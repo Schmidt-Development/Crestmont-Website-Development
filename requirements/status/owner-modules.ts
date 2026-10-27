@@ -1,5 +1,50 @@
 import type { ImplementationRecord } from "../status.ts";
 
 // Records for this workstream. See requirements/status.ts for the rules (later files override earlier ones).
+// Owner command-center modules (non-finance). Security-matrix ids (AUTH-*, EMP-002) are intentionally not
+// recorded here so this file never overrides that workstream's records.
+const OWNER = "owner-modules";
+
 export const OWNER_MODULES: Record<string, ImplementationRecord> = {
+  "OWN-001": { status: "implemented", owner: OWNER,
+    location: "src/routes/nav.ts (32 §34 modules + Notifications and Operational reports) + src/routes/reports-ops.ts /staff/reports/operations (range summary counted from records, permission-filtered export catalogue, audited summary.csv and time.csv) + tests/navigation.test.ts, tests/owner-platform.test.ts" },
+  "OWN-002": { status: "implemented", owner: OWNER,
+    location: "src/routes/owner.ts /staff/owner#executiveMetrics (every tile a query over persisted records; leads merged as duplicates excluded) + tests/readiness-ui.test.ts" },
+  "OWN-003": { status: "implemented", owner: OWNER,
+    location: "src/routes/platform.ts /staff/settings (business_settings + support_settings; validated contact, phone, hours, recovery targets 1–720 h, receptionist number, no markup; audited) feeding /staff/backups (recovery targets, last-drill verdict) and /staff/voice (number) + tests/owner-platform.test.ts, tests/platform.test.ts" },
+  "CRM-002": { status: "implemented", owner: OWNER,
+    location: "src/services/crm.ts (contacts, companies, customers with member-email search and active/inactive filter) + src/services/crm-dedupe.ts (duplicate clusters by normalized email/phone/name+company, audited merge moving activities/quotes/orders/calls, 'not a duplicate' dismissals; migrations/0016_owner_modules.sql) + /staff/crm/duplicates, /staff/crm/leads/:id/merge, /staff/customers/export.csv + tests/owner-modules.test.ts, tests/crm.test.ts" },
+  "CRM-005": { status: "implemented", owner: OWNER,
+    location: "src/services/crm.ts#leadScope/listLeads/assignOwner (merged duplicates hidden unless archived is requested; merged leads read-only) + /staff/crm (board, list, filters, pagination) + /staff/crm/export.csv + tests/crm.test.ts, tests/owner-modules.test.ts" },
+  "SALES-002": { status: "implemented", owner: OWNER,
+    location: "src/services/quotes.ts#saveQuote (quote_versions per save) + listQuotes/exportQuotes (search, lapsed filter) + closeQuote (withdrawn/declined with reason, blocks sending and acceptance until revised) + /staff/quotes, /staff/quotes/export.csv, /staff/quotes/:id/close + tests/crm.test.ts, tests/owner-modules.test.ts" },
+  "PM-001": { status: "implemented", owner: OWNER,
+    location: "src/domain/project.ts + src/services/projects.ts#changeProjectStatus (completion gated by closureChecklist; maintenance requires an active plan) + /staff/projects (filters, search, paginated list, board, overdue counts, audited /staff/projects/export.csv) + tests/projects.test.ts, tests/owner-delivery.test.ts" },
+  "PM-004": { status: "implemented", owner: OWNER,
+    location: "src/services/projects.ts (milestones, tasks, task_dependencies with cycle check + completion gate, assignments, estimates, time_entries with NULL unknown cost) + /staff/tasks (search, status/project/assignee incl. unassigned/due/dependency filters, pagination, audited export.csv) + tests/projects.test.ts, tests/owner-delivery.test.ts" },
+  "PM-007": { status: "implemented", owner: OWNER,
+    location: "src/services/projects.ts#addProjectCost/recordDeployment/closureChecklist (deployment, published handoff, no open tasks, no unpaid invoices, settled change orders, delivered revisions; customer acceptance informational) + projects.closed_by/closure_notes (migrations/0016_owner_modules.sql) + /staff/projects/:id?tab=approvals closure panel + tests/owner-delivery.test.ts, tests/projects.test.ts" },
+  "PORTAL-010": { status: "implemented", owner: OWNER,
+    location: "src/services/projects.ts#saveHandoff + closureChecklist (a project cannot be completed until the handoff is published) + /staff/projects/:id?tab=handoff + /portal/projects/:id/handoff (final acceptance → handoffs.accepted_at) + tests/owner-delivery.test.ts" },
+  "EMP-001": { status: "implemented", owner: OWNER,
+    location: "src/routes/platform.ts /staff/employees (roles, invitations, disable/enable; name/role/status filters; audited export.csv) + /staff/employees/:id (workload detail, validated audited capacity profile in staff_profiles) + src/services/employees.ts, src/services/workload.ts + tests/platform.test.ts, tests/owner-delivery.test.ts" },
+  "EMP-003": { status: "implemented", owner: OWNER,
+    location: "src/routes/projects.ts GET /staff (assigned tasks, projects, leads and tickets linked to their records, notifications linked to subjects, activity, role KPIs) + src/routes/notifications.ts /staff/notifications (paged, unread filter, per-item mark read, owner-scoped) + per-person workload on /staff/employees + tests/projects.test.ts, tests/owner-delivery.test.ts" },
+  "CMS-001": { status: "implemented", owner: OWNER,
+    location: "src/services/cms.ts (drafts, ?preview=<revision>, publish, revert, discardRevision, restoreRevision, liveContent) + /staff/cms (revision history with compare-with-live diff, discard, restore as new draft) over cms_entries/cms_revisions + tests/public.test.ts, tests/owner-content-portal.test.ts" },
+  "SUP-002": { status: "implemented", owner: OWNER,
+    location: "src/routes/support.ts /staff/support* (filters, pagination, audited /staff/support/export.csv with first-response timing) + src/services/support.ts (TICKET_TRANSITIONS, assignTicket, escalateTicket, addInternalNote, listQueue) + tests/support.test.ts, tests/owner-platform.test.ts" },
+  "AIOPS-001": { status: "implemented", owner: OWNER,
+    location: "/staff/ai (+ /staff/ai/:id) — provider, model, status, cost (Unknown when NULL), retries, errors, approval; audited /staff/ai/export.csv keeps unknown cost distinct; src/services/monitoring.ts#retryAiJob + tests/owner-platform.test.ts" },
+  "PORTAL-001": { status: "implemented", owner: OWNER,
+    location: "src/routes/portal.ts GET /portal (records-derived dashboard; notifications linked to subjects) + src/routes/notifications.ts /portal/notifications + src/routes/portal-maintenance.ts /portal/maintenance (plan, status, entitlements labelled proposed until approved, sites under care, maintenance requests) + /portal/team role/remove/revoke (src/services/customer-team.ts) + tests/owner-content-portal.test.ts, tests/owner-delivery.test.ts" },
+  "EMAIL-003": { status: "in_progress", owner: OWNER,
+    location: "/staff/email delivery log (status/template/recipient/date filters, pagination, audited export.csv; dev-outbox rows never reported as sent) + retry; POST /api/webhooks/resend (Svix-verified, idempotent) → email_deliveries + email_suppressions; /staff/email-suppressions + tests/integrations.test.ts, tests/owner-platform.test.ts",
+    missing: "No Resend account or webhook secret (BLK-005): delivery status, retry and Svix verification are tested only against locally signed payloads, never a real Resend delivery." },
+  "VOICE-005": { status: "in_progress", owner: OWNER,
+    location: "/staff/voice (provider/agent status, receptionist number read from Business settings instead of a hardcoded value, volume, history, conversion, escalations, errors, costs, config versions + diff, test calls) + tests/voice.test.ts, tests/owner-platform.test.ts",
+    missing: "§53 requires real provider data; only signed test events exist until a provider is connected and a number is provisioned (BLK-009)." },
+  "INFRA-006": { status: "in_progress", owner: OWNER,
+    location: "recordAppError wired in src/app/app.ts; /staff/monitoring; /staff/backups (register + restore drills; recovery targets from validated Business settings, last passed drill judged against them; no built-in targets)",
+    missing: "External alerting, automated D1/R2 backups and a staging restore drill do not exist yet (BLK-003); recovery targets await Founder approval and are blank until entered." },
 };

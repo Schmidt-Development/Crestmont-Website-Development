@@ -12,17 +12,17 @@ import { runInactivitySweep } from "../services/projects.ts";
 import { syncGithub } from "../services/github.ts";
 import { refreshIntegrationHealth } from "../services/integrations.ts";
 import { runCostImport } from "../services/cost-import.ts";
-import { runStripeReconciliation } from "../services/stripe-reconcile.ts";
+import { runStripeReconciliation, runStripeLedgerReconciliation } from "../services/stripe-reconcile.ts";
 import { probeEnvironments } from "../services/deployments.ts";
 import { runRetention } from "../services/retention.ts";
 
 export type JobName = "requirements" | "stripe_reconcile" | "support_escalation" | "github_sync" | "inactivity" | "integration_health"
-  | "stripe_side_reconcile" | "cost_import" | "env_probe" | "retention";
+  | "stripe_side_reconcile" | "stripe_ledger_reconcile" | "cost_import" | "env_probe" | "retention";
 
 /** Cron expression → jobs. Must match [triggers] crons in wrangler.toml. */
 export const SCHEDULE: Record<string, JobName[]> = {
   "*/15 * * * *": ["stripe_reconcile", "support_escalation", "github_sync", "env_probe"],
-  "17 11 * * *": ["requirements", "inactivity", "integration_health", "stripe_side_reconcile", "cost_import", "retention"],
+  "17 11 * * *": ["requirements", "inactivity", "integration_health", "stripe_side_reconcile", "stripe_ledger_reconcile", "cost_import", "retention"],
 };
 
 export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string, { ok: boolean; detail: string }>> {
@@ -46,6 +46,8 @@ export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string,
         case "integration_health": detail = `${(await refreshIntegrationHealth({ db: ctx.db, env, storage: ctx.storage })).length} integration rows refreshed`; break;
         // PAY-009: read-only comparison with Stripe; findings for human review, never marks anything paid.
         case "stripe_side_reconcile": detail = (await runStripeReconciliation(ctx.db, env)).detail; break;
+        // PAY-009: Stripe Invoices, balance transactions and payouts vs local records (read-only).
+        case "stripe_ledger_reconcile": detail = (await runStripeLedgerReconciliation(ctx.db, env)).detail; break;
         // FIN-002: AI usage + Stripe fees → project_costs, each source imported once.
         case "cost_import": detail = (await runCostImport(ctx.db, env)).detail; break;
         // READY-006 / LAUNCH-003: DNS/TLS/health probe of configured environment URLs (skips when none set).

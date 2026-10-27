@@ -5,6 +5,9 @@
 // in from business_settings and are never invented.
 import { PACKAGES, MAINTENANCE_PLANS } from "../domain/catalog.ts";
 import { DEFAULT_INACTIVITY_POLICY } from "../domain/project.ts";
+import { ATTRIBUTION_MAX_AGE } from "../services/leads.ts";
+
+const ATTRIBUTION_DAYS = ATTRIBUTION_MAX_AGE / 86400;
 
 export interface LegalSection { heading: string; paras?: string[]; list?: string[] }
 export interface LegalDoc { slug: string; title: string; summary: string; sections: LegalSection[] }
@@ -18,7 +21,7 @@ export interface LegalFacts {
   billingEmail: string;
 }
 
-export const LEGAL_SLUGS = ["privacy", "terms", "development-agreement", "refunds", "cancellation", "support", "acceptable-use", "accessibility", "disclosures"] as const;
+export const LEGAL_SLUGS = ["privacy", "terms", "development-agreement", "custom-development-agreement", "maintenance-agreement", "data-processing", "refunds", "cancellation", "support", "acceptable-use", "accessibility", "disclosures"] as const;
 export type LegalSlug = (typeof LEGAL_SLUGS)[number];
 
 export const DRAFT_BANNER = "Draft — pending attorney review. This document is a working draft published for transparency; it has not yet been reviewed by an attorney and may change before Crestmont accepts payments.";
@@ -50,7 +53,8 @@ export function legalDocs(f: LegalFacts): Record<LegalSlug, LegalDoc> {
         ] },
         { heading: "AI-assisted processing", paras: ["We use AI tools to help draft content, summarise requests and route enquiries. People review AI output before it is used for decisions that affect you, and AI is never used to approve refunds, contracts, pricing or releases."] },
         { heading: "Service providers", paras: ["We share information only with providers that help us operate — for example hosting, email delivery, payment processing and AI model providers — under terms that limit their use of the data to providing services to us. We do not sell personal information."] },
-        { heading: "Cookies", paras: ["We use strictly necessary cookies for sign-in sessions, security (CSRF protection) and short-lived notices. If we add analytics or other optional cookies, this policy will be updated and any required consent will be requested."] },
+        { heading: "Cookies", paras: ["We use strictly necessary cookies for sign-in sessions, security (CSRF protection) and short-lived notices.", `We also set one first-party cookie (cm_attr) that remembers how you arrived at our site (for example the campaign name in a link and the page you came from) for up to ${Math.round(ATTRIBUTION_DAYS)} days, so that a quote request can be credited to that source. It is read only by our own server and never shared with advertisers. If your browser sends a Do Not Track or Global Privacy Control signal, we do not record the referring page.`, "We do not use third-party analytics or advertising cookies. If that changes, this policy will be updated and any required consent will be requested."] },
+        { heading: "Phone calls", paras: ["If we offer an automated phone receptionist, it tells callers at the start of the call that they are speaking with an AI system. Calls are recorded or transcribed only after the caller is told and, where the law requires it, has agreed. Call details are used to answer your enquiry and are kept under the same rules as other enquiries."] },
         { heading: "Retention", paras: ["We keep account, project and billing records for as long as needed to provide services and meet legal and accounting requirements, and security logs for a limited period. Enquiries that do not become projects are deleted or anonymised after a reasonable period."] },
         { heading: "Your choices and rights", paras: [`Depending on where you live, you may have rights to access, correct, delete or obtain a copy of your personal information, and to opt out of certain processing. Send requests to ${f.legalEmail}. We will verify your identity before acting on a request and will not discriminate against you for exercising your rights.`] },
         { heading: "Security", paras: ["We use encryption in transit, hashed passwords, two-factor authentication for staff, role-based access and audit logging. No system is perfectly secure; we will notify affected people of security incidents as required by law."] },
@@ -90,6 +94,59 @@ export function legalDocs(f: LegalFacts): Record<LegalSlug, LegalDoc> {
           "Intellectual property transfer after full payment, subject to third-party licences.",
         ] },
         { heading: "Binding contracts", paras: ["Crestmont will not enter binding customer contracts until its legal identity, required disclosures and agreements are finalised. Agreement acceptance is recorded with the version you accepted."] },
+      ],
+    },
+    "custom-development-agreement": {
+      slug: "custom-development-agreement", title: "Custom development agreement (draft)", summary: "The draft agreement that governs custom website and software projects quoted individually.",
+      sections: [
+        { heading: "Parties", paras: [`This agreement is between ${who} ("Crestmont") and the customer organisation named on the accepted quote ("you"). It applies to custom projects quoted individually, not to the fixed-price packages.`] },
+        { heading: "Scope", paras: ["The scope is the line items, deliverables and assumptions in the written quote you accept in the customer portal. The quote version you accepted is recorded with its date, the person who accepted it and a fingerprint of its text. Anything not in the accepted quote is out of scope."] },
+        { heading: "Payment schedule", list: [
+          "50% of the quoted total is invoiced when you accept the quote; work is scheduled once it is paid.",
+          "25% is invoiced at the design-approval milestone.",
+          "The final 25% is invoiced when the site is ready to launch; launch takes place once it is paid.",
+          "Each milestone is invoiced once. Amounts are calculated by the platform from the accepted quote, never entered by hand.",
+        ] },
+        { heading: "Change orders", paras: ["Work outside the accepted scope needs a written change order stating the added scope, the price and any change to the timeline. Change-order work starts only after you approve it and, where the change order says so, after it is paid."] },
+        { heading: "Your responsibilities", list: ["Provide content, brand assets, credentials and decisions needed for the work.", "Review and respond to approval requests and revision rounds.", "Confirm you have the rights to the materials you supply."] },
+        { heading: "Timeline and inactivity", paras: [`Dates in the project plan assume timely responses. If we are waiting on you, reminders are sent after ${pol.remindAfterDays.join(" and ")} days, the project is escalated after ${pol.escalateAfterDays} days and may be paused after ${pol.pauseAfterDays} days. A paused project can be restarted; it is never cancelled without notice.`] },
+        { heading: "Acceptance and launch", paras: ["Before launch the work passes Crestmont's internal quality checks and is presented for your approval. Launch requires your recorded approval and payment of the final milestone. After launch you record final acceptance of the handoff."] },
+        { heading: "Ownership", paras: ["When all amounts due under this agreement are paid, the custom work product created for you is assigned to you, except third-party components (themes, plugins, fonts, libraries, stock media and services), which stay under their own licences, and Crestmont's pre-existing tools and know-how, which are licensed to you for use with the delivered work."] },
+        { heading: "Confidentiality and data", paras: ["Each side keeps the other's non-public information confidential. Where Crestmont processes personal data on your behalf, the data processing addendum applies."] },
+        { heading: "Warranty, liability and disputes", paras: ["Crestmont will correct defects in delivered work that do not match the accepted scope when reported within the warranty period. The warranty period, any limitation of liability, the governing law and the dispute-resolution process will be set during attorney review and are not yet part of this draft."] },
+        { heading: "Termination", paras: ["Either side may end the agreement in writing. Work completed and approved up to that point is invoiced at the milestone amounts already due; refunds are handled under the refund policy."] },
+      ],
+    },
+    "maintenance-agreement": {
+      slug: "maintenance-agreement", title: "Maintenance agreement (draft)", summary: "The draft agreement for monthly maintenance plans.",
+      sections: [
+        { heading: "Parties and plans", paras: [`This agreement is between ${who} ("Crestmont") and the customer organisation that subscribes to a maintenance plan (${Object.values(MAINTENANCE_PLANS).map((m) => `${m.name} ${usd(m.monthlyCents)}/month`).join(", ")}).`] },
+        { heading: "What each plan includes", paras: ["The services included in each plan (hosting, maintenance hours, content updates, security updates, monitoring, backups and support response targets) are listed on the plan page at the time you subscribe, and the version you subscribed to is recorded. Plan contents are awaiting final approval and will be published before maintenance plans are sold."] },
+        { heading: "Billing", paras: ["Plans are billed monthly in advance through our payment provider and renew automatically until cancelled. Unused hours and updates do not carry over. Work beyond the plan needs your approval before it starts and is quoted or billed as stated on the plan page."] },
+        { heading: "Requests", paras: ["Maintenance requests are made through the customer portal or a support ticket and are handled during staffed hours in line with the support policy."] },
+        { heading: "Cancellation", paras: ["You can cancel from the billing section of the customer portal. Cancellation takes effect at the end of the current billing period. Your domain remains yours, and backups and handover materials are provided in line with the cancellation policy."] },
+        { heading: "Limits", paras: ["Response targets are goals for an initial response, not guarantees of resolution time. Service levels, any credits, the limitation of liability and the governing law will be set during attorney review and are not yet part of this draft."] },
+      ],
+    },
+    "data-processing": {
+      slug: "data-processing", title: "Data processing addendum (draft)", summary: "How Crestmont handles personal data it processes on behalf of customers.",
+      sections: [
+        { heading: "Roles", paras: [`When Crestmont builds, hosts or maintains a website for you, you decide what personal data the site collects and why; ${who} processes that data on your behalf and only on your documented instructions. For data about you as our customer, our privacy policy applies instead.`] },
+        { heading: "Processing details", list: [
+          "Purpose: building, hosting, maintaining and supporting your website and related services.",
+          "Data: whatever your website's visitors and customers submit (for example contact-form entries), plus account data of your staff who use the customer portal.",
+          "Duration: the term of your project or maintenance plan, then return or deletion as described below.",
+        ] },
+        { heading: "Crestmont's commitments", list: [
+          "Process personal data only to provide the services and as you instruct.",
+          "Keep it confidential and limit access to staff who need it, each with individual accounts, two-factor authentication and logged access.",
+          "Protect it with security measures including encryption in transit, access controls, audit logging and backups.",
+          "Help you respond to requests from people exercising their privacy rights.",
+          "Notify you without undue delay after becoming aware of a personal data breach affecting your data.",
+          "At the end of the services, return or delete your personal data unless law requires it to be kept.",
+        ] },
+        { heading: "Subprocessors", paras: ["Crestmont uses service providers for hosting, file storage, email delivery, payments and AI-assisted drafting. The current list of subprocessors and where they process data will be published with the final version of this addendum, and you will be told before a new subprocessor is added."] },
+        { heading: "Status", paras: ["This addendum is a draft for attorney review. Jurisdiction-specific terms (for example standard contractual clauses or state privacy-law terms) will be added during that review where they apply."] },
       ],
     },
     refunds: {
@@ -160,7 +217,7 @@ export function legalDocs(f: LegalFacts): Record<LegalSlug, LegalDoc> {
         { heading: "Trading name", paras: ["Crestmont Website Development."] },
         { heading: "Contact", list: [`Support: ${f.supportEmail}`, `Billing: ${f.billingEmail}`, `Legal: ${f.legalEmail}`] },
         { heading: "Payments", paras: ["Online payments are processed by a third-party payment provider. Crestmont does not store full card numbers."] },
-        { heading: "Policies", paras: ["Our privacy policy, terms of service, refund, cancellation, support and acceptable use policies are linked below. They are drafts pending attorney review."] },
+        { heading: "Policies", paras: ["Our privacy policy, terms of service, development, maintenance and data processing agreements, refund, cancellation, support and acceptable use policies are linked below. They are drafts pending attorney review."] },
       ],
     },
   };

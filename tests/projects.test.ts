@@ -204,6 +204,11 @@ test("[PM-006] release readiness blocks deployment until all internal and custom
   assert.equal((await status(db, pid)).status, "deployment");
   const dep = await db.prepare(`SELECT url, commit_sha FROM customer_deployments WHERE project_id = ?`).bind(pid).first<{ url: string; commit_sha: string }>();
   assert.deepEqual({ ...dep }, { url: "https://acme.example", commit_sha: "abc1234" });
+  // Closure checklist: the handoff must be published before the project can be completed.
+  const blocked = await pmC.post(`/staff/projects/${pid}/status`, { to: "completed" });
+  assert.equal(blocked.status, 409);
+  assert.match(await blocked.text(), /Handoff published to the customer/);
+  assert.equal((await pmC.post(`/staff/projects/${pid}/handoff`, { intent: "publish", website_url: "https://acme.example", documentation: "Docs", access_instructions: "Via password manager", ownership_notes: "Domain in customer account", training_notes: "Video walkthrough" })).status, 303);
   assert.equal((await pmC.post(`/staff/projects/${pid}/status`, { to: "completed" })).status, 303);
   assert.ok((await db.prepare(`SELECT completed_at FROM projects WHERE id = ?`).bind(pid).first<{ completed_at: string }>())!.completed_at);
 });

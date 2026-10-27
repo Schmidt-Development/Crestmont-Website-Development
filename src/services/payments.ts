@@ -30,27 +30,8 @@ export async function processStripeEvent(ctx: Pick<AppContext, "db" | "email" | 
           break;
         }
         if (!m.invoice_id) throw new Error("checkout session missing invoice_id metadata");
-        const res = await markInvoicePaid(db, m.invoice_id, { amountCents: n(o, "amount_total") ?? -1, paymentIntentId: s(o, "payment_intent") });
-        if (res.alreadyPaid) break;
-        const inv = res.invoice;
-        let projectId = inv.project_id;
-        if (!projectId && inv.order_id && (inv.milestone_kind === "full" || inv.milestone_kind === "deposit_50")) projectId = await provisionProject(db, inv.order_id);
-        if (inv.milestone_kind === "change_order" && inv.project_id) {
-          await db.prepare(`UPDATE change_orders SET status = 'paid' WHERE invoice_id = ? AND status = 'approved'`).bind(inv.id).run();
-        }
-        if (inv.order_id) {
-          const lead = await db.prepare(`SELECT lead_id FROM orders WHERE id = ?`).bind(inv.order_id).first<{ lead_id: string | null }>();
-          if (lead?.lead_id) {
-            await db.batch([
-              db.prepare(`UPDATE leads SET stage = 'converted', updated_at = ? WHERE id = ? AND stage IN ('accepted','awaiting_payment')`).bind(nowIso(), lead.lead_id),
-              db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`).bind(newId("act"), lead.lead_id, `Payment confirmed by Stripe webhook (${evt.id}); lead converted`, nowIso()),
-            ]);
-          }
-        }
         const to = s(o, "customer_email") ?? ((o.customer_details as Obj | undefined)?.email as string | undefined) ?? null;
-        if (to) await sendMail(ctx, { template: "receipt", to, subject: "Payment received — Crestmont", heading: "Thank you — your payment was received", idempotencyKey: `receipt:${inv.id}`,
-          paragraphs: [`We received your payment of $${(inv.amount_cents / 100).toFixed(2)}.`, projectId ? "Your project is set up. The next step is onboarding, where you tell us about your business, brand and goals." : "Your project record has been updated."],
-          cta: { label: projectId ? "Start onboarding" : "View billing", url: `${ctx.baseUrl}/portal${projectId ? `/projects/${projectId}/onboarding` : "/billing"}` } });
+        await applyInvoicePayment(ctx, evt, m.invoice_id, { amountCents: n(o, "amount_total") ?? -1, paymentIntentId: s(o, "payment_intent"), chargeId: null }, to);
         break;
       }
       case "customer.subscription.created":
@@ -77,6 +58,27 @@ export async function processStripeEvent(ctx: Pick<AppContext, "db" | "email" | 
       case "invoice.paid": {
         const sub = s(o, "subscription");
         if (sub) await db.prepare(`UPDATE subscriptions SET status = 'active', updated_at = ? WHERE stripe_subscription_id = ? AND status = 'past_due'`).bind(nowIso(), sub).run();
+        // PAY-006: a Stripe Invoice created for a milestone invoice (src/services/stripe-invoices.ts).
+        const local = meta(o).crestmont_invoice_id;
+        if (local) {
+          const inv = await db.prepare(`SELECT id, stripe_invoice_id FROM invoices WHERE id = ?`).bind(local).first<{ id: string; stripe_invoice_id: string | null }>();
+          if (!inv) throw new Error(`Stripe invoice ${o.id} references unknown invoice ${local}`);
+          if (inv.stripe_invoice_id && inv.stripe_invoice_id !== o.id) throw new Error(`Stripe invoice ${o.id} does not match ${inv.stripe_invoice_id} recorded for ${local}`);
+          await db.prepare(`UPDATE invoices SET stripe_invoice_id = COALESCE(stripe_invoice_id, ?), stripe_invoice_status = 'paid', stripe_invoice_synced_at = ? WHERE id = ?`).bind(o.id, nowIso(), local).run();
+          await applyInvoicePayment(ctx, evt, local, { amountCents: n(o, "amount_paid") ?? -1, paymentIntentId: s(o, "payment_intent"), chargeId: s(o, "charge") }, s(o, "customer_email"));
+        }
+        break;
+      }
+      case "invoice.finalized":
+      case "invoice.voided":
+      case "invoice.marked_uncollectible": {
+        // Mirror Stripe's status for review; the local invoice status is not changed by these events.
+        const local = meta(o).crestmont_invoice_id;
+        if (!local) { await markEventResult(db, evt.id, { ok: true, ignored: true }); return; }
+        await db.prepare(`UPDATE invoices SET stripe_invoice_status = ?, stripe_invoice_number = COALESCE(?, stripe_invoice_number), stripe_hosted_invoice_url = COALESCE(?, stripe_hosted_invoice_url), stripe_invoice_synced_at = ?
+                          WHERE id = ? AND (stripe_invoice_id IS NULL OR stripe_invoice_id = ?) AND COALESCE(stripe_invoice_status, '') <> 'paid'`)
+          .bind(s(o, "status") ?? evt.type.slice("invoice.".length), s(o, "number"), s(o, "hosted_invoice_url"), nowIso(), local, o.id).run();
+        if (evt.type !== "invoice.finalized") await audit(db, { actorKind: "webhook", action: `invoice.stripe_${evt.type.slice("invoice.".length)}`, subjectType: "invoice", subjectId: local, details: { event: evt.id, stripeInvoice: o.id } });
         break;
       }
       case "charge.refunded": {
@@ -101,9 +103,24 @@ export async function processStripeEvent(ctx: Pick<AppContext, "db" | "email" | 
         const pay = pi ? await db.prepare(`SELECT id, organization_id FROM payments WHERE stripe_payment_intent_id = ?`).bind(pi).first<{ id: string; organization_id: string }>() : null;
         const due = n((o.evidence_details ?? {}) as Obj, "due_by");
         await db.prepare(`INSERT INTO disputes (id, organization_id, payment_id, stripe_dispute_id, amount_cents, reason, status, evidence_due_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)
-                          ON CONFLICT(stripe_dispute_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at`)
+                          ON CONFLICT(stripe_dispute_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at, amount_cents = excluded.amount_cents,
+                            reason = COALESCE(excluded.reason, disputes.reason), evidence_due_by = COALESCE(excluded.evidence_due_by, disputes.evidence_due_by),
+                            organization_id = COALESCE(disputes.organization_id, excluded.organization_id), payment_id = COALESCE(disputes.payment_id, excluded.payment_id)`)
           .bind(newId("dsp"), pay?.organization_id ?? null, pay?.id ?? null, evt.data.object.id, n(o, "amount") ?? 0, s(o, "reason"), s(o, "status") ?? "unknown", due ? new Date(due * 1000).toISOString() : null, nowIso(), nowIso()).run();
-        if (pay) await db.prepare(`UPDATE payments SET status = 'disputed' WHERE id = ?`).bind(pay.id).run();
+        if (pay) {
+          // A dispute closed in the merchant's favour ("won") returns the payment to its pre-dispute state.
+          if (evt.type === "charge.dispute.closed" && s(o, "status") === "won") {
+            const refunded = await db.prepare(`SELECT COALESCE(SUM(amount_cents),0) AS c FROM refunds WHERE payment_id = ? AND status = 'issued'`).bind(pay.id).first<{ c: number }>();
+            const amt = await db.prepare(`SELECT amount_cents FROM payments WHERE id = ?`).bind(pay.id).first<{ amount_cents: number }>();
+            const restored = !refunded?.c ? "succeeded" : refunded.c >= (amt?.amount_cents ?? 0) ? "refunded" : "partially_refunded";
+            await db.prepare(`UPDATE payments SET status = ? WHERE id = ? AND status = 'disputed'`).bind(restored, pay.id).run();
+          } else {
+            await db.prepare(`UPDATE payments SET status = 'disputed' WHERE id = ?`).bind(pay.id).run();
+          }
+        }
+        if (evt.type !== "charge.dispute.created") {
+          await audit(db, { actorKind: "webhook", action: evt.type === "charge.dispute.closed" ? "dispute.closed" : "dispute.updated", subjectType: "dispute", subjectId: evt.data.object.id, organizationId: pay?.organization_id ?? null, details: { event: evt.id, status: s(o, "status") } });
+        }
         if (evt.type === "charge.dispute.created") {
           // Disputes have hard evidence deadlines: alert the Owner and support staff immediately.
           const staff = (await db.prepare(`SELECT DISTINCT user_id FROM memberships WHERE role_id IN ('owner','support')`).all<{ user_id: string }>()).results;
@@ -125,6 +142,36 @@ export async function processStripeEvent(ctx: Pick<AppContext, "db" | "email" | 
     await markEventResult(db, evt.id, { ok: false, error: (e as Error).message });
     // Respond 200 anyway: the event is stored and retried by the reconciliation job (dead-letter after 5).
   }
+}
+
+/**
+ * Records a confirmed payment for a local invoice and runs the follow-ups (project provisioning, change
+ * order, lead conversion, receipt email). Shared by Checkout (checkout.session.completed) and Stripe
+ * Invoices (invoice.paid, PAY-006). Idempotent through markInvoicePaid.
+ */
+async function applyInvoicePayment(ctx: Pick<AppContext, "db" | "email" | "baseUrl">, evt: StripeEvent, invoiceId: string,
+  payment: { amountCents: number; paymentIntentId: string | null; chargeId: string | null }, to: string | null): Promise<void> {
+  const db = ctx.db;
+  const res = await markInvoicePaid(db, invoiceId, payment);
+  if (res.alreadyPaid) return;
+  const inv = res.invoice;
+  let projectId = inv.project_id;
+  if (!projectId && inv.order_id && (inv.milestone_kind === "full" || inv.milestone_kind === "deposit_50")) projectId = await provisionProject(db, inv.order_id);
+  if (inv.milestone_kind === "change_order" && inv.project_id) {
+    await db.prepare(`UPDATE change_orders SET status = 'paid' WHERE invoice_id = ? AND status = 'approved'`).bind(inv.id).run();
+  }
+  if (inv.order_id) {
+    const lead = await db.prepare(`SELECT lead_id FROM orders WHERE id = ?`).bind(inv.order_id).first<{ lead_id: string | null }>();
+    if (lead?.lead_id) {
+      await db.batch([
+        db.prepare(`UPDATE leads SET stage = 'converted', updated_at = ? WHERE id = ? AND stage IN ('accepted','awaiting_payment')`).bind(nowIso(), lead.lead_id),
+        db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`).bind(newId("act"), lead.lead_id, `Payment confirmed by Stripe webhook (${evt.id}); lead converted`, nowIso()),
+      ]);
+    }
+  }
+  if (to) await sendMail(ctx, { template: "receipt", to, subject: "Payment received — Crestmont", heading: "Thank you — your payment was received", idempotencyKey: `receipt:${inv.id}`,
+    paragraphs: [`We received your payment of $${(inv.amount_cents / 100).toFixed(2)}.`, projectId ? "Your project is set up. The next step is onboarding, where you tell us about your business, brand and goals." : "Your project record has been updated."],
+    cta: { label: projectId ? "Start onboarding" : "View billing", url: `${ctx.baseUrl}/portal${projectId ? `/projects/${projectId}/onboarding` : "/billing"}` } });
 }
 
 async function upsertSubscription(db: AppContext["db"], stripeId: string, orgId: string, productId: string | null, status: string, periodEnd: string | null) {

@@ -177,7 +177,7 @@ jobs:
           npm install --prefix .pw --no-save --no-audit --no-fund playwright@1.48.2 > /dev/null
           .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
           export E2E_PREVIEW_PASSWORD=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("access/private.json","utf8")).previewPassword)')
-          node --no-warnings --test --test-concurrency=1 --test-reporter=./scripts/evidence-reporter.mjs tests/e2e/staging.e2e.ts
+          node --no-warnings --test --test-concurrency=1 --test-reporter=./scripts/evidence-reporter.mjs tests/e2e/staging.e2e.ts tests/e2e/staging-journeys.e2e.ts
 
       - name: Record evidence and deployment
         if: always() && steps.deploy.outcome == 'success'

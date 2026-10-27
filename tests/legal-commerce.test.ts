@@ -62,8 +62,8 @@ test("[LEGAL-003] every policy in src/content/legal.ts has a seeded draft versio
   assert.equal(rendered.length, Object.keys(AGREEMENT_KINDS).length);
   for (const r of rendered) {
     const row = await one<{ version: string; body_sha256: string; body_text: string; attorney_reviewed: number; effective_at: string | null } | null>(t.db,
-      `SELECT version, body_sha256, body_text, attorney_reviewed, effective_at FROM agreements WHERE kind = ? AND version = ?`, r.kind, SEED_VERSION);
-    assert.ok(row, `seed version for ${r.kind}`);
+      `SELECT version, body_sha256, body_text, attorney_reviewed, effective_at FROM agreements WHERE kind = ? AND body_sha256 = ?`, r.kind, r.sha256);
+    assert.ok(row, `a stored draft version for ${r.kind} matches the current text`);
     assert.equal(row.attorney_reviewed, 0, "drafts are never marked attorney reviewed");
     assert.ok(row.effective_at);
     assert.equal(row.body_sha256, await sha256Hex(row.body_text), "stored hash is the hash of the stored text");
@@ -87,7 +87,7 @@ test("[LEGAL-003] registration records Terms + Privacy acceptance tied to exact 
   assert.equal(res.status, 200);
   const u = await one<{ id: string }>(t.db, `SELECT id FROM users WHERE email = 'jordan@leebakery.example'`);
   const rows = await acceptances(t.db, u.id);
-  assert.deepEqual(rows.map((r) => [r.kind, r.version, r.context_type, r.ip]), [["privacy_policy", SEED_VERSION, "registration", "203.0.113.7"], ["terms_of_service", SEED_VERSION, "registration", "203.0.113.7"]]);
+  assert.deepEqual(rows.map((r) => [r.kind, r.version, r.context_type, r.ip]), [["privacy_policy", "2026-10-draft-2", "registration", "203.0.113.7"], ["terms_of_service", SEED_VERSION, "registration", "203.0.113.7"]]);
   const auditRow = await one<{ details_json: string }>(t.db, `SELECT details_json FROM audit_logs WHERE action = 'agreements.accepted' AND actor_user_id = ?`, u.id);
   assert.match(auditRow.details_json, /"context":"registration"/);
 });
@@ -100,8 +100,8 @@ test("[LEGAL-003] quote acceptance and package checkout record the development a
   assert.equal((await one<{ n: number }>(t.db, `SELECT COUNT(*) AS n FROM agreement_acceptances WHERE user_id = ?`, cust.id)).n, 0);
   assert.equal((await cust.c.post("/checkout/starter", { terms: "1" })).status, 303);
   const rows = await acceptances(t.db, cust.id);
-  assert.deepEqual(rows.map((r) => r.kind), ["development_agreement", "refund_policy", "terms_of_service"]);
-  assert.ok(rows.every((r) => r.context_type === "package_checkout" && r.version === SEED_VERSION));
+  assert.deepEqual(rows.map((r) => r.kind), ["data_processing_addendum", "development_agreement", "refund_policy", "terms_of_service"]);
+  assert.ok(rows.every((r) => r.context_type === "package_checkout" && r.version === (r.kind === "data_processing_addendum" ? "2026-10-draft-2" : SEED_VERSION)));
 
   // Quote acceptance (proposal flow).
   const rep = await staffClient(t, "owner");
@@ -120,7 +120,7 @@ test("[LEGAL-003] quote acceptance and package checkout record the development a
   assert.equal((await q.post(`${qpath}/accept`, { agree: "1" })).status, 303);
   const qu = await one<{ id: string }>(t.db, `SELECT id FROM users WHERE email = 'quinn@lc.example'`);
   const qrows = (await acceptances(t.db, qu.id)).filter((r) => r.context_type === "quote_acceptance");
-  assert.deepEqual(qrows.map((r) => r.kind), ["development_agreement", "terms_of_service"]);
+  assert.deepEqual(qrows.map((r) => r.kind), ["custom_development_agreement", "data_processing_addendum", "terms_of_service"]);
 
   // Customer view: own organization only.
   const mine = await (await cust.c.get("/portal/agreements")).text();
@@ -182,7 +182,8 @@ test("[PAY-005] printable receipt: stable unique number, payment/invoice/Stripe 
   assert.match(h1, new RegExp(p1.inv));
   assert.match(h1, /cs_test_seed/);
   assert.match(h1, /legal business name will appear here once the legal entity is established/);
-  assert.match(h1, /Download \(print to PDF\)/);
+  assert.match(h1, new RegExp(`/portal/billing/receipts/${p1.pay}/pdf`));
+  assert.match(h1, /Print version/);
   // Stable across views; unique across payments.
   assert.equal(/CWD-R-\d{6}/.exec(await (await a.c.get(`/portal/billing/receipts/${p1.pay}`)).text())![0], num1);
   const num2 = /CWD-R-\d{6}/.exec(await (await a.c.get(`/portal/billing/receipts/${p2.pay}`)).text())![0];

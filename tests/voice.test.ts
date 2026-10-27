@@ -171,7 +171,7 @@ test("[VOICE-005] voice admin shows not-configured provider, no number, costs Un
   await send({ event: "call_ended", call_id: "test-1", outcome: "info_only", cost_microusd: 5000 });
   const c = await client().login(owner.email, TEST_PASSWORD, owner.secret);
   const html = await (await c.get("/staff/voice")).text();
-  assert.match(html, /None purchased/);
+  assert.match(html, /None recorded/);
   assert.match(html, /Purchasing a number requires Founder approval/);
   assert.match(html, /PROVIDER-EVALUATION\.md/);
   assert.match(html, /1 test calls excluded/);

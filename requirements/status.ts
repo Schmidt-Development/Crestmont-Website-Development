@@ -28,7 +28,8 @@ import { SECURITY_MATRIX } from "./status/security-matrix.ts";
 import { FINANCE_DOCS } from "./status/finance-docs.ts";
 import { OWNER_MODULES } from "./status/owner-modules.ts";
 import { BACKEND } from "./status/backend.ts";
+import { E2E } from "./status/e2e.ts";
 
 export const IMPLEMENTATION: Record<string, ImplementationRecord> = {
-  ...FOUNDATION, ...CORE, ...PUBLIC_SITE, ...PROJECTS, ...SALES_FINANCE, ...SUPPORT_OWNER, ...PLATFORM, ...INTEGRATION, ...LEGAL_COMMERCE, ...INTEGRATIONS, ...OPS, ...UX, ...SECURITY_MATRIX, ...FINANCE_DOCS, ...OWNER_MODULES, ...BACKEND,
+  ...FOUNDATION, ...CORE, ...PUBLIC_SITE, ...PROJECTS, ...SALES_FINANCE, ...SUPPORT_OWNER, ...PLATFORM, ...INTEGRATION, ...LEGAL_COMMERCE, ...INTEGRATIONS, ...OPS, ...UX, ...SECURITY_MATRIX, ...FINANCE_DOCS, ...OWNER_MODULES, ...E2E, ...BACKEND,
 };

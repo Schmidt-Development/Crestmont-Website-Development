@@ -6,8 +6,12 @@
 //     input_ref convention (documented in docs/voice/RETELL-INTEGRATION.md §"Cost import"):
 //       "project:<projectId>"  or  "project:<projectId>:<anything>"  → attributed to that project
 //       "ticket:<ticketId>"    → attributed to the ticket's project when tickets.project_id is set
-//       anything else (e.g. "lead:<id>")  → unattributed: a project_costs row with project_id NULL, so
+//       "lead:<leadId>" / "quote:<quoteId>" → the one project the lead converted into (orders.lead_id →
+//                                          projects.order_id); none yet or ambiguous → unattributed
+//       anything else          → unattributed: a project_costs row with project_id NULL, so
 //                                          company-wide AI spend is still recorded.
+//     Unattributed AI costs are re-checked on every run (reattributeAiCosts) and moved to the project
+//     when the lead converts or the ticket is linked later. Amounts never change; Unknown stays NULL.
 //     Only finished jobs are imported. A job whose provider was called but whose cost the platform could
 //     not price (cost_microusd NULL) is imported with amount NULL ("Unknown"). Jobs that never reached a
 //     provider (provider 'none') or failed without usage are recorded in the ledger as skipped.
@@ -21,18 +25,61 @@ import type { Env } from "../app/context.ts";
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { stripeReader } from "./stripe-reconcile.ts";
+import { audit } from "./security.ts";
 
 export const AI_FINAL_STATUSES = ["succeeded", "failed", "awaiting_approval", "approved", "rejected"] as const;
 const BATCH = 200;
 const FEE_FETCH_LIMIT = 50;
 
-/** Project id referenced by an ai_jobs.input_ref, or null when the job is not project work. */
+/**
+ * The single project a lead converted into: lead → orders.lead_id → projects.order_id. A lead with no
+ * project yet, or with more than one (ambiguous), is not attributed — the cost stays company-wide.
+ */
+async function projectForLead(db: Db, leadId: string): Promise<string | null> {
+  const rows = (await db.prepare(`SELECT DISTINCT p.id FROM orders o JOIN projects p ON p.order_id = o.id WHERE o.lead_id = ? LIMIT 2`).bind(leadId).all<{ id: string }>()).results;
+  return rows.length === 1 ? rows[0].id : null;
+}
+
+/**
+ * Project id referenced by an ai_jobs.input_ref, or null when the job is not (yet) attributable:
+ *   project:<id>[:…] → that project
+ *   ticket:<id>      → the ticket's project (tickets.project_id)
+ *   lead:<id>        → the project the lead converted into (exactly one)
+ *   quote:<id>       → the project of the quote's lead (exactly one)
+ */
 export async function projectForInputRef(db: Db, inputRef: string): Promise<string | null> {
-  const m = /^project:([A-Za-z0-9_.-]{1,120})(?::.*)?$/.exec(inputRef);
-  if (m) return (await db.prepare(`SELECT id FROM projects WHERE id = ?`).bind(m[1]).first<{ id: string }>())?.id ?? null;
-  const t = /^ticket:([A-Za-z0-9_.-]{1,120})$/.exec(inputRef);
-  if (t) return (await db.prepare(`SELECT project_id FROM tickets WHERE id = ?`).bind(t[1]).first<{ project_id: string | null }>())?.project_id ?? null;
-  return null;
+  const m = /^(project|ticket|lead|quote):([A-Za-z0-9_.-]{1,120})(?::.*)?$/.exec(inputRef);
+  if (!m) return null;
+  const [, kind, id] = m;
+  if (kind === "project") return (await db.prepare(`SELECT id FROM projects WHERE id = ?`).bind(id).first<{ id: string }>())?.id ?? null;
+  if (kind === "ticket") return (await db.prepare(`SELECT project_id FROM tickets WHERE id = ?`).bind(id).first<{ project_id: string | null }>())?.project_id ?? null;
+  if (kind === "lead") return projectForLead(db, id);
+  const q = await db.prepare(`SELECT lead_id FROM quotes WHERE id = ?`).bind(id).first<{ lead_id: string | null }>();
+  return q?.lead_id ? projectForLead(db, q.lead_id) : null;
+}
+
+/**
+ * Re-attribution: AI costs imported as company-wide because their lead/ticket had no project at the
+ * time are moved onto the project once the lead converts (or the ticket is linked). Amounts are not
+ * touched — an unknown amount stays NULL. Each move is audited.
+ */
+export async function reattributeAiCosts(db: Db): Promise<number> {
+  const rows = (await db.prepare(`SELECT c.source_id, c.project_cost_id, j.input_ref FROM cost_imports c JOIN ai_jobs j ON j.id = c.source_id
+      WHERE c.source = 'ai_job' AND c.project_id IS NULL AND c.project_cost_id IS NOT NULL ORDER BY c.imported_at LIMIT ?`).bind(BATCH)
+    .all<{ source_id: string; project_cost_id: string; input_ref: string }>()).results;
+  let moved = 0;
+  for (const r of rows) {
+    const projectId = await projectForInputRef(db, r.input_ref);
+    if (!projectId) continue;
+    const res = await db.batch([
+      db.prepare(`UPDATE project_costs SET project_id = ?, description = replace(description, ' — not attributed to a project', ' — attributed via ' || ?) WHERE id = ? AND project_id IS NULL`).bind(projectId, r.input_ref.split(":").slice(0, 2).join(":"), r.project_cost_id),
+      db.prepare(`UPDATE cost_imports SET project_id = ?, note = ? WHERE source = 'ai_job' AND source_id = ? AND project_id IS NULL`).bind(projectId, `project ${projectId} (re-attributed from ${r.input_ref.split(":")[0]})`, r.source_id),
+    ]);
+    if (res[0].meta.changes !== 1) continue;
+    moved++;
+    await audit(db, { actorKind: "system", action: "finance.cost_reattributed", subjectType: "project_cost", subjectId: r.project_cost_id, details: { aiJob: r.source_id, inputRef: r.input_ref, projectId } });
+  }
+  return moved;
 }
 
 /** Inserts the cost row and the ledger row atomically; the cost row is written only if the ledger row is new. */
@@ -116,11 +163,12 @@ export async function importStripeFees(db: Db, env: Env): Promise<Pick<CostImpor
   return out;
 }
 
-export async function runCostImport(db: Db, env: Env): Promise<{ detail: string } & CostImportResult> {
+export async function runCostImport(db: Db, env: Env): Promise<{ detail: string; aiReattributed: number } & CostImportResult> {
   const ai = await importAiCosts(db);
+  const aiReattributed = await reattributeAiCosts(db);
   const fees = await importStripeFees(db, env);
-  const detail = `AI: ${ai.aiImported} jobs imported (${ai.aiUnattributed} unattributed, ${ai.aiUnknown} unknown cost), ${ai.aiSkipped} skipped; Stripe: ${fees.stripe}; ${fees.feeImports} fee imports`;
-  return { detail, ...ai, ...fees };
+  const detail = `AI: ${ai.aiImported} jobs imported (${ai.aiUnattributed} unattributed, ${ai.aiUnknown} unknown cost), ${ai.aiSkipped} skipped, ${aiReattributed} re-attributed to projects; Stripe: ${fees.stripe}; ${fees.feeImports} fee imports`;
+  return { detail, aiReattributed, ...ai, ...fees };
 }
 
 export async function listCostImports(db: Db, limit: number, offset: number) {

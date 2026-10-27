@@ -92,7 +92,8 @@ The daily `cost_import` job (`src/services/cost-import.ts`) charges AI usage to 
 
 - `project:<projectId>` or `project:<projectId>:<anything>` → that project.
 - `ticket:<ticketId>` → the ticket's `project_id`, when it has one.
-- anything else (for example `lead:<id>`) → a company-wide `ai_usage` cost with `project_id NULL`, shown as "Unattributed AI cost" on `/staff/finance/reconciliation?view=costs`.
+- `lead:<leadId>` or `quote:<quoteId>` → the one project the lead converted into (`orders.lead_id` → `projects.order_id`). If the lead has not converted yet, the cost is recorded company-wide and moved onto the project on a later run once it converts; a lead with more than one project stays company-wide.
+- anything else → a company-wide `ai_usage` cost with `project_id NULL`, shown as "Unattributed AI cost" on `/staff/finance/reconciliation?view=costs`.
 
 Voice call costs (`calls.cost_microusd`) are shown on `/staff/voice` and are not imported into project costs, because calls are not project work.
 

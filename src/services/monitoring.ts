@@ -24,7 +24,11 @@ export function redact(s: string): string {
     .replace(/\bre_[A-Za-z0-9_]{10,}/g, "re_[redacted]")
     .replace(/\bsk-ant-[A-Za-z0-9_-]+/g, "sk-ant-[redacted]")
     .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}/g, "gh_[redacted]")
-    .replace(/\b[0-9a-f]{64}\b/g, "[redacted-token]");
+    .replace(/\b[0-9a-f]{64}\b/g, "[redacted-token]")
+    // Personal data that can end up in free-form error text (ASVS F-13).
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[redacted-email]")
+    .replace(/(?<![\w.:])\+?\(?\d[\d ().-]{8,}\d(?![\w.:])/g, (m) => /^\d{4}-\d{2}-\d{2}/.test(m) || m.replace(/\D/g, "").length < 10 ? m : "[redacted-phone]")
+    .replace(/\b(?:\d[ -]?){13,19}\b/g, "[redacted-number]");
 }
 
 export interface ServiceCheck { name: string; status: "healthy" | "failing" | "not_configured" | "stale" | "unavailable"; detail: string }
