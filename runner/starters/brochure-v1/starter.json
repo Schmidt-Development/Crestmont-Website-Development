@@ -1,0 +1,54 @@
+{
+  "schema": "crestmont.starter/1",
+  "name": "brochure",
+  "version": "1",
+  "description": "Approved starter for the standard packages: static multi-page site in public/ served by a Cloudflare Worker static-assets project, design tokens, contact form endpoint stub (unconfigured until a mail provider exists) and an offline `npm run check`.",
+  "packages": {
+    "starter": {
+      "maxPages": 5,
+      "contactForm": true,
+      "requirements": [
+        { "key": "pkg:pages-within-limit", "label": "Up to 5 pages" },
+        { "key": "pkg:responsive", "label": "Responsive website" },
+        { "key": "pkg:seo-basic", "label": "Basic technical SEO (titles, descriptions, sitemap, robots)" },
+        { "key": "pkg:contact-form", "label": "Contact form (endpoint unconfigured until a mail provider is connected)" },
+        { "key": "pkg:analytics-config", "label": "Basic analytics configuration (placeholder until the customer's analytics account exists)" },
+        { "key": "pkg:draft-copy", "label": "AI-assisted draft copy" },
+        { "key": "pkg:licensed-imagery", "label": "Appropriately licensed imagery (customer files or clearly licensed sources)" }
+      ]
+    },
+    "business": {
+      "maxPages": 12,
+      "contactForm": true,
+      "requirements": [
+        { "key": "pkg:pages-within-limit", "label": "Up to 12 pages" },
+        { "key": "pkg:design-customization", "label": "Expanded design customization" },
+        { "key": "pkg:content-structure", "label": "More extensive content structure" },
+        { "key": "pkg:forms-advanced", "label": "Advanced forms within documented scope" },
+        { "key": "pkg:integrations-defined", "label": "Defined integrations (stubbed until credentials exist)" },
+        { "key": "pkg:seo-expanded", "label": "Expanded technical SEO (canonical, Open Graph, structured data)" },
+        { "key": "pkg:responsive", "label": "Responsive website" }
+      ]
+    },
+    "premium": {
+      "maxPages": 25,
+      "contactForm": true,
+      "requirements": [
+        { "key": "pkg:pages-within-limit", "label": "Up to 25 pages within approved scope" },
+        { "key": "pkg:design-bespoke", "label": "Bespoke premium design" },
+        { "key": "pkg:layouts-interactions", "label": "Advanced layouts and interactions" },
+        { "key": "pkg:integrations-defined", "label": "Defined integrations (stubbed until credentials exist)" },
+        { "key": "pkg:seo-enhanced", "label": "Enhanced technical SEO" },
+        { "key": "pkg:performance", "label": "Performance optimization" },
+        { "key": "pkg:responsive", "label": "Responsive website" }
+      ]
+    }
+  },
+  "acceptance": [
+    {
+      "id": "static-check",
+      "label": "Offline HTML validation-lite, internal links, SEO meta, accessibility basics, responsive CSS, package page limit",
+      "command": ["npm", "run", "-s", "check", "--", "--package", "{package}"]
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+
+# STARTER-PLACEHOLDER Replace example.com with the customer's domain once it is known.
+Sitemap: https://example.com/sitemap.xml

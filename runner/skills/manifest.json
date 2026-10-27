@@ -1,0 +1,63 @@
+{
+  "schema": "crestmont.runner-skills/1",
+  "version": "2026.10.27",
+  "note": "Curated toolkit skills per build workflow. 'source' is a directory under SKILLS_SOURCE_DIR containing SKILL.md; it is copied to <workspace>/.claude/skills/<name>/ and the name is passed to query({ options: { skills } }). Set 'sha256' to the hex SHA-256 of a skill's SKILL.md to pin an exact reviewed version. A missing REQUIRED skill or tool fails the job at preflight.",
+  "skills": {
+    "frontend-design": { "title": "Frontend Design", "source": "frontend-design", "sha256": null },
+    "ui-ux-pro-max": { "title": "UI/UX Pro Max", "source": "ui-ux-pro-max", "sha256": null },
+    "design-taste-frontend": { "title": "Taste Skill", "source": "design-taste-frontend", "sha256": null },
+    "impeccable": { "title": "Impeccable", "source": "impeccable", "sha256": null },
+    "emil-design-eng": { "title": "Emil design engineering", "source": "emil-design-eng", "sha256": null },
+    "design-auditor": { "title": "Design Auditor", "source": "design-auditor", "sha256": null },
+    "web-design-guidelines": { "title": "Web Design Guidelines", "source": "web-design-guidelines", "sha256": null },
+    "design-md-library": { "title": "DESIGN.md references", "source": "design-md-library", "sha256": null },
+    "image-to-code": { "title": "Image to Code", "source": "image-to-code", "sha256": null },
+    "webapp-testing": { "title": "Webapp Testing", "source": "webapp-testing", "sha256": null },
+    "playwright-skill": { "title": "Playwright", "source": "playwright-skill", "sha256": null }
+  },
+  "tools": {
+    "git": { "command": ["git", "--version"] },
+    "node": { "command": ["node", "--version"] },
+    "npm": { "command": ["npm", "--version"] },
+    "tar": { "command": ["tar", "--version"] },
+    "chromium": {
+      "command": ["node", "-e", "const fs=require('node:fs');let p;try{p=require('playwright')}catch{process.exit(2)}process.exit(fs.existsSync(p.chromium.executablePath())?0:1)"],
+      "hint": "Install Playwright and its Chromium build (npx playwright install --with-deps chromium) and expose it via NODE_PATH/PLAYWRIGHT_BROWSERS_PATH."
+    },
+    "bwrap": { "command": ["bwrap", "--version"], "sandboxOnly": true, "hint": "apt-get install bubblewrap (needed by the Claude Code sandbox on Linux), or set RUNNER_SANDBOX=off on a dedicated VM." },
+    "socat": { "command": ["socat", "-V"], "sandboxOnly": true, "hint": "apt-get install socat (needed by the Claude Code sandbox network proxy on Linux)." }
+  },
+  "workflows": {
+    "standard-brochure": {
+      "description": "Standard packages (starter / business / premium) built from an approved starter.",
+      "skills": [
+        { "name": "frontend-design", "required": true },
+        { "name": "web-design-guidelines", "required": true },
+        { "name": "webapp-testing", "required": true },
+        { "name": "playwright-skill", "required": true },
+        { "name": "ui-ux-pro-max", "required": false },
+        { "name": "design-taste-frontend", "required": false },
+        { "name": "impeccable", "required": false },
+        { "name": "emil-design-eng", "required": false },
+        { "name": "design-auditor", "required": false },
+        { "name": "design-md-library", "required": false },
+        { "name": "image-to-code", "required": false }
+      ],
+      "tools": ["git", "node", "npm", "tar", "chromium", "bwrap", "socat"]
+    },
+    "custom-app": {
+      "description": "Custom quoted projects: requirements map, architecture, scaffold, meaningful implementation, remaining-work list.",
+      "skills": [
+        { "name": "frontend-design", "required": true },
+        { "name": "webapp-testing", "required": true },
+        { "name": "playwright-skill", "required": true },
+        { "name": "web-design-guidelines", "required": false },
+        { "name": "ui-ux-pro-max", "required": false },
+        { "name": "impeccable", "required": false },
+        { "name": "design-auditor", "required": false },
+        { "name": "image-to-code", "required": false }
+      ],
+      "tools": ["git", "node", "npm", "tar", "chromium", "bwrap", "socat"]
+    }
+  }
+}

@@ -354,6 +354,27 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/voice/test-event", fields: () => ({ scenario: "callback" }) },
     { key: "GET /staff/voice/calls/:id" },
 
+    // ── AI Builds (owner controls) ──
+    { key: "POST /staff/builds/settings", fields: () => ({ run_budget: "30", project_budget: "90", model: "claude-sonnet-5-5", max_runtime: "120", max_turns: "200", max_concurrent: "2", max_attempts: "3", automation_enabled: "1" }) },
+    { key: "POST /staff/builds/pause", fields: () => ({ paused: "1", reason: "matrix pause" }) },
+    { key: "POST /staff/builds/projects/:projectId/pause", fields: () => ({ paused: "1", reason: "matrix project pause" }) },
+    { key: "POST /staff/builds/projects/:projectId/budget", fields: () => ({ project_budget: "50" }) },
+    // Earlier refund scenarios made tenant A's order ineligible, which (correctly) canceled its build; restore the fixture state.
+    { key: "POST /staff/builds/:id/approve", fields: () => ({ notes: "matrix approval" }), setup: async () => { await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review' WHERE id = ?`).bind(w.ids.buildJob).run(); } },
+    { key: "POST /staff/builds/:id/revision", fields: () => ({ instruction: "Make the hero heading larger and add the opening hours to the footer." }), setup: async () => {
+      // Eligibility for new automated work: submitted intake, no approved/issued refund on the order.
+      await w.db.prepare(`UPDATE onboarding_responses SET completed_at = ? WHERE project_id = ?`).bind(nowIso(), w.a.ids.project).run();
+      await w.db.prepare(`UPDATE refunds SET status = 'denied' WHERE status IN ('approved','issued') AND payment_id IN (SELECT id FROM payments WHERE order_id = (SELECT order_id FROM projects WHERE id = ?))`).bind(w.a.ids.project).run();
+      await w.db.prepare(`UPDATE payments SET status = 'succeeded' WHERE order_id = (SELECT order_id FROM projects WHERE id = ?)`).bind(w.a.ids.project).run();
+    } },
+    { key: "POST /staff/builds/:id/retry", setup: async () => {
+      await w.db.prepare(`UPDATE build_jobs SET state = 'canceled' WHERE project_id = ? AND kind = 'revision'`).bind(w.a.ids.project).run();
+      await w.db.prepare(`UPDATE build_jobs SET state = 'failed' WHERE id = ?`).bind(w.ids.buildJob).run();
+    } },
+    { key: "POST /staff/builds/:id/resume", setup: async () => { await w.db.prepare(`UPDATE build_jobs SET state = 'paused' WHERE id = ?`).bind(w.ids.buildJob).run(); } },
+    { key: "POST /staff/builds/:id/cancel", fields: () => ({ reason: "matrix cancel" }) },
+    { key: "POST /staff/builds/backfill", fields: () => ({ project_id: w.b.ids.project! }) },
+
     // Last: cancelling tenant A's project (Owner only).
     { key: "POST /staff/projects/:id/cancel", path: () => P(w, "POST /staff/projects/:id/cancel"), fields: () => ({ reason: "Customer requested cancellation in writing" }) },
   ];

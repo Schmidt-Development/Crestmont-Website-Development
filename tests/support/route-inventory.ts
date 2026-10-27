@@ -29,7 +29,7 @@ export type ResourceKind =
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
-  | "member" | "notification" | "staffNotification";
+  | "member" | "notification" | "staffNotification" | "buildJob";
 
 export type Access =
   | { kind: "public" }
@@ -93,6 +93,16 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/readiness/deployments": signed("x-crestmont-signature"),
   "POST /api/readiness/release-candidates": signed("x-crestmont-signature"),
   "GET /api/readiness/release-authorization": signed("x-crestmont-signature", { staffRead: true }),
+  // AI Builds runner API (HMAC-signed with BUILD_RUNNER_SECRET; src/routes/builds.ts)
+  "POST /api/builds/runner/claim": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/heartbeat": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/checkpoint": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/requirements": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/checkpoint/fetch": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/files": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/complete": signed("x-crestmont-runner-signature"),
+  "GET /api/builds": { access: { kind: "staff", roles: rolesWith("builds.read") }, api: true },
+  "GET /api/builds/:id": { access: { kind: "staff", roles: rolesWith("builds.read") }, api: true, params: { id: "buildJob" } },
 
   // ── Authentication and account (src/routes/auth.ts, platform.ts privacy) ──
   "GET /login": pub,
@@ -211,6 +221,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /portal/team/members/:userId/remove": cust({ userId: "member" }, act("customer.member_removed"), { admin: true }),
   "POST /portal/team/invitations/:id/revoke": cust(P("customerInvitation"), act("customer.invitation_revoked"), { admin: true }),
   "GET /portal/notifications": cust(),
+  "GET /portal/projects/:id/build-status": cust(P("project")),
   "GET /live/unread": session(),
   "POST /portal/notifications/:id/read": cust(P("notification"), exempt("marks one of the caller's own notifications as read (scoped to the user; others' ids are 404)")),
   "GET /portal/maintenance": cust(),
@@ -431,6 +442,19 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/ai": staff(rolesWith("ai.manage")),
   "GET /staff/ai/export.csv": staff(rolesWith("ai.manage"), undefined, act("ai.jobs_exported")),
   "GET /staff/ai/:id": staff(rolesWith("ai.manage"), P("aiJob")),
+  // AI Builds owner dashboard (src/routes/builds.ts)
+  "GET /staff/builds": staff(rolesWith("builds.read")),
+  "GET /staff/builds/:id": staff(rolesWith("builds.read"), P("buildJob")),
+  "POST /staff/builds/pause": staff(rolesWith("builds.manage"), undefined, act("builds.paused_globally")),
+  "POST /staff/builds/settings": staff(rolesWith("builds.configure"), undefined, act("builds.settings_updated")),
+  "POST /staff/builds/backfill": staff(rolesWith("builds.configure"), undefined, act("builds.backfill_authorized")),
+  "POST /staff/builds/projects/:projectId/pause": staff(rolesWith("builds.manage"), { projectId: "project" }, act("builds.project_paused")),
+  "POST /staff/builds/projects/:projectId/budget": staff(rolesWith("builds.configure"), { projectId: "project" }, act("builds.project_budget_set")),
+  "POST /staff/builds/:id/cancel": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.canceled")),
+  "POST /staff/builds/:id/retry": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.retry")),
+  "POST /staff/builds/:id/resume": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.resume")),
+  "POST /staff/builds/:id/revision": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.revision_submitted")),
+  "POST /staff/builds/:id/approve": staff(rolesWith("builds.configure"), P("buildJob"), act("builds.preview_approved")),
   "POST /staff/ai/:id/decide": staff(rolesWith("ai.manage"), P("aiJob"), act("ai.draft_approved")),
   "POST /staff/ai/:id/retry": staff(rolesWith("ai.manage"), P("aiJob"), act("ai.job_retried")),
   "GET /staff/voice": staff(rolesWith("voice.manage")),

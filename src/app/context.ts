@@ -27,6 +27,8 @@ export interface Env {
   STAGING_ACCESS_PASSWORD?: string;
   /** "required" on the deployed staging Worker: the preview gate stays locked when no password is set. */
   PREVIEW_GATE?: string;
+  /** Shared HMAC secret for the AI Builds runner API (docs/ai-builds/RUNNER-PROTOCOL.md). Unset = execution unavailable. */
+  BUILD_RUNNER_SECRET?: string;
   /** "on" | "off": per-user limits on authenticated form submissions (default on outside development). ASVS F-15. */
   ACTION_RATE_LIMIT?: string;
   /** "on" | "off": breached-password check (default on outside development). ASVS F-06. */

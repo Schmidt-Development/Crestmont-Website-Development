@@ -13,6 +13,7 @@ import {
 import { TransitionError } from "../domain/state-machine.ts";
 import { issueMilestoneInvoice } from "./commerce.ts";
 import { notify, notifyCustomer, notifyProjectTeam, type MailCtx } from "./notifications.ts";
+import { syncProjectBuildSafe } from "./builds.ts";
 
 export interface ProjectRow {
   id: string; organization_id: string; order_id: string | null; product_id: string | null; name: string; status: ProjectStatus;
@@ -156,6 +157,7 @@ export async function cancelProject(ctx: MailCtx, actor: Actor, projectId: strin
   const at = nowIso();
   await ctx.db.prepare(`UPDATE projects SET status = 'cancelled', cancel_reason = ?, updated_at = ? WHERE id = ? AND status = ?`).bind(reason.trim(), at, projectId, p.status).run();
   await audit(ctx.db, { actorUserId: actor.userId, action: "project.cancelled", subjectType: "project", subjectId: projectId, organizationId: p.organization_id, details: { from: p.status, reason: reason.trim() } });
+  await syncProjectBuildSafe(ctx.db, projectId, "sweep");
   await notifyCustomer(ctx, projectId, { kind: "project_status", template: "project_update", subject: "Your project was cancelled", body: "Your project has been cancelled. Your project manager will contact you about next steps.", path: `/portal/projects/${projectId}`, key: `cancel:${projectId}` });
 }
 

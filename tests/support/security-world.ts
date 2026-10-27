@@ -14,7 +14,7 @@ import type { Env } from "../../src/app/context.ts";
 import type { ResourceKind } from "./route-inventory.ts";
 
 export type StaffRole = (typeof STAFF_ROLES)[number];
-export const SECRETS = { evidence: "matrix-evidence-secret", voice: "matrix-voice-secret", stripe: "whsec_matrixstripe", retell: "matrix-retell-key", resend: "whsec_" + Buffer.from("matrix-resend-secret").toString("base64") };
+export const SECRETS = { runner: "matrix-runner-secret", evidence: "matrix-evidence-secret", voice: "matrix-voice-secret", stripe: "whsec_matrixstripe", retell: "matrix-retell-key", resend: "whsec_" + Buffer.from("matrix-resend-secret").toString("base64") };
 
 export const PDF = new TextEncoder().encode("%PDF-1.4\n%security matrix fixture\n");
 export const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 1, 2, 3, 4]);
@@ -153,7 +153,7 @@ export async function buildWorld(): Promise<World> {
   const payments = new FakePayments();
   const app = await createTestApp({
     EVIDENCE_INGEST_SECRET: SECRETS.evidence, VOICE_WEBHOOK_SECRET: SECRETS.voice, STRIPE_WEBHOOK_SECRET: SECRETS.stripe,
-    RETELL_API_KEY: SECRETS.retell, RESEND_WEBHOOK_SECRET: SECRETS.resend,
+    RETELL_API_KEY: SECRETS.retell, RESEND_WEBHOOK_SECRET: SECRETS.resend, BUILD_RUNNER_SECRET: SECRETS.runner,
     overrides: { storage: new MemoryStorage(), payments },
   });
   const db = app.db;
@@ -238,6 +238,11 @@ async function buildStaffRecords(w: World) {
   await db.prepare(`INSERT INTO reconciliation_findings (id, fingerprint, kind, detail, status, first_seen_at, last_seen_at) VALUES (?, 'matrix-fp', 'unknown_local_invoice', 'Matrix finding detail', 'open', ?, ?)`).bind(ids.reconFinding, nowIso(), nowIso()).run();
   ids.staffNotification = newId("ntf");
   await db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES (?, ?, 'system', 'project', NULL, 'Matrix staff notification', ?)`).bind(ids.staffNotification, w.staff.owner.id, nowIso()).run();
+  // AI build record for tenant A's project (normally created by the payment/intake hooks).
+  ids.buildJob = newId("bld");
+  await db.prepare(`INSERT INTO build_jobs (id, project_id, organization_id, order_id, kind, revision, dedupe_key, state, state_reason, strategy, package_id, trigger, preview_url, agent_session_id, created_at, updated_at)
+                    SELECT ?, p.id, p.organization_id, p.order_id, 'first_build', 0, p.id || ':first', 'ready_for_review', 'matrix fixture', 'standard', 'business', 'sweep', 'https://preview.matrix.example', 'sess-matrix', ?, ? FROM projects p WHERE p.id = ?`)
+    .bind(ids.buildJob, nowIso(), nowIso(), w.a.ids.project).run();
   // Public identifiers
   ids.serviceSlug = "website-design-development";
   ids.legalSlug = "terms";

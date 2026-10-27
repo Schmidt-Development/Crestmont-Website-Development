@@ -235,7 +235,25 @@ export const REQUIREMENTS: RequirementDef[] = [
     ["LAUNCH-002", "Production deployment matches approved release candidate", "P0", "engineering", ["READY-008"]],
     ["LAUNCH-003", "Post-deploy production verification of critical journeys", "P0", "engineering", ["LAUNCH-002"]],
   ]),
+  // Founder addendum, 2026-10-27: automated paid-intake development (docs/ai-builds/). Added scope, not a
+  // re-definition of the original 154: reports show the original registry and this addendum separately.
+  ...group("AI Builds (addendum)", "Addendum 2026-10-27", [
+    ["AIB-001", "Automatic build eligibility from a webhook-verified qualifying payment and submitted intake, in either order", "P0", "engineering", ["PAY-003", "PORTAL-002"]],
+    ["AIB-002", "Durable, idempotent build queue (one job per order/revision; lost enqueues recovered by a sweep)", "P0", "engineering", ["AIB-001"]],
+    ["AIB-003", "Runner leases, heartbeats, bounded retries and concurrency limits (no competing builds per project)", "P0", "engineering", ["AIB-002"]],
+    ["AIB-004", "Interruption recovery and session resume from checkpoints", "P0", "engineering", ["AIB-003"]],
+    ["AIB-005", "Orchestrator-enforced spending, runtime and turn limits, cumulative across revisions", "P0", "engineering", ["AIB-003"]],
+    ["AIB-006", "Owner controls: global/project pause, cancel, retry, resume, revision, preview approval; honest stop semantics", "P0", "engineering", ["AIB-003"]],
+    ["AIB-007", "Isolation: signed runner API, per-customer data scoping, no platform secrets in workspaces, customer-safe summaries", "P0", "security", ["AIB-003"]],
+    ["AIB-008", "Versioned, immutable build brief snapshots with customer content treated as data", "P0", "engineering", ["AIB-001"]],
+    ["AIB-009", "Owner AI Builds dashboard and documented frontend API/state contract", "P0", "engineering", ["AIB-006"]],
+    ["AIB-010", "Build runner on the official Claude Agent SDK: isolated workspaces, versioned starters, curated skills, checks, previews", "P0", "engineering", ["AIB-003"]],
+    ["AIB-011", "Real provider-backed end-to-end staging build (test payment → intake → isolated session → preview → owner review)", "P0", "integration", ["AIB-010", "INFRA-002"]],
+  ]),
 ];
+
+/** The original Founder-approved registry (154). The AI Builds addendum is reported separately. */
+export const ORIGINAL_REQUIREMENT_COUNT = 154;
 
 const ids = new Set<string>();
 for (const r of REQUIREMENTS) {

@@ -6,6 +6,7 @@ import { isStaleEvent, markEventResult, type StripeEvent } from "../domain/strip
 import { markInvoicePaid, provisionProject } from "./commerce.ts";
 import { audit } from "./security.ts";
 import { sendMail } from "./mailer.ts";
+import { syncProjectBuildSafe } from "./builds.ts";
 
 type Obj = Record<string, unknown>;
 const s = (o: Obj, k: string) => (typeof o[k] === "string" ? (o[k] as string) : null);
@@ -93,6 +94,7 @@ export async function processStripeEvent(ctx: Pick<AppContext, "db" | "email" | 
                             WHERE status IN ('approved','failed') AND payment_id IN (SELECT id FROM payments WHERE stripe_payment_intent_id = ?)`)
             .bind(nowIso(), latestRefund ? s(latestRefund, "id") : null, pi).run();
           await audit(db, { actorKind: "webhook", action: "payment.refunded", subjectType: "payment", subjectId: pi, details: { event: evt.id, refunded } });
+          await syncBuildsForPaymentIntent(db, pi);
         }
         break;
       }
@@ -118,6 +120,7 @@ export async function processStripeEvent(ctx: Pick<AppContext, "db" | "email" | 
             await db.prepare(`UPDATE payments SET status = 'disputed' WHERE id = ?`).bind(pay.id).run();
           }
         }
+        if (pi) await syncBuildsForPaymentIntent(db, pi);
         if (evt.type !== "charge.dispute.created") {
           await audit(db, { actorKind: "webhook", action: evt.type === "charge.dispute.closed" ? "dispute.closed" : "dispute.updated", subjectType: "dispute", subjectId: evt.data.object.id, organizationId: pay?.organization_id ?? null, details: { event: evt.id, status: s(o, "status") } });
         }
@@ -157,6 +160,8 @@ async function applyInvoicePayment(ctx: Pick<AppContext, "db" | "email" | "baseU
   const inv = res.invoice;
   let projectId = inv.project_id;
   if (!projectId && inv.order_id && (inv.milestone_kind === "full" || inv.milestone_kind === "deposit_50")) projectId = await provisionProject(db, inv.order_id);
+  // AI Builds: re-evaluate the first build now that a verified payment exists (fast: rows only; the sweep recovers failures).
+  await syncProjectBuildSafe(db, projectId, "payment");
   if (inv.milestone_kind === "change_order" && inv.project_id) {
     await db.prepare(`UPDATE change_orders SET status = 'paid' WHERE invoice_id = ? AND status = 'approved'`).bind(inv.id).run();
   }
@@ -172,6 +177,11 @@ async function applyInvoicePayment(ctx: Pick<AppContext, "db" | "email" | "baseU
   if (to) await sendMail(ctx, { template: "receipt", to, subject: "Payment received — Crestmont", heading: "Thank you — your payment was received", idempotencyKey: `receipt:${inv.id}`,
     paragraphs: [`We received your payment of $${(inv.amount_cents / 100).toFixed(2)}.`, projectId ? "Your project is set up. The next step is onboarding, where you tell us about your business, brand and goals." : "Your project record has been updated."],
     cta: { label: projectId ? "Start onboarding" : "View billing", url: `${ctx.baseUrl}/portal${projectId ? `/projects/${projectId}/onboarding` : "/billing"}` } });
+}
+
+async function syncBuildsForPaymentIntent(db: AppContext["db"], pi: string) {
+  const rows = (await db.prepare(`SELECT DISTINCT i.project_id FROM payments p JOIN invoices i ON i.id = p.invoice_id WHERE p.stripe_payment_intent_id = ? AND i.project_id IS NOT NULL`).bind(pi).all<{ project_id: string }>()).results;
+  for (const r of rows) await syncProjectBuildSafe(db, r.project_id, "sweep");
 }
 
 async function upsertSubscription(db: AppContext["db"], stripeId: string, orgId: string, productId: string | null, status: string, periodEnd: string | null) {
