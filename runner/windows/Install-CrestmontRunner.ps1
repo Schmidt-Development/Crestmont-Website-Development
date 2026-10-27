@@ -28,7 +28,10 @@
 .PARAMETER SecretFile
   Path of a file holding BUILD_RUNNER_SECRET (copied into the secrets folder). Otherwise you are prompted (hidden input).
 .PARAMETER ExtraEgressDomains
-  Extra hosts the runner may reach (e.g. github.com api.github.com api.cloudflare.com for repos/previews).
+  Extra hosts the runner may reach (e.g. github.com api.github.com api.cloudflare.com for repos/previews). Each must be
+  a plain host name; hosted AI API domains are refused (SquidConf.ps1).
+.PARAMETER OllamaImage
+  Pinned image for the optional ollama-in-docker profile (written to compose\.env as OLLAMA_IMAGE).
 
 .EXAMPLE
   # From an elevated PowerShell in a checkout of the platform repository:
@@ -45,6 +48,7 @@ param(
   [string]$RunnerId = ("win-" + $env:COMPUTERNAME.ToLower()),
   [string[]]$ExtraEgressDomains = @(),
   [switch]$OllamaInDocker,
+  [string]$OllamaImage = "ollama/ollama:0.32.0",
   [switch]$SkipModelPull,
   [switch]$NoAutoStart,
   [switch]$NoStart
@@ -52,12 +56,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 $script:Problems = New-Object System.Collections.ArrayList
+. (Join-Path $PSScriptRoot "SquidConf.ps1")
 
 function Step([string]$Text) { Write-Host ""; Write-Host "==> $Text" -ForegroundColor Cyan }
 function Ok([string]$Text) { Write-Host "    OK   $Text" -ForegroundColor Green }
 function Warn([string]$Text) { Write-Host "    WARN $Text" -ForegroundColor Yellow }
 function Fail([string]$Text) { Write-Host "    FAIL $Text" -ForegroundColor Red; [void]$script:Problems.Add($Text) }
-function Stop-WithProblems {
+function Exit-WithProblem {
   Write-Host ""
   Write-Host "Stopped. Fix the problems above and run the script again (it is safe to re-run):" -ForegroundColor Red
   foreach ($p in $script:Problems) { Write-Host "  - $p" -ForegroundColor Red }
@@ -73,9 +78,13 @@ function Test-Admin {
 }
 
 $uri = $null
-try { $uri = [Uri]$PlatformUrl } catch { }
+try { $uri = [Uri]$PlatformUrl } catch { $uri = $null }
 if (-not $uri -or $uri.Scheme -ne "https") { throw "-PlatformUrl must be an https:// URL" }
 $PlatformHost = $uri.Host
+# Validate the allow-list inputs before anything is installed (host names only; no hosted AI APIs).
+$null = Assert-CrestmontDomain -Domain $PlatformHost -Label "-PlatformUrl host"
+foreach ($d in @($ExtraEgressDomains | Where-Object { $_ })) { $null = Assert-CrestmontDomain -Domain $d -Label "-ExtraEgressDomains" }
+if ($OllamaImage -notmatch '^[a-z0-9./_-]+:[0-9][0-9A-Za-z._-]*(@sha256:[0-9a-f]{64})?$') { throw "-OllamaImage must be a pinned tag such as ollama/ollama:0.32.0 (not latest)" }
 $Compose = Join-Path $InstallDir "compose"
 $State = Join-Path $InstallDir "state"
 $Secrets = Join-Path $InstallDir "secrets"
@@ -83,16 +92,16 @@ $Skills = Join-Path $InstallDir "skills"
 $Logs = Join-Path $InstallDir "logs"
 $RunnerSrc = Join-Path $RepoPath "runner"
 
-# ── 1. prerequisites ──
+# -- 1. prerequisites --
 Step "Prerequisites"
-if (-not (Test-Admin)) { Fail "Run this script from an elevated PowerShell (needed for folder ACLs and the scheduled task)."; Stop-WithProblems }
-if (-not (Test-Path (Join-Path $RunnerSrc "Dockerfile"))) { Fail "runner\Dockerfile not found under -RepoPath $RepoPath"; Stop-WithProblems }
+if (-not (Test-Admin)) { Fail "Run this script from an elevated PowerShell (needed for folder ACLs and the scheduled task)."; Exit-WithProblem }
+if (-not (Test-Path (Join-Path $RunnerSrc "Dockerfile"))) { Fail "runner\Dockerfile not found under -RepoPath $RepoPath"; Exit-WithProblem }
 $build = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
 if ($build -lt 19045) { Fail "Windows build ${build}: Ollama documents Windows 10 22H2 (build 19045) or newer." } else { Ok "Windows build $build" }
 
 $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
 $wslOk = $false
-if ($wsl) { $st = ((& wsl.exe --status 2>&1) | Out-String) -replace "`0", ""; $wslOk = ($LASTEXITCODE -eq 0) }
+if ($wsl) { $null = & wsl.exe --status 2>&1; $wslOk = ($LASTEXITCODE -eq 0) }
 if (-not $wslOk) {
   if ($Install) {
     Warn "Installing WSL (wsl --install --no-distribution). A REBOOT is required afterwards; then run this script again."
@@ -117,7 +126,7 @@ if (-not $docker -and (Test-Path "$env:ProgramFiles\Docker\Docker\resources\bin\
 
 $ollamaExe = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
 if (-not $OllamaInDocker -and -not (Test-Path $ollamaExe) -and -not (Get-Command ollama.exe -ErrorAction SilentlyContinue)) { Install-WithWinget "Ollama.Ollama" "Ollama" }
-if ($script:Problems.Count) { Stop-WithProblems }
+if ($script:Problems.Count) { Exit-WithProblem }
 
 # Docker engine up (start Docker Desktop if needed) and using Linux containers.
 & docker.exe info --format "{{.OSType}}" 2>$null | Out-Null
@@ -128,42 +137,52 @@ if ($LASTEXITCODE -ne 0) {
   do { Start-Sleep -Seconds 5; & docker.exe info --format "{{.OSType}}" 2>$null | Out-Null } while ($LASTEXITCODE -ne 0 -and (Get-Date) -lt $deadline)
 }
 $osType = (& docker.exe info --format "{{.OSType}}" 2>$null | Out-String).Trim()
-if ($osType -ne "linux") { Fail "Docker engine not reachable or not in Linux-container mode (got '$osType'). Use the WSL 2 backend with Linux containers."; Stop-WithProblems }
+if ($osType -ne "linux") { Fail "Docker engine not reachable or not in Linux-container mode (got '$osType'). Use the WSL 2 backend with Linux containers."; Exit-WithProblem }
 $serverVersion = (& docker.exe version --format "{{.Server.Version}}" | Out-String).Trim()
-if ([int]($serverVersion.Split(".")[0]) -lt 26) { Fail "Docker Engine ${serverVersion}: 26.0 or newer is required (volume-subpath mounts). Update Docker Desktop."; Stop-WithProblems }
+if ([int]($serverVersion.Split(".")[0]) -lt 26) { Fail "Docker Engine ${serverVersion}: 26.0 or newer is required (volume-subpath mounts). Update Docker Desktop."; Exit-WithProblem }
 Ok "Docker Engine $serverVersion (linux)"
 
-# ── 2. hardware discovery ──
+# -- 2. hardware discovery --
 Step "Hardware discovery (read-only)"
 foreach ($d in @($InstallDir, $Compose, $State, $Secrets, $Skills, $Logs, (Join-Path $InstallDir "evidence"))) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
 & (Join-Path $PSScriptRoot "Discover-Hardware.ps1") -PlatformUrl $PlatformUrl | Out-File -Encoding utf8 (Join-Path $State "hardware.json")
 $hw = Get-Content (Join-Path $State "hardware.json") -Raw | ConvertFrom-Json
 Ok ("CPU {0} ({1} threads), RAM {2} GB, GPUs: {3}" -f $hw.cpu.name, $hw.cpu.logicalProcessors, $hw.memory.totalGB, (($hw.gpus | ForEach-Object { "$($_.name) $($_.vramGB) GB" }) -join "; "))
-if ($hw.network.platform -and -not $hw.network.platform.reachable) { Fail "The platform URL $PlatformUrl is not reachable from this machine."; Stop-WithProblems }
+if ($hw.network.platform -and -not $hw.network.platform.reachable) { Fail "The platform URL $PlatformUrl is not reachable from this machine."; Exit-WithProblem }
 
-# ── 3. directories, ACLs, secret ──
+# -- 3. directories, ACLs, secret --
 Step "Folders and secrets ($InstallDir)"
 # Only SYSTEM, Administrators and the installing user; inheritance removed. Secrets get the same, nothing broader.
 foreach ($d in @($InstallDir, $Secrets)) {
   & icacls.exe $d /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${env:USERDOMAIN}\${env:USERNAME}:(OI)(CI)F" | Out-Null
-  if ($LASTEXITCODE -ne 0) { Fail "icacls on $d failed"; Stop-WithProblems }
+  if ($LASTEXITCODE -ne 0) { Fail "icacls on $d failed"; Exit-WithProblem }
 }
 $secretPath = Join-Path $Secrets "build_runner_secret"
 if (-not (Test-Path $secretPath)) {
   if ($SecretFile) { $value = (Get-Content $SecretFile -Raw).Trim() }
   else {
     $sec = Read-Host -AsSecureString "Paste BUILD_RUNNER_SECRET (the same value as the platform's Worker secret; input hidden)"
-    $value = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
+    try { $value = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
   }
-  if ($value.Length -lt 32) { Fail "BUILD_RUNNER_SECRET looks too short (< 32 characters)."; Stop-WithProblems }
+  if ($value.Length -lt 32) { Fail "BUILD_RUNNER_SECRET looks too short (< 32 characters)."; Exit-WithProblem }
   [IO.File]::WriteAllText($secretPath, $value)   # no BOM, no newline
   $value = $null
   Ok "Secret written to $secretPath (not displayed)"
 } else { Ok "Secret file already present (unchanged)" }
 if (-not (Get-ChildItem $Skills -Directory -ErrorAction SilentlyContinue)) { Warn "No curated skills in $Skills yet (see RUNNER-SETUP.md section 6); required ones fail preflight." }
 
-# ── 4. images ──
+# -- 4. images --
 Step "Building images (runner, sandbox, egress proxy)"
+# The images install npm packages with `npm ci` only: the committed lockfiles are what gets built.
+foreach ($lock in @("package-lock.json", "sandbox\package-lock.json")) {
+  if (-not (Test-Path (Join-Path $RunnerSrc $lock))) {
+    Fail ("runner\$lock is missing. Generate it on a machine with registry access (cd runner\" + (Split-Path $lock -Parent) +
+      "; npm install --package-lock-only --ignore-scripts), or take it from the CI 'runner-lockfiles' artifact, review and commit it. See RUNNER-SETUP.md section 12.")
+  }
+}
+if ($script:Problems.Count) { Exit-WithProblem }
 Invoke-Checked "docker.exe" @("build", "-t", "crestmont-ai-runner:1", "-f", (Join-Path $RunnerSrc "Dockerfile"), $RunnerSrc) "docker build runner"
 Invoke-Checked "docker.exe" @("build", "-t", "crestmont-build-sandbox:1", "-f", (Join-Path $RunnerSrc "sandbox\Dockerfile"), (Join-Path $RunnerSrc "sandbox")) "docker build sandbox"
 Copy-Item -Force (Join-Path $PSScriptRoot "docker-compose.yml") (Join-Path $Compose "docker-compose.yml")
@@ -171,7 +190,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Compose "proxy") | Out-Nul
 Copy-Item -Force (Join-Path $PSScriptRoot "proxy\Dockerfile") (Join-Path $Compose "proxy\Dockerfile")
 Ok "Images built"
 
-# ── 5. model selection ──
+# -- 5. model selection --
 Step "Model selection"
 & docker.exe run --rm --network none -v "${State}:/in:ro" --entrypoint node crestmont-ai-runner:1 --no-warnings windows/select-model.ts /in/hardware.json | Out-File -Encoding utf8 (Join-Path $State "recommendation.json")
 $selectExit = $LASTEXITCODE
@@ -180,12 +199,12 @@ Write-Host "    $($rec.summary)"
 foreach ($w in $rec.warnings) { Warn $w }
 foreach ($b in $rec.blockers) { Fail $b }
 if ($Model) { Warn "Using -Model $Model instead of the recommendation ($($rec.model))."; $script:Problems.Clear() }
-elseif ($selectExit -ne 0 -or -not $rec.model) { Stop-WithProblems }
+elseif ($selectExit -ne 0 -or -not $rec.model) { Exit-WithProblem }
 $selected = if ($Model) { $Model } else { $rec.model }
 $ctx = [int]$rec.contextTokens
 if ($ctx -lt 16384) { $ctx = 32768 }
 
-# ── 6. Ollama ──
+# -- 6. Ollama --
 if ($OllamaInDocker) {
   Step "Ollama in Docker (profile ollama-in-docker; GPU passthrough needs NVIDIA + WSL 2 backend)"
   $modelBase = "http://ollama:11434/v1"
@@ -214,29 +233,26 @@ if ($OllamaInDocker) {
     Start-Sleep -Seconds 5
   }
   $listen = Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue
-  if (-not $listen) { Fail "Ollama is not listening on port 11434."; Stop-WithProblems }
+  if (-not $listen) { Fail "Ollama is not listening on port 11434."; Exit-WithProblem }
   $public = @($listen | Where-Object { $_.LocalAddress -notin @("127.0.0.1", "::1") })
-  if ($public.Count) { Fail "Ollama listens on $($public.LocalAddress -join ', '): it must be localhost only. Remove OLLAMA_HOST overrides (system scope too)."; Stop-WithProblems }
+  if ($public.Count) { Fail "Ollama listens on $($public.LocalAddress -join ', '): it must be localhost only. Remove OLLAMA_HOST overrides (system scope too)."; Exit-WithProblem }
   Ok "Ollama listening on localhost only"
   if (-not $SkipModelPull) {
     Write-Host "    Pulling $selected (this can take a long time)"
     Invoke-Checked "ollama" @("pull", $selected) "ollama pull $selected"
   }
   $have = (& ollama list | Out-String)
-  if ($have -notmatch [Regex]::Escape(($selected -split ":")[0])) { Fail "Model $selected is not in 'ollama list'."; Stop-WithProblems }
+  if ($have -notmatch [Regex]::Escape(($selected -split ":")[0])) { Fail "Model $selected is not in 'ollama list'."; Exit-WithProblem }
   Ok "Model $selected available"
   $modelBase = "http://host.docker.internal:11434/v1"
 }
 
-# ── 7. compose files ──
+# -- 7. compose files --
 Step "Compose configuration"
-$extra = @($ExtraEgressDomains | Where-Object { $_ }) -join " "
-if (-not $extra) { $extra = "none.invalid" }
-$pull = if ($OllamaInDocker) { "registry.ollama.ai .ollama.com .r2.cloudflarestorage.com" } else { "none.invalid" }
-$squid = Get-Content (Join-Path $PSScriptRoot "proxy\squid.conf.template") -Raw
-$squid = $squid.Replace("__PLATFORM_HOST__", $PlatformHost).Replace("__RUNNER_EXTRA_DOMAINS__", $extra).Replace("__OLLAMA_PULL_DOMAINS__", $pull)
-# Squid expects LF line endings; write without BOM.
-[IO.File]::WriteAllText((Join-Path $Compose "proxy\squid.conf"), ($squid -replace "`r`n", "`n"))
+$template = Get-Content (Join-Path $PSScriptRoot "proxy\squid.conf.template") -Raw
+$squid = ConvertTo-SquidConf -Template $template -PlatformHost $PlatformHost -ExtraDomains $ExtraEgressDomains -OllamaInDocker:$OllamaInDocker
+# Squid expects LF line endings (ConvertTo-SquidConf normalizes them); write without BOM.
+[IO.File]::WriteAllText((Join-Path $Compose "proxy\squid.conf"), $squid)
 $runnerEnv = @(
   "CONTROL_PLANE_URL=$PlatformUrl"
   "BUILD_RUNNER_SECRET_FILE=/run/secrets/build_runner_secret"
@@ -254,11 +270,11 @@ $runnerEnv = @(
   "LOG_LEVEL=info"
 )
 $runnerEnv | Set-Content -Encoding ascii (Join-Path $Compose "runner.env")
-$composeEnv = @("OLLAMA_CONTEXT_LENGTH=$ctx", "OLLAMA_NUM_PARALLEL=$($rec.ollama.numParallel)", "OLLAMA_KV_CACHE_TYPE=$($rec.ollama.kvCacheType)")
+$composeEnv = @("OLLAMA_IMAGE=$OllamaImage", "OLLAMA_CONTEXT_LENGTH=$ctx", "OLLAMA_NUM_PARALLEL=$($rec.ollama.numParallel)", "OLLAMA_KV_CACHE_TYPE=$($rec.ollama.kvCacheType)")
 $composeEnv | Set-Content -Encoding ascii (Join-Path $Compose ".env")
 Ok "Wrote docker-compose.yml, proxy\squid.conf, runner.env (no secret values)"
 
-# ── 8. checks ──
+# -- 8. checks --
 Step "Connectivity and preflight"
 $composeArgs = @("compose", "-f", (Join-Path $Compose "docker-compose.yml"), "--project-directory", $Compose)
 if ($OllamaInDocker) { $composeArgs += @("--profile", "ollama-in-docker") }
@@ -275,13 +291,13 @@ if ($LASTEXITCODE -ne 0) {
   Fail ("Containers cannot reach the model server at $modelBase through the proxy. With native Ollama this usually means " +
     "host.docker.internal does not reach a localhost-only listener on this Docker Desktop version; re-run with -OllamaInDocker " +
     "(see WINDOWS-SUPERCOMPUTER.md, 'Ollama native vs in Docker').")
-  Stop-WithProblems
+  Exit-WithProblem
 }
 Ok "Model server reachable from the container network"
 Invoke-Checked "docker.exe" ($composeArgs + @("run", "--rm", "--no-deps", "runner", "node", "--no-warnings", "src/main.ts", "--preflight")) "runner --preflight"
 Ok "Runner preflight passed"
 
-# ── 9. start + auto-start ──
+# -- 9. start + auto-start --
 if (-not $NoStart) {
   Step "Starting the runner"
   Invoke-Checked "docker.exe" ($composeArgs + @("up", "-d")) "docker compose up"

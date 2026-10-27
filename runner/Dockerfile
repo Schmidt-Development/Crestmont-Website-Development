@@ -1,39 +1,39 @@
 # Crestmont AI Builds runner image (the orchestrator; it never runs customer code itself in the default local mode).
-# Build from the repository root:   docker build -t crestmont-ai-runner:1 -f runner/Dockerfile runner
+# Build (from the repository root):   docker build -t crestmont-ai-runner:1 -f runner/Dockerfile runner
 # Windows deployment: runner/windows/Install-CrestmontRunner.ps1 builds it. See docs/ai-builds/WINDOWS-SUPERCOMPUTER.md.
+# CI builds the default variant on every push and checks it (.github/workflows/ci.yml, job runner-images).
 #
 # Default (local provider): Node + git + tar + the Docker CLI (to start per-job sandbox containers from
-# runner/sandbox/Dockerfile). The optional, PAID Claude Agent SDK adapter and the tools it needs inside this image
-# (Playwright Chromium, bubblewrap, socat) are installed only with --build-arg INSTALL_AGENT_SDK=true.
+# runner/sandbox/Dockerfile). No runtime npm packages: `npm ci` against the committed package-lock.json installs
+# nothing and fails if package.json and the lockfile disagree.
+# The optional, PAID Claude Agent SDK adapter and the tools it needs inside this image (the SDK and Playwright from
+# agent-sdk/package-lock.json, Chromium, bubblewrap, socat) are installed only with --build-arg INSTALL_AGENT_SDK=true,
+# and that build fails until agent-sdk/package-lock.json has been generated, reviewed and committed.
 #
-# Docker CLI: copied from the official docker CLI image. volume-subpath mounts need Docker Engine/CLI >= 26.0
-# (https://docs.docker.com/engine/release-notes/26.0/). Pin the tag (and ideally the digest) you reviewed.
+# Base images are exact version tags; pin them by digest once CI has printed the digests (RUNNER-SETUP.md section 12).
+# Docker CLI: volume-subpath mounts need Docker Engine/CLI >= 26.0 (https://docs.docker.com/engine/release-notes/26.0/).
+# Debian packages are not version-pinned (bookworm security updates); hadolint DL3008 is ignored for that reason.
 ARG DOCKER_CLI_IMAGE=docker:27.5.1-cli
+ARG NODE_IMAGE=node:22.23.4-bookworm-slim
 FROM ${DOCKER_CLI_IMAGE} AS dockercli
 
-FROM node:22-bookworm-slim
+FROM ${NODE_IMAGE}
 
 ARG INSTALL_AGENT_SDK=false
-ARG PLAYWRIGHT_VERSION=1.55.0
 ENV DEBIAN_FRONTEND=noninteractive \
     NPM_CONFIG_UPDATE_NOTIFIER=false \
     NPM_CONFIG_FUND=false
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # git (job repositories), tar (checkpoints), tini (signal handling), ca-certificates.
+# hadolint ignore=DL3008
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git tar ca-certificates tini \
  && if [ "$INSTALL_AGENT_SDK" = "true" ]; then apt-get install -y --no-install-recommends bubblewrap socat; fi \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
-
-# Optional paid adapter only: Playwright + Chromium for the Agent SDK's in-process browser skills.
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright NODE_PATH=/usr/local/lib/node_modules
-RUN if [ "$INSTALL_AGENT_SDK" = "true" ]; then \
-      npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
-      && npx --yes "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium \
-      && chmod -R a+rX /ms-playwright; \
-    fi
 
 # Non-root user (uid 10001, same as the sandbox's builder user so both can write job workspaces).
 # Docker socket access is granted at run time through the socket's group (compose `group_add`), not root.
@@ -42,12 +42,27 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin runner \
  && chown runner:runner /workspaces
 
 WORKDIR /app
-COPY package.json ./
-# No package-lock.json is committed yet (it could not be generated without registry access; see
-# docs/ai-builds/RUNNER-SETUP.md "Dependency locking"). The local default has NO runtime npm dependencies.
-# The SDK (optionalDependencies, pinned exactly) is installed only for the paid adapter.
-RUN if [ "$INSTALL_AGENT_SDK" = "true" ]; then npm install --omit=dev --no-audit --no-fund; else npm install --omit=dev --omit=optional --no-audit --no-fund; fi \
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
  && npm cache clean --force
+
+# Optional paid adapter only: the SDK + Playwright (locked) and Chromium for the Agent SDK's in-process browser skills.
+# /app/node_modules points at agent-sdk/node_modules so `import("@anthropic-ai/claude-agent-sdk")` resolves.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+# (The [n] glob lets the default build proceed while agent-sdk/package-lock.json is not committed yet.)
+COPY agent-sdk/package.json agent-sdk/package-lock.jso[n] /app/agent-sdk/
+RUN if [ "$INSTALL_AGENT_SDK" = "true" ]; then \
+      if [ ! -f /app/agent-sdk/package-lock.json ]; then \
+        echo "INSTALL_AGENT_SDK=true needs runner/agent-sdk/package-lock.json (see RUNNER-SETUP.md section 12)" >&2; exit 1; \
+      fi \
+      && npm ci --prefix /app/agent-sdk --omit=dev --no-audit --no-fund \
+      && rm -rf /app/node_modules && ln -s /app/agent-sdk/node_modules /app/node_modules \
+      && /app/agent-sdk/node_modules/.bin/playwright install --with-deps chromium \
+      && rm -rf /var/lib/apt/lists/* \
+      && chmod -R a+rX /ms-playwright \
+      && npm cache clean --force; \
+    fi
+
 COPY src ./src
 COPY skills ./skills
 COPY starters ./starters

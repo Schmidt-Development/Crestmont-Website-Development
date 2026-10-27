@@ -3,11 +3,12 @@
 // not available in this test environment, so these do NOT prove the scripts run), and the compose/proxy policy.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
-import { selectModel, usableVram } from "../windows/select-model.ts";
+import { selectModel, usableVram, nvidiaDriverVersion, nvidiaDriverTooOld, parseHardwareBytes } from "../windows/select-model.ts";
 import type { Hardware, HardwareGpu } from "../windows/select-model.ts";
-import { RUNNER_DIR, REPO_ROOT } from "./helpers.ts";
+import { RUNNER_DIR, REPO_ROOT, tmp } from "./helpers.ts";
 
 const WIN = path.join(RUNNER_DIR, "windows");
 
@@ -130,10 +131,17 @@ function lintPowerShell(src: string): string[] {
   return problems;
 }
 
-test("[AIB-RUNNER] PowerShell scripts pass a light static lint (pwsh is not installed here; this does not execute them)", () => {
-  for (const f of ["Discover-Hardware.ps1", "Install-CrestmontRunner.ps1", "Start-CrestmontRunner.ps1", "Get-RunnerHealth.ps1", "Collect-Evidence.ps1"]) {
-    const src = readFileSync(path.join(WIN, f), "utf8");
-    assert.deepEqual(lintPowerShell(src), [], f);
+test("[AIB-RUNNER] PowerShell scripts pass a light static lint and are ASCII-only (the real parse + PSScriptAnalyzer run is Test-WindowsScripts.ps1, in CI)", () => {
+  const scripts = readdirSync(WIN).filter((f) => f.endsWith(".ps1"));
+  for (const f of ["Discover-Hardware.ps1", "Install-CrestmontRunner.ps1", "Start-CrestmontRunner.ps1", "Get-RunnerHealth.ps1", "Collect-Evidence.ps1", "SquidConf.ps1", "Test-WindowsScripts.ps1"]) {
+    assert.ok(scripts.includes(f), `${f} present`);
+  }
+  for (const f of scripts) {
+    const bytes = readFileSync(path.join(WIN, f));
+    // Windows PowerShell 5.1 reads BOM-less files as ANSI: UTF-8 punctuation (e.g. an em dash, E2 80 94) becomes
+    // characters such as U+201D that PowerShell treats as a quote, which can break string parsing.
+    assert.equal(bytes.findIndex((b) => b > 127), -1, `${f} must be ASCII-only`);
+    assert.deepEqual(lintPowerShell(bytes.toString("utf8")), [], f);
   }
   assert.ok(lintPowerShell("function a { (\n }").length > 0, "lint detects imbalance");
   assert.ok(lintPowerShell("Write-Host \"build $b: x\"").length > 0, "lint detects the $name: trap");
@@ -143,6 +151,90 @@ test("[AIB-RUNNER] PowerShell scripts pass a light static lint (pwsh is not inst
   assert.match(install, /RUNNER_ALLOW_PAID_PROVIDER=false/);
   assert.match(install, /if \(-not \$Install\)/, "installs only with -Install");
   assert.match(install, /Read-Host -AsSecureString/, "secret entered hidden, never echoed");
+  assert.match(install, /ZeroFreeBSTR/, "the unmanaged copy of the secret is zeroed");
+  assert.match(install, /\. \(Join-Path \$PSScriptRoot "SquidConf\.ps1"\)/, "installer uses the tested renderer");
+  assert.match(install, /ConvertTo-SquidConf -Template \$template -PlatformHost \$PlatformHost -ExtraDomains \$ExtraEgressDomains/);
+  assert.doesNotMatch(install, /\.Replace\("__PLATFORM_HOST__"/, "no second, untested substitution");
+  assert.match(install, /sandbox\\package-lock\.json/, "installer refuses to build without the committed lockfiles");
+  assert.match(install, /OLLAMA_IMAGE=\$OllamaImage/);
+  assert.match(install, /\[string\]\$OllamaImage = "ollama\/ollama:\d+\.\d+\.\d+"/);
+});
+
+test("[AIB-RUNNER] select-model: NVIDIA driver versions in nvidia-smi and Windows driver-store form", () => {
+  assert.equal(nvidiaDriverVersion("566.36"), "566.36");
+  assert.equal(nvidiaDriverVersion("551.61"), "551.61");
+  assert.equal(nvidiaDriverVersion("31.0.15.5161"), "551.61", "Win32_VideoController form: 15.5161 -> 551.61");
+  assert.equal(nvidiaDriverVersion("32.0.15.6636"), "566.36");
+  assert.equal(nvidiaDriverVersion("31.0.15.3758"), "537.58");
+  assert.equal(nvidiaDriverVersion("30.0.14.9649"), "496.49");
+  assert.equal(nvidiaDriverVersion(""), null);
+  assert.equal(nvidiaDriverVersion("unknown"), null);
+  assert.equal(nvidiaDriverTooOld("31.0.15.5161"), false);
+  assert.equal(nvidiaDriverTooOld("31.0.15.3758"), true);
+  assert.equal(nvidiaDriverTooOld("551.52"), true);
+  assert.equal(nvidiaDriverTooOld(null), false);
+  // Before this fix the Windows form was read as major version 32 and every such machine was BLOCKED.
+  const wmi = selectModel(hw({ gpus: [{ name: "RTX 4090", vramGB: 24, driverVersion: "32.0.15.6636", source: "registry qwMemorySize" }] }));
+  assert.equal(wmi.ok, true, wmi.blockers.join(" "));
+  const old = selectModel(hw({ gpus: [{ name: "RTX 4090", vramGB: 24, driverVersion: "31.0.15.3758", source: "Win32_VideoController" }] }));
+  assert.match(old.blockers.join(" "), /537\.58 \(reported as 31\.0\.15\.3758\) .*older than 551\.61/);
+});
+
+test("[AIB-RUNNER] select-model tolerates Windows PowerShell JSON shapes: BOM, UTF-16, single objects, strings, missing sections", () => {
+  const doc = { schema: "crestmont.hardware/1", cpu: { name: "CPU", cores: "16", logicalProcessors: "32" }, memory: { totalGB: "128" },
+    gpus: { name: "RTX 4090", vendor: "NVIDIA", vramGB: "24", vramReliable: true, driverVersion: "566.36", source: "nvidia-smi" },
+    disks: { drive: "C:", freeGB: "900" }, virtualization: { wslInstalled: true }, docker: { installed: true } };
+  const json = JSON.stringify(doc);
+  const variants: [string, Buffer][] = [
+    ["utf8", Buffer.from(json, "utf8")],
+    ["utf8 BOM (Out-File -Encoding utf8 in 5.1)", Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(json, "utf8")])],
+    ["utf16le BOM (> redirection in 5.1)", Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(json, "utf16le")])],
+    ["utf16le without BOM", Buffer.from(json, "utf16le")],
+  ];
+  for (const [label, buf] of variants) {
+    const r = selectModel(parseHardwareBytes(buf));
+    assert.equal(r.tier, "C", label);
+    assert.equal(r.ok, true, `${label}: ${r.blockers.join(" ")}`);
+    assert.equal(r.jobLimits.cpus, 8, `${label}: threads parsed from a string`);
+  }
+  const be = Buffer.from(json, "utf16le"); be.swap16();
+  assert.equal(selectModel(parseHardwareBytes(Buffer.concat([Buffer.from([0xfe, 0xff]), be]))).tier, "C", "utf16be BOM");
+  assert.throws(() => parseHardwareBytes(Buffer.from("not json")), SyntaxError);
+  // Missing sections: no crash, and the verdict says what is unknown instead of guessing.
+  const bare = selectModel({ schema: "crestmont.hardware/1" } as unknown as Hardware);
+  assert.equal(bare.ok, false);
+  assert.equal(bare.tier, "insufficient");
+  assert.match(bare.blockers.join(" "), /largest free is unknown/);
+  const nullGpu = selectModel(hw({ gpus: [{ vendor: "amd", vramGB: null, vramReliable: false, source: "Win32_VideoController" }], ram: 64, threads: 16 }));
+  assert.equal(nullGpu.tier, "E", "a GPU with unknown VRAM is not counted as accelerated");
+  assert.ok(nullGpu.warnings.some((w) => /32-bit field/.test(w)));
+  // Exact tier boundaries (VRAM thresholds are model file + 4 GB headroom).
+  assert.equal(selectModel(hw({ gpus: [{ vramGB: 36 }] })).tier, "B");
+  assert.equal(selectModel(hw({ gpus: [{ vramGB: 35.9 }] })).tier, "C");
+  assert.equal(selectModel(hw({ gpus: [{ vramGB: 23 }] })).tier, "C");
+  assert.equal(selectModel(hw({ gpus: [{ vramGB: 22.9 }], ram: 32 })).tier, "D");
+  assert.equal(selectModel(hw({ gpus: [{ vramGB: 16 }], ram: 31 })).tier, "insufficient", "16 GB GPU needs 32 GB RAM for offload");
+  assert.equal(selectModel(hw({ gpus: [{ vramGB: 89 }], ram: 63 })).tier, "B", "tier A also needs 64 GB RAM");
+  assert.equal(selectModel(hw({ gpus: [], ram: 48, threads: 7 })).tier, "insufficient", "CPU-only needs 8 threads");
+  assert.equal(selectModel(hw({ gpus: [], ram: 47.9, threads: 64 })).tier, "insufficient");
+  // Job limits stay within their documented bounds on tiny and huge machines.
+  for (const [ram, threads] of [[48, 8], [2048, 256]]) {
+    const r = selectModel(hw({ gpus: [{ vramGB: 96 }], ram, threads }));
+    assert.ok(r.jobLimits.cpus >= 2 && r.jobLimits.cpus <= 8, `cpus ${r.jobLimits.cpus}`);
+    assert.ok(r.jobLimits.memoryGB >= 4 && r.jobLimits.memoryGB <= 8, `memory ${r.jobLimits.memoryGB}`);
+  }
+});
+
+test("[AIB-RUNNER] select-model CLI reads a UTF-16 hardware.json and exits 0 (ok) / 3 (not ok)", () => {
+  const dir = tmp("aib-hw-");
+  const good = path.join(dir, "good.json");
+  writeFileSync(good, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(JSON.stringify(hw({ gpus: [{ vramGB: 24 }] })), "utf16le")]));
+  const r = spawnSync(process.execPath, ["--no-warnings", path.join(WIN, "select-model.ts"), good], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).model, "qwen3-coder:30b");
+  const weak = path.join(dir, "weak.json");
+  writeFileSync(weak, JSON.stringify(hw({ gpus: [], ram: 8, threads: 4 })));
+  assert.equal(spawnSync(process.execPath, ["--no-warnings", path.join(WIN, "select-model.ts"), weak], { encoding: "utf8" }).status, 3);
 });
 
 test("[AIB-RUNNER] compose + proxy policy: no published ports, internal networks, paid AI hosts denied, installs reach only the npm registry", () => {

@@ -119,22 +119,92 @@ const round1 = (n: number) => Math.round(n * 10) / 10;
 
 export function usableVram(hw: Hardware): { totalGB: number; largestGB: number; vendor: string | null; reliable: boolean; count: number } {
   // Ollama on Windows accelerates NVIDIA and AMD GPUs (S10); Intel and others count as no acceleration.
-  const gpus = (hw.gpus ?? []).filter((g) => (g.vendor === "nvidia" || g.vendor === "amd") && typeof g.vramGB === "number" && g.vramGB > 0);
+  const gpus = normalizeHardware(hw).gpus.filter((g) => (g.vendor === "nvidia" || g.vendor === "amd") && typeof g.vramGB === "number" && g.vramGB > 0);
   const total = gpus.reduce((n, g) => n + (g.vramGB ?? 0), 0);
   const largest = gpus.reduce((n, g) => Math.max(n, g.vramGB ?? 0), 0);
   return { totalGB: round1(total), largestGB: round1(largest), vendor: gpus[0]?.vendor ?? null, reliable: gpus.every((g) => g.vramReliable), count: gpus.length };
 }
 
-function nvidiaDriverTooOld(v: string | null): boolean {
-  if (!v) return false;
-  const m = /^(\d+)\.(\d+)/.exec(v.trim());
-  if (!m) return false;
-  const major = Number(m[1]);
-  const minor = Number(m[2]);
+/**
+ * NVIDIA driver version as NVIDIA publishes it ("551.61"). nvidia-smi reports that form. Win32_VideoController (used
+ * when nvidia-smi is missing) reports the Windows driver-store form ("31.0.15.5161"): the last five digits of its last
+ * two fields are the NVIDIA version (15.5161 -> 551.61). Returns null for anything else.
+ */
+export function nvidiaDriverVersion(v: string | null | undefined): string | null {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  const win = /^\d+\.\d+\.(\d+)\.(\d{1,4})$/.exec(s);
+  if (win) {
+    const digits = (win[1] + win[2].padStart(4, "0")).slice(-5);
+    if (digits.length < 5) return null;
+    return `${Number(digits.slice(0, 3))}.${digits.slice(3)}`;
+  }
+  const nv = /^(\d{3,})\.(\d{1,2})(?:\.\d+)?$/.exec(s);
+  return nv ? `${Number(nv[1])}.${nv[2].padStart(2, "0")}` : null;
+}
+
+export function nvidiaDriverTooOld(v: string | null | undefined): boolean {
+  const n = nvidiaDriverVersion(v);
+  if (!n) return false;
+  const [major, minor] = n.split(".").map(Number);
   return major < 551 || (major === 551 && minor < 61);
 }
 
-export function selectModel(hw: Hardware): Recommendation {
+const asArray = <T>(v: unknown): T[] => (Array.isArray(v) ? v as T[] : v && typeof v === "object" ? [v as T] : []);
+const num = (v: unknown): number | null => {
+  if (v === null || v === undefined || v === "" || typeof v === "boolean") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+/**
+ * Tolerant view of a Discover-Hardware.ps1 document. Windows PowerShell 5.1's ConvertTo-Json can emit a one-element
+ * array as a bare object, numbers can arrive as strings and vendor casing varies. Missing sections stay missing, so
+ * the checks below still see "unknown" rather than a made-up value.
+ */
+export function normalizeHardware(raw: unknown): Hardware {
+  const h = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const cpu = (h.cpu && typeof h.cpu === "object" ? h.cpu : {}) as Record<string, unknown>;
+  const mem = (h.memory && typeof h.memory === "object" ? h.memory : {}) as Record<string, unknown>;
+  const vendors = ["nvidia", "amd", "intel"];
+  return {
+    ...(h as unknown as Hardware),
+    cpu: { name: String(cpu.name ?? "?"), cores: num(cpu.cores) ?? 0, logicalProcessors: num(cpu.logicalProcessors) ?? 0 },
+    memory: { ...(mem as object), totalGB: num(mem.totalGB) ?? 0 },
+    gpus: asArray<Record<string, unknown>>(h.gpus).map((g) => {
+      const vendor = String(g.vendor ?? "").toLowerCase();
+      return {
+        name: String(g.name ?? "GPU"),
+        vendor: (vendors.includes(vendor) ? vendor : "other") as HardwareGpu["vendor"],
+        vramGB: num(g.vramGB),
+        vramReliable: g.vramReliable === true,
+        driverVersion: g.driverVersion === null || g.driverVersion === undefined ? null : String(g.driverVersion),
+        source: String(g.source ?? "unknown"),
+      };
+    }),
+    disks: asArray<Record<string, unknown>>(h.disks).map((d) => {
+      const total = num(d.totalGB);
+      return { drive: String(d.drive ?? "?"), freeGB: num(d.freeGB) ?? 0, ...(total !== null ? { totalGB: total } : {}) };
+    }),
+  };
+}
+
+/**
+ * Decode hardware.json bytes: UTF-8 with or without BOM (`Out-File -Encoding utf8` in Windows PowerShell 5.1 writes a
+ * BOM) or UTF-16 (what plain `>` redirection writes in Windows PowerShell 5.1).
+ */
+export function parseHardwareBytes(buf: Uint8Array): Hardware {
+  const b = Buffer.from(buf);
+  let text: string;
+  if (b[0] === 0xff && b[1] === 0xfe) text = b.subarray(2).toString("utf16le");
+  else if (b[0] === 0xfe && b[1] === 0xff) { const sw = Buffer.from(b.subarray(2)); sw.swap16(); text = sw.toString("utf16le"); }
+  else if (b.length >= 2 && b[0] !== 0 && b[1] === 0) text = b.toString("utf16le");
+  else text = b.toString("utf8");
+  return normalizeHardware(JSON.parse(text.replace(/^﻿/, "")));
+}
+
+export function selectModel(input: Hardware): Recommendation {
+  const hw = normalizeHardware(input);
   const reasons: string[] = [];
   const warnings: string[] = [];
   const blockers: string[] = [];
@@ -146,7 +216,7 @@ export function selectModel(hw: Hardware): Recommendation {
   reasons.push(`CPU ${hw.cpu?.name ?? "?"} (${hw.cpu?.cores ?? "?"} cores / ${threads} threads), RAM ${ram} GB, accelerated GPU memory ${vram.totalGB} GB across ${vram.count} GPU(s) (largest ${vram.largestGB} GB).`);
 
   for (const g of hw.gpus ?? []) {
-    if (g.vendor === "nvidia" && nvidiaDriverTooOld(g.driverVersion)) blockers.push(`NVIDIA driver ${g.driverVersion} on ${g.name} is older than 551.61, the minimum Ollama documents for Windows (S10). Update the driver.`);
+    if (g.vendor === "nvidia" && nvidiaDriverTooOld(g.driverVersion)) blockers.push(`NVIDIA driver ${nvidiaDriverVersion(g.driverVersion)} (reported as ${g.driverVersion}) on ${g.name} is older than 551.61, the minimum Ollama documents for Windows (S10). Update the driver.`);
     if ((g.vendor === "nvidia" || g.vendor === "amd") && !g.vramReliable) warnings.push(`VRAM of ${g.name} was read from Win32_VideoController (32-bit field, caps near 4 GB); install the vendor tools (nvidia-smi ships with the NVIDIA driver) and re-run discovery for an accurate figure.`);
     if (g.vendor === "intel") warnings.push(`${g.name}: Intel GPUs are not listed as accelerated by Ollama on Windows (S10); treated as CPU-only.`);
   }
@@ -216,8 +286,7 @@ export function selectModel(hw: Hardware): Recommendation {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const file = process.argv[2];
   if (!file) { process.stderr.write("usage: node windows/select-model.ts <hardware.json>\n"); process.exit(2); }
-  const raw = readFileSync(file, "utf8").replace(/^﻿/, "");
-  const rec = selectModel(JSON.parse(raw) as Hardware);
+  const rec = selectModel(parseHardwareBytes(readFileSync(file)));
   process.stdout.write(JSON.stringify(rec, null, 2) + "\n");
   process.exit(rec.ok ? 0 : 3);
 }

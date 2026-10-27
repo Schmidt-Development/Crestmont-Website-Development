@@ -21,7 +21,8 @@ import type { QueryFn } from "./providers/claude-agent-sdk.ts";
 import { assertProviderAllowed, createProvider } from "./providers/index.ts";
 import { draftsServer, serveOneDraft } from "./drafts.ts";
 import type { DraftOutcome } from "./drafts.ts";
-import { newHealthState, startHealthServer } from "./health.ts";
+import { newHealthState, startHealthServer, recordModelProbe, recordModelError, healthText } from "./health.ts";
+import { OpenAICompatClient } from "./providers/openai-client.ts";
 import type { HealthState } from "./health.ts";
 import { RUNNER_VERSION } from "./protocol.ts";
 import { rmSync } from "node:fs";
@@ -43,6 +44,27 @@ export interface LoopDeps {
   /** Serve AI drafts when idle (null = off). */
   drafts?: { serve: () => Promise<DraftOutcome>; maxPerIdle?: number } | null;
   health?: HealthState;
+  /**
+   * Model-server readiness probe (local provider). While it fails the runner claims neither builds nor drafts, so an
+   * unreachable Ollama does not burn build attempts; it is re-checked every loop until it answers, then every
+   * `intervalMs`.
+   */
+  modelProbe?: { check: () => Promise<{ ok: boolean; error?: string }>; intervalMs?: number } | null;
+}
+
+/** Probe: the model server answers GET /models and lists the configured model. No generation, no tokens. */
+export function localModelProbe(cfg: RunnerConfig, fetchImpl?: typeof fetch): () => Promise<{ ok: boolean; error?: string }> {
+  const client = new OpenAICompatClient({ baseUrl: cfg.local.baseUrl, apiKey: cfg.local.apiKey, timeoutMs: 15_000, retries: 0, fetchImpl });
+  return async () => {
+    try {
+      const ids = await client.models(AbortSignal.timeout(15_000));
+      const m = cfg.local.model;
+      if (!ids.some((id) => id === m || id === `${m}:latest`)) return { ok: false, error: `model ${m} is not available on the model server (pull it)` };
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: `model server not reachable: ${errorMessage(err)}` };
+    }
+  };
 }
 
 export function capabilities(cfg: RunnerConfig): string[] {
@@ -61,7 +83,23 @@ export async function runLoop(d: LoopDeps): Promise<number> {
   let idleMs = d.cfg.pollMinMs;
   let jobs = 0;
   let draftsSupported = true;
+  let lastProbeAt = 0;
+  let modelOk = true;
   while (!d.shouldStop()) {
+    if (d.modelProbe && (!modelOk || Date.now() - lastProbeAt >= (d.modelProbe.intervalMs ?? 300_000))) {
+      const p = await d.modelProbe.check();
+      lastProbeAt = Date.now();
+      if (d.health) recordModelProbe(d.health, p.ok, p.error);
+      if (!p.ok && modelOk) d.logger.warn("model server not ready; not claiming builds or drafts until it answers", { error: healthText(p.error) });
+      if (p.ok && !modelOk) d.logger.info("model server reachable again; claiming resumes");
+      modelOk = p.ok;
+      if (!modelOk) {
+        if (d.once) return jobs;
+        await sleep(idleMs, d.shouldStop);
+        idleMs = Math.min(d.cfg.pollMaxMs, idleMs * 2);
+        continue;
+      }
+    }
     let claimed;
     try {
       claimed = await d.client.claim(capabilities(d.cfg));
@@ -96,12 +134,26 @@ export async function runLoop(d: LoopDeps): Promise<number> {
     idleMs = d.cfg.pollMinMs;
     jobs++;
     if (d.health) d.health.currentJob = claimed.job.id;
+    let outcome = "crashed";
+    let jobError: string | null = null;
     try {
-      await runJob(claimed.job, { cfg: d.cfg, client: d.client, queryFn: d.queryFn, manifest: d.manifest, logger: d.logger, shutdown: d.shouldStop, ...(d.jobDeps ?? {}) });
+      const summary = await runJob(claimed.job, { cfg: d.cfg, client: d.client, queryFn: d.queryFn, manifest: d.manifest, logger: d.logger, shutdown: d.shouldStop, ...(d.jobDeps ?? {}) });
+      outcome = summary.outcome;
+      jobError = summary.complete?.error ?? (summary.outcome === "lease_lost" ? "lease lost (another attempt may own the job)" : null);
     } catch (err) {
-      d.logger.error("job crashed", { jobId: claimed.job.id, error: errorMessage(err) });
+      jobError = errorMessage(err);
+      d.logger.error("job crashed", { jobId: claimed.job.id, error: jobError });
     }
-    if (d.health) { d.health.currentJob = null; d.health.jobsRun++; }
+    if (d.health) {
+      d.health.currentJob = null;
+      d.health.jobsRun++;
+      d.health.lastJobOutcome = outcome;
+      d.health.lastJobError = healthText(jobError);
+      d.health.lastJobAt = new Date().toISOString();
+      if (jobError && /local model|model server/i.test(jobError)) recordModelError(d.health, jobError);
+    }
+    // A model failure inside the build: re-check the model server before claiming again.
+    if (jobError && /local model|model server/i.test(jobError)) lastProbeAt = 0;
     if (d.once) return jobs;
   }
   return jobs;
@@ -158,9 +210,15 @@ async function main(argv: string[]): Promise<number> {
     paidProviderAllowed: cfg.allowPaidProvider, model: cfg.agentProvider === "local" ? cfg.local.model : "per job",
     aiDrafts: !!ds, preview: !!cfg.preview, projectRepos: !!cfg.repo,
   });
+  const onDraftError = (msg: string) => {
+    health.lastDraftError = healthText(msg);
+    if (/local model/i.test(msg)) recordModelError(health, msg);
+  };
   await runLoop({
     cfg, client, queryFn, manifest, logger, shouldStop: () => stopping, once: argv.includes("--once"), health,
-    drafts: ds ? { serve: () => serveOneDraft({ client, model: ds.model, modelName: ds.modelName, log: logger }) } : null,
+    drafts: ds ? { serve: () => serveOneDraft({ client, model: ds.model, modelName: ds.modelName, log: logger, onError: onDraftError }) } : null,
+    // The local provider (and local drafts) need the model server; the paid adapter's model is not ours to probe.
+    modelProbe: cfg.agentProvider === "local" ? { check: localModelProbe(cfg), intervalMs: 300_000 } : null,
   });
   logger.info("runner stopped");
   return 0;

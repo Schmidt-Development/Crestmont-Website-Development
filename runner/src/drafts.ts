@@ -26,6 +26,8 @@ export interface DraftsDeps {
   log: Logger;
   temperature?: number;
   now?: () => number;
+  /** Called with the error text when a draft fails (health reporting). */
+  onError?: (message: string) => void;
 }
 
 /** Decide whether this runner serves drafts, and with what. Returns null (with the reason logged) when it must not. */
@@ -81,6 +83,7 @@ export async function serveOneDraft(d: DraftsDeps): Promise<DraftOutcome> {
   } catch (err) {
     error = `local model request failed: ${errorMessage(err).slice(0, 300)}`;
   }
+  if (error) d.onError?.(error);
   try {
     const r = await d.client.aiComplete(job, { ...(text !== undefined ? { text } : {}), ...(error ? { error } : {}), model: d.modelName, inputTokens, outputTokens });
     log.info("AI draft completed", { ok: !error, status: r.status, inputTokens, outputTokens });

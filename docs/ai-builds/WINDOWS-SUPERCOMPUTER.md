@@ -3,7 +3,9 @@
 **Status: designed and mock-tested only.** Nothing in this document has run on the Windows machine yet. Its hardware
 is unknown to this repository, so the model is chosen by `select-model.ts` from what `Discover-Hardware.ps1`
 reports, not assumed. The first real build is the controlled validation in `LOCAL-VALIDATION.md`. Until that
-passes, do not describe local AI builds as operational.
+passes, do not describe local AI builds as operational. What has been verified off the host (lint, real Squid,
+compose networks, PowerShell parse/analysis, sandbox flags with a real Docker daemon, CI image builds) and what only
+the host can show is tabled in `LOCAL-VALIDATION.md` § "Validation status".
 
 ## What runs where
 
@@ -157,13 +159,17 @@ The installer is idempotent. It:
 3. creates `C:\CrestmontRunner\{compose,state,secrets,skills,logs,evidence}`. Inheritance is removed, and only
    SYSTEM, Administrators and your account have access. The secret is entered hidden (or `-SecretFile`), stored
    without a newline and never printed.
-4. builds `crestmont-ai-runner:1`, `crestmont-build-sandbox:1` and `crestmont-egress-proxy:1`.
+4. builds `crestmont-ai-runner:1`, `crestmont-build-sandbox:1` and `crestmont-egress-proxy:1` (pinned base image
+   tags, `npm ci` from the committed lockfiles; it stops first if `runner\sandbox\package-lock.json` is missing, see
+   `RUNNER-SETUP.md` §12). CI builds the same three images on every push.
 5. writes `state\recommendation.json` and stops with the reasons when the machine is insufficient (`-Model <tag>`
    overrides).
 6. sets Ollama's user environment (`OLLAMA_HOST=127.0.0.1:11434`, context length, parallelism, keep-alive, flash
    attention, KV cache type), restarts Ollama, verifies that it listens on loopback only, and pulls the model.
-7. writes `compose\docker-compose.yml`, `compose\proxy\squid.conf` (the allow-list with your platform host) and
-   `compose\runner.env`, which holds names, URLs and limits only. The secret is mounted from `secrets\`.
+7. writes `compose\docker-compose.yml`, `compose\proxy\squid.conf` (the allow-list with your platform host,
+   rendered by `SquidConf.ps1`, which validates every host and refuses hosted AI domains as `-ExtraEgressDomains`;
+   the same rendering is unit-tested as `egress-policy.ts`) and `compose\runner.env`, which holds names, URLs and
+   limits only. The secret is mounted from `secrets\`. `compose\.env` pins `OLLAMA_IMAGE` (`-OllamaImage`).
 8. checks that a container on the internal network can list the model through the proxy, then runs the runner's
    `--preflight` (skills, model present, sandbox image present).
 9. runs `docker compose up -d` and registers the `CrestmontRunner-Start` scheduled task at your logon.
@@ -182,7 +188,11 @@ are reference guides the agent reads, not Claude skills. Required ones still fai
   "only available on Windows with the WSL 2 backend" and NVIDIA-only (https://docs.docker.com/desktop/features/gpu/).
   The model server then sits on the internal network with no published port, and model pulls go through the proxy.
   Trade-offs: no AMD acceleration, models live in a Docker volume (`crestmont-ollama-models`) inside the WSL VM's
-  disk, the image tag must be pinned, and GPU-PV performance may differ (unmeasured).
+  disk, the image tag is pinned (`-OllamaImage`, default `ollama/ollama:0.32.0`: that GitHub release exists; the
+  Docker Hub tag was not checked from here), and GPU-PV performance may differ (unmeasured).
+- **Proxy rule for the model (either mode).** Node's `fetch` behind `HTTP_PROXY` (`NODE_USE_ENV_PROXY=1`) tunnels
+  even `http://` URLs with CONNECT, so the proxy allows CONNECT to `host.docker.internal`/`ollama` on port 11434 from
+  the runner network only. Without that rule every model call was denied (found with a real Squid locally).
 
 ## Isolation details
 
@@ -196,6 +206,8 @@ are reference guides the agent reads, not Claude skills. Required ones still fai
 | Per-command timeout via in-container `timeout -k 5`. A hung client restarts the container. | `JobSandbox.argv` |
 | Disk quota: the job directory is measured after each command and install. Over `RUNNER_JOB_DISK_MB` the phase fails. `--storage-opt size` is not used: it needs overlay2 on xfs with pquota, which Docker Desktop's VM does not provide. | `overDiskQuota` |
 | Runner: internal network only, read-only root, cap-drop ALL, all egress through the proxy (`NODE_USE_ENV_PROXY=1`) | `docker-compose.yml` |
+| Proxy: Squid as the unprivileged `proxy` user, cap-drop ALL with nothing added back, paid AI hosts denied first (`TCP_DENIED`, logged), every allow-list host validated | `proxy/Dockerfile`, `squid.conf.template`, `SquidConf.ps1` |
+| Sandbox image: no setuid/setgid binaries, no curl/wget/ssh/docker/sudo, Playwright from a lockfile | `sandbox/Dockerfile`, checked by `runner/ci/sandbox-self-check.ts` in CI |
 | Model file tools: realpath confinement to the repository; `.git`, `.claude` and runner check results protected | `providers/local-tools.ts` |
 | Audit: runner JSON logs (secrets redacted), proxy access log, checkpoints (git bundle + agent transcript), owner report with model, tokens and time | |
 
@@ -207,7 +219,16 @@ not mitigated beyond the flags above. `workers.dev` previews (if enabled) are pu
 ## Operations
 
 - **Health:** `C:\CrestmontRunner\Get-RunnerHealth.ps1` prints the container states, the runner health JSON
-  (provider, model, current job, last claim) and the Ollama version. The compose healthcheck uses the same endpoint.
+  (provider, model, current job, last claim, `modelReachable` / `modelCheckedAt` from a `GET /v1/models` probe every
+  5 minutes, `lastModelError`, `lastJobOutcome` / `lastJobError`, `lastDraftError`) and the Ollama version. Error
+  texts are truncated and pass through the log redactor (no secrets, no URL credentials or query strings). The
+  compose healthcheck uses the same endpoint; it reports unhealthy while the model server is unreachable.
+- **Model server down:** while the probe fails the runner claims neither builds nor drafts (so an Ollama outage
+  does not burn build attempts), re-probes every poll interval and resumes on its own. A model failure inside a
+  build fails that attempt honestly (no paid fallback) and forces a re-probe before the next claim.
+- **Control plane unreachable during a build:** heartbeats are retried; if none succeeds for the lease window (the
+  lease time left at claim, 30 s..10 min), the runner stops the agent and keeps the workspace without completing, as
+  for `lease_lost`, because the server may already have given the job to another attempt.
 - **Logs:** `docker compose logs runner` (JSON lines, secrets redacted), `docker compose logs egress-proxy` (one
   line per outbound request) and `%LOCALAPPDATA%\Ollama\server.log`. Docker rotates container logs (json-file,
   20 MB × 10). `logs\start.log` is trimmed to about 2000 lines.

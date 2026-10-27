@@ -1,7 +1,15 @@
-# Crestmont egress allow-list (generated from squid.conf.template by Install-CrestmontRunner.ps1).
+# Crestmont egress allow-list (generated from squid.conf.template by Install-CrestmontRunner.ps1 via SquidConf.ps1;
+# the same rendering is unit-tested in runner/windows/egress-policy.ts and parsed with `squid -k parse` in CI).
 # Placeholders: __PLATFORM_HOST__ (control plane host), __RUNNER_EXTRA_DOMAINS__ (space separated, may be
 # "none.invalid"), __OLLAMA_PULL_DOMAINS__ (only for the ollama-in-docker profile, else "none.invalid").
+# Every substituted value is validated as a host name first (no spaces or newlines, so no rule injection), and hosted
+# AI API domains are refused as extras. Keep paid_ai in sync with PAID_AI_DOMAINS in egress-policy.ts (tested).
 http_port 3128
+# Fixed name (error pages, logs): the container hostname is not resolvable on every network setup, and Squid
+# refuses to start when it cannot determine one. The image starts Squid as Debian's `proxy` user (USER proxy);
+# cache_effective_user only matters if it were started as root.
+visible_hostname crestmont-egress-proxy
+cache_effective_user proxy
 pid_filename /run/squid/squid.pid
 cache deny all
 cache_mem 8 MB
@@ -21,8 +29,12 @@ acl ollama_port port 11434
 acl CONNECT method CONNECT
 
 # Paid / hosted AI APIs: always denied, and the denial is logged (TCP_DENIED) for the validation evidence.
-acl paid_ai dstdomain .anthropic.com .claude.ai .claude.com .openai.com .mistral.ai .googleapis.com .openrouter.ai .groq.com .together.xyz .fireworks.ai
+acl paid_ai dstdomain .anthropic.com .claude.ai .claude.com .openai.com .openai.azure.com .mistral.ai .googleapis.com
+acl paid_ai dstdomain .openrouter.ai .groq.com .together.xyz .together.ai .fireworks.ai .cohere.ai .cohere.com
+acl paid_ai dstdomain .deepseek.com .x.ai .perplexity.ai .replicate.com api-inference.huggingface.co router.huggingface.co
+acl paid_ai_re dstdom_regex -i ^bedrock-runtime(-fips)?\.[a-z0-9-]+\.amazonaws\.com$
 http_access deny paid_ai
+http_access deny paid_ai_re
 
 acl npm_registry dstdomain registry.npmjs.org
 acl control_plane dstdomain __PLATFORM_HOST__
@@ -30,7 +42,11 @@ acl runner_extra dstdomain __RUNNER_EXTRA_DOMAINS__
 acl ollama_host dstdomain host.docker.internal ollama
 acl ollama_pull dstdomain __OLLAMA_PULL_DOMAINS__
 
-# TLS only through CONNECT on 443; plain HTTP only to the local model server.
+# The local model server (port 11434 on host.docker.internal / the ollama container), plain HTTP or CONNECT. CONNECT
+# is required: Node's fetch with NODE_USE_ENV_PROXY=1 (undici EnvHttpProxyAgent) tunnels http:// URLs through
+# CONNECT too, so without this rule the runner cannot reach the model (reproduced locally; see LOCAL-VALIDATION.md).
+http_access allow runner_net CONNECT ollama_host ollama_port
+# Otherwise TLS only through CONNECT on 443; plain HTTP only to the local model server.
 http_access deny CONNECT !SSL_ports
 http_access allow install_net CONNECT npm_registry
 http_access allow runner_net CONNECT control_plane

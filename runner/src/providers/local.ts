@@ -24,7 +24,8 @@ import type { DockerExecutor } from "../sandbox.ts";
 import { fenceFor, localSystemPrompt } from "../prompt.ts";
 import type { AgentProvider, PhaseRequest, PhaseResult, PhaseStatus, PrepareContext, ProviderPreflight } from "./types.ts";
 import { PaidProviderRefusedError } from "./types.ts";
-import { OpenAICompatClient } from "./openai-client.ts";
+import { OpenAICompatClient, isContextOverflow } from "./openai-client.ts";
+import { domainMatches, isPaidAiHost } from "./paid-hosts.ts";
 import type { ChatMessage, ChatToolCall } from "./openai-client.ts";
 import { TOOL_NAMES, executeTool, schemaHint, toolSpecs, validateArgs } from "./local-tools.ts";
 import { fromNativeCalls, parseTextToolCalls } from "./local-parse.ts";
@@ -53,13 +54,16 @@ export interface LocalLimits {
 
 export const DEFAULT_LIMITS: LocalLimits = { maxMalformed: 4, maxNoToolReplies: 3, loopRepeats: 3 };
 
-/** Hosts that are paid/remote inference APIs: the local provider refuses them as LOCAL_MODEL_BASE_URL. */
-const PAID_HOSTS = /(^|\.)(anthropic\.com|claude\.ai|openai\.com|ollama\.com|googleapis\.com|mistral\.ai|together\.xyz|openrouter\.ai|groq\.com|fireworks\.ai)$/i;
+/**
+ * Hosts that are paid/remote inference APIs: the local provider refuses them as LOCAL_MODEL_BASE_URL. The shared list
+ * (also the egress proxy's deny list) plus ollama.com, whose API serves Ollama Cloud models remotely.
+ */
+const isRemoteInferenceHost = (host: string): boolean => isPaidAiHost(host) || domainMatches(".ollama.com", host);
 
 export function assertLocalEndpoint(baseUrl: string, model: string): void {
   let host = "";
   try { host = new URL(baseUrl).hostname; } catch { throw new Error(`LOCAL_MODEL_BASE_URL is not a URL: ${baseUrl}`); }
-  if (PAID_HOSTS.test(host)) throw new PaidProviderRefusedError(`LOCAL_MODEL_BASE_URL points at a hosted inference API (${host}); the local provider only talks to a self-hosted model server.`);
+  if (isRemoteInferenceHost(host)) throw new PaidProviderRefusedError(`LOCAL_MODEL_BASE_URL points at a hosted inference API (${host}); the local provider only talks to a self-hosted model server.`);
   if (/(^|[:-])cloud$/i.test(model)) throw new PaidProviderRefusedError(`LOCAL_MODEL "${model}" is an Ollama cloud model (runs remotely); choose a locally pulled model.`);
 }
 
@@ -294,7 +298,8 @@ export class LocalProvider implements AgentProvider {
     this.persist();
 
     const deadline = Date.now() + req.maxWallMs;
-    const budget = Math.max(2048, cfg.contextTokens - cfg.maxOutputTokensPerCall - 512);
+    let budget = Math.max(2048, cfg.contextTokens - cfg.maxOutputTokensPerCall - 512);
+    let overflowRetries = 0;
     const toolChars = Math.max(2000, Math.min(16_000, Math.floor(cfg.contextTokens * 3.5 / 6)));
     let turns = 0;
     let malformedStreak = 0;
@@ -335,6 +340,15 @@ export class LocalProvider implements AgentProvider {
           clearTimeout(timer);
           if (stop.reason) { status = "stopped"; stoppedBy = stop.reason; break; }
           if (Date.now() >= deadline) { status = "max_time"; break; }
+          if (isContextOverflow(err) && overflowRetries < 2) {
+            // The server refused the prompt as too long for its context window: fold more history into the summary
+            // and try again with a smaller budget (bounded; the estimate is chars/3.5, so real tokenizers can differ).
+            overflowRetries++;
+            budget = Math.max(1024, Math.floor(budget * 0.6));
+            tracker.note({ kind: "note", message: `model context overflow; compacting the conversation to ~${budget} tokens and retrying` });
+            log.warn("local model context overflow; compacting and retrying", { budget, attempt: overflowRetries });
+            continue;
+          }
           status = "error";
           error = `local model request failed: ${errorMessage(err).slice(0, 400)}`;
           break;
