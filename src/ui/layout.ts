@@ -103,12 +103,12 @@ function siteFooter(ctx: AppContext): SafeHtml {
 
 export function authLayout(ctx: AppContext, meta: PageMeta, body: SafeHtml): SafeHtml {
   return html`<html lang="en">${head(ctx, { ...meta, noindex: true })}<body>${envBanner(ctx)}
-<div class="auth-shell auth-shell--split"><aside class="auth-aside" aria-label="Crestmont Website Development">
+<div class="auth-shell auth-shell--split"><main id="main" class="auth-main"><div class="auth-card card card--gold">${brandMark()}${body}</div></main>
+<aside class="auth-aside" aria-label="Crestmont Website Development">
 ${brandMark()}
 <div><div class="auth-aside__crest">${crestRing()}<img src="/assets/brand/crestmont-logo-original.png" width="232" height="213" alt=""></div>
 <p class="auth-aside__line">Your project, its approvals and its history in one place.</p></div>
-<div class="auth-aside__foot"><a href="/">Website</a><a href="/legal/privacy">Privacy</a><a href="/legal/support">Support policy</a></div></aside>
-<main id="main" class="auth-main"><div class="auth-card card card--gold">${brandMark()}${body}</div></main></div>${flashToast(ctx)}</body></html>`;
+<div class="auth-aside__foot"><a href="/">Website</a><a href="/legal/privacy">Privacy</a><a href="/legal/support">Support policy</a></div></aside></div>${flashToast(ctx)}</body></html>`;
 }
 
 /** Pages whose server-side computation takes noticeable time; navigating to them shows a skeleton (BRAND-005). */

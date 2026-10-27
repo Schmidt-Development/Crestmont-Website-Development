@@ -44,13 +44,14 @@ Golds are sampled from the logo artwork (`#E6C582`, `#D7B56F`).
 | `--line` | `#2B2925` | Default hairline |
 | `--line-2` | `#3A372F` | Emphasised hairline, input borders |
 | `--line-gold` | `#5A4B2E` | Gold hairline (selected / featured) |
+| `--line-control` | `#6A655A` | Form-control borders — ≥ 3:1 against ink-0…ink-2 (WCAG 1.4.11) |
 | `--gold-1` | `#E6C582` | Links, highlights, gold text on black |
 | `--gold-2` | `#D7B56F` | Primary fill, active rails, focus base |
 | `--gold-3` | `#A88B52` | Quiet gold rules and ornaments |
 | `--white` | `#FFFFFF` | Headings |
 | `--text` | `#ECE9E2` | Body text (15.9:1 on ink-0) |
 | `--text-2` | `#B7B1A5` | Secondary text (9.1:1) |
-| `--text-3` | `#969083` | Tertiary text (≥ 4.5:1 on every ink up to ink-3) |
+| `--text-3` | `#969083` | Tertiary text (≥ 4.8:1 on every ink, measured) |
 | `--ok` `--warn` `--bad` `--info` | `#79C795` `#E4B652` `#E8877A` `#8DB2E2` | Status — always paired with a text label |
 
 Rules: status colour is never the only signal (badges carry words). Gold text only on `--ink-0..3`.

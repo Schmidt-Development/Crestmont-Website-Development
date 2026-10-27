@@ -23,7 +23,7 @@
     btn.setAttribute("aria-expanded", String(open));
     if (target.id === "site-nav") document.body.setAttribute("data-nav-open", String(open));
     if (open && focus) {
-      const first = target.querySelector("a[aria-current='page'], a, button");
+      const first = target.querySelector("a[aria-current='page']") || target.querySelector("nav a, a, button");
       if (first) setTimeout(() => first.focus({ preventScroll: true }), 30);
     } else if (!open && focus && target.contains(document.activeElement)) btn.focus();
   };
