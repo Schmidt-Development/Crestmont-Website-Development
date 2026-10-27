@@ -179,6 +179,7 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
   const sign: Record<string, (body: string) => Promise<Record<string, string>>> = {
     "POST /api/readiness/evidence": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.evidence, b) }),
     "POST /api/readiness/deployments": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.evidence, b) }),
+    "POST /api/readiness/github-snapshot": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.evidence, b) }),
     "POST /api/readiness/release-candidates": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.evidence, b) }),
     "POST /api/webhooks/stripe": async (b) => { const t = ts(); return { "stripe-signature": `t=${t},v1=${await hmacSha256Hex(SECRETS.stripe, `${t}.${b}`)}` }; },
     "POST /api/webhooks/voice": async (b) => ({ "x-crestmont-voice-signature": await signVoiceEvent(SECRETS.voice, b) }),

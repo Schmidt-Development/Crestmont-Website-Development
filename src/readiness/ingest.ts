@@ -5,7 +5,7 @@
 import type { Db } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import { hmacSha256Hex, sha256Hex, timingSafeEqualHex } from "../lib/crypto.ts";
-import { parse, v } from "../lib/validate.ts";
+import { parse, v, ValidationError, type Check } from "../lib/validate.ts";
 import { REQUIREMENTS, type RequirementDef } from "../../requirements/inventory.ts";
 import { IMPLEMENTATION, type ImplementationRecord } from "../../requirements/status.ts";
 
@@ -27,10 +27,34 @@ const evidenceSchema = v.object({
     durationMs: v.int({ min: 0, optional: true }),
     message: v.string({ optional: true, max: 2000 }),
   }), { max: 20_000 }),
+  // READY-006: optional external response-time samples (scripts/production-checks.ts), stored in env_latency.
+  timings: optional(v.array(v.object({
+    page: v.string({ min: 1, max: 200, pattern: /^\/[A-Za-z0-9/_.-]*$/ }),
+    samples: v.int({ min: 1, max: 1000 }),
+    failed: v.int({ min: 0, max: 1000 }),
+    p50Ms: v.int({ min: 0, max: 600_000, optional: true }),
+    p95Ms: v.int({ min: 0, max: 600_000, optional: true }),
+    maxMs: v.int({ min: 0, max: 600_000, optional: true }),
+  }), { max: 50 })),
 });
 
+function optional<T>(check: Check<T>): Check<T | undefined> {
+  return ((value, path, issues) => (value === undefined || value === null ? undefined : check(value, path, issues))) as Check<T | undefined>;
+}
+
 export type EvidenceDoc = ReturnType<typeof parseEvidence>;
-export function parseEvidence(json: unknown) { return parse(evidenceSchema, json); }
+export function parseEvidence(json: unknown) {
+  const doc = parse(evidenceSchema, json);
+  const issues: string[] = [];
+  const pages = new Set<string>();
+  for (const [i, t] of (doc.timings ?? []).entries()) {
+    if (t.failed > t.samples) issues.push(`timings[${i}].failed must be ≤ samples`);
+    if (pages.has(t.page)) issues.push(`timings[${i}].page is duplicated`);
+    pages.add(t.page);
+  }
+  if (issues.length) throw new ValidationError(issues);
+  return doc;
+}
 
 export class IngestAuthError extends Error {}
 
@@ -74,6 +98,10 @@ export async function ingestEvidence(db: Db, rawBody: string): Promise<IngestRes
         `INSERT INTO test_evidence (run_id, requirement_id, test_name, outcome, duration_ms, message) VALUES (?,?,?,?,?,?)
          ON CONFLICT(run_id, requirement_id, test_name) DO NOTHING`,
       ).bind(doc.runId, r.requirementId, r.testName, r.outcome, r.durationMs ?? null, r.message ?? null)),
+      ...(doc.timings ?? []).map((t) => db.prepare(
+        `INSERT INTO env_latency (run_id, environment, page, samples, failed_samples, p50_ms, p95_ms, max_ms, measured_at) VALUES (?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(run_id, page) DO NOTHING`,
+      ).bind(doc.runId, doc.environment, t.page, t.samples, t.failed, t.p50Ms ?? null, t.p95Ms ?? null, t.maxMs ?? null, doc.finishedAt)),
     ];
     await db.batch(stmts); // atomic in D1
     await recordIngestion(db, doc.source, attemptAt, unknown.length ? `Unknown requirement ids: ${unknown.join(", ")}` : null, true);

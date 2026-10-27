@@ -12,7 +12,7 @@ import { rateLimit, securityEvent } from "../services/security.ts";
 export const PREVIEW_COOKIE = "cm_preview";
 const PASS_TTL_S = 12 * 3600;
 
-const EXEMPT = [/^\/api\/health$/, /^\/api\/webhooks\//, /^\/api\/builds\/runner\//, /^\/api\/readiness\/(evidence|deployments|release-candidates|release-authorization|health)$/, /^\/assets\//];
+const EXEMPT = [/^\/api\/health$/, /^\/api\/webhooks\//, /^\/api\/builds\/runner\//, /^\/api\/readiness\/(evidence|deployments|release-candidates|release-authorization|health|github-snapshot)$/, /^\/assets\//];
 
 /**
  * Never in production. Required (fail closed even without a password) when the deployment sets

@@ -14,6 +14,7 @@ import { can, STAFF_ROLES, type Permission } from "../domain/authz.ts";
 import { recordAppError } from "../services/monitoring.ts";
 import { rateLimit, securityEvent } from "../services/security.ts";
 import { previewGate } from "./preview-gate.ts";
+import { recordRequestMetric } from "../services/env-metrics.ts";
 
 let router: Router | null = null;
 function getRouter(): Router {
@@ -113,11 +114,27 @@ export function requireCustomerOrg(ctx: AppContext): { organizationId: string; o
 const STATIC_TYPES: Record<string, string> = { css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8", png: "image/png", jpg: "image/jpeg", webp: "image/webp", svg: "image/svg+xml", ico: "image/x-icon", txt: "text/plain" };
 export const staticContentType = (path: string) => STATIC_TYPES[path.split(".").pop() ?? ""] ?? "application/octet-stream";
 
-export async function handle(req: Request, env: Env): Promise<Response> {
+/** Cloudflare's ExecutionContext (only waitUntil is used). Absent in tests and the dev server. */
+export interface ExecLike { waitUntil(p: Promise<unknown>): void }
+
+export async function handle(req: Request, env: Env, exec?: ExecLike): Promise<Response> {
   const url = new URL(req.url);
   if (url.pathname.startsWith("/assets/") && env.ASSETS) return env.ASSETS.fetch(req);
   const gated = await previewGate(req, env);
   if (gated) return gated;
+  // READY-006: per-environment hourly error-rate / duration buckets (src/services/env-metrics.ts).
+  // One UPSERT per request, after the response on Cloudflare (waitUntil); no path, id or user is stored.
+  const started = Date.now();
+  const mark = { unhandled: false };
+  const res = await dispatch(req, env, url, mark);
+  if (env.ENV_METRICS !== "off") {
+    const write = recordRequestMetric(env.DB, { environment: env.ENVIRONMENT, pathname: url.pathname, status: res.status, durationMs: Date.now() - started, unhandled: mark.unhandled, at: env.overrides?.now?.() ?? new Date() });
+    if (exec && typeof exec.waitUntil === "function") exec.waitUntil(write); else await write;
+  }
+  return res;
+}
+
+async function dispatch(req: Request, env: Env, url: URL, mark: { unhandled: boolean }): Promise<Response> {
   let ctx: AppContext | null = null;
   try {
     ctx = await buildContext(req, env);
@@ -145,6 +162,7 @@ export async function handle(req: Request, env: Env): Promise<Response> {
     if (status && status >= 400 && status < 500) {
       return isApi ? jsonResponse(ctx, status, { error: (err as Error).message }) : htmlError(ctx, req, env, status, status === 403 ? "Access denied" : "Request could not be completed", (err as Error).message);
     }
+    mark.unhandled = true;
     await recordAppError(env.DB, { path: url.pathname, method: req.method, message: (err as Error).message, stack: (err as Error).stack, environment: env.ENVIRONMENT });
     console.error(JSON.stringify({ level: "error", path: url.pathname, message: (err as Error).message, stack: (err as Error).stack?.split("\n").slice(0, 4).join(" | ") }));
     return isApi ? jsonResponse(ctx, 500, { error: "Internal error" }) : htmlError(ctx, req, env, 500, "Something went wrong", "The error has been logged. Please try again shortly.");
