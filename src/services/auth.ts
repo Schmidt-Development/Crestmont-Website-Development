@@ -141,7 +141,8 @@ export async function login(db: Db, emailRaw: string, password: string, meta: { 
   return { status: "ok", sessionToken: token, userId: u.id, mfaRequired: staff || !!u.totp_secret, maxAge };
 }
 
-export async function loadSession(db: Db, token: string | undefined): Promise<{ user: SessionUser; actor: Actor; sessionId: string; mfaVerified: boolean } | null> {
+/** `passive`: background requests (live polling) must not count as activity, or an idle tab would never time out (F-07). */
+export async function loadSession(db: Db, token: string | undefined, opts: { passive?: boolean } = {}): Promise<{ user: SessionUser; actor: Actor; sessionId: string; mfaVerified: boolean } | null> {
   if (!token || !/^[0-9a-f]{64}$/.test(token)) return null;
   const s = await db.prepare(
     `SELECT s.id, s.user_id, s.mfa_verified, s.expires_at, s.revoked_at, s.created_at, s.last_seen_at, u.email, u.display_name, u.email_verified_at, u.totp_secret, u.disabled_at
@@ -158,7 +159,7 @@ export async function loadSession(db: Db, token: string | undefined): Promise<{ 
     await db.prepare(`UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`).bind(nowIso(), s.id).run();
     return null;
   }
-  if (Date.now() - lastSeen > LAST_SEEN_WRITE_INTERVAL_MS) {
+  if (!opts.passive && Date.now() - lastSeen > LAST_SEEN_WRITE_INTERVAL_MS) {
     await db.prepare(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`).bind(nowIso(), s.id).run();
   }
   const mfaVerified = !!s.mfa_verified;

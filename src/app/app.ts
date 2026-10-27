@@ -12,6 +12,7 @@ import { errorPage } from "../ui/layout.ts";
 import { registerAll } from "../routes/index.ts";
 import { can, STAFF_ROLES, type Permission } from "../domain/authz.ts";
 import { recordAppError } from "../services/monitoring.ts";
+import { rateLimit, securityEvent } from "../services/security.ts";
 import { previewGate } from "./preview-gate.ts";
 
 let router: Router | null = null;
@@ -49,14 +50,14 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
     ctx.csrfToken = randomToken(16);
     ctx.setCookies.push(cookie("cm_csrf", ctx.csrfToken, { secure: isSecure(ctx), httpOnly: true, sameSite: "Strict", maxAge: 60 * 60 * 24 }));
   }
-  if (cookies.cm_flash) {
+  if (cookies.cm_flash && !url.pathname.startsWith("/live/")) {
     try {
       const f = JSON.parse(cookies.cm_flash);
       if (f && ["success", "error", "info"].includes(f.kind) && typeof f.text === "string") ctx.flash = { kind: f.kind, text: f.text.slice(0, 300) };
     } catch { /* ignore */ }
     ctx.setCookies.push(cookie("cm_flash", "", { maxAge: 0, secure: isSecure(ctx) }));
   }
-  const session = await loadSession(env.DB, cookies.cm_session);
+  const session = await loadSession(env.DB, cookies.cm_session, { passive: url.pathname.startsWith("/live/") });
   if (session) {
     ctx.user = session.user; ctx.actor = session.actor; ctx.sessionId = session.sessionId; ctx.sessionMfaVerified = session.mfaVerified;
   } else if (env.resolveActor) {
@@ -67,6 +68,23 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
     for (const r of rows) ctx.settings[r.key] = r.value;
   } catch { /* table may not exist in legacy test databases */ }
   return ctx;
+}
+
+// ── Anti-automation on authenticated business actions (ASVS V11, finding F-15) ──
+// Per signed-in user: at most ACTIONS_PER_ROUTE submissions of the same form route and ACTIONS_TOTAL
+// submissions overall per window. Far above what a person does by hand; stops scripted abuse of
+// business actions (refund requests, tickets, uploads, share links, messages). On by default outside
+// development (ACTION_RATE_LIMIT = "off" disables, "on" enables in development).
+export const ACTION_WINDOW_S = 300, ACTIONS_PER_ROUTE = 60, ACTIONS_TOTAL = 300;
+async function limitActions(ctx: AppContext, env: Env, pattern: string): Promise<void> {
+  const mode = env.ACTION_RATE_LIMIT ?? (env.ENVIRONMENT === "development" ? "off" : "on");
+  if (mode !== "on" || !ctx.user) return;
+  const perRoute = await rateLimit(ctx.db, `act:${ctx.user.id}:${pattern}`, ACTIONS_PER_ROUTE, ACTION_WINDOW_S);
+  const total = await rateLimit(ctx.db, `act:${ctx.user.id}`, ACTIONS_TOTAL, ACTION_WINDOW_S);
+  if (!perRoute.allowed || !total.allowed) {
+    await securityEvent(ctx.db, "rate_limited", { userId: ctx.user.id, ip: ctx.ip, detail: `actions ${pattern}` });
+    throw new HttpError(429, "Too many actions in a short time. Wait a few minutes and try again.");
+  }
 }
 
 // ── Guards used by route modules ──
@@ -111,6 +129,7 @@ export async function handle(req: Request, env: Env): Promise<Response> {
     // Every state-changing browser route is CSRF-protected centrally. /api/* routes authenticate
     // with signatures (webhooks, CI evidence) or are JSON-only and never accept cookies for writes.
     if (req.method !== "GET" && req.method !== "HEAD" && !url.pathname.startsWith("/api/")) await assertCsrf(ctx);
+    if (req.method === "POST" && ctx.user && !url.pathname.startsWith("/api/")) await limitActions(ctx, env, match.pattern);
     return await match.handler(ctx, match.params);
   } catch (err) {
     const isApi = url.pathname.startsWith("/api/");

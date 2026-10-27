@@ -34,4 +34,7 @@ export const BACKEND: Record<string, ImplementationRecord> = {
   "PORTAL-004": { status: "in_progress", owner: "engineering",
     location: "src/services/files.ts + portal/staff file routes (upload, download, preview, replace, folders, soft delete; tenant-checked, MFA-gated, audited downloads) + src/services/share-links.ts expiring hashed share links for external recipients (/files/:id/share, /share/:token; ≤ 7 days, revocable, rate-limited, audited); tests/security-tenancy.test.ts covers cross-customer file access",
     missing: "no malware scanning service (files stay 'Not yet scanned', ASVS F-02); R2 storage on staging depends on R2 being enabled on the Cloudflare account (the deploy disables uploads honestly otherwise)" },
+  "PORTAL-005": { status: "in_progress", owner: "engineering",
+    location: "src/services/messages.ts (project + general conversations, attachments, read status, internal notes, in-app + email notifications) + live unread counts without reload (GET /live/unread, src/routes/live.ts; public/assets/app.js passive polling that never extends the session idle timer; sidebar badges and a 'new messages — refresh' notice); tests/live-and-limits.test.ts",
+    missing: "notification email delivery depends on Resend (BLK-005; development outbox only)" },
 };

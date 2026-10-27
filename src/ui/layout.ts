@@ -97,7 +97,7 @@ export function appLayout(ctx: AppContext, opts: { title: string; nav: NavGroup[
   const items = g.items.filter(visible);
   if (!items.length) return html``;
   return html`<div class="side-group"><div class="side-group__label">${g.label}</div>${items.map((i) => html`<a class="side-link" href="${safeUrl(i.href)}"${current(i.href) ? html` aria-current="page"` : ""}${SLOW_PATHS.some((p) => i.href.startsWith(p)) ? html` data-slow` : ""}><span>${i.label}</span>${i.count ? html`<span class="badge badge--gold">${i.count}</span>` : ""}</a>`)}</div>`;
-})}</nav></aside>
+})}</nav>${ctx.user ? html`<div class="live-status" data-live-root role="status" aria-live="polite" hidden></div>` : ""}</aside>
 <div class="app-main"><div class="topbar"><button class="nav-toggle" style="display:inline-flex" type="button" data-toggle="app-nav" aria-controls="app-nav" aria-expanded="false">Menu</button>
 <span class="faint">${opts.area}</span>
 <span class="who">${ctx.user?.displayName ?? ""} · <a href="/account">Account</a></span>

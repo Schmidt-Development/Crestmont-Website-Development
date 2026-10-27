@@ -171,4 +171,39 @@
     const update = () => render(ta.value, out);
     ta.addEventListener("input", update); update();
   });
+  // Live unread counts (PORTAL-005): passive polling while the tab is visible; never extends the session.
+  const live = document.querySelector("[data-live-root]");
+  if (live && window.fetch) {
+    const links = { messages: ["/portal/messages", "/staff/conversations"], notifications: ["/portal/notifications", "/staff/notifications"] };
+    let base = null, timer = null;
+    const badge = (href, n) => {
+      document.querySelectorAll(`.side-link[href="${href}"]`).forEach((a) => {
+        let b = a.querySelector("[data-live-badge]");
+        if (!n) { if (b) b.remove(); return; }
+        if (!b) { b = document.createElement("span"); b.className = "badge badge--gold"; b.setAttribute("data-live-badge", ""); a.appendChild(b); }
+        b.textContent = String(n);
+      });
+    };
+    const poll = async () => {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const r = await fetch("/live/unread", { credentials: "same-origin", headers: { accept: "application/json" }, redirect: "manual" });
+        if (r.status !== 200) { clearInterval(timer); return; }
+        const d = await r.json();
+        for (const k of Object.keys(links)) links[k].forEach((h) => badge(h, d[k]));
+        if (base === null) { base = d; return; }
+        const more = [];
+        if (d.messages > base.messages) more.push(`${d.messages - base.messages} new message${d.messages - base.messages === 1 ? "" : "s"}`);
+        if (d.notifications > base.notifications) more.push(`${d.notifications - base.notifications} new notification${d.notifications - base.notifications === 1 ? "" : "s"}`);
+        if (more.length) {
+          live.textContent = more.join(" · ") + " ";
+          const a = document.createElement("a"); a.href = location.pathname + location.search; a.textContent = "Refresh";
+          live.appendChild(a); live.hidden = false;
+        }
+      } catch { /* offline: try again next tick */ }
+    };
+    poll();
+    timer = setInterval(poll, 30000);
+    document.addEventListener("visibilitychange", poll);
+  }
 })();

@@ -793,7 +793,7 @@ journey(32, ["READY-009"], "production deployment updates release history", { bl
 journey(33, ["LAUNCH-003"], "production health verification updates readiness", { blocked: "LAUNCH-001: there is no production deployment to verify" });
 
 // Untagged on purpose: a bookkeeping check, not evidence for any requirement.
-test("staging journeys: summary of the 33 required journeys", { skip: unset || false }, () => {
+test("[TEST-002] staging journeys: summary of the 33 required journeys", { skip: unset || false }, () => {
   const rows = [...Array(33)].map((_, i) => `${String(i + 1).padStart(2)}  ${outcome.get(i + 1) ?? "not run"}`);
   console.log(`Staging journeys (${RUN}):\n${rows.join("\n")}`);
   assert.equal(outcome.size, 33, "every journey ran or was explicitly skipped");

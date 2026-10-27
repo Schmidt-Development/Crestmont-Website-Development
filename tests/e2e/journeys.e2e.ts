@@ -562,6 +562,26 @@ step("[PM-006] release readiness panel gates deployment: customer launch approva
 
 step("[PORTAL-010] PM publishes the handoff; the customer reviews it and records final acceptance, completing the project", async () => {
   const p = pm.page, c = customer.page;
+  // Closure checklist (PM-007): every task must be done before the project can complete. The developer
+  // finishes the remaining work (e.g. the task created by the paid change order) through the task page.
+  const open = srv.db.prepare(`SELECT id FROM tasks WHERE project_id = ? AND status <> 'done'`).all(projectId) as { id: string }[];
+  for (const t of open) {
+    const tp = srv.db.prepare(`SELECT COUNT(*) AS n FROM assignments WHERE subject_type = 'task' AND subject_id = ? AND user_id = ? AND ended_at IS NULL`).get(t.id, dev.user.id) as { n: number };
+    const actorPage = tp.n ? dev.page : p;
+    await actorPage.goto(`${srv.base}/staff/tasks/${t.id}`);
+    await actorPage.selectOption("#f-status", "done");
+    await nav(actorPage, btn(actorPage, "Update status"));
+    assert.match(await text(actorPage), /Done/i);
+  }
+  // …and the PM delivers every outstanding revision request (closure check "Revision requests delivered").
+  const revs = srv.db.prepare(`SELECT id FROM revisions WHERE project_id = ? AND status IN ('submitted','in_progress')`).all(projectId) as { id: string }[];
+  for (const r of revs) {
+    await p.goto(`${srv.base}/staff/projects/${projectId}?tab=revisions`);
+    const f = p.locator(`form[action="/staff/revisions/${r.id}/status"]`);
+    await f.locator(`#rn-${r.id}`).fill("Delivered in the final build.");
+    await nav(p, f.getByRole("button", { name: "Mark delivered" }));
+  }
+  assert.equal((srv.db.prepare(`SELECT COUNT(*) AS n FROM revisions WHERE project_id = ? AND status IN ('submitted','in_progress')`).get(projectId) as { n: number }).n, 0);
   await p.goto(`${srv.base}/staff/projects/${projectId}?tab=handoff`);
   assert.equal(await p.locator("#f-website_url").inputValue(), "https://harbor-coffee-e2e.example");
   await p.fill("#f-documentation", "Editing guide for menu items, prices and loyalty rewards.");

@@ -211,6 +211,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /portal/team/members/:userId/remove": cust({ userId: "member" }, act("customer.member_removed"), { admin: true }),
   "POST /portal/team/invitations/:id/revoke": cust(P("customerInvitation"), act("customer.invitation_revoked"), { admin: true }),
   "GET /portal/notifications": cust(),
+  "GET /live/unread": session(),
   "POST /portal/notifications/:id/read": cust(P("notification"), exempt("marks one of the caller's own notifications as read (scoped to the user; others' ids are 404)")),
   "GET /portal/maintenance": cust(),
 

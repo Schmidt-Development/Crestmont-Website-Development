@@ -27,6 +27,8 @@ export interface Env {
   STAGING_ACCESS_PASSWORD?: string;
   /** "required" on the deployed staging Worker: the preview gate stays locked when no password is set. */
   PREVIEW_GATE?: string;
+  /** "on" | "off": per-user limits on authenticated form submissions (default on outside development). ASVS F-15. */
+  ACTION_RATE_LIMIT?: string;
   /** "on" | "off": breached-password check (default on outside development). ASVS F-06. */
   PASSWORD_BREACH_CHECK?: string;
   /** Resend webhook signing secret (whsec_…), verifies Svix signatures. EMAIL-003. */

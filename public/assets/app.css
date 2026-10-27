@@ -453,3 +453,7 @@ dialog.drawer { position: fixed; left: auto; right: 0; top: 0; bottom: 0; margin
 .kanban__item .kanban__card { padding-right: 5.5rem; }
 .kanban__quick { position: absolute; top: var(--s-2); right: var(--s-2); display: inline-flex; align-items: center; min-height: 34px; padding: 0 var(--s-2); font-size: var(--fs-xs); color: var(--gold-1); text-decoration: none; border: 1px solid var(--line); border-radius: var(--radius); background: var(--ink-1); }
 .kanban__quick:hover { border-color: var(--line-gold); color: var(--white); }
+
+/* Live unread notice (PORTAL-005) */
+.live-status { margin: var(--s-3) var(--s-2) 0; padding: .6rem .75rem; border: 1px solid var(--line-gold); border-radius: var(--radius); background: var(--ink-2); color: var(--text); font-size: var(--fs-xs); }
+.live-status a { color: var(--gold-1); margin-left: .25rem; }
