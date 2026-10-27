@@ -596,7 +596,7 @@ ${req.kind === "final_acceptance" ? html`<p><a href="/portal/projects/${proj.id}
     const kind = str(f, "kind") as P.CustomerApprovalKind;
     const decision = str(f, "decision") === "approved" ? "approved" : "rejected";
     return orRerender((errs, st) => approvalsPage(ctx, org, p.id, errs, st), async () => {
-      if (!(P.CUSTOMER_APPROVAL_KINDS as readonly string[]).includes(kind)) throw new HttpError(422, "Unknown approval type.");
+      // recordCustomerApproval authorizes (customer.approve) BEFORE validating the approval kind.
       await P.recordCustomerApproval(ctx, ctx.actor!, { organizationId: org.organizationId, projectId: p.id, kind, decision, notes: str(f, "notes"), userId: ctx.user!.id, subjectId: str(f, "subject_id") || null });
       return redirect(ctx, kind === "final_acceptance" ? `/portal/projects/${p.id}/handoff` : `/portal/projects/${p.id}/approvals`, { kind: "success", text: `${P.APPROVAL_LABELS[kind]} ${decision}.` });
     });

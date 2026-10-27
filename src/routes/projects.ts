@@ -495,6 +495,8 @@ ${input({ name: "description", label: "Description", required: true, maxlength: 
   });
   r.post("/staff/revisions/:id/status", async (ctx, p) => {
     requireStaff(ctx, "delivery.access");
+    // Authorize before validating input (record-level visibility is checked again in updateRevisionStatus).
+    if (!can(ctx.actor!, "project.coordinate") && !can(ctx.actor!, "task.update_assigned")) throw new HttpError(403, "You cannot update revisions.");
     const f = await ctx.form();
     const rev = await ctx.db.prepare(`SELECT project_id FROM revisions WHERE id = ?`).bind(p.id).first<{ project_id: string }>();
     if (!rev) throw new HttpError(404, "Revision not found");

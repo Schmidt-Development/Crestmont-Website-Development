@@ -6,9 +6,10 @@ import { HttpError, jsonResponse, securityHeaders } from "../app/http.ts";
 import { captureLead } from "../services/leads.ts";
 import { ingestEvidence, verifyEvidenceSignature, IngestAuthError } from "../readiness/ingest.ts";
 import { buildReport, loadReadinessInput, requirementsCsv } from "../readiness/report.ts";
-import { verifyStripeSignature, recordStripeEvent, WebhookSignatureError, type StripeEvent } from "../domain/stripe-webhook.ts";
+import { verifyStripeSignature, recordStripeEvent, isStripeEventEnvelope, WebhookSignatureError, type StripeEvent } from "../domain/stripe-webhook.ts";
 import { processStripeEvent } from "../services/payments.ts";
 import { can } from "../domain/authz.ts";
+import { audit } from "../services/security.ts";
 
 const MAX_BODY = 1_000_000;
 export async function readBody(req: Request): Promise<string> {
@@ -40,6 +41,7 @@ export function register(r: Router) {
   r.post("/api/leads", async (ctx) => {
     const raw = await readBody(ctx.req);
     const body = JSON.parse(raw) as Record<string, unknown>;
+    if (!body || typeof body !== "object" || Array.isArray(body)) return jsonResponse(ctx, 400, { error: "Body must be a JSON object" });
     if (!(await verifyTurnstile(ctx, body.turnstileToken))) return jsonResponse(ctx, 400, { error: "Bot verification failed" });
     const { leadId } = await captureLead(ctx.db, body, { ip: ctx.ip ?? undefined });
     return jsonResponse(ctx, 201, { leadId });
@@ -65,6 +67,7 @@ export function register(r: Router) {
       throw e;
     }
     const evt = JSON.parse(raw) as StripeEvent;
+    if (!isStripeEventEnvelope(evt)) return jsonResponse(ctx, 400, { error: "Malformed event" });
     const outcome = await recordStripeEvent(ctx.db, evt, raw);
     if (outcome === "new") await processStripeEvent(ctx, evt);
     return jsonResponse(ctx, 200, { received: true, duplicate: outcome === "duplicate" });
@@ -75,6 +78,7 @@ export function register(r: Router) {
     if (!can(ctx.actor, "readiness.read")) return jsonResponse(ctx, 403, { error: "Forbidden" });
     const report = await buildReport(await loadReadinessInput(ctx.db));
     if (csv) {
+      await audit(ctx.db, { actorUserId: ctx.actor.userId ?? null, actorKind: ctx.actor.kind === "user" ? "user" : "system", action: "readiness.exported", subjectType: "readiness_report", details: { format: "requirements_csv", via: "api" } });
       return new Response(requirementsCsv(report), { headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="crestmont-readiness-${report.generatedAt.slice(0, 10)}.csv"`, ...securityHeaders("api") } });
     }
     return jsonResponse(ctx, 200, report);

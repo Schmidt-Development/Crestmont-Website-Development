@@ -144,6 +144,8 @@ export function register(r: Router) {
   });
   r.post("/mfa/setup", async (ctx) => {
     requireUser(ctx);
+    // Same rule as GET: replacing an enrolled authenticator needs a session that already passed MFA.
+    if (ctx.user!.mfaEnabled && !ctx.sessionMfaVerified) return redirect(ctx, "/mfa");
     const f = await ctx.form();
     try {
       await auth.confirmTotpEnrollment(ctx.db, ctx.user!.id, ctx.sessionId!, str(f, "code").replace(/\s/g, ""));
@@ -231,6 +233,7 @@ ${table(sessions, [
   });
   r.post("/account/password", async (ctx) => {
     requireUser(ctx);
+    if (!ctx.sessionMfaVerified) throw new HttpError(401, "MFA_REQUIRED");
     const f = await ctx.form();
     try {
       await auth.changePassword(ctx.db, ctx.user!.id, String(f.get("current") ?? ""), String(f.get("next") ?? ""), ctx.sessionId!);
@@ -243,6 +246,7 @@ ${table(sessions, [
   });
   r.post("/account/sessions/:id/revoke", async (ctx, p) => {
     requireUser(ctx);
+    if (!ctx.sessionMfaVerified) throw new HttpError(401, "MFA_REQUIRED");
     const own = await ctx.db.prepare(`SELECT id FROM sessions WHERE id = ? AND user_id = ?`).bind(p.id, ctx.user!.id).first();
     if (!own) throw new HttpError(404, "Session not found");
     await auth.revokeSession(ctx.db, p.id, ctx.user!.id);
@@ -250,6 +254,7 @@ ${table(sessions, [
   });
   r.post("/account/sessions/revoke-others", async (ctx) => {
     requireUser(ctx);
+    if (!ctx.sessionMfaVerified) throw new HttpError(401, "MFA_REQUIRED");
     await auth.revokeAllSessions(ctx.db, ctx.user!.id, ctx.sessionId, ctx.user!.id);
     return redirect(ctx, "/account", { kind: "success", text: "All other sessions were signed out." });
   });

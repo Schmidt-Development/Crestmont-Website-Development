@@ -505,7 +505,9 @@ export function register(r: Router): void {
   r.get("/staff/crm/leads/:id/quick", (ctx, p) => leadQuickView(ctx, p.id));
   r.post("/staff/crm/leads/:id/stage", async (ctx, p) => {
     requireStaff(ctx, "crm.access");
-    await crm.getLead(ctx.db, ctx.actor!, p.id);
+    const lead = await crm.getLead(ctx.db, ctx.actor!, p.id);
+    // Authorize before validating input: callers who cannot write this lead get 403 whatever they send.
+    if (!can(ctx.actor!, "lead.write_all") && !(can(ctx.actor!, "lead.write_assigned") && lead.owner_user_id === ctx.actor!.userId)) throw new HttpError(403, "This lead is not assigned to you.");
     const f = await ctx.form();
     const to = str(f, "to") as LeadStage;
     if (!(LEAD_STAGES as readonly string[]).includes(to)) return leadDetail(ctx, p.id, ["Choose a stage"], 422);

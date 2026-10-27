@@ -107,7 +107,8 @@ export async function moveFile(db: Db, organizationId: string, id: string, folde
  *  - other staff with delivery/support access who are assigned to the file's project (PM, project or task assignment).
  */
 export async function canReadFile(ctx: AppContext, f: FileRow): Promise<boolean> {
-  if (!ctx.user || !ctx.actor || f.deleted_at) return false;
+  // A session that has not completed MFA (where the account requires it) reads nothing, customer or staff.
+  if (!ctx.user || !ctx.actor || f.deleted_at || !ctx.sessionMfaVerified) return false;
   const customerOrgs = ctx.user.memberships.filter((m) => !(STAFF_ROLES as readonly string[]).includes(m.role)).map((m) => m.organizationId);
   if (customerOrgs.includes(f.organization_id)) return true;
   if (!ctx.user.isStaff || !ctx.sessionMfaVerified) return false;
@@ -125,6 +126,7 @@ export async function canReadFile(ctx: AppContext, f: FileRow): Promise<boolean>
 /** Streams a file after the access check; audits every download/preview. */
 export async function serveFile(ctx: AppContext, id: string, inline: boolean): Promise<Response> {
   if (!ctx.user) throw new HttpError(401, "Please sign in.");
+  if (!ctx.sessionMfaVerified) throw new HttpError(401, "MFA_REQUIRED");
   const f = await getFile(ctx.db, id);
   // Same response for "missing" and "not yours" so file ids cannot be probed across tenants.
   if (!f || !(await canReadFile(ctx, f))) {

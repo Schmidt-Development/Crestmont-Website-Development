@@ -245,7 +245,9 @@ export function register(r: Router): void {
   r.post("/portal/billing/manage", async (ctx) => {
     const org = requireCustomerOrg(ctx);
     if (!can(ctx.actor!, "customer.billing", { organizationId: org.organizationId })) throw new HttpError(403, "Only an account administrator can manage payment methods.");
-    return stripeRedirect(ctx, await billingPortalUrl(ctx, org.organizationId));
+    const url = await billingPortalUrl(ctx, org.organizationId);
+    await audit(ctx.db, { actorUserId: ctx.user!.id, action: "billing.portal_opened", subjectType: "organization", subjectId: org.organizationId, organizationId: org.organizationId, ip: ctx.ip });
+    return stripeRedirect(ctx, url);
   });
   r.post("/portal/billing/refund-request", async (ctx) => {
     const org = requireCustomerOrg(ctx);
