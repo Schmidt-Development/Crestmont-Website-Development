@@ -2,7 +2,7 @@
 // -> agent config + skills -> plan/build/verify phases with heartbeats, checkpoints and caps -> runner checks ->
 // preview -> commit/push -> final checkpoint -> complete. Lease loss stops everything without completing.
 
-import { writeFileSync, mkdirSync, readdirSync, readFileSync, existsSync } from "node:fs";
+import { writeFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { ControlPlaneClient } from "./control-plane.ts";
 import { LeaseLostError } from "./control-plane.ts";
@@ -497,12 +497,4 @@ async function deployPreview(cfg: RunnerConfig, ws: Workspace, job: Job, checkEn
   const workers = out.match(/https:\/\/[A-Za-z0-9.-]+\.workers\.dev\S*/g);
   const url = explicit?.[1] ?? workers?.[workers.length - 1] ?? null;
   return url ? { url, note: "" } : { url: null, note: "preview deploy succeeded but printed no preview URL (print PREVIEW_URL=https://… )" };
-}
-
-export function workflowFor(job: Pick<Job, "strategy">): Workflow {
-  return job.strategy === "standard" ? "standard-brochure" : "custom-app";
-}
-
-export function hasFile(repo: string, rel: string): boolean {
-  return existsSync(path.join(repo, rel));
 }

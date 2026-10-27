@@ -176,6 +176,8 @@ export function buildAgentEnv(cfg: Pick<RunnerConfig, "agentPath" | "anthropicAp
     GIT_TERMINAL_PROMPT: "0",
     DISABLE_AUTOUPDATER: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    // Auto memory loads regardless of settingSources (https://code.claude.com/docs/en/agent-sdk/hosting#multi-tenant-isolation).
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
     CLAUDE_AGENT_SDK_CLIENT_APP: "crestmont-ai-builds-runner",
     ANTHROPIC_API_KEY: cfg.anthropicApiKey,
   };

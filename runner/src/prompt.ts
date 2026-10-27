@@ -119,7 +119,7 @@ export function systemPromptAppend(job: Job): string {
   ].join("\n");
 }
 
-export function phasePrompt(job: Job, phase: Phase, ctx: { starter: string | null; resumed: boolean; previousNote: string | null; failedChecks?: string[] }): string {
+export function phasePrompt(job: Job, phase: Phase, ctx: { starter: string | null; resumed: boolean; previousNote: string | null }): string {
   const lines: string[] = [];
   if (ctx.resumed && phase !== "repair") {
     lines.push("This build is continuing from an earlier attempt. Inspect the repository and .crestmont/ status files first and continue from where the work stopped; do not start over.");
