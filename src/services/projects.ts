@@ -12,6 +12,7 @@ import {
 } from "../domain/project.ts";
 import { TransitionError } from "../domain/state-machine.ts";
 import { issueMilestoneInvoice } from "./commerce.ts";
+import { taxForNewInvoice } from "./tax.ts";
 import { notify, notifyCustomer, notifyProjectTeam, type MailCtx } from "./notifications.ts";
 import { syncProjectBuildSafe } from "./builds.ts";
 
@@ -126,8 +127,10 @@ export async function changeProjectStatus(ctx: Ctx | MailCtx, projectId: string,
     .bind(to, to === "paused" ? from : null, at, to, at, to, actor.actorUserId ?? null, to, actor.note ?? null, projectId, from).run();
   if (res.meta.changes !== 1) throw new HttpError(409, "The project changed while you were editing. Reload and try again.");
   await audit(db, { actorUserId: actor.actorUserId ?? null, actorKind: actor.actorKind, action: to === "paused" ? "project.paused" : "project.status_changed", subjectType: "project", subjectId: projectId, organizationId: p.organization_id, details: { from, to, note: actor.note } });
-  await notifyCustomer(ctx, projectId, { kind: "project_status", template: "project_update", subject: to === "paused" ? "Your project has been paused" : "Your project moved to a new stage",
-    body: to === "paused" ? `Your project is paused${actor.note ? `: ${actor.note}` : ""}. Reply in your portal any time to restart it.` : `Status changed from ${labelStatus(from)} to ${labelStatus(to)}.`,
+  await notifyCustomer(ctx, projectId, { kind: "project_status",
+    mail: to === "paused" ? { template: "project_update", data: { event: "paused", note: actor.note ?? null } }
+      : to === "completed" ? { template: "project_completion", data: {} }
+      : { template: "project_update", data: { event: "status_changed", from, to } },
     path: `/portal/projects/${projectId}`, key: `status:${projectId}:${to}:${at}`, exceptUserId: actor.actorUserId ?? undefined });
 }
 
@@ -143,7 +146,7 @@ export async function resumeProject(ctx: Ctx | MailCtx, projectId: string, actor
   const res = await ctx.db.prepare(`UPDATE projects SET status = ?, paused_from_status = NULL, last_customer_activity_at = ?, updated_at = ? WHERE id = ? AND status = 'paused'`).bind(to, at, at, projectId).run();
   if (res.meta.changes !== 1) throw new HttpError(409, "Project is not paused.");
   await audit(ctx.db, { actorUserId: actor.actorUserId ?? null, actorKind: actor.actorKind, action: "project.resumed", subjectType: "project", subjectId: projectId, organizationId: p.organization_id, details: { to, note: actor.note } });
-  await notifyCustomer(ctx, projectId, { kind: "project_status", template: "project_update", subject: "Your project has restarted", body: `Work has resumed. Current stage: ${labelStatus(to)}.`, path: `/portal/projects/${projectId}`, key: `resume:${projectId}:${at}` });
+  await notifyCustomer(ctx, projectId, { kind: "project_status", mail: { template: "project_update", data: { event: "resumed", stage: to } }, path: `/portal/projects/${projectId}`, key: `resume:${projectId}:${at}` });
   return to;
 }
 
@@ -158,7 +161,7 @@ export async function cancelProject(ctx: MailCtx, actor: Actor, projectId: strin
   await ctx.db.prepare(`UPDATE projects SET status = 'cancelled', cancel_reason = ?, updated_at = ? WHERE id = ? AND status = ?`).bind(reason.trim(), at, projectId, p.status).run();
   await audit(ctx.db, { actorUserId: actor.userId, action: "project.cancelled", subjectType: "project", subjectId: projectId, organizationId: p.organization_id, details: { from: p.status, reason: reason.trim() } });
   await syncProjectBuildSafe(ctx.db, projectId, "sweep");
-  await notifyCustomer(ctx, projectId, { kind: "project_status", template: "project_update", subject: "Your project was cancelled", body: "Your project has been cancelled. Your project manager will contact you about next steps.", path: `/portal/projects/${projectId}`, key: `cancel:${projectId}` });
+  await notifyCustomer(ctx, projectId, { kind: "project_status", mail: { template: "project_update", data: { event: "cancelled" } }, path: `/portal/projects/${projectId}`, key: `cancel:${projectId}` });
 }
 
 export async function touchCustomerActivity(db: Db, organizationId: string, projectId: string): Promise<void> {
@@ -193,7 +196,7 @@ export async function requestCustomerApproval(ctx: MailCtx, actor: Actor, projec
   const id = newId("apr");
   await ctx.db.prepare(`INSERT INTO approval_requests (id, project_id, kind, subject_id, note, requested_by, created_at) VALUES (?,?,?,?,?,?,?)`).bind(id, projectId, kind, subjectId ?? null, note.trim() || null, actor.userId, nowIso()).run();
   await audit(ctx.db, { actorUserId: actor.userId, action: "approval.requested", subjectType: "project", subjectId: projectId, organizationId: p.organization_id, details: { kind, requestId: id } });
-  await notifyCustomer(ctx, projectId, { kind: "approval_request", template: "approval_request", subject: `Your approval is needed: ${APPROVAL_LABELS[kind]}`, body: note.trim() || `Please review and record your decision for: ${APPROVAL_LABELS[kind]}.`, path: `/portal/projects/${projectId}/approvals`, key: `apr:${id}` });
+  await notifyCustomer(ctx, projectId, { kind: "approval_request", mail: { template: "approval_request", data: { event: "requested", approval: APPROVAL_LABELS[kind], note: note.trim() || null } }, path: `/portal/projects/${projectId}/approvals`, key: `apr:${id}` });
   return id;
 }
 
@@ -230,7 +233,7 @@ export async function recordCustomerApproval(ctx: MailCtx, actor: Actor, input: 
   if (input.kind === "final_acceptance" && input.decision === "approved" && p.status === "deployment") {
     await changeProjectStatus(ctx, p.id, "completed", { actorUserId: input.userId, actorKind: "user", note: "Final acceptance recorded by customer" }).catch(() => undefined);
   }
-  await notifyProjectTeam(ctx, p.id, { kind: "approval_decision", template: "approval_request", subject: `Customer ${input.decision}: ${APPROVAL_LABELS[input.kind]}`, body: input.notes.trim() || `${APPROVAL_LABELS[input.kind]} was ${input.decision}.`, path: `/staff/projects/${p.id}?tab=approvals`, key: `apv:${id}` });
+  await notifyProjectTeam(ctx, p.id, { kind: "approval_decision", mail: { template: "approval_request", data: { event: "decided", approval: APPROVAL_LABELS[input.kind], decision: input.decision, notes: input.notes.trim() || null } }, path: `/staff/projects/${p.id}?tab=approvals`, key: `apv:${id}` });
   return id;
 }
 
@@ -288,7 +291,7 @@ export async function releaseReadiness(db: Db, projectId: string): Promise<{ rea
 export async function issueProjectMilestoneInvoice(ctx: MailCtx, actor: Actor, projectId: string, kind: "design_25" | "prelaunch_25"): Promise<string> {
   requireCoordinator(actor);
   const id = await issueMilestoneInvoice(ctx.db, projectId, kind, actor.userId!);
-  await notifyCustomer(ctx, projectId, { kind: "invoice", template: "invoice", subject: "A new invoice is ready", body: kind === "design_25" ? "Your 25% design milestone invoice is ready to pay." : "Your 25% pre-launch invoice is ready to pay.", path: `/portal/billing/invoices/${id}`, key: `inv:${id}` });
+  await notifyCustomer(ctx, projectId, { kind: "invoice", mail: { template: "invoice", data: { milestone: kind } }, path: `/portal/billing/invoices/${id}`, key: `inv:${id}` });
   return id;
 }
 
@@ -335,7 +338,7 @@ export async function saveHandoff(ctx: MailCtx, actor: Actor, projectId: string,
       published_at = COALESCE(handoffs.published_at, excluded.published_at), updated_at = excluded.updated_at`)
     .bind(projectId, h.website_url || null, h.documentation || null, h.access_instructions || null, h.ownership_notes || null, h.training_notes || null, h.documentation_file_id, publish ? at : null, at).run();
   await audit(ctx.db, { actorUserId: actor.userId, action: publish ? "handoff.published" : "handoff.saved", subjectType: "project", subjectId: projectId, organizationId: p.organization_id });
-  if (publish) await notifyCustomer(ctx, projectId, { kind: "handoff", template: "handoff", subject: "Your website handoff is ready", body: "Your website URL, documentation, access instructions, ownership records and training notes are ready. Review them and record your final acceptance.", path: `/portal/projects/${projectId}/handoff`, key: `handoff:${projectId}` });
+  if (publish) await notifyCustomer(ctx, projectId, { kind: "handoff", mail: { template: "handoff", data: {} }, path: `/portal/projects/${projectId}/handoff`, key: `handoff:${projectId}` });
 }
 
 export interface ClosureCheck { key: string; label: string; ok: boolean; required: boolean; detail: string }
@@ -638,8 +641,9 @@ export async function requestRevision(ctx: MailCtx, input: { organizationId: str
   if (decision.kind === "included" && p.status === "customer_review") {
     await changeProjectStatus(ctx, p.id, "revisions", { actorUserId: input.userId, actorKind: "user", note: `Revision round ${decision.round} requested` }).catch(() => undefined);
   }
-  await notifyProjectTeam(ctx, p.id, { kind: "revision", template: "revision_update", subject: decision.kind === "included" ? `Revision round ${decision.round} requested` : "Revision beyond allowance — change order needed",
-    body: decision.kind === "included" ? `Included round ${decision.round} of ${p.revision_allowance}.` : `The customer has used all ${p.revision_allowance} included rounds. Propose a change order with scope and price.`,
+  await notifyProjectTeam(ctx, p.id, { kind: "revision",
+    mail: decision.kind === "included" ? { template: "revision_update", data: { event: "requested", round: decision.round, allowance: p.revision_allowance } }
+      : { template: "revision_update", data: { event: "beyond_allowance", allowance: p.revision_allowance } },
     path: `/staff/projects/${p.id}?tab=revisions`, key: `rev:${id}` });
   return { revisionId: id, decision };
 }
@@ -660,7 +664,7 @@ export async function updateRevisionStatus(ctx: MailCtx, actor: Actor, userId: s
   await audit(ctx.db, { actorUserId: userId, action: "revision.status_changed", subjectType: "project", subjectId: r.project_id, organizationId: r.organization_id, details: { revisionId, from: r.status, to: status } });
   if (status === "delivered") {
     await ctx.db.prepare(`INSERT INTO approval_requests (id, project_id, kind, subject_id, note, requested_by, created_at) VALUES (?,?, 'revision', ?,?,?,?)`).bind(newId("apr"), r.project_id, revisionId, `Review revision round ${r.round}`, userId, at).run();
-    await notifyCustomer(ctx, r.project_id, { kind: "revision", template: "revision_update", subject: `Revision round ${r.round} is ready for review`, body: notes.trim() || "Your requested changes are ready. Review them and approve or ask for adjustments.", path: `/portal/projects/${r.project_id}/revisions`, key: `revdel:${revisionId}` });
+    await notifyCustomer(ctx, r.project_id, { kind: "revision", mail: { template: "revision_update", data: { event: "delivered", round: r.round, notes: notes.trim() || null } }, path: `/portal/projects/${r.project_id}/revisions`, key: `revdel:${revisionId}` });
   }
   return r.project_id;
 }
@@ -683,7 +687,7 @@ export async function proposeChangeOrder(ctx: MailCtx, actor: Actor, projectId: 
   if (input.revisionId) stmts.push(ctx.db.prepare(`UPDATE revisions SET billable_change_order_id = ? WHERE id = ? AND project_id = ?`).bind(id, input.revisionId, projectId));
   await ctx.db.batch(stmts);
   await audit(ctx.db, { actorUserId: actor.userId, action: "change_order.proposed", subjectType: "change_order", subjectId: id, organizationId: p.organization_id, details: { projectId, priceCents: input.priceCents, revisionId: input.revisionId ?? undefined } });
-  await notifyCustomer(ctx, projectId, { kind: "change_order", template: "change_order", subject: "A change order needs your approval", body: `Proposed additional work. Review the scope and price, then approve or decline.`, path: `/portal/projects/${projectId}/revisions`, key: `co:${id}` });
+  await notifyCustomer(ctx, projectId, { kind: "change_order", mail: { template: "change_order", data: { event: "proposed" } }, path: `/portal/projects/${projectId}/revisions`, key: `co:${id}` });
   return id;
 }
 
@@ -705,20 +709,22 @@ export async function decideChangeOrder(ctx: MailCtx, actor: Actor, input: { org
   } else {
     const taskId = newId("task");
     invoiceId = co.price_cents > 0 ? newId("inv") : null;
+    const coDescription = `Change order — ${co.scope_text.slice(0, 140)}`;
+    const tax = invoiceId ? await taxForNewInvoice(ctx.db, { description: coDescription, amountCents: co.price_cents, productKey: "change_order" }) : null;
     const stmts = [
       ctx.db.prepare(`INSERT INTO tasks (id, project_id, title, description, status, created_at) VALUES (?,?,?,?, 'todo', ?)`).bind(taskId, co.project_id, `Change order: ${co.scope_text.slice(0, 120)}`, co.scope_text, at),
       ctx.db.prepare(`UPDATE change_orders SET status = 'approved', decided_by = ?, decided_at = ?, decision_notes = ?, approved_by_contact_id = ?, invoice_id = ?, task_id = ? WHERE id = ? AND status = 'proposed'`)
         .bind(input.userId, at, input.notes.trim() || null, contact?.id ?? null, invoiceId, taskId, co.id),
     ];
     if (invoiceId) {
-      stmts.unshift(ctx.db.prepare(`INSERT INTO invoices (id, organization_id, project_id, milestone_kind, amount_cents, status, description, created_at) VALUES (?,?,?, 'change_order', ?, 'open', ?, ?)`)
-        .bind(invoiceId, co.organization_id, co.project_id, co.price_cents, `Change order — ${co.scope_text.slice(0, 140)}`, at));
+      stmts.unshift(ctx.db.prepare(`INSERT INTO invoices (id, organization_id, project_id, milestone_kind, amount_cents, subtotal_cents, tax_cents, tax_detail_json, status, description, created_at) VALUES (?,?,?, 'change_order', ?, ?, ?, ?, 'open', ?, ?)`)
+        .bind(invoiceId, co.organization_id, co.project_id, tax!.amountCents, tax!.subtotalCents, tax!.taxCents, tax!.detailJson, coDescription, at));
     }
     await ctx.db.batch(stmts);
   }
   await ctx.db.prepare(`UPDATE projects SET last_customer_activity_at = ? WHERE id = ?`).bind(at, co.project_id).run();
   await audit(ctx.db, { actorUserId: input.userId, action: `change_order.${input.decision}`, subjectType: "change_order", subjectId: co.id, organizationId: co.organization_id, details: { projectId: co.project_id, invoiceId, priceCents: co.price_cents } });
-  await notifyProjectTeam(ctx, co.project_id, { kind: "change_order", template: "change_order", subject: `Change order ${input.decision}`, body: `${co.project_name}: change order ${input.decision}${invoiceId ? " — invoice issued to the customer" : ""}.`, path: `/staff/projects/${co.project_id}?tab=revisions`, key: `codec:${co.id}` });
+  await notifyProjectTeam(ctx, co.project_id, { kind: "change_order", mail: { template: "change_order", data: { event: "decided", decision: input.decision, invoiceIssued: !!invoiceId } }, path: `/staff/projects/${co.project_id}?tab=revisions`, key: `codec:${co.id}` });
   return { invoiceId };
 }
 
@@ -811,13 +817,11 @@ export async function runInactivitySweep(ctx: Ctx, policy: InactivityPolicy = DE
     const claim = await db.prepare(`INSERT OR IGNORE INTO inactivity_notices (project_id, cycle_key, kind, seq, created_at) VALUES (?,?,?,?,?)`).bind(p.id, cycle, action.kind, seq, now.toISOString()).run();
     if (claim.meta.changes !== 1) continue;
     if (action.kind === "remind") {
-      await notifyCustomer(ctx, p.id, { kind: "inactivity_reminder", template: "project_update", subject: "Your project is waiting on you",
-        body: `We have not heard from you in ${days} days. Your project is waiting at "${labelStatus(p.status)}". Under our inactivity policy, projects are paused after ${policy.pauseAfterDays} days without a response; they are never cancelled automatically.`,
+      await notifyCustomer(ctx, p.id, { kind: "inactivity_reminder", mail: { template: "project_update", data: { event: "inactivity_reminder", days, stage: p.status, pauseAfterDays: policy.pauseAfterDays } },
         path: `/portal/projects/${p.id}`, key: `inact:${p.id}:${cycle}:remind:${seq}` });
       await audit(db, { actorKind: "system", action: "project.inactivity_reminder", subjectType: "project", subjectId: p.id, organizationId: p.organization_id, details: { days, reminder: seq } });
     } else if (action.kind === "escalate") {
-      await notifyProjectTeam(ctx, p.id, { kind: "inactivity_escalation", template: "project_update", pmOnly: true, subject: "Inactive customer project needs follow-up",
-        body: `${p.name} has had no customer activity for ${days} days (status: ${labelStatus(p.status)}). Please contact the customer.`, path: `/staff/projects/${p.id}`, key: `inact:${p.id}:${cycle}:escalate` });
+      await notifyProjectTeam(ctx, p.id, { kind: "inactivity_escalation", pmOnly: true, mail: { template: "project_update", data: { event: "inactivity_escalation", days, stage: p.status } }, path: `/staff/projects/${p.id}`, key: `inact:${p.id}:${cycle}:escalate` });
       await audit(db, { actorKind: "system", action: "project.inactivity_escalated", subjectType: "project", subjectId: p.id, organizationId: p.organization_id, details: { days } });
     } else {
       try {
@@ -826,7 +830,7 @@ export async function runInactivitySweep(ctx: Ctx, policy: InactivityPolicy = DE
         await db.prepare(`DELETE FROM inactivity_notices WHERE project_id = ? AND cycle_key = ? AND kind = 'pause'`).bind(p.id, cycle).run();
         throw e;
       }
-      await notifyProjectTeam(ctx, p.id, { kind: "inactivity_paused", template: "project_update", pmOnly: true, subject: "Project paused for inactivity", body: `${p.name} was paused after ${days} days without customer activity.`, path: `/staff/projects/${p.id}`, key: `inact:${p.id}:${cycle}:pause` });
+      await notifyProjectTeam(ctx, p.id, { kind: "inactivity_paused", pmOnly: true, mail: { template: "project_update", data: { event: "inactivity_paused", days } }, path: `/staff/projects/${p.id}`, key: `inact:${p.id}:${cycle}:pause` });
     }
     results.push({ projectId: p.id, action: action.kind, reminder: action.kind === "remind" ? seq : undefined });
   }

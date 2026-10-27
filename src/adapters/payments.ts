@@ -5,7 +5,8 @@
 
 export class LivePaymentsNotAuthorized extends Error {}
 
-export interface CheckoutLine { name: string; amountCents: number; quantity?: number }
+/** One Checkout line. Sales tax (LEGAL-005) is sent as its own line per jurisdiction, tagged with taxJurisdictionId. */
+export interface CheckoutLine { name: string; amountCents: number; quantity?: number; taxJurisdictionId?: string }
 export interface CheckoutRequest {
   mode: "payment" | "subscription";
   lines: CheckoutLine[];
@@ -64,6 +65,7 @@ export class StripeTestPayments implements PaymentsAdapter {
       form[`line_items[${i}][price_data][currency]`] = "usd";
       form[`line_items[${i}][price_data][unit_amount]`] = String(l.amountCents);
       form[`line_items[${i}][price_data][product_data][name]`] = l.name;
+      if (l.taxJurisdictionId) form[`line_items[${i}][price_data][product_data][metadata][crestmont_tax_jurisdiction]`] = l.taxJurisdictionId;
       if (req.mode === "subscription") form[`line_items[${i}][price_data][recurring][interval]`] = req.recurringInterval ?? "month";
     });
     for (const [k, v] of Object.entries(req.metadata)) form[`metadata[${k}]`] = v;
@@ -211,9 +213,12 @@ export class StripeInvoicing {
     return this.post<StripeInvoice>("invoices", form, `crestmont:invoice:${i.localInvoiceId}:create`);
   }
 
-  addInvoiceItem(i: { customer: string; invoice: string; amountCents: number; description: string; localInvoiceId: string }) {
+  addInvoiceItem(i: { customer: string; invoice: string; amountCents: number; description: string; localInvoiceId: string; taxJurisdictionId?: string }) {
+    // The main item keeps its original idempotency key; each sales-tax item (LEGAL-005) has its own.
+    const extra: [string, string][] = i.taxJurisdictionId ? [["metadata[crestmont_tax_jurisdiction]", i.taxJurisdictionId]] : [];
     return this.post<{ id: string; amount: number; invoice: string }>("invoiceitems", [["customer", i.customer], ["invoice", i.invoice], ["amount", String(i.amountCents)],
-      ["currency", "usd"], ["description", i.description], ["metadata[crestmont_invoice_id]", i.localInvoiceId]], `crestmont:invoice:${i.localInvoiceId}:item`);
+      ["currency", "usd"], ["description", i.description], ["metadata[crestmont_invoice_id]", i.localInvoiceId], ...extra],
+      `crestmont:invoice:${i.localInvoiceId}:item${i.taxJurisdictionId ? `:tax:${i.taxJurisdictionId}` : ""}`);
   }
 
   finalizeInvoice(stripeInvoiceId: string, localInvoiceId: string) {

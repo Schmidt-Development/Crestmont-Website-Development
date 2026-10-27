@@ -242,9 +242,8 @@ export async function createTicket(ctx: Pick<AppContext, "db" | "storage" | "ema
   }
   await audit(ctx.db, { actorUserId: user.id, action: "ticket.created", subjectType: "ticket", subjectId: id, organizationId: org.organizationId, details: { category: input.category, attachments: input.files.length } });
   const settings = await getSupportSettings(ctx);
-  await sendMail(ctx, { template: "support_ticket", to: user.email, subject: `We received your request — ${subject}`, heading: "Your support request is recorded",
-    paragraphs: [`Hello ${user.displayName}, we have recorded your request “${subject}” (reference ${id}).`, hoursDisclosure(settings)],
-    cta: { label: "View your ticket", url: `${ctx.baseUrl}/portal/support/${id}` }, idempotencyKey: `ticket-confirm:${id}` });
+  await sendMail(ctx, { template: "support_ticket", to: user.email, idempotencyKey: `ticket-confirm:${id}`,
+    data: { event: "received", name: user.displayName, subject, ticketRef: id, hoursNotice: hoursDisclosure(settings), url: `${ctx.baseUrl}/portal/support/${id}` } });
   for (const s of await supportAgents(ctx.db)) await notify(ctx.db, s.id, { kind: "ticket_new", subjectType: "ticket", subjectId: id, body: `New ${input.category.replace("_", " ")} ticket: ${subject}` });
   return id;
 }
@@ -270,16 +269,16 @@ export async function customerReply(ctx: Pick<AppContext, "db" | "storage" | "em
   const next: TicketStatus = ticket.status === "escalated" ? "escalated" : "pending_staff";
   await ctx.db.prepare(`UPDATE tickets SET status = ?, updated_at = ? WHERE id = ?`).bind(next, at, ticket.id).run();
   await audit(ctx.db, { actorUserId: userId, action: "ticket.customer_reply", subjectType: "ticket", subjectId: ticket.id, organizationId: ticket.organization_id });
-  await notifyStaffOfActivity(ctx, ticket, `Customer replied on “${ticket.subject}”`, `cust-reply:${ticket.id}:${at}`);
+  await notifyStaffOfActivity(ctx, ticket, "customer_replied", `cust-reply:${ticket.id}:${at}`);
 }
 
-async function notifyStaffOfActivity(ctx: MailCtx, ticket: TicketRow, text: string, key: string) {
+async function notifyStaffOfActivity(ctx: MailCtx, ticket: TicketRow, event: "customer_replied" | "customer_reopened", key: string) {
+  const text = event === "customer_replied" ? `Customer replied on “${ticket.subject}”` : `Customer reopened “${ticket.subject}”`;
   const a = await currentAssignee(ctx.db, ticket.id);
   const people = a ? [{ id: a.user_id, email: a.email }] : (await supportAgents(ctx.db)).map((s) => ({ id: s.id, email: s.email }));
   for (const p of people) {
     await notify(ctx.db, p.id, { kind: "ticket_activity", subjectType: "ticket", subjectId: ticket.id, body: text });
-    if (a) await sendMail(ctx, { template: "support_reply", to: p.email, subject: text, heading: text, paragraphs: ["Open the ticket in the staff support queue to respond."],
-      cta: { label: "Open ticket", url: `${ctx.baseUrl}/staff/support/${ticket.id}` }, idempotencyKey: `${key}:${p.id}` });
+    if (a) await sendMail(ctx, { template: "support_reply", to: p.email, idempotencyKey: `${key}:${p.id}`, data: { event, subject: ticket.subject, url: `${ctx.baseUrl}/staff/support/${ticket.id}` } });
   }
 }
 
@@ -287,7 +286,7 @@ export async function reopenTicket(ctx: MailCtx, ticket: TicketRow, userId: stri
   if (by === "customer" && ticket.status !== "resolved") throw new SupportError(ticket.status === "closed" ? "Closed tickets cannot be reopened. Please open a new ticket." : "Only resolved tickets can be reopened.", 409);
   await changeStatus(ctx, ticket, "open", userId);
   await ctx.db.prepare(`UPDATE tickets SET reopened_at = ?, resolved_at = NULL WHERE id = ?`).bind(nowIso(), ticket.id).run();
-  if (by === "customer") await notifyStaffOfActivity(ctx, ticket, `Customer reopened “${ticket.subject}”`, `reopen:${ticket.id}:${nowIso()}`);
+  if (by === "customer") await notifyStaffOfActivity(ctx, ticket, "customer_reopened", `reopen:${ticket.id}:${nowIso()}`);
 }
 
 // ───────────── Staff actions (SUP-002..004) ─────────────
@@ -317,9 +316,7 @@ export async function escalateTicket(ctx: MailCtx, ticket: TicketRow, userId: st
   for (const s of await supervisors(ctx.db)) {
     if (s.id === userId) continue;
     await notify(ctx.db, s.id, { kind: "ticket_escalated", subjectType: "ticket", subjectId: ticket.id, body: `Escalated: ${ticket.subject}` });
-    await sendMail(ctx, { template: "support_ticket", to: s.email, subject: `Escalated ticket — ${ticket.subject}`, heading: "A support ticket was escalated",
-      paragraphs: [`Ticket ${ticket.id} (“${ticket.subject}”) was escalated. Open it in the staff queue for details.`],
-      cta: { label: "Open ticket", url: `${ctx.baseUrl}/staff/support/${ticket.id}` }, idempotencyKey: `escalate:${ticket.id}:${s.id}:${ticket.updated_at}` });
+    await sendMail(ctx, { template: "support_ticket", to: s.email, data: { event: "escalated", subject: ticket.subject, ticketRef: ticket.id, url: `${ctx.baseUrl}/staff/support/${ticket.id}` }, idempotencyKey: `escalate:${ticket.id}:${s.id}:${ticket.updated_at}` });
   }
 }
 
@@ -337,9 +334,7 @@ export async function assignTicket(ctx: MailCtx, ticket: TicketRow, assigneeId: 
   await audit(ctx.db, { actorUserId: byUserId, action: "ticket.assigned", subjectType: "ticket", subjectId: ticket.id, organizationId: ticket.organization_id, details: { assigneeId, previous: current?.user_id ?? null } });
   if (assigneeId !== byUserId) {
     await notify(ctx.db, assigneeId, { kind: "ticket_assigned", subjectType: "ticket", subjectId: ticket.id, body: `Assigned to you: ${ticket.subject}` });
-    await sendMail(ctx, { template: "support_ticket", to: agent.email, subject: `Ticket assigned to you — ${ticket.subject}`, heading: "A support ticket was assigned to you",
-      paragraphs: [`Ticket ${ticket.id} (“${ticket.subject}”, ${ticket.priority} priority) is now assigned to you.`],
-      cta: { label: "Open ticket", url: `${ctx.baseUrl}/staff/support/${ticket.id}` }, idempotencyKey: `assign:${ticket.id}:${assigneeId}:${at}` });
+    await sendMail(ctx, { template: "support_ticket", to: agent.email, data: { event: "assigned", subject: ticket.subject, ticketRef: ticket.id, priority: ticket.priority, url: `${ctx.baseUrl}/staff/support/${ticket.id}` }, idempotencyKey: `assign:${ticket.id}:${assigneeId}:${at}` });
   }
 }
 
@@ -397,9 +392,7 @@ export async function staffReply(ctx: Pick<AppContext, "db" | "storage" | "email
   const opener = await ctx.db.prepare(`SELECT u.id, u.email, u.display_name FROM users u WHERE u.id = ? AND u.disabled_at IS NULL`).bind(ticket.opened_by).first<{ id: string; email: string; display_name: string }>();
   if (opener) {
     await notify(ctx.db, opener.id, { kind: "ticket_reply", subjectType: "ticket", subjectId: ticket.id, body: `Crestmont replied to “${ticket.subject}”` });
-    await sendMail(ctx, { template: "support_reply", to: opener.email, subject: `Update on your request — ${ticket.subject}`, heading: "There is an update on your support request",
-      paragraphs: [`Hello ${opener.display_name}, a member of the Crestmont team replied to “${ticket.subject}”. Sign in to read the reply and respond.`],
-      cta: { label: "Read the reply", url: `${ctx.baseUrl}/portal/support/${ticket.id}` }, idempotencyKey: `ticket-reply:${id}` });
+    await sendMail(ctx, { template: "support_reply", to: opener.email, data: { event: "staff_replied", name: opener.display_name, subject: ticket.subject, url: `${ctx.baseUrl}/portal/support/${ticket.id}` }, idempotencyKey: `ticket-reply:${id}` });
   }
   return { messageId: id };
 }
@@ -449,9 +442,7 @@ export async function runSupportEscalationSweep(ctx: Pick<AppContext, "db" | "em
     const people = a ? [{ id: a.user_id, email: a.email }] : (await supervisors(ctx.db)).map((x) => ({ id: x.id, email: x.email }));
     for (const p of people) {
       await notify(ctx.db, p.id, { kind: "ticket_sla_breached", subjectType: "ticket", subjectId: t.id, body: `No first response within ${s.firstResponseTargetHours}h: ${t.subject}` });
-      await sendMail(ctx, { template: "support_ticket", to: p.email, subject: `Response overdue — ${t.subject}`, heading: "A ticket has passed its first-response target",
-        paragraphs: [`Ticket ${t.id} (“${t.subject}”) has had no staff response within the ${s.firstResponseTargetHours}-hour target.`],
-        cta: { label: "Open ticket", url: `${ctx.baseUrl}/staff/support/${t.id}` }, idempotencyKey: `sla:${t.id}:${p.id}` });
+      await sendMail(ctx, { template: "support_ticket", to: p.email, data: { event: "sla_breached", subject: t.subject, ticketRef: t.id, targetHours: s.firstResponseTargetHours, url: `${ctx.baseUrl}/staff/support/${t.id}` }, idempotencyKey: `sla:${t.id}:${p.id}` });
     }
   }
   return { flagged, checked: due.length, targetHours: s.firstResponseTargetHours };

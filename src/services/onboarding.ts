@@ -188,7 +188,6 @@ export async function saveOnboarding(ctx: AppContext, input: { organizationId: s
   if (p.status === "purchased") await changeProjectStatus(ctx, p.id, "awaiting_onboarding", { actorUserId: input.userId, actorKind: "user" });
   await changeProjectStatus(ctx, p.id, "scope_review", { actorUserId: input.userId, actorKind: "user", note: "Onboarding completed by customer" });
   await syncProjectBuildSafe(ctx.db, p.id, "intake");
-  await notifyProjectTeam(ctx, p.id, { kind: "onboarding_completed", template: "onboarding", subject: "Customer onboarding completed", pmOnly: true,
-    body: "The customer submitted onboarding. The project is now in scope review.", path: `/staff/projects/${p.id}`, key: `onb:${p.id}` });
+  await notifyProjectTeam(ctx, p.id, { kind: "onboarding_completed", pmOnly: true, mail: { template: "onboarding", data: { event: "completed" } }, path: `/staff/projects/${p.id}`, key: `onb:${p.id}` });
   return { completed: true };
 }

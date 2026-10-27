@@ -23,6 +23,7 @@ import { nowIso } from "../lib/db.ts";
 import { HttpError } from "../app/http.ts";
 import { StripeInvoicing, LivePaymentsNotAuthorized, type StripeInvoice } from "../adapters/payments.ts";
 import { audit } from "./security.ts";
+import { checkoutLinesFor } from "./tax.ts";
 
 export const STRIPE_INVOICE_KINDS = ["deposit_50", "design_25", "prelaunch_25"] as const;
 export const DAYS_UNTIL_DUE = 14;
@@ -42,7 +43,7 @@ export function stripeInvoicer(env: Env): StripeInvoicer {
 
 interface LocalInvoice {
   id: string; organization_id: string; org_name: string; stripe_customer_id: string | null; order_id: string | null; project_id: string | null;
-  milestone_kind: string | null; amount_cents: number; status: string; description: string | null; stripe_invoice_id: string | null;
+  milestone_kind: string | null; amount_cents: number; subtotal_cents: number | null; tax_detail_json: string | null; status: string; description: string | null; stripe_invoice_id: string | null;
   stripe_invoice_status: string | null; stripe_checkout_session_id: string | null;
 }
 
@@ -64,7 +65,7 @@ async function persist(db: Db, id: string, s: StripeInvoice) {
 }
 
 export async function createStripeMilestoneInvoice(db: Db, env: Env, actorUserId: string, invoiceId: string): Promise<StripeInvoiceResult> {
-  const inv = await db.prepare(`SELECT i.id, i.organization_id, o.name AS org_name, o.stripe_customer_id, i.order_id, i.project_id, i.milestone_kind, i.amount_cents, i.status, i.description,
+  const inv = await db.prepare(`SELECT i.id, i.organization_id, o.name AS org_name, o.stripe_customer_id, i.order_id, i.project_id, i.milestone_kind, i.amount_cents, i.subtotal_cents, i.tax_detail_json, i.status, i.description,
         i.stripe_invoice_id, i.stripe_invoice_status, i.stripe_checkout_session_id
       FROM invoices i JOIN organizations o ON o.id = i.organization_id WHERE i.id = ?`).bind(invoiceId).first<LocalInvoice>();
   if (!inv) throw new HttpError(404, "Invoice not found.");
@@ -103,7 +104,10 @@ export async function createStripeMilestoneInvoice(db: Db, env: Env, actorUserId
     // 3–4. Item, verify, finalize — only while still a draft.
     if (si.status === "draft") {
       if (si.total === 0) {
-        await stripe.addInvoiceItem({ customer, invoice: si.id, amountCents: inv.amount_cents, description, localInvoiceId: inv.id });
+        // LEGAL-005: the taxable amount first (same idempotency key as before), then one item per jurisdiction's tax.
+        for (const l of checkoutLinesFor({ ...inv, description }, description)) {
+          await stripe.addInvoiceItem({ customer, invoice: si.id, amountCents: l.amountCents, description: l.name, localInvoiceId: inv.id, taxJurisdictionId: l.taxJurisdictionId });
+        }
         si = await stripe.retrieveInvoice(si.id);
       }
       if (si.total !== inv.amount_cents || si.currency !== "usd") {

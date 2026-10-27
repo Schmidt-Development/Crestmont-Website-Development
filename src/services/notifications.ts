@@ -2,7 +2,7 @@
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import type { AppContext } from "../app/context.ts";
-import { sendMail, type EmailTemplate } from "./mailer.ts";
+import { sendMail, templateContent, type EmailTemplate, type TemplateData, type MailSpec } from "./mailer.ts";
 
 export type MailCtx = Pick<AppContext, "db" | "email" | "baseUrl">;
 
@@ -76,26 +76,40 @@ export async function customerMembers(db: Db, organizationId: string): Promise<{
     .bind(organizationId).all<{ id: string; email: string; display_name: string }>()).results;
 }
 
-/** Notify (in-app + email) every customer member of the project's organization. */
-export async function notifyCustomer(ctx: MailCtx, projectId: string, n: { kind: string; template: EmailTemplate; subject: string; body: string; path: string; key: string; exceptUserId?: string }) {
+/** Project-scoped mail: template data without projectName/url, which the notifier fills in. */
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+export type ProjectMail = { [K in EmailTemplate]: { template: K; data: DistributiveOmit<TemplateData[K], "projectName" | "url"> } }[EmailTemplate];
+
+function projectSpec(mail: ProjectMail, projectName: string, url: string): MailSpec {
+  return { template: mail.template, data: { ...mail.data, projectName, url } } as MailSpec;
+}
+
+/** In-app notification text: the template's main (last) paragraph, so in-app and email never disagree. */
+function inAppBody(spec: MailSpec): string {
+  return templateContent(spec).paragraphs.at(-1) ?? templateContent(spec).subject;
+}
+
+/** Notify (in-app + email) every customer member of the project's organization. Copy lives in the template registry. */
+export async function notifyCustomer(ctx: MailCtx, projectId: string, n: { kind: string; mail: ProjectMail; path: string; key: string; exceptUserId?: string }) {
   const p = await ctx.db.prepare(`SELECT organization_id, name FROM projects WHERE id = ?`).bind(projectId).first<{ organization_id: string; name: string }>();
   if (!p) return;
+  const spec = projectSpec(n.mail, p.name, `${ctx.baseUrl}${n.path}`);
   for (const u of await customerMembers(ctx.db, p.organization_id)) {
     if (u.id === n.exceptUserId) continue;
-    await notify(ctx.db, u.id, { kind: n.kind, subjectType: "project", subjectId: projectId, body: n.body });
-    await sendMail(ctx, { template: n.template, to: u.email, subject: n.subject, heading: n.subject, paragraphs: [`Project: ${p.name}`, n.body],
-      cta: { label: "Open your portal", url: `${ctx.baseUrl}${n.path}` }, idempotencyKey: `${n.key}:${u.id}` });
+    await notify(ctx.db, u.id, { kind: n.kind, subjectType: "project", subjectId: projectId, body: inAppBody(spec) });
+    await sendMail(ctx, { ...spec, to: u.email, idempotencyKey: `${n.key}:${u.id}` });
   }
 }
 
 /** Notify (in-app + email) the PM and project assignees; falls back to owners/PMs when nobody is assigned. */
-export async function notifyProjectTeam(ctx: MailCtx, projectId: string, n: { kind: string; template: EmailTemplate; subject: string; body: string; path: string; key: string; exceptUserId?: string; pmOnly?: boolean }) {
+export async function notifyProjectTeam(ctx: MailCtx, projectId: string, n: { kind: string; mail: ProjectMail; path: string; key: string; exceptUserId?: string; pmOnly?: boolean }) {
   let people = n.pmOnly ? [await projectManager(ctx.db, projectId)].filter((x): x is NonNullable<typeof x> => !!x) : await projectStaff(ctx.db, projectId);
   if (!people.length) people = await fallbackCoordinators(ctx.db);
+  const p = await ctx.db.prepare(`SELECT name FROM projects WHERE id = ?`).bind(projectId).first<{ name: string }>();
+  const spec = projectSpec(n.mail, p?.name ?? projectId, `${ctx.baseUrl}${n.path}`);
   for (const u of people) {
     if (u.id === n.exceptUserId) continue;
-    await notify(ctx.db, u.id, { kind: n.kind, subjectType: "project", subjectId: projectId, body: n.body });
-    await sendMail(ctx, { template: n.template, to: u.email, subject: n.subject, heading: n.subject, paragraphs: [n.body],
-      cta: { label: "Open project", url: `${ctx.baseUrl}${n.path}` }, idempotencyKey: `${n.key}:${u.id}` });
+    await notify(ctx.db, u.id, { kind: n.kind, subjectType: "project", subjectId: projectId, body: inAppBody(spec) });
+    await sendMail(ctx, { ...spec, to: u.email, idempotencyKey: `${n.key}:${u.id}` });
   }
 }

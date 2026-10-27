@@ -6,6 +6,7 @@ import { isStaleEvent, markEventResult, type StripeEvent } from "../domain/strip
 import { markInvoicePaid, provisionProject } from "./commerce.ts";
 import { audit } from "./security.ts";
 import { sendMail } from "./mailer.ts";
+import { MAINTENANCE_PLANS } from "../domain/catalog.ts";
 import { syncProjectBuildSafe } from "./builds.ts";
 
 type Obj = Record<string, unknown>;
@@ -43,16 +44,20 @@ export async function processStripeEvent(ctx: Pick<AppContext, "db" | "email" | 
         if (!org) throw new Error("Subscription for unknown customer");
         const status = evt.type === "customer.subscription.deleted" ? "canceled" : (s(o, "status") ?? "incomplete");
         const end = n(o, "current_period_end");
-        await upsertSubscription(db, evt.data.object.id, org, m.product_id ?? null, status, end ? new Date(end * 1000).toISOString() : null);
+        const change = await upsertSubscription(db, evt.data.object.id, org, m.product_id ?? null, status, end ? new Date(end * 1000).toISOString() : null);
+        // EMAIL-002 subscription_update: customer administrators hear about real status changes of an existing plan.
+        if (change.previous && change.previous !== change.status) {
+          const plan = change.productId ? (MAINTENANCE_PLANS as Record<string, { name: string }>)[change.productId]?.name ?? change.productId : "maintenance";
+          const admins = (await db.prepare(`SELECT u.email FROM memberships mb JOIN users u ON u.id = mb.user_id WHERE mb.organization_id = ? AND mb.role_id = 'customer_admin' AND u.disabled_at IS NULL`).bind(org).all<{ email: string }>()).results;
+          for (const a of admins) await sendMail(ctx, { template: "subscription_update", to: a.email, idempotencyKey: `sub:${evt.id}:${a.email}`, data: { planName: plan, status: change.status, url: `${ctx.baseUrl}/portal/billing` } });
+        }
         break;
       }
       case "invoice.payment_failed": {
         const sub = s(o, "subscription");
         if (sub) await db.prepare(`UPDATE subscriptions SET status = 'past_due', updated_at = ? WHERE stripe_subscription_id = ?`).bind(nowIso(), sub).run();
         const to = s(o, "customer_email");
-        if (to) await sendMail(ctx, { template: "failed_payment", to, subject: "Action needed: payment failed", heading: "Your payment did not go through", idempotencyKey: `failed:${evt.id}`,
-          paragraphs: ["Your most recent maintenance plan payment failed. Please update your payment method to keep your plan active.", "Stripe will retry the payment automatically."],
-          cta: { label: "Update payment method", url: `${ctx.baseUrl}/portal/billing` } });
+        if (to) await sendMail(ctx, { template: "failed_payment", to, idempotencyKey: `failed:${evt.id}`, data: { url: `${ctx.baseUrl}/portal/billing` } });
         await audit(db, { actorKind: "webhook", action: "payment.failed", subjectType: "subscription", subjectId: sub, details: { event: evt.id } });
         break;
       }
@@ -174,9 +179,8 @@ async function applyInvoicePayment(ctx: Pick<AppContext, "db" | "email" | "baseU
       ]);
     }
   }
-  if (to) await sendMail(ctx, { template: "receipt", to, subject: "Payment received — Crestmont", heading: "Thank you — your payment was received", idempotencyKey: `receipt:${inv.id}`,
-    paragraphs: [`We received your payment of $${(inv.amount_cents / 100).toFixed(2)}.`, projectId ? "Your project is set up. The next step is onboarding, where you tell us about your business, brand and goals." : "Your project record has been updated."],
-    cta: { label: projectId ? "Start onboarding" : "View billing", url: `${ctx.baseUrl}/portal${projectId ? `/projects/${projectId}/onboarding` : "/billing"}` } });
+  if (to) await sendMail(ctx, { template: "receipt", to, idempotencyKey: `receipt:${inv.id}`,
+    data: { amountCents: inv.amount_cents, next: projectId ? "onboarding" : "billing", url: `${ctx.baseUrl}/portal${projectId ? `/projects/${projectId}/onboarding` : "/billing"}` } });
 }
 
 async function syncBuildsForPaymentIntent(db: AppContext["db"], pi: string) {
@@ -184,17 +188,18 @@ async function syncBuildsForPaymentIntent(db: AppContext["db"], pi: string) {
   for (const r of rows) await syncProjectBuildSafe(db, r.project_id, "sweep");
 }
 
-async function upsertSubscription(db: AppContext["db"], stripeId: string, orgId: string, productId: string | null, status: string, periodEnd: string | null) {
+async function upsertSubscription(db: AppContext["db"], stripeId: string, orgId: string, productId: string | null, status: string, periodEnd: string | null): Promise<{ previous: string | null; status: string; productId: string | null }> {
   const allowed = ["trialing", "active", "past_due", "canceled", "incomplete", "unpaid"];
   const st = allowed.includes(status) ? status : status === "incomplete_expired" ? "canceled" : "incomplete";
-  const existing = await db.prepare(`SELECT id FROM subscriptions WHERE stripe_subscription_id = ?`).bind(stripeId).first<{ id: string }>();
+  const existing = await db.prepare(`SELECT id, status, product_id FROM subscriptions WHERE stripe_subscription_id = ?`).bind(stripeId).first<{ id: string; status: string; product_id: string }>();
   if (existing) {
     await db.prepare(`UPDATE subscriptions SET status = ?, current_period_end = COALESCE(?, current_period_end), updated_at = ? WHERE id = ?`).bind(st, periodEnd, nowIso(), existing.id).run();
-  } else {
-    if (!productId) throw new Error("New subscription is missing product_id metadata");
-    await db.prepare(`INSERT INTO subscriptions (id, organization_id, product_id, stripe_subscription_id, status, current_period_end, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`)
-      .bind(newId("sub"), orgId, productId, stripeId, st, periodEnd, nowIso(), nowIso()).run();
+    return { previous: existing.status, status: st, productId: existing.product_id };
   }
+  if (!productId) throw new Error("New subscription is missing product_id metadata");
+  await db.prepare(`INSERT INTO subscriptions (id, organization_id, product_id, stripe_subscription_id, status, current_period_end, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`)
+    .bind(newId("sub"), orgId, productId, stripeId, st, periodEnd, nowIso(), nowIso()).run();
+  return { previous: null, status: st, productId };
 }
 
 /** Reconciliation: retry failed events (PAY-009). Called by the scheduled worker. */

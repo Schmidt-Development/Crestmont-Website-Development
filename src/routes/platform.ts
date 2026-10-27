@@ -15,7 +15,7 @@ import {
 import { staffNav, portalNav } from "./nav.ts";
 import { isOwner, can } from "../domain/authz.ts";
 import { audit } from "../services/security.ts";
-import { sendMail, renderMail, EMAIL_TEMPLATES, type EmailTemplate } from "../services/mailer.ts";
+import { sendMail, renderTemplate, identityFrom, EMAIL_TEMPLATES, REQUIRED_WORKFLOWS, TEMPLATES, type EmailTemplate, type TemplateDef } from "../services/mailer.ts";
 import { ResendEmail } from "../adapters/email.ts";
 import { decideAiJob, aiProviderFromEnv, AI_WORKFLOWS, AI_FORBIDDEN } from "../services/ai.ts";
 import * as emp from "../services/employees.ts";
@@ -127,12 +127,12 @@ function actorOf(ctx: AppContext) { return { userId: ctx.user!.id, isOwner: isOw
 // ───────────── 2. Email operations (EMAIL-002, EMAIL-003) ─────────────
 const EMAIL_STATUSES = ["queued", "sent", "delivered", "bounced", "failed", "suppressed"] as const;
 
-function sampleMail(t: EmailTemplate, baseUrl: string) {
-  return {
-    template: t, to: "preview@example.com", subject: `[Preview] ${label(t)}`, heading: `${label(t)} (preview)`,
-    paragraphs: ["This is sample text used only to preview the template layout.", "Real messages contain the details of the specific account, project or invoice."],
-    cta: { label: "Open your account", url: `${baseUrl}/account` }, idempotencyKey: `preview:${t}`,
-  };
+/** Renders a template's Nth preview sample with the current Business settings identity (pending text where unset). */
+function previewMail(ctx: AppContext, t: EmailTemplate, sample: number) {
+  const def = TEMPLATES[t] as TemplateDef<EmailTemplate>;
+  const data = def.samples[sample];
+  if (data === undefined) return null;
+  return renderTemplate(t, data as never, identityFrom(ctx.settings), def.category === "marketing" ? `${ctx.baseUrl}/unsubscribe/preview` : undefined);
 }
 
 // ───────────── 7. Backups ─────────────
@@ -176,6 +176,9 @@ ${input({ name: "voice.phone_number", id: "f-voice", label: "Receptionist phone 
 <div class="grid grid-2">${input({ name: "staffed_hours", label: "Staffed support hours", value: v?.staffed_hours ?? support?.staffed_hours ?? ctx.settings["support.staffed_hours"] ?? "", maxlength: 160, required: true, hint: "Shown publicly. Do not claim 24/7 human coverage unless it is actually staffed (SUP-005)." })}
 ${input({ name: "first_response_target_hours", label: "First-response target (staffed hours)", type: "number", min: 1, max: 168, value: v?.first_response_target_hours ?? support?.first_response_target_hours ?? "", required: true })}</div>
 <div class="form-actions">${button("Save settings")}</div></form>
+<section class="card stack" data-testid="tax-settings-link"><h2 class="card__title">Tax</h2>${isOwner(ctx.actor!)
+  ? html`<p class="muted">Sales tax registration, jurisdictions, rates and taxable products (LEGAL-005). Owner only.</p><p>${linkButton("Tax configuration", "/staff/settings/tax", "secondary", "sm")}</p>`
+  : html`<p class="muted">Tax configuration is recorded by the Owner.</p>`}</section>
 <section class="section--tight"><h2>Change history</h2>${table(meta, [
   { header: "Setting", cell: (m) => m.key },
   { header: "Last changed", cell: (m) => formatDateTime(m.updated_at) },
@@ -346,9 +349,8 @@ ${input({ name: "weekly_capacity_hours", label: "Weekly capacity (hours)", type:
     try {
       const inv = await emp.inviteStaff(ctx.db, ctx.user!.id, v.email, v.role);
       await sendMail(ctx, {
-        template: "staff_invitation", to: inv.email, subject: "You're invited to Crestmont Website Development", heading: "Join the Crestmont team",
-        paragraphs: [`${ctx.user!.displayName} invited you to join Crestmont Website Development as ${label(inv.role)}.`, "Accept within 7 days to choose your password. Two-factor authentication is required for all staff accounts."],
-        cta: { label: "Accept invitation", url: `${ctx.baseUrl}/invite?token=${inv.token}` }, idempotencyKey: `staff-invite:${inv.token.slice(0, 16)}`,
+        template: "staff_invitation", to: inv.email, idempotencyKey: `staff-invite:${inv.token.slice(0, 16)}`,
+        data: { inviterName: ctx.user!.displayName, roleLabel: label(inv.role), acceptUrl: `${ctx.baseUrl}/invite?token=${inv.token}` },
       });
       return redirect(ctx, "/staff/employees", { kind: "success", text: `Invitation sent to ${inv.email}.` });
     } catch (e) {
@@ -453,19 +455,30 @@ ${pagination(ctx, page, rows.length > limit)}`;
   });
   r.get("/staff/email/templates", (ctx) => {
     requireStaff(ctx, "settings.operational");
+    const required = new Set<string>(REQUIRED_WORKFLOWS);
+    const covered = REQUIRED_WORKFLOWS.filter((w) => w in TEMPLATES).length;
     const body = html`${pageHead("Email template catalogue", linkButton("Delivery log", "/staff/email", "secondary", "sm"), "Email operations")}
-${alert("warn", html`<strong>Preview only.</strong> These are rendered with sample text through the same renderer the platform uses for real mail. Nothing here is sent.`)}
-<p class="muted">${EMAIL_TEMPLATES.length} templates. HTML previews download as files (the page security policy does not allow embedding mail HTML).</p>
-<div class="grid grid-2">${EMAIL_TEMPLATES.map((t) => {
-      const m = renderMail(sampleMail(t, ctx.baseUrl));
-      return html`<section class="card"><h3 class="card__title">${label(t)} ${badge("draft", "Preview")}</h3><pre class="code-block">${m.text}</pre><a class="btn btn--ghost btn--sm" href="/staff/email/templates/${t}/html">Download HTML preview</a></section>`;
-    })}</div>`;
+${alert("warn", html`<strong>Preview only — copy awaiting Founder review.</strong> Each template is rendered with labelled sample data through the same registry and layout the platform uses for real mail. Nothing here is sent. The footer shows the business identity recorded in <a href="/staff/settings">Business settings</a>; anything not yet recorded shows as pending.`)}
+<p class="muted" data-testid="template-coverage">${covered} of ${REQUIRED_WORKFLOWS.length} required workflows have a template; ${EMAIL_TEMPLATES.length} templates in total. HTML previews download as files (the page security policy does not allow embedding mail HTML).</p>
+${EMAIL_TEMPLATES.map((t) => {
+      const def = TEMPLATES[t] as TemplateDef<EmailTemplate>;
+      return html`<section class="card stack" id="tpl-${t}" data-template="${t}"><h2 class="card__title">${label(t)} ${required.has(t) ? badge("active", "Required workflow") : badge("draft", "Additional")} ${badge(def.category === "transactional" ? "info" : "warn", def.category === "transactional" ? "Transactional — no unsubscribe link" : "Marketing — unsubscribe link")}</h2>
+<p class="muted">${def.description} Audience: ${label(def.audience)}.</p>
+${def.samples.map((_, i) => {
+        const m = previewMail(ctx, t, i)!;
+        return html`<details${i === 0 ? html` open` : ""}><summary><strong>Subject:</strong> ${m.subject}</summary><pre class="code-block">${m.text}</pre>
+<a class="btn btn--ghost btn--sm" href="/staff/email/templates/${t}/html?sample=${i}">Download HTML preview</a></details>`;
+      })}</section>`;
+    })}`;
     return staffPage(ctx, "Email templates", body);
   });
   r.get("/staff/email/templates/:name/html", (ctx, p) => {
     requireStaff(ctx, "settings.operational");
     if (!(EMAIL_TEMPLATES as readonly string[]).includes(p.name)) throw new HttpError(404, "Unknown template");
-    return download(ctx, renderMail(sampleMail(p.name as EmailTemplate, ctx.baseUrl)).html, `preview-${p.name}.html`, "text/html; charset=utf-8");
+    const n = Number(ctx.url.searchParams.get("sample") ?? "0");
+    const m = Number.isInteger(n) && n >= 0 ? previewMail(ctx, p.name as EmailTemplate, n) : null;
+    if (!m) throw new HttpError(404, "Unknown sample");
+    return download(ctx, m.html, `preview-${p.name}-${n}.html`, "text/html; charset=utf-8");
   });
   r.get("/staff/email/:id", async (ctx, p) => {
     requireStaff(ctx, "settings.operational");
@@ -1110,8 +1123,7 @@ ${checkbox("confirm", "I understand my account will be anonymised and I will los
       if (e instanceof priv.PrivacyError) return redirect(ctx, "/account/privacy", { kind: "error", text: e.message });
       throw e;
     }
-    await sendMail(ctx, { template: "security_notification", to: ctx.user!.email, subject: "We received your deletion request", heading: "Deletion request received", idempotencyKey: `privacy-del:${ctx.user!.id}:${Date.now()}`,
-      paragraphs: ["We received a request to delete your Crestmont account. A staff member will review it and confirm when it is complete.", "If you did not make this request, sign in and change your password, then contact support."] });
+    await sendMail(ctx, { template: "security_notification", to: ctx.user!.email, idempotencyKey: `privacy-del:${ctx.user!.id}:${Date.now()}`, data: { event: "deletion_requested" } });
     return redirect(ctx, "/account/privacy", { kind: "success", text: "Deletion request received. Staff will review it." });
   });
 }

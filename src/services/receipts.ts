@@ -5,6 +5,8 @@
 import type { Db } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import { HttpError } from "../app/http.ts";
+import { parseTaxDetail } from "./tax.ts";
+import type { TaxResult } from "../domain/tax.ts";
 
 export const RECEIPT_PREFIX = "CWD-R-";
 
@@ -15,6 +17,8 @@ export interface ReceiptData {
   order: { id: string; kind: string; total_cents: number } | null;
   organization: { id: string; name: string };
   refundedCents: number;
+  /** LEGAL-005: the paid invoice's tax snapshot; null when it was issued without tax configuration. */
+  tax: TaxResult | null;
 }
 
 /** Assigns the receipt number for a payment if it does not have one yet (idempotent). */
@@ -38,11 +42,13 @@ export async function loadReceipt(db: Db, paymentId: string, organizationId: str
   if (!p) throw new HttpError(404, "Receipt not found.");
   if (p.status === "failed") throw new HttpError(404, "This payment failed, so there is no receipt for it.");
   const receiptNumber = await ensureReceiptNumber(db, p.id);
-  const invoice = p.invoice_id ? await db.prepare(`SELECT id, description, milestone_kind, amount_cents, status, created_at, paid_at, stripe_checkout_session_id FROM invoices WHERE id = ? AND organization_id = ?`).bind(p.invoice_id, p.organization_id).first<NonNullable<ReceiptData["invoice"]>>() : null;
+  const invoice = p.invoice_id ? await db.prepare(`SELECT id, description, milestone_kind, amount_cents, status, created_at, paid_at, stripe_checkout_session_id, tax_detail_json FROM invoices WHERE id = ? AND organization_id = ?`).bind(p.invoice_id, p.organization_id).first<NonNullable<ReceiptData["invoice"]> & { tax_detail_json?: string | null }>() : null;
+  const tax = parseTaxDetail(invoice?.tax_detail_json);
+  if (invoice) delete invoice.tax_detail_json;
   const order = p.order_id ? await db.prepare(`SELECT id, kind, total_cents FROM orders WHERE id = ? AND organization_id = ?`).bind(p.order_id, p.organization_id).first<NonNullable<ReceiptData["order"]>>() : null;
   const organization = (await db.prepare(`SELECT id, name FROM organizations WHERE id = ?`).bind(p.organization_id).first<{ id: string; name: string }>())!;
   const refunded = await db.prepare(`SELECT COALESCE(SUM(amount_cents),0) AS n FROM refunds WHERE payment_id = ? AND status = 'issued'`).bind(p.id).first<{ n: number }>();
-  return { receiptNumber, payment: { id: p.id, amount_cents: p.amount_cents, status: p.status, created_at: p.created_at, stripe_payment_intent_id: p.stripe_payment_intent_id, stripe_charge_id: p.stripe_charge_id }, invoice, order, organization, refundedCents: refunded?.n ?? 0 };
+  return { receiptNumber, payment: { id: p.id, amount_cents: p.amount_cents, status: p.status, created_at: p.created_at, stripe_payment_intent_id: p.stripe_payment_intent_id, stripe_charge_id: p.stripe_charge_id }, invoice, order, organization, refundedCents: refunded?.n ?? 0, tax };
 }
 
 export interface BusinessIdentity { tradingName: string; legalName: string | null; address: string | null; billingEmail: string }

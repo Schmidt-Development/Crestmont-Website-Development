@@ -81,9 +81,9 @@ export async function postMessage(ctx: AppContext, input: {
   if (!input.internal && input.projectId) {
     const preview = body.length > 160 ? body.slice(0, 157) + "…" : body;
     if (input.fromStaff) {
-      await notifyCustomer(ctx, input.projectId, { kind: "message", template: "project_update", subject: "New message from your Crestmont team", body: preview, path: `/portal/projects/${input.projectId}/messages`, key: `msg:${id}`, exceptUserId: input.authorUserId });
+      await notifyCustomer(ctx, input.projectId, { kind: "message", mail: { template: "project_update", data: { event: "message_from_team", preview } }, path: `/portal/projects/${input.projectId}/messages`, key: `msg:${id}`, exceptUserId: input.authorUserId });
     } else {
-      await notifyProjectTeam(ctx, input.projectId, { kind: "message", template: "project_update", subject: "New customer message", body: preview, path: `/staff/projects/${input.projectId}?tab=messages`, key: `msg:${id}`, exceptUserId: input.authorUserId });
+      await notifyProjectTeam(ctx, input.projectId, { kind: "message", mail: { template: "project_update", data: { event: "message_from_customer", preview } }, path: `/staff/projects/${input.projectId}?tab=messages`, key: `msg:${id}`, exceptUserId: input.authorUserId });
     }
   }
   return id;
@@ -106,13 +106,13 @@ async function notifyGeneral(ctx: AppContext, organizationId: string, messageId:
   const preview = body.length > 160 ? body.slice(0, 157) + "…" : body;
   const org = await ctx.db.prepare(`SELECT name FROM organizations WHERE id = ?`).bind(organizationId).first<{ name: string }>();
   const people = fromStaff ? await customerMembers(ctx.db, organizationId) : await generalConversationStaff(ctx.db, organizationId);
-  const subject = fromStaff ? "New message from Crestmont" : `New general message from ${org?.name ?? "a customer"}`;
   const path = fromStaff ? "/portal/messages/general" : `/staff/conversations/${organizationId}`;
   for (const u of people) {
     if (u.id === authorUserId) continue;
     await notify(ctx.db, u.id, { kind: "message", subjectType: "conversation", subjectId: organizationId, body: fromStaff ? `New message from Crestmont: ${preview}` : `${org?.name ?? "Customer"}: ${preview}` });
-    await sendMail(ctx, { template: "project_update", to: u.email, subject, heading: subject, paragraphs: [preview],
-      cta: { label: fromStaff ? "Open your portal" : "Open conversation", url: `${ctx.baseUrl}${path}` }, idempotencyKey: `msg:${messageId}:${u.id}` });
+    const url = `${ctx.baseUrl}${path}`;
+    await sendMail(ctx, { template: "project_update", to: u.email, idempotencyKey: `msg:${messageId}:${u.id}`,
+      data: fromStaff ? { event: "general_message_from_team", preview, url } : { event: "general_message_from_customer", organizationName: org?.name ?? "a customer", preview, url } });
   }
 }
 

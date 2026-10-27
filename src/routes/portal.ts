@@ -696,9 +696,8 @@ ${select({ name: "role", label: "Role", options: roleOpts, value: "customer_memb
       const pending = await ctx.db.prepare(`SELECT 1 FROM invitations WHERE organization_id = ? AND email = ? AND accepted_at IS NULL AND expires_at > ?`).bind(org.organizationId, email, new Date().toISOString()).first();
       if (pending) return teamPage(ctx, org, ["An invitation to that address is already pending. Revoke it first to send a new one."], 422, email);
       const token = await createInvitation(ctx.db, ctx.user!.id, email, role, org.organizationId);
-      await sendMail(ctx, { template: "registration", to: email, subject: `${ctx.user!.displayName} invited you to ${org.organizationName} on Crestmont`, heading: `Join ${org.organizationName}`,
-        paragraphs: [`${ctx.user!.displayName} invited you to collaborate on ${org.organizationName}'s website project with Crestmont Website Development.`, "This invitation expires in 7 days."],
-        cta: { label: "Accept invitation", url: `${ctx.baseUrl}/invite?token=${token}` }, idempotencyKey: `cinv:${token.slice(0, 16)}` });
+      await sendMail(ctx, { template: "registration", to: email, idempotencyKey: `cinv:${token.slice(0, 16)}`,
+        data: { inviterName: ctx.user!.displayName, organizationName: org.organizationName, acceptUrl: `${ctx.baseUrl}/invite?token=${token}` } });
     } catch (e) {
       if (e instanceof AuthError) return teamPage(ctx, org, [e.message], 422, email);
       throw e;

@@ -7,6 +7,7 @@ import { milestoneInvoiceAllowed } from "../domain/project.ts";
 import { audit } from "./security.ts";
 import { HttpError } from "../app/http.ts";
 import { effectivePackagePrice } from "./pricing-approvals.ts";
+import { taxForNewInvoice, quoteProductKey, checkoutLinesFor } from "./tax.ts";
 
 export interface InvoiceRow { id: string; organization_id: string; order_id: string | null; project_id: string | null; milestone_kind: string | null; amount_cents: number; status: string; description: string | null }
 
@@ -18,13 +19,17 @@ export async function createPackageOrder(db: Db, organizationId: string, package
   const amount = price.cents;
   const at = nowIso(() => now);
   const orderId = newId("ord"), invoiceId = newId("inv");
+  // LEGAL-005: tax (if the Owner configured it) is added on top of the price; the order total stays pre-tax.
+  const tax = await taxForNewInvoice(db, { description: `${pkg.name} package — 100% upfront`, amountCents: amount, productKey: pkg.id });
   await db.batch([
     db.prepare(`INSERT INTO orders (id, organization_id, product_id, total_cents, status, kind, created_at) VALUES (?,?,?,?, 'pending_payment','package',?)`).bind(orderId, organizationId, pkg.id, amount, at),
-    db.prepare(`INSERT INTO invoices (id, organization_id, order_id, milestone_kind, amount_cents, status, description, created_at) VALUES (?,?,?, 'full', ?, 'open', ?, ?)`)
-      .bind(invoiceId, organizationId, orderId, amount, `${pkg.name} package — 100% upfront`, at),
+    db.prepare(`INSERT INTO invoices (id, organization_id, order_id, milestone_kind, amount_cents, subtotal_cents, tax_cents, tax_detail_json, status, description, created_at) VALUES (?,?,?, 'full', ?, ?, ?, ?, 'open', ?, ?)`)
+      .bind(invoiceId, organizationId, orderId, tax.amountCents, tax.subtotalCents, tax.taxCents, tax.detailJson, `${pkg.name} package — 100% upfront`, at),
   ]);
-  await audit(db, { actorUserId, action: "order.created", subjectType: "order", subjectId: orderId, organizationId, details: { packageId, totalCents: amount, priceSource: price.source, priceOverrideId: price.overrideId } });
-  return { orderId, invoiceId, amountCents: amount, description: `${pkg.name} website package` };
+  await audit(db, { actorUserId, action: "order.created", subjectType: "order", subjectId: orderId, organizationId, details: { packageId, totalCents: amount, taxCents: tax.taxCents, priceSource: price.source, priceOverrideId: price.overrideId } });
+  const description = `${pkg.name} website package`;
+  return { orderId, invoiceId, amountCents: tax.amountCents, description,
+    checkoutLines: checkoutLinesFor({ description, amount_cents: tax.amountCents, subtotal_cents: tax.subtotalCents, tax_detail_json: tax.detailJson }, description) };
 }
 
 /** Accepting a quote version creates the order and the first invoice (full or 50% deposit). */
@@ -32,14 +37,16 @@ export async function createQuoteOrder(db: Db, organizationId: string, quoteVers
   const at = nowIso();
   const orderId = newId("ord"), invoiceId = newId("inv");
   const first = quoteVersion.payment_schedule === "milestone_50_25_25" ? milestoneSplit(quoteVersion.total_cents)[0] : { kind: "full" as const, amountCents: quoteVersion.total_cents };
+  const description = first.kind === "deposit_50" ? "50% deposit" : "Payment in full";
+  const tax = await taxForNewInvoice(db, { description, amountCents: first.amountCents, productKey: await quoteProductKey(db, quoteVersion.id) });
   await db.batch([
     db.prepare(`INSERT INTO orders (id, organization_id, quote_version_id, product_id, total_cents, status, kind, lead_id, created_at) VALUES (?,?,?,?,?, 'pending_payment','quote',?,?)`)
       .bind(orderId, organizationId, quoteVersion.id, quoteVersion.payment_schedule === "upfront" ? null : "custom", quoteVersion.total_cents, leadId, at),
-    db.prepare(`INSERT INTO invoices (id, organization_id, order_id, milestone_kind, amount_cents, status, description, created_at) VALUES (?,?,?,?,?, 'open', ?, ?)`)
-      .bind(invoiceId, organizationId, orderId, first.kind, first.amountCents, first.kind === "deposit_50" ? "50% deposit" : "Payment in full", at),
+    db.prepare(`INSERT INTO invoices (id, organization_id, order_id, milestone_kind, amount_cents, subtotal_cents, tax_cents, tax_detail_json, status, description, created_at) VALUES (?,?,?,?,?,?,?,?, 'open', ?, ?)`)
+      .bind(invoiceId, organizationId, orderId, first.kind, tax.amountCents, tax.subtotalCents, tax.taxCents, tax.detailJson, description, at),
   ]);
-  await audit(db, { actorUserId, action: "order.created", subjectType: "order", subjectId: orderId, organizationId, details: { quoteVersionId: quoteVersion.id } });
-  return { orderId, invoiceId, amountCents: first.amountCents };
+  await audit(db, { actorUserId, action: "order.created", subjectType: "order", subjectId: orderId, organizationId, details: { quoteVersionId: quoteVersion.id, taxCents: tax.taxCents } });
+  return { orderId, invoiceId, amountCents: tax.amountCents };
 }
 
 /** Idempotent: provisions exactly one project per paid order. */
@@ -72,22 +79,24 @@ export async function provisionProject(db: Db, orderId: string): Promise<string>
 
 /** Issues the next 25% milestone invoice when its project approval exists; refuses duplicates. */
 export async function issueMilestoneInvoice(db: Db, projectId: string, kind: "design_25" | "prelaunch_25", actorUserId: string) {
-  const p = await db.prepare(`SELECT p.id, p.organization_id, p.payment_schedule, o.total_cents FROM projects p JOIN orders o ON o.id = p.order_id WHERE p.id = ?`).bind(projectId).first<{ id: string; organization_id: string; payment_schedule: string; total_cents: number }>();
+  const p = await db.prepare(`SELECT p.id, p.organization_id, p.payment_schedule, o.total_cents, o.quote_version_id FROM projects p JOIN orders o ON o.id = p.order_id WHERE p.id = ?`).bind(projectId).first<{ id: string; organization_id: string; payment_schedule: string; total_cents: number; quote_version_id: string | null }>();
   if (!p) throw new HttpError(404, "Project not found");
   if (p.payment_schedule !== "milestone_50_25_25") throw new HttpError(409, "This project is paid upfront");
   const approvals = (await db.prepare(`SELECT kind, decision FROM approvals WHERE project_id = ?`).bind(projectId).all<{ kind: string; decision: string }>()).results;
   if (!milestoneInvoiceAllowed(kind, approvals)) throw new HttpError(409, kind === "design_25" ? "Design must be approved before the design milestone invoice" : "Final launch approval is required before the pre-launch invoice");
   const amount = milestoneSplit(p.total_cents).find((m) => m.kind === kind)!.amountCents;
   const id = newId("inv");
+  const description = kind === "design_25" ? "25% on approved design" : "25% before launch";
+  const tax = await taxForNewInvoice(db, { description, amountCents: amount, productKey: await quoteProductKey(db, p.quote_version_id) });
   try {
-    await db.prepare(`INSERT INTO invoices (id, organization_id, order_id, project_id, milestone_kind, amount_cents, status, description, created_at)
-                      SELECT ?, organization_id, order_id, id, ?, ?, 'open', ?, ? FROM projects WHERE id = ?`)
-      .bind(id, kind, amount, kind === "design_25" ? "25% on approved design" : "25% before launch", nowIso(), projectId).run();
+    await db.prepare(`INSERT INTO invoices (id, organization_id, order_id, project_id, milestone_kind, amount_cents, subtotal_cents, tax_cents, tax_detail_json, status, description, created_at)
+                      SELECT ?, organization_id, order_id, id, ?, ?, ?, ?, ?, 'open', ?, ? FROM projects WHERE id = ?`)
+      .bind(id, kind, tax.amountCents, tax.subtotalCents, tax.taxCents, tax.detailJson, description, nowIso(), projectId).run();
   } catch (e) {
     if (/UNIQUE/.test((e as Error).message)) throw new HttpError(409, "That milestone invoice already exists");
     throw e;
   }
-  await audit(db, { actorUserId, action: "invoice.milestone_issued", subjectType: "invoice", subjectId: id, organizationId: p.organization_id, details: { kind, amount } });
+  await audit(db, { actorUserId, action: "invoice.milestone_issued", subjectType: "invoice", subjectId: id, organizationId: p.organization_id, details: { kind, amount, taxCents: tax.taxCents } });
   return id;
 }
 
@@ -104,7 +113,7 @@ export async function markInvoicePaid(db: Db, invoiceId: string, payment: { amou
       .bind(newId("pay"), inv.organization_id, inv.id, inv.order_id, payment.amountCents, payment.feeCents ?? null, payment.paymentIntentId, payment.chargeId ?? null, at),
   ]);
   if (inv.order_id) {
-    const totals = await db.prepare(`SELECT o.total_cents, COALESCE(SUM(i.amount_cents),0) AS paid FROM orders o LEFT JOIN invoices i ON i.order_id = o.id AND i.status = 'paid' WHERE o.id = ? GROUP BY o.id`).bind(inv.order_id).first<{ total_cents: number; paid: number }>();
+    const totals = await db.prepare(`SELECT o.total_cents, COALESCE(SUM(COALESCE(i.subtotal_cents, i.amount_cents)),0) AS paid FROM orders o LEFT JOIN invoices i ON i.order_id = o.id AND i.status = 'paid' WHERE o.id = ? GROUP BY o.id`).bind(inv.order_id).first<{ total_cents: number; paid: number }>();
     const status = totals && totals.paid >= totals.total_cents ? "paid" : "partially_paid";
     await db.prepare(`UPDATE orders SET status = ? WHERE id = ?`).bind(status, inv.order_id).run();
   }
