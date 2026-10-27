@@ -71,6 +71,8 @@ Set with `npx wrangler@4 secret put <NAME> --env staging` (then again with `--en
 | `GITHUB_TOKEN`, `GITHUB_REPO` | recommended (readiness data source) | optional | fine-grained, read-only, this repository only |
 | `VOICE_WEBHOOK_SECRET`, `RETELL_API_KEY` | after the provider is approved (BLK-009) | same | voice provider |
 
+**Stripe API version.** Every request the platform makes sends `Stripe-Version: 2025-02-24.acacia` (`STRIPE_API_VERSION` in `src/adapters/payments.ts`). Webhook events are rendered in the *webhook endpoint's* version: when creating the endpoint, choose the same version (Dashboard → Developers → Webhooks → Add endpoint → API version), or create it with `api_version=2025-02-24.acacia`. The handler also accepts newer (basil+) payloads: when an `invoice.paid` payload omits the PaymentIntent it looks it up with the pinned version, and fails the event for retry rather than record a payment that refunds and disputes could not find (`tests/stripe-versions.test.ts`). Events to enable: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `customer.subscription.created|updated|deleted`, `invoice.paid`, `invoice.payment_failed`, `invoice.finalized`, `invoice.voided`, `invoice.marked_uncollectible`, `charge.refunded`, `charge.dispute.created|updated|closed`.
+
 Non-secret vars: add `APP_URL = "https://<host>"` to each environment's `vars` in `wrangler.toml` once the URL is known (links in emails use it).
 
 ## 5. GitHub environments, secrets and variables

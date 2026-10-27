@@ -34,6 +34,14 @@ export class NoPayments implements PaymentsAdapter {
   async createRefund(): Promise<never> { throw new Error("Payments are not configured"); }
 }
 
+/**
+ * Every request pins the Stripe API version this integration is written against (https://docs.stripe.com/api-versions).
+ * 2025-02-24.acacia is the last version before 2025-03-31.basil, which removed Invoice.payment_intent/charge/subscription
+ * and Subscription.current_period_end. Webhook payloads follow the webhook endpoint's own version, so
+ * src/domain/stripe-shapes.ts reads both shapes. Upgrading means changing this constant after testing the new shapes.
+ */
+export const STRIPE_API_VERSION = "2025-02-24.acacia";
+
 export class StripeTestPayments implements PaymentsAdapter {
   readonly configured = true;
   readonly mode = "test" as const;
@@ -48,7 +56,7 @@ export class StripeTestPayments implements PaymentsAdapter {
   private async call<T>(path: string, form: Record<string, string>, idem?: string): Promise<T> {
     const r = await this.fetchImpl(`https://api.stripe.com/v1/${path}`, {
       method: "POST",
-      headers: { authorization: `Bearer ${this.key}`, "content-type": "application/x-www-form-urlencoded", ...(idem ? { "idempotency-key": idem } : {}) },
+      headers: { authorization: `Bearer ${this.key}`, "stripe-version": STRIPE_API_VERSION, "content-type": "application/x-www-form-urlencoded", ...(idem ? { "idempotency-key": idem } : {}) },
       body: new URLSearchParams(form).toString(),
     });
     const body = (await r.json()) as T & { error?: { message: string } };
@@ -100,7 +108,7 @@ export class StripeReadOnly {
   async get<T>(path: string, query: [string, string][] = []): Promise<T> {
     if (!/^[a-z_]+(\/[A-Za-z0-9_]+)*$/.test(path)) throw new Error("Invalid Stripe path");
     const qs = query.length ? `?${new URLSearchParams(query).toString()}` : "";
-    const r = await this.fetchImpl(`https://api.stripe.com/v1/${path}${qs}`, { method: "GET", headers: { authorization: `Bearer ${this.key}` } });
+    const r = await this.fetchImpl(`https://api.stripe.com/v1/${path}${qs}`, { method: "GET", headers: { authorization: `Bearer ${this.key}`, "stripe-version": STRIPE_API_VERSION } });
     const body = (await r.json().catch(() => ({}))) as T & { error?: { message: string }; livemode?: boolean };
     if (!r.ok) throw new Error(`Stripe ${r.status}: ${body.error?.message ?? "error"}`);
     if (body.livemode === true) throw new LivePaymentsNotAuthorized("Stripe returned a live-mode object; live payments are not authorised");
@@ -191,7 +199,7 @@ export class StripeInvoicing {
     if (!/^[a-z_]+(\/[A-Za-z0-9_]+)*$/.test(path)) throw new Error("Invalid Stripe path");
     const r = await this.fetchImpl(`https://api.stripe.com/v1/${path}`, {
       method: "POST",
-      headers: { authorization: `Bearer ${this.key}`, "content-type": "application/x-www-form-urlencoded", "idempotency-key": idempotencyKey },
+      headers: { authorization: `Bearer ${this.key}`, "stripe-version": STRIPE_API_VERSION, "content-type": "application/x-www-form-urlencoded", "idempotency-key": idempotencyKey },
       body: new URLSearchParams(form).toString(),
     });
     const body = (await r.json().catch(() => ({}))) as T & { error?: { message: string }; livemode?: boolean };

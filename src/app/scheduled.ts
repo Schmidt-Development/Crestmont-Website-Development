@@ -6,7 +6,7 @@ import { buildContext } from "./app.ts";
 import { nowIso } from "../lib/db.ts";
 import { syncRequirements } from "../readiness/ingest.ts";
 import { applySeedBlockerLinks } from "../services/readiness-admin.ts";
-import { retryFailedStripeEvents } from "../services/payments.ts";
+import { retryFailedStripeEvents, stripeInvoiceLookup } from "../services/payments.ts";
 import { runSupportEscalationSweep } from "../services/support.ts";
 import { runInactivitySweep } from "../services/projects.ts";
 import { syncGithub } from "../services/github.ts";
@@ -35,7 +35,7 @@ export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string,
       let detail: string;
       switch (job) {
         case "requirements": { const r = await syncRequirements(ctx.db); const l = await applySeedBlockerLinks(ctx.db); detail = `${r.upserted} requirements synced, ${l} blocker links applied`; break; }
-        case "stripe_reconcile": detail = `${await retryFailedStripeEvents(ctx)} stored events retried`; break;
+        case "stripe_reconcile": detail = `${await retryFailedStripeEvents({ db: ctx.db, email: ctx.email, baseUrl: ctx.baseUrl, stripeLookup: stripeInvoiceLookup(env.STRIPE_SECRET_KEY, env.overrides?.fetch ?? fetch) })} stored events retried`; break;
         case "support_escalation": { const r = await runSupportEscalationSweep(ctx); detail = `${r.flagged} of ${r.checked} tickets flagged${r.note ? ` (${r.note})` : ""}`; break; }
         case "github_sync": {
           if (!env.GITHUB_TOKEN || !env.GITHUB_REPO) { detail = "skipped: GitHub source not configured"; break; }

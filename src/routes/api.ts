@@ -7,7 +7,7 @@ import { captureLead } from "../services/leads.ts";
 import { ingestEvidence, verifyEvidenceSignature, IngestAuthError } from "../readiness/ingest.ts";
 import { buildReport, loadReadinessInput, requirementsCsv } from "../readiness/report.ts";
 import { verifyStripeSignature, recordStripeEvent, isStripeEventEnvelope, WebhookSignatureError, type StripeEvent } from "../domain/stripe-webhook.ts";
-import { processStripeEvent } from "../services/payments.ts";
+import { processStripeEvent, stripeInvoiceLookup } from "../services/payments.ts";
 import { can } from "../domain/authz.ts";
 import { audit } from "../services/security.ts";
 import { ingestPushedSnapshot, GithubPushError } from "../services/github.ts";
@@ -88,7 +88,7 @@ export function register(r: Router) {
     const evt = JSON.parse(raw) as StripeEvent;
     if (!isStripeEventEnvelope(evt)) return jsonResponse(ctx, 400, { error: "Malformed event" });
     const outcome = await recordStripeEvent(ctx.db, evt, raw);
-    if (outcome === "new") await processStripeEvent(ctx, evt);
+    if (outcome === "new") await processStripeEvent({ db: ctx.db, email: ctx.email, baseUrl: ctx.baseUrl, stripeLookup: stripeInvoiceLookup(ctx.env.STRIPE_SECRET_KEY, ctx.env.overrides?.fetch ?? fetch) }, evt);
     return jsonResponse(ctx, 200, { received: true, duplicate: outcome === "duplicate" });
   });
 
