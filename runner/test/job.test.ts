@@ -16,7 +16,7 @@ import { FORBIDDEN_ENV } from "../src/workspace.ts";
 import type { RunnerConfig } from "../src/config.ts";
 import {
   startFakeControlPlane, makeJob, claimFrom, fakeSdk, happyAgent, makeSkillsDir, testManifest, makeConfig, SECRET,
-  POLLUTED_ENV, delay, initMsg, toolMsg, resultMsg, writeFakeTranscript, tmp,
+  POLLUTED_ENV, delay, initMsg, toolMsg, resultMsg, writeFakeTranscript, tmp, SDK_OPT_IN,
 } from "./helpers.ts";
 import type { FakeCP, FakeSdk } from "./helpers.ts";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -25,7 +25,7 @@ const manifest = testManifest();
 
 async function setup(o: { job?: Partial<Job>; cfg?: Partial<RunnerConfig>; cp?: Parameters<typeof startFakeControlPlane>[0]; omitSkills?: string[] } = {}) {
   const cp = await startFakeControlPlane({ jobs: [makeJob(o.job)], ...(o.cp ?? {}) });
-  const cfg = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: makeSkillsDir(manifest, o.omitSkills), ...(o.cfg ?? {}) });
+  const cfg = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: makeSkillsDir(manifest, o.omitSkills), ...SDK_OPT_IN, ...(o.cfg ?? {}) });
   const client = new ControlPlaneClient({ baseUrl: cp.url, secret: SECRET, runnerId: cfg.runnerId, sleep: async () => {}, retry: { attempts: 2, baseMs: 1 } });
   const job = await claimFrom(cp);
   return { cp, cfg, client, job };
@@ -262,7 +262,7 @@ async function firstAttempt(cp: FakeCP, cfg: RunnerConfig, client: ControlPlaneC
 test("[AIB-RUNNER] resume restores the checkpoint (git bundle + transcript) and passes resume: sessionId [mock SDK]", async () => {
   const j1 = makeJob({ limits: { model: "m", maxTurns: 200, maxRuntimeMinutes: 120, runBudgetUsd: 25, projectBudgetRemainingUsd: 0.5 } });
   const cp = await startFakeControlPlane({ jobs: [j1] });
-  const cfg = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: makeSkillsDir(manifest) });
+  const cfg = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: makeSkillsDir(manifest), ...SDK_OPT_IN });
   const client = new ControlPlaneClient({ baseUrl: cp.url, secret: SECRET, runnerId: cfg.runnerId, sleep: async () => {} });
   try {
     const s1 = await firstAttempt(cp, cfg, client, await claimFrom(cp), true);
@@ -299,7 +299,7 @@ test("[AIB-RUNNER] resume on another host fetches the archive (proposed endpoint
   const j1 = makeJob({ limits: { model: "m", maxTurns: 200, maxRuntimeMinutes: 120, runBudgetUsd: 25, projectBudgetRemainingUsd: 0.5 } });
   for (const serve of [true, false]) {
     const cp = await startFakeControlPlane({ jobs: [{ ...j1, id: `${j1.id}${serve}` }], serveCheckpointFetch: serve });
-    const cfg1 = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: makeSkillsDir(manifest) });
+    const cfg1 = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: makeSkillsDir(manifest), ...SDK_OPT_IN });
     const client = new ControlPlaneClient({ baseUrl: cp.url, secret: SECRET, runnerId: "r", sleep: async () => {} });
     try {
       await firstAttempt(cp, cfg1, client, await claimFrom(cp), true);
@@ -307,7 +307,7 @@ test("[AIB-RUNNER] resume on another host fetches the archive (proposed endpoint
       const key = `builds/${j1.id}${serve}/ckpt-${cp.byPath("checkpoint").length}.tgz`;
       assert.ok(ck >= 1 && cp.archives.has(key));
       cp.jobs.push(makeJob({ id: `${j1.id}${serve}`, attempt: 2, leaseToken: "c".repeat(64), resume: { sessionId: "sess-resume-1", workspaceRef: "gone-on-this-host", checkpointKey: key } }));
-      const cfg2 = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: cfg1.skillsSourceDir, workspacesRoot: tmp("aib-host2-") });
+      const cfg2 = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: cfg1.skillsSourceDir, workspacesRoot: tmp("aib-host2-"), ...SDK_OPT_IN });
       const sdk = fakeSdk(happyAgent({ sessionId: "sess-new-2" }));
       const s2 = await runJob(await claimFrom(cp), deps(cfg2, client, sdk));
       if (serve) {

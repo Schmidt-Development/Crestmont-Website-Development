@@ -10,7 +10,7 @@ import { loadManifest, preflight, provisionSkills } from "../src/skills.ts";
 import { runLoop } from "../src/main.ts";
 import { ControlPlaneClient } from "../src/control-plane.ts";
 import { silentLogger } from "../src/log.ts";
-import { RUNNER_DIR, tmp, makeSkillsDir, makeConfig, startFakeControlPlane, makeJob, SECRET, testManifest, fakeSdk, happyAgent } from "./helpers.ts";
+import { RUNNER_DIR, tmp, makeSkillsDir, makeConfig, startFakeControlPlane, makeJob, SECRET, testManifest, fakeSdk, happyAgent, SDK_OPT_IN } from "./helpers.ts";
 
 const STARTER = path.join(RUNNER_DIR, "starters", "brochure-v1");
 
@@ -116,7 +116,7 @@ test("[AIB-RUNNER] skills manifest names the Founder's toolkit with sources and 
 test("[AIB-RUNNER] poll loop backs off while idle and runs a claimed job once [mock SDK]", async () => {
   const cp = await startFakeControlPlane({ jobs: [] });
   try {
-    const cfg = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: makeSkillsDir(testManifest()), pollMinMs: 10, pollMaxMs: 40 });
+    const cfg = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: makeSkillsDir(testManifest()), pollMinMs: 10, pollMaxMs: 40, ...SDK_OPT_IN });
     const client = new ControlPlaneClient({ baseUrl: cp.url, secret: SECRET, runnerId: "r" });
     const sleeps: number[] = [];
     let polls = 0;

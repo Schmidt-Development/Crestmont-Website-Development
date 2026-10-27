@@ -5,6 +5,7 @@
 import { existsSync, readFileSync, cpSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { run } from "./exec.ts";
+import type { ExecResult } from "./exec.ts";
 
 export interface StarterPackageSpec {
   maxPages: number;
@@ -56,11 +57,15 @@ export function acceptanceCommands(spec: StarterSpec | null, repo: string, packa
     .map((s) => ({ id: `npm-${s}`, label: `npm run ${s}`, command: ["npm", "run", "-s", s] }));
 }
 
-export async function runChecks(repo: string, commands: { id: string; label: string; command: string[] }[], env: Record<string, string>, timeoutMs: number): Promise<CheckOutcome[]> {
+/** Executes one check. Default: a runner-side child process (Agent SDK path). The local provider passes the job's
+ * container sandbox so agent-written code never runs in the runner process or on the host. */
+export type CheckExecutor = (argv: string[], timeoutMs: number) => Promise<ExecResult>;
+
+export async function runChecks(repo: string, commands: { id: string; label: string; command: string[] }[], env: Record<string, string>, timeoutMs: number, executor?: CheckExecutor): Promise<CheckOutcome[]> {
   const out: CheckOutcome[] = [];
   for (const c of commands) {
     const [cmd, ...args] = c.command;
-    const r = await run(cmd, args, { cwd: repo, env, timeoutMs });
+    const r = executor ? await executor(c.command, timeoutMs) : await run(cmd, args, { cwd: repo, env, timeoutMs });
     const tail = (r.stdout + "\n" + r.stderr).trim().split("\n").slice(-25).join("\n").slice(-3000);
     out.push({ id: c.id, label: c.label, command: c.command.join(" "), ok: r.code === 0, code: r.code, timedOut: r.timedOut, outputTail: tail });
   }
