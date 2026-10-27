@@ -460,8 +460,8 @@ async function proposalPage(ctx: AppContext, token: string, errors: string[] = [
   else if (!signedInMatch) acceptBlock = alert("warn", html`You are signed in as ${ctx.user.email}, but this proposal was sent to a different address. <form method="post" action="/logout" style="display:inline">${csrf(ctx)}<button class="btn btn--ghost btn--sm" type="submit">Sign out</button></form> and sign in with the address the proposal was sent to.`);
   else if (!ctx.user.emailVerified) acceptBlock = alert("warn", "Confirm your email address first — check your inbox for the confirmation link — then return to this page.");
   else acceptBlock = html`<form method="post" action="${self}/accept" class="card card--gold stack">${csrf(ctx)}<h2 style="font-size:1.3rem">Accept this proposal</h2>
-${checkbox("agree", "I accept this proposal, its scope and payment schedule, and the Development Agreement and Terms of Service.", { required: true })}
-<p class="faint"><a href="/legal/development-agreement">Development agreement</a> · <a href="/legal/terms">Terms</a> · <a href="/legal/refunds">Refund policy</a></p>
+${checkbox("agree", "I accept this proposal, its scope and payment schedule, the Custom Development Agreement, the Data Processing Addendum and the Terms of Service.", { required: true })}
+<p class="faint"><a href="/legal/custom-development-agreement">Custom development agreement</a> · <a href="/legal/data-processing">Data processing addendum</a> · <a href="/legal/terms">Terms</a> · <a href="/legal/refunds">Refund policy</a></p>
 <div class="form-actions">${button("Accept and continue to payment")}</div></form>`;
   return htmlResponse(ctx, publicLayout(ctx, { title: "Your proposal", noindex: true }, html`<section class="section"><div class="container stack" style="max-width:860px">
 <div class="eyebrow">Proposal · version ${p.version.version}</div><h1>Proposal for ${p.companyName ?? p.contact.name}</h1>
@@ -502,8 +502,8 @@ ${cancelled ? alert("info", "Checkout was cancelled. Nothing was charged.") : ""
 <ul class="checklist">${pkg.includes.map((i) => html`<li>${i}</li>`)}</ul>
 ${pkg.priceIsFloor ? html`<p class="faint">Need more than the standard Premium scope? <a href="/quote">Request a custom quote</a> — work above the starting price is quoted separately.</p>` : ""}</div>
 ${configured ? html`<form method="post" action="/checkout/${pkg.id}" class="card stack">${csrf(ctx)}
-${checkbox("terms", "I agree to the Development Agreement, Terms of Service and Refund Policy.", { required: true })}
-<p class="faint"><a href="/legal/development-agreement">Development agreement</a> · <a href="/legal/terms">Terms</a> · <a href="/legal/refunds">Refund policy</a></p>
+${checkbox("terms", "I agree to the Development Agreement, Terms of Service, Refund Policy and Data Processing Addendum.", { required: true })}
+<p class="faint"><a href="/legal/development-agreement">Development agreement</a> · <a href="/legal/terms">Terms</a> · <a href="/legal/refunds">Refund policy</a> · <a href="/legal/data-processing">Data processing addendum</a></p>
 <p class="faint">You will be taken to Stripe's secure checkout. Your payment is confirmed only when Stripe notifies us.</p>
 <div class="form-actions">${button(`Pay ${formatCents(priceCents)}`)}</div></form>`
     : html`<div class="card stack">${alert("warn", `${NOT_CONFIGURED} You cannot pay online right now.`)}<p>We can still start your project: request a quote or contact us and we will follow up with payment options.</p>
@@ -540,7 +540,7 @@ ${alert("warn", "Maintenance plans are not available for purchase yet. Their exa
     return htmlResponse(ctx, publicLayout(ctx, { title: `${plan.name} maintenance`, noindex: true }, html`<section class="section"><div class="container stack" style="max-width:720px">
 <div class="eyebrow">Maintenance plans</div><h1>${plan.name} — ${formatCents(monthlyCents)}/month</h1>
 <div class="card">${dl(Object.entries(plan.proposedEntitlements).map(([k, v]) => [label(k), v]))}</div>
-${ctx.payments.configured ? html`<form method="post" action="/checkout/maintenance/${plan.id}" class="card stack">${csrf(ctx)}${checkbox("terms", "I agree to the Terms of Service, Support Policy and Cancellation Policy, and authorize monthly billing until I cancel.", { required: true })}<div class="form-actions">${button("Subscribe")}</div></form>`
+${ctx.payments.configured ? html`<form method="post" action="/checkout/maintenance/${plan.id}" class="card stack">${csrf(ctx)}${checkbox("terms", "I agree to the Maintenance Agreement, Terms of Service, Support Policy, Cancellation Policy and Data Processing Addendum, and authorize monthly billing until I cancel.", { required: true })}<p class="faint"><a href="/legal/maintenance-agreement">Maintenance agreement</a> · <a href="/legal/terms">Terms</a> · <a href="/legal/support">Support policy</a> · <a href="/legal/cancellation">Cancellation policy</a> · <a href="/legal/data-processing">Data processing addendum</a></p><div class="form-actions">${button("Subscribe")}</div></form>`
       : html`<div class="card stack">${alert("warn", NOT_CONFIGURED)}<div class="row">${linkButton("Contact us", "/contact", "primary")}</div></div>`}</div></section>`));
   }
   if (!can(ctx.actor!, "customer.billing", { organizationId: org.organizationId })) throw new HttpError(403, "Only an account administrator can subscribe for this organization.");

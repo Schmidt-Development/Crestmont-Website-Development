@@ -43,9 +43,9 @@ export const SEED_VERSION = "2026-10-draft-1";
 /** Which documents a person accepts at each step (the checkbox label on that step names them). */
 export const ACCEPTANCE_SETS = {
   registration: ["terms_of_service", "privacy_policy"],
-  quote_acceptance: ["development_agreement", "terms_of_service"],
-  package_checkout: ["development_agreement", "terms_of_service", "refund_policy"],
-  maintenance_checkout: ["terms_of_service", "support_policy", "cancellation_policy"],
+  quote_acceptance: ["custom_development_agreement", "terms_of_service", "data_processing_addendum"],
+  package_checkout: ["development_agreement", "terms_of_service", "refund_policy", "data_processing_addendum"],
+  maintenance_checkout: ["maintenance_agreement", "terms_of_service", "support_policy", "cancellation_policy", "data_processing_addendum"],
 } as const satisfies Record<string, readonly AgreementKind[]>;
 export type AcceptanceContext = keyof typeof ACCEPTANCE_SETS;
 

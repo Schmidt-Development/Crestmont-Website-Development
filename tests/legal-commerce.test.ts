@@ -100,8 +100,8 @@ test("[LEGAL-003] quote acceptance and package checkout record the development a
   assert.equal((await one<{ n: number }>(t.db, `SELECT COUNT(*) AS n FROM agreement_acceptances WHERE user_id = ?`, cust.id)).n, 0);
   assert.equal((await cust.c.post("/checkout/starter", { terms: "1" })).status, 303);
   const rows = await acceptances(t.db, cust.id);
-  assert.deepEqual(rows.map((r) => r.kind), ["development_agreement", "refund_policy", "terms_of_service"]);
-  assert.ok(rows.every((r) => r.context_type === "package_checkout" && r.version === SEED_VERSION));
+  assert.deepEqual(rows.map((r) => r.kind), ["data_processing_addendum", "development_agreement", "refund_policy", "terms_of_service"]);
+  assert.ok(rows.every((r) => r.context_type === "package_checkout" && r.version === (r.kind === "data_processing_addendum" ? "2026-10-draft-2" : SEED_VERSION)));
 
   // Quote acceptance (proposal flow).
   const rep = await staffClient(t, "owner");
@@ -120,7 +120,7 @@ test("[LEGAL-003] quote acceptance and package checkout record the development a
   assert.equal((await q.post(`${qpath}/accept`, { agree: "1" })).status, 303);
   const qu = await one<{ id: string }>(t.db, `SELECT id FROM users WHERE email = 'quinn@lc.example'`);
   const qrows = (await acceptances(t.db, qu.id)).filter((r) => r.context_type === "quote_acceptance");
-  assert.deepEqual(qrows.map((r) => r.kind), ["development_agreement", "terms_of_service"]);
+  assert.deepEqual(qrows.map((r) => r.kind), ["custom_development_agreement", "data_processing_addendum", "terms_of_service"]);
 
   // Customer view: own organization only.
   const mine = await (await cust.c.get("/portal/agreements")).text();
