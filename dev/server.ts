@@ -30,6 +30,7 @@ const env: Env = {
   EVIDENCE_INGEST_SECRET: process.env.EVIDENCE_INGEST_SECRET,
   STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET,
   STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY,
+  VOICE_WEBHOOK_SECRET: process.env.VOICE_WEBHOOK_SECRET,
   overrides: { storage },
 };
 

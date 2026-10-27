@@ -15,7 +15,7 @@ export async function startServer() {
   const port = 20000 + Math.floor(Math.random() * 20000);
   const dbPath = join(dir, "e2e.db");
   const proc: ChildProcess = spawn(process.execPath, ["--no-warnings", "dev/server.ts", "--port", String(port), "--db", dbPath], {
-    env: { ...process.env, CRESTMONT_FILES: join(dir, "files"), STRIPE_WEBHOOK_SECRET: "whsec_e2e_test_secret", EVIDENCE_INGEST_SECRET: "e2e-ingest-secret" },
+    env: { ...process.env, CRESTMONT_FILES: join(dir, "files"), STRIPE_WEBHOOK_SECRET: "whsec_e2e_test_secret", EVIDENCE_INGEST_SECRET: "e2e-ingest-secret", VOICE_WEBHOOK_SECRET: "e2e-voice-secret" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let log = "";

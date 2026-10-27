@@ -288,7 +288,10 @@ test("[PORTAL-006] [PM-002] [PM-003] revisions count against the allowance, then
     .first<{ status: string; task_id: string; inv_status: string; milestone_kind: string; amount_cents: number; organization_id: string }>();
   assert.deepEqual({ s: after!.status, i: after!.inv_status, k: after!.milestone_kind, amt: after!.amount_cents, org: after!.organization_id }, { s: "approved", i: "open", k: "change_order", amt: 45_000, org: a.organizationId });
   assert.ok(after!.task_id, "assigned task created for the change order");
-  assert.match(await (await ca.get(`/portal/projects/${pa}/revisions`)).text(), /\/portal\/billing\/invoices\/inv_[0-9a-f]+\/pay/);
+  // The "Pay invoice" link opens the invoice page (which holds the POST pay form); /pay itself is POST-only.
+  const payHref = /href="(\/portal\/billing\/invoices\/inv_[0-9a-f]+)">Pay invoice/.exec(await (await ca.get(`/portal/projects/${pa}/revisions`)).text())?.[1];
+  assert.ok(payHref, "pay link present");
+  assert.equal((await ca.get(payHref!)).status, 200, "pay link resolves");
   assert.equal((await ca.post(`/portal/change-orders/${co!.id}/decide`, { decision: "approved" })).status, 409, "no double decision");
   assert.equal((await sc.post(`/staff/revisions/${r4!.id}/status`, { status: "in_progress" })).status, 303, "work can start once approved");
 });

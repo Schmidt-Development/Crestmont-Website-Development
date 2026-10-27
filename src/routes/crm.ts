@@ -165,7 +165,7 @@ ${can(actor, "lead.assign") ? html`<div class="card stack"><h2 style="font-size:
 ${select({ name: "owner", label: "Assign to", options: staff.map((s) => ({ value: s.id, label: s.display_name })), value: lead.owner_user_id, includeBlank: "Unassigned" })}<div class="form-actions">${button("Save owner", { size: "sm", variant: "secondary" })}</div></form></div>` : ""}
 <div class="card stack"><h2 style="font-size:1.2rem">Follow-up tasks</h2>
 ${tasks.length ? html`<ul class="checklist">${tasks.map((t) => html`<li>${t.completed_at ? html`<s>${t.body}</s> <span class="faint">done ${formatDate(t.completed_at)}</span>` : html`<strong>${t.body}</strong> <span class="${t.due_at && t.due_at < ctx.now().toISOString() ? "error-text" : "faint"}">due ${formatDate(t.due_at)}</span> ${writable ? actionForm(ctx, `${base}/tasks/${t.id}/complete`, "Mark done") : ""}`}</li>`)}</ul>` : html`<p class="muted">No follow-ups scheduled.</p>`}
-${writable ? html`<form method="post" action="${base}/task" class="stack">${csrf(ctx)}${input({ name: "body", label: "Follow-up", required: true })}${input({ name: "due", label: "Due date", type: "date", required: true })}<div class="form-actions">${button("Add task", { size: "sm", variant: "secondary" })}</div></form>` : ""}</div>
+${writable ? html`<form method="post" action="${base}/task" class="stack">${csrf(ctx)}${input({ name: "body", label: "Follow-up", required: true, id: "followup-body" })}${input({ name: "due", label: "Due date", type: "date", required: true })}<div class="form-actions">${button("Add task", { size: "sm", variant: "secondary" })}</div></form>` : ""}</div>
 </section></div>
 ${aiCard}
 <section class="card stack"><h2 style="font-size:1.2rem">Linked records</h2>
