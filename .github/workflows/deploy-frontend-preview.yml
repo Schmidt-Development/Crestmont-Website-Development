@@ -1,0 +1,135 @@
+name: Deploy frontend preview
+
+# Independent preview of the frontend branch (docs/frontend/HANDOFF.md §Preview). Deploys the Worker
+# "crestmont-platform-frontend-preview" with its OWN disposable D1 database "crestmont-frontend-preview".
+# It never deploys, migrates, seeds or sets secrets on crestmont-platform-staging or production:
+#   • every wrangler command passes --env frontend-preview and the guard step refuses any other target;
+#   • scripts/staging-access.ts is NOT used (it is hard-wired to --env staging);
+#   • the deployed URL must contain "crestmont-platform-frontend-preview" or the run fails.
+# Prerequisites: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID available to the "frontend-preview" GitHub
+# environment (repository-level secrets also work). Without them the run is skipped with a notice.
+
+on:
+  push:
+    branches: [claude/frontend-redesign]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-frontend-preview
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    environment: frontend-preview
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        name: Check Cloudflare credentials
+        env:
+          HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAS_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        run: |
+          if [ "$HAS_TOKEN" = "true" ] && [ "$HAS_ACCOUNT" = "true" ]; then echo "configured=true" >> "$GITHUB_OUTPUT"; else
+            echo "::notice title=Frontend preview skipped::Make CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID available to the frontend-preview environment (or as repository secrets). Nothing was deployed."
+            echo "configured=false" >> "$GITHUB_OUTPUT"; fi
+
+  deploy:
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    environment: frontend-preview
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      PREVIEW_ENV: frontend-preview
+      PREVIEW_WORKER: crestmont-platform-frontend-preview
+      PREVIEW_DB: crestmont-frontend-preview
+      WRANGLER: npx --yes wrangler@4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+
+      - name: Install dev tooling
+        run: npm install --no-save typescript@5 @types/node@22
+
+      - name: Typecheck and tests (the preview only receives code that passes)
+        run: npx tsc -p tsconfig.json && npm test
+
+      - name: Guard — targets must be the frontend preview only
+        run: |
+          node -e '
+            const t = require("fs").readFileSync("wrangler.toml", "utf8");
+            const s = t.indexOf("[env.frontend-preview]"); if (s < 0) throw new Error("no [env.frontend-preview] block");
+            const e = t.indexOf("\n[env.", s + 1); const block = t.slice(s, e > 0 ? e : undefined);
+            const name = /\nname = "([^"]+)"/.exec(block)?.[1], db = /database_name = "([^"]+)"/.exec(block)?.[1];
+            if (name !== process.env.PREVIEW_WORKER) throw new Error(`worker name is ${name}`);
+            if (db !== process.env.PREVIEW_DB) throw new Error(`database is ${db}`);
+            if (/staging"|production"/.test(name + "\"") || /crestmont-(staging|production)/.test(db)) throw new Error("refusing a shared target");
+            if (/r2_buckets/.test(block)) throw new Error("the preview must not bind an R2 bucket");
+            console.log(`Guard ok: ${name} / ${db}`);'
+
+      - name: Recreate the disposable preview database
+        run: |
+          list() { $WRANGLER d1 list --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s).find(d=>d.name===process.env.PREVIEW_DB);process.stdout.write(r?r.uuid:"")})'; }
+          old=$(list)
+          if [ -n "$old" ]; then $WRANGLER d1 delete "$PREVIEW_DB" --skip-confirmation; fi
+          $WRANGLER d1 create "$PREVIEW_DB"
+          id=$(list); [ -n "$id" ] || { echo "::error::Could not create $PREVIEW_DB"; exit 1; }
+          node -e 'const fs=require("fs");let t=fs.readFileSync("wrangler.toml","utf8");t=t.replace(/(database_name = "crestmont-frontend-preview", database_id = )""/, `$1"${process.argv[1]}"`);fs.writeFileSync("wrangler.toml",t)' "$id"
+          grep -q "$id" wrangler.toml && echo "Preview D1: $id"
+
+      - name: Apply D1 migrations (preview database only)
+        run: $WRANGLER d1 migrations apply "$PREVIEW_DB" --remote --env "$PREVIEW_ENV"
+
+      - name: Deploy the preview Worker
+        id: deploy
+        run: |
+          $WRANGLER deploy --env "$PREVIEW_ENV" | tee deploy.log
+          url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -1)
+          case "$url" in *crestmont-platform-frontend-preview*) ;; *) echo "::error::Unexpected deploy URL '$url' — refusing to continue"; exit 1;; esac
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Preview password (rotated every run)
+        run: |
+          pw=$(node -e 'process.stdout.write(require("crypto").randomBytes(18).toString("base64url"))')
+          echo "::add-mask::$pw"
+          printf '%s' "$pw" | $WRANGLER secret put STAGING_ACCESS_PASSWORD --env "$PREVIEW_ENV" > /dev/null
+          mkdir -p access && printf '%s' "$pw" > access/preview-password
+
+      - name: Seed labelled sample data and demo accounts
+        run: |
+          node --no-warnings scripts/seed-staging.ts --out seed.sql --credentials access/demo-accounts.md
+          $WRANGLER d1 execute "$PREVIEW_DB" --remote --env "$PREVIEW_ENV" --file seed.sql --yes
+
+      - name: Smoke checks
+        env:
+          BASE: ${{ steps.deploy.outputs.url }}
+        run: |
+          for i in 1 2 3 4 5 6; do code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/health"); [ "$code" = "200" ] && break; sleep 5; done
+          [ "$code" = "200" ] || { echo "::error::/api/health returned $code"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/"); [ "$code" = "401" ] || { echo "::error::preview gate not active on / (HTTP $code)"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/assets/app.css"); [ "$code" = "200" ] || { echo "::error::assets not served (HTTP $code)"; exit 1; }
+
+      - name: Access notes (private artifact; never in logs)
+        env:
+          BASE: ${{ steps.deploy.outputs.url }}
+        run: |
+          { echo "# Crestmont frontend preview"; echo; echo "- URL: $BASE"; echo "- Preview password: $(cat access/preview-password)";
+            echo "- Branch: ${GITHUB_REF_NAME} @ ${GITHUB_SHA}"; echo; echo "Separate from the shared staging site. Sample data only; the database is recreated on every run."; echo;
+            cat access/demo-accounts.md; } > access/README.md
+          rm -f access/preview-password access/demo-accounts.md
+          echo "### Frontend preview deployed: $BASE" >> "$GITHUB_STEP_SUMMARY"
+          echo "Access details are in the private **frontend-preview-access** artifact of this run." >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-preview-access
+          path: access/README.md
+          retention-days: 3

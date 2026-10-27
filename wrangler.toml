@@ -46,6 +46,19 @@ d1_databases = [{ binding = "DB", database_name = "crestmont-staging", database_
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-staging" }]
 triggers = { crons = ["*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts
 
+# ───────────── Frontend preview (independent of shared staging) ─────────────
+# A separate Worker, database and URL for reviewing the frontend branch (claude/frontend-redesign) without
+# touching crestmont-platform-staging or its data. Deployed ONLY by .github/workflows/deploy-frontend-preview.yml,
+# which refuses to run if any target here resolves to staging or production. Disposable: its D1 database is
+# recreated and reseeded with labelled sample data on every run. No R2 (uploads say storage is not configured)
+# and no cron triggers (scheduled jobs never run twice). Same private preview gate as staging (fails closed).
+[env.frontend-preview]
+name = "crestmont-platform-frontend-preview"
+workers_dev = true
+vars = { ENVIRONMENT = "staging", PREVIEW_GATE = "required", TURNSTILE_SITE_KEY = "1x00000000000000000000AA", TURNSTILE_SECRET = "1x0000000000000000000000000000000AA" }
+d1_databases = [{ binding = "DB", database_name = "crestmont-frontend-preview", database_id = "", migrations_dir = "migrations" }]
+triggers = { crons = [] }
+
 # ───────────── Production ─────────────
 # UNPROVISIONED (BLK-003). Deployed ONLY by .github/workflows/deploy-production.yml, which requires
 # the GitHub "production" environment approval AND a valid Founder approval for the exact commit
