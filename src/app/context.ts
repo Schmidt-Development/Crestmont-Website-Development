@@ -16,6 +16,11 @@ export interface Env {
   TURNSTILE_SITE_KEY?: string;
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
+  ANTHROPIC_API_KEY?: string;
+  AI_MODEL?: string;
+  GITHUB_TOKEN?: string;
+  GITHUB_REPO?: string;
+  VOICE_WEBHOOK_SECRET?: string;
   FILES?: unknown;              // R2 bucket binding
   ASSETS?: { fetch(req: Request): Promise<Response> };
   /** Test/dev hook: overrides the computed adapters. */
