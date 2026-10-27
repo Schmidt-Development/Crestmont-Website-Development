@@ -58,10 +58,13 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
     } catch { /* ignore */ }
     ctx.setCookies.push(cookie("cm_flash", "", { maxAge: 0, secure: isSecure(ctx) }));
   }
-  const session = await loadSession(env.DB, cookies.cm_session, { passive: url.pathname.startsWith("/live/") });
+  // ASVS F-08: /api/* skips CSRF, so a state-changing /api/* request never gets a cookie session at all. Such routes
+  // must authenticate by signature (webhooks, CI evidence, runner) or be public; a cookie can never authorize them.
+  const cookieAuth = !(url.pathname.startsWith("/api/") && req.method !== "GET" && req.method !== "HEAD");
+  const session = cookieAuth ? await loadSession(env.DB, cookies.cm_session, { passive: url.pathname.startsWith("/live/") }) : null;
   if (session) {
     ctx.user = session.user; ctx.actor = session.actor; ctx.sessionId = session.sessionId; ctx.sessionMfaVerified = session.mfaVerified;
-  } else if (env.resolveActor) {
+  } else if (env.resolveActor && cookieAuth) {
     ctx.actor = await env.resolveActor(req);
   }
   try {
@@ -144,7 +147,8 @@ async function dispatch(req: Request, env: Env, url: URL, mark: { unhandled: boo
       return htmlResponse(ctx, errorPage(ctx, 404, "Page not found", "The page you were looking for does not exist or has moved."), 404);
     }
     // Every state-changing browser route is CSRF-protected centrally. /api/* routes authenticate
-    // with signatures (webhooks, CI evidence) or are JSON-only and never accept cookies for writes.
+    // with signatures (webhooks, CI evidence) or are public; buildContext never loads a cookie session for an
+    // /api/* write, so a cookie cannot authorize one (ASVS F-08, enforced, tests/asvs-hardening.test.ts).
     if (req.method !== "GET" && req.method !== "HEAD" && !url.pathname.startsWith("/api/")) await assertCsrf(ctx);
     if (req.method === "POST" && ctx.user && !url.pathname.startsWith("/api/")) await limitActions(ctx, env, match.pattern);
     return await match.handler(ctx, match.params);

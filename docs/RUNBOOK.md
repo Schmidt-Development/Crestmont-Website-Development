@@ -33,6 +33,8 @@ Then run the E2E suite against staging and post the evidence (`npm run evidence:
 
 **Automated path (preferred):** `.github/workflows/deploy-staging.yml` runs the staging steps above on every push to `main` and records the deployment and evidence. `.github/workflows/deploy-production.yml` is manual only. It refuses to run unless `GET /api/readiness/release-authorization` confirms a valid Founder approval for the exact commit, runs the post-deploy production checks and rolls back on failure. Provisioning and the full flow: **docs/DEPLOYMENT.md**. Deployments are listed with their release-candidate match at `/staff/ops`.
 
+**Cron triggers.** `/api/readiness/health` has a required `scheduler` feed on staging/production: it turns 503 when the 15-minute jobs have not run for 45 minutes or the daily jobs for 26 hours (after the first hour / first day live). The staging deploy runs `scripts/verify-crons.ts`, which compares Cloudflare's registered schedules with `wrangler.toml` and re-registers them if they differ. If the feed stays red: Cloudflare dashboard → Workers → crestmont-platform-staging → Settings → Triggers (expect `*/15 * * * *` and `17 11 * * *`), then check Workers logs for `scheduled` errors.
+
 ## 3. Rollback
 
 1. `wrangler deployments list --env <env>` → `wrangler rollback <id> --env <env> --message "<reason>"`.

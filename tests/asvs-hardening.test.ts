@@ -72,3 +72,22 @@ test("[SEC-002] F-11 egress allowlist: only fixed provider hosts over https; val
   await import("../src/worker.ts");
   await assert.rejects(fetch("https://example.org/"), EgressBlockedError);
 });
+
+test("[SEC-007] F-08 a cookie session can never authorize an /api/* write: buildContext loads no session for non-GET /api/* requests", async () => {
+  const { createStaff } = await import("./support/app.ts");
+  const { buildContext } = await import("../src/app/app.ts");
+  const t = await createTestApp();
+  const owner = await createStaff(t.db, "owner", "f08-owner@crestmont.test");
+  const c = await t.client().login(owner.email, undefined, owner.secret);
+  const cookie = [...c.cookies].map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("; ");
+  const env = t.env as Parameters<typeof buildContext>[1];
+  const read = await buildContext(new Request("http://localhost/api/readiness/health", { headers: { cookie } }), env);
+  assert.ok(read.actor, "API reads may use the session (read-only views)");
+  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+    const w = await buildContext(new Request("http://localhost/api/leads", { method, headers: { cookie }, body: method === "DELETE" ? undefined : "{}" }), env);
+    assert.equal(w.actor, null, `${method} /api/* ignores the session cookie`);
+    assert.equal(w.user, null);
+  }
+  const form = await buildContext(new Request("http://localhost/staff/crm", { method: "POST", headers: { cookie }, body: "" }), env);
+  assert.ok(form.actor, "browser form posts keep the session (they are CSRF-protected instead)");
+});

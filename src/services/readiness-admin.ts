@@ -70,7 +70,32 @@ export async function feedStatuses(ctx: Pick<AppContext, "db" | "env" | "now">, 
       required: false, lastSuccessAt: r.last_success_at, lastAttemptAt: r.last_attempt_at };
   });
   const gh = await githubFeedStatus(ctx);
-  return [...required, gh, ...others];
+  const cron = await scheduledJobsFeed(ctx, input);
+  return [...required, gh, ...(cron ? [cron] : []), ...others];
+}
+
+/** Cron triggers that never fire are otherwise silent: every job feed simply never appears. On a deployed environment
+ *  (staging/production) that has been live for over an hour, the scheduler must have run its 15-minute jobs within
+ *  45 minutes and its daily jobs within 26 hours; this is a REQUIRED feed, so /api/readiness/health answers 503 and the
+ *  external monitor alerts when it is not met. Development has no scheduler and is exempt. */
+export async function scheduledJobsFeed(ctx: Pick<AppContext, "db" | "env" | "now">, input: ReadinessInput): Promise<FeedStatus | null> {
+  const env = ctx.env.ENVIRONMENT;
+  if (env !== "staging" && env !== "production") return null;
+  const now = ctx.now().getTime();
+  const firstDeploy = await ctx.db.prepare(`SELECT MIN(deployed_at) AS at FROM deployments WHERE environment = ? AND status = 'succeeded'`).bind(env).first<{ at: string | null }>().catch(() => null);
+  const liveSince = firstDeploy?.at ? Date.parse(firstDeploy.at) : null;
+  const row = (src: string) => input.ingestion.find((r) => r.source === src);
+  const frequent = row("job:build_sweep"), daily = row("job:requirements");
+  const lastSuccessAt = [frequent?.last_success_at, daily?.last_success_at].filter(Boolean).sort().pop() ?? null;
+  const lastAttemptAt = [frequent?.last_attempt_at, daily?.last_attempt_at].filter(Boolean).sort().pop() ?? null;
+  const age = (r?: { last_success_at: string | null }) => (r?.last_success_at ? now - Date.parse(r.last_success_at) : Infinity);
+  const grace = liveSince === null || now - liveSince < 60 * 60_000;
+  const problems: string[] = [];
+  if (age(frequent) > 45 * 60_000) problems.push(frequent?.last_success_at ? `15-minute jobs last ran ${frequent.last_success_at}` : "15-minute jobs have never run");
+  if (age(daily) > 26 * 3_600_000 && (liveSince === null || now - liveSince > 26 * 3_600_000)) problems.push(daily?.last_success_at ? `daily jobs last ran ${daily.last_success_at}` : "daily jobs have never run");
+  if (!problems.length) return { source: "scheduler", status: "healthy", detail: "Cron-triggered jobs are running on schedule", required: true, lastSuccessAt, lastAttemptAt };
+  if (grace) return { source: "scheduler", status: "healthy", detail: `Within the first hour after the first deployment: ${problems.join("; ")}`, required: true, lastSuccessAt, lastAttemptAt };
+  return { source: "scheduler", status: lastSuccessAt ? "stale" : "unavailable", detail: `${problems.join("; ")} — check the Worker's cron triggers (docs/RUNBOOK.md §2)`, required: true, lastSuccessAt, lastAttemptAt };
 }
 
 /** Overall health of the readiness system's own inputs. Unhealthy whenever a required feed is not healthy, or a configured source is failing. */

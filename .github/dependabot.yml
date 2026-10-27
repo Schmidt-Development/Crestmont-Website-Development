@@ -13,9 +13,17 @@ updates:
   - package-ecosystem: github-actions
     directory: "/"
     schedule: { interval: weekly, day: monday }
+  # The platform and runner target the Node 22 LTS line (package.json engines); major Node image bumps are a
+  # deliberate decision, not an automatic update.
   - package-ecosystem: docker
     directory: "/runner"
     schedule: { interval: weekly, day: monday }
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: docker
     directory: "/runner/sandbox"
     schedule: { interval: weekly, day: monday }
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]

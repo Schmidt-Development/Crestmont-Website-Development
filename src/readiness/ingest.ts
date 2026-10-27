@@ -105,11 +105,24 @@ export async function ingestEvidence(db: Db, rawBody: string): Promise<IngestRes
     ];
     await db.batch(stmts); // atomic in D1
     await recordIngestion(db, doc.source, attemptAt, unknown.length ? `Unknown requirement ids: ${unknown.join(", ")}` : null, true);
+    // Recovery drills get their own feed per environment, so a failed or missing rollback/restore is visible (and, when
+    // failing, turns /api/readiness/health to 503 so the external monitor alerts). Status and timestamp only.
+    for (const [feed, r] of recoveryDrillOutcomes(doc)) await recordIngestion(db, `recovery:${feed}:${doc.environment}`, attemptAt, r ? null : "drill failed — see /staff/readiness/requirements/TEST-004");
     return { status: "ingested", runId: doc.runId, accepted: accepted.length, unknownRequirements: unknown };
   } catch (err) {
     await recordIngestion(db, doc.source, attemptAt, (err as Error).message);
     throw err;
   }
+}
+
+/** rollback rehearsal → INFRA-005 "rollback automation exercised"; restore drill → INFRA-006 "restore drill:". */
+export function recoveryDrillOutcomes(doc: EvidenceDoc): [string, boolean][] {
+  const out: [string, boolean][] = [];
+  const rb = doc.results.filter((r) => r.requirementId === "INFRA-005" && r.testName.startsWith("rollback automation exercised"));
+  const rs = doc.results.filter((r) => r.requirementId === "INFRA-006" && r.testName.startsWith("restore drill:"));
+  if (rb.length) out.push(["rollback", rb.every((r) => r.outcome === "passed")]);
+  if (rs.length) out.push(["restore", rs.every((r) => r.outcome === "passed")]);
+  return out;
 }
 
 async function recordIngestion(db: Db, source: string, at: string, error: string | null, success = error === null): Promise<void> {
