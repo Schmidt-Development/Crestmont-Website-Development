@@ -121,7 +121,9 @@ db.raw.prepare(`INSERT INTO messages (id, organization_id, project_id, author_us
 db.raw.prepare(`INSERT INTO messages (id, organization_id, project_id, author_user_id, body, created_at) VALUES (?,?,NULL,?,?,?)`).run(newId("msg"), ridge.org, ridge.uid, "Sample general question: can we add a second location later?", iso(1));
 
 // ── Export: INSERT OR IGNORE in foreign-key order ──
-const SKIP = new Set(["d1_migrations", "sqlite_sequence", "sessions", "rate_limits", "security_events", "auth_tokens", "email_deliveries", "email_messages", "ingestion_status", "_cf_KV"]);
+// AI Builds rows are never seeded: sample projects must not become automated builds (and settings stay the Owner's).
+const SKIP = new Set(["d1_migrations", "sqlite_sequence", "sessions", "rate_limits", "security_events", "auth_tokens", "email_deliveries", "email_messages", "ingestion_status", "_cf_KV",
+  "build_settings", "build_project_controls", "build_briefs", "build_jobs", "build_runs", "build_events", "build_requirements", "build_runners"]);
 const tables = (db.raw.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all() as { name: string }[]).map((r) => r.name).filter((t) => !SKIP.has(t));
 const deps = new Map(tables.map((t) => [t, new Set((db.raw.prepare(`PRAGMA foreign_key_list("${t}")`).all() as { table: string }[]).map((f) => f.table).filter((x) => x !== t && tables.includes(x)))]));
 const ordered: string[] = [];
@@ -137,6 +139,9 @@ for (const t of ordered) {
     rows++;
   }
 }
+// Sample projects are created "now": move the automation cutoff past them so the sweep never queues builds for
+// sample data (real projects created after this seed still start automatically; the Owner can backfill any project).
+lines.push(`UPDATE build_settings SET auto_start_after = '${new Date(Date.now() + 1000).toISOString()}' WHERE id = 1 AND auto_start_after < '${new Date(Date.now() + 1000).toISOString()}';`);
 writeFileSync(OUT, lines.join("\n") + "\n");
 
 const md = [

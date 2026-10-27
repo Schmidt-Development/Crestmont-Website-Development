@@ -26,7 +26,7 @@ export const TERMINAL_STATES: readonly BuildState[] = ["approved", "canceled"];
 const T: Record<BuildState, readonly BuildState[]> = {
   awaiting_intake: ["awaiting_payment", "queued", "canceled"],
   awaiting_payment: ["awaiting_intake", "queued", "canceled"],
-  queued: ["preparing", "awaiting_intake", "awaiting_payment", "canceled", "paused"],
+  queued: ["preparing", "awaiting_intake", "awaiting_payment", "canceled", "paused", "budget_paused"],
   preparing: ["building", "verifying", "needs_information", "ready_for_review", "failed", "queued", "canceled", "paused", "budget_paused"],
   building: ["verifying", "needs_information", "ready_for_review", "failed", "queued", "canceled", "paused", "budget_paused"],
   verifying: ["building", "needs_information", "ready_for_review", "failed", "queued", "canceled", "paused", "budget_paused"],

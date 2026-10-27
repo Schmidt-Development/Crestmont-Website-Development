@@ -29,7 +29,7 @@ export async function pageNotifications(db: Db, userId: string, opts: { unreadOn
 const STAFF_LINKS: Record<string, (id: string) => string> = {
   project: (id) => `/staff/projects/${id}`, task: (id) => `/staff/tasks/${id}`, lead: (id) => `/staff/crm/leads/${id}`, ticket: (id) => `/staff/support/${id}`,
   quote: (id) => `/staff/quotes/${id}`, refund: (id) => `/staff/refunds/${id}`, cms_revision: (id) => `/staff/cms/revisions/${id}`, call: (id) => `/staff/voice/calls/${id}`,
-  conversation: (id) => `/staff/conversations/${id}`, organization: (id) => `/staff/customers/${id}`, ai_job: (id) => `/staff/ai/${id}`, blocker: (id) => `/staff/readiness/blockers/${id}`,
+  conversation: (id) => `/staff/conversations/${id}`, organization: (id) => `/staff/customers/${id}`, ai_job: (id) => `/staff/ai/${id}`, build_job: (id) => `/staff/builds/${id}`, blocker: (id) => `/staff/readiness/blockers/${id}`,
 };
 const PORTAL_LINKS: Record<string, (id: string) => string> = {
   project: (id) => `/portal/projects/${id}`, ticket: (id) => `/portal/support/${id}`, invoice: (id) => `/portal/billing/invoices/${id}`, conversation: () => `/portal/messages/general`,

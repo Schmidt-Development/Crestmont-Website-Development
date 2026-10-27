@@ -14,10 +14,12 @@ export type Permission =
   | "finance.read" | "audit.read" | "readiness.read" | "readiness.ingest" | "employee.manage"
   | "customer.org.read" | "customer.org.write" | "customer.approve" | "customer.billing"
   // area access (navigation + list pages); record-level checks still apply inside each area
-  | "crm.access" | "delivery.access" | "support.access" | "ai.manage" | "voice.manage" | "customers.read";
+  | "crm.access" | "delivery.access" | "support.access" | "ai.manage" | "voice.manage" | "customers.read"
+  // AI Builds (paid-intake automation): read, operate (cancel/pause/retry/resume/revise), configure (limits, approve, backfill)
+  | "builds.read" | "builds.manage" | "builds.configure";
 
 const OWNER_ONLY: Permission[] = ["refund.decide", "refund.issue", "pricing.change", "release.approve_production",
-  "release.deploy_production", "security.exception"];
+  "release.deploy_production", "security.exception", "builds.configure"];
 
 const ALL_STAFF: Permission[] = ["readiness.read"];
 
@@ -26,15 +28,15 @@ export const ROLE_PERMISSIONS: Record<Role, ReadonlySet<Permission>> = {
     "lead.read_all", "lead.write_all", "lead.assign", "quote.write", "quote.send", "project.read_all", "project.coordinate",
     "task.update_assigned", "milestone.update", "ticket.manage", "ticket.internal_note", "refund.review", "settings.operational",
     "cms.edit", "cms.publish", "portfolio.manage", "finance.read", "audit.read", "employee.manage",
-    "crm.access", "delivery.access", "support.access", "ai.manage", "voice.manage", "customers.read", ...OWNER_ONLY, ...ALL_STAFF,
+    "crm.access", "delivery.access", "support.access", "ai.manage", "voice.manage", "customers.read", "builds.read", "builds.manage", ...OWNER_ONLY, ...ALL_STAFF,
   ]),
   administrator: new Set<Permission>(["lead.read_all", "lead.assign", "project.read_all", "settings.operational", "cms.edit",
     "cms.publish", "portfolio.manage", "audit.read", "employee.manage", "crm.access", "delivery.access", "support.access",
-    "ai.manage", "customers.read", ...ALL_STAFF]),
+    "ai.manage", "customers.read", "builds.read", "builds.manage", ...ALL_STAFF]),
   sales: new Set<Permission>(["lead.read_assigned", "lead.write_assigned", "quote.write", "quote.send", "crm.access", "customers.read", ...ALL_STAFF]),
   developer: new Set<Permission>(["project.read_assigned", "task.update_assigned", "milestone.update", "delivery.access", ...ALL_STAFF]),
   project_manager: new Set<Permission>(["project.read_all", "project.coordinate", "milestone.update", "task.update_assigned",
-    "ticket.internal_note", "delivery.access", "support.access", "customers.read", ...ALL_STAFF]),
+    "ticket.internal_note", "delivery.access", "support.access", "customers.read", "builds.read", ...ALL_STAFF]),
   support: new Set<Permission>(["ticket.manage", "ticket.internal_note", "refund.review", "project.read_assigned", "support.access",
     "delivery.access", "customers.read", ...ALL_STAFF]),
   customer_admin: new Set<Permission>(["customer.org.read", "customer.org.write", "customer.approve", "customer.billing"]),

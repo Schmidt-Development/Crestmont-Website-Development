@@ -8,6 +8,7 @@ import { storeUpload, UploadError } from "./files.ts";
 import { changeProjectStatus } from "./projects.ts";
 import { notifyProjectTeam } from "./notifications.ts";
 import { HttpError } from "../app/http.ts";
+import { syncProjectBuildSafe } from "./builds.ts";
 
 export type FieldType = "text" | "email" | "tel" | "url" | "textarea" | "select" | "radio" | "checkboxes" | "file";
 
@@ -186,6 +187,7 @@ export async function saveOnboarding(ctx: AppContext, input: { organizationId: s
   await audit(ctx.db, { actorUserId: input.userId, action: "onboarding.completed", subjectType: "project", subjectId: p.id, organizationId: input.organizationId });
   if (p.status === "purchased") await changeProjectStatus(ctx, p.id, "awaiting_onboarding", { actorUserId: input.userId, actorKind: "user" });
   await changeProjectStatus(ctx, p.id, "scope_review", { actorUserId: input.userId, actorKind: "user", note: "Onboarding completed by customer" });
+  await syncProjectBuildSafe(ctx.db, p.id, "intake");
   await notifyProjectTeam(ctx, p.id, { kind: "onboarding_completed", template: "onboarding", subject: "Customer onboarding completed", pmOnly: true,
     body: "The customer submitted onboarding. The project is now in scope review.", path: `/staff/projects/${p.id}`, key: `onb:${p.id}` });
   return { completed: true };

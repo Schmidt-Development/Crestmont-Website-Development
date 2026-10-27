@@ -8,6 +8,7 @@ import { HttpError } from "../app/http.ts";
 import { refundTransition, type RefundStatus, REFUND_STATUSES } from "../domain/refunds.ts";
 import { ForbiddenError, type Actor } from "../domain/authz.ts";
 import { TransitionError } from "../domain/state-machine.ts";
+import { syncProjectBuildSafe } from "./builds.ts";
 import { audit } from "./security.ts";
 import { sendMail } from "./mailer.ts";
 import { NOT_CONFIGURED } from "./billing.ts";
@@ -91,6 +92,7 @@ export async function decideRefund(ctx: AppContext, actor: Actor, id: string, to
   const res = await ctx.db.prepare(`UPDATE refunds SET status = ?, decided_by = ?, decided_at = ?, decision_notes = ? WHERE id = ? AND status = ?`).bind(to, actor.userId ?? null, at, notes, id, r.status).run();
   if (res.meta.changes !== 1) throw new HttpError(409, "This refund changed while you were viewing it. Reload and try again.");
   await audit(ctx.db, { actorUserId: actor.userId, action: `refund.${to}`, subjectType: "refund", subjectId: id, organizationId: r.organization_id, details: { amountCents: r.amount_cents } });
+  if (to === "approved") await syncBuildsForRefund(ctx.db, r.payment_id);
   await notifyCustomer(ctx, r, to === "approved" ? "Your refund was approved" : "Update on your refund request",
     to === "approved" ? [`Your refund of $${(r.amount_cents / 100).toFixed(2)} was approved. We will send it to your original payment method and email you when it has been issued.`]
       : ["After review, your refund request was not approved.", "If you have more information, reply through a support ticket."], to);
@@ -120,8 +122,16 @@ export async function issueRefund(ctx: AppContext, actor: Actor, id: string) {
     ...(failed ? [] : [ctx.db.prepare(`UPDATE payments SET status = ? WHERE id = ?`).bind(r.amount_cents >= r.payment_amount_cents ? "refunded" : "partially_refunded", r.payment_id)]),
   ]);
   await audit(ctx.db, { actorUserId: actor.userId, action: failed ? "refund.failed" : "refund.issued", subjectType: "refund", subjectId: id, organizationId: r.organization_id, details: { stripeRefundId: result.id, status: result.status, amountCents: r.amount_cents } });
+  if (!failed) await syncBuildsForRefund(ctx.db, r.payment_id);
   if (!failed) await notifyCustomer(ctx, r, "Your refund has been issued", [`We issued a refund of $${(r.amount_cents / 100).toFixed(2)} to your original payment method. Depending on your bank it can take 5–10 business days to appear.`, `Reference: ${result.id}`], "issued");
   return { stripeRefundId: result.id, status: failed ? "failed" : "issued" };
+}
+
+/** An approved or issued refund makes the order ineligible for new automated build work (AI Builds). */
+async function syncBuildsForRefund(db: AppContext["db"], paymentId: string | null) {
+  if (!paymentId) return;
+  const rows = (await db.prepare(`SELECT DISTINCT i.project_id FROM payments p JOIN invoices i ON i.order_id = p.order_id WHERE p.id = ? AND i.project_id IS NOT NULL`).bind(paymentId).all<{ project_id: string }>()).results;
+  for (const x of rows) await syncProjectBuildSafe(db, x.project_id, "sweep");
 }
 
 /** Stripe dispute statuses that need no further action. */

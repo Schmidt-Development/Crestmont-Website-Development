@@ -1,0 +1,19 @@
+import type { ImplementationRecord } from "../status.ts";
+
+// AI Builds addendum (2026-10-27). Control plane in the Worker; runner in runner/. See docs/ai-builds/.
+const CP = "src/services/builds.ts + src/routes/builds.ts + migrations/0031_ai_builds.sql";
+export const AI_BUILDS: Record<string, ImplementationRecord> = {
+  "AIB-001": { status: "implemented", owner: "engineering", location: `${CP}: decideEligibility (verified customer, recorded package/quote scope, submitted intake, order's first invoice paid by a verified Stripe webhook — full or 50% deposit — no refund/dispute/cancellation); hooks in payments.ts (Checkout paid + async_payment_succeeded, invoice.paid, refunds, disputes), onboarding submit, refunds, project cancel; tests/builds.test.ts` },
+  "AIB-002": { status: "implemented", owner: "engineering", location: `${CP}: build_jobs.dedupe_key UNIQUE (project:first / project:rN), INSERT OR IGNORE + compare-and-set transitions, 15-minute build_sweep recovers lost enqueues; historical projects need an Owner backfill` },
+  "AIB-003": { status: "implemented", owner: "engineering", location: `${CP}: atomic claim with concurrency limit, hashed lease tokens, lease expiry + heartbeat renewal, partial unique index (one active build per project), bounded automatic retries with backoff` },
+  "AIB-004": { status: "implemented", owner: "engineering", location: `${CP}: checkpoints (session id, workspace ref, git source, session archive in R2), expired leases requeued with resume data, owner Resume of paused / budget-paused / needs-information / failed builds` },
+  "AIB-005": { status: "implemented", owner: "engineering", location: `${CP}: per-run and per-project (cumulative incl. revisions) limits, runtime and turn caps enforced at every heartbeat and at claim; partial work kept (budget_paused)` },
+  "AIB-006": { status: "implemented", owner: "engineering", location: `${CP}: global/project pause, cancel (active runs told to stop at next heartbeat), retry, resume, revision, preview approval (records the decision only), settings; every action audited with the acting user` },
+  "AIB-007": { status: "implemented", owner: "engineering", location: `${CP}: HMAC-signed runner API (BUILD_RUNNER_SECRET; 503 when unset), job-scoped lease tokens, runner file access limited to the job's own organization/project, sanitized activity, customer summary without internals; security matrix + tests/builds.test.ts` },
+  "AIB-008": { status: "implemented", owner: "engineering", location: `${CP}: buildBrief/snapshotBrief (immutable build_briefs with SHA-256, new version only on change, job keeps its snapshot), customer text isolated under customerData with fixed BRIEF_RULES (src/domain/builds.ts)` },
+  "AIB-009": { status: "implemented", owner: "engineering", location: "/staff/builds + /staff/builds/:id (src/routes/builds.ts), GET /api/builds and /api/builds/:id JSON, GET /portal/projects/:id/build-status; docs/ai-builds/FRONTEND-CONTRACT.md" },
+  "AIB-010": { status: "in_progress", owner: "engineering", location: "runner/ (separate Node 22 process; docs/ai-builds/RUNNER-SETUP.md)",
+    missing: "verified only with a fake Agent SDK and a fake control plane (mock tests); never run with the real SDK, a real model, real repositories or preview deploys" },
+  "AIB-011": { status: "in_progress", owner: "engineering", location: "docs/ai-builds/RUNNER-SETUP.md",
+    missing: "needs runner infrastructure, an Anthropic API key with a spend limit, BUILD_RUNNER_SECRET on staging, scoped repository and preview credentials, and a Stripe test account (BLK-004) for the test payment" },
+};
