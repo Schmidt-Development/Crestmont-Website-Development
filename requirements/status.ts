@@ -37,7 +37,7 @@ export const IMPLEMENTATION: Record<string, ImplementationRecord> = {
   ...FOUNDATION, ...CORE, ...PUBLIC_SITE, ...PROJECTS, ...SALES_FINANCE, ...SUPPORT_OWNER, ...PLATFORM, ...INTEGRATION, ...LEGAL_COMMERCE, ...INTEGRATIONS, ...OPS, ...UX, ...SECURITY_MATRIX, ...FINANCE_DOCS, ...OWNER_MODULES, ...E2E, ...BACKEND, ...AI_BUILDS,
 };
 for (const [id, missing] of Object.entries(REAUDIT_MISSING)) if (IMPLEMENTATION[id]?.status === "in_progress") IMPLEMENTATION[id] = { ...IMPLEMENTATION[id], missing };
-for (const [id, rec] of Object.entries(STARTED)) if (!IMPLEMENTATION[id]) IMPLEMENTATION[id] = rec;
+for (const [id, rec] of Object.entries(STARTED)) if (IMPLEMENTATION[id]?.status !== "implemented") IMPLEMENTATION[id] = rec;
 for (const c of CLOSURES) {
   const prev = IMPLEMENTATION[c.id];
   if (!prev) throw new Error(`closure for unknown record ${c.id}`);
