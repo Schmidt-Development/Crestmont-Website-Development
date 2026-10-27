@@ -88,3 +88,20 @@ Not blocking the next step: voice provider approval (`docs/voice/PROVIDER-EVALUA
   the live site before the artifact is issued. ACCESS_EPOCH 2 forces a one-time rotation of everything (old
   sessions revoked). The raw D1 export artifact (which held demo hashes and 2FA keys) was replaced by a Time
   Travel bookmark.
+
+### Session 3, first-party backend closeout (2026-10-27)
+
+- **Security matrix** (AUTH-007, AUTH-008, EMP-002, SEC-001 implemented): all 340 routes classified in
+  `tests/support/route-inventory.ts`; anonymous, pre-MFA, role, tenant (every id-bearing route replayed with another
+  customer's ids), audit (every audited action performed and its entry checked) and fuzz tests. 16 defects fixed,
+  including pre-MFA access to password/session/file routes and live reset links visible in staff email views.
+- **Finance** (PAY-005/006/008/009, FIN-002): zero-dependency PDF invoices and receipts, Stripe Invoice adapter for
+  50/25/25 milestones (contract-tested against fixtures; never called live), ledger/payout reconciliation job,
+  project attribution of AI costs, search/filter/export across finance modules. Migration 0015.
+- **Owner modules**: CRM duplicate detection and merge, quote withdraw/lapse, project closure checklist, employee
+  workload/capacity, CMS compare/discard/restore, operations reports, portal notifications/maintenance/team
+  management, CSV exports everywhere. Migration 0016.
+- **Staging journeys** (TEST-002): 21 of 33 journeys automated against the deployed preview (12 skipped with
+  blocker ids); evidence reporter now records skipped tests as skipped.
+- **Hardening**: breached-password check, egress allowlist, PII redaction, per-user action limits, live unread
+  counts (passive polling), legal drafts round 2 (custom development + maintenance agreements, DPA). Migration 0030.
