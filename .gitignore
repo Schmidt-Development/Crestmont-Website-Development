@@ -7,3 +7,4 @@ evidence/
 *.db-wal
 *.db-shm
 test-results/
+.claude/worktrees/
