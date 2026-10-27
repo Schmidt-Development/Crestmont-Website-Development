@@ -2,7 +2,8 @@
 import { html, safeUrl, type SafeHtml } from "../lib/html.ts";
 import type { AppContext } from "../app/context.ts";
 import { can, type Permission } from "../domain/authz.ts";
-import { csrf } from "./components.ts";
+import { csrf, drawerShell, skeleton } from "./components.ts";
+import { requestAttribution } from "../services/leads.ts";
 
 const FONTS = "https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Inter:wght@400;600&display=swap";
 
@@ -46,6 +47,9 @@ const PUBLIC_NAV = [
 
 export function publicLayout(ctx: AppContext, meta: PageMeta, body: SafeHtml): SafeHtml {
   const here = ctx.url.pathname;
+  // First-party campaign attribution (CRM-001): any public landing page records UTM parameters in cm_attr.
+  // Skipped on noindex pages (proposal and share links carry secret tokens in their path).
+  if (!ctx.user && !meta.noindex) requestAttribution(ctx);
   const account = ctx.user
     ? html`<a href="${ctx.user.isStaff ? "/staff" : "/portal"}">${ctx.user.isStaff ? "Staff" : "My account"}</a>`
     : html`<a href="/login">Sign in</a>`;
@@ -76,6 +80,9 @@ export function authLayout(ctx: AppContext, meta: PageMeta, body: SafeHtml): Saf
 <main id="main" class="auth-shell"><div class="auth-card card card--gold">${brandMark()}${body}</div></main>${flashToast(ctx)}</body></html>`;
 }
 
+/** Pages whose server-side computation takes noticeable time; navigating to them shows a skeleton (BRAND-005). */
+const SLOW_PATHS = ["/staff/readiness", "/staff/owner", "/staff/finance", "/staff/reports", "/staff/sales"];
+
 export interface NavItem { href: string; label: string; perm?: Permission; count?: number }
 export interface NavGroup { label: string; items: NavItem[] }
 
@@ -85,17 +92,18 @@ export function appLayout(ctx: AppContext, opts: { title: string; nav: NavGroup[
   const current = (h: string) => here === h || (h !== opts.home && here.startsWith(h + "/"));
   return html`<html lang="en">${head(ctx, { title: opts.title, noindex: true })}<body>
 <a class="skip" href="#main">Skip to content</a>${envBanner(ctx)}
-<div class="app"><aside class="sidebar" id="app-nav" aria-label="${opts.area} navigation">${brandMark(opts.home)}
-${opts.nav.map((g) => {
+<div class="app"><aside class="sidebar" id="app-nav">${brandMark(opts.home)}
+<nav aria-label="${opts.area} navigation">${opts.nav.map((g) => {
   const items = g.items.filter(visible);
   if (!items.length) return html``;
-  return html`<div class="side-group"><div class="side-group__label">${g.label}</div>${items.map((i) => html`<a class="side-link" href="${safeUrl(i.href)}"${current(i.href) ? html` aria-current="page"` : ""}><span>${i.label}</span>${i.count ? html`<span class="badge badge--gold">${i.count}</span>` : ""}</a>`)}</div>`;
-})}</aside>
+  return html`<div class="side-group"><div class="side-group__label">${g.label}</div>${items.map((i) => html`<a class="side-link" href="${safeUrl(i.href)}"${current(i.href) ? html` aria-current="page"` : ""}${SLOW_PATHS.some((p) => i.href.startsWith(p)) ? html` data-slow` : ""}><span>${i.label}</span>${i.count ? html`<span class="badge badge--gold">${i.count}</span>` : ""}</a>`)}</div>`;
+})}</nav></aside>
 <div class="app-main"><div class="topbar"><button class="nav-toggle" style="display:inline-flex" type="button" data-toggle="app-nav" aria-controls="app-nav" aria-expanded="false">Menu</button>
 <span class="faint">${opts.area}</span>
 <span class="who">${ctx.user?.displayName ?? ""} · <a href="/account">Account</a></span>
 <form method="post" action="/logout">${csrf(ctx)}<button class="btn btn--ghost btn--sm" type="submit">Sign out</button></form></div>
-<main id="main" class="page">${body}</main></div></div>${flashToast(ctx)}</body></html>`;
+<main id="main" class="page" data-slow-target>${body}</main></div></div>${drawerShell()}
+<template id="skeleton-tpl"><div class="loading-state" role="status"><span class="visually-hidden">Loading…</span>${skeleton({ kpis: 4, lines: 6 })}</div></template>${flashToast(ctx)}</body></html>`;
 }
 
 export function errorPage(ctx: AppContext, status: number, title: string, message: string): SafeHtml {

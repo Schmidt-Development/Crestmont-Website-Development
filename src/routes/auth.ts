@@ -13,6 +13,7 @@ import { formatDateTime, label } from "../lib/html.ts";
 import { HttpError } from "../app/http.ts";
 import { portalNav } from "./nav.ts";
 import { staffNav } from "./nav.ts";
+import { recordAcceptance } from "../services/agreements.ts";
 
 const safeNext = (n: string | null, fallback: string) => (n && n.startsWith("/") && !n.startsWith("//") ? n : fallback);
 
@@ -255,11 +256,8 @@ ${table(sessions, [
 }
 
 async function recordTermsAcceptance(ctx: AppContext, userId: string, organizationId: string) {
-  const agreements = (await ctx.db.prepare(`SELECT id FROM agreements WHERE kind IN ('terms_of_service','privacy_policy') AND effective_at IS NOT NULL`).all<{ id: string }>()).results;
-  for (const a of agreements) {
-    await ctx.db.prepare(`INSERT INTO agreement_acceptances (id, agreement_id, user_id, organization_id, ip, accepted_at) VALUES (?,?,?,?,?,?)`)
-      .bind(`acc_${crypto.randomUUID().replace(/-/g, "")}`, a.id, userId, organizationId, ctx.ip, new Date().toISOString()).run();
-  }
+  // LEGAL-003: records the exact Terms of Service + Privacy Policy versions shown at registration.
+  await recordAcceptance(ctx, { userId, organizationId, context: "registration" });
 }
 
 function mfaChallenge(ctx: AppContext, errors: string[] = []) {

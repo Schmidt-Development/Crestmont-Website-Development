@@ -5,7 +5,8 @@ import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { audit } from "./security.ts";
 import { storeUpload } from "./files.ts";
-import { notifyCustomer, notifyProjectTeam } from "./notifications.ts";
+import { notifyCustomer, notifyProjectTeam, notify, customerMembers } from "./notifications.ts";
+import { sendMail } from "./mailer.ts";
 import { HttpError } from "../app/http.ts";
 
 export interface MessageRow {
@@ -76,6 +77,7 @@ export async function postMessage(ctx: AppContext, input: {
     ...(!input.fromStaff && input.projectId ? [ctx.db.prepare(`UPDATE projects SET last_customer_activity_at = ? WHERE id = ? AND organization_id = ?`).bind(at, input.projectId, input.organizationId)] : []),
   ]);
   await audit(ctx.db, { actorUserId: input.authorUserId, action: input.internal ? "message.internal_note" : "message.posted", subjectType: "message", subjectId: id, organizationId: input.organizationId, details: { projectId: input.projectId, attachment: !!attachmentId } });
+  if (!input.internal && !input.projectId) await notifyGeneral(ctx, input.organizationId, id, body, input.fromStaff, input.authorUserId);
   if (!input.internal && input.projectId) {
     const preview = body.length > 160 ? body.slice(0, 157) + "…" : body;
     if (input.fromStaff) {
@@ -85,4 +87,52 @@ export async function postMessage(ctx: AppContext, input: {
     }
   }
   return id;
+}
+
+// ───────────── General (non-project) conversations ─────────────
+// One thread per customer organization with project_id NULL: questions that are not about a specific
+// project. Customers see only their own organization's thread (scoped by requireCustomerOrg); staff with
+// customers.read can read and reply to any organization's thread.
+
+/** Staff who answer general conversations: support and owners, plus PMs of the organization's active projects. */
+export async function generalConversationStaff(db: Db, organizationId: string): Promise<{ id: string; email: string; display_name: string }[]> {
+  return (await db.prepare(`SELECT DISTINCT u.id, u.email, u.display_name FROM users u WHERE u.disabled_at IS NULL AND (
+      u.id IN (SELECT user_id FROM memberships WHERE role_id IN ('owner','support'))
+      OR u.id IN (SELECT project_manager_id FROM projects WHERE organization_id = ? AND status NOT IN ('completed','cancelled') AND project_manager_id IS NOT NULL))
+    ORDER BY u.display_name`).bind(organizationId).all<{ id: string; email: string; display_name: string }>()).results;
+}
+
+async function notifyGeneral(ctx: AppContext, organizationId: string, messageId: string, body: string, fromStaff: boolean, authorUserId: string): Promise<void> {
+  const preview = body.length > 160 ? body.slice(0, 157) + "…" : body;
+  const org = await ctx.db.prepare(`SELECT name FROM organizations WHERE id = ?`).bind(organizationId).first<{ name: string }>();
+  const people = fromStaff ? await customerMembers(ctx.db, organizationId) : await generalConversationStaff(ctx.db, organizationId);
+  const subject = fromStaff ? "New message from Crestmont" : `New general message from ${org?.name ?? "a customer"}`;
+  const path = fromStaff ? "/portal/messages/general" : `/staff/conversations/${organizationId}`;
+  for (const u of people) {
+    if (u.id === authorUserId) continue;
+    await notify(ctx.db, u.id, { kind: "message", subjectType: "conversation", subjectId: organizationId, body: fromStaff ? `New message from Crestmont: ${preview}` : `${org?.name ?? "Customer"}: ${preview}` });
+    await sendMail(ctx, { template: "project_update", to: u.email, subject, heading: subject, paragraphs: [preview],
+      cta: { label: fromStaff ? "Open your portal" : "Open conversation", url: `${ctx.baseUrl}${path}` }, idempotencyKey: `msg:${messageId}:${u.id}` });
+  }
+}
+
+/** Organizations with a general conversation (or every customer org when `all`), newest activity first, with unread counts for this staff user. */
+export async function listGeneralConversations(db: Db, staffUserId: string, opts: { q?: string; limit?: number } = {}) {
+  const like = opts.q ? `%${opts.q.replace(/[\\%_]/g, (m) => "\\" + m)}%` : null;
+  return (await db.prepare(`SELECT o.id, o.name,
+      (SELECT COUNT(*) FROM messages m WHERE m.organization_id = o.id AND m.project_id IS NULL AND m.internal = 0) AS total,
+      (SELECT COUNT(*) FROM messages m WHERE m.organization_id = o.id AND m.project_id IS NULL AND m.internal = 0 AND m.author_user_id <> ?
+         AND NOT EXISTS (SELECT 1 FROM memberships mm WHERE mm.user_id = m.author_user_id AND mm.role_id IN ${STAFF_ROLE_SQL})
+         AND NOT EXISTS (SELECT 1 FROM message_reads r WHERE r.message_id = m.id AND r.user_id = ?)) AS unread,
+      (SELECT MAX(created_at) FROM messages m WHERE m.organization_id = o.id AND m.project_id IS NULL) AS last_at
+    FROM organizations o WHERE o.kind = 'customer' ${like ? `AND o.name LIKE ? ESCAPE '\\'` : ""}
+      AND (${like ? "1=1" : "EXISTS (SELECT 1 FROM messages m WHERE m.organization_id = o.id AND m.project_id IS NULL)"})
+    ORDER BY COALESCE(last_at, '') DESC, o.name LIMIT ?`).bind(staffUserId, staffUserId, ...(like ? [like] : []), opts.limit ?? 100)
+    .all<{ id: string; name: string; total: number; unread: number; last_at: string | null }>()).results;
+}
+
+export async function generalUnreadForStaff(db: Db, staffUserId: string): Promise<number> {
+  return (await db.prepare(`SELECT COUNT(*) AS n FROM messages m WHERE m.project_id IS NULL AND m.internal = 0 AND m.author_user_id <> ?
+      AND NOT EXISTS (SELECT 1 FROM memberships mm WHERE mm.user_id = m.author_user_id AND mm.role_id IN ${STAFF_ROLE_SQL})
+      AND NOT EXISTS (SELECT 1 FROM message_reads r WHERE r.message_id = m.id AND r.user_id = ?)`).bind(staffUserId, staffUserId).first<{ n: number }>())?.n ?? 0;
 }

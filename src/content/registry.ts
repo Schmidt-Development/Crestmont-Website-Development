@@ -6,7 +6,8 @@ import { PACKAGES, MAINTENANCE_PLANS } from "../domain/catalog.ts";
 import { DEFAULT_INACTIVITY_POLICY } from "../domain/project.ts";
 import { SERVICES } from "./services.ts";
 
-export type FieldKind = "text" | "textarea" | "items";
+/** "richtext" = long text in the safe markdown subset rendered by src/ui/markdown.ts (plain paragraphs stay valid). */
+export type FieldKind = "text" | "textarea" | "items" | "richtext";
 export interface FieldDef { name: string; label: string; kind: FieldKind; max: number; hint?: string }
 export interface CmsKeyDef {
   key: string;
@@ -21,6 +22,7 @@ export interface CmsKeyDef {
 
 const t = (name: string, label: string, max = 200, hint?: string): FieldDef => ({ name, label, kind: "text", max, hint });
 const ta = (name: string, label: string, max = 2000, hint?: string): FieldDef => ({ name, label, kind: "textarea", max, hint });
+const rt = (name: string, label: string, max = 6000, hint?: string): FieldDef => ({ name, label, kind: "richtext", max, hint });
 const items = (name: string, label: string, max = 12000): FieldDef => ({ name, label, kind: "items", max, hint: "One item per block: first line is the title, following lines are the text. Separate items with a blank line." });
 
 /** Parses the "items" field format: blocks separated by blank lines; first line = title. */
@@ -81,7 +83,7 @@ const pageSeo: [string, string, string, string][] = [
 
 const serviceKeys: CmsKeyDef[] = SERVICES.filter((s) => s.pricing !== "maintenance").map((s) => ({
   key: `service.${s.slug}`, label: s.name, group: "Service descriptions", previewPath: `/services/${s.slug}`,
-  fields: [t("summary", "Summary", 300), ta("intro", "Introduction", 2000)],
+  fields: [t("summary", "Summary", 300), rt("intro", "Introduction", 2000)],
   defaults: { summary: s.summary, intro: s.intro },
 }));
 
@@ -127,7 +129,7 @@ export const CMS_KEYS: CmsKeyDef[] = [
     fields: [t("heading", "Heading"), ta("lede", "Lead paragraph", 600), t("starter_tagline", "Starter tagline", 160), t("business_tagline", "Business tagline", 160), t("premium_tagline", "Premium tagline", 160), t("custom_heading", "Custom development heading", 120), ta("custom_body", "Custom development text", 800)],
     defaults: { heading: "Pricing", lede: "Published prices, enforced by our systems. Standard packages are paid upfront; custom work is quoted in writing and billed in milestones.", starter_tagline: "A focused, professional website for a small business.", business_tagline: "More pages, more customisation and defined integrations.", premium_tagline: "Bespoke design and advanced functionality within an approved scope.", custom_heading: "Custom development", custom_body: "Advanced e-commerce, custom SaaS platforms, complex web applications, specialised databases, extensive AI automation, advanced API integrations and work beyond package limits are quoted separately." } },
   { key: "about.page", label: "About Crestmont", group: "Pages", previewPath: "/about",
-    fields: [t("heading", "Heading"), ta("lede", "Lead paragraph", 600), ta("body", "Body (paragraphs separated by a blank line)", 6000)],
+    fields: [t("heading", "Heading"), ta("lede", "Lead paragraph", 600), rt("body", "Body", 6000)],
     defaults: { heading: "About Crestmont", lede: "Crestmont Website Development designs and builds websites and web systems for businesses across the United States.",
       body: "We work the way established professional firms do: a written scope, published prices, recorded approvals and a clear handoff. You always know what you are buying, what is included, and what happens next.\n\nWe do not publish claims we cannot support. You will not find inflated client counts, invented awards or anonymous testimonials here. Our portfolio shows real, live websites, and our prices are on the pricing page.\n\nWe use AI where it helps — drafting copy for your review, summarising requests, routing enquiries — and people make every decision that matters: scope, price, refunds, contracts and what goes live." } },
   { key: "process.page", label: "Development process", group: "Pages", previewPath: "/process",

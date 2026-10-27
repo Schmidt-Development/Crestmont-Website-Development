@@ -23,6 +23,8 @@ export const INTEGRATIONS = [
   { id: "dns", label: "DNS (crestmontwebsitedevelopment.com)", blocker: "BLK-011" },
   { id: "github", label: "GitHub repository", blocker: null },
   { id: "turnstile", label: "Cloudflare Turnstile (bot defence)", blocker: "BLK-003" },
+  { id: "retell", label: "Retell AI webhooks (voice receptionist)", blocker: "BLK-009" },
+  { id: "resend_webhooks", label: "Resend delivery webhooks (bounces, complaints)", blocker: "BLK-005" },
 ] as const;
 export type IntegrationId = (typeof INTEGRATIONS)[number]["id"];
 export type HealthStatus = "not_configured" | "configured_unverified" | "verified" | "degraded" | "failing" | "blocked";
@@ -87,6 +89,12 @@ export async function assessConfiguration(d: IntegrationDeps, id: IntegrationId)
         return { status: "not_configured", detail: `TURNSTILE_SECRET / TURNSTILE_SITE_KEY not set.${dev}`, fingerprint: null, probe: false };
       }
       return { status: "configured_unverified", detail: "Turnstile keys set. Probe confirms the secret is accepted by siteverify.", fingerprint: await fp(e.TURNSTILE_SECRET), probe: true };
+    case "retell":
+      if (!e.RETELL_API_KEY) return { status: "not_configured", detail: "RETELL_API_KEY is not set; /api/webhooks/retell and /api/webhooks/retell/functions reject every request. No Retell workspace exists for Crestmont yet (BLK-009).", fingerprint: null, probe: false };
+      return { status: "configured_unverified", detail: "Retell webhook key set, so signed Retell events are accepted. Unverified until a test call from the Crestmont workspace is received; there is no read-only probe.", fingerprint: await fp(e.RETELL_API_KEY), probe: false };
+    case "resend_webhooks":
+      if (!e.RESEND_WEBHOOK_SECRET) return { status: "not_configured", detail: "RESEND_WEBHOOK_SECRET is not set; /api/webhooks/resend rejects every request, so bounces and complaints are not recorded.", fingerprint: null, probe: false };
+      return { status: "configured_unverified", detail: "Svix signing secret set; signed Resend delivery events are accepted. Unverified until Resend delivers a real event.", fingerprint: await fp(e.RESEND_WEBHOOK_SECRET), probe: false };
   }
 }
 
@@ -252,7 +260,7 @@ export async function verifyIntegration(d: IntegrationDeps, id: IntegrationId, a
 
 /** Environment variable names the platform reads as secrets. Values are never displayed. */
 export const SECRET_NAMES = ["EVIDENCE_INGEST_SECRET", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "RESEND_API_KEY", "ANTHROPIC_API_KEY",
-  "GITHUB_TOKEN", "TURNSTILE_SECRET", "VOICE_WEBHOOK_SECRET"] as const;
+  "GITHUB_TOKEN", "TURNSTILE_SECRET", "VOICE_WEBHOOK_SECRET", "RETELL_API_KEY", "RESEND_WEBHOOK_SECRET"] as const;
 
 export function secretPresence(env: Env): { name: string; present: boolean }[] {
   const e = env as unknown as Record<string, unknown>;

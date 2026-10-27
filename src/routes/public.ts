@@ -6,13 +6,14 @@ import type { AppContext } from "../app/context.ts";
 import { html, raw, safeUrl, formatCents, formatDate, formatDateTime, type SafeHtml } from "../lib/html.ts";
 import { HttpError, htmlResponse, redirect, str, securityHeaders } from "../app/http.ts";
 import { publicLayout, appLayout } from "../ui/layout.ts";
-import { csrf, input, textarea, select, button, linkButton, actionForm, formErrors, alert, table, badge, emptyState, pageHead, dl, fileInput } from "../ui/components.ts";
+import { csrf, input, textarea, select, button, linkButton, actionForm, formErrors, alert, table, badge, emptyState, pageHead, dl, fileInput, attributionFields, richText } from "../ui/components.ts";
 import { requireStaff } from "../app/app.ts";
 import { staffNav } from "./nav.ts";
 import { verifyTurnstile } from "./api.ts";
 import { PACKAGES, MAINTENANCE_PLANS, type PackageId } from "../domain/catalog.ts";
+import { effectivePrices } from "../services/pricing-approvals.ts";
 import { can } from "../domain/authz.ts";
-import { captureLead } from "../services/leads.ts";
+import { captureLead, requestAttribution, submittedAttribution } from "../services/leads.ts";
 import { rateLimit, securityEvent } from "../services/security.ts";
 import { sendMail } from "../services/mailer.ts";
 import { ValidationError } from "../lib/validate.ts";
@@ -21,6 +22,7 @@ import * as cms from "../services/cms.ts";
 import * as pf from "../services/portfolio.ts";
 import { SERVICES, SERVICE_GROUPS, serviceBySlug, servicePath, PRICING_NOTE, type ServiceDef } from "../content/services.ts";
 import { CMS_KEYS, cmsKeyDef, parseItems, paragraphs, type CmsKeyDef } from "../content/registry.ts";
+import { renderMarkdown, markdownIssues } from "../ui/markdown.ts";
 import { legalDocs, LEGAL_SLUGS, DRAFT_BANNER, type LegalSlug, type LegalFacts } from "../content/legal.ts";
 
 const SUPPORT_EMAIL = "support@crestmontwebsitedevelopment.com";
@@ -29,7 +31,9 @@ const BILLING_EMAIL = "billing@crestmontwebsitedevelopment.com";
 const LEGAL_EMAIL = "legal@crestmontwebsitedevelopment.com";
 
 const PKG_ORDER: PackageId[] = ["starter", "business", "premium"];
-const pkgPrice = (id: PackageId) => formatCents(PACKAGES[id].basePriceCents) + (PACKAGES[id].priceIsFloor ? "+" : "");
+// CAT-007: prices shown are the Founder-approved effective prices (same lookup checkout uses), refreshed by page().
+let effective: Record<string, number> = {};
+const pkgPrice = (id: PackageId) => formatCents(effective[`package:${id}`] ?? PACKAGES[id].basePriceCents) + (PACKAGES[id].priceIsFloor ? "+" : "");
 const plans = () => Object.values(MAINTENANCE_PLANS);
 
 /** Static public paths, used by the sitemap and checked by the dead-link test. */
@@ -44,6 +48,7 @@ type Content = Awaited<ReturnType<typeof cms.loadContent>>;
 
 async function page(ctx: AppContext, seoKey: string, keys: string[], render: (c: Content) => SafeHtml | Promise<SafeHtml>, status = 200): Promise<Response> {
   const c = await cms.loadContent(ctx, [`seo.${seoKey}`, ...keys]);
+  effective = await effectivePrices(ctx.db, ctx.now());
   const seo = c.get(`seo.${seoKey}`);
   const body = await render(c);
   const banner = c.previewing
@@ -75,7 +80,7 @@ ${opts.compact ? html`<ul class="checklist">${p.includes.slice(0, 5).map((i) => 
 
 function maintenanceCards(): SafeHtml {
   const approved = plans().every((m) => m.entitlementsStatus === "approved");
-  return html`<div class="grid grid-3">${plans().map((m) => html`<div class="card"><h3 class="card__title">${m.name}</h3><div class="price">${formatCents(m.monthlyCents)}<small> / month</small></div>
+  return html`<div class="grid grid-3">${plans().map((m) => html`<div class="card"><h3 class="card__title">${m.name}</h3><div class="price" data-testid="price-${m.id}">${formatCents(effective[`maintenance:${m.id}`] ?? m.monthlyCents)}<small> / month</small></div>
 ${approved ? html`<ul class="checklist">${Object.values(m.proposedEntitlements).map((e) => html`<li>${e}</li>`)}</ul>` : html`<p class="muted">Full plan details will be published here once finalised.</p>`}</div>`)}</div>
 ${approved ? "" : html`<p class="muted">Each plan will have explicit, published limits for hosting, maintenance time, content updates, security updates, monitoring, backups and support response targets — with no unlimited development or unlimited support. Have a question in the meantime? <a href="/contact?topic=maintenance">Ask us about maintenance</a>.</p>`}`;
 }
@@ -159,7 +164,7 @@ function validateLeadForm(v: FormVals, kind: "quote" | "contact"): { errors: Fie
 }
 
 function quoteForm(ctx: AppContext, v: FormVals, e: FieldErrors): SafeHtml {
-  return html`${formErrors(Object.values(e))}<form method="post" action="/quote" class="lead-form" novalidate>${csrf(ctx)}${honeypot()}
+  return html`${formErrors(Object.values(e))}<form method="post" action="/quote" class="lead-form" novalidate>${csrf(ctx)}${honeypot()}${attributionFields(requestAttribution(ctx))}
 ${contactFields(v, e)}
 ${input({ name: "website", label: "Current website (optional)", type: "url", value: v.website, placeholder: "https://", error: e.website, maxlength: 300 })}
 <div class="grid grid-2 form-grid">
@@ -174,7 +179,7 @@ ${turnstileWidget(ctx)}
 }
 
 function contactForm(ctx: AppContext, v: FormVals, e: FieldErrors, opts: { compact?: boolean } = {}): SafeHtml {
-  return html`${formErrors(Object.values(e))}<form method="post" action="/contact" class="lead-form" novalidate>${csrf(ctx)}${honeypot()}
+  return html`${formErrors(Object.values(e))}<form method="post" action="/contact" class="lead-form" novalidate>${csrf(ctx)}${honeypot()}${attributionFields(requestAttribution(ctx))}
 ${contactFields(v, e)}
 ${opts.compact ? html`<input type="hidden" name="interest" value="${v.interest || "other"}">` : select({ name: "interest", label: "Topic", options: INTERESTS, value: v.interest || "other", required: true, error: e.interest })}
 ${textarea({ name: "message", label: "Message", value: v.message, rows: opts.compact ? 4 : 6, required: true, maxlength: 4000, error: e.message })}
@@ -211,7 +216,7 @@ async function handleLead(ctx: AppContext, kind: "quote" | "contact", rerender: 
     const { leadId } = await captureLead(ctx.db, {
       name: v.name, email: v.email, phone: v.phone || undefined, company: v.company || undefined, website: v.website || undefined,
       interest: v.interest, message: details, source: kind === "quote" ? "quote_form" : "web_form",
-    }, { ip: ctx.ip ?? undefined });
+    }, { ip: ctx.ip ?? undefined, attribution: submittedAttribution(ctx, f) });
     if (kind === "quote") {
       await ctx.db.prepare(`INSERT INTO lead_request_details (lead_id, service_slug, budget_range, timeline, created_at) VALUES (?,?,?,?,?)`)
         .bind(leadId, service?.slug ?? null, v.budget, v.timeline, nowIso()).run();
@@ -275,7 +280,7 @@ ${section("Not offered", "What we do not offer", html`<p class="muted">We do not
       const copy = c.get(`service.${s.slug}`);
       const related = SERVICES.filter((x) => x.group === s.group && x.slug !== s.slug).slice(0, 3);
       return html`${pageHero(s.group, s.name, copy.summary, html`${s.pricing === "custom" ? linkButton("Request a quote", `/quote?service=${s.slug}`) : linkButton("View packages", "/pricing")}${linkButton(s.pricing === "custom" ? "Contact us" : "Request a quote", s.pricing === "custom" ? "/contact" : `/quote?service=${s.slug}`, "secondary")}`)}
-<section class="section"><div class="container grid grid-2"><div class="prose">${paragraphs(copy.intro).map((x) => html`<p>${x}</p>`)}
+<section class="section"><div class="container grid grid-2"><div class="prose">${renderMarkdown(copy.intro)}
 <h2>How it is priced</h2><p>${PRICING_NOTE[s.pricing]}</p>${s.pricing !== "custom" ? html`<p class="muted">Packages: ${PKG_ORDER.map((id) => `${PACKAGES[id].name} ${pkgPrice(id)}`).join(" · ")}.</p>` : html`<p class="muted">Custom projects are billed 50% as a deposit, 25% after the approved design milestone and 25% before production launch.</p>`}</div>
 <div>${s.includes.length ? html`<div class="card"><h3 class="card__title">What is included</h3><ul class="checklist">${s.includes.map((i) => html`<li>${i}</li>`)}</ul></div>` : ""}
 ${s.boundaries.length ? html`<div class="card card--quiet"><h3 class="card__title">Good to know</h3><ul class="plain-list">${s.boundaries.map((i) => html`<li>${i}</li>`)}</ul></div>` : ""}</div></div></section>
@@ -342,7 +347,7 @@ ${tms.length ? section("Testimonials", "What they said", html`<div class="grid g
 
   r.get("/about", (ctx) => page(ctx, "about", ["about.page"], (c) => {
     const a = c.get("about.page");
-    return html`${pageHero("About", a.heading, a.lede)}<section class="section section--flush"><div class="container grid grid-2"><div class="prose">${paragraphs(a.body).map((x) => html`<p>${x}</p>`)}</div>
+    return html`${pageHero("About", a.heading, a.lede)}<section class="section section--flush"><div class="container grid grid-2"><div class="prose">${renderMarkdown(a.body)}</div>
 <div class="card card--gold"><h3 class="card__title">What we will not do</h3><ul class="plain-list"><li>Promise search rankings, traffic, leads or sales.</li><li>Run advertising campaigns or manage social media accounts.</li><li>Publish invented testimonials, ratings, awards or client counts.</li><li>Launch your site without your approval.</li><li>Add work to your bill without an approved change order.</li></ul>
 <p><a href="/process">How a project runs</a> · <a href="/legal/disclosures">Business disclosures</a></p></div></div></section>`;
   }));
@@ -483,7 +488,7 @@ ${groups.map((g) => html`<h2 class="h4">${g}</h2>${table(rows.filter((x) => x.de
     const body = JSON.parse(rev.body_json) as Record<string, string>;
     return staffShell(ctx, "Revision", html`${pageHead(`${def.label} — revision`, html`${linkButton("Back to editor", `/staff/cms/${def.key}`, "ghost", "sm")}${linkButton("Preview on site", `${def.previewPath}?preview=${rev.id}`, "secondary", "sm")}`, "Website CMS")}
 ${dl([["Status", badge(rev.status)], ["Created", formatDateTime(rev.created_at)], ["Published", formatDateTime(rev.published_at)], ["Note", rev.note]])}
-<div class="card">${def.fields.map((f) => html`<h3 class="h4">${f.label}</h3><pre class="cms-pre">${body[f.name] ?? ""}</pre>`)}</div>`);
+<div class="card">${def.fields.map((f) => html`<h3 class="h4">${f.label}</h3><pre class="cms-pre">${body[f.name] ?? ""}</pre>${f.kind === "richtext" ? html`<div class="richtext__preview prose">${renderMarkdown(body[f.name])}</div>` : ""}`)}</div>`);
   });
 
   r.post("/staff/cms/revisions/:id/publish", async (ctx, p) => {
@@ -507,6 +512,8 @@ ${dl([["Status", badge(rev.status)], ["Created", formatDateTime(rev.created_at)]
     if (!def) throw new HttpError(404, "Unknown content key");
     const f = await ctx.form();
     const vals = Object.fromEntries(def.fields.map((x) => [x.name, String(f.get(x.name) ?? "")]));
+    const rtIssues = def.fields.filter((x) => x.kind === "richtext").flatMap((x) => markdownIssues(vals[x.name]).map((m) => `${x.label}: ${m}`));
+    if (rtIssues.length) return cmsEditor(ctx, def, vals, rtIssues, 422);
     try {
       const res = await cms.saveDraft(ctx.db, ctx.actor!, def.key, vals, { note: str(f, "note"), ip: ctx.ip });
       return redirect(ctx, `/staff/cms/${def.key}`, { kind: "success", text: res.status === "pending_founder_approval" ? "Saved. This pricing presentation change now awaits Founder approval." : "Draft saved. Preview it, then publish when ready." });
@@ -537,6 +544,7 @@ ${latest && latest.status !== "published" ? alert("info", html`The form shows th
 ${formErrors(errors)}
 <form method="post" action="/staff/cms/${def.key}" class="card">${csrf(ctx)}
 ${def.fields.map((f) => f.kind === "text" ? input({ name: f.name, label: f.label, value: current[f.name], required: true, maxlength: f.max, hint: f.hint })
+    : f.kind === "richtext" ? richText({ name: f.name, label: f.label, value: current[f.name], rows: 10, required: true, maxlength: f.max, hint: f.hint, preview: renderMarkdown(current[f.name]) })
     : textarea({ name: f.name, label: f.label, value: current[f.name], rows: f.kind === "items" ? 16 : 6, required: true, maxlength: f.max, hint: f.hint }))}
 ${input({ name: "note", label: "Revision note (optional)", maxlength: 300 })}
 <div class="form-actions">${button(def.sensitivePricing ? "Save for Founder approval" : "Save draft")}</div></form>

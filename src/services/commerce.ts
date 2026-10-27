@@ -6,21 +6,25 @@ import { PACKAGES, MAINTENANCE_PLANS, milestoneSplit, type PackageId, type Maint
 import { milestoneInvoiceAllowed } from "../domain/project.ts";
 import { audit } from "./security.ts";
 import { HttpError } from "../app/http.ts";
+import { effectivePackagePrice } from "./pricing-approvals.ts";
 
 export interface InvoiceRow { id: string; organization_id: string; order_id: string | null; project_id: string | null; milestone_kind: string | null; amount_cents: number; status: string; description: string | null }
 
-export async function createPackageOrder(db: Db, organizationId: string, packageId: PackageId, actorUserId: string) {
+export async function createPackageOrder(db: Db, organizationId: string, packageId: PackageId, actorUserId: string, now: Date = new Date()) {
   const pkg = PACKAGES[packageId];
   if (!pkg) throw new HttpError(400, "Unknown package");
-  const at = nowIso();
+  // CAT-007: the Founder-approved effective price (catalog price unless an approved override is in force).
+  const price = await effectivePackagePrice(db, pkg.id, now);
+  const amount = price.cents;
+  const at = nowIso(() => now);
   const orderId = newId("ord"), invoiceId = newId("inv");
   await db.batch([
-    db.prepare(`INSERT INTO orders (id, organization_id, product_id, total_cents, status, kind, created_at) VALUES (?,?,?,?, 'pending_payment','package',?)`).bind(orderId, organizationId, pkg.id, pkg.basePriceCents, at),
+    db.prepare(`INSERT INTO orders (id, organization_id, product_id, total_cents, status, kind, created_at) VALUES (?,?,?,?, 'pending_payment','package',?)`).bind(orderId, organizationId, pkg.id, amount, at),
     db.prepare(`INSERT INTO invoices (id, organization_id, order_id, milestone_kind, amount_cents, status, description, created_at) VALUES (?,?,?, 'full', ?, 'open', ?, ?)`)
-      .bind(invoiceId, organizationId, orderId, pkg.basePriceCents, `${pkg.name} package — 100% upfront`, at),
+      .bind(invoiceId, organizationId, orderId, amount, `${pkg.name} package — 100% upfront`, at),
   ]);
-  await audit(db, { actorUserId, action: "order.created", subjectType: "order", subjectId: orderId, organizationId, details: { packageId, totalCents: pkg.basePriceCents } });
-  return { orderId, invoiceId, amountCents: pkg.basePriceCents, description: `${pkg.name} website package` };
+  await audit(db, { actorUserId, action: "order.created", subjectType: "order", subjectId: orderId, organizationId, details: { packageId, totalCents: amount, priceSource: price.source, priceOverrideId: price.overrideId } });
+  return { orderId, invoiceId, amountCents: amount, description: `${pkg.name} website package` };
 }
 
 /** Accepting a quote version creates the order and the first invoice (full or 50% deposit). */

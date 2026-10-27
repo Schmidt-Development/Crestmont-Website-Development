@@ -1,0 +1,148 @@
+name: Deploy staging
+
+# INFRA-005 / INFRA-002. Deploys main to the Cloudflare STAGING environment only.
+# Gated: does nothing (with a clear notice) until the Cloudflare account exists (BLK-003) and the
+# `staging` GitHub environment has the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID secrets and
+# wrangler.toml carries the real staging database_id. Production is never touched by this workflow.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        name: Check that staging is provisioned
+        env:
+          HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAS_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        run: |
+          configured=true
+          if [ "$HAS_TOKEN" != "true" ] || [ "$HAS_ACCOUNT" != "true" ]; then
+            echo "::notice title=Staging deploy skipped::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID are not set on the 'staging' GitHub environment (BLK-003). Nothing was deployed. See docs/DEPLOYMENT.md."
+            configured=false
+          elif awk '/^\[env\.staging\]/{s=1} /^\[env\.production\]/{s=0} s' wrangler.toml | grep -q 'database_id = ""'; then
+            echo "::notice title=Staging deploy skipped::wrangler.toml [env.staging] still has an empty database_id. Run 'wrangler d1 create crestmont-staging' and commit the id (docs/DEPLOYMENT.md §2)."
+            configured=false
+          fi
+          echo "configured=$configured" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL }}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      READINESS_URL: ${{ vars.READINESS_URL || vars.STAGING_URL }}
+      EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
+      STAGING_URL: ${{ vars.STAGING_URL }}
+      DEPLOYMENT_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-staging
+      WRANGLER: npx --yes wrangler@4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"   # >= 22.18 for native TypeScript
+
+      - name: Require staging URL and evidence secret
+        run: |
+          [ -n "$STAGING_URL" ] || { echo "::error::Set the STAGING_URL variable on the 'staging' environment (https://…)."; exit 1; }
+          [ -n "$EVIDENCE_INGEST_SECRET" ] || { echo "::error::Set the EVIDENCE_INGEST_SECRET secret on the 'staging' environment (same value as the Worker secret)."; exit 1; }
+
+      - name: Install dev tooling
+        run: npm install --no-save typescript@5 @types/node@22
+
+      - name: Typecheck
+        run: npx tsc -p tsconfig.json
+
+      - name: Unit / integration tests
+        run: npm test
+
+      - name: Safety export of the staging database
+        run: |
+          mkdir -p backups
+          $WRANGLER d1 export crestmont-staging --remote --env staging --output "backups/pre-deploy-staging-${GITHUB_SHA}.sql"
+          sha256sum backups/*.sql
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pre-deploy-staging-export
+          path: backups/
+          retention-days: 14
+
+      - name: Apply D1 migrations (staging)
+        run: $WRANGLER d1 migrations apply crestmont-staging --remote --env staging
+
+      - name: Record deployment started
+        run: >
+          node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment staging --commit "$GITHUB_SHA"
+          --status started --url "$STAGING_URL" --by "github-actions:${{ github.actor }}"
+          --ci-run "gh-${{ github.run_id }}-${{ github.run_attempt }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Deploy Worker (staging)
+        id: deploy
+        run: $WRANGLER deploy --env staging
+
+      - name: Record deployment succeeded
+        run: node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment staging --commit "$GITHUB_SHA" --status succeeded --by "github-actions:${{ github.actor }}"
+
+      - name: Post-deploy smoke checks against staging
+        id: smoke
+        run: >
+          node --no-warnings scripts/production-checks.ts --base "$STAGING_URL" --environment staging --commit "$GITHUB_SHA"
+          --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}" --out evidence/staging-check.json
+
+      - name: Browser E2E suite against staging
+        id: e2e
+        if: always() && steps.deploy.outcome == 'success'
+        env:
+          E2E_BASE_URL: ${{ vars.STAGING_URL }}
+          EVIDENCE_ENVIRONMENT: staging
+          EVIDENCE_SOURCE: staging_e2e
+        run: |
+          # The browser harness must drive the deployed URL (not a local server) for this to count as
+          # staging evidence. Until tests/e2e/support.ts honours E2E_BASE_URL, refuse rather than
+          # mislabel local-server results as staging (TEST-002).
+          if ! grep -q "E2E_BASE_URL" tests/e2e/support.ts; then
+            echo "::warning title=Staging E2E not run::tests/e2e/support.ts cannot target a remote URL yet (it starts a local server and reads its database). No staging E2E evidence was produced."
+            exit 0
+          fi
+          npx --yes playwright@1 install --with-deps chromium
+          npm run e2e
+
+      - name: Post staging evidence
+        if: always() && steps.deploy.outcome == 'success'
+        run: |
+          node --no-warnings scripts/post-evidence.ts evidence/staging-check.json
+          if [ -f evidence/e2e-evidence.json ] && grep -q '"environment": "staging"' evidence/e2e-evidence.json; then
+            node --no-warnings scripts/post-evidence.ts evidence/e2e-evidence.json
+          fi
+
+      - name: Record verification result
+        if: always() && steps.deploy.outcome == 'success'
+        run: >
+          node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment staging --commit "$GITHUB_SHA" --status succeeded
+          --by "github-actions:${{ github.actor }}"
+          --verification "${{ (steps.smoke.outcome == 'success' && steps.e2e.outcome == 'success') && 'passed' || 'failed' }}"
+
+      - name: Record failed deployment
+        if: failure() && steps.deploy.outcome == 'failure'
+        run: node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment staging --commit "$GITHUB_SHA" --status failed --by "github-actions:${{ github.actor }}" || true

@@ -57,11 +57,17 @@ wrangler d1 execute crestmont-restore-drill --remote --command "SELECT COUNT(*) 
 ```
 Drills **never** target production. Record the drill, its result, the time taken (observed RTO) and the age of the export (observed RPO) at /staff/backups → "Record a restore drill".
 
-Local development equivalent (works today):
+Local development equivalent (works today; TEST-004):
 ```sh
-sqlite3 .dev/crestmont.db ".backup backups/dev-$(date -u +%Y%m%d).db"
-sqlite3 backups/dev-YYYYMMDD.db "PRAGMA integrity_check; SELECT COUNT(*) FROM audit_logs;"
+# Full SQL export in the same format as `wrangler d1 export` (schema + data + indexes + triggers)
+node --no-warnings scripts/backup-export.ts --db .dev/crestmont.db --out backups/dev-$(date -u +%Y%m%d).sql
+# Restore into a FRESH database and verify: row counts per table vs the source, schema parity,
+# integrity_check, foreign_key_check, audit_logs still append-only. --record writes the drill to
+# restore_tests (environment "development") so it appears at /staff/backups.
+node --no-warnings scripts/restore-verify.ts --export backups/dev-YYYYMMDD.sql --source .dev/crestmont.db \
+  --record .dev/crestmont.db --by <your staff user id>
 ```
+The same `restore-verify.ts` checks apply to a `wrangler d1 export` file restored locally, which is a cheap pre-check before a D1 drill. `tests/ops.test.ts` proves the round trip on a database populated through the real routes (registration, checkout, Stripe webhook, readiness approvals, audit log). Development drills do **not** satisfy the staging drill requirement below.
 
 ## 4. R2 (files)
 

@@ -25,16 +25,35 @@ migrations_dir = "migrations"
 binding = "FILES"
 bucket_name = "crestmont-files-dev"
 
+# ───────────── Staging ─────────────
+# UNPROVISIONED (BLK-003). Fill database_id from `wrangler d1 create crestmont-staging` and create
+# the bucket with `wrangler r2 bucket create crestmont-files-staging`. See docs/DEPLOYMENT.md.
+# Non-inheritable keys (vars, d1_databases, r2_buckets) are repeated per environment on purpose:
+# staging and production never share a database, bucket or secret (INFRA-002, §62).
 [env.staging]
 name = "crestmont-platform-staging"
-vars = { ENVIRONMENT = "staging" }
+workers_dev = true            # staging is served at crestmont-platform-staging.<account>.workers.dev until a custom domain exists
+# routes = [{ pattern = "staging.crestmontwebsitedevelopment.com", custom_domain = true }]   # after DNS control (BLK-011)
+vars = { ENVIRONMENT = "staging" }   # add APP_URL = "https://<staging host>" once the URL is known
 d1_databases = [{ binding = "DB", database_name = "crestmont-staging", database_id = "", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-staging" }]
+triggers = { crons = ["*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts
 
+# ───────────── Production ─────────────
+# UNPROVISIONED (BLK-003). Deployed ONLY by .github/workflows/deploy-production.yml, which requires
+# the GitHub "production" environment approval AND a valid Founder approval for the exact commit
+# (GET /api/readiness/release-authorization). Never deploy production from a laptop.
 [env.production]
 name = "crestmont-platform-production"
-vars = { ENVIRONMENT = "production" }
+workers_dev = false           # production is reachable only on the custom domain
+# routes = [{ pattern = "crestmontwebsitedevelopment.com", custom_domain = true }, { pattern = "www.crestmontwebsitedevelopment.com", custom_domain = true }]   # after DNS control (BLK-011)
+vars = { ENVIRONMENT = "production" }   # add APP_URL = "https://crestmontwebsitedevelopment.com" with the custom domain
 d1_databases = [{ binding = "DB", database_name = "crestmont-production", database_id = "", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-production" }]
-# Secrets (set with `wrangler secret put`, per environment):
-#   EVIDENCE_INGEST_SECRET, STRIPE_WEBHOOK_SECRET, STRIPE_SECRET_KEY, TURNSTILE_SECRET, RESEND_API_KEY
+triggers = { crons = ["*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts
+
+# Secrets — NEVER in this file. Set per environment with `wrangler secret put <NAME> --env <env>`
+# (full list and who owns each in docs/DEPLOYMENT.md §4):
+#   EVIDENCE_INGEST_SECRET, STRIPE_WEBHOOK_SECRET, STRIPE_SECRET_KEY, TURNSTILE_SECRET, TURNSTILE_SITE_KEY,
+#   RESEND_API_KEY, ANTHROPIC_API_KEY, GITHUB_TOKEN, GITHUB_REPO, VOICE_WEBHOOK_SECRET,
+#   RESEND_WEBHOOK_SECRET (Svix whsec_…), RETELL_API_KEY (Crestmont Retell workspace key with webhook badge)

@@ -80,3 +80,45 @@ export class StripeTestPayments implements PaymentsAdapter {
     return this.call<{ id: string; status: string }>("refunds", { payment_intent: paymentIntentId, amount: String(amountCents) }, idempotencyKey);
   }
 }
+
+/**
+ * Read-only Stripe API access for fee import (FIN-002) and Stripe-side reconciliation (PAY-009).
+ * GET requests only: this class has no method that can create, change or refund anything.
+ * Same test-mode-only rule as StripeTestPayments.
+ */
+export class StripeReadOnly {
+  private key: string; private fetchImpl: typeof fetch;
+  constructor(secretKey: string, fetchImpl: typeof fetch = fetch) {
+    if (!secretKey.startsWith("sk_test_") && !secretKey.startsWith("rk_test_")) {
+      throw new LivePaymentsNotAuthorized("Only Stripe test-mode keys are accepted until live payments are authorised by the Founder");
+    }
+    this.key = secretKey; this.fetchImpl = fetchImpl;
+  }
+
+  async get<T>(path: string, query: [string, string][] = []): Promise<T> {
+    if (!/^[a-z_]+(\/[A-Za-z0-9_]+)*$/.test(path)) throw new Error("Invalid Stripe path");
+    const qs = query.length ? `?${new URLSearchParams(query).toString()}` : "";
+    const r = await this.fetchImpl(`https://api.stripe.com/v1/${path}${qs}`, { method: "GET", headers: { authorization: `Bearer ${this.key}` } });
+    const body = (await r.json().catch(() => ({}))) as T & { error?: { message: string }; livemode?: boolean };
+    if (!r.ok) throw new Error(`Stripe ${r.status}: ${body.error?.message ?? "error"}`);
+    if (body.livemode === true) throw new LivePaymentsNotAuthorized("Stripe returned a live-mode object; live payments are not authorised");
+    return body;
+  }
+
+  /** PaymentIntent with its latest charge and that charge's balance transaction (fee). */
+  retrievePaymentIntentWithFee(id: string) {
+    return this.get<{ id: string; status: string; amount_received?: number; latest_charge?: { id: string; balance_transaction?: { id: string; fee: number; currency: string } | string | null } | string | null }>(
+      `payment_intents/${id}`, [["expand[]", "latest_charge.balance_transaction"]]);
+  }
+
+  listCheckoutSessions(createdGte: number, startingAfter?: string) {
+    const q: [string, string][] = [["limit", "100"], ["created[gte]", String(createdGte)]];
+    if (startingAfter) q.push(["starting_after", startingAfter]);
+    return this.get<{ data: StripeCheckoutSessionSummary[]; has_more: boolean }>("checkout/sessions", q);
+  }
+}
+
+export interface StripeCheckoutSessionSummary {
+  id: string; created: number; mode: string; status: string | null; payment_status: string; amount_total: number | null;
+  payment_intent: string | null; subscription: string | null; metadata: Record<string, string> | null; livemode?: boolean;
+}

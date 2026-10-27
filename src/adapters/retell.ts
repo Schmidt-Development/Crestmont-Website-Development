@@ -1,0 +1,157 @@
+// Retell AI → Crestmont voice envelope (VOICE-003). Translation only: every business rule (idempotency
+// per call, published-pricing-only, lead/callback/support/escalation handling, consent-gated transcripts)
+// lives in src/services/voice.ts#handleVoiceEvent and is reused unchanged.
+//
+// Sources (checked 2026-10-27; see docs/voice/RETELL-INTEGRATION.md):
+//  - Secure webhook:  https://docs.retellai.com/features/secure-webhook.md
+//      Header `X-Retell-Signature: v=<unix ms>,d=<hex>`; d = HMAC-SHA256(key = Retell API key with the
+//      webhook badge, message = rawBody + v); reject when v is more than 5 minutes from now.
+//  - Webhook events:  https://docs.retellai.com/features/webhook-overview.md
+//      Body `{ event, call }`; events call_started, call_ended, call_analyzed (default subscriptions);
+//      2xx expected, 10 s timeout, up to 3 retries → consumers must be idempotent.
+//  - Custom functions: https://docs.retellai.com/build/single-multi-prompt/custom-function.md
+//      POST body `{ name, call, args }` (default, not "args only"), signed with the same X-Retell-Signature;
+//      the response body is stringified and given to the agent's LLM.
+//  - Call object:     https://docs.retellai.com/api-references/get-call.md
+//      call_cost.combined_cost is "in cents"; call_type web_call | phone_call; call_status; disconnection_reason.
+import type { Db } from "../lib/db.ts";
+import { nowIso } from "../lib/db.ts";
+import { hmacSha256Hex, sha256Hex, timingSafeEqualHex } from "../lib/crypto.ts";
+import { VOICE_FUNCTIONS, type CallOutcome } from "../services/voice.ts";
+
+export const RETELL_PROVIDER = "retell";
+export const RETELL_TOLERANCE_MS = 5 * 60 * 1000;
+
+export class RetellAuthError extends Error {}
+
+/** Signs exactly as Retell does (used by tests and the documentation's curl example). */
+export async function signRetell(apiKey: string, rawBody: string, nowMs = Date.now()): Promise<string> {
+  return `v=${nowMs},d=${await hmacSha256Hex(apiKey, rawBody + String(nowMs))}`;
+}
+
+/** Fails closed: no key → every request refused. */
+export async function verifyRetellSignature(apiKey: string | undefined, rawBody: string, header: string | null, nowMs = Date.now()): Promise<void> {
+  if (!apiKey) throw new RetellAuthError("Retell webhook key not configured (RETELL_API_KEY)");
+  const m = /^v=(\d{10,16}),d=([0-9a-f]{64})$/.exec((header ?? "").trim());
+  if (!m) throw new RetellAuthError("Missing or malformed X-Retell-Signature");
+  if (Math.abs(nowMs - Number(m[1])) > RETELL_TOLERANCE_MS) throw new RetellAuthError("Signature timestamp outside tolerance");
+  if (!timingSafeEqualHex(m[2], await hmacSha256Hex(apiKey, rawBody + m[1]))) throw new RetellAuthError("Signature mismatch");
+}
+
+type Obj = Record<string, unknown>;
+const obj = (x: unknown): Obj => (x && typeof x === "object" && !Array.isArray(x) ? (x as Obj) : {});
+const str = (o: Obj, k: string) => (typeof o[k] === "string" ? (o[k] as string) : undefined);
+
+export interface RetellCall {
+  call_id?: string; call_type?: string; from_number?: string; call_status?: string; disconnection_reason?: string;
+  transcript?: string; recording_url?: string; call_cost?: { combined_cost?: number }; call_analysis?: { call_summary?: string };
+  metadata?: Obj; retell_llm_dynamic_variables?: Obj;
+}
+
+const callIdOf = (call: Obj): string => {
+  const id = str(call, "call_id");
+  if (!id || !/^[A-Za-z0-9._:-]{1,120}$/.test(id)) throw new RetellPayloadError("call.call_id missing or invalid");
+  return id;
+};
+export class RetellPayloadError extends Error {}
+
+/** Web calls are Retell dashboard / web-SDK test calls; a phone call can also be flagged via metadata. */
+const isTest = (call: Obj) => str(call, "call_type") === "web_call" || obj(call.metadata).crestmont_test === true;
+
+/** Combined cost is reported in cents (possibly fractional) → integer micro-USD; anything else → unknown (null). */
+export function retellCostMicroUsd(call: Obj): number | null {
+  const c = obj(call.call_cost).combined_cost;
+  return typeof c === "number" && Number.isFinite(c) && c >= 0 ? Math.round(c * 10_000) : null;
+}
+
+async function consentFor(db: Db, callId: string): Promise<boolean> {
+  const row = await db.prepare(`SELECT consent FROM retell_call_consents WHERE provider_call_id = ?`).bind(callId).first<{ consent: number }>();
+  return row?.consent === 1;
+}
+
+/**
+ * Outcome for call_ended, derived from what the platform already recorded for this call (read-only
+ * look at voice_events written by handleVoiceEvent), in order of importance.
+ */
+async function deriveOutcome(db: Db, callId: string, call: Obj): Promise<CallOutcome> {
+  const status = str(call, "call_status");
+  const reason = str(call, "disconnection_reason") ?? "";
+  if (status === "error" || reason.startsWith("error")) return "error";
+  const kinds = new Set((await db.prepare(`SELECT e.kind FROM voice_events e JOIN calls c ON c.id = e.call_id WHERE c.provider = ? AND c.provider_call_id = ? AND e.status = 'ok'`)
+    .bind(RETELL_PROVIDER, callId).all<{ kind: string }>()).results.map((r) => r.kind));
+  if (kinds.has("fn:escalate")) return "escalated";
+  if (kinds.has("fn:route_support")) return "support_routed";
+  if (kinds.has("fn:create_lead")) return "lead_captured";
+  if (kinds.has("fn:request_callback")) return "callback_requested";
+  const talked = (str(call, "transcript") ?? "").trim().length > 0 || [...kinds].some((k) => k.startsWith("fn:"));
+  return talked ? "info_only" : "abandoned";
+}
+
+export type Translated =
+  | { kind: "envelope"; body: string }
+  | { kind: "ack"; body: Record<string, unknown> };
+
+/** Retell call webhook (`{event, call}`) → Crestmont voice envelope JSON. */
+export async function translateRetellEvent(db: Db, raw: string): Promise<Translated> {
+  const json = obj(JSON.parse(raw));
+  const event = str(json, "event");
+  const call = obj(json.call);
+  const callId = callIdOf(call);
+  const base = { provider: RETELL_PROVIDER, call_id: callId, test: isTest(call), from_number: str(call, "from_number") };
+  switch (event) {
+    case "call_started":
+      return { kind: "envelope", body: JSON.stringify({ ...base, event: "call_started", recording_consent: await consentFor(db, callId) }) };
+    case "call_ended":
+      return { kind: "envelope", body: JSON.stringify({
+        ...base, event: "call_ended", outcome: await deriveOutcome(db, callId, call),
+        recording_consent: await consentFor(db, callId),
+        cost_microusd: retellCostMicroUsd(call) ?? undefined,
+        // handleVoiceEvent discards these unless consent was recorded for the call (VOICE-006).
+        transcript: str(call, "transcript"), recording_url: str(call, "recording_url"),
+        error: str(call, "call_status") === "error" || (str(call, "disconnection_reason") ?? "").startsWith("error") ? `Retell: ${str(call, "disconnection_reason") ?? "error"}` : undefined,
+      }) };
+    case "call_analyzed": {
+      // call_ended already closed the call in the voice service; analysis only fills two fields that
+      // call_ended does not carry. The summary is written only when the call row records consent.
+      const summary = str(obj(call.call_analysis), "call_summary")?.slice(0, 4000) ?? null;
+      const cost = retellCostMicroUsd(call);
+      const res = await db.prepare(`UPDATE calls SET summary = CASE WHEN recording_consent = 1 AND summary IS NULL THEN ? ELSE summary END,
+          cost_microusd = COALESCE(cost_microusd, ?) WHERE provider = ? AND provider_call_id = ?`).bind(summary, cost, RETELL_PROVIDER, callId).run();
+      return { kind: "ack", body: { ok: true, applied: res.meta.changes === 1 } };
+    }
+    default:
+      // transcript_updated, transfer_* and chat events are not used by the platform.
+      return { kind: "ack", body: { ok: true, ignored: event ?? "unknown" } };
+  }
+}
+
+/** Retell-only consent capture: the agent calls `record_consent` after asking the caller (VOICE-006). */
+export const RETELL_ONLY_FUNCTIONS = ["record_consent"] as const;
+
+/**
+ * Retell custom function (`{name, call, args}`) → Crestmont `function_call` envelope.
+ * Retell sends no invocation id, so the idempotency key is a hash of the function name and its
+ * arguments: a retried request (max_retry) returns the stored result instead of acting twice.
+ */
+export async function translateRetellFunction(db: Db, raw: string): Promise<Translated> {
+  const json = obj(JSON.parse(raw));
+  const name = str(json, "name");
+  const call = obj(json.call);
+  if (!name) throw new RetellPayloadError("name missing: configure the function with the default payload (not \"args only\")");
+  const callId = callIdOf(call);
+  const args = obj(json.args);
+  if (name === "record_consent") {
+    if (typeof args.consent !== "boolean") throw new RetellPayloadError("args.consent must be true or false");
+    // Grant-only, like the voice service: a later "false" never erases an earlier recorded "true".
+    await db.prepare(`INSERT INTO retell_call_consents (provider_call_id, consent, recorded_at) VALUES (?,?,?)
+        ON CONFLICT(provider_call_id) DO UPDATE SET consent = MAX(consent, excluded.consent), recorded_at = excluded.recorded_at`)
+      .bind(callId, args.consent ? 1 : 0, nowIso()).run();
+    return { kind: "ack", body: { ok: true, result: { recorded: true, message: args.consent ? "Thank you. This call may be recorded and transcribed." : "Understood. This call will not be recorded or transcribed." } } };
+  }
+  const eventId = `retell-${(await sha256Hex(`${name}\n${JSON.stringify(args)}`)).slice(0, 40)}`;
+  return { kind: "envelope", body: JSON.stringify({
+    provider: RETELL_PROVIDER, call_id: callId, event: "function_call", event_id: eventId, test: isTest(call), from_number: str(call, "from_number"),
+    function: { name: (VOICE_FUNCTIONS as readonly string[]).includes(name) ? name : name.slice(0, 60), arguments: args },
+  }) };
+}
+

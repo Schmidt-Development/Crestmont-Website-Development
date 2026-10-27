@@ -27,12 +27,14 @@ Then run the E2E suite against staging and post the evidence (`npm run evidence:
 
 **Production** deploys require the Founder's approval, bound to the release-candidate commit (§44–§45, READY-008), and are never done by AI or automation without that approval. They follow the same steps with `--env production`, after a fresh export (BACKUP-RECOVERY §3.2). Record the deployment in release history.
 
+**Automated path (preferred):** `.github/workflows/deploy-staging.yml` runs the staging steps above on every push to `main` and records the deployment and evidence. `.github/workflows/deploy-production.yml` is manual only. It refuses to run unless `GET /api/readiness/release-authorization` confirms a valid Founder approval for the exact commit, runs the post-deploy production checks and rolls back on failure. Provisioning and the full flow: **docs/DEPLOYMENT.md**. Deployments are listed with their release-candidate match at `/staff/ops`.
+
 ## 3. Rollback
 
 1. `wrangler deployments list --env <env>` → `wrangler rollback <id> --env <env> --message "<reason>"`.
 2. Confirm `/api/health` and the critical journeys.
 3. If the cause was a migration, follow BACKUP-RECOVERY §5. Database restores in production need Founder approval.
-4. Open an incident blocker. Record `rolled_back` in release history.
+4. Open an incident blocker. Record `rolled_back` in release history: `node --no-warnings scripts/post-deployment.ts --id <deployment id> --environment <env> --commit <sha> --status rolled_back --rollback-target <previous deployment id> --by <name>` (DEPLOYMENT §9).
 
 ## 4. Rotating secrets
 

@@ -4,9 +4,9 @@ import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatCents, formatDate, formatDateTime, label, safeUrl, type SafeHtml } from "../lib/html.ts";
 import { HttpError, htmlResponse, redirect, str } from "../app/http.ts";
-import { requireCustomerOrg } from "../app/app.ts";
-import { appLayout } from "../ui/layout.ts";
-import { portalNav } from "./nav.ts";
+import { requireCustomerOrg, requireStaff } from "../app/app.ts";
+import { appLayout, publicLayout } from "../ui/layout.ts";
+import { portalNav, staffNav } from "./nav.ts";
 import {
   csrf, button, linkButton, actionForm, input, textarea, select, checkbox, formErrors, alert, badge, table, emptyState, kpi, dl, tabs, pageHead, nl2br,
 } from "../ui/components.ts";
@@ -14,6 +14,8 @@ import * as P from "../services/projects.ts";
 import * as F from "../services/files.ts";
 import * as M from "../services/messages.ts";
 import * as O from "../services/onboarding.ts";
+import * as S from "../services/share-links.ts";
+import { sharePanel } from "../ui/share.ts";
 import { listNotifications, markNotificationsRead } from "../services/notifications.ts";
 import { createInvitation, AuthError } from "../services/auth.ts";
 import { sendMail } from "../services/mailer.ts";
@@ -268,7 +270,7 @@ ${button("Upload", { disabled: !ctx.storage })}</form></section>
   { header: "Size", cell: (x) => F.humanSize(x.size_bytes), numeric: true },
   { header: "Uploaded", cell: (x) => html`${fmtDay(x.created_at)}<br><span class="faint">${x.uploader}</span>` },
   { header: "Scan", cell: (x) => badge(x.scan_status === "pending" ? "test_pending" : x.scan_status, F.scanLabel(x.scan_status)) },
-  { header: "", cell: (x) => html`<a class="btn btn--ghost btn--sm" href="/files/${x.id}">Download</a>${F.PREVIEWABLE.has(x.content_type) ? html` <a class="btn btn--ghost btn--sm" href="/files/${x.id}/preview" target="_blank" rel="noopener">Preview</a>` : ""}` },
+  { header: "", cell: (x) => html`<a class="btn btn--ghost btn--sm" href="/files/${x.id}">Download</a>${F.PREVIEWABLE.has(x.content_type) ? html` <a class="btn btn--ghost btn--sm" href="/files/${x.id}/preview" target="_blank" rel="noopener">Preview</a>` : ""}${isAdmin(org) ? html` <a class="btn btn--ghost btn--sm" href="/files/${x.id}/share">Share</a>` : ""}` },
 ], { empty: emptyState("No files yet", "Upload logos, content, images and documents for your project here.") })}</section>`;
     return page(ctx, "Files", body, status);
   };
@@ -298,6 +300,7 @@ ${newer ? alert("info", html`A newer version exists: <a href="/portal/files/${ne
 <div class="grid grid-2"><section class="card">${dl([["Type", f.content_type], ["Size", F.humanSize(f.size_bytes)], ["Folder", f.folder ?? "—"], ["Uploaded", formatDateTime(f.created_at)], ["SHA-256", html`<code style="word-break:break-all">${f.sha256}</code>`], ["Malware scan", F.scanLabel(f.scan_status)]])}
 ${F.PREVIEWABLE.has(f.content_type) && f.content_type.startsWith("image/") ? html`<img src="/files/${f.id}/preview" alt="${f.filename}" style="max-width:100%;margin-top:1rem;border-radius:4px">` : ""}</section>
 <section class="stack">${!f.replaced_by ? html`<div class="card"><h2 class="card__title">Replace with a new version</h2><form method="post" action="/portal/files/${f.id}/replace" enctype="multipart/form-data">${csrf(ctx)}<div class="field"><label for="f-file">New version</label><input class="input" id="f-file" type="file" name="file" required></div>${button("Upload new version", { variant: "secondary", disabled: !ctx.storage })}</form></div>` : ""}
+${!f.replaced_by ? sharePanel(ctx, f, await S.listShareLinks(ctx.db, f.id), { canManage: await S.canManageShares(ctx, f) }) : ""}
 <div class="card"><h2 class="card__title">Organize</h2><form method="post" action="/portal/files/${f.id}/move">${csrf(ctx)}${input({ name: "folder", label: "Folder", value: f.folder ?? "", maxlength: 80 })}${button("Move", { variant: "secondary" })}</form></div>
 <div class="card"><h2 class="card__title">Remove</h2><p class="muted">Removed files disappear from your file list. A record is kept for the audit trail.</p>${actionForm(ctx, `/portal/files/${f.id}/delete`, "Remove file", { variant: "danger", confirm: "Remove this file?" })}</div></section></div>
 ${versions.length ? html`<section style="margin-top:1.5rem"><h2>Earlier versions</h2>${table(versions, [{ header: "File", cell: (v) => html`<a href="/files/${v.id}">${v.filename}</a>` }, { header: "Uploaded", cell: (v) => formatDateTime(v.created_at) }, { header: "Size", cell: (v) => F.humanSize(v.size_bytes), numeric: true }])}</section>` : ""}`;
@@ -331,6 +334,95 @@ ${versions.length ? html`<section style="margin-top:1.5rem"><h2>Earlier versions
   r.get("/files/:id", async (ctx, p) => F.serveFile(ctx, p.id, false));
   r.get("/files/:id/preview", async (ctx, p) => F.serveFile(ctx, p.id, true));
 
+  // ── Time-limited share links (SEC-003) ──
+  // Management page for one file: customers of the owning organization (admins create/revoke) and staff who can read the file.
+  const shareFile = async (ctx: AppContext, id: string) => {
+    if (!ctx.user) throw new HttpError(401, "Please sign in.");
+    if (ctx.user.isStaff) requireStaff(ctx); else requireCustomerOrg(ctx);
+    const f = await F.getFile(ctx.db, id);
+    if (!f || !(await F.canReadFile(ctx, f))) throw new HttpError(404, "File not found");
+    return f;
+  };
+  const sharePage = async (ctx: AppContext, id: string, errors: string[] = [], status = 200, created: { url: string; expiresAt: string } | null = null) => {
+    const f = await shareFile(ctx, id);
+    const links = await S.listShareLinks(ctx.db, f.id);
+    const back = ctx.user!.isStaff ? (f.project_id ? `/staff/projects/${f.project_id}?tab=files` : `/staff/customers/${f.organization_id}`) : `/portal/files/${f.id}`;
+    const body = html`${pageHead(`Share ${f.filename}`, linkButton("Back", back, "ghost", "sm"), "Secure sharing")}${formErrors(errors)}
+${dl([["File", f.filename], ["Size", F.humanSize(f.size_bytes)], ["Malware scan", F.scanLabel(f.scan_status)]])}
+<div style="margin-top:1.5rem">${sharePanel(ctx, f, links, { canManage: await S.canManageShares(ctx, f), created })}</div>`;
+    const shell = ctx.user!.isStaff ? { title: "Share file", nav: staffNav(ctx), home: "/staff", area: "Crestmont staff" } : { title: "Share file", nav: portalNav(ctx), home: "/portal", area: "Customer portal" };
+    // A freshly created link is shown exactly once in this response; never cache it.
+    return htmlResponse(ctx, appLayout(ctx, shell, body), status);
+  };
+  r.get("/files/:id/share", async (ctx, p) => sharePage(ctx, p.id));
+  r.post("/files/:id/share", async (ctx, p) => {
+    const f = await shareFile(ctx, p.id);
+    if (!(await S.canManageShares(ctx, f))) throw new HttpError(403, "Only an account administrator or Crestmont staff can create share links for this file.");
+    const form = await ctx.form();
+    try {
+      const res = await S.createShareLink(ctx, { fileId: f.id, hours: Number(str(form, "hours")), acknowledgeUnscanned: !!form.get("acknowledge_unscanned"), note: str(form, "note") });
+      return sharePage(ctx, f.id, [], 201, { url: res.url, expiresAt: res.expiresAt });
+    } catch (e) {
+      if (e instanceof S.ShareError) return sharePage(ctx, f.id, [e.message], e.status);
+      throw e;
+    }
+  });
+  r.post("/files/share-links/:id/revoke", async (ctx, p) => {
+    if (!ctx.user) throw new HttpError(401, "Please sign in.");
+    if (ctx.user.isStaff) requireStaff(ctx); else requireCustomerOrg(ctx);
+    try {
+      const { fileId } = await S.revokeShareLink(ctx, p.id);
+      return redirect(ctx, `/files/${fileId}/share`, { kind: "success", text: "Share link revoked. It no longer works." });
+    } catch (e) {
+      if (e instanceof S.ShareError) throw new HttpError(e.status, e.message);
+      throw e;
+    }
+  });
+
+  // Public share link: no login. Shows only this file's name, size and the unscanned warning, then downloads it.
+  const shareDenied = (ctx: AppContext, reason: string) => {
+    const msg: Record<string, [number, string]> = {
+      not_found: [404, "This share link is not valid. Ask the person who sent it for a new link."],
+      expired: [410, "This share link has expired. Ask the person who sent it for a new link."],
+      revoked: [410, "This share link was revoked by its owner."],
+      file_unavailable: [410, "The shared file is no longer available."],
+      rate_limited: [429, "Too many requests from your network. Please wait a while and try again."],
+    };
+    const [st, text] = msg[reason] ?? msg.not_found;
+    const res = htmlResponse(ctx, publicLayout(ctx, { title: "Shared file", noindex: true }, html`<section class="section"><div class="container share-page stack"><div class="eyebrow">Shared file</div><h1>Link unavailable</h1>${alert("warn", text)}</div></section>`), st);
+    res.headers.set("referrer-policy", "no-referrer");
+    return res;
+  };
+  r.get("/share/:token", async (ctx, p) => {
+    const s = await S.resolveShare(ctx, p.token, "view");
+    if (!s.ok) return shareDenied(ctx, s.reason);
+    const res = htmlResponse(ctx, publicLayout(ctx, { title: "Shared file", noindex: true }, html`<section class="section"><div class="container share-page stack">
+<div class="eyebrow">Shared file</div><h1>${s.file.filename}</h1>
+<p class="muted">Shared privately by Crestmont Website Development or one of its customers. This link expires ${formatDateTime(s.link.expires_at)}.</p>
+${dl([["Size", F.humanSize(s.file.size_bytes)], ["Type", s.file.content_type], ["Malware scan", F.scanLabel(s.file.scan_status)]])}
+${s.file.scan_status !== "clean" ? alert("warn", html`<strong>This file has not been scanned for malware.</strong> Only open it if you trust the sender.`) : ""}
+<form method="post" action="/share/${p.token}/download">${csrf(ctx)}${button("Download file")}</form>
+<p class="faint">Downloads through this link are logged.</p></div></section>`));
+    res.headers.set("referrer-policy", "no-referrer");
+    res.headers.set("cache-control", "no-store");
+    return res;
+  });
+  r.post("/share/:token/download", async (ctx, p) => {
+    const s = await S.resolveShare(ctx, p.token, "download");
+    if (!s.ok) return shareDenied(ctx, s.reason);
+    if (!ctx.storage) throw new HttpError(503, "File storage is not configured yet.");
+    const obj = await ctx.storage.get(s.file.r2_key);
+    if (!obj) throw new HttpError(404, "File content is missing from storage.");
+    const headers = new Headers({
+      "content-type": s.file.content_type,
+      "content-disposition": `attachment; filename="${s.file.filename.replace(/[^\w.\- ()]/g, "_")}"`,
+      "cache-control": "private, no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
+      "content-security-policy": "default-src 'none'; sandbox", "x-frame-options": "DENY",
+    });
+    for (const c of ctx.setCookies) headers.append("set-cookie", c);
+    return new Response(obj.body as BodyInit, { headers });
+  });
+
   // ── Messages ──
   r.get("/portal/messages", async (ctx) => {
     const org = requireCustomerOrg(ctx);
@@ -340,13 +432,47 @@ ${versions.length ? html`<section style="margin-top:1.5rem"><h2>Earlier versions
         (SELECT MAX(created_at) FROM messages m WHERE m.project_id = p.id AND m.internal = 0) AS last_at
         FROM projects p WHERE p.organization_id = ? ORDER BY COALESCE(last_at, p.created_at) DESC`).bind(ctx.user!.id, ctx.user!.id, org.organizationId)
       .all<{ id: string; name: string; status: string; total: number; unread: number; last_at: string | null }>()).results;
-    return page(ctx, "Messages", html`${pageHead("Messages")}<p class="muted">Each project has its own conversation with your Crestmont team. For account or billing problems, open a <a href="/portal/support">support ticket</a>.</p>
+    const general = (await ctx.db.prepare(`SELECT COUNT(*) AS total,
+        SUM(CASE WHEN m.author_user_id <> ? AND NOT EXISTS (SELECT 1 FROM message_reads r WHERE r.message_id = m.id AND r.user_id = ?) THEN 1 ELSE 0 END) AS unread,
+        MAX(m.created_at) AS last_at FROM messages m WHERE m.organization_id = ? AND m.project_id IS NULL AND m.internal = 0`).bind(ctx.user!.id, ctx.user!.id, org.organizationId)
+      .first<{ total: number; unread: number | null; last_at: string | null }>())!;
+    return page(ctx, "Messages", html`${pageHead("Messages", linkButton("New general message", "/portal/messages/general", "primary", "sm"))}
+<section class="card" style="margin-bottom:1.5rem"><div class="row row--between"><div><h2 class="card__title">General conversation with Crestmont</h2>
+<p class="muted" style="margin:0">For questions that are not about one project — new work, your account, or anything else. For account or billing problems you can also open a <a href="/portal/support">support ticket</a>.</p></div>
+<div class="row">${general.unread ? badge("new", `${general.unread} unread`) : ""}<span class="faint">${general.total ? `${general.total} message${general.total === 1 ? "" : "s"} · last ${formatDateTime(general.last_at)}` : "No messages yet"}</span>${linkButton("Open", "/portal/messages/general", "secondary", "sm")}</div></div></section>
+<h2 class="h4">Project conversations</h2>
 ${table(rows, [
   { header: "Project", cell: (x) => html`<a href="/portal/projects/${x.id}/messages">${x.name}</a>` },
   { header: "Messages", cell: (x) => x.total, numeric: true },
   { header: "Unread", cell: (x) => (x.unread ? badge("new", `${x.unread} unread`) : "—") },
   { header: "Last message", cell: (x) => formatDateTime(x.last_at) },
-], { empty: emptyState("No conversations yet", "A conversation opens for each project once it is created.", linkButton("Start a project", "/pricing", "secondary")) })}`);
+], { empty: emptyState("No project conversations yet", "A conversation opens for each project once it is created. Use the general conversation above for anything else.", linkButton("View packages", "/pricing", "secondary")) })}`);
+  });
+
+  // General (non-project) conversation with Crestmont (PORTAL-005). project_id IS NULL, scoped to the caller's organization.
+  const generalThreadPage = async (ctx: AppContext, org: Org, errors: string[] = [], status = 200, draft = "") => {
+    const msgs = await M.listThread(ctx.db, { userId: ctx.user!.id, organizationId: org.organizationId, staff: false }, null);
+    await M.markThreadRead(ctx.db, ctx.user!.id, org.organizationId, null, false);
+    const body = html`${pageHead("General conversation", linkButton("All messages", "/portal/messages", "ghost", "sm"), org.organizationName)}
+<p class="muted">Messages here go to the Crestmont team, not to a specific project. Project questions are answered faster in that project's own conversation.</p>
+<div class="thread" aria-live="polite">${msgs.length ? msgs.map((m) => html`<article class="msg${m.author_is_staff ? " msg--staff" : ""}"><div class="msg__meta">${m.author_name}${m.author_is_staff ? " · Crestmont" : ""} · ${formatDateTime(m.created_at)}${m.author_user_id === ctx.user!.id ? (m.read_by_other_side ? " · Seen by Crestmont" : " · Not yet read") : m.read_by_me ? "" : " · New"}</div>
+${nl2br(m.body)}${m.attachment_file_id ? html`<p><a href="/files/${m.attachment_file_id}">Attachment: ${m.attachment_name ?? "file"}</a></p>` : ""}</article>`) : emptyState("No messages yet", "Ask a question or tell us what you need below.")}</div>
+${formErrors(errors)}
+<form method="post" action="/portal/messages/general" enctype="multipart/form-data" class="card" style="margin-top:1.5rem">${csrf(ctx)}
+${textarea({ name: "body", label: "Message", value: draft, required: true, maxlength: 10000, rows: 4 })}
+<div class="field"><label for="f-attachment">Attachment (optional)</label><input class="input" id="f-attachment" type="file" name="attachment" aria-describedby="f-attachment-hint"${ctx.storage ? "" : html` disabled`}><span class="hint" id="f-attachment-hint">${ctx.storage ? "Same file rules as uploads: up to 25 MB." : "File storage is not configured yet."}</span></div>
+${button("Send message")}</form>`;
+    return page(ctx, "General conversation", body, status);
+  };
+  r.get("/portal/messages/general", async (ctx) => generalThreadPage(ctx, requireCustomerOrg(ctx)));
+  r.post("/portal/messages/general", async (ctx) => {
+    const org = requireCustomerOrg(ctx);
+    const f = await ctx.form();
+    const att = f.get("attachment");
+    return orRerender((errs, st) => generalThreadPage(ctx, org, errs, st, str(f, "body")), async () => {
+      await M.postMessage(ctx, { organizationId: org.organizationId, projectId: null, authorUserId: ctx.user!.id, body: str(f, "body"), attachment: att && typeof att !== "string" ? att : null, fromStaff: false });
+      return redirect(ctx, "/portal/messages/general", { kind: "success", text: "Message sent." });
+    });
   });
 
   const threadPage = async (ctx: AppContext, org: Org, id: string, errors: string[] = [], status = 200, draft = "") => {

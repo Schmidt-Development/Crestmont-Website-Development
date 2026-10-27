@@ -8,18 +8,20 @@ import { HttpError, download, htmlResponse, redirect, str } from "../app/http.ts
 import { requireStaff, requireCustomerOrg } from "../app/app.ts";
 import { appLayout, publicLayout } from "../ui/layout.ts";
 import { staffNav } from "./nav.ts";
-import { csrf, button, linkButton, actionForm, input, textarea, select, checkbox, formErrors, alert, badge, table, emptyState, kpi, pagination, pageParam, dl, tabs, pageHead, barChart, nl2br } from "../ui/components.ts";
+import { csrf, button, linkButton, actionForm, input, textarea, select, checkbox, formErrors, alert, badge, table, emptyState, kpi, pagination, pageParam, dl, tabs, pageHead, barChart, nl2br, dateRange, drawerAttrs, drawerBody } from "../ui/components.ts";
 import { can } from "../domain/authz.ts";
 import { LEAD_STAGES, LEAD_TRANSITIONS, type LeadStage } from "../domain/crm.ts";
 import { PACKAGES, type PackageId, type QuoteLine } from "../domain/catalog.ts";
 import { changeLeadStage } from "../services/leads.ts";
 import * as crm from "../services/crm.ts";
 import * as quotes from "../services/quotes.ts";
-import { startPackageCheckout, startMaintenanceCheckout, packageById, maintenanceById, NOT_CONFIGURED, stripeRedirect, recordCheckoutTerms } from "../services/billing.ts";
+import { startPackageCheckout, startMaintenanceCheckout, packageById, maintenanceById, NOT_CONFIGURED, stripeRedirect } from "../services/billing.ts";
 import { requestAiDraft, aiProviderFromEnv, decideAiJob } from "../services/ai.ts";
 import { audit } from "../services/security.ts";
 import { toCsv, parseDollars, parseRange } from "../services/finance.ts";
 import { TransitionError } from "../domain/state-machine.ts";
+import { recordAcceptance } from "../services/agreements.ts";
+import { effectivePrice } from "../services/pricing-approvals.ts";
 
 export function staffPage(ctx: AppContext, title: string, body: SafeHtml, status = 200) {
   return htmlResponse(ctx, appLayout(ctx, { title, nav: staffNav(ctx), home: "/staff", area: "Staff" }, body), status);
@@ -29,10 +31,31 @@ export function definitions(defs: [string, string][]): SafeHtml {
   return html`<details class="card definitions"><summary><strong>How these numbers are calculated</strong></summary>${dl(defs.map(([k, v]) => [k, v]))}</details>`;
 }
 
+/** Date-range filter shared by sales/finance/reports pages. Markup comes from the design-system dateRange control (BRAND-004); query params stay `from` / `to`. */
 export function rangeForm(ctx: AppContext, from: string, to: string, extra: SafeHtml = html``): SafeHtml {
-  return html`<form method="get" class="filters" action="${ctx.url.pathname}">
-${input({ name: "from", label: "From", type: "date", value: from })}${input({ name: "to", label: "To", type: "date", value: to })}${extra}
-<div class="field">${button("Apply", { variant: "secondary", size: "sm" })}</div></form>`;
+  return dateRange(ctx, { from, to }, { extra });
+}
+
+/** Campaign attribution captured from the public forms (CRM-001). */
+function attributionCard(lead: crm.LeadRow): SafeHtml {
+  const rows: [string, string | null][] = [["Campaign source", lead.utm_source], ["Medium", lead.utm_medium], ["Campaign", lead.utm_campaign], ["Term", lead.utm_term], ["Content", lead.utm_content], ["Referrer", lead.referrer], ["Landing page", lead.landing_page]];
+  const known = rows.filter(([, v]) => v);
+  return html`<h3 style="font-size:1rem">Attribution</h3>${known.length ? html`<div data-attribution>${dl(known.map(([k, v]) => [k, v]))}</div>` : html`<p class="muted" data-attribution>No campaign or referrer recorded${["web_form", "quote_form"].includes(lead.source) ? " (direct visit, untagged link, or the visitor's browser asked not to be tracked)" : ` (${label(lead.source)} leads do not carry web attribution)`}.</p>`}`;
+}
+
+function attributionSection(a: Awaited<ReturnType<typeof crm.attributionReport>>, total: number): SafeHtml {
+  const col = (title: string, rows: crm.AttributionRow[]) => html`<section class="card"><h3 class="card__title">${title}</h3>${rows.length ? table(rows, [
+    { header: title, cell: (x) => x.value ?? html`<span class="faint">(none)</span>` },
+    { header: "Leads", cell: (x) => x.n, numeric: true },
+    { header: "Converted", cell: (x) => x.converted ?? 0, numeric: true },
+  ], { caption: `Leads by ${title.toLowerCase()}` }) : html`<p class="muted">No leads in this range.</p>`}</section>`;
+  return html`<section class="stack" style="margin-top:1.5rem" data-attribution-report><h2 style="font-size:1.4rem">Campaign attribution</h2>
+<p class="muted">From first-party UTM parameters on the visit that submitted a public form. No third-party tracking is used; referrers are not recorded when the visitor's browser sends Do-Not-Track or Global Privacy Control.</p>
+${total ? html`<div class="grid grid-3">${col("Source", a.source)}${col("Medium", a.medium)}${col("Campaign", a.campaign)}</div>
+<section class="card"><h3 class="card__title">Source / medium / campaign</h3>${table(a.combos, [
+    { header: "Source", cell: (x) => x.source ?? "—" }, { header: "Medium", cell: (x) => x.medium ?? "—" }, { header: "Campaign", cell: (x) => x.campaign ?? "—" },
+    { header: "Leads", cell: (x) => x.n, numeric: true }, { header: "Converted", cell: (x) => x.converted ?? 0, numeric: true },
+  ], { empty: html`<p class="muted">No leads with campaign parameters in this range.</p>`, caption: "Leads by campaign combination" })}</section>` : html`<p class="muted">No leads in this range.</p>`}</section>`;
 }
 
 const pct = (r: number | null) => (r === null ? "—" : `${(r * 100).toFixed(1)}%`);
@@ -75,7 +98,7 @@ ${input({ name: "from", label: "Created from", type: "date", value: f.from })}${
     const shown = LEAD_STAGES.filter((s) => s !== "archived" || f.stage === "archived");
     body = total === 0 ? emptyState("No leads match", all ? "Leads arrive from the website forms, the AI receptionist and manual entry." : "Leads assigned to you will appear here.", linkButton("Add a lead", "/staff/crm/new", "secondary"))
       : html`<div class="kanban" aria-label="Pipeline by stage">${shown.map((s) => html`<section class="kanban__col" aria-label="${label(s)}"><h3>${label(s)} · ${counts[s] ?? 0}</h3>
-${rows.filter((r) => r.stage === s).slice(0, 40).map((r) => html`<a class="kanban__card" href="/staff/crm/leads/${r.id}"><strong>${r.contact_name}</strong>${r.company_name ? html`<br><span class="faint">${r.company_name}</span>` : ""}<br><span class="faint">${label(r.source)} · ${formatDate(r.created_at)}${r.owner_name ? ` · ${r.owner_name}` : ""}</span></a>`)}
+${rows.filter((r) => r.stage === s).slice(0, 40).map((r) => html`<div class="kanban__item"><a class="kanban__card" href="/staff/crm/leads/${r.id}"><strong>${r.contact_name}</strong>${r.company_name ? html`<br><span class="faint">${r.company_name}</span>` : ""}<br><span class="faint">${label(r.source)} · ${formatDate(r.created_at)}${r.owner_name ? ` · ${r.owner_name}` : ""}</span></a><a class="kanban__quick" href="/staff/crm/leads/${r.id}/quick"${drawerAttrs(`/staff/crm/leads/${r.id}/quick`)} aria-label="Quick view: ${r.contact_name}">Quick view</a></div>`)}
 ${(counts[s] ?? 0) > 40 ? html`<a class="faint" href="${qs("list")}&amp;stage=${s}">View all ${counts[s]}</a>` : ""}</section>`)}</div>`;
   } else {
     const rows = await crm.listLeads(ctx.db, actor, f, { limit: limit + 1, offset });
@@ -148,6 +171,7 @@ ${dl([["Name", lead.contact_name], ["Email", lead.contact_email ? html`<a href="
   ["Customer account", links.orgId ? html`<a href="/staff/customers/${links.orgId}">View customer</a>` : lead.contact_user_id ? "Registered (no organization link yet)" : "Not registered"],
   ["Source", label(lead.source)], ["Interest", lead.interest ? label(lead.interest) : "—"], ["Created", formatDateTime(lead.created_at)], ["Owner", lead.owner_name ?? "Unassigned"],
   ...(lead.lost_reason ? [["Closed reason", lead.lost_reason] as [string, string]] : [])])}
+${attributionCard(lead)}
 ${lead.message ? html`<h3 style="font-size:1rem">Original message</h3><p>${nl2br(lead.message)}</p>` : ""}
 ${lead.qualification_notes ? html`<h3 style="font-size:1rem">Qualification notes</h3><p>${nl2br(lead.qualification_notes)}</p>` : ""}
 ${writable ? html`<details><summary>Edit contact, company and qualification</summary><form method="post" action="${base}/contact" class="stack">${csrf(ctx)}
@@ -182,6 +206,22 @@ ${writable ? html`<form method="post" action="${base}/note" class="stack">${csrf
 ${history.length ? html`<ul class="timeline">${history.map((a) => html`<li><strong>${label(a.kind)}</strong> <span class="faint">${formatDateTime(a.created_at)}${a.actor ? ` · ${a.actor}` : ""}</span><br>${nl2br(a.body)}</li>`)}</ul>` : html`<p class="muted">No activity yet.</p>`}
 </section>`;
   return staffPage(ctx, lead.contact_name, body, status);
+}
+
+/** Lead quick view (BRAND-003 drawer). A complete page on its own; the CRM board loads its drawer body into the drawer. */
+async function leadQuickView(ctx: AppContext, id: string) {
+  requireStaff(ctx, "crm.access");
+  const lead = await crm.getLead(ctx.db, ctx.actor!, id);
+  const acts = await crm.activities(ctx.db, id);
+  const openTasks = acts.filter((a) => a.kind === "task" && !a.completed_at);
+  const recent = acts.filter((a) => a.kind !== "task").slice(0, 5);
+  const body = drawerBody(lead.contact_name, html`<p>${badge(lead.stage)} <span class="faint">${label(lead.source)} · created ${formatDate(lead.created_at)}</span></p>
+${dl([["Company", lead.company_name], ["Email", lead.contact_email ? html`<a href="mailto:${lead.contact_email}">${lead.contact_email}</a>` : "—"], ["Phone", lead.contact_phone], ["Interest", lead.interest ? label(lead.interest) : "—"], ["Owner", lead.owner_name ?? "Unassigned"]])}
+${attributionCard(lead)}
+<h3 style="font-size:1rem">Open follow-ups</h3>${openTasks.length ? html`<ul class="checklist">${openTasks.map((t) => html`<li>${t.body} <span class="${t.due_at && t.due_at < ctx.now().toISOString() ? "error-text" : "faint"}">due ${formatDate(t.due_at)}</span></li>`)}</ul>` : html`<p class="muted">No open follow-ups.</p>`}
+<h3 style="font-size:1rem">Recent activity</h3>${recent.length ? html`<ul class="timeline">${recent.map((a) => html`<li><strong>${label(a.kind)}</strong> <span class="faint">${formatDateTime(a.created_at)}</span><br>${a.body.length > 220 ? a.body.slice(0, 217) + "…" : a.body}</li>`)}</ul>` : html`<p class="muted">No activity yet.</p>`}
+<p>${linkButton("Open full lead", `/staff/crm/leads/${id}`, "secondary", "sm")}</p>`);
+  return staffPage(ctx, `${lead.contact_name} — quick view`, html`${pageHead(lead.contact_name, linkButton("Back to pipeline", "/staff/crm", "ghost", "sm"), "Lead quick view")}<div class="card" style="max-width:640px">${body}</div>`);
 }
 
 async function leadAction(ctx: AppContext, id: string, fn: (lead: crm.LeadRow) => Promise<{ ok: boolean; issues?: string[] } | void>, success: string) {
@@ -226,7 +266,7 @@ async function customerPage(ctx: AppContext, id: string) {
   requireStaff(ctx, "customers.read");
   const d = await crm.customerDetail(ctx.db, id);
   const leadLink = (lid: string) => (can(ctx.actor!, "crm.access") ? html`<a href="/staff/crm/leads/${lid}">${lid}</a>` : html`${lid}`);
-  return staffPage(ctx, d.org.name, html`${pageHead(d.org.name, undefined, "Customer")}
+  return staffPage(ctx, d.org.name, html`${pageHead(d.org.name, linkButton("General conversation", `/staff/conversations/${d.org.id}`, "secondary", "sm"), "Customer")}
 ${dl([["Customer since", formatDate(d.org.created_at)], ["Stripe customer", d.org.stripe_customer_id ? "Linked" : "Not linked yet"], ["Members", d.members.map((m) => `${m.display_name} <${m.email}> (${label(m.role_id)})`).join(", ") || "—"]])}
 <div class="grid grid-2">
 <section class="card"><h2 style="font-size:1.2rem">Orders</h2>${table(d.orders, [{ header: "Order", cell: (o) => o.id }, { header: "Kind", cell: (o) => label(o.kind) }, { header: "Status", cell: (o) => badge(o.status) }, { header: "Total", cell: (o) => formatCents(o.total_cents), numeric: true }, { header: "Lead", cell: (o) => (o.lead_id ? leadLink(o.lead_id) : "—") }], { empty: html`<p class="muted">No orders.</p>` })}</section>
@@ -250,7 +290,8 @@ ${rangeForm(ctx, range.from, range.to)}
 <section class="card"><h2 style="font-size:1.2rem">Leads by source</h2>${r.bySource.length ? barChart(r.bySource.map((s) => ({ label: label(s.source), value: s.n, display: `${s.n} (${s.converted ?? 0} converted)` }))) : html`<p class="muted">No leads in this range.</p>`}</section>
 <section class="card"><h2 style="font-size:1.2rem">Stage funnel</h2>${r.created ? barChart(LEAD_STAGES.filter((s) => r.funnel[s]).map((s) => ({ label: label(s), value: r.funnel[s], display: String(r.funnel[s]) }))) : html`<p class="muted">No leads in this range.</p>`}</section>
 <section class="card"><h2 style="font-size:1.2rem">Revenue attributed by lead source</h2>${r.revenue.length ? barChart(r.revenue.map((x) => ({ label: label(x.source), value: x.cents, display: formatCents(x.cents) }))) : html`<p class="muted">No captured payments in this range.</p>`}</section>
-</div>${definitions(crm.SALES_DEFINITIONS)}`);
+</div>
+${attributionSection(r.attribution, r.created)}${definitions(crm.SALES_DEFINITIONS)}`);
 }
 
 // ── quotes ──
@@ -376,7 +417,7 @@ async function acceptProposalRoute(ctx: AppContext, token: string) {
   const f = await ctx.form();
   if (!f.get("agree")) return proposalPage(ctx, token, ["Tick the box to accept the proposal and agreements."], 422);
   const order = await quotes.acceptProposal(ctx, p, { id: ctx.user.id, email: ctx.user.email }, org.organizationId);
-  await recordCheckoutTerms(ctx, ctx.user.id, org.organizationId);
+  await recordAcceptance(ctx, { userId: ctx.user.id, organizationId: org.organizationId, context: "quote_acceptance", contextId: p.version.id });
   return redirect(ctx, `/portal/billing/invoices/${order.invoiceId}`, { kind: "success", text: "Proposal accepted. Pay the first invoice to start your project." });
 }
 
@@ -387,10 +428,11 @@ async function checkoutPage(ctx: AppContext, packageId: string, errors: string[]
   requireCustomerOrg(ctx);
   const configured = ctx.payments.configured;
   const cancelled = ctx.url.searchParams.get("checkout") === "cancelled";
+  const priceCents = (await effectivePrice(ctx.db, "package", pkg.id, ctx.now())).cents; // CAT-007
   return htmlResponse(ctx, publicLayout(ctx, { title: `Checkout — ${pkg.name}`, noindex: true }, html`<section class="section"><div class="container stack" style="max-width:760px">
 <div class="eyebrow">Checkout</div><h1>${pkg.name} website package</h1>
 ${cancelled ? alert("info", "Checkout was cancelled. Nothing was charged.") : ""}${formErrors(errors)}
-<div class="card card--gold stack"><p class="price">${formatCents(pkg.basePriceCents)}${pkg.priceIsFloor ? html` <small>starting price</small>` : ""}</p>
+<div class="card card--gold stack"><p class="price" data-testid="checkout-price">${formatCents(priceCents)}${pkg.priceIsFloor ? html` <small>starting price</small>` : ""}</p>
 <p class="muted">Fixed price, paid 100% upfront. ${pkg.revisionRounds} revision rounds, up to ${pkg.pageLimit} pages.</p>
 <ul class="checklist">${pkg.includes.map((i) => html`<li>${i}</li>`)}</ul>
 ${pkg.priceIsFloor ? html`<p class="faint">Need more than the standard Premium scope? <a href="/quote">Request a custom quote</a> — work above the starting price is quoted separately.</p>` : ""}</div>
@@ -398,7 +440,7 @@ ${configured ? html`<form method="post" action="/checkout/${pkg.id}" class="card
 ${checkbox("terms", "I agree to the Development Agreement, Terms of Service and Refund Policy.", { required: true })}
 <p class="faint"><a href="/legal/development-agreement">Development agreement</a> · <a href="/legal/terms">Terms</a> · <a href="/legal/refunds">Refund policy</a></p>
 <p class="faint">You will be taken to Stripe's secure checkout. Your payment is confirmed only when Stripe notifies us.</p>
-<div class="form-actions">${button(`Pay ${formatCents(pkg.basePriceCents)}`)}</div></form>`
+<div class="form-actions">${button(`Pay ${formatCents(priceCents)}`)}</div></form>`
     : html`<div class="card stack">${alert("warn", `${NOT_CONFIGURED} You cannot pay online right now.`)}<p>We can still start your project: request a quote or contact us and we will follow up with payment options.</p>
 <div class="row">${linkButton("Request a quote", "/quote", "primary")}${linkButton("Contact us", "/contact", "secondary")}</div></div>`}
 </div></section>`), status);
@@ -414,7 +456,7 @@ async function checkoutPost(ctx: AppContext, packageId: string) {
   if (!f.get("terms")) return checkoutPage(ctx, packageId, ["You must accept the agreements to continue."], 422);
   // Any client-supplied price/amount fields are ignored: the order total comes from PACKAGES.
   const res = await startPackageCheckout(ctx, { id: ctx.user!.id, email: ctx.user!.email }, org.organizationId, pkg.id);
-  await recordCheckoutTerms(ctx, ctx.user!.id, org.organizationId);
+  await recordAcceptance(ctx, { userId: ctx.user!.id, organizationId: org.organizationId, context: "package_checkout", contextId: res.orderId });
   return stripeRedirect(ctx, res.url);
 }
 
@@ -422,15 +464,16 @@ async function maintenanceCheckoutPage(ctx: AppContext, planId: string, post: bo
   const plan = maintenanceById(planId);
   if (!plan) throw new HttpError(404, "That maintenance plan does not exist.");
   const org = requireCustomerOrg(ctx);
+  const monthlyCents = (await effectivePrice(ctx.db, "maintenance", plan.id, ctx.now())).cents; // CAT-007
   if (plan.entitlementsStatus !== "approved") {
     return htmlResponse(ctx, publicLayout(ctx, { title: `${plan.name} maintenance`, noindex: true }, html`<section class="section"><div class="container stack" style="max-width:720px">
-<div class="eyebrow">Maintenance plans</div><h1>${plan.name} — ${formatCents(plan.monthlyCents)}/month</h1>
+<div class="eyebrow">Maintenance plans</div><h1>${plan.name} — ${formatCents(monthlyCents)}/month</h1>
 ${alert("warn", "Maintenance plans are not available for purchase yet. Their exact entitlements are awaiting Founder approval, and we will not sell a plan before its terms are final.")}
 <div class="row">${linkButton("Contact us", "/contact", "primary")}${linkButton("Back to hosting & maintenance", "/hosting-maintenance", "secondary")}</div></div></section>`), 409);
   }
   if (!post) {
     return htmlResponse(ctx, publicLayout(ctx, { title: `${plan.name} maintenance`, noindex: true }, html`<section class="section"><div class="container stack" style="max-width:720px">
-<div class="eyebrow">Maintenance plans</div><h1>${plan.name} — ${formatCents(plan.monthlyCents)}/month</h1>
+<div class="eyebrow">Maintenance plans</div><h1>${plan.name} — ${formatCents(monthlyCents)}/month</h1>
 <div class="card">${dl(Object.entries(plan.proposedEntitlements).map(([k, v]) => [label(k), v]))}</div>
 ${ctx.payments.configured ? html`<form method="post" action="/checkout/maintenance/${plan.id}" class="card stack">${csrf(ctx)}${checkbox("terms", "I agree to the Terms of Service, Support Policy and Cancellation Policy, and authorize monthly billing until I cancel.", { required: true })}<div class="form-actions">${button("Subscribe")}</div></form>`
       : html`<div class="card stack">${alert("warn", NOT_CONFIGURED)}<div class="row">${linkButton("Contact us", "/contact", "primary")}</div></div>`}</div></section>`));
@@ -440,7 +483,7 @@ ${ctx.payments.configured ? html`<form method="post" action="/checkout/maintenan
   const f = await ctx.form();
   if (!f.get("terms")) throw new HttpError(422, "You must accept the terms to subscribe.");
   const res = await startMaintenanceCheckout(ctx, { id: ctx.user!.id, email: ctx.user!.email }, org.organizationId, plan.id);
-  await recordCheckoutTerms(ctx, ctx.user!.id, org.organizationId);
+  await recordAcceptance(ctx, { userId: ctx.user!.id, organizationId: org.organizationId, context: "maintenance_checkout", contextId: plan.id });
   return stripeRedirect(ctx, res.url);
 }
 
@@ -459,6 +502,7 @@ export function register(r: Router): void {
   });
   r.get("/staff/crm/contacts", contactsPage);
   r.get("/staff/crm/leads/:id", (ctx, p) => leadDetail(ctx, p.id));
+  r.get("/staff/crm/leads/:id/quick", (ctx, p) => leadQuickView(ctx, p.id));
   r.post("/staff/crm/leads/:id/stage", async (ctx, p) => {
     requireStaff(ctx, "crm.access");
     await crm.getLead(ctx.db, ctx.actor!, p.id);
