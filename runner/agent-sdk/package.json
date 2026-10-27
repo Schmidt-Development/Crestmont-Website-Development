@@ -1,0 +1,11 @@
+{
+  "name": "crestmont-runner-agent-sdk",
+  "version": "1.1.0",
+  "private": true,
+  "description": "OPTIONAL, PAID adapter only: packages installed into the runner image with --build-arg INSTALL_AGENT_SDK=true. The default local runner never installs or imports these. Requires a reviewed agent-sdk/package-lock.json (npm ci).",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.310",
+    "playwright": "1.63.0"
+  }
+}

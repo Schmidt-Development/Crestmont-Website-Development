@@ -29,8 +29,7 @@ services:
     cpus: 0.5
     mem_limit: 256m
     pids_limit: 128
-    cap_drop: [ALL]
-    cap_add: [SETUID, SETGID]          # squid drops from root to the `proxy` user at start
+    cap_drop: [ALL]                    # squid runs as the unprivileged `proxy` user (proxy/Dockerfile): no capabilities
     security_opt: [no-new-privileges:true]
     logging: { driver: json-file, options: { max-size: "20m", max-file: "10" } }
 
@@ -76,8 +75,11 @@ services:
 
   ollama:
     profiles: ["ollama-in-docker"]
-    image: ${OLLAMA_IMAGE:-ollama/ollama}
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.32.0}   # pinned tag (installer -OllamaImage writes it to .env); never latest
     restart: unless-stopped
+    # No memory/CPU cap on purpose: the model server gets what the per-build limits leave (select-model.ts jobLimits).
+    pids_limit: 1024
+    security_opt: [no-new-privileges:true]
     networks: [runner_net]             # internal network: model pulls go through the allow-list proxy
     environment:
       HTTPS_PROXY: http://egress-proxy:3128

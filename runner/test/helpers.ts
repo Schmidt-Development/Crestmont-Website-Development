@@ -100,8 +100,8 @@ export interface FakeCP {
 
 export interface FakeCPOptions {
   jobs?: Job[];
-  /** Heartbeat answer for the n-th heartbeat (1-based). Return "lease_lost" to answer 409. */
-  heartbeat?: (n: number, body: Record<string, unknown>) => HeartbeatResponse | "lease_lost";
+  /** Heartbeat answer for the n-th heartbeat (1-based). "lease_lost" answers 409; "unavailable" answers 503. */
+  heartbeat?: (n: number, body: Record<string, unknown>) => HeartbeatResponse | "lease_lost" | "unavailable";
   files?: Record<string, { name: string; contentType: string; base64: string }>;
   /** Serve the proposed checkpoint/fetch endpoint. */
   serveCheckpointFetch?: boolean;
@@ -156,6 +156,7 @@ export async function startFakeControlPlane(o: FakeCPOptions = {}): Promise<Fake
           hb++;
           const ans = o.heartbeat ? o.heartbeat(hb, body) : { continue: true as const, leaseExpiresAt: new Date().toISOString() };
           if (ans === "lease_lost") { leased.delete(jobId); return send(409, { error: "lease_lost" }); }
+          if (ans === "unavailable") return send(503, { error: "unavailable" });
           return send(200, ans);
         }
         case "/api/builds/runner/checkpoint": {

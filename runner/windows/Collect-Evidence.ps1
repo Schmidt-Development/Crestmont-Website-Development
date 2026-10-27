@@ -82,7 +82,9 @@ Get-ChildItem (Join-Path $env:LOCALAPPDATA "Ollama") -Filter "server*.log" -Erro
 # Egress: every request through the allow-list proxy.
 & docker.exe @($dc + @("logs", "--no-color", "--timestamps", "egress-proxy")) 2>&1 | Out-File -Encoding utf8 (Join-Path $out "proxy-access.log")
 $lines = Get-Content (Join-Path $out "proxy-access.log") -ErrorAction SilentlyContinue
-$paid = @($lines | Where-Object { $_ -match "anthropic\.com|claude\.ai|openai\.com|mistral\.ai|openrouter\.ai" })
+# Same hosted-AI domains the proxy denies (squid.conf.template paid_ai / paid_ai_re; kept in sync by a runner test).
+$paidPattern = '(^|[\s/.])(anthropic\.com|claude\.ai|claude\.com|openai\.com|openai\.azure\.com|mistral\.ai|googleapis\.com|openrouter\.ai|groq\.com|together\.xyz|together\.ai|fireworks\.ai|cohere\.ai|cohere\.com|deepseek\.com|x\.ai|perplexity\.ai|replicate\.com|api-inference\.huggingface\.co|router\.huggingface\.co|bedrock-runtime(-fips)?\.[a-z0-9-]+\.amazonaws\.com)([:/\s]|$)'
+$paid = @($lines | Where-Object { $_ -match $paidPattern })
 $paidAllowed = @($paid | Where-Object { $_ -notmatch "TCP_DENIED" })
 $hosts = $lines | ForEach-Object { if ($_ -match "\s(CONNECT|GET|POST|HEAD)\s+(\S+)") { ($matches[2] -replace "^https?://", "") -replace "[:/].*$", "" } } | Group-Object | Sort-Object Count -Descending
 Save "proxy-summary.txt" @(
@@ -127,7 +129,8 @@ true
   & docker.exe run --rm --network none -v crestmont-workspaces:/w:ro -v "$(Join-Path $out 'workspace'):/out" --entrypoint sh crestmont-ai-runner:1 -c $sh
 }
 
-try { & (Join-Path $PSScriptRoot "Get-RunnerHealth.ps1") -InstallDir $InstallDir | Out-File -Encoding utf8 (Join-Path $out "health.txt") } catch { }
+try { & (Join-Path $PSScriptRoot "Get-RunnerHealth.ps1") -InstallDir $InstallDir | Out-File -Encoding utf8 (Join-Path $out "health.txt") }
+catch { "Get-RunnerHealth.ps1 failed: $($_.Exception.Message)" | Out-File -Encoding utf8 (Join-Path $out "health.txt") }
 
 # Manifest with hashes.
 Get-ChildItem $out -Recurse -File | Where-Object { $_.Name -ne "MANIFEST.txt" } |

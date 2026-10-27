@@ -37,3 +37,127 @@ jobs:
           READINESS_URL: ${{ vars.READINESS_URL }}
           EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
         run: npm run evidence:post
+
+  # AI Builds runner: real image builds on every push (nothing is pushed anywhere), plus self-checks inside the built
+  # images. This is the build evidence the Windows host cannot provide until it exists; it does not run a model.
+  runner-images:
+    name: Runner images (build + self-checks, no push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - name: hadolint (pinned release binary, checksum verified)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/hadolint" https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-Linux-x86_64
+          echo "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47  $RUNNER_TEMP/hadolint" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/hadolint"
+          "$RUNNER_TEMP/hadolint" runner/Dockerfile runner/sandbox/Dockerfile runner/windows/proxy/Dockerfile
+      - name: Lockfiles not committed yet are generated for this build only (warning)
+        run: |
+          set -e
+          if [ ! -f runner/sandbox/package-lock.json ]; then
+            echo "::warning file=runner/sandbox/package.json::runner/sandbox/package-lock.json is not committed; generated for this CI build only. Review the runner-lockfiles artifact and commit it."
+            (cd runner/sandbox && npm install --package-lock-only --ignore-scripts --no-audit --no-fund)
+          fi
+          if [ ! -f runner/agent-sdk/package-lock.json ]; then
+            echo "::warning file=runner/agent-sdk/package.json::runner/agent-sdk/package-lock.json (optional paid adapter) is not committed."
+            (cd runner/agent-sdk && npm install --package-lock-only --ignore-scripts --no-audit --no-fund) || echo "::warning::could not resolve runner/agent-sdk dependencies"
+          fi
+      - name: Upload lockfiles for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-lockfiles
+          if-no-files-found: ignore
+          path: |
+            runner/package-lock.json
+            runner/sandbox/package-lock.json
+            runner/agent-sdk/package-lock.json
+      - name: Build runner image (default local provider, no paid SDK)
+        run: docker buildx build --load --progress=plain -t crestmont-ai-runner:ci -f runner/Dockerfile runner
+      - name: Build per-build sandbox image
+        run: docker buildx build --load --progress=plain -t crestmont-build-sandbox:ci -f runner/sandbox/Dockerfile runner/sandbox
+      - name: Build egress proxy image
+        run: docker buildx build --load --progress=plain -t crestmont-egress-proxy:ci runner/windows/proxy
+      - name: Sandbox self-checks (production docker flags; uid 10001; no network; Chromium offline)
+        run: node --no-warnings runner/ci/sandbox-self-check.ts crestmont-build-sandbox:ci
+      - name: Runner and proxy self-checks (squid -k parse on the rendered allow-list)
+        run: node --no-warnings runner/ci/runner-image-self-check.ts crestmont-ai-runner:ci crestmont-egress-proxy:ci
+      - name: Egress allow-list end to end (compose networks, real proxy image, fake model server, tripwire)
+        run: node --no-warnings runner/ci/egress-e2e.ts crestmont-ai-runner:ci crestmont-egress-proxy:ci
+      - name: Base image digests to pin
+        if: always()
+        run: |
+          {
+            echo "### Base images resolved by this build (pin these digests after review)"
+            grep -ho '^ARG [A-Z_]*_IMAGE=[^ ]*' runner/Dockerfile runner/sandbox/Dockerfile runner/windows/proxy/Dockerfile | cut -d= -f2 | sort -u |
+              while read -r img; do
+                digest=$(docker buildx imagetools inspect "$img" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)
+                echo "- \`$img\` -> \`${digest:-unresolved}\`"
+              done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Windows deployment scripts: real PowerShell parse + PSScriptAnalyzer (pwsh is preinstalled on GitHub's ubuntu
+  # images), and the installer's squid.conf renderer compared byte for byte with the tested TypeScript renderer.
+  windows-scripts:
+    name: Windows scripts (pwsh parse, PSScriptAnalyzer, renderer parity)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - name: Parse every script and run PSScriptAnalyzer (Windows PowerShell 5.1 compatibility rules)
+        shell: pwsh
+        run: ./runner/windows/Test-WindowsScripts.ps1 -InstallAnalyzer
+      - name: SquidConf.ps1 renders exactly what egress-policy.ts renders
+        run: node --no-warnings --test --test-name-pattern "SquidConf.ps1" runner/test/egress-compose.test.ts
+
+  # The same scripts under Windows PowerShell 5.1 on a GitHub-hosted Windows VM (NOT the build machine): parse with
+  # the 5.1 parser, run the read-only hardware discovery and feed its JSON to select-model.ts.
+  windows-powershell-51:
+    name: Windows PowerShell 5.1 (parse, discovery dry run on a hosted VM)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - name: Parse every script with the Windows PowerShell 5.1 parser
+        shell: powershell
+        run: |
+          $PSVersionTable.PSVersion.ToString()
+          $bad = 0
+          foreach ($f in Get-ChildItem runner\windows\*.ps1) {
+            $t = $null; $e = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$t, [ref]$e)
+            if ($e.Count) { $bad++; $e | ForEach-Object { Write-Output ("{0}:{1} {2}" -f $f.Name, $_.Extent.StartLineNumber, $_.Message) } } else { Write-Output "OK $($f.Name)" }
+          }
+          if ($bad) { exit 1 }
+      - name: SquidConf.ps1 under Windows PowerShell 5.1 renders what egress-policy.ts renders
+        shell: pwsh
+        env:
+          PWSH: powershell
+        run: node --no-warnings --test --test-name-pattern "SquidConf.ps1" runner/test/egress-compose.test.ts
+      - name: Discover-Hardware.ps1 (read-only) -> select-model.ts
+        shell: powershell
+        run: |
+          .\runner\windows\Discover-Hardware.ps1 | Out-File -Encoding utf8 "$env:RUNNER_TEMP\hardware.json"
+          node --no-warnings runner\windows\select-model.ts "$env:RUNNER_TEMP\hardware.json" | Out-File -Encoding utf8 "$env:RUNNER_TEMP\recommendation.json"
+          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3) { throw "select-model.ts failed with exit $LASTEXITCODE" }
+          $hw = Get-Content "$env:RUNNER_TEMP\hardware.json" -Raw | ConvertFrom-Json
+          $rec = Get-Content "$env:RUNNER_TEMP\recommendation.json" -Raw | ConvertFrom-Json
+          if ($hw.schema -ne "crestmont.hardware/1") { throw "unexpected hardware schema" }
+          if ($rec.schema -ne "crestmont.model-recommendation/1") { throw "unexpected recommendation schema" }
+          Write-Output "Hosted VM (not the build machine): $($hw.cpu.name), $($hw.memory.totalGB) GB RAM -> tier $($rec.tier): $($rec.summary)"
+          exit 0   # select-model exits 3 for an insufficient machine, which a hosted VM is expected to be

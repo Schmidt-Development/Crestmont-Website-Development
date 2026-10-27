@@ -8,6 +8,49 @@ The runner's automated tests (`node --no-warnings --test 'runner/test/*.test.ts'
 Docker executor and a fake control plane. They prove the orchestration logic only. One test runs the browser check
 in real headless Chromium against the starter, outside a container.
 
+## Validation status (2026-10-27)
+
+What has been checked, and where. "Here" = the Linux development container this kit was hardened in (Docker
+Engine 29.9.2 daemon started locally; Docker Hub, the Debian archive, the npm registry and the PowerShell Gallery were
+NOT reachable from it; GitHub release downloads were). "CI" = jobs in `.github/workflows/ci.yml` that run on every
+push but had not run yet when this was written: their first green run is the evidence. Nothing below involved a real
+model, a GPU, Docker Desktop, WSL 2 or the Windows build machine.
+
+| Item | Verified here | Verified in CI | Needs the Windows host |
+| --- | --- | --- | --- |
+| Runner orchestration (leases, heartbeats, stop/cancel, checkpoints, resume, drafts, caps) with fake model / docker / control plane | yes: 96 tests in `runner/test` (94 pass + 2 skipped until the sandbox / agent-sdk lockfiles are committed; with `PWSH` and `SQUID_BIN` unset, 4 skip) | yes: `test` job | real build in §2-§4 |
+| Model-server failures: down, 5xx/429 retry, 400, timeout (one retry), garbage body, context overflow (compact + retry), cancel during backoff | yes: `resilience.test.ts` (fake server) | yes | real Ollama behaviour under load |
+| Lease watchdog (stops without completing when heartbeats fail past the lease window); checkpoints refuse symlinks | yes (fake control plane) | yes | crash drill §4.2 |
+| Health endpoint: model reachability, last model/job/draft error, secrets redacted; no claims while the model is down | yes (fake) | yes | `Get-RunnerHealth.ps1` on the host |
+| `runner/package-lock.json` (no runtime deps) + `npm ci` | yes: generated with npm 10.9.9 `--offline` (nothing to resolve), `npm ci --dry-run` OK | yes: runner image build | - |
+| `runner/sandbox/package-lock.json` (Playwright 1.63.0) | no: registry unreachable | generated in CI (warning) and uploaded as `runner-lockfiles`; commit it | - |
+| Dockerfiles lint | yes: hadolint 2.14.0 (release binary, SHA-256 checked), 0 findings (DL3008 apt pinning ignored inline, documented); `docker buildx build --check` (BuildKit rules, base overridden with a local image because Docker Hub was unreachable): no warnings | yes: hadolint in `runner-images` | - |
+| Image builds (runner, sandbox, proxy) | no: base images unreachable | yes: `runner-images` builds all three (no push) | build by the installer (§0) |
+| Sandbox hardening flags with a real daemon: uid 10001, no network, read-only root, no capabilities, no_new_privs, timeout kill, Chromium launches offline (browser-check passes the starter) | yes, against a host-derived STAND-IN image (not the real image): 11/12 checks; the 12th (no curl/wget/sudo) fails only because the stand-in is the host's own `/usr` | yes: `runner/ci/sandbox-self-check.ts` on the real image | Docker Desktop VM (§5 isolation evidence) |
+| Runner image checks (uid, Node >= 22.21, docker CLI >= 26, no SDK, paid adapter refused, select-model in-image) | yes, stand-in image: 10/11 (stand-in lacks tini) | yes: `runner/ci/runner-image-self-check.ts` | - |
+| Squid config | yes: Squid 5.7 (the bookworm version) built from the upstream tarball, `squid -k parse` OK on the rendered allow-list | yes: `squid -k parse` inside the real proxy image | - |
+| Squid allow-list enforcement on the compose networks | yes: `runner/ci/egress-e2e.ts` (real compose file, `docker compose up egress-proxy`, Squid 5.7 in a stand-in image, fake model server): 37/37 - paid AI hosts 403 (`TCP_DENIED`) from both networks, runner -> platform and model allowed, install -> only registry.npmjs.org, no direct route out, the tripwire passes with the proxy up and fails with it down | yes: same script on the real runner and proxy images | §1 tripwire on Docker Desktop |
+| docker-compose.yml structure (internal networks, no ports, restart, limits, socket only in the runner) | yes: `docker compose config` (compose v5.6.1) | yes | - |
+| PowerShell scripts | yes: pwsh 7.6.0 parser + PSScriptAnalyzer 1.24.0 (release assets, checksums checked) with Windows PowerShell 5.1 compatibility rules: 0 findings; ASCII-only | yes: `windows-scripts` (pwsh) and `windows-powershell-51` (5.1 parser, `Discover-Hardware.ps1` dry run on a GitHub-hosted Windows VM) | every script on the build machine |
+| `SquidConf.ps1` (installer) == `egress-policy.ts` | yes: byte-for-byte under pwsh 7.6.0 | yes: pwsh and Windows PowerShell 5.1 | - |
+| `.github/workflows/ci.yml` (new jobs) | yes: actionlint 1.7.8 with shellcheck 0.11.0, no findings (the jobs themselves have not run yet) | first run | - |
+| GPU, model choice, tokens/s, Docker Desktop `host.docker.internal` -> localhost Ollama | no | no | §0-§6 |
+
+Real defects this found and fixed (each would otherwise have surfaced only on the Windows host):
+- **Runner could not reach the model through the proxy.** Node's `fetch` with `NODE_USE_ENV_PROXY=1` tunnels even
+  `http://` URLs with CONNECT; the proxy only allowed plain HTTP to port 11434, so the installer's step-8 probe and every
+  model call would have been denied (`TCP_DENIED/403 CONNECT host.docker.internal:11434`). The template now allows
+  CONNECT to the model hosts on port 11434 from the runner network only; re-run: `TCP_TUNNEL/200`.
+- **Proxy crash-looped.** Started as root, Squid switched to `proxy` and could not open `/dev/stdout` (`FATAL:
+  Cannot open '/dev/stdout' for writing`). The image now runs Squid as `proxy` from the start; compose gives it no
+  capabilities at all. `visible_hostname` is set so Squid never fails on an unresolvable container hostname.
+- **The tripwire could pass with the proxy down.** Replaced by a raw CONNECT that requires the proxy's 403.
+- **Driver check blocked healthy machines without nvidia-smi.** The Windows driver-store version (`32.0.15.6636`)
+  was read as major version 32 (< 551); it is now converted (566.36).
+- **Scripts with UTF-8 box-drawing characters** (unsafe for Windows PowerShell 5.1, which reads BOM-less files as
+  ANSI) are now ASCII-only, and the installer validates every allow-list host before writing `squid.conf` (no rule
+  injection, no hosted AI domain as an extra).
+
 ## 0. Before you start
 - The installer completed: `Install-CrestmontRunner.ps1` ended with "Done" and `Get-RunnerHealth.ps1` exits 0.
 - `C:\CrestmontRunner\state\recommendation.json` says `"ok": true`. Note the tier, model and context.
@@ -22,11 +65,14 @@ in real headless Chromium against the starter, outside a container.
    (it samples CPU, RAM, GPU and container stats into `utilization.csv`; leave it running).
 2. Tripwire (proof of zero calls to Anthropic): the proxy denies and logs every paid AI host. In a second window:
    ```powershell
-   docker run --rm --network crestmont_runner -e HTTPS_PROXY=http://egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node crestmont-ai-runner:1 -e "fetch('https://api.anthropic.com/v1/models').then(r=>console.log('UNEXPECTED',r.status),e=>console.log('blocked as expected:',e.cause?.code||e.message))"
+   docker run --rm --network crestmont_runner --entrypoint node crestmont-ai-runner:1 -e "const r=require('http').request({host:'egress-proxy',port:3128,method:'CONNECT',path:'api.anthropic.com:443'});r.on('connect',(res,s)=>{s.destroy();const ok=res.statusCode===403;console.log(ok?'PASS: the proxy denied CONNECT api.anthropic.com:443 (403)':'FAIL: the proxy answered '+res.statusCode);process.exit(ok?0:1)});r.on('error',e=>{console.log('FAIL: proxy not reachable ('+e.code+')');process.exit(1)});r.end()"
    docker run --rm --network crestmont_runner --entrypoint node crestmont-ai-runner:1 -e "fetch('https://api.anthropic.com/v1/models').then(r=>console.log('UNEXPECTED',r.status),e=>console.log('no direct route as expected:',e.cause?.code||e.message))"
    ```
-   Pass when the first prints "blocked as expected" (the proxy log shows `TCP_DENIED … api.anthropic.com`) and the
-   second prints "no direct route as expected" (the internal network has no route out).
+   Pass when the first prints "PASS: the proxy denied ... (403)" (and the proxy log shows
+   `TCP_DENIED/403 CONNECT api.anthropic.com:443`) and the second prints "no direct route as expected" (the internal
+   network has no route out). The first command asks the proxy directly and needs its 403: an earlier version used
+   `fetch` through the proxy and printed "blocked as expected" even when the proxy was down (found in the local
+   end-to-end run, see "Validation status" below).
 
 ## 2. Run the build
 1. In the owner dashboard, queue a first build for the test project (backfill if needed) and resume automation for

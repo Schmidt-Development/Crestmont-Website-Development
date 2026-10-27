@@ -59,6 +59,18 @@ export interface JobDeps {
   runtimeMs?: number;
   interruptGraceMs?: number;
   processEnv?: Record<string, string | undefined>;
+  /**
+   * How long the runner keeps working without a successful heartbeat before it assumes the lease expired on the
+   * server and stops (workspace kept, no `complete`). Default: the lease time left at claim, clamped to 30 s..10 min.
+   */
+  leaseWindowMs?: number;
+}
+
+/** Lease window from the claim: time left on the lease, clamped (clock skew), 180 s (protocol default) if unknown. */
+export function leaseWindowFrom(leaseExpiresAt: string, now = Date.now()): number {
+  const left = Date.parse(leaseExpiresAt) - now;
+  if (!Number.isFinite(left)) return 180_000;
+  return Math.min(600_000, Math.max(30_000, left));
 }
 
 export interface JobSummary {
@@ -107,6 +119,11 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
   const markLeaseLost = () => { leaseLost = true; stop.request("lease_lost"); };
 
   // ── heartbeat loop ──
+  // Lease watchdog: the server revokes the lease when heartbeats stop arriving, and may hand the job to another
+  // attempt. If this runner cannot reach the control plane for longer than the lease window, it stops working on the
+  // job (as for lease_lost) instead of building on after another runner may have taken over.
+  const leaseWindowMs = deps.leaseWindowMs ?? leaseWindowFrom(job.leaseExpiresAt);
+  let lastLeaseOkAt = Date.now();
   const heartbeatOnce = async (): Promise<boolean> => {
     if (leaseLost) return false;
     try {
@@ -114,6 +131,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         stage, runCostUsd: tracker.attemptCostUsd, turns: tracker.turns(),
         sessionId: tracker.sessionId ?? undefined, activity: tracker.drainActivity(),
       });
+      lastLeaseOkAt = Date.now();
       if (!res.continue) {
         if (!serverStopReason) serverStopReason = res.reason;
         stop.request(SERVER_STOP + res.reason);
@@ -122,7 +140,13 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       return true;
     } catch (err) {
       if (err instanceof LeaseLostError) { markLeaseLost(); return false; }
-      log.warn("heartbeat failed", { error: errorMessage(err) });
+      const silentMs = Date.now() - lastLeaseOkAt;
+      log.warn("heartbeat failed", { error: errorMessage(err), msSinceLastOk: silentMs });
+      if (silentMs > leaseWindowMs) {
+        log.warn("no successful heartbeat within the lease window; assuming the lease expired and stopping work on this job (workspace kept)", { leaseWindowMs });
+        markLeaseLost();
+        return false;
+      }
       return true;
     }
   };

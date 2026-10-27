@@ -174,7 +174,8 @@ images, writes the compose stack (runner + egress proxy), runs `--preflight` and
 `runner/windows/docker-compose.yml` works with Docker Engine >= 26. Write `runner.env` and `proxy/squid.conf` by hand
 from the installer's steps 7-8.
 
-**Optional paid adapter (Linux host):** the image needs `--build-arg INSTALL_AGENT_SDK=true` and the environment
+**Optional paid adapter (Linux host):** the image needs `--build-arg INSTALL_AGENT_SDK=true` (which requires a
+reviewed `runner/agent-sdk/package-lock.json`, section 12) and the environment
 `RUNNER_AGENT_PROVIDER=claude-agent-sdk RUNNER_ALLOW_PAID_PROVIDER=true`:
 
 ```sh
@@ -259,16 +260,46 @@ paid adapter.
    verify), and can overshoot a cap by up to one model response
    ([cost tracking](https://code.claude.com/docs/en/agent-sdk/cost-tracking)). Authoritative billing is the Console.
 
-## 12. Dependency locking
+## 12. Dependency locking and image builds
 
-`runner/package.json` pins exact versions. The local default has **no** runtime npm dependencies: the agent loop,
-model client, sandbox and drafts use only Node built-ins. The Agent SDK is an `optionalDependency`, installed only
-with `INSTALL_AGENT_SDK=true`. No `package-lock.json` is committed, because one could not be generated where this was
-written (no registry access), and a hand-written lockfile would be fabricated. To lock: on a machine with registry
-access run `cd runner && npm install --package-lock-only` (and `--include=optional` if you use the SDK). Review and
-commit `runner/package-lock.json`, then switch the Dockerfile's `npm install` lines to `npm ci`. CI can then use
-`npm ci --ignore-scripts`. Base images (`node:22-bookworm-slim`, `debian:bookworm-slim`, `docker:27.5.1-cli`) should
-be pinned by digest after the first reviewed build.
+Every npm install in the images is `npm ci` from a committed lockfile (a test in `runner/test/supply-chain.test.ts`
+fails on `npm install`, `npx --yes` or `curl | sh` in a Dockerfile).
+
+| Manifest | What it installs | Lockfile |
+| --- | --- | --- |
+| `runner/package.json` | Nothing: the local default (agent loop, model client, sandbox, drafts) uses only Node built-ins. | `runner/package-lock.json`, committed. Generated with `npm install --package-lock-only --offline` (there is nothing to resolve). The runner image runs `npm ci --omit=dev --ignore-scripts`, which fails if the two disagree. |
+| `runner/sandbox/package.json` | `playwright` 1.63.0 (exact) for `browser-check.mjs`; the image then downloads that Playwright's Chromium. 1.63.0 is the version the real-Chromium browser-check test ran with. | `runner/sandbox/package-lock.json`: **not committed yet** (no registry access where this was written; a hand-written lockfile would be fabricated). |
+| `runner/agent-sdk/package.json` | Optional paid adapter only: `@anthropic-ai/claude-agent-sdk` and `playwright` (exact). Moved out of `optionalDependencies` so the default lockfile is complete. | `runner/agent-sdk/package-lock.json`: not committed. `--build-arg INSTALL_AGENT_SDK=true` refuses to build without it. |
+
+To create a missing lockfile: take it from the `runner-lockfiles` artifact of the CI job `runner-images` (CI
+generates it for that build and prints a warning), or on any machine with registry access run
+`cd runner/sandbox && npm install --package-lock-only --ignore-scripts`. Review it (every `resolved` URL is
+`https://registry.npmjs.org/...`, every entry has a `sha512-` integrity) and commit it; the supply-chain test then
+validates it on every run. `Install-CrestmontRunner.ps1` stops before building when a lockfile is missing.
+
+**Base images** are exact version tags, never floating: `node:22.23.4-bookworm-slim` (runner and sandbox; the Node
+version the tests ran on), `docker:27.5.1-cli` (Docker CLI copied into the runner), `debian:12.12-slim` (proxy),
+`ollama/ollama:0.32.0` (optional ollama-in-docker profile; the installer's `-OllamaImage`). They are `ARG`s at the top
+of each Dockerfile. Digests could not be fetched here (Docker Hub was unreachable), so they are **not** pinned by
+digest yet: the `runner-images` job writes the digest each tag resolved to into its job summary. After reviewing a
+green build, append them (`ARG NODE_IMAGE=node:22.23.4-bookworm-slim@sha256:<digest>`); the test accepts
+`tag@sha256:<digest>`. Debian packages are not version-pinned (bookworm security updates win); hadolint's DL3008 is
+ignored inline for that reason only.
+
+**CI image build** (`.github/workflows/ci.yml`, job `runner-images`, `contents: read`, nothing pushed): hadolint
+2.14.0 (checksum-verified binary) on all three Dockerfiles; `docker buildx build` of the runner (default build, no
+paid SDK), the sandbox and the egress proxy; then `runner/ci/sandbox-self-check.ts` (drives the runner's own
+`JobSandbox` with the real docker CLI, so the container gets the production flags, and checks uid 10001, no network
+tools, no setuid binaries, no network, read-only root, no capabilities, timeout kill, the locked Playwright, and
+`browser-check.mjs` passing the brochure starter in offline Chromium) and `runner/ci/runner-image-self-check.ts`
+(uid, Node >= 22.21, docker CLI >= 26, no SDK, the paid adapter refused without opt-in, `select-model.ts` run the
+installer's way, `squid -k parse` of the rendered allow-list inside the proxy image) and `runner/ci/egress-e2e.ts`
+(starts the proxy on the real compose networks and checks from both internal networks that hosted AI APIs get 403,
+the runner reaches the platform and a fake model server, installs reach only the npm registry, nothing leaves without
+the proxy, and the validation tripwire fails when the proxy is down). Job `windows-scripts` parses
+every PowerShell script and runs PSScriptAnalyzer with Windows PowerShell 5.1 compatibility rules
+(`runner/windows/Test-WindowsScripts.ps1`); job `windows-powershell-51` repeats the parse with the 5.1 parser on a
+GitHub-hosted Windows VM and runs the read-only `Discover-Hardware.ps1` into `select-model.ts` there.
 
 ## 13. Known limits and residual risks
 

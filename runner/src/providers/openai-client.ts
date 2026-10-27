@@ -62,6 +62,33 @@ export interface OpenAICompatOptions {
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** A backoff wait that ends early (with an AbortError) when the caller's signal fires, so a stop is never delayed. */
+async function abortableSleep(sleep: (ms: number) => Promise<void>, ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return sleep(ms);
+  if (signal.aborted) throw new DOMException("aborted", "AbortError");
+  let onAbort: (() => void) | null = null;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new DOMException("aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try { await Promise.race([sleep(ms), aborted]); } finally { if (onAbort) signal.removeEventListener("abort", onAbort); }
+}
+
+/**
+ * True when the server rejected the request because the prompt does not fit the model's context window. Ollama
+ * usually truncates silently instead; llama.cpp server, vLLM and LM Studio answer 400 with messages like these.
+ */
+export function isContextOverflow(err: unknown): boolean {
+  if (!(err instanceof ModelServerError)) return false;
+  if (![400, 413, 422, 500].includes(err.status)) return false;
+  return /context (length|window|size)|maximum context|exceeds? the (available )?context|too many tokens|prompt is too long|input (is )?too long|n_ctx|num_ctx/i.test(err.message);
+}
+
+/** Error from a model request that timed out (per-request timeout), as opposed to a stop requested by the caller. */
+export function isTimeout(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "TimeoutError";
+}
+
 export class OpenAICompatClient {
   private readonly o: OpenAICompatOptions;
 
@@ -76,6 +103,7 @@ export class OpenAICompatClient {
     const fetchImpl = this.o.fetchImpl ?? fetch;
     const attempts = 1 + (this.o.retries ?? 3);
     let last: unknown;
+    let timeouts = 0;
     for (let i = 1; i <= attempts; i++) {
       if (signal?.aborted) throw new DOMException("aborted", "AbortError");
       const started = Date.now();
@@ -96,9 +124,14 @@ export class OpenAICompatClient {
       } catch (err) {
         if (signal?.aborted) throw err;
         last = err;
-        const retryable = err instanceof ModelServerError ? err.retryable : !(err instanceof SyntaxError);
+        // Retry: connection errors, 5xx/429 and the first per-request timeout. Not retried: other 4xx (including a
+        // context overflow, which the agent loop handles by compacting), unparseable bodies, a second timeout (a
+        // generation that already took the full timeout twice will not get faster).
+        const timedOut = isTimeout(err);
+        if (timedOut) timeouts++;
+        const retryable = err instanceof ModelServerError ? err.retryable : timedOut ? timeouts < 2 : !(err instanceof SyntaxError);
         if (!retryable || i === attempts) break;
-        await (this.o.sleep ?? defaultSleep)(Math.min(30_000, 1000 * 2 ** (i - 1)));
+        await abortableSleep(this.o.sleep ?? defaultSleep, Math.min(30_000, 1000 * 2 ** (i - 1)), signal);
       }
     }
     throw last instanceof Error ? last : new Error(String(last));
