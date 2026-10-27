@@ -51,7 +51,7 @@ The page token set (`:root`, also used by the footer, sidebar, sign-in panel and
 | `--line-control` | `#737373` | `#767676` | Form-control borders, ≥ 3:1 on their fill |
 | `--line-gold` | `#4F4128` | `#5A4B2E` | Subtle gold borders (featured card, secondary buttons) |
 | `--white` (heading) | `#F5F5F5` | `#FFFFFF` | Strongest text |
-| `--text` / `-2` / `-3` | `#E2E2E2` / `#B8B8B8` / `#8F8F8F` | same | Text (on page: 15.9 / 9.9 / 6.1:1; ≥ 4.8:1 on every raised surface) |
+| `--text` / `-2` / `-3` | `#E2E2E2` / `#B8B8B8` / `#959595` | same | Text (on page: 15.5 / 10.1 / 6.7:1; ≥ 4.7:1 on every raised surface) |
 | `--gold-1` | `#E6C582` | same | Gold text and links |
 | `--gold-2` | `#D7B56F` | same | Gold fills — the approved Crestmont gold (dark `#0D0D0D` labels on it: 9.9:1) |
 | `--gold-pale` | `#F1DFB0` | same | Hover fill of solid-gold buttons (dark label: 14.7:1) |
