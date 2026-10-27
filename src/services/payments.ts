@@ -82,7 +82,12 @@ export async function processStripeEvent(ctx: Pick<AppContext, "db" | "email" | 
         const total = n(o, "amount") ?? 0;
         if (pi) {
           await db.prepare(`UPDATE payments SET status = ? WHERE stripe_payment_intent_id = ?`).bind(refunded >= total ? "refunded" : "partially_refunded", pi).run();
-          await db.prepare(`UPDATE refunds SET status = 'issued' WHERE status = 'approved' AND payment_id IN (SELECT id FROM payments WHERE stripe_payment_intent_id = ?)`).bind(pi).run();
+          // Refunds approved in the platform but issued from the Stripe dashboard are completed here too.
+          const latestRefund = ((o.refunds as Obj | undefined)?.data as Obj[] | undefined)?.[0];
+          await db.prepare(`UPDATE refunds SET status = 'issued', issued_at = COALESCE(issued_at, ?), stripe_refund_id = COALESCE(stripe_refund_id, ?)
+                            WHERE status IN ('approved','failed') AND payment_id IN (SELECT id FROM payments WHERE stripe_payment_intent_id = ?)`)
+            .bind(nowIso(), latestRefund ? s(latestRefund, "id") : null, pi).run();
+          await audit(db, { actorKind: "webhook", action: "payment.refunded", subjectType: "payment", subjectId: pi, details: { event: evt.id, refunded } });
         }
         break;
       }
@@ -96,6 +101,16 @@ export async function processStripeEvent(ctx: Pick<AppContext, "db" | "email" | 
                           ON CONFLICT(stripe_dispute_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at`)
           .bind(newId("dsp"), pay?.organization_id ?? null, pay?.id ?? null, evt.data.object.id, n(o, "amount") ?? 0, s(o, "reason"), s(o, "status") ?? "unknown", due ? new Date(due * 1000).toISOString() : null, nowIso(), nowIso()).run();
         if (pay) await db.prepare(`UPDATE payments SET status = 'disputed' WHERE id = ?`).bind(pay.id).run();
+        if (evt.type === "charge.dispute.created") {
+          // Disputes have hard evidence deadlines: alert the Owner and support staff immediately.
+          const staff = (await db.prepare(`SELECT DISTINCT user_id FROM memberships WHERE role_id IN ('owner','support')`).all<{ user_id: string }>()).results;
+          const body = `Payment dispute opened for $${((n(o, "amount") ?? 0) / 100).toFixed(2)}${due ? ` — evidence due ${new Date(due * 1000).toISOString().slice(0, 10)}` : ""}. Review it in Disputes.`;
+          for (const u of staff) {
+            await db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES (?,?,'dispute_opened','dispute',?,?,?)`)
+              .bind(newId("ntf"), u.user_id, evt.data.object.id, body, nowIso()).run();
+          }
+          await audit(db, { actorKind: "webhook", action: "dispute.opened", subjectType: "dispute", subjectId: evt.data.object.id, organizationId: pay?.organization_id ?? null, details: { event: evt.id, amount: n(o, "amount") } });
+        }
         break;
       }
       default:
