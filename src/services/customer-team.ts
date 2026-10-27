@@ -25,10 +25,11 @@ async function adminCount(db: Db, organizationId: string): Promise<number> {
 }
 
 export async function changeMemberRole(db: Db, actorUserId: string, organizationId: string, targetUserId: string, role: string) {
-  if (!(CUSTOMER_TEAM_ROLES as readonly string[]).includes(role)) throw new TeamError(422, "Choose administrator or member.");
   if (targetUserId === actorUserId) throw new TeamError(409, "You cannot change your own role. Ask another administrator.");
+  // Scope first: a user outside the caller's organization is "not found" whatever role is sent.
   const m = await member(db, organizationId, targetUserId);
   if (!m) throw new TeamError(404, "That person is not a member of your organization.");
+  if (!(CUSTOMER_TEAM_ROLES as readonly string[]).includes(role)) throw new TeamError(422, "Choose administrator or member.");
   if (m.role_id === role) return { from: m.role_id, to: m.role_id };
   if (m.role_id === "customer_admin" && (await adminCount(db, organizationId)) <= 1) throw new TeamError(409, "Your organization must keep at least one administrator.");
   await db.prepare(`UPDATE memberships SET role_id = ? WHERE id = ? AND organization_id = ?`).bind(role, m.id, organizationId).run();

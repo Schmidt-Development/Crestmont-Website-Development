@@ -142,6 +142,8 @@ async function buildTenant(w: Omit<World, "a" | "b">, key: "a" | "b"): Promise<T
   ids.customerInvitation = (await one<{ id: string }>(db, `SELECT id FROM invitations WHERE organization_id = ?`, cu.organizationId)).id;
   await recordAcceptance({ db, settings: {}, ip: "203.0.113.5", now: () => new Date(), req: new Request("http://crestmont.test/register") } as never, { userId: cu.id, organizationId: cu.organizationId, context: "registration" });
   ids.session = (await one<{ id: string }>(db, `SELECT id FROM sessions WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1`, cu.id)).id;
+  ids.member = memberId;
+  ids.notification = (await one<{ id: string }>(db, `SELECT id FROM notifications WHERE user_id = ? ORDER BY created_at LIMIT 1`, cu.id)).id;
 
   const allIds = [...new Set([...Object.values(ids).filter((v): v is string => !!v && v.length >= 8), cu.id, memberId])];
   return { marker, orgId: cu.organizationId, orgName, admin, member, ids, allIds };
@@ -234,6 +236,8 @@ async function buildStaffRecords(w: World) {
   await db.prepare(`INSERT INTO email_suppressions (id, email, reason, detail, created_at) VALUES (?, 'bounced@matrix.example', 'hard_bounce', 'mailbox does not exist', ?)`).bind(ids.suppression, nowIso()).run();
   ids.reconFinding = newId("rf");
   await db.prepare(`INSERT INTO reconciliation_findings (id, fingerprint, kind, detail, status, first_seen_at, last_seen_at) VALUES (?, 'matrix-fp', 'unknown_local_invoice', 'Matrix finding detail', 'open', ?, ?)`).bind(ids.reconFinding, nowIso(), nowIso()).run();
+  ids.staffNotification = newId("ntf");
+  await db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES (?, ?, 'system', 'project', NULL, 'Matrix staff notification', ?)`).bind(ids.staffNotification, w.staff.owner.id, nowIso()).run();
   // Public identifiers
   ids.serviceSlug = "website-design-development";
   ids.legalSlug = "terms";

@@ -29,6 +29,10 @@ export function customerPostFields(w: World, t: Tenant): Record<string, () => Fi
     "POST /portal/change-orders/:id/decide": () => ({ decision: "approved", notes: "ok" }),
     "POST /portal/projects/:id/approvals": () => ({ kind: "scope", decision: "approved", notes: "Looks right" }),
     "POST /portal/team": () => ({ email: `invitee-${Math.random().toString(16).slice(2, 8)}@${t.marker.toLowerCase()}.example` }),
+    "POST /portal/team/members/:userId/role": () => ({ role: "customer_admin" }),
+    "POST /portal/team/members/:userId/remove": () => ({}),
+    "POST /portal/team/invitations/:id/revoke": () => ({}),
+    "POST /portal/notifications/:id/read": () => ({}),
     "POST /q/:token/accept": () => ({ agree: "1" }),
     "POST /checkout/maintenance/:planId": () => ({ terms: "1" }),
     "POST /checkout/:packageId": () => ({ terms: "1" }),
@@ -116,6 +120,11 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/cms/:key", fields: () => ({ eyebrow: "Crestmont", heading: "A second hero heading.", lede: "Another lead paragraph for the homepage hero.", primary_label: "See packages", quote_label: "Get a quote", note: "audit" }) },
     { key: "POST /staff/cms/revisions/:id/publish", path: () => `/staff/cms/revisions/${w.ids.cmsRevision}/publish` },
     { key: "POST /staff/cms/:key/revert" },
+    { key: "POST /staff/cms/revisions/:id/discard", path: () => `/staff/cms/revisions/${x.cmsDraft}/discard`, setup: async () => {
+      await owner(w).c.post("/staff/cms/home.hero", { eyebrow: "Crestmont", heading: "A draft to discard.", lede: "A lead paragraph that will be discarded.", primary_label: "See packages", quote_label: "Get a quote", note: "discard me" });
+      x.cmsDraft = (await one<{ id: string }>(w, `SELECT id FROM cms_revisions WHERE note = 'discard me'`)).id;
+    } },
+    { key: "POST /staff/cms/revisions/:id/restore", path: () => `/staff/cms/revisions/${x.cmsDraft}/restore` },
     { key: "POST /staff/portfolio", fields: () => ({ name: "Audit Portfolio", slug: "audit-portfolio", industry: "Retail", live_url: "https://audit.matrix.example", description: "A verified description of the live website.", features: "Contact form", technology_summary: "", relationship: "Relationship documentation pending" }) },
     { key: "POST /staff/portfolio/:id", fields: () => ({ name: "Matrix Portfolio", slug: "matrix-portfolio", industry: "Retail", live_url: "https://portfolio.matrix.example", description: "An updated verified description of the live website.", features: "Single-page website", technology_summary: "", relationship: "Relationship documentation pending" }) },
     { key: "POST /staff/portfolio/:id/screenshot", fields: () => ({ kind: "mobile", captured_on: day(-1), screenshot: png("mobile.png") }) },
@@ -144,6 +153,17 @@ export function auditScenarios(w: World): Scenario[] {
     cust("POST /portal/change-orders/:id/decide"),
     cust("POST /portal/projects/:id/approvals"),
     cust("POST /portal/team"),
+    cust("POST /portal/team/members/:userId/role", { path: () => `/portal/team/members/${x.member2}/role`, setup: async () => {
+      x.member2 = newId("usr");
+      await w.db.batch([
+        w.db.prepare(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, created_at) VALUES (?, 'second-member@a.matrix.example', 'Second Member', 'x', ?, ?)`).bind(x.member2, nowIso(), nowIso()),
+        w.db.prepare(`INSERT INTO memberships (id, user_id, organization_id, role_id, created_at) VALUES (?,?,?, 'customer_member', ?)`).bind(newId("mbr"), x.member2, a.orgId, nowIso()),
+      ]);
+    } }),
+    cust("POST /portal/team/members/:userId/remove", { path: () => `/portal/team/members/${x.member2}/remove` }),
+    cust("POST /portal/team/invitations/:id/revoke"),
+    { key: "GET /portal/billing/invoices/:id/pdf", as: custA, path: () => `/portal/billing/invoices/${a.ids.paidInvoice}/pdf` },
+    { key: "GET /portal/billing/receipts/:paymentId/pdf", as: custA, path: () => `/portal/billing/receipts/${a.ids.payment}/pdf` },
     cust("POST /portal/support/new"),
     cust("POST /portal/support/:id/reply"),
     cust("POST /portal/billing/invoices/:id/pay"),
@@ -181,6 +201,14 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/quotes/:id", path: () => `/staff/quotes/${x.quote2}`, fields: () => ({ package: "premium", scope: "Premium package website: twenty pages with booking and a blog.", valid_until: day(25) }),
       setup: async () => { x.quote2 = (await one<{ id: string }>(w, `SELECT id FROM quotes WHERE lead_id = ?`, x.lead2)).id; } },
     { key: "POST /staff/quotes/:id/send", path: () => `/staff/quotes/${x.quote2}/send` },
+    { key: "POST /staff/quotes/:id/close", path: () => `/staff/quotes/${x.quote2}/close`, fields: () => ({ kind: "withdrawn", reason: "Scope changed after the call" }) },
+    { key: "GET /staff/quotes/export.csv" },
+    { key: "GET /staff/customers/export.csv" },
+    { key: "POST /staff/crm/duplicates/dismiss", fields: () => ({ a: w.ids.lead!, b: x.lead2, back: "/staff/crm/duplicates" }) },
+    { key: "POST /staff/crm/leads/:id/merge", path: () => `/staff/crm/leads/${x.mergeSrc}/merge`, fields: () => ({ into: x.lead2 }), setup: async () => {
+      await owner(w).c.post("/staff/crm/new", { name: "Merge Source", email: "merge-source@matrix.example", phone: "", company: "", website: "", interest: "starter", message: "dup", source: "referral" });
+      x.mergeSrc = (await one<{ id: string }>(w, `SELECT l.id FROM leads l JOIN contacts c ON c.id = l.contact_id WHERE c.email = 'merge-source@matrix.example'`)).id;
+    } },
 
     // ── Delivery (tenant A's project) ──
     { key: "POST /staff/conversations/:orgId", path: () => `/staff/conversations/${a.orgId}`, fields: () => ({ body: "Following up on your question." }) },
@@ -258,10 +286,19 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/refunds/:id/issue", path: () => P(w, "POST /staff/refunds/:id/issue") },
     { key: "POST /staff/finance/costs", fields: () => ({ project_id: a.ids.project!, category: "hosting", amount: "40.50", description: "Cloudflare hosting", incurred_on: day(-3) }) },
     { key: "GET /staff/reports/:file" },
+    { key: "GET /staff/reports/operations/summary.csv" },
+    { key: "GET /staff/reports/operations/time.csv" },
+    { key: "GET /staff/finance/invoices/:id/pdf", path: () => `/staff/finance/invoices/${a.ids.paidInvoice}/pdf` },
+    { key: "GET /staff/finance/receipts/:paymentId/pdf", path: () => `/staff/finance/receipts/${a.ids.payment}/pdf` },
+    { key: "POST /staff/finance/invoices/:id/stripe-invoice" },
+    { key: "GET /staff/projects/export.csv" },
+    { key: "GET /staff/tasks/export.csv" },
+    { key: "GET /staff/support/export.csv" },
     { key: "POST /staff/pricing", as: (ww) => ww.staff.sales, fields: () => ({ item: "package:business", proposed: "2599", effective_date: day(2), reason: "Audit market adjustment (TEST DATA)" }) },
     { key: "POST /staff/pricing/:id/decide", fields: () => ({ decision: "approved", note: "Approved" }) },
     { key: "POST /staff/email-suppressions/:id/remove", fields: () => ({ note: "Customer confirmed the new mailbox works" }) },
-    { key: "POST /staff/finance/reconciliation/:id/resolve", fields: () => ({ note: "Test-mode session from a deleted invoice; nothing owed." }) },
+    { key: "POST /staff/finance/reconciliation/:id/resolve", fields: () => ({ resolution: "no_action_needed", note: "Test-mode session from a deleted invoice; nothing owed." }) },
+    { key: "POST /staff/finance/reconciliation/:id/reopen", fields: () => ({ note: "Customer disputes this; reviewing again." }) },
 
     // ── Readiness and operations ──
     { key: "POST /staff/readiness/blockers/new", fields: () => ({ category: "security", severity: "medium", description: "Audit blocker description", subsystem: "Platform", owner: "Engineering", required_action: "Do the thing properly", dependency: "", requirement_ids: "" }) },
@@ -288,6 +325,11 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/employees/:id/role", fields: () => ({ role: "project_manager" }) },
     { key: "POST /staff/employees/:id/disable", fields: () => ({ reason: "Left the company" }) },
     { key: "POST /staff/employees/:id/enable" },
+    { key: "POST /staff/employees/:id/profile", fields: () => ({ job_title: "Front-end developer", weekly_capacity_hours: "30" }) },
+    { key: "GET /staff/employees/export.csv" },
+    { key: "GET /staff/email/export.csv" },
+    { key: "GET /staff/security/events.csv" },
+    { key: "GET /staff/ai/export.csv" },
     { key: "GET /staff/email/:id/html" },
     { key: "POST /staff/email/:id/retry" },
     { key: "POST /staff/integrations/:name/verify" },

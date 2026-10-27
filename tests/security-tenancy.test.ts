@@ -138,6 +138,14 @@ test("[AUTH-008] staff with assigned-only access are denied every project-scoped
   assert.equal(appErrors(w.db), errors0);
   assert.deepEqual(changedTables(bBefore, tenantRows(w.db, w.b)), [], "no record of tenant B changed");
   assert.ok(toLogin(await w.anon().get(`/portal/projects/${w.b.ids.project}`)));
+  // Lists and exports apply the same scoping: the developer's views show A's project and never B's.
+  for (const p of ["/staff/projects?status=all", "/staff/projects/export.csv?status=all", "/staff/tasks?status=all", "/staff/tasks/export.csv?status=all", "/staff/reports/operations/summary.csv", "/staff"]) {
+    const res = await dev.get(p);
+    assert.equal(res.status, 200, p);
+    const body = await res.text();
+    assert.deepEqual(leakedFrom(body, w.b), [], `${p} shows tenant B's records to an unassigned developer`);
+  }
+  assert.match(await (await dev.get("/staff/projects/export.csv?status=all")).text(), new RegExp(w.a.ids.project!));
 });
 
 test("[AUTH-008] ids smuggled into form fields cannot attach A's actions to B's records", async () => {

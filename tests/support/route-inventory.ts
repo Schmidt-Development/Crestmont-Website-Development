@@ -28,7 +28,8 @@ export type ResourceKind =
   | "lead" | "leadTask" | "aiJob" | "quote" | "quoteToken" | "cmsRevision" | "cmsKey" | "portfolio" | "portfolioSlug" | "portfolioFile"
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "priceRequest" | "suppression"
-  | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile";
+  | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
+  | "member" | "notification" | "staffNotification";
 
 export type Access =
   | { kind: "public" }
@@ -166,6 +167,9 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/portfolio/:id/unpublish": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.unpublished")),
   "POST /staff/portfolio/:id/move": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.reordered")),
   "POST /staff/portfolio/:id/testimonials": staff(rolesWith("portfolio.manage"), P("portfolio"), act("testimonial.verified_added")),
+  "GET /staff/cms/revisions/:id/compare": staff(rolesWith("cms.edit"), P("cmsRevision")),
+  "POST /staff/cms/revisions/:id/discard": staff(rolesWith("cms.edit"), P("cmsRevision"), act("cms.draft_discarded")),
+  "POST /staff/cms/revisions/:id/restore": staff(rolesWith("cms.edit"), P("cmsRevision"), act("cms.revision_restored")),
 
   // ── Customer portal (src/routes/portal.ts) ──
   "GET /portal": cust(),
@@ -203,6 +207,12 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /portal/projects/:id/handoff": cust(P("project")),
   "GET /portal/team": cust(),
   "POST /portal/team": cust(undefined, act("customer.member_invited"), { admin: true }),
+  "POST /portal/team/members/:userId/role": cust({ userId: "member" }, act("customer.member_role_changed"), { admin: true }),
+  "POST /portal/team/members/:userId/remove": cust({ userId: "member" }, act("customer.member_removed"), { admin: true }),
+  "POST /portal/team/invitations/:id/revoke": cust(P("customerInvitation"), act("customer.invitation_revoked"), { admin: true }),
+  "GET /portal/notifications": cust(),
+  "POST /portal/notifications/:id/read": cust(P("notification"), exempt("marks one of the caller's own notifications as read (scoped to the user; others' ids are 404)")),
+  "GET /portal/maintenance": cust(),
 
   // ── Sales: CRM, customers, quotes, proposals, checkout (src/routes/crm.ts) ──
   "GET /staff/crm": staff(crm),
@@ -210,6 +220,9 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/crm/new": staff(crm),
   "POST /staff/crm/new": staff(rolesWith("lead.write_all", "lead.write_assigned"), undefined, act("lead.created")),
   "GET /staff/crm/contacts": staff(crm),
+  "GET /staff/crm/duplicates": staff(crm),
+  "POST /staff/crm/duplicates/dismiss": staff(rolesWith("lead.write_all", "lead.write_assigned"), undefined, act("lead.duplicate_dismissed")),
+  "POST /staff/crm/leads/:id/merge": staff(rolesWith("lead.write_all", "lead.write_assigned"), P("lead"), act("lead.merged")),
   "GET /staff/crm/leads/:id": staff(crm, P("lead")),
   "GET /staff/crm/leads/:id/quick": staff(crm, P("lead")),
   "POST /staff/crm/leads/:id/stage": staff(rolesWith("lead.write_all", "lead.write_assigned"), P("lead"), act("lead.stage_changed")),
@@ -221,9 +234,12 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/crm/leads/:id/ai-draft": staff(rolesWith("lead.write_all", "lead.write_assigned"), P("lead"), act("ai.draft_created")),
   "POST /staff/crm/leads/:id/ai-draft/:jobId": staff(rolesWith("lead.write_all", "lead.write_assigned"), { id: "lead", jobId: "aiJob" }, act("ai.draft_approved")),
   "GET /staff/customers": staff(rolesWith("customers.read")),
+  "GET /staff/customers/export.csv": staff(rolesWith("customers.read"), undefined, act("customer.exported")),
   "GET /staff/customers/:id": staff(rolesWith("customers.read"), P("org")),
   "GET /staff/sales": staff(crm),
   "GET /staff/quotes": staff(rolesWith("quote.write")),
+  "GET /staff/quotes/export.csv": staff(rolesWith("quote.write"), undefined, act("quote.exported")),
+  "POST /staff/quotes/:id/close": staff(rolesWith("quote.write"), P("quote"), act("quote.withdrawn")),
   "GET /staff/quotes/new": { ...staff(rolesWith("quote.write")), query: "lead={lead}" },
   "POST /staff/quotes/new": staff(rolesWith("quote.write"), undefined, act("quote.created")),
   "GET /staff/quotes/:id": staff(rolesWith("quote.write"), P("quote")),
@@ -243,6 +259,9 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/conversations/:orgId": staff(rolesWith("customers.read"), { orgId: "org" }, act("message.posted")),
   "POST /staff/notifications/read": staff(STAFF_ROLES, undefined, exempt("marks the caller's own notifications as read")),
   "GET /staff/projects": staff(delivery),
+  "GET /staff/projects/export.csv": staff(delivery, undefined, act("project.exported")),
+  "GET /staff/notifications": staff(STAFF_ROLES),
+  "POST /staff/notifications/:id/read": staff(STAFF_ROLES, P("staffNotification"), exempt("marks one of the caller's own notifications as read (scoped to the user; others' ids are 404)")),
   "POST /staff/projects/sweep-inactivity": staff(coord, undefined, exempt("runs the scheduled inactivity policy on demand; each reminder/escalation/pause it causes is audited per project")),
   "GET /staff/projects/:id": staff(delivery, P("project")),
   "POST /staff/projects/:id/status": staff(coord, P("project"), act("project.paused")),
@@ -268,6 +287,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/milestones/:id/delete": staff(coord, P("milestone"), act("milestone.deleted")),
   "POST /staff/projects/:id/tasks": staff(coord, P("project"), act("task.created")),
   "GET /staff/tasks": staff(delivery),
+  "GET /staff/tasks/export.csv": staff(delivery, undefined, act("task.exported")),
   "GET /staff/tasks/:id": staff(delivery, P("task")),
   "POST /staff/tasks/:id/status": staff(rolesWith("project.coordinate", "task.update_assigned"), P("task"), act("task.status_changed")),
   "POST /staff/tasks/:id": staff(coord, P("task"), act("task.updated")),
@@ -285,6 +305,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /portal/support/:id/reply": cust(P("ticket"), act("ticket.customer_reply")),
   "POST /portal/support/:id/reopen": cust(P("ticket"), act("ticket.status_changed")),
   "GET /staff/support": staff(rolesWith("support.access")),
+  "GET /staff/support/export.csv": staff(rolesWith("support.access"), undefined, act("ticket.exported")),
   "GET /staff/support/settings": staff(ops),
   "POST /staff/support/settings": staff(ops, undefined, act("support.settings_updated")),
   "POST /staff/support/sweep": staff(rolesWith("ticket.manage"), undefined, exempt("runs the scheduled first-response SLA sweep on demand; each newly flagged ticket is audited (ticket.sla_breached)")),
@@ -316,6 +337,15 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/finance/profitability": staff(finance),
   "POST /staff/finance/costs": staff(finance, undefined, act("finance.cost_recorded")),
   "GET /staff/reports": staff(finance),
+  "GET /staff/reports/operations": staff(STAFF_ROLES),
+  "GET /staff/reports/operations/summary.csv": staff(STAFF_ROLES, undefined, act("report.operations_exported")),
+  "GET /staff/reports/operations/time.csv": staff(coord, undefined, act("report.time_exported")),
+  "GET /staff/finance/invoices/:id": staff(finance, P("invoice")),
+  "POST /staff/finance/invoices/:id/stripe-invoice": staff(finance, P("invoice"), blocked("no Stripe secret key in tests: the Stripe invoice is refused (409) and nothing is sent; a configured run audits invoice.stripe_invoice_created")),
+  "GET /staff/finance/invoices/:id/pdf": staff(finance, P("invoice"), act("invoice.pdf_downloaded")),
+  "GET /staff/finance/receipts/:paymentId/pdf": staff(finance, { paymentId: "payment" }, act("receipt.pdf_downloaded")),
+  "GET /portal/billing/invoices/:id/pdf": cust(P("invoice"), act("invoice.pdf_downloaded")),
+  "GET /portal/billing/receipts/:paymentId/pdf": cust({ paymentId: "payment" }, act("receipt.pdf_downloaded")),
   "GET /staff/reports/:file": staff(finance, { file: "reportFile" }, act("finance.exported")),
   "GET /staff/owner": staff(finance),
   "GET /portal/agreements": cust(),
@@ -329,6 +359,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/email-suppressions/:id/remove": staff(ops, P("suppression"), act("email.suppression_removed")),
   "GET /staff/finance/reconciliation": staff(finance),
   "POST /staff/finance/reconciliation/:id/resolve": staff(finance, P("reconFinding"), act("reconciliation.finding_resolved")),
+  "POST /staff/finance/reconciliation/:id/reopen": staff(finance, P("reconFinding"), act("reconciliation.finding_reopened")),
 
   // ── Launch readiness and operations (src/routes/readiness.ts, ops.ts) ──
   "GET /staff/readiness": staff(readiness),
@@ -368,12 +399,16 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
 
   // ── Platform: employees, email, integrations, monitoring, security, audit, backups, settings, AI, voice ──
   "GET /staff/employees": staff(rolesWith("employee.manage")),
+  "GET /staff/employees/export.csv": staff(rolesWith("employee.manage"), undefined, act("employee.exported")),
+  "GET /staff/employees/:id": staff(rolesWith("employee.manage"), P("staffUser")),
+  "POST /staff/employees/:id/profile": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.profile_updated")),
   "POST /staff/employees/invite": staff(rolesWith("employee.manage"), undefined, act("invitation.created")),
   "POST /staff/employees/invitations/:id/revoke": staff(rolesWith("employee.manage"), P("invitation"), act("invitation.revoked")),
   "POST /staff/employees/:id/role": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.role_changed")),
   "POST /staff/employees/:id/disable": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.disabled")),
   "POST /staff/employees/:id/enable": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.enabled")),
   "GET /staff/email": staff(ops),
+  "GET /staff/email/export.csv": staff(ops, undefined, act("email.log_exported")),
   "GET /staff/email/templates": staff(ops),
   "GET /staff/email/templates/:name/html": staff(ops, { name: "emailTemplate" }),
   "GET /staff/email/:id": staff(ops, P("emailDelivery")),
@@ -383,6 +418,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/integrations/:name/verify": staff(ops, { name: "integration" }, act("integration.verified_probe")),
   "GET /staff/monitoring": staff(ops),
   "GET /staff/security": staff(rolesWith("audit.read")),
+  "GET /staff/security/events.csv": staff(rolesWith("audit.read"), undefined, act("security.events_exported")),
   "POST /staff/privacy/:id/process": staff(rolesWith("employee.manage"), P("privacyRequest"), act("privacy.deletion_completed")),
   "GET /staff/audit": staff(rolesWith("audit.read")),
   "GET /staff/audit/export.csv": staff(rolesWith("audit.read"), undefined, act("audit.exported")),
@@ -392,6 +428,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/settings": staff(ops),
   "POST /staff/settings": staff(ops, undefined, act("settings.updated")),
   "GET /staff/ai": staff(rolesWith("ai.manage")),
+  "GET /staff/ai/export.csv": staff(rolesWith("ai.manage"), undefined, act("ai.jobs_exported")),
   "GET /staff/ai/:id": staff(rolesWith("ai.manage"), P("aiJob")),
   "POST /staff/ai/:id/decide": staff(rolesWith("ai.manage"), P("aiJob"), act("ai.draft_approved")),
   "POST /staff/ai/:id/retry": staff(rolesWith("ai.manage"), P("aiJob"), act("ai.job_retried")),

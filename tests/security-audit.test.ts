@@ -34,7 +34,7 @@ test("[EMP-002] audit inventory: every authenticated state-changing route and ev
   for (const r of classified()) {
     const a = r.spec.audit;
     const authenticated = ["session", "customer", "staff"].includes(r.spec.access.kind);
-    const isExport = r.method === "GET" && /export|\.csv$|\.json$|\.md$|\/reports\/|\/html$/.test(r.pattern) && !/templates/.test(r.pattern);
+    const isExport = r.method === "GET" && /export|\.csv$|\.json$|\.md$|\/reports\/:file|\/html$|\/pdf$/.test(r.pattern) && !/templates/.test(r.pattern);
     if (authenticated && (r.method === "POST" || isExport) && !a) problems.push(`${r.key}: no audit classification`);
     if (a && "exempt" in a) {
       if (a.exempt.length < 30) problems.push(`${r.key}: exemption reason too short`);
@@ -89,6 +89,13 @@ test("[EMP-002] every audited route writes its audit_logs action, attributed to 
   assert.deepEqual(problems, []);
   assert.ok(proven >= 135, `proved ${proven} audited routes`);
   assert.equal(appErrors(w.db), errors0, "no scenario produced a server error");
+  // Exports selected by a query parameter on a page route are audited too.
+  for (const p of ["/staff/finance/reconciliation?format=csv"]) {
+    const before = maxAuditId();
+    const res = await w.staff.owner.c.get(p);
+    assert.match(res.headers.get("content-type") ?? "", /text\/csv/, p);
+    assert.ok(auditSince(before).some((r) => r.action === "finance.exported" && r.actor_user_id === w.staff.owner.id), `${p} is audited`);
+  }
   // The audit log stays append-only throughout.
   await assert.rejects(w.db.prepare(`UPDATE audit_logs SET action = 'tampered'`).run(), /append-only/);
 });

@@ -307,3 +307,23 @@ test("[SEC-001] CSV exports neutralise spreadsheet formulas in every cell, inclu
   const leads = await (await w.staff.owner.c.get("/staff/crm/export.csv")).text();
   assert.ok(leads.includes("'=HYPERLINK"), "lead export contains the neutralised formula");
 });
+
+test("[SEC-001] invoice and receipt PDFs encode hostile text: PDF string delimiters are escaped and nothing can break out of a text operator", async () => {
+  // A customer name and invoice description that try to close the PDF string and inject operators.
+  const evil = "ZZPDF) Tj ET BT /F1 99 Tf (pwned\\";
+  await w.db.prepare(`UPDATE organizations SET name = ? WHERE id = ?`).bind(evil, w.b.orgId).run();
+  await w.db.prepare(`UPDATE invoices SET description = ? WHERE id = ?`).bind(evil, w.b.ids.paidInvoice!).run();
+  const docs = [
+    [w.staff.owner.c, `/staff/finance/invoices/${w.b.ids.paidInvoice}/pdf`], [w.staff.owner.c, `/staff/finance/receipts/${w.b.ids.payment}/pdf`],
+    [w.b.admin.c, `/portal/billing/invoices/${w.b.ids.paidInvoice}/pdf`], [w.b.admin.c, `/portal/billing/receipts/${w.b.ids.payment}/pdf`],
+  ] as const;
+  for (const [c, p] of docs) {
+    const res = await c.get(p);
+    assert.equal(res.status, 200, p);
+    assert.match(res.headers.get("content-type") ?? "", /application\/pdf/);
+    const text = new TextDecoder("latin1").decode(new Uint8Array(await res.arrayBuffer()));
+    assert.ok(text.includes("ZZPDF\\) Tj ET BT"), `${p}: the hostile name is present, escaped`);
+    assert.ok(!/ZZPDF\) Tj/.test(text), `${p}: the hostile name does not close its string`);
+    assert.ok(!text.includes("(pwned\\)"), `${p}: a trailing backslash cannot escape the closing delimiter`);
+  }
+});

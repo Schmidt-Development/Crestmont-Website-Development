@@ -20,5 +20,5 @@ export const SECURITY_MATRIX: Record<string, ImplementationRecord> = {
   "SEC-001": { status: "implemented", owner: "engineering",
     location: "src/lib/validate.ts, src/lib/html.ts auto-escaping, csvCell formula guards, signed-webhook envelope checks; tests/security-fuzz.test.ts fuzzes every POST "
       + "route's actual form fields (discovered at runtime), every GET route's query parameters and every signed JSON endpoint (valid signatures), then sweeps "
-      + "every page, every rendered email and every CSV export for unescaped payloads" },
+      + "every page, every rendered email, every CSV export and the invoice/receipt PDFs for unescaped payloads" },
 };
