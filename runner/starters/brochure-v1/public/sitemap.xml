@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- STARTER-PLACEHOLDER Replace example.com with the customer's domain once it is known; list every page. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://example.com/</loc></url>
+  <url><loc>https://example.com/about.html</loc></url>
+  <url><loc>https://example.com/services.html</loc></url>
+  <url><loc>https://example.com/contact.html</loc></url>
+</urlset>

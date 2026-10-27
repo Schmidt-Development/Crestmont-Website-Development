@@ -1,0 +1,23 @@
+{
+  // Runner typecheck: `npx tsc -p runner/tsconfig.json`.
+  // "paths" points the SDK import at the local declaration shim (src/sdk-types.d.ts) because the package
+  // cannot be installed in every environment. Once `npm install` has run in runner/, delete the "paths" entry
+  // to typecheck against the real @anthropic-ai/claude-agent-sdk declarations.
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "paths": {
+      "@anthropic-ai/claude-agent-sdk": ["./src/sdk-types.d.ts"]
+    }
+  },
+  "include": ["src", "test"]
+}

@@ -1,0 +1,190 @@
+// Control-plane client for docs/ai-builds/RUNNER-PROTOCOL.md (v1).
+//  - Every request: POST, JSON body, header x-crestmont-runner-signature: t=<unix s>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>
+//  - 409 {"error":"lease_lost"} -> LeaseLostError (caller stops work on that job immediately, keeps the workspace).
+//  - Network errors, 5xx and 429 are retried with exponential backoff + jitter; other 4xx are never retried.
+
+import { createHmac } from "node:crypto";
+import type {
+  ClaimResponse, HeartbeatRequest, HeartbeatResponse, CheckpointRequest, RequirementItem, CompleteRequest, Job,
+} from "./protocol.ts";
+import { RUNNER_VERSION, LIMITS } from "./protocol.ts";
+import type { Logger } from "./log.ts";
+import { silentLogger, errorMessage } from "./log.ts";
+
+export const SIGNATURE_HEADER = "x-crestmont-runner-signature";
+
+export function signBody(secret: string, body: string, unixSeconds: number): string {
+  const mac = createHmac("sha256", secret).update(`${unixSeconds}.${body}`).digest("hex");
+  return `t=${unixSeconds},v1=${mac}`;
+}
+
+/** Verifier used by the fake control plane in tests (same rules as the Worker: ±600 s tolerance). */
+export function verifySignature(secret: string, body: string, header: string | undefined, nowSeconds: number, toleranceSeconds = 600): boolean {
+  if (!header) return false;
+  const m = /^t=(\d+),v1=([0-9a-f]{64})$/.exec(header);
+  if (!m) return false;
+  const t = Number(m[1]);
+  if (Math.abs(nowSeconds - t) > toleranceSeconds) return false;
+  const expected = createHmac("sha256", secret).update(`${t}.${body}`).digest("hex");
+  return timingSafeEqualHex(expected, m[2]);
+}
+
+function timingSafeEqualHex(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+export class LeaseLostError extends Error {
+  constructor(jobId: string) {
+    super(`lease_lost for job ${jobId}`);
+    this.name = "LeaseLostError";
+  }
+}
+
+export class ControlPlaneError extends Error {
+  status: number;
+  body: string;
+  constructor(status: number, body: string, path: string) {
+    super(`control plane ${path} answered ${status}: ${body.slice(0, 300)}`);
+    this.name = "ControlPlaneError";
+    this.status = status;
+    this.body = body;
+  }
+}
+
+export interface RetryPolicy { attempts: number; baseMs: number; maxMs: number }
+
+export interface ControlPlaneOptions {
+  baseUrl: string;
+  secret: string;
+  runnerId: string;
+  fetchImpl?: typeof fetch;
+  retry?: Partial<RetryPolicy>;
+  timeoutMs?: number;
+  logger?: Logger;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+export class ControlPlaneClient {
+  readonly opts: ControlPlaneOptions;
+  readonly retry: RetryPolicy;
+  private readonly log: Logger;
+  constructor(opts: ControlPlaneOptions) {
+    if (!/^https?:\/\//.test(opts.baseUrl)) throw new Error("CONTROL_PLANE_URL must be an http(s) URL");
+    if (!opts.secret) throw new Error("BUILD_RUNNER_SECRET is required");
+    this.opts = opts;
+    this.retry = { attempts: 5, baseMs: 500, maxMs: 30_000, ...(opts.retry ?? {}) };
+    this.log = opts.logger ?? silentLogger;
+  }
+
+  /** Low-level signed POST with retry. Returns the parsed JSON body of a 2xx answer. */
+  async post<T>(path: string, payload: unknown, ctx: { jobId?: string } = {}): Promise<T> {
+    const fetchImpl = this.opts.fetchImpl ?? fetch;
+    const sleep = this.opts.sleep ?? defaultSleep;
+    const url = this.opts.baseUrl.replace(/\/+$/, "") + path;
+    const body = JSON.stringify(payload);
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= this.retry.attempts; attempt++) {
+      const t = Math.floor((this.opts.now ?? Date.now)() / 1000);
+      let res: Response;
+      try {
+        res = await fetchImpl(url, {
+          method: "POST",
+          headers: { "content-type": "application/json", [SIGNATURE_HEADER]: signBody(this.opts.secret, body, t) },
+          body,
+          signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000),
+        });
+      } catch (err) {
+        lastErr = err;
+        this.log.warn("control plane network error", { path, attempt, error: errorMessage(err) });
+        if (attempt < this.retry.attempts) await sleep(this.backoff(attempt));
+        continue;
+      }
+      const text = await res.text();
+      if (res.ok) {
+        try { return JSON.parse(text) as T; } catch { throw new ControlPlaneError(res.status, "invalid JSON", path); }
+      }
+      if (res.status === 409 && /lease_lost/.test(text)) throw new LeaseLostError(ctx.jobId ?? "?");
+      const retryable = res.status === 429 || res.status >= 500;
+      lastErr = new ControlPlaneError(res.status, text, path);
+      if (!retryable) throw lastErr;
+      this.log.warn("control plane retryable status", { path, attempt, status: res.status });
+      if (attempt < this.retry.attempts) {
+        const ra = Number(res.headers.get("retry-after"));
+        await sleep(Number.isFinite(ra) && ra > 0 ? Math.min(ra * 1000, this.retry.maxMs) : this.backoff(attempt));
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  }
+
+  backoff(attempt: number): number {
+    const exp = Math.min(this.retry.maxMs, this.retry.baseMs * 2 ** (attempt - 1));
+    return Math.round(exp / 2 + Math.random() * (exp / 2));
+  }
+
+  claim(capabilities: string[]): Promise<ClaimResponse> {
+    return this.post<ClaimResponse>("/api/builds/runner/claim", {
+      runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId), version: RUNNER_VERSION, capabilities,
+    });
+  }
+
+  heartbeat(job: Pick<Job, "id" | "leaseToken">, req: HeartbeatRequest): Promise<HeartbeatResponse> {
+    const activity = req.activity?.slice(-20).map((a) => ({ kind: a.kind, message: a.message.slice(0, LIMITS.activityMessage) }));
+    return this.post<HeartbeatResponse>("/api/builds/runner/heartbeat", {
+      jobId: job.id, leaseToken: job.leaseToken, stage: req.stage, runCostUsd: round4(req.runCostUsd), turns: req.turns,
+      ...(req.sessionId ? { sessionId: req.sessionId } : {}), ...(activity && activity.length ? { activity } : {}),
+    }, { jobId: job.id });
+  }
+
+  checkpoint(job: Pick<Job, "id" | "leaseToken">, req: CheckpointRequest): Promise<{ checkpointKey: string | null }> {
+    return this.post("/api/builds/runner/checkpoint", { jobId: job.id, leaseToken: job.leaseToken, ...req }, { jobId: job.id });
+  }
+
+  requirements(job: Pick<Job, "id" | "leaseToken">, items: RequirementItem[]): Promise<unknown> {
+    return this.post("/api/builds/runner/requirements", { jobId: job.id, leaseToken: job.leaseToken, items }, { jobId: job.id });
+  }
+
+  file(job: Pick<Job, "id" | "leaseToken">, fileId: string): Promise<{ name: string; contentType: string; base64: string }> {
+    return this.post("/api/builds/runner/files", { jobId: job.id, leaseToken: job.leaseToken, fileId }, { jobId: job.id });
+  }
+
+  /**
+   * PROPOSED endpoint (not in protocol v1): fetch a previously uploaded checkpoint archive so a different runner host
+   * can resume. A 404/405 answer means "not supported" and the caller falls back to git source / a new session.
+   */
+  async fetchCheckpoint(job: Pick<Job, "id" | "leaseToken">, checkpointKey: string): Promise<{ archiveBase64: string } | null> {
+    try {
+      return await this.post<{ archiveBase64: string }>("/api/builds/runner/checkpoint/fetch",
+        { jobId: job.id, leaseToken: job.leaseToken, checkpointKey }, { jobId: job.id });
+    } catch (err) {
+      if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null;
+      throw err;
+    }
+  }
+
+  complete(job: Pick<Job, "id" | "leaseToken">, req: CompleteRequest): Promise<unknown> {
+    return this.post("/api/builds/runner/complete", {
+      jobId: job.id, leaseToken: job.leaseToken, ...req, runCostUsd: round4(req.runCostUsd),
+      report: truncateBytes(req.report, LIMITS.report),
+      ...(req.error ? { error: req.error.slice(0, LIMITS.error) } : {}),
+    }, { jobId: job.id });
+  }
+}
+
+export function round4(n: number): number {
+  return Math.round((Number.isFinite(n) ? n : 0) * 10_000) / 10_000;
+}
+
+export function truncateBytes(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= maxBytes) return text;
+  const marker = "\n\n[report truncated to fit the 50 KB limit]\n";
+  let cut = buf.subarray(0, maxBytes - Buffer.byteLength(marker)).toString("utf8");
+  if (cut.endsWith("�")) cut = cut.slice(0, -1);
+  return cut + marker;
+}
