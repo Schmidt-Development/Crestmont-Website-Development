@@ -2,12 +2,12 @@
 import { html, safeUrl, type SafeHtml } from "../lib/html.ts";
 import type { AppContext } from "../app/context.ts";
 import { can, type Permission } from "../domain/authz.ts";
-import { csrf, drawerShell, skeleton } from "./components.ts";
+import { csrf, drawerShell, skeleton, ctaLink } from "./components.ts";
 import { requestAttribution } from "../services/leads.ts";
 
-// Type is self-hosted from /assets/fonts (SIL OFL): Gloock for display, Instrument Sans for text and UI.
-// The two faces used above the fold are preloaded; no third-party font requests.
-const PRELOAD_FONTS = ["/assets/fonts/Gloock-Regular.woff", "/assets/fonts/InstrumentSans-Regular.woff"];
+// Type is self-hosted from /assets/fonts (SIL OFL): Inter Display Medium for headlines, Inter for text and UI.
+// The faces used above the fold are preloaded; no third-party font requests.
+const PRELOAD_FONTS = ["/assets/fonts/InterDisplay-Medium.woff", "/assets/fonts/Inter-Regular.woff", "/assets/fonts/Inter-Medium.woff"];
 
 export interface PageMeta { title: string; description?: string; path?: string; noindex?: boolean; canonical?: string }
 
@@ -19,16 +19,17 @@ function head(ctx: AppContext, m: PageMeta): SafeHtml {
 ${m.description ? html`<meta name="description" content="${m.description}">` : ""}
 ${m.noindex || ctx.env.ENVIRONMENT !== "production" ? html`<meta name="robots" content="noindex, nofollow">` : html`<link rel="canonical" href="${canonical}">`}
 <meta property="og:title" content="${title}"><meta property="og:type" content="website">${m.description ? html`<meta property="og:description" content="${m.description}">` : ""}
-<meta name="theme-color" content="#0d0d0d"><meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#f2f1ee"><meta name="color-scheme" content="light">
 <link rel="icon" type="image/png" sizes="32x32" href="/assets/brand/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="/assets/brand/favicon-16.png">
 ${PRELOAD_FONTS.map((f) => html`<link rel="preload" href="${f}" as="font" type="font/woff" crossorigin>`)}<link rel="stylesheet" href="/assets/app.css">
 <noscript><link rel="stylesheet" href="/assets/nojs.css"></noscript><script src="/assets/app.js" defer></script></head>`;
 }
 
-/** Header mark: the original crest artwork at exactly 2× pixel density, plus the company name as text. */
+/** Header mark: the original crest artwork (unaltered, 2× pixel density) in a black tile of its own background
+ *  colour, plus the company name as text. */
 export function brandMark(href = "/"): SafeHtml {
   return html`<a class="brand" href="${href}" aria-label="Crestmont Website Development — home">
-<img class="brand__mark" src="/assets/brand/crestmont-crest.png" width="42" height="41" alt="" decoding="async">
+<span class="brand__tile"><img class="brand__mark" src="/assets/brand/crestmont-crest.png" width="42" height="41" alt="" decoding="async"></span>
 <span><span class="brand__word">CRESTMONT</span><span class="brand__sub">WEBSITE DEVELOPMENT</span></span></a>`;
 }
 
@@ -62,6 +63,29 @@ function envBanner(ctx: AppContext): SafeHtml {
   return html`<div class="draft-banner">${ctx.env.ENVIRONMENT === "staging" ? "Staging environment" : "Development environment"} — test data only. Payments, email and phone integrations are not live here.</div>`;
 }
 
+/**
+ * M01 opening sequence (docs/frontend/MOTION.md). Shown on the first public page view of a browser session:
+ * a GET for an indexable page, no flash message, and no `cm_intro` session cookie yet. The cookie is set with
+ * that response, so internal navigation, form re-renders and error pages never replay it. The overlay is a pure
+ * CSS timeline (no script needed to finish), never intercepts input, and is hidden for reduced motion and
+ * without JavaScript.
+ */
+function wantsIntro(ctx: AppContext, meta: PageMeta): boolean {
+  if (ctx.req.method !== "GET" || meta.noindex || ctx.flash) return false;
+  if (/(?:^|;\s*)cm_intro=/.test(ctx.req.headers.get("cookie") ?? "")) return false;
+  if ((ctx.req.headers.get("sec-purpose") ?? ctx.req.headers.get("purpose") ?? "").includes("prefetch")) return false;
+  return true;
+}
+
+function introOverlay(): SafeHtml {
+  // Seeded stagger (deterministic per tile, visually random) — tiles clear over ~230 ms after the mark.
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const tiles = Array.from({ length: 12 * 7 }, () => html`<i style="--d:${Math.round(rnd() * 230)}ms"></i>`);
+  return html`<div class="intro" data-intro aria-hidden="true"><div class="intro__tiles">${tiles}</div>
+<div class="intro__mark"><img src="/assets/brand/crestmont-crest.png" width="42" height="41" alt=""><span>CRESTMONT</span></div></div>`;
+}
+
 const PUBLIC_NAV = [
   ["/services", "Services"], ["/pricing", "Pricing"], ["/portfolio", "Portfolio"], ["/process", "Process"], ["/about", "About"], ["/contact", "Contact"],
 ] as const;
@@ -77,12 +101,14 @@ export function publicLayout(ctx: AppContext, meta: PageMeta, body: SafeHtml): S
   const account = ctx.user
     ? html`<a class="nav__account" href="${ctx.user.isStaff ? "/staff" : "/portal"}">${ctx.user.isStaff ? "Staff" : "My account"}</a>`
     : html`<a class="nav__account" href="/login">Sign in</a>`;
-  return html`<html lang="en">${head(ctx, meta)}<body>
-<a class="skip" href="#main">Skip to content</a>${envBanner(ctx)}
+  const intro = wantsIntro(ctx, meta);
+  if (intro) ctx.setCookies.push(`cm_intro=1; Path=/; SameSite=Lax${ctx.url.protocol === "https:" ? "; Secure" : ""}`);
+  return html`<html lang="en"${intro ? html` class="has-intro"` : ""}>${head(ctx, meta)}<body>
+${intro ? introOverlay() : ""}<a class="skip" href="#main">Skip to content</a>${envBanner(ctx)}
 <header class="site-header" data-site-header><div class="container">${brandMark()}
 ${menuButton("site-nav")}
 <nav class="nav" id="site-nav" aria-label="Primary">${PUBLIC_NAV.map(([h, l]) => html`<a href="${h}"${here === h || here.startsWith(h + "/") ? html` aria-current="page"` : ""}>${l}</a>`)}
-${account}<a class="btn btn--secondary btn--sm nav__cta" href="/quote">Request a quote</a></nav></div></header>
+${account}${ctaLink("Request a quote", "/quote", "primary", "sm", "nav__cta")}</nav></div></header>
 <main id="main">${body}</main>
 ${siteFooter(ctx)}${flashToast(ctx)}</body></html>`;
 }
@@ -91,14 +117,16 @@ function siteFooter(ctx: AppContext): SafeHtml {
   const email = ctx.settings["contact.email"] ?? "support@crestmontwebsitedevelopment.com";
   const hours = ctx.settings["support.staffed_hours"] ?? null;
   const links = (items: [string, string][]) => html`<ul class="footer-links">${items.map(([h, l]) => html`<li><a href="${h}">${l}</a></li>`)}</ul>`;
-  return html`<footer class="site-footer"><div class="container"><div class="footer-grid">
-<div>${brandMark()}<p class="faint" style="margin-top:1.25rem;max-width:26rem">Website design, development and digital systems for businesses across the United States.</p>
-<p class="footer-cta"><a class="btn btn--secondary btn--sm" href="/quote">Request a custom quote</a></p>
+  // M10: columns enter in a short stagger (data-reveal-group); the oversized outline wordmark is decorative text.
+  return html`<footer class="site-footer"><div class="container"><div class="footer-grid" data-reveal-group>
+<div data-reveal>${brandMark()}<p class="faint" style="margin-top:1.25rem;max-width:26rem">Website design, development and digital systems for businesses across the United States.</p>
+<p class="footer-cta">${ctaLink("Request a custom quote", "/quote", "primary", "sm")}</p>
 <p><a href="mailto:${email}">${email}</a></p>${hours ? html`<p class="faint">Staffed support: ${hours}</p>` : ""}</div>
-<div><h4>Services</h4>${links([["/services", "All services"], ["/services/website-design-development", "Design & development"], ["/services/website-redesign", "Redesign"], ["/services/custom-development", "Custom development"], ["/services/technical-seo", "Technical SEO"], ["/hosting-maintenance", "Hosting & maintenance"]])}</div>
-<div><h4>Company</h4>${links([["/about", "About"], ["/process", "Process"], ["/portfolio", "Portfolio"], ["/faq", "FAQs"], ["/contact", "Contact"], ["/pricing/compare", "Compare packages"]])}</div>
-<div><h4>Policies</h4>${links([["/legal/privacy", "Privacy"], ["/legal/terms", "Terms"], ["/legal/development-agreement", "Development agreement"], ["/legal/refunds", "Refunds"], ["/legal/cancellation", "Cancellation"], ["/legal/support", "Support policy"], ["/legal/accessibility", "Accessibility"], ["/legal/disclosures", "Business disclosures"]])}</div>
-</div><div class="footer-base"><p class="faint">© ${new Date().getFullYear()} Crestmont Website Development.</p><p class="faint"><a href="/login">Customer portal</a></p></div></div></footer>`;
+<div data-reveal><h4>Services</h4>${links([["/services", "All services"], ["/services/website-design-development", "Design & development"], ["/services/website-redesign", "Redesign"], ["/services/custom-development", "Custom development"], ["/services/technical-seo", "Technical SEO"], ["/hosting-maintenance", "Hosting & maintenance"]])}</div>
+<div data-reveal><h4>Company</h4>${links([["/about", "About"], ["/process", "Process"], ["/portfolio", "Portfolio"], ["/faq", "FAQs"], ["/contact", "Contact"], ["/pricing/compare", "Compare packages"]])}</div>
+<div data-reveal><h4>Policies</h4>${links([["/legal/privacy", "Privacy"], ["/legal/terms", "Terms"], ["/legal/development-agreement", "Development agreement"], ["/legal/refunds", "Refunds"], ["/legal/cancellation", "Cancellation"], ["/legal/support", "Support policy"], ["/legal/accessibility", "Accessibility"], ["/legal/disclosures", "Business disclosures"]])}</div>
+</div><div class="footer-base"><p class="faint">© ${new Date().getFullYear()} Crestmont Website Development.</p><p class="faint"><a href="/login">Customer portal</a></p></div></div>
+<span class="footer-word" aria-hidden="true">CRESTMONT</span></footer>`;
 }
 
 export function authLayout(ctx: AppContext, meta: PageMeta, body: SafeHtml): SafeHtml {

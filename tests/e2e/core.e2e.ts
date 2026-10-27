@@ -22,8 +22,13 @@ test("[BRAND-001] header shows the original crest artwork at exactly 2x pixel de
   assert.equal(info.src, "/assets/brand/crestmont-crest.png");
   assert.ok(info.complete && info.natural === 84 && info.naturalH === 82, `loaded original crop ${JSON.stringify(info)}`);
   assert.ok(info.natural / info.shown >= 2 - 1e-6, `never upscaled: ${info.natural}px source shown at ${info.shown}px`);
-  const bg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
-  assert.equal(bg, "rgb(13, 13, 13)", "page black matches the logo artwork background");
+  // The artwork has an opaque #0d0d0d background, so the surface directly behind it must be exactly that black
+  // (since design v3 the pages are light and the crest sits in a #0d0d0d tile — docs/frontend/DESIGN.md §2).
+  const bg = await img.evaluate((el: HTMLElement) => {
+    for (let e: HTMLElement | null = el.parentElement; e; e = e.parentElement) { const c = getComputedStyle(e).backgroundColor; if (c !== "rgba(0, 0, 0, 0)" && c !== "transparent") return c; }
+    return getComputedStyle(document.body).backgroundColor;
+  });
+  assert.equal(bg, "rgb(13, 13, 13)", "the surface behind the crest matches the logo artwork background");
   await ctx.close();
 });
 

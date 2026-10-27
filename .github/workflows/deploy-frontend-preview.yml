@@ -117,6 +117,27 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/"); [ "$code" = "401" ] || { echo "::error::preview gate not active on / (HTTP $code)"; exit 1; }
           code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/assets/app.css"); [ "$code" = "200" ] || { echo "::error::assets not served (HTTP $code)"; exit 1; }
 
+      - name: Verify the preview serves this commit's frontend assets (byte-for-byte)
+        env:
+          BASE: ${{ steps.deploy.outputs.url }}
+        run: |
+          fail=0
+          for f in assets/app.css assets/app.js assets/nojs.css assets/fonts/InterDisplay-Medium.woff assets/art/hero-build.webp assets/art/stage-build.webp; do
+            want=$(sha256sum "public/$f" | cut -d' ' -f1)
+            got=$(curl -s "$BASE/$f" | sha256sum | cut -d' ' -f1)
+            if [ "$want" = "$got" ]; then echo "ok   $f $want"; else echo "::error::$f served $got, expected $want"; fail=1; fi
+          done
+          # Homepage markup through the preview gate (this run's own password; never printed)
+          PW=$(cat access/preview-password)
+          cookie=$(curl -s -D - -o /dev/null --data-urlencode "password=$PW" --data-urlencode "next=/" "$BASE/__preview-access" | grep -i '^set-cookie: cm_preview=' | sed -E 's/^set-cookie: ([^;]+);.*/\1/I' | tr -d '\r')
+          [ -n "$cookie" ] || { echo "::error::preview password was not accepted"; exit 1; }
+          home=$(curl -s -H "cookie: $cookie" "$BASE/")
+          for marker in 'class="intro"' 'data-statement' 'data-stages' 'class="bento"' 'data-switch' 'hero-build.webp'; do
+            if printf '%s' "$home" | grep -q "$marker"; then echo "ok   homepage contains $marker"; else echo "::error::homepage is missing $marker"; fail=1; fi
+          done
+          [ "$fail" = 0 ] && echo "Hosted preview serves the assets and homepage of ${GITHUB_SHA}." >> "$GITHUB_STEP_SUMMARY"
+          exit $fail
+
       - name: Access notes (private artifact; never in logs)
         env:
           BASE: ${{ steps.deploy.outputs.url }}

@@ -6,7 +6,7 @@ import type { AppContext } from "../app/context.ts";
 import { html, raw, safeUrl, formatCents, formatDate, formatDateTime, type SafeHtml } from "../lib/html.ts";
 import { HttpError, htmlResponse, redirect, str, securityHeaders } from "../app/http.ts";
 import { publicLayout, appLayout, crestRing } from "../ui/layout.ts";
-import { csrf, input, textarea, select, button, linkButton, actionForm, formErrors, alert, table, badge, emptyState, pageHead, dl, fileInput, attributionFields, richText } from "../ui/components.ts";
+import { csrf, input, textarea, select, button, linkButton, ctaLink, ARROW_SVG, actionForm, formErrors, alert, table, badge, emptyState, pageHead, dl, fileInput, attributionFields, richText } from "../ui/components.ts";
 import { requireStaff } from "../app/app.ts";
 import { staffNav } from "./nav.ts";
 import { verifyTurnstile } from "./api.ts";
@@ -58,34 +58,36 @@ async function page(ctx: AppContext, seoKey: string, keys: string[], render: (c:
   return htmlResponse(ctx, publicLayout(ctx, { title: seo.title, description: seo.description }, html`${banner}${body}`), status);
 }
 
-// Margin-label composition (docs/frontend/DESIGN.md §8): the section name sits in a narrow left column on wide
-// screens; when the label would only repeat the heading it is left empty so columns still align.
-const section = (eyebrow: string, title: string, body: SafeHtml, opts: { id?: string; lede?: string } = {}) => html`<section class="section"${opts.id ? html` id="${opts.id}"` : ""}><div class="container section__inner">
-<p class="section__label"${eyebrow === title ? html` aria-hidden="true" style="visibility:hidden"` : ""}>${eyebrow}</p><div><div class="section__head"><h2>${title}</h2>${opts.lede ? html`<p class="lede">${opts.lede}</p>` : ""}</div>${body}</div></div></section>`;
+// Reference-matched section composition (docs/frontend/MOTION.md): a "/ label", then the heading (left) and
+// supporting copy (right). Headings resolve word by word as they enter (app.js splits words at runtime, so the
+// server HTML keeps whole phrases); supporting copy follows.
+const section = (eyebrow: string, title: string, body: SafeHtml, opts: { id?: string; lede?: string; cls?: string } = {}) => html`<section class="section${opts.cls ? ` ${opts.cls}` : ""}"${opts.id ? html` id="${opts.id}"` : ""}><div class="container section__inner">
+<p class="section__label">${eyebrow}</p><div class="section__head"><h2 class="reveal-words" data-reveal>${title}</h2>${opts.lede ? html`<p class="lede" data-reveal style="--rd:140ms">${opts.lede}</p>` : ""}</div>${body}</div></section>`;
 
 const pageHero = (eyebrow: string, title: string, lede?: string, actions?: SafeHtml) => html`<section class="hero hero--page"><div class="container">
-<div class="eyebrow">${eyebrow}</div><h1>${title}</h1>${lede ? html`<p class="lede">${lede}</p>` : ""}${actions ? html`<div class="row">${actions}</div>` : ""}</div></section>`;
+<div class="eyebrow">${eyebrow}</div><h1 class="hero-title">${title}</h1>${lede ? html`<p class="lede hero-seq" style="--seq:0">${lede}</p>` : ""}${actions ? html`<div class="row hero-seq" style="--seq:1">${actions}</div>` : ""}</div></section>`;
 
-const itemCards = (text: string) => html`<div class="grid grid-2">${parseItems(text).map((i) => html`<div class="card card--feature"><h3 class="card__title">${i.title}</h3><p class="muted">${i.body}</p></div>`)}</div>`;
-/** Two-column hairline ledger for principles and capabilities (no card chrome). */
-const ledger = (text: string) => html`<ul class="ledger">${parseItems(text).map((i) => html`<li><h3>${i.title}</h3><p>${i.body}</p></li>`)}</ul>`;
+const itemCards = (text: string) => html`<div class="experience" data-reveal-group>${parseItems(text).map((i) => html`<div class="card card--feature" data-reveal><h3 class="card__title">${i.title}</h3><p class="muted">${i.body}</p></div>`)}</div>`;
+/** Capability cards (three columns). */
+const ledger = (text: string) => html`<ul class="ledger" data-reveal-group>${parseItems(text).map((i) => html`<li data-reveal><h3>${i.title}</h3><p>${i.body}</p></li>`)}</ul>`;
 
 function packageCards(c: Content, opts: { compact?: boolean } = {}): SafeHtml {
   const pr = c.get("pricing.presentation");
-  return html`<div class="grid grid-3 pricing-grid">${PKG_ORDER.map((id) => {
+  return html`<div class="grid grid-3 pricing-grid" data-reveal-group>${PKG_ORDER.map((id) => {
     const p = PACKAGES[id];
-    return html`<article class="card${id === "business" ? " card--gold" : ""} package" aria-labelledby="pkg-${id}">
+    const featured = id === "business";
+    return html`<article class="card${featured ? " card--gold on-dark" : ""} package" aria-labelledby="pkg-${id}" data-reveal>
 <h3 class="card__title" id="pkg-${id}">${p.name}</h3><p class="muted">${pr[`${id}_tagline`] ?? ""}</p>
 <div class="price" data-testid="price-${id}">${pkgPrice(id)}</div><p class="faint package__terms">${p.priceIsFloor ? "Starting price · final price in your written scope · " : "Fixed price · "}paid 100% upfront</p>
 ${opts.compact ? html`<ul class="checklist">${p.includes.slice(0, 5).map((i) => html`<li>${i}</li>`)}</ul>` : html`<ul class="checklist">${p.includes.map((i) => html`<li>${i}</li>`)}</ul>`}
-<div class="package__actions">${linkButton(`Choose ${p.name}`, `/checkout/${id}`, id === "business" ? "primary" : "secondary")}${id === "premium" ? html` <a class="btn btn--ghost" href="/quote?package=premium">Discuss a larger scope</a>` : ""}</div>
+<div class="package__actions">${ctaLink(`Choose ${p.name}`, `/checkout/${id}`, featured ? "primary" : "secondary")}${id === "premium" ? html` <a class="btn btn--ghost" href="/quote?package=premium">Discuss a larger scope</a>` : ""}</div>
 </article>`;
   })}</div>`;
 }
 
 function maintenanceCards(): SafeHtml {
   const approved = plans().every((m) => m.entitlementsStatus === "approved");
-  return html`<div class="grid grid-3">${plans().map((m) => html`<div class="card"><h3 class="card__title">${m.name}</h3><div class="price" data-testid="price-${m.id}">${formatCents(effective[`maintenance:${m.id}`] ?? m.monthlyCents)}<small> / month</small></div>
+  return html`<div class="grid grid-3 pricing-grid" data-reveal-group>${plans().map((m) => html`<div class="card package" data-reveal><h3 class="card__title">${m.name}</h3><div class="price" data-testid="price-${m.id}">${formatCents(effective[`maintenance:${m.id}`] ?? m.monthlyCents)}<small> / month</small></div>
 ${approved ? html`<ul class="checklist">${Object.values(m.proposedEntitlements).map((e) => html`<li>${e}</li>`)}</ul>` : html`<p class="muted">Full plan details will be published here once finalised.</p>`}</div>`)}</div>
 ${approved ? "" : html`<p class="muted">Each plan will have explicit, published limits for hosting, maintenance time, content updates, security updates, monitoring, backups and support response targets — with no unlimited development or unlimited support. Have a question in the meantime? <a href="/contact?topic=maintenance">Ask us about maintenance</a>.</p>`}`;
 }
@@ -105,17 +107,41 @@ function shot(p: pf.PortfolioProject, kind: "desktop" | "mobile", viewer = false
   return viewer ? html`<a class="shot${kind === "mobile" ? " shot--mobile" : ""}" href="${src}" data-viewer data-alt="${alt}">${img}<span class="visually-hidden">Open full-screen</span></a>` : html`<div class="shot">${img}</div>`;
 }
 
+/** Large two-up project presentation (M05): image group enters before its text group. */
+function showcase(projects: pf.PortfolioProject[]): SafeHtml {
+  return html`<div class="showcase" data-reveal-group>${projects.slice(0, 2).map((p) => html`<a class="showcase__item" href="/portfolio/${p.slug}" data-reveal>
+<div class="showcase__media">${p.desktop_screenshot_file_id ? html`<img src="/portfolio-media/${p.desktop_screenshot_file_id}" alt="Desktop screenshot of ${p.name} (${p.live_url})" loading="lazy" decoding="async">` : html`<div class="shot shot--pending" role="img" aria-label="Screenshot of ${p.name} — capture pending"><span>Verified screenshot capture pending</span></div>`}</div>
+<div data-reveal style="--rd:120ms"><p class="faint" style="margin:0 0 .25rem">${p.industry}</p><h3 class="card__title" style="font-size:1.35rem">${p.name}</h3><p class="muted" style="margin:0">${p.description.length > 160 ? p.description.slice(0, 157) + "…" : p.description}</p></div></a>`)}</div>`;
+}
+
 /** Editorial index of services: name, summary and an arrow per row; the whole row is the link. */
 function serviceList(list: ServiceDef[], c?: Content): SafeHtml {
-  return html`<ul class="index-list">${list.map((s) => {
+  return html`<ul class="index-list" data-reveal-group>${list.map((s) => {
     const summary = c?.get(`service.${s.slug}`).summary ?? s.summary;
-    return html`<li><a href="${servicePath(s)}"><span class="index-list__name">${s.name}</span><span class="index-list__summary">${summary}</span><span class="index-list__arrow" aria-hidden="true">→</span></a></li>`;
+    return html`<li data-reveal><a href="${servicePath(s)}"><span class="index-list__name">${s.name}</span><span class="index-list__summary">${summary}</span><span class="index-list__arrow" aria-hidden="true">→</span></a></li>`;
   })}</ul>`;
 }
 
+/** Original rendered illustrations (tools/art/render_illustrations.py) for the six featured services. */
+const SERVICE_ART: Record<string, string> = {
+  "website-design-development": "svc-design-dev", "website-redesign": "svc-redesign", "e-commerce-development": "svc-ecommerce",
+  "custom-web-applications": "svc-apps", "technical-seo": "svc-seo", "ai-automation": "svc-automation",
+};
+
+/** Services bento (M05): two wide cards, four standard cards; each card links to the service page. */
+function serviceBento(list: ServiceDef[], c?: Content): SafeHtml {
+  return html`<div class="bento" data-reveal-group>${list.map((s) => {
+    const summary = c?.get(`service.${s.slug}`).summary ?? s.summary;
+    const art = SERVICE_ART[s.slug];
+    return html`<a class="bento__card" href="${servicePath(s)}" data-reveal><span class="bento__go" aria-hidden="true">${ARROW_SVG}</span>
+${art ? html`<img class="bento__icon" src="/assets/art/${art}.webp" width="360" height="360" alt="" loading="lazy" decoding="async">` : html`<span class="bento__icon"></span>`}
+<span class="bento__text"><span class="bento__title">${s.name}</span><span class="bento__summary">${summary}</span></span></a>`;
+  })}</div>`;
+}
+
 /**
- * "Anatomy of a build" (DESIGN.md §10): an illustrative miniature website assembled in six layers, each tied to a
- * real stage of the Crestmont process. Labelled as a concept; the business in the miniature is fictional.
+ * "Anatomy of a build" (M07): an illustrative miniature website assembled in six layers, each tied to a real stage
+ * of the Crestmont process. Labelled as a concept; the business in the miniature is fictional.
  */
 const ANATOMY: { title: string; stage: string; body: string }[] = [
   { title: "Structure", stage: "Scope review", body: "Pages, content order and the main calls to action are agreed against your package or quote before any visual design starts." },
@@ -129,10 +155,10 @@ const ANATOMY: { title: string; stage: string; body: string }[] = [
 function anatomy(): SafeHtml {
   const last = ANATOMY.length;
   return html`<p class="anatomy__note">Illustrative concept — not a client project</p><div class="anatomy" data-anatomy>
-<div><ol class="anatomy__layers" role="tablist" aria-label="Layers of a website build" aria-orientation="vertical">${ANATOMY.map((l, i) => html`<li class="anatomy__layer">
+<div data-reveal><ol class="anatomy__layers" role="tablist" aria-label="Layers of a website build" aria-orientation="vertical">${ANATOMY.map((l, i) => html`<li class="anatomy__layer">
 <button class="anatomy__tab" type="button" role="tab" id="anatomy-tab-${i + 1}" aria-controls="anatomy-stage" aria-selected="${i === last - 1 ? "true" : "false"}"><span class="anatomy__tab-title">${l.title}</span><span class="anatomy__tab-stage">Process stage: ${l.stage}</span></button>
 <p class="anatomy__detail">${l.body}</p></li>`)}</ol></div>
-<div class="anatomy__stage" id="anatomy-stage" role="tabpanel" aria-label="Miniature website preview">
+<div class="anatomy__stage" id="anatomy-stage" role="tabpanel" aria-label="Miniature website preview" data-reveal style="--rd:140ms">
 <div class="mini" data-layer="${last}" aria-hidden="true"><div class="mini__chrome"><i></i><i></i><i></i><span class="mini__url">your-business.example</span><span class="mini__score">✓ Checks complete</span></div>
 <div class="mini__viewport"><div class="mini__page">
 <div class="mini__nav mini__region"><span class="mini__tag">header</span><span class="mini__logo"></span><span class="mini__links"><i></i><i></i><i></i></span><span class="mini__btn"><span class="mini__btn-label">Visit</span></span></div>
@@ -144,17 +170,40 @@ function anatomy(): SafeHtml {
 <div class="mini__caption"><span>Layer: <strong data-anatomy-caption>${ANATOMY[last - 1]!.title}</strong></span><span>Fictional business, for illustration</span></div></div></div></div>`;
 }
 
-/** The development process as a selectable stepper; without JavaScript it is a complete ordered list. */
-function processStepper(steps: { title: string; body: string }[]): SafeHtml {
-  return html`<div class="stepper" data-stepper>
-<ol class="stepper__track" role="tablist" aria-label="Project stages" aria-orientation="vertical">${steps.map((s, i) => html`<li class="stepper__item">
-<button class="stepper__btn" type="button" role="tab" id="step-tab-${i + 1}" aria-controls="step-panel" aria-selected="${i === 0 ? "true" : "false"}" data-title="${s.title}" data-body="${s.body}">${s.title}</button>
-<p class="stepper__text">${s.body}</p></li>`)}</ol>
-<div class="stepper__panel" id="step-panel" role="tabpanel" aria-live="polite" data-stepper-panel><div data-panel-body>
-<span class="stepper__count" data-panel-count>Step 1 of ${steps.length}</span><h3 data-panel-title>${steps[0]?.title ?? ""}</h3><p data-panel-text>${steps[0]?.body ?? ""}</p></div>
-<div class="stepper__nav"><button class="btn btn--ghost btn--sm" type="button" data-step-prev>Previous stage</button><button class="btn btn--secondary btn--sm" type="button" data-step-next>Next stage</button></div>
-<p class="faint" style="margin:1.5rem 0 0;font-size:.8rem">Your customer portal shows which stage your project is in and what is waiting on you.</p></div></div>`;
+/**
+ * The approved process steps grouped into four phases for the stage controller (M06). With the default 11 steps the
+ * phases follow the real sequence; if the CMS changes the step count, steps are split evenly and each phase takes the
+ * name of its first step, so a phase name never contradicts its content.
+ */
+const PHASES = [
+  { name: "Scope", art: "stage-scope", from: 0, to: 4 }, { name: "Design", art: "stage-design", from: 4, to: 5 },
+  { name: "Build", art: "stage-build", from: 5, to: 8 }, { name: "Launch", art: "stage-launch", from: 8, to: 11 },
+];
+function phasesOf(steps: { title: string; body: string }[]) {
+  if (steps.length === 11) return PHASES.map((p) => ({ name: p.name, art: p.art, steps: steps.slice(p.from, p.to) }));
+  const n = Math.max(1, Math.ceil(steps.length / 4));
+  return PHASES.map((p, i) => ({ art: p.art, steps: steps.slice(i * n, i * n + n) })).filter((p) => p.steps.length).map((p) => ({ ...p, name: p.steps[0]!.title }));
 }
+
+/** Process stage controller (M06): sticky stage number + illustration; phase text scrolls in normal flow. */
+function processStages(steps: { title: string; body: string }[]): SafeHtml {
+  const phases = phasesOf(steps);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return html`<div class="stages" data-stages>
+<div class="stages__aside" aria-hidden="true"><div class="stages__count"><span class="stages__num-wrap"><span class="stages__num" data-stage-num>/${pad(1)}</span></span><span>/${pad(phases.length)}</span></div>
+<div class="stages__art" data-stage-art><img src="/assets/art/${phases[0]!.art}.webp" width="720" height="720" alt="" decoding="async"></div></div>
+<ol class="stages__list">${phases.map((ph, i) => html`<li class="stage" data-stage="${i}" data-art="/assets/art/${ph.art}.webp"${i === 0 ? html` data-current` : ""}>
+<div class="stage__art-m" aria-hidden="true"><img src="/assets/art/${ph.art}.webp" width="720" height="720" alt="" loading="lazy" decoding="async"></div>
+<p class="stage__num">/${pad(i + 1)}</p><h3>${ph.name}</h3>
+<ol class="stage__steps">${ph.steps.map((s) => html`<li><strong>${s.title}</strong><span>${s.body}</span></li>`)}</ol></li>`)}</ol></div>`;
+}
+
+/** Things Crestmont will not do (shown on About and in the homepage comparison; approved copy). */
+const WILL_NOT = [
+  "Promise search rankings, traffic, leads or sales.", "Run advertising campaigns or manage social media accounts.",
+  "Publish invented testimonials, ratings, awards or client counts.", "Launch your site without your approval.",
+  "Add work to your bill without an approved change order.",
+];
 
 const serviceKeys = () => SERVICES.filter((s) => s.pricing !== "maintenance").map((s) => `service.${s.slug}`);
 
@@ -291,37 +340,58 @@ async function handleLead(ctx: AppContext, kind: "quote" | "contact", rerender: 
 // ───────────────────────── public routes ─────────────────────────
 
 export function register(r: Router): void {
-  r.get("/", (ctx) => page(ctx, "home", ["home.hero", "home.why", "home.capabilities", "home.experience", "home.cta", "process.page", "faq.items", "pricing.presentation", "portfolio.intro", ...serviceKeys()], async (c) => {
+  r.get("/", (ctx) => page(ctx, "home", ["home.hero", "home.why", "home.capabilities", "home.experience", "home.cta", "process.page", "faq.items", "pricing.presentation", "portfolio.intro", "services.overview", ...serviceKeys()], async (c) => {
     const hero = c.get("home.hero"), why = c.get("home.why"), caps = c.get("home.capabilities"), exp = c.get("home.experience"), cta = c.get("home.cta");
-    const steps = parseItems(c.get("process.page").steps);
+    const pp = c.get("process.page");
+    const steps = parseItems(pp.steps);
+    const whyItems = parseItems(why.items);
     const faqs = parseItems(c.get("faq.items").items).slice(0, 5);
     const projects = await pf.listPublished(ctx.db);
     const featured = ["website-design-development", "website-redesign", "e-commerce-development", "custom-web-applications", "technical-seo", "ai-automation"].map((s) => serviceBySlug(s)!);
     const email = ctx.settings["contact.email"] ?? SUPPORT_EMAIL;
-    return html`<section class="hero hero--home"><div class="container hero__grid"><div class="hero__copy">
-<div class="eyebrow">${hero.eyebrow}</div><h1>${hero.heading}</h1><p class="lede">${hero.lede}</p>
-<div class="hero__actions">${linkButton(hero.primary_label, "/pricing")}${linkButton(hero.quote_label, "/quote", "secondary")}</div></div>
-<div class="hero__crest" aria-hidden="true">${crestRing()}<img src="/assets/brand/crestmont-logo-original.png" width="232" height="213" alt=""></div></div></section>
-<section class="commitments" aria-label="Commitments"><ul class="commitments__list">
-<li><span class="commitments__value">From ${pkgPrice("starter")}</span><span class="commitments__label">Published package prices, enforced at checkout</span></li>
-<li><span class="commitments__value">Counted revisions</span><span class="commitments__label">Every round is recorded in your project</span></li>
-<li><span class="commitments__value">Your approval first</span><span class="commitments__label">Nothing launches until you sign off</span></li>
-<li><span class="commitments__value">Yours to keep</span><span class="commitments__label">Your domain stays registered to you</span></li></ul></section>
-${section("Services", "What we build", html`${serviceList(featured, c)}<p class="section__more"><a href="/services">All services</a></p>`, { id: "services" })}
+    const pr = c.get("pricing.presentation");
+    return html`<section class="hero hero--home"><div class="container">
+<div class="hero__top"><div><p class="eyebrow">${hero.eyebrow}</p><h1 class="hero-title">${hero.heading}</h1></div>
+<a class="hero__panel on-dark hero-seq" style="--seq:0" href="/pricing"><span class="hero__panel-head"><span>Published packages</span><span>From</span></span>
+<span class="hero__panel-price">${pkgPrice("starter")}</span><span class="hero__panel-note">Package prices are published and enforced at checkout.</span><span class="btn__arrow" aria-hidden="true">${ARROW_SVG}</span><span class="visually-hidden">View pricing</span></a></div>
+<div class="hero__body"><div class="hero__art hero-seq hero-seq--art" style="--seq:0"><img src="/assets/art/hero-build.webp" width="960" height="960" alt="" fetchpriority="high" decoding="async"></div>
+<div class="hero__copy"><p class="lede hero-seq" style="--seq:1">${hero.lede}</p>
+<div class="hero__actions hero-seq" style="--seq:2">${ctaLink(hero.primary_label, "/pricing", "primary")}${ctaLink(hero.quote_label, "/quote", "secondary")}</div>
+<ul class="hero__facts hero-seq" style="--seq:3" aria-label="Commitments">
+<li><strong>Counted revisions</strong><span>Every round is recorded in your project</span></li>
+<li><strong>Your approval first</strong><span>Nothing launches until you sign off</span></li>
+<li><strong>Yours to keep</strong><span>Your domain stays registered to you</span></li>
+<li><strong>Written scope</strong><span>Custom work is quoted in writing</span></li></ul></div></div></div></section>
+<section class="statement statement--pinned" id="principles" data-statement aria-labelledby="principles-title"><div class="statement__stage"><div>
+<h2 class="statement__text scroll-words" id="principles-title">Published prices. Counted revisions. Nothing goes live without your approval.</h2>
+<ul class="statement__labels">${whyItems.slice(0, 4).map((w) => html`<li class="statement__label">${w.title}</li>`)}</ul></div></div></section>
+${section("Our services", "What we build", html`${serviceBento(featured, c)}<p class="section__more"><a href="/services">All services</a></p>`, { id: "services", lede: c.get("services.overview").lede })}
+${section("Latest work", c.get("portfolio.intro").heading === "Portfolio" ? "Real websites" : c.get("portfolio.intro").heading, projects.length ? html`${showcase(projects)}<p class="section__more"><a href="/portfolio">View the portfolio</a></p>`
+      : html`<div class="showcase__pending on-dark" data-reveal><div><h3>Portfolio in preparation</h3><p>Portfolio projects are published here once genuine screenshots of each live site have been captured and verified. We do not use mock-ups or stock imagery.</p></div>${ctaLink("About our portfolio", "/portfolio", "primary")}</div>`, { id: "portfolio" })}
+${section("Our approach", pp.heading, html`${processStages(steps)}<p class="section__more"><a href="/process">The full process</a></p>`, { id: "process", lede: pp.lede })}
 ${section("How it comes together", "Anatomy of a build", anatomy(), { id: "anatomy", lede: "A website is a stack of decisions. Choose a layer to see what changes, and which stage of our process is responsible for it." })}
-${section("Packages", "Published packages", html`${packageCards(c, { compact: true })}<p class="section__more"><a href="/pricing">Full package details</a> · <a href="/pricing/compare">Compare packages</a> · <a href="/quote">Custom development quote</a></p>`, { id: "packages", lede: c.get("pricing.presentation").lede })}
-${section("Process", "How a project runs", html`${processStepper(steps)}<p class="section__more"><a href="/process">The full process</a></p>`, { id: "process" })}
-${section("Portfolio", "Real websites", projects.length ? html`<div class="grid grid-2">${projects.slice(0, 2).map(portfolioCard)}</div><p class="section__more"><a href="/portfolio">View the portfolio</a></p>`
-      : html`<p class="muted">Portfolio projects are published here once genuine screenshots of each live site have been captured and verified. We do not use mock-ups or stock imagery. <a href="/portfolio">About our portfolio</a></p>`, { id: "portfolio" })}
-${section("Why Crestmont", why.heading, ledger(why.items), { id: "why" })}
+<section class="section" id="why"><div class="container"><p class="section__label" style="display:flex;justify-content:center">${why.heading}</p>
+<h2 class="statement-lg reveal-words" data-reveal>What you can hold us to.</h2>
+<div class="versus" data-reveal-group><div class="versus__panel on-dark" data-reveal><p class="versus__title"><span class="brand__tile" aria-hidden="true"><img class="brand__mark" src="/assets/brand/crestmont-crest.png" width="42" height="41" alt=""></span>Working with Crestmont</p>
+<ul class="versus__list">${whyItems.map((w) => html`<li><span><strong>${w.title}</strong><span>${w.body}</span></span></li>`)}</ul></div>
+<div class="versus__panel versus__panel--not reveal--slide" data-reveal style="--rd:160ms"><p class="versus__title">What we will not do</p><ul class="versus__list">${WILL_NOT.map((x) => html`<li><span>${x}</span></li>`)}</ul></div></div></div></section>
 ${section("Capabilities", caps.heading, ledger(caps.items), { id: "capabilities" })}
-${section("Maintenance", "Optional maintenance plans", html`${maintenanceCards()}<p class="section__more"><a href="/hosting-maintenance">Hosting &amp; maintenance</a></p>`, { id: "maintenance" })}
-${section("Customer experience", exp.heading, itemCards(exp.items), { id: "experience", lede: exp.lede })}
-${section("FAQs", "Common questions", html`${faqs.map((q) => html`<details class="disclosure"><summary>${q.title}</summary><p>${q.body}</p></details>`)}<p class="section__more"><a href="/faq">All questions</a></p>`, { id: "faq" })}
-<section class="section cta-band" id="contact"><div class="container cta-band__grid"><div class="cta-band__copy"><p class="section__label">Contact</p><h2>${cta.heading}</h2><p class="lede">${cta.body}</p>
-<div class="hero__actions">${linkButton("Request a custom quote", "/quote", "secondary")}${linkButton("Contact page", "/contact", "ghost")}</div>
-<p class="cta-band__contact">Prefer email? Write to <a href="mailto:${email}">${email}</a>.</p></div>
-<div class="card card--gold">${contactForm(ctx, { interest: "other" }, {}, { compact: true })}</div></div></section>`;
+<section class="section section--band" id="packages"><div class="container"><p class="section__label">Packages</p>
+<div class="plans__head"><h2 class="reveal-words" data-reveal>Choose your package</h2>
+<div class="switch" data-switch hidden><button class="switch__btn" type="button" data-switch-to="plans-packages">Website packages</button><button class="switch__btn" type="button" data-switch-to="maintenance">Monthly care</button><span class="switch__pill" aria-hidden="true"></span></div></div>
+<p class="lede" style="margin:-1rem 0 2.5rem">${pr.lede}</p>
+<div class="plans" data-plans><div class="plans__set" id="plans-packages"><h3 class="plans__set-title">Website packages</h3>${packageCards(c, { compact: true })}<p class="section__more"><a href="/pricing">Full package details</a><a href="/pricing/compare">Compare packages</a><a href="/quote">Custom development quote</a></p></div>
+<div class="plans__set" id="maintenance"><h3 class="plans__set-title">Optional maintenance plans</h3>${maintenanceCards()}<p class="section__more"><a href="/hosting-maintenance">Hosting &amp; maintenance</a></p></div></div></div></section>
+${section("Customer portal", exp.heading, itemCards(exp.items), { id: "experience", lede: exp.lede })}
+<section class="section" id="faq"><div class="container faq"><div class="faq__aside"><p class="section__label">FAQs</p><h2 class="faq__title reveal-words" data-reveal>Frequently asked questions</h2>
+<p data-reveal style="--rd:120ms">Another question? <a href="/contact">Contact us</a> or read <a href="/faq">all questions</a>.</p></div>
+<div data-reveal>${faqs.map((q) => html`<details class="disclosure"><summary>${q.title}</summary><div class="disclosure__body"><p>${q.body}</p></div></details>`)}</div></div></section>
+<section class="section" id="contact" style="padding-bottom:0"><div class="cta-band on-dark"><div class="container cta-band__grid"><div class="cta-band__copy" data-reveal-group>
+<div class="cta-band__art" data-reveal aria-hidden="true"><img src="/assets/art/stage-design.webp" width="720" height="720" alt="" loading="lazy" decoding="async"></div>
+<p class="section__label" data-reveal>Contact</p><h2 class="reveal-words" data-reveal>${cta.heading}</h2><p class="lede" data-reveal>${cta.body}</p>
+<div class="hero__actions" data-reveal>${ctaLink("Request a custom quote", "/quote", "primary")}${ctaLink("Contact page", "/contact", "secondary")}</div>
+<p class="cta-band__contact" data-reveal>Prefer email? Write to <a href="mailto:${email}">${email}</a>.</p></div>
+<div class="card" data-reveal style="--rd:160ms">${contactForm(ctx, { interest: "other" }, {}, { compact: true })}</div></div></div></section>`;
   }));
 
   r.get("/services", (ctx) => page(ctx, "services", ["services.overview", ...serviceKeys()], (c) => {
@@ -407,14 +477,14 @@ ${tms.length ? section("Testimonials", "What they said", html`<div class="grid g
   r.get("/about", (ctx) => page(ctx, "about", ["about.page"], (c) => {
     const a = c.get("about.page");
     return html`${pageHero("About", a.heading, a.lede)}<section class="section section--flush"><div class="container grid grid-2"><div class="prose">${renderMarkdown(a.body)}</div>
-<div class="card card--gold"><h3 class="card__title">What we will not do</h3><ul class="plain-list"><li>Promise search rankings, traffic, leads or sales.</li><li>Run advertising campaigns or manage social media accounts.</li><li>Publish invented testimonials, ratings, awards or client counts.</li><li>Launch your site without your approval.</li><li>Add work to your bill without an approved change order.</li></ul>
+<div class="card card--gold"><h3 class="card__title">What we will not do</h3><ul class="plain-list">${WILL_NOT.map((x) => html`<li>${x}</li>`)}</ul>
 <p><a href="/process">How a project runs</a> · <a href="/legal/disclosures">Business disclosures</a></p></div></div></section>`;
   }));
 
   r.get("/process", (ctx) => page(ctx, "process", ["process.page"], (c) => {
     const pp = c.get("process.page");
-    return html`${pageHero("Process", pp.heading, pp.lede)}<section class="section section--flush"><div class="container"><ol class="steps steps--full">${parseItems(pp.steps).map((s) => html`<li class="step"><h3 class="step__title">${s.title}</h3><p class="muted">${s.body}</p></li>`)}</ol>
-<div class="row section__more">${linkButton("View packages", "/pricing")}${linkButton("Request a quote", "/quote", "secondary")}<a href="/legal/development-agreement">Development agreement information</a></div></div></section>`;
+    return html`${pageHero("Process", pp.heading, pp.lede)}<section class="section section--flush"><div class="container">${processStages(parseItems(pp.steps))}
+<div class="row section__more">${ctaLink("View packages", "/pricing", "primary")}${ctaLink("Request a quote", "/quote", "secondary")}<a href="/legal/development-agreement">Development agreement information</a></div></div></section>`;
   }));
 
   r.get("/faq", (ctx) => page(ctx, "faq", ["faq.items"], (c) => html`${pageHero("FAQs", "Frequently asked questions")}<section class="section section--flush"><div class="container prose-wide">
