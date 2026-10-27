@@ -187,8 +187,12 @@ export function computeGates(input: ReadinessInput, statuses: RequirementStatus[
 
   const notImpl = inScope.filter((s) => s.implementation !== "implemented");
   const latestCi = input.evidence.filter((e) => e.source === "ci").sort((a, b) => (a.finished_at < b.finished_at ? 1 : -1))[0];
-  const ciRun = latestCi ? input.evidence.filter((e) => e.run_id === latestCi.run_id) : [];
+  // Gate B judges EVERY CI run for the latest commit (unit, integration, browser suites), not just the
+  // most recent one, so a passing later suite can never mask an earlier failing one.
+  const ciRun = latestCi ? input.evidence.filter((e) => e.source === "ci" && e.commit_sha === latestCi.commit_sha) : [];
   const ciFailed = ciRun.filter((e) => e.outcome === "failed").length;
+  const ciRunIds = [...new Set(ciRun.map((e) => e.run_id))];
+  const ciOrigin = ciRunIds.every((id) => id.startsWith("gh-")) ? "GitHub Actions" : ciRunIds.some((id) => id.startsWith("gh-")) ? "GitHub Actions + local" : "local runs only — not GitHub Actions";
   const openBlocking = input.findings.filter((f) => f.status === "open" && f.release_blocking);
   const secReqs = inScope.filter((s) => s.category === "security");
   const secUnverified = secReqs.filter((s) => s.verification.staging !== "passed");
@@ -206,8 +210,8 @@ export function computeGates(input: ReadinessInput, statuses: RequirementStatus[
   return [
     g("A", "Engineering completeness", notImpl.length === 0, true, "All in-scope requirements implemented or Founder-dispositioned",
       `${inScope.length - notImpl.length}/${inScope.length} implemented`, blockersFor(["engineering"]), "Engineering"),
-    g("B", "Automated test certification", !!latestCi && ciFailed === 0, feedsOk, "Latest CI run ingested, fresh, with zero failures",
-      latestCi ? `CI run ${latestCi.run_id} @ ${latestCi.commit_sha.slice(0, 7)}: ${ciRun.length - ciFailed} passed, ${ciFailed} failed` : "No CI evidence", [], "Engineering / QA"),
+    g("B", "Automated test certification", !!latestCi && ciFailed === 0, feedsOk, "All CI runs for the latest commit ingested, fresh, with zero failures",
+      latestCi ? `${ciRunIds.length} run(s) @ ${latestCi.commit_sha.slice(0, 7)} (${ciOrigin}): ${ciRun.length - ciFailed} passed, ${ciFailed} failed` : "No CI evidence", [], "Engineering / QA"),
     g("C", "Security certification", openBlocking.length === 0 && secUnverified.length === 0, feedsOk, "No open release-blocking findings; security requirements verified in staging",
       `${openBlocking.length} blocking findings open; ${secReqs.length - secUnverified.length}/${secReqs.length} security reqs staging-verified`, blockersFor(["security"]), "Security"),
     g("D", "Integration certification", integUnverified.length === 0, feedsOk, "Integration requirements verified in staging or Founder-excluded",

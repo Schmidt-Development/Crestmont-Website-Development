@@ -118,3 +118,13 @@ test("[READY-011] CSV export is derived from the report and guards formula injec
   assert.equal(csv.trim().split("\n").length, REQUIREMENTS.length + 1);
   assert.ok(csv.includes(`"'=HYPERLINK(""http://evil"")"`));
 });
+
+test("[READY-007] Gate B fails when any suite for the latest commit failed, even if a later suite passed", async () => {
+  const db = await seeded();
+  await ingestEvidence(db, evidence("unit-1", [{ requirementId: "DATA-001", outcome: "failed" }], { finishedAt: "2026-10-26T10:05:00Z" }));
+  await ingestEvidence(db, evidence("e2e-1", [{ requirementId: "CRM-001", outcome: "passed" }], { finishedAt: "2026-10-26T10:10:00Z" }));
+  const report = await buildReport(await loadReadinessInput(db));
+  const b = report.gates.find((g) => g.id === "B")!;
+  assert.notEqual(b.status, "pass");
+  assert.match(b.currentEvidence, /2 run\(s\) @ abc1234 \(local runs only — not GitHub Actions\): 1 passed, 1 failed/);
+});
