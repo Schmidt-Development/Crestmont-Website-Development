@@ -9,7 +9,8 @@ dashboards, sign-in flows and token pages. Implemented in `public/assets/app.css
 Crestmont's identity is a gold outlined crest on black. The system treats gold the way an engraver treats
 gilt on a black plate: **fine line work and one solid mark**, never washes, glow or gradients-as-decoration.
 
-- Gold is a signal. Per viewport: at most one solid gold control (the primary action), plus gold hairlines
+- Gold is a signal. Per viewport: at most one solid gold control (the primary action — the public header CTA is a
+  gold hairline so the page owns the solid one; it becomes solid inside the mobile menu), plus gold hairlines
   that carry structure (active navigation, the current step, the selected package, focus).
 - Black is the material. Surfaces are warm, layered blacks; depth comes from hairlines and tone, not shadow.
 - Type does the art direction. A high-contrast engraved serif for display; a crisp grotesque for everything
@@ -27,7 +28,9 @@ gilt on a black plate: **fine line work and one solid mark**, never washes, glow
 
 Both PNGs have an opaque `#0D0D0D` background. **Any surface the artwork sits on must be exactly
 `--ink-0` (#0D0D0D)** — header, sidebar, auth brand panel, hero ring centre — or a visible square appears.
-Never recolour, crop, outline-trace, or regenerate the crest. A vector master is a production blocker (see
+Never recolour, crop, outline-trace, or regenerate the crest. Rendering note: the artwork is displayed with
+`mix-blend-mode: lighten; filter: contrast(1.04)` so its flat near-black background (including a #0E0E0E patch in the
+PNG) dissolves into the page; the gold shifts by ~1%. The file itself is never modified. A vector master is a production blocker (see
 HANDOFF) — request one before print or very large display use.
 
 ## 3. Colour tokens

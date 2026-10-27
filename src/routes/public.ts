@@ -128,9 +128,8 @@ const ANATOMY: { title: string; stage: string; body: string }[] = [
 
 function anatomy(): SafeHtml {
   const last = ANATOMY.length;
-  return html`<div class="anatomy" data-anatomy>
-<div><p class="anatomy__note">Illustrative concept — not a client project</p>
-<ol class="anatomy__layers" role="tablist" aria-label="Layers of a website build" aria-orientation="vertical">${ANATOMY.map((l, i) => html`<li class="anatomy__layer">
+  return html`<p class="anatomy__note">Illustrative concept — not a client project</p><div class="anatomy" data-anatomy>
+<div><ol class="anatomy__layers" role="tablist" aria-label="Layers of a website build" aria-orientation="vertical">${ANATOMY.map((l, i) => html`<li class="anatomy__layer">
 <button class="anatomy__tab" type="button" role="tab" id="anatomy-tab-${i + 1}" aria-controls="anatomy-stage" aria-selected="${i === last - 1 ? "true" : "false"}"><span class="anatomy__tab-title">${l.title}</span><span class="anatomy__tab-stage">Process stage: ${l.stage}</span></button>
 <p class="anatomy__detail">${l.body}</p></li>`)}</ol></div>
 <div class="anatomy__stage" id="anatomy-stage" role="tabpanel" aria-label="Miniature website preview">

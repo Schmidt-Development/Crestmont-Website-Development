@@ -381,7 +381,9 @@ details.card[open] > summary { margin-bottom: var(--s-4); }
 .hero__crest img { position: relative; z-index: 1; width: 232px; max-width: 58%; }
 /* The artwork's flat background is #0d0d0d with a few #0e0e0e pixels; "lighten" lets the black dissolve into any
    dark surface while the gold renders exactly as drawn. The asset itself is never modified. */
-.hero__crest img, .auth-aside__crest img, .brand__mark { mix-blend-mode: lighten; }
+.hero__crest img, .auth-aside__crest img, .brand__mark { mix-blend-mode: lighten; filter: contrast(1.04); }
+/* contrast(1.04) moves the artwork's #0e0e0e patch just below the #0d0d0d page so "lighten" hides it; the gold
+   shifts by ~1% (imperceptible). The PNG itself is untouched. */
 .hero__ring { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; color: var(--gold-3); }
 .hero__ring .ring-draw { stroke-dasharray: 1; stroke-dashoffset: 0; }
 .js .hero__ring .ring-draw { animation: engrave var(--t-slow) var(--ease-in-out) both; animation-delay: calc(var(--i, 0) * 120ms + 150ms); }
@@ -904,3 +906,47 @@ code { overflow-wrap: anywhere; word-break: break-word; }
 .auth-card .form-actions { justify-content: center; }
 .drawer__body h2, .drawer__body h3 { margin-top: var(--s-6); margin-bottom: var(--s-3); font: 600 var(--fs-md)/1.3 var(--font-body); }
 .drawer__body > :first-child, .drawer__body [data-drawer-body] > :first-child { margin-top: 0; }
+
+/* ── 23. Independent design-critique fixes ── */
+/* One solid gold action per view: the header CTA is a gold hairline; page heroes and forms own the solid primary. */
+.nav .nav__cta { border-color: var(--gold-3); color: var(--gold-1); }
+.nav .nav__cta:hover { border-color: var(--gold-2); background: var(--gold-wash); color: var(--white); }
+@media (max-width: 1020px) { .site-header .nav .nav__cta { background: var(--gold-2); color: var(--ink-0); border-color: var(--gold-2); } }
+/* Section rhythm: less dead space after trailing link rows. */
+.section { padding: clamp(4rem, 9vw, 7rem) 0; }
+.section__more { margin-bottom: 0; display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); align-items: baseline; }
+/* Maintenance and package cards: breathing room under prices; actions aligned to the card foot. */
+.card > .price + p, .card > .price + .checklist { margin-top: var(--s-3); }
+.grid + p.muted, .grid + .muted { margin-top: var(--s-6); }
+.package__actions { margin-top: auto; padding-top: var(--s-4); }
+.package .checklist { flex: 0 1 auto; margin-bottom: var(--s-2); }
+@media (min-width: 900px) { .package .package__terms { min-height: 2.9em; } }
+/* KPI rows of 6 or 8 fill even rows on desktop instead of orphaning a card. */
+@media (min-width: 1100px) {
+  .kpis:has(> :nth-child(6):last-child) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .kpis:has(> :nth-child(8):last-child) { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+/* Filter bars: an even grid of controls; the Apply/Filter control takes the last cell. */
+@media (min-width: 761px) {
+  .filters:not(.date-range) { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); }
+  .filters:not(.date-range) .field { min-width: 0; }
+}
+/* Kanban: quiet Quick view control; edge fade signals more columns. */
+.kanban__quick { color: var(--text-2); border-color: var(--line-2); }
+.kanban__quick:hover { color: var(--gold-1); border-color: var(--line-gold); }
+.kanban { mask-image: linear-gradient(90deg, #000 92%, transparent); -webkit-mask-image: linear-gradient(90deg, #000 92%, transparent); }
+/* Phones: stacked full-width hero actions; single-column commitments; compact app top bar. */
+@media (max-width: 480px) {
+  .hero__actions { flex-direction: column; align-items: stretch; }
+  .hero__actions .btn { width: 100%; }
+  .commitments__list { grid-template-columns: 1fr; }
+  .commitments__list li { border-left: 0 !important; border-top: 1px solid var(--line); display: grid; grid-template-columns: minmax(0, 1fr); padding-top: var(--s-4); padding-bottom: var(--s-4); }
+  .commitments__list li:first-child { border-top: 0; }
+  .commitments__value { font-size: 1.25rem; }
+}
+@media (max-width: 600px) {
+  .topbar__area { display: none; }
+  .topbar .who { white-space: nowrap; }
+}
+/* Anatomy note now sits above the concept (before the miniature on phones too). */
+.anatomy__note { margin-bottom: var(--s-6); }

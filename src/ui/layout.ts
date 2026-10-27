@@ -82,7 +82,7 @@ export function publicLayout(ctx: AppContext, meta: PageMeta, body: SafeHtml): S
 <header class="site-header" data-site-header><div class="container">${brandMark()}
 ${menuButton("site-nav")}
 <nav class="nav" id="site-nav" aria-label="Primary">${PUBLIC_NAV.map(([h, l]) => html`<a href="${h}"${here === h || here.startsWith(h + "/") ? html` aria-current="page"` : ""}>${l}</a>`)}
-${account}<a class="btn btn--primary btn--sm" href="/quote">Request a quote</a></nav></div></header>
+${account}<a class="btn btn--secondary btn--sm nav__cta" href="/quote">Request a quote</a></nav></div></header>
 <main id="main">${body}</main>
 ${siteFooter(ctx)}${flashToast(ctx)}</body></html>`;
 }
@@ -141,5 +141,5 @@ export function appLayout(ctx: AppContext, opts: { title: string; nav: NavGroup[
 }
 
 export function errorPage(ctx: AppContext, status: number, title: string, message: string): SafeHtml {
-  return publicLayout(ctx, { title, noindex: true }, html`<section class="error-page container"><div class="error-page__mark" aria-hidden="true">${status}</div><div class="eyebrow">Error ${status}</div><h1>${title}</h1><p class="lede">${message}</p><div class="row" style="justify-content:center"><a class="btn btn--secondary" href="/">Return home</a><a class="btn btn--ghost" href="/contact">Contact us</a></div></section>`);
+  return publicLayout(ctx, { title, noindex: true }, html`<section class="error-page container"><div class="error-page__mark" aria-hidden="true">${status}</div><div class="eyebrow">Error ${status}</div><h1>${title}</h1><p class="lede">${message}</p><div class="row" style="justify-content:center"><a class="btn btn--primary" href="/">Return home</a><a class="btn btn--ghost" href="/contact">Contact us</a></div></section>`);
 }
