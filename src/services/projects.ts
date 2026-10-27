@@ -18,7 +18,7 @@ export interface ProjectRow {
   id: string; organization_id: string; order_id: string | null; product_id: string | null; name: string; status: ProjectStatus;
   paused_from_status: ProjectStatus | null; revision_allowance: number; payment_schedule: "upfront" | "milestone_50_25_25";
   last_customer_activity_at: string | null; created_at: string; updated_at: string; project_manager_id: string | null;
-  live_url: string | null; target_launch_at: string | null; cancel_reason: string | null; completed_at: string | null;
+  live_url: string | null; target_launch_at: string | null; cancel_reason: string | null; completed_at: string | null; closed_by?: string | null; closure_notes?: string | null;
 }
 
 type Ctx = MailCtx & Pick<AppContext, "now">;
@@ -112,10 +112,17 @@ export async function changeProjectStatus(ctx: Ctx | MailCtx, projectId: string,
   if (to === "completed") {
     const d = await db.prepare(`SELECT 1 FROM customer_deployments WHERE project_id = ?`).bind(projectId).first();
     if (!d) throw new HttpError(409, "Record the deployment before completing the project.");
+    const c = await closureChecklist(db, projectId);
+    if (!c.ready) throw new HttpError(409, `Project closure is incomplete: ${c.checks.filter((x) => x.required && !x.ok).map((x) => `${x.label} (${x.detail})`).join("; ")}`);
+  }
+  if (to === "maintenance") {
+    const sub = await db.prepare(`SELECT 1 FROM subscriptions WHERE organization_id = ? AND status IN ('active','trialing','past_due')`).bind(p.organization_id).first();
+    if (!sub) throw new HttpError(409, "Maintenance needs an active maintenance plan for this customer. Leave the project completed until a plan is active.");
   }
   const at = nowIso();
-  const res = await db.prepare(`UPDATE projects SET status = ?, paused_from_status = ?, updated_at = ?, completed_at = CASE WHEN ? = 'completed' THEN ? ELSE completed_at END WHERE id = ? AND status = ?`)
-    .bind(to, to === "paused" ? from : null, at, to, at, projectId, from).run();
+  const res = await db.prepare(`UPDATE projects SET status = ?, paused_from_status = ?, updated_at = ?, completed_at = CASE WHEN ? = 'completed' THEN ? ELSE completed_at END,
+      closed_by = CASE WHEN ? = 'completed' THEN ? ELSE closed_by END, closure_notes = CASE WHEN ? = 'completed' THEN ? ELSE closure_notes END WHERE id = ? AND status = ?`)
+    .bind(to, to === "paused" ? from : null, at, to, at, to, actor.actorUserId ?? null, to, actor.note ?? null, projectId, from).run();
   if (res.meta.changes !== 1) throw new HttpError(409, "The project changed while you were editing. Reload and try again.");
   await audit(db, { actorUserId: actor.actorUserId ?? null, actorKind: actor.actorKind, action: to === "paused" ? "project.paused" : "project.status_changed", subjectType: "project", subjectId: projectId, organizationId: p.organization_id, details: { from, to, note: actor.note } });
   await notifyCustomer(ctx, projectId, { kind: "project_status", template: "project_update", subject: to === "paused" ? "Your project has been paused" : "Your project moved to a new stage",
@@ -327,6 +334,33 @@ export async function saveHandoff(ctx: MailCtx, actor: Actor, projectId: string,
     .bind(projectId, h.website_url || null, h.documentation || null, h.access_instructions || null, h.ownership_notes || null, h.training_notes || null, h.documentation_file_id, publish ? at : null, at).run();
   await audit(ctx.db, { actorUserId: actor.userId, action: publish ? "handoff.published" : "handoff.saved", subjectType: "project", subjectId: projectId, organizationId: p.organization_id });
   if (publish) await notifyCustomer(ctx, projectId, { kind: "handoff", template: "handoff", subject: "Your website handoff is ready", body: "Your website URL, documentation, access instructions, ownership records and training notes are ready. Review them and record your final acceptance.", path: `/portal/projects/${projectId}/handoff`, key: `handoff:${projectId}` });
+}
+
+export interface ClosureCheck { key: string; label: string; ok: boolean; required: boolean; detail: string }
+
+/**
+ * Project closure / handoff checklist (PM-007, PORTAL-010). A project can be marked completed only
+ * when the required checks pass; customer final acceptance is shown but not required, so a customer
+ * who never responds cannot block closure (the handoff stays open for them in the portal).
+ */
+export async function closureChecklist(db: Db, projectId: string): Promise<{ ready: boolean; checks: ClosureCheck[] }> {
+  const n = async (sql: string) => (await db.prepare(sql).bind(projectId).first<{ n: number }>())?.n ?? 0;
+  const dep = await db.prepare(`SELECT url, deployed_at FROM customer_deployments WHERE project_id = ? ORDER BY deployed_at DESC LIMIT 1`).bind(projectId).first<{ url: string; deployed_at: string }>();
+  const h = await db.prepare(`SELECT published_at, accepted_at FROM handoffs WHERE project_id = ?`).bind(projectId).first<{ published_at: string | null; accepted_at: string | null }>();
+  const openTasks = await n(`SELECT COUNT(*) AS n FROM tasks WHERE project_id = ? AND status <> 'done'`);
+  const unpaid = await n(`SELECT COUNT(*) AS n FROM invoices WHERE project_id = ? AND status IN ('draft','open')`);
+  const openCos = await n(`SELECT COUNT(*) AS n FROM change_orders WHERE project_id = ? AND status IN ('proposed','approved')`);
+  const openRevs = await n(`SELECT COUNT(*) AS n FROM revisions WHERE project_id = ? AND status IN ('submitted','in_progress')`);
+  const checks: ClosureCheck[] = [
+    { key: "deployment", label: "Deployment recorded", ok: !!dep, required: true, detail: dep ? `${dep.url} on ${dep.deployed_at.slice(0, 10)}` : "no deployment recorded" },
+    { key: "handoff", label: "Handoff published to the customer", ok: !!h?.published_at, required: true, detail: h?.published_at ? `published ${h.published_at.slice(0, 10)}` : "handoff not published" },
+    { key: "tasks", label: "All tasks done", ok: openTasks === 0, required: true, detail: openTasks ? `${openTasks} open task(s)` : "no open tasks" },
+    { key: "invoices", label: "Project invoices paid", ok: unpaid === 0, required: true, detail: unpaid ? `${unpaid} unpaid invoice(s)` : "no unpaid invoices" },
+    { key: "change_orders", label: "Change orders settled", ok: openCos === 0, required: true, detail: openCos ? `${openCos} change order(s) proposed or awaiting payment` : "none open" },
+    { key: "revisions", label: "Revision requests delivered", ok: openRevs === 0, required: true, detail: openRevs ? `${openRevs} revision request(s) not delivered` : "none open" },
+    { key: "final_acceptance", label: "Customer final acceptance", ok: !!h?.accepted_at, required: false, detail: h?.accepted_at ? `accepted ${h.accepted_at.slice(0, 10)}` : "not yet recorded by the customer (not required to close)" },
+  ];
+  return { ready: checks.every((c) => !c.required || c.ok), checks };
 }
 
 export const COST_CATEGORIES = ["labor", "hosting", "ai_usage", "third_party_api", "software_license", "payment_fee", "other"] as const;

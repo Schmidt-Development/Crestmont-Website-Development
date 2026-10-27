@@ -16,11 +16,12 @@ import * as M from "../services/messages.ts";
 import * as O from "../services/onboarding.ts";
 import * as S from "../services/share-links.ts";
 import { sharePanel } from "../ui/share.ts";
-import { listNotifications, markNotificationsRead } from "../services/notifications.ts";
+import { listNotifications, markNotificationsRead, notificationHref } from "../services/notifications.ts";
 import { createInvitation, AuthError } from "../services/auth.ts";
 import { sendMail } from "../services/mailer.ts";
 import { audit } from "../services/security.ts";
 import { PACKAGES, type PackageId } from "../domain/catalog.ts";
+import * as T from "../services/customer-team.ts";
 
 type Org = ReturnType<typeof requireCustomerOrg>;
 
@@ -125,7 +126,8 @@ ${kpi("Maintenance plan", subs.length ? label(subs[0].status) : "None", subs.len
 ])}</section></div>`}
 <div class="grid grid-2" style="margin-top:1.5rem">
 <section class="card"><div class="row row--between"><h2 class="card__title">Notifications</h2>${notes.some((n) => !n.read_at) ? actionForm(ctx, "/portal/notifications/read", "Mark all read", { variant: "ghost" }) : ""}</div>
-${notes.length ? html`<ul class="timeline">${notes.map((n) => html`<li>${n.read_at ? "" : badge("new", "New")} ${n.body}<br><span class="faint">${formatDateTime(n.created_at)}</span></li>`)}</ul>` : html`<p class="muted">No notifications yet.</p>`}</section>
+${notes.length ? html`<ul class="timeline">${notes.map((n) => { const href = notificationHref(n, "portal"); return html`<li>${n.read_at ? "" : badge("new", "New")} ${href ? html`<a href="${href}">${n.body}</a>` : n.body}<br><span class="faint">${formatDateTime(n.created_at)}</span></li>`; })}</ul>` : html`<p class="muted">No notifications yet.</p>`}
+<p><a href="/portal/notifications">All notifications</a></p></section>
 <section class="card"><h2 class="card__title">Billing &amp; support</h2>
 <p>${openInvoices.n ? html`${openInvoices.n} open invoice${openInvoices.n === 1 ? "" : "s"} totalling ${formatCents(openInvoices.total)}.` : "No open invoices."} <a href="/portal/billing">Billing</a></p>
 <p>${subs.length ? html`Maintenance: ${subs.map((s) => html`${s.name} ${badge(s.status)} `)}` : "No maintenance subscription."}</p>
@@ -136,7 +138,8 @@ ${notes.length ? html`<ul class="timeline">${notes.map((n) => html`<li>${n.read_
   r.post("/portal/notifications/read", async (ctx) => {
     requireCustomerOrg(ctx);
     await markNotificationsRead(ctx.db, ctx.user!.id);
-    return redirect(ctx, "/portal", { kind: "success", text: "Notifications marked as read." });
+    const back = str(await ctx.form(), "back") === "/portal/notifications" ? "/portal/notifications" : "/portal";
+    return redirect(ctx, back, { kind: "success", text: "Notifications marked as read." });
   });
 
   // ── Projects ──
@@ -624,28 +627,75 @@ ${textarea({ name: "notes", label: "Notes", rows: 3, maxlength: 2000, hint: "Req
 
   // ── Team ──
   const teamPage = async (ctx: AppContext, org: Org, errors: string[] = [], status = 200, email = "") => {
-    const members = (await ctx.db.prepare(`SELECT u.display_name, u.email, m.role_id, m.created_at FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = ? ORDER BY m.created_at`).bind(org.organizationId).all<{ display_name: string; email: string; role_id: string; created_at: string }>()).results;
-    const invites = (await ctx.db.prepare(`SELECT email, role_id, expires_at FROM invitations WHERE organization_id = ? AND accepted_at IS NULL AND expires_at > ? ORDER BY expires_at DESC`).bind(org.organizationId, new Date().toISOString()).all<{ email: string; role_id: string; expires_at: string }>()).results;
+    const members = (await ctx.db.prepare(`SELECT u.id, u.display_name, u.email, m.role_id, m.created_at FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = ? ORDER BY m.created_at`).bind(org.organizationId).all<{ id: string; display_name: string; email: string; role_id: string; created_at: string }>()).results;
+    const invites = (await ctx.db.prepare(`SELECT id, email, role_id, expires_at FROM invitations WHERE organization_id = ? AND accepted_at IS NULL AND expires_at > ? ORDER BY expires_at DESC`).bind(org.organizationId, new Date().toISOString()).all<{ id: string; email: string; role_id: string; expires_at: string }>()).results;
+    const admin = isAdmin(org);
+    const roleLabel = (r: string) => (r === "customer_admin" ? "Administrator" : r === "customer_member" ? "Member" : label(r));
+    const roleOpts = [{ value: "customer_member", label: "Member" }, { value: "customer_admin", label: "Administrator" }];
     const body = html`${pageHead("Team", undefined, org.organizationName)}
-${table(members, [{ header: "Name", cell: (m) => m.display_name }, { header: "Email", cell: (m) => m.email }, { header: "Role", cell: (m) => label(m.role_id.replace("customer_", "")) }, { header: "Since", cell: (m) => fmtDay(m.created_at) }])}
-${invites.length ? html`<h2 style="margin-top:1.5rem">Pending invitations</h2>${table(invites, [{ header: "Email", cell: (i) => i.email }, { header: "Role", cell: (i) => label(i.role_id.replace("customer_", "")) }, { header: "Expires", cell: (i) => fmtDay(i.expires_at) }])}` : ""}
+${formErrors(errors)}
+<p class="muted"><strong>Members</strong> can view projects, send messages, upload files, request revisions and open support tickets. <strong>Administrators</strong> can also approve scope, designs, change orders and launch, pay invoices, and manage this team. Your organization always keeps at least one administrator.</p>
+${table(members, [
+      { header: "Name", cell: (m) => html`${m.display_name}${m.id === ctx.user!.id ? html` <span class="faint">(you)</span>` : ""}` }, { header: "Email", cell: (m) => m.email },
+      { header: "Role", cell: (m) => admin && m.id !== ctx.user!.id
+        ? html`<form method="post" action="/portal/team/members/${m.id}/role" class="row">${csrf(ctx)}<label class="visually-hidden" for="role-${m.id}">Role for ${m.display_name}</label><select class="select" id="role-${m.id}" name="role">${roleOpts.map((o) => html`<option value="${o.value}"${o.value === m.role_id ? html` selected` : ""}>${o.label}</option>`)}</select>${button("Save", { variant: "secondary", size: "sm" })}</form>`
+        : roleLabel(m.role_id) },
+      { header: "Since", cell: (m) => fmtDay(m.created_at) },
+      { header: "", cell: (m) => (admin && m.id !== ctx.user!.id ? actionForm(ctx, `/portal/team/members/${m.id}/remove`, "Remove", { variant: "danger", confirm: `Remove ${m.display_name} from ${org.organizationName}? They lose portal access immediately.` }) : "") },
+    ], { caption: "Team members" })}
+<h2 style="margin-top:1.5rem">Pending invitations</h2>${table(invites, [
+      { header: "Email", cell: (i) => i.email }, { header: "Role", cell: (i) => roleLabel(i.role_id) }, { header: "Expires", cell: (i) => fmtDay(i.expires_at) },
+      { header: "", cell: (i) => (admin ? actionForm(ctx, `/portal/team/invitations/${i.id}/revoke`, "Revoke", { variant: "ghost", confirm: `Revoke the invitation for ${i.email}?` }) : "") },
+    ], { empty: html`<p class="muted">No pending invitations.</p>`, caption: "Pending invitations" })}
 <section class="card" style="margin-top:1.5rem"><h2 class="card__title">Invite a colleague</h2>
-${isAdmin(org) ? html`${formErrors(errors)}<p class="muted">Members can view projects, send messages, upload files and request revisions. Only administrators can approve scope, designs, change orders and launch.</p>
-<form method="post" action="/portal/team">${csrf(ctx)}${input({ name: "email", label: "Email", type: "email", value: email, required: true, autocomplete: "off" })}${button("Send invitation")}</form>` : html`<p class="muted">Only an account administrator can invite colleagues.</p>`}</section>`;
+${admin ? html`<form method="post" action="/portal/team">${csrf(ctx)}${input({ name: "email", label: "Email", type: "email", value: email, required: true, autocomplete: "off" })}
+${select({ name: "role", label: "Role", options: roleOpts, value: "customer_member" })}${button("Send invitation")}</form>` : html`<p class="muted">Only an account administrator can invite colleagues or change roles.</p>`}</section>`;
     return page(ctx, "Team", body, status);
   };
+  const teamAction = async (ctx: AppContext, fn: (org: Org) => Promise<string>) => {
+    const org = requireCustomerOrg(ctx);
+    if (!isAdmin(org)) throw new HttpError(403, "Only an account administrator can manage the team.");
+    try {
+      return redirect(ctx, "/portal/team", { kind: "success", text: await fn(org) });
+    } catch (e) {
+      if (e instanceof T.TeamError) {
+        if (e.status === 404) throw new HttpError(404, e.message);
+        return teamPage(ctx, org, [e.message], e.status);
+      }
+      throw e;
+    }
+  };
+  r.post("/portal/team/members/:userId/role", async (ctx, p) => {
+    const role = str(await ctx.form(), "role");
+    return teamAction(ctx, async (org) => {
+      const res = await T.changeMemberRole(ctx.db, ctx.user!.id, org.organizationId, p.userId, role);
+      return res.from === res.to ? "Role unchanged." : `Role changed to ${res.to === "customer_admin" ? "Administrator" : "Member"}.`;
+    });
+  });
+  r.post("/portal/team/members/:userId/remove", async (ctx, p) => teamAction(ctx, async (org) => {
+    const m = await T.removeMember(ctx.db, ctx.user!.id, org.organizationId, p.userId);
+    return `${m.display_name} was removed and signed out.`;
+  }));
+  r.post("/portal/team/invitations/:id/revoke", async (ctx, p) => teamAction(ctx, async (org) => {
+    await T.revokeCustomerInvitation(ctx.db, ctx.user!.id, org.organizationId, p.id);
+    return "Invitation revoked.";
+  }));
   r.get("/portal/team", async (ctx) => teamPage(ctx, requireCustomerOrg(ctx)));
   r.post("/portal/team", async (ctx) => {
     const org = requireCustomerOrg(ctx);
     if (!isAdmin(org)) throw new HttpError(403, "Only an account administrator can invite colleagues.");
-    const email = str(await ctx.form(), "email").toLowerCase();
+    const form = await ctx.form();
+    const email = str(form, "email").toLowerCase();
+    const role = str(form, "role") === "customer_admin" ? "customer_admin" : "customer_member";
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email) || email.length > 254) return teamPage(ctx, org, ["Enter a valid email address."], 422, email);
     const member = await ctx.db.prepare(`SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = ? AND m.organization_id = ?`).bind(email, org.organizationId).first();
     if (member) return teamPage(ctx, org, ["That person is already a member of your organization."], 422, email);
     const staff = await ctx.db.prepare(`SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = ? AND m.role_id IN ('owner','administrator','sales','developer','project_manager','support')`).bind(email).first();
     if (staff) return teamPage(ctx, org, ["That address belongs to a Crestmont staff account and cannot be invited to a customer organization."], 422, email);
     try {
-      const token = await createInvitation(ctx.db, ctx.user!.id, email, "customer_member", org.organizationId);
+      const pending = await ctx.db.prepare(`SELECT 1 FROM invitations WHERE organization_id = ? AND email = ? AND accepted_at IS NULL AND expires_at > ?`).bind(org.organizationId, email, new Date().toISOString()).first();
+      if (pending) return teamPage(ctx, org, ["An invitation to that address is already pending. Revoke it first to send a new one."], 422, email);
+      const token = await createInvitation(ctx.db, ctx.user!.id, email, role, org.organizationId);
       await sendMail(ctx, { template: "registration", to: email, subject: `${ctx.user!.displayName} invited you to ${org.organizationName} on Crestmont`, heading: `Join ${org.organizationName}`,
         paragraphs: [`${ctx.user!.displayName} invited you to collaborate on ${org.organizationName}'s website project with Crestmont Website Development.`, "This invitation expires in 7 days."],
         cta: { label: "Accept invitation", url: `${ctx.baseUrl}/invite?token=${token}` }, idempotencyKey: `cinv:${token.slice(0, 16)}` });
@@ -653,7 +703,7 @@ ${isAdmin(org) ? html`${formErrors(errors)}<p class="muted">Members can view pro
       if (e instanceof AuthError) return teamPage(ctx, org, [e.message], 422, email);
       throw e;
     }
-    await audit(ctx.db, { actorUserId: ctx.user!.id, action: "customer.member_invited", subjectType: "organization", subjectId: org.organizationId, organizationId: org.organizationId, details: { email } });
+    await audit(ctx.db, { actorUserId: ctx.user!.id, action: "customer.member_invited", subjectType: "organization", subjectId: org.organizationId, organizationId: org.organizationId, details: { email, role } });
     return redirect(ctx, "/portal/team", { kind: "success", text: `Invitation sent to ${email}.` });
   });
 }

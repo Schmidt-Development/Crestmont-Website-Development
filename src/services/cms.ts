@@ -123,6 +123,40 @@ export async function unpublishEntry(db: Db, actor: Actor, key: string, opts: { 
   ]);
 }
 
+/** Discards an unpublished revision (draft or awaiting Founder approval). It is archived, never deleted, so history stays complete. */
+export async function discardRevision(db: Db, actor: Actor, revisionId: string, opts: { ip?: string | null } = {}) {
+  if (!can(actor, "cms.edit")) throw new CmsError(403, "You do not have permission to edit website content.");
+  const rev = await getRevision(db, revisionId);
+  if (!rev) throw new CmsError(404, "Revision not found");
+  if (rev.status !== "draft" && rev.status !== "pending_founder_approval") throw new CmsError(409, "Only unpublished drafts can be discarded.");
+  const res = await db.prepare(`UPDATE cms_revisions SET status = 'archived' WHERE id = ? AND status IN ('draft','pending_founder_approval')`).bind(revisionId).run();
+  if (res.meta.changes !== 1) throw new CmsError(409, "The revision changed while you were editing. Reload and try again.");
+  await db.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES (?,?,?,?,?,?,?,?)`)
+    .bind(actor.userId ?? null, actor.kind, "cms.draft_discarded", "cms_revision", revisionId, JSON.stringify({ key: rev.key, from: rev.status }), opts.ip ?? null, nowIso()).run();
+  return { key: rev.key };
+}
+
+/** Restores any earlier revision as a NEW draft (re-validated; pricing presentation goes back to Founder approval). The live page is unchanged until it is published. */
+export async function restoreRevision(db: Db, actor: Actor, revisionId: string, opts: { ip?: string | null } = {}) {
+  const rev = await getRevision(db, revisionId);
+  if (!rev) throw new CmsError(404, "Revision not found");
+  const def = cmsKeyDef(rev.key);
+  if (!def) throw new CmsError(404, "Unknown content key");
+  const body = JSON.parse(rev.body_json) as Record<string, string>;
+  const res = await saveDraft(db, actor, rev.key, { ...def.defaults, ...body }, { note: `Restored from revision of ${rev.created_at.slice(0, 10)} (${rev.id})`, ip: opts.ip });
+  await db.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES (?,?,?,?,?,?,?,?)`)
+    .bind(actor.userId ?? null, actor.kind, "cms.revision_restored", "cms_revision", res.revisionId, JSON.stringify({ key: rev.key, from: rev.id }), opts.ip ?? null, nowIso()).run();
+  return { key: rev.key, revisionId: res.revisionId, status: res.status };
+}
+
+/** The content the public currently sees for a key: the published revision, else the repository default. */
+export async function liveContent(db: Db, key: string): Promise<{ body: Record<string, string>; source: "published" | "default"; revisionId: string | null }> {
+  const def = cmsKeyDef(key);
+  const row = await db.prepare(`SELECT r.id, r.body_json FROM cms_entries e JOIN cms_revisions r ON r.id = e.published_revision_id WHERE e.key = ?`).bind(key).first<{ id: string; body_json: string }>();
+  if (row) return { body: { ...(def?.defaults ?? {}), ...safeParse(row.body_json) }, source: "published", revisionId: row.id };
+  return { body: { ...(def?.defaults ?? {}) }, source: "default", revisionId: null };
+}
+
 export async function history(db: Db, key: string): Promise<Revision[]> {
   return (await db.prepare(`SELECT r.*, a.display_name AS author_name, p.display_name AS approver_name FROM cms_revisions r
     JOIN cms_entries e ON e.id = r.entry_id LEFT JOIN users a ON a.id = r.author_user_id LEFT JOIN users p ON p.id = r.approved_by

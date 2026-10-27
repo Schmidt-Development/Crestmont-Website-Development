@@ -15,6 +15,7 @@ import { PACKAGES, type PackageId, type QuoteLine } from "../domain/catalog.ts";
 import { changeLeadStage } from "../services/leads.ts";
 import * as crm from "../services/crm.ts";
 import * as quotes from "../services/quotes.ts";
+import * as dedupe from "../services/crm-dedupe.ts";
 import { startPackageCheckout, startMaintenanceCheckout, packageById, maintenanceById, NOT_CONFIGURED, stripeRedirect } from "../services/billing.ts";
 import { requestAiDraft, aiProviderFromEnv, decideAiJob } from "../services/ai.ts";
 import { audit } from "../services/security.ts";
@@ -57,6 +58,9 @@ ${total ? html`<div class="grid grid-3">${col("Source", a.source)}${col("Medium"
     { header: "Leads", cell: (x) => x.n, numeric: true }, { header: "Converted", cell: (x) => x.converted ?? 0, numeric: true },
   ], { empty: html`<p class="muted">No leads with campaign parameters in this range.</p>`, caption: "Leads by campaign combination" })}</section>` : html`<p class="muted">No leads in this range.</p>`}</section>`;
 }
+
+/** Only same-site staff paths are accepted as a post-action return location. */
+const safeBack = (s: string, fallback: string) => (/^\/staff\/[A-Za-z0-9/_.?=&-]*$/.test(s) && !s.startsWith("//") ? s : fallback);
 
 const pct = (r: number | null) => (r === null ? "—" : `${(r * 100).toFixed(1)}%`);
 const today = (ctx: AppContext) => ctx.now().toISOString().slice(0, 10);
@@ -113,7 +117,7 @@ ${(counts[s] ?? 0) > 40 ? html`<a class="faint" href="${qs("list")}&amp;stage=${
       { header: "Updated", cell: (r) => formatDate(r.updated_at) },
     ], { empty: emptyState("No leads match", "Try a different search or filter."), caption: "Leads" })}${pagination(ctx, page, rows.length > limit)}`;
   }
-  return staffPage(ctx, "CRM", html`${pageHead("CRM pipeline", html`${linkButton("Export CSV", exportHref, "ghost", "sm")}${linkButton("Contacts", "/staff/crm/contacts", "ghost", "sm")}${linkButton("Add lead", "/staff/crm/new", "primary", "sm")}`, all ? "All leads" : "Leads assigned to you")}
+  return staffPage(ctx, "CRM", html`${pageHead("CRM pipeline", html`${linkButton("Export CSV", exportHref, "ghost", "sm")}${linkButton("Contacts", "/staff/crm/contacts", "ghost", "sm")}${linkButton("Duplicates", "/staff/crm/duplicates", "ghost", "sm")}${linkButton("Add lead", "/staff/crm/new", "primary", "sm")}`, all ? "All leads" : "Leads assigned to you")}
 ${tabs([{ href: qs("board"), label: `Pipeline (${total})`, current: view === "board" }, { href: qs("list"), label: "List", current: view === "list" }])}
 ${filters}${body}`);
 }
@@ -146,11 +150,12 @@ async function leadDetail(ctx: AppContext, id: string, errors: string[] = [], st
   requireStaff(ctx, "crm.access");
   const actor = ctx.actor!;
   const lead = await crm.getLead(ctx.db, actor, id);
-  const [acts, links, staff, ai] = await Promise.all([
+  const [acts, links, staff, ai, dups] = await Promise.all([
     crm.activities(ctx.db, id), crm.leadLinks(ctx.db, lead), can(actor, "lead.assign") ? crm.salesStaff(ctx.db) : Promise.resolve([]),
     ctx.db.prepare(`SELECT id, status, output_ref, error, created_at FROM ai_jobs WHERE workflow = 'lead_qualification' AND input_ref = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`).bind(`lead:${id}`).first<{ id: string; status: string; output_ref: string | null; error: string | null; created_at: string }>(),
+    lead.merged_into_lead_id ? Promise.resolve([]) : dedupe.duplicatesOf(ctx.db, actor, lead),
   ]);
-  const writable = can(actor, "lead.write_all") || (can(actor, "lead.write_assigned") && lead.owner_user_id === actor.userId);
+  const writable = !lead.merged_into_lead_id && (can(actor, "lead.write_all") || (can(actor, "lead.write_assigned") && lead.owner_user_id === actor.userId));
   const nextStages = (LEAD_TRANSITIONS[lead.stage] as readonly LeadStage[]).filter((s) => s !== "converted");
   const tasks = acts.filter((a) => a.kind === "task");
   const history = acts.filter((a) => a.kind !== "task");
@@ -162,8 +167,19 @@ ${ai.output_ref && ai.status !== "failed" ? html`<div class="prose"><p>${nl2br(a
 ${ai.status === "awaiting_approval" && writable ? html`<div class="row">${actionForm(ctx, `${base}/ai-draft/${ai.id}`, "Use as qualification notes", { hidden: { decision: "approved" }, variant: "primary" })}${actionForm(ctx, `${base}/ai-draft/${ai.id}`, "Discard draft", { hidden: { decision: "rejected" }, variant: "ghost" })}</div>` : ""}`
     : html`<p class="muted">Generate a draft summary of fit, budget signals and next questions from this lead's details. Nothing is sent to the customer.</p>`}
 ${writable ? actionForm(ctx, `${base}/ai-draft`, "Draft qualification with AI", { variant: "secondary" }) : ""}</section>`;
-  const body = html`${pageHead(lead.contact_name, html`${badge(lead.stage)}${can(actor, "quote.write") && writable ? linkButton("New quote", `/staff/quotes/new?lead=${id}`, "primary", "sm") : ""}`, lead.company_name ?? "Lead")}
-${formErrors(errors)}
+  const dupCard = dups.length ? html`<section class="card stack" data-duplicates><h2 style="font-size:1.2rem">Possible duplicates (${dups.length})</h2>
+<p class="muted">These leads share an email address, phone number, or name and company with this lead. Merging moves activities, quotes, orders and calls to the surviving lead, fills blank contact details, and archives the other lead (it stays in history).</p>
+${table(dups, [
+    { header: "Lead", cell: (d) => html`<a href="/staff/crm/leads/${d.id}">${d.contact_name}</a><br><span class="faint">${d.contact_email ?? d.contact_phone ?? ""}</span>` },
+    { header: "Company", cell: (d) => d.company_name ?? "—" }, { header: "Stage", cell: (d) => badge(d.stage) }, { header: "Created", cell: (d) => formatDate(d.created_at) },
+    { header: "Matched on", cell: (d) => d.reasons.map((r) => label(r)).join(", ") },
+    { header: "", cell: (d) => writable ? html`${actionForm(ctx, `/staff/crm/leads/${d.id}/merge`, "Merge it into this lead", { hidden: { into: id }, confirm: `Merge ${d.contact_name} into this lead? The other lead is archived.` })}
+${actionForm(ctx, `/staff/crm/leads/${id}/merge`, "Merge this lead into it", { variant: "ghost", hidden: { into: d.id }, confirm: "Merge this lead into the other one? This lead is archived." })}
+${actionForm(ctx, "/staff/crm/duplicates/dismiss", "Not a duplicate", { variant: "ghost", hidden: { a: id, b: d.id, back: `/staff/crm/leads/${id}` } })}` : "" },
+  ], { caption: "Possible duplicate leads" })}</section>` : html``;
+  const body = html`${pageHead(lead.contact_name, html`${badge(lead.stage)}${can(actor, "quote.write") && writable && !lead.merged_into_lead_id ? linkButton("New quote", `/staff/quotes/new?lead=${id}`, "primary", "sm") : ""}`, lead.company_name ?? "Lead")}
+${lead.merged_into_lead_id ? alert("info", html`This lead was merged into <a href="/staff/crm/leads/${lead.merged_into_lead_id}">lead ${lead.merged_into_lead_id}</a>. Its history moved there; this record is archived and kept for reference.`) : ""}
+${formErrors(errors)}${dupCard}
 <div class="grid grid-2">
 <section class="card stack"><h2 style="font-size:1.2rem">Contact &amp; company</h2>
 ${dl([["Name", lead.contact_name], ["Email", lead.contact_email ? html`<a href="mailto:${lead.contact_email}">${lead.contact_email}</a>` : "—"], ["Phone", lead.contact_phone], ["Company", lead.company_name],
@@ -232,6 +248,27 @@ async function leadAction(ctx: AppContext, id: string, fn: (lead: crm.LeadRow) =
   return redirect(ctx, `/staff/crm/leads/${id}`, { kind: "success", text: success });
 }
 
+// ── duplicates (CRM-002) ──
+async function duplicatesPage(ctx: AppContext) {
+  requireStaff(ctx, "crm.access");
+  const actor = ctx.actor!;
+  const clusters = await dedupe.findDuplicateClusters(ctx.db, actor);
+  const canWrite = (l: dedupe.DupLead) => can(actor, "lead.write_all") || (can(actor, "lead.write_assigned") && l.owner_user_id === actor.userId);
+  return staffPage(ctx, "Duplicate leads", html`${pageHead("Duplicate leads", linkButton("Pipeline", "/staff/crm", "ghost", "sm"), can(actor, "lead.read_all") ? "All leads" : "Leads assigned to you")}
+<p class="muted">Leads are grouped when their contacts share a normalized email address, a phone number (digits only, US country code ignored) or the same name at the same company. The suggested survivor is the most advanced lead (then the oldest). Merging is audited and cannot silently drop data: activities, quotes, orders and calls move to the survivor, blank contact fields are filled, and the merged lead is archived with a link to the survivor.</p>
+${clusters.length ? clusters.map((c, i) => {
+    const survivor = c.leads.find((l) => l.id === c.survivorId)!;
+    return html`<section class="card stack" data-cluster="${i + 1}"><h2 style="font-size:1.2rem">${survivor.contact_name} · ${c.leads.length} leads <span class="faint">matched on ${c.reasons.map((r) => label(r)).join(", ")}</span></h2>
+${table(c.leads, [
+      { header: "Lead", cell: (l) => html`<a href="/staff/crm/leads/${l.id}">${l.contact_name}</a>${l.id === c.survivorId ? html` ${badge("active", "Suggested survivor")}` : ""}` },
+      { header: "Email", cell: (l) => l.contact_email ?? "—" }, { header: "Phone", cell: (l) => l.contact_phone ?? "—" }, { header: "Company", cell: (l) => l.company_name ?? "—" },
+      { header: "Stage", cell: (l) => badge(l.stage) }, { header: "Source", cell: (l) => label(l.source) }, { header: "Owner", cell: (l) => l.owner_name ?? "Unassigned" }, { header: "Created", cell: (l) => formatDate(l.created_at) },
+      { header: "", cell: (l) => l.id === c.survivorId || !canWrite(l) || !canWrite(survivor) ? "" : html`${actionForm(ctx, `/staff/crm/leads/${l.id}/merge`, "Merge into survivor", { hidden: { into: c.survivorId, back: "/staff/crm/duplicates" }, confirm: `Merge ${l.contact_name} (${l.id}) into ${c.survivorId}?` })}
+${actionForm(ctx, "/staff/crm/duplicates/dismiss", "Not a duplicate", { variant: "ghost", hidden: { a: l.id, b: c.survivorId, back: "/staff/crm/duplicates" } })}` },
+    ], { caption: `Duplicate group ${i + 1}` })}<p class="faint">To keep a different lead, open it and merge the others into it from its page.</p></section>`;
+  }) : emptyState("No duplicates found", "No two visible leads share an email, phone number, or name and company.")}`);
+}
+
 // ── contacts / customers ──
 async function contactsPage(ctx: AppContext) {
   requireStaff(ctx, "crm.access");
@@ -252,9 +289,13 @@ async function customersPage(ctx: AppContext) {
   requireStaff(ctx, "customers.read");
   const q = (ctx.url.searchParams.get("q") ?? "").trim().slice(0, 120);
   const { page, limit, offset } = pageParam(ctx);
-  const rows = await crm.listCustomers(ctx.db, q, { limit, offset });
-  return staffPage(ctx, "Customers", html`${pageHead("Customers", undefined, "Customer organizations")}
-<form method="get" class="filters" action="/staff/customers">${input({ name: "q", label: "Search", value: q, placeholder: "Organization name" })}<div class="field">${button("Search", { variant: "secondary", size: "sm" })}</div></form>
+  const st = ctx.url.searchParams.get("status");
+  const status = st === "active" || st === "inactive" ? st : undefined;
+  const rows = await crm.listCustomers(ctx.db, q, { limit, offset }, { status });
+  const exportHref = (() => { const u = new URL(ctx.url); u.pathname = "/staff/customers/export.csv"; u.searchParams.delete("page"); return u.pathname + u.search; })();
+  return staffPage(ctx, "Customers", html`${pageHead("Customers", linkButton("Export CSV", exportHref, "ghost", "sm"), "Customer organizations")}
+<form method="get" class="filters" action="/staff/customers">${input({ name: "q", label: "Search", value: q, placeholder: "Organization name or member email" })}
+${select({ name: "status", label: "Status", options: [{ value: "active", label: "Active (open project or plan)" }, { value: "inactive", label: "Inactive" }], value: status, includeBlank: "All customers" })}<div class="field">${button("Search", { variant: "secondary", size: "sm" })}</div></form>
 ${table(rows.slice(0, limit), [
     { header: "Organization", cell: (r) => html`<a href="/staff/customers/${r.id}">${r.name}</a>` }, { header: "Since", cell: (r) => formatDate(r.created_at) },
     { header: "Orders", cell: (r) => r.orders, numeric: true }, { header: "Projects", cell: (r) => r.projects, numeric: true }, { header: "Active plans", cell: (r) => r.subscriptions, numeric: true },
@@ -329,19 +370,39 @@ ${input({ name: "valid_until", label: "Valid until", type: "date", value: v.vali
 <div class="form-actions">${button(submit)}</div></form>`;
 }
 
+const QUOTE_STATUS_OPTIONS = [{ value: "draft", label: "Draft" }, { value: "sent", label: "Sent" }, { value: "lapsed", label: "Lapsed (valid-until passed)" }, { value: "accepted", label: "Accepted" },
+  { value: "rejected", label: "Withdrawn / declined" }, { value: "expired", label: "Expired" }, { value: "superseded", label: "Superseded" }];
+
+function quoteFilter(ctx: AppContext): quotes.QuoteListFilter {
+  const status = ctx.url.searchParams.get("status") ?? "";
+  return { status: QUOTE_STATUS_OPTIONS.some((o) => o.value === status) ? status : undefined, q: (ctx.url.searchParams.get("q") ?? "").trim().slice(0, 120) || undefined, today: today(ctx) };
+}
+
 async function quotesList(ctx: AppContext) {
   requireStaff(ctx, "quote.write");
-  const status = ctx.url.searchParams.get("status") ?? "";
-  const valid = ["draft", "sent", "accepted", "rejected", "expired", "superseded"].includes(status) ? status : undefined;
+  const f = quoteFilter(ctx);
   const { page, limit, offset } = pageParam(ctx);
-  const rows = await quotes.listQuotes(ctx.db, ctx.actor!, { status: valid }, { limit, offset });
-  return staffPage(ctx, "Quotes", html`${pageHead("Quotes & proposals", undefined, "Sales")}
-<form method="get" class="filters" action="/staff/quotes">${select({ name: "status", label: "Status", options: ["draft", "sent", "accepted", "rejected", "expired", "superseded"], value: valid, includeBlank: "Any status" })}<div class="field">${button("Filter", { variant: "secondary", size: "sm" })}</div></form>
+  const rows = await quotes.listQuotes(ctx.db, ctx.actor!, f, { limit, offset });
+  const exportHref = (() => { const u = new URL(ctx.url); u.pathname = "/staff/quotes/export.csv"; u.searchParams.delete("page"); return u.pathname + u.search; })();
+  const lapsed = (q: { status: string; valid_until: string | null }) => ["draft", "sent"].includes(q.status) && !!q.valid_until && q.valid_until < today(ctx);
+  return staffPage(ctx, "Quotes", html`${pageHead("Quotes & proposals", linkButton("Export CSV", exportHref, "ghost", "sm"), "Sales")}
+<form method="get" class="filters" action="/staff/quotes">${input({ name: "q", label: "Search", value: f.q, placeholder: "Quote ID, contact, email or company" })}${select({ name: "status", label: "Status", options: QUOTE_STATUS_OPTIONS, value: f.status, includeBlank: "Any status" })}<div class="field">${button("Filter", { variant: "secondary", size: "sm" })}</div></form>
 ${table(rows.slice(0, limit), [
     { header: "Quote", cell: (q) => html`<a href="/staff/quotes/${q.id}">${q.id}</a>` }, { header: "Contact", cell: (q) => html`<a href="/staff/crm/leads/${q.lead_id}">${q.contact_name}</a>${q.company_name ? html`<br><span class="faint">${q.company_name}</span>` : ""}` },
-    { header: "Package", cell: (q) => quotes.packageName(q.package_id) }, { header: "Version", cell: (q) => `v${q.current_version}` }, { header: "Status", cell: (q) => badge(q.status) },
+    { header: "Package", cell: (q) => quotes.packageName(q.package_id) }, { header: "Version", cell: (q) => `v${q.current_version}` },
+    { header: "Status", cell: (q) => html`${q.status === "rejected" ? badge("rejected", q.closed_reason?.startsWith("declined") ? "Declined" : "Withdrawn") : badge(q.status)}${lapsed(q) ? html` ${badge("past_due", "Lapsed")}` : ""}` },
     { header: "Total", cell: (q) => formatCents(q.total_cents), numeric: true }, { header: "Valid until", cell: (q) => q.valid_until ?? "—" }, { header: "Sent", cell: (q) => formatDate(q.sent_at) }],
-    { empty: emptyState("No quotes", "Create a quote from a lead in the CRM.", linkButton("Open CRM", "/staff/crm", "secondary")) })}${pagination(ctx, page, rows.length > limit)}`);
+    { empty: f.q || f.status ? emptyState("No quotes match", "Try a different search or status.") : emptyState("No quotes", "Create a quote from a lead in the CRM.", linkButton("Open CRM", "/staff/crm", "secondary")) })}${pagination(ctx, page, rows.length > limit)}`);
+}
+
+async function quotesExport(ctx: AppContext) {
+  requireStaff(ctx, "quote.write");
+  const f = quoteFilter(ctx);
+  const rows = await quotes.exportQuotes(ctx.db, ctx.actor!, f);
+  await audit(ctx.db, { actorUserId: ctx.user!.id, action: "quote.exported", subjectType: "quote", details: { count: rows.length, filter: { status: f.status ?? null, q: f.q ?? null } } });
+  const csv = toCsv(["quote_id", "created_date", "status", "closed_reason", "version", "package", "total_cents", "total_usd", "payment_schedule", "valid_until", "sent_date", "lead_id", "contact", "email", "company"],
+    rows.map((q) => [q.id, q.created_at.slice(0, 10), q.status, q.closed_reason, q.current_version, q.package_id ?? "custom", q.total_cents, (q.total_cents / 100).toFixed(2), q.payment_schedule, q.valid_until, q.sent_at?.slice(0, 10) ?? "", q.lead_id, q.contact_name, q.contact_email, q.company_name]));
+  return download(ctx, csv, `crestmont-quotes-${today(ctx)}.csv`, "text/csv; charset=utf-8");
 }
 
 async function newQuotePage(ctx: AppContext, errors: string[] = [], values?: QuoteFormValues, status = 200) {
@@ -374,7 +435,11 @@ ${expired && quote.status !== "accepted" ? alert("warn", "This version's valid-u
 <div class="grid grid-2"><section class="card stack"><h2 style="font-size:1.2rem">Current version (v${current.version})</h2>
 ${dl([["Package", quotes.packageName(current.package_id)], ["Valid until", current.valid_until ?? "—"], ["Accepted", current.accepted_at ? formatDateTime(current.accepted_at) : "Not accepted"], ["Sent to", lead.contact_email ?? "No email on file"]])}
 ${lineTable(parsed.lines, current.total_cents, parsed.installments)}<h3 style="font-size:1rem">Scope</h3><p>${nl2br(current.scope_text)}</p>
-${quote.status !== "accepted" && can(ctx.actor!, "quote.send") ? actionForm(ctx, `/staff/quotes/${quote.id}/send`, quote.status === "sent" ? "Resend proposal" : "Send proposal", { variant: "primary", size: undefined, confirm: `Email this proposal to ${lead.contact_email ?? "the contact"}?` }) : ""}</section>
+${quote.status === "rejected" ? alert("warn", html`<strong>${quote.closed_reason?.startsWith("declined") ? "Declined by the customer" : "Withdrawn"}</strong> ${quote.closed_at ? `on ${formatDate(quote.closed_at)}` : ""} — ${quote.closed_reason?.replace(/^(withdrawn|declined): /, "") ?? ""}. The proposal link no longer accepts. Saving a new version reopens the quote as a draft.`) : ""}
+${["draft", "sent"].includes(quote.status) && can(ctx.actor!, "quote.send") ? actionForm(ctx, `/staff/quotes/${quote.id}/send`, quote.status === "sent" ? "Resend proposal" : "Send proposal", { variant: "primary", size: undefined, confirm: `Email this proposal to ${lead.contact_email ?? "the contact"}?` }) : ""}
+${["draft", "sent"].includes(quote.status) ? html`<details><summary>Withdraw or record a decline</summary><form method="post" action="/staff/quotes/${quote.id}/close" class="stack">${csrf(ctx)}
+${select({ name: "kind", label: "Outcome", options: [{ value: "withdrawn", label: "Withdrawn by Crestmont" }, { value: "declined", label: "Declined by the customer" }] })}
+${input({ name: "reason", label: "Reason", required: true, maxlength: 1000 })}<div class="form-actions">${button("Close quote", { variant: "danger", size: "sm" })}</div></form></details>` : ""}</section>
 <section class="stack">${quote.status !== "accepted" ? html`<h2 style="font-size:1.2rem">Revise (saves v${quote.current_version + 1})</h2>${quoteForm(ctx, `/staff/quotes/${quote.id}`, v, errors, `Save as v${quote.current_version + 1}`)}` : alert("success", "Accepted quotes cannot be revised. Additional work needs a change order on the project.")}</section></div>
 <section class="card"><h2 style="font-size:1.2rem">Version history</h2>${table(versions, [{ header: "Version", cell: (x) => `v${x.version}` }, { header: "Package", cell: (x) => quotes.packageName(x.package_id) }, { header: "Total", cell: (x) => formatCents(x.total_cents), numeric: true }, { header: "Schedule", cell: (x) => label(x.payment_schedule) }, { header: "Valid until", cell: (x) => x.valid_until ?? "—" }, { header: "Created", cell: (x) => formatDateTime(x.created_at) }, { header: "Accepted", cell: (x) => (x.accepted_at ? formatDateTime(x.accepted_at) : "—") }])}</section>`, status);
 }
@@ -501,11 +566,35 @@ export function register(r: Router): void {
     return redirect(ctx, `/staff/crm/leads/${res.leadId}`, { kind: "success", text: "Lead created." });
   });
   r.get("/staff/crm/contacts", contactsPage);
+  r.get("/staff/crm/duplicates", duplicatesPage);
+  r.post("/staff/crm/duplicates/dismiss", async (ctx) => {
+    requireStaff(ctx, "crm.access");
+    const f = await ctx.form();
+    const back = safeBack(str(f, "back"), "/staff/crm/duplicates");
+    try { await dedupe.dismissPair(ctx.db, ctx.actor!, str(f, "a"), str(f, "b"), { ip: ctx.ip }); } catch (e) {
+      if (e instanceof dedupe.MergeError) return redirect(ctx, back, { kind: "error", text: e.message });
+      throw e;
+    }
+    return redirect(ctx, back, { kind: "success", text: "Marked as not duplicates." });
+  });
+  r.post("/staff/crm/leads/:id/merge", async (ctx, p) => {
+    requireStaff(ctx, "crm.access");
+    const f = await ctx.form();
+    const into = str(f, "into");
+    try {
+      const moved = await dedupe.mergeLeads(ctx.db, ctx.actor!, p.id, into, { ip: ctx.ip });
+      return redirect(ctx, `/staff/crm/leads/${into}`, { kind: "success", text: `Lead merged: ${moved.activities} activities, ${moved.quotes} quotes, ${moved.orders} orders and ${moved.calls} calls moved here.` });
+    } catch (e) {
+      if (e instanceof dedupe.MergeError) return redirect(ctx, safeBack(str(f, "back"), `/staff/crm/leads/${p.id}`), { kind: "error", text: e.message });
+      throw e;
+    }
+  });
   r.get("/staff/crm/leads/:id", (ctx, p) => leadDetail(ctx, p.id));
   r.get("/staff/crm/leads/:id/quick", (ctx, p) => leadQuickView(ctx, p.id));
   r.post("/staff/crm/leads/:id/stage", async (ctx, p) => {
     requireStaff(ctx, "crm.access");
-    await crm.getLead(ctx.db, ctx.actor!, p.id);
+    const current = await crm.getLead(ctx.db, ctx.actor!, p.id);
+    if (current.merged_into_lead_id) throw new HttpError(409, "This lead was merged into another lead; change the surviving lead instead.");
     const f = await ctx.form();
     const to = str(f, "to") as LeadStage;
     if (!(LEAD_STAGES as readonly string[]).includes(to)) return leadDetail(ctx, p.id, ["Choose a stage"], 422);
@@ -564,10 +653,21 @@ export function register(r: Router): void {
   });
 
   r.get("/staff/customers", customersPage);
+  r.get("/staff/customers/export.csv", async (ctx) => {
+    requireStaff(ctx, "customers.read");
+    const q = (ctx.url.searchParams.get("q") ?? "").trim().slice(0, 120);
+    const st = ctx.url.searchParams.get("status");
+    const rows = (await crm.listCustomers(ctx.db, q, { limit: 10000, offset: 0 }, { status: st === "active" || st === "inactive" ? st : undefined })).slice(0, 10000);
+    await audit(ctx.db, { actorUserId: ctx.user!.id, action: "customer.exported", subjectType: "organization", details: { count: rows.length, q, status: st } });
+    const csv = toCsv(["organization_id", "name", "customer_since", "orders", "projects", "active_plans", "open_tickets", "paid_to_date_cents", "paid_to_date_usd"],
+      rows.map((r) => [r.id, r.name, r.created_at.slice(0, 10), r.orders, r.projects, r.subscriptions, r.open_tickets, r.paid_cents, (r.paid_cents / 100).toFixed(2)]));
+    return download(ctx, csv, `crestmont-customers-${today(ctx)}.csv`, "text/csv; charset=utf-8");
+  });
   r.get("/staff/customers/:id", (ctx, p) => customerPage(ctx, p.id));
   r.get("/staff/sales", salesPage);
 
   r.get("/staff/quotes", quotesList);
+  r.get("/staff/quotes/export.csv", quotesExport);
   r.get("/staff/quotes/new", (ctx) => newQuotePage(ctx));
   r.post("/staff/quotes/new", async (ctx) => {
     requireStaff(ctx, "quote.write");
@@ -587,6 +687,18 @@ export function register(r: Router): void {
     const res = await quotes.saveQuote(ctx.db, ctx.actor!, quote.lead_id, quote.id, qi, today(ctx));
     if (!res.ok) return quoteDetail(ctx, p.id, res.issues, values, 422);
     return redirect(ctx, `/staff/quotes/${p.id}`, { kind: "success", text: `Saved as v${res.version} (draft). Send it when ready.` });
+  });
+  r.post("/staff/quotes/:id/close", async (ctx, p) => {
+    requireStaff(ctx, "quote.write");
+    const f = await ctx.form();
+    const kind = str(f, "kind") === "declined" ? "declined" : "withdrawn";
+    try {
+      await quotes.closeQuote(ctx.db, ctx.actor!, p.id, kind, str(f, "reason"));
+    } catch (e) {
+      if (e instanceof HttpError && (e.status === 409 || e.status === 422)) return quoteDetail(ctx, p.id, [e.message], undefined, e.status);
+      throw e;
+    }
+    return redirect(ctx, `/staff/quotes/${p.id}`, { kind: "success", text: kind === "declined" ? "Quote recorded as declined." : "Quote withdrawn. The proposal link no longer accepts." });
   });
   r.post("/staff/quotes/:id/send", async (ctx, p) => {
     requireStaff(ctx, "quote.send");

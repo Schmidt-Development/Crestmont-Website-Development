@@ -20,6 +20,28 @@ export async function listNotifications(db: Db, userId: string, limit = 20): Pro
     .bind(userId, limit).all<NotificationRow>()).results;
 }
 
+/** Paged notification history for the full notifications page (newest first). */
+export async function pageNotifications(db: Db, userId: string, opts: { unreadOnly?: boolean; limit: number; offset: number }): Promise<NotificationRow[]> {
+  return (await db.prepare(`SELECT id, kind, subject_type, subject_id, body, read_at, created_at FROM notifications WHERE user_id = ? ${opts.unreadOnly ? "AND read_at IS NULL" : ""} ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?`)
+    .bind(userId, opts.limit, opts.offset).all<NotificationRow>()).results;
+}
+
+const STAFF_LINKS: Record<string, (id: string) => string> = {
+  project: (id) => `/staff/projects/${id}`, task: (id) => `/staff/tasks/${id}`, lead: (id) => `/staff/crm/leads/${id}`, ticket: (id) => `/staff/support/${id}`,
+  quote: (id) => `/staff/quotes/${id}`, refund: (id) => `/staff/refunds/${id}`, cms_revision: (id) => `/staff/cms/revisions/${id}`, call: (id) => `/staff/voice/calls/${id}`,
+  conversation: (id) => `/staff/conversations/${id}`, organization: (id) => `/staff/customers/${id}`, ai_job: (id) => `/staff/ai/${id}`, blocker: (id) => `/staff/readiness/blockers/${id}`,
+};
+const PORTAL_LINKS: Record<string, (id: string) => string> = {
+  project: (id) => `/portal/projects/${id}`, ticket: (id) => `/portal/support/${id}`, invoice: (id) => `/portal/billing/invoices/${id}`, conversation: () => `/portal/messages/general`,
+};
+
+/** Where a notification points in the given area, or null when it has no linkable subject there. Ids are URL-encoded. */
+export function notificationHref(n: Pick<NotificationRow, "subject_type" | "subject_id">, area: "staff" | "portal"): string | null {
+  if (!n.subject_type || !n.subject_id) return null;
+  const f = (area === "staff" ? STAFF_LINKS : PORTAL_LINKS)[n.subject_type];
+  return f ? f(encodeURIComponent(n.subject_id)) : null;
+}
+
 export async function unreadNotificationCount(db: Db, userId: string): Promise<number> {
   return (await db.prepare(`SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read_at IS NULL`).bind(userId).first<{ n: number }>())?.n ?? 0;
 }

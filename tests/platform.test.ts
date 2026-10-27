@@ -89,10 +89,15 @@ test("[EMP-003] employees page shows MFA status, sessions and assignment workloa
   const app = await createTestApp();
   const { c: owner } = await staffClient(app, "owner");
   const dev = await createStaff(app.db, "developer");
+  const cust = await createCustomer(app.db, "wl@cust.example", "Workload Co");
+  const pid = newId("prj");
+  await app.db.prepare(`INSERT INTO projects (id, organization_id, name, status, revision_allowance, payment_schedule, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`).bind(pid, cust.organizationId, "WL site", "development", 3, "upfront", nowIso(), nowIso()).run();
+  await app.db.prepare(`INSERT INTO tasks (id, project_id, title, status, estimate_minutes, due_at, created_at) VALUES ('t1', ?, 'Build header', 'todo', 90, '2020-01-01', ?)`).bind(pid, nowIso()).run();
   await app.db.prepare(`INSERT INTO assignments (id, subject_type, subject_id, user_id, created_at) VALUES (?,?,?,?,?)`).bind(newId("asg"), "task", "t1", dev.id, nowIso()).run();
   await app.db.prepare(`UPDATE users SET totp_secret = NULL WHERE id = ?`).bind(dev.id).run();
   const html = await (await owner.get("/staff/employees")).text();
-  assert.match(html, /Task: 1/);
+  assert.match(html, /1 task <span class="badge[^"]*">1 overdue/);
+  assert.match(html, /1\.5 h/);
   assert.match(html, /Not enrolled/);
   assert.match(html, /Owner — protected/);
 });

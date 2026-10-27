@@ -14,13 +14,13 @@ export const LEAD_SOURCES = ["web_form", "quote_form", "ai_receptionist", "refer
 
 export interface LeadRow {
   id: string; stage: LeadStage; source: string; interest: string | null; message: string | null; owner_user_id: string | null; owner_name: string | null;
-  qualification_notes: string | null; lost_reason: string | null; created_at: string; updated_at: string;
+  qualification_notes: string | null; lost_reason: string | null; created_at: string; updated_at: string; merged_into_lead_id: string | null;
   utm_source: string | null; utm_medium: string | null; utm_campaign: string | null; utm_term: string | null; utm_content: string | null; referrer: string | null; landing_page: string | null;
   contact_id: string; contact_name: string; contact_email: string | null; contact_phone: string | null; contact_user_id: string | null;
   company_id: string | null; company_name: string | null; company_website: string | null; company_organization_id: string | null;
 }
 
-const LEAD_SELECT = `SELECT l.id, l.stage, l.source, l.interest, l.message, l.owner_user_id, u.display_name AS owner_name, l.qualification_notes, l.lost_reason, l.created_at, l.updated_at,
+const LEAD_SELECT = `SELECT l.id, l.stage, l.source, l.interest, l.message, l.owner_user_id, u.display_name AS owner_name, l.qualification_notes, l.lost_reason, l.created_at, l.updated_at, l.merged_into_lead_id,
   l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.utm_content, l.referrer, l.landing_page,
   c.id AS contact_id, c.name AS contact_name, c.email AS contact_email, c.phone AS contact_phone, c.user_id AS contact_user_id,
   co.id AS company_id, co.name AS company_name, co.website AS company_website, co.organization_id AS company_organization_id
@@ -45,6 +45,8 @@ function filterSql(actor: Actor, f: LeadFilter): { where: string; binds: unknown
     binds.push(like, like, like);
   }
   if (f.stage && (LEAD_STAGES as readonly string[]).includes(f.stage)) { conds.push(`l.stage = ?`); binds.push(f.stage); }
+  // Leads merged into another lead are duplicates: hidden from the pipeline unless archived leads are requested.
+  if (f.stage !== "archived") conds.push(`l.merged_into_lead_id IS NULL`);
   if (f.source && (LEAD_SOURCES as readonly string[]).includes(f.source)) { conds.push(`l.source = ?`); binds.push(f.source); }
   if (f.owner === "unassigned") conds.push(`l.owner_user_id IS NULL`);
   else if (f.owner) { conds.push(`l.owner_user_id = ?`); binds.push(f.owner); }
@@ -75,6 +77,7 @@ export async function getLead(db: Db, actor: Actor, id: string): Promise<LeadRow
 }
 
 function assertCanWrite(actor: Actor, lead: LeadRow) {
+  if (lead.merged_into_lead_id) throw new HttpError(409, `This lead was merged into ${lead.merged_into_lead_id}; edit that lead instead.`);
   if (can(actor, "lead.write_all")) return;
   if (can(actor, "lead.write_assigned") && lead.owner_user_id === actor.userId) return;
   throw new HttpError(403, "This lead is not assigned to you.");
@@ -169,8 +172,9 @@ export async function assignOwner(db: Db, actor: Actor, leadId: string, userId: 
     if (!ok) throw new HttpError(400, "Leads can only be assigned to active sales staff.");
   }
   const at = nowIso();
-  const lead = await db.prepare(`SELECT owner_user_id FROM leads WHERE id = ?`).bind(leadId).first<{ owner_user_id: string | null }>();
+  const lead = await db.prepare(`SELECT owner_user_id, merged_into_lead_id FROM leads WHERE id = ?`).bind(leadId).first<{ owner_user_id: string | null; merged_into_lead_id: string | null }>();
   if (!lead) throw new HttpError(404, "Lead not found.");
+  if (lead.merged_into_lead_id) throw new HttpError(409, "This lead was merged into another lead; assign the surviving lead instead.");
   await db.batch([
     db.prepare(`UPDATE leads SET owner_user_id = ?, updated_at = ? WHERE id = ?`).bind(userId, at, leadId),
     db.prepare(`UPDATE assignments SET ended_at = ? WHERE subject_type = 'lead' AND subject_id = ? AND ended_at IS NULL`).bind(at, leadId),
@@ -223,18 +227,27 @@ export async function exportLeads(db: Db, actor: Actor, f: LeadFilter): Promise<
 }
 
 // ── customers (CRM-002) ──
-export async function listCustomers(db: Db, q: string, page: { limit: number; offset: number }) {
+export type CustomerListRow = { id: string; name: string; created_at: string; orders: number; projects: number; subscriptions: number; open_tickets: number; paid_cents: number };
+/** Active = a project not completed/cancelled, or an active/trialing/past-due subscription (same definition as the executive overview). */
+const ACTIVE_CUSTOMER_SQL = `(EXISTS(SELECT 1 FROM projects p WHERE p.organization_id = o.id AND p.status NOT IN ('completed','cancelled'))
+  OR EXISTS(SELECT 1 FROM subscriptions s WHERE s.organization_id = o.id AND s.status IN ('active','trialing','past_due')))`;
+
+export async function listCustomers(db: Db, q: string, page: { limit: number; offset: number }, opts: { status?: "active" | "inactive" } = {}) {
   const like = `%${q.replace(/[\\%_]/g, (m) => "\\" + m)}%`;
+  const conds = [`o.kind = 'customer'`];
+  const binds: unknown[] = [];
+  if (q) { conds.push(`(o.name LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM memberships mm JOIN users uu ON uu.id = mm.user_id WHERE mm.organization_id = o.id AND uu.email LIKE ? ESCAPE '\\'))`); binds.push(like, like); }
+  if (opts.status === "active") conds.push(ACTIVE_CUSTOMER_SQL);
+  if (opts.status === "inactive") conds.push(`NOT ${ACTIVE_CUSTOMER_SQL}`);
   return (await db.prepare(`SELECT o.id, o.name, o.created_at,
       (SELECT COUNT(*) FROM orders x WHERE x.organization_id = o.id) AS orders,
       (SELECT COUNT(*) FROM projects x WHERE x.organization_id = o.id) AS projects,
       (SELECT COUNT(*) FROM subscriptions x WHERE x.organization_id = o.id AND x.status IN ('active','trialing','past_due')) AS subscriptions,
       (SELECT COUNT(*) FROM tickets x WHERE x.organization_id = o.id AND x.status NOT IN ('resolved','closed')) AS open_tickets,
       (SELECT COALESCE(SUM(amount_cents),0) FROM payments x WHERE x.organization_id = o.id AND x.status IN ('succeeded','partially_refunded','disputed')) AS paid_cents
-    FROM organizations o WHERE o.kind = 'customer' ${q ? `AND o.name LIKE ? ESCAPE '\\'` : ""} ORDER BY o.created_at DESC LIMIT ? OFFSET ?`)
-    .bind(...(q ? [like] : []), page.limit + 1, page.offset).all<{ id: string; name: string; created_at: string; orders: number; projects: number; subscriptions: number; open_tickets: number; paid_cents: number }>()).results;
+    FROM organizations o WHERE ${conds.join(" AND ")} ORDER BY o.created_at DESC, o.id LIMIT ? OFFSET ?`)
+    .bind(...binds, page.limit + 1, page.offset).all<CustomerListRow>()).results;
 }
-
 export async function customerDetail(db: Db, orgId: string) {
   const org = await db.prepare(`SELECT id, name, created_at, stripe_customer_id FROM organizations WHERE id = ? AND kind = 'customer'`).bind(orgId).first<{ id: string; name: string; created_at: string; stripe_customer_id: string | null }>();
   if (!org) throw new HttpError(404, "Customer not found.");
@@ -265,7 +278,7 @@ export async function listContacts(db: Db, actor: Actor, q: string, page: { limi
 
 // ── sales reporting (CRM-006) ──
 export const SALES_DEFINITIONS: [string, string][] = [
-  ["Leads created", "Leads whose created_at falls in the range (all sources)."],
+  ["Leads created", "Leads whose created_at falls in the range (all sources). Leads merged into another lead as duplicates are not counted."],
   ["Converted", "Of those leads, the ones now in stage converted. Conversion is set only by a verified Stripe payment webhook."],
   ["Conversion rate", "Converted ÷ leads created in the range."],
   ["Stage funnel", "Current stage of each lead created in the range."],
@@ -278,9 +291,9 @@ export const SALES_DEFINITIONS: [string, string][] = [
 export async function salesReport(db: Db, actor: Actor, range: DateRange) {
   const scope = leadScope(actor);
   const r = [range.fromIso, range.toIso];
-  const bySource = (await db.prepare(`SELECT l.source, COUNT(*) AS n, SUM(CASE WHEN l.stage='converted' THEN 1 ELSE 0 END) AS converted FROM leads l WHERE ${scope.sql} AND l.created_at >= ? AND l.created_at < ? GROUP BY l.source ORDER BY n DESC`)
+  const bySource = (await db.prepare(`SELECT l.source, COUNT(*) AS n, SUM(CASE WHEN l.stage='converted' THEN 1 ELSE 0 END) AS converted FROM leads l WHERE ${scope.sql} AND l.merged_into_lead_id IS NULL AND l.created_at >= ? AND l.created_at < ? GROUP BY l.source ORDER BY n DESC`)
     .bind(...scope.binds, ...r).all<{ source: string; n: number; converted: number }>()).results;
-  const funnel = (await db.prepare(`SELECT l.stage, COUNT(*) AS n FROM leads l WHERE ${scope.sql} AND l.created_at >= ? AND l.created_at < ? GROUP BY l.stage`).bind(...scope.binds, ...r).all<{ stage: string; n: number }>()).results;
+  const funnel = (await db.prepare(`SELECT l.stage, COUNT(*) AS n FROM leads l WHERE ${scope.sql} AND l.merged_into_lead_id IS NULL AND l.created_at >= ? AND l.created_at < ? GROUP BY l.stage`).bind(...scope.binds, ...r).all<{ stage: string; n: number }>()).results;
   const created = bySource.reduce((s, x) => s + x.n, 0);
   const converted = bySource.reduce((s, x) => s + (x.converted ?? 0), 0);
   const sent = await db.prepare(`SELECT COUNT(*) AS n FROM quotes q JOIN leads l ON l.id = q.lead_id WHERE ${scope.sql} AND q.sent_at >= ? AND q.sent_at < ?`).bind(...scope.binds, ...r).first<{ n: number }>();
@@ -300,9 +313,9 @@ export interface AttributionRow { value: string | null; n: number; converted: nu
 export async function attributionReport(db: Db, actor: Actor, range: DateRange) {
   const scope = leadScope(actor);
   const by = async (col: "utm_source" | "utm_medium" | "utm_campaign") => (await db.prepare(`SELECT l.${col} AS value, COUNT(*) AS n, SUM(CASE WHEN l.stage='converted' THEN 1 ELSE 0 END) AS converted
-      FROM leads l WHERE ${scope.sql} AND l.created_at >= ? AND l.created_at < ? GROUP BY l.${col} ORDER BY n DESC, value LIMIT 25`).bind(...scope.binds, range.fromIso, range.toIso).all<AttributionRow>()).results;
+      FROM leads l WHERE ${scope.sql} AND l.merged_into_lead_id IS NULL AND l.created_at >= ? AND l.created_at < ? GROUP BY l.${col} ORDER BY n DESC, value LIMIT 25`).bind(...scope.binds, range.fromIso, range.toIso).all<AttributionRow>()).results;
   const combos = (await db.prepare(`SELECT l.utm_source AS source, l.utm_medium AS medium, l.utm_campaign AS campaign, COUNT(*) AS n, SUM(CASE WHEN l.stage='converted' THEN 1 ELSE 0 END) AS converted
-      FROM leads l WHERE ${scope.sql} AND l.created_at >= ? AND l.created_at < ? AND (l.utm_source IS NOT NULL OR l.utm_medium IS NOT NULL OR l.utm_campaign IS NOT NULL)
+      FROM leads l WHERE ${scope.sql} AND l.merged_into_lead_id IS NULL AND l.created_at >= ? AND l.created_at < ? AND (l.utm_source IS NOT NULL OR l.utm_medium IS NOT NULL OR l.utm_campaign IS NOT NULL)
       GROUP BY l.utm_source, l.utm_medium, l.utm_campaign ORDER BY n DESC LIMIT 50`).bind(...scope.binds, range.fromIso, range.toIso)
     .all<{ source: string | null; medium: string | null; campaign: string | null; n: number; converted: number }>()).results;
   return { source: await by("utm_source"), medium: await by("utm_medium"), campaign: await by("utm_campaign"), combos };
