@@ -5,7 +5,7 @@
 #
 # Build (from the repository root):  docker build -t crestmont-build-sandbox:1 -f runner/sandbox/Dockerfile runner/sandbox
 # Pin the base by digest after the first build you have reviewed: FROM node:22-bookworm-slim@sha256:<digest>
-FROM node:22-bookworm-slim
+FROM node:26-bookworm-slim
 
 ARG PLAYWRIGHT_VERSION=1.55.0
 ENV DEBIAN_FRONTEND=noninteractive \
