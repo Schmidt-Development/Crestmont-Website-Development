@@ -61,7 +61,7 @@ export interface Dashboard {
   range: DateRange;
   gross: number; refunds: number; net: number;
   fees: { known: number; unknownCount: number; paymentCount: number };
-  subscriptionRevenue: number; mrr: number; activeSubscriptions: number;
+  subscriptionRevenue: number; mrr: number; activeSubscriptions: number; /** active subscriptions whose plan has no server-side monthly price (excluded from MRR, never counted as $0) */ mrrUnpriced: number;
   churn: { canceled: number; activeAtStart: number; rate: number | null };
   outstanding: { cents: number; count: number };
   aov: { cents: number | null; orders: number };
@@ -82,8 +82,8 @@ export async function financeDashboard(db: Db, range: DateRange): Promise<Dashbo
   const subRev = await db.prepare(`SELECT COALESCE(SUM(p.amount_cents),0) AS c FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id LEFT JOIN orders o ON o.id = p.order_id
     WHERE p.status IN ${CAPTURED} AND p.created_at >= ? AND p.created_at < ? AND (i.milestone_kind = 'subscription' OR o.kind = 'subscription')`).bind(...r).first<{ c: number }>();
   const subs = (await db.prepare(`SELECT product_id, COUNT(*) AS n FROM subscriptions WHERE status = 'active' GROUP BY product_id`).all<{ product_id: string; n: number }>()).results;
-  let mrr = 0, active = 0;
-  for (const s of subs) { mrr += (planMonthlyCents(s.product_id) ?? 0) * s.n; active += s.n; }
+  let mrr = 0, active = 0, unpriced = 0;
+  for (const s of subs) { const m = planMonthlyCents(s.product_id); if (m === null) unpriced += s.n; else mrr += m * s.n; active += s.n; }
   const canceled = await db.prepare(`SELECT COUNT(*) AS n FROM subscriptions WHERE status = 'canceled' AND updated_at >= ? AND updated_at < ?`).bind(...r).first<{ n: number }>();
   const atStart = await db.prepare(`SELECT COUNT(*) AS n FROM subscriptions WHERE created_at < ? AND status NOT IN ('incomplete') AND NOT (status = 'canceled' AND updated_at < ?)`).bind(range.fromIso, range.fromIso).first<{ n: number }>();
   const out = await db.prepare(`SELECT COALESCE(SUM(amount_cents),0) AS c, COUNT(*) AS n FROM invoices WHERE status = 'open'`).first<{ c: number; n: number }>();
@@ -97,7 +97,7 @@ export async function financeDashboard(db: Db, range: DateRange): Promise<Dashbo
   return {
     range, gross, refunds, net: gross - refunds,
     fees: { known: pay?.fees ?? 0, unknownCount: pay?.unknown ?? 0, paymentCount: pay?.n ?? 0 },
-    subscriptionRevenue: subRev?.c ?? 0, mrr, activeSubscriptions: active,
+    subscriptionRevenue: subRev?.c ?? 0, mrr, activeSubscriptions: active, mrrUnpriced: unpriced,
     churn: { canceled: c, activeAtStart: s0, rate: s0 > 0 ? c / s0 : null },
     outstanding: { cents: out?.c ?? 0, count: out?.n ?? 0 },
     aov: { cents: aov && aov.n > 0 ? Math.round(aov.c / aov.n) : null, orders: aov?.n ?? 0 },
@@ -107,21 +107,50 @@ export async function financeDashboard(db: Db, range: DateRange): Promise<Dashbo
 }
 
 // ── lists ──
+/** Max rows in a list CSV export (the list itself is paginated). */
+export const LIST_EXPORT_LIMIT = 10_000;
+
+/** LIKE pattern for a free-text search box (wildcards in the user's text are escaped). */
+export function likePattern(q: string): string { return `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`; }
+/** Normalized search text from ?q= (trimmed, at most 100 characters). */
+export function searchParam(params: URLSearchParams): string { return (params.get("q") ?? "").trim().slice(0, 100); }
+
 export interface SubscriptionRow { id: string; organization_id: string; org_name: string; product_id: string; status: string; stripe_subscription_id: string | null; current_period_end: string | null; created_at: string; updated_at: string }
-export async function listSubscriptions(db: Db, f: { status?: string; limit: number; offset: number }) {
-  const where = f.status ? `WHERE s.status = ?` : "";
-  const binds: unknown[] = f.status ? [f.status] : [];
-  return (await db.prepare(`SELECT s.*, o.name AS org_name FROM subscriptions s JOIN organizations o ON o.id = s.organization_id ${where} ORDER BY s.created_at DESC LIMIT ? OFFSET ?`)
+export async function listSubscriptions(db: Db, f: { status?: string; q?: string; limit: number; offset: number }) {
+  const conds: string[] = [], binds: unknown[] = [];
+  if (f.status) { conds.push(`s.status = ?`); binds.push(f.status); }
+  if (f.q) { const l = likePattern(f.q); conds.push(`(o.name LIKE ? ESCAPE '\\' OR s.stripe_subscription_id LIKE ? ESCAPE '\\' OR s.product_id LIKE ? ESCAPE '\\' OR s.id LIKE ? ESCAPE '\\')`); binds.push(l, l, l, l); }
+  return (await db.prepare(`SELECT s.*, o.name AS org_name FROM subscriptions s JOIN organizations o ON o.id = s.organization_id ${conds.length ? "WHERE " + conds.join(" AND ") : ""} ORDER BY s.created_at DESC LIMIT ? OFFSET ?`)
     .bind(...binds, f.limit + 1, f.offset).all<SubscriptionRow>()).results;
 }
+export function subscriptionsListCsv(rows: SubscriptionRow[]): string {
+  return toCsv(["subscription_id", "customer", "plan", "status", "monthly_price_cents", "monthly_price_usd", "current_period_end", "started", "updated", "stripe_subscription"],
+    rows.map((s) => { const m = planMonthlyCents(s.product_id); return [s.id, s.org_name, s.product_id, s.status, m ?? "", dollars(m), s.current_period_end?.slice(0, 10) ?? "", s.created_at.slice(0, 10), s.updated_at.slice(0, 10), s.stripe_subscription_id]; }));
+}
 
-export interface InvoiceListRow { id: string; organization_id: string; org_name: string; order_id: string | null; project_id: string | null; milestone_kind: string | null; amount_cents: number; status: string; description: string | null; created_at: string; paid_at: string | null; due_at: string | null }
-export async function listInvoices(db: Db, f: { status?: string; range?: DateRange; limit: number; offset: number }) {
+export const INVOICE_STATUSES = ["draft", "open", "paid", "void", "uncollectible"] as const;
+export const INVOICE_KINDS = ["full", "deposit_50", "design_25", "prelaunch_25", "change_order", "subscription"] as const;
+export interface InvoiceListRow {
+  id: string; organization_id: string; org_name: string; order_id: string | null; project_id: string | null; milestone_kind: string | null; amount_cents: number; status: string; description: string | null;
+  created_at: string; paid_at: string | null; due_at: string | null; stripe_invoice_id: string | null; stripe_invoice_status: string | null; stripe_checkout_session_id: string | null;
+  /** Comma-separated ids of the invoice's non-failed payments (each has a receipt). */
+  payment_ids: string | null; paid_cents: number;
+}
+export async function listInvoices(db: Db, f: { status?: string; kind?: string; q?: string; range?: DateRange; limit: number; offset: number }) {
   const conds: string[] = [], binds: unknown[] = [];
   if (f.status) { conds.push(`i.status = ?`); binds.push(f.status); }
+  if (f.kind) { conds.push(`i.milestone_kind = ?`); binds.push(f.kind); }
+  if (f.q) { const l = likePattern(f.q); conds.push(`(o.name LIKE ? ESCAPE '\\' OR i.description LIKE ? ESCAPE '\\' OR i.id LIKE ? ESCAPE '\\' OR i.stripe_invoice_id LIKE ? ESCAPE '\\')`); binds.push(l, l, l, l); }
   if (f.range) { conds.push(`i.created_at >= ? AND i.created_at < ?`); binds.push(f.range.fromIso, f.range.toIso); }
-  return (await db.prepare(`SELECT i.*, o.name AS org_name FROM invoices i JOIN organizations o ON o.id = i.organization_id ${conds.length ? "WHERE " + conds.join(" AND ") : ""} ORDER BY i.created_at DESC LIMIT ? OFFSET ?`)
+  return (await db.prepare(`SELECT i.*, o.name AS org_name,
+        (SELECT group_concat(p.id) FROM payments p WHERE p.invoice_id = i.id AND p.status <> 'failed') AS payment_ids,
+        (SELECT COALESCE(SUM(p.amount_cents),0) FROM payments p WHERE p.invoice_id = i.id AND p.status <> 'failed') AS paid_cents
+      FROM invoices i JOIN organizations o ON o.id = i.organization_id ${conds.length ? "WHERE " + conds.join(" AND ") : ""} ORDER BY i.created_at DESC, i.rowid DESC LIMIT ? OFFSET ?`)
     .bind(...binds, f.limit + 1, f.offset).all<InvoiceListRow>()).results;
+}
+export function invoicesListCsv(rows: InvoiceListRow[]): string {
+  return toCsv(["invoice_id", "issued_date", "customer", "kind", "description", "amount_cents", "amount_usd", "status", "paid_cents", "paid_date", "due_date", "project_id", "order_id", "payment_ids", "stripe_invoice", "stripe_invoice_status"],
+    rows.map((i) => [i.id, i.created_at.slice(0, 10), i.org_name, i.milestone_kind, i.description, i.amount_cents, dollars(i.amount_cents), i.status, i.paid_cents, i.paid_at?.slice(0, 10) ?? "", i.due_at?.slice(0, 10) ?? "", i.project_id, i.order_id, (i.payment_ids ?? "").replace(/,/g, " "), i.stripe_invoice_id, i.stripe_invoice_status]));
 }
 
 // ── profitability (FIN-002, FIN-003) ──
@@ -132,6 +161,8 @@ export interface UnknownCost { source: "project_cost" | "time_entry"; id: string
 export interface ProjectProfit {
   projectId: string; name: string; organization: string; status: string;
   revenueCents: number; knownCostCents: number; unknown: UnknownCost[];
+  /** Known cost per category (labor includes time entries). */
+  knownByCategory: Partial<Record<CostCategory, number>>;
   profitCents: number | null; // null when any cost is unknown
 }
 
@@ -146,16 +177,18 @@ export async function projectProfitability(db: Db, projectId?: string): Promise<
       .all<{ id: string; minutes: number; hourly_cost_cents: number | null; worked_on: string; title: string }>()).results;
     let known = 0;
     const unknown: UnknownCost[] = [];
+    const byCat: Partial<Record<CostCategory, number>> = {};
+    const addCat = (k: CostCategory, v: number) => { byCat[k] = (byCat[k] ?? 0) + v; };
     for (const c of costs) {
       if (c.amount_cents === null) unknown.push({ source: "project_cost", id: c.id, description: `${c.category}: ${c.description}`, date: c.incurred_on });
-      else known += c.amount_cents;
+      else { known += c.amount_cents; addCat(c.category as CostCategory, c.amount_cents); }
     }
     for (const t of time) {
       if (t.hourly_cost_cents === null) unknown.push({ source: "time_entry", id: t.id, description: `Labor (${t.minutes} min) on "${t.title}" — hourly cost unknown`, date: t.worked_on });
-      else known += Math.round((t.minutes * t.hourly_cost_cents) / 60);
+      else { const v = Math.round((t.minutes * t.hourly_cost_cents) / 60); known += v; addCat("labor", v); }
     }
     const revenue = rev?.c ?? 0;
-    out.push({ projectId: p.id, name: p.name, organization: p.org, status: p.status, revenueCents: revenue, knownCostCents: known, unknown, profitCents: unknown.length ? null : revenue - known });
+    out.push({ projectId: p.id, name: p.name, organization: p.org, status: p.status, revenueCents: revenue, knownCostCents: known, unknown, knownByCategory: byCat, profitCents: unknown.length ? null : revenue - known });
   }
   return out;
 }

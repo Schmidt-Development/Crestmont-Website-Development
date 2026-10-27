@@ -25,10 +25,14 @@ const SELECT = `SELECT r.*, o.name AS org_name, u.display_name AS requester_name
   FROM refunds r JOIN organizations o ON o.id = r.organization_id JOIN users u ON u.id = r.requested_by JOIN payments p ON p.id = r.payment_id
   LEFT JOIN users rv ON rv.id = r.reviewed_by LEFT JOIN users dc ON dc.id = r.decided_by`;
 
-export async function listRefunds(db: Db, status: string | undefined, page: { limit: number; offset: number }) {
-  const valid = status && (REFUND_STATUSES as readonly string[]).includes(status);
-  return (await db.prepare(`${SELECT} ${valid ? "WHERE r.status = ?" : ""} ORDER BY CASE r.status WHEN 'requested' THEN 0 WHEN 'under_review' THEN 1 WHEN 'recommended' THEN 2 WHEN 'approved' THEN 3 WHEN 'failed' THEN 4 ELSE 5 END, r.created_at DESC LIMIT ? OFFSET ?`)
-    .bind(...(valid ? [status] : []), page.limit + 1, page.offset).all<RefundRow>()).results;
+const like = (q: string) => `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+
+export async function listRefunds(db: Db, status: string | undefined, page: { limit: number; offset: number }, q = "") {
+  const conds: string[] = [], binds: unknown[] = [];
+  if (status && (REFUND_STATUSES as readonly string[]).includes(status)) { conds.push("r.status = ?"); binds.push(status); }
+  if (q) { const l = like(q); conds.push(`(o.name LIKE ? ESCAPE '\\' OR u.email LIKE ? ESCAPE '\\' OR r.reason LIKE ? ESCAPE '\\' OR r.id LIKE ? ESCAPE '\\' OR p.stripe_payment_intent_id LIKE ? ESCAPE '\\')`); binds.push(l, l, l, l, l); }
+  return (await db.prepare(`${SELECT} ${conds.length ? `WHERE ${conds.join(" AND ")}` : ""} ORDER BY CASE r.status WHEN 'requested' THEN 0 WHEN 'under_review' THEN 1 WHEN 'recommended' THEN 2 WHEN 'approved' THEN 3 WHEN 'failed' THEN 4 ELSE 5 END, r.created_at DESC LIMIT ? OFFSET ?`)
+    .bind(...binds, page.limit + 1, page.offset).all<RefundRow>()).results;
 }
 
 export async function getRefund(db: Db, id: string): Promise<RefundRow> {
@@ -120,8 +124,18 @@ export async function issueRefund(ctx: AppContext, actor: Actor, id: string) {
   return { stripeRefundId: result.id, status: failed ? "failed" : "issued" };
 }
 
-export async function listDisputes(db: Db, page: { limit: number; offset: number }) {
+/** Stripe dispute statuses that need no further action. */
+export const DISPUTE_CLOSED = ["won", "lost", "closed", "warning_closed"] as const;
+export type DisputeRow = { id: string; organization_id: string | null; org_name: string | null; payment_id: string | null; stripe_dispute_id: string; amount_cents: number; reason: string | null; status: string; evidence_due_by: string | null; created_at: string; updated_at: string; payment_amount_cents: number | null; invoice_id: string | null; stripe_payment_intent_id: string | null };
+
+/** `state`: "open" (needs action), "closed", or "" for all. */
+export async function listDisputes(db: Db, page: { limit: number; offset: number }, f: { state?: string; q?: string } = {}) {
+  const conds: string[] = [], binds: unknown[] = [];
+  const closed = `(${DISPUTE_CLOSED.map((s) => `'${s}'`).join(",")})`;
+  if (f.state === "open") conds.push(`d.status NOT IN ${closed}`);
+  if (f.state === "closed") conds.push(`d.status IN ${closed}`);
+  if (f.q) { const l = like(f.q); conds.push(`(o.name LIKE ? ESCAPE '\\' OR d.stripe_dispute_id LIKE ? ESCAPE '\\' OR p.stripe_payment_intent_id LIKE ? ESCAPE '\\' OR d.reason LIKE ? ESCAPE '\\')`); binds.push(l, l, l, l); }
   return (await db.prepare(`SELECT d.*, o.name AS org_name, p.amount_cents AS payment_amount_cents, p.invoice_id, p.stripe_payment_intent_id FROM disputes d LEFT JOIN organizations o ON o.id = d.organization_id LEFT JOIN payments p ON p.id = d.payment_id
-    ORDER BY CASE WHEN d.status IN ('won','lost','closed') THEN 1 ELSE 0 END, COALESCE(d.evidence_due_by, d.created_at) LIMIT ? OFFSET ?`).bind(page.limit + 1, page.offset)
-    .all<{ id: string; organization_id: string | null; org_name: string | null; payment_id: string | null; stripe_dispute_id: string; amount_cents: number; reason: string | null; status: string; evidence_due_by: string | null; created_at: string; updated_at: string; payment_amount_cents: number | null; invoice_id: string | null; stripe_payment_intent_id: string | null }>()).results;
+    ${conds.length ? `WHERE ${conds.join(" AND ")}` : ""} ORDER BY CASE WHEN d.status IN ${closed} THEN 1 ELSE 0 END, COALESCE(d.evidence_due_by, d.created_at) LIMIT ? OFFSET ?`).bind(...binds, page.limit + 1, page.offset)
+    .all<DisputeRow>()).results;
 }
