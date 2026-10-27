@@ -1,0 +1,67 @@
+name: Staging rollback rehearsal
+
+# TEST-004 / INFRA-005: proves a bad staging deploy can be rolled back. Deploys the previous uploaded Worker version
+# to 100% of staging traffic, verifies health, then restores the version that was serving before and verifies again.
+# Manual only (staging serves the previous version for about a minute). Production is never touched; the D1 schema
+# is unchanged (migrations are additive), so the rehearsal never alters data.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  rehearse:
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WRANGLER: npx --yes wrangler@4
+      BASE: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - name: Identify the serving and previous versions
+        id: pick
+        run: |
+          echo "STARTED=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$GITHUB_ENV"
+          mkdir -p drill evidence
+          $WRANGLER deployments status --env staging --json > drill/status.json
+          $WRANGLER versions list --env staging --json > drill/versions.json
+          pair=$(node --no-warnings scripts/rollback-rehearsal.ts pick drill/status.json drill/versions.json)
+          cur=${pair%% *}; prev=${pair##* }
+          [ -n "$cur" ] && [ -n "$prev" ] && [ "$cur" != "$prev" ] || { echo "::error::could not identify the serving and previous versions"; exit 1; }
+          echo "current=$cur" >> "$GITHUB_OUTPUT"; echo "previous=$prev" >> "$GITHUB_OUTPUT"
+          echo "Serving $cur; rehearsing rollback to $prev"
+      - name: Roll back to the previous version and verify
+        id: back
+        continue-on-error: true
+        run: |
+          $WRANGLER versions deploy "${{ steps.pick.outputs.previous }}@100%" --env staging --message "Rollback rehearsal (run ${{ github.run_id }})" --yes
+          for i in 1 2 3 4 5 6; do sleep 10; [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/health")" = "200" ] && exit 0; done
+          echo "::error::health check failed after rollback"; exit 1
+      - name: Roll forward to the version that was serving and verify
+        id: fwd
+        if: always()
+        run: |
+          $WRANGLER versions deploy "${{ steps.pick.outputs.current }}@100%" --env staging --message "Rollback rehearsal: restore (run ${{ github.run_id }})" --yes
+          for i in 1 2 3 4 5 6; do sleep 10; [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/health")" = "200" ] && exit 0; done
+          echo "::error::health check failed after restoring the serving version — check staging now"; exit 1
+      - name: Record evidence on staging
+        if: always() && steps.pick.outcome == 'success'
+        run: |
+          node --no-warnings scripts/rollback-rehearsal.ts evidence --commit "$GITHUB_SHA" --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-rollback" --started "$STARTED" \
+            --rollback "${{ steps.back.outcome == 'success' && 'passed' || 'failed' }}" --rollforward "${{ steps.fwd.outcome == 'success' && 'passed' || 'failed' }}" --out evidence/rollback.json
+          ev=$(node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))')
+          echo "::add-mask::$ev"
+          printf '%s' "$ev" | $WRANGLER secret put EVIDENCE_INGEST_SECRET --env staging > /dev/null
+          sleep 10
+          READINESS_URL="$BASE" EVIDENCE_INGEST_SECRET="$ev" node --no-warnings scripts/post-evidence.ts evidence/rollback.json
