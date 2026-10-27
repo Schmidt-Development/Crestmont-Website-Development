@@ -1,0 +1,36 @@
+# Crestmont platform — Cloudflare Worker configuration.
+# NOT YET PROVISIONED: no Cloudflare account access exists in this session. The database_id
+# and bucket values below are intentionally empty and must be filled from real resources
+# (`wrangler d1 create`, `wrangler r2 bucket create`). Do not deploy until they are.
+
+name = "crestmont-platform"
+main = "src/worker.ts"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ENVIRONMENT = "development"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "crestmont-dev"
+database_id = ""
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "crestmont-files-dev"
+
+[env.staging]
+name = "crestmont-platform-staging"
+vars = { ENVIRONMENT = "staging" }
+d1_databases = [{ binding = "DB", database_name = "crestmont-staging", database_id = "", migrations_dir = "migrations" }]
+r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-staging" }]
+
+[env.production]
+name = "crestmont-platform-production"
+vars = { ENVIRONMENT = "production" }
+d1_databases = [{ binding = "DB", database_name = "crestmont-production", database_id = "", migrations_dir = "migrations" }]
+r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-production" }]
+# Secrets (set with `wrangler secret put`, per environment):
+#   EVIDENCE_INGEST_SECRET, STRIPE_WEBHOOK_SECRET, STRIPE_SECRET_KEY, TURNSTILE_SECRET, RESEND_API_KEY

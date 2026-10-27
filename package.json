@@ -1,0 +1,12 @@
+{
+  "name": "crestmont-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "test": "node --no-warnings --test --test-reporter=./scripts/evidence-reporter.mjs 'tests/**/*.test.ts'",
+    "typecheck": "tsc -p tsconfig.json",
+    "evidence:post": "node --no-warnings scripts/post-evidence.ts"
+  }
+}

@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dev tooling
+        run: npm install --no-save typescript@5 @types/node@22
+      - name: Typecheck
+        run: npx tsc -p tsconfig.json
+      - name: Unit / integration tests (emits requirement evidence)
+        run: npm test
+      - name: Dependency audit
+        run: npm audit --audit-level=high || true   # becomes blocking once runtime dependencies exist
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-evidence
+          path: evidence/ci-evidence.json
+      - name: Post evidence to staging readiness API
+        if: always() && github.ref == 'refs/heads/main' && vars.READINESS_URL != ''
+        env:
+          READINESS_URL: ${{ vars.READINESS_URL }}
+          EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
+        run: npm run evidence:post
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+      - uses: github/codeql-action/analyze@v3
