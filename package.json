@@ -10,6 +10,8 @@
     "test": "node --no-warnings --test --test-reporter=./scripts/evidence-reporter.mjs 'tests/**/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json",
     "evidence:post": "node --no-warnings scripts/post-evidence.ts",
-    "dev": "node --no-warnings dev/server.ts"
+    "dev": "node --no-warnings dev/server.ts",
+    "e2e": "EVIDENCE_FILE=evidence/e2e-evidence.json EVIDENCE_SUFFIX=e2e node --no-warnings --test --test-concurrency=1 --test-reporter=./scripts/evidence-reporter.mjs 'tests/e2e/*.e2e.ts'",
+    "bootstrap:owner": "node --no-warnings scripts/bootstrap-owner.ts"
   }
 }

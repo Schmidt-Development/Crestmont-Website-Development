@@ -24,10 +24,12 @@ export default async function* reporter(source) {
       ...(ok ? {} : { message: String(event.data.details?.error?.message ?? "").slice(0, 1000) }) });
   }
   const commitSha = process.env.GITHUB_SHA || sh("git rev-parse HEAD") || "0000000";
+  // Evidence from an uncommitted working tree is labelled so it is never mistaken for the commit itself.
+  const dirty = !process.env.GITHUB_SHA && sh("git status --porcelain --untracked-files=no") !== "";
   const doc = {
-    runId: process.env.GITHUB_RUN_ID ? `gh-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? 1}` : `local-${commitSha.slice(0, 12)}-${Date.now()}`,
-    source: "ci",
-    environment: "development",
+    runId: (process.env.GITHUB_RUN_ID ? `gh-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? 1}` : `local-${commitSha.slice(0, 12)}-${Date.now()}`) + (process.env.EVIDENCE_SUFFIX ? `-${process.env.EVIDENCE_SUFFIX}` : "") + (dirty ? "-dirty" : ""),
+    source: process.env.EVIDENCE_SOURCE || "ci",
+    environment: process.env.EVIDENCE_ENVIRONMENT || "development",
     commitSha,
     branch: process.env.GITHUB_REF_NAME || sh("git rev-parse --abbrev-ref HEAD") || undefined,
     ...(process.env.GITHUB_RUN_ID ? { runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}` } : {}),
@@ -36,7 +38,8 @@ export default async function* reporter(source) {
     results,
   };
   mkdirSync("evidence", { recursive: true });
-  writeFileSync("evidence/ci-evidence.json", JSON.stringify(doc, null, 2));
+  const out = process.env.EVIDENCE_FILE || "evidence/ci-evidence.json";
+  writeFileSync(out, JSON.stringify(doc, null, 2));
   const reqs = new Set(results.map((r) => r.requirementId));
-  yield `\n${pass} passed, ${fail} failed, ${untagged} untagged — evidence for ${reqs.size} requirements written to evidence/ci-evidence.json\n`;
+  yield `\n${pass} passed, ${fail} failed, ${untagged} untagged — evidence for ${reqs.size} requirements written to ${process.env.EVIDENCE_FILE || "evidence/ci-evidence.json"}\n`;
 }
