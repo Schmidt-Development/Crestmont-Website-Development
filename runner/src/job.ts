@@ -71,6 +71,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
   let runtimeTimer: NodeJS.Timeout | null = null;
   let hbRunning = false;
   let hbStopped = false;
+  let hbInFlight: Promise<boolean> | null = null;
   const sessionNotes: string[] = [];
   const sourceNotes: string[] = [];
   let starterLabel: string | null = null;
@@ -113,14 +114,22 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
   const scheduleHeartbeat = () => {
     if (hbStopped) return;
     hbTimer = setTimeout(async () => {
-      if (hbRunning) return scheduleHeartbeat();
+      if (hbRunning || hbStopped) return scheduleHeartbeat();
       hbRunning = true;
       if (tracker.turns() >= turnCap) stop.request("local:turns");
       if (deps.shutdown?.()) stop.request("local:shutdown");
-      await heartbeatOnce();
+      hbInFlight = heartbeatOnce();
+      await hbInFlight;
+      hbInFlight = null;
       hbRunning = false;
       scheduleHeartbeat();
     }, deps.heartbeatMs ?? (cfg.heartbeatSecondsOverride ?? job.heartbeatSeconds) * 1000);
+  };
+  /** Stop the heartbeat loop and wait for an in-flight heartbeat, so nothing is sent after `complete`. */
+  const stopHeartbeats = async () => {
+    hbStopped = true;
+    if (hbTimer) clearTimeout(hbTimer);
+    if (hbInFlight) await hbInFlight;
   };
 
   // ── helpers bound to this job ──
@@ -204,6 +213,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       ...(outcome === "needs_information" ? { missingInformation } : {}),
       ...(fields.error ? { error: fields.error } : {}),
     };
+    await stopHeartbeats();
     guard();
     await client.complete(job, req);
     log.info("job completed", { outcome, costUsd: req.runCostUsd, turns: req.turns });

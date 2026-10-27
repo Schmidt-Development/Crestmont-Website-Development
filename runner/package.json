@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node --no-warnings src/main.ts",
     "preflight": "node --no-warnings src/main.ts --preflight",
-    "test": "node --no-warnings --test test/",
+    "test": "node --no-warnings --test 'test/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
