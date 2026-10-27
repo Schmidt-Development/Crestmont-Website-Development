@@ -338,8 +338,8 @@ details.disclosure[open] summary::after { transform: rotate(0deg); }
 details.disclosure > :not(summary) { color: var(--text-2); max-width: 46rem; padding-bottom: var(--s-5); margin: 0; }
 details.disclosure[open] > :not(summary) { animation: reveal-down var(--t-med) var(--ease-out); }
 @keyframes reveal-down { from { opacity: 0; transform: translateY(-4px); } }
-details > summary { cursor: pointer; padding: var(--s-2) 0; }
-details.card > summary { font-weight: 600; color: var(--text); padding: 0; }
+details > summary { cursor: pointer; padding: var(--s-2) 0; min-height: 40px; }
+details.card > summary { font-weight: 600; color: var(--text); padding: var(--s-2) 0; min-height: 40px; line-height: 1.5; }
 details.card[open] > summary { margin-bottom: var(--s-4); }
 .definitions summary { cursor: pointer; }
 .definitions .dl { margin-top: var(--s-3); }
@@ -386,8 +386,8 @@ details.card[open] > summary { margin-bottom: var(--s-4); }
    shifts by ~1% (imperceptible). The PNG itself is untouched. */
 .hero__ring { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; color: var(--gold-3); }
 .hero__ring .ring-draw { stroke-dasharray: 1; stroke-dashoffset: 0; }
-.js .hero__ring .ring-draw { animation: engrave var(--t-slow) var(--ease-in-out) both; animation-delay: calc(var(--i, 0) * 120ms + 150ms); }
-.js .hero__ring .ring-ticks { animation: fade-in 700ms var(--ease-out) both 700ms; }
+.hero__ring .ring-draw { animation: engrave var(--t-slow) var(--ease-in-out) both; animation-delay: calc(var(--i, 0) * 120ms + 150ms); }
+.hero__ring .ring-ticks { animation: fade-in 700ms var(--ease-out) both 700ms; }
 @keyframes engrave { from { stroke-dashoffset: 1; } }
 @keyframes fade-in { from { opacity: 0; } }
 .hero--page { padding: clamp(3.5rem, 8vw, 7rem) 0 clamp(2.5rem, 5vw, 4.5rem); border-bottom: 1px solid var(--line); }
@@ -447,11 +447,11 @@ details.card[open] > summary { margin-bottom: var(--s-4); }
 .anatomy__tab:hover .anatomy__tab-title { color: var(--gold-1); }
 .anatomy__tab[aria-selected="true"]::before { color: var(--gold-1); }
 .anatomy__tab[aria-selected="true"] .anatomy__tab-title { color: var(--gold-1); }
-.js .anatomy__tab { padding-left: var(--s-4); }
-.js .anatomy__tab[aria-selected="true"]::after { transform: scaleY(1); }
+.anatomy__tab { padding-left: var(--s-4); }
+.anatomy__tab[aria-selected="true"]::after { transform: scaleY(1); }
 .anatomy__detail { grid-column: 2; color: var(--text-2); font-size: var(--fs-sm); margin: var(--s-2) 0 0; max-width: 30rem; }
-.js .anatomy__detail { display: none; }
-.js .anatomy__tab[aria-selected="true"] + .anatomy__detail { display: block; padding: 0 0 var(--s-4) calc(2.25rem + var(--s-3) + var(--s-4)); margin: 0; animation: reveal-down var(--t-med) var(--ease-out); }
+.anatomy__detail { display: none; }
+.anatomy__tab[aria-selected="true"] + .anatomy__detail { display: block; padding: 0 0 var(--s-4) calc(2.25rem + var(--s-3) + var(--s-4)); margin: 0; animation: reveal-down var(--t-med) var(--ease-out); }
 /* The miniature browser */
 .anatomy__stage { position: sticky; top: calc(var(--header-h) + 24px); }
 .mini { --m-ink: #f7f4ee; --m-paper: #ffffff; --m-accent: #2f4a3a; --m-type: var(--font-body);
@@ -545,9 +545,7 @@ details.card[open] > summary { margin-bottom: var(--s-4); }
 .stepper__panel [data-panel-body] { animation: reveal-down var(--t-med) var(--ease-out); }
 .stepper__nav { display: flex; gap: var(--s-2); margin-top: var(--s-6); }
 .stepper__text { margin: 0 0 var(--s-3) calc(31px + var(--s-4)); color: var(--text-2); font-size: var(--fs-sm); max-width: 36rem; }
-.js .stepper__text { display: none; }
-html:not(.js) .stepper { grid-template-columns: 1fr; }
-html:not(.js) .stepper__btn { cursor: default; color: var(--white); }
+.stepper__text { display: none; }
 @media (max-width: 900px) {
   .stepper { grid-template-columns: 1fr; gap: var(--s-5); }
   .stepper__panel { position: static; order: -1; min-height: 0; }
@@ -701,9 +699,8 @@ a.shot { display: block; cursor: zoom-in; }
 .kpi__value { font: 400 clamp(1.6rem, 2.3vw, 2.05rem)/1.1 var(--font-display); color: var(--white); margin-top: var(--s-2); font-variant-numeric: lining-nums tabular-nums; letter-spacing: -.01em; overflow-wrap: anywhere; font-synthesis: none; }
 .kpi__sub { font-size: var(--fs-xs); color: var(--text-3); margin-top: var(--s-1); }
 .meter { height: 4px; background: var(--ink-4); border-radius: 999px; overflow: hidden; margin-top: var(--s-3); }
-.meter > span { display: block; height: 100%; background: var(--gold-2); border-radius: inherit; transform-origin: left; }
-.js .meter > span { animation: meter-in 700ms var(--ease-out) both 120ms; }
-@keyframes meter-in { from { transform: scaleX(0); } }
+/* Operational screens: data renders at its value immediately — no decorative grow-in (DESIGN.md §6). */
+.meter > span { display: block; height: 100%; background: var(--gold-2); border-radius: inherit; }
 .exec-grid { margin-bottom: var(--s-5); }
 .exec-tile { text-decoration: none; color: inherit; display: block; transition: border-color var(--t-fast) var(--ease-out), background-color var(--t-fast) var(--ease-out); }
 .exec-tile:hover, .exec-tile:focus-visible { border-color: var(--line-gold); background: var(--ink-2); color: inherit; }
@@ -746,7 +743,6 @@ a.shot { display: block; cursor: zoom-in; }
 .bar-chart__row { display: grid; grid-template-columns: minmax(90px, 140px) minmax(60px, 1fr) max-content; gap: var(--s-3); align-items: center; font-size: var(--fs-sm); }
 .bar-chart__bar { height: 8px; background: var(--ink-4); border-radius: 999px; overflow: hidden; }
 .bar-chart__bar span { display: block; height: 100%; background: var(--gold-2); border-radius: inherit; transform-origin: left; }
-.js .bar-chart__bar span { animation: meter-in 700ms var(--ease-out) both 120ms; }
 .live-status { margin: var(--s-3) var(--s-2) 0; padding: .6rem .75rem; border: 1px solid var(--line-gold); border-radius: var(--r-2); background: var(--ink-2); color: var(--text); font-size: var(--fs-xs); animation: toast-in var(--t-med) var(--ease-out); }
 .live-status a { color: var(--gold-1); margin-left: .25rem; }
 .app-scrim { display: none; }
@@ -764,11 +760,6 @@ a.shot { display: block; cursor: zoom-in; }
   .topbar .nav-toggle { display: inline-flex !important; }
 }
 @media (min-width: 961px) { .topbar .nav-toggle { display: none !important; } }
-/* Without JavaScript the off-canvas sidebar cannot open, so on small screens it stays in the flow. */
-@media (max-width: 960px) {
-  html:not(.js) .sidebar { position: static; transform: none; visibility: visible; width: auto; height: auto; box-shadow: none; border-right: 0; border-bottom: 1px solid var(--line); }
-  html:not(.js) .topbar .nav-toggle { display: none !important; }
-}
 
 /* ── 16. Area-specific components (kept from the product workstreams) ─────────────────────────── */
 .quote-line { align-items: end; }

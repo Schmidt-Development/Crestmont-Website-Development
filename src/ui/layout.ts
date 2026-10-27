@@ -22,7 +22,7 @@ ${m.noindex || ctx.env.ENVIRONMENT !== "production" ? html`<meta name="robots" c
 <meta name="theme-color" content="#0d0d0d"><meta name="color-scheme" content="dark">
 <link rel="icon" type="image/png" sizes="32x32" href="/assets/brand/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="/assets/brand/favicon-16.png">
 ${PRELOAD_FONTS.map((f) => html`<link rel="preload" href="${f}" as="font" type="font/woff" crossorigin>`)}<link rel="stylesheet" href="/assets/app.css">
-<script src="/assets/boot.js"></script><script src="/assets/app.js" defer></script></head>`;
+<noscript><link rel="stylesheet" href="/assets/nojs.css"></noscript><script src="/assets/app.js" defer></script></head>`;
 }
 
 /** Header mark: the original crest artwork at exactly 2× pixel density, plus the company name as text. */

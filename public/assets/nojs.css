@@ -1,0 +1,14 @@
+/* Loaded only when scripting is disabled (<noscript><link>, CSP-compliant). app.css assumes JavaScript; these rules
+   restore the complete no-JS experience: the off-canvas sidebar stays in the flow on phones, the process and the
+   "Anatomy of a build" concept render as complete readable lists, and nothing depends on a script to appear. */
+.anatomy__tab { padding-left: 0; cursor: default; }
+.anatomy__tab::after { display: none; }
+.anatomy__detail { display: block !important; padding: 0 0 var(--s-4) calc(2.25rem + var(--s-3)) !important; }
+.stepper__text { display: block; }
+.stepper__panel { display: none; }
+.stepper { grid-template-columns: 1fr; }
+.stepper__btn { cursor: default; color: var(--white); }
+@media (max-width: 960px) {
+  .sidebar { position: static; transform: none; visibility: visible; width: auto; height: auto; box-shadow: none; border-right: 0; border-bottom: 1px solid var(--line); }
+  .topbar .nav-toggle { display: none !important; }
+}

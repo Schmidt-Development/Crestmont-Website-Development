@@ -150,7 +150,7 @@ function processStepper(steps: { title: string; body: string }[]): SafeHtml {
 <ol class="stepper__track" role="tablist" aria-label="Project stages" aria-orientation="vertical">${steps.map((s, i) => html`<li class="stepper__item">
 <button class="stepper__btn" type="button" role="tab" id="step-tab-${i + 1}" aria-controls="step-panel" aria-selected="${i === 0 ? "true" : "false"}" data-title="${s.title}" data-body="${s.body}">${s.title}</button>
 <p class="stepper__text">${s.body}</p></li>`)}</ol>
-<div class="stepper__panel" id="step-panel" role="tabpanel" aria-live="polite" data-stepper-panel hidden><div data-panel-body>
+<div class="stepper__panel" id="step-panel" role="tabpanel" aria-live="polite" data-stepper-panel><div data-panel-body>
 <span class="stepper__count" data-panel-count>Step 1 of ${steps.length}</span><h3 data-panel-title>${steps[0]?.title ?? ""}</h3><p data-panel-text>${steps[0]?.body ?? ""}</p></div>
 <div class="stepper__nav"><button class="btn btn--ghost btn--sm" type="button" data-step-prev>Previous stage</button><button class="btn btn--secondary btn--sm" type="button" data-step-next>Next stage</button></div>
 <p class="faint" style="margin:1.5rem 0 0;font-size:.8rem">Your customer portal shows which stage your project is in and what is waiting on you.</p></div></div>`;

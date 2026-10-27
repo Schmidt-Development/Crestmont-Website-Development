@@ -1,4 +1,5 @@
-// Progressive enhancement only: every feature works without JavaScript. Motion language: docs/frontend/DESIGN.md §6.
+// Progressive enhancement only: every feature works without JavaScript (the no-JS fallbacks live in nojs.css,
+// loaded through <noscript>). Motion language: docs/frontend/DESIGN.md §6.
 (() => {
   const root = document.documentElement;
   root.classList.add("js");
