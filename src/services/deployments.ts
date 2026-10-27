@@ -13,6 +13,7 @@ import { parse, v } from "../lib/validate.ts";
 import { approvalValidity } from "../readiness/engine.ts";
 import { ingestEvidence } from "../readiness/ingest.ts";
 import { audit } from "./security.ts";
+import { allowEgressHost } from "../lib/egress.ts";
 import * as ra from "./readiness-admin.ts";
 
 export class DeploymentError extends Error {
@@ -250,9 +251,11 @@ export async function probeEnvironments(ctx: Pick<AppContext, "db" | "settings" 
     if (!origin) { out.push({ environment: env, ran: false, detail: `skipped: ${envUrlKey(env)} is not a public https URL` }); continue; }
     const host = new URL(origin).hostname;
     const checkedAt = nowIso(ctx.now);
+    let dnsOk = false, dnsDetail = "", healthOk = false, tlsOk = false, healthDetail = "";
+    const releaseHost = allowEgressHost(host); // validated public https URL configured by the Owner (F-11)
+    try {
 
     // DNS
-    let dnsOk = false, dnsDetail: string;
     try {
       const r = await fetchImpl(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=A`, { headers: { accept: "application/dns-json" }, signal: AbortSignal.timeout(timeoutMs) });
       const b = (await r.json().catch(() => null)) as { Status?: number; Answer?: { data?: string }[] } | null;
@@ -262,7 +265,6 @@ export async function probeEnvironments(ctx: Pick<AppContext, "db" | "settings" 
     } catch (e) { dnsDetail = `DNS lookup for ${host} failed: ${(e as Error).message.slice(0, 200)}`; }
 
     // TLS + health
-    let healthOk = false, tlsOk = false, healthDetail: string;
     const started = Date.now();
     try {
       const r = await fetchImpl(`${origin}/api/health`, { headers: { accept: "application/json", "user-agent": "crestmont-env-probe" }, redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
@@ -272,6 +274,7 @@ export async function probeEnvironments(ctx: Pick<AppContext, "db" | "settings" 
       healthDetail = healthOk ? `/api/health 200 ok (${env}) in ${Date.now() - started} ms`
         : `/api/health returned HTTP ${r.status}${b?.environment && b.environment !== env ? ` for environment "${b.environment}" (expected ${env})` : ""}${b?.status ? `, status ${b.status}` : ""}`;
     } catch (e) { healthDetail = `HTTPS request to ${origin} failed (TLS, connection or timeout): ${(e as Error).message.slice(0, 200)}`; }
+    } finally { releaseHost(); }
 
     await writeHealth(ctx.db, "dns", env, dnsOk && tlsOk ? "configured_unverified" : "failing",
       `${dnsDetail}; TLS ${tlsOk ? "valid (HTTPS request completed)" : "not confirmed"}. Probed ${checkedAt}. DNS zone control is not verified by this probe.`);

@@ -1,6 +1,6 @@
 # OWASP ASVS 4.0.3 review (Level 2–oriented)
 
-**Requirement:** SEC-007 · **Scope:** the code in this repository as of 2026-10-26 (development only; no staging or production exists) · **Reviewer:** engineering, self-review.
+**Requirement:** SEC-007 · **Scope:** the code in this repository as of 2026-10-26, findings status updated 2026-10-27 (development only; no staging or production exists) · **Reviewer:** engineering, self-review.
 
 > **This is not a compliance claim.** Crestmont is **not** ASVS-compliant or certified, and nothing here should be presented that way. This is a self-review by the same team that wrote the code. It is not an independent assessment or a penetration test. It checks the source against the ASVS 4.0.3 chapters at roughly Level 2 depth and lists the gaps. An independent review and a staging penetration test are still needed before launch (F-16).
 
@@ -10,19 +10,19 @@ Severity: **High** = plausible exploitation or loss of an essential control befo
 
 | ID | Severity | Area | Finding | Status |
 |---|---|---|---|---|
-| F-01 | High | V14 / V1 | No staging or production environment, secrets store, WAF or Access policy exists yet (BLK-003). Every control below is verified only in development tests. | Open |
+| F-01 | High | V14 / V1 | No staging or production environment, secrets store, WAF or Access policy exists yet (BLK-003). Every control below is verified only in development tests. | Partly resolved: staging Worker, D1 and secrets now exist (deploy-staging.yml); production, WAF and Cloudflare Access are still not provisioned |
 | F-02 | High | V12 | No malware scanning for uploads. Files stay `scan_status='pending'` (`src/services/files.ts`). | Open |
 | F-03 | Medium | V7 | No external alerting. Errors go to `app_errors` and the console only; nobody is paged (`/staff/monitoring`). | Open |
-| F-04 | Medium | V2.8 | A TOTP code can be replayed within its ±30 s window. `verifyTotp` (`src/lib/auth-crypto.ts`) does not record the last used time-step. | Open |
+| F-04 | Medium | V2.8 | A TOTP code can be replayed within its ±30 s window. `verifyTotp` (`src/lib/auth-crypto.ts`) does not record the last used time-step. | **Fixed** (migration 0010: `users.totp_last_step`; codes are single-use per 30 s step; `tests/auth.test.ts`) |
 | F-05 | Medium | V2.4 | PBKDF2-SHA256 at 100 000 iterations is the Workers WebCrypto maximum, but below OWASP's current 600 000 recommendation for PBKDF2-SHA256. | Accepted constraint pending managed-auth decision |
-| F-06 | Medium | V2.1 | Breached-password checking (ASVS 2.1.7) is missing; there is only a tiny denylist (`passwordProblems`). | Open |
-| F-07 | Medium | V3.3 | Sessions have an absolute lifetime (12 h staff / 7 d customer) but **no idle timeout** (ASVS 3.3.2 at L2). | Open |
+| F-06 | Medium | V2.1 | Breached-password checking (ASVS 2.1.7) is missing; there is only a tiny denylist (`passwordProblems`). | **Fixed** (k-anonymity breached-password check via the Have I Been Pwned range API, on outside development, fail-open with a security event; larger offline denylist; `tests/asvs-hardening.test.ts`) |
+| F-07 | Medium | V3.3 | Sessions have an absolute lifetime (12 h staff / 7 d customer) but **no idle timeout** (ASVS 3.3.2 at L2). | **Fixed** (idle timeout 2 h staff / 24 h customer, `sessions.last_seen_at`; `src/services/auth.ts`) |
 | F-08 | Medium | V4 / V13 | `/api/*` routes skip CSRF by design. Safety relies on each API route never trusting cookies for writes. Today `readiness` reads use the cookie actor (read-only). Any future cookie-authenticated API write would be CSRF-exposed. | Open (guard by review) |
 | F-09 | Medium | V8.3 | Privacy deletion keeps `audit_logs.ip` and `security_events.email` for the anonymised user, because the audit table is append-only by design. The retention period for these is not yet defined. | Open (needs retention policy) |
 | F-10 | Medium | V10 / V14.2 | Dependency scanning (npm audit, CodeQL) is configured in CI but has never run (BLK-013). There are zero runtime dependencies, which limits exposure, but dev tooling is unscanned. | Open |
-| F-11 | Low | V5 / V12.6 | SSRF: outbound calls go only to fixed provider hosts (Stripe, Resend, Anthropic, GitHub, Turnstile, Cloudflare DoH) built from constants. `GITHUB_REPO` comes from configuration and is validated (`owner/name`). Nothing fetches user-supplied URLs today. There is still no central egress allowlist. | Open (hardening) |
-| F-12 | Low | V14.4 | `style-src 'self'` CSP is good. Several pages use inline `style="..."` attributes, which CSP-level-3 browsers block unless `'unsafe-inline'` is allowed. This is a functional, not security, issue. | Open |
-| F-13 | Low | V7.1 | `recordAppError` redacts common key formats (`src/services/monitoring.ts#redact`). Free-form error messages could still contain personal data. | Open |
+| F-11 | Low | V5 / V12.6 | SSRF: outbound calls go only to fixed provider hosts (Stripe, Resend, Anthropic, GitHub, Turnstile, Cloudflare DoH) built from constants. `GITHUB_REPO` comes from configuration and is validated (`owner/name`). Nothing fetches user-supplied URLs today. There is still no central egress allowlist. | **Fixed** (central egress allowlist `src/lib/egress.ts`, installed on the Worker's global fetch; the environment probe allows only its validated host for the call; `tests/asvs-hardening.test.ts`) |
+| F-12 | Low | V14.4 | `style-src 'self'` CSP is good. Several pages use inline `style="..."` attributes, which CSP-level-3 browsers block unless `'unsafe-inline'` is allowed. This is a functional, not security, issue. | **Fixed** (CSP allows `style-src-attr 'unsafe-inline'` only; scripts and style elements stay `'self'`) |
+| F-13 | Low | V7.1 | `recordAppError` redacts common key formats (`src/services/monitoring.ts#redact`). Free-form error messages could still contain personal data. | **Fixed** (`redact` also removes email addresses, phone numbers and card-like numbers from stored error text) |
 | F-14 | Low | V9 | HSTS is sent (`max-age=63072000; includeSubDomains`). TLS termination and the minimum TLS version are Cloudflare settings that are not provisioned yet. | Open |
 | F-15 | Low | V11 | The business-logic limits exist (revision allowances, refund chain, milestone de-duplication) but have no anti-automation on authenticated business actions apart from login/registration/reset rate limits. | Open |
 | F-16 | High | Process | No independent review or penetration test has been done. | Open |

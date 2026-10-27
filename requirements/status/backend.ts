@@ -24,4 +24,9 @@ export const BACKEND: Record<string, ImplementationRecord> = {
   "READY-005": { status: "in_progress", owner: "engineering",
     location: "src/services/github.ts#syncGithub + POST /staff/readiness/github/sync + scheduled github_sync job every 15 minutes (src/app/scheduled.ts) + /staff/readiness/engineering",
     missing: "GITHUB_TOKEN/GITHUB_REPO not provisioned as staging secrets; code scanning data needs GitHub Advanced Security; no live sync evidence yet" },
+  "SEC-002": { status: "implemented", owner: "engineering",
+    location: "CSRF double-submit + Origin check on every non-/api form POST (src/app/http.ts assertCsrf); auto-escaping html template and CSP (src/lib/html.ts, src/app/http.ts); parameterised SQL everywhere; SSRF: central egress allowlist on the Worker's global fetch (src/lib/egress.ts, installed in src/worker.ts) with the environment probe limited to its validated host; tests/asvs-hardening.test.ts, tests/security*.test.ts" },
+  "SEC-007": { status: "in_progress", owner: "engineering",
+    location: "docs/security/ASVS-REVIEW.md (self-review; F-04, F-06, F-07, F-11, F-12, F-13 fixed with tests; F-01 partly resolved by the staging environment)",
+    missing: "independent review / penetration test against staging (F-16); open: F-02 malware scanning (no scanner service), F-03 external alerting channel (Founder decision), F-05 PBKDF2 iteration ceiling, F-08 API CSRF exemption guarded by review, F-09 audit retention period (Founder/attorney), F-10 CI scanning evidence, F-14 TLS settings on the production zone, F-15 anti-automation on authenticated business actions" },
 };

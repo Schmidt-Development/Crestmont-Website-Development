@@ -5,7 +5,7 @@ import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { hashPassword, verifyPassword, randomToken, hashToken, passwordProblems, matchTotpStep, newTotpSecret } from "../lib/auth-crypto.ts";
 import { STAFF_ROLES, type Actor, type Role } from "../domain/authz.ts";
-import type { SessionUser } from "../app/context.ts";
+import type { SessionUser, Env } from "../app/context.ts";
 import { rateLimit, securityEvent, audit } from "./security.ts";
 
 export const SESSION_TTL_STAFF_S = 12 * 3600;
@@ -20,6 +20,37 @@ const LOCK_MINUTES = 15;
 export class AuthError extends Error {
   readonly status: number;
   constructor(message: string, status = 400) { super(message); this.status = status; }
+}
+
+/**
+ * Breached-password check (ASVS 2.1.7, finding F-06) using the Have I Been Pwned range API with
+ * k-anonymity: only the first 5 hex characters of the password's SHA-1 leave the platform, and the
+ * comparison happens locally. On by default outside development (PASSWORD_BREACH_CHECK = "off" disables,
+ * "on" enables in development). If the service cannot be reached the password is accepted (fail open)
+ * and the outage is recorded, because blocking every sign-up on a third-party outage is worse; the
+ * local policy in passwordProblems still applies.
+ */
+export const BREACH_API = "https://api.pwnedpasswords.com/range/";
+export async function assertPasswordNotBreached(env: Env, db: Db, password: string): Promise<void> {
+  const mode = env.PASSWORD_BREACH_CHECK ?? (env.ENVIRONMENT === "development" ? "off" : "on");
+  if (mode !== "on" || !password) return;
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-1", new TextEncoder().encode(password)));
+  const hex = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+  const f = env.overrides?.fetch ?? fetch;
+  let body: string;
+  try {
+    const r = await f(BREACH_API + hex.slice(0, 5), { headers: { "add-padding": "true", "user-agent": "crestmont-platform" }, signal: AbortSignal.timeout(3000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    body = await r.text();
+  } catch (e) {
+    await securityEvent(db, "breach_check_unavailable", { detail: String((e as Error).message ?? e).slice(0, 120) });
+    return;
+  }
+  const suffix = hex.slice(5);
+  for (const line of body.split("\n")) {
+    const [h, count] = line.trim().split(":");
+    if (h === suffix && Number(count) > 0) throw new AuthError("This password has appeared in a known data breach. Choose a different password.");
+  }
 }
 
 export async function registerCustomer(db: Db, input: { email: string; name: string; password: string; organizationName: string }, ip: string | null) {

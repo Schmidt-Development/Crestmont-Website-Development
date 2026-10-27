@@ -36,13 +36,20 @@ export async function verifyPassword(password: string, stored: string | null): P
 
 export const hashToken = (t: string) => sha256Hex(t);
 
-/** Basic password policy: length plus a small denylist. */
+/** Long-form passwords seen at the top of public breach corpora (offline fallback; the breach API is the main check). */
+const COMMON_PASSWORDS = new Set(["password1234", "123456789012", "qwertyuiopas", "qwertyuiop123", "passwordpassword", "1q2w3e4r5t6y", "1qaz2wsx3edc",
+  "abcdefghijkl", "abc123abc123", "aaaaaaaaaaaa", "iloveyouiloveyou", "trustno1trustno1", "monkeymonkey", "dragondragon", "sunshine1234",
+  "football1234", "baseball1234", "princess1234", "welcomewelcome", "changeme1234", "letmeinletmein", "administrator", "correcthorsebatterystaple"]);
+
+/** Basic password policy: length plus a denylist of common long passwords and patterns. */
 export function passwordProblems(pw: string, email?: string): string[] {
   const p: string[] = [];
   if (pw.length < 12) p.push("Password must be at least 12 characters");
   if (pw.length > 200) p.push("Password is too long");
   if (/^(.)\1+$/.test(pw)) p.push("Password cannot be a single repeated character");
-  if (["password1234", "123456789012", "qwertyuiopas"].includes(pw.toLowerCase())) p.push("Password is too common");
+  const lower = pw.toLowerCase();
+  if (COMMON_PASSWORDS.has(lower) || /^(password|passw0rd|qwerty|letmein|welcome|admin|iloveyou|crestmont)[\d!@#$%^&*._-]*$/.test(lower) || /^\d+$/.test(pw) && /^(0123456789|1234567890|9876543210)+/.test(pw))
+    p.push("Password is too common");
   if (email && pw.toLowerCase().includes(email.split("@")[0].toLowerCase()) && email.split("@")[0].length > 3) p.push("Password cannot contain your email name");
   return p;
 }

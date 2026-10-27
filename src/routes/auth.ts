@@ -81,6 +81,7 @@ export function register(r: Router) {
     if (!f.get("terms")) errors.push("You must accept the Terms of Service and Privacy Policy");
     if (errors.length) return registerPage(ctx, errors, v);
     try {
+      await auth.assertPasswordNotBreached(ctx.env, ctx.db, String(f.get("password") ?? ""));
       const res = await auth.registerCustomer(ctx.db, { email: v.email, name: v.name, password: String(f.get("password") ?? ""), organizationName: v.organization }, ctx.ip);
       if (res.verifyToken) {
         await sendMail(ctx, { template: "verification", to: v.email.toLowerCase(), subject: "Confirm your email — Crestmont", heading: "Confirm your email address", idempotencyKey: `verify:${res.userId}:${res.verifyToken.slice(0, 8)}`,
@@ -176,6 +177,7 @@ export function register(r: Router) {
   r.post("/password/reset", async (ctx) => {
     const f = await ctx.form();
     try {
+      await auth.assertPasswordNotBreached(ctx.env, ctx.db, String(f.get("password") ?? ""));
       await auth.resetPassword(ctx.db, str(f, "token"), String(f.get("password") ?? ""), ctx.ip);
       return redirect(ctx, "/login", { kind: "success", text: "Password updated. Sign in with your new password." });
     } catch (e) {
@@ -195,6 +197,7 @@ export function register(r: Router) {
     const f = await ctx.form();
     const token = str(f, "token");
     try {
+      await auth.assertPasswordNotBreached(ctx.env, ctx.db, String(f.get("password") ?? ""));
       await auth.acceptInvitation(ctx.db, token, str(f, "name"), String(f.get("password") ?? ""));
       return redirect(ctx, "/login", { kind: "success", text: "Invitation accepted. Sign in to continue — you will set up two-factor authentication next." });
     } catch (e) {
@@ -233,6 +236,7 @@ ${table(sessions, [
     requireUser(ctx);
     const f = await ctx.form();
     try {
+      await auth.assertPasswordNotBreached(ctx.env, ctx.db, String(f.get("next") ?? ""));
       await auth.changePassword(ctx.db, ctx.user!.id, String(f.get("current") ?? ""), String(f.get("next") ?? ""), ctx.sessionId!);
       await sendMail(ctx, { template: "security_notification", to: ctx.user!.email, subject: "Your password was changed", heading: "Password changed", idempotencyKey: `pw:${ctx.user!.id}:${Date.now()}`, paragraphs: ["The password for your Crestmont account was changed and other sessions were signed out. If this was not you, reset your password now."] });
       return redirect(ctx, "/account", { kind: "success", text: "Password updated. Other sessions were signed out." });
