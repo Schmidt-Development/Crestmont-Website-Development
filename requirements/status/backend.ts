@@ -29,4 +29,6 @@ export const BACKEND: Record<string, ImplementationRecord> = {
   "SEC-007": { status: "in_progress", owner: "engineering",
     location: "docs/security/ASVS-REVIEW.md (self-review; F-04, F-06, F-07, F-11, F-12, F-13 fixed with tests; F-01 partly resolved by the staging environment)",
     missing: "independent review / penetration test against staging (F-16); open: F-02 malware scanning (no scanner service), F-03 external alerting channel (Founder decision), F-05 PBKDF2 iteration ceiling, F-08 API CSRF exemption guarded by review, F-09 audit retention period (Founder/attorney), F-10 CI scanning evidence, F-14 TLS settings on the production zone, F-15 anti-automation on authenticated business actions" },
+  "TEST-001": { status: "implemented", owner: "engineering",
+    location: "node:test suites in tests/ (unit, integration through the real request pipeline, security matrix, finance, owner modules) reported by scripts/evidence-reporter.mjs into signed, idempotent evidence (/api/readiness/evidence); tests/coverage.test.ts fails if any implemented engineering or security requirement has no tagged test, or a tag names an unknown requirement" },
 };

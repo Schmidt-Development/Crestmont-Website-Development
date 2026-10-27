@@ -281,7 +281,7 @@ test("[FIN-001] all fees known → dashboard shows the fee total", async () => {
   assert.match(await (await owner.c.get("/staff/finance")).text(), /Stripe fees<\/div><div class="kpi__value">\$29\.30</);
 });
 
-test("[FIN-002] cost tracking keeps unknown costs unknown; [FIN-003] profitability is Incomplete until all costs are known", async () => {
+test("[FIN-002] [FIN-003] cost tracking keeps unknown costs unknown; profitability is Incomplete until all costs are known", async () => {
   const t = await app();
   const cu = await customerClient(t);
   const s = await seedPaid(t.db, cu.organizationId, { amount: 249_900 });
