@@ -1,4 +1,27 @@
 import type { ImplementationRecord } from "../status.ts";
 
-// Records for this product area. See requirements/status.ts for the rules.
-export const PUBLIC_SITE: Record<string, ImplementationRecord> = {};
+// Records for the public website, CMS and portfolio area (area A). See requirements/status.ts for the rules.
+// PORT-001..003 (genuine screenshots) are blocked (BLK-007) and intentionally have no record here.
+export const PUBLIC_SITE: Record<string, ImplementationRecord> = {
+  "WEB-001": { status: "implemented", location: "src/routes/public.ts GET / (all §12 sections; CMS keys home.*)", owner: "engineering" },
+  "WEB-002": { status: "implemented", location: "src/routes/public.ts /services, /services/:slug + src/content/services.ts", owner: "engineering" },
+  "WEB-003": { status: "implemented", location: "src/routes/public.ts /pricing, /pricing/compare (values from src/domain/catalog.ts PACKAGES)", owner: "engineering" },
+  "WEB-004": { status: "implemented", location: "src/routes/public.ts /about, /process, /faq, /contact (contact → captureLead web_form)", owner: "engineering" },
+  "WEB-005": { status: "implemented", location: "src/routes/public.ts GET/POST /quote → captureLead(quote_form) + lead_request_details (migration 0005), PRG to /quote/thanks, honeypot, rate limit, Turnstile fail-closed", owner: "engineering" },
+  "WEB-007": { status: "implemented", location: "src/routes/public.ts /hosting-maintenance, /services/technical-seo, /services/website-redesign, /services/custom-development", owner: "engineering" },
+  "WEB-008": { status: "implemented", location: "src/routes/public.ts /legal/:slug + src/content/legal.ts (drafts, visibly marked pending attorney review)", owner: "engineering" },
+  "WEB-009": { status: "in_progress", location: "tests/public.test.ts (crawl dead-link check + findProhibitedClaims/fabrication scan over every public page)", owner: "engineering", missing: "checks run in the dev test harness only; not yet run against a deployed staging build in CI; /checkout/:packageId is owned by the sales area and only its link shape is checked here" },
+  "WEB-010": { status: "implemented", location: "src/routes/public.ts /sitemap.xml, /robots.txt (Disallow all outside production); per-page title/description via CMS seo.* keys", owner: "engineering" },
+  "CAT-001": { status: "implemented", location: "src/domain/catalog.ts#APPROVED_SERVICES + src/content/services.ts (test asserts 1:1 coverage) + /services pages", owner: "engineering" },
+  "CAT-005": { status: "in_progress", location: "src/domain/catalog.ts#MAINTENANCE_PLANS; /hosting-maintenance shows names and monthly prices only", owner: "founder", missing: "entitlements are proposals pending Founder approval (CAT-006/BLK-010); recurring Stripe billing owned by the sales area" },
+  "CMS-001": { status: "implemented", location: "src/services/cms.ts + /staff/cms (drafts, ?preview=<revision>, publish, revert, revision history) over cms_entries/cms_revisions; defaults in src/content/registry.ts", owner: "engineering" },
+  "CMS-002": { status: "implemented", location: "src/services/cms.ts (cms.edit / cms.publish checks, audit_logs on every write) + requireStaff guards", owner: "engineering" },
+  "CMS-003": { status: "implemented", location: "src/services/cms.ts#saveDraft/publishRevision (pricing.presentation → pending_founder_approval, publish needs pricing.change; price text rejected; prices only from catalog.ts)", owner: "engineering" },
+  "PORT-004": { status: "in_progress", location: "migrations/0005_cms_portfolio.sql (descriptions limited to facts verified by page-text inspection 2026-10-26)", owner: "engineering", missing: "descriptions must be re-checked against the live sites when genuine screenshots are captured (BLK-007); technology summaries unknown" },
+  "PORT-006": { status: "in_progress", location: "src/routes/public.ts /portfolio, /portfolio/:slug (viewer dialog, Visit live website rel=noopener), /portfolio-media/:fileId (published-only)", owner: "engineering", missing: "no project is published yet: screenshots (BLK-007), relationship documentation (BLK-008) and link verification dates are outstanding" },
+  "PORT-007": { status: "implemented", location: "src/services/portfolio.ts + /staff/portfolio (add/edit, upload/replace screenshots via storage adapter, reorder, publish gate, link verification, relationship documentation, verified testimonials)", owner: "engineering" },
+  "LEGAL-001": { status: "in_progress", location: "src/content/legal.ts (terms, privacy, development agreement summary)", owner: "founder", missing: "attorney review (LEGAL-004); full custom-development and maintenance agreement texts; legal entity name (IDENT-001)" },
+  "LEGAL-002": { status: "in_progress", location: "src/content/legal.ts (support, refund, cancellation, acceptable use policies)", owner: "founder", missing: "attorney review (LEGAL-004); data processing addendum (DPA) not drafted" },
+  "IDENT-005": { status: "in_progress", location: "/legal/disclosures renders business.legal_name / business.address from business_settings", owner: "founder", missing: "legal entity (IDENT-001/BLK-006) and registered business address (IDENT-002) not established; page states they will be published before payments are accepted" },
+  "SUP-005": { status: "in_progress", location: "/legal/support, /contact and footer read support.staffed_hours from business_settings; no 24/7 human claims (tested)", owner: "founder", missing: "Founder has not set staffed support hours (business_settings support.staffed_hours)" },
+};
