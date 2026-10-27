@@ -13,5 +13,5 @@
     "skipLibCheck": true,
     "noUncheckedIndexedAccess": false
   },
-  "include": ["src", "tests", "requirements", "scripts/*.ts"]
+  "include": ["src", "tests", "requirements", "scripts/*.ts", "dev"]
 }

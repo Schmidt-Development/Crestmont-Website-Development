@@ -1,0 +1,22 @@
+name: CodeQL
+
+# Code scanning on private repositories requires GitHub Advanced Security (Code Security).
+# Kept separate from CI so a missing licence does not mark every build red. Runs weekly and on demand.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+      - uses: github/codeql-action/analyze@v3

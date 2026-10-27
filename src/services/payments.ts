@@ -1,0 +1,130 @@
+// Applies verified Stripe events (PAY-003). Webhooks are the only source of payment truth:
+// browser redirects never mark anything paid. Every handler is idempotent.
+import type { AppContext } from "../app/context.ts";
+import { nowIso, newId } from "../lib/db.ts";
+import { isStaleEvent, markEventResult, type StripeEvent } from "../domain/stripe-webhook.ts";
+import { markInvoicePaid, provisionProject } from "./commerce.ts";
+import { audit } from "./security.ts";
+import { sendMail } from "./mailer.ts";
+
+type Obj = Record<string, unknown>;
+const s = (o: Obj, k: string) => (typeof o[k] === "string" ? (o[k] as string) : null);
+const n = (o: Obj, k: string) => (typeof o[k] === "number" ? (o[k] as number) : null);
+const meta = (o: Obj) => ((o.metadata ?? {}) as Record<string, string>);
+
+export async function processStripeEvent(ctx: Pick<AppContext, "db" | "email" | "baseUrl">, evt: StripeEvent): Promise<void> {
+  const db = ctx.db;
+  try {
+    if (await isStaleEvent(db, evt)) { await markEventResult(db, evt.id, { ok: true, ignored: true }); return; }
+    const o = evt.data.object as Obj;
+    switch (evt.type) {
+      case "checkout.session.completed":
+      case "checkout.session.async_payment_succeeded": {
+        const m = meta(o);
+        if (s(o, "payment_status") !== "paid" && s(o, "mode") !== "subscription") break; // async methods settle later
+        if (m.organization_id && s(o, "customer")) {
+          await db.prepare(`UPDATE organizations SET stripe_customer_id = COALESCE(stripe_customer_id, ?) WHERE id = ?`).bind(s(o, "customer"), m.organization_id).run();
+        }
+        if (s(o, "mode") === "subscription") {
+          if (m.organization_id && m.product_id && s(o, "subscription")) await upsertSubscription(db, s(o, "subscription")!, m.organization_id, m.product_id, "active", null);
+          break;
+        }
+        if (!m.invoice_id) throw new Error("checkout session missing invoice_id metadata");
+        const res = await markInvoicePaid(db, m.invoice_id, { amountCents: n(o, "amount_total") ?? -1, paymentIntentId: s(o, "payment_intent") });
+        if (res.alreadyPaid) break;
+        const inv = res.invoice;
+        let projectId = inv.project_id;
+        if (!projectId && inv.order_id && (inv.milestone_kind === "full" || inv.milestone_kind === "deposit_50")) projectId = await provisionProject(db, inv.order_id);
+        if (inv.order_id) {
+          const lead = await db.prepare(`SELECT lead_id FROM orders WHERE id = ?`).bind(inv.order_id).first<{ lead_id: string | null }>();
+          if (lead?.lead_id) {
+            await db.batch([
+              db.prepare(`UPDATE leads SET stage = 'converted', updated_at = ? WHERE id = ? AND stage IN ('accepted','awaiting_payment')`).bind(nowIso(), lead.lead_id),
+              db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`).bind(newId("act"), lead.lead_id, `Payment confirmed by Stripe webhook (${evt.id}); lead converted`, nowIso()),
+            ]);
+          }
+        }
+        const to = s(o, "customer_email") ?? ((o.customer_details as Obj | undefined)?.email as string | undefined) ?? null;
+        if (to) await sendMail(ctx, { template: "receipt", to, subject: "Payment received — Crestmont", heading: "Thank you — your payment was received", idempotencyKey: `receipt:${inv.id}`,
+          paragraphs: [`We received your payment of $${(inv.amount_cents / 100).toFixed(2)}.`, projectId ? "Your project is set up. The next step is onboarding, where you tell us about your business, brand and goals." : "Your project record has been updated."],
+          cta: { label: projectId ? "Start onboarding" : "View billing", url: `${ctx.baseUrl}/portal${projectId ? `/projects/${projectId}/onboarding` : "/billing"}` } });
+        break;
+      }
+      case "customer.subscription.created":
+      case "customer.subscription.updated":
+      case "customer.subscription.deleted": {
+        const m = meta(o);
+        const org = m.organization_id ?? (await db.prepare(`SELECT id FROM organizations WHERE stripe_customer_id = ?`).bind(s(o, "customer")).first<{ id: string }>())?.id;
+        if (!org) throw new Error("Subscription for unknown customer");
+        const status = evt.type === "customer.subscription.deleted" ? "canceled" : (s(o, "status") ?? "incomplete");
+        const end = n(o, "current_period_end");
+        await upsertSubscription(db, evt.data.object.id, org, m.product_id ?? null, status, end ? new Date(end * 1000).toISOString() : null);
+        break;
+      }
+      case "invoice.payment_failed": {
+        const sub = s(o, "subscription");
+        if (sub) await db.prepare(`UPDATE subscriptions SET status = 'past_due', updated_at = ? WHERE stripe_subscription_id = ?`).bind(nowIso(), sub).run();
+        const to = s(o, "customer_email");
+        if (to) await sendMail(ctx, { template: "failed_payment", to, subject: "Action needed: payment failed", heading: "Your payment did not go through", idempotencyKey: `failed:${evt.id}`,
+          paragraphs: ["Your most recent maintenance plan payment failed. Please update your payment method to keep your plan active.", "Stripe will retry the payment automatically."],
+          cta: { label: "Update payment method", url: `${ctx.baseUrl}/portal/billing` } });
+        await audit(db, { actorKind: "webhook", action: "payment.failed", subjectType: "subscription", subjectId: sub, details: { event: evt.id } });
+        break;
+      }
+      case "invoice.paid": {
+        const sub = s(o, "subscription");
+        if (sub) await db.prepare(`UPDATE subscriptions SET status = 'active', updated_at = ? WHERE stripe_subscription_id = ? AND status = 'past_due'`).bind(nowIso(), sub).run();
+        break;
+      }
+      case "charge.refunded": {
+        const pi = s(o, "payment_intent");
+        const refunded = n(o, "amount_refunded") ?? 0;
+        const total = n(o, "amount") ?? 0;
+        if (pi) {
+          await db.prepare(`UPDATE payments SET status = ? WHERE stripe_payment_intent_id = ?`).bind(refunded >= total ? "refunded" : "partially_refunded", pi).run();
+          await db.prepare(`UPDATE refunds SET status = 'issued' WHERE status = 'approved' AND payment_id IN (SELECT id FROM payments WHERE stripe_payment_intent_id = ?)`).bind(pi).run();
+        }
+        break;
+      }
+      case "charge.dispute.created":
+      case "charge.dispute.updated":
+      case "charge.dispute.closed": {
+        const pi = s(o, "payment_intent");
+        const pay = pi ? await db.prepare(`SELECT id, organization_id FROM payments WHERE stripe_payment_intent_id = ?`).bind(pi).first<{ id: string; organization_id: string }>() : null;
+        const due = n((o.evidence_details ?? {}) as Obj, "due_by");
+        await db.prepare(`INSERT INTO disputes (id, organization_id, payment_id, stripe_dispute_id, amount_cents, reason, status, evidence_due_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)
+                          ON CONFLICT(stripe_dispute_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at`)
+          .bind(newId("dsp"), pay?.organization_id ?? null, pay?.id ?? null, evt.data.object.id, n(o, "amount") ?? 0, s(o, "reason"), s(o, "status") ?? "unknown", due ? new Date(due * 1000).toISOString() : null, nowIso(), nowIso()).run();
+        if (pay) await db.prepare(`UPDATE payments SET status = 'disputed' WHERE id = ?`).bind(pay.id).run();
+        break;
+      }
+      default:
+        await markEventResult(db, evt.id, { ok: true, ignored: true });
+        return;
+    }
+    await markEventResult(db, evt.id, { ok: true });
+  } catch (e) {
+    await markEventResult(db, evt.id, { ok: false, error: (e as Error).message });
+    // Respond 200 anyway: the event is stored and retried by the reconciliation job (dead-letter after 5).
+  }
+}
+
+async function upsertSubscription(db: AppContext["db"], stripeId: string, orgId: string, productId: string | null, status: string, periodEnd: string | null) {
+  const allowed = ["trialing", "active", "past_due", "canceled", "incomplete", "unpaid"];
+  const st = allowed.includes(status) ? status : status === "incomplete_expired" ? "canceled" : "incomplete";
+  const existing = await db.prepare(`SELECT id FROM subscriptions WHERE stripe_subscription_id = ?`).bind(stripeId).first<{ id: string }>();
+  if (existing) {
+    await db.prepare(`UPDATE subscriptions SET status = ?, current_period_end = COALESCE(?, current_period_end), updated_at = ? WHERE id = ?`).bind(st, periodEnd, nowIso(), existing.id).run();
+  } else {
+    if (!productId) throw new Error("New subscription is missing product_id metadata");
+    await db.prepare(`INSERT INTO subscriptions (id, organization_id, product_id, stripe_subscription_id, status, current_period_end, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`)
+      .bind(newId("sub"), orgId, productId, stripeId, st, periodEnd, nowIso(), nowIso()).run();
+  }
+}
+
+/** Reconciliation: retry failed events (PAY-009). Called by the scheduled worker. */
+export async function retryFailedStripeEvents(ctx: Pick<AppContext, "db" | "email" | "baseUrl">): Promise<number> {
+  const rows = (await ctx.db.prepare(`SELECT id, payload FROM stripe_events WHERE status IN ('failed','received') AND attempts < 5 ORDER BY stripe_created LIMIT 50`).all<{ id: string; payload: string }>()).results;
+  for (const r of rows) await processStripeEvent(ctx, JSON.parse(r.payload) as StripeEvent);
+  return rows.length;
+}

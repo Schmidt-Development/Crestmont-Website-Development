@@ -1,4 +1,9 @@
 node_modules/
 evidence/
 .wrangler/
+.dev/
 .dev.vars
+*.db
+*.db-wal
+*.db-shm
+test-results/
