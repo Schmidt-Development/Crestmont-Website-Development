@@ -1,4 +1,28 @@
 import type { ImplementationRecord } from "../status.ts";
 
-// Records for this product area. See requirements/status.ts for the rules.
-export const PROJECTS: Record<string, ImplementationRecord> = {};
+// Records for this product area (customer portal collaboration + project delivery). See requirements/status.ts for the rules.
+export const PROJECTS: Record<string, ImplementationRecord> = {
+  "PORTAL-001": { status: "implemented", location: "src/routes/portal.ts GET /portal (projects, required actions, unread messages, invoices, subscriptions, tickets, notifications; empty state → /pricing, /quote)", owner: "engineering" },
+  "PORTAL-002": { status: "implemented", location: "src/services/onboarding.ts (§19 fields, data-show-when conditions validated server-side, drafts, logo/images via file service) + /portal/projects/:id/onboarding; submit → scope_review via changeProjectStatus, PM notified", owner: "engineering" },
+  "PORTAL-003": { status: "implemented", location: "src/routes/portal.ts /portal/projects, /portal/projects/:id (milestones, customer-visible task counts, timeline from due dates, required approvals, blockers, filtered audit history)", owner: "engineering" },
+  "PORTAL-004": { status: "in_progress", location: "src/services/files.ts + /portal/files, /portal/projects/:id/files, /portal/files/:id (replace/move/delete), /files/:id[/preview]", owner: "engineering",
+    missing: "Upload/download/preview/replace/organize/soft delete and tenant-checked, audited downloads are built and tested; R2 bucket not yet bound in a deployed environment, no malware scanner (files stay 'Not yet scanned'), and no expiring signed share links for external recipients" },
+  "PORTAL-005": { status: "in_progress", location: "src/services/messages.ts + /portal/messages, /portal/projects/:id/messages, staff thread /staff/projects/:id?tab=messages (internal notes, attachments, message_reads, in-app + email notifications)", owner: "engineering",
+    missing: "Notification email delivery depends on Resend (not configured; dev outbox only); general (non-project) conversations are not exposed" },
+  "PORTAL-006": { status: "implemented", location: "src/services/projects.ts#requestRevision/updateRevisionStatus/proposeChangeOrder/decideChangeOrder + /portal/projects/:id/revisions; over-allowance rounds become change orders with open change_order invoices", owner: "engineering" },
+  "PORTAL-007": { status: "implemented", location: "src/services/projects.ts#requestCustomerApproval/recordCustomerApproval + approval_requests (migration 0006) + /portal/approvals, /portal/projects/:id/approvals (customer_admin only, notes required on reject, audited)", owner: "engineering" },
+  "PORTAL-010": { status: "implemented", location: "src/services/projects.ts#saveHandoff + /staff/projects/:id?tab=handoff (draft/publish) + /portal/projects/:id/handoff (final acceptance → handoffs.accepted_at)", owner: "engineering" },
+  "PM-002": { status: "implemented", location: "src/domain/project.ts#decideRevision + src/services/projects.ts#requestRevision (projects.revision_allowance from catalog: 2/3/4; every round counted, revisions.included)", owner: "engineering" },
+  "PM-003": { status: "in_progress", location: "src/services/projects.ts#proposeChangeOrder/decideChangeOrder (scope, price, customer approval, open invoice, delivery task)", owner: "engineering",
+    missing: "Payment collection is provided by the billing area (/portal/billing/invoices/:id/pay) and needs Stripe; change_orders.status moves to 'paid' only when the invoice row is paid (syncChangeOrderPayments) — no webhook hook from billing yet" },
+  "PM-004": { status: "implemented", location: "src/services/projects.ts (milestones, tasks, task_dependencies with cycle check + completion gate, assignments, estimates, time_entries with NULL unknown cost) + /staff/projects/:id?tab=plan, /staff/tasks, /staff/tasks/:id", owner: "engineering" },
+  "PM-005": { status: "in_progress", location: "src/services/projects.ts#runInactivitySweep (inactivity_notices, migration 0006; remind → escalate → pause, never cancel) + POST /staff/projects/sweep-inactivity + resumeProject", owner: "engineering",
+    missing: "No scheduled (cron) trigger wired in the deployed worker yet — the sweep runs on demand; customer-facing inactivity policy text must be published by the public-site area" },
+  "PM-006": { status: "implemented", location: "src/services/projects.ts#releaseReadiness (customerReleaseReadiness + customer review + change-order payments) + recordStaffApproval + recordDeployment gate; panel at /staff/projects/:id?tab=approvals (separate from platform readiness)", owner: "engineering" },
+  "PM-007": { status: "implemented", location: "src/services/projects.ts#addProjectCost/recordDeployment + /staff/projects/:id?tab=costs|approvals (NULL = Unknown; completion requires a deployment record; completed_at)", owner: "engineering" },
+  "EMP-003": { status: "implemented", location: "src/routes/projects.ts GET /staff (assigned tasks with due/overdue, projects, assigned leads, assigned tickets, notifications, activity, role-specific counts)", owner: "engineering" },
+  "FILE-001": { status: "in_progress", location: "src/services/files.ts (metadata, sha256, tenant-scoped queries, access check for customers and assigned/authorized staff) on src/adapters/storage.ts", owner: "engineering",
+    missing: "R2 bucket binding not provisioned in staging/production; verified only against the in-memory test adapter" },
+  "SEC-003": { status: "in_progress", location: "src/services/files.ts (validateUpload allow-list + magic bytes, 25 MB limit, private keys, nosniff/sandbox headers, inline only for images/PDF, file.downloaded / file.download_denied audit)", owner: "engineering",
+    missing: "No malware scanning service configured (scan_status stays 'pending', shown as 'Not yet scanned'); no time-limited signed URLs" },
+};

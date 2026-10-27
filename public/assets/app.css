@@ -317,3 +317,20 @@ fieldset.field > legend { font-size: var(--fs-sm); color: var(--text-2); margin-
 .kanban__card strong { display: block; color: var(--white); font-weight: 600; }
 details > summary { cursor: pointer; padding: var(--s-2) 0; }
 .filters .btn { align-self: end; }
+/* ── support & readiness (area D) ── */
+.exec-tile { text-decoration: none; color: inherit; display: block; transition: border-color .15s; }
+.exec-tile:hover, .exec-tile:focus-visible { border-color: var(--line-gold); color: inherit; }
+.exec-tile--warn .kpi__value { color: var(--warn); }
+.exec-tile--bad .kpi__value { color: var(--bad); }
+[data-gate] .dl { margin-top: var(--s-3); }
+[data-gate] ul, .readiness-report ul { margin: 0; padding-left: 1.1rem; }
+@media print {
+  .no-print, .tabs, .filters, .toast, .draft-banner, form { display: none !important; }
+  .app { display: block; } .app-main, .page { padding: 0; }
+  .readiness-report, .readiness-report * { color: #000 !important; background: #fff !important; border-color: #999 !important; box-shadow: none !important; }
+  .readiness-report a { text-decoration: none; }
+  .readiness-report .card, .readiness-report [data-gate], .readiness-report tr { break-inside: avoid; }
+  .readiness-report .table { font-size: 9pt; }
+  .readiness-report .meter span { background: #000 !important; }
+  .readiness-report details > *:not(summary) { display: block; }
+}
