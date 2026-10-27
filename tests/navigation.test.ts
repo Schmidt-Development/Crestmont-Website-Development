@@ -1,13 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createStaff, createCustomer } from "./support/app.ts";
-import { staffNav, portalNav } from "../src/routes/nav.ts";
+import { staffNav, portalNav, OWNER_MODULE_LABELS } from "../src/routes/nav.ts";
 import { can } from "../src/domain/authz.ts";
 
-const OWNER_MODULES = ["Executive overview", "Launch readiness", "Engineering", "Development", "Staging", "Production", "CRM", "Sales", "Quotes",
-  "Customers", "Projects", "Tasks", "Employees", "Support", "Refunds", "Disputes", "Revenue", "Subscriptions", "Invoices", "Profitability",
-  "AI operations", "AI receptionist", "Email operations", "Portfolio", "Website CMS", "Integrations", "Monitoring", "Security", "Audit logs",
-  "Backups", "Reports", "Business settings"];
+const OWNER_MODULES = OWNER_MODULE_LABELS;
+assert.equal(OWNER_MODULES.length, 32);
 
 test("[OWN-001] the Owner navigation exposes all 32 §34 modules and every one renders (200)", async () => {
   const { db, client } = await createTestApp();

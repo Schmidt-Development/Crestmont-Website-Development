@@ -12,8 +12,8 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      rotate_preview_password:
-        description: "Generate a new staging preview password (old one stops working)"
+      rotate_credentials:
+        description: "Rotate the preview password and every demo account password and 2FA key (old ones stop working)"
         type: boolean
         default: false
       reseed_demo_accounts:
@@ -55,6 +55,9 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       FIXED_PREVIEW_PASSWORD: ${{ secrets.STAGING_PREVIEW_PASSWORD }}
       DEPLOYMENT_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-staging
+      # Bump to force a one-time rotation of all staging access credentials on the next run (scripts/staging-access.ts).
+      # 2 = rotation after the preview-password mismatch of deploy #4 (2026-10-27).
+      ACCESS_EPOCH: "2"
       WRANGLER: npx --yes wrangler@4
     steps:
       - uses: actions/checkout@v4
@@ -89,16 +92,14 @@ jobs:
             node -e 'const fs=require("fs");let t=fs.readFileSync("wrangler.toml","utf8");t=t.replace(/^r2_buckets = \[\{ binding = "FILES", bucket_name = "crestmont-files-staging" \}\]\n/m,"");fs.writeFileSync("wrangler.toml",t)'
           fi
 
-      - name: Safety export of the staging database
+      - name: Restore point (D1 Time Travel bookmark)
         continue-on-error: true
-        run: mkdir -p backups && $WRANGLER d1 export crestmont-staging --remote --env staging --output "backups/pre-deploy-${GITHUB_SHA}.sql"
-
-      - uses: actions/upload-artifact@v4
-        if: hashFiles('backups/*.sql') != ''
-        with:
-          name: pre-deploy-staging-export
-          path: backups/
-          retention-days: 14
+        run: |
+          # D1 keeps point-in-time history; record where to restore to instead of exporting the database
+          # (an export would copy demo password hashes and 2FA keys into a second artifact).
+          $WRANGLER d1 time-travel info crestmont-staging --env staging --json > tt.json 2>/dev/null && \
+            node -e 'const j=JSON.parse(require("fs").readFileSync("tt.json","utf8"));console.log("Pre-deploy D1 bookmark: "+(j.bookmark??JSON.stringify(j)))' | tee -a "$GITHUB_STEP_SUMMARY"
+          rm -f tt.json
 
       - name: Apply D1 migrations
         run: $WRANGLER d1 migrations apply crestmont-staging --remote --env staging
@@ -111,28 +112,11 @@ jobs:
           [ -n "$url" ] || { echo "::error::No workers.dev URL in deploy output. Choose a workers.dev subdomain in the Cloudflare dashboard (Workers & Pages → Overview) and re-run."; exit 1; }
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
-      - name: Preview password and evidence secret
-        id: secrets
-        env:
-          ROTATE: ${{ inputs.rotate_preview_password }}
+      - name: Evidence ingest secret
         run: |
-          mkdir -p access
-          names=$($WRANGLER secret list --env staging 2>/dev/null || echo "[]")
-          if [ -n "$FIXED_PREVIEW_PASSWORD" ]; then
-            printf '%s' "$FIXED_PREVIEW_PASSWORD" | $WRANGLER secret put STAGING_ACCESS_PASSWORD --env staging
-            echo "known=true" >> "$GITHUB_OUTPUT"; pw="$FIXED_PREVIEW_PASSWORD"; echo "(preview password = your STAGING_PREVIEW_PASSWORD secret)" > access/password.txt
-          elif ! echo "$names" | grep -q STAGING_ACCESS_PASSWORD || [ "$ROTATE" = "true" ]; then
-            pw=$(node -e 'process.stdout.write(require("crypto").randomBytes(12).toString("base64url"))')
-            echo "::add-mask::$pw"
-            printf '%s' "$pw" | $WRANGLER secret put STAGING_ACCESS_PASSWORD --env staging
-            echo "$pw" > access/password.txt; echo "known=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "known=false" >> "$GITHUB_OUTPUT"; pw=""
-          fi
-          if [ -n "$pw" ]; then echo "::add-mask::$pw"; echo "pw=$pw" >> "$GITHUB_OUTPUT"; fi
           ev=$(node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))')
           echo "::add-mask::$ev"
-          printf '%s' "$ev" | $WRANGLER secret put EVIDENCE_INGEST_SECRET --env staging
+          printf '%s' "$ev" | $WRANGLER secret put EVIDENCE_INGEST_SECRET --env staging > /dev/null
           echo "EVIDENCE_INGEST_SECRET=$ev" >> "$GITHUB_ENV"
 
       - name: Seed sample data and demo accounts (first run or on request)
@@ -142,7 +126,9 @@ jobs:
         run: |
           n=$($WRANGLER d1 execute crestmont-staging --remote --env staging --json --command "SELECT COUNT(*) AS n FROM users WHERE email LIKE '%@crestmont-preview.test'" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);process.stdout.write(String(j[0].results[0].n))})')
           if [ "$n" = "0" ] || [ "$RESEED" = "true" ]; then
-            node --no-warnings scripts/seed-staging.ts --out seed.sql --credentials access/demo-accounts.md
+            # The seed's own random credentials are discarded: the next step applies the issued ones.
+            node --no-warnings scripts/seed-staging.ts --out seed.sql --credentials "$RUNNER_TEMP/discard.md"
+            rm -f "$RUNNER_TEMP/discard.md"
             $WRANGLER d1 execute crestmont-staging --remote --env staging --file seed.sql --yes
             echo "seeded=true" >> "$GITHUB_OUTPUT"
           else
@@ -150,30 +136,37 @@ jobs:
             echo "seeded=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Apply staging access (preview password + demo accounts, rotated when due)
+        env:
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ROTATE: ${{ inputs.rotate_credentials }}
+        run: node --no-warnings scripts/staging-access.ts --url "${{ steps.deploy.outputs.url }}" --out access
+
+      - name: Verify the full access sequence on the live preview
+        id: verify
+        run: |
+          node --no-warnings scripts/verify-staging-access.ts --access access/access.json \
+            --url "${{ steps.deploy.outputs.url }}" --readme access/README.md
+
       - name: Smoke checks through the preview gate
         id: smoke
         env:
           BASE: ${{ steps.deploy.outputs.url }}
-          PW: ${{ steps.secrets.outputs.pw }}
         run: |
           code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/health"); [ "$code" = "200" ] || { echo "::error::/api/health returned $code"; exit 1; }
           code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/"); [ "$code" = "401" ] || { echo "::error::preview gate not active on / (HTTP $code)"; exit 1; }
-          if [ -n "$PW" ]; then
-            cookie=$(curl -s -D - -o /dev/null --data-urlencode "password=$PW" --data-urlencode "next=/" "$BASE/__preview-access" | grep -i '^set-cookie: cm_preview=' | sed -E 's/^set-cookie: ([^;]+);.*/\1/I' | tr -d '\r')
-            [ -n "$cookie" ] || { echo "::error::preview password was not accepted"; exit 1; }
-            CHECK_COOKIE="$cookie" node --no-warnings scripts/production-checks.ts --base "$BASE" --environment staging --commit "$GITHUB_SHA" \
-              --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}" --out evidence/staging-check.json
-          else
-            echo "Preview password unknown to this run (set once, not rotated): ran health + gate checks only."
-          fi
+          PW=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("access/private.json","utf8")).previewPassword)')
+          cookie=$(curl -s -D - -o /dev/null --data-urlencode "password=$PW" --data-urlencode "next=/" "$BASE/__preview-access" | grep -i '^set-cookie: cm_preview=' | sed -E 's/^set-cookie: ([^;]+);.*/\1/I' | tr -d '\r')
+          [ -n "$cookie" ] || { echo "::error::preview password was not accepted"; exit 1; }
+          CHECK_COOKIE="$cookie" node --no-warnings scripts/production-checks.ts --base "$BASE" --environment staging --commit "$GITHUB_SHA" \
+            --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}" --out evidence/staging-check.json
 
       - name: Browser journey on the preview (staging E2E evidence)
         id: e2e
-        if: steps.smoke.outcome == 'success' && steps.secrets.outputs.pw != '' && steps.seed.outputs.seeded == 'true'
+        if: steps.smoke.outcome == 'success'
         continue-on-error: true
         env:
           E2E_BASE_URL: ${{ steps.deploy.outputs.url }}
-          E2E_PREVIEW_PASSWORD: ${{ steps.secrets.outputs.pw }}
           E2E_ACCOUNTS_FILE: access/demo-accounts.md
           EVIDENCE_ENVIRONMENT: staging
           EVIDENCE_FILE: evidence/staging-e2e.json
@@ -181,8 +174,9 @@ jobs:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
         run: |
-          npm install --prefix .pw --no-save --no-audit --no-fund playwright@1.48.2
-          .pw/node_modules/.bin/playwright install --with-deps chromium
+          npm install --prefix .pw --no-save --no-audit --no-fund playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+          export E2E_PREVIEW_PASSWORD=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("access/private.json","utf8")).previewPassword)')
           node --no-warnings --test --test-concurrency=1 --test-reporter=./scripts/evidence-reporter.mjs tests/e2e/staging.e2e.ts
 
       - name: Record evidence and deployment
@@ -197,26 +191,20 @@ jobs:
             --ci-run "gh-${{ github.run_id }}-${{ github.run_attempt }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --verification "${{ steps.smoke.outcome == 'success' && 'passed' || 'failed' }}" || true
 
-      - name: Write access instructions
+      - name: Access summary (no credentials)
         if: always() && steps.deploy.outcome == 'success'
-        env:
-          BASE: ${{ steps.deploy.outputs.url }}
-          KNOWN: ${{ steps.secrets.outputs.known }}
         run: |
-          {
-            echo "# Crestmont staging preview"; echo
-            echo "URL: $BASE"; echo
-            if [ -f access/password.txt ]; then echo "Preview password: $(cat access/password.txt)"; else echo "Preview password: unchanged since it was first issued (re-run this workflow with 'rotate_preview_password' to get a new one)."; fi
-            echo; echo "1. Open the URL and enter the preview password."
-            echo "2. Sign in with a demo account below (staff accounts need the 2FA setup key in an authenticator app)."
-            echo; [ -f access/demo-accounts.md ] && cat access/demo-accounts.md || echo "Demo accounts were issued on an earlier run (re-run with 'reseed_demo_accounts' for a fresh set)."
-          } > access/README.md
-          rm -f access/password.txt
-          echo "### Staging preview deployed: $BASE" >> "$GITHUB_STEP_SUMMARY"
-          echo "Access details are in the private **staging-preview-access** artifact of this run (not in logs)." >> "$GITHUB_STEP_SUMMARY"
+          rm -f access/private.json access/access.json access/demo-accounts.md
+          if [ "${{ steps.verify.outcome }}" = "success" ]; then
+            echo "### Staging preview deployed and verified: ${{ steps.deploy.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "Preview password → Owner sign-in → 2FA → all 32 Owner modules verified on the live site." >> "$GITHUB_STEP_SUMMARY"
+            echo "Credentials are in the private **staging-preview-access** artifact of this run (never in logs)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Staging access NOT verified — no access artifact was issued for this run." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - uses: actions/upload-artifact@v4
-        if: always() && steps.deploy.outcome == 'success'
+        if: always() && steps.verify.outcome == 'success'
         with:
           name: staging-preview-access
           path: access/README.md

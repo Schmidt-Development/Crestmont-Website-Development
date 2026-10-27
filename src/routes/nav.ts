@@ -4,6 +4,12 @@
 import type { AppContext } from "../app/context.ts";
 import type { NavGroup } from "../ui/layout.ts";
 
+/** The 32 Owner command-center modules (§34). Each must appear in the Owner's navigation (OWN-001). */
+export const OWNER_MODULE_LABELS = ["Executive overview", "Launch readiness", "Engineering", "Development", "Staging", "Production", "CRM", "Sales", "Quotes",
+  "Customers", "Projects", "Tasks", "Employees", "Support", "Refunds", "Disputes", "Revenue", "Subscriptions", "Invoices", "Profitability",
+  "AI operations", "AI receptionist", "Email operations", "Portfolio", "Website CMS", "Integrations", "Monitoring", "Security", "Audit logs",
+  "Backups", "Reports", "Business settings"] as const;
+
 export function portalNav(_ctx: AppContext): NavGroup[] {
   return [
     { label: "Overview", items: [{ href: "/portal", label: "Dashboard" }, { href: "/portal/projects", label: "Projects" }] },

@@ -515,8 +515,13 @@ test("[INFRA-005] deployment workflows are gated: staging skips without Cloudfla
   assert.match(staging, /deploy --env staging/);
   // Preview: self-provisioned, gated, password masked and delivered only as a private artifact, seeded on first run.
   assert.match(staging, /d1 create crestmont-staging/);
-  assert.match(staging, /secret put STAGING_ACCESS_PASSWORD --env staging/);
-  assert.match(staging, /::add-mask::\$pw/);
+  // Access credentials: derived + re-applied every run, verified end to end before any artifact is issued.
+  assert.match(staging, /ACCESS_ROOT_KEY: \$\{\{ secrets\.CLOUDFLARE_API_TOKEN \}\}/);
+  assert.match(staging, /scripts\/staging-access\.ts/);
+  assert.match(staging, /scripts\/verify-staging-access\.ts/);
+  assert.match(staging, /upload-artifact@v4\n\s+if: always\(\) && steps\.verify\.outcome == 'success'/, "access artifact only after the live sequence verified");
+  assert.match(staging, /rm -f access\/private\.json access\/access\.json/);
+  assert.doesNotMatch(staging, /upload-artifact[\s\S]*?path: (backups|access\/(private|access))/, "no other artifact carries credentials");
   assert.match(staging, /preview gate not active/);
   assert.match(staging, /scripts\/seed-staging\.ts/);
   assert.match(staging, /name: staging-preview-access/);

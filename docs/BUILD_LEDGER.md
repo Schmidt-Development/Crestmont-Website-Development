@@ -79,3 +79,12 @@ Not blocking the next step: voice provider approval (`docs/voice/PROVIDER-EVALUA
 - **Staging browser journey** (`tests/e2e/staging.e2e.ts`, TEST-002): runs in the deploy workflow on seeding
   runs and records staging evidence; rehearsed locally against the dev server with the gate on (pass).
 - Status: preview not yet live — waiting on the two Cloudflare secrets (no other blocker).
+- **Preview-password mismatch (deploy #4) fixed at the root**: the password was only (re)issued when the Worker
+  secret looked missing or on request, so later runs could overwrite it while an earlier artifact kept the old
+  value, and an artifact could be uploaded without the password ever being proven on the live site; reseeding
+  also issued demo credentials that `INSERT OR IGNORE` never applied. Now `scripts/staging-access.ts` derives the
+  preview password and all demo credentials (HMAC of the Cloudflare token secret + D1-stored salt) and re-applies
+  them every run; `scripts/verify-staging-access.ts` proves preview password → Owner sign-in → 2FA → 32 modules on
+  the live site before the artifact is issued. ACCESS_EPOCH 2 forces a one-time rotation of everything (old
+  sessions revoked). The raw D1 export artifact (which held demo hashes and 2FA keys) was replaced by a Time
+  Travel bookmark.

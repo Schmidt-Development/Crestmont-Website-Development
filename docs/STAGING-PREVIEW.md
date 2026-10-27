@@ -22,21 +22,31 @@ automated by `.github/workflows/deploy-staging.yml`.
 
 ## What you get
 
-When the run finishes, open it and download the **staging-preview-access** artifact (private to repository
-members, kept 7 days). It contains the preview URL, the preview password (if generated) and one demo account
-per role: Owner (all 32 modules), Administrator, Sales, Developer, Project Manager, Support, and two customer
-accounts. Staff accounts use two-factor authentication: add the listed setup key to an authenticator app.
+Each successful run downloads as a **staging-preview-access** artifact (private to repository members, kept
+7 days). Its README holds, at the top: the website URL, the preview password, the Owner email, the Owner
+password and the Owner 2FA authenticator setup key, followed by every other demo account.
 
-- Lost the password? Re-run the workflow with **rotate_preview_password** ticked.
-- Want fresh demo accounts? Re-run with **reseed_demo_accounts** ticked.
+The artifact is issued **only after the run has verified the whole sequence on the live site**: preview
+password → Owner email and password → a valid 2FA code → all 32 Owner modules loading. If that check fails the
+run fails and no artifact is issued, so an artifact never holds credentials that do not work.
+
+How the credentials stay in sync: every run derives the preview password and all demo credentials from the
+`CLOUDFLARE_API_TOKEN` secret plus a random salt kept in the staging database, and re-applies them to the
+Worker secret and the demo accounts. The newest artifact is therefore always correct, and credentials do not
+change between runs unless they are rotated.
+
+- **Rotate everything** (preview password, all demo passwords and 2FA keys; old sessions are signed out):
+  re-run with **rotate_credentials** ticked. Re-add the Owner key to your authenticator afterwards.
+- Rotating the Cloudflare API token also changes the derived credentials on the next run.
+- Want fresh sample data? Re-run with **reseed_demo_accounts** ticked.
+- Choosing your own preview password: set the `STAGING_PREVIEW_PASSWORD` repository secret; it is used as-is.
 - R2 (file uploads) is optional: if it is not enabled on the account the preview works and file pages say
   storage is not configured. Enable R2 in the dashboard to turn uploads on (R2 asks for a payment method even
   on its free tier — that is your decision).
 
 ## Staging browser evidence
 
-On a run that issues the preview password and seeds the demo accounts (the first run, or with both boxes
-ticked), the workflow also drives a real Chromium browser through the preview: the gate, every public page
+After verification, every run also drives a real Chromium browser through the preview: the gate, every public page
 linked from the homepage, the customer portal (with tenant isolation) and every Owner module. Results are
 recorded as **staging** evidence for TEST-002. The journey is read-only; it never submits business forms.
 Rehearse locally with `tests/e2e/staging.e2e.ts` (see its header for the three variables).
