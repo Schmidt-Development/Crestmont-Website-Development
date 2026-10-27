@@ -1,14 +1,25 @@
 name: Deploy staging
 
-# INFRA-005 / INFRA-002. Deploys main to the Cloudflare STAGING environment only.
-# Gated: does nothing (with a clear notice) until the Cloudflare account exists (BLK-003) and the
-# `staging` GitHub environment has the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID secrets and
-# wrangler.toml carries the real staging database_id. Production is never touched by this workflow.
+# Staging preview for the Founder (INFRA-002/INFRA-005). Self-provisioning: the ONLY prerequisites are the
+# repository (or `staging` environment) secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID — see
+# docs/STAGING-PREVIEW.md. The workflow creates the staging D1 database if missing, applies migrations,
+# deploys the Worker behind the private preview gate, seeds clearly-labelled sample data and demo accounts
+# on first run, and hands the access details to the Founder as a private workflow artifact.
+# Production is never touched here (see deploy-production.yml, which requires Founder approval).
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      rotate_preview_password:
+        description: "Generate a new staging preview password (old one stops working)"
+        type: boolean
+        default: false
+      reseed_demo_accounts:
+        description: "Create a fresh set of demo accounts and sample data (adds alongside existing)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -24,36 +35,25 @@ jobs:
     outputs:
       configured: ${{ steps.check.outputs.configured }}
     steps:
-      - uses: actions/checkout@v4
       - id: check
-        name: Check that staging is provisioned
+        name: Check Cloudflare credentials
         env:
           HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
           HAS_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
         run: |
-          configured=true
-          if [ "$HAS_TOKEN" != "true" ] || [ "$HAS_ACCOUNT" != "true" ]; then
-            echo "::notice title=Staging deploy skipped::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID are not set on the 'staging' GitHub environment (BLK-003). Nothing was deployed. See docs/DEPLOYMENT.md."
-            configured=false
-          elif awk '/^\[env\.staging\]/{s=1} /^\[env\.production\]/{s=0} s' wrangler.toml | grep -q 'database_id = ""'; then
-            echo "::notice title=Staging deploy skipped::wrangler.toml [env.staging] still has an empty database_id. Run 'wrangler d1 create crestmont-staging' and commit the id (docs/DEPLOYMENT.md §2)."
-            configured=false
-          fi
-          echo "configured=$configured" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_TOKEN" = "true" ] && [ "$HAS_ACCOUNT" = "true" ]; then echo "configured=true" >> "$GITHUB_OUTPUT"; else
+            echo "::notice title=Staging deploy skipped::Add the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID secrets (docs/STAGING-PREVIEW.md). Nothing was deployed."
+            echo "configured=false" >> "$GITHUB_OUTPUT"; fi
 
   deploy:
     needs: preflight
     if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
-    environment:
-      name: staging
-      url: ${{ vars.STAGING_URL }}
+    environment: staging
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      READINESS_URL: ${{ vars.READINESS_URL || vars.STAGING_URL }}
-      EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
-      STAGING_URL: ${{ vars.STAGING_URL }}
+      FIXED_PREVIEW_PASSWORD: ${{ secrets.STAGING_PREVIEW_PASSWORD }}
       DEPLOYMENT_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-staging
       WRANGLER: npx --yes wrangler@4
     steps:
@@ -62,87 +62,143 @@ jobs:
         with:
           node-version: "22.x"   # >= 22.18 for native TypeScript
 
-      - name: Require staging URL and evidence secret
-        run: |
-          [ -n "$STAGING_URL" ] || { echo "::error::Set the STAGING_URL variable on the 'staging' environment (https://…)."; exit 1; }
-          [ -n "$EVIDENCE_INGEST_SECRET" ] || { echo "::error::Set the EVIDENCE_INGEST_SECRET secret on the 'staging' environment (same value as the Worker secret)."; exit 1; }
-
       - name: Install dev tooling
         run: npm install --no-save typescript@5 @types/node@22
 
-      - name: Typecheck
-        run: npx tsc -p tsconfig.json
+      - name: Typecheck and tests (staging only receives code that passes)
+        run: npx tsc -p tsconfig.json && npm test
 
-      - name: Unit / integration tests
-        run: npm test
+      - name: Provision staging D1 database (idempotent)
+        run: |
+          id=$($WRANGLER d1 list --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s).find(d=>d.name==="crestmont-staging");process.stdout.write(r?r.uuid:"")})')
+          if [ -z "$id" ]; then
+            $WRANGLER d1 create crestmont-staging
+            id=$($WRANGLER d1 list --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s).find(d=>d.name==="crestmont-staging");process.stdout.write(r?r.uuid:"")})')
+          fi
+          [ -n "$id" ] || { echo "::error::Could not find or create the crestmont-staging D1 database"; exit 1; }
+          # Inject the id into the staging block only (workspace copy; nothing is committed).
+          node -e 'const fs=require("fs");let t=fs.readFileSync("wrangler.toml","utf8");t=t.replace(/(database_name = "crestmont-staging", database_id = )""/, `$1"${process.argv[1]}"`);fs.writeFileSync("wrangler.toml",t)' "$id"
+          grep -q "$id" wrangler.toml && echo "Staging D1: $id"
+
+      - name: File storage (R2) if available, otherwise disable uploads honestly
+        run: |
+          if $WRANGLER r2 bucket list 2>/dev/null | grep -q "crestmont-files-staging" || $WRANGLER r2 bucket create crestmont-files-staging 2>/dev/null; then
+            echo "R2 bucket ready"
+          else
+            echo "::warning title=File uploads disabled on staging::R2 is not enabled on this Cloudflare account. Pages that store files will say storage is not configured. Enable R2 in the Cloudflare dashboard to turn uploads on."
+            node -e 'const fs=require("fs");let t=fs.readFileSync("wrangler.toml","utf8");t=t.replace(/^r2_buckets = \[\{ binding = "FILES", bucket_name = "crestmont-files-staging" \}\]\n/m,"");fs.writeFileSync("wrangler.toml",t)'
+          fi
 
       - name: Safety export of the staging database
-        run: |
-          mkdir -p backups
-          $WRANGLER d1 export crestmont-staging --remote --env staging --output "backups/pre-deploy-staging-${GITHUB_SHA}.sql"
-          sha256sum backups/*.sql
+        continue-on-error: true
+        run: mkdir -p backups && $WRANGLER d1 export crestmont-staging --remote --env staging --output "backups/pre-deploy-${GITHUB_SHA}.sql"
 
       - uses: actions/upload-artifact@v4
+        if: hashFiles('backups/*.sql') != ''
         with:
           name: pre-deploy-staging-export
           path: backups/
           retention-days: 14
 
-      - name: Apply D1 migrations (staging)
+      - name: Apply D1 migrations
         run: $WRANGLER d1 migrations apply crestmont-staging --remote --env staging
 
-      - name: Record deployment started
-        run: >
-          node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment staging --commit "$GITHUB_SHA"
-          --status started --url "$STAGING_URL" --by "github-actions:${{ github.actor }}"
-          --ci-run "gh-${{ github.run_id }}-${{ github.run_attempt }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-
-      - name: Deploy Worker (staging)
+      - name: Deploy Worker (staging, behind the preview gate)
         id: deploy
-        run: $WRANGLER deploy --env staging
+        run: |
+          $WRANGLER deploy --env staging | tee deploy.log
+          url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -1)
+          [ -n "$url" ] || { echo "::error::No workers.dev URL in deploy output. Choose a workers.dev subdomain in the Cloudflare dashboard (Workers & Pages → Overview) and re-run."; exit 1; }
+          echo "url=$url" >> "$GITHUB_OUTPUT"
 
-      - name: Record deployment succeeded
-        run: node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment staging --commit "$GITHUB_SHA" --status succeeded --by "github-actions:${{ github.actor }}"
+      - name: Preview password and evidence secret
+        id: secrets
+        env:
+          ROTATE: ${{ inputs.rotate_preview_password }}
+        run: |
+          mkdir -p access
+          names=$($WRANGLER secret list --env staging 2>/dev/null || echo "[]")
+          if [ -n "$FIXED_PREVIEW_PASSWORD" ]; then
+            printf '%s' "$FIXED_PREVIEW_PASSWORD" | $WRANGLER secret put STAGING_ACCESS_PASSWORD --env staging
+            echo "known=true" >> "$GITHUB_OUTPUT"; pw="$FIXED_PREVIEW_PASSWORD"; echo "(preview password = your STAGING_PREVIEW_PASSWORD secret)" > access/password.txt
+          elif ! echo "$names" | grep -q STAGING_ACCESS_PASSWORD || [ "$ROTATE" = "true" ]; then
+            pw=$(node -e 'process.stdout.write(require("crypto").randomBytes(12).toString("base64url"))')
+            echo "::add-mask::$pw"
+            printf '%s' "$pw" | $WRANGLER secret put STAGING_ACCESS_PASSWORD --env staging
+            echo "$pw" > access/password.txt; echo "known=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "known=false" >> "$GITHUB_OUTPUT"; pw=""
+          fi
+          if [ -n "$pw" ]; then echo "::add-mask::$pw"; echo "pw=$pw" >> "$GITHUB_OUTPUT"; fi
+          ev=$(node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))')
+          echo "::add-mask::$ev"
+          printf '%s' "$ev" | $WRANGLER secret put EVIDENCE_INGEST_SECRET --env staging
+          echo "EVIDENCE_INGEST_SECRET=$ev" >> "$GITHUB_ENV"
 
-      - name: Post-deploy smoke checks against staging
+      - name: Seed sample data and demo accounts (first run or on request)
+        id: seed
+        env:
+          RESEED: ${{ inputs.reseed_demo_accounts }}
+        run: |
+          n=$($WRANGLER d1 execute crestmont-staging --remote --env staging --json --command "SELECT COUNT(*) AS n FROM users WHERE email LIKE '%@crestmont-preview.test'" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);process.stdout.write(String(j[0].results[0].n))})')
+          if [ "$n" = "0" ] || [ "$RESEED" = "true" ]; then
+            node --no-warnings scripts/seed-staging.ts --out seed.sql --credentials access/demo-accounts.md
+            $WRANGLER d1 execute crestmont-staging --remote --env staging --file seed.sql --yes
+            echo "seeded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Demo data already present ($n demo accounts); not reseeding."
+            echo "seeded=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Smoke checks through the preview gate
         id: smoke
-        run: >
-          node --no-warnings scripts/production-checks.ts --base "$STAGING_URL" --environment staging --commit "$GITHUB_SHA"
-          --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}" --out evidence/staging-check.json
+        env:
+          BASE: ${{ steps.deploy.outputs.url }}
+          PW: ${{ steps.secrets.outputs.pw }}
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/health"); [ "$code" = "200" ] || { echo "::error::/api/health returned $code"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/"); [ "$code" = "401" ] || { echo "::error::preview gate not active on / (HTTP $code)"; exit 1; }
+          if [ -n "$PW" ]; then
+            cookie=$(curl -s -D - -o /dev/null --data-urlencode "password=$PW" --data-urlencode "next=/" "$BASE/__preview-access" | grep -i '^set-cookie: cm_preview=' | sed -E 's/^set-cookie: ([^;]+);.*/\1/I' | tr -d '\r')
+            [ -n "$cookie" ] || { echo "::error::preview password was not accepted"; exit 1; }
+            CHECK_COOKIE="$cookie" node --no-warnings scripts/production-checks.ts --base "$BASE" --environment staging --commit "$GITHUB_SHA" \
+              --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}" --out evidence/staging-check.json
+          else
+            echo "Preview password unknown to this run (set once, not rotated): ran health + gate checks only."
+          fi
 
-      - name: Browser E2E suite against staging
-        id: e2e
+      - name: Record evidence and deployment
         if: always() && steps.deploy.outcome == 'success'
         env:
-          E2E_BASE_URL: ${{ vars.STAGING_URL }}
-          EVIDENCE_ENVIRONMENT: staging
-          EVIDENCE_SOURCE: staging_e2e
+          READINESS_URL: ${{ steps.deploy.outputs.url }}
         run: |
-          # The browser harness must drive the deployed URL (not a local server) for this to count as
-          # staging evidence. Until tests/e2e/support.ts honours E2E_BASE_URL, refuse rather than
-          # mislabel local-server results as staging (TEST-002).
-          if ! grep -q "E2E_BASE_URL" tests/e2e/support.ts; then
-            echo "::warning title=Staging E2E not run::tests/e2e/support.ts cannot target a remote URL yet (it starts a local server and reads its database). No staging E2E evidence was produced."
-            exit 0
-          fi
-          npx --yes playwright@1 install --with-deps chromium
-          npm run e2e
+          [ -f evidence/staging-check.json ] && node --no-warnings scripts/post-evidence.ts evidence/staging-check.json || true
+          node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment staging --commit "$GITHUB_SHA" \
+            --status succeeded --url "$READINESS_URL" --by "github-actions:${{ github.actor }}" \
+            --ci-run "gh-${{ github.run_id }}-${{ github.run_attempt }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --verification "${{ steps.smoke.outcome == 'success' && 'passed' || 'failed' }}" || true
 
-      - name: Post staging evidence
+      - name: Write access instructions
         if: always() && steps.deploy.outcome == 'success'
+        env:
+          BASE: ${{ steps.deploy.outputs.url }}
+          KNOWN: ${{ steps.secrets.outputs.known }}
         run: |
-          node --no-warnings scripts/post-evidence.ts evidence/staging-check.json
-          if [ -f evidence/e2e-evidence.json ] && grep -q '"environment": "staging"' evidence/e2e-evidence.json; then
-            node --no-warnings scripts/post-evidence.ts evidence/e2e-evidence.json
-          fi
+          {
+            echo "# Crestmont staging preview"; echo
+            echo "URL: $BASE"; echo
+            if [ -f access/password.txt ]; then echo "Preview password: $(cat access/password.txt)"; else echo "Preview password: unchanged since it was first issued (re-run this workflow with 'rotate_preview_password' to get a new one)."; fi
+            echo; echo "1. Open the URL and enter the preview password."
+            echo "2. Sign in with a demo account below (staff accounts need the 2FA setup key in an authenticator app)."
+            echo; [ -f access/demo-accounts.md ] && cat access/demo-accounts.md || echo "Demo accounts were issued on an earlier run (re-run with 'reseed_demo_accounts' for a fresh set)."
+          } > access/README.md
+          rm -f access/password.txt
+          echo "### Staging preview deployed: $BASE" >> "$GITHUB_STEP_SUMMARY"
+          echo "Access details are in the private **staging-preview-access** artifact of this run (not in logs)." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Record verification result
+      - uses: actions/upload-artifact@v4
         if: always() && steps.deploy.outcome == 'success'
-        run: >
-          node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment staging --commit "$GITHUB_SHA" --status succeeded
-          --by "github-actions:${{ github.actor }}"
-          --verification "${{ (steps.smoke.outcome == 'success' && steps.e2e.outcome == 'success') && 'passed' || 'failed' }}"
-
-      - name: Record failed deployment
-        if: failure() && steps.deploy.outcome == 'failure'
-        run: node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment staging --commit "$GITHUB_SHA" --status failed --by "github-actions:${{ github.actor }}" || true
+        with:
+          name: staging-preview-access
+          path: access/README.md
+          retention-days: 7

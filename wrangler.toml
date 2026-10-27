@@ -11,6 +11,11 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 ENVIRONMENT = "development"
 
+# Static files (CSS, JS, brand assets) are served by Cloudflare's assets binding before the Worker runs.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
 # Must match SCHEDULE in src/app/scheduled.ts
 [triggers]
 crons = ["*/15 * * * *", "17 11 * * *"]
@@ -34,7 +39,9 @@ bucket_name = "crestmont-files-dev"
 name = "crestmont-platform-staging"
 workers_dev = true            # staging is served at crestmont-platform-staging.<account>.workers.dev until a custom domain exists
 # routes = [{ pattern = "staging.crestmontwebsitedevelopment.com", custom_domain = true }]   # after DNS control (BLK-011)
-vars = { ENVIRONMENT = "staging" }   # add APP_URL = "https://<staging host>" once the URL is known
+# Turnstile: Cloudflare's documented always-pass TEST keys (public values, not secrets) so preview forms work.
+# Replace with real keys before any public exposure. STAGING_ACCESS_PASSWORD (secret) gates the whole preview.
+vars = { ENVIRONMENT = "staging", PREVIEW_GATE = "required", TURNSTILE_SITE_KEY = "1x00000000000000000000AA", TURNSTILE_SECRET = "1x0000000000000000000000000000000AA" }
 d1_databases = [{ binding = "DB", database_name = "crestmont-staging", database_id = "", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-staging" }]
 triggers = { crons = ["*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts

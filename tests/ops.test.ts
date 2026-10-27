@@ -508,12 +508,19 @@ test("[INFRA-005] deployment workflows are gated: staging skips without Cloudfla
   assert.match(staging, /secrets\.CLOUDFLARE_ACCOUNT_ID != ''/);
   assert.match(staging, /::notice title=Staging deploy skipped::/);
   assert.match(staging, /if: needs\.preflight\.outputs\.configured == 'true'/);
-  assert.match(staging, /environment:\n\s+name: staging/);
+  assert.match(staging, /environment: staging/);
   assert.match(staging, /npx tsc -p tsconfig\.json/);
   assert.match(staging, /npm test/);
   assert.match(staging, /d1 migrations apply crestmont-staging --remote --env staging/);
   assert.match(staging, /deploy --env staging/);
-  assert.match(staging, /EVIDENCE_ENVIRONMENT: staging/);
+  // Preview: self-provisioned, gated, password masked and delivered only as a private artifact, seeded on first run.
+  assert.match(staging, /d1 create crestmont-staging/);
+  assert.match(staging, /secret put STAGING_ACCESS_PASSWORD --env staging/);
+  assert.match(staging, /::add-mask::\$pw/);
+  assert.match(staging, /preview gate not active/);
+  assert.match(staging, /scripts\/seed-staging\.ts/);
+  assert.match(staging, /name: staging-preview-access/);
+  assert.doesNotMatch(staging, /echo "\$pw"\s*$/m, "preview password is never echoed to the log");
   assert.match(staging, /scripts\/post-evidence\.ts/);
   assert.match(staging, /scripts\/post-deployment\.ts/);
   assert.doesNotMatch(staging, /--env production/, "staging workflow never touches production");

@@ -12,6 +12,7 @@ import { errorPage } from "../ui/layout.ts";
 import { registerAll } from "../routes/index.ts";
 import { can, STAFF_ROLES, type Permission } from "../domain/authz.ts";
 import { recordAppError } from "../services/monitoring.ts";
+import { previewGate } from "./preview-gate.ts";
 
 let router: Router | null = null;
 function getRouter(): Router {
@@ -97,6 +98,8 @@ export const staticContentType = (path: string) => STATIC_TYPES[path.split(".").
 export async function handle(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
   if (url.pathname.startsWith("/assets/") && env.ASSETS) return env.ASSETS.fetch(req);
+  const gated = await previewGate(req, env);
+  if (gated) return gated;
   let ctx: AppContext | null = null;
   try {
     ctx = await buildContext(req, env);
