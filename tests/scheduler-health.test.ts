@@ -39,6 +39,11 @@ test("[READY-012] [INFRA-006] deployed environments require the scheduler: never
   t = await staging(300);
   await scheduled({ cron: "*/15 * * * *" }, t.env);
   assert.equal((await health(t)).code, 200, "daily jobs need not have run in the first 26 hours");
+  t = await staging(72 * 60);
+  await scheduled({ cron: "*/15 * * * *" }, t.env);
+  assert.equal((await health(t)).code, 200, "after a trigger repair, a daily job that has never run is pending, not failing, while the 15-minute jobs run");
+  await t.db.prepare(`INSERT INTO ingestion_status (source, last_success_at, last_attempt_at) VALUES ('job:requirements', ?, ?)`).bind(new Date(Date.now() - 30 * 3_600_000).toISOString(), new Date(Date.now() - 30 * 3_600_000).toISOString()).run();
+  assert.equal((await health(t)).code, 503, "a daily job that stopped is a failure");
 
   // Development has no scheduler: no feed, no effect.
   const dev = await createTestApp();

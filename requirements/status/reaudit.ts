@@ -8,4 +8,6 @@ export const REAUDIT_MISSING: Record<string, string> = {
   "PAY-003": "event processing and the */15 retry cron are deployed on staging but have never been fed by real Stripe events (BLK-004)",
   "SUP-003": "the escalation sweep runs on the staging cron; confirm a scheduled_job_runs record, and email delivery is unverified until Resend exists (BLK-005)",
   "PM-005": "the daily inactivity cron is deployed on staging — a recorded scheduled_job_runs execution is still to be confirmed; customer-facing inactivity policy text not published",
+  "INFRA-006": "external alerting exists (off-platform monitor every 30 min; scheduler and recovery-drill feeds are alerting signals) and the restore drill runs after every staging deploy; open: a drill run not yet observed from this session, cron triggers on staging found not firing (repair added to the deploy, outcome visible as the 'scheduler' feed), and recovery targets (RTO/RPO) await the Founder",
+  "TEST-004": "rollback rehearsal and restore drill run after every successful staging deploy and now publish recovery:rollback:staging / recovery:restore:staging feeds; close when those feeds show a passed run",
 };

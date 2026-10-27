@@ -92,8 +92,11 @@ export async function scheduledJobsFeed(ctx: Pick<AppContext, "db" | "env" | "no
   const grace = liveSince === null || now - liveSince < 60 * 60_000;
   const problems: string[] = [];
   if (age(frequent) > 45 * 60_000) problems.push(frequent?.last_success_at ? `15-minute jobs last ran ${frequent.last_success_at}` : "15-minute jobs have never run");
-  if (age(daily) > 26 * 3_600_000 && (liveSince === null || now - liveSince > 26 * 3_600_000)) problems.push(daily?.last_success_at ? `daily jobs last ran ${daily.last_success_at}` : "daily jobs have never run");
-  if (!problems.length) return { source: "scheduler", status: "healthy", detail: "Cron-triggered jobs are running on schedule", required: true, lastSuccessAt, lastAttemptAt };
+  // A daily job that has never run is only a failure while the 15-minute jobs are failing too: after the triggers are
+  // (re)registered, the first daily run can be up to 24 h away, and alerting every 30 minutes until then is noise.
+  const dailyNeverRan = !daily?.last_success_at;
+  if (age(daily) > 26 * 3_600_000 && (liveSince === null || now - liveSince > 26 * 3_600_000) && !(dailyNeverRan && !problems.length)) problems.push(daily?.last_success_at ? `daily jobs last ran ${daily.last_success_at}` : "daily jobs have never run");
+  if (!problems.length) return { source: "scheduler", status: "healthy", detail: dailyNeverRan ? "15-minute jobs are running; the daily jobs have not run yet" : "Cron-triggered jobs are running on schedule", required: true, lastSuccessAt, lastAttemptAt };
   if (grace) return { source: "scheduler", status: "healthy", detail: `Within the first hour after the first deployment: ${problems.join("; ")}`, required: true, lastSuccessAt, lastAttemptAt };
   return { source: "scheduler", status: lastSuccessAt ? "stale" : "unavailable", detail: `${problems.join("; ")} — check the Worker's cron triggers (docs/RUNBOOK.md §2)`, required: true, lastSuccessAt, lastAttemptAt };
 }
