@@ -126,15 +126,19 @@ jobs:
           [ -n "$url" ] || { echo "::error::No workers.dev URL in deploy output. Choose a workers.dev subdomain in the Cloudflare dashboard (Workers & Pages → Overview) and re-run."; exit 1; }
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
-      - name: Evidence ingest secret
-        # Derived (stable) and put only when changed: any secret change blocks Worker rollbacks (Cloudflare 10220).
+      - name: Evidence ingest secret (stable; put only when changed)
+        # Stable and put only when changed: any secret change blocks Worker rollbacks (Cloudflare 10220).
+        # The GitHub secret EVIDENCE_INGEST_SECRET is used when it exists, so ci.yml, release.yml and deploy-production.yml
+        # sign with the value staging holds; until then the key derived from the Cloudflare token is used (with a warning).
         env:
           ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          EVIDENCE_INGEST_SECRET_STABLE: ${{ secrets.EVIDENCE_INGEST_SECRET }}
         run: |
-          ev=$(node --no-warnings scripts/staging-secrets.ts derive evidence)
+          ev=$(node --no-warnings scripts/evidence-secret.ts print)
           echo "::add-mask::$ev"
           printf '%s' "$ev" | node --no-warnings scripts/staging-secrets.ts put EVIDENCE_INGEST_SECRET
           echo "EVIDENCE_INGEST_SECRET=$ev" >> "$GITHUB_ENV"
+          echo "Evidence secret fingerprint: $(EVIDENCE_INGEST_SECRET="$ev" node --no-warnings scripts/evidence-secret.ts fingerprint) (must match the Deploy production summary)." >> "$GITHUB_STEP_SUMMARY"
 
       - name: External scheduler key
         # Derived from the Cloudflare token secret (scripts/trigger-scheduler.ts), so the health monitor can trigger the

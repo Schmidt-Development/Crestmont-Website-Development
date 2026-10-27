@@ -77,6 +77,11 @@ jobs:
         with:
           node-version: "22.x"
 
+      - name: Evidence secret fingerprint (compare with the staging deploy summary; the value is never shown)
+        run: |
+          fp=$(node --no-warnings scripts/evidence-secret.ts fingerprint)
+          echo "Evidence secret fingerprint: $fp (must equal the fingerprint in the latest Deploy staging summary, or release authorization returns 401)." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Configuration digest (bound to the release candidate)
         id: cfg
         run: echo "sha256=$(node --no-warnings scripts/release-candidate.ts --print-config-digest)" >> "$GITHUB_OUTPUT"
@@ -97,8 +102,15 @@ jobs:
       - name: Safety export of the production database (BACKUP-RECOVERY §3.2)
         run: |
           mkdir -p backups
-          $WRANGLER d1 export crestmont-production --remote --env production --output "backups/pre-deploy-production-${TARGET_COMMIT}.sql"
-          sha256sum backups/*.sql | tee backups/SHA256SUMS
+          # First release only: a brand-new database has no tables, so there is nothing to export (and D1's
+          # export of an empty database is not relied on). Any database that has tables is always exported.
+          tables=$($WRANGLER d1 execute crestmont-production --remote --env production --json --command "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);process.stdout.write(String(j[0].results[0].n))})')
+          if [ "$tables" = "0" ]; then
+            echo "Production database is empty (first release): no pre-deploy export needed." | tee backups/EMPTY-DATABASE.txt
+          else
+            $WRANGLER d1 export crestmont-production --remote --env production --output "backups/pre-deploy-production-${TARGET_COMMIT}.sql"
+          fi
+          sha256sum backups/* | tee backups/SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:
@@ -125,6 +137,15 @@ jobs:
 
       - name: Record deployment succeeded
         run: node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment production --commit "$TARGET_COMMIT" --status succeeded --by "github-actions:${{ github.actor }}"
+
+      - name: Wait for the production URL to answer (custom-domain certificate on first release)
+        run: |
+          for i in $(seq 1 36); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$PRODUCTION_URL/api/health" || true)
+            [ "$code" = "200" ] && { echo "Production answered after $((i * 10 - 10)) s."; exit 0; }
+            sleep 10
+          done
+          echo "::warning::$PRODUCTION_URL/api/health did not return 200 within 6 minutes; the checks below decide."
 
       - name: Post-deploy production checks (LAUNCH-003)
         id: checks

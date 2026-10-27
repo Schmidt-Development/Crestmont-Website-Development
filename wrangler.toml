@@ -53,8 +53,13 @@ triggers = { crons = ["*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE i
 [env.production]
 name = "crestmont-platform-production"
 workers_dev = false           # production is reachable only on the custom domain
-# routes = [{ pattern = "crestmontwebsitedevelopment.com", custom_domain = true }, { pattern = "www.crestmontwebsitedevelopment.com", custom_domain = true }]   # after DNS control (BLK-011)
-vars = { ENVIRONMENT = "production" }   # add APP_URL = "https://crestmontwebsitedevelopment.com" with the custom domain
+preview_urls = false          # no per-version preview URLs for production (explicit; Wrangler ≥ 4.44 would also infer it from workers_dev)
+# Apex only. The custom domain (DNS record + certificate) is created by `wrangler deploy --env production`, which
+# runs only in deploy-production.yml after Founder approval. The apex must have no existing CNAME record.
+# www is NOT a second Worker hostname: it is a proxied placeholder record plus a Cloudflare Redirect Rule
+# (301 → https://crestmontwebsitedevelopment.com, path and query kept). See docs/DEPLOYMENT.md §7.
+routes = [{ pattern = "crestmontwebsitedevelopment.com", custom_domain = true }]
+vars = { ENVIRONMENT = "production", APP_URL = "https://crestmontwebsitedevelopment.com" }
 d1_databases = [{ binding = "DB", database_name = "crestmont-production", database_id = "c667f1a9-0802-4c52-a0e1-b512219a6eea", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-production" }]
 triggers = { crons = ["*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts
