@@ -25,3 +25,13 @@ INSERT INTO blocker_requirements (blocker_id, requirement_id) VALUES
 ('BLK-009','VOICE-001'),('BLK-009','VOICE-002'),
 ('BLK-010','CAT-006'),
 ('BLK-011','IDENT-004');
+
+-- Session 2 updates (2026-10-26)
+UPDATE blockers SET status='resolved', resolved_at='2026-10-26T22:22:00Z',
+  resolution_evidence='Founder supplied logo (232x213 PNG); stored byte-identical as public/assets/brand/crestmont-logo-original.png (sha256 ebf3f92b8e1a3081...)' WHERE id='BLK-001';
+UPDATE blockers SET status='resolved', resolved_at='2026-10-26T22:21:00Z',
+  resolution_evidence='Private repo noahschmidt10/Crestmont-Website-Development created by Founder; foundation 8bec22d pushed and verified' WHERE id='BLK-002';
+INSERT INTO blockers (id, category, description, severity, subsystem, owner, required_action, dependency, status, created_at) VALUES
+('BLK-013','external_account','GitHub Actions jobs are refused before starting: account payments failed or spending limit must be increased','high','Infrastructure','Founder','Fix billing / raise the Actions spending limit in GitHub Settings > Billing and plans','GitHub billing','open','2026-10-26T22:23:00Z'),
+('BLK-014','external_account','Original logo is a 232x213 raster; no vector master. Sharp use is limited to small sizes (crest <= 42 px tall on retina, lockup <= 116 px wide)','low','Brand','Founder','Provide the original vector (SVG/AI/EPS/PDF) or a >= 1000 px PNG for hero, print, social and app-icon uses',NULL,'open','2026-10-26T22:25:00Z');
+INSERT INTO blocker_requirements (blocker_id, requirement_id) VALUES ('BLK-013','INFRA-004'),('BLK-013','READY-005');
