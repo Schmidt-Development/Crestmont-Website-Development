@@ -46,6 +46,9 @@ test("[READY-004] signed CI evidence is ingested idempotently and unknown ids ar
 
 test("[READY-002] implementation and verification are tracked separately and latest failure wins", async () => {
   const db = await seeded();
+  // Pin the records this test reasons about so it does not depend on other areas' live status files.
+  db.raw.exec(`UPDATE requirements SET implementation_status='implemented' WHERE id IN ('DATA-001','SALES-001');
+               UPDATE requirements SET implementation_status='in_progress' WHERE id='CRM-001'`);
   await ingestEvidence(db, evidence("r1", [{ requirementId: "DATA-001", outcome: "passed" }, { requirementId: "CRM-001", outcome: "passed" }]));
   let report = await buildReport(await loadReadinessInput(db));
   const get = (id: string) => report.requirements.find((r) => r.id === id)!;

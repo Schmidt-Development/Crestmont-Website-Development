@@ -3,13 +3,17 @@
 // routes are the only places that change. Authorization is always enforced by the platform.
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
-import { hashPassword, verifyPassword, randomToken, hashToken, passwordProblems, verifyTotp, newTotpSecret } from "../lib/auth-crypto.ts";
+import { hashPassword, verifyPassword, randomToken, hashToken, passwordProblems, matchTotpStep, newTotpSecret } from "../lib/auth-crypto.ts";
 import { STAFF_ROLES, type Actor, type Role } from "../domain/authz.ts";
 import type { SessionUser } from "../app/context.ts";
 import { rateLimit, securityEvent, audit } from "./security.ts";
 
 export const SESSION_TTL_STAFF_S = 12 * 3600;
 export const SESSION_TTL_CUSTOMER_S = 7 * 24 * 3600;
+/** Idle timeouts (ASVS 3.3.2): a session unused for this long is rejected. */
+export const SESSION_IDLE_STAFF_S = 2 * 3600;
+export const SESSION_IDLE_CUSTOMER_S = 24 * 3600;
+const LAST_SEEN_WRITE_INTERVAL_MS = 5 * 60e3;
 const LOCK_AFTER = 8;
 const LOCK_MINUTES = 15;
 
@@ -109,14 +113,23 @@ export async function login(db: Db, emailRaw: string, password: string, meta: { 
 export async function loadSession(db: Db, token: string | undefined): Promise<{ user: SessionUser; actor: Actor; sessionId: string; mfaVerified: boolean } | null> {
   if (!token || !/^[0-9a-f]{64}$/.test(token)) return null;
   const s = await db.prepare(
-    `SELECT s.id, s.user_id, s.mfa_verified, s.expires_at, s.revoked_at, u.email, u.display_name, u.email_verified_at, u.totp_secret, u.disabled_at
+    `SELECT s.id, s.user_id, s.mfa_verified, s.expires_at, s.revoked_at, s.created_at, s.last_seen_at, u.email, u.display_name, u.email_verified_at, u.totp_secret, u.disabled_at
      FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?`,
-  ).bind(await hashToken(token)).first<{ id: string; user_id: string; mfa_verified: number; expires_at: string; revoked_at: string | null; email: string; display_name: string; email_verified_at: string | null; totp_secret: string | null; disabled_at: string | null }>();
+  ).bind(await hashToken(token)).first<{ id: string; user_id: string; mfa_verified: number; expires_at: string; revoked_at: string | null; created_at: string; last_seen_at: string | null; email: string; display_name: string; email_verified_at: string | null; totp_secret: string | null; disabled_at: string | null }>();
   if (!s || s.revoked_at || s.disabled_at || s.expires_at < nowIso()) return null;
   const memberships = (await db.prepare(
     `SELECT m.organization_id, o.name, m.role_id FROM memberships m JOIN organizations o ON o.id = m.organization_id WHERE m.user_id = ?`,
   ).bind(s.user_id).all<{ organization_id: string; name: string; role_id: Role }>()).results;
   const isStaff = memberships.some((m) => (STAFF_ROLES as readonly string[]).includes(m.role_id));
+  const lastSeen = Date.parse(s.last_seen_at ?? s.created_at);
+  const idleLimit = (isStaff ? SESSION_IDLE_STAFF_S : SESSION_IDLE_CUSTOMER_S) * 1000;
+  if (Date.now() - lastSeen > idleLimit) {
+    await db.prepare(`UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`).bind(nowIso(), s.id).run();
+    return null;
+  }
+  if (Date.now() - lastSeen > LAST_SEEN_WRITE_INTERVAL_MS) {
+    await db.prepare(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`).bind(nowIso(), s.id).run();
+  }
   const mfaVerified = !!s.mfa_verified;
   const user: SessionUser = {
     id: s.user_id, email: s.email, displayName: s.display_name, emailVerified: !!s.email_verified_at, mfaEnabled: !!s.totp_secret,
@@ -131,10 +144,17 @@ export async function loadSession(db: Db, token: string | undefined): Promise<{ 
 export async function completeMfa(db: Db, sessionId: string, userId: string, code: string, ip: string | null): Promise<void> {
   const rl = await rateLimit(db, `mfa:${userId}`, 8, 900);
   if (!rl.allowed) throw new AuthError("Too many codes entered. Wait a few minutes.", 429);
-  const u = await db.prepare(`SELECT totp_secret FROM users WHERE id = ?`).bind(userId).first<{ totp_secret: string | null }>();
-  if (!u?.totp_secret || !(await verifyTotp(u.totp_secret, code))) {
+  const u = await db.prepare(`SELECT totp_secret, totp_last_step FROM users WHERE id = ?`).bind(userId).first<{ totp_secret: string | null; totp_last_step: number | null }>();
+  const step = u?.totp_secret ? await matchTotpStep(u.totp_secret, code) : null;
+  if (step === null) {
     await securityEvent(db, "mfa_failed", { userId, ip });
     throw new AuthError("That code is not valid.", 401);
+  }
+  // Replay protection: each time-step can be used once, and never an earlier one.
+  const claim = await db.prepare(`UPDATE users SET totp_last_step = ? WHERE id = ? AND (totp_last_step IS NULL OR totp_last_step < ?)`).bind(step, userId, step).run();
+  if (claim.meta.changes !== 1) {
+    await securityEvent(db, "mfa_replay_rejected", { userId, ip });
+    throw new AuthError("That code was already used. Wait for the next code.", 401);
   }
   await db.prepare(`UPDATE sessions SET mfa_verified = 1 WHERE id = ? AND user_id = ?`).bind(sessionId, userId).run();
   await audit(db, { actorUserId: userId, action: "session.mfa_verified", subjectType: "user", subjectId: userId, ip });
@@ -148,9 +168,10 @@ export async function beginTotpEnrollment(db: Db, userId: string): Promise<strin
 
 export async function confirmTotpEnrollment(db: Db, userId: string, sessionId: string, code: string): Promise<void> {
   const u = await db.prepare(`SELECT totp_pending_secret FROM users WHERE id = ?`).bind(userId).first<{ totp_pending_secret: string | null }>();
-  if (!u?.totp_pending_secret || !(await verifyTotp(u.totp_pending_secret, code))) throw new AuthError("That code is not valid. Check your authenticator's time setting and try again.");
+  const step = u?.totp_pending_secret ? await matchTotpStep(u.totp_pending_secret, code) : null;
+  if (step === null) throw new AuthError("That code is not valid. Check your authenticator's time setting and try again.");
   await db.batch([
-    db.prepare(`UPDATE users SET totp_secret = totp_pending_secret, totp_pending_secret = NULL, mfa_enabled = 1 WHERE id = ?`).bind(userId),
+    db.prepare(`UPDATE users SET totp_secret = totp_pending_secret, totp_pending_secret = NULL, mfa_enabled = 1, totp_last_step = ? WHERE id = ?`).bind(step, userId),
     db.prepare(`UPDATE sessions SET mfa_verified = 1 WHERE id = ?`).bind(sessionId),
   ]);
   await audit(db, { actorUserId: userId, action: "user.mfa_enabled", subjectType: "user", subjectId: userId });

@@ -47,6 +47,11 @@ export function formatCents(cents: number | null | undefined): string {
 
 export function formatDate(iso: string | null | undefined): string {
   if (!iso) return "—";
+  // A bare calendar date (YYYY-MM-DD) has no time zone: format it as that same day, not shifted.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+    const d = new Date(iso + "T12:00:00Z");
+    return Number.isNaN(d.getTime()) ? "—" : d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
+  }
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "America/New_York" });

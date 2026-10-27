@@ -168,8 +168,46 @@ test("[SEC-002] pages carry a strict CSP and anti-framing headers", async () => 
   const csp = res.headers.get("content-security-policy") ?? "";
   assert.match(csp, /default-src 'self'/);
   assert.match(csp, /frame-ancestors 'none'/);
-  assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval/);
+  assert.doesNotMatch(csp, /unsafe-eval/);
+  // Only inline style ATTRIBUTES are allowed; scripts and style elements stay self-only.
+  const directive = (name: string) => csp.split(";").map((d) => d.trim()).find((d) => d.startsWith(name + " ")) ?? "";
+  assert.doesNotMatch(directive("script-src"), /unsafe-inline/);
+  assert.doesNotMatch(directive("style-src"), /unsafe-inline/);
+  assert.equal(directive("style-src-attr"), "style-src-attr 'unsafe-inline'");
   assert.equal(res.headers.get("x-frame-options"), "DENY");
   const cookies = res.headers.getSetCookie().join("\n");
   assert.match(cookies, /cm_csrf=[0-9a-f]{32}; Path=\/; Max-Age=86400; HttpOnly; SameSite=Strict/);
+});
+
+test("[AUTH-003] a TOTP code cannot be replayed (ASVS F-04)", async () => {
+  const { db, client } = await createTestApp();
+  const s = await createStaff(db, "support");
+  const code = await totpCode(s.secret);
+  const a = client();
+  await a.post("/login", { email: s.email, password: TEST_PASSWORD });
+  assert.equal((await a.post("/mfa", { code })).status, 303);
+  const b = client();
+  await b.post("/login", { email: s.email, password: TEST_PASSWORD });
+  const replay = await b.post("/mfa", { code });
+  assert.equal(replay.status, 401);
+  assert.match(await replay.text(), /already used/);
+  const ev = await db.prepare(`SELECT COUNT(*) n FROM security_events WHERE kind = 'mfa_replay_rejected'`).first<{ n: number }>();
+  assert.equal(ev!.n, 1);
+});
+
+test("[AUTH-004] idle sessions expire: staff after 2 hours, customers after 24 hours (ASVS F-07)", async () => {
+  const { db, client } = await createTestApp();
+  const cust = await createCustomer(db, "idle@example.com");
+  const c = await client().login(cust.email);
+  assert.equal((await c.get("/account")).status, 200);
+  await db.prepare(`UPDATE sessions SET last_seen_at = ? WHERE user_id = ?`).bind(new Date(Date.now() - 23 * 3600e3).toISOString(), cust.id).run();
+  assert.equal((await c.get("/account")).status, 200, "23h idle customer session still valid");
+  await db.prepare(`UPDATE sessions SET last_seen_at = ? WHERE user_id = ?`).bind(new Date(Date.now() - 25 * 3600e3).toISOString(), cust.id).run();
+  assert.equal((await c.get("/account")).status, 303, "25h idle customer session rejected");
+  const s = await createStaff(db, "sales");
+  const st = await client().login(s.email, TEST_PASSWORD, s.secret);
+  await db.prepare(`UPDATE sessions SET last_seen_at = ? WHERE user_id = ?`).bind(new Date(Date.now() - 3 * 3600e3).toISOString(), s.id).run();
+  assert.equal((await st.get("/account")).status, 303, "3h idle staff session rejected");
+  const revoked = await db.prepare(`SELECT COUNT(*) n FROM sessions WHERE revoked_at IS NOT NULL`).first<{ n: number }>();
+  assert.equal(revoked!.n, 2);
 });

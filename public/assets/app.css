@@ -241,7 +241,8 @@ details.disclosure[open] summary::after { content: "–"; }
   .topbar { padding: var(--s-3) var(--s-4); }
 }
 .auth-shell { min-height: 100vh; display: grid; place-items: center; padding: var(--s-6) var(--s-4); }
-.auth-card { width: 100%; max-width: 440px; }
+/* The logo artwork has a solid #0d0d0d background, so surfaces carrying it use exactly that black. */
+.auth-card { width: 100%; max-width: 440px; background: var(--ink-0); }
 .auth-card .brand { justify-content: center; display: flex; margin-bottom: var(--s-6); }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 @media print { .site-header, .sidebar, .topbar, .site-footer, .btn { display: none !important; } body { background: #fff; color: #000; } }

@@ -277,11 +277,14 @@ test("[READY-005] GitHub sync is not configured without a token, never fakes dat
 
 test("[READY-007] security findings register: critical findings block Gate C; accepting risk is Owner-only", async () => {
   const { db, o, ad } = await setup();
+  // The register starts with the ASVS self-review findings (migration 0010); count relative to that baseline.
+  const baseline = (await db.prepare(`SELECT COUNT(*) n FROM security_findings WHERE status = 'open' AND release_blocking = 1`).first<{ n: number }>())!.n;
+  assert.ok(baseline >= 1, "review findings are in the register");
   assert.equal((await ad.post("/staff/readiness/security", { title: "Reflected XSS in search", severity: "critical", source: "Manual review", detail: "" })).status, 303);
-  const f = await db.prepare(`SELECT id, release_blocking FROM security_findings`).first<{ id: string; release_blocking: number }>();
+  const f = await db.prepare(`SELECT id, release_blocking FROM security_findings WHERE title = 'Reflected XSS in search'`).first<{ id: string; release_blocking: number }>();
   assert.equal(f?.release_blocking, 1);
   const overview = await (await o.get("/staff/readiness")).text();
-  assert.match(overview, /1 blocking findings open/);
+  assert.match(overview, new RegExp(`${baseline + 1} blocking findings open`));
   assert.equal((await ad.post(`/staff/readiness/security/${f!.id}/resolve`, { outcome: "accepted_risk", evidence: "We accept this risk for launch" })).status, 403);
   assert.equal((await ad.post(`/staff/readiness/security/${f!.id}/resolve`, { outcome: "resolved", evidence: "" })).status, 422);
   assert.equal((await ad.post(`/staff/readiness/security/${f!.id}/resolve`, { outcome: "resolved", evidence: "Escaped output in commit 9f8e7d6, retested" })).status, 303);

@@ -12,6 +12,9 @@ export const PAGE_CSP = [
   "default-src 'self'",
   "img-src 'self' data:",
   "style-src 'self' https://fonts.googleapis.com",
+  // Inline style ATTRIBUTES only (layout values rendered through the escaping template). Style
+  // elements, external sheets and all scripts remain restricted to self (ASVS finding F-12).
+  "style-src-attr 'unsafe-inline'",
   "font-src 'self' https://fonts.gstatic.com",
   "script-src 'self' https://challenges.cloudflare.com",
   "frame-src https://challenges.cloudflare.com",

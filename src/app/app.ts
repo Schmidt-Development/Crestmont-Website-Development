@@ -11,6 +11,7 @@ import { ValidationError } from "../lib/validate.ts";
 import { errorPage } from "../ui/layout.ts";
 import { registerAll } from "../routes/index.ts";
 import { can, STAFF_ROLES, type Permission } from "../domain/authz.ts";
+import { recordAppError } from "../services/monitoring.ts";
 
 let router: Router | null = null;
 function getRouter(): Router {
@@ -122,6 +123,7 @@ export async function handle(req: Request, env: Env): Promise<Response> {
     if (status && status >= 400 && status < 500) {
       return isApi ? jsonResponse(ctx, status, { error: (err as Error).message }) : htmlError(ctx, req, env, status, status === 403 ? "Access denied" : "Request could not be completed", (err as Error).message);
     }
+    await recordAppError(env.DB, { path: url.pathname, method: req.method, message: (err as Error).message, stack: (err as Error).stack, environment: env.ENVIRONMENT });
     console.error(JSON.stringify({ level: "error", path: url.pathname, message: (err as Error).message, stack: (err as Error).stack?.split("\n").slice(0, 4).join(" | ") }));
     return isApi ? jsonResponse(ctx, 500, { error: "Internal error" }) : htmlError(ctx, req, env, 500, "Something went wrong", "The error has been logged. Please try again shortly.");
   }

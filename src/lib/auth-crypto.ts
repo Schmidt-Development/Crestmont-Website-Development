@@ -92,11 +92,17 @@ export async function totpCode(secret: string, timeSeconds = Math.floor(Date.now
 }
 
 export async function verifyTotp(secret: string, code: string, timeSeconds = Math.floor(Date.now() / 1000)): Promise<boolean> {
-  if (!/^\d{6}$/.test(code)) return false;
+  return (await matchTotpStep(secret, code, timeSeconds)) !== null;
+}
+
+/** Returns the 30-second time-step the code belongs to (±1 step drift), or null. Used for replay protection. */
+export async function matchTotpStep(secret: string, code: string, timeSeconds = Math.floor(Date.now() / 1000)): Promise<number | null> {
+  if (!/^\d{6}$/.test(code)) return null;
   for (const drift of [-1, 0, 1]) {
-    if (timingSafeEqualHex(await totpCode(secret, timeSeconds + drift * 30), code)) return true;
+    const t = timeSeconds + drift * 30;
+    if (timingSafeEqualHex(await totpCode(secret, t), code)) return Math.floor(t / 30);
   }
-  return false;
+  return null;
 }
 
 export function otpauthUri(secret: string, account: string): string {
