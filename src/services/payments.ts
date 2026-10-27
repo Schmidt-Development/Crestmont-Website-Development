@@ -35,6 +35,9 @@ export async function processStripeEvent(ctx: Pick<AppContext, "db" | "email" | 
         const inv = res.invoice;
         let projectId = inv.project_id;
         if (!projectId && inv.order_id && (inv.milestone_kind === "full" || inv.milestone_kind === "deposit_50")) projectId = await provisionProject(db, inv.order_id);
+        if (inv.milestone_kind === "change_order" && inv.project_id) {
+          await db.prepare(`UPDATE change_orders SET status = 'paid' WHERE invoice_id = ? AND status = 'approved'`).bind(inv.id).run();
+        }
         if (inv.order_id) {
           const lead = await db.prepare(`SELECT lead_id FROM orders WHERE id = ?`).bind(inv.order_id).first<{ lead_id: string | null }>();
           if (lead?.lead_id) {
