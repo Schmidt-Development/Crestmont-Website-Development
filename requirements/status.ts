@@ -24,7 +24,11 @@ import { LEGAL_COMMERCE } from "./status/legal-commerce.ts";
 import { INTEGRATIONS } from "./status/integrations.ts";
 import { OPS } from "./status/ops.ts";
 import { UX } from "./status/ux.ts";
+import { SECURITY_MATRIX } from "./status/security-matrix.ts";
+import { FINANCE_DOCS } from "./status/finance-docs.ts";
+import { OWNER_MODULES } from "./status/owner-modules.ts";
+import { BACKEND } from "./status/backend.ts";
 
 export const IMPLEMENTATION: Record<string, ImplementationRecord> = {
-  ...FOUNDATION, ...CORE, ...PUBLIC_SITE, ...PROJECTS, ...SALES_FINANCE, ...SUPPORT_OWNER, ...PLATFORM, ...INTEGRATION, ...LEGAL_COMMERCE, ...INTEGRATIONS, ...OPS, ...UX,
+  ...FOUNDATION, ...CORE, ...PUBLIC_SITE, ...PROJECTS, ...SALES_FINANCE, ...SUPPORT_OWNER, ...PLATFORM, ...INTEGRATION, ...LEGAL_COMMERCE, ...INTEGRATIONS, ...OPS, ...UX, ...SECURITY_MATRIX, ...FINANCE_DOCS, ...OWNER_MODULES, ...BACKEND,
 };
