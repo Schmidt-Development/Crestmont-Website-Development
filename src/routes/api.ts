@@ -10,6 +10,7 @@ import { verifyStripeSignature, recordStripeEvent, isStripeEventEnvelope, Webhoo
 import { processStripeEvent } from "../services/payments.ts";
 import { can } from "../domain/authz.ts";
 import { audit } from "../services/security.ts";
+import { ingestPushedSnapshot, GithubPushError } from "../services/github.ts";
 
 const MAX_BODY = 1_000_000;
 export async function readBody(req: Request): Promise<string> {
@@ -56,6 +57,24 @@ export function register(r: Router) {
       throw e;
     }
     return jsonResponse(ctx, 200, await ingestEvidence(ctx.db, raw));
+  });
+
+  // READY-005: GitHub snapshot pushed by the deploy workflow (scripts/post-github-snapshot.ts), signed with
+  // the same HMAC scheme and secret as evidence. Lets the GitHub view work without a PAT on the Worker.
+  r.post("/api/readiness/github-snapshot", async (ctx) => {
+    const raw = await readBody(ctx.req);
+    try {
+      await verifyEvidenceSignature(ctx.env.EVIDENCE_INGEST_SECRET, raw, ctx.req.headers.get("x-crestmont-signature"));
+    } catch (e) {
+      if (e instanceof IngestAuthError) throw new HttpError(401, e.message);
+      throw e;
+    }
+    try {
+      return jsonResponse(ctx, 200, await ingestPushedSnapshot(ctx, raw));
+    } catch (e) {
+      if (e instanceof GithubPushError) return jsonResponse(ctx, e.status, { error: e.message });
+      throw e;
+    }
   });
 
   r.post("/api/webhooks/stripe", async (ctx) => {

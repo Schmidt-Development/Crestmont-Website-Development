@@ -13,7 +13,8 @@ import { audit } from "../services/security.ts";
 import { requirementsCsv } from "../readiness/report.ts";
 import { ENVS, type Env as ReadyEnv, type Metric, type RequirementStatus } from "../readiness/engine.ts";
 import * as ra from "../services/readiness-admin.ts";
-import { githubConfig, latestGithubSync, syncGithub, type GithubRun } from "../services/github.ts";
+import { githubConfig, hasPushedSnapshot, latestGithubSync, syncGithub, type GithubRun, type GithubSyncRow } from "../services/github.ts";
+import { errorRateSummary, latestLatency, type ErrorRateSummary, type LatencyRun } from "../services/env-metrics.ts";
 
 const page = (ctx: AppContext, title: string, body: SafeHtml, status = 200) =>
   htmlResponse(ctx, appLayout(ctx, { title, nav: staffNav(ctx), home: "/staff", area: "Launch readiness" }, body), status);
@@ -157,16 +158,21 @@ async function githubPanel(ctx: AppContext): Promise<SafeHtml> {
   const configured = githubConfig(ctx.env);
   const canSync = can(ctx.actor!, "settings.operational");
   const syncBtn = canSync ? actionForm(ctx, "/staff/readiness/github/sync", "Sync GitHub now") : "";
-  if (!configured) {
+  const pushed = await hasPushedSnapshot(ctx.db);
+  if (!configured && !pushed) {
     return html`<section class="card stack"><div class="row row--between"><h2 style="font-size:1.4rem;margin:0">GitHub</h2>${badge("not_configured")}</div>
-${alert("warn", "GitHub source not configured. Set the GITHUB_TOKEN secret and GITHUB_REPO (owner/name) for this environment to read branches, commits, pull requests, workflow runs, code scanning and release tags. No GitHub data is shown until then.")}${syncBtn}</section>`;
+${alert("warn", "GitHub source not configured. No snapshot has been pushed by GitHub Actions (the staging deploy workflow posts one with its read-only workflow token), and GITHUB_TOKEN / GITHUB_REPO are not set for a server-side pull. No GitHub data is shown until one of them provides it.")}${syncBtn}</section>`;
   }
   const { latest, lastGood } = await latestGithubSync(ctx.db);
   const failing = latest && !latest.ok;
   const snap = lastGood?.snapshot;
   const stale = !!snap && (failing || ctx.now().getTime() - Date.parse(lastGood!.fetched_at) > 24 * 3_600_000);
-  return html`<section class="card stack"><div class="row row--between"><h2 style="font-size:1.4rem;margin:0">GitHub — ${configured.repo}</h2>${syncBtn}</div>
-${!latest ? alert("warn", "Configured but never synced. Run a sync to load repository data.") : ""}
+  const repo = configured?.repo ?? latest?.repo ?? "";
+  const sourceNote = (row: GithubSyncRow | null) => !row ? "" : row.source === "push"
+    ? html`<p class="faint" data-github-source="push">Source: snapshot pushed by GitHub Actions with the workflow's read-only token${row.run_url ? html` (<a href="${safeUrl(row.run_url)}" rel="noopener">workflow run</a>)` : ""}.${configured ? "" : " Server-side pull is not configured (no GITHUB_TOKEN on this Worker); data refreshes on each deploy."}</p>`
+    : html`<p class="faint" data-github-source="pull">Source: pulled by this server with GITHUB_TOKEN.</p>`;
+  return html`<section class="card stack"><div class="row row--between"><h2 style="font-size:1.4rem;margin:0">GitHub — ${repo}</h2>${configured ? syncBtn : ""}</div>
+${!latest ? alert("warn", "Configured but never synced. Run a sync to load repository data.") : ""}${sourceNote(lastGood ?? latest)}
 ${failing ? alert("error", html`<strong>Last GitHub sync failed</strong> at ${formatDateTime(latest!.fetched_at)}: ${latest!.error}`) : ""}
 ${snap ? html`${stale ? alert("warn", html`<strong>Stale data.</strong> The data below is from the last successful sync at ${formatDateTime(lastGood!.fetched_at)} and may not be current.`) : html`<p class="faint">Synchronised ${formatDateTime(lastGood!.fetched_at)}.</p>`}
 ${dl([["Default branch", snap.defaultBranch], ["Head commit", snap.head ? html`${snap.head.url ? html`<a href="${safeUrl(snap.head.url)}" rel="noopener"><code>${short(snap.head.sha)}</code></a>` : html`<code>${short(snap.head.sha)}</code>`} ${snap.head.message} <span class="faint">— ${snap.head.author ?? "unknown"}, ${formatDateTime(snap.head.date)}</span>` : "No commits"],
@@ -190,6 +196,31 @@ const ENV_INTEGRATIONS: Record<string, string[]> = {
   staging: ["d1", "r2", "auth", "stripe", "resend", "ai", "voice", "telephony", "monitoring", "dns", "github"],
   production: ["d1", "r2", "auth", "stripe", "resend", "ai", "voice", "telephony", "monitoring", "dns"],
 };
+
+const UNKNOWN = "Unknown";
+const ms = (n: number | null | undefined) => (n === null || n === undefined ? UNKNOWN : `${n} ms`);
+
+/** READY-006: error rate (last 24 h, first-party) and latency (server buckets + post-deploy samples). Missing data = "Unknown", never 0. */
+function errorLatencySection(env: ra.Environment, thisServer: boolean, serverEnv: string, er: ErrorRateSummary | null, lat: LatencyRun | null): SafeHtml {
+  const rate = er ? `${(Math.round(er.errorRate * 10_000) / 100).toFixed(2)}%` : UNKNOWN;
+  const why = thisServer
+    ? `No request has been recorded for ${env} in the last 24 hours, so the error rate is unknown.`
+    : `This server runs as ${serverEnv}. Each environment's Worker records its own request metrics in its own database, so ${env} error-rate data is not visible here.`;
+  const p95Upper = er ? (er.p95UpperMs === null ? "> 3000 ms" : `≤ ${er.p95UpperMs} ms`) : UNKNOWN;
+  return html`<section class="card stack" aria-labelledby="perf-h" data-env-metrics="${er ? "recorded" : "unknown"}"><h2 id="perf-h" style="font-size:1.4rem">Error rate and latency</h2>
+<div class="grid grid-4 kpis">${kpi("Error rate (24 h)", rate, er ? `${er.errors5xx} of ${er.requests} requests answered 5xx` : "No request metrics recorded")}
+${kpi("Unhandled exceptions (24 h)", er ? er.unhandled : UNKNOWN, er ? "Turned into HTTP 500 by the app" : "No request metrics recorded")}
+${kpi("Server time p95 (24 h)", p95Upper, er ? `avg ${er.avgMs} ms · max ${er.maxMs} ms` : "No request metrics recorded")}
+${kpi("Post-deploy p95 (worst page)", lat && lat.pages.length ? (lat.pages.some((p) => p.p95 === null) ? UNKNOWN : ms(Math.max(...lat.pages.map((p) => p.p95 as number)))) : UNKNOWN, lat ? `Sampled ${formatDateTime(lat.measuredAt)}` : "No timing evidence ingested")}</div>
+${er ? html`<p class="faint">Recorded by this ${env} Worker since ${formatDateTime(er.since)}: one hourly counter row per area, no paths, ids or user data. Server time is wall-clock time inside the Worker (Workers timers advance across I/O such as database calls); percentiles are histogram bucket upper bounds. 5xx includes intentional 503 answers (e.g. degraded readiness health).</p>
+${table(er.byArea, [{ header: "Area", cell: (a) => a.area }, { header: "Requests", cell: (a) => a.requests, numeric: true }, { header: "5xx", cell: (a) => a.errors5xx, numeric: true }, { header: "Unhandled", cell: (a) => a.unhandled, numeric: true }], { caption: "Requests by area (last 24 h)" })}`
+    : alert("info", why)}
+<h3 style="font-size:1.1rem">Post-deploy response times</h3>
+${lat ? html`<p class="faint">From <a href="/staff/readiness/runs/${encodeURIComponent(lat.runId)}">${lat.runId}</a> (commit <code>${short(lat.commitSha)}</code>), measured from the CI runner after deployment, network time included. Percentiles use successful samples only.</p>
+${table(lat.pages, [{ header: "Page", cell: (p) => html`<code>${p.page}</code>` }, { header: "Samples", cell: (p) => p.samples, numeric: true }, { header: "Failed", cell: (p) => p.failed, numeric: true },
+    { header: "p50", cell: (p) => ms(p.p50), numeric: true }, { header: "p95", cell: (p) => ms(p.p95), numeric: true }, { header: "Max", cell: (p) => ms(p.max), numeric: true }], { caption: "Response times per page" })}`
+    : html`<p class="faint">${UNKNOWN}: no post-deploy timing evidence has been ingested for ${env}. scripts/production-checks.ts records it on every ${env === "production" ? "production" : "staging"} deploy.</p>`}</section>`;
+}
 
 async function envView(ctx: AppContext, env: ra.Environment): Promise<Response> {
   const { report } = await ra.loadReport(ctx);
@@ -218,6 +249,8 @@ async function envView(ctx: AppContext, env: ra.Environment): Promise<Response> 
   }
   const latestCommit = current?.commit_sha ?? (await ctx.db.prepare(`SELECT commit_sha, branch, finished_at FROM evidence_runs WHERE environment = ? ORDER BY finished_at DESC LIMIT 1`).bind(env).first<{ commit_sha: string }>())?.commit_sha ?? null;
   const rollback = env === "production" ? (current?.rollback_target_deployment_id ?? deps.filter((d) => d.status === "succeeded")[1]?.id ?? null) : null;
+  const errorRate = await errorRateSummary(ctx.db, env, ctx.now(), 24);
+  const latency = await latestLatency(ctx.db, env);
 
   return page(ctx, `${label(env)} environment`, html`${pageHead(`${label(env)} environment`, undefined, "Launch readiness")}${subnav(ctx)}
 ${thisServer ? alert("info", `This server is running as ${env}; the database answered a health query just now.`) : ""}
@@ -235,8 +268,8 @@ ${deps.length > 1 ? html`<h3 style="font-size:1.1rem">Deployment history</h3>${t
 <section class="card stack"><h2 style="font-size:1.4rem">Environment health</h2>
 ${table(integRows, [{ header: "Integration", cell: (i) => i.integration }, { header: "Status", cell: (i) => badge(i.status === "none" ? "unavailable" : i.status, i.status === "none" ? "Unverified" : undefined) }, { header: "Detail", cell: (i) => i.detail ?? "—" }, { header: "Checked", cell: (i) => (i.checked_at ? formatDateTime(i.checked_at) : "—") }])}</section>
 <section class="card stack"><h2 style="font-size:1.4rem">Verification in ${env}</h2>
-${table(verificationRows, [{ header: "Check", cell: (v) => v.label }, { header: "Result", cell: (v) => (v.r ? verifBadge(v.r.verification[env]) : "—") }, { header: "State", cell: (v) => (v.r ? badge(v.r.state) : "—") }, { header: "Requirement", cell: (v) => html`<a href="/staff/readiness/requirements/${v.id}">${v.id}</a>` }])}
-<p class="faint">Performance results: no performance evidence source exists yet, so performance is unverified.</p></section>
+${table(verificationRows, [{ header: "Check", cell: (v) => v.label }, { header: "Result", cell: (v) => (v.r ? verifBadge(v.r.verification[env]) : "—") }, { header: "State", cell: (v) => (v.r ? badge(v.r.state) : "—") }, { header: "Requirement", cell: (v) => html`<a href="/staff/readiness/requirements/${v.id}">${v.id}</a>` }])}</section>
+${errorLatencySection(env, thisServer, ctx.env.ENVIRONMENT, errorRate, latency)}
 <section class="card stack"><h2 style="font-size:1.4rem">Test / E2E runs in ${env}</h2>
 ${table(runs, [{ header: "Run", cell: (r) => html`<a href="/staff/readiness/runs/${encodeURIComponent(r.id)}">${r.id}</a>` }, { header: "Source", cell: (r) => label(r.source) }, { header: "Commit", cell: (r) => html`<code>${short(r.commit_sha)}</code>` },
     { header: "Passed", cell: (r) => r.passed, numeric: true }, { header: "Failed", cell: (r) => r.failed, numeric: true }, { header: "Finished", cell: (r) => formatDateTime(r.finished_at) }],

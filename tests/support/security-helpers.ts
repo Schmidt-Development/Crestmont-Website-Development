@@ -29,8 +29,8 @@ export async function call(c: TestClient, r: { method: string }, path: string, f
   return r.method === "GET" ? c.get(path) : c.post(path, fields);
 }
 
-/** Tables whose rows legitimately change on denied requests (logging, rate limiting, session bookkeeping). */
-export const VOLATILE = new Set(["audit_logs", "security_events", "rate_limits", "app_errors", "sessions", "d1_migrations", "email_deliveries", "email_messages"]);
+/** Tables whose rows legitimately change on denied requests (logging, rate limiting, session bookkeeping, request metrics). */
+export const VOLATILE = new Set(["audit_logs", "security_events", "rate_limits", "app_errors", "sessions", "d1_migrations", "email_deliveries", "email_messages", "env_metrics"]);
 
 /** Per-table content hash of the whole database (except volatile tables), to prove denied requests change nothing. */
 export function snapshot(db: Env["DB"], exclude: Set<string> = VOLATILE): Map<string, string> {

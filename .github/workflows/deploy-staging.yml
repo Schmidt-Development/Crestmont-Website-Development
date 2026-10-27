@@ -50,6 +50,16 @@ jobs:
     if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
     environment: staging
+    # Read-only workflow token. The extra read scopes are used only by the "GitHub readiness snapshot"
+    # step (READY-005): actions (workflow runs/jobs), pull-requests (open PRs), checks (annotations that
+    # explain refused jobs), security-events (code scanning; 403 without Advanced Security = "unavailable").
+    # No write permission is granted.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: read
+      security-events: read
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -61,6 +71,8 @@ jobs:
       WRANGLER: npx --yes wrangler@4
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # the token is passed only to the snapshot step, never left in .git/config
       - uses: actions/setup-node@v4
         with:
           node-version: "22.x"   # >= 22.18 for native TypeScript
@@ -198,6 +210,16 @@ jobs:
             --status succeeded --url "$READINESS_URL" --by "github-actions:${{ github.actor }}" \
             --ci-run "gh-${{ github.run_id }}-${{ github.run_attempt }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --verification "${{ steps.smoke.outcome == 'success' && 'passed' || 'failed' }}" || true
+
+      - name: GitHub readiness snapshot (branches, commits, PRs, runs, tags, code scanning)
+        # READY-005 push path: the workflow's read-only token reads GitHub; the Worker needs no PAT.
+        # Runs only scripts/post-github-snapshot.ts (no npm packages are loaded); token and secret are never printed.
+        if: always() && steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          READINESS_URL: ${{ steps.deploy.outputs.url }}
+        run: node --no-warnings scripts/post-github-snapshot.ts
 
       - name: Access summary (no credentials)
         if: always() && steps.deploy.outcome == 'success'

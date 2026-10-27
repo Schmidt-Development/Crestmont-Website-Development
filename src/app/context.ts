@@ -37,7 +37,9 @@ export interface Env {
   PASSWORD_BREACH_CHECK?: string;
   /** Resend webhook signing secret (whsec_…), verifies Svix signatures. EMAIL-003. */
   RESEND_WEBHOOK_SECRET?: string;
-  FILES?: unknown;              // R2 bucket binding
+  /** "off" disables the per-request env_metrics UPSERT (READY-006). Default on. */
+  ENV_METRICS?: string;
+  FILES?: unknown;             // R2 bucket binding
   ASSETS?: { fetch(req: Request): Promise<Response> };
   /** Test/dev hook: overrides the computed adapters. */
   overrides?: Partial<Pick<AppContext, "email" | "storage" | "payments">> & { now?: () => Date; /** Test seam for read-only provider calls (cost import, reconciliation). */ fetch?: typeof fetch };
