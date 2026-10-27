@@ -1,6 +1,9 @@
 // node:test custom reporter. Prints a readable summary and writes evidence/ci-evidence.json,
 // mapping each test tagged "[REQ-ID] ..." to its requirement. This file is what CI signs and
 // posts to /api/readiness/evidence. Untagged tests are counted but produce no evidence.
+// A test may carry several leading tags ("[TEST-002] [CRM-001] journey 1: ...") and then produces one
+// result per tag. Skipped tests (node:test reports them as test:pass with `skip` set) are recorded as
+// outcome "skipped" with the skip reason, never as "passed".
 import { writeFileSync, mkdirSync } from "node:fs";
 import { execSync } from "node:child_process";
 
@@ -9,19 +12,23 @@ const sh = (c) => { try { return execSync(c, { stdio: ["ignore", "pipe", "ignore
 export default async function* reporter(source) {
   const startedAt = new Date().toISOString();
   const results = [];
-  let pass = 0, fail = 0, untagged = 0;
+  let pass = 0, fail = 0, skipped = 0, untagged = 0;
   for await (const event of source) {
     if (event.type !== "test:pass" && event.type !== "test:fail") continue;
     if (event.data.details?.type === "suite") continue;
     const name = event.data.name;
     const ok = event.type === "test:pass";
-    ok ? pass++ : fail++;
-    const m = /^\[([A-Z]+-\d{3})\]\s*(.*)$/.exec(name);
-    yield `${ok ? "✔" : "✖"} ${name}\n`;
+    const skip = ok && (event.data.skip !== undefined && event.data.skip !== false || event.data.todo !== undefined && event.data.todo !== false);
+    const reason = skip ? String(typeof event.data.skip === "string" ? event.data.skip : typeof event.data.todo === "string" ? event.data.todo : "skipped") : "";
+    skip ? skipped++ : ok ? pass++ : fail++;
+    const m = /^((?:\[[A-Z]+-\d{3}\]\s*)+)(.*)$/.exec(name);
+    yield `${skip ? "-" : ok ? "✔" : "✖"} ${name}${skip ? ` # SKIP ${reason}` : ""}\n`;
     if (!ok) yield `    ${String(event.data.details?.error?.cause?.message ?? event.data.details?.error?.message ?? "").split("\n")[0]}\n`;
     if (!m) { untagged++; continue; }
-    results.push({ requirementId: m[1], testName: m[2], outcome: ok ? "passed" : "failed", durationMs: Math.round(event.data.details?.duration_ms ?? 0),
-      ...(ok ? {} : { message: String(event.data.details?.error?.message ?? "").slice(0, 1000) }) });
+    for (const requirementId of new Set(m[1].match(/[A-Z]+-\d{3}/g))) {
+      results.push({ requirementId, testName: m[2], outcome: skip ? "skipped" : ok ? "passed" : "failed", durationMs: Math.round(event.data.details?.duration_ms ?? 0),
+        ...(skip ? { message: reason.slice(0, 1000) } : ok ? {} : { message: String(event.data.details?.error?.message ?? "").slice(0, 1000) }) });
+    }
   }
   const commitSha = process.env.GITHUB_SHA || sh("git rev-parse HEAD") || "0000000";
   // Evidence from an uncommitted working tree is labelled so it is never mistaken for the commit itself.
@@ -41,5 +48,5 @@ export default async function* reporter(source) {
   const out = process.env.EVIDENCE_FILE || "evidence/ci-evidence.json";
   writeFileSync(out, JSON.stringify(doc, null, 2));
   const reqs = new Set(results.map((r) => r.requirementId));
-  yield `\n${pass} passed, ${fail} failed, ${untagged} untagged — evidence for ${reqs.size} requirements written to ${process.env.EVIDENCE_FILE || "evidence/ci-evidence.json"}\n`;
+  yield `\n${pass} passed, ${fail} failed, ${skipped} skipped, ${untagged} untagged — evidence for ${reqs.size} requirements written to ${process.env.EVIDENCE_FILE || "evidence/ci-evidence.json"}\n`;
 }
