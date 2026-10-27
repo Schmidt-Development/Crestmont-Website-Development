@@ -62,8 +62,8 @@ test("[LEGAL-003] every policy in src/content/legal.ts has a seeded draft versio
   assert.equal(rendered.length, Object.keys(AGREEMENT_KINDS).length);
   for (const r of rendered) {
     const row = await one<{ version: string; body_sha256: string; body_text: string; attorney_reviewed: number; effective_at: string | null } | null>(t.db,
-      `SELECT version, body_sha256, body_text, attorney_reviewed, effective_at FROM agreements WHERE kind = ? AND version = ?`, r.kind, SEED_VERSION);
-    assert.ok(row, `seed version for ${r.kind}`);
+      `SELECT version, body_sha256, body_text, attorney_reviewed, effective_at FROM agreements WHERE kind = ? AND body_sha256 = ?`, r.kind, r.sha256);
+    assert.ok(row, `a stored draft version for ${r.kind} matches the current text`);
     assert.equal(row.attorney_reviewed, 0, "drafts are never marked attorney reviewed");
     assert.ok(row.effective_at);
     assert.equal(row.body_sha256, await sha256Hex(row.body_text), "stored hash is the hash of the stored text");
@@ -87,7 +87,7 @@ test("[LEGAL-003] registration records Terms + Privacy acceptance tied to exact 
   assert.equal(res.status, 200);
   const u = await one<{ id: string }>(t.db, `SELECT id FROM users WHERE email = 'jordan@leebakery.example'`);
   const rows = await acceptances(t.db, u.id);
-  assert.deepEqual(rows.map((r) => [r.kind, r.version, r.context_type, r.ip]), [["privacy_policy", SEED_VERSION, "registration", "203.0.113.7"], ["terms_of_service", SEED_VERSION, "registration", "203.0.113.7"]]);
+  assert.deepEqual(rows.map((r) => [r.kind, r.version, r.context_type, r.ip]), [["privacy_policy", "2026-10-draft-2", "registration", "203.0.113.7"], ["terms_of_service", SEED_VERSION, "registration", "203.0.113.7"]]);
   const auditRow = await one<{ details_json: string }>(t.db, `SELECT details_json FROM audit_logs WHERE action = 'agreements.accepted' AND actor_user_id = ?`, u.id);
   assert.match(auditRow.details_json, /"context":"registration"/);
 });
