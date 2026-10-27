@@ -37,4 +37,7 @@ export const BACKEND: Record<string, ImplementationRecord> = {
   "PORTAL-005": { status: "in_progress", owner: "engineering",
     location: "src/services/messages.ts (project + general conversations, attachments, read status, internal notes, in-app + email notifications) + live unread counts without reload (GET /live/unread, src/routes/live.ts; public/assets/app.js passive polling that never extends the session idle timer; sidebar badges and a 'new messages — refresh' notice); tests/live-and-limits.test.ts",
     missing: "notification email delivery depends on Resend (BLK-005; development outbox only)" },
+  "TEST-004": { status: "in_progress", owner: "engineering",
+    location: "development: backup export → fresh database round trip and rollback linkage (tests/ops.test.ts); staging: .github/workflows/staging-restore-drill.yml (weekly + manual) exports staging D1, restores it into a scratch D1 database, compares every table's row count (scripts/restore-drill.ts, tests/restore-drill.test.ts), posts signed staging evidence and deletes the scratch database",
+    missing: "the staging drill has not run yet (needs the workflow to execute with the Cloudflare secrets); no Worker rollback rehearsal on staging" },
 };
