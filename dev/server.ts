@@ -9,6 +9,7 @@ import { LocalDiskStorage } from "./local-storage.ts";
 import { handle, staticContentType } from "../src/app/app.ts";
 import type { Env } from "../src/app/context.ts";
 import { syncRequirements } from "../src/readiness/ingest.ts";
+import { applySeedBlockerLinks } from "../src/services/readiness-admin.ts";
 
 const args = process.argv.slice(2);
 const arg = (k: string, d: string) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
@@ -18,6 +19,7 @@ if (dbPath !== ":memory:") mkdirSync(resolve(dbPath, ".."), { recursive: true })
 
 const db = openDb(dbPath);
 await syncRequirements(db);
+await applySeedBlockerLinks(db);
 const storage = new LocalDiskStorage(process.env.CRESTMONT_FILES ?? ".dev/files");
 const PUBLIC = resolve(import.meta.dirname, "../public");
 

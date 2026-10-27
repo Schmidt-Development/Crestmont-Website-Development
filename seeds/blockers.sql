@@ -1,3 +1,5 @@
+-- SUPERSEDED: the authoritative blocker register is created by migrations/0008_support_readiness.sql
+-- (same ids and statuses). Kept as the historical discovery record; do not apply on top of 0008.
 -- Real blockers recorded during Phase 1 discovery (2026-10-26). Apply after requirements sync.
 INSERT INTO blockers (id, category, description, severity, subsystem, owner, required_action, dependency, status, created_at) VALUES
 ('BLK-001','external_account','Original Crestmont gold-shield logo file is not in the workspace','high','Brand','Founder','Upload the original logo file (SVG preferred, else highest-resolution PNG)',NULL,'open','2026-10-26T22:00:00Z'),
