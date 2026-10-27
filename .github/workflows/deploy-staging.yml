@@ -276,13 +276,43 @@ jobs:
           if [ "${{ steps.verify.outcome }}" = "success" ]; then
             echo "### Staging preview deployed and verified: ${{ steps.deploy.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
             echo "Preview password → Owner sign-in → 2FA → all 32 Owner modules verified on the live site." >> "$GITHUB_STEP_SUMMARY"
-            echo "Credentials are in the private **staging-preview-access** artifact of this run (never in logs)." >> "$GITHUB_STEP_SUMMARY"
+            echo "Credentials: **staging-preview-access** artifact of this run (encrypted when the repository is public; never in logs)." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "### Staging access NOT verified — no access artifact was issued for this run." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - uses: actions/upload-artifact@v4
+      # Workflow artifacts of a PUBLIC repository can be downloaded by anyone signed in to GitHub. The access
+      # notes are therefore encrypted with the Founder's ACCESS_ARTIFACT_PASSPHRASE secret before upload, and
+      # are not issued at all from a public repository without it. (Plain notes only from a private repository.)
+      - name: Protect the access notes
+        id: protect
         if: always() && steps.verify.outcome == 'success'
+        env:
+          ACCESS_ARTIFACT_PASSPHRASE: ${{ secrets.ACCESS_ARTIFACT_PASSPHRASE }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          if [ -n "$ACCESS_ARTIFACT_PASSPHRASE" ]; then
+            openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -in access/README.md -out access/staging-access.md.enc -pass env:ACCESS_ARTIFACT_PASSPHRASE
+            rm -f access/README.md
+            echo "upload=encrypted" >> "$GITHUB_OUTPUT"
+            echo "Access notes are encrypted (decrypt: \`openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in staging-access.md.enc -out staging-access.md\`, passphrase = ACCESS_ARTIFACT_PASSPHRASE)." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$REPO_PRIVATE" = "true" ]; then
+            echo "upload=plain" >> "$GITHUB_OUTPUT"
+          else
+            rm -f access/README.md
+            echo "upload=none" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Access notes not issued::This repository is public, so plaintext credentials are never uploaded. Add the repository secret ACCESS_ARTIFACT_PASSPHRASE (docs/STAGING-PREVIEW.md) and re-run to receive an encrypted copy."
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.protect.outputs.upload == 'encrypted'
+        with:
+          name: staging-preview-access
+          path: access/staging-access.md.enc
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.protect.outputs.upload == 'plain'
         with:
           name: staging-preview-access
           path: access/README.md

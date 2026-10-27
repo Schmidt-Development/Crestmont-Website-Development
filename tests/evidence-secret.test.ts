@@ -104,3 +104,23 @@ test("[INFRA-005] production workflow: first release tolerates an empty database
   assert.ok(p.indexOf("Wait for the production URL") > p.indexOf("Deploy Worker (production)"));
   assert.ok(p.indexOf("Wait for the production URL") < p.indexOf("Post-deploy production checks"));
 });
+
+test("[SEC-004] [INFRA-005] public repository: no workflow uploads plaintext credentials or a database export as an artifact", () => {
+  const staging = wf("deploy-staging.yml");
+  assert.match(staging, /ACCESS_ARTIFACT_PASSPHRASE: \$\{\{ secrets\.ACCESS_ARTIFACT_PASSPHRASE \}\}/);
+  assert.match(staging, /openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -in access\/README\.md -out access\/staging-access\.md\.enc -pass env:ACCESS_ARTIFACT_PASSPHRASE/);
+  // The plaintext notes are uploaded only from a private repository; a public one without a passphrase gets none.
+  assert.match(staging, /elif \[ "\$REPO_PRIVATE" = "true" \]; then\s*\n\s*echo "upload=plain"/);
+  assert.match(staging, /REPO_PRIVATE: \$\{\{ github\.event\.repository\.private \}\}/);
+  const uploads = [...staging.matchAll(/- uses: actions\/upload-artifact@v4\s*\n\s*if: ([^\n]+)\n[\s\S]*?path: ([^\n]+)/g)].map((m) => [m[1].trim(), m[2].trim()]);
+  assert.deepEqual(uploads, [
+    ["always() && steps.protect.outputs.upload == 'encrypted'", "access/staging-access.md.enc"],
+    ["always() && steps.protect.outputs.upload == 'plain'", "access/README.md"],
+  ]);
+  const prod = wf("deploy-production.yml");
+  assert.doesNotMatch(prod, /upload-artifact/, "no production artifact at all");
+  assert.match(prod, /r2 object put "crestmont-files-production\/_backups\/[^"]+" --file "\$f" --remote/);
+  assert.ok(prod.indexOf("r2 object put") < prod.indexOf("Apply D1 migrations (production"), "the export is stored before anything changes");
+  for (const n of ["deploy-staging.yml", "staging-restore-drill.yml", "staging-rollback-rehearsal.yml"])
+    assert.doesNotMatch(wf(n), /path: (drill|backups)\//, `${n} never uploads a database export`);
+});

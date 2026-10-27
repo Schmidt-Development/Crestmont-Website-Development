@@ -112,11 +112,17 @@ jobs:
           fi
           sha256sum backups/* | tee backups/SHA256SUMS
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pre-deploy-production-export
-          path: backups/
-          retention-days: 30
+      # The repository is public: a workflow artifact can be downloaded by anyone signed in to GitHub, so a
+      # production database export is NEVER uploaded as an artifact. It goes to the private production
+      # bucket under _backups/ (lifecycle rule: delete after 30 days, docs/DEPLOYMENT.md §2). If the copy
+      # cannot be stored, the deploy stops here, before any migration or code change.
+      - name: Store the safety export privately (production R2, not a workflow artifact)
+        if: hashFiles('backups/*.sql') != ''
+        run: |
+          f="backups/pre-deploy-production-${TARGET_COMMIT}.sql"
+          $WRANGLER r2 object put "crestmont-files-production/_backups/pre-deploy-production-${TARGET_COMMIT}-${{ github.run_id }}.sql" --file "$f" --remote > /dev/null
+          echo "Pre-deploy export stored at r2://crestmont-files-production/_backups/pre-deploy-production-${TARGET_COMMIT}-${{ github.run_id }}.sql (sha256 $(sha256sum "$f" | cut -d' ' -f1))." >> "$GITHUB_STEP_SUMMARY"
+          rm -f "$f"
 
       - name: Re-check Founder authorization immediately before changing production
         run: node --no-warnings scripts/release-authorization.ts --commit "$TARGET_COMMIT" --config "${{ steps.cfg.outputs.sha256 }}"

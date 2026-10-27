@@ -37,7 +37,7 @@ npx wrangler@4 r2 bucket create crestmont-files-production
 ```
 
 - Copy each printed `database_id` into `wrangler.toml` (`[env.staging]` and `[env.production]` `d1_databases`). These ids are not secrets. Commit the change through a pull request. Both deploy workflows refuse to run while a `database_id` is empty.
-- R2: turn on object versioning or a lifecycle rule keeping non-current versions for 30 days (BACKUP-RECOVERY §4). Do **not** enable public access on either bucket.
+- R2: turn on object versioning or a lifecycle rule keeping non-current versions for 30 days (BACKUP-RECOVERY §4). Do **not** enable public access on either bucket. On `crestmont-files-production` also add a lifecycle rule *prefix `_backups/` → delete objects after 30 days* (pre-deploy database exports written by `deploy-production.yml`).
 - Apply the schema the first time (later runs happen in the workflows):
   ```sh
   npx wrangler@4 d1 migrations apply crestmont-staging --remote --env staging
@@ -116,13 +116,13 @@ Settings → Branches → rule for `main`:
 
 ## 8. Normal flow
 
-1. **Merge to `main`** → `ci.yml` (tests, evidence) and `deploy-staging.yml`: typecheck, tests, D1 safety export (artifact), migrations, record *started*, `wrangler deploy --env staging`, record *succeeded*, smoke checks (`scripts/production-checks.ts --environment staging`), browser E2E against staging, post evidence, record the verification result.
+1. **Merge to `main`** → `ci.yml` (tests, evidence) and `deploy-staging.yml`: typecheck, tests, D1 Time Travel bookmark, migrations, record *started*, `wrangler deploy --env staging`, record *succeeded*, smoke checks (`scripts/production-checks.ts --environment staging`), browser E2E against staging, post evidence, record the verification result.
 2. **Tag a release** `git tag -s v1.0.0 <sha> && git push origin v1.0.0` → `release.yml` creates a GitHub pre-release with notes and, through `scripts/release-candidate.ts`, a release candidate bound to the full SHA and the `wrangler.toml` digest. The candidate can also be created by hand at `/staff/readiness/releases`.
 3. **Founder reviews and approves** at `/staff/readiness/approve` (Owner + MFA only; bound to commit, config and evidence set).
 4. **Run *Deploy production*** (Actions → Deploy production → Run workflow) with the full commit SHA. GitHub waits for the Founder's environment approval. The workflow then:
    - checks that the commit is on `main` and the production `database_id` is set;
    - calls `GET /api/readiness/release-authorization?commit=<sha>&config=<digest>` (signed; `scripts/release-authorization.ts`) and **stops unless `authorized: true`**;
-   - runs typecheck and tests, exports the production D1 (artifact, 30 days), re-checks authorization, applies migrations, records the deployment (the platform compares the commit with the approved candidate: LAUNCH-002), deploys;
+   - runs typecheck and tests, exports the production D1 to the private production bucket under `_backups/` (never a workflow artifact: the repository is public; skipped only for an empty database on the first release), re-checks authorization, applies migrations, records the deployment (the platform compares the commit with the approved candidate: LAUNCH-002), deploys;
    - runs the post-deploy checks (health, home, pricing, contact, login, security headers, staff redirect, readiness health) and posts them as `production_check` evidence (Gate H);
    - on a critical failure runs `wrangler rollback --env production` and records the deployment as `rolled_back`.
 

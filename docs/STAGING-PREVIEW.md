@@ -18,12 +18,23 @@ automated by `.github/workflows/deploy-staging.yml`.
    - `CLOUDFLARE_API_TOKEN` = the token from step 3
    - `CLOUDFLARE_ACCOUNT_ID` = the ID from step 4
    - optional `STAGING_PREVIEW_PASSWORD` = a preview password you choose (otherwise one is generated)
+   - **`ACCESS_ARTIFACT_PASSPHRASE`** = a long passphrase you keep in your password manager. **Required while the
+     repository is public**: artifacts of a public repository can be downloaded by anyone signed in to GitHub, so the
+     access notes are encrypted with this passphrase, and are not issued at all without it.
+   - **`EVIDENCE_INGEST_SECRET`** = `openssl rand -hex 32`, set once (docs/DEPLOYMENT.md §5). The same value is used
+     by every workflow; without it each run uses a one-run value and production release authorization cannot work.
 6. **Run it** — **Actions → Deploy staging → Run workflow** (it also runs on every push to `main`).
 
 ## What you get
 
-Each successful run downloads as a **staging-preview-access** artifact (private to repository members, kept
-7 days). Its README holds, at the top: the website URL, the preview password, the Owner email, the Owner
+Each successful run downloads as a **staging-preview-access** artifact (kept 7 days). In a public repository it
+contains `staging-access.md.enc`; decrypt it locally (Git Bash on Windows, Terminal on macOS):
+
+```sh
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in staging-access.md.enc -out staging-access.md
+```
+
+and enter `ACCESS_ARTIFACT_PASSPHRASE`. Delete the decrypted file when done. The notes hold, at the top: the website URL, the preview password, the Owner email, the Owner
 password and the Owner 2FA authenticator setup key, followed by every other demo account.
 
 The artifact is issued **only after the run has verified the whole sequence on the live site**: preview
