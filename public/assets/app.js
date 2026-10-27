@@ -134,6 +134,17 @@
     ["dragleave", "drop"].forEach((t) => z.addEventListener(t, () => z.removeAttribute("data-over")));
   });
 
+  // ── Scrollable tab strips: mark which edge has hidden content; keep the current tab in view ──
+  document.querySelectorAll(".tabs").forEach((t) => {
+    const mark = () => {
+      const max = t.scrollWidth - t.clientWidth;
+      t.setAttribute("data-overflow", max <= 2 ? "none" : t.scrollLeft < 4 ? "end" : t.scrollLeft > max - 4 ? "start" : "both");
+    };
+    const cur = t.querySelector("[aria-current='page']");
+    if (cur && t.scrollWidth > t.clientWidth) t.scrollLeft = Math.max(0, cur.offsetLeft - t.clientWidth / 3);
+    t.addEventListener("scroll", mark, { passive: true }); window.addEventListener("resize", mark, { passive: true }); mark();
+  });
+
   // ── Roving tablists: the "Anatomy of a build" concept and the process stepper ──
   // Markup is a complete ordered list without JS; with JS one item is selected at a time.
   const tablist = (list, onSelect) => {

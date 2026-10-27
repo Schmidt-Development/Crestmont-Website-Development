@@ -117,7 +117,7 @@ const SLOW_PATHS = ["/staff/readiness", "/staff/owner", "/staff/finance", "/staf
 export interface NavItem { href: string; label: string; perm?: Permission; count?: number }
 export interface NavGroup { label: string; items: NavItem[] }
 
-const initials = (name: string | undefined) => (name ?? "").split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]!.toUpperCase()).join("") || "·";
+const initials = (name: string | undefined) => (name ?? "").replace(/\(.*?\)/g, " ").split(/[^\p{L}\p{N}]+/u).filter(Boolean).slice(0, 2).map((p) => p[0]!.toUpperCase()).join("") || "·";
 
 export function appLayout(ctx: AppContext, opts: { title: string; nav: NavGroup[]; home: string; area: string }, body: SafeHtml): SafeHtml {
   const here = ctx.url.pathname;
@@ -134,7 +134,7 @@ export function appLayout(ctx: AppContext, opts: { title: string; nav: NavGroup[
 <div class="app-scrim" data-close-nav="app-nav" aria-hidden="true"></div>
 <div class="app-main"><div class="topbar">${menuButton("app-nav")}
 <span class="topbar__area faint">${opts.area}</span>
-<span class="who"><span class="avatar" aria-hidden="true">${initials(ctx.user?.displayName)}</span>${ctx.user?.displayName ?? ""} · <a href="/account">Account</a></span>
+<span class="who"><span class="avatar" aria-hidden="true">${initials(ctx.user?.displayName)}</span><span class="who__name">${ctx.user?.displayName ?? ""} · </span><a href="/account">Account</a></span>
 <form method="post" action="/logout">${csrf(ctx)}<button class="btn btn--ghost btn--sm" type="submit">Sign out</button></form></div>
 <main id="main" class="page" data-slow-target>${body}</main></div></div>${drawerShell()}
 <template id="skeleton-tpl"><div class="loading-state" role="status"><span class="visually-hidden">Loading…</span>${skeleton({ kpis: 4, lines: 6 })}</div></template>${flashToast(ctx)}</body></html>`;

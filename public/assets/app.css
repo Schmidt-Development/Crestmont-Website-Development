@@ -276,7 +276,9 @@ fieldset.field > legend { font-size: var(--fs-sm); color: var(--text-2); margin-
 .side-link .badge::before { display: none; }
 
 /* ── 10. Tables, filters, pagination ──────────────────────────────────────────────────────────── */
-.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r-2); background: var(--ink-0); -webkit-overflow-scrolling: touch; }
+/* position:relative contains the visually-hidden <caption> (absolutely positioned); without it the caption escaped
+   the scroll frame and widened the whole page on phones. */
+.table-wrap { position: relative; overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r-2); background: var(--ink-0); -webkit-overflow-scrolling: touch; }
 table.table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
 .table th { text-align: left; font-weight: 600; color: var(--text-3); background: var(--ink-1); padding: var(--s-3) var(--s-4); border-bottom: 1px solid var(--line); white-space: nowrap; font-size: var(--fs-xs); letter-spacing: .02em; position: sticky; top: 0; z-index: 1; }
 .table td { padding: var(--s-3) var(--s-4); border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; color: var(--text); }
@@ -675,7 +677,8 @@ a.shot { display: block; cursor: zoom-in; }
 .topbar__area { font-size: var(--fs-sm); color: var(--text-3); white-space: nowrap; display: inline-flex; align-items: center; gap: var(--s-2); }
 .topbar__area::before { content: ""; width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--gold-2); }
 .topbar .faint { white-space: nowrap; }
-.topbar .who { margin-left: auto; font-size: var(--fs-sm); color: var(--text-2); display: inline-flex; align-items: center; gap: var(--s-2); }
+.topbar .who { margin-left: auto; font-size: var(--fs-sm); color: var(--text-2); }
+.topbar .who .avatar { vertical-align: middle; margin-right: var(--s-2); }
 .topbar .who a { color: var(--text-2); }
 .topbar .who a:hover { color: var(--white); }
 .topbar form { margin: 0; }
@@ -692,7 +695,7 @@ a.shot { display: block; cursor: zoom-in; }
 .kpis { display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); margin-bottom: var(--s-5); }
 .kpi { position: relative; background: var(--ink-1); border: 1px solid var(--line); border-radius: var(--r-2); padding: var(--s-4); min-width: 0; }
 .kpi__label { font-size: var(--fs-xs); font-weight: 500; color: var(--text-3); letter-spacing: .01em; }
-.kpi__value { font: 600 clamp(1.4rem, 2vw, 1.75rem)/1.15 var(--font-body); color: var(--white); margin-top: var(--s-2); font-variant-numeric: tabular-nums; letter-spacing: -.015em; overflow-wrap: anywhere; }
+.kpi__value { font: 400 clamp(1.6rem, 2.3vw, 2.05rem)/1.1 var(--font-display); color: var(--white); margin-top: var(--s-2); font-variant-numeric: lining-nums tabular-nums; letter-spacing: -.01em; overflow-wrap: anywhere; font-synthesis: none; }
 .kpi__sub { font-size: var(--fs-xs); color: var(--text-3); margin-top: var(--s-1); }
 .meter { height: 4px; background: var(--ink-4); border-radius: 999px; overflow: hidden; margin-top: var(--s-3); }
 .meter > span { display: block; height: 100%; background: var(--gold-2); border-radius: inherit; transform-origin: left; }
@@ -733,8 +736,8 @@ a.shot { display: block; cursor: zoom-in; }
 .kanban__item .kanban__card { padding-right: 5.5rem; }
 .kanban__quick { position: absolute; top: var(--s-2); right: var(--s-2); display: inline-flex; align-items: center; min-height: 30px; padding: 0 var(--s-2); font-size: var(--fs-xs); color: var(--gold-1); text-decoration: none; border: 1px solid var(--line); border-radius: var(--r-1); background: var(--ink-1); }
 .kanban__quick:hover { border-color: var(--line-gold); color: var(--white); }
-.dl { display: grid; grid-template-columns: max-content 1fr; gap: var(--s-2) var(--s-5); font-size: var(--fs-sm); margin: 0; }
-.dl dt { color: var(--text-3); }
+.dl { display: grid; grid-template-columns: minmax(0, max-content) minmax(0, 1fr); gap: var(--s-2) var(--s-5); font-size: var(--fs-sm); margin: 0; }
+.dl dt { color: var(--text-3); overflow-wrap: break-word; }
 .dl dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
 .bar-chart { display: grid; gap: var(--s-2); }
 .bar-chart__row { display: grid; grid-template-columns: minmax(90px, 140px) minmax(60px, 1fr) max-content; gap: var(--s-3); align-items: center; font-size: var(--fs-sm); }
@@ -813,7 +816,7 @@ a.shot { display: block; cursor: zoom-in; }
   .section { padding: var(--s-8) 0; }
   .bar-chart__row { grid-template-columns: 1fr auto; }
   .bar-chart__row > .bar-chart__bar { grid-column: 1 / -1; grid-row: 2; }
-  .dl { grid-template-columns: 1fr; gap: 0 var(--s-5); }
+  .dl { grid-template-columns: minmax(0, 1fr); gap: 0 var(--s-5); }
   .dl dt { margin-top: var(--s-2); }
   .page-head .actions { margin-left: 0; }
   .toast { left: var(--s-4); right: var(--s-4); bottom: var(--s-4); max-width: none; }
@@ -862,3 +865,39 @@ a.shot { display: block; cursor: zoom-in; }
   .brand__sub { font-size: .5rem; letter-spacing: .14em; }
   .nav-toggle { padding: 0 var(--s-2); }
 }
+
+/* ── 21. Overflow guards (found by the 360px crawl) ──
+   Grid items default to min-width:auto, so a wide table inside a grid card widened the whole track; tables now
+   scroll inside their own frame. Long hashes, badges and receipt lines wrap instead of widening the page. */
+.grid > *, .kpis > *, .exec-grid > *, .form-layout > * { min-width: 0; }
+code { overflow-wrap: anywhere; word-break: break-word; }
+.badge { max-width: 100%; }
+@media (max-width: 560px) { .badge { white-space: normal; line-height: 1.45; padding-top: 2px; padding-bottom: 2px; } .table .badge { white-space: nowrap; } }
+.receipt, .receipt * { overflow-wrap: anywhere; }
+.receipt > *, .receipt .grid > * { min-width: 0; }
+/* Long unbroken values (hashes, ids, URLs) in running text break only when they would otherwise overflow. */
+.page p, .page li, .page dd, .page td, .page h2, .page h3, .page summary { overflow-wrap: break-word; }
+
+/* ── 22. Dense-tool refinements (dashboard review) ── */
+/* Apply/Filter buttons keep their natural width instead of stretching across a wrapped filter row. */
+.filters .field:has(> .btn:only-child), .filters .field:has(> button:only-child), .filters > .btn, .filters > button { flex: 0 0 auto; min-width: 0; }
+/* Precise pointers get the denser 15px control text; touch keeps 16px so iOS never zooms on focus. */
+@media (pointer: fine) { .page .input, .page .select, .page .textarea { font-size: .9375rem; min-height: 40px; } .page .filters .btn { min-height: 40px; } }
+/* Kanban: only the title line makes room for the Quick view control. */
+.kanban__item .kanban__card { padding-right: var(--s-3); }
+.kanban__item .kanban__card strong { padding-right: 5.25rem; margin-bottom: var(--s-1); }
+.kanban__card { line-height: 1.5; }
+/* Scrollable strips (tabs) fade at the edge that has more content; app.js sets data-overflow. */
+.tabs[data-overflow="end"] { mask-image: linear-gradient(90deg, #000 85%, transparent); -webkit-mask-image: linear-gradient(90deg, #000 85%, transparent); }
+.tabs[data-overflow="both"] { mask-image: linear-gradient(90deg, transparent, #000 12%, #000 85%, transparent); -webkit-mask-image: linear-gradient(90deg, transparent, #000 12%, #000 85%, transparent); }
+.tabs[data-overflow="start"] { mask-image: linear-gradient(90deg, transparent, #000 15%); -webkit-mask-image: linear-gradient(90deg, transparent, #000 15%); }
+@media (max-width: 560px) {
+  .kpis, .kpis.grid, .kpis.grid-4, .kpis.grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-2); }
+  .kpi { padding: var(--s-3); }
+  .kpi__sub { font-size: .72rem; }
+  .topbar .who__name { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .topbar { flex-wrap: nowrap; }
+  .topbar__area { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .table td:first-child, .table th:first-child { min-width: 9.5rem; }
+}
+.auth-card .form-actions { justify-content: center; }
