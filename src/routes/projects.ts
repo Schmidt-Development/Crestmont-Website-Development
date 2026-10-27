@@ -3,18 +3,19 @@
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatCents, formatDate, formatDateTime, label, safeUrl, type SafeHtml } from "../lib/html.ts";
-import { HttpError, htmlResponse, redirect, str } from "../app/http.ts";
+import { HttpError, download, htmlResponse, redirect, str } from "../app/http.ts";
 import { requireStaff } from "../app/app.ts";
 import { appLayout } from "../ui/layout.ts";
 import { staffNav } from "./nav.ts";
 import {
-  csrf, button, linkButton, actionForm, input, textarea, select, checkbox, formErrors, alert, badge, table, emptyState, kpi, dl, tabs, pageHead, nl2br,
+  csrf, button, linkButton, actionForm, input, textarea, select, checkbox, formErrors, alert, badge, table, emptyState, kpi, dl, tabs, pageHead, nl2br, pagination, pageParam,
 } from "../ui/components.ts";
+import { toCsv } from "../services/finance.ts";
 import * as P from "../services/projects.ts";
 import * as F from "../services/files.ts";
 import * as M from "../services/messages.ts";
 import * as O from "../services/onboarding.ts";
-import { listNotifications, markNotificationsRead } from "../services/notifications.ts";
+import { listNotifications, markNotificationsRead, notificationHref } from "../services/notifications.ts";
 import { audit } from "../services/security.ts";
 import { can, isOwner } from "../domain/authz.ts";
 import { PROJECT_STATUSES, PROJECT_TRANSITIONS, type ProjectStatus } from "../domain/project.ts";
@@ -102,16 +103,16 @@ ${can(actor, "customers.read") ? await generalConversationsNotice(ctx) : ""}
   { header: "Status", cell: (t) => badge(t.status) },
   { header: "Due", cell: (t) => (t.due_at ? html`${fmtDay(t.due_at)}${t.due_at < today ? html` ${badge("past_due", "Overdue")}` : ""}` : "—") },
 ], { empty: html`<p class="muted">No open tasks assigned to you.</p>` })}</section>
-<section class="card"><div class="row row--between"><h2 class="card__title">Notifications</h2>${notes.some((n) => !n.read_at) ? actionForm(ctx, "/staff/notifications/read", "Mark all read", { variant: "ghost" }) : ""}</div>
-${notes.length ? html`<ul class="timeline">${notes.map((n) => html`<li>${n.read_at ? "" : badge("new", "New")} ${n.subject_type === "project" && n.subject_id ? html`<a href="/staff/projects/${n.subject_id}">${n.body}</a>` : n.body}<br><span class="faint">${formatDateTime(n.created_at)}</span></li>`)}</ul>` : html`<p class="muted">No notifications.</p>`}</section>
+<section class="card"><div class="row row--between"><h2 class="card__title">Notifications</h2><div class="row">${notes.some((n) => !n.read_at) ? actionForm(ctx, "/staff/notifications/read", "Mark all read", { variant: "ghost" }) : ""}${linkButton("View all", "/staff/notifications", "ghost", "sm")}</div></div>
+${notes.length ? html`<ul class="timeline">${notes.map((n) => { const href = notificationHref(n, "staff"); return html`<li>${n.read_at ? "" : badge("new", "New")} ${href ? html`<a href="${href}">${n.body}</a>` : n.body}<br><span class="faint">${formatDateTime(n.created_at)}</span></li>`; })}</ul>` : html`<p class="muted">No notifications.</p>`}</section>
 ${can(actor, "delivery.access") ? html`<section class="card"><h2 class="card__title">My projects</h2>${table(myProjects, [
   { header: "Project", cell: (p) => html`<a href="/staff/projects/${p.id}">${p.name}</a><br><span class="faint">${p.org}</span>` }, { header: "Status", cell: (p) => badge(p.status) },
 ], { empty: html`<p class="muted">You are not assigned to any active project.</p>` })}</section>` : ""}
 ${can(actor, "crm.access") || leads.length ? html`<section class="card"><h2 class="card__title">Assigned leads</h2>${table(leads, [
-  { header: "Lead", cell: (l) => html`<a href="/staff/crm">${l.name}</a>${l.interest ? html`<br><span class="faint">${l.interest}</span>` : ""}` }, { header: "Stage", cell: (l) => badge(l.stage) }, { header: "Updated", cell: (l) => fmtDay(l.updated_at) },
+  { header: "Lead", cell: (l) => html`<a href="/staff/crm/leads/${l.id}">${l.name}</a>${l.interest ? html`<br><span class="faint">${l.interest}</span>` : ""}` }, { header: "Stage", cell: (l) => badge(l.stage) }, { header: "Updated", cell: (l) => fmtDay(l.updated_at) },
 ], { empty: html`<p class="muted">No open leads assigned to you.</p>` })}</section>` : ""}
 ${can(actor, "support.access") || tickets.length ? html`<section class="card"><h2 class="card__title">Assigned tickets</h2>${table(tickets, [
-  { header: "Ticket", cell: (t) => html`<a href="/staff/support">${t.subject}</a><br><span class="faint">${t.org}</span>` }, { header: "Priority", cell: (t) => badge(t.priority) }, { header: "Status", cell: (t) => badge(t.status) },
+  { header: "Ticket", cell: (t) => html`<a href="/staff/support/${t.id}">${t.subject}</a><br><span class="faint">${t.org}</span>` }, { header: "Priority", cell: (t) => badge(t.priority) }, { header: "Status", cell: (t) => badge(t.status) },
 ], { empty: html`<p class="muted">No open tickets assigned to you.</p>` })}</section>` : ""}
 <section class="card"><h2 class="card__title">My recent activity</h2>${activity.length ? html`<ul class="timeline">${activity.map((a) => html`<li>${a.action.replace(/[._]/g, " ")} <span class="faint">(${a.subject_type})</span><br><span class="faint">${formatDateTime(a.created_at)}</span></li>`)}</ul>` : html`<p class="muted">No activity recorded yet.</p>`}</section>
 </div>`;
@@ -165,27 +166,50 @@ ${checkbox("internal", "Internal note — not visible to the customer")}<div cla
   r.post("/staff/notifications/read", async (ctx) => {
     requireStaff(ctx);
     await markNotificationsRead(ctx.db, ctx.user!.id);
-    return redirect(ctx, "/staff", { kind: "success", text: "Notifications marked as read." });
+    const back = str(await ctx.form(), "back") === "/staff/notifications" ? "/staff/notifications" : "/staff";
+    return redirect(ctx, back, { kind: "success", text: "Notifications marked as read." });
   });
 
   // ───────────── Project list / kanban ─────────────
-  r.get("/staff/projects", async (ctx) => {
-    requireStaff(ctx, "delivery.access");
+  type ProjectListRow = { id: string; name: string; status: string; product_id: string | null; created_at: string; updated_at: string; last_customer_activity_at: string | null; target_launch_at: string | null; completed_at: string | null; org: string; pm_name: string | null; done: number; total: number; overdue: number };
+  const projectQuery = (ctx: AppContext) => {
     const q = ctx.url.searchParams;
     const status = q.get("status") ?? "", pm = q.get("pm") ?? "", org = q.get("customer") ?? "", search = (q.get("q") ?? "").trim().slice(0, 100);
-    const view = q.get("view") === "kanban" ? "kanban" : "list";
     const vis = P.visibleProjectsSql(ctx.actor!, ctx.user!.id);
     const where = [vis.sql];
-    const binds: unknown[] = [...vis.binds];
+    const today = ctx.now().toISOString().slice(0, 10);
+    const binds: unknown[] = [today, ...vis.binds]; // first placeholder: the overdue-task cut-off in the SELECT list
     if ((PROJECT_STATUSES as readonly string[]).includes(status)) { where.push("p.status = ?"); binds.push(status); }
     else if (status !== "all") where.push("p.status NOT IN ('cancelled')");
     if (pm === "none") where.push("p.project_manager_id IS NULL"); else if (pm) { where.push("p.project_manager_id = ?"); binds.push(pm); }
     if (org) { where.push("p.organization_id = ?"); binds.push(org); }
-    if (search) { where.push("(p.name LIKE ? OR o.name LIKE ? OR p.id = ?)"); binds.push(`%${search}%`, `%${search}%`, search); }
-    const rows = (await ctx.db.prepare(`SELECT p.id, p.name, p.status, p.product_id, p.updated_at, p.last_customer_activity_at, o.name AS org, u.display_name AS pm_name,
-        (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.status = 'done') AS done, (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id) AS total
-        FROM projects p JOIN organizations o ON o.id = p.organization_id LEFT JOIN users u ON u.id = p.project_manager_id WHERE ${where.join(" AND ")} ORDER BY p.updated_at DESC LIMIT 300`).bind(...binds)
-      .all<{ id: string; name: string; status: string; product_id: string | null; updated_at: string; last_customer_activity_at: string | null; org: string; pm_name: string | null; done: number; total: number }>()).results;
+    if (search) { const like = `%${search.replace(/[\\%_]/g, (m) => "\\" + m)}%`; where.push("(p.name LIKE ? ESCAPE '\\' OR o.name LIKE ? ESCAPE '\\' OR p.id = ?)"); binds.push(like, like, search); }
+    const sql = `SELECT p.id, p.name, p.status, p.product_id, p.created_at, p.updated_at, p.last_customer_activity_at, p.target_launch_at, p.completed_at, o.name AS org, u.display_name AS pm_name,
+        (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.status = 'done') AS done, (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id) AS total,
+        (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.status <> 'done' AND t.due_at IS NOT NULL AND t.due_at < ?) AS overdue
+        FROM projects p JOIN organizations o ON o.id = p.organization_id LEFT JOIN users u ON u.id = p.project_manager_id WHERE ${where.join(" AND ")} ORDER BY p.updated_at DESC, p.id`;
+    return { sql, binds, v: { status, pm, org, search } };
+  };
+  r.get("/staff/projects/export.csv", async (ctx) => {
+    requireStaff(ctx, "delivery.access");
+    const pq = projectQuery(ctx);
+    const rows = (await ctx.db.prepare(`${pq.sql} LIMIT 10000`).bind(...pq.binds).all<ProjectListRow>()).results;
+    await audit(ctx.db, { actorUserId: ctx.user!.id, action: "project.exported", subjectType: "project", details: { count: rows.length, filter: pq.v } });
+    const csv = toCsv(["project_id", "name", "customer", "package", "status", "project_manager", "tasks_done", "tasks_total", "tasks_overdue", "target_launch", "created_date", "completed_date", "last_customer_activity"],
+      rows.map((p) => [p.id, p.name, p.org, p.product_id ?? "", p.status, p.pm_name ?? "", p.done, p.total, p.overdue, p.target_launch_at?.slice(0, 10) ?? "", p.created_at.slice(0, 10), p.completed_at?.slice(0, 10) ?? "", p.last_customer_activity_at?.slice(0, 10) ?? ""]));
+    return download(ctx, csv, `crestmont-projects-${ctx.now().toISOString().slice(0, 10)}.csv`, "text/csv; charset=utf-8");
+  });
+  r.get("/staff/projects", async (ctx) => {
+    requireStaff(ctx, "delivery.access");
+    const q = ctx.url.searchParams;
+    const view = q.get("view") === "kanban" ? "kanban" : "list";
+    const pq = projectQuery(ctx);
+    const { status, pm, org, search } = pq.v;
+    const { page: pageNo, limit, offset } = pageParam(ctx);
+    // The board shows every matching project (capped); the list is paginated.
+    const rows = (await ctx.db.prepare(view === "kanban" ? `${pq.sql} LIMIT 500` : `${pq.sql} LIMIT ? OFFSET ?`).bind(...pq.binds, ...(view === "kanban" ? [] : [limit + 1, offset])).all<ProjectListRow>()).results;
+    const hasNext = view === "list" && rows.length > limit;
+    if (hasNext) rows.length = limit;
     const pms = await staffUsers(ctx, ["project_manager", "owner"]);
     const orgs = (await ctx.db.prepare(`SELECT DISTINCT o.id, o.name FROM organizations o JOIN projects p ON p.organization_id = o.id ORDER BY o.name`).all<{ id: string; name: string }>()).results;
     const qs = (v: string) => { const u = new URLSearchParams(q); u.set("view", v); return `/staff/projects?${u}`; };
@@ -199,7 +223,8 @@ ${input({ name: "q", label: "Search", value: search, placeholder: "Project, cust
       { header: "Package", cell: (p) => packageName(p.product_id) },
       { header: "Status", cell: (p) => badge(p.status) },
       { header: "PM", cell: (p) => p.pm_name ?? badge("pending", "Unassigned") },
-      { header: "Tasks", cell: (p) => (p.total ? `${p.done} / ${p.total}` : "—") },
+      { header: "Tasks", cell: (p) => (p.total ? html`${p.done} / ${p.total}${p.overdue ? html` ${badge("past_due", `${p.overdue} overdue`)}` : ""}` : "—") },
+      { header: "Target launch", cell: (p) => fmtDay(p.target_launch_at) },
       { header: "Customer activity", cell: (p) => fmtDay(p.last_customer_activity_at) },
       { header: "Updated", cell: (p) => fmtDay(p.updated_at) },
     ], { empty: emptyState("No projects match", "Projects are created automatically when a package order or accepted quote is paid.") });
@@ -208,9 +233,10 @@ ${input({ name: "q", label: "Search", value: search, placeholder: "Project, cust
       const items = rows.filter((p) => p.status === s);
       return html`<div class="kanban__col"><h3>${label(s)} · ${items.length}</h3>${items.map((p) => html`<a class="kanban__card" href="/staff/projects/${p.id}"><strong>${p.name}</strong><br><span class="faint">${p.pm_name ?? "No PM"} · ${p.total ? `${p.done}/${p.total} tasks` : "No tasks"}</span></a>`)}</div>`;
     })}</div>`;
-    const body = html`${pageHead("Projects", html`${linkButton("List", qs("list"), view === "list" ? "primary" : "ghost", "sm")}${linkButton("Board", qs("kanban"), view === "kanban" ? "primary" : "ghost", "sm")}
+    const exportHref = (() => { const u = new URLSearchParams(q); u.delete("page"); u.delete("view"); const s2 = u.toString(); return `/staff/projects/export.csv${s2 ? `?${s2}` : ""}`; })();
+    const body = html`${pageHead("Projects", html`${linkButton("List", qs("list"), view === "list" ? "primary" : "ghost", "sm")}${linkButton("Board", qs("kanban"), view === "kanban" ? "primary" : "ghost", "sm")}${linkButton("Export CSV", exportHref, "ghost", "sm")}
 ${can(ctx.actor!, "project.coordinate") ? actionForm(ctx, "/staff/projects/sweep-inactivity", "Run inactivity sweep", { variant: "secondary", confirm: "Send due inactivity reminders, escalations and pauses now?" }) : ""}`)}
-${filters}${view === "kanban" ? kanbanView : listView}`;
+${filters}${view === "kanban" ? kanbanView : html`${listView}${pagination(ctx, pageNo, hasNext)}`}`;
     return page(ctx, "Projects", body);
   });
 
@@ -310,6 +336,7 @@ ${textarea({ name: "description", label: "Description", rows: 2, maxlength: 5000
 ${coord ? html`<form method="post" action="/staff/projects/${proj.id}/change-orders" style="margin-top:1rem">${csrf(ctx)}${textarea({ name: "scope", label: "New change order — additional scope", rows: 3, maxlength: 5000, required: true })}${input({ name: "price", label: "Price (USD)", required: true })}${button("Propose to customer", { variant: "secondary" })}</form>` : ""}</section>`;
     } else if (tab === "approvals") {
       const rr = await P.releaseReadiness(db, proj.id);
+      const closure = await P.closureChecklist(db, proj.id);
       const approvals = (await db.prepare(`SELECT a.kind, a.decision, a.notes, a.created_at, u.display_name FROM approvals a JOIN users u ON u.id = a.decided_by WHERE a.project_id = ? ORDER BY a.created_at DESC, a.rowid DESC`).bind(proj.id).all<{ kind: string; decision: string; notes: string | null; created_at: string; display_name: string }>()).results;
       const requests = (await db.prepare(`SELECT kind, note, created_at, resolved_at FROM approval_requests WHERE project_id = ? ORDER BY created_at DESC`).bind(proj.id).all<{ kind: string; note: string | null; created_at: string; resolved_at: string | null }>()).results;
       const invoices = (await db.prepare(`SELECT id, milestone_kind, amount_cents, status, created_at FROM invoices WHERE project_id = ? ORDER BY created_at`).bind(proj.id).all<{ id: string; milestone_kind: string | null; amount_cents: number; status: string; created_at: string }>()).results;
@@ -330,7 +357,15 @@ ${coord && proj.payment_schedule === "milestone_50_25_25" ? html`<div class="row
 <section class="card"><h2 class="card__title">Deployment</h2>${table(deps, [{ header: "URL", cell: (d) => html`<a href="${safeUrl(d.url)}" rel="noopener">${d.url}</a>` }, { header: "Commit", cell: (d) => d.commit_sha ?? "—" }, { header: "By", cell: (d) => d.display_name }, { header: "When", cell: (d) => formatDateTime(d.deployed_at) }], { empty: html`<p class="muted">No deployment recorded.</p>` })}
 ${coord ? rr.ready ? html`<form method="post" action="/staff/projects/${proj.id}/deployments">${csrf(ctx)}${input({ name: "url", label: "Live URL", type: "url", required: true, placeholder: "https://" })}${input({ name: "commit_sha", label: "Commit SHA (optional)", maxlength: 40 })}${button("Record deployment")}</form>`
   : html`<p class="muted">Deployment can be recorded once every readiness check passes.</p>` : ""}
-${coord && proj.status === "deployment" && deps.length ? actionForm(ctx, `/staff/projects/${proj.id}/status`, "Mark project completed", { hidden: { to: "completed" }, variant: "primary" }) : ""}</section></div>
+</section></div>
+<section class="card" style="margin-top:1.5rem" data-closure><h2 class="card__title">Project closure &amp; handoff</h2>
+<p class="muted">A project is completed only when every required check passes. Customer final acceptance is tracked but not required, so an unresponsive customer cannot block closure.</p>
+${table(closure.checks, [{ header: "Check", cell: (c) => html`${c.label}${c.required ? "" : html` <span class="faint">(informational)</span>`}` }, { header: "Result", cell: (c) => badge(c.ok ? "pass" : c.required ? "fail" : "pending", c.ok ? "Done" : c.required ? "Outstanding" : "Not yet") }, { header: "Detail", cell: (c) => c.detail }])}
+${proj.status === "completed" || proj.status === "maintenance" ? html`<p>${badge("completed", `Completed ${formatDateTime(proj.completed_at)}`)}${proj.closure_notes ? html` <span class="faint">${proj.closure_notes}</span>` : ""}</p>`
+  : coord && proj.status === "deployment" ? (closure.ready ? html`<form method="post" action="/staff/projects/${proj.id}/status">${csrf(ctx)}<input type="hidden" name="to" value="completed">${textarea({ name: "note", label: "Closure notes (optional)", rows: 2, maxlength: 300, id: "closure-note" })}<div class="form-actions">${button("Mark project completed")}</div></form>`
+    : html`<p class="muted">Resolve the outstanding checks above, then complete the project here.</p>`)
+  : html`<p class="faint">Closure becomes available once the project reaches Deployment.</p>`}
+${coord && proj.status === "completed" ? html`<p class="faint">Move to Maintenance once the customer's maintenance plan is active.</p>` : ""}</section>
 <section class="card" style="margin-top:1.5rem"><h2 class="card__title">Approval log</h2>${table(approvals, [{ header: "Approval", cell: (a) => P.APPROVAL_LABELS[a.kind] ?? a.kind }, { header: "Decision", cell: (a) => badge(a.decision) }, { header: "By", cell: (a) => a.display_name }, { header: "Notes", cell: (a) => a.notes ?? "—" }, { header: "When", cell: (a) => formatDateTime(a.created_at) }], { empty: html`<p class="muted">No approvals recorded.</p>` })}
 <h3>Customer approval requests</h3>${table(requests, [{ header: "Approval", cell: (a) => P.APPROVAL_LABELS[a.kind] }, { header: "Note", cell: (a) => a.note ?? "—" }, { header: "Requested", cell: (a) => fmtDay(a.created_at) }, { header: "Status", cell: (a) => (a.resolved_at ? badge("resolved") : badge("pending_customer", "Waiting on customer")) }], { empty: html`<p class="muted">No requests sent.</p>` })}</section>`;
     } else if (tab === "messages") {
@@ -560,11 +595,12 @@ ${input({ name: "description", label: "Description", required: true, maxlength: 
     });
   });
 
-  r.get("/staff/tasks", async (ctx) => {
-    requireStaff(ctx, "delivery.access");
+  type TaskListRow = { id: string; title: string; status: string; due_at: string | null; estimate_minutes: number | null; completed_at: string | null; created_at: string; project_id: string; project_name: string; milestone: string | null; assignees: string | null; logged: number; open_deps: number };
+  const taskQuery = (ctx: AppContext) => {
     const q = ctx.url.searchParams;
     const me = ctx.user!.id, actor = ctx.actor!;
     const status = q.get("status") ?? "open", projectId = q.get("project") ?? "", assignee = q.get("assignee") ?? (can(actor, "project.read_all") ? "" : "me"), due = q.get("due") ?? "";
+    const search = (q.get("q") ?? "").trim().slice(0, 100);
     const where: string[] = [], binds: unknown[] = [];
     const vis = P.visibleProjectsSql(actor, me);
     where.push(vis.sql); binds.push(...vis.binds);
@@ -573,28 +609,61 @@ ${input({ name: "description", label: "Description", required: true, maxlength: 
     }
     if (status === "open") where.push("t.status <> 'done'"); else if ((P.TASK_STATUSES as readonly string[]).includes(status)) { where.push("t.status = ?"); binds.push(status); }
     if (projectId) { where.push("t.project_id = ?"); binds.push(projectId); }
-    if (assignee) { where.push(`EXISTS (SELECT 1 FROM assignments a WHERE a.subject_type = 'task' AND a.subject_id = t.id AND a.user_id = ? AND a.ended_at IS NULL)`); binds.push(assignee === "me" ? me : assignee); }
+    if (assignee === "unassigned") where.push(`NOT EXISTS (SELECT 1 FROM assignments a WHERE a.subject_type = 'task' AND a.subject_id = t.id AND a.ended_at IS NULL)`);
+    else if (assignee) { where.push(`EXISTS (SELECT 1 FROM assignments a WHERE a.subject_type = 'task' AND a.subject_id = t.id AND a.user_id = ? AND a.ended_at IS NULL)`); binds.push(assignee === "me" ? me : assignee); }
     const today = ctx.now().toISOString().slice(0, 10);
     if (due === "overdue") { where.push("t.due_at < ? AND t.status <> 'done'"); binds.push(today); }
     if (due === "week") { where.push("t.due_at BETWEEN ? AND ?"); binds.push(today, new Date(ctx.now().getTime() + 7 * 86400e3).toISOString().slice(0, 10)); }
-    const rows = (await ctx.db.prepare(`SELECT t.id, t.title, t.status, t.due_at, t.estimate_minutes, p.id AS project_id, p.name AS project_name,
-        (SELECT group_concat(u.display_name, ', ') FROM assignments a JOIN users u ON u.id = a.user_id WHERE a.subject_type = 'task' AND a.subject_id = t.id AND a.ended_at IS NULL) AS assignees
-        FROM tasks t JOIN projects p ON p.id = t.project_id WHERE ${where.join(" AND ")} ORDER BY CASE WHEN t.due_at IS NULL THEN 1 ELSE 0 END, t.due_at, t.created_at LIMIT 300`).bind(...binds)
-      .all<{ id: string; title: string; status: string; due_at: string | null; estimate_minutes: number | null; project_id: string; project_name: string; assignees: string | null }>()).results;
+    if (due === "none") where.push("t.due_at IS NULL");
+    if (q.get("blocked") === "1") where.push(`EXISTS (SELECT 1 FROM task_dependencies d JOIN tasks dt ON dt.id = d.depends_on_task_id WHERE d.task_id = t.id AND dt.status <> 'done')`);
+    if (search) { const like = `%${search.replace(/[\\%_]/g, (m) => "\\" + m)}%`; where.push(`(t.title LIKE ? ESCAPE '\\' OR t.description LIKE ? ESCAPE '\\' OR p.name LIKE ? ESCAPE '\\' OR t.id = ?)`); binds.push(like, like, like, search); }
+    const sql = `SELECT t.id, t.title, t.status, t.due_at, t.estimate_minutes, t.completed_at, t.created_at, p.id AS project_id, p.name AS project_name, m.name AS milestone,
+        (SELECT group_concat(u.display_name, ', ') FROM assignments a JOIN users u ON u.id = a.user_id WHERE a.subject_type = 'task' AND a.subject_id = t.id AND a.ended_at IS NULL) AS assignees,
+        (SELECT COALESCE(SUM(minutes),0) FROM time_entries te WHERE te.task_id = t.id) AS logged,
+        (SELECT COUNT(*) FROM task_dependencies d JOIN tasks dt ON dt.id = d.depends_on_task_id WHERE d.task_id = t.id AND dt.status <> 'done') AS open_deps
+        FROM tasks t JOIN projects p ON p.id = t.project_id LEFT JOIN milestones m ON m.id = t.milestone_id WHERE ${where.join(" AND ")} ORDER BY CASE WHEN t.due_at IS NULL THEN 1 ELSE 0 END, t.due_at, t.created_at, t.id`;
+    return { sql, binds, today, v: { status, projectId, assignee, due, search, blocked: q.get("blocked") === "1" } };
+  };
+  r.get("/staff/tasks/export.csv", async (ctx) => {
+    requireStaff(ctx, "delivery.access");
+    const tq = taskQuery(ctx);
+    const rows = (await ctx.db.prepare(`${tq.sql} LIMIT 20000`).bind(...tq.binds).all<TaskListRow>()).results;
+    await audit(ctx.db, { actorUserId: ctx.user!.id, action: "task.exported", subjectType: "task", details: { count: rows.length, filter: tq.v } });
+    const csv = toCsv(["task_id", "title", "project_id", "project", "milestone", "status", "assignees", "due_date", "overdue", "estimate_minutes", "logged_minutes", "open_dependencies", "created_date", "completed_date"],
+      rows.map((t) => [t.id, t.title, t.project_id, t.project_name, t.milestone ?? "", t.status, t.assignees ?? "", t.due_at?.slice(0, 10) ?? "", t.due_at && t.due_at.slice(0, 10) < tq.today && t.status !== "done" ? "yes" : "no",
+        t.estimate_minutes ?? "", t.logged, t.open_deps, t.created_at.slice(0, 10), t.completed_at?.slice(0, 10) ?? ""]));
+    return download(ctx, csv, `crestmont-tasks-${tq.today}.csv`, "text/csv; charset=utf-8");
+  });
+  r.get("/staff/tasks", async (ctx) => {
+    requireStaff(ctx, "delivery.access");
+    const actor = ctx.actor!;
+    const tq = taskQuery(ctx);
+    const { status, projectId, assignee, due, search, blocked } = tq.v;
+    const today = tq.today;
+    const { page: pageNo, limit, offset } = pageParam(ctx);
+    const rows = (await ctx.db.prepare(`${tq.sql} LIMIT ? OFFSET ?`).bind(...tq.binds, limit + 1, offset).all<TaskListRow>()).results;
+    const hasNext = rows.length > limit;
+    if (hasNext) rows.length = limit;
+    const vis = P.visibleProjectsSql(actor, ctx.user!.id);
     const projects = (await ctx.db.prepare(`SELECT p.id, p.name FROM projects p WHERE ${vis.sql} AND p.status NOT IN ('cancelled') ORDER BY p.name`).bind(...vis.binds).all<{ id: string; name: string }>()).results;
     const people = can(actor, "project.read_all") ? await staffUsers(ctx) : [];
-    const body = html`${pageHead("Tasks")}<form method="get" action="/staff/tasks" class="filters">
+    const exportHref = (() => { const u = new URL(ctx.url); u.pathname = "/staff/tasks/export.csv"; u.searchParams.delete("page"); return u.pathname + u.search; })();
+    const body = html`${pageHead("Tasks", linkButton("Export CSV", exportHref, "ghost", "sm"))}<form method="get" action="/staff/tasks" class="filters">
+${input({ name: "q", label: "Search", value: search, placeholder: "Task, description or project" })}
 ${select({ name: "status", label: "Status", options: [{ value: "open", label: "Open" }, { value: "all", label: "All" }, ...P.TASK_STATUSES.map((s) => ({ value: s, label: label(s) }))], value: status })}
 ${select({ name: "project", label: "Project", options: projects.map((x) => ({ value: x.id, label: x.name })), value: projectId, includeBlank: "All projects" })}
-${select({ name: "assignee", label: "Assignee", options: [{ value: "me", label: "Me" }, ...people.map((u) => ({ value: u.id, label: u.display_name }))], value: assignee, includeBlank: "Anyone" })}
-${select({ name: "due", label: "Due", options: [{ value: "overdue", label: "Overdue" }, { value: "week", label: "Next 7 days" }], value: due, includeBlank: "Any time" })}${button("Filter", { variant: "secondary" })}</form>
+${select({ name: "assignee", label: "Assignee", options: [{ value: "me", label: "Me" }, ...(can(actor, "project.read_all") ? [{ value: "unassigned", label: "Unassigned" }] : []), ...people.map((u) => ({ value: u.id, label: u.display_name }))], value: assignee, includeBlank: "Anyone" })}
+${select({ name: "due", label: "Due", options: [{ value: "overdue", label: "Overdue" }, { value: "week", label: "Next 7 days" }, { value: "none", label: "No due date" }], value: due, includeBlank: "Any time" })}
+${checkbox("blocked", "Waiting on a dependency", { checked: blocked, value: "1" })}${button("Filter", { variant: "secondary" })}</form>
 ${table(rows, [
-  { header: "Task", cell: (t) => html`<a href="/staff/tasks/${t.id}">${t.title}</a>` },
-  { header: "Project", cell: (t) => html`<a href="/staff/projects/${t.project_id}?tab=plan">${t.project_name}</a>` },
-  { header: "Assignees", cell: (t) => t.assignees ?? "—" },
+  { header: "Task", cell: (t) => html`<a href="/staff/tasks/${t.id}">${t.title}</a>${t.open_deps ? html`<br>${badge("blocked", `Waiting on ${t.open_deps} task${t.open_deps === 1 ? "" : "s"}`)}` : ""}` },
+  { header: "Project", cell: (t) => html`<a href="/staff/projects/${t.project_id}?tab=plan">${t.project_name}</a>${t.milestone ? html`<br><span class="faint">${t.milestone}</span>` : ""}` },
+  { header: "Assignees", cell: (t) => t.assignees ?? html`<span class="faint">Unassigned</span>` },
   { header: "Status", cell: (t) => badge(t.status) },
-  { header: "Due", cell: (t) => (t.due_at ? html`${fmtDay(t.due_at)}${t.due_at < today && t.status !== "done" ? html` ${badge("past_due", "Overdue")}` : ""}` : "—") },
-], { empty: emptyState("No tasks match", "Tasks appear here when a project manager assigns them.") })}`;
+  { header: "Estimate / logged", cell: (t) => `${t.estimate_minutes === null ? "—" : `${(t.estimate_minutes / 60).toFixed(1)} h`} / ${(t.logged / 60).toFixed(1)} h` },
+  { header: "Due", cell: (t) => (t.due_at ? html`${fmtDay(t.due_at)}${t.due_at.slice(0, 10) < today && t.status !== "done" ? html` ${badge("past_due", "Overdue")}` : ""}` : "—") },
+], { empty: emptyState("No tasks match", search || projectId || due || blocked ? "Try a different search or filter." : "Tasks appear here when a project manager assigns them.") })}
+${pagination(ctx, pageNo, hasNext)}`;
     return page(ctx, "Tasks", body);
   });
 

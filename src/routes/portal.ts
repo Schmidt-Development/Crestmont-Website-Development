@@ -16,7 +16,7 @@ import * as M from "../services/messages.ts";
 import * as O from "../services/onboarding.ts";
 import * as S from "../services/share-links.ts";
 import { sharePanel } from "../ui/share.ts";
-import { listNotifications, markNotificationsRead } from "../services/notifications.ts";
+import { listNotifications, markNotificationsRead, notificationHref } from "../services/notifications.ts";
 import { createInvitation, AuthError } from "../services/auth.ts";
 import { sendMail } from "../services/mailer.ts";
 import { audit } from "../services/security.ts";
@@ -125,7 +125,8 @@ ${kpi("Maintenance plan", subs.length ? label(subs[0].status) : "None", subs.len
 ])}</section></div>`}
 <div class="grid grid-2" style="margin-top:1.5rem">
 <section class="card"><div class="row row--between"><h2 class="card__title">Notifications</h2>${notes.some((n) => !n.read_at) ? actionForm(ctx, "/portal/notifications/read", "Mark all read", { variant: "ghost" }) : ""}</div>
-${notes.length ? html`<ul class="timeline">${notes.map((n) => html`<li>${n.read_at ? "" : badge("new", "New")} ${n.body}<br><span class="faint">${formatDateTime(n.created_at)}</span></li>`)}</ul>` : html`<p class="muted">No notifications yet.</p>`}</section>
+${notes.length ? html`<ul class="timeline">${notes.map((n) => { const href = notificationHref(n, "portal"); return html`<li>${n.read_at ? "" : badge("new", "New")} ${href ? html`<a href="${href}">${n.body}</a>` : n.body}<br><span class="faint">${formatDateTime(n.created_at)}</span></li>`; })}</ul>` : html`<p class="muted">No notifications yet.</p>`}
+<p><a href="/portal/notifications">All notifications</a></p></section>
 <section class="card"><h2 class="card__title">Billing &amp; support</h2>
 <p>${openInvoices.n ? html`${openInvoices.n} open invoice${openInvoices.n === 1 ? "" : "s"} totalling ${formatCents(openInvoices.total)}.` : "No open invoices."} <a href="/portal/billing">Billing</a></p>
 <p>${subs.length ? html`Maintenance: ${subs.map((s) => html`${s.name} ${badge(s.status)} `)}` : "No maintenance subscription."}</p>
@@ -136,7 +137,8 @@ ${notes.length ? html`<ul class="timeline">${notes.map((n) => html`<li>${n.read_
   r.post("/portal/notifications/read", async (ctx) => {
     requireCustomerOrg(ctx);
     await markNotificationsRead(ctx.db, ctx.user!.id);
-    return redirect(ctx, "/portal", { kind: "success", text: "Notifications marked as read." });
+    const back = str(await ctx.form(), "back") === "/portal/notifications" ? "/portal/notifications" : "/portal";
+    return redirect(ctx, back, { kind: "success", text: "Notifications marked as read." });
   });
 
   // ── Projects ──

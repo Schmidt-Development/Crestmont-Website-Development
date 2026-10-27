@@ -12,7 +12,7 @@ export const OWNER_MODULE_LABELS = ["Executive overview", "Launch readiness", "E
 
 export function portalNav(_ctx: AppContext): NavGroup[] {
   return [
-    { label: "Overview", items: [{ href: "/portal", label: "Dashboard" }, { href: "/portal/projects", label: "Projects" }] },
+    { label: "Overview", items: [{ href: "/portal", label: "Dashboard" }, { href: "/portal/projects", label: "Projects" }, { href: "/portal/notifications", label: "Notifications" }] },
     { label: "Collaborate", items: [{ href: "/portal/messages", label: "Messages" }, { href: "/portal/files", label: "Files" }, { href: "/portal/approvals", label: "Approvals" }] },
     { label: "Account", items: [{ href: "/portal/billing", label: "Billing" }, { href: "/portal/agreements", label: "Agreements" }, { href: "/portal/support", label: "Support" }, { href: "/portal/team", label: "Team" }] },
   ];
@@ -22,6 +22,7 @@ export function staffNav(_ctx: AppContext): NavGroup[] {
   return [
     { label: "Work", items: [
       { href: "/staff", label: "My work" },
+      { href: "/staff/notifications", label: "Notifications" },
       { href: "/staff/owner", label: "Executive overview", perm: "finance.read" },
     ] },
     { label: "Launch readiness", items: [

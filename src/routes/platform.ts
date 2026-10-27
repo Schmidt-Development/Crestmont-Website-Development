@@ -19,6 +19,8 @@ import { sendMail, renderMail, EMAIL_TEMPLATES, type EmailTemplate } from "../se
 import { ResendEmail } from "../adapters/email.ts";
 import { decideAiJob, aiProviderFromEnv, AI_WORKFLOWS, AI_FORBIDDEN } from "../services/ai.ts";
 import * as emp from "../services/employees.ts";
+import * as wl from "../services/workload.ts";
+import { toCsv } from "../services/finance.ts";
 import * as integ from "../services/integrations.ts";
 import * as mon from "../services/monitoring.ts";
 import * as priv from "../services/privacy.ts";
@@ -55,25 +57,37 @@ function errStatus(e: unknown): number | undefined {
 // ───────────── 1. Employees (EMP-001, EMP-002, EMP-003, AUTH-006) ─────────────
 async function employeesPage(ctx: AppContext, errors: string[] = [], v: Record<string, string> = {}) {
   requireStaff(ctx, "employee.manage");
-  const staff = await emp.listStaff(ctx.db);
-  const workload = new Map<string, { subject_type: string; n: number }[]>();
-  for (const s of staff) workload.set(s.id, await emp.staffWorkload(ctx.db, s.id));
+  const fq = q(ctx, "q"), frole = q(ctx, "role"), fstatus = q(ctx, "status");
+  const all = await wl.teamWorkload(ctx.db, ctx.now());
+  const staff = filterStaff(all, fq, frole, fstatus);
   const invites = await emp.pendingInvitations(ctx.db);
   const roleOpts = emp.ASSIGNABLE_STAFF_ROLES.map((r) => ({ value: r, label: label(r) }));
-  const active = staff.filter((s) => !s.disabled_at);
+  const active = all.filter((s) => !s.disabled_at);
   const mfa = active.filter((s) => s.mfa).length;
-  const body = html`${pageHead("Employees", undefined, "Delivery")}
-<div class="kpis grid grid-4">${kpi("Active staff", active.length)}${kpi("MFA enrolled", `${mfa}/${active.length}`, "Required for every staff sign-in", active.length ? (mfa / active.length) * 100 : 0)}${kpi("Disabled", staff.length - active.length)}${kpi("Pending invitations", invites.length)}</div>
-${alert("info", html`The <strong>Owner</strong> role is never granted, changed or removed here, and the Owner account cannot be disabled. Role changes and disabling sign the person out everywhere. Every change is written to the audit log.`)}
+  const teamOverdue = active.reduce((n, s) => n + s.w.overdueTasks, 0);
+  const unassignedTasks = (await ctx.db.prepare(`SELECT COUNT(*) AS n FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.status <> 'done' AND p.status NOT IN ('completed','maintenance','cancelled')
+      AND NOT EXISTS (SELECT 1 FROM assignments a WHERE a.subject_type = 'task' AND a.subject_id = t.id AND a.ended_at IS NULL)`).first<{ n: number }>())?.n ?? 0;
+  const exportQs = new URLSearchParams(ctx.url.search); exportQs.delete("page");
+  const exportHref = `/staff/employees/export.csv${exportQs.toString() ? `?${exportQs}` : ""}`;
+  const body = html`${pageHead("Employees", linkButton("Export CSV", exportHref, "ghost", "sm"), "Delivery")}
+<div class="kpis grid grid-4">${kpi("Active staff", active.length)}${kpi("MFA enrolled", `${mfa}/${active.length}`, "Required for every staff sign-in", active.length ? (mfa / active.length) * 100 : 0)}${kpi("Disabled", all.length - active.length)}${kpi("Pending invitations", invites.length)}</div>
+<div class="kpis grid grid-4">${kpi("Overdue tasks (team)", teamOverdue, "Assigned tasks past their due date")}${kpi("Open tasks without an assignee", unassignedTasks, "On active projects")}${kpi("Open tasks (team)", active.reduce((n, s) => n + s.w.openTasks, 0))}${kpi("Logged (7 days, team)", wl.hours(active.reduce((n, s) => n + s.w.loggedLast7Minutes, 0)))}</div>
+${alert("info", html`The <strong>Owner</strong> role is never granted, changed or removed here, and the Owner account cannot be disabled. Role changes and disabling sign the person out everywhere. Every change is written to the audit log. Workload counts come from live assignments, tasks, leads, tickets and time entries; utilisation is logged time in the last 7 days ÷ the weekly capacity set on each person's page.`)}
 <section class="section--tight"><h2>Staff</h2>
+${filterForm(ctx, [
+  input({ name: "q", label: "Name or email", value: fq }),
+  select({ name: "role", label: "Role", options: [{ value: "owner", label: "Owner" }, ...roleOpts], value: frole, includeBlank: "Any role" }),
+  select({ name: "status", label: "Status", options: [{ value: "active", label: "Active" }, { value: "disabled", label: "Disabled" }], value: fstatus, includeBlank: "Any" }),
+])}
 ${table(staff, [
-  { header: "Name", cell: (s) => html`${s.display_name}<br><span class="faint">${s.email}</span>` },
+  { header: "Name", cell: (s) => html`<a href="/staff/employees/${s.id}">${s.display_name}</a><br><span class="faint">${s.email}${s.w.jobTitle ? ` · ${s.w.jobTitle}` : ""}</span>` },
   { header: "Role", cell: (s) => badge(s.role === "owner" ? "requires_founder_approval" : "", label(s.role)) },
   { header: "Status", cell: (s) => s.disabled_at ? badge("blocked", "Disabled") : s.locked_until && s.locked_until > nowIso() ? badge("paused", "Locked") : badge("active", "Active") },
   { header: "MFA", cell: (s) => s.mfa ? badge("verified", "Enrolled") : badge("failing", "Not enrolled") },
   { header: "Last sign-in", cell: (s) => formatDateTime(s.last_sign_in) },
-  { header: "Sessions", cell: (s) => s.active_sessions, numeric: true },
-  { header: "Open assignments", cell: (s) => { const w = workload.get(s.id) ?? []; return w.length ? html`${w.map((x) => html`<span class="badge">${label(x.subject_type)}: ${x.n}</span> `)}` : html`<span class="faint">None</span>`; } },
+  { header: "Workload", cell: (s) => html`${s.w.openTasks} task${s.w.openTasks === 1 ? "" : "s"}${s.w.overdueTasks ? html` ${badge("past_due", `${s.w.overdueTasks} overdue`)}` : ""}<br><span class="faint">${s.w.activeProjects} projects · ${s.w.openLeads} leads · ${s.w.openTickets} tickets</span>` },
+  { header: "Open estimate", cell: (s) => html`${wl.hours(s.w.openEstimateMinutes)}${s.w.unestimatedTasks ? html`<br><span class="faint">+${s.w.unestimatedTasks} unestimated</span>` : ""}`, numeric: true },
+  { header: "Logged 7 d / capacity", cell: (s) => html`${wl.hours(s.w.loggedLast7Minutes)} / ${s.w.weeklyCapacityMinutes === null ? "not set" : wl.hours(s.w.weeklyCapacityMinutes)}<br><span class="faint">${wl.utilisationText(s.w)}</span>` },
   { header: "Manage", cell: (s) => {
     if (s.role === "owner") return html`<span class="faint">Owner — protected</span>`;
     if (s.id === ctx.user!.id) return html`<span class="faint">Your account</span>`;
@@ -82,7 +96,7 @@ ${s.disabled_at
   ? actionForm(ctx, `/staff/employees/${s.id}/enable`, "Enable account", { variant: "secondary" })
   : html`<form method="post" action="/staff/employees/${s.id}/disable" class="row" data-confirm="Disable this account and sign them out everywhere?">${csrf(ctx)}<label class="visually-hidden" for="reason-${s.id}">Reason</label><input class="input" id="reason-${s.id}" name="reason" placeholder="Reason" maxlength="300" required>${button("Disable", { variant: "danger", size: "sm" })}</form>`}`;
   } },
-], { empty: emptyState("No staff yet", "Invite your first team member below.") })}</section>
+], { empty: emptyState(fq || frole || fstatus ? "No staff match" : "No staff yet", fq || frole || fstatus ? "Adjust the filters." : "Invite your first team member below.") })}</section>
 <div class="grid grid-2">
 <section class="card"><h2 class="card__title">Invite a staff member</h2>${formErrors(errors)}
 <form method="post" action="/staff/employees/invite">${csrf(ctx)}
@@ -98,6 +112,11 @@ ${table(invites, [
   { header: "", cell: (i) => actionForm(ctx, `/staff/employees/invitations/${i.id}/revoke`, "Revoke", { variant: "ghost", confirm: "Revoke this invitation?" }) },
 ], { empty: emptyState("No pending invitations", "Invitations you send appear here until accepted or expired.") })}</section></div>`;
   return staffPage(ctx, "Employees", body, errors.length ? 422 : 200);
+}
+
+function filterStaff<T extends { display_name: string; email: string; role: string; disabled_at: string | null }>(all: T[], fq: string, frole: string, fstatus: string): T[] {
+  return all.filter((s) => (!fq || `${s.display_name} ${s.email}`.toLowerCase().includes(fq.toLowerCase()))
+    && (!frole || s.role === frole) && (!fstatus || (fstatus === "disabled" ? !!s.disabled_at : !s.disabled_at)));
 }
 
 function actorOf(ctx: AppContext) { return { userId: ctx.user!.id, isOwner: isOwner(ctx.actor!) }; }
@@ -241,6 +260,67 @@ ${dev ? html`<section class="card" style="margin-top:1.5rem"><h2 class="card__ti
 export function register(r: Router): void {
   // ── Employees ──
   r.get("/staff/employees", (ctx) => employeesPage(ctx));
+  r.get("/staff/employees/export.csv", async (ctx) => {
+    requireStaff(ctx, "employee.manage");
+    const rows = filterStaff(await wl.teamWorkload(ctx.db, ctx.now()), q(ctx, "q"), q(ctx, "role"), q(ctx, "status"));
+    await audit(ctx.db, { actorUserId: ctx.user!.id, action: "employee.exported", subjectType: "user", details: { count: rows.length } });
+    const csv = toCsv(["user_id", "name", "email", "role", "job_title", "status", "mfa", "last_sign_in", "open_tasks", "overdue_tasks", "due_next_7_days", "blocked_tasks", "open_estimate_hours", "unestimated_tasks",
+      "active_projects", "open_leads", "open_tickets", "logged_7d_hours", "logged_30d_hours", "weekly_capacity_hours", "utilisation_7d"],
+      rows.map((s) => [s.id, s.display_name, s.email, s.role, s.w.jobTitle ?? "", s.disabled_at ? "disabled" : "active", s.mfa ? "yes" : "no", s.last_sign_in ?? "", s.w.openTasks, s.w.overdueTasks, s.w.dueNext7, s.w.blockedTasks,
+        (s.w.openEstimateMinutes / 60).toFixed(2), s.w.unestimatedTasks, s.w.activeProjects, s.w.openLeads, s.w.openTickets, (s.w.loggedLast7Minutes / 60).toFixed(2), (s.w.loggedLast30Minutes / 60).toFixed(2),
+        s.w.weeklyCapacityMinutes === null ? "" : (s.w.weeklyCapacityMinutes / 60).toFixed(2), s.w.utilisation === null ? "unknown" : s.w.utilisation.toFixed(3)]));
+    return download(ctx, csv, `crestmont-employees-${nowIso().slice(0, 10)}.csv`, "text/csv; charset=utf-8");
+  });
+  const employeeDetail = async (ctx: AppContext, id: string, errors: string[] = [], status = 200) => {
+    requireStaff(ctx, "employee.manage");
+    const s = (await emp.listStaff(ctx.db)).find((x) => x.id === id);
+    if (!s) throw new HttpError(404, "Staff member not found");
+    const w = await wl.workloadFor(ctx.db, id, ctx.now());
+    const today = ctx.now().toISOString().slice(0, 10);
+    const tasks = (await ctx.db.prepare(`SELECT t.id, t.title, t.status, t.due_at, t.estimate_minutes, p.id AS project_id, p.name AS project_name FROM assignments a JOIN tasks t ON t.id = a.subject_id JOIN projects p ON p.id = t.project_id
+        WHERE a.subject_type = 'task' AND a.user_id = ? AND a.ended_at IS NULL AND t.status <> 'done' ORDER BY CASE WHEN t.due_at IS NULL THEN 1 ELSE 0 END, t.due_at LIMIT 200`).bind(id)
+      .all<{ id: string; title: string; status: string; due_at: string | null; estimate_minutes: number | null; project_id: string; project_name: string }>()).results;
+    const projects = (await ctx.db.prepare(`SELECT p.id, p.name, p.status, CASE WHEN p.project_manager_id = ?1 THEN 'Project manager' ELSE 'Assigned' END AS role FROM projects p WHERE p.status NOT IN ('completed','maintenance','cancelled') AND (p.project_manager_id = ?1
+        OR EXISTS (SELECT 1 FROM assignments a WHERE a.subject_type = 'project' AND a.subject_id = p.id AND a.user_id = ?1 AND a.ended_at IS NULL)
+        OR EXISTS (SELECT 1 FROM assignments a JOIN tasks tt ON tt.id = a.subject_id WHERE a.subject_type = 'task' AND tt.project_id = p.id AND a.user_id = ?1 AND a.ended_at IS NULL AND tt.status <> 'done')) ORDER BY p.updated_at DESC`).bind(id)
+      .all<{ id: string; name: string; status: string; role: string }>()).results;
+    const leads = (await ctx.db.prepare(`SELECT l.id, l.stage, c.name FROM leads l JOIN contacts c ON c.id = l.contact_id WHERE l.owner_user_id = ? AND l.merged_into_lead_id IS NULL AND l.stage NOT IN ('converted','lost','rejected','archived') ORDER BY l.updated_at DESC LIMIT 100`).bind(id).all<{ id: string; stage: string; name: string }>()).results;
+    const tickets = (await ctx.db.prepare(`SELECT t.id, t.subject, t.priority, t.status FROM assignments a JOIN tickets t ON t.id = a.subject_id WHERE a.subject_type = 'ticket' AND a.user_id = ? AND a.ended_at IS NULL AND t.status NOT IN ('resolved','closed') ORDER BY t.updated_at DESC LIMIT 100`).bind(id).all<{ id: string; subject: string; priority: string; status: string }>()).results;
+    const time = (await ctx.db.prepare(`SELECT te.worked_on, te.minutes, t.id AS task_id, t.title FROM time_entries te JOIN tasks t ON t.id = te.task_id WHERE te.user_id = ? ORDER BY te.worked_on DESC LIMIT 20`).bind(id).all<{ worked_on: string; minutes: number; task_id: string; title: string }>()).results;
+    const activity = (await ctx.db.prepare(`SELECT action, subject_type, subject_id, created_at FROM audit_logs WHERE actor_user_id = ? ORDER BY id DESC LIMIT 20`).bind(id).all<{ action: string; subject_type: string; subject_id: string | null; created_at: string }>()).results;
+    const body = html`${pageHead(s.display_name, linkButton("All employees", "/staff/employees", "ghost", "sm"), `${label(s.role)}${w.jobTitle ? ` · ${w.jobTitle}` : ""}`)}
+${formErrors(errors)}
+<div class="kpis grid grid-4">${kpi("Open tasks", w.openTasks, w.overdueTasks ? `${w.overdueTasks} overdue` : "None overdue")}${kpi("Due in 7 days", w.dueNext7)}${kpi("Waiting on dependencies", w.blockedTasks)}${kpi("Open estimate", wl.hours(w.openEstimateMinutes), w.unestimatedTasks ? `${w.unestimatedTasks} task(s) not estimated` : "All open tasks estimated")}</div>
+<div class="kpis grid grid-4">${kpi("Active projects", w.activeProjects)}${kpi("Open leads", w.openLeads)}${kpi("Open tickets", w.openTickets)}${kpi("Logged last 7 days", wl.hours(w.loggedLast7Minutes), `Utilisation: ${wl.utilisationText(w)}`, w.utilisation === null ? undefined : Math.min(100, w.utilisation * 100))}</div>
+<div class="grid grid-2"><section class="card"><h2 class="card__title">Profile &amp; capacity</h2>${dl([["Email", s.email], ["Status", s.disabled_at ? "Disabled" : "Active"], ["Two-factor", s.mfa ? "Enrolled" : "Not enrolled"], ["Last sign-in", formatDateTime(s.last_sign_in)], ["Logged last 30 days", wl.hours(w.loggedLast30Minutes)]])}
+<form method="post" action="/staff/employees/${s.id}/profile">${csrf(ctx)}${input({ name: "job_title", label: "Job title", value: w.jobTitle, maxlength: 120 })}
+${input({ name: "weekly_capacity_hours", label: "Weekly capacity (hours)", type: "number", min: 0, max: 100, step: "0.25", value: w.weeklyCapacityMinutes === null ? "" : w.weeklyCapacityMinutes / 60, hint: "Blank = not set; utilisation then shows as Unknown." })}
+<div class="form-actions">${button("Save profile", { variant: "secondary", size: "sm" })}</div></form></section>
+<section class="card"><h2 class="card__title">Projects</h2>${table(projects, [{ header: "Project", cell: (p) => html`<a href="/staff/projects/${p.id}">${p.name}</a>` }, { header: "Role", cell: (p) => p.role }, { header: "Status", cell: (p) => badge(p.status) }], { empty: html`<p class="muted">No active projects.</p>` })}</section></div>
+<section class="section--tight"><h2>Open tasks</h2>${table(tasks, [
+  { header: "Task", cell: (t) => html`<a href="/staff/tasks/${t.id}">${t.title}</a><br><span class="faint">${t.project_name}</span>` }, { header: "Status", cell: (t) => badge(t.status) },
+  { header: "Estimate", cell: (t) => (t.estimate_minutes === null ? "—" : wl.hours(t.estimate_minutes)), numeric: true },
+  { header: "Due", cell: (t) => (t.due_at ? html`${t.due_at.slice(0, 10)}${t.due_at.slice(0, 10) < today ? html` ${badge("past_due", "Overdue")}` : ""}` : "—") },
+], { empty: emptyState("No open tasks", "Tasks assigned to this person appear here.") })}</section>
+<div class="grid grid-2"><section class="card"><h2 class="card__title">Leads</h2>${table(leads, [{ header: "Lead", cell: (l) => html`<a href="/staff/crm/leads/${l.id}">${l.name}</a>` }, { header: "Stage", cell: (l) => badge(l.stage) }], { empty: html`<p class="muted">No open leads.</p>` })}</section>
+<section class="card"><h2 class="card__title">Tickets</h2>${table(tickets, [{ header: "Ticket", cell: (t) => html`<a href="/staff/support/${t.id}">${t.subject}</a>` }, { header: "Priority", cell: (t) => badge(t.priority) }, { header: "Status", cell: (t) => badge(t.status) }], { empty: html`<p class="muted">No open tickets.</p>` })}</section>
+<section class="card"><h2 class="card__title">Recent time</h2>${table(time, [{ header: "Date", cell: (x) => x.worked_on }, { header: "Task", cell: (x) => html`<a href="/staff/tasks/${x.task_id}">${x.title}</a>` }, { header: "Time", cell: (x) => wl.hours(x.minutes), numeric: true }], { empty: html`<p class="muted">No time logged.</p>` })}</section>
+<section class="card"><h2 class="card__title">Recent activity</h2>${table(activity, [{ header: "When", cell: (a) => formatDateTime(a.created_at) }, { header: "Action", cell: (a) => html`<code>${a.action}</code>` }, { header: "Subject", cell: (a) => `${a.subject_type}${a.subject_id ? ` ${a.subject_id}` : ""}` }], { empty: html`<p class="muted">No recorded activity.</p>` })}
+<p><a href="/staff/audit?actor=${encodeURIComponent(s.email)}">Full history in the audit log</a></p></section></div>`;
+    return staffPage(ctx, s.display_name, body, status);
+  };
+  r.get("/staff/employees/:id", (ctx, p) => employeeDetail(ctx, p.id));
+  r.post("/staff/employees/:id/profile", async (ctx, p) => {
+    requireStaff(ctx, "employee.manage");
+    const f = await ctx.form();
+    try {
+      await wl.saveProfile(ctx.db, ctx.user!.id, p.id, { jobTitle: str(f, "job_title"), weeklyCapacityHours: str(f, "weekly_capacity_hours") });
+    } catch (e) {
+      if (e instanceof wl.ProfileError) return employeeDetail(ctx, p.id, [e.message], 422);
+      throw e;
+    }
+    return redirect(ctx, `/staff/employees/${p.id}`, { kind: "success", text: "Profile saved." });
+  });
   r.post("/staff/employees/invite", async (ctx) => {
     requireStaff(ctx, "employee.manage");
     const f = await ctx.form();

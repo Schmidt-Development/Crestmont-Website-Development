@@ -14,7 +14,8 @@ import * as platform from "./platform.ts";
 import * as legal from "./legal.ts";
 import * as hooks from "./hooks.ts";
 import * as ops from "./ops.ts";
+import * as notifications from "./notifications.ts";
 
 export function registerAll(r: Router): void {
-  for (const m of [api, auth, publicSite, portal, crm, projects, support, finance, owner, readiness, platform, legal, hooks, ops]) m.register(r);
+  for (const m of [api, auth, publicSite, portal, crm, projects, support, finance, owner, readiness, platform, legal, hooks, ops, notifications]) m.register(r);
 }
