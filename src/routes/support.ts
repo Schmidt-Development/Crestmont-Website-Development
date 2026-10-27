@@ -160,7 +160,10 @@ ${table(rows.slice(0, limit), [
 ${pagination(ctx, page, rows.length > limit)}`);
   });
 
-  r.get("/portal/support/new", async (ctx) => newTicketForm(ctx, requireCustomerOrg(ctx).organizationId));
+  r.get("/portal/support/new", async (ctx) => {
+    const cat = ctx.url.searchParams.get("category") ?? "";
+    return newTicketForm(ctx, requireCustomerOrg(ctx).organizationId, [], (sup.TICKET_CATEGORIES as readonly string[]).includes(cat) ? { category: cat } : {});
+  });
   r.post("/portal/support/new", async (ctx) => {
     const org = requireCustomerOrg(ctx);
     const f = await ctx.form();

@@ -19,6 +19,7 @@ import { sendMail } from "../services/mailer.ts";
 import { ValidationError } from "../lib/validate.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import * as cms from "../services/cms.ts";
+import { lineDiff } from "../services/voice.ts";
 import * as pf from "../services/portfolio.ts";
 import { SERVICES, SERVICE_GROUPS, serviceBySlug, servicePath, PRICING_NOTE, type ServiceDef } from "../content/services.ts";
 import { CMS_KEYS, cmsKeyDef, parseItems, paragraphs, type CmsKeyDef } from "../content/registry.ts";
@@ -491,6 +492,41 @@ ${dl([["Status", badge(rev.status)], ["Created", formatDateTime(rev.created_at)]
 <div class="card">${def.fields.map((f) => html`<h3 class="h4">${f.label}</h3><pre class="cms-pre">${body[f.name] ?? ""}</pre>${f.kind === "richtext" ? html`<div class="richtext__preview prose">${renderMarkdown(body[f.name])}</div>` : ""}`)}</div>`);
   });
 
+  r.get("/staff/cms/revisions/:id/compare", async (ctx, p) => {
+    requireStaff(ctx, "cms.edit");
+    const rev = await cms.getRevision(ctx.db, p.id);
+    const def = rev && cmsKeyDef(rev.key);
+    if (!rev || !def) throw new HttpError(404, "Revision not found");
+    const live = await cms.liveContent(ctx.db, def.key);
+    const body = { ...def.defaults, ...(JSON.parse(rev.body_json) as Record<string, string>) };
+    const changed = def.fields.filter((f) => (live.body[f.name] ?? "") !== (body[f.name] ?? ""));
+    return staffShell(ctx, "Compare revision", html`${pageHead(`${def.label} — compare with live`, html`${linkButton("Back to editor", `/staff/cms/${def.key}`, "ghost", "sm")}${linkButton("Preview on site", `${def.previewPath}?preview=${rev.id}`, "secondary", "sm")}`, "Website CMS")}
+<p class="muted">Lines prefixed <code>-</code> are on the live page now (${live.source === "published" ? "published revision" : "repository default"}); lines prefixed <code>+</code> are in this ${rev.status.replace(/_/g, " ")} revision from ${formatDateTime(rev.created_at)}.</p>
+${changed.length ? def.fields.map((f) => {
+      const diff = lineDiff(live.body[f.name] ?? "", body[f.name] ?? "");
+      return changed.includes(f) ? html`<h3 class="h4">${f.label}</h3><pre class="code-block diff">${diff.map((d) => html`<span class="diff__${d.op === "+" ? "add" : d.op === "-" ? "del" : "ctx"}">${d.op} ${d.text}\n</span>`)}</pre>` : html``;
+    }) : alert("info", "This revision is identical to what the live page shows.")}`);
+  });
+
+  r.post("/staff/cms/revisions/:id/discard", async (ctx, p) => {
+    requireStaff(ctx, "cms.edit");
+    try {
+      const { key } = await cms.discardRevision(ctx.db, ctx.actor!, p.id, { ip: ctx.ip });
+      return redirect(ctx, `/staff/cms/${key}`, { kind: "success", text: "Draft discarded. It stays in the revision history as archived." });
+    } catch (e) { cmsFail(e); }
+  });
+
+  r.post("/staff/cms/revisions/:id/restore", async (ctx, p) => {
+    requireStaff(ctx, "cms.edit");
+    try {
+      const res = await cms.restoreRevision(ctx.db, ctx.actor!, p.id, { ip: ctx.ip });
+      return redirect(ctx, `/staff/cms/${res.key}`, { kind: "success", text: res.status === "pending_founder_approval" ? "Restored as a new revision awaiting Founder approval." : "Restored as a new draft. Preview it, then publish when ready." });
+    } catch (e) {
+      if (e instanceof cms.CmsError && e.status === 422) return redirect(ctx, "/staff/cms", { kind: "error", text: `That revision no longer passes content rules: ${e.issues.join(" ")}`.slice(0, 280) });
+      cmsFail(e);
+    }
+  });
+
   r.post("/staff/cms/revisions/:id/publish", async (ctx, p) => {
     requireStaff(ctx, "cms.edit");
     try {
@@ -555,8 +591,10 @@ ${table(hist, [
   { header: "Author", cell: (h) => h.author_name ?? "—" },
   { header: "Published / approved by", cell: (h) => h.approver_name ? `${h.approver_name} · ${formatDateTime(h.published_at)}` : "—" },
   { header: "Note", cell: (h) => h.note ?? "" },
-  { header: "Actions", cell: (h) => html`<a class="btn btn--ghost btn--sm" href="${def.previewPath}?preview=${h.id}">Preview</a>
-${h.status !== "published" ? (canPublish ? actionForm(ctx, `/staff/cms/revisions/${h.id}/publish`, def.sensitivePricing ? "Approve & publish" : "Publish", { variant: "primary", confirm: "Publish this revision to the public website?" }) : html`<span class="faint">${def.sensitivePricing ? "Awaiting Founder approval" : "Needs a publisher"}</span>`) : ""}` },
+  { header: "Actions", cell: (h) => html`<a class="btn btn--ghost btn--sm" href="${def.previewPath}?preview=${h.id}">Preview</a> <a class="btn btn--ghost btn--sm" href="/staff/cms/revisions/${h.id}/compare">Compare with live</a>
+${h.status !== "published" ? (canPublish ? actionForm(ctx, `/staff/cms/revisions/${h.id}/publish`, def.sensitivePricing ? "Approve & publish" : "Publish", { variant: "primary", confirm: "Publish this revision to the public website?" }) : html`<span class="faint">${def.sensitivePricing ? "Awaiting Founder approval" : "Needs a publisher"}</span>`) : ""}
+${h.status === "draft" || h.status === "pending_founder_approval" ? actionForm(ctx, `/staff/cms/revisions/${h.id}/discard`, "Discard", { variant: "ghost", confirm: "Discard this unpublished draft?" }) : ""}
+${h.status === "archived" ? actionForm(ctx, `/staff/cms/revisions/${h.id}/restore`, "Restore as new draft", { variant: "ghost" }) : ""}` },
 ], { empty: emptyState("No revisions yet", "The public page shows the repository default. Save a draft to start a revision history."), caption: "Revision history" })}
 ${live && canPublish ? html`<p>${actionForm(ctx, `/staff/cms/${def.key}/revert`, "Revert live page to repository default", { variant: "ghost", confirm: "Unpublish the live revision?" })}</p>` : ""}`, status);
 }

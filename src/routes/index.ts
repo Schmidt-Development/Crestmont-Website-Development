@@ -16,8 +16,9 @@ import * as hooks from "./hooks.ts";
 import * as ops from "./ops.ts";
 import * as notifications from "./notifications.ts";
 import * as reportsOps from "./reports-ops.ts";
+import * as portalMaintenance from "./portal-maintenance.ts";
 
 export function registerAll(r: Router): void {
   // reportsOps precedes finance so /staff/reports/operations is not captured by /staff/reports/:file.
-  for (const m of [api, auth, publicSite, portal, crm, projects, support, reportsOps, finance, owner, readiness, platform, legal, hooks, ops, notifications]) m.register(r);
+  for (const m of [api, auth, publicSite, portal, crm, projects, support, reportsOps, finance, owner, readiness, platform, legal, hooks, ops, notifications, portalMaintenance]) m.register(r);
 }
