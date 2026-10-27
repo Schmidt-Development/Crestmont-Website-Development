@@ -135,3 +135,20 @@ The redesign keeps the honest placeholders the platform already renders. These n
 3. **Crest vector master** — unblocks a larger hero mark and print use.
 4. **Attorney review** of the legal drafts — unblocks publishing the policy pages as final.
 5. **Portfolio material** with consent — unblocks the showcase (currently the "Portfolio in preparation" panel).
+
+## 9. Dark colourway (palette-only change after design approval)
+
+The owner approved the v3 design, layout, artwork and motion at `503749e` and asked for a colourway change only:
+rich black pages, charcoal secondary surfaces, white headings, grey supporting text, the existing Crestmont gold.
+
+- **Files:** `public/assets/app.css` (tokens + targeted hard-coded colours, the Anatomy miniature's mock site,
+  one SVG icon stroke) and `src/ui/layout.ts` (one line: `theme-color` `#080808`, `color-scheme` `dark`).
+- **No layout or motion change:** 10,226 elements on 12 pages at 1280 and 390 px, with and without reduced motion,
+  have identical geometry, typography, text and transition/animation properties versus `503749e`; all 114
+  role/width screenshots have identical dimensions.
+- **States checked:** button hover fills (14.7:1 and 9.9:1), switch selected/unselected (9.9 / 7.9:1), FAQ expanded
+  (10.1:1, `aria-expanded` true), field focus (gold border 10.7:1 + ring), validation text and invalid border
+  (7.2:1), error summary (16.2:1), disabled buttons (45 % opacity, as before), loading skeletons (token-based).
+- **No white flash:** first-visit frames captured from a mid-grey start page never exceed mean luminance 31/255;
+  the pre-CSS canvas is dark via the `color-scheme` meta.
+- **Artwork:** all 11 illustrations have fully transparent edges (no baked backgrounds); the crest files are unchanged.

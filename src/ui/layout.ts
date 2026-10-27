@@ -19,7 +19,7 @@ function head(ctx: AppContext, m: PageMeta): SafeHtml {
 ${m.description ? html`<meta name="description" content="${m.description}">` : ""}
 ${m.noindex || ctx.env.ENVIRONMENT !== "production" ? html`<meta name="robots" content="noindex, nofollow">` : html`<link rel="canonical" href="${canonical}">`}
 <meta property="og:title" content="${title}"><meta property="og:type" content="website">${m.description ? html`<meta property="og:description" content="${m.description}">` : ""}
-<meta name="theme-color" content="#f2f1ee"><meta name="color-scheme" content="light">
+<meta name="theme-color" content="#080808"><meta name="color-scheme" content="dark">
 <link rel="icon" type="image/png" sizes="32x32" href="/assets/brand/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="/assets/brand/favicon-16.png">
 ${PRELOAD_FONTS.map((f) => html`<link rel="preload" href="${f}" as="font" type="font/woff" crossorigin>`)}<link rel="stylesheet" href="/assets/app.css">
 <noscript><link rel="stylesheet" href="/assets/nojs.css"></noscript><script src="/assets/app.js" defer></script></head>`;

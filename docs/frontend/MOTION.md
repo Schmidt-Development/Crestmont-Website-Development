@@ -45,6 +45,14 @@ implementation decisions, not measurements.
 - `prefers-reduced-motion: reduce`: no intro, no tile effects, no reveals, M04/M06 unpinned; all content visible.
 - Tile effects never flash: tiles only fade between two stable colours, never alternate (no strobe).
 
+## Dark colourway (owner-approved palette change)
+
+The palette moved to rich black / charcoal / white / grey with Crestmont gold. Choreography, timing, easing and
+triggers are unchanged — verified by comparing 10,226 elements' geometry and computed transition/animation
+properties against `503749e` (0 differences). Colour-only adjustments inside the motion: M01 tiles are charcoal
+(`#141414`) clearing to the `#080808` page; M03 fills solid-gold buttons with pale-gold tiles and outlined buttons with
+gold tiles; M09's pill is gold with a dark label.
+
 ## Status checklist (final, build `c60be7d`)
 
 Statuses: **Implemented and verified** = built and checked in a real browser (local Chromium 153 against the
