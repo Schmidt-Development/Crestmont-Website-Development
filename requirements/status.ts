@@ -19,7 +19,8 @@ import { PROJECTS } from "./status/projects.ts";
 import { SALES_FINANCE } from "./status/sales-finance.ts";
 import { SUPPORT_OWNER } from "./status/support-owner.ts";
 import { PLATFORM } from "./status/platform.ts";
+import { INTEGRATION } from "./status/integration.ts";
 
 export const IMPLEMENTATION: Record<string, ImplementationRecord> = {
-  ...FOUNDATION, ...CORE, ...PUBLIC_SITE, ...PROJECTS, ...SALES_FINANCE, ...SUPPORT_OWNER, ...PLATFORM,
+  ...FOUNDATION, ...CORE, ...PUBLIC_SITE, ...PROJECTS, ...SALES_FINANCE, ...SUPPORT_OWNER, ...PLATFORM, ...INTEGRATION,
 };
