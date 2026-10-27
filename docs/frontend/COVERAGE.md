@@ -7,16 +7,16 @@ screenshot set adds 320/414/820/1680). **Local verification only** — the hoste
 
 | | Count |
 |---|---|
-| GET route patterns | 173 |
-| Rendered and checked (layout overflow, console errors, one h1, one main, images) | 115 |
+| GET route patterns | 178 |
+| Rendered and checked (layout overflow, console errors, one h1, one main, images) | 126 |
 | Open issues | 0 |
-| Styled by the shared system, not reached by the crawl (need specific records/tokens) | 28 |
-| No page UI (JSON, files, SEO, downloads) | 30 |
+| Styled by the shared system, not reached by the crawl (need specific records/tokens) | 20 |
+| No page UI (JSON, files, SEO, downloads) | 32 |
 
 Every HTML surface renders through `publicLayout`, `authLayout` or `appLayout` and the shared components, so all routes —
 including those not reached — receive the new design system; "not reached" means not individually screenshot-verified.
 
-## API (JSON, no UI) (5)
+## API (JSON, no UI) (7)
 
 | Route | Status | Roles crawled | Widths |
 |---|---|---|---|
@@ -25,6 +25,8 @@ including those not reached — receive the new design system; "not reached" mea
 | `/api/readiness/requirements.csv` | n/a (no page UI) | — | — |
 | `/api/readiness/health` | n/a (no page UI) | — | — |
 | `/api/readiness/release-authorization` | n/a (no page UI) | — | — |
+| `/api/builds` | n/a (no page UI) | — | — |
+| `/api/builds/:id` | n/a (no page UI) | — | — |
 
 ## Authentication & account (10)
 
@@ -32,16 +34,16 @@ including those not reached — receive the new design system; "not reached" mea
 |---|---|---|---|
 | `/login` | ✅ rendered & checked | public, customer, owner, sales, support, developer | 1280 + 360 |
 | `/register` | ✅ rendered & checked | public | 1280 + 360 |
-| `/verify-email` | styled by shared system · not reached by crawl | — | — |
-| `/mfa` | styled by shared system · not reached by crawl | — | — |
+| `/verify-email` | ✅ rendered (400 for crawled roles) | public | 1280 + 360 |
+| `/mfa` | ✅ rendered & checked | public | 1280 + 360 |
 | `/mfa/setup` | ✅ rendered & checked | customer | 1280 + 360 |
 | `/password/forgot` | ✅ rendered & checked | public | 1280 + 360 |
-| `/password/reset` | styled by shared system · not reached by crawl | — | — |
-| `/invite` | styled by shared system · not reached by crawl | — | — |
+| `/password/reset` | ✅ rendered & checked | public | 1280 + 360 |
+| `/invite` | ✅ rendered (400 for crawled roles) | public | 1280 + 360 |
 | `/account` | ✅ rendered & checked | customer, owner, sales, support, developer | 1280 + 360 |
-| `/account/privacy` | styled by shared system · not reached by crawl | — | — |
+| `/account/privacy` | ✅ rendered & checked | customer | 1280 + 360 |
 
-## Customer portal (26)
+## Customer portal (27)
 
 | Route | Status | Roles crawled | Widths |
 |---|---|---|---|
@@ -71,6 +73,7 @@ including those not reached — receive the new design system; "not reached" mea
 | `/portal/billing/receipts/:paymentId` | ✅ rendered & checked | customer | 1280 + 360 |
 | `/portal/notifications` | ✅ rendered & checked | customer | 1280 + 360 |
 | `/portal/maintenance` | ✅ rendered & checked | customer | 1280 + 360 |
+| `/portal/projects/:id/build-status` | styled by shared system · not reached by crawl | — | — |
 
 ## Owner — command center (1)
 
@@ -108,18 +111,18 @@ including those not reached — receive the new design system; "not reached" mea
 |---|---|---|---|
 | `/` | ✅ rendered & checked | public, customer, owner, sales, support, developer | 1280 + 360 |
 | `/services` | ✅ rendered & checked | public, customer, owner, sales, support, developer | 1280 + 360 |
-| `/services/hosting-maintenance` | styled by shared system · not reached by crawl | — | — |
+| `/services/hosting-maintenance` | ✅ rendered & checked | public | 1280 + 360 |
 | `/services/:slug` | ✅ rendered & checked | public, customer, owner, sales, support, developer | 1280 + 360 |
 | `/pricing` | ✅ rendered & checked | public, customer, owner, sales, support, developer | 1280 + 360 |
 | `/pricing/compare` | ✅ rendered & checked | public, customer, owner, sales, support, developer | 1280 + 360 |
 | `/portfolio` | ✅ rendered & checked | public, customer, owner, sales, support, developer | 1280 + 360 |
-| `/portfolio/:slug` | styled by shared system · not reached by crawl | — | — |
+| `/portfolio/:slug` | ✅ rendered (404 for crawled roles) | public | 1280 + 360 |
 | `/about` | ✅ rendered & checked | public, customer, owner, sales, support, developer | 1280 + 360 |
 | `/process` | ✅ rendered & checked | public, customer, owner, sales, support, developer | 1280 + 360 |
 | `/faq` | ✅ rendered & checked | public, customer, owner, sales, support, developer | 1280 + 360 |
 | `/hosting-maintenance` | ✅ rendered & checked | public, customer, owner, sales, support, developer | 1280 + 360 |
 | `/contact` | ✅ rendered & checked | public, customer, owner, sales, support, developer | 1280 + 360 |
-| `/contact/thanks` | styled by shared system · not reached by crawl | — | — |
+| `/contact/thanks` | ✅ rendered & checked | public | 1280 + 360 |
 
 ## Public — policies (4)
 
@@ -170,7 +173,7 @@ including those not reached — receive the new design system; "not reached" mea
 | `/staff/finance/receipts/:paymentId` | ✅ rendered & checked | owner | 1280 + 360 |
 | `/staff/finance/reconciliation` | ✅ rendered & checked | owner | 1280 + 360 |
 
-## Staff — platform & admin (36)
+## Staff — platform & admin (38)
 
 | Route | Status | Roles crawled | Widths |
 |---|---|---|---|
@@ -210,6 +213,8 @@ including those not reached — receive the new design system; "not reached" mea
 | `/staff/ops` | ✅ rendered & checked | owner, sales, support, developer | 1280 + 360 |
 | `/staff/ops/retention` | ✅ rendered & checked | owner, sales, support, developer | 1280 + 360 |
 | `/staff/notifications` | ✅ rendered & checked | owner, sales, support, developer | 1280 + 360 |
+| `/staff/builds` | ✅ rendered & checked | owner | 1280 + 360 |
+| `/staff/builds/:id` | styled by shared system · not reached by crawl | — | — |
 
 ## Staff — sales & CRM (16)
 
@@ -249,13 +254,13 @@ including those not reached — receive the new design system; "not reached" mea
 |---|---|---|---|
 | `/portfolio-media/:fileId` | n/a (no page UI) | — | — |
 | `/quote` | ✅ rendered & checked | public, customer, owner, sales, support, developer | 1280 + 360 |
-| `/quote/thanks` | styled by shared system · not reached by crawl | — | — |
+| `/quote/thanks` | ✅ rendered & checked | public | 1280 + 360 |
 | `/files/:id` | styled by shared system · not reached by crawl | — | — |
 | `/files/:id/preview` | n/a (no page UI) | — | — |
 | `/files/:id/share` | styled by shared system · not reached by crawl | — | — |
 | `/share/:token` | styled by shared system · not reached by crawl | — | — |
 | `/q/:token` | styled by shared system · not reached by crawl | — | — |
-| `/checkout/maintenance/:planId` | styled by shared system · not reached by crawl | — | — |
+| `/checkout/maintenance/:planId` | ✅ rendered & checked | public | 1280 + 360 |
 | `/checkout/:packageId` | ✅ rendered & checked | public, customer, owner, sales, support, developer | 1280 + 360 |
 | `/live/unread` | n/a (no page UI) | — | — |
 
