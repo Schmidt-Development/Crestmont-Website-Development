@@ -41,7 +41,7 @@ workers_dev = true            # staging is served at crestmont-platform-staging.
 # routes = [{ pattern = "staging.crestmontwebsitedevelopment.com", custom_domain = true }]   # after DNS control (BLK-011)
 # Turnstile: Cloudflare's documented always-pass TEST keys (public values, not secrets) so preview forms work.
 # Replace with real keys before any public exposure. STAGING_ACCESS_PASSWORD (secret) gates the whole preview.
-vars = { ENVIRONMENT = "staging", PREVIEW_GATE = "required", TURNSTILE_SITE_KEY = "1x00000000000000000000AA", TURNSTILE_SECRET = "1x0000000000000000000000000000000AA" }
+vars = { ENVIRONMENT = "staging", AI_PROVIDER = "local-runner", PREVIEW_GATE = "required", TURNSTILE_SITE_KEY = "1x00000000000000000000AA", TURNSTILE_SECRET = "1x0000000000000000000000000000000AA" }
 d1_databases = [{ binding = "DB", database_name = "crestmont-staging", database_id = "", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-staging" }]
 triggers = { crons = ["*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts

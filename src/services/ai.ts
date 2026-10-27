@@ -39,10 +39,23 @@ Never approve or promise refunds, never agree to contracts, never authorise rele
 
 export interface AiDraftRequest { workflow: AiWorkflow; inputRef: string; prompt: string; requestedBy: string | null }
 
-export async function requestAiDraft(db: Db, provider: AiProvider | null, req: AiDraftRequest): Promise<{ jobId: string; status: "awaiting_approval" | "failed"; text: string | null; error: string | null }> {
+/** The self-hosted model behind the build runner (no per-token fee). Jobs are queued and leased to the runner. */
+export const LOCAL_RUNNER = "local-runner" as const;
+export type AiBackend = AiProvider | typeof LOCAL_RUNNER | null;
+export const AI_SYSTEM_PROMPT = SYSTEM_BASE;
+
+export async function requestAiDraft(db: Db, provider: AiBackend, req: AiDraftRequest): Promise<{ jobId: string; status: "awaiting_approval" | "failed" | "queued"; text: string | null; error: string | null }> {
   if (!(AI_WORKFLOWS as readonly string[]).includes(req.workflow)) throw new Error("Unknown AI workflow");
   const jobId = newId("ai");
   const at = nowIso();
+  if (provider === LOCAL_RUNNER) {
+    await db.batch([
+      db.prepare(`INSERT INTO ai_jobs (id, workflow, provider, model, status, input_ref, created_at, updated_at) VALUES (?,?, 'local-runner', 'self-hosted', 'queued', ?, ?, ?)`).bind(jobId, req.workflow, req.inputRef, at, at),
+      db.prepare(`INSERT INTO ai_job_inputs (job_id, prompt, created_at) VALUES (?,?,?) ON CONFLICT(job_id) DO NOTHING`).bind(jobId, req.prompt.slice(0, 20_000), at),
+    ]);
+    await audit(db, { actorUserId: req.requestedBy, actorKind: "ai", action: "ai.draft_queued", subjectType: "ai_job", subjectId: jobId, details: { workflow: req.workflow, backend: LOCAL_RUNNER } });
+    return { jobId, status: "queued", text: null, error: null };
+  }
   await db.prepare(`INSERT INTO ai_jobs (id, workflow, provider, model, status, input_ref, created_at, updated_at) VALUES (?,?,?,?, 'running', ?, ?, ?)`)
     .bind(jobId, req.workflow, provider?.name ?? "none", provider?.model ?? "none", req.inputRef, at, at).run();
   if (!provider) {
@@ -70,6 +83,11 @@ export async function decideAiJob(db: Db, jobId: string, userId: string, decisio
   await audit(db, { actorUserId: userId, action: `ai.draft_${decision}`, subjectType: "ai_job", subjectId: jobId });
 }
 
-export function aiProviderFromEnv(env: { ANTHROPIC_API_KEY?: string; AI_MODEL?: string }): AiProvider | null {
+/**
+ * AI_PROVIDER = "local-runner" routes drafts to the self-hosted model through the build runner (requires
+ * BUILD_RUNNER_SECRET) and never falls back to a paid API. Otherwise a configured ANTHROPIC_API_KEY is used.
+ */
+export function aiProviderFromEnv(env: { ANTHROPIC_API_KEY?: string; AI_MODEL?: string; AI_PROVIDER?: string; BUILD_RUNNER_SECRET?: string }): AiBackend {
+  if (env.AI_PROVIDER === LOCAL_RUNNER) return env.BUILD_RUNNER_SECRET ? LOCAL_RUNNER : null;
   return env.ANTHROPIC_API_KEY ? new AnthropicProvider(env.ANTHROPIC_API_KEY, env.AI_MODEL) : null;
 }

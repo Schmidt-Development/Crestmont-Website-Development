@@ -3,7 +3,7 @@
 import type { Db } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import type { StorageAdapter } from "../adapters/storage.ts";
-import { requestAiDraft, type AiDraftRequest, type AiProvider } from "./ai.ts";
+import { requestAiDraft, type AiDraftRequest, type AiProvider, type AiBackend } from "./ai.ts";
 import { audit as auditLog } from "./security.ts";
 
 /**
@@ -104,7 +104,7 @@ export async function errorsByDay(db: Db, days = 7, now = new Date()): Promise<{
 // be retried with the same input) and the retry linkage. Any area may call startAiJob instead of
 // requestAiDraft to make its jobs retryable from /staff/ai.
 
-export async function startAiJob(db: Db, provider: AiProvider | null, req: AiDraftRequest) {
+export async function startAiJob(db: Db, provider: AiBackend, req: AiDraftRequest) {
   const res = await requestAiDraft(db, provider, req);
   await db.prepare(`INSERT INTO ai_job_inputs (job_id, prompt, created_at) VALUES (?,?,?) ON CONFLICT(job_id) DO NOTHING`).bind(res.jobId, req.prompt.slice(0, 20_000), nowIso()).run();
   return res;
@@ -116,7 +116,7 @@ export class AiOpsError extends Error {
 }
 
 /** Re-runs a failed job as a new job (retry_of → original). Fails honestly when no provider is configured. */
-export async function retryAiJob(db: Db, provider: AiProvider | null, jobId: string, userId: string) {
+export async function retryAiJob(db: Db, provider: AiBackend, jobId: string, userId: string) {
   const job = await db.prepare(`SELECT id, workflow, input_ref, status FROM ai_jobs WHERE id = ?`).bind(jobId).first<{ id: string; workflow: string; input_ref: string; status: string }>();
   if (!job) throw new AiOpsError("AI job not found.", 404);
   if (job.status !== "failed") throw new AiOpsError("Only failed jobs can be retried.", 409);

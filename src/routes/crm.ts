@@ -642,7 +642,7 @@ export function register(r: Router): void {
       `Message from the prospect:\n${lead.message ?? "(none)"}`, `Existing notes:\n${lead.qualification_notes ?? "(none)"}`,
       `Approved packages: Starter $999 (5 pages), Business $2,499 (12 pages), Premium from $4,999 (25 pages); larger work is a custom quote. Summarize fit, likely package, open questions, and suggested next step. Do not quote new prices or promise dates.`].join("\n");
     const res = await requestAiDraft(ctx.db, aiProviderFromEnv(ctx.env), { workflow: "lead_qualification", inputRef: `lead:${lead.id}`, prompt, requestedBy: ctx.user!.id });
-    return redirect(ctx, `/staff/crm/leads/${p.id}`, res.status === "failed" ? { kind: "error", text: res.error ?? "AI draft failed." } : { kind: "success", text: "AI draft ready for review." });
+    return redirect(ctx, `/staff/crm/leads/${p.id}`, res.status === "failed" ? { kind: "error", text: res.error ?? "AI draft failed." } : res.status === "queued" ? { kind: "info", text: "Draft requested from the self-hosted model; reload this page in a minute to review it. Nothing has been sent." } : { kind: "success", text: "AI draft ready for review." });
   });
   r.post("/staff/crm/leads/:id/ai-draft/:jobId", async (ctx, p) => {
     requireStaff(ctx, "crm.access");

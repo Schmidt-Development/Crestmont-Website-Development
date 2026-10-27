@@ -16,6 +16,7 @@ import {
 import { audit } from "./security.ts";
 import { redact } from "./monitoring.ts";
 import { getOnboarding, allFields, isVisible, type Answers } from "./onboarding.ts";
+import { sweepAiLeases } from "./ai-runner.ts";
 
 const MICRO = 1_000_000;
 export const usdToMicro = (usd: unknown): number => {
@@ -561,7 +562,8 @@ export async function sweepBuilds(db: Db, now = new Date()): Promise<string> {
       for (const job of (await db.prepare(`SELECT * FROM build_jobs WHERE project_id = ? AND state NOT IN ('canceled','approved')`).bind(j.project_id).all<BuildJob>()).results) await applyDecision(db, job, d, { kind: "system" });
     }
   }
-  return `${expired} expired lease(s) handled, ${synced} project(s) re-evaluated`;
+  const ai = await sweepAiLeases(db, now);
+  return `${expired} expired lease(s) handled, ${synced} project(s) re-evaluated, ${ai} AI draft lease(s) requeued`;
 }
 
 /** Safe wrapper for hooks inside payment/intake/refund flows: never breaks the caller; the sweep recovers failures. */

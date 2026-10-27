@@ -10,6 +10,7 @@ import { BUILD_STATES, BUILD_STATE_LABELS, BUILD_STATE_CUSTOMER, type BuildState
 import { alert, badge, button, csrf, dl, emptyState, input, kpi, pageHead, pageParam, pagination, select, table, textarea, checkbox, actionForm, linkButton } from "../ui/components.ts";
 import { staffPage } from "./crm.ts";
 import * as B from "../services/builds.ts";
+import * as AIR from "../services/ai-runner.ts";
 import { notify } from "../services/notifications.ts";
 
 const RUNNER = "/api/builds/runner";
@@ -52,6 +53,9 @@ export function register(r: Router): void {
   r.post(`${RUNNER}/heartbeat`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.heartbeat(ctx.db, await runnerBody(ctx), ctx.now()))));
   r.post(`${RUNNER}/checkpoint`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.checkpoint(ctx.db, ctx.storage, await runnerBody(ctx)))));
   r.post(`${RUNNER}/checkpoint/fetch`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.fetchCheckpoint(ctx.db, ctx.storage, await runnerBody(ctx)))));
+  // Self-hosted AI drafts (ai_jobs with provider local-runner), same signed channel.
+  r.post(`${RUNNER}/ai/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await AIR.claimAiJob(ctx.db, typeof b.runnerId === "string" ? b.runnerId : "", ctx.now())); }));
+  r.post(`${RUNNER}/ai/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await AIR.completeAiJob(ctx.db, await runnerBody(ctx)))));
   r.post(`${RUNNER}/requirements`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.reportRequirements(ctx.db, await runnerBody(ctx)))));
   r.post(`${RUNNER}/files`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.runnerFile(ctx.db, ctx.storage, await runnerBody(ctx)))));
   r.post(`${RUNNER}/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.completeJob(ctx.db, await runnerBody(ctx), (j, to) => notifyStaff(ctx, j, to)))));

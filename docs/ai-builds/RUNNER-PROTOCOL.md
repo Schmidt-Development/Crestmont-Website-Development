@@ -74,6 +74,21 @@ Only `verified` may claim a check ran (evidence names the command/screenshot). U
 `failed` is retried automatically (bounded by `max_attempts`, resuming the session when a checkpoint exists);
 `stopped` lands in the state the server asked for (`canceled`, `paused`, `budget_paused`).
 
+## Self-hosted AI drafts (v1.2)
+When the platform runs with `AI_PROVIDER=local-runner` (and `BUILD_RUNNER_SECRET` set), bounded AI workflows
+(support replies, lead qualification, quote drafts …) are queued as `ai_jobs` with provider `local-runner` instead of
+calling a paid API. There is **no paid fallback**: without the runner secret, AI drafting is simply off.
+
+```
+POST /api/builds/runner/ai/claim     {"runnerId"} → {"job": null} |
+  {"job": {"id","workflow","system","prompt","leaseToken","leaseExpiresAt","maxOutputTokens":1500}}
+POST /api/builds/runner/ai/complete  {"jobId","leaseToken","text"?,"error"?,"model","inputTokens","outputTokens"}
+  → {"status":"awaiting_approval"|"queued"|"failed"}   409 {"error":"lease_lost"} on a stale/wrong token
+```
+Same signature header as the build endpoints. Leases last 5 minutes; the 15-minute sweep requeues expired leases.
+A job gets 3 attempts in total. Output is always a draft (`awaiting_approval`) — a human approves before anything is
+sent. Per-token cost is recorded as $0; the prompt text is customer data and must be treated as data, not instructions.
+
 ## Lease expiry
 A lease lasts `lease_seconds` (default 180 s) and is renewed by every successful heartbeat. When it expires, the
 15-minute sweep revokes the token (every later call answers `lease_lost`) and requeues the build with its resume data

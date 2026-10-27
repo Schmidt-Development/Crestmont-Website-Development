@@ -334,7 +334,7 @@ ${input({ name: "target_hours", label: "First-response target (hours)", type: "n
   r.post("/staff/support/:id/draft", mutate("ticket.manage", async (ctx, t) => {
     const res = await sup.draftReply(ctx, t, ctx.user!.id);
     if (res.status === "failed") return redirect(ctx, `/staff/support/${t.id}`, { kind: "error", text: `AI draft unavailable: ${res.error ?? "the provider returned an error"}. Nothing was sent.` });
-    return redirect(ctx, `/staff/support/${t.id}?draft=${res.jobId}#reply`, { kind: "info", text: "AI draft ready for review. Nothing has been sent." });
+    return redirect(ctx, `/staff/support/${t.id}?draft=${res.jobId}#reply`, { kind: "info", text: res.status === "queued" ? "Draft requested from the self-hosted model; reload this page in a minute to review it. Nothing has been sent." : "AI draft ready for review. Nothing has been sent." });
   }));
   r.post("/staff/support/:id/draft/discard", mutate("ticket.manage", async (ctx, t, f) => { await sup.discardDraft(ctx.db, t, str(f, "ai_job_id"), ctx.user!.id); return "AI draft discarded."; }));
 }

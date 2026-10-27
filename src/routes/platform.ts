@@ -971,7 +971,7 @@ ${dl([["Job id", j.id], ["Status", badge(j.status)], ["Provider / model", `${j.p
     requireStaff(ctx, "ai.manage");
     try {
       const res = await mon.retryAiJob(ctx.db, aiProviderFromEnv(ctx.env), p.id, ctx.user!.id);
-      return redirect(ctx, "/staff/ai", res.status === "failed" ? { kind: "error", text: `Retry failed: ${res.error ?? "unknown error"}` } : { kind: "success", text: "Retry succeeded; the new draft awaits approval." });
+      return redirect(ctx, "/staff/ai", res.status === "failed" ? { kind: "error", text: `Retry failed: ${res.error ?? "unknown error"}` } : res.status === "queued" ? { kind: "info", text: "Retry queued for the self-hosted model; the new draft appears here when ready." } : { kind: "success", text: "Retry succeeded; the new draft awaits approval." });
     } catch (e) {
       if (e instanceof mon.AiOpsError) return redirect(ctx, "/staff/ai", { kind: "error", text: e.message });
       throw e;
