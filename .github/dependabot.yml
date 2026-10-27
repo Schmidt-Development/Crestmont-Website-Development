@@ -1,0 +1,21 @@
+# Dependency scanning and update PRs (SEC-004). Dependabot security alerts must also be enabled in the repository's
+# Settings → Code security (a Founder/admin setting); these update PRs run CI like any other change.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+  - package-ecosystem: npm
+    directory: "/runner"
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: weekly, day: monday }
+  - package-ecosystem: docker
+    directory: "/runner"
+    schedule: { interval: weekly, day: monday }
+  - package-ecosystem: docker
+    directory: "/runner/sandbox"
+    schedule: { interval: weekly, day: monday }

@@ -6,6 +6,10 @@ name: Staging restore drill
 
 on:
   workflow_dispatch:
+  # After every successful staging deploy, so recovery is re-proven against the build that is actually serving.
+  workflow_run:
+    workflows: ["Deploy staging"]
+    types: [completed]
   schedule:
     - cron: "41 7 * * 1"   # weekly, Monday 07:41 UTC
 
@@ -13,12 +17,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-staging
+  group: deploy-staging   # shares the group: its evidence step installs a Worker secret, which creates a new Worker version
   cancel-in-progress: false
 
 jobs:
   drill:
     runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     environment: staging
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

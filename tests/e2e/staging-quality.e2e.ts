@@ -1,4 +1,4 @@
-// Content and accessibility checks against the DEPLOYED staging preview (WEB-009, TEST-003).
+// Content, visual-consistency and accessibility checks against the DEPLOYED staging preview (WEB-009, TEST-003, BRAND-006).
 //   E2E_BASE_URL, E2E_PREVIEW_PASSWORD  the preview (required; otherwise the file is skipped)
 //   E2E_ACCOUNTS_FILE                   demo accounts (optional; adds the customer portal to the accessibility scan)
 //   AXE_PATH                            path to axe-core's axe.min.js (installed by the deploy workflow; the
@@ -9,6 +9,8 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
 import { launchBrowser } from "./support.ts";
+import { pageRules, contrastRules } from "./visual-rules.ts";
+import { totpCode } from "../../src/lib/auth-crypto.ts";
 import { findProhibitedClaims } from "../../src/domain/catalog.ts";
 import { FABRICATION } from "../support/content-rules.ts";
 
@@ -96,4 +98,70 @@ test("[TEST-003] staging: axe-core WCAG 2.1 A/AA scan of public pages, sign-in a
   } finally {
     await browser.close();
   }
+});
+
+type Acct = { role: string; email: string; password: string; totp?: string };
+function demoAccounts(): Acct[] {
+  const f = process.env.E2E_ACCOUNTS_FILE;
+  if (!f || !existsSync(f)) return [];
+  return [...readFileSync(f, "utf8").matchAll(/^\| (\w+) \| (\S+) \| `([^`]+)` \| (?:`([A-Z2-7]+)`|—) \|/gm)].map((m) => ({ role: m[1], email: m[2], password: m[3], totp: m[4] }));
+}
+
+test("[BRAND-006] [TEST-003] staging: shared design language holds on the deployed build — public, customer portal, employee and Owner pages at 375px and 1440px (layout, landmarks, naming, tap targets, AA contrast)", { skip: skip || (demoAccounts().length ? false : "E2E_ACCOUNTS_FILE not set") }, async () => {
+  const all = demoAccounts();
+  const want = [all.find((a) => a.role === "owner"), all.find((a) => a.role === "developer"), all.find((a) => a.email.startsWith("customer.harbor"))];
+  assert.ok(want.every(Boolean), "owner, developer and customer demo accounts present");
+  const browser = await launchBrowser();
+  const problems: string[] = [];
+  let pagesChecked = 0;
+  try {
+    const [name, value] = pass.split("=");
+    // Sign in once per role at desktop width, then reuse the session for every width.
+    const states: { role: string; state: unknown; paths: string[] }[] = [];
+    for (const a of want as Acct[]) {
+      const ctx = await browser.newContext();
+      await ctx.addCookies([{ name, value, url: BASE! }]);
+      const page = await ctx.newPage();
+      await page.goto(BASE + "/login");
+      await page.fill("#f-email", a.email);
+      await page.fill("#f-password", a.password);
+      await Promise.all([page.waitForLoadState("load"), page.click("button[type=submit]")]);
+      if (new URL(page.url()).pathname.startsWith("/mfa")) {
+        assert.ok(a.totp, `${a.role} needs a TOTP key`);
+        const left = 30 - (Math.floor(Date.now() / 1000) % 30);
+        await new Promise((r) => setTimeout(r, (left + 1) * 1000));
+        await page.fill("#f-code", await totpCode(a.totp!));
+        await Promise.all([page.waitForLoadState("load"), page.click("button[type=submit]")]);
+      }
+      assert.doesNotMatch(new URL(page.url()).pathname, /^\/(login|mfa)/, `signed in as ${a.role}`);
+      const area = a.role === "customer_admin" ? "/portal" : "/staff";
+      await page.goto(BASE + area);
+      const hrefs: string[] = await page.$$eval(`a[href^='${area}']`, (as: Element[]) => [...new Set(as.map((x) => x.getAttribute("href")!.split("#")[0]))]);
+      const paths = [area, ...hrefs.filter((h) => h !== area && !/logout|export|\.csv|\.pdf|download/.test(h))].slice(0, 45);
+      states.push({ role: a.role, state: await ctx.storageState(), paths });
+      await ctx.close();
+    }
+    const publicPaths = ["/", "/services", "/pricing", "/portfolio", "/about", "/process", "/faq", "/contact", "/quote", "/legal/privacy", "/login", "/register"];
+    for (const width of [375, 1440]) {
+      const groups = [{ role: "public", state: undefined as unknown, paths: publicPaths }, ...states];
+      for (const g of groups) {
+        const ctx = await browser.newContext({ viewport: { width, height: width < 800 ? 900 : 1000 }, deviceScaleFactor: width === 375 ? 2 : 1, isMobile: width === 375, hasTouch: width < 1000, ...(g.state ? { storageState: g.state } : {}) });
+        await ctx.addCookies([{ name, value, url: BASE! }]);
+        const page = await ctx.newPage();
+        page.on("pageerror", (e: Error) => problems.push(`JS error ${e.message} @ ${page.url()}`));
+        for (const path of g.paths) {
+          const res = await page.goto(BASE + path, { waitUntil: "load" });
+          if (!res || res.status() !== 200) { problems.push(`${width}px ${g.role} ${path}: HTTP ${res?.status()}`); continue; }
+          pagesChecked++;
+          for (const p of await page.evaluate(pageRules, { mobile: width === 375, width })) problems.push(`${width}px ${g.role} ${path}: ${p}`);
+          if (width === 1440) for (const x of await page.evaluate(contrastRules)) problems.push(`${g.role} ${path}: contrast "${x.text}" ${x.sel} ${x.ratio}:1 < ${x.need}:1`);
+        }
+        await ctx.close();
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+  assert.ok(pagesChecked >= 60, `checked ${pagesChecked} page views`);
+  assert.deepEqual(problems, []);
 });

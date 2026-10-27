@@ -1,8 +1,12 @@
 # Operational runbook
 
-**Requirement:** DOC-002 · Applies to development now and to staging/production once provisioned (BLK-003). Commands assume `wrangler` is authenticated with a **scoped** Cloudflare API token for the Crestmont account only.
+**Requirement:** DOC-002 · Applies to development and staging (live since 2026-10-27) and to production once the Founder authorizes it (LAUNCH-001). Commands assume `wrangler` is authenticated with a **scoped** Cloudflare API token for the Crestmont account only.
 
-Staffed hours are set at /staff/settings. Outside those hours, nobody is paged. **No external alerting exists yet** (see /staff/monitoring). Until it does, check /staff/monitoring at the start and end of each staffed day.
+Staffed hours are set at /staff/settings. Outside those hours, nobody is paged.
+
+**Alerting (baseline, no extra cost).** `.github/workflows/staging-health-monitor.yml` probes `/api/health` and `/api/readiness/health` from GitHub's infrastructure every 30 minutes (three attempts a minute apart). A failed run is the alert: GitHub notifies the account that last changed the workflow's schedule, and anyone watching the repository's Actions, by email and web notification. Make sure that account's notification settings send "Actions: failed workflows" by email. To add another channel (SMS, Slack, a paging service), keep this workflow and add a step that calls it — that choice is the Founder's (ASVS F-03). Production gets the same monitor when it exists (copy the workflow with the production URL). In-app signals remain at /staff/monitoring; check it at the start and end of each staffed day.
+
+**Recovery is rehearsed automatically.** After every successful staging deploy, `staging-rollback-rehearsal.yml` rolls the Worker back to the previous code version, verifies health, rolls forward and verifies again, and `staging-restore-drill.yml` restores a fresh staging export into a scratch database and compares every table's row count. Both post signed evidence (TEST-004, INFRA-005, INFRA-006) visible at /staff/readiness. A failed rehearsal or drill alerts the same way as the monitor.
 
 ## 1. Daily checks (staffed hours)
 

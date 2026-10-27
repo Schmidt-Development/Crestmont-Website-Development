@@ -1,0 +1,45 @@
+name: Staging health monitor
+
+# External alerting for staging (READY-012, INFRA-006, ASVS F-03 interim channel). Runs from GitHub's infrastructure,
+# outside Cloudflare, every 30 minutes. It needs no secrets: it only reads the public health endpoints.
+# A failed run is the alert — GitHub notifies the account that last changed this schedule (and repository watchers
+# subscribed to Actions) by email/web notification. The Founder may later add or swap a channel (see docs/RUNBOOK.md,
+# "Alerting"); this workflow stays as the zero-cost baseline.
+on:
+  schedule:
+    - cron: "11,41 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-health-monitor
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BASE: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+    steps:
+      - name: Service and evidence-feed health (retries before alerting)
+        run: |
+          fail=""
+          for attempt in 1 2 3; do
+            fail=""
+            app=$(curl -s -o /tmp/app.json -w '%{http_code}' --max-time 20 "$BASE/api/health" || echo 000)
+            feeds=$(curl -s -o /tmp/feeds.json -w '%{http_code}' --max-time 20 "$BASE/api/readiness/health" || echo 000)
+            [ "$app" = "200" ] || fail="$fail /api/health=$app"
+            [ "$feeds" = "200" ] || fail="$fail /api/readiness/health=$feeds"
+            [ -z "$fail" ] && break
+            sleep 60
+          done
+          {
+            echo "### Staging health $(date -u +%Y-%m-%dT%H:%MZ)"
+            echo "- /api/health: $app"
+            echo "- /api/readiness/health: $feeds"
+            echo '```json'; cat /tmp/feeds.json 2>/dev/null | head -c 4000; echo; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$fail" ]; then echo "::error title=Staging unhealthy::$fail (after 3 attempts)"; exit 1; fi

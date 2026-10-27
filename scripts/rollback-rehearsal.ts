@@ -23,23 +23,40 @@ export function currentVersionIds(statusJson: string): string[] {
   return [...ids];
 }
 
-/** Uploaded versions, newest first. */
-export function versionsNewestFirst(listJson: string): { id: string; createdOn: string }[] {
-  const out = new Map<string, string>();
+/** Uploaded versions, newest first. `trigger` is Cloudflare's "workers/triggered_by" annotation when present
+ *  ("upload" / "version_upload" for new code, "secret" for a secret change on the same code, …). */
+export function versionsNewestFirst(listJson: string): { id: string; createdOn: string; trigger: string | null }[] {
+  const out = new Map<string, { createdOn: string; trigger: string | null }>();
   walk(parse(listJson), (o) => {
     const id = o.id;
     const created = (o.created_on ?? (o.metadata as Obj | undefined)?.created_on ?? o.createdOn) as unknown;
-    if (typeof id === "string" && UUID.test(id) && typeof created === "string" && !Number.isNaN(Date.parse(created))) out.set(id, created);
+    const ann = o.annotations as Obj | undefined;
+    const trig = ann?.["workers/triggered_by"] ?? (o.metadata as Obj | undefined)?.source;
+    if (typeof id === "string" && UUID.test(id) && typeof created === "string" && !Number.isNaN(Date.parse(created))) out.set(id, { createdOn: created, trigger: typeof trig === "string" ? trig : null });
   });
-  return [...out].map(([id, createdOn]) => ({ id, createdOn })).sort((a, b) => Date.parse(b.createdOn) - Date.parse(a.createdOn));
+  return [...out].map(([id, v]) => ({ id, ...v })).sort((a, b) => Date.parse(b.createdOn) - Date.parse(a.createdOn));
 }
 
-export function pickRollback(statusJson: string, listJson: string): { current: string; previous: string } {
+const isSecretOnly = (t: string | null) => !!t && /secret/i.test(t);
+
+/** Previous = the newest version whose CODE predates the serving build: skip versions that only changed secrets on
+ *  top of the serving code, and the serving code's own upload, so the rehearsal really runs older code. Falls back to
+ *  the newest other version when Wrangler reports no trigger annotations. */
+export function pickRollback(statusJson: string, listJson: string): { current: string; previous: string; previousIsOlderCode: boolean } {
   const current = currentVersionIds(statusJson);
   if (current.length !== 1) throw new Error(`expected exactly one version serving 100% of traffic, found ${current.length}`);
-  const prev = versionsNewestFirst(listJson).find((v) => v.id !== current[0]);
-  if (!prev) throw new Error("no earlier uploaded version to roll back to");
-  return { current: current[0], previous: prev.id };
+  const all = versionsNewestFirst(listJson);
+  const others = all.filter((v) => v.id !== current[0]);
+  if (!others.length) throw new Error("no earlier uploaded version to roll back to");
+  const idx = all.findIndex((v) => v.id === current[0]);
+  if (idx >= 0 && all.some((v) => v.trigger)) {
+    let i = idx;
+    // Walk back through secret-only versions to the upload that produced the serving code.
+    while (i < all.length && isSecretOnly(all[i].trigger)) i++;
+    const older = all.slice(i + 1).find((v) => v.trigger && !isSecretOnly(v.trigger));
+    if (older) return { current: current[0], previous: older.id, previousIsOlderCode: true };
+  }
+  return { current: current[0], previous: others[0].id, previousIsOlderCode: false };
 }
 
 export function rehearsalEvidence(o: { commit: string; runId: string; startedAt: string; rollback: boolean; rollforward: boolean; detail?: string }) {
@@ -58,7 +75,7 @@ export function rehearsalEvidence(o: { commit: string; runId: string; startedAt:
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [mode, a, b] = process.argv.slice(2);
   const arg = (n: string) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : undefined; };
-  if (mode === "pick") { const r = pickRollback(readFileSync(a, "utf8"), readFileSync(b, "utf8")); process.stdout.write(`${r.current} ${r.previous}`); }
+  if (mode === "pick") { const r = pickRollback(readFileSync(a, "utf8"), readFileSync(b, "utf8")); process.stdout.write(`${r.current} ${r.previous}`); process.stderr.write(r.previousIsOlderCode ? "previous version runs the earlier deployed code\n" : "no trigger annotations: previous version may share the serving code\n"); }
   else if (mode === "evidence") {
     writeFileSync(arg("--out") ?? "evidence/rollback.json", JSON.stringify(rehearsalEvidence({ commit: arg("--commit") ?? "0000000", runId: arg("--run-id") ?? `local-rollback-${Date.now()}`, startedAt: arg("--started") ?? new Date().toISOString(),
       rollback: arg("--rollback") === "passed", rollforward: arg("--rollforward") === "passed", detail: arg("--detail") })));
