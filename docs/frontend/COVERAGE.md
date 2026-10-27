@@ -2,8 +2,8 @@
 
 Generated 2026-10-27 from `listRoutes()` (every registered GET route) joined with the local Chromium crawl
 (seeded development server, roles: public, customer, owner, sales, support, developer; widths 1280 and 360px;
-screenshot set adds 320/414/820/1680). **Local verification only** — the hosted frontend preview passed CI smoke checks
-(health, preview gate, assets) but has not been browsed from this environment.
+screenshot set adds 320/414/820/1680). **Local verification only** — design v3 @ `c60be7d`. The hosted preview is verified by CI to serve these exact assets
+byte-for-byte (Actions run 40596685833) but has not been browsed from this environment.
 
 | | Count |
 |---|---|

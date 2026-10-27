@@ -1,7 +1,8 @@
 # Frontend redesign — integration handoff
 
 For the backend session and whoever merges `claude/frontend-redesign`. The design specification is
-[DESIGN.md](DESIGN.md), research is [RESEARCH.md](RESEARCH.md), and route coverage is [COVERAGE.md](COVERAGE.md).
+[DESIGN.md](DESIGN.md) (v3, reference-matched), the motion specification and M01–M10 checklist is
+[MOTION.md](MOTION.md), research is [RESEARCH.md](RESEARCH.md), and route coverage is [COVERAGE.md](COVERAGE.md).
 
 ## 1. Branch, base and status
 
@@ -18,15 +19,18 @@ For the backend session and whoever merges `claude/frontend-redesign`. The desig
 
 | File | Owner | Change |
 |---|---|---|
-| `public/assets/app.css` | Frontend | Rewritten as a token-based design system. **Every existing class name is kept**; new classes are added. |
-| `public/assets/app.js` | Frontend | All existing behaviour is kept verbatim. Added: header state, accessible menus, toast dismissal, busy submit buttons, copy links, roving tablists, tab overflow hints. Bug fix: cancelling a `data-confirm` dialog no longer disables the form's buttons. |
+| `public/assets/app.css` | Frontend | Rewritten as the v3 token-based design system: light pages, black panels, gold accent. **Every existing class name is kept**; new classes are added (DESIGN.md §6). |
+| `public/assets/app.js` | Frontend | All existing behaviour is kept verbatim. Added: header state, accessible menus, toast dismissal, busy submit buttons, copy links, roving tablists, tab overflow hints. Bug fix: cancelling a `data-confirm` dialog no longer disables the form's buttons. v3 adds the motion layer (MOTION.md): word reveals, one IntersectionObserver, one rAF scroll loop, tile-fill buttons, tile illustration swaps, package switch, FAQ disclosure. |
 | `public/assets/nojs.css` | Frontend (new) | No-JS fallbacks, loaded only via `<noscript><link>` (CSP-compliant). No render-blocking script is needed. |
-| `public/assets/fonts/*` | Frontend (new) | Self-hosted Gloock and Instrument Sans: Latin-subset WOFF files plus their SIL OFL licences. Google Fonts is no longer requested. |
-| `src/ui/layout.ts` | Frontend / shared | Same exports and signatures. New `crestRing()` export. The header, footer, auth shell (split layout) and app shell (scrim, avatar) are re-marked up. Accessible names used by tests ("Menu", "Sign out", sidebar labels) are unchanged. |
-| `src/routes/public.ts` | **Shared** | Edits are limited to the public page templates: the `section()` helper, `serviceList()` (replaces `serviceCard()`), `anatomy()`, `processStepper()`, `ledger()`, and the `/`, `/services` and `/services/:slug` render bodies. CMS keys, form handling, prices, `data-testid`s, section ids and the CMS/portfolio admin are untouched. |
+| `public/assets/fonts/*` | Frontend (new) | Self-hosted Inter Display Medium and Inter Regular/Medium/SemiBold: Latin-subset WOFF files plus the SIL OFL licence. Google Fonts is no longer requested. |
+| `public/assets/art/*.webp` | Frontend (new) | 11 original dimensional illustrations (hero, 4 process stages, 6 services; ≈220 KB total), rendered by `tools/art/render_illustrations.py`. |
+| `tools/art/render_illustrations.py` | Frontend (new) | Reproducible numpy SDF renderer for the artwork (`python3 tools/art/render_illustrations.py --out public/assets/art`). Not part of the Worker. |
+| `src/ui/layout.ts` | Frontend / shared | Same exports and signatures. New `crestRing()` export. The header, footer, auth shell (split layout) and app shell (scrim, avatar) are re-marked up. v3: the crest sits in a `#0d0d0d` tile (`.brand__tile`); the M01 intro overlay renders on the first public page view of a browser session (session cookie `cm_intro`, never on POST re-renders, flash pages or errors). Accessible names used by tests ("Menu", "Sign out", sidebar labels) are unchanged. |
+| `src/routes/public.ts` | **Shared** | Edits are limited to the public page templates: the `section()` and `pageHero` helpers, `serviceList()` / `serviceBento()` (replace `serviceCard()`), `anatomy()`, `processStages()` (replaces `processStepper()`; groups the 11 approved steps into 4 phases), `ledger()`, `packageCards()`, `showcase()`, and the `/`, `/services`, `/services/:slug`, `/process` and `/about` render bodies. CMS keys, form handling, prices, `data-testid`s, section ids and the CMS/portfolio admin are untouched. |
 | `src/app/app.ts` | **Shared** | One line: `woff` and `woff2` MIME types added to `STATIC_TYPES` for the dev server. Production assets are served by the Cloudflare `ASSETS` binding. |
 | `wrangler.toml` | **Shared** | Additive only: a new `[env.frontend-preview]` block placed **between** staging and production, which the gate test requires. The staging and production blocks are unchanged. |
-| `.github/workflows/deploy-frontend-preview.yml` | Frontend (new) | Separate preview deploy. See §4. |
+| `.github/workflows/deploy-frontend-preview.yml` | Frontend (new) | Separate preview deploy, now with a byte-for-byte asset and homepage-marker check. See §4. |
+| `tests/e2e/core.e2e.ts` | **Shared (test)** | `BRAND-001` only: instead of requiring a black `<body>`, it checks that the nearest opaque surface behind the crest is `rgb(13, 13, 13)` — the same guarantee (the logo's own background is never mismatched) now that pages are light. The 2× density and original-file assertions are unchanged. |
 | `docs/frontend/*` | Frontend (new) | Specification, research, coverage and this handoff. |
 
 **Unchanged:** business logic, payments, database schema and migrations, authorization, jobs, secrets, API routes and their request/response contracts, and every other route module.
@@ -64,8 +68,10 @@ These are backend-owned decisions. The frontend did not hide them with CSS, beca
   - A guard refuses to run if the target Worker or database is anything other than the preview's own.
   - It does **not** use `scripts/staging-access.ts`, which is hard-wired to `--env staging`.
   - Smoke checks: `/api/health` returns 200, `/` returns 401 (the gate), `/assets/app.css` returns 200.
+  - Asset check: the sha256 of `app.css`, `app.js`, `nojs.css`, the display font and two illustrations served by the preview must equal the commit's files, and the gated homepage must contain the v3 markers (`class="intro"`, `data-statement`, `data-stages`, `class="bento"`, `data-switch`, `hero-build.webp`).
 - **Access:** each run uploads a private **`frontend-preview-access`** artifact, kept for 3 days. It contains the URL, the preview password and the demo accounts.
 - **First run:** Actions run `40499029032` on `1760530` succeeded, including every guard and smoke step.
+- **v3 run:** Actions run `40596685833` on `c60be7d` succeeded, including the byte-for-byte asset check and the homepage markers.
 - **Retiring it:**
   1. Delete the workflow file.
   2. Run `wrangler delete --env frontend-preview`.
@@ -86,24 +92,46 @@ The redesign keeps the honest placeholders the platform already renders. These n
 
 **Local verification** (development server, seeded with the staging seed, Chromium 153):
 
-- **Crawl:**
-  - 3,072 page audits across 506 concrete pages (237 route shapes).
+- **Crawl (v3 @ `c60be7d`):**
+  - 3,182 page audits across 528 concrete pages.
   - Roles: public, customer, owner, sales, support and developer, at 1280px and 360px.
   - Every page was checked for horizontal overflow, console and page errors, exactly one `h1`, exactly one `main`, and broken images.
   - **0 open issues.**
-- **Screenshots:** 114, at 320, 414, 820, 1280 and 1680px. Delivered separately as a zip.
+- **Screenshots:** before (v2) and after (v3) sets at 320, 414, 820, 1280 and 1680px, captured after scrolling each page so reveals have run. Delivered separately as zips, plus side-by-side comparison sheets.
+- **Recordings:** `crestmont-motion-desktop.mp4` (38.6 s, 1440-wide, captioned M01–M10) and `crestmont-motion-mobile.mp4` (21.2 s, 390-wide).
 - **Keyboard:** every focus stop on `/`, `/quote` and `/login` has a visible indicator. Menus and the drawer close on Escape and return focus. The anatomy and stepper tablists use arrow keys.
-- **Reduced motion:** the hero renders complete with no animation (`prefers-reduced-motion: reduce`).
+- **Reduced motion:** every section renders complete with no animation, no intro and no pinning (`prefers-reduced-motion: reduce`).
+- **No-JS:** with JavaScript disabled every section is visible (`nojs.css`); hidden reveal states only apply under `html.js`.
 - **Contrast:**
   - Every text token measures ≥ 4.8:1 on every surface.
   - Form-control borders are ≥ 3:1.
   - The primary button is 9.9:1.
 - **Backend `staging-quality` crawl:** the content, link and truthfulness rules pass against a local gated server. The axe-core sub-test was skipped, because axe-core cannot be installed in the build environment (package registries are blocked). It will run in the staging and preview workflows, which install it.
-- **E2E (`npm run e2e`, local Chromium):** **34 passed, 0 failed, 37 skipped.** The skipped tests are staging journeys that need a deployed preview plus its access file.
-  Two regressions found by this suite were fixed:
+- **`npm test` (v3):** 311 passed, 0 failed.
+- **E2E (`npm run e2e`, local Chromium, v3):** **34 passed, 0 failed, 37 skipped.** The skipped tests are staging journeys that need a deployed preview plus its access file.
+  v3 fixes found by this suite: `BRAND-006` contrast (container link colours overrode button labels; the switch's selected state was transparent) — both fixed in CSS; `BRAND-001` updated as described in §2. A third, intermittent `BRAND-006` failure (≈1 run in 3) was traced to the package switch's first render: the selected label's colour transition started from dark grey on the already-black button for 280 ms. The first placement now applies without transitions; 8/8 isolated runs and two full E2E runs pass. Under reduced motion, all four process phases are now shown at full strength (they had kept the scroll-position dimming).
+  Two earlier regressions found by this suite were fixed:
   - `AUTH-003` failed because a synchronous `boot.js` blocked HTML parsing during form round-trips, so the half-parsed page lacked the error text. It is replaced by `<noscript>` `nojs.css`. Verified 3/3 runs, and the baseline passes too.
   - `BRAND-004` failed because a decorative meter grow-in rendered 0px at the first frame. Operational screens no longer animate data.
 - **Not verified here:**
   - Safari and Firefox rendering (only Chromium was available).
   - Browsing the hosted preview, since the build environment's egress policy blocks `workers.dev`.
   - Real device testing.
+
+## 7. Remaining discrepancies against the reference (v3)
+
+1. **Reference internals not inspected.** The reference's CSS/JS could not be fetched; every motion value was measured from the supplied recording (±33 ms) — see MOTION.md.
+2. **Hosted preview not viewed.** CI proves the preview serves this commit's assets and markup byte-for-byte; a human look at the hosted page is the remaining check.
+3. **Browsers.** Only Chromium was tested. Safari (sticky + WAAPI) and Firefox should be checked on the preview.
+4. **Process grouping.** The reference shows 4 stages; Crestmont's 11 approved steps are grouped into 4 phases (Scope, Design, Build, Launch) with every step still listed. The `/process` page keeps all 11.
+5. **Content by design.** No testimonials, client logos, team or blog sections — the reference has them; Crestmont has no approved material for them.
+6. **Hero timing.** The hero settles in ≈1.4 s versus ≈2.3 s in the recording (the recording includes a longer load hold).
+7. **Crest scale.** The crest stays at native resolution in a black tile; a vector master would allow the larger mark the reference uses.
+
+## 8. Approvals needed (ordered by what they unblock)
+
+1. **Review the hosted preview** (link and password in the run's `frontend-preview-access` artifact) and decide on merging `claude/frontend-redesign` into `main` — the merge is not done by this work.
+2. **Business facts** in §5 (maintenance inclusions, support hours, legal name/address) — they unblock final copy on pricing, contact and legal pages.
+3. **Crest vector master** — unblocks a larger hero mark and print use.
+4. **Attorney review** of the legal drafts — unblocks publishing the policy pages as final.
+5. **Portfolio material** with consent — unblocks the showcase (currently the "Portfolio in preparation" panel).

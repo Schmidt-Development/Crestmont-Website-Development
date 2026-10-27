@@ -667,6 +667,8 @@ details.card[open] > summary { margin-bottom: var(--s-4); }
 .switch__btn[aria-selected="true"] { color: #fff; }
 /* Once the pill has settled, the selected button carries the black itself (the pill is only the moving layer). */
 .switch__btn[aria-selected="true"][data-settled] { background: var(--black); }
+/* First placement (and reduced motion) applies the selected state without any transition. */
+.switch--instant .switch__btn, .switch--instant .switch__pill { transition: none !important; }
 .switch__pill { position: absolute; z-index: 0; top: 4px; bottom: 4px; left: 4px; width: 0; border-radius: 7px; background: var(--black); transition: transform 300ms var(--ease-in-out), width 300ms var(--ease-in-out); }
 .switch__pill::after { content: ""; position: absolute; right: 8px; top: 50%; width: 6px; height: 6px; margin-top: -3px; border-radius: 2px; background: var(--gold-2); }
 .plans__head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: end; gap: var(--s-5); margin-bottom: clamp(2rem, 4vw, 3rem); }
@@ -1020,6 +1022,7 @@ a.shot { display: block; cursor: zoom-in; }
   .js .statement--pinned .statement__labels { position: static; display: grid; margin: var(--s-7) auto 0; max-width: 760px; pointer-events: auto; }
   .js .statement--pinned .statement__label { position: static; opacity: 1; transform: none; }
   .js .scroll-words .w { opacity: 1; transform: none; }
+  .js .stages--live .stage { opacity: 1; transform: none; }
 }
 
 /* ── 21. Print ────────────────────────────────────────────────────────────────────────────────── */

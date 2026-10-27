@@ -418,9 +418,9 @@
     let cur = 0;
     const show = (i, animate) => {
       btns.forEach((b, j) => { b.setAttribute("aria-selected", String(i === j)); b.tabIndex = i === j ? 0 : -1; b.removeAttribute("data-settled"); });
-      place(i);
       clearTimeout(sw._settle);
-      sw._settle = setTimeout(() => btns[i].setAttribute("data-settled", ""), animate && !RM() ? 300 : 0);
+      if (animate && !RM()) { place(i); sw._settle = setTimeout(() => btns[i].setAttribute("data-settled", ""), 300); }
+      else { sw.classList.add("switch--instant"); place(i); btns[i].setAttribute("data-settled", ""); void sw.offsetWidth; sw.classList.remove("switch--instant"); }
       const prev = sets[cur]; cur = i;
       sets.forEach((s, j) => { s.hidden = j !== i; });
       if (!animate || RM() || !prev || prev === sets[i]) return;
