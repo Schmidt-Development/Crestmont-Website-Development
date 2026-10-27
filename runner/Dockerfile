@@ -11,7 +11,7 @@
 ARG DOCKER_CLI_IMAGE=docker:27.5.1-cli
 FROM ${DOCKER_CLI_IMAGE} AS dockercli
 
-FROM node:22-bookworm-slim
+FROM node:26-bookworm-slim
 
 ARG INSTALL_AGENT_SDK=false
 ARG PLAYWRIGHT_VERSION=1.55.0
