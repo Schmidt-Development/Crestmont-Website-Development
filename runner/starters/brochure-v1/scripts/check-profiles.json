@@ -1,0 +1,5 @@
+{
+  "starter": { "maxPages": 5, "contactForm": true, "seo": "basic" },
+  "business": { "maxPages": 12, "contactForm": true, "seo": "expanded" },
+  "premium": { "maxPages": 25, "contactForm": true, "seo": "enhanced" }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "customer-site",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-page website served as Cloudflare Workers static assets (Crestmont brochure starter v1).",
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "dev": "npx wrangler dev"
+  }
+}

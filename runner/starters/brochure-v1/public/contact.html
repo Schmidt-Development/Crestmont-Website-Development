@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Contact — STARTER-PLACEHOLDER Business name</title>
+  <meta name="description" content="STARTER-PLACEHOLDER How to reach the business: email, phone and the contact form (50–160 characters).">
+  <link rel="stylesheet" href="assets/css/tokens.css">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <script src="assets/js/contact.js" defer></script>
+  <!-- Analytics: not configured. Add the customer's analytics snippet only once their account exists. -->
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="container site-header__inner">
+      <a class="brand" href="index.html">STARTER-PLACEHOLDER Business name</a>
+      <nav aria-label="Main">
+        <ul class="nav" role="list">
+          <li><a href="index.html">Home</a></li>
+          <li><a href="about.html">About</a></li>
+          <li><a href="services.html">Services</a></li>
+          <li><a href="contact.html" aria-current="page">Contact</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+  <main id="main">
+    <section class="section" aria-labelledby="contact-title">
+      <div class="container contact">
+        <div>
+          <h1 id="contact-title">Contact</h1>
+          <p>STARTER-PLACEHOLDER Short invitation to get in touch.</p>
+          <ul class="contact__details" role="list">
+            <li>Email: <a href="mailto:hello@example.com">STARTER-PLACEHOLDER public email</a></li>
+            <li>Phone: <a href="tel:+10000000000">STARTER-PLACEHOLDER public phone</a></li>
+          </ul>
+        </div>
+        <form class="form" method="post" action="/api/contact" data-contact-form novalidate>
+          <div class="form__field">
+            <label for="contact-name">Name</label>
+            <input id="contact-name" name="name" type="text" autocomplete="name" required maxlength="120">
+          </div>
+          <div class="form__field">
+            <label for="contact-email">Email</label>
+            <input id="contact-email" name="email" type="email" autocomplete="email" required maxlength="254">
+          </div>
+          <div class="form__field">
+            <label for="contact-phone">Phone (optional)</label>
+            <input id="contact-phone" name="phone" type="tel" autocomplete="tel" maxlength="40">
+          </div>
+          <div class="form__field">
+            <label for="contact-message">Message</label>
+            <textarea id="contact-message" name="message" rows="6" required maxlength="5000"></textarea>
+          </div>
+          <div class="form__hp" aria-hidden="true">
+            <label for="contact-company-website">Leave this field empty</label>
+            <input id="contact-company-website" name="company_website" type="text" tabindex="-1" autocomplete="off">
+          </div>
+          <button class="button" type="submit">Send message</button>
+          <p class="form__status" role="status" aria-live="polite" data-contact-status></p>
+        </form>
+      </div>
+    </section>
+  </main>
+  <footer class="site-footer">
+    <div class="container">
+      <p>&copy; <span data-year>2026</span> STARTER-PLACEHOLDER Business name. All rights reserved.</p>
+    </div>
+  </footer>
+</body>
+</html>
