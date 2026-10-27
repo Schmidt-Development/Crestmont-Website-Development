@@ -35,7 +35,7 @@ export async function executiveMetrics(ctx: AppContext) {
   const activeCustomers = await n(ctx, `SELECT COUNT(*) AS n FROM organizations o WHERE o.kind = 'customer' AND (
       EXISTS(SELECT 1 FROM projects p WHERE p.organization_id = o.id AND p.status NOT IN ('completed','cancelled'))
       OR EXISTS(SELECT 1 FROM subscriptions s WHERE s.organization_id = o.id AND s.status IN ('active','trialing','past_due')))`);
-  const newLeads = await n(ctx, `SELECT COUNT(*) AS n FROM leads WHERE created_at >= ?`, iso30);
+  const newLeads = await n(ctx, `SELECT COUNT(*) AS n FROM leads WHERE merged_into_lead_id IS NULL AND created_at >= ?`, iso30);
   const activeProjects = await n(ctx, `SELECT COUNT(*) AS n FROM projects WHERE status NOT IN ('completed','cancelled','maintenance')`);
   const customerApprovals = await n(ctx, `SELECT COUNT(*) AS n FROM approval_requests WHERE resolved_at IS NULL`);
   const refundDecisions = await n(ctx, `SELECT COUNT(*) AS n FROM refunds WHERE status IN ('requested','under_review','recommended')`);
@@ -76,7 +76,7 @@ export function register(r: Router): void {
         empty: m.activeSubs === 0 ? "No active maintenance subscriptions." : undefined },
       { label: "Active customers", value: String(m.activeCustomers), href: "/staff/customers", definition: "Customer organizations with a project that is not completed/cancelled, or an active, trialing or past-due subscription.",
         empty: m.activeCustomers === 0 ? "No customer currently has an active project or subscription." : undefined },
-      { label: "New leads (30 days)", value: String(m.newLeads), href: "/staff/crm?view=list", definition: "Leads created in the last 30 days, all sources.", empty: m.newLeads === 0 ? "No leads in the last 30 days." : undefined },
+      { label: "New leads (30 days)", value: String(m.newLeads), href: "/staff/crm?view=list", definition: "Leads created in the last 30 days, all sources, excluding leads merged as duplicates.", empty: m.newLeads === 0 ? "No leads in the last 30 days." : undefined },
       { label: "Active projects", value: String(m.activeProjects), href: "/staff/projects", definition: "Projects not completed, cancelled or in maintenance (paused projects included).", empty: m.activeProjects === 0 ? "No active projects." : undefined },
       { label: "Pending approvals", value: String(pendingApprovals), href: m.refundDecisions ? "/staff/refunds" : founderPending ? "/staff/readiness/approve" : "/staff/projects",
         definition: `${m.customerApprovals} customer decisions requested, ${m.refundDecisions} refunds awaiting review/decision, ${founderPending} Founder launch decision outstanding.`,
