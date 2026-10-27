@@ -137,7 +137,14 @@ const BACKUP_METHODS = ["d1_export", "d1_time_travel_bookmark", "r2_versioning",
 const ENVS = ["development", "staging", "production"] as const;
 
 // ───────────── 8. Settings ─────────────
-const SETTING_KEYS = ["business.legal_name", "business.address", "contact.email", "contact.phone", "support.staffed_hours"] as const;
+const SETTING_KEYS = ["business.legal_name", "business.address", "contact.email", "contact.phone", "support.staffed_hours",
+  "backup.rpo_target_hours", "backup.rto_target_hours", "voice.phone_number"] as const;
+
+/** Recovery targets from business settings; null when not set (never a built-in default). */
+export function recoveryTargets(settings: Record<string, string>): { rpoHours: number | null; rtoHours: number | null } {
+  const n = (k: string) => { const v = parseInt(settings[k] ?? "", 10); return Number.isInteger(v) && v > 0 ? v : null; };
+  return { rpoHours: n("backup.rpo_target_hours"), rtoHours: n("backup.rto_target_hours") };
+}
 
 async function settingsPage(ctx: AppContext, errors: string[] = [], v?: Record<string, string>) {
   requireStaff(ctx, "settings.operational");
@@ -156,6 +163,12 @@ ${checkbox("address_confirm", "I confirm this is a registered business address a
 <h2 class="card__title">Contact</h2>
 <div class="grid grid-2">${input({ name: "contact.email", id: "f-cemail", label: "Public contact email", type: "email", value: val("contact.email"), maxlength: 254 })}
 ${input({ name: "contact.phone", id: "f-cphone", label: "Public phone", value: val("contact.phone"), maxlength: 40, hint: "Business line only. No phone number has been purchased for the AI receptionist yet." })}</div>
+<h2 class="card__title">Recovery targets</h2>
+<p class="hint">Used by the Backups page to judge restore drills. Leave blank until the Founder approves targets; nothing is assumed when blank.</p>
+<div class="grid grid-2">${input({ name: "backup.rpo_target_hours", id: "f-rpo", label: "Recovery point objective (hours of data loss)", type: "number", min: 1, max: 720, value: val("backup.rpo_target_hours") })}
+${input({ name: "backup.rto_target_hours", id: "f-rto", label: "Recovery time objective (hours to restore)", type: "number", min: 1, max: 720, value: val("backup.rto_target_hours") })}</div>
+<h2 class="card__title">AI receptionist</h2>
+${input({ name: "voice.phone_number", id: "f-voice", label: "Receptionist phone number (only once purchased)", value: val("voice.phone_number"), maxlength: 40, hint: "Record the number only after the Founder-approved provider has provisioned it. The AI receptionist page shows this value; blank means no number." })}
 <h2 class="card__title">Support</h2>
 <div class="grid grid-2">${input({ name: "staffed_hours", label: "Staffed support hours", value: v?.staffed_hours ?? support?.staffed_hours ?? ctx.settings["support.staffed_hours"] ?? "", maxlength: 160, required: true, hint: "Shown publicly. Do not claim 24/7 human coverage unless it is actually staffed (SUP-005)." })}
 ${input({ name: "first_response_target_hours", label: "First-response target (staffed hours)", type: "number", min: 1, max: 168, value: v?.first_response_target_hours ?? support?.first_response_target_hours ?? "", required: true })}</div>
@@ -205,7 +218,9 @@ async function voicePage(ctx: AppContext, errors: string[] = [], draft?: { instr
 <div class="grid grid-3">
 <section class="card"><h2 class="card__title">Provider</h2><p>${badge(h("voice")?.status ?? "not_configured")}</p><p class="muted">${h("voice")?.detail ?? ""}</p>
 <p class="faint">Provider evaluation and recommendation awaiting Founder decision: <code>docs/voice/PROVIDER-EVALUATION.md</code> (BLK-009). Crestmont must use its own separate provider workspace; the other business's existing receptionist is never touched.</p></section>
-<section class="card"><h2 class="card__title">Phone number</h2><p>${badge("not_configured", "None purchased")}</p><p class="muted">No number has been purchased. Purchasing a number requires Founder approval of the provider recommendation and its cost. This platform never buys numbers.</p></section>
+<section class="card"><h2 class="card__title">Phone number</h2>${ctx.settings["voice.phone_number"]
+  ? html`<p>${badge("configured_unverified", ctx.settings["voice.phone_number"])}</p><p class="muted">Recorded in Business settings. It is not verified as live until signed provider events arrive for real (non-test) calls.</p>`
+  : html`<p>${badge("not_configured", "None recorded")}</p><p class="muted">No receptionist number is recorded in Business settings. Purchasing a number requires Founder approval of the provider recommendation and its cost; this platform never buys numbers.</p>`}</section>
 <section class="card"><h2 class="card__title">Agent</h2>${activeCfg ? html`<p>${badge("active", `Configuration v${activeCfg.version} active`)}</p><p class="muted">Activated ${formatDateTime(activeCfg.activated_at)}. It is not live on any phone line until a provider and number exist.</p>` : html`<p>${badge("not_configured", "No active configuration")}</p><p class="muted">Create and activate a configuration version below.</p>`}</section>
 </div>
 <div class="kpis grid grid-4" style="margin-top:1.5rem">${kpi("Calls (30 days)", n("real"), `${n("test")} test calls excluded`)}${kpi("Calls with a CRM lead", n("with_lead"))}${kpi("Escalations", n("escalated"))}${kpi("Call errors", n("errors"))}</div>
@@ -373,13 +388,31 @@ ${input({ name: "weekly_capacity_hours", label: "Weekly capacity (hours)", type:
   }
 
   // ── Email operations ──
-  r.get("/staff/email", async (ctx) => {
-    requireStaff(ctx, "settings.operational");
-    const status = q(ctx, "status"), template = q(ctx, "template"), to = q(ctx, "to", 254);
+  const emailQuery = (ctx: AppContext) => {
+    const status = q(ctx, "status"), template = q(ctx, "template"), to = q(ctx, "to", 254), from = q(ctx, "from", 10), until = q(ctx, "until", 10);
     const where: string[] = [], binds: unknown[] = [];
     if ((EMAIL_STATUSES as readonly string[]).includes(status)) { where.push("d.status = ?"); binds.push(status); }
     if ((EMAIL_TEMPLATES as readonly string[]).includes(template)) { where.push("d.template = ?"); binds.push(template); }
     if (to) { where.push("d.to_email LIKE ?"); binds.push(`%${to.replace(/[%_]/g, "")}%`); }
+    if (isDate(from)) { where.push("d.created_at >= ?"); binds.push(from); }
+    if (isDate(until)) { where.push("d.created_at < ?"); binds.push(new Date(Date.parse(until) + 86400e3).toISOString().slice(0, 10)); }
+    return { where, binds, v: { status, template, to, from, until } };
+  };
+  r.get("/staff/email/export.csv", async (ctx) => {
+    requireStaff(ctx, "settings.operational");
+    const { where, binds, v } = emailQuery(ctx);
+    const rows = (await ctx.db.prepare(`SELECT d.id, d.template, d.to_email, d.status, d.attempts, d.last_error, d.created_at, d.updated_at, m.provider, m.subject FROM email_deliveries d LEFT JOIN email_messages m ON m.delivery_id = d.id
+        ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY d.created_at DESC LIMIT 50000`).bind(...binds)
+      .all<{ id: string; template: string; to_email: string; status: string; attempts: number; last_error: string | null; created_at: string; updated_at: string; provider: string | null; subject: string | null }>()).results;
+    await audit(ctx.db, { actorUserId: ctx.user!.id, action: "email.log_exported", subjectType: "email_delivery", details: { count: rows.length, filters: v } });
+    const csv = toCsv(["delivery_id", "created_at", "updated_at", "template", "to", "subject", "provider", "status", "attempts", "last_error"],
+      rows.map((d) => [d.id, d.created_at, d.updated_at, d.template, d.to_email, d.subject ?? "", d.provider ?? "", d.provider === "dev-outbox" ? "dev_outbox_not_sent" : d.status, d.attempts, d.last_error ?? ""]));
+    return download(ctx, csv, `crestmont-email-log-${nowIso().slice(0, 10)}.csv`, "text/csv; charset=utf-8");
+  });
+  r.get("/staff/email", async (ctx) => {
+    requireStaff(ctx, "settings.operational");
+    const { where, binds, v: ev } = emailQuery(ctx);
+    const { status, template, to } = ev;
     const { page, limit, offset } = pageParam(ctx);
     const rows = (await ctx.db.prepare(`SELECT d.id, d.template, d.to_email, d.status, d.attempts, d.last_error, d.created_at, d.updated_at, m.provider, m.subject FROM email_deliveries d LEFT JOIN email_messages m ON m.delivery_id = d.id
         ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY d.created_at DESC LIMIT ? OFFSET ?`).bind(...binds, limit + 1, offset)
@@ -387,7 +420,8 @@ ${input({ name: "weekly_capacity_hours", label: "Weekly capacity (hours)", type:
     const counts = (await ctx.db.prepare(`SELECT status, COUNT(*) AS n FROM email_deliveries GROUP BY status`).all<{ status: string; n: number }>()).results;
     const health = (await integ.refreshIntegrationHealth({ db: ctx.db, env: ctx.env, storage: ctx.storage })).find((h) => h.integration === "resend" && h.environment === ctx.env.ENVIRONMENT);
     const c = (s: string) => counts.find((x) => x.status === s)?.n ?? 0;
-    const body = html`${pageHead("Email operations", linkButton("Template catalogue", "/staff/email/templates", "secondary", "sm"), "Platform")}
+    const exportQs = new URLSearchParams(ctx.url.search); exportQs.delete("page");
+    const body = html`${pageHead("Email operations", html`${linkButton("Export CSV", `/staff/email/export.csv${exportQs.toString() ? `?${exportQs}` : ""}`, "ghost", "sm")}${linkButton("Template catalogue", "/staff/email/templates", "secondary", "sm")}`, "Platform")}
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Delivery provider &amp; domain authentication</h2>
 <p>${badge(health?.status ?? "not_configured")} <span class="muted">Adapter in use: <strong>${ctx.email.kind}</strong></span></p><p class="muted">${health?.detail ?? ""}</p>
 ${ctx.email.kind === "dev-outbox" ? html`<p class="faint">Development outbox: messages are rendered and stored here, never sent and never reported as delivered.</p>` : ""}
@@ -398,6 +432,8 @@ ${filterForm(ctx, [
   select({ name: "status", label: "Status", options: [...EMAIL_STATUSES], value: status, includeBlank: "Any status" }),
   select({ name: "template", label: "Template", options: [...EMAIL_TEMPLATES], value: template, includeBlank: "Any template" }),
   input({ name: "to", label: "Recipient contains", value: to, maxlength: 254 }),
+  input({ name: "from", label: "From", type: "date", value: ev.from }),
+  input({ name: "until", label: "To", type: "date", value: ev.until }),
 ])}
 ${table(rows.slice(0, limit), [
   { header: "Created", cell: (d) => html`<a href="/staff/email/${d.id}">${formatDateTime(d.created_at)}</a>` },
@@ -582,7 +618,7 @@ ${table(privacy, [
     ? html`<form method="post" action="/staff/privacy/${p.id}/process" class="row">${csrf(ctx)}<label class="visually-hidden" for="pn-${p.id}">Notes</label><input class="input" id="pn-${p.id}" name="notes" placeholder="Notes" maxlength="1000">${button("Complete deletion", { variant: "danger", size: "sm", name: "decision", value: "complete" })}${button("Deny", { variant: "ghost", size: "sm", name: "decision", value: "deny" })}</form>`
     : p.processed_by_name ? `Processed by ${p.processed_by_name}` : "—" },
 ], { empty: emptyState("No deletion requests", "Requests made from /account/privacy appear here.") })}</section>
-<section class="section--tight"><h2>Security events</h2>
+<section class="section--tight"><div class="row row--between"><h2>Security events</h2>${linkButton("Export CSV", `/staff/security/events.csv${(() => { const u = new URLSearchParams(ctx.url.search); u.delete("page"); return u.toString() ? `?${u}` : ""; })()}`, "ghost", "sm")}</div>
 ${filterForm(ctx, [
   select({ name: "kind", label: "Kind", options: kinds, value: kind, includeBlank: "Any" }),
   input({ name: "email", label: "Email contains", value: email }),
@@ -598,6 +634,20 @@ ${table(events.slice(0, limit), [
 ], { empty: emptyState("No security events", "Failed sign-ins, lockouts, rate limits and MFA failures appear here.") })}
 ${pagination(ctx, page, events.length > limit)}</section>`;
     return staffPage(ctx, "Security", body);
+  });
+  r.get("/staff/security/events.csv", async (ctx) => {
+    requireStaff(ctx, "audit.read");
+    const kind = q(ctx, "kind", 60), email = q(ctx, "email", 254), from = q(ctx, "from", 10), to = q(ctx, "to", 10);
+    const where: string[] = [], binds: unknown[] = [];
+    if (kind) { where.push("kind = ?"); binds.push(kind); }
+    if (email) { where.push("email LIKE ?"); binds.push(`%${email.replace(/[%_]/g, "")}%`); }
+    if (isDate(from)) { where.push("created_at >= ?"); binds.push(from); }
+    if (isDate(to)) { where.push("created_at < ?"); binds.push(new Date(Date.parse(to) + 86400e3).toISOString().slice(0, 10)); }
+    const rows = (await ctx.db.prepare(`SELECT id, kind, user_id, email, ip, detail, created_at FROM security_events ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id DESC LIMIT 50000`).bind(...binds)
+      .all<{ id: number; kind: string; user_id: string | null; email: string | null; ip: string | null; detail: string | null; created_at: string }>()).results;
+    await audit(ctx.db, { actorUserId: ctx.user!.id, action: "security.events_exported", subjectType: "security_events", details: { count: rows.length, filters: { kind, email, from, to } } });
+    const csv = toCsv(["id", "created_at", "kind", "user_id", "email", "ip", "detail"], rows.map((e) => [e.id, e.created_at, e.kind, e.user_id ?? "", e.email ?? "", e.ip ?? "", e.detail ?? ""]));
+    return download(ctx, csv, `crestmont-security-events-${nowIso().slice(0, 10)}.csv`, "text/csv; charset=utf-8");
   });
   r.post("/staff/privacy/:id/process", async (ctx, p) => {
     requireStaff(ctx, "employee.manage");
@@ -670,9 +720,15 @@ ${pagination(ctx, page, rows.length > limit)}`;
       .all<{ id: string; what: string; target: string; environment: string; performed_at: string; result: string; duration_minutes: number | null; data_loss_minutes: number | null; evidence: string; performed_by_name: string; verified_by_name: string | null }>()).results;
     const staff = (await emp.listStaff(ctx.db)).filter((s) => !s.disabled_at).map((s) => ({ value: s.id, label: s.display_name }));
     const lastPass = drills.find((d) => d.result === "passed");
+    const targets = recoveryTargets(ctx.settings);
+    const judge = (observedMin: number | null, targetH: number | null, name: string) =>
+      targetH === null ? `${name} target not set` : observedMin === null ? `${name} not measured in the last passed drill` : observedMin <= targetH * 60 ? `${name} ${observedMin} min within the ${targetH} h target` : `${name} ${observedMin} min EXCEEDS the ${targetH} h target`;
+    const drillVerdict = !lastPass ? "No passed restore drill is recorded, so recovery against any target is unproven." :
+      `Last passed drill (${formatDate(lastPass.performed_at)}): ${judge(lastPass.duration_minutes, targets.rtoHours, "restore time")}; ${judge(lastPass.data_loss_minutes, targets.rpoHours, "data-loss window")}.`;
     const body = html`${pageHead("Backups & recovery", undefined, "Platform")}
 ${alert("warn", html`<strong>No automated backups exist yet.</strong> Cloudflare D1 Time Travel and R2 object versioning are not provisioned because no Cloudflare account is connected (BLK-003). Until then, record every manual export and every restore drill here with evidence. Procedures: <code>docs/BACKUP-RECOVERY.md</code>.`)}
-<div class="kpis grid grid-4">${kpi("Backups recorded", backups.length)}${kpi("Restore drills", drills.length)}${kpi("Last passed drill", lastPass ? formatDate(lastPass.performed_at) : "Never")}${kpi("Proposed targets", "RPO 24 h · RTO 4 h", "Pending Founder approval")}</div>
+<div class="kpis grid grid-4">${kpi("Backups recorded", backups.length)}${kpi("Restore drills", drills.length)}${kpi("Last passed drill", lastPass ? formatDate(lastPass.performed_at) : "Never")}${kpi("Recovery targets", targets.rpoHours === null && targets.rtoHours === null ? "Not set" : `RPO ${targets.rpoHours ?? "—"} h · RTO ${targets.rtoHours ?? "—"} h`, "From Business settings")}</div>
+<p class="muted">${drillVerdict}</p>
 ${formErrors(errors)}
 <section class="section--tight"><h2>Backup register</h2>${table(backups, [
   { header: "Taken", cell: (b) => formatDateTime(b.taken_at) },
@@ -794,6 +850,12 @@ ${textarea({ name: "evidence", label: "Evidence (row counts compared, checks run
     if (v["business.address"] && v["business.address"] !== (ctx.settings["business.address"] ?? "") && !v.address_confirm) e.push("Confirm the address is a registered business address and not a residence");
     if (v["contact.email"] && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v["contact.email"])) e.push("Enter a valid contact email");
     if (v["contact.phone"] && !/^[+0-9 ().-]{7,40}$/.test(v["contact.phone"])) e.push("Enter a valid phone number");
+    if (v["voice.phone_number"] && !/^[+0-9 ().-]{7,40}$/.test(v["voice.phone_number"])) e.push("Enter a valid receptionist phone number");
+    for (const [k, name] of [["backup.rpo_target_hours", "Recovery point objective"], ["backup.rto_target_hours", "Recovery time objective"]] as const) {
+      if (v[k] && (!/^\d+$/.test(v[k]) || Number(v[k]) < 1 || Number(v[k]) > 720)) e.push(`${name} must be a whole number of hours between 1 and 720`);
+    }
+    if (v["contact.email"].length > 254) e.push("Contact email is too long");
+    if (/<[^>]*>/.test(v["business.legal_name"] + v["business.address"])) e.push("Business name and address must be plain text");
     if (v.staffed_hours.length < 3 || v.staffed_hours.length > 160) e.push("Enter staffed support hours");
     if (/24\s*\/\s*7|24 hours|around the clock/i.test(v.staffed_hours)) e.push("Staffed hours must not claim 24/7 human coverage unless it is actually staffed — describe the real staffed hours");
     const target = Number(v.first_response_target_hours);
@@ -819,13 +881,29 @@ ${textarea({ name: "evidence", label: "Evidence (row counts compared, checks run
   });
 
   // ── AI operations ──
+  const AI_STATUSES = ["queued", "running", "succeeded", "failed", "awaiting_approval", "approved", "rejected"];
+  const aiQuery = (ctx: AppContext) => {
+    const status = q(ctx, "status"), workflow = q(ctx, "workflow");
+    const where: string[] = [], binds: unknown[] = [];
+    if (AI_STATUSES.includes(status)) { where.push("j.status = ?"); binds.push(status); }
+    if ((AI_WORKFLOWS as readonly string[]).includes(workflow)) { where.push("j.workflow = ?"); binds.push(workflow); }
+    return { where, binds, status, workflow };
+  };
+  r.get("/staff/ai/export.csv", async (ctx) => {
+    requireStaff(ctx, "ai.manage");
+    const { where, binds, status, workflow } = aiQuery(ctx);
+    const rows = (await ctx.db.prepare(`SELECT j.id, j.workflow, j.provider, j.model, j.status, j.input_ref, j.cost_microusd, j.error, j.retries, j.retry_of, j.created_at, j.updated_at, u.display_name AS approver
+        FROM ai_jobs j LEFT JOIN users u ON u.id = j.approved_by ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY j.created_at DESC LIMIT 50000`).bind(...binds)
+      .all<{ id: string; workflow: string; provider: string; model: string; status: string; input_ref: string; cost_microusd: number | null; error: string | null; retries: number; retry_of: string | null; created_at: string; updated_at: string; approver: string | null }>()).results;
+    await audit(ctx.db, { actorUserId: ctx.user!.id, action: "ai.jobs_exported", subjectType: "ai_job", details: { count: rows.length, status, workflow } });
+    const csv = toCsv(["job_id", "created_at", "updated_at", "workflow", "provider", "model", "status", "input_ref", "cost_usd", "cost_known", "retries", "retry_of", "decided_by", "error"],
+      rows.map((j) => [j.id, j.created_at, j.updated_at, j.workflow, j.provider, j.model, j.status, j.input_ref, j.cost_microusd === null ? "" : (j.cost_microusd / 1e6).toFixed(6), j.cost_microusd === null ? "unknown" : "known", j.retries, j.retry_of ?? "", j.approver ?? "", j.error ?? ""]));
+    return download(ctx, csv, `crestmont-ai-jobs-${nowIso().slice(0, 10)}.csv`, "text/csv; charset=utf-8");
+  });
   r.get("/staff/ai", async (ctx) => {
     requireStaff(ctx, "ai.manage");
-    const status = q(ctx, "status"), workflow = q(ctx, "workflow");
-    const STATUSES = ["queued", "running", "succeeded", "failed", "awaiting_approval", "approved", "rejected"];
-    const where: string[] = [], binds: unknown[] = [];
-    if (STATUSES.includes(status)) { where.push("j.status = ?"); binds.push(status); }
-    if ((AI_WORKFLOWS as readonly string[]).includes(workflow)) { where.push("j.workflow = ?"); binds.push(workflow); }
+    const { where, binds, status, workflow } = aiQuery(ctx);
+    const STATUSES = AI_STATUSES;
     const { page, limit, offset } = pageParam(ctx);
     const jobs = (await ctx.db.prepare(`SELECT j.id, j.workflow, j.provider, j.model, j.status, j.input_ref, j.cost_microusd, j.error, j.retries, j.retry_of, j.created_at, u.display_name AS approver, (SELECT 1 FROM ai_job_inputs i WHERE i.job_id = j.id) AS retryable
         FROM ai_jobs j LEFT JOIN users u ON u.id = j.approved_by ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY j.created_at DESC LIMIT ? OFFSET ?`).bind(...binds, limit + 1, offset)
@@ -833,7 +911,8 @@ ${textarea({ name: "evidence", label: "Evidence (row counts compared, checks run
     const totals = await ctx.db.prepare(`SELECT COUNT(*) AS n, SUM(CASE WHEN status='awaiting_approval' THEN 1 ELSE 0 END) AS waiting, SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
         SUM(COALESCE(cost_microusd,0)) AS known_cost, SUM(CASE WHEN cost_microusd IS NULL AND status NOT IN ('failed','queued','running') THEN 1 ELSE 0 END) AS unknown_cost FROM ai_jobs`).first<{ n: number; waiting: number | null; failed: number | null; known_cost: number | null; unknown_cost: number | null }>();
     const configured = !!ctx.env.ANTHROPIC_API_KEY;
-    const body = html`${pageHead("AI operations", undefined, "AI")}
+    const aiExportQs = new URLSearchParams(ctx.url.search); aiExportQs.delete("page");
+    const body = html`${pageHead("AI operations", linkButton("Export CSV", `/staff/ai/export.csv${aiExportQs.toString() ? `?${aiExportQs}` : ""}`, "ghost", "sm"), "AI")}
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Provider</h2>
 <p>${configured ? badge("configured_unverified", "API key present") : badge("not_configured", "Not configured")}</p>
 <p class="muted">${configured ? html`Anthropic Messages API · model <code>${ctx.env.AI_MODEL ?? "claude-sonnet-5-5 (default)"}</code>. The key is never displayed. Verify it on the <a href="/staff/integrations">integrations page</a>.` : "ANTHROPIC_API_KEY is not set. Every AI job fails with not_configured; no text is generated or simulated."}</p></section>

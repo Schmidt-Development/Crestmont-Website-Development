@@ -2,7 +2,9 @@
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatDateTime, label, type SafeHtml } from "../lib/html.ts";
-import { HttpError, htmlResponse, redirect, str } from "../app/http.ts";
+import { HttpError, download, htmlResponse, redirect, str } from "../app/http.ts";
+import { toCsv } from "../services/finance.ts";
+import { audit } from "../services/security.ts";
 import { requireCustomerOrg, requireStaff } from "../app/app.ts";
 import { appLayout } from "../ui/layout.ts";
 import {
@@ -204,10 +206,24 @@ ${pagination(ctx, page, rows.length > limit)}`);
   });
 
   // ───────── Staff queue ─────────
+  const queueFilters = (ctx: AppContext): sup.QueueFilters => {
+    const sp = ctx.url.searchParams;
+    return { status: sp.get("status") ?? "active", priority: sp.get("priority") ?? "", category: sp.get("category") ?? "", assignee: sp.get("assignee") ?? "", q: (sp.get("q") ?? "").trim(), breached: sp.get("breached") === "1" };
+  };
+  r.get("/staff/support/export.csv", async (ctx) => {
+    requireStaff(ctx, "support.access");
+    const filters = queueFilters(ctx);
+    const rows = (await sup.listQueue(ctx.db, filters, ctx.user!.id, 20000, 0)).slice(0, 20000);
+    const s = await sup.getSupportSettings(ctx);
+    const now = ctx.now();
+    await audit(ctx.db, { actorUserId: ctx.user!.id, action: "ticket.exported", subjectType: "ticket", details: { count: rows.length, filters } });
+    const csv = toCsv(["ticket_id", "opened", "customer", "subject", "category", "priority", "status", "assignee", "first_response_at", "first_response_hours", "response_target_hours", "response_state", "resolved_at"],
+      rows.map((t) => { const rt = sup.responseTiming(t, s.firstResponseTargetHours, now); return [t.id, t.created_at, t.organization_name, t.subject, t.category, t.priority, t.status, t.assignee_name ?? "", t.first_response_at ?? "", rt.firstResponseHours ?? "", rt.targetHours ?? "", rt.state, t.resolved_at ?? ""]; }));
+    return download(ctx, csv, `crestmont-tickets-${now.toISOString().slice(0, 10)}.csv`, "text/csv; charset=utf-8");
+  });
   r.get("/staff/support", async (ctx) => {
     requireStaff(ctx, "support.access");
-    const sp = ctx.url.searchParams;
-    const filters: sup.QueueFilters = { status: sp.get("status") ?? "active", priority: sp.get("priority") ?? "", category: sp.get("category") ?? "", assignee: sp.get("assignee") ?? "", q: (sp.get("q") ?? "").trim(), breached: sp.get("breached") === "1" };
+    const filters = queueFilters(ctx);
     const { page, limit, offset } = pageParam(ctx);
     const rows = await sup.listQueue(ctx.db, filters, ctx.user!.id, limit, offset);
     const counts = await sup.queueCounts(ctx.db);
@@ -216,7 +232,8 @@ ${pagination(ctx, page, rows.length > limit)}`);
     const settings = await sup.getSupportSettings(ctx);
     const agents = await sup.supportAgents(ctx.db);
     const now = ctx.now();
-    return staffPage(ctx, "Support queue", html`${pageHead("Support queue", html`${can(ctx.actor!, "ticket.manage") ? actionForm(ctx, "/staff/support/sweep", "Run escalation sweep") : ""}${can(ctx.actor!, "settings.operational") ? linkButton("Support settings", "/staff/support/settings", "ghost", "sm") : ""}`, "Support")}
+    const exportQs = new URLSearchParams(ctx.url.search); exportQs.delete("page");
+    return staffPage(ctx, "Support queue", html`${pageHead("Support queue", html`${linkButton("Export CSV", `/staff/support/export.csv${exportQs.toString() ? `?${exportQs}` : ""}`, "ghost", "sm")}${can(ctx.actor!, "ticket.manage") ? actionForm(ctx, "/staff/support/sweep", "Run escalation sweep") : ""}${can(ctx.actor!, "settings.operational") ? linkButton("Support settings", "/staff/support/settings", "ghost", "sm") : ""}`, "Support")}
 <div class="kpis grid grid-4">${kpi("Open", n("open"))}${kpi("Awaiting staff", n("pending_staff"))}${kpi("Escalated", n("escalated"))}${kpi("Overdue first response", breached, settings.firstResponseTargetHours ? `Target ${settings.firstResponseTargetHours} h` : "No target configured")}</div>
 ${settings.staffedHours ? html`<p class="faint">Published staffed hours: ${settings.staffedHours}. Intake is 24/7.</p>` : alert("warn", html`Staffed support hours are not configured, so customers are told hours are not yet published. ${can(ctx.actor!, "settings.operational") ? html`<a href="/staff/support/settings">Set them</a>.` : ""}`)}
 <form class="filters row" method="get" action="/staff/support">

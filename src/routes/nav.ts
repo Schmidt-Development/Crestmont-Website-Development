@@ -23,6 +23,7 @@ export function staffNav(_ctx: AppContext): NavGroup[] {
     { label: "Work", items: [
       { href: "/staff", label: "My work" },
       { href: "/staff/notifications", label: "Notifications" },
+      { href: "/staff/reports/operations", label: "Operational reports" },
       { href: "/staff/owner", label: "Executive overview", perm: "finance.read" },
     ] },
     { label: "Launch readiness", items: [
