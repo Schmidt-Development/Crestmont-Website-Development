@@ -356,3 +356,19 @@ test("[AIB-009] owner dashboard and JSON contract render real records and honest
   const o2 = await createStaff(none.db, "owner", "o2@crestmont.test");
   assert.match(await (await (await none.client().login(o2.email, undefined, o2.secret)).get("/staff/builds")).text(), /Execution unavailable/);
 });
+
+test("[AIB-004] protocol v1.1: a runner on another host fetches the job's own checkpoint; a shutdown release requeues without spending an attempt", async () => {
+  const t = await app();
+  const { job } = await queuedProject(t);
+  const c = (await runner(t, "claim", { runnerId: "host-a" })).json.job;
+  const ck = await runner(t, "checkpoint", { jobId: c.id, leaseToken: c.leaseToken, sessionId: "sess-x", archiveBase64: Buffer.from("session transcript archive").toString("base64") });
+  const rel = await runner(t, "complete", { jobId: c.id, leaseToken: c.leaseToken, outcome: "released", runCostUsd: 0.3, error: "SIGTERM" });
+  assert.equal(rel.json.state, "queued");
+  assert.equal((await B.getJob(t.db, job.id))!.attempts, 0, "a release does not count as an attempt");
+  const c2 = (await runner(t, "claim", { runnerId: "host-b" })).json.job;
+  assert.equal(c2.resume.checkpointKey, ck.json.checkpointKey);
+  const got = await runner(t, "checkpoint/fetch", { jobId: c2.id, leaseToken: c2.leaseToken, checkpointKey: ck.json.checkpointKey });
+  assert.equal(Buffer.from(got.json.archiveBase64, "base64").toString(), "session transcript archive");
+  assert.equal((await runner(t, "checkpoint/fetch", { jobId: c2.id, leaseToken: c2.leaseToken, checkpointKey: "builds/other-job/ckpt-1.tgz" })).status, 404, "only the job's own checkpoint");
+  assert.equal((await runner(t, "checkpoint/fetch", { jobId: c2.id, leaseToken: c.leaseToken, checkpointKey: ck.json.checkpointKey })).json.error, "lease_lost");
+});

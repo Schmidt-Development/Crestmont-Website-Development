@@ -12,8 +12,9 @@ export const AI_BUILDS: Record<string, ImplementationRecord> = {
   "AIB-007": { status: "implemented", owner: "engineering", location: `${CP}: HMAC-signed runner API (BUILD_RUNNER_SECRET; 503 when unset), job-scoped lease tokens, runner file access limited to the job's own organization/project, sanitized activity, customer summary without internals; security matrix + tests/builds.test.ts` },
   "AIB-008": { status: "implemented", owner: "engineering", location: `${CP}: buildBrief/snapshotBrief (immutable build_briefs with SHA-256, new version only on change, job keeps its snapshot), customer text isolated under customerData with fixed BRIEF_RULES (src/domain/builds.ts)` },
   "AIB-009": { status: "implemented", owner: "engineering", location: "/staff/builds + /staff/builds/:id (src/routes/builds.ts), GET /api/builds and /api/builds/:id JSON, GET /portal/projects/:id/build-status; docs/ai-builds/FRONTEND-CONTRACT.md" },
-  "AIB-010": { status: "in_progress", owner: "engineering", location: "runner/ (separate Node 22 process; docs/ai-builds/RUNNER-SETUP.md)",
-    missing: "verified only with a fake Agent SDK and a fake control plane (mock tests); never run with the real SDK, a real model, real repositories or preview deploys" },
+  "AIB-010": { status: "in_progress", owner: "engineering",
+    location: "runner/ (Node 22, @anthropic-ai/claude-agent-sdk 0.3.310 pinned; isolated per-job workspace/home/config dir, allowlisted agent env, restrictive .claude/settings.json + sandbox, plan/build/verify phases resuming one session, server-driven stop via interrupt(), checkpoints = git bundle + session transcripts, versioned brochure-v1 starter with acceptance checks, curated skill manifest with preflight, runner-only preview deploys, owner report); runner/test (42 mock tests, run in CI)",
+    missing: "verified only with a fake Agent SDK and a fake control plane (mock tests); the real SDK install, Docker image, bubblewrap sandbox in Docker, repository push and preview deploys have never run" },
   "AIB-011": { status: "in_progress", owner: "engineering", location: "docs/ai-builds/RUNNER-SETUP.md",
     missing: "needs runner infrastructure, an Anthropic API key with a spend limit, BUILD_RUNNER_SECRET on staging, scoped repository and preview credentials, and a Stripe test account (BLK-004) for the test payment" },
 };

@@ -121,7 +121,7 @@ export interface CheckpointRequest {
   archiveBase64?: string;
 }
 
-export type Outcome = "ready_for_review" | "needs_information" | "failed" | "stopped";
+export type Outcome = "ready_for_review" | "needs_information" | "failed" | "stopped" | "released";
 
 export interface CompleteRequest {
   outcome: Outcome;

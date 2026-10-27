@@ -34,6 +34,7 @@ const OUTCOME_TEXT: Record<Outcome, string> = {
   needs_information: "Needs information",
   failed: "Failed",
   stopped: "Stopped",
+  released: "Released by the runner (will resume)",
 };
 
 function list(items: string[], empty = "- None"): string {

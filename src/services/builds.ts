@@ -438,6 +438,20 @@ export async function checkpoint(db: Db, storage: StorageAdapter | null, b: Reco
   return { checkpointKey: key };
 }
 
+/** Protocol v1.1: a runner on another host fetches the job's latest checkpoint archive to resume the session. */
+export async function fetchCheckpoint(db: Db, storage: StorageAdapter | null, b: Record<string, unknown>) {
+  const job = await leased(db, b.jobId, b.leaseToken);
+  if (!job.checkpoint_key || b.checkpointKey !== job.checkpoint_key) throw new HttpError(404, "Checkpoint not found for this build");
+  if (!storage) throw new HttpError(409, "File storage is not configured");
+  const obj = await storage.get(job.checkpoint_key);
+  if (!obj) throw new HttpError(404, "Checkpoint archive missing");
+  const bytes = obj.body instanceof Uint8Array ? obj.body : new Uint8Array(await new Response(obj.body as BodyInit).arrayBuffer());
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  await event(db, job.id, "checkpoint", "Runner fetched the checkpoint archive to resume", { kind: "runner" });
+  return { archiveBase64: btoa(bin) };
+}
+
 export async function reportRequirements(db: Db, b: Record<string, unknown>) {
   const job = await leased(db, b.jobId, b.leaseToken);
   let n = 0;
@@ -499,6 +513,11 @@ export async function completeJob(db: Db, b: Record<string, unknown>, notify?: (
     to = sr === "paused" ? "paused" : sr === "budget" || sr === "runtime" ? "budget_paused" : sr === "canceled" || sr === "ineligible" ? "canceled" : "failed";
     reason = sr === "budget" ? "Stopped at a spending limit; partial work preserved" : sr === "runtime" ? "Stopped at the runtime or turn limit; partial work preserved"
       : sr === "paused" ? "Paused by the owner; partial work preserved" : sr === "ineligible" ? "Stopped: the order is no longer eligible" : sr === "canceled" ? "Canceled by the owner" : `Runner stopped without a server request${err ? `: ${err}` : ""}`;
+  } else if (outcome === "released") {
+    // Runner shutdown: work is checkpointed; requeue without spending an attempt (protocol v1.1).
+    to = job.cancel_requested_at ? "canceled" : "queued";
+    reason = job.cancel_requested_at ? "Canceled while the runner was shutting down" : `Runner released the build (shutdown)${err ? `: ${err}` : ""}; it resumes from its checkpoint`;
+    extra = to === "queued" ? { attempts: Math.max(0, job.attempts - 1), finished_at: null } : {};
   } else if (outcome === "failed") {
     if (job.attempts < job.max_attempts && !job.cancel_requested_at) {
       const backoffMin = Math.min(60, 2 ** job.attempts);

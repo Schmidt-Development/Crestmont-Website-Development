@@ -394,7 +394,8 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         guard();
       }
       if (serverStopReason) return await finish("stopped", { stopReason: `control plane requested stop (${serverStopReason})`, checks });
-      if (reason === "local:shutdown") return await finish("failed", { error: "Runner shutdown before the build finished; work was checkpointed for a retry.", stopReason: reason, checks });
+      // Protocol v1.1: "released" requeues without spending an attempt.
+      if (reason === "local:shutdown") return await finish("released", { error: "Runner shutdown before the build finished; work was checkpointed.", stopReason: reason, checks });
       return await finish("failed", { error: `Local safety limit reached (${reason.replace("local:", "")}) before the build finished; the control plane did not request a stop.`, stopReason: reason, checks });
     }
     if (st.agentError) {

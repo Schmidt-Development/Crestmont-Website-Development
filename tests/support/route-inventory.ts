@@ -98,6 +98,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/builds/runner/heartbeat": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/checkpoint": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/requirements": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/checkpoint/fetch": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/files": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/complete": signed("x-crestmont-runner-signature"),
   "GET /api/builds": { access: { kind: "staff", roles: rolesWith("builds.read") }, api: true },
