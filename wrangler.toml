@@ -11,6 +11,10 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 ENVIRONMENT = "development"
 
+# Must match SCHEDULE in src/app/scheduled.ts
+[triggers]
+crons = ["*/15 * * * *", "17 11 * * *"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "crestmont-dev"
