@@ -173,11 +173,12 @@ jobs:
           EVIDENCE_SUFFIX: staging-e2e
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
+          AXE_PATH: ${{ github.workspace }}/.pw/node_modules/axe-core/axe.min.js
         run: |
-          npm install --prefix .pw --no-save --no-audit --no-fund playwright@1.48.2 > /dev/null
+          npm install --prefix .pw --no-save --no-audit --no-fund playwright@1.48.2 axe-core@4.10.2 > /dev/null
           .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
           export E2E_PREVIEW_PASSWORD=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("access/private.json","utf8")).previewPassword)')
-          node --no-warnings --test --test-concurrency=1 --test-reporter=./scripts/evidence-reporter.mjs tests/e2e/staging.e2e.ts tests/e2e/staging-journeys.e2e.ts
+          node --no-warnings --test --test-concurrency=1 --test-reporter=./scripts/evidence-reporter.mjs tests/e2e/staging.e2e.ts tests/e2e/staging-quality.e2e.ts tests/e2e/staging-journeys.e2e.ts
 
       - name: Record evidence and deployment
         if: always() && steps.deploy.outcome == 'success'

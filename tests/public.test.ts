@@ -5,6 +5,7 @@ import { findProhibitedClaims, PACKAGES, MAINTENANCE_PLANS, APPROVED_SERVICES, p
 import { SERVICES, servicePath } from "../src/content/services.ts";
 import { PUBLIC_PATHS } from "../src/routes/public.ts";
 import { LEGAL_SLUGS } from "../src/content/legal.ts";
+import { FABRICATION } from "./support/content-rules.ts";
 import { newId, nowIso } from "../src/lib/db.ts";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 1, 2, 3, 4]);
@@ -12,11 +13,6 @@ const pngFile = (name = "capture.png") => new File([PNG], name, { type: "image/p
 
 const text = (h: string) => h.replace(/<script[\s\S]*?<\/script>/g, " ").replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, " ");
 const hrefs = (h: string) => [...h.matchAll(/href="([^"]+)"/g)].map((m) => m[1].replace(/&amp;/g, "&"));
-
-/** Truthfulness checks beyond the catalogue's PROHIBITED_CLAIMS (§12: no fabricated counts, awards, ratings, history, scarcity). */
-const FABRICATION = [/\b\d[\d,]*\+?\s+(happy |satisfied )?(clients|customers|businesses served|projects delivered)\b/i, /award[- ]winning/i, /\b\d+\+?\s+years? (of experience|in business)\b/i,
-  /★|\b\d(\.\d)?\s*(\/\s*5|stars?)\b/i, /only \d+ (spots?|slots?) (left|remaining)/i, /offer ends|limited time|countdown/i, /(?<!\b(not|never|no|cannot) )\bguarantee(d|s)?\b/i,
-  /24\/7 (human|live|staffed)/i, /attorney[- ](approved|reviewed)(?! )/i];
 
 async function staffClient(app: Awaited<ReturnType<typeof createTestApp>>, role: Parameters<typeof createStaff>[1], email?: string) {
   const s = await createStaff(app.db, role, email);
