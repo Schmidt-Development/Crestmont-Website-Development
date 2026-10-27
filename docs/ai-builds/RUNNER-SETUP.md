@@ -40,7 +40,9 @@ Generate one secret and give it to both sides:
 ```sh
 openssl rand -hex 32 > /srv/crestmont/secrets/build_runner_secret
 chmod 600 /srv/crestmont/secrets/build_runner_secret
-npx wrangler secret put BUILD_RUNNER_SECRET     # in the platform repo; paste the same value
+# Easiest: add it as the GitHub repository secret BUILD_RUNNER_SECRET; the next "Deploy staging" run installs it on
+# the staging Worker. Or directly, from the platform repo:
+npx wrangler secret put BUILD_RUNNER_SECRET --env staging     # paste the same value
 ```
 
 Without the Worker secret every runner endpoint answers `503 Build runner not configured`.

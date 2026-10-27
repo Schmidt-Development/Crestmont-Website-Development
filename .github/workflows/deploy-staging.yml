@@ -119,6 +119,13 @@ jobs:
           printf '%s' "$ev" | $WRANGLER secret put EVIDENCE_INGEST_SECRET --env staging > /dev/null
           echo "EVIDENCE_INGEST_SECRET=$ev" >> "$GITHUB_ENV"
 
+      - name: AI Builds runner secret (only when the Founder has provided one)
+        env:
+          RUNNER_SECRET: ${{ secrets.BUILD_RUNNER_SECRET }}
+        run: |
+          if [ -n "$RUNNER_SECRET" ]; then printf '%s' "$RUNNER_SECRET" | $WRANGLER secret put BUILD_RUNNER_SECRET --env staging > /dev/null && echo "BUILD_RUNNER_SECRET installed on staging."
+          else echo "BUILD_RUNNER_SECRET not provided: AI Builds execution stays unavailable on staging (builds wait in the queue)."; fi
+
       - name: Seed sample data and demo accounts (first run or on request)
         id: seed
         env:
