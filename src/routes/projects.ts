@@ -211,7 +211,9 @@ ${checkbox("internal", "Internal note — not visible to the customer")}<div cla
     const hasNext = view === "list" && rows.length > limit;
     if (hasNext) rows.length = limit;
     const pms = await staffUsers(ctx, ["project_manager", "owner"]);
-    const orgs = (await ctx.db.prepare(`SELECT DISTINCT o.id, o.name FROM organizations o JOIN projects p ON p.organization_id = o.id ORDER BY o.name`).all<{ id: string; name: string }>()).results;
+    // Customer filter options come only from projects this person may see (assigned-only staff do not learn other customers).
+    const vis = P.visibleProjectsSql(ctx.actor!, ctx.user!.id);
+    const orgs = (await ctx.db.prepare(`SELECT DISTINCT o.id, o.name FROM organizations o JOIN projects p ON p.organization_id = o.id WHERE ${vis.sql} ORDER BY o.name`).bind(...vis.binds).all<{ id: string; name: string }>()).results;
     const qs = (v: string) => { const u = new URLSearchParams(q); u.set("view", v); return `/staff/projects?${u}`; };
     const filters = html`<form method="get" action="/staff/projects" class="filters"><input type="hidden" name="view" value="${view}">
 ${select({ name: "status", label: "Status", options: [{ value: "all", label: "All incl. cancelled" }, ...PROJECT_STATUSES.map((s) => ({ value: s, label: label(s) }))], value: status, includeBlank: "Open (not cancelled)" })}
@@ -530,6 +532,8 @@ ${input({ name: "description", label: "Description", required: true, maxlength: 
   });
   r.post("/staff/revisions/:id/status", async (ctx, p) => {
     requireStaff(ctx, "delivery.access");
+    // Authorize before validating input (record-level visibility is checked again in updateRevisionStatus).
+    if (!can(ctx.actor!, "project.coordinate") && !can(ctx.actor!, "task.update_assigned")) throw new HttpError(403, "You cannot update revisions.");
     const f = await ctx.form();
     const rev = await ctx.db.prepare(`SELECT project_id FROM revisions WHERE id = ?`).bind(p.id).first<{ project_id: string }>();
     if (!rev) throw new HttpError(404, "Revision not found");

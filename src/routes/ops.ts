@@ -318,6 +318,7 @@ export function register(r: Router): void {
   r.get("/staff/readiness/founder-report.md", async (ctx) => {
     requireStaff(ctx, "readiness.read");
     const fr = await buildFounderReport(ctx);
+    await audit(ctx.db, { actorUserId: ctx.user!.id, action: "readiness.exported", subjectType: "readiness_report", details: { format: "founder_report", evidenceSetSha256: fr.evidenceSetSha256 } });
     return download(ctx, fr.markdown, `crestmont-final-status-${fr.generatedAt.slice(0, 10)}.md`, "text/markdown; charset=utf-8");
   });
 }

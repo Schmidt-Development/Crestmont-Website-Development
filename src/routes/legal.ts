@@ -209,11 +209,12 @@ export function register(r: Router): void {
     requireStaff(ctx);
     const f = await ctx.form();
     const decision = str(f, "decision");
-    if (decision !== "approved" && decision !== "rejected") throw new HttpError(422, "Choose approve or reject.");
+    // Authorize before validating input: non-Founders get 403 (and an audit entry) whatever they send.
     if (!pricing.canDecide(ctx.actor!)) {
-      await audit(ctx.db, { actorUserId: ctx.user!.id, action: "pricing.change_decision_denied", subjectType: "price_change_request", subjectId: p.id, ip: ctx.ip, details: { decision } });
+      await audit(ctx.db, { actorUserId: ctx.user!.id, action: "pricing.change_decision_denied", subjectType: "price_change_request", subjectId: p.id, ip: ctx.ip, details: { decision: decision.slice(0, 40) } });
       throw new HttpError(403, "Only the Founder (Owner with pricing.change) can approve or reject price changes.");
     }
+    if (decision !== "approved" && decision !== "rejected") throw new HttpError(422, "Choose approve or reject.");
     const res = await pricing.decidePriceChange(ctx.db, ctx.actor!, p.id, decision, str(f, "note"), ctx.now());
     return redirect(ctx, "/staff/pricing", { kind: "success", text: decision === "approved" ? `Approved. The new price takes effect ${formatDateTime(res.effectiveAt)}.` : "Price change rejected." });
   });

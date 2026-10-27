@@ -50,8 +50,10 @@ function filterSql(actor: Actor, f: LeadFilter): { where: string; binds: unknown
   if (f.source && (LEAD_SOURCES as readonly string[]).includes(f.source)) { conds.push(`l.source = ?`); binds.push(f.source); }
   if (f.owner === "unassigned") conds.push(`l.owner_user_id IS NULL`);
   else if (f.owner) { conds.push(`l.owner_user_id = ?`); binds.push(f.owner); }
-  if (f.from && /^\d{4}-\d{2}-\d{2}$/.test(f.from)) { conds.push(`l.created_at >= ?`); binds.push(`${f.from}T00:00:00.000Z`); }
-  if (f.to && /^\d{4}-\d{2}-\d{2}$/.test(f.to)) { conds.push(`l.created_at < ?`); binds.push(new Date(Date.parse(f.to) + 86400e3).toISOString()); }
+  // Only real calendar days are applied (2026-13-45 matches the pattern but is not a date).
+  const isDay = (s: string | undefined): s is string => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(s)) && new Date(Date.parse(s)).toISOString().startsWith(s);
+  if (isDay(f.from)) { conds.push(`l.created_at >= ?`); binds.push(`${f.from}T00:00:00.000Z`); }
+  if (isDay(f.to)) { conds.push(`l.created_at < ?`); binds.push(new Date(Date.parse(f.to) + 86400e3).toISOString()); }
   return { where: conds.join(" AND "), binds };
 }
 

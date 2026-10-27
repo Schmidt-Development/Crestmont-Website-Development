@@ -244,6 +244,7 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgs: 
 /** Handles one verified webhook event. The caller has already checked the signature. */
 export async function handleVoiceEvent(db: Db, rawBody: string): Promise<VoiceResult> {
   const json = JSON.parse(rawBody) as Record<string, unknown>;
+  if (!json || typeof json !== "object" || Array.isArray(json)) throw new ValidationError(["Event body must be a JSON object"]);
   const base = parse(envelope, { ...json, test: json.test === undefined ? undefined : String(json.test) });
   const isTest = base.test === "true";
   const consent = json.recording_consent === true;

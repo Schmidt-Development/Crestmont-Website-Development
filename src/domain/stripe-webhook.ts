@@ -28,6 +28,14 @@ export interface StripeEvent {
   data: { object: { id: string; [k: string]: unknown } };
 }
 
+/** Shape check for a verified event body before it is stored or processed (SEC-001). */
+export function isStripeEventEnvelope(v: unknown): v is StripeEvent {
+  const e = v as Partial<StripeEvent> | null;
+  const obj = e && typeof e === "object" && !Array.isArray(e) ? e.data?.object : null;
+  return !!e && typeof e.id === "string" && e.id.length > 0 && e.id.length <= 255 && typeof e.type === "string" && e.type.length > 0 && e.type.length <= 255
+    && Number.isInteger(e.created) && !!obj && typeof obj === "object" && !Array.isArray(obj) && typeof obj.id === "string" && obj.id.length <= 255;
+}
+
 export type RecordOutcome = "new" | "duplicate";
 
 /** Stores the event exactly once. Duplicate deliveries are acknowledged without reprocessing. */

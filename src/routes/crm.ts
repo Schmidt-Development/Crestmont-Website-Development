@@ -569,6 +569,8 @@ export function register(r: Router): void {
   r.get("/staff/crm/duplicates", duplicatesPage);
   r.post("/staff/crm/duplicates/dismiss", async (ctx) => {
     requireStaff(ctx, "crm.access");
+    // Authorize before validating input (record-level write checks follow in dismissPair).
+    if (!can(ctx.actor!, "lead.write_all") && !can(ctx.actor!, "lead.write_assigned")) throw new HttpError(403, "You cannot edit leads.");
     const f = await ctx.form();
     const back = safeBack(str(f, "back"), "/staff/crm/duplicates");
     try { await dedupe.dismissPair(ctx.db, ctx.actor!, str(f, "a"), str(f, "b"), { ip: ctx.ip }); } catch (e) {
@@ -579,6 +581,8 @@ export function register(r: Router): void {
   });
   r.post("/staff/crm/leads/:id/merge", async (ctx, p) => {
     requireStaff(ctx, "crm.access");
+    // Authorize before validating input (record-level write checks follow in mergeLeads).
+    if (!can(ctx.actor!, "lead.write_all") && !can(ctx.actor!, "lead.write_assigned")) throw new HttpError(403, "You cannot edit leads.");
     const f = await ctx.form();
     const into = str(f, "into");
     try {
@@ -594,6 +598,8 @@ export function register(r: Router): void {
   r.post("/staff/crm/leads/:id/stage", async (ctx, p) => {
     requireStaff(ctx, "crm.access");
     const current = await crm.getLead(ctx.db, ctx.actor!, p.id);
+    // Authorize before validating input: callers who cannot write this lead get 403 whatever they send.
+    if (!can(ctx.actor!, "lead.write_all") && !(can(ctx.actor!, "lead.write_assigned") && current.owner_user_id === ctx.actor!.userId)) throw new HttpError(403, "This lead is not assigned to you.");
     if (current.merged_into_lead_id) throw new HttpError(409, "This lead was merged into another lead; change the surviving lead instead.");
     const f = await ctx.form();
     const to = str(f, "to") as LeadStage;

@@ -248,6 +248,7 @@ export async function changePassword(db: Db, userId: string, current: string, ne
   const problems = passwordProblems(next, u.email);
   if (problems.length) throw new AuthError(problems.join(". "));
   await db.prepare(`UPDATE users SET password_hash = ? WHERE id = ?`).bind(await hashPassword(next), userId).run();
+  await audit(db, { actorUserId: userId, action: "user.password_changed", subjectType: "user", subjectId: userId });
   await revokeAllSessions(db, userId, keepSessionId, userId);
 }
 

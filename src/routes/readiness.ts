@@ -9,6 +9,7 @@ import { appLayout } from "../ui/layout.ts";
 import { csrf, input, textarea, select, button, linkButton, formErrors, alert, badge, table, emptyState, pageHead, dl, checkbox, actionForm, kpi, tabs, nl2br } from "../ui/components.ts";
 import { staffNav } from "./nav.ts";
 import { can, isOwner } from "../domain/authz.ts";
+import { audit } from "../services/security.ts";
 import { requirementsCsv } from "../readiness/report.ts";
 import { ENVS, type Env as ReadyEnv, type Metric, type RequirementStatus } from "../readiness/engine.ts";
 import * as ra from "../services/readiness-admin.ts";
@@ -589,11 +590,13 @@ ${textarea({ name: "rollback_plan", label: "Rollback plan", value: v.rollback_pl
   r.get("/staff/readiness/export.csv", async (ctx) => {
     requireStaff(ctx, "readiness.read");
     const { report } = await ra.loadReport(ctx);
+    await audit(ctx.db, { actorUserId: ctx.user!.id, action: "readiness.exported", subjectType: "readiness_report", details: { format: "requirements_csv" } });
     return download(ctx, requirementsCsv(report), `crestmont-readiness-${report.generatedAt.slice(0, 10)}.csv`, "text/csv; charset=utf-8");
   });
   r.get("/staff/readiness/packet.json", async (ctx) => {
     requireStaff(ctx, "readiness.read");
     const p = await ra.evidencePacket(ctx);
+    await audit(ctx.db, { actorUserId: ctx.user!.id, action: "readiness.exported", subjectType: "readiness_report", details: { format: "evidence_packet", sha256: p.sha256 } });
     const res = download(ctx, p.body, `crestmont-release-evidence-${p.generatedAt.slice(0, 19).replace(/:/g, "")}.json`, "application/json; charset=utf-8");
     res.headers.set("x-evidence-packet-sha256", p.sha256);
     return res;

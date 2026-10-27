@@ -1,5 +1,5 @@
 // Route registry. Each product area owns one module; order matters only for overlapping paths.
-import type { Router } from "../lib/router.ts";
+import { Router } from "../lib/router.ts";
 import * as api from "./api.ts";
 import * as auth from "./auth.ts";
 import * as publicSite from "./public.ts";
@@ -21,4 +21,16 @@ import * as portalMaintenance from "./portal-maintenance.ts";
 export function registerAll(r: Router): void {
   // reportsOps precedes finance so /staff/reports/operations is not captured by /staff/reports/:file.
   for (const m of [api, auth, publicSite, portal, crm, projects, support, reportsOps, finance, owner, readiness, platform, legal, hooks, ops, notifications, portalMaintenance]) m.register(r);
+}
+
+/** Every registered method + path pattern, in match order (route security matrix, AUTH-007/SEC-001). */
+export function listRoutes(): { method: string; pattern: string }[] {
+  return routeTable().list();
+}
+
+/** A fully registered router, for introspection (which pattern a concrete path resolves to). */
+export function routeTable(): Router {
+  const r = new Router();
+  registerAll(r);
+  return r;
 }
