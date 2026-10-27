@@ -171,7 +171,7 @@ export async function projectProfitability(db: Db, projectId?: string): Promise<
     .bind(...(projectId ? [projectId] : [])).all<{ id: string; name: string; status: string; org: string }>()).results;
   const out: ProjectProfit[] = [];
   for (const p of projects) {
-    const rev = await db.prepare(`SELECT COALESCE(SUM(amount_cents),0) AS c FROM invoices WHERE project_id = ? AND status = 'paid'`).bind(p.id).first<{ c: number }>();
+    const rev = await db.prepare(`SELECT COALESCE(SUM(COALESCE(subtotal_cents, amount_cents)),0) AS c FROM invoices WHERE project_id = ? AND status = 'paid'`).bind(p.id).first<{ c: number }>();
     const costs = (await db.prepare(`SELECT id, category, amount_cents, description, incurred_on FROM project_costs WHERE project_id = ?`).bind(p.id).all<{ id: string; category: string; amount_cents: number | null; description: string; incurred_on: string }>()).results;
     const time = (await db.prepare(`SELECT te.id, te.minutes, te.hourly_cost_cents, te.worked_on, t.title FROM time_entries te JOIN tasks t ON t.id = te.task_id WHERE t.project_id = ?`).bind(p.id)
       .all<{ id: string; minutes: number; hourly_cost_cents: number | null; worked_on: string; title: string }>()).results;

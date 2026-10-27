@@ -172,12 +172,8 @@ export async function sendQuote(ctx: AppContext, actor: Actor, quoteId: string) 
   ]);
   const url = `${ctx.baseUrl}/q/${token}`;
   await sendMail(ctx, {
-    template: "quote_sent", to: lead.contact_email, subject: "Your Crestmont proposal", heading: "Your website proposal is ready",
-    idempotencyKey: `quote:${current.id}:${token.slice(0, 12)}`,
-    paragraphs: [`Hello ${lead.contact_name}, thank you for considering Crestmont Website Development.`,
-      `Your proposal totals $${(current.total_cents / 100).toFixed(2)}${current.valid_until ? ` and is valid until ${current.valid_until}` : ""}. Review the scope, line items and payment schedule at the link below.`,
-      "To accept, you will sign in (or create an account) with this email address."],
-    cta: { label: "Review proposal", url },
+    template: "quote_sent", to: lead.contact_email, idempotencyKey: `quote:${current.id}:${token.slice(0, 12)}`,
+    data: { contactName: lead.contact_name, totalCents: current.total_cents, validUntil: current.valid_until ?? null, proposalUrl: url },
   });
   await audit(ctx.db, { actorUserId: actor.userId, action: "quote.sent", subjectType: "quote", subjectId: quoteId, details: { version: current.version } });
   let stageNote: string | null = null;

@@ -6,6 +6,8 @@ import type { Db } from "../lib/db.ts";
 import { HttpError } from "../app/http.ts";
 import { PdfDocument, PdfFlow, type Rgb } from "../lib/pdf.ts";
 import { businessIdentity, ensureReceiptNumber, loadReceipt, type ReceiptData } from "./receipts.ts";
+import { parseTaxDetail, taxStatement, taxLabel } from "./tax.ts";
+import type { TaxResult } from "../domain/tax.ts";
 
 const GOLD: Rgb = [0.788, 0.647, 0.298];
 const INK: Rgb = [0.07, 0.07, 0.07];
@@ -35,13 +37,17 @@ export interface InvoiceDocData {
   schedule: { id: string; milestone_kind: string | null; amount_cents: number; status: string }[];
   payments: { id: string; amount_cents: number; status: string; created_at: string; stripe_payment_intent_id: string | null; receipt_number: string; refunded_cents: number }[];
   paidCents: number; refundedCents: number; balanceCents: number;
+  /** LEGAL-005 tax snapshot fixed when the invoice was issued; null = issued without tax configuration. */
+  tax: TaxResult | null;
 }
 
 export async function loadInvoiceDoc(db: Db, invoiceId: string, organizationId: string | null): Promise<InvoiceDocData> {
-  const invoice = await db.prepare(`SELECT id, organization_id, order_id, project_id, milestone_kind, amount_cents, status, description, created_at, due_at, paid_at, stripe_invoice_id, stripe_invoice_number, stripe_checkout_session_id
-      FROM invoices WHERE id = ?${organizationId ? " AND organization_id = ?" : ""}`).bind(...(organizationId ? [invoiceId, organizationId] : [invoiceId])).first<InvoiceDocData["invoice"]>();
+  const invoice = await db.prepare(`SELECT id, organization_id, order_id, project_id, milestone_kind, amount_cents, status, description, created_at, due_at, paid_at, stripe_invoice_id, stripe_invoice_number, stripe_checkout_session_id, tax_detail_json
+      FROM invoices WHERE id = ?${organizationId ? " AND organization_id = ?" : ""}`).bind(...(organizationId ? [invoiceId, organizationId] : [invoiceId])).first<InvoiceDocData["invoice"] & { tax_detail_json?: string | null }>();
   // Customers never see drafts (same rule as the billing page).
   if (!invoice || (organizationId && invoice.status === "draft")) throw new HttpError(404, "Invoice not found.");
+  const tax = parseTaxDetail(invoice.tax_detail_json);
+  delete invoice.tax_detail_json;
   const org = invoice.organization_id;
   const organization = (await db.prepare(`SELECT id, name FROM organizations WHERE id = ?`).bind(org).first<{ id: string; name: string }>())!;
   const project = invoice.project_id ? await db.prepare(`SELECT id, name FROM projects WHERE id = ? AND organization_id = ?`).bind(invoice.project_id, org).first<{ id: string; name: string }>() : null;
@@ -49,11 +55,12 @@ export async function loadInvoiceDoc(db: Db, invoiceId: string, organizationId: 
 
   const label = invoice.description ?? MILESTONE_LABEL[invoice.milestone_kind ?? ""] ?? "Invoice";
   const lines: InvoiceLine[] = [];
+  const lineAmount = tax ? tax.subtotalCents : invoice.amount_cents;
   if (invoice.milestone_kind === "change_order") {
     const co = await db.prepare(`SELECT scope_text, price_cents FROM change_orders WHERE invoice_id = ?`).bind(invoice.id).first<{ scope_text: string; price_cents: number }>();
-    lines.push({ description: co ? `Change order: ${co.scope_text}` : label, amountCents: invoice.amount_cents });
+    lines.push({ description: co ? `Change order: ${co.scope_text}` : label, amountCents: lineAmount });
   } else {
-    lines.push({ description: label, amountCents: invoice.amount_cents });
+    lines.push({ description: label, amountCents: lineAmount });
   }
 
   let orderLines: InvoiceLine[] = [];
@@ -79,7 +86,7 @@ export async function loadInvoiceDoc(db: Db, invoiceId: string, organizationId: 
   const paidCents = payments.reduce((s, p) => s + p.amount_cents, 0);
   const refundedCents = payments.reduce((s, p) => s + p.refunded_cents, 0);
   const balanceCents = invoice.status === "void" || invoice.status === "uncollectible" ? 0 : Math.max(0, invoice.amount_cents - paidCents);
-  return { invoice, organization, project, order, lines, orderLines, schedule, payments, paidCents, refundedCents, balanceCents };
+  return { invoice, organization, project, order, lines, orderLines, schedule, payments, paidCents, refundedCents, balanceCents, tax };
 }
 
 function letterhead(flow: PdfFlow, settings: Record<string, string>, kindLabel: string, number: string) {
@@ -124,10 +131,19 @@ export function invoicePdf(d: InvoiceDocData, settings: Record<string, string>, 
     ...(d.invoice.stripe_invoice_id ? [["Stripe invoice", d.invoice.stripe_invoice_id] as [string, string]] : []),
   ]);
   flow.gap(14);
-  flow.table([{ header: "Description", width: flow.contentWidth - 110 }, { header: "Amount (USD)", width: 110, align: "right" }],
-    d.lines.map((l) => [l.description, usd(l.amountCents)]));
+  const totals: [string, string][] = [];
+  if (d.tax) {
+    // LEGAL-005: tax per line (taxable amount, tax, line total), then the subtotal and each jurisdiction's tax.
+    const t = d.tax;
+    flow.table([{ header: "Description", width: flow.contentWidth - 300 }, { header: "Amount", width: 100, align: "right" }, { header: "Sales tax", width: 100, align: "right" }, { header: "Line total", width: 100, align: "right" }],
+      d.lines.map((l, i) => { const tl = t.lines[i]; return [l.description, usd(l.amountCents), tl?.taxable ? usd(tl.taxCents) : "Not taxable", usd(l.amountCents + (tl?.taxCents ?? 0))]; }));
+    totals.push(["Subtotal", usd(t.subtotalCents)], ...t.byJurisdiction.map((j) => [taxLabel(j), usd(j.taxCents)] as [string, string]));
+  } else {
+    flow.table([{ header: "Description", width: flow.contentWidth - 110 }, { header: "Amount (USD)", width: 110, align: "right" }],
+      d.lines.map((l) => [l.description, usd(l.amountCents)]));
+  }
   flow.gap(6);
-  const totals: [string, string][] = [["Invoice total", usd(d.invoice.amount_cents)], ["Paid", usd(d.paidCents)]];
+  totals.push(["Invoice total", usd(d.invoice.amount_cents)], ["Paid", usd(d.paidCents)]);
   if (d.refundedCents) totals.push(["Refunded", usd(d.refundedCents)]);
   totals.push(["Balance due", usd(d.balanceCents)]);
   for (const [k, v] of totals) {
@@ -161,7 +177,7 @@ export function invoicePdf(d: InvoiceDocData, settings: Record<string, string>, 
   flow.paragraph(d.invoice.status === "open"
     ? "Pay online from the Billing page of your Crestmont customer portal. Payment is confirmed only when our payment processor (Stripe) notifies us."
     : "Thank you for your business.", { size: 9, color: MUTED });
-  flow.paragraph("This document summarizes Crestmont's records for this invoice. It is not a tax invoice; tax configuration is not yet finalized.", { size: 8, color: MUTED });
+  flow.paragraph(`This document summarizes Crestmont's records for this invoice. ${taxStatement(d.tax)}`, { size: 8, color: MUTED });
   footer(doc, `Invoice ${d.invoice.id} - generated ${generatedAt.toISOString().slice(0, 16).replace("T", " ")} UTC`);
   return doc.toBytes();
 }
@@ -186,6 +202,7 @@ export function receiptPdf(r: ReceiptData, settings: Record<string, string>, gen
   flow.gap(14);
   const desc = r.invoice ? `${r.invoice.description ?? MILESTONE_LABEL[r.invoice.milestone_kind ?? ""] ?? "Invoice"} (invoice ${r.invoice.id})` : "Payment (no invoice linked)";
   const rows: string[][] = [[desc, usd(r.payment.amount_cents)]];
+  if (r.tax) for (const j of r.tax.byJurisdiction) rows.push([`Includes ${taxLabel(j)}`, usd(j.taxCents)]);
   if (r.refundedCents) rows.push(["Refunded", `-${usd(r.refundedCents)}`]);
   flow.table([{ header: "Payment for", width: flow.contentWidth - 110 }, { header: "Amount (USD)", width: 110, align: "right" }], rows);
   flow.ensure(16); flow.y -= 16;
@@ -204,7 +221,7 @@ export function receiptPdf(r: ReceiptData, settings: Record<string, string>, gen
     ]);
     flow.gap(12);
   }
-  flow.paragraph("This receipt confirms a payment recorded from a Stripe payment confirmation. It is not a tax invoice; tax configuration is not yet finalized.", { size: 8, color: MUTED });
+  flow.paragraph(`This receipt confirms a payment recorded from a Stripe payment confirmation. ${taxStatement(r.tax)}`, { size: 8, color: MUTED });
   footer(doc, `Receipt ${r.receiptNumber} - generated ${generatedAt.toISOString().slice(0, 16).replace("T", " ")} UTC`);
   return doc.toBytes();
 }

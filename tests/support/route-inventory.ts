@@ -441,6 +441,10 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/backups/restore-tests": staff(ops, undefined, act("backup.restore_test_recorded")),
   "GET /staff/settings": staff(ops),
   "POST /staff/settings": staff(ops, undefined, act("settings.updated")),
+  // LEGAL-005 tax configuration (src/routes/tax.ts): Owner only, every change audited.
+  "GET /staff/settings/tax": staff(OWNER),
+  "POST /staff/settings/tax": staff(OWNER, undefined, act("tax.settings_updated")),
+  "POST /staff/settings/tax/jurisdictions": staff(OWNER, undefined, act("tax.jurisdiction_added")),
   "GET /staff/ai": staff(rolesWith("ai.manage")),
   "GET /staff/ai/export.csv": staff(rolesWith("ai.manage"), undefined, act("ai.jobs_exported")),
   "GET /staff/ai/:id": staff(rolesWith("ai.manage"), P("aiJob")),

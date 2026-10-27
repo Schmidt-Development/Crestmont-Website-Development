@@ -338,6 +338,8 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/backups/records", fields: () => ({ what: "D1 dev export", location: "local disk ~/backups/dev.sql", environment: "development", method: "d1_export", taken_at: day(-2) + "T10:00", result: "succeeded", evidence: "wrangler d1 export output: 12 tables", size_bytes: "2048" }) },
     { key: "POST /staff/backups/restore-tests", fields: () => ({ what: "dev db", target: "scratch sqlite file", environment: "development", performed_at: day(-1) + "T11:00", result: "passed", duration_minutes: "12", evidence: "row counts matched for 12 tables" }) },
     { key: "POST /staff/settings", fields: () => ({ "business.legal_name": "", "business.address": "", "contact.email": "hello@matrix.crestmont.test", "contact.phone": "", staffed_hours: "Mon–Fri 9am–5pm ET", first_response_target_hours: "8" }) },
+    { key: "POST /staff/settings/tax", fields: () => ({ notes: "Matrix test: registration not decided (TEST DATA)" }) },
+    { key: "POST /staff/settings/tax/jurisdictions", fields: () => ({ name: "Matrix Test Jurisdiction", registration_id: "TEST-0001", rate: "1.5" }) },
     { key: "POST /staff/ai/:id/decide", fields: () => ({ decision: "approved", final_text: "Edited draft" }), setup: async () => {
       w.ids.aiJob = newId("ai");
       await w.db.prepare(`INSERT INTO ai_jobs (id, workflow, provider, model, status, input_ref, output_ref, created_at, updated_at) VALUES (?, 'quote_draft', 'anthropic', 'test', 'awaiting_approval', 'quote:x', 'Draft', ?, ?)`).bind(w.ids.aiJob, nowIso(), nowIso()).run();

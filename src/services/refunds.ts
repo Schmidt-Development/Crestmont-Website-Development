@@ -10,7 +10,7 @@ import { ForbiddenError, type Actor } from "../domain/authz.ts";
 import { TransitionError } from "../domain/state-machine.ts";
 import { syncProjectBuildSafe } from "./builds.ts";
 import { audit } from "./security.ts";
-import { sendMail } from "./mailer.ts";
+import { sendMail, templateContent } from "./mailer.ts";
 import { NOT_CONFIGURED } from "./billing.ts";
 
 export interface RefundRow {
@@ -52,8 +52,11 @@ function guard(actor: Actor, from: RefundStatus, to: RefundStatus, opts: { manda
   }
 }
 
-async function notifyCustomer(ctx: AppContext, r: RefundRow, heading: string, paragraphs: string[], key: string) {
-  await sendMail(ctx, { template: "refund_decision", to: r.requester_email, subject: heading, heading, idempotencyKey: `refund:${r.id}:${key}`, paragraphs, cta: { label: "View billing", url: `${ctx.baseUrl}/portal/billing` } });
+type RefundMail = { event: "under_review" } | { event: "denied" } | { event: "approved"; amountCents: number } | { event: "issued"; amountCents: number; reference: string };
+async function notifyCustomer(ctx: AppContext, r: RefundRow, mail: RefundMail, key: string) {
+  const data = { ...mail, url: `${ctx.baseUrl}/portal/billing` };
+  await sendMail(ctx, { template: "refund_decision", to: r.requester_email, idempotencyKey: `refund:${r.id}:${key}`, data });
+  const heading = templateContent({ template: "refund_decision", data }).heading;
   await ctx.db.prepare(`UPDATE refunds SET customer_notified_at = ? WHERE id = ?`).bind(nowIso(ctx.now), r.id).run();
   await ctx.db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES (?,?,?,?,?,?,?)`)
     .bind(newId("ntf"), r.requested_by, "refund_update", "refund", r.id, heading, nowIso(ctx.now)).run();
@@ -72,9 +75,9 @@ export async function reviewRefund(ctx: AppContext, actor: Actor, id: string, to
   if (res.meta.changes !== 1) throw new HttpError(409, "This refund changed while you were viewing it. Reload and try again.");
   await audit(ctx.db, { actorUserId: actor.userId, action: `refund.${to}`, subjectType: "refund", subjectId: id, organizationId: r.organization_id, details: { from: r.status, mandatoryObligation: mandatory } });
   if (to === "denied") {
-    await notifyCustomer(ctx, r, "Update on your refund request", ["After review, your refund request was not approved.", "If you have more information, reply through a support ticket and we will take another look."], "denied");
+    await notifyCustomer(ctx, r, { event: "denied" }, "denied");
   } else if (to === "under_review") {
-    await notifyCustomer(ctx, r, "Your refund request is under review", ["Our support team has started reviewing your refund request. We will email you when a decision is made."], "under_review");
+    await notifyCustomer(ctx, r, { event: "under_review" }, "under_review");
   }
   if (to === "recommended") {
     const owners = (await ctx.db.prepare(`SELECT DISTINCT user_id FROM memberships WHERE role_id = 'owner'`).all<{ user_id: string }>()).results;
@@ -93,9 +96,7 @@ export async function decideRefund(ctx: AppContext, actor: Actor, id: string, to
   if (res.meta.changes !== 1) throw new HttpError(409, "This refund changed while you were viewing it. Reload and try again.");
   await audit(ctx.db, { actorUserId: actor.userId, action: `refund.${to}`, subjectType: "refund", subjectId: id, organizationId: r.organization_id, details: { amountCents: r.amount_cents } });
   if (to === "approved") await syncBuildsForRefund(ctx.db, r.payment_id);
-  await notifyCustomer(ctx, r, to === "approved" ? "Your refund was approved" : "Update on your refund request",
-    to === "approved" ? [`Your refund of $${(r.amount_cents / 100).toFixed(2)} was approved. We will send it to your original payment method and email you when it has been issued.`]
-      : ["After review, your refund request was not approved.", "If you have more information, reply through a support ticket."], to);
+  await notifyCustomer(ctx, r, to === "approved" ? { event: "approved", amountCents: r.amount_cents } : { event: "denied" }, to);
 }
 
 /** Founder issues an approved refund through Stripe (approved|failed → issued|failed). */
@@ -123,7 +124,7 @@ export async function issueRefund(ctx: AppContext, actor: Actor, id: string) {
   ]);
   await audit(ctx.db, { actorUserId: actor.userId, action: failed ? "refund.failed" : "refund.issued", subjectType: "refund", subjectId: id, organizationId: r.organization_id, details: { stripeRefundId: result.id, status: result.status, amountCents: r.amount_cents } });
   if (!failed) await syncBuildsForRefund(ctx.db, r.payment_id);
-  if (!failed) await notifyCustomer(ctx, r, "Your refund has been issued", [`We issued a refund of $${(r.amount_cents / 100).toFixed(2)} to your original payment method. Depending on your bank it can take 5–10 business days to appear.`, `Reference: ${result.id}`], "issued");
+  if (!failed) await notifyCustomer(ctx, r, { event: "issued", amountCents: r.amount_cents, reference: result.id }, "issued");
   return { stripeRefundId: result.id, status: failed ? "failed" : "issued" };
 }
 

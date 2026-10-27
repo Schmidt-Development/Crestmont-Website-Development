@@ -84,9 +84,8 @@ export function register(r: Router) {
       await auth.assertPasswordNotBreached(ctx.env, ctx.db, String(f.get("password") ?? ""));
       const res = await auth.registerCustomer(ctx.db, { email: v.email, name: v.name, password: String(f.get("password") ?? ""), organizationName: v.organization }, ctx.ip);
       if (res.verifyToken) {
-        await sendMail(ctx, { template: "verification", to: v.email.toLowerCase(), subject: "Confirm your email — Crestmont", heading: "Confirm your email address", idempotencyKey: `verify:${res.userId}:${res.verifyToken.slice(0, 8)}`,
-          paragraphs: [`Hello ${v.name}, thank you for creating a Crestmont account.`, "Confirm your email address to finish setting up your account. This link expires in 48 hours."],
-          cta: { label: "Confirm email", url: `${ctx.baseUrl}/verify-email?token=${res.verifyToken}` } });
+        await sendMail(ctx, { template: "verification", to: v.email.toLowerCase(), idempotencyKey: `verify:${res.userId}:${res.verifyToken.slice(0, 8)}`,
+          data: { name: v.name, confirmUrl: `${ctx.baseUrl}/verify-email?token=${res.verifyToken}` } });
         await recordTermsAcceptance(ctx, res.userId, res.organizationId!);
       }
       return htmlResponse(ctx, authLayout(ctx, { title: "Check your email" }, html`<h1 style="font-size:2rem">Check your email</h1>
@@ -112,8 +111,8 @@ export function register(r: Router) {
     requireUser(ctx);
     if (!ctx.user!.emailVerified) {
       const token = await auth.newEmailVerifyToken(ctx.db, ctx.user!.id);
-      await sendMail(ctx, { template: "verification", to: ctx.user!.email, subject: "Confirm your email — Crestmont", heading: "Confirm your email address", idempotencyKey: `verify:${ctx.user!.id}:${token.slice(0, 8)}`,
-        paragraphs: ["Confirm your email address to finish setting up your account. This link expires in 48 hours."], cta: { label: "Confirm email", url: `${ctx.baseUrl}/verify-email?token=${token}` } });
+      await sendMail(ctx, { template: "verification", to: ctx.user!.email, idempotencyKey: `verify:${ctx.user!.id}:${token.slice(0, 8)}`,
+        data: { name: null, confirmUrl: `${ctx.baseUrl}/verify-email?token=${token}` } });
     }
     return redirect(ctx, "/portal", { kind: "info", text: "If your email is unconfirmed, a new link is on its way." });
   });
@@ -150,8 +149,7 @@ export function register(r: Router) {
     const f = await ctx.form();
     try {
       await auth.confirmTotpEnrollment(ctx.db, ctx.user!.id, ctx.sessionId!, str(f, "code").replace(/\s/g, ""));
-      await sendMail(ctx, { template: "security_notification", to: ctx.user!.email, subject: "Two-factor authentication enabled", heading: "Two-factor authentication is on", idempotencyKey: `mfa-on:${ctx.user!.id}:${Date.now()}`,
-        paragraphs: ["Two-factor authentication was enabled on your Crestmont account. If this was not you, reset your password immediately and contact support."] });
+      await sendMail(ctx, { template: "security_notification", to: ctx.user!.email, idempotencyKey: `mfa-on:${ctx.user!.id}:${Date.now()}`, data: { event: "mfa_enabled" } });
       return redirect(ctx, safeNext(ctx.url.searchParams.get("next"), ctx.user!.isStaff ? "/staff" : "/account"), { kind: "success", text: "Two-factor authentication is enabled." });
     } catch (e) {
       if (e instanceof auth.AuthError) {
@@ -169,9 +167,8 @@ export function register(r: Router) {
     const f = await ctx.form();
     const res = await auth.requestPasswordReset(ctx.db, str(f, "email"), ctx.ip);
     if (res) {
-      await sendMail(ctx, { template: "password_reset", to: str(f, "email").toLowerCase(), subject: "Reset your Crestmont password", heading: "Reset your password", idempotencyKey: `reset:${res.userId}:${res.token.slice(0, 8)}`,
-        paragraphs: ["Someone asked to reset the password for this account. If that was you, use the link below within one hour.", "If you did not ask for this, you can ignore this email."],
-        cta: { label: "Choose a new password", url: `${ctx.baseUrl}/password/reset?token=${res.token}` } });
+      await sendMail(ctx, { template: "password_reset", to: str(f, "email").toLowerCase(), idempotencyKey: `reset:${res.userId}:${res.token.slice(0, 8)}`,
+        data: { resetUrl: `${ctx.baseUrl}/password/reset?token=${res.token}` } });
     }
     return htmlResponse(ctx, authLayout(ctx, { title: "Check your email" }, html`<h1 style="font-size:2rem">Check your email</h1><p>If an account exists for that address, a reset link has been sent. It expires in one hour.</p>`));
   });
@@ -241,7 +238,7 @@ ${table(sessions, [
     try {
       await auth.assertPasswordNotBreached(ctx.env, ctx.db, String(f.get("next") ?? ""));
       await auth.changePassword(ctx.db, ctx.user!.id, String(f.get("current") ?? ""), String(f.get("next") ?? ""), ctx.sessionId!);
-      await sendMail(ctx, { template: "security_notification", to: ctx.user!.email, subject: "Your password was changed", heading: "Password changed", idempotencyKey: `pw:${ctx.user!.id}:${Date.now()}`, paragraphs: ["The password for your Crestmont account was changed and other sessions were signed out. If this was not you, reset your password now."] });
+      await sendMail(ctx, { template: "security_notification", to: ctx.user!.email, idempotencyKey: `pw:${ctx.user!.id}:${Date.now()}`, data: { event: "password_changed" } });
       return redirect(ctx, "/account", { kind: "success", text: "Password updated. Other sessions were signed out." });
     } catch (e) {
       if (e instanceof auth.AuthError) return redirect(ctx, "/account", { kind: "error", text: e.message });
