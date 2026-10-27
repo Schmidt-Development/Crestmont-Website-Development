@@ -128,9 +128,12 @@ test("[AIB-RUNNER] CI builds the runner, sandbox and proxy images (no push, read
   const ps = job("windows-scripts");
   assert.match(ps, /permissions:\n\s+contents: read\n/);
   assert.match(ps, /shell: pwsh\n\s+run: \.\/runner\/windows\/Test-WindowsScripts\.ps1/);
-  const ps51 = job("windows-powershell-51");
+  const winWf = readFileSync(path.join(REPO_ROOT, ".github", "workflows", "windows-powershell.yml"), "utf8");
+  const ps51 = winWf.slice(winWf.indexOf("\n  windows-powershell-51:\n"));
+  assert.ok(winWf.includes("\n  windows-powershell-51:\n"), "Windows PowerShell 5.1 job exists");
+  assert.match(winWf, /paths: \["runner\/windows\/\*\*"/, "Windows-hosted minutes only when the Windows kit changes");
+  assert.match(winWf, /^permissions:\n\s+contents: read\n/m);
   assert.match(ps51, /runs-on: windows-latest/);
-  assert.match(ps51, /permissions:\n\s+contents: read\n/);
   assert.match(ps51, /Discover-Hardware\.ps1/);
   assert.doesNotMatch(ci, /ANTHROPIC_API_KEY|OPENAI_API_KEY/, "CI never gets a paid AI key");
 });

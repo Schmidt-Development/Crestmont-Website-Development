@@ -298,7 +298,7 @@ installer's way, `squid -k parse` of the rendered allow-list inside the proxy im
 the runner reaches the platform and a fake model server, installs reach only the npm registry, nothing leaves without
 the proxy, and the validation tripwire fails when the proxy is down). Job `windows-scripts` parses
 every PowerShell script and runs PSScriptAnalyzer with Windows PowerShell 5.1 compatibility rules
-(`runner/windows/Test-WindowsScripts.ps1`); job `windows-powershell-51` repeats the parse with the 5.1 parser on a
+(`runner/windows/Test-WindowsScripts.ps1`); job `windows-powershell-51` (workflow `windows-powershell.yml`, only when `runner/windows/**` changes) repeats the parse with the 5.1 parser on a
 GitHub-hosted Windows VM and runs the read-only `Discover-Hardware.ps1` into `select-model.ts` there.
 
 ## 13. Known limits and residual risks

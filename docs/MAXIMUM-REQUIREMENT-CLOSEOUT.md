@@ -70,7 +70,7 @@ Blocker type: **T** technical/observation, **E** external account/service, **H**
 | TEST-004 | T | rehearsal + restore drill now run after every staging deploy; no run observed from this session | Founder (or a session with the Schmidt repo attached) confirms a green `staging-rollback-rehearsal` / `staging-restore-drill` run or the TEST-004 evidence at /staff/readiness |
 | INFRA-006 | T/F | same drill evidence; recovery targets (RTO/RPO) blank | observe a drill run; Founder enters recovery targets |
 | TEST-002 | E/F | 12 of 33 journeys need Stripe (5,6,7,17,19,24,25), voice (27,28) or launch (31–33) | Stripe test account; voice provider; LAUNCH-001 |
-| READY-005 | E | GitHub snapshot push path not yet observed on staging; code scanning needs GitHub Advanced Security | next staging deploy (feed turns healthy); enable code scanning (admin) |
+| READY-005 | E | push path verified on real staging (github feed healthy 22:42 UTC); code scanning needs GitHub Advanced Security | enable code scanning (admin), or the Founder accepts scans as out of scope |
 | PAY-001 | E | needs a dedicated Stripe test-mode account and one real checkout | create account, add `STRIPE_SECRET_KEY` (sk_test) + `STRIPE_WEBHOOK_SECRET` to staging |
 | PAY-004 | E/F | subscriptions need Stripe test run; maintenance entitlements unapproved | Stripe test account; Founder approves CAT-006 |
 | EMAIL-001 | E | Resend account + verified domain + one real delivery | verify domain in Resend; add `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_FROM` |
@@ -94,10 +94,32 @@ Blocker type: **T** technical/observation, **E** external account/service, **H**
 | PORT-001..006 | F | genuine screenshots, relationship records, link verification | run `portfolio-screenshots.yml`, review, upload; document relationships |
 | LAUNCH-001..003 | F | production authorization | Founder decision after the gates pass |
 
+## Self-hosted AI runner (Workstream: runner hardening)
+
+Zero-paid-AI default preserved (local Ollama provider; Agent SDK only as an explicitly enabled adapter; no fallback).
+Done before machine access:
+- **Dependency locking:** `runner/package-lock.json` + `npm ci`; sandbox Playwright via its own package.json; exact base-image tags.
+- **Five host-only defects fixed:**
+  - the proxy blocked the runner's CONNECT tunnel to Ollama;
+  - Squid crash-looped when it dropped root;
+  - the paid-API tripwire could pass with the proxy down;
+  - the Windows driver-store version was misread, wrongly blocking NVIDIA hosts;
+  - unvalidated allow-list hosts could inject proxy rules.
+- **Resilience:** context-overflow shrink-and-retry, bounded timeout retry, cancellable backoff, lease watchdog, symlink-safe checkpoints, model reachability in `/health`.
+- **Executed in the cloud workspace (not the Windows host):**
+  - hadolint (0 findings);
+  - pwsh 7.6 + PSScriptAnalyzer with 5.1 rules (0 findings);
+  - `squid -k parse` on the rendered config;
+  - stand-in images under the production docker flags: sandbox 11/12, runner image 10/11, egress end-to-end 37/37. The stand-ins were built from local binaries because Docker Hub was unreachable, so the 2 expected misses are stand-in artefacts.
+- **CI:** builds the real images and runs the self-checks on every push (`runner-images`). Windows PowerShell 5.1 checks run only when the Windows kit changes, to limit Windows-runner minutes.
+- **Still needs the Windows host:** GPU/model choice and throughput, Docker Desktop forwarding to Ollama, real image builds on the host, and LOCAL-VALIDATION §0–§6 (tripwire, real Starter build, cancel/crash drills, evidence).
+
 ## 9. Verified staging status
 
 - Staging `https://crestmont-platform-staging.partners-df4.workers.dev` is live behind the preview gate; public
-  `/api/readiness/health` returned `ok` at 22:35 UTC with the `ci` and `staging_e2e` feeds healthy (last success 22:28 UTC).
+  `/api/readiness/health` returned `ok` at 22:55 UTC with all three feeds healthy: `ci` (22:43), `staging_e2e` (22:42) and
+  `github` (22:42 — the new READY-005 snapshot, posted by the real deploy workflow with its read-only token, which also
+  shows the deploy carrying READY-006's metrics and timings went out).
   These show evidence was *received*; per-test outcomes are visible to staff at /staff/readiness.
 - This session cannot read GitHub Actions for the Schmidt repository (the same-named repository attached to this session
   occupies the checkout path), so individual run results were not observed here.
