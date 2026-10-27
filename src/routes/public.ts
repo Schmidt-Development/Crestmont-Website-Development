@@ -5,7 +5,7 @@ import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, raw, safeUrl, formatCents, formatDate, formatDateTime, type SafeHtml } from "../lib/html.ts";
 import { HttpError, htmlResponse, redirect, str, securityHeaders } from "../app/http.ts";
-import { publicLayout, appLayout } from "../ui/layout.ts";
+import { publicLayout, appLayout, crestRing } from "../ui/layout.ts";
 import { csrf, input, textarea, select, button, linkButton, actionForm, formErrors, alert, table, badge, emptyState, pageHead, dl, fileInput, attributionFields, richText } from "../ui/components.ts";
 import { requireStaff } from "../app/app.ts";
 import { staffNav } from "./nav.ts";
@@ -58,13 +58,17 @@ async function page(ctx: AppContext, seoKey: string, keys: string[], render: (c:
   return htmlResponse(ctx, publicLayout(ctx, { title: seo.title, description: seo.description }, html`${banner}${body}`), status);
 }
 
-const section = (eyebrow: string, title: string, body: SafeHtml, opts: { id?: string; lede?: string } = {}) => html`<section class="section"${opts.id ? html` id="${opts.id}"` : ""}><div class="container">
-<div class="eyebrow">${eyebrow}</div><h2>${title}</h2>${opts.lede ? html`<p class="lede">${opts.lede}</p>` : ""}${body}</div></section>`;
+// Margin-label composition (docs/frontend/DESIGN.md §8): the section name sits in a narrow left column on wide
+// screens; when the label would only repeat the heading it is left empty so columns still align.
+const section = (eyebrow: string, title: string, body: SafeHtml, opts: { id?: string; lede?: string } = {}) => html`<section class="section"${opts.id ? html` id="${opts.id}"` : ""}><div class="container section__inner">
+<p class="section__label"${eyebrow === title ? html` aria-hidden="true" style="visibility:hidden"` : ""}>${eyebrow}</p><div><div class="section__head"><h2>${title}</h2>${opts.lede ? html`<p class="lede">${opts.lede}</p>` : ""}</div>${body}</div></div></section>`;
 
 const pageHero = (eyebrow: string, title: string, lede?: string, actions?: SafeHtml) => html`<section class="hero hero--page"><div class="container">
 <div class="eyebrow">${eyebrow}</div><h1>${title}</h1>${lede ? html`<p class="lede">${lede}</p>` : ""}${actions ? html`<div class="row">${actions}</div>` : ""}</div></section>`;
 
-const itemCards = (text: string) => html`<div class="grid grid-3">${parseItems(text).map((i) => html`<div class="card card--feature"><h3 class="card__title">${i.title}</h3><p class="muted">${i.body}</p></div>`)}</div>`;
+const itemCards = (text: string) => html`<div class="grid grid-2">${parseItems(text).map((i) => html`<div class="card card--feature"><h3 class="card__title">${i.title}</h3><p class="muted">${i.body}</p></div>`)}</div>`;
+/** Two-column hairline ledger for principles and capabilities (no card chrome). */
+const ledger = (text: string) => html`<ul class="ledger">${parseItems(text).map((i) => html`<li><h3>${i.title}</h3><p>${i.body}</p></li>`)}</ul>`;
 
 function packageCards(c: Content, opts: { compact?: boolean } = {}): SafeHtml {
   const pr = c.get("pricing.presentation");
@@ -101,9 +105,56 @@ function shot(p: pf.PortfolioProject, kind: "desktop" | "mobile", viewer = false
   return viewer ? html`<a class="shot${kind === "mobile" ? " shot--mobile" : ""}" href="${src}" data-viewer data-alt="${alt}">${img}<span class="visually-hidden">Open full-screen</span></a>` : html`<div class="shot">${img}</div>`;
 }
 
-function serviceCard(s: ServiceDef, c?: Content): SafeHtml {
-  const summary = c?.get(`service.${s.slug}`).summary ?? s.summary;
-  return html`<a class="card card--link" href="${servicePath(s)}"><h3 class="card__title">${s.name}</h3><p class="muted">${summary}</p><span class="card__more">Learn more</span></a>`;
+/** Editorial index of services: name, summary and an arrow per row; the whole row is the link. */
+function serviceList(list: ServiceDef[], c?: Content): SafeHtml {
+  return html`<ul class="index-list">${list.map((s) => {
+    const summary = c?.get(`service.${s.slug}`).summary ?? s.summary;
+    return html`<li><a href="${servicePath(s)}"><span class="index-list__name">${s.name}</span><span class="index-list__summary">${summary}</span><span class="index-list__arrow" aria-hidden="true">→</span></a></li>`;
+  })}</ul>`;
+}
+
+/**
+ * "Anatomy of a build" (DESIGN.md §10): an illustrative miniature website assembled in six layers, each tied to a
+ * real stage of the Crestmont process. Labelled as a concept; the business in the miniature is fictional.
+ */
+const ANATOMY: { title: string; stage: string; body: string }[] = [
+  { title: "Structure", stage: "Scope review", body: "Pages, content order and the main calls to action are agreed against your package or quote before any visual design starts." },
+  { title: "Design system", stage: "Design", body: "Type, colour, spacing and components are defined once and applied everywhere, so every page belongs to the same site." },
+  { title: "Real content", stage: "Design and development", body: "Your words and images replace placeholders, and layouts are checked against real lengths rather than filler text." },
+  { title: "Interaction", stage: "Development", body: "Menus, buttons and forms respond to touch, mouse and keyboard, and every action confirms what happened." },
+  { title: "Accessibility", stage: "Internal quality assurance", body: "Focus order, contrast, labels and page landmarks are checked toward WCAG 2.1 AA before you see a review build." },
+  { title: "Performance", stage: "Internal quality assurance", body: "Images are sized and compressed, scripts are kept minimal and pages are served from modern edge hosting." },
+];
+
+function anatomy(): SafeHtml {
+  const last = ANATOMY.length;
+  return html`<div class="anatomy" data-anatomy>
+<div><p class="anatomy__note">Illustrative concept — not a client project</p>
+<ol class="anatomy__layers" role="tablist" aria-label="Layers of a website build" aria-orientation="vertical">${ANATOMY.map((l, i) => html`<li class="anatomy__layer">
+<button class="anatomy__tab" type="button" role="tab" id="anatomy-tab-${i + 1}" aria-controls="anatomy-stage" aria-selected="${i === last - 1 ? "true" : "false"}"><span class="anatomy__tab-title">${l.title}</span><span class="anatomy__tab-stage">Process stage: ${l.stage}</span></button>
+<p class="anatomy__detail">${l.body}</p></li>`)}</ol></div>
+<div class="anatomy__stage" id="anatomy-stage" role="tabpanel" aria-label="Miniature website preview">
+<div class="mini" data-layer="${last}" aria-hidden="true"><div class="mini__chrome"><i></i><i></i><i></i><span class="mini__url">your-business.example</span><span class="mini__score">✓ Checks complete</span></div>
+<div class="mini__viewport"><div class="mini__page">
+<div class="mini__nav mini__region"><span class="mini__tag">header</span><span class="mini__logo"></span><span class="mini__links"><i></i><i></i><i></i></span><span class="mini__btn"><span class="mini__btn-label">Visit</span></span></div>
+<div class="mini__hero mini__region"><span class="mini__tag">main</span><div><span class="mini__h" style="display:block"></span><span class="mini__h mini__h--2" style="display:block"></span>
+<p class="mini__text mini__text--h">Fresh bread, baked before sunrise.</p><span class="mini__p" style="display:block"></span><span class="mini__p mini__p--2" style="display:block"></span>
+<p class="mini__text mini__text--p">Order ahead online and collect a warm loaf on your way to work.</p><span class="mini__cta"><span class="mini__cta-label">Order ahead</span></span></div><span class="mini__img"></span></div>
+<div class="mini__cards"><span class="mini__card"></span><span class="mini__card"></span><span class="mini__card"></span></div>
+</div></div>
+<div class="mini__caption"><span>Layer: <strong data-anatomy-caption>${ANATOMY[last - 1]!.title}</strong></span><span>Fictional business, for illustration</span></div></div></div></div>`;
+}
+
+/** The development process as a selectable stepper; without JavaScript it is a complete ordered list. */
+function processStepper(steps: { title: string; body: string }[]): SafeHtml {
+  return html`<div class="stepper" data-stepper>
+<ol class="stepper__track" role="tablist" aria-label="Project stages" aria-orientation="vertical">${steps.map((s, i) => html`<li class="stepper__item">
+<button class="stepper__btn" type="button" role="tab" id="step-tab-${i + 1}" aria-controls="step-panel" aria-selected="${i === 0 ? "true" : "false"}" data-title="${s.title}" data-body="${s.body}">${s.title}</button>
+<p class="stepper__text">${s.body}</p></li>`)}</ol>
+<div class="stepper__panel" id="step-panel" role="tabpanel" aria-live="polite" data-stepper-panel hidden><div data-panel-body>
+<span class="stepper__count" data-panel-count>Step 1 of ${steps.length}</span><h3 data-panel-title>${steps[0]?.title ?? ""}</h3><p data-panel-text>${steps[0]?.body ?? ""}</p></div>
+<div class="stepper__nav"><button class="btn btn--ghost btn--sm" type="button" data-step-prev>Previous stage</button><button class="btn btn--secondary btn--sm" type="button" data-step-next>Next stage</button></div>
+<p class="faint" style="margin:1.5rem 0 0;font-size:.8rem">Your customer portal shows which stage your project is in and what is waiting on you.</p></div></div>`;
 }
 
 const serviceKeys = () => SERVICES.filter((s) => s.pricing !== "maintenance").map((s) => `service.${s.slug}`);
@@ -247,29 +298,37 @@ export function register(r: Router): void {
     const faqs = parseItems(c.get("faq.items").items).slice(0, 5);
     const projects = await pf.listPublished(ctx.db);
     const featured = ["website-design-development", "website-redesign", "e-commerce-development", "custom-web-applications", "technical-seo", "ai-automation"].map((s) => serviceBySlug(s)!);
-    return html`<section class="hero hero--home"><div class="container hero__grid"><div>
+    const email = ctx.settings["contact.email"] ?? SUPPORT_EMAIL;
+    return html`<section class="hero hero--home"><div class="container hero__grid"><div class="hero__copy">
 <div class="eyebrow">${hero.eyebrow}</div><h1>${hero.heading}</h1><p class="lede">${hero.lede}</p>
-<div class="row">${linkButton(hero.primary_label, "/pricing")}${linkButton(hero.quote_label, "/quote", "secondary")}</div></div>
-<div class="hero__crest" aria-hidden="true"><img src="/assets/brand/crestmont-logo-original.png" width="232" height="213" alt=""></div></div></section>
-${section("Services", "What we build", html`<div class="grid grid-3">${featured.map((s) => serviceCard(s, c))}</div><p class="section__more"><a href="/services">All services</a></p>`, { id: "services" })}
+<div class="hero__actions">${linkButton(hero.primary_label, "/pricing")}${linkButton(hero.quote_label, "/quote", "secondary")}</div></div>
+<div class="hero__crest" aria-hidden="true">${crestRing()}<img src="/assets/brand/crestmont-logo-original.png" width="232" height="213" alt=""></div></div></section>
+<section class="commitments" aria-label="Commitments"><ul class="commitments__list">
+<li><span class="commitments__value">From ${pkgPrice("starter")}</span><span class="commitments__label">Published package prices, enforced at checkout</span></li>
+<li><span class="commitments__value">Counted revisions</span><span class="commitments__label">Every round is recorded in your project</span></li>
+<li><span class="commitments__value">Your approval first</span><span class="commitments__label">Nothing launches until you sign off</span></li>
+<li><span class="commitments__value">Yours to keep</span><span class="commitments__label">Your domain stays registered to you</span></li></ul></section>
+${section("Services", "What we build", html`${serviceList(featured, c)}<p class="section__more"><a href="/services">All services</a></p>`, { id: "services" })}
+${section("How it comes together", "Anatomy of a build", anatomy(), { id: "anatomy", lede: "A website is a stack of decisions. Choose a layer to see what changes, and which stage of our process is responsible for it." })}
 ${section("Packages", "Published packages", html`${packageCards(c, { compact: true })}<p class="section__more"><a href="/pricing">Full package details</a> · <a href="/pricing/compare">Compare packages</a> · <a href="/quote">Custom development quote</a></p>`, { id: "packages", lede: c.get("pricing.presentation").lede })}
-${section("Process", "How a project runs", html`<ol class="steps">${steps.slice(0, 8).map((s) => html`<li class="step"><h3 class="step__title">${s.title}</h3><p class="muted">${s.body}</p></li>`)}</ol><p class="section__more"><a href="/process">The full process</a></p>`, { id: "process" })}
-${section("Portfolio", "Real websites", projects.length ? html`<div class="grid grid-3">${projects.slice(0, 3).map(portfolioCard)}</div><p class="section__more"><a href="/portfolio">View the portfolio</a></p>`
+${section("Process", "How a project runs", html`${processStepper(steps)}<p class="section__more"><a href="/process">The full process</a></p>`, { id: "process" })}
+${section("Portfolio", "Real websites", projects.length ? html`<div class="grid grid-2">${projects.slice(0, 2).map(portfolioCard)}</div><p class="section__more"><a href="/portfolio">View the portfolio</a></p>`
       : html`<p class="muted">Portfolio projects are published here once genuine screenshots of each live site have been captured and verified. We do not use mock-ups or stock imagery. <a href="/portfolio">About our portfolio</a></p>`, { id: "portfolio" })}
-${section("Why Crestmont", why.heading, itemCards(why.items), { id: "why" })}
-${section("Capabilities", caps.heading, itemCards(caps.items), { id: "capabilities" })}
+${section("Why Crestmont", why.heading, ledger(why.items), { id: "why" })}
+${section("Capabilities", caps.heading, ledger(caps.items), { id: "capabilities" })}
 ${section("Maintenance", "Optional maintenance plans", html`${maintenanceCards()}<p class="section__more"><a href="/hosting-maintenance">Hosting &amp; maintenance</a></p>`, { id: "maintenance" })}
 ${section("Customer experience", exp.heading, itemCards(exp.items), { id: "experience", lede: exp.lede })}
 ${section("FAQs", "Common questions", html`${faqs.map((q) => html`<details class="disclosure"><summary>${q.title}</summary><p>${q.body}</p></details>`)}<p class="section__more"><a href="/faq">All questions</a></p>`, { id: "faq" })}
-<section class="section" id="contact"><div class="container grid grid-2"><div><div class="eyebrow">Contact</div><h2>${cta.heading}</h2><p class="lede">${cta.body}</p>
-<div class="row">${linkButton("Request a custom quote", "/quote")}${linkButton("Contact us", "/contact", "secondary")}</div></div>
+<section class="section cta-band" id="contact"><div class="container cta-band__grid"><div><p class="section__label">Contact</p><h2 style="margin-top:1.5rem">${cta.heading}</h2><p class="lede">${cta.body}</p>
+<div class="hero__actions">${linkButton("Request a custom quote", "/quote")}${linkButton("Contact us", "/contact", "secondary")}</div>
+<p class="cta-band__contact">Prefer email? Write to <a href="mailto:${email}">${email}</a>.</p></div>
 <div class="card card--gold">${contactForm(ctx, { interest: "other" }, {}, { compact: true })}</div></div></section>`;
   }));
 
   r.get("/services", (ctx) => page(ctx, "services", ["services.overview", ...serviceKeys()], (c) => {
     const o = c.get("services.overview");
     return html`${pageHero("Services", o.heading, o.lede, html`${linkButton("View pricing", "/pricing")}${linkButton("Request a quote", "/quote", "secondary")}`)}
-${SERVICE_GROUPS.map((g) => section(g, g, html`<div class="grid grid-3">${SERVICES.filter((s) => s.group === g).map((s) => serviceCard(s, c))}</div>`))}
+${SERVICE_GROUPS.map((g) => section("Services", g, serviceList(SERVICES.filter((s) => s.group === g), c)))}
 ${section("Not offered", "What we do not offer", html`<p class="muted">We do not run advertising campaigns, operate social media accounts on your behalf or sell full-service marketing retainers, and we do not promise rankings, leads, traffic or sales. We only take on work that passes a reasonable technical feasibility and delivery-capability review.</p>`)}`;
   }));
 
@@ -285,7 +344,7 @@ ${section("Not offered", "What we do not offer", html`<p class="muted">We do not
 <h2>How it is priced</h2><p>${PRICING_NOTE[s.pricing]}</p>${s.pricing !== "custom" ? html`<p class="muted">Packages: ${PKG_ORDER.map((id) => `${PACKAGES[id].name} ${pkgPrice(id)}`).join(" · ")}.</p>` : html`<p class="muted">Custom projects are billed 50% as a deposit, 25% after the approved design milestone and 25% before production launch.</p>`}</div>
 <div>${s.includes.length ? html`<div class="card"><h3 class="card__title">What is included</h3><ul class="checklist">${s.includes.map((i) => html`<li>${i}</li>`)}</ul></div>` : ""}
 ${s.boundaries.length ? html`<div class="card card--quiet"><h3 class="card__title">Good to know</h3><ul class="plain-list">${s.boundaries.map((i) => html`<li>${i}</li>`)}</ul></div>` : ""}</div></div></section>
-${related.length ? section("Related", "Related services", html`<div class="grid grid-3">${related.map((x) => serviceCard(x))}</div>`) : ""}`;
+${related.length ? section("Related", "Related services", serviceList(related)) : ""}`;
     });
   });
 

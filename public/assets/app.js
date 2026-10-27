@@ -1,28 +1,92 @@
-// Progressive enhancement only: every feature works without JavaScript.
+// Progressive enhancement only: every feature works without JavaScript. Motion language: docs/frontend/DESIGN.md §6.
 (() => {
-  // Mobile nav / sidebar toggles
-  document.querySelectorAll("[data-toggle]").forEach((btn) => {
+  const root = document.documentElement;
+  root.classList.add("js");
+  const reduceMotion = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : { matches: false };
+
+  // ── Header: hairline appears once the page scrolls (passive, rAF-throttled) ──
+  const header = document.querySelector("[data-site-header]");
+  if (header) {
+    let ticking = false;
+    const update = () => { header.setAttribute("data-scrolled", String(window.scrollY > 8)); ticking = false; };
+    window.addEventListener("scroll", () => { if (!ticking) { ticking = true; requestAnimationFrame(update); } }, { passive: true });
+    update();
+  }
+
+  // ── Menus: public navigation panel and the app sidebar (off-canvas below 960px) ──
+  // Escape and outside clicks close; focus moves into the menu and returns to the toggle; links close it.
+  const toggles = [...document.querySelectorAll("[data-toggle]")];
+  const setOpen = (btn, open, { focus = true } = {}) => {
+    const target = document.getElementById(btn.getAttribute("data-toggle"));
+    if (!target) return;
+    target.setAttribute("data-open", String(open));
+    btn.setAttribute("aria-expanded", String(open));
+    if (target.id === "site-nav") document.body.setAttribute("data-nav-open", String(open));
+    if (open && focus) {
+      const first = target.querySelector("a[aria-current='page'], a, button");
+      if (first) setTimeout(() => first.focus({ preventScroll: true }), 30);
+    } else if (!open && focus && target.contains(document.activeElement)) btn.focus();
+  };
+  toggles.forEach((btn) => {
     btn.addEventListener("click", () => {
       const target = document.getElementById(btn.getAttribute("data-toggle"));
-      if (!target) return;
-      const open = target.getAttribute("data-open") === "true";
-      target.setAttribute("data-open", String(!open));
-      btn.setAttribute("aria-expanded", String(!open));
+      if (target) setOpen(btn, target.getAttribute("data-open") !== "true");
     });
   });
-  // Confirm dangerous actions
+  const closeAll = (focus = true) => toggles.forEach((b) => { if (b.getAttribute("aria-expanded") === "true") setOpen(b, false, { focus }); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeAll(); });
+  document.addEventListener("click", (e) => {
+    if (!(e.target instanceof Element)) return;
+    if (e.target.closest("[data-close-nav]")) { closeAll(); return; }
+    toggles.forEach((b) => {
+      if (b.getAttribute("aria-expanded") !== "true") return;
+      const t = document.getElementById(b.getAttribute("data-toggle"));
+      if (t && !t.contains(e.target) && !b.contains(e.target)) setOpen(b, false, { focus: false });
+      else if (t && e.target.closest("a") && t.contains(e.target)) setOpen(b, false, { focus: false });
+    });
+  });
+  let lastWide = window.innerWidth > 1020;
+  window.addEventListener("resize", () => { const wide = window.innerWidth > 1020; if (wide !== lastWide) { lastWide = wide; closeAll(false); } }, { passive: true });
+
+  // ── Confirm dangerous actions (runs before the busy-state handler below) ──
   document.querySelectorAll("form[data-confirm]").forEach((f) => {
-    f.addEventListener("submit", (e) => { if (!window.confirm(f.getAttribute("data-confirm"))) e.preventDefault(); });
+    f.addEventListener("submit", (e) => { if (!window.confirm(f.getAttribute("data-confirm"))) { e.preventDefault(); e.stopImmediatePropagation(); } });
   });
-  // Prevent double submission
+
+  // ── Prevent double submission; the pressed button shows a busy state ──
+  // Forms that do not navigate (file downloads such as CSV exports) re-enable after a few seconds.
   document.querySelectorAll("form").forEach((f) => {
-    f.addEventListener("submit", () => {
-      setTimeout(() => f.querySelectorAll("button[type=submit]").forEach((b) => { b.setAttribute("aria-disabled", "true"); b.disabled = true; }), 0);
+    f.addEventListener("submit", (e) => {
+      if (e.defaultPrevented) return;
+      const pressed = e.submitter instanceof HTMLButtonElement ? e.submitter : f.querySelector("button[type=submit]");
+      setTimeout(() => {
+        const buttons = f.querySelectorAll("button[type=submit]");
+        buttons.forEach((b) => { b.setAttribute("aria-disabled", "true"); b.disabled = true; });
+        if (pressed && pressed.classList.contains("btn") && f.method.toLowerCase() === "post") pressed.setAttribute("data-busy", "true");
+        setTimeout(() => buttons.forEach((b) => { b.disabled = false; b.removeAttribute("aria-disabled"); b.removeAttribute("data-busy"); }), 8000);
+      }, 0);
     });
   });
-  // Auto-dismiss toasts
-  document.querySelectorAll(".toast").forEach((t) => setTimeout(() => t.remove(), 7000));
-  // Conditional form sections: <div data-show-when="fieldName=value1,value2">
+  window.addEventListener("pageshow", (e) => {
+    if (!e.persisted) return;
+    document.querySelectorAll("button[data-busy], button[aria-disabled='true']").forEach((b) => { b.disabled = false; b.removeAttribute("aria-disabled"); b.removeAttribute("data-busy"); });
+  });
+
+  // ── Toasts: dismiss button, auto-dismiss with an exit transition; paused while hovered or focused ──
+  document.querySelectorAll(".toast").forEach((t) => {
+    const close = document.createElement("button");
+    close.type = "button"; close.className = "toast__close"; close.setAttribute("aria-label", "Dismiss notification"); close.textContent = "×";
+    t.appendChild(close);
+    let timer = 0;
+    const leave = () => { t.setAttribute("data-leaving", "true"); setTimeout(() => t.remove(), reduceMotion.matches ? 0 : 300); };
+    const arm = () => { clearTimeout(timer); timer = setTimeout(leave, 7000); };
+    close.addEventListener("click", leave);
+    t.addEventListener("mouseenter", () => clearTimeout(timer)); t.addEventListener("mouseleave", arm);
+    t.addEventListener("focusin", () => clearTimeout(timer)); t.addEventListener("focusout", arm);
+    arm();
+  });
+
+  // ── Conditional form sections: <div data-show-when="fieldName=value1,value2"> ──
   const sync = () => {
     document.querySelectorAll("[data-show-when]").forEach((el) => {
       const [name, vals] = el.getAttribute("data-show-when").split("=");
@@ -34,7 +98,8 @@
     });
   };
   document.addEventListener("change", sync); sync();
-  // Screenshot viewer (full screen)
+
+  // ── Screenshot viewer (full screen) ──
   document.querySelectorAll("[data-viewer]").forEach((a) => {
     a.addEventListener("click", (e) => {
       const dlg = document.getElementById("viewer");
@@ -46,6 +111,90 @@
     });
   });
   document.querySelectorAll("dialog [data-close]").forEach((b) => b.addEventListener("click", () => b.closest("dialog").close()));
+  document.querySelectorAll("dialog:not(.drawer)").forEach((d) => d.addEventListener("click", (e) => { if (e.target === d) d.close(); }));
+
+  // ── Copy buttons for share URLs and other copyable values ──
+  if (navigator.clipboard) {
+    document.querySelectorAll(".share-url").forEach((el) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "btn btn--secondary btn--sm copy-btn"; b.textContent = "Copy link";
+      b.style.marginTop = ".5rem";
+      b.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(el.textContent.trim()); b.textContent = "Copied"; b.setAttribute("data-copied", "true"); }
+        catch { b.textContent = "Select and copy the link"; }
+        setTimeout(() => { b.textContent = "Copy link"; b.removeAttribute("data-copied"); }, 2400);
+      });
+      el.insertAdjacentElement("afterend", b);
+    });
+  }
+
+  // ── File drop zones: highlight while a file is dragged over ──
+  document.querySelectorAll(".dropzone").forEach((z) => {
+    ["dragenter", "dragover"].forEach((t) => z.addEventListener(t, () => z.setAttribute("data-over", "true")));
+    ["dragleave", "drop"].forEach((t) => z.addEventListener(t, () => z.removeAttribute("data-over")));
+  });
+
+  // ── Roving tablists: the "Anatomy of a build" concept and the process stepper ──
+  // Markup is a complete ordered list without JS; with JS one item is selected at a time.
+  const tablist = (list, onSelect) => {
+    const tabs = [...list.querySelectorAll("[role=tab]")];
+    if (!tabs.length) return;
+    const select = (i, focus) => {
+      tabs.forEach((t, j) => {
+        t.setAttribute("aria-selected", String(i === j)); t.tabIndex = i === j ? 0 : -1;
+        if (j < i) t.setAttribute("data-past", "true"); else t.removeAttribute("data-past");
+      });
+      if (focus) tabs[i].focus();
+      onSelect(i, tabs[i]);
+    };
+    tabs.forEach((t, i) => {
+      t.addEventListener("click", () => select(i, false));
+      t.addEventListener("keydown", (e) => {
+        const k = e.key, n = tabs.length;
+        const next = k === "ArrowDown" || k === "ArrowRight" ? (i + 1) % n : k === "ArrowUp" || k === "ArrowLeft" ? (i - 1 + n) % n : k === "Home" ? 0 : k === "End" ? n - 1 : -1;
+        if (next >= 0) { e.preventDefault(); select(next, true); }
+      });
+    });
+    const initial = Math.max(0, tabs.findIndex((t) => t.getAttribute("aria-selected") === "true"));
+    select(initial, false);
+    return select;
+  };
+
+  document.querySelectorAll("[data-anatomy]").forEach((wrap) => {
+    const mini = wrap.querySelector(".mini");
+    const list = wrap.querySelector("[role=tablist]");
+    const caption = wrap.querySelector("[data-anatomy-caption]");
+    if (!mini || !list) return;
+    list.querySelectorAll("li").forEach((li) => li.setAttribute("role", "presentation"));
+    tablist(list, (i, tab) => {
+      mini.setAttribute("data-layer", String(i + 1));
+      if (caption) caption.textContent = tab.querySelector(".anatomy__tab-title")?.textContent ?? "";
+    });
+  });
+
+  document.querySelectorAll("[data-stepper]").forEach((wrap) => {
+    const list = wrap.querySelector("[role=tablist]");
+    const panel = wrap.querySelector("[data-stepper-panel]");
+    if (!list || !panel) return;
+    list.querySelectorAll("li").forEach((li) => li.setAttribute("role", "presentation"));
+    const tabs = [...list.querySelectorAll("[role=tab]")];
+    const count = panel.querySelector("[data-panel-count]"), title = panel.querySelector("[data-panel-title]"), body = panel.querySelector("[data-panel-text]");
+    const prev = panel.querySelector("[data-step-prev]"), next = panel.querySelector("[data-step-next]");
+    let current = 0;
+    const select = tablist(list, (i, tab) => {
+      current = i;
+      count.textContent = `Step ${i + 1} of ${tabs.length}`;
+      title.textContent = tab.getAttribute("data-title") || tab.textContent.trim();
+      body.textContent = tab.getAttribute("data-body") || "";
+      const wrapBody = panel.querySelector("[data-panel-body]");
+      if (wrapBody && !reduceMotion.matches) { wrapBody.style.animation = "none"; void wrapBody.offsetWidth; wrapBody.style.animation = ""; }
+      if (prev) prev.disabled = i === 0;
+      if (next) next.disabled = i === tabs.length - 1;
+    });
+    panel.hidden = false;
+    if (prev) prev.addEventListener("click", () => select(Math.max(0, current - 1), false));
+    if (next) next.addEventListener("click", () => select(Math.min(tabs.length - 1, current + 1), false));
+  });
 
   // ───────────── UX workstream (BRAND-003..005) ─────────────
   // Drawer quick-view: links marked data-drawer="<url>" open that page's [data-drawer-body] in the
