@@ -66,3 +66,16 @@ Not blocking the next step: voice provider approval (`docs/voice/PROVIDER-EVALUA
 1. In a session with org access: push local commits, re-run CI, fix any real CI issue, record GitHub run evidence (`gh-*` run ids), close BLK-013 only on a green executed run.
 2. With Cloudflare access: create staging D1/R2, apply migrations, deploy staging, set secrets, run the e2e suite against the staging URL with EVIDENCE_ENVIRONMENT=staging, post evidence.
 3. Remaining in-progress items (see `requirements/status/*.ts` "missing" notes): malware scanning, external alerting, breached-password check, UTM attribution, PDF receipts/quotes, Resend delivery webhooks, provider adapter for the chosen voice platform.
+
+## Session 3 — 2026-10-27 (staging preview priority)
+
+- **Preview gate** (`src/app/preview-gate.ts`): HMAC pass cookie, constant-time password check, D1-backed rate
+  limit and security events, fail-closed on deployed staging (`PREVIEW_GATE = "required"`), never active in production.
+- **Self-provisioning staging deploy** (`deploy-staging.yml`): needs only `CLOUDFLARE_API_TOKEN` and
+  `CLOUDFLARE_ACCOUNT_ID`; creates D1, applies migrations, deploys, sets/rotates secrets, seeds, smoke-checks,
+  writes a private access artifact. Founder steps: `docs/STAGING-PREVIEW.md`.
+- **Sample data** (`scripts/seed-staging.ts`): generated through the real services (403 rows, 86 tables,
+  8 demo accounts on the reserved `.test` domain).
+- **Staging browser journey** (`tests/e2e/staging.e2e.ts`, TEST-002): runs in the deploy workflow on seeding
+  runs and records staging evidence; rehearsed locally against the dev server with the gate on (pass).
+- Status: preview not yet live — waiting on the two Cloudflare secrets (no other blocker).

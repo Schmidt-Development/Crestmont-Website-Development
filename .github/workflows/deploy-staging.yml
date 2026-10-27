@@ -167,12 +167,31 @@ jobs:
             echo "Preview password unknown to this run (set once, not rotated): ran health + gate checks only."
           fi
 
+      - name: Browser journey on the preview (staging E2E evidence)
+        id: e2e
+        if: steps.smoke.outcome == 'success' && steps.secrets.outputs.pw != '' && steps.seed.outputs.seeded == 'true'
+        continue-on-error: true
+        env:
+          E2E_BASE_URL: ${{ steps.deploy.outputs.url }}
+          E2E_PREVIEW_PASSWORD: ${{ steps.secrets.outputs.pw }}
+          E2E_ACCOUNTS_FILE: access/demo-accounts.md
+          EVIDENCE_ENVIRONMENT: staging
+          EVIDENCE_FILE: evidence/staging-e2e.json
+          EVIDENCE_SUFFIX: staging-e2e
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund playwright@1.48.2
+          .pw/node_modules/.bin/playwright install --with-deps chromium
+          node --no-warnings --test --test-concurrency=1 --test-reporter=./scripts/evidence-reporter.mjs tests/e2e/staging.e2e.ts
+
       - name: Record evidence and deployment
         if: always() && steps.deploy.outcome == 'success'
         env:
           READINESS_URL: ${{ steps.deploy.outputs.url }}
         run: |
           [ -f evidence/staging-check.json ] && node --no-warnings scripts/post-evidence.ts evidence/staging-check.json || true
+          [ -f evidence/staging-e2e.json ] && node --no-warnings scripts/post-evidence.ts evidence/staging-e2e.json || true
           node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment staging --commit "$GITHUB_SHA" \
             --status succeeded --url "$READINESS_URL" --by "github-actions:${{ github.actor }}" \
             --ci-run "gh-${{ github.run_id }}-${{ github.run_attempt }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \

@@ -31,6 +31,8 @@ const env: Env = {
   STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET,
   STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY,
   VOICE_WEBHOOK_SECRET: process.env.VOICE_WEBHOOK_SECRET,
+  // Lets the staging browser suite rehearse the preview gate locally (gate is never active in production).
+  STAGING_ACCESS_PASSWORD: process.env.STAGING_ACCESS_PASSWORD,
   overrides: { storage },
 };
 

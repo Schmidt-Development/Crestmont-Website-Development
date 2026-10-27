@@ -33,6 +33,14 @@ accounts. Staff accounts use two-factor authentication: add the listed setup key
   storage is not configured. Enable R2 in the dashboard to turn uploads on (R2 asks for a payment method even
   on its free tier — that is your decision).
 
+## Staging browser evidence
+
+On a run that issues the preview password and seeds the demo accounts (the first run, or with both boxes
+ticked), the workflow also drives a real Chromium browser through the preview: the gate, every public page
+linked from the homepage, the customer portal (with tenant isolation) and every Owner module. Results are
+recorded as **staging** evidence for TEST-002. The journey is read-only; it never submits business forms.
+Rehearse locally with `tests/e2e/staging.e2e.ts` (see its header for the three variables).
+
 ## Safety properties (verified by tests)
 
 - The whole site is behind the preview password; staging stays **locked** if no password is configured.
