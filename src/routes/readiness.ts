@@ -452,7 +452,7 @@ ${table(failedTests, [{ header: "Requirement", cell: (x) => html`<a href="/staff
     const rows = show === "all" ? all : all.filter((b) => b.status === (show === "resolved" ? "resolved" : "open"));
     const canEdit = can(ctx.actor!, "settings.operational");
     return page(ctx, "Blockers", html`${pageHead("Blocker register", canEdit ? linkButton("New blocker", "/staff/readiness/blockers/new", "primary", "sm") : undefined, "Launch readiness")}${subnav(ctx)}
-<nav class="tabs">${[["open", "Open"], ["resolved", "Resolved"], ["all", "All"]].map(([k, l]) => html`<a href="/staff/readiness/blockers?show=${k}"${k === show ? html` aria-current="page"` : ""}>${l} (${k === "all" ? all.length : all.filter((b) => b.status === k).length})</a>`)}</nav>
+<nav class="tabs" aria-label="Blocker status">${[["open", "Open"], ["resolved", "Resolved"], ["all", "All"]].map(([k, l]) => html`<a href="/staff/readiness/blockers?show=${k}"${k === show ? html` aria-current="page"` : ""}>${l} (${k === "all" ? all.length : all.filter((b) => b.status === k).length})</a>`)}</nav>
 ${ra.BLOCKER_CATEGORIES.map((c) => {
       const inCat = rows.filter((b) => b.category === c);
       return html`<section class="stack" data-category="${c}"><h2 style="font-size:1.35rem">${c === "founder_approval" ? "Founder approvals" : c === "external_account" ? "External account blockers" : c === "production_incident" ? "Production incidents" : `${label(c)} blockers`} <span class="faint">(${inCat.length})</span></h2>

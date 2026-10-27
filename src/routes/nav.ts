@@ -8,7 +8,7 @@ export function portalNav(_ctx: AppContext): NavGroup[] {
   return [
     { label: "Overview", items: [{ href: "/portal", label: "Dashboard" }, { href: "/portal/projects", label: "Projects" }] },
     { label: "Collaborate", items: [{ href: "/portal/messages", label: "Messages" }, { href: "/portal/files", label: "Files" }, { href: "/portal/approvals", label: "Approvals" }] },
-    { label: "Account", items: [{ href: "/portal/billing", label: "Billing" }, { href: "/portal/support", label: "Support" }, { href: "/portal/team", label: "Team" }] },
+    { label: "Account", items: [{ href: "/portal/billing", label: "Billing" }, { href: "/portal/agreements", label: "Agreements" }, { href: "/portal/support", label: "Support" }, { href: "/portal/team", label: "Team" }] },
   ];
 }
 
@@ -29,7 +29,10 @@ export function staffNav(_ctx: AppContext): NavGroup[] {
       { href: "/staff/crm", label: "CRM", perm: "crm.access" },
       { href: "/staff/sales", label: "Sales", perm: "crm.access" },
       { href: "/staff/quotes", label: "Quotes", perm: "quote.write" },
+      { href: "/staff/pricing", label: "Pricing approvals", perm: "quote.write" },
       { href: "/staff/customers", label: "Customers", perm: "customers.read" },
+      { href: "/staff/legal", label: "Agreements", perm: "customers.read" },
+      { href: "/staff/conversations", label: "Conversations", perm: "customers.read" },
     ] },
     { label: "Delivery", items: [
       { href: "/staff/projects", label: "Projects", perm: "delivery.access" },
@@ -46,6 +49,7 @@ export function staffNav(_ctx: AppContext): NavGroup[] {
       { href: "/staff/finance/subscriptions", label: "Subscriptions", perm: "finance.read" },
       { href: "/staff/finance/invoices", label: "Invoices", perm: "finance.read" },
       { href: "/staff/finance/profitability", label: "Profitability", perm: "finance.read" },
+      { href: "/staff/finance/reconciliation", label: "Reconciliation", perm: "finance.read" },
       { href: "/staff/reports", label: "Reports", perm: "finance.read" },
     ] },
     { label: "AI", items: [
@@ -58,6 +62,7 @@ export function staffNav(_ctx: AppContext): NavGroup[] {
     ] },
     { label: "Platform", items: [
       { href: "/staff/email", label: "Email operations", perm: "settings.operational" },
+      { href: "/staff/email-suppressions", label: "Email suppressions", perm: "settings.operational" },
       { href: "/staff/integrations", label: "Integrations", perm: "settings.operational" },
       { href: "/staff/monitoring", label: "Monitoring", perm: "settings.operational" },
       { href: "/staff/security", label: "Security", perm: "audit.read" },

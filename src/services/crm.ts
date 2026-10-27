@@ -15,11 +15,13 @@ export const LEAD_SOURCES = ["web_form", "quote_form", "ai_receptionist", "refer
 export interface LeadRow {
   id: string; stage: LeadStage; source: string; interest: string | null; message: string | null; owner_user_id: string | null; owner_name: string | null;
   qualification_notes: string | null; lost_reason: string | null; created_at: string; updated_at: string;
+  utm_source: string | null; utm_medium: string | null; utm_campaign: string | null; utm_term: string | null; utm_content: string | null; referrer: string | null; landing_page: string | null;
   contact_id: string; contact_name: string; contact_email: string | null; contact_phone: string | null; contact_user_id: string | null;
   company_id: string | null; company_name: string | null; company_website: string | null; company_organization_id: string | null;
 }
 
 const LEAD_SELECT = `SELECT l.id, l.stage, l.source, l.interest, l.message, l.owner_user_id, u.display_name AS owner_name, l.qualification_notes, l.lost_reason, l.created_at, l.updated_at,
+  l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.utm_content, l.referrer, l.landing_page,
   c.id AS contact_id, c.name AS contact_name, c.email AS contact_email, c.phone AS contact_phone, c.user_id AS contact_user_id,
   co.id AS company_id, co.name AS company_name, co.website AS company_website, co.organization_id AS company_organization_id
   FROM leads l JOIN contacts c ON c.id = l.contact_id LEFT JOIN companies co ON co.id = c.company_id LEFT JOIN users u ON u.id = l.owner_user_id`;
@@ -269,6 +271,7 @@ export const SALES_DEFINITIONS: [string, string][] = [
   ["Stage funnel", "Current stage of each lead created in the range."],
   ["Quotes sent", "Quotes whose first send (quotes.sent_at) falls in the range."],
   ["Quotes accepted", "Quote versions accepted (quote_versions.accepted_at) in the range."],
+  ["Campaign attribution", "Leads created in the range grouped by the first-party UTM parameters (utm_source / utm_medium / utm_campaign) captured from the landing URL of the visit that submitted a public form. \"(none)\" = no campaign parameters (direct, organic or untagged links, manual entry, receptionist)."],
   ["Revenue by source", "Captured payments in the range on orders linked to a lead (orders.lead_id), grouped by that lead's source. Package checkouts without a lead are shown as \"no lead (direct checkout)\"."],
 ];
 
@@ -287,5 +290,20 @@ export async function salesReport(db: Db, actor: Actor, range: DateRange) {
         WHERE p.status IN ('succeeded','partially_refunded','refunded','disputed') AND p.created_at >= ? AND p.created_at < ? GROUP BY source ORDER BY cents DESC`).bind(...r).all<{ source: string; cents: number }>()).results
     : (await db.prepare(`SELECT l.source AS source, SUM(p.amount_cents) AS cents FROM payments p JOIN orders o ON o.id = p.order_id JOIN leads l ON l.id = o.lead_id
         WHERE ${scope.sql} AND p.status IN ('succeeded','partially_refunded','refunded','disputed') AND p.created_at >= ? AND p.created_at < ? GROUP BY l.source ORDER BY cents DESC`).bind(...scope.binds, ...r).all<{ source: string; cents: number }>()).results;
-  return { bySource, funnel: Object.fromEntries(funnel.map((f) => [f.stage, f.n])) as Record<string, number>, created, converted, rate: created ? converted / created : null, quotesSent: sent?.n ?? 0, quotesAccepted: accepted?.n ?? 0, revenue };
+  const attribution = await attributionReport(db, actor, range);
+  return { bySource, funnel: Object.fromEntries(funnel.map((f) => [f.stage, f.n])) as Record<string, number>, created, converted, rate: created ? converted / created : null, quotesSent: sent?.n ?? 0, quotesAccepted: accepted?.n ?? 0, revenue, attribution };
+}
+
+// ── campaign attribution (CRM-001, CRM-006) ──
+export interface AttributionRow { value: string | null; n: number; converted: number }
+/** Leads created in the range grouped by UTM source, medium and campaign (each dimension separately, plus the full combination). */
+export async function attributionReport(db: Db, actor: Actor, range: DateRange) {
+  const scope = leadScope(actor);
+  const by = async (col: "utm_source" | "utm_medium" | "utm_campaign") => (await db.prepare(`SELECT l.${col} AS value, COUNT(*) AS n, SUM(CASE WHEN l.stage='converted' THEN 1 ELSE 0 END) AS converted
+      FROM leads l WHERE ${scope.sql} AND l.created_at >= ? AND l.created_at < ? GROUP BY l.${col} ORDER BY n DESC, value LIMIT 25`).bind(...scope.binds, range.fromIso, range.toIso).all<AttributionRow>()).results;
+  const combos = (await db.prepare(`SELECT l.utm_source AS source, l.utm_medium AS medium, l.utm_campaign AS campaign, COUNT(*) AS n, SUM(CASE WHEN l.stage='converted' THEN 1 ELSE 0 END) AS converted
+      FROM leads l WHERE ${scope.sql} AND l.created_at >= ? AND l.created_at < ? AND (l.utm_source IS NOT NULL OR l.utm_medium IS NOT NULL OR l.utm_campaign IS NOT NULL)
+      GROUP BY l.utm_source, l.utm_medium, l.utm_campaign ORDER BY n DESC LIMIT 50`).bind(...scope.binds, range.fromIso, range.toIso)
+    .all<{ source: string | null; medium: string | null; campaign: string | null; n: number; converted: number }>()).results;
+  return { source: await by("utm_source"), medium: await by("utm_medium"), campaign: await by("utm_campaign"), combos };
 }

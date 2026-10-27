@@ -21,10 +21,14 @@ export interface Env {
   GITHUB_TOKEN?: string;
   GITHUB_REPO?: string;
   VOICE_WEBHOOK_SECRET?: string;
+  /** Retell workspace API key that carries the webhook badge (verifies X-Retell-Signature). VOICE-003. */
+  RETELL_API_KEY?: string;
+  /** Resend webhook signing secret (whsec_…), verifies Svix signatures. EMAIL-003. */
+  RESEND_WEBHOOK_SECRET?: string;
   FILES?: unknown;              // R2 bucket binding
   ASSETS?: { fetch(req: Request): Promise<Response> };
   /** Test/dev hook: overrides the computed adapters. */
-  overrides?: Partial<Pick<AppContext, "email" | "storage" | "payments">> & { now?: () => Date };
+  overrides?: Partial<Pick<AppContext, "email" | "storage" | "payments">> & { now?: () => Date; /** Test seam for read-only provider calls (cost import, reconciliation). */ fetch?: typeof fetch };
   /** Legacy test seam retained for the API tests. */
   resolveActor?: (req: Request) => Promise<Actor | null>;
 }

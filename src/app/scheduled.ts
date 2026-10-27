@@ -11,13 +11,16 @@ import { runSupportEscalationSweep } from "../services/support.ts";
 import { runInactivitySweep } from "../services/projects.ts";
 import { syncGithub } from "../services/github.ts";
 import { refreshIntegrationHealth } from "../services/integrations.ts";
+import { runCostImport } from "../services/cost-import.ts";
+import { runStripeReconciliation } from "../services/stripe-reconcile.ts";
 
-export type JobName = "requirements" | "stripe_reconcile" | "support_escalation" | "github_sync" | "inactivity" | "integration_health";
+export type JobName = "requirements" | "stripe_reconcile" | "support_escalation" | "github_sync" | "inactivity" | "integration_health"
+  | "stripe_side_reconcile" | "cost_import";
 
 /** Cron expression → jobs. Must match [triggers] crons in wrangler.toml. */
 export const SCHEDULE: Record<string, JobName[]> = {
   "*/15 * * * *": ["stripe_reconcile", "support_escalation", "github_sync"],
-  "17 11 * * *": ["requirements", "inactivity", "integration_health"],
+  "17 11 * * *": ["requirements", "inactivity", "integration_health", "stripe_side_reconcile", "cost_import"],
 };
 
 export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string, { ok: boolean; detail: string }>> {
@@ -39,6 +42,10 @@ export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string,
         }
         case "inactivity": detail = `${(await runInactivitySweep(ctx)).length} inactivity actions`; break;
         case "integration_health": detail = `${(await refreshIntegrationHealth({ db: ctx.db, env, storage: ctx.storage })).length} integration rows refreshed`; break;
+        // PAY-009: read-only comparison with Stripe; findings for human review, never marks anything paid.
+        case "stripe_side_reconcile": detail = (await runStripeReconciliation(ctx.db, env)).detail; break;
+        // FIN-002: AI usage + Stripe fees → project_costs, each source imported once.
+        case "cost_import": detail = (await runCostImport(ctx.db, env)).detail; break;
       }
       results[job] = { ok: true, detail };
       await record(env, job, at, null);

@@ -20,28 +20,34 @@ export function actionForm(ctx: AppContext, action: string, text: string, opts: 
 
 interface FieldBase { name: string; label: string; hint?: string; error?: string; required?: boolean; id?: string }
 
+/** aria-invalid + aria-describedby linking a control to its error message and hint (BRAND-005, TEST-003). */
+function describedBy(id: string, f: { hint?: string; error?: string }): SafeHtml {
+  const ids = [f.error ? `${id}-err` : "", f.hint ? `${id}-hint` : ""].filter(Boolean).join(" ");
+  return html`${f.error ? html` aria-invalid="true"` : ""}${ids ? html` aria-describedby="${ids}"` : ""}`;
+}
+
 export function input(f: FieldBase & { type?: string; value?: string | number | null; autocomplete?: string; placeholder?: string; min?: number; max?: number; step?: string; pattern?: string; maxlength?: number; inputmode?: string }): SafeHtml {
   const id = f.id ?? `f-${f.name}`;
   return html`<div class="field"><label for="${id}">${f.label}${f.required ? html` <span aria-hidden="true" class="faint">*</span>` : ""}</label>
-<input class="input" id="${id}" name="${f.name}" type="${f.type ?? "text"}" value="${f.value ?? ""}"${f.required ? html` required` : ""}${f.autocomplete ? html` autocomplete="${f.autocomplete}"` : ""}${f.placeholder ? html` placeholder="${f.placeholder}"` : ""}${f.min !== undefined ? html` min="${f.min}"` : ""}${f.max !== undefined ? html` max="${f.max}"` : ""}${f.step ? html` step="${f.step}"` : ""}${f.maxlength ? html` maxlength="${f.maxlength}"` : ""}${f.inputmode ? html` inputmode="${f.inputmode}"` : ""}${f.error ? html` aria-invalid="true" aria-describedby="${id}-err"` : f.hint ? html` aria-describedby="${id}-hint"` : ""}>
+<input class="input" id="${id}" name="${f.name}" type="${f.type ?? "text"}" value="${f.value ?? ""}"${f.required ? html` required` : ""}${f.autocomplete ? html` autocomplete="${f.autocomplete}"` : ""}${f.placeholder ? html` placeholder="${f.placeholder}"` : ""}${f.min !== undefined ? html` min="${f.min}"` : ""}${f.max !== undefined ? html` max="${f.max}"` : ""}${f.step ? html` step="${f.step}"` : ""}${f.maxlength ? html` maxlength="${f.maxlength}"` : ""}${f.inputmode ? html` inputmode="${f.inputmode}"` : ""}${describedBy(id, f)}>
 ${f.hint ? html`<span class="hint" id="${id}-hint">${f.hint}</span>` : ""}${f.error ? html`<span class="error-text" id="${id}-err" role="alert">${f.error}</span>` : ""}</div>`;
 }
 
 export function textarea(f: FieldBase & { value?: string | null; rows?: number; maxlength?: number }): SafeHtml {
   const id = f.id ?? `f-${f.name}`;
   return html`<div class="field"><label for="${id}">${f.label}${f.required ? html` <span aria-hidden="true" class="faint">*</span>` : ""}</label>
-<textarea class="textarea" id="${id}" name="${f.name}" rows="${f.rows ?? 5}"${f.required ? html` required` : ""}${f.maxlength ? html` maxlength="${f.maxlength}"` : ""}${f.error ? html` aria-invalid="true" aria-describedby="${id}-err"` : ""}>${f.value ?? ""}</textarea>
-${f.hint ? html`<span class="hint">${f.hint}</span>` : ""}${f.error ? html`<span class="error-text" id="${id}-err" role="alert">${f.error}</span>` : ""}</div>`;
+<textarea class="textarea" id="${id}" name="${f.name}" rows="${f.rows ?? 5}"${f.required ? html` required` : ""}${f.maxlength ? html` maxlength="${f.maxlength}"` : ""}${describedBy(id, f)}>${f.value ?? ""}</textarea>
+${f.hint ? html`<span class="hint" id="${id}-hint">${f.hint}</span>` : ""}${f.error ? html`<span class="error-text" id="${id}-err" role="alert">${f.error}</span>` : ""}</div>`;
 }
 
 export function select(f: FieldBase & { options: { value: string; label: string }[] | string[]; value?: string | null; includeBlank?: string }): SafeHtml {
   const id = f.id ?? `f-${f.name}`;
   const opts = f.options.map((o) => (typeof o === "string" ? { value: o, label: labelize(o) } : o));
   return html`<div class="field"><label for="${id}">${f.label}</label>
-<select class="select" id="${id}" name="${f.name}"${f.required ? html` required` : ""}${f.error ? html` aria-invalid="true"` : ""}>
+<select class="select" id="${id}" name="${f.name}"${f.required ? html` required` : ""}${describedBy(id, f)}>
 ${f.includeBlank !== undefined ? html`<option value="">${f.includeBlank}</option>` : ""}
 ${opts.map((o) => html`<option value="${o.value}"${o.value === (f.value ?? "") ? html` selected` : ""}>${o.label}</option>`)}
-</select>${f.hint ? html`<span class="hint">${f.hint}</span>` : ""}${f.error ? html`<span class="error-text" role="alert">${f.error}</span>` : ""}</div>`;
+</select>${f.hint ? html`<span class="hint" id="${id}-hint">${f.hint}</span>` : ""}${f.error ? html`<span class="error-text" id="${id}-err" role="alert">${f.error}</span>` : ""}</div>`;
 }
 
 export function checkbox(name: string, text: string, opts: { checked?: boolean; value?: string; required?: boolean } = {}): SafeHtml {
@@ -50,8 +56,8 @@ export function checkbox(name: string, text: string, opts: { checked?: boolean; 
 
 export function fileInput(name: string, labelText: string, opts: { multiple?: boolean; hint?: string; accept?: string } = {}): SafeHtml {
   return html`<div class="field dropzone"><label for="f-${name}">${labelText}</label>
-<input id="f-${name}" class="input" type="file" name="${name}"${opts.multiple ? html` multiple` : ""} accept="${opts.accept ?? ".pdf,.png,.jpg,.jpeg,.webp,.gif,.docx,.xlsx,.zip,.txt,.csv"}">
-<span class="hint">${opts.hint ?? "PDF, images, Word, Excel, ZIP, text or CSV · up to 25 MB each"}</span></div>`;
+<input id="f-${name}" class="input" type="file" name="${name}"${opts.multiple ? html` multiple` : ""} accept="${opts.accept ?? ".pdf,.png,.jpg,.jpeg,.webp,.gif,.docx,.xlsx,.zip,.txt,.csv"}" aria-describedby="f-${name}-hint">
+<span class="hint" id="f-${name}-hint">${opts.hint ?? "PDF, images, Word, Excel, ZIP, text or CSV · up to 25 MB each"}</span></div>`;
 }
 
 export function formErrors(errors: string[]): SafeHtml {
@@ -114,8 +120,8 @@ export function dl(items: [string, SafeHtml | string | number | null | undefined
   return html`<dl class="dl">${items.map(([k, v]) => html`<dt>${k}</dt><dd>${(v ?? "—") as SafeHtml}</dd>`)}</dl>`;
 }
 
-export function tabs(items: { href: string; label: string; current: boolean }[]): SafeHtml {
-  return html`<nav class="tabs">${items.map((t) => html`<a href="${safeUrl(t.href)}"${t.current ? html` aria-current="page"` : ""}>${t.label}</a>`)}</nav>`;
+export function tabs(items: { href: string; label: string; current: boolean }[], ariaLabel = "Section"): SafeHtml {
+  return html`<nav class="tabs" aria-label="${ariaLabel}">${items.map((t) => html`<a href="${safeUrl(t.href)}"${t.current ? html` aria-current="page"` : ""}>${t.label}</a>`)}</nav>`;
 }
 
 export function pageHead(title: string, actions?: SafeHtml, sub?: string): SafeHtml {
@@ -128,3 +134,85 @@ export function barChart(rows: { label: string; value: number; display: string }
 }
 
 export const nl2br = (s: string | null | undefined): SafeHtml => join((s ?? "").split("\n").map((line) => html`${line}`), "<br>");
+
+// ───────────── UX workstream components (BRAND-003..005) ─────────────
+
+/**
+ * Drawer (BRAND-003). `drawerLink` is an ordinary link to a full server-rendered page; with JavaScript,
+ * app.js opens the page's `[data-drawer-body]` region in the shared `<dialog class="drawer">` instead.
+ * Without JavaScript (or if the fetch fails) the link simply navigates.
+ */
+export function drawerAttrs(quickUrl: string): SafeHtml {
+  return html` data-drawer="${safeUrl(quickUrl)}"`;
+}
+
+/** The one drawer dialog per page. Rendered by appLayout; content is filled by app.js. */
+export function drawerShell(): SafeHtml {
+  return html`<dialog class="drawer" id="drawer" aria-labelledby="drawer-title">
+<div class="drawer__head"><h2 class="drawer__title" id="drawer-title">Details</h2><form method="dialog"><button class="btn btn--ghost btn--sm" type="submit" data-close>Close</button></form></div>
+<div class="drawer__body" aria-live="polite"></div>
+<div class="drawer__foot"><a class="btn btn--secondary btn--sm" href="#" data-drawer-full>Open full record</a></div></dialog>`;
+}
+
+/** Wraps the part of a full page that the drawer shows. */
+export function drawerBody(title: string, body: SafeHtml): SafeHtml {
+  return html`<div data-drawer-body data-drawer-title="${title}">${body}</div>`;
+}
+
+/** Skeleton loader (BRAND-005): placeholder blocks while a slow section loads. Purely decorative for AT. */
+export function skeleton(opts: { lines?: number; kpis?: number } = {}): SafeHtml {
+  const kpis = opts.kpis ?? 0, lines = opts.lines ?? 4;
+  return html`<div class="skeleton-wrap" aria-hidden="true">${kpis ? html`<div class="kpis">${Array.from({ length: kpis }, () => html`<div class="kpi"><div class="skeleton skeleton--label"></div><div class="skeleton skeleton--value"></div></div>`)}</div>` : ""}
+<div class="card">${Array.from({ length: lines }, (_, i) => html`<div class="skeleton skeleton--line" style="width:${[92, 78, 85, 64, 88, 70][i % 6]}%"></div>`)}</div></div>`;
+}
+
+export interface DateRangeValue { from: string; to: string }
+
+/** Server-computed presets so they work as plain links without JavaScript. Dates are UTC calendar days. */
+export function dateRangePresets(now: Date): { key: string; label: string; from: string; to: string }[] {
+  const d = (x: Date) => x.toISOString().slice(0, 10);
+  const today = d(now);
+  const y = now.getUTCFullYear(), m = now.getUTCMonth();
+  return [
+    { key: "month", label: "This month", from: d(new Date(Date.UTC(y, m, 1))), to: today },
+    { key: "30d", label: "Last 30 days", from: d(new Date(now.getTime() - 29 * 86400e3)), to: today },
+    { key: "quarter", label: "This quarter", from: d(new Date(Date.UTC(y, Math.floor(m / 3) * 3, 1))), to: today },
+    { key: "year", label: "This year", from: d(new Date(Date.UTC(y, 0, 1))), to: today },
+  ];
+}
+
+/**
+ * Date-range control (BRAND-004): from/to date inputs plus preset links (this month, last 30 days, this
+ * quarter, this year). Keeps the existing query parameter names `from` and `to` and preserves other params.
+ */
+export function dateRange(ctx: AppContext, value: DateRangeValue, opts: { extra?: SafeHtml; legend?: string; applyLabel?: string } = {}): SafeHtml {
+  const presets = dateRangePresets(ctx.now());
+  const keep = [...ctx.url.searchParams].filter(([k]) => !["from", "to", "page"].includes(k));
+  const href = (from: string, to: string) => {
+    const u = new URL(ctx.url); u.searchParams.set("from", from); u.searchParams.set("to", to); u.searchParams.delete("page");
+    return u.pathname + u.search;
+  };
+  return html`<form method="get" class="filters date-range" action="${ctx.url.pathname}" data-slow>
+${keep.filter(([k]) => !opts.extra || !new RegExp(`name="${k}"`).test(opts.extra.value)).map(([k, v]) => html`<input type="hidden" name="${k}" value="${v}">`)}
+<fieldset class="date-range__fields"><legend class="label">${opts.legend ?? "Date range"}</legend>
+<div class="date-range__inputs">${input({ name: "from", id: "range-from", label: "From", type: "date", value: value.from })}${input({ name: "to", id: "range-to", label: "To", type: "date", value: value.to })}</div>
+<nav class="date-range__presets" aria-label="Date range presets">${presets.map((p) => html`<a class="chip" href="${href(p.from, p.to)}"${p.from === value.from && p.to === value.to ? html` aria-current="true"` : ""}>${p.label}</a>`)}</nav></fieldset>
+${opts.extra ?? ""}<div class="field date-range__apply">${button(opts.applyLabel ?? "Apply", { variant: "secondary", size: "sm" })}</div></form>`;
+}
+
+/**
+ * Rich-text field (BRAND-004): a plain textarea that accepts the safe markdown subset rendered by
+ * src/ui/markdown.ts, plus a server-rendered preview. app.js adds a formatting toolbar and updates the
+ * preview live; without JavaScript the textarea and the saved-value preview still work.
+ */
+export function richText(f: FieldBase & { value?: string | null; rows?: number; maxlength?: number; preview: SafeHtml }): SafeHtml {
+  const id = f.id ?? `f-${f.name}`;
+  const hint = `${f.hint ? f.hint + " " : ""}Formatting: ## heading, **bold**, *italic*, [link text](https://…), "- " bullets, "1. " numbered lists, blank line between paragraphs. HTML is not allowed.`;
+  return html`<div class="richtext" data-richtext="${id}">${textarea({ ...f, hint })}
+<div class="richtext__preview-wrap"><div class="label" id="${id}-preview-label">Formatted preview</div><div class="richtext__preview prose" id="${id}-preview" data-preview-for="${id}" aria-labelledby="${id}-preview-label">${f.preview}</div></div></div>`;
+}
+
+/** Hidden attribution fields for public lead forms (CRM-001). Values are computed server-side; no JavaScript. */
+export function attributionFields(a: Partial<Record<"utm_source" | "utm_medium" | "utm_campaign" | "utm_term" | "utm_content" | "referrer" | "landing_page", string>>): SafeHtml {
+  return html`${(["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "referrer", "landing_page"] as const).filter((k) => a[k]).map((k) => html`<input type="hidden" name="${k}" value="${a[k]}">`)}`;
+}

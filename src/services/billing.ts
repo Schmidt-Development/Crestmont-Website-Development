@@ -9,6 +9,7 @@ import { PACKAGES, MAINTENANCE_PLANS, type PackageId, type MaintenanceId, type M
 import { createPackageOrder } from "./commerce.ts";
 import { audit } from "./security.ts";
 import { sendMail } from "./mailer.ts";
+import { effectivePrice, pricedItem } from "./pricing-approvals.ts";
 
 export const NOT_CONFIGURED = "Online payment is not configured yet.";
 
@@ -26,7 +27,7 @@ export async function startPackageCheckout(ctx: AppContext, user: CheckoutUser, 
   const pkg = packageById(packageId);
   if (!pkg) throw new HttpError(404, "Unknown package.");
   if (!ctx.payments.configured) throw new HttpError(409, NOT_CONFIGURED);
-  const order = await createPackageOrder(ctx.db, organizationId, pkg.id, user.id);
+  const order = await createPackageOrder(ctx.db, organizationId, pkg.id, user.id, ctx.now());
   const session = await ctx.payments.createCheckout({
     mode: "payment",
     lines: [{ name: order.description, amountCents: order.amountCents }],
@@ -92,7 +93,7 @@ export async function startMaintenanceCheckout(ctx: AppContext, user: CheckoutUs
   const session = await ctx.payments.createCheckout({
     mode: "subscription",
     recurringInterval: "month",
-    lines: [{ name: `${plan.name} maintenance (monthly)`, amountCents: plan.monthlyCents }],
+    lines: [{ name: `${plan.name} maintenance (monthly)`, amountCents: pricedItem("maintenance", plan.id) ? (await effectivePrice(ctx.db, "maintenance", plan.id, ctx.now())).cents : plan.monthlyCents }], // CAT-007 effective price
     customerEmail: user.email,
     successUrl: `${ctx.baseUrl}/portal/billing?checkout=success`,
     cancelUrl: `${ctx.baseUrl}/checkout/maintenance/${plan.id}?checkout=cancelled`,

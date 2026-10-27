@@ -50,6 +50,11 @@ async function staffUsers(ctx: AppContext, roles?: string[]): Promise<{ id: stri
   return (await ctx.db.prepare(`SELECT u.id, u.display_name, MIN(m.role_id) AS role_id FROM users u JOIN memberships m ON m.user_id = u.id WHERE u.disabled_at IS NULL AND m.role_id IN (${r.map(() => "?").join(",")}) GROUP BY u.id ORDER BY u.display_name`).bind(...r).all<{ id: string; display_name: string; role_id: string }>()).results;
 }
 
+async function generalConversationsNotice(ctx: AppContext): Promise<SafeHtml> {
+  const n = await M.generalUnreadForStaff(ctx.db, ctx.user!.id);
+  return n ? html`<div class="alert alert--info" role="status">${n} unread general customer message${n === 1 ? "" : "s"} (outside projects). <a href="/staff/conversations">Open conversations</a></div>` : html``;
+}
+
 export function register(r: Router): void {
   // ───────────── My work ─────────────
   r.get("/staff", async (ctx) => {
@@ -90,6 +95,7 @@ export function register(r: Router): void {
     if (can(actor, "support.access")) roleKpis.push(kpi("My open tickets", tickets.length));
     const body = html`${pageHead("My work", undefined, label(ctx.user!.memberships.find((m) => m.organizationId)?.role ?? "staff"))}
 <div class="kpis">${kpi("Open tasks", tasks.length, overdue ? `${overdue} overdue` : "None overdue")}${kpi("Due in 7 days", dueSoon)}${kpi("Unread customer messages", unreadMsgs)}${roleKpis}</div>
+${can(actor, "customers.read") ? await generalConversationsNotice(ctx) : ""}
 <div class="grid grid-2">
 <section class="card"><h2 class="card__title">Assigned tasks</h2>${table(tasks, [
   { header: "Task", cell: (t) => html`<a href="/staff/tasks/${t.id}">${t.title}</a><br><span class="faint">${t.project_name}</span>` },
@@ -110,6 +116,50 @@ ${can(actor, "support.access") || tickets.length ? html`<section class="card"><h
 <section class="card"><h2 class="card__title">My recent activity</h2>${activity.length ? html`<ul class="timeline">${activity.map((a) => html`<li>${a.action.replace(/[._]/g, " ")} <span class="faint">(${a.subject_type})</span><br><span class="faint">${formatDateTime(a.created_at)}</span></li>`)}</ul>` : html`<p class="muted">No activity recorded yet.</p>`}</section>
 </div>`;
     return page(ctx, "My work", body);
+  });
+
+  // ───────────── General (non-project) customer conversations (PORTAL-005) ─────────────
+  r.get("/staff/conversations", async (ctx) => {
+    requireStaff(ctx, "customers.read");
+    const q = (ctx.url.searchParams.get("q") ?? "").trim().slice(0, 120);
+    const rows = await M.listGeneralConversations(ctx.db, ctx.user!.id, { q: q || undefined });
+    return page(ctx, "Conversations", html`${pageHead("General conversations", undefined, "Customer messages outside projects")}
+<form method="get" class="filters" action="/staff/conversations">${input({ name: "q", label: "Find a customer", value: q, placeholder: "Organization name" })}${button("Search", { variant: "secondary", size: "sm" })}</form>
+${table(rows, [
+  { header: "Customer", cell: (x) => html`<a href="/staff/conversations/${x.id}">${x.name}</a>` },
+  { header: "Messages", cell: (x) => x.total, numeric: true },
+  { header: "Unread", cell: (x) => (x.unread ? badge("new", `${x.unread} unread`) : "—") },
+  { header: "Last message", cell: (x) => formatDateTime(x.last_at) },
+], { empty: emptyState(q ? "No customers match" : "No general conversations yet", q ? "Try another name." : "Customers start one from Messages in their portal. Search for a customer to message them first.") })}`);
+  });
+  const conversationPage = async (ctx: AppContext, orgId: string, errors: string[] = [], status = 200, draft = "") => {
+    requireStaff(ctx, "customers.read");
+    const org = await ctx.db.prepare(`SELECT id, name FROM organizations WHERE id = ? AND kind = 'customer'`).bind(orgId).first<{ id: string; name: string }>();
+    if (!org) throw new HttpError(404, "Customer not found");
+    const msgs = await M.listThread(ctx.db, { userId: ctx.user!.id, organizationId: org.id, staff: true }, null);
+    await M.markThreadRead(ctx.db, ctx.user!.id, org.id, null, true);
+    const body = html`${pageHead(org.name, html`${linkButton("All conversations", "/staff/conversations", "ghost", "sm")}${linkButton("Customer record", `/staff/customers/${org.id}`, "ghost", "sm")}`, "General conversation")}
+${formErrors(errors)}
+<div class="thread">${msgs.length ? msgs.map((m) => html`<article class="msg${m.internal ? " msg--internal" : m.author_is_staff ? " msg--staff" : ""}"><div class="msg__meta">${m.internal ? "Internal note · " : ""}${m.author_name}${m.author_is_staff ? " · Crestmont" : " · Customer"} · ${formatDateTime(m.created_at)}${!m.internal && m.author_is_staff ? (m.read_by_other_side ? " · Seen by customer" : " · Not yet read by customer") : ""}</div>${nl2br(m.body)}${m.attachment_file_id ? html`<p><a href="/files/${m.attachment_file_id}">Attachment: ${m.attachment_name ?? "file"}</a></p>` : ""}</article>`) : emptyState("No messages yet", "Send the first message, or leave an internal note for the team.")}</div>
+<form method="post" action="/staff/conversations/${org.id}" enctype="multipart/form-data" class="card" style="margin-top:1.5rem">${csrf(ctx)}${textarea({ name: "body", label: "Message", required: true, rows: 4, maxlength: 10000, value: draft })}
+<div class="field"><label for="f-attachment">Attachment (optional)</label><input class="input" id="f-attachment" type="file" name="attachment"${ctx.storage ? "" : html` disabled`}></div>
+${checkbox("internal", "Internal note — not visible to the customer")}<div class="form-actions">${button("Send")}</div></form>`;
+    return page(ctx, `${org.name} — conversation`, body, status);
+  };
+  r.get("/staff/conversations/:orgId", async (ctx, p) => conversationPage(ctx, p.orgId));
+  r.post("/staff/conversations/:orgId", async (ctx, p) => {
+    requireStaff(ctx, "customers.read");
+    const org = await ctx.db.prepare(`SELECT id FROM organizations WHERE id = ? AND kind = 'customer'`).bind(p.orgId).first<{ id: string }>();
+    if (!org) throw new HttpError(404, "Customer not found");
+    const f = await ctx.form();
+    const att = f.get("attachment");
+    try {
+      await M.postMessage(ctx, { organizationId: org.id, projectId: null, authorUserId: ctx.user!.id, body: str(f, "body"), attachment: att && typeof att !== "string" ? att : null, internal: !!f.get("internal"), fromStaff: true });
+    } catch (e) {
+      if (e instanceof M.MessageError) return conversationPage(ctx, org.id, [e.message], 422, str(f, "body"));
+      throw e;
+    }
+    return redirect(ctx, `/staff/conversations/${org.id}`, { kind: "success", text: f.get("internal") ? "Internal note added." : "Message sent." });
   });
 
   r.post("/staff/notifications/read", async (ctx) => {
@@ -297,6 +347,7 @@ ${table(files, [
   { header: "File", cell: (f) => html`<a href="/files/${f.id}">${f.filename}</a>${f.replaced_by ? html` ${badge("archived", "Superseded")}` : ""}` }, { header: "Folder", cell: (f) => f.folder ?? "—" },
   { header: "Size", cell: (f) => F.humanSize(f.size_bytes), numeric: true }, { header: "By", cell: (f) => f.uploader }, { header: "Uploaded", cell: (f) => fmtDay(f.created_at) },
   { header: "Scan", cell: (f) => F.scanLabel(f.scan_status) },
+  { header: "", cell: (f) => (f.replaced_by ? "" : html`<a class="btn btn--ghost btn--sm" href="/files/${f.id}/share">Create share link</a>`) },
 ], { empty: html`<p class="muted">No files for this project.</p>` })}
 <form method="post" action="/staff/projects/${proj.id}/files" enctype="multipart/form-data" class="card" style="margin-top:1.5rem">${csrf(ctx)}<h2 class="card__title">Share a file with the customer</h2>
 <div class="field"><label for="f-file">File</label><input class="input" id="f-file" type="file" name="file" required></div>${input({ name: "folder", label: "Folder", value: "Deliverables", maxlength: 80 })}${button("Upload", { variant: "secondary", disabled: !ctx.storage })}</form>`;

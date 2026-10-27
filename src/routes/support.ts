@@ -146,7 +146,7 @@ export function register(r: Router): void {
     const settings = await sup.getSupportSettings(ctx);
     return portalPage(ctx, "Support", html`${pageHead("Support", linkButton("New ticket", "/portal/support/new"), org.organizationName)}
 ${alert("info", sup.hoursDisclosure(settings))}
-<nav class="tabs">${(["all", "active", "closed"] as const).map((v) => html`<a href="/portal/support?view=${v}"${v === view ? html` aria-current="page"` : ""}>${v === "all" ? "All" : v === "active" ? "Open" : "Resolved & closed"}</a>`)}</nav>
+<nav class="tabs" aria-label="Ticket views">${(["all", "active", "closed"] as const).map((v) => html`<a href="/portal/support?view=${v}"${v === view ? html` aria-current="page"` : ""}>${v === "all" ? "All" : v === "active" ? "Open" : "Resolved & closed"}</a>`)}</nav>
 ${table(rows.slice(0, limit), [
       { header: "Subject", cell: (t) => html`<a href="/portal/support/${t.id}">${t.subject}</a>` },
       { header: "Category", cell: (t) => label(t.category) },

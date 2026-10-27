@@ -335,3 +335,121 @@ details > summary { cursor: pointer; padding: var(--s-2) 0; }
   .readiness-report .meter span { background: #000 !important; }
   .readiness-report details > *:not(summary) { display: block; }
 }
+
+/* ── UX workstream: design-system completion (BRAND-003..006, TEST-003) ── */
+/* Drawer: native <dialog class="drawer"> pinned to the right edge, full height. */
+dialog.drawer { padding: 0; width: min(480px, 100vw); display: none; flex-direction: column; inset: 0 0 0 auto; }
+dialog.drawer[open] { display: flex; }
+.drawer__head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); padding: var(--s-4) var(--s-5); border-bottom: 1px solid var(--line); }
+.drawer__title { font-size: var(--fs-xl); margin: 0; }
+.drawer__body { flex: 1; overflow-y: auto; padding: var(--s-5); }
+.drawer__body h2 { font-size: var(--fs-lg); margin-top: var(--s-4); }
+.drawer__foot { padding: var(--s-3) var(--s-5); border-top: 1px solid var(--line); display: flex; justify-content: flex-end; }
+@media (prefers-reduced-motion: no-preference) { dialog.drawer[open] { animation: drawer-in .18s ease-out; } }
+@keyframes drawer-in { from { transform: translateX(24px); opacity: 0; } }
+/* Skeleton loaders */
+.skeleton--line { height: .8rem; margin: var(--s-3) 0; }
+.skeleton--label { height: .6rem; width: 55%; }
+.skeleton--value { height: 1.6rem; width: 40%; margin-top: var(--s-3); }
+.page.is-loading > :not(.loading-state) { display: none; }
+.loading-state { margin-top: var(--s-2); }
+/* Date range control */
+.date-range__fields { border: 0; padding: 0; margin: 0; display: grid; gap: var(--s-2); min-width: 0; }
+.date-range__fields > legend { padding: 0; margin-bottom: var(--s-1); font-family: var(--font-body); font-size: var(--fs-sm); color: var(--text); }
+.date-range__inputs { display: flex; flex-wrap: wrap; gap: var(--s-3); }
+.date-range__inputs .field { margin: 0; min-width: 150px; flex: 1 1 150px; }
+.date-range__presets { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.chip { display: inline-flex; align-items: center; min-height: 34px; padding: 0 var(--s-3); border: 1px solid var(--line); border-radius: 999px; font-size: var(--fs-xs); color: var(--text-2); text-decoration: none; letter-spacing: .03em; }
+.chip:hover { border-color: var(--line-gold); color: var(--white); }
+.chip[aria-current="true"] { border-color: var(--gold-2); color: var(--gold-1); background: var(--ink-2); }
+.date-range__apply { margin: 0; }
+/* Rich text */
+.richtext { display: grid; gap: var(--s-3); margin-bottom: var(--s-4); }
+.richtext .field { margin-bottom: 0; }
+.richtext__toolbar { display: flex; flex-wrap: wrap; gap: var(--s-1); padding: var(--s-1); border: 1px solid var(--line); border-bottom: 0; border-radius: var(--radius) var(--radius) 0 0; background: var(--ink-1); }
+.richtext__toolbar + .textarea { border-top-left-radius: 0; border-top-right-radius: 0; }
+.richtext__preview { border: 1px dashed var(--line); border-radius: var(--radius); padding: var(--s-3) var(--s-4); background: var(--ink-1); max-width: none; font-size: var(--fs-sm); }
+.richtext__preview :last-child { margin-bottom: 0; }
+.richtext__preview h2 { font-size: var(--fs-xl); margin-top: var(--s-3); }
+.richtext__preview h3 { font-size: var(--fs-lg); margin-top: var(--s-3); }
+/* Attribution / share links */
+.attr-list { margin: 0; }
+.share-url { display: block; word-break: break-all; font: var(--fs-sm)/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--ink-1); border: 1px solid var(--line-gold); border-radius: var(--radius); padding: var(--s-3); user-select: all; }
+.share-page { max-width: 640px; }
+
+/* Visual-audit fixes (BRAND-006): every surface shares the same spacing, contrast and tap-target rules. */
+/* Faint text sits on raised surfaces (cards, inputs): #8a857a dropped to 4.47:1 on --ink-3. Raised to keep ≥ 4.5:1 everywhere. */
+:root { --text-3: #949083; }
+/* Tables: header cells aligned with numeric columns; cells never overflow the wrapper. */
+.table th.num { text-align: right; }
+.table td { overflow-wrap: anywhere; }
+.table td:has(> .btn), .table td:has(> form) { white-space: nowrap; }
+/* Forms placed in rows (stage selects, task status, filters) align their controls on a single baseline. */
+form.row { align-items: flex-end; }
+form.row .field { margin-bottom: 0; flex: 1 1 180px; }
+.filters > .btn, .filters > button { min-height: 44px; }
+/* Long unbroken values (ids, hashes, URLs, emails) wrap instead of forcing horizontal scroll. */
+.dl dd, .msg, .kanban__card, .card { overflow-wrap: anywhere; }
+.page-head h1 { overflow-wrap: anywhere; }
+/* Sidebar nav wrapper keeps the existing group spacing. */
+.sidebar nav { display: block; }
+/* Topbar: the person's name and sign-out never squeeze the menu button off-screen on phones. */
+.topbar { flex-wrap: wrap; row-gap: var(--s-2); }
+.topbar form { margin: 0; }
+.topbar .faint { white-space: nowrap; }
+@media (min-width: 961px) { .topbar .nav-toggle { display: none !important; } }
+/* Bar charts collapse the label column on small screens instead of overflowing. */
+@media (max-width: 560px) {
+  .bar-chart__row { grid-template-columns: 1fr auto; }
+  .bar-chart__row > .bar-chart__bar { grid-column: 1 / -1; grid-row: 2; }
+  .dl { grid-template-columns: 1fr; gap: 0 var(--s-5); }
+  .dl dt { margin-top: var(--s-2); }
+  .page-head .actions { margin-left: 0; }
+  .toast { left: var(--s-4); right: var(--s-4); max-width: none; }
+}
+/* Tap targets: links inside running text are fine, but stand-alone controls get at least 34px on touch. */
+@media (pointer: coarse), (max-width: 760px) {
+  .side-link { min-height: 40px; }
+  .tabs a { min-height: 44px; display: inline-flex; align-items: center; }
+  .nav a:not(.btn) { min-height: 40px; display: flex; align-items: center; }
+  .nav-toggle { min-height: 40px; }
+  .pagination a { min-height: 40px; }
+}
+/* ── legal & commerce: receipts (PAY-005) ── */
+.receipt { max-width: 52rem; }
+.receipt-print { background: #fff; color: #000; }
+@media print {
+  .receipt, .receipt * { color: #000 !important; background: #fff !important; border-color: #999 !important; box-shadow: none !important; }
+  .receipt { border: 1px solid #999; break-inside: avoid; }
+  .no-print, .sidebar, .topbar { display: none !important; }
+}
+.receipt-print .receipt, .receipt-print .receipt * { color: #000; background: #fff; border-color: #999; }
+/* Audit fix: ".nav a" (0,1,1) outranked ".btn--primary" (0,1,0), so the header "Request a quote" button rendered
+   gold text on a gold fill (1.07:1). Primary buttons inside the nav keep their ink-on-gold colours (8.3:1). */
+.nav a.btn--primary, .nav a.btn--primary:hover { color: var(--ink-0); }
+/* Audit fix: on phones the footer's 2-column grid was forced to 446px by the support email address (min-content),
+   widening the whole page. Columns may shrink, long addresses wrap, and the brand column spans the full row. */
+.footer-grid > * { min-width: 0; }
+.site-footer a { overflow-wrap: anywhere; }
+@media (max-width: 760px) { .footer-grid > :first-child { grid-column: 1 / -1; } }
+/* Audit fix: the drawer was offset 8px past the right edge by the generic dialog margins. */
+dialog.drawer { position: fixed; left: auto; right: 0; top: 0; bottom: 0; margin: 0; height: 100dvh; max-height: 100dvh; max-width: 100vw; }
+/* Audit fix: checkbox labels in filter rows were 23px high on phones. */
+@media (pointer: coarse), (max-width: 760px) { label.checkbox { min-height: 34px; align-items: center; } label.checkbox input { margin-top: 0; } }
+/* Audit fix: the 248px sidebar clipped the lockup ("CRESTMON…", "WEBSITE DEVELOPMEN…") because the wordmark's
+   letter-spacing was tuned for the public header. Slightly wider sidebar + tighter tracking in the app shell only. */
+@media (min-width: 961px) { .app { grid-template-columns: 264px 1fr; } }
+.sidebar .brand__word { font-size: 1.15rem; letter-spacing: .16em; }
+.sidebar .brand__sub { font-size: .6rem; letter-spacing: .16em; }
+/* Audit fix: bar-chart value column wrapped "1 (0 converted)" onto two lines. */
+.bar-chart__row { grid-template-columns: minmax(90px, 140px) minmax(60px, 1fr) max-content; }
+/* Audit fix: on phones the topbar's Menu button inherited margin-left:auto from the public header toggle and
+   floated right beside the area label, with Sign out dropping to an orphaned line. Menu now leads the bar;
+   the person's name and Sign out stay together on the right. */
+.topbar .nav-toggle { margin-left: 0; }
+@media (max-width: 960px) { .topbar .who { margin-left: auto; } .topbar > form { margin-left: auto; } .topbar .who + form { margin-left: 0; } }
+/* CRM board: each card links to the full lead; "Quick view" opens the lead in the drawer (BRAND-003). */
+.kanban__item { position: relative; }
+.kanban__item .kanban__card { padding-right: 5.5rem; }
+.kanban__quick { position: absolute; top: var(--s-2); right: var(--s-2); display: inline-flex; align-items: center; min-height: 34px; padding: 0 var(--s-2); font-size: var(--fs-xs); color: var(--gold-1); text-decoration: none; border: 1px solid var(--line); border-radius: var(--radius); background: var(--ink-1); }
+.kanban__quick:hover { border-color: var(--line-gold); color: var(--white); }

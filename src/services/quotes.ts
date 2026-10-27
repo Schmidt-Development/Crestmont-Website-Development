@@ -15,6 +15,7 @@ import { changeLeadStage } from "./leads.ts";
 import { createQuoteOrder } from "./commerce.ts";
 import { sendMail } from "./mailer.ts";
 import { audit } from "./security.ts";
+import { withEffectivePackagePrice } from "./pricing-approvals.ts";
 import { getLead, leadScope, type LeadRow } from "./crm.ts";
 
 /** Automation actor used for pipeline moves triggered by a customer's own action (quote acceptance).
@@ -65,7 +66,7 @@ export async function saveQuote(db: Db, actor: Actor, leadId: string, quoteId: s
   const v = validateQuoteInput(input, today);
   if (!v.ok) return v;
   const at = nowIso();
-  const price = v.price;
+  const price = await withEffectivePackagePrice(db, v.price); // CAT-007: Founder-approved effective package price
   const lineJson = JSON.stringify({ lines: price.lines, installments: price.installments });
   if (!quoteId) {
     const qid = newId("qt"), vid = newId("qv");

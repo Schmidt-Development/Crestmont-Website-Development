@@ -37,4 +37,5 @@ vars = { ENVIRONMENT = "production" }
 d1_databases = [{ binding = "DB", database_name = "crestmont-production", database_id = "", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-production" }]
 # Secrets (set with `wrangler secret put`, per environment):
-#   EVIDENCE_INGEST_SECRET, STRIPE_WEBHOOK_SECRET, STRIPE_SECRET_KEY, TURNSTILE_SECRET, RESEND_API_KEY
+#   EVIDENCE_INGEST_SECRET, STRIPE_WEBHOOK_SECRET, STRIPE_SECRET_KEY, TURNSTILE_SECRET, RESEND_API_KEY,
+#   RESEND_WEBHOOK_SECRET (Svix whsec_…), RETELL_API_KEY (Crestmont Retell workspace key with webhook badge)
