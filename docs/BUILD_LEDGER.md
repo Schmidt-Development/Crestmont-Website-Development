@@ -35,3 +35,34 @@ Readiness snapshot (computed, not hand-entered): 11/154 implemented · 34/154 ha
 3. Capture genuine portfolio screenshots via browser automation once a browser or egress is available.
 4. Design system + public site (Phase 4–5), then auth wiring, Stripe test checkout, customer portal.
 5. Readiness dashboard UI and Founder approval panel.
+
+## Session 2 — 2026-10-26 → 27
+
+### Repository and CI
+- Foundation verified (154 requirements, 35 tests, migrations, readiness engine, ledger) and imported to the private repo. Repo later **transferred to `Schmidt-Development/Crestmont-Website-Development`** (Enterprise). This session lost access at the transfer (git 403 / API 404) and cannot attach the org repo because a same-named repo is already attached. **Last commit on GitHub: `6b1cb3e`.** Commits `57145fb` and `a9fe428` (+ this ledger commit) exist only locally and in the delivered git bundle — the next session must push them.
+- **BLK-013 open.** Every GitHub Actions run from `8bec22d` through `6b1cb3e` was refused before any job started: "recent account payments have failed or your spending limit needs to be increased" (last observed: run 40443419501, 2026-10-27 03:18 UTC, after the Founder reported the payment as settled). No run has executed under the Enterprise organization yet. Close BLK-013 only after a run with real job logs succeeds there.
+- CodeQL is a separate workflow (needs GitHub Advanced Security on private repos; Enterprise may now provide it).
+
+### Built (all integrated on `main`, verified locally)
+Core pipeline (router, escaping templates, CSRF, CSP), design system, in-platform auth (PBKDF2, TOTP MFA required for staff with replay protection, idle + absolute session limits, lockout, rate limits, invitations), Stripe test-mode adapter (live keys refused) + webhook application, email adapters (Resend / dev outbox), bounded AI drafts; public website (all §11 pages), CMS, portfolio management; customer portal and project management; CRM, quotes, checkout, billing, refunds, disputes, finance; support, Owner overview, Launch Readiness Command Center UI; platform admin, AI operations, AI receptionist webhook + guardrails, privacy requests; scheduled jobs; ops docs (ASVS self-review, runbook, backup & recovery, voice provider evaluation). Official logo stored byte-identical; crest shown at exactly 2x density.
+
+### Evidence at `a9fe428` (local runs — environment "development", not GitHub Actions)
+- 183 unit/integration tests + 25 real-Chromium journeys (21 §69 journeys + 4 core): 207 passed, 0 failed.
+- Readiness (computed): 67/154 implemented · 105/154 passing dev evidence · 22 blocked · 0 staging · 0 production. Gates A, C, D, E, F, G fail; B passes on local evidence only; H not evaluable. **Not production-ready.**
+- 12 open blockers; 17 security findings recorded (3 resolved, 2 accepted risk, 12 open — 5 release-blocking).
+
+### Not exercisable yet (no accounts / environments)
+Real Stripe checkout, subscriptions, failed-payment recovery, refund issuance (BLK-004); email delivery (BLK-005); voice provider (BLK-009); staging/production deployment and health (BLK-003); GitHub data source in a deployed environment (BLK-013, token). These are covered by signed fixtures and honest "not configured" states, never presented as live.
+
+### Founder decisions that block the next engineering actions
+1. **Access for the new org:** install the Claude GitHub App on `Schmidt-Development` for this repo and start a session with it as source (blocks pushing `57145fb`+, CI verification, BLK-013).
+2. **Cloudflare account + scoped API token** (blocks staging: D1, R2, Workers, cron, Turnstile, DNS — Gates D/E/H, BLK-003).
+3. **Approve together:** maintenance entitlements in `src/domain/catalog.ts` (BLK-010) and authentication approach `docs/adr/0002-authentication-provider.md` (recommended: keep in-platform auth + Cloudflare Access for `/staff`, $0 under 50 staff).
+4. **Stripe test-mode account** (BLK-004) and **Resend + mailbox provider** (BLK-005) for integration certification.
+5. **Portfolio:** document Crestmont's relationship to the three businesses (BLK-008) and either allow the three domains in Settings → Capabilities or provide another genuine capture route (BLK-007).
+Not blocking the next step: voice provider approval (`docs/voice/PROVIDER-EVALUATION.md` recommends Retell, separate workspace), legal entity/attorney review (BLK-006, blocks Gate F and live payments), vector logo (BLK-014).
+
+### Next actions (engineering)
+1. In a session with org access: push local commits, re-run CI, fix any real CI issue, record GitHub run evidence (`gh-*` run ids), close BLK-013 only on a green executed run.
+2. With Cloudflare access: create staging D1/R2, apply migrations, deploy staging, set secrets, run the e2e suite against the staging URL with EVIDENCE_ENVIRONMENT=staging, post evidence.
+3. Remaining in-progress items (see `requirements/status/*.ts` "missing" notes): malware scanning, external alerting, breached-password check, UTM attribution, PDF receipts/quotes, Resend delivery webhooks, provider adapter for the chosen voice platform.
