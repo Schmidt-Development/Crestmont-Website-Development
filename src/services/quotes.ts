@@ -33,7 +33,7 @@ export interface QuoteVersionRow {
   id: string; quote_id: string; version: number; line_items_json: string; total_cents: number; payment_schedule: string; scope_text: string;
   valid_until: string | null; accepted_at: string | null; accepted_by_contact_id: string | null; accepted_by_user_id: string | null; package_id: string | null; created_at: string;
 }
-export interface QuoteRow { id: string; lead_id: string; status: string; current_version: number; created_by: string; created_at: string; sent_at: string | null }
+export interface QuoteRow { id: string; lead_id: string; status: string; current_version: number; created_by: string; created_at: string; sent_at: string | null; closed_reason?: string | null; closed_at?: string | null }
 
 export function validateQuoteInput(input: QuoteInput, today: string): { ok: true; price: PriceBreakdown } | { ok: false; issues: string[] } {
   const issues: string[] = [];
@@ -54,6 +54,7 @@ export function validateQuoteInput(input: QuoteInput, today: string): { ok: true
 
 function assertLeadWritable(actor: Actor, lead: LeadRow) {
   if (!can(actor, "quote.write")) throw new HttpError(403, "You cannot write quotes.");
+  if (lead.merged_into_lead_id) throw new HttpError(409, `This lead was merged into ${lead.merged_into_lead_id}; quote from that lead instead.`);
   if (can(actor, "lead.write_all")) return;
   if (can(actor, "lead.write_assigned") && lead.owner_user_id === actor.userId) return;
   throw new HttpError(403, "This lead is not assigned to you.");
@@ -102,15 +103,52 @@ export async function getQuote(db: Db, actor: Actor, quoteId: string) {
   return { quote: q, versions, current: versions.find((v) => v.version === q.current_version)! };
 }
 
-export async function listQuotes(db: Db, actor: Actor, f: { status?: string }, page: { limit: number; offset: number }) {
+export interface QuoteListFilter { status?: string; q?: string; today?: string }
+export type QuoteListRow = { id: string; status: string; current_version: number; created_at: string; sent_at: string | null; lead_id: string; total_cents: number; payment_schedule: string; valid_until: string | null; package_id: string | null; contact_name: string; contact_email: string | null; company_name: string | null; closed_reason: string | null };
+
+/** "Lapsed" = a draft or sent quote whose current version's valid-until date has passed (it can no longer be accepted). */
+function quoteFilterSql(actor: Actor, f: QuoteListFilter) {
   const scope = leadScope(actor);
-  const conds = [scope.sql], binds = [...scope.binds];
-  if (f.status) { conds.push(`q.status = ?`); binds.push(f.status); }
-  return (await db.prepare(`SELECT q.id, q.status, q.current_version, q.created_at, q.sent_at, q.lead_id, qv.total_cents, qv.payment_schedule, qv.valid_until, qv.package_id, c.name AS contact_name, co.name AS company_name
+  const conds = [scope.sql], binds: unknown[] = [...scope.binds];
+  const today = f.today ?? nowIso().slice(0, 10);
+  if (f.status === "lapsed") { conds.push(`q.status IN ('draft','sent') AND qv.valid_until IS NOT NULL AND qv.valid_until < ?`); binds.push(today); }
+  else if (f.status) { conds.push(`q.status = ?`); binds.push(f.status); }
+  if (f.q) {
+    const like = `%${f.q.replace(/[\\%_]/g, (m) => "\\" + m)}%`;
+    conds.push(`(q.id = ? OR c.name LIKE ? ESCAPE '\\' OR c.email LIKE ? ESCAPE '\\' OR co.name LIKE ? ESCAPE '\\')`);
+    binds.push(f.q, like, like, like);
+  }
+  return { where: conds.join(" AND "), binds };
+}
+const QUOTE_LIST_SELECT = `SELECT q.id, q.status, q.current_version, q.created_at, q.sent_at, q.lead_id, q.closed_reason, qv.total_cents, qv.payment_schedule, qv.valid_until, qv.package_id, c.name AS contact_name, c.email AS contact_email, co.name AS company_name
     FROM quotes q JOIN leads l ON l.id = q.lead_id JOIN contacts c ON c.id = l.contact_id LEFT JOIN companies co ON co.id = c.company_id
-    JOIN quote_versions qv ON qv.quote_id = q.id AND qv.version = q.current_version WHERE ${conds.join(" AND ")} ORDER BY q.created_at DESC LIMIT ? OFFSET ?`)
-    .bind(...binds, page.limit + 1, page.offset)
-    .all<{ id: string; status: string; current_version: number; created_at: string; sent_at: string | null; lead_id: string; total_cents: number; payment_schedule: string; valid_until: string | null; package_id: string | null; contact_name: string; company_name: string | null }>()).results;
+    JOIN quote_versions qv ON qv.quote_id = q.id AND qv.version = q.current_version`;
+
+export async function listQuotes(db: Db, actor: Actor, f: QuoteListFilter, page: { limit: number; offset: number }) {
+  const { where, binds } = quoteFilterSql(actor, f);
+  return (await db.prepare(`${QUOTE_LIST_SELECT} WHERE ${where} ORDER BY q.created_at DESC, q.id LIMIT ? OFFSET ?`).bind(...binds, page.limit + 1, page.offset).all<QuoteListRow>()).results;
+}
+
+export async function exportQuotes(db: Db, actor: Actor, f: QuoteListFilter) {
+  const { where, binds } = quoteFilterSql(actor, f);
+  return (await db.prepare(`${QUOTE_LIST_SELECT} WHERE ${where} ORDER BY q.created_at DESC LIMIT 10000`).bind(...binds).all<QuoteListRow>()).results;
+}
+
+/** Closes an open quote: withdrawn by Crestmont, or declined by the customer. Status becomes 'rejected'; proposal links stop accepting. */
+export async function closeQuote(db: Db, actor: Actor, quoteId: string, kind: "withdrawn" | "declined", reason: string) {
+  const { quote } = await getQuote(db, actor, quoteId);
+  const lead = await getLead(db, actor, quote.lead_id);
+  assertLeadWritable(actor, lead);
+  const why = reason.trim();
+  if (why.length < 5 || why.length > 1000) throw new HttpError(422, "Give a reason (5–1000 characters).");
+  if (!["draft", "sent"].includes(quote.status)) throw new HttpError(409, `A ${quote.status} quote cannot be ${kind}.`);
+  const at = nowIso();
+  const res = await db.batch([
+    db.prepare(`UPDATE quotes SET status = 'rejected', closed_reason = ?, closed_by = ?, closed_at = ? WHERE id = ? AND status IN ('draft','sent')`).bind(`${kind}: ${why}`, actor.userId ?? null, at, quoteId),
+    db.prepare(`INSERT INTO crm_activities (id, lead_id, actor_user_id, kind, body, created_at) VALUES (?,?,?,'system',?,?)`).bind(newId("act"), lead.id, actor.userId ?? null, `Quote ${quoteId} ${kind === "withdrawn" ? "withdrawn by Crestmont" : "declined by the customer"}: ${why}`, at),
+  ]);
+  if (res[0].meta.changes !== 1) throw new HttpError(409, "The quote changed while you were editing. Reload and try again.");
+  await audit(db, { actorUserId: actor.userId, action: kind === "withdrawn" ? "quote.withdrawn" : "quote.declined", subjectType: "quote", subjectId: quoteId, details: { reason: why, from: quote.status } });
 }
 
 /** Sends the current version: new access token (hash stored), email, lead → quote_sent where valid. */
@@ -120,6 +158,7 @@ export async function sendQuote(ctx: AppContext, actor: Actor, quoteId: string) 
   const lead = await getLead(ctx.db, actor, quote.lead_id);
   assertLeadWritable(actor, lead);
   if (quote.status === "accepted") throw new HttpError(409, "This quote is already accepted.");
+  if (quote.status === "rejected") throw new HttpError(409, "This quote was withdrawn or declined. Save a new version to reopen it before sending.");
   if (!lead.contact_email) throw new HttpError(409, "The contact has no email address. Add one before sending the proposal.");
   const today = ctx.now().toISOString().slice(0, 10);
   if (current.valid_until && current.valid_until < today) throw new HttpError(409, "This version has expired. Save a new version with a later valid-until date.");
