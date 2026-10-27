@@ -5,8 +5,9 @@ import { can, type Permission } from "../domain/authz.ts";
 import { csrf, drawerShell, skeleton } from "./components.ts";
 import { requestAttribution } from "../services/leads.ts";
 
-// Display: Bodoni Moda (engraved, high-contrast serif with optical sizes). Text & UI: Instrument Sans.
-const FONTS = "https://fonts.googleapis.com/css2?family=Bodoni+Moda:opsz,wght@6..96,400..700&family=Instrument+Sans:wdth,wght@75..100,400..700&display=swap";
+// Type is self-hosted from /assets/fonts (SIL OFL): Gloock for display, Instrument Sans for text and UI.
+// The two faces used above the fold are preloaded; no third-party font requests.
+const PRELOAD_FONTS = ["/assets/fonts/Gloock-Regular.woff", "/assets/fonts/InstrumentSans-Regular.woff"];
 
 export interface PageMeta { title: string; description?: string; path?: string; noindex?: boolean; canonical?: string }
 
@@ -20,8 +21,7 @@ ${m.noindex || ctx.env.ENVIRONMENT !== "production" ? html`<meta name="robots" c
 <meta property="og:title" content="${title}"><meta property="og:type" content="website">${m.description ? html`<meta property="og:description" content="${m.description}">` : ""}
 <meta name="theme-color" content="#0d0d0d"><meta name="color-scheme" content="dark">
 <link rel="icon" type="image/png" sizes="32x32" href="/assets/brand/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="/assets/brand/favicon-16.png">
-<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="${FONTS}"><link rel="stylesheet" href="/assets/app.css">
+${PRELOAD_FONTS.map((f) => html`<link rel="preload" href="${f}" as="font" type="font/woff" crossorigin>`)}<link rel="stylesheet" href="/assets/app.css">
 <script src="/assets/boot.js"></script><script src="/assets/app.js" defer></script></head>`;
 }
 

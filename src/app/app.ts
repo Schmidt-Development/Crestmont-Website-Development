@@ -110,7 +110,7 @@ export function requireCustomerOrg(ctx: AppContext): { organizationId: string; o
   return m;
 }
 
-const STATIC_TYPES: Record<string, string> = { css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8", png: "image/png", jpg: "image/jpeg", webp: "image/webp", svg: "image/svg+xml", ico: "image/x-icon", txt: "text/plain" };
+const STATIC_TYPES: Record<string, string> = { css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8", png: "image/png", jpg: "image/jpeg", webp: "image/webp", svg: "image/svg+xml", ico: "image/x-icon", txt: "text/plain", woff: "font/woff", woff2: "font/woff2" };
 export const staticContentType = (path: string) => STATIC_TYPES[path.split(".").pop() ?? ""] ?? "application/octet-stream";
 
 export async function handle(req: Request, env: Env): Promise<Response> {

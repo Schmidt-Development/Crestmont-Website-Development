@@ -137,10 +137,10 @@ function anatomy(): SafeHtml {
 <div class="mini" data-layer="${last}" aria-hidden="true"><div class="mini__chrome"><i></i><i></i><i></i><span class="mini__url">your-business.example</span><span class="mini__score">✓ Checks complete</span></div>
 <div class="mini__viewport"><div class="mini__page">
 <div class="mini__nav mini__region"><span class="mini__tag">header</span><span class="mini__logo"></span><span class="mini__links"><i></i><i></i><i></i></span><span class="mini__btn"><span class="mini__btn-label">Visit</span></span></div>
-<div class="mini__hero mini__region"><span class="mini__tag">main</span><div><span class="mini__h" style="display:block"></span><span class="mini__h mini__h--2" style="display:block"></span>
-<p class="mini__text mini__text--h">Fresh bread, baked before sunrise.</p><span class="mini__p" style="display:block"></span><span class="mini__p mini__p--2" style="display:block"></span>
+<div class="mini__hero mini__region"><span class="mini__tag">main</span><div><span class="mini__h"></span><span class="mini__h mini__h--2"></span>
+<p class="mini__text mini__text--h">Fresh bread, baked before sunrise.</p><span class="mini__p"></span><span class="mini__p mini__p--2"></span>
 <p class="mini__text mini__text--p">Order ahead online and collect a warm loaf on your way to work.</p><span class="mini__cta"><span class="mini__cta-label">Order ahead</span></span></div><span class="mini__img"></span></div>
-<div class="mini__cards"><span class="mini__card"></span><span class="mini__card"></span><span class="mini__card"></span></div>
+<div class="mini__cards mini__region"><span class="mini__tag">section</span><span class="mini__card"><span class="mini__card-text">Sourdough<span>Baked daily</span></span></span><span class="mini__card"><span class="mini__card-text">Pastries<span>Weekends</span></span></span><span class="mini__card"><span class="mini__card-text">Catering<span>Order 48h ahead</span></span></span></div>
 </div></div>
 <div class="mini__caption"><span>Layer: <strong data-anatomy-caption>${ANATOMY[last - 1]!.title}</strong></span><span>Fictional business, for illustration</span></div></div></div></div>`;
 }
@@ -319,8 +319,8 @@ ${section("Capabilities", caps.heading, ledger(caps.items), { id: "capabilities"
 ${section("Maintenance", "Optional maintenance plans", html`${maintenanceCards()}<p class="section__more"><a href="/hosting-maintenance">Hosting &amp; maintenance</a></p>`, { id: "maintenance" })}
 ${section("Customer experience", exp.heading, itemCards(exp.items), { id: "experience", lede: exp.lede })}
 ${section("FAQs", "Common questions", html`${faqs.map((q) => html`<details class="disclosure"><summary>${q.title}</summary><p>${q.body}</p></details>`)}<p class="section__more"><a href="/faq">All questions</a></p>`, { id: "faq" })}
-<section class="section cta-band" id="contact"><div class="container cta-band__grid"><div><p class="section__label">Contact</p><h2 style="margin-top:1.5rem">${cta.heading}</h2><p class="lede">${cta.body}</p>
-<div class="hero__actions">${linkButton("Request a custom quote", "/quote")}${linkButton("Contact us", "/contact", "secondary")}</div>
+<section class="section cta-band" id="contact"><div class="container cta-band__grid"><div class="cta-band__copy"><p class="section__label">Contact</p><h2>${cta.heading}</h2><p class="lede">${cta.body}</p>
+<div class="hero__actions">${linkButton("Request a custom quote", "/quote", "secondary")}${linkButton("Contact page", "/contact", "ghost")}</div>
 <p class="cta-band__contact">Prefer email? Write to <a href="mailto:${email}">${email}</a>.</p></div>
 <div class="card card--gold">${contactForm(ctx, { interest: "other" }, {}, { compact: true })}</div></div></section>`;
   }));

@@ -60,8 +60,8 @@ Primary button = `--ink-0` on `--gold-2` (9.9:1).
 
 | Role | Family | Notes |
 |---|---|---|
-| Display | **Bodoni Moda** (variable, optical size) | Public h1/h2, prices, app page titles. Weight 500–600. Never below 22px. |
-| Text & UI | **Instrument Sans** (variable, width) | Body, labels, tables, buttons, app headings h2–h4. |
+| Display | **Gloock** (single weight, high-contrast Didone-inspired serif) | Public h1/h2, prices, app page titles. Weight 400 only (`font-synthesis: none`). Never below 22px. |
+| Text & UI | **Instrument Sans** (Regular, Italic, Bold) | Body, labels, tables, buttons, app headings h2–h4. 400–500 map to Regular, 600–700 to Bold. |
 | Numbers | Instrument Sans, `font-variant-numeric: tabular-nums` | KPIs, tables, money. |
 | Code | System monospace | Code blocks, ids, share URLs only — never decorative labels. |
 
@@ -73,6 +73,11 @@ Scale (1.25 minor-third steps, fluid at the top):
 - Display headings: tight leading (1.02–1.1), slight negative tracking at the largest sizes.
 - No all-caps labels except the brand wordmark. Section labels are sentence case.
 - Headlines are never accented by colouring or italicising one word.
+
+Both families are **self-hosted** from `public/assets/fonts/` as Latin-subset WOFF files (≈105 KB total, two
+preloaded) under the SIL Open Font License 1.1 (licence files alongside). No third-party font requests; the CSP's
+`font-src 'self'` covers them. Bodoni Moda was the first choice; Gloock was adopted because it could be self-hosted
+and verified in the build environment — the character (engraved, high-contrast) is the same.
 
 ## 5. Space, width, shape
 
