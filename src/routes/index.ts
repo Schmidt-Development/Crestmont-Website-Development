@@ -11,7 +11,10 @@ import * as finance from "./finance.ts";
 import * as owner from "./owner.ts";
 import * as readiness from "./readiness.ts";
 import * as platform from "./platform.ts";
+import * as legal from "./legal.ts";
+import * as hooks from "./hooks.ts";
+import * as ops from "./ops.ts";
 
 export function registerAll(r: Router): void {
-  for (const m of [api, auth, publicSite, portal, crm, projects, support, finance, owner, readiness, platform]) m.register(r);
+  for (const m of [api, auth, publicSite, portal, crm, projects, support, finance, owner, readiness, platform, legal, hooks, ops]) m.register(r);
 }
