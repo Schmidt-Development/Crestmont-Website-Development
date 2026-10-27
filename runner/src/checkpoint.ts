@@ -1,5 +1,6 @@
-// Checkpoint archives (tar.gz ≤ 20 MB): meta.json + repo.bundle (git bundle --all) + the Agent SDK session
-// transcripts under <job home>/.claude/projects/ that `resume` needs.
+// Checkpoint archives (tar.gz ≤ 20 MB): meta.json + repo.bundle (git bundle --all) + the provider's session
+// transcripts that `resume` needs: the Agent SDK's under <job home>/.claude/projects/ ("claude-projects") and the
+// local provider's under <job dir>/agent/ ("local-agent").
 // Transcript location: https://code.claude.com/docs/en/agent-sdk/sessions ("Claude Code stores sessions under
 // ~/.claude/projects/<encoded-cwd>/*.jsonl ... If you set CLAUDE_CONFIG_DIR, look under $CLAUDE_CONFIG_DIR/projects/";
 // "Resume across hosts: Move the session file ... restore it inside any directory under ~/.claude/projects/").
@@ -21,6 +22,8 @@ export interface CheckpointMeta {
   sessionTotalCostUsd: number;
   sourceBranch: string | null;
   sourceCommit: string | null;
+  /** Agent provider that owns sessionId ("local" | "claude-agent-sdk"); absent in checkpoints from runner 1.0. */
+  provider?: string;
   createdAt: string;
   contents: string[];
 }
@@ -38,6 +41,12 @@ export async function buildCheckpoint(ws: Workspace, git: GitCtx, meta: Omit<Che
   if (existsSync(projects)) {
     cpSync(projects, path.join(stage, "claude-projects"), { recursive: true });
     contents.push("claude-projects");
+  }
+  // The local provider's transcript (<job dir>/agent/, outside the agent's repository).
+  const localAgent = path.join(ws.dir, "agent");
+  if (existsSync(localAgent)) {
+    cpSync(localAgent, path.join(stage, "local-agent"), { recursive: true });
+    contents.push("local-agent");
   }
   if (await createBundle(git, path.join(stage, "repo.bundle"))) contents.push("repo.bundle");
   const full: CheckpointMeta = { schema: "crestmont.runner-checkpoint/1", createdAt: new Date().toISOString(), contents, ...meta };
@@ -107,6 +116,8 @@ export async function restoreCheckpoint(ws: Workspace, git: GitCtx, archive: Buf
     mkdirSync(path.join(ws.home, ".claude"), { recursive: true });
     cpSync(projects, path.join(ws.home, ".claude", "projects"), { recursive: true });
   }
+  const localAgent = path.join(dir, "local-agent");
+  if (existsSync(localAgent)) cpSync(localAgent, path.join(ws.dir, "agent"), { recursive: true });
   rmSync(dir, { recursive: true, force: true });
   rmSync(archiveFile, { force: true });
   return { meta, repoRestored, sessionFileFound: sessionId ? sessionFileExists(ws.home, sessionId) : false };

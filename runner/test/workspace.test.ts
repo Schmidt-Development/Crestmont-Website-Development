@@ -87,12 +87,15 @@ test("[AIB-RUNNER] config reads secrets from *_FILE, requires the essentials and
   const cfg = loadConfig({
     CONTROL_PLANE_URL: "https://crestmont.example", BUILD_RUNNER_SECRET_FILE: path.join(dir, "secret"), ANTHROPIC_API_KEY_FILE: path.join(dir, "key"),
     RUNNER_WORKSPACES: path.join(dir, "ws"), SKILLS_SOURCE_DIR: path.join(dir, "skills"), PATH: "/usr/bin",
+    RUNNER_AGENT_PROVIDER: "claude-agent-sdk", RUNNER_ALLOW_PAID_PROVIDER: "true",
   });
   assert.equal(cfg.secret, "file-based-runner-secret-123456");
+  assert.equal(cfg.anthropicApiKey, "sk-ant-api03-filebasedkey-abcdefghijkl");
   assert.equal(cfg.repo, null);
   assert.equal(cfg.preview, null);
   assert.equal(cfg.sandbox, "on", "sandbox on by default");
-  assert.throws(() => loadConfig({ PATH: "/usr/bin" }), /CONTROL_PLANE_URL, BUILD_RUNNER_SECRET, ANTHROPIC_API_KEY, RUNNER_WORKSPACES, SKILLS_SOURCE_DIR/);
+  assert.throws(() => loadConfig({ PATH: "/usr/bin" }), /CONTROL_PLANE_URL, BUILD_RUNNER_SECRET, LOCAL_MODEL, RUNNER_WORKSPACES, SKILLS_SOURCE_DIR/);
+  assert.throws(() => loadConfig({ PATH: "/usr/bin", RUNNER_AGENT_PROVIDER: "claude-agent-sdk" }), /CONTROL_PLANE_URL, BUILD_RUNNER_SECRET, ANTHROPIC_API_KEY, RUNNER_WORKSPACES, SKILLS_SOURCE_DIR/);
   const lines: string[] = [];
   const log = createLogger({ sink: (l) => lines.push(l) });
   log.info("x", { leaked: "file-based-runner-secret-123456", key: "sk-ant-api03-filebasedkey-abcdefghijkl", header: "authorization: Bearer abc.def" });

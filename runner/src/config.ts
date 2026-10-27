@@ -14,7 +14,11 @@ export interface RunnerConfig {
   skillsSourceDir: string;
   skillsManifestPath: string;
   startersDir: string;
-  /** Agent auth: ANTHROPIC_API_KEY (Claude Console key). */
+  /** Which agent runs the builds. "local" (default) = in-house tool-using agent against a self-hosted model. */
+  agentProvider: AgentProviderId;
+  /** RUNNER_ALLOW_PAID_PROVIDER: the paid Claude Agent SDK adapter refuses to start unless this is true. */
+  allowPaidProvider: boolean;
+  /** Agent SDK auth: ANTHROPIC_API_KEY (Claude Console key). Read ONLY when agentProvider is claude-agent-sdk. */
   anthropicApiKey: string;
   anthropicBaseUrl: string;
   /** PATH handed to the agent and to checks. */
@@ -47,8 +51,56 @@ export interface RunnerConfig {
   gitAuthorName: string;
   gitAuthorEmail: string;
   logLevel: "debug" | "info" | "warn" | "error";
+  /** Local (self-hosted) model settings for the local provider and AI drafts. */
+  local: LocalModelConfig;
+  /** Per-job container sandbox (local provider; every agent command, install, check and browser check runs here). */
+  jobSandbox: JobSandboxConfig;
+  /** Short platform AI drafts (ai_jobs) served by the local model between builds. */
+  aiDrafts: { enabled: boolean; provider: "local" | "claude" };
+  /** Local-only health endpoint port inside the runner container (0 = off). */
+  healthPort: number;
+  healthHost: string;
 }
 
+export type AgentProviderId = "local" | "claude-agent-sdk";
+
+export interface LocalModelConfig {
+  /** OpenAI-compatible base URL, e.g. Ollama: http://host.docker.internal:11434/v1 */
+  baseUrl: string;
+  model: string;
+  /** Placeholder: Ollama ignores it but OpenAI-style clients send one. Never a paid key. */
+  apiKey: string;
+  /** The context window the model server was configured with (OLLAMA_CONTEXT_LENGTH / Modelfile num_ctx). */
+  contextTokens: number;
+  maxOutputTokensPerCall: number;
+  /** Total generated tokens per job attempt (all phases). */
+  maxOutputTokensTotal: number;
+  temperature: number;
+  requestTimeoutMs: number;
+}
+
+export interface JobSandboxConfig {
+  dockerBin: string;
+  image: string;
+  /** Named Docker volume that holds RUNNER_WORKSPACES (runner in a container). Empty = bind-mount host paths. */
+  volume: string;
+  cpus: string;
+  memory: string;
+  pidsLimit: number;
+  tmpfsMb: number;
+  commandTimeoutMs: number;
+  installTimeoutMs: number;
+  /** Docker network whose only egress is the allow-listed registry proxy. */
+  installNetwork: string;
+  /** Registry proxy URL used by package installs, e.g. http://egress-proxy:3128 */
+  installProxy: string;
+  registry: string;
+  diskQuotaMb: number;
+  uid: number;
+  /** Packages whose install scripts may run (npm rebuild, offline) after an --ignore-scripts install. */
+  allowedBuildScripts: string[];
+  browserCheck: boolean;
+}
 type Env = Record<string, string | undefined>;
 
 export function readSecret(env: Env, name: string): string {
@@ -71,7 +123,15 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
 
   const controlPlaneUrl = need("CONTROL_PLANE_URL", env.CONTROL_PLANE_URL ?? "");
   const secret = need("BUILD_RUNNER_SECRET", readSecret(env, "BUILD_RUNNER_SECRET"));
-  const anthropicApiKey = need("ANTHROPIC_API_KEY", readSecret(env, "ANTHROPIC_API_KEY"));
+  const agentProvider: AgentProviderId = env.RUNNER_AGENT_PROVIDER === "claude-agent-sdk" ? "claude-agent-sdk" : "local";
+  if (env.RUNNER_AGENT_PROVIDER && !["local", "claude-agent-sdk"].includes(env.RUNNER_AGENT_PROVIDER)) {
+    throw new Error(`RUNNER_AGENT_PROVIDER must be "local" or "claude-agent-sdk" (got ${env.RUNNER_AGENT_PROVIDER})`);
+  }
+  const allowPaidProvider = env.RUNNER_ALLOW_PAID_PROVIDER === "true";
+  // The Anthropic key is read only for the explicitly enabled paid adapter; the local default never touches it.
+  const anthropicApiKey = agentProvider === "claude-agent-sdk" ? need("ANTHROPIC_API_KEY", readSecret(env, "ANTHROPIC_API_KEY")) : "";
+  const localModel = env.LOCAL_MODEL ?? "";
+  if (agentProvider === "local") need("LOCAL_MODEL", localModel);
   const workspacesRoot = need("RUNNER_WORKSPACES", env.RUNNER_WORKSPACES ?? "");
   const skillsSourceDir = need("SKILLS_SOURCE_DIR", env.SKILLS_SOURCE_DIR ?? "");
   if (missing.length) throw new Error(`Missing required configuration: ${missing.join(", ")}`);
@@ -128,12 +188,51 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
     gitAuthorName: env.RUNNER_GIT_NAME ?? "Crestmont AI Builds",
     gitAuthorEmail: env.RUNNER_GIT_EMAIL ?? "ai-builds@users.noreply.github.com",
     logLevel: (["debug", "info", "warn", "error"].includes(env.LOG_LEVEL ?? "") ? env.LOG_LEVEL : "info") as RunnerConfig["logLevel"],
+    agentProvider,
+    allowPaidProvider,
+    local: {
+      baseUrl: (env.LOCAL_MODEL_BASE_URL ?? "http://host.docker.internal:11434/v1").replace(/\/+$/, ""),
+      model: localModel,
+      apiKey: env.LOCAL_MODEL_API_KEY ?? "ollama",
+      contextTokens: num(env.LOCAL_MODEL_CONTEXT_TOKENS, 32_768),
+      maxOutputTokensPerCall: num(env.LOCAL_MODEL_MAX_OUTPUT_TOKENS, 8_192),
+      maxOutputTokensTotal: num(env.RUNNER_LOCAL_MAX_OUTPUT_TOKENS, 2_000_000),
+      temperature: env.LOCAL_MODEL_TEMPERATURE !== undefined && Number.isFinite(Number(env.LOCAL_MODEL_TEMPERATURE)) ? Number(env.LOCAL_MODEL_TEMPERATURE) : 0.2,
+      requestTimeoutMs: num(env.LOCAL_MODEL_REQUEST_TIMEOUT_SECONDS, 900) * 1000,
+    },
+    jobSandbox: {
+      dockerBin: env.RUNNER_DOCKER_BIN ?? "docker",
+      image: env.RUNNER_SANDBOX_IMAGE ?? "crestmont-build-sandbox:1",
+      volume: env.RUNNER_SANDBOX_VOLUME ?? "",
+      cpus: env.RUNNER_JOB_CPUS ?? "2",
+      memory: env.RUNNER_JOB_MEMORY ?? "4g",
+      pidsLimit: num(env.RUNNER_JOB_PIDS, 512),
+      tmpfsMb: num(env.RUNNER_JOB_TMPFS_MB, 512),
+      commandTimeoutMs: num(env.RUNNER_JOB_COMMAND_TIMEOUT_SECONDS, 600) * 1000,
+      installTimeoutMs: num(env.RUNNER_JOB_INSTALL_TIMEOUT_SECONDS, 900) * 1000,
+      installNetwork: env.RUNNER_INSTALL_NETWORK ?? "crestmont_install",
+      installProxy: env.RUNNER_INSTALL_PROXY ?? "http://egress-proxy:3128",
+      registry: env.RUNNER_NPM_REGISTRY ?? "https://registry.npmjs.org/",
+      diskQuotaMb: num(env.RUNNER_JOB_DISK_MB, 4096),
+      uid: num(env.RUNNER_JOB_UID, 10001),
+      allowedBuildScripts: list(env.RUNNER_ALLOWED_BUILD_SCRIPTS),
+      browserCheck: env.RUNNER_BROWSER_CHECK !== "off",
+    },
+    aiDrafts: {
+      // Default on with the local provider; the paid path needs BOTH explicit flags (and is not implemented here).
+      enabled: env.RUNNER_SERVE_AI_DRAFTS !== undefined ? env.RUNNER_SERVE_AI_DRAFTS === "true" : agentProvider === "local",
+      provider: env.RUNNER_AI_DRAFTS_PROVIDER === "claude" ? "claude" : "local",
+    },
+    healthPort: env.RUNNER_HEALTH_PORT ? num(env.RUNNER_HEALTH_PORT, 0) : 0,
+    healthHost: env.RUNNER_HEALTH_HOST ?? "127.0.0.1",
   };
 }
 
 /** Variable names (never values) the owner report lists under "configuration". */
 export function configuredVariableNames(cfg: RunnerConfig): string[] {
-  const names = ["CONTROL_PLANE_URL", "BUILD_RUNNER_SECRET", "ANTHROPIC_API_KEY", "RUNNER_WORKSPACES", "SKILLS_SOURCE_DIR"];
+  const names = ["CONTROL_PLANE_URL", "BUILD_RUNNER_SECRET", "RUNNER_WORKSPACES", "SKILLS_SOURCE_DIR", "RUNNER_AGENT_PROVIDER"];
+  if (cfg.agentProvider === "claude-agent-sdk") names.push("RUNNER_ALLOW_PAID_PROVIDER", "ANTHROPIC_API_KEY");
+  else names.push("LOCAL_MODEL", "LOCAL_MODEL_BASE_URL", "RUNNER_SANDBOX_IMAGE");
   if (cfg.repo) names.push("PROJECT_REPO_OWNER", "PROJECT_REPO_TOKEN");
   if (cfg.preview) names.push("PREVIEW_DEPLOY_COMMAND", ...cfg.preview.envNames);
   return names;

@@ -1,14 +1,29 @@
 # AI Builds runner: Founder setup
 
 The build runner (`runner/`) is a separate Node 22 process. It pulls eligible paid-intake build jobs from the Crestmont
-control plane (the Worker, see `RUNNER-PROTOCOL.md`), runs a Claude Agent SDK coding session in an isolated workspace
-per job attempt, and reports progress, checkpoints and an owner report back. It never publishes to production, changes
-domains, takes payments or emails customers. Every build lands in **owner review**.
+control plane (the Worker, see `RUNNER-PROTOCOL.md`), runs a coding agent in an isolated workspace per job attempt,
+and reports progress, checkpoints and an owner report back. It never publishes to production, changes domains, takes
+payments or emails customers. Every build lands in **owner review**.
 
-Nothing in this document has been run against real accounts yet. The runner's automated tests use a fake control
-plane and a fake Agent SDK; the first real build is the acceptance test of this setup (step 9).
+**Agent providers.**
+- **`local` (default): self-hosted model, zero per-token fees.** An in-house tool-using agent talks to a model
+  server you run (Ollama) through its OpenAI-compatible API. Every command, install, build, test and browser check
+  runs in a per-build container sandbox. The supported deployment is the company's Windows build machine:
+  **follow `WINDOWS-SUPERCOMPUTER.md`**, then validate with `LOCAL-VALIDATION.md`. Sections 3–6 and 9–10 below apply
+  to it too. Sections 2, 8 (SDK part) and 11 apply only to the optional adapter.
+- **`claude-agent-sdk` (optional, paid): the original Claude Agent SDK adapter.** It is off unless you set
+  **both** `RUNNER_AGENT_PROVIDER=claude-agent-sdk` and `RUNNER_ALLOW_PAID_PROVIDER=true`. It is never used as a
+  fallback when the local provider fails. A failing local build fails honestly.
 
-## 1. Where to run it
+Nothing in this document has been run against real accounts or the Windows machine yet. The runner's automated
+tests use a fake control plane, a fake OpenAI-compatible model server, a fake Docker executor and a fake Agent SDK.
+The first real build is the acceptance test (`LOCAL-VALIDATION.md` for local; section 9 for the SDK adapter).
+
+## 1. Where to run it (optional Agent SDK adapter on a Linux host)
+
+The local provider runs on the Windows build machine (`WINDOWS-SUPERCOMPUTER.md`). The rest of this section is for
+the optional paid adapter.
+
 
 Run it on a small Linux host you control, in Docker, one job at a time:
 
@@ -22,7 +37,11 @@ Run it on a small Linux host you control, in Docker, one job at a time:
 Outbound HTTPS the host needs: `api.anthropic.com`, the platform URL (control plane), `registry.npmjs.org`, and when
 enabled, `github.com` / `api.github.com` (project repositories) and `api.cloudflare.com` (previews). Nothing inbound.
 
-## 2. Anthropic API key (model access and spend cap)
+## 2. Anthropic API key (optional paid adapter only)
+
+Skip this section for the local provider: it never reads `ANTHROPIC_API_KEY`, and its egress proxy denies
+`anthropic.com`.
+
 
 1. In the Claude Console (console.anthropic.com; Anthropic's docs now link it as platform.claude.com), create a
    dedicated **workspace** named for example `crestmont-ai-builds`.
@@ -116,7 +135,12 @@ copied into each workspace, and only their names are enabled for the session.
 | --- | --- | --- | --- |
 | `CONTROL_PLANE_URL` | yes | | Platform base URL, for example `https://crestmont.example` |
 | `BUILD_RUNNER_SECRET` or `BUILD_RUNNER_SECRET_FILE` | yes | | Shared HMAC secret (prefer `_FILE`) |
-| `ANTHROPIC_API_KEY` or `ANTHROPIC_API_KEY_FILE` | yes | | Console API key for the agent (prefer `_FILE`) |
+| `RUNNER_AGENT_PROVIDER` | no | `local` | `local` (self-hosted model) or `claude-agent-sdk` (paid, optional) |
+| `RUNNER_ALLOW_PAID_PROVIDER` | no | `false` | Must be `true` before the paid adapter starts. Never a fallback. |
+| `LOCAL_MODEL` | local: yes | | Model tag on the model server, e.g. `qwen3-coder:30b` (see `WINDOWS-SUPERCOMPUTER.md`) |
+| `LOCAL_MODEL_BASE_URL` | no | `http://host.docker.internal:11434/v1` | OpenAI-compatible endpoint; hosted AI APIs and `*-cloud` models are refused |
+| *(local provider, sandbox, AI drafts)* | no | | Full list in `WINDOWS-SUPERCOMPUTER.md` § "Configuration added for the local provider" |
+| `ANTHROPIC_API_KEY` or `ANTHROPIC_API_KEY_FILE` | SDK adapter only | | Console API key for the paid adapter (prefer `_FILE`); not read by the local provider |
 | `ANTHROPIC_BASE_URL` | no | | Optional proxy that injects the key outside the host |
 | `RUNNER_WORKSPACES` | yes | `/workspaces` in the image | Job workspaces; must not be inside any git repository |
 | `SKILLS_SOURCE_DIR` | yes | `/skills` in the image | Curated skill sources (section 6) |
@@ -128,10 +152,10 @@ copied into each workspace, and only their names are enabled for the session.
 | `PREVIEW_DEPLOY_COMMAND` | no | | Preview deploy command (section 5) |
 | `PREVIEW_DEPLOY_ENV` | no | | Comma list of variables passed only to the preview command; each may use `<NAME>_FILE` |
 | `PREVIEW_DEPLOY_TIMEOUT_SECONDS` | no | `600` | |
-| `RUNNER_SANDBOX` | no | `on` | Claude Code OS sandbox for agent shell commands (section 8) |
+| `RUNNER_SANDBOX` | no | `on` | SDK adapter: Claude Code OS sandbox for agent shell commands (section 8). The local provider always uses per-build containers. |
 | `RUNNER_ALLOWED_DOMAINS` | no | `registry.npmjs.org` | Sandbox network allowlist for agent shell commands |
 | `RUNNER_FETCH_REFERENCES` | no | off | `1` lets the agent WebFetch only the brief's reference-site hosts |
-| `RUNNER_MAX_BUDGET_USD` | no | `50` | Local per-attempt spend cap (the stricter of this and the server's limits wins) |
+| `RUNNER_MAX_BUDGET_USD` | no | `50` | SDK adapter: per-attempt spend cap (the stricter of this and the server's limits wins). Local inference costs $0. |
 | `RUNNER_MAX_TURNS` | no | `300` | Local per-attempt turn cap |
 | `RUNNER_MAX_RUNTIME_MINUTES` | no | `180` | Local per-attempt wall-clock cap |
 | `RUNNER_HEARTBEAT_SECONDS` | no | server value | Override the heartbeat interval |
@@ -145,9 +169,17 @@ copied into each workspace, and only their names are enabled for the session.
 
 ## 8. Build, check and start
 
+**Local provider:** use `runner/windows/Install-CrestmontRunner.ps1` (`WINDOWS-SUPERCOMPUTER.md`). It builds the
+images, writes the compose stack (runner + egress proxy), runs `--preflight` and starts it. On a Linux host the same
+`runner/windows/docker-compose.yml` works with Docker Engine >= 26. Write `runner.env` and `proxy/squid.conf` by hand
+from the installer's steps 7-8.
+
+**Optional paid adapter (Linux host):** the image needs `--build-arg INSTALL_AGENT_SDK=true` and the environment
+`RUNNER_AGENT_PROVIDER=claude-agent-sdk RUNNER_ALLOW_PAID_PROVIDER=true`:
+
 ```sh
 # On the host, from a checkout of the platform repository (the image itself contains only runner/):
-docker build -t crestmont-ai-runner -f runner/Dockerfile runner
+docker build --build-arg INSTALL_AGENT_SDK=true -t crestmont-ai-runner -f runner/Dockerfile runner
 
 docker volume create crestmont-ai-workspaces
 
@@ -155,18 +187,21 @@ docker run --rm \
   -v crestmont-ai-workspaces:/workspaces -v /srv/crestmont/skills:/skills:ro -v /srv/crestmont/secrets:/run/secrets:ro \
   -e CONTROL_PLANE_URL=https://<platform domain> \
   -e BUILD_RUNNER_SECRET_FILE=/run/secrets/build_runner_secret \
+  -e RUNNER_AGENT_PROVIDER=claude-agent-sdk -e RUNNER_ALLOW_PAID_PROVIDER=true \
   -e ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic_api_key \
   crestmont-ai-runner node --no-warnings src/main.ts --preflight
 ```
 
-`--preflight` verifies isolation, every required skill and every tool (git, node, npm, tar, Playwright Chromium, and
-bubblewrap/socat when the sandbox is on) for both workflows, and exits non-zero on any failure. Then start it:
+`--preflight` verifies isolation and every required skill for both workflows, then the provider. SDK adapter: every
+tool (git, node, npm, tar, Playwright Chromium, and bubblewrap/socat when the sandbox is on). Local provider: the model
+is pulled on the model server and the sandbox image exists. It exits non-zero on any failure. Then start it:
 
 ```sh
 docker run -d --name crestmont-ai-runner --restart unless-stopped --memory 4g --cpus 2 \
   -v crestmont-ai-workspaces:/workspaces -v /srv/crestmont/skills:/skills:ro -v /srv/crestmont/secrets:/run/secrets:ro \
   -e CONTROL_PLANE_URL=https://<platform domain> \
   -e BUILD_RUNNER_SECRET_FILE=/run/secrets/build_runner_secret \
+  -e RUNNER_AGENT_PROVIDER=claude-agent-sdk -e RUNNER_ALLOW_PAID_PROVIDER=true \
   -e ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic_api_key \
   -e PROJECT_REPO_OWNER=crestmont-builds -e PROJECT_REPO_TOKEN_FILE=/run/secrets/project_repo_token \
   -e PREVIEW_DEPLOY_COMMAND='npx --yes wrangler@<exact version> deploy --name "$CRESTMONT_PREVIEW_NAME"' \
@@ -183,9 +218,9 @@ profiles block; if the first build fails with a sandbox error, either add
 boundary) or set `RUNNER_SANDBOX=off` and enforce egress with a host firewall that allows only the domains in
 section 1. Which of these works on your host is not verified yet.
 
-**Stop.** `docker stop -t 300 crestmont-ai-runner`. On SIGTERM the runner stops claiming, interrupts the running
-agent, commits, checkpoints and completes the job as `failed` ("runner shutdown"), which the control plane retries,
-resuming the session from the checkpoint. A plain kill leaves the lease to expire on the server.
+**Stop.** `docker stop -t 300 crestmont-ai-runner` (local stack: `docker compose stop runner`). On SIGTERM the runner
+stops claiming, interrupts the running agent, commits, checkpoints and completes the job as `released` (protocol
+v1.1), which requeues it without spending an attempt; the next attempt resumes the session from the checkpoint. A plain kill leaves the lease to expire on the server.
 **Pause new work** from the owner dashboard (server-side pause); the runner keeps polling and receives
 `{"job":null,"reason":"paused"}`. `--once` runs at most one job and exits.
 
@@ -211,6 +246,11 @@ after each attempt for resume and debugging. Delete old ones according to `docs/
 
 ## 11. Cost controls (from hardest to softest)
 
+Local provider: there is no per-token cost. `runCostUsd` is always 0, and the owner report lists tokens, model calls
+and model wall time instead. Turn, runtime and output-token caps still apply. The items below concern the optional
+paid adapter.
+
+
 1. Claude Console workspace spend limit (section 2): the only control that cannot be exceeded.
 2. Control-plane budgets: per run and per project, enforced on every heartbeat (`continue:false, reason:"budget"`).
 3. Runner caps: each agent phase gets `maxBudgetUsd` = the stricter remaining budget (run, project,
@@ -219,7 +259,22 @@ after each attempt for resume and debugging. Delete old ones according to `docs/
    verify), and can overshoot a cap by up to one model response
    ([cost tracking](https://code.claude.com/docs/en/agent-sdk/cost-tracking)). Authoritative billing is the Console.
 
-## 12. Known limits and residual risks
+## 12. Dependency locking
+
+`runner/package.json` pins exact versions. The local default has **no** runtime npm dependencies: the agent loop,
+model client, sandbox and drafts use only Node built-ins. The Agent SDK is an `optionalDependency`, installed only
+with `INSTALL_AGENT_SDK=true`. No `package-lock.json` is committed, because one could not be generated where this was
+written (no registry access), and a hand-written lockfile would be fabricated. To lock: on a machine with registry
+access run `cd runner && npm install --package-lock-only` (and `--include=optional` if you use the SDK). Review and
+commit `runner/package-lock.json`, then switch the Dockerfile's `npm install` lines to `npm ci`. CI can then use
+`npm ci --ignore-scripts`. Base images (`node:22-bookworm-slim`, `debian:bookworm-slim`, `docker:27.5.1-cli`) should
+be pinned by digest after the first reviewed build.
+
+## 13. Known limits and residual risks
+
+Local provider: see `WINDOWS-SUPERCOMPUTER.md` § "Isolation details" (Docker socket held by the runner; Docker
+Desktop VM as the boundary). The points below concern the optional SDK adapter.
+
 
 - The agent and the checks it writes run as the same OS user as the runner. Secrets are read from files and are
   not in the agent's environment. The agent is denied the secrets directory by permission rules and, with the

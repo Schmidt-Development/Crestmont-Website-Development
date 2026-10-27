@@ -6,6 +6,7 @@
 import { createHmac } from "node:crypto";
 import type {
   ClaimResponse, HeartbeatRequest, HeartbeatResponse, CheckpointRequest, RequirementItem, CompleteRequest, Job,
+  AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest,
 } from "./protocol.ts";
 import { RUNNER_VERSION, LIMITS } from "./protocol.ts";
 import type { Logger } from "./log.ts";
@@ -165,6 +166,19 @@ export class ControlPlaneClient {
       if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null;
       throw err;
     }
+  }
+
+  /** AI drafts: claim one short draft job (or {job:null}). Same HMAC signing as every runner endpoint. */
+  aiClaim(): Promise<AiDraftClaimResponse> {
+    return this.post<AiDraftClaimResponse>("/api/builds/runner/ai/claim", { runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId) });
+  }
+
+  /** AI drafts: complete with the text (or an error) and token counts. No cost is sent: local inference has none. */
+  aiComplete(job: Pick<AiDraftJob, "id" | "leaseToken">, req: AiDraftCompleteRequest): Promise<{ status: string }> {
+    return this.post("/api/builds/runner/ai/complete", {
+      jobId: job.id, leaseToken: job.leaseToken, model: req.model, inputTokens: req.inputTokens, outputTokens: req.outputTokens,
+      ...(req.text !== undefined ? { text: req.text } : {}), ...(req.error ? { error: req.error.slice(0, LIMITS.error) } : {}),
+    }, { jobId: job.id });
   }
 
   complete(job: Pick<Job, "id" | "leaseToken">, req: CompleteRequest): Promise<unknown> {
