@@ -182,7 +182,8 @@ test("[PAY-005] printable receipt: stable unique number, payment/invoice/Stripe 
   assert.match(h1, new RegExp(p1.inv));
   assert.match(h1, /cs_test_seed/);
   assert.match(h1, /legal business name will appear here once the legal entity is established/);
-  assert.match(h1, /Download \(print to PDF\)/);
+  assert.match(h1, new RegExp(`/portal/billing/receipts/${p1.pay}/pdf`));
+  assert.match(h1, /Print version/);
   // Stable across views; unique across payments.
   assert.equal(/CWD-R-\d{6}/.exec(await (await a.c.get(`/portal/billing/receipts/${p1.pay}`)).text())![0], num1);
   const num2 = /CWD-R-\d{6}/.exec(await (await a.c.get(`/portal/billing/receipts/${p2.pay}`)).text())![0];

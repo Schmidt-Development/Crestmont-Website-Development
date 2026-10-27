@@ -1,4 +1,4 @@
-// Stripe adapter (PAY-001, PAY-004). TEST MODE ONLY until the Founder authorises live payments
+// Stripe adapter (PAY-001, PAY-004, PAY-006, PAY-009). TEST MODE ONLY until the Founder authorises live payments
 // after the legal entity exists (PAY-010). A live secret key is refused at construction.
 // When no key is configured the platform reports payments as "not configured" and checkout
 // buttons explain that online payment is unavailable — nothing is simulated.
@@ -116,9 +116,110 @@ export class StripeReadOnly {
     if (startingAfter) q.push(["starting_after", startingAfter]);
     return this.get<{ data: StripeCheckoutSessionSummary[]; has_more: boolean }>("checkout/sessions", q);
   }
+
+  /** GET /v1/invoices (https://docs.stripe.com/api/invoices/list). */
+  listInvoices(f: { createdGte?: number; customer?: string; startingAfter?: string }) {
+    const q: [string, string][] = [["limit", "100"]];
+    if (f.createdGte !== undefined) q.push(["created[gte]", String(f.createdGte)]);
+    if (f.customer) q.push(["customer", f.customer]);
+    if (f.startingAfter) q.push(["starting_after", f.startingAfter]);
+    return this.get<{ data: StripeInvoice[]; has_more: boolean }>("invoices", q);
+  }
+
+  /**
+   * GET /v1/balance_transactions (https://docs.stripe.com/api/balance_transactions/list) with each
+   * transaction's source expanded, so a charge's payment_intent and a refund's id can be matched locally.
+   */
+  listBalanceTransactions(f: { createdGte?: number; payout?: string; startingAfter?: string }) {
+    const q: [string, string][] = [["limit", "100"], ["expand[]", "data.source"]];
+    if (f.createdGte !== undefined) q.push(["created[gte]", String(f.createdGte)]);
+    if (f.payout) q.push(["payout", f.payout]);
+    if (f.startingAfter) q.push(["starting_after", f.startingAfter]);
+    return this.get<{ data: StripeBalanceTransaction[]; has_more: boolean }>("balance_transactions", q);
+  }
+
+  /** GET /v1/payouts (https://docs.stripe.com/api/payouts/list). */
+  listPayouts(createdGte: number, startingAfter?: string) {
+    const q: [string, string][] = [["limit", "100"], ["created[gte]", String(createdGte)]];
+    if (startingAfter) q.push(["starting_after", startingAfter]);
+    return this.get<{ data: StripePayout[]; has_more: boolean }>("payouts", q);
+  }
 }
 
 export interface StripeCheckoutSessionSummary {
   id: string; created: number; mode: string; status: string | null; payment_status: string; amount_total: number | null;
   payment_intent: string | null; subscription: string | null; metadata: Record<string, string> | null; livemode?: boolean;
+}
+
+/** Fields of the Stripe Invoice object (https://docs.stripe.com/api/invoices/object) that the platform reads. */
+export interface StripeInvoice {
+  id: string; object?: "invoice"; customer: string | null; status: "draft" | "open" | "paid" | "void" | "uncollectible" | null;
+  number: string | null; currency: string; total: number; amount_due: number; amount_paid: number; created: number;
+  hosted_invoice_url?: string | null; collection_method?: string; metadata: Record<string, string> | null; livemode?: boolean;
+  subscription?: string | null; payment_intent?: string | null; status_transitions?: { paid_at?: number | null; finalized_at?: number | null } | null;
+}
+/** https://docs.stripe.com/api/balance_transactions/object (source expanded). */
+export interface StripeBalanceTransaction {
+  id: string; amount: number; fee: number; net: number; currency: string; type: string; created: number; status?: string;
+  source: string | { id: string; object: string; payment_intent?: string | null; charge?: string | null; amount?: number } | null;
+}
+/** https://docs.stripe.com/api/payouts/object */
+export interface StripePayout { id: string; amount: number; currency: string; status: string; arrival_date: number | null; created: number; failure_message?: string | null; livemode?: boolean }
+
+/**
+ * Stripe Invoicing write path for milestone invoices (PAY-006): customer → invoice → invoice item →
+ * finalize, never "send" (the customer pays from the portal link). Every POST carries an idempotency
+ * key derived from the local invoice id, so a retried request returns Stripe's first response instead
+ * of creating a second invoice or item. Test-mode keys only, same rule as StripeTestPayments.
+ * https://docs.stripe.com/api/customers/create, /api/invoices/create, /api/invoiceitems/create,
+ * /api/invoices/finalize, /api/invoices/retrieve.
+ */
+export class StripeInvoicing {
+  private key: string; private fetchImpl: typeof fetch;
+  readonly reader: StripeReadOnly;
+  constructor(secretKey: string, fetchImpl: typeof fetch = fetch) {
+    if (!secretKey.startsWith("sk_test_") && !secretKey.startsWith("rk_test_")) {
+      throw new LivePaymentsNotAuthorized("Only Stripe test-mode keys are accepted until live payments are authorised by the Founder");
+    }
+    this.key = secretKey; this.fetchImpl = fetchImpl;
+    this.reader = new StripeReadOnly(secretKey, fetchImpl);
+  }
+
+  private async post<T>(path: string, form: [string, string][], idempotencyKey: string): Promise<T> {
+    if (!/^[a-z_]+(\/[A-Za-z0-9_]+)*$/.test(path)) throw new Error("Invalid Stripe path");
+    const r = await this.fetchImpl(`https://api.stripe.com/v1/${path}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${this.key}`, "content-type": "application/x-www-form-urlencoded", "idempotency-key": idempotencyKey },
+      body: new URLSearchParams(form).toString(),
+    });
+    const body = (await r.json().catch(() => ({}))) as T & { error?: { message: string }; livemode?: boolean };
+    if (!r.ok) throw new Error(`Stripe ${r.status}: ${body.error?.message ?? "error"}`);
+    if (body.livemode === true) throw new LivePaymentsNotAuthorized("Stripe returned a live-mode object; live payments are not authorised");
+    return body;
+  }
+
+  createCustomer(c: { name: string; email: string | null; organizationId: string }) {
+    const form: [string, string][] = [["name", c.name], ["metadata[organization_id]", c.organizationId]];
+    if (c.email) form.push(["email", c.email]);
+    return this.post<{ id: string }>("customers", form, `crestmont:customer:${c.organizationId}`);
+  }
+
+  createInvoice(i: { customer: string; description: string; daysUntilDue: number; metadata: Record<string, string>; localInvoiceId: string }) {
+    const form: [string, string][] = [["customer", i.customer], ["collection_method", "send_invoice"], ["days_until_due", String(i.daysUntilDue)],
+      ["auto_advance", "false"], ["pending_invoice_items_behavior", "exclude"], ["currency", "usd"], ["description", i.description]];
+    for (const [k, v] of Object.entries(i.metadata)) form.push([`metadata[${k}]`, v]);
+    return this.post<StripeInvoice>("invoices", form, `crestmont:invoice:${i.localInvoiceId}:create`);
+  }
+
+  addInvoiceItem(i: { customer: string; invoice: string; amountCents: number; description: string; localInvoiceId: string }) {
+    return this.post<{ id: string; amount: number; invoice: string }>("invoiceitems", [["customer", i.customer], ["invoice", i.invoice], ["amount", String(i.amountCents)],
+      ["currency", "usd"], ["description", i.description], ["metadata[crestmont_invoice_id]", i.localInvoiceId]], `crestmont:invoice:${i.localInvoiceId}:item`);
+  }
+
+  finalizeInvoice(stripeInvoiceId: string, localInvoiceId: string) {
+    return this.post<StripeInvoice>(`invoices/${stripeInvoiceId}/finalize`, [["auto_advance", "false"]], `crestmont:invoice:${localInvoiceId}:finalize`);
+  }
+
+  retrieveInvoice(stripeInvoiceId: string) { return this.reader.get<StripeInvoice>(`invoices/${stripeInvoiceId}`); }
+  listCustomerInvoices(customer: string) { return this.reader.listInvoices({ customer }); }
 }

@@ -105,8 +105,8 @@ function receiptDocument(ctx: AppContext, r: ReceiptData, backHref: string): Saf
   const id = businessIdentity(ctx.settings);
   const ref = r.payment.stripe_payment_intent_id ?? null;
   return html`<div class="no-print row" style="margin-bottom:1rem">${linkButton("Back", backHref, "ghost", "sm")}
-<a class="btn btn--secondary btn--sm" href="${ctx.url.pathname}?view=print">Download (print to PDF)</a></div>
-<p class="faint no-print">To save a PDF, open the printable version and use your browser's Print command, then choose “Save as PDF”. Crestmont does not generate PDF files itself.</p>
+<a class="btn btn--primary btn--sm" href="${ctx.url.pathname}/pdf" data-pdf>Download PDF</a>
+<a class="btn btn--secondary btn--sm" href="${ctx.url.pathname}?view=print">Print version</a></div>
 <article class="card receipt stack" data-testid="receipt">
 <div class="row row--between"><div><div class="eyebrow">Payment receipt</div><h1 style="margin:0">${r.receiptNumber}</h1></div>
 <div style="text-align:right"><strong>${id.tradingName}</strong><br>
