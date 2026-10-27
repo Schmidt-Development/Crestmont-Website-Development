@@ -19,5 +19,5 @@
       "@anthropic-ai/claude-agent-sdk": ["./src/sdk-types.d.ts"]
     }
   },
-  "include": ["src", "test"]
+  "include": ["src", "test", "windows/*.ts"]
 }
