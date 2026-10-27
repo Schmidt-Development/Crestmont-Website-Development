@@ -129,3 +129,16 @@ Done before machine access:
 Readiness gates A–F at /staff/readiness/gates; production stays blocked on: Founder launch authorization (LAUNCH-001),
 legal identity and attorney review (IDENT-001/002, LEGAL-004), tax (LEGAL-005), Stripe live activation (PAY-010),
 independent security review (SEC-007), branch protection (INFRA-005), and production environment creation (INFRA-002).
+
+## Addendum — continuation after `7bf8ead` (2026-10-27/28)
+
+Engineering-only work done without external services, Founder decisions or the supercomputer:
+
+| Commit | Change | Why |
+|---|---|---|
+| `4ad178c` | Required `scheduler` feed on staging/production; `scripts/verify-crons.ts` re-registers missing cron triggers during the staging deploy; `recovery:rollback|restore:<env>` feeds from drill evidence; ASVS F-08 enforced (no cookie session for any `/api/*` write); `env_metrics` 90-day retention; Dependabot ignores major Node image bumps | **Defect found:** the public health feed showed no `job:*` entries on staging, i.e. the cron-triggered jobs (Stripe retry, support escalation, inactivity, retention, build sweep…) had never recorded a run there, while health reported `ok` |
+| `069bec0` | Stripe requests pinned to `2025-02-24.acacia`; webhook handling accepts basil+ shapes (`src/domain/stripe-shapes.ts`); `invoice.paid` without a payment link resolves it via the pinned API or fails for retry; documented webhook version + event list (test-enforced) | **Defect found:** no `Stripe-Version` was sent; Stripe `2025-03-31.basil` removed `Invoice.payment_intent/charge/subscription` and `Subscription.current_period_end`, so on a new account milestone payments would lose their PaymentIntent link (refunds/disputes unmatched) and subscription events their subscription id |
+| `95bb65b` | Scheduler feed treats a never-run daily job as pending while the 15-minute jobs run | avoids alerting every 30 min for up to 24 h after a trigger repair |
+
+Tests: 353 unit/integration (was 344), all passing. Requirement totals unchanged: original 111 / 41 / 2, addendum 9 / 2 / 0
+(120 of 165, 72.7%). TEST-004 closes when the new `recovery:*:staging` feeds show passed runs.
