@@ -10,6 +10,7 @@ import { approvalValidity, ingestionHealth, type ReadinessInput } from "../readi
 import { can, isOwner, type Actor } from "../domain/authz.ts";
 import { audit } from "./security.ts";
 import { githubFeedStatus, latestGithubSync } from "./github.ts";
+import { mfaKeyStatus } from "../lib/totp-secrets.ts";
 
 export type Report = Awaited<ReturnType<typeof buildReport>>;
 
@@ -74,7 +75,28 @@ export async function feedStatuses(ctx: Pick<AppContext, "db" | "env" | "now">, 
   });
   const gh = await githubFeedStatus(ctx);
   const cron = await scheduledJobsFeed(ctx, input);
-  return [...required, gh, ...(cron ? [cron] : []), ...others];
+  return [...required, gh, ...(cron ? [cron] : []), ...(await mfaFeeds(ctx)), ...others];
+}
+
+/** MFA encryption at rest (docs/AUTH-PRODUCTION.md gap 3) on deployed environments — status only, never the key, a secret
+ *  or a count: `mfa-key` = whether the Worker holds a usable MFA_ENCRYPTION_KEY (invalid = failing, which alerts);
+ *  `mfa-at-rest` = whether any two-factor secret is still stored in plaintext (never failing: those still work and are
+ *  encrypted at the next sign-in or by scripts/encrypt-totp-secrets.ts). */
+export async function mfaFeeds(ctx: Pick<AppContext, "db" | "env">): Promise<FeedStatus[]> {
+  const env = ctx.env.ENVIRONMENT;
+  if (env !== "staging" && env !== "production") return [];
+  const key = await mfaKeyStatus(ctx.env);
+  const keyFeed: FeedStatus = key === "ok"
+    ? { source: `mfa-key:${env}`, status: "healthy", detail: "MFA_ENCRYPTION_KEY is set and valid", required: false, lastSuccessAt: null, lastAttemptAt: null }
+    : key === "missing"
+      ? { source: `mfa-key:${env}`, status: "unavailable", detail: "MFA_ENCRYPTION_KEY is not set: new two-factor enrolment is refused", required: false, lastSuccessAt: null, lastAttemptAt: null }
+      : { source: `mfa-key:${env}`, status: "failing", detail: "Last attempt failed: MFA_ENCRYPTION_KEY is set but is not base64 of exactly 32 bytes", required: false, lastSuccessAt: null, lastAttemptAt: null };
+  const plain = await ctx.db.prepare(`SELECT EXISTS (SELECT 1 FROM users WHERE (totp_secret IS NOT NULL AND totp_secret NOT LIKE 'v1:%') OR (totp_pending_secret IS NOT NULL AND totp_pending_secret NOT LIKE 'v1:%')) AS any_plain`)
+    .first<{ any_plain: number }>().catch(() => null);
+  const restFeed: FeedStatus = plain && !plain.any_plain && key === "ok"
+    ? { source: `mfa-at-rest:${env}`, status: "healthy", detail: "Every stored two-factor secret is encrypted", required: false, lastSuccessAt: null, lastAttemptAt: null }
+    : { source: `mfa-at-rest:${env}`, status: "unavailable", detail: key === "ok" ? "Some two-factor secrets are still stored in plaintext (encrypted at each account's next sign-in, or all at once by scripts/encrypt-totp-secrets.ts)" : "Encryption at rest needs MFA_ENCRYPTION_KEY", required: false, lastSuccessAt: null, lastAttemptAt: null };
+  return [keyFeed, restFeed];
 }
 
 /** Cron triggers that never fire are otherwise silent: every job feed simply never appears. On a deployed environment
