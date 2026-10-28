@@ -26,7 +26,7 @@ export const REQUIRED_WORKFLOWS = [
   "support_reply", "refund_request", "refund_decision", "project_completion", "handoff", "security_notification",
   "critical_incident",
 ] as const;
-export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received"] as const;
+export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "consultation"] as const;
 export type EmailTemplate = (typeof EMAIL_TEMPLATES)[number];
 export type MailCategory = "transactional" | "marketing";
 export type Audience = "customer" | "staff" | "prospect" | "any";
@@ -93,6 +93,8 @@ export interface TemplateData {
   staff_invitation: { inviterName: string; roleLabel: string; acceptUrl: string };
   quote_sent: { contactName: string; totalCents: number; validUntil: string | null; proposalUrl: string };
   lead_received: { name: string; kind: "quote" | "contact" };
+  /** Consultation booked by phone with the AI receptionist (VOICE-003). `when` is pre-formatted in the business time zone. */
+  consultation: { event: "requested" | "confirmed" | "rescheduled" | "cancelled"; name: string; when: string; code: string };
 }
 
 export interface MailContent { subject: string; heading: string; paragraphs: string[]; cta?: { label: string; url: string } }
@@ -417,6 +419,30 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
         "If you did not send this request, you can ignore this email."],
     }),
     samples: [{ name: "Morgan Hale", kind: "quote" }, { name: "Morgan Hale", kind: "contact" }],
+  },
+  consultation: {
+    name: "consultation", category: "transactional", audience: "prospect",
+    description: "Consultation requested, confirmed, rescheduled or cancelled (booked by phone with the AI receptionist).",
+    render: (d) => {
+      const ref = `Your booking reference is ${d.code}. Quote it, with the phone number you gave us, if you call to change the booking.`;
+      const notMe = "If you did not book this consultation, you can ignore this email.";
+      switch (d.event) {
+        case "requested": return { subject: "Consultation request received — Crestmont", heading: "We received your consultation request",
+          paragraphs: [`Hello ${d.name}, thank you for calling Crestmont Website Development.`, `We are holding ${d.when} for you. A team member will confirm the time by email.`, ref, notMe] };
+        case "confirmed": return { subject: "Consultation confirmed — Crestmont", heading: "Your consultation is confirmed",
+          paragraphs: [`Hello ${d.name}, your consultation with Crestmont Website Development is confirmed for ${d.when}.`, ref, notMe] };
+        case "rescheduled": return { subject: "Consultation rescheduled — Crestmont", heading: "Your consultation has moved",
+          paragraphs: [`Hello ${d.name}, your consultation is now ${d.when}.`, ref, notMe] };
+        case "cancelled": return { subject: "Consultation cancelled — Crestmont", heading: "Your consultation is cancelled",
+          paragraphs: [`Hello ${d.name}, your consultation for ${d.when} has been cancelled.`, "Call us or use the contact form if you would like to book another time.", notMe] };
+      }
+    },
+    samples: [
+      { event: "requested", name: "Morgan Hale", when: "Tuesday, November 3 at 10:00 AM EST", code: "K7MP4Q" },
+      { event: "confirmed", name: "Morgan Hale", when: "Tuesday, November 3 at 10:00 AM EST", code: "K7MP4Q" },
+      { event: "rescheduled", name: "Morgan Hale", when: "Thursday, November 5 at 2:30 PM EST", code: "R2WX9T" },
+      { event: "cancelled", name: "Morgan Hale", when: "Tuesday, November 3 at 10:00 AM EST", code: "K7MP4Q" },
+    ],
   },
 };
 
