@@ -142,6 +142,21 @@ jobs:
           rm -f access/demo-access.sql
           echo "Sample data and demo accounts seeded."
 
+      - name: Portfolio projects and their isolated demos (verified from this runner before they are embedded)
+        id: portfolio
+        run: |
+          origins=$(node -e 'const t=require("fs").readFileSync("wrangler.toml","utf8");const s=t.indexOf("[env.frontend-preview]");const b=t.slice(s,t.indexOf("\n[env.",s+1));process.stdout.write((/PORTFOLIO_DEMO_ORIGINS = "([^"]*)"/.exec(b)||[])[1]||"")')
+          verified=""; report=""
+          for slug_url in $(node --no-warnings -e 'import("./src/content/portfolio-projects.ts").then(m=>console.log(m.PORTFOLIO_PROJECTS.map(p=>p.slug+"|"+p.demoUrl).join("\n")))'); do
+            slug=${slug_url%%|*}; url=${slug_url#*|}; base=${url%/}
+            info=$(curl -s --max-time 15 "$base/__demo/info" || true)
+            fa=$(curl -s --max-time 15 -D - -o /dev/null "$base/" | grep -i '^content-security-policy:' | grep -o "frame-ancestors[^;]*" || true)
+            if echo "$info" | grep -q '"demo":true' && echo "$fa" | grep -q "crestmont-platform-frontend-preview"; then verified="$verified,$slug"; report="$report\n- $slug: demo verified ($base)"; else report="$report\n- $slug: demo not reachable or not embeddable yet — screenshot shown"; fi
+          done
+          node --no-warnings scripts/portfolio-setup.ts --out portfolio.sql --origins "$origins" --verified "${verified#,}" | tee portfolio-report.txt
+          $WRANGLER d1 execute "$PREVIEW_DB" --remote --env "$PREVIEW_ENV" --file portfolio.sql --yes > /dev/null
+          { echo "### Portfolio"; echo; cat portfolio-report.txt | sed 's/^/- /'; printf "$report\n"; } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Smoke checks
         env:
           BASE: ${{ steps.deploy.outputs.url }}

@@ -55,7 +55,8 @@ triggers = { crons = ["*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE i
 [env.frontend-preview]
 name = "crestmont-platform-frontend-preview"
 workers_dev = true
-vars = { ENVIRONMENT = "staging", PREVIEW_GATE = "required", TURNSTILE_SITE_KEY = "1x00000000000000000000AA", TURNSTILE_SECRET = "1x0000000000000000000000000000000AA" }
+# PORTFOLIO_DEMO_ORIGINS: the ONLY origins this preview may frame (isolated portfolio demo Workers; docs/frontend/PORTFOLIO.md).
+vars = { ENVIRONMENT = "staging", PREVIEW_GATE = "required", TURNSTILE_SITE_KEY = "1x00000000000000000000AA", TURNSTILE_SECRET = "1x0000000000000000000000000000000AA", PORTFOLIO_DEMO_ORIGINS = "https://lansing-car-rentals-portfolio-demo.partners-df4.workers.dev https://glassly-portfolio-demo.partners-df4.workers.dev https://lcr-mentorship-portfolio-demo.partners-df4.workers.dev https://better-lansing-mechanics-portfolio-demo.partners-df4.workers.dev" }
 d1_databases = [{ binding = "DB", database_name = "crestmont-frontend-preview", database_id = "", migrations_dir = "migrations" }]
 triggers = { crons = [] }
 
