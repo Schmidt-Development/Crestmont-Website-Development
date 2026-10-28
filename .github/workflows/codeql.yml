@@ -1,11 +1,19 @@
 name: CodeQL
 
-# Code scanning on private repositories requires GitHub Advanced Security (Code Security).
-# Kept separate from CI so a missing licence does not mark every build red. Runs weekly and on demand.
+# Code scanning is free for public repositories; on a private repository it requires GitHub Code Security.
+# The repository is public (2026-10-28), so this also runs on every push to main and every pull request.
+# If the repository is made private without Code Security, upload fails here only; CI is unaffected.
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
   schedule:
     - cron: "17 6 * * 1"
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

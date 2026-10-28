@@ -120,6 +120,8 @@ Release approval, staff invitations / role changes / disable / enable / 2FA rese
 
 ## 10. Incident response
 
+Full procedure — severity levels, evidence preservation with legal holds, and playbooks for credential compromise, data exposure, outage, database corruption, payments, provider outages and malware — is in `docs/INCIDENT-RESPONSE.md`. The short version:
+
 1. **Detect / declare:** anyone may declare an incident. Create an `production_incident` blocker in /staff/readiness with a severity.
 2. **Contain:** roll back (§3), disable affected accounts (§4), rotate exposed secrets, turn off the affected feature (for example remove the voice number's webhook), or put the site in maintenance through Cloudflare.
 3. **Preserve evidence:** export D1 (BACKUP-RECOVERY §3.2) **before** making data fixes. Do not delete audit or security events (they are append-only).
