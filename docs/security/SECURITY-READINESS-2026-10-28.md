@@ -46,7 +46,7 @@ Companion documents (no duplication — each topic lives in one place):
 | Privacy export / deletion | self-service export, staff-processed anonymisation | `tests/data.test.ts` | — (F-26 + legal hold added here) | Engineering | Implemented and verified |
 | Retention | two-tier job; configurable tier off by default | `tests/ops.test.ts` [SEC-006] | Approve periods | Founder + counsel | Founder decision required |
 | Secrets | Worker secrets + GitHub secrets; scanning workflow; deploy fingerprints | `tests/secret-scan.test.ts`, `tests/staging-secrets.test.ts` | F-18/F-19 artifact exposure (PR #8) | Production-readiness session | Engineering incomplete (in PR) |
-| Supply chain | Dependabot, CodeQL (weekly only), audit step (no-op) | workflow files | §6 | Engineering / Founder (settings) | Partly fixed here |
+| Supply chain | Dependabot, CodeQL default setup (push/PR) plus a redundant advanced workflow, audit step (no-op) | workflow files | §6 | Engineering / Founder (settings) | Partly fixed here |
 | Monitoring | in-platform health feeds, GitHub-hosted monitor | `tests/scheduler-health.test.ts`, `tests/infra-workflows.test.ts` | Alert destination (F-03) | Founder | Founder decision required |
 | Backup / restore | pre-deploy exports, restore drill, rollback rehearsal | `tests/restore-drill.test.ts`, `tests/rollback-rehearsal.test.ts` | D1 restore drill on staging | **D1 restore session** | External verification |
 | Legal documents | 12 published drafts with banner; versioned agreements, immutable acceptances | `tests/legal-commerce.test.ts` | Attorney review (LEGAL-004) | Founder + counsel | Attorney review required |
@@ -135,7 +135,7 @@ Assets: customer business data and files; staff and customer accounts; payment s
 | No attachments on internal notes (F-27) | `src/services/messages.ts` | `[PORTAL-005]` |
 | Step-up on 9 more actions (F-28) | `src/app/step-up.ts`, `tests/auth-hardening.test.ts` (scope note) | `[AUTH-008]` + existing coverage test |
 | Findings register corrected and extended | `migrations/0040_security_readiness.sql` | `[SEC-007]` |
-| Blocking dependency audit; CodeQL on push/PR; Dependabot for runner sub-packages; artifact retention 14 days; CI scratch ignored | `.github/workflows/ci.yml`, `codeql.yml`, `dependabot.yml`, `.gitignore` | YAML validated; audit step dry-run locally |
+| Blocking dependency audit; Dependabot for runner sub-packages; artifact retention 14 days; CI scratch ignored | `.github/workflows/ci.yml`, `dependabot.yml`, `.gitignore` | YAML validated; audit step dry-run locally |
 
 **Not changed on purpose:** MFA keys and migration (MFA session), D1 restore implementation (restore session), R2 adapter (R2 session), Resend/Stripe/Retell code and webhooks (their sessions), deploy/provision workflows and `wrangler.toml` (PR #8/#12/#13), frontend files, published agreement texts (counsel first), email-verification gating and retention periods (Founder).
 
@@ -208,7 +208,7 @@ Backups (D1 exports) contain all of the above: they must stay encrypted and priv
 | `claude/frontend-preview-encrypt-access` (PR #9) | 16 (40 behind main) | frontend assets, preview workflow | none; behind main |
 | `claude/frontend-redesign` | 22 | public assets, layout, `0037_portfolio_demos.sql` | migration number collision (note above) |
 | `claude/staging-email-recipient-guard` (Resend) | 3 | email adapter, hooks, `app.ts`, `context.ts` | none (this branch does not touch those files) |
-| `dependabot/*` (4) | 1 each | action versions in workflows | `ci.yml`/`codeql.yml` edits here avoid the `uses:` lines, so rebases are trivial |
+| `dependabot/*` (4) | 1 each | action versions in workflows | `ci.yml` edits here avoid the `uses:` lines, so rebases are trivial |
 | `claude/backend-pending`, `ci-dom-iterable`, `production-provisioning` | 0 | — | already merged |
 
 PR state (open/merged) could not be read: this session has read-only git access and the GitHub API/web pages were not reachable. States above are inferred from git ancestry.
@@ -248,7 +248,7 @@ The Founder (organization owner) should check these in GitHub. None cost money o
 2. **Environment secrets:** keep `CLOUDFLARE_API_TOKEN` and production Turnstile keys on the `production` environment, not at repository level.
 3. **Settings → Rules → Rulesets** for `main`: require PR, 1 approval, required status check *CI / test*, block force pushes and deletion. Add a tag ruleset for `v*`.
 4. **Settings → Actions → General:** *Require approval for all outside collaborators* for fork PRs; default workflow permissions = *Read repository contents*.
-5. **Settings → Code security:** enable Secret scanning + Push protection, Dependabot alerts and security updates, and Code scanning (free on public repos).
+5. **Settings → Code security:** enable Secret scanning + Push protection and Dependabot alerts/security updates. **Code scanning default setup is already enabled** (verified on PR #18: it analyses `actions` and `javascript-typescript` on pushes and PRs). Because default setup is on, the separate `.github/workflows/codeql.yml` (advanced setup, weekly + manual) can never upload results and fails each run ("CodeQL analyses from advanced configurations cannot be processed when the default setup is enabled"). Decision for the Founder: delete `codeql.yml` (recommended — default setup covers it) or switch default setup off and keep the workflow. Not changed here.
 6. **Actions → artifacts:** delete existing `staging-preview-access` and `pre-deploy-production-export` artifacts from past runs (F-18/F-19).
 7. Consider whether the repository should be **private**. Being public is the root cause of F-18/F-19. Private repositories lose free CodeQL/secret scanning unless GitHub Code Security is purchased — a cost/benefit decision for the Founder (register item D-15).
 
