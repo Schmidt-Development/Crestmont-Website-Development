@@ -67,7 +67,9 @@ jobs:
       DEPLOYMENT_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-staging
       # Bump to force a one-time rotation of all staging access credentials on the next run (scripts/staging-access.ts).
       # 2 = rotation after the preview-password mismatch of deploy #4 (2026-10-27).
-      ACCESS_EPOCH: "2"
+      # 3 = rotation after plaintext access notes were exposed as public artifacts (2026-10-27/28). Lands in the same
+      #     deploy that first protects the notes, so the new credentials are never uploaded in plaintext.
+      ACCESS_EPOCH: "3"
       WRANGLER: npx --yes wrangler@4
     steps:
       - uses: actions/checkout@v4
