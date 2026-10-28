@@ -116,9 +116,19 @@
       urlLabel(s, new URL(s.dataset.demoUrl).host);
       if (live) live.textContent = `${name(cur)} demo reset to its starting page.`;
     });
+    // Expanding takes the explorer out of the flow; a spacer holds its place so the page never shortens (which would
+    // clamp the scroll position), and the exact position is restored on close.
+    let spacer = null, savedY = 0;
     const setExpanded = (on) => {
+      if (on === root.classList.contains("pfx--expanded")) return;
+      if (on) {
+        savedY = window.scrollY;
+        spacer = document.createElement("div"); spacer.setAttribute("aria-hidden", "true"); spacer.style.height = root.offsetHeight + "px";
+        root.before(spacer);
+      }
       root.classList.toggle("pfx--expanded", on);
       document.documentElement.classList.toggle("pfx-lock", on);
+      if (!on) { spacer && spacer.remove(); spacer = null; window.scrollTo({ top: savedY, behavior: "instant" }); }
       if (expandBtn) { expandBtn.setAttribute("aria-pressed", String(on)); expandBtn.textContent = on ? "Close expanded view" : "Expand"; }
     };
     expandBtn && expandBtn.addEventListener("click", () => setExpanded(!root.classList.contains("pfx--expanded")));
