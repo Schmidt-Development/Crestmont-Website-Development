@@ -194,6 +194,28 @@ export async function overrideUnchanged(o: { base: string; fixedPreview?: string
   return new Client(o.base, o.f ?? fetch, o.sleep ?? realSleep).gate(o.fixedPreview);
 }
 
+/**
+ * READ-ONLY, every deploy: the last rotation is complete in D1. Needs no credential, so it also covers a run where the
+ * HTTP revocation proof could not run (deploy #56: the rotation succeeded, the new-access check failed before the proof).
+ */
+export async function rotationState(ops: D1Ops, epoch: string): Promise<Check[]> {
+  const meta = Object.fromEntries((await ops.query<{ key: string; value: string }>(`SELECT key, value FROM _staging_access`).catch(() => [])).map((r) => [r.key, r.value]));
+  const at = meta.rotated_at ?? "";
+  const demo = `(SELECT id FROM users WHERE email LIKE '%@${DEMO_DOMAIN}')`;
+  const n = async (sql: string) => Number((await ops.query<{ n: number }>(sql))[0]?.n ?? 0);
+  const checks: Check[] = [];
+  const add = (name: string, ok: boolean, detail?: string) => checks.push({ name, ok, detail });
+  add(`Access epoch is ${epoch}`, meta.epoch === epoch, meta.epoch ? `D1 holds epoch ${meta.epoch}` : "no access issued yet");
+  if (!at) { add("Rotation recorded", false, "no rotated_at in D1"); return checks; }
+  add("Rotation audited", (await n(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'staging.access_rotated' AND subject_id = '${epoch.replace(/'/g, "")}'`)) > 0);
+  const fp = (await ops.query<{ updated_at: string }>(`SELECT updated_at FROM deploy_secret_fingerprints WHERE name = 'STAGING_ACCESS_PASSWORD'`).catch(() => []))[0]?.updated_at;
+  add("Preview password changed with the rotation", !!fp && fp >= at, fp ? undefined : "no fingerprint recorded");
+  add("No demo session from before the rotation", (await n(`SELECT COUNT(*) AS n FROM sessions WHERE user_id IN ${demo} AND created_at < '${at}'`)) === 0);
+  add("No demo one-time token from before the rotation", (await n(`SELECT COUNT(*) AS n FROM auth_tokens WHERE user_id IN ${demo} AND created_at < '${at}'`)) === 0);
+  add("No demo recovery code from before the rotation", (await n(`SELECT COUNT(*) AS n FROM mfa_recovery_codes WHERE user_id IN ${demo} AND created_at < '${at}'`)) === 0);
+  return checks;
+}
+
 export const report = (checks: Check[]) => ["| Check | Result |", "|---|---|", ...checks.map((c) => `| ${c.name} | ${c.ok ? "PASS" : "**FAIL**"}${c.detail ? ` (${c.detail})` : ""} |`)].join("\n");
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -208,6 +230,14 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         process.exit(1);
       }
       console.log(g.pending ? "Rotation pending: secure delivery is configured and the preview password will change." : "No rotation pending.");
+      process.exit(0);
+    }
+    if (mode === "state") {
+      const checks = await rotationState(wranglerOps(), process.env.ACCESS_EPOCH ?? "1");
+      const table = report(checks);
+      console.log(table);
+      if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Rotation state in D1 (read-only)\n\n${table}\n`);
+      if (checks.some((c) => !c.ok)) { console.error("::error title=Rotation incomplete::See the step summary (no values are shown)."); process.exit(1); }
       process.exit(0);
     }
     if (mode === "override") {
