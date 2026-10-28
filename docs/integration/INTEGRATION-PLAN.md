@@ -6,6 +6,16 @@ Re-run the commands in §9 before acting on anything here; the other sessions ar
 
 This document plans the integration. It merges nothing, deploys nothing, and changes no secret.
 
+## 0. Delta at 07:15 UTC (supersedes §1–§7 where they differ)
+
+- `main` is now `17c38f0`: **#14 merged** (email isolation, env-tagged Resend webhooks) and **#15 merged** (restore drill imports in dependency order).
+- **Restore drill passed** on `17c38f0` (07:06 UTC). CI on `main` passed; Deploy staging passed.
+- The runner CI flake (§5) was addressed on `main` by `2149384` (lease-watchdog fixture race). Watch the next few runs before calling it closed.
+- Frontend is now `efc1665` (29 ahead / 7 behind `main`, still merges cleanly): cumulative pricing model, real-device-width portfolio framing, live links, read-only isolation audit for demo branches.
+- New branches: `claude/ai-website-builder-readiness` (PR #16, open) and `claude/staging-mfa-encryption`; both merge cleanly with `main`. No new migrations on either.
+- **#8 is still unmerged, and live plaintext `staging-preview-access` artifacts rose from 14 to 16.** §4 remains the top priority.
+- Remaining stack order for `main`: #12 → #8 → #13, then #16 (pending its owner), then the frontend integration PR.
+
 ## 1. Repository and branch map
 
 | Branch | Head | vs `main` (ahead / behind) | Owner (inferred from commits/PRs) | State |
