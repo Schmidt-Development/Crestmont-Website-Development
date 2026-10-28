@@ -19,7 +19,10 @@ test("[INFRA-002] production guard: the committed wrangler.toml targets exactly 
   assert.throws(() => guardProduction(swap('bucket_name = "crestmont-files-production"', 'bucket_name = "crestmont-files-staging"')), /bucket/);
   assert.throws(() => guardProduction(swap('name = "crestmont-platform-production"', 'name = "crestmont-platform-staging"')), /worker name/);
   assert.throws(() => guardProduction(swap("workers_dev = false", "workers_dev = true")), /workers_dev/);
-  assert.throws(() => guardProduction(swap('database_id = ""', 'database_id = "not-a-uuid"')), /not a D1 UUID/);
+  assert.throws(() => guardProduction(swap('database_id = "[^"]*"', 'database_id = "not-a-uuid"')), /not a D1 UUID/);
+  // The production database provisioned by provision-production.yml (run #1) is pinned, and only in production.
+  assert.equal(t.databaseId, "c667f1a9-0802-4c52-a0e1-b512219a6eea");
+  assert.equal(toml.split(t.databaseId).length - 1, 1, "no other environment references the production database");
   assert.throws(() => guardProduction("name = \"x\"\n"), /no \[env\.production\]/);
 });
 
@@ -68,7 +71,29 @@ test("[INFRA-005] provisioning workflow: manual, main-only, confirmed, Founder-g
   assert.match(wf, /secrets\.PRODUCTION_TURNSTILE_SITE_KEY/);
   assert.match(wf, /secrets\.PRODUCTION_TURNSTILE_SECRET/);
   assert.match(wf, /grep -qx EVIDENCE_INGEST_SECRET[\s\S]*already set[\s\S]*kept/);
+  // Re-runs change no secret (a changed secret blocks rollbacks, Cloudflare 10220) unless explicitly asked.
+  assert.match(wf, /replace_turnstile:\s*\n\s*description:[^\n]*\n\s*type: boolean\s*\n\s*default: false/);
+  assert.match(wf, /grep -qx "\$name" && \[ "\$REPLACE_TURNSTILE" != "true" \][\s\S]*already set on \$WORKER: kept/);
+  assert.equal((wf.match(/secret put/g) ?? []).length, 3, "exactly three puts: Turnstile (loop), evidence, MFA key — each guarded");
   assert.doesNotMatch(wf, /STRIPE_SECRET_KEY \||RESEND_API_KEY \||secret put (STRIPE|RESEND|RETELL|ANTHROPIC|BUILD_RUNNER|STAGING_ACCESS)/, "never installs a live-service or preview secret");
   assert.doesNotMatch(wf, /echo\s+["']?\$(PROD_TURNSTILE_SECRET|CLOUDFLARE_API_TOKEN|PROD_TURNSTILE_SITE_KEY)\b/, "never echoes a secret");
   assert.doesNotMatch(wf, /upload-artifact/, "no artifacts (public repository)");
+});
+
+test("[AUTH-003] [INFRA-002] production MFA key: well-formed 32-byte base64 from the Founder's environment secret, installed once and never replaced", async () => {
+  const { mfaKeyProblems } = await import("../scripts/provision-production.ts");
+  const { importMfaKey } = await import("../src/lib/totp-secrets.ts");
+  const good = Buffer.from(Array.from({ length: 32 }, (_, i) => (i * 37 + 11) % 256)).toString("base64");
+  assert.deepEqual(mfaKeyProblems(good), []);
+  await importMfaKey(good); // the Worker accepts the same format
+  assert.match(mfaKeyProblems(undefined).join(), /not set/);
+  assert.match(mfaKeyProblems("not base64!").join(), /base64/);
+  assert.match(mfaKeyProblems(Buffer.alloc(16, 7).toString("base64")).join(), /exactly 32 bytes \(got 16\)/);
+  assert.match(mfaKeyProblems(Buffer.alloc(32, 0).toString("base64")).join(), /random/);
+  assert.ok(!mfaKeyProblems("x".repeat(43) + "=").join().includes("x".repeat(43)), "the value is never echoed");
+  assert.match(wf, /PROD_MFA_ENCRYPTION_KEY: \$\{\{ secrets\.PRODUCTION_MFA_ENCRYPTION_KEY \}\}/);
+  const keep = wf.indexOf("grep -qx MFA_ENCRYPTION_KEY"), put = wf.indexOf("secret put MFA_ENCRYPTION_KEY");
+  assert.ok(keep > 0 && put > keep, "the existing key is checked before anything is installed");
+  assert.match(wf.slice(keep, put), /already set[\s\S]*kept \(never replaced\)[\s\S]*elif/);
+  assert.doesNotMatch(wf, /randomBytes\(32\)\.toString\("base64"\)/, "the workflow never invents an MFA key the Founder has no copy of");
 });

@@ -35,7 +35,9 @@ export interface D1Ops {
 }
 
 export interface DemoAccount { role: string; email: string; password: string; totp: string | null; note: string }
-export interface AccessResult { rotated: boolean; previewPassword: string; previewSource: "derived" | "founder"; accounts: DemoAccount[] }
+/** What a rotation revoked beyond passwords and 2FA keys (counts only; for logs and evidence). */
+export interface Revoked { sessions: number; authTokens: number; recoveryCodes: number; invitations: number }
+export interface AccessResult { rotated: boolean; previewPassword: string; previewSource: "derived" | "founder"; accounts: DemoAccount[]; revoked?: Revoked }
 
 const enc = new TextEncoder();
 async function hmac(key: string, msg: string): Promise<Uint8Array> {
@@ -105,11 +107,27 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
     }
     sql.push(`UPDATE users SET password_hash = ${q(await hashPassword(password))}, totp_secret = ${totpSql}, totp_last_step = NULL, failed_logins = 0, locked_until = NULL WHERE id = ${q(u.id)};`);
   }
+  let revoked: Revoked | undefined;
   if (rotated) {
-    // Previously issued credentials stop working everywhere: sessions and one-time tokens of demo users.
-    sql.push(`DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE email LIKE '%@${DEMO_DOMAIN}');`);
-    sql.push(`DELETE FROM auth_tokens WHERE user_id IN (SELECT id FROM users WHERE email LIKE '%@${DEMO_DOMAIN}');`);
-    sql.push(`INSERT OR REPLACE INTO _staging_access (key, value) VALUES ('salt', ${q(salt)}), ('epoch', ${q(o.epoch)}), ('rotated_at', ${q(new Date().toISOString())});`);
+    // Previously issued credentials stop working everywhere: sessions, one-time tokens and MFA recovery codes of demo
+    // users, and invitations they issued that nobody has accepted yet (an invitation link is a credential too).
+    // Accounts outside the demo domain are never touched. Counts are taken first so the rotation is auditable.
+    const now = new Date().toISOString();
+    const demo = `(SELECT id FROM users WHERE email LIKE '%@${DEMO_DOMAIN}')`;
+    const count = async (from: string) => Number((await ops.query<{ n: number }>(`SELECT COUNT(*) AS n FROM ${from}`))[0]?.n ?? 0);
+    revoked = {
+      sessions: await count(`sessions WHERE user_id IN ${demo}`),
+      authTokens: await count(`auth_tokens WHERE user_id IN ${demo}`),
+      recoveryCodes: await count(`mfa_recovery_codes WHERE user_id IN ${demo}`),
+      invitations: await count(`invitations WHERE accepted_at IS NULL AND expires_at > ${q(now)} AND invited_by IN ${demo}`),
+    };
+    sql.push(`DELETE FROM sessions WHERE user_id IN ${demo};`);
+    sql.push(`DELETE FROM auth_tokens WHERE user_id IN ${demo};`);
+    sql.push(`DELETE FROM mfa_recovery_codes WHERE user_id IN ${demo};`);
+    sql.push(`UPDATE invitations SET expires_at = ${q(now)} WHERE accepted_at IS NULL AND expires_at > ${q(now)} AND invited_by IN ${demo};`);
+    sql.push(`INSERT OR REPLACE INTO _staging_access (key, value) VALUES ('salt', ${q(salt)}), ('epoch', ${q(o.epoch)}), ('rotated_at', ${q(now)});`);
+    sql.push(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, organization_id, details_json, ip, created_at)
+      VALUES (NULL, 'system', 'staging.access_rotated', 'staging_access', ${q(o.epoch)}, NULL, ${q(JSON.stringify({ epoch: o.epoch, demoAccounts: users.length, revoked }))}, NULL, ${q(now)});`);
   }
   if (!accounts.some((a) => a.role === "owner")) throw new Error("No Owner demo account found in staging D1 (seed first)");
   const dir = mkdtempSync(join(tmpdir(), "staging-access-"));
@@ -128,7 +146,36 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
   if (o.rootKey) await putSecretIfChanged(ops, o.rootKey, "STAGING_ACCESS_PASSWORD", previewPassword);
   else await ops.putSecret("STAGING_ACCESS_PASSWORD", previewPassword);
   accounts.sort((a, b) => (ROLE_ORDER.indexOf(a.role) + 1 || 99) - (ROLE_ORDER.indexOf(b.role) + 1 || 99) || a.email.localeCompare(b.email));
-  return { rotated, previewPassword, previewSource: founder ? "founder" : "derived", accounts };
+  return { rotated, previewPassword, previewSource: founder ? "founder" : "derived", accounts, revoked };
+}
+
+/** Whether the next applyAccess() call will rotate (read-only). */
+export async function rotationPending(ops: D1Ops, o: { epoch: string; rotate: boolean }): Promise<boolean> {
+  if (o.rotate) return true;
+  const rows = await ops.query<{ key: string; value: string }>(`SELECT key, value FROM _staging_access WHERE key IN ('salt', 'epoch')`).catch(() => []);
+  const meta = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  return !meta.salt || meta.epoch !== o.epoch;
+}
+
+/**
+ * READ-ONLY: the credentials that are live right now (before a rotation), derived exactly as applyAccess() derived
+ * them. Used only by scripts/staging-rotation-check.ts to prove that these stop working after the rotation; the values
+ * never leave the runner. The preview password may be Founder-fixed, so both candidates are returned for the caller
+ * to test against the live gate.
+ */
+export async function currentAccess(ops: D1Ops, rootKey: string, fixedPreviewPassword?: string): Promise<{ previewCandidates: string[]; owner: { email: string; password: string; totp: string } } | null> {
+  const rows = await ops.query<{ key: string; value: string }>(`SELECT key, value FROM _staging_access WHERE key = 'salt'`).catch(() => []);
+  const salt = rows[0]?.value;
+  if (!salt) return null;
+  const owner = (await ops.query<{ email: string; mfa_enabled: number }>(
+    `SELECT u.email, u.mfa_enabled FROM users u JOIN memberships m ON m.user_id = u.id
+      WHERE m.role_id = 'owner' AND u.email LIKE '%@${DEMO_DOMAIN}' AND u.password_hash IS NOT NULL ORDER BY u.email LIMIT 1`))[0];
+  if (!owner?.mfa_enabled) return null;
+  const derived = await derivePassword(rootKey, salt, "preview");
+  return {
+    previewCandidates: [...new Set([fixedPreviewPassword, derived].filter((v): v is string => !!v))],
+    owner: { email: owner.email, password: await derivePassword(rootKey, salt, `password:${owner.email}`), totp: await deriveTotp(rootKey, salt, owner.email) },
+  };
 }
 
 export function accountsTable(accounts: DemoAccount[]): string {
@@ -142,7 +189,7 @@ export function accessReadme(url: string, r: AccessResult, verifiedAt: string | 
 
 Keep this file private. It is issued only through this GitHub Actions artifact.
 ${verifiedAt ? `Verified by the deploy run at ${verifiedAt}: preview password → Owner sign-in → 2FA → all 32 Owner modules.` : "NOT VERIFIED — do not rely on these values."}
-${r.rotated ? "These credentials were rotated in this run; all earlier preview passwords, demo passwords, 2FA keys and demo sessions no longer work." : "Credentials unchanged since the last rotation."}
+${r.rotated ? "These credentials were rotated in this run; all earlier preview passwords, demo passwords, 2FA keys, recovery codes, demo sessions and pending demo invitations no longer work." : "Credentials unchanged since the last rotation."}
 
 ## 1. Staging website
 
@@ -167,6 +214,9 @@ ${url}
 4. The Owner command center opens with all 32 modules in the left navigation.
 
 Passwords use dashes between groups of five characters; type the dashes. Each 2FA code works once.
+
+After a rotation the Owner has no recovery codes. Once signed in, open Account → Recovery codes, enter a current
+2FA code and save the new codes in your password manager (they are shown once).
 
 ## All demo accounts (sample data only)
 
@@ -210,6 +260,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     writeFileSync(join(out, "demo-accounts.md"), accountsTable(r.accounts) + "\n", { mode: 0o600 });
     writeFileSync(join(out, "access.json"), JSON.stringify(r), { mode: 0o600 });
     console.log(`Staging access applied: ${r.accounts.length} demo accounts, ${r.rotated ? "rotated" : "unchanged"}, preview password ${r.previewSource}.`);
+    if (r.revoked) console.log(`Revoked with the rotation: ${r.revoked.sessions} demo sessions, ${r.revoked.authTokens} one-time tokens, ${r.revoked.recoveryCodes} recovery codes, ${r.revoked.invitations} pending invitations issued by demo accounts.`);
   } catch (e) {
     // wrangler errors can echo arguments; print only the first line of our own message.
     console.error(`::error::Staging access could not be applied: ${String((e as Error).message ?? e).split("\n")[0].slice(0, 200)}`);
