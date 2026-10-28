@@ -33,9 +33,11 @@ export interface ConsultationRow {
 }
 
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I: easier to read aloud
+// Exactly 32 symbols, so each one is picked by the top 5 bits of a random byte: uniform, no modulo bias.
+if (CODE_ALPHABET.length !== 32) throw new Error("CODE_ALPHABET must have exactly 32 symbols");
 export function newConfirmationCode(): string {
   const b = crypto.getRandomValues(new Uint8Array(6));
-  return [...b].map((x) => CODE_ALPHABET[x % CODE_ALPHABET.length]).join("");
+  return [...b].map((x) => CODE_ALPHABET[x >> 3]).join("");
 }
 export const normaliseCode = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
 const digits = (s: string | null | undefined) => (s ?? "").replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
