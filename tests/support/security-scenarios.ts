@@ -383,6 +383,18 @@ export function auditScenarios(w: World): Scenario[] {
       await w.db.prepare(`UPDATE refunds SET status = 'denied' WHERE status IN ('approved','issued') AND payment_id IN (SELECT id FROM payments WHERE order_id = (SELECT order_id FROM projects WHERE id = ?))`).bind(w.a.ids.project).run();
       await w.db.prepare(`UPDATE payments SET status = 'succeeded' WHERE order_id = (SELECT order_id FROM projects WHERE id = ?)`).bind(w.a.ids.project).run();
     } },
+    // A customer's open, included revision request forwarded to the AI builder (owner_approval policy).
+    { key: "POST /staff/builds/customer-revisions/:id/forward", fields: () => ({ instruction: "Add the opening hours to the contact page footer." }), setup: async () => {
+      await w.db.prepare(`UPDATE build_jobs SET state = 'canceled' WHERE project_id = ? AND id <> ?`).bind(w.a.ids.project, w.ids.buildJob).run();
+      await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review' WHERE id = ?`).bind(w.ids.buildJob).run();
+      await w.db.prepare(`UPDATE revisions SET status = 'submitted', included = 1 WHERE id = ?`).bind(w.ids.revision).run();
+      await w.db.prepare(`UPDATE onboarding_responses SET completed_at = ? WHERE project_id = ?`).bind(nowIso(), w.a.ids.project).run();
+      await w.db.prepare(`UPDATE refunds SET status = 'denied' WHERE status IN ('approved','issued') AND payment_id IN (SELECT id FROM payments WHERE order_id = (SELECT order_id FROM projects WHERE id = ?))`).bind(w.a.ids.project).run();
+      await w.db.prepare(`UPDATE payments SET status = 'succeeded' WHERE order_id = (SELECT order_id FROM projects WHERE id = ?)`).bind(w.a.ids.project).run();
+    } },
+    { key: "POST /staff/builds/:id/delete-preview", setup: async () => {
+      await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review', preview_name = 'cm-prv-matrix-b0', preview_deleted_at = NULL, preview_delete_requested_at = NULL WHERE id = ?`).bind(w.ids.buildJob).run();
+    } },
     { key: "POST /staff/builds/:id/retry", setup: async () => {
       await w.db.prepare(`UPDATE build_jobs SET state = 'canceled' WHERE project_id = ? AND kind = 'revision'`).bind(w.a.ids.project).run();
       await w.db.prepare(`UPDATE build_jobs SET state = 'failed' WHERE id = ?`).bind(w.ids.buildJob).run();

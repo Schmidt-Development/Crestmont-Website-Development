@@ -6,8 +6,7 @@
 import { createHmac } from "node:crypto";
 import type {
   ClaimResponse, HeartbeatRequest, HeartbeatResponse, CheckpointRequest, RequirementItem, CompleteRequest, Job,
-  AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest,
-} from "./protocol.ts";
+  AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest, ExpiredPreview, ExpiredPreviewsResponse } from "./protocol.ts";
 import { RUNNER_VERSION, LIMITS } from "./protocol.ts";
 import type { Logger } from "./log.ts";
 import { silentLogger, errorMessage } from "./log.ts";
@@ -167,6 +166,21 @@ export class ControlPlaneClient {
       if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null;
       throw err;
     }
+  }
+
+  /** Preview lifecycle (v1.2): previews the platform wants deleted. null = the platform does not offer it (404/405). */
+  async expiredPreviews(): Promise<ExpiredPreview[] | null> {
+    try {
+      const r = await this.post<ExpiredPreviewsResponse>("/api/builds/runner/previews/claim", { runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId) });
+      return Array.isArray(r.previews) ? r.previews.slice(0, 20) : [];
+    } catch (err) {
+      if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null;
+      throw err;
+    }
+  }
+
+  previewDeleted(jobId: string, ok: boolean, error: string | null): Promise<unknown> {
+    return this.post("/api/builds/runner/previews/deleted", { runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId), jobId, ok, ...(error ? { error: error.slice(0, 500) } : {}) });
   }
 
   /** AI drafts: claim one short draft job (or {job:null}). Same HMAC signing as every runner endpoint. */

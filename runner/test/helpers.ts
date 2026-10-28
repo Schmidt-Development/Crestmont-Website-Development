@@ -110,6 +110,8 @@ export interface FakeCPOptions {
   /** Answer for /ai/complete: "lease_lost" -> 409. */
   aiComplete?: (body: Record<string, unknown>) => "lease_lost" | { status: string };
   secret?: string;
+  /** Extra endpoints without a lease (path after /api/builds/runner/), e.g. "previews/claim". Others answer 404. */
+  extraRoutes?: Record<string, (body: Record<string, unknown>) => unknown>;
 }
 
 export async function startFakeControlPlane(o: FakeCPOptions = {}): Promise<FakeCP> {
@@ -143,6 +145,9 @@ export async function startFakeControlPlane(o: FakeCPOptions = {}): Promise<Fake
         leased.delete(String(body.jobId));
         return send(200, ans);
       }
+      const extra = o.extraRoutes?.[p.replace("/api/builds/runner/", "")];
+      if (extra) return send(200, extra(body));
+      if (p === "/api/builds/runner/previews/claim" || p === "/api/builds/runner/previews/deleted") return send(404, { error: "unknown" });
       if (p === "/api/builds/runner/claim") {
         const job = jobs.shift();
         if (!job) return send(200, { job: null, reason: "none_queued" });

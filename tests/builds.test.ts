@@ -616,3 +616,50 @@ test("[AIB-006] customer revisions follow the existing entitlement rules and the
   await B.updateBuildSettings({ db: t.db, userId: t.owner.id }, base);
   assert.equal((await B.getBuildSettings(t.db)).customer_revision_mode, "owner_approval", "omitted = unchanged");
 });
+
+test("[AIB-006] previews: one per build, deleted on owner request or after the Founder's retention period (never the one in review), only by the runner", async () => {
+  const t = await app();
+  const { pid, firstJobId } = await reviewedProject(t);
+  // complete() above sent no previewName (an older runner): nothing is ever deleted for it.
+  assert.equal((await B.getJob(t.db, firstJobId))!.preview_name, null);
+  await t.db.prepare(`UPDATE build_jobs SET preview_name = 'cm-prv-first-b0' WHERE id = ?`).bind(firstJobId).run();
+  // A revision reports its own preview Worker; malformed names are not stored.
+  assert.equal((await t.oc.post(`/staff/builds/${firstJobId}/revision`, { instruction: "Add the opening hours to the footer of every page." })).status, 303);
+  const rc = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  await runner(t, "complete", { jobId: rc.id, leaseToken: rc.leaseToken, outcome: "ready_for_review", runCostUsd: 0, previewUrl: "https://cm-prv-x-r1.acct.workers.dev", previewName: "cm-prv-x-r1" });
+  assert.equal((await B.getJob(t.db, rc.id))!.preview_name, "cm-prv-x-r1");
+
+  // No retention set (default): nothing expires on its own.
+  assert.equal((await B.getBuildSettings(t.db)).preview_retention_days, null);
+  assert.deepEqual((await runner(t, "previews/claim", { runnerId: "r1" })).json, { previews: [] });
+
+  // Retention 7 days: the superseded first build's preview (finished 10 days ago) expires; the revision in review does not.
+  const settings = { run_budget: "25", project_budget: "75", model: "qwen3-coder:30b", max_runtime: "120", max_turns: "200", max_concurrent: "2", max_attempts: "3", automation_enabled: "1", customer_revision_mode: "owner_approval", preview_retention_days: "7" };
+  assert.equal((await t.oc.post("/staff/builds/settings", settings)).status, 303);
+  assert.equal((await B.getBuildSettings(t.db)).preview_retention_days, 7);
+  const old = new Date(Date.now() - 10 * 86400_000).toISOString();
+  await t.db.prepare(`UPDATE build_jobs SET finished_at = ? WHERE project_id = ?`).bind(old, pid).run();
+  const claim1 = (await runner(t, "previews/claim", { runnerId: "r1" })).json;
+  assert.deepEqual(claim1, { previews: [{ jobId: firstJobId, previewName: "cm-prv-first-b0" }] }, "only the superseded preview");
+  assert.deepEqual((await runner(t, "previews/claim", { runnerId: "r1" })).json, { previews: [] }, "handed out once until reported");
+  // A failed deletion is reported and offered again later.
+  await runner(t, "previews/deleted", { runnerId: "r1", jobId: firstJobId, ok: false, error: "token expired" });
+  assert.ok(await t.db.prepare(`SELECT 1 FROM build_events WHERE job_id = ? AND message LIKE 'Preview deletion failed: token expired%'`).bind(firstJobId).first());
+  assert.equal((await runner(t, "previews/claim", { runnerId: "r1" })).json.previews.length, 1);
+  await runner(t, "previews/deleted", { runnerId: "r1", jobId: firstJobId, ok: true });
+  assert.ok((await B.getJob(t.db, firstJobId))!.preview_deleted_at);
+  assert.match(await (await t.oc.get(`/staff/builds/${firstJobId}`)).text(), /Deleted .*cm-prv-first-b0/);
+  assert.equal((await runner(t, "previews/deleted", { runnerId: "r1", jobId: firstJobId, ok: true })).status, 404, "nothing pending any more");
+
+  // Owner request: the preview in review is deleted only when asked, and then it can no longer be approved.
+  assert.equal((await t.oc.post(`/staff/builds/${rc.id}/delete-preview`)).status, 303);
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.preview_delete_requested' AND subject_id = ?`).bind(rc.id).first());
+  assert.match(flash(await t.oc.post(`/staff/builds/${rc.id}/approve`, { notes: "" })), /preview was deleted/);
+  assert.deepEqual((await runner(t, "previews/claim", { runnerId: "r1" })).json, { previews: [{ jobId: rc.id, previewName: "cm-prv-x-r1" }] });
+  // Unsigned calls are refused like every runner endpoint.
+  assert.equal((await runner(t, "previews/claim", { runnerId: "r1" }, "wrong-secret")).status, 401);
+  // Settings: empty keeps previews until deleted; out-of-range is refused.
+  assert.equal((await t.oc.post("/staff/builds/settings", { ...settings, preview_retention_days: "" })).status, 303);
+  assert.equal((await B.getBuildSettings(t.db)).preview_retention_days, null);
+  assert.match(flash(await t.oc.post("/staff/builds/settings", { ...settings, preview_retention_days: "0" })), /Preview retention must be 1–365 days/);
+});

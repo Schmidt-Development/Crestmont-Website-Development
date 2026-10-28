@@ -21,3 +21,13 @@ CREATE UNIQUE INDEX idx_build_jobs_customer_revision_live ON build_jobs(customer
 ALTER TABLE build_runs ADD COLUMN provider TEXT;
 ALTER TABLE build_runs ADD COLUMN model TEXT;
 ALTER TABLE build_runs ADD COLUMN zero_cost INTEGER CHECK (zero_cost IS NULL OR zero_cost IN (0, 1));
+
+-- Preview lifecycle: one preview Worker per build (name recorded), deleted on owner request or after the retention
+-- period, by the runner (which holds the preview credential). The platform never holds a Cloudflare token.
+ALTER TABLE build_jobs ADD COLUMN preview_name TEXT;
+ALTER TABLE build_jobs ADD COLUMN preview_delete_requested_at TEXT;
+ALTER TABLE build_jobs ADD COLUMN preview_delete_claimed_at TEXT;
+ALTER TABLE build_jobs ADD COLUMN preview_deleted_at TEXT;
+-- Days after a build finished before its preview is deleted, when a newer build of the project exists or the build is
+-- approved / canceled / failed. NULL (default) = previews are kept until an owner deletes them (a Founder decision).
+ALTER TABLE build_settings ADD COLUMN preview_retention_days INTEGER CHECK (preview_retention_days IS NULL OR preview_retention_days BETWEEN 1 AND 365);

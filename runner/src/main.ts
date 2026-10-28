@@ -15,7 +15,7 @@ import { ControlPlaneClient } from "./control-plane.ts";
 import { assertIsolation, buildAgentEnv, buildCheckEnv, createWorkspace } from "./workspace.ts";
 import { loadManifest, preflight } from "./skills.ts";
 import type { SkillManifest, Workflow } from "./skills.ts";
-import { runJob } from "./job.ts";
+import { runJob, deletePreview } from "./job.ts";
 import type { JobDeps } from "./job.ts";
 import type { QueryFn } from "./providers/claude-agent-sdk.ts";
 import { assertProviderAllowed, createProvider } from "./providers/index.ts";
@@ -43,6 +43,8 @@ export interface LoopDeps {
   jobDeps?: Partial<JobDeps>;
   /** Serve AI drafts when idle (null = off). */
   drafts?: { serve: () => Promise<DraftOutcome>; maxPerIdle?: number } | null;
+  /** Delete expired / owner-deleted previews when idle (null = PREVIEW_DELETE_COMMAND not configured). */
+  previews?: { sweep: () => Promise<"unsupported" | number> } | null;
   health?: HealthState;
   /**
    * Model-server readiness probe (local provider). While it fails the runner claims neither builds nor drafts, so an
@@ -67,9 +69,23 @@ export function localModelProbe(cfg: RunnerConfig, fetchImpl?: typeof fetch): ()
   };
 }
 
+/** Delete the previews the platform lists (owner request or retention), one at a time, and report each result. */
+export async function sweepPreviews(cfg: RunnerConfig, client: ControlPlaneClient, logger: Logger, processEnv: Record<string, string | undefined> = process.env): Promise<"unsupported" | number> {
+  const list = await client.expiredPreviews();
+  if (list === null) return "unsupported";
+  let deleted = 0;
+  for (const p of list) {
+    const r = await deletePreview(cfg, String(p.previewName), processEnv);
+    if (r.ok) deleted++;
+    else logger.warn("preview delete failed", { jobId: p.jobId, error: r.error });
+    await client.previewDeleted(String(p.jobId), r.ok, r.error);
+  }
+  return deleted;
+}
+
 export function capabilities(cfg: RunnerConfig): string[] {
   const base = cfg.agentProvider === "local" ? ["local-model", "container-sandbox", "zero-token-cost"] : ["agent-sdk"];
-  return [...base, "git", ...(cfg.preview ? ["preview"] : []), ...(cfg.aiDrafts.enabled && cfg.aiDrafts.provider === "local" ? ["ai-drafts"] : [])];
+  return [...base, "git", ...(cfg.preview ? ["preview"] : []), ...(cfg.previewDelete ? ["preview-cleanup"] : []), ...(cfg.aiDrafts.enabled && cfg.aiDrafts.provider === "local" ? ["ai-drafts"] : [])];
 }
 
 async function interruptibleSleep(ms: number, shouldStop: () => boolean): Promise<void> {
@@ -83,6 +99,7 @@ export async function runLoop(d: LoopDeps): Promise<number> {
   let idleMs = d.cfg.pollMinMs;
   let jobs = 0;
   let draftsSupported = true;
+  let previewsSupported = true;
   let lastProbeAt = 0;
   let modelOk = true;
   let paidRefusalLogged = false;
@@ -128,6 +145,13 @@ export async function runLoop(d: LoopDeps): Promise<number> {
           served++;
           if (d.health) d.health.draftsServed++;
         }
+      }
+      if (d.previews && previewsSupported && !d.shouldStop()) {
+        try {
+          const n = await d.previews.sweep();
+          if (n === "unsupported") { previewsSupported = false; d.logger.info("the control plane does not offer preview cleanup; not polling for it again until restart"); }
+          else if (n > 0) d.logger.info("previews deleted", { count: n });
+        } catch (err) { d.logger.warn("preview cleanup failed", { error: errorMessage(err) }); }
       }
       if (d.once) return jobs;
       if (served > 0) { idleMs = d.cfg.pollMinMs; continue; }
@@ -222,6 +246,7 @@ async function main(argv: string[]): Promise<number> {
   await runLoop({
     cfg, client, queryFn, manifest, logger, shouldStop: () => stopping, once: argv.includes("--once"), health,
     drafts: ds ? { serve: () => serveOneDraft({ client, model: ds.model, modelName: ds.modelName, log: logger, onError: onDraftError }) } : null,
+    previews: cfg.previewDelete ? { sweep: () => sweepPreviews(cfg, client, logger) } : null,
     // The local provider (and local drafts) need the model server; the paid adapter's model is not ours to probe.
     modelProbe: cfg.agentProvider === "local" ? { check: localModelProbe(cfg), intervalMs: 300_000 } : null,
   });

@@ -105,6 +105,8 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/builds/runner/ai/complete": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/files": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/complete": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/previews/claim": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/previews/deleted": signed("x-crestmont-runner-signature"),
   "GET /api/builds": { access: { kind: "staff", roles: rolesWith("builds.read") }, api: true },
   "GET /api/builds/:id": { access: { kind: "staff", roles: rolesWith("builds.read") }, api: true, params: { id: "buildJob" } },
 
@@ -469,6 +471,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/builds/:id/revision": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.revision_submitted")),
   "POST /staff/builds/:id/approve": staff(rolesWith("builds.configure"), P("buildJob"), act("builds.preview_approved")),
   "POST /staff/builds/customer-revisions/:id/forward": staff(rolesWith("builds.manage"), P("revision"), act("builds.customer_revision_forwarded")),
+  "POST /staff/builds/:id/delete-preview": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.preview_delete_requested")),
   "POST /staff/ai/:id/decide": staff(rolesWith("ai.manage"), P("aiJob"), act("ai.draft_approved")),
   "POST /staff/ai/:id/retry": staff(rolesWith("ai.manage"), P("aiJob"), act("ai.job_retried")),
   "POST /staff/ai/budget": staff(rolesWith("ai.budget"), undefined, act("ai.budget_updated")),

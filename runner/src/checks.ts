@@ -121,17 +121,44 @@ export async function runChecks(repo: string, commands: { id: string; label: str
   return out;
 }
 
-/** Wrangler config keys that would make a preview deploy execute project code with the preview credential. */
+/**
+ * Wrangler config the runner refuses to deploy with the preview credential: a custom build command (runs project
+ * code), routes or custom domains (outside the preview account's workers.dev), and any path that leaves the
+ * project (absolute, home-relative or with ..), which could upload runner files such as /run/secrets as assets.
+ */
 export function previewConfigProblems(repo: string): string[] {
   const problems: string[] = [];
   for (const f of ["wrangler.json", "wrangler.jsonc", "wrangler.toml"]) {
     const file = path.join(repo, f);
     if (!existsSync(file)) continue;
+    let st;
+    try { st = lstatSync(file); } catch { continue; }
+    if (st.isSymbolicLink()) { problems.push(`${f} is a symbolic link`); continue; }
     const text = readFileSync(file, "utf8");
     if (/"build"\s*:/.test(text) || /^\s*\[build\]/m.test(text)) problems.push(`${f} defines a custom build command`);
     if (/"routes?"\s*:|^\s*routes?\s*=|"custom_domain"|custom_domain\s*=/m.test(text)) problems.push(`${f} defines routes or custom domains`);
+    for (const m of text.matchAll(/["']([^"'\n]{1,500})["']/g)) {
+      const v = m[1];
+      if (/^(?:\/|~|[A-Za-z]:[\\/]|\\\\)/.test(v) || /(?:^|[\\/])\.\.(?:[\\/]|$)/.test(v)) {
+        if (/^https?:\/\//i.test(v) || /^\/\*/.test(v) || /^\/api\//.test(v) || v === "/api/*") continue; // URLs and route patterns are not paths
+        problems.push(`${f} refers to a path outside the project (${v.slice(0, 80)})`);
+        break;
+      }
+    }
   }
   return problems;
+}
+
+/** Files a deploy tool would load from the project directory (package managers, env files, local tool installs). */
+export const PREVIEW_EXPORT_STRIP = ["node_modules", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs", ".wrangler", ".dev.vars", ".env", ".git"];
+
+/** Worker names the runner deploys and deletes: cm-prv-<project>-<build>. */
+export const PREVIEW_NAME = /^cm-prv-[a-z0-9][a-z0-9-]{1,55}$/;
+
+/** One preview per build: a revision never replaces the preview of the build an owner reviewed. */
+export function previewName(projectId: string, kind: "first_build" | "revision", revision: number): string {
+  const project = projectId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+  return `cm-prv-${project}-${kind === "revision" ? `r${revision}` : "b0"}`;
 }
 
 // ── Brief conformance (runner-side, reads files only; never executes agent code) ──

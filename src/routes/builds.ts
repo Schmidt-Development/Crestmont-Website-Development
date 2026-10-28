@@ -56,6 +56,9 @@ export function register(r: Router): void {
   // Self-hosted AI drafts (ai_jobs with provider local-runner), same signed channel.
   r.post(`${RUNNER}/ai/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await AIR.claimAiJob(ctx.db, typeof b.runnerId === "string" ? b.runnerId : "", ctx.now())); }));
   r.post(`${RUNNER}/ai/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await AIR.completeAiJob(ctx.db, await runnerBody(ctx)))));
+  // Preview lifecycle (protocol v1.2): previews to delete, and the runner's report for each.
+  r.post(`${RUNNER}/previews/claim`, runnerRoute(async (ctx) => { await runnerBody(ctx); return jsonResponse(ctx, 200, await B.claimExpiredPreviews(ctx.db, ctx.now())); }));
+  r.post(`${RUNNER}/previews/deleted`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.reportPreviewDeleted(ctx.db, await runnerBody(ctx)))));
   r.post(`${RUNNER}/requirements`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.reportRequirements(ctx.db, await runnerBody(ctx)))));
   r.post(`${RUNNER}/files`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.runnerFile(ctx.db, ctx.storage, await runnerBody(ctx)))));
   r.post(`${RUNNER}/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.completeJob(ctx.db, await runnerBody(ctx), (j, to) => notifyStaff(ctx, j, to), { previewHosts: B.previewHostList(ctx.env.BUILD_PREVIEW_HOSTS) }))));
@@ -143,6 +146,7 @@ ${configure ? html`<form method="post" action="/staff/builds/settings" class="st
 ${input({ name: "max_runtime", label: "Max runtime (minutes)", type: "number", value: s.max_runtime_minutes })}${input({ name: "max_turns", label: "Max agent turns", type: "number", value: s.max_turns })}${input({ name: "max_concurrent", label: "Concurrent builds", type: "number", value: s.max_concurrent })}
 ${input({ name: "max_attempts", label: "Automatic attempts", type: "number", value: s.max_attempts })}</div>
 ${checkbox("automation_enabled", "Start eligible first builds automatically", { checked: !!s.automation_enabled })}
+${input({ name: "preview_retention_days", label: "Delete superseded or finished previews after (days)", type: "number", value: s.preview_retention_days ?? "", hint: "Empty: previews are kept until an owner deletes them. The preview in owner review is never deleted automatically." })}
 ${select({ name: "customer_revision_mode", label: "Customer revision requests", value: s.customer_revision_mode, options: [
   { value: "off", label: "Off (staff only)" }, { value: "owner_approval", label: "Owner approval (default)" }, { value: "auto", label: "Automatic for entitled rounds" }] })}
 <p class="faint">Limits are enforced by the platform at every runner heartbeat, not by the prompt. Projects created before ${formatDateTime(s.auto_start_after)} are never started automatically; use Backfill on a project to include it.</p>
@@ -166,7 +170,8 @@ ${dl([["Project", html`<a href="/staff/projects/${x.projectId}">${x.projectName}
   ["Eligibility", x.eligibility.verdict === "queued" ? "Eligible: verified payment and submitted intake" : x.eligibility.reasons.join("; ")],
   ["Started", x.startedAt ? formatDateTime(x.startedAt) : "—"], ["Elapsed", dur(x.elapsedSeconds)], ["Latest heartbeat", x.heartbeatAt ? formatDateTime(x.heartbeatAt) : "—"],
   ["Attempts", `${x.attempts} of ${x.maxAttempts}`], ["Cost", `${usd(x.costUsd)} this build · project ${usd(x.projectSpendUsd)} of ${usd(x.projectBudgetUsd)} · per-run limit ${usd(x.runBudgetUsd)}`],
-  ["Preview", x.previewUrl ? html`<a href="${x.previewUrl}" rel="noopener noreferrer" target="_blank">${x.previewUrl}</a>` : "Not available"],
+  ["Preview", j.preview_deleted_at ? `Deleted ${formatDateTime(j.preview_deleted_at)}${j.preview_name ? ` (${j.preview_name})` : ""}`
+    : x.previewUrl ? html`<a href="${x.previewUrl}" rel="noopener noreferrer" target="_blank">${x.previewUrl}</a>${j.preview_delete_requested_at ? html` ${badge("warn", "Deletion requested")}` : ""}` : "Not available"],
   ["Source", x.source.repo ? `${x.source.repo}${x.source.branch ? ` @ ${x.source.branch}` : ""}${x.source.commit ? ` (${x.source.commit.slice(0, 12)})` : ""}` : "Not available"],
   ["Brief", d.brief ? `version ${(d.brief as { version: number }).version}` : "—"], ["Revision instruction", j.instruction],
   ["Customer revision", x.customerRevision ? html`Round ${x.customerRevision.round} (<a href="/staff/projects/${x.projectId}?tab=revisions">project revisions</a>)` : "—"]])}
@@ -180,7 +185,8 @@ ${!["canceled", "approved"].includes(j.state) ? act("cancel", "Cancel build", in
 ${j.state === "failed" ? act("retry", "Retry") : ""}
 ${["paused", "budget_paused", "needs_information", "failed"].includes(j.state) && (j.agent_session_id || j.source_commit) ? act("resume", "Resume saved session") : ""}
 ${["ready_for_review", "approved", "needs_information"].includes(j.state) ? act("revision", "Submit revision", textarea({ name: "instruction", label: "Revision instruction", required: true, maxlength: 5000, rows: 3 }), "primary") : ""}
-${configure && j.state === "ready_for_review" ? act("approve", "Approve preview for delivery", input({ name: "notes", label: "Notes", maxlength: 500, id: "f-approve-notes" }), "primary") : ""}
+${configure && j.state === "ready_for_review" && !j.preview_deleted_at && !j.preview_delete_requested_at ? act("approve", "Approve preview for delivery", input({ name: "notes", label: "Notes", maxlength: 500, id: "f-approve-notes" }), "primary") : ""}
+${j.preview_name && !j.preview_deleted_at && !j.preview_delete_requested_at && !["preparing", "building", "verifying"].includes(j.state) ? act("delete-preview", "Delete preview") : ""}
 ${html`<form method="post" action="/staff/builds/projects/${j.project_id}/pause" class="row">${csrf(ctx)}${x.projectPaused ? html`<input type="hidden" name="paused" value="0">${button("Resume project automation", { variant: "secondary", size: "sm" })}` : html`<input type="hidden" name="paused" value="1">${input({ name: "reason", label: "Reason", required: true, maxlength: 300, id: "f-project-pause" })}${button("Pause this project", { variant: "secondary", size: "sm" })}`}</form>`}
 ${configure ? html`<form method="post" action="/staff/builds/projects/${j.project_id}/budget" class="row">${csrf(ctx)}${input({ name: "project_budget", label: "Project limit (USD)", type: "number", step: "0.01", value: x.projectBudgetUsd, id: "f-project-budget" })}${button("Set project limit", { variant: "secondary", size: "sm" })}</form>` : ""}
 <p class="faint">Approving a preview records the owner decision only; it never publishes to production, changes domains, charges the customer or emails them.</p></section>` : ""}
@@ -214,7 +220,8 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     const n = (k: string) => Number(str(f, k));
     try {
       await B.updateBuildSettings(owner(ctx), { automationEnabled: !!f.get("automation_enabled"), runBudgetUsd: n("run_budget"), projectBudgetUsd: n("project_budget"), maxRuntimeMinutes: n("max_runtime"), maxTurns: n("max_turns"), maxConcurrent: n("max_concurrent"), maxAttempts: n("max_attempts"), model: str(f, "model"),
-        customerRevisionMode: (str(f, "customer_revision_mode") || undefined) as B.CustomerRevisionMode | undefined });
+        customerRevisionMode: (str(f, "customer_revision_mode") || undefined) as B.CustomerRevisionMode | undefined,
+        previewRetentionDays: f.has("preview_retention_days") ? (str(f, "preview_retention_days") ? Number(str(f, "preview_retention_days")) : null) : undefined });
     } catch (e) { return fail(ctx, "/staff/builds", e); }
     return back(ctx, "/staff/builds", "Limits saved.");
   });
@@ -267,6 +274,11 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     return back(ctx, `/staff/builds/${p.id}`, "Preview approved for the delivery process. Nothing was published or sent to the customer.");
   });
 
+  r.post("/staff/builds/:id/delete-preview", async (ctx, p) => {
+    requireStaff(ctx, "builds.manage");
+    try { await B.requestPreviewDeletion(owner(ctx), p.id); } catch (e) { return fail(ctx, `/staff/builds/${p.id}`, e); }
+    return back(ctx, `/staff/builds/${p.id}`, "Preview deletion requested. The runner deletes it from the preview account when idle.");
+  });
   r.post("/staff/builds/customer-revisions/:id/forward", async (ctx, p) => {
     requireStaff(ctx, "builds.manage");
     let id: string;
@@ -289,7 +301,7 @@ function settingsView(s: B.BuildSettings) {
     automationEnabled: !!s.automation_enabled, globallyPaused: !!s.globally_paused, pauseReason: s.pause_reason, autoStartAfter: s.auto_start_after,
     runBudgetUsd: B.microToUsd(s.run_budget_micro), projectBudgetUsd: B.microToUsd(s.project_budget_micro), maxRuntimeMinutes: s.max_runtime_minutes,
     maxTurns: s.max_turns, maxConcurrent: s.max_concurrent, maxAttempts: s.max_attempts, model: s.model,
-    customerRevisionMode: s.customer_revision_mode,
+    customerRevisionMode: s.customer_revision_mode, previewRetentionDays: s.preview_retention_days,
   };
 }
 void actionForm;

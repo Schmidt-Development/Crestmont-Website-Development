@@ -47,6 +47,12 @@ export interface RunnerConfig {
     prefix: string;
   } | null;
   preview: { command: string; envNames: string[]; timeoutMs: number } | null;
+  /**
+   * Preview deletion: PREVIEW_DELETE=cloudflare-api (built in: DELETE /accounts/{CLOUDFLARE_ACCOUNT_ID}/workers/scripts/{name}
+   * with CLOUDFLARE_API_TOKEN, through the runner's proxy), or PREVIEW_DELETE_COMMAND (a shell command given
+   * $CRESTMONT_PREVIEW_NAME and the PREVIEW_DEPLOY_ENV credentials). Unset = previews are never deleted by the runner.
+   */
+  previewDelete: { mode: "cloudflare-api" | "command"; command: string; timeoutMs: number } | null;
   platformRepoPatterns: RegExp[];
   gitAuthorName: string;
   gitAuthorEmail: string;
@@ -154,6 +160,13 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
     timeoutMs: num(env.PREVIEW_DEPLOY_TIMEOUT_SECONDS, 600) * 1000,
   } : null;
 
+  if (env.PREVIEW_DELETE && env.PREVIEW_DELETE !== "cloudflare-api") throw new Error(`PREVIEW_DELETE must be "cloudflare-api" (got ${env.PREVIEW_DELETE}); for a custom command use PREVIEW_DELETE_COMMAND`);
+  const previewDeleteCommand = env.PREVIEW_DELETE_COMMAND ?? "";
+  const previewDeleteTimeout = num(env.PREVIEW_DELETE_TIMEOUT_SECONDS, 180) * 1000;
+  const previewDelete = env.PREVIEW_DELETE === "cloudflare-api" ? { mode: "cloudflare-api" as const, command: "", timeoutMs: previewDeleteTimeout }
+    : previewDeleteCommand ? { mode: "command" as const, command: previewDeleteCommand, timeoutMs: previewDeleteTimeout } : null;
+  if (previewDelete?.mode === "cloudflare-api") for (const n of ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"]) registerSecret(readSecret(env, n));
+
   for (const s of [secret, anthropicApiKey, repoToken]) registerSecret(s);
   for (const n of preview?.envNames ?? []) registerSecret(readSecret(env, n));
 
@@ -183,6 +196,7 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
     maxCustomerFileBytes: num(env.RUNNER_MAX_CUSTOMER_FILE_MB, 25) * 1024 * 1024,
     repo,
     preview,
+    previewDelete,
     platformRepoPatterns: list(env.CRESTMONT_PLATFORM_REPO_PATTERNS, ["Crestmont-Website-Development", "crestmont-platform"])
       .map((p) => new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")),
     gitAuthorName: env.RUNNER_GIT_NAME ?? "Crestmont AI Builds",
@@ -235,5 +249,6 @@ export function configuredVariableNames(cfg: RunnerConfig): string[] {
   else names.push("LOCAL_MODEL", "LOCAL_MODEL_BASE_URL", "RUNNER_SANDBOX_IMAGE");
   if (cfg.repo) names.push("PROJECT_REPO_OWNER", "PROJECT_REPO_TOKEN");
   if (cfg.preview) names.push("PREVIEW_DEPLOY_COMMAND", ...cfg.preview.envNames);
+  if (cfg.previewDelete) names.push(cfg.previewDelete.mode === "cloudflare-api" ? "PREVIEW_DELETE" : "PREVIEW_DELETE_COMMAND");
   return names;
 }

@@ -33,6 +33,8 @@ export interface BuildSettings {
   max_concurrent: number; max_attempts: number; lease_seconds: number; model: string; updated_by: string | null; updated_at: string;
   /** Founder policy for customer revision requests (migration 0041): off | owner_approval (default) | auto. */
   customer_revision_mode: CustomerRevisionMode;
+  /** Days before a superseded / finished build's preview is deleted; null = keep until an owner deletes it (0041). */
+  preview_retention_days: number | null;
 }
 export const CUSTOMER_REVISION_MODES = ["off", "owner_approval", "auto"] as const;
 export type CustomerRevisionMode = (typeof CUSTOMER_REVISION_MODES)[number];
@@ -56,6 +58,7 @@ export interface BuildJob {
   cancel_requested_by: string | null; approved_by: string | null; approved_at: string | null; created_at: string; updated_at: string;
   /** The customer's revision request (portal `revisions`) this AI revision works on; null for owner-initiated revisions. */
   customer_revision_id: string | null;
+  preview_name: string | null; preview_delete_requested_at: string | null; preview_delete_claimed_at: string | null; preview_deleted_at: string | null;
 }
 
 export async function getJob(db: Db, id: string): Promise<BuildJob | null> {
@@ -526,6 +529,10 @@ export async function runnerFile(db: Db, storage: StorageAdapter | null, b: Reco
   return { name: f.filename, contentType: f.content_type, scanStatus: f.scan_status, base64: btoa(bin) };
 }
 
+/** Worker names the runner deploys previews under (runner/src/checks.ts PREVIEW_NAME). */
+export const PREVIEW_NAME = /^cm-prv-[a-z0-9][a-z0-9-]{1,55}$/;
+const okPreviewName = (v: unknown) => typeof v === "string" && PREVIEW_NAME.test(v) ? v : null;
+
 /** Preview hosts allowed by default: the per-project Cloudflare Workers preview the brochure starter deploys to. */
 export const DEFAULT_PREVIEW_HOSTS = [".workers.dev"];
 
@@ -557,6 +564,8 @@ export async function completeJob(db: Db, b: Record<string, unknown>, notify?: (
     // A build delivered to review shows only the preview this attempt deployed: an older URL (an earlier attempt or the
     // previous revision) would let the owner approve a site that is not the one under review.
     preview_url: outcome === "ready_for_review" ? (previewRejected ? null : reportedPreview) : (previewRejected ? null : reportedPreview) ?? job.preview_url,
+    // The preview Worker's name, kept so the runner can delete it later (only for a preview that was recorded).
+    preview_name: reportedPreview && !previewRejected ? okPreviewName(b.previewName) : outcome === "ready_for_review" ? null : job.preview_name,
     report_md: typeof b.report === "string" ? sanitize(b.report, 50_000) : job.report_md,
   };
   const err = typeof b.error === "string" ? sanitize(b.error, 2000) : null;
@@ -636,7 +645,8 @@ export async function syncProjectBuildSafe(db: Db, projectId: string | null | un
 
 type OwnerCtx = Pick<AppContext, "db"> & { userId: string };
 
-export async function updateBuildSettings(c: OwnerCtx, v: { automationEnabled: boolean; runBudgetUsd: number; projectBudgetUsd: number; maxRuntimeMinutes: number; maxTurns: number; maxConcurrent: number; maxAttempts: number; model: string; customerRevisionMode?: CustomerRevisionMode }) {
+export async function updateBuildSettings(c: OwnerCtx, v: { automationEnabled: boolean; runBudgetUsd: number; projectBudgetUsd: number; maxRuntimeMinutes: number; maxTurns: number; maxConcurrent: number; maxAttempts: number; model: string; customerRevisionMode?: CustomerRevisionMode; previewRetentionDays?: number | null }) {
+  if (v.previewRetentionDays != null && !(Number.isInteger(v.previewRetentionDays) && v.previewRetentionDays >= 1 && v.previewRetentionDays <= 365)) throw new HttpError(422, "Preview retention must be 1–365 days, or empty to keep previews until deleted.");
   if (v.customerRevisionMode !== undefined && !(CUSTOMER_REVISION_MODES as readonly string[]).includes(v.customerRevisionMode)) throw new HttpError(422, "Choose how customer revision requests reach the AI builder.");
   if (!(v.runBudgetUsd > 0 && v.runBudgetUsd <= 1000)) throw new HttpError(422, "Per-run limit must be between $0.01 and $1,000.");
   if (!(v.projectBudgetUsd >= v.runBudgetUsd && v.projectBudgetUsd <= 10000)) throw new HttpError(422, "Per-project limit must be at least the per-run limit and at most $10,000.");
@@ -647,8 +657,10 @@ export async function updateBuildSettings(c: OwnerCtx, v: { automationEnabled: b
   // Provider-neutral model identifiers: hosted names (vendor-model-version), Ollama tags (family:size) and namespaced ids (org/model).
   if (!/^[a-z0-9][a-z0-9._:/-]{2,80}$/i.test(v.model) || /\.\.|\/\//.test(v.model)) throw new HttpError(422, "Enter a model identifier, for example qwen3-coder:30b for a self-hosted model.");
   await c.db.prepare(`UPDATE build_settings SET automation_enabled = ?, run_budget_micro = ?, project_budget_micro = ?, max_runtime_minutes = ?, max_turns = ?, max_concurrent = ?, max_attempts = ?, model = ?,
-      customer_revision_mode = COALESCE(?, customer_revision_mode), updated_by = ?, updated_at = ? WHERE id = 1`)
-    .bind(v.automationEnabled ? 1 : 0, usdToMicro(v.runBudgetUsd), usdToMicro(v.projectBudgetUsd), v.maxRuntimeMinutes, v.maxTurns, v.maxConcurrent, v.maxAttempts, v.model, v.customerRevisionMode ?? null, c.userId, nowIso()).run();
+      customer_revision_mode = COALESCE(?, customer_revision_mode), preview_retention_days = CASE WHEN ? = 1 THEN ? ELSE preview_retention_days END,
+      updated_by = ?, updated_at = ? WHERE id = 1`)
+    .bind(v.automationEnabled ? 1 : 0, usdToMicro(v.runBudgetUsd), usdToMicro(v.projectBudgetUsd), v.maxRuntimeMinutes, v.maxTurns, v.maxConcurrent, v.maxAttempts, v.model, v.customerRevisionMode ?? null,
+      v.previewRetentionDays === undefined ? 0 : 1, v.previewRetentionDays ?? null, c.userId, nowIso()).run();
   await audit(c.db, { actorUserId: c.userId, action: "builds.settings_updated", subjectType: "build_settings", subjectId: "1", details: v });
 }
 
@@ -876,6 +888,7 @@ export async function approveBuild(c: OwnerCtx, id: string, notes: string) {
   const j = await ownerJob(c, id);
   if (j.state !== "ready_for_review") throw new HttpError(409, "Only a build in owner review can be approved.");
   if (!j.preview_url) throw new HttpError(409, "This build has no preview to approve.");
+  if (j.preview_deleted_at || j.preview_delete_requested_at) throw new HttpError(409, "This build's preview was deleted (or is being deleted); it cannot be approved.");
   await transition(c.db, j, "approved", `Preview approved by owner for the delivery process${notes.trim() ? `: ${notes.trim()}` : ""}`, userActor(c), { approved_by: c.userId, approved_at: nowIso() });
   await audit(c.db, { actorUserId: c.userId, action: "builds.preview_approved", subjectType: "build_job", subjectId: id, organizationId: j.organization_id, details: { preview: j.preview_url, commit: j.source_commit, customerRevisionId: j.customer_revision_id } });
   if (j.customer_revision_id) {
@@ -883,6 +896,54 @@ export async function approveBuild(c: OwnerCtx, id: string, notes: string) {
     // (project → Revisions → mark delivered), which notifies the customer and asks for their approval.
     await event(c.db, id, "action", "AI result approved for this customer revision; deliver it to the customer from the project's Revisions tab", userActor(c), { data: { customerRevisionId: j.customer_revision_id } });
   }
+}
+
+// ── Preview lifecycle: deletion on owner request or after the retention period (performed by the runner) ──
+
+/** Owner action: delete this build's preview Worker. The runner (which holds the preview credential) does it. */
+export async function requestPreviewDeletion(c: OwnerCtx, id: string) {
+  const j = await ownerJob(c, id);
+  if (!j.preview_name || j.preview_deleted_at) throw new HttpError(409, "This build has no preview to delete.");
+  if (["preparing", "building", "verifying"].includes(j.state)) throw new HttpError(409, "Wait until the build stops before deleting its preview.");
+  await c.db.prepare(`UPDATE build_jobs SET preview_delete_requested_at = COALESCE(preview_delete_requested_at, ?), updated_at = ? WHERE id = ?`).bind(nowIso(), nowIso(), id).run();
+  await event(c.db, id, "preview", "Preview deletion requested by owner; the runner deletes it when idle", userActor(c), { data: { name: j.preview_name } });
+  await audit(c.db, { actorUserId: c.userId, action: "builds.preview_delete_requested", subjectType: "build_job", subjectId: id, organizationId: j.organization_id, details: { name: j.preview_name } });
+}
+
+/**
+ * Previews to delete now: owner-requested ones, and (when a retention period is set) previews of builds that finished
+ * longer ago than that AND are approved / canceled / failed or superseded by a newer build of the same project. The
+ * preview currently in owner review is never expired. Each is handed out once per hour until the runner reports back.
+ */
+export async function claimExpiredPreviews(db: Db, now = new Date()) {
+  const s = await getBuildSettings(db);
+  const at = now.toISOString();
+  const reclaimBefore = new Date(now.getTime() - 3600_000).toISOString();
+  const cutoff = s.preview_retention_days ? new Date(now.getTime() - s.preview_retention_days * 86400_000).toISOString() : null;
+  const rows = (await db.prepare(`SELECT j.id, j.preview_name FROM build_jobs j
+      WHERE j.preview_name IS NOT NULL AND j.preview_deleted_at IS NULL
+        AND (j.preview_delete_claimed_at IS NULL OR j.preview_delete_claimed_at < ?)
+        AND j.state NOT IN ('preparing','building','verifying')
+        AND (j.preview_delete_requested_at IS NOT NULL
+          OR (? IS NOT NULL AND j.finished_at < ? AND (j.state IN ('approved','canceled','failed')
+                OR EXISTS (SELECT 1 FROM build_jobs n WHERE n.project_id = j.project_id AND n.created_at > j.created_at))))
+      ORDER BY j.finished_at LIMIT 10`).bind(reclaimBefore, cutoff, cutoff).all<{ id: string; preview_name: string }>()).results
+    .filter((r) => PREVIEW_NAME.test(r.preview_name));
+  for (const r of rows) await db.prepare(`UPDATE build_jobs SET preview_delete_claimed_at = ? WHERE id = ?`).bind(at, r.id).run();
+  return { previews: rows.map((r) => ({ jobId: r.id, previewName: r.preview_name })) };
+}
+
+export async function reportPreviewDeleted(db: Db, b: Record<string, unknown>) {
+  const job = typeof b.jobId === "string" ? await getJob(db, b.jobId) : null;
+  if (!job || !job.preview_name || !job.preview_delete_claimed_at) throw new HttpError(404, "No preview deletion pending for this build");
+  if (b.ok === true) {
+    await db.prepare(`UPDATE build_jobs SET preview_deleted_at = ?, preview_delete_claimed_at = NULL, updated_at = ? WHERE id = ?`).bind(nowIso(), nowIso(), job.id).run();
+    await event(db, job.id, "preview", `Preview ${job.preview_name} deleted by the runner`, { kind: "runner" }, { data: { name: job.preview_name, requested: !!job.preview_delete_requested_at } });
+  } else {
+    await db.prepare(`UPDATE build_jobs SET preview_delete_claimed_at = NULL WHERE id = ?`).bind(job.id).run();
+    await event(db, job.id, "error", `Preview deletion failed: ${sanitize(b.error ?? "unknown error", 300)}`, { kind: "runner" });
+  }
+  return { ok: true };
 }
 
 // ── Read models (owner dashboard + frontend contract) ──

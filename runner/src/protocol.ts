@@ -137,6 +137,8 @@ export interface CompleteRequest extends ProviderReport {
   sourceBranch: string;
   sourceCommit: string;
   previewUrl: string | null;
+  /** The preview Worker's name (protocol v1.2), so the platform can later ask the runner to delete it. */
+  previewName?: string;
   report: string;
   missingInformation?: string[];
   error?: string;
@@ -175,3 +177,8 @@ export const LIMITS = {
   archiveBytes: 20 * 1024 * 1024,
   runnerId: 64,
 };
+
+// ── Preview lifecycle (protocol v1.2) ──
+/** A preview the platform wants deleted (owner request, or past the retention period). */
+export interface ExpiredPreview { jobId: string; previewName: string }
+export interface ExpiredPreviewsResponse { previews: ExpiredPreview[] }
