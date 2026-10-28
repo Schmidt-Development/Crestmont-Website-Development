@@ -240,12 +240,12 @@ jobs:
             echo "seeded=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Before rotating: sign in with the credentials that are live now and keep that session and one recovery code, so
-      # the run can PROVE they stop working. Values stay on the runner (RUNNER_TEMP, 0600, masked) and are never uploaded.
       - name: Preview password will change (before the rotation)
         if: steps.gate.outputs.pending == 'true'
         run: node --no-warnings scripts/staging-rotation-check.ts override --url "${{ steps.deploy.outputs.url }}"
 
+      # Before rotating: sign in with the credentials that are live now and keep that session and one recovery code, so
+      # the run can PROVE they stop working. Values stay on the runner (RUNNER_TEMP, 0600, masked) and are never uploaded.
       - name: Capture the pre-rotation access (for the revocation proof)
         if: steps.gate.outputs.pending == 'true'
         continue-on-error: true
