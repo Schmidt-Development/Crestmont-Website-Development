@@ -129,7 +129,13 @@ jobs:
           done
           # Homepage markup through the preview gate (this run's own password; never printed)
           PW=$(cat access/preview-password)
-          cookie=$(curl -s -D - -o /dev/null --data-urlencode "password=$PW" --data-urlencode "next=/" "$BASE/__preview-access" | grep -i '^set-cookie: cm_preview=' | sed -E 's/^set-cookie: ([^;]+);.*/\1/I' | tr -d '\r')
+          # The password was just written as a Worker secret; allow up to ~60 s for it to propagate.
+          cookie=""
+          for i in $(seq 1 12); do
+            cookie=$(curl -s -D - -o /dev/null --data-urlencode "password=$PW" --data-urlencode "next=/" "$BASE/__preview-access" | grep -i '^set-cookie: cm_preview=' | sed -E 's/^set-cookie: ([^;]+);.*/\1/I' | tr -d '\r')
+            [ -n "$cookie" ] && break
+            sleep 5
+          done
           [ -n "$cookie" ] || { echo "::error::preview password was not accepted"; exit 1; }
           home=$(curl -s -H "cookie: $cookie" "$BASE/")
           for marker in 'class="intro"' 'data-statement' 'data-stages' 'class="bento"' 'data-switch' 'hero-build.webp'; do
