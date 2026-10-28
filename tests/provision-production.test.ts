@@ -75,3 +75,21 @@ test("[INFRA-005] provisioning workflow: manual, main-only, confirmed, Founder-g
   assert.doesNotMatch(wf, /echo\s+["']?\$(PROD_TURNSTILE_SECRET|CLOUDFLARE_API_TOKEN|PROD_TURNSTILE_SITE_KEY)\b/, "never echoes a secret");
   assert.doesNotMatch(wf, /upload-artifact/, "no artifacts (public repository)");
 });
+
+test("[AUTH-003] [INFRA-002] production MFA key: well-formed 32-byte base64 from the Founder's environment secret, installed once and never replaced", async () => {
+  const { mfaKeyProblems } = await import("../scripts/provision-production.ts");
+  const { importMfaKey } = await import("../src/lib/totp-secrets.ts");
+  const good = Buffer.from(Array.from({ length: 32 }, (_, i) => (i * 37 + 11) % 256)).toString("base64");
+  assert.deepEqual(mfaKeyProblems(good), []);
+  await importMfaKey(good); // the Worker accepts the same format
+  assert.match(mfaKeyProblems(undefined).join(), /not set/);
+  assert.match(mfaKeyProblems("not base64!").join(), /base64/);
+  assert.match(mfaKeyProblems(Buffer.alloc(16, 7).toString("base64")).join(), /exactly 32 bytes \(got 16\)/);
+  assert.match(mfaKeyProblems(Buffer.alloc(32, 0).toString("base64")).join(), /random/);
+  assert.ok(!mfaKeyProblems("x".repeat(43) + "=").join().includes("x".repeat(43)), "the value is never echoed");
+  assert.match(wf, /PROD_MFA_ENCRYPTION_KEY: \$\{\{ secrets\.PRODUCTION_MFA_ENCRYPTION_KEY \}\}/);
+  const keep = wf.indexOf("grep -qx MFA_ENCRYPTION_KEY"), put = wf.indexOf("secret put MFA_ENCRYPTION_KEY");
+  assert.ok(keep > 0 && put > keep, "the existing key is checked before anything is installed");
+  assert.match(wf.slice(keep, put), /already set[\s\S]*kept \(never replaced\)[\s\S]*elif/);
+  assert.doesNotMatch(wf, /randomBytes\(32\)\.toString\("base64"\)/, "the workflow never invents an MFA key the Founder has no copy of");
+});
