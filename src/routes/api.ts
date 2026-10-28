@@ -30,7 +30,8 @@ export async function verifyTurnstile(ctx: AppContext, token: unknown): Promise<
   form.set("secret", env.TURNSTILE_SECRET);
   form.set("response", token);
   if (ctx.ip) form.set("remoteip", ctx.ip);
-  const r = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: form });
+  const f = env.overrides?.fetch ?? fetch; // test seam; production uses the global fetch
+  const r = await f("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: form });
   return ((await r.json()) as { success?: boolean }).success === true;
 }
 

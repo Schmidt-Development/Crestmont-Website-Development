@@ -97,7 +97,8 @@ ${table(staff, [
     return html`<form method="post" action="/staff/employees/${s.id}/role" class="row">${csrf(ctx)}<label class="visually-hidden" for="role-${s.id}">Role for ${s.display_name}</label><select class="select" id="role-${s.id}" name="role">${roleOpts.map((o) => html`<option value="${o.value}"${o.value === s.role ? html` selected` : ""}>${o.label}</option>`)}</select>${button("Change role", { variant: "secondary", size: "sm" })}</form>
 ${s.disabled_at
   ? actionForm(ctx, `/staff/employees/${s.id}/enable`, "Enable account", { variant: "secondary" })
-  : html`<form method="post" action="/staff/employees/${s.id}/disable" class="row" data-confirm="Disable this account and sign them out everywhere?">${csrf(ctx)}<label class="visually-hidden" for="reason-${s.id}">Reason</label><input class="input" id="reason-${s.id}" name="reason" placeholder="Reason" maxlength="300" required>${button("Disable", { variant: "danger", size: "sm" })}</form>`}`;
+  : html`<form method="post" action="/staff/employees/${s.id}/disable" class="row" data-confirm="Disable this account and sign them out everywhere?">${csrf(ctx)}<label class="visually-hidden" for="reason-${s.id}">Reason</label><input class="input" id="reason-${s.id}" name="reason" placeholder="Reason" maxlength="300" required>${button("Disable", { variant: "danger", size: "sm" })}</form>`}
+${s.mfa ? actionForm(ctx, `/staff/employees/${s.id}/mfa-reset`, "Reset 2FA", { variant: "ghost", confirm: "Reset this person's two-factor authentication? Their authenticator and recovery codes stop working, they are signed out everywhere, and they must set up a new authenticator at next sign-in." }) : ""}`;
   } },
 ], { empty: emptyState(fq || frole || fstatus ? "No staff match" : "No staff yet", fq || frole || fstatus ? "Adjust the filters." : "Invite your first team member below.") })}</section>
 <div class="grid grid-2">
@@ -362,6 +363,22 @@ ${input({ name: "weekly_capacity_hours", label: "Weekly capacity (hours)", type:
     requireStaff(ctx, "employee.manage");
     try { await emp.revokeInvitation(ctx.db, ctx.user!.id, p.id); } catch (e) { if (e instanceof emp.EmployeeError) return redirect(ctx, "/staff/employees", { kind: "error", text: e.message }); throw e; }
     return redirect(ctx, "/staff/employees", { kind: "success", text: "Invitation revoked." });
+  });
+  // AUTH-002: administrator-initiated two-factor reset for a person who lost their authenticator (step-up required).
+  r.post("/staff/employees/:id/mfa-reset", async (ctx, p) => {
+    requireStaff(ctx, "employee.manage");
+    try {
+      const res = await emp.resetStaffMfa(ctx.db, actorOf(ctx), p.id, ctx.ip);
+      await sendMail(ctx, { template: "security_notification", to: res.email, idempotencyKey: `mfa-reset:${p.id}:${Date.now()}`, data: { event: "mfa_reset" } });
+      return redirect(ctx, "/staff/employees", { kind: "success", text: "Two-factor authentication was reset. They were signed out and will set up a new authenticator at next sign-in." });
+    } catch (e) {
+      if (e instanceof emp.EmployeeError) {
+        if (e.status === 403) throw new HttpError(403, e.message);
+        if (e.status === 404) throw new HttpError(404, e.message);
+        return redirect(ctx, "/staff/employees", { kind: "error", text: e.message });
+      }
+      throw e;
+    }
   });
   r.post("/staff/employees/:id/role", async (ctx, p) => {
     requireStaff(ctx, "employee.manage");

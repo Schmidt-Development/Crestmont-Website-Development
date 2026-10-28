@@ -55,11 +55,37 @@ The secret names are listed (presence only) at /staff/security. Rotate on staff 
 | `GITHUB_TOKEN` | New fine-grained token (read-only on the one repo) → `wrangler secret put` → probe → revoke | |
 | `EVIDENCE_INGEST_SECRET` | Generate 32 random bytes → set in Worker **and** the GitHub Actions secret together | Ingestion fails closed in between |
 | `VOICE_WEBHOOK_SECRET` | Generate 32 random bytes → set in the Worker and in the provider adapter together | The webhook fails closed in between. Calls in progress may lose events. Rotate outside call hours. |
-| `TURNSTILE_SECRET` | Rotate in the Cloudflare dashboard → `wrangler secret put` | |
+| `TURNSTILE_SECRET` | Rotate in the Cloudflare dashboard → `wrangler secret put` | Also protects /register and /password/forgot. |
+| `MFA_ENCRYPTION_KEY` | **Not rotated in place.** The key encrypts every stored TOTP secret; replacing it makes them unreadable and staff sign-in fails closed. On suspected exposure: plan a re-enrolment (administrator MFA reset for each person, §4a) or a re-encryption release; never just overwrite the secret. | `openssl rand -base64 32`. Losing it means every user must re-enrol. Keep a copy in the Founder's password manager. |
 
 Generate secrets with `openssl rand -hex 32`. Never paste a secret into chat, tickets, commits or logs. The integration matrix stores only a truncated hash fingerprint, so a rotation automatically resets an integration to "configured, unverified" until the probe passes again.
 
 **Compromised staff account:** disable it at /staff/employees (this revokes all sessions). Rotate any secret that person could read. Review /staff/audit filtered by that actor.
+
+## 4a. Lost authenticator (two-factor recovery)
+
+Every account that enrols two-factor authentication receives **10 single-use recovery codes**, shown once. Each works once in place of a 6-digit code (at sign-in and at the "Confirm it is you" step-up). Using one is recorded (security event `mfa_recovery_code_used`, audit `user.mfa_recovery_code_used`) and the user is emailed. A new set is generated from /account (needs the current authenticator code); that replaces every earlier code.
+
+**Employee without authenticator or codes:** an Owner or Administrator opens /staff/employees → *Reset 2FA* on that person (needs a fresh step-up check). This clears the authenticator and recovery codes, signs the person out everywhere, emails them, and writes `employee.mfa_reset`. They enrol a new authenticator at next sign-in. Confirm the person's identity out of band first (call them on a known number). Nobody can reset their own two-factor this way, and only the Owner can reset the Owner account.
+
+**Owner break-glass** (the Owner has lost the authenticator *and* every recovery code). Run only on the Owner's direct request, after confirming identity out of band (video call or in person); never on an email or chat request alone.
+
+```sh
+# 1. Safety copy first (BACKUP-RECOVERY §3.2)
+wrangler d1 export crestmont-production --remote --env production --output backups/pre-owner-mfa-reset.sql
+# 2. Generate the SQL (refuses unless every flag is present; prints nothing secret)
+node --no-warnings scripts/reset-owner-mfa.ts --email <owner email> --operator "<your name>" \
+  --reason "<why, and how identity was confirmed>" --confirm-owner-break-glass --print-sql > owner-mfa-reset.sql
+# 3. Read it, then apply it (every statement is a no-op unless the email is the Owner's)
+wrangler d1 execute crestmont-production --remote --env production --file owner-mfa-reset.sql
+rm owner-mfa-reset.sql
+```
+
+For a local or restored database file use `--db <path>` instead of `--print-sql` (it also refuses a non-Owner email). The script clears the Owner's authenticator, pending enrolment and recovery codes, revokes every Owner session, and writes `owner.mfa_break_glass_reset` to `audit_logs` (actor `system`, with operator and reason) plus a `mfa_reset_break_glass` security event. It never changes the password. The Owner then signs in with the password (or resets it by email) and enrols a new authenticator immediately; check /staff/audit for the entry.
+
+## 4b. Step-up checks
+
+Release approval, staff invitations / role changes / disable / enable / 2FA reset, refund decisions and issuing, integration probes and environment/automation settings, every data export, and replacing an authenticator require a two-factor check within the last 10 minutes (list: `src/app/step-up.ts`). The person is sent to "Confirm it is you", enters a current code (or a recovery code), and returns to the page; a form must then be submitted again. JSON exports answer 401 until the check is done in the browser.
 
 ## 5. Stripe webhook failures and dead letters
 

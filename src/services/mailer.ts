@@ -86,7 +86,7 @@ export interface TemplateData {
     | { event: "issued"; amountCents: number; reference: string; url: string };
   project_completion: ProjectBase;
   handoff: ProjectBase;
-  security_notification: { event: "mfa_enabled" | "password_changed" | "deletion_requested" };
+  security_notification: { event: "mfa_enabled" | "password_changed" | "deletion_requested" | "mfa_recovery_code_used" | "mfa_recovery_codes_regenerated" | "mfa_reset" };
   /** Staff alert for a critical production incident (no automated incident source exists yet). */
   critical_incident: { summary: string; occurredAt: string; url: string };
   password_reset: { resetUrl: string };
@@ -345,18 +345,24 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
   },
   security_notification: {
     name: "security_notification", category: "transactional", audience: "any",
-    description: "Account security events: two-factor enabled, password changed, deletion requested.",
+    description: "Account security events: two-factor enabled, reset or recovery code used, recovery codes regenerated, password changed, deletion requested.",
     render: (d) => {
       switch (d.event) {
         case "mfa_enabled": return { subject: "Two-factor authentication enabled", heading: "Two-factor authentication is on",
           paragraphs: ["Two-factor authentication was enabled on your Crestmont account. If this was not you, reset your password immediately and contact support."] };
         case "password_changed": return { subject: "Your password was changed", heading: "Password changed",
           paragraphs: ["The password for your Crestmont account was changed and other sessions were signed out. If this was not you, reset your password now."] };
+        case "mfa_recovery_code_used": return { subject: "A recovery code was used on your account", heading: "Recovery code used",
+          paragraphs: ["One of your two-factor recovery codes was just used to verify a sign-in on your Crestmont account. That code no longer works.", "If this was not you, reset your password immediately and contact support. Otherwise, generate a new set of recovery codes from your account page."] };
+        case "mfa_recovery_codes_regenerated": return { subject: "New two-factor recovery codes", heading: "Recovery codes replaced",
+          paragraphs: ["A new set of two-factor recovery codes was generated for your Crestmont account. Every earlier recovery code stopped working.", "If this was not you, reset your password immediately and contact support."] };
+        case "mfa_reset": return { subject: "Two-factor authentication was reset", heading: "Two-factor authentication reset",
+          paragraphs: ["An administrator reset two-factor authentication on your Crestmont account and signed you out everywhere. You will set up a new authenticator the next time you sign in.", "If you did not ask for this, contact the Crestmont Owner immediately."] };
         case "deletion_requested": return { subject: "We received your deletion request", heading: "Deletion request received",
           paragraphs: ["We received a request to delete your Crestmont account. A staff member will review it and confirm when it is complete.", "If you did not make this request, sign in and change your password, then contact support."] };
       }
     },
-    samples: [{ event: "mfa_enabled" }, { event: "password_changed" }, { event: "deletion_requested" }],
+    samples: [{ event: "mfa_enabled" }, { event: "password_changed" }, { event: "deletion_requested" }, { event: "mfa_recovery_code_used" }, { event: "mfa_recovery_codes_regenerated" }, { event: "mfa_reset" }],
   },
   critical_incident: {
     name: "critical_incident", category: "transactional", audience: "staff",

@@ -39,6 +39,8 @@ export interface Env {
   PASSWORD_BREACH_CHECK?: string;
   /** Resend webhook signing secret (whsec_…), verifies Svix signatures. EMAIL-003. */
   RESEND_WEBHOOK_SECRET?: string;
+  /** Base64 of 32 random bytes: AES-GCM key for TOTP secrets at rest (src/lib/totp-secrets.ts). Required outside development. */
+  MFA_ENCRYPTION_KEY?: string;
   /** "off" disables the per-request env_metrics UPSERT (READY-006). Default on. */
   ENV_METRICS?: string;
   FILES?: unknown;             // R2 bucket binding
@@ -74,6 +76,8 @@ export interface AppContext {
   actor: Actor | null;
   sessionId: string | null;
   sessionMfaVerified: boolean;
+  /** When this session last completed a TOTP / recovery-code verification (step-up MFA, src/app/step-up.ts). */
+  sessionMfaAt: string | null;
   csrfToken: string;
   flash: { kind: "success" | "error" | "info"; text: string } | null;
   setCookies: string[];

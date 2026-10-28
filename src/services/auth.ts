@@ -3,7 +3,8 @@
 // routes are the only places that change. Authorization is always enforced by the platform.
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
-import { hashPassword, verifyPassword, randomToken, hashToken, passwordProblems, matchTotpStep, newTotpSecret } from "../lib/auth-crypto.ts";
+import { hashPassword, verifyPassword, randomToken, hashToken, passwordProblems, matchTotpStep, newTotpSecret, passwordNeedsRehash, newRecoveryCode, normalizeRecoveryCode, RECOVERY_CODE_COUNT } from "../lib/auth-crypto.ts";
+import { MfaKeyError, assertCanStoreTotpSecret, isEncryptedTotpSecret, openTotpSecret, sealTotpSecret, sealWithKey, type MfaKeyEnv } from "../lib/totp-secrets.ts";
 import { STAFF_ROLES, type Actor, type Role } from "../domain/authz.ts";
 import type { SessionUser, Env } from "../app/context.ts";
 import { rateLimit, securityEvent, audit } from "./security.ts";
@@ -130,6 +131,12 @@ export async function login(db: Db, emailRaw: string, password: string, meta: { 
   }
   if (u.locked_until && u.locked_until > nowIso()) throw new AuthError("This account is temporarily locked after repeated failed sign-ins. Try again later.", 423);
   await db.prepare(`UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?`).bind(u.id).run();
+  // Versioned hash format (docs/AUTH-PRODUCTION.md gap 6): a hash made with older parameters is replaced with
+  // one made with the current algorithm and cost, now that the plaintext is known to be correct.
+  if (passwordNeedsRehash(u.password_hash)) {
+    const res = await db.prepare(`UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?`).bind(await hashPassword(password), u.id, u.password_hash).run();
+    if (res.meta.changes === 1) await audit(db, { actorUserId: u.id, actorKind: "system", action: "user.password_rehashed", subjectType: "user", subjectId: u.id, details: { from: u.password_hash!.split("$").slice(0, 2).join("$") } });
+  }
   const roles = (await db.prepare(`SELECT role_id FROM memberships WHERE user_id = ?`).bind(u.id).all<{ role_id: Role }>()).results.map((r) => r.role_id);
   const staff = roles.some((r) => (STAFF_ROLES as readonly string[]).includes(r));
   const maxAge = staff ? SESSION_TTL_STAFF_S : SESSION_TTL_CUSTOMER_S;
@@ -142,12 +149,12 @@ export async function login(db: Db, emailRaw: string, password: string, meta: { 
 }
 
 /** `passive`: background requests (live polling) must not count as activity, or an idle tab would never time out (F-07). */
-export async function loadSession(db: Db, token: string | undefined, opts: { passive?: boolean } = {}): Promise<{ user: SessionUser; actor: Actor; sessionId: string; mfaVerified: boolean } | null> {
+export async function loadSession(db: Db, token: string | undefined, opts: { passive?: boolean } = {}): Promise<{ user: SessionUser; actor: Actor; sessionId: string; mfaVerified: boolean; mfaVerifiedAt: string | null } | null> {
   if (!token || !/^[0-9a-f]{64}$/.test(token)) return null;
   const s = await db.prepare(
-    `SELECT s.id, s.user_id, s.mfa_verified, s.expires_at, s.revoked_at, s.created_at, s.last_seen_at, u.email, u.display_name, u.email_verified_at, u.totp_secret, u.disabled_at
+    `SELECT s.id, s.user_id, s.mfa_verified, s.mfa_verified_at, s.expires_at, s.revoked_at, s.created_at, s.last_seen_at, u.email, u.display_name, u.email_verified_at, u.totp_secret, u.disabled_at
      FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?`,
-  ).bind(await hashToken(token)).first<{ id: string; user_id: string; mfa_verified: number; expires_at: string; revoked_at: string | null; created_at: string; last_seen_at: string | null; email: string; display_name: string; email_verified_at: string | null; totp_secret: string | null; disabled_at: string | null }>();
+  ).bind(await hashToken(token)).first<{ id: string; user_id: string; mfa_verified: number; mfa_verified_at: string | null; expires_at: string; revoked_at: string | null; created_at: string; last_seen_at: string | null; email: string; display_name: string; email_verified_at: string | null; totp_secret: string | null; disabled_at: string | null }>();
   if (!s || s.revoked_at || s.disabled_at || s.expires_at < nowIso()) return null;
   const memberships = (await db.prepare(
     `SELECT m.organization_id, o.name, m.role_id FROM memberships m JOIN organizations o ON o.id = m.organization_id WHERE m.user_id = ?`,
@@ -170,43 +177,195 @@ export async function loadSession(db: Db, token: string | undefined, opts: { pas
   // Customers without MFA enabled are treated as fully verified for their own customer roles.
   const effectiveMfa = mfaVerified || (!isStaff && !s.totp_secret);
   const actor: Actor = { kind: "user", userId: s.user_id, roles: memberships.map((m) => ({ role: m.role_id, organizationId: m.organization_id })), mfaVerified: effectiveMfa };
-  return { user, actor, sessionId: s.id, mfaVerified: effectiveMfa };
+  return { user, actor, sessionId: s.id, mfaVerified: effectiveMfa, mfaVerifiedAt: s.mfa_verified ? s.mfa_verified_at : null };
 }
 
-export async function completeMfa(db: Db, sessionId: string, userId: string, code: string, ip: string | null): Promise<void> {
-  const rl = await rateLimit(db, `mfa:${userId}`, 8, 900);
-  if (!rl.allowed) throw new AuthError("Too many codes entered. Wait a few minutes.", 429);
-  const u = await db.prepare(`SELECT totp_secret, totp_last_step FROM users WHERE id = ?`).bind(userId).first<{ totp_secret: string | null; totp_last_step: number | null }>();
-  const step = u?.totp_secret ? await matchTotpStep(u.totp_secret, code) : null;
-  if (step === null) {
-    await securityEvent(db, "mfa_failed", { userId, ip });
-    throw new AuthError("That code is not valid.", 401);
+// ── Second factor: TOTP (encrypted at rest) and single-use recovery codes (AUTH-002, AUTH-003) ──
+
+const MFA_UNAVAILABLE = "Two-factor verification is temporarily unavailable in this environment. Contact the platform operator.";
+
+/** Decrypts the user's TOTP secret. A missing/wrong key is an operator problem: fail closed, record it, never echo secrets. */
+async function readTotpSecret(env: MfaKeyEnv, db: Db, userId: string): Promise<{ plain: string; stored: string } | null> {
+  const u = await db.prepare(`SELECT totp_secret FROM users WHERE id = ?`).bind(userId).first<{ totp_secret: string | null }>();
+  if (!u?.totp_secret) return null;
+  try {
+    return { plain: await openTotpSecret(env, userId, u.totp_secret), stored: u.totp_secret };
+  } catch (e) {
+    if (e instanceof MfaKeyError) {
+      await securityEvent(db, "mfa_key_unavailable", { userId, detail: e.message.slice(0, 160) });
+      throw new AuthError(MFA_UNAVAILABLE, 503);
+    }
+    throw e;
   }
-  // Replay protection: each time-step can be used once, and never an earlier one.
+}
+
+/**
+ * Checks a 6-digit TOTP code with replay protection (each 30-second step once, never an earlier one). After a
+ * successful check a legacy plaintext secret is re-encrypted when MFA_ENCRYPTION_KEY is configured.
+ */
+async function checkTotp(env: MfaKeyEnv, db: Db, userId: string, code: string, ip: string | null): Promise<boolean> {
+  const t = await readTotpSecret(env, db, userId);
+  const step = t ? await matchTotpStep(t.plain, code) : null;
+  if (step === null || !t) return false;
   const claim = await db.prepare(`UPDATE users SET totp_last_step = ? WHERE id = ? AND (totp_last_step IS NULL OR totp_last_step < ?)`).bind(step, userId, step).run();
   if (claim.meta.changes !== 1) {
     await securityEvent(db, "mfa_replay_rejected", { userId, ip });
     throw new AuthError("That code was already used. Wait for the next code.", 401);
   }
-  await db.prepare(`UPDATE sessions SET mfa_verified = 1 WHERE id = ? AND user_id = ?`).bind(sessionId, userId).run();
-  await audit(db, { actorUserId: userId, action: "session.mfa_verified", subjectType: "user", subjectId: userId, ip });
+  if (!isEncryptedTotpSecret(t.stored) && env.MFA_ENCRYPTION_KEY) {
+    try {
+      const sealed = await sealWithKey(env.MFA_ENCRYPTION_KEY, userId, t.plain);
+      await db.prepare(`UPDATE users SET totp_secret = ? WHERE id = ? AND totp_secret = ?`).bind(sealed, userId, t.stored).run();
+    } catch (e) {
+      // A malformed key must not lock out a user whose (legacy) code was just verified; record it for the operator.
+      if (!(e instanceof MfaKeyError)) throw e;
+      await securityEvent(db, "mfa_key_unavailable", { userId, detail: e.message.slice(0, 160) });
+    }
+  }
+  return true;
 }
 
-export async function beginTotpEnrollment(db: Db, userId: string): Promise<string> {
+/** Consumes a recovery code. Returns the number of unused codes left, or null when the code does not match an unused one. */
+async function useRecoveryCode(db: Db, userId: string, input: string): Promise<number | null> {
+  const code = normalizeRecoveryCode(input);
+  if (!code) return null;
+  const rows = (await db.prepare(`SELECT id, code_hash FROM mfa_recovery_codes WHERE user_id = ? AND lookup = ? AND used_at IS NULL`).bind(userId, code.slice(0, 4)).all<{ id: string; code_hash: string }>()).results;
+  if (!rows.length) { await verifyPassword(code, null); return null; } // equalise timing
+  for (const r of rows) {
+    if (!(await verifyPassword(code, r.code_hash))) continue;
+    const claim = await db.prepare(`UPDATE mfa_recovery_codes SET used_at = ? WHERE id = ? AND used_at IS NULL`).bind(nowIso(), r.id).run();
+    if (claim.meta.changes !== 1) return null;
+    return (await db.prepare(`SELECT COUNT(*) AS n FROM mfa_recovery_codes WHERE user_id = ? AND used_at IS NULL`).bind(userId).first<{ n: number }>())?.n ?? 0;
+  }
+  return null;
+}
+
+export type SecondFactorResult = { method: "totp" } | { method: "recovery"; remaining: number };
+
+/**
+ * Verifies a second factor for this session: a 6-digit TOTP code, or (when `allowRecovery`) a single-use recovery
+ * code. Success marks the session MFA-verified *now* (sessions.mfa_verified_at, used by step-up). A recovery code
+ * revokes nothing else, but is recorded as a security event and in the audit log; the caller emails the user.
+ */
+export async function verifySecondFactor(env: MfaKeyEnv, db: Db, sessionId: string, userId: string, codeRaw: string, ip: string | null,
+  purpose: "login" | "step_up", opts: { allowRecovery?: boolean } = { allowRecovery: true }): Promise<SecondFactorResult> {
+  const rl = await rateLimit(db, `mfa:${userId}`, 8, 900);
+  if (!rl.allowed) throw new AuthError("Too many codes entered. Wait a few minutes.", 429);
+  const compact = codeRaw.replace(/\s/g, "");
+  let result: SecondFactorResult | null = null;
+  if (/^\d{6}$/.test(compact)) {
+    if (await checkTotp(env, db, userId, compact, ip)) result = { method: "totp" };
+  } else if (opts.allowRecovery) {
+    const remaining = await useRecoveryCode(db, userId, codeRaw);
+    if (remaining !== null) result = { method: "recovery", remaining };
+  }
+  if (!result) {
+    await securityEvent(db, "mfa_failed", { userId, ip, detail: purpose });
+    throw new AuthError("That code is not valid.", 401);
+  }
+  await db.prepare(`UPDATE sessions SET mfa_verified = 1, mfa_verified_at = ? WHERE id = ? AND user_id = ?`).bind(nowIso(), sessionId, userId).run();
+  if (result.method === "recovery") {
+    await securityEvent(db, "mfa_recovery_code_used", { userId, ip, detail: `${purpose}; ${result.remaining} left` });
+    await audit(db, { actorUserId: userId, action: "user.mfa_recovery_code_used", subjectType: "user", subjectId: userId, ip, details: { purpose, remaining: result.remaining } });
+  }
+  await audit(db, { actorUserId: userId, action: purpose === "login" ? "session.mfa_verified" : "session.step_up_verified", subjectType: "user", subjectId: userId, ip, details: { method: result.method } });
+  return result;
+}
+
+/** Sign-in second step (TOTP or recovery code). */
+export async function completeMfa(env: MfaKeyEnv, db: Db, sessionId: string, userId: string, code: string, ip: string | null): Promise<SecondFactorResult> {
+  return verifySecondFactor(env, db, sessionId, userId, code, ip, "login");
+}
+
+/** Starts enrolment. Outside development without MFA_ENCRYPTION_KEY this fails closed (503) and stores nothing. */
+export async function beginTotpEnrollment(env: MfaKeyEnv, db: Db, userId: string): Promise<string> {
   const secret = newTotpSecret();
-  await db.prepare(`UPDATE users SET totp_pending_secret = ? WHERE id = ?`).bind(secret, userId).run();
+  let sealed: string;
+  try {
+    assertCanStoreTotpSecret(env);
+    sealed = await sealTotpSecret(env, userId, secret); // also validates the key (exactly 32 bytes)
+  } catch (e) {
+    if (e instanceof MfaKeyError) { await securityEvent(db, "mfa_key_unavailable", { userId, detail: "enrolment refused" }); throw new AuthError(e.message, 503); }
+    throw e;
+  }
+  await db.prepare(`UPDATE users SET totp_pending_secret = ? WHERE id = ?`).bind(sealed, userId).run();
   return secret;
 }
 
-export async function confirmTotpEnrollment(db: Db, userId: string, sessionId: string, code: string): Promise<void> {
+/** The pending (not yet confirmed) secret, for re-displaying the setup page after a wrong code. */
+export async function pendingTotpSecret(env: MfaKeyEnv, db: Db, userId: string): Promise<string | null> {
   const u = await db.prepare(`SELECT totp_pending_secret FROM users WHERE id = ?`).bind(userId).first<{ totp_pending_secret: string | null }>();
-  const step = u?.totp_pending_secret ? await matchTotpStep(u.totp_pending_secret, code) : null;
-  if (step === null) throw new AuthError("That code is not valid. Check your authenticator's time setting and try again.");
+  if (!u?.totp_pending_secret) return null;
+  try { return await openTotpSecret(env, userId, u.totp_pending_secret); } catch (e) { if (e instanceof MfaKeyError) throw new AuthError(MFA_UNAVAILABLE, 503); throw e; }
+}
+
+/** Confirms enrolment and issues a new set of recovery codes, returned once (plaintext) for display. */
+export async function confirmTotpEnrollment(env: MfaKeyEnv, db: Db, userId: string, sessionId: string, code: string): Promise<string[]> {
+  const plain = await pendingTotpSecret(env, db, userId);
+  const step = plain ? await matchTotpStep(plain, code) : null;
+  if (step === null || !plain) throw new AuthError("That code is not valid. Check your authenticator's time setting and try again.");
+  let sealed: string;
+  try { sealed = await sealTotpSecret(env, userId, plain); } catch (e) { if (e instanceof MfaKeyError) throw new AuthError(e.message, 503); throw e; }
+  const at = nowIso();
   await db.batch([
-    db.prepare(`UPDATE users SET totp_secret = totp_pending_secret, totp_pending_secret = NULL, mfa_enabled = 1, totp_last_step = ? WHERE id = ?`).bind(step, userId),
-    db.prepare(`UPDATE sessions SET mfa_verified = 1 WHERE id = ?`).bind(sessionId),
+    db.prepare(`UPDATE users SET totp_secret = ?, totp_pending_secret = NULL, mfa_enabled = 1, totp_last_step = ? WHERE id = ?`).bind(sealed, step, userId),
+    db.prepare(`UPDATE sessions SET mfa_verified = 1, mfa_verified_at = ? WHERE id = ?`).bind(at, sessionId),
   ]);
   await audit(db, { actorUserId: userId, action: "user.mfa_enabled", subjectType: "user", subjectId: userId });
+  const codes = await issueRecoveryCodes(db, userId);
+  await audit(db, { actorUserId: userId, action: "user.mfa_recovery_codes_generated", subjectType: "user", subjectId: userId, details: { count: codes.length } });
+  return codes;
+}
+
+/** Replaces the user's recovery codes with RECOVERY_CODE_COUNT new ones; only their password hashes are stored. */
+async function issueRecoveryCodes(db: Db, userId: string): Promise<string[]> {
+  const codes: string[] = [];
+  const lookups = new Set<string>();
+  while (codes.length < RECOVERY_CODE_COUNT) {
+    const c = newRecoveryCode();
+    if (lookups.has(c.slice(0, 4))) continue;
+    lookups.add(c.slice(0, 4));
+    codes.push(c);
+  }
+  const at = nowIso();
+  const hashes = await Promise.all(codes.map((c) => hashPassword(normalizeRecoveryCode(c)!)));
+  await db.batch([
+    db.prepare(`DELETE FROM mfa_recovery_codes WHERE user_id = ?`).bind(userId),
+    ...codes.map((c, i) => db.prepare(`INSERT INTO mfa_recovery_codes (id, user_id, lookup, code_hash, created_at) VALUES (?,?,?,?,?)`).bind(newId("mrc"), userId, c.slice(0, 4), hashes[i], at)),
+  ]);
+  return codes;
+}
+
+/**
+ * Regenerates recovery codes. Requires an MFA-verified session AND a current TOTP code from the authenticator
+ * (a recovery code cannot mint new recovery codes). Audited and recorded as a security event.
+ */
+export async function regenerateRecoveryCodes(env: MfaKeyEnv, db: Db, sessionId: string, userId: string, code: string, ip: string | null): Promise<string[]> {
+  const rl = await rateLimit(db, `mfa:${userId}`, 8, 900);
+  if (!rl.allowed) throw new AuthError("Too many codes entered. Wait a few minutes.", 429);
+  const compact = code.replace(/\s/g, "");
+  if (!/^\d{6}$/.test(compact) || !(await checkTotp(env, db, userId, compact, ip))) {
+    await securityEvent(db, "mfa_failed", { userId, ip, detail: "recovery code regeneration" });
+    throw new AuthError("Enter the current 6-digit code from your authenticator app.", 401);
+  }
+  await db.prepare(`UPDATE sessions SET mfa_verified_at = ? WHERE id = ? AND user_id = ? AND mfa_verified = 1`).bind(nowIso(), sessionId, userId).run();
+  const codes = await issueRecoveryCodes(db, userId);
+  await securityEvent(db, "mfa_recovery_codes_regenerated", { userId, ip });
+  await audit(db, { actorUserId: userId, action: "user.mfa_recovery_codes_regenerated", subjectType: "user", subjectId: userId, ip, details: { count: codes.length } });
+  return codes;
+}
+
+export async function recoveryCodeStatus(db: Db, userId: string): Promise<{ total: number; remaining: number }> {
+  const r = await db.prepare(`SELECT COUNT(*) AS total, SUM(CASE WHEN used_at IS NULL THEN 1 ELSE 0 END) AS remaining FROM mfa_recovery_codes WHERE user_id = ?`).bind(userId).first<{ total: number; remaining: number | null }>();
+  return { total: r?.total ?? 0, remaining: r?.remaining ?? 0 };
+}
+
+/** Clears every MFA factor (authenticator, pending enrolment, recovery codes): the user must enrol again. Callers revoke sessions and audit. */
+export async function clearMfa(db: Db, userId: string): Promise<void> {
+  await db.batch([
+    db.prepare(`UPDATE users SET totp_secret = NULL, totp_pending_secret = NULL, totp_last_step = NULL, mfa_enabled = 0 WHERE id = ?`).bind(userId),
+    db.prepare(`DELETE FROM mfa_recovery_codes WHERE user_id = ?`).bind(userId),
+  ]);
 }
 
 export async function revokeSession(db: Db, sessionId: string, byUserId: string) {
@@ -219,8 +378,15 @@ export async function revokeAllSessions(db: Db, userId: string, exceptSessionId:
   await audit(db, { actorUserId: byUserId, action: "session.revoked_all", subjectType: "user", subjectId: userId });
 }
 
+/** Per-IP limit on reset requests (bot protection, docs/AUTH-PRODUCTION.md gap 4); the per-email limit below stays. */
+export const RESET_PER_IP_LIMIT = 10, RESET_PER_IP_WINDOW_S = 3600;
 export async function requestPasswordReset(db: Db, emailRaw: string, ip: string | null): Promise<{ userId: string; token: string } | null> {
   const email = emailRaw.trim().toLowerCase();
+  const ipRl = await rateLimit(db, `reset-ip:${ip ?? "unknown"}`, RESET_PER_IP_LIMIT, RESET_PER_IP_WINDOW_S);
+  if (!ipRl.allowed) {
+    await securityEvent(db, "rate_limited", { ip, detail: "password reset (per IP)" });
+    throw new AuthError("Too many reset requests from your network. Wait an hour and try again.", 429);
+  }
   const rl = await rateLimit(db, `reset:${email}`, 3, 3600);
   if (!rl.allowed) return null;
   const u = await db.prepare(`SELECT id FROM users WHERE email = ? AND disabled_at IS NULL`).bind(email).first<{ id: string }>();

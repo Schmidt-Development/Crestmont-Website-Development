@@ -63,4 +63,5 @@ triggers = { crons = ["*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE i
 # (full list and who owns each in docs/DEPLOYMENT.md §4):
 #   EVIDENCE_INGEST_SECRET, STRIPE_WEBHOOK_SECRET, STRIPE_SECRET_KEY, TURNSTILE_SECRET, TURNSTILE_SITE_KEY,
 #   RESEND_API_KEY, ANTHROPIC_API_KEY, GITHUB_TOKEN, GITHUB_REPO, VOICE_WEBHOOK_SECRET,
-#   RESEND_WEBHOOK_SECRET (Svix whsec_…), RETELL_API_KEY (Crestmont Retell workspace key with webhook badge)
+#   RESEND_WEBHOOK_SECRET (Svix whsec_…), RETELL_API_KEY (Crestmont Retell workspace key with webhook badge),
+#   MFA_ENCRYPTION_KEY (base64 of 32 random bytes; required on staging/production for two-factor enrolment)

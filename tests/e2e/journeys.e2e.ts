@@ -113,6 +113,15 @@ async function signIn(page: Page, email: string, secret?: string) {
   }
   assert.doesNotMatch(new URL(page.url()).pathname, /^\/(login|mfa)/, `signed in as ${email}`);
 }
+/** Step-up MFA (src/app/step-up.ts): sensitive actions need a TOTP check within 10 minutes; do it just before. */
+async function freshMfa(page: Page, user: StaffUser) {
+  const back = new URL(page.url()).pathname + new URL(page.url()).search;
+  await page.goto(`${srv.base}/mfa/step-up?next=${encodeURIComponent(back)}`);
+  srv.db.prepare("UPDATE users SET totp_last_step = NULL WHERE email = ?").run(user.email);
+  await page.fill("#f-code", await totpCode(user.secret));
+  await nav(page, "button[type=submit]");
+  assert.equal(new URL(page.url()).pathname + new URL(page.url()).search, back, "returned to the page after the step-up check");
+}
 async function staffActor(role: string, name: string, opts: Record<string, unknown> = {}): Promise<Actor & { user: StaffUser }> {
   const user = await createStaff(role, name);
   const a = await actor(opts);
@@ -673,6 +682,7 @@ step("[PAY-007] refund request from billing enters the approval workflow: suppor
   await o.goto(srv.base + "/staff/owner");
   assert.match(await text(o, '[data-metric="Pending approvals"]'), /1 refunds awaiting review\/decision/);
   await o.goto(refundUrl);
+  await freshMfa(o, owner.user);
   assert.match(await text(o, ".page-head, main"), /Recommended/i);
   await o.fill("#f-notes", "Approved as a goodwill partial refund (E2E test data).");
   await nav(o, btn(o, "Approve refund"));
@@ -747,6 +757,7 @@ test("[READY-008] Owner creates a release candidate and records the Founder deci
   };
   await candidate(COMMIT_A, "a".repeat(64));
   await nav(o, o.getByRole("link", { name: "Founder approval panel" }));
+  await freshMfa(o, owner.user);
   assert.match(await text(o), new RegExp(COMMIT_A));
   await o.selectOption("#f-decision", "approved");
   await o.fill("#f-confirm_commit", COMMIT_A);

@@ -1,9 +1,16 @@
 // Password hashing (PBKDF2-SHA256, 100k iterations — the Workers WebCrypto maximum),
-// opaque session/reset tokens, and RFC 6238 TOTP for MFA.
+// opaque session/reset tokens, MFA recovery codes, and RFC 6238 TOTP for MFA.
+//
+// Stored password hashes are self-describing: "pbkdf2$<iterations>$<salt hex>$<hash hex>", where "pbkdf2" means
+// PBKDF2-HMAC-SHA256 with a 16-byte salt and a 32-byte output. verifyPassword reads the algorithm and the
+// iteration count from the stored value, and passwordNeedsRehash() tells the login flow to re-hash with the
+// current parameters after a successful sign-in, so a stronger KDF (a new algorithm tag) or a different cost
+// can be adopted without a reset (docs/AUTH-PRODUCTION.md gap 6).
 import { sha256Hex, timingSafeEqualHex, toHex } from "./crypto.ts";
 
 const enc = new TextEncoder();
-const ITERATIONS = 100_000;
+export const PASSWORD_ALGORITHM = "pbkdf2";
+export const ITERATIONS = 100_000;
 
 export function randomToken(bytes = 32): string {
   const b = new Uint8Array(bytes);
@@ -17,10 +24,18 @@ async function pbkdf2(password: string, salt: Uint8Array<ArrayBuffer>, iteration
   return toHex(bits);
 }
 
-export async function hashPassword(password: string): Promise<string> {
+/** `iterations` is only ever overridden by tests (to create legacy-cost hashes); production always uses ITERATIONS. */
+export async function hashPassword(password: string, iterations = ITERATIONS): Promise<string> {
   const salt = new Uint8Array(16);
   crypto.getRandomValues(salt);
-  return `pbkdf2$${ITERATIONS}$${toHex(salt)}$${await pbkdf2(password, salt, ITERATIONS)}`;
+  return `${PASSWORD_ALGORITHM}$${iterations}$${toHex(salt)}$${await pbkdf2(password, salt, iterations)}`;
+}
+
+/** True when a stored hash was made with other parameters than the current ones (algorithm, cost, salt or output size). */
+export function passwordNeedsRehash(stored: string | null): boolean {
+  if (!stored) return false;
+  const [alg, iter, saltHex, hash] = stored.split("$");
+  return alg !== PASSWORD_ALGORITHM || Number(iter) !== ITERATIONS || saltHex?.length !== 32 || hash?.length !== 64;
 }
 
 export async function verifyPassword(password: string, stored: string | null): Promise<boolean> {
@@ -35,6 +50,32 @@ export async function verifyPassword(password: string, stored: string | null): P
 }
 
 export const hashToken = (t: string) => sha256Hex(t);
+
+// ── MFA recovery codes ──
+// 12 characters from a 31-character alphabet without look-alikes (~59 bits), shown as xxxx-xxxx-xxxx. The first
+// four characters are a non-secret lookup key (to find the row without hashing every code); the whole code is
+// stored only as a password hash.
+const RECOVERY_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
+export const RECOVERY_CODE_COUNT = 10;
+
+export function newRecoveryCode(): string {
+  let out = "";
+  const limit = Math.floor(256 / RECOVERY_ALPHABET.length) * RECOVERY_ALPHABET.length;
+  while (out.length < 12) {
+    const b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    for (const x of b) if (x < limit && out.length < 12) out += RECOVERY_ALPHABET[x % RECOVERY_ALPHABET.length];
+  }
+  return `${out.slice(0, 4)}-${out.slice(4, 8)}-${out.slice(8)}`;
+}
+
+/** Canonical form of a typed recovery code (case, spaces and dashes ignored), or null if it cannot be one. */
+export function normalizeRecoveryCode(input: string): string | null {
+  const c = input.toLowerCase().replace(/[\s-]/g, "");
+  if (c.length !== 12) return null;
+  for (const ch of c) if (!RECOVERY_ALPHABET.includes(ch)) return null;
+  return c;
+}
 
 /** Long-form passwords seen at the top of public breach corpora (offline fallback; the breach API is the main check). */
 const COMMON_PASSWORDS = new Set(["password1234", "123456789012", "qwertyuiopas", "qwertyuiop123", "passwordpassword", "1q2w3e4r5t6y", "1qaz2wsx3edc",
