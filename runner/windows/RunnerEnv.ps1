@@ -73,7 +73,10 @@ function Get-CrestmontRunnerEnvText {
 }
 
 function Merge-CrestmontRunnerEnv {
-  param([object[]]$Managed, [AllowNull()][string]$ExistingRunnerEnv, [AllowNull()][string]$ExistingLocalEnv, [string]$Stamp)
+  # The two existing-file parameters are deliberately untyped: a [string] parameter turns $null ("no file") into "".
+  param([object[]]$Managed, [AllowNull()]$ExistingRunnerEnv, [AllowNull()]$ExistingLocalEnv, [string]$Stamp)
+  if ($null -ne $ExistingRunnerEnv) { $ExistingRunnerEnv = [string]$ExistingRunnerEnv }
+  if ($null -ne $ExistingLocalEnv) { $ExistingLocalEnv = [string]$ExistingLocalEnv }
   if ($Stamp -cnotmatch '^[0-9]{8}-[0-9]{6}$') { throw "stamp must look like 20261028-041500" }
   $runnerEnv = Get-CrestmontRunnerEnvText -Managed $Managed
   $reserved = @($script:CrestmontManagedRunnerEnvKeys) + @($script:CrestmontReservedLocalKeys)
