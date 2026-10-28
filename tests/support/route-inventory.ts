@@ -81,6 +81,8 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   // ── JSON API, CI and provider webhooks (src/routes/api.ts, hooks.ts, ops.ts, platform.ts) ──
   "GET /api/health": pub,
   "POST /api/leads": { access: { kind: "public" }, api: true },
+  "GET /api/assistant": { access: { kind: "public" }, api: true },
+  "POST /api/assistant": { access: { kind: "public" }, api: true },
   "POST /api/readiness/evidence": signed("x-crestmont-signature"),
   "POST /api/readiness/github-snapshot": signed("x-crestmont-signature"),
   "POST /api/scheduled/run": signed("x-crestmont-scheduler-signature"),

@@ -110,7 +110,34 @@ ${menuButton("site-nav")}
 <nav class="nav" id="site-nav" aria-label="Primary">${PUBLIC_NAV.map(([h, l]) => html`<a href="${h}"${here === h || here.startsWith(h + "/") ? html` aria-current="page"` : ""}>${l}</a>`)}
 ${account}${ctaLink("Request a quote", "/quote", "primary", "sm", "nav__cta")}</nav></div></header>
 <main id="main">${body}</main>
-${siteFooter(ctx)}${flashToast(ctx)}</body></html>`;
+${siteFooter(ctx)}${flashToast(ctx)}${assistantWidget(ctx)}</body></html>`;
+}
+
+/** Crestmont website assistant (docs/frontend/CHATBOT.md): on every public page, bottom-right. Hidden until
+ *  /assets/assistant.js starts (it needs JavaScript); it asks /api/assistant whether live AI answers are available and
+ *  says so honestly when they are not. */
+function assistantWidget(ctx: AppContext): SafeHtml {
+  const email = ctx.settings["contact.email"] ?? "support@crestmontwebsitedevelopment.com";
+  const ask = ["What's included in each package?", "How does the AI Receptionist work?", "How long does a website take?", "Do I need a custom quote?"];
+  return html`<div class="cb" data-cb hidden>
+<button type="button" class="cb__launch" data-cb-launch aria-expanded="false" aria-controls="cb-panel"><img src="/assets/brand/crestmont-crest.png" width="84" height="82" alt=""><span class="visually-hidden">Open the Crestmont assistant</span><span class="cb__dot" data-cb-dot hidden aria-hidden="true"></span></button>
+<p class="cb__hello" data-cb-hello hidden><span>Questions? Ask the Crestmont assistant.</span><button type="button" class="cb__hello-x" data-cb-hello-x aria-label="Dismiss">×</button></p>
+<section class="cb__panel" id="cb-panel" data-cb-panel role="dialog" aria-modal="false" aria-labelledby="cb-title" hidden>
+<header class="cb__head"><span class="cb__crest" aria-hidden="true"><img src="/assets/brand/crestmont-crest.png" width="84" height="82" alt=""></span>
+<span class="cb__titles"><span class="cb__title" id="cb-title">Crestmont assistant</span><span class="cb__status" data-cb-status>Checking…</span></span>
+<button type="button" class="cb__icon" data-cb-restart title="Start a new conversation"><span class="visually-hidden">Start a new conversation</span><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M4 10a6 6 0 1 0 1.8-4.3M4 3.5v3.5h3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+<button type="button" class="cb__icon" data-cb-close title="Close"><span class="visually-hidden">Close the assistant</span><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button></header>
+<div class="cb__log" data-cb-log role="log" aria-live="polite" aria-relevant="additions" tabindex="0">
+<div class="cb__msg cb__msg--welcome"><p>Hi — I'm Crestmont's AI assistant. I can explain our services and packages, the AI Receptionist and how a project works, and point you to the right page.</p><p class="cb__fine">I can make mistakes, so check important details on the linked pages. Please don't share passwords or payment details here.</p></div>
+</div>
+<div class="cb__suggest" data-cb-suggest role="group" aria-label="Suggested questions">${ask.map((q) => html`<button type="button" class="cb__chip" data-cb-ask>${q}</button>`)}</div>
+<div class="cb__offline" data-cb-offline hidden><p><strong>Live AI answers aren't switched on right now.</strong> These pages answer most questions, and a person replies to every message:</p>
+<ul class="cb__links">${([["/pricing", "Packages and prices"], ["/pricing/compare", "Compare packages"], ["/services", "All services"], ["/services/ai-receptionist", "AI Receptionist"], ["/process", "How a project works"], ["/quote", "Request a quote"]] as [string, string][]).map(([h, l]) => html`<li><a href="${h}">${l}</a></li>`)}</ul></div>
+<form class="cb__form" data-cb-form><label class="visually-hidden" for="cb-input">Your question</label>
+<textarea id="cb-input" class="cb__input" data-cb-input rows="1" maxlength="600" placeholder="Ask about services, pricing or the process…" autocomplete="off"></textarea>
+<button type="submit" class="cb__send" data-cb-send><span class="visually-hidden">Send</span><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M3.5 10h12M10.5 5l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button></form>
+<p class="cb__foot"><a href="/contact?topic=assistant">Talk to a person</a><span aria-hidden="true">·</span><a href="mailto:${email}">Email us<span class="visually-hidden"> at ${email}</span></a></p>
+</section></div><script src="/assets/assistant.js" defer></script>`;
 }
 
 function siteFooter(ctx: AppContext): SafeHtml {

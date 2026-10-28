@@ -11,6 +11,11 @@ import { processStripeEvent, stripeInvoiceLookup } from "../services/payments.ts
 import { can } from "../domain/authz.ts";
 import { audit, rateLimit } from "../services/security.ts";
 import { scheduled, SCHEDULE } from "../app/scheduled.ts";
+import * as assistant from "../services/assistant.ts";
+import { aiProviderFromEnv } from "../services/ai.ts";
+import { loadContent } from "../services/cms.ts";
+import { parseItems } from "../content/registry.ts";
+import { effectivePrices } from "../services/pricing-approvals.ts";
 import { ingestPushedSnapshot, GithubPushError } from "../services/github.ts";
 
 const MAX_BODY = 1_000_000;
@@ -65,6 +70,30 @@ export function register(r: Router) {
     if (!(await verifyTurnstile(ctx, body.turnstileToken))) return jsonResponse(ctx, 400, { error: "Bot verification failed" });
     const { leadId } = await captureLead(ctx.db, body, { ip: ctx.ip ?? undefined });
     return jsonResponse(ctx, 201, { leadId });
+  });
+
+  // Public website assistant (docs/frontend/CHATBOT.md). GET says honestly whether live AI answers are available;
+  // POST answers from approved facts only. Same-origin JSON only (a cross-site form cannot send application/json, and
+  // the Origin must match), rate-limited, size-capped and budget-capped; no visitor text is stored.
+  r.get("/api/assistant", async (ctx) => {
+    const a = await assistant.assistantAvailability(ctx.db, aiProviderFromEnv(ctx.env));
+    return jsonResponse(ctx, 200, { available: a.available, reason: a.reason, maxMessageChars: assistant.ASSISTANT_LIMITS.maxMessageChars });
+  });
+  r.post("/api/assistant", async (ctx) => {
+    const origin = ctx.req.headers.get("origin");
+    if (!origin || origin !== ctx.url.origin) return jsonResponse(ctx, 403, { code: "forbidden", message: "Cross-origin request blocked" });
+    if (!/^application\/json\b/i.test(ctx.req.headers.get("content-type") ?? "")) return jsonResponse(ctx, 415, { code: "invalid", message: "Send JSON" });
+    let body: unknown;
+    try { body = JSON.parse(await readBody(ctx.req)); } catch (e) { if (e instanceof HttpError) throw e; return jsonResponse(ctx, 400, { code: "invalid", message: "Invalid JSON" }); }
+    const session = String(ctx.req.headers.get("x-assistant-session") ?? "").slice(0, 64);
+    const c = await loadContent(ctx, ["faq.items", "process.page"]);
+    const facts: assistant.AssistantFacts = {
+      pricesCents: await effectivePrices(ctx.db, ctx.now()),
+      process: parseItems(c.get("process.page").steps ?? ""), faqs: parseItems(c.get("faq.items").items ?? ""),
+      email: ctx.settings["contact.email"]?.trim() || "support@crestmontwebsitedevelopment.com",
+    };
+    const res = await assistant.answer(ctx.db, aiProviderFromEnv(ctx.env), { body, ip: ctx.ip ?? null, session: /^[a-z0-9-]{8,64}$/i.test(session) ? session : "", facts });
+    return res.ok ? jsonResponse(ctx, 200, { reply: res.reply, links: res.links, ai: true }) : jsonResponse(ctx, res.status, { code: res.code, message: res.message });
   });
 
   r.post("/api/readiness/evidence", async (ctx) => {
