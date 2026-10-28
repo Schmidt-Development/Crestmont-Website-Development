@@ -20,6 +20,8 @@ import { sweepAiLeases } from "./ai-runner.ts";
 import { notifyCustomer, notifyProjectTeam, type MailCtx } from "./notifications.ts";
 import { previewSignInUrl, safePreviewPath } from "../lib/preview-token.ts";
 import { sweepDeployments } from "./site-delivery.ts";
+import { syncStageFromJob, seedIntegrationsFromBrief } from "./build-pipeline.ts";
+import { authenticateWorker, dispatch, recordWorkerStatus, releaseAssignment, sweepWorkers, workerModeOn } from "./build-workers.ts";
 
 const MICRO = 1_000_000;
 export const usdToMicro = (usd: unknown): number => {
@@ -87,6 +89,12 @@ async function transition(db: Db, job: Pick<BuildJob, "id" | "state">, to: Build
     .bind(to, reason, at, ...cols.map((c) => sets[c]), job.id, job.state).run();
   if (!r.meta?.changes) return false;
   await event(db, job.id, "transition", reason, actor, { from: job.state, to });
+  // V2: the project pipeline follows the job; a website that finished its turn frees its builder worker.
+  const p = await db.prepare(`SELECT project_id FROM build_jobs WHERE id = ?`).bind(job.id).first<{ project_id: string }>();
+  if (p) {
+    await syncStageFromJob(db, { project_id: p.project_id, state: to, state_reason: reason });
+    if (["ready_for_review", "approved", "canceled", "failed", "needs_information", "budget_paused"].includes(to)) await releaseAssignment(db, p.project_id, `build ${to.replace(/_/g, " ")}`);
+  }
   return true;
 }
 
@@ -214,6 +222,7 @@ async function enqueue(db: Db, job: BuildJob, reason: string, actor: Actor): Pro
   try {
     const ok = await transition(db, job, "queued", reason, actor, { brief_id: brief.id, not_before: null });
     if (ok) await seedRequirements(db, job.id, brief.content, job.kind === "revision");
+    if (ok) await seedIntegrationsFromBrief(db, job.project_id, job.organization_id, brief.content);
     return ok;
   } catch (e) {
     // Partial unique index: another build of this project is active. Stay pending; the sweep retries.
@@ -343,6 +352,12 @@ async function projectBudgetMicro(db: Db, projectId: string, s: BuildSettings) {
 
 /** Capability a runner announces when its model costs nothing per token (the self-hosted local provider). */
 export const ZERO_COST_CAPABILITY = "zero-token-cost";
+/**
+ * Capability a runner announces for a provider used through an existing subscription sign-in (Claude Code with a
+ * Claude plan): no per-token charge to Crestmont. The Founder keeps "extra usage" purchases off on those accounts;
+ * the runner strips every API key from the CLI's environment so it cannot fall back to metered API billing.
+ */
+export const SUBSCRIPTION_CAPABILITY = "subscription-included";
 
 /** Runner capabilities as recorded: strings only, bounded. */
 export function runnerCapabilities(raw: unknown): string[] {
@@ -355,10 +370,10 @@ export function runnerCapabilities(raw: unknown): string[] {
  * next to the runner's own RUNNER_ALLOW_PAID_PROVIDER; budgets still apply on top.
  */
 export function paidProviderRefused(capabilities: string[], allowPaidProvider: boolean): boolean {
-  return !allowPaidProvider && !capabilities.includes(ZERO_COST_CAPABILITY);
+  return !allowPaidProvider && !capabilities.includes(ZERO_COST_CAPABILITY) && !capabilities.includes(SUBSCRIPTION_CAPABILITY);
 }
 
-export async function claimJob(db: Db, runner: { runnerId: string; version?: string; capabilities?: unknown }, now = new Date(), opts: { allowPaidProvider?: boolean } = {}) {
+export async function claimJob(db: Db, runner: { runnerId: string; version?: string; capabilities?: unknown; workerId?: unknown; workerKey?: unknown; status?: unknown }, now = new Date(), opts: { allowPaidProvider?: boolean } = {}) {
   const runnerId = String(runner.runnerId ?? "").slice(0, 64);
   if (!/^[A-Za-z0-9._:-]{1,64}$/.test(runnerId)) throw new HttpError(422, "runnerId must be 1-64 characters of [A-Za-z0-9._:-]");
   const at = now.toISOString();
@@ -367,10 +382,22 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
   await db.prepare(`INSERT INTO build_runners (runner_id, version, capabilities, last_seen_at) VALUES (?,?,?,?) ON CONFLICT(runner_id) DO UPDATE SET version = excluded.version, capabilities = excluded.capabilities, last_seen_at = excluded.last_seen_at`)
     .bind(runnerId, version, JSON.stringify(capabilities), at).run();
   if (paidProviderRefused(capabilities, !!opts.allowPaidProvider)) return { job: null, reason: "paid_provider_not_authorized" as const };
+  // V2 worker mode: once builder workers are registered, every claim names its worker; a worker only receives work for
+  // the one website assigned to it (dispatcher: lowest verified usage first, then the documented fallback).
+  let worker: Awaited<ReturnType<typeof authenticateWorker>> | null = null;
+  if (await workerModeOn(db)) {
+    worker = await authenticateWorker(db, runner.workerId, runner.workerKey);
+    await recordWorkerStatus(db, worker, runnerId, runner.status && typeof runner.status === "object" ? runner.status as Record<string, unknown> : {}, now);
+    await dispatch(db, now);
+  }
   const s = await getBuildSettings(db);
   if (s.globally_paused || !s.automation_enabled) return { job: null, reason: "paused" as const };
   if (await activeCount(db) >= s.max_concurrent) return { job: null, reason: "at_capacity" as const };
-  const candidates = (await db.prepare(`SELECT j.* FROM build_jobs j LEFT JOIN build_project_controls c ON c.project_id = j.project_id
+  const candidates = worker
+    ? (await db.prepare(`SELECT j.* FROM build_jobs j JOIN build_assignments a ON a.project_id = j.project_id AND a.released_at IS NULL AND a.worker_id = ?
+        LEFT JOIN build_project_controls c ON c.project_id = j.project_id
+        WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?) AND COALESCE(c.paused,0) = 0 ORDER BY j.created_at LIMIT 10`).bind(worker.id, at).all<BuildJob>()).results
+    : (await db.prepare(`SELECT j.* FROM build_jobs j LEFT JOIN build_project_controls c ON c.project_id = j.project_id
       WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?) AND COALESCE(c.paused,0) = 0 ORDER BY j.created_at LIMIT 10`).bind(at).all<BuildJob>()).results;
   for (const c of candidates) {
     const budget = await projectBudgetMicro(db, c.project_id, s);
@@ -379,15 +406,16 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
     const token = randomToken(32);
     const leaseUntil = new Date(now.getTime() + s.lease_seconds * 1000).toISOString();
     const r = await db.prepare(`UPDATE build_jobs SET state = 'preparing', state_reason = 'claimed by runner', lease_runner = ?, lease_token_hash = ?, lease_expires_at = ?, heartbeat_at = ?,
-        run_started_at = ?, started_at = COALESCE(started_at, ?), attempts = attempts + 1, stop_reason = NULL, updated_at = ?
+        run_started_at = ?, started_at = COALESCE(started_at, ?), attempts = attempts + 1, stop_reason = NULL, worker_id = COALESCE(?, worker_id), updated_at = ?
       WHERE id = ? AND state = 'queued' AND (SELECT COUNT(*) FROM build_jobs WHERE state IN ('preparing','building','verifying')) < ?`)
-      .bind(runnerId, await sha256Hex(token), leaseUntil, at, at, at, at, c.id, s.max_concurrent).run();
+      .bind(runnerId, await sha256Hex(token), leaseUntil, at, at, at, worker?.id ?? null, at, c.id, s.max_concurrent).run();
     if (!r.meta?.changes) continue; // another runner won this job (or capacity filled): try the next
     const job = (await getJob(db, c.id))!;
     await db.prepare(`INSERT OR IGNORE INTO build_runs (id, job_id, attempt, runner_id, started_at, session_id, zero_cost) VALUES (?,?,?,?,?,?,?)`)
       .bind(newId("brun"), job.id, job.attempts, runnerId, at, job.agent_session_id, capabilities.includes(ZERO_COST_CAPABILITY) ? 1 : 0).run();
     // Audit: which runner build and which kind of provider (zero-cost or paid) took this attempt.
-    await event(db, job.id, "transition", `Claimed by runner ${runnerId} (attempt ${job.attempts}; ${capabilities.includes(ZERO_COST_CAPABILITY) ? "zero-cost provider" : "PAID provider"})`, { kind: "runner" },
+    const billing = capabilities.includes(ZERO_COST_CAPABILITY) ? "zero-cost provider" : capabilities.includes(SUBSCRIPTION_CAPABILITY) ? "subscription provider, no per-token charge" : "PAID provider";
+    await event(db, job.id, "transition", `Claimed by runner ${runnerId}${worker ? ` for worker ${worker.label}` : ""} (attempt ${job.attempts}; ${billing})`, { kind: "runner" },
       { from: "queued", to: "preparing", data: { runnerVersion: version, capabilities, paidProvider: !capabilities.includes(ZERO_COST_CAPABILITY) } });
     const brief = job.brief_id ? await db.prepare(`SELECT id, version, sha256, content_json FROM build_briefs WHERE id = ?`).bind(job.brief_id).first<{ id: string; version: number; sha256: string; content_json: string }>() : null;
     const reqs = (await db.prepare(`SELECT key, label, status FROM build_requirements WHERE job_id = ? ORDER BY key`).bind(job.id).all<{ key: string; label: string; status: string }>()).results;
@@ -399,6 +427,10 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
         strategy: job.strategy, packageId: job.package_id, starter: job.strategy === "standard" ? { name: "brochure", version: "1" } : null,
         brief: brief ? { id: brief.id, version: brief.version, sha256: brief.sha256, content: JSON.parse(brief.content_json) } : null,
         instruction: job.instruction, requirements: reqs,
+        // V2: the Architect's master specification when one exists (the orchestrator then skips the architect step).
+        spec: await db.prepare(`SELECT spec_json, spec_version FROM build_pipeline WHERE project_id = ?`).bind(job.project_id).first<{ spec_json: string | null; spec_version: number }>()
+          .then((r) => r?.spec_json ? { version: r.spec_version, content: JSON.parse(r.spec_json) } : null),
+        worker: worker ? { id: worker.id, label: worker.label, maxSessions: worker.max_sessions } : null,
         limits: { model: s.model, maxTurns: s.max_turns, maxRuntimeMinutes: s.max_runtime_minutes, runBudgetUsd: microToUsd(Math.min(s.run_budget_micro, remaining)), projectBudgetRemainingUsd: microToUsd(remaining) },
         resume: job.agent_session_id || job.source_commit ? { sessionId: job.agent_session_id, workspaceRef: job.workspace_ref, checkpointKey: job.checkpoint_key, sourceRepo: job.source_repo, sourceBranch: job.source_branch, sourceCommit: job.source_commit } : null,
       },
@@ -406,6 +438,9 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
   }
   return { job: null, reason: "none_queued" as const };
 }
+
+/** The job a runner request refers to, only while that runner holds its lease (V2 orchestrator endpoints). */
+export async function leasedJob(db: Db, jobId: unknown, token: unknown): Promise<BuildJob> { return leased(db, jobId, token); }
 
 async function leased(db: Db, jobId: unknown, token: unknown): Promise<BuildJob> {
   if (typeof jobId !== "string" || typeof token !== "string" || !/^[0-9a-f]{64}$/.test(token)) throw new LeaseLostError("lease_lost");
@@ -641,6 +676,7 @@ export async function sweepBuilds(db: Db, now = new Date()): Promise<string> {
   const ai = await sweepAiLeases(db, now);
   const previews = await sweepPreviewRetention(db, now);
   const releases = await sweepDeployments(db, now);
+  await sweepWorkers(db, now);
   return `${expired} expired lease(s) handled, ${synced} project(s) re-evaluated, ${ai} AI draft lease(s) requeued, ${previews} preview(s) past retention, ${releases} stalled release(s) failed`;
 }
 

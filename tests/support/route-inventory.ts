@@ -29,7 +29,7 @@ export type ResourceKind =
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
-  | "member" | "notification" | "staffNotification" | "buildJob" | "siteDeployment";
+  | "member" | "notification" | "staffNotification" | "buildJob" | "siteDeployment" | "buildWorker" | "buildApproval" | "buildIntegration";
 
 export type Access =
   | { kind: "public" }
@@ -111,6 +111,12 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/builds/runner/previews/deleted": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/deployments/claim": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/deployments/complete": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/pipeline/spec": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/cycles/submit": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/integrations/report": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/approvals/request": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/approvals/list": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/workers/status": signed("x-crestmont-runner-signature"),
   "GET /api/builds": { access: { kind: "staff", roles: rolesWith("builds.read") }, api: true },
   "GET /api/builds/:id": { access: { kind: "staff", roles: rolesWith("builds.read") }, api: true, params: { id: "buildJob" } },
 
@@ -485,6 +491,16 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /portal/projects/:id/previews/:buildId/review": cust({ id: "project", buildId: "buildJob" }, act("portal.preview_reviewed"), { admin: true }),
   // Founder decision D5: customer production delivery (Owner only; authorization and domains need a recent MFA step-up).
   "GET /staff/builds/projects/:id/delivery": staff(rolesWith("builds.read"), P("project")),
+  // Architecture V2: builder accounts, pipeline, approvals, integrations.
+  "GET /staff/builds/workers": staff(rolesWith("builds.read")),
+  "POST /staff/builds/workers": staff(rolesWith("builds.configure"), undefined, act("builds.worker_registered")),
+  "POST /staff/builds/workers/:id/update": staff(rolesWith("builds.configure"), P("buildWorker"), act("builds.worker_updated")),
+  "POST /staff/builds/workers/:id/rotate-key": staff(rolesWith("builds.configure"), P("buildWorker"), act("builds.worker_updated")),
+  "POST /staff/builds/projects/:id/reassign": staff(rolesWith("builds.manage"), P("project"), act("builds.project_reassigned")),
+  "GET /staff/builds/pipeline": staff(rolesWith("builds.read")),
+  "GET /staff/builds/projects/:id/pipeline": staff(rolesWith("builds.read"), P("project")),
+  "POST /staff/builds/approvals/:id/decide": staff(rolesWith("builds.configure"), P("buildApproval"), act("builds.approval_decided")),
+  "POST /staff/builds/integrations/:id/live": staff(rolesWith("builds.configure"), P("buildIntegration"), act("builds.integration_live_status")),
   "POST /staff/builds/projects/:id/site-target": staff(rolesWith("builds.configure"), P("project"), act("builds.site_target_created")),
   "POST /staff/builds/projects/:id/site-domain": staff(rolesWith("builds.configure"), P("project"), act("builds.site_domain_changed")),
   "POST /staff/builds/:id/prepare-release": staff(rolesWith("builds.configure"), P("buildJob"), act("builds.site_release_prepared")),

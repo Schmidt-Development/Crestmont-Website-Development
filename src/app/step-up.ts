@@ -27,6 +27,10 @@ export const STEP_UP_ROUTES: Readonly<Record<string, string>> = {
   // Customer production delivery (Founder decision D5): the Owner's explicit authorizations
   "POST /staff/builds/releases/:id/authorize": "customer production release",
   "POST /staff/builds/projects/:id/site-domain": "customer domain authorization",
+  // AI builder V2: builder enrollment keys and sensitive-action approvals
+  "POST /staff/builds/workers": "builder worker enrollment",
+  "POST /staff/builds/workers/:id/rotate-key": "builder worker key rotation",
+  "POST /staff/builds/approvals/:id/decide": "AI builder sensitive-action approval",
   "POST /staff/ai/budget": "paid AI budget",
   // MFA changes (replacing an enrolled authenticator; first enrolment is unaffected because no MFA exists yet)
   "GET /mfa/setup": "authenticator change",

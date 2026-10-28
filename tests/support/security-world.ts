@@ -255,6 +255,13 @@ async function buildStaffRecords(w: World) {
     await db.prepare(`INSERT INTO site_deployments (id, target_id, project_id, organization_id, build_job_id, version, kind, state, source_repo, source_commit, worker_name, prepared_at, verified_at, created_at, updated_at)
       SELECT ?, 'st_matrix', project_id, organization_id, id, ?, 'release', ?, 'https://github.com/crestmont-builds/matrix', 'abc1234', 'cm-site-matrix-a', ?, ?, ?, ? FROM build_jobs WHERE id = ?`).bind(id, v, state, nowIso(), nowIso(), nowIso(), nowIso(), ids.buildJob).run();
   }
+  // Architecture V2 fixtures: a builder worker (turns worker mode on: claims must name it), an approval and an integration.
+  ids.buildWorker = newId("wkr");
+  await db.prepare(`INSERT INTO build_workers (id, label, provider_kind, billing, enabled, dispatch_paused, enrollment_key_hash, created_at, updated_at) VALUES (?, 'Matrix worker', 'local-model', 'zero-cost', 1, 0, ?, ?, ?)`).bind(ids.buildWorker, "0".repeat(64), nowIso(), nowIso()).run();
+  ids.buildApproval = newId("apv");
+  await db.prepare(`INSERT INTO build_approvals (id, project_id, organization_id, job_id, kind, summary, dedupe_key, requested_by, requested_at) SELECT ?, project_id, organization_id, id, 'credential_request', 'Stripe secret key for live payments', 'matrix-apv', 'runner', ? FROM build_jobs WHERE id = ?`).bind(ids.buildApproval, nowIso(), ids.buildJob).run();
+  ids.buildIntegration = newId("int");
+  await db.prepare(`INSERT INTO build_integrations (id, project_id, organization_id, key, name, purpose, credentials_required, setup_instructions, permissions_required, human_action, responsible, updated_at) SELECT ?, project_id, organization_id, 'stripe', 'Stripe payments', 'Payments', 'keys', 'setup', 'owner', 'Provide keys', 'customer', ? FROM build_jobs WHERE id = ?`).bind(ids.buildIntegration, nowIso(), ids.buildJob).run();
   // Public identifiers
   ids.serviceSlug = "website-design-development";
   ids.legalSlug = "terms";

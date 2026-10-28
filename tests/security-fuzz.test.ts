@@ -188,7 +188,7 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
     "POST /api/webhooks/resend": async (b) => signSvix(SECRETS.resend, `msg_${Math.random().toString(16).slice(2)}`, b),
     "POST /api/leads": async () => ({}),
     "POST /api/scheduled/run": async (b) => ({ "x-crestmont-scheduler-signature": await signEvidence(SECRETS.scheduler, b) }),
-    ...Object.fromEntries(["claim", "heartbeat", "checkpoint", "checkpoint/fetch", "requirements", "files", "complete", "ai/claim", "ai/complete", "previews/claim", "previews/deleted", "deployments/claim", "deployments/complete"].map((x) => [`POST /api/builds/runner/${x}`, async (b: string) => ({ "x-crestmont-runner-signature": await signEvidence(SECRETS.runner, b) })])),
+    ...Object.fromEntries(["claim", "heartbeat", "checkpoint", "checkpoint/fetch", "requirements", "files", "complete", "ai/claim", "ai/complete", "previews/claim", "previews/deleted", "deployments/claim", "deployments/complete", "pipeline/spec", "cycles/submit", "integrations/report", "approvals/request", "approvals/list", "workers/status"].map((x) => [`POST /api/builds/runner/${x}`, async (b: string) => ({ "x-crestmont-runner-signature": await signEvidence(SECRETS.runner, b) })])),
   };
   const jsonPosts = classified().filter((r) => r.method === "POST" && (r.spec.access.kind === "signed" || r.spec.access.kind === "webhook" || r.spec.api));
   assert.deepEqual(jsonPosts.map((r) => r.key).filter((k) => !sign[k]), [], "every JSON POST route has a signer");

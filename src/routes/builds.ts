@@ -12,6 +12,8 @@ import { staffPage } from "./crm.ts";
 import * as B from "../services/builds.ts";
 import * as AIR from "../services/ai-runner.ts";
 import * as D from "../services/site-delivery.ts";
+import * as W from "../services/build-workers.ts";
+import * as PL from "../services/build-pipeline.ts";
 import { notify } from "../services/notifications.ts";
 
 const RUNNER = "/api/builds/runner";
@@ -55,7 +57,7 @@ function previewRedirect(location: string): Response {
 
 export function register(r: Router): void {
   // ───── Runner API (HMAC-signed; no cookies) ─────
-  r.post(`${RUNNER}/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await B.claimJob(ctx.db, { runnerId: typeof b.runnerId === "string" ? b.runnerId : "", version: typeof b.version === "string" ? b.version : "", capabilities: b.capabilities }, ctx.now(), { allowPaidProvider: ctx.env.BUILD_ALLOW_PAID_PROVIDER === "true" })); }));
+  r.post(`${RUNNER}/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await B.claimJob(ctx.db, { runnerId: typeof b.runnerId === "string" ? b.runnerId : "", version: typeof b.version === "string" ? b.version : "", capabilities: b.capabilities, workerId: b.workerId, workerKey: b.workerKey, status: b.workerStatus }, ctx.now(), { allowPaidProvider: ctx.env.BUILD_ALLOW_PAID_PROVIDER === "true" })); }));
   r.post(`${RUNNER}/heartbeat`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.heartbeat(ctx.db, await runnerBody(ctx), ctx.now()))));
   r.post(`${RUNNER}/checkpoint`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.checkpoint(ctx.db, ctx.storage, await runnerBody(ctx)))));
   r.post(`${RUNNER}/checkpoint/fetch`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.fetchCheckpoint(ctx.db, ctx.storage, await runnerBody(ctx)))));
@@ -66,6 +68,19 @@ export function register(r: Router): void {
   // Customer production delivery (protocol v1.4; Founder decision D5): Owner-authorized releases only.
   r.post(`${RUNNER}/deployments/claim`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await D.claimDeployment(ctx.db, await runnerBody(ctx), ctx.now()))));
   r.post(`${RUNNER}/deployments/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await D.completeDeployment(ctx.db, await runnerBody(ctx), ctx))));
+  // Architecture V2 (local orchestrator ⇄ platform): specification, review cycles, integrations, approvals, worker status.
+  const leasedBody = async (ctx: AppContext) => { const b = await runnerBody(ctx); return { b, job: await B.leasedJob(ctx.db, b.jobId, b.leaseToken) }; };
+  r.post(`${RUNNER}/pipeline/spec`, runnerRoute(async (ctx) => { const { b, job } = await leasedBody(ctx); return jsonResponse(ctx, 200, await PL.storeSpec(ctx.db, job, b.spec, String(b.provider ?? ""))); }));
+  r.post(`${RUNNER}/cycles/submit`, runnerRoute(async (ctx) => { const { b, job } = await leasedBody(ctx); return jsonResponse(ctx, 200, await PL.submitCycle(ctx.db, job, b)); }));
+  r.post(`${RUNNER}/integrations/report`, runnerRoute(async (ctx) => { const { b, job } = await leasedBody(ctx); return jsonResponse(ctx, 200, await PL.reportIntegrations(ctx.db, job, b.items)); }));
+  r.post(`${RUNNER}/approvals/request`, runnerRoute(async (ctx) => { const { b, job } = await leasedBody(ctx); return jsonResponse(ctx, 200, await PL.requestApproval(ctx.db, job, b, String(b.runnerId ?? "runner"))); }));
+  r.post(`${RUNNER}/approvals/list`, runnerRoute(async (ctx) => { const { job } = await leasedBody(ctx); return jsonResponse(ctx, 200, { approvals: await PL.approvalsForJob(ctx.db, job.id) }); }));
+  r.post(`${RUNNER}/workers/status`, runnerRoute(async (ctx) => {
+    const b = await runnerBody(ctx);
+    const w = await W.authenticateWorker(ctx.db, b.workerId, b.workerKey);
+    await W.recordWorkerStatus(ctx.db, w, typeof b.runnerId === "string" ? b.runnerId.slice(0, 64) : "", b.status && typeof b.status === "object" ? b.status as Record<string, unknown> : {}, ctx.now());
+    return jsonResponse(ctx, 200, { ok: true });
+  }));
   r.post(`${RUNNER}/previews/claim`, runnerRoute(async (ctx) => { await runnerBody(ctx); return jsonResponse(ctx, 200, await B.claimExpiredPreviews(ctx.db, ctx.now())); }));
   r.post(`${RUNNER}/previews/deleted`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.reportPreviewDeleted(ctx.db, await runnerBody(ctx)))));
   r.post(`${RUNNER}/requirements`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.reportRequirements(ctx.db, await runnerBody(ctx)))));
@@ -168,6 +183,71 @@ ${select({ name: "customer_revision_mode", label: "Customer revision requests", 
     return staffPage(ctx, "AI builds", body);
   });
 
+  const workerKeyPage = (ctx: AppContext, label: string, workerId: string, key: string) => staffPage(ctx, "Builder worker key", html`${pageHead("Builder worker key", linkButton("Builder accounts", "/staff/builds/workers", "ghost", "sm"))}
+${alert("warn", html`Shown <strong>once</strong>. Put it in the build machine's secrets folder for <strong>${label}</strong> (<code>worker_${workerId}_key</code>) and reference it from the orchestrator's worker list. It is a Crestmont enrollment key, not a Claude or OpenAI credential; it cannot be shown again (rotate it if lost).`)}
+<section class="card"><p>Worker id: <code>${workerId}</code></p><p>Enrollment key: <code>${key}</code></p></section>`);
+  r.get("/staff/builds/workers", async (ctx) => {
+    requireStaff(ctx, "builds.read");
+    const configure = can(ctx.actor!, "builds.configure");
+    const workers = await W.listWorkers(ctx.db);
+    const av = new Map((await W.workerAvailability(ctx.db, ctx.now())).map((a) => [a.workerId, a]));
+    const assignments = new Map((await ctx.db.prepare(`SELECT a.worker_id, a.project_id, p.name FROM build_assignments a JOIN projects p ON p.id = a.project_id WHERE a.released_at IS NULL`).all<{ worker_id: string; project_id: string; name: string }>()).results.map((r) => [r.worker_id, r]));
+    const jobsBy = new Map((await ctx.db.prepare(`SELECT worker_id, COUNT(*) AS n, SUM(CASE WHEN state IN ('preparing','building','verifying') THEN 1 ELSE 0 END) AS live FROM build_jobs WHERE worker_id IS NOT NULL GROUP BY worker_id`).all<{ worker_id: string; n: number; live: number }>()).results.map((r) => [r.worker_id, r]));
+    const body = html`${pageHead("Builder accounts", linkButton("Pipeline", "/staff/builds/pipeline", "ghost", "sm"), "AI builds")}
+${alert("info", html`Each worker owns <strong>one customer website at a time</strong>. New websites go to the eligible worker with the lowest <em>verified</em> weekly usage; workers without verified usage follow, least recently assigned first. Usage is shown only when the orchestrator read it through an authorized interface; it is never estimated. No account passwords or provider tokens are stored here.`)}
+${table(workers, [
+  { header: "Worker", cell: (w) => html`<strong>${w.label}</strong><br><span class="faint">${w.provider_kind} · ${w.billing === "metered" ? "metered (refused at $0 cap)" : w.billing === "subscription" ? "existing subscription" : "zero-cost"}</span>` },
+  { header: "Availability", cell: (w) => { const a = av.get(w.id); return a?.eligible ? badge("ok", "Available") : badge(w.enabled ? "warn" : "muted", a?.reason ?? "—"); } },
+  { header: "Assigned website", cell: (w) => { const a = assignments.get(w.id); return a ? html`<a href="/staff/builds/projects/${a.project_id}/pipeline">${a.name}</a>` : "—"; } },
+  { header: "Sessions", cell: (w) => `${jobsBy.get(w.id)?.live ?? 0} active · up to ${w.max_sessions} per website` },
+  { header: "Weekly usage", cell: (w) => av.get(w.id)?.usageVerified ? `${w.usage_percent}% (verified: ${w.usage_source}, ${formatDateTime(w.usage_reported_at!)})` : "Not available (no authorized usage interface)" },
+  { header: "Last health check", cell: (w) => html`${w.last_seen_at ? formatDateTime(w.last_seen_at) : "never"}${w.rate_limited_until ? html`<br>${badge("warn", `rate-limited until ${formatDateTime(w.rate_limited_until)}`)}` : ""}${w.last_error ? html`<br><span class="faint">${w.last_error}</span>` : ""}` },
+  { header: "Jobs", cell: (w) => String(jobsBy.get(w.id)?.n ?? 0) },
+  { header: "", cell: (w) => !configure || !w.enabled ? "" : html`<form method="post" action="/staff/builds/workers/${w.id}/update" class="row">${csrf(ctx)}${w.dispatch_paused ? html`<input type="hidden" name="action" value="resume">${button("Resume dispatch", { variant: "secondary", size: "sm" })}` : html`<input type="hidden" name="action" value="pause">${input({ name: "reason", label: "Pause reason", maxlength: 300, id: `f-wp-${w.id}` })}${button("Pause dispatch", { variant: "secondary", size: "sm" })}`}</form>
+<form method="post" action="/staff/builds/workers/${w.id}/update" class="row">${csrf(ctx)}<input type="hidden" name="action" value="sessions">${input({ name: "max_sessions", label: "Sessions per website", type: "number", value: w.max_sessions, id: `f-ws-${w.id}` })}${button("Save", { variant: "ghost", size: "sm" })}</form>
+<form method="post" action="/staff/builds/workers/${w.id}/rotate-key" class="row">${csrf(ctx)}${button("Rotate enrollment key", { variant: "ghost", size: "sm" })}</form>
+<form method="post" action="/staff/builds/workers/${w.id}/update" class="row">${csrf(ctx)}<input type="hidden" name="action" value="remove">${button("Remove worker", { variant: "danger", size: "sm" })}</form>` },
+], { empty: emptyState("No builder workers", "Without registered workers the builder runs in single-runner mode. Register one worker per Claude account (or local model) the orchestrator serves.") })}
+${configure ? html`<section class="card stack"><h2 class="card__title">Register a worker</h2><form method="post" action="/staff/builds/workers" class="stack">${csrf(ctx)}
+${input({ name: "label", label: "Name", required: true, maxlength: 80, id: "f-w-label" })}
+${select({ name: "provider_kind", label: "Type", options: [{ value: "claude-code", label: "Claude Code (existing Claude plan sign-in on the build machine)" }, { value: "local-model", label: "Self-hosted model (Ollama)" }, { value: "anthropic-api", label: "Anthropic API (metered — refused at the $0 cap)" }, { value: "openai-api", label: "OpenAI API (metered — refused at the $0 cap)" }], id: "f-w-kind" })}
+${input({ name: "max_sessions", label: "Sessions per website", type: "number", value: 1, id: "f-w-sessions" })}
+${button("Register worker", { size: "sm" })}</form><p class="faint">The account itself is signed in on the build machine with the provider's own login, in that worker's own configuration folder. Crestmont never sees the password or token.</p></section>` : ""}`;
+    return staffPage(ctx, "Builder accounts", body);
+  });
+  r.get("/staff/builds/pipeline", async (ctx) => {
+    requireStaff(ctx, "builds.read");
+    const rows = (await ctx.db.prepare(`SELECT pl.project_id, pl.stage, pl.stage_reason, pl.updated_at, p.name, o.name AS org,
+        (SELECT w.label FROM build_assignments a JOIN build_workers w ON w.id = a.worker_id WHERE a.project_id = pl.project_id AND a.released_at IS NULL) AS worker,
+        (SELECT c.decision || ' (cycle ' || c.cycle || ', score ' || COALESCE(c.score, 0) || ')' FROM build_cycles c WHERE c.project_id = pl.project_id ORDER BY c.created_at DESC LIMIT 1) AS review,
+        (SELECT COUNT(*) FROM build_integrations i WHERE i.project_id = pl.project_id AND i.live_status <> 'verified_live') AS integrations,
+        (SELECT COUNT(*) FROM build_approvals ap WHERE ap.project_id = pl.project_id AND ap.status = 'pending') AS approvals,
+        (SELECT COUNT(*) FROM build_jobs j WHERE j.project_id = pl.project_id AND j.state IN ('preparing','building','verifying')) AS sessions
+      FROM build_pipeline pl JOIN projects p ON p.id = pl.project_id JOIN organizations o ON o.id = pl.organization_id ORDER BY pl.updated_at DESC LIMIT 200`)
+      .all<{ project_id: string; stage: PL.Stage; stage_reason: string | null; updated_at: string; name: string; org: string; worker: string | null; review: string | null; integrations: number; approvals: number; sessions: number }>()).results;
+    const count = (f: (r: typeof rows[number]) => boolean) => rows.filter(f).length;
+    const av = await W.workerAvailability(ctx.db, ctx.now());
+    const spend = await ctx.db.prepare(`SELECT COALESCE(SUM(cost_micro),0) AS paid FROM build_runs WHERE COALESCE(zero_cost, 0) = 0`).first<{ paid: number }>();
+    const cap = await ctx.db.prepare(`SELECT paid_spend_cap_micro AS c FROM build_settings WHERE id = 1`).first<{ c: number }>();
+    const pending = (await ctx.db.prepare(`SELECT ap.*, p.name FROM build_approvals ap JOIN projects p ON p.id = ap.project_id WHERE ap.status = 'pending' ORDER BY ap.requested_at`).all<{ id: string; kind: string; summary: string; detail: string | null; requested_at: string; name: string; project_id: string }>()).results;
+    const configure = can(ctx.actor!, "builds.configure");
+    const body = html`${pageHead("AI website pipeline", linkButton("Builder accounts", "/staff/builds/workers", "ghost", "sm"), "AI builds")}
+<div class="kpis">${kpi("Website orders", rows.length)}${kpi("Active", count((r) => ["WORKER_ASSIGNED", "BUILDING", "TESTING", "AI_REVIEW", "REVISION_REQUIRED"].includes(r.stage)))}${kpi("Queued", count((r) => ["QUEUED", "WAITING_FOR_WORKER_CAPACITY"].includes(r.stage)))}${kpi("Builders available", `${av.filter((a) => a.eligible).length} of ${av.length}`)}${kpi("Awaiting Founder approval", count((r) => r.stage === "READY_FOR_FOUNDER_APPROVAL"))}${kpi("Additional AI spend", `$${B.microToUsd(spend?.paid ?? 0).toFixed(2)}`, `cap $${B.microToUsd(cap?.c ?? 0).toFixed(2)} — metered providers refused at $0`)}</div>
+<section class="card"><h2 class="card__title">Approvals required</h2>${table(pending, [
+  { header: "Website", cell: (a) => html`<a href="/staff/builds/projects/${a.project_id}/pipeline">${a.name}</a>` }, { header: "Kind", cell: (a) => a.kind.replace(/_/g, " ") },
+  { header: "Request", cell: (a) => html`${a.summary}${a.detail ? html`<br><span class="faint">${a.detail}</span>` : ""}` }, { header: "Requested", cell: (a) => formatDateTime(a.requested_at) },
+  { header: "", cell: (a) => configure ? html`<form method="post" action="/staff/builds/approvals/${a.id}/decide" class="stack">${csrf(ctx)}${input({ name: "note", label: "Note (required to reject)", maxlength: 1000, id: `f-apv-${a.id}` })}<div class="row">${button("Approve", { name: "decision", value: "approve", size: "sm" })}${button("Reject", { variant: "ghost", name: "decision", value: "reject", size: "sm" })}</div></form>` : "" },
+], { empty: html`<p class="muted">Nothing needs your authorization. Routine development continues without approvals.</p>` })}</section>
+<section class="card"><h2 class="card__title">Websites</h2>${table(rows, [
+  { header: "Website", cell: (r) => html`<a href="/staff/builds/projects/${r.project_id}/pipeline">${r.name}</a><br><span class="faint">${r.org}</span>` },
+  { header: "Stage", cell: (r) => html`${badge(r.stage === "FAILED_NEEDS_INTERVENTION" ? "bad" : r.stage.startsWith("WAITING") ? "warn" : r.stage === "READY_FOR_FOUNDER_APPROVAL" ? "ok" : "info", PL.STAGE_LABELS[r.stage])}<br><span class="faint">${r.stage_reason ?? ""}</span>` },
+  { header: "Worker", cell: (r) => r.worker ?? "—" }, { header: "Sessions", cell: (r) => String(r.sessions) },
+  { header: "Latest AI review", cell: (r) => r.review ?? "—" },
+  { header: "Open integrations", cell: (r) => String(r.integrations) }, { header: "Approvals", cell: (r) => String(r.approvals) },
+  { header: "Updated", cell: (r) => formatDateTime(r.updated_at) },
+], { empty: emptyState("No websites in the pipeline yet", "A website enters the pipeline when its build is created from a paid intake.") })}</section>`;
+    return staffPage(ctx, "AI website pipeline", body);
+  });
   r.get("/staff/builds/:id", async (ctx, p) => {
     requireStaff(ctx, "builds.read");
     const d = await B.buildDetail(ctx.db, p.id);
@@ -340,6 +420,84 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     const f = await ctx.form();
     try { await B.customerReviewPreview({ db: ctx.db, mail: ctx }, { organizationId: org.organizationId, userId: ctx.user!.id }, p.id, p.buildId, str(f, "decision"), str(f, "note")); } catch (e) { return fail(ctx, `/portal/projects/${p.id}/revisions`, e); }
     return redirect(ctx, `/portal/projects/${p.id}/revisions`, { kind: "success", text: "Thank you. Your project team has your review." });
+  });
+
+  // ───── Architecture V2: Builder Accounts, pipeline overview, approvals, integrations ─────
+  r.post("/staff/builds/workers", async (ctx) => {
+    requireStaff(ctx, "builds.configure");
+    const f = await ctx.form();
+    let res: { id: string; enrollmentKey: string };
+    try { res = await W.registerWorker(owner(ctx), { label: str(f, "label"), providerKind: str(f, "provider_kind"), maxSessions: Number(str(f, "max_sessions") || "1") }); } catch (e) { return fail(ctx, "/staff/builds/workers", e); }
+    return workerKeyPage(ctx, str(f, "label"), res.id, res.enrollmentKey);
+  });
+  r.post("/staff/builds/workers/:id/update", async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    const f = await ctx.form();
+    try { await W.updateWorker(owner(ctx), p.id, str(f, "action"), { reason: str(f, "reason"), maxSessions: f.has("max_sessions") ? Number(str(f, "max_sessions") || "NaN") : undefined }); } catch (e) { return fail(ctx, "/staff/builds/workers", e); }
+    return back(ctx, "/staff/builds/workers", "Worker updated.");
+  });
+  r.post("/staff/builds/workers/:id/rotate-key", async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    let key: string;
+    try { key = await W.rotateWorkerKey(owner(ctx), p.id); } catch (e) { return fail(ctx, "/staff/builds/workers", e); }
+    const w = (await W.getWorker(ctx.db, p.id))!;
+    return workerKeyPage(ctx, w.label, w.id, key);
+  });
+  r.post("/staff/builds/projects/:id/reassign", async (ctx, p) => {
+    requireStaff(ctx, "builds.manage");
+    try { await W.reassignProject(owner(ctx), p.id, str(await ctx.form(), "reason")); } catch (e) { return fail(ctx, `/staff/builds/projects/${p.id}/pipeline`, e); }
+    return back(ctx, `/staff/builds/projects/${p.id}/pipeline`, "Released from its worker; the dispatcher assigns the next eligible worker.");
+  });
+  r.get("/staff/builds/projects/:id/pipeline", async (ctx, p) => {
+    requireStaff(ctx, "builds.read");
+    const proj = await ctx.db.prepare(`SELECT id, name FROM projects WHERE id = ?`).bind(p.id).first<{ id: string; name: string }>();
+    if (!proj) throw new HttpError(404, "Project not found");
+    const pl = await PL.getPipeline(ctx.db, p.id);
+    const spec = pl?.spec_json ? JSON.parse(pl.spec_json) as PL.MasterSpec : null;
+    const cycles = (await ctx.db.prepare(`SELECT * FROM build_cycles WHERE project_id = ? ORDER BY created_at DESC LIMIT 100`).bind(p.id).all<{ id: string; job_id: string; cycle: number; prompt: string; prompt_source: string; reviewer_provider: string | null; proposed_decision: string | null; decision: string | null; decision_reason: string | null; next_prompt: string | null; score: number | null; findings_json: string | null; created_at: string }>()).results;
+    const ints = (await ctx.db.prepare(`SELECT * FROM build_integrations WHERE project_id = ? ORDER BY key`).bind(p.id).all<{ id: string; key: string; name: string; purpose: string; credentials_required: string; setup_instructions: string; permissions_required: string; code_status: string; mock_status: string; live_status: string; human_action: string; responsible: string }>()).results;
+    const events = (await ctx.db.prepare(`SELECT * FROM build_pipeline_events WHERE project_id = ? ORDER BY id DESC LIMIT 100`).bind(p.id).all<{ at: string; from_stage: string | null; to_stage: string; message: string; actor_kind: string }>()).results;
+    const asg = await W.activeAssignment(ctx.db, p.id);
+    const configure = can(ctx.actor!, "builds.configure"), manage = can(ctx.actor!, "builds.manage");
+    const body = html`${pageHead(proj.name, linkButton("Pipeline", "/staff/builds/pipeline", "ghost", "sm"), "AI website pipeline")}
+${dl([["Stage", pl ? html`${PL.STAGE_LABELS[pl.stage]} <span class="faint">${pl.stage_reason ?? ""}</span>` : "Not in the pipeline yet"], ["Worker", asg ? (await W.getWorker(ctx.db, asg.worker_id))?.label ?? asg.worker_id : "None"],
+  ["Specification", spec ? `v${pl!.spec_version} from ${pl!.architect_provider ?? "?"} · ${spec.tasks.length} tasks · ${spec.acceptanceCriteria.length} acceptance criteria` : "None yet"]])}
+${manage && asg ? html`<form method="post" action="/staff/builds/projects/${p.id}/reassign" class="row">${csrf(ctx)}${input({ name: "reason", label: "Reassign reason", required: true, maxlength: 300, id: "f-reassign" })}${button("Reassign to another worker", { variant: "secondary", size: "sm" })}</form>` : ""}
+<section class="card"><h2 class="card__title">External integrations</h2><p class="faint">Engineering continues with mocks; only the live connection waits. "Live" is recorded by a person after a real test, never inferred from mock tests.</p>${table(ints, [
+  { header: "Integration", cell: (i) => html`<strong>${i.name}</strong><br><span class="faint">${i.purpose}</span>` },
+  { header: "Needs", cell: (i) => html`${i.credentials_required}<br><span class="faint">${i.permissions_required}</span>` },
+  { header: "Setup", cell: (i) => i.setup_instructions },
+  { header: "Code / mock / live", cell: (i) => html`${badge(i.code_status === "implemented" ? "ok" : "pending", i.code_status.replace(/_/g, " "))} ${badge(i.mock_status === "passed" ? "ok" : i.mock_status === "failed" ? "bad" : "pending", `mock ${i.mock_status.replace(/_/g, " ")}`)} ${badge(i.live_status === "verified_live" ? "ok" : "warn", i.live_status.replace(/_/g, " "))}` },
+  { header: "Action / owner", cell: (i) => `${i.human_action} (${i.responsible.replace(/_/g, " ")})` },
+  { header: "", cell: (i) => configure ? html`<form method="post" action="/staff/builds/integrations/${i.id}/live" class="row">${csrf(ctx)}${i.live_status === "verified_live" ? html`<input type="hidden" name="live" value="0">${button("Mark not live", { variant: "ghost", size: "sm" })}` : html`<input type="hidden" name="live" value="1">${button("I verified it live", { variant: "secondary", size: "sm" })}`}</form>` : "" },
+], { empty: html`<p class="muted">No external integrations.</p>` })}</section>
+<section class="card"><h2 class="card__title">Review cycles and prompt history</h2>${table(cycles, [
+  { header: "Cycle", cell: (c) => html`<a href="/staff/builds/${c.job_id}">${c.cycle}</a>` },
+  { header: "Prompt", cell: (c) => html`<details><summary>${c.prompt_source}</summary><pre class="code-block">${c.prompt}</pre></details>` },
+  { header: "Decision", cell: (c) => html`${badge(c.decision === "ESCALATED" ? "bad" : c.decision?.startsWith("READY") ? "ok" : "info", c.decision ?? "—")}${c.proposed_decision && c.proposed_decision !== c.decision ? html`<br><span class="faint">reviewer proposed ${c.proposed_decision}</span>` : ""}<br><span class="faint">${c.decision_reason ?? ""}</span>` },
+  { header: "Score", cell: (c) => c.score === null ? "—" : `${Math.round(c.score * 100)}%` },
+  { header: "Next prompt", cell: (c) => c.next_prompt ? html`<details><summary>corrective prompt</summary><pre class="code-block">${c.next_prompt}</pre></details>` : "—" },
+  { header: "When", cell: (c) => formatDateTime(c.created_at) },
+], { empty: html`<p class="muted">No review cycles yet.</p>` })}</section>
+${spec ? html`<section class="card"><h2 class="card__title">Master specification</h2><details><summary>Acceptance criteria (${spec.acceptanceCriteria.length})</summary><ul>${spec.acceptanceCriteria.map((a) => html`<li><code>${a.id}</code> ${a.text} <span class="faint">(${a.verification})</span></li>`)}</ul></details>
+<details><summary>Tasks (${spec.tasks.length})</summary><ul>${spec.tasks.map((t) => html`<li><code>${t.id}</code> [${t.workstream}] ${t.title}${t.dependsOn.length ? html` <span class="faint">after ${t.dependsOn.join(", ")}</span>` : ""}</li>`)}</ul></details>
+<details><summary>Provisional assumptions (${spec.assumptions.length})</summary><ul>${spec.assumptions.map((a) => html`<li>${a.text}</li>`)}</ul></details>
+<details><summary>Master prompt</summary><pre class="code-block">${spec.masterPrompt}</pre></details></section>` : ""}
+<section class="card"><h2 class="card__title">Stage history</h2>${table(events, [{ header: "When", cell: (e) => formatDateTime(e.at) }, { header: "Stage", cell: (e) => `${e.from_stage ?? "—"} → ${e.to_stage}` }, { header: "By", cell: (e) => e.actor_kind }, { header: "Detail", cell: (e) => e.message }])}</section>`;
+    return staffPage(ctx, proj.name, body);
+  });
+  r.post("/staff/builds/approvals/:id/decide", async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    const f = await ctx.form();
+    try { await PL.decideApproval(owner(ctx), p.id, str(f, "decision") === "approve", str(f, "note")); } catch (e) { return fail(ctx, "/staff/builds/pipeline", e); }
+    return back(ctx, "/staff/builds/pipeline", "Decision recorded. The orchestrator acts on it at its next check.");
+  });
+  r.post("/staff/builds/integrations/:id/live", async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    const row = await ctx.db.prepare(`SELECT project_id FROM build_integrations WHERE id = ?`).bind(p.id).first<{ project_id: string }>();
+    if (!row) throw new HttpError(404, "Integration not found");
+    try { await PL.markIntegrationLive(owner(ctx), p.id, str(await ctx.form(), "live") === "1"); } catch (e) { return fail(ctx, `/staff/builds/projects/${row.project_id}/pipeline`, e); }
+    return back(ctx, `/staff/builds/projects/${row.project_id}/pipeline`, "Integration status updated.");
   });
 
   // ───── Customer production delivery (Founder decision D5) ─────

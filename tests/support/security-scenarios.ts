@@ -431,6 +431,17 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/builds/releases/:id/rollback", setup: async () => {
       await w.db.prepare(`UPDATE site_deployments SET state = 'superseded', verified_at = ? WHERE id = ?`).bind(nowIso(), w.ids.siteDeployment).run();
     } },
+    // Architecture V2
+    { key: "POST /staff/builds/workers", fields: () => ({ label: "Claude account 9", provider_kind: "claude-code", max_sessions: "2" }) },
+    { key: "POST /staff/builds/workers/:id/update", fields: () => ({ action: "pause", reason: "Matrix pause" }) },
+    { key: "POST /staff/builds/workers/:id/rotate-key" },
+    { key: "POST /staff/builds/projects/:id/reassign", fields: () => ({ reason: "Matrix reassignment" }), setup: async () => {
+      await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review' WHERE project_id = ? AND state IN ('preparing','building','verifying')`).bind(a.ids.project).run();
+      await w.db.prepare(`UPDATE build_assignments SET released_at = ? WHERE project_id = ? AND released_at IS NULL`).bind(nowIso(), a.ids.project).run();
+      await w.db.prepare(`INSERT INTO build_assignments (id, project_id, organization_id, worker_id, assigned_at) SELECT 'asg_matrix', id, organization_id, ?, ? FROM projects WHERE id = ?`).bind(w.ids.buildWorker, nowIso(), a.ids.project).run();
+    } },
+    { key: "POST /staff/builds/approvals/:id/decide", fields: () => ({ decision: "approve", note: "Matrix" }) },
+    { key: "POST /staff/builds/integrations/:id/live", fields: () => ({ live: "1" }) },
     { key: "POST /staff/builds/:id/delete-preview", setup: async () => {
       await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review', preview_name = 'cm-prv-matrix-b0', preview_deleted_at = NULL, preview_delete_requested_at = NULL, source_commit = 'abc123', checkpoint_key = 'builds/matrix/ckpt-1.tgz' WHERE id = ?`).bind(w.ids.buildJob).run();
     } },
