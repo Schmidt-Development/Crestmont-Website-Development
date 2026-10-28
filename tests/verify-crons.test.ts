@@ -26,10 +26,17 @@ test("[INFRA-006] cron registration and rollback steps publish their own health 
   const { rehearsalEvidence } = await import("../scripts/rollback-rehearsal.ts");
   const { recoveryDrillOutcomes, parseEvidence } = await import("../src/readiness/ingest.ts");
   const now = new Date().toISOString();
-  assert.deepEqual(recoveryDrillOutcomes(parseEvidence(cronEvidence({ env: "staging", commit: "a".repeat(40), runId: "r1", startedAt: now, ok: false, detail: "GET schedules: HTTP 403" }))), [["cron-triggers", false]]);
+  assert.deepEqual(recoveryDrillOutcomes(parseEvidence(cronEvidence({ env: "staging", commit: "a".repeat(40), runId: "r1", startedAt: now, ok: false, detail: "GET schedules: HTTP 403" }))), [["cron-triggers", false, "GET schedules: HTTP 403"]]);
   assert.deepEqual(recoveryDrillOutcomes(parseEvidence(rehearsalEvidence({ commit: "a".repeat(40), runId: "r2", startedAt: now, rollback: false, rollforward: true }))),
-    [["recovery:rollback", false], ["recovery:rollback-step", false], ["recovery:rollforward-step", true]]);
+    [["recovery:rollback", false], ["recovery:rollback-step", false, "rollback step failed"], ["recovery:rollforward-step", true, undefined]]);
   const wf = readFileSync(".github/workflows/deploy-staging.yml", "utf8");
   assert.ok(wf.indexOf("Evidence ingest secret") < wf.indexOf("Verify cron triggers"), "cron evidence is posted after the ingest secret exists");
   assert.match(wf, /post-evidence\.ts evidence\/cron-triggers\.json/);
+});
+
+test("[INFRA-006] failing infrastructure feeds expose a short sanitized public reason; nothing else does", async () => {
+  const { publicReason } = await import("../src/routes/readiness.ts");
+  assert.deepEqual(publicReason({ source: "cron-triggers:staging", status: "failing", detail: "Last attempt failed: GET schedules: HTTP 403 token abcdefghijklmnopqrstuvwxyz0123456789ABCD" }), { reason: "GET schedules: HTTP 403 token [redacted]" });
+  assert.deepEqual(publicReason({ source: "recovery:rollback-step:staging", status: "healthy", detail: "x" }), {});
+  assert.deepEqual(publicReason({ source: "ci", status: "failing", detail: "Last attempt failed: something" }), {}, "other feeds keep details staff-only");
 });

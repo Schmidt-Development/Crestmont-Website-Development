@@ -68,7 +68,7 @@ export function rehearsalEvidence(o: { commit: string; runId: string; startedAt:
     results: [
       { requirementId: "TEST-004", testName: `rollback rehearsal: ${name}`, outcome: ok ? "passed" : "failed", ...(ok ? {} : { message: msg || `rollback ${o.rollback ? "ok" : "failed"}, roll-forward ${o.rollforward ? "ok" : "failed"}` }) },
       { requirementId: "INFRA-005", testName: `rollback automation exercised on staging: ${name}`, outcome: ok ? "passed" : "failed", ...(ok ? {} : { message: msg || "rehearsal failed" }) },
-      { requirementId: "INFRA-005", testName: "rollback step: previous version deployed to 100% and healthy", outcome: o.rollback ? "passed" : "failed" },
+      { requirementId: "INFRA-005", testName: "rollback step: previous version deployed to 100% and healthy", outcome: o.rollback ? "passed" : "failed", ...(o.rollback ? {} : { message: msg || "rollback step failed" }) },
       { requirementId: "INFRA-005", testName: "roll-forward step: serving version restored and healthy", outcome: o.rollforward ? "passed" : "failed" },
     ],
   };

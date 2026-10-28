@@ -348,6 +348,14 @@ ${textarea({ name: "notes", label: "Notes (optional)", rows: 3, maxlength: 4000 
 
 // ───────── Registration ─────────
 
+/** Failing infrastructure feeds (cron registration, recovery drills) carry a short public reason: these texts come from
+ *  the platform's own CI scripts (HTTP status codes, step names), never from users. Token-like strings are removed. */
+export function publicReason(f: { source: string; status: string; detail: string }): { reason?: string } {
+  if (f.status !== "failing" || !/^(cron-triggers|recovery):|^job:_invocation$/.test(f.source)) return {};
+  const text = f.detail.replace(/^Last attempt failed:\s*/, "").replace(/[A-Za-z0-9_\-]{32,}/g, "[redacted]").replace(/[^\x20-\x7e]/g, "").slice(0, 200);
+  return text ? { reason: text } : {};
+}
+
 export function register(r: Router): void {
   // Self-monitoring (READY-012, §50). Unauthenticated callers get statuses only; staff also get details.
   r.get("/api/readiness/health", async (ctx) => {
@@ -360,7 +368,7 @@ export function register(r: Router): void {
     return jsonResponse(ctx, h.ok || asReport ? 200 : 503, {
       ...(asReport ? { httpStatus: h.ok ? 200 : 503 } : {}),
       status: h.ok ? "ok" : "degraded", checkedAt: report.generatedAt,
-      feeds: feeds.map((f) => ({ source: f.source, required: f.required, status: f.status, lastSuccessAt: f.lastSuccessAt, ...(detailed ? { detail: f.detail, lastAttemptAt: f.lastAttemptAt } : {}) })),
+      feeds: feeds.map((f) => ({ source: f.source, required: f.required, status: f.status, lastSuccessAt: f.lastSuccessAt, ...(detailed ? { detail: f.detail, lastAttemptAt: f.lastAttemptAt } : publicReason(f)) })),
       ...(detailed ? { reason: h.reason, evidenceSetSha256: report.evidenceSetSha256, decision: report.decision.summary } : {}),
     });
   });

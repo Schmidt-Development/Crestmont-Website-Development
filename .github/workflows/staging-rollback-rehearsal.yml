@@ -50,8 +50,13 @@ jobs:
         id: back
         continue-on-error: true
         run: |
-          $WRANGLER versions deploy "${{ steps.pick.outputs.previous }}@100%" --env staging --message "Rollback rehearsal (run ${{ github.run_id }})" --yes
-          for i in 1 2 3 4 5 6; do sleep 10; [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/health")" = "200" ] && exit 0; done
+          set +e
+          $WRANGLER versions deploy "${{ steps.pick.outputs.previous }}@100%" --env staging --message "Rollback rehearsal (run ${{ github.run_id }})" --yes > back.log 2>&1
+          rc=$?; cat back.log
+          if [ $rc -ne 0 ]; then echo "reason=deploy_command_failed: $(grep -iE 'error|✘' back.log | head -1 | tr -d '\r' | cut -c1-160)" >> "$GITHUB_OUTPUT"; echo "::error::versions deploy failed"; exit 1; fi
+          code=000
+          for i in 1 2 3 4 5 6; do sleep 10; code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/health"); [ "$code" = "200" ] && exit 0; done
+          echo "reason=health_check_failed: /api/health HTTP $code after 60 s" >> "$GITHUB_OUTPUT"
           echo "::error::health check failed after rollback"; exit 1
       - name: Roll forward to the version that was serving and verify
         id: fwd
@@ -62,9 +67,12 @@ jobs:
           echo "::error::health check failed after restoring the serving version — check staging now"; exit 1
       - name: Record evidence on staging
         if: always() && steps.pick.outcome == 'success'
+        env:
+          BACK_REASON: ${{ steps.back.outputs.reason }}   # passed via env, never interpolated into the script
         run: |
           node --no-warnings scripts/rollback-rehearsal.ts evidence --commit "$GITHUB_SHA" --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-rollback" --started "$STARTED" \
-            --rollback "${{ steps.back.outcome == 'success' && 'passed' || 'failed' }}" --rollforward "${{ steps.fwd.outcome == 'success' && 'passed' || 'failed' }}" --out evidence/rollback.json
+            --rollback "${{ steps.back.outcome == 'success' && 'passed' || 'failed' }}" --rollforward "${{ steps.fwd.outcome == 'success' && 'passed' || 'failed' }}" \
+            --detail "$BACK_REASON" --out evidence/rollback.json
           ev=$(node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))')
           echo "::add-mask::$ev"
           printf '%s' "$ev" | $WRANGLER secret put EVIDENCE_INGEST_SECRET --env staging > /dev/null
