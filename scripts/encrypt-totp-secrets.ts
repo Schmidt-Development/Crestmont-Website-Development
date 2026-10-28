@@ -45,7 +45,37 @@ export async function planReencryption(rows: TotpRow[], rawKey: string): Promise
   return { sql, plaintext, alreadyEncrypted };
 }
 
-interface Ops { rows(): Promise<TotpRow[]>; apply(sql: string[]): Promise<void> }
+interface Ops { rows(): Promise<TotpRow[]>; apply(sql: string[]): Promise<void>; deploymentEnvironments?(): Promise<string[]> }
+
+// ── Database identity safeguards (remote D1) ──
+/** The D1 database_name wrangler.toml binds for `[env.<env>]`. */
+export function declaredDatabase(toml: string, env: string): string | null {
+  const start = toml.indexOf(`[env.${env}]`);
+  if (start < 0) return null;
+  const rest = toml.slice(start + 1);
+  const end = rest.search(/^\[(?!\[)(?!env\.\w+\.)/m);
+  const section = end < 0 ? rest : rest.slice(0, end);
+  return /database_name\s*=\s*"([^"]+)"/.exec(section)?.[1] ?? null;
+}
+
+export const PRODUCTION_CONFIRM_ENV = "CRESTMONT_CONFIRM_PRODUCTION_MFA_MIGRATION";
+
+/** Refuses unless the target is unambiguously the intended environment's database:
+ *  1. --database equals the database wrangler.toml binds for --env;
+ *  2. the database's own deployment records name exactly that environment (a staging D1 records staging deploys);
+ *  3. production additionally needs --confirm-production <database> AND CRESTMONT_CONFIRM_PRODUCTION_MFA_MIGRATION=<database>. */
+export async function assertTargetIdentity(o: { env: string; database: string; toml: string; confirmProduction?: string; confirmEnv?: string; recordedEnvironments: () => Promise<string[]> }): Promise<void> {
+  if (o.env !== "staging" && o.env !== "production") throw new Error(`--env must be staging or production`);
+  const declared = declaredDatabase(o.toml, o.env);
+  if (!declared) throw new Error(`wrangler.toml declares no D1 database for [env.${o.env}]`);
+  if (o.database !== declared) throw new Error(`--database ${o.database} is not the ${o.env} database (wrangler.toml binds ${declared} for [env.${o.env}])`);
+  if (o.env === "production" && (o.confirmProduction !== declared || o.confirmEnv !== declared)) {
+    throw new Error(`production needs --confirm-production ${declared} and ${PRODUCTION_CONFIRM_ENV}=${declared} (both exactly)`);
+  }
+  const envs = [...new Set(await o.recordedEnvironments())];
+  if (envs.length === 0) throw new Error(`${o.database} has no recorded deployments, so its identity cannot be confirmed`);
+  if (envs.length !== 1 || envs[0] !== o.env) throw new Error(`${o.database} records deployments for ${envs.join(", ")}, not only ${o.env}`);
+}
 
 export async function run(ops: Ops, rawKey: string, write: boolean, log: (s: string) => void): Promise<Plan> {
   if (!rawKey) throw new Error("Set MFA_ENCRYPTION_KEY in the environment (the same value as the Worker secret).");
@@ -73,11 +103,15 @@ function localOps(path: string): Ops {
   };
 }
 
-function remoteOps(database: string, env: string): Ops {
+function remoteOps(database: string, env: string): Ops & { deploymentEnvironments(): Promise<string[]> } {
   const [cmd, ...base] = (process.env.WRANGLER ?? "npx --yes wrangler@4").split(" ").filter(Boolean);
   const d1 = ["d1", "execute", database, "--remote", "--env", env];
   const exec = (args: string[]) => execFileSync(cmd, [...base, ...d1, ...args], { stdio: ["pipe", "pipe", "pipe"], encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   return {
+    async deploymentEnvironments() {
+      const out = exec(["--json", "--command", "SELECT DISTINCT environment FROM deployments WHERE status = 'succeeded'"]);
+      return ((JSON.parse(out.slice(out.indexOf("[")))[0]?.results ?? []) as { environment: string }[]).map((r) => r.environment);
+    },
     async rows() {
       const out = exec(["--json", "--command", SELECT_ROWS]);
       return (JSON.parse(out.slice(out.indexOf("[")))[0]?.results ?? []) as TotpRow[];
@@ -104,7 +138,16 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exit(2);
   }
   try {
-    await run(remote ? remoteOps(database!, env!) : localOps(db!), process.env.MFA_ENCRYPTION_KEY ?? "", args.includes("--yes"), (s) => console.log(s));
+    let ops: Ops;
+    if (remote) {
+      const r = remoteOps(database!, env!);
+      const { readFileSync } = await import("node:fs");
+      await assertTargetIdentity({ env: env!, database: database!, toml: readFileSync("wrangler.toml", "utf8"), confirmProduction: get("--confirm-production"),
+        confirmEnv: process.env[PRODUCTION_CONFIRM_ENV], recordedEnvironments: () => r.deploymentEnvironments() });
+      console.log(`Target confirmed: ${database} is the ${env} database (wrangler.toml binding and its own deployment records agree).`);
+      ops = r;
+    } else ops = localOps(db!);
+    await run(ops, process.env.MFA_ENCRYPTION_KEY ?? "", args.includes("--yes"), (s) => console.log(s));
   } catch (e) {
     console.error(`Refused: ${String((e as Error).message ?? e).split("\n")[0].slice(0, 300)}`);
     process.exit(1);

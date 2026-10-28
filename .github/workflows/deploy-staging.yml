@@ -314,6 +314,10 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           ROTATE: ${{ inputs.rotate_credentials }}
+          # Optional. When the staging environment secret STAGING_MFA_ENCRYPTION_KEY holds the SAME value as the staging
+          # Worker secret MFA_ENCRYPTION_KEY, demo 2FA secrets are written already encrypted. Without it they are written
+          # in plaintext only when first issued or rotated, and the Worker encrypts each at its next sign-in.
+          MFA_ENCRYPTION_KEY: ${{ secrets.STAGING_MFA_ENCRYPTION_KEY }}
         run: node --no-warnings scripts/staging-access.ts --url "${{ steps.deploy.outputs.url }}" --out access
 
       # Read-only, every run: the last rotation is complete in D1 (no credential needed; counts and PASS/FAIL only).

@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashPassword, base32Encode } from "../src/lib/auth-crypto.ts";
+import { sealWithKey } from "../src/lib/totp-secrets.ts";
 
 export const DEMO_DOMAIN = "crestmont-preview.test";
 const ALPHABET = "23456789abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ"; // no 0/O/1/l/I, no markdown-active characters
@@ -64,7 +65,13 @@ const NOTES: Record<string, string> = {
   project_manager: "Staff (project manager)", support: "Staff (support)",
 };
 
-export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: string; rotate: boolean }): Promise<AccessResult> {
+/** Keyed fingerprint of a demo account's derived TOTP secret: lets a deploy tell whether the stored secret (which may now be
+ *  encrypted at rest) is still the one it would issue, without reading or decrypting it. */
+async function totpFingerprint(rootKey: string, userId: string, totp: string): Promise<string> {
+  return [...await hmac(rootKey, `crestmont-staging-access:v1:totp-fp:${userId}:${totp}`)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: string; rotate: boolean; mfaKey?: string }): Promise<AccessResult> {
   if (!o.rootKey || o.rootKey.length < 16) throw new Error("ACCESS_ROOT_KEY is missing or too short");
   await ops.query(`CREATE TABLE IF NOT EXISTS _staging_access (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
   const meta = Object.fromEntries((await ops.query<{ key: string; value: string }>(`SELECT key, value FROM _staging_access`)).map((r) => [r.key, r.value]));
@@ -73,8 +80,8 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
   crypto.getRandomValues(saltBytes);
   const salt = rotated ? [...saltBytes].map((b) => b.toString(16).padStart(2, "0")).join("") : meta.salt;
 
-  const users = await ops.query<{ id: string; email: string; mfa_enabled: number; roles: string | null }>(
-    `SELECT u.id, u.email, u.mfa_enabled, (SELECT group_concat(m.role_id) FROM memberships m WHERE m.user_id = u.id) AS roles
+  const users = await ops.query<{ id: string; email: string; mfa_enabled: number; has_totp: number; roles: string | null }>(
+    `SELECT u.id, u.email, u.mfa_enabled, (u.totp_secret IS NOT NULL) AS has_totp, (SELECT group_concat(m.role_id) FROM memberships m WHERE m.user_id = u.id) AS roles
        FROM users u WHERE u.email LIKE '%@${DEMO_DOMAIN}' AND u.password_hash IS NOT NULL ORDER BY u.email`);
   const accounts: DemoAccount[] = [];
   const sql: string[] = [];
@@ -83,7 +90,19 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
     const password = await derivePassword(o.rootKey, salt, `password:${u.email}`);
     const totp = u.mfa_enabled ? await deriveTotp(o.rootKey, salt, u.email) : null;
     accounts.push({ role, email: u.email, password, totp, note: NOTES[role] ?? "Customer portal (sample organization)" });
-    sql.push(`UPDATE users SET password_hash = ${q(await hashPassword(password))}, totp_secret = ${totp ? q(totp) : "totp_secret"}, totp_last_step = NULL, failed_logins = 0, locked_until = NULL WHERE id = ${q(u.id)};`);
+    // The TOTP secret is written only when it changes (first issue or a rotation). Re-writing it on every deploy would
+    // replace a secret that the Worker has since encrypted at rest (MFA_ENCRYPTION_KEY) with plaintext again.
+    let totpSql = "totp_secret";
+    if (totp) {
+      const fp = await totpFingerprint(o.rootKey, u.id, totp);
+      if (rotated || !u.has_totp || meta[`totp_fp:${u.id}`] !== fp) {
+        // With the key available to the deploy, the secret is written already encrypted; otherwise in plaintext, and the
+        // Worker encrypts it at that account's next successful sign-in.
+        totpSql = q(o.mfaKey ? await sealWithKey(o.mfaKey, u.id, totp) : totp);
+        sql.push(`INSERT OR REPLACE INTO _staging_access (key, value) VALUES (${q(`totp_fp:${u.id}`)}, ${q(fp)});`);
+      }
+    }
+    sql.push(`UPDATE users SET password_hash = ${q(await hashPassword(password))}, totp_secret = ${totpSql}, totp_last_step = NULL, failed_logins = 0, locked_until = NULL WHERE id = ${q(u.id)};`);
   }
   let revoked: Revoked | undefined;
   if (rotated) {
@@ -216,6 +235,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const r = await applyAccess(wranglerOps(), {
       rootKey: process.env.ACCESS_ROOT_KEY ?? "", epoch: process.env.ACCESS_EPOCH ?? "1",
       rotate: process.env.ROTATE === "true",
+      mfaKey: process.env.MFA_ENCRYPTION_KEY || undefined, // optional: the SAME value as the staging Worker secret
     });
     for (const v of [...r.accounts.flatMap((a) => [a.password, a.totp ?? ""])].filter(Boolean)) console.log(`::add-mask::${v}`);
     mkdirSync(out, { recursive: true });
