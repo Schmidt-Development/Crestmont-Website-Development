@@ -133,7 +133,7 @@ export function recoveryDrillOutcomes(doc: EvidenceDoc): [string, boolean, strin
   // "skipped" = native triggers unavailable on this account (Workers Free limit) and the external scheduler is used
   // instead; whether jobs actually run is judged by the required `scheduler` feed.
   if (cron.length) out.push(["cron-triggers", cron.every((r) => r.outcome !== "failed"), why(cron)]);
-  if (rs.length) out.push(["recovery:restore", rs.every((r) => r.outcome === "passed")]);
+  if (rs.length) out.push(["recovery:restore", rs.every((r) => r.outcome === "passed"), why(rs)]);
   return out;
 }
 

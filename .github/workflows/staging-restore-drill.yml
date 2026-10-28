@@ -44,27 +44,35 @@ jobs:
         with:
           node-version: "22.x"
       - name: Export staging (read-only)
+        id: export
         if: steps.pre.outputs.ok == 'true'
         run: |
           echo "STARTED=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$GITHUB_ENV"
           mkdir -p drill evidence
-          $WRANGLER d1 export crestmont-staging --remote --env staging --output drill/staging.sql > /dev/null
-          $WRANGLER d1 execute crestmont-staging --remote --env staging --json --command "SELECT name FROM sqlite_master WHERE type='table'" > drill/tables.json
+          fail() { echo "reason=$1: $(sed -e 's/\x1b\[[0-9;]*m//g' drill/err.log 2>/dev/null | grep -iE 'error|code:' | head -2 | tr '\n' ' ' | sed -E 's#/accounts/[^/]+/#/accounts/…/#' | cut -c1-300)" >> "$GITHUB_OUTPUT"; exit 1; }
+          $WRANGLER d1 export crestmont-staging --remote --env staging --output drill/staging.sql > /dev/null 2> drill/err.log || fail "export"
+          $WRANGLER d1 execute crestmont-staging --remote --env staging --json --command "SELECT name FROM sqlite_master WHERE type='table'" > drill/tables.json 2> drill/err.log || fail "list tables"
           node --no-warnings scripts/restore-drill.ts sql drill/tables.json > drill/count.sql
-          $WRANGLER d1 execute crestmont-staging --remote --env staging --json --command "$(cat drill/count.sql)" > drill/source.json
+          $WRANGLER d1 execute crestmont-staging --remote --env staging --json --command "$(cat drill/count.sql)" > drill/source.json 2> drill/err.log || fail "count source rows"
       - name: Restore into a scratch database and compare
-        if: steps.pre.outputs.ok == 'true'
+        id: restore
+        if: steps.pre.outputs.ok == 'true' && steps.export.outcome == 'success'
         run: |
-          $WRANGLER d1 create "$SCRATCH" > /dev/null
-          $WRANGLER d1 execute "$SCRATCH" --remote --file drill/staging.sql --yes > /dev/null
-          $WRANGLER d1 execute "$SCRATCH" --remote --json --command "$(cat drill/count.sql)" > drill/restored.json
+          fail() { echo "reason=$1: $(sed -e 's/\x1b\[[0-9;]*m//g' drill/err.log 2>/dev/null | grep -iE 'error|code:' | head -2 | tr '\n' ' ' | sed -E 's#/accounts/[^/]+/#/accounts/…/#' | cut -c1-300)" >> "$GITHUB_OUTPUT"; exit 1; }
+          $WRANGLER d1 create "$SCRATCH" > /dev/null 2> drill/err.log || fail "create scratch database"
+          $WRANGLER d1 execute "$SCRATCH" --remote --file drill/staging.sql --yes > /dev/null 2> drill/err.log || fail "import export into scratch"
+          $WRANGLER d1 execute "$SCRATCH" --remote --json --command "$(cat drill/count.sql)" > drill/restored.json 2> drill/err.log || fail "count restored rows"
           node --no-warnings scripts/restore-drill.ts compare drill/source.json drill/restored.json \
             --commit "$GITHUB_SHA" --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-restore-drill" --started "$STARTED" --out evidence/restore-drill.json
       - name: Record evidence on staging
-        if: always() && steps.pre.outputs.ok == 'true' && hashFiles('evidence/restore-drill.json') != ''
+        if: always() && steps.pre.outputs.ok == 'true'
         env:
           ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          FAIL_REASON: ${{ steps.export.outputs.reason || steps.restore.outputs.reason }}   # via env, never interpolated
         run: |
+          mkdir -p evidence
+          [ -f evidence/restore-drill.json ] || node --no-warnings scripts/restore-drill.ts fail --reason "${FAIL_REASON:-drill stopped before the comparison}" \
+            --commit "$GITHUB_SHA" --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-restore-drill" --started "${STARTED:-$(date -u +%Y-%m-%dT%H:%M:%S.000Z)}" --out evidence/restore-drill.json
           # The staging preview URL (repository variable STAGING_URL overrides the known workers.dev address).
           url="${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}"
           # The deploy installs this derived key; it is not rotated here (a secret change would block rollbacks).

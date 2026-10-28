@@ -50,5 +50,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     writeFileSync(arg("--out") ?? "evidence/restore-drill.json", JSON.stringify(drillEvidence(r, { commit: arg("--commit") ?? "0000000", runId: arg("--run-id") ?? `local-drill-${Date.now()}`, startedAt: arg("--started") ?? new Date().toISOString() })));
     console.log(`${r.passed ? "PASSED" : "FAILED"}: ${r.tables} tables, ${r.rows} rows${r.problems.length ? `; ${r.problems.join("; ")}` : ""}`);
     if (!r.passed) process.exit(1);
+  } else if (mode === "fail") {
+    // A step before the comparison failed (export, scratch database, import): record a failed drill with the reason,
+    // so the recovery:restore feed shows it instead of the drill silently leaving no evidence.
+    const reason = (arg("--reason") || "restore drill failed before the comparison").slice(0, 500);
+    writeFileSync(arg("--out") ?? "evidence/restore-drill.json", JSON.stringify(drillEvidence({ passed: false, tables: 0, rows: 0, problems: [reason] }, { commit: arg("--commit") ?? "0000000", runId: arg("--run-id") ?? `local-drill-${Date.now()}`, startedAt: arg("--started") ?? new Date().toISOString() })));
   } else { console.error("usage: restore-drill.ts sql <tables.json> | compare <source.json> <restored.json> [--commit --run-id --out --started]"); process.exit(2); }
 }

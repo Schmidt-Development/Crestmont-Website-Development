@@ -66,3 +66,18 @@ test("[FILE-001] the staging deploy publishes whether R2 file storage is bound: 
   assert.equal(await feed(), "healthy");
   assert.match(readFileSync(".github/workflows/deploy-staging.yml", "utf8"), /storage-evidence\.ts --state "\$R2_STATE"/);
 });
+
+test("[TEST-004] [INFRA-006] a restore drill that fails before the comparison still records failed evidence with its reason", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { recoveryDrillOutcomes, parseEvidence } = await import("../src/readiness/ingest.ts");
+  const out = join(mkdtempSync(join(tmpdir(), "drill-")), "e.json");
+  execFileSync("node", ["--no-warnings", "scripts/restore-drill.ts", "fail", "--reason", "create scratch database: code: 7406", "--commit", "a".repeat(40), "--run-id", "r", "--out", out]);
+  const doc = parseEvidence(JSON.parse(readFileSync(out, "utf8")));
+  assert.deepEqual(recoveryDrillOutcomes(doc), [["recovery:restore", false, "create scratch database: code: 7406"]]);
+  const wf = readFileSync(".github/workflows/staging-restore-drill.yml", "utf8");
+  assert.match(wf, /FAIL_REASON: \$\{\{ steps\.export\.outputs\.reason \|\| steps\.restore\.outputs\.reason \}\}/);
+  assert.doesNotMatch(wf, /--reason "\$\{\{/, "the reason reaches the script through env, not interpolation");
+});
