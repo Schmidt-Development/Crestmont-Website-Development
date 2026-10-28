@@ -179,7 +179,9 @@ test("[SEC-007] findings register: fixed findings recorded as resolved; new open
   const rows = Object.fromEntries((await db.prepare(`SELECT id, status, release_blocking FROM security_findings`).all<{ id: string; status: string; release_blocking: number }>()).results.map((r) => [r.id, r]));
   for (const id of ["F-06", "F-08", "F-11", "F-13", "F-15", "F-20", "F-21", "F-22", "F-25", "F-26", "F-27", "F-28", "F-30"]) assert.equal(rows[id]?.status, "resolved", id);
   assert.deepEqual([rows["F-29"]?.status, rows["F-29"]?.release_blocking], ["open", 0], "F-29 waits on a Founder decision");
-  for (const id of ["F-18", "F-19", "F-23"]) assert.deepEqual([rows[id]?.status, rows[id]?.release_blocking], ["open", 1], id);
+  assert.deepEqual([rows["F-18"]?.status, rows["F-18"]?.release_blocking], ["open", 1], "F-18 stays open until the rotation is verified");
+  for (const id of ["F-19", "F-23"]) assert.equal(rows[id]?.status, "resolved", `${id} fixed by the credential-remediation PR`);
+  assert.equal(rows["F-24"]?.status, "open", "F-24 recorded resolved only once token scoping is on main");
   for (const id of ["F-01", "F-02", "F-03", "F-10", "F-16"]) assert.equal(rows[id]?.status, "open", `${id} stays open until externally resolved`);
 });
 
