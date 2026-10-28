@@ -61,7 +61,8 @@ async function pickSlot(f, dayRe, timeRe) {
     const t = f.locator("main button:not([disabled])", { hasText: timeRe }).filter({ visible: true });
     if (await t.count()) { await click(t.first()); await sleep(250); return; }
   }
-  throw new Error("no open time found");
+  const seen = await f.evaluate(() => [...document.querySelectorAll("main button")].filter((b) => b.offsetParent).map((b) => `${b.disabled ? "×" : ""}${b.textContent.trim().replace(/\s+/g, " ").slice(0, 14)}`).slice(0, 24).join(", "));
+  throw new Error(`no open time found among ${n} day(s); buttons: ${seen}`);
 }
 
 export const FLOWS = {
@@ -72,7 +73,7 @@ export const FLOWS = {
     if (await f.locator("[name=cash_amount]").isVisible()) { await reveal(f.locator("[name=cash_amount]")); await f.locator("[name=cash_amount]").fill("100000"); }
     await click(f.locator("#apply-form button[type=submit]"));
     await waitPath(f, /^\/partner\/schedule/, "application");
-    await pickSlot(f, /open/, /^\d{1,2}:\d\d (AM|PM)$/);
+    await pickSlot(f, /open/, /^\d{1,2}:\d\d\s?(AM|PM)$/i);
     await click(f.locator("main button", { hasText: "Confirm my call" }));
     await waitPath(f, /^\/partner\/status/, "call booking");
     const t = await text(f);
@@ -82,7 +83,7 @@ export const FLOWS = {
   // mentorship.lansingcarrentals.com: book a paid call → simulated checkout → confirmation → captured emails.
   "Lansing Car Rentals Mentorship": async (f) => {
     await f.goto(new URL("/book", f.url()).toString());
-    await pickSlot(f, /open/, /^\d{1,2}:\d\d (AM|PM)$/);
+    await pickSlot(f, /open/, /^\d{1,2}:\d\d\s?(AM|PM)$/i);
     await fillVisible(f);
     await click(f.locator("button[type=submit]").last());
     await waitPath(f, /^\/__demo\/checkout\//, "checkout");
@@ -113,7 +114,7 @@ export const FLOWS = {
     for (let step = 0; step < 8; step++) {
       if (/^\/__demo\/checkout\//.test(path(f))) break;
       await fillVisible(f);
-      if (await f.locator("main button", { hasText: /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\d/ }).filter({ visible: true }).count()) await pickSlot(f, /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\d/, /^\d{1,2}:\d\d (AM|PM)$/);
+      if (await f.locator("main button", { hasText: /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\d/ }).filter({ visible: true }).count()) await pickSlot(f, /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\d/, /^\d{1,2}:\d\d\s?(AM|PM)$/i);
       const cont = f.locator("main button", { hasText: /^(Continue|Next|Review)/ }).filter({ visible: true }).first();
       const sub = f.locator("main button", { hasText: /pay|book|confirm|checkout/i }).filter({ visible: true }).first();
       if (await cont.count()) await click(cont); else if (await sub.count()) await click(sub); else break;
