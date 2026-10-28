@@ -42,7 +42,7 @@ const isSecretOnly = (t: string | null) => !!t && /secret/i.test(t);
 /** Previous = the newest version whose CODE predates the serving build: skip versions that only changed secrets on
  *  top of the serving code, and the serving code's own upload, so the rehearsal really runs older code. Falls back to
  *  the newest other version when Wrangler reports no trigger annotations. */
-export function pickRollback(statusJson: string, listJson: string): { current: string; previous: string; previousIsOlderCode: boolean } {
+export function pickRollback(statusJson: string, listJson: string): { current: string; previous: string; previousIsOlderCode: boolean; secretChanged: boolean } {
   const current = currentVersionIds(statusJson);
   if (current.length !== 1) throw new Error(`expected exactly one version serving 100% of traffic, found ${current.length}`);
   const all = versionsNewestFirst(listJson);
@@ -54,12 +54,39 @@ export function pickRollback(statusJson: string, listJson: string): { current: s
     // Walk back through secret-only versions to the upload that produced the serving code.
     while (i < all.length && isSecretOnly(all[i].trigger)) i++;
     const older = all.slice(i + 1).find((v) => v.trigger && !isSecretOnly(v.trigger));
-    if (older) return { current: current[0], previous: older.id, previousIsOlderCode: true };
+    if (older) return { current: current[0], previous: older.id, previousIsOlderCode: true, secretChanged: secretChangeBetween(all, idx, all.indexOf(older)) };
   }
-  return { current: current[0], previous: others[0].id, previousIsOlderCode: false };
+  const prevIdx = all.findIndex((v) => v.id === others[0].id);
+  return { current: current[0], previous: others[0].id, previousIsOlderCode: false, secretChanged: idx >= 0 && prevIdx > idx && secretChangeBetween(all, idx, prevIdx) };
 }
 
-export function rehearsalEvidence(o: { commit: string; runId: string; startedAt: string; rollback: boolean; rollforward: boolean; detail?: string }) {
+/**
+ * A secret changed after `previous` was active (a secret-only version lies between it and the serving version, inclusive
+ * of the serving one). Cloudflare then refuses the rollback (error 10220), and forcing it would bring the OLD secret
+ * values back (after a credential rotation: the old preview password). So there is no safe rollback target until the
+ * next deploy uploads code under the current secrets; the rehearsal reports that as "unavailable", not as a failure.
+ */
+export function secretChangeBetween(all: { trigger: string | null }[], currentIdx: number, previousIdx: number): boolean {
+  return all.slice(Math.max(0, currentIdx), previousIdx).some((v) => isSecretOnly(v.trigger));
+}
+
+export const NO_SAFE_TARGET = "no safe rollback target: a secret changed after the previous code version was active (Cloudflare refuses that rollback, error 10220, and forcing it would restore the old secret values); the next deploy creates a target";
+
+export function rehearsalEvidence(o: { commit: string; runId: string; startedAt: string; rollback: boolean | "skipped"; rollforward: boolean | "skipped"; detail?: string }) {
+  if (o.rollback === "skipped" || o.rollforward === "skipped") {
+    // Not run (see NO_SAFE_TARGET): recorded as skipped with the reason, never as passed and never as failed.
+    const message = (o.detail || NO_SAFE_TARGET).slice(0, 1000);
+    const name = `staging Worker rolled back to the previous version (health verified) and forward again (health verified)`;
+    return {
+      runId: o.runId, source: "ci", environment: "staging", commitSha: o.commit, startedAt: o.startedAt, finishedAt: new Date().toISOString(),
+      results: [
+        { requirementId: "TEST-004", testName: `rollback rehearsal: ${name}`, outcome: "skipped", message },
+        { requirementId: "INFRA-005", testName: `rollback automation exercised on staging: ${name}`, outcome: "skipped", message },
+        { requirementId: "INFRA-005", testName: "rollback step: previous version deployed to 100% and healthy", outcome: "skipped", message },
+        { requirementId: "INFRA-005", testName: "roll-forward step: serving version restored and healthy", outcome: "skipped", message },
+      ],
+    };
+  }
   const ok = o.rollback && o.rollforward;
   const msg = (o.detail ?? "").slice(0, 1000);
   const name = `staging Worker rolled back to the previous version (health verified) and forward again (health verified)`;
@@ -77,9 +104,9 @@ export function rehearsalEvidence(o: { commit: string; runId: string; startedAt:
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [mode, a, b] = process.argv.slice(2);
   const arg = (n: string) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : undefined; };
-  if (mode === "pick") { const r = pickRollback(readFileSync(a, "utf8"), readFileSync(b, "utf8")); process.stdout.write(`${r.current} ${r.previous}`); process.stderr.write(r.previousIsOlderCode ? "previous version runs the earlier deployed code\n" : "no trigger annotations: previous version may share the serving code\n"); }
+  if (mode === "pick") { const r = pickRollback(readFileSync(a, "utf8"), readFileSync(b, "utf8")); process.stdout.write(`${r.current} ${r.previous} ${r.secretChanged ? "secret-changed" : "same-secrets"}`); process.stderr.write(r.previousIsOlderCode ? "previous version runs the earlier deployed code\n" : "no trigger annotations: previous version may share the serving code\n"); }
   else if (mode === "evidence") {
     writeFileSync(arg("--out") ?? "evidence/rollback.json", JSON.stringify(rehearsalEvidence({ commit: arg("--commit") ?? "0000000", runId: arg("--run-id") ?? `local-rollback-${Date.now()}`, startedAt: arg("--started") ?? new Date().toISOString(),
-      rollback: arg("--rollback") === "passed", rollforward: arg("--rollforward") === "passed", detail: arg("--detail") })));
+      rollback: arg("--rollback") === "skipped" ? "skipped" : arg("--rollback") === "passed", rollforward: arg("--rollforward") === "skipped" ? "skipped" : arg("--rollforward") === "passed", detail: arg("--detail") })));
   } else { console.error("usage: rollback-rehearsal.ts pick <status.json> <versions.json> | evidence …"); process.exit(2); }
 }
