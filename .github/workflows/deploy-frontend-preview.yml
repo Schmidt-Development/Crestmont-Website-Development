@@ -8,6 +8,16 @@ name: Deploy frontend preview
 #   • the deployed URL must contain "crestmont-platform-frontend-preview" or the run fails.
 # Prerequisites: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID available to the "frontend-preview" GitHub
 # environment (repository-level secrets also work). Without them the run is skipped with a notice.
+#
+# Access (the repository is PUBLIC — workflow artifacts and logs are readable by anyone signed in to GitHub):
+#   • No credential is ever uploaded as an artifact (plain or encrypted) or written to the log.
+#   • FRONTEND_PREVIEW_PASSWORD (secret set by the Founder, ≥ 12 characters) is the preview password.
+#   • FRONTEND_PREVIEW_DEMO_PASSWORD (optional, ≥ 12) is the password of every demo account; if unset, the demo
+#     accounts use FRONTEND_PREVIEW_PASSWORD. Staff demo accounts (Owner included) have no authenticator: two-factor
+#     stays required and is enrolled by the Founder on first sign-in, so no 2FA key ever exists outside the preview.
+#   • Without FRONTEND_PREVIEW_PASSWORD the preview is deployed LOCKED (random values nobody holds) and the run
+#     summary says how to unlock it. Reset = change the secret, then re-run this workflow.
+#   • Every run proves the path on the live preview: preview password → homepage → Owner sign-in → 2FA required.
 
 on:
   push:
@@ -98,17 +108,39 @@ jobs:
           case "$url" in *crestmont-platform-frontend-preview*) ;; *) echo "::error::Unexpected deploy URL '$url' — refusing to continue"; exit 1;; esac
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
-      - name: Preview password (rotated every run)
+      - name: Preview access from the Founder's secrets (nothing printed or uploaded)
+        id: access
+        env:
+          FOUNDER_PREVIEW_PASSWORD: ${{ secrets.FRONTEND_PREVIEW_PASSWORD }}
+          FOUNDER_DEMO_PASSWORD: ${{ secrets.FRONTEND_PREVIEW_DEMO_PASSWORD }}
         run: |
-          pw=$(node -e 'process.stdout.write(require("crypto").randomBytes(18).toString("base64url"))')
-          echo "::add-mask::$pw"
-          printf '%s' "$pw" | $WRANGLER secret put STAGING_ACCESS_PASSWORD --env "$PREVIEW_ENV" > /dev/null
-          mkdir -p access && printf '%s' "$pw" > access/preview-password
+          mkdir -p access
+          rnd() { node -e 'process.stdout.write(require("crypto").randomBytes(24).toString("base64url"))'; }
+          if [ ${#FOUNDER_PREVIEW_PASSWORD} -ge 12 ]; then
+            gate="$FOUNDER_PREVIEW_PASSWORD"; demo="${FOUNDER_DEMO_PASSWORD:-$FOUNDER_PREVIEW_PASSWORD}"
+            if [ ${#demo} -lt 12 ]; then echo "::error title=FRONTEND_PREVIEW_DEMO_PASSWORD too short::Use at least 12 characters, or delete it to reuse FRONTEND_PREVIEW_PASSWORD."; exit 1; fi
+            echo "mode=founder" >> "$GITHUB_OUTPUT"
+            [ -n "$FOUNDER_DEMO_PASSWORD" ] && echo "demo=separate" >> "$GITHUB_OUTPUT" || echo "demo=same" >> "$GITHUB_OUTPUT"
+          else
+            # No usable Founder secret: lock the preview with random values that nobody holds.
+            gate=$(rnd); demo=$(rnd)
+            echo "mode=locked" >> "$GITHUB_OUTPUT"
+            if [ -n "$FOUNDER_PREVIEW_PASSWORD" ]; then echo "::warning title=Frontend preview locked::FRONTEND_PREVIEW_PASSWORD is shorter than 12 characters. Set a longer value and re-run this workflow."
+            else echo "::warning title=Frontend preview locked::Add the secret FRONTEND_PREVIEW_PASSWORD (Settings → Environments → frontend-preview, or a repository secret) and re-run this workflow."; fi
+          fi
+          echo "::add-mask::$gate"; echo "::add-mask::$demo"
+          printf '%s' "$gate" | $WRANGLER secret put STAGING_ACCESS_PASSWORD --env "$PREVIEW_ENV" > /dev/null
+          printf '%s' "$gate" > access/gate; printf '%s' "$demo" > access/demo
 
-      - name: Seed labelled sample data and demo accounts
+      - name: Seed labelled sample data and demo accounts (Founder's demo password; 2FA enrolled at first sign-in)
         run: |
-          node --no-warnings scripts/seed-staging.ts --out seed.sql --credentials access/demo-accounts.md
-          $WRANGLER d1 execute "$PREVIEW_DB" --remote --env "$PREVIEW_ENV" --file seed.sql --yes
+          node --no-warnings scripts/seed-staging.ts --out seed.sql --credentials access/discarded-random-credentials.md > /dev/null
+          rm -f access/discarded-random-credentials.md
+          FRONTEND_PREVIEW_DEMO_PASSWORD="$(cat access/demo)" node --no-warnings scripts/frontend-preview-access.ts --out access/demo-access.sql
+          $WRANGLER d1 execute "$PREVIEW_DB" --remote --env "$PREVIEW_ENV" --file seed.sql --yes > /dev/null
+          $WRANGLER d1 execute "$PREVIEW_DB" --remote --env "$PREVIEW_ENV" --file access/demo-access.sql --yes > /dev/null
+          rm -f access/demo-access.sql
+          echo "Sample data and demo accounts seeded."
 
       - name: Smoke checks
         env:
@@ -130,7 +162,7 @@ jobs:
             if [ "$want" = "$got" ]; then echo "ok   $f $want"; else echo "::error::$f served $got, expected $want"; fail=1; fi
           done
           # Homepage markup through the preview gate (this run's own password; never printed)
-          PW=$(cat access/preview-password)
+          PW=$(cat access/gate)
           # The password was just written as a Worker secret; allow up to ~60 s for it to propagate.
           cookie=""
           for i in $(seq 1 12); do
@@ -146,19 +178,37 @@ jobs:
           [ "$fail" = 0 ] && echo "Hosted preview serves the assets and homepage of ${GITHUB_SHA}." >> "$GITHUB_STEP_SUMMARY"
           exit $fail
 
-      - name: Access notes (private artifact; never in logs)
+      - name: Verify access works on the live preview (preview password → Owner sign-in → 2FA required)
         env:
           BASE: ${{ steps.deploy.outputs.url }}
-        run: |
-          { echo "# Crestmont frontend preview"; echo; echo "- URL: $BASE"; echo "- Preview password: $(cat access/preview-password)";
-            echo "- Branch: ${GITHUB_REF_NAME} @ ${GITHUB_SHA}"; echo; echo "Separate from the shared staging site. Sample data only; the database is recreated on every run."; echo;
-            cat access/demo-accounts.md; } > access/README.md
-          rm -f access/preview-password access/demo-accounts.md
-          echo "### Frontend preview deployed: $BASE" >> "$GITHUB_STEP_SUMMARY"
-          echo "Access details are in the private **frontend-preview-access** artifact of this run." >> "$GITHUB_STEP_SUMMARY"
+        run: PREVIEW_PASSWORD="$(cat access/gate)" DEMO_PASSWORD="$(cat access/demo)" node --no-warnings scripts/frontend-preview-check.ts "$BASE"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: frontend-preview-access
-          path: access/README.md
-          retention-days: 3
+      - name: Access summary (no credentials; nothing is uploaded)
+        if: always() && steps.deploy.outcome == 'success'
+        env:
+          BASE: ${{ steps.deploy.outputs.url }}
+          MODE: ${{ steps.access.outputs.mode }}
+          DEMO: ${{ steps.access.outputs.demo }}
+        run: |
+          rm -rf access
+          {
+            if [ "$MODE" = "founder" ]; then
+              echo "### Frontend preview ready: $BASE"
+              echo
+              echo "Commit \`${GITHUB_SHA}\`. Credentials are never uploaded or logged — this repository is public."
+              echo
+              echo "1. Open $BASE and enter **your \`FRONTEND_PREVIEW_PASSWORD\`** (the secret you set in GitHub)."
+              if [ "$DEMO" = "separate" ]; then pwname="FRONTEND_PREVIEW_DEMO_PASSWORD"; else pwname="FRONTEND_PREVIEW_PASSWORD"; fi
+              echo "2. Optional — dashboards: sign in at $BASE/login as \`owner@crestmont-preview.test\` with your \`$pwname\`."
+              echo "   The first sign-in asks you to set up two-factor authentication: scan the code with your authenticator app."
+              echo "   The preview database is recreated on every run, so remove the old authenticator entry and enrol again after each deploy."
+              echo "3. Other demo accounts use the same password: \`customer.harbor@crestmont-preview.test\`, \`customer.ridgeline@crestmont-preview.test\` (customer portal), \`administrator@\`, \`sales@\`, \`support@\`, \`developer@crestmont-preview.test\` (staff; 2FA set up on first sign-in)."
+              echo
+              echo "**Reset or change the password:** update the secret, then run *Deploy frontend preview* again (Actions → Run workflow)."
+            else
+              echo "### Frontend preview deployed but LOCKED: $BASE"
+              echo
+              echo "No usable \`FRONTEND_PREVIEW_PASSWORD\` secret, so the preview was locked with random values nobody holds. Nothing was uploaded."
+              echo "To open it: add the secret \`FRONTEND_PREVIEW_PASSWORD\` (12+ characters) under Settings → Environments → frontend-preview (or as a repository secret), then run *Deploy frontend preview* again."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

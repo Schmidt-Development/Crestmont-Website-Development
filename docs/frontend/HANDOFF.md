@@ -63,13 +63,26 @@ These are backend-owned decisions. The frontend did not hide them with CSS, beca
   - The subdomain matches the staging account (`partners-df4`). The full hostname is inferred from the deploy convention; it has not been browsed from the build environment.
 - **Database:** its own D1 database `crestmont-frontend-preview`. It is **recreated and reseeded on every run**, using labelled sample data and `.test` demo accounts.
 - **Excluded:** no R2 bucket and no cron triggers, so scheduled jobs never run twice.
-- **Gate:** `PREVIEW_GATE = "required"`, so it fails closed. A new random preview password is generated on every run.
+- **Gate:** `PREVIEW_GATE = "required"`, so it fails closed. The preview password is the Founder's own GitHub secret
+  `FRONTEND_PREVIEW_PASSWORD` (12+ characters). Without it the preview deploys **locked** (random values nobody holds).
 - **Workflow:** `deploy-frontend-preview.yml` runs on pushes to `claude/frontend-redesign` and on manual dispatch.
   - A guard refuses to run if the target Worker or database is anything other than the preview's own.
   - It does **not** use `scripts/staging-access.ts`, which is hard-wired to `--env staging`.
   - Smoke checks: `/api/health` returns 200, `/` returns 401 (the gate), `/assets/app.css` returns 200.
   - Asset check: the sha256 of `app.css`, `app.js`, `nojs.css`, the display font and two illustrations served by the preview must equal the commit's files, and the gated homepage must contain the v3 markers (`class="intro"`, `data-statement`, `data-stages`, `class="bento"`, `data-switch`, `hero-build.webp`).
-- **Access:** each run uploads a private **`frontend-preview-access`** artifact, kept for 3 days. It contains the URL, the preview password and the demo accounts.
+- **Access (public repository — no credential is ever uploaded or logged):**
+  - Preview: open the URL and enter the Founder's `FRONTEND_PREVIEW_PASSWORD`.
+  - Demo accounts (`owner@`, `administrator@`, `sales@`, `support@`, `developer@`, `customer.harbor@`,
+    `customer.ridgeline@crestmont-preview.test`) use `FRONTEND_PREVIEW_DEMO_PASSWORD`, or `FRONTEND_PREVIEW_PASSWORD`
+    when that optional secret is not set (`scripts/frontend-preview-access.ts`).
+  - Staff demo accounts have no authenticator: two-factor stays required and the Founder enrols their own app on first
+    sign-in (`/mfa/setup`). The database is recreated every run, so enrol again after each deploy.
+  - Reset: change the secret, then run *Deploy frontend preview* again.
+  - Every run verifies the path on the live preview (`scripts/frontend-preview-check.ts`): preview password →
+    homepage → Owner sign-in → two-factor required. The run summary states the access steps and never a credential.
+  - History: until run `40606533216` the workflow uploaded plaintext access notes; after the repository became public
+    the Founder had all of them deleted, and those passwords stopped working when the preview database and password
+    were recreated. PR #9 (encrypted notes) is superseded by this approach (no credential artifacts at all).
 - **First run:** Actions run `40499029032` on `1760530` succeeded, including every guard and smoke step.
 - **v3 run:** Actions run `40596685833` on `c60be7d` succeeded, including the byte-for-byte asset check and the homepage markers.
 - **Retiring it:**
