@@ -109,15 +109,12 @@ test("[INFRA-005] production workflow: first release tolerates an empty database
 test("[SEC-004] [INFRA-005] public repository: no workflow uploads plaintext credentials or a database export as an artifact", () => {
   const staging = wf("deploy-staging.yml");
   assert.match(staging, /ACCESS_ARTIFACT_PASSPHRASE: \$\{\{ secrets\.ACCESS_ARTIFACT_PASSPHRASE \}\}/);
-  assert.match(staging, /openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -in access\/README\.md -out access\/staging-access\.md\.enc -pass env:ACCESS_ARTIFACT_PASSPHRASE/);
-  // The plaintext notes are uploaded only from a private repository; a public one without a passphrase gets none.
-  assert.match(staging, /elif \[ "\$REPO_PRIVATE" = "true" \]; then\s*\n\s*echo "upload=plain"/);
-  assert.match(staging, /REPO_PRIVATE: \$\{\{ github\.event\.repository\.private \}\}/);
+  // Sealed with authenticated encryption (AES-256-GCM, scripts/seal-access-notes.ts); without a passphrase nothing is
+  // uploaded, whatever the repository visibility (security remediation 2026-10-28).
+  assert.match(staging, /node --no-warnings scripts\/seal-access-notes\.ts seal --out access\/staging-access\.cmseal \$files/);
+  assert.doesNotMatch(staging, /openssl enc|upload=plain|REPO_PRIVATE/);
   const uploads = [...staging.matchAll(/- uses: actions\/upload-artifact@v4\s*\n\s*if: ([^\n]+)\n[\s\S]*?path: ([^\n]+)/g)].map((m) => [m[1].trim(), m[2].trim()]);
-  assert.deepEqual(uploads, [
-    ["always() && steps.protect.outputs.upload == 'encrypted'", "access/staging-access.md.enc"],
-    ["always() && steps.protect.outputs.upload == 'plain'", "access/README.md"],
-  ]);
+  assert.deepEqual(uploads, [["always() && steps.protect.outputs.upload == 'sealed'", "access/staging-access.cmseal"]]);
   const prod = wf("deploy-production.yml");
   assert.doesNotMatch(prod, /upload-artifact/, "no production artifact at all");
   assert.match(prod, /r2 object put "crestmont-files-production\/_backups\/[^"]+" --file "\$f" --remote/);
