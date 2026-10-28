@@ -89,19 +89,30 @@ smoke-checks the contract above. Each repository needs `CLOUDFLARE_API_TOKEN` an
   is a space-separated list of https origins; unset means posters only.
 - Optional: an R2 binding for the preview, if uploaded screenshots should replace the bundled posters.
 
-## Deployment status and blockers (2026-10-28)
+## Deployment status and blockers (updated 2026-10-28, evening)
 
-| Project | Branch pushed? | Why / what is needed |
-|---|---|---|
-| Glassly Auto Glass | **Yes** (`c1ebeeb`) | Only the demo workflow runs; it stopped at the credentials gate (run 40630447849, nothing deployed). Needs repository secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`: https://github.com/Schmidt-Development/glassly/settings/secrets/actions — then re-run the workflow. |
-| Lansing Car Rentals, LCR Mentorship | No | The repository's Cloudflare Git integrations build feature branches: "Workers Builds: lansing-car-rentals-site-staging" (the shared staging Worker) and Cloudflare Pages branch previews (also Netlify deploy previews). A push could upload a build to shared staging, so it cannot be confirmed safe. |
-| Better Lansing Mechanics | No | "Workers Builds: better-lansing-mechanics-staging" ran for a `claude/*` branch on 2026-10-27, so a push could build onto shared staging. |
+Isolation audit (read-only, `portfolio-demo-isolation-audit.yml`, run 40746359640 with `CLOUDFLARE_AUDIT_TOKEN`):
+every Pages project (paginated, `per_page=10`) and all three Workers Builds triggers were read.
 
-To unblock the held branches, exclude `crestmont/*` from non-production branch builds in Cloudflare for:
+| Project | Cloudflare | Other hosts | Branch | Deploy |
+|---|---|---|---|---|
+| Glassly Auto Glass | ISOLATED (no trigger or Pages project) | Vercel: no status on any non-main push since 2026-09-03 (two branch pushes this week) | pushed `55cbfd1` | waits for `PORTFOLIO_DEMO_CLOUDFLARE_API_TOKEN` |
+| Better Lansing Mechanics | ISOLATED (staging trigger `main` only, production trigger `production` only) | none | pushed `29dfa7b` (no Cloudflare build started) | waits for `PORTFOLIO_DEMO_CLOUDFLARE_API_TOKEN` |
+| Lansing Car Rentals, LCR Mentorship | ISOLATED (staging trigger selects only `claude/session-2026-10-21`; Pages previews off) | Netlify `astonishing-sawine-f80069`: settings unread (needs `NETLIFY_AUTH_TOKEN`) | held locally (`964831d`, `31cb794`) | after the Netlify check, then the demo token |
 
-- Workers & Pages → lansing-car-rentals-site-staging → Settings → Build → Branch control
-- the lansing-car-rentals Pages project
-- better-lansing-mechanics-staging
-- Netlify site astonishing-sawine-f80069 → Branches and deploy contexts
+Credentials:
 
-Alternatively, confirm those settings already exclude these branches. Then add the same two secrets to each repository and push the preserved branches (bundles and patches are kept with the handoff). A Cloudflare API token for the demos should be limited to **Workers Scripts: Edit** and **D1: Edit** on the account. It needs no zone, DNS, Pages or route permissions.
+- `PORTFOLIO_DEMO_CLOUDFLARE_API_TOKEN` — a dedicated token (Account › Workers Scripts › Edit, Account › D1 › Edit; no zone
+  permissions) available to glassly, better-lansing-mechanics and lansing-car-rentals (an organization secret shared
+  with the three is simplest). The demo workflows deliberately do **not** use a repository's `CLOUDFLARE_API_TOKEN`
+  (better-lansing-mechanics' is its production backup token); each refuses a token that is inactive or can see zones.
+  The account ID falls back to `CLOUDFLARE_ACCOUNT_ID` or is inferred by Wrangler.
+- `NETLIFY_AUTH_TOKEN` (Crestmont repository, read-only use) — lets the audit read the Netlify site's branch-deploy
+  settings. Until then lansing-car-rentals stays UNVERIFIED and its branches are not pushed.
+
+After a demo deploys, the next frontend-preview deploy verifies it from the runner (`/__demo/info` and
+`frame-ancestors`) before marking it ready; the hosted browser stage then drives it inside the explorer (scroll
+containment by wheel and touch, navigation, reset, device controls, simulated transaction).
+
+Demo kit fix (all four branches): framed, `scrollIntoView`, `focus` and in-page links scroll only the demo's own
+document. Before, Glassly's in-page quote link also scrolled the Crestmont page around the frame.

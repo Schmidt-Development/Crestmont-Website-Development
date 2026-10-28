@@ -33,21 +33,9 @@ Recordings and screenshots: artifact `frontend-preview-browser` on run 406568778
 
 Tests: **411 unit tests passing** (after the review fixes). The local e2e and visual sweep also pass.
 
-## 3. Portfolio demos — status: BLOCKED (screenshot fallbacks in use)
+## 3. Portfolio demos — status: BLOCKED on credentials (screenshot fallbacks in use)
 
-| Demo | Branch | State | Exact restriction |
-|---|---|---|---|
-| Glassly | `crestmont/portfolio-demo` | pushed (c1ebeeb); not deployed | `CLOUDFLARE_API_TOKEN` (Workers Scripts Edit + D1 Edit) and `CLOUDFLARE_ACCOUNT_ID` missing at https://github.com/Schmidt-Development/glassly/settings/secrets/actions |
-| Lansing Car Rentals (rentals, mentorship) | `crestmont/portfolio-demo-rentals`, `-mentorship` | local only (a707c26, 54c6e80) | Isolation unverified: Workers Builds / Pages / Netlify Git integrations exist, and the audit cannot read them |
-| Better Lansing Mechanics | `crestmont/portfolio-demo` | local only (e5a9948) | same as above |
-
-The isolation audit (latest re-run of 40646972719) returns **UNVERIFIED**:
-- 6 Worker build configurations are unreadable (the token needs *Workers CI: Read*);
-- Pages listing returns 403 (needs *Cloudflare Pages: Read*).
-
-To unblock, add `CLOUDFLARE_AUDIT_TOKEN` (Workers CI Read, Pages Read, Workers Scripts Read) at https://github.com/Schmidt-Development/Crestmont-Website-Development/settings/secrets/actions, then re-run "Portfolio demo isolation audit". The demo branches are pushed only if the verdict is ISOLATED.
-
-Netlify cannot be audited with Cloudflare tokens; confirm branch deploys are off for these branches in Netlify. Recovery bundles of all branches have been delivered. The "unavailable" messaging stays until hosted demos are verified.
+Superseded by the follow-up below and by the status table in `PORTFOLIO.md`.
 
 ## 4. Pricing audit and commercial decisions to confirm
 
@@ -101,3 +89,37 @@ The following were not touched:
 - the production and shared staging sites of the four businesses.
 
 No secrets were committed or printed. Only `claude/frontend-redesign` (Crestmont) and the Glassly demo branch were pushed.
+
+## Follow-up (2026-10-28 evening): Glassly frame, About diagram, demo unblocking
+
+**Fixed**
+- *Glassly in the main explorer:* the explorer chose the device from the frame's width, so on 1000–1200px laptops the
+  homepage/portfolio frames (narrower than the case-study frame) switched to the tablet layout; Glassly's full-bleed
+  cover-video hero then appeared as an enlarged portrait crop. The device now follows the visitor's viewport, and
+  desktop renderings keep the 16:10 frame at every width (no gap below the screenshot). Posters were confirmed genuine
+  against the demo build.
+- *About capability diagram:* nodes are placed from their complete bounds (label, selected ring, focus ring), kept
+  inside the panel and clear of the core and each other; below ~380px the diagram stacks; connectors are redrawn from
+  the final centres on resize. No clipping is used; without JavaScript the capabilities are a plain list.
+- *Isolation audit:* Pages listing paginated (`per_page=10`, every page; the 400 was `per_page=100`); errors classified
+  (400 invalid request vs 401/403 auth/permission vs network); per-repository verdicts; optional Netlify settings check.
+- *Demo credentials:* demo workflows use only a dedicated `PORTFOLIO_DEMO_CLOUDFLARE_API_TOKEN` and refuse a token that
+  is inactive or can see zones (better-lansing-mechanics' `CLOUDFLARE_API_TOKEN` is its production backup token).
+- *Demo kit (all four):* framed demos keep `scrollIntoView`, `focus` and in-page links inside their own document — the
+  explorer check found Glassly's in-page link scrolling the Crestmont page.
+
+**Hosted verification** — deploy run 40757361020 (commit dd5483a): **176 of 176 checks passed** at 1440 desktop, 1180
+laptop, 820 touch tablet, 390 phone and reduced motion: every explorer location and project frame (full width, arrows
+outside the frame, honest state), the About diagram's six selections at four sizes plus keyboard, pages, pricing,
+receptionist, assistant and contact. The demos show the screenshot fallback ("no-demo") because none is deployed.
+
+**Locally verified against all four demos (154 checks):** interactive state after the origin-checked handshake;
+wheel and finger-swipe scrolling to the end and past both boundaries with Crestmont stationary; scrolling outside
+the explorer; internal navigation staying in the demo; forged messages ignored; Reset; 390/820/1440 device controls;
+and each simulated transaction inside the frame with Crestmont stationary (LCR application → call booked; mentorship
+booking → simulated checkout → confirmation → captured emails; Glassly instant quote → quote page; BLM wizard →
+simulated checkout → confirmed booking). The same checks run on the hosted preview as soon as demos are deployed.
+
+**Demo status:** Glassly and BLM — isolation verified, branches pushed, deploy waits for
+`PORTFOLIO_DEMO_CLOUDFLARE_API_TOKEN`. Lansing Car Rentals and Mentorship — Cloudflare isolated; Netlify settings
+unread (needs `NETLIFY_AUTH_TOKEN`); branches held locally.
