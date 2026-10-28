@@ -62,6 +62,11 @@ export async function postMessage(ctx: AppContext, input: {
   if (body.length < 1) throw new MessageError("Write a message before sending.");
   if (body.length > 10_000) throw new MessageError("Messages are limited to 10,000 characters.");
   if (input.internal && !input.fromStaff) throw new HttpError(403, "Only staff can write internal notes.");
+  // Files belong to the customer organization and appear in its portal file list, so an attachment on an
+  // internal note would be visible to (and downloadable by) the customer. Refuse instead of leaking it.
+  if (input.internal && input.attachment && input.attachment.size > 0) {
+    throw new MessageError("Internal notes cannot carry attachments: uploaded files are visible to the customer. Post the note without the file.");
+  }
   let attachmentId: string | null = null;
   if (input.attachment && input.attachment.size > 0) {
     try {

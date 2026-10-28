@@ -30,6 +30,18 @@ export const STEP_UP_ROUTES: Readonly<Record<string, string>> = {
   "POST /mfa/setup": "authenticator change",
   // Data exports that are not file-named (the rest are matched by isDataExport)
   "POST /account/privacy/export": "personal data export",
+  // Added by the security readiness review (2026-10-28): irreversible data deletion, retention periods,
+  // Founder-protected pricing and tax settings, and membership changes not covered above.
+  "POST /staff/privacy/:id/process": "privacy deletion (anonymisation)",
+  "POST /staff/ops/retention": "data retention periods",
+  "POST /staff/pricing/:id/decide": "price change decision",
+  "POST /staff/settings/tax": "tax configuration",
+  "POST /staff/settings/tax/jurisdictions": "tax jurisdictions",
+  "POST /staff/employees/invitations/:id/revoke": "staff invitation revoke",
+  // Customer team changes (applies only to customers who enabled two-factor authentication)
+  "POST /portal/team": "customer team invitation",
+  "POST /portal/team/members/:userId/role": "customer role change",
+  "POST /portal/team/members/:userId/remove": "customer member removal",
 };
 
 /** Bulk data exports: CSV/JSON/Markdown downloads, finance report files, and ?format=csv views of staff pages. */

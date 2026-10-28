@@ -297,7 +297,9 @@ test("[AUTH-003] [EMP-002] every step-up action is refused without a recent MFA 
     }
   } finally { restore(); }
   assert.deepEqual(problems, []);
-  for (const k of Object.keys(STEP_UP_ROUTES).filter((k) => !k.includes("/mfa/setup"))) assert.ok(refused.includes(k), `${k} was exercised`);
+  // Customer routes (/portal/*) step up only for customers who enabled MFA; the world's customers have none, so those
+  // keys are exercised with an MFA-enabled customer in tests/security-readiness.test.ts [AUTH-008].
+  for (const k of Object.keys(STEP_UP_ROUTES).filter((k) => !k.includes("/mfa/setup") && !k.includes(" /portal/"))) assert.ok(refused.includes(k), `${k} was exercised`);
   assert.ok(refused.length >= 30, `exercised ${refused.length} step-up actions`);
   // Exports selected by ?format=csv on a page route.
   const o = w.staff.owner;
