@@ -88,11 +88,11 @@ async function insertBooking(db: Db, row: Omit<ConsultationRow, "confirmation_co
   throw new Error("Could not allocate a confirmation code");
 }
 
-export interface BookInput { name: string; phone: string; email?: string | null; startsAt: string; topic?: string | null; leadId: string | null; callId: string | null; isTest: boolean; source: "ai_receptionist" | "staff" }
+export interface BookInput { name: string; phone: string; email?: string | null; startsAt: string; topic?: string | null; leadId: string | null; callId: string | null; isTest: boolean; source: "ai_receptionist" | "staff"; checkExisting?: boolean }
 
 /** Books a slot. A caller who already holds an upcoming booking gets it back instead of a second one. */
 export async function book(db: Db, cfg: VoiceConfig, at: Date, cal: CalendarAdapter, b: BookInput): Promise<{ booking: ConsultationRow; existing: boolean }> {
-  const mine = (await db.prepare(`SELECT * FROM consultations WHERE status IN ('requested','confirmed') AND starts_at > ? AND phone IS NOT NULL`).bind(at.toISOString()).all<ConsultationRow>()).results
+  const mine = b.checkExisting === false ? undefined : (await db.prepare(`SELECT * FROM consultations WHERE status IN ('requested','confirmed') AND starts_at > ? AND phone IS NOT NULL`).bind(at.toISOString()).all<ConsultationRow>()).results
     .find((r) => digits(r.phone).length >= 7 && digits(r.phone) === digits(b.phone));
   if (mine) return { booking: mine, existing: true };
   await assertBookable(db, cfg, at, cal, b.startsAt);
@@ -117,20 +117,29 @@ export async function findVerified(db: Db, code: string, phone: string): Promise
 export async function reschedule(db: Db, cfg: VoiceConfig, at: Date, cal: CalendarAdapter, current: ConsultationRow, newStartsAt: string, actor: { kind: "ai" | "user"; userId?: string }): Promise<ConsultationRow> {
   if (Date.parse(current.starts_at) <= at.getTime()) throw new SlotUnavailableError("This consultation has already started");
   await assertBookable(db, cfg, at, cal, newStartsAt, current.id);
-  // Free the old slot first (the unique index would otherwise block a move to an adjacent overlapping start),
-  // then claim the new one; if the claim fails the old booking is restored.
-  await db.prepare(`UPDATE consultations SET status = 'cancelled', cancel_reason = 'rescheduled', updated_at = ? WHERE id = ?`).bind(nowIso(), current.id).run();
-  try {
-    const next = await insertBooking(db, {
-      ...current, id: newId("cns"), starts_at: new Date(Date.parse(newStartsAt)).toISOString(), duration_minutes: cfg.scheduling.duration_minutes,
-      timezone: cfg.timezone!, status: cfg.scheduling.auto_confirm ? "confirmed" : "requested", rescheduled_from: current.id,
-    });
-    await audit(db, { actorKind: actor.kind, actorUserId: actor.userId ?? null, action: "consultation.rescheduled", subjectType: "consultation", subjectId: next.id, details: { from: current.id } });
-    return next;
-  } catch (e) {
-    await db.prepare(`UPDATE consultations SET status = ?, cancel_reason = NULL, updated_at = ? WHERE id = ?`).bind(current.status, nowIso(), current.id).run();
-    throw e;
+  // One transaction: free the old slot and claim the new one. If the new slot is taken the whole batch rolls
+  // back, so the original booking can never be lost to a concurrent booking of the freed slot.
+  const stamp = nowIso();
+  const status: ConsultationStatus = cfg.scheduling.auto_confirm ? "confirmed" : "requested";
+  const startsAt = new Date(Date.parse(newStartsAt)).toISOString();
+  for (let i = 0; i < 5; i++) {
+    const id = newId("cns"), code = newConfirmationCode();
+    try {
+      await db.batch([
+        db.prepare(`UPDATE consultations SET status = 'cancelled', cancel_reason = 'rescheduled', updated_at = ? WHERE id = ? AND status IN ('requested','confirmed')`).bind(stamp, current.id),
+        db.prepare(`INSERT INTO consultations (id, lead_id, call_id, name, phone, email, starts_at, duration_minutes, timezone, status, confirmation_code, topic, source, is_test, rescheduled_from, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id, current.lead_id, current.call_id, current.name, current.phone, current.email, startsAt, cfg.scheduling.duration_minutes, cfg.timezone!, status, code, current.topic, current.source, current.is_test, current.id, stamp, stamp),
+      ]);
+      await audit(db, { actorKind: actor.kind, actorUserId: actor.userId ?? null, action: "consultation.rescheduled", subjectType: "consultation", subjectId: id, details: { from: current.id } });
+      return { ...current, id, starts_at: startsAt, duration_minutes: cfg.scheduling.duration_minutes, timezone: cfg.timezone!, status, confirmation_code: code, rescheduled_from: current.id, created_at: stamp };
+    } catch (e) {
+      const msg = String((e as Error).message);
+      if (/consultations\.starts_at|uq_consultations_active_slot/i.test(msg)) throw new SlotUnavailableError("That time was just taken");
+      if (/confirmation_code/i.test(msg)) continue;
+      throw e;
+    }
   }
+  throw new Error("Could not allocate a confirmation code");
 }
 
 export async function cancel(db: Db, current: ConsultationRow, reason: string, actor: { kind: "ai" | "user"; userId?: string }): Promise<void> {

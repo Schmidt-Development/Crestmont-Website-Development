@@ -53,35 +53,52 @@ export async function voiceAnalytics(db: Db, since: Date): Promise<VoiceAnalytic
   };
 }
 
-const digits = (s: string | null | undefined) => (s ?? "").replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
+const digits = (s: string) => s.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
 
 /**
  * Erases receptionist data about one phone number for a caller who is not an account holder (account
  * holders use the existing privacy request flow). Clears transcripts, recordings, summaries and the number
  * on calls; anonymises consultations and contacts the receptionist created; deletes call consents and
- * finished outbound requests and cancels pending ones. The do-not-call entry is KEPT: honouring an opt-out
- * requires remembering the number. Call outcomes, timings and costs remain for reporting.
+ * outbound requests; scrubs receptionist-written lead text, CRM notes and notifications about them. The
+ * do-not-call entry is KEPT (without its note): honouring an opt-out requires remembering the number. Call
+ * outcomes, timings and costs remain for reporting, and outbound calls keep the dialled number so per-number
+ * call limits still apply.
  */
 export async function eraseCallerData(db: Db, staffUserId: string, phoneRaw: string, note: string): Promise<Record<string, number>> {
   const phone = toE164(phoneRaw);
   if (!phone) throw Object.assign(new Error("Enter the caller's number in a dialable format (e.g. +15551234567)"), { status: 422 });
   if (note.trim().length < 5) throw Object.assign(new Error("Describe the request (who asked, and how)"), { status: 422 });
   const d = digits(phone);
-  const callIds = (await db.prepare(`SELECT id, from_number, to_number, direction FROM calls WHERE from_number IS NOT NULL OR to_number IS NOT NULL`).all<{ id: string; from_number: string | null; to_number: string | null; direction: string }>()).results
-    .filter((c) => digits(c.direction === "outbound" ? c.to_number : c.from_number) === d).map((c) => c.id);
-  const consultationIds = (await db.prepare(`SELECT id, phone FROM consultations WHERE phone IS NOT NULL`).all<{ id: string; phone: string }>()).results.filter((r) => digits(r.phone) === d).map((r) => r.id);
-  const contactIds = (await db.prepare(`SELECT c.id, c.phone FROM contacts c JOIN leads l ON l.contact_id = c.id WHERE l.source = 'ai_receptionist' AND c.user_id IS NULL AND c.phone IS NOT NULL`).all<{ id: string; phone: string }>()).results
-    .filter((r) => digits(r.phone) === d).map((r) => r.id);
+  // Number matching in SQL (no full-table reads): strip common separators, compare 10-digit forms.
+  const norm = (col: string) => `(CASE WHEN length(x) = 11 AND substr(x,1,1) = '1' THEN substr(x,2) ELSE x END)`.replace(/x/g,
+    `replace(replace(replace(replace(replace(replace(COALESCE(${col},''),' ',''),'-',''),'(',''),')',''),'.',''),'+','')`);
+  const ids = async (sql: string) => (await db.prepare(sql).bind(d).all<{ id: string }>()).results.map((r) => r.id);
+  const callIds = await ids(`SELECT id FROM calls WHERE ${norm("CASE WHEN direction = 'outbound' THEN to_number ELSE from_number END")} = ?`);
+  const consultationIds = await ids(`SELECT id FROM consultations WHERE ${norm("phone")} = ?`);
+  const contactIds = await ids(`SELECT c.id FROM contacts c JOIN leads l ON l.contact_id = c.id WHERE l.source = 'ai_receptionist' AND c.user_id IS NULL AND ${norm("c.phone")} = ?`);
+  const outboundIds = (await db.prepare(`SELECT id FROM voice_outbound_requests WHERE phone_e164 = ?`).bind(phone).all<{ id: string }>()).results.map((r) => r.id);
+  const leadIds = [...new Set([
+    ...(contactIds.length ? (await db.prepare(`SELECT id FROM leads WHERE contact_id IN (${contactIds.map(() => "?").join(",")})`).bind(...contactIds).all<{ id: string }>()).results.map((r) => r.id) : []),
+    ...(callIds.length ? (await db.prepare(`SELECT lead_id AS id FROM calls WHERE lead_id IS NOT NULL AND id IN (${callIds.map(() => "?").join(",")})`).bind(...callIds).all<{ id: string }>()).results.map((r) => r.id) : []),
+  ])];
   const at = nowIso();
+  const inList = (n: number) => Array.from({ length: n }, () => "?").join(",");
+  const subjects = [...callIds, ...consultationIds, ...outboundIds];
   const stmts = [
+    // Call outcome, timing, cost and the counted number stay (per-number outbound caps and the DNC list need it
+    // for outbound calls); transcripts, recordings, summaries and the caller's inbound number go.
     ...callIds.map((id) => db.prepare(`UPDATE calls SET transcript = NULL, recording_url = NULL, summary = NULL,
-        from_number = CASE WHEN direction = 'inbound' THEN NULL ELSE from_number END, to_number = CASE WHEN direction = 'outbound' THEN NULL ELSE to_number END WHERE id = ?`).bind(id)),
+        from_number = CASE WHEN direction = 'inbound' THEN NULL ELSE from_number END WHERE id = ?`).bind(id)),
     ...consultationIds.map((id) => db.prepare(`UPDATE consultations SET name = 'Deleted contact', phone = NULL, email = NULL, topic = NULL, updated_at = ? WHERE id = ?`).bind(at, id)),
     ...contactIds.map((id) => db.prepare(`UPDATE contacts SET name = 'Deleted contact', email = NULL, phone = NULL WHERE id = ?`).bind(id)),
-    // Order matters: detach outbound requests from consents and consultations before deleting what they reference.
-    db.prepare(`UPDATE voice_outbound_requests SET status = 'cancelled', status_detail = 'Caller data erased', updated_at = ? WHERE phone_e164 = ? AND status IN ('pending_approval','approved')`).bind(at, phone),
+    // Receptionist-written CRM text quotes names and numbers: replace it on this caller's receptionist leads.
+    ...leadIds.map((id) => db.prepare(`UPDATE leads SET message = 'Details erased at the caller''s request' WHERE id = ? AND source = 'ai_receptionist'`).bind(id)),
+    ...leadIds.map((id) => db.prepare(`UPDATE crm_activities SET body = 'Details erased at the caller''s request' WHERE lead_id = ? AND kind IN ('call','task') AND lead_id IN (SELECT id FROM leads WHERE source = 'ai_receptionist')`).bind(id)),
+    ...(subjects.length ? [db.prepare(`DELETE FROM notifications WHERE subject_id IN (${inList(subjects.length)})`).bind(...subjects)] : []),
+    db.prepare(`UPDATE voice_dnc SET detail = NULL WHERE phone_e164 = ?`).bind(phone),
+    // Order matters: detach outbound requests from consents before deleting them.
     db.prepare(`UPDATE voice_outbound_requests SET consent_id = NULL WHERE phone_e164 = ? OR consent_id IN (SELECT id FROM voice_call_consents WHERE phone_e164 = ?)`).bind(phone, phone),
-    db.prepare(`DELETE FROM voice_outbound_requests WHERE phone_e164 = ? AND status NOT IN ('dialing')`).bind(phone),
+    db.prepare(`DELETE FROM voice_outbound_requests WHERE phone_e164 = ?`).bind(phone),
     db.prepare(`DELETE FROM voice_call_consents WHERE phone_e164 = ?`).bind(phone),
   ];
   await db.batch(stmts);

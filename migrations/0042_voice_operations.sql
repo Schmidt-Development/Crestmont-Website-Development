@@ -87,7 +87,8 @@ CREATE TABLE voice_outbound_requests (
   requested_by TEXT REFERENCES users(id),  -- NULL = created by the platform (e.g. a caller's callback request)
   approved_by TEXT REFERENCES users(id),
   approved_at TEXT,
-  attempts INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0,      -- calls Retell confirmed it created; the idempotency key advances only with this
+  transient_failures INTEGER NOT NULL DEFAULT 0 CHECK (transient_failures >= 0), -- timeouts/429/5xx runs (same key reused)
   max_attempts INTEGER NOT NULL DEFAULT 2 CHECK (max_attempts BETWEEN 1 AND 3),
   next_attempt_at TEXT,
   provider_call_id TEXT,

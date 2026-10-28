@@ -32,7 +32,7 @@ export function outboundGate(env: Pick<Env, "RETELL_API_KEY" | "RETELL_OUTBOUND"
 export interface OutboundRow {
   id: string; purpose: OutboundPurpose; phone_e164: string; contact_name: string | null; reason: string; lead_id: string | null;
   consultation_id: string | null; consent_id: string | null; status: string; status_detail: string | null; requested_by: string | null;
-  approved_by: string | null; attempts: number; max_attempts: number; next_attempt_at: string | null; provider_call_id: string | null;
+  approved_by: string | null; attempts: number; transient_failures: number; max_attempts: number; next_attempt_at: string | null; provider_call_id: string | null;
   idempotency_key: string; is_test: number; created_at: string;
 }
 
@@ -88,6 +88,8 @@ export async function requestOutbound(db: Db, i: OutboundInput): Promise<Outboun
   if (!(OUTBOUND_PURPOSES as readonly string[]).includes(i.purpose)) throw new OutboundError("Unsupported call purpose");
   const phone = toE164(i.phone);
   if (!phone) throw new OutboundError("Enter the number in a dialable format (E.164, e.g. +15551234567)");
+  // Calling-window rules assume US time zones, and Retell-purchased numbers dial US destinations only.
+  if (!phone.startsWith("+1")) throw new OutboundError("Outbound calls are limited to US/Canada (+1) numbers");
   const reason = i.reason.trim();
   if (reason.length < 3 || reason.length > 1000) throw new OutboundError("Describe why the call is being made (3–1000 characters)");
   if (i.consentEvidence && i.consentEvidence.trim().length >= 5) await recordCallConsent(db, phone, i.purpose, "staff_recorded", i.consentEvidence.trim(), i.requestedBy);
@@ -153,6 +155,10 @@ export async function eligibility(db: Db, cfg: VoiceConfig, row: OutboundRow, at
 
 // ───────────── Queue processing (scheduled job "voice_outbound") ─────────────
 
+/** A dial with no call result after this long is treated as lost (Retell calls are capped at hours, results arrive in minutes). */
+export const STALE_DIALING_MS = 3 * 3_600_000;
+const MAX_TRANSIENT_FAILURES = 3;
+
 export interface OutboundDeps { db: Db; env: Pick<Env, "RETELL_API_KEY" | "RETELL_OUTBOUND" | "ENVIRONMENT">; fetch: typeof fetch; now?: () => Date; sleep?: (ms: number) => Promise<void> }
 
 async function failToHuman(db: Db, row: OutboundRow, status: "failed" | "no_answer" | "blocked", detail: string) {
@@ -167,6 +173,11 @@ export async function processOutboundQueue(d: OutboundDeps): Promise<{ detail: s
   const cfg = await loadVoiceConfig(d.db);
   const gate = outboundGate(d.env, cfg);
   if (!gate.enabled) return { detail: `skipped: outbound disabled (${gate.reasons.join("; ")})`, dialled: 0 };
+  // Recovery: a request whose call result never arrived (lost webhook, Worker stopped after the claim) is handed
+  // to a person rather than staying in 'dialing' for ever. It is never re-dialled automatically.
+  const stale = (await d.db.prepare(`SELECT * FROM voice_outbound_requests WHERE status = 'dialing' AND updated_at < ?`)
+    .bind(new Date(now().getTime() - STALE_DIALING_MS).toISOString()).all<OutboundRow>()).results;
+  for (const row of stale) await failToHuman(d.db, row, "failed", "no call result was received from Retell; check the Retell call log before calling again");
   const due = (await d.db.prepare(`SELECT * FROM voice_outbound_requests WHERE status = 'approved' AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY created_at LIMIT 5`)
     .bind(now().toISOString()).all<OutboundRow>()).results;
   let dialled = 0;
@@ -199,16 +210,22 @@ export async function processOutboundQueue(d: OutboundDeps): Promise<{ detail: s
       const at = now().toISOString();
       await d.db.batch([
         d.db.prepare(`UPDATE voice_outbound_requests SET provider_call_id = ?, status_detail = NULL, next_attempt_at = NULL, updated_at = ? WHERE id = ?`).bind(res.callId, at, row.id),
+        // call_started may already have created the row (webhooks can beat this response): link it either way.
         d.db.prepare(`INSERT INTO calls (id, provider, provider_call_id, from_number, to_number, direction, recording_consent, started_at, is_test, environment, outbound_request_id, lead_id, created_at)
-            VALUES (?, 'retell', ?, ?, ?, 'outbound', 0, ?, ?, ?, ?, ?, ?) ON CONFLICT(provider, provider_call_id) DO NOTHING`)
+            VALUES (?, 'retell', ?, ?, ?, 'outbound', 0, ?, ?, ?, ?, ?, ?) ON CONFLICT(provider, provider_call_id) DO UPDATE SET
+              outbound_request_id = COALESCE(calls.outbound_request_id, excluded.outbound_request_id), direction = 'outbound',
+              to_number = COALESCE(calls.to_number, excluded.to_number), lead_id = COALESCE(calls.lead_id, excluded.lead_id),
+              environment = COALESCE(calls.environment, excluded.environment), is_test = MAX(calls.is_test, excluded.is_test)`)
           .bind(newId("call"), res.callId, cfg.outbound.from_number, row.phone_e164, at, row.is_test, d.env.ENVIRONMENT, row.id, row.lead_id, at),
       ]);
       await audit(d.db, { actorKind: "system", action: "voice.outbound_dialled", subjectType: "voice_outbound_request", subjectId: row.id, details: { attempt } });
       dialled++;
-    } else if (res.retryable && attempt < row.max_attempts) {
-      await d.db.prepare(`UPDATE voice_outbound_requests SET status = 'approved', status_detail = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
-        .bind(res.error, new Date(now().getTime() + 30 * 60_000).toISOString(), nowIso(), row.id).run();
-      notes.push(`${row.id}: ${res.error} (will retry)`);
+    } else if (res.retryable && row.transient_failures + 1 < MAX_TRANSIENT_FAILURES) {
+      // Transient (timeout/429/5xx): Retell may or may not have created the call, so the attempt number and
+      // therefore the idempotency key stay the same. A retry with that key can never place a second call.
+      await d.db.prepare(`UPDATE voice_outbound_requests SET status = 'approved', attempts = ?, transient_failures = transient_failures + 1, status_detail = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
+        .bind(row.attempts, res.error, new Date(now().getTime() + 30 * 60_000).toISOString(), nowIso(), row.id).run();
+      notes.push(`${row.id}: ${res.error} (will retry with the same idempotency key)`);
     } else {
       await failToHuman(d.db, row, "failed", res.error);
       notes.push(`${row.id}: ${res.error}`);
@@ -223,7 +240,7 @@ const NO_ANSWER = new Set(["dial_no_answer", "dial_busy", "voicemail_reached", "
 const UNREACHABLE = new Set(["dial_failed", "invalid_destination", "telephony_provider_permission_denied", "telephony_provider_unavailable", "sip_routing_error", "marked_as_spam", "network_blocked"]);
 
 /** Applies the outcome of an outbound call. Idempotent: only a request still in 'dialing' is changed. */
-export async function applyOutboundResult(db: Db, requestId: string, disconnectionReason: string | null, costMicroUsd: number | null): Promise<string | null> {
+export async function applyOutboundResult(db: Db, requestId: string, disconnectionReason: string | null, costMicroUsd: number | null, at: Date = new Date()): Promise<string | null> {
   const row = await getOutbound(db, requestId);
   if (!row || row.status !== "dialing") return null;
   const reason = disconnectionReason ?? "";
@@ -237,7 +254,7 @@ export async function applyOutboundResult(db: Db, requestId: string, disconnecti
     if (row.attempts < row.max_attempts) {
       // Spaced well apart; eligibility re-checks the window and caps when it comes due.
       await db.prepare(`UPDATE voice_outbound_requests SET status = 'approved', status_detail = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
-        .bind(`No answer (${reason}); one more attempt later`, new Date(Date.now() + 4 * 3_600_000).toISOString(), nowIso(), row.id).run();
+        .bind(`No answer (${reason}); one more attempt later`, new Date(at.getTime() + 4 * 3_600_000).toISOString(), nowIso(), row.id).run();
       return "approved";
     }
     await failToHuman(db, row, "no_answer", `no answer after ${row.attempts} attempt(s) (${reason})`);

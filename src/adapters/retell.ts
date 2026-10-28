@@ -19,7 +19,7 @@ import { nowIso } from "../lib/db.ts";
 import { hmacSha256Hex, sha256Hex, timingSafeEqualHex } from "../lib/crypto.ts";
 import { VOICE_FUNCTIONS, ensureCall, recordCallEvent, type CallOutcome } from "../services/voice.ts";
 import { loadVoiceConfig, hoursStatus, transferAvailability, describeHours } from "../services/voice-settings.ts";
-import { addLeadTask, notifyOwners } from "../services/voice-common.ts";
+import { addLeadTask, notifyOwners, redactSensitive } from "../services/voice-common.ts";
 import { audit } from "../services/security.ts";
 
 /** Environment the request is being processed in (env.ENVIRONMENT). */
@@ -62,7 +62,7 @@ const callIdOf = (call: Obj): string => {
 export class RetellPayloadError extends Error {}
 
 /** Web calls are Retell dashboard / web-SDK test calls; a phone call can also be flagged via metadata. */
-const isTest = (call: Obj) => str(call, "call_type") === "web_call" || obj(call.metadata).crestmont_test === true;
+const isTest = (call: Obj) => { const t = obj(call.metadata).crestmont_test; return str(call, "call_type") === "web_call" || t === true || t === "true"; };
 
 /** Combined cost is reported in cents (possibly fractional) → integer micro-USD; anything else → unknown (null). */
 export function retellCostMicroUsd(call: Obj): number | null {
@@ -124,6 +124,7 @@ export async function translateRetellEvent(db: Db, raw: string, ctx: RetellCtx):
   const base = {
     provider: RETELL_PROVIDER, call_id: callId, test: isTest(call), from_number: str(call, "from_number"), to_number: str(call, "to_number"),
     direction: str(call, "direction") === "outbound" ? "outbound" : "inbound", environment: str(obj(call.metadata), "crestmont_env"),
+    outbound_request_id: str(obj(call.metadata), "crestmont_outbound_request_id"),
   };
   if (event && TRANSFER_EVENTS.has(event)) return transferEvent(db, event, call, callId, base);
   switch (event) {
@@ -142,8 +143,11 @@ export async function translateRetellEvent(db: Db, raw: string, ctx: RetellCtx):
     case "call_analyzed": {
       // call_ended already closed the call in the voice service; analysis only fills two fields that
       // call_ended does not carry. The summary is written only when the call row records consent.
-      const summary = str(obj(call.call_analysis), "call_summary")?.slice(0, 4000) ?? null;
+      const raw = str(obj(call.call_analysis), "call_summary");
+      const summary = raw === undefined ? null : redactSensitive(raw.slice(0, 4000));
       const cost = retellCostMicroUsd(call);
+      // Outbound cost often arrives only with the analysis; record it once on the request.
+      if (cost !== null) await db.prepare(`UPDATE voice_outbound_requests SET cost_microusd = ? WHERE cost_microusd IS NULL AND id = (SELECT outbound_request_id FROM calls WHERE provider = ? AND provider_call_id = ?)`).bind(cost, RETELL_PROVIDER, callId).run();
       const res = await db.prepare(`UPDATE calls SET summary = CASE WHEN recording_consent = 1 AND summary IS NULL THEN ? ELSE summary END,
           cost_microusd = COALESCE(cost_microusd, ?) WHERE provider = ? AND provider_call_id = ?`).bind(summary, cost, RETELL_PROVIDER, callId).run();
       return { kind: "ack", body: { ok: true, applied: res.meta.changes === 1 } };

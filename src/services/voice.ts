@@ -37,6 +37,8 @@ export const VOICE_FUNCTIONS = ["get_published_pricing", "create_lead", "request
   "lookup_consultation", "reschedule_consultation", "cancel_consultation", "record_opt_out"] as const;
 export type VoiceFunction = (typeof VOICE_FUNCTIONS)[number];
 
+const READ_ONLY = new Set<VoiceFunction>(["get_published_pricing", "get_business_hours", "check_transfer_availability", "check_consultation_availability"]);
+
 /** Optional collaborators for handleVoiceEvent. Every one has a safe default (no mail, real clock, no calendar). */
 export interface VoiceDeps {
   mail?: MailerCtx;
@@ -108,18 +110,21 @@ const digits = (s: string | null | undefined) => (s ?? "").replace(/\D/g, "").re
 interface CallRow { id: string; provider: string; provider_call_id: string; lead_id: string | null; recording_consent: number; is_test: number; ended_at: string | null; direction: string; from_number: string | null; to_number: string | null; outbound_request_id: string | null }
 const CALL_COLS = `id, provider, provider_call_id, lead_id, recording_consent, is_test, ended_at, direction, from_number, to_number, outbound_request_id`;
 
-export interface CallData { from?: string | null; to?: string | null; direction?: "inbound" | "outbound"; environment?: string | null; consent?: boolean; isTest: boolean; agentVersion: number | null }
+export interface CallData { from?: string | null; to?: string | null; direction?: "inbound" | "outbound"; environment?: string | null; outboundRequestId?: string | null; consent?: boolean; isTest: boolean; agentVersion: number | null }
 
 /** Creates the call row once per provider call id (any later event only fills fields that are still empty). */
 export async function ensureCall(db: Db, provider: string, providerCallId: string, data: CallData): Promise<{ call: CallRow; created: boolean }> {
   const at = nowIso();
   const env = data.environment && ["development", "staging", "production"].includes(data.environment) ? data.environment : null;
-  const res = await db.prepare(`INSERT INTO calls (id, provider, provider_call_id, from_number, to_number, direction, recording_consent, started_at, is_test, agent_config_version, environment, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider, provider_call_id) DO NOTHING`)
-    .bind(newId("call"), provider, providerCallId, data.from ?? null, data.to ?? null, data.direction ?? "inbound", data.consent ? 1 : 0, at, data.isTest ? 1 : 0, data.agentVersion, env, at).run();
-  if (res.meta.changes !== 1 && (data.from || data.to || env)) {
-    await db.prepare(`UPDATE calls SET from_number = COALESCE(from_number, ?), to_number = COALESCE(to_number, ?), environment = COALESCE(environment, ?) WHERE provider = ? AND provider_call_id = ?`)
-      .bind(data.from ?? null, data.to ?? null, env, provider, providerCallId).run();
+  // An outbound request id is accepted only if that request really exists (it arrives in signed metadata the platform set).
+  const ob = data.outboundRequestId && /^vob_[A-Za-z0-9_-]{1,60}$/.test(data.outboundRequestId)
+    ? (await db.prepare(`SELECT id FROM voice_outbound_requests WHERE id = ?`).bind(data.outboundRequestId).first<{ id: string }>())?.id ?? null : null;
+  const res = await db.prepare(`INSERT INTO calls (id, provider, provider_call_id, from_number, to_number, direction, recording_consent, started_at, is_test, agent_config_version, environment, outbound_request_id, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider, provider_call_id) DO NOTHING`)
+    .bind(newId("call"), provider, providerCallId, data.from ?? null, data.to ?? null, data.direction ?? "inbound", data.consent ? 1 : 0, at, data.isTest ? 1 : 0, data.agentVersion, env, ob, at).run();
+  if (res.meta.changes !== 1 && (data.from || data.to || env || ob)) {
+    await db.prepare(`UPDATE calls SET from_number = COALESCE(from_number, ?), to_number = COALESCE(to_number, ?), environment = COALESCE(environment, ?), outbound_request_id = COALESCE(outbound_request_id, ?) WHERE provider = ? AND provider_call_id = ?`)
+      .bind(data.from ?? null, data.to ?? null, env, ob, provider, providerCallId).run();
   }
   const call = await db.prepare(`SELECT ${CALL_COLS} FROM calls WHERE provider = ? AND provider_call_id = ?`).bind(provider, providerCallId).first<CallRow>();
   return { call: call!, created: res.meta.changes === 1 };
@@ -135,7 +140,12 @@ async function claimEvent(db: Db, callId: string, key: string, kind: string): Pr
   const res = await db.prepare(`INSERT INTO voice_events (id, call_id, event_key, kind, status, created_at) VALUES (?,?,?,?, 'ok', ?) ON CONFLICT(call_id, event_key) DO NOTHING`)
     .bind(id, callId, key, kind, nowIso()).run();
   if (res.meta.changes === 1) return { duplicate: false, eventId: id };
-  const prev = await db.prepare(`SELECT result_json FROM voice_events WHERE call_id = ? AND event_key = ?`).bind(callId, key).first<{ result_json: string | null }>();
+  const prev = await db.prepare(`SELECT id, status, result_json FROM voice_events WHERE call_id = ? AND event_key = ?`).bind(callId, key).first<{ id: string; status: string; result_json: string | null }>();
+  // A failed attempt is not an answer: the provider's retry gets a fresh attempt instead of the stored error.
+  if (prev && prev.status === "error") {
+    const retry = await db.prepare(`UPDATE voice_events SET status = 'ok', result_json = NULL, detail = NULL WHERE id = ? AND status = 'error'`).bind(prev.id).run();
+    if (retry.meta.changes === 1) return { duplicate: false, eventId: prev.id };
+  }
   return { duplicate: true, result: prev?.result_json ? JSON.parse(prev.result_json) : {} };
 }
 
@@ -169,6 +179,12 @@ async function createCallLead(db: Db, call: CallRow, c: { name: string; email?: 
 }
 
 const addTask = addLeadTask;
+
+/** True when `phoneE164` is the number this call comes from (inbound) or was placed to (outbound). */
+function isCallersOwn(call: CallRow, phoneE164: string): boolean {
+  const own = toE164(call.direction === "outbound" ? call.to_number : call.from_number);
+  return !!own && own === phoneE164;
+}
 
 const SUPPORT_RESPONSE = "Thank you. I've passed this to our support team. If we can match it to an existing account, they'll follow up through that account; otherwise someone will call you back during staffed hours.";
 
@@ -264,8 +280,9 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       await addTask(db, leadId, `Call back ${a.name} at ${a.phone}${a.preferred_time ? ` (preferred: ${a.preferred_time})` : ""}: ${a.reason}`);
       // The caller asked to be called back: that request is the consent, scoped to the callback purpose only.
       // The outbound request still waits for staff approval, and outbound calling is off by default.
+      // Consent counts only for the number the caller is actually calling from: a caller cannot consent for someone else.
       const phone = toE164(a.phone);
-      if (phone && await recordCallConsent(db, phone, "callback", "caller_request", `call:${call.id}`)) {
+      if (phone && isCallersOwn(call, phone) && await recordCallConsent(db, phone, "callback", "caller_request", `call:${call.id}`)) {
         await requestOutbound(db, { purpose: "callback", phone, name: a.name, reason: `Caller asked for a callback${a.preferred_time ? ` (preferred: ${a.preferred_time})` : ""}: ${a.reason}`, leadId, isTest: !!call.is_test });
       }
       return { callbackRequested: true, message: "Thanks. Someone will call you back during staffed hours." };
@@ -337,15 +354,18 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       const a = parse(fnSchemas.book_consultation, rawArgs ?? {});
       const c = await cfg();
       const phone = toE164(a.phone) ?? a.phone;
-      const leadId = call.lead_id ?? await createCallLead(db, call, { name: a.name, email: a.email, phone, interest: "other", message: `Consultation requested by phone: ${a.topic}` });
+      if (!c.scheduling.enabled || !c.timezone) return { booked: false, reason: "scheduling_disabled", message: "I can't book consultations by phone right now. Offer to take a callback request." };
       try {
-        const { booking, existing } = await sched.book(db, c, now, cal, { name: a.name, phone, email: a.email ?? null, startsAt: a.start_time, topic: a.topic, leadId, callId: call.id, isTest: !!call.is_test, source: "ai_receptionist" });
+        // Only the caller's own number is checked for an existing booking: saying "you already have one" for any
+        // other number would reveal whether that number has a booking.
+        const { booking, existing } = await sched.book(db, c, now, cal, { name: a.name, phone, email: a.email ?? null, startsAt: a.start_time, topic: a.topic, leadId: call.lead_id, callId: call.id, isTest: !!call.is_test, source: "ai_receptionist", checkExisting: isCallersOwn(call, phone) });
         if (existing) return { booked: false, already_booked: true, message: "You already have an upcoming consultation with us. I can reschedule or cancel it if you give me your booking reference." };
+        const leadId = call.lead_id ?? await createCallLead(db, call, { name: a.name, email: a.email, phone, interest: "other", message: `Consultation requested by phone: ${a.topic}` });
         await db.prepare(`UPDATE consultations SET lead_id = COALESCE(lead_id, ?) WHERE id = ?`).bind(leadId, booking.id).run();
         await addLeadNote(db, leadId, `Consultation ${booking.status} for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) via AI receptionist`);
         if (booking.status === "requested") await addLeadTask(db, leadId, `Confirm or decline the consultation requested for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}). Check your calendar first: no calendar is connected.`, 4);
         await notifyOwners(db, "voice_consultation", `${call.is_test ? "[TEST] " : ""}Consultation ${booking.status} by phone: ${a.name}, ${sched.labelOf(booking)}`, "consultation", booking.id);
-        if (a.reminder_call_ok === "true") await recordCallConsent(db, phone, "consultation_reminder", "caller_request", `call:${call.id}`);
+        if (a.reminder_call_ok === "true" && isCallersOwn(call, phone)) await recordCallConsent(db, phone, "consultation_reminder", "caller_request", `call:${call.id}`);
         await mailConsultation(deps, booking, booking.status === "confirmed" ? "confirmed" : "requested");
         return { booked: true, status: booking.status, when: sched.labelOf(booking), confirmation_code: booking.confirmation_code,
           message: booking.status === "confirmed"
@@ -412,6 +432,7 @@ export async function handleVoiceEvent(db: Db, rawBody: string, deps: VoiceDeps 
   const direction = json.direction === "outbound" ? "outbound" : "inbound";
   const { call } = await ensureCall(db, base.provider, base.call_id, {
     from, to: phoneOf("to_number"), direction, environment: typeof json.environment === "string" ? json.environment : null,
+    outboundRequestId: typeof json.outbound_request_id === "string" ? json.outbound_request_id : null,
     consent, isTest, agentVersion: await activeAgentVersion(db),
   });
 
@@ -450,7 +471,7 @@ export async function handleVoiceEvent(db: Db, rawBody: string, deps: VoiceDeps 
       await notifyOwners(db, "voice_missed_call", `Missed call from ${from ?? call.from_number} — the caller hung up before speaking with the receptionist.`, "call", call.id);
     }
     if (call.direction === "outbound" && call.outbound_request_id) {
-      await applyOutboundResult(db, call.outbound_request_id, reason, cost);
+      await applyOutboundResult(db, call.outbound_request_id, reason, cost, deps.now?.() ?? new Date());
     }
     return { status: 200, body: { ok: true, callId: call.id, outcome } };
   }
@@ -458,7 +479,9 @@ export async function handleVoiceEvent(db: Db, rawBody: string, deps: VoiceDeps 
   // function_call
   const fn = parse(v.enumOf(VOICE_FUNCTIONS), (json.function as { name?: unknown } | undefined)?.name);
   if (!base.event_id) throw new ValidationError(["event_id is required for function calls (idempotency key)"]);
-  const claim = await claimEvent(db, call.id, `fn:${base.event_id}`, `fn:${fn}`);
+  // Read-only answers can change during a call (availability, hours): log them, never replay a stored one.
+  const key = READ_ONLY.has(fn) ? `fn:${base.event_id}:${newId("ro")}` : `fn:${base.event_id}`;
+  const claim = await claimEvent(db, call.id, key, `fn:${fn}`);
   if (claim.duplicate) return { status: 200, body: { ok: true, duplicate: true, result: claim.result } };
   try {
     const result = await runFunction(db, call, fn, (json.function as { arguments?: unknown }).arguments, deps);
