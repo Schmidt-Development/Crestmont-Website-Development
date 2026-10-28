@@ -187,7 +187,7 @@ export function milestoneSplit(totalCents: number): PriceBreakdown["installments
 export const APPROVED_SERVICES = [
   "Website design and development", "Website redesign", "E-commerce development", "Custom web applications",
   "Customer and administrative portals", "Booking and scheduling systems", "Payment and subscription integrations",
-  "AI chatbots and workflow automation", "Hosting and maintenance", "API integrations", "Technical SEO",
+  "AI chatbots and workflow automation", "AI receptionist voice agents (inbound and outbound calls)", "Hosting and maintenance", "API integrations", "Technical SEO",
   "Search Console and analytics setup", "Google Business Profile setup assistance for eligible businesses",
   "Conversion-focused landing pages", "Email automation infrastructure", "CRM integrations", "Website performance optimization",
 ] as const;

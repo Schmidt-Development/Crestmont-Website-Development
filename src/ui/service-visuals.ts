@@ -3,6 +3,7 @@
 // adds the interactions. Everything shown is an illustrative demonstration with fictional businesses and synthetic
 // data: no real customers, prices beyond published ones, rankings, traffic or outcomes, and no network calls.
 import { html, type SafeHtml } from "../lib/html.ts";
+import { receptionistConsole } from "./receptionist.ts";
 
 type Note = { key: string; title: string; body: string };
 const opt = (key: string, label: string, pressed = false, extra = "") => html`<button type="button" class="sv__opt" data-key="${key}" aria-pressed="${pressed ? "true" : "false"}"${extra ? html` ${extra}` : ""}>${label}</button>`;
@@ -274,7 +275,7 @@ const VISUALS: Record<string, () => SafeHtml> = {
   "technical-seo": sitemap, "ai-automation": aiFlow, "custom-development": milestones, portals: roles, "booking-scheduling": booking,
   "payments-subscriptions": payFlow, "api-integrations": apiFlow, "crm-integrations": crmFlow, "email-automation": emailFlow,
   "landing-pages": () => events("landing"), "analytics-search-console": () => events("analytics"), "google-business-profile": gbpFlow,
-  "performance-optimization": waterfall, "hosting-maintenance": careFlow,
+  "performance-optimization": waterfall, "hosting-maintenance": careFlow, "ai-receptionist": () => receptionistConsole({ id: "rc-page" }),
 };
 export const SERVICE_VISUAL_SLUGS = Object.keys(VISUALS);
 export function serviceVisual(slug: string): SafeHtml | null { const f = VISUALS[slug]; return f ? f() : null; }

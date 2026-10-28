@@ -12,7 +12,7 @@ test("[WEB-002] [WEB-009] every service page has its own interactive visual; no 
   assert.deepEqual([...SERVICE_VISUAL_SLUGS].sort(), SERVICES.map((s) => s.slug).sort());
   for (const slug of SERVICE_VISUAL_SLUGS) {
     const h = String(serviceVisual(slug));
-    assert.match(h, /Illustrative demonstration/, `${slug}: labelled illustrative`);
+    assert.match(h, /Illustrative demonstration|Simulated call · no real call/, `${slug}: labelled illustrative or simulated`);
     assert.match(h, /<script src="\/assets\/services\.js" defer><\/script>/);
     assert.doesNotMatch(h, /<form|<input(?![^>]*type="range")|<iframe|https?:\/\//i, `${slug}: no forms, data inputs, frames or external URLs`);
     const text = h.replace(/<[^>]+>/g, " ");
@@ -29,7 +29,8 @@ test("[WEB-002] [WEB-007] service pages keep their heading, summary, CTAs, price
     assert.equal(res.status, 200, servicePath(s));
     const html = await res.text();
     assert.match(html, /class="hero hero--page hero--service"/, `${s.slug}: two-column hero`);
-    assert.equal((html.match(/data-sv="/g) ?? []).length, 1, `${s.slug}: one visual`);
+    const hero = html.slice(html.indexOf('class="hero hero--page hero--service"'), html.indexOf("</section>", html.indexOf('class="hero hero--page hero--service"')));
+    assert.equal((hero.match(/data-sv="/g) ?? []).length, 1, `${s.slug}: one visual beside the hero copy`);
     assert.ok(html.indexOf("hero-service__copy") < html.indexOf("hero-service__visual"), "copy first (left / top on phones)");
     assert.ok(html.includes(`<h1 class="hero-title">${s.name.replace(/&/g, "&amp;")}`) || s.slug === "hosting-maintenance", `${s.slug}: heading unchanged`);
     if (s.slug === "hosting-maintenance") assert.match(html, /href="\/contact\?topic=maintenance"/);

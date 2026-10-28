@@ -377,6 +377,116 @@
     render();
   };
 
+  // AI receptionist control centre: a scripted, clearly simulated call. Lines play in order (or step with Next line);
+  // each line's data-effect updates the call state and the connected systems. Text-only, so it works without sound.
+  engines.receptionist = (v) => {
+    const R = () => $(v.body, ".rc");
+    let i = 0, playing = false, secs = 0, started = false, quiet = true; // quiet: no line-by-line announcements until the visitor interacts
+    const scn = () => $(R(), `.rc-scn[data-scn="${R().dataset.scenario}"]`);
+    const lines = () => $$(scn(), ".rc-line");
+    const btn = () => $(v.fig, "[data-play]");
+    const fmt = (t) => `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
+    const setState = (t) => { $(R(), "[data-call-state]").textContent = t; };
+    const sys = (k, val) => { const el = $(R(), `[data-sys="${k}"]`); if (!el) return; $(el, "[data-sys-val]").textContent = val; el.classList.remove("is-pulse"); void el.offsetWidth; el.classList.add("is-pulse", "is-set"); };
+    // The call clock is simulated: each spoken line adds its speaking time, so it reads the same with or without motion.
+    const clock = (add) => { secs += add; $(R(), "[data-timer]").textContent = fmt(Math.round(secs)); };
+    const apply = (effect) => (effect || "").split(";").filter(Boolean).forEach((e) => {
+      const eq = e.indexOf("=");
+      if (eq > 0) { sys(e.slice(0, eq), e.slice(eq + 1)); return; }
+      if (e === "checks") $$(scn(), "[data-check]").forEach((c) => c.classList.add("is-ok"));
+      else if (e === "call:dialing") { R().dataset.state = "dialing"; setState("Dialing… (simulated)"); }
+      else if (e === "call:connected") { R().dataset.state = "live"; setState("Connected · AI receptionist on the line"); }
+      else if (e === "call:ended") { R().dataset.state = "ended"; setState("Call completed"); speak(null); }
+      else if (e === "summary") $(scn(), "[data-summary]").classList.add("is-in");
+    });
+    const speak = (who) => {
+      R().dataset.speaking = who || "";
+      $(R(), "[data-speaker]").textContent = who === "ai" ? "AI receptionist speaking" : who === "caller" ? (R().dataset.mode === "outbound" ? "Customer speaking" : "Caller speaking") : "—";
+    };
+    const scrollLog = () => { const box = $(R(), "[data-scroll]"); box.scrollTop = box.scrollHeight; };
+    const show = (n) => {
+      const ls = lines(); const li = ls[n]; if (!li) return false;
+      li.classList.add("is-in"); apply(li.dataset.effect); speak(li.dataset.who === "system" ? null : li.dataset.who);
+      if (li.dataset.who !== "system" && R().dataset.state === "live") clock(durationOf(li) / 1000 * 1.6);
+      scrollLog();
+      if (!quiet) v.say(`${$(li, ".rc-line__who").textContent}: ${$(li, ".rc-line__text").textContent}`);
+      return true;
+    };
+    const durationOf = (li) => li.dataset.who === "system" ? 950 : Math.min(4200, 750 + $(li, ".rc-line__text").textContent.length * 27);
+    const loop = () => {
+      if (!playing) return;
+      if (i >= lines().length) { playing = false; btn().textContent = "Play again"; return; }
+      const li = lines()[i]; show(i); i++;
+      v.later(durationOf(li), loop);
+    };
+    const reset = (keep) => {
+      playing = false; i = 0; secs = 0; v.reset();
+      const r = R(); if (keep) { r.dataset.mode = keep.mode; r.dataset.scenario = keep.scenario; }
+      selectUI(); setState("Ready — press Play to start the simulated call");
+    };
+    const selectUI = () => {
+      const r = R(), mode = r.dataset.mode || "inbound";
+      r.dataset.mode = mode;
+      $$(r, "[data-mode-btn]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.modeBtn === mode)));
+      $$(r, "[data-scn-btn]").forEach((b) => { b.hidden = b.dataset.mode !== mode; b.setAttribute("aria-pressed", String(b.dataset.scnBtn === r.dataset.scenario)); });
+      $$(r, ".rc-scn").forEach((x) => x.toggleAttribute("data-on", x.dataset.scn === r.dataset.scenario));
+      const sc = scn();
+      $(r, "[data-caller]").textContent = sc.dataset.caller;
+      $(r, "[data-number]").textContent = sc.dataset.number;
+      r.dataset.state = "idle"; speak(null); $(r, "[data-timer]").textContent = "00:00";
+      btn().textContent = "Play call";
+    };
+    v.fig.addEventListener("click", (e) => {
+      const b = e.target.closest("button"); if (!b) return;
+      if (b.dataset.modeBtn) { const first = $(v.fig, `[data-scn-btn][data-mode="${b.dataset.modeBtn}"]`); reset({ mode: b.dataset.modeBtn, scenario: first.dataset.scnBtn }); v.say(`${b.textContent} calls. Scenario: ${first.textContent}.`); }
+      else if (b.dataset.scnBtn) { reset({ mode: b.dataset.mode, scenario: b.dataset.scnBtn }); v.say(`Scenario: ${b.textContent}. Press Play call to start.`); }
+      else if (b.hasAttribute("data-play")) {
+        if (playing) { playing = false; b.textContent = "Resume call"; v.say("Paused."); return; }
+        if (i >= lines().length) { const keep = { mode: R().dataset.mode, scenario: R().dataset.scenario }; reset(keep); }
+        playing = true; btn().textContent = "Pause"; loop();
+      } else if (b.hasAttribute("data-step")) {
+        playing = false; btn().textContent = i ? "Resume call" : "Play call";
+        if (i >= lines().length) { v.say("End of the call. Replay to start again."); return; }
+        show(i); i++; if (i >= lines().length) btn().textContent = "Play again";
+      } else if (b.hasAttribute("data-reset")) { reset({ mode: R().dataset.mode, scenario: R().dataset.scenario }); v.say("Ready to replay."); }
+    });
+    selectUI();
+    // The console comes alive as it scrolls into view: the call starts by itself (Pause is always available). With
+    // reduced motion it shows the completed call at once instead — a complete state without timed movement.
+    const begin = () => {
+      if (started) return; started = true;
+      if (reduce.matches) { while (i < lines().length) { show(i); i++; } btn().textContent = "Play again"; return; }
+      playing = true; btn().textContent = "Pause"; loop();
+    };
+    v.fig.addEventListener("click", () => { started = true; quiet = false; }, true);
+    if ("IntersectionObserver" in window) {
+      const io = new IntersectionObserver((es) => { if (es.some((x) => x.intersectionRatio >= 0.45)) { io.disconnect(); begin(); } }, { threshold: [0, 0.45] });
+      io.observe(v.fig);
+    }
+  };
+
+  // Voice styles: a radio group (arrow keys move and select). Preview is text + waveform — no audio until a provider
+  // is approved, and the page says so.
+  engines.voices = (v) => {
+    const L = $(v.body, ".vl"), items = $$(L, "[data-voice-btn]");
+    const pick = (b, focus) => {
+      items.forEach((x) => { const on = x === b; x.setAttribute("aria-checked", String(on)); x.tabIndex = on ? 0 : -1; });
+      L.dataset.voice = b.dataset.voiceBtn;
+      $$(L, "[data-voice-card]").forEach((c) => c.toggleAttribute("data-on", c.dataset.voiceCard === b.dataset.voiceBtn));
+      const card = $(L, `[data-voice-card="${b.dataset.voiceBtn}"]`);
+      card.classList.remove("is-speaking"); void card.offsetWidth; card.classList.add("is-speaking");
+      v.later(2600, () => card.classList.remove("is-speaking"));
+      if (focus) b.focus();
+      v.say(`${$(b, ".vl__name").textContent}. Sample line: ${$(card, ".vl__line").textContent}`);
+    };
+    L.addEventListener("click", (e) => { const b = e.target.closest("[data-voice-btn]"); if (b) pick(b, false); });
+    L.addEventListener("keydown", (e) => {
+      const b = e.target.closest("[data-voice-btn]"); if (!b) return;
+      const k = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[e.key]; if (!k) return;
+      e.preventDefault(); pick(items[(items.indexOf(b) + k + items.length) % items.length], true);
+    });
+  };
+
   const start = () => $$(document, "[data-sv]").forEach((fig) => {
     if (fig.hasAttribute("data-js")) return;
     const kind = fig.dataset.sv.split(" ")[0]; const eng = engines[kind];
