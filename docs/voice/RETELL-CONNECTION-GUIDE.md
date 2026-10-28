@@ -1,0 +1,36 @@
+# Connecting Retell — Founder checklist
+
+Work through this **in order, on staging first**. Production repeats steps 1–17 with production values only after step 18. Who does each step: **F** = needs the Founder's own access or approval; **C** = Claude (or an engineer) can do it in the repository or the Owner pages once given access; **F+C** = Founder approves, Claude prepares.
+
+URLs below are the real implemented routes. `<staging host>` is `crestmont-platform-staging.<your workers.dev subdomain>.workers.dev` (or `staging.crestmontwebsitedevelopment.com` after DNS, BLK-011). `<production host>` is `crestmontwebsitedevelopment.com` once its custom domain exists (not before: production has `workers_dev = false`).
+
+**Before starting (F):** approve the provider recommendation (VOICE-001, `PROVIDER-EVALUATION.md` §6), a monthly budget ceiling, and toll-free vs local number. Merge the Retell backend PR so staging runs this code.
+
+| # | Step | Who | Exactly what |
+|---|---|---|---|
+| 1 | Workspace | F | In the Retell dashboard, create a **new** workspace "Crestmont Website Development" with its own card. Never open, edit or reuse anything in the other business's workspace. |
+| 2 | Agent | F | Create **one** agent "Crestmont Receptionist" (Single/Multi-Prompt). One agent serves inbound and outbound (`RETELL-AGENT-SPEC.md` §1). |
+| 3 | Model and voice | F | Choose model and voice by the criteria in `RETELL-AGENT-SPEC.md` §4. Note the per-minute price Retell shows. |
+| 4 | Prompt | F+C | In `/staff/voice`, create a configuration version with the additions in `RETELL-AGENT-SPEC.md` §3, activate it, paste the full text into the agent. Set the begin message and default dynamic variables (§3, §5). |
+| 5 | Custom functions | F | Add the 14 functions from `RETELL-INTEGRATION.md` §6 (copy the JSON). Add the built-in Transfer Call (destination `{{transfer_number}}`) and End Call tools. |
+| 6 | Function URLs | F | Every function: POST `https://<staging host>/api/webhooks/retell/functions`, timeout 10000 ms, max retries 1, "Payload: args only" **off**. |
+| 7 | Authentication | F | Retell signs every request with the workspace API key that has the **webhook badge**. Create (or identify) that key in the new workspace. Nothing else to configure: there are no custom auth headers. |
+| 8 | Webhook URL | F | Agent → Webhook URL: `https://<staging host>/api/webhooks/retell`. |
+| 9 | Webhook events | F | Select `call_started`, `call_ended`, `call_analyzed`, `transfer_started`, `transfer_bridged`, `transfer_cancelled`, `transfer_ended`. Data storage: `basic_attributes_only`. |
+| 10 | API credentials | F (C can run the command with Cloudflare access) | `wrangler secret put RETELL_API_KEY --env staging` with the webhook-badge key. Never in the repo, chat, tickets or email. `/staff/integrations` then shows *Retell AI webhooks: configured_unverified*. |
+| 11 | Phone number | F | Buy (or import) the number in the Crestmont workspace — **Founder purchase only** (VOICE-002). Inbound agent: Crestmont Receptionist. Inbound Webhook URL: `https://<staging host>/api/webhooks/retell/inbound`. Then in `/staff/voice/operations`, list the number under *Receptionist numbers for this environment* (E.164) and record it in Business settings → *Receptionist phone number*. |
+| 12 | Transfers | F | Decide whether live transfer is offered and to which **business** line. If yes: enter it in `/staff/voice/operations` → *Live transfer* and enable it (needs business hours). If not, leave it off: callers get a callback, and `{{transfer_number}}` stays empty. |
+| 13 | Scheduling | F+C | Set the time zone and business hours (and closed dates) in `/staff/voice/operations`. To let the receptionist book consultations, enable *Consultation scheduling*, choose length, notice and horizon. Keep auto-confirm **off** unless a calendar is connected (none is today): you confirm each held booking on the same page after checking your calendar. |
+| 14 | Notifications | C (verify) | Nothing to configure in Retell. Owner alerts use in-app notifications; consultation emails use the existing Resend pipeline (`consultation` template, shown in `/staff/email` previews), sent only when the caller gave an email. On staging, real mail goes only to `EMAIL_RECIPIENT_ALLOWLIST` (default `@crestmontwebsitedevelopment.com`); other addresses are recorded in the outbox and not sent. During step 15 give an allowlisted address of your own. |
+| 15 | Test inbound | F | From the Retell dashboard place a **web test call** (arrives as a test call). Then call the staging number from your own phone. Script: ask about pricing → give consent → request a callback → book a consultation (if enabled) → ask for a person (transfer if configured) → hang up. Check `/staff/voice` (call, outcome, cost), `/staff/voice/operations` (booking held, callback request pending), CRM lead. Record the result as evidence. |
+| 16 | Test outbound | F | Only after inbound passes. Set `wrangler secret put RETELL_OUTBOUND --env staging` to `on`; in `/staff/voice/operations` enable outbound with the staging number and the agent id. Create a request to **your own phone** with consent evidence, approve it, wait for the 15-minute job (or trigger `/api/scheduled/run`). Answer, then say "please don't call again" and confirm the number appears on the do-not-call list. Turn the switch off again afterwards if outbound is not going live. |
+| 17 | CRM, support, logs, costs | F+C | Confirm: lead created with source `ai_receptionist`; a support call for a known customer opened a ticket while saying nothing about the account; escalation produced an Owner notification; `/staff/voice/operations` shows answered/missed, duration and the provider-reported cost; the costs match the Retell dashboard. |
+| 18 | Production | F | Approve production in writing. Repeat 7–17 with production values: production key (`--env production`), production webhook/function/inbound URLs on `<production host>`, production number bound in production's `/staff/voice/operations`. **Never** point a staging agent or number at production: the environment stamp would refuse it, but do not rely on that. Outbound stays off in production until separately approved. |
+
+## Emergency stop
+
+`/staff/voice/operations` → Receptionist → *Paused: reject calls*. The inbound webhook then rejects every call before any agent runs. To stop outbound, untick *Allow approved outbound calls* (or remove `RETELL_OUTBOUND`).
+
+## What has NOT been verified
+
+Everything was tested against simulated, signed Retell payloads and a fake Retell API. Until steps 15–17 are done, nothing is proven against the real Retell service: payload details Retell may add or omit, real latency, transfer behaviour, voicemail detection and cost reporting.
