@@ -93,6 +93,9 @@ test("[AIB-RUNNER] local provider happy path: plan/build/verify with a tool-usin
     assert.ok(existsSync(path.join(repo, ".crestmont", "plan.md")));
     // Zero per-token cost everywhere; tokens and model time reported.
     for (const hb of r.cp.byPath("heartbeat")) assert.equal(hb.body.runCostUsd, 0);
+    // Provider-independent record of what actually ran (stored per attempt by the platform).
+    for (const hb of r.cp.byPath("heartbeat")) assert.deepEqual([hb.body.provider, hb.body.model], ["local", "test-coder:30b"]);
+    assert.deepEqual([r.cp.byPath("complete")[0].body.provider, r.cp.byPath("complete")[0].body.model], ["local", "test-coder:30b"]);
     const done = r.cp.byPath("complete")[0].body;
     assert.equal(done.runCostUsd, 0);
     assert.match(String(done.sessionId), /^local-/);

@@ -102,7 +102,10 @@ export type StopReason = "canceled" | "paused" | "budget" | "runtime" | "ineligi
 
 export interface Activity { kind: "step" | "tool" | "check" | "note"; message: string }
 
-export interface HeartbeatRequest {
+/** Which agent provider and model actually run this attempt (optional; protocol v1.2, ignored by older platforms). */
+export interface ProviderReport { provider?: string; model?: string }
+
+export interface HeartbeatRequest extends ProviderReport {
   stage: Stage;
   runCostUsd: number;
   turns: number;
@@ -125,7 +128,7 @@ export interface CheckpointRequest {
 
 export type Outcome = "ready_for_review" | "needs_information" | "failed" | "stopped" | "released";
 
-export interface CompleteRequest {
+export interface CompleteRequest extends ProviderReport {
   outcome: Outcome;
   runCostUsd: number;
   turns: number;

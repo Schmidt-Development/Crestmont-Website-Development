@@ -139,6 +139,7 @@ export class ControlPlaneClient {
     return this.post<HeartbeatResponse>("/api/builds/runner/heartbeat", {
       jobId: job.id, leaseToken: job.leaseToken, stage: req.stage, runCostUsd: round4(req.runCostUsd), turns: req.turns,
       ...(req.sessionId ? { sessionId: req.sessionId } : {}), ...(activity && activity.length ? { activity } : {}),
+      ...(req.provider ? { provider: req.provider.slice(0, 40) } : {}), ...(req.model ? { model: req.model.slice(0, 120) } : {}),
     }, { jobId: job.id });
   }
 

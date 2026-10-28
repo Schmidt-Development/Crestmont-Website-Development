@@ -14,7 +14,7 @@ import { TransitionError } from "../domain/state-machine.ts";
 import { issueMilestoneInvoice } from "./commerce.ts";
 import { taxForNewInvoice } from "./tax.ts";
 import { notify, notifyCustomer, notifyProjectTeam, type MailCtx } from "./notifications.ts";
-import { syncProjectBuildSafe } from "./builds.ts";
+import { syncProjectBuildSafe, syncCustomerRevisionSafe } from "./builds.ts";
 
 export interface ProjectRow {
   id: string; organization_id: string; order_id: string | null; product_id: string | null; name: string; status: ProjectStatus;
@@ -645,6 +645,9 @@ export async function requestRevision(ctx: MailCtx, input: { organizationId: str
     mail: decision.kind === "included" ? { template: "revision_update", data: { event: "requested", round: decision.round, allowance: p.revision_allowance } }
       : { template: "revision_update", data: { event: "beyond_allowance", allowance: p.revision_allowance } },
     path: `/staff/projects/${p.id}?tab=revisions`, key: `rev:${id}` });
+  // AI builder policy (Owner -> AI builds): with "auto", an entitled request is queued as an AI revision now;
+  // otherwise it waits in the owner's queue. Never fails the customer's request.
+  await syncCustomerRevisionSafe(ctx.db, id);
   return { revisionId: id, decision };
 }
 
@@ -725,6 +728,12 @@ export async function decideChangeOrder(ctx: MailCtx, actor: Actor, input: { org
   await ctx.db.prepare(`UPDATE projects SET last_customer_activity_at = ? WHERE id = ?`).bind(at, co.project_id).run();
   await audit(ctx.db, { actorUserId: input.userId, action: `change_order.${input.decision}`, subjectType: "change_order", subjectId: co.id, organizationId: co.organization_id, details: { projectId: co.project_id, invoiceId, priceCents: co.price_cents } });
   await notifyProjectTeam(ctx, co.project_id, { kind: "change_order", mail: { template: "change_order", data: { event: "decided", decision: input.decision, invoiceIssued: !!invoiceId } }, path: `/staff/projects/${co.project_id}?tab=revisions`, key: `codec:${co.id}` });
+  // An approved change order entitles its revision round: with the "auto" AI policy it is queued now.
+  if (input.decision === "approved") {
+    for (const r of (await ctx.db.prepare(`SELECT id FROM revisions WHERE billable_change_order_id = ? AND status IN ('submitted','in_progress')`).bind(co.id).all<{ id: string }>()).results) {
+      await syncCustomerRevisionSafe(ctx.db, r.id);
+    }
+  }
   return { invoiceId };
 }
 
@@ -738,8 +747,14 @@ export async function listChangeOrders(db: Db, projectId: string): Promise<Chang
   return (await db.prepare(`SELECT c.*, i.status AS invoice_status FROM change_orders c LEFT JOIN invoices i ON i.id = c.invoice_id WHERE c.project_id = ? ORDER BY c.created_at DESC`).bind(projectId).all<ChangeOrderRow>()).results;
 }
 
-export async function listRevisions(db: Db, projectId: string): Promise<(RevisionRow & { co_status: string | null; co_price: number | null })[]> {
-  return (await db.prepare(`SELECT r.*, c.status AS co_status, c.price_cents AS co_price FROM revisions r LEFT JOIN change_orders c ON c.id = r.billable_change_order_id WHERE r.project_id = ? ORDER BY r.round DESC`).bind(projectId).all<RevisionRow & { co_status: string | null; co_price: number | null }>()).results;
+export async function listRevisions(db: Db, projectId: string): Promise<(RevisionRow & { co_status: string | null; co_price: number | null; ai_job_id: string | null; ai_job_state: string | null; ai_preview_url: string | null })[]> {
+  // The most recent AI build for each request (Owner -> AI builds forwards customer revisions to the AI builder).
+  return (await db.prepare(`SELECT r.*, c.status AS co_status, c.price_cents AS co_price,
+      (SELECT j.id FROM build_jobs j WHERE j.customer_revision_id = r.id ORDER BY j.created_at DESC LIMIT 1) AS ai_job_id,
+      (SELECT j.state FROM build_jobs j WHERE j.customer_revision_id = r.id ORDER BY j.created_at DESC LIMIT 1) AS ai_job_state,
+      (SELECT j.preview_url FROM build_jobs j WHERE j.customer_revision_id = r.id ORDER BY j.created_at DESC LIMIT 1) AS ai_preview_url
+    FROM revisions r LEFT JOIN change_orders c ON c.id = r.billable_change_order_id WHERE r.project_id = ? ORDER BY r.round DESC`).bind(projectId)
+    .all<RevisionRow & { co_status: string | null; co_price: number | null; ai_job_id: string | null; ai_job_state: string | null; ai_preview_url: string | null }>()).results;
 }
 
 // ───────────── History ─────────────

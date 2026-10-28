@@ -31,7 +31,11 @@ export interface BuildSettings {
   automation_enabled: number; globally_paused: number; pause_reason: string | null; auto_start_after: string;
   run_budget_micro: number; project_budget_micro: number; max_runtime_minutes: number; max_turns: number;
   max_concurrent: number; max_attempts: number; lease_seconds: number; model: string; updated_by: string | null; updated_at: string;
+  /** Founder policy for customer revision requests (migration 0041): off | owner_approval (default) | auto. */
+  customer_revision_mode: CustomerRevisionMode;
 }
+export const CUSTOMER_REVISION_MODES = ["off", "owner_approval", "auto"] as const;
+export type CustomerRevisionMode = (typeof CUSTOMER_REVISION_MODES)[number];
 export async function getBuildSettings(db: Db): Promise<BuildSettings> {
   const s = await db.prepare(`SELECT * FROM build_settings WHERE id = 1`).first<BuildSettings>();
   if (!s) throw new Error("build_settings row missing (migration 0031)");
@@ -50,6 +54,8 @@ export interface BuildJob {
   lease_token_hash: string | null; lease_expires_at: string | null; heartbeat_at: string | null; stop_reason: string | null;
   run_started_at: string | null; started_at: string | null; finished_at: string | null; cancel_requested_at: string | null;
   cancel_requested_by: string | null; approved_by: string | null; approved_at: string | null; created_at: string; updated_at: string;
+  /** The customer's revision request (portal `revisions`) this AI revision works on; null for owner-initiated revisions. */
+  customer_revision_id: string | null;
 }
 
 export async function getJob(db: Db, id: string): Promise<BuildJob | null> {
@@ -369,7 +375,8 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
       .bind(runnerId, await sha256Hex(token), leaseUntil, at, at, at, at, c.id, s.max_concurrent).run();
     if (!r.meta?.changes) continue; // another runner won this job (or capacity filled): try the next
     const job = (await getJob(db, c.id))!;
-    await db.prepare(`INSERT OR IGNORE INTO build_runs (id, job_id, attempt, runner_id, started_at, session_id) VALUES (?,?,?,?,?,?)`).bind(newId("brun"), job.id, job.attempts, runnerId, at, job.agent_session_id).run();
+    await db.prepare(`INSERT OR IGNORE INTO build_runs (id, job_id, attempt, runner_id, started_at, session_id, zero_cost) VALUES (?,?,?,?,?,?,?)`)
+      .bind(newId("brun"), job.id, job.attempts, runnerId, at, job.agent_session_id, capabilities.includes(ZERO_COST_CAPABILITY) ? 1 : 0).run();
     // Audit: which runner build and which kind of provider (zero-cost or paid) took this attempt.
     await event(db, job.id, "transition", `Claimed by runner ${runnerId} (attempt ${job.attempts}; ${capabilities.includes(ZERO_COST_CAPABILITY) ? "zero-cost provider" : "PAID provider"})`, { kind: "runner" },
       { from: "queued", to: "preparing", data: { runnerVersion: version, capabilities, paidProvider: !capabilities.includes(ZERO_COST_CAPABILITY) } });
@@ -398,8 +405,16 @@ async function leased(db: Db, jobId: unknown, token: unknown): Promise<BuildJob>
   return job;
 }
 
-async function recordRunUsage(db: Db, job: BuildJob, runCostUsd: unknown, turns: unknown, sessionId?: unknown) {
+/** Provider id and model the runner reports (provider-independent record of what actually ran this attempt). */
+const okProvider = (v: unknown) => typeof v === "string" && /^[a-z0-9][a-z0-9._-]{0,39}$/.test(v) ? v : null;
+const okModel = (v: unknown) => typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,119}$/.test(v) ? v : null;
+
+async function recordRunUsage(db: Db, job: BuildJob, runCostUsd: unknown, turns: unknown, sessionId?: unknown, provider?: unknown, model?: unknown) {
   const micro = usdToMicro(runCostUsd);
+  if (okProvider(provider) || okModel(model)) {
+    await db.prepare(`UPDATE build_runs SET provider = COALESCE(?, provider), model = COALESCE(?, model) WHERE job_id = ? AND attempt = ?`)
+      .bind(okProvider(provider), okModel(model), job.id, job.attempts).run();
+  }
   await db.prepare(`UPDATE build_runs SET cost_micro = MAX(cost_micro, ?), turns = MAX(turns, ?), session_id = COALESCE(?, session_id) WHERE job_id = ? AND attempt = ?`)
     .bind(micro, Math.max(0, Math.floor(Number(turns) || 0)), typeof sessionId === "string" ? sessionId.slice(0, 100) : null, job.id, job.attempts).run();
   await db.prepare(`UPDATE build_jobs SET cost_micro = (SELECT COALESCE(SUM(cost_micro),0) FROM build_runs WHERE job_id = ?), turns = (SELECT COALESCE(SUM(turns),0) FROM build_runs WHERE job_id = ?),
@@ -412,7 +427,7 @@ async function recordRunUsage(db: Db, job: BuildJob, runCostUsd: unknown, turns:
 export async function heartbeat(db: Db, b: Record<string, unknown>, now = new Date()) {
   const job = await leased(db, b.jobId, b.leaseToken);
   const s = await getBuildSettings(db);
-  const runMicro = await recordRunUsage(db, job, b.runCostUsd, b.turns, b.sessionId);
+  const runMicro = await recordRunUsage(db, job, b.runCostUsd, b.turns, b.sessionId, b.provider, b.model);
   const stage = b.stage;
   if ((stage === "building" || stage === "verifying" || stage === "preparing") && stage !== job.state) {
     try { await transition(db, job, stage, `Runner stage: ${stage}`, { kind: "runner" }); } catch { /* invalid stage order is ignored */ }
@@ -529,7 +544,7 @@ export function previewUrlAllowed(url: string, hosts: string[]): boolean {
 export async function completeJob(db: Db, b: Record<string, unknown>, notify?: (job: BuildJob, to: BuildState) => Promise<void>, opts: { previewHosts?: string[] } = {}) {
   const job = await leased(db, b.jobId, b.leaseToken);
   const s = await getBuildSettings(db);
-  await recordRunUsage(db, job, b.runCostUsd, b.turns, b.sessionId);
+  await recordRunUsage(db, job, b.runCostUsd, b.turns, b.sessionId, b.provider, b.model);
   const outcome = String(b.outcome ?? "");
   const at = nowIso();
   const reportedPreview = okUrl(b.previewUrl);
@@ -621,7 +636,8 @@ export async function syncProjectBuildSafe(db: Db, projectId: string | null | un
 
 type OwnerCtx = Pick<AppContext, "db"> & { userId: string };
 
-export async function updateBuildSettings(c: OwnerCtx, v: { automationEnabled: boolean; runBudgetUsd: number; projectBudgetUsd: number; maxRuntimeMinutes: number; maxTurns: number; maxConcurrent: number; maxAttempts: number; model: string }) {
+export async function updateBuildSettings(c: OwnerCtx, v: { automationEnabled: boolean; runBudgetUsd: number; projectBudgetUsd: number; maxRuntimeMinutes: number; maxTurns: number; maxConcurrent: number; maxAttempts: number; model: string; customerRevisionMode?: CustomerRevisionMode }) {
+  if (v.customerRevisionMode !== undefined && !(CUSTOMER_REVISION_MODES as readonly string[]).includes(v.customerRevisionMode)) throw new HttpError(422, "Choose how customer revision requests reach the AI builder.");
   if (!(v.runBudgetUsd > 0 && v.runBudgetUsd <= 1000)) throw new HttpError(422, "Per-run limit must be between $0.01 and $1,000.");
   if (!(v.projectBudgetUsd >= v.runBudgetUsd && v.projectBudgetUsd <= 10000)) throw new HttpError(422, "Per-project limit must be at least the per-run limit and at most $10,000.");
   if (!(Number.isInteger(v.maxRuntimeMinutes) && v.maxRuntimeMinutes >= 5 && v.maxRuntimeMinutes <= 1440)) throw new HttpError(422, "Runtime limit must be 5–1440 minutes.");
@@ -630,8 +646,9 @@ export async function updateBuildSettings(c: OwnerCtx, v: { automationEnabled: b
   if (!(Number.isInteger(v.maxAttempts) && v.maxAttempts >= 1 && v.maxAttempts <= 10)) throw new HttpError(422, "Attempts must be 1–10.");
   // Provider-neutral model identifiers: hosted names (vendor-model-version), Ollama tags (family:size) and namespaced ids (org/model).
   if (!/^[a-z0-9][a-z0-9._:/-]{2,80}$/i.test(v.model) || /\.\.|\/\//.test(v.model)) throw new HttpError(422, "Enter a model identifier, for example qwen3-coder:30b for a self-hosted model.");
-  await c.db.prepare(`UPDATE build_settings SET automation_enabled = ?, run_budget_micro = ?, project_budget_micro = ?, max_runtime_minutes = ?, max_turns = ?, max_concurrent = ?, max_attempts = ?, model = ?, updated_by = ?, updated_at = ? WHERE id = 1`)
-    .bind(v.automationEnabled ? 1 : 0, usdToMicro(v.runBudgetUsd), usdToMicro(v.projectBudgetUsd), v.maxRuntimeMinutes, v.maxTurns, v.maxConcurrent, v.maxAttempts, v.model, c.userId, nowIso()).run();
+  await c.db.prepare(`UPDATE build_settings SET automation_enabled = ?, run_budget_micro = ?, project_budget_micro = ?, max_runtime_minutes = ?, max_turns = ?, max_concurrent = ?, max_attempts = ?, model = ?,
+      customer_revision_mode = COALESCE(?, customer_revision_mode), updated_by = ?, updated_at = ? WHERE id = 1`)
+    .bind(v.automationEnabled ? 1 : 0, usdToMicro(v.runBudgetUsd), usdToMicro(v.projectBudgetUsd), v.maxRuntimeMinutes, v.maxTurns, v.maxConcurrent, v.maxAttempts, v.model, v.customerRevisionMode ?? null, c.userId, nowIso()).run();
   await audit(c.db, { actorUserId: c.userId, action: "builds.settings_updated", subjectType: "build_settings", subjectId: "1", details: v });
 }
 
@@ -715,34 +732,144 @@ export async function retryBuild(c: OwnerCtx, id: string, mode: "retry" | "resum
   await audit(c.db, { actorUserId: c.userId, action: `builds.${mode}`, subjectType: "build_job", subjectId: id, organizationId: j.organization_id });
 }
 
-export async function submitRevision(c: OwnerCtx, projectId: string, instruction: string) {
-  const text = instruction.trim();
-  if (text.length < 10 || text.length > 5000) throw new HttpError(422, "Write the revision instruction (10–5000 characters).");
-  const prev = await c.db.prepare(`SELECT * FROM build_jobs WHERE project_id = ? ORDER BY revision DESC, created_at DESC LIMIT 1`).bind(projectId).first<BuildJob>();
+/**
+ * The build a new revision starts from: the newest build that did not fail and was not canceled (a failed or canceled
+ * revision is skipped, so its partial source is never the base and it does not block later revisions). It must have
+ * reached owner review. `nextRevision` is the next unused revision number (failed/canceled ones keep theirs).
+ */
+async function revisableBuild(db: Db, projectId: string): Promise<{ prev: BuildJob; nextRevision: number }> {
+  const prev = await db.prepare(`SELECT * FROM build_jobs WHERE project_id = ? AND state NOT IN ('failed','canceled') ORDER BY revision DESC, created_at DESC LIMIT 1`).bind(projectId).first<BuildJob>();
   if (!prev) throw new HttpError(409, "This project has no build to revise yet.");
   if (!["ready_for_review", "approved", "needs_information"].includes(prev.state)) throw new HttpError(409, `The latest build is ${BUILD_STATE_LABELS[prev.state].toLowerCase()}; revise after it reaches owner review.`);
-  await requireEligible(c.db, projectId);
-  await requireBudget(c.db, projectId);
-  const s = await getBuildSettings(c.db);
-  const brief = await snapshotBrief(c.db, projectId);
+  const max = await db.prepare(`SELECT MAX(revision) AS m FROM build_jobs WHERE project_id = ?`).bind(projectId).first<{ m: number | null }>();
+  return { prev, nextRevision: (max?.m ?? prev.revision) + 1 };
+}
+
+/**
+ * One path for every AI revision (owner-written or a customer's request): same eligibility, budget, brief snapshot,
+ * source continuation and duplicate protection. Returns the new build id.
+ */
+async function queueRevisionJob(db: Db, projectId: string, instruction: string, actor: Actor, customerRevision: { id: string; round: number } | null): Promise<string> {
+  const text = instruction.trim();
+  if (text.length < 10 || text.length > 5000) throw new HttpError(422, "Write the revision instruction (10–5000 characters).");
+  const { prev, nextRevision } = await revisableBuild(db, projectId);
+  await requireEligible(db, projectId);
+  await requireBudget(db, projectId);
+  const s = await getBuildSettings(db);
+  const brief = await snapshotBrief(db, projectId);
   const id = newId("bld");
-  const rev = prev.revision + 1;
+  const rev = nextRevision;
   const at = nowIso();
+  const reason = customerRevision ? `Customer revision round ${customerRevision.round} queued` : "Revision submitted by owner";
   try {
-    await c.db.prepare(`INSERT INTO build_jobs (id, project_id, organization_id, order_id, kind, revision, dedupe_key, state, state_reason, strategy, package_id, brief_id, instruction, trigger, created_by, max_attempts,
-        agent_session_id, workspace_ref, checkpoint_key, source_repo, source_branch, source_commit, created_at, updated_at)
-        VALUES (?,?,?,?, 'revision', ?, ?, 'queued', 'Revision submitted by owner', ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(id, projectId, prev.organization_id, prev.order_id, rev, `${projectId}:r${rev}`, prev.strategy, prev.package_id, brief.id, text, c.userId, s.max_attempts,
+    await db.prepare(`INSERT INTO build_jobs (id, project_id, organization_id, order_id, kind, revision, dedupe_key, state, state_reason, strategy, package_id, brief_id, instruction, trigger, created_by, max_attempts,
+        agent_session_id, workspace_ref, checkpoint_key, source_repo, source_branch, source_commit, customer_revision_id, created_at, updated_at)
+        VALUES (?,?,?,?, 'revision', ?, ?, 'queued', ?, ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(id, projectId, prev.organization_id, prev.order_id, rev, `${projectId}:r${rev}`, reason, prev.strategy, prev.package_id, brief.id, text, actor.userId ?? null, s.max_attempts,
         // The revision starts from the previous source; its preview stays empty until the revision deploys its own
         // (the previous build keeps its preview URL in its own record).
-        prev.agent_session_id, prev.workspace_ref, prev.checkpoint_key, prev.source_repo, prev.source_branch, prev.source_commit, at, at).run();
+        prev.agent_session_id, prev.workspace_ref, prev.checkpoint_key, prev.source_repo, prev.source_branch, prev.source_commit, customerRevision?.id ?? null, at, at).run();
   } catch (e) {
-    if (/UNIQUE/i.test((e as Error).message)) throw new HttpError(409, "A revision is already queued or running for this project.");
+    const m = (e as Error).message;
+    if (/UNIQUE/i.test(m) && /customer_revision/i.test(m)) throw new HttpError(409, "This customer revision already has an AI build in progress.");
+    if (/UNIQUE/i.test(m)) throw new HttpError(409, "A revision is already queued or running for this project.");
     throw e;
   }
-  await event(c.db, id, "transition", `Revision ${rev} queued by owner`, userActor(c), { to: "queued", data: { previous: prev.id } });
-  await audit(c.db, { actorUserId: c.userId, action: "builds.revision_submitted", subjectType: "build_job", subjectId: id, organizationId: prev.organization_id, details: { revision: rev, previous: prev.id } });
+  await event(db, id, "transition", customerRevision ? `Revision ${rev} queued for customer revision round ${customerRevision.round}` : `Revision ${rev} queued by owner`, actor,
+    { to: "queued", data: { previous: prev.id, customerRevisionId: customerRevision?.id ?? null } });
   return id;
+}
+
+export async function submitRevision(c: OwnerCtx, projectId: string, instruction: string) {
+  const id = await queueRevisionJob(c.db, projectId, instruction, userActor(c), null);
+  const j = (await getJob(c.db, id))!;
+  await audit(c.db, { actorUserId: c.userId, action: "builds.revision_submitted", subjectType: "build_job", subjectId: id, organizationId: j.organization_id, details: { revision: j.revision } });
+  return id;
+}
+
+// ── Customer revision requests (portal) → AI revisions ──
+
+export interface CustomerRevision {
+  id: string; projectId: string; organizationId: string; projectName: string; organizationName: string; round: number; text: string; status: string;
+  createdAt: string; included: boolean; changeOrderStatus: string | null;
+  /** Whether the existing entitlement rules allow work on this round (included, or its change order approved/paid). */
+  entitled: boolean;
+  /** The live AI build for this request, if any (failed/canceled ones may be replaced). */
+  liveJob: { id: string; state: BuildState; previewUrl: string | null } | null;
+  /** The most recent AI build for this request (any state), for history and preview association. */
+  latestJob: { id: string; state: BuildState; previewUrl: string | null } | null;
+}
+
+/** Mirrors updateRevisionStatus in services/projects.ts: a beyond-allowance round needs an approved/paid change order. */
+export function revisionEntitled(included: boolean, changeOrderStatus: string | null): boolean {
+  return included || (!!changeOrderStatus && ["approved", "paid", "completed"].includes(changeOrderStatus));
+}
+
+const CUSTOMER_REVISION_SQL = `SELECT r.id, r.project_id, r.round, r.request_text, r.status, r.created_at, r.included, c.status AS co_status,
+    p.organization_id, p.name AS project_name, o.name AS org_name
+  FROM revisions r JOIN projects p ON p.id = r.project_id JOIN organizations o ON o.id = p.organization_id
+  LEFT JOIN change_orders c ON c.id = r.billable_change_order_id`;
+type CustomerRevisionRow = { id: string; project_id: string; round: number; request_text: string; status: string; created_at: string; included: number; co_status: string | null; organization_id: string; project_name: string; org_name: string };
+
+async function toCustomerRevision(db: Db, r: CustomerRevisionRow): Promise<CustomerRevision> {
+  const jobs = (await db.prepare(`SELECT id, state, preview_url FROM build_jobs WHERE customer_revision_id = ? ORDER BY created_at DESC`).bind(r.id).all<{ id: string; state: BuildState; preview_url: string | null }>()).results;
+  const live = jobs.find((j) => !["failed", "canceled"].includes(j.state));
+  const view = (j: { id: string; state: BuildState; preview_url: string | null } | undefined) => j ? { id: j.id, state: j.state, previewUrl: j.preview_url } : null;
+  return {
+    id: r.id, projectId: r.project_id, organizationId: r.organization_id, projectName: r.project_name, organizationName: r.org_name, round: r.round, text: r.request_text,
+    status: r.status, createdAt: r.created_at, included: !!r.included, changeOrderStatus: r.co_status, entitled: revisionEntitled(!!r.included, r.co_status),
+    liveJob: view(live), latestJob: view(jobs[0]),
+  };
+}
+
+export async function getCustomerRevision(db: Db, revisionId: string): Promise<CustomerRevision | null> {
+  const r = await db.prepare(`${CUSTOMER_REVISION_SQL} WHERE r.id = ?`).bind(revisionId).first<CustomerRevisionRow>();
+  return r ? toCustomerRevision(db, r) : null;
+}
+
+/** Open customer requests (submitted / in progress) for the owner's AI builds queue. */
+export async function customerRevisionQueue(db: Db, limit = 50): Promise<CustomerRevision[]> {
+  const rows = (await db.prepare(`${CUSTOMER_REVISION_SQL} WHERE r.status IN ('submitted','in_progress') ORDER BY r.created_at LIMIT ?`).bind(limit).all<CustomerRevisionRow>()).results;
+  return Promise.all(rows.map((r) => toCustomerRevision(db, r)));
+}
+
+/**
+ * Queue an AI revision for a customer's revision request. Owner path (mode owner_approval or auto; the owner may edit
+ * the instruction) and the automatic path (mode auto) share every check: the request is open and entitled under the
+ * existing rules, the project is eligible and within budget, its latest build reached owner review, and no live AI
+ * build exists for the same request. The customer's text is untrusted data (REVISION-REQUEST.md, rules first).
+ */
+export async function forwardCustomerRevision(db: Db, revisionId: string, actor: Actor, opts: { instruction?: string } = {}): Promise<string> {
+  const s = await getBuildSettings(db);
+  if (s.customer_revision_mode === "off") throw new HttpError(409, "Customer revisions are not sent to the AI builder (Owner → AI builds → Customer revisions: off).");
+  const r = await getCustomerRevision(db, revisionId);
+  if (!r) throw new HttpError(404, "Revision request not found");
+  if (!["submitted", "in_progress"].includes(r.status)) throw new HttpError(409, `This revision request is ${r.status.replace(/_/g, " ")}; only open requests can be sent to the AI builder.`);
+  if (!r.entitled) throw new HttpError(409, "This round is beyond the included revisions; its change order must be approved before any work starts.");
+  if (r.liveJob) throw new HttpError(409, "This customer revision already has an AI build in progress.");
+  const instruction = (opts.instruction ?? "").trim() || r.text.trim();
+  if (instruction.length > 5000) throw new HttpError(422, "The customer's request is longer than 5,000 characters; edit it into an instruction before sending it to the AI builder.");
+  const id = await queueRevisionJob(db, r.projectId, instruction, actor, { id: r.id, round: r.round });
+  // Work has started on the request (the customer's revisions page shows "in progress"); staff still deliver it.
+  await db.prepare(`UPDATE revisions SET status = 'in_progress' WHERE id = ? AND status = 'submitted'`).bind(r.id).run();
+  await audit(db, { actorUserId: actor.userId ?? null, actorKind: actor.kind === "user" ? "user" : "system", action: "builds.customer_revision_forwarded", subjectType: "build_job", subjectId: id,
+    organizationId: r.organizationId, details: { revisionId: r.id, round: r.round, edited: !!(opts.instruction ?? "").trim(), mode: s.customer_revision_mode } });
+  return id;
+}
+
+/** Mode `auto`: queue an entitled customer request when everything allows it; otherwise leave it for the owner. Never throws. */
+export async function syncCustomerRevisionSafe(db: Db, revisionId: string): Promise<string | null> {
+  try {
+    const s = await getBuildSettings(db);
+    if (s.customer_revision_mode !== "auto" || s.globally_paused || !s.automation_enabled) return null;
+    const r = await getCustomerRevision(db, revisionId);
+    if (!r || !r.entitled || r.liveJob || !["submitted", "in_progress"].includes(r.status) || r.text.trim().length > 5000) return null;
+    if ((await projectControls(db, r.projectId))?.paused) return null;
+    return await forwardCustomerRevision(db, revisionId, { kind: "system" });
+  } catch (e) {
+    console.error(JSON.stringify({ level: "warn", msg: "customer revision not queued automatically; it waits for the owner", revisionId, error: (e as Error).message }));
+    return null;
+  }
 }
 
 export async function approveBuild(c: OwnerCtx, id: string, notes: string) {
@@ -750,7 +877,12 @@ export async function approveBuild(c: OwnerCtx, id: string, notes: string) {
   if (j.state !== "ready_for_review") throw new HttpError(409, "Only a build in owner review can be approved.");
   if (!j.preview_url) throw new HttpError(409, "This build has no preview to approve.");
   await transition(c.db, j, "approved", `Preview approved by owner for the delivery process${notes.trim() ? `: ${notes.trim()}` : ""}`, userActor(c), { approved_by: c.userId, approved_at: nowIso() });
-  await audit(c.db, { actorUserId: c.userId, action: "builds.preview_approved", subjectType: "build_job", subjectId: id, organizationId: j.organization_id, details: { preview: j.preview_url, commit: j.source_commit } });
+  await audit(c.db, { actorUserId: c.userId, action: "builds.preview_approved", subjectType: "build_job", subjectId: id, organizationId: j.organization_id, details: { preview: j.preview_url, commit: j.source_commit, customerRevisionId: j.customer_revision_id } });
+  if (j.customer_revision_id) {
+    // Approval records the owner's decision only. Delivering the round to the customer stays a staff step
+    // (project → Revisions → mark delivered), which notifies the customer and asks for their approval.
+    await event(c.db, id, "action", "AI result approved for this customer revision; deliver it to the customer from the project's Revisions tab", userActor(c), { data: { customerRevisionId: j.customer_revision_id } });
+  }
 }
 
 // ── Read models (owner dashboard + frontend contract) ──
@@ -763,6 +895,8 @@ export interface BuildSummary {
   requirements: Record<RequirementStatus, number>; previewUrl: string | null;
   source: { repo: string | null; branch: string | null; commit: string | null }; attempts: number; maxAttempts: number;
   cancelRequested: boolean; projectPaused: boolean; updatedAt: string;
+  /** The customer revision request this build works on (null for first builds and owner-written revisions). */
+  customerRevision: { id: string; round: number } | null;
 }
 
 export async function summarize(db: Db, j: BuildJob, now = new Date()): Promise<BuildSummary> {
@@ -781,6 +915,9 @@ export async function summarize(db: Db, j: BuildJob, now = new Date()): Promise<
     runBudgetUsd: microToUsd(s.run_budget_micro), projectBudgetUsd: microToUsd(controls?.project_budget_micro ?? s.project_budget_micro),
     requirements: counts, previewUrl: j.preview_url, source: { repo: j.source_repo, branch: j.source_branch, commit: j.source_commit },
     attempts: j.attempts, maxAttempts: j.max_attempts, cancelRequested: !!j.cancel_requested_at, projectPaused: !!controls?.paused, updatedAt: j.updated_at,
+    customerRevision: j.customer_revision_id
+      ? { id: j.customer_revision_id, round: (await db.prepare(`SELECT round FROM revisions WHERE id = ?`).bind(j.customer_revision_id).first<{ round: number }>())?.round ?? 0 }
+      : null,
   };
 }
 
@@ -798,7 +935,7 @@ export async function buildDetail(db: Db, id: string) {
   if (!j) throw new HttpError(404, "Build not found");
   const requirements = (await db.prepare(`SELECT key, label, status, evidence, blocker, updated_at FROM build_requirements WHERE job_id = ? ORDER BY CASE status WHEN 'blocked' THEN 0 WHEN 'remaining' THEN 1 WHEN 'implemented_unverified' THEN 2 ELSE 3 END, key`).bind(id).all()).results;
   const events = (await db.prepare(`SELECT id, at, kind, from_state, to_state, message, actor_kind, actor_user_id FROM build_events WHERE job_id = ? ORDER BY id DESC LIMIT 200`).bind(id).all()).results;
-  const runs = (await db.prepare(`SELECT attempt, runner_id, started_at, ended_at, outcome, cost_micro, turns, session_id, error FROM build_runs WHERE job_id = ? ORDER BY attempt`).bind(id).all<{ cost_micro: number }>()).results
+  const runs = (await db.prepare(`SELECT attempt, runner_id, started_at, ended_at, outcome, cost_micro, turns, session_id, error, provider, model, zero_cost FROM build_runs WHERE job_id = ? ORDER BY attempt`).bind(id).all<{ cost_micro: number }>()).results
     .map((r) => ({ ...r, cost_usd: microToUsd(r.cost_micro) }));
   const brief = j.brief_id ? await db.prepare(`SELECT id, version, sha256, created_at FROM build_briefs WHERE id = ?`).bind(j.brief_id).first() : null;
   return { job: j, summary: await summarize(db, j), requirements, events, runs, brief, report: j.report_md, missingInformation: j.missing_info_json ? JSON.parse(j.missing_info_json) as string[] : [] };

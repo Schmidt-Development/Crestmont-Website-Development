@@ -468,6 +468,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/builds/:id/resume": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.resume")),
   "POST /staff/builds/:id/revision": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.revision_submitted")),
   "POST /staff/builds/:id/approve": staff(rolesWith("builds.configure"), P("buildJob"), act("builds.preview_approved")),
+  "POST /staff/builds/customer-revisions/:id/forward": staff(rolesWith("builds.manage"), P("revision"), act("builds.customer_revision_forwarded")),
   "POST /staff/ai/:id/decide": staff(rolesWith("ai.manage"), P("aiJob"), act("ai.draft_approved")),
   "POST /staff/ai/:id/retry": staff(rolesWith("ai.manage"), P("aiJob"), act("ai.job_retried")),
   "POST /staff/ai/budget": staff(rolesWith("ai.budget"), undefined, act("ai.budget_updated")),

@@ -70,6 +70,7 @@ export function register(r: Router): void {
     return jsonResponse(ctx, 200, {
       settings: settingsView(s), runner: await B.runnerStatus(ctx.db, ctx.now()),
       builds: await Promise.all(rows.slice(0, limit).map((j) => B.summarize(ctx.db, j, ctx.now()))), hasMore: rows.length > limit,
+      customerRevisions: await B.customerRevisionQueue(ctx.db),
     });
   });
   r.get("/api/builds/:id", async (ctx, p) => {
@@ -91,6 +92,14 @@ export function register(r: Router): void {
     const runner = await B.runnerStatus(ctx.db, ctx.now());
     const counts = Object.fromEntries((await ctx.db.prepare(`SELECT state, COUNT(*) AS n FROM build_jobs GROUP BY state`).all<{ state: string; n: number }>()).results.map((r) => [r.state, r.n]));
     const configure = can(ctx.actor!, "builds.configure");
+    const manageBuilds = can(ctx.actor!, "builds.manage");
+    const custRevs = await B.customerRevisionQueue(ctx.db);
+    const modeText: Record<B.CustomerRevisionMode, string> = {
+      off: "Off: customer revision requests are handled by staff only.",
+      owner_approval: "Owner approval: requests wait here until an owner sends them to the AI builder.",
+      auto: "Automatic: entitled requests are queued as AI revisions when the project is eligible.",
+    };
+    const entitlement = (r: B.CustomerRevision) => r.included ? badge("ok", "Included round") : r.entitled ? badge("ok", "Change order approved") : badge("warn", r.changeOrderStatus ? `Change order ${r.changeOrderStatus}` : "Change order required");
     const body = html`${pageHead("AI builds", undefined, "Automated first builds for paid intakes")}
 ${!ctx.env.BUILD_RUNNER_SECRET ? alert("warn", html`<strong>Execution unavailable.</strong> No build runner is configured on this environment (BUILD_RUNNER_SECRET is not set), so eligible builds wait in the queue and nothing is generated. Setup: docs/ai-builds/RUNNER-SETUP.md.`)
   : runner?.online ? alert("success", `Runner ${runner.runner_id} (v${runner.version ?? "?"}) last checked in ${formatDateTime(runner.last_seen_at)}.`)
@@ -109,6 +118,22 @@ ${table(sums, [
   { header: "Elapsed", cell: (x) => dur(x.elapsedSeconds) },
 ], { empty: emptyState("No AI builds yet", "A build record appears when a paid project created after automation was enabled has its intake or verified payment. Older projects are started only through Backfill.") })}
 ${pagination(ctx, page, rows.length > limit)}
+<section class="card"><h2 class="card__title">Customer revision requests</h2>
+<p class="faint">${modeText[s.customer_revision_mode]} Entitlement follows the project's revision allowance: rounds beyond it need an approved change order. Approving an AI result never delivers it; staff deliver the round from the project's Revisions tab.</p>
+${table(custRevs, [
+  { header: "Customer / project", cell: (r) => html`${r.organizationName}<br><a class="faint" href="/staff/projects/${r.projectId}?tab=revisions">${r.projectName}</a>` },
+  { header: "Round", cell: (r) => html`${r.round} ${badge("info", r.status.replace(/_/g, " "))}`, numeric: true },
+  { header: "Request (customer text)", cell: (r) => r.text.length > 240 ? `${r.text.slice(0, 240)}…` : r.text },
+  { header: "Entitlement", cell: (r) => entitlement(r) },
+  { header: "AI build", cell: (r) => {
+    const j = r.liveJob ?? r.latestJob;
+    return j ? html`<a href="/staff/builds/${j.id}">${BUILD_STATE_LABELS[j.state]}</a>${j.previewUrl ? html` · <a href="${j.previewUrl}" rel="noopener noreferrer" target="_blank">preview</a>` : ""}` : "—";
+  } },
+  { header: "", cell: (r) => manageBuilds && s.customer_revision_mode !== "off" && r.entitled && !r.liveJob
+    ? html`<form method="post" action="/staff/builds/customer-revisions/${r.id}/forward" class="stack">${csrf(ctx)}${textarea({ name: "instruction", label: "Instruction for the AI builder (edit if needed)", value: r.text.slice(0, 5000), maxlength: 5000, rows: 3, id: `f-instr-${r.id}` })}${button(r.latestJob ? "Send to AI build again" : "Send to AI build", { variant: "primary", size: "sm" })}</form>`
+    : "" },
+], { empty: emptyState("No open customer revision requests", "Requests customers submit in the portal appear here while they are open.") })}
+</section>
 <section class="card"><h2 class="card__title">Controls</h2>
 ${can(ctx.actor!, "builds.manage") ? html`<form method="post" action="/staff/builds/pause" class="row">${csrf(ctx)}${s.globally_paused
   ? html`<input type="hidden" name="paused" value="0">${button("Resume automation", { variant: "primary", size: "sm" })}`
@@ -118,6 +143,8 @@ ${configure ? html`<form method="post" action="/staff/builds/settings" class="st
 ${input({ name: "max_runtime", label: "Max runtime (minutes)", type: "number", value: s.max_runtime_minutes })}${input({ name: "max_turns", label: "Max agent turns", type: "number", value: s.max_turns })}${input({ name: "max_concurrent", label: "Concurrent builds", type: "number", value: s.max_concurrent })}
 ${input({ name: "max_attempts", label: "Automatic attempts", type: "number", value: s.max_attempts })}</div>
 ${checkbox("automation_enabled", "Start eligible first builds automatically", { checked: !!s.automation_enabled })}
+${select({ name: "customer_revision_mode", label: "Customer revision requests", value: s.customer_revision_mode, options: [
+  { value: "off", label: "Off (staff only)" }, { value: "owner_approval", label: "Owner approval (default)" }, { value: "auto", label: "Automatic for entitled rounds" }] })}
 <p class="faint">Limits are enforced by the platform at every runner heartbeat, not by the prompt. Projects created before ${formatDateTime(s.auto_start_after)} are never started automatically; use Backfill on a project to include it.</p>
 <div class="form-actions">${button("Save limits")}</div></form>
 <form method="post" action="/staff/builds/backfill" class="row">${csrf(ctx)}${input({ name: "project_id", label: "Backfill project id", required: true, maxlength: 60, hint: "Authorizes one existing project for automated builds; it starts only if eligible." })}${button("Backfill", { variant: "secondary", size: "sm" })}</form>` : ""}
@@ -141,7 +168,8 @@ ${dl([["Project", html`<a href="/staff/projects/${x.projectId}">${x.projectName}
   ["Attempts", `${x.attempts} of ${x.maxAttempts}`], ["Cost", `${usd(x.costUsd)} this build · project ${usd(x.projectSpendUsd)} of ${usd(x.projectBudgetUsd)} · per-run limit ${usd(x.runBudgetUsd)}`],
   ["Preview", x.previewUrl ? html`<a href="${x.previewUrl}" rel="noopener noreferrer" target="_blank">${x.previewUrl}</a>` : "Not available"],
   ["Source", x.source.repo ? `${x.source.repo}${x.source.branch ? ` @ ${x.source.branch}` : ""}${x.source.commit ? ` (${x.source.commit.slice(0, 12)})` : ""}` : "Not available"],
-  ["Brief", d.brief ? `version ${(d.brief as { version: number }).version}` : "—"], ["Revision instruction", j.instruction]])}
+  ["Brief", d.brief ? `version ${(d.brief as { version: number }).version}` : "—"], ["Revision instruction", j.instruction],
+  ["Customer revision", x.customerRevision ? html`Round ${x.customerRevision.round} (<a href="/staff/projects/${x.projectId}?tab=revisions">project revisions</a>)` : "—"]])}
 ${d.missingInformation.length ? alert("warn", html`<strong>Information needed:</strong> ${d.missingInformation.join("; ")}`) : ""}
 <section class="card"><h2 class="card__title">Requirements</h2><p class="faint">Statuses come from the runner with evidence; "verified" requires a check that ran. Counts are not a completion promise.</p>
 ${table(d.requirements as { key: string; label: string; status: string; evidence: string | null; blocker: string | null }[], [
@@ -157,8 +185,9 @@ ${html`<form method="post" action="/staff/builds/projects/${j.project_id}/pause"
 ${configure ? html`<form method="post" action="/staff/builds/projects/${j.project_id}/budget" class="row">${csrf(ctx)}${input({ name: "project_budget", label: "Project limit (USD)", type: "number", step: "0.01", value: x.projectBudgetUsd, id: "f-project-budget" })}${button("Set project limit", { variant: "secondary", size: "sm" })}</form>` : ""}
 <p class="faint">Approving a preview records the owner decision only; it never publishes to production, changes domains, charges the customer or emails them.</p></section>` : ""}
 ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2><pre class="code-block">${d.report}</pre></section>` : ""}
-<section class="card"><h2 class="card__title">Attempts</h2>${table(d.runs as unknown as { attempt: number; runner_id: string; started_at: string; ended_at: string | null; outcome: string | null; cost_usd: number; turns: number; error: string | null }[], [
-  { header: "#", cell: (r) => r.attempt }, { header: "Runner", cell: (r) => r.runner_id }, { header: "Started", cell: (r) => formatDateTime(r.started_at) }, { header: "Ended", cell: (r) => r.ended_at ? formatDateTime(r.ended_at) : "—" },
+<section class="card"><h2 class="card__title">Attempts</h2>${table(d.runs as unknown as { attempt: number; runner_id: string; started_at: string; ended_at: string | null; outcome: string | null; cost_usd: number; turns: number; error: string | null; provider: string | null; model: string | null; zero_cost: number | null }[], [
+  { header: "#", cell: (r) => r.attempt }, { header: "Runner", cell: (r) => r.runner_id },
+  { header: "Provider / model", cell: (r) => html`${r.provider ?? "—"}${r.model ? ` · ${r.model}` : ""}${r.zero_cost === 1 ? html` ${badge("ok", "zero-cost")}` : r.zero_cost === 0 ? html` ${badge("warn", "paid")}` : ""}` }, { header: "Started", cell: (r) => formatDateTime(r.started_at) }, { header: "Ended", cell: (r) => r.ended_at ? formatDateTime(r.ended_at) : "—" },
   { header: "Outcome", cell: (r) => r.outcome ?? "running" }, { header: "Cost", cell: (r) => usd(r.cost_usd), numeric: true }, { header: "Turns", cell: (r) => r.turns, numeric: true }, { header: "Error", cell: (r) => r.error ?? "—" }],
   { empty: emptyState("No attempts yet", "An attempt starts when a runner claims the build.") })}</section>
 <section class="card"><h2 class="card__title">Activity</h2><p class="faint">Sanitized: secrets, keys, emails and long blobs are removed before storage.</p>${table(d.events as { at: string; kind: string; message: string; actor_kind: string }[], [
@@ -184,7 +213,8 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     const f = await ctx.form();
     const n = (k: string) => Number(str(f, k));
     try {
-      await B.updateBuildSettings(owner(ctx), { automationEnabled: !!f.get("automation_enabled"), runBudgetUsd: n("run_budget"), projectBudgetUsd: n("project_budget"), maxRuntimeMinutes: n("max_runtime"), maxTurns: n("max_turns"), maxConcurrent: n("max_concurrent"), maxAttempts: n("max_attempts"), model: str(f, "model") });
+      await B.updateBuildSettings(owner(ctx), { automationEnabled: !!f.get("automation_enabled"), runBudgetUsd: n("run_budget"), projectBudgetUsd: n("project_budget"), maxRuntimeMinutes: n("max_runtime"), maxTurns: n("max_turns"), maxConcurrent: n("max_concurrent"), maxAttempts: n("max_attempts"), model: str(f, "model"),
+        customerRevisionMode: (str(f, "customer_revision_mode") || undefined) as B.CustomerRevisionMode | undefined });
     } catch (e) { return fail(ctx, "/staff/builds", e); }
     return back(ctx, "/staff/builds", "Limits saved.");
   });
@@ -237,6 +267,13 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     return back(ctx, `/staff/builds/${p.id}`, "Preview approved for the delivery process. Nothing was published or sent to the customer.");
   });
 
+  r.post("/staff/builds/customer-revisions/:id/forward", async (ctx, p) => {
+    requireStaff(ctx, "builds.manage");
+    let id: string;
+    try { id = await B.forwardCustomerRevision(ctx.db, p.id, { kind: "user", userId: ctx.user!.id }, { instruction: str(await ctx.form(), "instruction") }); } catch (e) { return fail(ctx, "/staff/builds", e); }
+    return back(ctx, `/staff/builds/${id}`, "Customer revision sent to the AI builder. It continues from the latest build; deliver the result from the project's Revisions tab after review.");
+  });
+
   // ───── Customer-facing summary (own organization; no internal detail) ─────
   r.get("/portal/projects/:id/build-status", async (ctx, p) => {
     const org = requireCustomerOrg(ctx);
@@ -252,6 +289,7 @@ function settingsView(s: B.BuildSettings) {
     automationEnabled: !!s.automation_enabled, globallyPaused: !!s.globally_paused, pauseReason: s.pause_reason, autoStartAfter: s.auto_start_after,
     runBudgetUsd: B.microToUsd(s.run_budget_micro), projectBudgetUsd: B.microToUsd(s.project_budget_micro), maxRuntimeMinutes: s.max_runtime_minutes,
     maxTurns: s.max_turns, maxConcurrent: s.max_concurrent, maxAttempts: s.max_attempts, model: s.model,
+    customerRevisionMode: s.customer_revision_mode,
   };
 }
 void actionForm;

@@ -130,6 +130,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       const res = await client.heartbeat(job, {
         stage, runCostUsd: tracker.attemptCostUsd, turns: tracker.turns(),
         sessionId: tracker.sessionId ?? undefined, activity: tracker.drainActivity(),
+        ...(provider ? { provider: provider.id, model: provider.model(job) } : {}),
       });
       lastLeaseOkAt = Date.now();
       if (!res.continue) {
@@ -251,6 +252,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     await sendRequirements(requirements);
     const req: CompleteRequest = {
       outcome, runCostUsd: tracker.attemptCostUsd, turns: tracker.turns(), sessionId: tracker.sessionId ?? "",
+      ...(provider ? { provider: provider.id, model: provider.model(job) } : {}),
       sourceRepo: sourceRepoValue(), sourceBranch: branch, sourceCommit: commit ?? "",
       previewUrl: fields.preview?.url ?? null, report,
       ...(outcome === "needs_information" ? { missingInformation } : {}),
