@@ -45,7 +45,7 @@ for (const [name, viewport, mobile] of [["desktop", { width: 1440, height: 900 }
   const errors = []; p.on("pageerror", (e) => errors.push(`${p.url()}: ${e.message}`)); p.on("console", (m) => { if (m.type() === "error") errors.push(`${p.url()}: ${m.text()}`); });
   // 1. Every key page renders, scrolls without horizontal overflow, and carries the assistant launcher.
   for (const path of PAGES) {
-    const res = await p.goto(base + path, { waitUntil: "networkidle" });
+    const res = await p.goto(base + path, { waitUntil: "load" });
     await p.waitForTimeout(600);
     const m = await p.evaluate(() => ({ overflow: document.documentElement.scrollWidth - innerWidth, launcher: !!document.querySelector("[data-cb-launch]") }));
     ok(res.status() === 200 && m.overflow <= 0 && m.launcher, `${name} ${path}: 200, no horizontal overflow, assistant present`);
@@ -53,7 +53,7 @@ for (const [name, viewport, mobile] of [["desktop", { width: 1440, height: 900 }
   }
   await step(`${name} pricing`, async () => {
   // 2. Pricing: no dash under a higher package where a lower one is included.
-  await p.goto(base + "/pricing/compare", { waitUntil: "networkidle" });
+  await p.goto(base + "/pricing/compare", { waitUntil: "load" });
   const inherit = await p.evaluate(() => [...document.querySelectorAll("[data-compare] tbody tr")].filter((tr) => tr.querySelectorAll("td").length === 3 && tr.querySelector(".toggletip")).every((tr) => {
     const c = [...tr.querySelectorAll("td")].map((td) => td.classList.contains("compare__no")); const first = c.indexOf(false); return first < 0 || c.slice(first).every((x) => !x); }));
   ok(inherit, `${name} pricing comparison: packages are cumulative in every row`);
@@ -80,7 +80,7 @@ for (const [name, viewport, mobile] of [["desktop", { width: 1440, height: 900 }
   });
   await step(`${name} receptionist`, async () => {
   // 4. AI Receptionist: the call plays and finishes with a summary.
-  await p.goto(base + "/services/ai-receptionist", { waitUntil: "networkidle" });
+  await p.goto(base + "/services/ai-receptionist", { waitUntil: "load" });
   const rc = p.locator("#sv-rc-page"); await rc.scrollIntoViewIfNeeded();
   await rc.getByRole("button", { name: "Replay" }).click();
   for (let i = 0; i < 14; i++) await rc.getByRole("button", { name: "Next line" }).click();
@@ -97,7 +97,7 @@ for (const [name, viewport, mobile] of [["desktop", { width: 1440, height: 900 }
   });
   await step(`${name} about`, async () => {
   // 6. About: interactions respond and the CRESTMONT wordmark is preserved.
-  await p.goto(base + "/about", { waitUntil: "networkidle" });
+  await p.goto(base + "/about", { waitUntil: "load" });
   await p.locator("#sv-constellation [data-cst=ai]").click();
   await p.locator("#sv-journey").getByRole("button", { name: "Next step" }).click();
   await p.locator("#lab").getByRole("tab", { name: "Accessibility" }).click(); await p.locator("#lab").getByRole("button", { name: "Check contrast" }).click();
@@ -108,7 +108,7 @@ for (const [name, viewport, mobile] of [["desktop", { width: 1440, height: 900 }
   await step(`${name} contact`, async () => {
   // 7. Contact: a safe test submission to the disposable preview database reaches the thank-you page.
   if (name === "desktop") {
-    await p.goto(base + "/contact", { waitUntil: "networkidle" });
+    await p.goto(base + "/contact", { waitUntil: "load" });
     await p.locator("#f-name").fill("Preview Check"); await p.locator("#f-email").fill("preview-check@example.com");
     await p.locator(".cx-chip", { hasText: "Something else" }).click();
     await p.locator("#f-message").fill("Automated preview verification — please ignore.");
