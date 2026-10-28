@@ -371,6 +371,7 @@ export function makeConfig(over: Partial<RunnerConfig> & { controlPlaneUrl: stri
     maxCustomerFileBytes: 5 * 1024 * 1024,
     repo: null,
     preview: null,
+    delivery: null,
     platformRepoPatterns: [/Crestmont-Website-Development/i],
     gitAuthorName: "Test Runner",
     gitAuthorEmail: "runner@test.invalid",

@@ -52,6 +52,12 @@ export interface RunnerConfig {
    */
   preview: { command: string; envNames: string[]; timeoutMs: number; gateSecret: string } | null;
   /**
+   * Customer production delivery (Founder decision D5): PRODUCTION_DEPLOY_COMMAND deploys an Owner-authorized release
+   * with the customer-hosting account's credentials (PRODUCTION_DEPLOY_ENV), which must be different variables and
+   * values from the preview credentials. Unset = this runner never deploys a customer site.
+   */
+  delivery: { command: string; envNames: string[]; timeoutMs: number; verifyAttempts: number; verifyDelayMs: number } | null;
+  /**
    * Preview deletion: PREVIEW_DELETE=cloudflare-api (built in: DELETE /accounts/{CLOUDFLARE_ACCOUNT_ID}/workers/scripts/{name}
    * with CLOUDFLARE_API_TOKEN, through the runner's proxy), or PREVIEW_DELETE_COMMAND (a shell command given
    * $CRESTMONT_PREVIEW_NAME and the PREVIEW_DEPLOY_ENV credentials). Unset = previews are never deleted by the runner.
@@ -176,6 +182,26 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
   for (const n of preview?.envNames ?? []) registerSecret(readSecret(env, n));
   registerSecret(preview?.gateSecret ?? "");
 
+  const deliveryCommand = env.PRODUCTION_DEPLOY_COMMAND ?? "";
+  const delivery = deliveryCommand ? {
+    command: deliveryCommand,
+    envNames: list(env.PRODUCTION_DEPLOY_ENV),
+    timeoutMs: num(env.PRODUCTION_DEPLOY_TIMEOUT_SECONDS, 600) * 1000,
+    verifyAttempts: Math.max(1, Math.min(20, num(env.PRODUCTION_VERIFY_ATTEMPTS, 6))),
+    verifyDelayMs: num(env.PRODUCTION_VERIFY_DELAY_SECONDS, 10) * 1000,
+  } : null;
+  if (delivery) {
+    if (!repo) throw new Error("PRODUCTION_DEPLOY_COMMAND needs the project repositories (PROJECT_REPO_*): releases are deployed from the versioned project repository");
+    const shared = delivery.envNames.filter((n) => (preview?.envNames ?? []).includes(n));
+    if (shared.length) throw new Error(`PRODUCTION_DEPLOY_ENV must not reuse the preview credentials (${shared.join(", ")}); use separate variables for the customer-hosting account`);
+    const previewValues = new Set((preview?.envNames ?? []).map((n) => readSecret(env, n)).filter(Boolean));
+    for (const n of delivery.envNames) {
+      const v = readSecret(env, n);
+      if (v && previewValues.has(v)) throw new Error(`PRODUCTION_DEPLOY_ENV ${n} has the same value as a preview credential; production and preview must use different accounts or tokens`);
+      registerSecret(v);
+    }
+  }
+
   return {
     controlPlaneUrl,
     secret,
@@ -203,6 +229,7 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
     repo,
     preview,
     previewDelete,
+    delivery,
     platformRepoPatterns: list(env.CRESTMONT_PLATFORM_REPO_PATTERNS, ["Crestmont-Website-Development", "crestmont-platform"])
       .map((p) => new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")),
     gitAuthorName: env.RUNNER_GIT_NAME ?? "Crestmont AI Builds",

@@ -75,28 +75,42 @@ export interface GatePlan {
   gateSource: string;
 }
 
+/** The site's own Wrangler settings, validated (shared by private previews and customer production releases). */
+export interface SiteConfig {
+  main: string | null;
+  /** The site's assets block as it should be deployed (binding, directory, handling), without run_worker_first. */
+  assets: { directory: string; binding: string; not_found_handling?: string; html_handling?: string } | null;
+  /** The site's own run_worker_first (true, patterns, or false). */
+  workerFirst: true | string[] | false;
+  /** A 404 from assets falls through to the site's Worker (Workers' default without not_found_handling). */
+  fallThrough: boolean;
+  vars: Record<string, string | number | boolean>;
+  compatibilityDate: string;
+  compatibilityFlags: string[];
+}
+
 /**
- * Read the agent's Wrangler config from an export and plan the gated deployment. Anything the preview account cannot
- * or should not get (bindings to data stores, Durable Objects, services, routes, build commands, TOML configs) is
- * refused rather than dropped, so a preview never behaves differently from what the owner thinks was reviewed.
+ * Read the agent's Wrangler config from an export. Anything the target account cannot or should not get (bindings
+ * to data stores, Durable Objects, services, routes, build commands, TOML configs) is refused rather than dropped, so
+ * what is deployed never behaves differently from what the owner reviewed.
  */
-export function planGatedPreview(exportDir: string, workerName: string, key: string): { plan: GatePlan | null; problems: string[] } {
+export function readSiteConfig(exportDir: string): { site: SiteConfig | null; problems: string[] } {
   const problems: string[] = [];
-  if (existsSync(path.join(exportDir, "wrangler.toml"))) return { plan: null, problems: ["wrangler.toml is not supported for private previews (use wrangler.jsonc)"] };
+  if (existsSync(path.join(exportDir, "wrangler.toml"))) return { site: null, problems: ["wrangler.toml is not supported (use wrangler.jsonc)"] };
   const files = ["wrangler.jsonc", "wrangler.json"].filter((f) => existsSync(path.join(exportDir, f)));
-  if (files.length > 1) return { plan: null, problems: ["both wrangler.json and wrangler.jsonc exist"] };
+  if (files.length > 1) return { site: null, problems: ["both wrangler.json and wrangler.jsonc exist"] };
   let agent: Record<string, unknown> = {};
   if (files.length) {
     const file = path.join(exportDir, files[0]);
-    if (lstatSync(file).isSymbolicLink()) return { plan: null, problems: [`${files[0]} is a symbolic link`] };
+    if (lstatSync(file).isSymbolicLink()) return { site: null, problems: [`${files[0]} is a symbolic link`] };
     try {
       const v = parseJsonc(readFileSync(file, "utf8"));
       if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("not an object");
       agent = v as Record<string, unknown>;
-    } catch (err) { return { plan: null, problems: [`${files[0]} could not be read: ${(err as Error).message.slice(0, 120)}`] }; }
+    } catch (err) { return { site: null, problems: [`${files[0]} could not be read: ${(err as Error).message.slice(0, 120)}`] }; }
   }
   const extra = Object.keys(agent).filter((k) => !TOP_KEYS.has(k));
-  if (extra.length) problems.push(`Wrangler config uses settings a private preview does not support: ${extra.slice(0, 8).join(", ")}`);
+  if (extra.length) problems.push(`Wrangler config uses settings Crestmont deployments do not support: ${extra.slice(0, 8).join(", ")}`);
 
   let main: string | null = null;
   if (agent.main !== undefined) {
@@ -105,7 +119,7 @@ export function planGatedPreview(exportDir: string, workerName: string, key: str
     else main = agent.main.replace(/^\.\//, "");
   }
   const assetsIn = agent.assets as Record<string, unknown> | undefined;
-  let assets: Record<string, unknown> | null = null;
+  let assets: SiteConfig["assets"] = null;
   let workerFirst: true | string[] | false = false;
   let fallThrough = false;
   if (assetsIn !== undefined) {
@@ -126,7 +140,7 @@ export function planGatedPreview(exportDir: string, workerName: string, key: str
       const hh = assetsIn.html_handling;
       if (hh !== undefined && !["auto-trailing-slash", "force-trailing-slash", "drop-trailing-slash", "none"].includes(hh as string)) problems.push("assets.html_handling is not supported");
       fallThrough = !!main && (nf === undefined || nf === "none");
-      assets = { directory: dir, binding, ...(nf ? { not_found_handling: nf } : {}), ...(hh ? { html_handling: hh } : {}), run_worker_first: true };
+      assets = { directory: String(dir), binding: String(binding), ...(nf ? { not_found_handling: String(nf) } : {}), ...(hh ? { html_handling: String(hh) } : {}) };
     }
   }
   if (!main && !assets) problems.push("nothing to serve: the Wrangler config has neither main nor assets");
@@ -139,20 +153,27 @@ export function planGatedPreview(exportDir: string, workerName: string, key: str
       vars[k] = v as string | number | boolean;
     }
   }
-  const date = typeof agent.compatibility_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(agent.compatibility_date) ? agent.compatibility_date : "2025-09-01";
-  const flags = Array.isArray(agent.compatibility_flags) ? agent.compatibility_flags.filter((f): f is string => typeof f === "string" && /^[a-z0-9_]{1,64}$/.test(f)) : [];
-  if (problems.length) return { plan: null, problems };
+  const compatibilityDate = typeof agent.compatibility_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(agent.compatibility_date) ? agent.compatibility_date : "2025-09-01";
+  const compatibilityFlags = Array.isArray(agent.compatibility_flags) ? agent.compatibility_flags.filter((f): f is string => typeof f === "string" && /^[a-z0-9_]{1,64}$/.test(f)) : [];
+  if (problems.length) return { site: null, problems };
+  return { site: { main, assets, workerFirst, fallThrough, vars, compatibilityDate, compatibilityFlags }, problems: [] };
+}
+
+/** Plan the gated preview deployment: the gate is the entry point for every request; the site's settings are kept. */
+export function planGatedPreview(exportDir: string, workerName: string, key: string): { plan: GatePlan | null; problems: string[] } {
+  const { site, problems } = readSiteConfig(exportDir);
+  if (!site) return { plan: null, problems };
   const config: Record<string, unknown> = {
     name: workerName,
     main: GATE_FILE,
-    compatibility_date: date,
-    ...(flags.length ? { compatibility_flags: flags } : {}),
+    compatibility_date: site.compatibilityDate,
+    ...(site.compatibilityFlags.length ? { compatibility_flags: site.compatibilityFlags } : {}),
     workers_dev: true,
     preview_urls: false,
-    ...(assets ? { assets } : {}),
-    vars: { ...vars, CRESTMONT_PREVIEW_KEY: key },
+    ...(site.assets ? { assets: { ...site.assets, run_worker_first: true } } : {}),
+    vars: { ...site.vars, CRESTMONT_PREVIEW_KEY: key },
   };
-  return { plan: { config, gateSource: gateSource(workerName, main, assets ? String(assets.binding) : null, workerFirst, fallThrough) }, problems: [] };
+  return { plan: { config, gateSource: gateSource(workerName, site.main, site.assets?.binding ?? null, site.workerFirst, site.fallThrough) }, problems: [] };
 }
 
 /** Write the gate and the generated config into the export, replacing the agent's config. */

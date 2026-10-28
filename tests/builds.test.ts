@@ -7,6 +7,7 @@ import { createPackageOrder, provisionProject } from "../src/services/commerce.t
 import { hmacSha256Hex } from "../src/lib/crypto.ts";
 import { FakePayments } from "./support/security-world.ts";
 import * as B from "../src/services/builds.ts";
+import * as D from "../src/services/site-delivery.ts";
 import type { Env } from "../src/app/context.ts";
 
 const RUNNER_SECRET = "test-runner-secret";
@@ -781,6 +782,122 @@ test("[AIB-006] D3: previews are private: staff and the project's own customer g
   await runner(t2, "complete", { jobId: j2.id, leaseToken: j2.leaseToken, outcome: "ready_for_review", runCostUsd: 0, sourceCommit: "x1", previewUrl: "https://cm-prv-b-b0.acct.workers.dev", previewName: "cm-prv-b-b0", previewGated: true });
   assert.match(flash(await t2.oc.get(`/staff/builds/${j2.id}/preview`)), /BUILD_PREVIEW_GATE_SECRET is not configured/);
   void q2;
+});
+
+// ── Founder decision D5 (2026-10-28): owner-controlled customer production delivery ──
+test("[AIB-006] D5: approval never publishes; a release is prepared, explicitly Owner-authorized, deployed by the runner to the customer's own target, verified, versioned and reversible", async () => {
+  const t = await app();
+  const { pid, firstJobId, cu } = await reviewedProject(t);
+  const REPO = "https://github.com/crestmont-builds/crestmont-build-x";
+  await t.db.prepare(`UPDATE build_jobs SET source_repo = ? WHERE id = ?`).bind(REPO, firstJobId).run();
+  const deliveryUrl = `/staff/builds/projects/${pid}/delivery`;
+  const caps = { runnerId: "r1", capabilities: [...LOCAL_CAPS, "production-deploy"] };
+  // Steps 1-5 first: nothing to release before the owner approves the build.
+  assert.match(await (await t.oc.get(deliveryUrl)).text(), /No approved build yet/);
+  assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "x" })), /has not approved this build/);
+  assert.equal((await t.oc.post(`/staff/builds/${firstJobId}/approve`, { notes: "final" })).status, 303);
+  assert.equal(await t.db.prepare(`SELECT COUNT(*) AS n FROM site_deployments`).first<{ n: number }>().then((r) => r!.n), 0, "approval publishes nothing");
+  assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "Owner-run" })), /Create the project's production target first/);
+
+  // Deployment identity: cm-site-<project>, unique; never a preview or Crestmont name.
+  assert.equal((await t.oc.post(`/staff/builds/projects/${pid}/site-target`)).status, 303);
+  const target = (await t.db.prepare(`SELECT * FROM site_targets WHERE project_id = ?`).bind(pid).first<{ worker_name: string; id: string }>())!;
+  assert.match(target.worker_name, /^cm-site-[a-z0-9-]+$/);
+  assert.match(flash(await t.oc.post(`/staff/builds/projects/${pid}/site-target`)), /already has a production target/);
+  // Domains: the customer's own only, typed twice, unique across customers.
+  assert.match(flash(await t.oc.post(`/staff/builds/projects/${pid}/site-domain`, { hostname: "app.crestmontwebsites.com", confirm: "app.crestmontwebsites.com" })), /Crestmont and workers.dev domains are not allowed/);
+  assert.match(flash(await t.oc.post(`/staff/builds/projects/${pid}/site-domain`, { hostname: "x.acct.workers.dev", confirm: "x.acct.workers.dev" })), /not allowed/);
+  assert.match(flash(await t.oc.post(`/staff/builds/projects/${pid}/site-domain`, { hostname: "www.harbor.example", confirm: "www.harbor.exampl" })), /Type the domain again/);
+  assert.equal((await t.oc.post(`/staff/builds/projects/${pid}/site-domain`, { hostname: "www.harbor.example", confirm: "www.harbor.example" })).status, 303);
+  const other = await reviewedProject(t);
+  await t.oc.post(`/staff/builds/projects/${other.pid}/site-target`);
+  assert.match(flash(await t.oc.post(`/staff/builds/projects/${other.pid}/site-domain`, { hostname: "www.harbor.example", confirm: "www.harbor.example" })), /already assigned to another customer/);
+  const otherTarget = (await t.db.prepare(`SELECT worker_name FROM site_targets WHERE project_id = ?`).bind(other.pid).first<{ worker_name: string }>())!;
+  assert.notEqual(otherTarget.worker_name, target.worker_name, "one deployment identity per customer project");
+
+  // Step 4: a shared preview needs the customer's approval; an unshared one needs a recorded reason.
+  await t.db.prepare(`UPDATE build_jobs SET customer_preview_shared_at = ? WHERE id = ?`).bind(new Date().toISOString(), firstJobId).run();
+  assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`)), /customer has not reviewed the shared preview/);
+  await t.db.prepare(`UPDATE build_jobs SET customer_preview_shared_at = NULL WHERE id = ?`).bind(firstJobId).run();
+  assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`)), /record why customer review does not apply/);
+  // Step 6: prepare v1 (deploys nothing).
+  assert.equal((await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "Owner-managed site; reviewed on a call." })).status, 303);
+  const v1 = (await t.db.prepare(`SELECT * FROM site_deployments WHERE project_id = ? AND version = 1`).bind(pid).first<{ id: string; state: string; worker_name: string; hostname: string }>())!;
+  assert.equal(v1.state, "prepared");
+  assert.equal(v1.worker_name, target.worker_name);
+  assert.equal(v1.hostname, "www.harbor.example");
+  assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "again" })), /already prepared or in progress/);
+  // Nothing is offered to a runner before authorization, nor to one without the capability.
+  assert.deepEqual((await runner(t, "deployments/claim", caps)).json, { deployment: null });
+
+  // Step 7: Owner-only, typed confirmation. Another staff role cannot authorize.
+  const admin = await createStaff(t.db, "administrator", "admin-d5@crestmont.test");
+  const ac = await t.client().login(admin.email, undefined, admin.secret);
+  assert.equal((await ac.post(`/staff/builds/releases/${v1.id}/authorize`, { confirm: v1.worker_name })).status, 403);
+  assert.match(flash(await t.oc.post(`/staff/builds/releases/${v1.id}/authorize`, { confirm: "cm-site-wrong" })), /Type the site's Worker name/);
+  assert.equal((await t.oc.post(`/staff/builds/releases/${v1.id}/authorize`, { confirm: v1.worker_name, note: "Go live" })).status, 303);
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.site_release_authorized' AND actor_user_id = ?`).bind(t.owner.id).first());
+  assert.deepEqual((await runner(t, "deployments/claim", { runnerId: "r1" })).json, { deployment: null }, "a runner without production-deploy never gets a release");
+
+  // Steps 8-10: the runner claims it (lease), deploys and reports verification evidence.
+  const c1 = (await runner(t, "deployments/claim", caps)).json.deployment;
+  assert.deepEqual({ ...c1, leaseToken: "x" }, { id: v1.id, leaseToken: "x", kind: "release", version: 1, projectId: pid, workerName: v1.worker_name, hostname: "www.harbor.example", sourceRepo: REPO, sourceCommit: "first0000001" });
+  assert.equal((await runner(t, "deployments/claim", caps)).json.deployment, null, "claimed once");
+  assert.equal((await runner(t, "deployments/complete", { deploymentId: v1.id, leaseToken: "0".repeat(64), result: "deployed" })).status, 409);
+  const sha = "a".repeat(64);
+  const verified = { url: "https://www.harbor.example/", httpStatus: 200, expectedSha256: sha, actualSha256: sha, matched: true, attempts: 1 };
+  assert.deepEqual((await runner(t, "deployments/complete", { deploymentId: v1.id, leaseToken: c1.leaseToken, result: "deployed", deployedUrl: "https://cm-site-x.acct.workers.dev", contentSha256: sha, verification: verified })).json, { state: "live" });
+  assert.equal((await runner(t, "deployments/complete", { deploymentId: v1.id, leaseToken: c1.leaseToken, result: "deployed" })).status, 409, "reported once");
+  const note = await t.db.prepare(`SELECT body FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`).bind(cu.id).first<{ body: string }>();
+  assert.match(note!.body, /Version 1 of your website was published and verified at https:\/\/www.harbor.example/);
+  // D2 hand-off: the approved preview's retention starts only now that its production deployment is verified.
+  assert.equal((await B.previewRetentionFor(t.db, (await B.getJob(t.db, firstJobId))!)).status, "scheduled");
+  const page = await (await t.oc.get(deliveryUrl)).text();
+  assert.match(page, /Live and verified/);
+  assert.match(page, /content matches the release/);
+  assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "again" })), /already live/);
+
+  // A newer approved build: v2 deploys but fails verification (v1 stays live); v3 goes live and supersedes v1.
+  assert.equal((await t.oc.post(`/staff/builds/${firstJobId}/revision`, { instruction: "Add the opening hours to the footer of every page." })).status, 303);
+  const rc = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  await runner(t, "complete", { jobId: rc.id, leaseToken: rc.leaseToken, outcome: "ready_for_review", runCostUsd: 0, sourceRepo: REPO, sourceCommit: "rev10000001", previewUrl: "https://cm-prv-x-r1.acct.workers.dev", previewName: "cm-prv-x-r1", previewGated: true });
+  assert.equal((await t.oc.post(`/staff/builds/${rc.id}/approve`, { notes: "" })).status, 303);
+  assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "old" })), /newer build of this project was approved/);
+  const release = async (expectState: string, verification: unknown) => {
+    assert.equal((await t.oc.post(`/staff/builds/${rc.id}/prepare-release`, { customer_review_na: "Owner-managed site." })).status, 303);
+    const d = (await t.db.prepare(`SELECT id, worker_name, version FROM site_deployments WHERE project_id = ? ORDER BY version DESC LIMIT 1`).bind(pid).first<{ id: string; worker_name: string; version: number }>())!;
+    await t.oc.post(`/staff/builds/releases/${d.id}/authorize`, { confirm: d.worker_name });
+    const c = (await runner(t, "deployments/claim", caps)).json.deployment;
+    assert.equal((await runner(t, "deployments/complete", { deploymentId: d.id, leaseToken: c.leaseToken, result: "deployed", contentSha256: sha, verification })).json.state, expectState);
+    return d;
+  };
+  const v2 = await release("verification_failed", { ...verified, actualSha256: "b".repeat(64), matched: false });
+  assert.equal((await D.getDeployment(t.db, v1.id))!.state, "live", "a failed verification does not replace the live version");
+  assert.equal(v2.version, 2);
+  const v3 = await release("live", verified);
+  assert.equal((await D.getDeployment(t.db, v1.id))!.state, "superseded");
+  // Rollback: a new version from v1's source, authorized like any release.
+  assert.equal((await t.oc.post(`/staff/builds/releases/${v1.id}/rollback`)).status, 303);
+  const v4 = (await t.db.prepare(`SELECT * FROM site_deployments WHERE project_id = ? AND version = 4`).bind(pid).first<{ id: string; kind: string; rollback_of: string; source_commit: string; state: string }>())!;
+  assert.deepEqual([v4.kind, v4.rollback_of, v4.source_commit, v4.state], ["rollback", v1.id, "first0000001", "prepared"]);
+  assert.match(flash(await t.oc.post(`/staff/builds/releases/${v3.id}/rollback`)), /is the one live now/);
+  assert.equal((await t.oc.post(`/staff/builds/releases/${v4.id}/authorize`, { confirm: target.worker_name })).status, 303);
+  // The runner vanishes mid-deployment: failed, never retried automatically.
+  const c4 = (await runner(t, "deployments/claim", caps)).json.deployment;
+  assert.equal(c4.sourceCommit, "first0000001");
+  await B.sweepBuilds(t.db, new Date(Date.now() + 2 * 3600_000));
+  assert.equal((await D.getDeployment(t.db, v4.id))!.state, "failed");
+  assert.equal((await runner(t, "deployments/claim", caps)).json.deployment, null);
+  assert.equal((await D.getDeployment(t.db, v3.id))!.state, "live", "the live version is untouched");
+  // Cancel: a prepared release can be withdrawn with a reason.
+  assert.equal((await t.oc.post(`/staff/builds/releases/${v1.id}/rollback`)).status, 303);
+  const v5 = (await t.db.prepare(`SELECT id FROM site_deployments WHERE project_id = ? AND version = 5`).bind(pid).first<{ id: string }>())!;
+  assert.equal((await t.oc.post(`/staff/builds/releases/${v5.id}/cancel`, { reason: "Not today" })).status, 303);
+  assert.equal((await D.getDeployment(t.db, v5.id))!.state, "canceled");
+  for (const a of ["builds.site_target_created", "builds.site_domain_changed", "builds.site_release_prepared", "builds.site_release_live", "builds.site_release_failed", "builds.site_rollback_prepared", "builds.site_release_canceled"])
+    assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = ?`).bind(a).first(), a);
+  // Customers have no access to delivery controls.
+  assert.equal((await other.c.get(deliveryUrl)).status, 403);
 });
 
 // ── Founder decision D1 (2026-10-28): owner approval of customer revisions ──

@@ -243,6 +243,13 @@ async function buildStaffRecords(w: World) {
   await db.prepare(`INSERT INTO build_jobs (id, project_id, organization_id, order_id, kind, revision, dedupe_key, state, state_reason, strategy, package_id, trigger, preview_url, preview_name, preview_gated, agent_session_id, created_at, updated_at)
                     SELECT ?, p.id, p.organization_id, p.order_id, 'first_build', 0, p.id || ':first', 'ready_for_review', 'matrix fixture', 'standard', 'business', 'sweep', 'https://cm-prv-matrix-b0.acct.workers.dev', 'cm-prv-matrix-b0', 1, 'sess-matrix', ?, ? FROM projects p WHERE p.id = ?`)
     .bind(ids.buildJob, nowIso(), nowIso(), w.a.ids.project).run();
+  // Customer production delivery (Founder decision D5): tenant A's target with a superseded v1 and a live v2.
+  ids.siteDeployment = newId("sd");
+  await db.prepare(`INSERT INTO site_targets (id, project_id, organization_id, worker_name, created_at, updated_at) SELECT 'st_matrix', id, organization_id, 'cm-site-matrix-a', ?, ? FROM projects WHERE id = ?`).bind(nowIso(), nowIso(), w.a.ids.project).run();
+  for (const [id, v, state] of [[ids.siteDeployment, 1, "superseded"], [newId("sd"), 2, "live"]] as const) {
+    await db.prepare(`INSERT INTO site_deployments (id, target_id, project_id, organization_id, build_job_id, version, kind, state, source_repo, source_commit, worker_name, prepared_at, verified_at, created_at, updated_at)
+      SELECT ?, 'st_matrix', project_id, organization_id, id, ?, 'release', ?, 'https://github.com/crestmont-builds/matrix', 'abc1234', 'cm-site-matrix-a', ?, ?, ?, ? FROM build_jobs WHERE id = ?`).bind(id, v, state, nowIso(), nowIso(), nowIso(), nowIso(), ids.buildJob).run();
+  }
   // Public identifiers
   ids.serviceSlug = "website-design-development";
   ids.legalSlug = "terms";

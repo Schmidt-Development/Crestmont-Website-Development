@@ -160,7 +160,7 @@ export function writeAgentConfig(ws: Workspace, p: Omit<AgentPermissionInput, "r
 // ── Agent environment ──
 
 /** Name patterns that must never reach the agent (checked after the allowlist as a second guard). */
-export const FORBIDDEN_ENV = /(RUNNER_SECRET|BUILD_RUNNER|STRIPE|CLOUDFLARE|CF_API|WRANGLER|GITHUB|GH_TOKEN|PROJECT_REPO|PREVIEW_|DATABASE|D1_|SESSION_SECRET|PAYMENT|PASSWORD|AWS_|PRIVATE_KEY|CONTROL_PLANE)/i;
+export const FORBIDDEN_ENV = /(RUNNER_SECRET|BUILD_RUNNER|STRIPE|CLOUDFLARE|CF_API|WRANGLER|GITHUB|GH_TOKEN|PROJECT_REPO|PREVIEW_|PRODUCTION_|SITE_DEPLOY|DATABASE|D1_|SESSION_SECRET|PAYMENT|PASSWORD|AWS_|PRIVATE_KEY|CONTROL_PLANE)/i;
 
 export function buildAgentEnv(cfg: Pick<RunnerConfig, "agentPath" | "anthropicApiKey" | "anthropicBaseUrl" | "agentPassthrough">, ws: Workspace, source: Record<string, string | undefined> = process.env): Record<string, string> {
   const env: Record<string, string> = {

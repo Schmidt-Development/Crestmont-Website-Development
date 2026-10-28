@@ -11,6 +11,7 @@ import { alert, badge, button, csrf, dl, emptyState, input, kpi, pageHead, pageP
 import { staffPage } from "./crm.ts";
 import * as B from "../services/builds.ts";
 import * as AIR from "../services/ai-runner.ts";
+import * as D from "../services/site-delivery.ts";
 import { notify } from "../services/notifications.ts";
 
 const RUNNER = "/api/builds/runner";
@@ -62,6 +63,9 @@ export function register(r: Router): void {
   r.post(`${RUNNER}/ai/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await AIR.claimAiJob(ctx.db, typeof b.runnerId === "string" ? b.runnerId : "", ctx.now())); }));
   r.post(`${RUNNER}/ai/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await AIR.completeAiJob(ctx.db, await runnerBody(ctx)))));
   // Preview lifecycle (protocol v1.2): previews to delete, and the runner's report for each.
+  // Customer production delivery (protocol v1.4; Founder decision D5): Owner-authorized releases only.
+  r.post(`${RUNNER}/deployments/claim`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await D.claimDeployment(ctx.db, await runnerBody(ctx), ctx.now()))));
+  r.post(`${RUNNER}/deployments/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await D.completeDeployment(ctx.db, await runnerBody(ctx), ctx))));
   r.post(`${RUNNER}/previews/claim`, runnerRoute(async (ctx) => { await runnerBody(ctx); return jsonResponse(ctx, 200, await B.claimExpiredPreviews(ctx.db, ctx.now())); }));
   r.post(`${RUNNER}/previews/deleted`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.reportPreviewDeleted(ctx.db, await runnerBody(ctx)))));
   r.post(`${RUNNER}/requirements`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.reportRequirements(ctx.db, await runnerBody(ctx)))));
@@ -204,7 +208,7 @@ ${(j.preview_name || j.preview_url) && !j.preview_deleted_at && !j.preview_delet
   : html`${button("Preserve preview", { variant: "secondary", size: "sm", name: "action", value: "preserve" })}${button("Extend retention by 30 days", { variant: "secondary", size: "sm", name: "action", value: "extend" })}`}</form>` : ""}
 ${html`<form method="post" action="/staff/builds/projects/${j.project_id}/pause" class="row">${csrf(ctx)}${x.projectPaused ? html`<input type="hidden" name="paused" value="0">${button("Resume project automation", { variant: "secondary", size: "sm" })}` : html`<input type="hidden" name="paused" value="1">${input({ name: "reason", label: "Reason", required: true, maxlength: 300, id: "f-project-pause" })}${button("Pause this project", { variant: "secondary", size: "sm" })}`}</form>`}
 ${configure ? html`<form method="post" action="/staff/builds/projects/${j.project_id}/budget" class="row">${csrf(ctx)}${input({ name: "project_budget", label: "Project limit (USD)", type: "number", step: "0.01", value: x.projectBudgetUsd, id: "f-project-budget" })}${button("Set project limit", { variant: "secondary", size: "sm" })}</form>` : ""}
-<p class="faint">Approving a preview records the owner decision only; it never publishes to production, changes domains, charges the customer or emails them.</p></section>` : ""}
+<p class="faint">Approving a preview records the owner decision only; it never publishes to production, changes domains, charges the customer or emails them. Publishing is a separate, owner-authorized release: ${html`<a href="/staff/builds/projects/${j.project_id}/delivery">Production delivery</a>`}.</p></section>` : ""}
 ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2><pre class="code-block">${d.report}</pre></section>` : ""}
 <section class="card"><h2 class="card__title">Attempts</h2>${table(d.runs as unknown as { attempt: number; runner_id: string; started_at: string; ended_at: string | null; outcome: string | null; cost_usd: number; turns: number; error: string | null; provider: string | null; model: string | null; zero_cost: number | null }[], [
   { header: "#", cell: (r) => r.attempt }, { header: "Runner", cell: (r) => r.runner_id },
@@ -336,6 +340,80 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     const f = await ctx.form();
     try { await B.customerReviewPreview({ db: ctx.db, mail: ctx }, { organizationId: org.organizationId, userId: ctx.user!.id }, p.id, p.buildId, str(f, "decision"), str(f, "note")); } catch (e) { return fail(ctx, `/portal/projects/${p.id}/revisions`, e); }
     return redirect(ctx, `/portal/projects/${p.id}/revisions`, { kind: "success", text: "Thank you. Your project team has your review." });
+  });
+
+  // ───── Customer production delivery (Founder decision D5) ─────
+  r.get("/staff/builds/projects/:id/delivery", async (ctx, p) => {
+    requireStaff(ctx, "builds.read");
+    const v = await D.deliveryView(ctx.db, p.id);
+    const configure = can(ctx.actor!, "builds.configure");
+    const t = v.target, b = v.approvedBuild;
+    const inFlight = v.deployments.find((d) => ["prepared", "authorized", "deploying"].includes(d.state));
+    const body = html`${pageHead("Production delivery", linkButton("All builds", "/staff/builds", "ghost", "sm"), v.project.name)}
+${alert("info", html`Approving a preview never publishes it. A release is prepared from the approved build, <strong>explicitly authorized by the Owner</strong>, deployed by the build runner to this customer's own Worker on the customer-hosting account, then verified. Nothing is deployed until a runner with <code>PRODUCTION_DEPLOY_COMMAND</code> is configured.`)}
+<section class="card"><h2 class="card__title">Deployment target</h2>${t ? dl([["Worker", t.worker_name], ["Provider", "Cloudflare Workers (customer-hosting account, never the Crestmont platform account)"],
+  ["Customer domain", t.hostname ? `${t.hostname} (authorized ${formatDateTime(t.hostname_authorized_at!)})` : "None — the site is reachable only on its workers.dev address until a domain is authorized"], ["Status", t.enabled ? "Enabled" : "Disabled"]])
+  : html`<p class="muted">No target yet.</p>${configure ? html`<form method="post" action="/staff/builds/projects/${v.project.id}/site-target" class="row">${csrf(ctx)}${button("Create production target", { size: "sm" })}</form>` : ""}`}
+${t && configure ? html`<form method="post" action="/staff/builds/projects/${v.project.id}/site-domain" class="stack">${csrf(ctx)}${input({ name: "hostname", label: "Authorize customer domain (leave empty to remove)", value: t.hostname ?? "", maxlength: 253, id: "f-site-host" })}${input({ name: "confirm", label: "Type the domain again", maxlength: 253, id: "f-site-host-confirm" })}${button("Save domain authorization", { variant: "secondary", size: "sm" })}</form><p class="faint">Attaching a domain is a separate Owner decision; it takes effect with the next authorized release. Domain purchase and DNS are not done here.</p>` : ""}</section>
+<section class="card"><h2 class="card__title">Prepare a release</h2>${b ? html`<p>Approved build: <a href="/staff/builds/${b.id}">${b.kind === "revision" ? `revision ${b.revision}` : "first build"}</a> · commit ${(b.source_commit ?? "").slice(0, 12)} · approved ${formatDateTime(b.approved_at!)}${b.customer_preview_shared_at ? html` · customer review: ${b.customer_review ? badge(b.customer_review === "approved" ? "ok" : "warn", b.customer_review === "approved" ? "approved" : "changes requested") : badge("pending", "pending")}` : " · not shared with the customer"}</p>
+${v.blockers.filter((x) => !x.includes("record why")).length ? alert("warn", html`<ul>${v.blockers.filter((x) => !x.includes("record why")).map((x) => html`<li>${x}</li>`)}</ul>`) : ""}
+${configure && !inFlight ? html`<form method="post" action="/staff/builds/${b.id}/prepare-release" class="stack">${csrf(ctx)}${b.customer_preview_shared_at ? "" : input({ name: "customer_review_na", label: "Why customer review does not apply (required when the preview was not shared)", maxlength: 300, id: "f-crna" })}${button("Prepare release (does not deploy)", { size: "sm" })}</form>` : inFlight ? html`<p class="faint">A release is already ${D.DEPLOYMENT_STATE_LABELS[inFlight.state].toLowerCase()}.</p>` : ""}` : html`<p class="muted">No approved build yet.</p>`}</section>
+<section class="card"><h2 class="card__title">Releases</h2>${table(v.deployments, [
+  { header: "Version", cell: (d) => html`v${d.version}${d.kind === "rollback" ? html` ${badge("info", "rollback")}` : ""}` },
+  { header: "State", cell: (d) => html`${badge(d.state === "live" ? "ok" : ["failed", "verification_failed"].includes(d.state) ? "bad" : ["prepared", "authorized", "deploying"].includes(d.state) ? "pending" : "muted", D.DEPLOYMENT_STATE_LABELS[d.state])}${d.state_reason ? html`<br><span class="faint">${d.state_reason}</span>` : ""}` },
+  { header: "Source", cell: (d) => html`<a href="/staff/builds/${d.build_job_id}">${d.source_commit.slice(0, 12)}</a>` },
+  { header: "Prepared / authorized", cell: (d) => html`${formatDateTime(d.prepared_at)}${d.authorized_at ? html`<br>authorized ${formatDateTime(d.authorized_at)}` : ""}` },
+  { header: "Evidence", cell: (d) => d.verification_json ? (() => { const x = JSON.parse(d.verification_json) as { url: string | null; httpStatus: number | null; matched: boolean | null; actualSha256: string | null }; return html`${x.url ?? "—"} · HTTP ${x.httpStatus ?? "—"} · ${x.matched === true ? "content matches the release" : x.matched === false ? "content does NOT match" : "no content check"}${x.actualSha256 ? html`<br><span class="faint">sha256 ${x.actualSha256.slice(0, 16)}…</span>` : ""}`; })() : d.error ?? "—" },
+  { header: "Actions", cell: (d) => !configure ? "" : d.state === "prepared" ? html`<form method="post" action="/staff/builds/releases/${d.id}/authorize" class="stack">${csrf(ctx)}${input({ name: "confirm", label: `Type ${d.worker_name} to authorize`, required: true, maxlength: 80, id: `f-auth-${d.id}` })}${input({ name: "note", label: "Note", maxlength: 500, id: `f-auth-note-${d.id}` })}${button("Authorize production release", { variant: "danger", size: "sm" })}</form>${cancelForm(d.id)}`
+    : d.state === "authorized" ? cancelForm(d.id)
+    : d.state === "superseded" && d.verified_at && !inFlight ? html`<form method="post" action="/staff/builds/releases/${d.id}/rollback" class="row">${csrf(ctx)}${button(`Prepare rollback to v${d.version}`, { variant: "secondary", size: "sm" })}</form>` : "" },
+], { empty: emptyState("No releases yet", "Prepare a release from the approved build. Nothing is published until the Owner authorizes it.") })}</section>
+${v.deployments.length ? html`<section class="card"><h2 class="card__title">Release history</h2>${table(v.deployments.flatMap((d) => d.events.map((e) => ({ ...e, version: d.version }))), [
+  { header: "When", cell: (e) => formatDateTime(e.at) }, { header: "Version", cell: (e) => `v${e.version}` }, { header: "By", cell: (e) => e.actor_kind }, { header: "Detail", cell: (e) => e.message }])}</section>` : ""}`;
+    function cancelForm(id: string) { return html`<form method="post" action="/staff/builds/releases/${id}/cancel" class="row">${csrf(ctx)}${input({ name: "reason", label: "Cancel reason", required: true, maxlength: 300, id: `f-cancel-${id}` })}${button("Cancel release", { variant: "ghost", size: "sm" })}</form>`; }
+    return staffPage(ctx, "Production delivery", body);
+  });
+  const deliveryBack = async (ctx: AppContext, projectId: string, text: string) => back(ctx, `/staff/builds/projects/${projectId}/delivery`, text);
+  const projectOfDeployment = async (ctx: AppContext, id: string) => (await D.getDeployment(ctx.db, id))?.project_id ?? null;
+  r.post("/staff/builds/projects/:id/site-target", async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    try { await D.createSiteTarget(owner(ctx), p.id); } catch (e) { return fail(ctx, `/staff/builds/projects/${p.id}/delivery`, e); }
+    return deliveryBack(ctx, p.id, "Production target created. Nothing was deployed.");
+  });
+  r.post("/staff/builds/projects/:id/site-domain", async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    const f = await ctx.form();
+    try { await D.setSiteHostname(owner(ctx), p.id, str(f, "hostname") || null, str(f, "confirm")); } catch (e) { return fail(ctx, `/staff/builds/projects/${p.id}/delivery`, e); }
+    return deliveryBack(ctx, p.id, "Domain authorization saved. It is attached only by the next authorized release.");
+  });
+  r.post("/staff/builds/:id/prepare-release", async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    const job = await B.getJob(ctx.db, p.id);
+    if (!job) throw new HttpError(404, "Build not found");
+    try { await D.prepareRelease(owner(ctx), p.id, str(await ctx.form(), "customer_review_na")); } catch (e) { return fail(ctx, `/staff/builds/projects/${job.project_id}/delivery`, e); }
+    return deliveryBack(ctx, job.project_id, "Release prepared. Nothing is deployed until the Owner authorizes it.");
+  });
+  r.post("/staff/builds/releases/:id/authorize", async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    const pid = await projectOfDeployment(ctx, p.id);
+    if (!pid) throw new HttpError(404, "Release not found");
+    const f = await ctx.form();
+    try { await D.authorizeRelease(owner(ctx), p.id, str(f, "confirm"), str(f, "note")); } catch (e) { return fail(ctx, `/staff/builds/projects/${pid}/delivery`, e); }
+    return deliveryBack(ctx, pid, "Production release authorized. The build runner deploys and verifies it; the result appears here.");
+  });
+  r.post("/staff/builds/releases/:id/cancel", async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    const pid = await projectOfDeployment(ctx, p.id);
+    if (!pid) throw new HttpError(404, "Release not found");
+    try { await D.cancelRelease(owner(ctx), p.id, str(await ctx.form(), "reason")); } catch (e) { return fail(ctx, `/staff/builds/projects/${pid}/delivery`, e); }
+    return deliveryBack(ctx, pid, "Release canceled.");
+  });
+  r.post("/staff/builds/releases/:id/rollback", async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    const pid = await projectOfDeployment(ctx, p.id);
+    if (!pid) throw new HttpError(404, "Release not found");
+    try { await D.prepareRollback(owner(ctx), p.id); } catch (e) { return fail(ctx, `/staff/builds/projects/${pid}/delivery`, e); }
+    return deliveryBack(ctx, pid, "Rollback prepared. It needs the Owner's authorization like any release.");
   });
 
   // ───── Customer-facing summary (own organization; no internal detail) ─────

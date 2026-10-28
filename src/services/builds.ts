@@ -19,6 +19,7 @@ import { getOnboarding, allFields, isVisible, type Answers } from "./onboarding.
 import { sweepAiLeases } from "./ai-runner.ts";
 import { notifyCustomer, notifyProjectTeam, type MailCtx } from "./notifications.ts";
 import { previewSignInUrl, safePreviewPath } from "../lib/preview-token.ts";
+import { sweepDeployments } from "./site-delivery.ts";
 
 const MICRO = 1_000_000;
 export const usdToMicro = (usd: unknown): number => {
@@ -639,7 +640,8 @@ export async function sweepBuilds(db: Db, now = new Date()): Promise<string> {
   }
   const ai = await sweepAiLeases(db, now);
   const previews = await sweepPreviewRetention(db, now);
-  return `${expired} expired lease(s) handled, ${synced} project(s) re-evaluated, ${ai} AI draft lease(s) requeued, ${previews} preview(s) past retention`;
+  const releases = await sweepDeployments(db, now);
+  return `${expired} expired lease(s) handled, ${synced} project(s) re-evaluated, ${ai} AI draft lease(s) requeued, ${previews} preview(s) past retention, ${releases} stalled release(s) failed`;
 }
 
 /** Safe wrapper for hooks inside payment/intake/refund flows: never breaks the caller; the sweep recovers failures. */

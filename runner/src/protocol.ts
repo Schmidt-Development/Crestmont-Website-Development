@@ -184,3 +184,34 @@ export const LIMITS = {
 /** A preview the platform wants deleted (owner request, or past the retention period). */
 export interface ExpiredPreview { jobId: string; previewName: string }
 export interface ExpiredPreviewsResponse { previews: ExpiredPreview[] }
+
+// ── Customer production delivery (protocol v1.4; Founder decision D5) ──
+/**
+ * A release the Owner explicitly authorized: deploy this project's committed source (sourceRepo @ sourceCommit) to
+ * the customer's own Worker (cm-site-*) on the customer-hosting account, then verify it. Offered only to a runner
+ * that declares the "production-deploy" capability (PRODUCTION_DEPLOY_COMMAND configured).
+ */
+export interface SiteDeployment {
+  id: string;
+  leaseToken: string;
+  kind: "release" | "rollback";
+  version: number;
+  projectId: string;
+  workerName: string;
+  /** A customer domain the Owner authorized separately (attached as a Workers custom domain), or null. */
+  hostname: string | null;
+  sourceRepo: string;
+  sourceCommit: string;
+}
+export interface DeploymentClaimResponse { deployment: SiteDeployment | null }
+export interface DeploymentVerification { url: string | null; httpStatus: number | null; expectedSha256: string | null; actualSha256: string | null; matched: boolean | null; attempts: number }
+export interface DeploymentCompleteRequest {
+  deploymentId: string;
+  leaseToken: string;
+  /** "deployed": the deploy command succeeded (see verification); "failed": nothing was (knowingly) changed. */
+  result: "deployed" | "failed";
+  deployedUrl: string | null;
+  contentSha256: string | null;
+  verification: DeploymentVerification | null;
+  error?: string;
+}

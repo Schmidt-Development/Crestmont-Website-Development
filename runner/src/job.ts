@@ -633,7 +633,7 @@ async function deployPreview(cfg: RunnerConfig, ws: Workspace, git: GitCtx, job:
 }
 
 /** Remove package-manager / tool / env files at any depth of the export (never follows links). */
-function stripForPreview(dir: string, depth: number): void {
+export function stripForPreview(dir: string, depth: number): void {
   if (depth > 20) return;
   for (const e of readdirSync(dir)) {
     const p = path.join(dir, e);

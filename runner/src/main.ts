@@ -16,6 +16,7 @@ import { assertIsolation, buildAgentEnv, buildCheckEnv, createWorkspace } from "
 import { loadManifest, preflight } from "./skills.ts";
 import type { SkillManifest, Workflow } from "./skills.ts";
 import { runJob, deletePreview } from "./job.ts";
+import { serveOneDeployment } from "./delivery.ts";
 import type { JobDeps } from "./job.ts";
 import type { QueryFn } from "./providers/claude-agent-sdk.ts";
 import { assertProviderAllowed, createProvider } from "./providers/index.ts";
@@ -45,6 +46,8 @@ export interface LoopDeps {
   drafts?: { serve: () => Promise<DraftOutcome>; maxPerIdle?: number } | null;
   /** Delete expired / owner-deleted previews when idle (null = PREVIEW_DELETE_COMMAND not configured). */
   previews?: { sweep: () => Promise<"unsupported" | number> } | null;
+  /** Owner-authorized customer releases (null = PRODUCTION_DEPLOY_COMMAND not configured). */
+  deployments?: { serve: () => Promise<"unsupported" | "none" | "done"> } | null;
   health?: HealthState;
   /**
    * Model-server readiness probe (local provider). While it fails the runner claims neither builds nor drafts, so an
@@ -85,7 +88,7 @@ export async function sweepPreviews(cfg: RunnerConfig, client: ControlPlaneClien
 
 export function capabilities(cfg: RunnerConfig): string[] {
   const base = cfg.agentProvider === "local" ? ["local-model", "container-sandbox", "zero-token-cost"] : ["agent-sdk"];
-  return [...base, "git", ...(cfg.preview ? ["preview"] : []), ...((cfg.preview?.gateSecret.length ?? 0) >= 32 ? ["private-preview"] : []), ...(cfg.previewDelete ? ["preview-cleanup"] : []), ...(cfg.aiDrafts.enabled && cfg.aiDrafts.provider === "local" ? ["ai-drafts"] : [])];
+  return [...base, "git", ...(cfg.preview ? ["preview"] : []), ...((cfg.preview?.gateSecret.length ?? 0) >= 32 ? ["private-preview"] : []), ...(cfg.previewDelete ? ["preview-cleanup"] : []), ...(cfg.delivery && cfg.repo ? ["production-deploy"] : []), ...(cfg.aiDrafts.enabled && cfg.aiDrafts.provider === "local" ? ["ai-drafts"] : [])];
 }
 
 async function interruptibleSleep(ms: number, shouldStop: () => boolean): Promise<void> {
@@ -100,6 +103,7 @@ export async function runLoop(d: LoopDeps): Promise<number> {
   let jobs = 0;
   let draftsSupported = true;
   let previewsSupported = true;
+  let deploymentsSupported = true;
   let lastProbeAt = 0;
   let modelOk = true;
   let paidRefusalLogged = false;
@@ -152,6 +156,13 @@ export async function runLoop(d: LoopDeps): Promise<number> {
           if (n === "unsupported") { previewsSupported = false; d.logger.info("the control plane does not offer preview cleanup; not polling for it again until restart"); }
           else if (n > 0) d.logger.info("previews deleted", { count: n });
         } catch (err) { d.logger.warn("preview cleanup failed", { error: errorMessage(err) }); }
+      }
+      if (d.deployments && deploymentsSupported && !d.shouldStop()) {
+        try {
+          const r = await d.deployments.serve();
+          if (r === "unsupported") { deploymentsSupported = false; d.logger.info("the control plane does not offer customer releases; not polling for them again until restart"); }
+          else if (r === "done") served++;
+        } catch (err) { d.logger.warn("customer release handling failed", { error: errorMessage(err) }); }
       }
       if (d.once) return jobs;
       if (served > 0) { idleMs = d.cfg.pollMinMs; continue; }
@@ -237,7 +248,7 @@ async function main(argv: string[]): Promise<number> {
   logger.info("runner started", {
     version: RUNNER_VERSION, controlPlane: new URL(cfg.controlPlaneUrl).origin, provider: cfg.agentProvider,
     paidProviderAllowed: cfg.allowPaidProvider, model: cfg.agentProvider === "local" ? cfg.local.model : "per job",
-    aiDrafts: !!ds, preview: !!cfg.preview, privatePreviewGate: (cfg.preview?.gateSecret.length ?? 0) >= 32, projectRepos: !!cfg.repo,
+    aiDrafts: !!ds, preview: !!cfg.preview, privatePreviewGate: (cfg.preview?.gateSecret.length ?? 0) >= 32, customerDelivery: !!(cfg.delivery && cfg.repo), projectRepos: !!cfg.repo,
   });
   if (cfg.preview && cfg.preview.gateSecret.length < 32) logger.warn("PREVIEW_DEPLOY_COMMAND is set but PREVIEW_GATE_SECRET is missing or shorter than 32 characters: no preview will be deployed (previews are private; Founder decision D3)");
   const onDraftError = (msg: string) => {
@@ -248,6 +259,7 @@ async function main(argv: string[]): Promise<number> {
     cfg, client, queryFn, manifest, logger, shouldStop: () => stopping, once: argv.includes("--once"), health,
     drafts: ds ? { serve: () => serveOneDraft({ client, model: ds.model, modelName: ds.modelName, log: logger, onError: onDraftError }) } : null,
     previews: cfg.previewDelete ? { sweep: () => sweepPreviews(cfg, client, logger) } : null,
+    deployments: cfg.delivery && cfg.repo ? { serve: () => serveOneDeployment(cfg, client, capabilities(cfg), { logger }) } : null,
     // The local provider (and local drafts) need the model server; the paid adapter's model is not ours to probe.
     modelProbe: cfg.agentProvider === "local" ? { check: localModelProbe(cfg), intervalMs: 300_000 } : null,
   });

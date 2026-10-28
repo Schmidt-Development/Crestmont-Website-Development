@@ -6,7 +6,8 @@
 import { createHmac } from "node:crypto";
 import type {
   ClaimResponse, HeartbeatRequest, HeartbeatResponse, CheckpointRequest, RequirementItem, CompleteRequest, Job,
-  AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest, ExpiredPreview, ExpiredPreviewsResponse } from "./protocol.ts";
+  AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest, ExpiredPreview, ExpiredPreviewsResponse,
+  SiteDeployment, DeploymentClaimResponse, DeploymentCompleteRequest } from "./protocol.ts";
 import { RUNNER_VERSION, LIMITS } from "./protocol.ts";
 import type { Logger } from "./log.ts";
 import { silentLogger, errorMessage } from "./log.ts";
@@ -177,6 +178,21 @@ export class ControlPlaneClient {
       if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null;
       throw err;
     }
+  }
+
+  /** Customer production delivery: one Owner-authorized release (or null). null result = the platform has no such endpoint. */
+  async claimDeployment(capabilities: string[]): Promise<SiteDeployment | null | "unsupported"> {
+    try {
+      const r = await this.post<DeploymentClaimResponse>("/api/builds/runner/deployments/claim", { runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId), capabilities });
+      return r.deployment ?? null;
+    } catch (err) {
+      if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return "unsupported";
+      throw err;
+    }
+  }
+
+  completeDeployment(req: DeploymentCompleteRequest): Promise<{ state: string }> {
+    return this.post("/api/builds/runner/deployments/complete", { runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId), ...req, ...(req.error ? { error: req.error.slice(0, LIMITS.error) } : {}) });
   }
 
   previewDeleted(jobId: string, ok: boolean, error: string | null): Promise<unknown> {
