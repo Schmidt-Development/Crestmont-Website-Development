@@ -55,6 +55,8 @@ async function waitPath(f, re, what, ms = 20_000) {
 /** A day button with open times, then the first enabled time. */
 async function pickSlot(f, dayRe, timeRe) {
   const days = f.locator("main button", { hasText: dayRe }).filter({ visible: true });
+  // The calendar loads its availability after the page; give it time before deciding there is none.
+  for (let k = 0; k < 40 && !(await days.count()); k++) await sleep(500);
   const n = await days.count();
   for (let d = 0; d < Math.min(n, 12); d++) {
     await click(days.nth(d)); await sleep(300);
@@ -62,7 +64,10 @@ async function pickSlot(f, dayRe, timeRe) {
     if (await t.count()) { await click(t.first()); await sleep(250); return; }
   }
   const seen = await f.evaluate(() => [...document.querySelectorAll("main button")].filter((b) => b.offsetParent).map((b) => `${b.disabled ? "×" : ""}${b.textContent.trim().replace(/\s+/g, " ").slice(0, 14)}`).slice(0, 24).join(", "));
-  throw new Error(`no open time found among ${n} day(s); buttons: ${seen}`);
+  const page = (await f.locator("main").innerText().catch(() => "")).replace(/\s+/g, " ");
+  const msg = (page.match(/[^.]*(no (open )?times?|unavailable|could not|couldn.t|error|try again|closed)[^.]*\./i) || [""])[0].slice(0, 200);
+  const api = await f.evaluate(() => performance.getEntriesByType("resource").filter((e) => /avail|slot|calendar|schedule|times/i.test(e.name)).map((e) => `${new URL(e.name).pathname} ${e.responseStatus ?? ""}`).slice(-4).join(", "));
+  throw new Error(`no open time found among ${n} day(s); page says: "${msg || page.slice(0, 160)}"; availability requests: ${api || "none"}; buttons: ${seen}`);
 }
 
 export const FLOWS = {
