@@ -19,7 +19,10 @@ test("[INFRA-002] production guard: the committed wrangler.toml targets exactly 
   assert.throws(() => guardProduction(swap('bucket_name = "crestmont-files-production"', 'bucket_name = "crestmont-files-staging"')), /bucket/);
   assert.throws(() => guardProduction(swap('name = "crestmont-platform-production"', 'name = "crestmont-platform-staging"')), /worker name/);
   assert.throws(() => guardProduction(swap("workers_dev = false", "workers_dev = true")), /workers_dev/);
-  assert.throws(() => guardProduction(swap('database_id = ""', 'database_id = "not-a-uuid"')), /not a D1 UUID/);
+  assert.throws(() => guardProduction(swap('database_id = "[^"]*"', 'database_id = "not-a-uuid"')), /not a D1 UUID/);
+  // The production database provisioned by provision-production.yml (run #1) is pinned, and only in production.
+  assert.equal(t.databaseId, "c667f1a9-0802-4c52-a0e1-b512219a6eea");
+  assert.equal(toml.split(t.databaseId).length - 1, 1, "no other environment references the production database");
   assert.throws(() => guardProduction("name = \"x\"\n"), /no \[env\.production\]/);
 });
 

@@ -59,4 +59,5 @@ and run the re-encryption script (DEPLOYMENT §4).
   written to the outbox. Customer sign-up and self-service reset do not work for real users until transactional
   email is authorised (marketing email stays off).
 - **Staging credential rotation** after the public-artifact exposure: `Deploy staging` with *rotate_credentials*,
-  once PR #8 is merged (so the new notes are encrypted).
+  once PR #8 is merged (notes sealed with AES-256-GCM; the run verifies that every old credential and session is
+  rejected — docs/STAGING-PREVIEW.md).

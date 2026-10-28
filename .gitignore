@@ -8,3 +8,8 @@ evidence/
 *.db-shm
 test-results/
 .claude/worktrees/
+# CI scratch output that can hold database exports or credentials; never commit (security readiness 2026-10-28)
+backups/
+access/
+drill/
+.pw/

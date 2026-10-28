@@ -15,8 +15,9 @@ export const SESSION_TTL_CUSTOMER_S = 7 * 24 * 3600;
 export const SESSION_IDLE_STAFF_S = 2 * 3600;
 export const SESSION_IDLE_CUSTOMER_S = 24 * 3600;
 const LAST_SEEN_WRITE_INTERVAL_MS = 5 * 60e3;
-const LOCK_AFTER = 8;
+export const LOCK_AFTER = 8;
 const LOCK_MINUTES = 15;
+export const LOCKED_MESSAGE = "This account is temporarily locked after repeated failed sign-ins. Try again later.";
 
 export class AuthError extends Error {
   readonly status: number;
@@ -119,6 +120,17 @@ export async function login(db: Db, emailRaw: string, password: string, meta: { 
   const u = await db.prepare(`SELECT id, password_hash, disabled_at, locked_until, failed_logins, totp_secret FROM users WHERE email = ?`).bind(email)
     .first<{ id: string; password_hash: string | null; disabled_at: string | null; locked_until: string | null; failed_logins: number; totp_secret: string | null }>();
   const ok = await verifyPassword(password, u?.password_hash ?? null);
+  // Lockout is decided BEFORE the password result is used, and looks the same for every email address.
+  // Previously a locked account answered "locked" only to the correct password (and "incorrect" to wrong
+  // ones), which confirmed a guessed password during the lockout. Unknown addresses get an equivalent
+  // counter so the "locked" answer does not reveal which addresses have accounts.
+  const locked = u
+    ? !!(u.locked_until && u.locked_until > nowIso())
+    : !(await rateLimit(db, `login-fail:${email}`, LOCK_AFTER, LOCK_MINUTES * 60)).allowed;
+  if (locked) {
+    await securityEvent(db, "login_blocked_locked", { userId: u?.id, email, ip: meta.ip });
+    throw new AuthError(LOCKED_MESSAGE, 423);
+  }
   if (!u || !ok || u.disabled_at) {
     if (u) {
       const fails = u.failed_logins + 1;
@@ -129,7 +141,6 @@ export async function login(db: Db, emailRaw: string, password: string, meta: { 
     await securityEvent(db, "login_failed", { userId: u?.id, email, ip: meta.ip });
     throw new AuthError("Email or password is incorrect.", 401);
   }
-  if (u.locked_until && u.locked_until > nowIso()) throw new AuthError("This account is temporarily locked after repeated failed sign-ins. Try again later.", 423);
   await db.prepare(`UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?`).bind(u.id).run();
   // Versioned hash format (docs/AUTH-PRODUCTION.md gap 6): a hash made with older parameters is replaced with
   // one made with the current algorithm and cost, now that the plaintext is known to be correct.
@@ -398,12 +409,22 @@ export async function requestPasswordReset(db: Db, emailRaw: string, ip: string 
   return { userId: u.id, token };
 }
 
+/**
+ * After a password is reset or changed, every other outstanding reset link for the account stops working.
+ * Otherwise a reset link sent earlier (for example to a mailbox an attacker can read) would stay valid for its
+ * full hour and could undo the change.
+ */
+export async function invalidateResetTokens(db: Db, userId: string): Promise<void> {
+  await db.prepare(`UPDATE auth_tokens SET used_at = ? WHERE user_id = ? AND purpose = 'password_reset' AND used_at IS NULL`).bind(nowIso(), userId).run();
+}
+
 export async function resetPassword(db: Db, token: string, newPassword: string, ip: string | null) {
   const userId = await consumeToken(db, token, "password_reset");
   const u = await db.prepare(`SELECT email FROM users WHERE id = ?`).bind(userId).first<{ email: string }>();
   const problems = passwordProblems(newPassword, u?.email);
   if (problems.length) throw new AuthError(problems.join(". "));
   await db.prepare(`UPDATE users SET password_hash = ?, failed_logins = 0, locked_until = NULL WHERE id = ?`).bind(await hashPassword(newPassword), userId).run();
+  await invalidateResetTokens(db, userId);
   await revokeAllSessions(db, userId, null, userId);
   await audit(db, { actorUserId: userId, action: "user.password_reset", subjectType: "user", subjectId: userId, ip });
   return userId;
@@ -415,6 +436,7 @@ export async function changePassword(db: Db, userId: string, current: string, ne
   const problems = passwordProblems(next, u.email);
   if (problems.length) throw new AuthError(problems.join(". "));
   await db.prepare(`UPDATE users SET password_hash = ? WHERE id = ?`).bind(await hashPassword(next), userId).run();
+  await invalidateResetTokens(db, userId);
   await audit(db, { actorUserId: userId, action: "user.password_changed", subjectType: "user", subjectId: userId });
   await revokeAllSessions(db, userId, keepSessionId, userId);
 }

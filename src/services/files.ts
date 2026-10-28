@@ -133,6 +133,13 @@ export async function serveFile(ctx: AppContext, id: string, inline: boolean): P
     if (f) await audit(ctx.db, { actorUserId: ctx.user.id, action: "file.download_denied", subjectType: "file", subjectId: f.id, organizationId: f.organization_id, ip: ctx.ip });
     throw new HttpError(404, "File not found");
   }
+  // Fail closed on scanner verdicts (F-02): a file flagged as infected, or whose scan failed, is quarantined.
+  // Nobody downloads or previews it through the portal (share links already refuse it). Files with no scan yet
+  // ('pending') stay downloadable because no scanner is connected; the UI labels them "Not yet scanned".
+  if (isQuarantined(f.scan_status)) {
+    await audit(ctx.db, { actorUserId: ctx.user.id, action: "file.download_blocked", subjectType: "file", subjectId: f.id, organizationId: f.organization_id, ip: ctx.ip, details: { scanStatus: f.scan_status } });
+    throw new HttpError(409, f.scan_status === "infected" ? "This file was flagged by the malware scan and is quarantined." : "The malware scan for this file failed, so it is quarantined until it is scanned again.");
+  }
   if (!ctx.storage) throw new HttpError(503, "File storage is not configured yet.");
   const obj = await ctx.storage.get(f.r2_key);
   if (!obj) throw new HttpError(404, "File content is missing from storage.");
@@ -155,6 +162,11 @@ export function humanSize(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** Scan states in which a file must not be served or shared. */
+export function isQuarantined(status: string): boolean {
+  return status === "infected" || status === "failed";
 }
 
 export function scanLabel(status: string): string {

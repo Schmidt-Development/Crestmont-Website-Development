@@ -18,12 +18,25 @@ automated by `.github/workflows/deploy-staging.yml`.
    - `CLOUDFLARE_API_TOKEN` = the token from step 3
    - `CLOUDFLARE_ACCOUNT_ID` = the ID from step 4
    - optional `STAGING_PREVIEW_PASSWORD` = a preview password you choose (otherwise one is generated)
+   - **`ACCESS_ARTIFACT_PASSPHRASE`** = a passphrase of **at least 16 characters** you keep in your password manager.
+     **Required**: artifacts of a public repository can be downloaded by anyone signed in to GitHub, so the access notes
+     are sealed with this passphrase (AES-256-GCM) and are **not issued at all** without it — whatever the repository's
+     visibility. No plaintext access notes are ever uploaded.
+   - **`EVIDENCE_INGEST_SECRET`** = `openssl rand -hex 32`, set once (docs/DEPLOYMENT.md §5). The same value is used
+     by every workflow; without it staging uses a key derived from the Cloudflare token, and CI, releases and production release authorization cannot sign against staging.
 6. **Run it** — **Actions → Deploy staging → Run workflow** (it also runs on every push to `main`).
 
 ## What you get
 
-Each successful run downloads as a **staging-preview-access** artifact (private to repository members, kept
-7 days). Its README holds, at the top: the website URL, the preview password, the Owner email, the Owner
+Each successful run produces a **staging-preview-access** artifact (kept 7 days) containing `staging-access.cmseal`.
+Decrypt it from a checkout of this repository (Node 22.18 or later):
+
+```sh
+node --no-warnings scripts/seal-access-notes.ts open --in staging-access.cmseal --out staging-access.md
+```
+
+and enter `ACCESS_ARTIFACT_PASSPHRASE` when asked (it is not echoed). A modified file or a wrong passphrase is
+refused; nothing partial is written. Delete the decrypted file when done. The notes hold, at the top: the website URL, the preview password, the Owner email, the Owner
 password and the Owner 2FA authenticator setup key, followed by every other demo account.
 
 The artifact is issued **only after the run has verified the whole sequence on the live site**: preview
@@ -35,11 +48,19 @@ How the credentials stay in sync: every run derives the preview password and all
 Worker secret and the demo accounts. The newest artifact is therefore always correct, and credentials do not
 change between runs unless they are rotated.
 
-- **Rotate everything** (preview password, all demo passwords and 2FA keys; old sessions are signed out):
-  re-run with **rotate_credentials** ticked. Re-add the Owner key to your authenticator afterwards.
+- **Rotate everything**: re-run with **rotate_credentials** ticked (or bump `ACCESS_EPOCH` in the workflow). A rotation
+  replaces the preview password, every demo password and 2FA key, and also removes demo-account sessions, one-time
+  tokens, **recovery codes** and pending authenticator enrolments, and expires invitations sent by demo accounts.
+  The previous preview password is **retired**: if it was your own `STAGING_PREVIEW_PASSWORD` secret, it is ignored
+  from then on (with a warning) until you set a new value. The same run proves the rotation on the live site: the old
+  preview password, old preview cookie, old Owner password, old 2FA key and an Owner session held from before the
+  rotation must all be rejected (step summary "Credential rotation verification"). Every run also writes an
+  **exposure audit** (counts in the summary; details such as IPs only inside the sealed notes). Re-add the Owner key
+  to your authenticator afterwards.
 - Rotating the Cloudflare API token also changes the derived credentials on the next run.
 - Want fresh sample data? Re-run with **reseed_demo_accounts** ticked.
-- Choosing your own preview password: set the `STAGING_PREVIEW_PASSWORD` repository secret; it is used as-is.
+- Choosing your own preview password: set the `STAGING_PREVIEW_PASSWORD` repository secret; it is used as-is unless
+  a rotation has retired that value.
 - R2 (file uploads) is optional: if it is not enabled on the account the preview works and file pages say
   storage is not configured. Enable R2 in the dashboard to turn uploads on (R2 asks for a payment method even
   on its free tier — that is your decision).

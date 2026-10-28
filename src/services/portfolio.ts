@@ -182,7 +182,7 @@ export async function uploadScreenshot(db: Db, storage: StorageAdapter | null, a
   const previous = p[col];
   const at = nowIso();
   const stmts = [
-    db.prepare(`INSERT INTO files (id, organization_id, project_id, r2_key, filename, content_type, size_bytes, sha256, scan_status, folder, uploaded_by, created_at) VALUES (?,?,NULL,?,?,?,?,?,'clean','portfolio',?,?)`)
+    db.prepare(`INSERT INTO files (id, organization_id, project_id, r2_key, filename, content_type, size_bytes, sha256, scan_status, folder, uploaded_by, created_at) VALUES (?,?,NULL,?,?,?,?,?,'pending','portfolio',?,?)`)
       .bind(fileId, org.id, key, name, contentType, bytes.length, sha, actor.userId ?? null, at),
     db.prepare(`UPDATE portfolio_projects SET ${col} = ?, screenshot_captured_at = ?, updated_at = ? WHERE id = ?`).bind(fileId, `${capturedOn}T00:00:00.000Z`, at, id),
     auditStmt(db, actor, previous ? "portfolio.screenshot_replaced" : "portfolio.screenshot_uploaded", id, { kind, fileId, previous, sha256: sha }, ip),
