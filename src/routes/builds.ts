@@ -45,7 +45,7 @@ async function notifyStaff(ctx: AppContext, job: B.BuildJob, to: BuildState) {
   if (!["ready_for_review", "needs_information", "failed", "budget_paused"].includes(to)) return;
   const pm = await ctx.db.prepare(`SELECT project_manager_id FROM projects WHERE id = ?`).bind(job.project_id).first<{ project_manager_id: string | null }>();
   const owners = (await ctx.db.prepare(`SELECT DISTINCT user_id FROM memberships WHERE role_id = 'owner'`).all<{ user_id: string }>()).results.map((r) => r.user_id);
-  const body = to === "ready_for_review" ? "An AI first build is ready for owner review." : to === "needs_information" ? "An AI build needs information before it can continue."
+  const body = to === "ready_for_review" ? "An AI build finished and is waiting for the private internal review (the customer sees nothing yet)." : to === "needs_information" ? "An AI build needs information before it can continue."
     : to === "failed" ? "An AI build failed after its retries." : "An AI build stopped at its spending limit.";
   for (const u of new Set([...owners, ...(pm?.project_manager_id ? [pm.project_manager_id] : [])])) await notify(ctx.db, u, { kind: "build", subjectType: "build_job", subjectId: job.id, body });
 }
@@ -133,7 +133,7 @@ ${!ctx.env.BUILD_RUNNER_SECRET ? alert("warn", html`<strong>Execution unavailabl
   : alert("warn", runner ? `Runner ${runner.runner_id} last checked in ${formatDateTime(runner.last_seen_at)}; it is not polling now, so queued builds are waiting.` : "No build runner has connected yet; queued builds are waiting.")}
 ${runner && !runner.zeroCost && ctx.env.BUILD_ALLOW_PAID_PROVIDER !== "true" ? alert("warn", html`<strong>Paid provider refused.</strong> Runner ${runner.runner_id} does not declare zero token cost (a paid model provider), so it gets no builds. Paid AI needs BUILD_ALLOW_PAID_PROVIDER=true on this environment as well as the runner's own opt-in; budgets still apply.`) : ""}
 ${s.globally_paused ? alert("warn", html`<strong>Automation paused.</strong> ${s.pause_reason ?? ""}`) : ""}
-<div class="kpis">${kpi("Queued", counts.queued ?? 0)}${kpi("Running", (counts.preparing ?? 0) + (counts.building ?? 0) + (counts.verifying ?? 0))}${kpi("In owner review", counts.ready_for_review ?? 0)}${kpi("Need attention", (counts.needs_information ?? 0) + (counts.failed ?? 0) + (counts.budget_paused ?? 0))}</div>
+<div class="kpis">${kpi("Queued", counts.queued ?? 0)}${kpi("Running", (counts.preparing ?? 0) + (counts.building ?? 0) + (counts.verifying ?? 0))}${kpi("Awaiting internal review", counts.ready_for_review ?? 0)}${kpi("Need attention", (counts.needs_information ?? 0) + (counts.failed ?? 0) + (counts.budget_paused ?? 0))}</div>
 <form method="get" class="filters row">${select({ name: "state", label: "State", options: BUILD_STATES.map((x) => ({ value: x, label: BUILD_STATE_LABELS[x] })), value: state, includeBlank: "All states" })}${input({ name: "q", label: "Search", value: q, placeholder: "Customer or project" })}${button("Filter", { variant: "secondary", size: "sm" })}</form>
 ${table(sums, [
   { header: "Customer / project", cell: (x) => html`<a href="/staff/builds/${x.id}">${x.organizationName}</a><br><span class="faint">${x.projectName}${x.kind === "revision" ? ` · revision ${x.revision}` : ""}</span>` },
@@ -183,68 +183,88 @@ ${select({ name: "customer_revision_mode", label: "Customer revision requests", 
     return staffPage(ctx, "AI builds", body);
   });
 
-  const workerKeyPage = (ctx: AppContext, label: string, workerId: string, key: string) => staffPage(ctx, "Builder worker key", html`${pageHead("Builder worker key", linkButton("Builder accounts", "/staff/builds/workers", "ghost", "sm"))}
-${alert("warn", html`Shown <strong>once</strong>. Put it in the build machine's secrets folder for <strong>${label}</strong> (<code>worker_${workerId}_key</code>) and reference it from the orchestrator's worker list. It is a Crestmont enrollment key, not a Claude or OpenAI credential; it cannot be shown again (rotate it if lost).`)}
+  const workerKeyPage = (ctx: AppContext, label: string, workerId: string, key: string) => staffPage(ctx, "GPU worker key", html`${pageHead("GPU worker key", linkButton("GPU workers", "/staff/builds/workers", "ghost", "sm"))}
+${alert("warn", html`Shown <strong>once</strong>. On the build machine for <strong>${label}</strong>, save it as <code>C:\CrestmontRunner\secrets\worker_key</code> (one line) and pass the worker id to the installer (<code>-WorkerId ${workerId}</code>). It is a Crestmont enrollment key, not a model or provider credential; it cannot be shown again (rotate it if lost).`)}
 <section class="card"><p>Worker id: <code>${workerId}</code></p><p>Enrollment key: <code>${key}</code></p></section>`);
+  const mb = (n: number | null) => n === null ? "—" : n >= 1024 ? `${(n / 1024).toFixed(1)} GB` : `${n} MB`;
+  const parseJson = <T,>(s: string | null, d: T): T => { if (!s) return d; try { return JSON.parse(s) as T; } catch { return d; } };
   r.get("/staff/builds/workers", async (ctx) => {
     requireStaff(ctx, "builds.read");
     const configure = can(ctx.actor!, "builds.configure");
     const workers = await W.listWorkers(ctx.db);
+    const models = await W.listModels(ctx.db);
     const av = new Map((await W.workerAvailability(ctx.db, ctx.now())).map((a) => [a.workerId, a]));
-    const assignments = new Map((await ctx.db.prepare(`SELECT a.worker_id, a.project_id, p.name FROM build_assignments a JOIN projects p ON p.id = a.project_id WHERE a.released_at IS NULL`).all<{ worker_id: string; project_id: string; name: string }>()).results.map((r) => [r.worker_id, r]));
-    const jobsBy = new Map((await ctx.db.prepare(`SELECT worker_id, COUNT(*) AS n, SUM(CASE WHEN state IN ('preparing','building','verifying') THEN 1 ELSE 0 END) AS live FROM build_jobs WHERE worker_id IS NOT NULL GROUP BY worker_id`).all<{ worker_id: string; n: number; live: number }>()).results.map((r) => [r.worker_id, r]));
-    const body = html`${pageHead("Builder accounts", linkButton("Pipeline", "/staff/builds/pipeline", "ghost", "sm"), "AI builds")}
-${alert("info", html`Each worker is one Claude account signed in on Node 1 and owns <strong>one customer website at a time</strong>, through its whole development and review cycle. New websites go to the eligible worker with the lowest <em>verified</em> weekly usage; workers without verified usage follow, least recently assigned first. Usage is shown only when the orchestrator read it through an authorized interface; it is never estimated. No account passwords or provider tokens are stored here.`)}
-${table(workers, [
-  { header: "Worker", cell: (w) => html`<strong>${w.label}</strong><br><span class="faint">${w.provider_kind === "claude-code" ? "Claude Code · existing Claude plan" : "self-hosted model · $0"}${w.account_label ? html` · ${w.account_label}` : ""}</span>` },
-  { header: "Availability", cell: (w) => { const a = av.get(w.id); return a?.eligible ? badge("ok", "Available") : badge(w.enabled ? "warn" : "muted", a?.reason ?? "—"); } },
-  { header: "Assigned website", cell: (w) => { const a = assignments.get(w.id); return a ? html`<a href="/staff/builds/projects/${a.project_id}/pipeline">${a.name}</a>` : "—"; } },
-  { header: "Sessions", cell: (w) => `${jobsBy.get(w.id)?.live ?? 0} active · up to ${w.max_sessions} per website` },
-  { header: "Weekly usage", cell: (w) => av.get(w.id)?.usageVerified ? `${w.usage_percent}% (verified: ${w.usage_source}, ${formatDateTime(w.usage_reported_at!)})` : "Not available (no authorized usage interface)" },
-  { header: "Last health check", cell: (w) => html`${w.last_seen_at ? formatDateTime(w.last_seen_at) : "never"}${w.rate_limited_until ? html`<br>${badge("warn", `rate-limited until ${formatDateTime(w.rate_limited_until)}`)}` : ""}${w.last_error ? html`<br><span class="faint">${w.last_error}</span>` : ""}` },
-  { header: "Jobs", cell: (w) => String(jobsBy.get(w.id)?.n ?? 0) },
+    const projectsBy = new Map((await ctx.db.prepare(`SELECT worker_id, COUNT(*) AS n FROM build_assignments WHERE released_at IS NULL GROUP BY worker_id`).all<{ worker_id: string; n: number }>()).results.map((r) => [r.worker_id, r.n]));
+    const fresh = (w: W.BuildWorker) => !!w.telemetry_at && ctx.now().getTime() - Date.parse(w.telemetry_at) < 10 * 60_000;
+    const body = html`${pageHead("GPU workers and AI models", linkButton("Website pipeline", "/staff/builds/pipeline", "ghost", "sm"), "AI builds")}
+${alert("info", html`A GPU worker is an inference server on Crestmont-owned hardware (Node 1 first) with the build runner in front of it. Many websites share one worker: it runs up to its <em>concurrent website builds</em> at once and switches the GPU between <strong>Model A</strong> (architect, reviewer, hard repairs) and <strong>Model B</strong> (builder). Telemetry is shown only as the worker reported it, with its source; nothing is estimated here. Only owned hardware can run builds ($0 metered inference); rented GPUs need a separate Founder approval and budget.`)}
+<section class="card"><h2 class="card__title">GPU workers</h2>${table(workers, [
+  { header: "Worker", cell: (w) => { const hw = parseJson<{ name?: string | null; driver?: string | null }>(w.hardware_json, {}); return html`<strong>${w.label}</strong><br><span class="faint">${hw.name ?? "GPU not reported"}${hw.driver ? ` · driver ${hw.driver}` : ""} · ${w.cost_class.replace(/-/g, " ")}</span>`; } },
+  { header: "Health", cell: (w) => { const a = av.get(w.id); return html`${a?.eligible ? badge("ok", "Available") : badge(w.enabled ? "warn" : "muted", a?.reason ?? "—")}<br><span class="faint">last report ${w.last_seen_at ? formatDateTime(w.last_seen_at) : "never"}</span>${w.last_error ? html`<br><span class="faint">${w.last_error}</span>` : ""}`; } },
+  { header: "Model loaded", cell: (w) => { const l = parseJson<{ model: string; vramMb: number | null }[]>(w.loaded_models_json, []); return html`${l.length ? l.map((x) => html`<code>${x.model}</code> ${x.vramMb !== null ? mb(x.vramMb) : ""}<br>`) : "none"}<span class="faint">${w.model_state ?? "state not reported"}</span>`; } },
+  { header: "VRAM / GPU", cell: (w) => w.telemetry_source && fresh(w) ? html`${mb(w.vram_used_mb)} of ${mb(w.vram_total_mb)} · ${w.gpu_util_percent === null ? "—" : `${w.gpu_util_percent}%`} busy<br><span class="faint">source: ${w.telemetry_source}</span>` : "Not reported" },
+  { header: "Inference", cell: (w) => fresh(w) ? html`${w.active_requests ?? 0} running · ${w.queued_requests ?? 0} queued<br><span class="faint">GPU concurrency ${w.max_concurrent_requests ?? "?"} · ${(() => { const sw = parseJson<{ count?: number; failures?: number; avgMs?: number | null }>(w.switch_json, {}); return `${sw.count ?? 0} model switches${sw.avgMs ? ` (avg ${Math.round(sw.avgMs / 1000)} s)` : ""}${sw.failures ? `, ${sw.failures} failed` : ""}`; })()}</span>` : "Not reported" },
+  { header: "Website builds", cell: (w) => html`${av.get(w.id)?.running ?? 0} running of ${w.max_active_projects}<br><span class="faint">${projectsBy.get(w.id) ?? 0} websites assigned${w.slots_total ? ` · runner slots ${w.slots_busy ?? 0}/${w.slots_total}` : ""}</span>` },
   { header: "", cell: (w) => !configure || !w.enabled ? "" : html`<form method="post" action="/staff/builds/workers/${w.id}/update" class="row">${csrf(ctx)}${w.dispatch_paused ? html`<input type="hidden" name="action" value="resume">${button("Resume dispatch", { variant: "secondary", size: "sm" })}` : html`<input type="hidden" name="action" value="pause">${input({ name: "reason", label: "Pause reason", maxlength: 300, id: `f-wp-${w.id}` })}${button("Pause dispatch", { variant: "secondary", size: "sm" })}`}</form>
-<form method="post" action="/staff/builds/workers/${w.id}/update" class="row">${csrf(ctx)}<input type="hidden" name="action" value="sessions">${input({ name: "max_sessions", label: "Sessions per website", type: "number", value: w.max_sessions, id: `f-ws-${w.id}` })}${button("Save", { variant: "ghost", size: "sm" })}</form>
+<form method="post" action="/staff/builds/workers/${w.id}/update" class="row">${csrf(ctx)}<input type="hidden" name="action" value="capacity">${input({ name: "max_active_projects", label: "Concurrent website builds", type: "number", value: w.max_active_projects, id: `f-wc-${w.id}`, hint: "From the Node 1 concurrency benchmark" })}${button("Save", { variant: "ghost", size: "sm" })}</form>
 <form method="post" action="/staff/builds/workers/${w.id}/rotate-key" class="row">${csrf(ctx)}${button("Rotate enrollment key", { variant: "ghost", size: "sm" })}</form>
 <form method="post" action="/staff/builds/workers/${w.id}/update" class="row">${csrf(ctx)}<input type="hidden" name="action" value="remove">${button("Remove worker", { variant: "danger", size: "sm" })}</form>` },
-], { empty: emptyState("No builder workers", "Without registered workers the builder runs in single-runner mode. Register one worker per Claude account (or local model) the orchestrator serves.") })}
-${configure ? html`<section class="card stack"><h2 class="card__title">Register a worker</h2><form method="post" action="/staff/builds/workers" class="stack">${csrf(ctx)}
-${input({ name: "label", label: "Name", required: true, maxlength: 80, id: "f-w-label" })}
-${select({ name: "provider_kind", label: "Type", options: [{ value: "claude-code", label: "Claude Code (existing Claude plan sign-in on Node 1)" }, { value: "local-model", label: "Self-hosted model (optional)" }], id: "f-w-kind" })}
-${input({ name: "account_label", label: "Claude account (email, identifier only)", maxlength: 120, id: "f-w-account" })}
-${input({ name: "max_sessions", label: "Sessions per website", type: "number", value: 1, id: "f-w-sessions" })}
-${button("Register worker", { size: "sm" })}</form><p class="faint">The account itself is signed in on the build machine with the provider's own login, in that worker's own configuration folder. Crestmont never sees the password or token.</p></section>` : ""}`;
-    return staffPage(ctx, "Builder accounts", body);
+], { empty: emptyState("No GPU workers", "Without registered workers the builder runs in single-runner mode. Register Node 1, then install the runner with its worker id and key.") })}</section>
+<section class="card"><h2 class="card__title">AI models</h2><p class="faint">As each worker reports them. Memory is measured (Ollama, while loaded) or the configured estimate; the source is shown. Throughput is the worker's recent average.</p>${table(models, [
+  { header: "Model", cell: (m) => html`<code>${m.model_tag}</code>${m.loaded ? html` ${badge("ok", "loaded")}` : ""}<br><span class="faint">${[m.family, m.parameter_size, m.license].filter(Boolean).join(" · ") || "details not reported"}</span>` },
+  { header: "Role", cell: (m) => m.role === "architect_reviewer" ? "Model A: architect, reviewer, hard repairs" : m.role === "builder" ? "Model B: builder, routine fixes" : "Single model (both roles)" },
+  { header: "Quantization", cell: (m) => m.quantization ?? "—" },
+  { header: "Memory", cell: (m) => m.vram_mb === null ? "—" : html`${mb(m.vram_mb)} <span class="faint">(${m.vram_source === "measured" ? "measured" : "configured estimate"})</span>` },
+  { header: "Context", cell: (m) => m.context_tokens ? `${m.context_tokens.toLocaleString("en-US")} tokens` : "—" },
+  { header: "Performance", cell: (m) => html`${m.tokens_per_second === null ? "no measurement yet" : `${m.tokens_per_second} tokens/s`}<br><span class="faint">${m.requests} requests</span>` },
+  { header: "Last healthy", cell: (m) => html`${m.last_ok_at ? formatDateTime(m.last_ok_at) : "never"}${m.last_error ? html`<br><span class="faint">${m.last_error}</span>` : ""}` },
+  { header: "Worker", cell: (m) => workers.find((w) => w.id === m.worker_id)?.label ?? m.worker_id },
+], { empty: html`<p class="muted">No model has been reported yet. Models appear when a GPU worker connects.</p>` })}</section>
+${configure ? html`<section class="card stack"><h2 class="card__title">Register a GPU worker</h2><form method="post" action="/staff/builds/workers" class="stack">${csrf(ctx)}
+${input({ name: "label", label: "Name", required: true, maxlength: 80, id: "f-w-label", hint: "For example \"Node 1 RTX 5090\"" })}
+${select({ name: "cost_class", label: "Hardware", options: [{ value: "owned-hardware", label: "Crestmont-owned hardware ($0 metered inference)" }], id: "f-w-cost" })}
+${input({ name: "max_active_projects", label: "Concurrent website builds", type: "number", value: 1, id: "f-w-capacity", hint: "Start with 1; raise it from the concurrency benchmark (docs/ai-builds/ORCHESTRATOR.md)" })}
+${button("Register worker", { size: "sm" })}</form><p class="faint">Rented GPUs and paid inference servers are not available: they need a separate Founder approval and budget.</p></section>` : ""}`;
+    return staffPage(ctx, "GPU workers and AI models", body);
   });
   r.get("/staff/builds/pipeline", async (ctx) => {
     requireStaff(ctx, "builds.read");
-    const rows = (await ctx.db.prepare(`SELECT pl.project_id, pl.stage, pl.stage_reason, pl.updated_at, p.name, o.name AS org,
+    const rows = (await ctx.db.prepare(`SELECT pl.project_id, pl.stage, pl.stage_reason, pl.priority, pl.updated_at, p.name, o.name AS org,
         (SELECT w.label FROM build_assignments a JOIN build_workers w ON w.id = a.worker_id WHERE a.project_id = pl.project_id AND a.released_at IS NULL) AS worker,
-        (SELECT c.decision || ' (cycle ' || c.cycle || ', score ' || COALESCE(c.score, 0) || ')' FROM build_cycles c WHERE c.project_id = pl.project_id ORDER BY c.created_at DESC LIMIT 1) AS review,
+        (SELECT j.id || '|' || j.state || '|' || COALESCE(j.current_model,'') || '|' || COALESCE(j.current_task,'') || '|' || COALESCE(j.activity_state,'') || '|' || COALESCE(j.ai_acceptance,'') || '|' || CASE WHEN j.internal_approved_at IS NULL THEN '0' ELSE '1' END || '|' || CASE WHEN j.customer_preview_shared_at IS NULL THEN '0' ELSE '1' END || '|' || CASE WHEN j.preview_gated = 1 AND j.preview_deleted_at IS NULL THEN '1' ELSE '0' END
+           FROM build_jobs j WHERE j.project_id = pl.project_id ORDER BY j.revision DESC, j.created_at DESC LIMIT 1) AS job,
+        (SELECT c.decision || '|' || c.cycle || '|' || COALESCE(c.score, 0) || '|' || COALESCE(c.reviewer_model, c.reviewer_provider, '') || '|' || COALESCE(c.evidence_json, '') FROM build_cycles c WHERE c.project_id = pl.project_id ORDER BY c.created_at DESC LIMIT 1) AS review,
+        (SELECT COUNT(*) FROM build_jobs j WHERE j.project_id = pl.project_id AND j.kind = 'revision') AS revisions,
         (SELECT COUNT(*) FROM build_integrations i WHERE i.project_id = pl.project_id AND i.live_status <> 'verified_live') AS integrations,
-        (SELECT COUNT(*) FROM build_approvals ap WHERE ap.project_id = pl.project_id AND ap.status = 'pending') AS approvals,
-        (SELECT COUNT(*) FROM build_jobs j WHERE j.project_id = pl.project_id AND j.state IN ('preparing','building','verifying')) AS sessions
-      FROM build_pipeline pl JOIN projects p ON p.id = pl.project_id JOIN organizations o ON o.id = pl.organization_id ORDER BY pl.updated_at DESC LIMIT 200`)
-      .all<{ project_id: string; stage: PL.Stage; stage_reason: string | null; updated_at: string; name: string; org: string; worker: string | null; review: string | null; integrations: number; approvals: number; sessions: number }>()).results;
-    const count = (f: (r: typeof rows[number]) => boolean) => rows.filter(f).length;
+        (SELECT COUNT(*) FROM build_approvals ap WHERE ap.project_id = pl.project_id AND ap.status = 'pending') AS approvals
+      FROM build_pipeline pl JOIN projects p ON p.id = pl.project_id JOIN organizations o ON o.id = pl.organization_id ORDER BY pl.priority DESC, pl.updated_at DESC LIMIT 200`)
+      .all<{ project_id: string; stage: PL.Stage; stage_reason: string | null; priority: number; updated_at: string; name: string; org: string; worker: string | null; job: string | null; review: string | null; revisions: number; integrations: number; approvals: number }>()).results;
+    const sv = await W.schedulerView(ctx.db, ctx.now());
     const av = await W.workerAvailability(ctx.db, ctx.now());
     const spend = await ctx.db.prepare(`SELECT COALESCE(SUM(cost_micro),0) AS paid FROM build_runs WHERE COALESCE(zero_cost, 0) = 0`).first<{ paid: number }>();
-    const pending = (await ctx.db.prepare(`SELECT ap.*, p.name FROM build_approvals ap JOIN projects p ON p.id = ap.project_id WHERE ap.status = 'pending' ORDER BY ap.requested_at`).all<{ id: string; kind: string; summary: string; detail: string | null; requested_at: string; name: string; project_id: string }>()).results;
-    const configure = can(ctx.actor!, "builds.configure");
-    const body = html`${pageHead("AI website pipeline", linkButton("Builder accounts", "/staff/builds/workers", "ghost", "sm"), "AI builds")}
-<div class="kpis">${kpi("Website orders", rows.length)}${kpi("Active", count((r) => ["WORKER_ASSIGNED", "BUILDING", "TESTING", "AI_REVIEW", "REVISION_REQUIRED"].includes(r.stage)))}${kpi("Queued", count((r) => ["QUEUED", "WAITING_FOR_WORKER_CAPACITY"].includes(r.stage)))}${kpi("Builders available", `${av.filter((a) => a.eligible).length} of ${av.length}`)}${kpi("Awaiting Founder approval", count((r) => r.stage === "READY_FOR_FOUNDER_APPROVAL"))}${kpi("Additional AI spend", `$${B.microToUsd(spend?.paid ?? 0).toFixed(2)}`, (spend?.paid ?? 0) === 0 ? "policy $0: subscriptions and owned hardware only" : "NOT ZERO: investigate the runs")}</div>
+    const pending = (await ctx.db.prepare(`SELECT ap.*, p.name FROM build_approvals ap JOIN projects p ON p.id = ap.project_id WHERE ap.status = 'pending' ORDER BY ap.requested_at`).all<{ id: string; kind: string; summary: string; detail: string | null; operation: string | null; requested_at: string; name: string; project_id: string }>()).results;
+    const configure = can(ctx.actor!, "builds.configure"), manage = can(ctx.actor!, "builds.manage");
+    const job = (r: typeof rows[number]) => { const [id, state, model, task, activity, acceptance, internal, shared, preview] = (r.job ?? "").split("|"); return r.job ? { id, state, model, task, activity, acceptance, internal: internal === "1", shared: shared === "1", preview: preview === "1" } : null; };
+    const review = (r: typeof rows[number]) => { if (!r.review) return null; const [decision, cycle, score, by, ...ev] = r.review.split("|"); const e = parseJson<{ checks?: { ok: boolean }[] }>(ev.join("|"), {}); const checks = e.checks ?? []; return { decision, cycle, score: Number(score), by, passed: checks.filter((c) => c.ok).length, total: checks.length }; };
+    const body = html`${pageHead("AI website pipeline", linkButton("GPU workers and AI models", "/staff/builds/workers", "ghost", "sm"), "AI builds")}
+<div class="kpis">${kpi("Active websites", sv.activeProjects)}${kpi("Ready to run", sv.readyToRun)}${kpi("GPU requests running", sv.executingGpuRequests ?? "not reported")}${kpi("Waiting for GPU", sv.waitingForGpu)}${kpi("Running tests", sv.waitingForTests)}${kpi("In AI review", sv.waitingForReview)}${kpi("Waiting for external setup", sv.waitingForExternalSetup)}${kpi("Waiting for a person", sv.waitingForHumanApproval)}${kpi("Delivered", sv.completed)}${kpi("GPU workers available", `${av.filter((a) => a.eligible).length} of ${av.length}`)}${kpi("Metered AI spend", `$${B.microToUsd(spend?.paid ?? 0).toFixed(2)}`, (spend?.paid ?? 0) === 0 ? "policy $0: owned hardware only" : "NOT ZERO: investigate the runs")}</div>
 <section class="card"><h2 class="card__title">Approvals required</h2>${table(pending, [
-  { header: "Website", cell: (a) => html`<a href="/staff/builds/projects/${a.project_id}/pipeline">${a.name}</a>` }, { header: "Kind", cell: (a) => a.kind.replace(/_/g, " ") },
+  { header: "Website", cell: (a) => html`<a href="/staff/builds/projects/${a.project_id}/pipeline">${a.name}</a>` }, { header: "Kind", cell: (a) => html`${a.kind.replace(/_/g, " ")}${a.operation ? html`<br><code>${a.operation}</code>` : ""}` },
   { header: "Request", cell: (a) => html`${a.summary}${a.detail ? html`<br><span class="faint">${a.detail}</span>` : ""}` }, { header: "Requested", cell: (a) => formatDateTime(a.requested_at) },
   { header: "", cell: (a) => configure ? html`<form method="post" action="/staff/builds/approvals/${a.id}/decide" class="stack">${csrf(ctx)}${input({ name: "note", label: "Note (required to reject)", maxlength: 1000, id: `f-apv-${a.id}` })}<div class="row">${button("Approve", { name: "decision", value: "approve", size: "sm" })}${button("Reject", { variant: "ghost", name: "decision", value: "reject", size: "sm" })}</div></form>` : "" },
 ], { empty: html`<p class="muted">Nothing needs your authorization. Routine development continues without approvals.</p>` })}</section>
 <section class="card"><h2 class="card__title">Websites</h2>${table(rows, [
-  { header: "Website", cell: (r) => html`<a href="/staff/builds/projects/${r.project_id}/pipeline">${r.name}</a><br><span class="faint">${r.org}</span>` },
-  { header: "Stage", cell: (r) => html`${badge(r.stage === "FAILED_NEEDS_INTERVENTION" ? "bad" : r.stage.startsWith("WAITING") ? "warn" : r.stage === "READY_FOR_FOUNDER_APPROVAL" ? "ok" : "info", PL.STAGE_LABELS[r.stage])}<br><span class="faint">${r.stage_reason ?? ""}</span>` },
-  { header: "Worker", cell: (r) => r.worker ?? "—" }, { header: "Sessions", cell: (r) => String(r.sessions) },
-  { header: "Latest AI review", cell: (r) => r.review ?? "—" },
-  { header: "Open integrations", cell: (r) => String(r.integrations) }, { header: "Approvals", cell: (r) => String(r.approvals) },
-  { header: "Updated", cell: (r) => formatDateTime(r.updated_at) },
+  { header: "Customer / project", cell: (r) => html`<a href="/staff/builds/projects/${r.project_id}/pipeline">${r.name}</a><br><span class="faint">${r.org}</span>${r.priority ? html`<br>${badge(r.priority > 0 ? "info" : "muted", `priority ${r.priority > 0 ? "+" : ""}${r.priority}`)}` : ""}` },
+  { header: "Stage", cell: (r) => html`${badge(r.stage === "FAILED_NEEDS_INTERVENTION" ? "bad" : r.stage.startsWith("WAITING") || r.stage === "AWAITING_INTERNAL_APPROVAL" ? "warn" : ["READY_FOR_CUSTOMER_PREVIEW", "CUSTOMER_PREVIEW", "APPROVED_FOR_DELIVERY", "DELIVERED"].includes(r.stage) ? "ok" : "info", PL.STAGE_LABELS[r.stage])}<br><span class="faint">${r.stage_reason ?? ""}</span>` },
+  { header: "GPU worker / model", cell: (r) => { const j = job(r); return html`${r.worker ?? "—"}${j?.model ? html`<br><code>${j.model}</code>` : ""}${j?.activity && ["preparing", "building", "verifying"].includes(j.state) ? html`<br><span class="faint">${j.activity.replace(/_/g, " ")}</span>` : ""}`; } },
+  { header: "Last task", cell: (r) => job(r)?.task?.replace(/_/g, " ") || "—" },
+  { header: "Tests", cell: (r) => { const v = review(r); return v && v.total ? `${v.passed}/${v.total} checks passed` : "—"; } },
+  { header: "AI review", cell: (r) => { const v = review(r); return v ? html`${badge(v.decision === "ESCALATED" ? "bad" : v.decision.startsWith("READY") ? "ok" : "info", v.decision.replace(/_/g, " ").toLowerCase())}<br><span class="faint">cycle ${v.cycle} · ${Math.round(v.score * 100)}%${v.by ? ` · ${v.by}` : ""}</span>` : "—"; } },
+  { header: "Revisions", cell: (r) => String(r.revisions), numeric: true },
+  { header: "Pending human actions", cell: (r) => { const j = job(r); const items = [r.approvals ? `${r.approvals} approval(s)` : "", r.integrations ? `${r.integrations} integration(s)` : "", r.stage === "AWAITING_INTERNAL_APPROVAL" ? "internal review" : ""].filter(Boolean); return items.length ? items.join(", ") : j ? "none" : "—"; } },
+  { header: "Private preview", cell: (r) => { const j = job(r); return !j ? "—" : j.preview ? html`<a href="/staff/builds/${j.id}">${j.internal ? "approved internally" : "awaiting internal review"}</a>` : "none"; } },
+  { header: "Customer sees", cell: (r) => { const j = job(r); return j?.shared ? badge("ok", "preview shared") : badge("muted", "nothing yet"); } },
+  { header: "", cell: (r) => manage ? html`<form method="post" action="/staff/builds/projects/${r.project_id}/priority" class="row">${csrf(ctx)}${input({ name: "priority", label: "Priority", type: "number", value: r.priority, id: `f-pr-${r.project_id}` })}${button("Set", { variant: "ghost", size: "sm" })}</form>` : "" },
 ], { empty: emptyState("No websites in the pipeline yet", "A website enters the pipeline when its build is created from a paid intake.") })}</section>`;
     return staffPage(ctx, "AI website pipeline", body);
   });
@@ -265,6 +285,9 @@ ${dl([["Project", html`<a href="/staff/projects/${x.projectId}">${x.projectName}
   ["Attempts", `${x.attempts} of ${x.maxAttempts}`], ["Cost", `${usd(x.costUsd)} this build · project ${usd(x.projectSpendUsd)} of ${usd(x.projectBudgetUsd)} · per-run limit ${usd(x.runBudgetUsd)}`],
   ["Preview", j.preview_deleted_at ? `Deleted ${formatDateTime(j.preview_deleted_at)}${j.preview_name ? ` (${j.preview_name})` : ""}`
     : x.previewUrl ? html`${previewAccess.available ? html`<a href="/staff/builds/${j.id}/preview" rel="noopener noreferrer" target="_blank">Open preview</a> ` : ""}${j.preview_gated ? badge("ok", "Private") : badge("warn", "Public (legacy)")} <span class="faint">${j.preview_name ?? ""}</span>${previewAccess.reason ? html`<br><span class="faint">${previewAccess.reason}</span>` : ""}${j.preview_delete_requested_at ? html` ${badge("warn", "Deletion requested")}` : ""}` : "Not available"],
+  ["Automated acceptance", j.ai_acceptance === "passed" ? badge("ok", "Passed (Model A review + runner checks, confirmed by the platform)") : j.ai_acceptance === "passed_pending_integrations" ? badge("warn", "Passed except live integrations") : j.ai_acceptance === "failed" ? badge("bad", "Not passed") : "No review cycle recorded"],
+  ["Now", ["preparing", "building", "verifying"].includes(j.state) ? `${(j.activity_state ?? "running").replace(/_/g, " ")}${j.current_model ? ` · ${j.current_model}` : ""}${j.current_task ? ` · ${j.current_task.replace(/_/g, " ")}` : ""}` : "—"],
+  ["Internal review (private)", j.internal_approved_at ? html`Approved ${formatDateTime(j.internal_approved_at)}${j.internal_approval_note ? html` <span class="faint">${j.internal_approval_note}</span>` : ""}` : j.state === "ready_for_review" ? badge("warn", "Awaiting internal approval: the customer sees nothing") : "—"],
   ["Customer preview", j.customer_preview_shared_at ? html`Shared ${formatDateTime(j.customer_preview_shared_at)}${j.customer_review ? html` · ${badge(j.customer_review === "approved" ? "ok" : "warn", j.customer_review === "approved" ? "Customer approved" : "Customer requested changes")}${j.customer_review_note ? html` <span class="faint">${j.customer_review_note}</span>` : ""}` : html` · ${badge("pending", "Awaiting customer review")}`}` : "Not shared"],
   ["Source", x.source.repo ? `${x.source.repo}${x.source.branch ? ` @ ${x.source.branch}` : ""}${x.source.commit ? ` (${x.source.commit.slice(0, 12)})` : ""}` : "Not available"],
   ["Preview retention", x.previewRetention.status === "scheduled" ? `Scheduled for deletion on ${formatDateTime(x.previewRetention.deleteAfter!)}${j.preview_retain_until ? " (extended)" : ""}` : x.previewRetention.note],
@@ -280,15 +303,16 @@ ${!["canceled", "approved"].includes(j.state) ? act("cancel", "Cancel build", in
 ${j.state === "failed" ? act("retry", "Retry") : ""}
 ${["paused", "budget_paused", "needs_information", "failed"].includes(j.state) && (j.agent_session_id || j.source_commit) ? act("resume", "Resume saved session") : ""}
 ${["ready_for_review", "approved", "needs_information"].includes(j.state) ? act("revision", "Submit revision", textarea({ name: "instruction", label: "Revision instruction", required: true, maxlength: 5000, rows: 3 }), "primary") : ""}
-${configure && j.state === "ready_for_review" && !j.preview_deleted_at && !j.preview_delete_requested_at ? act("approve", "Approve preview for delivery", input({ name: "notes", label: "Notes", maxlength: 500, id: "f-approve-notes" }), "primary") : ""}
-${j.preview_gated && !j.preview_deleted_at && ["ready_for_review", "approved"].includes(j.state) ? j.customer_preview_shared_at ? act("share-preview", "Stop sharing preview with customer", html`<input type="hidden" name="action" value="unshare">`) : act("share-preview", "Share private preview with customer", html`<input type="hidden" name="action" value="share">`) : ""}
+${configure && j.state === "ready_for_review" && !j.internal_approved_at && j.preview_url && !j.preview_deleted_at ? act("internal-approve", "Approve internally (private review)", input({ name: "note", label: j.ai_acceptance === "passed" || j.ai_acceptance === "passed_pending_integrations" ? "Note" : "Why it may go ahead without passing the automated review (required)", maxlength: 1000, id: "f-internal-note" }), "primary") : ""}
+${j.preview_gated && !j.preview_deleted_at && j.internal_approved_at && ["ready_for_review", "approved"].includes(j.state) ? j.customer_preview_shared_at ? act("share-preview", "Stop sharing preview with customer", html`<input type="hidden" name="action" value="unshare">`) : act("share-preview", "Share private preview with customer", html`<input type="hidden" name="action" value="share">`) : ""}
+${configure && j.state === "ready_for_review" && j.internal_approved_at && !j.preview_deleted_at && !j.preview_delete_requested_at ? act("approve", "Final approval for delivery", input({ name: "notes", label: "Notes", maxlength: 500, id: "f-approve-notes" }), "primary") : ""}
 ${j.preview_name && !j.preview_deleted_at && !j.preview_delete_requested_at && !["preparing", "building", "verifying"].includes(j.state) && !["approved_kept", "kept_unrecoverable"].includes(x.previewRetention.status) ? act("delete-preview", "Delete preview") : ""}
 ${(j.preview_name || j.preview_url) && !j.preview_deleted_at && !j.preview_delete_claimed_at ? html`<form method="post" action="/staff/builds/${j.id}/preview-retention" class="row">${csrf(ctx)}${j.preview_preserved
   ? button("Stop preserving preview", { variant: "secondary", size: "sm", name: "action", value: "release" })
   : html`${button("Preserve preview", { variant: "secondary", size: "sm", name: "action", value: "preserve" })}${button("Extend retention by 30 days", { variant: "secondary", size: "sm", name: "action", value: "extend" })}`}</form>` : ""}
 ${html`<form method="post" action="/staff/builds/projects/${j.project_id}/pause" class="row">${csrf(ctx)}${x.projectPaused ? html`<input type="hidden" name="paused" value="0">${button("Resume project automation", { variant: "secondary", size: "sm" })}` : html`<input type="hidden" name="paused" value="1">${input({ name: "reason", label: "Reason", required: true, maxlength: 300, id: "f-project-pause" })}${button("Pause this project", { variant: "secondary", size: "sm" })}`}</form>`}
 ${configure ? html`<form method="post" action="/staff/builds/projects/${j.project_id}/budget" class="row">${csrf(ctx)}${input({ name: "project_budget", label: "Project limit (USD)", type: "number", step: "0.01", value: x.projectBudgetUsd, id: "f-project-budget" })}${button("Set project limit", { variant: "secondary", size: "sm" })}</form>` : ""}
-<p class="faint">Approving a preview records the owner decision only; it never publishes to production, changes domains, charges the customer or emails them. Publishing is a separate, owner-authorized release: ${html`<a href="/staff/builds/projects/${j.project_id}/delivery">Production delivery</a>`}.</p></section>` : ""}
+<p class="faint">Order: private internal review → (optional) share with the customer → customer feedback and revisions → final approval → Owner-authorized release. Approving records a decision only; it never publishes to production, changes domains, charges the customer or emails them. Publishing is a separate, owner-authorized release: ${html`<a href="/staff/builds/projects/${j.project_id}/delivery">Production delivery</a>`}.</p></section>` : ""}
 ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2><pre class="code-block">${d.report}</pre></section>` : ""}
 <section class="card"><h2 class="card__title">Attempts</h2>${table(d.runs as unknown as { attempt: number; runner_id: string; started_at: string; ended_at: string | null; outcome: string | null; cost_usd: number; turns: number; error: string | null; provider: string | null; model: string | null; zero_cost: number | null }[], [
   { header: "#", cell: (r) => r.attempt }, { header: "Runner", cell: (r) => r.runner_id },
@@ -367,10 +391,20 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     try { id = await B.submitRevision(owner(ctx), j.project_id, str(await ctx.form(), "instruction")); } catch (e) { return fail(ctx, `/staff/builds/${p.id}`, e); }
     return back(ctx, `/staff/builds/${id}`, "Revision queued. It continues from the previous build's source and session; the project budget is cumulative.");
   });
+  r.post("/staff/builds/:id/internal-approve", async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    try { await B.internalApprove(owner(ctx), p.id, str(await ctx.form(), "note")); } catch (e) { return fail(ctx, `/staff/builds/${p.id}`, e); }
+    return back(ctx, `/staff/builds/${p.id}`, "Approved internally. The customer still sees nothing until you share the preview.");
+  });
+  r.post("/staff/builds/projects/:id/priority", async (ctx, p) => {
+    requireStaff(ctx, "builds.manage");
+    try { await W.setProjectPriority(owner(ctx), p.id, Number(str(await ctx.form(), "priority") || "NaN")); } catch (e) { return fail(ctx, "/staff/builds/pipeline", e); }
+    return back(ctx, "/staff/builds/pipeline", "Priority saved. Waiting time still raises lower-priority websites so none is starved.");
+  });
   r.post("/staff/builds/:id/approve", async (ctx, p) => {
     requireStaff(ctx, "builds.configure");
     try { await B.approveBuild(owner(ctx), p.id, str(await ctx.form(), "notes")); } catch (e) { return fail(ctx, `/staff/builds/${p.id}`, e); }
-    return back(ctx, `/staff/builds/${p.id}`, "Preview approved for the delivery process. Nothing was published or sent to the customer.");
+    return back(ctx, `/staff/builds/${p.id}`, "Final approval recorded for the delivery process. Nothing was published or sent to the customer.");
   });
 
   r.post("/staff/builds/:id/preview-retention", async (ctx, p) => {
@@ -422,18 +456,18 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     return redirect(ctx, `/portal/projects/${p.id}/revisions`, { kind: "success", text: "Thank you. Your project team has your review." });
   });
 
-  // ───── Architecture V2: Builder Accounts, pipeline overview, approvals, integrations ─────
+  // ───── V4: GPU workers, pipeline overview, approvals, integrations ─────
   r.post("/staff/builds/workers", async (ctx) => {
     requireStaff(ctx, "builds.configure");
     const f = await ctx.form();
     let res: { id: string; enrollmentKey: string };
-    try { res = await W.registerWorker(owner(ctx), { label: str(f, "label"), providerKind: str(f, "provider_kind"), maxSessions: Number(str(f, "max_sessions") || "1"), accountLabel: str(f, "account_label") }); } catch (e) { return fail(ctx, "/staff/builds/workers", e); }
+    try { res = await W.registerWorker(owner(ctx), { label: str(f, "label"), costClass: str(f, "cost_class") || undefined, maxActiveProjects: Number(str(f, "max_active_projects") || "1") }); } catch (e) { return fail(ctx, "/staff/builds/workers", e); }
     return workerKeyPage(ctx, str(f, "label"), res.id, res.enrollmentKey);
   });
   r.post("/staff/builds/workers/:id/update", async (ctx, p) => {
     requireStaff(ctx, "builds.configure");
     const f = await ctx.form();
-    try { await W.updateWorker(owner(ctx), p.id, str(f, "action"), { reason: str(f, "reason"), maxSessions: f.has("max_sessions") ? Number(str(f, "max_sessions") || "NaN") : undefined }); } catch (e) { return fail(ctx, "/staff/builds/workers", e); }
+    try { await W.updateWorker(owner(ctx), p.id, str(f, "action"), { reason: str(f, "reason"), maxActiveProjects: f.has("max_active_projects") ? Number(str(f, "max_active_projects") || "NaN") : undefined }); } catch (e) { return fail(ctx, "/staff/builds/workers", e); }
     return back(ctx, "/staff/builds/workers", "Worker updated.");
   });
   r.post("/staff/builds/workers/:id/rotate-key", async (ctx, p) => {
@@ -454,25 +488,26 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     if (!proj) throw new HttpError(404, "Project not found");
     const pl = await PL.getPipeline(ctx.db, p.id);
     const spec = pl?.spec_json ? JSON.parse(pl.spec_json) as PL.MasterSpec : null;
-    const cycles = (await ctx.db.prepare(`SELECT * FROM build_cycles WHERE project_id = ? ORDER BY created_at DESC LIMIT 100`).bind(p.id).all<{ id: string; job_id: string; cycle: number; prompt: string; prompt_source: string; reviewer_provider: string | null; proposed_decision: string | null; decision: string | null; decision_reason: string | null; next_prompt: string | null; score: number | null; findings_json: string | null; created_at: string }>()).results;
-    const ints = (await ctx.db.prepare(`SELECT * FROM build_integrations WHERE project_id = ? ORDER BY key`).bind(p.id).all<{ id: string; key: string; name: string; purpose: string; credentials_required: string; setup_instructions: string; permissions_required: string; code_status: string; mock_status: string; live_status: string; human_action: string; responsible: string }>()).results;
+    const cycles = (await ctx.db.prepare(`SELECT * FROM build_cycles WHERE project_id = ? ORDER BY created_at DESC LIMIT 100`).bind(p.id).all<{ id: string; job_id: string; cycle: number; prompt: string; prompt_source: string; reviewer_provider: string | null; builder_model: string | null; reviewer_model: string | null; routing_json: string | null; proposed_decision: string | null; decision: string | null; decision_reason: string | null; next_prompt: string | null; score: number | null; findings_json: string | null; created_at: string }>()).results;
+    const ints = (await ctx.db.prepare(`SELECT * FROM build_integrations WHERE project_id = ? ORDER BY key`).bind(p.id).all<{ id: string; key: string; name: string; purpose: string; credentials_required: string; setup_instructions: string; permissions_required: string; code_status: string; mock_status: string; sandbox_status: string; sandbox_evidence: string | null; live_status: string; human_action: string; responsible: string }>()).results;
     const events = (await ctx.db.prepare(`SELECT * FROM build_pipeline_events WHERE project_id = ? ORDER BY id DESC LIMIT 100`).bind(p.id).all<{ at: string; from_stage: string | null; to_stage: string; message: string; actor_kind: string }>()).results;
     const asg = await W.activeAssignment(ctx.db, p.id);
     const configure = can(ctx.actor!, "builds.configure"), manage = can(ctx.actor!, "builds.manage");
     const body = html`${pageHead(proj.name, linkButton("Pipeline", "/staff/builds/pipeline", "ghost", "sm"), "AI website pipeline")}
-${dl([["Stage", pl ? html`${PL.STAGE_LABELS[pl.stage]} <span class="faint">${pl.stage_reason ?? ""}</span>` : "Not in the pipeline yet"], ["Worker", asg ? (await W.getWorker(ctx.db, asg.worker_id))?.label ?? asg.worker_id : "None"],
+${dl([["Stage", pl ? html`${PL.STAGE_LABELS[pl.stage]} <span class="faint">${pl.stage_reason ?? ""}</span>` : "Not in the pipeline yet"], ["GPU worker", asg ? (await W.getWorker(ctx.db, asg.worker_id))?.label ?? asg.worker_id : "None"], ["Priority", String(pl?.priority ?? 0)],
   ["Specification", spec ? `v${pl!.spec_version} from ${pl!.architect_provider ?? "?"} · ${spec.tasks.length} tasks · ${spec.acceptanceCriteria.length} acceptance criteria` : "None yet"]])}
 ${manage && asg ? html`<form method="post" action="/staff/builds/projects/${p.id}/reassign" class="row">${csrf(ctx)}${input({ name: "reason", label: "Reassign reason", required: true, maxlength: 300, id: "f-reassign" })}${button("Reassign to another worker", { variant: "secondary", size: "sm" })}</form>` : ""}
 <section class="card"><h2 class="card__title">External integrations</h2><p class="faint">Engineering continues with mocks; only the live connection waits. "Live" is recorded by a person after a real test, never inferred from mock tests.</p>${table(ints, [
   { header: "Integration", cell: (i) => html`<strong>${i.name}</strong><br><span class="faint">${i.purpose}</span>` },
   { header: "Needs", cell: (i) => html`${i.credentials_required}<br><span class="faint">${i.permissions_required}</span>` },
   { header: "Setup", cell: (i) => i.setup_instructions },
-  { header: "Code / mock / live", cell: (i) => html`${badge(i.code_status === "implemented" ? "ok" : "pending", i.code_status.replace(/_/g, " "))} ${badge(i.mock_status === "passed" ? "ok" : i.mock_status === "failed" ? "bad" : "pending", `mock ${i.mock_status.replace(/_/g, " ")}`)} ${badge(i.live_status === "verified_live" ? "ok" : "warn", i.live_status.replace(/_/g, " "))}` },
+  { header: "Code / mock / test env / live", cell: (i) => html`${badge(i.code_status === "implemented" ? "ok" : "pending", i.code_status.replace(/_/g, " "))} ${badge(i.mock_status === "passed" ? "ok" : i.mock_status === "failed" ? "bad" : "pending", `mock ${i.mock_status.replace(/_/g, " ")}`)} ${badge(i.sandbox_status === "passed" ? "ok" : i.sandbox_status === "failed" ? "bad" : "pending", `test env ${i.sandbox_status.replace(/_/g, " ")}`)} ${badge(i.live_status === "verified_live" ? "ok" : "warn", i.live_status.replace(/_/g, " "))}${i.sandbox_evidence ? html`<br><span class="faint">${i.sandbox_evidence}</span>` : ""}` },
   { header: "Action / owner", cell: (i) => `${i.human_action} (${i.responsible.replace(/_/g, " ")})` },
   { header: "", cell: (i) => configure ? html`<form method="post" action="/staff/builds/integrations/${i.id}/live" class="row">${csrf(ctx)}${i.live_status === "verified_live" ? html`<input type="hidden" name="live" value="0">${button("Mark not live", { variant: "ghost", size: "sm" })}` : html`<input type="hidden" name="live" value="1">${button("I verified it live", { variant: "secondary", size: "sm" })}`}</form>` : "" },
 ], { empty: html`<p class="muted">No external integrations.</p>` })}</section>
 <section class="card"><h2 class="card__title">Review cycles and prompt history</h2>${table(cycles, [
   { header: "Cycle", cell: (c) => html`<a href="/staff/builds/${c.job_id}">${c.cycle}</a>` },
+  { header: "Models", cell: (c) => html`${c.builder_model ? html`built: <code>${c.builder_model}</code>` : "—"}<br>${c.reviewer_model ? html`reviewed: <code>${c.reviewer_model}</code>` : html`<span class="faint">reviewer: ${c.reviewer_provider ?? "—"}</span>`}${c.routing_json ? html`<br><span class="faint">${parseJson<{ reason?: string }>(c.routing_json, {}).reason ?? ""}</span>` : ""}` },
   { header: "Prompt", cell: (c) => html`<details><summary>${c.prompt_source}</summary><pre class="code-block">${c.prompt}</pre></details>` },
   { header: "Decision", cell: (c) => html`${badge(c.decision === "ESCALATED" ? "bad" : c.decision?.startsWith("READY") ? "ok" : "info", c.decision ?? "—")}${c.proposed_decision && c.proposed_decision !== c.decision ? html`<br><span class="faint">reviewer proposed ${c.proposed_decision}</span>` : ""}<br><span class="faint">${c.decision_reason ?? ""}</span>` },
   { header: "Score", cell: (c) => c.score === null ? "—" : `${Math.round(c.score * 100)}%` },

@@ -257,7 +257,7 @@ async function buildStaffRecords(w: World) {
   }
   // Architecture V2 fixtures: a builder worker (turns worker mode on: claims must name it), an approval and an integration.
   ids.buildWorker = newId("wkr");
-  await db.prepare(`INSERT INTO build_workers (id, label, provider_kind, billing, enabled, dispatch_paused, enrollment_key_hash, created_at, updated_at) VALUES (?, 'Matrix worker', 'local-model', 'zero-cost', 1, 0, ?, ?, ?)`).bind(ids.buildWorker, "0".repeat(64), nowIso(), nowIso()).run();
+  await db.prepare(`INSERT INTO build_workers (id, label, provider_kind, cost_class, enabled, dispatch_paused, enrollment_key_hash, created_at, updated_at) VALUES (?, 'Matrix worker', 'local-gpu', 'owned-hardware', 1, 0, ?, ?, ?)`).bind(ids.buildWorker, "0".repeat(64), nowIso(), nowIso()).run();
   ids.buildApproval = newId("apv");
   await db.prepare(`INSERT INTO build_approvals (id, project_id, organization_id, job_id, kind, summary, dedupe_key, requested_by, requested_at) SELECT ?, project_id, organization_id, id, 'credential_request', 'Stripe secret key for live payments', 'matrix-apv', 'runner', ? FROM build_jobs WHERE id = ?`).bind(ids.buildApproval, nowIso(), ids.buildJob).run();
   ids.buildIntegration = newId("int");

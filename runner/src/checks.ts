@@ -4,7 +4,7 @@
 
 import { existsSync, readFileSync, cpSync, readdirSync, lstatSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { run } from "./exec.ts";
+import { run, programOf } from "./exec.ts";
 import type { ExecResult } from "./exec.ts";
 
 export interface StarterPackageSpec {
@@ -40,6 +40,9 @@ export function loadStarter(dir: string): StarterSpec {
   if (!existsSync(file)) throw new Error(`Starter not found: ${dir}`);
   const spec = JSON.parse(readFileSync(file, "utf8")) as StarterSpec;
   if (spec.schema !== "crestmont.starter/1") throw new Error(`Unsupported starter schema in ${file}`);
+  for (const a of spec.acceptance ?? []) {
+    if (!Array.isArray(a.command) || !programOf(a.command[0])) throw new Error(`Starter ${spec.name}-v${spec.version}: acceptance check ${a.id} must start with an allow-listed program (node, npm, npx, ...), got ${String(a.command?.[0]).slice(0, 60)}`);
+  }
   return spec;
 }
 
@@ -114,7 +117,11 @@ export async function runChecks(repo: string, commands: { id: string; label: str
   const out: CheckOutcome[] = [];
   for (const c of commands) {
     const [cmd, ...args] = c.command;
-    const r = executor ? await executor(c.command, timeoutMs) : await run(cmd, args, { cwd: repo, env, timeoutMs });
+    // Runner-side checks start only allow-listed programs; the sandbox executor runs them inside the job container.
+    const program = programOf(cmd);
+    const r = executor ? await executor(c.command, timeoutMs)
+      : program ? await run(program, args, { cwd: repo, env, timeoutMs })
+      : { code: 126, stdout: "", stderr: `refused: ${String(cmd).slice(0, 60)} is not an allow-listed program`, timedOut: false, notFound: false, refused: true };
     const tail = (r.stdout + "\n" + r.stderr).trim().split("\n").slice(-25).join("\n").slice(-3000);
     out.push({ id: c.id, label: c.label, command: c.command.join(" "), ok: r.code === 0, code: r.code, timedOut: r.timedOut, outputTail: tail });
   }

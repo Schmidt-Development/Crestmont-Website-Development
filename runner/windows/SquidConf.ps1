@@ -15,8 +15,6 @@ $script:CrestmontPaidAiDomains = @(
   ".deepseek.com", ".x.ai", ".perplexity.ai", ".replicate.com", "api-inference.huggingface.co", "router.huggingface.co"
 )
 $script:CrestmontOllamaPullDomains = @("registry.ollama.ai", ".ollama.com", ".r2.cloudflarestorage.com")
-# Founder V3: exact Claude Code hosts, reachable only from the claude worker network (-ClaudeCode).
-$script:CrestmontClaudeServiceDomains = @("api.anthropic.com", "claude.ai", "claude.com", "platform.claude.com", "console.anthropic.com")
 
 function Test-CrestmontDomainMatch {
   param([string]$Entry, [string]$HostName)
@@ -55,8 +53,7 @@ function ConvertTo-SquidConf {
     [Parameter(Mandatory = $true)][string]$Template,
     [Parameter(Mandatory = $true)][string]$PlatformHost,
     [string[]]$ExtraDomains = @(),
-    [switch]$OllamaInDocker,
-    [switch]$ClaudeCode
+    [switch]$OllamaInDocker
   )
   $platform = Assert-CrestmontDomain -Domain $PlatformHost -Label "platform host"
   if ($platform.StartsWith(".")) { throw "platform host: give the exact host, not a .domain wildcard" }
@@ -66,11 +63,10 @@ function ConvertTo-SquidConf {
   }
   $extra = if ($extras.Count) { $extras -join " " } else { "none.invalid" }
   $pull = if ($OllamaInDocker) { $script:CrestmontOllamaPullDomains -join " " } else { "none.invalid" }
-  $claude = if ($ClaudeCode) { $script:CrestmontClaudeServiceDomains -join " " } else { "none.invalid" }
-  foreach ($p in @("__PLATFORM_HOST__", "__RUNNER_EXTRA_DOMAINS__", "__OLLAMA_PULL_DOMAINS__", "__CLAUDE_SERVICE_DOMAINS__")) {
+  foreach ($p in @("__PLATFORM_HOST__", "__RUNNER_EXTRA_DOMAINS__", "__OLLAMA_PULL_DOMAINS__")) {
     if (-not $Template.Contains($p)) { throw "template is missing the $p placeholder" }
   }
-  $out = $Template.Replace("__PLATFORM_HOST__", $platform).Replace("__RUNNER_EXTRA_DOMAINS__", $extra).Replace("__OLLAMA_PULL_DOMAINS__", $pull).Replace("__CLAUDE_SERVICE_DOMAINS__", $claude)
+  $out = $Template.Replace("__PLATFORM_HOST__", $platform).Replace("__RUNNER_EXTRA_DOMAINS__", $extra).Replace("__OLLAMA_PULL_DOMAINS__", $pull)
   $out = $out.Replace("`r`n", "`n")
   $body = ($out -split "`n" | Where-Object { -not $_.StartsWith("#") }) -join "`n"
   if ($body -cmatch '__[A-Z_]+__') { throw "unreplaced placeholder in the rendered configuration" }

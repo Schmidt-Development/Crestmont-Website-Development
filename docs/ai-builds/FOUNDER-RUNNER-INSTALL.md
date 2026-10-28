@@ -11,10 +11,10 @@ Nothing here turns on paid AI. The installer writes `RUNNER_ALLOW_PAID_PROVIDER=
 and refuses that key in your own `runner.local.env`. The platform separately refuses work to any runner that does
 not declare zero token cost unless `BUILD_ALLOW_PAID_PROVIDER=true` is set on the Worker. Leave both off.
 
-**Founder V3 (Claude-only, 2026-10-28).** The three Claude account workers are set up with
-`Install-CrestmontRunner.ps1 -Provider ClaudeCode`; that mode does not install or need Ollama. Exact steps and the
-provider-authorization decision that must come first: `ORCHESTRATOR.md` §9–11. The local-model steps below stay valid for
-`-Provider Local` (the default), where Ollama is optional infrastructure, not a requirement of the V3 pipeline.
+**Founder V4 (local dual-model, 2026-10-28).** Install Node 1 with `-ModelA qwen3.8:27b-q4_K_M -ModelB
+qwen3.6:35b-a3b-q4_K_M -Slots 1 -GpuConcurrency 1 -WorkerId <wkr_...>`, then benchmark and raise slots and concurrency
+from the measurements. Exact steps, the benchmark and the first internal website: `ORCHESTRATOR.md` §12–§14. The
+single-model steps below remain valid (`-Model`).
 
 ## A. Decisions to make first
 

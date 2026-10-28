@@ -60,6 +60,8 @@ services:
       - crestmont-workspaces:/workspaces
       - ../skills:/skills:ro
       - ../secrets:/run/secrets:ro
+      # GPU telemetry written by the host's Write-GpuTelemetry.ps1 (nvidia-smi every minute); read-only (V4).
+      - ../state/telemetry:/run/crestmont:ro
       # The RUNNER needs the Docker API to create per-build sandboxes. The sandboxes themselves never get it.
       - /var/run/docker.sock:/var/run/docker.sock
     group_add: ["${DOCKER_SOCKET_GID:-0}"]
@@ -67,7 +69,7 @@ services:
     read_only: true
     tmpfs: ["/tmp:size=256m", "/home/runner:size=64m"]
     cpus: ${RUNNER_CPUS:-1}
-    mem_limit: ${RUNNER_MEMORY:-1g}
+    mem_limit: ${RUNNER_MEMORY:-2g}      # V4: several website agents (slots) in one runner process
     pids_limit: 256
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]

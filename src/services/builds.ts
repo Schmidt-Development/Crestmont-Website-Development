@@ -20,8 +20,8 @@ import { sweepAiLeases } from "./ai-runner.ts";
 import { notifyCustomer, notifyProjectTeam, type MailCtx } from "./notifications.ts";
 import { previewSignInUrl, safePreviewPath } from "../lib/preview-token.ts";
 import { sweepDeployments } from "./site-delivery.ts";
-import { syncStageFromJob, seedIntegrationsFromBrief } from "./build-pipeline.ts";
-import { authenticateWorker, dispatch, recordWorkerStatus, releaseAssignment, sweepWorkers, workerModeOn } from "./build-workers.ts";
+import { setStage, syncStageFromJob, seedIntegrationsFromBrief } from "./build-pipeline.ts";
+import { activeBuilds, authenticateWorker, dispatch, effectivePriority, recordWorkerStatus, releaseAssignment, sweepWorkers, workerModeOn } from "./build-workers.ts";
 
 const MICRO = 1_000_000;
 export const usdToMicro = (usd: unknown): number => {
@@ -67,6 +67,10 @@ export interface BuildJob {
   preview_preserved: number; preview_retain_until: string | null; preview_delete_reason: string | null; preview_gated: number;
   customer_preview_shared_at: string | null; customer_preview_shared_by: string | null; customer_review: "approved" | "changes_requested" | null;
   customer_reviewed_by: string | null; customer_reviewed_at: string | null; customer_review_note: string | null;
+  /** V4: GPU worker, what the website's agent is doing now (runner-reported), automated acceptance, private review gate. */
+  worker_id: string | null; activity_state: string | null; current_model: string | null; current_task: string | null; activity_at: string | null;
+  ai_acceptance: "passed" | "passed_pending_integrations" | "failed" | null;
+  internal_approved_at: string | null; internal_approved_by: string | null; internal_approval_note: string | null;
 }
 
 export async function getJob(db: Db, id: string): Promise<BuildJob | null> {
@@ -89,13 +93,12 @@ async function transition(db: Db, job: Pick<BuildJob, "id" | "state">, to: Build
     .bind(to, reason, at, ...cols.map((c) => sets[c]), job.id, job.state).run();
   if (!r.meta?.changes) return false;
   await event(db, job.id, "transition", reason, actor, { from: job.state, to });
-  // V2: the project pipeline follows the job; a website that finished its turn frees its builder worker.
+  // The project pipeline follows the job. V4: the GPU-worker affinity (where the workspace and checkpoints live) lasts
+  // through reviews and revisions; it ends at final approval or cancellation. It never holds GPU capacity by itself.
   const p = await db.prepare(`SELECT project_id FROM build_jobs WHERE id = ?`).bind(job.id).first<{ project_id: string }>();
   if (p) {
     await syncStageFromJob(db, { project_id: p.project_id, state: to, state_reason: reason });
-    // V3 §5: ownership lasts the whole development and review lifecycle; released at engineering completion (owner
-    // review), approval or cancellation. Failures and pauses keep the owner (the Owner can reassign explicitly).
-    if (["ready_for_review", "approved", "canceled"].includes(to)) await releaseAssignment(db, p.project_id, `build ${to.replace(/_/g, " ")}`);
+    if (["approved", "canceled"].includes(to)) await releaseAssignment(db, p.project_id, `build ${to.replace(/_/g, " ")}`);
   }
   return true;
 }
@@ -354,12 +357,6 @@ async function projectBudgetMicro(db: Db, projectId: string, s: BuildSettings) {
 
 /** Capability a runner announces when its model costs nothing per token (the self-hosted local provider). */
 export const ZERO_COST_CAPABILITY = "zero-token-cost";
-/**
- * Capability a runner announces for a provider used through an existing subscription sign-in (Claude Code with a
- * Claude plan): no per-token charge to Crestmont. The Founder keeps "extra usage" purchases off on those accounts;
- * the runner strips every API key from the CLI's environment so it cannot fall back to metered API billing.
- */
-export const SUBSCRIPTION_CAPABILITY = "subscription-included";
 
 /** Runner capabilities as recorded: strings only, bounded. */
 export function runnerCapabilities(raw: unknown): string[] {
@@ -372,7 +369,7 @@ export function runnerCapabilities(raw: unknown): string[] {
  * next to the runner's own RUNNER_ALLOW_PAID_PROVIDER; budgets still apply on top.
  */
 export function paidProviderRefused(capabilities: string[], allowPaidProvider: boolean): boolean {
-  return !allowPaidProvider && !capabilities.includes(ZERO_COST_CAPABILITY) && !capabilities.includes(SUBSCRIPTION_CAPABILITY);
+  return !allowPaidProvider && !capabilities.includes(ZERO_COST_CAPABILITY);
 }
 
 export async function claimJob(db: Db, runner: { runnerId: string; version?: string; capabilities?: unknown; workerId?: unknown; workerKey?: unknown; status?: unknown }, now = new Date(), opts: { allowPaidProvider?: boolean } = {}) {
@@ -384,26 +381,29 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
   await db.prepare(`INSERT INTO build_runners (runner_id, version, capabilities, last_seen_at) VALUES (?,?,?,?) ON CONFLICT(runner_id) DO UPDATE SET version = excluded.version, capabilities = excluded.capabilities, last_seen_at = excluded.last_seen_at`)
     .bind(runnerId, version, JSON.stringify(capabilities), at).run();
   if (paidProviderRefused(capabilities, !!opts.allowPaidProvider)) return { job: null, reason: "paid_provider_not_authorized" as const };
-  // V2 worker mode: once builder workers are registered, every claim names its worker; a worker only receives work for
-  // the one website assigned to it (dispatcher: lowest verified usage first, then the documented fallback).
+  // V4 worker mode: once GPU workers are registered, every claim names its worker; a worker receives work only for the
+  // websites assigned to it, up to its concurrent-build capacity (a website waiting for a person holds none).
   let worker: Awaited<ReturnType<typeof authenticateWorker>> | null = null;
   if (await workerModeOn(db)) {
     worker = await authenticateWorker(db, runner.workerId, runner.workerKey);
     await recordWorkerStatus(db, worker, runnerId, runner.status && typeof runner.status === "object" ? runner.status as Record<string, unknown> : {}, now);
     await dispatch(db, now);
-    const fresh = await db.prepare(`SELECT rate_limited_until, dispatch_paused FROM build_workers WHERE id = ?`).bind(worker.id).first<{ rate_limited_until: string | null; dispatch_paused: number }>();
-    if (fresh?.rate_limited_until && Date.parse(fresh.rate_limited_until) > now.getTime()) return { job: null, reason: "worker_rate_limited" as const };
+    const fresh = await db.prepare(`SELECT dispatch_paused, max_active_projects, cost_class FROM build_workers WHERE id = ?`).bind(worker.id).first<{ dispatch_paused: number; max_active_projects: number; cost_class: string }>();
     if (fresh?.dispatch_paused) return { job: null, reason: "paused" as const };
+    if (fresh?.cost_class !== "owned-hardware") return { job: null, reason: "paid_provider_not_authorized" as const };
+    if (await activeBuilds(db, worker.id) >= (fresh?.max_active_projects ?? 1)) return { job: null, reason: "at_capacity" as const };
   }
   const s = await getBuildSettings(db);
   if (s.globally_paused || !s.automation_enabled) return { job: null, reason: "paused" as const };
   if (await activeCount(db) >= s.max_concurrent) return { job: null, reason: "at_capacity" as const };
-  const candidates = worker
-    ? (await db.prepare(`SELECT j.* FROM build_jobs j JOIN build_assignments a ON a.project_id = j.project_id AND a.released_at IS NULL AND a.worker_id = ?
-        LEFT JOIN build_project_controls c ON c.project_id = j.project_id
-        WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?) AND COALESCE(c.paused,0) = 0 ORDER BY j.created_at LIMIT 10`).bind(worker.id, at).all<BuildJob>()).results
-    : (await db.prepare(`SELECT j.* FROM build_jobs j LEFT JOIN build_project_controls c ON c.project_id = j.project_id
-      WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?) AND COALESCE(c.paused,0) = 0 ORDER BY j.created_at LIMIT 10`).bind(at).all<BuildJob>()).results;
+  const rows = worker
+    ? (await db.prepare(`SELECT j.*, COALESCE(pl.priority, 0) AS _priority FROM build_jobs j JOIN build_assignments a ON a.project_id = j.project_id AND a.released_at IS NULL AND a.worker_id = ?
+        LEFT JOIN build_project_controls c ON c.project_id = j.project_id LEFT JOIN build_pipeline pl ON pl.project_id = j.project_id
+        WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?) AND COALESCE(c.paused,0) = 0 ORDER BY j.created_at LIMIT 50`).bind(worker.id, at).all<BuildJob & { _priority: number }>()).results
+    : (await db.prepare(`SELECT j.*, COALESCE(pl.priority, 0) AS _priority FROM build_jobs j LEFT JOIN build_project_controls c ON c.project_id = j.project_id LEFT JOIN build_pipeline pl ON pl.project_id = j.project_id
+      WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?) AND COALESCE(c.paused,0) = 0 ORDER BY j.created_at LIMIT 50`).bind(at).all<BuildJob & { _priority: number }>()).results;
+  // Founder priority first, raised by waiting time (no starvation); then arrival.
+  const candidates = rows.map((r) => ({ r, e: effectivePriority(r._priority, r.created_at, now) })).sort((a, b) => b.e - a.e || (a.r.created_at < b.r.created_at ? -1 : a.r.created_at > b.r.created_at ? 1 : 0)).map((x) => x.r).slice(0, 10);
   for (const c of candidates) {
     const budget = await projectBudgetMicro(db, c.project_id, s);
     const spent = await projectSpendMicro(db, c.project_id);
@@ -419,7 +419,7 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
     await db.prepare(`INSERT OR IGNORE INTO build_runs (id, job_id, attempt, runner_id, started_at, session_id, zero_cost) VALUES (?,?,?,?,?,?,?)`)
       .bind(newId("brun"), job.id, job.attempts, runnerId, at, job.agent_session_id, capabilities.includes(ZERO_COST_CAPABILITY) ? 1 : 0).run();
     // Audit: which runner build and which kind of provider (zero-cost or paid) took this attempt.
-    const billing = capabilities.includes(ZERO_COST_CAPABILITY) ? "zero-cost provider" : capabilities.includes(SUBSCRIPTION_CAPABILITY) ? "subscription provider, no per-token charge" : "PAID provider";
+    const billing = capabilities.includes(ZERO_COST_CAPABILITY) ? "zero-cost provider" : "PAID provider";
     await event(db, job.id, "transition", `Claimed by runner ${runnerId}${worker ? ` for worker ${worker.label}` : ""} (attempt ${job.attempts}; ${billing})`, { kind: "runner" },
       { from: "queued", to: "preparing", data: { runnerVersion: version, capabilities, paidProvider: !capabilities.includes(ZERO_COST_CAPABILITY) } });
     const brief = job.brief_id ? await db.prepare(`SELECT id, version, sha256, content_json FROM build_briefs WHERE id = ?`).bind(job.brief_id).first<{ id: string; version: number; sha256: string; content_json: string }>() : null;
@@ -435,7 +435,7 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
         // V2: the Architect's master specification when one exists (the orchestrator then skips the architect step).
         spec: await db.prepare(`SELECT spec_json, spec_version FROM build_pipeline WHERE project_id = ?`).bind(job.project_id).first<{ spec_json: string | null; spec_version: number }>()
           .then((r) => r?.spec_json ? { version: r.spec_version, content: JSON.parse(r.spec_json) } : null),
-        worker: worker ? { id: worker.id, label: worker.label, maxSessions: worker.max_sessions } : null,
+        worker: worker ? { id: worker.id, label: worker.label, maxActiveProjects: worker.max_active_projects } : null,
         limits: { model: s.model, maxTurns: s.max_turns, maxRuntimeMinutes: s.max_runtime_minutes, runBudgetUsd: microToUsd(Math.min(s.run_budget_micro, remaining)), projectBudgetRemainingUsd: microToUsd(remaining) },
         resume: job.agent_session_id || job.source_commit ? { sessionId: job.agent_session_id, workspaceRef: job.workspace_ref, checkpointKey: job.checkpoint_key, sourceRepo: job.source_repo, sourceBranch: job.source_branch, sourceCommit: job.source_commit } : null,
       },
@@ -453,6 +453,9 @@ async function leased(db: Db, jobId: unknown, token: unknown): Promise<BuildJob>
   if (!job || !job.lease_token_hash || !(ACTIVE_STATES as readonly string[]).includes(job.state) || !timingSafeEqualHex(job.lease_token_hash, await sha256Hex(token))) throw new LeaseLostError("lease_lost");
   return job;
 }
+
+/** Activity states a runner reports for a build (V4 scheduler view). */
+export const ACTIVITY_STATES = ["preparing", "gpu_running", "gpu_waiting", "model_switching", "testing", "reviewing", "idle"];
 
 /** Provider id and model the runner reports (provider-independent record of what actually ran this attempt). */
 const okProvider = (v: unknown) => typeof v === "string" && /^[a-z0-9][a-z0-9._-]{0,39}$/.test(v) ? v : null;
@@ -480,6 +483,14 @@ export async function heartbeat(db: Db, b: Record<string, unknown>, now = new Da
   const stage = b.stage;
   if ((stage === "building" || stage === "verifying" || stage === "preparing") && stage !== job.state) {
     try { await transition(db, job, stage, `Runner stage: ${stage}`, { kind: "runner" }); } catch { /* invalid stage order is ignored */ }
+  }
+  // V4 scheduler view: what this website's agent is doing now (GPU running / waiting / switching, tests, review).
+  const o = b.orchestration && typeof b.orchestration === "object" ? b.orchestration as Record<string, unknown> : null;
+  if (o) {
+    const act = ACTIVITY_STATES.includes(o.activity as string) ? o.activity as string : null;
+    const model = okModel(o.model);
+    const task = typeof o.task === "string" && /^[a-z_]{2,40}$/.test(o.task) ? o.task : null;
+    if (act) await db.prepare(`UPDATE build_jobs SET activity_state = ?, current_model = COALESCE(?, current_model), current_task = COALESCE(?, current_task), activity_at = ? WHERE id = ?`).bind(act, model, task, now.toISOString(), job.id).run();
   }
   for (const a of (Array.isArray(b.activity) ? b.activity : []).slice(0, 20)) {
     const x = a as { kind?: unknown; message?: unknown };
@@ -620,7 +631,7 @@ export async function completeJob(db: Db, b: Record<string, unknown>, notify?: (
   let to: BuildState;
   let reason: string;
   let extra: Record<string, unknown> = {};
-  if (outcome === "ready_for_review") { to = "ready_for_review"; reason = "First build delivered to owner review"; }
+  if (outcome === "ready_for_review") { to = "ready_for_review"; reason = "Build finished: awaiting private internal approval (not visible to the customer)"; extra = { activity_state: null }; }
   else if (outcome === "needs_information") {
     to = "needs_information"; reason = "Blocked on information only the customer or owner can provide";
     extra = { missing_info_json: JSON.stringify((Array.isArray(b.missingInformation) ? b.missingInformation : []).slice(0, 30).map((x) => sanitize(x, 300))) };
@@ -632,10 +643,10 @@ export async function completeJob(db: Db, b: Record<string, unknown>, notify?: (
   } else if (outcome === "released") {
     // Runner shutdown: work is checkpointed; requeue without spending an attempt (protocol v1.1).
     to = job.cancel_requested_at ? "canceled" : "queued";
-    // V3: a worker whose Claude plan capacity ran out releases the build until capacity returns (≤ 8 days).
+    // A runner may ask for the build back no earlier than a given time (≤ 8 days), e.g. while its model server recovers.
     const nb = typeof b.notBefore === "string" && !Number.isNaN(Date.parse(b.notBefore)) && Date.parse(b.notBefore) > Date.now() && Date.parse(b.notBefore) < Date.now() + 8 * 86400_000 ? new Date(b.notBefore).toISOString() : null;
-    reason = job.cancel_requested_at ? "Canceled while the runner was shutting down" : nb ? `Waiting for the assigned account's plan capacity (until ${nb.slice(0, 16).replace("T", " ")} UTC)${err ? `: ${err}` : ""}; resumes from its checkpoint, no paid fallback` : `Runner released the build (shutdown)${err ? `: ${err}` : ""}; it resumes from its checkpoint`;
-    extra = to === "queued" ? { attempts: Math.max(0, job.attempts - 1), finished_at: null, ...(nb ? { not_before: nb } : {}) } : {};
+    reason = job.cancel_requested_at ? "Canceled while the runner was shutting down" : nb ? `Released by the runner until ${nb.slice(0, 16).replace("T", " ")} UTC${err ? `: ${err}` : ""}; resumes from its checkpoint, no paid fallback` : `Runner released the build (shutdown)${err ? `: ${err}` : ""}; it resumes from its checkpoint`;
+    extra = to === "queued" ? { attempts: Math.max(0, job.attempts - 1), finished_at: null, activity_state: null, ...(nb ? { not_before: nb } : {}) } : {};
   } else if (outcome === "failed") {
     if (job.attempts < job.max_attempts && !job.cancel_requested_at) {
       const backoffMin = Math.min(60, 2 ** job.attempts);
@@ -976,6 +987,7 @@ export async function approveBuild(c: OwnerCtx, id: string, notes: string) {
   if (j.state !== "ready_for_review") throw new HttpError(409, "Only a build in owner review can be approved.");
   if (!j.preview_url) throw new HttpError(409, "This build has no preview to approve.");
   if (j.preview_deleted_at || j.preview_delete_requested_at) throw new HttpError(409, "This build's preview was deleted (or is being deleted); it cannot be approved.");
+  if (!j.internal_approved_at) throw new HttpError(409, "Approve the build internally first (private Crestmont review), then give the final approval.");
   await transition(c.db, j, "approved", `Preview approved by owner for the delivery process${notes.trim() ? `: ${notes.trim()}` : ""}`, userActor(c), { approved_by: c.userId, approved_at: nowIso() });
   await audit(c.db, { actorUserId: c.userId, action: "builds.preview_approved", subjectType: "build_job", subjectId: id, organizationId: j.organization_id, details: { preview: j.preview_url, commit: j.source_commit, customerRevisionId: j.customer_revision_id } });
   if (j.customer_revision_id) {
@@ -1153,20 +1165,47 @@ export async function staffPreviewLink(c: OwnerCtx, secret: string | undefined, 
   return a.gated ? previewSignInUrl(secret!, j.preview_name!, j.preview_url!, { next: safePreviewPath(next), audience: "owner" }) : j.preview_url!;
 }
 
+/**
+ * Staff: the private Crestmont review (V4 §7 F). A finished build waits in AWAITING_INTERNAL_APPROVAL, invisible to the
+ * customer, until a staff member with builds.configure approves it here (MFA step-up on the route). The automated
+ * acceptance verdict is shown but never decides: approving a build that did not pass it needs a written reason.
+ * Approval does not share anything; sharing the preview with the customer is a separate, explicit action.
+ */
+export async function internalApprove(c: OwnerCtx, id: string, note: string) {
+  const j = await ownerJob(c, id);
+  if (j.state !== "ready_for_review") throw new HttpError(409, "Only a finished build that is awaiting internal approval can be approved internally.");
+  if (j.internal_approved_at) throw new HttpError(409, "This build is already approved internally.");
+  if (!j.preview_url || j.preview_deleted_at || j.preview_delete_requested_at) throw new HttpError(409, "Review the preview first: this build has no preview that still exists.");
+  const text = note.trim().slice(0, 1000);
+  if (j.ai_acceptance !== "passed" && j.ai_acceptance !== "passed_pending_integrations" && text.length < 10) {
+    throw new HttpError(422, "This build did not pass the automated acceptance review. Explain in the note (at least 10 characters) why it may go ahead.");
+  }
+  const r = await c.db.prepare(`UPDATE build_jobs SET internal_approved_at = ?, internal_approved_by = ?, internal_approval_note = ?, updated_at = ? WHERE id = ? AND internal_approved_at IS NULL AND state = 'ready_for_review'`)
+    .bind(nowIso(), c.userId, text || null, nowIso(), id).run();
+  if (!r.meta?.changes) throw new HttpError(409, "The build changed meanwhile; reload and try again.");
+  await event(c.db, id, "action", `Approved in the private Crestmont review${j.ai_acceptance !== "passed" ? ` (automated acceptance: ${j.ai_acceptance ?? "not run"}; override noted)` : ""}`, userActor(c), { data: { note: text || null } });
+  await audit(c.db, { actorUserId: c.userId, action: "builds.internal_approved", subjectType: "build_job", subjectId: id, organizationId: j.organization_id, details: { aiAcceptance: j.ai_acceptance, override: j.ai_acceptance !== "passed" && j.ai_acceptance !== "passed_pending_integrations" } });
+  await setStage(c.db, j.project_id, "READY_FOR_CUSTOMER_PREVIEW", "Approved internally; not shared with the customer yet", "user");
+}
+
 /** Owner: share (or stop sharing) a gated preview with the project's customer, who can then open and review it. */
 export async function sharePreview(c: OwnerCtx & { mail?: MailCtx }, id: string, share: boolean) {
   const j = await ownerJob(c, id);
   if (!share) {
     if (!j.customer_preview_shared_at) throw new HttpError(409, "This preview is not shared.");
     await c.db.prepare(`UPDATE build_jobs SET customer_preview_shared_at = NULL, customer_preview_shared_by = NULL, updated_at = ? WHERE id = ?`).bind(nowIso(), id).run();
+    if (j.state === "ready_for_review") await setStage(c.db, j.project_id, "READY_FOR_CUSTOMER_PREVIEW", "Preview no longer shared with the customer", "user");
   } else {
     if (!j.preview_gated || !j.preview_name || !j.preview_url || j.preview_deleted_at) throw new HttpError(409, "Only a private (gated) preview that still exists can be shared with the customer.");
     if (!["ready_for_review", "approved"].includes(j.state)) throw new HttpError(409, "Share a preview once the build is in owner review or approved.");
+    // V4 §7 F/G: the customer sees a website only after a staff member approved it in the private review.
+    if (!j.internal_approved_at) throw new HttpError(409, "Approve this build internally first (private Crestmont review). The customer cannot see it before that.");
     if (j.customer_preview_shared_at) throw new HttpError(409, "This preview is already shared with the customer.");
     await c.db.prepare(`UPDATE build_jobs SET customer_preview_shared_at = ?, customer_preview_shared_by = ?, customer_review = NULL, customer_reviewed_by = NULL, customer_reviewed_at = NULL, customer_review_note = NULL, updated_at = ? WHERE id = ?`)
       .bind(nowIso(), c.userId, nowIso(), id).run();
   }
   await event(c.db, id, "preview", share ? "Preview shared with the customer" : "Preview no longer shared with the customer", userActor(c));
+  if (share && j.state === "ready_for_review") await setStage(c.db, j.project_id, "CUSTOMER_PREVIEW", "Private preview shared with the customer after internal approval", "user");
   await audit(c.db, { actorUserId: c.userId, action: "builds.preview_shared", subjectType: "build_job", subjectId: id, organizationId: j.organization_id, details: { shared: share } });
   if (share && c.mail) await notifyCustomer(c.mail, j.project_id, { kind: "project", mail: { template: "project_update", data: { event: "preview_shared" } }, path: `/portal/projects/${j.project_id}/revisions`, key: `prvshare:${id}` });
 }
@@ -1210,6 +1249,7 @@ export async function customerReviewPreview(c: { db: Db; mail?: MailCtx }, u: { 
   await c.db.prepare(`UPDATE build_jobs SET customer_review = ?, customer_reviewed_by = ?, customer_reviewed_at = ?, customer_review_note = ?, updated_at = ? WHERE id = ?`)
     .bind(decision, u.userId, nowIso(), text || null, nowIso(), j.id).run();
   await event(c.db, j.id, "preview", decision === "approved" ? "Customer approved the preview" : "Customer requested changes to the preview", { kind: "user", userId: u.userId }, { data: { note: text || null } });
+  if (j.state === "ready_for_review") await setStage(c.db, j.project_id, decision === "approved" ? "CUSTOMER_PREVIEW" : "CUSTOMER_FEEDBACK", decision === "approved" ? "The customer approved the preview; final approval is a staff decision" : "The customer requested changes (a revision follows the customer-revision policy)", "user");
   await audit(c.db, { actorUserId: u.userId, action: "portal.preview_reviewed", subjectType: "build_job", subjectId: j.id, organizationId: j.organization_id, details: { decision } });
   if (c.mail) await notifyProjectTeam(c.mail, j.project_id, { kind: "project", mail: { template: "project_update", data: { event: "preview_reviewed", decision, note: text || null } }, path: `/staff/builds/${j.id}`, key: `prvrev:${j.id}:${decision}:${Date.now()}`, exceptUserId: u.userId });
 }

@@ -14,7 +14,7 @@ server-side. All amounts are USD numbers; all timestamps ISO-8601 UTC.
 | `queued` | Queued | eligible; waiting for runner capacity | cancel |
 | `preparing` / `building` / `verifying` | Preparing / Building / Verifying | leased by a runner | cancel (stops at next heartbeat), pause |
 | `needs_information` | Needs information | stopped on a blocker only a person can resolve | resume, revision, cancel |
-| `ready_for_review` | Ready for owner review | preview delivered to owner review | approve (Owner), revision, cancel |
+| `ready_for_review` | Awaiting internal review | finished; private Crestmont review (V4): the customer sees nothing until internal approval and sharing | internal-approve (Owner, MFA), then share / final approve; revision, cancel |
 | `approved` | Approved for delivery | owner approved the preview for the existing delivery process | revision |
 | `failed` | Failed | attempts exhausted | retry, resume (if a session/source exists), cancel |
 | `budget_paused` | Budget paused | stopped at a spending/runtime/turn limit; partial work kept | resume (after raising the limit), cancel |
@@ -62,7 +62,9 @@ missingInformation[], instruction, kind, revision, agentSessionId, checkpointAva
 | `POST /staff/builds/:id/cancel` | builds.manage | `reason` |
 | `POST /staff/builds/:id/retry` / `resume` | builds.manage | — |
 | `POST /staff/builds/:id/revision` | builds.manage | `instruction` (10–5000 chars) |
-| `POST /staff/builds/:id/approve` | builds.configure | `notes` (refused when the preview was deleted) |
+| `POST /staff/builds/:id/internal-approve` | builds.configure + MFA step-up | `note` (required, ≥ 10 characters, when the automated acceptance did not pass); shares nothing (V4) |
+| `POST /staff/builds/:id/approve` | builds.configure + MFA step-up | `notes` (final approval; refused before the internal approval or when the preview was deleted) |
+| `POST /staff/builds/projects/:id/priority` | builds.manage | `priority` −5..5 (V4; waiting time still raises lower priorities) |
 | `POST /staff/builds/:id/delete-preview` | builds.manage | — (the runner deletes the Worker when idle) |
 | `POST /staff/builds/customer-revisions/:id/forward` | builds.manage | `instruction` (optional; default: the customer's text, ≤ 5000 chars) |
 
@@ -79,7 +81,7 @@ Wording from `BUILD_STATE_CUSTOMER`. Never show prompts, logs, costs, previews i
 | `POST /staff/builds/customer-revisions/:id/reject` (`reason`) | builds.manage | D1: reject (no build; customer told why) |
 | `POST /staff/builds/:id/preview-retention` (`action`: preserve / release / extend) | builds.manage | D2 |
 | `GET /staff/builds/:id/preview` | builds.read | D3: 303 to a 5-minute signed sign-in link (never show raw preview URLs) |
-| `POST /staff/builds/:id/share-preview` (`action`: share / unshare) | builds.manage | D3 |
+| `POST /staff/builds/:id/share-preview` (`action`: share / unshare) | builds.manage + MFA step-up | D3; sharing only after the internal approval (V4) |
 | `GET /portal/projects/:id/previews/:buildId` | customer of the project | D3: sign-in link for a shared preview |
 | `POST /portal/projects/:id/previews/:buildId/review` (`decision`, `note`) | customer_admin | D3/D5 step 4 |
 | `GET /staff/builds/projects/:id/delivery` | builds.read | D5 page |

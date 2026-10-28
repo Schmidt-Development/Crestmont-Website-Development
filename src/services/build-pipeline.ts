@@ -1,12 +1,13 @@
-// AI Website Builder V3 (Founder, 2026-10-28; Claude-only): durable project pipeline, architect specification, the
-// ARCHITECT → BUILD → TEST → REVIEW → CORRECT loop, the external-integration checklist and the approval queue.
+// AI Website Builder V4 (Founder, 2026-10-28; local dual-model): durable project pipeline, architect specification,
+// the ARCHITECT → BUILD → TEST → REVIEW → CORRECT loop, the external-integration checklist and the approval queue.
 //
 // Division of work ("the orchestrator is a controller"):
-//  - The local Crestmont Orchestrator (the build runner on Node 1) runs the Claude architect session, the Claude
-//    builder session(s) and a separate Claude review session on the website's assigned account, and reports here.
+//  - The local orchestrator (the build runner on a GPU worker) runs Model A (architect, reviewer, hard repairs) and
+//    Model B (builder, routine fixes) on the shared GPU, with the reviewer in a fresh read-only session, and reports here.
 //  - The platform is the durable, auditable system of record and the referee: it stores the specification, every
 //    cycle's evidence and decision, and it can overrule the reviewer when the evidence contradicts it (a "ready"
-//    verdict with failing checks or without screenshots), and it stops loops that make no progress.
+//    verdict with failing checks or without screenshots), and it stops loops that make no progress. No AI verdict can
+//    move a website past the private Crestmont review: that takes a staff decision (builds.ts internal approval).
 
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
@@ -17,25 +18,29 @@ import { audit } from "./security.ts";
 
 type OwnerCtx = Pick<AppContext, "db"> & { userId: string };
 
-export const STAGES = ["INTAKE_RECEIVED", "ARCHITECTING", "READY_FOR_DISPATCH", "QUEUED", "WORKER_ASSIGNED", "BUILDING", "TESTING", "AI_REVIEW",
-  "REVISION_REQUIRED", "WAITING_FOR_WORKER_CAPACITY", "WAITING_FOR_HUMAN_AUTHORIZATION", "WAITING_FOR_EXTERNAL_SETUP", "READY_FOR_FINAL_QA",
-  "READY_FOR_FOUNDER_APPROVAL", "APPROVED_FOR_DELIVERY", "DELIVERED", "FAILED_NEEDS_INTERVENTION"] as const;
+export const STAGES = ["INTAKE_RECEIVED", "ARCHITECTING", "QUEUED", "WAITING_FOR_GPU_CAPACITY", "WORKER_ASSIGNED", "BUILDING", "TESTING", "AI_REVIEW",
+  "REVISION_REQUIRED", "WAITING_FOR_HUMAN_AUTHORIZATION", "WAITING_FOR_EXTERNAL_SETUP", "AWAITING_INTERNAL_APPROVAL", "READY_FOR_CUSTOMER_PREVIEW",
+  "CUSTOMER_PREVIEW", "CUSTOMER_FEEDBACK", "APPROVED_FOR_DELIVERY", "DELIVERED", "FAILED_NEEDS_INTERVENTION"] as const;
 export type Stage = (typeof STAGES)[number];
 export const STAGE_LABELS: Record<Stage, string> = {
-  INTAKE_RECEIVED: "Intake received", ARCHITECTING: "Architecting", READY_FOR_DISPATCH: "Ready for dispatch", QUEUED: "Queued",
-  WORKER_ASSIGNED: "Worker assigned", BUILDING: "Building", TESTING: "Testing", AI_REVIEW: "AI review", REVISION_REQUIRED: "Revision required (automatic)",
-  WAITING_FOR_WORKER_CAPACITY: "Waiting for a builder", WAITING_FOR_HUMAN_AUTHORIZATION: "Waiting for authorization",
-  WAITING_FOR_EXTERNAL_SETUP: "Waiting for external setup", READY_FOR_FINAL_QA: "Ready for final QA", READY_FOR_FOUNDER_APPROVAL: "Ready for Founder approval",
-  APPROVED_FOR_DELIVERY: "Approved for delivery", DELIVERED: "Delivered", FAILED_NEEDS_INTERVENTION: "Needs intervention",
+  INTAKE_RECEIVED: "Intake received", ARCHITECTING: "Architecting (Model A)", QUEUED: "Queued", WAITING_FOR_GPU_CAPACITY: "Waiting for GPU capacity",
+  WORKER_ASSIGNED: "GPU worker assigned", BUILDING: "Building", TESTING: "Testing", AI_REVIEW: "AI review (Model A)", REVISION_REQUIRED: "Automatic corrections",
+  WAITING_FOR_HUMAN_AUTHORIZATION: "Waiting for authorization", WAITING_FOR_EXTERNAL_SETUP: "Waiting for external setup",
+  AWAITING_INTERNAL_APPROVAL: "Awaiting internal approval (private)", READY_FOR_CUSTOMER_PREVIEW: "Internally approved, not shared",
+  CUSTOMER_PREVIEW: "Customer preview", CUSTOMER_FEEDBACK: "Customer feedback", APPROVED_FOR_DELIVERY: "Final approval: ready for delivery",
+  DELIVERED: "Delivered", FAILED_NEEDS_INTERVENTION: "Needs intervention",
 };
 
-export const DECISIONS = ["CONTINUE_BUILDING", "FIX_DEFECTS", "RUN_MORE_TESTS", "WAIT_FOR_EXTERNAL_SETUP", "NEEDS_HUMAN_AUTHORIZATION", "READY_FOR_FINAL_QA", "READY_FOR_FOUNDER_APPROVAL"] as const;
+export const DECISIONS = ["CONTINUE_BUILDING", "FIX_DEFECTS", "RUN_MORE_TESTS", "WAIT_FOR_EXTERNAL_SETUP", "NEEDS_HUMAN_AUTHORIZATION", "READY_FOR_FINAL_QA", "READY_FOR_INTERNAL_APPROVAL"] as const;
 export type Decision = (typeof DECISIONS)[number] | "ESCALATED";
 const CONTINUE: readonly Decision[] = ["CONTINUE_BUILDING", "FIX_DEFECTS", "RUN_MORE_TESTS"];
+const READY: readonly Decision[] = ["READY_FOR_FINAL_QA", "READY_FOR_INTERNAL_APPROVAL"];
+/** Decision names of earlier runners, mapped to the current ones. */
+const LEGACY_DECISIONS: Record<string, Decision> = { READY_FOR_FOUNDER_APPROVAL: "READY_FOR_INTERNAL_APPROVAL" };
 
 export async function getPipeline(db: Db, projectId: string) {
   return db.prepare(`SELECT * FROM build_pipeline WHERE project_id = ?`).bind(projectId)
-    .first<{ project_id: string; organization_id: string; stage: Stage; stage_reason: string | null; spec_json: string | null; spec_version: number; architect_provider: string | null; updated_at: string }>();
+    .first<{ project_id: string; organization_id: string; stage: Stage; stage_reason: string | null; priority: number; spec_json: string | null; spec_version: number; architect_provider: string | null; updated_at: string }>();
 }
 
 /** Durable stage change with an event; no-op when the stage and reason are unchanged (idempotent). */
@@ -58,20 +63,16 @@ export async function setStage(db: Db, projectId: string, stage: Stage, reason: 
 export async function syncStageFromJob(db: Db, job: { project_id: string; state: string; state_reason?: string | null }) {
   const map: Record<string, Stage | null> = {
     awaiting_intake: "INTAKE_RECEIVED", awaiting_payment: "INTAKE_RECEIVED", queued: "QUEUED", preparing: "BUILDING", building: "BUILDING", verifying: "TESTING",
-    ready_for_review: "READY_FOR_FOUNDER_APPROVAL", approved: "APPROVED_FOR_DELIVERY", failed: "FAILED_NEEDS_INTERVENTION", budget_paused: "FAILED_NEEDS_INTERVENTION",
+    // A finished build is parked privately: the customer sees nothing until a staff member approves it (V4 §7 F).
+    ready_for_review: "AWAITING_INTERNAL_APPROVAL", approved: "APPROVED_FOR_DELIVERY", failed: "FAILED_NEEDS_INTERVENTION", budget_paused: "FAILED_NEEDS_INTERVENTION",
     needs_information: "WAITING_FOR_HUMAN_AUTHORIZATION", paused: null, canceled: null,
   };
   const stage = map[job.state];
   if (!stage) return;
-  // A queued job whose project already owns a worker keeps WORKER_ASSIGNED / WAITING_FOR_WORKER_CAPACITY from the dispatcher.
+  // A queued job whose project already has a worker keeps WORKER_ASSIGNED / WAITING_FOR_GPU_CAPACITY from the dispatcher.
   if (stage === "QUEUED") {
     const cur = await getPipeline(db, job.project_id);
-    if (cur && ["WORKER_ASSIGNED", "WAITING_FOR_WORKER_CAPACITY", "REVISION_REQUIRED"].includes(cur.stage)) return;
-  }
-  // The reviewer may already have placed a delivered build in final QA or external setup: keep its more precise stage.
-  if (stage === "READY_FOR_FOUNDER_APPROVAL") {
-    const cur = await getPipeline(db, job.project_id);
-    if (cur && ["READY_FOR_FINAL_QA", "WAITING_FOR_EXTERNAL_SETUP", "WAITING_FOR_HUMAN_AUTHORIZATION"].includes(cur.stage)) return;
+    if (cur && ["WORKER_ASSIGNED", "WAITING_FOR_GPU_CAPACITY", "REVISION_REQUIRED"].includes(cur.stage)) return;
   }
   await setStage(db, job.project_id, stage, job.state_reason ?? `Build ${job.state.replace(/_/g, " ")}`);
 }
@@ -234,7 +235,8 @@ export async function submitCycle(db: Db, job: { id: string; project_id: string;
   const last = await db.prepare(`SELECT cycle FROM build_cycles WHERE job_id = ? ORDER BY cycle DESC LIMIT 1`).bind(job.id).first<{ cycle: number }>();
   if (cycle !== (last?.cycle ?? 0) + 1) throw new HttpError(409, `expected cycle ${(last?.cycle ?? 0) + 1}`);
   const ev = parseEvidence(b.evidence);
-  const proposed = (DECISIONS as readonly string[]).includes(b.decision as string) ? b.decision as Decision : null;
+  const rawDecision = LEGACY_DECISIONS[b.decision as string] ?? b.decision;
+  const proposed = (DECISIONS as readonly string[]).includes(rawDecision as string) ? rawDecision as Decision : null;
   const nextPrompt = s(b.nextPrompt, 60000).trim() || null;
   const addresses = (Array.isArray(b.addresses) ? b.addresses : []).filter((x): x is string => typeof x === "string").slice(0, 200);
   const promptUsed = s(b.prompt, 60000) || "(not recorded)";
@@ -251,7 +253,7 @@ export async function submitCycle(db: Db, job: { id: string; project_id: string;
 
   let decision: Decision = proposed ?? "FIX_DEFECTS";
   let reason = proposed ? `Reviewer (${provider}): ${proposed}` : "No valid reviewer decision; treated as FIX_DEFECTS";
-  if ((decision === "READY_FOR_FINAL_QA" || decision === "READY_FOR_FOUNDER_APPROVAL") && (open.length || !hasDesktop || !hasMobile)) {
+  if (READY.includes(decision) && (open.length || !hasDesktop || !hasMobile)) {
     decision = "FIX_DEFECTS";
     reason = `Overruled: the evidence does not support "${proposed}" (${open.length ? `${open.length} outstanding item(s)` : ""}${!hasDesktop || !hasMobile ? `${open.length ? "; " : ""}desktop and mobile screenshots are required` : ""})`;
   }
@@ -274,15 +276,20 @@ export async function submitCycle(db: Db, job: { id: string; project_id: string;
   }
   const finalPrompt = CONTINUE.includes(decision) ? nextPrompt : null;
   const sessions = (Array.isArray(b.sessions) ? b.sessions : []).slice(0, 50).map((x) => x as Record<string, unknown>).map((x) => ({
-    id: s(x.id, 40), workstream: s(x.workstream, 60), tasks: (Array.isArray(x.tasks) ? x.tasks : []).map((t) => s(t, 60)).slice(0, 50), mode: s(x.mode, 20), status: s(x.status, 30), note: s(x.note, 300),
+    id: s(x.id, 40), role: s(x.role, 30), model: s(x.model, 120), workstream: s(x.workstream, 60), tasks: (Array.isArray(x.tasks) ? x.tasks : []).map((t) => s(t, 60)).slice(0, 50), mode: s(x.mode, 20), status: s(x.status, 30), note: s(x.note, 300),
   }));
-  await db.prepare(`INSERT INTO build_cycles (id, job_id, project_id, cycle, prompt, prompt_source, sessions_json, evidence_json, reviewer_provider, proposed_decision, decision, decision_reason, next_prompt, score, failure_signature, findings_json, created_at, reviewed_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .bind(newId("cyc"), job.id, job.project_id, cycle, promptUsed, source, JSON.stringify(sessions), JSON.stringify(ev), provider, proposed, decision, reason.slice(0, 1000), finalPrompt, score, signature, JSON.stringify({ outstanding: open.slice(0, 200), addresses }), nowIso(), nowIso()).run();
+  const model = (v: unknown) => typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,119}$/.test(v) ? v : null;
+  const routing = b.routing && typeof b.routing === "object" ? JSON.stringify(b.routing).slice(0, 2000) : null;
+  await db.prepare(`INSERT INTO build_cycles (id, job_id, project_id, cycle, prompt, prompt_source, sessions_json, evidence_json, reviewer_provider, builder_model, reviewer_model, routing_json, proposed_decision, decision, decision_reason, next_prompt, score, failure_signature, findings_json, created_at, reviewed_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(newId("cyc"), job.id, job.project_id, cycle, promptUsed, source, JSON.stringify(sessions), JSON.stringify(ev), provider, model(b.builderModel), model(b.reviewerModel), routing, proposed, decision, reason.slice(0, 1000), finalPrompt, score, signature, JSON.stringify({ outstanding: open.slice(0, 200), addresses }), nowIso(), nowIso()).run();
+  // The automated acceptance verdict of this build (the internal-approval page shows it; it never approves anything).
+  const acceptance = READY.includes(decision) ? "passed" : decision === "WAIT_FOR_EXTERNAL_SETUP" ? "passed_pending_integrations" : "failed";
+  await db.prepare(`UPDATE build_jobs SET ai_acceptance = ?, updated_at = ? WHERE id = ?`).bind(acceptance, nowIso(), job.id).run();
   const stage: Stage = CONTINUE.includes(decision) ? "REVISION_REQUIRED" : decision === "ESCALATED" ? "FAILED_NEEDS_INTERVENTION"
-    : decision === "WAIT_FOR_EXTERNAL_SETUP" ? "WAITING_FOR_EXTERNAL_SETUP" : decision === "NEEDS_HUMAN_AUTHORIZATION" ? "WAITING_FOR_HUMAN_AUTHORIZATION" : decision as Stage;
-  await setStage(db, job.project_id, stage, `Cycle ${cycle}: ${reason}`, "runner");
-  await audit(db, { actorKind: "system", action: "builds.review_cycle", subjectType: "build_job", subjectId: job.id, organizationId: job.organization_id, details: { cycle, proposed, decision, outstanding: open.length, score } });
+    : decision === "WAIT_FOR_EXTERNAL_SETUP" ? "WAITING_FOR_EXTERNAL_SETUP" : decision === "NEEDS_HUMAN_AUTHORIZATION" ? "WAITING_FOR_HUMAN_AUTHORIZATION" : "AI_REVIEW";
+  await setStage(db, job.project_id, stage, `Cycle ${cycle}: ${READY.includes(decision) ? "AI acceptance passed; the build finishes and waits for internal approval" : reason}`, "runner");
+  await audit(db, { actorKind: "system", action: "builds.review_cycle", subjectType: "build_job", subjectId: job.id, organizationId: job.organization_id, details: { cycle, proposed, decision, outstanding: open.length, score, builderModel: model(b.builderModel), reviewerModel: model(b.reviewerModel) } });
   return { cycle, decision, reason, continue: CONTINUE.includes(decision), prompt: finalPrompt };
 }
 
@@ -333,9 +340,13 @@ export async function reportIntegrations(db: Db, job: { project_id: string; orga
     await ensureIntegration(db, job.project_id, job.organization_id, key, s(r.name, 100), s(r.purpose, 300));
     const code = ["not_started", "in_progress", "implemented"].includes(r.codeStatus as string) ? r.codeStatus as string : null;
     const mock = ["not_tested", "passed", "failed"].includes(r.mockStatus as string) ? r.mockStatus as string : null;
+    // Set only by the runner's trusted integration layer after an approved test-environment operation (sanitized).
+    const sandbox = ["passed", "failed"].includes(r.sandboxStatus as string) ? r.sandboxStatus as string : null;
+    const evidence = sandbox ? s(r.sandboxEvidence, 1000).replace(/[A-Za-z0-9_\-]{24,}/g, "[redacted]") || null : null;
     await db.prepare(`UPDATE build_integrations SET code_status = COALESCE(?, code_status), mock_status = COALESCE(?, mock_status),
+        sandbox_status = COALESCE(?, sandbox_status), sandbox_evidence = CASE WHEN ? IS NULL THEN sandbox_evidence ELSE ? END,
         live_status = CASE WHEN live_status = 'verified_live' THEN live_status ELSE 'awaiting_credentials' END, updated_at = ? WHERE project_id = ? AND key = ?`)
-      .bind(code, mock, nowIso(), job.project_id, key).run();
+      .bind(code, mock, sandbox, sandbox, evidence, nowIso(), job.project_id, key).run();
     n++;
   }
   return { updated: n };
@@ -352,19 +363,25 @@ export async function markIntegrationLive(c: OwnerCtx, integrationId: string, li
 // ── Sensitive-action approvals (routine development never comes here) ──
 
 export const APPROVAL_KINDS = ["credential_request", "external_account_connection", "sensitive_customer_system", "paid_usage_increase", "purchase",
-  "infrastructure_permission", "production_publish", "dns_change", "destructive_outside_workspace", "privileged_access", "security_or_legal_decision"] as const;
+  "infrastructure_permission", "production_publish", "dns_change", "destructive_outside_workspace", "privileged_access", "security_or_legal_decision",
+  // V4 §8: run one catalogued operation of the trusted integration layer against a test environment.
+  "integration_operation"] as const;
+/** Operation ids of the runner's trusted integration catalogue (runner/src/integrations/catalog.ts). */
+export const OPERATION_ID = /^[a-z0-9_]{2,40}\.[a-z0-9_]{2,60}$/;
 
 export async function requestApproval(db: Db, job: { id: string; project_id: string; organization_id: string }, b: Record<string, unknown>, requestedBy: string) {
   const kind = (APPROVAL_KINDS as readonly string[]).includes(b.kind as string) ? b.kind as string : null;
   if (!kind) throw new HttpError(422, `kind must be one of ${APPROVAL_KINDS.join(", ")}`);
   const summary = s(b.summary, 500).trim();
   if (summary.length < 5) throw new HttpError(422, "summary is required");
-  const dedupe = await sha256Hex(`${job.project_id}|${kind}|${summary.toLowerCase()}`);
+  const operation = kind === "integration_operation" ? (typeof b.operation === "string" && OPERATION_ID.test(b.operation) ? b.operation : null) : null;
+  if (kind === "integration_operation" && !operation) throw new HttpError(422, "operation must name a catalogued integration operation (provider.action)");
+  const dedupe = await sha256Hex(`${job.project_id}|${kind}|${operation ?? ""}|${summary.toLowerCase()}`);
   const ex = await db.prepare(`SELECT id, status FROM build_approvals WHERE dedupe_key = ?`).bind(dedupe).first<{ id: string; status: string }>();
   if (ex) return { id: ex.id, status: ex.status, duplicate: true };
   const aid = newId("apv");
-  await db.prepare(`INSERT INTO build_approvals (id, project_id, organization_id, job_id, kind, summary, detail, dedupe_key, requested_by, requested_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
-    .bind(aid, job.project_id, job.organization_id, job.id, kind, summary, s(b.detail, 5000) || null, dedupe, requestedBy.slice(0, 64), nowIso()).run();
+  await db.prepare(`INSERT INTO build_approvals (id, project_id, organization_id, job_id, kind, summary, detail, operation, dedupe_key, requested_by, requested_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(aid, job.project_id, job.organization_id, job.id, kind, summary, s(b.detail, 5000) || null, operation, dedupe, requestedBy.slice(0, 64), nowIso()).run();
   await audit(db, { actorKind: "system", action: "builds.approval_requested", subjectType: "project", subjectId: job.project_id, organizationId: job.organization_id, details: { approvalId: aid, kind } });
   return { id: aid, status: "pending", duplicate: false };
 }
@@ -380,5 +397,5 @@ export async function decideApproval(c: OwnerCtx, approvalId: string, approve: b
 
 /** Runner: the decisions on this job's requests (the orchestrator acts only on approved ones). */
 export async function approvalsForJob(db: Db, jobId: string) {
-  return (await db.prepare(`SELECT id, kind, summary, status, decision_note FROM build_approvals WHERE job_id = ? ORDER BY requested_at`).bind(jobId).all<{ id: string; kind: string; summary: string; status: string; decision_note: string | null }>()).results;
+  return (await db.prepare(`SELECT id, kind, summary, operation, status, decision_note FROM build_approvals WHERE job_id = ? ORDER BY requested_at`).bind(jobId).all<{ id: string; kind: string; summary: string; operation: string | null; status: string; decision_note: string | null }>()).results;
 }

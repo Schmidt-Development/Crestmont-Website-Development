@@ -2,7 +2,7 @@
   "name": "crestmont-ai-builds-runner",
   "version": "1.1.0",
   "private": true,
-  "description": "Crestmont AI Builds runner: pulls paid-intake build jobs from the control plane and builds them with a self-hosted model (local provider, default) in per-job container sandboxes. No runtime npm dependencies. The Claude Agent SDK adapter is optional and paid (opt-in; its packages live in agent-sdk/).",
+  "description": "Crestmont AI Builds runner: pulls paid-intake build jobs from the control plane and builds them with self-hosted models (Founder V4: Model A architect/reviewer and Model B builder on one shared GPU) in per-job container sandboxes. No runtime npm dependencies. The Claude Agent SDK adapter is optional and paid (opt-in; its packages live in agent-sdk/; recommended for removal).",
   "type": "module",
   "engines": {
     "node": ">=22.18"
@@ -12,7 +12,8 @@
     "preflight": "node --no-warnings src/main.ts --preflight",
     "select-model": "node --no-warnings windows/select-model.ts",
     "test": "node --no-warnings --test 'test/*.test.ts'",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "benchmark": "node --no-warnings src/benchmark.ts"
   },
   "dependencies": {}
 }

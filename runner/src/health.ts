@@ -12,8 +12,12 @@ export interface HealthState {
   version: string;
   provider: string;
   model: string;
-  /** Job id currently running, or null. */
+  /** Job id currently running (the latest started), or null. */
   currentJob: string | null;
+  /** V4: every build this runner works on now (one per website slot). */
+  runningJobs: string[];
+  /** V4: GPU scheduler summary (model loaded, requests running/queued, switches). */
+  inference: { state: string; active: number; queued: number; switches: number } | null;
   currentDraft: string | null;
   lastClaimAt: string | null;
   lastClaimOk: boolean | null;
@@ -41,7 +45,7 @@ export interface HealthState {
 
 export function newHealthState(fields: Pick<HealthState, "runnerId" | "version" | "provider" | "model">): HealthState {
   return {
-    ...fields, startedAt: new Date().toISOString(), currentJob: null, currentDraft: null, lastClaimAt: null, lastClaimOk: null,
+    ...fields, startedAt: new Date().toISOString(), currentJob: null, runningJobs: [], inference: null, currentDraft: null, lastClaimAt: null, lastClaimOk: null,
     lastClaimError: null, modelReachable: null, modelCheckedAt: null, modelGpuShare: null, lastModelError: null, lastModelErrorAt: null,
     lastJobOutcome: null, lastJobError: null, lastJobAt: null, lastDraftError: null, jobsRun: 0, draftsServed: 0, stopping: false,
   };
@@ -75,7 +79,7 @@ export function recordModelError(s: HealthState, error: string, now = new Date()
  */
 export function healthStatus(s: HealthState, now = Date.now(), staleMs = 15 * 60_000): { ok: boolean; reason: string } {
   if (s.stopping) return { ok: false, reason: "stopping" };
-  if (s.currentJob) return { ok: true, reason: "running a build" };
+  if (s.currentJob || s.runningJobs.length) return { ok: true, reason: s.runningJobs.length > 1 ? `running ${s.runningJobs.length} builds` : "running a build" };
   if (s.modelReachable === false) return { ok: false, reason: `model server not reachable: ${s.lastModelError ?? "unknown"}` };
   if (!s.lastClaimAt) return { ok: Date.parse(s.startedAt) > now - staleMs, reason: "starting" };
   if (!s.lastClaimOk) return { ok: false, reason: `last claim failed: ${s.lastClaimError ?? "unknown"}` };

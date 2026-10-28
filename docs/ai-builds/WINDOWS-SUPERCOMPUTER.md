@@ -220,6 +220,15 @@ Hardware validation (Founder): install, then `ollama ps` (expect `100% GPU`), `G
 reachable, GPU residency 100%), then the first build of `LOCAL-VALIDATION.md`. Until then, native Ollama on this
 machine is **untested**.
 
+## Founder V4: two models on one GPU (2026-10-28)
+Dual-model mode (`-ModelA` + `-ModelB`) pulls both models and writes `LOCAL_MODEL_A` / `LOCAL_MODEL_B`, `RUNNER_SLOTS`,
+`INFERENCE_MAX_CONCURRENT` (= `OLLAMA_NUM_PARALLEL`), `GPU_VRAM_TOTAL_MB` (from the hardware check, only when reliable)
+and the GPU worker id. Ollama keeps `OLLAMA_MAX_LOADED_MODELS=1`: the runner's scheduler decides which model is in GPU
+memory and switches by unloading (`keep_alive: 0`) and loading (empty prompt) through Ollama's native API. A scheduled
+task (`CrestmontRunner-GpuTelemetry`, every minute) writes `state\telemetry\gpu.json` from `nvidia-smi`; it is mounted
+read-only into the runner and reported to the GPU workers page. Sizes, context and concurrency are estimates until the
+benchmark (`ORCHESTRATOR.md` §12) measures them on this machine.
+
 ## Isolation details
 
 | Control | Where |

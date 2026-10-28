@@ -1,9 +1,7 @@
 # Crestmont egress allow-list (generated from squid.conf.template by Install-CrestmontRunner.ps1 via SquidConf.ps1;
 # the same rendering is unit-tested in runner/windows/egress-policy.ts and parsed with `squid -k parse` in CI).
 # Placeholders: __PLATFORM_HOST__ (control plane host), __RUNNER_EXTRA_DOMAINS__ (space separated, may be
-# "none.invalid"), __OLLAMA_PULL_DOMAINS__ (only for the ollama-in-docker profile, else "none.invalid"),
-# __CLAUDE_SERVICE_DOMAINS__ (only with -Provider ClaudeCode: the exact Claude Code hosts, reachable ONLY from the
-# claude worker network; else "none.invalid").
+# "none.invalid"), __OLLAMA_PULL_DOMAINS__ (only for the ollama-in-docker profile, else "none.invalid").
 # Every substituted value is validated as a host name first (no spaces or newlines, so no rule injection), and hosted
 # AI API domains are refused as extras. Keep paid_ai in sync with PAID_AI_DOMAINS in egress-policy.ts (tested).
 http_port 3128
@@ -26,18 +24,11 @@ logfile_rotate 0
 
 acl runner_net src 172.30.10.0/24
 acl install_net src 172.30.20.0/24
-acl claude_net src 172.30.30.0/24
 acl SSL_ports port 443
 acl ollama_port port 11434
 acl CONNECT method CONNECT
 
-# Founder V3: Claude Code builder workers (one Claude plan account each) reach exactly the Claude Code hosts, from
-# their own network only. Billing safety is not the proxy's job here: the runner starts Claude Code without any API
-# key, so these requests carry the account's subscription sign-in. Every other network keeps the tripwire below.
-acl claude_service dstdomain __CLAUDE_SERVICE_DOMAINS__
-http_access allow claude_net CONNECT claude_service
-
-# Paid / hosted AI APIs: always denied (other than the rule above), and the denial is logged (TCP_DENIED).
+# Paid / hosted AI APIs: always denied, and the denial is logged (TCP_DENIED) for the validation evidence.
 acl paid_ai dstdomain .anthropic.com .claude.ai .claude.com .openai.com .openai.azure.com .mistral.ai .googleapis.com
 acl paid_ai dstdomain .openrouter.ai .groq.com .together.xyz .together.ai .fireworks.ai .cohere.ai .cohere.com
 acl paid_ai dstdomain .deepseek.com .x.ai .perplexity.ai .replicate.com api-inference.huggingface.co router.huggingface.co
@@ -62,8 +53,4 @@ http_access allow runner_net CONNECT control_plane
 http_access allow runner_net CONNECT runner_extra
 http_access allow runner_net !CONNECT ollama_host ollama_port
 http_access allow runner_net CONNECT ollama_pull
-# Claude workers run the agent's own package installs and reach the platform, repos and previews like the runner.
-http_access allow claude_net CONNECT control_plane
-http_access allow claude_net CONNECT runner_extra
-http_access allow claude_net CONNECT npm_registry
 http_access deny all

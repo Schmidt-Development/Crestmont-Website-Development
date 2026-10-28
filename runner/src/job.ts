@@ -38,12 +38,17 @@ import type { Phase } from "./prompt.ts";
 import { readRequirements, checkRequirements, readStringList, readAgentReport } from "./requirements.ts";
 import { buildReport } from "./report.ts";
 import { run, proxyEnv } from "./exec.ts";
-import { ClaudeCodeCliProvider, type Spawner } from "./providers/claude-code-cli.ts";
+import { runOperatorCommand } from "./operator-command.ts";
+import { resolveWithin } from "./paths.ts";
 import type { Advisor } from "./orchestrator/advisors.ts";
-import { AdvisorUnavailableError, ClaudeCodeAdvisor, DeterministicReviewer } from "./orchestrator/advisors.ts";
+import { DeterministicReviewer, LocalModelAdvisor } from "./orchestrator/advisors.ts";
 import type { MasterSpec, ReviewVerdict } from "./orchestrator/contracts.ts";
+import { outstanding } from "./orchestrator/contracts.ts";
 import { collectEvidence, builderIntegrations, builderApprovalRequests, writeReview, BUILDER_CONTRACT } from "./orchestrator/evidence.ts";
-import { runCoordinatedSessions, type SessionRecord, type SessionTask } from "./orchestrator/sessions.ts";
+import type { SessionRecord } from "./orchestrator/sessions.ts";
+import type { InferenceScheduler } from "./inference/scheduler.ts";
+import { runIntegrationOperations } from "./integrations/broker.ts";
+import { buildTask, repairTask, revisionTask, route, type Route, type Task } from "./inference/router.ts";
 
 export interface JobDeps {
   cfg: RunnerConfig;
@@ -72,11 +77,11 @@ export interface JobDeps {
    * server and stops (workspace kept, no `complete`). Default: the lease time left at claim, clamped to 30 s..10 min.
    */
   leaseWindowMs?: number;
-  /** V3 orchestrator: architect/reviewer adapters (tests inject mocks; default from cfg.advisor). */
+  /** Orchestrator: architect/reviewer adapters (tests inject mocks; default from cfg.advisor: Model A, read-only). */
   architect?: Advisor | null;
   reviewer?: Advisor | null;
-  /** V3: process spawner for the Claude Code CLI (tests use a fake CLI). */
-  spawner?: Spawner;
+  /** V4: the runner's shared GPU scheduler (null = requests go straight to the model server). */
+  scheduler?: InferenceScheduler | null;
 }
 
 /** Lease window from the claim: time left on the lease, clamped (clock skew), 180 s (protocol default) if unknown. */
@@ -137,6 +142,13 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
   // job (as for lease_lost) instead of building on after another runner may have taken over.
   const leaseWindowMs = deps.leaseWindowMs ?? leaseWindowFrom(job.leaseExpiresAt);
   let lastLeaseOkAt = Date.now();
+  // V4 scheduler view: what this website's agent does now. The GPU queue's view (waiting, switching) wins.
+  const now: { activity: "preparing" | "gpu_running" | "testing" | "reviewing"; model: string | null; task: Task | null } = { activity: "preparing", model: null, task: null };
+  const orchestration = () => {
+    const g = deps.scheduler?.activity(job.projectId) ?? null;
+    const activity = g && g.state !== "gpu_running" ? g.state : now.activity;
+    return { activity, model: g?.model ?? now.model, task: (g?.task as Task | undefined) ?? now.task };
+  };
   const heartbeatOnce = async (): Promise<boolean> => {
     if (leaseLost) return false;
     try {
@@ -144,6 +156,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         stage, runCostUsd: tracker.attemptCostUsd, turns: tracker.turns(),
         sessionId: tracker.sessionId ?? undefined, activity: tracker.drainActivity(),
         ...(provider ? { provider: provider.id, model: provider.model(job) } : {}),
+        orchestration: orchestration(),
       });
       lastLeaseOkAt = Date.now();
       if (!res.continue) {
@@ -284,7 +297,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     try {
       provider = deps.provider ?? createProvider(cfg, {
         log, queryFn: deps.queryFn, dockerExecutor: deps.dockerExecutor, fetchImpl: deps.modelFetch,
-        interruptGraceMs: deps.interruptGraceMs, localLimits: deps.localLimits, spawner: deps.spawner,
+        interruptGraceMs: deps.interruptGraceMs, localLimits: deps.localLimits, scheduler: deps.scheduler ?? null,
       });
     } catch (err) {
       // No fallback: a refused or misconfigured provider fails this attempt with the reason.
@@ -402,39 +415,47 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     // ── agent phases ──
     stage = "building";
     const st: { localLimit: string | null; agentError: string | null } = { localLimit: null, agentError: null };
-    // ── V3 orchestrator state: the account's usage limit, the master specification, review sessions ──
-    let usageLimit: { limited: boolean; resetAt: string | null } | null = null;
-    const claudeEnv = provider instanceof ClaudeCodeCliProvider ? provider.sessionEnv() : null;
+    // Single-model mode: the one model is LOCAL_MODEL (cfg.local.model) for every role.
+    const models = cfg.models.mode === "dual" ? cfg.models : (() => { const one = { ...cfg.models.b, tag: cfg.local.model, contextTokens: cfg.local.contextTokens }; return { a: one, b: one, mode: "single" as const }; })();
+    const routed: Route[] = [];
     const advisorFor = (role: "architect" | "reviewer"): Advisor | null => {
       if (role === "architect" && deps.architect !== undefined) return deps.architect;
       if (role === "reviewer" && deps.reviewer !== undefined) return deps.reviewer;
       const kind = role === "architect" ? cfg.advisor.architect : cfg.advisor.reviewer;
-      if (kind === "claude-code" && claudeEnv && cfg.claudeCode) return new ClaudeCodeAdvisor({ bin: cfg.claudeCode.bin, cwd: ws!.repo, env: claudeEnv, model: cfg.claudeCode.model, timeoutMs: cfg.advisor.timeoutMs, maxTurns: cfg.advisor.maxTurns });
+      if (kind === "local" && provider instanceof LocalProvider) {
+        // A fresh Model A session per call, read-only tools, on the shared GPU queue.
+        return new LocalModelAdvisor({
+          client: provider.client, scheduler: deps.scheduler ?? null, projectId: job.projectId, model: models.a, repo: ws!.repo,
+          maxTurns: cfg.advisor.maxTurns, maxOutputTokens: cfg.local.maxOutputTokensPerCall, temperature: cfg.local.temperature,
+          onUsage: (r) => { tracker.modelCalls++; tracker.inputTokens += r.promptTokens; tracker.outputTokens += r.completionTokens; tracker.modelWallMs += r.wallMs; },
+        });
+      }
       return role === "reviewer" ? new DeterministicReviewer() : null;
     };
-    const noteLimit = (err: unknown) => { if (err instanceof AdvisorUnavailableError && /usage limit/i.test(err.message)) usageLimit = { limited: true, resetAt: err.rateLimitedUntil }; };
     let spec: MasterSpec | null = job.spec?.content && typeof job.spec.content === "object" ? job.spec.content as MasterSpec : null;
     const sessionRecords: SessionRecord[] = [];
     const architect = advisorFor("architect");
     if (!spec && architect) {
-      // A. Architect session (fresh context, read-only) → validated, stored specification.
+      // A. Model A architect session (fresh context, read-only) → validated, stored master specification.
       stage = "preparing";
-      tracker.note({ kind: "step", message: `architect session (${architect.name})` });
+      const r = route("architecture", models);
+      routed.push(r);
+      Object.assign(now, { activity: "gpu_running", model: r.model.tag, task: r.task });
+      tracker.note({ kind: "step", message: `architect session (${architect.name}; ${r.reason})` });
       const idx = (() => { try { return JSON.parse(readFileSync(path.join(ws.repo, "customer-files", "INDEX.json"), "utf8")) as { files: { id: string; savedAs: string; contentType: string; folder: string | null }[] }; } catch { return { files: [] }; } })();
       const input = {
         brief: job.brief.content, referenceUrls: (job.brief.content.customerData.references ?? []).map((r: { url: string }) => r.url),
         referenceImages: idx.files.filter((f) => /^image\//.test(f.contentType)).map((f) => ({ fileId: f.id, path: path.join(ws!.repo, "customer-files", f.savedAs), folder: f.folder, name: f.savedAs })),
-        maxSessions: job.worker?.maxSessions ?? 1,
+        maxSessions: 1,
       };
-      for (let attempt = 1; attempt <= 2 && !spec && !usageLimit; attempt++) {
+      for (let attempt = 1; attempt <= 2 && !spec && !stop.reason; attempt++) {
         try {
           const raw = await architect.architect(input);
           const stored = await client.storeSpec(job, raw, architect.name);
           spec = raw as MasterSpec;
-          sessionRecords.push({ id: "architect", role: "builder", workstream: "architecture", tasks: [], ownedPaths: [], mode: "serial", status: "completed", note: stored ? `specification v${stored.specVersion} stored` : "platform without V3 endpoints: specification kept locally", changedFiles: [] });
+          sessionRecords.push({ id: "architect", role: "builder", workstream: "architecture", tasks: [], ownedPaths: [], mode: "serial", status: "completed", note: `${r.model.tag}: ${stored ? `specification v${stored.specVersion} stored` : "platform without orchestration endpoints: specification kept locally"}`, changedFiles: [] });
         } catch (err) {
           if (err instanceof LeaseLostError) { markLeaseLost(); throw err; }
-          noteLimit(err);
           sessionNotes.push(`Architect session ${attempt} did not produce a valid specification: ${errorMessage(err).slice(0, 300)}`);
         }
       }
@@ -443,9 +464,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       writeFileSync(path.join(ws.repo, "SPEC.json"), JSON.stringify(spec, null, 2) + "\n");
       writeFileSync(path.join(ws.repo, "SPEC.md"), `# Master specification\n\n## Implementation prompt\n\n${spec.masterPrompt}\n\n## Acceptance criteria\n\n${(spec.acceptanceCriteria ?? []).map((a) => `- ${a.id}: ${a.text} (${a.verification})`).join("\n")}\n`);
     }
-    const runOne = async (phase: Phase, previousNote: string | null, promptOverride: string | null = null, sessionProvider: AgentProvider | null = null, sessionTracker: RunTracker | null = null): Promise<PhaseResult | null> => {
-      const prov = sessionProvider ?? provider!;
-      const trk = sessionTracker ?? tracker;
+    const runOne = async (phase: Phase, previousNote: string | null, promptOverride: string | null, r: Route): Promise<PhaseResult | null> => {
       const remainingBudget = budgetCap - tracker.attemptCostUsd;
       const remainingTurns = turnCap - tracker.turns();
       if (provider!.paid && remainingBudget <= 0.01) { st.localLimit = "budget"; return null; }
@@ -453,15 +472,16 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       const reserve = Math.ceil(turnCap * 0.2);
       const phaseTurns = phase === "plan" ? Math.min(remainingTurns, Math.max(5, Math.ceil(turnCap * 0.15)))
         : phase === "build" ? Math.max(1, remainingTurns - reserve) : remainingTurns;
-      tracker.note({ kind: "step", message: `phase ${phase}` });
+      routed.push(r);
+      Object.assign(now, { activity: "gpu_running", model: r.model.tag, task: r.task });
+      tracker.note({ kind: "step", message: `phase ${phase}: ${r.reason} (${r.model.tag})` });
       const base = promptOverride ?? phasePrompt(job, phase, { starter: starterLabel, resumed: !!job.resume, previousNote, toolset });
-      const res = await prov.run({
+      const res = await provider!.run({
         phase,
         prompt: spec ? `${base}\n\nSPEC.json holds the architect's master specification for this website; it is authoritative for design, structure and acceptance criteria.\n\n${BUILDER_CONTRACT}` : base,
         maxTurns: phaseTurns, maxBudgetUsd: remainingBudget, maxWallMs: Math.max(1000, runtimeDeadline - Date.now()),
-        resumeSessionId: sessionProvider ? null : trk.sessionId, tracker: trk, stop,
+        resumeSessionId: tracker.sessionId, tracker, stop, model: r.model.tag, task: r.task,
       });
-      if (prov instanceof ClaudeCodeCliProvider && prov.rateLimit.limited) usageLimit = prov.rateLimit;
       if (res.status === "max_budget") st.localLimit = "budget";
       if (res.status === "max_turns" && tracker.turns() >= turnCap) st.localLimit = "turns";
       if (res.status === "max_output_tokens") st.localLimit = "output tokens";
@@ -472,31 +492,17 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     };
 
     const previousNote = sessionNotes.find((n) => n.includes("could not be restored")) ?? null;
-    const maxSessions = Math.max(1, job.worker?.maxSessions ?? 1);
     const buildBase = await headCommit(git!); // cycle 1's evidence covers everything built in this attempt
+    // Routing of the build itself: a revision by difficulty, a first build by its workstreams (both Model B unless hard).
+    const rev = job.kind === "revision" ? revisionTask(job.instruction) : null;
+    const buildRoute = rev ? route(rev.task, models, rev.reason) : route(buildTask(spec), models);
+    let lastBuildModel = buildRoute.model.tag;
     for (const phase of (spec ? ["build", "verify"] : ["plan", "build", "verify"]) as Phase[]) {
-      if (stop.reason || st.localLimit || st.agentError || usageLimit) break;
+      if (stop.reason || st.localLimit || st.agentError) break;
       if (phase === "verify") stage = "verifying";
-      if (phase === "build" && spec && maxSessions > 1 && provider instanceof ClaudeCodeCliProvider && (spec.tasks ?? []).length > 1) {
-        // B. Several coordinated builder sessions on the assigned account (isolated worktrees, owned paths).
-        const records = await runCoordinatedSessions({
-          git: git!, workDir: ws.dir, tasks: spec.tasks as SessionTask[], maxSessions, shouldStop: () => !!(stop.reason || usageLimit),
-          runSession: async (sess) => {
-            const sp = new ClaudeCodeCliProvider({ cfg, log, spawner: deps.spawner });
-            await sp.prepare({ job, ws: { ...ws!, repo: sess.cwd }, skillNames, referenceDomains: referenceHosts(job), processEnv: deps.processEnv ?? process.env, systemPromptAppend: systemPromptAppend(job) });
-            const trk = new RunTracker();
-            const prompt = [`You are builder session ${sess.id} for this website. Your tasks (from SPEC.json):`, ...sess.tasks.map((t) => `- ${t.id} [${t.workstream}] ${t.title}`),
-              sess.ownedPaths.length ? `Edit only files under: ${sess.ownedPaths.join(", ")}. Other sessions own the rest of the repository at the same time.` : "", "Commit nothing yourself; the orchestrator commits and merges your work."].filter(Boolean).join("\n");
-            const r = await runOne("build", null, prompt, sp, trk);
-            tracker.turnsCompleted += trk.turns();
-            return { ok: r?.status === "success", error: r?.error ?? null };
-          },
-        });
-        sessionRecords.push(...records);
-        tracker.note({ kind: "step", message: `coordinated sessions: ${records.map((r) => `${r.id}:${r.status}`).join(", ")}` });
-      } else {
-        await runOne(phase, phase === "plan" ? previousNote : null);
-      }
+      const r = phase === "plan" ? route("planning", models) : phase === "build" ? buildRoute : route("debugging", models, "verify and fix → Model B");
+      await runOne(phase, phase === "plan" ? previousNote : null, null, r);
+      if (phase !== "plan") lastBuildModel = r.model.tag;
       guard();
       await sendRequirements(readRequirements(ws.repo, job.requirements));
       await checkpoint(`after ${phase}`);
@@ -509,6 +515,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
      * computed by the runner itself from the brief snapshot (files are only read, never executed).
      */
     const acceptance = async (commands: { id: string; label: string; command: string[] }[]): Promise<CheckOutcome[]> => {
+      Object.assign(now, { activity: "testing", task: null });
       if (sandbox) await sandbox.restart();
       if (starterSpec && job.starter) {
         const restored = restoreProtectedFiles(starterDir(cfg.startersDir, job.starter), ws!.repo, starterSpec);
@@ -530,9 +537,9 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       return out;
     };
 
-    // ── runner acceptance checks → separate review session → corrective prompt → same worker (V3 §7) ──
+    // ── runner acceptance checks → fresh Model A review session → routed corrections (B, or A when hard) → repeat ──
     let checks: CheckOutcome[] = [];
-    if (!stop.reason && !st.localLimit && !st.agentError && !usageLimit) {
+    if (!stop.reason && !st.localLimit && !st.agentError) {
       stage = "verifying";
       const commands = acceptanceCommands(starterSpec, ws.repo, job.packageId);
       if (sandbox && cfg.jobSandbox.browserCheck && existsSync(path.join(ws.repo, "public", "index.html"))) {
@@ -548,56 +555,75 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       let cycleBase = buildBase;
       let promptUsed = spec?.masterPrompt ?? "Runner build phases (plan, build, verify) from BRIEF.md";
       let promptSource: "architect" | "reviewer" | "runner" = spec ? "architect" : "runner";
+      let cycleRoute: Route = buildRoute;
+      const signatures: string[] = [];
       for (let cycle = 1; cycle <= cfg.advisor.maxCycles; cycle++) {
-        if (stop.reason || st.localLimit || st.agentError || usageLimit) break;
+        if (stop.reason || st.localLimit || st.agentError) break;
         if (checks.some((c) => !c.ok)) writeFileSync(path.join(ws.repo, ".crestmont", "runner-checks.json"), JSON.stringify(checks.map(({ id, command, ok, code, outputTail }) => ({ id, command, ok, code, outputTail })), null, 2));
         await commitAll(git!, `AI build: cycle ${cycle} evidence`);
         const evidence = await collectEvidence({ repo: ws.repo, pathEnv: cfg.agentPath, home: ws.home, baseCommit: cycleBase, checks, requirements: readRequirements(ws.repo, job.requirements), spec });
         // Builder outputs: integration status and sensitive-action requests (the build continues meanwhile).
         try {
-          const ints = builderIntegrations(ws.repo);
+          // The builder's own status is code + mock only; it cannot set test-environment or live status.
+          const ints = builderIntegrations(ws.repo).map(({ key, codeStatus, mockStatus, name, purpose }) => ({ key, codeStatus, mockStatus, name, purpose }));
           if (ints.length) await client.reportIntegrations(job, ints);
-          for (const a of builderApprovalRequests(ws.repo)) await client.requestApproval(job, a);
+          for (const a of builderApprovalRequests(ws.repo)) if (a.kind !== "integration_operation") await client.requestApproval(job, a);
+          // V4 §8: catalogued test-environment operations, run by the runner itself after the Owner approved them.
+          const ops = await runIntegrationOperations({
+            repo: ws.repo, jobDir: ws.dir, projectId: job.projectId, secretsRoot: path.join(cfg.secretsDir, "integrations"),
+            approvals: () => client.listApprovals(job), requestApproval: (r) => client.requestApproval(job, r), report: (items) => client.reportIntegrations(job, items), fetchImpl: deps.fetchImpl,
+          });
+          for (const o of ops) tracker.note({ kind: "note", message: `integration operation ${o.operation}: ${o.status}` });
         } catch (err) { if (err instanceof LeaseLostError) { markLeaseLost(); throw err; } log.warn("integration/approval report failed", { error: errorMessage(err) }); }
-        // C. Independent review session (fresh context; falls back to the deterministic reviewer if it is unavailable).
+        // C. Independent review: a fresh Model A session (falls back to the deterministic reviewer if it is unavailable).
         stage = "verifying";
+        const open = outstanding(evidence);
+        const reviewRoute = route(open.length ? "review" : "final_review", models);
+        Object.assign(now, { activity: "reviewing", model: reviewRoute.model.tag, task: reviewRoute.task });
         let verdict: ReviewVerdict;
         let reviewerName = reviewer.name;
         try { verdict = await reviewer.review(spec, evidence, cycle); }
         catch (err) {
-          noteLimit(err);
-          if (usageLimit) break;
+          if (stop.reason) break;
           sessionNotes.push(`Review session for cycle ${cycle} failed (${errorMessage(err).slice(0, 200)}); the deterministic reviewer judged this cycle.`);
           reviewerName = "deterministic";
           verdict = await new DeterministicReviewer().review(spec, evidence);
         }
         writeReview(ws.repo, cycle, verdict.decision, verdict.nextPrompt, verdict.findings);
+        const reviewerModel = reviewerName.startsWith("local:") ? reviewerName.slice(6) : null;
         const res = await client.submitCycle(job, { cycle, prompt: promptUsed, promptSource, evidence, decision: verdict.decision, addresses: verdict.addresses, nextPrompt: verdict.nextPrompt, reviewerProvider: reviewerName,
+          builderModel: lastBuildModel, reviewerModel, routing: { builder: cycleRoute.slot, builderTask: cycleRoute.task, reason: cycleRoute.reason, reviewer: reviewerModel ? "A" : "rules" },
           sessions: sessionRecords.splice(0) }).catch((err) => { if (err instanceof LeaseLostError) { markLeaseLost(); throw err; } throw err; });
-        // Older platform without V3 endpoints: the earlier behaviour (one repair round when checks failed).
+        // Older platform without the orchestration endpoints: the earlier behaviour (one repair round when checks failed).
         const decision = res ?? { cycle, decision: verdict.decision, reason: "local", continue: cycle === 1 && checks.some((c) => !c.ok), prompt: verdict.nextPrompt };
-        tracker.note({ kind: "step", message: `cycle ${cycle}: ${decision.decision}${res ? "" : " (platform without V3 endpoints)"}` });
+        tracker.note({ kind: "step", message: `cycle ${cycle}: ${decision.decision}${res ? "" : " (platform without orchestration endpoints)"}` });
         if (!decision.continue) break;
-        // D. Corrective prompt → the same project's builder (the session continues with its context).
+        // D. Corrective prompt → routed: ordinary defects to Model B; repeated, architectural or integration-heavy to A.
+        const sig = [...open].sort().join("\n");
+        signatures.push(sig);
+        let repeats = 0;
+        for (let i = signatures.length - 1; i >= 0 && signatures[i] === sig; i--) repeats++;
+        const rt = repairTask({ outstanding: open, sameFailureRepeats: repeats, findings: verdict.findings, escalateAfterRepeats: cfg.routing.escalateAfterRepeats });
+        cycleRoute = route(rt.task, models, rt.reason);
         cycleBase = await headCommit(git!);
         promptUsed = decision.prompt ?? "Repair: fix the failing checks listed in .crestmont/runner-checks.json.";
         promptSource = "reviewer";
-        // Without V3 endpoints the classic repair prompt is used (runner-checks.json); otherwise the reviewer's prompt.
-        await runOne("repair", null, res ? `${promptUsed}\n\nThe full review is in .crestmont/review-${String(cycle).padStart(2, "0")}.md.` : null);
+        // Without the orchestration endpoints the classic repair prompt is used (runner-checks.json); otherwise the reviewer's prompt.
+        await runOne("repair", null, res ? `${promptUsed}\n\nThe full review is in .crestmont/review-${String(cycle).padStart(2, "0")}.md.` : null, cycleRoute);
+        lastBuildModel = cycleRoute.model.tag;
         guard();
-        if (stop.reason || st.localLimit || st.agentError || usageLimit) break;
+        if (stop.reason || st.localLimit || st.agentError) break;
         checks = await acceptance(commands);
         await checkpoint(`after cycle ${cycle} corrections`);
       }
     }
+    Object.assign(now, { activity: "preparing", task: null });
 
-    // ── plan capacity exhausted: checkpoint, keep the account's ownership, wait, resume without duplicate work ──
-    const limit = usageLimit as { limited: boolean; resetAt: string | null } | null;
-    if (limit && !stop.reason) {
-      await checkpoint("plan usage limit reached");
-      const until = limit.resetAt && Date.parse(limit.resetAt) > Date.now() ? limit.resetAt : new Date(Date.now() + 60 * 60_000).toISOString();
-      try { await client.reportWorkerStatus({ rateLimitedUntil: until, error: "Claude plan usage limit reached" }); } catch { /* reported again with the next claim */ }
-      return await finish("released", { error: "The assigned Claude account reached its plan usage limit; work is checkpointed and resumes when capacity returns (no paid fallback).", stopReason: "usage_limit", checks, notBefore: until });
+    // ── a model could not be loaded on the GPU: checkpoint and give the build back without spending an attempt ──
+    if (st.agentError && /could not be loaded/.test(st.agentError) && !stop.reason) {
+      await checkpoint("model unavailable");
+      const until = new Date(Date.now() + 10 * 60_000).toISOString();
+      return await finish("released", { error: `${st.agentError.slice(0, 300)}; work is checkpointed and resumes when the model loads again (no paid fallback).`, stopReason: "model_unavailable", checks, notBefore: until });
     }
 
     // ── stop paths ──
@@ -742,8 +768,14 @@ async function deployPreview(cfg: RunnerConfig, ws: Workspace, git: GitCtx, job:
     const v = readSecret(processEnv, n);
     if (v) env[n] = v;
   }
-  const r = await run("sh", ["-c", cfg.preview.command], { cwd: exportDir, env, timeoutMs: cfg.preview.timeoutMs });
+  // No shell: the setting is parsed into an allow-listed Wrangler invocation; the preview name and IDs are passed as
+  // whole arguments. The export directory must still be inside this job's workspace.
+  const r = await runOperatorCommand("preview-deploy", cfg.preview.command, cfg.preview.envNames, env, { cwd: resolveWithin(ws.dir, exportDir), timeoutMs: cfg.preview.timeoutMs });
   rmSync(exportDir, { recursive: true, force: true });
+  if (r.refused) {
+    log.warn("preview deploy command refused", { error: r.stderr.slice(0, 300) });
+    return { url: null, note: `preview deploy command refused: ${r.stderr.slice(0, 300)}`, name: null };
+  }
   if (r.code !== 0) {
     log.warn("preview deploy failed", { code: r.code });
     return { url: null, note: `preview deploy command failed (exit ${r.code}${r.timedOut ? ", timed out" : ""})`, name: null };
@@ -797,7 +829,8 @@ export async function deletePreview(cfg: RunnerConfig, name: string, processEnv:
   const env: Record<string, string> = { PATH: cfg.agentPath, HOME: dir, LANG: "C.UTF-8", ...proxyEnv(processEnv), CRESTMONT_PREVIEW_NAME: name };
   for (const n of cfg.preview?.envNames ?? []) { const v = readSecret(processEnv, n); if (v) env[n] = v; }
   try {
-    const r = await run("sh", ["-c", cfg.previewDelete.command], { cwd: dir, env, timeoutMs: cfg.previewDelete.timeoutMs });
+    const r = await runOperatorCommand("preview-delete", cfg.previewDelete.command, cfg.preview?.envNames ?? [], env, { cwd: dir, timeoutMs: cfg.previewDelete.timeoutMs });
+    if (r.refused) return { ok: false, error: `delete command refused: ${r.stderr.slice(0, 300)}` };
     return r.code === 0 ? { ok: true, error: null } : { ok: false, error: `delete command failed (exit ${r.code}${r.timedOut ? ", timed out" : ""})` };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }

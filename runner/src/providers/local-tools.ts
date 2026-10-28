@@ -107,6 +107,21 @@ export const TOOL_DEFS: ToolDef[] = [
 
 export const TOOL_NAMES = TOOL_DEFS.map((t) => t.name);
 
+/** Tools of a read-only session (Model A architect and reviewer): they can look, never change or run anything. */
+export const READ_ONLY_TOOLS = ["list_dir", "read_file", "search"];
+export function readOnlyToolSpecs(): ToolSpec[] {
+  return toolSpecs().filter((t) => READ_ONLY_TOOLS.includes(t.function.name));
+}
+
+/** Execute a tool for a read-only session; anything but the read-only tools is refused (never executed). */
+export async function executeReadOnlyTool(name: string, args: Record<string, unknown>, repo: string): Promise<ToolOutcome> {
+  if (!READ_ONLY_TOOLS.includes(name)) return { ok: false, activity: `${name} refused`, output: `ERROR: ${name} is not available in a read-only session. Available: ${READ_ONLY_TOOLS.join(", ")}.` };
+  const problems = validateArgs(name, args);
+  if (problems.length) return { ok: false, activity: `${name} invalid`, output: `ERROR: invalid call to ${name}: ${problems.join("; ")}. Schema: ${schemaHint(name)}` };
+  const noSandbox = new Proxy({}, { get() { throw new Error("read-only session: no commands"); } }) as unknown as JobSandbox;
+  return executeTool(name, args, { repo, sandbox: noSandbox, defaultTimeoutMs: 0 });
+}
+
 export function toolSpecs(): ToolSpec[] {
   return TOOL_DEFS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters as unknown as Record<string, unknown> } }));
 }

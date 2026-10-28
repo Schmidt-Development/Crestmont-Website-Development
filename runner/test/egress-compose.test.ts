@@ -12,7 +12,7 @@ import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import {
-  renderDefaultSquidConf, renderSquidConf, parseSquidPolicy, evaluateSquid, NETWORKS, PAID_AI_DOMAINS, isPaidAiHost, CLAUDE_SERVICE_DOMAINS,
+  renderDefaultSquidConf, renderSquidConf, parseSquidPolicy, evaluateSquid, NETWORKS, PAID_AI_DOMAINS, isPaidAiHost,
   EgressPolicyError, TEMPLATE_PATH, OLLAMA_PULL_DOMAINS,
 } from "../windows/egress-policy.ts";
 import type { SquidInputs } from "../windows/egress-policy.ts";
@@ -55,20 +55,6 @@ test("[AIB-RUNNER] squid allow-list: runner reaches the platform and the local m
   assert.equal(evaluateSquid(p, req("runner", "evil.example")).rule, "http_access deny all");
 });
 
-test("[AIB-015] V3 squid: Claude workers reach exactly the Claude Code hosts from their own network; every other network keeps the paid-AI tripwire", () => {
-  const p = parseSquidPolicy(renderDefaultSquidConf({ platformHost: PLATFORM, extraDomains: ["github.com"], claudeCode: true }));
-  for (const h of CLAUDE_SERVICE_DOMAINS) {
-    assert.ok(evaluateSquid(p, req("claude", h)).allowed, `claude -> ${h}`);
-    for (const net of ["runner", "install", "outside"] as const) assert.equal(evaluateSquid(p, req(net, h)).allowed, false, `${net} -> ${h}`);
-  }
-  for (const h of ["api.openai.com", "anthropic.com", "x.anthropic.com", "api.claude.com", "api.mistral.ai"]) assert.equal(evaluateSquid(p, req("claude", h)).allowed, false, `claude -> ${h} denied`);
-  assert.ok(evaluateSquid(p, req("claude", PLATFORM)).allowed);
-  assert.ok(evaluateSquid(p, req("claude", "registry.npmjs.org")).allowed, "the agent installs packages itself");
-  assert.ok(evaluateSquid(p, req("claude", "github.com")).allowed);
-  assert.equal(evaluateSquid(p, req("claude", "host.docker.internal", 11434, "CONNECT")).allowed, false, "no local model needed or reachable");
-  assert.equal(evaluateSquid(p, req("claude", "evil.example")).allowed, false);
-});
-
 test("[AIB-RUNNER] squid allow-list: anthropic.com, api.openai.com and other hosted AI APIs are denied first, from every network", () => {
   const hosts = [
     "anthropic.com", "api.anthropic.com", "claude.ai", "api.claude.com", "api.openai.com", "openai.com", "x.openai.azure.com",
@@ -87,9 +73,7 @@ test("[AIB-RUNNER] squid allow-list: anthropic.com, api.openai.com and other hos
     }
   }
   const order = p.rules.map((r) => `${r.action} ${r.terms.map((t) => (t.negate ? "!" : "") + t.name).join(" ")}`);
-  // The only rule before the paid denial is the V3 Claude worker rule, which matches nothing unless -ClaudeCode.
-  assert.deepEqual(order.slice(0, 3), ["allow claude_net CONNECT claude_service", "deny paid_ai", "deny paid_ai_re"]);
-  for (const host of hosts) assert.equal(evaluateSquid(p, req("claude", host)).allowed, false, `claude net without -ClaudeCode -> ${host}`);
+  assert.deepEqual(order.slice(0, 2), ["deny paid_ai", "deny paid_ai_re"]);
   assert.equal(order.at(-1), "deny all");
   // Extras and the ollama-in-docker pull hosts work where intended.
   assert.ok(evaluateSquid(p, req("runner", "api.github.com")).allowed);
@@ -160,17 +144,16 @@ test("[AIB-RUNNER] SquidConf.ps1 (used by the installer) renders byte-for-byte w
   const dir = tmp("aib-squid-ps-");
   const script = path.join(dir, "render.ps1");
   writeFileSync(script, [
-    "param([string]$Template, [string]$PlatformHost, [string]$Extra, [switch]$OllamaInDocker, [switch]$ClaudeCode, [string]$Out)",
+    "param([string]$Template, [string]$PlatformHost, [string]$Extra, [switch]$OllamaInDocker, [string]$Out)",
     "$ErrorActionPreference = 'Stop'",
     `. '${path.join(WIN, "SquidConf.ps1").replaceAll("'", "''")}'`,
     "$t = [IO.File]::ReadAllText($Template)",
     "$extras = @(); if ($Extra) { $extras = $Extra -split ',' }",
-    "try { $s = ConvertTo-SquidConf -Template $t -PlatformHost $PlatformHost -ExtraDomains $extras -OllamaInDocker:$OllamaInDocker -ClaudeCode:$ClaudeCode; [IO.File]::WriteAllText($Out, $s); exit 0 }",
+    "try { $s = ConvertTo-SquidConf -Template $t -PlatformHost $PlatformHost -ExtraDomains $extras -OllamaInDocker:$OllamaInDocker; [IO.File]::WriteAllText($Out, $s); exit 0 }",
     "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 3 }",
   ].join("\n"));
-  const cases: { platformHost: string; extra: string[]; ollama: boolean; claude?: boolean; error?: RegExp }[] = [
+  const cases: { platformHost: string; extra: string[]; ollama: boolean; error?: RegExp }[] = [
     { platformHost: PLATFORM, extra: [], ollama: false },
-    { platformHost: PLATFORM, extra: ["github.com"], ollama: false, claude: true },
     { platformHost: "Staging.Crestmont.Example", extra: ["github.com", "api.github.com", "api.cloudflare.com"], ollama: true },
     { platformHost: PLATFORM, extra: ["api.openai.com"], ollama: false, error: /hosted AI API/ },
     { platformHost: PLATFORM, extra: [".azure.com"], ollama: false, error: /hosted AI API/ },
@@ -180,7 +163,7 @@ test("[AIB-RUNNER] SquidConf.ps1 (used by the installer) renders byte-for-byte w
   for (const c of cases) {
     const out = path.join(dir, `out-${Math.random().toString(36).slice(2)}.conf`);
     // (No empty arguments: Windows PowerShell 5.1 drops "" on the -File command line.)
-    const args = ["-NoProfile", "-NonInteractive", "-File", script, "-Template", TEMPLATE_PATH, "-PlatformHost", c.platformHost, ...(c.extra.length ? ["-Extra", c.extra.join(",")] : []), "-Out", out, ...(c.ollama ? ["-OllamaInDocker"] : []), ...(c.claude ? ["-ClaudeCode"] : [])];
+    const args = ["-NoProfile", "-NonInteractive", "-File", script, "-Template", TEMPLATE_PATH, "-PlatformHost", c.platformHost, ...(c.extra.length ? ["-Extra", c.extra.join(",")] : []), "-Out", out, ...(c.ollama ? ["-OllamaInDocker"] : [])];
     const r = spawnSync(PWSH!, args, { encoding: "utf8", timeout: 120_000 });
     if (c.error) {
       assert.equal(r.status, 3, `${JSON.stringify(c)} must be refused: ${r.stdout}${r.stderr}`);
@@ -190,14 +173,14 @@ test("[AIB-RUNNER] SquidConf.ps1 (used by the installer) renders byte-for-byte w
     }
     assert.equal(r.status, 0, r.stdout + r.stderr);
     const fromPs = readFileSync(out, "utf8");
-    assert.equal(fromPs, renderDefaultSquidConf({ platformHost: c.platformHost, extraDomains: c.extra, ollamaInDocker: c.ollama, claudeCode: !!c.claude }), JSON.stringify(c));
+    assert.equal(fromPs, renderDefaultSquidConf({ platformHost: c.platformHost, extraDomains: c.extra, ollamaInDocker: c.ollama }), JSON.stringify(c));
   }
 });
 
 const SQUID = process.env.SQUID_BIN || null;
 test("[AIB-RUNNER] squid -k parse accepts the rendered configuration (SQUID_BIN set)", { skip: SQUID ? false : "set SQUID_BIN=<squid binary> to run; CI parses it inside the built proxy image" }, () => {
   const dir = tmp("aib-squid-");
-  const inputs: [string, SquidInputs][] = [["default", { platformHost: PLATFORM }], ["extras", { platformHost: PLATFORM, extraDomains: ["github.com", "api.github.com"], ollamaInDocker: true }], ["claude-code", { platformHost: PLATFORM, extraDomains: ["github.com"], claudeCode: true }]];
+  const inputs: [string, SquidInputs][] = [["default", { platformHost: PLATFORM }], ["extras", { platformHost: PLATFORM, extraDomains: ["github.com", "api.github.com"], ollamaInDocker: true }]];
   for (const [name, input] of inputs) {
     const conf = path.join(dir, `${name}.conf`);
     // pid file / logs under the temp dir so parsing needs no root paths.

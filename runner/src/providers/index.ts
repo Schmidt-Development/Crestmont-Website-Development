@@ -11,7 +11,7 @@ import { PaidProviderRefusedError } from "./types.ts";
 import { LocalProvider } from "./local.ts";
 import type { LocalLimits } from "./local.ts";
 import { ClaudeAgentSdkProvider } from "./claude-agent-sdk.ts";
-import { ClaudeCodeCliProvider, type Spawner } from "./claude-code-cli.ts";
+import type { InferenceScheduler } from "../inference/scheduler.ts";
 import type { QueryFn } from "./claude-agent-sdk.ts";
 
 export interface ProviderDeps {
@@ -24,8 +24,8 @@ export interface ProviderDeps {
   localLimits?: Partial<LocalLimits>;
   clientRetries?: number;
   clientSleep?: (ms: number) => Promise<void>;
-  /** Only for the claude-code provider: process spawner (tests use a fake CLI). */
-  spawner?: Spawner;
+  /** V4: the runner's shared GPU scheduler (local provider). */
+  scheduler?: InferenceScheduler | null;
 }
 
 export function assertProviderAllowed(cfg: Pick<RunnerConfig, "agentProvider" | "allowPaidProvider">): void {
@@ -36,7 +36,6 @@ export function assertProviderAllowed(cfg: Pick<RunnerConfig, "agentProvider" | 
 
 export function createProvider(cfg: RunnerConfig, deps: ProviderDeps): AgentProvider {
   assertProviderAllowed(cfg);
-  if (cfg.agentProvider === "claude-code") return new ClaudeCodeCliProvider({ cfg, log: deps.log, spawner: deps.spawner });
   if (cfg.agentProvider === "claude-agent-sdk") {
     if (!deps.queryFn) throw new Error("The Claude Agent SDK adapter needs the SDK's query function");
     return new ClaudeAgentSdkProvider({ cfg, queryFn: deps.queryFn, log: deps.log, interruptGraceMs: deps.interruptGraceMs });
@@ -47,7 +46,7 @@ export function createProvider(cfg: RunnerConfig, deps: ProviderDeps): AgentProv
     executor: deps.dockerExecutor ?? cliDockerExecutor(cfg.jobSandbox.dockerBin, {
       PATH: cfg.agentPath, HOME: "/tmp", LANG: "C.UTF-8", ...(process.env.DOCKER_HOST ? { DOCKER_HOST: process.env.DOCKER_HOST } : {}),
     }),
-    clientRetries: deps.clientRetries, clientSleep: deps.clientSleep,
+    clientRetries: deps.clientRetries, clientSleep: deps.clientSleep, scheduler: deps.scheduler ?? null,
   });
 }
 

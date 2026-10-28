@@ -377,7 +377,9 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/builds/projects/:projectId/pause", fields: () => ({ paused: "1", reason: "matrix project pause" }) },
     { key: "POST /staff/builds/projects/:projectId/budget", fields: () => ({ project_budget: "50" }) },
     // Earlier refund scenarios made tenant A's order ineligible, which (correctly) canceled its build; restore the fixture state.
-    { key: "POST /staff/builds/:id/approve", fields: () => ({ notes: "matrix approval" }), setup: async () => { await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review' WHERE id = ?`).bind(w.ids.buildJob).run(); } },
+    // V4 §7 F: the private internal review, then the final approval.
+    { key: "POST /staff/builds/:id/internal-approve", fields: () => ({ note: "Matrix: reviewed the preview by hand" }), setup: async () => { await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review', internal_approved_at = NULL, preview_url = COALESCE(preview_url, 'https://cm-prv-matrix-b0.acct.workers.dev'), preview_deleted_at = NULL, preview_delete_requested_at = NULL WHERE id = ?`).bind(w.ids.buildJob).run(); } },
+    { key: "POST /staff/builds/:id/approve", fields: () => ({ notes: "matrix approval" }), setup: async () => { await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review', internal_approved_at = COALESCE(internal_approved_at, ?), preview_url = COALESCE(preview_url, 'https://cm-prv-matrix-b0.acct.workers.dev'), preview_deleted_at = NULL, preview_delete_requested_at = NULL WHERE id = ?`).bind(nowIso(), w.ids.buildJob).run(); } },
     { key: "POST /staff/builds/:id/revision", fields: () => ({ instruction: "Make the hero heading larger and add the opening hours to the footer." }), setup: async () => {
       // Eligibility for new automated work: submitted intake, no approved/issued refund on the order.
       await w.db.prepare(`UPDATE onboarding_responses SET completed_at = ? WHERE project_id = ?`).bind(nowIso(), w.a.ids.project).run();
@@ -405,7 +407,7 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "GET /staff/builds/:id/preview", setup: async () => {
       await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review', preview_url = 'https://cm-prv-matrix-b0.acct.workers.dev', preview_name = 'cm-prv-matrix-b0', preview_gated = 1, preview_deleted_at = NULL, customer_preview_shared_at = NULL WHERE id = ?`).bind(w.ids.buildJob).run();
     } },
-    { key: "POST /staff/builds/:id/share-preview", fields: () => ({ action: "share" }) },
+    { key: "POST /staff/builds/:id/share-preview", fields: () => ({ action: "share" }), setup: async () => { await w.db.prepare(`UPDATE build_jobs SET internal_approved_at = COALESCE(internal_approved_at, ?) WHERE id = ?`).bind(nowIso(), w.ids.buildJob).run(); } },
     { key: "GET /portal/projects/:id/previews/:buildId", as: custA, path: () => `/portal/projects/${a.ids.project}/previews/${w.ids.buildJob}` },
     { key: "POST /portal/projects/:id/previews/:buildId/review", as: custA, path: () => `/portal/projects/${a.ids.project}/previews/${w.ids.buildJob}/review`, fields: () => ({ decision: "changes_requested", note: "Please use the new logo." }) },
     // Founder decision D5: customer production delivery (framework only; nothing is deployed in tests).
@@ -431,8 +433,9 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/builds/releases/:id/rollback", setup: async () => {
       await w.db.prepare(`UPDATE site_deployments SET state = 'superseded', verified_at = ? WHERE id = ?`).bind(nowIso(), w.ids.siteDeployment).run();
     } },
-    // Architecture V2
-    { key: "POST /staff/builds/workers", fields: () => ({ label: "Claude account 9", provider_kind: "claude-code", max_sessions: "2" }) },
+    // V4: GPU workers, priority
+    { key: "POST /staff/builds/workers", fields: () => ({ label: "Node 9 GPU", cost_class: "owned-hardware", max_active_projects: "2" }) },
+    { key: "POST /staff/builds/projects/:id/priority", fields: () => ({ priority: "2" }) },
     { key: "POST /staff/builds/workers/:id/update", fields: () => ({ action: "pause", reason: "Matrix pause" }) },
     { key: "POST /staff/builds/workers/:id/rotate-key" },
     { key: "POST /staff/builds/projects/:id/reassign", fields: () => ({ reason: "Matrix reassignment" }), setup: async () => {

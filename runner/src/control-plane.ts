@@ -163,7 +163,13 @@ export class ControlPlaneClient {
     catch (err) { if (!(err instanceof ControlPlaneError && (err.status === 404 || err.status === 405))) throw err; }
   }
 
-  async requestApproval(job: Pick<Job, "id" | "leaseToken">, req: { kind: string; summary: string; detail?: string }): Promise<{ id: string; status: string } | null> {
+  /** Decisions on this job's approval requests (null = a platform without the endpoint). */
+  async listApprovals(job: Pick<Job, "id" | "leaseToken">): Promise<{ id: string; kind: string; summary: string; operation: string | null; status: string; decision_note: string | null }[] | null> {
+    try { return (await this.post<{ approvals: { id: string; kind: string; summary: string; operation: string | null; status: string; decision_note: string | null }[] }>("/api/builds/runner/approvals/list", { jobId: job.id, leaseToken: job.leaseToken })).approvals; }
+    catch (err) { if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null; throw err; }
+  }
+
+  async requestApproval(job: Pick<Job, "id" | "leaseToken">, req: { kind: string; summary: string; detail?: string; operation?: string }): Promise<{ id: string; status: string } | null> {
     try { return await this.post("/api/builds/runner/approvals/request", { runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId), jobId: job.id, leaseToken: job.leaseToken, ...req }); }
     catch (err) { if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null; throw err; }
   }
@@ -174,6 +180,7 @@ export class ControlPlaneClient {
       jobId: job.id, leaseToken: job.leaseToken, stage: req.stage, runCostUsd: round4(req.runCostUsd), turns: req.turns,
       ...(req.sessionId ? { sessionId: req.sessionId } : {}), ...(activity && activity.length ? { activity } : {}),
       ...(req.provider ? { provider: req.provider.slice(0, 40) } : {}), ...(req.model ? { model: req.model.slice(0, 120) } : {}),
+      ...(req.orchestration ? { orchestration: { activity: req.orchestration.activity.slice(0, 30), model: req.orchestration.model?.slice(0, 120) ?? null, task: req.orchestration.task?.slice(0, 40) ?? null } } : {}),
     }, { jobId: job.id });
   }
 

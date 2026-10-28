@@ -106,7 +106,7 @@ test("[AIB-RUNNER] local provider happy path: plan/build/verify with a tool-usin
     assert.match(String(done.report), /PASS `node scripts\/check\.mjs --package starter`/);
     assert.match(String(done.report), /PASS `node \/opt\/crestmont\/browser-check\.mjs --root public --out \.crestmont\/screenshots`/);
     const acts = r.cp.byPath("heartbeat").flatMap((h) => (h.body.activity as { message: string }[] | undefined) ?? []).map((a) => a.message).join("\n");
-    assert.match(acts, /local model test-coder:30b: phase plan success; \d+ calls; tokens in \d+ \/ out \d+; model time \d+ s; cost \$0/);
+    assert.match(acts, /local model test-coder:30b \(planning\): phase plan success; \d+ calls; tokens in \d+ \/ out \d+; model time \d+ s; cost \$0/);
     // Every command (agent's and the runner's checks) went through the job container.
     const execs = r.docker.calls.filter((c) => c[0] === "exec").map((c) => c.slice(c.indexOf("timeout") + 4).join(" "));
     assert.ok(execs.some((e) => e.includes("npm run -s check -- --package starter") && e.startsWith("bash -c")), "agent's check via run_command");
@@ -231,7 +231,7 @@ test("[AIB-RUNNER] the paid Agent SDK adapter is refused unless explicitly allow
   assert.equal(cfg.local.baseUrl, "http://host.docker.internal:11434/v1");
   assert.equal(cfg.aiDrafts.enabled, true);
   assert.equal(loadConfig({ ...env, RUNNER_AGENT_PROVIDER: "claude-agent-sdk" }).allowPaidProvider, false);
-  assert.throws(() => loadConfig({ ...env, RUNNER_AGENT_PROVIDER: "openai" }), /must be "local", "claude-code" or "claude-agent-sdk"/);
+  assert.throws(() => loadConfig({ ...env, RUNNER_AGENT_PROVIDER: "openai" }), /must be "local" or "claude-agent-sdk"/);
 });
 
 // ── AI drafts ──

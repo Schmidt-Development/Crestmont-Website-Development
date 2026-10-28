@@ -9,6 +9,7 @@ import { FakePayments } from "./support/security-world.ts";
 import * as B from "../src/services/builds.ts";
 import * as D from "../src/services/site-delivery.ts";
 import type { Env } from "../src/app/context.ts";
+import { getPipeline } from "../src/services/build-pipeline.ts";
 
 const RUNNER_SECRET = "test-runner-secret";
 const WHSEC = "whsec_buildtest";
@@ -116,6 +117,10 @@ test("[AIB-001] intake first, payment second; unpaid orders never queue; histori
   assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.backfill_authorized'`).first());
 });
 
+const stageOf = async (t: { db: App["db"] }, pid: string) => (await getPipeline(t.db, pid))?.stage;
+/** V4: the private internal review comes before the final approval (no AI review cycle ran in these fixtures). */
+const internalOk = async (t: { oc: TestClient }, id: string) => { await t.oc.post(`/staff/builds/${id}/internal-approve`, { note: "Reviewed by hand in the fixture (no AI review cycle)" }); };
+
 async function queuedProject(t: App) {
   const { cu, c, order } = await customerWithOrder(t);
   await stripe(t, "checkout.session.completed", session(cu.organizationId, order));
@@ -169,6 +174,7 @@ test("[AIB-002] controlled-fixture pipeline: one durable job → one leased sess
   assert.match(page, /\$3\.21/);
   const api = await (await t.oc.get(`/api/builds/${j.id}`)).json() as { summary: B.BuildSummary };
   assert.deepEqual(api.summary.requirements, { remaining: api.summary.requirements.remaining, implemented_unverified: 0, verified: 1, blocked: 1 });
+  await internalOk(t, j.id);
   assert.equal((await t.oc.post(`/staff/builds/${j.id}/approve`, { notes: "Looks good" })).status, 303);
   assert.equal((await B.getJob(t.db, j.id))!.state, "approved");
   assert.equal((await t.db.prepare(`SELECT status FROM projects WHERE id = ?`).bind(pid).first<{ status: string }>())!.status, "scope_review", "approval changes no project or delivery state on its own");
@@ -438,12 +444,14 @@ test("[AIB-006] preview URLs: only allowed preview hosts are recorded; a revisio
   assert.equal(j.state, "ready_for_review");
   assert.equal(j.preview_url, null);
   assert.ok(await t.db.prepare(`SELECT 1 FROM build_events WHERE job_id = ? AND kind = 'error' AND message LIKE 'Preview URL not recorded%'`).bind(c.id).first());
+  await internalOk(t, c.id);
   const refused = await t.oc.post(`/staff/builds/${c.id}/approve`, { notes: "" });
   assert.match(decodeURIComponent(refused.headers.getSetCookie().join(";")), /no preview to approve/);
 
   // 2. A revision of an approved build: its record starts without a preview, and a revision that deploys none
   //    reaches review without the old URL (approval refused); the original build keeps its own preview and history.
   await t.db.prepare(`UPDATE build_jobs SET preview_url = 'https://first.acct.workers.dev' WHERE id = ?`).bind(c.id).run();
+  await internalOk(t, c.id);
   assert.equal((await t.oc.post(`/staff/builds/${c.id}/approve`, { notes: "first build ok" })).status, 303);
   assert.equal((await t.oc.post(`/staff/builds/${c.id}/revision`, { instruction: "Add opening hours to the contact page." })).status, 303);
   const rev = (await jobOf(t, pid)).find((x) => x.kind === "revision")!;
@@ -454,6 +462,7 @@ test("[AIB-006] preview URLs: only allowed preview hosts are recorded; a revisio
   j = (await B.getJob(t.db, rev.id))!;
   assert.equal(j.state, "ready_for_review");
   assert.equal(j.preview_url, null);
+  await internalOk(t, rev.id);
   const refused2 = await t.oc.post(`/staff/builds/${rev.id}/approve`, { notes: "" });
   assert.match(decodeURIComponent(refused2.headers.getSetCookie().join(";")), /no preview to approve/);
   const first = (await B.getJob(t.db, c.id))!;
@@ -540,6 +549,7 @@ test("[AIB-006] [AIB-007] customer revision request → owner forwards it → AI
   assert.doesNotMatch(tab, /rev1\.acct\.workers\.dev/);
 
   // Approval records the decision; it does not deliver the round to the customer.
+  await internalOk(t, revJob.id);
   assert.equal((await t.oc.post(`/staff/builds/${revJob.id}/approve`, { notes: "" })).status, 303);
   assert.equal((await B.getJob(t.db, revJob.id))!.state, "approved");
   assert.equal((await revisionsOf(t, pid))[0].status, "in_progress", "delivery is still a staff step");
@@ -641,6 +651,7 @@ test("[AIB-006] D2: previews are kept while in work or review, the approved one 
   assert.equal(plan.get(rc.id)!.status, "in_progress", "awaiting owner review: never automatic");
 
   // The owner approves the revision: the superseded first-build preview is scheduled 30 days later; the approved one is kept.
+  await internalOk(t, rc.id);
   assert.equal((await t.oc.post(`/staff/builds/${rc.id}/approve`, { notes: "final" })).status, 303);
   const approvedAt = (await B.getJob(t.db, rc.id))!.approved_at!;
   plan = await B.previewRetentionPlan(t.db, pid);
@@ -724,7 +735,15 @@ test("[AIB-006] D3: previews are private: staff and the project's own customer g
   // The customer: nothing until the owner shares it.
   assert.equal((await q.c.get(`/portal/projects/${pid}/previews/${job.id}`)).status, 404);
   assert.doesNotMatch(await (await q.c.get(`/portal/projects/${pid}/revisions`)).text(), /Website previews/);
+  // V4 §7 F: nothing reaches the customer before the private internal review approves it.
+  assert.match(flash(await t.oc.post(`/staff/builds/${job.id}/share-preview`, { action: "share" })), /Approve this build internally first/);
+  assert.equal(await stageOf(t, pid), "AWAITING_INTERNAL_APPROVAL");
+  assert.match(flash(await t.oc.post(`/staff/builds/${job.id}/internal-approve`, { note: "" })), /did not pass the automated acceptance review/);
+  assert.equal((await t.oc.post(`/staff/builds/${job.id}/internal-approve`, { note: "Reviewed the preview by hand; no AI review ran (D3 test)" })).status, 303);
+  assert.equal(await stageOf(t, pid), "READY_FOR_CUSTOMER_PREVIEW");
+  assert.equal((await q.c.get(`/portal/projects/${pid}/previews/${job.id}`)).status, 404, "internal approval alone shares nothing");
   assert.equal((await t.oc.post(`/staff/builds/${job.id}/share-preview`, { action: "share" })).status, 303);
+  assert.equal(await stageOf(t, pid), "CUSTOMER_PREVIEW");
   assert.match(flash(await t.oc.post(`/staff/builds/${job.id}/share-preview`, { action: "share" })), /already shared/);
   const note = await t.db.prepare(`SELECT body FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`).bind(q.cu.id).first<{ body: string }>();
   assert.match(note!.body, /private preview of your website is ready/);
@@ -795,6 +814,7 @@ test("[AIB-006] D5: approval never publishes; a release is prepared, explicitly 
   // Steps 1-5 first: nothing to release before the owner approves the build.
   assert.match(await (await t.oc.get(deliveryUrl)).text(), /No approved build yet/);
   assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "x" })), /has not approved this build/);
+  await internalOk(t, firstJobId);
   assert.equal((await t.oc.post(`/staff/builds/${firstJobId}/approve`, { notes: "final" })).status, 303);
   assert.equal(await t.db.prepare(`SELECT COUNT(*) AS n FROM site_deployments`).first<{ n: number }>().then((r) => r!.n), 0, "approval publishes nothing");
   assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "Owner-run" })), /Create the project's production target first/);
@@ -861,6 +881,7 @@ test("[AIB-006] D5: approval never publishes; a release is prepared, explicitly 
   assert.equal((await t.oc.post(`/staff/builds/${firstJobId}/revision`, { instruction: "Add the opening hours to the footer of every page." })).status, 303);
   const rc = (await runner(t, "claim", { runnerId: "r1" })).json.job;
   await runner(t, "complete", { jobId: rc.id, leaseToken: rc.leaseToken, outcome: "ready_for_review", runCostUsd: 0, sourceRepo: REPO, sourceCommit: "rev10000001", previewUrl: "https://cm-prv-x-r1.acct.workers.dev", previewName: "cm-prv-x-r1", previewGated: true });
+  await internalOk(t, rc.id);
   assert.equal((await t.oc.post(`/staff/builds/${rc.id}/approve`, { notes: "" })).status, 303);
   assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "old" })), /newer build of this project was approved/);
   const release = async (expectState: string, verification: unknown) => {

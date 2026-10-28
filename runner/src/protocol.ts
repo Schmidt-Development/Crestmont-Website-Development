@@ -91,8 +91,8 @@ export interface Job {
   resume: JobResume | null;
   /** V2: the Architect's master specification for this website, when the platform has one. */
   spec?: { version: number; content: unknown } | null;
-  /** V2: the builder worker this job was assigned to (worker mode). */
-  worker?: { id: string; label: string; maxSessions: number } | null;
+  /** V4: the GPU worker this job was assigned to (worker mode). */
+  worker?: { id: string; label: string; maxActiveProjects?: number } | null;
 }
 
 export type ClaimResponse =
@@ -115,6 +115,8 @@ export interface HeartbeatRequest extends ProviderReport {
   turns: number;
   sessionId?: string;
   activity?: Activity[];
+  /** V4 scheduler view: what the website's agent is doing now (GPU running/waiting/switching, tests, review). */
+  orchestration?: { activity: string; model: string | null; task: string | null };
 }
 
 export type HeartbeatResponse =
@@ -224,4 +226,18 @@ export interface DeploymentCompleteRequest {
 
 // ── Architecture V2: orchestrator ⇄ platform (additive; older platforms answer 404) ──
 export interface CycleSubmitResponse { cycle: number; decision: string; reason: string; continue: boolean; prompt: string | null }
-export interface WorkerStatus { usage?: { percent: number; source: string } | null; rateLimitedUntil?: string | null; error?: string | null }
+/** V4 GPU worker status (with every claim and every minute). Values as measured; absent = not reported. */
+export interface WorkerStatus {
+  gpu?: { name: string | null; driver: string | null; vramTotalMb: number | null; vramUsedMb: number | null; utilPercent: number | null; source: string } | null;
+  inference?: {
+    state: string; active: number; queued: number; maxConcurrent: number; loaded: { model: string; vramMb: number | null }[];
+    throughput: Record<string, { tokensPerSecond: number | null; requests: number }>; switches: { count: number; failures: number; avgMs: number | null };
+  };
+  models?: {
+    tag: string; role: "architect_reviewer" | "builder" | "single"; family: string | null; parameterSize: string | null; quantization: string | null; contextTokens: number;
+    vramMb: number | null; vramSource: "measured" | "configured-estimate" | null; license: string | null; tokensPerSecond: number | null; requests: number; lastOkAt: string | null; lastError: string | null;
+  }[];
+  slotsTotal?: number;
+  slotsBusy?: number;
+  error?: string | null;
+}

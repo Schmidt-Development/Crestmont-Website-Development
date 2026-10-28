@@ -130,8 +130,18 @@ Access remains possible later on top of the gate (defence in depth), but it is n
 
    `PREVIEW_DELETE=cloudflare-api` uses the runner's built-in call to Cloudflare's documented
    `DELETE /accounts/{account_id}/workers/scripts/{script_name}` (no `force`; a Worker that no longer exists counts
-   as deleted). `PREVIEW_DELETE_COMMAND=<shell command>` is the alternative (given `$CRESTMONT_PREVIEW_NAME` and the
-   `PREVIEW_DEPLOY_ENV` variables).
+   as deleted). `PREVIEW_DELETE_COMMAND='npx --yes wrangler@<exact version> delete --name "$CRESTMONT_PREVIEW_NAME" --force'`
+   is the alternative (given `$CRESTMONT_PREVIEW_NAME` and the `PREVIEW_DEPLOY_ENV` variables).
+
+   **No shell.** The runner parses these settings into one Wrangler invocation and runs it without a shell. The
+   accepted form is `[NAME=value ...] npx --yes wrangler@<x.y.z> <subcommand> [flags]` or `wrangler <subcommand>
+   [flags]`; the subcommand is `deploy` (or `delete` for `PREVIEW_DELETE_COMMAND`), and only `--name`, `--message`,
+   `--tag`, `--compatibility-date`, `--env`, `--minify`, `--dry-run`, `--keep-vars` (deploy) or `--name`, `--env`,
+   `--force`, `--dry-run` (delete) are allowed. Shell syntax (`;`, `&&`, `|`, redirects, `$(...)`, backticks),
+   other programs (node, npm, scripts), unpinned packages, `--config`/`--assets`/script paths and unknown
+   `$VARIABLES` are refused when the runner starts. Arguments may use only the runner's `$CRESTMONT_*` values;
+   leading `NAME=value` assignments (`WRANGLER_*`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`) may also use the
+   command's `*_ENV` credential variables.
 6. **Egress.** Re-run the installer with `-ExtraEgressDomains api.cloudflare.com,registry.npmjs.org` (plus the
    GitHub hosts if you use project repositories). `npx` downloads Wrangler from the npm registry and Wrangler calls
    the Cloudflare API; nothing else is allowed out of the runner network.

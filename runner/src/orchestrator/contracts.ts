@@ -1,8 +1,8 @@
-// Crestmont AI Orchestrator: communication contracts (Founder V2 redirect §9C).
+// Crestmont AI Orchestrator: communication contracts (Founder V4: local dual-model).
 //
-// The orchestrator is a controller: it moves structured documents between the Claude architect session, the Claude
-// builder sessions and the separate Claude review session, and reports each one to the platform (the durable record). Every document that comes
-// back from a model is untrusted input and is validated before use; the platform validates it again.
+// The orchestrator is a controller: it moves structured documents between the Model A architect session, the Model B
+// builder and the separate Model A review session, and reports each one to the platform (the durable record). Every
+// document that comes back from a model is untrusted input and is validated before use; the platform validates it again.
 
 export const SPEC_SCHEMA = "crestmont.master-spec/1";
 
@@ -61,7 +61,7 @@ export interface CycleEvidence {
   recommendedNext: string[];
 }
 
-export const REVIEW_DECISIONS = ["CONTINUE_BUILDING", "FIX_DEFECTS", "RUN_MORE_TESTS", "WAIT_FOR_EXTERNAL_SETUP", "NEEDS_HUMAN_AUTHORIZATION", "READY_FOR_FINAL_QA", "READY_FOR_FOUNDER_APPROVAL"] as const;
+export const REVIEW_DECISIONS = ["CONTINUE_BUILDING", "FIX_DEFECTS", "RUN_MORE_TESTS", "WAIT_FOR_EXTERNAL_SETUP", "NEEDS_HUMAN_AUTHORIZATION", "READY_FOR_FINAL_QA", "READY_FOR_INTERNAL_APPROVAL"] as const;
 export type ReviewDecision = (typeof REVIEW_DECISIONS)[number];
 
 export interface ReviewVerdict {
@@ -83,7 +83,8 @@ export const REVIEW_JSON_SCHEMA = {
 } as const;
 
 export function parseVerdict(raw: unknown): ReviewVerdict | null {
-  const o = raw && typeof raw === "object" ? raw as Record<string, unknown> : null;
+  const o = raw && typeof raw === "object" ? { ...(raw as Record<string, unknown>) } : null;
+  if (o && o.decision === "READY_FOR_FOUNDER_APPROVAL") o.decision = "READY_FOR_INTERNAL_APPROVAL"; // older wording
   if (!o || !(REVIEW_DECISIONS as readonly string[]).includes(o.decision as string)) return null;
   const strs = (v: unknown) => (Array.isArray(v) ? v : []).filter((x): x is string => typeof x === "string").map((x) => x.slice(0, 1000)).slice(0, 100);
   return { decision: o.decision as ReviewDecision, addresses: strs(o.addresses), findings: strs(o.findings), nextPrompt: typeof o.nextPrompt === "string" && o.nextPrompt.trim() ? o.nextPrompt.slice(0, 60000) : null };

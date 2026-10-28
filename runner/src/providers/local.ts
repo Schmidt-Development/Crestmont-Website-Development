@@ -24,7 +24,8 @@ import type { DockerExecutor } from "../sandbox.ts";
 import { fenceFor, localSystemPrompt } from "../prompt.ts";
 import type { AgentProvider, PhaseRequest, PhaseResult, PhaseStatus, PrepareContext, ProviderPreflight } from "./types.ts";
 import { PaidProviderRefusedError } from "./types.ts";
-import { OpenAICompatClient, isContextOverflow } from "./openai-client.ts";
+import { OpenAICompatClient, isContextOverflow, contentText } from "./openai-client.ts";
+import type { InferenceScheduler } from "../inference/scheduler.ts";
 import { domainMatches, isPaidAiHost } from "./paid-hosts.ts";
 import type { ChatMessage, ChatToolCall } from "./openai-client.ts";
 import { TOOL_NAMES, executeTool, schemaHint, toolSpecs, validateArgs } from "./local-tools.ts";
@@ -41,7 +42,7 @@ export interface LocalTranscript {
   /** Rolling summary of turns folded out of the context window. */
   summary: string[];
   history: ChatMessage[];
-  phases: { phase: string; status: string; turns: number; at: string }[];
+  phases: { phase: string; status: string; turns: number; at: string; model?: string }[];
   turns: number;
   updatedAt: string;
 }
@@ -71,7 +72,7 @@ export const estimateTokens = (text: string): number => Math.ceil(text.length / 
 
 function messageText(m: ChatMessage): string {
   if (m.role === "assistant") return (m.content ?? "") + (m.tool_calls ?? []).map((t) => t.function.name + t.function.arguments).join("");
-  return m.content;
+  return contentText(m.content);
 }
 
 export function transcriptPath(ws: Workspace, sessionId: string): string {
@@ -154,6 +155,8 @@ export interface LocalProviderDeps {
   /** Test hook: retries/backoff of the model client. */
   clientRetries?: number;
   clientSleep?: (ms: number) => Promise<void>;
+  /** V4: the runner's shared GPU scheduler (every model request of every website goes through it). */
+  scheduler?: InferenceScheduler | null;
 }
 
 export class LocalProvider implements AgentProvider {
@@ -182,15 +185,19 @@ export class LocalProvider implements AgentProvider {
     this.limits = { ...DEFAULT_LIMITS, ...(deps.limits ?? {}) };
   }
 
-  model(): string { return this.deps.cfg.local.model; }
+  /** Model of the current/last phase (V4: Model B by default; the router may choose Model A per phase). */
+  model(): string { return this.currentModel ?? this.deps.cfg.local.model; }
+  private currentModel: string | null = null;
+  private projectId = "";
 
   async preflight(): Promise<ProviderPreflight> {
     const errors: string[] = [];
     const warnings: string[] = [];
     try {
       const ids = await this.client.models();
-      const m = this.deps.cfg.local.model;
-      if (!ids.some((id) => id === m || id === `${m}:latest`)) errors.push(`Local model ${m} is not available on ${this.client.baseUrl} (available: ${ids.slice(0, 10).join(", ") || "none"}). Pull it first (ollama pull ${m}).`);
+      for (const m of new Set([this.deps.cfg.local.model, ...(this.deps.cfg.models.mode === "dual" ? [this.deps.cfg.models.a.tag] : [])].filter(Boolean))) {
+        if (!ids.some((id) => id === m || id === `${m}:latest`)) errors.push(`Local model ${m} is not available on ${this.client.baseUrl} (available: ${ids.slice(0, 10).join(", ") || "none"}). Pull it first (ollama pull ${m}).`);
+      }
     } catch (err) {
       errors.push(`Local model server ${this.client.baseUrl} is not reachable: ${errorMessage(err).slice(0, 200)}`);
     }
@@ -201,6 +208,7 @@ export class LocalProvider implements AgentProvider {
 
   async prepare(ctx: PrepareContext): Promise<void> {
     this.ws = ctx.ws;
+    this.projectId = ctx.job.projectId;
     this.sandbox = new JobSandbox(this.deps.cfg.jobSandbox, ctx.ws, ctx.job.id, this.deps.executor, this.deps.log);
     this.system = localSystemPrompt(ctx.job, ctx.skillNames);
     const briefFile = path.join(ctx.ws.repo, "BRIEF.md");
@@ -250,7 +258,7 @@ export class LocalProvider implements AgentProvider {
   /** Fold older turns into the rolling summary until the request fits the context budget. */
   private compact(budgetTokens: number): void {
     const t = this.transcript!;
-    const size = () => estimateTokens(this.system) + estimateTokens(this.pinnedMessage().content as string) + t.history.reduce((n, m) => n + estimateTokens(messageText(m)) + 8, 0);
+    const size = () => estimateTokens(this.system) + estimateTokens(contentText(this.pinnedMessage().content)) + t.history.reduce((n, m) => n + estimateTokens(messageText(m)) + 8, 0);
     if (size() <= budgetTokens) return;
     const target = Math.floor(budgetTokens * 0.6);
     while (size() > target && t.history.length > 6) {
@@ -263,7 +271,7 @@ export class LocalProvider implements AgentProvider {
       if (t.history.length - n < 4) break;
       const removed = t.history.splice(0, n);
       for (const m of removed) {
-        if (m.role === "user") t.summary.push(`- [runner instruction] ${m.content.split("\n")[0].slice(0, 200)}`);
+        if (m.role === "user") t.summary.push(`- [runner instruction] ${contentText(m.content).split("\n")[0].slice(0, 200)}`);
         else if (m.role === "assistant") {
           if (m.content) t.summary.push(`- [you said] ${m.content.replace(/\s+/g, " ").slice(0, 200)}`);
           for (const c of m.tool_calls ?? []) t.summary.push(`- [you called] ${c.function.name} ${c.function.arguments.replace(/\s+/g, " ").slice(0, 160)}`);
@@ -280,7 +288,13 @@ export class LocalProvider implements AgentProvider {
   async run(req: PhaseRequest): Promise<PhaseResult> {
     if (!this.ws || !this.sandbox) throw new Error("LocalProvider.prepare() was not called");
     const { tracker, stop } = req;
-    const cfg = this.deps.cfg.local;
+    const base = this.deps.cfg.local;
+    // V4: the router picks the model per phase; the transcript (context) is kept across models.
+    // Dual mode: each model's own context size and reasoning setting; single mode: LOCAL_MODEL with LOCAL_MODEL_CONTEXT_TOKENS.
+    const m = this.deps.cfg.models;
+    const profile = m.mode === "dual" ? [m.a, m.b].find((x) => x.tag === req.model) ?? null : null;
+    const cfg = { ...base, model: req.model ?? base.model, contextTokens: profile?.contextTokens ?? base.contextTokens };
+    this.currentModel = cfg.model;
     const log = this.deps.log;
     if (stop.reason) return { status: "stopped", error: null, stoppedBy: stop.reason };
 
@@ -332,10 +346,16 @@ export class LocalProvider implements AgentProvider {
         const timer = setTimeout(() => this.abort?.abort(), Math.max(1, deadline - Date.now()));
         let res;
         try {
-          res = await this.client.chat({
+          const request = {
             model: cfg.model, messages, tools: toolSpecs(), temperature: cfg.temperature,
             max_tokens: Math.min(cfg.maxOutputTokensPerCall, remainingOut),
-          }, this.abort.signal);
+            ...(profile?.reasoning ? { reasoning_effort: profile.reasoning } : (m.mode === "single" && m.b.reasoning ? { reasoning_effort: m.b.reasoning } : {})),
+          };
+          const signal = this.abort.signal;
+          const sched = this.deps.scheduler;
+          res = sched
+            ? await sched.run({ model: cfg.model, projectId: this.projectId, task: req.task ?? req.phase }, () => this.client.chat(request, signal), signal, (r) => r)
+            : await this.client.chat(request, signal);
         } catch (err) {
           clearTimeout(timer);
           if (stop.reason) { status = "stopped"; stoppedBy = stop.reason; break; }
@@ -447,10 +467,10 @@ export class LocalProvider implements AgentProvider {
       unsubscribe();
       this.currentStop = null;
       t.history = repairHistory(t.history);
-      t.phases.push({ phase: req.phase, status: status ?? "error", turns, at: new Date().toISOString() });
+      t.phases.push({ phase: req.phase, status: status ?? "error", turns, at: new Date().toISOString(), model: cfg.model });
       this.persist();
     }
-    tracker.note({ kind: "note", message: `local model ${cfg.model}: phase ${req.phase} ${status}; ${turns} calls; tokens in ${tracker.inputTokens} / out ${tracker.outputTokens}; model time ${Math.round(tracker.modelWallMs / 1000)} s; cost $0` });
+    tracker.note({ kind: "note", message: `local model ${cfg.model}${req.task ? ` (${req.task.replace(/_/g, " ")})` : ""}: phase ${req.phase} ${status}; ${turns} calls; tokens in ${tracker.inputTokens} / out ${tracker.outputTokens}; model time ${Math.round(tracker.modelWallMs / 1000)} s; cost $0` });
     log.info("local phase ended", { phase: req.phase, status, turns, inputTokens: tracker.inputTokens, outputTokens: tracker.outputTokens });
     return { status: status ?? "error", error, stoppedBy };
   }

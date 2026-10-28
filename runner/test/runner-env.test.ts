@@ -22,7 +22,9 @@ function managed(over: Record<string, string> = {}): EnvLine[] {
     CONTROL_PLANE_URL: "https://staging.crestmont.example", BUILD_RUNNER_SECRET_FILE: "/run/secrets/build_runner_secret", RUNNER_ID: "win-build1",
     RUNNER_AGENT_PROVIDER: "local", RUNNER_ALLOW_PAID_PROVIDER: "false", LOCAL_MODEL: "qwen3-coder:30b", LOCAL_MODEL_BASE_URL: "http://host.docker.internal:11434/v1",
     LOCAL_MODEL_CONTEXT_TOKENS: "32768", RUNNER_SANDBOX_IMAGE: "crestmont-build-sandbox:1", RUNNER_JOB_CPUS: "4", RUNNER_JOB_MEMORY: "6g",
-    RUNNER_JOB_DISK_MB: "4096", RUNNER_SERVE_AI_DRAFTS: "true", LOG_LEVEL: "info", ...over,
+    RUNNER_JOB_DISK_MB: "4096", RUNNER_SERVE_AI_DRAFTS: "true", LOG_LEVEL: "info",
+    LOCAL_MODEL_A: "", LOCAL_MODEL_B: "", LOCAL_MODEL_A_VISION: "false", RUNNER_SLOTS: "1", INFERENCE_MAX_CONCURRENT: "1", GPU_VRAM_TOTAL_MB: "32563",
+    GPU_TELEMETRY_FILE: "/run/crestmont/gpu.json", BUILD_WORKER_ID: "", BUILD_WORKER_KEY_FILE: "", ...over,
   };
   return MANAGED_RUNNER_ENV_KEYS.map((key) => ({ key, value: v[key] }));
 }
@@ -154,10 +156,18 @@ test("[AIB-RUNNER] installer: configuration preserved across re-runs, inputs val
   assert.match(install, /-OllamaImage must be pinned by tag and digest/);
   assert.match(install, /\$ollamaCli = if \(Test-Path \$ollamaExe\)/, "ollama by full path after a fresh install");
   assert.doesNotMatch(install, /& ollama list|"ollama" @\("pull"/);
-  assert.match(install, /\$want = if \(\$selected\.Contains\(":"\)\)/, "exact tag match in ollama list");
+  assert.match(install, /\$want = if \(\$m\.Contains\(":"\)\)/, "exact tag match in ollama list (every model of the mode)");
+  // Founder V4: dual-model mode pulls and checks both models; one model is loaded at a time; GPU telemetry task.
+  assert.match(install, /\[string\]\$ModelA = "",/);
+  assert.match(install, /Dual-model mode needs both -ModelA \(architect\/reviewer\) and -ModelB \(builder\)/);
+  assert.match(install, /\$pullList = @\(if \(\$DualMode\) \{ \$ModelA, \$ModelB \} else \{ \$selected \}\)/);
+  assert.match(install, /OLLAMA_MAX_LOADED_MODELS = "1"/);
+  assert.match(install, /key = "LOCAL_MODEL_A"; value = \$\(if \(\$DualMode\) \{ \$ModelA \} else \{ "" \}\)/);
+  assert.match(install, /key = "BUILD_WORKER_KEY_FILE"; value = \$\(if \(\$WorkerId\) \{ "\/run\/secrets\/worker_key" \} else \{ "" \}\)/);
+  assert.match(install, /CrestmontRunner-GpuTelemetry/);
   const autoStart = install.slice(install.indexOf('if (-not $NoAutoStart) {'));
   assert.doesNotMatch(autoStart.slice(0, autoStart.indexOf("Register-ScheduledTask")), /Collect-Evidence\.ps1/, "tools are not copied only with auto-start");
-  assert.match(install, /foreach \(\$tool in @\("Start-CrestmontRunner\.ps1", "Get-RunnerHealth\.ps1", "Collect-Evidence\.ps1", "Discover-Hardware\.ps1"\)\)/);
+  assert.match(install, /foreach \(\$tool in @\("Start-CrestmontRunner\.ps1", "Get-RunnerHealth\.ps1", "Collect-Evidence\.ps1", "Discover-Hardware\.ps1", "Write-GpuTelemetry\.ps1"\)\)/);
   assert.match(install, /\$healthExit = \$LASTEXITCODE[\s\S]{0,200}if \(\$healthExit -ne 0\) \{[\s\S]{0,300}exit 1/, "no 'Done' when health fails");
   assert.match(install, /KernelVersion[\s\S]{0,200}WSL2/, "WSL 2 backend detected from Docker Desktop's kernel");
   assert.match(install, /docker\.exe compose version --short/, "Compose >= 2.24 for the optional env file");

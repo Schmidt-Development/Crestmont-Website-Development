@@ -3,7 +3,8 @@
 
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync, chmodSync } from "node:fs";
+import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { verifySignature, SIGNATURE_HEADER } from "../src/control-plane.ts";
@@ -373,8 +374,11 @@ export function makeConfig(over: Partial<RunnerConfig> & { controlPlaneUrl: stri
     preview: null,
     delivery: null,
     worker: null,
-    claudeCode: null,
-    advisor: { architect: "none", reviewer: "deterministic", timeoutMs: 60_000, maxTurns: 30, maxCycles: 8 },
+    models: (() => { const single = { tag: "test-coder:30b", role: "single" as const, contextTokens: 32_768, vramMb: 0, quantization: null, reasoning: null, vision: false, license: null }; return { a: single, b: single, mode: "single" as const }; })(),
+    inference: { maxConcurrent: 1, vramTotalMb: 0, vramReserveMb: 4096, switchTimeoutMs: 30_000, maxWaitBeforeSwitchMs: 180_000, keepAlive: "30m", telemetryFile: "/nonexistent/gpu.json" },
+    slots: 1,
+    routing: { escalateAfterRepeats: 2 },
+    advisor: { architect: "none", reviewer: "deterministic", maxTurns: 30, maxCycles: 8 },
     platformRepoPatterns: [/Crestmont-Website-Development/i],
     gitAuthorName: "Test Runner",
     gitAuthorEmail: "runner@test.invalid",
@@ -511,12 +515,35 @@ export function fakeDocker(opts: { passthrough?: boolean; override?: FakeDocker[
       const argv = args.slice(t + 4);
       if (argv[0] === "node" && String(argv[1]).endsWith("browser-check.mjs")) return ok("browser check: 5 pages x 2 viewports OK (fake)");
       if (opts.passthrough === false || !repos.has(name)) return ok("");
-      const { run } = await import("../src/exec.ts");
-      return run(argv[0], argv.slice(1), { cwd: repos.get(name)!, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: tmp("aib-fakehome-") }, timeoutMs: o.timeoutMs });
+      // Emulates the job container: the container's own shell runs the agent's command. (Deliberately not the runner's
+      // exec helper, which refuses shells on the runner host.)
+      return containerExec(argv, repos.get(name)!, o.timeoutMs);
     }
     return ok("");
   };
   return state;
+}
+
+function containerExec(argv: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean; notFound: boolean }> {
+  return new Promise((resolve) => {
+    execFile(argv[0], argv.slice(1), { cwd, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: tmp("aib-fakehome-") }, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const e = err as (NodeJS.ErrnoException & { code?: number | string; killed?: boolean }) | null;
+      resolve({ code: e ? (typeof e.code === "number" ? e.code : 127) : 0, stdout: String(stdout), stderr: String(stderr), timedOut: !!e?.killed, notFound: e?.code === "ENOENT" });
+    });
+  });
+}
+
+/**
+ * A stand-in `wrangler` executable (Node script) in a fresh bin directory. Returns the PATH to give the runner
+ * (cfg.agentPath): the fake first, then the system PATH. The deploy commands under test are real allow-listed
+ * invocations (`wrangler deploy`, `npx ... wrangler@x.y.z` is not used here because npx would download).
+ */
+export function fakeWrangler(body: string): { dir: string; agentPath: string } {
+  const dir = tmp("aib-fake-wrangler-");
+  const file = path.join(dir, "wrangler");
+  writeFileSync(file, `#!/usr/bin/env node\n${body}\n`);
+  chmodSync(file, 0o755);
+  return { dir, agentPath: `${dir}${path.delimiter}${process.env.PATH ?? "/usr/bin:/bin"}` };
 }
 
 /** A process environment full of secrets the agent must never see. */

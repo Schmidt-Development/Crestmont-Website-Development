@@ -23,13 +23,15 @@ validation (`LOCAL-VALIDATION.md`) and a real end-to-end staging run succeed (re
     does not declare zero token cost), and is never an automatic fallback.
   Deployment: `WINDOWS-SUPERCOMPUTER.md` (Windows + WSL 2 + Docker Desktop, outbound-only, no public port).
 
-## Founder architecture V3 (2026-10-28): Claude-only orchestration
-`ORCHESTRATOR.md`. Three Claude Code builder workers on Node 1 (one Claude plan account each, one website each, a fourth
-website queues), each running architect → builder session(s) → tests → separate Claude reviewer → corrective cycles,
-with approvals, an integrations checklist and the Builder accounts / Pipeline dashboard. Provider kind `claude-code`
-(`runner/src/providers/claude-code-cli.ts`) with subscription sign-in only; metered credentials are refused. OpenAI /
-Codex paths were removed. **Release gate blocked:** live use on consumer Max accounts for customer builds needs the
-Founder decision in `ORCHESTRATOR.md` §9.4. The local-model provider stays available and Ollama is optional.
+## Founder architecture V4 (2026-10-28): local dual-model on owned GPUs
+`ORCHESTRATOR.md`. Node 1 (RTX 5090) runs two open-weight models through Ollama: **Model A** `qwen3.8:27b-q4_K_M`
+(architect, fresh read-only reviewer, hard repairs) and **Model B** `qwen3.6:35b-a3b-q4_K_M` (builder). One shared GPU
+scheduler loads one model at a time (they do not fit together in 32 GB), batches by model and serves several websites
+at once (runner slots). The platform tracks every website, dispatches by GPU capacity and Founder priority, and parks
+finished websites in a **private internal review**: the customer sees nothing until staff approve the build internally
+and share its preview. Integrations that need credentials go through a trusted, Owner-approved runner layer; agents
+never see secrets. $0 metered inference; the V3 Claude-subscription worker was removed (history: `history/`).
+Status: implemented and simulated-tested; nothing has run on Node 1 yet.
 
 ## When a build starts
 A first build is queued automatically when all hold (re-checked on payment, intake, refunds, disputes, cancellation and every 15 min):
@@ -65,4 +67,4 @@ selected projects. Staging sample data is excluded the same way.
 - Founder order of work for the first real build (decisions, install, known installer issues): `FOUNDER-RUNNER-INSTALL.md`.
 - Preview account, private access, lifecycle and secret inventory: `PREVIEW-DEPLOYMENT.md`.
 - Customer production delivery: `DELIVERY.md`.
-- V3 Claude-only orchestrator, provider authorization gate, Node 1 Claude setup: `ORCHESTRATOR.md`.
+- V4 dual-model orchestrator, GPU scheduling, private review gate, Node 1 installation and benchmarks: `ORCHESTRATOR.md`.

@@ -20,8 +20,6 @@ FROM ${DOCKER_CLI_IMAGE} AS dockercli
 FROM ${NODE_IMAGE}
 
 ARG INSTALL_AGENT_SDK=false
-# Founder V3 (Claude-only orchestrator): the Claude Code CLI for subscription-signed-in builder workers.
-ARG INSTALL_CLAUDE_CODE=false
 ENV DEBIAN_FRONTEND=noninteractive \
     NPM_CONFIG_UPDATE_NOTIFIER=false \
     NPM_CONFIG_FUND=false
@@ -32,7 +30,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # hadolint ignore=DL3008
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git tar ca-certificates tini \
- && if [ "$INSTALL_AGENT_SDK" = "true" ] || [ "$INSTALL_CLAUDE_CODE" = "true" ]; then apt-get install -y --no-install-recommends bubblewrap socat; fi \
+ && if [ "$INSTALL_AGENT_SDK" = "true" ]; then apt-get install -y --no-install-recommends bubblewrap socat; fi \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
@@ -60,21 +58,6 @@ RUN if [ "$INSTALL_AGENT_SDK" = "true" ]; then \
       && npm ci --prefix /app/agent-sdk --omit=dev --no-audit --no-fund \
       && rm -rf /app/node_modules && ln -s /app/agent-sdk/node_modules /app/node_modules \
       && /app/agent-sdk/node_modules/.bin/playwright install --with-deps chromium \
-      && rm -rf /var/lib/apt/lists/* \
-      && chmod -R a+rX /ms-playwright \
-      && npm cache clean --force; \
-    fi
-
-# Claude Code (V3 builder workers): the CLI + Playwright (locked) and Chromium. Signed in per worker at run time
-# (CLAUDE_CODE_CONFIG_DIR, mounted per account); the image holds no credential.
-COPY claude-code/package.json claude-code/package-lock.jso[n] /app/claude-code/
-RUN if [ "$INSTALL_CLAUDE_CODE" = "true" ]; then \
-      if [ ! -f /app/claude-code/package-lock.json ]; then \
-        echo "INSTALL_CLAUDE_CODE=true needs runner/claude-code/package-lock.json (see docs/ai-builds/ORCHESTRATOR.md)" >&2; exit 1; \
-      fi \
-      && npm ci --prefix /app/claude-code --omit=dev --no-audit --no-fund \
-      && ln -s /app/claude-code/node_modules/.bin/claude /usr/local/bin/claude \
-      && /app/claude-code/node_modules/.bin/playwright install --with-deps chromium \
       && rm -rf /var/lib/apt/lists/* \
       && chmod -R a+rX /ms-playwright \
       && npm cache clean --force; \

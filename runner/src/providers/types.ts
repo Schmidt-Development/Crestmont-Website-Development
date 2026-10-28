@@ -2,8 +2,9 @@
 // streams events into the shared RunTracker (session id, turns, cost, tokens, activity), honours the job's StopSwitch
 // and can be interrupted. Two implementations:
 //   - providers/local.ts             (DEFAULT) in-house tool-using agent against a self-hosted OpenAI-compatible model
-//   - providers/claude-agent-sdk.ts  (OPTIONAL, paid) the original Claude Agent SDK adapter; refuses to start unless
-//                                    RUNNER_ALLOW_PAID_PROVIDER=true. There is never an automatic fallback to it.
+//   - providers/claude-agent-sdk.ts  (OPTIONAL, paid; recommended for removal under Founder V4) the original Claude Agent
+//                                    SDK adapter; refuses to start unless RUNNER_ALLOW_PAID_PROVIDER=true and the platform
+//                                    also allows paid providers. There is never an automatic fallback to it.
 
 import type { RunTracker, StopSwitch } from "../agent.ts";
 import type { Job } from "../protocol.ts";
@@ -11,7 +12,7 @@ import type { Phase } from "../prompt.ts";
 import type { Workspace } from "../workspace.ts";
 import type { Logger } from "../log.ts";
 
-export type ProviderId = "local" | "claude-agent-sdk" | "claude-code";
+export type ProviderId = "local" | "claude-agent-sdk";
 
 export interface PhaseRequest {
   phase: Phase;
@@ -25,6 +26,10 @@ export interface PhaseRequest {
   resumeSessionId: string | null;
   tracker: RunTracker;
   stop: StopSwitch;
+  /** V4: model chosen by the router for this phase (local provider); default Model B. */
+  model?: string;
+  /** V4: routed task (architecture, frontend, debugging, repeated_failure, ...), for the GPU queue and the logs. */
+  task?: string;
 }
 
 export type PhaseStatus =
