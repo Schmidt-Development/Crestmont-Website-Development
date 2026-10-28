@@ -140,7 +140,39 @@ const decodeEntities = (s: string) => s
   .replace(/&(?:amp|#0*38|#x0*26);/gi, "&").replace(/&(?:apos|#0*39|#x0*27|rsquo|lsquo|#0*8217|#x0*2019);/gi, "'")
   .replace(/&(?:quot|#0*34|#x0*22|ldquo|rdquo);/gi, '"').replace(/&nbsp;|&#0*160;|&#x0*a0;/gi, " ");
 const norm = (s: string) => decodeEntities(s).replace(/[‘’ʼ]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, " ").trim().toLowerCase();
-const visibleText = (html: string) => html.replace(/<!--[\s\S]*?-->/g, " ").replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ");
+/**
+ * Visible text of an HTML document for matching (never output as HTML). A scanner, not a regex: comments and
+ * script/style elements are removed even when unterminated or closed as `</script >`, then every remaining tag, and
+ * finally any stray angle bracket, so no markup can survive into the text.
+ */
+export function visibleText(html: string): string {
+  const lower = html.toLowerCase();
+  let out = "";
+  let i = 0;
+  while (i < html.length) {
+    const lt = html.indexOf("<", i);
+    if (lt < 0) { out += html.slice(i); break; }
+    out += html.slice(i, lt);
+    let end: number;
+    if (lower.startsWith("<!--", lt)) {
+      const c = lower.indexOf("-->", lt + 4);
+      end = c < 0 ? html.length : c + 3;
+    } else {
+      const m = /^<(script|style)\b/.exec(lower.slice(lt, lt + 8));
+      if (m) {
+        const close = lower.indexOf(`</${m[1]}`, lt + 1);
+        const gt = close < 0 ? -1 : lower.indexOf(">", close);
+        end = gt < 0 ? html.length : gt + 1;
+      } else {
+        const gt = html.indexOf(">", lt + 1);
+        end = gt < 0 ? html.length : gt + 1;
+      }
+    }
+    out += " ";
+    i = end;
+  }
+  return out.replace(/[<>]/g, " ");
+}
 
 function htmlPages(dir: string, depth = 0): string[] {
   const out: string[] = [];

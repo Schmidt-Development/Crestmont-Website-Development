@@ -72,9 +72,39 @@ function tokenize(html) {
   return { clean, tags };
 }
 
-/** @param {string} html */
+/**
+ * Visible text of an HTML fragment (for matching only, never output). A scanner, not a regex: comments and
+ * script/style elements are removed even when unterminated or closed as `</script >`; then every tag and any stray
+ * angle bracket.
+ * @param {string} html
+ */
 function textOf(html) {
-  return html.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/&[a-z]+;|&#\d+;/gi, " ").replace(/\s+/g, " ").trim();
+  const lower = html.toLowerCase();
+  let out = "";
+  let i = 0;
+  while (i < html.length) {
+    const lt = html.indexOf("<", i);
+    if (lt < 0) { out += html.slice(i); break; }
+    out += html.slice(i, lt);
+    let end;
+    if (lower.startsWith("<!--", lt)) {
+      const c = lower.indexOf("-->", lt + 4);
+      end = c < 0 ? html.length : c + 3;
+    } else {
+      const m = /^<(script|style)\b/.exec(lower.slice(lt, lt + 8));
+      if (m) {
+        const close = lower.indexOf(`</${m[1]}`, lt + 1);
+        const gt = close < 0 ? -1 : lower.indexOf(">", close);
+        end = gt < 0 ? html.length : gt + 1;
+      } else {
+        const gt = html.indexOf(">", lt + 1);
+        end = gt < 0 ? html.length : gt + 1;
+      }
+    }
+    out += " ";
+    i = end;
+  }
+  return out.replace(/[<>]/g, " ").replace(/&[a-z]+;|&#\d+;/gi, " ").replace(/\s+/g, " ").trim();
 }
 
 export function runCheck(opts) {
@@ -106,7 +136,7 @@ export function runCheck(opts) {
     if (/lorem ipsum/i.test(t)) err(rel(f), "lorem ipsum filler text");
     if (PLACEHOLDER_IMAGES.test(t)) err(rel(f), "placeholder image service (not licensed imagery, and unavailable offline)");
     if (f.endsWith(".html")) {
-      const text = textOf(t.replace(/<!--[\s\S]*?-->/g, ""));
+      const text = textOf(t);
       const token = TEMPLATE_TOKEN.exec(text);
       if (token) err(rel(f), `unfilled template text "${token[0].slice(0, 60)}"`);
       if (/\b(?:TODO|FIXME)\b/.test(text)) err(rel(f), "TODO/FIXME left in page text");

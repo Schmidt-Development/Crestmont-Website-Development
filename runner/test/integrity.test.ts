@@ -159,3 +159,21 @@ test("[AIB-RUNNER] browser-check.mjs uses the image's Playwright, never a playwr
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stdout, /page error: boom/);
 });
+
+test("[AIB-RUNNER] visible-text extraction drops comments, script and style however they are closed (no markup survives)", async () => {
+  const { visibleText } = await import("../src/checks.ts");
+  const html = `<p>Keep A</p><!-- hidden --><script >x("Harbor")</script ><style>.a{}</style\n><p>Keep B</p><!--<!--nested--> after<script>never closed <b>Harbor</b>`;
+  const t = visibleText(html);
+  assert.match(t, /Keep A/);
+  assert.match(t, /Keep B/);
+  assert.match(t, /after/);
+  assert.doesNotMatch(t, /Harbor|hidden|\.a\{|[<>]/);
+  assert.equal(visibleText("a <!-- open comment never closed Harbor").includes("Harbor"), false);
+  // The starter checker uses the same scanner for TODO/template detection: commented or scripted text is not page text.
+  const repo = starterCopy();
+  fillStarterFromBrief(repo);
+  const about = path.join(repo, "public", "about.html");
+  writeFileSync(about, readFileSync(about, "utf8").replace("</main>", "<script >/* TODO */</script ><!--- TODO --></main>"));
+  const r = spawnSync(process.execPath, [path.join(repo, "scripts", "check.mjs"), "--root", repo, "--package", "starter"], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stdout);
+});

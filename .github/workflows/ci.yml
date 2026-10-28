@@ -57,12 +57,12 @@ jobs:
           echo "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47  $RUNNER_TEMP/hadolint" | sha256sum -c -
           chmod +x "$RUNNER_TEMP/hadolint"
           "$RUNNER_TEMP/hadolint" runner/Dockerfile runner/sandbox/Dockerfile runner/windows/proxy/Dockerfile
-      - name: Lockfiles not committed yet are generated for this build only (warning)
+      - name: Sandbox lockfile is committed (required); optional paid adapter lockfile generated if missing (warning)
         run: |
           set -e
           if [ ! -f runner/sandbox/package-lock.json ]; then
-            echo "::warning file=runner/sandbox/package.json::runner/sandbox/package-lock.json is not committed; generated for this CI build only. Review the runner-lockfiles artifact and commit it."
-            (cd runner/sandbox && npm install --package-lock-only --ignore-scripts --no-audit --no-fund)
+            echo "::error file=runner/sandbox/package.json::runner/sandbox/package-lock.json must be committed (the sandbox image installs with npm ci from it)."
+            exit 1
           fi
           if [ ! -f runner/agent-sdk/package-lock.json ]; then
             echo "::warning file=runner/agent-sdk/package.json::runner/agent-sdk/package-lock.json (optional paid adapter) is not committed."
@@ -89,17 +89,25 @@ jobs:
         run: node --no-warnings runner/ci/runner-image-self-check.ts crestmont-ai-runner:ci crestmont-egress-proxy:ci
       - name: Egress allow-list end to end (compose networks, real proxy image, fake model server, tripwire)
         run: node --no-warnings runner/ci/egress-e2e.ts crestmont-ai-runner:ci crestmont-egress-proxy:ci
-      - name: Base image digests to pin
+      - name: Base image digests (pinned references must still resolve; current digest of each tag reported)
         if: always()
         run: |
-          {
-            echo "### Base images resolved by this build (pin these digests after review)"
-            grep -ho '^ARG [A-Z_]*_IMAGE=[^ ]*' runner/Dockerfile runner/sandbox/Dockerfile runner/windows/proxy/Dockerfile | cut -d= -f2 | sort -u |
-              while read -r img; do
-                digest=$(docker buildx imagetools inspect "$img" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)
-                echo "- \`$img\` -> \`${digest:-unresolved}\`"
-              done
-          } >> "$GITHUB_STEP_SUMMARY"
+          set -u
+          echo "### Base images (tag -> current digest of that tag)" >> "$GITHUB_STEP_SUMMARY"
+          { grep -ho '^ARG [A-Z_]*_IMAGE=[^ ]*' runner/Dockerfile runner/sandbox/Dockerfile runner/windows/proxy/Dockerfile | cut -d= -f2
+            grep -ho '\[string\]\$OllamaImage = "[^"]*"' runner/windows/Install-CrestmontRunner.ps1 | cut -d'"' -f2; } | sort -u |
+            while read -r ref; do
+              tag="${ref%%@*}"
+              digest=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)
+              pinned=""; case "$ref" in *@sha256:*) pinned="${ref##*@}";; esac
+              state="unpinned"
+              if [ -n "$pinned" ]; then
+                if [ "$pinned" = "$digest" ]; then state="pinned, current"; else state="pinned, the tag has moved since (review before re-pinning)"; fi
+              fi
+              echo "- \`$tag\` -> \`${digest:-unresolved}\` ($state)" >> "$GITHUB_STEP_SUMMARY"
+              # Annotation: readable through the checks API (the step summary is not), for reviewing digest pins.
+              echo "::notice title=Base image digest::$tag@${digest:-unresolved} ($state)"
+            done
 
   # Windows deployment scripts: real PowerShell parse + PSScriptAnalyzer (pwsh is preinstalled on GitHub's ubuntu
   # images), and the installer's squid.conf renderer compared byte for byte with the tested TypeScript renderer.
