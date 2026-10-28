@@ -29,6 +29,7 @@ concurrency:
 
 jobs:
   probe:
+    if: github.ref == 'refs/heads/main'   # main only (see deploy-staging.yml)
     runs-on: ubuntu-latest
     timeout-minutes: 8
     environment: staging
@@ -47,8 +48,9 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.run_jobs
         env:
           ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          INCLUDE_DAILY: ${{ inputs.include_daily }}
         run: |
-          daily=""; [ "${{ inputs.include_daily }}" = "true" ] && daily="--daily"
+          daily=""; [ "$INCLUDE_DAILY" = "true" ] && daily="--daily"
           node --no-warnings scripts/trigger-scheduler.ts run --url "$BASE" $daily | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Service and evidence-feed health (retries before alerting)

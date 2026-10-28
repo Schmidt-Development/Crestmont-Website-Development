@@ -7,6 +7,7 @@
 //   node --no-warnings scripts/provision-production.ts guard [wrangler.toml]
 //   node --no-warnings scripts/provision-production.ts d1-uuid <d1-list.json> <database name>
 //   node --no-warnings scripts/provision-production.ts turnstile          (reads PROD_TURNSTILE_SITE_KEY / PROD_TURNSTILE_SECRET)
+//   node --no-warnings scripts/provision-production.ts mfa-key            (reads PROD_MFA_ENCRYPTION_KEY)
 //   node --no-warnings scripts/provision-production.ts secret-names <secret-list.json>
 import { readFileSync } from "node:fs";
 
@@ -74,6 +75,17 @@ export function turnstileProblems(siteKey: string | undefined, secret: string | 
   return p;
 }
 
+/** MFA_ENCRYPTION_KEY must be base64 of exactly 32 random bytes (src/lib/totp-secrets.ts). Never echoes the value. */
+export function mfaKeyProblems(raw: string | undefined): string[] {
+  const v = (raw ?? "").trim();
+  if (!v) return ["PRODUCTION_MFA_ENCRYPTION_KEY is not set on the production environment"];
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(v)) return ["PRODUCTION_MFA_ENCRYPTION_KEY is not valid base64"];
+  const n = Buffer.from(v, "base64").length;
+  if (n !== 32) return [`PRODUCTION_MFA_ENCRYPTION_KEY must decode to exactly 32 bytes (got ${n})`];
+  if (new Set(Buffer.from(v, "base64")).size < 8) return ["PRODUCTION_MFA_ENCRYPTION_KEY does not look random"];
+  return [];
+}
+
 /** Secret names from `wrangler secret list --format json` (an absent Worker yields an empty list). */
 export function secretNames(listOutput: string): string[] {
   return (jsonArray<{ name?: string }>(listOutput) ?? []).map((r) => r.name ?? "").filter(Boolean);
@@ -101,10 +113,14 @@ if (isMain) {
       const problems = turnstileProblems(process.env.PROD_TURNSTILE_SITE_KEY, process.env.PROD_TURNSTILE_SECRET, stagingTurnstile(readFileSync("wrangler.toml", "utf8")));
       if (problems.length) { for (const p of problems) console.log(`::error title=Turnstile::${p}`); process.exit(1); }
       console.log("Turnstile production keys present and distinct from test and staging keys.");
+    } else if (cmd === "mfa-key") {
+      const problems = mfaKeyProblems(process.env.PROD_MFA_ENCRYPTION_KEY);
+      if (problems.length) { for (const p of problems) console.log(`::error title=MFA key::${p}`); process.exit(1); }
+      console.log("PRODUCTION_MFA_ENCRYPTION_KEY is well formed.");
     } else if (cmd === "secret-names") {
       process.stdout.write(secretNames(readFileSync(a, "utf8")).join("\n"));
     } else {
-      console.error("Usage: provision-production.ts guard | d1-uuid <file> <name> | turnstile | secret-names <file>");
+      console.error("Usage: provision-production.ts guard | d1-uuid <file> <name> | turnstile | mfa-key | secret-names <file>");
       process.exit(2);
     }
   } catch (e) {

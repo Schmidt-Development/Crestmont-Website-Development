@@ -4,14 +4,15 @@ name: Provision production
 #   • D1 database  crestmont-production       — created if missing, never recreated or deleted
 #   • R2 bucket    crestmont-files-production — must already exist (checked, never created or changed)
 #   • Worker       crestmont-platform-production — created as an empty draft that holds its production secrets
-#                  (TURNSTILE_SITE_KEY, TURNSTILE_SECRET, EVIDENCE_INGEST_SECRET); its workers.dev URL and preview
+#                  (TURNSTILE_SITE_KEY, TURNSTILE_SECRET, EVIDENCE_INGEST_SECRET, MFA_ENCRYPTION_KEY); its workers.dev URL and preview
 #                  URLs are switched off, so it is not reachable anywhere.
 # It NEVER uploads application code, attaches a domain or changes DNS, applies migrations, seeds data, or touches
 # crestmont-platform-staging / crestmont-platform-frontend-preview. The application is deployed only by
 # deploy-production.yml after the Founder's release approval.
 #
 # Gates: manual trigger on main only, the confirmation phrase, and the GitHub `production` environment (the
-# Founder is its required reviewer). Re-running is safe: every step is idempotent and existing secrets are kept.
+# Founder is its required reviewer). Re-running is safe: every step is idempotent and existing secrets are kept, so a
+# re-run never changes a Worker secret (which would block rollbacks, Cloudflare 10220) unless replace_turnstile is set.
 
 on:
   workflow_dispatch:
@@ -20,6 +21,10 @@ on:
         description: 'Type "provision crestmont-platform-production" to confirm'
         required: true
         type: string
+      replace_turnstile:
+        description: "Replace the Turnstile keys already on the Worker (blocks rolling back to earlier versions; do it only between deploys)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -104,17 +109,40 @@ jobs:
         env:
           PROD_TURNSTILE_SITE_KEY: ${{ secrets.PRODUCTION_TURNSTILE_SITE_KEY }}
           PROD_TURNSTILE_SECRET: ${{ secrets.PRODUCTION_TURNSTILE_SECRET }}
+          PROD_MFA_ENCRYPTION_KEY: ${{ secrets.PRODUCTION_MFA_ENCRYPTION_KEY }}
+          REPLACE_TURNSTILE: ${{ inputs.replace_turnstile }}
         run: |
           $WRANGLER secret list --env production --format json > secrets.json 2>/dev/null || echo "[]" > secrets.json
           names=$(node --no-warnings scripts/provision-production.ts secret-names secrets.json); rm -f secrets.json
-          printf '%s' "$PROD_TURNSTILE_SITE_KEY" | $WRANGLER secret put TURNSTILE_SITE_KEY --env production > /dev/null
-          printf '%s' "$PROD_TURNSTILE_SECRET" | $WRANGLER secret put TURNSTILE_SECRET --env production > /dev/null
+          # Secrets are put only when missing (or on an explicit replace request): any secret change makes earlier Worker
+          # versions un-rollbackable (Cloudflare 10220, docs/RUNBOOK.md §3), so a routine re-run changes nothing.
+          for pair in "TURNSTILE_SITE_KEY:PROD_TURNSTILE_SITE_KEY" "TURNSTILE_SECRET:PROD_TURNSTILE_SECRET"; do
+            name=${pair%%:*}; var=${pair##*:}
+            if printf '%s\n' "$names" | grep -qx "$name" && [ "$REPLACE_TURNSTILE" != "true" ]; then
+              echo "$name already set on $WORKER: kept."
+            else
+              printf '%s' "${!var}" | $WRANGLER secret put "$name" --env production > /dev/null
+              echo "$name installed on $WORKER."
+            fi
+          done
           if printf '%s\n' "$names" | grep -qx EVIDENCE_INGEST_SECRET; then
             echo "EVIDENCE_INGEST_SECRET already set on $WORKER: kept."
           else
             # Production's own value: random, never staging's, never printed or stored anywhere else.
             node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))' | $WRANGLER secret put EVIDENCE_INGEST_SECRET --env production > /dev/null
             echo "EVIDENCE_INGEST_SECRET generated for $WORKER (production-only value)."
+          fi
+          # MFA_ENCRYPTION_KEY encrypts every stored two-factor secret. It is NEVER replaced once set (replacing it would
+          # make every enrolled authenticator unreadable). The value comes from the production environment secret
+          # PRODUCTION_MFA_ENCRYPTION_KEY so the Founder keeps a recoverable copy in the password manager.
+          if printf '%s\n' "$names" | grep -qx MFA_ENCRYPTION_KEY; then
+            echo "MFA_ENCRYPTION_KEY already set on $WORKER: kept (never replaced)."
+          elif [ -n "$PROD_MFA_ENCRYPTION_KEY" ]; then
+            node --no-warnings scripts/provision-production.ts mfa-key
+            printf '%s' "$PROD_MFA_ENCRYPTION_KEY" | $WRANGLER secret put MFA_ENCRYPTION_KEY --env production > /dev/null
+            echo "MFA_ENCRYPTION_KEY installed on $WORKER from PRODUCTION_MFA_ENCRYPTION_KEY."
+          else
+            echo "::warning title=MFA_ENCRYPTION_KEY not set::Two-factor enrolment on production fails closed until the production environment secret PRODUCTION_MFA_ENCRYPTION_KEY is added and this workflow is re-run (docs/PRODUCTION-PROVISIONING.md)."
           fi
           $WRANGLER secret list --env production --format json > secrets.json
           node --no-warnings scripts/provision-production.ts secret-names secrets.json > names.txt; rm -f secrets.json
