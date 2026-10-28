@@ -185,6 +185,7 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
     "POST /api/webhooks/voice": async (b) => ({ "x-crestmont-voice-signature": await signVoiceEvent(SECRETS.voice, b) }),
     "POST /api/webhooks/retell": async (b) => ({ "x-retell-signature": await signRetell(SECRETS.retell, b) }),
     "POST /api/webhooks/retell/functions": async (b) => ({ "x-retell-signature": await signRetell(SECRETS.retell, b) }),
+    "POST /api/webhooks/retell/inbound": async (b) => ({ "x-retell-signature": await signRetell(SECRETS.retell, b) }),
     "POST /api/webhooks/resend": async (b) => signSvix(SECRETS.resend, `msg_${Math.random().toString(16).slice(2)}`, b),
     "POST /api/leads": async () => ({}),
     "POST /api/scheduled/run": async (b) => ({ "x-crestmont-scheduler-signature": await signEvidence(SECRETS.scheduler, b) }),

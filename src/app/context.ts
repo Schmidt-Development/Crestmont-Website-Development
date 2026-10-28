@@ -25,6 +25,8 @@ export interface Env {
   VOICE_WEBHOOK_SECRET?: string;
   /** Retell workspace API key that carries the webhook badge (verifies X-Retell-Signature). VOICE-003. */
   RETELL_API_KEY?: string;
+  /** "on" enables outbound calling in this environment (default off). The Owner's receptionist setting must also be on. */
+  RETELL_OUTBOUND?: string;
   /** Staging only: password for the outer preview gate (src/app/preview-gate.ts). Ignored in production. */
   STAGING_ACCESS_PASSWORD?: string;
   /** "required" on the deployed staging Worker: the preview gate stays locked when no password is set. */
