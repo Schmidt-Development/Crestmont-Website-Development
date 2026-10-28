@@ -50,6 +50,9 @@ interface Ops {
   /** Records a recovery point immediately before writing and returns how to restore it (D1 Time Travel bookmark, or a
    *  file copy for a local database). Required for --yes: without a recovery point nothing is written. */
   recoveryPoint?(): Promise<string>;
+  /** Remote targets: --yes needs at least one secret the Worker itself already encrypted, which proves the given key IS
+   *  the Worker's (AES-GCM is authenticated). Without that proof a mistyped key would encrypt every row unreadably. */
+  requireKeyProof?: boolean;
 }
 
 // ── Database identity safeguards (remote D1) ──
@@ -87,7 +90,13 @@ export async function run(ops: Ops, rawKey: string, write: boolean, log: (s: str
   const plan = await planReencryption(await ops.rows(), rawKey);
   log(`TOTP secrets: ${plan.plaintext} stored in plaintext, ${plan.alreadyEncrypted} already encrypted (all decrypt with this key).`);
   if (!plan.sql.length) { log("Nothing to do."); return plan; }
-  if (!write) { log(`Dry run: re-run with --yes to encrypt ${plan.plaintext} value(s).`); return plan; }
+  const unproven = ops.requireKeyProof && plan.alreadyEncrypted === 0;
+  if (!write) {
+    if (unproven) log("Note: no secret encrypted by the Worker exists yet, so this key cannot be proven to be the Worker's; --yes will refuse until one does (sign in once with any two-factor account on this environment).");
+    log(`Dry run: re-run with --yes to encrypt ${plan.plaintext} value(s).`);
+    return plan;
+  }
+  if (unproven) throw new Error("no secret encrypted by the Worker exists yet to prove this is the Worker's MFA_ENCRYPTION_KEY; sign in once with any two-factor account on this environment (the Worker encrypts its secret), then re-run. Nothing was written");
   if (!ops.recoveryPoint) throw new Error("no recovery point can be recorded for this target; nothing was written");
   let restore: string;
   try { restore = await ops.recoveryPoint(); } catch (e) { throw new Error(`could not record a recovery point (${String((e as Error).message ?? e).split("\n")[0].slice(0, 160)}); nothing was written`); }
@@ -123,6 +132,7 @@ function remoteOps(database: string, env: string): Ops & { deploymentEnvironment
   const d1 = ["d1", "execute", database, "--remote", "--env", env];
   const exec = (args: string[]) => execFileSync(cmd, [...base, ...d1, ...args], { stdio: ["pipe", "pipe", "pipe"], encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   return {
+    requireKeyProof: true,
     async recoveryPoint() {
       // D1 Time Travel: a point-in-time bookmark of the database as it is now (no data is copied anywhere).
       const out = execFileSync(cmd, [...base, "d1", "time-travel", "info", database, "--env", env, "--json"], { stdio: ["pipe", "pipe", "pipe"], encoding: "utf8" });

@@ -175,3 +175,22 @@ test("[AUTH-003] [SEC-004] end to end with a key: invalid and expired codes refu
   for (const v of [enrolCode, good, ...tried.filter((t) => t.length === 6 && t !== "000000")]) assert.ok(!new RegExp(`(?<![0-9a-zA-Z])${v}(?![0-9a-zA-Z])`).test(dump), "no TOTP code is logged");
 });
 const loc = (r: Response) => r.headers.get("location") ?? "";
+
+test("[SEC-004] encrypt-totp-secrets on a remote target refuses --yes until a Worker-encrypted secret proves the key", async () => {
+  const { run } = await import("../scripts/encrypt-totp-secrets.ts");
+  const key = KEY();
+  const plain = { id: "u1", totp_secret: newTotpSecret(), totp_pending_secret: null };
+  const applied: string[][] = [];
+  const logs: string[] = [];
+  const ops = (rows: typeof plain[]) => ({ requireKeyProof: true, rows: async () => rows, apply: async (s: string[]) => { applied.push(s); }, recoveryPoint: async () => "restore B" });
+  await run(ops([plain]), key, false, (l) => logs.push(l));
+  assert.ok(logs.some((l) => /cannot be proven/.test(l)), "the dry run says so");
+  await assert.rejects(run(ops([plain]), key, true, () => {}), /prove this is the Worker's MFA_ENCRYPTION_KEY[\s\S]*Nothing was written/);
+  assert.equal(applied.length, 0);
+  // With one secret the Worker encrypted under this key, the write proceeds; under another key, it is refused.
+  const workerRow = { id: "u2", totp_secret: await sealWithKey(key, "u2", newTotpSecret()), totp_pending_secret: null };
+  await run(ops([plain, workerRow]), key, true, () => {});
+  assert.equal(applied.length, 1);
+  await assert.rejects(run(ops([plain, workerRow]), KEY(), true, () => {}), /do not decrypt/);
+  assert.equal(applied.length, 1);
+});
