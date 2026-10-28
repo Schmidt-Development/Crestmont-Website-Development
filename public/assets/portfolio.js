@@ -49,7 +49,11 @@
       root.dataset.scale = s < 0.6 ? "small" : "ok";
     };
     // Default device follows the space available (a phone gets the phone layout, not a shrunken desktop).
-    const autoMode = () => { const W = screen0 ? screen0.clientWidth : innerWidth; return W >= 960 ? "desktop" : W >= 600 ? "tablet" : "mobile"; };
+    // The automatic device follows the VISITOR's screen, not the frame's width: a laptop visitor sees every website at
+    // its desktop layout (scaled to fit), whichever page hosts the explorer. Picking by frame width put the narrower
+    // homepage/portfolio frames into the tablet layout on 1000–1200px laptops while the wider case-study frame stayed
+    // on desktop, which showed full-bleed sites (Glassly's cover-video hero) as a cropped portrait close-up.
+    const autoMode = () => { const W = innerWidth; return W >= 1024 ? "desktop" : W >= 600 ? "tablet" : "mobile"; };
     const setMode = (m, announce) => {
       root.dataset.mode = m;
       modeBtns.forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.pfxMode === m)));
@@ -165,8 +169,7 @@
     if (reduce.matches) track.style.transition = "none";
     setMode(autoMode(), false);
     if ("ResizeObserver" in window && screen0) {
-      let lastW = screen0.clientWidth;
-      new ResizeObserver(() => { const W = screen0.clientWidth; if (!userMode && Math.abs(W - lastW) > 40) setMode(autoMode(), false); else fit(); lastW = W; }).observe(screen0);
+      new ResizeObserver(() => { const m = autoMode(); if (!userMode && m !== root.dataset.mode) setMode(m, false); else fit(); }).observe(screen0);
     } else window.addEventListener("resize", fit);
     go(0, false);
     // Lazy: create the active demo only when the explorer approaches the viewport.

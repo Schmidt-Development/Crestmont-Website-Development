@@ -1123,7 +1123,9 @@ a.shot { display: block; cursor: zoom-in; }
 .pfx__viewport { container-type: inline-size; }
 .pfx__screen { --pfx-pad: 0px; position: relative; height: clamp(380px, 62.5cqi, min(78svh, 760px)); background: var(--ink-1); overflow: hidden; overscroll-behavior: contain; }
 /* Narrower frames (tablets, small laptops) get a taller, roughly square screen so tablet and phone viewports keep real height. */
-@container (max-width: 999px) { .pfx__screen { height: clamp(440px, 170cqi, 74svh); } }
+/* Tall frames are for portrait devices only: a desktop rendering keeps the 16:10 desktop frame (62.5cqi) at every width,
+   so the full desktop viewport fits without a gap below it. */
+@container (max-width: 999px) { .pfx:not([data-mode="desktop"]) .pfx__screen { height: clamp(440px, 170cqi, 74svh); } }
 .pfx__stage { position: absolute; top: var(--pfx-pad); left: 50%; width: var(--pfx-stw, 100%); height: var(--pfx-sth, 100%); transform: translateX(-50%); overflow: hidden; background: #050505; }
 .pfx__poster { position: absolute; left: 0; top: 0; width: 100%; height: auto; display: none; transition: opacity var(--t-med) var(--ease-out); }
 .pfx__poster--missing { position: absolute; inset: 0; height: 100%; display: grid; place-items: center; color: var(--text-3); font-size: var(--fs-sm); }
