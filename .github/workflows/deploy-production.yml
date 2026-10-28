@@ -42,9 +42,16 @@ jobs:
       EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
       PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
       TARGET_COMMIT: ${{ inputs.commit }}
+      # F-23: free-text input reaches scripts only through this variable, never interpolated into `run:`.
+      RELEASE_TAG: ${{ inputs.tag }}
       DEPLOYMENT_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-production
       WRANGLER: npx --yes wrangler@4
     steps:
+      - name: Validate inputs (F-23)
+        run: |
+          [[ "$TARGET_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit must be a full 40-character SHA"; exit 1; }
+          [[ -z "$RELEASE_TAG" || "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::tag must look like v1.2.3 or v1.2.3-rc.1"; exit 1; }
+
       - name: Refuse unless production is provisioned
         run: |
           missing=""
@@ -135,11 +142,11 @@ jobs:
           node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment production --commit "$TARGET_COMMIT"
           --status started --url "$PRODUCTION_URL" --by "github-actions:${{ github.actor }}" --release "${{ steps.auth.outputs.release_id }}"
           --ci-run "gh-${{ github.run_id }}-${{ github.run_attempt }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          --notes "tag ${{ inputs.tag }}"
+          --notes "tag ${RELEASE_TAG}"
 
       - name: Deploy Worker (production)
         id: deploy
-        run: $WRANGLER deploy --env production --message "Release ${{ inputs.tag }} ${TARGET_COMMIT}"
+        run: $WRANGLER deploy --env production --message "Release ${RELEASE_TAG} ${TARGET_COMMIT}"
 
       - name: Record deployment succeeded
         run: node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment production --commit "$TARGET_COMMIT" --status succeeded --by "github-actions:${{ github.actor }}"

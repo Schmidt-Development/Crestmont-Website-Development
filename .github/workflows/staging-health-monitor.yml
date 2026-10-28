@@ -29,6 +29,7 @@ concurrency:
 
 jobs:
   probe:
+    if: github.ref == 'refs/heads/main'   # main only (see deploy-staging.yml)
     runs-on: ubuntu-latest
     timeout-minutes: 8
     environment: staging
