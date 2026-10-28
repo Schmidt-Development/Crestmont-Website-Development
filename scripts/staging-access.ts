@@ -17,12 +17,12 @@
 // Writes <dir>/README.md (the private artifact), <dir>/demo-accounts.md and <dir>/private.json (for the
 // verifier and the browser journey; not uploaded). Prints no credential except as ::add-mask:: commands.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashPassword, base32Encode } from "../src/lib/auth-crypto.ts";
-import { putSecretIfChanged } from "./staging-secrets.ts";
+import { putSecretIfChanged, keyedFingerprint } from "./staging-secrets.ts";
 
 export const DEMO_DOMAIN = "crestmont-preview.test";
 const ALPHABET = "23456789abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ"; // no 0/O/1/l/I, no markdown-active characters
@@ -34,7 +34,12 @@ export interface D1Ops {
 }
 
 export interface DemoAccount { role: string; email: string; password: string; totp: string | null; note: string }
-export interface AccessResult { rotated: boolean; previewPassword: string; previewSource: "derived" | "founder"; accounts: DemoAccount[] }
+export interface AccessResult { rotated: boolean; previewPassword: string; previewSource: "derived" | "founder"; accounts: DemoAccount[]; fixedPreviewRetired?: boolean }
+
+/** Keyed fingerprint of a preview password (stored to recognise retired values without storing them). */
+export async function previewFingerprint(rootKey: string, password: string): Promise<string> {
+  return keyedFingerprint(rootKey, "retired-preview", password);
+}
 
 const enc = new TextEncoder();
 async function hmac(key: string, msg: string): Promise<Uint8Array> {
@@ -43,7 +48,7 @@ async function hmac(key: string, msg: string): Promise<Uint8Array> {
 }
 
 /** Uniform characters from ALPHABET via rejection sampling over HMAC blocks; grouped in fives for reading aloud. */
-async function derivePassword(key: string, salt: string, label: string, chars = 20): Promise<string> {
+export async function derivePassword(key: string, salt: string, label: string, chars = 20): Promise<string> {
   const limit = Math.floor(256 / ALPHABET.length) * ALPHABET.length;
   let out = "";
   for (let block = 0; out.length < chars; block++) {
@@ -54,7 +59,7 @@ async function derivePassword(key: string, salt: string, label: string, chars = 
   return out.match(/.{1,5}/g)!.join("-");
 }
 
-async function deriveTotp(key: string, salt: string, email: string): Promise<string> {
+export async function deriveTotp(key: string, salt: string, email: string): Promise<string> {
   return base32Encode((await hmac(key, `crestmont-staging-access:v1:${salt}:totp:${email}`)).slice(0, 20));
 }
 
@@ -90,9 +95,42 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
     // Previously issued credentials stop working everywhere: sessions and one-time tokens of demo users.
     sql.push(`DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE email LIKE '%@${DEMO_DOMAIN}');`);
     sql.push(`DELETE FROM auth_tokens WHERE user_id IN (SELECT id FROM users WHERE email LIKE '%@${DEMO_DOMAIN}');`);
+    // Security remediation 2026-10-28 (F-18): anyone holding leaked demo credentials could have generated recovery
+    // codes, started a new authenticator enrolment, or invited accounts of their own. None of that may survive.
+    sql.push(`DELETE FROM mfa_recovery_codes WHERE user_id IN (SELECT id FROM users WHERE email LIKE '%@${DEMO_DOMAIN}');`);
+    sql.push(`UPDATE users SET totp_pending_secret = NULL WHERE email LIKE '%@${DEMO_DOMAIN}';`);
+    sql.push(`UPDATE invitations SET expires_at = ${q(new Date().toISOString())} WHERE accepted_at IS NULL AND invited_by IN (SELECT id FROM users WHERE email LIKE '%@${DEMO_DOMAIN}');`);
     sql.push(`INSERT OR REPLACE INTO _staging_access (key, value) VALUES ('salt', ${q(salt)}), ('epoch', ${q(o.epoch)}), ('rotated_at', ${q(new Date().toISOString())});`);
   }
   if (!accounts.some((a) => a.role === "owner")) throw new Error("No Owner demo account found in staging D1 (seed first)");
+  await runSql(ops, sql);
+  const sql2: string[] = [];
+  // Rotation retires the preview password that was live before it (derived from the old salt, or the Founder's fixed
+  // value). A retired value is never put back, so a Founder-held STAGING_PREVIEW_PASSWORD that was exposed is ignored
+  // (with a warning) until the Founder sets a new one; the derived password is used meanwhile.
+  const retired = new Set(Object.keys(meta).filter((k) => k.startsWith("retired_preview:")).map((k) => k.slice("retired_preview:".length)));
+  if (rotated && meta.salt) { // only a rotation that replaces live credentials retires them (not the very first issue)
+    const before = [o.fixedPreviewPassword, meta.salt ? await derivePassword(o.rootKey, meta.salt, "preview") : undefined].filter((v): v is string => !!v);
+    for (const v of before) {
+      const fp = await previewFingerprint(o.rootKey, v);
+      retired.add(fp);
+      sql2.push(`INSERT OR REPLACE INTO _staging_access (key, value) VALUES (${q(`retired_preview:${fp}`)}, ${q(new Date().toISOString())});`);
+    }
+  }
+  const fixedRetired = !!o.fixedPreviewPassword && retired.has(await previewFingerprint(o.rootKey, o.fixedPreviewPassword));
+  const founder = !!o.fixedPreviewPassword && !fixedRetired;
+  const previewPassword = founder ? o.fixedPreviewPassword! : await derivePassword(o.rootKey, salt, "preview");
+  if (retired.has(await previewFingerprint(o.rootKey, previewPassword))) throw new Error("Refusing to re-issue a retired preview password");
+  if (sql2.length) await runSql(ops, sql2);
+  // The live secret always equals what this run reports; it is re-put only when the value changed, because any secret
+  // change blocks Worker rollbacks to earlier versions (Cloudflare error 10220).
+  if (o.rootKey) await putSecretIfChanged(ops, o.rootKey, "STAGING_ACCESS_PASSWORD", previewPassword);
+  else await ops.putSecret("STAGING_ACCESS_PASSWORD", previewPassword);
+  accounts.sort((a, b) => (ROLE_ORDER.indexOf(a.role) + 1 || 99) - (ROLE_ORDER.indexOf(b.role) + 1 || 99) || a.email.localeCompare(b.email));
+  return { rotated, previewPassword, previewSource: founder ? "founder" : "derived", accounts, fixedPreviewRetired: fixedRetired };
+}
+
+async function runSql(ops: D1Ops, sql: string[]): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "staging-access-"));
   chmodSync(dir, 0o700);
   try {
@@ -102,14 +140,6 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-  const founder = !!o.fixedPreviewPassword;
-  const previewPassword = founder ? o.fixedPreviewPassword! : await derivePassword(o.rootKey, salt, "preview");
-  // The live secret always equals what this run reports; it is re-put only when the value changed, because any secret
-  // change blocks Worker rollbacks to earlier versions (Cloudflare error 10220).
-  if (o.rootKey) await putSecretIfChanged(ops, o.rootKey, "STAGING_ACCESS_PASSWORD", previewPassword);
-  else await ops.putSecret("STAGING_ACCESS_PASSWORD", previewPassword);
-  accounts.sort((a, b) => (ROLE_ORDER.indexOf(a.role) + 1 || 99) - (ROLE_ORDER.indexOf(b.role) + 1 || 99) || a.email.localeCompare(b.email));
-  return { rotated, previewPassword, previewSource: founder ? "founder" : "derived", accounts };
 }
 
 export function accountsTable(accounts: DemoAccount[]): string {
@@ -190,6 +220,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     writeFileSync(join(out, "demo-accounts.md"), accountsTable(r.accounts) + "\n", { mode: 0o600 });
     writeFileSync(join(out, "access.json"), JSON.stringify(r), { mode: 0o600 });
     console.log(`Staging access applied: ${r.accounts.length} demo accounts, ${r.rotated ? "rotated" : "unchanged"}, preview password ${r.previewSource}.`);
+    if (r.fixedPreviewRetired) console.log("::warning title=STAGING_PREVIEW_PASSWORD retired::The repository secret STAGING_PREVIEW_PASSWORD holds a preview password that was retired by a credential rotation (it may have been exposed). It is ignored; the derived preview password is in use. Set a NEW value for the secret, or delete it.");
+    if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `rotated=${r.rotated}\n`);
   } catch (e) {
     // wrangler errors can echo arguments; print only the first line of our own message.
     console.error(`::error::Staging access could not be applied: ${String((e as Error).message ?? e).split("\n")[0].slice(0, 200)}`);

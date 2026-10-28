@@ -37,7 +37,7 @@ npx wrangler@4 r2 bucket create crestmont-files-production
 ```
 
 - Copy each printed `database_id` into `wrangler.toml` (`[env.staging]` and `[env.production]` `d1_databases`). These ids are not secrets. Commit the change through a pull request. Both deploy workflows refuse to run while a `database_id` is empty.
-- R2: turn on object versioning or a lifecycle rule keeping non-current versions for 30 days (BACKUP-RECOVERY §4). Do **not** enable public access on either bucket.
+- R2: turn on object versioning or a lifecycle rule keeping non-current versions for 30 days (BACKUP-RECOVERY §4). Do **not** enable public access on either bucket. On `crestmont-files-production` also add a lifecycle rule *prefix `_backups/` → delete objects after 30 days* (pre-deploy database exports written by `deploy-production.yml`).
 - Apply the schema the first time (later runs happen in the workflows):
   ```sh
   npx wrangler@4 d1 migrations apply crestmont-staging --remote --env staging
@@ -61,7 +61,7 @@ Set with `npx wrangler@4 secret put <NAME> --env staging` (then again with `--en
 
 | Secret | Staging | Production | Source / owner |
 |---|---|---|---|
-| `EVIDENCE_INGEST_SECRET` | required | required | `openssl rand -hex 32`. The same value goes into the GitHub environment secret of the same name. |
+| `EVIDENCE_INGEST_SECRET` | required — installed by `deploy-staging.yml` from the GitHub secret of the same name (§5) | required — its **own** value (`openssl rand -hex 32`), set by hand once | Staging: the readiness system that CI, releases and production authorization sign against. Production: used only when production hosts its own readiness system; never staging's value. |
 | `STRIPE_SECRET_KEY` | test key `sk_test_…` / `rk_test_…` | **test key only** until PAY-010 (the adapter refuses live keys) | Stripe (BLK-004) |
 | `STRIPE_WEBHOOK_SECRET` | required with Stripe | required with Stripe | Stripe webhook endpoint `https://<host>/api/webhooks/stripe` |
 | `RESEND_API_KEY` | optional — a **separate** Resend API key (sending access, domain `crestmontwebsitedevelopment.com`) | required for email — its own key | Resend (BLK-005). Staging mails only `EMAIL_RECIPIENT_ALLOWLIST` (below); reserved test addresses (`.test`, `.invalid`, `example.com` …) are never mailed anywhere. |
@@ -85,13 +85,14 @@ Non-secret vars: add `APP_URL = "https://<host>"` to each environment's `vars` i
 Repository → Settings → Environments:
 
 1. **`staging`**
-   - Secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `EVIDENCE_INGEST_SECRET` (the staging Worker's value).
+   - Secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (`EVIDENCE_INGEST_SECRET` comes from the repository secret below).
    - Variables: `STAGING_URL` (e.g. `https://crestmont-platform-staging.<subdomain>.workers.dev`), `READINESS_URL` (the staging URL; staging hosts the readiness system that CI and deploy evidence post to).
    - Deployment branches: `main` only.
+   - **Evidence secret (stable):** the repository secret `EVIDENCE_INGEST_SECRET` (Settings → Secrets and variables → Actions → *Repository secrets*) is the one value every GitHub-side workflow signs with (`ci.yml`, `release.yml`, `deploy-production.yml`). `deploy-staging.yml` installs exactly that value on the staging Worker through `scripts/evidence-secret.ts`, and only when it changed (`scripts/staging-secrets.ts`: a changed secret blocks rollbacks, Cloudflare 10220); the restore drill and rollback rehearsal reuse it and never touch the Worker. Generate it once with `openssl rand -hex 32`. Until it exists, staging uses the key derived from the Cloudflare token and warns *"EVIDENCE_INGEST_SECRET not configured"*: staging's own evidence keeps working, but CI evidence, release candidates and production release authorization cannot sign against staging. Setting it changes the staging secret once (rollbacks to versions older than that deploy are then refused, as for any secret change). Do not define a different `EVIDENCE_INGEST_SECRET` on the `staging` or `production` *environments* (an environment secret overrides the repository secret in that environment's jobs). Each staging and production run prints a 12-character **fingerprint** (never the value); they must match.
 2. **`production`**
    - **Required reviewers: the Founder** (and nobody else who can approve alone). Enable "Prevent self-review".
    - Deployment branches and tags: `main` only.
-   - Secrets: `CLOUDFLARE_API_TOKEN` (ideally a production-only token), `CLOUDFLARE_ACCOUNT_ID`, `EVIDENCE_INGEST_SECRET` (the value of the Worker that hosts the readiness system the Founder approves in).
+   - Secrets: `CLOUDFLARE_API_TOKEN` (a production-only token, §1), `CLOUDFLARE_ACCOUNT_ID`. `EVIDENCE_INGEST_SECRET` is inherited from the repository secret (the staging readiness system's value); do not add a different one here.
    - Variables: `PRODUCTION_URL` (`https://crestmontwebsitedevelopment.com`), `READINESS_URL` (where the Founder's approval is recorded: the staging readiness system until production hosts its own).
 3. Repository variable `READINESS_URL` and secret `EVIDENCE_INGEST_SECRET` are also used by `ci.yml` and `release.yml`.
 
@@ -109,19 +110,21 @@ Settings → Branches → rule for `main`:
 ## 7. Custom domain (after DNS control, BLK-011)
 
 1. Add `crestmontwebsitedevelopment.com` to the Cloudflare account and switch the registrar's nameservers.
-2. Uncomment the `routes` lines in `wrangler.toml` (`custom_domain = true`) for staging (`staging.` subdomain) and production (apex + `www`). Commit through a PR. This is a configuration change, so it needs a new release candidate.
-3. SSL/TLS: Full (strict). Minimum TLS 1.2. Always use HTTPS. HSTS after verification (addresses ASVS F-14).
-4. Set `env.staging.url` / `env.production.url` at `/staff/ops`. The 15-minute probe then records DNS/TLS/health in the environment views.
+2. **Production apex** — `wrangler.toml` `[env.production]` already declares `routes = [{ pattern = "crestmontwebsitedevelopment.com", custom_domain = true }]`. The custom domain (DNS record and certificate) is created by the approved `deploy-production.yml` run itself. Before that run, the apex must have **no CNAME record** (Cloudflare refuses a custom domain on a hostname with a CNAME); note and remove any parked A/AAAA/CNAME records for the apex in DNS → Records (screenshot them first: that is the DNS rollback).
+3. **www → apex** — not a Worker hostname. Add a proxied placeholder record (`AAAA www 100::`, Proxy status *Proxied*) and a Redirect Rule (Rules → Redirect Rules → *Redirect from WWW to root* template, or a single redirect: hostname equals `www.crestmontwebsitedevelopment.com` → dynamic `concat("https://crestmontwebsitedevelopment.com", http.request.uri.path)`, status 301, preserve query string). Do this only after the apex answers.
+4. **Staging** `staging.crestmontwebsitedevelopment.com` — uncomment the staging `routes` line through a PR. The next staging deploy after the merge attaches it (that merge is the DNS change). The workers.dev address keeps working because `workers_dev = true` stays. Staging stays behind the preview gate; its Turnstile keys are test keys, so keep the gate on.
+5. SSL/TLS: Full (strict). Minimum TLS 1.2. Always use HTTPS. **HSTS only after** HTTPS on the apex and the www redirect are verified (addresses ASVS F-14); start with a short max-age.
+6. Set `env.staging.url` / `env.production.url` at `/staff/ops`. The 15-minute probe then records DNS/TLS/health in the environment views.
 
 ## 8. Normal flow
 
-1. **Merge to `main`** → `ci.yml` (tests, evidence) and `deploy-staging.yml`: typecheck, tests, D1 safety export (artifact), migrations, record *started*, `wrangler deploy --env staging`, record *succeeded*, smoke checks (`scripts/production-checks.ts --environment staging`), browser E2E against staging, post evidence, record the verification result.
+1. **Merge to `main`** → `ci.yml` (tests, evidence) and `deploy-staging.yml`: typecheck, tests, D1 Time Travel bookmark, migrations, record *started*, `wrangler deploy --env staging`, record *succeeded*, smoke checks (`scripts/production-checks.ts --environment staging`), browser E2E against staging, post evidence, record the verification result.
 2. **Tag a release** `git tag -s v1.0.0 <sha> && git push origin v1.0.0` → `release.yml` creates a GitHub pre-release with notes and, through `scripts/release-candidate.ts`, a release candidate bound to the full SHA and the `wrangler.toml` digest. The candidate can also be created by hand at `/staff/readiness/releases`.
 3. **Founder reviews and approves** at `/staff/readiness/approve` (Owner + MFA only; bound to commit, config and evidence set).
 4. **Run *Deploy production*** (Actions → Deploy production → Run workflow) with the full commit SHA. GitHub waits for the Founder's environment approval. The workflow then:
    - checks that the commit is on `main` and the production `database_id` is set;
    - calls `GET /api/readiness/release-authorization?commit=<sha>&config=<digest>` (signed; `scripts/release-authorization.ts`) and **stops unless `authorized: true`**;
-   - runs typecheck and tests, exports the production D1 (artifact, 30 days), re-checks authorization, applies migrations, records the deployment (the platform compares the commit with the approved candidate: LAUNCH-002), deploys;
+   - runs typecheck and tests, exports the production D1 to the private production bucket under `_backups/` (never a workflow artifact: the repository is public; skipped only for an empty database on the first release), re-checks authorization, applies migrations, records the deployment (the platform compares the commit with the approved candidate: LAUNCH-002), deploys;
    - runs the post-deploy checks (health, home, pricing, contact, login, security headers, staff redirect, readiness health) and posts them as `production_check` evidence (Gate H);
    - on a critical failure runs `wrangler rollback --env production` and records the deployment as `rolled_back`.
 
