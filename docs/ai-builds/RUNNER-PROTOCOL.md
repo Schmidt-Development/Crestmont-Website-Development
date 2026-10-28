@@ -42,6 +42,13 @@ Body `{ "runnerId": "string (≤64)", "version": "runner semver", "capabilities"
 ```
 Claiming is atomic: one job per lease, at most `max_concurrent` active jobs, never two active jobs for a project.
 
+**Paid-provider gate (platform side).** A runner whose `capabilities` do not include `"zero-token-cost"` (the paid
+Agent SDK adapter, or an unknown/older runner) is treated as paid and answered
+`{ "job": null, "reason": "paid_provider_not_authorized" }` unless the Worker sets `BUILD_ALLOW_PAID_PROVIDER=true`.
+Paid AI therefore needs both keys (runner `RUNNER_ALLOW_PAID_PROVIDER=true` and platform `BUILD_ALLOW_PAID_PROVIDER=true`)
+plus the budgets. Runners treat an unknown reason like `paused` (back off, keep polling). Every claim event records
+the runner version, its capabilities and whether the provider is zero-cost or paid (`build_events.data_json`).
+
 ### `POST /api/builds/runner/heartbeat`
 `{ "jobId", "leaseToken", "stage": "preparing" | "building" | "verifying", "runCostUsd": number (cumulative this attempt),
   "turns": number, "sessionId"?: string, "activity"?: [ { "kind": "step"|"tool"|"check"|"note", "message": "≤500 chars" } ] }`
@@ -76,6 +83,11 @@ Only `verified` may claim a check ran (evidence names the command/screenshot). U
   "sourceRepo": "…", "sourceBranch": "…", "sourceCommit": "…", "previewUrl": "https://…" | null,
   "report": "markdown owner report ≤ 50 KB", "missingInformation"?: ["…"], "error"?: "≤2000" }
 ```
+`previewUrl` is recorded only when it is `https`, has no credentials and its host is under an allowed preview host
+(Worker `BUILD_PREVIEW_HOSTS`, comma-separated, default `.workers.dev`); otherwise it is dropped and an `error` event
+names the rejected URL. For `ready_for_review` only the preview reported by *this* completion is kept (an earlier
+attempt's URL is cleared), and a revision starts with no preview, so the owner can only approve a preview of the
+build under review.
 `released` (v1.1: runner shutdown; work checkpointed) requeues the build without spending an attempt.
 `failed` is retried automatically (bounded by `max_attempts`, resuming the session when a checkpoint exists);
 `stopped` lands in the state the server asked for (`canceled`, `paused`, `budget_paused`).

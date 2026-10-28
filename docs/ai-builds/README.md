@@ -19,7 +19,8 @@ validation (`LOCAL-VALIDATION.md`) and a real end-to-end staging run succeed (re
     tokens and model time are reported. When idle, the runner also serves the platform's short AI drafts (`ai_jobs`)
     with the same local model.
   - `claude-agent-sdk` (optional, paid): the original Agent SDK adapter. It needs `RUNNER_ALLOW_PAID_PROVIDER=true`
-    and is never an automatic fallback.
+    on the runner **and** `BUILD_ALLOW_PAID_PROVIDER=true` on the Worker (the platform gives no work to a runner that
+    does not declare zero token cost), and is never an automatic fallback.
   Deployment: `WINDOWS-SUPERCOMPUTER.md` (Windows + WSL 2 + Docker Desktop, outbound-only, no public port).
 
 ## When a build starts
@@ -43,3 +44,4 @@ selected projects. Staging sample data is excluded the same way.
 ## Contracts
 - Runner protocol: `RUNNER-PROTOCOL.md` · Frontend: `FRONTEND-CONTRACT.md` · Runner setup: `RUNNER-SETUP.md` · Starters: `STARTERS.md`.
 - Windows build machine (local model, default): `WINDOWS-SUPERCOMPUTER.md` · Validation plan: `LOCAL-VALIDATION.md`.
+- Founder order of work for the first real build (decisions, install, known installer issues): `FOUNDER-RUNNER-INSTALL.md`.

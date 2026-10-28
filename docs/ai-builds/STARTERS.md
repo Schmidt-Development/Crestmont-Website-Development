@@ -25,9 +25,9 @@ dependencies.
 | `src/worker.js` | `/api/contact` stub: validates, honeypot, then **503 "not connected yet"** (501 if only a provider name is set) |
 | `scripts/check.mjs` | Offline acceptance check (below) |
 | `STARTER.md` | Conventions the agent must follow |
-| `starter.json` | Runner-side contract: per-package page limits, requirement keys, acceptance commands (not copied) |
+| `starter.json` | Runner-side contract: per-package page limits, requirement keys, acceptance commands, protected checker files (not copied) |
 
-### Acceptance check (`npm run check -- --package <id>`)
+### Acceptance check (`node scripts/check.mjs --package <id>`; `npm run check -- --package <id>` for the agent)
 
 No network, no dependencies, Node 22+. Fails (exit 1) on:
 
@@ -40,13 +40,33 @@ No network, no dependencies, Node 22+. Fails (exit 1) on:
 - Responsive: viewport meta on every page and `@media` or `clamp()` in the CSS.
 - Package: page count over the limit (5 / 12 / 25, matching `PACKAGES` in `src/domain/catalog.ts`), missing contact
   form posting to `/api/contact` with name/email/message.
-- Leftovers: any `STARTER-PLACEHOLDER`, any "lorem ipsum".
+- Leftovers: any `STARTER-PLACEHOLDER`, any "lorem ipsum", bracketed fill-ins such as `[Your Phone Number]`, unrendered
+  template variables (`{{ ... }}`), `TODO`/`FIXME` in page text, placeholder image services (placeholder.com,
+  placehold.co, picsum.photos, dummyimage.com, ...).
 
 The runner runs this itself after the agent's verify phase (the agent's own claims are not enough), gives the agent
 one repair round if it fails, and records each check as a `check:<id>` requirement: `verified` with the command as
 evidence when it passes, `blocked` with the exit code when it fails. Browser verification (desktop/mobile,
 keyboard, form behavior) is done by the agent with the Playwright/Webapp Testing skills and only counts as
 `verified` when the evidence names a screenshot or command.
+
+**Check integrity.** The agent can edit every file in its workspace, including the checker. Before each of its
+acceptance runs the runner therefore (1) recreates the build's sandbox container, so nothing the agent left running
+survives into the checks, (2) restores the files listed in `starter.json` `protected` (`scripts/check.mjs`,
+`scripts/check-profiles.json`) from its own copy of the starter, never writing through a link the agent planted, and
+(3) runs the checker directly with `node`, not through the editable `package.json` script. When a protected file had
+been changed, the owner report says so ("Check integrity: ..."). The browser check (`/opt/crestmont/browser-check.mjs`)
+lives in the sandbox image and loads only the image's Playwright, never a `playwright` package in the project.
+
+**Brief conformance** (`check:brief-conformance`, computed by the runner from the brief snapshot; files are read,
+nothing is executed): the customer's business name must appear on the home page, and the public email and phone the
+customer gave must appear on at least one page. A failure gets the same repair round and blocks the preview like any
+other failed check. This is an objective floor, not a quality judgement: design, copy and brand fit are decided in
+the owner's review of the preview.
+
+> brochure v1 was amended on 2026-10-28 (check integrity, brief conformance, template-leftover rules) **before any
+> real build used it**, so the "immutable once released" rule below was not broken in practice. From the first real
+> build on, further check changes go into `brochure-v2`.
 
 ### Package profiles (from `PACKAGES.includes`)
 

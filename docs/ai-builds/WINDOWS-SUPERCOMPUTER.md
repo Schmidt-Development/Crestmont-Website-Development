@@ -152,14 +152,15 @@ Set-ExecutionPolicy -Scope Process Bypass
 ```
 
 The installer is idempotent. It:
-1. checks Windows ≥ build 19045, WSL 2, Docker Desktop (Linux containers, engine ≥ 26) and Ollama. With `-Install`
+1. checks Windows ≥ build 19045, that `wsl --status` succeeds (the WSL 2 default version itself is not checked; confirm
+   `wsl --status` shows "Default Version: 2"), Docker Desktop (Linux containers, engine ≥ 26) and Ollama. With `-Install`
    it runs `winget install --exact --id Docker.DockerDesktop` / `Ollama.Ollama` and `wsl --install --no-distribution`
    (a reboot follows; re-run afterwards). The winget package ids are from memory: check them with `winget show <id>`.
 2. writes `C:\CrestmontRunner\state\hardware.json`.
 3. creates `C:\CrestmontRunner\{compose,state,secrets,skills,logs,evidence}`. Inheritance is removed, and only
    SYSTEM, Administrators and your account have access. The secret is entered hidden (or `-SecretFile`), stored
    without a newline and never printed.
-4. builds `crestmont-ai-runner:1`, `crestmont-build-sandbox:1` and `crestmont-egress-proxy:1` (pinned base image
+4. builds `crestmont-ai-runner:1` and `crestmont-build-sandbox:1` (`crestmont-egress-proxy:1` is built at step 8) (pinned base image
    tags, `npm ci` from the committed lockfiles; it stops first if `runner\sandbox\package-lock.json` is missing, see
    `RUNNER-SETUP.md` §12). CI builds the same three images on every push.
 5. writes `state\recommendation.json` and stops with the reasons when the machine is insufficient (`-Model <tag>`
@@ -173,6 +174,9 @@ The installer is idempotent. It:
 8. checks that a container on the internal network can list the model through the proxy, then runs the runner's
    `--preflight` (skills, model present, sandbox image present).
 9. runs `docker compose up -d` and registers the `CrestmontRunner-Start` scheduled task at your logon.
+
+**Exact Founder sequence, prerequisites, decisions and known installer issues (2026-10-28 audit):**
+`FOUNDER-RUNNER-INSTALL.md`. Read it before running the installer.
 
 Copy the curated skills to `C:\CrestmontRunner\skills\` first (see `RUNNER-SETUP.md` §6). For the local model they
 are reference guides the agent reads, not Claude skills. Required ones still fail preflight when missing.

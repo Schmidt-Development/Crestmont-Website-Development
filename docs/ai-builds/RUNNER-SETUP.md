@@ -109,7 +109,13 @@ The runner (not the agent) runs the command in the job repository after the acce
 `PREVIEW_DEPLOY_ENV` added to a secret-free environment. It reads the URL from a `PREVIEW_URL=https://…` line or the
 last `*.workers.dev` URL in the output. It refuses to deploy when the project's Wrangler config has a custom
 `build` command, routes or custom domains. `workers.dev` previews are public to anyone with the link; put Cloudflare
-Access in front of the preview account if that matters.
+Access in front of the preview account if that matters. The platform records a preview URL only when its host is
+under `BUILD_PREVIEW_HOSTS` (Worker variable, default `.workers.dev`); set it if previews use another host.
+
+On the Windows compose stack the runner's network has no route out except the egress proxy: git push and the preview
+command use the runner's `HTTPS_PROXY` (passed to those commands only, never to the agent), and the proxy must allow
+their hosts. Add them with the installer's `-ExtraEgressDomains github.com,api.github.com,api.cloudflare.com` (plus
+`registry.npmjs.org` when the deploy command runs `npx wrangler`).
 
 ## 6. Curated skills
 
@@ -227,6 +233,10 @@ v1.1), which requeues it without spending an attempt; the next attempt resumes t
 
 ## 9. First real run (acceptance)
 
+This section is for the optional paid Agent SDK adapter on a Linux host. For the default self-hosted runner on the
+Windows machine, follow `LOCAL-VALIDATION.md` (and `FOUNDER-RUNNER-INSTALL.md`) instead: logs come from
+`docker compose -f C:\CrestmontRunner\compose\docker-compose.yml logs -f runner` and the spend is always $0.
+
 1. Run `--preflight` (section 8) until it passes.
 2. In the platform, queue one internal test project on the Starter package with a low run budget (for example $5).
 3. Watch `docker logs -f crestmont-ai-runner` and the owner dashboard: stages preparing → building → verifying,
@@ -243,7 +253,8 @@ path, sanitized again server-side). Registered secret values and common token sh
 
 Workspaces under `/workspaces` contain customer project data (brief, files, code, session transcripts) and are kept
 after each attempt for resume and debugging. Delete old ones according to `docs/RETENTION-SCHEDULE.md`, for example
-`find /var/lib/docker/volumes/crestmont-ai-workspaces/_data -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} +`.
+`find /var/lib/docker/volumes/crestmont-ai-workspaces/_data -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} +`
+(on the Windows machine the volume is `crestmont-workspaces`, inside Docker Desktop's WSL 2 VM).
 
 ## 11. Cost controls (from hardest to softest)
 

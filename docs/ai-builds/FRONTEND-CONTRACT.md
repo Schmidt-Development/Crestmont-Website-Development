@@ -32,7 +32,7 @@ If a percentage is ever shown it must be `verified / total` from this checklist,
 { "settings": { "automationEnabled": true, "globallyPaused": false, "pauseReason": null, "autoStartAfter": "…",
                 "runBudgetUsd": 25, "projectBudgetUsd": 75, "maxRuntimeMinutes": 120, "maxTurns": 200,
                 "maxConcurrent": 2, "maxAttempts": 3, "model": "claude-sonnet-5-5" },
-  "runner": { "runner_id": "…", "version": "…", "last_seen_at": "…", "online": true } | null,
+  "runner": { "runner_id": "…", "version": "…", "last_seen_at": "…", "capabilities": ["local-model","zero-token-cost","…"], "zeroCost": true, "online": true } | null,
   "builds": [ BuildSummary ], "hasMore": false }
 ```
 `BuildSummary`: `id, projectId, projectName, organizationName, orderId, kind ("first_build"|"revision"), revision, packageId,
