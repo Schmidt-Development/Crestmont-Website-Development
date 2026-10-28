@@ -624,4 +624,17 @@
     timer = setInterval(poll, 30000);
     document.addEventListener("visibilitychange", poll);
   }
+
+  // Toggletips (pricing comparison): the explanation is in the HTML and visible without JavaScript; with JavaScript it opens
+  // on click or Enter/Space and closes with Escape or a click elsewhere. Never hover-only.
+  {
+    const tips = document.querySelectorAll(".toggletip");
+    if (tips.length) {
+      document.documentElement.classList.add("has-toggletips");
+      const close = (except) => tips.forEach((b) => { if (b !== except) b.setAttribute("aria-expanded", "false"); });
+      tips.forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); const open = b.getAttribute("aria-expanded") !== "true"; close(b); b.setAttribute("aria-expanded", String(open)); }));
+      document.addEventListener("click", () => close(null));
+      document.addEventListener("keydown", (e) => { if (e.key === "Escape") { const o = document.querySelector('.toggletip[aria-expanded="true"]'); if (o) { o.setAttribute("aria-expanded", "false"); o.focus(); } } });
+    }
+  }
 })();

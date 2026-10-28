@@ -10,7 +10,7 @@ import { csrf, input, textarea, select, button, linkButton, ctaLink, ARROW_SVG, 
 import { requireStaff } from "../app/app.ts";
 import { staffNav } from "./nav.ts";
 import { verifyTurnstile } from "./api.ts";
-import { PACKAGES, MAINTENANCE_PLANS, type PackageId } from "../domain/catalog.ts";
+import { PACKAGES, PACKAGE_FEATURES, packageAdditions, MAINTENANCE_PLANS, type PackageId } from "../domain/catalog.ts";
 import { effectivePrices } from "../services/pricing-approvals.ts";
 import { can } from "../domain/authz.ts";
 import { captureLead, requestAttribution, submittedAttribution } from "../services/leads.ts";
@@ -82,13 +82,16 @@ const ledger = (text: string) => html`<ul class="ledger" data-reveal-group>${par
 
 function packageCards(c: Content, opts: { compact?: boolean } = {}): SafeHtml {
   const pr = c.get("pricing.presentation");
-  return html`<div class="grid grid-3 pricing-grid" data-reveal-group>${PKG_ORDER.map((id) => {
+  return html`<div class="grid grid-3 pricing-grid" data-reveal-group>${PKG_ORDER.map((id, i) => {
     const p = PACKAGES[id];
     const featured = id === "business";
-    return html`<article class="card${featured ? " card--gold on-dark" : ""} package" aria-labelledby="pkg-${id}" data-reveal>
+    // Packages are cumulative: higher tiers lead with "Everything in <lower tier>, plus" and list only what they add.
+    const items = i === 0 ? p.includes : packageAdditions(id);
+    const shown = opts.compact ? items.slice(0, 5) : items;
+    return html`<article class="card${featured ? " card--gold on-dark" : ""}${id === "premium" ? " package--premium" : ""} package" aria-labelledby="pkg-${id}" data-reveal>
 <h3 class="card__title" id="pkg-${id}">${p.name}</h3><p class="muted">${pr[`${id}_tagline`] ?? ""}</p>
 <div class="price" data-testid="price-${id}">${pkgPrice(id)}</div><p class="faint package__terms">${p.priceIsFloor ? "Starting price · final price in your written scope · " : "Fixed price · "}paid 100% upfront</p>
-${opts.compact ? html`<ul class="checklist">${p.includes.slice(0, 5).map((i) => html`<li>${i}</li>`)}</ul>` : html`<ul class="checklist">${p.includes.map((i) => html`<li>${i}</li>`)}</ul>`}
+${i > 0 ? html`<p class="package__inherits">Everything in ${PACKAGES[PKG_ORDER[i - 1]].name}, plus:</p>` : ""}<ul class="checklist">${shown.map((it) => html`<li>${it}</li>`)}</ul>${opts.compact && items.length > shown.length ? html`<p class="package__more"><a href="/pricing/compare">See everything in ${p.name}</a></p>` : ""}
 <div class="package__actions">${ctaLink(`Choose ${p.name}`, `/checkout/${id}`, featured ? "primary" : "secondary")}${id === "premium" ? html` <a class="btn btn--ghost" href="/quote?package=premium">Discuss a larger scope</a>` : ""}</div>
 </article>`;
   })}</div>`;
@@ -435,20 +438,35 @@ ${section("Policies", "Before you buy", html`<ul class="plain-list"><li>Every re
   }));
 
   r.get("/pricing/compare", (ctx) => page(ctx, "compare", ["pricing.presentation"], () => {
-    const covered = /^(up to \d+ pages|\d+ revision rounds)/i;
-    const featureRows = [...new Set(PKG_ORDER.flatMap((id) => PACKAGES[id].includes.filter((i) => !covered.test(i))))];
-    const cell = (ok: boolean) => ok ? html`<span class="tick" aria-label="Included">✓</span>` : html`<span class="faint" aria-label="Not included">—</span>`;
-    return html`${pageHero("Pricing", "Compare packages", "Every row below comes from the same server-side catalogue that checkout uses.")}
-<section class="section section--flush"><div class="container"><div class="table-wrap"><table class="table compare"><caption class="visually-hidden">Package comparison</caption>
-<thead><tr><th scope="col">Feature</th>${PKG_ORDER.map((id) => html`<th scope="col">${PACKAGES[id].name}</th>`)}</tr></thead><tbody>
-<tr><th scope="row">Price</th>${PKG_ORDER.map((id) => html`<td><strong>${pkgPrice(id)}</strong></td>`)}</tr>
-<tr><th scope="row">Payment</th>${PKG_ORDER.map(() => html`<td>100% upfront</td>`)}</tr>
-<tr><th scope="row">Pages</th>${PKG_ORDER.map((id) => html`<td>Up to ${PACKAGES[id].pageLimit}${id === "premium" ? " within approved scope" : ""}</td>`)}</tr>
-<tr><th scope="row">Revision rounds</th>${PKG_ORDER.map((id) => html`<td>${PACKAGES[id].revisionRounds}</td>`)}</tr>
-${featureRows.map((feat) => html`<tr><th scope="row">${feat}</th>${PKG_ORDER.map((id) => html`<td>${cell(PACKAGES[id].includes.includes(feat))}</td>`)}</tr>`)}
-<tr><th scope="row"><span class="visually-hidden">Choose</span></th>${PKG_ORDER.map((id) => html`<td>${linkButton(`Choose ${PACKAGES[id].name}`, `/checkout/${id}`, "secondary", "sm")}</td>`)}</tr>
-</tbody></table></div>
-<p class="muted">A dash means the item is not listed for that package; packages differ in scope as well as features. Need more than Premium? <a href="/quote?package=custom">Request a custom quote</a>.</p></div></section>`;
+    // One row per capability from the catalogue's structured feature model (the same data behind checkout, contract scope,
+    // proposals and build briefs). Packages are cumulative, so a higher tier never shows a dash where a lower tier is included.
+    const top = (fid: string) => PACKAGE_FEATURES.find((f) => f.id === fid)!;
+    const uniform = (f: (typeof PACKAGE_FEATURES)[number]) => new Set(PKG_ORDER.map((id) => f.levels[id]).filter(Boolean)).size === 1;
+    const cell = (f: (typeof PACKAGE_FEATURES)[number], id: PackageId) => {
+      const v = f.levels[id];
+      if (!v) return html`<td class="compare__no"><span aria-hidden="true">—</span><span class="visually-hidden">Not included in ${PACKAGES[id].name}</span></td>`;
+      if (uniform(f)) return html`<td class="compare__yes"><span class="compare__tick" aria-hidden="true"></span><span class="visually-hidden">Included in ${PACKAGES[id].name}</span></td>`;
+      return html`<td class="compare__scope"><span class="compare__tick compare__tick--sm" aria-hidden="true"></span><span class="visually-hidden">Included in ${PACKAGES[id].name}: </span>${v}</td>`;
+    };
+    const groups: [string, string[]][] = [
+      ["Scope", ["pages", "revisions"]],
+      ["Design and content", ["responsive", "design", "layouts", "content", "copy", "imagery"]],
+      ["Functionality", ["forms", "integrations"]],
+      ["Search, measurement and speed", ["seo", "analytics", "performance"]],
+      ["Delivery", ["approval", "launch"]],
+    ];
+    const head = html`<thead><tr><th scope="col" class="compare__corner"><span class="visually-hidden">Capability</span></th>${PKG_ORDER.map((id) => html`<th scope="col" class="compare__pkg${id === "premium" ? " compare__pkg--premium" : ""}">${id === "premium" ? html`<span class="compare__badge">Most complete</span>` : ""}<span class="compare__name">${PACKAGES[id].name}</span><span class="compare__price">${pkgPrice(id)}</span></th>`)}</tr></thead>`;
+    return html`${pageHero("Pricing", "Compare packages", "Each package includes everything in the one before it, at the same or a larger scope. Every row comes from the same server-side catalogue that checkout and your written scope use.")}
+<section class="section section--flush"><div class="container"><div class="compare-wrap"><table class="table compare" data-compare><caption class="visually-hidden">Website package comparison. Each package includes everything in the package before it.</caption>
+${head}
+${groups.map(([g, ids]) => html`<tbody><tr class="compare__group"><th scope="rowgroup" colspan="4">${g}</th></tr>
+${ids.map((fid) => { const f = top(fid); return html`<tr><th scope="row"><span class="compare__label">${f.label}</span><button type="button" class="toggletip" aria-expanded="false" aria-controls="tip-${f.id}"><span class="visually-hidden">About ${f.label}</span><span aria-hidden="true">i</span></button><span class="toggletip__text" id="tip-${f.id}" role="note">${f.note}</span></th>${PKG_ORDER.map((id) => cell(f, id))}</tr>`; })}</tbody>`)}
+<tbody><tr class="compare__group"><th scope="rowgroup" colspan="4">Payment</th></tr>
+<tr><th scope="row"><span class="compare__label">Price</span></th>${PKG_ORDER.map((id) => html`<td class="compare__scope"><strong>${pkgPrice(id)}</strong>${PACKAGES[id].priceIsFloor ? html`<span class="compare__sub">final price in your written scope</span>` : ""}</td>`)}</tr>
+<tr><th scope="row"><span class="compare__label">Payment</span></th>${PKG_ORDER.map(() => html`<td class="compare__scope">100% upfront</td>`)}</tr>
+<tr class="compare__actions"><th scope="row"><span class="visually-hidden">Choose a package</span></th>${PKG_ORDER.map((id) => html`<td>${linkButton(`Choose ${PACKAGES[id].name}`, `/checkout/${id}`, id === "premium" ? "primary" : "secondary", "sm")}</td>`)}</tr></tbody>
+</table></div>
+<p class="muted compare__foot">A gold check means the item is included at the same scope in that package; where the scope grows, the package's own wording is shown. Need more than Premium? <a href="/quote?package=custom">Request a custom quote</a>.</p></div></section>`;
   }));
 
   r.get("/portfolio", (ctx) => page(ctx, "portfolio", ["portfolio.intro"], async (c) => {

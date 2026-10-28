@@ -690,11 +690,66 @@ details.card[open] > summary { margin-bottom: var(--s-4); }
 .package:hover { border-color: var(--line-2); }
 .card > .price + p, .card > .price + .checklist { margin-top: var(--s-3); }
 .grid + p.muted, .grid + .muted { margin-top: var(--s-6); }
-.compare th, .compare td { text-align: center; }
-.compare td:first-child, .compare th:first-child { text-align: left; }
-.compare .tick { color: var(--gold-1); font-weight: 600; }
-.compare th[scope="row"] { font-weight: 400; color: var(--text-2); position: static; background: transparent; white-space: normal; font-size: var(--fs-sm); }
-.compare thead th { font-size: var(--fs-sm); color: var(--white); }
+.package__inherits { margin: var(--s-3) 0 var(--s-2); color: var(--gold-1); font-size: var(--fs-sm); font-weight: 500; }
+.package__more { margin: 0 0 var(--s-2); font-size: var(--fs-sm); }
+.package__more a { color: var(--text-2); }
+.package__more a:hover { color: var(--gold-1); }
+
+/* Package comparison — cumulative packages, one row per capability (catalog PACKAGE_FEATURES). No overflow container, so the
+   package headings stay pinned beneath the site header while the rows scroll past. */
+.compare-wrap { border: 1px solid var(--line); border-radius: var(--r-3); background: var(--ink-2); }
+table.compare { table-layout: fixed; }
+.compare col, .compare th, .compare td { box-sizing: border-box; }
+.compare thead th { position: sticky; top: var(--header-h); z-index: 3; background: var(--ink-2); border-bottom: 1px solid var(--line-2); padding: var(--s-5) var(--s-4) var(--s-4); white-space: normal; vertical-align: bottom; text-align: center; }
+.compare thead th:first-child { border-top-left-radius: var(--r-3); }
+.compare thead th:last-child { border-top-right-radius: var(--r-3); }
+.compare__corner { width: 34%; }
+.compare__name { display: block; color: var(--white); font-family: var(--font-display); font-size: var(--fs-lg); font-weight: 600; letter-spacing: -.01em; }
+.compare__price { display: block; margin-top: 2px; color: var(--text-2); font-size: var(--fs-sm); font-weight: 500; font-variant-numeric: tabular-nums; }
+.compare__badge { display: inline-block; margin-bottom: var(--s-2); padding: .15em .6em; border-radius: 999px; background: var(--gold-2); color: var(--on-gold); font-size: var(--fs-xs); font-weight: 600; letter-spacing: .02em; }
+/* Premium: a quiet gold column from heading to the final button */
+.compare thead .compare__pkg--premium { background: linear-gradient(180deg, rgba(215,181,111,.16), var(--ink-2) 85%); box-shadow: inset 1px 0 0 var(--line-gold), inset -1px 0 0 var(--line-gold), inset 0 2px 0 var(--gold-2); }
+.compare thead .compare__pkg--premium .compare__name { color: var(--gold-pale); }
+.compare tbody td:last-child { background: rgba(215,181,111,.045); box-shadow: inset 1px 0 0 var(--line-gold), inset -1px 0 0 var(--line-gold); }
+.compare tbody:last-of-type tr:last-child td:last-child { box-shadow: inset 1px 0 0 var(--line-gold), inset -1px 0 0 var(--line-gold), inset 0 -1px 0 var(--line-gold); }
+.compare th[scope="row"] { position: relative; text-align: left; font-weight: 400; color: var(--text); background: transparent; white-space: normal; font-size: var(--fs-sm); padding: var(--s-3) var(--s-4); vertical-align: middle; z-index: auto; }
+.compare td { text-align: center; vertical-align: middle; padding: var(--s-3) var(--s-3); }
+.compare tbody tr:not(.compare__group):not(.compare__actions):hover { background: rgba(255,255,255,.025); }
+.compare tbody tr:not(.compare__group):hover th[scope="row"] .compare__label { color: var(--white); }
+.compare__group th { position: static; padding: var(--s-5) var(--s-4) var(--s-2); background: transparent; color: var(--gold-1); font-size: var(--fs-xs); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; border-bottom: 1px solid var(--line); text-align: left; z-index: auto; }
+.compare__tick { display: inline-block; width: 22px; height: 22px; border-radius: 50%; background: var(--gold-wash); box-shadow: inset 0 0 0 1px var(--gold-3); vertical-align: middle; position: relative; }
+.compare__tick::after { content: ""; position: absolute; left: 7.5px; top: 4px; width: 5px; height: 10px; border: solid var(--gold-1); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.compare__tick--sm { width: 16px; height: 16px; margin: 0 .45em .15em 0; flex: none; }
+.compare__tick--sm::after { left: 5.5px; top: 2.5px; width: 4px; height: 8px; }
+.compare__scope { color: var(--text); font-size: var(--fs-sm); line-height: 1.4; }
+.compare__no { color: var(--text-3); }
+.compare__sub { display: block; color: var(--text-3); font-size: var(--fs-xs); font-weight: 400; margin-top: 2px; }
+.compare__actions td { padding: var(--s-4) var(--s-3) var(--s-5); }
+.compare__actions .btn { width: 100%; justify-content: center; }
+.compare__foot { margin-top: var(--s-5); max-width: 70ch; }
+/* Toggletip: explanation text is in the page (visible without JavaScript); with JS it opens on click/Enter and closes with Escape. */
+.toggletip { display: none; }
+.has-toggletips .toggletip { display: inline-grid; place-items: center; width: 22px; height: 22px; margin-left: .45em; padding: 0; vertical-align: middle; border-radius: 50%; border: 1px solid var(--line-control); background: transparent; color: var(--text-2); font: 600 11px/1 var(--font-body); font-style: italic; cursor: pointer; position: relative; }
+.has-toggletips .toggletip::before { content: ""; position: absolute; inset: -11px; }
+.has-toggletips .toggletip:hover, .has-toggletips .toggletip[aria-expanded="true"] { border-color: var(--gold-2); color: var(--gold-1); }
+.toggletip__text { display: block; margin-top: 4px; color: var(--text-3); font-size: var(--fs-xs); line-height: 1.45; }
+.has-toggletips .toggletip__text { display: none; position: absolute; left: var(--s-4); top: calc(100% - 6px); z-index: 5; width: min(320px, 80vw); margin: 0; padding: var(--s-3); border: 1px solid var(--line-gold); border-radius: var(--r-1); background: var(--ink-3); color: var(--text); box-shadow: 0 18px 36px -12px rgba(0,0,0,.85); }
+.has-toggletips .toggletip[aria-expanded="true"] + .toggletip__text { display: block; animation: sv-in 200ms var(--ease-out); }
+@media (max-width: 760px) {
+  .compare__corner { width: 31%; }
+  .compare thead th { padding: var(--s-4) 4px var(--s-3); }
+  .compare__name { font-size: var(--fs-md); }
+  .compare__price { font-size: var(--fs-xs); }
+  .compare__badge { font-size: 10px; padding: .1em .45em; }
+  .compare th[scope="row"] { padding: var(--s-3) 6px var(--s-3) var(--s-3); font-size: var(--fs-xs); }
+  .compare td { padding: var(--s-3) 4px; }
+  .compare__scope { font-size: 11.5px; line-height: 1.35; overflow-wrap: break-word; hyphens: auto; }
+  .compare__tick--sm { display: none; }
+  .compare__group th { padding: var(--s-4) var(--s-3) var(--s-2); }
+  .compare__actions .btn { padding-left: 4px; padding-right: 4px; font-size: var(--fs-xs); white-space: normal; min-height: 44px; }
+  .compare__actions td { padding: var(--s-3) 3px var(--s-4); }
+  .has-toggletips .toggletip__text { left: var(--s-3); width: min(300px, 86vw); }
+}
 
 /* Portfolio */
 .shot { border: 1px solid var(--line); border-radius: var(--r-3); overflow: hidden; background: var(--ink-1); }
