@@ -4,7 +4,7 @@ import { Router } from "../lib/router.ts";
 import { HttpError, assertCsrf, cookie, htmlResponse, isSecure, jsonResponse, parseCookies, redirect } from "./http.ts";
 import { randomToken } from "../lib/auth-crypto.ts";
 import { loadSession } from "../services/auth.ts";
-import { OutboxEmail, ResendEmail } from "../adapters/email.ts";
+import { OutboxEmail, ResendEmail, recipientPolicy } from "../adapters/email.ts";
 import { R2Storage, type R2BucketLike } from "../adapters/storage.ts";
 import { NoPayments, StripeTestPayments } from "../adapters/payments.ts";
 import { ValidationError } from "../lib/validate.ts";
@@ -31,7 +31,7 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
   const ctx: AppContext = {
     req, url, env, db: env.DB,
     email: env.overrides?.email ?? (env.RESEND_API_KEY && env.ENVIRONMENT !== "development"
-      ? new ResendEmail(env.DB, env.RESEND_API_KEY, env.EMAIL_FROM ?? "Crestmont <support@crestmontwebsitedevelopment.com>")
+      ? new ResendEmail(env.DB, env.RESEND_API_KEY, env.EMAIL_FROM ?? "Crestmont <support@crestmontwebsitedevelopment.com>", undefined, recipientPolicy(env))
       : new OutboxEmail(env.DB)),
     storage: env.overrides?.storage !== undefined ? env.overrides.storage : env.FILES ? new R2Storage(env.FILES as R2BucketLike) : null,
     payments: env.overrides?.payments ?? (env.STRIPE_SECRET_KEY ? new StripeTestPayments(env.STRIPE_SECRET_KEY) : new NoPayments()),
