@@ -200,6 +200,26 @@ are reference guides the agent reads, not Claude skills. Required ones still fai
   even `http://` URLs with CONNECT, so the proxy allows CONNECT to `host.docker.internal`/`ollama` on port 11434 from
   the runner network only. Without that rule every model call was denied (found with a real Squid locally).
 
+## Founder decision D4: native Windows Ollama (2026-10-28)
+
+Approved as the preferred inference architecture, **subject to hardware validation (not done yet)**. What the kit
+enforces and what is still to be measured on the machine:
+
+| Requirement | How |
+| --- | --- |
+| Docker sandbox kept for untrusted code | Every build command runs in a per-build container with `--network none`, read-only root, all capabilities dropped, uid 10001, CPU/memory/PID limits (`runner/src/sandbox.ts`) |
+| Inference separate from the untrusted container | Ollama runs natively on the Windows host; the sandbox has no network at all and no route to it |
+| Only an authorized endpoint through a controlled gateway | Only the runner container reaches `host.docker.internal:11434`, and only through the Squid egress proxy's allow-list; install containers are refused the model host (`runner/test/egress-compose.test.ts`) |
+| Ollama never exposed | `OLLAMA_HOST=127.0.0.1:11434`; the installer stops if Ollama listens on any other address; compose publishes no ports |
+| Model availability, GPU, memory | Installer: `Discover-Hardware.ps1` + `select-model.ts` (VRAM/RAM → model and context); runtime: the runner probes `/v1/models` every 5 minutes and reads `/api/ps` for GPU residency; `Get-RunnerHealth.ps1` prints both and warns when part of the model runs on the CPU |
+| Health check | Runner `/health` (`modelReachable`, `modelGpuShare`, last model error), no claims while the model server is down |
+| Swappable provider | The runner speaks the OpenAI-compatible API (`LOCAL_MODEL_BASE_URL`); `/api/ps` is optional and ignored for other servers |
+| No install without authorized access | Nothing is installed remotely; the Founder runs the installer |
+
+Hardware validation (Founder): install, then `ollama ps` (expect `100% GPU`), `Get-RunnerHealth.ps1` (expect model
+reachable, GPU residency 100%), then the first build of `LOCAL-VALIDATION.md`. Until then, native Ollama on this
+machine is **untested**.
+
 ## Isolation details
 
 | Control | Where |

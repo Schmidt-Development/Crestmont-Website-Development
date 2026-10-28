@@ -26,6 +26,7 @@ export function customerPostFields(w: World, t: Tenant): Record<string, () => Fi
     "POST /portal/messages/general": () => ({ body: `${t.marker} another general message` }),
     "POST /portal/projects/:id/messages": () => ({ body: `${t.marker} another project message` }),
     "POST /portal/projects/:id/revisions": () => ({ request: `${t.marker} please adjust the footer spacing` }),
+    "POST /portal/projects/:id/previews/:buildId/review": () => ({ decision: "changes_requested", note: `${t.marker} please use the new logo` }),
     "POST /portal/change-orders/:id/decide": () => ({ decision: "approved", notes: "ok" }),
     "POST /portal/projects/:id/approvals": () => ({ kind: "scope", decision: "approved", notes: "Looks right" }),
     "POST /portal/team": () => ({ email: `invitee-${Math.random().toString(16).slice(2, 8)}@${t.marker.toLowerCase()}.example` }),

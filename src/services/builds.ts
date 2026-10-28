@@ -1158,10 +1158,11 @@ export async function customerPreviewLink(db: Db, secret: string | undefined, u:
 
 /** Customer review of a shared preview (step 4 of the delivery workflow). Account administrators only. */
 export async function customerReviewPreview(c: { db: Db; mail?: MailCtx }, u: { organizationId: string; userId: string }, projectId: string, buildId: string, decision: string, note: string) {
+  // Tenant scope first: another organization's ids are 404 whatever the form says.
+  const j = await customerJob(c.db, u.organizationId, projectId, buildId);
   if (decision !== "approved" && decision !== "changes_requested") throw new HttpError(422, "Choose whether the preview is ready or needs changes.");
   const text = note.trim().slice(0, 2000);
   if (decision === "changes_requested" && text.length < 3) throw new HttpError(422, "Describe what should change.");
-  const j = await customerJob(c.db, u.organizationId, projectId, buildId);
   if (j.preview_deleted_at || !j.preview_gated) throw new HttpError(409, "This preview is not available any more.");
   await c.db.prepare(`UPDATE build_jobs SET customer_review = ?, customer_reviewed_by = ?, customer_reviewed_at = ?, customer_review_note = ?, updated_at = ? WHERE id = ?`)
     .bind(decision, u.userId, nowIso(), text || null, nowIso(), j.id).run();

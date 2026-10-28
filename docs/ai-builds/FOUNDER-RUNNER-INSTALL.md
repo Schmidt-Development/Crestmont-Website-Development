@@ -19,9 +19,9 @@ not declare zero token cost unless `BUILD_ALLOW_PAID_PROVIDER=true` is set on th
 | How Ollama runs | Native Windows app (default), or `-OllamaInDocker` (NVIDIA only, needs the WSL 2 backend) | Native is simpler. The Docker option keeps the model server inside the compose stack. |
 | Unattended reboots | Logon task (default), auto-logon, or NSSM service | The default task only starts at **your** logon (`WINDOWS-SUPERCOMPUTER.md` § Operations). |
 | Project repositories | None (commits stay in the runner and its checkpoints), or a dedicated GitHub org + fine-grained token | Without a repository, the revision drill needs the checkpoint bundle for the diff. |
-| Previews | None (builds cannot be approved), or a separate Cloudflare preview account (`PREVIEW-DEPLOYMENT.md`) | Approval needs a preview. Decide who may open previews (Cloudflare Access recommended) and how long they are kept. |
-| Customer revision policy | Owner → AI builds → Customer revision requests: `off`, `owner_approval` (default), `auto` | Whether a customer's revision request reaches the AI builder automatically, after you forward it, or never. Entitlement (included rounds, change orders) is the existing rule either way. |
-| Preview retention | Owner → AI builds → "Delete superseded or finished previews after (days)" (empty by default) | Empty keeps every preview until you delete it. |
+| Previews | None (builds cannot be approved), or a separate Cloudflare preview account (`PREVIEW-DEPLOYMENT.md`) | Approval needs a preview. Decided (D3): previews are private behind the platform's gate; set the preview gate secret. |
+| Customer revision policy | Decided (D1): `owner_approval` (default) | Each request waits for you to approve or reject it. |
+| Preview retention | Decided (D2): 30 days after final approval (default setting) | `PREVIEW-DEPLOYMENT.md` §3. |
 | Model | The installer's recommendation (from detected VRAM/RAM), or `-Model <tag>` | `-Model` overrides only the model choice; driver, disk, WSL and Docker blockers still stop the install. |
 
 ## B. Prepare
@@ -97,7 +97,29 @@ Only a completed checklist counts as a passed first real build.
 ## F. What is still open before production (not needed for the first test build)
 
 - The first real build itself (this page, then `LOCAL-VALIDATION.md`).
-- Production deployment of generated sites: approval records a decision only and no production publish path exists.
-  Intentional until you decide the delivery process.
+- Customer production delivery (D5): the framework exists (`DELIVERY.md`); the customer-hosting account and the
+  runner's `PRODUCTION_DEPLOY_COMMAND` are not set up, so nothing can be published yet.
 - Whether AI revisions should be charged differently from staff-delivered rounds: today the existing allowance and
   change-order rules decide entitlement; the AI builder adds no pricing.
+
+## G. Who does what (Founder decisions of 2026-10-28)
+
+**A. Engineering Claude finishes in the repository (done on PR #16, CI-tested):** D1 revision approval queue; D2
+retention policy and scheduled cleanup; D3 private-preview gate and signed sign-in links; D4 native-Ollama health
+(model availability, GPU residency) and isolation invariants; D5 delivery framework (targets, versions, Owner
+authorization with MFA step-up, runner deploy + verification, rollback, audit); docs below.
+
+**B. Configuration Claude can do with access it already has:** none at the moment. The staging Worker is frozen for
+the credential-exposure remediation, and Claude has no access to the build machine or to Cloudflare accounts.
+
+**C. Founder-only actions, in order:**
+
+| # | Action | Where |
+| --- | --- | --- |
+| 1 | Finish the staging credential remediation; then merge PR #16 when you choose | GitHub |
+| 2 | Provision staging D1 (`wrangler d1 create`, put the id in `wrangler.toml`, apply migrations up to 0042) | `RUNNER-SETUP.md` §2 |
+| 3 | Generate and set `BUILD_RUNNER_SECRET` on the staging Worker | §B2 above |
+| 4 | Install native Ollama and the runner kit on the Windows machine; confirm `ollama ps` shows `100% GPU` and `Get-RunnerHealth.ps1` reports GPU residency 100% | §C above, `WINDOWS-SUPERCOMPUTER.md` |
+| 5 | Create the preview Cloudflare account and token; generate the preview gate secret; set it as `BUILD_PREVIEW_GATE_SECRET` (Worker) and `secrets\preview_gate_secret` (runner) | `PREVIEW-DEPLOYMENT.md` §4 |
+| 6 | Run the first real build with the fictional intake and tick the proof checklist | `LOCAL-VALIDATION.md` |
+| 7 | Later, for the first real customer: customer-hosting Cloudflare account, token, `PRODUCTION_DEPLOY_*` settings, a fictional release drill | `DELIVERY.md` §5 |

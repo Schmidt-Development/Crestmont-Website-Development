@@ -21,6 +21,12 @@ export interface HealthState {
   /** Model server reachability (local provider): null until the first probe. */
   modelReachable: boolean | null;
   modelCheckedAt: string | null;
+  /**
+   * Founder decision D4 (native Windows Ollama): share of the loaded model held in GPU memory, from Ollama's
+   * GET /api/ps (size_vram / size). 1 = fully on the GPU; < 1 = partly on the CPU (slow); null = not loaded yet or
+   * the model server is not Ollama (another OpenAI-compatible provider).
+   */
+  modelGpuShare: number | null;
   /** Last model-server problem seen by a probe, a build phase or a draft (with its time). Cleared by nothing: history. */
   lastModelError: string | null;
   lastModelErrorAt: string | null;
@@ -36,7 +42,7 @@ export interface HealthState {
 export function newHealthState(fields: Pick<HealthState, "runnerId" | "version" | "provider" | "model">): HealthState {
   return {
     ...fields, startedAt: new Date().toISOString(), currentJob: null, currentDraft: null, lastClaimAt: null, lastClaimOk: null,
-    lastClaimError: null, modelReachable: null, modelCheckedAt: null, lastModelError: null, lastModelErrorAt: null,
+    lastClaimError: null, modelReachable: null, modelCheckedAt: null, modelGpuShare: null, lastModelError: null, lastModelErrorAt: null,
     lastJobOutcome: null, lastJobError: null, lastJobAt: null, lastDraftError: null, jobsRun: 0, draftsServed: 0, stopping: false,
   };
 }
@@ -87,4 +93,19 @@ export function startHealthServer(state: HealthState, host: string, port: number
     server.once("error", reject);
     server.listen(port, host, () => resolve(server));
   });
+}
+
+/**
+ * Ollama-only: how much of `model` is resident in GPU memory (GET <origin>/api/ps). Returns null when the model is not
+ * loaded or the server has no /api/ps (another provider): the check is advisory and never blocks a build.
+ */
+export async function ollamaGpuShare(baseUrl: string, model: string, fetchImpl: typeof fetch = fetch): Promise<number | null> {
+  try {
+    const res = await fetchImpl(new URL("/api/ps", baseUrl).href, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return null;
+    const body = await res.json() as { models?: { name?: string; model?: string; size?: number; size_vram?: number }[] };
+    const m = (body.models ?? []).find((x) => [x.name, x.model].some((n) => n === model || n === `${model}:latest`));
+    if (!m || typeof m.size !== "number" || m.size <= 0 || typeof m.size_vram !== "number") return null;
+    return Math.max(0, Math.min(1, Math.round((m.size_vram / m.size) * 1000) / 1000));
+  } catch { return null; }
 }

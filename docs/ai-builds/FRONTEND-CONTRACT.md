@@ -70,3 +70,21 @@ missingInformation[], instruction, kind, revision, agentSessionId, checkpointAva
 
 `GET /portal/projects/:id/build-status` (customer session, own organization only) → `{ "status": "In progress" | "Scheduled" | … | null, "updatedAt": "…" | null }`.
 Wording from `BUILD_STATE_CUSTOMER`. Never show prompts, logs, costs, previews in progress or other customers' data.
+
+## Founder decisions of 2026-10-28 (server-rendered; same endpoints for any redesign)
+
+| Endpoint | Permission | Purpose |
+|---|---|---|
+| `POST /staff/builds/customer-revisions/:id/forward` | builds.manage | D1: approve a customer request (queues one AI build) |
+| `POST /staff/builds/customer-revisions/:id/reject` (`reason`) | builds.manage | D1: reject (no build; customer told why) |
+| `POST /staff/builds/:id/preview-retention` (`action`: preserve / release / extend) | builds.manage | D2 |
+| `GET /staff/builds/:id/preview` | builds.read | D3: 303 to a 5-minute signed sign-in link (never show raw preview URLs) |
+| `POST /staff/builds/:id/share-preview` (`action`: share / unshare) | builds.manage | D3 |
+| `GET /portal/projects/:id/previews/:buildId` | customer of the project | D3: sign-in link for a shared preview |
+| `POST /portal/projects/:id/previews/:buildId/review` (`decision`, `note`) | customer_admin | D3/D5 step 4 |
+| `GET /staff/builds/projects/:id/delivery` | builds.read | D5 page |
+| `POST /staff/builds/projects/:id/site-target` · `.../site-domain` (`hostname`, `confirm`; MFA step-up) | builds.configure (Owner) | D5 |
+| `POST /staff/builds/:id/prepare-release` (`customer_review_na`) | builds.configure | D5 step 6 |
+| `POST /staff/builds/releases/:id/authorize` (`confirm` = Worker name, `note`; MFA step-up) · `/cancel` (`reason`) · `/rollback` | builds.configure | D5 steps 7 and rollback |
+
+`BuildSummary` adds `previewRetention { status, deleteAfter, note }` and `preview { gated, sharedWithCustomer, customerReview }`.

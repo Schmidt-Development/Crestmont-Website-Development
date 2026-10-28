@@ -22,7 +22,7 @@ import type { QueryFn } from "./providers/claude-agent-sdk.ts";
 import { assertProviderAllowed, createProvider } from "./providers/index.ts";
 import { draftsServer, serveOneDraft } from "./drafts.ts";
 import type { DraftOutcome } from "./drafts.ts";
-import { newHealthState, startHealthServer, recordModelProbe, recordModelError, healthText } from "./health.ts";
+import { newHealthState, startHealthServer, recordModelProbe, recordModelError, healthText, ollamaGpuShare } from "./health.ts";
 import { OpenAICompatClient } from "./providers/openai-client.ts";
 import type { HealthState } from "./health.ts";
 import { RUNNER_VERSION } from "./protocol.ts";
@@ -54,18 +54,19 @@ export interface LoopDeps {
    * unreachable Ollama does not burn build attempts; it is re-checked every loop until it answers, then every
    * `intervalMs`.
    */
-  modelProbe?: { check: () => Promise<{ ok: boolean; error?: string }>; intervalMs?: number } | null;
+  modelProbe?: { check: () => Promise<{ ok: boolean; error?: string; gpuShare?: number | null }>; intervalMs?: number } | null;
 }
 
 /** Probe: the model server answers GET /models and lists the configured model. No generation, no tokens. */
-export function localModelProbe(cfg: RunnerConfig, fetchImpl?: typeof fetch): () => Promise<{ ok: boolean; error?: string }> {
+export function localModelProbe(cfg: RunnerConfig, fetchImpl?: typeof fetch): () => Promise<{ ok: boolean; error?: string; gpuShare?: number | null }> {
   const client = new OpenAICompatClient({ baseUrl: cfg.local.baseUrl, apiKey: cfg.local.apiKey, timeoutMs: 15_000, retries: 0, fetchImpl });
   return async () => {
     try {
       const ids = await client.models(AbortSignal.timeout(15_000));
       const m = cfg.local.model;
       if (!ids.some((id) => id === m || id === `${m}:latest`)) return { ok: false, error: `model ${m} is not available on the model server (pull it)` };
-      return { ok: true };
+      // Founder decision D4: report GPU residency (Ollama only; advisory, never blocks).
+      return { ok: true, gpuShare: await ollamaGpuShare(cfg.local.baseUrl, m, fetchImpl) };
     } catch (err) {
       return { ok: false, error: `model server not reachable: ${errorMessage(err)}` };
     }
@@ -111,7 +112,13 @@ export async function runLoop(d: LoopDeps): Promise<number> {
     if (d.modelProbe && (!modelOk || Date.now() - lastProbeAt >= (d.modelProbe.intervalMs ?? 300_000))) {
       const p = await d.modelProbe.check();
       lastProbeAt = Date.now();
-      if (d.health) recordModelProbe(d.health, p.ok, p.error);
+      if (d.health) {
+        recordModelProbe(d.health, p.ok, p.error);
+        if (p.gpuShare !== undefined) {
+          if (p.gpuShare !== null && p.gpuShare < 1 && d.health.modelGpuShare !== p.gpuShare) d.logger.warn("the model is only partly in GPU memory; builds will be slow (choose a smaller model or context)", { gpuShare: p.gpuShare });
+          d.health.modelGpuShare = p.gpuShare;
+        }
+      }
       if (!p.ok && modelOk) d.logger.warn("model server not ready; not claiming builds or drafts until it answers", { error: healthText(p.error) });
       if (p.ok && !modelOk) d.logger.info("model server reachable again; claiming resumes");
       modelOk = p.ok;

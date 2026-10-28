@@ -84,7 +84,8 @@ test("[AUTH-008] customer A gets 403/404 on every customer route addressed with 
   const served: string[] = [];
   for (const r of all.filter((x) => x.method === "GET" && covered.includes(x.key))) {
     const res = await w.b.admin.c.get(pathFor(w, r, w.b));
-    if (res.status !== 200) served.push(`${r.key} → ${res.status}`);
+    const ok = r.spec.offsite ? res.status === 303 && /^https:\/\//.test(res.headers.get("location") ?? "") : res.status === 200;
+    if (!ok) served.push(`${r.key} → ${res.status}`);
   }
   assert.deepEqual(served, []);
 });
@@ -97,6 +98,8 @@ test("[AUTH-008] every customer page, list and data export served to A (also wit
       for (const suffix of ["", `${r.spec.query ? "&" : "?"}org=${w.b.orgId}`]) {
         const path = pathFor(w, r, w.a) + suffix;
         const res = await who.c.get(path);
+        // Off-site routes (a signed preview sign-in link) answer 303 to the preview, never a page with records.
+        if (r.spec.offsite) { if (res.status !== 303 || !/^https:\/\//.test(res.headers.get("location") ?? "")) problems.push(`${r.key} ${path} → ${res.status}`); continue; }
         if (res.status !== 200) { problems.push(`${r.key} ${path} → ${res.status}`); continue; }
         const leaks = leakedFrom(await res.text(), w.b);
         if (leaks.length) problems.push(`${r.key} ${path} leaked ${leaks.join(", ")}`);

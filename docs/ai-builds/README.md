@@ -38,20 +38,22 @@ selected projects. Staging sample data is excluded the same way.
 ## Operations (Owner → AI builds)
 - Pause all automation or one project; cancel; retry; resume a saved session; submit a revision; approve a preview.
 - Limits: per-run and per-project (cumulative, revisions included) spending, runtime, turns, concurrency, attempts, model.
-- Approving a preview records the decision only. Nothing here publishes to production, changes domains, charges customers,
-  emails customers or migrates production databases.
+- Approving a preview records the decision only. Publishing a customer site is the separate, Owner-authorized
+  release workflow of `DELIVERY.md`; nothing here changes Crestmont's own production, charges customers or migrates
+  production databases.
 
-## Customer revisions and previews (2026-10-28)
-- A customer's revision request (portal → Revisions; the existing allowance and change-order rules decide whether a
-  round may be worked on) reaches the AI builder according to the Owner's policy: `off`, `owner_approval` (default:
-  the request waits in Owner → AI builds until an owner forwards it, optionally editing the instruction) or `auto`.
-  One live AI build per request; a failed one can be sent again. Approving the AI result never delivers it: staff
-  deliver the round from the project's Revisions tab, which notifies the customer.
-- Each build gets its own preview Worker on a separate preview account; previews are deleted on owner request or
-  after an optional retention period, by the runner. Setup: `PREVIEW-DEPLOYMENT.md`.
+## Founder decisions (2026-10-28)
+| # | Decision | Implementation |
+| --- | --- | --- |
+| D1 | Owner approval of customer revisions | Requests wait in Owner → AI builds; *Approve and start AI build* queues one build (existing queue, no duplicate jobs); *Reject* (reason sent to the customer) starts nothing and does not use a round. Identical resubmissions are not new rounds; failed/canceled builds stay eligible. Tenant-scoped, audited; the portal shows Awaiting review / In progress / Not accepted. Automatic mode exists but is off by default. |
+| D2 | Preview retention: 30 days after final approval | `PREVIEW-DEPLOYMENT.md` §3: in-progress and in-review previews never expire; the approved one is kept until its production deployment is verified; never the only recoverable copy; dates shown; preserve/extend; scheduled, audited, retried. |
+| D3 | Private previews with authentication | `PREVIEW-DEPLOYMENT.md` §2a: runner-generated gate + platform-signed 5-minute links (staff, or the project's own customer for a shared preview). $0; Cloudflare Access not needed. |
+| D4 | Native Windows Ollama | `WINDOWS-SUPERCOMPUTER.md` "Founder decision D4": inference on the host (localhost only), sandbox without network, runner reaches the model through the egress gateway; model + GPU residency health check. **Not yet validated on the Founder's hardware.** |
+| D5 | Owner-controlled customer production delivery | `DELIVERY.md`: prepare → explicit Owner authorization (MFA step-up) → runner deploy to `cm-site-<project>` → verification → versions, rollback, audit. Framework only; nothing deployed. |
 
 ## Contracts
 - Runner protocol: `RUNNER-PROTOCOL.md` · Frontend: `FRONTEND-CONTRACT.md` · Runner setup: `RUNNER-SETUP.md` · Starters: `STARTERS.md`.
 - Windows build machine (local model, default): `WINDOWS-SUPERCOMPUTER.md` · Validation plan: `LOCAL-VALIDATION.md`.
 - Founder order of work for the first real build (decisions, install, known installer issues): `FOUNDER-RUNNER-INSTALL.md`.
-- Preview account, lifecycle and secret inventory: `PREVIEW-DEPLOYMENT.md`.
+- Preview account, private access, lifecycle and secret inventory: `PREVIEW-DEPLOYMENT.md`.
+- Customer production delivery: `DELIVERY.md`.

@@ -133,6 +133,17 @@ untrusted user content, both sent exactly as given. It finishes inside the lease
   `previews/claim` (an older platform) disables polling until restart.
 - Claim capability `"preview-cleanup"` is announced when deletion is configured.
 
+## Private previews and customer delivery (v1.4, 2026-10-28; additive)
+- `complete` may include `previewGated: true` when the preview was deployed behind the private-preview gate
+  (Founder decision D3, `PREVIEW-DEPLOYMENT.md` §2a). Only gated previews can be opened by customers; previews
+  reported without it are shown as public legacy previews.
+- Capabilities: `private-preview` (runner has `PREVIEW_GATE_SECRET`), `production-deploy` (runner has
+  `PRODUCTION_DEPLOY_COMMAND` and project repositories).
+- `POST /api/builds/runner/deployments/claim` and `.../deployments/complete`: Owner-authorized customer releases
+  (Founder decision D5). Bodies, lease and states: `DELIVERY.md` §3. The platform hands a release only to a runner
+  declaring `production-deploy`; an expired deployment lease fails the release (never retried automatically).
+- Older platforms answer 404 to these endpoints; the runner then stops polling them until restart.
+
 ## Lease expiry
 A lease lasts `lease_seconds` (default 180 s) and is renewed by every successful heartbeat. When it expires, the
 15-minute sweep revokes the token (every later call answers `lease_lost`) and requeues the build with its resume data
