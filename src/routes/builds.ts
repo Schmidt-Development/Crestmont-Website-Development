@@ -194,9 +194,9 @@ ${alert("warn", html`Shown <strong>once</strong>. Put it in the build machine's 
     const assignments = new Map((await ctx.db.prepare(`SELECT a.worker_id, a.project_id, p.name FROM build_assignments a JOIN projects p ON p.id = a.project_id WHERE a.released_at IS NULL`).all<{ worker_id: string; project_id: string; name: string }>()).results.map((r) => [r.worker_id, r]));
     const jobsBy = new Map((await ctx.db.prepare(`SELECT worker_id, COUNT(*) AS n, SUM(CASE WHEN state IN ('preparing','building','verifying') THEN 1 ELSE 0 END) AS live FROM build_jobs WHERE worker_id IS NOT NULL GROUP BY worker_id`).all<{ worker_id: string; n: number; live: number }>()).results.map((r) => [r.worker_id, r]));
     const body = html`${pageHead("Builder accounts", linkButton("Pipeline", "/staff/builds/pipeline", "ghost", "sm"), "AI builds")}
-${alert("info", html`Each worker owns <strong>one customer website at a time</strong>. New websites go to the eligible worker with the lowest <em>verified</em> weekly usage; workers without verified usage follow, least recently assigned first. Usage is shown only when the orchestrator read it through an authorized interface; it is never estimated. No account passwords or provider tokens are stored here.`)}
+${alert("info", html`Each worker is one Claude account signed in on Node 1 and owns <strong>one customer website at a time</strong>, through its whole development and review cycle. New websites go to the eligible worker with the lowest <em>verified</em> weekly usage; workers without verified usage follow, least recently assigned first. Usage is shown only when the orchestrator read it through an authorized interface; it is never estimated. No account passwords or provider tokens are stored here.`)}
 ${table(workers, [
-  { header: "Worker", cell: (w) => html`<strong>${w.label}</strong><br><span class="faint">${w.provider_kind} · ${w.billing === "metered" ? "metered (refused at $0 cap)" : w.billing === "subscription" ? "existing subscription" : "zero-cost"}</span>` },
+  { header: "Worker", cell: (w) => html`<strong>${w.label}</strong><br><span class="faint">${w.provider_kind === "claude-code" ? "Claude Code · existing Claude plan" : "self-hosted model · $0"}${w.account_label ? html` · ${w.account_label}` : ""}</span>` },
   { header: "Availability", cell: (w) => { const a = av.get(w.id); return a?.eligible ? badge("ok", "Available") : badge(w.enabled ? "warn" : "muted", a?.reason ?? "—"); } },
   { header: "Assigned website", cell: (w) => { const a = assignments.get(w.id); return a ? html`<a href="/staff/builds/projects/${a.project_id}/pipeline">${a.name}</a>` : "—"; } },
   { header: "Sessions", cell: (w) => `${jobsBy.get(w.id)?.live ?? 0} active · up to ${w.max_sessions} per website` },
@@ -210,7 +210,8 @@ ${table(workers, [
 ], { empty: emptyState("No builder workers", "Without registered workers the builder runs in single-runner mode. Register one worker per Claude account (or local model) the orchestrator serves.") })}
 ${configure ? html`<section class="card stack"><h2 class="card__title">Register a worker</h2><form method="post" action="/staff/builds/workers" class="stack">${csrf(ctx)}
 ${input({ name: "label", label: "Name", required: true, maxlength: 80, id: "f-w-label" })}
-${select({ name: "provider_kind", label: "Type", options: [{ value: "claude-code", label: "Claude Code (existing Claude plan sign-in on the build machine)" }, { value: "local-model", label: "Self-hosted model (Ollama)" }, { value: "anthropic-api", label: "Anthropic API (metered — refused at the $0 cap)" }, { value: "openai-api", label: "OpenAI API (metered — refused at the $0 cap)" }], id: "f-w-kind" })}
+${select({ name: "provider_kind", label: "Type", options: [{ value: "claude-code", label: "Claude Code (existing Claude plan sign-in on Node 1)" }, { value: "local-model", label: "Self-hosted model (optional)" }], id: "f-w-kind" })}
+${input({ name: "account_label", label: "Claude account (email, identifier only)", maxlength: 120, id: "f-w-account" })}
 ${input({ name: "max_sessions", label: "Sessions per website", type: "number", value: 1, id: "f-w-sessions" })}
 ${button("Register worker", { size: "sm" })}</form><p class="faint">The account itself is signed in on the build machine with the provider's own login, in that worker's own configuration folder. Crestmont never sees the password or token.</p></section>` : ""}`;
     return staffPage(ctx, "Builder accounts", body);
@@ -228,11 +229,10 @@ ${button("Register worker", { size: "sm" })}</form><p class="faint">The account 
     const count = (f: (r: typeof rows[number]) => boolean) => rows.filter(f).length;
     const av = await W.workerAvailability(ctx.db, ctx.now());
     const spend = await ctx.db.prepare(`SELECT COALESCE(SUM(cost_micro),0) AS paid FROM build_runs WHERE COALESCE(zero_cost, 0) = 0`).first<{ paid: number }>();
-    const cap = await ctx.db.prepare(`SELECT paid_spend_cap_micro AS c FROM build_settings WHERE id = 1`).first<{ c: number }>();
     const pending = (await ctx.db.prepare(`SELECT ap.*, p.name FROM build_approvals ap JOIN projects p ON p.id = ap.project_id WHERE ap.status = 'pending' ORDER BY ap.requested_at`).all<{ id: string; kind: string; summary: string; detail: string | null; requested_at: string; name: string; project_id: string }>()).results;
     const configure = can(ctx.actor!, "builds.configure");
     const body = html`${pageHead("AI website pipeline", linkButton("Builder accounts", "/staff/builds/workers", "ghost", "sm"), "AI builds")}
-<div class="kpis">${kpi("Website orders", rows.length)}${kpi("Active", count((r) => ["WORKER_ASSIGNED", "BUILDING", "TESTING", "AI_REVIEW", "REVISION_REQUIRED"].includes(r.stage)))}${kpi("Queued", count((r) => ["QUEUED", "WAITING_FOR_WORKER_CAPACITY"].includes(r.stage)))}${kpi("Builders available", `${av.filter((a) => a.eligible).length} of ${av.length}`)}${kpi("Awaiting Founder approval", count((r) => r.stage === "READY_FOR_FOUNDER_APPROVAL"))}${kpi("Additional AI spend", `$${B.microToUsd(spend?.paid ?? 0).toFixed(2)}`, `cap $${B.microToUsd(cap?.c ?? 0).toFixed(2)} — metered providers refused at $0`)}</div>
+<div class="kpis">${kpi("Website orders", rows.length)}${kpi("Active", count((r) => ["WORKER_ASSIGNED", "BUILDING", "TESTING", "AI_REVIEW", "REVISION_REQUIRED"].includes(r.stage)))}${kpi("Queued", count((r) => ["QUEUED", "WAITING_FOR_WORKER_CAPACITY"].includes(r.stage)))}${kpi("Builders available", `${av.filter((a) => a.eligible).length} of ${av.length}`)}${kpi("Awaiting Founder approval", count((r) => r.stage === "READY_FOR_FOUNDER_APPROVAL"))}${kpi("Additional AI spend", `$${B.microToUsd(spend?.paid ?? 0).toFixed(2)}`, (spend?.paid ?? 0) === 0 ? "policy $0: subscriptions and owned hardware only" : "NOT ZERO: investigate the runs")}</div>
 <section class="card"><h2 class="card__title">Approvals required</h2>${table(pending, [
   { header: "Website", cell: (a) => html`<a href="/staff/builds/projects/${a.project_id}/pipeline">${a.name}</a>` }, { header: "Kind", cell: (a) => a.kind.replace(/_/g, " ") },
   { header: "Request", cell: (a) => html`${a.summary}${a.detail ? html`<br><span class="faint">${a.detail}</span>` : ""}` }, { header: "Requested", cell: (a) => formatDateTime(a.requested_at) },
@@ -427,7 +427,7 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     requireStaff(ctx, "builds.configure");
     const f = await ctx.form();
     let res: { id: string; enrollmentKey: string };
-    try { res = await W.registerWorker(owner(ctx), { label: str(f, "label"), providerKind: str(f, "provider_kind"), maxSessions: Number(str(f, "max_sessions") || "1") }); } catch (e) { return fail(ctx, "/staff/builds/workers", e); }
+    try { res = await W.registerWorker(owner(ctx), { label: str(f, "label"), providerKind: str(f, "provider_kind"), maxSessions: Number(str(f, "max_sessions") || "1"), accountLabel: str(f, "account_label") }); } catch (e) { return fail(ctx, "/staff/builds/workers", e); }
     return workerKeyPage(ctx, str(f, "label"), res.id, res.enrollmentKey);
   });
   r.post("/staff/builds/workers/:id/update", async (ctx, p) => {

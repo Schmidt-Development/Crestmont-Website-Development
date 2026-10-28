@@ -11,7 +11,7 @@ import type { Phase } from "../prompt.ts";
 import type { Workspace } from "../workspace.ts";
 import type { Logger } from "../log.ts";
 
-export type ProviderId = "local" | "claude-agent-sdk";
+export type ProviderId = "local" | "claude-agent-sdk" | "claude-code";
 
 export interface PhaseRequest {
   phase: Phase;

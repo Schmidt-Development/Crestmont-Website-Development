@@ -89,6 +89,10 @@ export interface Job {
   requirements: RequirementItem[];
   limits: JobLimits;
   resume: JobResume | null;
+  /** V2: the Architect's master specification for this website, when the platform has one. */
+  spec?: { version: number; content: unknown } | null;
+  /** V2: the builder worker this job was assigned to (worker mode). */
+  worker?: { id: string; label: string; maxSessions: number } | null;
 }
 
 export type ClaimResponse =
@@ -144,6 +148,8 @@ export interface CompleteRequest extends ProviderReport {
   report: string;
   missingInformation?: string[];
   error?: string;
+  /** V3 (outcome "released"): the account's plan capacity returns at this time; requeue not before it. */
+  notBefore?: string;
 }
 
 // ── AI drafts (platform ai_jobs: support replies, lead notes, ...) served by the self-hosted model ──
@@ -215,3 +221,7 @@ export interface DeploymentCompleteRequest {
   verification: DeploymentVerification | null;
   error?: string;
 }
+
+// ── Architecture V2: orchestrator ⇄ platform (additive; older platforms answer 404) ──
+export interface CycleSubmitResponse { cycle: number; decision: string; reason: string; continue: boolean; prompt: string | null }
+export interface WorkerStatus { usage?: { percent: number; source: string } | null; rateLimitedUntil?: string | null; error?: string | null }

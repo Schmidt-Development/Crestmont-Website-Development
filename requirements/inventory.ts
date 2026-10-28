@@ -254,8 +254,8 @@ export const REQUIREMENTS: RequirementDef[] = [
     ["AIB-012", "Builder worker registry: one customer website per worker, lowest verified usage first with a documented fallback, queue beyond capacity, Builder Accounts dashboard", "P0", "engineering", ["AIB-003"]],
     ["AIB-013", "Architect master specification and autonomous BUILD→TEST→REVIEW→PROMPT loop with evidence gates, traceable continuations and loop guards", "P0", "engineering", ["AIB-012"]],
     ["AIB-014", "Sensitive-action approval queue and nonblocking external-integration checklist (never marked live by the builder)", "P0", "engineering", ["AIB-013"]],
-    ["AIB-015", "Local orchestrator provider adapters (subscription Claude Code builder, Codex/ChatGPT architect-reviewer, local fallback, mock) with hard zero-additional-spend enforcement", "P0", "engineering", ["AIB-012"]],
-    ["AIB-016", "Proof with real subscription-backed providers: orchestrator → Claude Code → reviewer → corrective prompt → second build", "P0", "integration", ["AIB-015"]],
+    ["AIB-015", "Claude-only local orchestrator: subscription Claude Code architect, builder and separate reviewer sessions (mock for tests), multi-session coordination, usage-limit handling, hard zero-additional-spend enforcement", "P0", "engineering", ["AIB-012"]],
+    ["AIB-016", "Proof on Node 1 with the three signed-in Claude accounts: orchestrator → Claude architect → builder → separate reviewer → corrective prompt → second build", "P0", "integration", ["AIB-015"]],
   ]),
 ];
 

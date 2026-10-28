@@ -1,19 +1,21 @@
-// AI Website Builder V2 (2026-10-28): builder workers, one customer website per worker, account selection.
+// AI Website Builder V3 (Founder, 2026-10-28; Claude-only): builder workers, one customer website per worker.
 //
 // A worker is a registered, Owner-authorized builder identity served by the local Crestmont Orchestrator (the build
-// runner on the Founder's machine): for example "Claude account 1" (a Claude Code installation signed in with that
-// account, in its own config directory), a self-hosted model, or a future API-backed agent. The platform stores no
-// account password or provider token: a worker proves itself with a Crestmont enrollment key (hash stored, shown once)
-// on top of the HMAC-signed runner channel.
+// runner on Node 1): "Claude 1/2/3" = a Claude Code installation signed in with one Claude plan account in its own
+// config directory; optionally a self-hosted model. There are no pay-per-use worker kinds. The platform stores no
+// account password, token or session: a worker proves itself with a Crestmont enrollment key (hash stored, shown
+// once) on top of the HMAC-signed runner channel.
 //
 // Rules (Founder V2 §4, redirect §5):
 //  - one active customer website per worker, one worker per website (unique partial indexes on build_assignments);
-//  - selection: enabled, not paused, connected (seen within the stale window), not rate-limited, not at its usage limit,
-//    allowed by the cost policy; then the lowest VERIFIED weekly usage first; workers without verified telemetry
+//  - selection: enabled, not paused, connected (seen within the stale window), not rate-limited, not at its usage limit;
+//    then the lowest VERIFIED weekly usage first; workers without verified telemetry
 //    follow, least recently assigned first (documented fallback; usage is never estimated or invented);
 //  - further websites wait (WAITING_FOR_WORKER_CAPACITY) and are assigned when a worker frees up;
-//  - a project is never moved to another worker merely to get around a provider limit: reassignment is an explicit
-//    Owner action (or automatic only when the worker is disconnected/removed, with the work checkpointed).
+//  - a project keeps its worker through the whole development and review lifecycle (also while the account waits for
+//    plan capacity); it is released at engineering completion (owner review), approval or cancellation, or by an
+//    explicit Owner reassignment; automatically only when the worker is removed or disconnected for long, with the
+//    work checkpointed. A project is never moved to another account to get around a plan's usage limit.
 //
 // When no worker is registered the builder keeps its earlier single-runner behaviour (backward compatible).
 
@@ -28,11 +30,11 @@ import { setStage } from "./build-pipeline.ts";
 
 type OwnerCtx = Pick<AppContext, "db"> & { userId: string };
 
-export type ProviderKind = "local-model" | "claude-code" | "anthropic-api" | "openai-api" | "other";
-export type Billing = "zero-cost" | "subscription" | "metered";
-export const PROVIDER_KINDS: readonly ProviderKind[] = ["local-model", "claude-code", "anthropic-api", "openai-api", "other"];
-/** Default billing per kind: API workers are metered (per-token charges); claude-code runs on a subscription login. */
-export const DEFAULT_BILLING: Record<ProviderKind, Billing> = { "local-model": "zero-cost", "claude-code": "subscription", "anthropic-api": "metered", "openai-api": "metered", other: "metered" };
+export type ProviderKind = "claude-code" | "local-model";
+export type Billing = "subscription" | "zero-cost";
+export const PROVIDER_KINDS: readonly ProviderKind[] = ["claude-code", "local-model"];
+/** claude-code runs on an existing Claude plan sign-in; local-model on owned hardware. No metered kinds exist. */
+export const DEFAULT_BILLING: Record<ProviderKind, Billing> = { "claude-code": "subscription", "local-model": "zero-cost" };
 /** Usage at or above this verified percentage of the weekly allowance counts as "at its permitted usage limit". */
 export const USAGE_LIMIT_PERCENT = 95;
 /** Verified usage older than this is not used for ranking (it may be stale). */
@@ -40,7 +42,7 @@ export const USAGE_FRESH_HOURS = 24;
 
 export interface BuildWorker {
   id: string; label: string; provider_kind: ProviderKind; billing: Billing; enabled: number; dispatch_paused: number; pause_reason: string | null;
-  max_sessions: number; enrollment_key_hash: string; runner_id: string | null; usage_percent: number | null; usage_source: string | null;
+  max_sessions: number; account_label: string | null; enrollment_key_hash: string; runner_id: string | null; usage_percent: number | null; usage_source: string | null;
   usage_reported_at: string | null; rate_limited_until: string | null; last_seen_at: string | null; last_error: string | null; last_error_at: string | null;
   last_assigned_at: string | null; created_by: string | null; created_at: string; updated_at: string;
 }
@@ -66,24 +68,23 @@ export async function workerAssignment(db: Db, workerId: string): Promise<Assign
 async function staleMinutes(db: Db): Promise<number> {
   return (await db.prepare(`SELECT worker_stale_minutes AS m FROM build_settings WHERE id = 1`).first<{ m: number }>())?.m ?? 15;
 }
-async function paidCapMicro(db: Db): Promise<number> {
-  return (await db.prepare(`SELECT paid_spend_cap_micro AS c FROM build_settings WHERE id = 1`).first<{ c: number }>())?.c ?? 0;
-}
 
 // ── Owner actions ──
 
-export async function registerWorker(c: OwnerCtx, v: { label: string; providerKind: string; maxSessions?: number }): Promise<{ id: string; enrollmentKey: string }> {
+export async function registerWorker(c: OwnerCtx, v: { label: string; providerKind: string; maxSessions?: number; accountLabel?: string }): Promise<{ id: string; enrollmentKey: string }> {
   const label = v.label.trim().slice(0, 80);
   if (label.length < 2) throw new HttpError(422, "Give the worker a name (for example \"Claude account 1\").");
   if (!(PROVIDER_KINDS as readonly string[]).includes(v.providerKind)) throw new HttpError(422, "Choose the worker type.");
   const kind = v.providerKind as ProviderKind;
   const maxSessions = v.maxSessions ?? 1;
   if (!Number.isInteger(maxSessions) || maxSessions < 1 || maxSessions > 16) throw new HttpError(422, "Sessions per website must be 1–16.");
+  const account = (v.accountLabel ?? "").trim().slice(0, 120) || null;
+  if (account && !/^[^\s<>"']+@[^\s<>"']+\.[^\s<>"']+$/.test(account)) throw new HttpError(422, "Account: the Claude account's email address (an identifier only; never a password).");
   const key = randomToken(32);
   const id = newId("wkr");
-  await c.db.prepare(`INSERT INTO build_workers (id, label, provider_kind, billing, max_sessions, enrollment_key_hash, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)`)
-    .bind(id, label, kind, DEFAULT_BILLING[kind], maxSessions, await sha256Hex(key), c.userId, nowIso(), nowIso()).run();
-  await audit(c.db, { actorUserId: c.userId, action: "builds.worker_registered", subjectType: "build_worker", subjectId: id, details: { label, providerKind: kind, billing: DEFAULT_BILLING[kind] } });
+  await c.db.prepare(`INSERT INTO build_workers (id, label, provider_kind, billing, max_sessions, account_label, enrollment_key_hash, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+    .bind(id, label, kind, DEFAULT_BILLING[kind], maxSessions, account, await sha256Hex(key), c.userId, nowIso(), nowIso()).run();
+  await audit(c.db, { actorUserId: c.userId, action: "builds.worker_registered", subjectType: "build_worker", subjectId: id, details: { label, providerKind: kind, billing: DEFAULT_BILLING[kind], account } });
   return { id, enrollmentKey: key };
 }
 
@@ -162,7 +163,6 @@ export type WorkerAvailability = { workerId: string; label: string; eligible: bo
 
 export async function workerAvailability(db: Db, now = new Date()): Promise<WorkerAvailability[]> {
   const stale = await staleMinutes(db);
-  const cap = await paidCapMicro(db);
   const out: WorkerAvailability[] = [];
   for (const w of await listWorkers(db)) {
     const fresh = !!w.usage_reported_at && now.getTime() - Date.parse(w.usage_reported_at) <= USAGE_FRESH_HOURS * 3600_000;
@@ -173,7 +173,6 @@ export async function workerAvailability(db: Db, now = new Date()): Promise<Work
     else if (!w.last_seen_at || now.getTime() - Date.parse(w.last_seen_at) > stale * 60_000) reason = "disconnected (no heartbeat)";
     else if (w.rate_limited_until && Date.parse(w.rate_limited_until) > now.getTime()) reason = `rate-limited until ${w.rate_limited_until}`;
     else if (verified && w.usage_percent! >= USAGE_LIMIT_PERCENT) reason = `at its usage limit (${w.usage_percent}% verified)`;
-    else if (w.billing === "metered" && cap <= 0) reason = "metered provider refused by the $0 spending cap";
     else if (await workerAssignment(db, w.id)) reason = "owns another website";
     out.push({ workerId: w.id, label: w.label, eligible: !reason, reason, usagePercent: verified ? w.usage_percent : null, usageVerified: verified, lastAssignedAt: w.last_assigned_at });
   }

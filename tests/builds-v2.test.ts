@@ -93,10 +93,12 @@ test("[AIB-012] Proof 5 (simulated): three workers take three websites, a fourth
   await runner(t, "workers/status", { runnerId: "orch", workerId: w1.id, workerKey: w1.key, status: { usage: { percent: 97, source: "claude-code:statusline" } } });
   const av = new Map((await W.workerAvailability(t.db)).map((a) => [a.workerId, a]));
   assert.match(String(av.get(w1.id)!.reason), /at its usage limit|owns another website/);
-  // Additional workers are registered without any scheduler change; a metered API worker is refused at the $0 cap.
-  const api = await worker(t, "API worker", "anthropic-api");
-  await runner(t, "workers/status", { runnerId: "orch", workerId: api.id, workerKey: api.key, status: {} });
-  assert.match(String(new Map((await W.workerAvailability(t.db)).map((a) => [a.workerId, a])).get(api.id)!.reason), /\$0 spending cap/);
+  // Additional workers are registered without any scheduler change; there are no pay-per-use worker kinds (V3).
+  await assert.rejects(W.registerWorker({ db: t.db, userId: t.owner.id }, { label: "API worker", providerKind: "anthropic-api" }), /Choose the worker type/);
+  await assert.rejects(W.registerWorker({ db: t.db, userId: t.owner.id }, { label: "OpenAI worker", providerKind: "openai-api" }), /Choose the worker type/);
+  const extra = await worker(t, "Claude 4");
+  await runner(t, "workers/status", { runnerId: "orch", workerId: extra.id, workerKey: extra.key, status: {} });
+  assert.equal(new Map((await W.workerAvailability(t.db)).map((a) => [a.workerId, a])).get(extra.id)!.eligible, true);
   assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.worker_assigned'`).first());
   // Dashboard pages render.
   assert.match(await (await t.oc.get("/staff/builds/workers")).text(), /Claude account 2/);
@@ -220,4 +222,25 @@ test("[AIB-012] worker disconnects: the project returns to the queue with its wo
   await W.sweepWorkers(t.db, later);
   assert.equal((await W.activeAssignment(t.db, site.pid))!.worker_id, w2.id, "reassigned to the connected worker");
   assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.project_reassigned'`).first());
+});
+
+test("[AIB-012] V3: when the assigned account's plan capacity runs out the build waits (checkpointed) and keeps its account; no other account takes it", async () => {
+  const t = await app();
+  const w1 = await worker(t, "Claude 1"), w2 = await worker(t, "Claude 2");
+  for (const w of [w1, w2]) await runner(t, "workers/status", { runnerId: "orch", workerId: w.id, workerKey: w.key, status: {} });
+  const site = await website(t, "Alpha Bakery");
+  await W.dispatch(t.db);
+  const owner = (await W.activeAssignment(t.db, site.pid))!.worker_id;
+  const ow = owner === w1.id ? w1 : w2, other = owner === w1.id ? w2 : w1;
+  const j = (await claim(t, ow)).json.job;
+  const until = new Date(Date.now() + 2 * 3600_000).toISOString();
+  await runner(t, "workers/status", { runnerId: "orch", workerId: ow.id, workerKey: ow.key, status: { rateLimitedUntil: until, error: "Claude plan usage limit reached" } });
+  assert.equal((await runner(t, "complete", { jobId: j.id, leaseToken: j.leaseToken, outcome: "released", runCostUsd: 0, sourceCommit: "a1b2c3d4", previewUrl: null, error: "usage limit", notBefore: until })).status, 200);
+  const job = (await B.getJob(t.db, j.id))!;
+  assert.equal(job.state, "queued");
+  assert.equal(job.not_before, until, "waits for the account's capacity");
+  assert.equal(job.attempts, 0, "no attempt spent");
+  assert.equal((await W.activeAssignment(t.db, site.pid))!.worker_id, ow.id, "ownership kept through the wait");
+  assert.equal((await claim(t, other)).json.job, null, "another account does not take the website to get around the limit");
+  assert.equal((await claim(t, ow, { rateLimitedUntil: until })).json.reason, "worker_rate_limited");
 });

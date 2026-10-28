@@ -93,7 +93,9 @@ async function transition(db: Db, job: Pick<BuildJob, "id" | "state">, to: Build
   const p = await db.prepare(`SELECT project_id FROM build_jobs WHERE id = ?`).bind(job.id).first<{ project_id: string }>();
   if (p) {
     await syncStageFromJob(db, { project_id: p.project_id, state: to, state_reason: reason });
-    if (["ready_for_review", "approved", "canceled", "failed", "needs_information", "budget_paused"].includes(to)) await releaseAssignment(db, p.project_id, `build ${to.replace(/_/g, " ")}`);
+    // V3 §5: ownership lasts the whole development and review lifecycle; released at engineering completion (owner
+    // review), approval or cancellation. Failures and pauses keep the owner (the Owner can reassign explicitly).
+    if (["ready_for_review", "approved", "canceled"].includes(to)) await releaseAssignment(db, p.project_id, `build ${to.replace(/_/g, " ")}`);
   }
   return true;
 }
@@ -389,6 +391,9 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
     worker = await authenticateWorker(db, runner.workerId, runner.workerKey);
     await recordWorkerStatus(db, worker, runnerId, runner.status && typeof runner.status === "object" ? runner.status as Record<string, unknown> : {}, now);
     await dispatch(db, now);
+    const fresh = await db.prepare(`SELECT rate_limited_until, dispatch_paused FROM build_workers WHERE id = ?`).bind(worker.id).first<{ rate_limited_until: string | null; dispatch_paused: number }>();
+    if (fresh?.rate_limited_until && Date.parse(fresh.rate_limited_until) > now.getTime()) return { job: null, reason: "worker_rate_limited" as const };
+    if (fresh?.dispatch_paused) return { job: null, reason: "paused" as const };
   }
   const s = await getBuildSettings(db);
   if (s.globally_paused || !s.automation_enabled) return { job: null, reason: "paused" as const };
@@ -627,8 +632,10 @@ export async function completeJob(db: Db, b: Record<string, unknown>, notify?: (
   } else if (outcome === "released") {
     // Runner shutdown: work is checkpointed; requeue without spending an attempt (protocol v1.1).
     to = job.cancel_requested_at ? "canceled" : "queued";
-    reason = job.cancel_requested_at ? "Canceled while the runner was shutting down" : `Runner released the build (shutdown)${err ? `: ${err}` : ""}; it resumes from its checkpoint`;
-    extra = to === "queued" ? { attempts: Math.max(0, job.attempts - 1), finished_at: null } : {};
+    // V3: a worker whose Claude plan capacity ran out releases the build until capacity returns (≤ 8 days).
+    const nb = typeof b.notBefore === "string" && !Number.isNaN(Date.parse(b.notBefore)) && Date.parse(b.notBefore) > Date.now() && Date.parse(b.notBefore) < Date.now() + 8 * 86400_000 ? new Date(b.notBefore).toISOString() : null;
+    reason = job.cancel_requested_at ? "Canceled while the runner was shutting down" : nb ? `Waiting for the assigned account's plan capacity (until ${nb.slice(0, 16).replace("T", " ")} UTC)${err ? `: ${err}` : ""}; resumes from its checkpoint, no paid fallback` : `Runner released the build (shutdown)${err ? `: ${err}` : ""}; it resumes from its checkpoint`;
+    extra = to === "queued" ? { attempts: Math.max(0, job.attempts - 1), finished_at: null, ...(nb ? { not_before: nb } : {}) } : {};
   } else if (outcome === "failed") {
     if (job.attempts < job.max_attempts && !job.cancel_requested_at) {
       const backoffMin = Math.min(60, 2 ** job.attempts);

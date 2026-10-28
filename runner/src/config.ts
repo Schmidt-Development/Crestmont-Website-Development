@@ -58,6 +58,14 @@ export interface RunnerConfig {
    */
   delivery: { command: string; envNames: string[]; timeoutMs: number; verifyAttempts: number; verifyDelayMs: number } | null;
   /**
+   * Architecture V2 (local orchestrator). `worker`: the builder worker this process serves (BUILD_WORKER_ID +
+   * BUILD_WORKER_KEY[_FILE]); `claudeCode`: the Claude Code CLI signed in with that worker's Claude plan, in its own
+   * CLAUDE config directory (never an API key); `advisor`: who writes the specification and who reviews each cycle.
+   */
+  worker: { id: string; key: string } | null;
+  claudeCode: { bin: string; configDir: string; model: string | null } | null;
+  advisor: { architect: "claude-code" | "none"; reviewer: "claude-code" | "deterministic"; timeoutMs: number; maxTurns: number; maxCycles: number };
+  /**
    * Preview deletion: PREVIEW_DELETE=cloudflare-api (built in: DELETE /accounts/{CLOUDFLARE_ACCOUNT_ID}/workers/scripts/{name}
    * with CLOUDFLARE_API_TOKEN, through the runner's proxy), or PREVIEW_DELETE_COMMAND (a shell command given
    * $CRESTMONT_PREVIEW_NAME and the PREVIEW_DEPLOY_ENV credentials). Unset = previews are never deleted by the runner.
@@ -78,7 +86,7 @@ export interface RunnerConfig {
   healthHost: string;
 }
 
-export type AgentProviderId = "local" | "claude-agent-sdk";
+export type AgentProviderId = "local" | "claude-agent-sdk" | "claude-code";
 
 export interface LocalModelConfig {
   /** OpenAI-compatible base URL, e.g. Ollama: http://host.docker.internal:11434/v1 */
@@ -139,9 +147,9 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
 
   const controlPlaneUrl = need("CONTROL_PLANE_URL", env.CONTROL_PLANE_URL ?? "");
   const secret = need("BUILD_RUNNER_SECRET", readSecret(env, "BUILD_RUNNER_SECRET"));
-  const agentProvider: AgentProviderId = env.RUNNER_AGENT_PROVIDER === "claude-agent-sdk" ? "claude-agent-sdk" : "local";
-  if (env.RUNNER_AGENT_PROVIDER && !["local", "claude-agent-sdk"].includes(env.RUNNER_AGENT_PROVIDER)) {
-    throw new Error(`RUNNER_AGENT_PROVIDER must be "local" or "claude-agent-sdk" (got ${env.RUNNER_AGENT_PROVIDER})`);
+  const agentProvider: AgentProviderId = env.RUNNER_AGENT_PROVIDER === "claude-agent-sdk" ? "claude-agent-sdk" : env.RUNNER_AGENT_PROVIDER === "claude-code" ? "claude-code" : "local";
+  if (env.RUNNER_AGENT_PROVIDER && !["local", "claude-agent-sdk", "claude-code"].includes(env.RUNNER_AGENT_PROVIDER)) {
+    throw new Error(`RUNNER_AGENT_PROVIDER must be "local", "claude-code" or "claude-agent-sdk" (got ${env.RUNNER_AGENT_PROVIDER})`);
   }
   const allowPaidProvider = env.RUNNER_ALLOW_PAID_PROVIDER === "true";
   // The Anthropic key is read only for the explicitly enabled paid adapter; the local default never touches it.
@@ -230,6 +238,28 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
     preview,
     previewDelete,
     delivery,
+    worker: (() => {
+      const id = env.BUILD_WORKER_ID ?? "";
+      if (!id) return null;
+      const key = readSecret(env, "BUILD_WORKER_KEY");
+      if (!/^wkr_[A-Za-z0-9]+$/.test(id) || !/^[0-9a-f]{64}$/.test(key)) throw new Error("BUILD_WORKER_ID / BUILD_WORKER_KEY(_FILE) are set but invalid (copy them from Owner → AI builds → Builder accounts)");
+      registerSecret(key);
+      return { id, key };
+    })(),
+    claudeCode: agentProvider === "claude-code" ? (() => {
+      const dir = env.CLAUDE_CODE_CONFIG_DIR ?? "";
+      if (!dir || !path.isAbsolute(dir)) throw new Error("RUNNER_AGENT_PROVIDER=claude-code needs CLAUDE_CODE_CONFIG_DIR: the absolute path of this worker's own Claude Code config directory (signed in once with `claude` → /login using the worker's Claude account)");
+      return { bin: env.CLAUDE_CODE_BIN ?? "claude", configDir: dir, model: env.CLAUDE_CODE_MODEL ?? null };
+    })() : null,
+    advisor: (() => {
+      const claude = agentProvider === "claude-code";
+      const a = env.ORCHESTRATOR_ARCHITECT ?? (claude ? "claude-code" : "none"), r = env.ORCHESTRATOR_REVIEWER ?? (claude ? "claude-code" : "deterministic");
+      if (!["claude-code", "none"].includes(a)) throw new Error("ORCHESTRATOR_ARCHITECT must be claude-code or none");
+      if (!["claude-code", "deterministic"].includes(r)) throw new Error("ORCHESTRATOR_REVIEWER must be claude-code or deterministic");
+      if ((a === "claude-code" || r === "claude-code") && !claude) throw new Error("A Claude Code architect/reviewer needs RUNNER_AGENT_PROVIDER=claude-code (the session runs on the website's assigned Claude account)");
+      return { architect: a as "claude-code" | "none", reviewer: r as "claude-code" | "deterministic",
+        timeoutMs: num(env.ORCHESTRATOR_ADVISOR_TIMEOUT_SECONDS, 1200) * 1000, maxTurns: Math.max(5, Math.min(200, num(env.ORCHESTRATOR_ADVISOR_MAX_TURNS, 60))), maxCycles: Math.max(1, Math.min(50, num(env.ORCHESTRATOR_MAX_CYCLES, 8))) };
+    })(),
     platformRepoPatterns: list(env.CRESTMONT_PLATFORM_REPO_PATTERNS, ["Crestmont-Website-Development", "crestmont-platform"])
       .map((p) => new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")),
     gitAuthorName: env.RUNNER_GIT_NAME ?? "Crestmont AI Builds",

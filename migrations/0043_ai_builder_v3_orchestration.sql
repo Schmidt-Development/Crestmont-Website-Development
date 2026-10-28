@@ -1,16 +1,18 @@
--- AI Website Builder architecture V2 (2026-10-28): builder workers, one website per worker, pipeline stages,
--- architect/reviewer cycles, external-integration checklist, sensitive-action approvals.
--- Provider-independent: a "worker" is any registered, Owner-authorized builder identity (a self-hosted model, a
--- Claude Code installation, an API-backed agent). No account passwords or provider tokens are stored here; a worker
--- proves itself with a Crestmont enrollment key (hash only) on top of the signed runner channel.
+-- AI Website Builder architecture V3 (Founder, 2026-10-28; Claude-only): builder workers (one Claude account each),
+-- one website per worker, pipeline stages, architect/builder/reviewer cycles, external-integration checklist,
+-- sensitive-action approvals. A "worker" is a registered, Owner-authorized builder identity served by the local
+-- orchestrator on Node 1 (a Claude Code installation signed in with one Claude plan account; optionally a self-hosted
+-- model). No account password, token or session is stored here; a worker proves itself with a Crestmont enrollment
+-- key (hash only) on top of the signed runner channel. No metered (pay-per-use) provider kinds exist.
 
 CREATE TABLE build_workers (
   id TEXT PRIMARY KEY,
   label TEXT NOT NULL,
-  -- local-model | claude-code | anthropic-api | openai-api | other
-  provider_kind TEXT NOT NULL CHECK (provider_kind IN ('local-model', 'claude-code', 'anthropic-api', 'openai-api', 'other')),
-  -- Per-token billing: paid workers never receive work while the paid-spend cap is 0 (the $0 target).
-  billing TEXT NOT NULL DEFAULT 'zero-cost' CHECK (billing IN ('zero-cost', 'subscription', 'metered')),
+  provider_kind TEXT NOT NULL CHECK (provider_kind IN ('claude-code', 'local-model')),
+  -- No metered kinds: claude-code runs on an existing subscription sign-in, local-model on owned hardware.
+  billing TEXT NOT NULL DEFAULT 'subscription' CHECK (billing IN ('subscription', 'zero-cost')),
+  -- The Claude account this worker is signed in with, as an identifier for the Owner (never a credential).
+  account_label TEXT,
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
   dispatch_paused INTEGER NOT NULL DEFAULT 0 CHECK (dispatch_paused IN (0, 1)),
   pause_reason TEXT,
@@ -78,6 +80,8 @@ CREATE TABLE build_cycles (
   cycle INTEGER NOT NULL CHECK (cycle >= 1),
   prompt TEXT NOT NULL,
   prompt_source TEXT NOT NULL CHECK (prompt_source IN ('architect', 'reviewer', 'owner', 'runner')),
+  -- Sessions of this cycle (architect/builder/reviewer/workstream): [{id, role, task, worktree, status, provider}].
+  sessions_json TEXT,
   evidence_json TEXT,
   reviewer_provider TEXT,
   -- Reviewer decision as proposed, and the platform's authoritative decision after the evidence and loop guards.
@@ -133,8 +137,6 @@ CREATE TABLE build_approvals (
 );
 CREATE INDEX idx_build_approvals_status ON build_approvals(status, requested_at);
 
--- Cost layer: hard cap on metered AI spend (USD micro). 0 = refuse every paid call (the Founder's $0 target).
-ALTER TABLE build_settings ADD COLUMN paid_spend_cap_micro INTEGER NOT NULL DEFAULT 0 CHECK (paid_spend_cap_micro >= 0);
 ALTER TABLE build_settings ADD COLUMN max_review_cycles INTEGER NOT NULL DEFAULT 8 CHECK (max_review_cycles BETWEEN 1 AND 50);
 ALTER TABLE build_settings ADD COLUMN worker_stale_minutes INTEGER NOT NULL DEFAULT 15 CHECK (worker_stale_minutes BETWEEN 2 AND 1440);
 ALTER TABLE build_jobs ADD COLUMN worker_id TEXT REFERENCES build_workers(id);

@@ -38,6 +38,12 @@ import type { Phase } from "./prompt.ts";
 import { readRequirements, checkRequirements, readStringList, readAgentReport } from "./requirements.ts";
 import { buildReport } from "./report.ts";
 import { run, proxyEnv } from "./exec.ts";
+import { ClaudeCodeCliProvider, type Spawner } from "./providers/claude-code-cli.ts";
+import type { Advisor } from "./orchestrator/advisors.ts";
+import { AdvisorUnavailableError, ClaudeCodeAdvisor, DeterministicReviewer } from "./orchestrator/advisors.ts";
+import type { MasterSpec, ReviewVerdict } from "./orchestrator/contracts.ts";
+import { collectEvidence, builderIntegrations, builderApprovalRequests, writeReview, BUILDER_CONTRACT } from "./orchestrator/evidence.ts";
+import { runCoordinatedSessions, type SessionRecord, type SessionTask } from "./orchestrator/sessions.ts";
 
 export interface JobDeps {
   cfg: RunnerConfig;
@@ -66,6 +72,11 @@ export interface JobDeps {
    * server and stops (workspace kept, no `complete`). Default: the lease time left at claim, clamped to 30 s..10 min.
    */
   leaseWindowMs?: number;
+  /** V3 orchestrator: architect/reviewer adapters (tests inject mocks; default from cfg.advisor). */
+  architect?: Advisor | null;
+  reviewer?: Advisor | null;
+  /** V3: process spawner for the Claude Code CLI (tests use a fake CLI). */
+  spawner?: Spawner;
 }
 
 /** Lease window from the claim: time left on the lease, clamped (clock skew), 180 s (protocol default) if unknown. */
@@ -226,7 +237,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     }
   };
 
-  const finish = async (outcome: Outcome, fields: { error?: string | null; checks?: CheckOutcome[]; preview?: { url: string | null; note: string; name?: string | null }; stopReason?: string | null }): Promise<JobSummary> => {
+  const finish = async (outcome: Outcome, fields: { error?: string | null; checks?: CheckOutcome[]; preview?: { url: string | null; note: string; name?: string | null }; stopReason?: string | null; notBefore?: string | null }): Promise<JobSummary> => {
     guard();
     const commit = git ? await headCommit(git) : null;
     const seed = job.requirements;
@@ -260,6 +271,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       ...(fields.preview?.url && fields.preview.name ? { previewName: fields.preview.name, previewGated: true } : {}),
       ...(outcome === "needs_information" ? { missingInformation } : {}),
       ...(fields.error ? { error: fields.error } : {}),
+      ...(fields.notBefore ? { notBefore: fields.notBefore } : {}),
     };
     await stopHeartbeats();
     guard();
@@ -272,7 +284,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     try {
       provider = deps.provider ?? createProvider(cfg, {
         log, queryFn: deps.queryFn, dockerExecutor: deps.dockerExecutor, fetchImpl: deps.modelFetch,
-        interruptGraceMs: deps.interruptGraceMs, localLimits: deps.localLimits,
+        interruptGraceMs: deps.interruptGraceMs, localLimits: deps.localLimits, spawner: deps.spawner,
       });
     } catch (err) {
       // No fallback: a refused or misconfigured provider fails this attempt with the reason.
@@ -390,7 +402,50 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     // ── agent phases ──
     stage = "building";
     const st: { localLimit: string | null; agentError: string | null } = { localLimit: null, agentError: null };
-    const runOne = async (phase: Phase, previousNote: string | null): Promise<PhaseResult | null> => {
+    // ── V3 orchestrator state: the account's usage limit, the master specification, review sessions ──
+    let usageLimit: { limited: boolean; resetAt: string | null } | null = null;
+    const claudeEnv = provider instanceof ClaudeCodeCliProvider ? provider.sessionEnv() : null;
+    const advisorFor = (role: "architect" | "reviewer"): Advisor | null => {
+      if (role === "architect" && deps.architect !== undefined) return deps.architect;
+      if (role === "reviewer" && deps.reviewer !== undefined) return deps.reviewer;
+      const kind = role === "architect" ? cfg.advisor.architect : cfg.advisor.reviewer;
+      if (kind === "claude-code" && claudeEnv && cfg.claudeCode) return new ClaudeCodeAdvisor({ bin: cfg.claudeCode.bin, cwd: ws!.repo, env: claudeEnv, model: cfg.claudeCode.model, timeoutMs: cfg.advisor.timeoutMs, maxTurns: cfg.advisor.maxTurns });
+      return role === "reviewer" ? new DeterministicReviewer() : null;
+    };
+    const noteLimit = (err: unknown) => { if (err instanceof AdvisorUnavailableError && /usage limit/i.test(err.message)) usageLimit = { limited: true, resetAt: err.rateLimitedUntil }; };
+    let spec: MasterSpec | null = job.spec?.content && typeof job.spec.content === "object" ? job.spec.content as MasterSpec : null;
+    const sessionRecords: SessionRecord[] = [];
+    const architect = advisorFor("architect");
+    if (!spec && architect) {
+      // A. Architect session (fresh context, read-only) → validated, stored specification.
+      stage = "preparing";
+      tracker.note({ kind: "step", message: `architect session (${architect.name})` });
+      const idx = (() => { try { return JSON.parse(readFileSync(path.join(ws.repo, "customer-files", "INDEX.json"), "utf8")) as { files: { id: string; savedAs: string; contentType: string; folder: string | null }[] }; } catch { return { files: [] }; } })();
+      const input = {
+        brief: job.brief.content, referenceUrls: (job.brief.content.customerData.references ?? []).map((r: { url: string }) => r.url),
+        referenceImages: idx.files.filter((f) => /^image\//.test(f.contentType)).map((f) => ({ fileId: f.id, path: path.join(ws!.repo, "customer-files", f.savedAs), folder: f.folder, name: f.savedAs })),
+        maxSessions: job.worker?.maxSessions ?? 1,
+      };
+      for (let attempt = 1; attempt <= 2 && !spec && !usageLimit; attempt++) {
+        try {
+          const raw = await architect.architect(input);
+          const stored = await client.storeSpec(job, raw, architect.name);
+          spec = raw as MasterSpec;
+          sessionRecords.push({ id: "architect", role: "builder", workstream: "architecture", tasks: [], ownedPaths: [], mode: "serial", status: "completed", note: stored ? `specification v${stored.specVersion} stored` : "platform without V3 endpoints: specification kept locally", changedFiles: [] });
+        } catch (err) {
+          if (err instanceof LeaseLostError) { markLeaseLost(); throw err; }
+          noteLimit(err);
+          sessionNotes.push(`Architect session ${attempt} did not produce a valid specification: ${errorMessage(err).slice(0, 300)}`);
+        }
+      }
+    }
+    if (spec) {
+      writeFileSync(path.join(ws.repo, "SPEC.json"), JSON.stringify(spec, null, 2) + "\n");
+      writeFileSync(path.join(ws.repo, "SPEC.md"), `# Master specification\n\n## Implementation prompt\n\n${spec.masterPrompt}\n\n## Acceptance criteria\n\n${(spec.acceptanceCriteria ?? []).map((a) => `- ${a.id}: ${a.text} (${a.verification})`).join("\n")}\n`);
+    }
+    const runOne = async (phase: Phase, previousNote: string | null, promptOverride: string | null = null, sessionProvider: AgentProvider | null = null, sessionTracker: RunTracker | null = null): Promise<PhaseResult | null> => {
+      const prov = sessionProvider ?? provider!;
+      const trk = sessionTracker ?? tracker;
       const remainingBudget = budgetCap - tracker.attemptCostUsd;
       const remainingTurns = turnCap - tracker.turns();
       if (provider!.paid && remainingBudget <= 0.01) { st.localLimit = "budget"; return null; }
@@ -399,12 +454,14 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       const phaseTurns = phase === "plan" ? Math.min(remainingTurns, Math.max(5, Math.ceil(turnCap * 0.15)))
         : phase === "build" ? Math.max(1, remainingTurns - reserve) : remainingTurns;
       tracker.note({ kind: "step", message: `phase ${phase}` });
-      const res = await provider!.run({
+      const base = promptOverride ?? phasePrompt(job, phase, { starter: starterLabel, resumed: !!job.resume, previousNote, toolset });
+      const res = await prov.run({
         phase,
-        prompt: phasePrompt(job, phase, { starter: starterLabel, resumed: !!job.resume, previousNote, toolset }),
+        prompt: spec ? `${base}\n\nSPEC.json holds the architect's master specification for this website; it is authoritative for design, structure and acceptance criteria.\n\n${BUILDER_CONTRACT}` : base,
         maxTurns: phaseTurns, maxBudgetUsd: remainingBudget, maxWallMs: Math.max(1000, runtimeDeadline - Date.now()),
-        resumeSessionId: tracker.sessionId, tracker, stop,
+        resumeSessionId: sessionProvider ? null : trk.sessionId, tracker: trk, stop,
       });
+      if (prov instanceof ClaudeCodeCliProvider && prov.rateLimit.limited) usageLimit = prov.rateLimit;
       if (res.status === "max_budget") st.localLimit = "budget";
       if (res.status === "max_turns" && tracker.turns() >= turnCap) st.localLimit = "turns";
       if (res.status === "max_output_tokens") st.localLimit = "output tokens";
@@ -415,10 +472,31 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     };
 
     const previousNote = sessionNotes.find((n) => n.includes("could not be restored")) ?? null;
-    for (const phase of ["plan", "build", "verify"] as Phase[]) {
-      if (stop.reason || st.localLimit || st.agentError) break;
+    const maxSessions = Math.max(1, job.worker?.maxSessions ?? 1);
+    const buildBase = await headCommit(git!); // cycle 1's evidence covers everything built in this attempt
+    for (const phase of (spec ? ["build", "verify"] : ["plan", "build", "verify"]) as Phase[]) {
+      if (stop.reason || st.localLimit || st.agentError || usageLimit) break;
       if (phase === "verify") stage = "verifying";
-      await runOne(phase, phase === "plan" ? previousNote : null);
+      if (phase === "build" && spec && maxSessions > 1 && provider instanceof ClaudeCodeCliProvider && (spec.tasks ?? []).length > 1) {
+        // B. Several coordinated builder sessions on the assigned account (isolated worktrees, owned paths).
+        const records = await runCoordinatedSessions({
+          git: git!, workDir: ws.dir, tasks: spec.tasks as SessionTask[], maxSessions, shouldStop: () => !!(stop.reason || usageLimit),
+          runSession: async (sess) => {
+            const sp = new ClaudeCodeCliProvider({ cfg, log, spawner: deps.spawner });
+            await sp.prepare({ job, ws: { ...ws!, repo: sess.cwd }, skillNames, referenceDomains: referenceHosts(job), processEnv: deps.processEnv ?? process.env, systemPromptAppend: systemPromptAppend(job) });
+            const trk = new RunTracker();
+            const prompt = [`You are builder session ${sess.id} for this website. Your tasks (from SPEC.json):`, ...sess.tasks.map((t) => `- ${t.id} [${t.workstream}] ${t.title}`),
+              sess.ownedPaths.length ? `Edit only files under: ${sess.ownedPaths.join(", ")}. Other sessions own the rest of the repository at the same time.` : "", "Commit nothing yourself; the orchestrator commits and merges your work."].filter(Boolean).join("\n");
+            const r = await runOne("build", null, prompt, sp, trk);
+            tracker.turnsCompleted += trk.turns();
+            return { ok: r?.status === "success", error: r?.error ?? null };
+          },
+        });
+        sessionRecords.push(...records);
+        tracker.note({ kind: "step", message: `coordinated sessions: ${records.map((r) => `${r.id}:${r.status}`).join(", ")}` });
+      } else {
+        await runOne(phase, phase === "plan" ? previousNote : null);
+      }
       guard();
       await sendRequirements(readRequirements(ws.repo, job.requirements));
       await checkpoint(`after ${phase}`);
@@ -452,9 +530,9 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       return out;
     };
 
-    // ── runner acceptance checks (+ one repair round) ──
+    // ── runner acceptance checks → separate review session → corrective prompt → same worker (V3 §7) ──
     let checks: CheckOutcome[] = [];
-    if (!stop.reason && !st.localLimit && !st.agentError) {
+    if (!stop.reason && !st.localLimit && !st.agentError && !usageLimit) {
       stage = "verifying";
       const commands = acceptanceCommands(starterSpec, ws.repo, job.packageId);
       if (sandbox && cfg.jobSandbox.browserCheck && existsSync(path.join(ws.repo, "public", "index.html"))) {
@@ -466,15 +544,60 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       }
       checks = await acceptance(commands);
       for (const c of checks) tracker.note({ kind: "check", message: `${c.ok ? "PASS" : "FAIL"} ${c.command}` });
-      if (checks.some((c) => !c.ok)) {
-        writeFileSync(path.join(ws.repo, ".crestmont", "runner-checks.json"), JSON.stringify(checks.map(({ id, command, ok, code, outputTail }) => ({ id, command, ok, code, outputTail })), null, 2));
-        await runOne("repair", null);
-        guard();
-        if (!stop.reason && !st.localLimit && !st.agentError) {
-          checks = await acceptance(commands);
-          await checkpoint("after repair");
+      const reviewer = advisorFor("reviewer")!;
+      let cycleBase = buildBase;
+      let promptUsed = spec?.masterPrompt ?? "Runner build phases (plan, build, verify) from BRIEF.md";
+      let promptSource: "architect" | "reviewer" | "runner" = spec ? "architect" : "runner";
+      for (let cycle = 1; cycle <= cfg.advisor.maxCycles; cycle++) {
+        if (stop.reason || st.localLimit || st.agentError || usageLimit) break;
+        if (checks.some((c) => !c.ok)) writeFileSync(path.join(ws.repo, ".crestmont", "runner-checks.json"), JSON.stringify(checks.map(({ id, command, ok, code, outputTail }) => ({ id, command, ok, code, outputTail })), null, 2));
+        await commitAll(git!, `AI build: cycle ${cycle} evidence`);
+        const evidence = await collectEvidence({ repo: ws.repo, pathEnv: cfg.agentPath, home: ws.home, baseCommit: cycleBase, checks, requirements: readRequirements(ws.repo, job.requirements), spec });
+        // Builder outputs: integration status and sensitive-action requests (the build continues meanwhile).
+        try {
+          const ints = builderIntegrations(ws.repo);
+          if (ints.length) await client.reportIntegrations(job, ints);
+          for (const a of builderApprovalRequests(ws.repo)) await client.requestApproval(job, a);
+        } catch (err) { if (err instanceof LeaseLostError) { markLeaseLost(); throw err; } log.warn("integration/approval report failed", { error: errorMessage(err) }); }
+        // C. Independent review session (fresh context; falls back to the deterministic reviewer if it is unavailable).
+        stage = "verifying";
+        let verdict: ReviewVerdict;
+        let reviewerName = reviewer.name;
+        try { verdict = await reviewer.review(spec, evidence, cycle); }
+        catch (err) {
+          noteLimit(err);
+          if (usageLimit) break;
+          sessionNotes.push(`Review session for cycle ${cycle} failed (${errorMessage(err).slice(0, 200)}); the deterministic reviewer judged this cycle.`);
+          reviewerName = "deterministic";
+          verdict = await new DeterministicReviewer().review(spec, evidence);
         }
+        writeReview(ws.repo, cycle, verdict.decision, verdict.nextPrompt, verdict.findings);
+        const res = await client.submitCycle(job, { cycle, prompt: promptUsed, promptSource, evidence, decision: verdict.decision, addresses: verdict.addresses, nextPrompt: verdict.nextPrompt, reviewerProvider: reviewerName,
+          sessions: sessionRecords.splice(0) }).catch((err) => { if (err instanceof LeaseLostError) { markLeaseLost(); throw err; } throw err; });
+        // Older platform without V3 endpoints: the earlier behaviour (one repair round when checks failed).
+        const decision = res ?? { cycle, decision: verdict.decision, reason: "local", continue: cycle === 1 && checks.some((c) => !c.ok), prompt: verdict.nextPrompt };
+        tracker.note({ kind: "step", message: `cycle ${cycle}: ${decision.decision}${res ? "" : " (platform without V3 endpoints)"}` });
+        if (!decision.continue) break;
+        // D. Corrective prompt → the same project's builder (the session continues with its context).
+        cycleBase = await headCommit(git!);
+        promptUsed = decision.prompt ?? "Repair: fix the failing checks listed in .crestmont/runner-checks.json.";
+        promptSource = "reviewer";
+        // Without V3 endpoints the classic repair prompt is used (runner-checks.json); otherwise the reviewer's prompt.
+        await runOne("repair", null, res ? `${promptUsed}\n\nThe full review is in .crestmont/review-${String(cycle).padStart(2, "0")}.md.` : null);
+        guard();
+        if (stop.reason || st.localLimit || st.agentError || usageLimit) break;
+        checks = await acceptance(commands);
+        await checkpoint(`after cycle ${cycle} corrections`);
       }
+    }
+
+    // ── plan capacity exhausted: checkpoint, keep the account's ownership, wait, resume without duplicate work ──
+    const limit = usageLimit as { limited: boolean; resetAt: string | null } | null;
+    if (limit && !stop.reason) {
+      await checkpoint("plan usage limit reached");
+      const until = limit.resetAt && Date.parse(limit.resetAt) > Date.now() ? limit.resetAt : new Date(Date.now() + 60 * 60_000).toISOString();
+      try { await client.reportWorkerStatus({ rateLimitedUntil: until, error: "Claude plan usage limit reached" }); } catch { /* reported again with the next claim */ }
+      return await finish("released", { error: "The assigned Claude account reached its plan usage limit; work is checkpointed and resumes when capacity returns (no paid fallback).", stopReason: "usage_limit", checks, notBefore: until });
     }
 
     // ── stop paths ──

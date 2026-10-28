@@ -7,7 +7,7 @@ import { createHmac } from "node:crypto";
 import type {
   ClaimResponse, HeartbeatRequest, HeartbeatResponse, CheckpointRequest, RequirementItem, CompleteRequest, Job,
   AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest, ExpiredPreview, ExpiredPreviewsResponse,
-  SiteDeployment, DeploymentClaimResponse, DeploymentCompleteRequest } from "./protocol.ts";
+  SiteDeployment, DeploymentClaimResponse, DeploymentCompleteRequest, CycleSubmitResponse, WorkerStatus } from "./protocol.ts";
 import { RUNNER_VERSION, LIMITS } from "./protocol.ts";
 import type { Logger } from "./log.ts";
 import { silentLogger, errorMessage } from "./log.ts";
@@ -58,6 +58,8 @@ export class ControlPlaneError extends Error {
 export interface RetryPolicy { attempts: number; baseMs: number; maxMs: number }
 
 export interface ControlPlaneOptions {
+  /** V2 worker mode: the builder worker this runner process serves (id + Crestmont enrollment key). */
+  worker?: { id: string; key: string } | null;
   baseUrl: string;
   secret: string;
   runnerId: string;
@@ -131,7 +133,39 @@ export class ControlPlaneClient {
   claim(capabilities: string[]): Promise<ClaimResponse> {
     return this.post<ClaimResponse>("/api/builds/runner/claim", {
       runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId), version: RUNNER_VERSION, capabilities,
+      ...(this.opts.worker ? { workerId: this.opts.worker.id, workerKey: this.opts.worker.key, workerStatus: this.workerStatus } : {}),
     });
+  }
+
+  /** V2 worker mode: latest status reported with every claim (usage only from an authorized interface). */
+  workerStatus: WorkerStatus = {};
+
+  async reportWorkerStatus(status: WorkerStatus): Promise<void> {
+    this.workerStatus = status;
+    if (!this.opts.worker) return;
+    await this.post("/api/builds/runner/workers/status", { runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId), workerId: this.opts.worker.id, workerKey: this.opts.worker.key, status });
+  }
+
+  /** V2: store the Architect's specification. null = this platform has no V2 endpoints. */
+  async storeSpec(job: Pick<Job, "id" | "leaseToken">, spec: unknown, provider: string): Promise<{ specVersion: number } | null> {
+    try { return await this.post("/api/builds/runner/pipeline/spec", { jobId: job.id, leaseToken: job.leaseToken, spec, provider }); }
+    catch (err) { if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null; throw err; }
+  }
+
+  /** V2: one completed implementation cycle with the reviewer's proposal; the platform returns the authoritative decision. */
+  async submitCycle(job: Pick<Job, "id" | "leaseToken">, body: Record<string, unknown>): Promise<CycleSubmitResponse | null> {
+    try { return await this.post<CycleSubmitResponse>("/api/builds/runner/cycles/submit", { jobId: job.id, leaseToken: job.leaseToken, ...body }); }
+    catch (err) { if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null; throw err; }
+  }
+
+  async reportIntegrations(job: Pick<Job, "id" | "leaseToken">, items: unknown[]): Promise<void> {
+    try { await this.post("/api/builds/runner/integrations/report", { jobId: job.id, leaseToken: job.leaseToken, items }); }
+    catch (err) { if (!(err instanceof ControlPlaneError && (err.status === 404 || err.status === 405))) throw err; }
+  }
+
+  async requestApproval(job: Pick<Job, "id" | "leaseToken">, req: { kind: string; summary: string; detail?: string }): Promise<{ id: string; status: string } | null> {
+    try { return await this.post("/api/builds/runner/approvals/request", { runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId), jobId: job.id, leaseToken: job.leaseToken, ...req }); }
+    catch (err) { if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null; throw err; }
   }
 
   heartbeat(job: Pick<Job, "id" | "leaseToken">, req: HeartbeatRequest): Promise<HeartbeatResponse> {

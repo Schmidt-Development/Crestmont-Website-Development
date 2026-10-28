@@ -231,7 +231,7 @@ test("[AIB-RUNNER] the paid Agent SDK adapter is refused unless explicitly allow
   assert.equal(cfg.local.baseUrl, "http://host.docker.internal:11434/v1");
   assert.equal(cfg.aiDrafts.enabled, true);
   assert.equal(loadConfig({ ...env, RUNNER_AGENT_PROVIDER: "claude-agent-sdk" }).allowPaidProvider, false);
-  assert.throws(() => loadConfig({ ...env, RUNNER_AGENT_PROVIDER: "openai" }), /must be "local" or "claude-agent-sdk"/);
+  assert.throws(() => loadConfig({ ...env, RUNNER_AGENT_PROVIDER: "openai" }), /must be "local", "claude-code" or "claude-agent-sdk"/);
 });
 
 // ── AI drafts ──

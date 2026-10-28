@@ -1,9 +1,9 @@
-// AI Website Builder V2 (2026-10-28): durable project pipeline, architect specification, the BUILD → TEST → REVIEW →
-// NEW PROMPT loop, the external-integration checklist and the sensitive-action approval queue.
+// AI Website Builder V3 (Founder, 2026-10-28; Claude-only): durable project pipeline, architect specification, the
+// ARCHITECT → BUILD → TEST → REVIEW → CORRECT loop, the external-integration checklist and the approval queue.
 //
-// Division of work (Founder redirect: "the orchestrator is a controller"):
-//  - The local Crestmont Orchestrator (the build runner on the Founder's machine) calls the AI Architect, the
-//    Claude Code builder and the AI Reviewer through their supported local interfaces, and reports every result here.
+// Division of work ("the orchestrator is a controller"):
+//  - The local Crestmont Orchestrator (the build runner on Node 1) runs the Claude architect session, the Claude
+//    builder session(s) and a separate Claude review session on the website's assigned account, and reports here.
 //  - The platform is the durable, auditable system of record and the referee: it stores the specification, every
 //    cycle's evidence and decision, and it can overrule the reviewer when the evidence contradicts it (a "ready"
 //    verdict with failing checks or without screenshots), and it stops loops that make no progress.
@@ -273,9 +273,12 @@ export async function submitCycle(db: Db, job: { id: string; project_id: string;
     else if (stalled) { decision = "ESCALATED"; reason = "No measurable progress over the last three cycles"; }
   }
   const finalPrompt = CONTINUE.includes(decision) ? nextPrompt : null;
-  await db.prepare(`INSERT INTO build_cycles (id, job_id, project_id, cycle, prompt, prompt_source, evidence_json, reviewer_provider, proposed_decision, decision, decision_reason, next_prompt, score, failure_signature, findings_json, created_at, reviewed_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .bind(newId("cyc"), job.id, job.project_id, cycle, promptUsed, source, JSON.stringify(ev), provider, proposed, decision, reason.slice(0, 1000), finalPrompt, score, signature, JSON.stringify({ outstanding: open.slice(0, 200), addresses }), nowIso(), nowIso()).run();
+  const sessions = (Array.isArray(b.sessions) ? b.sessions : []).slice(0, 50).map((x) => x as Record<string, unknown>).map((x) => ({
+    id: s(x.id, 40), workstream: s(x.workstream, 60), tasks: (Array.isArray(x.tasks) ? x.tasks : []).map((t) => s(t, 60)).slice(0, 50), mode: s(x.mode, 20), status: s(x.status, 30), note: s(x.note, 300),
+  }));
+  await db.prepare(`INSERT INTO build_cycles (id, job_id, project_id, cycle, prompt, prompt_source, sessions_json, evidence_json, reviewer_provider, proposed_decision, decision, decision_reason, next_prompt, score, failure_signature, findings_json, created_at, reviewed_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(newId("cyc"), job.id, job.project_id, cycle, promptUsed, source, JSON.stringify(sessions), JSON.stringify(ev), provider, proposed, decision, reason.slice(0, 1000), finalPrompt, score, signature, JSON.stringify({ outstanding: open.slice(0, 200), addresses }), nowIso(), nowIso()).run();
   const stage: Stage = CONTINUE.includes(decision) ? "REVISION_REQUIRED" : decision === "ESCALATED" ? "FAILED_NEEDS_INTERVENTION"
     : decision === "WAIT_FOR_EXTERNAL_SETUP" ? "WAITING_FOR_EXTERNAL_SETUP" : decision === "NEEDS_HUMAN_AUTHORIZATION" ? "WAITING_FOR_HUMAN_AUTHORIZATION" : decision as Stage;
   await setStage(db, job.project_id, stage, `Cycle ${cycle}: ${reason}`, "runner");
