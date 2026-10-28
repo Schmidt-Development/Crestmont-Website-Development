@@ -251,6 +251,26 @@ async function useRecoveryCode(db: Db, userId: string, input: string): Promise<n
   return null;
 }
 
+/** Wrong second-factor codes allowed per user in any rolling 24 hours before further attempts are refused. */
+export const MFA_DAILY_FAILURES = 30;
+
+/** Second-factor attempt limits: 8 per user per 15 minutes, and MFA_DAILY_FAILURES wrong codes in any rolling 24 hours
+ *  (one password-only session could otherwise keep guessing all day: ≈0.2 % chance per day of a valid TOTP code).
+ *  The daily cap counts the security events already recorded for wrong or replayed codes, so successes never count. */
+async function assertMfaAttemptsAllowed(db: Db, userId: string, ip: string | null, purpose: string): Promise<void> {
+  const rl = await rateLimit(db, `mfa:${userId}`, 8, 900);
+  if (!rl.allowed) throw new AuthError("Too many codes entered. Wait a few minutes.", 429);
+  // Only failures since the last (re-)enrolment count, so an administrator MFA reset followed by re-enrolment unblocks.
+  const since = new Date(Date.now() - 24 * 3_600_000).toISOString();
+  const failures = (await db.prepare(`SELECT COUNT(*) AS n FROM security_events WHERE user_id = ? AND kind IN ('mfa_failed', 'mfa_replay_rejected')
+      AND created_at > max(?, COALESCE((SELECT MAX(created_at) FROM audit_logs WHERE subject_type = 'user' AND subject_id = ? AND action = 'user.mfa_enabled'), ''))`)
+    .bind(userId, since, userId).first<{ n: number }>())?.n ?? 0;
+  if (failures >= MFA_DAILY_FAILURES) {
+    await securityEvent(db, "mfa_locked", { userId, ip, detail: purpose });
+    throw new AuthError("Too many incorrect codes in the last 24 hours. Try again later, or ask an administrator to reset your two-factor authentication.", 429);
+  }
+}
+
 export type SecondFactorResult = { method: "totp" } | { method: "recovery"; remaining: number };
 
 /**
@@ -260,8 +280,7 @@ export type SecondFactorResult = { method: "totp" } | { method: "recovery"; rema
  */
 export async function verifySecondFactor(env: MfaKeyEnv, db: Db, sessionId: string, userId: string, codeRaw: string, ip: string | null,
   purpose: "login" | "step_up", opts: { allowRecovery?: boolean } = { allowRecovery: true }): Promise<SecondFactorResult> {
-  const rl = await rateLimit(db, `mfa:${userId}`, 8, 900);
-  if (!rl.allowed) throw new AuthError("Too many codes entered. Wait a few minutes.", 429);
+  await assertMfaAttemptsAllowed(db, userId, ip, purpose);
   const compact = codeRaw.replace(/\s/g, "");
   let result: SecondFactorResult | null = null;
   if (/^\d{6}$/.test(compact)) {
@@ -321,8 +340,11 @@ export async function confirmTotpEnrollment(env: MfaKeyEnv, db: Db, userId: stri
   await db.batch([
     db.prepare(`UPDATE users SET totp_secret = ?, totp_pending_secret = NULL, mfa_enabled = 1, totp_last_step = ? WHERE id = ?`).bind(sealed, step, userId),
     db.prepare(`UPDATE sessions SET mfa_verified = 1, mfa_verified_at = ? WHERE id = ?`).bind(at, sessionId),
+    // Enrolling or REPLACING the authenticator signs out every other session: a session verified with the old
+    // authenticator (for example on a lost or stolen device) must not stay signed in after the replacement.
+    db.prepare(`UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND id IS NOT ? AND revoked_at IS NULL`).bind(at, userId, sessionId),
   ]);
-  await audit(db, { actorUserId: userId, action: "user.mfa_enabled", subjectType: "user", subjectId: userId });
+  await audit(db, { actorUserId: userId, action: "user.mfa_enabled", subjectType: "user", subjectId: userId, details: { otherSessionsRevoked: true } });
   const codes = await issueRecoveryCodes(db, userId);
   await audit(db, { actorUserId: userId, action: "user.mfa_recovery_codes_generated", subjectType: "user", subjectId: userId, details: { count: codes.length } });
   return codes;
@@ -352,8 +374,7 @@ async function issueRecoveryCodes(db: Db, userId: string): Promise<string[]> {
  * (a recovery code cannot mint new recovery codes). Audited and recorded as a security event.
  */
 export async function regenerateRecoveryCodes(env: MfaKeyEnv, db: Db, sessionId: string, userId: string, code: string, ip: string | null): Promise<string[]> {
-  const rl = await rateLimit(db, `mfa:${userId}`, 8, 900);
-  if (!rl.allowed) throw new AuthError("Too many codes entered. Wait a few minutes.", 429);
+  await assertMfaAttemptsAllowed(db, userId, ip, "recovery_codes");
   const compact = code.replace(/\s/g, "");
   if (!/^\d{6}$/.test(compact) || !(await checkTotp(env, db, userId, compact, ip))) {
     await securityEvent(db, "mfa_failed", { userId, ip, detail: "recovery code regeneration" });

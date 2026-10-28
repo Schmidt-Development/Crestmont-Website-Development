@@ -68,7 +68,10 @@ test("[SEC-004] [READY-012] mfa-key / mfa-at-rest feeds report key state and pla
   assert.equal(missing["mfa-key"].source, "mfa-key:staging");
   assert.equal(missing["mfa-key"].status, "unavailable");
   assert.equal(missing["mfa-at-rest"].status, "unavailable");
-  assert.ok(overallFeedHealth(Object.values(missing)).ok, "a missing key does not page anyone");
+  assert.ok(overallFeedHealth(Object.values(missing)).ok, "a missing key on staging does not page anyone");
+  const prodMissing = await byEnv({ ENVIRONMENT: "production" });
+  assert.equal(prodMissing["mfa-key"].status, "failing", "production without the key alerts");
+  assert.equal(overallFeedHealth(Object.values(prodMissing)).ok, false);
 
   const invalid = await byEnv({ ENVIRONMENT: "staging", MFA_ENCRYPTION_KEY: "not-a-valid-key" });
   assert.equal(invalid["mfa-key"].status, "failing");
@@ -110,3 +113,65 @@ test("[SEC-004] [READY-012] public /api/readiness/health lists the MFA feeds wit
   assert.ok(body.feeds.some((f) => f.source === "mfa-at-rest:staging"));
   assert.ok(!JSON.stringify(body).includes(key) && !JSON.stringify(body).includes("AAAA"));
 });
+
+test("[SEC-004] cross-environment isolation: a secret sealed under one environment's key never opens under another's or for another user", async () => {
+  const { openWithKey } = await import("../src/lib/totp-secrets.ts");
+  const staging = KEY(), production = KEY();
+  const secret = newTotpSecret();
+  const sealed = await sealWithKey(staging, "usr_1", secret);
+  assert.equal(await openWithKey(staging, "usr_1", sealed), secret);
+  await assert.rejects(openWithKey(production, "usr_1", sealed), "a production key cannot read a staging row");
+  await assert.rejects(openWithKey(staging, "usr_2", sealed), "nor can the row be moved to another user");
+  const tampered = sealed.slice(0, -4) + (sealed.endsWith("AAA=") ? "BBB=" : "AAA=");
+  await assert.rejects(openWithKey(staging, "usr_1", tampered), "authenticated: tampering is detected");
+  assert.notEqual(await sealWithKey(staging, "usr_1", secret), sealed, "a fresh nonce for every encryption");
+});
+
+test("[AUTH-003] [SEC-004] end to end with a key: invalid and expired codes refused, valid accepted, and no secret or code is written to any log table", async () => {
+  const { totpCode } = await import("../src/lib/auth-crypto.ts");
+  const key = KEY();
+  const app = await createTestApp({ ENVIRONMENT: "development", MFA_ENCRYPTION_KEY: key });
+  const { createStaff, TEST_PASSWORD } = await import("./support/app.ts");
+  const s = await createStaff(app.db, "support", "e2e-mfa@crestmont.test");
+  await app.db.prepare(`UPDATE users SET totp_secret = NULL, mfa_enabled = 0 WHERE id = ?`).bind(s.id).run();
+  const c = app.client();
+  await c.post("/login", { email: s.email, password: TEST_PASSWORD });
+  const setup = await (await c.get("/mfa/setup")).text();
+  const secret = /data-testid="totp-secret">([A-Z2-7 ]+)</.exec(setup)![1].replace(/ /g, "");
+  const enrolCode = await totpCode(secret);
+  const done = await c.post("/mfa/setup", { code: enrolCode });
+  const codes = [...(await done.text()).matchAll(/<li><code>([a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4})<\/code><\/li>/g)].map((m) => m[1]);
+  assert.equal(codes.length, 10);
+  const row = await app.db.prepare(`SELECT totp_secret, totp_pending_secret FROM users WHERE id = ?`).bind(s.id).first<{ totp_secret: string; totp_pending_secret: string | null }>();
+  assert.match(row!.totp_secret, /^v1:/, "stored encrypted");
+  assert.equal(row!.totp_pending_secret, null);
+
+  const reset = () => app.db.prepare(`UPDATE users SET totp_last_step = NULL WHERE id = ?`).bind(s.id).run().then(() => app.db.prepare(`DELETE FROM rate_limits WHERE key = ?`).bind(`mfa:${s.id}`).run());
+  const fresh = app.client();
+  await fresh.post("/login", { email: s.email, password: TEST_PASSWORD });
+  const now = Math.floor(Date.now() / 1000);
+  const tried: string[] = [];
+  for (const [label, code] of [["expired (3 steps old)", await totpCode(secret, now - 90)], ["future (3 steps ahead)", await totpCode(secret, now + 90)], ["malformed", "12345"], ["wrong", "000000"]] as const) {
+    if (code === await totpCode(secret)) continue; // astronomically unlikely collision
+    await reset(); tried.push(code);
+    assert.equal((await fresh.post("/mfa", { code })).status, 401, `${label} code refused`);
+    assert.notEqual((await fresh.get("/staff")).status, 200);
+  }
+  await reset();
+  const good = await totpCode(secret, now - 30); // one step of clock drift is accepted
+  assert.equal(loc(await fresh.post("/mfa", { code: good })), "/staff");
+  const r = app.client();
+  await r.post("/login", { email: s.email, password: TEST_PASSWORD });
+  assert.equal(loc(await r.post("/mfa", { code: codes[0] })), "/staff", "recovery code accepted once");
+
+  // Nothing secret anywhere in the log / audit / event tables (or the stored email bodies).
+  const dump = JSON.stringify([
+    ...(await app.db.prepare(`SELECT * FROM security_events`).all()).results,
+    ...(await app.db.prepare(`SELECT * FROM audit_logs`).all()).results,
+    ...(await app.db.prepare(`SELECT * FROM email_messages`).all().catch(() => ({ results: [] }))).results,
+  ]);
+  for (const v of [secret, key, ...codes]) assert.ok(!dump.includes(v), "no TOTP secret, key or recovery code is logged");
+  // 6-digit codes as standalone tokens (a hex id or timestamp may contain the same digits by chance).
+  for (const v of [enrolCode, good, ...tried.filter((t) => t.length === 6 && t !== "000000")]) assert.ok(!new RegExp(`(?<![0-9a-zA-Z])${v}(?![0-9a-zA-Z])`).test(dump), "no TOTP code is logged");
+});
+const loc = (r: Response) => r.headers.get("location") ?? "";

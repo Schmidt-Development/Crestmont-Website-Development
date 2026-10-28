@@ -90,7 +90,9 @@ export async function mfaFeeds(ctx: Pick<AppContext, "db" | "env">): Promise<Fee
   const keyFeed: FeedStatus = key === "ok"
     ? { source: `mfa-key:${env}`, status: "healthy", detail: "MFA_ENCRYPTION_KEY is set and valid", required: false, lastSuccessAt: null, lastAttemptAt: null }
     : key === "missing"
-      ? { source: `mfa-key:${env}`, status: "unavailable", detail: "MFA_ENCRYPTION_KEY is not set: new two-factor enrolment is refused", required: false, lastSuccessAt: null, lastAttemptAt: null }
+      // Production must never run without the key (staff could not enrol two-factor), so there it is failing and alerts;
+      // on staging it is only unavailable while the key is being rolled out.
+      ? { source: `mfa-key:${env}`, status: env === "production" ? "failing" : "unavailable", detail: `${env === "production" ? "Last attempt failed: " : ""}MFA_ENCRYPTION_KEY is not set: new two-factor enrolment is refused`, required: false, lastSuccessAt: null, lastAttemptAt: null }
       : { source: `mfa-key:${env}`, status: "failing", detail: "Last attempt failed: MFA_ENCRYPTION_KEY is set but is not base64 of exactly 32 bytes", required: false, lastSuccessAt: null, lastAttemptAt: null };
   const plain = await ctx.db.prepare(`SELECT EXISTS (SELECT 1 FROM users WHERE (totp_secret IS NOT NULL AND totp_secret NOT LIKE 'v1:%') OR (totp_pending_secret IS NOT NULL AND totp_pending_secret NOT LIKE 'v1:%')) AS any_plain`)
     .first<{ any_plain: number }>().catch(() => null);
