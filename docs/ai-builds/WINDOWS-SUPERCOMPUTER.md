@@ -161,16 +161,18 @@ The installer is idempotent. It:
    SYSTEM, Administrators and your account have access. The secret is entered hidden (or `-SecretFile`), stored
    without a newline and never printed.
 4. builds `crestmont-ai-runner:1` and `crestmont-build-sandbox:1` (`crestmont-egress-proxy:1` is built at step 8) (pinned base image
-   tags, `npm ci` from the committed lockfiles; it stops first if `runner\sandbox\package-lock.json` is missing, see
-   `RUNNER-SETUP.md` §12). CI builds the same three images on every push.
-5. writes `state\recommendation.json` and stops with the reasons when the machine is insufficient (`-Model <tag>`
-   overrides).
+   tags pinned by digest, `npm ci` from the committed lockfiles, see `RUNNER-SETUP.md` §12). CI builds the same three
+   images on every push.
+5. writes `state\recommendation.json` and stops with the reasons when the machine is insufficient. `-Model <tag>`
+   overrides only the model choice (`modelChoiceBlockers`); driver, disk, WSL and Docker blockers still stop it.
 6. sets Ollama's user environment (`OLLAMA_HOST=127.0.0.1:11434`, context length, parallelism, keep-alive, flash
    attention, KV cache type), restarts Ollama, verifies that it listens on loopback only, and pulls the model.
 7. writes `compose\docker-compose.yml`, `compose\proxy\squid.conf` (the allow-list with your platform host,
    rendered by `SquidConf.ps1`, which validates every host and refuses hosted AI domains as `-ExtraEgressDomains`;
-   the same rendering is unit-tested as `egress-policy.ts`) and `compose\runner.env`, which holds names, URLs and
-   limits only. The secret is mounted from `secrets\`. `compose\.env` pins `OLLAMA_IMAGE` (`-OllamaImage`).
+   the same rendering is unit-tested as `egress-policy.ts`), the managed `compose\runner.env` (names, URLs and
+   limits only; rewritten on every run, backed up when it changes) and, once, `compose\runner.local.env` for your
+   own settings (never overwritten; managed or sandbox-weakening keys there stop the installer; `RunnerEnv.ps1`).
+   The secret is mounted from `secrets\`. `compose\.env` pins `OLLAMA_IMAGE` (`-OllamaImage`).
 8. checks that a container on the internal network can list the model through the proxy, then runs the runner's
    `--preflight` (skills, model present, sandbox image present).
 9. runs `docker compose up -d` and registers the `CrestmontRunner-Start` scheduled task at your logon.

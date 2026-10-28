@@ -23,7 +23,10 @@ model, a GPU, Docker Desktop, WSL 2 or the Windows build machine.
 | Lease watchdog (stops without completing when heartbeats fail past the lease window); checkpoints refuse symlinks | yes (fake control plane) | yes | crash drill §4.2 |
 | Health endpoint: model reachability, last model/job/draft error, secrets redacted; no claims while the model is down | yes (fake) | yes | `Get-RunnerHealth.ps1` on the host |
 | `runner/package-lock.json` (no runtime deps) + `npm ci` | yes: generated with npm 10.9.9 `--offline` (nothing to resolve), `npm ci --dry-run` OK | yes: runner image build | - |
-| `runner/sandbox/package-lock.json` (Playwright 1.63.0) | no: registry unreachable | generated in CI (warning) and uploaded as `runner-lockfiles`; commit it | - |
+| `runner/sandbox/package-lock.json` (Playwright 1.63.0) | 2026-10-28: committed (integrity hashes from an independent install of the exact versions); `npm ci --dry-run --offline` resolves it | yes: the sandbox image's `npm ci` verified every hash against the registry tarballs (run of `ba86157`); CI now fails if the lockfile is missing | - |
+| Base images pinned by digest | 2026-10-28: node, docker CLI, debian and ollama pinned `tag@sha256` from CI's resolution; the supply-chain test requires digests | yes: images built from the pinned digests (`5c395a1` onward); CI reports whether each pin is still current | - |
+| Installer configuration preservation (`runner.env` managed, `runner.local.env` never overwritten), `-Model` limited to model-choice blockers | yes: `runner/test/runner-env.test.ts` (TypeScript twin + real `docker compose config` for env-file precedence and `$` handling) | yes: `RunnerEnv.ps1` byte-for-byte parity under pwsh 7 and Windows PowerShell 5.1 (`ac4c819`) | a re-run on the build machine |
+| Sandbox isolation evidence (docker inspect of every build container, `check:sandbox-isolation`) | yes: `runner/test/isolation.test.ts` (fake docker; verdict on each weakened flag) | yes | a real container on Docker Desktop (§5) |
 | Dockerfiles lint | yes: hadolint 2.14.0 (release binary, SHA-256 checked), 0 findings (DL3008 apt pinning ignored inline, documented); `docker buildx build --check` (BuildKit rules, base overridden with a local image because Docker Hub was unreachable): no warnings | yes: hadolint in `runner-images` | - |
 | Image builds (runner, sandbox, proxy) | no: base images unreachable | yes: `runner-images` builds all three (no push) | build by the installer (§0) |
 | Sandbox hardening flags with a real daemon: uid 10001, no network, read-only root, no capabilities, no_new_privs, timeout kill, Chromium launches offline (browser-check passes the starter) | yes, against a host-derived STAND-IN image (not the real image): 11/12 checks; the 12th (no curl/wget/sudo) fails only because the stand-in is the host's own `/usr` | yes: `runner/ci/sandbox-self-check.ts` on the real image | Docker Desktop VM (§5 isolation evidence) |
@@ -88,7 +91,8 @@ or simply not obeyed) and no environment values anywhere in the repository, repo
 - A wrist-watch or stopwatch. Note start/end times by hand as a cross-check.
 
 ## 1. Start measurement and the paid-API tripwire
-1. Elevated PowerShell: `C:\CrestmontRunner\Collect-Evidence.ps1 -Monitor -Minutes 120 -IntervalSeconds 15`
+1. Elevated PowerShell: `C:\CrestmontRunner\Collect-Evidence.ps1 -Monitor -Minutes 120 -IntervalSeconds 15 -EvidenceDir C:\CrestmontRunner\evidence\first-real-build`
+   (use the same `-EvidenceDir` for the `-JobId` collection in §5 so everything lands in one folder)
    (it samples CPU, RAM, GPU and container stats into `utilization.csv`; leave it running).
 2. Tripwire (proof of zero calls to Anthropic): the proxy denies and logs every paid AI host. In a second window:
    ```powershell
@@ -123,16 +127,23 @@ explains why. Either way, record which.
 3. Approve (or not) in the dashboard. Approval only records the decision.
 
 ## 3a. Revision drill (proves steps 8-10 of the first-real-build test)
-1. With the first build in `ready_for_review` or `approved`, open it in Owner -> AI builds and submit a revision with a
+1. With the first build in `ready_for_review` or `approved` and the project in customer review (staff move it there),
+   sign in to the portal as the test customer and request a revision (Revisions → "What should change?") with a
    small, visible, checkable change, for example: "On the Services & Prices page add a row 'Wheel truing - $25'
-   and change the home page headline to 'Commuter tune-ups in one day'."
+   and change the home page headline to 'Commuter tune-ups in one day'." With the default `owner_approval` policy it
+   appears in Owner -> AI builds -> Customer revision requests as an included round; press *Send to AI build*
+   (optionally editing the instruction). (Owner-written revisions from a build page work the same way.)
 2. Pass when: a new build record `revision 1` is created and claimed (the first build's record, report, events and
    preview URL are unchanged); the runner works on branch `ai-build/revision-1` starting from the first build's commit
    (the revision's report names the source); the revision's preview is a **new** deploy (the revision record starts
    with no preview, so an owner can never approve the old site by mistake); and a diff between the two commits
    (`git diff <first>..<revision>` in the project repository or the checkpoint bundle) shows the requested changes
    and nothing unrelated.
-3. Record both build ids, both commits, both preview URLs and the diff summary in `drills.txt`.
+3. Pass also when: the customer's revisions page shows the round "in progress" while the AI works; approving the
+   revision build does **not** deliver it to the customer (staff deliver it from the project's Revisions tab, and the
+   customer is then asked to approve); the revision's preview Worker is `cm-prv-…-r1` and the first build's
+   `cm-prv-…-b0` still shows the first version.
+4. Record both build ids, both commits, both preview URLs and the diff summary in `drills.txt`.
 
 ## 4. Cancellation and recovery drill
 1. **Cancel:** queue a revision (or a second test project), and press *Cancel* in the dashboard once it is
@@ -147,7 +158,7 @@ explains why. Either way, record which.
 
 ## 5. Collect the evidence
 ```powershell
-C:\CrestmontRunner\Collect-Evidence.ps1 -JobId bld_XXXX
+C:\CrestmontRunner\Collect-Evidence.ps1 -JobId bld_XXXX -EvidenceDir C:\CrestmontRunner\evidence\first-real-build
 ```
 The folder `C:\CrestmontRunner\evidence\<time>-bld_XXXX\` then contains:
 
@@ -159,7 +170,7 @@ The folder `C:\CrestmontRunner\evidence\<time>-bld_XXXX\` then contains:
 | Generated source | `workspace\<ref>\` | real pages, no `STARTER-PLACEHOLDER`, `.crestmont\requirements.json` with honest statuses |
 | Build / check output | `runner-job.log`, `workspace\<ref>\.crestmont\runner-checks.json` (only when a check failed), owner report | `node scripts/check.mjs` result recorded as `check:static-check`, `check:brief-conformance` recorded; no "Check integrity" note (if one appears, the agent edited the checker: the runner restored it, but record the model as untrustworthy for unattended builds) |
 | Browser test output | `workspace\<ref>\.crestmont\screenshots\*.png`, `check:browser-check` in the report | 2 screenshots per page; PASS, or FAIL with reasons |
-| Isolation | `docker-inspect-cm-job-*.json` | `NetworkMode: none`, `ReadonlyRootfs: true`, `CapDrop: [ALL]`, `SecurityOpt: [no-new-privileges]`, memory/CPU/PID limits, only two mounts |
+| Isolation | `workspace\<ref>\_runner-evidence\sandbox-isolation-NN.json` (one per build container, written by the runner from `docker inspect`, kept after the containers are removed) and `check:sandbox-isolation` in the owner report | every record `"ok": true`: network none, read-only root, cap-drop ALL, no-new-privileges, uid 10001, memory/CPU/PID limits, exactly the two job mounts, no Docker socket |
 | No public port | `listening-ports.txt`, `firewall-inbound.txt` | nothing from Docker/Ollama/runner listening on a non-loopback address; no inbound rules added |
 | Runtime / CPU / RAM / GPU | `utilization.csv`, `runner-job.log` (timestamps), owner report (model time, tokens) | recorded, whatever the values are |
 | Preview reviewed by the owner | your notes (add `owner-review.txt`) | written |
@@ -180,7 +191,7 @@ runner and the real model (none of it has happened yet):
 | 5 | Quality checks execute | `check:static-check`, `check:brief-conformance`, `check:browser-check` in the report with real output; screenshots |
 | 6 | A preview is produced | preview URL on an allowed preview host (`BUILD_PREVIEW_HOSTS`, default `*.workers.dev`) recorded on the build |
 | 7 | The Owner can inspect the result | owner notes in `owner-review.txt` (desktop + phone) |
-| 8 | A revision can be requested | §3a step 1: revision build id |
+| 8 | A revision can be requested | §3a step 1: the customer's portal request, its round, and the revision build id it was forwarded to |
 | 9 | The revision changes the website | §3a step 2: new preview + commit diff |
 | 10 | Original build and audit history preserved | first build's record, events, report and preview unchanged after the revision |
 

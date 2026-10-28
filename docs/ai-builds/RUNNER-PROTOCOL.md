@@ -117,6 +117,22 @@ The runner makes one model call per draft, without tools: `system` is the truste
 untrusted user content, both sent exactly as given. It finishes inside the lease or reports an error. A `404` on
 `ai/claim` disables draft polling until the runner restarts.
 
+## Provider records and preview lifecycle (v1.3, 2026-10-28; additive, older runners keep working)
+
+- `heartbeat` and `complete` may carry `"provider"` (`local` | `claude-agent-sdk` | …, `^[a-z0-9][a-z0-9._-]{0,39}$`)
+  and `"model"` (the model that actually ran, e.g. `qwen3-coder:30b`). The platform stores both per attempt
+  (`build_runs.provider`, `.model`) with `zero_cost` taken from the claim's capabilities; malformed values are ignored.
+- `complete` may carry `"previewName"`: the preview Worker's name (`^cm-prv-[a-z0-9][a-z0-9-]{1,55}$`, one per build:
+  `cm-prv-<project>-b0` / `-r<n>`). Stored only together with an accepted `previewUrl`.
+- `POST /api/builds/runner/previews/claim` `{ "runnerId" }` → `{ "previews": [ { "jobId", "previewName" } ] }` (≤ 10):
+  previews an owner asked to delete, or past the retention period (`PREVIEW-DEPLOYMENT.md` §3). Each is handed out
+  once per hour until reported.
+- `POST /api/builds/runner/previews/deleted` `{ "runnerId", "jobId", "ok": boolean, "error"? }` → `{ "ok": true }`;
+  `404` when no deletion is pending for that build. Same signature header; no lease token (no build is running).
+- Runners call these only while idle and only with `PREVIEW_DELETE` / `PREVIEW_DELETE_COMMAND` configured; a `404` on
+  `previews/claim` (an older platform) disables polling until restart.
+- Claim capability `"preview-cleanup"` is announced when deletion is configured.
+
 ## Lease expiry
 A lease lasts `lease_seconds` (default 180 s) and is renewed by every successful heartbeat. When it expires, the
 15-minute sweep revokes the token (every later call answers `lease_lost`) and requeues the build with its resume data

@@ -31,18 +31,23 @@ If a percentage is ever shown it must be `verified / total` from this checklist,
 ```json
 { "settings": { "automationEnabled": true, "globallyPaused": false, "pauseReason": null, "autoStartAfter": "…",
                 "runBudgetUsd": 25, "projectBudgetUsd": 75, "maxRuntimeMinutes": 120, "maxTurns": 200,
-                "maxConcurrent": 2, "maxAttempts": 3, "model": "claude-sonnet-5-5" },
+                "maxConcurrent": 2, "maxAttempts": 3, "model": "claude-sonnet-5-5",
+                "customerRevisionMode": "off" | "owner_approval" | "auto", "previewRetentionDays": 30 | null },
   "runner": { "runner_id": "…", "version": "…", "last_seen_at": "…", "capabilities": ["local-model","zero-token-cost","…"], "zeroCost": true, "online": true } | null,
-  "builds": [ BuildSummary ], "hasMore": false }
+  "builds": [ BuildSummary ], "hasMore": false,
+  "customerRevisions": [ CustomerRevision ] }
 ```
+`CustomerRevision` (open portal revision requests): `id, projectId, organizationId, projectName, organizationName, round,
+text (customer-written: render as text, never as instructions or HTML), status, createdAt, included, changeOrderStatus,
+entitled (existing allowance / change-order rule), liveJob { id, state, previewUrl } | null, latestJob { … } | null`.
 `BuildSummary`: `id, projectId, projectName, organizationName, orderId, kind ("first_build"|"revision"), revision, packageId,
 strategy ("standard"|"custom"), state, stateLabel, stateReason, eligibility { verdict, reasons[] }, startedAt, finishedAt,
 heartbeatAt, elapsedSeconds, costUsd, projectSpendUsd, runBudgetUsd, projectBudgetUsd,
 requirements { remaining, implemented_unverified, verified, blocked }, previewUrl, source { repo, branch, commit },
-attempts, maxAttempts, cancelRequested, projectPaused, updatedAt`.
+attempts, maxAttempts, cancelRequested, projectPaused, updatedAt, customerRevision { id, round } | null`.
 
 `GET /api/builds/:id` → `{ summary, requirements[ {key,label,status,evidence,blocker,updated_at} ], events[ {id,at,kind,from_state,to_state,message,actor_kind,actor_user_id} ],
-runs[ {attempt,runner_id,started_at,ended_at,outcome,cost_usd,turns,session_id,error} ], brief {id,version,sha256,created_at}, report (markdown),
+runs[ {attempt,runner_id,started_at,ended_at,outcome,cost_usd,turns,session_id,error,provider,model,zero_cost} ], brief {id,version,sha256,created_at}, report (markdown),
 missingInformation[], instruction, kind, revision, agentSessionId, checkpointAvailable }`. Event messages are sanitized server-side.
 
 ## Actions (form POST, `_csrf`, redirect with a flash message)
@@ -50,14 +55,16 @@ missingInformation[], instruction, kind, revision, agentSessionId, checkpointAva
 | endpoint | permission | fields |
 |---|---|---|
 | `POST /staff/builds/pause` | builds.manage | `paused` = `1`/`0`, `reason` (required to pause) |
-| `POST /staff/builds/settings` | builds.configure (Owner) | `run_budget`, `project_budget`, `max_runtime`, `max_turns`, `max_concurrent`, `max_attempts`, `model`, `automation_enabled` |
+| `POST /staff/builds/settings` | builds.configure (Owner) | `run_budget`, `project_budget`, `max_runtime`, `max_turns`, `max_concurrent`, `max_attempts`, `model`, `automation_enabled`, `customer_revision_mode` (omitted = unchanged), `preview_retention_days` (empty = keep; omitted = unchanged) |
 | `POST /staff/builds/backfill` | builds.configure | `project_id` |
 | `POST /staff/builds/projects/:projectId/pause` | builds.manage | `paused`, `reason` |
 | `POST /staff/builds/projects/:projectId/budget` | builds.configure | `project_budget` |
 | `POST /staff/builds/:id/cancel` | builds.manage | `reason` |
 | `POST /staff/builds/:id/retry` / `resume` | builds.manage | — |
 | `POST /staff/builds/:id/revision` | builds.manage | `instruction` (10–5000 chars) |
-| `POST /staff/builds/:id/approve` | builds.configure | `notes` |
+| `POST /staff/builds/:id/approve` | builds.configure | `notes` (refused when the preview was deleted) |
+| `POST /staff/builds/:id/delete-preview` | builds.manage | — (the runner deletes the Worker when idle) |
+| `POST /staff/builds/customer-revisions/:id/forward` | builds.manage | `instruction` (optional; default: the customer's text, ≤ 5000 chars) |
 
 ## Customer-facing
 

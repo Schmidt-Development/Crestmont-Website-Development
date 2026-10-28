@@ -89,6 +89,9 @@ It is never written to `.git/config` and never reaches the agent. Branches pushe
 
 ## 5. Preview deploys (optional)
 
+**On the Windows build machine follow `PREVIEW-DEPLOYMENT.md`** (settings go in `runner.local.env`, single-quoted;
+per-build Worker names, sanitized export, deletion and retention). The steps below are the original Linux-host notes.
+
 Without this, reports say "Preview unavailable".
 
 1. Create a **separate Cloudflare account** for previews only (for example "Crestmont Previews"). Never the
@@ -279,11 +282,10 @@ fails on `npm install`, `npx --yes` or `curl | sh` in a Dockerfile).
 | Manifest | What it installs | Lockfile |
 | --- | --- | --- |
 | `runner/package.json` | Nothing: the local default (agent loop, model client, sandbox, drafts) uses only Node built-ins. | `runner/package-lock.json`, committed. Generated with `npm install --package-lock-only --offline` (there is nothing to resolve). The runner image runs `npm ci --omit=dev --ignore-scripts`, which fails if the two disagree. |
-| `runner/sandbox/package.json` | `playwright` 1.63.0 (exact) for `browser-check.mjs`; the image then downloads that Playwright's Chromium. 1.63.0 is the version the real-Chromium browser-check test ran with. | `runner/sandbox/package-lock.json`: **not committed yet** (no registry access where this was written; a hand-written lockfile would be fabricated). |
+| `runner/sandbox/package.json` | `playwright` 1.63.0 (exact) for `browser-check.mjs`; the image then downloads that Playwright's Chromium. 1.63.0 is the version the real-Chromium browser-check test ran with. | `runner/sandbox/package-lock.json`: committed 2026-10-28 (playwright + playwright-core 1.63.0; integrity hashes from an independent install of those exact versions, registry URLs). CI's sandbox image build ran `npm ci` from it, which verifies every hash against the registry tarballs, and passed. CI now fails if it is missing. |
 | `runner/agent-sdk/package.json` | Optional paid adapter only: `@anthropic-ai/claude-agent-sdk` and `playwright` (exact). Moved out of `optionalDependencies` so the default lockfile is complete. | `runner/agent-sdk/package-lock.json`: not committed. `--build-arg INSTALL_AGENT_SDK=true` refuses to build without it. |
 
-To create a missing lockfile: take it from the `runner-lockfiles` artifact of the CI job `runner-images` (CI
-generates it for that build and prints a warning), or on any machine with registry access run
+To regenerate a lockfile (for example after changing a pinned version), on any machine with registry access run
 `cd runner/sandbox && npm install --package-lock-only --ignore-scripts`. Review it (every `resolved` URL is
 `https://registry.npmjs.org/...`, every entry has a `sha512-` integrity) and commit it; the supply-chain test then
 validates it on every run. `Install-CrestmontRunner.ps1` stops before building when a lockfile is missing.
@@ -291,10 +293,10 @@ validates it on every run. `Install-CrestmontRunner.ps1` stops before building w
 **Base images** are exact version tags, never floating: `node:22.23.4-bookworm-slim` (runner and sandbox; the Node
 version the tests ran on), `docker:27.5.1-cli` (Docker CLI copied into the runner), `debian:12.12-slim` (proxy),
 `ollama/ollama:0.32.0` (optional ollama-in-docker profile; the installer's `-OllamaImage`). They are `ARG`s at the top
-of each Dockerfile. Digests could not be fetched here (Docker Hub was unreachable), so they are **not** pinned by
-digest yet: the `runner-images` job writes the digest each tag resolved to into its job summary. After reviewing a
-green build, append them (`ARG NODE_IMAGE=node:22.23.4-bookworm-slim@sha256:<digest>`); the test accepts
-`tag@sha256:<digest>`. Debian packages are not version-pinned (bookworm security updates win); hadolint's DL3008 is
+of each Dockerfile. Since 2026-10-28 every one is **pinned by tag and digest** (`tag@sha256:<digest>`, the digests
+CI's `runner-images` job resolved; the compose default and the installer's `-OllamaImage` default included), and the
+supply-chain test requires a digest. The CI job reports each tag's current digest as a "Base image digest" annotation
+and says whether the pin is still current; re-pin only after reviewing what changed. Debian packages are not version-pinned (bookworm security updates win); hadolint's DL3008 is
 ignored inline for that reason only.
 
 **CI image build** (`.github/workflows/ci.yml`, job `runner-images`, `contents: read`, nothing pushed): hadolint

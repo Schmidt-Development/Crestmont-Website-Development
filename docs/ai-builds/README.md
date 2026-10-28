@@ -41,7 +41,17 @@ selected projects. Staging sample data is excluded the same way.
 - Approving a preview records the decision only. Nothing here publishes to production, changes domains, charges customers,
   emails customers or migrates production databases.
 
+## Customer revisions and previews (2026-10-28)
+- A customer's revision request (portal → Revisions; the existing allowance and change-order rules decide whether a
+  round may be worked on) reaches the AI builder according to the Owner's policy: `off`, `owner_approval` (default:
+  the request waits in Owner → AI builds until an owner forwards it, optionally editing the instruction) or `auto`.
+  One live AI build per request; a failed one can be sent again. Approving the AI result never delivers it: staff
+  deliver the round from the project's Revisions tab, which notifies the customer.
+- Each build gets its own preview Worker on a separate preview account; previews are deleted on owner request or
+  after an optional retention period, by the runner. Setup: `PREVIEW-DEPLOYMENT.md`.
+
 ## Contracts
 - Runner protocol: `RUNNER-PROTOCOL.md` · Frontend: `FRONTEND-CONTRACT.md` · Runner setup: `RUNNER-SETUP.md` · Starters: `STARTERS.md`.
 - Windows build machine (local model, default): `WINDOWS-SUPERCOMPUTER.md` · Validation plan: `LOCAL-VALIDATION.md`.
 - Founder order of work for the first real build (decisions, install, known installer issues): `FOUNDER-RUNNER-INSTALL.md`.
+- Preview account, lifecycle and secret inventory: `PREVIEW-DEPLOYMENT.md`.
