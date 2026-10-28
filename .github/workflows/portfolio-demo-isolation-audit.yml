@@ -37,4 +37,7 @@ jobs:
           # read these settings — the audit then reports UNVERIFIED rather than assuming isolation.
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_AUDIT_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Optional, read-only use: lets the audit read the Netlify site's branch-deploy settings (otherwise UNVERIFIED
+          # for the repository that Netlify builds).
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
         run: node --no-warnings scripts/demo-isolation-audit.ts

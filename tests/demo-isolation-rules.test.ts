@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DEMO_BRANCHES, matches, branchSelected, pathsTrigger } from "../scripts/demo-isolation-rules.ts";
+import { classify, netlifyDeploys } from "../scripts/demo-isolation-rules.ts";
 
 test("[SEC-002] isolation audit: wildcard, branch and path rules follow Cloudflare's semantics and fail safe", () => {
   assert.ok(matches("*", "anything") && matches("crestmont/*", "crestmont/portfolio-demo") && matches("*.md", "docs/a.md"));
@@ -19,4 +20,15 @@ test("[SEC-002] isolation audit: wildcard, branch and path rules follow Cloudfla
   assert.ok(pathsTrigger(files, ["*"], ["portfolio-demo/*"]), ".github/ still matches");
   assert.ok(pathsTrigger([], ["src/*"], ["*"]), "zero-file pushes always build");
   assert.equal(new Set(DEMO_BRANCHES.map((d) => `${d.repo}:${d.branch}`)).size, 4);
+});
+
+test("[SEC-002] audit error classes: HTTP 400 is an invalid request, never a missing permission; Netlify rule is conservative", () => {
+  assert.deepEqual([400, 401, 403, 404, 429, 500, 0].map(classify), ["invalid-request", "authentication", "permission", "not-found", "rate-limited", "service", "network"]);
+  const b = "crestmont/portfolio-demo-rentals";
+  assert.equal(netlifyDeploys(b, { allowed_branches: ["cloudflare-pages-deployment"] }), false, "only the production branch deploys");
+  assert.equal(netlifyDeploys(b, { allowed_branches: [] }), true, "empty list may mean all branches");
+  assert.equal(netlifyDeploys(b, {}), true);
+  assert.equal(netlifyDeploys(b, { allowed_branches: ["main", "crestmont/*"] }), true, "wildcards are not trusted");
+  assert.equal(netlifyDeploys(b, { allowed_branches: [b] }), true);
+  assert.equal(netlifyDeploys(b, { stop_builds: true, allowed_branches: [] }), false);
 });

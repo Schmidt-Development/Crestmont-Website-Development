@@ -24,3 +24,21 @@ export function pathsTrigger(files: string[], inc: string[] | null | undefined, 
   return files.filter((f) => !(exc ?? []).some((p) => matches(p, f))).some((f) => includes.some((p) => matches(p, f)));
 }
 
+
+/** Netlify sites connected to a project repository (seen deploying pull-request previews for lansing-car-rentals). */
+export const NETLIFY_SITES: { site: string; repo: string }[] = [{ site: "astonishing-sawine-f80069", repo: "lansing-car-rentals" }];
+
+export type FailKind = "invalid-request" | "authentication" | "permission" | "not-found" | "rate-limited" | "service" | "network";
+/** An invalid request (HTTP 400) is a defect in the audit's own request — never evidence of a missing permission. */
+export function classify(status: number): FailKind {
+  return status === 0 ? "network" : status === 400 ? "invalid-request" : status === 401 ? "authentication" : status === 403 ? "permission" : status === 404 ? "not-found" : status === 429 ? "rate-limited" : "service";
+}
+
+/** Conservative Netlify rule for a push without a pull request: it deploys unless builds are stopped or branch deploys
+ *  name exact branches (no wildcard; an empty list is treated as "all branches") that exclude this one. */
+export function netlifyDeploys(branch: string, b: { stop_builds?: boolean; allowed_branches?: string[] }): boolean {
+  if (b.stop_builds) return false;
+  const allowed = b.allowed_branches ?? [];
+  const exact = allowed.length > 0 && allowed.every((a) => !a.includes("*"));
+  return !exact || allowed.includes(branch);
+}
