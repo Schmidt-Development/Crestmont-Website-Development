@@ -10,9 +10,9 @@ These are actions, not choices. They close active exposures.
 
 | # | Action | Why | How |
 |---|---|---|---|
-| A1 | Review and merge **PR #8** (`claude/production-readiness`). It already contains PR #12's only commit, so #12 merges with it; #13 is a superset and can follow. Ask the PR owner to apply `pr8-pr13-F23-F24-workflow-hardening.patch` first (F-23/F-24) | Stops staging Owner credentials (F-18) and the production database export (F-19) being published as artifacts of this public repository | GitHub PR review |
-| A2 | Delete existing `staging-preview-access` (and any `pre-deploy-production-export`) artifacts | Old artifacts stay downloadable until they expire | Actions → each *Deploy staging* run → Artifacts → delete |
-| A3 | Rotate staging credentials after A1 | Treat the old staging Owner password and 2FA key as compromised | *Deploy staging* → run workflow with `rotate_credentials=true` |
+| A1 | **Merge PR #8** (`claude/production-readiness`, head `66c61cf`; contains PR #12's only commit; #13 not required). All checks pass. Includes the F-23/F-24 fixes and authenticated sealing | Stops every future plaintext credential and database-export artifact | GitHub → PR #8 → *Merge pull request* (this session's merge was refused by its permission policy) |
+| A2 | ~~Delete existing `staging-preview-access` artifacts~~ **Done 2026-10-28**: 16 deleted, 0 remaining; no production export artifact ever existed | Old artifacts stayed downloadable until expiry | — |
+| A3 | Rotate staging credentials **after A1**, then read the run's "Credential rotation verification" | Treat the old staging Owner password, 2FA key and preview password as compromised | Set `ACCESS_ARTIFACT_PASSPHRASE` (16+ chars) first, then *Deploy staging* → Run workflow → `rotate_credentials=true` |
 | A4 | GitHub settings (free on public repos) | Enforce what the files cannot | `docs/security/SECURITY-READINESS-2026-10-28.md` §10 (environment reviewers + `main`-only, rulesets, secret scanning + push protection, Dependabot alerts, fork-PR approval). Code scanning default setup is already on; delete the redundant `codeql.yml`, which fails every run while default setup is enabled |
 
 ## B. Decisions
@@ -49,7 +49,7 @@ These are actions, not choices. They close active exposures.
 | **Legal counsel** | Review `docs/legal/*` (questions in README §5 and RESEARCH-NOTES §5); governing law; breach notice; call-recording consent; auto-renewal; AI IP language; DMCA agent | LEGAL-004, Gate F |
 | **Accountant (CPA)** | Entity tax classification; Michigan sales/use tax on builds, hosting, plans and resold licenses (RAB 2023-10); Lansing city income tax; record retention period | LEGAL-005, PAY-010 |
 | **Insurance agent** | Tech E&O + cyber quotes; GL/BOP; contract certificate requirements | D-06 |
-| **Other Claude sessions** | PR #8 tag-injection/secret-scope patch (§9 of the security doc); AI builder: refuse `failed` scans; AI runner: commit sandbox/agent-sdk lockfiles; frontend: renumber `0037_portfolio_demos.sql`; D1 restore drill on staging; MFA production key | F-23, F-24, D-04 |
+| **Other Claude sessions** | AI builder: refuse `failed` scans; AI runner: commit sandbox/agent-sdk lockfiles; frontend: renumber `0037_portfolio_demos.sql`; D1 restore drill on staging; MFA production key | F-23, F-24, D-04 |
 | **Founder authorization** | Every production deployment, migration, secret change, DNS change, live payment or live calling | Gate G |
 
 ## D. Business setup checklist (Founder; nothing here has been filed or bought)
@@ -78,7 +78,7 @@ These are actions, not choices. They close active exposures.
 |---|---|---|
 | Ready for integration testing | **Yes, for backend code** — tests pass on this branch; frontend redesign and provider integrations are separate branches | `npm test`, typecheck |
 | Ready for staging verification | **Partly** — staging exists, but uploads are off (no R2) and 0/15 security requirements are staging-verified; staging Owner credentials must be rotated first (F-18) | Gate C/E |
-| Ready for production configuration | **No** — PR #8/#12/#13 unmerged; production secrets/domain not provisioned; F-19/F-23 open | Gates A, C, D |
+| Ready for production configuration | **No** — PR #8 awaiting merge; production secrets/domain not provisioned | Gates A, C, D |
 | Ready for production deployment | **No** | Gates A, C, D, E, F, G fail |
 | Overall | **Blocked** on A1–A4, D-01, D-05, D-09, D-13, counsel review, and provider accounts | this register |
 

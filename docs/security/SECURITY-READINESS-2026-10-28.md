@@ -61,13 +61,13 @@ All findings are recorded in `security_findings` by `migrations/0040_security_re
 ### Critical
 
 **F-18 — Staging Owner credentials published as a public artifact.** `deploy-staging.yml` on `main` uploads `access/README.md` (written by `scripts/staging-access.ts accessReadme`: preview password, Owner email and password, Owner TOTP setup key) as the `staging-preview-access` artifact. The workflow calls it "private"; on a public repository any signed-in GitHub user can download workflow artifacts.
-- **Status:** open. Fix exists in **PR #8** (`claude/production-readiness`): encrypt with `ACCESS_ARTIFACT_PASSPHRASE` or withhold on a public repository. Reviewed here and sound.
-- **Required now (Founder):** merge PR #8 (after review); delete existing `staging-preview-access` artifacts from past runs (Actions → each Deploy staging run → Artifacts → delete); then rotate staging credentials (`Deploy staging` → `rotate_credentials=true`). Treat the previous staging Owner password and 2FA key as compromised. Review staging `audit_logs` for `session.created` from unknown IPs.
+- **Status (2026-10-28 evening):** **open (release-blocking) until rotation is verified.** Publishing path fixed in PR #8 (`66c61cf`): notes sealed with AES-256-GCM (`scripts/seal-access-notes.ts`), no plaintext path for any repository visibility, enforced by `tests/workflow-security.test.ts`. **All 16 historical `staging-preview-access` artifacts deleted** (Founder-authorized; inventory re-queried: 0 remaining). The rotation itself now also removes recovery codes, pending enrolments and demo-sent invitations, retires the old preview password, and proves on the live site that old credentials and an old Owner session are rejected (`scripts/staging-rotation-check.ts`).
+- **Remaining steps:** merge PR #8 → confirm the merge-triggered staging deploy uploads only `staging-access.cmseal` (or nothing, if `ACCESS_ARTIFACT_PASSPHRASE` is unset) → run *Deploy staging* with `rotate_credentials=true` → read its "Credential rotation verification" and "Staging exposure audit" summaries. Deleting artifacts does not undo the exposure; the values must be presumed copied.
 - **Remaining risk until then:** anyone can sign in to staging as Owner. Staging holds seeded demo data only (no customer data), but the Owner can change staging settings and trigger staging integrations.
 
 **F-19 — Production database export published as a public artifact.** `deploy-production.yml` on `main` exports `crestmont-production` and uploads it as `pre-deploy-production-export` (30-day retention).
-- **Status:** open. Fix exists in PR #8 (export stored in the private R2 bucket; only the hash is reported). Production has never been deployed, so no customer data has been exposed.
-- **Required:** PR #8 must merge **before the first production deployment**. Gate C blocks release while this is open.
+- **Status:** **resolved by PR #8** (export stored in the private production R2 bucket; no artifact). No production deploy has ever run, so no export artifact ever existed (verified in the artifact inventory, 2026-10-28).
+- **Required:** PR #8 must be merged before the first production deployment (this PR includes it).
 
 ### High
 
@@ -79,8 +79,8 @@ All findings are recorded in `security_findings` by `migrations/0040_security_re
 |---|---|---|---|
 | F-20 | Lockout confirmed a correct password: a locked account said "locked" only to the right password, "incorrect" to wrong ones | `src/services/auth.ts login` | **Resolved**: lockout decided before the password result; unknown emails get an equivalent counter so the answer does not reveal which accounts exist. Two tests |
 | F-21 | Files with `scan_status` `infected`/`failed` were downloadable via `GET /files/:id` (share links already refused them) | `src/services/files.ts serveFile` | **Resolved**: 409 + audited `file.download_blocked` |
-| F-23 | `deploy-production.yml` interpolates free-text `inputs.tag` into `run:` scripts that hold the production token | lines `--notes "tag ${{ inputs.tag }}"`, `--message "Release ${{ inputs.tag }} …"` (also in PR #8) | **Open** — tested hand-off patch `pr8-pr13-F23-F24-workflow-hardening.patch` (applies cleanly to PR #8 and #13; their suite passes with it) |
-| F-24 | Deploy workflows expose `CLOUDFLARE_API_TOKEN` to every step (including `npm install` of unpinned packages); `wrangler@4` and all actions pinned to mutable tags | job-level `env:` in deploy-production/staging | **Open** — same hand-off patch blanks secrets in every npm step; exact wrangler/SHA pinning still to do |
+| F-23 | `deploy-production.yml` interpolates free-text `inputs.tag` into `run:` scripts that hold the production token | lines `--notes "tag ${{ inputs.tag }}"`, `--message "Release ${{ inputs.tag }} …"` (also in PR #8) | **Resolved in PR #8** (`ccb4b75`): tag passed only via `$RELEASE_TAG`, whole-string bash validation (a `grep` check would accept a multi-line value), enforced by `tests/workflow-security.test.ts` |
+| F-24 | Deploy workflows expose `CLOUDFLARE_API_TOKEN` to every step (including `npm install` of unpinned packages); `wrangler@4` and all actions pinned to mutable tags | job-level `env:` in deploy-production/staging | **Resolved in PR #8**: no job-level secrets; token only on wrangler steps; nothing on npm/tsc/test steps; evidence secret unset before the browser journey. Exact wrangler version pin still recommended (registry unreachable from this workspace) |
 | F-29 | Published refund policy says the Founder decides discretionary refunds, but support can permanently deny at review (`under_review → denied` needs only `refund.review`) | `src/domain/refunds.ts`, `src/content/legal.ts` refunds | **Open — Founder decision D-08** (change the workflow or the policy text; not decided here) |
 | F-30 | AI build inputs accepted files whose scan **failed**; portfolio uploads were stored as `clean` with no scan | `src/services/builds.ts`, `src/services/portfolio.ts` | **Resolved** (both refuse/label correctly; one-condition changes that merge cleanly with the AI builder and frontend branches) |
 | F-25 | No legal-hold mechanism: retention purges and privacy anonymisation could destroy evidence | — | **Resolved**: `legal_holds` + enforcement (§4) |
@@ -101,7 +101,7 @@ All findings are recorded in `security_findings` by `migrations/0040_security_re
 
 ### Already-fixed findings corrected in the register
 
-F-06, F-08, F-11, F-13, F-15 were fixed in code with tests by earlier sessions (see `ASVS-REVIEW.md`) but `security_findings` still said `open`. The migration records them as resolved with their test evidence. The genuinely open release-blocking findings are now **F-01, F-02, F-03, F-10, F-16, F-18, F-19, F-23**. Open non-blocking: F-05 (accepted), F-09, F-14, F-17 (accepted), F-24, F-29.
+F-06, F-08, F-11, F-13, F-15 were fixed in code with tests by earlier sessions (see `ASVS-REVIEW.md`) but `security_findings` still said `open`. The migration records them as resolved with their test evidence. The genuinely open release-blocking findings are now **F-01, F-02, F-03, F-10, F-16, F-18** (F-18 until the staging rotation is verified). Open non-blocking: F-05 (accepted), F-09, F-14, F-17 (accepted), F-29. F-19, F-23, F-24 resolved by PR #8.
 
 ---
 
