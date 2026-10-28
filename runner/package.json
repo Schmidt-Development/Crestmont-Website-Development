@@ -1,8 +1,8 @@
 {
   "name": "crestmont-ai-builds-runner",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "Crestmont AI Builds build runner: pulls paid-intake build jobs from the control plane and runs Claude Agent SDK sessions in isolated workspaces.",
+  "description": "Crestmont AI Builds runner: pulls paid-intake build jobs from the control plane and builds them with a self-hosted model (local provider, default) in per-job container sandboxes. No runtime npm dependencies. The Claude Agent SDK adapter is optional and paid (opt-in; its packages live in agent-sdk/).",
   "type": "module",
   "engines": {
     "node": ">=22.18"
@@ -10,10 +10,9 @@
   "scripts": {
     "start": "node --no-warnings src/main.ts",
     "preflight": "node --no-warnings src/main.ts --preflight",
+    "select-model": "node --no-warnings windows/select-model.ts",
     "test": "node --no-warnings --test 'test/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json"
   },
-  "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.310"
-  }
+  "dependencies": {}
 }

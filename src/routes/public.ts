@@ -231,7 +231,8 @@ const HONEYPOT = "fax_number";
 type FormVals = Record<string, string>;
 type FieldErrors = Record<string, string>;
 
-function turnstileWidget(ctx: AppContext): SafeHtml {
+/** Cloudflare Turnstile widget (renders nothing without a site key, e.g. in development). Also used by /register and /password/forgot. */
+export function turnstileWidget(ctx: AppContext): SafeHtml {
   if (!ctx.env.TURNSTILE_SITE_KEY) return html``;
   return html`<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script><div class="cf-turnstile field" data-sitekey="${ctx.env.TURNSTILE_SITE_KEY}"></div>`;
 }
@@ -322,11 +323,7 @@ async function handleLead(ctx: AppContext, kind: "quote" | "contact", rerender: 
         .bind(leadId, service?.slug ?? null, v.budget, v.timeline, nowIso()).run();
     }
     try {
-      await sendMail(ctx, { template: "lead_received", to: v.email.toLowerCase(), subject: kind === "quote" ? "We received your quote request — Crestmont" : "We received your message — Crestmont",
-        heading: kind === "quote" ? "Your quote request is in" : "Your message is in", idempotencyKey: `lead-ack:${leadId}`,
-        paragraphs: [`Hello ${v.name}, thank you for contacting Crestmont Website Development.`,
-          kind === "quote" ? "A member of our team will review your project details and reply by email. If the work is feasible within our services, we will follow up with questions or a written quote." : "A member of our team will read your message and reply by email.",
-          "If you did not send this request, you can ignore this email."] });
+      await sendMail(ctx, { template: "lead_received", to: v.email.toLowerCase(), idempotencyKey: `lead-ack:${leadId}`, data: { name: v.name, kind: kind === "quote" ? "quote" : "contact" } });
     } catch (err) {
       console.error(JSON.stringify({ level: "warn", msg: "lead acknowledgement email failed", leadId, error: (err as Error).message }));
     }

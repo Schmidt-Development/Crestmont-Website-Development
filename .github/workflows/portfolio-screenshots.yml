@@ -1,0 +1,40 @@
+name: Portfolio screenshots (for Founder review)
+
+# PORT-001..003: captures genuine, unedited desktop and mobile screenshots of the three live portfolio sites with
+# headless Chromium and uploads them as a private artifact with a manifest (final URL, HTTP status, SHA-256).
+# Nothing is published: the Founder reviews the files and, if approved, uploads them in Staff → Portfolio, where
+# publishing stays blocked until the relationship (PORT-005) and link verification (PORT-006) are recorded.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - name: Install Chromium (pinned Playwright)
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+      - name: Capture the live sites
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+        run: node --no-warnings scripts/capture-portfolio.ts --out portfolio-shots
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Portfolio captures (unpublished — Founder review required)" >> "$GITHUB_STEP_SUMMARY"
+          node -e 'const m=require("./portfolio-shots/manifest.json");for(const r of m.records)console.log(`- ${r.slug} ${r.viewport}: ${r.usable?"usable":"NOT usable"} — HTTP ${r.httpStatus} ${r.finalUrl??""} ${r.error??""}`)' >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: portfolio-screenshots
+          path: portfolio-shots/
+          retention-days: 30

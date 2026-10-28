@@ -5,7 +5,8 @@
 
 export class LivePaymentsNotAuthorized extends Error {}
 
-export interface CheckoutLine { name: string; amountCents: number; quantity?: number }
+/** One Checkout line. Sales tax (LEGAL-005) is sent as its own line per jurisdiction, tagged with taxJurisdictionId. */
+export interface CheckoutLine { name: string; amountCents: number; quantity?: number; taxJurisdictionId?: string }
 export interface CheckoutRequest {
   mode: "payment" | "subscription";
   lines: CheckoutLine[];
@@ -33,6 +34,14 @@ export class NoPayments implements PaymentsAdapter {
   async createRefund(): Promise<never> { throw new Error("Payments are not configured"); }
 }
 
+/**
+ * Every request pins the Stripe API version this integration is written against (https://docs.stripe.com/api-versions).
+ * 2025-02-24.acacia is the last version before 2025-03-31.basil, which removed Invoice.payment_intent/charge/subscription
+ * and Subscription.current_period_end. Webhook payloads follow the webhook endpoint's own version, so
+ * src/domain/stripe-shapes.ts reads both shapes. Upgrading means changing this constant after testing the new shapes.
+ */
+export const STRIPE_API_VERSION = "2025-02-24.acacia";
+
 export class StripeTestPayments implements PaymentsAdapter {
   readonly configured = true;
   readonly mode = "test" as const;
@@ -47,7 +56,7 @@ export class StripeTestPayments implements PaymentsAdapter {
   private async call<T>(path: string, form: Record<string, string>, idem?: string): Promise<T> {
     const r = await this.fetchImpl(`https://api.stripe.com/v1/${path}`, {
       method: "POST",
-      headers: { authorization: `Bearer ${this.key}`, "content-type": "application/x-www-form-urlencoded", ...(idem ? { "idempotency-key": idem } : {}) },
+      headers: { authorization: `Bearer ${this.key}`, "stripe-version": STRIPE_API_VERSION, "content-type": "application/x-www-form-urlencoded", ...(idem ? { "idempotency-key": idem } : {}) },
       body: new URLSearchParams(form).toString(),
     });
     const body = (await r.json()) as T & { error?: { message: string } };
@@ -64,6 +73,7 @@ export class StripeTestPayments implements PaymentsAdapter {
       form[`line_items[${i}][price_data][currency]`] = "usd";
       form[`line_items[${i}][price_data][unit_amount]`] = String(l.amountCents);
       form[`line_items[${i}][price_data][product_data][name]`] = l.name;
+      if (l.taxJurisdictionId) form[`line_items[${i}][price_data][product_data][metadata][crestmont_tax_jurisdiction]`] = l.taxJurisdictionId;
       if (req.mode === "subscription") form[`line_items[${i}][price_data][recurring][interval]`] = req.recurringInterval ?? "month";
     });
     for (const [k, v] of Object.entries(req.metadata)) form[`metadata[${k}]`] = v;
@@ -98,7 +108,7 @@ export class StripeReadOnly {
   async get<T>(path: string, query: [string, string][] = []): Promise<T> {
     if (!/^[a-z_]+(\/[A-Za-z0-9_]+)*$/.test(path)) throw new Error("Invalid Stripe path");
     const qs = query.length ? `?${new URLSearchParams(query).toString()}` : "";
-    const r = await this.fetchImpl(`https://api.stripe.com/v1/${path}${qs}`, { method: "GET", headers: { authorization: `Bearer ${this.key}` } });
+    const r = await this.fetchImpl(`https://api.stripe.com/v1/${path}${qs}`, { method: "GET", headers: { authorization: `Bearer ${this.key}`, "stripe-version": STRIPE_API_VERSION } });
     const body = (await r.json().catch(() => ({}))) as T & { error?: { message: string }; livemode?: boolean };
     if (!r.ok) throw new Error(`Stripe ${r.status}: ${body.error?.message ?? "error"}`);
     if (body.livemode === true) throw new LivePaymentsNotAuthorized("Stripe returned a live-mode object; live payments are not authorised");
@@ -189,7 +199,7 @@ export class StripeInvoicing {
     if (!/^[a-z_]+(\/[A-Za-z0-9_]+)*$/.test(path)) throw new Error("Invalid Stripe path");
     const r = await this.fetchImpl(`https://api.stripe.com/v1/${path}`, {
       method: "POST",
-      headers: { authorization: `Bearer ${this.key}`, "content-type": "application/x-www-form-urlencoded", "idempotency-key": idempotencyKey },
+      headers: { authorization: `Bearer ${this.key}`, "stripe-version": STRIPE_API_VERSION, "content-type": "application/x-www-form-urlencoded", "idempotency-key": idempotencyKey },
       body: new URLSearchParams(form).toString(),
     });
     const body = (await r.json().catch(() => ({}))) as T & { error?: { message: string }; livemode?: boolean };
@@ -211,9 +221,12 @@ export class StripeInvoicing {
     return this.post<StripeInvoice>("invoices", form, `crestmont:invoice:${i.localInvoiceId}:create`);
   }
 
-  addInvoiceItem(i: { customer: string; invoice: string; amountCents: number; description: string; localInvoiceId: string }) {
+  addInvoiceItem(i: { customer: string; invoice: string; amountCents: number; description: string; localInvoiceId: string; taxJurisdictionId?: string }) {
+    // The main item keeps its original idempotency key; each sales-tax item (LEGAL-005) has its own.
+    const extra: [string, string][] = i.taxJurisdictionId ? [["metadata[crestmont_tax_jurisdiction]", i.taxJurisdictionId]] : [];
     return this.post<{ id: string; amount: number; invoice: string }>("invoiceitems", [["customer", i.customer], ["invoice", i.invoice], ["amount", String(i.amountCents)],
-      ["currency", "usd"], ["description", i.description], ["metadata[crestmont_invoice_id]", i.localInvoiceId]], `crestmont:invoice:${i.localInvoiceId}:item`);
+      ["currency", "usd"], ["description", i.description], ["metadata[crestmont_invoice_id]", i.localInvoiceId], ...extra],
+      `crestmont:invoice:${i.localInvoiceId}:item${i.taxJurisdictionId ? `:tax:${i.taxJurisdictionId}` : ""}`);
   }
 
   finalizeInvoice(stripeInvoiceId: string, localInvoiceId: string) {

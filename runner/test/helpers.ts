@@ -100,11 +100,15 @@ export interface FakeCP {
 
 export interface FakeCPOptions {
   jobs?: Job[];
-  /** Heartbeat answer for the n-th heartbeat (1-based). Return "lease_lost" to answer 409. */
-  heartbeat?: (n: number, body: Record<string, unknown>) => HeartbeatResponse | "lease_lost";
+  /** Heartbeat answer for the n-th heartbeat (1-based). "lease_lost" answers 409; "unavailable" answers 503. */
+  heartbeat?: (n: number, body: Record<string, unknown>) => HeartbeatResponse | "lease_lost" | "unavailable";
   files?: Record<string, { name: string; contentType: string; base64: string }>;
   /** Serve the proposed checkpoint/fetch endpoint. */
   serveCheckpointFetch?: boolean;
+  /** AI draft jobs served by /ai/claim (undefined = endpoints answer 404, like a platform without them). */
+  aiJobs?: Record<string, unknown>[];
+  /** Answer for /ai/complete: "lease_lost" -> 409. */
+  aiComplete?: (body: Record<string, unknown>) => "lease_lost" | { status: string };
   secret?: string;
 }
 
@@ -126,6 +130,19 @@ export async function startFakeControlPlane(o: FakeCPOptions = {}): Promise<Fake
       const body = JSON.parse(raw) as Record<string, unknown>;
       const p = req.url ?? "";
       calls.push({ path: p, body });
+      if (p === "/api/builds/runner/ai/claim") {
+        if (!o.aiJobs) return send(404, { error: "unknown" });
+        const job = o.aiJobs.shift();
+        if (job) leased.set(String(job.id), String(job.leaseToken));
+        return send(200, { job: job ?? null });
+      }
+      if (p === "/api/builds/runner/ai/complete") {
+        if (!o.aiJobs) return send(404, { error: "unknown" });
+        const ans = o.aiComplete ? o.aiComplete(body) : { status: body.error ? "queued" : "awaiting_approval" };
+        if (ans === "lease_lost" || leased.get(String(body.jobId)) !== body.leaseToken) return send(409, { error: "lease_lost" });
+        leased.delete(String(body.jobId));
+        return send(200, ans);
+      }
       if (p === "/api/builds/runner/claim") {
         const job = jobs.shift();
         if (!job) return send(200, { job: null, reason: "none_queued" });
@@ -139,6 +156,7 @@ export async function startFakeControlPlane(o: FakeCPOptions = {}): Promise<Fake
           hb++;
           const ans = o.heartbeat ? o.heartbeat(hb, body) : { continue: true as const, leaseExpiresAt: new Date().toISOString() };
           if (ans === "lease_lost") { leased.delete(jobId); return send(409, { error: "lease_lost" }); }
+          if (ans === "unavailable") return send(503, { error: "unavailable" });
           return send(200, ans);
         }
         case "/api/builds/runner/checkpoint": {
@@ -339,8 +357,121 @@ export function makeConfig(over: Partial<RunnerConfig> & { controlPlaneUrl: stri
     gitAuthorName: "Test Runner",
     gitAuthorEmail: "runner@test.invalid",
     logLevel: "error",
+    agentProvider: "local",
+    allowPaidProvider: false,
+    local: {
+      baseUrl: "http://127.0.0.1:9/v1", model: "test-coder:30b", apiKey: "ollama", contextTokens: 32_768,
+      maxOutputTokensPerCall: 4096, maxOutputTokensTotal: 1_000_000, temperature: 0.2, requestTimeoutMs: 30_000,
+    },
+    jobSandbox: {
+      dockerBin: "docker", image: "crestmont-build-sandbox:test", volume: "", cpus: "2", memory: "4g", pidsLimit: 512,
+      tmpfsMb: 256, commandTimeoutMs: 60_000, installTimeoutMs: 120_000, installNetwork: "crestmont_install",
+      installProxy: "http://egress-proxy:3128", registry: "https://registry.npmjs.org/", diskQuotaMb: 4096, uid: 10001,
+      allowedBuildScripts: [], browserCheck: true,
+    },
+    aiDrafts: { enabled: false, provider: "local" },
+    healthPort: 0,
+    healthHost: "127.0.0.1",
     ...over,
+  } as RunnerConfig;
+}
+
+/** The optional, paid Agent SDK adapter, explicitly enabled (what the SDK-path tests exercise). */
+export const SDK_OPT_IN = { agentProvider: "claude-agent-sdk", allowPaidProvider: true, anthropicApiKey: "sk-ant-test-not-a-real-key-000000" } as const;
+
+// ── fake OpenAI-compatible model server (stands in for Ollama; never a real API) ──
+
+export interface FakeModelRequest { model: string; messages: { role: string; content: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[]; tool_call_id?: string }[]; tools?: { function: { name: string } }[]; max_tokens?: number; temperature?: number }
+
+export type FakeModelReply =
+  | { content?: string | null; toolCalls?: { name: string; arguments: string | Record<string, unknown>; id?: string }[]; finish?: string; usage?: { prompt_tokens: number; completion_tokens: number } }
+  | { status: number; body: string };
+
+export interface FakeModel {
+  url: string;
+  requests: FakeModelRequest[];
+  /** Requests aborted by the client (interrupts). */
+  aborted: number;
+  close(): Promise<void>;
+}
+
+export async function startFakeModel(handler: (req: FakeModelRequest, n: number, signal: { aborted: boolean }) => FakeModelReply | Promise<FakeModelReply>, models = ["test-coder:30b"]): Promise<FakeModel> {
+  const state = { requests: [] as FakeModelRequest[], aborted: 0 };
+  const server = createServer((req, res) => {
+    let raw = "";
+    const sig = { aborted: false };
+    res.on("close", () => { if (!res.writableEnded) { sig.aborted = true; state.aborted++; } });
+    req.on("data", (d) => { raw += d; });
+    req.on("end", async () => {
+      if (req.method === "GET" && req.url === "/v1/models") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ object: "list", data: models.map((id) => ({ id, object: "model" })) }));
+        return;
+      }
+      if (req.method !== "POST" || req.url !== "/v1/chat/completions") { res.writeHead(404).end(); return; }
+      const body = JSON.parse(raw) as FakeModelRequest;
+      state.requests.push(body);
+      const reply = await handler(body, state.requests.length, sig);
+      if (sig.aborted) return;
+      if ("status" in reply) { res.writeHead(reply.status, { "content-type": "application/json" }); res.end(reply.body); return; }
+      const toolCalls = (reply.toolCalls ?? []).map((t, i) => ({
+        id: t.id ?? `call_${state.requests.length}_${i}`, type: "function",
+        function: { name: t.name, arguments: typeof t.arguments === "string" ? t.arguments : JSON.stringify(t.arguments) },
+      }));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: `chatcmpl-${state.requests.length}`, object: "chat.completion", model: body.model,
+        choices: [{ index: 0, message: { role: "assistant", content: reply.content ?? (toolCalls.length ? "" : null), ...(toolCalls.length ? { tool_calls: toolCalls } : {}) }, finish_reason: reply.finish ?? (toolCalls.length ? "tool_calls" : "stop") }],
+        usage: reply.usage ?? { prompt_tokens: 1000, completion_tokens: 100, total_tokens: 1100 },
+      }));
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}/v1`,
+    get requests() { return state.requests; },
+    get aborted() { return state.aborted; },
+    close: () => new Promise((r) => { server.closeAllConnections(); server.close(() => r()); }),
   };
+}
+
+// ── fake docker executor (records exact CLI flags; runs `docker exec` argv on the test host for realism) ──
+
+export interface FakeDocker {
+  executor: import("../src/sandbox.ts").DockerExecutor;
+  calls: string[][];
+  /** Override results per call (return undefined for the default behaviour). */
+  override?: (args: string[]) => import("../src/exec.ts").ExecResult | undefined | Promise<import("../src/exec.ts").ExecResult | undefined>;
+}
+
+export function fakeDocker(opts: { passthrough?: boolean; override?: FakeDocker["override"] } = {}): FakeDocker {
+  const repos = new Map<string, string>();
+  const ok = (stdout = "") => ({ code: 0, stdout, stderr: "", timedOut: false, notFound: false });
+  const state: FakeDocker = { calls: [], override: opts.override, executor: null as unknown as FakeDocker["executor"] };
+  state.executor = async (args, o) => {
+    state.calls.push([...args]);
+    const ov = await state.override?.(args);
+    if (ov) return ov;
+    if (args[0] === "run" && args.includes("-d")) {
+      const name = args[args.indexOf("--name") + 1];
+      const mount = args.find((a) => a.includes("dst=/workspace/repo"));
+      const src = /src=([^,]+)/.exec(mount ?? "")?.[1];
+      if (src) repos.set(name, src);
+      return ok("container-id");
+    }
+    if (args[0] === "exec") {
+      const name = args[3];
+      const t = args.indexOf("timeout");
+      const argv = args.slice(t + 4);
+      if (argv[0] === "node" && String(argv[1]).endsWith("browser-check.mjs")) return ok("browser check: 5 pages x 2 viewports OK (fake)");
+      if (opts.passthrough === false || !repos.has(name)) return ok("");
+      const { run } = await import("../src/exec.ts");
+      return run(argv[0], argv.slice(1), { cwd: repos.get(name)!, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: tmp("aib-fakehome-") }, timeoutMs: o.timeoutMs });
+    }
+    return ok("");
+  };
+  return state;
 }
 
 /** A process environment full of secrets the agent must never see. */

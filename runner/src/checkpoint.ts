@@ -1,10 +1,11 @@
-// Checkpoint archives (tar.gz ≤ 20 MB): meta.json + repo.bundle (git bundle --all) + the Agent SDK session
-// transcripts under <job home>/.claude/projects/ that `resume` needs.
+// Checkpoint archives (tar.gz ≤ 20 MB): meta.json + repo.bundle (git bundle --all) + the provider's session
+// transcripts that `resume` needs: the Agent SDK's under <job home>/.claude/projects/ ("claude-projects") and the
+// local provider's under <job dir>/agent/ ("local-agent").
 // Transcript location: https://code.claude.com/docs/en/agent-sdk/sessions ("Claude Code stores sessions under
 // ~/.claude/projects/<encoded-cwd>/*.jsonl ... If you set CLAUDE_CONFIG_DIR, look under $CLAUDE_CONFIG_DIR/projects/";
 // "Resume across hosts: Move the session file ... restore it inside any directory under ~/.claude/projects/").
 
-import { mkdirSync, cpSync, existsSync, readFileSync, writeFileSync, statSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, cpSync, existsSync, readFileSync, writeFileSync, statSync, lstatSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { run, baseEnv } from "./exec.ts";
 import { createBundle, cloneFromBundle } from "./git.ts";
@@ -21,6 +22,8 @@ export interface CheckpointMeta {
   sessionTotalCostUsd: number;
   sourceBranch: string | null;
   sourceCommit: string | null;
+  /** Agent provider that owns sessionId ("local" | "claude-agent-sdk"); absent in checkpoints from runner 1.0. */
+  provider?: string;
   createdAt: string;
   contents: string[];
 }
@@ -29,6 +32,11 @@ export interface BuiltCheckpoint { file: string; base64: string | null; bytes: n
 
 let counter = 0;
 
+/** cpSync filter: copy directories and regular files only (symlinks and special files are left out of checkpoints). */
+function regularOnly(src: string): boolean {
+  try { const st = lstatSync(src); return st.isDirectory() || st.isFile(); } catch { return false; }
+}
+
 export async function buildCheckpoint(ws: Workspace, git: GitCtx, meta: Omit<CheckpointMeta, "schema" | "createdAt" | "contents">, pathEnv: string, maxBytes = LIMITS.archiveBytes): Promise<BuiltCheckpoint> {
   const n = nextIndex(ws);
   const stage = path.join(ws.tmp, `ckpt-stage-${n}-${counter++}`);
@@ -36,8 +44,14 @@ export async function buildCheckpoint(ws: Workspace, git: GitCtx, meta: Omit<Che
   const contents: string[] = [];
   const projects = path.join(ws.home, ".claude", "projects");
   if (existsSync(projects)) {
-    cpSync(projects, path.join(stage, "claude-projects"), { recursive: true });
+    cpSync(projects, path.join(stage, "claude-projects"), { recursive: true, filter: regularOnly });
     contents.push("claude-projects");
+  }
+  // The local provider's transcript (<job dir>/agent/, outside the agent's repository).
+  const localAgent = path.join(ws.dir, "agent");
+  if (existsSync(localAgent)) {
+    cpSync(localAgent, path.join(stage, "local-agent"), { recursive: true, filter: regularOnly });
+    contents.push("local-agent");
   }
   if (await createBundle(git, path.join(stage, "repo.bundle"))) contents.push("repo.bundle");
   const full: CheckpointMeta = { schema: "crestmont.runner-checkpoint/1", createdAt: new Date().toISOString(), contents, ...meta };
@@ -92,8 +106,17 @@ export async function restoreCheckpoint(ws: Workspace, git: GitCtx, archive: Buf
     const norm = path.posix.normalize(member);
     if (norm.startsWith("/") || norm.startsWith("../") || norm === "..") throw new Error(`unsafe path in checkpoint archive: ${member}`);
   }
+  // Only regular files and directories: a symlink or hard link (e.g. a transcript pointing at /run/secrets/...) would
+  // be copied into the workspace and later read back into the model context or a checkpoint upload.
+  const verbose = await run("tar", ["-tvzf", archiveFile], { env, timeoutMs: 60_000 });
+  if (verbose.code !== 0) throw new Error("checkpoint archive is not a valid tar.gz");
+  for (const line of verbose.stdout.split("\n").filter(Boolean)) {
+    if (!"-d".includes(line[0])) throw new Error(`checkpoint archive contains a link or special file (${line[0]}): ${line.slice(0, 200)}`);
+  }
   const x = await run("tar", ["-xzf", archiveFile, "-C", dir, "--no-same-owner", "--no-same-permissions"], { env, timeoutMs: 120_000 });
   if (x.code !== 0) throw new Error(`could not extract checkpoint: ${x.stderr.slice(0, 300)}`);
+  const linked = findLinks(dir);
+  if (linked) { rmSync(dir, { recursive: true, force: true }); rmSync(archiveFile, { force: true }); throw new Error(`checkpoint archive contains a link: ${path.relative(dir, linked)}`); }
   let meta: CheckpointMeta | null = null;
   try { meta = JSON.parse(readFileSync(path.join(dir, "meta.json"), "utf8")) as CheckpointMeta; } catch { meta = null; }
   let repoRestored = false;
@@ -107,9 +130,23 @@ export async function restoreCheckpoint(ws: Workspace, git: GitCtx, archive: Buf
     mkdirSync(path.join(ws.home, ".claude"), { recursive: true });
     cpSync(projects, path.join(ws.home, ".claude", "projects"), { recursive: true });
   }
+  const localAgent = path.join(dir, "local-agent");
+  if (existsSync(localAgent)) cpSync(localAgent, path.join(ws.dir, "agent"), { recursive: true });
   rmSync(dir, { recursive: true, force: true });
   rmSync(archiveFile, { force: true });
   return { meta, repoRestored, sessionFileFound: sessionId ? sessionFileExists(ws.home, sessionId) : false };
+}
+
+/** First symlink (or non-regular, non-directory entry) below `dir`, or null. */
+function findLinks(dir: string, depth = 0): string | null {
+  if (depth > 50) return dir;
+  for (const e of readdirSync(dir)) {
+    const p = path.join(dir, e);
+    const st = lstatSync(p);
+    if (st.isDirectory()) { const f = findLinks(p, depth + 1); if (f) return f; }
+    else if (!st.isFile()) return p;
+  }
+  return null;
 }
 
 export function sessionFileExists(home: string, sessionId: string): boolean {

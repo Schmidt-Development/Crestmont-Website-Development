@@ -210,7 +210,7 @@ test("[EMAIL-003] hard bounce and complaint suppress the recipient; the next sen
   const calls: string[] = [];
   const fakeFetch = (async (u: string | URL | Request) => { calls.push(String(u)); return new Response(JSON.stringify({ id: "re_new" }), { status: 200 }); }) as typeof fetch;
   const resend = new ResendEmail(t.db, "re_test_key", "Crestmont <support@crestmontwebsitedevelopment.com>", fakeFetch);
-  const mail = { template: "security_notification" as const, to: "gone@example.com", subject: "Security notice", heading: "Security", paragraphs: ["TEST"], idempotencyKey: "sec:1" };
+  const mail = { template: "security_notification" as const, to: "gone@example.com", data: { event: "password_changed" as const }, idempotencyKey: "sec:1" };
   const r = await sendMail({ email: resend }, mail);
   assert.equal(r.status, "suppressed");
   assert.deepEqual(calls, [], "provider was not called");

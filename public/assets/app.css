@@ -309,6 +309,7 @@ fieldset.field > legend { font-size: var(--fs-sm); color: var(--text-2); margin-
 .toast__close:hover { color: var(--white); background: var(--ink-4); }
 @keyframes toast-in { from { transform: translateY(12px); opacity: 0; } }
 .badge { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px 1px 8px; border-radius: 999px; font: 500 var(--fs-xs)/1.7 var(--font-body); letter-spacing: 0; border: 1px solid var(--line-2); color: var(--text-2); background: var(--ink-2); white-space: nowrap; font-variant-numeric: tabular-nums; max-width: 100%; }
+@media (max-width: 480px) { .badge { white-space: normal; } }
 .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
 .badge--ok, .badge--warn, .badge--bad, .badge--info, .badge--gold { border-color: color-mix(in srgb, currentColor 35%, transparent); background: color-mix(in srgb, currentColor 8%, var(--ink-2)); }
 .badge--ok { color: var(--ok); } .badge--warn { color: var(--warn); } .badge--bad { color: var(--bad); } .badge--info { color: var(--info); } .badge--gold { color: var(--gold-1); }
@@ -874,7 +875,7 @@ a.shot { display: block; cursor: zoom-in; }
 .exec-tile--bad .kpi__value { color: var(--bad); }
 .exec-tile--warn::after, .exec-tile--bad::after { content: ""; position: absolute; top: var(--s-4); right: var(--s-4); width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
 .exec-tile--bad::after { background: var(--bad); }
-.tabs { display: flex; gap: var(--s-1); border-bottom: 1px solid var(--line); margin-bottom: var(--s-5); overflow-x: auto; scrollbar-width: none; }
+.tabs { position: relative; display: flex; gap: var(--s-1); border-bottom: 1px solid var(--line); margin-bottom: var(--s-5); overflow-x: auto; scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
 .tabs a { position: relative; padding: var(--s-3) var(--s-4); color: var(--text-2); text-decoration: none; font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; transition: color var(--t-fast) var(--ease-out); }
 .tabs a::after { content: ""; position: absolute; left: var(--s-3); right: var(--s-3); bottom: -1px; height: 2px; background: var(--gold-2); transform: scaleX(0); transition: transform var(--t-med) var(--ease-out); }
@@ -895,7 +896,7 @@ a.shot { display: block; cursor: zoom-in; }
 .msg--internal { border-style: dashed; background: var(--ink-3); }
 .msg__meta { font-size: var(--fs-xs); color: var(--text-3); margin-bottom: var(--s-1); }
 .thread .msg p:last-child { margin-bottom: 0; }
-.kanban { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(240px, 1fr); gap: var(--s-3); overflow-x: auto; padding-bottom: var(--s-3); scroll-snap-type: x proximity; mask-image: linear-gradient(90deg, #000 92%, transparent); -webkit-mask-image: linear-gradient(90deg, #000 92%, transparent); }
+.kanban { position: relative; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(240px, 1fr); gap: var(--s-3); overflow-x: auto; padding-bottom: var(--s-3); scroll-snap-type: x proximity; mask-image: linear-gradient(90deg, #000 92%, transparent); -webkit-mask-image: linear-gradient(90deg, #000 92%, transparent); }
 .kanban__col { background: var(--ink-1); border: 1px solid var(--line); border-radius: var(--r-3); padding: var(--s-3); min-height: 140px; scroll-snap-align: start; }
 .kanban__col h3 { font: 600 var(--fs-xs)/1.3 var(--font-body); color: var(--text-2); margin-bottom: var(--s-3); display: flex; justify-content: space-between; gap: var(--s-2); }
 .kanban__card { display: block; background: var(--ink-2); border: 1px solid var(--line); border-radius: var(--r-2); padding: var(--s-3); margin-bottom: var(--s-2); text-decoration: none; color: var(--text); font-size: var(--fs-sm); overflow-wrap: anywhere; line-height: 1.5; transition: border-color var(--t-fast) var(--ease-out), transform var(--t-fast) var(--ease-out), box-shadow var(--t-fast); }
@@ -933,6 +934,8 @@ a.shot { display: block; cursor: zoom-in; }
 .quote-line .field:first-child { flex: 3 1 260px; }
 .quote-line .field:last-child { flex: 1 1 120px; }
 .code-block { background: var(--ink-3); border: 1px solid var(--line); border-radius: var(--r-2); padding: var(--s-3) var(--s-4); font: var(--fs-xs)/1.6 var(--font-mono); color: var(--text-2); white-space: pre-wrap; word-break: break-word; max-height: 28rem; overflow: auto; margin: 0 0 var(--s-3); }
+.recovery-codes { list-style: none; margin: var(--s-4) 0; padding: var(--s-4); display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--s-2) var(--s-4); background: var(--ink-3); border: 1px solid var(--line-gold); border-radius: var(--r-2); }
+.recovery-codes code { font: 500 var(--fs-md)/1.6 var(--font-mono); color: var(--white); letter-spacing: .06em; }
 .diff span { display: block; }
 .diff__add { color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
 .diff__del { color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--bad) 50%, transparent); }

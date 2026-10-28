@@ -42,6 +42,8 @@ export function customerPostFields(w: World, t: Tenant): Record<string, () => Fi
     "POST /portal/billing/invoices/:id/pay": () => ({}),
     "POST /portal/billing/manage": () => ({}),
     "POST /portal/billing/refund-request": () => ({ payment_id: t.ids.payment!, amount: "50", reason: `${t.marker} duplicate purchase by mistake`, evidence: "receipt" }),
+    "POST /mfa/step-up": () => ({ code: "000000" }),
+    "POST /account/mfa/recovery-codes": () => ({ code: "000000" }),
     "POST /account/password": () => ({ current: TEST_PASSWORD, next: TEST_PASSWORD }),
     "POST /account/sessions/:id/revoke": () => ({}),
     "POST /account/sessions/revoke-others": () => ({}),
@@ -104,6 +106,14 @@ export function auditScenarios(w: World): Scenario[] {
       const res = await c.post("/mfa", { code: await totpCode(spare.secret) });
       spare.c = c;
       return { res, actorId: spare.id };
+    } },
+    { key: "POST /mfa/step-up", run: async () => {
+      await w.db.prepare(`UPDATE users SET totp_last_step = NULL WHERE id = ?`).bind(spare.id).run();
+      return { res: await spare.c.post("/mfa/step-up?next=%2Faccount", { code: await totpCode(spare.secret) }), actorId: spare.id };
+    } },
+    { key: "POST /account/mfa/recovery-codes", run: async () => {
+      await w.db.prepare(`UPDATE users SET totp_last_step = NULL WHERE id = ?`).bind(spare.id).run();
+      return { res: await spare.c.post("/account/mfa/recovery-codes", { code: await totpCode(spare.secret) }), actorId: spare.id };
     } },
     { key: "POST /account/password", as: spareAs, fields: () => ({ current: TEST_PASSWORD, next: NEWPW }) },
     { key: "POST /account/sessions/:id/revoke", run: async () => {
@@ -325,6 +335,7 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/employees/:id/role", fields: () => ({ role: "project_manager" }) },
     { key: "POST /staff/employees/:id/disable", fields: () => ({ reason: "Left the company" }) },
     { key: "POST /staff/employees/:id/enable" },
+    { key: "POST /staff/employees/:id/mfa-reset" },
     { key: "POST /staff/employees/:id/profile", fields: () => ({ job_title: "Front-end developer", weekly_capacity_hours: "30" }) },
     { key: "GET /staff/employees/export.csv" },
     { key: "GET /staff/email/export.csv" },
@@ -338,6 +349,8 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/backups/records", fields: () => ({ what: "D1 dev export", location: "local disk ~/backups/dev.sql", environment: "development", method: "d1_export", taken_at: day(-2) + "T10:00", result: "succeeded", evidence: "wrangler d1 export output: 12 tables", size_bytes: "2048" }) },
     { key: "POST /staff/backups/restore-tests", fields: () => ({ what: "dev db", target: "scratch sqlite file", environment: "development", performed_at: day(-1) + "T11:00", result: "passed", duration_minutes: "12", evidence: "row counts matched for 12 tables" }) },
     { key: "POST /staff/settings", fields: () => ({ "business.legal_name": "", "business.address": "", "contact.email": "hello@matrix.crestmont.test", "contact.phone": "", staffed_hours: "Mon–Fri 9am–5pm ET", first_response_target_hours: "8" }) },
+    { key: "POST /staff/settings/tax", fields: () => ({ notes: "Matrix test: registration not decided (TEST DATA)" }) },
+    { key: "POST /staff/settings/tax/jurisdictions", fields: () => ({ name: "Matrix Test Jurisdiction", registration_id: "TEST-0001", rate: "1.5" }) },
     { key: "POST /staff/ai/:id/decide", fields: () => ({ decision: "approved", final_text: "Edited draft" }), setup: async () => {
       w.ids.aiJob = newId("ai");
       await w.db.prepare(`INSERT INTO ai_jobs (id, workflow, provider, model, status, input_ref, output_ref, created_at, updated_at) VALUES (?, 'quote_draft', 'anthropic', 'test', 'awaiting_approval', 'quote:x', 'Draft', ?, ?)`).bind(w.ids.aiJob, nowIso(), nowIso()).run();

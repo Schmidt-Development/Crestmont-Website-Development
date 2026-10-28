@@ -78,7 +78,8 @@ test("[AUTH-003] staff without MFA are sent to enrolment and can enable TOTP", a
   const setup = await c.get("/mfa/setup");
   const secret = /data-testid="totp-secret">([A-Z2-7 ]+)</.exec(await setup.text())![1].replace(/ /g, "");
   const done = await c.post("/mfa/setup", { code: await totpCode(secret) });
-  assert.equal(done.status, 303);
+  assert.equal(done.status, 200, "enrolment shows the recovery codes once");
+  assert.equal([...(await done.text()).matchAll(/<li><code>[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}<\/code><\/li>/g)].length, 10);
   assert.equal((await db.prepare(`SELECT mfa_enabled FROM users WHERE id = ?`).bind(s.id).first<{ mfa_enabled: number }>())?.mfa_enabled, 1);
 });
 

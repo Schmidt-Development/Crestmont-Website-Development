@@ -14,7 +14,7 @@ import type { Env } from "../../src/app/context.ts";
 import type { ResourceKind } from "./route-inventory.ts";
 
 export type StaffRole = (typeof STAFF_ROLES)[number];
-export const SECRETS = { runner: "matrix-runner-secret", evidence: "matrix-evidence-secret", voice: "matrix-voice-secret", stripe: "whsec_matrixstripe", retell: "matrix-retell-key", resend: "whsec_" + Buffer.from("matrix-resend-secret").toString("base64") };
+export const SECRETS = { scheduler: "matrix-scheduler-secret", runner: "matrix-runner-secret", evidence: "matrix-evidence-secret", voice: "matrix-voice-secret", stripe: "whsec_matrixstripe", retell: "matrix-retell-key", resend: "whsec_" + Buffer.from("matrix-resend-secret").toString("base64") };
 
 export const PDF = new TextEncoder().encode("%PDF-1.4\n%security matrix fixture\n");
 export const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 1, 2, 3, 4]);
@@ -153,7 +153,7 @@ export async function buildWorld(): Promise<World> {
   const payments = new FakePayments();
   const app = await createTestApp({
     EVIDENCE_INGEST_SECRET: SECRETS.evidence, VOICE_WEBHOOK_SECRET: SECRETS.voice, STRIPE_WEBHOOK_SECRET: SECRETS.stripe,
-    RETELL_API_KEY: SECRETS.retell, RESEND_WEBHOOK_SECRET: SECRETS.resend, BUILD_RUNNER_SECRET: SECRETS.runner,
+    RETELL_API_KEY: SECRETS.retell, RESEND_WEBHOOK_SECRET: SECRETS.resend, BUILD_RUNNER_SECRET: SECRETS.runner, SCHEDULER_TRIGGER_SECRET: SECRETS.scheduler,
     overrides: { storage: new MemoryStorage(), payments },
   });
   const db = app.db;

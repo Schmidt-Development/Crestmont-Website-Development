@@ -1,0 +1,62 @@
+name: Staging health monitor
+
+# External alerting for staging (READY-012, INFRA-006, ASVS F-03 interim channel). Runs from GitHub's infrastructure,
+# outside Cloudflare, every 30 minutes. The probe reads only public health endpoints; the scheduler step uses a key
+# derived from the Cloudflare token secret (see below).
+# A failed run is the alert — GitHub notifies the account that last changed this schedule (and repository watchers
+# subscribed to Actions) by email/web notification. The Founder may later add or swap a channel (see docs/RUNBOOK.md,
+# "Alerting"); this workflow stays as the zero-cost baseline.
+on:
+  schedule:
+    - cron: "11,41 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-health-monitor
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: staging
+    env:
+      BASE: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - name: External scheduler (runs the scheduled jobs; native Cron Triggers are unavailable on this account)
+        # Workers Free allows 5 cron triggers per Cloudflare account and they are in use, so staging's jobs are
+        # triggered from here: the 15-minute set every run, the daily set during the 11:00 UTC hour. Signed with a key
+        # derived from the Cloudflare token secret; the Worker refuses unsigned calls and runs each set at most every 5 min.
+        env:
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          daily=""; [ "$(date -u +%H)" = "11" ] && daily="--daily"
+          node --no-warnings scripts/trigger-scheduler.ts run --url "$BASE" $daily | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Service and evidence-feed health (retries before alerting)
+        run: |
+          fail=""
+          for attempt in 1 2 3; do
+            fail=""
+            app=$(curl -s -o /tmp/app.json -w '%{http_code}' --max-time 20 "$BASE/api/health" || echo 000)
+            feeds=$(curl -s -o /tmp/feeds.json -w '%{http_code}' --max-time 20 "$BASE/api/readiness/health" || echo 000)
+            [ "$app" = "200" ] || fail="$fail /api/health=$app"
+            [ "$feeds" = "200" ] || fail="$fail /api/readiness/health=$feeds"
+            [ -z "$fail" ] && break
+            sleep 60
+          done
+          {
+            echo "### Staging health $(date -u +%Y-%m-%dT%H:%MZ)"
+            echo "- /api/health: $app"
+            echo "- /api/readiness/health: $feeds"
+            echo '```json'; cat /tmp/feeds.json 2>/dev/null | head -c 4000; echo; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$fail" ]; then echo "::error title=Staging unhealthy::$fail (after 3 attempts)"; exit 1; fi

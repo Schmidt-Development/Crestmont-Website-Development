@@ -5,7 +5,7 @@
 import type { Db } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import { hmacSha256Hex, sha256Hex, timingSafeEqualHex } from "../lib/crypto.ts";
-import { parse, v } from "../lib/validate.ts";
+import { parse, v, ValidationError, type Check } from "../lib/validate.ts";
 import { REQUIREMENTS, type RequirementDef } from "../../requirements/inventory.ts";
 import { IMPLEMENTATION, type ImplementationRecord } from "../../requirements/status.ts";
 
@@ -27,10 +27,34 @@ const evidenceSchema = v.object({
     durationMs: v.int({ min: 0, optional: true }),
     message: v.string({ optional: true, max: 2000 }),
   }), { max: 20_000 }),
+  // READY-006: optional external response-time samples (scripts/production-checks.ts), stored in env_latency.
+  timings: optional(v.array(v.object({
+    page: v.string({ min: 1, max: 200, pattern: /^\/[A-Za-z0-9/_.-]*$/ }),
+    samples: v.int({ min: 1, max: 1000 }),
+    failed: v.int({ min: 0, max: 1000 }),
+    p50Ms: v.int({ min: 0, max: 600_000, optional: true }),
+    p95Ms: v.int({ min: 0, max: 600_000, optional: true }),
+    maxMs: v.int({ min: 0, max: 600_000, optional: true }),
+  }), { max: 50 })),
 });
 
+function optional<T>(check: Check<T>): Check<T | undefined> {
+  return ((value, path, issues) => (value === undefined || value === null ? undefined : check(value, path, issues))) as Check<T | undefined>;
+}
+
 export type EvidenceDoc = ReturnType<typeof parseEvidence>;
-export function parseEvidence(json: unknown) { return parse(evidenceSchema, json); }
+export function parseEvidence(json: unknown) {
+  const doc = parse(evidenceSchema, json);
+  const issues: string[] = [];
+  const pages = new Set<string>();
+  for (const [i, t] of (doc.timings ?? []).entries()) {
+    if (t.failed > t.samples) issues.push(`timings[${i}].failed must be ≤ samples`);
+    if (pages.has(t.page)) issues.push(`timings[${i}].page is duplicated`);
+    pages.add(t.page);
+  }
+  if (issues.length) throw new ValidationError(issues);
+  return doc;
+}
 
 export class IngestAuthError extends Error {}
 
@@ -74,14 +98,40 @@ export async function ingestEvidence(db: Db, rawBody: string): Promise<IngestRes
         `INSERT INTO test_evidence (run_id, requirement_id, test_name, outcome, duration_ms, message) VALUES (?,?,?,?,?,?)
          ON CONFLICT(run_id, requirement_id, test_name) DO NOTHING`,
       ).bind(doc.runId, r.requirementId, r.testName, r.outcome, r.durationMs ?? null, r.message ?? null)),
+      ...(doc.timings ?? []).map((t) => db.prepare(
+        `INSERT INTO env_latency (run_id, environment, page, samples, failed_samples, p50_ms, p95_ms, max_ms, measured_at) VALUES (?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(run_id, page) DO NOTHING`,
+      ).bind(doc.runId, doc.environment, t.page, t.samples, t.failed, t.p50Ms ?? null, t.p95Ms ?? null, t.maxMs ?? null, doc.finishedAt)),
     ];
     await db.batch(stmts); // atomic in D1
     await recordIngestion(db, doc.source, attemptAt, unknown.length ? `Unknown requirement ids: ${unknown.join(", ")}` : null, true);
+    // Recovery drills get their own feed per environment, so a failed or missing rollback/restore is visible (and, when
+    // failing, turns /api/readiness/health to 503 so the external monitor alerts). Status and timestamp only.
+    for (const [feed, r, reason] of recoveryDrillOutcomes(doc)) await recordIngestion(db, `${feed}:${doc.environment}`, attemptAt, r ? null : (reason ?? "drill failed — see /staff/readiness/requirements/TEST-004"));
     return { status: "ingested", runId: doc.runId, accepted: accepted.length, unknownRequirements: unknown };
   } catch (err) {
     await recordIngestion(db, doc.source, attemptAt, (err as Error).message);
     throw err;
   }
+}
+
+/** rollback rehearsal → INFRA-005 "rollback automation exercised"; restore drill → INFRA-006 "restore drill:". */
+export function recoveryDrillOutcomes(doc: EvidenceDoc): [string, boolean, string?][] {
+  const out: [string, boolean, string?][] = [];
+  const why = (rs: EvidenceDoc["results"]) => rs.find((r) => r.outcome === "failed" && r.message)?.message;
+  const rb = doc.results.filter((r) => r.requirementId === "INFRA-005" && r.testName.startsWith("rollback automation exercised"));
+  const rs = doc.results.filter((r) => r.requirementId === "INFRA-006" && r.testName.startsWith("restore drill:"));
+  if (rb.length) out.push(["recovery:rollback", rb.every((r) => r.outcome === "passed")]);
+  for (const [prefix, feed] of [["rollback step:", "recovery:rollback-step"], ["roll-forward step:", "recovery:rollforward-step"]] as const) {
+    const st = doc.results.filter((r) => r.requirementId === "INFRA-005" && r.testName.startsWith(prefix));
+    if (st.length) out.push([feed, st.every((r) => r.outcome === "passed"), why(st)]);
+  }
+  const cron = doc.results.filter((r) => r.requirementId === "INFRA-006" && r.testName.startsWith("cron triggers registered"));
+  // "skipped" = native triggers unavailable on this account (Workers Free limit) and the external scheduler is used
+  // instead; whether jobs actually run is judged by the required `scheduler` feed.
+  if (cron.length) out.push(["cron-triggers", cron.every((r) => r.outcome !== "failed"), why(cron)]);
+  if (rs.length) out.push(["recovery:restore", rs.every((r) => r.outcome === "passed")]);
+  return out;
 }
 
 async function recordIngestion(db: Db, source: string, at: string, error: string | null, success = error === null): Promise<void> {

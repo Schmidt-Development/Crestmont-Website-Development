@@ -101,6 +101,7 @@ export async function processDeletion(db: Db, staffUserId: string, requestId: st
   const anonEmail = `deleted+${u}@deleted.invalid`;
   await db.batch([
     db.prepare(`UPDATE users SET email = ?, display_name = 'Deleted user', password_hash = NULL, totp_secret = NULL, totp_pending_secret = NULL, mfa_enabled = 0, disabled_at = COALESCE(disabled_at, ?) WHERE id = ?`).bind(anonEmail, at, u),
+    db.prepare(`DELETE FROM mfa_recovery_codes WHERE user_id = ?`).bind(u),
     db.prepare(`UPDATE contacts SET name = 'Deleted contact', email = NULL, phone = NULL WHERE user_id = ?`).bind(u),
     db.prepare(`DELETE FROM memberships WHERE user_id = ?`).bind(u),
     db.prepare(`DELETE FROM notifications WHERE user_id = ?`).bind(u),

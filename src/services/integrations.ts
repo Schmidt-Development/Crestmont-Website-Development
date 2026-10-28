@@ -3,6 +3,7 @@
 // to the provider. Nothing is ever marked verified without a successful call; a probe failure is
 // recorded as "failing" with the provider's error. Secrets are never stored or displayed — only
 // a short SHA-256 fingerprint, used to notice when a key changes so stale verification is dropped.
+import { STRIPE_API_VERSION } from "../adapters/payments.ts";
 import type { Db } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import { sha256Hex } from "../lib/crypto.ts";
@@ -160,7 +161,7 @@ export async function verifyIntegration(d: IntegrationDeps, id: IntegrationId, a
   try {
     switch (id) {
       case "stripe": {
-        const r = await f("https://api.stripe.com/v1/balance", { headers: { authorization: `Bearer ${d.env.STRIPE_SECRET_KEY}` } });
+        const r = await f("https://api.stripe.com/v1/balance", { headers: { authorization: `Bearer ${d.env.STRIPE_SECRET_KEY}`, "stripe-version": STRIPE_API_VERSION } });
         const b = await jsonOrNull(r);
         if (!r.ok) { detail = providerError("Stripe", r, b); break; }
         if (b?.livemode === true) { status = "blocked"; detail = "Stripe reports livemode=true for this key; live payments are not authorised."; break; }
@@ -260,7 +261,7 @@ export async function verifyIntegration(d: IntegrationDeps, id: IntegrationId, a
 
 /** Environment variable names the platform reads as secrets. Values are never displayed. */
 export const SECRET_NAMES = ["EVIDENCE_INGEST_SECRET", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "RESEND_API_KEY", "ANTHROPIC_API_KEY",
-  "GITHUB_TOKEN", "TURNSTILE_SECRET", "VOICE_WEBHOOK_SECRET", "RETELL_API_KEY", "RESEND_WEBHOOK_SECRET"] as const;
+  "GITHUB_TOKEN", "TURNSTILE_SECRET", "VOICE_WEBHOOK_SECRET", "RETELL_API_KEY", "RESEND_WEBHOOK_SECRET", "MFA_ENCRYPTION_KEY"] as const;
 
 export function secretPresence(env: Env): { name: string; present: boolean }[] {
   const e = env as unknown as Record<string, unknown>;

@@ -2,11 +2,15 @@
 // document (source "production_check" for production, "staging_e2e" for staging) for the DEPLOYED
 // commit, ready for scripts/post-evidence.ts. Exit code 1 when a CRITICAL check failed — the deploy
 // workflow then rolls back. Every result is real: a check that could not run is recorded as failed.
+// It also samples response times of fixed public pages (READY-006) and ships p50/p95/max per page as
+// `timings` in the same evidence document (stored in env_latency, shown on the environment view).
+// Options: --samples N (default 5), --p95-budget-ms MS (default 2000; non-critical READY-006 check).
 //
 //   node --no-warnings scripts/production-checks.ts --base https://crestmontwebsitedevelopment.com \
 //     --environment production --commit $GITHUB_SHA --out evidence/production-check.json [--run-id gh-…]
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { summarizeSamples, type PageTiming } from "../src/services/env-metrics.ts";
 
 const args = process.argv.slice(2);
 const get = (k: string) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : undefined; };
@@ -59,12 +63,36 @@ for (const c of checks) {
   if (failure && c.critical) criticalFailed++;
   console.log(`${failure ? "✖" : "✔"} ${c.testName}${failure ? ` — ${failure}` : ""}`);
 }
+// ── READY-006: response-time sampling (performance evidence for the environment view) ──
+// Sequential GETs of fixed public pages, timed to the end of the body, measured from this runner (so
+// network time is included). Only successful (HTTP 200) samples count towards p50/p95; failures are
+// counted separately. A page with no successful sample has no percentiles (shown as Unknown).
+const SAMPLES = Math.max(1, Math.min(50, Number(get("--samples") ?? 5) || 5));
+const BUDGET_MS = Math.max(1, Number(get("--p95-budget-ms") ?? 2000) || 2000);
+const TIMED_PAGES = ["/", "/pricing", "/contact", "/login", "/api/health"];
+const timings: PageTiming[] = [];
+for (const p of TIMED_PAGES) {
+  const ok: number[] = [];
+  let failed = 0;
+  for (let i = 0; i < SAMPLES; i++) {
+    const t = performance.now();
+    try { if ((await get200(p, (r) => (r.status === 200 ? null : `HTTP ${r.status}`))) === null) ok.push(performance.now() - t); else failed++; }
+    catch { failed++; }
+  }
+  timings.push(summarizeSamples(p, ok, failed));
+}
+const slow = timings.filter((t) => t.p95Ms === undefined || t.p95Ms > BUDGET_MS);
+results.push({ requirementId: "READY-006", testName: `${environment} response-time sampling: p95 ≤ ${BUDGET_MS} ms on every checked page (${SAMPLES} samples each, from the CI runner)`,
+  outcome: slow.length ? "failed" : "passed", durationMs: 0,
+  ...(slow.length ? { message: slow.map((t) => `${t.page}: ${t.p95Ms === undefined ? "no successful sample" : `p95 ${t.p95Ms} ms`}`).join("; ").slice(0, 1000) } : {}) });
+for (const t of timings) console.log(`  ${t.page}: p50 ${t.p50Ms ?? "Unknown"} ms · p95 ${t.p95Ms ?? "Unknown"} ms · ${t.failed}/${t.samples} failed`);
+
 const runId = (get("--run-id") ?? `local-${commit.slice(0, 12)}-${Date.now()}`) + `-${environment}-check`;
 const doc = {
   runId, source: environment === "production" ? "production_check" : "staging_e2e", environment, commitSha: commit,
   branch: process.env.GITHUB_REF_NAME || undefined,
   ...(process.env.GITHUB_RUN_ID ? { runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}` } : {}),
-  startedAt, finishedAt: new Date().toISOString(), results,
+  startedAt, finishedAt: new Date().toISOString(), results, timings,
 };
 mkdirSync(dirname(out), { recursive: true });
 writeFileSync(out, JSON.stringify(doc, null, 2));

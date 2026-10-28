@@ -31,7 +31,7 @@ AI Builds addendum **9 implemented / 2 in progress / 0 not started (11)**.
 
 | # | Action | Unblocks | Exact steps |
 |---|---|---|---|
-| 1 | **Provision the AI Builds runner** | AIB-010/011 (any real automated build) | Follow `docs/ai-builds/RUNNER-SETUP.md`: a Linux VM with Docker (2 vCPU / 4 GB / 40 GB); an Anthropic Console workspace with a monthly spend limit and an API key (not a claude.ai subscription); `openssl rand -hex 32` → GitHub repository secret `BUILD_RUNNER_SECRET` (the next staging deploy installs it) and the same value for the runner; optional dedicated GitHub org + fine-grained token for build repos; optional separate Cloudflare account/token for preview Workers; review `runner/skills/manifest.json`; first run: one internal Starter project with a $5 project limit. |
+| 1 | **Set up the self-hosted runner on the Windows supercomputer** | AIB-010/011, real AI drafts (AIOPS-002, SUP-004) — no paid API needed | Follow `docs/ai-builds/WINDOWS-SUPERCOMPUTER.md`: run `runner\windows\Discover-Hardware.ps1` (stop if the recommendation is INSUFFICIENT), install Docker Desktop (WSL2) + Ollama via `Install-CrestmontRunner.ps1 -Install`, set `BUILD_RUNNER_SECRET` (GitHub secret + runner), then run the drills in `docs/ai-builds/LOCAL-VALIDATION.md` and `Collect-Evidence.ps1`. No Anthropic key is required; the paid adapter stays off. |
 | 2 | **Stripe test account** (BLK-004) | Checkout, Stripe invoices, refunds, disputes, reconciliation; AI Builds end-to-end test payment; journeys 5–7, 17, 19, 24, 25 | Create a dedicated Crestmont Stripe account, stay in test mode, add `STRIPE_SECRET_KEY` (sk_test_…) and `STRIPE_WEBHOOK_SECRET` as staging Worker secrets, point a test webhook at `/api/webhooks/stripe`. |
 | 3 | Resend + business email (BLK-005, IDENT-003) | Real email delivery, EMAIL-001..003 | Verify the sending domain in Resend; add `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_FROM` to staging. |
 | 4 | Legal entity, address, attorney review, tax (IDENT-001/002, LEGAL-004/005) | Live payments (PAY-010), final legal pages | Provide the entity name and registered address in Business settings; engage an attorney for the drafts in `/legal`. |
@@ -40,6 +40,9 @@ AI Builds addendum **9 implemented / 2 in progress / 0 not started (11)**.
 | 7 | Portfolio screenshots + relationship records (BLK-007/008) | PORT-001..006 | Provide or approve genuine screenshots and the relationship statement per business. |
 | 8 | External alerting channel (ASVS F-03), malware scanning (F-02), independent pen test (F-16) | SEC-007, INFRA-006, SEC-003 | Choose an alert destination; choose a scanning service; commission a review. |
 | 9 | Production launch authorization (LAUNCH-001) | Production | Only after the above; the release gate stays in place. |
+
+## Update (evening)
+Self-hosted AI drafts (9165c8b) and the provider-independent local runner (ce728d3) are merged; see `docs/REQUIREMENTS-REAUDIT-2026-10-27.md`. Nothing has run on the Windows machine yet.
 
 ## 4. How to resume
 - Pull `main`; run `npm run -s typecheck && npm test` (all pass at this checkpoint) and `npm run e2e`.

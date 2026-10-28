@@ -22,7 +22,7 @@ export const PLATFORM: Record<string, ImplementationRecord> = {
   // ── AI operations ──
   "AIOPS-001": { status: "implemented", location: "/staff/ai (+ /staff/ai/:id) — provider, model, status, cost (Unknown when NULL), retries, errors, approval; src/services/monitoring.ts#retryAiJob", owner: "engineering" },
   "AIOPS-002": { status: "in_progress", location: "src/services/ai.ts workflows; approval/retry in /staff/ai", owner: "engineering",
-    missing: "no AI provider key configured, so no workflow has produced a real draft; per-workflow entry points live in other areas" },
+    missing: "drafts can now be served by the self-hosted runner (AI_PROVIDER=local-runner, /api/builds/runner/ai/*, tests/ai-local-runner.test.ts — controlled fixtures) with no paid API; no real local model has produced a draft yet (runner not provisioned on the Windows host)" },
   "AIOPS-003": { status: "in_progress", location: "src/domain/authz.ts OWNER_ONLY for non-user actors; AI output is draft-only (decideAiJob); voice agent has no refund/contract/pricing functions", owner: "engineering",
     missing: "verification in staging" },
 

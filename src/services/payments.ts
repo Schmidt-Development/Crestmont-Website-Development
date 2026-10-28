@@ -6,14 +6,32 @@ import { isStaleEvent, markEventResult, type StripeEvent } from "../domain/strip
 import { markInvoicePaid, provisionProject } from "./commerce.ts";
 import { audit } from "./security.ts";
 import { sendMail } from "./mailer.ts";
+import { MAINTENANCE_PLANS } from "../domain/catalog.ts";
 import { syncProjectBuildSafe } from "./builds.ts";
+import { invoiceSubscription, invoicePaymentIntent, invoiceCharge, invoiceLacksPaymentLink, subscriptionPeriodEnd } from "../domain/stripe-shapes.ts";
+import { StripeReadOnly } from "../adapters/payments.ts";
+
+/** Resolves an invoice's payment link through the API at the pinned version (where Invoice.payment_intent exists),
+ *  for webhook payloads rendered in a newer version that omits it. */
+export type StripeInvoiceLookup = (invoiceId: string) => Promise<{ paymentIntentId: string | null; chargeId: string | null }>;
+export function stripeInvoiceLookup(secretKey: string | undefined, fetchImpl: typeof fetch = fetch): StripeInvoiceLookup | undefined {
+  if (!secretKey) return undefined;
+  let reader: StripeReadOnly;
+  try { reader = new StripeReadOnly(secretKey, fetchImpl); } catch { return undefined; } // live keys stay refused
+  return async (id) => {
+    if (!/^in_[A-Za-z0-9]+$/.test(id)) throw new Error("Invalid Stripe invoice id");
+    const inv = await reader.get<Record<string, unknown>>(`invoices/${id}`);
+    return { paymentIntentId: invoicePaymentIntent(inv), chargeId: invoiceCharge(inv) };
+  };
+}
+type EventCtx = Pick<AppContext, "db" | "email" | "baseUrl"> & { stripeLookup?: StripeInvoiceLookup };
 
 type Obj = Record<string, unknown>;
 const s = (o: Obj, k: string) => (typeof o[k] === "string" ? (o[k] as string) : null);
 const n = (o: Obj, k: string) => (typeof o[k] === "number" ? (o[k] as number) : null);
 const meta = (o: Obj) => ((o.metadata ?? {}) as Record<string, string>);
 
-export async function processStripeEvent(ctx: Pick<AppContext, "db" | "email" | "baseUrl">, evt: StripeEvent): Promise<void> {
+export async function processStripeEvent(ctx: EventCtx, evt: StripeEvent): Promise<void> {
   const db = ctx.db;
   try {
     if (await isStaleEvent(db, evt)) { await markEventResult(db, evt.id, { ok: true, ignored: true }); return; }
@@ -42,22 +60,26 @@ export async function processStripeEvent(ctx: Pick<AppContext, "db" | "email" | 
         const org = m.organization_id ?? (await db.prepare(`SELECT id FROM organizations WHERE stripe_customer_id = ?`).bind(s(o, "customer")).first<{ id: string }>())?.id;
         if (!org) throw new Error("Subscription for unknown customer");
         const status = evt.type === "customer.subscription.deleted" ? "canceled" : (s(o, "status") ?? "incomplete");
-        const end = n(o, "current_period_end");
-        await upsertSubscription(db, evt.data.object.id, org, m.product_id ?? null, status, end ? new Date(end * 1000).toISOString() : null);
+        const end = subscriptionPeriodEnd(o);
+        const change = await upsertSubscription(db, evt.data.object.id, org, m.product_id ?? null, status, end ? new Date(end * 1000).toISOString() : null);
+        // EMAIL-002 subscription_update: customer administrators hear about real status changes of an existing plan.
+        if (change.previous && change.previous !== change.status) {
+          const plan = change.productId ? (MAINTENANCE_PLANS as Record<string, { name: string }>)[change.productId]?.name ?? change.productId : "maintenance";
+          const admins = (await db.prepare(`SELECT u.email FROM memberships mb JOIN users u ON u.id = mb.user_id WHERE mb.organization_id = ? AND mb.role_id = 'customer_admin' AND u.disabled_at IS NULL`).bind(org).all<{ email: string }>()).results;
+          for (const a of admins) await sendMail(ctx, { template: "subscription_update", to: a.email, idempotencyKey: `sub:${evt.id}:${a.email}`, data: { planName: plan, status: change.status, url: `${ctx.baseUrl}/portal/billing` } });
+        }
         break;
       }
       case "invoice.payment_failed": {
-        const sub = s(o, "subscription");
+        const sub = invoiceSubscription(o);
         if (sub) await db.prepare(`UPDATE subscriptions SET status = 'past_due', updated_at = ? WHERE stripe_subscription_id = ?`).bind(nowIso(), sub).run();
         const to = s(o, "customer_email");
-        if (to) await sendMail(ctx, { template: "failed_payment", to, subject: "Action needed: payment failed", heading: "Your payment did not go through", idempotencyKey: `failed:${evt.id}`,
-          paragraphs: ["Your most recent maintenance plan payment failed. Please update your payment method to keep your plan active.", "Stripe will retry the payment automatically."],
-          cta: { label: "Update payment method", url: `${ctx.baseUrl}/portal/billing` } });
+        if (to) await sendMail(ctx, { template: "failed_payment", to, idempotencyKey: `failed:${evt.id}`, data: { url: `${ctx.baseUrl}/portal/billing` } });
         await audit(db, { actorKind: "webhook", action: "payment.failed", subjectType: "subscription", subjectId: sub, details: { event: evt.id } });
         break;
       }
       case "invoice.paid": {
-        const sub = s(o, "subscription");
+        const sub = invoiceSubscription(o);
         if (sub) await db.prepare(`UPDATE subscriptions SET status = 'active', updated_at = ? WHERE stripe_subscription_id = ? AND status = 'past_due'`).bind(nowIso(), sub).run();
         // PAY-006: a Stripe Invoice created for a milestone invoice (src/services/stripe-invoices.ts).
         const local = meta(o).crestmont_invoice_id;
@@ -66,7 +88,15 @@ export async function processStripeEvent(ctx: Pick<AppContext, "db" | "email" | 
           if (!inv) throw new Error(`Stripe invoice ${o.id} references unknown invoice ${local}`);
           if (inv.stripe_invoice_id && inv.stripe_invoice_id !== o.id) throw new Error(`Stripe invoice ${o.id} does not match ${inv.stripe_invoice_id} recorded for ${local}`);
           await db.prepare(`UPDATE invoices SET stripe_invoice_id = COALESCE(stripe_invoice_id, ?), stripe_invoice_status = 'paid', stripe_invoice_synced_at = ? WHERE id = ?`).bind(o.id, nowIso(), local).run();
-          await applyInvoicePayment(ctx, evt, local, { amountCents: n(o, "amount_paid") ?? -1, paymentIntentId: s(o, "payment_intent"), chargeId: s(o, "charge") }, s(o, "customer_email"));
+          let link = { paymentIntentId: invoicePaymentIntent(o), chargeId: invoiceCharge(o) };
+          if (!link.paymentIntentId && invoiceLacksPaymentLink(o)) {
+            // Newer-version payload: resolve the PaymentIntent through the pinned API version. Without it, refunds and
+            // disputes could not be matched to this payment, so the event fails and is retried by reconciliation.
+            if (!ctx.stripeLookup) throw new Error(`invoice ${o.id} payload has no payment link and Stripe is not configured to look it up`);
+            link = await ctx.stripeLookup(String(o.id));
+            if (!link.paymentIntentId) throw new Error(`Stripe invoice ${o.id} has no PaymentIntent yet`);
+          }
+          await applyInvoicePayment(ctx, evt, local, { amountCents: n(o, "amount_paid") ?? -1, ...link }, s(o, "customer_email"));
         }
         break;
       }
@@ -174,9 +204,8 @@ async function applyInvoicePayment(ctx: Pick<AppContext, "db" | "email" | "baseU
       ]);
     }
   }
-  if (to) await sendMail(ctx, { template: "receipt", to, subject: "Payment received — Crestmont", heading: "Thank you — your payment was received", idempotencyKey: `receipt:${inv.id}`,
-    paragraphs: [`We received your payment of $${(inv.amount_cents / 100).toFixed(2)}.`, projectId ? "Your project is set up. The next step is onboarding, where you tell us about your business, brand and goals." : "Your project record has been updated."],
-    cta: { label: projectId ? "Start onboarding" : "View billing", url: `${ctx.baseUrl}/portal${projectId ? `/projects/${projectId}/onboarding` : "/billing"}` } });
+  if (to) await sendMail(ctx, { template: "receipt", to, idempotencyKey: `receipt:${inv.id}`,
+    data: { amountCents: inv.amount_cents, next: projectId ? "onboarding" : "billing", url: `${ctx.baseUrl}/portal${projectId ? `/projects/${projectId}/onboarding` : "/billing"}` } });
 }
 
 async function syncBuildsForPaymentIntent(db: AppContext["db"], pi: string) {
@@ -184,21 +213,22 @@ async function syncBuildsForPaymentIntent(db: AppContext["db"], pi: string) {
   for (const r of rows) await syncProjectBuildSafe(db, r.project_id, "sweep");
 }
 
-async function upsertSubscription(db: AppContext["db"], stripeId: string, orgId: string, productId: string | null, status: string, periodEnd: string | null) {
+async function upsertSubscription(db: AppContext["db"], stripeId: string, orgId: string, productId: string | null, status: string, periodEnd: string | null): Promise<{ previous: string | null; status: string; productId: string | null }> {
   const allowed = ["trialing", "active", "past_due", "canceled", "incomplete", "unpaid"];
   const st = allowed.includes(status) ? status : status === "incomplete_expired" ? "canceled" : "incomplete";
-  const existing = await db.prepare(`SELECT id FROM subscriptions WHERE stripe_subscription_id = ?`).bind(stripeId).first<{ id: string }>();
+  const existing = await db.prepare(`SELECT id, status, product_id FROM subscriptions WHERE stripe_subscription_id = ?`).bind(stripeId).first<{ id: string; status: string; product_id: string }>();
   if (existing) {
     await db.prepare(`UPDATE subscriptions SET status = ?, current_period_end = COALESCE(?, current_period_end), updated_at = ? WHERE id = ?`).bind(st, periodEnd, nowIso(), existing.id).run();
-  } else {
-    if (!productId) throw new Error("New subscription is missing product_id metadata");
-    await db.prepare(`INSERT INTO subscriptions (id, organization_id, product_id, stripe_subscription_id, status, current_period_end, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`)
-      .bind(newId("sub"), orgId, productId, stripeId, st, periodEnd, nowIso(), nowIso()).run();
+    return { previous: existing.status, status: st, productId: existing.product_id };
   }
+  if (!productId) throw new Error("New subscription is missing product_id metadata");
+  await db.prepare(`INSERT INTO subscriptions (id, organization_id, product_id, stripe_subscription_id, status, current_period_end, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`)
+    .bind(newId("sub"), orgId, productId, stripeId, st, periodEnd, nowIso(), nowIso()).run();
+  return { previous: null, status: st, productId };
 }
 
 /** Reconciliation: retry failed events (PAY-009). Called by the scheduled worker. */
-export async function retryFailedStripeEvents(ctx: Pick<AppContext, "db" | "email" | "baseUrl">): Promise<number> {
+export async function retryFailedStripeEvents(ctx: EventCtx): Promise<number> {
   const rows = (await ctx.db.prepare(`SELECT id, payload FROM stripe_events WHERE status IN ('failed','received') AND attempts < 5 ORDER BY stripe_created LIMIT 50`).all<{ id: string; payload: string }>()).results;
   for (const r of rows) await processStripeEvent(ctx, JSON.parse(r.payload) as StripeEvent);
   return rows.length;

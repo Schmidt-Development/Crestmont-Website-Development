@@ -1,18 +1,26 @@
 # AI Builds — automated first builds for paid intakes
 
 **Status:** the control plane is implemented and tested with controlled fixtures. **Execution is unavailable** until the
-Founder provisions a build runner (`RUNNER-SETUP.md`). No real Claude build has run; do not describe it as operational
-until a real end-to-end staging run succeeds (requirement AIB-011).
+Founder provisions a build runner. The default runner uses a **self-hosted model on the company's Windows build
+machine** (`WINDOWS-SUPERCOMPUTER.md`, zero per-token fees). The Claude Agent SDK is an optional, explicitly enabled
+paid adapter. No real build has run on either provider. Do not describe AI builds as operational until the controlled
+validation (`LOCAL-VALIDATION.md`) and a real end-to-end staging run succeed (requirement AIB-011).
 
 ## Architecture
 - **Control plane (Cloudflare Worker, D1):** `src/services/builds.ts`, `src/routes/builds.ts`, `migrations/0031_ai_builds.sql`.
   Eligibility, durable queue (`build_jobs`, unique per order/revision, one active build per project), leases and heartbeats,
   budgets/runtime/turn limits, state transitions with reasons (`build_events`), brief snapshots (`build_briefs`),
   requirement checklist (`build_requirements`), attempts (`build_runs`), owner controls, notifications.
-- **Runner (separate Node process, official Claude Agent SDK):** `runner/`. Pulls jobs over the signed protocol
-  (`RUNNER-PROTOCOL.md`), works in an isolated per-job workspace with a per-customer repository and preview credentials,
-  reports usage at each heartbeat and stops when the platform says so. Workers cannot host the Agent SDK, so the runner runs
-  on a container/VM host.
+- **Runner (separate Node process):** `runner/`. Pulls jobs over the signed protocol (`RUNNER-PROTOCOL.md`), works in
+  an isolated per-job workspace with a per-customer repository and preview credentials, reports usage at each heartbeat
+  and stops when the platform says so. Agent providers (`runner/src/providers/`):
+  - `local` (default): in-house tool-using agent against a self-hosted, OpenAI-compatible model server (Ollama).
+    Commands, installs, checks and browser checks run in a separate restricted container per build. Cost is $0;
+    tokens and model time are reported. When idle, the runner also serves the platform's short AI drafts (`ai_jobs`)
+    with the same local model.
+  - `claude-agent-sdk` (optional, paid): the original Agent SDK adapter. It needs `RUNNER_ALLOW_PAID_PROVIDER=true`
+    and is never an automatic fallback.
+  Deployment: `WINDOWS-SUPERCOMPUTER.md` (Windows + WSL 2 + Docker Desktop, outbound-only, no public port).
 
 ## When a build starts
 A first build is queued automatically when all hold (re-checked on payment, intake, refunds, disputes, cancellation and every 15 min):
@@ -34,3 +42,4 @@ selected projects. Staging sample data is excluded the same way.
 
 ## Contracts
 - Runner protocol: `RUNNER-PROTOCOL.md` · Frontend: `FRONTEND-CONTRACT.md` · Runner setup: `RUNNER-SETUP.md` · Starters: `STARTERS.md`.
+- Windows build machine (local model, default): `WINDOWS-SUPERCOMPUTER.md` · Validation plan: `LOCAL-VALIDATION.md`.

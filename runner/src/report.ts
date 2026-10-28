@@ -27,6 +27,8 @@ export interface ReportInput {
   agentReport: string | null;
   envVarNames: string[];
   starter: string | null;
+  /** Which agent provider ran and its model usage. Absent = Agent SDK wording (runner 1.0 behaviour). */
+  usage?: { provider: string; model: string; paid: boolean; inputTokens: number; outputTokens: number; modelWallMs: number; modelCalls: number };
 }
 
 const OUTCOME_TEXT: Record<Outcome, string> = {
@@ -108,7 +110,13 @@ export function buildReport(i: ReportInput): string {
   out.push(list(i.envVarNames.map((n) => `\`${n}\``)));
   out.push("");
   out.push("## Run details");
-  out.push(`- Estimated model spend this attempt: $${i.costUsd.toFixed(2)} (Agent SDK client-side estimate; authoritative billing is in the Claude Console)`);
+  if (i.usage && !i.usage.paid) {
+    out.push(`- Agent: local provider, self-hosted model \`${i.usage.model}\` (no per-token fees; model spend this attempt: $0.00)`);
+    out.push(`- Model usage this attempt: ${i.usage.modelCalls} model calls, ${i.usage.inputTokens} input tokens, ${i.usage.outputTokens} output tokens, ${Math.round(i.usage.modelWallMs / 1000)} s waiting for the model`);
+  } else {
+    if (i.usage) out.push(`- Agent: ${i.usage.provider} (paid adapter, explicitly enabled), model \`${i.usage.model}\``);
+    out.push(`- Estimated model spend this attempt: $${i.costUsd.toFixed(2)} (Agent SDK client-side estimate; authoritative billing is in the Claude Console)`);
+  }
   out.push(`- Agent turns this attempt: ${i.turns}`);
   out.push(`- Session: ${i.sessionId ?? "(none)"}`);
   for (const n of [...i.sessionNotes, ...i.costCaveats]) out.push(`- ${n}`);

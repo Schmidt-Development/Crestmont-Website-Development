@@ -41,7 +41,7 @@ workers_dev = true            # staging is served at crestmont-platform-staging.
 # routes = [{ pattern = "staging.crestmontwebsitedevelopment.com", custom_domain = true }]   # after DNS control (BLK-011)
 # Turnstile: Cloudflare's documented always-pass TEST keys (public values, not secrets) so preview forms work.
 # Replace with real keys before any public exposure. STAGING_ACCESS_PASSWORD (secret) gates the whole preview.
-vars = { ENVIRONMENT = "staging", PREVIEW_GATE = "required", TURNSTILE_SITE_KEY = "1x00000000000000000000AA", TURNSTILE_SECRET = "1x0000000000000000000000000000000AA" }
+vars = { ENVIRONMENT = "staging", AI_PROVIDER = "local-runner", PREVIEW_GATE = "required", TURNSTILE_SITE_KEY = "1x00000000000000000000AA", TURNSTILE_SECRET = "1x0000000000000000000000000000000AA" }
 d1_databases = [{ binding = "DB", database_name = "crestmont-staging", database_id = "", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-staging" }]
 triggers = { crons = ["*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts
@@ -76,4 +76,5 @@ triggers = { crons = ["*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE i
 # (full list and who owns each in docs/DEPLOYMENT.md §4):
 #   EVIDENCE_INGEST_SECRET, STRIPE_WEBHOOK_SECRET, STRIPE_SECRET_KEY, TURNSTILE_SECRET, TURNSTILE_SITE_KEY,
 #   RESEND_API_KEY, ANTHROPIC_API_KEY, GITHUB_TOKEN, GITHUB_REPO, VOICE_WEBHOOK_SECRET,
-#   RESEND_WEBHOOK_SECRET (Svix whsec_…), RETELL_API_KEY (Crestmont Retell workspace key with webhook badge)
+#   RESEND_WEBHOOK_SECRET (Svix whsec_…), RETELL_API_KEY (Crestmont Retell workspace key with webhook badge),
+#   MFA_ENCRYPTION_KEY (base64 of 32 random bytes; required on staging/production for two-factor enrolment)

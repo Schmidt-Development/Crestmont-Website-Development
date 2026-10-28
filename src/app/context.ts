@@ -27,15 +27,23 @@ export interface Env {
   STAGING_ACCESS_PASSWORD?: string;
   /** "required" on the deployed staging Worker: the preview gate stays locked when no password is set. */
   PREVIEW_GATE?: string;
+  /** "local-runner": AI drafts are served by the self-hosted model through the build runner (no paid API). */
+  AI_PROVIDER?: string;
   /** Shared HMAC secret for the AI Builds runner API (docs/ai-builds/RUNNER-PROTOCOL.md). Unset = execution unavailable. */
   BUILD_RUNNER_SECRET?: string;
+  /** HMAC key for POST /api/scheduled/run (external scheduler when native Cron Triggers are unavailable). */
+  SCHEDULER_TRIGGER_SECRET?: string;
   /** "on" | "off": per-user limits on authenticated form submissions (default on outside development). ASVS F-15. */
   ACTION_RATE_LIMIT?: string;
   /** "on" | "off": breached-password check (default on outside development). ASVS F-06. */
   PASSWORD_BREACH_CHECK?: string;
   /** Resend webhook signing secret (whsec_…), verifies Svix signatures. EMAIL-003. */
   RESEND_WEBHOOK_SECRET?: string;
-  FILES?: unknown;              // R2 bucket binding
+  /** Base64 of 32 random bytes: AES-GCM key for TOTP secrets at rest (src/lib/totp-secrets.ts). Required outside development. */
+  MFA_ENCRYPTION_KEY?: string;
+  /** "off" disables the per-request env_metrics UPSERT (READY-006). Default on. */
+  ENV_METRICS?: string;
+  FILES?: unknown;             // R2 bucket binding
   ASSETS?: { fetch(req: Request): Promise<Response> };
   /** Test/dev hook: overrides the computed adapters. */
   overrides?: Partial<Pick<AppContext, "email" | "storage" | "payments">> & { now?: () => Date; /** Test seam for read-only provider calls (cost import, reconciliation). */ fetch?: typeof fetch };
@@ -68,6 +76,8 @@ export interface AppContext {
   actor: Actor | null;
   sessionId: string | null;
   sessionMfaVerified: boolean;
+  /** When this session last completed a TOTP / recovery-code verification (step-up MFA, src/app/step-up.ts). */
+  sessionMfaAt: string | null;
   csrfToken: string;
   flash: { kind: "success" | "error" | "info"; text: string } | null;
   setCookies: string[];

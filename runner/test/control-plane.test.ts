@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { ControlPlaneClient, signBody, verifySignature, LeaseLostError, ControlPlaneError, SIGNATURE_HEADER, truncateBytes } from "../src/control-plane.ts";
 import { startFakeControlPlane, makeJob, SECRET } from "./helpers.ts";
+import { RUNNER_VERSION } from "../src/protocol.ts";
 
 test("[AIB-RUNNER] signature header is t=<unix>,v1=<hex HMAC-SHA256(secret, \"<t>.<raw body>\")>", () => {
   const body = JSON.stringify({ runnerId: "r1", version: "1.0.0", capabilities: ["agent-sdk"] });
@@ -24,7 +25,7 @@ test("[AIB-RUNNER] client signs every request; the fake control plane rejects a 
     const good = new ControlPlaneClient({ baseUrl: cp.url, secret: SECRET, runnerId: "r1" });
     const r = await good.claim(["agent-sdk", "git"]);
     assert.ok(r.job, "claimed");
-    assert.deepEqual(cp.calls[0].body, { runnerId: "r1", version: "1.0.0", capabilities: ["agent-sdk", "git"] });
+    assert.deepEqual(cp.calls[0].body, { runnerId: "r1", version: RUNNER_VERSION, capabilities: ["agent-sdk", "git"] });
     let fetches = 0;
     const counting: typeof fetch = (input, init) => { fetches++; return fetch(input, init); };
     const bad = new ControlPlaneClient({ baseUrl: cp.url, secret: "wrong-secret-0000000000", runnerId: "r1", fetchImpl: counting, sleep: async () => {} });

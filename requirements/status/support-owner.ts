@@ -10,7 +10,7 @@ export const SUPPORT_OWNER: Record<string, ImplementationRecord> = {
   "SUP-003": { status: "in_progress", location: "src/services/support.ts#runSupportEscalationSweep/responseTiming/staffReply + POST /staff/support/sweep", owner: "engineering",
     missing: "sweep is manual (POST /staff/support/sweep) until a Worker cron trigger calls runSupportEscalationSweep; email delivery unverified until Resend exists (BLK-005)" },
   "SUP-004": { status: "in_progress", location: "src/services/support.ts#draftReply/staffReply (approval on ticket_messages.approved_by + ai_jobs via decideAiJob)", owner: "engineering",
-    missing: "no AI provider key provisioned in any environment, so drafting is verified only against a stubbed provider in tests" },
+    missing: "drafting verified only against a stubbed provider and the local-runner fixture (tests/ai-local-runner.test.ts); no real model output yet — needs the self-hosted runner provisioned (no API key required)" },
   "SUP-005": { status: "in_progress", location: "support_settings + /staff/support/settings + src/services/support.ts#hoursDisclosure (rejects 24/7 human-coverage wording)", owner: "founder",
     missing: "Founder has not set the actual staffed hours and first-response target; public support policy page must show them once set" },
 

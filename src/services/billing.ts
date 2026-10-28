@@ -10,6 +10,8 @@ import { createPackageOrder } from "./commerce.ts";
 import { audit } from "./security.ts";
 import { sendMail } from "./mailer.ts";
 import { effectivePrice, pricedItem } from "./pricing-approvals.ts";
+import { checkoutLinesFor, loadTaxConfig, taxLines } from "./tax.ts";
+import { computeTax } from "../domain/tax.ts";
 
 export const NOT_CONFIGURED = "Online payment is not configured yet.";
 
@@ -30,7 +32,7 @@ export async function startPackageCheckout(ctx: AppContext, user: CheckoutUser, 
   const order = await createPackageOrder(ctx.db, organizationId, pkg.id, user.id, ctx.now());
   const session = await ctx.payments.createCheckout({
     mode: "payment",
-    lines: [{ name: order.description, amountCents: order.amountCents }],
+    lines: order.checkoutLines,
     customerEmail: user.email,
     successUrl: `${ctx.baseUrl}/portal/billing?checkout=success`,
     cancelUrl: `${ctx.baseUrl}/checkout/${pkg.id}?checkout=cancelled`,
@@ -46,10 +48,10 @@ async function recordCheckoutSession(db: Db, invoiceId: string, sessionId: strin
   await db.prepare(`UPDATE invoices SET stripe_checkout_session_id = ? WHERE id = ?`).bind(sessionId, invoiceId).run();
 }
 
-export interface CustomerInvoice { id: string; organization_id: string; order_id: string | null; project_id: string | null; milestone_kind: string | null; amount_cents: number; status: string; description: string | null; created_at: string; paid_at: string | null; due_at: string | null; stripe_checkout_session_id: string | null; stripe_invoice_status: string | null; stripe_hosted_invoice_url: string | null }
+export interface CustomerInvoice { id: string; organization_id: string; order_id: string | null; project_id: string | null; milestone_kind: string | null; amount_cents: number; subtotal_cents: number | null; tax_cents: number; tax_detail_json: string | null; status: string; description: string | null; created_at: string; paid_at: string | null; due_at: string | null; stripe_checkout_session_id: string | null; stripe_invoice_status: string | null; stripe_hosted_invoice_url: string | null }
 
 export async function customerInvoice(db: Db, organizationId: string, invoiceId: string): Promise<CustomerInvoice> {
-  const inv = await db.prepare(`SELECT id, organization_id, order_id, project_id, milestone_kind, amount_cents, status, description, created_at, paid_at, due_at, stripe_checkout_session_id, stripe_invoice_status, stripe_hosted_invoice_url FROM invoices WHERE id = ? AND organization_id = ?`)
+  const inv = await db.prepare(`SELECT id, organization_id, order_id, project_id, milestone_kind, amount_cents, subtotal_cents, tax_cents, tax_detail_json, status, description, created_at, paid_at, due_at, stripe_checkout_session_id, stripe_invoice_status, stripe_hosted_invoice_url FROM invoices WHERE id = ? AND organization_id = ?`)
     .bind(invoiceId, organizationId).first<CustomerInvoice>();
   if (!inv) throw new HttpError(404, "Invoice not found.");
   return inv;
@@ -67,7 +69,7 @@ export async function startInvoiceCheckout(ctx: AppContext, user: CheckoutUser, 
   const kind = inv.milestone_kind === "change_order" ? "change_order" : inv.milestone_kind === "design_25" || inv.milestone_kind === "prelaunch_25" ? "milestone" : order?.kind ?? "invoice";
   const session = await ctx.payments.createCheckout({
     mode: "payment",
-    lines: [{ name: inv.description ?? "Crestmont invoice", amountCents: inv.amount_cents }],
+    lines: checkoutLinesFor(inv, "Crestmont invoice"),
     customerEmail: user.email,
     successUrl: `${ctx.baseUrl}/portal/billing?checkout=success`,
     cancelUrl: `${ctx.baseUrl}/portal/billing/invoices/${inv.id}?checkout=cancelled`,
@@ -92,10 +94,13 @@ export async function startMaintenanceCheckout(ctx: AppContext, user: CheckoutUs
   if (!ctx.payments.configured) throw new HttpError(409, NOT_CONFIGURED);
   const existing = await ctx.db.prepare(`SELECT id FROM subscriptions WHERE organization_id = ? AND product_id = ? AND status IN ('active','trialing','past_due')`).bind(organizationId, plan.id).first();
   if (existing) throw new HttpError(409, `You already have an active ${plan.name} plan. Manage it from Billing.`);
+  const monthly = pricedItem("maintenance", plan.id) ? (await effectivePrice(ctx.db, "maintenance", plan.id, ctx.now())).cents : plan.monthlyCents; // CAT-007 effective price
+  // LEGAL-005: configured tax is a separate recurring line per jurisdiction.
+  const tax = computeTax([{ description: `${plan.name} maintenance (monthly)`, amountCents: monthly, productKey: plan.id }], await loadTaxConfig(ctx.db));
   const session = await ctx.payments.createCheckout({
     mode: "subscription",
     recurringInterval: "month",
-    lines: [{ name: `${plan.name} maintenance (monthly)`, amountCents: pricedItem("maintenance", plan.id) ? (await effectivePrice(ctx.db, "maintenance", plan.id, ctx.now())).cents : plan.monthlyCents }], // CAT-007 effective price
+    lines: [{ name: `${plan.name} maintenance (monthly)`, amountCents: monthly }, ...(tax.configured ? taxLines(tax) : [])],
     customerEmail: user.email,
     successUrl: `${ctx.baseUrl}/portal/billing?checkout=success`,
     cancelUrl: `${ctx.baseUrl}/checkout/maintenance/${plan.id}?checkout=cancelled`,
@@ -117,7 +122,7 @@ export async function customerBilling(db: Db, organizationId: string) {
   const q = <T>(sql: string) => db.prepare(sql).bind(organizationId).all<T>().then((r) => r.results);
   return {
     orders: await q<{ id: string; kind: string; status: string; total_cents: number; created_at: string; product_id: string | null }>(`SELECT id, kind, status, total_cents, created_at, product_id FROM orders WHERE organization_id = ? ORDER BY created_at DESC`),
-    invoices: await q<CustomerInvoice>(`SELECT id, organization_id, order_id, project_id, milestone_kind, amount_cents, status, description, created_at, paid_at, due_at, stripe_checkout_session_id, stripe_invoice_status, stripe_hosted_invoice_url FROM invoices WHERE organization_id = ? AND status <> 'draft' ORDER BY created_at DESC`),
+    invoices: await q<CustomerInvoice>(`SELECT id, organization_id, order_id, project_id, milestone_kind, amount_cents, subtotal_cents, tax_cents, tax_detail_json, status, description, created_at, paid_at, due_at, stripe_checkout_session_id, stripe_invoice_status, stripe_hosted_invoice_url FROM invoices WHERE organization_id = ? AND status <> 'draft' ORDER BY created_at DESC`),
     payments: await q<{ id: string; invoice_id: string | null; amount_cents: number; status: string; created_at: string; description: string | null; refundable: number }>(`SELECT p.id, p.invoice_id, p.amount_cents, p.status, p.created_at, i.description,
         CASE WHEN p.status = 'succeeded' AND NOT EXISTS (SELECT 1 FROM refunds r WHERE r.payment_id = p.id AND r.status NOT IN ('denied','failed')) THEN 1 ELSE 0 END AS refundable
       FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id WHERE p.organization_id = ? ORDER BY p.created_at DESC`),
@@ -148,9 +153,7 @@ export async function requestRefund(ctx: AppContext, user: CheckoutUser, organiz
   await ctx.db.prepare(`INSERT INTO refunds (id, organization_id, payment_id, amount_cents, reason, evidence, status, requested_by, created_at) VALUES (?,?,?,?,?,?, 'requested', ?, ?)`)
     .bind(id, organizationId, pay!.id, amount, input.reason, input.evidence || null, user.id, at).run();
   await audit(ctx.db, { actorUserId: user.id, action: "refund.requested", subjectType: "refund", subjectId: id, organizationId, details: { paymentId: pay!.id, amountCents: amount } });
-  await sendMail(ctx, { template: "refund_request", to: user.email, subject: "We received your refund request", heading: "Your refund request was received", idempotencyKey: `refund-req:${id}`,
-    paragraphs: [`We received your request to refund $${(amount / 100).toFixed(2)}.`, "Our support team reviews every request and records the outcome. Discretionary refunds are decided by the Founder. You will receive an email when a decision is made."],
-    cta: { label: "View billing", url: `${ctx.baseUrl}/portal/billing` } });
+  await sendMail(ctx, { template: "refund_request", to: user.email, idempotencyKey: `refund-req:${id}`, data: { amountCents: amount, url: `${ctx.baseUrl}/portal/billing` } });
   const reviewers = (await ctx.db.prepare(`SELECT DISTINCT user_id FROM memberships WHERE role_id IN ('support','owner')`).all<{ user_id: string }>()).results;
   for (const r of reviewers) {
     await ctx.db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES (?,?,?,?,?,?,?)`)

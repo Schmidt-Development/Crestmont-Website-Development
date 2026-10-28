@@ -16,6 +16,15 @@ import * as fin from "../services/finance.ts";
 import * as docs from "../services/finance-documents.ts";
 import { createStripeMilestoneInvoice, stripeInvoicer, stripeInvoiceBlocker, STRIPE_INVOICE_KINDS } from "../services/stripe-invoices.ts";
 import { audit } from "../services/security.ts";
+import { parseTaxDetail, taxStatement, taxLabel } from "../services/tax.ts";
+import type { TaxResult } from "../domain/tax.ts";
+
+/** LEGAL-005: subtotal and tax per jurisdiction from the invoice's issue-time snapshot, or the "not a tax invoice" note. */
+function taxBreakdown(tax: TaxResult | null): SafeHtml {
+  if (!tax) return html`<p class="faint" data-testid="tax-note">${taxStatement(null)}</p>`;
+  return html`<div data-testid="tax-breakdown">${dl([["Subtotal", docs.usd(tax.subtotalCents)], ...tax.byJurisdiction.map((j) => [taxLabel(j), docs.usd(j.taxCents)] as [string, string]), ["Total", docs.usd(tax.totalCents)]])}
+<p class="faint">${taxStatement(tax)}</p></div>`;
+}
 import { staffPage, definitions, rangeForm } from "./crm.ts";
 
 function portalPage(ctx: AppContext, title: string, body: SafeHtml, status = 200) {
@@ -79,7 +88,7 @@ async function invoicePage(ctx: AppContext, id: string) {
   return portalPage(ctx, "Invoice", html`${pageHead(inv.description ?? MILESTONE_LABEL[inv.milestone_kind ?? ""] ?? "Invoice", html`${badge(inv.status)}${linkButton("Download PDF", `/portal/billing/invoices/${inv.id}/pdf`, "secondary", "sm")}${linkButton("All billing", "/portal/billing", "ghost", "sm")}`, `Invoice ${inv.id}`)}
 ${ctx.url.searchParams.get("checkout") === "cancelled" ? alert("info", "Checkout was cancelled. Nothing was charged.") : ""}
 <section class="card stack">${dl([["Organization", org.organizationName], ["Issued", formatDate(inv.created_at)], ["Type", MILESTONE_LABEL[inv.milestone_kind ?? ""] ?? "—"], ["Project", project ? html`<a href="/portal/projects/${project.id}">${project.name}</a>` : "Created after payment"], ["Due", formatDate(inv.due_at)], ["Paid", formatDate(inv.paid_at)]])}
-<p class="price">${formatCents(inv.amount_cents)}</p>
+<p class="price">${formatCents(inv.amount_cents)}</p>${taxBreakdown(parseTaxDetail(inv.tax_detail_json))}
 ${payBlock}</section>
 <section class="card"><h2 style="font-size:1.2rem">Payments (receipts)</h2>${table(pays, [{ header: "Date", cell: (p) => formatDateTime(p.created_at) }, { header: "Status", cell: (p) => badge(p.status) }, { header: "Amount", cell: (p) => formatCents(p.amount_cents), numeric: true }, { header: "Reference", cell: (p) => p.stripe_payment_intent_id ?? p.id }, { header: "", cell: (p) => (p.status !== "failed" ? html`<a href="/portal/billing/receipts/${p.id}">Receipt</a> · <a href="/portal/billing/receipts/${p.id}/pdf">PDF</a>` : "") }], { empty: html`<p class="muted">No payment recorded yet.</p>` })}</section>`);
 }
@@ -303,6 +312,7 @@ async function staffInvoicePage(ctx: AppContext, id: string, errors: string[] = 
 ${actionForm(ctx, `/staff/finance/invoices/${inv.id}/stripe-invoice`, `Create Stripe invoice for ${formatCents(inv.amount_cents)}`, { variant: "primary", confirm: "Create and finalize this invoice in Stripe (not sent by email)?" })}`;
   return staffPage(ctx, "Invoice", html`${pageHead(d.lines[0]?.description ?? "Invoice", html`${badge(inv.status)}${linkButton("Invoice PDF", `/staff/finance/invoices/${inv.id}/pdf`, "secondary", "sm")}${linkButton("All invoices", "/staff/finance/invoices", "ghost", "sm")}`, `Invoice ${inv.id}`)}${formErrors(errors)}
 <div class="grid grid-2"><section class="card stack">${dl([["Customer", html`<a href="/staff/customers/${d.organization.id}">${d.organization.name}</a>`], ["Type", MILESTONE_LABEL[inv.milestone_kind ?? ""] ?? "—"], ["Amount", formatCents(inv.amount_cents)],
+    ["Sales tax", d.tax ? docs.usd(d.tax.taxCents) : "None (issued without tax configuration)"],
     ["Paid", formatCents(d.paidCents)], ["Refunded", formatCents(d.refundedCents)], ["Balance due", formatCents(d.balanceCents)], ["Issued", formatDate(inv.created_at)], ["Paid at", formatDate(inv.paid_at)],
     ["Project", d.project ? html`<a href="/staff/projects/${d.project.id}">${d.project.name}</a>` : "—"], ["Order", d.order ? `${d.order.id} (${label(d.order.kind)}, ${formatCents(d.order.total_cents)})` : "—"], ["Checkout session", inv.stripe_checkout_session_id]])}
 <h2 style="font-size:1.1rem">Receipts</h2>${table(d.payments, [{ header: "Date", cell: (p) => formatDate(p.created_at) }, { header: "Receipt", cell: (p) => html`<a href="/staff/finance/receipts/${p.id}">${p.receipt_number}</a> · <a href="/staff/finance/receipts/${p.id}/pdf">PDF</a>` },

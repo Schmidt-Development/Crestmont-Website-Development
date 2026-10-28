@@ -153,6 +153,17 @@ async function awaitTurnstile(page: Page) {
   if (!(await page.locator(".cf-turnstile").count())) return; // development: no widget
   await page.waitForFunction(() => (document.querySelector("[name='cf-turnstile-response']") as HTMLInputElement | null)?.value, undefined, { timeout: TIMEOUT });
 }
+/** Step-up MFA before a sensitive action (src/app/step-up.ts). Codes are single-use per 30 s step, so on a replay wait for the next step. */
+async function freshMfa(page: Page, a: Account) {
+  const back = new URL(page.url()).pathname + new URL(page.url()).search;
+  await page.goto(`${BASE}/mfa/step-up?next=${encodeURIComponent(back)}`);
+  for (let attempt = 0; new URL(page.url()).pathname === "/mfa/step-up" && attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, (31 - (Math.floor(Date.now() / 1000) % 30)) * 1000));
+    await page.fill("#f-code", await totpCode(a.totp!));
+    await nav(page, "button[type=submit]");
+  }
+  assert.equal(new URL(page.url()).pathname + new URL(page.url()).search, back, `step-up check passed for ${a.role} (${await alerts(page)})`);
+}
 async function projectId(customer: string, name: RegExp): Promise<string> {
   const c = await as(customer);
   await c.goto(BASE + "/portal/projects");
@@ -278,6 +289,7 @@ journey(4, ["SALES-004"], "customer registers from the proposal, verifies the em
   await p.fill("#f-email", contact.email);
   await p.fill("#f-password", contact.password);
   await p.check("input[name=terms]");
+  await awaitTurnstile(p); // /register is bot-protected (always-pass test keys on staging)
   await nav(p, "button[type=submit]");
   assert.match(await text(p, "h1"), /Check your email/, await alerts(p));
   await p.goto(linkIn(await outbox(contact.email, "verification"), "/verify-email"));
@@ -689,6 +701,7 @@ journey(26, ["PAY-007"], "refund request enters the approval workflow: support r
     if (await btn(s, "Start review").count()) { await s.fill("#f-notes", `E2E ${RUN}: closing a stale test request.`); await nav(s, btn(s, "Start review")); }
     if (await btn(s, "Deny").count()) { await s.fill("#f-notes", `E2E ${RUN}: closing a stale test request.`); await nav(s, btn(s, "Deny")); continue; }
     await o.goto(BASE + href);
+    await freshMfa(o, account("owner"));
     await o.fill("#f-notes", `E2E ${RUN}: closing a stale test request.`);
     await nav(o, btn(o, "Deny refund"));
   }
@@ -711,6 +724,7 @@ journey(26, ["PAY-007"], "refund request enters the approval workflow: support r
   assert.match(await text(s), /Awaiting the Founder's decision\./);
 
   await o.goto(refundUrl);
+  await freshMfa(o, account("owner"));
   assert.match(await text(o, ".page-head, main"), /Recommended/i);
   await o.fill("#f-notes", `E2E ${RUN}: denied — staging journey test, no refund owed.`);
   await nav(o, btn(o, "Deny refund"));

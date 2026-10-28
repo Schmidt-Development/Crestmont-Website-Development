@@ -23,6 +23,16 @@ import { toCsv, parseDollars, parseRange } from "../services/finance.ts";
 import { TransitionError } from "../domain/state-machine.ts";
 import { recordAcceptance } from "../services/agreements.ts";
 import { effectivePrice } from "../services/pricing-approvals.ts";
+import { loadTaxConfig, taxLabel } from "../services/tax.ts";
+import { computeTax, type TaxResult } from "../domain/tax.ts";
+import { usd } from "../services/finance-documents.ts";
+
+/** LEGAL-005: estimated tax per quote line under the current configuration (null when tax is not configured). */
+async function quoteTax(ctx: AppContext, packageId: string | null, lines: QuoteLine[]): Promise<TaxResult | null> {
+  const key = packageId && packageId in PACKAGES ? packageId : "custom";
+  const r = computeTax(lines.map((l) => ({ description: l.description, amountCents: l.amountCents, productKey: key })), await loadTaxConfig(ctx.db));
+  return r.configured ? r : null;
+}
 
 export function staffPage(ctx: AppContext, title: string, body: SafeHtml, status = 200) {
   return htmlResponse(ctx, appLayout(ctx, { title, nav: staffNav(ctx), home: "/staff", area: "Staff" }, body), status);
@@ -416,9 +426,13 @@ async function newQuotePage(ctx: AppContext, errors: string[] = [], values?: Quo
 ${quoteForm(ctx, `/staff/quotes/new?lead=${encodeURIComponent(lead.id)}`, v, errors, "Save draft (v1)")}`, status);
 }
 
-function lineTable(lines: QuoteLine[], total: number, installments: { kind: string; amountCents: number }[]) {
-  return html`${table(lines, [{ header: "Item", cell: (l) => l.description }, { header: "Amount", cell: (l) => formatCents(l.amountCents), numeric: true }])}
-<p class="right"><strong>Total ${formatCents(total)}</strong></p>
+function lineTable(lines: QuoteLine[], total: number, installments: { kind: string; amountCents: number }[], tax: TaxResult | null = null) {
+  const taxed = tax ? html`${table(tax.lines, [{ header: "Item", cell: (l) => l.description }, { header: "Amount", cell: (l) => usd(l.amountCents), numeric: true },
+    { header: "Estimated sales tax", cell: (l) => (l.taxable ? usd(l.taxCents) : "Not taxable"), numeric: true }, { header: "Line total", cell: (l) => usd(l.amountCents + l.taxCents), numeric: true }])}
+<div class="right" data-testid="quote-tax"><p>Subtotal ${usd(tax.subtotalCents)}</p>${tax.byJurisdiction.map((j) => html`<p>${taxLabel(j)} ${usd(j.taxCents)}</p>`)}<p><strong>Total with estimated tax ${usd(tax.totalCents)}</strong></p></div>
+<p class="faint">Sales tax is calculated on each invoice when it is issued, from the rates recorded in Crestmont's tax settings (rounded per line and jurisdiction, half away from zero). Installments below are before tax; per-invoice rounding can differ from this estimate by a cent.</p>` : "";
+  return html`${tax ? taxed : html`${table(lines, [{ header: "Item", cell: (l) => l.description }, { header: "Amount", cell: (l) => formatCents(l.amountCents), numeric: true }])}
+<p class="right"><strong>Total ${formatCents(total)}</strong></p>`}
 <h3 style="font-size:1rem">Payment schedule</h3>${table(installments, [{ header: "Installment", cell: (i) => ({ full: "100% upfront", deposit_50: "50% deposit on acceptance", design_25: "25% after approved design", prelaunch_25: "25% before production launch" } as Record<string, string>)[i.kind] ?? label(i.kind) }, { header: "Amount", cell: (i) => formatCents(i.amountCents), numeric: true }])}`;
 }
 
@@ -434,7 +448,7 @@ async function quoteDetail(ctx: AppContext, id: string, errors: string[] = [], v
 ${expired && quote.status !== "accepted" ? alert("warn", "This version's valid-until date has passed. Save a new version with a later date before sending.") : ""}
 <div class="grid grid-2"><section class="card stack"><h2 style="font-size:1.2rem">Current version (v${current.version})</h2>
 ${dl([["Package", quotes.packageName(current.package_id)], ["Valid until", current.valid_until ?? "—"], ["Accepted", current.accepted_at ? formatDateTime(current.accepted_at) : "Not accepted"], ["Sent to", lead.contact_email ?? "No email on file"]])}
-${lineTable(parsed.lines, current.total_cents, parsed.installments)}<h3 style="font-size:1rem">Scope</h3><p>${nl2br(current.scope_text)}</p>
+${lineTable(parsed.lines, current.total_cents, parsed.installments, await quoteTax(ctx, current.package_id, parsed.lines))}<h3 style="font-size:1rem">Scope</h3><p>${nl2br(current.scope_text)}</p>
 ${quote.status === "rejected" ? alert("warn", html`<strong>${quote.closed_reason?.startsWith("declined") ? "Declined by the customer" : "Withdrawn"}</strong> ${quote.closed_at ? `on ${formatDate(quote.closed_at)}` : ""} — ${quote.closed_reason?.replace(/^(withdrawn|declined): /, "") ?? ""}. The proposal link no longer accepts. Saving a new version reopens the quote as a draft.`) : ""}
 ${["draft", "sent"].includes(quote.status) && can(ctx.actor!, "quote.send") ? actionForm(ctx, `/staff/quotes/${quote.id}/send`, quote.status === "sent" ? "Resend proposal" : "Send proposal", { variant: "primary", size: undefined, confirm: `Email this proposal to ${lead.contact_email ?? "the contact"}?` }) : ""}
 ${["draft", "sent"].includes(quote.status) ? html`<details><summary>Withdraw or record a decline</summary><form method="post" action="/staff/quotes/${quote.id}/close" class="stack">${csrf(ctx)}
@@ -468,7 +482,7 @@ ${checkbox("agree", "I accept this proposal, its scope and payment schedule, the
 ${formErrors(errors)}
 ${dl([["Prepared for", `${p.contact.name}${p.companyName ? `, ${p.companyName}` : ""}`], ["Package", quotes.packageName(p.version.package_id)], ["Valid until", p.version.valid_until ?? "—"], ["Status", label(p.state)]])}
 <section class="card stack"><h2 style="font-size:1.3rem">Scope of work</h2><p>${nl2br(p.version.scope_text)}</p></section>
-<section class="card stack"><h2 style="font-size:1.3rem">Investment</h2>${lineTable(p.lines, p.version.total_cents, p.installments)}</section>
+<section class="card stack"><h2 style="font-size:1.3rem">Investment</h2>${lineTable(p.lines, p.version.total_cents, p.installments, await quoteTax(ctx, p.version.package_id, p.lines))}</section>
 ${acceptBlock}</div></section>`), status);
 }
 
@@ -494,10 +508,14 @@ async function checkoutPage(ctx: AppContext, packageId: string, errors: string[]
   const configured = ctx.payments.configured;
   const cancelled = ctx.url.searchParams.get("checkout") === "cancelled";
   const priceCents = (await effectivePrice(ctx.db, "package", pkg.id, ctx.now())).cents; // CAT-007
+  // LEGAL-005: configured sales tax is shown per jurisdiction and included in the amount charged.
+  const tax = computeTax([{ description: `${pkg.name} website package`, amountCents: priceCents, productKey: pkg.id }], await loadTaxConfig(ctx.db));
+  const dueCents = tax.configured ? tax.totalCents : priceCents;
   return htmlResponse(ctx, publicLayout(ctx, { title: `Checkout — ${pkg.name}`, noindex: true }, html`<section class="section"><div class="container stack" style="max-width:760px">
 <div class="eyebrow">Checkout</div><h1>${pkg.name} website package</h1>
 ${cancelled ? alert("info", "Checkout was cancelled. Nothing was charged.") : ""}${formErrors(errors)}
 <div class="card card--gold stack"><p class="price" data-testid="checkout-price">${formatCents(priceCents)}${pkg.priceIsFloor ? html` <small>starting price</small>` : ""}</p>
+${tax.configured ? html`<div data-testid="checkout-tax">${tax.byJurisdiction.map((j) => html`<p>${taxLabel(j)}: ${usd(j.taxCents)}</p>`)}<p><strong>Total due ${usd(tax.totalCents)}</strong></p></div>` : ""}
 <p class="muted">Fixed price, paid 100% upfront. ${pkg.revisionRounds} revision rounds, up to ${pkg.pageLimit} pages.</p>
 <ul class="checklist">${pkg.includes.map((i) => html`<li>${i}</li>`)}</ul>
 ${pkg.priceIsFloor ? html`<p class="faint">Need more than the standard Premium scope? <a href="/quote">Request a custom quote</a> — work above the starting price is quoted separately.</p>` : ""}</div>
@@ -505,7 +523,7 @@ ${configured ? html`<form method="post" action="/checkout/${pkg.id}" class="card
 ${checkbox("terms", "I agree to the Development Agreement, Terms of Service, Refund Policy and Data Processing Addendum.", { required: true })}
 <p class="faint"><a href="/legal/development-agreement">Development agreement</a> · <a href="/legal/terms">Terms</a> · <a href="/legal/refunds">Refund policy</a> · <a href="/legal/data-processing">Data processing addendum</a></p>
 <p class="faint">You will be taken to Stripe's secure checkout. Your payment is confirmed only when Stripe notifies us.</p>
-<div class="form-actions">${button(`Pay ${formatCents(priceCents)}`)}</div></form>`
+<div class="form-actions">${button(`Pay ${formatCents(dueCents)}`)}</div></form>`
     : html`<div class="card stack">${alert("warn", `${NOT_CONFIGURED} You cannot pay online right now.`)}<p>We can still start your project: request a quote or contact us and we will follow up with payment options.</p>
 <div class="row">${linkButton("Request a quote", "/quote", "primary")}${linkButton("Contact us", "/contact", "secondary")}</div></div>`}
 </div></section>`), status);
@@ -642,7 +660,7 @@ export function register(r: Router): void {
       `Message from the prospect:\n${lead.message ?? "(none)"}`, `Existing notes:\n${lead.qualification_notes ?? "(none)"}`,
       `Approved packages: Starter $999 (5 pages), Business $2,499 (12 pages), Premium from $4,999 (25 pages); larger work is a custom quote. Summarize fit, likely package, open questions, and suggested next step. Do not quote new prices or promise dates.`].join("\n");
     const res = await requestAiDraft(ctx.db, aiProviderFromEnv(ctx.env), { workflow: "lead_qualification", inputRef: `lead:${lead.id}`, prompt, requestedBy: ctx.user!.id });
-    return redirect(ctx, `/staff/crm/leads/${p.id}`, res.status === "failed" ? { kind: "error", text: res.error ?? "AI draft failed." } : { kind: "success", text: "AI draft ready for review." });
+    return redirect(ctx, `/staff/crm/leads/${p.id}`, res.status === "failed" ? { kind: "error", text: res.error ?? "AI draft failed." } : res.status === "queued" ? { kind: "info", text: "Draft requested from the self-hosted model; reload this page in a minute to review it. Nothing has been sent." } : { kind: "success", text: "AI draft ready for review." });
   });
   r.post("/staff/crm/leads/:id/ai-draft/:jobId", async (ctx, p) => {
     requireStaff(ctx, "crm.access");

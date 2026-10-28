@@ -2,7 +2,7 @@
 // -> agent config + skills -> plan/build/verify phases with heartbeats, checkpoints and caps -> runner checks ->
 // preview -> commit/push -> final checkpoint -> complete. Lease loss stops everything without completing.
 
-import { writeFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { writeFileSync, mkdirSync, readdirSync, readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import type { ControlPlaneClient } from "./control-plane.ts";
 import { LeaseLostError } from "./control-plane.ts";
@@ -11,20 +11,25 @@ import { configuredVariableNames, readSecret } from "./config.ts";
 import type { Job, Outcome, RequirementItem, Stage, CompleteRequest } from "./protocol.ts";
 import type { Logger } from "./log.ts";
 import { errorMessage } from "./log.ts";
-import type { QueryFn, PhaseResult } from "./agent.ts";
-import { RunTracker, StopSwitch, runPhase } from "./agent.ts";
-import type { Options } from "@anthropic-ai/claude-agent-sdk";
+import { RunTracker, StopSwitch } from "./agent.ts";
+import type { QueryFn } from "./providers/claude-agent-sdk.ts";
+import type { AgentProvider, PhaseResult } from "./providers/types.ts";
+import { PaidProviderRefusedError } from "./providers/types.ts";
+import { createProvider } from "./providers/index.ts";
+import { LocalProvider } from "./providers/local.ts";
+import type { LocalLimits } from "./providers/local.ts";
+import type { DockerExecutor } from "./sandbox.ts";
+import { BROWSER_CHECK, needsInstall } from "./sandbox.ts";
 import type { Workspace } from "./workspace.ts";
 import {
-  assertIsolation, createWorkspace, findLocalWorkspace, latestCheckpointFile, writeAgentConfig, agentPermissions,
-  buildAgentEnv, buildCheckEnv,
+  assertIsolation, createWorkspace, findLocalWorkspace, latestCheckpointFile, buildAgentEnv, buildCheckEnv,
 } from "./workspace.ts";
 import type { GitCtx } from "./git.ts";
 import { initRepo, configureRepo, commitAll, headCommit, ensureProjectRepo, pushBranch, cloneProjectRepo, projectRepoUrl } from "./git.ts";
 import type { SkillManifest, Workflow, PreflightResult } from "./skills.ts";
 import { preflight, provisionSkills } from "./skills.ts";
-import { buildCheckpoint, restoreCheckpoint, sessionFileExists } from "./checkpoint.ts";
-import type { StarterSpec, CheckOutcome } from "./checks.ts";
+import { buildCheckpoint, restoreCheckpoint } from "./checkpoint.ts";
+import type { StarterSpec, CheckOutcome, CheckExecutor } from "./checks.ts";
 import { starterDir, loadStarter, copyStarter, acceptanceCommands, runChecks, previewConfigProblems } from "./checks.ts";
 import { writeBriefFiles, systemPromptAppend, phasePrompt } from "./prompt.ts";
 import type { Phase } from "./prompt.ts";
@@ -35,7 +40,15 @@ import { run } from "./exec.ts";
 export interface JobDeps {
   cfg: RunnerConfig;
   client: ControlPlaneClient;
-  queryFn: QueryFn;
+  /** Agent provider for this job. Default: createProvider(cfg) - local unless the paid adapter is explicitly enabled. */
+  provider?: AgentProvider;
+  /** The Claude Agent SDK's query() (or a test fake): used only by the optional, explicitly enabled paid adapter. */
+  queryFn?: QueryFn;
+  /** Docker CLI executor for the local provider's per-job sandbox (tests inject a fake). */
+  dockerExecutor?: DockerExecutor;
+  /** fetch used for the local model server (tests point it at a fake). */
+  modelFetch?: typeof fetch;
+  localLimits?: Partial<LocalLimits>;
   manifest: SkillManifest;
   logger: Logger;
   fetchImpl?: typeof fetch;
@@ -46,6 +59,18 @@ export interface JobDeps {
   runtimeMs?: number;
   interruptGraceMs?: number;
   processEnv?: Record<string, string | undefined>;
+  /**
+   * How long the runner keeps working without a successful heartbeat before it assumes the lease expired on the
+   * server and stops (workspace kept, no `complete`). Default: the lease time left at claim, clamped to 30 s..10 min.
+   */
+  leaseWindowMs?: number;
+}
+
+/** Lease window from the claim: time left on the lease, clamped (clock skew), 180 s (protocol default) if unknown. */
+export function leaseWindowFrom(leaseExpiresAt: string, now = Date.now()): number {
+  const left = Date.parse(leaseExpiresAt) - now;
+  if (!Number.isFinite(left)) return 180_000;
+  return Math.min(600_000, Math.max(30_000, left));
 }
 
 export interface JobSummary {
@@ -83,6 +108,8 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
   const turnCap = Math.max(1, Math.min(job.limits.maxTurns, cfg.localMaxTurns));
   const budgetCap = Math.max(0, Math.min(job.limits.runBudgetUsd, job.limits.projectBudgetRemainingUsd, cfg.localMaxBudgetUsd));
   const runtimeMs = deps.runtimeMs ?? Math.min(job.limits.maxRuntimeMinutes, cfg.localMaxRuntimeMinutes) * 60_000;
+  let provider: AgentProvider | null = null;
+  let runtimeDeadline = Date.now() + runtimeMs;
   const repoTarget = cfg.repo;
   const repoUrl = repoTarget ? projectRepoUrl(repoTarget, job.projectId) : null;
   let pushed = false;
@@ -92,6 +119,11 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
   const markLeaseLost = () => { leaseLost = true; stop.request("lease_lost"); };
 
   // ── heartbeat loop ──
+  // Lease watchdog: the server revokes the lease when heartbeats stop arriving, and may hand the job to another
+  // attempt. If this runner cannot reach the control plane for longer than the lease window, it stops working on the
+  // job (as for lease_lost) instead of building on after another runner may have taken over.
+  const leaseWindowMs = deps.leaseWindowMs ?? leaseWindowFrom(job.leaseExpiresAt);
+  let lastLeaseOkAt = Date.now();
   const heartbeatOnce = async (): Promise<boolean> => {
     if (leaseLost) return false;
     try {
@@ -99,6 +131,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         stage, runCostUsd: tracker.attemptCostUsd, turns: tracker.turns(),
         sessionId: tracker.sessionId ?? undefined, activity: tracker.drainActivity(),
       });
+      lastLeaseOkAt = Date.now();
       if (!res.continue) {
         if (!serverStopReason) serverStopReason = res.reason;
         stop.request(SERVER_STOP + res.reason);
@@ -107,7 +140,13 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       return true;
     } catch (err) {
       if (err instanceof LeaseLostError) { markLeaseLost(); return false; }
-      log.warn("heartbeat failed", { error: errorMessage(err) });
+      const silentMs = Date.now() - lastLeaseOkAt;
+      log.warn("heartbeat failed", { error: errorMessage(err), msSinceLastOk: silentMs });
+      if (silentMs > leaseWindowMs) {
+        log.warn("no successful heartbeat within the lease window; assuming the lease expired and stopping work on this job (workspace kept)", { leaseWindowMs });
+        markLeaseLost();
+        return false;
+      }
       return true;
     }
   };
@@ -169,7 +208,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     try {
       const built = await buildCheckpoint(ws, git, {
         jobId: job.id, attempt: job.attempt, sessionId: tracker.sessionId, sessionTotalCostUsd: tracker.lastSessionTotalUsd,
-        sourceBranch: branch, sourceCommit: commit,
+        sourceBranch: branch, sourceCommit: commit, provider: provider?.id ?? cfg.agentProvider,
       }, cfg.agentPath);
       if (built.note) sourceNotes.push(built.note);
       guard();
@@ -204,6 +243,10 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       skills: { provisioned: skillNames, missingOptional: (pf?.skills ?? []).filter((s) => !s.ok && !s.required).map((s) => s.name) },
       assumptions, missingInformation, agentReport: ws ? readAgentReport(ws.repo) : null,
       envVarNames: configuredVariableNames(cfg), starter: starterLabel,
+      usage: {
+        provider: provider?.id ?? cfg.agentProvider, model: provider ? provider.model(job) : job.limits.model, paid: provider?.paid ?? cfg.agentProvider !== "local",
+        inputTokens: tracker.inputTokens, outputTokens: tracker.outputTokens, modelWallMs: tracker.modelWallMs, modelCalls: tracker.modelCalls,
+      },
     });
     await sendRequirements(requirements);
     const req: CompleteRequest = {
@@ -221,18 +264,34 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
   };
 
   try {
+    try {
+      provider = deps.provider ?? createProvider(cfg, {
+        log, queryFn: deps.queryFn, dockerExecutor: deps.dockerExecutor, fetchImpl: deps.modelFetch,
+        interruptGraceMs: deps.interruptGraceMs, localLimits: deps.localLimits,
+      });
+    } catch (err) {
+      // No fallback: a refused or misconfigured provider fails this attempt with the reason.
+      const why = err instanceof PaidProviderRefusedError ? `Paid provider refused: ${err.message}` : `Agent provider unavailable: ${errorMessage(err)}`;
+      return await finish("failed", { error: why });
+    }
     await assertIsolation({ cwd: cfg.workspacesRoot, workspacesRoot: cfg.workspacesRoot, platformRepoPatterns: cfg.platformRepoPatterns, pathEnv: cfg.agentPath });
     ws = createWorkspace(cfg.workspacesRoot, job);
     git = { repo: ws.repo, pathEnv: cfg.agentPath, home: ws.home };
     log.info("job started", { workspace: ws.dir, strategy: job.strategy, packageId: job.packageId });
     scheduleHeartbeat();
     runtimeTimer = setTimeout(() => stop.request("local:runtime"), runtimeMs);
+    runtimeDeadline = Date.now() + runtimeMs;
 
     // ── preflight ──
     const workflow: Workflow = job.strategy === "standard" ? "standard-brochure" : "custom-app";
     const agentEnv = buildAgentEnv(cfg, ws, deps.processEnv ?? process.env);
     const checkEnv = buildCheckEnv(agentEnv);
-    pf = await preflight({ manifest: deps.manifest, workflow, skillsSourceDir: cfg.skillsSourceDir, sandbox: cfg.sandbox, env: checkEnv });
+    // Runner-side tool checks apply to the Agent SDK path; the local provider's tools live in the sandbox image.
+    pf = await preflight({ manifest: deps.manifest, workflow, skillsSourceDir: cfg.skillsSourceDir, sandbox: cfg.sandbox, env: checkEnv, checkTools: provider.id !== "local" });
+    const ppf = await provider.preflight(log);
+    pf.errors.push(...ppf.errors);
+    pf.warnings.push(...ppf.warnings);
+    pf.ok = pf.errors.length === 0;
     for (const w of pf.warnings) tracker.note({ kind: "note", message: w });
     if (!pf.ok) return await finish("failed", { error: `Preflight failed: ${pf.errors.join("; ")}` });
     if (job.strategy === "standard") {
@@ -262,11 +321,13 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         }
       }
       let baseline: number | null = null;
+      let checkpointProvider: string | null = null;
       if (archive) {
         try {
           const restored = await restoreCheckpoint(ws, git, archive, r.sessionId ?? null, cfg.agentPath, r.sourceBranch ?? null);
           if (restored.repoRestored) sourceNotes.push("Source restored from the checkpoint git bundle.");
           if (restored.meta && restored.meta.sessionId === r.sessionId) baseline = restored.meta.sessionTotalCostUsd;
+          if (restored.meta) checkpointProvider = restored.meta.provider ?? "claude-agent-sdk";
         } catch (err) {
           sessionNotes.push(`Checkpoint could not be restored: ${errorMessage(err).slice(0, 200)}`);
         }
@@ -279,14 +340,19 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           sourceNotes.push(`Cloning ${r.sourceRepo} failed: ${errorMessage(err).slice(0, 200)}`);
         }
       }
-      if (r.sessionId && sessionFileExists(ws.home, r.sessionId)) {
+      const label = provider.id === "local" ? "local agent session" : "Agent SDK session";
+      if (r.sessionId && checkpointProvider && checkpointProvider !== provider.id) {
+        sessionNotes.push(`The previous session (${r.sessionId}) belongs to the ${checkpointProvider} provider; this attempt uses ${provider.id}, so it could not be restored; continued from the git source with a new session.`);
+      } else if (r.sessionId && provider.hasSession(ws, r.sessionId)) {
         resumeSession = r.sessionId;
         tracker.sessionId = r.sessionId;
-        if (baseline !== null) tracker.lastSessionTotalUsd = baseline;
-        else sessionNotes.push("Resumed session without a recorded cost baseline: this attempt's reported spend may include earlier attempts (over-reported, never under-reported).");
-        sessionNotes.push(`Resumed Agent SDK session ${r.sessionId}.`);
+        if (provider.paid) {
+          if (baseline !== null) tracker.lastSessionTotalUsd = baseline;
+          else sessionNotes.push("Resumed session without a recorded cost baseline: this attempt's reported spend may include earlier attempts (over-reported, never under-reported).");
+        }
+        sessionNotes.push(`Resumed ${label} ${r.sessionId}.`);
       } else if (r.sessionId) {
-        sessionNotes.push(`The previous Agent SDK session (${r.sessionId}) could not be restored; continued from the git source with a new session.`);
+        sessionNotes.push(`The previous ${label} (${r.sessionId}) could not be restored; continued from the git source with a new session.`);
       }
       if (readdirSync(ws.repo).length === 0) sourceNotes.push("The previous attempt's source could not be restored; this attempt started from the beginning.");
     }
@@ -306,30 +372,15 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     writeBriefFiles(ws.repo, job, job.requirements);
     await downloadCustomerFiles(job, ws.repo, client, cfg.maxCustomerFileBytes, missingFiles, () => markLeaseLost());
     guard();
-    const referenceDomains = referenceHosts(job);
-    const permInput = {
-      secretsDir: cfg.secretsDir, allowedDomains: cfg.allowedDomains, referenceDomains,
-      fetchReferences: cfg.fetchReferences, sandbox: cfg.sandbox,
-    };
-    writeAgentConfig(ws, permInput);
-    const perms = agentPermissions({ ...permInput, repo: ws.repo });
     skillNames = provisionSkills(ws.repo, pf.skills);
+    await provider.prepare({
+      job, ws, skillNames, referenceDomains: referenceHosts(job), processEnv: deps.processEnv ?? process.env,
+      systemPromptAppend: systemPromptAppend(job),
+    });
     await sendRequirements(job.requirements);
-
-    const baseOptions: Options = {
-      cwd: ws.repo,
-      env: agentEnv,
-      model: job.limits.model,
-      permissionMode: "dontAsk",
-      allowedTools: perms.allow,
-      disallowedTools: perms.deny,
-      settingSources: ["project"],
-      systemPrompt: { type: "preset", preset: "claude_code", append: systemPromptAppend(job) },
-      skills: skillNames,
-      additionalDirectories: [],
-      persistSession: true,
-      stderr: (d: string) => log.debug("agent stderr", { line: d.slice(0, 500) }),
-    };
+    const toolset = provider.id === "local" ? "local" as const : "claude" as const;
+    const sandbox = provider instanceof LocalProvider ? provider.jobSandbox() : null;
+    const checkExecutor: CheckExecutor | undefined = sandbox ? (argv, t) => sandbox.argv(argv, t) : undefined;
 
     // ── agent phases ──
     stage = "building";
@@ -337,21 +388,24 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     const runOne = async (phase: Phase, previousNote: string | null): Promise<PhaseResult | null> => {
       const remainingBudget = budgetCap - tracker.attemptCostUsd;
       const remainingTurns = turnCap - tracker.turns();
-      if (remainingBudget <= 0.01) { st.localLimit = "budget"; return null; }
+      if (provider!.paid && remainingBudget <= 0.01) { st.localLimit = "budget"; return null; }
       if (remainingTurns <= 0) { st.localLimit = "turns"; return null; }
       const reserve = Math.ceil(turnCap * 0.2);
       const phaseTurns = phase === "plan" ? Math.min(remainingTurns, Math.max(5, Math.ceil(turnCap * 0.15)))
         : phase === "build" ? Math.max(1, remainingTurns - reserve) : remainingTurns;
       tracker.note({ kind: "step", message: `phase ${phase}` });
-      const res = await runPhase({
-        queryFn: deps.queryFn,
-        prompt: phasePrompt(job, phase, { starter: starterLabel, resumed: !!job.resume, previousNote }),
-        options: { ...baseOptions, maxTurns: phaseTurns, maxBudgetUsd: Math.round(remainingBudget * 100) / 100, ...(tracker.sessionId ? { resume: tracker.sessionId } : {}) },
-        tracker, stop, interruptGraceMs: deps.interruptGraceMs,
+      const res = await provider!.run({
+        phase,
+        prompt: phasePrompt(job, phase, { starter: starterLabel, resumed: !!job.resume, previousNote, toolset }),
+        maxTurns: phaseTurns, maxBudgetUsd: remainingBudget, maxWallMs: Math.max(1000, runtimeDeadline - Date.now()),
+        resumeSessionId: tracker.sessionId, tracker, stop,
       });
-      if (res.result?.subtype === "error_max_budget_usd") st.localLimit = "budget";
-      if (res.result?.subtype === "error_max_turns" && tracker.turns() >= turnCap) st.localLimit = "turns";
-      if (res.error && !res.stoppedBy) st.agentError = `Agent ${phase} phase ended without a result: ${res.error.slice(0, 500)}`;
+      if (res.status === "max_budget") st.localLimit = "budget";
+      if (res.status === "max_turns" && tracker.turns() >= turnCap) st.localLimit = "turns";
+      if (res.status === "max_output_tokens") st.localLimit = "output tokens";
+      if (res.status === "max_time" && !stop.reason) st.localLimit = "runtime";
+      if (res.status === "loop") st.agentError = `Agent ${phase} phase stopped: ${res.error ?? "repetition loop detected"}`;
+      else if (res.status === "error" && !res.stoppedBy) st.agentError = `Agent ${phase} phase ended without a result: ${(res.error ?? "unknown error").slice(0, 500)}`;
       return res;
     };
 
@@ -370,14 +424,21 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     if (!stop.reason && !st.localLimit && !st.agentError) {
       stage = "verifying";
       const commands = acceptanceCommands(starterSpec, ws.repo, job.packageId);
-      checks = await runChecks(ws.repo, commands, checkEnv, cfg.checkTimeoutMs);
+      if (sandbox && cfg.jobSandbox.browserCheck && existsSync(path.join(ws.repo, "public", "index.html"))) {
+        commands.push({ id: "browser-check", label: "Headless Chromium: every page at desktop and mobile width (console errors, failed requests, horizontal overflow, screenshots)", command: ["node", BROWSER_CHECK, "--root", "public", "--out", ".crestmont/screenshots"] });
+      }
+      if (sandbox && needsInstall(ws.repo)) {
+        const inst = await sandbox.install();
+        tracker.note({ kind: "check", message: `${inst.code === 0 ? "PASS" : "FAIL"} ${inst.command}` });
+      }
+      checks = await runChecks(ws.repo, commands, checkEnv, cfg.checkTimeoutMs, checkExecutor);
       for (const c of checks) tracker.note({ kind: "check", message: `${c.ok ? "PASS" : "FAIL"} ${c.command}` });
       if (checks.some((c) => !c.ok)) {
         writeFileSync(path.join(ws.repo, ".crestmont", "runner-checks.json"), JSON.stringify(checks.map(({ id, command, ok, code, outputTail }) => ({ id, command, ok, code, outputTail })), null, 2));
         await runOne("repair", null);
         guard();
         if (!stop.reason && !st.localLimit && !st.agentError) {
-          checks = await runChecks(ws.repo, commands, checkEnv, cfg.checkTimeoutMs);
+          checks = await runChecks(ws.repo, commands, checkEnv, cfg.checkTimeoutMs, checkExecutor);
           await checkpoint("after repair");
         }
       }
@@ -435,6 +496,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     hbStopped = true;
     if (hbTimer) clearTimeout(hbTimer);
     if (runtimeTimer) clearTimeout(runtimeTimer);
+    await provider?.close().catch((err: unknown) => log.warn("provider close failed", { error: errorMessage(err) }));
   }
 }
 

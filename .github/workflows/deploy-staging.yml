@@ -50,6 +50,16 @@ jobs:
     if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
     environment: staging
+    # Read-only workflow token. The extra read scopes are used only by the "GitHub readiness snapshot"
+    # step (READY-005): actions (workflow runs/jobs), pull-requests (open PRs), checks (annotations that
+    # explain refused jobs), security-events (code scanning; 403 without Advanced Security = "unavailable").
+    # No write permission is granted.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: read
+      security-events: read
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -61,6 +71,8 @@ jobs:
       WRANGLER: npx --yes wrangler@4
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # the token is passed only to the snapshot step, never left in .git/config
       - uses: actions/setup-node@v4
         with:
           node-version: "22.x"   # >= 22.18 for native TypeScript
@@ -118,6 +130,35 @@ jobs:
           echo "::add-mask::$ev"
           printf '%s' "$ev" | $WRANGLER secret put EVIDENCE_INGEST_SECRET --env staging > /dev/null
           echo "EVIDENCE_INGEST_SECRET=$ev" >> "$GITHUB_ENV"
+
+      - name: External scheduler key
+        # Derived from the Cloudflare token secret (scripts/trigger-scheduler.ts), so the health monitor can trigger the
+        # scheduled jobs when native Cron Triggers are unavailable on this account. Same value on every deploy.
+        env:
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          k=$(node --no-warnings scripts/trigger-scheduler.ts derive)
+          echo "::add-mask::$k"
+          printf '%s' "$k" | $WRANGLER secret put SCHEDULER_TRIGGER_SECRET --env staging > /dev/null
+
+      - name: Verify cron triggers (and re-register them if missing)
+        # READY-012 / INFRA-006: scheduled jobs had never run on staging. Compares Cloudflare's registered schedules
+        # with wrangler.toml and repairs them through the Workers API. Non-fatal: the scheduler feed in
+        # /api/readiness/health (required) and the external monitor report the outcome.
+        continue-on-error: true
+        env:
+          READINESS_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          mkdir -p evidence
+          set +e
+          node --no-warnings scripts/verify-crons.ts --env staging --evidence evidence/cron-triggers.json --commit "$GITHUB_SHA" \
+            --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-crons" > cron.log 2>&1
+          rc=$?
+          set -e
+          cat cron.log; cat cron.log >> "$GITHUB_STEP_SUMMARY"
+          # Publishes the outcome as the cron-triggers:staging feed in /api/readiness/health, pass or fail.
+          [ -f evidence/cron-triggers.json ] && node --no-warnings scripts/post-evidence.ts evidence/cron-triggers.json || true
+          exit $rc
 
       - name: AI Builds runner secret (only when the Founder has provided one)
         env:
@@ -198,6 +239,16 @@ jobs:
             --status succeeded --url "$READINESS_URL" --by "github-actions:${{ github.actor }}" \
             --ci-run "gh-${{ github.run_id }}-${{ github.run_attempt }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --verification "${{ steps.smoke.outcome == 'success' && 'passed' || 'failed' }}" || true
+
+      - name: GitHub readiness snapshot (branches, commits, PRs, runs, tags, code scanning)
+        # READY-005 push path: the workflow's read-only token reads GitHub; the Worker needs no PAT.
+        # Runs only scripts/post-github-snapshot.ts (no npm packages are loaded); token and secret are never printed.
+        if: always() && steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          READINESS_URL: ${{ steps.deploy.outputs.url }}
+        run: node --no-warnings scripts/post-github-snapshot.ts
 
       - name: Access summary (no credentials)
         if: always() && steps.deploy.outcome == 'success'

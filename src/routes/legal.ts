@@ -15,6 +15,8 @@ import { csrf, button, linkButton, input, textarea, select, formErrors, alert, b
 import { DRAFT_BANNER } from "../content/legal.ts";
 import * as ag from "../services/agreements.ts";
 import { loadReceipt, businessIdentity, type ReceiptData } from "../services/receipts.ts";
+import { taxStatement, taxLabel } from "../services/tax.ts";
+import { usd } from "../services/finance-documents.ts";
 import * as pricing from "../services/pricing-approvals.ts";
 import { audit } from "../services/security.ts";
 
@@ -118,12 +120,14 @@ ${dl([
   ["Amount paid", html`<strong>${formatCents(r.payment.amount_cents)}</strong> USD`], ["Payment status", label(r.payment.status)],
   ...(r.refundedCents ? [["Refunded", formatCents(r.refundedCents)] as [string, string]] : []),
   ["Invoice", r.invoice ? `${r.invoice.id} — ${r.invoice.description ?? MILESTONE_LABEL[r.invoice.milestone_kind ?? ""] ?? "Invoice"}` : "No invoice linked"],
-  ["Invoice amount", r.invoice ? formatCents(r.invoice.amount_cents) : "—"], ["Invoice issued", formatDate(r.invoice?.created_at)],
+  ["Invoice amount", r.invoice ? formatCents(r.invoice.amount_cents) : "—"],
+  ...(r.tax ? [["Of which sales tax", html`${r.tax.byJurisdiction.map((j) => html`<span data-testid="receipt-tax">${taxLabel(j)}: ${usd(j.taxCents)}</span><br>`)}`] as [string, SafeHtml]] : []),
+  ["Invoice issued", formatDate(r.invoice?.created_at)],
   ["Order", r.order ? `${r.order.id} (${label(r.order.kind)}, total ${formatCents(r.order.total_cents)})` : "—"],
   ["Stripe payment reference", ref ?? "Not recorded"], ["Stripe charge", r.payment.stripe_charge_id ?? "Not recorded"],
   ["Stripe checkout session", r.invoice?.stripe_checkout_session_id ?? "Not recorded"], ["Internal payment ID", r.payment.id],
 ])}
-<p class="faint">This receipt confirms a payment recorded from a Stripe payment confirmation. It is not a tax invoice; tax configuration is not yet finalized.</p>
+<p class="faint">This receipt confirms a payment recorded from a Stripe payment confirmation. ${taxStatement(r.tax)}</p>
 </article>`;
 }
 

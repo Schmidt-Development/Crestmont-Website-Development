@@ -1,0 +1,114 @@
+# Crestmont self-hosted build runner on the Windows build machine (Docker Desktop, WSL 2 backend).
+# Install-CrestmontRunner.ps1 copies this file to <InstallDir>\compose\ together with proxy\ and writes runner.env.
+#
+#   runner        Node orchestrator. OUTBOUND ONLY: it sits on an `internal` network and reaches the platform (and the
+#                 native Ollama on the Windows host) exclusively through the egress proxy. No published ports.
+#   egress-proxy  Squid allow-list proxy. Runner may reach: the platform host, host.docker.internal:11434 (Ollama) and,
+#                 if configured, github/cloudflare for repos/previews. Per-build install containers may reach ONLY
+#                 registry.npmjs.org. Paid AI APIs (anthropic.com, openai.com, ...) are explicitly denied and every
+#                 request is logged (the evidence that no paid API is called).
+#   ollama        OPTIONAL profile "ollama-in-docker" (alternative to native Windows Ollama; see WINDOWS-SUPERCOMPUTER.md).
+#
+# Per-build sandbox containers are started by the runner (docker run), not by compose: network none (or the
+# crestmont_install network for package installs), non-root, read-only, cap-drop ALL, CPU/RAM/PID limits.
+# Nothing here publishes a port, so nothing listens on the machine's network interfaces.
+
+name: crestmont-runner
+
+services:
+  egress-proxy:
+    build: { context: ./proxy }
+    image: crestmont-egress-proxy:1
+    restart: unless-stopped
+    networks: [runner_net, install_net, egress_net]
+    volumes:
+      - ./proxy/squid.conf:/etc/squid/squid.conf:ro
+    extra_hosts:
+      # Docker Desktop provides host.docker.internal itself; this line makes plain Linux engines behave the same.
+      - "host.docker.internal:host-gateway"
+    cpus: 0.5
+    mem_limit: 256m
+    pids_limit: 128
+    cap_drop: [ALL]                    # squid runs as the unprivileged `proxy` user (proxy/Dockerfile): no capabilities
+    security_opt: [no-new-privileges:true]
+    logging: { driver: json-file, options: { max-size: "20m", max-file: "10" } }
+
+  runner:
+    image: crestmont-ai-runner:1
+    restart: unless-stopped
+    depends_on: [egress-proxy]
+    env_file: ./runner.env
+    environment:
+      HTTPS_PROXY: http://egress-proxy:3128
+      HTTP_PROXY: http://egress-proxy:3128
+      NO_PROXY: localhost,127.0.0.1
+      NODE_USE_ENV_PROXY: "1"          # Node >= 22.21 fetch() honours HTTP(S)_PROXY only with this set
+      RUNNER_WORKSPACES: /workspaces
+      RUNNER_SANDBOX_VOLUME: crestmont-workspaces
+      RUNNER_INSTALL_NETWORK: crestmont_install
+      RUNNER_INSTALL_PROXY: http://egress-proxy:3128
+      RUNNER_HEALTH_PORT: "8787"
+      RUNNER_HEALTH_HOST: 127.0.0.1    # reachable only inside the runner container (docker exec / healthcheck)
+    volumes:
+      - crestmont-workspaces:/workspaces
+      - ../skills:/skills:ro
+      - ../secrets:/run/secrets:ro
+      # The RUNNER needs the Docker API to create per-build sandboxes. The sandboxes themselves never get it.
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add: ["${DOCKER_SOCKET_GID:-0}"]
+    networks: [runner_net]
+    read_only: true
+    tmpfs: ["/tmp:size=256m", "/home/runner:size=64m"]
+    cpus: ${RUNNER_CPUS:-1}
+    mem_limit: ${RUNNER_MEMORY:-1g}
+    pids_limit: 256
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 300s            # SIGTERM -> interrupt agent, checkpoint, complete "released"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging: { driver: json-file, options: { max-size: "20m", max-file: "10" } }
+
+  ollama:
+    profiles: ["ollama-in-docker"]
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.32.0}   # pinned tag (installer -OllamaImage writes it to .env); never latest
+    restart: unless-stopped
+    # No memory/CPU cap on purpose: the model server gets what the per-build limits leave (select-model.ts jobLimits).
+    pids_limit: 1024
+    security_opt: [no-new-privileges:true]
+    networks: [runner_net]             # internal network: model pulls go through the allow-list proxy
+    environment:
+      HTTPS_PROXY: http://egress-proxy:3128
+      OLLAMA_HOST: 0.0.0.0:11434       # inside the container network only; no published port
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-32768}
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-60m}
+      OLLAMA_FLASH_ATTENTION: ${OLLAMA_FLASH_ATTENTION:-1}
+      OLLAMA_KV_CACHE_TYPE: ${OLLAMA_KV_CACHE_TYPE:-q8_0}
+      OLLAMA_MAX_LOADED_MODELS: "1"
+    volumes:
+      - ollama-models:/root/.ollama
+    gpus: all
+    logging: { driver: json-file, options: { max-size: "20m", max-file: "10" } }
+
+networks:
+  runner_net:
+    name: crestmont_runner
+    internal: true
+    ipam: { config: [{ subnet: 172.30.10.0/24 }] }
+  install_net:
+    name: crestmont_install
+    internal: true
+    ipam: { config: [{ subnet: 172.30.20.0/24 }] }
+  egress_net:
+    name: crestmont_egress
+
+volumes:
+  crestmont-workspaces:
+    name: crestmont-workspaces
+  ollama-models:
+    name: crestmont-ollama-models

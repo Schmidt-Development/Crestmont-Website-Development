@@ -55,6 +55,8 @@ function checkSkill(sourceRoot: string, name: string, def: SkillDef, required: b
 export async function preflight(opts: {
   manifest: SkillManifest; workflow: Workflow; skillsSourceDir: string; sandbox: "on" | "off";
   env: Record<string, string>; toolTimeoutMs?: number;
+  /** false: skip runner-side tool checks (the local provider's tools live in the sandbox image). */
+  checkTools?: boolean;
 }): Promise<PreflightResult> {
   const wf = opts.manifest.workflows[opts.workflow];
   const errors: string[] = [];
@@ -66,7 +68,7 @@ export async function preflight(opts: {
     (s.required ? errors : warnings).push(s.required ? `Required ${msg}` : `Optional ${msg}`);
   }
   const tools: ToolCheck[] = [];
-  for (const name of wf.tools) {
+  for (const name of opts.checkTools === false ? [] : wf.tools) {
     const def = opts.manifest.tools[name];
     if (def.sandboxOnly && opts.sandbox === "off") continue;
     const [cmd, ...args] = def.command;
