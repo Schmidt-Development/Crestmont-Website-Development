@@ -1,0 +1,37 @@
+name: Portfolio demo isolation audit (read-only)
+
+# Reads — never changes — the Cloudflare Git build settings of the project repositories (Workers Builds triggers and
+# Pages projects) and reports whether pushing each portfolio-demo branch would start any build of those projects'
+# own Workers or Pages (production or shared staging). It deploys nothing, writes no settings and prints no secrets.
+# The demo branches are pushed only after this audit reports ISOLATED (docs/frontend/PORTFOLIO.md).
+
+on:
+  push:
+    branches: [claude/frontend-redesign]
+    paths:
+      - scripts/demo-isolation-audit.ts
+      - scripts/demo-isolation-rules.ts
+      - .github/workflows/portfolio-demo-isolation-audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portfolio-demo-isolation-audit
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - name: Audit Cloudflare Git build settings for the demo branches (read-only)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node --no-warnings scripts/demo-isolation-audit.ts
