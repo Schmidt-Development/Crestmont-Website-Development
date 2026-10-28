@@ -87,7 +87,7 @@ test("[AIB-RUNNER] happy path: claim -> heartbeat -> requirements -> checkpoint 
     assert.equal(byKey["page:home"].status, "verified");
     assert.equal(byKey["page:contact"].status, "implemented_unverified");
     assert.equal(byKey["check:static-check"].status, "verified");
-    assert.match(byKey["check:static-check"].evidence!, /npm run -s check -- --package starter/);
+    assert.match(byKey["check:static-check"].evidence!, /node scripts\/check\.mjs --package starter/);
     // Workspace: isolated repo with commits, runner config, provisioned skills, brief files kept out of git.
     const repo = path.join(s.workspace!, "repo");
     assert.ok(Number(git(repo, "rev-list", "--count", "HEAD")) >= 2);
@@ -337,7 +337,7 @@ test("[AIB-RUNNER] failing acceptance checks get one repair round, then fail hon
     assert.ok(existsSync(path.join(s.workspace!, "repo", ".crestmont", "runner-checks.json")));
     assert.equal(s.outcome, "failed");
     assert.match(String(s.complete?.error), /Acceptance checks failed: static-check/);
-    assert.match(String(s.complete?.report), /FAIL `npm run -s check -- --package starter`/);
+    assert.match(String(s.complete?.report), /FAIL `node scripts\/check\.mjs --package starter`/);
     assert.match(String(s.complete?.report), /STARTER-PLACEHOLDER/);
     assert.equal(s.complete?.previewUrl, null);
   } finally { await cp.close(); }
@@ -349,11 +349,17 @@ test("[AIB-RUNNER] preview deploy runs the configured command with preview crede
   const { cp, cfg, client, job } = await setup({ cfg: { preview: { command: cmd, envNames: ["CLOUDFLARE_API_TOKEN"], timeoutMs: 30_000 } } });
   try {
     const sdk = fakeSdk(happyAgent());
-    const s = await runJob(job, deps(cfg, client, sdk));
+    const proxied = { ...POLLUTED_ENV, HTTPS_PROXY: "http://egress-proxy:3128", NO_PROXY: "localhost,127.0.0.1", HTTP_PROXY: "http://user:pw@leaky-proxy:3128" };
+    const s = await runJob(job, deps(cfg, client, sdk, { processEnv: proxied }));
     assert.equal(s.outcome, "ready_for_review", String(s.complete?.error));
     assert.equal(s.complete?.previewUrl, "https://cm-prv-prj-test1.preview.workers.dev");
     const seen = JSON.parse(readFileSync(envDump, "utf8")) as Record<string, string>;
     assert.equal(seen.CLOUDFLARE_API_TOKEN, POLLUTED_ENV.CLOUDFLARE_API_TOKEN, "preview command gets its credential");
+    // On the Windows stack the runner network's only way out is the egress proxy: the deploy needs it, the agent never gets it.
+    assert.equal(seen.HTTPS_PROXY, "http://egress-proxy:3128");
+    assert.equal(seen.NO_PROXY, "localhost,127.0.0.1");
+    assert.ok(!("HTTP_PROXY" in seen), "a proxy URL with credentials is not passed on");
+    assert.ok(!("HTTPS_PROXY" in sdk.calls[0].options.env!), "agent never had the proxy");
     assert.ok(!("BUILD_RUNNER_SECRET" in seen) && !("STRIPE_SECRET_KEY" in seen) && !("ANTHROPIC_API_KEY" in seen));
     assert.ok(!("CLOUDFLARE_API_TOKEN" in sdk.calls[0].options.env!), "agent never had it");
   } finally { await cp.close(); }

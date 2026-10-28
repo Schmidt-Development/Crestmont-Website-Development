@@ -254,6 +254,20 @@ export function resultMsg(sessionId: string, totalCost: number, turns: number, s
   return { type: "result", subtype, session_id: sessionId, is_error: subtype !== "success", num_turns: turns, total_cost_usd: totalCost, ...(subtype === "success" ? { result: "done" } : {}) };
 }
 
+/** What a compliant agent does with the starter: the customer's business details from BRIEF.json, then no placeholders. */
+export function fillStarterFromBrief(repo: string): void {
+  let b = { name: "", publicEmail: "", publicPhone: "" };
+  try { b = JSON.parse(readFileSync(path.join(repo, "BRIEF.json"), "utf8")).customerData.business; } catch { /* no brief: placeholders only */ }
+  for (const f of walkFiles(path.join(repo, "public"))) {
+    if (!/\.(html|xml|txt)$/.test(f)) continue;
+    let t = readFileSync(f, "utf8");
+    if (b.name) t = t.replace(/STARTER-PLACEHOLDER Business name/g, b.name);
+    if (b.publicEmail) t = t.replace(/STARTER-PLACEHOLDER public email/g, b.publicEmail);
+    if (b.publicPhone) t = t.replace(/STARTER-PLACEHOLDER public phone/g, b.publicPhone);
+    writeFileSync(f, t.replace(/STARTER-PLACEHOLDER ?/g, ""));
+  }
+}
+
 /** A well-behaved fake agent for the brochure starter: plans, replaces placeholders, records honest statuses. */
 export function happyAgent(opts: { sessionId?: string; costPerPhase?: number; stepDelayMs?: number; startTotal?: number } = {}) {
   // Like Claude Code, a resumed session's results include the spend restored from earlier calls (startTotal).
@@ -274,10 +288,7 @@ export function happyAgent(opts: { sessionId?: string; costPerPhase?: number; st
       ]));
     } else if (ctx.prompt.includes("Phase 2 of 3")) {
       yield toolMsg(`m${ctx.call}a`, "Edit", { file_path: "public/index.html" }, sid);
-      for (const f of walkFiles(path.join(cwd, "public"))) {
-        if (!/\.(html|xml|txt)$/.test(f)) continue;
-        writeFileSync(f, readFileSync(f, "utf8").replace(/STARTER-PLACEHOLDER ?/g, ""));
-      }
+      fillStarterFromBrief(cwd);
       writeFileSync(path.join(st, "requirements.json"), JSON.stringify([
         { key: "page:home", status: "implemented_unverified" }, { key: "page:contact", status: "implemented_unverified" },
       ]));

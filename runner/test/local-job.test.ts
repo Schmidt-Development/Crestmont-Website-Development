@@ -50,7 +50,7 @@ function scriptedBuilder(r: FakeModelRequest): FakeModelReply {
   ];
   const build = [
     call("edit_file", { path: "public/index.html", old_string: "<title>STARTER-PLACEHOLDER Business name — what you do, for whom</title>", new_string: "<title>Acme Plumbing — plumbing for homeowners</title>" }),
-    call("run_command", { command: "grep -rl STARTER-PLACEHOLDER public | xargs sed -i 's/STARTER-PLACEHOLDER \\?//g'" }),
+    call("run_command", { command: "grep -rl STARTER-PLACEHOLDER public | xargs sed -i -e 's/STARTER-PLACEHOLDER Business name/Acme Plumbing ZX-41/g' -e 's/STARTER-PLACEHOLDER public email/hello@acme.example/g' -e 's/STARTER-PLACEHOLDER public phone/+1 555 0100/g' -e 's/STARTER-PLACEHOLDER \\?//g'" }),
     call("report_requirement", { key: "page:home", status: "implemented_unverified" }),
     call("finish", { summary: "built" }),
   ];
@@ -100,17 +100,23 @@ test("[AIB-RUNNER] local provider happy path: plan/build/verify with a tool-usin
     assert.match(String(done.report), /local provider, self-hosted model `test-coder:30b` \(no per-token fees; model spend this attempt: \$0\.00\)/);
     assert.match(String(done.report), new RegExp(`${r.model.requests.length} model calls, ${r.model.requests.length * 1000} input tokens, ${r.model.requests.length * 100} output tokens`));
     assert.doesNotMatch(String(done.report), /Agent SDK client-side estimate/);
-    assert.match(String(done.report), /PASS `npm run -s check -- --package starter`/);
+    assert.match(String(done.report), /PASS `node scripts\/check\.mjs --package starter`/);
     assert.match(String(done.report), /PASS `node \/opt\/crestmont\/browser-check\.mjs --root public --out \.crestmont\/screenshots`/);
     const acts = r.cp.byPath("heartbeat").flatMap((h) => (h.body.activity as { message: string }[] | undefined) ?? []).map((a) => a.message).join("\n");
     assert.match(acts, /local model test-coder:30b: phase plan success; \d+ calls; tokens in \d+ \/ out \d+; model time \d+ s; cost \$0/);
     // Every command (agent's and the runner's checks) went through the job container.
     const execs = r.docker.calls.filter((c) => c[0] === "exec").map((c) => c.slice(c.indexOf("timeout") + 4).join(" "));
     assert.ok(execs.some((e) => e.includes("npm run -s check -- --package starter") && e.startsWith("bash -c")), "agent's check via run_command");
-    assert.ok(execs.includes("npm run -s check -- --package starter"), "runner's acceptance check in the sandbox");
+    assert.ok(execs.includes("node scripts/check.mjs --package starter"), "runner's acceptance check in the sandbox (the checker itself, not an editable npm script)");
     assert.ok(execs.some((e) => e.startsWith("node /opt/crestmont/browser-check.mjs")), "browser check in the sandbox");
     const starts = r.docker.calls.filter((c) => c[0] === "run" && c.includes("-d"));
     assert.ok(starts.length >= 1 && starts.every((c) => c[c.indexOf("--network") + 1] === "none"));
+    // The runner's acceptance run starts in a fresh container: nothing the agent left running survives into it.
+    const flat = r.docker.calls.map((c) => c.join(" "));
+    const checkAt = flat.findIndex((c) => c.endsWith("node scripts/check.mjs --package starter"));
+    const agentCheckAt = flat.findIndex((c) => c.includes("bash -c npm run -s check"));
+    assert.ok(agentCheckAt >= 0 && checkAt > agentCheckAt);
+    assert.ok(flat.slice(agentCheckAt, checkAt).some((c) => c.startsWith("rm -f cm-job-")) && flat.slice(agentCheckAt, checkAt).some((c) => c.startsWith("run -d")), "container recreated before the runner's checks");
     assert.ok(r.docker.calls.at(-1)![0] === "rm", "container removed at the end of the job");
     // Requirement statuses honest; the model saw the paths of the starter.
     const items = r.cp.byPath("requirements").pop()!.body.items as { key: string; status: string }[];

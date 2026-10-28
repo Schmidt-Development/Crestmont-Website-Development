@@ -48,7 +48,8 @@
     {
       "id": "static-check",
       "label": "Offline HTML validation-lite, internal links, SEO meta, accessibility basics, responsive CSS, package page limit",
-      "command": ["npm", "run", "-s", "check", "--", "--package", "{package}"]
+      "command": ["node", "scripts/check.mjs", "--package", "{package}"]
     }
-  ]
+  ],
+  "protected": ["scripts/check.mjs", "scripts/check-profiles.json"]
 }

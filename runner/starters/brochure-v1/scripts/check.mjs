@@ -2,7 +2,8 @@
 // Offline acceptance check for the brochure starter (no network, no dependencies).
 //   npm run check -- --package starter|business|premium [--allow-placeholders] [--root <dir>] [--json]
 // Checks: HTML validation-lite (doctype, lang, charset, tag balance, duplicate ids), internal links/assets/anchors,
-// SEO meta per package level, accessibility basics, responsive CSS, package page limit, contact form, leftovers.
+// SEO meta per package level, accessibility basics, responsive CSS, package page limit, contact form, leftovers
+// (starter placeholders, lorem ipsum, bracketed/template fill-ins, TODO/FIXME, placeholder image services).
 // Exit code 1 when any ERROR is found. WARNINGs are printed but do not fail the check.
 
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
@@ -27,6 +28,9 @@ function parseArgs(argv) {
 const VOID = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]);
 const OPTIONAL_CLOSE = new Set(["p", "li", "dt", "dd", "option", "tr", "td", "th", "thead", "tbody", "tfoot"]);
 const EXTERNAL = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
+// Generic AI/template leftovers the customer would see: bracketed fill-ins and unrendered template variables.
+const TEMPLATE_TOKEN = /\[(?:your|insert|enter|add|company|business|client|placeholder)\b[^\]\n]{0,60}\]|\{\{[^}\n]{1,60}\}\}/i;
+const PLACEHOLDER_IMAGES = /\b(?:via\.placeholder\.com|placeholder\.com|placehold\.(?:co|it)|picsum\.photos|dummyimage\.com|placekitten\.com|loremflickr\.com)\b/i;
 
 /** @param {string} dir @returns {string[]} */
 function walk(dir) {
@@ -100,6 +104,13 @@ export function runCheck(opts) {
     const t = readFileSync(f, "utf8");
     if (!opts.allowPlaceholders && t.includes("STARTER-PLACEHOLDER")) err(rel(f), "starter placeholder text remains (STARTER-PLACEHOLDER)");
     if (/lorem ipsum/i.test(t)) err(rel(f), "lorem ipsum filler text");
+    if (PLACEHOLDER_IMAGES.test(t)) err(rel(f), "placeholder image service (not licensed imagery, and unavailable offline)");
+    if (f.endsWith(".html")) {
+      const text = textOf(t.replace(/<!--[\s\S]*?-->/g, ""));
+      const token = TEMPLATE_TOKEN.exec(text);
+      if (token) err(rel(f), `unfilled template text "${token[0].slice(0, 60)}"`);
+      if (/\b(?:TODO|FIXME)\b/.test(text)) err(rel(f), "TODO/FIXME left in page text");
+    }
   }
 
   const titles = new Map();

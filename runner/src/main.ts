@@ -85,6 +85,7 @@ export async function runLoop(d: LoopDeps): Promise<number> {
   let draftsSupported = true;
   let lastProbeAt = 0;
   let modelOk = true;
+  let paidRefusalLogged = false;
   while (!d.shouldStop()) {
     if (d.modelProbe && (!modelOk || Date.now() - lastProbeAt >= (d.modelProbe.intervalMs ?? 300_000))) {
       const p = await d.modelProbe.check();
@@ -112,6 +113,10 @@ export async function runLoop(d: LoopDeps): Promise<number> {
       continue;
     }
     if (!claimed.job) {
+      if (claimed.reason === "paid_provider_not_authorized" && !paidRefusalLogged) {
+        paidRefusalLogged = true;
+        d.logger.warn("the platform refuses builds to this runner: it uses a paid provider and BUILD_ALLOW_PAID_PROVIDER is not enabled on the platform");
+      }
       // Idle: no build is running, so one draft at a time stays within the machine's concurrency of one.
       let served = 0;
       if (d.drafts && draftsSupported) {

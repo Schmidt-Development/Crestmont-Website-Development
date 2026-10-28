@@ -4,13 +4,13 @@
 
 import { writeFileSync, existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { run, baseEnv } from "./exec.ts";
+import { run, baseEnv, proxyEnv } from "./exec.ts";
 import type { ExecResult } from "./exec.ts";
 
 export interface GitCtx { repo: string; pathEnv: string; home: string }
 
 async function git(ctx: GitCtx, args: string[], extraEnv: Record<string, string> = {}, timeoutMs = 120_000): Promise<ExecResult> {
-  return run("git", args, { cwd: ctx.repo, env: { ...baseEnv(ctx.pathEnv, ctx.home), ...extraEnv }, timeoutMs });
+  return run("git", args, { cwd: ctx.repo, env: { ...baseEnv(ctx.pathEnv, ctx.home), ...proxyEnv(), ...extraEnv }, timeoutMs });
 }
 
 async function gitOk(ctx: GitCtx, args: string[], extraEnv: Record<string, string> = {}): Promise<string> {

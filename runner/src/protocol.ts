@@ -92,7 +92,9 @@ export interface Job {
 }
 
 export type ClaimResponse =
-  | { job: null; reason: "none_queued" | "paused" | "at_capacity" }
+  // paid_provider_not_authorized: this runner does not declare zero token cost and the platform has not enabled paid
+  // providers (BUILD_ALLOW_PAID_PROVIDER). Treated like "paused": back off and keep polling.
+  | { job: null; reason: "none_queued" | "paused" | "at_capacity" | "paid_provider_not_authorized" }
   | { job: Job };
 
 export type Stage = "preparing" | "building" | "verifying";

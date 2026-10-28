@@ -45,3 +45,21 @@ export function baseEnv(pathValue: string, home: string): Record<string, string>
     GIT_CONFIG_NOSYSTEM: "1",
   };
 }
+
+/**
+ * The runner's own outbound proxy settings (compose sets HTTPS_PROXY=http://egress-proxy:3128 on the runner; its
+ * network has no other way out). Runner-side network commands (git push/clone, the preview deploy) need them; the
+ * agent and the sandbox never get them. A proxy URL carrying credentials is not passed on.
+ */
+export function proxyEnv(env: Record<string, string | undefined> = process.env): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy"]) {
+    const v = env[name];
+    if (!v || v.length > 500) continue;
+    if (!/^no_proxy$/i.test(name)) {
+      try { const u = new URL(v); if (u.username || u.password || !/^https?:$/.test(u.protocol)) continue; } catch { continue; }
+    }
+    out[name] = v;
+  }
+  return out;
+}

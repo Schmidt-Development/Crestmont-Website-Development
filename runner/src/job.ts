@@ -30,12 +30,12 @@ import type { SkillManifest, Workflow, PreflightResult } from "./skills.ts";
 import { preflight, provisionSkills } from "./skills.ts";
 import { buildCheckpoint, restoreCheckpoint } from "./checkpoint.ts";
 import type { StarterSpec, CheckOutcome, CheckExecutor } from "./checks.ts";
-import { starterDir, loadStarter, copyStarter, acceptanceCommands, runChecks, previewConfigProblems } from "./checks.ts";
+import { starterDir, loadStarter, copyStarter, acceptanceCommands, runChecks, previewConfigProblems, restoreProtectedFiles, briefConformance } from "./checks.ts";
 import { writeBriefFiles, systemPromptAppend, phasePrompt } from "./prompt.ts";
 import type { Phase } from "./prompt.ts";
 import { readRequirements, checkRequirements, readStringList, readAgentReport } from "./requirements.ts";
 import { buildReport } from "./report.ts";
-import { run } from "./exec.ts";
+import { run, proxyEnv } from "./exec.ts";
 
 export interface JobDeps {
   cfg: RunnerConfig;
@@ -419,6 +419,31 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       await checkpoint(`after ${phase}`);
     }
 
+    /**
+     * The runner's own acceptance run. The agent can change any workspace file and could have left processes running
+     * in its container, so first: a fresh sandbox container (nothing the agent started survives), and the starter's
+     * checker files restored from the runner's copy. Then the acceptance commands, plus the brief-conformance check
+     * computed by the runner itself from the brief snapshot (files are only read, never executed).
+     */
+    const acceptance = async (commands: { id: string; label: string; command: string[] }[]): Promise<CheckOutcome[]> => {
+      if (sandbox) await sandbox.restart();
+      if (starterSpec && job.starter) {
+        const restored = restoreProtectedFiles(starterDir(cfg.startersDir, job.starter), ws!.repo, starterSpec);
+        if (restored.length) {
+          const note = `Check integrity: the agent had changed ${restored.join(", ")}; the runner restored the approved starter version before running its acceptance checks.`;
+          if (!sourceNotes.includes(note)) sourceNotes.push(note);
+          tracker.note({ kind: "check", message: `restored protected checker files: ${restored.join(", ")}` });
+        }
+      }
+      const out = await runChecks(ws!.repo, commands, checkEnv, cfg.checkTimeoutMs, checkExecutor);
+      if (job.strategy === "standard") {
+        const b = job.brief.content.customerData.business;
+        const bc = briefConformance(ws!.repo, { businessName: b.name, publicEmail: b.publicEmail, publicPhone: b.publicPhone });
+        if (bc) out.push(bc);
+      }
+      return out;
+    };
+
     // ── runner acceptance checks (+ one repair round) ──
     let checks: CheckOutcome[] = [];
     if (!stop.reason && !st.localLimit && !st.agentError) {
@@ -431,14 +456,14 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         const inst = await sandbox.install();
         tracker.note({ kind: "check", message: `${inst.code === 0 ? "PASS" : "FAIL"} ${inst.command}` });
       }
-      checks = await runChecks(ws.repo, commands, checkEnv, cfg.checkTimeoutMs, checkExecutor);
+      checks = await acceptance(commands);
       for (const c of checks) tracker.note({ kind: "check", message: `${c.ok ? "PASS" : "FAIL"} ${c.command}` });
       if (checks.some((c) => !c.ok)) {
         writeFileSync(path.join(ws.repo, ".crestmont", "runner-checks.json"), JSON.stringify(checks.map(({ id, command, ok, code, outputTail }) => ({ id, command, ok, code, outputTail })), null, 2));
         await runOne("repair", null);
         guard();
         if (!stop.reason && !st.localLimit && !st.agentError) {
-          checks = await runChecks(ws.repo, commands, checkEnv, cfg.checkTimeoutMs, checkExecutor);
+          checks = await acceptance(commands);
           await checkpoint("after repair");
         }
       }
@@ -542,6 +567,8 @@ async function deployPreview(cfg: RunnerConfig, ws: Workspace, job: Job, checkEn
   if (problems.length) return { url: null, note: `refused to deploy: ${problems.join("; ")}` };
   const env: Record<string, string> = {
     ...checkEnv,
+    // The runner's egress proxy (its network has no other route out); never handed to the agent or the sandbox.
+    ...proxyEnv(processEnv),
     CRESTMONT_PREVIEW_NAME: `cm-prv-${job.projectId}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 54),
     CRESTMONT_JOB_ID: job.id,
     CRESTMONT_PROJECT_ID: job.projectId,

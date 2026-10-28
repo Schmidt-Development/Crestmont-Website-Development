@@ -2,7 +2,7 @@
 // enough). Starter checks come from starter.json; custom projects run whichever of test/build/check scripts exist.
 // Checks run with the agent environment minus the Anthropic credential: they execute agent-written code.
 
-import { existsSync, readFileSync, cpSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, cpSync, readdirSync, lstatSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { run } from "./exec.ts";
 import type { ExecResult } from "./exec.ts";
@@ -20,6 +20,12 @@ export interface StarterSpec {
   description: string;
   packages: Record<string, StarterPackageSpec>;
   acceptance: { id: string; label: string; command: string[] }[];
+  /**
+   * Starter files the acceptance checks depend on (the checker and its package profiles). The agent can edit any file
+   * in its workspace, so the runner restores these from its own starter copy before every acceptance run: a weakened
+   * checker can never decide whether a build passes.
+   */
+  protected?: string[];
 }
 
 export interface CheckOutcome { id: string; label: string; command: string; ok: boolean; code: number; timedOut: boolean; outputTail: string }
@@ -35,6 +41,49 @@ export function loadStarter(dir: string): StarterSpec {
   const spec = JSON.parse(readFileSync(file, "utf8")) as StarterSpec;
   if (spec.schema !== "crestmont.starter/1") throw new Error(`Unsupported starter schema in ${file}`);
   return spec;
+}
+
+/** Repository-relative POSIX path without traversal, absolute paths or git internals. */
+const SAFE_REL = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))(?!\.git(?:\/|$))[A-Za-z0-9._\/-]{1,200}$/;
+
+/**
+ * Restore the starter's protected files (checker, package profiles) into the workspace from the runner's copy.
+ * Returns the files that were missing or differed (i.e. the agent changed them) — reported to the owner.
+ */
+export function restoreProtectedFiles(dir: string, repo: string, spec: StarterSpec): string[] {
+  const changed: string[] = [];
+  for (const rel of spec.protected ?? []) {
+    if (!SAFE_REL.test(rel)) throw new Error(`Starter ${spec.name}-v${spec.version}: invalid protected path ${rel}`);
+    const src = path.join(dir, rel);
+    if (!existsSync(src)) throw new Error(`Starter ${spec.name}-v${spec.version}: protected file ${rel} is missing from the starter`);
+    const dst = path.join(repo, rel);
+    const want = readFileSync(src);
+    let same = false;
+    try { same = !lstatSync(dst).isSymbolicLink() && lstatSync(dst).isFile() && readFileSync(dst).equals(want); } catch { same = false; }
+    if (same && !hasLinkedAncestor(repo, rel)) continue;
+    changed.push(rel);
+    // Never write through a link the agent planted: replace any linked or non-directory ancestor with a real directory.
+    let cur = repo;
+    for (const part of rel.split("/").slice(0, -1)) {
+      cur = path.join(cur, part);
+      let st = null;
+      try { st = lstatSync(cur); } catch { /* missing */ }
+      if (st && (st.isSymbolicLink() || !st.isDirectory())) rmSync(cur, { recursive: true, force: true });
+      if (!st || st.isSymbolicLink() || !st.isDirectory()) mkdirSync(cur);
+    }
+    rmSync(dst, { recursive: true, force: true });
+    writeFileSync(dst, want);
+  }
+  return changed;
+}
+
+function hasLinkedAncestor(repo: string, rel: string): boolean {
+  let cur = repo;
+  for (const part of rel.split("/").slice(0, -1)) {
+    cur = path.join(cur, part);
+    try { if (lstatSync(cur).isSymbolicLink()) return true; } catch { return false; }
+  }
+  return false;
 }
 
 /** Copy the starter (excluding starter.json, which stays a runner-side contract) into an empty repository. */
@@ -83,4 +132,78 @@ export function previewConfigProblems(repo: string): string[] {
     if (/"routes?"\s*:|^\s*routes?\s*=|"custom_domain"|custom_domain\s*=/m.test(text)) problems.push(`${f} defines routes or custom domains`);
   }
   return problems;
+}
+
+// ── Brief conformance (runner-side, reads files only; never executes agent code) ──
+
+const decodeEntities = (s: string) => s
+  .replace(/&(?:amp|#0*38|#x0*26);/gi, "&").replace(/&(?:apos|#0*39|#x0*27|rsquo|lsquo|#0*8217|#x0*2019);/gi, "'")
+  .replace(/&(?:quot|#0*34|#x0*22|ldquo|rdquo);/gi, '"').replace(/&nbsp;|&#0*160;|&#x0*a0;/gi, " ");
+const norm = (s: string) => decodeEntities(s).replace(/[‘’ʼ]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, " ").trim().toLowerCase();
+const visibleText = (html: string) => html.replace(/<!--[\s\S]*?-->/g, " ").replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ");
+
+function htmlPages(dir: string, depth = 0): string[] {
+  const out: string[] = [];
+  let entries: string[] = [];
+  try { entries = readdirSync(dir); } catch { return out; }
+  for (const e of entries.sort()) {
+    const p = path.join(dir, e);
+    let st;
+    try { st = lstatSync(p); } catch { continue; }
+    if (st.isSymbolicLink()) continue;
+    if (st.isDirectory() && depth < 3 && !e.startsWith(".") && e !== "node_modules") out.push(...htmlPages(p, depth + 1));
+    else if (st.isFile() && e.endsWith(".html") && st.size <= 2 * 1024 * 1024) out.push(p);
+  }
+  return out.slice(0, 200);
+}
+
+/** Digit strings of phone-like runs in a page (text and tel: links). */
+function phoneDigits(html: string): string[] {
+  return [...decodeEntities(html).matchAll(/(?:tel:)?\+?\d[\d\s().\- ]{5,22}\d/gi)].map((m) => m[0].replace(/\D/g, ""));
+}
+
+export interface BriefFacts { businessName?: string; publicEmail?: string; publicPhone?: string }
+
+/**
+ * Objective checks that the generated site carries the customer's own business details (from the brief snapshot,
+ * not from files in the workspace): the business name on the home page, and the public email and phone on at least
+ * one page when the customer gave them. Returns null when there is no static site or nothing to check.
+ * Subjective quality (design, copy, brand fit) is NOT judged here; that is the owner's review.
+ */
+export function briefConformance(repo: string, facts: BriefFacts): CheckOutcome | null {
+  const pub = path.join(repo, "public");
+  const pages = htmlPages(pub);
+  if (!pages.length) return null;
+  const findings: string[] = [];
+  let checked = 0;
+  const read = (f: string) => { try { return readFileSync(f, "utf8"); } catch { return ""; } };
+  const name = norm(String(facts.businessName ?? "")).slice(0, 120);
+  if (name.length >= 2) {
+    checked++;
+    const home = pages.find((p) => path.relative(pub, p) === "index.html");
+    const homeText = home ? norm(visibleText(read(home))) : "";
+    const homeTitle = home ? norm((/<title>([\s\S]*?)<\/title>/i.exec(read(home))?.[1]) ?? "") : "";
+    if (!home) findings.push("ERROR public/index.html: home page missing");
+    else if (!homeText.includes(name) && !homeTitle.includes(name)) findings.push(`ERROR public/index.html: the customer's business name ("${facts.businessName!.trim().slice(0, 80)}") does not appear on the home page`);
+  }
+  const email = String(facts.publicEmail ?? "").trim().toLowerCase();
+  if (/^[^\s@<>"']{1,64}@[a-z0-9.-]{1,190}\.[a-z]{2,}$/i.test(email)) {
+    checked++;
+    if (!pages.some((p) => decodeEntities(read(p)).toLowerCase().includes(email))) findings.push(`ERROR public/: the customer's public email (${email}) does not appear on any page`);
+  }
+  const want = String(facts.publicPhone ?? "").replace(/\D/g, "");
+  if (want.length >= 7) {
+    checked++;
+    const tail = want.slice(-10);
+    if (!pages.some((p) => phoneDigits(read(p)).some((d) => d.endsWith(tail)))) {
+      findings.push(`ERROR public/: the customer's public phone number (${String(facts.publicPhone).trim().slice(0, 40)}) does not appear on any page`);
+    }
+  }
+  if (!checked) return null;
+  const ok = findings.length === 0;
+  return {
+    id: "brief-conformance", label: "Customer business details from the brief appear on the site (name on the home page; public email and phone on a page)",
+    command: "runner: brief conformance (business name, public email, public phone)", ok, code: ok ? 0 : 1, timedOut: false,
+    outputTail: ok ? `${checked} customer detail(s) found on the site` : findings.join("\n"),
+  };
 }
