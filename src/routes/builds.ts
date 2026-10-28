@@ -49,7 +49,7 @@ async function notifyStaff(ctx: AppContext, job: B.BuildJob, to: BuildState) {
 
 export function register(r: Router): void {
   // ───── Runner API (HMAC-signed; no cookies) ─────
-  r.post(`${RUNNER}/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await B.claimJob(ctx.db, { runnerId: typeof b.runnerId === "string" ? b.runnerId : "", version: typeof b.version === "string" ? b.version : "", capabilities: Array.isArray(b.capabilities) ? b.capabilities.map(String) : [] }, ctx.now())); }));
+  r.post(`${RUNNER}/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await B.claimJob(ctx.db, { runnerId: typeof b.runnerId === "string" ? b.runnerId : "", version: typeof b.version === "string" ? b.version : "", capabilities: b.capabilities }, ctx.now(), { allowPaidProvider: ctx.env.BUILD_ALLOW_PAID_PROVIDER === "true" })); }));
   r.post(`${RUNNER}/heartbeat`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.heartbeat(ctx.db, await runnerBody(ctx), ctx.now()))));
   r.post(`${RUNNER}/checkpoint`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.checkpoint(ctx.db, ctx.storage, await runnerBody(ctx)))));
   r.post(`${RUNNER}/checkpoint/fetch`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.fetchCheckpoint(ctx.db, ctx.storage, await runnerBody(ctx)))));
@@ -58,7 +58,7 @@ export function register(r: Router): void {
   r.post(`${RUNNER}/ai/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await AIR.completeAiJob(ctx.db, await runnerBody(ctx)))));
   r.post(`${RUNNER}/requirements`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.reportRequirements(ctx.db, await runnerBody(ctx)))));
   r.post(`${RUNNER}/files`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.runnerFile(ctx.db, ctx.storage, await runnerBody(ctx)))));
-  r.post(`${RUNNER}/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.completeJob(ctx.db, await runnerBody(ctx), (j, to) => notifyStaff(ctx, j, to)))));
+  r.post(`${RUNNER}/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.completeJob(ctx.db, await runnerBody(ctx), (j, to) => notifyStaff(ctx, j, to), { previewHosts: B.previewHostList(ctx.env.BUILD_PREVIEW_HOSTS) }))));
 
   // ───── JSON contract for the dashboard frontend (staff session) ─────
   r.get("/api/builds", async (ctx) => {
@@ -95,6 +95,7 @@ export function register(r: Router): void {
 ${!ctx.env.BUILD_RUNNER_SECRET ? alert("warn", html`<strong>Execution unavailable.</strong> No build runner is configured on this environment (BUILD_RUNNER_SECRET is not set), so eligible builds wait in the queue and nothing is generated. Setup: docs/ai-builds/RUNNER-SETUP.md.`)
   : runner?.online ? alert("success", `Runner ${runner.runner_id} (v${runner.version ?? "?"}) last checked in ${formatDateTime(runner.last_seen_at)}.`)
   : alert("warn", runner ? `Runner ${runner.runner_id} last checked in ${formatDateTime(runner.last_seen_at)}; it is not polling now, so queued builds are waiting.` : "No build runner has connected yet; queued builds are waiting.")}
+${runner && !runner.zeroCost && ctx.env.BUILD_ALLOW_PAID_PROVIDER !== "true" ? alert("warn", html`<strong>Paid provider refused.</strong> Runner ${runner.runner_id} does not declare zero token cost (a paid model provider), so it gets no builds. Paid AI needs BUILD_ALLOW_PAID_PROVIDER=true on this environment as well as the runner's own opt-in; budgets still apply.`) : ""}
 ${s.globally_paused ? alert("warn", html`<strong>Automation paused.</strong> ${s.pause_reason ?? ""}`) : ""}
 <div class="kpis">${kpi("Queued", counts.queued ?? 0)}${kpi("Running", (counts.preparing ?? 0) + (counts.building ?? 0) + (counts.verifying ?? 0))}${kpi("In owner review", counts.ready_for_review ?? 0)}${kpi("Need attention", (counts.needs_information ?? 0) + (counts.failed ?? 0) + (counts.budget_paused ?? 0))}</div>
 <form method="get" class="filters row">${select({ name: "state", label: "State", options: BUILD_STATES.map((x) => ({ value: x, label: BUILD_STATE_LABELS[x] })), value: state, includeBlank: "All states" })}${input({ name: "q", label: "Search", value: q, placeholder: "Customer or project" })}${button("Filter", { variant: "secondary", size: "sm" })}</form>
@@ -113,7 +114,7 @@ ${can(ctx.actor!, "builds.manage") ? html`<form method="post" action="/staff/bui
   ? html`<input type="hidden" name="paused" value="0">${button("Resume automation", { variant: "primary", size: "sm" })}`
   : html`<input type="hidden" name="paused" value="1">${input({ name: "reason", label: "Reason", required: true, maxlength: 300 })}${button("Pause all automation", { variant: "danger", size: "sm" })}`}</form>` : ""}
 ${configure ? html`<form method="post" action="/staff/builds/settings" class="stack">${csrf(ctx)}
-<div class="grid grid-3">${input({ name: "run_budget", label: "Per-run limit (USD)", type: "number", step: "0.01", value: B.microToUsd(s.run_budget_micro) })}${input({ name: "project_budget", label: "Per-project limit (USD, cumulative incl. revisions)", type: "number", step: "0.01", value: B.microToUsd(s.project_budget_micro) })}${input({ name: "model", label: "Model", value: s.model })}
+<div class="grid grid-3">${input({ name: "run_budget", label: "Per-run limit (USD)", type: "number", step: "0.01", value: B.microToUsd(s.run_budget_micro) })}${input({ name: "project_budget", label: "Per-project limit (USD, cumulative incl. revisions)", type: "number", step: "0.01", value: B.microToUsd(s.project_budget_micro) })}${input({ name: "model", label: "Model", value: s.model, hint: "Sent to the runner. The self-hosted runner uses its own LOCAL_MODEL instead (named in every build report)." })}
 ${input({ name: "max_runtime", label: "Max runtime (minutes)", type: "number", value: s.max_runtime_minutes })}${input({ name: "max_turns", label: "Max agent turns", type: "number", value: s.max_turns })}${input({ name: "max_concurrent", label: "Concurrent builds", type: "number", value: s.max_concurrent })}
 ${input({ name: "max_attempts", label: "Automatic attempts", type: "number", value: s.max_attempts })}</div>
 ${checkbox("automation_enabled", "Start eligible first builds automatically", { checked: !!s.automation_enabled })}

@@ -326,12 +326,32 @@ async function projectBudgetMicro(db: Db, projectId: string, s: BuildSettings) {
   return (await projectControls(db, projectId))?.project_budget_micro ?? s.project_budget_micro;
 }
 
-export async function claimJob(db: Db, runner: { runnerId: string; version?: string; capabilities?: string[] }, now = new Date()) {
+/** Capability a runner announces when its model costs nothing per token (the self-hosted local provider). */
+export const ZERO_COST_CAPABILITY = "zero-token-cost";
+
+/** Runner capabilities as recorded: strings only, bounded. */
+export function runnerCapabilities(raw: unknown): string[] {
+  return (Array.isArray(raw) ? raw : []).filter((c): c is string => typeof c === "string").map((c) => c.slice(0, 40)).slice(0, 20);
+}
+
+/**
+ * Paid-AI gate on the platform side. A runner that does not declare zero token cost is treated as paid (unknown or
+ * older runners included) and gets no work unless the Worker explicitly allows paid providers. This is the second key
+ * next to the runner's own RUNNER_ALLOW_PAID_PROVIDER; budgets still apply on top.
+ */
+export function paidProviderRefused(capabilities: string[], allowPaidProvider: boolean): boolean {
+  return !allowPaidProvider && !capabilities.includes(ZERO_COST_CAPABILITY);
+}
+
+export async function claimJob(db: Db, runner: { runnerId: string; version?: string; capabilities?: unknown }, now = new Date(), opts: { allowPaidProvider?: boolean } = {}) {
   const runnerId = String(runner.runnerId ?? "").slice(0, 64);
   if (!/^[A-Za-z0-9._:-]{1,64}$/.test(runnerId)) throw new HttpError(422, "runnerId must be 1-64 characters of [A-Za-z0-9._:-]");
   const at = now.toISOString();
+  const capabilities = runnerCapabilities(runner.capabilities);
+  const version = String(runner.version ?? "").slice(0, 40);
   await db.prepare(`INSERT INTO build_runners (runner_id, version, capabilities, last_seen_at) VALUES (?,?,?,?) ON CONFLICT(runner_id) DO UPDATE SET version = excluded.version, capabilities = excluded.capabilities, last_seen_at = excluded.last_seen_at`)
-    .bind(runnerId, String(runner.version ?? "").slice(0, 40), JSON.stringify((runner.capabilities ?? []).slice(0, 20)), at).run();
+    .bind(runnerId, version, JSON.stringify(capabilities), at).run();
+  if (paidProviderRefused(capabilities, !!opts.allowPaidProvider)) return { job: null, reason: "paid_provider_not_authorized" as const };
   const s = await getBuildSettings(db);
   if (s.globally_paused || !s.automation_enabled) return { job: null, reason: "paused" as const };
   if (await activeCount(db) >= s.max_concurrent) return { job: null, reason: "at_capacity" as const };
@@ -350,7 +370,9 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
     if (!r.meta?.changes) continue; // another runner won this job (or capacity filled): try the next
     const job = (await getJob(db, c.id))!;
     await db.prepare(`INSERT OR IGNORE INTO build_runs (id, job_id, attempt, runner_id, started_at, session_id) VALUES (?,?,?,?,?,?)`).bind(newId("brun"), job.id, job.attempts, runnerId, at, job.agent_session_id).run();
-    await event(db, job.id, "transition", `Claimed by runner ${runnerId} (attempt ${job.attempts})`, { kind: "runner" }, { from: "queued", to: "preparing" });
+    // Audit: which runner build and which kind of provider (zero-cost or paid) took this attempt.
+    await event(db, job.id, "transition", `Claimed by runner ${runnerId} (attempt ${job.attempts}; ${capabilities.includes(ZERO_COST_CAPABILITY) ? "zero-cost provider" : "PAID provider"})`, { kind: "runner" },
+      { from: "queued", to: "preparing", data: { runnerVersion: version, capabilities, paidProvider: !capabilities.includes(ZERO_COST_CAPABILITY) } });
     const brief = job.brief_id ? await db.prepare(`SELECT id, version, sha256, content_json FROM build_briefs WHERE id = ?`).bind(job.brief_id).first<{ id: string; version: number; sha256: string; content_json: string }>() : null;
     const reqs = (await db.prepare(`SELECT key, label, status FROM build_requirements WHERE job_id = ? ORDER BY key`).bind(job.id).all<{ key: string; label: string; status: string }>()).results;
     const remaining = Math.max(0, budget - spent);
@@ -489,16 +511,37 @@ export async function runnerFile(db: Db, storage: StorageAdapter | null, b: Reco
   return { name: f.filename, contentType: f.content_type, scanStatus: f.scan_status, base64: btoa(bin) };
 }
 
-export async function completeJob(db: Db, b: Record<string, unknown>, notify?: (job: BuildJob, to: BuildState) => Promise<void>) {
+/** Preview hosts allowed by default: the per-project Cloudflare Workers preview the brochure starter deploys to. */
+export const DEFAULT_PREVIEW_HOSTS = [".workers.dev"];
+
+export function previewHostList(raw: string | undefined): string[] {
+  const list = String(raw ?? "").split(",").map((h) => h.trim().toLowerCase()).filter((h) => /^\.?[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(h));
+  return list.length ? list : DEFAULT_PREVIEW_HOSTS;
+}
+
+/** A preview URL is recorded only when it is https and its host is (a subdomain of) an allowed preview host. */
+export function previewUrlAllowed(url: string, hosts: string[]): boolean {
+  let host: string;
+  try { const u = new URL(url); if (u.protocol !== "https:" || u.username || u.password) return false; host = u.hostname.toLowerCase(); } catch { return false; }
+  return hosts.some((h) => h.startsWith(".") ? host.endsWith(h) && host.length > h.length : host === h || host.endsWith(`.${h}`));
+}
+
+export async function completeJob(db: Db, b: Record<string, unknown>, notify?: (job: BuildJob, to: BuildState) => Promise<void>, opts: { previewHosts?: string[] } = {}) {
   const job = await leased(db, b.jobId, b.leaseToken);
   const s = await getBuildSettings(db);
   await recordRunUsage(db, job, b.runCostUsd, b.turns, b.sessionId);
   const outcome = String(b.outcome ?? "");
   const at = nowIso();
+  const reportedPreview = okUrl(b.previewUrl);
+  const previewHosts = opts.previewHosts ?? DEFAULT_PREVIEW_HOSTS;
+  const previewRejected = reportedPreview && !previewUrlAllowed(reportedPreview, previewHosts) ? reportedPreview : null;
   const common = {
     lease_token_hash: null, lease_expires_at: null, lease_runner: null, finished_at: at,
     source_repo: okUrl(b.sourceRepo) ?? okRef(b.sourceRepo) ?? job.source_repo, source_branch: okRef(b.sourceBranch, 200) ?? job.source_branch,
-    source_commit: okRef(b.sourceCommit, 64) ?? job.source_commit, preview_url: okUrl(b.previewUrl) ?? job.preview_url,
+    source_commit: okRef(b.sourceCommit, 64) ?? job.source_commit,
+    // A build delivered to review shows only the preview this attempt deployed: an older URL (an earlier attempt or the
+    // previous revision) would let the owner approve a site that is not the one under review.
+    preview_url: outcome === "ready_for_review" ? (previewRejected ? null : reportedPreview) : (previewRejected ? null : reportedPreview) ?? job.preview_url,
     report_md: typeof b.report === "string" ? sanitize(b.report, 50_000) : job.report_md,
   };
   const err = typeof b.error === "string" ? sanitize(b.error, 2000) : null;
@@ -529,6 +572,7 @@ export async function completeJob(db: Db, b: Record<string, unknown>, notify?: (
   await db.prepare(`UPDATE build_runs SET ended_at = ?, outcome = ?, error = ? WHERE job_id = ? AND attempt = ?`).bind(at, outcome, err, job.id, job.attempts).run();
   const ok = await transition(db, job, to, reason, { kind: "runner" }, { ...common, ...extra });
   if (!ok) throw new LeaseLostError("lease_lost");
+  if (previewRejected) await event(db, job.id, "error", `Preview URL not recorded: its host is not an allowed preview host (${previewHosts.join(", ")})`, { kind: "system" }, { data: { url: previewRejected.slice(0, 300) } });
   if (common.preview_url && common.preview_url !== job.preview_url) await event(db, job.id, "preview", "Preview published", { kind: "runner" }, { data: { url: common.preview_url } });
   if (common.source_commit && common.source_commit !== job.source_commit) await event(db, job.id, "source", `Source at ${common.source_commit.slice(0, 12)}`, { kind: "runner" }, { data: { repo: common.source_repo, branch: common.source_branch } });
   void s;
@@ -584,7 +628,8 @@ export async function updateBuildSettings(c: OwnerCtx, v: { automationEnabled: b
   if (!(Number.isInteger(v.maxTurns) && v.maxTurns >= 1 && v.maxTurns <= 5000)) throw new HttpError(422, "Turn limit must be 1–5000.");
   if (!(Number.isInteger(v.maxConcurrent) && v.maxConcurrent >= 0 && v.maxConcurrent <= 50)) throw new HttpError(422, "Concurrent builds must be 0–50.");
   if (!(Number.isInteger(v.maxAttempts) && v.maxAttempts >= 1 && v.maxAttempts <= 10)) throw new HttpError(422, "Attempts must be 1–10.");
-  if (!/^[a-z0-9][a-z0-9.\-]{2,80}$/.test(v.model)) throw new HttpError(422, "Enter a model identifier such as claude-sonnet-5-5.");
+  // Provider-neutral model identifiers: hosted names (vendor-model-version), Ollama tags (family:size) and namespaced ids (org/model).
+  if (!/^[a-z0-9][a-z0-9._:/-]{2,80}$/i.test(v.model) || /\.\.|\/\//.test(v.model)) throw new HttpError(422, "Enter a model identifier, for example qwen3-coder:30b for a self-hosted model.");
   await c.db.prepare(`UPDATE build_settings SET automation_enabled = ?, run_budget_micro = ?, project_budget_micro = ?, max_runtime_minutes = ?, max_turns = ?, max_concurrent = ?, max_attempts = ?, model = ?, updated_by = ?, updated_at = ? WHERE id = 1`)
     .bind(v.automationEnabled ? 1 : 0, usdToMicro(v.runBudgetUsd), usdToMicro(v.projectBudgetUsd), v.maxRuntimeMinutes, v.maxTurns, v.maxConcurrent, v.maxAttempts, v.model, c.userId, nowIso()).run();
   await audit(c.db, { actorUserId: c.userId, action: "builds.settings_updated", subjectType: "build_settings", subjectId: "1", details: v });
@@ -685,10 +730,12 @@ export async function submitRevision(c: OwnerCtx, projectId: string, instruction
   const at = nowIso();
   try {
     await c.db.prepare(`INSERT INTO build_jobs (id, project_id, organization_id, order_id, kind, revision, dedupe_key, state, state_reason, strategy, package_id, brief_id, instruction, trigger, created_by, max_attempts,
-        agent_session_id, workspace_ref, checkpoint_key, source_repo, source_branch, source_commit, preview_url, created_at, updated_at)
-        VALUES (?,?,?,?, 'revision', ?, ?, 'queued', 'Revision submitted by owner', ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        agent_session_id, workspace_ref, checkpoint_key, source_repo, source_branch, source_commit, created_at, updated_at)
+        VALUES (?,?,?,?, 'revision', ?, ?, 'queued', 'Revision submitted by owner', ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(id, projectId, prev.organization_id, prev.order_id, rev, `${projectId}:r${rev}`, prev.strategy, prev.package_id, brief.id, text, c.userId, s.max_attempts,
-        prev.agent_session_id, prev.workspace_ref, prev.checkpoint_key, prev.source_repo, prev.source_branch, prev.source_commit, prev.preview_url, at, at).run();
+        // The revision starts from the previous source; its preview stays empty until the revision deploys its own
+        // (the previous build keeps its preview URL in its own record).
+        prev.agent_session_id, prev.workspace_ref, prev.checkpoint_key, prev.source_repo, prev.source_branch, prev.source_commit, at, at).run();
   } catch (e) {
     if (/UNIQUE/i.test((e as Error).message)) throw new HttpError(409, "A revision is already queued or running for this project.");
     throw e;
@@ -758,8 +805,11 @@ export async function buildDetail(db: Db, id: string) {
 }
 
 export async function runnerStatus(db: Db, now = new Date()) {
-  const r = await db.prepare(`SELECT runner_id, version, last_seen_at FROM build_runners ORDER BY last_seen_at DESC LIMIT 1`).first<{ runner_id: string; version: string | null; last_seen_at: string }>();
-  return r ? { ...r, online: now.getTime() - Date.parse(r.last_seen_at) < 5 * 60e3 } : null;
+  const r = await db.prepare(`SELECT runner_id, version, capabilities, last_seen_at FROM build_runners ORDER BY last_seen_at DESC LIMIT 1`).first<{ runner_id: string; version: string | null; capabilities: string | null; last_seen_at: string }>();
+  if (!r) return null;
+  let caps: string[] = [];
+  try { caps = runnerCapabilities(JSON.parse(r.capabilities ?? "[]")); } catch { /* unreadable: treated as no capabilities */ }
+  return { runner_id: r.runner_id, version: r.version, last_seen_at: r.last_seen_at, capabilities: caps, zeroCost: caps.includes(ZERO_COST_CAPABILITY), online: now.getTime() - Date.parse(r.last_seen_at) < 5 * 60e3 };
 }
 
 /** Customer-facing summary: own organization only, no internal detail, no percentages. */

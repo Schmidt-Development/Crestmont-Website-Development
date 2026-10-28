@@ -33,6 +33,14 @@ export interface Env {
   AI_PROVIDER?: string;
   /** Shared HMAC secret for the AI Builds runner API (docs/ai-builds/RUNNER-PROTOCOL.md). Unset = execution unavailable. */
   BUILD_RUNNER_SECRET?: string;
+  /**
+   * "true" lets a build runner that does not declare zero token cost (a paid model provider such as the Claude Agent SDK
+   * adapter) claim builds. Unset = only zero-cost (self-hosted) runners get work. Second key next to the runner's own
+   * RUNNER_ALLOW_PAID_PROVIDER: paid AI needs both, plus the budgets in Owner → AI builds.
+   */
+  BUILD_ALLOW_PAID_PROVIDER?: string;
+  /** Comma-separated host suffixes a build preview URL may use (default ".workers.dev"). Other URLs are not recorded. */
+  BUILD_PREVIEW_HOSTS?: string;
   /** HMAC key for POST /api/scheduled/run (external scheduler when native Cron Triggers are unavailable). */
   SCHEDULER_TRIGGER_SECRET?: string;
   /** "on" | "off": per-user limits on authenticated form submissions (default on outside development). ASVS F-15. */

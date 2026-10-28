@@ -20,8 +20,12 @@ async function app(extra: Partial<Env> = {}) {
   return { ...t, owner, oc };
 }
 
+/** What the self-hosted runner (local provider) announces; claims without capabilities get these. */
+const LOCAL_CAPS = ["local-model", "container-sandbox", "zero-token-cost", "git"];
+
 async function runner(t: App, path: string, body: unknown, secret = RUNNER_SECRET) {
-  const raw = JSON.stringify(body);
+  const withCaps = path === "claim" && body && typeof body === "object" && !("capabilities" in body) ? { ...body, capabilities: LOCAL_CAPS } : body;
+  const raw = JSON.stringify(withCaps);
   const ts = Math.floor(Date.now() / 1000);
   const res = await t.client().request("POST", `/api/builds/runner/${path}`, { body: raw, headers: { "content-type": "application/json", "x-crestmont-runner-signature": `t=${ts},v1=${await hmacSha256Hex(secret, `${ts}.${raw}`)}` } });
   return { status: res.status, json: await res.json() as Record<string, any> }; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -120,7 +124,8 @@ async function queuedProject(t: App) {
 }
 
 test("[AIB-002] controlled-fixture pipeline: one durable job → one leased session → checkpoint, requirements, preview → owner review → approval (mock runner, not a real build)", async () => {
-  const t = await app();
+  // This fixture plays the optional PAID adapter (agent-sdk, per-token cost), so the platform's second key is set.
+  const t = await app({ BUILD_ALLOW_PAID_PROVIDER: "true" });
   const { pid, job } = await queuedProject(t);
   const claim = await runner(t, "claim", { runnerId: "runner-a", version: "1.0.0", capabilities: ["agent-sdk"] });
   assert.equal(claim.status, 200);
@@ -371,4 +376,93 @@ test("[AIB-004] protocol v1.1: a runner on another host fetches the job's own ch
   assert.equal(Buffer.from(got.json.archiveBase64, "base64").toString(), "session transcript archive");
   assert.equal((await runner(t, "checkpoint/fetch", { jobId: c2.id, leaseToken: c2.leaseToken, checkpointKey: "builds/other-job/ckpt-1.tgz" })).status, 404, "only the job's own checkpoint");
   assert.equal((await runner(t, "checkpoint/fetch", { jobId: c2.id, leaseToken: c.leaseToken, checkpointKey: ck.json.checkpointKey })).json.error, "lease_lost");
+});
+
+// ── AI Website Builder readiness (2026-10-28): paid-provider second key, preview hosts, revision previews ──
+
+test("[AIB-005] [AIB-007] paid AI needs the platform's second key: a runner without zero token cost gets no build unless BUILD_ALLOW_PAID_PROVIDER=true; claims record the provider kind", async () => {
+  const t = await app();
+  const { job } = await queuedProject(t);
+  for (const caps of [["agent-sdk", "git"], [], ["local-model", "git"]]) {
+    assert.deepEqual((await runner(t, "claim", { runnerId: "paid-1", capabilities: caps })).json, { job: null, reason: "paid_provider_not_authorized" }, `refused: ${caps.join(",") || "(none)"}`);
+  }
+  assert.equal((await B.getJob(t.db, job.id))!.state, "queued", "the refused claim leaves the build queued");
+  assert.equal((await B.getJob(t.db, job.id))!.attempts, 0);
+  const page = await (await t.oc.get("/staff/builds")).text();
+  assert.match(page, /Paid provider refused/);
+  // The self-hosted runner (declares zero token cost) is unaffected, and its claim is audited as zero-cost.
+  const c = (await runner(t, "claim", { runnerId: "local-1" })).json.job;
+  assert.equal(c.id, job.id);
+  const ev = (await t.db.prepare(`SELECT message, data_json FROM build_events WHERE job_id = ? AND message LIKE 'Claimed by runner%'`).bind(job.id).first<{ message: string; data_json: string }>())!;
+  assert.match(ev.message, /zero-cost provider/);
+  assert.equal(JSON.parse(ev.data_json).paidProvider, false);
+  assert.ok(JSON.parse(ev.data_json).capabilities.includes("zero-token-cost"));
+
+  // With the second key the paid runner may claim, and that attempt is recorded as PAID.
+  const t2 = await app({ BUILD_ALLOW_PAID_PROVIDER: "true" });
+  const q2 = await queuedProject(t2);
+  const c2 = (await runner(t2, "claim", { runnerId: "paid-1", capabilities: ["agent-sdk", "git"] })).json.job;
+  assert.equal(c2.id, q2.job.id);
+  const ev2 = (await t2.db.prepare(`SELECT message, data_json FROM build_events WHERE job_id = ? AND message LIKE 'Claimed by runner%'`).bind(q2.job.id).first<{ message: string; data_json: string }>())!;
+  assert.match(ev2.message, /PAID provider/);
+  assert.equal(JSON.parse(ev2.data_json).paidProvider, true);
+  assert.equal(B.paidProviderRefused(["agent-sdk"], false), true);
+  assert.equal(B.paidProviderRefused(["agent-sdk"], true), false);
+  assert.equal(B.paidProviderRefused(["zero-token-cost"], false), false);
+});
+
+test("[AIB-006] preview URLs: only allowed preview hosts are recorded; a revision never shows the previous build's preview and cannot be approved without its own", async () => {
+  assert.equal(B.previewUrlAllowed("https://cm-prv-p1.acct.workers.dev", B.DEFAULT_PREVIEW_HOSTS), true);
+  assert.equal(B.previewUrlAllowed("https://workers.dev", B.DEFAULT_PREVIEW_HOSTS), false, "the bare suffix is not a preview");
+  assert.equal(B.previewUrlAllowed("https://evil-workers.dev", B.DEFAULT_PREVIEW_HOSTS), false);
+  assert.equal(B.previewUrlAllowed("https://workers.dev.evil.example", B.DEFAULT_PREVIEW_HOSTS), false);
+  assert.equal(B.previewUrlAllowed("https://u:p@x.acct.workers.dev", B.DEFAULT_PREVIEW_HOSTS), false, "no credentials in preview URLs");
+  assert.equal(B.previewUrlAllowed("http://x.acct.workers.dev", B.DEFAULT_PREVIEW_HOSTS), false);
+  assert.deepEqual(B.previewHostList(" .pages.dev , preview.crestmont.example ,bad host"), [".pages.dev", "preview.crestmont.example"]);
+  assert.deepEqual(B.previewHostList(""), [".workers.dev"]);
+  assert.equal(B.previewUrlAllowed("https://a.preview.crestmont.example/x", ["preview.crestmont.example"]), true);
+
+  const t = await app();
+  const { pid } = await queuedProject(t);
+  // 1. A preview on a host outside the allow-list is not recorded (an error event says why), so it cannot be approved.
+  const c = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  await runner(t, "complete", { jobId: c.id, leaseToken: c.leaseToken, outcome: "ready_for_review", runCostUsd: 0, previewUrl: "https://customer-domain.example/" });
+  let j = (await B.getJob(t.db, c.id))!;
+  assert.equal(j.state, "ready_for_review");
+  assert.equal(j.preview_url, null);
+  assert.ok(await t.db.prepare(`SELECT 1 FROM build_events WHERE job_id = ? AND kind = 'error' AND message LIKE 'Preview URL not recorded%'`).bind(c.id).first());
+  const refused = await t.oc.post(`/staff/builds/${c.id}/approve`, { notes: "" });
+  assert.match(decodeURIComponent(refused.headers.getSetCookie().join(";")), /no preview to approve/);
+
+  // 2. A revision of an approved build: its record starts without a preview, and a revision that deploys none
+  //    reaches review without the old URL (approval refused); the original build keeps its own preview and history.
+  await t.db.prepare(`UPDATE build_jobs SET preview_url = 'https://first.acct.workers.dev' WHERE id = ?`).bind(c.id).run();
+  assert.equal((await t.oc.post(`/staff/builds/${c.id}/approve`, { notes: "first build ok" })).status, 303);
+  assert.equal((await t.oc.post(`/staff/builds/${c.id}/revision`, { instruction: "Add opening hours to the contact page." })).status, 303);
+  const rev = (await jobOf(t, pid)).find((x) => x.kind === "revision")!;
+  assert.equal(rev.preview_url, null, "the revision does not inherit the previous preview");
+  const rc = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  assert.equal(rc.id, rev.id);
+  await runner(t, "complete", { jobId: rc.id, leaseToken: rc.leaseToken, outcome: "ready_for_review", runCostUsd: 0, previewUrl: null });
+  j = (await B.getJob(t.db, rev.id))!;
+  assert.equal(j.state, "ready_for_review");
+  assert.equal(j.preview_url, null);
+  const refused2 = await t.oc.post(`/staff/builds/${rev.id}/approve`, { notes: "" });
+  assert.match(decodeURIComponent(refused2.headers.getSetCookie().join(";")), /no preview to approve/);
+  const first = (await B.getJob(t.db, c.id))!;
+  assert.equal(first.state, "approved");
+  assert.equal(first.preview_url, "https://first.acct.workers.dev", "the original build and its preview are preserved");
+});
+
+test("[AIB-005] the model setting accepts provider-neutral identifiers (self-hosted tags, namespaced ids) and still rejects junk", async () => {
+  const t = await app();
+  const base = { automationEnabled: true, runBudgetUsd: 25, projectBudgetUsd: 75, maxRuntimeMinutes: 120, maxTurns: 200, maxConcurrent: 2, maxAttempts: 3 };
+  const ctx = { db: t.db, userId: t.owner.id };
+  for (const model of ["qwen3-coder:30b", "claude-sonnet-5-5", "org/model-7b", "gpt-oss:20b"]) {
+    await B.updateBuildSettings(ctx, { ...base, model });
+    assert.equal((await B.getBuildSettings(t.db)).model, model);
+  }
+  for (const model of ["", "a", "../etc", "x y", "model;rm", "org//model"]) {
+    await assert.rejects(B.updateBuildSettings(ctx, { ...base, model }), /model identifier/, model);
+  }
 });
