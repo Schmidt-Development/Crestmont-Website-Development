@@ -107,6 +107,8 @@ export interface AgentPermissionInput {
   referenceDomains: string[];
   fetchReferences: boolean;
   sandbox: "on" | "off";
+  /** Directories the agent must never read or write, e.g. the worker's own Claude Code config dir (OAuth login). */
+  privateDirs?: string[];
 }
 
 export function agentPermissions(p: AgentPermissionInput): { allow: string[]; deny: string[] } {
@@ -121,6 +123,7 @@ export function agentPermissions(p: AgentPermissionInput): { allow: string[]; de
     // Anything outside the workspace: host secrets, other processes' environments, the runner's home.
     `Read(/${p.secretsDir}/**)`, `Edit(/${p.secretsDir}/**)`, "Read(//proc/**)", "Read(//etc/**)", "Read(//root/**)",
     "Read(//var/run/**)", "Read(//run/**)",
+    ...(p.privateDirs ?? []).flatMap((d) => [`Read(/${d}/**)`, `Edit(/${d}/**)`]),
   ];
   return { allow, deny };
 }
@@ -144,7 +147,7 @@ export function claudeSettings(p: AgentPermissionInput): Record<string, unknown>
       allowUnsandboxedCommands: false,
       autoAllowBashIfSandboxed: true,
       network: { allowedDomains: [...p.allowedDomains] },
-      filesystem: { allowWrite: ["~/.npm", "~/.cache"], denyRead: [p.secretsDir] },
+      filesystem: { allowWrite: ["~/.npm", "~/.cache"], denyRead: [p.secretsDir, ...(p.privateDirs ?? [])] },
     };
   }
   return settings;

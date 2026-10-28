@@ -11,6 +11,11 @@ Nothing here turns on paid AI. The installer writes `RUNNER_ALLOW_PAID_PROVIDER=
 and refuses that key in your own `runner.local.env`. The platform separately refuses work to any runner that does
 not declare zero token cost unless `BUILD_ALLOW_PAID_PROVIDER=true` is set on the Worker. Leave both off.
 
+**Founder V3 (Claude-only, 2026-10-28).** The three Claude account workers are set up with
+`Install-CrestmontRunner.ps1 -Provider ClaudeCode`; that mode does not install or need Ollama. Exact steps and the
+provider-authorization decision that must come first: `ORCHESTRATOR.md` §9–11. The local-model steps below stay valid for
+`-Provider Local` (the default), where Ollama is optional infrastructure, not a requirement of the V3 pipeline.
+
 ## A. Decisions to make first
 
 | Decision | Options | Effect |

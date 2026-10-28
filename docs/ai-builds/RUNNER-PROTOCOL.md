@@ -1,4 +1,4 @@
-# AI Builds — runner protocol (v1.1)
+# AI Builds — runner protocol (v1.1; additive revisions to v1.5)
 
 The Crestmont Worker is the **control plane** (eligibility, queue, leases, budgets, state, owner controls, records).
 Coding runs in a separate **build runner** (Node 22 process) that pulls work over HTTPS. By default it uses a
@@ -143,6 +143,24 @@ untrusted user content, both sent exactly as given. It finishes inside the lease
   (Founder decision D5). Bodies, lease and states: `DELIVERY.md` §3. The platform hands a release only to a runner
   declaring `production-deploy`; an expired deployment lease fails the release (never retried automatically).
 - Older platforms answer 404 to these endpoints; the runner then stops polling them until restart.
+
+## Builder workers and orchestration (v1.5, Founder V3, 2026-10-28; additive)
+Details: `ORCHESTRATOR.md`. All endpoints keep the v1 signature and lease rules; older platforms answer 404 and the
+runner falls back to the v1.4 single-repair behavior.
+- `claim` may carry `workerId`, `workerKey` (the Owner-issued enrollment key, stored hashed) and `status`. When any worker
+  is registered, only enrolled workers get work: one active website per worker (the project's assignment), refused with
+  `worker_rate_limited` or for a paused worker. The claimed job includes `spec` (if stored) and `worker`.
+- `POST /api/builds/runner/workers/status`: `{runnerId, workerId, workerKey, status}`; `status` reports version,
+  rate-limit reset (`rateLimitedUntil`) and usage **only with its source**.
+- `POST /api/builds/runner/pipeline/spec`: `{jobId, leaseToken, spec, provider}`; the architect's MasterSpec, validated.
+- `POST /api/builds/runner/cycles/submit`: `{jobId, leaseToken, cycle, evidence, decision, nextPrompt, addresses, prompt, promptSource, …}`; the platform
+  referee returns the decision (evidence overrules "ready"), the next prompt, or `ESCALATED`.
+- `POST /api/builds/runner/integrations/report`, `.../approvals/request`, `.../approvals/list`: the integration
+  checklist (the runner never marks one live) and approvals for non-routine actions.
+- `complete` with outcome `released` may include `notBefore` (ISO time, at most 8 days ahead): the plan's usage limit was
+  reached. The build is requeued without using an attempt, keeps its worker, and resumes from its checkpoint after
+  that time. There is no paid fallback.
+- Capability `subscription-included`: the provider runs on a flat-rate plan sign-in, never on a metered key.
 
 ## Lease expiry
 A lease lasts `lease_seconds` (default 180 s) and is renewed by every successful heartbeat. When it expires, the

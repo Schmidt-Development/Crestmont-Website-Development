@@ -20,8 +20,8 @@ export const AI_BUILDS: Record<string, ImplementationRecord> = {
   "AIB-012": { status: "implemented", owner: "engineering", location: "src/services/build-workers.ts (registry, enrollment keys, dispatcher, release, stale sweep) + /staff/builds/workers; migration 0043; tests/builds-v2.test.ts (simulated orchestrator)" },
   "AIB-013": { status: "implemented", owner: "engineering", location: "src/services/build-pipeline.ts (spec validation, submitCycle evidence gates and loop guards, stage machine) + runner orchestrator loop; tests/builds-v2.test.ts, runner/test/orchestrator.test.ts (mock providers)" },
   "AIB-014": { status: "implemented", owner: "engineering", location: "src/services/build-pipeline.ts (approvals, integration checklist) + /staff/builds/pipeline; tests/builds-v2.test.ts" },
-  "AIB-015": { status: "in_progress", owner: "engineering", location: "runner/src/orchestrator/ (contracts, adapters, cost guard)",
-    missing: "the subscription-backed adapters are implemented against the documented CLIs but untested with real accounts; provider-terms verdicts in docs/ai-builds/ORCHESTRATOR.md decide which are enabled" },
-  "AIB-016": { status: "in_progress", owner: "founder", location: "docs/ai-builds/ORCHESTRATOR.md (proof steps)",
-    missing: "needs the Founder's signed-in Claude and ChatGPT accounts on the build machine; no real provider has been called from this repository" },
+  "AIB-015": { status: "in_progress", owner: "engineering", location: "runner/src/orchestrator/ + runner/src/providers/claude-code-cli.ts (Claude-only V3: architect, builder, separate reviewer, cost guard)",
+    missing: "Claude Code subscription adapter tested only with simulated sessions; live customer use is blocked by provider authorization until the Founder decision in docs/ai-builds/ORCHESTRATOR.md section 9.4" },
+  "AIB-016": { status: "in_progress", owner: "founder", location: "docs/ai-builds/ORCHESTRATOR.md (sections 10-11: Node 1 setup and first acceptance test)",
+    missing: "needs the release-gate decision, the three Claude accounts signed in on Node 1, the reviewed claude-code lockfile and a sandbox check; no real Claude account has been used from this repository" },
 };

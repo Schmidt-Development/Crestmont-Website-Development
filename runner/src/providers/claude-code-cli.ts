@@ -57,7 +57,7 @@ export class ClaudeCodeCliProvider implements AgentProvider {
 
   async prepare(ctx: PrepareContext): Promise<void> {
     this.ws = ctx.ws;
-    writeAgentConfig(ctx.ws, { secretsDir: this.cfg.secretsDir, allowedDomains: this.cfg.allowedDomains, referenceDomains: ctx.referenceDomains, fetchReferences: this.cfg.fetchReferences, sandbox: this.cfg.sandbox });
+    writeAgentConfig(ctx.ws, { secretsDir: this.cfg.secretsDir, allowedDomains: this.cfg.allowedDomains, referenceDomains: ctx.referenceDomains, fetchReferences: this.cfg.fetchReferences, sandbox: this.cfg.sandbox, privateDirs: [this.cfg.claudeCode!.configDir] });
     const env: Record<string, string> = {
       PATH: this.cfg.agentPath, HOME: ctx.ws.home, TMPDIR: ctx.ws.tmp, LANG: "C.UTF-8", CI: "1", NO_COLOR: "1",
       CLAUDE_CONFIG_DIR: this.cfg.claudeCode!.configDir,
