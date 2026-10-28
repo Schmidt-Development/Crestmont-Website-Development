@@ -88,3 +88,20 @@ smoke-checks the contract above. Each repository needs `CLOUDFLARE_API_TOKEN` an
 - Set `PORTFOLIO_DEMO_ORIGINS` for the backend-owned environments when the demos are approved for them. The value
   is a space-separated list of https origins; unset means posters only.
 - Optional: an R2 binding for the preview, if uploaded screenshots should replace the bundled posters.
+
+## Deployment status and blockers (2026-10-28)
+
+| Project | Branch pushed? | Why / what is needed |
+|---|---|---|
+| Glassly Auto Glass | **Yes** (`c1ebeeb`) | Only the demo workflow runs; it stopped at the credentials gate (run 40630447849, nothing deployed). Needs repository secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`: https://github.com/Schmidt-Development/glassly/settings/secrets/actions — then re-run the workflow. |
+| Lansing Car Rentals, LCR Mentorship | No | The repository's Cloudflare Git integrations build feature branches: "Workers Builds: lansing-car-rentals-site-staging" (the shared staging Worker) and Cloudflare Pages branch previews (also Netlify deploy previews). A push could upload a build to shared staging, so it cannot be confirmed safe. |
+| Better Lansing Mechanics | No | "Workers Builds: better-lansing-mechanics-staging" ran for a `claude/*` branch on 2026-10-27, so a push could build onto shared staging. |
+
+To unblock the held branches, exclude `crestmont/*` from non-production branch builds in Cloudflare for:
+
+- Workers & Pages → lansing-car-rentals-site-staging → Settings → Build → Branch control
+- the lansing-car-rentals Pages project
+- better-lansing-mechanics-staging
+- Netlify site astonishing-sawine-f80069 → Branches and deploy contexts
+
+Alternatively, confirm those settings already exclude these branches. Then add the same two secrets to each repository and push the preserved branches (bundles and patches are kept with the handoff). A Cloudflare API token for the demos should be limited to **Workers Scripts: Edit** and **D1: Edit** on the account. It needs no zone, DNS, Pages or route permissions.
