@@ -595,10 +595,10 @@ test("[AUTH-001] password hashes carry algorithm and cost; a hash with older par
 test("[AUTH-002] [AUTH-005] wrong second-factor codes are capped per rolling 24 hours (successes never count); re-enrolment clears the cap", async () => {
   const { MFA_DAILY_FAILURES } = await import("../src/services/auth.ts");
   const app = await createTestApp();
-  const s = await createStaff(app.db, "sales", "cap@crestmont.test");
+  const s = await enrolledStaff(app, "sales", "cap@crestmont.test");
   const c = app.client();
   await c.post("/login", { email: s.email, password: TEST_PASSWORD });
-  const fail = (at: string) => app.db.prepare(`INSERT INTO security_events (kind, user_id, detail, created_at) VALUES ('mfa_failed', ?, 'login', ?)`).bind(s.id, at).run();
+  const fail = (at: string) => app.db.prepare(`INSERT INTO security_events (kind, user_id, detail, created_at) VALUES ('mfa_failed', ?, 'totp; login', ?)`).bind(s.id, at).run();
   const old = new Date(Date.now() - 25 * 3_600_000).toISOString();
   for (let i = 0; i < 50; i++) await fail(old); // more than a day ago: ignored
   for (let i = 0; i < MFA_DAILY_FAILURES - 1; i++) await fail(new Date().toISOString());
@@ -612,13 +612,20 @@ test("[AUTH-002] [AUTH-005] wrong second-factor codes are capped per rolling 24 
   await nextWindow(app.db, s.id);
   const blocked = await c2.post("/mfa", { code: await totpCode(s.secret) });
   assert.equal(blocked.status, 401, "at the cap even a valid code is refused (whether it was valid is not revealed)");
-  assert.match(await blocked.text(), /Too many incorrect codes in the last 24 hours/);
+  assert.match(await blocked.text(), /Too many incorrect authenticator codes in the last 24 hours/);
   assert.equal((await one<{ n: number }>(app.db, `SELECT COUNT(*) n FROM security_events WHERE user_id = ? AND kind = 'mfa_locked'`, s.id))?.n, 1, "recorded for the operator");
   assert.notEqual(loc(await c2.get("/staff")), "", "still not signed in");
+  // A valid recovery code still works at the cap (someone holding the password cannot lock the person out).
+  const c3 = app.client();
+  await c3.post("/login", { email: s.email, password: TEST_PASSWORD });
+  await nextWindow(app.db, s.id);
+  assert.equal(loc(await c3.post("/mfa", { code: s.codes[0] })), "/staff", "recovery code accepted at the cap");
   // Step-up and recovery-code regeneration share the cap.
   await nextWindow(app.db, s.id);
   const su = await c.post("/mfa/step-up?next=%2Fstaff", { code: await totpCode(s.secret) });
-  assert.match(await su.text(), /Too many incorrect codes in the last 24 hours/);
+  assert.match(await su.text(), /Too many incorrect authenticator codes in the last 24 hours/);
+  // A replayed code (double submit) is not a wrong code and never counts.
+  assert.equal((await one<{ n: number }>(app.db, `SELECT COUNT(*) n FROM security_events WHERE user_id = ? AND kind = 'mfa_failed' AND detail LIKE 'totp%' AND created_at > ?`, s.id, new Date(Date.now() - 3_600_000).toISOString()))!.n, MFA_DAILY_FAILURES);
   // An administrator MFA reset + re-enrolment (user.mfa_enabled) starts a fresh count.
   await app.db.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, created_at) VALUES (?, 'user', 'user.mfa_enabled', 'user', ?, ?)`).bind(s.id, s.id, new Date(Date.now() + 1000).toISOString()).run();
   await new Promise((r) => setTimeout(r, 1100));

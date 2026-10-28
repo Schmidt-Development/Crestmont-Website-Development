@@ -108,8 +108,15 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
 
   const totpStorage = await deployKeyStorage(ops, o.mfaKey);
   const sealKey = totpStorage === "encrypted" ? o.mfaKey : undefined;
-  const users = await ops.query<{ id: string; email: string; mfa_enabled: number; has_totp: number; roles: string | null }>(
-    `SELECT u.id, u.email, u.mfa_enabled, (u.totp_secret IS NOT NULL) AS has_totp, (SELECT group_concat(m.role_id) FROM memberships m WHERE m.user_id = u.id) AS roles
+  const now = new Date().toISOString();
+  const dayAgo = new Date(Date.now() - 24 * 3_600_000).toISOString();
+  // totp_secret is read only to compare it with the secret this run would issue (never printed or written elsewhere);
+  // enrolled_at = the last time the person re-enrolled an authenticator themselves (POST /mfa/setup).
+  const users = await ops.query<{ id: string; email: string; mfa_enabled: number; totp_secret: string | null; enrolled_at: string | null; mfa_fails: number; roles: string | null }>(
+    `SELECT u.id, u.email, u.mfa_enabled, u.totp_secret,
+            (SELECT MAX(a.created_at) FROM audit_logs a WHERE a.subject_type = 'user' AND a.subject_id = u.id AND a.action = 'user.mfa_enabled') AS enrolled_at,
+            (SELECT COUNT(*) FROM security_events e WHERE e.user_id = u.id AND e.kind = 'mfa_failed' AND e.created_at > ${q(dayAgo)}) AS mfa_fails,
+            (SELECT group_concat(m.role_id) FROM memberships m WHERE m.user_id = u.id) AS roles
        FROM users u WHERE u.email LIKE '%@${DEMO_DOMAIN}' AND u.password_hash IS NOT NULL ORDER BY u.email`);
   const accounts: DemoAccount[] = [];
   const sql: string[] = [];
@@ -118,17 +125,31 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
     const password = await derivePassword(o.rootKey, salt, `password:${u.email}`);
     const totp = u.mfa_enabled ? await deriveTotp(o.rootKey, salt, u.email) : null;
     accounts.push({ role, email: u.email, password, totp, note: NOTES[role] ?? "Customer portal (sample organization)" });
-    // The TOTP secret is written only when it changes (first issue or a rotation). Re-writing it on every deploy would
-    // replace a secret that the Worker has since encrypted at rest (MFA_ENCRYPTION_KEY) with plaintext again.
+    // The TOTP secret is written only when the stored one is not (or may not be) the one this run issues. Re-writing it
+    // on every deploy would replace a secret the Worker has since encrypted at rest (MFA_ENCRYPTION_KEY) with plaintext.
     let totpSql = "totp_secret";
     if (totp) {
       const fp = await totpDerivationMarker(o.rootKey, salt, u.id, u.email);
-      if (rotated || !u.has_totp || meta[`totp_fp:${u.id}`] !== fp) {
-        // With the key available to the deploy, the secret is written already encrypted; otherwise in plaintext, and the
-        // Worker encrypts it at that account's next successful sign-in.
+      const stored = u.totp_secret;
+      const encrypted = !!stored && stored.startsWith("v1:");
+      const marker = meta[`totp_fp:${u.id}`], markedAt = meta[`totp_at:${u.id}`] ?? "";
+      let write: boolean;
+      if (rotated || !stored) write = true;                                     // new or cleared (e.g. an MFA reset)
+      else if (u.enrolled_at && u.enrolled_at > markedAt) write = true;         // someone replaced the authenticator: heal
+      else if (!encrypted) write = stored !== totp;                             // plaintext: compare directly
+      else if (sealKey) write = await openWithKey(sealKey, u.id, stored).then((p) => p !== totp, () => true); // proven key: compare
+      else if (marker) write = marker !== fp;                                   // derivation inputs changed (root key replaced)
+      else write = false; // encrypted, no marker yet (first run of this logic): earlier deploys always wrote the derived secret, so adopt it
+      if (write) {
+        // With the proven key the secret is written already encrypted; otherwise in plaintext, and the Worker
+        // encrypts it at that account's next successful sign-in.
         totpSql = q(sealKey ? await sealWithKey(sealKey, u.id, totp) : totp);
-        sql.push(`INSERT OR REPLACE INTO _staging_access (key, value) VALUES (${q(`totp_fp:${u.id}`)}, ${q(fp)});`);
       }
+      if (write || marker !== fp) sql.push(`INSERT OR REPLACE INTO _staging_access (key, value) VALUES (${q(`totp_fp:${u.id}`)}, ${q(fp)}), (${q(`totp_at:${u.id}`)}, ${q(now)});`);
+      // Re-provisioning (or repeated wrong codes from reviewers sharing the demo credentials) restarts the daily
+      // wrong-code count, so a shared demo account cannot stay locked across deploys.
+      if (write || u.mfa_fails > 0) sql.push(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, organization_id, details_json, ip, created_at)
+        VALUES (NULL, 'system', 'user.mfa_provisioned', 'user', ${q(u.id)}, NULL, ${q(JSON.stringify({ source: "staging-access", secretWritten: write }))}, NULL, ${q(now)});`);
     }
     sql.push(`UPDATE users SET password_hash = ${q(await hashPassword(password))}, totp_secret = ${totpSql}, totp_last_step = NULL, failed_logins = 0, locked_until = NULL WHERE id = ${q(u.id)};`);
   }

@@ -168,3 +168,50 @@ test("[INFRA-002] [SEC-004] staging access writes a demo 2FA secret only when it
   for (const m of meta) { assert.match(m.value, /^[0-9a-f]{64}$/); assert.notEqual(m.value, ownerOf(r7).totp); }
   assert.ok(!accessReadme(BASE, r7, "2026-10-28T00:00:00.000Z").includes(mfaKey));
 });
+
+test("[INFRA-002] [SEC-004] staging access: adopts secrets the Worker already encrypted (no plaintext rewrite on the first run), heals a replaced demo authenticator, and clears a reviewer-caused 2FA lock", async () => {
+  const s = await stagingDb();
+  const mfaKey = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+  const { sealWithKey, openWithKey } = await import("../src/lib/totp-secrets.ts");
+  const stored = (id: string) => (s.db.raw.prepare(`SELECT totp_secret AS t FROM users WHERE id = ?`).get(id) as { t: string | null }).t;
+  const idOf = (email: string) => (s.db.raw.prepare(`SELECT id FROM users WHERE email = ?`).get(email) as { id: string }).id;
+
+  // A database from before this change: credentials applied, then the Worker encrypted the Owner's secret, and no
+  // change markers exist yet.
+  const r1 = await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false });
+  const owner = ownerOf(r1), id = idOf(owner.email);
+  s.db.raw.prepare(`DELETE FROM _staging_access WHERE key LIKE 'totp_%'`).run();
+  const sealed = await sealWithKey(mfaKey, id, owner.totp);
+  s.db.raw.prepare(`UPDATE users SET totp_secret = ? WHERE id = ?`).run(sealed, id);
+  await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false });
+  assert.equal(stored(id), sealed, "first run of the new logic adopts the encrypted secret instead of writing plaintext");
+
+  // A reviewer replaces the demo Owner's authenticator (POST /mfa/setup writes user.mfa_enabled). The next deploy
+  // restores the published setup key, so demo-accounts.md stays true.
+  const other = await sealWithKey(mfaKey, id, "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP");
+  s.db.raw.prepare(`UPDATE users SET totp_secret = ? WHERE id = ?`).run(other, id);
+  s.db.raw.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, created_at) VALUES (?, 'user', 'user.mfa_enabled', 'user', ?, ?)`).run(id, id, new Date(Date.now() + 1000).toISOString());
+  await new Promise((r) => setTimeout(r, 1100));
+  const r2 = await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false });
+  assert.equal(stored(id), owner.totp, "healed (in plaintext without a proven deploy key; the Worker re-encrypts at sign-in)");
+  assert.equal(ownerOf(r2).totp, owner.totp);
+  // With a proven deploy key a replaced secret is detected by decrypting it, and healed encrypted.
+  s.db.raw.prepare(`UPDATE users SET totp_secret = ? WHERE id = ?`).run(sealed, id); // something encrypted → key provable
+  const someoneElse = s.db.raw.prepare(`SELECT id FROM users WHERE email LIKE '%@crestmont-preview.test' AND id != ? AND totp_secret IS NOT NULL LIMIT 1`).get(id) as { id: string };
+  s.db.raw.prepare(`UPDATE users SET totp_secret = ? WHERE id = ?`).run(await sealWithKey(mfaKey, someoneElse.id, "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"), someoneElse.id);
+  const r3 = await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false, mfaKey });
+  assert.equal(r3.totpStorage, "encrypted");
+  assert.equal(stored(id), sealed, "an encrypted secret that already matches is left byte-for-byte");
+  const healed = stored(someoneElse.id)!;
+  assert.match(healed, /^v1:/);
+  assert.equal(await openWithKey(mfaKey, someoneElse.id, healed), r3.accounts.find((a) => idOf(a.email) === someoneElse.id)!.totp, "mismatching secret healed, encrypted");
+
+  // Reviewers sharing the demo password exhaust the daily wrong-code cap; the next deploy restarts the count.
+  for (let i = 0; i < 30; i++) s.db.raw.prepare(`INSERT INTO security_events (kind, user_id, detail, created_at) VALUES ('mfa_failed', ?, 'totp; login', ?)`).run(id, new Date().toISOString());
+  await new Promise((r) => setTimeout(r, 5));
+  const r4 = await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false, mfaKey });
+  assert.ok(s.db.raw.prepare(`SELECT 1 FROM audit_logs WHERE action = 'user.mfa_provisioned' AND subject_id = ?`).get(id), "provisioning recorded");
+  s.db.raw.prepare("UPDATE users SET totp_last_step = NULL").run();
+  await new Promise((r) => setTimeout(r, 5));
+  await verifyStagingAccess({ base: BASE, previewPassword: r4.previewPassword, owner: ownerOf(r4) }, s.fetchFor({ ...s.env(), MFA_ENCRYPTION_KEY: mfaKey }));
+});
