@@ -502,6 +502,52 @@
       const d = $(C, `[data-cst-detail="${k}"]`);
       v.say(`${$(d, ".cst__h").textContent}. ${$(d, "p").textContent} ${$(d, ".cst__connects").textContent}`);
     };
+    // Placement from complete node bounds. Each node's box — label, selected-state ring (6px) and focus ring (3px offset +
+    // 2px outline) — must sit inside the stage, clear of the core and of every other node. The design positions
+    // (--x/--y, % of the stage) are honoured where they fit; otherwise each centre moves inward just enough. If boxes
+    // would still collide (narrow stages), the diagram rearranges: core on top, capabilities in a grid below.
+    // Connectors are redrawn from the final centres, so they stay attached whatever the width.
+    const stage = $(C, ".cst__stage"), core = $(C, ".cst__core"), svg = $(C, ".cst__lines");
+    const RING = 10, GAP = 8;
+    const want = nodes.map((n) => ({ x: parseFloat(n.style.getPropertyValue("--x")) / 100, y: parseFloat(n.style.getPropertyValue("--y")) / 100 }));
+    const hit = (a, b) => a.l < b.r + GAP && b.l < a.r + GAP && a.t < b.b + GAP && b.t < a.b + GAP;
+    const box = (cx, cy, w, h, pad) => ({ l: cx - w / 2 - pad, r: cx + w / 2 + pad, t: cy - h / 2 - pad, b: cy + h / 2 + pad });
+    const clamp = (v, lo, hi) => (lo > hi ? (lo + hi) / 2 : Math.min(hi, Math.max(lo, v)));
+    const layout = () => {
+      stage.classList.remove("cst__stage--stack"); stage.style.height = "";
+      const W = stage.clientWidth; if (!W) return;
+      const size = nodes.map((n) => ({ w: n.offsetWidth, h: n.offsetHeight })), cw = core.offsetWidth, ch = core.offsetHeight;
+      let H = stage.clientHeight;
+      let pts = want.map((p, i) => ({ x: clamp(p.x * W, size[i].w / 2 + RING, W - size[i].w / 2 - RING), y: clamp(p.y * H, size[i].h / 2 + RING, H - size[i].h / 2 - RING) }));
+      let c = { x: W / 2, y: H * 0.51 };
+      const boxes = pts.map((p, i) => box(p.x, p.y, size[i].w, size[i].h, RING / 2));
+      const coreBox = box(c.x, c.y, cw, ch, 0);
+      const collide = boxes.some((a, i) => hit(a, coreBox) || boxes.some((b, j) => j > i && hit(a, b)));
+      if (collide) {
+        // Stacked arrangement: core at the top, two columns (one if a label cannot fit half the width).
+        stage.classList.add("cst__stage--stack");
+        const maxW = Math.max(...size.map((z) => z.w)), cols = maxW + 2 * RING <= (W - RING) / 2 ? 2 : 1;
+        const rowH = Math.max(...size.map((z) => z.h)) + 2 * RING + 10, top = RING + ch + 34;
+        c = { x: W / 2, y: RING + ch / 2 };
+        pts = nodes.map((n, i) => { const col = cols === 2 ? i % 2 : 0, row = cols === 2 ? Math.floor(i / 2) : i;
+          const cx = cols === 2 ? (col ? W * 0.75 : W * 0.25) : W / 2;
+          return { x: clamp(cx, size[i].w / 2 + RING, W - size[i].w / 2 - RING), y: top + row * rowH + rowH / 2 }; });
+        H = top + Math.ceil(nodes.length / cols) * rowH + RING;
+        // The border sits outside the positioning box: size the stage so its inner height is exactly H.
+        stage.style.height = `${Math.ceil(H + stage.offsetHeight - stage.clientHeight)}px`;
+        H = stage.clientHeight;
+      }
+      core.style.left = `${c.x}px`; core.style.top = `${c.y}px`;
+      nodes.forEach((n, i) => { n.style.left = `${pts[i].x}px`; n.style.top = `${pts[i].y}px`; });
+      const X = (v) => (v / W * 100).toFixed(2), Y = (v) => (v / H * 100).toFixed(2), at = new Map(nodes.map((n, i) => [n.dataset.cst, pts[i]]));
+      $$(svg, "[data-spoke]").forEach((l) => { const p = at.get(l.dataset.spoke); l.setAttribute("x1", X(c.x)); l.setAttribute("y1", Y(c.y)); l.setAttribute("x2", X(p.x)); l.setAttribute("y2", Y(p.y)); });
+      $$(svg, "[data-link]").forEach((l) => { const [a, b] = l.dataset.link.split("|").map((k) => at.get(k)); l.setAttribute("x1", X(a.x)); l.setAttribute("y1", Y(a.y)); l.setAttribute("x2", X(b.x)); l.setAttribute("y2", Y(b.y)); });
+      C.dataset.layout = collide ? "stack" : "ring";
+    };
+    layout();
+    if ("ResizeObserver" in window) { let w = 0; new ResizeObserver(() => { if (stage.clientWidth !== w) { w = stage.clientWidth; layout(); } }).observe(stage); }
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(layout);
+
     C.addEventListener("click", (e) => { const b = e.target.closest("[data-cst]"); if (b) pick(b, false); });
     C.addEventListener("keydown", (e) => {
       const b = e.target.closest("[data-cst]"); if (!b) return;

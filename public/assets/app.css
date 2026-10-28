@@ -1769,7 +1769,7 @@ html.has-intro .cb { animation: show-now 1ms linear 2.4s backwards; }
 /* constellation */
 .cst { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: var(--s-4); align-items: center; }
 @media (max-width: 900px) { .cst { grid-template-columns: minmax(0, 1fr); } }
-.cst__stage { position: relative; aspect-ratio: 1.25 / 1; min-height: 300px; border-radius: var(--r-3); background: radial-gradient(60% 60% at 50% 50%, rgba(215,181,111,.10), transparent 70%), var(--ink-1); border: 1px solid var(--line); overflow: hidden; }
+.cst__stage { position: relative; aspect-ratio: 1.25 / 1; min-height: 300px; border-radius: var(--r-3); background: radial-gradient(60% 60% at 50% 50%, rgba(215,181,111,.10), transparent 70%), var(--ink-1); border: 1px solid var(--line); overflow: visible; }
 .cst__lines { position: absolute; inset: 0; width: 100%; height: 100%; }
 .cst__spoke, .cst__link { stroke: var(--line-2); stroke-width: .25; vector-effect: non-scaling-stroke; transition: stroke var(--t-med), stroke-width var(--t-med); }
 .cst__spoke { stroke-dasharray: 2 2; }
@@ -1975,3 +1975,11 @@ html.has-intro .cb { animation: show-now 1ms linear 2.4s backwards; }
 /* touch targets and phone fit (375px sweep) */
 .rc__scn-btn.sv__opt--sm { min-height: 38px; }
 @media (max-width: 560px) { .cst__stage { aspect-ratio: 1 / 1.08; min-height: 0; } }
+/* Measured placement (services.js): the stacked arrangement sets its own height. */
+.cst__stage--stack { aspect-ratio: auto; min-height: 0; }
+/* Without JavaScript the capabilities are a plain, fully readable list (no positioned nodes to overflow). */
+.sv:not([data-js]) .cst__stage { aspect-ratio: auto; min-height: 0; padding: var(--s-4); }
+.sv:not([data-js]) .cst__lines { display: none; }
+.sv:not([data-js]) .cst__core { position: static; transform: none; margin: 0 auto var(--s-3); width: max-content; }
+.sv:not([data-js]) .cst__nodes { position: static; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.sv:not([data-js]) .cst__node { position: static; transform: none; }
