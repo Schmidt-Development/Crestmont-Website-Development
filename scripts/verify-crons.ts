@@ -5,7 +5,7 @@
 //   node --no-warnings scripts/verify-crons.ts --env staging [--dry-run]
 //   env: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
 // Staging only: it refuses any other environment, so production triggers are never changed by automation.
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 /** Crons declared for one environment in wrangler.toml (inline `triggers = { crons = [...] }` form). */
@@ -31,8 +31,25 @@ export function registeredCrons(body: unknown): string[] {
   return (r?.schedules ?? []).map((s) => s.cron).filter((c): c is string => typeof c === "string");
 }
 
+/** Signed-evidence document for the readiness API: feeds the public `cron-triggers:<env>` health signal. */
+export function cronEvidence(o: { env: string; commit: string; runId: string; startedAt: string; ok: boolean; detail: string }) {
+  return {
+    runId: o.runId, source: "ci", environment: o.env, commitSha: o.commit, startedAt: o.startedAt, finishedAt: new Date().toISOString(),
+    results: [{ requirementId: "INFRA-006", testName: `cron triggers registered on ${o.env} as declared in wrangler.toml`, outcome: o.ok ? "passed" : "failed", ...(o.ok ? {} : { message: o.detail.slice(0, 1000) }) }],
+  };
+}
+
 async function main() {
   const args = process.argv.slice(2);
+  const arg = (k: string) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : undefined; };
+  const startedAt = new Date().toISOString();
+  const out = arg("--evidence");
+  const writeEvidence = (ok: boolean, detail: string) => { if (out) writeFileSync(out, JSON.stringify(cronEvidence({ env: "staging", commit: arg("--commit") ?? "0".repeat(40), runId: arg("--run-id") ?? `local-cron-${Date.now()}`, startedAt, ok, detail }))); };
+  try { await verify(args); writeEvidence(true, ""); }
+  catch (e) { writeEvidence(false, (e as Error).message); throw e; }
+}
+
+async function verify(args: string[]) {
   const env = args[args.indexOf("--env") + 1];
   const dry = args.includes("--dry-run");
   if (env !== "staging") throw new Error("verify-crons only manages staging; production triggers change only through an approved production deploy");

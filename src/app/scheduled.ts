@@ -79,6 +79,15 @@ async function record(env: Env, job: string, at: string, error: string | null) {
 export async function scheduled(controller: { cron: string }, env: Env): Promise<void> {
   const jobs = SCHEDULE[controller.cron];
   if (!jobs) { console.error(JSON.stringify({ level: "error", message: `No jobs for cron ${controller.cron}` })); return; }
-  const results = await runJobs(env, jobs);
-  console.log(JSON.stringify({ level: "info", cron: controller.cron, results }));
+  const at = nowIso();
+  try {
+    const results = await runJobs(env, jobs);
+    await record(env, "_invocation", at, null);
+    console.log(JSON.stringify({ level: "info", cron: controller.cron, results }));
+  } catch (e) {
+    // Setup failed before any job could record itself (e.g. building the context): leave a visible trace.
+    await record(env, "_invocation", at, `${controller.cron}: ${(e as Error).message}`).catch(() => {});
+    console.error(JSON.stringify({ level: "error", cron: controller.cron, message: (e as Error).message }));
+    throw e;
+  }
 }

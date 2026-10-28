@@ -21,7 +21,7 @@ test("[TEST-004] [INFRA-005] staging rollback rehearsal: picks the serving and p
   assert.throws(() => pickRollback(JSON.stringify([{ versions: [{ version_id: B, percentage: 50 }, { version_id: C, percentage: 50 }] }]), list), /exactly one version/);
   assert.throws(() => pickRollback(status, JSON.stringify([{ id: C, created_on: "2026-10-27T10:00:00Z" }])), /no earlier/);
   const ev = parseEvidence(rehearsalEvidence({ commit: "b".repeat(40), runId: "gh-9-1-rollback", startedAt: new Date().toISOString(), rollback: true, rollforward: false }));
-  assert.deepEqual(ev.results.map((r) => [r.requirementId, r.outcome]), [["TEST-004", "failed"], ["INFRA-005", "failed"]]);
+  assert.deepEqual(ev.results.map((r) => [r.requirementId, r.outcome]), [["TEST-004", "failed"], ["INFRA-005", "failed"], ["INFRA-005", "passed"], ["INFRA-005", "failed"]]);
   const wf = readFileSync(".github/workflows/staging-rollback-rehearsal.yml", "utf8");
   assert.match(wf, /workflow_dispatch:/);
   assert.doesNotMatch(wf, /schedule:|--env production|crestmont-platform-production/);
