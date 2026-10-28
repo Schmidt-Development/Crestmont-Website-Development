@@ -26,6 +26,8 @@ async function cf<T>(path: string): Promise<{ ok: true; result: T } | { ok: fals
 let unsafe = false, unknown = false;
 const out: string[] = [];
 const log = (s: string) => { console.log(s); out.push(s); };
+/** Findings are also emitted as annotations so they are readable without downloading the job log (settings only). */
+const note = (title: string, lines: string[]) => console.log(`::notice title=${title.replace(/[,:\n]/g, " ")}::${lines.join(" | ").replace(/\n/g, " ").slice(0, 3800)}`);
 
 // ── Workers Builds ──────────────────────────────────────────────────────────────────────────────────────────────────
 interface Script { id: string; tag?: string }
@@ -44,11 +46,14 @@ else {
       connected++;
       log(`Worker ${s.id} · trigger "${tr.trigger_name}" ← ${tr.repo_connection?.provider_account_name}/${repo}`);
       log(`    branches include ${JSON.stringify(tr.branch_includes)} exclude ${JSON.stringify(tr.branch_excludes)} · paths include ${JSON.stringify(tr.path_includes)} exclude ${JSON.stringify(tr.path_excludes)} · root ${tr.root_directory ?? "/"} · deploy: ${tr.deploy_command ?? "(default)"}`);
+      const verdicts: string[] = [];
       for (const d of DEMO_BRANCHES.filter((x) => x.repo === repo)) {
         const b = branchSelected(d.branch, tr.branch_includes, tr.branch_excludes), p = b && pathsTrigger(d.files, tr.path_includes, tr.path_excludes);
         if (p) unsafe = true;
-        log(`    ${p ? "BUILD  " : "skip   "} ${d.branch}: ${!b ? "branch not selected" : p ? "branch selected and changed paths match — a push WOULD start this build" : "branch selected but every changed path is excluded"}`);
+        const v = `${p ? "BUILD" : "skip"} ${d.branch}: ${!b ? "branch not selected" : p ? "branch selected and changed paths match — a push WOULD start this build" : "branch selected but every changed path is excluded"}`;
+        verdicts.push(v); log(`    ${v}`);
       }
+      note(`Worker ${s.id} trigger ${tr.trigger_name}`, [`repo ${repo}`, `branches +${JSON.stringify(tr.branch_includes)} -${JSON.stringify(tr.branch_excludes)}`, `paths +${JSON.stringify(tr.path_includes)} -${JSON.stringify(tr.path_excludes)}`, `deploy ${tr.deploy_command ?? "(default)"}`, ...verdicts]);
     }
   }
   if (readFail) { unknown = true; log(`UNKNOWN  ${readFail} Worker build configuration(s) could not be read. The token needs Workers CI: Read (Account › Workers CI › Read).`); }
@@ -64,19 +69,23 @@ else {
   for (const p of linked) {
     const c = p.source!.config!;
     log(`Pages ${p.name} ← ${c.owner}/${c.repo_name} · production ${c.production_branch} · builds ${c.deployments_enabled === false ? "DISABLED" : "enabled"} · previews ${c.preview_deployment_setting} include ${JSON.stringify(c.preview_branch_includes ?? [])} exclude ${JSON.stringify(c.preview_branch_excludes ?? [])} · paths include ${JSON.stringify(c.path_includes ?? [])} exclude ${JSON.stringify(c.path_excludes ?? [])}`);
+    const verdicts: string[] = [];
     for (const d of DEMO_BRANCHES.filter((x) => x.repo === c.repo_name)) {
       const previewOn = c.deployments_enabled !== false && c.preview_deployment_setting !== "none";
       const b = previewOn && (c.preview_deployment_setting === "all" ? !(c.preview_branch_excludes ?? []).some((x) => matches(x, d.branch)) : branchSelected(d.branch, c.preview_branch_includes, c.preview_branch_excludes));
       const pth = b && pathsTrigger(d.files, c.path_includes, c.path_excludes);
       if (pth) unsafe = true;
-      log(`    ${pth ? "BUILD  " : "skip   "} ${d.branch}: ${!previewOn ? "preview builds are off" : !b ? "branch excluded from previews" : pth ? "a push WOULD create a Pages preview deployment" : "every changed path is excluded"}`);
+      const v = `${pth ? "BUILD" : "skip"} ${d.branch}: ${!previewOn ? "preview builds are off" : !b ? "branch excluded from previews" : pth ? "a push WOULD create a Pages preview deployment" : "every changed path is excluded"}`;
+      verdicts.push(v); log(`    ${v}`);
     }
+    note(`Pages ${p.name}`, [`repo ${c.repo_name}`, `production ${c.production_branch}`, `builds ${c.deployments_enabled === false ? "disabled" : "enabled"}`, `previews ${c.preview_deployment_setting} +${JSON.stringify(c.preview_branch_includes ?? [])} -${JSON.stringify(c.preview_branch_excludes ?? [])}`, `paths +${JSON.stringify(c.path_includes ?? [])} -${JSON.stringify(c.path_excludes ?? [])}`, ...verdicts]);
   }
   log(`Pages: ${linked.length} project(s) connected to the project repositories.`);
 }
 
 const verdict = unsafe ? "NOT ISOLATED — do not push the demo branches" : unknown ? "UNVERIFIED — some settings could not be read" : "ISOLATED — no Cloudflare Git build would start for any demo branch";
 log(`\nVerdict: ${verdict}`);
+note("Verdict", [verdict, ...out.filter((l) => l.startsWith("UNKNOWN") || /connected to the project repositories/.test(l))]);
 log("Not covered by this audit: Netlify (no Netlify token here) — Netlify builds deploy previews for pull requests; the demo branches never open one.");
 if (process.env.GITHUB_STEP_SUMMARY) await import("node:fs").then((fs) => fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY!, `## Portfolio demo isolation audit (read-only)\n\n\`\`\`\n${out.join("\n")}\n\`\`\`\n`));
 process.exit(unsafe || unknown ? 2 : 0);
