@@ -89,30 +89,22 @@ smoke-checks the contract above. Each repository needs `CLOUDFLARE_API_TOKEN` an
   is a space-separated list of https origins; unset means posters only.
 - Optional: an R2 binding for the preview, if uploaded screenshots should replace the bundled posters.
 
-## Deployment status and blockers (updated 2026-10-28, evening)
+## Deployment status (2026-10-28, 19:50 ET) — all four demos live and connected
 
-Isolation audit (read-only, `portfolio-demo-isolation-audit.yml`, run 40746359640 with `CLOUDFLARE_AUDIT_TOKEN`):
-every Pages project (paginated, `per_page=10`) and all three Workers Builds triggers were read.
+Isolation audit run 40783606013: ISOLATED for every repository (Workers Builds triggers `main`, `production`,
+`claude/session-2026-10-21`; Pages previews off; Netlify branch deploys only `claude/session-2026-10-21`, PR previews off).
 
-| Project | Cloudflare | Other hosts | Branch | Deploy |
-|---|---|---|---|---|
-| Glassly Auto Glass | ISOLATED (no trigger or Pages project) | Vercel: no status on any non-main push since 2026-09-03 (two branch pushes this week) | pushed `55cbfd1` | waits for `PORTFOLIO_DEMO_CLOUDFLARE_API_TOKEN` |
-| Better Lansing Mechanics | ISOLATED (staging trigger `main` only, production trigger `production` only) | none | pushed `29dfa7b` (no Cloudflare build started) | waits for `PORTFOLIO_DEMO_CLOUDFLARE_API_TOKEN` |
-| Lansing Car Rentals, LCR Mentorship | ISOLATED (staging trigger selects only `claude/session-2026-10-21`; Pages previews off) | Netlify `astonishing-sawine-f80069`: settings unread (needs `NETLIFY_AUTH_TOKEN`) | held locally (`964831d`, `31cb794`) | after the Netlify check, then the demo token |
+| Demo | URL | Demo workflow run |
+|---|---|---|
+| Lansing Car Rentals | https://lansing-car-rentals-portfolio-demo.partners-df4.workers.dev/ | lansing-car-rentals 40785029945 |
+| LCR Mentorship | https://lcr-mentorship-portfolio-demo.partners-df4.workers.dev/ | lansing-car-rentals 40785033696 |
+| Glassly Auto Glass | https://glassly-portfolio-demo.partners-df4.workers.dev/ | glassly 40785026514 |
+| Better Lansing Mechanics | https://better-lansing-mechanics-portfolio-demo.partners-df4.workers.dev/ | better-lansing-mechanics 40785531768 |
 
-Credentials:
+Each demo workflow passed its scope guard, isolation, framing and blocked-route smoke checks. Frontend preview run
+40787390976 (commit 98ba751) verified each demo from the runner, connected all four, and passed 256/256 hosted
+browser checks, including every demo's scroll containment, navigation, reset, device controls and simulated transaction.
 
-- `PORTFOLIO_DEMO_CLOUDFLARE_API_TOKEN` — a dedicated token (Account › Workers Scripts › Edit, Account › D1 › Edit; no zone
-  permissions) available to glassly, better-lansing-mechanics and lansing-car-rentals (an organization secret shared
-  with the three is simplest). The demo workflows deliberately do **not** use a repository's `CLOUDFLARE_API_TOKEN`
-  (better-lansing-mechanics' is its production backup token); each refuses a token that is inactive or can see zones.
-  The account ID falls back to `CLOUDFLARE_ACCOUNT_ID` or is inferred by Wrangler.
-- `NETLIFY_AUTH_TOKEN` (Crestmont repository, read-only use) — lets the audit read the Netlify site's branch-deploy
-  settings. Until then lansing-car-rentals stays UNVERIFIED and its branches are not pushed.
-
-After a demo deploys, the next frontend-preview deploy verifies it from the runner (`/__demo/info` and
-`frame-ancestors`) before marking it ready; the hosted browser stage then drives it inside the explorer (scroll
-containment by wheel and touch, navigation, reset, device controls, simulated transaction).
-
-Demo kit fix (all four branches): framed, `scrollIntoView`, `focus` and in-page links scroll only the demo's own
-document. Before, Glassly's in-page quote link also scrolled the Crestmont page around the frame.
+Demo token scope guard: listing zones is not evidence of zone permissions — the token (Account › Workers Scripts ›
+Edit, Account › D1 › Edit) sees zone metadata, but every zone surface (settings, DNS, Workers routes, rulesets, page
+rules, SSL) answers 403. The guard fails on any readable zone surface, more than one account, or unusable Workers/D1.
