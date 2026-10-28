@@ -4,12 +4,19 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Db, DbStatement } from "../src/lib/db.ts";
 
+export const D1_MAX_BOUND_PARAMETERS = 100;
+
 class Stmt implements DbStatement {
   private values: unknown[] = [];
   private readonly db: DatabaseSync;
   readonly sql: string;
   constructor(db: DatabaseSync, sql: string) { this.db = db; this.sql = sql; }
-  bind(...values: unknown[]): DbStatement { const s = new Stmt(this.db, this.sql); s.values = values.map((v) => (v === undefined ? null : typeof v === "boolean" ? Number(v) : v)); return s; }
+  bind(...values: unknown[]): DbStatement {
+    // Cloudflare D1 rejects a query with more than 100 bound parameters (developers.cloudflare.com/d1/platform/limits);
+    // SQLite allows 32766, so without this check such a query passes every local test and fails only when deployed.
+    if (values.length > D1_MAX_BOUND_PARAMETERS) throw new Error(`D1 limit: ${values.length} bound parameters (maximum ${D1_MAX_BOUND_PARAMETERS}) in: ${this.sql.replace(/\s+/g, " ").slice(0, 120)}`);
+    const s = new Stmt(this.db, this.sql); s.values = values.map((v) => (v === undefined ? null : typeof v === "boolean" ? Number(v) : v)); return s;
+  }
   async all<T>() { return { results: this.db.prepare(this.sql).all(...(this.values as never[])) as T[] }; }
   async first<T>() { return (this.db.prepare(this.sql).get(...(this.values as never[])) as T) ?? null; }
   async run() { return this.runSync(); }
