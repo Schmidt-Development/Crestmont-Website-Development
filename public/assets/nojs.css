@@ -14,3 +14,9 @@
   .sidebar { position: static; transform: none; visibility: visible; width: auto; height: auto; box-shadow: none; border-right: 0; border-bottom: 1px solid var(--line); }
   .topbar .nav-toggle { display: none !important; }
 }
+/* Portfolio explorer without JavaScript: an accessible list of projects with screenshots and links. */
+.pfx__row { display: block; }
+.pfx__arrow, .pfx__bar, .pfx__chrome .pfx__flag { display: none; }
+.pfx__window { overflow: visible; border-radius: 0; }
+.pfx__track { display: grid; gap: var(--s-8); transform: none !important; }
+.pfx__screen { height: auto; aspect-ratio: 16 / 10; }

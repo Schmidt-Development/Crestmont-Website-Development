@@ -21,6 +21,7 @@ import { newId, nowIso } from "../lib/db.ts";
 import * as cms from "../services/cms.ts";
 import { lineDiff } from "../services/voice.ts";
 import * as pf from "../services/portfolio.ts";
+import { portfolioExplorer } from "../ui/portfolio-explorer.ts";
 import { SERVICES, SERVICE_GROUPS, serviceBySlug, servicePath, PRICING_NOTE, type ServiceDef } from "../content/services.ts";
 import { CMS_KEYS, cmsKeyDef, parseItems, paragraphs, type CmsKeyDef } from "../content/registry.ts";
 import { renderMarkdown, markdownIssues } from "../ui/markdown.ts";
@@ -100,9 +101,10 @@ function portfolioCard(p: pf.PortfolioProject): SafeHtml {
 
 function shot(p: pf.PortfolioProject, kind: "desktop" | "mobile", viewer = false): SafeHtml {
   const id = kind === "desktop" ? p.desktop_screenshot_file_id : p.mobile_screenshot_file_id;
+  const asset = kind === "desktop" ? p.poster_desktop_asset : p.poster_mobile_asset;
   const alt = `${kind === "desktop" ? "Desktop" : "Mobile"} screenshot of ${p.name} (${p.live_url})`;
-  if (!id) return html`<div class="shot shot--pending${kind === "mobile" ? " shot--mobile" : ""}" role="img" aria-label="${alt} — capture pending"><span>Verified screenshot capture pending</span></div>`;
-  const src = `/portfolio-media/${id}`;
+  if (!id && !asset) return html`<div class="shot shot--pending${kind === "mobile" ? " shot--mobile" : ""}" role="img" aria-label="${alt} — capture pending"><span>Verified screenshot capture pending</span></div>`;
+  const src = id ? `/portfolio-media/${id}` : asset!;
   const img = html`<img src="${src}" alt="${alt}" loading="lazy" decoding="async">`;
   return viewer ? html`<a class="shot${kind === "mobile" ? " shot--mobile" : ""}" href="${src}" data-viewer data-alt="${alt}">${img}<span class="visually-hidden">Open full-screen</span></a>` : html`<div class="shot">${img}</div>`;
 }
@@ -363,7 +365,7 @@ export function register(r: Router): void {
 <h2 class="statement__text scroll-words" id="principles-title">Published prices. Counted revisions. Nothing goes live without your approval.</h2>
 <ul class="statement__labels">${whyItems.slice(0, 4).map((w) => html`<li class="statement__label">${w.title}</li>`)}</ul></div></div></section>
 ${section("Our services", "What we build", html`${serviceBento(featured, c)}<p class="section__more"><a href="/services">All services</a></p>`, { id: "services", lede: c.get("services.overview").lede })}
-${section("Latest work", c.get("portfolio.intro").heading === "Portfolio" ? "Real websites" : c.get("portfolio.intro").heading, projects.length ? html`${showcase(projects)}<p class="section__more"><a href="/portfolio">View the portfolio</a></p>`
+${section("Latest work", c.get("portfolio.intro").heading === "Portfolio" ? "Real websites" : c.get("portfolio.intro").heading, projects.length ? html`${portfolioExplorer(ctx, projects, { variant: "home" })}<p class="section__more"><a href="/portfolio">View the portfolio</a></p>`
       : html`<div class="showcase__pending on-dark" data-reveal><div><h3>Portfolio in preparation</h3><p>Portfolio projects are published here once genuine screenshots of each live site have been captured and verified. We do not use mock-ups or stock imagery.</p></div>${ctaLink("About our portfolio", "/portfolio", "primary")}</div>`, { id: "portfolio" })}
 ${section("Our approach", pp.heading, html`${processStages(steps)}<p class="section__more"><a href="/process">The full process</a></p>`, { id: "process", lede: pp.lede })}
 ${section("How it comes together", "Anatomy of a build", anatomy(), { id: "anatomy", lede: "A website is a stack of decisions. Choose a layer to see what changes, and which stage of our process is responsible for it." })}
@@ -445,7 +447,8 @@ ${featureRows.map((feat) => html`<tr><th scope="row">${feat}</th>${PKG_ORDER.map
     const intro = c.get("portfolio.intro");
     const projects = await pf.listPublished(ctx.db);
     return html`${pageHero("Portfolio", intro.heading, intro.lede)}
-<section class="section section--flush"><div class="container">${projects.length ? html`<div class="grid grid-3">${projects.map(portfolioCard)}</div>`
+<section class="section section--flush"><div class="container">${projects.length ? html`${portfolioExplorer(ctx, projects, { variant: "portfolio" })}
+<div class="pf-index"><h2 class="pf-index__title">Case studies</h2><ul class="index-list">${projects.map((x) => html`<li><a href="/portfolio/${x.slug}"><span class="index-list__name">${x.name}</span><span class="index-list__summary">${x.industry}</span><span class="index-list__arrow" aria-hidden="true">→</span></a></li>`)}</ul></div>`
       : emptyState("Portfolio projects are being prepared", "Projects appear here once genuine desktop and mobile screenshots of each live website have been captured and verified, and the project's relationship to Crestmont is documented. We never substitute mock-ups or stock imagery.", html`<a class="btn btn--secondary" href="/contact">Ask us about our work</a>`)}</div></section>`;
   }));
 
@@ -455,6 +458,7 @@ ${featureRows.map((feat) => html`<tr><th scope="row">${feat}</th>${PKG_ORDER.map
     const tms = await pf.publishedTestimonials(ctx.db, proj.id);
     return htmlResponse(ctx, publicLayout(ctx, { title: `${proj.name} — case study`, description: proj.description.slice(0, 160) }, html`
 ${pageHero(proj.industry, proj.name, undefined, html`<a class="btn btn--primary" href="${safeUrl(proj.live_url)}" rel="noopener" target="_blank">Visit live website</a>${linkButton("All projects", "/portfolio", "ghost")}`)}
+<section class="section section--flush"><div class="container">${portfolioExplorer(ctx, [proj], { variant: "case", headingLevel: 2 })}</div></section>
 <section class="section section--flush"><div class="container case-shots"><figure>${shot(proj, "desktop", true)}<figcaption class="faint">Desktop${proj.screenshot_captured_at ? ` · captured ${formatDate(proj.screenshot_captured_at)}` : ""}</figcaption></figure>
 <figure>${shot(proj, "mobile", true)}<figcaption class="faint">Mobile</figcaption></figure></div></section>
 <section class="section"><div class="container grid grid-2"><div class="prose"><h2>About the project</h2>${paragraphs(proj.description).map((x) => html`<p>${x}</p>`)}
@@ -817,6 +821,11 @@ function registerPortfolioAdmin(r: Router) {
   });
   action("verify-link", async (ctx, id, f) => { await pf.recordLinkVerification(ctx.db, ctx.actor!, id, str(f, "verified_on"), ctx.ip); return "Link verification recorded."; });
   action("relationship", async (ctx, id, f) => { await pf.documentRelationship(ctx.db, ctx.actor!, id, str(f, "relationship"), str(f, "evidence"), ctx.ip); return "Relationship documentation recorded."; });
+  action("demo", async (ctx, id, f) => {
+    await pf.setDemo(ctx.db, ctx.actor!, id, { demo_url: str(f, "demo_url"), demo_status: str(f, "demo_status"), demo_revision: str(f, "demo_revision"), verified_on: str(f, "demo_verified_on"),
+      poster_desktop_asset: str(f, "poster_desktop_asset"), poster_mobile_asset: str(f, "poster_mobile_asset") }, pf.approvedDemoOrigins(ctx.env.PORTFOLIO_DEMO_ORIGINS, { allowLocal: pf.allowLocalDemos(ctx.env.ENVIRONMENT) }), ctx.ip);
+    return "Interactive demo settings saved.";
+  });
   action("publish", async (ctx, id) => { await pf.setPublished(ctx.db, ctx.actor!, id, true, ctx.ip); return "Project published."; });
   action("unpublish", async (ctx, id) => { await pf.setPublished(ctx.db, ctx.actor!, id, false, ctx.ip); return "Project unpublished."; });
   action("move", async (ctx, id, f) => { await pf.move(ctx.db, ctx.actor!, id, str(f, "dir") === "up" ? "up" : "down", ctx.ip); return "Order updated."; });
@@ -831,10 +840,30 @@ ${table(all, [
   { header: "#", cell: (p) => p.position, numeric: true },
   { header: "Project", cell: (p) => html`<a href="/staff/portfolio/${p.id}">${p.name}</a><br><span class="faint">${p.live_url}</span>` },
   { header: "Status", cell: (p) => p.published ? badge("published") : badge("draft", "Unpublished") },
+  { header: "Interactive demo", cell: (p) => { const d = pf.demoState(p, pf.approvedDemoOrigins(ctx.env.PORTFOLIO_DEMO_ORIGINS, { allowLocal: pf.allowLocalDemos(ctx.env.ENVIRONMENT) })); return d.kind === "embed" ? badge("ok", "Embedded") : d.kind === "unavailable" ? badge("blocked", "Unavailable") : badge("draft", "None"); } },
   { header: "Ready to publish", cell: (p) => { const b = pf.publishBlockers(p); return b.length ? html`${badge("blocked", `${b.length} blocker${b.length > 1 ? "s" : ""}`)}` : badge("ok", "Ready"); } },
   { header: "Order", cell: (p) => html`${actionForm(ctx, `/staff/portfolio/${p.id}/move`, "Up", { hidden: { dir: "up" } })} ${actionForm(ctx, `/staff/portfolio/${p.id}/move`, "Down", { hidden: { dir: "down" } })}` },
 ], { empty: emptyState("No portfolio projects", "Add a project below."), caption: "Portfolio projects" })}
 <h2 class="h4">Add a project</h2>${projectForm(ctx, "/staff/portfolio", { relationship: "Relationship documentation pending", ...v }, "Add project", errors)}`, status);
+}
+
+/** Interactive demo settings (PORTFOLIO.md): isolated demo deployment, its verification and bundled posters. */
+function demoAdmin(ctx: AppContext, p: pf.PortfolioProject): SafeHtml {
+  const approved = pf.approvedDemoOrigins(ctx.env.PORTFOLIO_DEMO_ORIGINS, { allowLocal: pf.allowLocalDemos(ctx.env.ENVIRONMENT) });
+  const st = pf.demoState(p, approved);
+  return html`<div class="card"><h3 class="card__title">Interactive demo</h3>
+<p class="muted">The portfolio explorer embeds an isolated demonstration deployment of this website — never the production site. Only origins on the approved list for this environment can be embedded.</p>
+${dl([["Explorer shows", st.kind === "embed" ? "The interactive demo" : st.kind === "unavailable" ? `Screenshot — ${st.reason}` : "Screenshot only"],
+  ["Approved demo origins", approved.size ? [...approved].join(", ") : "None configured (PORTFOLIO_DEMO_ORIGINS)"],
+  ["Last verified", p.demo_verified_at ? formatDate(p.demo_verified_at) : "Not verified"], ["Source revision", p.demo_revision ?? "—"]])}
+<form method="post" action="/staff/portfolio/${p.id}/demo">${csrf(ctx)}
+${input({ name: "demo_url", label: "Demo link (isolated demonstration deployment)", type: "url", value: p.demo_url, hint: "Must be on an approved demo origin and must not be the production website." })}
+${select({ name: "demo_status", label: "Demo status", value: p.demo_status, options: [{ value: "none", label: "None — show the screenshot" }, { value: "ready", label: "Ready — embed the demo" }, { value: "unavailable", label: "Unavailable — screenshot with an unavailable notice" }] })}
+${input({ name: "demo_verified_on", label: "Date you verified the demo (isolation and navigation)", type: "date" })}
+${input({ name: "demo_revision", label: "Source revision", value: p.demo_revision, maxlength: 120, hint: "repository@commit the demo was built from" })}
+${input({ name: "poster_desktop_asset", label: "Bundled desktop poster", value: p.poster_desktop_asset, hint: "Optional genuine screenshot shipped with the site: /assets/portfolio/<name>.webp" })}
+${input({ name: "poster_mobile_asset", label: "Bundled mobile poster", value: p.poster_mobile_asset })}
+<div class="form-actions">${button("Save demo settings", { variant: "secondary", size: "sm" })}</div></form></div>`;
 }
 
 async function portfolioEditor(ctx: AppContext, id: string, opts: { errors?: string[]; values?: pf.ProjectInput; status?: number } = {}): Promise<Response> {
@@ -863,6 +892,7 @@ ${blockers.length ? html`<div class="alert alert--warn" role="status"><strong>Pu
 <div class="card"><h3 class="card__title">Relationship documentation</h3>${dl([["Current", p.relationship], ["Documented", p.relationship_documented_at ? formatDate(p.relationship_documented_at) : "Not yet documented"], ["Evidence", p.relationship_evidence]])}
 <form method="post" action="/staff/portfolio/${p.id}/relationship">${csrf(ctx)}${input({ name: "relationship", label: "Relationship statement shown publicly", value: /pending/i.test(p.relationship) ? "" : p.relationship, required: true, maxlength: 300 })}
 ${textarea({ name: "evidence", label: "Documentation (where it is kept, who authorised it, date)", rows: 3, required: true, maxlength: 2000 })}<div class="form-actions">${button("Record documentation", { variant: "secondary", size: "sm" })}</div></form></div></div>
+${demoAdmin(ctx, p)}
 <h2 class="h4">Project details</h2>${projectForm(ctx, `/staff/portfolio/${p.id}`, v, "Save details")}
 <h2 class="h4">Verified testimonials</h2><p class="muted">Add only testimonials you have confirmed with the author, including permission to publish. They are stored separately and are unpublished until you publish them.</p>
 ${table(tms, [

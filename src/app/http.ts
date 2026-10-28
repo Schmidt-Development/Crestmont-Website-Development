@@ -25,9 +25,15 @@ export const PAGE_CSP = [
   "object-src 'none'",
 ].join("; ");
 
-export function securityHeaders(kind: "page" | "api" = "page"): Record<string, string> {
+/** PAGE_CSP with additional frame-src origins (portfolio demos). Only bare https origins are accepted. */
+export function pageCsp(extraFrameSrc: string[] = []): string {
+  const extra = extraFrameSrc.filter((o) => /^https:\/\/[a-z0-9.-]+(:\d{1,5})?$/.test(o) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d{1,5})?$/.test(o));
+  return extra.length ? PAGE_CSP.replace("frame-src https://challenges.cloudflare.com", `frame-src https://challenges.cloudflare.com ${[...new Set(extra)].join(" ")}`) : PAGE_CSP;
+}
+
+export function securityHeaders(kind: "page" | "api" = "page", frameSrc: string[] = []): Record<string, string> {
   return {
-    "content-security-policy": kind === "page" ? PAGE_CSP : "default-src 'none'; frame-ancestors 'none'",
+    "content-security-policy": kind === "page" ? pageCsp(frameSrc) : "default-src 'none'; frame-ancestors 'none'",
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY",
     "referrer-policy": "strict-origin-when-cross-origin",
@@ -67,7 +73,7 @@ function withCookies(ctx: AppContext, headers: Headers): void {
 }
 
 export function htmlResponse(ctx: AppContext, body: SafeHtml, status = 200): Response {
-  const headers = new Headers({ "content-type": "text/html; charset=utf-8", "cache-control": ctx.user ? "no-store" : "no-cache", ...securityHeaders("page") });
+  const headers = new Headers({ "content-type": "text/html; charset=utf-8", "cache-control": ctx.user ? "no-store" : "no-cache", ...securityHeaders("page", ctx.frameSrc) });
   withCookies(ctx, headers);
   return new Response("<!doctype html>" + body.value, { status, headers });
 }

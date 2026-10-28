@@ -1042,3 +1042,75 @@ a.shot { display: block; cursor: zoom-in; }
 }
 /* Phones: the full-bleed black contact band runs straight into the black footer. */
 @media (max-width: 900px) { main:has(> #contact:last-child) + .site-footer { margin-top: 0; } main:has(> #contact:last-child) + .site-footer .container { border-top: 1px solid var(--line); padding-top: var(--s-7); } }
+
+/* ── Portfolio explorer (docs/frontend/PORTFOLIO.md) ─────────────────────────────────────────────────────────
+   One active project in a large embedded viewport; previous/next arrows sit OUTSIDE the viewport. Base styles
+   are the enhanced carousel; nojs.css turns the same markup into an accessible project list. */
+.pfx { --pfx-h: clamp(420px, 64vh, 720px); position: relative; margin-top: var(--s-2); }
+.pfx__row { display: grid; grid-template-columns: 56px minmax(0, 1fr) 56px; gap: var(--s-4); align-items: center; }
+.pfx--single .pfx__row { grid-template-columns: minmax(0, 1fr); }
+.pfx__arrow { width: 56px; height: 56px; border-radius: 14px; display: grid; place-items: center; background: var(--ink-2); color: var(--white); border: 1px solid var(--line-gold); cursor: pointer; transition: background-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out), transform var(--t-fast) var(--ease-out); }
+.pfx__arrow:hover { background: var(--gold-2); color: var(--on-gold); border-color: var(--gold-2); }
+.pfx__arrow:active { transform: scale(.96); }
+.pfx__window { overflow: hidden; border-radius: var(--r-4); min-width: 0; }
+.pfx__track { display: flex; list-style: none; margin: 0; padding: 0; transition: transform 560ms var(--ease-in-out); will-change: transform; }
+.pfx__slide { flex: 0 0 100%; min-width: 0; }
+.pfx__viewport { border: 1px solid var(--line-2); border-radius: var(--r-4); background: #050505; overflow: hidden; box-shadow: var(--shadow-1); }
+.pfx__chrome { display: flex; align-items: center; gap: var(--s-3); height: 42px; padding: 0 var(--s-4); background: var(--ink-2); border-bottom: 1px solid var(--line); }
+.pfx__dots { display: inline-flex; gap: 6px; } .pfx__dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-4); }
+.pfx__url { flex: 1; min-width: 0; height: 26px; display: flex; align-items: center; padding: 0 12px; border-radius: 999px; background: var(--ink-0); color: var(--text-3); font: 500 var(--fs-xs)/1 var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pfx__flag { font: 600 .68rem/1 var(--font-body); letter-spacing: .08em; text-transform: uppercase; color: var(--gold-1); border: 1px solid var(--line-gold); border-radius: 999px; padding: 5px 9px; }
+.pfx__screen { position: relative; height: var(--pfx-h); background: var(--ink-1); overflow: hidden; overscroll-behavior: contain; }
+.pfx__poster { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: top center; transition: opacity var(--t-med) var(--ease-out); }
+.pfx__poster--missing { display: grid; place-items: center; color: var(--text-3); font-size: var(--fs-sm); }
+.pfx__poster--mobile { display: none; }
+.pfx__frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; opacity: 0; transition: opacity var(--t-med) var(--ease-out); }
+.pfx__slide.is-ready .pfx__frame { opacity: 1; }
+.pfx__slide.is-ready .pfx__poster { opacity: 0; }
+/* Phone-width viewport: the same outer size (no layout shift); the site renders at 390 CSS px. */
+.pfx[data-mode="mobile"] .pfx__screen { background: radial-gradient(60% 80% at 50% 40%, #151515, #070707); }
+.pfx[data-mode="mobile"] .pfx__frame, .pfx[data-mode="mobile"] .pfx__poster--mobile { left: 50%; width: 390px; max-width: calc(100% - 32px); transform: translateX(-50%); top: 16px; bottom: 16px; height: calc(100% - 32px); border-radius: 28px; box-shadow: 0 0 0 8px #1c1c1c, 0 0 0 9px var(--line-2), 0 30px 60px -20px rgba(0,0,0,.9); }
+.pfx[data-mode="mobile"] .pfx__poster--mobile { display: block; object-fit: cover; }
+.pfx[data-mode="mobile"] .pfx__poster--desktop { opacity: 0; }
+.pfx__status { position: absolute; left: var(--s-4); bottom: var(--s-4); max-width: min(520px, calc(100% - 2 * var(--s-4))); padding: var(--s-2) var(--s-3); border-radius: var(--r-2); background: rgba(8,8,8,.92); border: 1px solid var(--line-2); color: var(--text); font-size: var(--fs-sm); line-height: 1.45; }
+.pfx__status:empty { display: none; }
+.pfx__status a { color: var(--gold-1); }
+.pfx__meta { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--s-4) var(--s-7); align-items: end; padding: var(--s-5) var(--s-1) 0; }
+.pfx__count { margin: 0 0 var(--s-2); color: var(--text-3); font-size: var(--fs-sm); }
+.pfx__count-n { color: var(--gold-1); font-weight: 600; }
+.pfx__name { font: 500 var(--fs-3xl)/1.05 var(--font-display); letter-spacing: -.035em; margin: 0 0 var(--s-2); }
+.pfx__desc { margin: 0; color: var(--text-2); max-width: 62ch; }
+.pfx__links { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); align-items: center; justify-content: flex-end; }
+.pfx__label { flex-basis: 100%; text-align: right; font-size: var(--fs-xs); font-weight: 600; letter-spacing: .04em; color: var(--gold-1); }
+.pfx__link { display: inline-flex; align-items: center; gap: 6px; color: var(--white); font-size: var(--fs-sm); font-weight: 500; text-decoration: none; border-bottom: 1px solid var(--line-control); padding-bottom: 2px; }
+.pfx__link:hover { color: var(--gold-1); border-bottom-color: var(--gold-1); }
+.pfx__bar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--s-3) var(--s-5); margin-top: var(--s-5); padding-top: var(--s-4); border-top: 1px solid var(--line); }
+.pfx__pages { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.pfx__page, .pfx__tool { min-height: 38px; padding: 0 var(--s-3); border-radius: 999px; border: 1px solid var(--line-2); background: var(--ink-2); color: var(--text-2); font: 500 var(--fs-sm)/1 var(--font-body); cursor: pointer; transition: background-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out); }
+.pfx__page:hover, .pfx__tool:hover { color: var(--white); border-color: var(--line-control); }
+.pfx__page[aria-current="true"], .pfx__tool[aria-pressed="true"] { background: var(--gold-2); border-color: var(--gold-2); color: var(--on-gold); }
+.pfx__tools { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: center; }
+.pfx__seg { display: inline-flex; gap: 4px; padding: 3px; border-radius: 999px; border: 1px solid var(--line); background: var(--ink-1); }
+.pfx__seg .pfx__tool { border-color: transparent; min-height: 32px; background: transparent; }
+.pfx__seg .pfx__tool[aria-pressed="true"] { background: var(--gold-2); color: var(--on-gold); }
+.pfx__hint { margin: var(--s-3) 0 0; color: var(--text-3); font-size: var(--fs-xs); }
+.pfx--single .pfx__pages, .pfx--case .pfx__links .pfx__link--case { display: none; }
+/* Expanded view: the same element becomes a fixed overlay, so the mounted demo is never reloaded. */
+.pfx--expanded { position: fixed; inset: 0; z-index: 250; margin: 0; padding: var(--s-4) clamp(var(--s-3), 3vw, var(--s-7)); background: rgba(5,5,5,.97); display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; --pfx-h: calc(100dvh - 250px); }
+.pfx--expanded .pfx__hint { display: none; }
+html.pfx-lock { overflow: hidden; }
+.pf-index { margin-top: var(--s-8); }
+.pf-index__title { font: 500 var(--fs-2xl)/1.1 var(--font-display); letter-spacing: -.03em; margin-bottom: var(--s-4); }
+@media (max-width: 760px) {
+  .pfx { --pfx-h: clamp(440px, 72vh, 640px); }
+  .pfx__row { grid-template-columns: 1fr 1fr; grid-template-areas: "win win" "prev next"; gap: var(--s-3); }
+  .pfx--single .pfx__row { grid-template-columns: 1fr; grid-template-areas: "win"; }
+  .pfx__window { grid-area: win; }
+  .pfx__arrow { width: 100%; height: 52px; }
+  .pfx__arrow--prev { grid-area: prev; } .pfx__arrow--next { grid-area: next; }
+  .pfx__seg { display: none; }
+  .pfx__meta { grid-template-columns: 1fr; }
+  .pfx__links { justify-content: flex-start; } .pfx__label { text-align: left; }
+  .pfx__name { font-size: var(--fs-2xl); }
+  .pfx--expanded { --pfx-h: calc(100dvh - 300px); }
+}
