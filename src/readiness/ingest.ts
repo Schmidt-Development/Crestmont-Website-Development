@@ -116,7 +116,7 @@ export async function ingestEvidence(db: Db, rawBody: string): Promise<IngestRes
     }
     // Optional platform services (FILE-001): bound → healthy; skipped (service not enabled) → "unavailable", never failing.
     const storage = doc.results.find((r) => r.requirementId === "FILE-001" && r.testName.startsWith("file storage (R2)"));
-    if (storage) await recordIngestion(db, `file-storage:${doc.environment}`, attemptAt, storage.outcome === "failed" ? (storage.message ?? "failed") : null, storage.outcome === "passed");
+    if (storage) await recordIngestion(db, `file-storage:${doc.environment}`, attemptAt, storage.outcome === "passed" ? null : (storage.message ?? "not bound"), storage.outcome === "passed");
     return { status: "ingested", runId: doc.runId, accepted: accepted.length, unknownRequirements: unknown };
   } catch (err) {
     await recordIngestion(db, doc.source, attemptAt, (err as Error).message);

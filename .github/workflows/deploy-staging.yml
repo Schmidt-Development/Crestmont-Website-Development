@@ -98,10 +98,12 @@ jobs:
       - name: File storage (R2) if available, otherwise disable uploads honestly
         id: r2
         run: |
-          if $WRANGLER r2 bucket list 2>/dev/null | grep -q "crestmont-files-staging" || $WRANGLER r2 bucket create crestmont-files-staging 2>/dev/null; then
+          if $WRANGLER r2 bucket list > r2-list.log 2> r2.err && grep -q "crestmont-files-staging" r2-list.log || $WRANGLER r2 bucket create crestmont-files-staging >> r2.err 2>&1; then
             echo "R2 bucket ready"; echo "state=bound" >> "$GITHUB_OUTPUT"
           else
             echo "state=unavailable" >> "$GITHUB_OUTPUT"
+            # Why (for the public file-storage:staging feed): Cloudflare's error text, account id elided. Bucket names only.
+            echo "reason=$(sed -e 's/\x1b\[[0-9;]*m//g' r2.err | grep -iE 'error|code|not enabled|permission|auth' | head -2 | tr '\n' ' ' | sed -E 's#/accounts/[^/]+/#/accounts/…/#' | cut -c1-240) buckets visible: $(grep -oE 'name:\s*\S+' r2-list.log | sed 's/name:\s*//' | tr '\n' ' ' | cut -c1-120)" >> "$GITHUB_OUTPUT"
             echo "::warning title=File uploads disabled on staging::R2 is not enabled on this Cloudflare account. Pages that store files will say storage is not configured. Enable R2 in the Cloudflare dashboard to turn uploads on."
             node -e 'const fs=require("fs");let t=fs.readFileSync("wrangler.toml","utf8");t=t.replace(/^r2_buckets = \[\{ binding = "FILES", bucket_name = "crestmont-files-staging" \}\]\n/m,"");fs.writeFileSync("wrangler.toml",t)'
           fi
@@ -151,8 +153,9 @@ jobs:
         env:
           READINESS_URL: ${{ steps.deploy.outputs.url }}
           R2_STATE: ${{ steps.r2.outputs.state }}
+          R2_REASON: ${{ steps.r2.outputs.reason }}   # via env, never interpolated into the script
         run: |
-          node --no-warnings scripts/storage-evidence.ts --state "$R2_STATE" --commit "$GITHUB_SHA" --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-r2" --out evidence/r2.json
+          node --no-warnings scripts/storage-evidence.ts --state "$R2_STATE" --reason "$R2_REASON" --commit "$GITHUB_SHA" --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-r2" --out evidence/r2.json
           node --no-warnings scripts/post-evidence.ts evidence/r2.json
 
       - name: Verify cron triggers (and re-register them if missing)

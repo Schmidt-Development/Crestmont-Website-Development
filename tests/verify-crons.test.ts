@@ -62,8 +62,13 @@ test("[FILE-001] the staging deploy publishes whether R2 file storage is bound: 
   await ingestEvidence(t.db, JSON.stringify(storageEvidence({ state: "unavailable", commit: "a".repeat(40), runId: "r2-1" })));
   assert.equal(await feed(), "unavailable");
   assert.equal((await t.client().get("/api/readiness/health")).status, 200, "a disabled optional service does not degrade health");
+  const report = ((await (await t.client().get("/api/readiness/health?view=report")).json()) as { feeds: { source: string; reason?: string }[] }).feeds.find((f) => f.source === "file-storage:staging");
+  assert.match(report?.reason ?? "", /not usable by the deploy token/, "the public reason says why storage is off");
   await ingestEvidence(t.db, JSON.stringify(storageEvidence({ state: "bound", commit: "a".repeat(40), runId: "r2-2" })));
   assert.equal(await feed(), "healthy");
+  await ingestEvidence(t.db, JSON.stringify(storageEvidence({ state: "unavailable", commit: "a".repeat(40), runId: "r2-3", reason: "Authentication error [code: 10000]" })));
+  assert.equal(await feed(), "unavailable", "losing the binding after it worked shows unavailable again");
+  assert.equal((await t.client().get("/api/readiness/health")).status, 200);
   assert.match(readFileSync(".github/workflows/deploy-staging.yml", "utf8"), /storage-evidence\.ts --state "\$R2_STATE"/);
 });
 

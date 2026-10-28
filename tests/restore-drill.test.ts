@@ -6,7 +6,7 @@ import { parseEvidence } from "../src/readiness/ingest.ts";
 
 test("[TEST-004] staging restore drill: counts every table, detects missing/extra tables and row drift, and emits valid signed-evidence documents", () => {
   const tables = rowsOf(`[{"results":[{"name":"users"},{"name":"projects"},{"name":"sqlite_sequence"},{"name":"d1_migrations"},{"name":"_cf_KV"},{"name":"bad name;"}],"success":true}]`).map((r) => String(r.name));
-  assert.equal(countSql(tables), `SELECT 'projects' AS t, COUNT(*) AS n FROM "projects" UNION ALL SELECT 'users' AS t, COUNT(*) AS n FROM "users"`);
+  assert.equal(countSql(tables), `SELECT (SELECT COUNT(*) FROM "projects") AS "projects", (SELECT COUNT(*) FROM "users") AS "users"`);
   const src = [{ t: "users", n: 8 }, { t: "projects", n: 2 }];
   const ok = compareCounts(src, [{ t: "projects", n: 2 }, { t: "users", n: 8 }]);
   assert.deepEqual(ok, { passed: true, tables: 2, rows: 10, problems: [] });
@@ -26,15 +26,15 @@ test("[TEST-004] staging restore drill: counts every table, detects missing/extr
   assert.match(wf, /rm -rf drill/);
 });
 
-test("[TEST-004] [INFRA-006] restore drill counts tables in small batches (a single ~95-table UNION ALL was rejected on staging) and compares across batch outputs", async () => {
+test("[TEST-004] [INFRA-006] restore drill counts tables without compound SELECTs (D1 error 7500 on staging), in batches, and compares across batch outputs", async () => {
   const { countQueries, rowsOfAll } = await import("../scripts/restore-drill.ts");
   const tables = Array.from({ length: 40 }, (_, i) => `t${String(i).padStart(2, "0")}`).concat(["sqlite_sequence", "_cf_KV", "d1_migrations"]);
   const qs = countQueries(tables, 15);
   assert.equal(qs.length, 3);
-  assert.ok(qs.every((q) => (q.match(/SELECT '/g) ?? []).length <= 15));
-  assert.equal(qs.join(" ").match(/SELECT '/g)!.length, 40, "every user table counted once, internal tables skipped");
-  const out = (ts: string[]) => JSON.stringify([{ results: ts.map((t) => ({ t, n: 2 })), success: true }]);
-  assert.equal(rowsOfAll([out(["a", "b"]), out(["c"])]).length, 3);
+  assert.ok(qs.every((q) => !/UNION/i.test(q)), "no compound SELECT");
+  assert.equal(qs.join(" ").match(/SELECT COUNT\(\*\)/g)!.length, 40, "every user table counted once, internal tables skipped");
+  const oneRow = (ts: string[]) => JSON.stringify([{ results: [Object.fromEntries(ts.map((t) => [t, 2]))], success: true }]);
+  assert.deepEqual(rowsOfAll([oneRow(["a", "b"]), oneRow(["c"])]), [{ t: "a", n: 2 }, { t: "b", n: 2 }, { t: "c", n: 2 }]);
   const wf = (await import("node:fs")).readFileSync(".github/workflows/staging-restore-drill.yml", "utf8");
   assert.match(wf, /count crestmont-staging "--remote --env staging" source \|\| fail "count source rows"/);
   assert.match(wf, /compare "\$\(cat drill\/source\.list\)" "\$\(cat drill\/restored\.list\)"/);

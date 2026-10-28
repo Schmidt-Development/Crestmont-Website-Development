@@ -16,17 +16,22 @@ const SKIP = /^(sqlite_|_cf_|d1_migrations$)/;
 export function countSql(tables: string[]): string {
   return countQueries(tables, Infinity)[0];
 }
-/** One counting query per batch of tables (D1 rejected a single ~95-table UNION ALL on staging). */
-export function countQueries(tables: string[], batch = 15): string[] {
+/** Counting queries for D1. D1 rejects compound SELECTs beyond a few terms ("too many terms in compound SELECT",
+ *  code 7500, seen on staging), so each query is ONE row of scalar sub-selects — no UNION — one column per table,
+ *  in batches to stay well under column limits. */
+export function countQueries(tables: string[], batch = 20): string[] {
   const ok = tables.filter((t) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(t) && !SKIP.test(t)).sort();
   if (!ok.length) throw new Error("no tables to count");
+  const size = Number.isFinite(batch) ? batch : ok.length;
   const out: string[] = [];
-  for (let i = 0; i < ok.length; i += Number.isFinite(batch) ? batch : ok.length)
-    out.push(ok.slice(i, i + (Number.isFinite(batch) ? batch : ok.length)).map((t) => `SELECT '${t}' AS t, COUNT(*) AS n FROM "${t}"`).join(" UNION ALL "));
+  for (let i = 0; i < ok.length; i += size)
+    out.push(`SELECT ${ok.slice(i, i + size).map((t) => `(SELECT COUNT(*) FROM "${t}") AS "${t}"`).join(", ")}`);
   return out;
 }
-/** Rows from several `wrangler d1 execute --json` outputs (one per batch). */
-export function rowsOfAll(outputs: string[]): Rows { return outputs.flatMap(rowsOf); }
+/** {t, n} rows from several `wrangler d1 execute --json` outputs; accepts both the one-row-of-columns shape and {t, n} rows. */
+export function rowsOfAll(outputs: string[]): Rows {
+  return outputs.flatMap(rowsOf).flatMap((r) => ("t" in r && "n" in r ? [r] : Object.entries(r).map(([t, n]) => ({ t, n }))));
+}
 
 export interface DrillResult { passed: boolean; tables: number; rows: number; problems: string[] }
 export function compareCounts(source: Rows, restored: Rows): DrillResult {
