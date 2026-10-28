@@ -4,7 +4,7 @@
 import { readFileSync, existsSync, cpSync, statSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { run } from "./exec.ts";
+import { run, programOf } from "./exec.ts";
 
 export type Workflow = "standard-brochure" | "custom-app";
 
@@ -24,6 +24,9 @@ export function loadManifest(file: string): SkillManifest {
   for (const wf of Object.values(m.workflows)) {
     for (const s of wf.skills) if (!m.skills[s.name]) throw new Error(`Workflow skill ${s.name} is not defined in the manifest`);
     for (const t of wf.tools) if (!m.tools[t]) throw new Error(`Workflow tool ${t} is not defined in the manifest`);
+  }
+  for (const [name, t] of Object.entries(m.tools)) {
+    if (!Array.isArray(t.command) || !programOf(t.command[0])) throw new Error(`Tool ${name}: the check command must start with an allow-listed program, got ${String(t.command?.[0]).slice(0, 60)}`);
   }
   for (const name of Object.keys(m.skills)) {
     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) throw new Error(`Invalid skill name ${name}`);
@@ -72,9 +75,11 @@ export async function preflight(opts: {
     const def = opts.manifest.tools[name];
     if (def.sandboxOnly && opts.sandbox === "off") continue;
     const [cmd, ...args] = def.command;
-    const r = await run(cmd, args, { env: opts.env, timeoutMs: opts.toolTimeoutMs ?? 30_000, cwd: opts.env.HOME });
+    const program = programOf(cmd);
+    const r = program ? await run(program, args, { env: opts.env, timeoutMs: opts.toolTimeoutMs ?? 30_000, cwd: opts.env.HOME })
+      : { code: 126, stdout: "", stderr: "", timedOut: false, notFound: false, refused: true };
     const ok = r.code === 0;
-    const problem = ok ? undefined : r.notFound ? "not installed" : r.timedOut ? "check timed out" : `check exited ${r.code}`;
+    const problem = ok ? undefined : r.refused ? "check command is not an allow-listed program" : r.notFound ? "not installed" : r.timedOut ? "check timed out" : `check exited ${r.code}`;
     tools.push({ name, ok, problem, hint: def.hint });
     if (!ok) errors.push(`Required tool ${name}: ${problem}${def.hint ? ` (${def.hint})` : ""}`);
   }

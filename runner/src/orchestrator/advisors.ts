@@ -9,7 +9,7 @@
 // Customer content reaches every adapter fenced as data with an explicit instruction not to follow it. There is no
 // OpenAI/ChatGPT role and no pay-per-use provider.
 
-import { run } from "../exec.ts";
+import { run, trustedBinary } from "../exec.ts";
 import { fenceFor } from "../prompt.ts";
 import type { ArchitectInput, CycleEvidence, MasterSpec, ReviewVerdict } from "./contracts.ts";
 import { MASTER_SPEC_JSON_SCHEMA, REVIEW_JSON_SCHEMA, SPEC_SCHEMA, extractJson, outstanding, parseVerdict } from "./contracts.ts";
@@ -91,7 +91,7 @@ export class ClaudeCodeAdvisor implements Advisor {
 
   private async ask(role: "architect" | "reviewer", prompt: string): Promise<unknown> {
     assertNoMeteredEnv(this.o.env);
-    const r = await (this.o.runner ?? run)(this.o.bin, this.argv(role), { cwd: this.o.cwd, env: this.o.env, timeoutMs: this.o.timeoutMs, input: prompt, maxOutput: 4_000_000 });
+    const r = await (this.o.runner ?? run)(trustedBinary("claude", this.o.bin), this.argv(role), { cwd: this.o.cwd, env: this.o.env, timeoutMs: this.o.timeoutMs, input: prompt, maxOutput: 4_000_000 });
     const out = `${r.stdout}\n${r.stderr}`;
     let text = "";
     try { const res = JSON.parse(r.stdout) as { result?: unknown; is_error?: boolean }; text = typeof res.result === "string" ? res.result : ""; if (res.is_error) throw new Error("error result"); } catch { text = ""; }

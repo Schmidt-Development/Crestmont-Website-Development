@@ -16,15 +16,18 @@ import { copyFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { run } from "../src/exec.ts";
+import { run, trustedBinary, dockerImageRef } from "../src/exec.ts";
 import { renderDefaultSquidConf } from "../windows/egress-policy.ts";
 
-const [runnerImage, proxyImage] = process.argv.slice(2);
-if (!runnerImage || !proxyImage) { process.stderr.write("usage: node runner/ci/egress-e2e.ts <runner image> <proxy image>\n"); process.exit(2); }
+const [runnerArg, proxyArg] = process.argv.slice(2);
+if (!runnerArg || !proxyArg) { process.stderr.write("usage: node runner/ci/egress-e2e.ts <runner image> <proxy image>\n"); process.exit(2); }
+// Command-line values are validated before they reach the docker CLI: image references only, a docker binary only.
+const runnerImage = dockerImageRef(runnerArg), proxyImage = dockerImageRef(proxyArg);
+const DOCKER = trustedBinary("docker", process.env.DOCKER_BIN || "docker");
 const RUNNER_DIR = path.resolve(import.meta.dirname, "..");
 const PLATFORM = process.env.E2E_PLATFORM_HOST || "example.com";
 const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? "/tmp", ...(process.env.DOCKER_HOST ? { DOCKER_HOST: process.env.DOCKER_HOST } : {}) };
-const docker = (args: string[], cwd?: string, timeoutMs = 120_000) => run(process.env.DOCKER_BIN || "docker", args, { env, cwd, timeoutMs });
+const docker = (args: string[], cwd?: string, timeoutMs = 120_000) => run(DOCKER, args, { env, cwd, timeoutMs });
 
 const dir = mkdtempSync(path.join(tmpdir(), "cm-egress-"));
 const compose = path.join(dir, "compose");

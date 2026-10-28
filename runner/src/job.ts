@@ -38,6 +38,8 @@ import type { Phase } from "./prompt.ts";
 import { readRequirements, checkRequirements, readStringList, readAgentReport } from "./requirements.ts";
 import { buildReport } from "./report.ts";
 import { run, proxyEnv } from "./exec.ts";
+import { runOperatorCommand } from "./operator-command.ts";
+import { resolveWithin } from "./paths.ts";
 import { ClaudeCodeCliProvider, type Spawner } from "./providers/claude-code-cli.ts";
 import type { Advisor } from "./orchestrator/advisors.ts";
 import { AdvisorUnavailableError, ClaudeCodeAdvisor, DeterministicReviewer } from "./orchestrator/advisors.ts";
@@ -742,8 +744,14 @@ async function deployPreview(cfg: RunnerConfig, ws: Workspace, git: GitCtx, job:
     const v = readSecret(processEnv, n);
     if (v) env[n] = v;
   }
-  const r = await run("sh", ["-c", cfg.preview.command], { cwd: exportDir, env, timeoutMs: cfg.preview.timeoutMs });
+  // No shell: the setting is parsed into an allow-listed Wrangler invocation; the preview name and IDs are passed as
+  // whole arguments. The export directory must still be inside this job's workspace.
+  const r = await runOperatorCommand("preview-deploy", cfg.preview.command, cfg.preview.envNames, env, { cwd: resolveWithin(ws.dir, exportDir), timeoutMs: cfg.preview.timeoutMs });
   rmSync(exportDir, { recursive: true, force: true });
+  if (r.refused) {
+    log.warn("preview deploy command refused", { error: r.stderr.slice(0, 300) });
+    return { url: null, note: `preview deploy command refused: ${r.stderr.slice(0, 300)}`, name: null };
+  }
   if (r.code !== 0) {
     log.warn("preview deploy failed", { code: r.code });
     return { url: null, note: `preview deploy command failed (exit ${r.code}${r.timedOut ? ", timed out" : ""})`, name: null };
@@ -797,7 +805,8 @@ export async function deletePreview(cfg: RunnerConfig, name: string, processEnv:
   const env: Record<string, string> = { PATH: cfg.agentPath, HOME: dir, LANG: "C.UTF-8", ...proxyEnv(processEnv), CRESTMONT_PREVIEW_NAME: name };
   for (const n of cfg.preview?.envNames ?? []) { const v = readSecret(processEnv, n); if (v) env[n] = v; }
   try {
-    const r = await run("sh", ["-c", cfg.previewDelete.command], { cwd: dir, env, timeoutMs: cfg.previewDelete.timeoutMs });
+    const r = await runOperatorCommand("preview-delete", cfg.previewDelete.command, cfg.preview?.envNames ?? [], env, { cwd: dir, timeoutMs: cfg.previewDelete.timeoutMs });
+    if (r.refused) return { ok: false, error: `delete command refused: ${r.stderr.slice(0, 300)}` };
     return r.code === 0 ? { ok: true, error: null } : { ok: false, error: `delete command failed (exit ${r.code}${r.timedOut ? ", timed out" : ""})` };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }

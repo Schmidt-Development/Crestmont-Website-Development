@@ -81,6 +81,8 @@ release is executed. Domain purchase/transfer and DNS changes at the customer's 
    ```
 
    Project repositories (`PROJECT_REPO_*`) are required: releases are built from the versioned repository.
+   The command runs without a shell, in the same restricted Wrangler form as the preview commands
+   (PREVIEW-DEPLOYMENT.md, "No shell"); anything else is refused when the runner starts.
 4. Restart the runner; `Get-RunnerHealth.ps1` / the startup log shows `customerDelivery: true`.
 5. First release: with a fictional project, prepare → authorize → watch it go live on its `workers.dev` address,
    check the evidence, then prepare a rollback and cancel it. Only then authorize a real customer's domain.

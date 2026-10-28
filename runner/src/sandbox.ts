@@ -16,7 +16,7 @@
 
 import { lstatSync, readdirSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { run } from "./exec.ts";
+import { run, trustedBinary } from "./exec.ts";
 import type { ExecResult } from "./exec.ts";
 import type { JobSandboxConfig } from "./config.ts";
 import type { Workspace } from "./workspace.ts";
@@ -27,7 +27,8 @@ import { silentLogger } from "./log.ts";
 export type DockerExecutor = (args: string[], opts: { timeoutMs: number }) => Promise<ExecResult>;
 
 export function cliDockerExecutor(dockerBin: string, env: Record<string, string>): DockerExecutor {
-  return (args, opts) => run(dockerBin, args, { env, timeoutMs: opts.timeoutMs, maxOutput: 4 * 1024 * 1024 });
+  const docker = trustedBinary("docker", dockerBin);
+  return (args, opts) => run(docker, args, { env, timeoutMs: opts.timeoutMs, maxOutput: 4 * 1024 * 1024 });
 }
 
 export const CONTAINER_REPO = "/workspace/repo";

@@ -16,10 +16,10 @@ import path from "node:path";
 import { JobSandbox, cliDockerExecutor } from "../src/sandbox.ts";
 import type { JobSandboxConfig } from "../src/config.ts";
 import { createWorkspace } from "../src/workspace.ts";
-import { run } from "../src/exec.ts";
+import { run, trustedBinary, dockerImageRef } from "../src/exec.ts";
 
 const RUNNER_DIR = path.resolve(import.meta.dirname, "..");
-const image = process.argv[2];
+const image = process.argv[2] ? dockerImageRef(process.argv[2]) : process.argv[2];
 if (!image) { process.stderr.write("usage: node runner/ci/sandbox-self-check.ts <sandbox image>\n"); process.exit(2); }
 
 const cfg: JobSandboxConfig = {
@@ -90,7 +90,7 @@ try {
   check("self-check crashed", false, String(err instanceof Error ? err.stack : err));
 } finally {
   await sandbox.close();
-  const left = await run(cfg.dockerBin, ["ps", "-a", "--filter", `name=${sandbox.name}`, "--format", "{{.Names}}"], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, timeoutMs: 30_000 });
+  const left = await run(trustedBinary("docker", cfg.dockerBin), ["ps", "-a", "--filter", `name=${sandbox.name}`, "--format", "{{.Names}}"], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, timeoutMs: 30_000 });
   check("job container removed on close", left.stdout.trim() === "", left.stdout);
 }
 

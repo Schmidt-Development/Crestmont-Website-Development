@@ -20,6 +20,8 @@ import type { RunnerConfig } from "./config.ts";
 import { readSecret } from "./config.ts";
 import type { DeploymentCompleteRequest, DeploymentVerification, SiteDeployment } from "./protocol.ts";
 import { run, proxyEnv } from "./exec.ts";
+import { runOperatorCommand } from "./operator-command.ts";
+import { resolveWithin } from "./paths.ts";
 import { cloneProjectRepo, headCommit, projectRepoUrl, type GitCtx } from "./git.ts";
 import { previewConfigProblems } from "./checks.ts";
 import { readSiteConfig } from "./preview-gate.ts";
@@ -101,7 +103,9 @@ export async function runSiteDeployment(cfg: RunnerConfig, d: SiteDeployment, de
       CRESTMONT_SITE_WORKER: d.workerName, CRESTMONT_DEPLOYMENT_ID: d.id, CRESTMONT_SITE_VERSION: String(d.version),
     };
     for (const n of cfg.delivery.envNames) { const v = readSecret(processEnv, n); if (v) env[n] = v; }
-    const r = await run("sh", ["-c", cfg.delivery.command], { cwd: exportDir, env, timeoutMs: cfg.delivery.timeoutMs });
+    // No shell: an allow-listed `wrangler deploy` with the runner-generated config, run from the confined export.
+    const r = await runOperatorCommand("production-deploy", cfg.delivery.command, cfg.delivery.envNames, env, { cwd: resolveWithin(cfg.workspacesRoot, exportDir), timeoutMs: cfg.delivery.timeoutMs });
+    if (r.refused) return failed(`deploy command refused: ${r.stderr.slice(0, 300)}`);
     if (r.code !== 0) {
       deps.logger.warn("production deploy command failed", { deploymentId: d.id, code: r.code });
       // A failed command may still have changed the live site (e.g. a timeout after upload): say so.

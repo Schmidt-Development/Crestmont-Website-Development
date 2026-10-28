@@ -13,7 +13,7 @@ import { silentLogger } from "../src/log.ts";
 import { previewConfigProblems, previewName, PREVIEW_NAME } from "../src/checks.ts";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import {
-  startFakeControlPlane, makeJob, claimFrom, fakeSdk, happyAgent, makeSkillsDir, testManifest, makeConfig, SECRET, POLLUTED_ENV, tmp, SDK_OPT_IN,
+  startFakeControlPlane, makeJob, claimFrom, fakeSdk, happyAgent, makeSkillsDir, testManifest, makeConfig, SECRET, POLLUTED_ENV, tmp, SDK_OPT_IN, fakeWrangler,
 } from "./helpers.ts";
 
 const manifest = testManifest();
@@ -44,9 +44,10 @@ test("[AIB-RUNNER] the preview deploy sees only a clean export of the committed 
   const seen = path.join(tmp("aib-prev-seen-"), "seen.json");
   // Stands in for `npx wrangler deploy`: records the directory it was given and its listing.
   // A constant command; the output path arrives as an environment variable (PREVIEW_DEPLOY_ENV), like a credential.
-  const cmd = `node -e "const fs=require('fs');const ls=(d,p='')=>fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?ls(d+'/'+e.name,p+e.name+'/'):[p+e.name]);fs.writeFileSync(process.env.PREVIEW_TEST_SEEN,JSON.stringify({cwd:process.cwd(),files:ls('.')}));console.log('PREVIEW_URL=https://'+process.env.CRESTMONT_PREVIEW_NAME+'.preview.workers.dev')"`;
+  const bin = fakeWrangler(`const fs=require('fs');const ls=(d,p='')=>fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?ls(d+'/'+e.name,p+e.name+'/'):[p+e.name]);fs.writeFileSync(process.env.PREVIEW_TEST_SEEN,JSON.stringify({cwd:process.cwd(),files:ls('.')}));console.log('PREVIEW_URL=https://'+process.env.CRESTMONT_PREVIEW_NAME+'.preview.workers.dev')`);
+  const cmd = `wrangler deploy --name "$CRESTMONT_PREVIEW_NAME"`;
   const cp = await startFakeControlPlane({ jobs: [makeJob()] });
-  const cfg = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: makeSkillsDir(manifest), ...SDK_OPT_IN, preview: { command: cmd, envNames: ["PREVIEW_TEST_SEEN"], timeoutMs: 30_000, gateSecret: "preview-gate-secret-for-tests-0123456789" } });
+  const cfg = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: makeSkillsDir(manifest), ...SDK_OPT_IN, agentPath: bin.agentPath, preview: { command: cmd, envNames: ["PREVIEW_TEST_SEEN"], timeoutMs: 30_000, gateSecret: "preview-gate-secret-for-tests-0123456789" } });
   const client = new ControlPlaneClient({ baseUrl: cp.url, secret: SECRET, runnerId: cfg.runnerId, sleep: async () => {}, retry: { attempts: 2, baseMs: 1 } });
   try {
     const job = await claimFrom(cp);
@@ -82,8 +83,10 @@ test("[AIB-RUNNER] the preview deploy sees only a clean export of the committed 
 test("[AIB-RUNNER] preview cleanup: the runner deletes only previews the platform lists, with validated names, and reports each result", async () => {
   const log = path.join(tmp("aib-prev-del-"), "deleted.txt");
   const cp = await startFakeControlPlane({ jobs: [] });
-  const base = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: "x" });
-  const cfg = { ...base, preview: { command: "true", envNames: ["CLOUDFLARE_API_TOKEN", "PREVIEW_TEST_LOG"], timeoutMs: 10_000, gateSecret: "preview-gate-secret-for-tests-0123456789" }, previewDelete: { mode: "command" as const, command: `echo "$CRESTMONT_PREVIEW_NAME $CLOUDFLARE_API_TOKEN" >> "$PREVIEW_TEST_LOG"`, timeoutMs: 10_000 } };
+  // Stands in for `wrangler delete`: appends the name it was given (an argument) and the credential (environment).
+  const bin = fakeWrangler(`require('fs').appendFileSync(process.env.PREVIEW_TEST_LOG, process.argv.slice(3).join(' ') + ' ' + process.env.CLOUDFLARE_API_TOKEN + '\\n')`);
+  const base = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: "x", agentPath: bin.agentPath });
+  const cfg = { ...base, preview: { command: "wrangler deploy", envNames: ["CLOUDFLARE_API_TOKEN", "PREVIEW_TEST_LOG"], timeoutMs: 10_000, gateSecret: "preview-gate-secret-for-tests-0123456789" }, previewDelete: { mode: "command" as const, command: `wrangler delete --name "$CRESTMONT_PREVIEW_NAME" --force`, timeoutMs: 10_000 } };
   const env = { ...POLLUTED_ENV, PREVIEW_TEST_LOG: log };
   const client = new ControlPlaneClient({ baseUrl: cp.url, secret: SECRET, runnerId: cfg.runnerId, sleep: async () => {}, retry: { attempts: 1, baseMs: 1 } });
   try {
@@ -97,7 +100,7 @@ test("[AIB-RUNNER] preview cleanup: the runner deletes only previews the platfor
   const client2 = new ControlPlaneClient({ baseUrl: cp2.url, secret: SECRET, runnerId: cfg.runnerId, sleep: async () => {}, retry: { attempts: 1, baseMs: 1 } });
   try {
     assert.equal(await sweepPreviews({ ...cfg, controlPlaneUrl: cp2.url }, client2, silentLogger, env), 1);
-    assert.equal(readFileSync(log, "utf8").trim(), `cm-prv-prj-a-b0 ${POLLUTED_ENV.CLOUDFLARE_API_TOKEN}`, "only the valid name; the credential reaches the delete command");
+    assert.equal(readFileSync(log, "utf8").trim(), `--name cm-prv-prj-a-b0 --force ${POLLUTED_ENV.CLOUDFLARE_API_TOKEN}`, "only the valid name; the credential reaches the delete command");
     const reports = cp2.byPath("previews/deleted").map((r) => r.body);
     assert.deepEqual(reports.map((r) => [r.jobId, r.ok]), [["bld_1", true], ["bld_2", false]]);
     assert.match(String(reports[1].error), /not a Crestmont preview name/);

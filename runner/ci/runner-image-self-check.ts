@@ -10,14 +10,16 @@
 import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { run } from "../src/exec.ts";
+import { run, trustedBinary, dockerImageRef } from "../src/exec.ts";
 import { renderDefaultSquidConf } from "../windows/egress-policy.ts";
 
-const [runnerImage, proxyImage] = process.argv.slice(2);
-if (!runnerImage || !proxyImage) { process.stderr.write("usage: node runner/ci/runner-image-self-check.ts <runner image> <proxy image>\n"); process.exit(2); }
+const [runnerArg, proxyArg] = process.argv.slice(2);
+if (!runnerArg || !proxyArg) { process.stderr.write("usage: node runner/ci/runner-image-self-check.ts <runner image> <proxy image>\n"); process.exit(2); }
+const runnerImage = dockerImageRef(runnerArg), proxyImage = dockerImageRef(proxyArg);
+const DOCKER = trustedBinary("docker", process.env.DOCKER_BIN || "docker");
 
 const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? "/tmp", ...(process.env.DOCKER_HOST ? { DOCKER_HOST: process.env.DOCKER_HOST } : {}) };
-const docker = (args: string[], timeoutMs = 120_000) => run(process.env.DOCKER_BIN || "docker", args, { env, timeoutMs });
+const docker = (args: string[], timeoutMs = 120_000) => run(DOCKER, args, { env, timeoutMs });
 const results: { check: string; ok: boolean; detail: string }[] = [];
 const check = (name: string, ok: boolean, detail = "") => { results.push({ check: name, ok, detail: detail.slice(0, 800) }); };
 const semverAtLeast = (v: string, min: [number, number]) => { const [a, b] = v.trim().replace(/^v/, "").split(".").map(Number); return a > min[0] || (a === min[0] && b >= min[1]); };

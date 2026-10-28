@@ -12,6 +12,13 @@
 // ends and the worker is reported as rate-limited; there is never a fallback to a paid API.
 
 import { spawn } from "node:child_process";
+import { trustedBinary } from "../exec.ts";
+
+/** A resumable session id (from a checkpoint or the control plane) is a plain UUID-like token, never an option. */
+export function safeSessionId(id: string): string {
+  if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9-]{7,79}$/.test(id)) throw new Error("refusing to resume: invalid Claude Code session id");
+  return id;
+}
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import type { RunnerConfig } from "../config.ts";
@@ -39,10 +46,13 @@ export class ClaudeCodeCliProvider implements AgentProvider {
   private env: Record<string, string> | null = null;
   private appendPrompt = "";
   private child: ReturnType<Spawner> | null = null;
+  private readonly bin: string;
 
   constructor(deps: { cfg: RunnerConfig; log: Logger; spawner?: Spawner }) {
     this.cfg = deps.cfg; this.log = deps.log; this.spawner = deps.spawner ?? spawn;
     if (!deps.cfg.claudeCode) throw new Error("claude-code provider without CLAUDE_CODE_CONFIG_DIR");
+    // Operator-configured executable: the Claude Code CLI itself, never a shell or another program.
+    this.bin = trustedBinary("claude", deps.cfg.claudeCode.bin).path;
   }
 
   model(job: Job): string { return this.cfg.claudeCode?.model ?? job.limits.model; }
@@ -77,15 +87,17 @@ export class ClaudeCodeCliProvider implements AgentProvider {
   argv(req: PhaseRequest): string[] {
     return ["-p", "--output-format", "stream-json", "--verbose", "--max-turns", String(Math.max(1, req.maxTurns)), "--setting-sources", "project",
       "--permission-mode", "dontAsk", ...(this.cfg.claudeCode!.model ? ["--model", this.cfg.claudeCode!.model] : []),
-      ...(this.appendPrompt ? ["--append-system-prompt", this.appendPrompt] : []), ...(req.resumeSessionId ? ["--resume", req.resumeSessionId] : [])];
+      ...(this.appendPrompt ? ["--append-system-prompt", this.appendPrompt] : []), ...(req.resumeSessionId ? ["--resume", safeSessionId(req.resumeSessionId)] : [])];
   }
 
   run(req: PhaseRequest): Promise<PhaseResult> {
     if (!this.ws || !this.env) throw new Error("ClaudeCodeCliProvider.prepare() was not called");
     this.rateLimit = { limited: false, resetAt: null };
     if (req.stop.reason) return Promise.resolve({ status: "stopped", error: null, stoppedBy: req.stop.reason });
+    let argv: string[];
+    try { argv = this.argv(req); } catch (err) { return Promise.resolve({ status: "error", error: err instanceof Error ? err.message : String(err), stoppedBy: null }); }
     return new Promise((resolve) => {
-      const child = this.spawner(this.cfg.claudeCode!.bin, this.argv(req), { cwd: this.ws!.repo, env: this.env!, stdio: ["pipe", "pipe", "pipe"] });
+      const child = this.spawner(this.bin, argv, { cwd: this.ws!.repo, env: this.env!, stdio: ["pipe", "pipe", "pipe"], shell: false, windowsHide: true });
       this.child = child;
       let buf = "", errTail = "", result: Record<string, unknown> | null = null, stoppedBy: string | null = null, timedOut = false;
       const onLine = (line: string) => {

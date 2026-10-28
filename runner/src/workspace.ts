@@ -1,10 +1,11 @@
 // Isolated per-attempt workspaces, the platform-checkout refusal, the agent's .claude/settings.json and the
 // allowlisted agent environment.
 
-import { mkdirSync, existsSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, existsSync, writeFileSync, readdirSync, statSync, lstatSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { run, baseEnv } from "./exec.ts";
+import { resolveWithin } from "./paths.ts";
 import type { RunnerConfig } from "./config.ts";
 import type { Job } from "./protocol.ts";
 
@@ -59,9 +60,13 @@ export async function assertIsolation(opts: { cwd: string; workspacesRoot: strin
 const safe = (s: string) => s.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 60);
 
 export function createWorkspace(root: string, job: Pick<Job, "id" | "attempt">): Workspace {
+  if (!path.isAbsolute(root)) throw new IsolationError(`workspace root must be an absolute path: ${String(root).slice(0, 200)}`);
+  // job.id and job.attempt arrive from the control plane: both are reduced to plain segment text before use.
+  const attempt = Number(job.attempt);
+  if (!Number.isSafeInteger(attempt) || attempt < 0 || attempt > 100_000) throw new IsolationError(`invalid job attempt ${String(job.attempt).slice(0, 40)}`);
   mkdirSync(root, { recursive: true, mode: 0o700 });
-  const ref = `${safe(job.id)}-a${job.attempt}-${randomBytes(3).toString("hex")}`;
-  const dir = path.join(root, ref);
+  const ref = `${safe(String(job.id))}-a${attempt}-${randomBytes(3).toString("hex")}`;
+  const dir = resolveWithin(root, ref);
   const ws: Workspace = {
     dir, ref,
     home: path.join(dir, "home"),
@@ -76,8 +81,9 @@ export function createWorkspace(root: string, job: Pick<Job, "id" | "attempt">):
 /** Resolve a workspaceRef from a claim to an existing workspace on this host, refusing path tricks. */
 export function findLocalWorkspace(root: string, ref: string | null | undefined): Workspace | null {
   if (!ref || !/^[A-Za-z0-9_-]{1,120}$/.test(ref)) return null;
-  const dir = path.join(root, ref);
-  if (!existsSync(dir) || !statSync(dir).isDirectory()) return null;
+  let dir: string;
+  // A symlink planted under the root must not redirect a resumed job to another directory.
+  try { dir = resolveWithin(root, ref); if (!existsSync(dir) || lstatSync(dir).isSymbolicLink() || !statSync(dir).isDirectory()) return null; } catch { return null; }
   return { dir, ref, home: path.join(dir, "home"), repo: path.join(dir, "repo"), tmp: path.join(dir, "tmp"), checkpoints: path.join(dir, "checkpoints") };
 }
 

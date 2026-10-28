@@ -5,6 +5,8 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { hostname } from "node:os";
 import { registerSecret } from "./log.ts";
+import { trustedBinary } from "./exec.ts";
+import { parseOperatorCommand } from "./operator-command.ts";
 
 export interface RunnerConfig {
   controlPlaneUrl: string;
@@ -159,6 +161,10 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
   const workspacesRoot = need("RUNNER_WORKSPACES", env.RUNNER_WORKSPACES ?? "");
   const skillsSourceDir = need("SKILLS_SOURCE_DIR", env.SKILLS_SOURCE_DIR ?? "");
   if (missing.length) throw new Error(`Missing required configuration: ${missing.join(", ")}`);
+  // Every job workspace, export and checkpoint path is built under this root and confined to it.
+  if (!path.isAbsolute(workspacesRoot) || workspacesRoot.includes("\0") || workspacesRoot.split(/[\\/]/).includes("..")) {
+    throw new Error(`RUNNER_WORKSPACES must be an absolute path without ".." (got ${workspacesRoot.slice(0, 200)})`);
+  }
 
   const repoToken = readSecret(env, "PROJECT_REPO_TOKEN");
   const repoOwner = env.PROJECT_REPO_OWNER ?? "";
@@ -178,12 +184,15 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
     timeoutMs: num(env.PREVIEW_DEPLOY_TIMEOUT_SECONDS, 600) * 1000,
     gateSecret: readSecret(env, "PREVIEW_GATE_SECRET"),
   } : null;
+  // Operator commands run without a shell: parse them now so an unsupported setting stops the runner at startup.
+  if (preview) parseOperatorCommand("preview-deploy", preview.command, preview.envNames);
 
   if (env.PREVIEW_DELETE && env.PREVIEW_DELETE !== "cloudflare-api") throw new Error(`PREVIEW_DELETE must be "cloudflare-api" (got ${env.PREVIEW_DELETE}); for a custom command use PREVIEW_DELETE_COMMAND`);
   const previewDeleteCommand = env.PREVIEW_DELETE_COMMAND ?? "";
   const previewDeleteTimeout = num(env.PREVIEW_DELETE_TIMEOUT_SECONDS, 180) * 1000;
   const previewDelete = env.PREVIEW_DELETE === "cloudflare-api" ? { mode: "cloudflare-api" as const, command: "", timeoutMs: previewDeleteTimeout }
     : previewDeleteCommand ? { mode: "command" as const, command: previewDeleteCommand, timeoutMs: previewDeleteTimeout } : null;
+  if (previewDelete?.mode === "command") parseOperatorCommand("preview-delete", previewDelete.command, preview?.envNames ?? []);
   if (previewDelete?.mode === "cloudflare-api") for (const n of ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"]) registerSecret(readSecret(env, n));
 
   for (const s of [secret, anthropicApiKey, repoToken]) registerSecret(s);
@@ -199,6 +208,7 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
     verifyDelayMs: num(env.PRODUCTION_VERIFY_DELAY_SECONDS, 10) * 1000,
   } : null;
   if (delivery) {
+    parseOperatorCommand("production-deploy", delivery.command, delivery.envNames);
     if (!repo) throw new Error("PRODUCTION_DEPLOY_COMMAND needs the project repositories (PROJECT_REPO_*): releases are deployed from the versioned project repository");
     const shared = delivery.envNames.filter((n) => (preview?.envNames ?? []).includes(n));
     if (shared.length) throw new Error(`PRODUCTION_DEPLOY_ENV must not reuse the preview credentials (${shared.join(", ")}); use separate variables for the customer-hosting account`);
@@ -248,8 +258,10 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
     })(),
     claudeCode: agentProvider === "claude-code" ? (() => {
       const dir = env.CLAUDE_CODE_CONFIG_DIR ?? "";
+      if (dir && (path.normalize(dir) !== dir || dir.split(/[\\/]/).includes(".."))) throw new Error(`CLAUDE_CODE_CONFIG_DIR must be a normalized absolute path without ".." (got ${dir.slice(0, 200)})`);
       if (!dir || !path.isAbsolute(dir)) throw new Error("RUNNER_AGENT_PROVIDER=claude-code needs CLAUDE_CODE_CONFIG_DIR: the absolute path of this worker's own Claude Code config directory (signed in once with `claude` → /login using the worker's Claude account)");
-      return { bin: env.CLAUDE_CODE_BIN ?? "claude", configDir: dir, model: env.CLAUDE_CODE_MODEL ?? null };
+      // The Claude Code CLI path is operator configuration: the expected binary name or an absolute path to it, never a shell.
+      return { bin: trustedBinary("claude", env.CLAUDE_CODE_BIN ?? "claude").path, configDir: dir, model: env.CLAUDE_CODE_MODEL ?? null };
     })() : null,
     advisor: (() => {
       const claude = agentProvider === "claude-code";
@@ -278,7 +290,7 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
       requestTimeoutMs: num(env.LOCAL_MODEL_REQUEST_TIMEOUT_SECONDS, 900) * 1000,
     },
     jobSandbox: {
-      dockerBin: env.RUNNER_DOCKER_BIN ?? "docker",
+      dockerBin: trustedBinary("docker", env.RUNNER_DOCKER_BIN ?? "docker").path,
       image: env.RUNNER_SANDBOX_IMAGE ?? "crestmont-build-sandbox:1",
       volume: env.RUNNER_SANDBOX_VOLUME ?? "",
       cpus: env.RUNNER_JOB_CPUS ?? "2",

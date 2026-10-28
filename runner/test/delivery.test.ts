@@ -11,7 +11,7 @@ import { run } from "../src/exec.ts";
 import type { GitCtx } from "../src/git.ts";
 import type { SiteDeployment } from "../src/protocol.ts";
 import { silentLogger } from "../src/log.ts";
-import { makeConfig, tmp, POLLUTED_ENV, SECRET } from "./helpers.ts";
+import { makeConfig, tmp, POLLUTED_ENV, SECRET, fakeWrangler } from "./helpers.ts";
 
 const STARTER = path.join(import.meta.dirname, "..", "starters", "brochure-v1");
 const REPO = { owner: "crestmont-builds", ownerType: "org" as const, token: "github_pat_test_repo_token_000000", host: "github.com", apiBase: "https://api.github.com", prefix: "crestmont-build-" };
@@ -41,7 +41,10 @@ function deployment(over: Partial<SiteDeployment> = {}): SiteDeployment {
 }
 
 // Stands in for `wrangler deploy`: records what it was given; the dump path arrives through PRODUCTION_DEPLOY_ENV.
-const DEPLOY_CMD = `node -e "const fs=require('fs');fs.writeFileSync(process.env.PROD_TEST_DUMP,JSON.stringify({env:process.env,cwd:process.cwd(),files:fs.readdirSync('.'),config:JSON.parse(fs.readFileSync('wrangler.json','utf8'))}));console.log('Uploaded');console.log('SITE_URL=https://'+process.env.CRESTMONT_SITE_WORKER+'.hosting.workers.dev')"`;
+// The setting is a plain allow-listed invocation (no shell); the fake `wrangler` on the runner's PATH records argv too.
+const DEPLOY_CMD = `WRANGLER_SEND_METRICS=false wrangler deploy --message "release $CRESTMONT_DEPLOYMENT_ID"`;
+const DEPLOY_BIN = fakeWrangler(`const fs=require('fs');fs.writeFileSync(process.env.PROD_TEST_DUMP,JSON.stringify({argv:process.argv.slice(2),env:process.env,cwd:process.cwd(),files:fs.readdirSync('.'),config:JSON.parse(fs.readFileSync('wrangler.json','utf8'))}));console.log('Uploaded');console.log('SITE_URL=https://'+process.env.CRESTMONT_SITE_WORKER+'.hosting.workers.dev')`);
+const FAIL_BIN = fakeWrangler(`console.log('should-not-be-trusted');process.exit(9)`);
 
 test("[AIB-006] D5: the release config is the site's own, under its customer Worker name; a domain is attached only when authorized; previews, Crestmont and shared domains are refused", () => {
   const dir = tmp("aib-rel-plan-");
@@ -65,7 +68,7 @@ test("[AIB-006] D5: the release config is the site's own, under its customer Wor
 test("[AIB-006] D5: the runner deploys the authorized commit of the project's own repository with production credentials only it holds, then verifies the live content", async () => {
   const src = await sourceRepo();
   const dump = path.join(tmp("aib-rel-dump-"), "dump.json");
-  const cfg = makeConfig({ controlPlaneUrl: "http://127.0.0.1:9", skillsSourceDir: "x", repo: REPO, delivery: { command: DEPLOY_CMD, envNames: ["SITE_CF_TOKEN", "PROD_TEST_DUMP"], timeoutMs: 30_000, verifyAttempts: 3, verifyDelayMs: 0 } });
+  const cfg = makeConfig({ controlPlaneUrl: "http://127.0.0.1:9", skillsSourceDir: "x", repo: REPO, agentPath: DEPLOY_BIN.agentPath, delivery: { command: DEPLOY_CMD, envNames: ["SITE_CF_TOKEN", "PROD_TEST_DUMP"], timeoutMs: 30_000, verifyAttempts: 3, verifyDelayMs: 0 } });
   const index = readFileSync(path.join(STARTER, "public", "index.html"));
   const fetched: string[] = [];
   let served: Uint8Array = index;
@@ -78,7 +81,9 @@ test("[AIB-006] D5: the runner deploys the authorized commit of the project's ow
   const sha = createHash("sha256").update(index).digest("hex");
   assert.equal(r.contentSha256, sha);
   assert.deepEqual(r.verification, { url: "https://www.harbor.example/", httpStatus: 200, expectedSha256: sha, actualSha256: sha, matched: true, attempts: 1 });
-  const seen = JSON.parse(readFileSync(dump, "utf8")) as { env: Record<string, string>; cwd: string; files: string[]; config: Record<string, unknown> };
+  const seen = JSON.parse(readFileSync(dump, "utf8")) as { argv: string[]; env: Record<string, string>; cwd: string; files: string[]; config: Record<string, unknown> };
+  assert.deepEqual(seen.argv, ["deploy", "--message", "release sd_test1"], "structured argv: the runner value is one argument, no shell");
+  assert.equal(seen.env.WRANGLER_SEND_METRICS, "false", "leading assignment applied to the environment");
   assert.equal(seen.env.SITE_CF_TOKEN, "site-hosting-token-0000000000", "the deploy command gets the customer-hosting credential");
   for (const k of ["BUILD_RUNNER_SECRET", "STRIPE_SECRET_KEY", "CLOUDFLARE_API_TOKEN", "GITHUB_TOKEN", "PROJECT_REPO_TOKEN", "DATABASE_URL"]) assert.ok(!(k in seen.env), `${k} is not passed to the deploy`);
   assert.equal(seen.env.CRESTMONT_SITE_WORKER, "cm-site-prj-alpha1");
@@ -97,7 +102,7 @@ test("[AIB-006] D5: the runner deploys the authorized commit of the project's ow
 
 test("[AIB-006] D5: refusals: another repository, an unknown commit, a preview or Crestmont Worker, a runner without delivery configured", async () => {
   const src = await sourceRepo();
-  const cfg = makeConfig({ controlPlaneUrl: "http://127.0.0.1:9", skillsSourceDir: "x", repo: REPO, delivery: { command: "echo should-not-run; exit 9", envNames: [], timeoutMs: 10_000, verifyAttempts: 1, verifyDelayMs: 0 } });
+  const cfg = makeConfig({ controlPlaneUrl: "http://127.0.0.1:9", skillsSourceDir: "x", repo: REPO, agentPath: FAIL_BIN.agentPath, delivery: { command: "wrangler deploy", envNames: [], timeoutMs: 10_000, verifyAttempts: 1, verifyDelayMs: 0 } });
   const deps = { logger: silentLogger, processEnv: POLLUTED_ENV, clone: localClone(src.dir), fetchImpl: (async () => { throw new Error("no fetch expected"); }) as unknown as typeof fetch };
   assert.match(String((await runSiteDeployment(cfg, deployment({ sourceRepo: "https://github.com/attacker/x.git", sourceCommit: src.commit }), deps)).error), /not this project's repository/);
   assert.match(String((await runSiteDeployment(cfg, deployment({ sourceCommit: "f".repeat(40) }), deps)).error), /could not fetch the release source|is not the authorized/);
@@ -119,11 +124,11 @@ test("[AIB-006] D5: refusals: another repository, an unknown commit, a preview o
 
 test("[AIB-006] D5: production and preview credentials must be separate; delivery needs the project repositories", () => {
   const base = { LOCAL_MODEL: "qwen3-coder:30b", RUNNER_WORKSPACES: tmp("aib-rel-ws-"), SKILLS_SOURCE_DIR: tmp("aib-rel-skills-"), BUILD_RUNNER_SECRET: SECRET, CONTROL_PLANE_URL: "https://platform.example", AGENT_PROVIDER: "local", PROJECT_REPO_OWNER: "crestmont-builds", PROJECT_REPO_TOKEN: "github_pat_x_000000000000000000",
-    PREVIEW_DEPLOY_COMMAND: "true", PREVIEW_DEPLOY_ENV: "CLOUDFLARE_API_TOKEN", CLOUDFLARE_API_TOKEN: "preview-token-0000000000" };
-  assert.throws(() => loadConfig({ ...base, PRODUCTION_DEPLOY_COMMAND: "true", PRODUCTION_DEPLOY_ENV: "CLOUDFLARE_API_TOKEN" }), /must not reuse the preview credentials/);
-  assert.throws(() => loadConfig({ ...base, PRODUCTION_DEPLOY_COMMAND: "true", PRODUCTION_DEPLOY_ENV: "SITE_CF_TOKEN", SITE_CF_TOKEN: "preview-token-0000000000" }), /same value as a preview credential/);
-  assert.throws(() => loadConfig({ ...base, PROJECT_REPO_TOKEN: "", PRODUCTION_DEPLOY_COMMAND: "true" }), /needs the project repositories/);
-  const ok = loadConfig({ ...base, PRODUCTION_DEPLOY_COMMAND: "true", PRODUCTION_DEPLOY_ENV: "SITE_CF_TOKEN", SITE_CF_TOKEN: "site-token-0000000000" });
+    PREVIEW_DEPLOY_COMMAND: `npx --yes wrangler@4.40.0 deploy --name "$CRESTMONT_PREVIEW_NAME"`, PREVIEW_DEPLOY_ENV: "CLOUDFLARE_API_TOKEN", CLOUDFLARE_API_TOKEN: "preview-token-0000000000" };
+  assert.throws(() => loadConfig({ ...base, PRODUCTION_DEPLOY_COMMAND: "npx --yes wrangler@4.40.0 deploy", PRODUCTION_DEPLOY_ENV: "CLOUDFLARE_API_TOKEN" }), /must not reuse the preview credentials/);
+  assert.throws(() => loadConfig({ ...base, PRODUCTION_DEPLOY_COMMAND: "npx --yes wrangler@4.40.0 deploy", PRODUCTION_DEPLOY_ENV: "SITE_CF_TOKEN", SITE_CF_TOKEN: "preview-token-0000000000" }), /same value as a preview credential/);
+  assert.throws(() => loadConfig({ ...base, PROJECT_REPO_TOKEN: "", PRODUCTION_DEPLOY_COMMAND: "npx --yes wrangler@4.40.0 deploy" }), /needs the project repositories/);
+  const ok = loadConfig({ ...base, PRODUCTION_DEPLOY_COMMAND: "npx --yes wrangler@4.40.0 deploy", PRODUCTION_DEPLOY_ENV: "SITE_CF_TOKEN", SITE_CF_TOKEN: "site-token-0000000000" });
   assert.deepEqual(ok.delivery?.envNames, ["SITE_CF_TOKEN"]);
   assert.equal(loadConfig(base).delivery, null, "unset by default: this runner never deploys a customer site");
 });
