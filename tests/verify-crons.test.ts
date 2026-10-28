@@ -62,8 +62,13 @@ test("[FILE-001] the staging deploy publishes whether R2 file storage is bound: 
   await ingestEvidence(t.db, JSON.stringify(storageEvidence({ state: "unavailable", commit: "a".repeat(40), runId: "r2-1" })));
   assert.equal(await feed(), "unavailable");
   assert.equal((await t.client().get("/api/readiness/health")).status, 200, "a disabled optional service does not degrade health");
+  const report = ((await (await t.client().get("/api/readiness/health?view=report")).json()) as { feeds: { source: string; reason?: string }[] }).feeds.find((f) => f.source === "file-storage:staging");
+  assert.match(report?.reason ?? "", /not usable by the deploy token/, "the public reason says why storage is off");
   await ingestEvidence(t.db, JSON.stringify(storageEvidence({ state: "bound", commit: "a".repeat(40), runId: "r2-2" })));
   assert.equal(await feed(), "healthy");
+  await ingestEvidence(t.db, JSON.stringify(storageEvidence({ state: "unavailable", commit: "a".repeat(40), runId: "r2-3", reason: "Authentication error [code: 10000]" })));
+  assert.equal(await feed(), "unavailable", "losing the binding after it worked shows unavailable again");
+  assert.equal((await t.client().get("/api/readiness/health")).status, 200);
   assert.match(readFileSync(".github/workflows/deploy-staging.yml", "utf8"), /storage-evidence\.ts --state "\$R2_STATE"/);
 });
 
@@ -80,4 +85,21 @@ test("[TEST-004] [INFRA-006] a restore drill that fails before the comparison st
   const wf = readFileSync(".github/workflows/staging-restore-drill.yml", "utf8");
   assert.match(wf, /FAIL_REASON: \$\{\{ steps\.export\.outputs\.reason \|\| steps\.restore\.outputs\.reason \}\}/);
   assert.doesNotMatch(wf, /--reason "\$\{\{/, "the reason reaches the script through env, not interpolation");
+});
+
+test("[FILE-001] [PORTAL-004] staging journey 9 (upload → preview → delete) publishes file-uploads:staging: healthy when it passed, unavailable when skipped, failing with a reason when it failed", async () => {
+  const { ingestEvidence } = await import("../src/readiness/ingest.ts");
+  const { createTestApp } = await import("./support/app.ts");
+  const t = await createTestApp();
+  const at = new Date().toISOString();
+  const doc = (id: string, outcome: string, message?: string) => JSON.stringify({ runId: id, source: "staging_e2e", environment: "staging", commitSha: "a".repeat(40), startedAt: at, finishedAt: at,
+    results: [{ requirementId: "FILE-001", testName: "[TEST-002] [PORTAL-004] [FILE-001] journey 9", outcome, ...(message ? { message } : {}) }] });
+  const feed = async () => ((await (await t.client().get("/api/readiness/health?view=report")).json()) as { feeds: { source: string; status: string; reason?: string }[] }).feeds.find((f) => f.source === "file-uploads:staging");
+  await ingestEvidence(t.db, doc("j9-1", "skipped"));
+  assert.equal((await feed())?.status, "unavailable");
+  await ingestEvidence(t.db, doc("j9-2", "failed", "upload listed: expected file name"));
+  assert.deepEqual(await feed(), { source: "file-uploads:staging", required: false, status: "failing", lastSuccessAt: null, reason: "upload listed: expected file name" });
+  await ingestEvidence(t.db, doc("j9-3", "passed"));
+  assert.equal((await feed())?.status, "healthy");
+  assert.match(readFileSync("tests/e2e/staging-journeys.e2e.ts", "utf8"), /journey\(9, \["PORTAL-004", "FILE-001"\]/);
 });

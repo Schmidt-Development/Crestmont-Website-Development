@@ -97,10 +97,37 @@ export async function addSuppression(db: Db, email: string, reason: "hard_bounce
 }
 
 /** Handles one verified Resend event, exactly once per svix-id. */
-export async function handleResendEvent(db: Db, svixId: string, raw: string): Promise<EventOutcome> {
+/**
+ * Environment isolation: Resend webhooks are per account, so this endpoint may receive the other environment's
+ * events. Our sends carry the tag environment=<ENVIRONMENT> (src/adapters/email.ts). An event tagged for another
+ * environment is acknowledged and recorded without recipient or message id, and changes nothing. Staging also
+ * ignores untagged events (it only ever sends tagged mail); production applies untagged ones (e.g. mail sent from
+ * the Resend dashboard), because a missed production bounce is worse than a stray one.
+ */
+export function eventIsForeign(data: Record<string, unknown>, environment: string | undefined): boolean {
+  if (!environment) return false;
+  const tags = data.tags;
+  let tag: string | null = null;
+  if (tags && typeof tags === "object" && !Array.isArray(tags)) {
+    const v = (tags as Record<string, unknown>).environment;
+    tag = typeof v === "string" ? v : null;
+  } else if (Array.isArray(tags)) {
+    const t = tags.find((x) => x && typeof x === "object" && (x as Record<string, unknown>).name === "environment") as Record<string, unknown> | undefined;
+    tag = typeof t?.value === "string" ? (t.value as string) : null;
+  }
+  if (tag === null) return environment === "staging";
+  return tag !== environment;
+}
+
+export async function handleResendEvent(db: Db, svixId: string, raw: string, environment?: string): Promise<EventOutcome> {
   const json = obj(JSON.parse(raw));
   const type = s(json, "type") ?? "unknown";
   const data = obj(json.data);
+  if (eventIsForeign(data, environment)) {
+    const claim = await db.prepare(`INSERT INTO email_webhook_events (svix_id, type, provider_message_id, delivery_id, recipient, outcome, event_created_at, received_at)
+        VALUES (?,?,NULL,NULL,NULL,'ignored',?,?) ON CONFLICT(svix_id) DO NOTHING`).bind(svixId, type.slice(0, 60), s(json, "created_at"), nowIso()).run();
+    return { duplicate: claim.meta.changes !== 1, outcome: "ignored" };
+  }
   const messageId = s(data, "email_id");
   const recipients = (Array.isArray(data.to) ? data.to : typeof data.to === "string" ? [data.to] : []).filter((x): x is string => typeof x === "string").slice(0, 50);
   const delivery = messageId ? await db.prepare(`SELECT id, status, to_email FROM email_deliveries WHERE provider_message_id = ?`).bind(messageId).first<{ id: string; status: string; to_email: string }>() : null;

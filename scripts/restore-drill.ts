@@ -14,9 +14,106 @@ export function rowsOf(wranglerJson: string): Rows {
 
 const SKIP = /^(sqlite_|_cf_|d1_migrations$)/;
 export function countSql(tables: string[]): string {
+  return countQueries(tables, Infinity)[0];
+}
+/** Counting queries for D1. D1 rejects compound SELECTs beyond a few terms ("too many terms in compound SELECT",
+ *  code 7500, seen on staging), so each query is ONE row of scalar sub-selects — no UNION — one column per table,
+ *  in batches to stay well under column limits. */
+export function countQueries(tables: string[], batch = 20): string[] {
   const ok = tables.filter((t) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(t) && !SKIP.test(t)).sort();
   if (!ok.length) throw new Error("no tables to count");
-  return ok.map((t) => `SELECT '${t}' AS t, COUNT(*) AS n FROM "${t}"`).join(" UNION ALL ");
+  const size = Number.isFinite(batch) ? batch : ok.length;
+  const out: string[] = [];
+  for (let i = 0; i < ok.length; i += size)
+    out.push(`SELECT ${ok.slice(i, i + size).map((t) => `(SELECT COUNT(*) FROM "${t}") AS "${t}"`).join(", ")}`);
+  return out;
+}
+/** {t, n} rows from several `wrangler d1 execute --json` outputs; accepts both the one-row-of-columns shape and {t, n} rows. */
+export function rowsOfAll(outputs: string[]): Rows {
+  return outputs.flatMap(rowsOf).flatMap((r) => ("t" in r && "n" in r ? [r] : Object.entries(r).map(([t, n]) => ({ t, n }))));
+}
+
+/** Splits SQL into statements on `;` outside string literals, quoted identifiers and comments. A CREATE TRIGGER
+ *  statement runs to its closing `END;` (its body contains `;`). Each statement keeps its trailing `;`. */
+export function splitStatements(sql: string): string[] {
+  const out: string[] = [];
+  let cur = "", i = 0;
+  const flush = () => { const s = cur.trim(); if (s) out.push(s); cur = ""; };
+  while (i < sql.length) {
+    const c = sql[i];
+    if (c === "'" || c === '"' || c === "`" || c === "[") {
+      const close = c === "[" ? "]" : c;
+      let j = i + 1;
+      for (;;) {
+        if (j >= sql.length) break;
+        if (sql[j] === close) { if (close !== "]" && sql[j + 1] === close) { j += 2; continue; } break; }
+        j++;
+      }
+      cur += sql.slice(i, j + 1); i = j + 1; continue;
+    }
+    if (c === "-" && sql[i + 1] === "-") { const j = sql.indexOf("\n", i); i = j < 0 ? sql.length : j + 1; cur += "\n"; continue; }
+    if (c === "/" && sql[i + 1] === "*") { const j = sql.indexOf("*/", i + 2); i = j < 0 ? sql.length : j + 2; cur += " "; continue; }
+    cur += c; i++;
+    if (c === ";") {
+      const trigger = /^\s*CREATE\s+(TEMP(ORARY)?\s+)?TRIGGER\b/i.test(cur);
+      if (!trigger || /\bEND\s*;$/i.test(cur.trimEnd())) flush();
+    }
+  }
+  flush();
+  return out;
+}
+
+const IDENT = String.raw`(?:"((?:[^"]|"")+)"|\x60([^\x60]+)\x60|\[([^\]]+)\]|([A-Za-z_][A-Za-z0-9_$]*))`;
+const ident = (m: RegExpMatchArray, k: number) => (m[k] ?? m[k + 1] ?? m[k + 2] ?? m[k + 3] ?? "").replace(/""/g, '"');
+const CREATE_TABLE = new RegExp(String.raw`^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:main\.)?${IDENT}`, "i");
+const INSERT = new RegExp(String.raw`^(?:INSERT|REPLACE)\s+(?:OR\s+\w+\s+)?INTO\s+(?:main\.)?${IDENT}`, "i");
+const REFERENCES = new RegExp(String.raw`\bREFERENCES\s+(?:main\.)?${IDENT}`, "gi");
+
+/** Prepares a `wrangler d1 export` dump for `d1 execute --file`.
+ *  1. Removes what Cloudflare's import guide (developers.cloudflare.com/d1/best-practices/import-export-data) says D1
+ *     rejects: BEGIN TRANSACTION/COMMIT, reserved `_cf_*` tables, and writes to SQLite's internal tables
+ *     (sqlite_sequence, sqlite_stat*) plus the `ANALYZE sqlite_schema` that precedes stat rows.
+ *  2. Re-orders it so it can be replayed: a D1 export lists tables in creation order, and a table created early can
+ *     reference one created later (invoices → projects on staging). Inserting a child row before its parent table
+ *     exists fails with "no such table" even with defer_foreign_keys — the import then aborts (D1_RESET_DO).
+ *     Output: PRAGMAs, every CREATE TABLE, then each table's rows with parents before children, then everything
+ *     else (indexes, triggers, views) in export order. Statements are parsed, so data containing `;` or newlines is safe. */
+export function sanitizeExport(sql: string): { sql: string; removed: Record<string, number> } {
+  const rules: [string, RegExp][] = [
+    ["transaction", /^(BEGIN(\s+(DEFERRED|IMMEDIATE|EXCLUSIVE))?(\s+TRANSACTION)?|COMMIT(\s+TRANSACTION)?|END(\s+TRANSACTION)?)\s*;$/i],
+    ["_cf_ tables", /^(CREATE\s+TABLE(\s+IF\s+NOT\s+EXISTS)?|INSERT(\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|DELETE\s+FROM|UPDATE|DROP\s+TABLE(\s+IF\s+EXISTS)?)\s+["`[]?_cf_/i],
+    ["sqlite internal", /^((INSERT(\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|DELETE\s+FROM|UPDATE)\s+["`[]?sqlite_(sequence|stat\d)|ANALYZE\s+["`[]?sqlite_(schema|master))\b/i],
+  ];
+  const removed: Record<string, number> = {};
+  const pragmas: string[] = [], creates = new Map<string, string>(), rows = new Map<string, string[]>(), rest: string[] = [];
+  const deps = new Map<string, Set<string>>();
+  for (const s of splitStatements(sql)) {
+    const hit = rules.find(([, re]) => re.test(s));
+    if (hit) { removed[hit[0]] = (removed[hit[0]] ?? 0) + 1; continue; }
+    let m: RegExpMatchArray | null;
+    if (/^PRAGMA\b/i.test(s)) pragmas.push(s);
+    else if ((m = s.match(CREATE_TABLE))) {
+      const t = ident(m, 1).toLowerCase();
+      creates.set(t, s);
+      deps.set(t, new Set([...s.matchAll(REFERENCES)].map((r) => ident(r, 1).toLowerCase()).filter((p) => p !== t)));
+    } else if ((m = s.match(INSERT))) {
+      const t = ident(m, 1).toLowerCase();
+      if (!rows.has(t)) rows.set(t, []);
+      rows.get(t)!.push(s);
+    } else rest.push(s);
+  }
+  // Parents before children; export order breaks ties and cycles (rows of a cycle rely on defer_foreign_keys).
+  const order: string[] = [], state = new Map<string, number>();
+  const visit = (t: string) => {
+    if (state.get(t)) return;            // 1 = in progress (cycle), 2 = done
+    state.set(t, 1);
+    for (const p of deps.get(t) ?? []) if (creates.has(p)) visit(p);
+    state.set(t, 2); order.push(t);
+  };
+  for (const t of [...creates.keys(), ...rows.keys()]) visit(t);
+  const data = order.flatMap((t) => rows.get(t) ?? []);
+  const out = [...pragmas, ...creates.values(), ...data, ...rest];
+  return { sql: out.join("\n") + (out.length ? "\n" : ""), removed };
 }
 
 export interface DrillResult { passed: boolean; tables: number; rows: number; problems: string[] }
@@ -44,9 +141,14 @@ export function drillEvidence(r: DrillResult, o: { commit: string; runId: string
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [mode, a, b] = process.argv.slice(2);
   const arg = (n: string) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : undefined; };
-  if (mode === "sql") process.stdout.write(countSql(rowsOf(readFileSync(a, "utf8")).map((r) => String(r.name))));
+  if (mode === "sanitize") {
+    const r = sanitizeExport(readFileSync(a, "utf8"));
+    writeFileSync(b, r.sql);
+    console.log(`sanitized export: removed ${JSON.stringify(r.removed)}`);
+  } else if (mode === "sql") process.stdout.write(countQueries(rowsOf(readFileSync(a, "utf8")).map((r) => String(r.name))).join("\n") + "\n");
   else if (mode === "compare") {
-    const r = compareCounts(rowsOf(readFileSync(a, "utf8")), rowsOf(readFileSync(b, "utf8")));
+    // a / b: comma-separated lists of wrangler JSON outputs (one per counting batch).
+    const r = compareCounts(rowsOfAll(a.split(",").map((f) => readFileSync(f, "utf8"))), rowsOfAll(b.split(",").map((f) => readFileSync(f, "utf8"))));
     writeFileSync(arg("--out") ?? "evidence/restore-drill.json", JSON.stringify(drillEvidence(r, { commit: arg("--commit") ?? "0000000", runId: arg("--run-id") ?? `local-drill-${Date.now()}`, startedAt: arg("--started") ?? new Date().toISOString() })));
     console.log(`${r.passed ? "PASSED" : "FAILED"}: ${r.tables} tables, ${r.rows} rows${r.problems.length ? `; ${r.problems.join("; ")}` : ""}`);
     if (!r.passed) process.exit(1);

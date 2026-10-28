@@ -73,11 +73,13 @@ const P = (w: World, key: string, t: Tenant = w.a) => pathFor(w, { method: key.s
 export function withFakeAi(w: World): () => void {
   const real = globalThis.fetch;
   w.env.ANTHROPIC_API_KEY = "test-key-not-real";
+  w.env.AI_PROVIDER = "anthropic"; // paid AI is explicit opt-in; the Owner budget row is set below
+  void w.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('ai.monthly_budget_usd', '100', ?) ON CONFLICT(key) DO NOTHING`).bind(new Date().toISOString()).run();
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     if (String(input).startsWith("https://api.anthropic.com/")) return new Response(JSON.stringify({ content: [{ type: "text", text: "Draft text for review." }], usage: { input_tokens: 10, output_tokens: 5 } }), { status: 200, headers: { "content-type": "application/json" } });
     return real(input, init);
   }) as typeof fetch;
-  return () => { globalThis.fetch = real; delete w.env.ANTHROPIC_API_KEY; };
+  return () => { globalThis.fetch = real; delete w.env.ANTHROPIC_API_KEY; delete w.env.AI_PROVIDER; };
 }
 
 /** Ordered scenarios; later ones may rely on state created by earlier ones. Keys must match the inventory. */
@@ -368,6 +370,7 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "GET /staff/voice/calls/:id" },
 
     // ── AI Builds (owner controls) ──
+    { key: "POST /staff/ai/budget", fields: () => ({ monthly_budget_usd: "25" }) },
     { key: "POST /staff/builds/settings", fields: () => ({ run_budget: "30", project_budget: "90", model: "claude-sonnet-5-5", max_runtime: "120", max_turns: "200", max_concurrent: "2", max_attempts: "3", automation_enabled: "1" }) },
     { key: "POST /staff/builds/pause", fields: () => ({ paused: "1", reason: "matrix pause" }) },
     { key: "POST /staff/builds/projects/:projectId/pause", fields: () => ({ paused: "1", reason: "matrix project pause" }) },

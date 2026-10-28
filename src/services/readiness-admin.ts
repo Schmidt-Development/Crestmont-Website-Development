@@ -63,10 +63,13 @@ export async function feedStatuses(ctx: Pick<AppContext, "db" | "env" | "now">, 
   });
   const requiredIds = new Set(required.map((r) => r.source));
   const others: FeedStatus[] = input.ingestion.filter((r) => !requiredIds.has(r.source) && r.source !== "github").map((r) => {
-    const failing = !!(r.last_error && r.last_attempt_at && (!r.last_success_at || r.last_attempt_at > r.last_success_at));
+    // An optional service that is simply not enabled (file storage) is "unavailable", never a failure that degrades health.
+    const optionalOff = r.source.startsWith("file-storage:");
+    const failing = !optionalOff && !!(r.last_error && r.last_attempt_at && (!r.last_success_at || r.last_attempt_at > r.last_success_at));
     const stale = !failing && r.last_success_at !== null && now.getTime() - Date.parse(r.last_success_at) > 72 * 3_600_000;
-    return { source: r.source, status: failing ? "failing" : !r.last_success_at ? "unavailable" : stale ? "stale" : "healthy",
-      detail: failing ? `Last attempt failed: ${r.last_error}` : r.last_success_at ? `Last success ${r.last_success_at}` : "No successful ingestion recorded",
+    const offNow = optionalOff && !!r.last_error && (!r.last_success_at || (r.last_attempt_at ?? "") > r.last_success_at);
+    return { source: r.source, status: failing ? "failing" : offNow || !r.last_success_at ? "unavailable" : stale ? "stale" : "healthy",
+      detail: failing ? `Last attempt failed: ${r.last_error}` : optionalOff && r.last_error && (!r.last_success_at || (r.last_attempt_at ?? "") > r.last_success_at) ? r.last_error : r.last_success_at ? `Last success ${r.last_success_at}` : "No successful ingestion recorded",
       required: false, lastSuccessAt: r.last_success_at, lastAttemptAt: r.last_attempt_at };
   });
   const gh = await githubFeedStatus(ctx);

@@ -7,16 +7,16 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const STORAGE_TEST = "file storage (R2) bucket bound to the staging Worker";
-export function storageEvidence(o: { state: string; commit: string; runId: string; at?: string }) {
+export function storageEvidence(o: { state: string; commit: string; runId: string; at?: string; reason?: string }) {
   const at = o.at ?? new Date().toISOString();
   return { runId: o.runId, source: "ci", environment: "staging", commitSha: o.commit, startedAt: at, finishedAt: at,
     results: [{ requirementId: "FILE-001", testName: STORAGE_TEST, outcome: o.state === "bound" ? "passed" : "skipped",
-      ...(o.state === "bound" ? {} : { message: "R2 is not enabled on the Cloudflare account; uploads are disabled on staging" }) }] };
+      ...(o.state === "bound" ? {} : { message: `R2 bucket crestmont-files-staging not usable by the deploy token; uploads are disabled on staging. ${(o.reason ?? "").trim()}`.slice(0, 400) }) }] };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const arg = (k: string) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : undefined; };
   const out = arg("--out") ?? "evidence/r2.json";
   mkdirSync(dirname(out), { recursive: true });
-  writeFileSync(out, JSON.stringify(storageEvidence({ state: arg("--state") ?? "unavailable", commit: arg("--commit") ?? "0".repeat(40), runId: arg("--run-id") ?? `local-r2-${Date.now()}` })));
+  writeFileSync(out, JSON.stringify(storageEvidence({ state: arg("--state") ?? "unavailable", commit: arg("--commit") ?? "0".repeat(40), runId: arg("--run-id") ?? `local-r2-${Date.now()}`, reason: arg("--reason") })));
 }
