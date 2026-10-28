@@ -52,19 +52,59 @@ export class OutboxEmail implements EmailAdapter {
   }
 }
 
+/**
+ * Which recipients may receive real mail (EMAIL-001, INFRA-002). Never: reserved names that cannot receive mail
+ * (RFC 2606 / 6761: .test, .invalid, .example, .localhost, example.com/.net/.org) — sending to them only produces
+ * bounces against the sending domain. On staging, additionally only the allowlist: EMAIL_RECIPIENT_ALLOWLIST is a
+ * comma-separated list of exact addresses and/or "@domain" entries; unset, it defaults to "@crestmontwebsitedevelopment.com".
+ * Staging is test data (demo accounts, sample customers), so it must never mail anyone outside that list.
+ */
+const RESERVED = /(\.(test|invalid|example|localhost)|@example\.(com|net|org)|\.example\.(com|net|org))$/i;
+export const DEFAULT_STAGING_ALLOWLIST = "@crestmontwebsitedevelopment.com";
+export function recipientPolicy(env: { ENVIRONMENT: string; EMAIL_RECIPIENT_ALLOWLIST?: string }): (to: string) => string | null {
+  const entries = (env.EMAIL_RECIPIENT_ALLOWLIST ?? DEFAULT_STAGING_ALLOWLIST).split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+  return (toRaw: string) => {
+    const to = toRaw.trim().toLowerCase();
+    if (RESERVED.test(to)) return "Not sent: reserved test address that cannot receive mail.";
+    if (env.ENVIRONMENT !== "production" && !entries.some((e) => (e.startsWith("@") ? to.endsWith(e) : to === e)))
+      return "Not sent: staging only mails addresses on EMAIL_RECIPIENT_ALLOWLIST (staging holds test data).";
+    return null;
+  };
+}
+
 export class ResendEmail implements EmailAdapter {
   readonly kind = "resend" as const;
   private db: Db; private apiKey: string; private from: string; private fetchImpl: typeof fetch;
-  constructor(db: Db, apiKey: string, from: string, fetchImpl: typeof fetch = fetch) {
-    this.db = db; this.apiKey = apiKey; this.from = from; this.fetchImpl = fetchImpl;
+  private blocked: (to: string) => string | null;
+  private environment: string | null;
+  /**
+   * `environment` is sent as the Resend tag `environment=<staging|production>`. Resend webhooks are configured per
+   * account, so one environment's endpoint can receive the other's events; the receiver ignores events whose tag
+   * names another environment (src/services/email-events.ts), keeping each database to its own recipients.
+   */
+  constructor(db: Db, apiKey: string, from: string, fetchImpl: typeof fetch = fetch, blocked: (to: string) => string | null = () => null, environment: string | null = null) {
+    this.db = db; this.apiKey = apiKey; this.from = from; this.fetchImpl = fetchImpl; this.blocked = blocked; this.environment = environment;
   }
   async send(msg: EmailMessage): Promise<EmailResult> {
+    // A recipient outside the policy is recorded in the outbox (never sent, never reported delivered).
+    const reason = this.blocked(msg.to);
+    if (reason) {
+      const o = await insertDelivery(this.db, msg, "dev-outbox");
+      if (!o) return { deliveryId: "", status: "duplicate", provider: "dev-outbox" };
+      await this.db.prepare(`UPDATE email_deliveries SET last_error = COALESCE(last_error, ?) WHERE id = ?`).bind(reason, o.id).run();
+      return { deliveryId: o.id, status: o.suppressed ? "suppressed" : "queued", provider: "dev-outbox" };
+    }
     const d = await insertDelivery(this.db, msg, "resend");
     if (!d) return { deliveryId: "", status: "duplicate", provider: this.kind };
     if (d.suppressed) return { deliveryId: d.id, status: "suppressed", provider: this.kind };
     return this.attempt(d.id, msg);
   }
   async attempt(id: string, msg: EmailMessage): Promise<EmailResult> {
+    const blocked = this.blocked(msg.to);
+    if (blocked) {
+      await this.db.prepare(`UPDATE email_deliveries SET last_error=?, updated_at=? WHERE id=?`).bind(blocked, nowIso(), id).run();
+      return { deliveryId: id, status: "failed", provider: this.kind };
+    }
     // A suppression added after the message was queued also blocks retries.
     const suppressed = await suppressionReason(this.db, msg.to);
     if (suppressed) {
@@ -75,7 +115,8 @@ export class ResendEmail implements EmailAdapter {
       const r = await this.fetchImpl("https://api.resend.com/emails", {
         method: "POST",
         headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json", "idempotency-key": msg.idempotencyKey },
-        body: JSON.stringify({ from: this.from, to: [msg.to], subject: msg.subject, html: msg.html, text: msg.text }),
+        body: JSON.stringify({ from: this.from, to: [msg.to], subject: msg.subject, html: msg.html, text: msg.text,
+          ...(this.environment ? { tags: [{ name: "environment", value: this.environment }] } : {}) }),
       });
       const body = (await r.json().catch(() => ({}))) as { id?: string; message?: string };
       if (!r.ok) throw new Error(`Resend ${r.status}: ${body.message ?? "error"}`);

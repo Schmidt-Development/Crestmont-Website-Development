@@ -44,11 +44,97 @@ test("[TEST-004] restore drill sanitizes the D1 export before importing it (tran
   const { sanitizeExport } = await import("../scripts/restore-drill.ts");
   const dump = ["PRAGMA defer_foreign_keys=TRUE;", "BEGIN TRANSACTION;", 'CREATE TABLE _cf_KV (key TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID;', 'INSERT INTO "_cf_KV" VALUES(\'a\',X\'00\');',
     "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT);", 'INSERT INTO "users" VALUES(\'u1\',\'a@b.example\');', 'DELETE FROM sqlite_sequence;', 'INSERT INTO "sqlite_sequence" VALUES(\'audit_logs\',5);', "COMMIT;"].join("\n");
-  const r = sanitizeExport(dump);
-  assert.deepEqual(r.removed, { transaction: 2, "_cf_ tables": 2, sqlite_sequence: 2 });
-  assert.equal(r.sql, ["PRAGMA defer_foreign_keys=TRUE;", "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT);", 'INSERT INTO "users" VALUES(\'u1\',\'a@b.example\');'].join("\n"));
+  const r = sanitizeExport(dump + "\nANALYZE sqlite_schema;\nINSERT INTO sqlite_stat1 VALUES('users','sqlite_autoindex_users_1','1 1');");
+  assert.deepEqual(r.removed, { transaction: 2, "_cf_ tables": 2, "sqlite internal": 4 });
+  assert.equal(r.sql, ["PRAGMA defer_foreign_keys=TRUE;", "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT);", 'INSERT INTO "users" VALUES(\'u1\',\'a@b.example\');', ""].join("\n"));
   const { DatabaseSync } = await import("node:sqlite");
   const db = new DatabaseSync(":memory:");
   db.exec(r.sql);
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number }).n, 1, "the sanitized dump restores");
+});
+
+test("[TEST-004] restore drill parses the export into statements: ';' and newlines inside data, quoted names, comments and trigger bodies", async () => {
+  const { splitStatements, sanitizeExport } = await import("../scripts/restore-drill.ts");
+  const sql = [
+    "-- header comment; not a statement",
+    `INSERT INTO "notes" VALUES('a;b','line1`, `COMMIT;`, `END;', 'it''s');`,
+    "CREATE TRIGGER t BEFORE UPDATE ON notes\nBEGIN\n  SELECT RAISE(ABORT, 'no; updates');\nEND;",
+    'CREATE TABLE "odd ""name""" (x TEXT);',
+  ].join("\n");
+  const s = splitStatements(sql);
+  assert.equal(s.length, 3);
+  assert.match(s[0], /^INSERT INTO "notes" VALUES\('a;b','line1\nCOMMIT;\nEND;', 'it''s'\);$/, "data that looks like COMMIT;/END; stays inside its row");
+  assert.match(s[1], /^CREATE TRIGGER t[\s\S]*END;$/, "a trigger body is one statement");
+  const r = sanitizeExport(sql);
+  assert.deepEqual(r.removed, {}, "nothing inside a row or a trigger is mistaken for a transaction statement");
+});
+
+/** A dump shaped like `wrangler d1 export`: defer_foreign_keys first, tables in creation order each followed by its
+ *  rows, then indexes and triggers, then SQLite internals. */
+async function d1StyleExport(db: import("node:sqlite").DatabaseSync): Promise<string> {
+  const master = db.prepare("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY rowid").all() as { type: string; name: string; sql: string }[];
+  const lit = (v: unknown) => v === null ? "NULL" : typeof v === "number" || typeof v === "bigint" ? String(v) : `'${String(v).replace(/'/g, "''")}'`;
+  const out = ["PRAGMA defer_foreign_keys=TRUE;"];
+  for (const m of master.filter((m) => m.type === "table")) {
+    out.push(`${m.sql};`);
+    for (const row of db.prepare(`SELECT * FROM "${m.name}"`).all()) out.push(`INSERT INTO "${m.name}" VALUES(${Object.values(row).map(lit).join(",")});`);
+  }
+  for (const m of master.filter((m) => m.type !== "table")) out.push(`${m.sql};`);
+  out.push("DELETE FROM sqlite_sequence;", "ANALYZE sqlite_schema;");
+  return out.join("\n");
+}
+
+test("[TEST-004] [INFRA-006] restore drill re-orders the export so a table created before the table it references restores (staging import failed: D1_RESET_DO)", async () => {
+  const { sanitizeExport, splitStatements } = await import("../scripts/restore-drill.ts");
+  const { DatabaseSync } = await import("node:sqlite");
+  const { readdirSync } = await import("node:fs");
+  // The real schema: requirements (0002) references release_approvals (created later in 0002), deployments → releases, …
+  const src = new DatabaseSync(":memory:");
+  src.exec("PRAGMA foreign_keys=ON");
+  for (const f of readdirSync("migrations").filter((f) => f.endsWith(".sql")).sort()) src.exec(readFileSync(`migrations/${f}`, "utf8"));
+  // One readiness requirement, as staging's evidence ingester writes; its approval reference is NULL — SQLite still
+  // needs the referenced table to exist to insert it.
+  src.exec(`INSERT INTO requirements (id, subsystem, section, title, priority, category, requires_founder_approval, inventory_version, updated_at)
+    VALUES ('TEST-004','ops','backups','restore drill','P0','engineering',0,'v1','2026-10-28T00:00:00.000Z')`);
+  const dump = await d1StyleExport(src);
+  const tables = (src.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[]).map((r) => r.name);
+  const counts = (db: InstanceType<typeof DatabaseSync>) => Object.fromEntries(tables.map((t) => [t, (db.prepare(`SELECT COUNT(*) AS n FROM "${t}"`).get() as { n: number }).n]));
+  const replay = (sql: string) => {  // statement by statement, foreign keys enforced, as a fresh D1 database does
+    const db = new DatabaseSync(":memory:");
+    db.exec("PRAGMA foreign_keys=ON");
+    for (const s of splitStatements(sql)) db.exec(s);
+    return db;
+  };
+  const unsorted = dump.split("\n").filter((l) => !/sqlite_sequence|^ANALYZE/.test(l)).join("\n");
+  assert.throws(() => replay(unsorted), /no such table: main\.release_approvals/, "export order alone cannot be restored");
+
+  const r = sanitizeExport(dump);
+  const restored = replay(r.sql);
+  assert.deepEqual(counts(restored), counts(src), "every table restored with identical row counts");
+  assert.equal((restored.prepare("PRAGMA integrity_check").get() as { integrity_check: string }).integrity_check, "ok");
+  assert.deepEqual(restored.prepare("PRAGMA foreign_key_check").all(), []);
+  const objs = (db: InstanceType<typeof DatabaseSync>) => db.prepare("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
+  assert.deepEqual(objs(restored), objs(src), "tables, indexes and append-only triggers all restored");
+  assert.throws(() => restored.exec("DELETE FROM agreements"), /cannot be deleted/, "restored triggers still enforce");
+  // Every CREATE TABLE precedes every row.
+  const st = splitStatements(r.sql);
+  const lastCreate = st.map((s) => /^CREATE TABLE/i.test(s)).lastIndexOf(true), firstInsert = st.findIndex((s) => /^INSERT/i.test(s));
+  assert.ok(lastCreate < firstInsert);
+});
+
+test("[TEST-004] restore drill inserts parent rows before child rows (no reliance on deferred foreign keys across import batches)", async () => {
+  const { sanitizeExport, splitStatements } = await import("../scripts/restore-drill.ts");
+  const dump = ["PRAGMA defer_foreign_keys=TRUE;",
+    "CREATE TABLE invoices (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id));", `INSERT INTO "invoices" VALUES('i1','p1');`,
+    'CREATE TABLE "projects" (id TEXT PRIMARY KEY, org TEXT REFERENCES [orgs](id));', `INSERT INTO "projects" VALUES('p1','o1');`,
+    "CREATE TABLE orgs (id TEXT PRIMARY KEY, parent TEXT REFERENCES orgs(id));", `INSERT INTO "orgs" VALUES('o0',NULL);`, `INSERT INTO "orgs" VALUES('o1','o0');`,
+    "CREATE INDEX idx_inv ON invoices(project_id);"].join("\n");
+  const st = splitStatements(sanitizeExport(dump).sql);
+  assert.deepEqual(st.filter((s) => /^INSERT/.test(s)).map((s) => s.match(/INTO "(\w+)"/)![1]), ["orgs", "orgs", "projects", "invoices"], "parents first; a table's own rows keep their order");
+  assert.equal(st.at(-1), "CREATE INDEX idx_inv ON invoices(project_id);", "indexes after data");
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(":memory:");
+  db.exec("PRAGMA foreign_keys=ON");
+  for (const s of st.filter((s) => !/^PRAGMA/.test(s))) db.exec(s);   // even with no deferral at all
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM invoices").get() as { n: number }).n, 1);
 });

@@ -201,7 +201,11 @@ test("[AIB-RUNNER] lease watchdog: when heartbeats fail for longer than the leas
   assert.equal(leaseWindowFrom(new Date(Date.now() + 86_400_000).toISOString()), 600_000);
   const manifest = testManifest();
   const cp = await startFakeControlPlane({ jobs: [makeJob()], heartbeat: () => "unavailable" });
-  const model = await startFakeModel(async (_r, _n, sig) => { await delay(30); return sig.aborted ? finish() : listDir(); });
+  // The agent must still be working when the lease window runs out. Each turn makes a DIFFERENT, productive call:
+  // repeating one identical call would trip the runner's loop detector (local provider, loopRepeats) and end the run
+  // as a legitimate "failed" before the window elapsed on a fast machine — a race, not a lease-handling defect.
+  const progress = (n: number): FakeModelReply => ({ toolCalls: [{ name: "write_file", arguments: { path: `.crestmont/progress-${n}.md`, content: `step ${n}\n` } }] });
+  const model = await startFakeModel(async (_r, n, sig) => { await delay(30); return sig.aborted ? finish() : progress(n); });
   const base = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: "x" });
   const cfg = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: makeSkillsDir(manifest), local: { ...base.local, baseUrl: model.url } });
   const client = new ControlPlaneClient({ baseUrl: cp.url, secret: SECRET, runnerId: cfg.runnerId, sleep: async () => {}, retry: { attempts: 1, baseMs: 1 } });
@@ -209,7 +213,7 @@ test("[AIB-RUNNER] lease watchdog: when heartbeats fail for longer than the leas
     const job = await claimFrom(cp);
     const t0 = Date.now();
     const s = await runJob(job, { cfg, client, manifest, logger: silentLogger, heartbeatMs: 25, leaseWindowMs: 300, processEnv: POLLUTED_ENV, dockerExecutor: fakeDocker().executor });
-    assert.equal(s.outcome, "lease_lost");
+    assert.equal(s.outcome, "lease_lost", `stopped for ${s.stopReason ?? "no recorded reason"}`);
     assert.equal(s.complete, null);
     assert.equal(cp.byPath("complete").length, 0, "never completes a job it may no longer own");
     assert.ok(s.workspace && existsSync(s.workspace), "workspace preserved for the next attempt");
