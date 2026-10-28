@@ -177,7 +177,8 @@ test("[SEC-006] legal holds: retention keeps held data, anonymisation waits, hol
 test("[SEC-007] findings register: fixed findings recorded as resolved; new open findings gate release", async () => {
   const { db } = await createTestApp();
   const rows = Object.fromEntries((await db.prepare(`SELECT id, status, release_blocking FROM security_findings`).all<{ id: string; status: string; release_blocking: number }>()).results.map((r) => [r.id, r]));
-  for (const id of ["F-06", "F-08", "F-11", "F-13", "F-15", "F-20", "F-21", "F-22", "F-25", "F-26", "F-27", "F-28"]) assert.equal(rows[id]?.status, "resolved", id);
+  for (const id of ["F-06", "F-08", "F-11", "F-13", "F-15", "F-20", "F-21", "F-22", "F-25", "F-26", "F-27", "F-28", "F-30"]) assert.equal(rows[id]?.status, "resolved", id);
+  assert.deepEqual([rows["F-29"]?.status, rows["F-29"]?.release_blocking], ["open", 0], "F-29 waits on a Founder decision");
   for (const id of ["F-18", "F-19", "F-23"]) assert.deepEqual([rows[id]?.status, rows[id]?.release_blocking], ["open", 1], id);
   for (const id of ["F-01", "F-02", "F-03", "F-10", "F-16"]) assert.equal(rows[id]?.status, "open", `${id} stays open until externally resolved`);
 });
@@ -230,4 +231,36 @@ test("[AUTH-008] irreversible and Founder-protected actions require recent MFA (
     assert.match(r.headers.get("location") ?? "", /^\/mfa\/step-up/, `${path} needs step-up`);
   }
   assert.equal((await db.prepare(`SELECT COUNT(*) n FROM invitations WHERE email = 'new-member@example.com'`).first<{ n: number }>())?.n, 0, "no invitation before step-up");
+});
+
+test("[SEC-003] [AIB-002] the build runner never receives quarantined files; unscanned files are passed as 'pending', never as clean", async () => {
+  const { provisionProject } = await import("../src/services/commerce.ts");
+  const { runnerFile } = await import("../src/services/builds.ts");
+  const { sha256Hex } = await import("../src/lib/crypto.ts");
+  const { nowIso } = await import("../src/lib/db.ts");
+  const t = await fileSetup();
+  const orderId = newId("ord");
+  await t.db.prepare(`INSERT INTO orders (id, organization_id, product_id, total_cents, status, kind, created_at) VALUES (?,?, 'business', 249900, 'paid', 'package', ?)`).bind(orderId, t.cust.organizationId, nowIso()).run();
+  const projectId = await provisionProject(t.db, orderId);
+  const file = await storeUpload({ db: t.db, storage: t.storage }, { organizationId: t.cust.organizationId, projectId, file: new File([PDF], "brief-for-build.pdf"), uploadedBy: t.cust.id });
+  const token = "a".repeat(64), jobId = newId("bjob");
+  await t.db.prepare(`INSERT INTO build_jobs (id, project_id, organization_id, kind, dedupe_key, state, strategy, trigger, lease_runner, lease_token_hash, lease_expires_at, created_at, updated_at)
+    VALUES (?,?,?, 'first_build', ?, 'building', 'standard', 'payment', 'runner-a', ?, ?, ?, ?)`)
+    .bind(jobId, projectId, t.cust.organizationId, `dk-${jobId}`, await sha256Hex(token), new Date(Date.now() + 3600e3).toISOString(), nowIso(), nowIso()).run();
+  const fetchIt = () => runnerFile(t.db, t.storage, { jobId, leaseToken: token, fileId: file.id });
+  const pending = await fetchIt();
+  assert.equal(pending.scanStatus, "pending", "unscanned files are labelled pending for the runner");
+  for (const status of ["failed", "infected"]) {
+    await t.db.prepare(`UPDATE files SET scan_status = ? WHERE id = ?`).bind(status, file.id).run();
+    await assert.rejects(fetchIt(), (e: unknown) => (e as { status?: number }).status === 409, `${status} file refused`);
+  }
+});
+
+test("[SEC-003] portfolio screenshots are recorded as not yet scanned, never as clean", async () => {
+  const src = (await import("node:fs")).readFileSync(new URL("../src/services/portfolio.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /INSERT INTO files[^;]*'clean'/, "no upload path may mark a file clean without a scanner verdict");
+  for (const f of ["src/services/files.ts", "src/services/support.ts", "src/services/portfolio.ts"]) {
+    const s = (await import("node:fs")).readFileSync(new URL(`../${f}`, import.meta.url), "utf8");
+    assert.doesNotMatch(s, /scan_status[^;]{0,200}VALUES[^;]*'clean'/, `${f} inserts files as pending`);
+  }
 });
