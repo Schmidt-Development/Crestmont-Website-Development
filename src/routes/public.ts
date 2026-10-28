@@ -328,6 +328,12 @@ export function turnstileWidget(ctx: AppContext): SafeHtml {
   return html`<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script><div class="cf-turnstile field" data-sitekey="${ctx.env.TURNSTILE_SITE_KEY}"></div>`;
 }
 
+/** One-time submission token (not lead data): a second submit of the same form — a double click or a retried request —
+ *  lands on the same thank-you page without creating a second lead. Forms posted without it behave as before. */
+const SUBMISSION_RE = /^[a-f0-9]{24}$/;
+const submissionField = (v: FormVals) => html`<input type="hidden" name="submission" value="${SUBMISSION_RE.test(v.submission ?? "") ? v.submission : randomHex(12)}">`;
+function randomHex(bytes: number): string { const a = new Uint8Array(bytes); crypto.getRandomValues(a); return [...a].map((b) => b.toString(16).padStart(2, "0")).join(""); }
+
 const honeypot = () => html`<div class="hp" aria-hidden="true"><label for="f-${HONEYPOT}">Leave this field empty</label><input id="f-${HONEYPOT}" name="${HONEYPOT}" type="text" tabindex="-1" autocomplete="off"></div>`;
 
 function contactFields(v: FormVals, e: FieldErrors): SafeHtml {
@@ -356,7 +362,7 @@ function validateLeadForm(v: FormVals, kind: "quote" | "contact"): { errors: Fie
 }
 
 function quoteForm(ctx: AppContext, v: FormVals, e: FieldErrors): SafeHtml {
-  return html`${formErrors(Object.values(e))}<form method="post" action="/quote" class="lead-form" novalidate>${csrf(ctx)}${honeypot()}${attributionFields(requestAttribution(ctx))}
+  return html`${formErrors(Object.values(e))}<form method="post" action="/quote" class="lead-form" novalidate data-lead-form>${csrf(ctx)}${honeypot()}${submissionField(v)}${attributionFields(requestAttribution(ctx))}
 ${contactFields(v, e)}
 ${input({ name: "website", label: "Current website (optional)", type: "url", value: v.website, placeholder: "https://", error: e.website, maxlength: 300 })}
 <div class="grid grid-2 form-grid">
@@ -371,7 +377,7 @@ ${turnstileWidget(ctx)}
 }
 
 function contactForm(ctx: AppContext, v: FormVals, e: FieldErrors, opts: { compact?: boolean } = {}): SafeHtml {
-  return html`${formErrors(Object.values(e))}<form method="post" action="/contact" class="lead-form" novalidate>${csrf(ctx)}${honeypot()}${attributionFields(requestAttribution(ctx))}
+  return html`${formErrors(Object.values(e))}<form method="post" action="/contact" class="lead-form" novalidate>${csrf(ctx)}${honeypot()}${submissionField(v)}${attributionFields(requestAttribution(ctx))}
 ${contactFields(v, e)}
 ${opts.compact ? html`<input type="hidden" name="interest" value="${v.interest || "other"}">` : select({ name: "interest", label: "Topic", options: INTERESTS, value: v.interest || "other", required: true, error: e.interest })}
 ${textarea({ name: "message", label: "Message", value: v.message, rows: opts.compact ? 4 : 6, required: true, maxlength: 4000, error: e.message })}
@@ -387,6 +393,7 @@ const LEAD_FIELDS = ["name", "email", "phone", "company", "website", "interest",
 async function handleLead(ctx: AppContext, kind: "quote" | "contact", rerender: (v: FormVals, e: FieldErrors, status: number) => Promise<Response>): Promise<Response> {
   const f = await ctx.form();
   const v = formValues(f, LEAD_FIELDS);
+  v.submission = str(f, "submission");
   const thanks = kind === "quote" ? "/quote/thanks" : "/contact/thanks";
   if (str(f, HONEYPOT)) {
     await securityEvent(ctx.db, "lead_form_honeypot", { ip: ctx.ip, detail: kind });
@@ -400,6 +407,11 @@ async function handleLead(ctx: AppContext, kind: "quote" | "contact", rerender: 
   const { errors } = validateLeadForm(v, kind);
   if (Object.keys(errors).length) return rerender(v, errors, 422);
 
+  // Consumed only after validation passed, atomically: a duplicate never creates a second lead.
+  if (SUBMISSION_RE.test(v.submission)) {
+    const once = await rateLimit(ctx.db, `leadsub:${v.submission}`, 1, 86_400);
+    if (!once.allowed) return redirect(ctx, thanks, { kind: "success", text: kind === "quote" ? "Thank you — your quote request was received." : "Thank you — your message was received." });
+  }
   const service = v.service ? serviceBySlug(v.service) : undefined;
   const details = kind === "quote"
     ? [`Service: ${service?.name ?? "Not sure yet"}`, `Budget range: ${v.budget}`, `Timeline: ${v.timeline}`, "", v.message].join("\n")
@@ -419,6 +431,8 @@ async function handleLead(ctx: AppContext, kind: "quote" | "contact", rerender: 
       console.error(JSON.stringify({ level: "warn", msg: "lead acknowledgement email failed", leadId, error: (err as Error).message }));
     }
   } catch (err) {
+    // The lead was not saved: release the one-time token so the visitor can resubmit, and never report success.
+    if (SUBMISSION_RE.test(v.submission)) await ctx.db.prepare(`DELETE FROM rate_limits WHERE key = ?`).bind(`leadsub:${v.submission}`).run().catch(() => undefined);
     if (err instanceof ValidationError) return rerender(v, { form: err.issues.join(". ") }, 422);
     throw err;
   }
@@ -686,21 +700,61 @@ function renderQuote(ctx: AppContext, v: FormVals, e: FieldErrors, status: numbe
 <p class="muted">Looking for a standard website? The <a href="/pricing">published packages</a> can be purchased directly.</p></aside></div></section>`, status);
 }
 
+/** Topic → the workspace element that responds to it (decorative; aria-hidden). */
+const TOPIC_GLYPH: Record<string, string> = { starter: "site", business: "site", premium: "site", custom: "code", maintenance: "care", other: "chat" };
+
+/** Contact (docs/frontend/CONTACT.md): the same intake contract as before — fields, names, validation, CRM lead,
+ *  acknowledgement email and thank-you redirect — presented as a centred, premium form inside a responsive workspace. */
+function contactFormPremium(ctx: AppContext, v: FormVals, e: FieldErrors): SafeHtml {
+  const topic = v.interest || "other";
+  return html`${formErrors(Object.values(e))}<form method="post" action="/contact" class="lead-form cx-form" novalidate data-cx-form>${csrf(ctx)}${honeypot()}${submissionField(v)}${attributionFields(requestAttribution(ctx))}
+<div class="cx-progress" aria-hidden="true"><span class="cx-progress__bar" data-cx-bar></span></div>
+<p class="cx-progress__text" data-cx-progress aria-live="polite"></p>
+<fieldset class="cx-step"><legend class="cx-step__title"><span class="cx-step__n">01</span> About you</legend>${contactFields(v, e)}</fieldset>
+<fieldset class="cx-step cx-topics${e.interest ? " has-error" : ""}"${e.interest ? html` aria-describedby="f-interest-err"` : ""}><legend class="cx-step__title"><span class="cx-step__n">02</span> What is it about? <span aria-hidden="true" class="faint">*</span></legend>
+<div class="cx-chips">${INTERESTS.map((i) => html`<label class="cx-chip"><input type="radio" name="interest" value="${i.value}"${i.value === topic ? html` checked` : ""} required data-cx-topic="${TOPIC_GLYPH[i.value] ?? "chat"}"><span>${i.label}</span></label>`)}</div>
+${e.interest ? html`<span class="error-text" id="f-interest-err" role="alert">${e.interest}</span>` : ""}</fieldset>
+<fieldset class="cx-step"><legend class="cx-step__title"><span class="cx-step__n">03</span> Your message</legend>
+${textarea({ name: "message", label: "Message", value: v.message, rows: 6, required: true, maxlength: 4000, error: e.message, hint: "At least 10 characters. Please don't include passwords or payment details." })}
+<p class="cx-count" aria-hidden="true"><span data-cx-count>${String(v.message?.length ?? 0)}</span> / 4000</p></fieldset>
+${turnstileWidget(ctx)}
+<div class="cx-submit"><button type="submit" class="btn btn--primary cx-send" data-cx-send><span class="cx-send__label">Send message</span><span class="cx-send__spin" aria-hidden="true"></span></button>
+<p class="faint form-note">We reply by email. See our <a href="/legal/privacy">privacy policy</a>.</p></div></form>`;
+}
+
 function renderContact(ctx: AppContext, v: FormVals, e: FieldErrors, status: number) {
   return page(ctx, "contact", ["contact.page"], (c) => {
     const cp = c.get("contact.page");
     const hours = ctx.settings["support.staffed_hours"];
     const email = ctx.settings["contact.email"] ?? SUPPORT_EMAIL;
-    return html`${pageHero("Contact", cp.heading, cp.lede)}
-<section class="section section--flush"><div class="container grid grid-2 form-layout"><div class="card card--gold">${contactForm(ctx, v, e)}</div>
-<aside>${dl([["General & support", html`<a href="mailto:${email}">${email}</a>`], ["Sales", html`<a href="mailto:${SALES_EMAIL}">${SALES_EMAIL}</a>`], ["Billing", html`<a href="mailto:${BILLING_EMAIL}">${BILLING_EMAIL}</a>`],
-  ["Staffed hours", hours ?? "Staffed support hours will be published here."]])}
-<p class="muted">Existing customers can submit support tickets at any time from the <a href="/login">customer portal</a>.</p><p class="muted">Need a project estimate? Use the <a href="/quote">custom quote form</a>.</p></aside></div></section>`;
+    const channel = (title: string, addr: string, note: string) => html`<a class="cx-channel" href="mailto:${addr}" data-reveal><span class="cx-channel__title">${title}</span><span class="cx-channel__addr">${addr}</span><span class="cx-channel__note">${note}</span><span class="cx-channel__go" aria-hidden="true">${ARROW_SVG}</span></a>`;
+    return html`<section class="hero hero--page hero--contact"><div class="container cx-hero"><div class="eyebrow">Contact</div><h1 class="hero-title">${cp.heading}</h1>${cp.lede ? html`<p class="lede hero-seq" style="--seq:0">${cp.lede}</p>` : ""}</div></section>
+<section class="section section--flush cx-section"><div class="container">
+<div class="cx" data-cx data-topic="${TOPIC_GLYPH[v.interest || "other"] ?? "chat"}">
+<div class="cx-ws" aria-hidden="true">
+<span class="cx-ws__item cx-ws__item--site" data-glyph="site"><i></i><i></i><i></i><b></b></span>
+<span class="cx-ws__item cx-ws__item--code" data-glyph="code"><em>&lt;/&gt;</em><i></i><i></i></span>
+<span class="cx-ws__item cx-ws__item--care" data-glyph="care"><em>✓</em><i></i></span>
+<span class="cx-ws__item cx-ws__item--chat" data-glyph="chat"><i></i><i></i></span>
+<span class="cx-ws__orb cx-ws__orb--a"></span><span class="cx-ws__orb cx-ws__orb--b"></span><span class="cx-ws__ring" data-cx-ring></span>
+</div>
+<div class="cx-card on-dark">${contactFormPremium(ctx, v, e)}</div>
+</div>
+<div class="cx-channels" data-reveal-group>
+${channel("General & support", email, "Questions, existing projects and anything else")}
+${channel("Sales", SALES_EMAIL, "Packages, quotes and new projects")}
+${channel("Billing", BILLING_EMAIL, "Invoices and payments")}
+</div>
+<div class="cx-more" data-reveal><p><strong>Staffed hours:</strong> ${hours ?? "published here once confirmed"}.</p><p>Existing customers can open support tickets any time in the <a href="/login">customer portal</a>. Planning a project? The <a href="/quote">custom quote form</a> collects the details we need.</p></div>
+</div></section>`;
   }, status);
 }
 
 function thanksPage(ctx: AppContext, title: string, body: string) {
-  return htmlResponse(ctx, publicLayout(ctx, { title, noindex: true }, html`<section class="hero hero--page"><div class="container"><div class="eyebrow">Received</div><h1>${title}</h1><p class="lede">${body}</p>
+  return htmlResponse(ctx, publicLayout(ctx, { title, noindex: true }, html`<section class="hero hero--page hero--thanks"><div class="container cx-thanks">
+<svg class="cx-check" viewBox="0 0 64 64" width="72" height="72" aria-hidden="true"><circle cx="32" cy="32" r="29" fill="none" stroke="currentColor" stroke-width="2"/><path d="M19 33l9 9 17-19" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+<div class="eyebrow">Received</div><h1>${title}</h1><p class="lede">${body}</p>
+<ol class="cx-next"><li><strong>Recorded</strong><span>Your message is saved with our team.</span></li><li><strong>Read by a person</strong><span>Someone from Crestmont reviews it.</span></li><li><strong>Reply by email</strong><span>We answer at the address you gave.</span></li></ol>
 <div class="row">${linkButton("Return home", "/", "secondary")}${linkButton("View packages", "/pricing", "ghost")}</div></div></section>`));
 }
 

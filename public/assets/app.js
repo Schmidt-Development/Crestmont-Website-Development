@@ -61,9 +61,13 @@
       if (e.defaultPrevented) return;
       const pressed = e.submitter instanceof HTMLButtonElement ? e.submitter : f.querySelector("button[type=submit]");
       setTimeout(() => {
+        // Checked again here, after every submit handler has run: a submit cancelled later (for example by client-side
+        // validation) must not leave the button disabled and busy.
+        if (e.defaultPrevented) return;
         const buttons = f.querySelectorAll("button[type=submit]");
         buttons.forEach((b) => { b.setAttribute("aria-disabled", "true"); b.disabled = true; });
-        if (pressed && pressed.classList.contains("btn") && f.method.toLowerCase() === "post") pressed.setAttribute("data-busy", "true");
+        // Buttons with their own sending state (contact form) keep their label visible instead of the generic spinner.
+        if (pressed && pressed.classList.contains("btn") && !pressed.hasAttribute("data-cx-send") && f.method.toLowerCase() === "post") pressed.setAttribute("data-busy", "true");
         setTimeout(() => buttons.forEach((b) => { b.disabled = false; b.removeAttribute("aria-disabled"); b.removeAttribute("data-busy"); }), 8000);
       }, 0);
     });
@@ -636,5 +640,70 @@
       document.addEventListener("click", () => close(null));
       document.addEventListener("keydown", (e) => { if (e.key === "Escape") { const o = document.querySelector('.toggletip[aria-expanded="true"]'); if (o) { o.setAttribute("aria-expanded", "false"); o.focus(); } } });
     }
+  }
+
+  // Contact & quote forms (docs/frontend/CONTACT.md). Same fields and server validation as always; this adds live
+  // progress, inline checks that mirror the server's rules, the topic-reactive workspace, and a sending state that
+  // blocks a second click (the server also ignores duplicate submissions). Success is only ever the server's redirect.
+  {
+    const RULES = {
+      name: (v) => (v.length >= 2 && v.length <= 120 ? "" : "Enter your name (2–120 characters)"),
+      email: (v) => (/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v) && v.length <= 254 ? "" : "Enter a valid email address"),
+      phone: (v) => (!v || /^[+0-9 ().-]{7,40}$/.test(v) ? "" : "Enter a valid phone number, or leave it blank"),
+      message: (v) => (v.length >= 10 && v.length <= 4000 ? "" : "Enter a message of 10–4000 characters"),
+    };
+    const setError = (el, msg) => {
+      const field = el.closest(".field"); if (!field) return;
+      const id = `${el.id}-err`; let err = document.getElementById(id);
+      if (msg) {
+        if (!err) { err = document.createElement("span"); err.className = "error-text"; err.id = id; field.append(err); }
+        err.textContent = msg; el.setAttribute("aria-invalid", "true");
+        const d = new Set((el.getAttribute("aria-describedby") || "").split(" ").filter(Boolean)); d.add(id); el.setAttribute("aria-describedby", [...d].join(" "));
+      } else if (err) { err.remove(); el.removeAttribute("aria-invalid"); el.setAttribute("aria-describedby", (el.getAttribute("aria-describedby") || "").split(" ").filter((x) => x && x !== id).join(" ")); }
+    };
+    const check = (el) => { const r = RULES[el.name]; if (!r) return ""; const msg = r(el.value.trim()); setError(el, msg); return msg; };
+    document.querySelectorAll("[data-cx-form], [data-lead-form]").forEach((form) => {
+      const cx = form.closest("[data-cx]");
+      const send = form.querySelector('button[type="submit"]');
+      const bar = form.querySelector("[data-cx-bar]"), prog = form.querySelector("[data-cx-progress]"), count = form.querySelector("[data-cx-count]");
+      const required = ["name", "email", "message"];
+      const progress = () => {
+        if (!bar) return;
+        let done = required.filter((n) => { const el = form.elements[n]; return el && !RULES[n](el.value.trim()); }).length;
+        const topic = form.querySelector('input[name="interest"]:checked'); if (topic) done++;
+        const total = required.length + 1;
+        bar.style.width = `${(done / total) * 100}%`;
+        prog.textContent = done === total ? "Ready to send" : `${done} of ${total} required details complete`;
+        if (cx) cx.style.setProperty("--cx-p", String(done / total));
+      };
+      form.addEventListener("input", (e) => {
+        const t = e.target;
+        if (t.name === "message" && count) count.textContent = String(t.value.length);
+        if (t.getAttribute("aria-invalid") === "true") check(t);
+        progress();
+      });
+      form.addEventListener("change", (e) => { if (e.target.name === "interest" && cx) cx.dataset.topic = e.target.dataset.cxTopic || "chat"; progress(); });
+      form.addEventListener("focusout", (e) => { if (e.target.value) check(e.target); });
+      form.addEventListener("focusin", (e) => { if (cx) cx.dataset.focus = e.target.name || ""; });
+      form.addEventListener("submit", (e) => {
+        if (form.dataset.sending === "true") { e.preventDefault(); return; }
+        const bad = [...form.querySelectorAll("input, textarea")].filter((el) => RULES[el.name] && check(el));
+        if (bad.length) { e.preventDefault(); bad[0].focus(); return; }
+        form.dataset.sending = "true";
+        if (send) {
+          // Drop the hover tile layer (M03): its copies of the old label would otherwise show over "Sending…".
+          const fx = send.querySelector(".btn__fx"); if (fx) fx.remove(); send._fx = null;
+          send.setAttribute("aria-disabled", "true"); send.classList.add("is-sending");
+          const l = send.querySelector(".cx-send__label"); if (l) l.textContent = "Sending…";
+        }
+        if (cx) cx.classList.add("is-sending");
+      });
+      window.addEventListener("pageshow", () => {
+        delete form.dataset.sending;
+        if (send) { send.removeAttribute("aria-disabled"); send.classList.remove("is-sending"); const l = send.querySelector(".cx-send__label"); if (l) l.textContent = "Send message"; }
+        if (cx) cx.classList.remove("is-sending");
+      });
+      progress();
+    });
   }
 })();
