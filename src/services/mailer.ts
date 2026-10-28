@@ -62,7 +62,9 @@ export interface TemplateData {
   revision_update:
     | ProjectBase & { event: "requested"; round: number; allowance: number }
     | ProjectBase & { event: "beyond_allowance"; allowance: number }
-    | ProjectBase & { event: "delivered"; round: number; notes: string | null };
+    | ProjectBase & { event: "delivered"; round: number; notes: string | null }
+    | ProjectBase & { event: "accepted"; round: number }
+    | ProjectBase & { event: "declined"; round: number; reason: string };
   change_order:
     | ProjectBase & { event: "proposed" }
     | ProjectBase & { event: "decided"; decision: string; invoiceIssued: boolean };
@@ -205,7 +207,7 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
   },
   revision_update: {
     name: "revision_update", category: "transactional", audience: "any",
-    description: "Revision requested (team) and revision ready for review (customer).",
+    description: "Revision requested (team); request accepted or declined by the owner, and revision ready for review (customer).",
     render: (d) => {
       switch (d.event) {
         case "requested": return { subject: `Revision round ${d.round} requested`, heading: `Revision round ${d.round} requested`, paragraphs: [P(d), `Included round ${d.round} of ${d.allowance}.`], cta: { label: "Open project", url: d.url } };
@@ -213,9 +215,14 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
           paragraphs: [P(d), `The customer has used all ${d.allowance} included rounds. Propose a change order with scope and price.`], cta: { label: "Open project", url: d.url } };
         case "delivered": return { subject: `Revision round ${d.round} is ready for review`, heading: `Revision round ${d.round} is ready for review`,
           paragraphs: [P(d), d.notes ?? "Your requested changes are ready. Review them and approve or ask for adjustments."], cta: { label: "Open your portal", url: d.url } };
+        case "accepted": return { subject: `Revision round ${d.round} accepted`, heading: `Revision round ${d.round} accepted`,
+          paragraphs: [P(d), `Revision round ${d.round} was accepted and work on it has started. We will let you know when it is ready for your review.`], cta: { label: "Open your portal", url: d.url } };
+        case "declined": return { subject: `Revision request ${d.round} was not accepted`, heading: `Revision request ${d.round} was not accepted`,
+          paragraphs: [P(d), "Reply in your portal if you have questions or want to submit a revised request.", `Revision request ${d.round} was not accepted: ${d.reason} It does not use one of your included rounds.`], cta: { label: "Open your portal", url: d.url } };
       }
     },
-    samples: [{ ...sampleProject, event: "requested", round: 1, allowance: 3 }, { ...sampleProject, event: "beyond_allowance", allowance: 3 }, { ...sampleProject, event: "delivered", round: 1, notes: null }],
+    samples: [{ ...sampleProject, event: "requested", round: 1, allowance: 3 }, { ...sampleProject, event: "beyond_allowance", allowance: 3 }, { ...sampleProject, event: "delivered", round: 1, notes: null },
+      { ...sampleProject, event: "accepted", round: 2 }, { ...sampleProject, event: "declined", round: 3, reason: "This change is outside the agreed scope." }],
   },
   change_order: {
     name: "change_order", category: "transactional", audience: "any",

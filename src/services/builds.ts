@@ -17,6 +17,7 @@ import { audit } from "./security.ts";
 import { redact } from "./monitoring.ts";
 import { getOnboarding, allFields, isVisible, type Answers } from "./onboarding.ts";
 import { sweepAiLeases } from "./ai-runner.ts";
+import { notifyCustomer, type MailCtx } from "./notifications.ts";
 
 const MICRO = 1_000_000;
 export const usdToMicro = (usd: unknown): number => {
@@ -59,6 +60,9 @@ export interface BuildJob {
   /** The customer's revision request (portal `revisions`) this AI revision works on; null for owner-initiated revisions. */
   customer_revision_id: string | null;
   preview_name: string | null; preview_delete_requested_at: string | null; preview_delete_claimed_at: string | null; preview_deleted_at: string | null;
+  preview_preserved: number; preview_retain_until: string | null; preview_delete_reason: string | null; preview_gated: number;
+  customer_preview_shared_at: string | null; customer_preview_shared_by: string | null; customer_review: "approved" | "changes_requested" | null;
+  customer_reviewed_by: string | null; customer_reviewed_at: string | null; customer_review_note: string | null;
 }
 
 export async function getJob(db: Db, id: string): Promise<BuildJob | null> {
@@ -631,7 +635,8 @@ export async function sweepBuilds(db: Db, now = new Date()): Promise<string> {
     }
   }
   const ai = await sweepAiLeases(db, now);
-  return `${expired} expired lease(s) handled, ${synced} project(s) re-evaluated, ${ai} AI draft lease(s) requeued`;
+  const previews = await sweepPreviewRetention(db, now);
+  return `${expired} expired lease(s) handled, ${synced} project(s) re-evaluated, ${ai} AI draft lease(s) requeued, ${previews} preview(s) past retention`;
 }
 
 /** Safe wrapper for hooks inside payment/intake/refund flows: never breaks the caller; the sweep recovers failures. */
@@ -646,7 +651,7 @@ export async function syncProjectBuildSafe(db: Db, projectId: string | null | un
 type OwnerCtx = Pick<AppContext, "db"> & { userId: string };
 
 export async function updateBuildSettings(c: OwnerCtx, v: { automationEnabled: boolean; runBudgetUsd: number; projectBudgetUsd: number; maxRuntimeMinutes: number; maxTurns: number; maxConcurrent: number; maxAttempts: number; model: string; customerRevisionMode?: CustomerRevisionMode; previewRetentionDays?: number | null }) {
-  if (v.previewRetentionDays != null && !(Number.isInteger(v.previewRetentionDays) && v.previewRetentionDays >= 1 && v.previewRetentionDays <= 365)) throw new HttpError(422, "Preview retention must be 1–365 days, or empty to keep previews until deleted.");
+  if (v.previewRetentionDays !== undefined && !(Number.isInteger(v.previewRetentionDays) && v.previewRetentionDays! >= 1 && v.previewRetentionDays! <= 365)) throw new HttpError(422, "Preview retention must be 1–365 days (Founder decision: 30 days after final approval).");
   if (v.customerRevisionMode !== undefined && !(CUSTOMER_REVISION_MODES as readonly string[]).includes(v.customerRevisionMode)) throw new HttpError(422, "Choose how customer revision requests reach the AI builder.");
   if (!(v.runBudgetUsd > 0 && v.runBudgetUsd <= 1000)) throw new HttpError(422, "Per-run limit must be between $0.01 and $1,000.");
   if (!(v.projectBudgetUsd >= v.runBudgetUsd && v.projectBudgetUsd <= 10000)) throw new HttpError(422, "Per-project limit must be at least the per-run limit and at most $10,000.");
@@ -810,6 +815,10 @@ export interface CustomerRevision {
   liveJob: { id: string; state: BuildState; previewUrl: string | null } | null;
   /** The most recent AI build for this request (any state), for history and preview association. */
   latestJob: { id: string; state: BuildState; previewUrl: string | null } | null;
+  /** Owner decision (Founder decision D1): null = awaiting the owner's review. */
+  decision: "approved" | "rejected" | null; decidedAt: string | null; decisionNote: string | null;
+  /** The project's current reviewable build (what the owner compares the request against). */
+  currentBuild: { id: string; state: BuildState } | null;
 }
 
 /** Mirrors updateRevisionStatus in services/projects.ts: a beyond-allowance round needs an approved/paid change order. */
@@ -818,10 +827,12 @@ export function revisionEntitled(included: boolean, changeOrderStatus: string | 
 }
 
 const CUSTOMER_REVISION_SQL = `SELECT r.id, r.project_id, r.round, r.request_text, r.status, r.created_at, r.included, c.status AS co_status,
+    r.ai_decision, r.ai_decided_at, r.ai_decision_note,
     p.organization_id, p.name AS project_name, o.name AS org_name
   FROM revisions r JOIN projects p ON p.id = r.project_id JOIN organizations o ON o.id = p.organization_id
   LEFT JOIN change_orders c ON c.id = r.billable_change_order_id`;
-type CustomerRevisionRow = { id: string; project_id: string; round: number; request_text: string; status: string; created_at: string; included: number; co_status: string | null; organization_id: string; project_name: string; org_name: string };
+type CustomerRevisionRow = { id: string; project_id: string; round: number; request_text: string; status: string; created_at: string; included: number; co_status: string | null; organization_id: string; project_name: string; org_name: string;
+  ai_decision: "approved" | "rejected" | null; ai_decided_at: string | null; ai_decision_note: string | null };
 
 async function toCustomerRevision(db: Db, r: CustomerRevisionRow): Promise<CustomerRevision> {
   const jobs = (await db.prepare(`SELECT id, state, preview_url FROM build_jobs WHERE customer_revision_id = ? ORDER BY created_at DESC`).bind(r.id).all<{ id: string; state: BuildState; preview_url: string | null }>()).results;
@@ -831,6 +842,9 @@ async function toCustomerRevision(db: Db, r: CustomerRevisionRow): Promise<Custo
     id: r.id, projectId: r.project_id, organizationId: r.organization_id, projectName: r.project_name, organizationName: r.org_name, round: r.round, text: r.request_text,
     status: r.status, createdAt: r.created_at, included: !!r.included, changeOrderStatus: r.co_status, entitled: revisionEntitled(!!r.included, r.co_status),
     liveJob: view(live), latestJob: view(jobs[0]),
+    decision: r.ai_decision, decidedAt: r.ai_decided_at, decisionNote: r.ai_decision_note,
+    currentBuild: await db.prepare(`SELECT id, state FROM build_jobs WHERE project_id = ? AND state NOT IN ('failed','canceled') ORDER BY revision DESC, created_at DESC LIMIT 1`)
+      .bind(r.project_id).first<{ id: string; state: BuildState }>() ?? null,
   };
 }
 
@@ -839,9 +853,9 @@ export async function getCustomerRevision(db: Db, revisionId: string): Promise<C
   return r ? toCustomerRevision(db, r) : null;
 }
 
-/** Open customer requests (submitted / in progress) for the owner's AI builds queue. */
+/** Open customer requests (submitted / in progress, not rejected) for the owner's AI builds queue. */
 export async function customerRevisionQueue(db: Db, limit = 50): Promise<CustomerRevision[]> {
-  const rows = (await db.prepare(`${CUSTOMER_REVISION_SQL} WHERE r.status IN ('submitted','in_progress') ORDER BY r.created_at LIMIT ?`).bind(limit).all<CustomerRevisionRow>()).results;
+  const rows = (await db.prepare(`${CUSTOMER_REVISION_SQL} WHERE r.status IN ('submitted','in_progress') AND COALESCE(r.ai_decision, '') <> 'rejected' ORDER BY r.created_at LIMIT ?`).bind(limit).all<CustomerRevisionRow>()).results;
   return Promise.all(rows.map((r) => toCustomerRevision(db, r)));
 }
 
@@ -851,22 +865,47 @@ export async function customerRevisionQueue(db: Db, limit = 50): Promise<Custome
  * existing rules, the project is eligible and within budget, its latest build reached owner review, and no live AI
  * build exists for the same request. The customer's text is untrusted data (REVISION-REQUEST.md, rules first).
  */
-export async function forwardCustomerRevision(db: Db, revisionId: string, actor: Actor, opts: { instruction?: string } = {}): Promise<string> {
+export async function forwardCustomerRevision(db: Db, revisionId: string, actor: Actor, opts: { instruction?: string; mail?: MailCtx } = {}): Promise<string> {
   const s = await getBuildSettings(db);
   if (s.customer_revision_mode === "off") throw new HttpError(409, "Customer revisions are not sent to the AI builder (Owner → AI builds → Customer revisions: off).");
   const r = await getCustomerRevision(db, revisionId);
   if (!r) throw new HttpError(404, "Revision request not found");
+  if (r.decision === "rejected") throw new HttpError(409, "This revision request was rejected; it cannot start an AI build.");
   if (!["submitted", "in_progress"].includes(r.status)) throw new HttpError(409, `This revision request is ${r.status.replace(/_/g, " ")}; only open requests can be sent to the AI builder.`);
   if (!r.entitled) throw new HttpError(409, "This round is beyond the included revisions; its change order must be approved before any work starts.");
   if (r.liveJob) throw new HttpError(409, "This customer revision already has an AI build in progress.");
   const instruction = (opts.instruction ?? "").trim() || r.text.trim();
   if (instruction.length > 5000) throw new HttpError(422, "The customer's request is longer than 5,000 characters; edit it into an instruction before sending it to the AI builder.");
   const id = await queueRevisionJob(db, r.projectId, instruction, actor, { id: r.id, round: r.round });
-  // Work has started on the request (the customer's revisions page shows "in progress"); staff still deliver it.
-  await db.prepare(`UPDATE revisions SET status = 'in_progress' WHERE id = ? AND status = 'submitted'`).bind(r.id).run();
+  // The owner's approval (D1) is recorded once; work has started (the customer's page shows "in progress").
+  const firstApproval = r.decision !== "approved";
+  await db.prepare(`UPDATE revisions SET status = CASE WHEN status = 'submitted' THEN 'in_progress' ELSE status END,
+      ai_decision = 'approved', ai_decided_by = COALESCE(ai_decided_by, ?), ai_decided_at = COALESCE(ai_decided_at, ?) WHERE id = ?`).bind(actor.userId ?? null, nowIso(), r.id).run();
+  if (firstApproval && opts.mail) {
+    await notifyCustomer(opts.mail, r.projectId, { kind: "revision", mail: { template: "revision_update", data: { event: "accepted", round: r.round } }, path: `/portal/projects/${r.projectId}/revisions`, key: `revacc:${r.id}` });
+  }
   await audit(db, { actorUserId: actor.userId ?? null, actorKind: actor.kind === "user" ? "user" : "system", action: "builds.customer_revision_forwarded", subjectType: "build_job", subjectId: id,
     organizationId: r.organizationId, details: { revisionId: r.id, round: r.round, edited: !!(opts.instruction ?? "").trim(), mode: s.customer_revision_mode } });
   return id;
+}
+
+/**
+ * Founder decision D1: the owner rejects a customer revision request. No AI build starts, the request is closed for
+ * staff work, it does not use an included round, and the customer is told why.
+ */
+export async function rejectCustomerRevision(c: OwnerCtx & { mail?: MailCtx }, revisionId: string, reason: string) {
+  const why = reason.trim();
+  if (why.length < 3 || why.length > 1000) throw new HttpError(422, "Give the customer a reason (3–1000 characters).");
+  const r = await getCustomerRevision(c.db, revisionId);
+  if (!r) throw new HttpError(404, "Revision request not found");
+  if (r.decision === "rejected") throw new HttpError(409, "This revision request was already rejected.");
+  if (r.liveJob) throw new HttpError(409, "An AI build is working on this request; cancel it first.");
+  if (r.status !== "submitted") throw new HttpError(409, `This revision request is ${r.status.replace(/_/g, " ")}; only a request awaiting review can be rejected.`);
+  const res = await c.db.prepare(`UPDATE revisions SET ai_decision = 'rejected', ai_decided_by = ?, ai_decided_at = ?, ai_decision_note = ? WHERE id = ? AND status = 'submitted' AND ai_decision IS NULL`)
+    .bind(c.userId, nowIso(), why, r.id).run();
+  if (!res.meta?.changes) throw new HttpError(409, "This revision request changed meanwhile; reload and try again.");
+  await audit(c.db, { actorUserId: c.userId, action: "builds.customer_revision_rejected", subjectType: "project", subjectId: r.projectId, organizationId: r.organizationId, details: { revisionId: r.id, round: r.round, reason: why } });
+  if (c.mail) await notifyCustomer(c.mail, r.projectId, { kind: "revision", mail: { template: "revision_update", data: { event: "declined", round: r.round, reason: why } }, path: `/portal/projects/${r.projectId}/revisions`, key: `revdec:${r.id}` });
 }
 
 /** Mode `auto`: queue an entitled customer request when everything allows it; otherwise leave it for the owner. Never throws. */
@@ -875,7 +914,7 @@ export async function syncCustomerRevisionSafe(db: Db, revisionId: string): Prom
     const s = await getBuildSettings(db);
     if (s.customer_revision_mode !== "auto" || s.globally_paused || !s.automation_enabled) return null;
     const r = await getCustomerRevision(db, revisionId);
-    if (!r || !r.entitled || r.liveJob || !["submitted", "in_progress"].includes(r.status) || r.text.trim().length > 5000) return null;
+    if (!r || !r.entitled || r.liveJob || r.decision === "rejected" || !["submitted", "in_progress"].includes(r.status) || r.text.trim().length > 5000) return null;
     if ((await projectControls(db, r.projectId))?.paused) return null;
     return await forwardCustomerRevision(db, revisionId, { kind: "system" });
   } catch (e) {
@@ -900,34 +939,156 @@ export async function approveBuild(c: OwnerCtx, id: string, notes: string) {
 
 // ── Preview lifecycle: deletion on owner request or after the retention period (performed by the runner) ──
 
+// ── Preview retention (Founder decision D2): 30 days after the owner approves the final preview ──
+
+export type PreviewRetentionStatus =
+  | "none" | "deleted" | "deletion_pending" | "preserved" | "in_progress" | "awaiting_approval"
+  | "approved_kept" | "scheduled" | "kept_unrecoverable";
+
+export interface PreviewRetention {
+  status: PreviewRetentionStatus;
+  /** When the scheduled cleanup deletes the preview (status "scheduled"), else null. */
+  deleteAfter: string | null;
+  note: string;
+}
+
+const RETENTION_TEXT: Record<PreviewRetentionStatus, string> = {
+  none: "No preview",
+  deleted: "Deleted",
+  deletion_pending: "Deletion requested; the runner deletes it when idle",
+  preserved: "Preserved by the owner (never deleted automatically)",
+  in_progress: "Kept: the build is in progress or awaiting owner review",
+  awaiting_approval: "Kept until the owner approves a final preview for this project",
+  approved_kept: "Approved preview: kept until its production deployment is verified",
+  scheduled: "Scheduled for deletion",
+  kept_unrecoverable: "Kept: this is the only recoverable copy of the site (no project repository or checkpoint)",
+};
+
+/** A build's site can be rebuilt without its preview only when its source exists outside the runner's workspace. */
+function sourceRecoverable(j: Pick<BuildJob, "source_commit" | "source_repo" | "checkpoint_key">): boolean {
+  return !!j.source_commit && (/^https:\/\//.test(j.source_repo ?? "") || !!j.checkpoint_key);
+}
+
+/**
+ * The retention decision for every preview of a project. Never automatic for a build still in progress or awaiting
+ * owner review; the approved build's preview is kept until its production deployment is verified live; superseded
+ * previews (older builds, and builds that failed or were canceled) are deleted `preview_retention_days` (30) after the
+ * owner's approval — later if the owner extended them, never if preserved or if the preview is the only recoverable
+ * copy of the site.
+ */
+export async function previewRetentionPlan(db: Db, projectId: string, now = new Date()): Promise<Map<string, PreviewRetention>> {
+  const s = await getBuildSettings(db);
+  const days = s.preview_retention_days ?? 30;
+  const jobs = (await db.prepare(`SELECT * FROM build_jobs WHERE project_id = ? ORDER BY created_at`).bind(projectId).all<BuildJob>()).results;
+  const approved = jobs.filter((x) => x.state === "approved" && x.approved_at).sort((a, b) => (a.approved_at! < b.approved_at! ? 1 : -1))[0] ?? null;
+  const handoff = approved ? await db.prepare(`SELECT verified_at FROM site_deployments WHERE build_job_id = ? AND state IN ('live','superseded') AND verified_at IS NOT NULL ORDER BY verified_at LIMIT 1`)
+    .bind(approved.id).first<{ verified_at: string }>() : null;
+  const plus = (iso: string, d: number) => new Date(Date.parse(iso) + d * 86400_000).toISOString();
+  const out = new Map<string, PreviewRetention>();
+  const put = (id: string, status: PreviewRetentionStatus, deleteAfter: string | null = null) => out.set(id, { status, deleteAfter, note: RETENTION_TEXT[status] });
+  for (const j of jobs) {
+    if (!j.preview_url && !j.preview_name) { put(j.id, "none"); continue; }
+    if (j.preview_deleted_at) { put(j.id, "deleted"); continue; }
+    if (j.preview_delete_requested_at) { put(j.id, "deletion_pending", j.preview_delete_requested_at); continue; }
+    if (j.preview_preserved) { put(j.id, "preserved"); continue; }
+    const stopped = ["approved", "failed", "canceled"].includes(j.state);
+    // No final approval yet: nothing expires (active builds and previews awaiting owner review are never automatic).
+    if (!approved) { put(j.id, stopped ? "awaiting_approval" : "in_progress"); continue; }
+    let base: string;
+    if (j.id === approved.id) {
+      if (!handoff) { put(j.id, "approved_kept"); continue; }
+      base = handoff.verified_at;
+    } else if (j.created_at < approved.created_at) {
+      base = approved.approved_at!; // superseded by the approved build, whatever state it was left in
+    } else if (stopped) {
+      base = j.finished_at ?? j.updated_at; // a later attempt that failed or was canceled
+    } else { put(j.id, "in_progress"); continue; } // newer work in progress or awaiting review
+    if (!sourceRecoverable(j)) { put(j.id, "kept_unrecoverable"); continue; }
+    let due = plus(base, days);
+    if (j.preview_retain_until && j.preview_retain_until > due) due = j.preview_retain_until;
+    put(j.id, "scheduled", due);
+  }
+  void now;
+  return out;
+}
+
+export async function previewRetentionFor(db: Db, j: BuildJob, now = new Date()): Promise<PreviewRetention> {
+  return (await previewRetentionPlan(db, j.project_id, now)).get(j.id) ?? { status: "none", deleteAfter: null, note: RETENTION_TEXT.none };
+}
+
+/** Scheduled cleanup (15-minute sweep): previews past their date become deletion requests, each audited. */
+export async function sweepPreviewRetention(db: Db, now = new Date()): Promise<number> {
+  const at = now.toISOString();
+  const projects = (await db.prepare(`SELECT DISTINCT project_id FROM build_jobs WHERE preview_name IS NOT NULL AND preview_deleted_at IS NULL AND preview_delete_requested_at IS NULL AND preview_preserved = 0 LIMIT 200`)
+    .all<{ project_id: string }>()).results;
+  let n = 0;
+  for (const p of projects) {
+    for (const [id, r] of await previewRetentionPlan(db, p.project_id, now)) {
+      if (r.status !== "scheduled" || !r.deleteAfter || r.deleteAfter > at) continue;
+      const job = (await getJob(db, id))!;
+      if (!job.preview_name) continue; // a preview without a recorded Worker name cannot be deleted by the runner
+      const res = await db.prepare(`UPDATE build_jobs SET preview_delete_requested_at = ?, preview_delete_reason = 'retention', updated_at = ? WHERE id = ? AND preview_delete_requested_at IS NULL AND preview_deleted_at IS NULL AND preview_preserved = 0`)
+        .bind(at, at, id).run();
+      if (!res.meta?.changes) continue;
+      await event(db, id, "preview", `Preview retention ended (${r.deleteAfter.slice(0, 10)}); deletion requested`, { kind: "system" }, { data: { name: job.preview_name } });
+      await audit(db, { actorKind: "system", action: "builds.preview_expired", subjectType: "build_job", subjectId: id, organizationId: job.organization_id, details: { name: job.preview_name, deleteAfter: r.deleteAfter } });
+      n++;
+    }
+  }
+  return n;
+}
+
 /** Owner action: delete this build's preview Worker. The runner (which holds the preview credential) does it. */
 export async function requestPreviewDeletion(c: OwnerCtx, id: string) {
   const j = await ownerJob(c, id);
   if (!j.preview_name || j.preview_deleted_at) throw new HttpError(409, "This build has no preview to delete.");
   if (["preparing", "building", "verifying"].includes(j.state)) throw new HttpError(409, "Wait until the build stops before deleting its preview.");
-  await c.db.prepare(`UPDATE build_jobs SET preview_delete_requested_at = COALESCE(preview_delete_requested_at, ?), updated_at = ? WHERE id = ?`).bind(nowIso(), nowIso(), id).run();
+  const r = await previewRetentionFor(c.db, j);
+  if (r.status === "approved_kept") throw new HttpError(409, "This is the approved preview; it is kept until its production deployment is verified.");
+  if (!sourceRecoverable(j)) throw new HttpError(409, "This preview is the only recoverable copy of the site (no project repository or checkpoint); it cannot be deleted.");
+  await c.db.prepare(`UPDATE build_jobs SET preview_delete_requested_at = COALESCE(preview_delete_requested_at, ?), preview_delete_reason = COALESCE(preview_delete_reason, 'owner'), updated_at = ? WHERE id = ?`).bind(nowIso(), nowIso(), id).run();
   await event(c.db, id, "preview", "Preview deletion requested by owner; the runner deletes it when idle", userActor(c), { data: { name: j.preview_name } });
   await audit(c.db, { actorUserId: c.userId, action: "builds.preview_delete_requested", subjectType: "build_job", subjectId: id, organizationId: j.organization_id, details: { name: j.preview_name } });
 }
 
+/** Owner: preserve a preview (never deleted automatically), release it, or extend its retention by 30 days. */
+export async function setPreviewRetention(c: OwnerCtx, id: string, action: string) {
+  const j = await ownerJob(c, id);
+  if (!j.preview_name && !j.preview_url) throw new HttpError(409, "This build has no preview.");
+  if (j.preview_deleted_at) throw new HttpError(409, "This preview was already deleted.");
+  if (!["preserve", "release", "extend"].includes(action)) throw new HttpError(422, "Choose preserve, release or extend.");
+  if (j.preview_delete_claimed_at) throw new HttpError(409, "The runner is deleting this preview right now; try again in a few minutes.");
+  const now = nowIso();
+  let detail: Record<string, unknown> = { action };
+  if (action === "preserve") {
+    await c.db.prepare(`UPDATE build_jobs SET preview_preserved = 1, preview_delete_requested_at = CASE WHEN preview_delete_reason = 'retention' THEN NULL ELSE preview_delete_requested_at END,
+        preview_delete_reason = CASE WHEN preview_delete_reason = 'retention' THEN NULL ELSE preview_delete_reason END, updated_at = ? WHERE id = ?`).bind(now, id).run();
+  } else if (action === "release") {
+    await c.db.prepare(`UPDATE build_jobs SET preview_preserved = 0, updated_at = ? WHERE id = ?`).bind(now, id).run();
+  } else {
+    const current = await previewRetentionFor(c.db, j);
+    const from = current.deleteAfter && current.deleteAfter > now ? current.deleteAfter : now;
+    const until = new Date(Date.parse(from) + 30 * 86400_000).toISOString();
+    await c.db.prepare(`UPDATE build_jobs SET preview_retain_until = ?, preview_delete_requested_at = CASE WHEN preview_delete_reason = 'retention' THEN NULL ELSE preview_delete_requested_at END,
+        preview_delete_reason = CASE WHEN preview_delete_reason = 'retention' THEN NULL ELSE preview_delete_reason END, updated_at = ? WHERE id = ?`).bind(until, now, id).run();
+    detail = { action, until };
+  }
+  await event(c.db, id, "preview", action === "preserve" ? "Preview preserved by owner" : action === "release" ? "Preview no longer preserved; normal retention applies" : `Preview retention extended to ${String(detail.until).slice(0, 10)}`, userActor(c));
+  await audit(c.db, { actorUserId: c.userId, action: "builds.preview_retention_changed", subjectType: "build_job", subjectId: id, organizationId: j.organization_id, details: detail });
+}
+
 /**
- * Previews to delete now: owner-requested ones, and (when a retention period is set) previews of builds that finished
- * longer ago than that AND are approved / canceled / failed or superseded by a newer build of the same project. The
- * preview currently in owner review is never expired. Each is handed out once per hour until the runner reports back.
+ * Previews the runner should delete now: requested by the owner or by the retention sweep (never decided here).
+ * Each is handed out once per hour until the runner reports back, so a failed deletion is retried safely.
  */
 export async function claimExpiredPreviews(db: Db, now = new Date()) {
-  const s = await getBuildSettings(db);
   const at = now.toISOString();
   const reclaimBefore = new Date(now.getTime() - 3600_000).toISOString();
-  const cutoff = s.preview_retention_days ? new Date(now.getTime() - s.preview_retention_days * 86400_000).toISOString() : null;
   const rows = (await db.prepare(`SELECT j.id, j.preview_name FROM build_jobs j
-      WHERE j.preview_name IS NOT NULL AND j.preview_deleted_at IS NULL
+      WHERE j.preview_name IS NOT NULL AND j.preview_deleted_at IS NULL AND j.preview_delete_requested_at IS NOT NULL AND j.preview_preserved = 0
         AND (j.preview_delete_claimed_at IS NULL OR j.preview_delete_claimed_at < ?)
         AND j.state NOT IN ('preparing','building','verifying')
-        AND (j.preview_delete_requested_at IS NOT NULL
-          OR (? IS NOT NULL AND j.finished_at < ? AND (j.state IN ('approved','canceled','failed')
-                OR EXISTS (SELECT 1 FROM build_jobs n WHERE n.project_id = j.project_id AND n.created_at > j.created_at))))
-      ORDER BY j.finished_at LIMIT 10`).bind(reclaimBefore, cutoff, cutoff).all<{ id: string; preview_name: string }>()).results
+      ORDER BY j.preview_delete_requested_at LIMIT 10`).bind(reclaimBefore).all<{ id: string; preview_name: string }>()).results
     .filter((r) => PREVIEW_NAME.test(r.preview_name));
   for (const r of rows) await db.prepare(`UPDATE build_jobs SET preview_delete_claimed_at = ? WHERE id = ?`).bind(at, r.id).run();
   return { previews: rows.map((r) => ({ jobId: r.id, previewName: r.preview_name })) };
@@ -938,10 +1099,11 @@ export async function reportPreviewDeleted(db: Db, b: Record<string, unknown>) {
   if (!job || !job.preview_name || !job.preview_delete_claimed_at) throw new HttpError(404, "No preview deletion pending for this build");
   if (b.ok === true) {
     await db.prepare(`UPDATE build_jobs SET preview_deleted_at = ?, preview_delete_claimed_at = NULL, updated_at = ? WHERE id = ?`).bind(nowIso(), nowIso(), job.id).run();
-    await event(db, job.id, "preview", `Preview ${job.preview_name} deleted by the runner`, { kind: "runner" }, { data: { name: job.preview_name, requested: !!job.preview_delete_requested_at } });
+    await event(db, job.id, "preview", `Preview ${job.preview_name} deleted by the runner`, { kind: "runner" }, { data: { name: job.preview_name, reason: job.preview_delete_reason } });
+    await audit(db, { actorKind: "system", action: "builds.preview_deleted", subjectType: "build_job", subjectId: job.id, organizationId: job.organization_id, details: { name: job.preview_name, reason: job.preview_delete_reason } });
   } else {
     await db.prepare(`UPDATE build_jobs SET preview_delete_claimed_at = NULL WHERE id = ?`).bind(job.id).run();
-    await event(db, job.id, "error", `Preview deletion failed: ${sanitize(b.error ?? "unknown error", 300)}`, { kind: "runner" });
+    await event(db, job.id, "error", `Preview deletion failed (retried within the hour): ${sanitize(b.error ?? "unknown error", 300)}`, { kind: "runner" });
   }
   return { ok: true };
 }
@@ -958,6 +1120,10 @@ export interface BuildSummary {
   cancelRequested: boolean; projectPaused: boolean; updatedAt: string;
   /** The customer revision request this build works on (null for first builds and owner-written revisions). */
   customerRevision: { id: string; round: number } | null;
+  /** Founder decision D2: what happens to this build's preview and when (scheduled deletion date). */
+  previewRetention: PreviewRetention;
+  /** Founder decision D3: previews are private; the preview opens through Crestmont sign-in only. */
+  preview: { gated: boolean; sharedWithCustomer: boolean; customerReview: "approved" | "changes_requested" | null };
 }
 
 export async function summarize(db: Db, j: BuildJob, now = new Date()): Promise<BuildSummary> {
@@ -979,6 +1145,8 @@ export async function summarize(db: Db, j: BuildJob, now = new Date()): Promise<
     customerRevision: j.customer_revision_id
       ? { id: j.customer_revision_id, round: (await db.prepare(`SELECT round FROM revisions WHERE id = ?`).bind(j.customer_revision_id).first<{ round: number }>())?.round ?? 0 }
       : null,
+    previewRetention: await previewRetentionFor(db, j, now),
+    preview: { gated: !!j.preview_gated, sharedWithCustomer: !!j.customer_preview_shared_at, customerReview: j.customer_review },
   };
 }
 

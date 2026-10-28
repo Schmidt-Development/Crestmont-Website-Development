@@ -99,7 +99,7 @@ export function register(r: Router): void {
     const custRevs = await B.customerRevisionQueue(ctx.db);
     const modeText: Record<B.CustomerRevisionMode, string> = {
       off: "Off: customer revision requests are handled by staff only.",
-      owner_approval: "Owner approval: requests wait here until an owner sends them to the AI builder.",
+      owner_approval: "Owner approval (Founder decision): every request waits here until an owner approves it (it then enters the build queue) or rejects it (no AI build; the customer is told why).",
       auto: "Automatic: entitled requests are queued as AI revisions when the project is eligible.",
     };
     const entitlement = (r: B.CustomerRevision) => r.included ? badge("ok", "Included round") : r.entitled ? badge("ok", "Change order approved") : badge("warn", r.changeOrderStatus ? `Change order ${r.changeOrderStatus}` : "Change order required");
@@ -119,6 +119,7 @@ ${table(sums, [
   { header: "Requirements", cell: (x) => `${x.requirements.verified} verified · ${x.requirements.implemented_unverified} unverified · ${x.requirements.blocked} blocked · ${x.requirements.remaining} remaining` },
   { header: "Cost", cell: (x) => `${usd(x.costUsd)} (project ${usd(x.projectSpendUsd)} of ${usd(x.projectBudgetUsd)})`, numeric: true },
   { header: "Elapsed", cell: (x) => dur(x.elapsedSeconds) },
+  { header: "Preview", cell: (x) => x.previewRetention.status === "scheduled" ? `Deletes ${x.previewRetention.deleteAfter!.slice(0, 10)}` : x.previewRetention.status === "none" ? "—" : x.previewRetention.note },
 ], { empty: emptyState("No AI builds yet", "A build record appears when a paid project created after automation was enabled has its intake or verified payment. Older projects are started only through Backfill.") })}
 ${pagination(ctx, page, rows.length > limit)}
 <section class="card"><h2 class="card__title">Customer revision requests</h2>
@@ -128,12 +129,14 @@ ${table(custRevs, [
   { header: "Round", cell: (r) => html`${r.round} ${badge("info", r.status.replace(/_/g, " "))}`, numeric: true },
   { header: "Request (customer text)", cell: (r) => r.text.length > 240 ? `${r.text.slice(0, 240)}…` : r.text },
   { header: "Entitlement", cell: (r) => entitlement(r) },
+  { header: "Website now", cell: (r) => r.currentBuild ? html`<a href="/staff/builds/${r.currentBuild.id}">${BUILD_STATE_LABELS[r.currentBuild.state]}</a>` : "No build yet" },
   { header: "AI build", cell: (r) => {
     const j = r.liveJob ?? r.latestJob;
-    return j ? html`<a href="/staff/builds/${j.id}">${BUILD_STATE_LABELS[j.state]}</a>${j.previewUrl ? html` · <a href="${j.previewUrl}" rel="noopener noreferrer" target="_blank">preview</a>` : ""}` : "—";
+    return j ? html`<a href="/staff/builds/${j.id}">${BUILD_STATE_LABELS[j.state]}</a>` : r.decision === "approved" ? "Approved" : badge("warn", "Awaiting owner review");
   } },
   { header: "", cell: (r) => manageBuilds && s.customer_revision_mode !== "off" && r.entitled && !r.liveJob
-    ? html`<form method="post" action="/staff/builds/customer-revisions/${r.id}/forward" class="stack">${csrf(ctx)}${textarea({ name: "instruction", label: "Instruction for the AI builder (edit if needed)", value: r.text.slice(0, 5000), maxlength: 5000, rows: 3, id: `f-instr-${r.id}` })}${button(r.latestJob ? "Send to AI build again" : "Send to AI build", { variant: "primary", size: "sm" })}</form>`
+    ? html`<form method="post" action="/staff/builds/customer-revisions/${r.id}/forward" class="stack">${csrf(ctx)}${textarea({ name: "instruction", label: "Instruction for the AI builder (edit if needed)", value: r.text.slice(0, 5000), maxlength: 5000, rows: 3, id: `f-instr-${r.id}` })}${button(r.latestJob ? "Start AI build again" : "Approve and start AI build", { variant: "primary", size: "sm" })}</form>
+${r.status === "submitted" && !r.decision ? html`<form method="post" action="/staff/builds/customer-revisions/${r.id}/reject" class="stack">${csrf(ctx)}${input({ name: "reason", label: "Reason (sent to the customer)", required: true, maxlength: 1000, id: `f-rej-${r.id}` })}${button("Reject request", { variant: "danger", size: "sm" })}</form>` : ""}`
     : "" },
 ], { empty: emptyState("No open customer revision requests", "Requests customers submit in the portal appear here while they are open.") })}
 </section>
@@ -146,7 +149,7 @@ ${configure ? html`<form method="post" action="/staff/builds/settings" class="st
 ${input({ name: "max_runtime", label: "Max runtime (minutes)", type: "number", value: s.max_runtime_minutes })}${input({ name: "max_turns", label: "Max agent turns", type: "number", value: s.max_turns })}${input({ name: "max_concurrent", label: "Concurrent builds", type: "number", value: s.max_concurrent })}
 ${input({ name: "max_attempts", label: "Automatic attempts", type: "number", value: s.max_attempts })}</div>
 ${checkbox("automation_enabled", "Start eligible first builds automatically", { checked: !!s.automation_enabled })}
-${input({ name: "preview_retention_days", label: "Delete superseded or finished previews after (days)", type: "number", value: s.preview_retention_days ?? "", hint: "Empty: previews are kept until an owner deletes them. The preview in owner review is never deleted automatically." })}
+${input({ name: "preview_retention_days", label: "Preview retention after final approval (days)", type: "number", value: s.preview_retention_days ?? 30, hint: "Founder decision: 30. Superseded previews are deleted this many days after the owner approves the final preview; the approved one stays until its production deployment is verified; previews in progress or review never expire." })}
 ${select({ name: "customer_revision_mode", label: "Customer revision requests", value: s.customer_revision_mode, options: [
   { value: "off", label: "Off (staff only)" }, { value: "owner_approval", label: "Owner approval (default)" }, { value: "auto", label: "Automatic for entitled rounds" }] })}
 <p class="faint">Limits are enforced by the platform at every runner heartbeat, not by the prompt. Projects created before ${formatDateTime(s.auto_start_after)} are never started automatically; use Backfill on a project to include it.</p>
@@ -173,6 +176,7 @@ ${dl([["Project", html`<a href="/staff/projects/${x.projectId}">${x.projectName}
   ["Preview", j.preview_deleted_at ? `Deleted ${formatDateTime(j.preview_deleted_at)}${j.preview_name ? ` (${j.preview_name})` : ""}`
     : x.previewUrl ? html`<a href="${x.previewUrl}" rel="noopener noreferrer" target="_blank">${x.previewUrl}</a>${j.preview_delete_requested_at ? html` ${badge("warn", "Deletion requested")}` : ""}` : "Not available"],
   ["Source", x.source.repo ? `${x.source.repo}${x.source.branch ? ` @ ${x.source.branch}` : ""}${x.source.commit ? ` (${x.source.commit.slice(0, 12)})` : ""}` : "Not available"],
+  ["Preview retention", x.previewRetention.status === "scheduled" ? `Scheduled for deletion on ${formatDateTime(x.previewRetention.deleteAfter!)}${j.preview_retain_until ? " (extended)" : ""}` : x.previewRetention.note],
   ["Brief", d.brief ? `version ${(d.brief as { version: number }).version}` : "—"], ["Revision instruction", j.instruction],
   ["Customer revision", x.customerRevision ? html`Round ${x.customerRevision.round} (<a href="/staff/projects/${x.projectId}?tab=revisions">project revisions</a>)` : "—"]])}
 ${d.missingInformation.length ? alert("warn", html`<strong>Information needed:</strong> ${d.missingInformation.join("; ")}`) : ""}
@@ -186,7 +190,10 @@ ${j.state === "failed" ? act("retry", "Retry") : ""}
 ${["paused", "budget_paused", "needs_information", "failed"].includes(j.state) && (j.agent_session_id || j.source_commit) ? act("resume", "Resume saved session") : ""}
 ${["ready_for_review", "approved", "needs_information"].includes(j.state) ? act("revision", "Submit revision", textarea({ name: "instruction", label: "Revision instruction", required: true, maxlength: 5000, rows: 3 }), "primary") : ""}
 ${configure && j.state === "ready_for_review" && !j.preview_deleted_at && !j.preview_delete_requested_at ? act("approve", "Approve preview for delivery", input({ name: "notes", label: "Notes", maxlength: 500, id: "f-approve-notes" }), "primary") : ""}
-${j.preview_name && !j.preview_deleted_at && !j.preview_delete_requested_at && !["preparing", "building", "verifying"].includes(j.state) ? act("delete-preview", "Delete preview") : ""}
+${j.preview_name && !j.preview_deleted_at && !j.preview_delete_requested_at && !["preparing", "building", "verifying"].includes(j.state) && !["approved_kept", "kept_unrecoverable"].includes(x.previewRetention.status) ? act("delete-preview", "Delete preview") : ""}
+${(j.preview_name || j.preview_url) && !j.preview_deleted_at && !j.preview_delete_claimed_at ? html`<form method="post" action="/staff/builds/${j.id}/preview-retention" class="row">${csrf(ctx)}${j.preview_preserved
+  ? button("Stop preserving preview", { variant: "secondary", size: "sm", name: "action", value: "release" })
+  : html`${button("Preserve preview", { variant: "secondary", size: "sm", name: "action", value: "preserve" })}${button("Extend retention by 30 days", { variant: "secondary", size: "sm", name: "action", value: "extend" })}`}</form>` : ""}
 ${html`<form method="post" action="/staff/builds/projects/${j.project_id}/pause" class="row">${csrf(ctx)}${x.projectPaused ? html`<input type="hidden" name="paused" value="0">${button("Resume project automation", { variant: "secondary", size: "sm" })}` : html`<input type="hidden" name="paused" value="1">${input({ name: "reason", label: "Reason", required: true, maxlength: 300, id: "f-project-pause" })}${button("Pause this project", { variant: "secondary", size: "sm" })}`}</form>`}
 ${configure ? html`<form method="post" action="/staff/builds/projects/${j.project_id}/budget" class="row">${csrf(ctx)}${input({ name: "project_budget", label: "Project limit (USD)", type: "number", step: "0.01", value: x.projectBudgetUsd, id: "f-project-budget" })}${button("Set project limit", { variant: "secondary", size: "sm" })}</form>` : ""}
 <p class="faint">Approving a preview records the owner decision only; it never publishes to production, changes domains, charges the customer or emails them.</p></section>` : ""}
@@ -221,7 +228,7 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     try {
       await B.updateBuildSettings(owner(ctx), { automationEnabled: !!f.get("automation_enabled"), runBudgetUsd: n("run_budget"), projectBudgetUsd: n("project_budget"), maxRuntimeMinutes: n("max_runtime"), maxTurns: n("max_turns"), maxConcurrent: n("max_concurrent"), maxAttempts: n("max_attempts"), model: str(f, "model"),
         customerRevisionMode: (str(f, "customer_revision_mode") || undefined) as B.CustomerRevisionMode | undefined,
-        previewRetentionDays: f.has("preview_retention_days") ? (str(f, "preview_retention_days") ? Number(str(f, "preview_retention_days")) : null) : undefined });
+        previewRetentionDays: f.has("preview_retention_days") ? Number(str(f, "preview_retention_days") || "NaN") : undefined });
     } catch (e) { return fail(ctx, "/staff/builds", e); }
     return back(ctx, "/staff/builds", "Limits saved.");
   });
@@ -274,6 +281,11 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     return back(ctx, `/staff/builds/${p.id}`, "Preview approved for the delivery process. Nothing was published or sent to the customer.");
   });
 
+  r.post("/staff/builds/:id/preview-retention", async (ctx, p) => {
+    requireStaff(ctx, "builds.manage");
+    try { await B.setPreviewRetention(owner(ctx), p.id, str(await ctx.form(), "action")); } catch (e) { return fail(ctx, `/staff/builds/${p.id}`, e); }
+    return back(ctx, `/staff/builds/${p.id}`, "Preview retention updated.");
+  });
   r.post("/staff/builds/:id/delete-preview", async (ctx, p) => {
     requireStaff(ctx, "builds.manage");
     try { await B.requestPreviewDeletion(owner(ctx), p.id); } catch (e) { return fail(ctx, `/staff/builds/${p.id}`, e); }
@@ -282,8 +294,13 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
   r.post("/staff/builds/customer-revisions/:id/forward", async (ctx, p) => {
     requireStaff(ctx, "builds.manage");
     let id: string;
-    try { id = await B.forwardCustomerRevision(ctx.db, p.id, { kind: "user", userId: ctx.user!.id }, { instruction: str(await ctx.form(), "instruction") }); } catch (e) { return fail(ctx, "/staff/builds", e); }
-    return back(ctx, `/staff/builds/${id}`, "Customer revision sent to the AI builder. It continues from the latest build; deliver the result from the project's Revisions tab after review.");
+    try { id = await B.forwardCustomerRevision(ctx.db, p.id, { kind: "user", userId: ctx.user!.id }, { instruction: str(await ctx.form(), "instruction"), mail: ctx }); } catch (e) { return fail(ctx, "/staff/builds", e); }
+    return back(ctx, `/staff/builds/${id}`, "Revision approved and queued for the AI builder. It continues from the latest build; deliver the result from the project's Revisions tab after review.");
+  });
+  r.post("/staff/builds/customer-revisions/:id/reject", async (ctx, p) => {
+    requireStaff(ctx, "builds.manage");
+    try { await B.rejectCustomerRevision({ ...owner(ctx), mail: ctx }, p.id, str(await ctx.form(), "reason")); } catch (e) { return fail(ctx, "/staff/builds", e); }
+    return back(ctx, "/staff/builds", "Revision request rejected. No AI build starts; the customer was told why and the round is not used.");
   });
 
   // ───── Customer-facing summary (own organization; no internal detail) ─────

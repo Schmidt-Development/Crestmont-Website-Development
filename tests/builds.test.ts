@@ -617,49 +617,135 @@ test("[AIB-006] customer revisions follow the existing entitlement rules and the
   assert.equal((await B.getBuildSettings(t.db)).customer_revision_mode, "owner_approval", "omitted = unchanged");
 });
 
-test("[AIB-006] previews: one per build, deleted on owner request or after the Founder's retention period (never the one in review), only by the runner", async () => {
+test("[AIB-006] D2: previews are kept while in work or review, the approved one until its production deployment is verified, superseded ones 30 days after approval; owners can preserve or extend; cleanup is scheduled, audited and retried", async () => {
   const t = await app();
   const { pid, firstJobId } = await reviewedProject(t);
-  // complete() above sent no previewName (an older runner): nothing is ever deleted for it.
-  assert.equal((await B.getJob(t.db, firstJobId))!.preview_name, null);
-  await t.db.prepare(`UPDATE build_jobs SET preview_name = 'cm-prv-first-b0' WHERE id = ?`).bind(firstJobId).run();
-  // A revision reports its own preview Worker; malformed names are not stored.
+  const DAY = 86400_000;
+  const setJob = (id: string, cols: string, ...v: unknown[]) => t.db.prepare(`UPDATE build_jobs SET ${cols} WHERE id = ?`).bind(...v, id).run();
+  assert.equal((await B.getBuildSettings(t.db)).preview_retention_days, 30, "Founder decision: 30 days");
+  // The first build's preview, recoverable from its project repository.
+  await setJob(firstJobId, "preview_name = 'cm-prv-first-b0', source_repo = 'https://github.com/crestmont-builds/x', source_commit = 'first0000001'");
+  // A revision reports its own preview Worker (a malformed name would not be stored).
   assert.equal((await t.oc.post(`/staff/builds/${firstJobId}/revision`, { instruction: "Add the opening hours to the footer of every page." })).status, 303);
   const rc = (await runner(t, "claim", { runnerId: "r1" })).json.job;
-  await runner(t, "complete", { jobId: rc.id, leaseToken: rc.leaseToken, outcome: "ready_for_review", runCostUsd: 0, previewUrl: "https://cm-prv-x-r1.acct.workers.dev", previewName: "cm-prv-x-r1" });
+  await runner(t, "complete", { jobId: rc.id, leaseToken: rc.leaseToken, outcome: "ready_for_review", runCostUsd: 0, sourceRepo: "https://github.com/crestmont-builds/x", sourceCommit: "rev10000001", previewUrl: "https://cm-prv-x-r1.acct.workers.dev", previewName: "cm-prv-x-r1" });
   assert.equal((await B.getJob(t.db, rc.id))!.preview_name, "cm-prv-x-r1");
 
-  // No retention set (default): nothing expires on its own.
-  assert.equal((await B.getBuildSettings(t.db)).preview_retention_days, null);
-  assert.deepEqual((await runner(t, "previews/claim", { runnerId: "r1" })).json, { previews: [] });
+  // Nothing is approved yet: no preview expires, however old.
+  const long = new Date(Date.now() + 400 * DAY);
+  assert.equal(await B.sweepPreviewRetention(t.db, long), 0);
+  let plan = await B.previewRetentionPlan(t.db, pid, long);
+  assert.equal(plan.get(rc.id)!.status, "in_progress", "awaiting owner review: never automatic");
 
-  // Retention 7 days: the superseded first build's preview (finished 10 days ago) expires; the revision in review does not.
-  const settings = { run_budget: "25", project_budget: "75", model: "qwen3-coder:30b", max_runtime: "120", max_turns: "200", max_concurrent: "2", max_attempts: "3", automation_enabled: "1", customer_revision_mode: "owner_approval", preview_retention_days: "7" };
-  assert.equal((await t.oc.post("/staff/builds/settings", settings)).status, 303);
-  assert.equal((await B.getBuildSettings(t.db)).preview_retention_days, 7);
-  const old = new Date(Date.now() - 10 * 86400_000).toISOString();
-  await t.db.prepare(`UPDATE build_jobs SET finished_at = ? WHERE project_id = ?`).bind(old, pid).run();
-  const claim1 = (await runner(t, "previews/claim", { runnerId: "r1" })).json;
-  assert.deepEqual(claim1, { previews: [{ jobId: firstJobId, previewName: "cm-prv-first-b0" }] }, "only the superseded preview");
+  // The owner approves the revision: the superseded first-build preview is scheduled 30 days later; the approved one is kept.
+  assert.equal((await t.oc.post(`/staff/builds/${rc.id}/approve`, { notes: "final" })).status, 303);
+  const approvedAt = (await B.getJob(t.db, rc.id))!.approved_at!;
+  plan = await B.previewRetentionPlan(t.db, pid);
+  assert.equal(plan.get(firstJobId)!.status, "scheduled");
+  assert.equal(plan.get(firstJobId)!.deleteAfter, new Date(Date.parse(approvedAt) + 30 * DAY).toISOString());
+  assert.equal(plan.get(rc.id)!.status, "approved_kept");
+  assert.match(await (await t.oc.get(`/staff/builds/${firstJobId}`)).text(), /Scheduled for deletion on/);
+  assert.match(await (await t.oc.get("/staff/builds")).text(), /Deletes \d{4}-\d{2}-\d{2}/);
+  assert.match(flash(await t.oc.post(`/staff/builds/${rc.id}/delete-preview`)), /kept until its production deployment is verified/);
+
+  // Before the date: nothing. After it: a deletion request, audited; the runner claims it; a failure is retried.
+  assert.equal(await B.sweepPreviewRetention(t.db, new Date(Date.parse(approvedAt) + 29 * DAY)), 0);
+  // The owner extends it by 30 days first: the date moves.
+  assert.equal((await t.oc.post(`/staff/builds/${firstJobId}/preview-retention`, { action: "extend" })).status, 303);
+  const extended = (await B.previewRetentionFor(t.db, (await B.getJob(t.db, firstJobId))!)).deleteAfter!;
+  assert.equal(extended, new Date(Date.parse(approvedAt) + 60 * DAY).toISOString());
+  assert.equal(await B.sweepPreviewRetention(t.db, new Date(Date.parse(approvedAt) + 31 * DAY)), 0, "extended");
+  assert.equal(await B.sweepPreviewRetention(t.db, new Date(Date.parse(approvedAt) + 61 * DAY)), 1);
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.preview_expired' AND subject_id = ? AND actor_kind = 'system'`).bind(firstJobId).first());
+  assert.deepEqual((await runner(t, "previews/claim", { runnerId: "r1" })).json, { previews: [{ jobId: firstJobId, previewName: "cm-prv-first-b0" }] });
   assert.deepEqual((await runner(t, "previews/claim", { runnerId: "r1" })).json, { previews: [] }, "handed out once until reported");
-  // A failed deletion is reported and offered again later.
   await runner(t, "previews/deleted", { runnerId: "r1", jobId: firstJobId, ok: false, error: "token expired" });
-  assert.ok(await t.db.prepare(`SELECT 1 FROM build_events WHERE job_id = ? AND message LIKE 'Preview deletion failed: token expired%'`).bind(firstJobId).first());
-  assert.equal((await runner(t, "previews/claim", { runnerId: "r1" })).json.previews.length, 1);
+  assert.ok(await t.db.prepare(`SELECT 1 FROM build_events WHERE job_id = ? AND message LIKE 'Preview deletion failed (retried within the hour): token expired%'`).bind(firstJobId).first());
+  assert.equal((await runner(t, "previews/claim", { runnerId: "r1" })).json.previews.length, 1, "retried");
   await runner(t, "previews/deleted", { runnerId: "r1", jobId: firstJobId, ok: true });
   assert.ok((await B.getJob(t.db, firstJobId))!.preview_deleted_at);
-  assert.match(await (await t.oc.get(`/staff/builds/${firstJobId}`)).text(), /Deleted .*cm-prv-first-b0/);
-  assert.equal((await runner(t, "previews/deleted", { runnerId: "r1", jobId: firstJobId, ok: true })).status, 404, "nothing pending any more");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.preview_deleted' AND subject_id = ?`).bind(firstJobId).first());
+  assert.equal((await runner(t, "previews/deleted", { runnerId: "r1", jobId: firstJobId, ok: true })).status, 404);
 
-  // Owner request: the preview in review is deleted only when asked, and then it can no longer be approved.
-  assert.equal((await t.oc.post(`/staff/builds/${rc.id}/delete-preview`)).status, 303);
-  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.preview_delete_requested' AND subject_id = ?`).bind(rc.id).first());
-  assert.match(flash(await t.oc.post(`/staff/builds/${rc.id}/approve`, { notes: "" })), /preview was deleted/);
-  assert.deepEqual((await runner(t, "previews/claim", { runnerId: "r1" })).json, { previews: [{ jobId: rc.id, previewName: "cm-prv-x-r1" }] });
-  // Unsigned calls are refused like every runner endpoint.
-  assert.equal((await runner(t, "previews/claim", { runnerId: "r1" }, "wrong-secret")).status, 401);
-  // Settings: empty keeps previews until deleted; out-of-range is refused.
-  assert.equal((await t.oc.post("/staff/builds/settings", { ...settings, preview_retention_days: "" })).status, 303);
-  assert.equal((await B.getBuildSettings(t.db)).preview_retention_days, null);
-  assert.match(flash(await t.oc.post("/staff/builds/settings", { ...settings, preview_retention_days: "0" })), /Preview retention must be 1–365 days/);
+  // The approved preview after a verified production deployment: retention starts then (unless preserved).
+  const verifiedAt = new Date(Date.parse(approvedAt) + 5 * DAY).toISOString();
+  await t.db.prepare(`INSERT INTO site_targets (id, project_id, organization_id, worker_name, created_at, updated_at) SELECT 'st_t', id, organization_id, 'cm-site-test', ?, ? FROM projects WHERE id = ?`).bind(verifiedAt, verifiedAt, pid).run();
+  await t.db.prepare(`INSERT INTO site_deployments (id, target_id, project_id, organization_id, build_job_id, version, kind, state, source_commit, worker_name, prepared_at, verified_at, created_at, updated_at)
+    SELECT 'sd_t', 'st_t', project_id, organization_id, id, 1, 'release', 'live', 'rev10000001', 'cm-site-test', ?, ?, ?, ? FROM build_jobs WHERE id = ?`).bind(verifiedAt, verifiedAt, verifiedAt, verifiedAt, rc.id).run();
+  assert.equal((await B.previewRetentionFor(t.db, (await B.getJob(t.db, rc.id))!)).deleteAfter, new Date(Date.parse(verifiedAt) + 30 * DAY).toISOString());
+  assert.equal((await t.oc.post(`/staff/builds/${rc.id}/preview-retention`, { action: "preserve" })).status, 303);
+  assert.equal((await B.previewRetentionFor(t.db, (await B.getJob(t.db, rc.id))!)).status, "preserved");
+  assert.equal(await B.sweepPreviewRetention(t.db, new Date(Date.parse(verifiedAt) + 400 * DAY)), 0, "preserved: never deleted automatically");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.preview_retention_changed' AND subject_id = ?`).bind(rc.id).first());
+
+  // Never the only recoverable copy: without a project repository or checkpoint the preview is kept.
+  await setJob(rc.id, "preview_preserved = 0, source_repo = 'runner-local:r1/ws', checkpoint_key = NULL");
+  assert.equal((await B.previewRetentionFor(t.db, (await B.getJob(t.db, rc.id))!)).status, "kept_unrecoverable");
+  assert.match(flash(await t.oc.post(`/staff/builds/${rc.id}/delete-preview`)), /only recoverable copy/);
+  // Settings: required, 1–365.
+  const settings = { run_budget: "25", project_budget: "75", model: "qwen3-coder:30b", max_runtime: "120", max_turns: "200", max_concurrent: "2", max_attempts: "3", automation_enabled: "1", customer_revision_mode: "owner_approval", preview_retention_days: "" };
+  assert.match(flash(await t.oc.post("/staff/builds/settings", settings)), /Preview retention must be 1–365 days/);
+  assert.equal((await t.oc.post("/staff/builds/settings", { ...settings, preview_retention_days: "45" })).status, 303);
+  assert.equal((await B.getBuildSettings(t.db)).preview_retention_days, 45);
+});
+
+// ── Founder decision D1 (2026-10-28): owner approval of customer revisions ──
+
+test("[AIB-006] [AIB-007] D1: customer revisions wait for the owner; rejection starts no build, frees the round and tells the customer; duplicates are one request; approval notifies and queues", async () => {
+  const t = await app();
+  const { pid, c } = await reviewedProject(t);
+  assert.equal((await B.getBuildSettings(t.db)).customer_revision_mode, "owner_approval", "automatic generation is off by default");
+  // Duplicate submissions (double click / resubmit) are one request, one round.
+  const text = "Please add a gallery page with six photos of our cakes.";
+  assert.equal((await c.post(`/portal/projects/${pid}/revisions`, { request: text })).status, 303);
+  const dupRes = await c.post(`/portal/projects/${pid}/revisions`, { request: `  ${text.toUpperCase()}  ` });
+  assert.match(flash(dupRes), /We already have this request \(round 1\)/);
+  let revs = await revisionsOf(t, pid);
+  assert.equal(revs.length, 1);
+  const rev = revs[0];
+  // The customer sees an accurate status: awaiting review.
+  assert.match(await (await c.get(`/portal/projects/${pid}/revisions`)).text(), /Awaiting review/);
+  // The owner sees it with the project's current website, and nothing has been built.
+  const dash = await (await t.oc.get("/staff/builds")).text();
+  assert.match(dash, /Awaiting owner review/);
+  assert.match(dash, /Approve and start AI build/);
+  assert.match(dash, new RegExp(`/staff/builds/customer-revisions/${rev.id}/reject`));
+  assert.equal((await jobOf(t, pid)).length, 1);
+
+  // Reject: no AI build, closed for staff work, round not used, customer told why, audited.
+  assert.match(flash(await t.oc.post(`/staff/builds/customer-revisions/${rev.id}/reject`, { reason: "" })), /Give the customer a reason/);
+  assert.equal((await t.oc.post(`/staff/builds/customer-revisions/${rev.id}/reject`, { reason: "A gallery is not part of the Starter package; we can quote it separately." })).status, 303);
+  assert.equal((await jobOf(t, pid)).length, 1, "rejected requests trigger no AI build");
+  const after = (await B.getCustomerRevision(t.db, rev.id))!;
+  assert.equal(after.decision, "rejected");
+  assert.ok(!(await B.customerRevisionQueue(t.db)).some((r) => r.id === rev.id), "gone from the owner's queue");
+  await assert.rejects(B.forwardCustomerRevision(t.db, rev.id, { kind: "user", userId: t.owner.id }), /was rejected/);
+  const st = await t.oc.post(`/staff/revisions/${rev.id}/status`, { status: "in_progress" });
+  assert.ok([303, 409].includes(st.status), `status ${st.status}`);
+  assert.equal((await revisionsOf(t, pid))[0].status, "submitted", "staff cannot start a rejected request either");
+  assert.equal((await t.db.prepare(`SELECT COUNT(*) AS n FROM revisions WHERE project_id = ? AND included = 1 AND COALESCE(ai_decision,'') <> 'rejected'`).bind(pid).first<{ n: number }>())!.n, 0, "the round is not used");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.customer_revision_rejected' AND actor_user_id = ?`).bind(t.owner.id).first());
+  const portal = await (await c.get(`/portal/projects/${pid}/revisions`)).text();
+  assert.match(portal, /Not accepted/);
+  assert.match(portal, /not part of the Starter package/);
+  assert.ok(await t.db.prepare(`SELECT 1 FROM notifications n JOIN memberships m ON m.user_id = n.user_id WHERE m.role_id = 'customer_admin' AND n.kind = 'revision' AND n.body LIKE '%was not accepted: A gallery is not part%'`).first(), "customer notified with the reason");
+  // A rejected request can be resubmitted (it is closed, so the same text is a new request).
+  assert.equal((await c.post(`/portal/projects/${pid}/revisions`, { request: text })).status, 303);
+  revs = await revisionsOf(t, pid);
+  assert.equal(revs.length, 2);
+  assert.match(flash(await t.oc.post(`/staff/builds/customer-revisions/${rev.id}/reject`, { reason: "again" })), /already rejected/);
+
+  // Approve the new one: queued for the AI builder, customer told work started, cannot be rejected afterwards.
+  const second = revs[1];
+  assert.equal((await t.oc.post(`/staff/builds/customer-revisions/${second.id}/forward`, { instruction: "" })).status, 303);
+  const job = (await jobOf(t, pid)).find((j) => j.customer_revision_id === second.id)!;
+  assert.equal(job.state, "queued", "approved requests enter the existing build queue");
+  assert.equal((await B.getCustomerRevision(t.db, second.id))!.decision, "approved");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM notifications n JOIN memberships m ON m.user_id = n.user_id WHERE m.role_id = 'customer_admin' AND n.kind = 'revision' AND n.body LIKE 'Revision round % was accepted%'`).first(), "customer told work started");
+  assert.match(await (await c.get(`/portal/projects/${pid}/revisions`)).text(), /In progress/);
+  assert.match(flash(await t.oc.post(`/staff/builds/customer-revisions/${second.id}/reject`, { reason: "Changed my mind" })), /AI build is working on this request/);
+  // Tenant isolation: another customer cannot see or act on these requests.
+  const other = await customerWithOrder(t);
+  assert.equal((await other.c.get(`/portal/projects/${pid}/revisions`)).status, 404);
+  assert.equal((await other.c.post(`/staff/builds/customer-revisions/${second.id}/reject`, { reason: "nope nope" })).status, 403);
 });

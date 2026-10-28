@@ -523,7 +523,10 @@ ${c.invoice_id ? html`<p>Invoice: ${badge(c.invoice_status ?? "open")} ${c.invoi
 <section style="margin-top:1.5rem"><h2>Revision rounds</h2>${table(revs, [
   { header: "Round", cell: (x) => html`${x.round}${x.included ? "" : html` ${badge("requested", "Billable")}`}` },
   { header: "Request", cell: (x) => nl2br(x.request_text.length > 300 ? x.request_text.slice(0, 297) + "…" : x.request_text) },
-  { header: "Status", cell: (x) => (!x.included && !x.billable_change_order_id ? badge("pending", "Awaiting change-order quote") : badge(x.status)) },
+  { header: "Status", cell: (x) => x.ai_decision === "rejected" ? html`${badge("rejected", "Not accepted")}${x.ai_decision_note ? html`<br><span class="faint">${x.ai_decision_note}</span>` : ""}`
+    : !x.included && !x.billable_change_order_id ? badge("pending", "Awaiting change-order quote")
+    : x.status === "submitted" && !x.ai_decision ? badge("pending", "Awaiting review")
+    : x.status === "in_progress" ? badge("in_progress", "In progress") : badge(x.status) },
   { header: "Change order", cell: (x) => (x.co_status ? html`${badge(x.co_status)} ${formatCents(x.co_price)}` : "—") },
   { header: "Submitted", cell: (x) => fmtDay(x.created_at) },
   { header: "", cell: (x) => (x.status === "delivered" ? html`<a class="btn btn--secondary btn--sm" href="/portal/projects/${proj.id}/approvals">Review &amp; approve</a>` : "") },
@@ -536,7 +539,8 @@ ${c.invoice_id ? html`<p>Invoice: ${badge(c.invoice_status ?? "open")} ${c.invoi
     const f = await ctx.form();
     return orRerender((errs, st) => revisionsPage(ctx, org, p.id, errs, st), async () => {
       const res = await P.requestRevision(ctx, { organizationId: org.organizationId, projectId: p.id, userId: ctx.user!.id, text: str(f, "request") });
-      return redirect(ctx, `/portal/projects/${p.id}/revisions`, { kind: "success", text: res.decision.kind === "included" ? `Revision round ${res.decision.round} submitted.` : "Request received. Your included rounds are used, so we will send a change order for approval." });
+      if (res.duplicate) return redirect(ctx, `/portal/projects/${p.id}/revisions`, { kind: "info", text: `We already have this request (round ${res.decision.round}); nothing new was submitted.` });
+      return redirect(ctx, `/portal/projects/${p.id}/revisions`, { kind: "success", text: res.decision.kind === "included" ? `Revision round ${res.decision.round} submitted. We will review it and let you know when work starts.` : "Request received. Your included rounds are used, so we will send a change order for approval." });
     });
   });
   r.post("/portal/change-orders/:id/decide", async (ctx, p) => {
