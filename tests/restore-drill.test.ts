@@ -39,3 +39,16 @@ test("[TEST-004] [INFRA-006] restore drill counts tables without compound SELECT
   assert.match(wf, /count crestmont-staging "--remote --env staging" source \|\| fail "count source rows"/);
   assert.match(wf, /compare "\$\(cat drill\/source\.list\)" "\$\(cat drill\/restored\.list\)"/);
 });
+
+test("[TEST-004] restore drill sanitizes the D1 export before importing it (transactions, reserved _cf_ tables, sqlite_sequence) and keeps everything else", async () => {
+  const { sanitizeExport } = await import("../scripts/restore-drill.ts");
+  const dump = ["PRAGMA defer_foreign_keys=TRUE;", "BEGIN TRANSACTION;", 'CREATE TABLE _cf_KV (key TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID;', 'INSERT INTO "_cf_KV" VALUES(\'a\',X\'00\');',
+    "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT);", 'INSERT INTO "users" VALUES(\'u1\',\'a@b.example\');', 'DELETE FROM sqlite_sequence;', 'INSERT INTO "sqlite_sequence" VALUES(\'audit_logs\',5);', "COMMIT;"].join("\n");
+  const r = sanitizeExport(dump);
+  assert.deepEqual(r.removed, { transaction: 2, "_cf_ tables": 2, sqlite_sequence: 2 });
+  assert.equal(r.sql, ["PRAGMA defer_foreign_keys=TRUE;", "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT);", 'INSERT INTO "users" VALUES(\'u1\',\'a@b.example\');'].join("\n"));
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(":memory:");
+  db.exec(r.sql);
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number }).n, 1, "the sanitized dump restores");
+});

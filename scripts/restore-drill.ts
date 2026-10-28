@@ -33,6 +33,24 @@ export function rowsOfAll(outputs: string[]): Rows {
   return outputs.flatMap(rowsOf).flatMap((r) => ("t" in r && "n" in r ? [r] : Object.entries(r).map(([t, n]) => ({ t, n }))));
 }
 
+/** Prepares a `wrangler d1 export` dump for `d1 execute --file` per Cloudflare's import guide
+ *  (developers.cloudflare.com/d1/best-practices/import-export-data): no BEGIN TRANSACTION/COMMIT, no reserved `_cf_*`
+ *  tables, no writes to SQLite's internal sqlite_sequence. Line-based: D1 exports put each such statement on its own line. */
+export function sanitizeExport(sql: string): { sql: string; removed: Record<string, number> } {
+  const rules: [string, RegExp][] = [
+    ["transaction", /^\s*(BEGIN( TRANSACTION)?|COMMIT|END( TRANSACTION)?)\s*;\s*$/i],
+    ["_cf_ tables", /^\s*(CREATE TABLE( IF NOT EXISTS)?|INSERT INTO|DELETE FROM|DROP TABLE( IF EXISTS)?)\s+["`]?_cf_/i],
+    ["sqlite_sequence", /^\s*(INSERT INTO|DELETE FROM|UPDATE)\s+["`]?sqlite_sequence/i],
+  ];
+  const removed: Record<string, number> = {};
+  const kept = sql.split("\n").filter((line) => {
+    const hit = rules.find(([, re]) => re.test(line));
+    if (hit) removed[hit[0]] = (removed[hit[0]] ?? 0) + 1;
+    return !hit;
+  });
+  return { sql: kept.join("\n"), removed };
+}
+
 export interface DrillResult { passed: boolean; tables: number; rows: number; problems: string[] }
 export function compareCounts(source: Rows, restored: Rows): DrillResult {
   const a = new Map(source.map((r) => [String(r.t), Number(r.n)]));
@@ -58,7 +76,11 @@ export function drillEvidence(r: DrillResult, o: { commit: string; runId: string
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [mode, a, b] = process.argv.slice(2);
   const arg = (n: string) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : undefined; };
-  if (mode === "sql") process.stdout.write(countQueries(rowsOf(readFileSync(a, "utf8")).map((r) => String(r.name))).join("\n") + "\n");
+  if (mode === "sanitize") {
+    const r = sanitizeExport(readFileSync(a, "utf8"));
+    writeFileSync(b, r.sql);
+    console.log(`sanitized export: removed ${JSON.stringify(r.removed)}`);
+  } else if (mode === "sql") process.stdout.write(countQueries(rowsOf(readFileSync(a, "utf8")).map((r) => String(r.name))).join("\n") + "\n");
   else if (mode === "compare") {
     // a / b: comma-separated lists of wrangler JSON outputs (one per counting batch).
     const r = compareCounts(rowsOfAll(a.split(",").map((f) => readFileSync(f, "utf8"))), rowsOfAll(b.split(",").map((f) => readFileSync(f, "utf8"))));
