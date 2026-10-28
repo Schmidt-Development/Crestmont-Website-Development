@@ -146,7 +146,7 @@ jobs:
           [ "$fail" = 0 ] && echo "Hosted preview serves the assets and homepage of ${GITHUB_SHA}." >> "$GITHUB_STEP_SUMMARY"
           exit $fail
 
-      - name: Access notes (private artifact; never in logs)
+      - name: Access notes (never in logs)
         env:
           BASE: ${{ steps.deploy.outputs.url }}
         run: |
@@ -155,9 +155,39 @@ jobs:
             cat access/demo-accounts.md; } > access/README.md
           rm -f access/preview-password access/demo-accounts.md
           echo "### Frontend preview deployed: $BASE" >> "$GITHUB_STEP_SUMMARY"
-          echo "Access details are in the private **frontend-preview-access** artifact of this run." >> "$GITHUB_STEP_SUMMARY"
+          echo "Access details: **frontend-preview-access** artifact of this run (encrypted while the repository is public)." >> "$GITHUB_STEP_SUMMARY"
+
+      # The repository is public: workflow artifacts can be downloaded by anyone signed in to GitHub. Same
+      # protection as deploy-staging.yml: encrypt with the Founder's ACCESS_ARTIFACT_PASSPHRASE, and issue no
+      # notes from a public repository without it. Plain notes only from a private repository.
+      - name: Protect the access notes
+        id: protect
+        env:
+          ACCESS_ARTIFACT_PASSPHRASE: ${{ secrets.ACCESS_ARTIFACT_PASSPHRASE }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          if [ -n "$ACCESS_ARTIFACT_PASSPHRASE" ]; then
+            openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -in access/README.md -out access/frontend-preview-access.md.enc -pass env:ACCESS_ARTIFACT_PASSPHRASE
+            rm -f access/README.md
+            echo "upload=encrypted" >> "$GITHUB_OUTPUT"
+            echo "Decrypt: \`openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in frontend-preview-access.md.enc -out frontend-preview-access.md\` (passphrase = ACCESS_ARTIFACT_PASSPHRASE)." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$REPO_PRIVATE" = "true" ]; then
+            echo "upload=plain" >> "$GITHUB_OUTPUT"
+          else
+            rm -f access/README.md
+            echo "upload=none" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Access notes not issued::This repository is public, so plaintext credentials are never uploaded. Add the repository secret ACCESS_ARTIFACT_PASSPHRASE and re-run to receive an encrypted copy."
+          fi
 
       - uses: actions/upload-artifact@v4
+        if: steps.protect.outputs.upload == 'encrypted'
+        with:
+          name: frontend-preview-access
+          path: access/frontend-preview-access.md.enc
+          retention-days: 3
+
+      - uses: actions/upload-artifact@v4
+        if: steps.protect.outputs.upload == 'plain'
         with:
           name: frontend-preview-access
           path: access/README.md
