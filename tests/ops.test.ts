@@ -519,7 +519,10 @@ test("[INFRA-005] deployment workflows are gated: staging skips without Cloudfla
   assert.match(staging, /ACCESS_ROOT_KEY: \$\{\{ secrets\.CLOUDFLARE_API_TOKEN \}\}/);
   assert.match(staging, /scripts\/staging-access\.ts/);
   assert.match(staging, /scripts\/verify-staging-access\.ts/);
-  assert.match(staging, /upload-artifact@v4\n\s+if: always\(\) && steps\.verify\.outcome == 'success'/, "access artifact only after the live sequence verified");
+  // The access notes are prepared (encrypted on a public repository) only after the live sequence verified,
+  // and every artifact upload depends on that step's output.
+  assert.match(staging, /- name: Seal the access notes\n\s+id: protect\n\s+if: always\(\) && steps\.verify\.outcome == 'success'/, "access artifact only after the live sequence verified");
+  for (const m of staging.matchAll(/upload-artifact@v4\n\s+if: ([^\n]+)/g)) assert.match(m[1], /steps\.protect\.outputs\.upload == 'sealed'/, "access artifact only after the live sequence verified");
   assert.match(staging, /rm -f access\/private\.json access\/access\.json/);
   assert.doesNotMatch(staging, /upload-artifact[\s\S]*?path: (backups|access\/(private|access))/, "no other artifact carries credentials");
   assert.match(staging, /preview gate not active/);
