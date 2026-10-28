@@ -18,7 +18,6 @@ import { existsSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 
 import { fileURLToPath } from "node:url";
 import { totpCode } from "../src/lib/auth-crypto.ts";
 import { currentAccess, rotationPending, wranglerOps, DEMO_DOMAIN, type AccessResult, type D1Ops } from "./staging-access.ts";
-import { secretFingerprint } from "./staging-secrets.ts";
 import { passphraseProblem } from "./seal.ts";
 
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
@@ -177,21 +176,22 @@ export async function verify(o: { base: string; ops: D1Ops; state: CaptureState;
 
 /**
  * Before anything changes: when a rotation is pending, the Founder must be able to receive the new credentials (a usable
- * ACCESS_ARTIFACT_PASSPHRASE), and a STAGING_PREVIEW_PASSWORD override must not equal the live preview password (the
- * rotation would silently keep it). Compares keyed fingerprints only (scripts/staging-secrets.ts); prints no value.
+ * ACCESS_ARTIFACT_PASSPHRASE). Prints no value.
  */
-export async function gate(o: { ops: D1Ops; rootKey: string; epoch: string; rotate: boolean; passphrase?: string; fixedPreview?: string }): Promise<{ pending: boolean; problems: string[] }> {
+export async function gate(o: { ops: D1Ops; epoch: string; rotate: boolean; passphrase?: string }): Promise<{ pending: boolean; problems: string[] }> {
   const pending = await rotationPending(o.ops, { epoch: o.epoch, rotate: o.rotate });
   if (!pending) return { pending, problems: [] };
-  const problems: string[] = [];
   const p = passphraseProblem(o.passphrase);
-  if (p) problems.push(`${p}: the rotated Owner credentials could not be delivered to the Founder`);
-  if (o.fixedPreview) {
-    const rows = await o.ops.query<{ fingerprint: string }>(`SELECT fingerprint FROM deploy_secret_fingerprints WHERE name = 'STAGING_ACCESS_PASSWORD'`).catch(() => []);
-    if (rows[0]?.fingerprint === secretFingerprint(o.rootKey, "STAGING_ACCESS_PASSWORD", o.fixedPreview))
-      problems.push("the STAGING_PREVIEW_PASSWORD secret equals the live preview password, so the rotation would not change it: set a new value or delete the secret");
-  }
-  return { pending, problems };
+  return { pending, problems: p ? [`${p}: the rotated Owner credentials could not be delivered to the Founder`] : [] };
+}
+
+/**
+ * Still before the rotation (the live site holds the current values): a STAGING_PREVIEW_PASSWORD override that the live
+ * gate already accepts would survive the rotation unchanged. Tested against the live gate, so no value is hashed or stored.
+ */
+export async function overrideUnchanged(o: { base: string; fixedPreview?: string; f?: Fetch; sleep?: Sleep }): Promise<boolean> {
+  if (!o.fixedPreview) return false;
+  return new Client(o.base, o.f ?? fetch, o.sleep ?? realSleep).gate(o.fixedPreview);
 }
 
 export const report = (checks: Check[]) => ["| Check | Result |", "|---|---|", ...checks.map((c) => `| ${c.name} | ${c.ok ? "PASS" : "**FAIL**"}${c.detail ? ` (${c.detail})` : ""} |`)].join("\n");
@@ -201,13 +201,22 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const mode = process.argv[2], url = arg("--url"), stateFile = arg("--state");
   try {
     if (mode === "gate") {
-      const g = await gate({ ops: wranglerOps(), rootKey: process.env.ACCESS_ROOT_KEY ?? "", epoch: process.env.ACCESS_EPOCH ?? "1", rotate: process.env.ROTATE === "true", passphrase: process.env.ACCESS_ARTIFACT_PASSPHRASE, fixedPreview: process.env.FIXED_PREVIEW_PASSWORD || undefined });
+      const g = await gate({ ops: wranglerOps(), epoch: process.env.ACCESS_EPOCH ?? "1", rotate: process.env.ROTATE === "true", passphrase: process.env.ACCESS_ARTIFACT_PASSPHRASE });
       if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `pending=${g.pending}\n`);
       if (g.problems.length) {
         for (const p of g.problems) console.error(`::error title=Rotation blocked (nothing was changed)::${p}`);
         process.exit(1);
       }
       console.log(g.pending ? "Rotation pending: secure delivery is configured and the preview password will change." : "No rotation pending.");
+      process.exit(0);
+    }
+    if (mode === "override") {
+      if (!url) throw new Error("--url is required");
+      if (await overrideUnchanged({ base: url, fixedPreview: process.env.FIXED_PREVIEW_PASSWORD || undefined })) {
+        console.error("::error title=Rotation blocked (no credential was changed)::The STAGING_PREVIEW_PASSWORD secret is the live preview password, so the rotation would not change it. Set a new value or delete the secret, then re-run.");
+        process.exit(1);
+      }
+      console.log("The preview password will change with the rotation.");
       process.exit(0);
     }
     if (!url || !stateFile) throw new Error("--url and --state are required");

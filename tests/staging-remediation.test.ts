@@ -11,9 +11,8 @@ import { handle } from "../src/app/app.ts";
 import { syncRequirements } from "../src/readiness/ingest.ts";
 import type { Env } from "../src/app/context.ts";
 import { applyAccess, currentAccess, DEMO_DOMAIN, type D1Ops } from "../scripts/staging-access.ts";
-import { putSecretIfChanged } from "../scripts/staging-secrets.ts";
 import { seal, open, passphraseProblem, SealError, MAGIC } from "../scripts/seal.ts";
-import { capture, verify, gate, report } from "../scripts/staging-rotation-check.ts";
+import { capture, verify, gate, overrideUnchanged, report } from "../scripts/staging-rotation-check.ts";
 import { snapshot, summary } from "../scripts/staging-forensics.ts";
 
 const BASE = "https://crestmont-platform-staging.example.workers.dev";
@@ -92,21 +91,19 @@ test("[INFRA-002] rotation also revokes demo recovery codes and pending demo inv
   assert.equal((await applyAccess(s.ops, { rootKey: KEY, epoch: "3", rotate: false })).revoked, undefined);
 });
 
-test("[INFRA-002] delivery gate: a pending rotation needs a usable passphrase and must change the preview password; nothing pending, nothing required", async () => {
+test("[INFRA-002] delivery gate: a pending rotation needs a usable passphrase; an unchanged preview override is caught on the live gate before rotating", async () => {
   const s = await staging();
   const fixed = "founder-fixed-preview-password-1";
   await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false, fixedPreviewPassword: fixed });
-  assert.deepEqual(await gate({ ops: s.ops, rootKey: KEY, epoch: "2", rotate: false }), { pending: false, problems: [] });
-  const noPass = await gate({ ops: s.ops, rootKey: KEY, epoch: "3", rotate: false });
+  assert.deepEqual(await gate({ ops: s.ops, epoch: "2", rotate: false }), { pending: false, problems: [] });
+  const noPass = await gate({ ops: s.ops, epoch: "3", rotate: false });
   assert.equal(noPass.pending, true);
   assert.match(noPass.problems.join(), /not configured.*could not be delivered/);
-  const sameFixed = await gate({ ops: s.ops, rootKey: KEY, epoch: "3", rotate: false, passphrase: PASS, fixedPreview: fixed });
-  assert.match(sameFixed.problems.join(), /STAGING_PREVIEW_PASSWORD secret equals the live preview password/);
-  assert.deepEqual(await gate({ ops: s.ops, rootKey: KEY, epoch: "3", rotate: false, passphrase: PASS, fixedPreview: "a-brand-new-founder-value-2" }), { pending: true, problems: [] });
-  assert.deepEqual(await gate({ ops: s.ops, rootKey: KEY, epoch: "3", rotate: false, passphrase: PASS }), { pending: true, problems: [] });
-  assert.equal((await gate({ ops: s.ops, rootKey: KEY, epoch: "2", rotate: true, passphrase: "short" })).problems.length, 1, "a manual rotate also needs delivery");
-  // The fingerprint compared is the one putSecretIfChanged() maintains.
-  assert.equal(await putSecretIfChanged(s.ops, KEY, "STAGING_ACCESS_PASSWORD", fixed), "unchanged");
+  assert.deepEqual(await gate({ ops: s.ops, epoch: "3", rotate: false, passphrase: PASS }), { pending: true, problems: [] });
+  assert.equal((await gate({ ops: s.ops, epoch: "2", rotate: true, passphrase: "short" })).problems.length, 1, "a manual rotate also needs delivery");
+  assert.equal(await overrideUnchanged({ base: BASE, fixedPreview: fixed, f: s.f }), true, "unchanged override is the live password");
+  assert.equal(await overrideUnchanged({ base: BASE, fixedPreview: "a-brand-new-founder-value-2", f: s.f }), false);
+  assert.equal(await overrideUnchanged({ base: BASE, f: s.f }), false, "no override");
 });
 
 test("[INFRA-002] revocation proof over HTTP: after rotation the old preview password, password, 2FA key, recovery code and session fail; the new ones and recovery work", async (t) => {
@@ -172,7 +169,7 @@ test("[INFRA-002] workflows: no plaintext credential or database artifact; stagi
   const uploads = [...staging.matchAll(/upload-artifact@v\d+[\s\S]*?path:\s*(\S+)/g)].map((m) => m[1]);
   assert.ok(uploads.includes("access/staging-access.sealed") && uploads.includes("forensics/staging-forensics.sealed"), uploads.join());
   for (const p of uploads) assert.ok(/\.sealed$/.test(p) || /^evidence/.test(p), `unexpected upload ${p}`);
-  const order = ["Credential delivery gate", "Forensic snapshot", "Apply D1 migrations", "Capture the pre-rotation access", "Apply staging access", "Verify the full access sequence", "Prove the old access is revoked", "Seal the access notes", "Remove credentials and evidence"];
+  const order = ["Credential delivery gate", "Forensic snapshot", "Apply D1 migrations", "Preview password will change", "Capture the pre-rotation access", "Apply staging access", "Verify the full access sequence", "Prove the old access is revoked", "Seal the access notes", "Remove credentials and evidence"];
   const at = order.map((n) => staging.indexOf(`- name: ${n}`));
   assert.ok(at.every((i) => i > 0), `steps present: ${order.filter((_, i) => at[i] < 0)}`);
   assert.deepEqual([...at].sort((a, b) => a - b), at, "steps run in this order");

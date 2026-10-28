@@ -127,7 +127,6 @@ jobs:
       - name: Credential delivery gate (before any rotation)
         id: gate
         env:
-          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           ACCESS_ARTIFACT_PASSPHRASE: ${{ secrets.ACCESS_ARTIFACT_PASSPHRASE }}
           ROTATE: ${{ inputs.rotate_credentials }}
         run: node --no-warnings scripts/staging-rotation-check.ts gate
@@ -243,6 +242,10 @@ jobs:
 
       # Before rotating: sign in with the credentials that are live now and keep that session and one recovery code, so
       # the run can PROVE they stop working. Values stay on the runner (RUNNER_TEMP, 0600, masked) and are never uploaded.
+      - name: Preview password will change (before the rotation)
+        if: steps.gate.outputs.pending == 'true'
+        run: node --no-warnings scripts/staging-rotation-check.ts override --url "${{ steps.deploy.outputs.url }}"
+
       - name: Capture the pre-rotation access (for the revocation proof)
         if: steps.gate.outputs.pending == 'true'
         continue-on-error: true
