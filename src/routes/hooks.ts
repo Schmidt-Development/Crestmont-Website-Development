@@ -54,7 +54,7 @@ export function register(r: Router): void {
       if (e instanceof mail.SvixAuthError) throw new HttpError(401, e.message);
       throw e;
     }
-    const out = await mail.handleResendEvent(ctx.db, svixId, raw);
+    const out = await mail.handleResendEvent(ctx.db, svixId, raw, ctx.env.ENVIRONMENT);
     return jsonResponse(ctx, 200, { received: true, ...out });
   });
 

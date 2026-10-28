@@ -76,8 +76,14 @@ export class ResendEmail implements EmailAdapter {
   readonly kind = "resend" as const;
   private db: Db; private apiKey: string; private from: string; private fetchImpl: typeof fetch;
   private blocked: (to: string) => string | null;
-  constructor(db: Db, apiKey: string, from: string, fetchImpl: typeof fetch = fetch, blocked: (to: string) => string | null = () => null) {
-    this.db = db; this.apiKey = apiKey; this.from = from; this.fetchImpl = fetchImpl; this.blocked = blocked;
+  private environment: string | null;
+  /**
+   * `environment` is sent as the Resend tag `environment=<staging|production>`. Resend webhooks are configured per
+   * account, so one environment's endpoint can receive the other's events; the receiver ignores events whose tag
+   * names another environment (src/services/email-events.ts), keeping each database to its own recipients.
+   */
+  constructor(db: Db, apiKey: string, from: string, fetchImpl: typeof fetch = fetch, blocked: (to: string) => string | null = () => null, environment: string | null = null) {
+    this.db = db; this.apiKey = apiKey; this.from = from; this.fetchImpl = fetchImpl; this.blocked = blocked; this.environment = environment;
   }
   async send(msg: EmailMessage): Promise<EmailResult> {
     // A recipient outside the policy is recorded in the outbox (never sent, never reported delivered).
@@ -109,7 +115,8 @@ export class ResendEmail implements EmailAdapter {
       const r = await this.fetchImpl("https://api.resend.com/emails", {
         method: "POST",
         headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json", "idempotency-key": msg.idempotencyKey },
-        body: JSON.stringify({ from: this.from, to: [msg.to], subject: msg.subject, html: msg.html, text: msg.text }),
+        body: JSON.stringify({ from: this.from, to: [msg.to], subject: msg.subject, html: msg.html, text: msg.text,
+          ...(this.environment ? { tags: [{ name: "environment", value: this.environment }] } : {}) }),
       });
       const body = (await r.json().catch(() => ({}))) as { id?: string; message?: string };
       if (!r.ok) throw new Error(`Resend ${r.status}: ${body.message ?? "error"}`);

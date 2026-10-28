@@ -62,3 +62,43 @@ test("[EMAIL-001] [INFRA-002] staging Resend adapter: blocked recipients are rec
   // Duplicate idempotency keys stay duplicates in the outbox path.
   assert.equal((await mail.send(msg("someone@gmail.com"))).status, "duplicate");
 });
+
+test("[EMAIL-003] [INFRA-002] Resend webhooks are per account: each environment's receiver ignores the other's events and stores no foreign recipient", async () => {
+  const { createTestApp } = await import("./support/app.ts");
+  const { signSvix } = await import("../src/services/email-events.ts");
+  const WHSEC = `whsec_${btoa("staging-and-production-are-separate!")}`;
+  const event = (tags: unknown, to = "customer@gmail.com", id = "re_x") => JSON.stringify({ type: "email.bounced", created_at: new Date().toISOString(),
+    data: { email_id: id, to: [to], bounce: { type: "Permanent", subType: "General", message: "no such user" }, ...(tags === undefined ? {} : { tags }) } });
+  const post = async (env: Awaited<ReturnType<typeof createTestApp>>, svixId: string, raw: string) => {
+    const res = await env.client().request("POST", "/api/webhooks/resend", { body: raw, headers: { "content-type": "application/json", ...(await signSvix(WHSEC, svixId, raw)) } });
+    return { status: res.status, json: (await res.json()) as { outcome: string; duplicate: boolean } };
+  };
+  const count = async (db: { prepare: (q: string) => { first: <T>() => Promise<T | null> } }, q: string) => ((await db.prepare(q).first<{ n: number }>())?.n ?? 0);
+
+  const staging = await createTestApp({ ENVIRONMENT: "staging", PREVIEW_GATE: "required", RESEND_WEBHOOK_SECRET: WHSEC });
+  for (const [i, tags] of [[1, { environment: "production" }], [2, undefined], [3, [{ name: "environment", value: "production" }]]] as const) {
+    const r = await post(staging, `msg_s${i}`, event(tags));
+    assert.equal(r.status, 200, "acknowledged so Resend does not retry");
+    assert.equal(r.json.outcome, "ignored");
+  }
+  assert.equal(await count(staging.db, `SELECT COUNT(*) n FROM email_suppressions`), 0, "no production customer suppressed in staging");
+  assert.equal(await count(staging.db, `SELECT COUNT(*) n FROM email_webhook_events WHERE recipient IS NOT NULL OR provider_message_id IS NOT NULL`), 0, "no foreign recipient or message id stored");
+  assert.equal((await post(staging, "msg_s1", event({ environment: "production" }))).json.duplicate, true, "replays stay idempotent");
+  assert.equal((await post(staging, "msg_s4", event({ environment: "staging" }, "tester@crestmontwebsitedevelopment.com"))).json.outcome, "applied");
+  assert.equal(await count(staging.db, `SELECT COUNT(*) n FROM email_suppressions`), 1, "staging's own bounce is applied");
+
+  const production = await createTestApp({ ENVIRONMENT: "production", RESEND_WEBHOOK_SECRET: WHSEC });
+  assert.equal((await post(production, "msg_p1", event({ environment: "staging" }, "tester@crestmontwebsitedevelopment.com"))).json.outcome, "ignored");
+  assert.equal(await count(production.db, `SELECT COUNT(*) n FROM email_suppressions`), 0);
+  assert.equal((await post(production, "msg_p2", event({ environment: "production" }))).json.outcome, "applied");
+  assert.equal((await post(production, "msg_p3", event(undefined, "dashboard-send@gmail.com"))).json.outcome, "applied", "untagged (e.g. dashboard) mail still protects production");
+  assert.equal(await count(production.db, `SELECT COUNT(*) n FROM email_suppressions`), 2);
+});
+
+test("[EMAIL-003] sends are tagged with their environment so webhooks can be routed", async () => {
+  const db = createTestDb();
+  const bodies: Record<string, unknown>[] = [];
+  const f = (async (_u: string, init: RequestInit) => { bodies.push(JSON.parse(String(init.body))); return new Response(JSON.stringify({ id: "re_t" }), { status: 200 }); }) as unknown as typeof fetch;
+  await new ResendEmail(db, "re_test_key", "Crestmont <support@crestmontwebsitedevelopment.com>", f, recipientPolicy({ ENVIRONMENT: "production" }), "production").send(msg("customer@gmail.com"));
+  assert.deepEqual(bodies[0].tags, [{ name: "environment", value: "production" }]);
+});
