@@ -53,6 +53,28 @@ test("[TEST-004] restore drill sanitizes the D1 export before importing it (tran
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number }).n, 1, "the sanitized dump restores");
 });
 
+test("[TEST-004] [SEC-003] a failed drill's reason (shown on the public health feed) never carries row data or tokens", async () => {
+  const { redactReason, drillEvidence } = await import("../scripts/restore-drill.ts");
+  const raw = `import export into scratch: ✘ [ERROR] UNIQUE constraint failed: users.email: SQLITE_CONSTRAINT (code 7500) near INSERT INTO "users" VALUES('usr_1','dana.customer@harbor-dental.example','Dana O''Neil',X'00ff'); account 0123456789abcdef0123456789abcdef`;
+  const r = redactReason(raw);
+  for (const leaked of ["dana.customer", "harbor-dental", "Dana O", "00ff", "0123456789abcdef"]) assert.ok(!r.includes(leaked), `leaked ${leaked}: ${r}`);
+  assert.match(r, /UNIQUE constraint failed: users\.email: SQLITE_CONSTRAINT \(code 7500\)/, "the diagnosis survives");
+  assert.match(redactReason("no such table: main.deploy_secret_fingerprints"), /deploy_secret_fingerprints/, "long table names are not mistaken for tokens");
+  // The CLI's fail mode applies it before the evidence is written.
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "drill-"));
+  try {
+    execFileSync(process.execPath, ["--no-warnings", "scripts/restore-drill.ts", "fail", "--reason", raw, "--out", join(dir, "e.json")]);
+    const ev = readFileSync(join(dir, "e.json"), "utf8");
+    assert.ok(!ev.includes("dana.customer") && !ev.includes("Dana O"));
+    assert.equal(JSON.parse(ev).results[0].outcome, "failed");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+  assert.ok(drillEvidence);
+});
+
 test("[TEST-004] restore drill parses the export into statements: ';' and newlines inside data, quoted names, comments and trigger bodies", async () => {
   const { splitStatements, sanitizeExport } = await import("../scripts/restore-drill.ts");
   const sql = [
