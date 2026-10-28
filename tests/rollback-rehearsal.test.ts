@@ -12,12 +12,12 @@ test("[TEST-004] [INFRA-005] staging rollback rehearsal: picks the serving and p
   const list = "⛅️ wrangler\n" + JSON.stringify([{ id: A, metadata: { created_on: "2026-10-26T10:00:00Z" } }, { id: C, metadata: { created_on: "2026-10-27T10:00:00Z" } }, { id: B, created_on: "2026-10-27T09:00:00Z" }]);
   assert.deepEqual(currentVersionIds(status), [C]);
   assert.deepEqual(versionsNewestFirst(list).map((v) => v.id), [C, B, A]);
-  assert.deepEqual(pickRollback(status, list), { current: C, previous: B, previousIsOlderCode: false });
+  assert.deepEqual(pickRollback(status, list), { current: C, previous: B, previousIsOlderCode: false, secretChanged: false });
   // With trigger annotations: skip secret-only versions and the serving code's own upload.
   const D = "44444444-4444-4444-8444-444444444444", E = "55555555-5555-4555-8555-555555555555";
   const ann = (id: string, at: string, t: string) => ({ id, metadata: { created_on: at }, annotations: { "workers/triggered_by": t } });
   const list2 = JSON.stringify([ann(E, "2026-10-27T10:03:00Z", "secret"), ann(D, "2026-10-27T10:02:00Z", "secret"), ann(C, "2026-10-27T10:00:00Z", "upload"), ann(B, "2026-10-26T09:01:00Z", "secret"), ann(A, "2026-10-26T09:00:00Z", "upload")]);
-  assert.deepEqual(pickRollback(JSON.stringify({ versions: [{ version_id: E, percentage: 100 }] }), list2), { current: E, previous: A, previousIsOlderCode: true });
+  assert.deepEqual(pickRollback(JSON.stringify({ versions: [{ version_id: E, percentage: 100 }] }), list2), { current: E, previous: A, previousIsOlderCode: true, secretChanged: true }, "secrets changed (B, D, E) since A was active: Cloudflare would refuse this rollback (10220)");
   assert.throws(() => pickRollback(JSON.stringify([{ versions: [{ version_id: B, percentage: 50 }, { version_id: C, percentage: 50 }] }]), list), /exactly one version/);
   assert.throws(() => pickRollback(status, JSON.stringify([{ id: C, created_on: "2026-10-27T10:00:00Z" }])), /no earlier/);
   const ev = parseEvidence(rehearsalEvidence({ commit: "b".repeat(40), runId: "gh-9-1-rollback", startedAt: new Date().toISOString(), rollback: true, rollforward: false }));

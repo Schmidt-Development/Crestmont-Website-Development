@@ -328,3 +328,31 @@ test("[PORTAL-005] staff internal notes and replies; staff without project visib
   assert.equal((await db.prepare(`SELECT internal FROM messages WHERE project_id = ?`).bind(pid).first<{ internal: number }>())!.internal, 1);
   assert.equal(await lastEmail(db, cust.email).then((m) => m?.template === "project_update" && /Kickoff/.test(m.text_body)), false, "internal notes never email the customer");
 });
+
+test("[PM-004] deleting a task unlinks its notifications (no link to a 404); migration 0044 repairs links left by earlier deletions", async () => {
+  // Staging deploy #57: BRAND-006 followed a developer's notification link to a deleted task and got HTTP 404.
+  const { db, cust, dev, pmC, devC } = await setup();
+  const pid = await makeProject(db, cust.organizationId);
+  assert.equal((await pmC.post(`/staff/projects/${pid}/tasks`, { title: "Temporary task", assignee_id: dev.id })).status, 303);
+  assert.equal((await pmC.post(`/staff/projects/${pid}/tasks`, { title: "Kept task", assignee_id: dev.id })).status, 303);
+  const temp = (await db.prepare(`SELECT id FROM tasks WHERE title = 'Temporary task'`).first<{ id: string }>())!.id;
+  const kept = (await db.prepare(`SELECT id FROM tasks WHERE title = 'Kept task'`).first<{ id: string }>())!.id;
+  assert.match(await (await devC.get("/staff/notifications")).text(), new RegExp(`/staff/tasks/${temp}`), "linked while the task exists");
+
+  assert.equal((await pmC.post(`/staff/tasks/${temp}/delete`)).status, 303);
+  const n = await db.prepare(`SELECT subject_type, subject_id, body FROM notifications WHERE user_id = ? AND body LIKE '%assigned%' ORDER BY created_at`).bind(dev.id).all<{ subject_type: string | null; subject_id: string | null; body: string }>();
+  assert.equal(n.results.length, 2, "the notification text is kept");
+  assert.equal(n.results.filter((r) => r.subject_id === null).length, 1, "only the deleted task's notification lost its link");
+  const page = await (await devC.get("/staff/notifications")).text();
+  assert.doesNotMatch(page, new RegExp(`/staff/tasks/${temp}`), "no link to the deleted task");
+  assert.match(page, new RegExp(`/staff/tasks/${kept}`), "links to existing tasks stay");
+  for (const href of new Set([...page.matchAll(/href="(\/staff\/tasks\/task_[^"]+)"/g)].map((m) => m[1]))) assert.equal((await devC.get(href)).status, 200, href);
+
+  // Rows left dangling before this change (staging): the migration unlinks them and nothing else. Idempotent.
+  await db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES ('ntf_old', ?, 'assignment', 'task', 'task_gone', 'old', ?)`).bind(dev.id, nowIso()).run();
+  const { readFileSync } = await import("node:fs");
+  const sql = readFileSync("migrations/0044_notifications_deleted_task_links.sql", "utf8");
+  for (let i = 0; i < 2; i++) await db.prepare(sql.split("\n").filter((l) => !l.startsWith("--")).join("\n")).run();
+  assert.equal((await db.prepare(`SELECT subject_id FROM notifications WHERE id = 'ntf_old'`).first<{ subject_id: string | null }>())!.subject_id, null);
+  assert.equal((await db.prepare(`SELECT COUNT(*) AS c FROM notifications WHERE subject_type = 'task' AND subject_id = ?`).bind(kept).first<{ c: number }>())!.c, 1, "valid links untouched");
+});
