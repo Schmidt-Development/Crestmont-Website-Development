@@ -85,10 +85,13 @@ test("[VOICE-005] time-zone arithmetic: DST, business hours, holidays and the co
   assert.equal(closed.nextOpenAt, "2026-11-02T14:00:00.000Z");
   assert.equal(hoursStatus({ ...c, holidays: ["2026-11-02"] }, MON_9AM).open, false, "holiday");
   assert.equal(hoursStatus(defaultVoiceConfig(), MON_9AM).configured, false);
-  // 09:00 ET is 06:00 PT: outside a 09:00–20:00 window somewhere in the continental US.
+  // 09:00 ET is 06:00 PT: outside a 09:00–20:00 window somewhere in the US.
   assert.equal(withinCallingWindow(c, MON_9AM, null), false);
   assert.equal(withinCallingWindow(c, MON_9AM, "America/New_York"), true);
-  assert.equal(withinCallingWindow(c, new Date("2026-11-02T18:00:00Z"), null), true, "13:00 ET / 10:00 PT");
+  assert.equal(withinCallingWindow(c, new Date("2026-12-07T17:00:00Z"), null), false, "12:00 ET but 07:00 in Honolulu, 08:00 in Anchorage");
+  assert.equal(withinCallingWindow(c, new Date("2026-11-02T19:00:00Z"), null), true, "14:00 ET / 09:00 HST");
+  const short = configured(); short.outbound.window_start = "10:00"; short.outbound.window_end = "12:00";
+  assert.ok(voiceConfigProblems(short).some((p) => /at least 8 hours/.test(p)), "a window that can never be met in every zone is refused");
   assert.equal(toE164("(555) 010-0123"), "+15550100123");
   assert.equal(toE164("not a number"), null);
 });
@@ -232,9 +235,10 @@ test("[VOICE-003] consultation availability honours hours, minimum notice, align
 
 test("[VOICE-003] booking: CRM lead, held slot, reference, email via the platform mailer, no duplicates, no double booking", async () => {
   const t = await schedulingApp();
-  await t.post("/api/webhooks/retell", { event: "call_started", call: phoneCall("c_b1") });
+  await t.post("/api/webhooks/retell", { event: "call_started", call: phoneCall("c_b1", { from_number: "+15550100126" }) });
   const args = { name: "Bea Booker", phone: "+1 (555) 010-0126", email: "bea@example.com", start_time: "2026-11-03T14:00:00.000Z", topic: "New site for a bakery", reminder_call_ok: true };
-  const b = await t.post("/api/webhooks/retell/functions", fn("c_b1", "book_consultation", args));
+  const own = { from_number: "+15550100126" };
+  const b = await t.post("/api/webhooks/retell/functions", fn("c_b1", "book_consultation", args, own));
   assert.equal(b.json.booked, true);
   assert.equal(b.json.status, "requested", "no calendar connected: held until staff confirm");
   assert.match(b.json.confirmation_code, /^[A-HJ-NP-Z2-9]{6}$/);
@@ -247,9 +251,9 @@ test("[VOICE-003] booking: CRM lead, held slot, reference, email via the platfor
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM notifications WHERE kind = 'voice_consultation'`), 1);
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM voice_call_consents WHERE purpose = 'consultation_reminder'`), 1, "reminder consent only because the caller agreed");
   // Retell retry of the identical request returns the stored result (no second booking).
-  assert.deepEqual((await t.post("/api/webhooks/retell/functions", fn("c_b1", "book_consultation", args))).json, b.json);
+  assert.deepEqual((await t.post("/api/webhooks/retell/functions", fn("c_b1", "book_consultation", args, own))).json, b.json);
   // The same caller on a new call gets their existing booking back.
-  const again = await t.post("/api/webhooks/retell/functions", fn("c_b2", "book_consultation", { ...args, start_time: "2026-11-03T15:00:00.000Z" }));
+  const again = await t.post("/api/webhooks/retell/functions", fn("c_b2", "book_consultation", { ...args, start_time: "2026-11-03T15:00:00.000Z" }, own));
   assert.equal(again.json.already_booked, true);
   // Another caller cannot take the same slot; alternatives are offered instead.
   const clash = await t.post("/api/webhooks/retell/functions", fn("c_b3", "book_consultation", { ...args, name: "Other Person", phone: "+15550100127", email: undefined }, { from_number: "+15550100127" }));
@@ -337,7 +341,7 @@ async function outboundApp(fetchResponses: { status: number; body?: unknown }[],
   const run = () => processOutboundQueue({ db: t.db, env: t.env, fetch: fake.f, now: () => at, sleep: async () => {} });
   return { ...t, fake, run };
 }
-// 14:00 ET on Monday = 11:00 PT: inside 09:00–20:00 everywhere in the continental US.
+// 14:00 ET on Monday = 09:00 in Hawaii: inside 09:00–20:00 in every US zone.
 const MON_2PM = new Date("2026-11-02T19:00:00Z");
 
 test("[VOICE-003] [SEC-002] outbound is off by default: two independent switches, and the scheduled job dials nothing", async () => {
@@ -356,7 +360,7 @@ test("[VOICE-003] [SEC-002] outbound is off by default: two independent switches
 
 test("[VOICE-003] callback requests become consented outbound requests that still wait for approval", async () => {
   const t = await outboundApp([{ status: 201, body: { call_id: "call_out_1" } }], MON_2PM);
-  await t.post("/api/webhooks/retell/functions", fn("c_cb", "request_callback", { name: "Cal Back", phone: "555-010-0141", reason: "Wants to talk about a store", preferred_time: "afternoons" }));
+  await t.post("/api/webhooks/retell/functions", fn("c_cb", "request_callback", { name: "Cal Back", phone: "555-010-0141", reason: "Wants to talk about a store", preferred_time: "afternoons" }, { from_number: "+15550100141" }));
   const req = await one<{ id: string; status: string; consent_id: string; purpose: string; phone_e164: string; lead_id: string }>(t.db, `SELECT * FROM voice_outbound_requests`);
   assert.equal(req.status, "pending_approval");
   assert.equal(req.purpose, "callback");
@@ -416,7 +420,7 @@ test("[VOICE-003] outbound eligibility: consent required, DNC and opt-out enforc
   assert.equal((await early.run()).dialled, 0);
   const waiting = await one<{ status: string; next_attempt_at: string }>(early.db, `SELECT status, next_attempt_at FROM voice_outbound_requests WHERE id = ?`, r2.id);
   assert.equal(waiting.status, "approved");
-  assert.equal(waiting.next_attempt_at, "2026-11-02T17:00:00.000Z", "09:00 Pacific");
+  assert.equal(waiting.next_attempt_at, "2026-11-02T19:00:00.000Z", "09:00 in Hawaii, the last US zone to reach the window");
   assert.equal(early.fake.calls.length, 0);
   // Daily cap: one call per number per day.
   const r3 = await requestOutbound(t.db, { purpose: "callback", phone: "+15550100154", reason: "Callback", consentEvidence: "Caller asked on a call", requestedBy: t.owner.id });
@@ -571,4 +575,98 @@ test("[VOICE-005] [SEC-001] Owner operations page: settings round-trip with vali
   const admin = await createStaff(t.db, "administrator");
   const a = t.client(); await a.login(admin.email, TEST_PASSWORD, admin.secret);
   assert.equal((await a.get("/staff/voice/operations")).status, 403);
+});
+
+
+// ───────────── Regressions from the independent review ─────────────
+
+test("[VOICE-003] [SEC-002] a caller cannot record call consent for someone else's number", async () => {
+  const t = await schedulingApp();
+  await t.post("/api/webhooks/retell/functions", fn("c_c1", "request_callback", { name: "Mal Icious", phone: "+15550100777", reason: "Call my neighbour" }, { from_number: "+15550100123" }));
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM voice_call_consents`), 0);
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM voice_outbound_requests`), 0, "a task for a person is created, never a consented call request");
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM crm_activities WHERE kind = 'task'`), 1);
+  await t.post("/api/webhooks/retell/functions", fn("c_c2", "book_consultation", { name: "Mal Icious", phone: "+15550100778", start_time: "2026-11-03T14:00:00.000Z", topic: "x y z", reminder_call_ok: true }));
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM voice_call_consents`), 0);
+});
+
+test("[VOICE-004] booking for a different number never reveals whether that number has a booking; no lead when scheduling is off", async () => {
+  const off = await app({}, MON_9AM);
+  const r = await off.post("/api/webhooks/retell/functions", fn("c_off", "book_consultation", { name: "Nora Off", phone: "+15550100200", start_time: "2026-11-03T14:00:00.000Z", topic: "Site" }));
+  assert.equal(r.json.booked, false);
+  assert.equal(await count(off.db, `SELECT COUNT(*) n FROM leads`), 0);
+  const t = await schedulingApp();
+  await t.post("/api/webhooks/retell/functions", fn("c_e1", "book_consultation", { name: "Owen Own", phone: "+15550100201", start_time: "2026-11-03T14:00:00.000Z", topic: "Site" }, { from_number: "+15550100201" }));
+  const probe = await t.post("/api/webhooks/retell/functions", fn("c_e2", "book_consultation", { name: "Pry", phone: "+15550100201", start_time: "2026-11-03T15:00:00.000Z", topic: "Probe" }, { from_number: "+15550100999" }));
+  assert.notEqual(probe.json.already_booked, true);
+  const own = await t.post("/api/webhooks/retell/functions", fn("c_e3", "book_consultation", { name: "Owen Own", phone: "+15550100201", start_time: "2026-11-03T16:00:00.000Z", topic: "Again" }, { from_number: "+15550100201" }));
+  assert.equal(own.json.already_booked, true, "the caller's own number still gets their booking back");
+});
+
+test("[VOICE-003] read-only answers are fresh on repeat; a failed attempt is retried, not replayed", async () => {
+  const t = await schedulingApp();
+  const first = await t.post("/api/webhooks/retell/functions", fn("c_ro", "check_consultation_availability", {}));
+  await t.post("/api/webhooks/retell/functions", fn("c_ro2", "book_consultation", { name: "Taker", phone: "+15550100210", start_time: first.json.slots[0].start_time, topic: "Site" }, { from_number: "+15550100210" }));
+  const again = await t.post("/api/webhooks/retell/functions", fn("c_ro", "check_consultation_availability", {}));
+  assert.notEqual(again.json.slots[0].start_time, first.json.slots[0].start_time, "identical request on the same call sees the new booking");
+  // Simulate a stored failed attempt for a write function: the retry runs again instead of returning the error.
+  const args = { name: "Retry Ray", phone: "+15550100211", interest: "business", requirements: "A website please" };
+  const ok1 = await t.post("/api/webhooks/retell/functions", fn("c_rt", "create_lead", args));
+  assert.equal(ok1.json.leadCreated, true);
+  await t.db.prepare(`UPDATE voice_events SET status = 'error', result_json = '{"error":"x"}' WHERE kind = 'fn:create_lead'`).run();
+  await t.db.prepare(`DELETE FROM crm_activities`).run();
+  await t.db.prepare(`UPDATE calls SET lead_id = NULL`).run();
+  const ok2 = await t.post("/api/webhooks/retell/functions", fn("c_rt", "create_lead", args));
+  assert.equal(ok2.json.leadCreated, true);
+});
+
+test("[VOICE-003] outbound recovery: webhook-first call rows are linked; lost results are swept to a person; timeouts reuse the key", async () => {
+  // call_started (with Retell metadata) arrives before create-phone-call returns.
+  let tRef: Awaited<ReturnType<typeof outboundApp>> | null = null;
+  const fake = { calls: [] as FakeCall[] };
+  const t = await outboundApp([{ status: 201, body: { call_id: "call_w1" } }], MON_2PM);
+  tRef = t;
+  const r = await requestOutbound(t.db, { purpose: "callback", phone: "+15550100220", reason: "Callback", consentEvidence: "Caller asked on a call", requestedBy: t.owner.id });
+  await decideOutbound(t.db, t.owner.id, r.id, "approve");
+  await t.post("/api/webhooks/retell", { event: "call_started", call: { ...phoneCall("call_w1"), direction: "outbound", from_number: "+15550109999", to_number: "+15550100220", metadata: { crestmont_env: "development", crestmont_outbound_request_id: r.id, crestmont_test: "true" } } });
+  assert.equal(await count(tRef.db, `SELECT COUNT(*) n FROM calls WHERE provider_call_id = 'call_w1' AND outbound_request_id = ? AND is_test = 1`, r.id), 1, "metadata links the row and the string test flag is honoured");
+  await t.run();
+  await t.post("/api/webhooks/retell", { event: "call_ended", call: { ...phoneCall("call_w1"), direction: "outbound", to_number: "+15550100220", disconnection_reason: "agent_hangup", metadata: { crestmont_env: "development", crestmont_outbound_request_id: r.id } } });
+  assert.equal((await one<{ status: string }>(t.db, `SELECT status FROM voice_outbound_requests WHERE id = ?`, r.id)).status, "completed");
+  void fake;
+
+  // Lost result: stuck in 'dialing' past the threshold → failed + human notification, never re-dialled.
+  const r2 = await requestOutbound(t.db, { purpose: "callback", phone: "+15550100221", reason: "Callback", consentEvidence: "Caller asked on a call", requestedBy: t.owner.id });
+  await t.db.prepare(`UPDATE voice_outbound_requests SET status = 'dialing', approved_by = ?, updated_at = '2026-11-02T10:00:00.000Z' WHERE id = ?`).bind(t.owner.id, r2.id).run();
+  const before = t.fake.calls.length;
+  await t.run();
+  assert.equal((await one<{ status: string }>(t.db, `SELECT status FROM voice_outbound_requests WHERE id = ?`, r2.id)).status, "failed");
+  assert.equal(t.fake.calls.length, before);
+
+  // Timeouts: every run reuses the same idempotency key, and the request is bounded.
+  const slow = await outboundApp([{ status: 503 }], MON_2PM);
+  const r3 = await requestOutbound(slow.db, { purpose: "callback", phone: "+15550100222", reason: "Callback", consentEvidence: "Caller asked on a call", requestedBy: slow.owner.id });
+  await decideOutbound(slow.db, slow.owner.id, r3.id, "approve");
+  for (let i = 0; i < 4; i++) { await slow.db.prepare(`UPDATE voice_outbound_requests SET next_attempt_at = NULL WHERE id = ?`).bind(r3.id).run(); await slow.run(); }
+  assert.equal(new Set(slow.fake.calls.map((c) => c.body.idempotency_key)).size, 1, "never a second key while the first outcome is unknown");
+  assert.equal(slow.fake.calls.length, 9, "3 runs × (1 + 2 in-run retries), then handed to a person");
+  assert.equal((await one<{ status: string }>(slow.db, `SELECT status FROM voice_outbound_requests WHERE id = ?`, r3.id)).status, "failed");
+  await assert.rejects(requestOutbound(slow.db, { purpose: "callback", phone: "+442071234567", reason: "Callback", requestedBy: slow.owner.id }), /\+1/);
+});
+
+test("[VOICE-006] call_analyzed summaries are redacted; erasure scrubs CRM notes, lead text and notifications", async () => {
+  const t = await app();
+  const from = { from_number: "+15550100230" };
+  await t.post("/api/webhooks/retell/functions", fn("c_s1", "record_consent", { consent: true }, from));
+  await t.post("/api/webhooks/retell/functions", fn("c_s1", "request_callback", { name: "Sam Scrub", phone: "+15550100230", reason: "Talk about card 4111 1111 1111 1111" }, from));
+  await t.post("/api/webhooks/retell", { event: "call_ended", call: phoneCall("c_s1", { ...from, transcript: "hi" }) });
+  await t.post("/api/webhooks/retell", { event: "call_analyzed", call: phoneCall("c_s1", { ...from, call_analysis: { call_summary: "Caller read card 4111 1111 1111 1111" } }) });
+  assert.doesNotMatch((await one<{ summary: string }>(t.db, `SELECT summary FROM calls`)).summary, /4111/);
+  await t.post("/api/webhooks/retell", { event: "call_ended", call: phoneCall("c_s2", { from_number: "+15550100230" }) }); // missed call notification
+  await eraseCallerData(t.db, t.owner.id, "+15550100230", "Caller asked by email");
+  const dump = JSON.stringify([
+    (await t.db.prepare(`SELECT body FROM crm_activities`).all()).results, (await t.db.prepare(`SELECT message FROM leads`).all()).results,
+    (await t.db.prepare(`SELECT body FROM notifications`).all()).results,
+  ]);
+  assert.doesNotMatch(dump, /Sam|0230/);
 });

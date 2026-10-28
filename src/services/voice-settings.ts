@@ -129,6 +129,9 @@ export function voiceConfigProblems(c: VoiceConfig): string[] {
   else {
     if (minutesOf(o.window_start) < 8 * 60 || minutesOf(o.window_end) > 21 * 60) p.push("Outbound calls must stay within 08:00–21:00 recipient local time.");
     if (minutesOf(o.window_end) <= minutesOf(o.window_start)) p.push("Outbound window end must be after its start.");
+    // Without a known recipient zone the window must hold from Hawaii to Eastern time at once (up to 6 hours
+    // apart); a shorter window could never be met and every approved call would be blocked.
+    else if (minutesOf(o.window_end) - minutesOf(o.window_start) < 8 * 60) p.push("Outbound calling window must be at least 8 hours long, so it can be met in every US time zone.");
   }
   if (!Number.isInteger(o.max_per_number_per_day) || o.max_per_number_per_day < 1 || o.max_per_number_per_day > 3) p.push("Outbound limit per number per day must be 1–3.");
   if (!Number.isInteger(o.max_per_number_per_week) || o.max_per_number_per_week < o.max_per_number_per_day || o.max_per_number_per_week > 7) p.push("Outbound limit per number per week must be between the daily limit and 7.");
@@ -263,10 +266,10 @@ export function transferAvailability(c: VoiceConfig, at: Date): { available: boo
 // ───────────── Outbound calling window (recipient local time) ─────────────
 
 /**
- * Without a known recipient time zone, the window must hold in every continental US zone at once
- * (start checked in Pacific time, end in Eastern), which is the conservative reading of quiet-hours rules.
+ * Without a known recipient time zone, the window must hold in every US zone at once (Eastern through
+ * Hawaii), which is the conservative reading of quiet-hours rules. Outbound is limited to +1 numbers.
  */
-export const CONSERVATIVE_US_ZONES = ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"] as const;
+export const CONSERVATIVE_US_ZONES = ["America/New_York", "America/Chicago", "America/Denver", "America/Phoenix", "America/Los_Angeles", "America/Anchorage", "Pacific/Honolulu"] as const;
 
 export function withinCallingWindow(c: VoiceConfig, at: Date, recipientTz: string | null): boolean {
   const zones = recipientTz ? [recipientTz] : [...CONSERVATIVE_US_ZONES];
@@ -312,6 +315,7 @@ export function candidateSlots(c: VoiceConfig, at: Date, busy: { start: number; 
         if (s < earliest) continue;
         if (busy.some((b) => s < b.end && e > b.start)) continue;
         const startsAt = new Date(s).toISOString();
+        if (out.some((x) => x.startsAt === startsAt)) continue; // the skipped hour on the spring-forward day
         out.push({ startsAt, endsAt: new Date(e).toISOString(), label: slotLabel(startsAt, tz) });
       }
     }

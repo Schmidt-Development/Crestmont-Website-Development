@@ -65,7 +65,11 @@ Checked against docs.retellai.com on 2026-10-28; sources in `RETELL-INTEGRATION.
 | Notifications | Complete via existing outbox/Resend + in-app | `email_deliveries` assertions (dev outbox; nothing sent) |
 | Call analytics | Complete | analytics test; Owner page render |
 | Tenant isolation | Partial — Crestmont-only by design; customer tenants not a product | number binding + environment stamp tests; §1 |
-| Security and privacy | Complete | redaction, erasure, secret non-disclosure, Owner-only access tests |
+| Security and privacy | Complete | redaction, erasure, secret non-disclosure, Owner-only access, review regressions (§6) |
 | Retell configuration guide | Complete | `RETELL-CONNECTION-GUIDE.md`, `RETELL-AGENT-SPEC.md` |
 
 "Simulated" means signed test payloads and a fake Retell API; it is not live verification.
+
+## 6. Independent review
+
+A separate review of the diff (by an agent that had not seen the work being written) found nine confirmed defects, all fixed with regression tests: consent recordable for another person's number; outbound requests able to stick in `dialing` (webhook-first race, lost results); a timeout retry that could have dialled twice under a new idempotency key; calling windows that could never be met; Hawaii/Alaska missing from quiet-hours checks and non-US numbers accepted; unredacted `call_analyzed` summaries; caller erasure leaving the number in CRM notes, lead text and notifications; booking responses revealing whether another number had a booking; and stored errors / stale read-only answers being replayed. Also fixed: non-atomic reschedule, duplicate slots on the spring-forward day, string test flag, injected clock for retries, outbound cost from `call_analyzed`. Remaining known limitation: two simultaneous bookings for the same caller's number on different calls can both succeed (each slot is still unique); staff see both on the operations page.
