@@ -165,3 +165,18 @@ rich black pages, charcoal secondary surfaces, white headings, grey supporting t
 - **No white flash:** first-visit frames captured from a mid-grey start page never exceed mean luminance 31/255;
   the pre-CSS canvas is dark via the `color-scheme` meta.
 - **Artwork:** all 11 illustrations have fully transparent edges (no baked backgrounds); the crest files are unchanged.
+
+## 10. Interactive portfolio and service pages (2026-10-27)
+
+- **Portfolio explorer:** see `PORTFOLIO.md`. It is data-driven (four founder-owned projects via
+  `scripts/portfolio-setup.ts`) and embeds only isolated, verified demo deployments.
+  - Additive migration 0037.
+  - New staff route `POST /staff/portfolio/:id/demo`.
+  - Per-response `frame-src` for approved demo origins only.
+- **Service visuals:** see `SERVICE-VISUALS.md`. These are frontend only, with no backend changes.
+- **Backend asks:** migration 0037 and `PORTFOLIO_DEMO_ORIGINS` in the backend-owned environments, both when
+  scheduled.
+- **Blockers:**
+  - The four demo branches need push access to the three project repositories plus Cloudflare secrets in each.
+  - Until the demos are deployed and verified from the runner, the preview shows genuine posters with
+    "not verified yet" status lines and does not frame anything.

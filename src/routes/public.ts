@@ -21,6 +21,7 @@ import { newId, nowIso } from "../lib/db.ts";
 import * as cms from "../services/cms.ts";
 import { lineDiff } from "../services/voice.ts";
 import * as pf from "../services/portfolio.ts";
+import { serviceVisual } from "../ui/service-visuals.ts";
 import { portfolioExplorer } from "../ui/portfolio-explorer.ts";
 import { SERVICES, SERVICE_GROUPS, serviceBySlug, servicePath, PRICING_NOTE, type ServiceDef } from "../content/services.ts";
 import { CMS_KEYS, cmsKeyDef, parseItems, paragraphs, type CmsKeyDef } from "../content/registry.ts";
@@ -67,6 +68,13 @@ const section = (eyebrow: string, title: string, body: SafeHtml, opts: { id?: st
 
 const pageHero = (eyebrow: string, title: string, lede?: string, actions?: SafeHtml) => html`<section class="hero hero--page"><div class="container">
 <div class="eyebrow">${eyebrow}</div><h1 class="hero-title">${title}</h1>${lede ? html`<p class="lede hero-seq" style="--seq:0">${lede}</p>` : ""}${actions ? html`<div class="row hero-seq" style="--seq:1">${actions}</div>` : ""}</div></section>`;
+
+/** Service detail hero: the standard page hero copy and CTAs (unchanged) beside an interactive demonstration. */
+const serviceHero = (eyebrow: string, title: string, lede: string | undefined, actions: SafeHtml, visual: SafeHtml | null) => visual
+  ? html`<section class="hero hero--page hero--service"><div class="container hero-service"><div class="hero-service__copy">
+<div class="eyebrow">${eyebrow}</div><h1 class="hero-title">${title}</h1>${lede ? html`<p class="lede hero-seq" style="--seq:0">${lede}</p>` : ""}<div class="row hero-seq" style="--seq:1">${actions}</div></div>
+<div class="hero-service__visual hero-seq" style="--seq:2">${visual}</div></div></section>`
+  : pageHero(eyebrow, title, lede, actions);
 
 const itemCards = (text: string) => html`<div class="experience" data-reveal-group>${parseItems(text).map((i) => html`<div class="card card--feature" data-reveal><h3 class="card__title">${i.title}</h3><p class="muted">${i.body}</p></div>`)}</div>`;
 /** Capability cards (three columns). */
@@ -407,7 +415,7 @@ ${section("Not offered", "What we do not offer", html`<p class="muted">We do not
     return page(ctx, "services", [`service.${s.slug}`, "pricing.presentation"], (c) => {
       const copy = c.get(`service.${s.slug}`);
       const related = SERVICES.filter((x) => x.group === s.group && x.slug !== s.slug).slice(0, 3);
-      return html`${pageHero(s.group, s.name, copy.summary, html`${s.pricing === "custom" ? linkButton("Request a quote", `/quote?service=${s.slug}`) : linkButton("View packages", "/pricing")}${linkButton(s.pricing === "custom" ? "Contact us" : "Request a quote", s.pricing === "custom" ? "/contact" : `/quote?service=${s.slug}`, "secondary")}`)}
+      return html`${serviceHero(s.group, s.name, copy.summary, html`${s.pricing === "custom" ? linkButton("Request a quote", `/quote?service=${s.slug}`) : linkButton("View packages", "/pricing")}${linkButton(s.pricing === "custom" ? "Contact us" : "Request a quote", s.pricing === "custom" ? "/contact" : `/quote?service=${s.slug}`, "secondary")}`, serviceVisual(s.slug))}
 <section class="section"><div class="container grid grid-2"><div class="prose">${renderMarkdown(copy.intro)}
 <h2>How it is priced</h2><p>${PRICING_NOTE[s.pricing]}</p>${s.pricing !== "custom" ? html`<p class="muted">Packages: ${PKG_ORDER.map((id) => `${PACKAGES[id].name} ${pkgPrice(id)}`).join(" · ")}.</p>` : html`<p class="muted">Custom projects are billed 50% as a deposit, 25% after the approved design milestone and 25% before production launch.</p>`}</div>
 <div>${s.includes.length ? html`<div class="card"><h3 class="card__title">What is included</h3><ul class="checklist">${s.includes.map((i) => html`<li>${i}</li>`)}</ul></div>` : ""}
@@ -494,7 +502,7 @@ ${parseItems(c.get("faq.items").items).map((q) => html`<details class="disclosur
 
   r.get("/hosting-maintenance", (ctx) => page(ctx, "hosting", ["hosting.page"], (c) => {
     const h = c.get("hosting.page");
-    return html`${pageHero("Ongoing care", h.heading, h.lede, html`${linkButton("Ask about maintenance", "/contact?topic=maintenance")}`)}
+    return html`${serviceHero("Ongoing care", h.heading, h.lede, html`${linkButton("Ask about maintenance", "/contact?topic=maintenance")}`, serviceVisual("hosting-maintenance"))}
 <section class="section section--flush"><div class="container">${maintenanceCards()}</div></section>
 ${section("Ownership", "Your site, your choice", html`<ul class="plain-list"><li>Maintenance plans are optional. Your domain always remains registered to you.</li><li>You can use your own domain registrar or agency-managed DNS services.</li><li>Plans renew monthly by automatic billing, with self-service payment management in your customer portal; see the <a href="/legal/cancellation">cancellation policy</a>.</li><li>Support tickets can be submitted at any time; see the <a href="/legal/support">support policy</a> for staffed hours.</li></ul>`)}`;
   }));

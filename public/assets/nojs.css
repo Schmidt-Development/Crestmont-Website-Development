@@ -20,3 +20,9 @@
 .pfx__window { overflow: visible; border-radius: 0; }
 .pfx__track { display: grid; gap: var(--s-8); transform: none !important; }
 .pfx__screen { height: auto; aspect-ratio: 16 / 10; }
+/* Service visuals without JavaScript: every step, layer and explanation is visible as a readable list; controls that
+   need scripting are hidden. */
+.sv__controls, .sv-actions, .sv-flow__toggles, .sv-book__rules, .sv-wf__opts { display: none !important; }
+.sv-compare { cursor: default; } .sv-compare__handle { display: none; }
+.hero--service .hero-service { align-items: start; }
+.sv-flow__panel { min-height: 0; }
