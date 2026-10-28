@@ -30,6 +30,9 @@ concurrency:
 
 jobs:
   preflight:
+    # Staging is deployed only from main. A manual run from any other branch is skipped here; old branches carry older
+    # copies of this file, so the `staging` environment must ALSO allow only `main` (Settings → Environments).
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: staging
     outputs:
@@ -60,14 +63,17 @@ jobs:
       pull-requests: read
       checks: read
       security-events: read
+    # F-24: no secret is set for the whole job. The Cloudflare token and account id are given only to the steps that run
+    # wrangler or call the Cloudflare API (including the delivery gate, forensic snapshot, capture and revocation proof,
+    # which read staging D1 through wrangler); STAGING_PREVIEW_PASSWORD only to the steps that use it. npm install, the
+    # tests and the browser journey (third-party package code) receive none. tests/workflow-security.test.ts enforces this.
     env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      FIXED_PREVIEW_PASSWORD: ${{ secrets.STAGING_PREVIEW_PASSWORD }}
       DEPLOYMENT_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-staging
       # Bump to force a one-time rotation of all staging access credentials on the next run (scripts/staging-access.ts).
       # 2 = rotation after the preview-password mismatch of deploy #4 (2026-10-27).
-      ACCESS_EPOCH: "2"
+      # 3 = rotation after plaintext access notes were exposed as public artifacts (2026-10-27/28). Lands in the same
+      #     deploy that first protects the notes, so the new credentials are never uploaded in plaintext.
+      ACCESS_EPOCH: "3"
       WRANGLER: npx --yes wrangler@4
     steps:
       - uses: actions/checkout@v4
@@ -84,6 +90,9 @@ jobs:
         run: npx tsc -p tsconfig.json && npm test
 
       - name: Provision staging D1 database (idempotent)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           id=$($WRANGLER d1 list --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s).find(d=>d.name==="crestmont-staging");process.stdout.write(r?r.uuid:"")})')
           if [ -z "$id" ]; then
@@ -96,6 +105,9 @@ jobs:
           grep -q "$id" wrangler.toml && echo "Staging D1: $id"
 
       - name: File storage (R2) if available, otherwise disable uploads honestly
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         id: r2
         run: |
           if $WRANGLER r2 bucket list > r2-list.log 2> r2.err && grep -q "crestmont-files-staging" r2-list.log || $WRANGLER r2 bucket create crestmont-files-staging >> r2.err 2>&1; then
@@ -109,6 +121,9 @@ jobs:
           fi
 
       - name: Restore point (D1 Time Travel bookmark)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         continue-on-error: true
         run: |
           # D1 keeps point-in-time history; record where to restore to instead of exporting the database
@@ -117,10 +132,49 @@ jobs:
             node -e 'const j=JSON.parse(require("fs").readFileSync("tt.json","utf8"));console.log("Pre-deploy D1 bookmark: "+(j.bookmark??JSON.stringify(j)))' | tee -a "$GITHUB_STEP_SUMMARY"
           rm -f tt.json
 
+      # A rotation must never leave the Founder without a way to receive the new Owner credentials, and must actually
+      # change the preview password. Checked BEFORE anything is changed; nothing is printed but the verdict.
+      - name: Credential delivery gate (before any rotation)
+        id: gate
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_ARTIFACT_PASSPHRASE: ${{ secrets.ACCESS_ARTIFACT_PASSPHRASE }}
+          ROTATE: ${{ inputs.rotate_credentials }}
+        run: node --no-warnings scripts/staging-rotation-check.ts gate
+
+      # Evidence first: a rotation deletes demo sessions, tokens and recovery codes. Full rows are sealed for the
+      # Founder (public repository); only non-identifying counts reach the summary.
+      - name: Forensic snapshot (before the rotation; sealed)
+        if: steps.gate.outputs.pending == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_ARTIFACT_PASSPHRASE: ${{ secrets.ACCESS_ARTIFACT_PASSPHRASE }}
+        run: |
+          mkdir -p forensics
+          node --no-warnings scripts/staging-forensics.ts --out forensics/snapshot.json
+          node --no-warnings scripts/seal.ts seal forensics/snapshot.json forensics/staging-forensics.sealed
+          rm -f forensics/snapshot.json
+
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.pending == 'true'
+        with:
+          name: staging-forensics-sealed
+          path: forensics/staging-forensics.sealed
+          retention-days: 90
+          if-no-files-found: error
+
       - name: Apply D1 migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: $WRANGLER d1 migrations apply crestmont-staging --remote --env staging
 
       - name: Deploy Worker (staging, behind the preview gate)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         id: deploy
         run: |
           $WRANGLER deploy --env staging | tee deploy.log
@@ -128,20 +182,28 @@ jobs:
           [ -n "$url" ] || { echo "::error::No workers.dev URL in deploy output. Choose a workers.dev subdomain in the Cloudflare dashboard (Workers & Pages → Overview) and re-run."; exit 1; }
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
-      - name: Evidence ingest secret
-        # Derived (stable) and put only when changed: any secret change blocks Worker rollbacks (Cloudflare 10220).
+      - name: Evidence ingest secret (stable; put only when changed)
+        # Stable and put only when changed: any secret change blocks Worker rollbacks (Cloudflare 10220).
+        # The GitHub secret EVIDENCE_INGEST_SECRET is used when it exists, so ci.yml, release.yml and deploy-production.yml
+        # sign with the value staging holds; until then the key derived from the Cloudflare token is used (with a warning).
         env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          EVIDENCE_INGEST_SECRET_STABLE: ${{ secrets.EVIDENCE_INGEST_SECRET }}
         run: |
-          ev=$(node --no-warnings scripts/staging-secrets.ts derive evidence)
+          ev=$(node --no-warnings scripts/evidence-secret.ts print)
           echo "::add-mask::$ev"
           printf '%s' "$ev" | node --no-warnings scripts/staging-secrets.ts put EVIDENCE_INGEST_SECRET
           echo "EVIDENCE_INGEST_SECRET=$ev" >> "$GITHUB_ENV"
+          echo "Evidence secret fingerprint: $(EVIDENCE_INGEST_SECRET="$ev" node --no-warnings scripts/evidence-secret.ts fingerprint) (must match the Deploy production summary)." >> "$GITHUB_STEP_SUMMARY"
 
       - name: External scheduler key
         # Derived from the Cloudflare token secret (scripts/trigger-scheduler.ts), so the health monitor can trigger the
         # scheduled jobs when native Cron Triggers are unavailable on this account. Same value on every deploy.
         env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           k=$(node --no-warnings scripts/trigger-scheduler.ts derive)
@@ -164,6 +226,8 @@ jobs:
         # /api/readiness/health (required) and the external monitor report the outcome.
         continue-on-error: true
         env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           READINESS_URL: ${{ steps.deploy.outputs.url }}
         run: |
           mkdir -p evidence
@@ -179,6 +243,8 @@ jobs:
 
       - name: AI Builds runner secret (only when the Founder has provided one)
         env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           RUNNER_SECRET: ${{ secrets.BUILD_RUNNER_SECRET }}
           ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
@@ -188,6 +254,8 @@ jobs:
       - name: Seed sample data and demo accounts (first run or on request)
         id: seed
         env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           RESEED: ${{ inputs.reseed_demo_accounts }}
         run: |
           n=$($WRANGLER d1 execute crestmont-staging --remote --env staging --json --command "SELECT COUNT(*) AS n FROM users WHERE email LIKE '%@crestmont-preview.test'" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);process.stdout.write(String(j[0].results[0].n))})')
@@ -202,8 +270,30 @@ jobs:
             echo "seeded=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Preview password will change (before the rotation)
+        env:
+          FIXED_PREVIEW_PASSWORD: ${{ secrets.STAGING_PREVIEW_PASSWORD }}
+        if: steps.gate.outputs.pending == 'true'
+        run: node --no-warnings scripts/staging-rotation-check.ts override --url "${{ steps.deploy.outputs.url }}"
+
+      # Before rotating: sign in with the credentials that are live now and keep that session and one recovery code, so
+      # the run can PROVE they stop working. Values stay on the runner (RUNNER_TEMP, 0600, masked) and are never uploaded.
+      - name: Capture the pre-rotation access (for the revocation proof)
+        if: steps.gate.outputs.pending == 'true'
+        continue-on-error: true
+        env:
+          FIXED_PREVIEW_PASSWORD: ${{ secrets.STAGING_PREVIEW_PASSWORD }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ROTATE: ${{ inputs.rotate_credentials }}
+        run: node --no-warnings scripts/staging-rotation-check.ts capture --url "${{ steps.deploy.outputs.url }}" --state "$RUNNER_TEMP/rotation-state.json"
+
       - name: Apply staging access (preview password + demo accounts, rotated when due)
         env:
+          FIXED_PREVIEW_PASSWORD: ${{ secrets.STAGING_PREVIEW_PASSWORD }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           ROTATE: ${{ inputs.rotate_credentials }}
         run: node --no-warnings scripts/staging-access.ts --url "${{ steps.deploy.outputs.url }}" --out access
@@ -241,10 +331,21 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
           AXE_PATH: ${{ github.workspace }}/.pw/node_modules/axe-core/axe.min.js
         run: |
+          unset EVIDENCE_INGEST_SECRET   # set via GITHUB_ENV earlier; third-party packages below never see it (F-24)
           npm install --prefix .pw --no-save --no-audit --no-fund playwright@1.48.2 axe-core@4.10.2 > /dev/null
           .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
           export E2E_PREVIEW_PASSWORD=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("access/private.json","utf8")).previewPassword)')
           node --no-warnings --test --test-concurrency=1 --test-reporter=./scripts/evidence-reporter.mjs tests/e2e/staging.e2e.ts tests/e2e/staging-quality.e2e.ts tests/e2e/staging-journeys.e2e.ts
+
+      - name: Prove the old access is revoked and the new access works
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        id: revoked
+        if: always() && steps.verify.outcome == 'success' && steps.gate.outputs.pending == 'true'
+        run: |
+          node --no-warnings scripts/staging-rotation-check.ts verify --url "${{ steps.deploy.outputs.url }}" \
+            --state "$RUNNER_TEMP/rotation-state.json" --access access/access.json
 
       - name: Record evidence and deployment
         if: always() && steps.deploy.outcome == 'success'
@@ -275,14 +376,39 @@ jobs:
           if [ "${{ steps.verify.outcome }}" = "success" ]; then
             echo "### Staging preview deployed and verified: ${{ steps.deploy.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
             echo "Preview password → Owner sign-in → 2FA → all 32 Owner modules verified on the live site." >> "$GITHUB_STEP_SUMMARY"
-            echo "Credentials are in the private **staging-preview-access** artifact of this run (never in logs)." >> "$GITHUB_STEP_SUMMARY"
+            echo "Credentials: **staging-access-sealed** artifact of this run (AES-256-GCM; only the ACCESS_ARTIFACT_PASSPHRASE opens it; never in logs)." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "### Staging access NOT verified — no access artifact was issued for this run." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - uses: actions/upload-artifact@v4
+      # Workflow artifacts of this PUBLIC repository can be downloaded by anyone signed in to GitHub. Access notes are
+      # therefore sealed (authenticated encryption, scripts/seal.ts) with the Founder's ACCESS_ARTIFACT_PASSPHRASE, or
+      # not issued at all. There is no plaintext path, whatever the repository's visibility.
+      - name: Seal the access notes
+        id: protect
         if: always() && steps.verify.outcome == 'success'
+        env:
+          ACCESS_ARTIFACT_PASSPHRASE: ${{ secrets.ACCESS_ARTIFACT_PASSPHRASE }}
+        run: |
+          if node --no-warnings scripts/seal.ts check > /dev/null 2>&1; then
+            node --no-warnings scripts/seal.ts seal access/README.md access/staging-access.sealed
+            rm -f access/README.md
+            echo "upload=sealed" >> "$GITHUB_OUTPUT"
+            echo "Open the sealed notes: \`node --no-warnings scripts/seal.ts open staging-access.sealed\` (asks for the passphrase; docs/STAGING-PREVIEW.md)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            rm -f access/README.md
+            echo "upload=none" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Access notes not issued::No usable ACCESS_ARTIFACT_PASSPHRASE secret (32+ characters), so no credentials were uploaded. See docs/STAGING-PREVIEW.md."
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.protect.outputs.upload == 'sealed'
         with:
-          name: staging-preview-access
-          path: access/README.md
+          name: staging-access-sealed
+          path: access/staging-access.sealed
           retention-days: 7
+          if-no-files-found: error
+
+      - name: Remove credentials and evidence from the runner
+        if: always()
+        run: rm -rf access forensics "$RUNNER_TEMP/rotation-state.json"

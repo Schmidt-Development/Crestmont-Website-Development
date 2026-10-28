@@ -4,7 +4,7 @@ Three separate stages. Each one needs the Founder; none happens on a push.
 
 | Stage | What it does | How | Reversible? |
 |---|---|---|---|
-| **1. Provision** | Creates the D1 database `crestmont-production` and the Worker `crestmont-platform-production` as an empty draft holding its secrets; checks the R2 bucket `crestmont-files-production`. No code, no domain, no DNS, no migrations, no public URL. | Actions → **Provision production** (`.github/workflows/provision-production.yml`) | Yes: the draft Worker and empty database can be deleted in the dashboard. |
+| **1. Provision** | Creates the D1 database `crestmont-production` and the Worker `crestmont-platform-production` as an empty draft holding its secrets (Turnstile, evidence, MFA encryption key); checks the R2 bucket `crestmont-files-production`. No code, no domain, no DNS, no migrations, no public URL. | Actions → **Provision production** (`.github/workflows/provision-production.yml`) | Yes: the draft Worker and empty database can be deleted in the dashboard. |
 | **2. Deploy** | Uploads the approved commit, applies migrations, attaches `crestmontwebsitedevelopment.com`, runs post-deploy checks, rolls back on failure. | Actions → **Deploy production** (`deploy-production.yml`), after the Founder approves the release candidate | Code: `wrangler rollback`. Migrations are additive and are not rolled back. |
 | **3. Open to customers** | Real email, `www` redirect, HSTS, Owner account, and the authentication items in `docs/AUTH-PRODUCTION.md`. | Founder decisions and configuration | — |
 
@@ -32,10 +32,11 @@ Account Resources: **Include → the Crestmont account** only. Zone Resources: *
   - `CLOUDFLARE_API_TOKEN` — the production token above
   - `CLOUDFLARE_ACCOUNT_ID` — `df441806863a7fd3f26dea4e782a25fc`
   - `PRODUCTION_TURNSTILE_SITE_KEY`, `PRODUCTION_TURNSTILE_SECRET` — the production widget's keys (the workflow refuses Cloudflare test keys and staging's keys)
+  - `PRODUCTION_MFA_ENCRYPTION_KEY` — output of `openssl rand -base64 32`, saved in the password manager **before** it is added here. It encrypts every stored two-factor secret on production; the workflow installs it once and never replaces it (a different value would make every enrolled authenticator unreadable). Without it, two-factor enrolment on production fails closed, so no Owner account can be completed.
 - **Environment variables** (needed by Stage 2, harmless now): `PRODUCTION_URL` = `https://crestmontwebsitedevelopment.com`, `READINESS_URL` = `https://crestmont-platform-staging.partners-df4.workers.dev`.
 
 ### Run it
-Actions → **Provision production** → *Run workflow* (branch `main`) → confirmation `provision crestmont-platform-production` → approve the `production` deployment when GitHub asks. The run summary shows the D1 `database_id` (not a secret) and the secret **names** installed. Re-running is safe.
+Actions → **Provision production** → *Run workflow* (branch `main`) → confirmation `provision crestmont-platform-production` → approve the `production` deployment when GitHub asks. The run summary shows the D1 `database_id` (not a secret) and the secret **names** installed. Re-running is safe and changes no existing Worker secret (a changed secret blocks rollbacks, Cloudflare 10220); to replace the Turnstile keys, tick *replace_turnstile*, and do it only between deploys.
 
 Then commit that `database_id` into `[env.production]` of `wrangler.toml` through a pull request; `deploy-production.yml` refuses to run until it is committed.
 
