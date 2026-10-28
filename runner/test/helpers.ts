@@ -456,8 +456,26 @@ export interface FakeDocker {
   override?: (args: string[]) => import("../src/exec.ts").ExecResult | undefined | Promise<import("../src/exec.ts").ExecResult | undefined>;
 }
 
+/** What `docker inspect` reports for a container started with these `docker run` args (enough for evaluateIsolation). */
+export function inspectFromRunArgs(args: string[]): Record<string, unknown> {
+  const all = (flag: string) => args.flatMap((a, i) => (a === flag ? [args[i + 1]] : []));
+  const one = (flag: string) => all(flag)[0];
+  const mem = /^(\d+)([gm])$/i.exec(one("--memory") ?? "");
+  return {
+    Config: { User: one("--user"), Image: args.find((a) => a.startsWith("crestmont-build-sandbox")) ?? "img", Labels: Object.fromEntries(all("--label").map((l) => l.split("="))) },
+    HostConfig: {
+      NetworkMode: one("--network"), ReadonlyRootfs: args.includes("--read-only"), CapDrop: all("--cap-drop"), CapAdd: null,
+      SecurityOpt: all("--security-opt"), Privileged: args.includes("--privileged"),
+      Memory: mem ? Number(mem[1]) * (mem[2].toLowerCase() === "g" ? 1024 ** 3 : 1024 ** 2) : 0,
+      NanoCpus: Math.round(Number(one("--cpus") ?? 0) * 1e9), PidsLimit: Number(one("--pids-limit") ?? 0), PortBindings: {},
+    },
+    Mounts: all("--mount").map((m) => ({ Type: /type=(\w+)/.exec(m)?.[1], Source: /src=([^,]+)/.exec(m)?.[1], Destination: /dst=([^,]+)/.exec(m)?.[1], RW: true })),
+  };
+}
+
 export function fakeDocker(opts: { passthrough?: boolean; override?: FakeDocker["override"] } = {}): FakeDocker {
   const repos = new Map<string, string>();
+  const runs = new Map<string, string[]>();
   const ok = (stdout = "") => ({ code: 0, stdout, stderr: "", timedOut: false, notFound: false });
   const state: FakeDocker = { calls: [], override: opts.override, executor: null as unknown as FakeDocker["executor"] };
   state.executor = async (args, o) => {
@@ -469,7 +487,12 @@ export function fakeDocker(opts: { passthrough?: boolean; override?: FakeDocker[
       const mount = args.find((a) => a.includes("dst=/workspace/repo"));
       const src = /src=([^,]+)/.exec(mount ?? "")?.[1];
       if (src) repos.set(name, src);
+      runs.set(name, [...args]);
       return ok("container-id");
+    }
+    if (args[0] === "inspect") {
+      const run = runs.get(args[args.length - 1]);
+      return run ? ok(JSON.stringify([inspectFromRunArgs(run)])) : { code: 1, stdout: "", stderr: "No such container", timedOut: false, notFound: false };
     }
     if (args[0] === "exec") {
       const name = args[3];

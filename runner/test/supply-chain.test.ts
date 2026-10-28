@@ -74,9 +74,16 @@ function fromLines(dockerfile: string): { args: Record<string, string>; froms: s
   return { args, froms };
 }
 
-const IMAGE_REF = /^[a-z0-9./-]+:\d+(\.\d+){1,2}(-[a-z0-9.-]+)?(@sha256:[0-9a-f]{64})?$/;
+// Exact version tag AND immutable digest (the tag stays for readability; Docker resolves the digest). Digests are the
+// ones CI's runner-images job reports per tag ("Base image digest" annotations); re-pin only after reviewing a change.
+const IMAGE_REF = /^[a-z0-9./-]+:\d+(\.\d+){1,2}(-[a-z0-9.-]+)?@sha256:[0-9a-f]{64}$/;
 
-test("[AIB-RUNNER] Dockerfiles: npm ci from lockfiles only, exact base image tags, non-root users, hadolint exceptions documented", () => {
+test("[AIB-RUNNER] Dockerfiles: npm ci from lockfiles only, base images pinned by tag and digest, non-root users, hadolint exceptions documented", () => {
+  // The optional Ollama container image is pinned the same way, in the compose default and the installer default.
+  const compose = read("windows/docker-compose.yml");
+  const ollamaDefault = /\$\{OLLAMA_IMAGE:-([^}]+)\}/.exec(compose)?.[1] ?? "";
+  assert.match(ollamaDefault, IMAGE_REF, "compose: ollama image default pinned by digest");
+  assert.match(read("windows/Install-CrestmontRunner.ps1"), new RegExp(`\\[string\\]\\$OllamaImage = "${ollamaDefault.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`), "installer default = compose default");
   const files = { runner: "Dockerfile", sandbox: "sandbox/Dockerfile", proxy: "windows/proxy/Dockerfile" };
   for (const [name, f] of Object.entries(files)) {
     const src = read(f);
@@ -88,7 +95,7 @@ test("[AIB-RUNNER] Dockerfiles: npm ci from lockfiles only, exact base image tag
     assert.ok(froms.length >= 1);
     for (const ref of froms) {
       if (/^[a-z]+$/.test(ref)) continue; // a build stage name
-      assert.match(ref, IMAGE_REF, `${name}: FROM ${ref} is an exact version tag (optionally @sha256)`);
+      assert.match(ref, IMAGE_REF, `${name}: FROM ${ref} is an exact version tag pinned to a sha256 digest`);
       assert.doesNotMatch(ref, /:latest\b|:(\d+)(-[a-z-]+)?$/, `${name}: FROM ${ref} is not a floating tag`);
     }
     for (const m of code.matchAll(/hadolint ignore=([A-Z0-9,]+)/g)) assert.deepEqual(m[1].split(","), ["DL3008"], `${name}: only the documented apt pinning exception`);

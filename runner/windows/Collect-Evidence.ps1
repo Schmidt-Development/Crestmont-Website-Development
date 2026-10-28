@@ -9,7 +9,9 @@
     -Monitor -Minutes 90     sample CPU / RAM / GPU (nvidia-smi) every -IntervalSeconds into utilization.csv while the
                              validation build runs (start it right after queuing the build).
     -JobId bld_...           collect everything about that build after it finished (or was cancelled).
-  Both can be combined; -Monitor runs first.
+  Both can be combined; -Monitor runs first. To keep a monitor run and the later job collection in ONE folder, pass
+  the same -EvidenceDir to both. Without it, a -JobId collection copies utilization.csv from the most recent -Monitor
+  folder (written in the last 24 hours) and records which one in EVIDENCE-INDEX.txt.
 
   Collected (when available):
     hardware.json, recommendation.json      machine + model decision
@@ -18,11 +20,14 @@
     proxy-access.log, proxy-summary.txt     every outbound request of the runner + build containers; anthropic.com
                                             and other paid AI hosts counted (expected: 0 allowed)
     runner.log, runner-job.log              runner JSON lines (all / this job)
-    docker-ps.txt, docker-inspect-*.json    containers and their isolation flags (network none, cap-drop, limits)
+    docker-ps.txt, docker-inspect-*.json    containers still present and their isolation flags
+    workspace\<ref>\_runner-evidence\      sandbox-isolation-NN.json: docker inspect of EVERY build container the job
+                                            ran, judged by the runner (kept after the containers are removed)
     listening-ports.txt, firewall-inbound.txt
                                             no public listener, no inbound rules added
     workspace\                              generated source, .crestmont status files, runner-checks.json, screenshots
-    health.json, utilization.csv, MANIFEST.txt (SHA-256 of every file)
+    health.txt, utilization.csv, EVIDENCE-INDEX.txt (which LOCAL-VALIDATION.md evidence is present / missing),
+    MANIFEST.txt (SHA-256 of every file)
 #>
 [CmdletBinding()]
 param(
@@ -30,11 +35,14 @@ param(
   [string]$JobId = "",
   [switch]$Monitor,
   [int]$Minutes = 60,
-  [int]$IntervalSeconds = 15
+  [int]$IntervalSeconds = 15,
+  [string]$EvidenceDir = ""
 )
 $ErrorActionPreference = "Continue"
+if ($JobId -and $JobId -cnotmatch '^[A-Za-z0-9_-]{1,80}$') { throw "-JobId must look like bld_..." }
 $stamp = (Get-Date).ToString("yyyyMMdd-HHmmss")
-$out = Join-Path $InstallDir "evidence\$stamp$(if ($JobId) { "-$JobId" })"
+$suffix = if ($JobId) { "-$JobId" } elseif ($Monitor) { "-monitor" } else { "" }
+$out = if ($EvidenceDir) { $EvidenceDir } else { Join-Path $InstallDir "evidence\$stamp$suffix" }
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $compose = Join-Path $InstallDir "compose"
 $dc = @("compose", "-f", (Join-Path $compose "docker-compose.yml"), "--project-directory", $compose)
@@ -111,6 +119,16 @@ Save "listening-ports.txt" (Get-NetTCPConnection -State Listen -ErrorAction Sile
 Save "firewall-inbound.txt" (Get-NetFirewallRule -Direction Inbound -Enabled True -ErrorAction SilentlyContinue |
   Where-Object { $_.DisplayName -match "ollama|docker|crestmont|squid|node" } | Select-Object DisplayName, Profile, Action | Format-Table -AutoSize | Out-String)
 
+# Utilization: from this folder's own -Monitor run, else the most recent monitor folder of the last 24 hours.
+$utilSource = "none"
+if (Test-Path (Join-Path $out "utilization.csv")) { $utilSource = "this folder (-Monitor)" }
+elseif ($JobId) {
+  $recent = Get-ChildItem (Join-Path $InstallDir "evidence") -Directory -Filter "*-monitor" -ErrorAction SilentlyContinue |
+    Where-Object { (Test-Path (Join-Path $_.FullName "utilization.csv")) -and $_.LastWriteTime -gt (Get-Date).AddHours(-24) } |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if ($recent) { Copy-Item (Join-Path $recent.FullName "utilization.csv") $out; $utilSource = "copied from $($recent.FullName)" }
+}
+
 # Workspace artifacts of the job (generated source, status files, screenshots) from the workspaces volume.
 if ($JobId) {
   $safe = $JobId -replace "[^A-Za-z0-9_-]", "_"
@@ -122,6 +140,7 @@ for d in /w/JOBPREFIX-a*; do
   n=$(basename "$d")
   mkdir -p "/out/$n" && cp -r "$d/repo/." "/out/$n/"
   ls -l "$d/agent" > "/out/$n/AGENT-TRANSCRIPTS.txt" 2>/dev/null
+  [ -d "$d/evidence" ] && mkdir -p "/out/$n/_runner-evidence" && cp "$d/evidence/"*.json "/out/$n/_runner-evidence/" 2>/dev/null
 done
 true
 '@
@@ -131,6 +150,25 @@ true
 
 try { & (Join-Path $PSScriptRoot "Get-RunnerHealth.ps1") -InstallDir $InstallDir | Out-File -Encoding utf8 (Join-Path $out "health.txt") }
 catch { "Get-RunnerHealth.ps1 failed: $($_.Exception.Message)" | Out-File -Encoding utf8 (Join-Path $out "health.txt") }
+
+# Index: each evidence row of LOCAL-VALIDATION.md section 5 and whether this folder has it.
+function Has([string]$Pattern) { if (@(Get-ChildItem $out -Recurse -File -Filter $Pattern -ErrorAction SilentlyContinue).Count) { "present" } else { "MISSING" } }
+Save "EVIDENCE-INDEX.txt" @(
+  "Evidence folder: $out"
+  "Build: $(if ($JobId) { $JobId } else { '(none: -JobId not given)' })"
+  ""
+  "Local inference          ollama-server*.log, ollama-ps.txt     $(Has 'ollama-*.log') / $(Has 'ollama-ps.txt')"
+  "Zero paid AI calls       proxy-summary.txt                    $(Has 'proxy-summary.txt')"
+  "Generated source         workspace\<ref>\                       $(Has 'BRIEF.md')"
+  "Checks and report        runner-job.log                        $(Has 'runner-job.log')"
+  "Screenshots              workspace\<ref>\.crestmont\screenshots $(Has '*.png')"
+  "Sandbox isolation        workspace\<ref>\_runner-evidence\     $(Has 'sandbox-isolation-*.json')"
+  "No public port           listening-ports.txt                   $(Has 'listening-ports.txt')"
+  "Utilization              utilization.csv                       $(Has 'utilization.csv') ($utilSource)"
+  "Health                   health.txt                            $(Has 'health.txt')"
+  ""
+  "Add by hand: owner-review.txt (preview review), drills.txt (revision, cancel, crash recovery)."
+)
 
 # Manifest with hashes.
 Get-ChildItem $out -Recurse -File | Where-Object { $_.Name -ne "MANIFEST.txt" } |

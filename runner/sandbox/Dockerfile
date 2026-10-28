@@ -10,7 +10,7 @@
 # Reproducibility: the base image is an exact version tag (pin it by digest once CI has printed the digest; see
 # docs/ai-builds/RUNNER-SETUP.md section 12) and the npm packages come from package-lock.json via `npm ci`.
 # Debian packages are not version-pinned (bookworm security updates); hadolint DL3008 is ignored for that reason.
-ARG NODE_IMAGE=node:22.23.4-bookworm-slim
+ARG NODE_IMAGE=node:22.23.4-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da
 FROM ${NODE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \

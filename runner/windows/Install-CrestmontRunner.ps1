@@ -14,7 +14,9 @@
     5. Model selection (windows/select-model.ts inside the runner image) -> state\recommendation.json; -Model overrides.
     6. Ollama: user environment (OLLAMA_HOST=127.0.0.1:11434 = localhost only, context length, parallelism,
        keep-alive, flash attention, KV cache type), restart, pull the selected model.
-    7. Compose files: docker-compose.yml, proxy\squid.conf (allow-list), runner.env (no secrets inline).
+    7. Compose files: docker-compose.yml, proxy\squid.conf (allow-list), runner.env (managed, no secrets inline) and
+       runner.local.env (your own settings: created once, never overwritten; see RunnerEnv.ps1). An existing runner.env
+       is backed up when it changes, and keys the installer does not manage are moved to runner.local.env.
     8. Checks: containers can reach Ollama via host.docker.internal; `--preflight` inside the runner image.
     9. Start (docker compose up -d) and auto-start at logon (Scheduled Task running Start-CrestmontRunner.ps1).
   It creates NO inbound firewall rules and publishes NO ports. All communication with Crestmont is outbound polling.
@@ -24,14 +26,16 @@
 .PARAMETER Install
   Allow installing missing prerequisites with winget / wsl --install. Without it the script only reports.
 .PARAMETER Model
-  Override the recommended model tag (e.g. qwen3-coder:30b). Use only after reading the recommendation.
+  Override the recommended model tag (e.g. qwen3-coder:30b). Use only after reading the recommendation. It overrides
+  only the model choice: driver, disk, WSL and Docker blockers still stop the install.
 .PARAMETER SecretFile
   Path of a file holding BUILD_RUNNER_SECRET (copied into the secrets folder). Otherwise you are prompted (hidden input).
 .PARAMETER ExtraEgressDomains
   Extra hosts the runner may reach (e.g. github.com api.github.com api.cloudflare.com for repos/previews). Each must be
   a plain host name; hosted AI API domains are refused (SquidConf.ps1).
 .PARAMETER OllamaImage
-  Pinned image for the optional ollama-in-docker profile (written to compose\.env as OLLAMA_IMAGE).
+  Image for the optional ollama-in-docker profile, pinned by tag AND digest (repo:tag@sha256:...), written to
+  compose\.env as OLLAMA_IMAGE. Get a digest with: docker buildx imagetools inspect ollama/ollama:<tag>
 
 .EXAMPLE
   # From an elevated PowerShell in a checkout of the platform repository:
@@ -48,7 +52,7 @@ param(
   [string]$RunnerId = ("win-" + $env:COMPUTERNAME.ToLower()),
   [string[]]$ExtraEgressDomains = @(),
   [switch]$OllamaInDocker,
-  [string]$OllamaImage = "ollama/ollama:0.32.0",
+  [string]$OllamaImage = "ollama/ollama:0.32.0@sha256:57f573b47f1f71ebb445789f279fe3e596a8beab182f7cf486db9205bad87c5a",
   [switch]$SkipModelPull,
   [switch]$NoAutoStart,
   [switch]$NoStart
@@ -57,6 +61,7 @@ param(
 $ErrorActionPreference = "Stop"
 $script:Problems = New-Object System.Collections.ArrayList
 . (Join-Path $PSScriptRoot "SquidConf.ps1")
+. (Join-Path $PSScriptRoot "RunnerEnv.ps1")
 
 function Step([string]$Text) { Write-Host ""; Write-Host "==> $Text" -ForegroundColor Cyan }
 function Ok([string]$Text) { Write-Host "    OK   $Text" -ForegroundColor Green }
@@ -84,7 +89,10 @@ $PlatformHost = $uri.Host
 # Validate the allow-list inputs before anything is installed (host names only; no hosted AI APIs).
 $null = Assert-CrestmontDomain -Domain $PlatformHost -Label "-PlatformUrl host"
 foreach ($d in @($ExtraEgressDomains | Where-Object { $_ })) { $null = Assert-CrestmontDomain -Domain $d -Label "-ExtraEgressDomains" }
-if ($OllamaImage -notmatch '^[a-z0-9./_-]+:[0-9][0-9A-Za-z._-]*(@sha256:[0-9a-f]{64})?$') { throw "-OllamaImage must be a pinned tag such as ollama/ollama:0.32.0 (not latest)" }
+if ($OllamaImage -cnotmatch '^[a-z0-9./_-]+:[0-9][0-9A-Za-z._-]*@sha256:[0-9a-f]{64}$') { throw "-OllamaImage must be pinned by tag and digest, e.g. ollama/ollama:0.32.0@sha256:<64 hex> (docker buildx imagetools inspect ollama/ollama:<tag>)" }
+# -Model ends up in runner.env and on the ollama command line: an Ollama tag only (no spaces, quotes or newlines).
+if ($Model -and $Model -cnotmatch '^[a-z0-9][a-z0-9._-]{0,80}(:[A-Za-z0-9._-]{1,60})?$') { throw "-Model must be an Ollama model tag such as qwen3-coder:30b" }
+if ($RunnerId -cnotmatch '^[A-Za-z0-9._:-]{1,64}$') { throw "-RunnerId must be 1-64 characters of A-Z a-z 0-9 . _ : -" }
 $Compose = Join-Path $InstallDir "compose"
 $State = Join-Path $InstallDir "state"
 $Secrets = Join-Path $InstallDir "secrets"
@@ -126,6 +134,8 @@ if (-not $docker -and (Test-Path "$env:ProgramFiles\Docker\Docker\resources\bin\
 
 $ollamaExe = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
 if (-not $OllamaInDocker -and -not (Test-Path $ollamaExe) -and -not (Get-Command ollama.exe -ErrorAction SilentlyContinue)) { Install-WithWinget "Ollama.Ollama" "Ollama" }
+# The ollama CLI by full path: right after a winget install it is not on this session's PATH yet.
+$ollamaCli = if (Test-Path $ollamaExe) { $ollamaExe } else { (Get-Command ollama.exe -ErrorAction SilentlyContinue).Source }
 if ($script:Problems.Count) { Exit-WithProblem }
 
 # Docker engine up (start Docker Desktop if needed) and using Linux containers.
@@ -141,6 +151,18 @@ if ($osType -ne "linux") { Fail "Docker engine not reachable or not in Linux-con
 $serverVersion = (& docker.exe version --format "{{.Server.Version}}" | Out-String).Trim()
 if ([int]($serverVersion.Split(".")[0]) -lt 26) { Fail "Docker Engine ${serverVersion}: 26.0 or newer is required (volume-subpath mounts). Update Docker Desktop."; Exit-WithProblem }
 Ok "Docker Engine $serverVersion (linux)"
+$composeVersion = (& docker.exe compose version --short 2>$null | Out-String).Trim().TrimStart("v")
+$cv = $composeVersion.Split(".")
+if ($cv.Count -lt 2 -or -not ($cv[0] -match '^\d+$') -or -not ($cv[1] -match '^\d+$') -or ([int]$cv[0] -lt 2) -or ([int]$cv[0] -eq 2 -and [int]$cv[1] -lt 24)) {
+  Fail "Docker Compose ${composeVersion}: 2.24 or newer is required (optional runner.local.env). Update Docker Desktop."; Exit-WithProblem
+}
+Ok "Docker Compose $composeVersion"
+# WSL 2 backend: Docker Desktop's VM kernel name says which backend runs the Linux containers.
+$kernel = (& docker.exe info --format "{{.KernelVersion}}" 2>$null | Out-String).Trim()
+if ($kernel -match "WSL2") { Ok "Docker Desktop uses the WSL 2 backend ($kernel)" }
+elseif ($OllamaInDocker) { Fail "Docker Desktop is not using the WSL 2 backend (kernel '$kernel'); GPU passthrough for -OllamaInDocker needs it. Settings > General > Use the WSL 2 based engine." }
+else { Warn "Docker Desktop does not report the WSL 2 backend (kernel '$kernel'). The documented setup is the WSL 2 based engine (Settings > General)." }
+if ($script:Problems.Count) { Exit-WithProblem }
 
 # -- 2. hardware discovery --
 Step "Hardware discovery (read-only)"
@@ -198,7 +220,12 @@ $rec = Get-Content (Join-Path $State "recommendation.json") -Raw | ConvertFrom-J
 Write-Host "    $($rec.summary)"
 foreach ($w in $rec.warnings) { Warn $w }
 foreach ($b in $rec.blockers) { Fail $b }
-if ($Model) { Warn "Using -Model $Model instead of the recommendation ($($rec.model))."; $script:Problems.Clear() }
+if ($Model) {
+  # -Model overrides the model choice only. Every other blocker (driver, disk, WSL, Docker) still stops the install.
+  Warn "Using -Model $Model instead of the recommendation ($($rec.model))."
+  foreach ($b in @($rec.modelChoiceBlockers)) { if ($b) { [void]$script:Problems.Remove($b); Warn "Overridden by -Model: $b" } }
+  if ($script:Problems.Count) { Exit-WithProblem }
+}
 elseif ($selectExit -ne 0 -or -not $rec.model) { Exit-WithProblem }
 $selected = if ($Model) { $Model } else { $rec.model }
 $ctx = [int]$rec.contextTokens
@@ -239,10 +266,14 @@ if ($OllamaInDocker) {
   Ok "Ollama listening on localhost only"
   if (-not $SkipModelPull) {
     Write-Host "    Pulling $selected (this can take a long time)"
-    Invoke-Checked "ollama" @("pull", $selected) "ollama pull $selected"
+    if (-not $ollamaCli) { Fail "The ollama CLI was not found (open a new elevated PowerShell after installing Ollama, then re-run)."; Exit-WithProblem }
+    Invoke-Checked $ollamaCli @("pull", $selected) "ollama pull $selected"
   }
-  $have = (& ollama list | Out-String)
-  if ($have -notmatch [Regex]::Escape(($selected -split ":")[0])) { Fail "Model $selected is not in 'ollama list'."; Exit-WithProblem }
+  if (-not $ollamaCli) { Fail "The ollama CLI was not found (open a new elevated PowerShell after installing Ollama, then re-run)."; Exit-WithProblem }
+  # Exact tag match on the NAME column (a bare name means :latest), not a substring of the listing.
+  $names = @(& $ollamaCli list | Select-Object -Skip 1 | ForEach-Object { ("$_".Trim() -split '\s+')[0] } | Where-Object { $_ })
+  $want = if ($selected.Contains(":")) { $selected } else { "${selected}:latest" }
+  if (-not ($names -contains $want)) { Fail "Model $want is not in 'ollama list' (found: $($names -join ', '))."; Exit-WithProblem }
   Ok "Model $selected available"
   $modelBase = "http://host.docker.internal:11434/v1"
 }
@@ -253,26 +284,49 @@ $template = Get-Content (Join-Path $PSScriptRoot "proxy\squid.conf.template") -R
 $squid = ConvertTo-SquidConf -Template $template -PlatformHost $PlatformHost -ExtraDomains $ExtraEgressDomains -OllamaInDocker:$OllamaInDocker
 # Squid expects LF line endings (ConvertTo-SquidConf normalizes them); write without BOM.
 [IO.File]::WriteAllText((Join-Path $Compose "proxy\squid.conf"), $squid)
-$runnerEnv = @(
-  "CONTROL_PLANE_URL=$PlatformUrl"
-  "BUILD_RUNNER_SECRET_FILE=/run/secrets/build_runner_secret"
-  "RUNNER_ID=$RunnerId"
-  "RUNNER_AGENT_PROVIDER=local"
-  "RUNNER_ALLOW_PAID_PROVIDER=false"
-  "LOCAL_MODEL=$selected"
-  "LOCAL_MODEL_BASE_URL=$modelBase"
-  "LOCAL_MODEL_CONTEXT_TOKENS=$ctx"
-  "RUNNER_SANDBOX_IMAGE=crestmont-build-sandbox:1"
-  "RUNNER_JOB_CPUS=$($rec.jobLimits.cpus)"
-  "RUNNER_JOB_MEMORY=$($rec.jobLimits.memoryGB)g"
-  "RUNNER_JOB_DISK_MB=$([int]$rec.jobLimits.diskGB * 1024)"
-  "RUNNER_SERVE_AI_DRAFTS=true"
-  "LOG_LEVEL=info"
+$managed = @(
+  [pscustomobject]@{ key = "CONTROL_PLANE_URL"; value = $PlatformUrl }
+  [pscustomobject]@{ key = "BUILD_RUNNER_SECRET_FILE"; value = "/run/secrets/build_runner_secret" }
+  [pscustomobject]@{ key = "RUNNER_ID"; value = $RunnerId }
+  [pscustomobject]@{ key = "RUNNER_AGENT_PROVIDER"; value = "local" }
+  [pscustomobject]@{ key = "RUNNER_ALLOW_PAID_PROVIDER"; value = "false" }
+  [pscustomobject]@{ key = "LOCAL_MODEL"; value = $selected }
+  [pscustomobject]@{ key = "LOCAL_MODEL_BASE_URL"; value = $modelBase }
+  [pscustomobject]@{ key = "LOCAL_MODEL_CONTEXT_TOKENS"; value = "$ctx" }
+  [pscustomobject]@{ key = "RUNNER_SANDBOX_IMAGE"; value = "crestmont-build-sandbox:1" }
+  [pscustomobject]@{ key = "RUNNER_JOB_CPUS"; value = "$($rec.jobLimits.cpus)" }
+  [pscustomobject]@{ key = "RUNNER_JOB_MEMORY"; value = "$($rec.jobLimits.memoryGB)g" }
+  [pscustomobject]@{ key = "RUNNER_JOB_DISK_MB"; value = "$([int]$rec.jobLimits.diskGB * 1024)" }
+  [pscustomobject]@{ key = "RUNNER_SERVE_AI_DRAFTS"; value = "true" }
+  [pscustomobject]@{ key = "LOG_LEVEL"; value = "info" }
 )
-$runnerEnv | Set-Content -Encoding ascii (Join-Path $Compose "runner.env")
+$runnerEnvPath = Join-Path $Compose "runner.env"
+$localEnvPath = Join-Path $Compose "runner.local.env"
+$oldRunnerEnv = $null; if (Test-Path $runnerEnvPath) { $oldRunnerEnv = [IO.File]::ReadAllText($runnerEnvPath) }
+$oldLocalEnv = $null; if (Test-Path $localEnvPath) { $oldLocalEnv = [IO.File]::ReadAllText($localEnvPath) }
+$stamp = (Get-Date).ToString("yyyyMMdd-HHmmss")
+$merged = Merge-CrestmontRunnerEnv -Managed $managed -ExistingRunnerEnv $oldRunnerEnv -ExistingLocalEnv $oldLocalEnv -Stamp $stamp
+if (@($merged.conflicts).Count) {
+  Fail ("runner.local.env (or a hand edit of runner.env) sets keys the installer manages or that would weaken the build sandbox / enable a paid provider: " +
+    (@($merged.conflicts) -join ", ") + ". Remove them from $localEnvPath (use installer parameters for managed values) and re-run.")
+  Exit-WithProblem
+}
+# Never overwrite silently: back up an existing runner.env that is about to change, and say what moved where.
+if ($null -ne $oldRunnerEnv -and $oldRunnerEnv -cne $merged.runnerEnv) {
+  $backup = Join-Path $Compose "runner.env.$stamp.bak"
+  Copy-Item -Force $runnerEnvPath $backup
+  Warn "runner.env changes (backup: $backup). Changed managed keys: $(if (@($merged.changed).Count) { @($merged.changed) -join ', ' } else { 'none' })"
+}
+if (@($merged.moved).Count) { Warn "Moved your own settings from runner.env to runner.local.env: $(@($merged.moved) -join ', ')" }
+if ($null -eq $oldLocalEnv -or $oldLocalEnv -cne $merged.localEnv) { [IO.File]::WriteAllText($localEnvPath, $merged.localEnv) }
+[IO.File]::WriteAllText($runnerEnvPath, $merged.runnerEnv)
 $composeEnv = @("OLLAMA_IMAGE=$OllamaImage", "OLLAMA_CONTEXT_LENGTH=$ctx", "OLLAMA_NUM_PARALLEL=$($rec.ollama.numParallel)", "OLLAMA_KV_CACHE_TYPE=$($rec.ollama.kvCacheType)")
 $composeEnv | Set-Content -Encoding ascii (Join-Path $Compose ".env")
-Ok "Wrote docker-compose.yml, proxy\squid.conf, runner.env (no secret values)"
+Ok "Wrote docker-compose.yml, proxy\squid.conf, runner.env (managed, no secret values); runner.local.env kept"
+# Tool scripts next to the install, whether or not auto-start is registered (Get-RunnerHealth, Collect-Evidence, ...).
+foreach ($tool in @("Start-CrestmontRunner.ps1", "Get-RunnerHealth.ps1", "Collect-Evidence.ps1", "Discover-Hardware.ps1")) {
+  Copy-Item -Force (Join-Path $PSScriptRoot $tool) (Join-Path $InstallDir $tool)
+}
 
 # -- 8. checks --
 Step "Connectivity and preflight"
@@ -305,10 +359,6 @@ if (-not $NoStart) {
 }
 if (-not $NoAutoStart) {
   Step "Auto-start after reboot"
-  Copy-Item -Force (Join-Path $PSScriptRoot "Start-CrestmontRunner.ps1") (Join-Path $InstallDir "Start-CrestmontRunner.ps1")
-  Copy-Item -Force (Join-Path $PSScriptRoot "Get-RunnerHealth.ps1") (Join-Path $InstallDir "Get-RunnerHealth.ps1")
-  Copy-Item -Force (Join-Path $PSScriptRoot "Collect-Evidence.ps1") (Join-Path $InstallDir "Collect-Evidence.ps1")
-  Copy-Item -Force (Join-Path $PSScriptRoot "Discover-Hardware.ps1") (Join-Path $InstallDir "Discover-Hardware.ps1")
   $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"{0}`" -InstallDir `"{1}`"{2}" -f (Join-Path $InstallDir "Start-CrestmontRunner.ps1"), $InstallDir, $(if ($OllamaInDocker) { " -OllamaInDocker" } else { "" }))
   # Docker Desktop and the Ollama tray app run in a user session, so the task runs at this user's logon.
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
@@ -318,7 +368,17 @@ if (-not $NoAutoStart) {
 }
 
 Step "Health"
+if ($NoStart) {
+  Write-Host ""
+  Write-Host "Configured (not started: -NoStart). Model: $selected  Provider: local (paid API disabled)." -ForegroundColor Green
+  exit 0
+}
 Start-Sleep -Seconds 10
 & (Join-Path $PSScriptRoot "Get-RunnerHealth.ps1") -InstallDir $InstallDir
+$healthExit = $LASTEXITCODE
 Write-Host ""
+if ($healthExit -ne 0) {
+  Write-Host "Installed, but the health check FAILED (see above). The runner is not ready: fix the reported problem and run Get-RunnerHealth.ps1 again." -ForegroundColor Red
+  exit 1
+}
 Write-Host "Done. Model: $selected  Provider: local (paid API disabled)  No ports published, no firewall rules added." -ForegroundColor Green

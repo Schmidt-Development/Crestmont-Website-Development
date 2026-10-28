@@ -239,3 +239,17 @@ export function briefConformance(repo: string, facts: BriefFacts): CheckOutcome 
     outputTail: ok ? `${checked} customer detail(s) found on the site` : findings.join("\n"),
   };
 }
+
+/** Owner-report check from the sandbox isolation records (every container this job started). */
+export function isolationCheck(records: { container: string; ok: boolean; findings: string[] }[]): CheckOutcome | null {
+  if (!records.length) return null;
+  const bad = records.filter((r) => !r.ok);
+  const ok = bad.length === 0;
+  return {
+    id: "sandbox-isolation",
+    label: "Build containers verified with docker inspect: no network, read-only root, no capabilities, no-new-privileges, non-root, CPU/RAM/PID limits, only the job's two mounts, no Docker socket",
+    command: "runner: docker inspect of each build container (evidence/sandbox-isolation-*.json in the job directory)",
+    ok, code: ok ? 0 : 1, timedOut: false,
+    outputTail: ok ? `${records.length} container(s) checked, all isolated` : bad.map((r) => `${r.container}: ${r.findings.join("; ")}`).join("\n").slice(0, 3000),
+  };
+}

@@ -43,6 +43,11 @@ jobs:
         env:
           PWSH: powershell
         run: node --no-warnings --test --test-name-pattern "SquidConf.ps1" runner/test/egress-compose.test.ts
+      - name: RunnerEnv.ps1 under Windows PowerShell 5.1 produces what runner-env.ts produces
+        shell: pwsh
+        env:
+          PWSH: powershell
+        run: node --no-warnings --test --test-name-pattern "RunnerEnv.ps1" runner/test/runner-env.test.ts
       - name: Discover-Hardware.ps1 (read-only) -> select-model.ts
         shell: powershell
         run: |

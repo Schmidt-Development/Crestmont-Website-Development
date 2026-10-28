@@ -262,7 +262,7 @@ test("[AIB-RUNNER] docker-compose.yml (docker compose config): internal networks
   const ollama = c.services.ollama;
   assert.deepEqual(ollama.profiles, ["ollama-in-docker"], "Ollama in Docker is opt-in");
   assert.deepEqual(Object.keys(ollama.networks ?? {}), ["runner_net"], "Ollama container has no direct egress");
-  assert.match(String(ollama.image), /^ollama\/ollama:\d+\.\d+\.\d+$/);
+  assert.match(String(ollama.image), /^ollama\/ollama:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$/);
 });
 
 test("[AIB-RUNNER] docker-compose.yml text checks (no docker needed): no ports, sandboxes not defined in compose, pinned images", () => {
@@ -274,6 +274,6 @@ test("[AIB-RUNNER] docker-compose.yml text checks (no docker needed): no ports, 
   const runnerBlock = compose.slice(compose.indexOf("\n  runner:"), compose.indexOf("\n  ollama:"));
   assert.ok(runnerBlock.includes(sockLines[0]), "the socket mount is in the runner service");
   assert.doesNotMatch(compose, /crestmont-build-sandbox/, "per-build sandboxes are created by the runner with its own flags, never by compose");
-  assert.match(compose, /\$\{OLLAMA_IMAGE:-ollama\/ollama:\d+\.\d+\.\d+\}/);
+  assert.match(compose, /\$\{OLLAMA_IMAGE:-ollama\/ollama:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}\}/);
   assert.equal((compose.match(/restart: unless-stopped/g) ?? []).length, 3);
 });

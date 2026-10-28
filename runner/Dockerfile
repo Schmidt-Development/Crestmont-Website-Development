@@ -13,8 +13,8 @@
 # Base images are exact version tags; pin them by digest once CI has printed the digests (RUNNER-SETUP.md section 12).
 # Docker CLI: volume-subpath mounts need Docker Engine/CLI >= 26.0 (https://docs.docker.com/engine/release-notes/26.0/).
 # Debian packages are not version-pinned (bookworm security updates); hadolint DL3008 is ignored for that reason.
-ARG DOCKER_CLI_IMAGE=docker:27.5.1-cli
-ARG NODE_IMAGE=node:22.23.4-bookworm-slim
+ARG DOCKER_CLI_IMAGE=docker:27.5.1-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
+ARG NODE_IMAGE=node:22.23.4-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da
 FROM ${DOCKER_CLI_IMAGE} AS dockercli
 
 FROM ${NODE_IMAGE}

@@ -122,6 +122,17 @@ test("[AIB-RUNNER] local provider happy path: plan/build/verify with a tool-usin
     const items = r.cp.byPath("requirements").pop()!.body.items as { key: string; status: string }[];
     assert.equal(items.find((i) => i.key === "page:home")!.status, "verified");
     assert.equal(items.find((i) => i.key === "check:browser-check")!.status, "verified");
+    // Isolation evidence: verified from docker inspect, and kept in the job directory (outside the agent's repo)
+    // after the container is removed at the end of the job.
+    assert.equal(items.find((i) => i.key === "check:sandbox-isolation")!.status, "verified");
+    const evidence = path.join(s.workspace!, "evidence", "sandbox-isolation-01.json");
+    assert.ok(existsSync(evidence), "isolation evidence written");
+    const rec = JSON.parse(readFileSync(evidence, "utf8"));
+    assert.equal(rec.ok, true);
+    assert.equal(rec.facts.networkMode, "none");
+    assert.equal(rec.facts.readonlyRootfs, true);
+    assert.ok(!existsSync(path.join(repo, "evidence")), "not inside the repository the agent edits");
+    assert.match(String(done.report), /PASS `runner: docker inspect of each build container/);
     // The model never saw a secret from the runner's environment; the brief only inside the untrusted block.
     const all = JSON.stringify(r.model.requests);
     for (const v of Object.values(POLLUTED_ENV).filter((x) => x.length > 12 && !x.includes("/"))) assert.ok(!all.includes(v), "no secret reached the model");

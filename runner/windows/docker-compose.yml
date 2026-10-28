@@ -37,7 +37,14 @@ services:
     image: crestmont-ai-runner:1
     restart: unless-stopped
     depends_on: [egress-proxy]
-    env_file: ./runner.env
+    # runner.local.env (the Founder's own settings, optional, never overwritten by the installer) loads FIRST and the
+    # installer-managed runner.env SECOND: for a key in both, runner.env wins (later env_file entries override earlier).
+    # The `environment:` block below wins over both. Optional env files need Docker Compose 2.24+ (installer checks).
+    env_file:
+      - path: ./runner.local.env
+        required: false
+      - path: ./runner.env
+        required: true
     environment:
       HTTPS_PROXY: http://egress-proxy:3128
       HTTP_PROXY: http://egress-proxy:3128
@@ -75,7 +82,7 @@ services:
 
   ollama:
     profiles: ["ollama-in-docker"]
-    image: ${OLLAMA_IMAGE:-ollama/ollama:0.32.0}   # pinned tag (installer -OllamaImage writes it to .env); never latest
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.32.0@sha256:57f573b47f1f71ebb445789f279fe3e596a8beab182f7cf486db9205bad87c5a}   # tag + digest (installer -OllamaImage writes it to .env); never latest
     restart: unless-stopped
     # No memory/CPU cap on purpose: the model server gets what the per-build limits leave (select-model.ts jobLimits).
     pids_limit: 1024

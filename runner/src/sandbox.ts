@@ -14,7 +14,7 @@
 // (`--storage-opt size=` would need overlay2 on xfs with pquota, which Docker Desktop's VM does not provide, and the
 // root filesystem is read-only anyway.)
 
-import { lstatSync, readdirSync, existsSync, readFileSync } from "node:fs";
+import { lstatSync, readdirSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { run } from "./exec.ts";
 import type { ExecResult } from "./exec.ts";
@@ -44,6 +44,63 @@ export function validatePackageSpec(spec: string): string | null {
 
 export interface SandboxCommandResult extends ExecResult { command: string }
 
+/** What `docker inspect` says about one build container, checked against the hardening the runner asked for. */
+export interface IsolationRecord {
+  container: string;
+  at: string;
+  ok: boolean;
+  findings: string[];
+  /** The facts the verdict is based on (subset of `docker inspect`), kept as evidence after the container is gone. */
+  facts: Record<string, unknown>;
+}
+
+interface InspectShape {
+  Config?: { User?: string; Image?: string; Labels?: Record<string, string> };
+  HostConfig?: {
+    NetworkMode?: string; ReadonlyRootfs?: boolean; CapDrop?: string[] | null; CapAdd?: string[] | null; SecurityOpt?: string[] | null;
+    Privileged?: boolean; Memory?: number; NanoCpus?: number; PidsLimit?: number | null; PortBindings?: Record<string, unknown> | null;
+    Binds?: string[] | null; Devices?: unknown[] | null; IpcMode?: string; PidMode?: string; UsernsMode?: string;
+  };
+  Mounts?: { Type?: string; Source?: string; Destination?: string; RW?: boolean }[];
+}
+
+/**
+ * Pure verdict on a container's real configuration (as Docker applied it, not as the runner requested it): a Docker
+ * Desktop version that silently ignored a flag would show up here.
+ */
+export function evaluateIsolation(inspect: unknown, expect: { uid: number; network: string }): { ok: boolean; findings: string[]; facts: Record<string, unknown> } {
+  const i = (Array.isArray(inspect) ? inspect[0] : inspect) as InspectShape | undefined;
+  const h = i?.HostConfig ?? {};
+  const findings: string[] = [];
+  const lower = (a: string[] | null | undefined) => (a ?? []).map((x) => String(x).toLowerCase());
+  if (!i || !i.HostConfig) return { ok: false, findings: ["docker inspect returned no HostConfig"], facts: {} };
+  if (h.NetworkMode !== expect.network) findings.push(`network is ${String(h.NetworkMode)}, expected ${expect.network}`);
+  if (h.ReadonlyRootfs !== true) findings.push("root filesystem is writable");
+  if (!lower(h.CapDrop).includes("all")) findings.push("capabilities not dropped (CapDrop lacks ALL)");
+  if (lower(h.CapAdd).length) findings.push(`capabilities added: ${lower(h.CapAdd).join(", ")}`);
+  if (!lower(h.SecurityOpt).some((o) => o === "no-new-privileges" || o === "no-new-privileges:true")) findings.push("no-new-privileges not set");
+  if (h.Privileged) findings.push("container is privileged");
+  if (h.PidMode === "host" || h.IpcMode === "host" || h.UsernsMode === "host") findings.push("shares a host namespace (pid/ipc/userns)");
+  if ((h.Devices ?? []).length) findings.push("host devices are attached");
+  if (i.Config?.User !== `${expect.uid}:${expect.uid}`) findings.push(`runs as user ${String(i.Config?.User || "root")}, expected ${expect.uid}:${expect.uid}`);
+  if (!(Number(h.Memory) > 0)) findings.push("no memory limit");
+  if (!(Number(h.NanoCpus) > 0)) findings.push("no CPU limit");
+  if (!(Number(h.PidsLimit) > 0)) findings.push("no process limit");
+  if (h.PortBindings && Object.keys(h.PortBindings).length) findings.push("ports are published");
+  const mounts = i.Mounts ?? [];
+  const dests = mounts.map((m) => m.Destination).sort();
+  if (JSON.stringify(dests) !== JSON.stringify([CONTAINER_HOME, CONTAINER_REPO].sort())) findings.push(`mounts are ${dests.join(", ") || "none"}, expected only ${CONTAINER_REPO} and ${CONTAINER_HOME}`);
+  if (mounts.some((m) => /docker\.sock/.test(String(m.Source ?? ""))) || (h.Binds ?? []).some((b) => /docker\.sock/.test(b))) findings.push("the Docker socket is mounted");
+  const facts = {
+    image: i.Config?.Image ?? null, user: i.Config?.User ?? null, labels: i.Config?.Labels ?? {},
+    networkMode: h.NetworkMode ?? null, readonlyRootfs: h.ReadonlyRootfs ?? null, capDrop: h.CapDrop ?? null, capAdd: h.CapAdd ?? null,
+    securityOpt: h.SecurityOpt ?? null, privileged: h.Privileged ?? null, memoryBytes: h.Memory ?? null, nanoCpus: h.NanoCpus ?? null,
+    pidsLimit: h.PidsLimit ?? null, portBindings: h.PortBindings ?? null,
+    mounts: mounts.map((m) => ({ type: m.Type ?? null, destination: m.Destination ?? null, rw: m.RW ?? null })),
+  };
+  return { ok: findings.length === 0, findings, facts };
+}
+
 export class JobSandbox {
   readonly name: string;
   readonly cfg: JobSandboxConfig;
@@ -52,6 +109,8 @@ export class JobSandbox {
   private readonly exec: DockerExecutor;
   private readonly log: Logger;
   private started = false;
+  /** One record per container this job started (restarts included). Also written to <job dir>/evidence/. */
+  readonly isolation: IsolationRecord[] = [];
 
   constructor(cfg: JobSandboxConfig, ws: Workspace, jobId: string, exec: DockerExecutor, log: Logger = silentLogger) {
     this.cfg = cfg;
@@ -106,6 +165,29 @@ export class JobSandbox {
     if (r.code !== 0) throw new Error(`could not start the build sandbox container: ${(r.stderr || r.stdout).slice(0, 400)}`);
     this.started = true;
     this.log.info("sandbox started", { container: this.name });
+    await this.recordIsolation();
+  }
+
+  /**
+   * Isolation evidence: `docker inspect` of the container just started, judged by evaluateIsolation, written to the
+   * job's own directory (outside the repository the agent sees) so it survives the container's removal at job end
+   * (Collect-Evidence.ps1 copies it) and summarized in the owner report as check:sandbox-isolation.
+   */
+  async recordIsolation(): Promise<IsolationRecord> {
+    const at = new Date().toISOString();
+    const r = await this.exec(["inspect", "--type", "container", "--format", "{{json .}}", this.name], { timeoutMs: 30_000 });
+    let parsed: unknown = null;
+    try { parsed = r.code === 0 ? JSON.parse(r.stdout) : null; } catch { parsed = null; }
+    const verdict = parsed ? evaluateIsolation(parsed, { uid: this.cfg.uid, network: "none" }) : { ok: false, findings: [`docker inspect failed (exit ${r.code})`], facts: {} };
+    const rec: IsolationRecord = { container: this.name, at, ok: verdict.ok, findings: verdict.findings, facts: verdict.facts };
+    this.isolation.push(rec);
+    try {
+      const dir = path.join(this.ws.dir, "evidence");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, `sandbox-isolation-${String(this.isolation.length).padStart(2, "0")}.json`), JSON.stringify({ schema: "crestmont.sandbox-isolation/1", job: this.jobId, ...rec }, null, 2) + "\n");
+    } catch (err) { this.log.warn("could not write isolation evidence", { error: String(err) }); }
+    if (!rec.ok) this.log.warn("sandbox isolation check failed", { container: this.name, findings: rec.findings });
+    return rec;
   }
 
   /** Run a shell command inside the job container (network none). The in-container `timeout` kills it reliably. */

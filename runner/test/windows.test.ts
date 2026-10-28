@@ -148,7 +148,8 @@ test("[AIB-RUNNER] PowerShell scripts pass a light static lint and are ASCII-onl
   const install = readFileSync(path.join(WIN, "Install-CrestmontRunner.ps1"), "utf8");
   assert.doesNotMatch(install, /New-NetFirewallRule|netsh\s+advfirewall/i, "no inbound firewall rules");
   assert.match(install, /OLLAMA_HOST = "127\.0\.0\.1:11434"/);
-  assert.match(install, /RUNNER_ALLOW_PAID_PROVIDER=false/);
+  assert.match(install, /key = "RUNNER_ALLOW_PAID_PROVIDER"; value = "false"/);
+  assert.match(install, /key = "RUNNER_AGENT_PROVIDER"; value = "local"/);
   assert.match(install, /if \(-not \$Install\)/, "installs only with -Install");
   assert.match(install, /Read-Host -AsSecureString/, "secret entered hidden, never echoed");
   assert.match(install, /ZeroFreeBSTR/, "the unmanaged copy of the secret is zeroed");
@@ -157,7 +158,7 @@ test("[AIB-RUNNER] PowerShell scripts pass a light static lint and are ASCII-onl
   assert.doesNotMatch(install, /\.Replace\("__PLATFORM_HOST__"/, "no second, untested substitution");
   assert.match(install, /sandbox\\package-lock\.json/, "installer refuses to build without the committed lockfiles");
   assert.match(install, /OLLAMA_IMAGE=\$OllamaImage/);
-  assert.match(install, /\[string\]\$OllamaImage = "ollama\/ollama:\d+\.\d+\.\d+"/);
+  assert.match(install, /\[string\]\$OllamaImage = "ollama\/ollama:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}"/);
 });
 
 test("[AIB-RUNNER] select-model: NVIDIA driver versions in nvidia-smi and Windows driver-store form", () => {

@@ -30,7 +30,7 @@ import type { SkillManifest, Workflow, PreflightResult } from "./skills.ts";
 import { preflight, provisionSkills } from "./skills.ts";
 import { buildCheckpoint, restoreCheckpoint } from "./checkpoint.ts";
 import type { StarterSpec, CheckOutcome, CheckExecutor } from "./checks.ts";
-import { starterDir, loadStarter, copyStarter, acceptanceCommands, runChecks, previewConfigProblems, restoreProtectedFiles, briefConformance } from "./checks.ts";
+import { starterDir, loadStarter, copyStarter, acceptanceCommands, runChecks, previewConfigProblems, restoreProtectedFiles, briefConformance, isolationCheck } from "./checks.ts";
 import { writeBriefFiles, systemPromptAppend, phasePrompt } from "./prompt.ts";
 import type { Phase } from "./prompt.ts";
 import { readRequirements, checkRequirements, readStringList, readAgentReport } from "./requirements.ts";
@@ -441,6 +441,9 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         const bc = briefConformance(ws!.repo, { businessName: b.name, publicEmail: b.publicEmail, publicPhone: b.publicPhone });
         if (bc) out.push(bc);
       }
+      // Every container this job ran (agent phases and these checks), as Docker actually configured it.
+      const iso = sandbox ? isolationCheck(sandbox.isolation) : null;
+      if (iso) out.push(iso);
       return out;
     };
 

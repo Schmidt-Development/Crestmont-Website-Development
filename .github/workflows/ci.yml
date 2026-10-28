@@ -127,3 +127,5 @@ jobs:
         run: ./runner/windows/Test-WindowsScripts.ps1 -InstallAnalyzer
       - name: SquidConf.ps1 renders exactly what egress-policy.ts renders
         run: node --no-warnings --test --test-name-pattern "SquidConf.ps1" runner/test/egress-compose.test.ts
+      - name: RunnerEnv.ps1 (runner.env / runner.local.env preservation) produces exactly what runner-env.ts produces
+        run: node --no-warnings --test --test-name-pattern "RunnerEnv.ps1" runner/test/runner-env.test.ts
