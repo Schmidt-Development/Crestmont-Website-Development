@@ -205,7 +205,8 @@ ${kpi("Estimated completion", lastDue ? fmtDay(lastDue) : proj.target_launch_at 
     const uploaded = async (n: string) => {
       const ids = Array.isArray(a[n]) ? (a[n] as string[]) : [];
       if (!ids.length) return html``;
-      const rows = (await ctx.db.prepare(`SELECT id, filename FROM files WHERE organization_id = ? AND deleted_at IS NULL AND id IN (${ids.map(() => "?").join(",")})`).bind(org.organizationId, ...ids).all<{ id: string; filename: string }>()).results;
+      // One JSON parameter, not one per id: uploads accumulate across draft saves and D1 rejects more than 100 bound parameters.
+      const rows = (await ctx.db.prepare(`SELECT id, filename FROM files WHERE organization_id = ? AND deleted_at IS NULL AND id IN (SELECT value FROM json_each(?))`).bind(org.organizationId, JSON.stringify(ids)).all<{ id: string; filename: string }>()).results;
       return html`<p class="hint">Uploaded: ${rows.map((f) => html`<a href="/files/${f.id}">${f.filename}</a> `)}</p>`;
     };
     const field = async (f: O.OnboardingField): Promise<SafeHtml> => {
