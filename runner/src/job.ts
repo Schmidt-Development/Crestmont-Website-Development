@@ -579,14 +579,17 @@ async function deployPreview(cfg: RunnerConfig, ws: Workspace, git: GitCtx, job:
   if (!cfg.preview) return { url: null, note: "PREVIEW_DEPLOY_COMMAND is not configured on the runner.", name: null };
   const name = previewName(job.projectId, job.kind, job.revision);
   if (!PREVIEW_NAME.test(name)) return { url: null, note: `refused to deploy: unexpected preview name ${name}`, name: null };
-  const exportDir = path.join(ws.dir, `preview-export-${Date.now().toString(36)}`);
+  // Constant, relative arguments; the job's directories are given only as working directories.
+  const exportName = "preview-export";
+  const exportDir = path.join(ws.dir, exportName);
+  const tarFile = path.join(ws.dir, "preview-export.tar");
   try {
     await commitAll(git, "AI build: source deployed to the preview");
+    rmSync(exportDir, { recursive: true, force: true });
     mkdirSync(exportDir, { recursive: true });
-    const tarFile = path.join(ws.dir, "preview-export.tar");
-    const a = await run("git", ["-C", ws.repo, "archive", "--format=tar", "-o", tarFile, "HEAD"], { env: { PATH: cfg.agentPath, HOME: ws.home, GIT_CONFIG_NOSYSTEM: "1" }, timeoutMs: 120_000 });
+    const a = await run("git", ["archive", "--format=tar", "-o", "../preview-export.tar", "HEAD"], { cwd: ws.repo, env: { PATH: cfg.agentPath, HOME: ws.home, GIT_CONFIG_NOSYSTEM: "1" }, timeoutMs: 120_000 });
     if (a.code !== 0) return { url: null, note: `preview export failed (git archive exit ${a.code})`, name: null };
-    const x = await run("tar", ["-xf", tarFile, "-C", exportDir, "--no-same-owner", "--no-same-permissions"], { env: { PATH: cfg.agentPath }, timeoutMs: 120_000 });
+    const x = await run("tar", ["-xf", "../preview-export.tar", "--no-same-owner", "--no-same-permissions"], { cwd: exportDir, env: { PATH: cfg.agentPath }, timeoutMs: 120_000 });
     rmSync(tarFile, { force: true });
     if (x.code !== 0) return { url: null, note: `preview export failed (tar exit ${x.code})`, name: null };
     stripForPreview(exportDir, 0);
