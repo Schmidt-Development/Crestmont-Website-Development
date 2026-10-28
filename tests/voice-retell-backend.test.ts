@@ -670,3 +670,13 @@ test("[VOICE-006] call_analyzed summaries are redacted; erasure scrubs CRM notes
   ]);
   assert.doesNotMatch(dump, /Sam|0230/);
 });
+
+test("[VOICE-004] booking references are uniform over the 32-symbol alphabet (no modulo bias)", async () => {
+  const { newConfirmationCode } = await import("../src/services/voice-scheduling.ts");
+  const counts = new Map<string, number>();
+  for (let i = 0; i < 4000; i++) for (const ch of newConfirmationCode()) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+  assert.equal(counts.size, 32, "every symbol occurs, and only alphabet symbols occur");
+  for (const ch of counts.keys()) assert.match(ch, /^[A-HJ-NP-Z2-9]$/);
+  const expected = 24_000 / 32;
+  for (const n of counts.values()) assert.ok(Math.abs(n - expected) < expected * 0.25, `symbol frequency ${n} is near uniform (${expected})`);
+});
