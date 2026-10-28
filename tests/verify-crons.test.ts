@@ -51,3 +51,18 @@ test("[INFRA-006] the Workers Free cron limit is recorded as skipped (external s
   assert.equal(recoveryDrillOutcomes(parseEvidence(ev))[0][1], true);
   assert.equal(cronEvidence({ env: "staging", commit: "a".repeat(40), runId: "r", startedAt: new Date().toISOString(), ok: false, detail: "GET schedules: HTTP 403" }).results[0].outcome, "failed");
 });
+
+test("[FILE-001] the staging deploy publishes whether R2 file storage is bound: healthy when bound, 'unavailable' (not failing) when R2 is not enabled", async () => {
+  const { storageEvidence } = await import("../scripts/storage-evidence.ts");
+  const { ingestEvidence } = await import("../src/readiness/ingest.ts");
+  const { createTestApp } = await import("./support/app.ts");
+  const t = await createTestApp();
+  await t.db.prepare(`INSERT INTO ingestion_status (source, last_success_at, last_attempt_at) VALUES ('ci', ?, ?)`).bind(new Date().toISOString(), new Date().toISOString()).run();
+  const feed = async () => ((await (await t.client().get("/api/readiness/health")).json()) as { feeds: { source: string; status: string }[] }).feeds.find((f) => f.source === "file-storage:staging")?.status;
+  await ingestEvidence(t.db, JSON.stringify(storageEvidence({ state: "unavailable", commit: "a".repeat(40), runId: "r2-1" })));
+  assert.equal(await feed(), "unavailable");
+  assert.equal((await t.client().get("/api/readiness/health")).status, 200, "a disabled optional service does not degrade health");
+  await ingestEvidence(t.db, JSON.stringify(storageEvidence({ state: "bound", commit: "a".repeat(40), runId: "r2-2" })));
+  assert.equal(await feed(), "healthy");
+  assert.match(readFileSync(".github/workflows/deploy-staging.yml", "utf8"), /storage-evidence\.ts --state "\$R2_STATE"/);
+});

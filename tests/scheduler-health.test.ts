@@ -30,7 +30,7 @@ test("[READY-012] [INFRA-006] deployed environments require the scheduler: never
   h = await health(t);
   assert.equal(h.code, 200);
   assert.equal(h.body.feeds.find((f) => f.source === "scheduler")!.status, "healthy");
-  // A 15-minute job that stopped 2 hours ago is stale (threshold 75 min).
+  // A 15-minute job that stopped 2 hours ago is stale (threshold 45 min).
   await t.db.prepare(`UPDATE ingestion_status SET last_success_at = ? WHERE source = 'job:build_sweep'`).bind(new Date(Date.now() - 2 * 3_600_000).toISOString()).run();
   h = await health(t);
   assert.equal(h.code, 503);

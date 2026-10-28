@@ -96,10 +96,12 @@ jobs:
           grep -q "$id" wrangler.toml && echo "Staging D1: $id"
 
       - name: File storage (R2) if available, otherwise disable uploads honestly
+        id: r2
         run: |
           if $WRANGLER r2 bucket list 2>/dev/null | grep -q "crestmont-files-staging" || $WRANGLER r2 bucket create crestmont-files-staging 2>/dev/null; then
-            echo "R2 bucket ready"
+            echo "R2 bucket ready"; echo "state=bound" >> "$GITHUB_OUTPUT"
           else
+            echo "state=unavailable" >> "$GITHUB_OUTPUT"
             echo "::warning title=File uploads disabled on staging::R2 is not enabled on this Cloudflare account. Pages that store files will say storage is not configured. Enable R2 in the Cloudflare dashboard to turn uploads on."
             node -e 'const fs=require("fs");let t=fs.readFileSync("wrangler.toml","utf8");t=t.replace(/^r2_buckets = \[\{ binding = "FILES", bucket_name = "crestmont-files-staging" \}\]\n/m,"");fs.writeFileSync("wrangler.toml",t)'
           fi
@@ -143,6 +145,15 @@ jobs:
           k=$(node --no-warnings scripts/trigger-scheduler.ts derive)
           echo "::add-mask::$k"
           printf '%s' "$k" | node --no-warnings scripts/staging-secrets.ts put SCHEDULER_TRIGGER_SECRET
+
+      - name: Report file storage state (file-storage:staging feed)
+        continue-on-error: true
+        env:
+          READINESS_URL: ${{ steps.deploy.outputs.url }}
+          R2_STATE: ${{ steps.r2.outputs.state }}
+        run: |
+          node --no-warnings scripts/storage-evidence.ts --state "$R2_STATE" --commit "$GITHUB_SHA" --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-r2" --out evidence/r2.json
+          node --no-warnings scripts/post-evidence.ts evidence/r2.json
 
       - name: Verify cron triggers (and re-register them if missing)
         # READY-012 / INFRA-006: scheduled jobs had never run on staging. Compares Cloudflare's registered schedules

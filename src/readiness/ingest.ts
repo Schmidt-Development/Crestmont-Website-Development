@@ -108,6 +108,9 @@ export async function ingestEvidence(db: Db, rawBody: string): Promise<IngestRes
     // Recovery drills get their own feed per environment, so a failed or missing rollback/restore is visible (and, when
     // failing, turns /api/readiness/health to 503 so the external monitor alerts). Status and timestamp only.
     for (const [feed, r, reason] of recoveryDrillOutcomes(doc)) await recordIngestion(db, `${feed}:${doc.environment}`, attemptAt, r ? null : (reason ?? "drill failed — see /staff/readiness/requirements/TEST-004"));
+    // Optional platform services (FILE-001): bound → healthy; skipped (service not enabled) → "unavailable", never failing.
+    const storage = doc.results.find((r) => r.requirementId === "FILE-001" && r.testName.startsWith("file storage (R2)"));
+    if (storage) await recordIngestion(db, `file-storage:${doc.environment}`, attemptAt, storage.outcome === "failed" ? (storage.message ?? "failed") : null, storage.outcome === "passed");
     return { status: "ingested", runId: doc.runId, accepted: accepted.length, unknownRequirements: unknown };
   } catch (err) {
     await recordIngestion(db, doc.source, attemptAt, (err as Error).message);
