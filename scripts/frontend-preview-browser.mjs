@@ -5,6 +5,9 @@
 //
 //   PREVIEW_PASSWORD=… PLAYWRIGHT_MODULE=… node scripts/frontend-preview-browser.mjs <base-url> <out-dir>
 import fs from "node:fs";
+// Any crash is reported as an annotation (the job log is not always readable where the results are reviewed).
+const crash = (e) => { console.log(`::error title=Browser verification crashed::${String(e?.stack || e).replace(/\n/g, " | ").slice(0, 1500)}`); process.exit(1); };
+process.on("uncaughtException", crash); process.on("unhandledRejection", crash);
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const { checkLocation, checkInteractive, checkFlow } = await import("./preview-explorer-checks.mjs");
 const { checkConstellation } = await import("./preview-about-checks.mjs");

@@ -205,8 +205,8 @@ jobs:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
         run: |
-          npm install --prefix .pw --no-save --no-audit --no-fund playwright@1.63.0 > /dev/null
-          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+          npm install --prefix .pw --no-save --no-audit --no-fund playwright@1.63.0 > pw-install.log 2>&1 || { echo "::error title=Playwright install failed::$(tail -c 600 pw-install.log | tr '\n' ' ')"; exit 1; }
+          .pw/node_modules/.bin/playwright install --with-deps chromium > pw-browsers.log 2>&1 || { echo "::error title=Chromium install failed::$(tail -c 600 pw-browsers.log | tr '\n' ' ')"; exit 1; }
           PREVIEW_PASSWORD="$(cat access/gate)" node --no-warnings scripts/frontend-preview-browser.mjs "$BASE" preview-browser
 
       - name: Upload recordings and screenshots (public pages only; no credentials)
