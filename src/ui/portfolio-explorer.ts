@@ -52,8 +52,8 @@ export function portfolioExplorer(ctx: AppContext, projects: PortfolioProject[],
   <div class="pfx__links">
     ${st.kind === "embed" ? html`<span class="pfx__label">Interactive demo — no real transactions</span>` : ""}
     ${opts.variant !== "case" ? html`<a class="pfx__link" href="/portfolio/${p.slug}">Case study</a>` : ""}
-    ${st.kind === "embed" ? html`<a class="pfx__link pfx__link--demo" href="${safeUrl(st.url)}" target="_blank" rel="noopener">Open demo in a new tab ${EXTERNAL}</a>` : ""}
-    <a class="pfx__link pfx__link--live" href="${safeUrl(p.live_url)}" target="_blank" rel="noopener">Visit live website ${EXTERNAL}<span class="visually-hidden"> (opens the operational ${p.name} website in a new tab)</span></a>
+    ${st.kind === "embed" ? html`<a class="pfx__link pfx__link--demo" href="${safeUrl(st.url)}" target="_blank" rel="noopener noreferrer">Open demo in a new tab ${EXTERNAL}</a>` : ""}
+    <a class="pfx__link pfx__link--live" href="${safeUrl(p.live_url)}" target="_blank" rel="noopener noreferrer">Visit live website ${EXTERNAL}<span class="visually-hidden"> (opens the operational ${p.name} website in a new tab)</span></a>
   </div>
 </div>
 </li>`;

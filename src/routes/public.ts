@@ -107,7 +107,7 @@ ${approved ? "" : html`<p class="muted">Each plan will have explicit, published 
 function portfolioCard(p: pf.PortfolioProject): SafeHtml {
   return html`<article class="card portfolio-card"><a class="portfolio-card__shot" href="/portfolio/${p.slug}">${shot(p, "desktop")}</a>
 <div class="eyebrow">${p.industry}</div><h3 class="card__title"><a href="/portfolio/${p.slug}">${p.name}</a></h3><p class="muted">${p.description.length > 180 ? p.description.slice(0, 177) + "…" : p.description}</p>
-<div class="row"><a class="btn btn--secondary btn--sm" href="/portfolio/${p.slug}">Case study</a><a class="btn btn--ghost btn--sm" href="${safeUrl(p.live_url)}" rel="noopener" target="_blank">Visit live website</a></div></article>`;
+<div class="row"><a class="btn btn--secondary btn--sm" href="/portfolio/${p.slug}">Case study</a><a class="btn btn--ghost btn--sm" href="${safeUrl(p.live_url)}" rel="noopener noreferrer" target="_blank">Visit live website</a></div></article>`;
 }
 
 function shot(p: pf.PortfolioProject, kind: "desktop" | "mobile", viewer = false): SafeHtml {
@@ -474,7 +474,7 @@ ${ids.map((fid) => { const f = top(fid); return html`<tr><th scope="row"><span c
     const projects = await pf.listPublished(ctx.db);
     return html`${pageHero("Portfolio", intro.heading, intro.lede)}
 <section class="section section--flush"><div class="container">${projects.length ? html`${portfolioExplorer(ctx, projects, { variant: "portfolio" })}
-<div class="pf-index"><h2 class="pf-index__title">Case studies</h2><ul class="index-list">${projects.map((x) => html`<li><a href="/portfolio/${x.slug}"><span class="index-list__name">${x.name}</span><span class="index-list__summary">${x.industry}</span><span class="index-list__arrow" aria-hidden="true">→</span></a></li>`)}</ul></div>`
+<div class="pf-index"><h2 class="pf-index__title">Case studies</h2><ul class="index-list">${projects.map((x) => html`<li class="pf-index__item"><a href="/portfolio/${x.slug}"><span class="index-list__name">${x.name}</span><span class="index-list__summary">${x.industry}</span><span class="index-list__arrow" aria-hidden="true">→</span></a><a class="pf-index__live" href="${safeUrl(x.live_url)}" target="_blank" rel="noopener noreferrer">Visit live website<span class="visually-hidden">: ${x.name} (opens in a new tab)</span></a></li>`)}</ul></div>`
       : emptyState("Portfolio projects are being prepared", "Projects appear here once genuine desktop and mobile screenshots of each live website have been captured and verified, and the project's relationship to Crestmont is documented. We never substitute mock-ups or stock imagery.", html`<a class="btn btn--secondary" href="/contact">Ask us about our work</a>`)}</div></section>`;
   }));
 
@@ -483,14 +483,14 @@ ${ids.map((fid) => { const f = top(fid); return html`<tr><th scope="row"><span c
     if (!proj || !proj.published) throw new HttpError(404, "That portfolio project is not available.");
     const tms = await pf.publishedTestimonials(ctx.db, proj.id);
     return htmlResponse(ctx, publicLayout(ctx, { title: `${proj.name} — case study`, description: proj.description.slice(0, 160) }, html`
-${pageHero(proj.industry, proj.name, undefined, html`<a class="btn btn--primary" href="${safeUrl(proj.live_url)}" rel="noopener" target="_blank">Visit live website</a>${linkButton("All projects", "/portfolio", "ghost")}`)}
+${pageHero(proj.industry, proj.name, undefined, html`<a class="btn btn--primary" href="${safeUrl(proj.live_url)}" rel="noopener noreferrer" target="_blank">Visit live website</a>${linkButton("All projects", "/portfolio", "ghost")}`)}
 <section class="section section--flush"><div class="container">${portfolioExplorer(ctx, [proj], { variant: "case", headingLevel: 2 })}</div></section>
 <section class="section section--flush"><div class="container case-shots"><figure>${shot(proj, "desktop", true)}<figcaption class="faint">Desktop${proj.screenshot_captured_at ? ` · captured ${formatDate(proj.screenshot_captured_at)}` : ""}</figcaption></figure>
 <figure>${shot(proj, "mobile", true)}<figcaption class="faint">Mobile</figcaption></figure></div></section>
 <section class="section"><div class="container grid grid-2"><div class="prose"><h2>About the project</h2>${paragraphs(proj.description).map((x) => html`<p>${x}</p>`)}
 ${proj.technology_summary ? html`<h3>Technology</h3><p>${proj.technology_summary}</p>` : ""}<p class="faint">${proj.relationship}</p></div>
 <div class="card"><h3 class="card__title">Verified features</h3><ul class="checklist">${pf.features(proj).map((f) => html`<li>${f}</li>`)}</ul>
-${dl([["Industry", proj.industry], ["Live site", html`<a href="${safeUrl(proj.live_url)}" rel="noopener" target="_blank">${proj.live_url.replace(/^https?:\/\//, "")}</a>`], ["Link verified", formatDate(proj.link_verified_at)]])}</div></div></section>
+${dl([["Industry", proj.industry], ["Live site", html`<a href="${safeUrl(proj.live_url)}" rel="noopener noreferrer" target="_blank">${proj.live_url.replace(/^https?:\/\//, "")}</a>`], ["Link verified", formatDate(proj.link_verified_at)]])}</div></div></section>
 ${tms.length ? section("Testimonials", "What they said", html`<div class="grid grid-2">${tms.map((t) => html`<blockquote class="card testimonial"><p>“${t.body}”</p><footer class="faint">— ${t.author_name}</footer></blockquote>`)}</div>`) : ""}
 <dialog id="viewer" class="viewer" aria-label="Screenshot viewer"><img alt=""><form method="dialog"><button class="btn btn--secondary btn--sm" type="submit" data-close>Close</button></form></dialog>`));
   });

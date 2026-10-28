@@ -1155,6 +1155,11 @@ a.shot { display: block; cursor: zoom-in; }
 .pfx--expanded .pfx__hint { display: none; }
 html.pfx-lock { overflow: hidden; }
 .pf-index { margin-top: var(--s-8); }
+.pf-index__item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: var(--s-5); }
+.index-list .pf-index__live { display: inline-flex; align-items: center; min-height: 44px; padding: 0 var(--s-2); color: var(--text-2); font-size: var(--fs-sm); white-space: nowrap; text-decoration: underline; text-decoration-color: var(--line-control); text-underline-offset: 3px; }
+.index-list .pf-index__live::after { content: "↗"; margin-left: .35em; }
+.index-list .pf-index__live:hover { color: var(--gold-1); text-decoration-color: currentColor; }
+@media (max-width: 760px) { .pf-index__item { grid-template-columns: minmax(0, 1fr); } .index-list .pf-index__live { padding: 0 0 var(--s-4); } }
 .pf-index__title { font: 500 var(--fs-2xl)/1.1 var(--font-display); letter-spacing: -.03em; margin-bottom: var(--s-4); }
 @media (max-width: 760px) {
   .pfx { --pfx-h: clamp(440px, 72vh, 640px); }

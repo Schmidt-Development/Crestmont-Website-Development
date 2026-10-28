@@ -89,7 +89,7 @@ test("[PORT-006] [PORT-007] explorer: published records drive one shared compone
   assert.match(html, /aria-label="Next project: Glassly Auto Glass"/);
   assert.match(html, /Interactive demo — no real transactions/);
   assert.match(html, /<script src="\/assets\/portfolio\.js" defer>/);
-  for (const p of PORTFOLIO_PROJECTS) assert.ok(html.includes(`href="${p.liveUrl}" target="_blank" rel="noopener">Visit live website`), "separate live-site link");
+  for (const p of PORTFOLIO_PROJECTS) assert.ok(html.includes(`href="${p.liveUrl}" target="_blank" rel="noopener noreferrer">Visit live website`), "separate live-site link");
   const csp = res.headers.get("content-security-policy")!;
   for (const o of ORIGINS.split(" ")) assert.ok(csp.includes(o), `frame-src allows ${o}`);
   for (const t of [html.replace(/<[^>]+>/g, " ")]) { assert.equal(findProhibitedClaims(t).length, 0); for (const re of FABRICATION) assert.doesNotMatch(t, re); }

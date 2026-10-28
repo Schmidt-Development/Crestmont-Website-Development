@@ -345,7 +345,7 @@ test("[PORT-007] [PORT-006] full portfolio workflow: upload, replace, verify, do
   const csh = await cs.text();
   assert.match(csh, /<dialog id="viewer"/);
   assert.match(csh, /data-viewer/);
-  assert.match(csh, /href="https:\/\/lansingcarrentals\.com" rel="noopener" target="_blank">Visit live website/);
+  assert.match(csh, /href="https:\/\/lansingcarrentals\.com" rel="noopener noreferrer" target="_blank">Visit live website/);
   assert.match(csh, /Booking via links to Turo/);
   const media = await anon.get(`/portfolio-media/${second}`);
   assert.equal(media.status, 200);

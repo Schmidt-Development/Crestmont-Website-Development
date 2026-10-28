@@ -35,7 +35,7 @@
       el.textContent = text;
       if (linkUrl) {
         const a = document.createElement("a");
-        a.href = linkUrl; a.target = "_blank"; a.rel = "noopener"; a.textContent = " Open the demo in a new tab.";
+        a.href = linkUrl; a.target = "_blank"; a.rel = "noopener noreferrer"; a.textContent = " Open the demo in a new tab.";
         el.append(a);
       }
     };
