@@ -347,7 +347,7 @@ test("[AIB-RUNNER] preview deploy runs the configured command with preview crede
   const envDump = path.join(tmp("aib-prev-"), "env.json");
   // Constant command; the dump path arrives through PREVIEW_DEPLOY_ENV like the credential (no paths spliced into a shell string).
   const cmd = `node -e "require('fs').writeFileSync(process.env.PREVIEW_TEST_DUMP, JSON.stringify(process.env)); console.log('Deployed'); console.log('PREVIEW_URL=https://' + process.env.CRESTMONT_PREVIEW_NAME + '.preview.workers.dev')"`;
-  const { cp, cfg, client, job } = await setup({ cfg: { preview: { command: cmd, envNames: ["CLOUDFLARE_API_TOKEN", "PREVIEW_TEST_DUMP"], timeoutMs: 30_000 } } });
+  const { cp, cfg, client, job } = await setup({ cfg: { preview: { command: cmd, envNames: ["CLOUDFLARE_API_TOKEN", "PREVIEW_TEST_DUMP"], timeoutMs: 30_000, gateSecret: "preview-gate-secret-for-tests-0123456789" } } });
   try {
     const sdk = fakeSdk(happyAgent());
     const proxied = { ...POLLUTED_ENV, PREVIEW_TEST_DUMP: envDump, HTTPS_PROXY: "http://egress-proxy:3128", NO_PROXY: "localhost,127.0.0.1", HTTP_PROXY: "http://user:pw@leaky-proxy:3128" };
@@ -368,7 +368,7 @@ test("[AIB-RUNNER] preview deploy runs the configured command with preview crede
 });
 
 test("[AIB-RUNNER] preview deploy is refused when the agent added a custom build command or routes [mock SDK]", async () => {
-  const { cp, cfg, client, job } = await setup({ cfg: { preview: { command: "echo PREVIEW_URL=https://x.workers.dev", envNames: [], timeoutMs: 10_000 } } });
+  const { cp, cfg, client, job } = await setup({ cfg: { preview: { command: "echo PREVIEW_URL=https://x.workers.dev", envNames: [], timeoutMs: 10_000, gateSecret: "preview-gate-secret-for-tests-0123456789" } } });
   try {
     const sdk = fakeSdk(async function* (ctx): AsyncGenerator<SDKMessage> {
       if (ctx.prompt.includes("Phase 2 of 3")) {

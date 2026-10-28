@@ -47,6 +47,11 @@ async function notifyStaff(ctx: AppContext, job: B.BuildJob, to: BuildState) {
   for (const u of new Set([...owners, ...(pm?.project_manager_id ? [pm.project_manager_id] : [])])) await notify(ctx.db, u, { kind: "build", subjectType: "build_job", subjectId: job.id, body });
 }
 
+/** Off-site redirect to a preview sign-in link: never cached, never leaks the link as a referrer. */
+function previewRedirect(location: string): Response {
+  return new Response(null, { status: 303, headers: { location, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+}
+
 export function register(r: Router): void {
   // ───── Runner API (HMAC-signed; no cookies) ─────
   r.post(`${RUNNER}/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await B.claimJob(ctx.db, { runnerId: typeof b.runnerId === "string" ? b.runnerId : "", version: typeof b.version === "string" ? b.version : "", capabilities: b.capabilities }, ctx.now(), { allowPaidProvider: ctx.env.BUILD_ALLOW_PAID_PROVIDER === "true" })); }));
@@ -164,6 +169,7 @@ ${select({ name: "customer_revision_mode", label: "Customer revision requests", 
     const d = await B.buildDetail(ctx.db, p.id);
     const j = d.job, x = d.summary;
     const manage = can(ctx.actor!, "builds.manage"), configure = can(ctx.actor!, "builds.configure");
+    const previewAccess = B.previewAccess(j, ctx.env.BUILD_PREVIEW_GATE_SECRET);
     const act = (path: string, label: string, extra: SafeHtml = html``, variant: "primary" | "secondary" | "danger" = "secondary") =>
       html`<form method="post" action="/staff/builds/${j.id}/${path}" class="row">${csrf(ctx)}${extra}${button(label, { variant, size: "sm" })}</form>`;
     const body = html`${pageHead(`${x.organizationName} — ${x.kind === "revision" ? `revision ${x.revision}` : "first build"}`, linkButton("All builds", "/staff/builds", "ghost", "sm"), x.projectName)}
@@ -174,7 +180,8 @@ ${dl([["Project", html`<a href="/staff/projects/${x.projectId}">${x.projectName}
   ["Started", x.startedAt ? formatDateTime(x.startedAt) : "—"], ["Elapsed", dur(x.elapsedSeconds)], ["Latest heartbeat", x.heartbeatAt ? formatDateTime(x.heartbeatAt) : "—"],
   ["Attempts", `${x.attempts} of ${x.maxAttempts}`], ["Cost", `${usd(x.costUsd)} this build · project ${usd(x.projectSpendUsd)} of ${usd(x.projectBudgetUsd)} · per-run limit ${usd(x.runBudgetUsd)}`],
   ["Preview", j.preview_deleted_at ? `Deleted ${formatDateTime(j.preview_deleted_at)}${j.preview_name ? ` (${j.preview_name})` : ""}`
-    : x.previewUrl ? html`<a href="${x.previewUrl}" rel="noopener noreferrer" target="_blank">${x.previewUrl}</a>${j.preview_delete_requested_at ? html` ${badge("warn", "Deletion requested")}` : ""}` : "Not available"],
+    : x.previewUrl ? html`${previewAccess.available ? html`<a href="/staff/builds/${j.id}/preview" rel="noopener noreferrer" target="_blank">Open preview</a> ` : ""}${j.preview_gated ? badge("ok", "Private") : badge("warn", "Public (legacy)")} <span class="faint">${j.preview_name ?? ""}</span>${previewAccess.reason ? html`<br><span class="faint">${previewAccess.reason}</span>` : ""}${j.preview_delete_requested_at ? html` ${badge("warn", "Deletion requested")}` : ""}` : "Not available"],
+  ["Customer preview", j.customer_preview_shared_at ? html`Shared ${formatDateTime(j.customer_preview_shared_at)}${j.customer_review ? html` · ${badge(j.customer_review === "approved" ? "ok" : "warn", j.customer_review === "approved" ? "Customer approved" : "Customer requested changes")}${j.customer_review_note ? html` <span class="faint">${j.customer_review_note}</span>` : ""}` : html` · ${badge("pending", "Awaiting customer review")}`}` : "Not shared"],
   ["Source", x.source.repo ? `${x.source.repo}${x.source.branch ? ` @ ${x.source.branch}` : ""}${x.source.commit ? ` (${x.source.commit.slice(0, 12)})` : ""}` : "Not available"],
   ["Preview retention", x.previewRetention.status === "scheduled" ? `Scheduled for deletion on ${formatDateTime(x.previewRetention.deleteAfter!)}${j.preview_retain_until ? " (extended)" : ""}` : x.previewRetention.note],
   ["Brief", d.brief ? `version ${(d.brief as { version: number }).version}` : "—"], ["Revision instruction", j.instruction],
@@ -190,6 +197,7 @@ ${j.state === "failed" ? act("retry", "Retry") : ""}
 ${["paused", "budget_paused", "needs_information", "failed"].includes(j.state) && (j.agent_session_id || j.source_commit) ? act("resume", "Resume saved session") : ""}
 ${["ready_for_review", "approved", "needs_information"].includes(j.state) ? act("revision", "Submit revision", textarea({ name: "instruction", label: "Revision instruction", required: true, maxlength: 5000, rows: 3 }), "primary") : ""}
 ${configure && j.state === "ready_for_review" && !j.preview_deleted_at && !j.preview_delete_requested_at ? act("approve", "Approve preview for delivery", input({ name: "notes", label: "Notes", maxlength: 500, id: "f-approve-notes" }), "primary") : ""}
+${j.preview_gated && !j.preview_deleted_at && ["ready_for_review", "approved"].includes(j.state) ? j.customer_preview_shared_at ? act("share-preview", "Stop sharing preview with customer", html`<input type="hidden" name="action" value="unshare">`) : act("share-preview", "Share private preview with customer", html`<input type="hidden" name="action" value="share">`) : ""}
 ${j.preview_name && !j.preview_deleted_at && !j.preview_delete_requested_at && !["preparing", "building", "verifying"].includes(j.state) && !["approved_kept", "kept_unrecoverable"].includes(x.previewRetention.status) ? act("delete-preview", "Delete preview") : ""}
 ${(j.preview_name || j.preview_url) && !j.preview_deleted_at && !j.preview_delete_claimed_at ? html`<form method="post" action="/staff/builds/${j.id}/preview-retention" class="row">${csrf(ctx)}${j.preview_preserved
   ? button("Stop preserving preview", { variant: "secondary", size: "sm", name: "action", value: "release" })
@@ -301,6 +309,33 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     requireStaff(ctx, "builds.manage");
     try { await B.rejectCustomerRevision({ ...owner(ctx), mail: ctx }, p.id, str(await ctx.form(), "reason")); } catch (e) { return fail(ctx, "/staff/builds", e); }
     return back(ctx, "/staff/builds", "Revision request rejected. No AI build starts; the customer was told why and the round is not used.");
+  });
+
+  // ───── Private previews (Founder decision D3) ─────
+  r.get("/staff/builds/:id/preview", async (ctx, p) => {
+    requireStaff(ctx, "builds.read");
+    let to: string;
+    try { to = await B.staffPreviewLink(owner(ctx), ctx.env.BUILD_PREVIEW_GATE_SECRET, p.id, ctx.url.searchParams.get("next") ?? "/"); } catch (e) { return fail(ctx, `/staff/builds/${p.id}`, e); }
+    return previewRedirect(to);
+  });
+  r.post("/staff/builds/:id/share-preview", async (ctx, p) => {
+    requireStaff(ctx, "builds.manage");
+    const share = str(await ctx.form(), "action") !== "unshare";
+    try { await B.sharePreview({ ...owner(ctx), mail: ctx }, p.id, share); } catch (e) { return fail(ctx, `/staff/builds/${p.id}`, e); }
+    return back(ctx, `/staff/builds/${p.id}`, share ? "Preview shared. The customer was notified and can open it from their portal while signed in." : "The customer can no longer open this preview.");
+  });
+  r.get("/portal/projects/:id/previews/:buildId", async (ctx, p) => {
+    const org = requireCustomerOrg(ctx);
+    let to: string;
+    try { to = await B.customerPreviewLink(ctx.db, ctx.env.BUILD_PREVIEW_GATE_SECRET, { organizationId: org.organizationId, userId: ctx.user!.id }, p.id, p.buildId); } catch (e) { return fail(ctx, `/portal/projects/${p.id}/revisions`, e); }
+    return previewRedirect(to);
+  });
+  r.post("/portal/projects/:id/previews/:buildId/review", async (ctx, p) => {
+    const org = requireCustomerOrg(ctx);
+    if (org.role !== "customer_admin") throw new HttpError(403, "An account administrator reviews website previews.");
+    const f = await ctx.form();
+    try { await B.customerReviewPreview({ db: ctx.db, mail: ctx }, { organizationId: org.organizationId, userId: ctx.user!.id }, p.id, p.buildId, str(f, "decision"), str(f, "note")); } catch (e) { return fail(ctx, `/portal/projects/${p.id}/revisions`, e); }
+    return redirect(ctx, `/portal/projects/${p.id}/revisions`, { kind: "success", text: "Thank you. Your project team has your review." });
   });
 
   // ───── Customer-facing summary (own organization; no internal detail) ─────

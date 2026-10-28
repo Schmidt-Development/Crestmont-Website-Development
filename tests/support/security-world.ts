@@ -153,7 +153,7 @@ export async function buildWorld(): Promise<World> {
   const payments = new FakePayments();
   const app = await createTestApp({
     EVIDENCE_INGEST_SECRET: SECRETS.evidence, VOICE_WEBHOOK_SECRET: SECRETS.voice, STRIPE_WEBHOOK_SECRET: SECRETS.stripe,
-    RETELL_API_KEY: SECRETS.retell, RESEND_WEBHOOK_SECRET: SECRETS.resend, BUILD_RUNNER_SECRET: SECRETS.runner, SCHEDULER_TRIGGER_SECRET: SECRETS.scheduler,
+    RETELL_API_KEY: SECRETS.retell, RESEND_WEBHOOK_SECRET: SECRETS.resend, BUILD_RUNNER_SECRET: SECRETS.runner, BUILD_PREVIEW_GATE_SECRET: "matrix-preview-gate-secret-0123456789abcdef", SCHEDULER_TRIGGER_SECRET: SECRETS.scheduler,
     overrides: { storage: new MemoryStorage(), payments },
   });
   const db = app.db;
@@ -240,8 +240,8 @@ async function buildStaffRecords(w: World) {
   await db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES (?, ?, 'system', 'project', NULL, 'Matrix staff notification', ?)`).bind(ids.staffNotification, w.staff.owner.id, nowIso()).run();
   // AI build record for tenant A's project (normally created by the payment/intake hooks).
   ids.buildJob = newId("bld");
-  await db.prepare(`INSERT INTO build_jobs (id, project_id, organization_id, order_id, kind, revision, dedupe_key, state, state_reason, strategy, package_id, trigger, preview_url, agent_session_id, created_at, updated_at)
-                    SELECT ?, p.id, p.organization_id, p.order_id, 'first_build', 0, p.id || ':first', 'ready_for_review', 'matrix fixture', 'standard', 'business', 'sweep', 'https://preview.matrix.example', 'sess-matrix', ?, ? FROM projects p WHERE p.id = ?`)
+  await db.prepare(`INSERT INTO build_jobs (id, project_id, organization_id, order_id, kind, revision, dedupe_key, state, state_reason, strategy, package_id, trigger, preview_url, preview_name, preview_gated, agent_session_id, created_at, updated_at)
+                    SELECT ?, p.id, p.organization_id, p.order_id, 'first_build', 0, p.id || ':first', 'ready_for_review', 'matrix fixture', 'standard', 'business', 'sweep', 'https://cm-prv-matrix-b0.acct.workers.dev', 'cm-prv-matrix-b0', 1, 'sess-matrix', ?, ? FROM projects p WHERE p.id = ?`)
     .bind(ids.buildJob, nowIso(), nowIso(), w.a.ids.project).run();
   // Public identifiers
   ids.serviceSlug = "website-design-development";

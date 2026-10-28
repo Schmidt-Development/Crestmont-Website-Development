@@ -46,7 +46,7 @@ test("[AIB-RUNNER] the preview deploy sees only a clean export of the committed 
   // A constant command; the output path arrives as an environment variable (PREVIEW_DEPLOY_ENV), like a credential.
   const cmd = `node -e "const fs=require('fs');const ls=(d,p='')=>fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?ls(d+'/'+e.name,p+e.name+'/'):[p+e.name]);fs.writeFileSync(process.env.PREVIEW_TEST_SEEN,JSON.stringify({cwd:process.cwd(),files:ls('.')}));console.log('PREVIEW_URL=https://'+process.env.CRESTMONT_PREVIEW_NAME+'.preview.workers.dev')"`;
   const cp = await startFakeControlPlane({ jobs: [makeJob()] });
-  const cfg = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: makeSkillsDir(manifest), ...SDK_OPT_IN, preview: { command: cmd, envNames: ["PREVIEW_TEST_SEEN"], timeoutMs: 30_000 } });
+  const cfg = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: makeSkillsDir(manifest), ...SDK_OPT_IN, preview: { command: cmd, envNames: ["PREVIEW_TEST_SEEN"], timeoutMs: 30_000, gateSecret: "preview-gate-secret-for-tests-0123456789" } });
   const client = new ControlPlaneClient({ baseUrl: cp.url, secret: SECRET, runnerId: cfg.runnerId, sleep: async () => {}, retry: { attempts: 2, baseMs: 1 } });
   try {
     const job = await claimFrom(cp);
@@ -69,7 +69,10 @@ test("[AIB-RUNNER] the preview deploy sees only a clean export of the committed 
     assert.equal(s.outcome, "ready_for_review", String(s.complete?.error));
     const rec = JSON.parse(readFileSync(seen, "utf8")) as { cwd: string; files: string[] };
     assert.notEqual(path.resolve(rec.cwd), path.resolve(path.join(s.workspace!, "repo")), "not the live workspace");
-    assert.ok(rec.files.includes("public/index.html") && rec.files.includes("wrangler.jsonc"), "the committed site is there");
+    assert.ok(rec.files.includes("public/index.html") && rec.files.includes("src/worker.js"), "the committed site is there");
+    // Founder decision D3: the deployed config is the runner's, with the private-preview gate as entry point.
+    assert.ok(rec.files.includes("wrangler.json") && rec.files.includes("__crestmont_preview_gate.mjs") && !rec.files.includes("wrangler.jsonc"), "runner-generated config and gate");
+    assert.equal(s.complete?.previewGated, true);
     for (const f of rec.files) assert.doesNotMatch(f, /(^|\/)(node_modules|\.npmrc|\.env\.production|\.wrangler|\.git)(\/|$)/, `stripped: ${f}`);
     assert.ok(!existsSync(rec.cwd), "the export is removed after the deploy");
     assert.equal(s.complete?.previewName, "cm-prv-prj-test1-b0");
@@ -80,7 +83,7 @@ test("[AIB-RUNNER] preview cleanup: the runner deletes only previews the platfor
   const log = path.join(tmp("aib-prev-del-"), "deleted.txt");
   const cp = await startFakeControlPlane({ jobs: [] });
   const base = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: "x" });
-  const cfg = { ...base, preview: { command: "true", envNames: ["CLOUDFLARE_API_TOKEN", "PREVIEW_TEST_LOG"], timeoutMs: 10_000 }, previewDelete: { mode: "command" as const, command: `echo "$CRESTMONT_PREVIEW_NAME $CLOUDFLARE_API_TOKEN" >> "$PREVIEW_TEST_LOG"`, timeoutMs: 10_000 } };
+  const cfg = { ...base, preview: { command: "true", envNames: ["CLOUDFLARE_API_TOKEN", "PREVIEW_TEST_LOG"], timeoutMs: 10_000, gateSecret: "preview-gate-secret-for-tests-0123456789" }, previewDelete: { mode: "command" as const, command: `echo "$CRESTMONT_PREVIEW_NAME $CLOUDFLARE_API_TOKEN" >> "$PREVIEW_TEST_LOG"`, timeoutMs: 10_000 } };
   const env = { ...POLLUTED_ENV, PREVIEW_TEST_LOG: log };
   const client = new ControlPlaneClient({ baseUrl: cp.url, secret: SECRET, runnerId: cfg.runnerId, sleep: async () => {}, retry: { attempts: 1, baseMs: 1 } });
   try {

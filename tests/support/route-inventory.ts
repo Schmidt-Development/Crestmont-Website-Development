@@ -49,6 +49,8 @@ export interface RouteSpec {
   audit?: AuditClass;
   /** JSON API route (/api/*): denials are JSON 401/403, never a redirect. */
   api?: true;
+  /** GET answers 303 to an off-site URL (a signed preview sign-in link), not a page. */
+  offsite?: true;
   /** Query string the page needs to render, with {resourceKind} placeholders (e.g. "lead={lead}"). */
   query?: string;
 }
@@ -474,6 +476,11 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/builds/customer-revisions/:id/reject": staff(rolesWith("builds.manage"), P("revision"), act("builds.customer_revision_rejected")),
   "POST /staff/builds/:id/delete-preview": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.preview_delete_requested")),
   "POST /staff/builds/:id/preview-retention": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.preview_retention_changed")),
+  // Founder decision D3: private previews. Opening one issues a signed 5-minute sign-in link (audited).
+  "GET /staff/builds/:id/preview": { ...staff(rolesWith("builds.read"), P("buildJob"), act("builds.preview_opened")), offsite: true },
+  "POST /staff/builds/:id/share-preview": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.preview_shared")),
+  "GET /portal/projects/:id/previews/:buildId": { ...cust({ id: "project", buildId: "buildJob" }, act("portal.preview_opened")), offsite: true },
+  "POST /portal/projects/:id/previews/:buildId/review": cust({ id: "project", buildId: "buildJob" }, act("portal.preview_reviewed"), { admin: true }),
   "POST /staff/ai/:id/decide": staff(rolesWith("ai.manage"), P("aiJob"), act("ai.draft_approved")),
   "POST /staff/ai/:id/retry": staff(rolesWith("ai.manage"), P("aiJob"), act("ai.job_retried")),
   "POST /staff/ai/budget": staff(rolesWith("ai.budget"), undefined, act("ai.budget_updated")),

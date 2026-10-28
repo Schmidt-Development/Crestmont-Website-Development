@@ -41,6 +41,11 @@ export interface Env {
   BUILD_ALLOW_PAID_PROVIDER?: string;
   /** Comma-separated host suffixes a build preview URL may use (default ".workers.dev"). Other URLs are not recorded. */
   BUILD_PREVIEW_HOSTS?: string;
+  /**
+   * Private AI-builder previews (Founder decision D3): signs the 5-minute sign-in links the preview gate accepts. The
+   * same value (≥32 random characters) as the runner's PREVIEW_GATE_SECRET. Unset = previews cannot be opened.
+   */
+  BUILD_PREVIEW_GATE_SECRET?: string;
   /** HMAC key for POST /api/scheduled/run (external scheduler when native Cron Triggers are unavailable). */
   SCHEDULER_TRIGGER_SECRET?: string;
   /** "on" | "off": per-user limits on authenticated form submissions (default on outside development). ASVS F-15. */

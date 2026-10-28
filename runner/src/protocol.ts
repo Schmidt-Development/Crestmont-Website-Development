@@ -139,6 +139,8 @@ export interface CompleteRequest extends ProviderReport {
   previewUrl: string | null;
   /** The preview Worker's name (protocol v1.2), so the platform can later ask the runner to delete it. */
   previewName?: string;
+  /** True when the preview was deployed behind the private-preview gate (protocol v1.4; Founder decision D3). */
+  previewGated?: boolean;
   report: string;
   missingInformation?: string[];
   error?: string;

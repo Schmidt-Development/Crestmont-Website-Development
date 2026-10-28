@@ -39,7 +39,9 @@ $script:CrestmontLocalEnvTemplate = @(
   "# PREVIEW_DEPLOY_COMMAND=...",
   "# PREVIEW_DEPLOY_ENV=CLOUDFLARE_API_TOKEN,CLOUDFLARE_ACCOUNT_ID",
   "# CLOUDFLARE_API_TOKEN_FILE=/run/secrets/cloudflare_api_token",
-  "# CLOUDFLARE_ACCOUNT_ID_FILE=/run/secrets/cloudflare_account_id"
+  "# CLOUDFLARE_ACCOUNT_ID_FILE=/run/secrets/cloudflare_account_id",
+  "# Private previews (required for any preview; same value as the platform's BUILD_PREVIEW_GATE_SECRET):",
+  "# PREVIEW_GATE_SECRET_FILE=/run/secrets/preview_gate_secret"
 )
 
 function ConvertFrom-CrestmontEnvText {

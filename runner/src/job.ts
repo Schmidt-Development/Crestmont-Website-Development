@@ -11,7 +11,7 @@ import type { RunnerConfig } from "./config.ts";
 import { configuredVariableNames, readSecret } from "./config.ts";
 import type { Job, Outcome, RequirementItem, Stage, CompleteRequest } from "./protocol.ts";
 import type { Logger } from "./log.ts";
-import { errorMessage } from "./log.ts";
+import { errorMessage, registerSecret } from "./log.ts";
 import { RunTracker, StopSwitch } from "./agent.ts";
 import type { QueryFn } from "./providers/claude-agent-sdk.ts";
 import type { AgentProvider, PhaseResult } from "./providers/types.ts";
@@ -31,6 +31,7 @@ import type { SkillManifest, Workflow, PreflightResult } from "./skills.ts";
 import { preflight, provisionSkills } from "./skills.ts";
 import { buildCheckpoint, restoreCheckpoint } from "./checkpoint.ts";
 import type { StarterSpec, CheckOutcome, CheckExecutor } from "./checks.ts";
+import { previewKey, planGatedPreview, applyGatedPreview } from "./preview-gate.ts";
 import { starterDir, loadStarter, copyStarter, acceptanceCommands, runChecks, previewConfigProblems, restoreProtectedFiles, briefConformance, isolationCheck, previewName, PREVIEW_NAME, PREVIEW_EXPORT_STRIP } from "./checks.ts";
 import { writeBriefFiles, systemPromptAppend, phasePrompt } from "./prompt.ts";
 import type { Phase } from "./prompt.ts";
@@ -256,7 +257,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       ...(provider ? { provider: provider.id, model: provider.model(job) } : {}),
       sourceRepo: sourceRepoValue(), sourceBranch: branch, sourceCommit: commit ?? "",
       previewUrl: fields.preview?.url ?? null, report,
-      ...(fields.preview?.url && fields.preview.name ? { previewName: fields.preview.name } : {}),
+      ...(fields.preview?.url && fields.preview.name ? { previewName: fields.preview.name, previewGated: true } : {}),
       ...(outcome === "needs_information" ? { missingInformation } : {}),
       ...(fields.error ? { error: fields.error } : {}),
     };
@@ -577,6 +578,8 @@ async function downloadCustomerFiles(job: Job, repo: string, client: ControlPlan
  */
 async function deployPreview(cfg: RunnerConfig, ws: Workspace, git: GitCtx, job: Job, checkEnv: Record<string, string>, processEnv: Record<string, string | undefined>, log: Logger): Promise<{ url: string | null; note: string; name: string | null }> {
   if (!cfg.preview) return { url: null, note: "PREVIEW_DEPLOY_COMMAND is not configured on the runner.", name: null };
+  // Founder decision D3: previews are private. Never deploy one without the gate.
+  if (!cfg.preview.gateSecret || cfg.preview.gateSecret.length < 32) return { url: null, note: "PREVIEW_GATE_SECRET (at least 32 characters, the same value as on the platform) is not configured on the runner; previews are private and are not deployed without the gate.", name: null };
   const name = previewName(job.projectId, job.kind, job.revision);
   if (!PREVIEW_NAME.test(name)) return { url: null, note: `refused to deploy: unexpected preview name ${name}`, name: null };
   // Constant, relative arguments; the job's directories are given only as working directories.
@@ -598,6 +601,12 @@ async function deployPreview(cfg: RunnerConfig, ws: Workspace, git: GitCtx, job:
   }
   const problems = previewConfigProblems(exportDir);
   if (problems.length) { rmSync(exportDir, { recursive: true, force: true }); return { url: null, note: `refused to deploy: ${problems.join("; ")}`, name: null }; }
+  // The agent's Wrangler config is replaced by a runner-generated one whose entry point is the private-preview gate.
+  const key = previewKey(cfg.preview.gateSecret, name);
+  registerSecret(key);
+  const gated = planGatedPreview(exportDir, name, key);
+  if (!gated.plan) { rmSync(exportDir, { recursive: true, force: true }); return { url: null, note: `refused to deploy: ${gated.problems.join("; ")}`, name: null }; }
+  applyGatedPreview(exportDir, gated.plan);
   const env: Record<string, string> = {
     ...checkEnv,
     // The runner's egress proxy (its network has no other route out); never handed to the agent or the sandbox.

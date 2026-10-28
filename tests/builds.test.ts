@@ -534,7 +534,9 @@ test("[AIB-006] [AIB-007] customer revision request → owner forwards it → AI
   assert.match(detail, /Round 1/);
   const tab = await (await t.oc.get(`/staff/projects/${pid}?tab=revisions`)).text();
   assert.match(tab, new RegExp(`/staff/builds/${revJob.id}`));
-  assert.match(tab, /rev1\.acct\.workers\.dev/);
+  // D3: previews are reached through the platform's signed sign-in route, never as a raw URL on the page.
+  assert.match(tab, new RegExp(`/staff/builds/${revJob.id}/preview`));
+  assert.doesNotMatch(tab, /rev1\.acct\.workers\.dev/);
 
   // Approval records the decision; it does not deliver the round to the customer.
   assert.equal((await t.oc.post(`/staff/builds/${revJob.id}/approve`, { notes: "" })).status, 303);
@@ -687,6 +689,98 @@ test("[AIB-006] D2: previews are kept while in work or review, the approved one 
   assert.match(flash(await t.oc.post("/staff/builds/settings", settings)), /Preview retention must be 1–365 days/);
   assert.equal((await t.oc.post("/staff/builds/settings", { ...settings, preview_retention_days: "45" })).status, 303);
   assert.equal((await B.getBuildSettings(t.db)).preview_retention_days, 45);
+});
+
+// ── Founder decision D3 (2026-10-28): private previews ──
+test("[AIB-006] D3: previews are private: staff and the project's own customer get signed 5-minute sign-in links; nothing public, no cross-tenant access, customer review recorded", async () => {
+  const GATE = "platform-preview-gate-secret-0123456789abcdef";
+  const t = await app({ BUILD_PREVIEW_GATE_SECRET: GATE });
+  const q = await queuedProject(t);
+  const pid = q.pid;
+  const job = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  await runner(t, "complete", { jobId: job.id, leaseToken: job.leaseToken, outcome: "ready_for_review", runCostUsd: 0, sourceCommit: "first0000001", previewUrl: "https://cm-prv-alpha-b0.acct.workers.dev", previewName: "cm-prv-alpha-b0", previewGated: true });
+  let j = (await B.getJob(t.db, job.id))!;
+  assert.equal(j.preview_gated, 1);
+
+  // Staff: a 303 to the preview's own sign-in path with a token for THIS preview, owner audience, 5 minutes.
+  const open = await t.oc.get(`/staff/builds/${job.id}/preview?next=/about.html`);
+  assert.equal(open.status, 303);
+  assert.equal(open.headers.get("referrer-policy"), "no-referrer");
+  const link = new URL(open.headers.get("location")!);
+  assert.equal(link.origin, "https://cm-prv-alpha-b0.acct.workers.dev");
+  assert.equal(link.pathname, "/__crestmont/auth");
+  const payload = JSON.parse(Buffer.from(link.searchParams.get("t")!.split(".")[0], "base64url").toString());
+  assert.equal(payload.p, "cm-prv-alpha-b0");
+  assert.equal(payload.a, "owner");
+  assert.equal(payload.n, "/about.html");
+  assert.ok(payload.exp - Date.now() / 1000 <= 300 && payload.exp - Date.now() / 1000 > 290);
+  assert.ok(!link.href.includes(GATE));
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.preview_opened' AND subject_id = ?`).bind(job.id).first());
+  const detail = await (await t.oc.get(`/staff/builds/${job.id}`)).text();
+  assert.match(detail, /Open preview/);
+  assert.doesNotMatch(detail, /href="https:\/\/cm-prv-alpha-b0/, "no raw preview link");
+
+  // The customer: nothing until the owner shares it.
+  assert.equal((await q.c.get(`/portal/projects/${pid}/previews/${job.id}`)).status, 404);
+  assert.doesNotMatch(await (await q.c.get(`/portal/projects/${pid}/revisions`)).text(), /Website previews/);
+  assert.equal((await t.oc.post(`/staff/builds/${job.id}/share-preview`, { action: "share" })).status, 303);
+  assert.match(flash(await t.oc.post(`/staff/builds/${job.id}/share-preview`, { action: "share" })), /already shared/);
+  const note = await t.db.prepare(`SELECT body FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`).bind(q.cu.id).first<{ body: string }>();
+  assert.match(note!.body, /private preview of your website is ready/);
+  const portal = await (await q.c.get(`/portal/projects/${pid}/revisions`)).text();
+  assert.match(portal, /Website previews/);
+  assert.match(portal, new RegExp(`/portal/projects/${pid}/previews/${job.id}`));
+  assert.doesNotMatch(portal, /cm-prv-alpha-b0\.acct/, "the customer never sees a raw preview URL");
+  const copen = await q.c.get(`/portal/projects/${pid}/previews/${job.id}`);
+  assert.equal(copen.status, 303);
+  const clink = new URL(copen.headers.get("location")!);
+  assert.equal(JSON.parse(Buffer.from(clink.searchParams.get("t")!.split(".")[0], "base64url").toString()).a, "customer");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'portal.preview_opened' AND subject_id = ? AND actor_user_id = ?`).bind(job.id, q.cu.id).first());
+
+  // Another customer: not their project, not their build (wrong project id, or right project id).
+  const other = await customerWithOrder(t);
+  assert.equal((await other.c.get(`/portal/projects/${pid}/previews/${job.id}`)).status, 404);
+  const otherPid = await (async () => { await stripe(t, "checkout.session.completed", session(other.cu.organizationId, other.order)); return projectOf(t, other.order.orderId); })();
+  assert.equal((await other.c.get(`/portal/projects/${otherPid}/previews/${job.id}`)).status, 404);
+  assert.equal((await other.c.post(`/portal/projects/${otherPid}/previews/${job.id}/review`, { decision: "approved", note: "" })).status, 404);
+  // A non-admin member of the right organization can open it but not review it.
+  const member = await createCustomer(t.db, `m${Date.now()}@harbor.example`, "ignored");
+  await t.db.prepare(`UPDATE memberships SET organization_id = ?, role_id = 'customer_member' WHERE user_id = ?`).bind(q.cu.organizationId, member.id).run();
+  const mc = await t.client().login(member.email, TEST_PASSWORD);
+  assert.equal((await mc.get(`/portal/projects/${pid}/previews/${job.id}`)).status, 303);
+  assert.equal((await mc.post(`/portal/projects/${pid}/previews/${job.id}/review`, { decision: "approved", note: "" })).status, 403);
+
+  // Customer review (step 4): changes need a reason; recorded, audited, shown to staff, team notified.
+  assert.match(flash(await q.c.post(`/portal/projects/${pid}/previews/${job.id}/review`, { decision: "changes_requested", note: "" })), /Describe what should change/);
+  assert.equal((await q.c.post(`/portal/projects/${pid}/previews/${job.id}/review`, { decision: "changes_requested", note: "Please use our new logo." })).status, 303);
+  j = (await B.getJob(t.db, job.id))!;
+  assert.equal(j.customer_review, "changes_requested");
+  assert.equal(j.customer_review_note, "Please use our new logo.");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'portal.preview_reviewed' AND subject_id = ?`).bind(job.id).first());
+  assert.match(await (await t.oc.get(`/staff/builds/${job.id}`)).text(), /Customer requested changes/);
+  assert.match(await (await q.c.get(`/portal/projects/${pid}/revisions`)).text(), /Changes requested/);
+
+  // Unsharing ends customer access; deletion ends everyone's.
+  assert.equal((await t.oc.post(`/staff/builds/${job.id}/share-preview`, { action: "unshare" })).status, 303);
+  assert.equal((await q.c.get(`/portal/projects/${pid}/previews/${job.id}`)).status, 404);
+  await t.db.prepare(`UPDATE build_jobs SET customer_preview_shared_at = ?, preview_deleted_at = ? WHERE id = ?`).bind(new Date().toISOString(), new Date().toISOString(), job.id).run();
+  assert.match(flash(await q.c.get(`/portal/projects/${pid}/previews/${job.id}`)), /not available any more/);
+  assert.match(flash(await t.oc.get(`/staff/builds/${job.id}/preview`)), /was deleted/);
+  assert.match(await (await q.c.get(`/portal/projects/${pid}/revisions`)).text(), /No longer available/);
+
+  // A preview reported without the gate (an older runner) is never shared and is labelled public.
+  await t.db.prepare(`UPDATE build_jobs SET preview_deleted_at = NULL, preview_gated = 0, customer_preview_shared_at = NULL WHERE id = ?`).bind(job.id).run();
+  assert.match(flash(await t.oc.post(`/staff/builds/${job.id}/share-preview`, { action: "share" })), /Only a private \(gated\) preview/);
+  assert.match(await (await t.oc.get(`/staff/builds/${job.id}`)).text(), /Public \(legacy\)/);
+  const legacy = await t.oc.get(`/staff/builds/${job.id}/preview`);
+  assert.equal(legacy.headers.get("location"), "https://cm-prv-alpha-b0.acct.workers.dev");
+  // The platform without its gate secret issues no links.
+  const t2 = await app();
+  const q2 = await queuedProject(t2);
+  const j2 = (await runner(t2, "claim", { runnerId: "r1" })).json.job;
+  await runner(t2, "complete", { jobId: j2.id, leaseToken: j2.leaseToken, outcome: "ready_for_review", runCostUsd: 0, sourceCommit: "x1", previewUrl: "https://cm-prv-b-b0.acct.workers.dev", previewName: "cm-prv-b-b0", previewGated: true });
+  assert.match(flash(await t2.oc.get(`/staff/builds/${j2.id}/preview`)), /BUILD_PREVIEW_GATE_SECRET is not configured/);
+  void q2;
 });
 
 // ── Founder decision D1 (2026-10-28): owner approval of customer revisions ──

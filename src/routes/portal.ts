@@ -22,6 +22,7 @@ import { sendMail } from "../services/mailer.ts";
 import { audit } from "../services/security.ts";
 import { PACKAGES, type PackageId } from "../domain/catalog.ts";
 import * as T from "../services/customer-team.ts";
+import { customerPreviews } from "../services/builds.ts";
 
 type Org = ReturnType<typeof requireCustomerOrg>;
 
@@ -511,7 +512,17 @@ ${button("Send message")}</form>`;
     const cos = await P.listChangeOrders(ctx.db, proj.id);
     const usage = await P.revisionUsage(ctx.db, proj.id);
     const remaining = Math.max(0, proj.revision_allowance - usage.used);
-    const body = html`${pageHead("Revisions", undefined, proj.name)}${projectTabs(ctx, proj.id)}
+    const previews = await customerPreviews(ctx.db, org.organizationId, proj.id);
+    const previewSection = previews.length ? html`<section class="card" style="margin-bottom:1.5rem"><h2 class="card__title">Website previews</h2>
+<p class="muted">Previews are private: they open only from this page while you are signed in, and links expire after a few minutes.</p>
+${table(previews, [
+  { header: "Preview", cell: (v) => v.label },
+  { header: "Shared", cell: (v) => fmtDay(v.sharedAt) },
+  { header: "Your review", cell: (v) => v.review ? html`${badge(v.review === "approved" ? "approved" : "pending", v.review === "approved" ? "Ready" : "Changes requested")}${v.reviewNote ? html`<br><span class="faint">${v.reviewNote}</span>` : ""}` : badge("pending", "Awaiting your review") },
+  { header: "", cell: (v) => v.available ? html`<a class="btn btn--secondary btn--sm" href="/portal/projects/${proj.id}/previews/${v.buildId}" target="_blank" rel="noopener noreferrer">Open preview</a>
+${isAdmin(org) ? html`<form method="post" action="/portal/projects/${proj.id}/previews/${v.buildId}/review" class="stack" style="margin-top:.5rem">${csrf(ctx)}${textarea({ name: "note", label: "Comments (required when asking for changes)", maxlength: 2000, rows: 2, id: `prv-note-${v.buildId}` })}<div class="row">${button("It is ready", { name: "decision", value: "approved", size: "sm" })}${button("Request changes", { variant: "ghost", name: "decision", value: "changes_requested", size: "sm" })}</div></form>` : ""}` : html`<span class="faint">No longer available</span>` },
+])}</section>` : "";
+    const body = html`${pageHead("Revisions", undefined, proj.name)}${projectTabs(ctx, proj.id)}${previewSection}
 <div class="kpis">${kpi("Included rounds", proj.revision_allowance, packageName(proj.product_id))}${kpi("Used", usage.used)}${kpi("Remaining", remaining, remaining ? undefined : "Further changes need a change order")}</div>
 ${formErrors(errors)}
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Request a revision</h2>

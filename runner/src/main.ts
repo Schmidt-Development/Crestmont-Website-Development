@@ -85,7 +85,7 @@ export async function sweepPreviews(cfg: RunnerConfig, client: ControlPlaneClien
 
 export function capabilities(cfg: RunnerConfig): string[] {
   const base = cfg.agentProvider === "local" ? ["local-model", "container-sandbox", "zero-token-cost"] : ["agent-sdk"];
-  return [...base, "git", ...(cfg.preview ? ["preview"] : []), ...(cfg.previewDelete ? ["preview-cleanup"] : []), ...(cfg.aiDrafts.enabled && cfg.aiDrafts.provider === "local" ? ["ai-drafts"] : [])];
+  return [...base, "git", ...(cfg.preview ? ["preview"] : []), ...((cfg.preview?.gateSecret.length ?? 0) >= 32 ? ["private-preview"] : []), ...(cfg.previewDelete ? ["preview-cleanup"] : []), ...(cfg.aiDrafts.enabled && cfg.aiDrafts.provider === "local" ? ["ai-drafts"] : [])];
 }
 
 async function interruptibleSleep(ms: number, shouldStop: () => boolean): Promise<void> {
@@ -237,8 +237,9 @@ async function main(argv: string[]): Promise<number> {
   logger.info("runner started", {
     version: RUNNER_VERSION, controlPlane: new URL(cfg.controlPlaneUrl).origin, provider: cfg.agentProvider,
     paidProviderAllowed: cfg.allowPaidProvider, model: cfg.agentProvider === "local" ? cfg.local.model : "per job",
-    aiDrafts: !!ds, preview: !!cfg.preview, projectRepos: !!cfg.repo,
+    aiDrafts: !!ds, preview: !!cfg.preview, privatePreviewGate: (cfg.preview?.gateSecret.length ?? 0) >= 32, projectRepos: !!cfg.repo,
   });
+  if (cfg.preview && cfg.preview.gateSecret.length < 32) logger.warn("PREVIEW_DEPLOY_COMMAND is set but PREVIEW_GATE_SECRET is missing or shorter than 32 characters: no preview will be deployed (previews are private; Founder decision D3)");
   const onDraftError = (msg: string) => {
     health.lastDraftError = healthText(msg);
     if (/local model/i.test(msg)) recordModelError(health, msg);

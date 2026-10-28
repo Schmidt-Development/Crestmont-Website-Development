@@ -46,7 +46,11 @@ export interface RunnerConfig {
     apiBase: string;
     prefix: string;
   } | null;
-  preview: { command: string; envNames: string[]; timeoutMs: number } | null;
+  /**
+   * Preview deploy. `gateSecret` (PREVIEW_GATE_SECRET, ≥32 characters, the same value as the platform's) signs the
+   * private-preview gate (Founder decision D3); without it the runner refuses to deploy any preview.
+   */
+  preview: { command: string; envNames: string[]; timeoutMs: number; gateSecret: string } | null;
   /**
    * Preview deletion: PREVIEW_DELETE=cloudflare-api (built in: DELETE /accounts/{CLOUDFLARE_ACCOUNT_ID}/workers/scripts/{name}
    * with CLOUDFLARE_API_TOKEN, through the runner's proxy), or PREVIEW_DELETE_COMMAND (a shell command given
@@ -158,6 +162,7 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
     command: previewCommand,
     envNames: list(env.PREVIEW_DEPLOY_ENV),
     timeoutMs: num(env.PREVIEW_DEPLOY_TIMEOUT_SECONDS, 600) * 1000,
+    gateSecret: readSecret(env, "PREVIEW_GATE_SECRET"),
   } : null;
 
   if (env.PREVIEW_DELETE && env.PREVIEW_DELETE !== "cloudflare-api") throw new Error(`PREVIEW_DELETE must be "cloudflare-api" (got ${env.PREVIEW_DELETE}); for a custom command use PREVIEW_DELETE_COMMAND`);
@@ -169,6 +174,7 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
 
   for (const s of [secret, anthropicApiKey, repoToken]) registerSecret(s);
   for (const n of preview?.envNames ?? []) registerSecret(readSecret(env, n));
+  registerSecret(preview?.gateSecret ?? "");
 
   return {
     controlPlaneUrl,

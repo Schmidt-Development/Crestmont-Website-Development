@@ -400,6 +400,13 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/builds/:id/preview-retention", fields: () => ({ action: "extend" }), setup: async () => {
       await w.db.prepare(`UPDATE build_jobs SET preview_name = 'cm-prv-matrix-b0', preview_deleted_at = NULL, preview_delete_claimed_at = NULL WHERE id = ?`).bind(w.ids.buildJob).run();
     } },
+    // Founder decision D3: private previews (owner opens/shares; the project's customer opens/reviews a shared one).
+    { key: "GET /staff/builds/:id/preview", setup: async () => {
+      await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review', preview_url = 'https://cm-prv-matrix-b0.acct.workers.dev', preview_name = 'cm-prv-matrix-b0', preview_gated = 1, preview_deleted_at = NULL, customer_preview_shared_at = NULL WHERE id = ?`).bind(w.ids.buildJob).run();
+    } },
+    { key: "POST /staff/builds/:id/share-preview", fields: () => ({ action: "share" }) },
+    { key: "GET /portal/projects/:id/previews/:buildId", as: custA, path: () => `/portal/projects/${a.ids.project}/previews/${w.ids.buildJob}` },
+    { key: "POST /portal/projects/:id/previews/:buildId/review", as: custA, path: () => `/portal/projects/${a.ids.project}/previews/${w.ids.buildJob}/review`, fields: () => ({ decision: "changes_requested", note: "Please use the new logo." }) },
     { key: "POST /staff/builds/:id/delete-preview", setup: async () => {
       await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review', preview_name = 'cm-prv-matrix-b0', preview_deleted_at = NULL, preview_delete_requested_at = NULL, source_commit = 'abc123', checkpoint_key = 'builds/matrix/ckpt-1.tgz' WHERE id = ?`).bind(w.ids.buildJob).run();
     } },

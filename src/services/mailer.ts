@@ -53,6 +53,9 @@ export interface TemplateData {
     | ProjectBase & { event: "message_from_team"; preview: string }
     | ProjectBase & { event: "message_from_customer"; preview: string }
     | ProjectBase & { event: "inactivity_escalation"; days: number; stage: string }
+    | ProjectBase & { event: "preview_shared" }
+    | ProjectBase & { event: "preview_reviewed"; decision: "approved" | "changes_requested"; note: string | null }
+    | ProjectBase & { event: "site_released"; version: number; siteUrl: string | null }
     | ProjectBase & { event: "inactivity_paused"; days: number }
     | { event: "general_message_from_team"; preview: string; url: string }
     | { event: "general_message_from_customer"; organizationName: string; preview: string; url: string };
@@ -179,6 +182,13 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
         case "inactivity_escalation": return { subject: "Inactive customer project needs follow-up", heading: "Inactive customer project needs follow-up",
           paragraphs: [P(d), `${d.projectName} has had no customer activity for ${d.days} days (status: ${stage(d.stage)}). Please contact the customer.`], cta: staff };
         case "inactivity_paused": return { subject: "Project paused for inactivity", heading: "Project paused for inactivity", paragraphs: [P(d), `${d.projectName} was paused after ${d.days} days without customer activity.`], cta: staff };
+        case "preview_shared": return { subject: "A private preview of your website is ready", heading: "A private preview of your website is ready",
+          paragraphs: [P(d), "The preview is private: open it from your portal while signed in. Tell us there whether it is ready or what should change.", "A private preview of your website is ready for your review in your portal."], cta: portal };
+        case "preview_reviewed": return { subject: d.decision === "approved" ? "Customer approved the website preview" : "Customer requested changes to the website preview",
+          heading: d.decision === "approved" ? "Customer approved the website preview" : "Customer requested changes to the website preview",
+          paragraphs: [P(d), `${d.projectName}: the customer ${d.decision === "approved" ? "approved the preview" : "requested changes"}${d.note ? `: ${d.note}` : "."}`], cta: staff };
+        case "site_released": return { subject: "Your website update is live", heading: "Your website update is live",
+          paragraphs: [P(d), `Version ${d.version} of your website was published and verified${d.siteUrl && /^https:\/\/[A-Za-z0-9.-]+(?:\/[^\s<>"']*)?$/.test(d.siteUrl) ? ` at ${d.siteUrl}` : ""}.`], cta: portal };
         case "general_message_from_team": return { subject: "New message from Crestmont", heading: "New message from Crestmont", paragraphs: [d.preview], cta: portal };
         case "general_message_from_customer": return { subject: `New general message from ${d.organizationName}`, heading: `New general message from ${d.organizationName}`, paragraphs: [d.preview], cta: { label: "Open conversation", url: d.url } };
       }
@@ -193,6 +203,9 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
       { ...sampleProject, event: "message_from_customer", preview: "Here are the photos for the About page." },
       { ...sampleProject, event: "inactivity_escalation", days: 21, stage: "customer_review" },
       { ...sampleProject, event: "inactivity_paused", days: 30 },
+      { ...sampleProject, event: "preview_shared" },
+      { ...sampleProject, event: "preview_reviewed", decision: "changes_requested", note: "Please use our new logo." },
+      { ...sampleProject, event: "site_released", version: 2, siteUrl: "https://www.example.com" },
       { event: "general_message_from_team", preview: "Thanks for your question about hosting.", url: "https://example.com/portal/messages/general" },
       { event: "general_message_from_customer", organizationName: "Sample Bakery", preview: "Do you also build online stores?", url: "https://example.com/staff/conversations/org_sample" },
     ],

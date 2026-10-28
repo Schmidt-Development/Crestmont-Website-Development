@@ -17,7 +17,8 @@ import { audit } from "./security.ts";
 import { redact } from "./monitoring.ts";
 import { getOnboarding, allFields, isVisible, type Answers } from "./onboarding.ts";
 import { sweepAiLeases } from "./ai-runner.ts";
-import { notifyCustomer, type MailCtx } from "./notifications.ts";
+import { notifyCustomer, notifyProjectTeam, type MailCtx } from "./notifications.ts";
+import { previewSignInUrl, safePreviewPath } from "../lib/preview-token.ts";
 
 const MICRO = 1_000_000;
 export const usdToMicro = (usd: unknown): number => {
@@ -570,6 +571,8 @@ export async function completeJob(db: Db, b: Record<string, unknown>, notify?: (
     preview_url: outcome === "ready_for_review" ? (previewRejected ? null : reportedPreview) : (previewRejected ? null : reportedPreview) ?? job.preview_url,
     // The preview Worker's name, kept so the runner can delete it later (only for a preview that was recorded).
     preview_name: reportedPreview && !previewRejected ? okPreviewName(b.previewName) : outcome === "ready_for_review" ? null : job.preview_name,
+    // Founder decision D3: only a preview the runner reports as deployed behind the private-preview gate is shareable.
+    preview_gated: reportedPreview && !previewRejected ? (b.previewGated === true && okPreviewName(b.previewName) ? 1 : 0) : outcome === "ready_for_review" ? 0 : job.preview_gated,
     report_md: typeof b.report === "string" ? sanitize(b.report, 50_000) : job.report_md,
   };
   const err = typeof b.error === "string" ? sanitize(b.error, 2000) : null;
@@ -1081,6 +1084,90 @@ export async function setPreviewRetention(c: OwnerCtx, id: string, action: strin
  * Previews the runner should delete now: requested by the owner or by the retention sweep (never decided here).
  * Each is handed out once per hour until the runner reports back, so a failed deletion is retried safely.
  */
+// ── Private previews (Founder decision D3) ──
+// Previews are deployed behind the runner's gate; the only way in is a 5-minute sign-in link signed here after the
+// platform has checked who is asking. Staff with builds.read can open any preview; a customer only a gated, shared,
+// undeleted preview of their own organization's project.
+
+export type PreviewAccess = { gated: boolean; available: boolean; reason: string | null };
+
+export function previewAccess(j: Pick<BuildJob, "preview_url" | "preview_name" | "preview_deleted_at" | "preview_gated">, secret: string | undefined): PreviewAccess {
+  if (!j.preview_url || !j.preview_name) return { gated: false, available: false, reason: "This build has no preview." };
+  if (j.preview_deleted_at) return { gated: !!j.preview_gated, available: false, reason: "This preview was deleted." };
+  if (!j.preview_gated) return { gated: false, available: true, reason: "Deployed before private previews: it is public. Delete it or run a new build." };
+  if (!secret || secret.length < 32) return { gated: true, available: false, reason: "BUILD_PREVIEW_GATE_SECRET is not configured on the platform, so no sign-in link can be issued." };
+  return { gated: true, available: true, reason: null };
+}
+
+/** Staff: a sign-in link for a build's preview (audited). An ungated legacy preview is opened directly. */
+export async function staffPreviewLink(c: OwnerCtx, secret: string | undefined, id: string, next?: string): Promise<string> {
+  const j = await ownerJob(c, id);
+  const a = previewAccess(j, secret);
+  if (!a.available) throw new HttpError(409, a.reason ?? "Preview unavailable.");
+  await audit(c.db, { actorUserId: c.userId, action: "builds.preview_opened", subjectType: "build_job", subjectId: j.id, organizationId: j.organization_id, details: { name: j.preview_name, gated: a.gated } });
+  return a.gated ? previewSignInUrl(secret!, j.preview_name!, j.preview_url!, { next: safePreviewPath(next), audience: "owner" }) : j.preview_url!;
+}
+
+/** Owner: share (or stop sharing) a gated preview with the project's customer, who can then open and review it. */
+export async function sharePreview(c: OwnerCtx & { mail?: MailCtx }, id: string, share: boolean) {
+  const j = await ownerJob(c, id);
+  if (!share) {
+    if (!j.customer_preview_shared_at) throw new HttpError(409, "This preview is not shared.");
+    await c.db.prepare(`UPDATE build_jobs SET customer_preview_shared_at = NULL, customer_preview_shared_by = NULL, updated_at = ? WHERE id = ?`).bind(nowIso(), id).run();
+  } else {
+    if (!j.preview_gated || !j.preview_name || !j.preview_url || j.preview_deleted_at) throw new HttpError(409, "Only a private (gated) preview that still exists can be shared with the customer.");
+    if (!["ready_for_review", "approved"].includes(j.state)) throw new HttpError(409, "Share a preview once the build is in owner review or approved.");
+    if (j.customer_preview_shared_at) throw new HttpError(409, "This preview is already shared with the customer.");
+    await c.db.prepare(`UPDATE build_jobs SET customer_preview_shared_at = ?, customer_preview_shared_by = ?, customer_review = NULL, customer_reviewed_by = NULL, customer_reviewed_at = NULL, customer_review_note = NULL, updated_at = ? WHERE id = ?`)
+      .bind(nowIso(), c.userId, nowIso(), id).run();
+  }
+  await event(c.db, id, "preview", share ? "Preview shared with the customer" : "Preview no longer shared with the customer", userActor(c));
+  await audit(c.db, { actorUserId: c.userId, action: "builds.preview_shared", subjectType: "build_job", subjectId: id, organizationId: j.organization_id, details: { shared: share } });
+  if (share && c.mail) await notifyCustomer(c.mail, j.project_id, { kind: "project", mail: { template: "project_update", data: { event: "preview_shared" } }, path: `/portal/projects/${j.project_id}/revisions`, key: `prvshare:${id}` });
+}
+
+export interface CustomerPreview { buildId: string; label: string; sharedAt: string; review: "approved" | "changes_requested" | null; reviewNote: string | null; reviewedAt: string | null; available: boolean }
+
+/** Previews shared with a customer organization's project (tenant-scoped by organization and project). */
+export async function customerPreviews(db: Db, organizationId: string, projectId: string): Promise<CustomerPreview[]> {
+  const rows = (await db.prepare(`SELECT * FROM build_jobs WHERE organization_id = ? AND project_id = ? AND customer_preview_shared_at IS NOT NULL ORDER BY created_at DESC LIMIT 20`)
+    .bind(organizationId, projectId).all<BuildJob>()).results;
+  return rows.map((j) => ({
+    buildId: j.id, label: j.kind === "revision" ? `Revision ${j.revision}` : "First build", sharedAt: j.customer_preview_shared_at!,
+    review: j.customer_review, reviewNote: j.customer_review_note, reviewedAt: j.customer_reviewed_at,
+    available: !!j.preview_gated && !!j.preview_url && !!j.preview_name && !j.preview_deleted_at,
+  }));
+}
+
+async function customerJob(db: Db, organizationId: string, projectId: string, buildId: string): Promise<BuildJob> {
+  const j = await db.prepare(`SELECT * FROM build_jobs WHERE id = ? AND organization_id = ? AND project_id = ? AND customer_preview_shared_at IS NOT NULL`).bind(buildId, organizationId, projectId).first<BuildJob>();
+  if (!j) throw new HttpError(404, "Preview not found");
+  return j;
+}
+
+/** Customer: a sign-in link for a preview shared with their own project (audited). Never an ungated preview. */
+export async function customerPreviewLink(db: Db, secret: string | undefined, u: { organizationId: string; userId: string }, projectId: string, buildId: string): Promise<string> {
+  const j = await customerJob(db, u.organizationId, projectId, buildId);
+  const a = previewAccess(j, secret);
+  if (!a.available || !a.gated) throw new HttpError(409, "This preview is not available any more. Contact your project team.");
+  await audit(db, { actorUserId: u.userId, action: "portal.preview_opened", subjectType: "build_job", subjectId: j.id, organizationId: j.organization_id, details: { name: j.preview_name } });
+  return previewSignInUrl(secret!, j.preview_name!, j.preview_url!, { audience: "customer" });
+}
+
+/** Customer review of a shared preview (step 4 of the delivery workflow). Account administrators only. */
+export async function customerReviewPreview(c: { db: Db; mail?: MailCtx }, u: { organizationId: string; userId: string }, projectId: string, buildId: string, decision: string, note: string) {
+  if (decision !== "approved" && decision !== "changes_requested") throw new HttpError(422, "Choose whether the preview is ready or needs changes.");
+  const text = note.trim().slice(0, 2000);
+  if (decision === "changes_requested" && text.length < 3) throw new HttpError(422, "Describe what should change.");
+  const j = await customerJob(c.db, u.organizationId, projectId, buildId);
+  if (j.preview_deleted_at || !j.preview_gated) throw new HttpError(409, "This preview is not available any more.");
+  await c.db.prepare(`UPDATE build_jobs SET customer_review = ?, customer_reviewed_by = ?, customer_reviewed_at = ?, customer_review_note = ?, updated_at = ? WHERE id = ?`)
+    .bind(decision, u.userId, nowIso(), text || null, nowIso(), j.id).run();
+  await event(c.db, j.id, "preview", decision === "approved" ? "Customer approved the preview" : "Customer requested changes to the preview", { kind: "user", userId: u.userId }, { data: { note: text || null } });
+  await audit(c.db, { actorUserId: u.userId, action: "portal.preview_reviewed", subjectType: "build_job", subjectId: j.id, organizationId: j.organization_id, details: { decision } });
+  if (c.mail) await notifyProjectTeam(c.mail, j.project_id, { kind: "project", mail: { template: "project_update", data: { event: "preview_reviewed", decision, note: text || null } }, path: `/staff/builds/${j.id}`, key: `prvrev:${j.id}:${decision}:${Date.now()}`, exceptUserId: u.userId });
+}
+
 export async function claimExpiredPreviews(db: Db, now = new Date()) {
   const at = now.toISOString();
   const reclaimBefore = new Date(now.getTime() - 3600_000).toISOString();
