@@ -5,12 +5,16 @@
 //  • a demo iframe is created only for the active project once the explorer is near the viewport, and stays
 //    mounted afterwards (its page and scroll position survive project switches); Reset reloads its start state;
 //  • frames are shown only after the demo announces itself with an origin-checked postMessage; otherwise the
-//    genuine poster stays and an honest status explains what happened.
+//    genuine poster stays and an honest status explains what happened;
+//  • each demo renders at a real device width (desktop 1440, tablet 820, phone 390 CSS px) and the whole viewport is
+//    scaled down to fit the frame — the full width is always visible and the site scrolls natively to its end. The
+//    scale never exceeds 1, and the viewport height follows the frame, so nothing is cropped horizontally.
 (() => {
   const roots = document.querySelectorAll("[data-pfx]");
   if (!roots.length) return;
   const reduce = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : { matches: false };
   const READY_TIMEOUT = 20000;
+  const DEVICES = { desktop: { w: 1440, pad: 0, label: "Desktop" }, tablet: { w: 820, pad: 14, label: "Tablet" }, mobile: { w: 390, pad: 14, label: "Phone" } };
 
   roots.forEach((root) => {
     const slides = [...root.querySelectorAll("[data-pfx-slide]")];
@@ -27,7 +31,32 @@
     const frames = new Map(); // slide index → { f, ready, timer }
     let cur = 0, near = false;
 
-    root.dataset.mode = "desktop";
+    // Fit: one measurement per explorer (every slide has the same frame), applied as CSS variables.
+    const screen0 = slides[0] && slides[0].querySelector("[data-pfx-screen]");
+    const fit = () => {
+      if (!screen0) return;
+      const d = DEVICES[root.dataset.mode] || DEVICES.desktop;
+      const W = screen0.clientWidth, H = screen0.clientHeight;
+      if (!W || !H) return;
+      const s = Math.min(1, (W - 2 * d.pad) / d.w);
+      const stW = Math.round(d.w * s), stH = Math.max(1, H - 2 * d.pad);
+      root.style.setProperty("--pfx-s", s.toFixed(4));
+      root.style.setProperty("--pfx-dw", d.w + "px");
+      root.style.setProperty("--pfx-stw", stW + "px");
+      root.style.setProperty("--pfx-sth", stH + "px");
+      root.style.setProperty("--pfx-fh", Math.round(stH / s) + "px");
+      root.style.setProperty("--pfx-pad", d.pad + "px");
+      root.dataset.scale = s < 0.6 ? "small" : "ok";
+    };
+    // Default device follows the space available (a phone gets the phone layout, not a shrunken desktop).
+    const autoMode = () => { const W = screen0 ? screen0.clientWidth : innerWidth; return W >= 960 ? "desktop" : W >= 600 ? "tablet" : "mobile"; };
+    const setMode = (m, announce) => {
+      root.dataset.mode = m;
+      modeBtns.forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.pfxMode === m)));
+      fit();
+      if (announce && live) live.textContent = `${DEVICES[m].label} viewport: the website is shown at ${DEVICES[m].w} pixels wide${Number(getComputedStyle(root).getPropertyValue("--pfx-s")) < 1 ? ", scaled to fit" : ""}.`;
+    };
+    let userMode = false;
     const name = (i) => slides[(i + n) % n].dataset.name;
     const status = (s, text, linkUrl) => {
       const el = s.querySelector("[data-pfx-status]");
@@ -57,7 +86,7 @@
       frames.set(i, rec);
       arm(i, rec, url);
       f.src = url;
-      s.querySelector("[data-pfx-screen]").append(f);
+      s.querySelector("[data-pfx-stage]").append(f);
     }
     function arm(i, rec, url) {
       const s = slides[i];
@@ -100,11 +129,7 @@
     prev && prev.addEventListener("click", () => go(cur - 1));
     next && next.addEventListener("click", () => go(cur + 1));
     pages.forEach((b) => b.addEventListener("click", () => go(Number(b.dataset.pfxGo))));
-    modeBtns.forEach((b) => b.addEventListener("click", () => {
-      root.dataset.mode = b.dataset.pfxMode;
-      modeBtns.forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
-      if (live) live.textContent = `${b.dataset.pfxMode === "mobile" ? "Phone" : "Desktop"} viewport.`;
-    }));
+    modeBtns.forEach((b) => b.addEventListener("click", () => { userMode = true; setMode(b.dataset.pfxMode, true); }));
     resetBtn && resetBtn.addEventListener("click", () => {
       const s = slides[cur], rec = frames.get(cur);
       if (!s.dataset.demoUrl) { if (live) live.textContent = `${name(cur)} has no interactive demo to reset.`; return; }
@@ -130,11 +155,19 @@
       document.documentElement.classList.toggle("pfx-lock", on);
       if (!on) { spacer && spacer.remove(); spacer = null; window.scrollTo({ top: savedY, behavior: "instant" }); }
       if (expandBtn) { expandBtn.setAttribute("aria-pressed", String(on)); expandBtn.textContent = on ? "Close expanded view" : "Expand"; }
+      // A larger frame: re-pick the device unless the visitor chose one, then refit.
+      if (!userMode) setMode(autoMode(), false); else fit();
+      if (on && live) live.textContent = `Expanded view of ${name(cur)}. Press Escape or Close expanded view to return.`;
     };
     expandBtn && expandBtn.addEventListener("click", () => setExpanded(!root.classList.contains("pfx--expanded")));
     document.addEventListener("keydown", (e) => { if (e.key === "Escape" && root.classList.contains("pfx--expanded")) { setExpanded(false); expandBtn && expandBtn.focus({ preventScroll: true }); } });
 
     if (reduce.matches) track.style.transition = "none";
+    setMode(autoMode(), false);
+    if ("ResizeObserver" in window && screen0) {
+      let lastW = screen0.clientWidth;
+      new ResizeObserver(() => { const W = screen0.clientWidth; if (!userMode && Math.abs(W - lastW) > 40) setMode(autoMode(), false); else fit(); lastW = W; }).observe(screen0);
+    } else window.addEventListener("resize", fit);
     go(0, false);
     // Lazy: create the active demo only when the explorer approaches the viewport.
     if ("IntersectionObserver" in window) {

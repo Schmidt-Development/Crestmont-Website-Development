@@ -59,7 +59,7 @@ test("[PORT-004] [PORT-007] portfolio setup: four founder-owned projects, factua
     for (const re of FABRICATION) assert.doesNotMatch(text, re, `${p.slug}: no fabrication pattern`);
     assert.doesNotMatch(p.description, /\b\d+\s+(cars|vehicles)\b|revenue|\$\d/i, `${p.slug}: no metrics or prices`);
     assert.notEqual(new URL(p.demoUrl).host, new URL(p.liveUrl).host, `${p.slug}: demo is a separate deployment`);
-    for (const f of [p.posterDesktop, p.posterMobile]) assert.ok(existsSync(join("public", f)), `${f} is bundled`);
+    for (const f of [p.posterDesktop, p.posterTablet, p.posterMobile]) assert.ok(existsSync(join("public", f)), `${f} is bundled`);
   }
   const sql = setupSql(["--verified", "glassly-auto-glass"]);
   assert.match(sql, /ON CONFLICT\(id\) DO UPDATE/);
@@ -89,6 +89,11 @@ test("[PORT-006] [PORT-007] explorer: published records drive one shared compone
   assert.match(html, /aria-label="Next project: Glassly Auto Glass"/);
   assert.match(html, /Interactive demo — no real transactions/);
   assert.match(html, /<script src="\/assets\/portfolio\.js" defer>/);
+  // Framing: every slide has a device stage with the genuine desktop, tablet and phone captures, and the visitor can
+  // pick the device viewport (desktop 1440 / tablet 820 / phone 390 CSS px, scaled to fit — never cropped).
+  assert.equal((html.match(/data-pfx-stage/g) ?? []).length, 4);
+  for (const p of PORTFOLIO_PROJECTS) for (const f of [p.posterDesktop, p.posterTablet, p.posterMobile]) assert.ok(html.includes(`src="${f}"`), `${f} rendered`);
+  for (const m of ["desktop", "tablet", "mobile"]) assert.match(html, new RegExp(`data-pfx-mode="${m}"`));
   for (const p of PORTFOLIO_PROJECTS) assert.ok(html.includes(`href="${p.liveUrl}" target="_blank" rel="noopener noreferrer">Visit live website`), "separate live-site link");
   const csp = res.headers.get("content-security-policy")!;
   for (const o of ORIGINS.split(" ")) assert.ok(csp.includes(o), `frame-src allows ${o}`);

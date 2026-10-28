@@ -18,7 +18,7 @@ export interface PortfolioProject {
   /** Isolated demonstration deployment (never the production site) — migration 0037. */
   demo_url: string | null; demo_status: "none" | "ready" | "unavailable"; demo_verified_at: string | null; demo_verified_by: string | null; demo_revision: string | null;
   /** Genuine screenshots bundled under /assets/portfolio/ (survive preview database rebuilds; no R2 needed). */
-  poster_desktop_asset: string | null; poster_mobile_asset: string | null;
+  poster_desktop_asset: string | null; poster_mobile_asset: string | null; poster_tablet_asset: string | null;
 }
 export interface Testimonial { id: string; portfolio_project_id: string | null; author_name: string; body: string; verification_evidence: string; verified_by: string; published: number; created_at: string | null }
 
@@ -74,8 +74,8 @@ export function demoState(p: Pick<PortfolioProject, "demo_url" | "demo_status" |
   return { kind: "embed", url: p.demo_url, origin };
 }
 
-export interface DemoInput { demo_url: string; demo_status: string; demo_revision: string; verified_on: string; poster_desktop_asset: string; poster_mobile_asset: string }
-export function validateDemo(input: DemoInput, liveUrl: string, approved: Set<string>): { values: { demo_url: string | null; demo_status: "none" | "ready" | "unavailable"; demo_revision: string | null; verified_on: string | null; poster_desktop_asset: string | null; poster_mobile_asset: string | null }; issues: string[] } {
+export interface DemoInput { demo_url: string; demo_status: string; demo_revision: string; verified_on: string; poster_desktop_asset: string; poster_mobile_asset: string; poster_tablet_asset?: string }
+export function validateDemo(input: DemoInput, liveUrl: string, approved: Set<string>): { values: { demo_url: string | null; demo_status: "none" | "ready" | "unavailable"; demo_revision: string | null; verified_on: string | null; poster_desktop_asset: string | null; poster_mobile_asset: string | null; poster_tablet_asset: string | null }; issues: string[] } {
   const t = (x: string | undefined) => (x ?? "").trim();
   const issues: string[] = [];
   const status = t(input.demo_status) || "none";
@@ -93,9 +93,9 @@ export function validateDemo(input: DemoInput, liveUrl: string, approved: Set<st
   const verified = t(input.verified_on) || null;
   if (verified && (!/^\d{4}-\d{2}-\d{2}$/.test(verified) || Number.isNaN(Date.parse(verified)) || Date.parse(verified) > Date.now() + 86_400_000)) issues.push("Demo verification date must be a valid date, not in the future");
   if (status === "ready" && !verified) issues.push("Record the date the demo was verified before marking it ready");
-  const pd = t(input.poster_desktop_asset) || null, pm = t(input.poster_mobile_asset) || null;
-  if ((pd && !POSTER_RE.test(pd)) || (pm && !POSTER_RE.test(pm))) issues.push("Bundled posters must be /assets/portfolio/<name>.webp");
-  return { values: { demo_url: url, demo_status: status as "none" | "ready" | "unavailable", demo_revision: revision, verified_on: verified, poster_desktop_asset: pd, poster_mobile_asset: pm }, issues };
+  const pd = t(input.poster_desktop_asset) || null, pm = t(input.poster_mobile_asset) || null, pt = t(input.poster_tablet_asset) || null;
+  if ([pd, pm, pt].some((x) => x && !POSTER_RE.test(x))) issues.push("Bundled posters must be /assets/portfolio/<name>.webp");
+  return { values: { demo_url: url, demo_status: status as "none" | "ready" | "unavailable", demo_revision: revision, verified_on: verified, poster_desktop_asset: pd, poster_mobile_asset: pm, poster_tablet_asset: pt }, issues };
 }
 
 export async function setDemo(db: Db, actor: Actor, id: string, input: DemoInput, approved: Set<string>, ip?: string | null) {
@@ -111,9 +111,9 @@ export async function setDemo(db: Db, actor: Actor, id: string, input: DemoInput
   const status = v.demo_status === "ready" && !verifiedAt ? "unavailable" : v.demo_status;
   await db.batch([
     db.prepare(`UPDATE portfolio_projects SET demo_url = ?, demo_status = ?, demo_revision = ?, demo_verified_at = ?, demo_verified_by = CASE WHEN ? THEN ? ELSE demo_verified_by END,
-      poster_desktop_asset = ?, poster_mobile_asset = ?, updated_at = ? WHERE id = ?`)
-      .bind(v.demo_url, status, v.demo_revision, verifiedAt, v.verified_on ? 1 : 0, actor.userId ?? null, v.poster_desktop_asset, v.poster_mobile_asset, nowIso(), id),
-    auditStmt(db, actor, "portfolio.demo_updated", id, { demoUrl: v.demo_url, status, revision: v.demo_revision, verifiedOn: v.verified_on, posters: [v.poster_desktop_asset, v.poster_mobile_asset] }, ip),
+      poster_desktop_asset = ?, poster_mobile_asset = ?, poster_tablet_asset = ?, updated_at = ? WHERE id = ?`)
+      .bind(v.demo_url, status, v.demo_revision, verifiedAt, v.verified_on ? 1 : 0, actor.userId ?? null, v.poster_desktop_asset, v.poster_mobile_asset, v.poster_tablet_asset, nowIso(), id),
+    auditStmt(db, actor, "portfolio.demo_updated", id, { demoUrl: v.demo_url, status, revision: v.demo_revision, verifiedOn: v.verified_on, posters: [v.poster_desktop_asset, v.poster_tablet_asset, v.poster_mobile_asset] }, ip),
   ]);
 }
 

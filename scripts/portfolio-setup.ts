@@ -36,7 +36,7 @@ for (const p of PORTFOLIO_PROJECTS) {
   const { values, issues } = validateProject({ name: p.name, slug: p.slug, industry: p.industry, live_url: p.liveUrl, description: p.description, features: p.features.join("\n"), technology_summary: p.technology, relationship: FOUNDER_AUTHORIZATION.relationship });
   const demoUrl = overrides[p.slug] ?? p.demoUrl;
   const isVerified = verified.has(p.slug);
-  const demo = validateDemo({ demo_url: demoUrl, demo_status: isVerified ? "ready" : "unavailable", demo_revision: p.demoRevision, verified_on: isVerified ? verifiedOn : "", poster_desktop_asset: p.posterDesktop, poster_mobile_asset: p.posterMobile }, p.liveUrl, approved);
+  const demo = validateDemo({ demo_url: demoUrl, demo_status: isVerified ? "ready" : "unavailable", demo_revision: p.demoRevision, verified_on: isVerified ? verifiedOn : "", poster_desktop_asset: p.posterDesktop, poster_mobile_asset: p.posterMobile, poster_tablet_asset: p.posterTablet }, p.liveUrl, approved);
   if (issues.length || demo.issues.length) throw new Error(`${p.slug}: ${[...issues, ...demo.issues].join("; ")}`);
   const documentedAt = `${FOUNDER_AUTHORIZATION.documentedOn}T00:00:00.000Z`;
   const linkAt = `${p.linkVerifiedOn}T00:00:00.000Z`;
@@ -44,14 +44,14 @@ for (const p of PORTFOLIO_PROJECTS) {
   const row = { relationship: FOUNDER_AUTHORIZATION.relationship, relationship_documented_at: documentedAt, link_verified_at: linkAt, desktop_screenshot_file_id: null, mobile_screenshot_file_id: null, poster_desktop_asset: p.posterDesktop, poster_mobile_asset: p.posterMobile } as unknown as PortfolioProject;
   const publish = publishBlockers(row).length === 0;
   sql.push(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, technology_summary, position, published, updated_at, created_at,
-  relationship_documented_at, relationship_documented_by, relationship_evidence, link_verified_at, link_verified_by, published_at, demo_url, demo_status, demo_verified_at, demo_verified_by, demo_revision, poster_desktop_asset, poster_mobile_asset)
+  relationship_documented_at, relationship_documented_by, relationship_evidence, link_verified_at, link_verified_by, published_at, demo_url, demo_status, demo_verified_at, demo_verified_by, demo_revision, poster_desktop_asset, poster_mobile_asset, poster_tablet_asset)
 VALUES (${[p.id, values.slug, values.name, values.industry, values.live_url, FOUNDER_AUTHORIZATION.relationship, values.description, values.featuresJson, values.technology_summary || null, p.position, publish ? 1 : 0, now, now,
-    documentedAt, null, FOUNDER_AUTHORIZATION.evidence, linkAt, null, publish ? now : null, demo.values.demo_url, demo.values.demo_status, demoAt, null, demo.values.demo_revision, p.posterDesktop, p.posterMobile].map(q).join(", ")})
+    documentedAt, null, FOUNDER_AUTHORIZATION.evidence, linkAt, null, publish ? now : null, demo.values.demo_url, demo.values.demo_status, demoAt, null, demo.values.demo_revision, p.posterDesktop, p.posterMobile, p.posterTablet].map(q).join(", ")})
 ON CONFLICT(id) DO UPDATE SET slug = excluded.slug, name = excluded.name, industry = excluded.industry, live_url = excluded.live_url, relationship = excluded.relationship, description = excluded.description,
   verified_features_json = excluded.verified_features_json, technology_summary = excluded.technology_summary, position = excluded.position, published = excluded.published, updated_at = excluded.updated_at,
   relationship_documented_at = excluded.relationship_documented_at, relationship_evidence = excluded.relationship_evidence, link_verified_at = excluded.link_verified_at,
   published_at = COALESCE(portfolio_projects.published_at, excluded.published_at), demo_url = excluded.demo_url, demo_status = excluded.demo_status, demo_verified_at = excluded.demo_verified_at,
-  demo_revision = excluded.demo_revision, poster_desktop_asset = excluded.poster_desktop_asset, poster_mobile_asset = excluded.poster_mobile_asset;`);
+  demo_revision = excluded.demo_revision, poster_desktop_asset = excluded.poster_desktop_asset, poster_mobile_asset = excluded.poster_mobile_asset, poster_tablet_asset = excluded.poster_tablet_asset;`);
   audit(p.id, "portfolio.relationship_documented", { relationship: FOUNDER_AUTHORIZATION.relationship, source: "founder-authorization-2026-10-27" });
   audit(p.id, "portfolio.link_verified", { date: p.linkVerifiedOn, url: p.liveUrl });
   audit(p.id, "portfolio.demo_updated", { demoUrl: demo.values.demo_url, status: demo.values.demo_status, revision: p.demoRevision, verifiedOn: isVerified ? verifiedOn : null });

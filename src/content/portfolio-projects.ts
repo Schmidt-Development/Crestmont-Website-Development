@@ -15,7 +15,7 @@ export interface PortfolioSeed {
   description: string; features: string[]; technology: string;
   /** Isolated demo deployment (never production) and the source revision it is built from. */
   demoUrl: string; demoRevision: string; demoRepoBranch: string;
-  posterDesktop: string; posterMobile: string;
+  posterDesktop: string; posterTablet: string; posterMobile: string;
   /** Date the live link was opened and confirmed to load the correct site. */
   linkVerifiedOn: string;
 }
@@ -28,7 +28,7 @@ export const PORTFOLIO_PROJECTS: PortfolioSeed[] = [
     features: ["Vehicle showcase with Turo booking links", "Partner application with call scheduling", "Agreement preparation and e-signing", "Branded transactional email with delivery tracking", "Private owner portal for applications and contracts"],
     technology: "Cloudflare Worker with D1, scheduled jobs, server-rendered pages and branded transactional email.",
     demoUrl: "https://lansing-car-rentals-portfolio-demo.partners-df4.workers.dev/", demoRevision: "lansing-car-rentals@e11bf33", demoRepoBranch: "Schmidt-Development/lansing-car-rentals:crestmont/portfolio-demo-rentals",
-    posterDesktop: "/assets/portfolio/lansing-car-rentals-desktop.webp", posterMobile: "/assets/portfolio/lansing-car-rentals-mobile.webp", linkVerifiedOn: "2026-10-27",
+    posterDesktop: "/assets/portfolio/lansing-car-rentals-desktop.webp", posterTablet: "/assets/portfolio/lansing-car-rentals-tablet.webp", posterMobile: "/assets/portfolio/lansing-car-rentals-mobile.webp", linkVerifiedOn: "2026-10-27",
   },
   {
     id: "pf_glassly_auto_glass", slug: "glassly-auto-glass", name: "Glassly Auto Glass", industry: "Auto glass", position: 2,
@@ -37,7 +37,7 @@ export const PORTFOLIO_PROJECTS: PortfolioSeed[] = [
     features: ["Scroll-driven hero sequence for desktop and mobile", "VIN decoding through NHTSA's public decoder", "Instant or manual quote outcome with confidence checks", "Server-side validation of every submitted field"],
     technology: "Static front end with a Node.js serverless quote API.",
     demoUrl: "https://glassly-portfolio-demo.partners-df4.workers.dev/", demoRevision: "glassly@dadad20", demoRepoBranch: "Schmidt-Development/glassly:crestmont/portfolio-demo",
-    posterDesktop: "/assets/portfolio/glassly-auto-glass-desktop.webp", posterMobile: "/assets/portfolio/glassly-auto-glass-mobile.webp", linkVerifiedOn: "2026-10-27",
+    posterDesktop: "/assets/portfolio/glassly-auto-glass-desktop.webp", posterTablet: "/assets/portfolio/glassly-auto-glass-tablet.webp", posterMobile: "/assets/portfolio/glassly-auto-glass-mobile.webp", linkVerifiedOn: "2026-10-27",
   },
   {
     id: "pf_lcr_mentorship", slug: "lansing-car-rentals-mentorship", name: "Lansing Car Rentals Mentorship", industry: "Business mentorship", position: 3,
@@ -46,7 +46,7 @@ export const PORTFOLIO_PROJECTS: PortfolioSeed[] = [
     features: ["Time selection with lead-time and horizon rules", "Hosted checkout with verified-payment confirmation", "Double-booking protection with temporary holds", "Customer confirmation and internal notification emails", "Owner calendar, availability blocks and lead sheet"],
     technology: "Cloudflare Pages Functions with D1; Stripe and Resend through their REST APIs.",
     demoUrl: "https://lcr-mentorship-portfolio-demo.partners-df4.workers.dev/", demoRevision: "lansing-car-rentals@b3e0b17", demoRepoBranch: "Schmidt-Development/lansing-car-rentals:crestmont/portfolio-demo-mentorship",
-    posterDesktop: "/assets/portfolio/lansing-car-rentals-mentorship-desktop.webp", posterMobile: "/assets/portfolio/lansing-car-rentals-mentorship-mobile.webp", linkVerifiedOn: "2026-10-27",
+    posterDesktop: "/assets/portfolio/lansing-car-rentals-mentorship-desktop.webp", posterTablet: "/assets/portfolio/lansing-car-rentals-mentorship-tablet.webp", posterMobile: "/assets/portfolio/lansing-car-rentals-mentorship-mobile.webp", linkVerifiedOn: "2026-10-27",
   },
   {
     id: "pf_better_lansing_mechanics", slug: "better-lansing-mechanics", name: "Better Lansing Mechanics", industry: "Auto repair", position: 4,
@@ -55,6 +55,6 @@ export const PORTFOLIO_PROJECTS: PortfolioSeed[] = [
     features: ["Service pages for each repair category", "English and Spanish pages", "Multi-step appointment request with booking payment", "Callback and fleet enquiry forms", "Customer portal for estimates and repair status"],
     technology: "Cloudflare Workers with D1 and R2; server-rendered pages with a React customer portal.",
     demoUrl: "https://better-lansing-mechanics-portfolio-demo.partners-df4.workers.dev/", demoRevision: "better-lansing-mechanics@59ccaf4", demoRepoBranch: "Schmidt-Development/better-lansing-mechanics:crestmont/portfolio-demo",
-    posterDesktop: "/assets/portfolio/better-lansing-mechanics-desktop.webp", posterMobile: "/assets/portfolio/better-lansing-mechanics-mobile.webp", linkVerifiedOn: "2026-10-27",
+    posterDesktop: "/assets/portfolio/better-lansing-mechanics-desktop.webp", posterTablet: "/assets/portfolio/better-lansing-mechanics-tablet.webp", posterMobile: "/assets/portfolio/better-lansing-mechanics-mobile.webp", linkVerifiedOn: "2026-10-27",
   },
 ];

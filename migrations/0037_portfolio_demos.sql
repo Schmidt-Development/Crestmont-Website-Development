@@ -12,3 +12,4 @@ ALTER TABLE portfolio_projects ADD COLUMN demo_revision TEXT;
 -- Genuine screenshots bundled with the site under /assets/portfolio/ (alternative to uploaded R2 screenshots).
 ALTER TABLE portfolio_projects ADD COLUMN poster_desktop_asset TEXT CHECK (poster_desktop_asset IS NULL OR poster_desktop_asset GLOB '/assets/portfolio/[a-z0-9]*.webp');
 ALTER TABLE portfolio_projects ADD COLUMN poster_mobile_asset TEXT CHECK (poster_mobile_asset IS NULL OR poster_mobile_asset GLOB '/assets/portfolio/[a-z0-9]*.webp');
+ALTER TABLE portfolio_projects ADD COLUMN poster_tablet_asset TEXT CHECK (poster_tablet_asset IS NULL OR poster_tablet_asset GLOB '/assets/portfolio/[a-z0-9]*.webp');

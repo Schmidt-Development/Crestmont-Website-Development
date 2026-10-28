@@ -849,7 +849,7 @@ function registerPortfolioAdmin(r: Router) {
   action("relationship", async (ctx, id, f) => { await pf.documentRelationship(ctx.db, ctx.actor!, id, str(f, "relationship"), str(f, "evidence"), ctx.ip); return "Relationship documentation recorded."; });
   action("demo", async (ctx, id, f) => {
     await pf.setDemo(ctx.db, ctx.actor!, id, { demo_url: str(f, "demo_url"), demo_status: str(f, "demo_status"), demo_revision: str(f, "demo_revision"), verified_on: str(f, "demo_verified_on"),
-      poster_desktop_asset: str(f, "poster_desktop_asset"), poster_mobile_asset: str(f, "poster_mobile_asset") }, pf.approvedDemoOrigins(ctx.env.PORTFOLIO_DEMO_ORIGINS, { allowLocal: pf.allowLocalDemos(ctx.env.ENVIRONMENT) }), ctx.ip);
+      poster_desktop_asset: str(f, "poster_desktop_asset"), poster_mobile_asset: str(f, "poster_mobile_asset"), poster_tablet_asset: str(f, "poster_tablet_asset") }, pf.approvedDemoOrigins(ctx.env.PORTFOLIO_DEMO_ORIGINS, { allowLocal: pf.allowLocalDemos(ctx.env.ENVIRONMENT) }), ctx.ip);
     return "Interactive demo settings saved.";
   });
   action("publish", async (ctx, id) => { await pf.setPublished(ctx.db, ctx.actor!, id, true, ctx.ip); return "Project published."; });
@@ -888,6 +888,7 @@ ${select({ name: "demo_status", label: "Demo status", value: p.demo_status, opti
 ${input({ name: "demo_verified_on", label: "Date you verified the demo (isolation and navigation)", type: "date" })}
 ${input({ name: "demo_revision", label: "Source revision", value: p.demo_revision, maxlength: 120, hint: "repository@commit the demo was built from" })}
 ${input({ name: "poster_desktop_asset", label: "Bundled desktop poster", value: p.poster_desktop_asset, hint: "Optional genuine screenshot shipped with the site: /assets/portfolio/<name>.webp" })}
+${input({ name: "poster_tablet_asset", label: "Bundled tablet poster", value: p.poster_tablet_asset })}
 ${input({ name: "poster_mobile_asset", label: "Bundled mobile poster", value: p.poster_mobile_asset })}
 <div class="form-actions">${button("Save demo settings", { variant: "secondary", size: "sm" })}</div></form></div>`;
 }
