@@ -198,6 +198,26 @@ jobs:
           BASE: ${{ steps.deploy.outputs.url }}
         run: PREVIEW_PASSWORD="$(cat access/gate)" DEMO_PASSWORD="$(cat access/demo)" node --no-warnings scripts/frontend-preview-check.ts "$BASE"
 
+      - name: Real-browser verification of the hosted preview (pages, interactions, recordings)
+        id: browser
+        env:
+          BASE: ${{ steps.deploy.outputs.url }}
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+          PREVIEW_PASSWORD="$(cat access/gate)" node --no-warnings scripts/frontend-preview-browser.mjs "$BASE" preview-browser
+
+      - name: Upload recordings and screenshots (public pages only; no credentials)
+        if: always() && steps.browser.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-preview-browser
+          path: preview-browser
+          retention-days: 14
+          if-no-files-found: ignore
+
       - name: Access summary (no credentials; nothing is uploaded)
         if: always() && steps.deploy.outcome == 'success'
         env:
