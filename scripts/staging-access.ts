@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashPassword, base32Encode } from "../src/lib/auth-crypto.ts";
-import { putSecretIfChanged } from "./staging-secrets.ts";
+import { putSecretIfChanged, keyedFingerprint } from "./staging-secrets.ts";
 
 export const DEMO_DOMAIN = "crestmont-preview.test";
 const ALPHABET = "23456789abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ"; // no 0/O/1/l/I, no markdown-active characters
@@ -38,7 +38,7 @@ export interface AccessResult { rotated: boolean; previewPassword: string; previ
 
 /** Keyed fingerprint of a preview password (stored to recognise retired values without storing them). */
 export async function previewFingerprint(rootKey: string, password: string): Promise<string> {
-  return [...await hmac(rootKey, `crestmont-staging-access:v1:preview-fp:${password}`)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return keyedFingerprint(rootKey, "retired-preview", password);
 }
 
 const enc = new TextEncoder();
