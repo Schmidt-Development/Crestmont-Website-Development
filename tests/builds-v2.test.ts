@@ -236,6 +236,12 @@ test("[AIB-014] sensitive actions and integration operations wait for the Owner 
   assert.deepEqual(list.find((x) => x.id === op.id), { ...list.find((x) => x.id === op.id), status: "approved", operation: "stripe.verify_test_key" });
   assert.equal((await t.oc.post(`/staff/builds/integrations/${stripe.id}/live`, { live: "1" })).status, 303);
   assert.equal((await t.db.prepare(`SELECT live_status FROM build_integrations WHERE id = ?`).bind(stripe.id).first<{ live_status: string }>())!.live_status, "verified_live");
+  // A later build of the same project (e.g. a revision) sees the Owner's decision on the operation.
+  await t.db.prepare(`CREATE TEMP TABLE j2 AS SELECT * FROM build_jobs WHERE id = ?`).bind(job.id).run();
+  await t.db.prepare(`UPDATE j2 SET id = 'bjob_later', dedupe_key = 'later', state = 'canceled'`).run();
+  await t.db.prepare(`INSERT INTO build_jobs SELECT * FROM j2`).run();
+  assert.equal((await PL.approvalsForJob(t.db, "bjob_later")).find((x) => x.operation === "stripe.verify_test_key")?.status, "approved");
+  assert.equal((await PL.approvalsForJob(t.db, "bjob_later")).some((x) => x.kind === "credential_request"), false, "other jobs' ordinary requests stay with their job");
   const pm = await createStaff(t.db, "project_manager", "pm-v2@crestmont.test");
   const pc = await t.client().login(pm.email, undefined, pm.secret);
   assert.equal((await pc.post(`/staff/builds/approvals/${a1.id}/decide`, { decision: "approve" })).status, 403);
@@ -315,4 +321,8 @@ test("[AIB-017] private Crestmont review: a finished website is invisible to the
   assert.equal((await t2.oc.post(`/staff/builds/${j2.id}/internal-approve`, { note: "Checked by hand: the failing check is a flaky external link." })).status, 303);
   const audit = await t2.db.prepare(`SELECT details_json FROM audit_logs WHERE action = 'builds.internal_approved'`).first<{ details_json: string }>();
   assert.match(audit!.details_json, /"override":true/);
+  // A build approved before the review gate existed can still be recorded as internally approved (then shared).
+  await t2.db.prepare(`UPDATE build_jobs SET state = 'approved', internal_approved_at = NULL WHERE id = ?`).bind(j2.id).run();
+  assert.equal((await t2.oc.post(`/staff/builds/${j2.id}/internal-approve`, { note: "Approved before the gate existed; recorded now." })).status, 303);
+  assert.ok((await B.getJob(t2.db, j2.id))!.internal_approved_at);
 });

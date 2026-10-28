@@ -9,7 +9,7 @@
 // Customer content reaches every adapter fenced as data with an explicit instruction not to follow it. Nothing here
 // calls a paid or remote inference service.
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fenceFor } from "../prompt.ts";
 import type { ArchitectInput, CycleEvidence, MasterSpec, ReviewVerdict } from "./contracts.ts";
@@ -163,12 +163,17 @@ export class LocalModelAdvisor implements Advisor {
 /** Screenshots for a vision reviewer: desktop + mobile pairs, at most six, each existing, inside the repo, ≤ 2 MB. */
 export function pickScreenshots(repo: string, e: CycleEvidence): { path: string; label: string }[] {
   const out: { path: string; label: string }[] = [];
-  const root = path.resolve(repo);
+  let root: string;
+  try { root = realpathSync(repo); } catch { return out; }
   const ordered = [...e.screenshots].sort((a, b) => (a.page === b.page ? (a.viewport === "desktop" ? -1 : 1) : 0));
   for (const s of ordered) {
     if (out.length >= 6) break;
-    const abs = path.resolve(root, s.path);
-    if (!abs.startsWith(root + path.sep) || !/\.png$/i.test(abs) || !existsSync(abs) || statSync(abs).size > 2 * 1024 * 1024) continue;
+    const lexical = path.resolve(root, s.path);
+    if (!lexical.startsWith(root + path.sep) || !/\.png$/i.test(lexical) || !existsSync(lexical)) continue;
+    // Never follow a link the agent planted: the real file must be a regular file inside the repository.
+    const st = lstatSync(lexical);
+    const abs = realpathSync(lexical);
+    if (st.isSymbolicLink() || !st.isFile() || !abs.startsWith(root + path.sep) || st.size > 2 * 1024 * 1024) continue;
     out.push({ path: abs, label: `${s.page} (${s.viewport})` });
   }
   return out;

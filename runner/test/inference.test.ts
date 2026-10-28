@@ -111,7 +111,7 @@ test("[AIB-015] GPU scheduler: a failed model load is retried once, then the mod
   const st = s.status();
   assert.equal(st.switches.failures, 1);
   assert.match(st.state, /failed: .*qwen3\.8/);
-  await assert.rejects(job(s, A.tag, "p2"), /failed to load recently/, "cooldown: no reload storm");
+  await assert.rejects(job(s, A.tag, "p2"), /could not be loaded recently/, "cooldown: no reload storm");
   // Model B still serves (reloaded after the failed switch unloaded it).
   const b = await job(s, B.tag, "p3");
   assert.equal(b.completionTokens, 50);
@@ -208,4 +208,34 @@ test("[AIB-015] configuration: Model A / Model B (dual) or one model (single); t
   assert.throws(() => loadConfig({ ...env, LOCAL_MODEL: "x", RUNNER_AGENT_PROVIDER: "claude-code" }), /removed \(Founder directive V4\)/);
   assert.throws(() => loadConfig({ ...env }), /LOCAL_MODEL_B \(or LOCAL_MODEL\)/);
   assert.throws(() => loadModels({ LOCAL_MODEL_A: "a", LOCAL_MODEL_A_REASONING: "max" }, "b"), /must be high, medium or low/);
+});
+
+test("[AIB-015] review fixes: an unreachable model server puts no model on cooldown; cooldown errors are recognisable as 'could not be loaded'; no busy re-arming while requests drain", async () => {
+  // 1. Start-up residency check fails (server down), then succeeds: the waiting request runs; no cooldown, no failed state.
+  let down = true;
+  const f = fakeResidency();
+  const flaky: Residency = { ...f.r, loaded: async () => { if (down) throw new Error("connect ECONNREFUSED"); return f.r.loaded(); } };
+  const s = new InferenceScheduler({ models: [A, B], maxConcurrent: 1, vramTotalMb: 32607, vramReserveMb: 4096, switchTimeoutMs: 1000, maxWaitBeforeSwitchMs: 50, minDwellMs: 0, idleGraceMs: 5, keepAlive: "30m", residency: flaky, reconcileRetryMs: 30 });
+  const p = job(s, B.tag, "p1");
+  await delay(50);
+  assert.doesNotMatch(s.status().state, /failed/);
+  down = false;
+  assert.equal((await p).completionTokens, 50);
+  assert.equal(s.status().switches.failures, 0);
+  s.close();
+  // 2. Cooldown message matches the runner's model-unavailable handling.
+  const g = fakeResidency({ initial: [{ model: B.tag, vramMb: 25100 }], failLoad: (m) => m === A.tag });
+  const s2 = sched(g.r, { idleGraceMs: 5 });
+  await assert.rejects(job(s2, A.tag, "x"), /could not be loaded/);
+  await assert.rejects(job(s2, A.tag, "y"), /could not be loaded recently/);
+  s2.close();
+  // 3. Pump is not re-armed every 20 ms while a long request drains.
+  const h = fakeResidency({ initial: [{ model: B.tag, vramMb: 25100 }] });
+  const s3 = sched(h.r, { maxWaitBeforeSwitchMs: 10, idleGraceMs: 5 });
+  let pumps = 0;
+  const orig = (s3 as unknown as { pump: () => void }).pump.bind(s3);
+  (s3 as unknown as { pump: () => void }).pump = () => { pumps++; orig(); };
+  await Promise.all([job(s3, B.tag, "long", 400), (async () => { await delay(5); await job(s3, A.tag, "rev", 5); })()]);
+  assert.ok(pumps < 30, `pump ran ${pumps} times`);
+  s3.close();
 });

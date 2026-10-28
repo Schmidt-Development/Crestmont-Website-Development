@@ -31,6 +31,8 @@ export interface SchedulerOptions {
   minDwellMs?: number;
   /** Idle time of the loaded model before switching to a waiting one (its agents may be between calls). */
   idleGraceMs?: number;
+  /** Retry interval when the model server does not answer the residency check. */
+  reconcileRetryMs?: number;
   keepAlive: string;
   residency: Residency;
   cooldownMs?: number;
@@ -77,7 +79,7 @@ export class InferenceScheduler {
   private reconciled = false;
 
   constructor(o: SchedulerOptions) {
-    this.o = { minDwellMs: 120_000, idleGraceMs: 20_000, cooldownMs: 120_000, now: () => Date.now(), ...o } as Required<Omit<SchedulerOptions, "log">> & { log?: Logger };
+    this.o = { minDwellMs: 120_000, idleGraceMs: 20_000, reconcileRetryMs: 5_000, cooldownMs: 120_000, now: () => Date.now(), ...o } as Required<Omit<SchedulerOptions, "log">> & { log?: Logger };
   }
 
   private now(): number { return this.o.now(); }
@@ -116,7 +118,7 @@ export class InferenceScheduler {
   /** Run one model request through the GPU queue. `fn` performs the request; its usage is recorded when returned. */
   async run<T>(meta: RequestMeta, fn: () => Promise<T>, signal?: AbortSignal, usage?: (r: T) => Usage | null): Promise<T> {
     const until = this.failedUntil.get(meta.model);
-    if (until && until > this.now()) throw new ModelUnavailableError(`${meta.model} failed to load recently; retried after ${new Date(until).toISOString()}`);
+    if (until && until > this.now()) throw new ModelUnavailableError(`model ${meta.model} could not be loaded recently; retried after ${new Date(until).toISOString()}`);
     const enqueuedAt = this.now();
     await new Promise<void>((resolve, reject) => {
       const w: Waiter = { seq: ++this.seq, meta, enqueuedAt, grant: () => { cleanup(); resolve(); }, fail: (e) => { cleanup(); reject(e); } };
@@ -202,6 +204,8 @@ export class InferenceScheduler {
     }
     for (const w of this.queue) if (!this.admissible(w.meta.model)) this.projectActivity.set(w.meta.projectId, { state: "gpu_waiting", model: w.meta.model, task: w.meta.task });
     const due = Math.min(Math.max(blocked.enqueuedAt + this.o.maxWaitBeforeSwitchMs, this.residentSince + this.o.minDwellMs), idle ? this.lastActivityAt + this.o.idleGraceMs : Infinity) - this.now();
+    // Running requests call pump when they finish; a timer is needed only for a deadline still ahead.
+    if (this.totalInFlight() > 0 && !(due > 0)) return;
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => { this.timer = null; this.pump(); }, Math.max(20, Number.isFinite(due) ? due : this.o.maxWaitBeforeSwitchMs));
   }
@@ -236,13 +240,23 @@ export class InferenceScheduler {
         try { switched = await attempt(); error = null; break; } catch (err) { error = err as Error; this.o.log?.warn("model switch failed", { target, attempt: i + 1, error: error.message?.slice(0, 200) }); }
       }
       const ms = this.now() - started;
-      if (switched || error) {
+      if (switched || (error && !reconcileOnly)) {
         const rec: SwitchRecord = { from, to: target, ms, ok: !error, at: new Date(this.now()).toISOString(), ...(error ? { error: error.message.slice(0, 200) } : {}) };
         this.switchLog = [...this.switchLog.slice(-19), rec];
         this.switchCount++;
         this.switchMsTotal += ms;
         if (error) this.switchFailures++;
         this.o.log?.info("model switch", { ...rec });
+      }
+      if (error && reconcileOnly) {
+        // The model server did not answer the start-up check: nothing failed to load. Keep the requests queued and try
+        // again shortly (their own stop/deadline signals still end them); no model goes on cooldown.
+        this.reconciled = false;
+        this.switching = null;
+        this.o.log?.warn("model server not reachable for the residency check; retrying", { error: error.message.slice(0, 200) });
+        if (this.timer) clearTimeout(this.timer);
+        this.timer = setTimeout(() => { this.timer = null; this.pump(); }, this.o.reconcileRetryMs);
+        return;
       }
       if (error) {
         // Recovery: re-read what is really loaded, put the model on a cooldown, fail only the requests that need it.

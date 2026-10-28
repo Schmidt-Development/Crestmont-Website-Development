@@ -3,7 +3,8 @@
 // the separate review session judges them), and the builder's structured outputs (integration status, approval
 // requests). Nothing here executes workspace code.
 
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { writeInside } from "../paths.ts";
 import path from "node:path";
 import { run } from "../exec.ts";
 import type { CheckOutcome } from "../checks.ts";
@@ -60,8 +61,7 @@ export function builderApprovalRequests(repo: string): { kind: string; summary: 
 
 /** The reviewer's corrective prompt, kept in the workspace for the builder and the next checkpoint. */
 export function writeReview(repo: string, cycle: number, decision: string, prompt: string | null, findings: string[]): void {
-  mkdirSync(path.join(repo, ".crestmont"), { recursive: true });
-  writeFileSync(path.join(repo, ".crestmont", `review-${String(cycle).padStart(2, "0")}.md`), [`# Review of cycle ${cycle}: ${decision}`, "", ...findings.map((f) => `- ${f}`), "", prompt ? `## Next prompt\n\n${prompt}` : ""].join("\n"));
+  writeInside(repo, path.join(".crestmont", `review-${String(cycle).padStart(2, "0")}.md`), [`# Review of cycle ${cycle}: ${decision}`, "", ...findings.map((f) => `- ${f}`), "", prompt ? `## Next prompt\n\n${prompt}` : ""].join("\n"));
 }
 
 /** Instructions appended to builder prompts so the evidence files exist (V3 §7B, §8, §9). */

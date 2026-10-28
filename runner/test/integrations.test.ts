@@ -75,3 +75,23 @@ test("[AIB-018] the agent cannot reach the secrets: its file tools are confined 
   assert.throws(() => confine(s.repo, "/run/secrets/integrations/prj_1/STRIPE_TEST_SECRET_KEY", "r"), PathDenied);
   assert.ok(!existsSync(path.join(s.repo, "STRIPE_TEST_SECRET_KEY")));
 });
+
+test("[AIB-018] review fixes: runner-written files never follow a symlink the agent planted; screenshots behind symlinks are not sent to the model", async () => {
+  const { writeInside, PathEscapeError } = await import("../src/paths.ts");
+  const { pickScreenshots } = await import("../src/orchestrator/advisors.ts");
+  const { symlinkSync } = await import("node:fs");
+  const s = setup([{ operation: "stripe.verify_test_key", summary: "" }], []);
+  const outside = path.join(tmp("aib-victim-"), "runner-config.env");
+  writeFileSync(outside, "ORIGINAL");
+  symlinkSync(outside, path.join(s.repo, ".crestmont", "integration-results.json"));
+  await assert.rejects(runIntegrationOperations(s.deps), PathEscapeError);
+  assert.equal(readFileSync(outside, "utf8"), "ORIGINAL", "the runner file was not overwritten");
+  writeInside(s.repo, ".crestmont/review-01.md", "ok");
+  assert.equal(readFileSync(path.join(s.repo, ".crestmont", "review-01.md"), "utf8"), "ok");
+  mkdirSync(path.join(s.repo, ".crestmont", "screenshots"), { recursive: true });
+  symlinkSync(outside, path.join(s.repo, ".crestmont", "screenshots", "home-desktop.png"));
+  writeFileSync(path.join(s.repo, ".crestmont", "screenshots", "home-mobile.png"), "png");
+  const shots = pickScreenshots(s.repo, { summary: "", changedFiles: [], commits: [], checks: [], criteria: [], defects: [], integrationBlockers: [], securityFindings: [], recommendedNext: [],
+    screenshots: [{ path: ".crestmont/screenshots/home-desktop.png", viewport: "desktop", page: "home" }, { path: ".crestmont/screenshots/home-mobile.png", viewport: "mobile", page: "home" }] });
+  assert.deepEqual(shots.map((x) => x.label), ["home (mobile)"]);
+});

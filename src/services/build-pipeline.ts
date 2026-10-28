@@ -397,5 +397,8 @@ export async function decideApproval(c: OwnerCtx, approvalId: string, approve: b
 
 /** Runner: the decisions on this job's requests (the orchestrator acts only on approved ones). */
 export async function approvalsForJob(db: Db, jobId: string) {
-  return (await db.prepare(`SELECT id, kind, summary, operation, status, decision_note FROM build_approvals WHERE job_id = ? ORDER BY requested_at`).bind(jobId).all<{ id: string; kind: string; summary: string; operation: string | null; status: string; decision_note: string | null }>()).results;
+  // The job's own requests, plus the project's decisions on integration operations from earlier builds (the platform
+  // keeps one request per project and operation, so a revision sees the Owner's existing decision).
+  return (await db.prepare(`SELECT id, kind, summary, operation, status, decision_note FROM build_approvals WHERE job_id = ?
+      OR (kind = 'integration_operation' AND project_id = (SELECT project_id FROM build_jobs WHERE id = ?)) ORDER BY requested_at`).bind(jobId, jobId).all<{ id: string; kind: string; summary: string; operation: string | null; status: string; decision_note: string | null }>()).results;
 }

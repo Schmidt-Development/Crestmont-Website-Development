@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from "no
 import path from "node:path";
 import { findOperation, RefusedOperationError } from "./catalog.ts";
 import { registerSecret, redact } from "../log.ts";
+import { writeInside } from "../paths.ts";
 
 export interface BrokerRequest { operation: string; summary: string }
 export interface BrokerOutcome { operation: string; status: "not_supported" | "awaiting_approval" | "rejected" | "missing_credentials" | "passed" | "failed" | "refused"; evidence: string }
@@ -79,7 +80,7 @@ export async function runIntegrationOperations(d: BrokerDeps): Promise<BrokerOut
     if (!op) { out.push({ operation: req.operation, status: "not_supported", evidence: "not in the runner's integration catalogue: a person must perform or review this step" }); continue; }
     const decision = decisions?.filter((a) => a.kind === "integration_operation" && a.operation === op.id).at(-1);
     if (!decision) {
-      await d.requestApproval({ kind: "integration_operation", operation: op.id, summary: `Run ${op.id} for this website (test environment)`, detail: `${op.description} Requested by the builder: ${req.summary || "(no reason given)"}. Uses the project's ${op.secrets.join(", ")} from the runner's secrets; contacts ${op.hosts.join(", ")}.` });
+      await d.requestApproval({ kind: "integration_operation", operation: op.id, summary: `Run ${op.id} for this website (test environment)`, detail: `${op.description} The AI builder's reason (unverified): ${req.summary || "(none given)"}. Uses the project's ${op.secrets.join(", ")} from the runner's secrets; contacts ${op.hosts.join(", ")}.` });
       out.push({ operation: op.id, status: "awaiting_approval", evidence: "waiting for the Owner's approval on the platform" });
       continue;
     }
@@ -100,8 +101,7 @@ export async function runIntegrationOperations(d: BrokerDeps): Promise<BrokerOut
   }
   mkdirSync(d.jobDir, { recursive: true });
   writeFileSync(doneFile, JSON.stringify(done));
-  // The agent sees the sanitized outcome only.
-  mkdirSync(path.join(d.repo, ".crestmont"), { recursive: true });
-  writeFileSync(path.join(d.repo, ".crestmont", "integration-results.json"), JSON.stringify(out, null, 2) + "\n");
+  // The agent sees the sanitized outcome only (written without following links the agent may have planted).
+  writeInside(d.repo, path.join(".crestmont", "integration-results.json"), JSON.stringify(out, null, 2) + "\n");
   return out;
 }

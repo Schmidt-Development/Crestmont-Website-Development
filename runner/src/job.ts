@@ -39,7 +39,7 @@ import { readRequirements, checkRequirements, readStringList, readAgentReport } 
 import { buildReport } from "./report.ts";
 import { run, proxyEnv } from "./exec.ts";
 import { runOperatorCommand } from "./operator-command.ts";
-import { resolveWithin } from "./paths.ts";
+import { resolveWithin, writeInside } from "./paths.ts";
 import type { Advisor } from "./orchestrator/advisors.ts";
 import { DeterministicReviewer, LocalModelAdvisor } from "./orchestrator/advisors.ts";
 import type { MasterSpec, ReviewVerdict } from "./orchestrator/contracts.ts";
@@ -416,6 +416,10 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     stage = "building";
     const st: { localLimit: string | null; agentError: string | null } = { localLimit: null, agentError: null };
     // Single-model mode: the one model is LOCAL_MODEL (cfg.local.model) for every role.
+    // Architect/review sessions stop with the job (cancel, lease loss, shutdown, runtime limit all go through `stop`).
+    const advisorAbort = new AbortController();
+    stop.onStop(() => advisorAbort.abort());
+    if (stop.reason) advisorAbort.abort();
     const models = cfg.models.mode === "dual" ? cfg.models : (() => { const one = { ...cfg.models.b, tag: cfg.local.model, contextTokens: cfg.local.contextTokens }; return { a: one, b: one, mode: "single" as const }; })();
     const routed: Route[] = [];
     const advisorFor = (role: "architect" | "reviewer"): Advisor | null => {
@@ -425,7 +429,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       if (kind === "local" && provider instanceof LocalProvider) {
         // A fresh Model A session per call, read-only tools, on the shared GPU queue.
         return new LocalModelAdvisor({
-          client: provider.client, scheduler: deps.scheduler ?? null, projectId: job.projectId, model: models.a, repo: ws!.repo,
+          client: provider.client, scheduler: deps.scheduler ?? null, projectId: job.projectId, model: models.a, repo: ws!.repo, signal: advisorAbort.signal,
           maxTurns: cfg.advisor.maxTurns, maxOutputTokens: cfg.local.maxOutputTokensPerCall, temperature: cfg.local.temperature,
           onUsage: (r) => { tracker.modelCalls++; tracker.inputTokens += r.promptTokens; tracker.outputTokens += r.completionTokens; tracker.modelWallMs += r.wallMs; },
         });
@@ -559,7 +563,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       const signatures: string[] = [];
       for (let cycle = 1; cycle <= cfg.advisor.maxCycles; cycle++) {
         if (stop.reason || st.localLimit || st.agentError) break;
-        if (checks.some((c) => !c.ok)) writeFileSync(path.join(ws.repo, ".crestmont", "runner-checks.json"), JSON.stringify(checks.map(({ id, command, ok, code, outputTail }) => ({ id, command, ok, code, outputTail })), null, 2));
+        if (checks.some((c) => !c.ok)) writeInside(ws.repo, path.join(".crestmont", "runner-checks.json"), JSON.stringify(checks.map(({ id, command, ok, code, outputTail }) => ({ id, command, ok, code, outputTail })), null, 2));
         await commitAll(git!, `AI build: cycle ${cycle} evidence`);
         const evidence = await collectEvidence({ repo: ws.repo, pathEnv: cfg.agentPath, home: ws.home, baseCommit: cycleBase, checks, requirements: readRequirements(ws.repo, job.requirements), spec });
         // Builder outputs: integration status and sensitive-action requests (the build continues meanwhile).
@@ -567,7 +571,8 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           // The builder's own status is code + mock only; it cannot set test-environment or live status.
           const ints = builderIntegrations(ws.repo).map(({ key, codeStatus, mockStatus, name, purpose }) => ({ key, codeStatus, mockStatus, name, purpose }));
           if (ints.length) await client.reportIntegrations(job, ints);
-          for (const a of builderApprovalRequests(ws.repo)) if (a.kind !== "integration_operation") await client.requestApproval(job, a);
+          // Only these fields of the agent's request reach the platform; its text is labelled as the builder's.
+          for (const a of builderApprovalRequests(ws.repo)) if (a.kind !== "integration_operation") await client.requestApproval(job, { kind: String(a.kind), summary: String(a.summary).slice(0, 400), ...(a.detail ? { detail: `Requested by the AI builder (unverified): ${String(a.detail).slice(0, 4000)}` } : {}) });
           // V4 §8: catalogued test-environment operations, run by the runner itself after the Owner approved them.
           const ops = await runIntegrationOperations({
             repo: ws.repo, jobDir: ws.dir, projectId: job.projectId, secretsRoot: path.join(cfg.secretsDir, "integrations"),
@@ -620,7 +625,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     Object.assign(now, { activity: "preparing", task: null });
 
     // ── a model could not be loaded on the GPU: checkpoint and give the build back without spending an attempt ──
-    if (st.agentError && /could not be loaded/.test(st.agentError) && !stop.reason) {
+    if (st.agentError && /could not be loaded|ModelUnavailableError/.test(st.agentError) && !stop.reason) {
       await checkpoint("model unavailable");
       const until = new Date(Date.now() + 10 * 60_000).toISOString();
       return await finish("released", { error: `${st.agentError.slice(0, 300)}; work is checkpointed and resumes when the model loads again (no paid fallback).`, stopReason: "model_unavailable", checks, notBefore: until });

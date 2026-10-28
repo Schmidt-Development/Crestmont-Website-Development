@@ -2,7 +2,7 @@
 // directories). Every such path must stay inside an authorized root (the job workspace or RUNNER_WORKSPACES): no
 // traversal, no unrelated absolute path, and no symlink that leads out of the root.
 
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 export class PathEscapeError extends Error {
@@ -38,4 +38,25 @@ export const SAFE_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,159}$/;
 export function assertSafeSegment(s: string, what: string): string {
   if (typeof s !== "string" || !SAFE_SEGMENT.test(s) || s.includes("..")) throw new PathEscapeError(`invalid ${what}: ${String(s).slice(0, 80)}`);
   return s;
+}
+
+/**
+ * Write a runner-owned file inside a directory the agent can also change (the job repository). Refuses a target or
+ * any directory on the way that is a symbolic link (the agent could point it at a runner file), then writes a temp
+ * file and renames it over the target, so the write never follows a link.
+ */
+export function writeInside(root: string, rel: string, content: string): void {
+  const target = resolveWithin(root, rel);
+  const r = path.resolve(root);
+  let cur = r;
+  for (const seg of path.relative(r, path.dirname(target)).split(path.sep).filter(Boolean)) {
+    cur = path.join(cur, seg);
+    if (existsSync(cur) && lstatSync(cur).isSymbolicLink()) throw new PathEscapeError(`${cur.slice(0, 200)} is a symbolic link`);
+  }
+  mkdirSync(path.dirname(target), { recursive: true });
+  if (existsSync(target) && lstatSync(target).isSymbolicLink()) throw new PathEscapeError(`${target.slice(0, 200)} is a symbolic link`);
+  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, content, { flag: "wx" });
+  renameSync(tmp, target);
+  resolveWithin(root, rel);
 }

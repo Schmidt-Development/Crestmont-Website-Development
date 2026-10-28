@@ -170,6 +170,7 @@ No AI verdict changes any of these steps.
   - its tools are confined to the repository;
   - its sandbox has no network and no secrets;
   - the runner's secrets directory is outside both.
+- `api.stripe.com` must be added to the runner's egress allow-list (`-ExtraEgressDomains`); that list applies to the runner container only. Build sandboxes have no network, and the install network reaches only the npm registry.
 - Live connections are still marked by a person (never inferred). Unknown operations are recorded as "not supported"
   for a person.
 - Customer production secrets stay out of the AI builder entirely. They are set on the customer's target during the D5

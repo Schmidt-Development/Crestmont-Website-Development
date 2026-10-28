@@ -399,9 +399,9 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
   const rows = worker
     ? (await db.prepare(`SELECT j.*, COALESCE(pl.priority, 0) AS _priority FROM build_jobs j JOIN build_assignments a ON a.project_id = j.project_id AND a.released_at IS NULL AND a.worker_id = ?
         LEFT JOIN build_project_controls c ON c.project_id = j.project_id LEFT JOIN build_pipeline pl ON pl.project_id = j.project_id
-        WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?) AND COALESCE(c.paused,0) = 0 ORDER BY j.created_at LIMIT 50`).bind(worker.id, at).all<BuildJob & { _priority: number }>()).results
+        WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?) AND COALESCE(c.paused,0) = 0 ORDER BY COALESCE(pl.priority, 0) DESC, j.created_at LIMIT 200`).bind(worker.id, at).all<BuildJob & { _priority: number }>()).results
     : (await db.prepare(`SELECT j.*, COALESCE(pl.priority, 0) AS _priority FROM build_jobs j LEFT JOIN build_project_controls c ON c.project_id = j.project_id LEFT JOIN build_pipeline pl ON pl.project_id = j.project_id
-      WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?) AND COALESCE(c.paused,0) = 0 ORDER BY j.created_at LIMIT 50`).bind(at).all<BuildJob & { _priority: number }>()).results;
+      WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?) AND COALESCE(c.paused,0) = 0 ORDER BY COALESCE(pl.priority, 0) DESC, j.created_at LIMIT 200`).bind(at).all<BuildJob & { _priority: number }>()).results;
   // Founder priority first, raised by waiting time (no starvation); then arrival.
   const candidates = rows.map((r) => ({ r, e: effectivePriority(r._priority, r.created_at, now) })).sort((a, b) => b.e - a.e || (a.r.created_at < b.r.created_at ? -1 : a.r.created_at > b.r.created_at ? 1 : 0)).map((x) => x.r).slice(0, 10);
   for (const c of candidates) {
@@ -412,8 +412,9 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
     const leaseUntil = new Date(now.getTime() + s.lease_seconds * 1000).toISOString();
     const r = await db.prepare(`UPDATE build_jobs SET state = 'preparing', state_reason = 'claimed by runner', lease_runner = ?, lease_token_hash = ?, lease_expires_at = ?, heartbeat_at = ?,
         run_started_at = ?, started_at = COALESCE(started_at, ?), attempts = attempts + 1, stop_reason = NULL, worker_id = COALESCE(?, worker_id), updated_at = ?
-      WHERE id = ? AND state = 'queued' AND (SELECT COUNT(*) FROM build_jobs WHERE state IN ('preparing','building','verifying')) < ?`)
-      .bind(runnerId, await sha256Hex(token), leaseUntil, at, at, at, worker?.id ?? null, at, c.id, s.max_concurrent).run();
+      WHERE id = ? AND state = 'queued' AND (SELECT COUNT(*) FROM build_jobs WHERE state IN ('preparing','building','verifying')) < ?
+        AND (? IS NULL OR (SELECT COUNT(*) FROM build_jobs WHERE worker_id = ? AND state IN ('preparing','building','verifying')) < (SELECT max_active_projects FROM build_workers WHERE id = ?))`)
+      .bind(runnerId, await sha256Hex(token), leaseUntil, at, at, at, worker?.id ?? null, at, c.id, s.max_concurrent, worker?.id ?? null, worker?.id ?? null, worker?.id ?? null).run();
     if (!r.meta?.changes) continue; // another runner won this job (or capacity filled): try the next
     const job = (await getJob(db, c.id))!;
     await db.prepare(`INSERT OR IGNORE INTO build_runs (id, job_id, attempt, runner_id, started_at, session_id, zero_cost) VALUES (?,?,?,?,?,?,?)`)
@@ -1173,19 +1174,20 @@ export async function staffPreviewLink(c: OwnerCtx, secret: string | undefined, 
  */
 export async function internalApprove(c: OwnerCtx, id: string, note: string) {
   const j = await ownerJob(c, id);
-  if (j.state !== "ready_for_review") throw new HttpError(409, "Only a finished build that is awaiting internal approval can be approved internally.");
+  // Builds approved before the internal review existed can be recorded too, so their previews can still be shared.
+  if (j.state !== "ready_for_review" && j.state !== "approved") throw new HttpError(409, "Only a finished build that is awaiting internal approval can be approved internally.");
   if (j.internal_approved_at) throw new HttpError(409, "This build is already approved internally.");
   if (!j.preview_url || j.preview_deleted_at || j.preview_delete_requested_at) throw new HttpError(409, "Review the preview first: this build has no preview that still exists.");
   const text = note.trim().slice(0, 1000);
   if (j.ai_acceptance !== "passed" && j.ai_acceptance !== "passed_pending_integrations" && text.length < 10) {
     throw new HttpError(422, "This build did not pass the automated acceptance review. Explain in the note (at least 10 characters) why it may go ahead.");
   }
-  const r = await c.db.prepare(`UPDATE build_jobs SET internal_approved_at = ?, internal_approved_by = ?, internal_approval_note = ?, updated_at = ? WHERE id = ? AND internal_approved_at IS NULL AND state = 'ready_for_review'`)
+  const r = await c.db.prepare(`UPDATE build_jobs SET internal_approved_at = ?, internal_approved_by = ?, internal_approval_note = ?, updated_at = ? WHERE id = ? AND internal_approved_at IS NULL AND state IN ('ready_for_review','approved')`)
     .bind(nowIso(), c.userId, text || null, nowIso(), id).run();
   if (!r.meta?.changes) throw new HttpError(409, "The build changed meanwhile; reload and try again.");
   await event(c.db, id, "action", `Approved in the private Crestmont review${j.ai_acceptance !== "passed" ? ` (automated acceptance: ${j.ai_acceptance ?? "not run"}; override noted)` : ""}`, userActor(c), { data: { note: text || null } });
   await audit(c.db, { actorUserId: c.userId, action: "builds.internal_approved", subjectType: "build_job", subjectId: id, organizationId: j.organization_id, details: { aiAcceptance: j.ai_acceptance, override: j.ai_acceptance !== "passed" && j.ai_acceptance !== "passed_pending_integrations" } });
-  await setStage(c.db, j.project_id, "READY_FOR_CUSTOMER_PREVIEW", "Approved internally; not shared with the customer yet", "user");
+  if (j.state === "ready_for_review") await setStage(c.db, j.project_id, "READY_FOR_CUSTOMER_PREVIEW", "Approved internally; not shared with the customer yet", "user");
 }
 
 /** Owner: share (or stop sharing) a gated preview with the project's customer, who can then open and review it. */
