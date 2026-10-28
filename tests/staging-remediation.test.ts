@@ -12,7 +12,8 @@ import { syncRequirements } from "../src/readiness/ingest.ts";
 import type { Env } from "../src/app/context.ts";
 import { applyAccess, currentAccess, DEMO_DOMAIN, type D1Ops } from "../scripts/staging-access.ts";
 import { seal, open, passphraseProblem, SealError, MAGIC } from "../scripts/seal.ts";
-import { capture, verify, gate, overrideUnchanged, report } from "../scripts/staging-rotation-check.ts";
+import { capture, verify, gate, overrideUnchanged, report, rotationState } from "../scripts/staging-rotation-check.ts";
+import { verifyStagingAccess } from "../scripts/verify-staging-access.ts";
 import { snapshot, summary } from "../scripts/staging-forensics.ts";
 
 const BASE = "https://crestmont-platform-staging.example.workers.dev";
@@ -178,4 +179,77 @@ test("[INFRA-002] workflows: no plaintext credential or database artifact; stagi
   assert.doesNotMatch(prod, /run:[^\n]*\$\{\{ inputs\.tag \}\}|--notes "tag \$\{\{ inputs\.tag/);
   assert.match(prod, /RELEASE_TAG: \$\{\{ inputs\.tag \}\}/);
   assert.doesNotMatch(prod, /upload-artifact[\s\S]*?path:\s*backups/, "no production database export as an artifact");
+});
+
+// ── Deploy #56 (2026-10-28): rotation succeeded, then "sign-in page: HTTP 401" right after "preview password accepted". ──
+// The preview pass is an HMAC keyed by STAGING_ACCESS_PASSWORD; edge instances that still had the old password refused a
+// pass issued by an instance that already had the new one. These tests reproduce that with two app instances.
+async function rotated() {
+  const s = await staging();
+  await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false });
+  const oldPassword = s.secrets.STAGING_ACCESS_PASSWORD;
+  const access = await applyAccess(s.ops, { rootKey: KEY, epoch: "3", rotate: false });
+  const owner = access.accounts.find((a) => a.role === "owner")!;
+  const fresh = (e: Env) => async (url: string, init?: RequestInit) => handle(new Request(url, init), e);
+  const env = (pw: string): Env => ({ DB: s.db, ENVIRONMENT: "staging", PREVIEW_GATE: "required", APP_URL: BASE, STAGING_ACCESS_PASSWORD: pw });
+  return { s, access, oldPassword, input: { base: BASE, previewPassword: access.previewPassword, owner: { email: owner.email, password: owner.password, totp: owner.totp! } }, newApp: fresh(env(access.previewPassword)), staleApp: fresh(env(oldPassword)) };
+}
+const PROP = { deadlineMs: 120_000, retryMs: 5_000, confirmMs: 2_000, consecutive: 3 };
+
+test("[INFRA-002] deploy #56 regression: a just-rotated preview password that is still propagating is waited out, without extra password attempts", async (t) => {
+  const sleep = fakeClock(t);
+  const r = await rotated();
+  // GET /login: stale, stale, new, stale (streak resets), new, new, new; everything else on the new instance.
+  const plan = ["stale", "stale", "new", "stale", "new", "new", "new"];
+  let logins = 0, passwordPosts = 0;
+  const f = async (url: string, init?: RequestInit) => {
+    const path = new URL(url).pathname;
+    if (path === "/__preview-access") passwordPosts++;
+    if (path === "/login" && (init?.method ?? "GET") === "GET" && logins < plan.length) return plan[logins++] === "stale" ? r.staleApp(url, init) : r.newApp(url, init);
+    return r.newApp(url, init);
+  };
+  const log: string[] = [];
+  const res = await verifyStagingAccess(r.input, f, (l) => log.push(l), sleep, PROP);
+  assert.equal(res.pages, res.modules);
+  assert.equal(passwordPosts, 1, "the password is sent once; the same pass is re-tried");
+  assert.ok(log.some((l) => /honoured everywhere after \d+s \(3 refusals/.test(l)), log.join("\n"));
+});
+
+test("[INFRA-002] deploy #56 regression: a pass that is never honoured still fails (deadline), and any other 401 fails at once", async (t) => {
+  const sleep = fakeClock(t);
+  const r = await rotated();
+  let posts = 0;
+  const neverPropagates = async (url: string, init?: RequestInit) => {
+    const path = new URL(url).pathname;
+    if (path === "/__preview-access") { posts++; return r.newApp(url, init); }
+    return r.staleApp(url, init);
+  };
+  await assert.rejects(verifyStagingAccess(r.input, neverPropagates, () => {}, sleep, PROP), /sign-in page: HTTP 401: the preview pass for the accepted password was still refused after 12\ds/);
+  assert.equal(posts, 1, "no password retries while waiting");
+  const otherError = async (url: string, init?: RequestInit) =>
+    new URL(url).pathname === "/login" ? new Response("unauthorized", { status: 401 }) : r.newApp(url, init);
+  await assert.rejects(verifyStagingAccess(r.input, otherError, () => {}, sleep, PROP), /^Error: sign-in page: HTTP 401$/);
+  // The gate itself is unchanged: the stale instance never accepts the new password's pass, nor the new instance the old password.
+  const c = await r.newApp(`${BASE}/__preview-access`, { method: "POST", body: new URLSearchParams({ password: r.oldPassword, next: "/" }), redirect: "manual" });
+  assert.equal(c.status, 401);
+});
+
+test("[INFRA-002] rotation state in D1 (read-only): complete after the rotation; a surviving pre-rotation session or an unchanged preview password fails", async () => {
+  const s = await staging();
+  await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false });
+  const before = new Date(Date.now() - 60_000).toISOString(), future = new Date(Date.now() + 864e5).toISOString();
+  await applyAccess(s.ops, { rootKey: KEY, epoch: "3", rotate: false });
+  const ok = await rotationState(s.ops, "3");
+  assert.deepEqual(ok.filter((c) => !c.ok), [], report(ok));
+  assert.equal(ok.length, 6);
+  assert.equal((await rotationState(s.ops, "4")).find((c) => c.name === "Access epoch is 4")?.ok, false);
+  const owner = (s.db.raw.prepare(`SELECT id FROM users WHERE email LIKE '%@${DEMO_DOMAIN}' LIMIT 1`).get()) as { id: string };
+  s.db.raw.exec(`INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at) VALUES ('s_old', '${owner.id}', 'th-old', '${before}', '${future}')`);
+  assert.equal((await rotationState(s.ops, "3")).find((c) => c.name === "No demo session from before the rotation")?.ok, false);
+  // Founder-fixed preview password left unchanged across a rotation: the secret did not change with it.
+  const t = await staging();
+  await applyAccess(t.ops, { rootKey: KEY, epoch: "2", rotate: false, fixedPreviewPassword: "founder-fixed-preview-password-1" });
+  t.db.raw.exec(`UPDATE deploy_secret_fingerprints SET updated_at = '2000-01-01T00:00:00.000Z' WHERE name = 'STAGING_ACCESS_PASSWORD'`);
+  await applyAccess(t.ops, { rootKey: KEY, epoch: "3", rotate: false, fixedPreviewPassword: "founder-fixed-preview-password-1" });
+  assert.equal((await rotationState(t.ops, "3")).find((c) => c.name === "Preview password changed with the rotation")?.ok, false);
 });

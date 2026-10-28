@@ -13,10 +13,23 @@ import { accessReadme, type AccessResult } from "./staging-access.ts";
 
 export interface VerifyInput { base: string; previewPassword: string; owner: { email: string; password: string; totp: string } }
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
+type Sleep = (ms: number) => Promise<void>;
+const realSleep: Sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+/**
+ * A changed STAGING_ACCESS_PASSWORD reaches Cloudflare's edge locations at different moments. The preview pass cookie is
+ * an HMAC keyed by that secret, so for a while a pass issued by an instance that already has the new password is refused
+ * (401, the gate page) by one that still has the old password. Deploy #56 (2026-10-28) failed exactly there, right after
+ * the credential rotation. The verifier therefore waits until the pass is honoured consistently before going on.
+ * It re-sends the same cookie (no extra password attempts, so the gate's rate limit is not spent) and gives up at a
+ * deadline: a pass that is never honoured still fails, and any other response fails at once.
+ */
+export const PROPAGATION = { deadlineMs: 120_000, retryMs: 5_000, confirmMs: 2_000, consecutive: 3 } as const;
+const isGatePage = (status: number, body: string) => status === 401 && body.includes('action="/__preview-access"');
 
 const decode = (s: string) => s.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&#39;|&#x27;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, " ").trim();
 
-export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log: (s: string) => void = () => {}): Promise<{ modules: number; pages: number }> {
+export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log: (s: string) => void = () => {}, sleep: Sleep = realSleep, propagation: { deadlineMs: number; retryMs: number; confirmMs: number; consecutive: number } = PROPAGATION): Promise<{ modules: number; pages: number }> {
   const base = v.base.replace(/\/$/, "");
   const jar = new Map<string, string>();
   const send = async (method: string, path: string, form?: Record<string, string>) => {
@@ -47,9 +60,27 @@ export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log:
     if (r.status === 303 && jar.has("cm_preview")) break;
     if (r.status === 429) fail("preview password", "rate limited");
     if (attempt >= 6) fail("preview password", `not accepted (HTTP ${r.status})`);
-    await new Promise((res) => setTimeout(res, 10_000));
+    await sleep(10_000);
   }
   log("2/5 preview password accepted");
+
+  // 2b. The pass must be honoured consistently (see PROPAGATION) before anything else is checked.
+  for (let streak = 0, waited = 0, refused = 0; ;) {
+    r = await send("GET", "/login");
+    const body = await r.text();
+    if (r.status === 200 && jar.has("cm_csrf")) {
+      if (++streak >= propagation.consecutive) {
+        if (refused) log(`2b/5 preview pass honoured everywhere after ${Math.round(waited / 1000)}s (${refused} refusal${refused === 1 ? "" : "s"} while the password change propagated)`);
+        break;
+      }
+      await sleep(propagation.confirmMs); waited += propagation.confirmMs;
+      continue;
+    }
+    if (!isGatePage(r.status, body)) fail("sign-in page", `HTTP ${r.status}`);
+    streak = 0; refused++;
+    if (waited >= propagation.deadlineMs) fail("sign-in page", `HTTP 401: the preview pass for the accepted password was still refused after ${Math.round(waited / 1000)}s (the password change has not reached every edge location)`);
+    await sleep(propagation.retryMs); waited += propagation.retryMs;
+  }
 
   // 3. Owner email and password.
   r = await send("GET", "/login");

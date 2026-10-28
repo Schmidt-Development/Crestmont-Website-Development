@@ -298,6 +298,13 @@ jobs:
           ROTATE: ${{ inputs.rotate_credentials }}
         run: node --no-warnings scripts/staging-access.ts --url "${{ steps.deploy.outputs.url }}" --out access
 
+      # Read-only, every run: the last rotation is complete in D1 (no credential needed; counts and PASS/FAIL only).
+      - name: Rotation state in D1 (old demo sessions, tokens and recovery codes are gone)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node --no-warnings scripts/staging-rotation-check.ts state
+
       - name: Verify the full access sequence on the live preview
         id: verify
         run: |
