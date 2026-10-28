@@ -42,7 +42,9 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
-    environment: frontend-preview
+    environment:
+      name: frontend-preview
+      url: ${{ steps.deploy.outputs.url }}   # recorded on the GitHub deployment, so the exact URL is verifiable
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
