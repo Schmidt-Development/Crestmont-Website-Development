@@ -364,7 +364,7 @@ journey(8, ["PORTAL-002"], "customer completes conditional onboarding (sample Ri
   assertClean();
 });
 
-journey(9, ["PORTAL-004"], "customer uploads a project file (sample Harbor project), previews it and removes it", {}, async (t) => {
+journey(9, ["PORTAL-004", "FILE-001"], "customer uploads a project file (sample Harbor project), previews it and removes it", {}, async (t) => {
   const id = await projectId("customer.harbor", HARBOR);
   const c = await as("customer.harbor");
   const name = `e2e-${RUN}.png`;
