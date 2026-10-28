@@ -1,0 +1,143 @@
+name: Provision production
+
+# Creates Crestmont's production INFRASTRUCTURE ONLY (INFRA-002, INFRA-005), from GitHub, without a laptop:
+#   • D1 database  crestmont-production       — created if missing, never recreated or deleted
+#   • R2 bucket    crestmont-files-production — must already exist (checked, never created or changed)
+#   • Worker       crestmont-platform-production — created as an empty draft that holds its production secrets
+#                  (TURNSTILE_SITE_KEY, TURNSTILE_SECRET, EVIDENCE_INGEST_SECRET); its workers.dev URL and preview
+#                  URLs are switched off, so it is not reachable anywhere.
+# It NEVER uploads application code, attaches a domain or changes DNS, applies migrations, seeds data, or touches
+# crestmont-platform-staging / crestmont-platform-frontend-preview. The application is deployed only by
+# deploy-production.yml after the Founder's release approval.
+#
+# Gates: manual trigger on main only, the confirmation phrase, and the GitHub `production` environment (the
+# Founder is its required reviewer). Re-running is safe: every step is idempotent and existing secrets are kept.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "provision crestmont-platform-production" to confirm'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production   # never overlaps a production deploy
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WRANGLER: npx --yes wrangler@4
+      WORKER: crestmont-platform-production
+      DB_NAME: crestmont-production
+      BUCKET: crestmont-files-production
+    steps:
+      - name: Refuse unless confirmed, on main, with credentials
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          [ "$GITHUB_REF" = "refs/heads/main" ] || { echo "::error::Run this workflow from main only (got $GITHUB_REF)."; exit 1; }
+          [ "$CONFIRM" = "provision crestmont-platform-production" ] || { echo "::error::Confirmation phrase does not match. Nothing was changed."; exit 1; }
+          missing=""
+          [ -n "$CLOUDFLARE_API_TOKEN" ] || missing="$missing CLOUDFLARE_API_TOKEN"
+          [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          [ -z "$missing" ] || { echo "::error title=Production environment incomplete::Missing secrets on the 'production' environment:$missing. Nothing was changed."; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+
+      - name: Guard — wrangler.toml targets production only
+        run: node --no-warnings scripts/provision-production.ts guard wrangler.toml
+
+      - name: Turnstile production keys (present, not test keys, not staging's)
+        env:
+          PROD_TURNSTILE_SITE_KEY: ${{ secrets.PRODUCTION_TURNSTILE_SITE_KEY }}
+          PROD_TURNSTILE_SECRET: ${{ secrets.PRODUCTION_TURNSTILE_SECRET }}
+        run: node --no-warnings scripts/provision-production.ts turnstile
+
+      - name: Token can reach the account
+        run: $WRANGLER whoami > /dev/null
+
+      - name: R2 bucket exists (created by the Founder; never created or changed here)
+        run: |
+          $WRANGLER r2 bucket info "$BUCKET" > /dev/null 2>&1 || { echo "::error::R2 bucket $BUCKET was not found with this token. Check the bucket name and that the token has Account → Workers R2 Storage: Edit."; exit 1; }
+          echo "R2 bucket $BUCKET: present." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: D1 database (create if missing; never recreated)
+        id: d1
+        run: |
+          $WRANGLER d1 list --json > d1.json
+          id=$(node --no-warnings scripts/provision-production.ts d1-uuid d1.json "$DB_NAME")
+          created=false
+          if [ -z "$id" ]; then
+            $WRANGLER d1 create "$DB_NAME" > /dev/null
+            $WRANGLER d1 list --json > d1.json
+            id=$(node --no-warnings scripts/provision-production.ts d1-uuid d1.json "$DB_NAME")
+            created=true
+          fi
+          rm -f d1.json
+          [ -n "$id" ] || { echo "::error::Could not find or create the $DB_NAME D1 database."; exit 1; }
+          committed=$(node -e 'const t=require("fs").readFileSync("wrangler.toml","utf8");const s=t.indexOf("\n[env.production]");const b=t.slice(s);process.stdout.write((/database_name = "crestmont-production", database_id = "([^"]*)"/.exec(b)||[])[1]||"")')
+          if [ -n "$committed" ] && [ "$committed" != "$id" ]; then
+            echo "::error::wrangler.toml pins database_id $committed but the account's $DB_NAME is $id. Investigate before continuing."; exit 1
+          fi
+          # Workspace copy only (nothing is committed): lets the secret commands below resolve the production config.
+          node -e 'const fs=require("fs");let t=fs.readFileSync("wrangler.toml","utf8");t=t.replace(/(database_name = "crestmont-production", database_id = )""/, `$1"${process.argv[1]}"`);fs.writeFileSync("wrangler.toml",t)' "$id"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "committed=$committed" >> "$GITHUB_OUTPUT"
+          { echo "### D1 \`$DB_NAME\`: $([ "$created" = true ] && echo created || echo already existed)"; echo; echo "database_id: \`$id\`"; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Worker secrets (creates the empty draft Worker on first run; existing EVIDENCE_INGEST_SECRET kept)
+        env:
+          PROD_TURNSTILE_SITE_KEY: ${{ secrets.PRODUCTION_TURNSTILE_SITE_KEY }}
+          PROD_TURNSTILE_SECRET: ${{ secrets.PRODUCTION_TURNSTILE_SECRET }}
+        run: |
+          $WRANGLER secret list --env production --format json > secrets.json 2>/dev/null || echo "[]" > secrets.json
+          names=$(node --no-warnings scripts/provision-production.ts secret-names secrets.json); rm -f secrets.json
+          printf '%s' "$PROD_TURNSTILE_SITE_KEY" | $WRANGLER secret put TURNSTILE_SITE_KEY --env production > /dev/null
+          printf '%s' "$PROD_TURNSTILE_SECRET" | $WRANGLER secret put TURNSTILE_SECRET --env production > /dev/null
+          if printf '%s\n' "$names" | grep -qx EVIDENCE_INGEST_SECRET; then
+            echo "EVIDENCE_INGEST_SECRET already set on $WORKER: kept."
+          else
+            # Production's own value: random, never staging's, never printed or stored anywhere else.
+            node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))' | $WRANGLER secret put EVIDENCE_INGEST_SECRET --env production > /dev/null
+            echo "EVIDENCE_INGEST_SECRET generated for $WORKER (production-only value)."
+          fi
+          $WRANGLER secret list --env production --format json > secrets.json
+          node --no-warnings scripts/provision-production.ts secret-names secrets.json > names.txt; rm -f secrets.json
+          for n in TURNSTILE_SITE_KEY TURNSTILE_SECRET EVIDENCE_INGEST_SECRET; do grep -qx "$n" names.txt || { echo "::error::$n is not set on $WORKER"; exit 1; }; done
+          if grep -qxE 'STRIPE_SECRET_KEY|RESEND_API_KEY|RETELL_API_KEY|ANTHROPIC_API_KEY|BUILD_RUNNER_SECRET|STAGING_ACCESS_PASSWORD' names.txt; then
+            echo "::warning title=Live-service secret present::$WORKER holds a payments/email/voice/AI or preview secret that this setup never installs. Review it in the Cloudflare dashboard."
+          fi
+          echo "Worker \`$WORKER\` secrets: $(tr '\n' ' ' < names.txt)(names only)." >> "$GITHUB_STEP_SUMMARY"; rm -f names.txt
+
+      - name: No public URL for the draft Worker (workers.dev and preview URLs off)
+        run: |
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$WORKER/subdomain"
+          curl -fsS -X POST "$api" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" --data '{"enabled":false,"previews_enabled":false}' > /dev/null
+          state=$(curl -fsS "$api" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s).result||{};process.stdout.write(`${!!r.enabled}/${!!r.previews_enabled}`)})')
+          [ "$state" = "false/false" ] || { echo "::error::workers.dev/preview state is $state, expected false/false"; exit 1; }
+          echo "workers.dev URL and preview URLs: off." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Next step
+        run: |
+          {
+            echo
+            echo "### Provisioned. Nothing was deployed, no domain was attached, no migration ran."
+            if [ -z "${{ steps.d1.outputs.committed }}" ]; then
+              echo "Next: commit \`database_id = \"${{ steps.d1.outputs.id }}\"\` into \`[env.production]\` of wrangler.toml through a pull request (deploy-production.yml refuses to run until it is committed)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
