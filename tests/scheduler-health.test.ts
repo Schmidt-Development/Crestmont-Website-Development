@@ -21,6 +21,9 @@ test("[READY-012] [INFRA-006] deployed environments require the scheduler: never
   let h = await health(t);
   assert.equal(h.code, 503, "cron jobs that never ran on a deployed environment are a failure, not silence");
   assert.deepEqual(h.body.feeds.find((f) => f.source === "scheduler"), { source: "scheduler", required: true, status: "unavailable", lastSuccessAt: null });
+  const report = await t.client().get("/api/readiness/health?view=report");
+  assert.equal(report.status, 200, "?view=report returns the same public body with HTTP 200");
+  assert.equal(((await report.json()) as { httpStatus: number }).httpStatus, 503);
   // After the 15-minute and daily jobs run, health recovers.
   await scheduled({ cron: "*/15 * * * *" }, t.env);
   await scheduled({ cron: "17 11 * * *" }, t.env);

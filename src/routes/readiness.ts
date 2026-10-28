@@ -355,7 +355,10 @@ export function register(r: Router): void {
     const feeds = await ra.feedStatuses(ctx, input);
     const h = ra.overallFeedHealth(feeds);
     const detailed = !!ctx.actor && can(ctx.actor, "readiness.read");
-    return jsonResponse(ctx, h.ok ? 200 : 503, {
+    // ?view=report: the same body with HTTP 200 for tools that cannot read error responses. Monitors use the default.
+    const asReport = new URL(ctx.req.url).searchParams.get("view") === "report";
+    return jsonResponse(ctx, h.ok || asReport ? 200 : 503, {
+      ...(asReport ? { httpStatus: h.ok ? 200 : 503 } : {}),
       status: h.ok ? "ok" : "degraded", checkedAt: report.generatedAt,
       feeds: feeds.map((f) => ({ source: f.source, required: f.required, status: f.status, lastSuccessAt: f.lastSuccessAt, ...(detailed ? { detail: f.detail, lastAttemptAt: f.lastAttemptAt } : {}) })),
       ...(detailed ? { reason: h.reason, evidenceSetSha256: report.evidenceSetSha256, decision: report.decision.summary } : {}),
