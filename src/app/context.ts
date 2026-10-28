@@ -16,6 +16,8 @@ export interface Env {
   TURNSTILE_SITE_KEY?: string;
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
+  /** Staging only: comma-separated addresses and/or "@domain" entries that may receive real mail (default "@crestmontwebsitedevelopment.com"). */
+  EMAIL_RECIPIENT_ALLOWLIST?: string;
   ANTHROPIC_API_KEY?: string;
   AI_MODEL?: string;
   GITHUB_TOKEN?: string;

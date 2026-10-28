@@ -66,7 +66,8 @@ jobs:
               $WRANGLER d1 execute "$1" $2 --json --command "$q" > "drill/$3-$i.json" 2> drill/err.log || { cp "drill/$3-$i.json" drill/out.log; return 1; }
               files="$files${files:+,}drill/$3-$i.json"; i=$((i+1)); done < drill/count.sql; echo "$files" > "drill/$3.list"; }
           $WRANGLER d1 create "$SCRATCH" > /dev/null 2> drill/err.log || fail "create scratch database"
-          $WRANGLER d1 execute "$SCRATCH" --remote --file drill/staging.sql --yes > /dev/null 2> drill/err.log || fail "import export into scratch"
+          node --no-warnings scripts/restore-drill.ts sanitize drill/staging.sql drill/import.sql
+          $WRANGLER d1 execute "$SCRATCH" --remote --file drill/import.sql --yes > drill/out.log 2> drill/err.log || fail "import export into scratch"
           count "$SCRATCH" "--remote" restored || fail "count restored rows"
           node --no-warnings scripts/restore-drill.ts compare "$(cat drill/source.list)" "$(cat drill/restored.list)" \
             --commit "$GITHUB_SHA" --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-restore-drill" --started "$STARTED" --out evidence/restore-drill.json
