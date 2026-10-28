@@ -1,6 +1,6 @@
 # Security, legal and production readiness review — 2026-10-28
 
-**Branch:** `claude/security-legal-production-readiness` · **Base:** `origin/main` @ `85819b8` · **Scope:** security, privacy, legal preparation, compliance engineering, supply chain, Cloudflare, recovery, monitoring, production readiness.
+**Branch:** `claude/security-legal-production-readiness` · **Base:** `origin/main` @ `85819b8` (review), rebased onto `17c38f0` (PRs #14, #15) for integration · **Scope:** security, privacy, legal preparation, compliance engineering, supply chain, Cloudflare, recovery, monitoring, production readiness.
 
 > **This is a self-review, not an audit or certification.** It was performed by an automated engineering session reading the code, running the test suite and reviewing workflow files. No penetration test, no scan of any live environment, and no independent review has been done (finding F-16 stays open). Nothing here makes Crestmont "secure", "compliant" or "production-ready".
 
@@ -79,8 +79,10 @@ All findings are recorded in `security_findings` by `migrations/0040_security_re
 |---|---|---|---|
 | F-20 | Lockout confirmed a correct password: a locked account said "locked" only to the right password, "incorrect" to wrong ones | `src/services/auth.ts login` | **Resolved**: lockout decided before the password result; unknown emails get an equivalent counter so the answer does not reveal which accounts exist. Two tests |
 | F-21 | Files with `scan_status` `infected`/`failed` were downloadable via `GET /files/:id` (share links already refused them) | `src/services/files.ts serveFile` | **Resolved**: 409 + audited `file.download_blocked` |
-| F-23 | `deploy-production.yml` interpolates free-text `inputs.tag` into `run:` scripts that hold the production token | lines `--notes "tag ${{ inputs.tag }}"`, `--message "Release ${{ inputs.tag }} …"` (also in PR #8) | **Open** — patch in §9 for the PR #8 owner |
-| F-24 | Deploy workflows expose `CLOUDFLARE_API_TOKEN` to every step (including `npm install` of unpinned packages); `wrangler@4` and all actions pinned to mutable tags | job-level `env:` in deploy-production/staging | **Open** — patch in §9 |
+| F-23 | `deploy-production.yml` interpolates free-text `inputs.tag` into `run:` scripts that hold the production token | lines `--notes "tag ${{ inputs.tag }}"`, `--message "Release ${{ inputs.tag }} …"` (also in PR #8) | **Open** — tested hand-off patch `pr8-pr13-F23-F24-workflow-hardening.patch` (applies cleanly to PR #8 and #13; their suite passes with it) |
+| F-24 | Deploy workflows expose `CLOUDFLARE_API_TOKEN` to every step (including `npm install` of unpinned packages); `wrangler@4` and all actions pinned to mutable tags | job-level `env:` in deploy-production/staging | **Open** — same hand-off patch blanks secrets in every npm step; exact wrangler/SHA pinning still to do |
+| F-29 | Published refund policy says the Founder decides discretionary refunds, but support can permanently deny at review (`under_review → denied` needs only `refund.review`) | `src/domain/refunds.ts`, `src/content/legal.ts` refunds | **Open — Founder decision D-08** (change the workflow or the policy text; not decided here) |
+| F-30 | AI build inputs accepted files whose scan **failed**; portfolio uploads were stored as `clean` with no scan | `src/services/builds.ts`, `src/services/portfolio.ts` | **Resolved** (both refuse/label correctly; one-condition changes that merge cleanly with the AI builder and frontend branches) |
 | F-25 | No legal-hold mechanism: retention purges and privacy anonymisation could destroy evidence | — | **Resolved**: `legal_holds` + enforcement (§4) |
 | F-27 | Attachments on staff internal notes were stored as customer-organization files, visible and downloadable in the portal | `src/services/messages.ts postMessage` | **Resolved**: attachments refused on internal notes |
 | F-28 | Privacy anonymisation, retention periods, pricing decisions, tax settings, invitation revoke and customer team changes did not need step-up MFA | `src/app/step-up.ts` | **Resolved**: 9 routes added; existing coverage test exercises the staff ones |
@@ -99,7 +101,7 @@ All findings are recorded in `security_findings` by `migrations/0040_security_re
 
 ### Already-fixed findings corrected in the register
 
-F-06, F-08, F-11, F-13, F-15 were fixed in code with tests by earlier sessions (see `ASVS-REVIEW.md`) but `security_findings` still said `open`. The migration records them as resolved with their test evidence. The genuinely open release-blocking findings are now **F-01, F-02, F-03, F-10, F-16, F-18, F-19, F-23**.
+F-06, F-08, F-11, F-13, F-15 were fixed in code with tests by earlier sessions (see `ASVS-REVIEW.md`) but `security_findings` still said `open`. The migration records them as resolved with their test evidence. The genuinely open release-blocking findings are now **F-01, F-02, F-03, F-10, F-16, F-18, F-19, F-23**. Open non-blocking: F-05 (accepted), F-09, F-14, F-17 (accepted), F-24, F-29.
 
 ---
 
@@ -230,11 +232,11 @@ PR state (open/merged) could not be read: this session has read-only git access 
 - Add `persist-credentials: false` to checkouts that don't push (`release.yml` especially).
 - After Dependabot settles action versions, pin all `uses:` to full commit SHAs with a version comment.
 
-**For the AI Website Builder workstream — `src/services/builds.ts`:** refuse `scan_status = 'failed'` as well as `'infected'` for runner file fetches (use `isQuarantined` from `src/services/files.ts`).
+**For the AI Website Builder workstream — `src/services/builds.ts`:** done on this branch (F-30): `runnerFile` and the brief file list now refuse `failed` as well as `infected`. Merges cleanly with `claude/ai-website-builder-readiness`; please keep the condition when rebasing.
 
 **For the R2 workstream:** when a scanner is chosen, the upload path should keep new objects un-servable until a verdict (see `docs/security/MALWARE-SCANNING.md` §3).
 
-**For the AI runner workstream:** commit `runner/sandbox/package-lock.json` and `runner/agent-sdk/package-lock.json` so CI audits and Dependabot have input.
+**For the AI runner workstream:** `runner/sandbox/package-lock.json` is committed on `claude/ai-website-builder-readiness` (good — the CI audit here will then audit it); `runner/agent-sdk/package-lock.json` is still missing.
 
 ---
 

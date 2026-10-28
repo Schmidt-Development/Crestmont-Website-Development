@@ -10,7 +10,7 @@ These are actions, not choices. They close active exposures.
 
 | # | Action | Why | How |
 |---|---|---|---|
-| A1 | Review and merge **PR #8** (`claude/production-readiness`) | Stops staging Owner credentials (F-18) and the production database export (F-19) being published as artifacts of this public repository | GitHub PR review |
+| A1 | Review and merge **PR #8** (`claude/production-readiness`). It already contains PR #12's only commit, so #12 merges with it; #13 is a superset and can follow. Ask the PR owner to apply `pr8-pr13-F23-F24-workflow-hardening.patch` first (F-23/F-24) | Stops staging Owner credentials (F-18) and the production database export (F-19) being published as artifacts of this public repository | GitHub PR review |
 | A2 | Delete existing `staging-preview-access` (and any `pre-deploy-production-export`) artifacts | Old artifacts stay downloadable until they expire | Actions → each *Deploy staging* run → Artifacts → delete |
 | A3 | Rotate staging credentials after A1 | Treat the old staging Owner password and 2FA key as compromised | *Deploy staging* → run workflow with `rotate_credentials=true` |
 | A4 | GitHub settings (free on public repos) | Enforce what the files cannot | `docs/security/SECURITY-READINESS-2026-10-28.md` §10 (environment reviewers + `main`-only, rulesets, secret scanning + push protection, Dependabot alerts, fork-PR approval) |
