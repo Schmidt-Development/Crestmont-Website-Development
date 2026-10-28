@@ -42,6 +42,8 @@ export function customerPostFields(w: World, t: Tenant): Record<string, () => Fi
     "POST /portal/billing/invoices/:id/pay": () => ({}),
     "POST /portal/billing/manage": () => ({}),
     "POST /portal/billing/refund-request": () => ({ payment_id: t.ids.payment!, amount: "50", reason: `${t.marker} duplicate purchase by mistake`, evidence: "receipt" }),
+    "POST /mfa/step-up": () => ({ code: "000000" }),
+    "POST /account/mfa/recovery-codes": () => ({ code: "000000" }),
     "POST /account/password": () => ({ current: TEST_PASSWORD, next: TEST_PASSWORD }),
     "POST /account/sessions/:id/revoke": () => ({}),
     "POST /account/sessions/revoke-others": () => ({}),
@@ -104,6 +106,14 @@ export function auditScenarios(w: World): Scenario[] {
       const res = await c.post("/mfa", { code: await totpCode(spare.secret) });
       spare.c = c;
       return { res, actorId: spare.id };
+    } },
+    { key: "POST /mfa/step-up", run: async () => {
+      await w.db.prepare(`UPDATE users SET totp_last_step = NULL WHERE id = ?`).bind(spare.id).run();
+      return { res: await spare.c.post("/mfa/step-up?next=%2Faccount", { code: await totpCode(spare.secret) }), actorId: spare.id };
+    } },
+    { key: "POST /account/mfa/recovery-codes", run: async () => {
+      await w.db.prepare(`UPDATE users SET totp_last_step = NULL WHERE id = ?`).bind(spare.id).run();
+      return { res: await spare.c.post("/account/mfa/recovery-codes", { code: await totpCode(spare.secret) }), actorId: spare.id };
     } },
     { key: "POST /account/password", as: spareAs, fields: () => ({ current: TEST_PASSWORD, next: NEWPW }) },
     { key: "POST /account/sessions/:id/revoke", run: async () => {
@@ -325,6 +335,7 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/employees/:id/role", fields: () => ({ role: "project_manager" }) },
     { key: "POST /staff/employees/:id/disable", fields: () => ({ reason: "Left the company" }) },
     { key: "POST /staff/employees/:id/enable" },
+    { key: "POST /staff/employees/:id/mfa-reset" },
     { key: "POST /staff/employees/:id/profile", fields: () => ({ job_title: "Front-end developer", weekly_capacity_hours: "30" }) },
     { key: "GET /staff/employees/export.csv" },
     { key: "GET /staff/email/export.csv" },

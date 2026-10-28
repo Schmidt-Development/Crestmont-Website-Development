@@ -132,7 +132,8 @@ const HONEYPOT = "fax_number";
 type FormVals = Record<string, string>;
 type FieldErrors = Record<string, string>;
 
-function turnstileWidget(ctx: AppContext): SafeHtml {
+/** Cloudflare Turnstile widget (renders nothing without a site key, e.g. in development). Also used by /register and /password/forgot. */
+export function turnstileWidget(ctx: AppContext): SafeHtml {
   if (!ctx.env.TURNSTILE_SITE_KEY) return html``;
   return html`<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script><div class="cf-turnstile field" data-sitekey="${ctx.env.TURNSTILE_SITE_KEY}"></div>`;
 }

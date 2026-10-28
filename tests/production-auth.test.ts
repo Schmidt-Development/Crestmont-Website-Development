@@ -9,11 +9,18 @@ import { createTestApp, createStaff, createCustomer, lastEmail, linkFrom, TEST_P
 import { totpCode } from "../src/lib/auth-crypto.ts";
 
 // Production enables the breached-password check; answer it locally (no breach) instead of calling the API.
-const noBreach: typeof fetch = async () => new Response("0000000000000000000000000000000000A:0\n", { status: 200 });
+// Turnstile siteverify is answered locally too: only the token "human-token" passes (TEST DATA).
+const noBreach: typeof fetch = async (input, init) => {
+  if (String(input).includes("turnstile/v0/siteverify")) return Response.json({ success: (init?.body as FormData).get("response") === "human-token" });
+  return new Response("0000000000000000000000000000000000A:0\n", { status: 200 });
+};
+const HUMAN = { "cf-turnstile-response": "human-token" };
+const TEST_MFA_KEY = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
 
 async function productionApp() {
   // PREVIEW_GATE and STAGING_ACCESS_PASSWORD are set on purpose: production must ignore them.
-  return createTestApp({ ENVIRONMENT: "production", APP_URL: "http://crestmont.test", PREVIEW_GATE: "required", STAGING_ACCESS_PASSWORD: "staging-preview-pw", overrides: { fetch: noBreach } });
+  return createTestApp({ ENVIRONMENT: "production", APP_URL: "http://crestmont.test", PREVIEW_GATE: "required", STAGING_ACCESS_PASSWORD: "staging-preview-pw",
+    TURNSTILE_SECRET: "test-turnstile-secret", MFA_ENCRYPTION_KEY: TEST_MFA_KEY, overrides: { fetch: noBreach } });
 }
 
 const PUBLIC_PAGES = ["/", "/services", "/pricing", "/pricing/compare", "/portfolio", "/process", "/about", "/faq", "/hosting-maintenance", "/contact", "/quote", "/legal", "/legal/privacy", "/login", "/register", "/password/forgot"];
@@ -40,7 +47,7 @@ test("[AUTH-001] [AUTH-008] production: a customer signs up, confirms the email,
   const { db, client } = await productionApp();
   const other = await createCustomer(db, "other@example.com", "Other Org");
   const c = client();
-  const reg = await c.post("/register", { name: "Riley Shaw", organization: "Shaw Studio", email: "riley@shaw.example", password: TEST_PASSWORD, terms: "1" });
+  const reg = await c.post("/register", { name: "Riley Shaw", organization: "Shaw Studio", email: "riley@shaw.example", password: TEST_PASSWORD, terms: "1", ...HUMAN });
   assert.equal(reg.status, 200);
   const mail = await lastEmail(db, "riley@shaw.example");
   assert.equal(mail?.template, "verification");
@@ -73,7 +80,7 @@ test("[AUTH-006] [AUTH-003] production: an employee accepts an individual invita
   assert.equal((await c.get("/mfa")).headers.get("location"), "/mfa/setup");
   const setup = await (await c.get("/mfa/setup")).text();
   const secret = /data-testid="totp-secret">([A-Z2-7 ]+)</.exec(setup)![1].replace(/ /g, "");
-  assert.equal((await c.post("/mfa/setup", { code: await totpCode(secret) })).status, 303);
+  assert.equal((await c.post("/mfa/setup", { code: await totpCode(secret) })).status, 200, "enrolled; recovery codes shown once");
   assert.equal((await c.get("/staff")).status, 200);
   const approve = await c.get("/staff/readiness/approve");
   assert.notEqual(approve.status, 200, "only the Owner may open the release approval page");
@@ -97,7 +104,7 @@ test("[AUTH-003] production: the Owner is bootstrapped by a one-time invitation 
   const setup = await (await c.get("/mfa/setup")).text();
   const secret = /data-testid="totp-secret">([A-Z2-7 ]+)</.exec(setup)![1].replace(/ /g, "");
   assert.equal((await c.post("/mfa/setup", { code: "000000" })).status, 400);
-  assert.equal((await c.post("/mfa/setup", { code: await totpCode(secret) })).status, 303);
+  assert.equal((await c.post("/mfa/setup", { code: await totpCode(secret) })).status, 200, "enrolled; recovery codes shown once");
   assert.equal((await c.get("/staff/readiness/approve")).status, 200);
   const role = await db.prepare(`SELECT m.role_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = 'founder@crestmont.test'`).first<{ role_id: string }>();
   assert.equal(role?.role_id, "owner");
@@ -109,7 +116,7 @@ test("[AUTH-003] production: the Owner is bootstrapped by a one-time invitation 
   const account = await c.get("/account");
   assert.equal(account.status, 200);
   assert.ok(!(await account.text()).includes(secret), "an enrolled MFA secret is never shown again");
-  assert.match((await d.get("/mfa/setup")).headers.get("location") ?? "", /^\/mfa$/, "an unverified session cannot replace the authenticator");
+  assert.match((await d.get("/mfa/setup")).headers.get("location") ?? "", /^\/mfa(\?next=%2Fmfa%2Fsetup)?$/, "an unverified session cannot replace the authenticator");
 });
 
 test("[AUTH-002] [AUTH-004] production: password reset is single-use, signs out every session, and does not reveal whether an account exists", async () => {
@@ -118,8 +125,8 @@ test("[AUTH-002] [AUTH-004] production: password reset is single-use, signs out 
   const a = client();
   assert.equal((await a.post("/login", { email: cust.email, password: TEST_PASSWORD })).headers.get("location"), "/portal");
   const b = client();
-  const unknown = await (await b.post("/password/forgot", { email: "nobody@example.com" })).text();
-  const known = await (await b.post("/password/forgot", { email: cust.email })).text();
+  const unknown = await (await b.post("/password/forgot", { email: "nobody@example.com", ...HUMAN })).text();
+  const known = await (await b.post("/password/forgot", { email: cust.email, ...HUMAN })).text();
   assert.equal(unknown.replace(/nobody@example\.com/g, ""), known.replace(/reset@example\.com/g, ""), "same response for unknown accounts");
   const mail = await lastEmail(db, cust.email);
   assert.equal(mail?.template, "password_reset");

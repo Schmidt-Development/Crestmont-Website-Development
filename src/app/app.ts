@@ -15,6 +15,7 @@ import { recordAppError } from "../services/monitoring.ts";
 import { rateLimit, securityEvent } from "../services/security.ts";
 import { previewGate } from "./preview-gate.ts";
 import { recordRequestMetric } from "../services/env-metrics.ts";
+import { STEP_UP_MAX_AGE_MINUTES, stepUpAction, stepUpReturnPath } from "./step-up.ts";
 
 let router: Router | null = null;
 function getRouter(): Router {
@@ -37,7 +38,7 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
     ip: req.headers.get("cf-connecting-ip") ?? req.headers.get("x-forwarded-for")?.split(",")[0].trim() ?? null,
     now,
     baseUrl: env.APP_URL ?? url.origin,
-    user: null, actor: null, sessionId: null, sessionMfaVerified: false,
+    user: null, actor: null, sessionId: null, sessionMfaVerified: false, sessionMfaAt: null,
     csrfToken: cookies.cm_csrf && /^[0-9a-f]{32}$/.test(cookies.cm_csrf) ? cookies.cm_csrf : "",
     flash: null,
     setCookies: [],
@@ -63,7 +64,7 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
   const cookieAuth = !(url.pathname.startsWith("/api/") && req.method !== "GET" && req.method !== "HEAD");
   const session = cookieAuth ? await loadSession(env.DB, cookies.cm_session, { passive: url.pathname.startsWith("/live/") }) : null;
   if (session) {
-    ctx.user = session.user; ctx.actor = session.actor; ctx.sessionId = session.sessionId; ctx.sessionMfaVerified = session.mfaVerified;
+    ctx.user = session.user; ctx.actor = session.actor; ctx.sessionId = session.sessionId; ctx.sessionMfaVerified = session.mfaVerified; ctx.sessionMfaAt = session.mfaVerifiedAt;
   } else if (env.resolveActor && cookieAuth) {
     ctx.actor = await env.resolveActor(req);
   }
@@ -101,6 +102,26 @@ export function requireStaff(ctx: AppContext, perm?: Permission): void {
   if (!ctx.user!.isStaff) throw new HttpError(403, "This area is for Crestmont staff.");
   if (!ctx.sessionMfaVerified) throw new HttpError(401, "MFA_REQUIRED");
   if (perm && !can(ctx.actor!, perm)) throw new HttpError(403, "You do not have permission to do that.");
+}
+
+/** Thrown when a sensitive action needs a fresh second factor; app.ts turns it into a redirect to /mfa/step-up. */
+export class StepUpRequired extends HttpError {
+  constructor() { super(401, "STEP_UP_REQUIRED"); }
+}
+
+/**
+ * Step-up MFA (docs/AUTH-PRODUCTION.md gap 2): the session must have completed a TOTP or recovery-code
+ * verification within `maxAgeMinutes`. Applied centrally to every action listed in src/app/step-up.ts.
+ * Users without MFA enrolled have no factor to step up with and are not asked here: staff in that state are
+ * still stopped by requireStaff (which demands an MFA-verified session), and first enrolment must stay reachable.
+ */
+export function requireRecentMfa(ctx: AppContext, maxAgeMinutes = STEP_UP_MAX_AGE_MINUTES): void {
+  requireUser(ctx);
+  if (!ctx.user!.mfaEnabled) return;
+  if (!ctx.sessionMfaVerified) throw new HttpError(401, "MFA_REQUIRED");
+  const at = ctx.sessionMfaAt ? Date.parse(ctx.sessionMfaAt) : NaN;
+  const age = Date.now() - at;
+  if (!(age >= -60e3 && age <= maxAgeMinutes * 60e3)) throw new StepUpRequired();
 }
 
 /** Returns the customer organization the signed-in customer is acting for (first membership, or ?org= when they belong to several). */
@@ -151,6 +172,9 @@ async function dispatch(req: Request, env: Env, url: URL, mark: { unhandled: boo
     // /api/* write, so a cookie cannot authorize one (ASVS F-08, enforced, tests/asvs-hardening.test.ts).
     if (req.method !== "GET" && req.method !== "HEAD" && !url.pathname.startsWith("/api/")) await assertCsrf(ctx);
     if (req.method === "POST" && ctx.user && !url.pathname.startsWith("/api/")) await limitActions(ctx, env, match.pattern);
+    // Step-up MFA for sensitive actions (single policy list in src/app/step-up.ts). Signed-in users only: anonymous
+    // requests fall through to the route's own guard, which answers 401 / sign-in as before.
+    if (ctx.user && stepUpAction(req.method, match.pattern, url)) requireRecentMfa(ctx);
     return await match.handler(ctx, match.params);
   } catch (err) {
     const isApi = url.pathname.startsWith("/api/");
@@ -161,8 +185,13 @@ async function dispatch(req: Request, env: Env, url: URL, mark: { unhandled: boo
     const status = (err as { status?: number }).status;
     if (status === 401 && !isApi) {
       if ((err as Error).message === "MFA_REQUIRED" && ctx) return redirect(ctx, `/mfa?next=${encodeURIComponent(url.pathname)}`);
+      if (err instanceof StepUpRequired && ctx) {
+        const back = stepUpReturnPath(req, url, ctx.user?.isStaff ? "/staff" : "/account");
+        return redirect(ctx, `/mfa/step-up?next=${encodeURIComponent(back)}`, req.method === "GET" ? undefined : { kind: "info", text: "Confirm it is you, then submit the form again." });
+      }
       if (ctx) return redirect(ctx, `/login?next=${encodeURIComponent(url.pathname + url.search)}`);
     }
+    if (err instanceof StepUpRequired && isApi) return jsonResponse(ctx, 401, { error: "Recent two-factor verification required. Verify at /mfa/step-up and retry." });
     if (status && status >= 400 && status < 500) {
       return isApi ? jsonResponse(ctx, status, { error: (err as Error).message }) : htmlError(ctx, req, env, status, status === 403 ? "Access denied" : "Request could not be completed", (err as Error).message);
     }

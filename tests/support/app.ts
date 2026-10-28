@@ -86,7 +86,8 @@ export class TestClient {
       if (!totpSecret) throw new Error("MFA required but no TOTP secret given");
       // Codes are single-use per 30-second step (replay protection). Tests sign in many times within one
       // step, so the harness simulates "the next window" by clearing the last accepted step first.
-      await this.env.DB.prepare(`UPDATE users SET totp_last_step = NULL WHERE totp_secret = ?`).bind(totpSecret).run();
+      // (Matched by email: with MFA_ENCRYPTION_KEY set, the stored secret is ciphertext.)
+      await this.env.DB.prepare(`UPDATE users SET totp_last_step = NULL WHERE email = ?`).bind(email.trim().toLowerCase()).run();
       const r2 = await this.post("/mfa", { code: await totpCode(totpSecret) });
       if (r2.status !== 303) throw new Error(`mfa failed: ${r2.status}`);
     }

@@ -22,25 +22,34 @@ implemented parts are in `tests/production-auth.test.ts` (development-mode equiv
 | Tenant isolation | every customer route checked against other organizations' ids | security-tenancy.test.ts |
 | Audit logging | `audit_logs` for registration, sessions, MFA, resets, invitations; `security_events` for failures | auth.test.ts, platform tests |
 | Release approval needs Owner + MFA | `/staff/readiness/approve` | production-auth #3, #4 |
+| MFA recovery (gap 1, done) | 10 single-use recovery codes (PBKDF2-hashed, shown once at enrolment / regeneration; regeneration needs an MFA-verified session + current TOTP; use is a security event + audit + email); administrator MFA reset at /staff/employees (Owner/Administrator; never the Owner by a non-Owner, never yourself; revokes sessions, forces re-enrolment, audited); Owner break-glass `scripts/reset-owner-mfa.ts` (RUNBOOK §4a) | auth-hardening.test.ts |
+| Step-up MFA (gap 2, done) | `requireRecentMfa()` in `src/app/app.ts`, applied centrally from the single list in `src/app/step-up.ts` (release approval, staff invitations / role / disable / enable / 2FA reset, refund decide / issue, integration probes and environment / automation settings, every data export, replacing an authenticator); 10-minute window from `sessions.mfa_verified_at`; `/mfa/step-up` accepts a TOTP or recovery code and returns to a same-origin `next` | auth-hardening.test.ts (every listed action refused, then performed after a fresh TOTP) |
+| TOTP secrets at rest (gap 3, done) | AES-GCM under `MFA_ENCRYPTION_KEY`, stored `v1:<iv>:<ct>` with the user id as authenticated data; legacy plaintext verifies and is re-encrypted on the next success; `scripts/encrypt-totp-secrets.ts` for existing rows; development without a key stores plaintext, staging/production refuse enrolment without it (existing users unaffected). Rollout order: DEPLOYMENT §4 | auth-hardening.test.ts |
+| Bot protection on auth forms (gap 4, done) | Turnstile (same `verifyTurnstile` as the lead forms; fails closed outside development without `TURNSTILE_SECRET`) on `/register` and `/password/forgot`; `/password/forgot` also limited to 10/hour per IP (the 3/hour per-email limit stays) | auth-hardening.test.ts, production-auth.test.ts |
+| Versioned password hash (gap 6, done) | Stored as `pbkdf2$<iterations>$<salt>$<hash>` (algorithm + cost in every hash, unchanged); any hash with other parameters is re-hashed on the next successful sign-in (`user.password_rehashed`). Iterations unchanged at 100k | auth-hardening.test.ts |
 
 ## Gaps for the backend session (in priority order)
 
-1. **MFA account recovery.** There are no recovery codes and no documented path when an authenticator is lost.
+Status: **1, 2, 3, 4 and 6 are implemented** (see the table above and `tests/auth-hardening.test.ts`). **5 is open**: it is a
+product decision for the Founder. Operator action still required: set `MFA_ENCRYPTION_KEY` on staging and production
+and run the re-encryption script (DEPLOYMENT §4).
+
+1. **[Done] MFA account recovery.** There are no recovery codes and no documented path when an authenticator is lost.
    For the Owner this is a lock-out risk. Proposed: 10 single-use recovery codes (hashed like passwords, shown once
    at enrolment, regenerate on demand, audited); Administrator-initiated MFA reset for employees (revokes sessions,
    forces re-enrolment, audited); a documented Owner break-glass procedure (operator-run script, like
    `bootstrap-owner.ts`, that revokes sessions and clears MFA, recorded in `audit_logs`).
-2. **Step-up MFA for sensitive actions.** MFA is checked once per session (staff sessions last up to 12 h). Require
+2. **[Done] Step-up MFA for sensitive actions.** MFA is checked once per session (staff sessions last up to 12 h). Require
    a fresh TOTP (or one verified within ~10 minutes) for: release approval, role/membership changes, refunds and
    payouts, integration/secret settings, data exports, and MFA changes.
-3. **TOTP secrets at rest.** `users.totp_secret` and `totp_pending_secret` are stored in clear. Encrypt with
+3. **[Done — operator must set the key] TOTP secrets at rest.** `users.totp_secret` and `totp_pending_secret` are stored in clear. Encrypt with
    AES-GCM under a per-environment Worker secret (e.g. `MFA_ENCRYPTION_KEY`), with a migration that re-encrypts
    existing rows. (The deleted staging export artifact showed why: a database copy exposed 2FA keys.)
-4. **Bot protection on auth forms.** Public contact/quote forms use Turnstile; `/register` and `/password/forgot`
+4. **[Done] Bot protection on auth forms.** Public contact/quote forms use Turnstile; `/register` and `/password/forgot`
    do not. Add the existing Turnstile check, and a per-IP limit on `/password/forgot` (currently per email only).
-5. **Email-verified gating.** Unverified customers can sign in (proposal acceptance already requires a verified
+5. **[Open — Founder decision] Email-verified gating.** Unverified customers can sign in (proposal acceptance already requires a verified
    email). Decide which other actions require it (checkout, file upload, messaging).
-6. **Password hashing cost.** 100k PBKDF2 iterations is the Workers maximum and below current OWASP guidance for
+6. **[Done — format confirmed versioned, rehash-on-login added] Password hashing cost.** 100k PBKDF2 iterations is the Workers maximum and below current OWASP guidance for
    PBKDF2-SHA256. Acceptable for launch; keep the hash format versioned so a stronger KDF can be adopted with
    rehash-on-login.
 

@@ -119,6 +119,10 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /mfa": flow(act("session.mfa_verified")),
   "GET /mfa/setup": flow(),
   "POST /mfa/setup": flow(act("user.mfa_enabled")),
+  // Step-up MFA (src/app/step-up.ts): a fully signed-in session re-verifies before a sensitive action.
+  "GET /mfa/step-up": session(),
+  "POST /mfa/step-up": session(act("session.step_up_verified")),
+  "POST /account/mfa/recovery-codes": session(act("user.mfa_recovery_codes_regenerated")),
   "GET /password/forgot": pub,
   "POST /password/forgot": pub,
   "GET /password/reset": token("password reset token (?token=)"),
@@ -422,6 +426,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/employees/:id/role": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.role_changed")),
   "POST /staff/employees/:id/disable": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.disabled")),
   "POST /staff/employees/:id/enable": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.enabled")),
+  "POST /staff/employees/:id/mfa-reset": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.mfa_reset")),
   "GET /staff/email": staff(ops),
   "GET /staff/email/export.csv": staff(ops, undefined, act("email.log_exported")),
   "GET /staff/email/templates": staff(ops),

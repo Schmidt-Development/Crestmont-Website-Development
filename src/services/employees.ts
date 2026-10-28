@@ -4,11 +4,14 @@
 //    Owner account at all.
 //  - Users cannot disable themselves or change their own role.
 //  - Disabling revokes every session immediately. Every change is audited.
+//  - Two-factor reset (lost authenticator, AUTH-002): Owner / Administrator only (employee.manage); never your own
+//    account; the Owner account only by the Owner (a locked-out Owner uses scripts/reset-owner-mfa.ts). Clears the
+//    authenticator and recovery codes and revokes every session, so the person must enrol again at next sign-in.
 import type { Db } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import { STAFF_ROLES, type Role } from "../domain/authz.ts";
-import { audit } from "./security.ts";
-import { createInvitation, revokeAllSessions } from "./auth.ts";
+import { audit, securityEvent } from "./security.ts";
+import { clearMfa, createInvitation, revokeAllSessions } from "./auth.ts";
 
 /** Roles that can be assigned or invited through the UI (never 'owner'). */
 export const ASSIGNABLE_STAFF_ROLES = STAFF_ROLES.filter((r) => r !== "owner") as Exclude<(typeof STAFF_ROLES)[number], "owner">[];
@@ -106,4 +109,16 @@ export async function revokeInvitation(db: Db, byUserId: string, invitationId: s
   const res = await db.prepare(`UPDATE invitations SET expires_at = ? WHERE id = ? AND accepted_at IS NULL AND role_id <> 'owner' AND expires_at > ?`).bind(nowIso(), invitationId, nowIso()).run();
   if (res.meta.changes !== 1) throw new EmployeeError("Invitation not found or no longer pending.", 404);
   await audit(db, { actorUserId: byUserId, action: "invitation.revoked", subjectType: "invitation", subjectId: invitationId });
+}
+
+export async function resetStaffMfa(db: Db, actor: { userId: string; isOwner: boolean }, targetUserId: string, ip: string | null): Promise<{ email: string }> {
+  if (targetUserId === actor.userId) throw new EmployeeError("You cannot reset your own two-factor authentication here. Use \"Replace authenticator\" on your account page, or a recovery code.", 403);
+  const m = await staffMembership(db, targetUserId);
+  if (!m) throw new EmployeeError("Staff member not found.", 404);
+  if (m.role_id === "owner" && !actor.isOwner) throw new EmployeeError("Only the Owner can reset the Owner account's two-factor authentication. A locked-out Owner follows the break-glass procedure in docs/RUNBOOK.md.", 403);
+  await clearMfa(db, targetUserId);
+  await revokeAllSessions(db, targetUserId, null, actor.userId);
+  await securityEvent(db, "mfa_reset_by_admin", { userId: targetUserId, ip, detail: `by ${actor.userId}` });
+  await audit(db, { actorUserId: actor.userId, action: "employee.mfa_reset", subjectType: "user", subjectId: targetUserId, organizationId: m.organization_id, ip, details: { role: m.role_id } });
+  return { email: m.email };
 }
