@@ -55,7 +55,7 @@ name = "crestmont-platform-production"
 workers_dev = false           # production is reachable only on the custom domain
 # routes = [{ pattern = "crestmontwebsitedevelopment.com", custom_domain = true }, { pattern = "www.crestmontwebsitedevelopment.com", custom_domain = true }]   # after DNS control (BLK-011)
 vars = { ENVIRONMENT = "production" }   # add APP_URL = "https://crestmontwebsitedevelopment.com" with the custom domain
-d1_databases = [{ binding = "DB", database_name = "crestmont-production", database_id = "", migrations_dir = "migrations" }]
+d1_databases = [{ binding = "DB", database_name = "crestmont-production", database_id = "c667f1a9-0802-4c52-a0e1-b512219a6eea", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-production" }]
 triggers = { crons = ["*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts
 
