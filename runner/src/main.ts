@@ -88,7 +88,8 @@ export async function sweepPreviews(cfg: RunnerConfig, client: ControlPlaneClien
 }
 
 export function capabilities(cfg: RunnerConfig): string[] {
-  const base = cfg.agentProvider === "local" ? ["local-model", "container-sandbox", "zero-token-cost"] : ["agent-sdk"];
+  const base = cfg.agentProvider === "local" ? ["local-model", "container-sandbox", "zero-token-cost"]
+    : cfg.agentProvider === "claude-code" ? ["claude-code", "subscription-included"] : ["agent-sdk"];
   return [...base, "git", ...(cfg.preview ? ["preview"] : []), ...((cfg.preview?.gateSecret.length ?? 0) >= 32 ? ["private-preview"] : []), ...(cfg.previewDelete ? ["preview-cleanup"] : []), ...(cfg.delivery && cfg.repo ? ["production-deploy"] : []), ...(cfg.aiDrafts.enabled && cfg.aiDrafts.provider === "local" ? ["ai-drafts"] : [])];
 }
 
@@ -241,7 +242,7 @@ async function main(argv: string[]): Promise<number> {
   }
   if (argv.includes("--preflight")) return (await runPreflight(cfg, manifest, logger, queryFn)) ? 0 : 1;
 
-  const client = new ControlPlaneClient({ baseUrl: cfg.controlPlaneUrl, secret: cfg.secret, runnerId: cfg.runnerId, logger });
+  const client = new ControlPlaneClient({ baseUrl: cfg.controlPlaneUrl, secret: cfg.secret, runnerId: cfg.runnerId, logger, worker: cfg.worker });
   const health = newHealthState({ runnerId: cfg.runnerId, version: RUNNER_VERSION, provider: cfg.agentProvider, model: cfg.agentProvider === "local" ? cfg.local.model : "per job" });
   if (cfg.healthPort) {
     await startHealthServer(health, cfg.healthHost, cfg.healthPort);
@@ -256,6 +257,7 @@ async function main(argv: string[]): Promise<number> {
     version: RUNNER_VERSION, controlPlane: new URL(cfg.controlPlaneUrl).origin, provider: cfg.agentProvider,
     paidProviderAllowed: cfg.allowPaidProvider, model: cfg.agentProvider === "local" ? cfg.local.model : "per job",
     aiDrafts: !!ds, preview: !!cfg.preview, privatePreviewGate: (cfg.preview?.gateSecret.length ?? 0) >= 32, customerDelivery: !!(cfg.delivery && cfg.repo), projectRepos: !!cfg.repo,
+    worker: cfg.worker?.id ?? null, architect: cfg.advisor.architect, reviewer: cfg.advisor.reviewer,
   });
   if (cfg.preview && cfg.preview.gateSecret.length < 32) logger.warn("PREVIEW_DEPLOY_COMMAND is set but PREVIEW_GATE_SECRET is missing or shorter than 32 characters: no preview will be deployed (previews are private; Founder decision D3)");
   const onDraftError = (msg: string) => {

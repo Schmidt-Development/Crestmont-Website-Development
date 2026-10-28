@@ -16,6 +16,8 @@ export const TEMPLATE_PATH = path.join(import.meta.dirname, "proxy", "squid.conf
 export const PLACEHOLDER_NONE = "none.invalid";
 /** Hosts the Ollama-in-Docker profile needs for `ollama pull` (must match Install-CrestmontRunner.ps1). */
 export const OLLAMA_PULL_DOMAINS = ["registry.ollama.ai", ".ollama.com", ".r2.cloudflarestorage.com"];
+/** Founder V3: exact hosts Claude Code needs (inference + plan sign-in), allowed only from the claude worker network. */
+export const CLAUDE_SERVICE_DOMAINS = ["api.anthropic.com", "claude.ai", "claude.com", "platform.claude.com", "console.anthropic.com"];
 
 /** Hosted inference APIs that must never be reachable: one list, shared with the local provider. */
 export { PAID_AI_DOMAINS, domainMatches, isPaidAiHost } from "../src/providers/paid-hosts.ts";
@@ -43,6 +45,8 @@ export interface SquidInputs {
   extraDomains?: string[];
   /** Ollama runs in Docker and pulls models through the proxy. */
   ollamaInDocker?: boolean;
+  /** Founder V3: Claude Code builder workers (Claude hosts reachable from the claude worker network only). */
+  claudeCode?: boolean;
 }
 
 export function renderSquidConf(template: string, i: SquidInputs): string {
@@ -51,10 +55,11 @@ export function renderSquidConf(template: string, i: SquidInputs): string {
   const extras = (i.extraDomains ?? []).filter((d) => String(d ?? "").trim() !== "").map((d) => validateDomain(d, "extra egress domain"));
   const extra = extras.length ? extras.join(" ") : PLACEHOLDER_NONE;
   const pull = i.ollamaInDocker ? OLLAMA_PULL_DOMAINS.join(" ") : PLACEHOLDER_NONE;
-  for (const p of ["__PLATFORM_HOST__", "__RUNNER_EXTRA_DOMAINS__", "__OLLAMA_PULL_DOMAINS__"]) {
+  const claude = i.claudeCode ? CLAUDE_SERVICE_DOMAINS.join(" ") : PLACEHOLDER_NONE;
+  for (const p of ["__PLATFORM_HOST__", "__RUNNER_EXTRA_DOMAINS__", "__OLLAMA_PULL_DOMAINS__", "__CLAUDE_SERVICE_DOMAINS__"]) {
     if (!template.includes(p)) throw new EgressPolicyError(`template is missing the ${p} placeholder`);
   }
-  const out = template.replaceAll("__PLATFORM_HOST__", platform).replaceAll("__RUNNER_EXTRA_DOMAINS__", extra).replaceAll("__OLLAMA_PULL_DOMAINS__", pull).replace(/\r\n/g, "\n");
+  const out = template.replaceAll("__PLATFORM_HOST__", platform).replaceAll("__RUNNER_EXTRA_DOMAINS__", extra).replaceAll("__OLLAMA_PULL_DOMAINS__", pull).replaceAll("__CLAUDE_SERVICE_DOMAINS__", claude).replace(/\r\n/g, "\n");
   if (/__[A-Z_]+__/.test(out.replace(/^#.*$/gm, ""))) throw new EgressPolicyError("unreplaced placeholder in the rendered configuration");
   return out;
 }
@@ -125,4 +130,4 @@ export function evaluateSquid(p: SquidPolicy, r: SquidRequest): { allowed: boole
 }
 
 /** Client addresses of the compose networks (docker-compose.yml ipam subnets). */
-export const NETWORKS = { runner: "172.30.10.5", install: "172.30.20.5", outside: "10.9.8.7" } as const;
+export const NETWORKS = { runner: "172.30.10.5", install: "172.30.20.5", claude: "172.30.30.5", outside: "10.9.8.7" } as const;

@@ -1,0 +1,88 @@
+# Founder V3 (2026-10-28, Claude-only): three Claude Code builder workers on Node 1, one Claude plan account each.
+# Used together with docker-compose.yml when Install-CrestmontRunner.ps1 runs with -Provider ClaudeCode:
+#   docker compose -f docker-compose.yml -f docker-compose.claude.yml ...
+#
+#   claude-1..3   One orchestrator process per Claude account. Each serves exactly one builder worker registered in
+#                 Owner -> AI builds -> Builder accounts (claude-N.env: BUILD_WORKER_ID, key file) and runs Claude Code
+#                 with that account's own config directory (..\claude\claude-N, signed in once by the Founder).
+#                 No API key exists anywhere; no Docker socket (the agent's commands cannot start containers);
+#                 own network (claude_net) whose only way out is the egress proxy: the Claude Code hosts, the
+#                 platform, the npm registry and the configured extras. No published ports.
+#   runner        The local-model runner is not started in this mode (profile "local-runner"); Ollama is not needed.
+
+x-claude-worker: &claude-worker
+  image: crestmont-ai-runner:1
+  restart: unless-stopped
+  depends_on: [egress-proxy]
+  environment: &claude-env
+    HTTPS_PROXY: http://egress-proxy:3128
+    HTTP_PROXY: http://egress-proxy:3128
+    NO_PROXY: localhost,127.0.0.1
+    NODE_USE_ENV_PROXY: "1"
+    RUNNER_WORKSPACES: /workspaces
+    RUNNER_AGENT_PROVIDER: claude-code
+    RUNNER_ALLOW_PAID_PROVIDER: "false"
+    RUNNER_SANDBOX: "on"                 # Claude Code's own sandbox for the agent's commands (bubblewrap)
+    RUNNER_HEALTH_PORT: "8787"
+    RUNNER_HEALTH_HOST: 127.0.0.1
+  networks: [claude_net]
+  read_only: true
+  tmpfs: ["/tmp:size=1g", "/home/runner:size=256m"]
+  cpus: ${CLAUDE_WORKER_CPUS:-4}
+  mem_limit: ${CLAUDE_WORKER_MEMORY:-8g}
+  pids_limit: 1024
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 300s
+  healthcheck:
+    test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+    interval: 60s
+    timeout: 10s
+    retries: 3
+    start_period: 60s
+  logging: { driver: json-file, options: { max-size: "20m", max-file: "10" } }
+
+services:
+  runner:
+    profiles: ["local-runner"]
+  egress-proxy:
+    networks: [runner_net, install_net, egress_net, claude_net]
+  claude-1:
+    <<: *claude-worker
+    env_file:
+      - { path: ./runner.local.env, required: false }
+      - { path: ./runner.env, required: true }
+      - { path: ./claude-1.env, required: true }
+    volumes:
+      - crestmont-workspaces:/workspaces
+      - ../skills:/skills:ro
+      - ../secrets:/run/secrets:ro
+      - ../claude/claude-1:/claude/claude-1
+  claude-2:
+    <<: *claude-worker
+    env_file:
+      - { path: ./runner.local.env, required: false }
+      - { path: ./runner.env, required: true }
+      - { path: ./claude-2.env, required: true }
+    volumes:
+      - crestmont-workspaces:/workspaces
+      - ../skills:/skills:ro
+      - ../secrets:/run/secrets:ro
+      - ../claude/claude-2:/claude/claude-2
+  claude-3:
+    <<: *claude-worker
+    env_file:
+      - { path: ./runner.local.env, required: false }
+      - { path: ./runner.env, required: true }
+      - { path: ./claude-3.env, required: true }
+    volumes:
+      - crestmont-workspaces:/workspaces
+      - ../skills:/skills:ro
+      - ../secrets:/run/secrets:ro
+      - ../claude/claude-3:/claude/claude-3
+
+networks:
+  claude_net:
+    name: crestmont_claude
+    internal: true
+    ipam: { config: [{ subnet: 172.30.30.0/24 }] }

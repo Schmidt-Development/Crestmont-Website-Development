@@ -33,6 +33,12 @@
 .PARAMETER ExtraEgressDomains
   Extra hosts the runner may reach (e.g. github.com api.github.com api.cloudflare.com for repos/previews). Each must be
   a plain host name; hosted AI API domains are refused (SquidConf.ps1).
+.PARAMETER Provider
+  Local (default): the self-hosted model runner (Ollama). ClaudeCode (Founder V3): three orchestrator containers, one
+  per Claude plan account, running Claude Code (no Ollama, no API key; docker-compose.claude.yml).
+.PARAMETER ClaudeWorkerIds
+  With -Provider ClaudeCode: the builder worker ids from Owner > AI builds > Builder accounts, in order (claude-1,
+  claude-2, claude-3). Each enrollment key goes in <InstallDir>\secrets\worker_claude-<n>_key.
 .PARAMETER OllamaImage
   Image for the optional ollama-in-docker profile, pinned by tag AND digest (repo:tag@sha256:...), written to
   compose\.env as OLLAMA_IMAGE. Get a digest with: docker buildx imagetools inspect ollama/ollama:<tag>
@@ -55,7 +61,9 @@ param(
   [string]$OllamaImage = "ollama/ollama:0.32.0@sha256:57f573b47f1f71ebb445789f279fe3e596a8beab182f7cf486db9205bad87c5a",
   [switch]$SkipModelPull,
   [switch]$NoAutoStart,
-  [switch]$NoStart
+  [switch]$NoStart,
+  [ValidateSet("Local", "ClaudeCode")][string]$Provider = "Local",
+  [string[]]$ClaudeWorkerIds = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -93,6 +101,13 @@ if ($OllamaImage -cnotmatch '^[a-z0-9./_-]+:[0-9][0-9A-Za-z._-]*@sha256:[0-9a-f]
 # -Model ends up in runner.env and on the ollama command line: an Ollama tag only (no spaces, quotes or newlines).
 if ($Model -and $Model -cnotmatch '^[a-z0-9][a-z0-9._-]{0,80}(:[A-Za-z0-9._-]{1,60})?$') { throw "-Model must be an Ollama model tag such as qwen3-coder:30b" }
 if ($RunnerId -cnotmatch '^[A-Za-z0-9._:-]{1,64}$') { throw "-RunnerId must be 1-64 characters of A-Z a-z 0-9 . _ : -" }
+$ClaudeMode = $Provider -eq "ClaudeCode"
+if ($ClaudeMode) {
+  $ClaudeWorkerIds = @($ClaudeWorkerIds | ForEach-Object { "$_" -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+  if ($ClaudeWorkerIds.Count -ne 3) { throw "-Provider ClaudeCode needs -ClaudeWorkerIds with the three worker ids from Owner > AI builds > Builder accounts (claude-1, claude-2, claude-3)" }
+  foreach ($w in $ClaudeWorkerIds) { if ($w -cnotmatch '^wkr_[A-Za-z0-9]+$') { throw "-ClaudeWorkerIds: $w is not a worker id (wkr_...)" } }
+  if ($OllamaInDocker) { throw "-OllamaInDocker does not apply to -Provider ClaudeCode" }
+}
 $Compose = Join-Path $InstallDir "compose"
 $State = Join-Path $InstallDir "state"
 $Secrets = Join-Path $InstallDir "secrets"
@@ -133,7 +148,7 @@ $docker = Get-Command docker.exe -ErrorAction SilentlyContinue
 if (-not $docker -and (Test-Path "$env:ProgramFiles\Docker\Docker\resources\bin\docker.exe")) { $env:Path += ";$env:ProgramFiles\Docker\Docker\resources\bin" }
 
 $ollamaExe = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
-if (-not $OllamaInDocker -and -not (Test-Path $ollamaExe) -and -not (Get-Command ollama.exe -ErrorAction SilentlyContinue)) { Install-WithWinget "Ollama.Ollama" "Ollama" }
+if (-not $ClaudeMode -and -not $OllamaInDocker -and -not (Test-Path $ollamaExe) -and -not (Get-Command ollama.exe -ErrorAction SilentlyContinue)) { Install-WithWinget "Ollama.Ollama" "Ollama" }
 # The ollama CLI by full path: right after a winget install it is not on this session's PATH yet.
 $ollamaCli = if (Test-Path $ollamaExe) { $ollamaExe } else { (Get-Command ollama.exe -ErrorAction SilentlyContinue).Source }
 if ($script:Problems.Count) { Exit-WithProblem }
@@ -198,14 +213,18 @@ if (-not (Get-ChildItem $Skills -Directory -ErrorAction SilentlyContinue)) { War
 # -- 4. images --
 Step "Building images (runner, sandbox, egress proxy)"
 # The images install npm packages with `npm ci` only: the committed lockfiles are what gets built.
-foreach ($lock in @("package-lock.json", "sandbox\package-lock.json")) {
+$locks = @("package-lock.json", "sandbox\package-lock.json")
+if ($ClaudeMode) { $locks += "claude-code\package-lock.json" }
+foreach ($lock in $locks) {
   if (-not (Test-Path (Join-Path $RunnerSrc $lock))) {
     Fail ("runner\$lock is missing. Generate it on a machine with registry access (cd runner\" + (Split-Path $lock -Parent) +
       "; npm install --package-lock-only --ignore-scripts), or take it from the CI 'runner-lockfiles' artifact, review and commit it. See RUNNER-SETUP.md section 12.")
   }
 }
 if ($script:Problems.Count) { Exit-WithProblem }
-Invoke-Checked "docker.exe" @("build", "-t", "crestmont-ai-runner:1", "-f", (Join-Path $RunnerSrc "Dockerfile"), $RunnerSrc) "docker build runner"
+$buildArgs = @("build", "-t", "crestmont-ai-runner:1", "-f", (Join-Path $RunnerSrc "Dockerfile"))
+if ($ClaudeMode) { $buildArgs += @("--build-arg", "INSTALL_CLAUDE_CODE=true") }
+Invoke-Checked "docker.exe" ($buildArgs + @($RunnerSrc)) "docker build runner"
 Invoke-Checked "docker.exe" @("build", "-t", "crestmont-build-sandbox:1", "-f", (Join-Path $RunnerSrc "sandbox\Dockerfile"), (Join-Path $RunnerSrc "sandbox")) "docker build sandbox"
 Copy-Item -Force (Join-Path $PSScriptRoot "docker-compose.yml") (Join-Path $Compose "docker-compose.yml")
 New-Item -ItemType Directory -Force -Path (Join-Path $Compose "proxy") | Out-Null
@@ -220,19 +239,29 @@ $rec = Get-Content (Join-Path $State "recommendation.json") -Raw | ConvertFrom-J
 Write-Host "    $($rec.summary)"
 foreach ($w in $rec.warnings) { Warn $w }
 foreach ($b in $rec.blockers) { Fail $b }
-if ($Model) {
+if ($ClaudeMode) {
+  # Claude Code workers: no local model. The recommendation still sizes the per-build limits (CPU, memory, disk).
+  foreach ($b in @($rec.modelChoiceBlockers)) { if ($b) { [void]$script:Problems.Remove($b); Ok "Not applicable with -Provider ClaudeCode: $b" } }
+  if ($script:Problems.Count) { Exit-WithProblem }
+}
+elseif ($Model) {
   # -Model overrides the model choice only. Every other blocker (driver, disk, WSL, Docker) still stops the install.
   Warn "Using -Model $Model instead of the recommendation ($($rec.model))."
   foreach ($b in @($rec.modelChoiceBlockers)) { if ($b) { [void]$script:Problems.Remove($b); Warn "Overridden by -Model: $b" } }
   if ($script:Problems.Count) { Exit-WithProblem }
 }
 elseif ($selectExit -ne 0 -or -not $rec.model) { Exit-WithProblem }
+if ($ClaudeMode) { $Model = "claude-code" }
 $selected = if ($Model) { $Model } else { $rec.model }
 $ctx = [int]$rec.contextTokens
 if ($ctx -lt 16384) { $ctx = 32768 }
 
 # -- 6. Ollama --
-if ($OllamaInDocker) {
+if ($ClaudeMode) {
+  Step "Ollama: not needed (-Provider ClaudeCode)"
+  $modelBase = ""
+}
+elseif ($OllamaInDocker) {
   Step "Ollama in Docker (profile ollama-in-docker; GPU passthrough needs NVIDIA + WSL 2 backend)"
   $modelBase = "http://ollama:11434/v1"
 } else {
@@ -281,23 +310,25 @@ if ($OllamaInDocker) {
 # -- 7. compose files --
 Step "Compose configuration"
 $template = Get-Content (Join-Path $PSScriptRoot "proxy\squid.conf.template") -Raw
-$squid = ConvertTo-SquidConf -Template $template -PlatformHost $PlatformHost -ExtraDomains $ExtraEgressDomains -OllamaInDocker:$OllamaInDocker
+$squid = ConvertTo-SquidConf -Template $template -PlatformHost $PlatformHost -ExtraDomains $ExtraEgressDomains -OllamaInDocker:$OllamaInDocker -ClaudeCode:$ClaudeMode
 # Squid expects LF line endings (ConvertTo-SquidConf normalizes them); write without BOM.
 [IO.File]::WriteAllText((Join-Path $Compose "proxy\squid.conf"), $squid)
+# The same managed keys in both modes (RunnerEnv.ps1 requires exactly this set, in order). With -Provider ClaudeCode
+# the local-model keys are inert placeholders (the Claude workers never read them) and drafts are off.
 $managed = @(
   [pscustomobject]@{ key = "CONTROL_PLANE_URL"; value = $PlatformUrl }
   [pscustomobject]@{ key = "BUILD_RUNNER_SECRET_FILE"; value = "/run/secrets/build_runner_secret" }
   [pscustomobject]@{ key = "RUNNER_ID"; value = $RunnerId }
-  [pscustomobject]@{ key = "RUNNER_AGENT_PROVIDER"; value = "local" }
+  [pscustomobject]@{ key = "RUNNER_AGENT_PROVIDER"; value = $(if ($ClaudeMode) { "claude-code" } else { "local" }) }
   [pscustomobject]@{ key = "RUNNER_ALLOW_PAID_PROVIDER"; value = "false" }
-  [pscustomobject]@{ key = "LOCAL_MODEL"; value = $selected }
-  [pscustomobject]@{ key = "LOCAL_MODEL_BASE_URL"; value = $modelBase }
+  [pscustomobject]@{ key = "LOCAL_MODEL"; value = $(if ($ClaudeMode) { "not-used" } else { $selected }) }
+  [pscustomobject]@{ key = "LOCAL_MODEL_BASE_URL"; value = $(if ($ClaudeMode) { "http://not-used.invalid/v1" } else { $modelBase }) }
   [pscustomobject]@{ key = "LOCAL_MODEL_CONTEXT_TOKENS"; value = "$ctx" }
   [pscustomobject]@{ key = "RUNNER_SANDBOX_IMAGE"; value = "crestmont-build-sandbox:1" }
   [pscustomobject]@{ key = "RUNNER_JOB_CPUS"; value = "$($rec.jobLimits.cpus)" }
   [pscustomobject]@{ key = "RUNNER_JOB_MEMORY"; value = "$($rec.jobLimits.memoryGB)g" }
   [pscustomobject]@{ key = "RUNNER_JOB_DISK_MB"; value = "$([int]$rec.jobLimits.diskGB * 1024)" }
-  [pscustomobject]@{ key = "RUNNER_SERVE_AI_DRAFTS"; value = "true" }
+  [pscustomobject]@{ key = "RUNNER_SERVE_AI_DRAFTS"; value = $(if ($ClaudeMode) { "false" } else { "true" }) }
   [pscustomobject]@{ key = "LOG_LEVEL"; value = "info" }
 )
 $runnerEnvPath = Join-Path $Compose "runner.env"
@@ -322,6 +353,25 @@ if ($null -eq $oldLocalEnv -or $oldLocalEnv -cne $merged.localEnv) { [IO.File]::
 [IO.File]::WriteAllText($runnerEnvPath, $merged.runnerEnv)
 $composeEnv = @("OLLAMA_IMAGE=$OllamaImage", "OLLAMA_CONTEXT_LENGTH=$ctx", "OLLAMA_NUM_PARALLEL=$($rec.ollama.numParallel)", "OLLAMA_KV_CACHE_TYPE=$($rec.ollama.kvCacheType)")
 $composeEnv | Set-Content -Encoding ascii (Join-Path $Compose ".env")
+$claudeOverlay = Join-Path $Compose "docker-compose.claude.yml"
+if ($ClaudeMode) {
+  # One orchestrator container per Claude account: worker identity, enrollment key file, own Claude config folder.
+  Copy-Item -Force (Join-Path $PSScriptRoot "docker-compose.claude.yml") $claudeOverlay
+  for ($i = 1; $i -le 3; $i++) {
+    $keyFile = Join-Path $Secrets "worker_claude-${i}_key"
+    if (-not (Test-Path $keyFile)) { Fail "Missing $keyFile : paste worker claude-$i's enrollment key (Owner > AI builds > Builder accounts) into it." }
+    New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir "claude\claude-$i") | Out-Null
+    $lines = @(
+      "BUILD_WORKER_ID=$($ClaudeWorkerIds[$i - 1])",
+      "BUILD_WORKER_KEY_FILE=/run/secrets/worker_claude-${i}_key",
+      "CLAUDE_CODE_CONFIG_DIR=/claude/claude-$i",
+      "RUNNER_ID=$RunnerId-claude-$i"
+    )
+    [IO.File]::WriteAllText((Join-Path $Compose "claude-$i.env"), (($lines -join "`n") + "`n"))
+  }
+  if ($script:Problems.Count) { Exit-WithProblem }
+  Ok "Wrote docker-compose.claude.yml and claude-1..3.env (worker ids; no credentials)"
+} elseif (Test-Path $claudeOverlay) { Remove-Item -Force $claudeOverlay }
 Ok "Wrote docker-compose.yml, proxy\squid.conf, runner.env (managed, no secret values); runner.local.env kept"
 # Tool scripts next to the install, whether or not auto-start is registered (Get-RunnerHealth, Collect-Evidence, ...).
 foreach ($tool in @("Start-CrestmontRunner.ps1", "Get-RunnerHealth.ps1", "Collect-Evidence.ps1", "Discover-Hardware.ps1")) {
@@ -332,23 +382,34 @@ foreach ($tool in @("Start-CrestmontRunner.ps1", "Get-RunnerHealth.ps1", "Collec
 Step "Connectivity and preflight"
 $composeArgs = @("compose", "-f", (Join-Path $Compose "docker-compose.yml"), "--project-directory", $Compose)
 if ($OllamaInDocker) { $composeArgs += @("--profile", "ollama-in-docker") }
+if ($ClaudeMode) { $composeArgs += @("-f", $claudeOverlay) }
 Invoke-Checked "docker.exe" ($composeArgs + @("build", "egress-proxy")) "docker compose build egress-proxy"
 Invoke-Checked "docker.exe" ($composeArgs + @("up", "-d", "egress-proxy")) "start egress proxy"
 if ($OllamaInDocker) {
   Invoke-Checked "docker.exe" ($composeArgs + @("up", "-d", "ollama")) "start ollama container"
   if (-not $SkipModelPull) { Invoke-Checked "docker.exe" ($composeArgs + @("exec", "ollama", "ollama", "pull", $selected)) "ollama pull (container)" }
 }
-# Does the model server answer through the proxy, exactly as the runner will call it?
+# Does the model server answer through the proxy, exactly as the runner will call it? (Not with Claude Code workers.)
 $probe = "fetch(process.env.U+'/models').then(r=>r.json()).then(j=>{console.log((j.data||[]).map(m=>m.id).join(','));process.exit(0)},e=>{console.error(String(e));process.exit(1)})"
-& docker.exe run --rm --network crestmont_runner -e "U=$modelBase" -e NODE_USE_ENV_PROXY=1 -e HTTP_PROXY=http://egress-proxy:3128 -e HTTPS_PROXY=http://egress-proxy:3128 --entrypoint node crestmont-ai-runner:1 -e $probe
-if ($LASTEXITCODE -ne 0) {
-  Fail ("Containers cannot reach the model server at $modelBase through the proxy. With native Ollama this usually means " +
-    "host.docker.internal does not reach a localhost-only listener on this Docker Desktop version; re-run with -OllamaInDocker " +
-    "(see WINDOWS-SUPERCOMPUTER.md, 'Ollama native vs in Docker').")
-  Exit-WithProblem
+if (-not $ClaudeMode) {
+  & docker.exe run --rm --network crestmont_runner -e "U=$modelBase" -e NODE_USE_ENV_PROXY=1 -e HTTP_PROXY=http://egress-proxy:3128 -e HTTPS_PROXY=http://egress-proxy:3128 --entrypoint node crestmont-ai-runner:1 -e $probe
+  if ($LASTEXITCODE -ne 0) {
+    Fail ("Containers cannot reach the model server at $modelBase through the proxy. With native Ollama this usually means " +
+      "host.docker.internal does not reach a localhost-only listener on this Docker Desktop version; re-run with -OllamaInDocker " +
+      "(see WINDOWS-SUPERCOMPUTER.md, 'Ollama native vs in Docker').")
+    Exit-WithProblem
+  }
+  Ok "Model server reachable from the container network"
 }
-Ok "Model server reachable from the container network"
-Invoke-Checked "docker.exe" ($composeArgs + @("run", "--rm", "--no-deps", "runner", "node", "--no-warnings", "src/main.ts", "--preflight")) "runner --preflight"
+$preflightService = if ($ClaudeMode) { "claude-1" } else { "runner" }
+Invoke-Checked "docker.exe" ($composeArgs + @("run", "--rm", "--no-deps", $preflightService, "node", "--no-warnings", "src/main.ts", "--preflight")) "runner --preflight"
+if ($ClaudeMode) {
+  Write-Host ""
+  Write-Host "Sign each Claude account in once (Founder; opens a URL you complete in your browser, then paste the code):" -ForegroundColor Yellow
+  for ($i = 1; $i -le 3; $i++) {
+    Write-Host ("  docker " + (($composeArgs + @("run", "--rm", "-it", "--no-deps", "-e", "CLAUDE_CONFIG_DIR=/claude/claude-$i", "claude-$i", "claude")) -join " ") + "   (then /login, then /exit)")
+  }
+}
 Ok "Runner preflight passed"
 
 # -- 9. start + auto-start --
@@ -370,7 +431,7 @@ if (-not $NoAutoStart) {
 Step "Health"
 if ($NoStart) {
   Write-Host ""
-  Write-Host "Configured (not started: -NoStart). Model: $selected  Provider: local (paid API disabled)." -ForegroundColor Green
+  Write-Host "Configured (not started: -NoStart). Provider: $(if ($ClaudeMode) { 'Claude Code (3 accounts, subscription sign-in, no API key)' } else { "local, model $selected" }) (paid API disabled)." -ForegroundColor Green
   exit 0
 }
 Start-Sleep -Seconds 10
@@ -381,4 +442,4 @@ if ($healthExit -ne 0) {
   Write-Host "Installed, but the health check FAILED (see above). The runner is not ready: fix the reported problem and run Get-RunnerHealth.ps1 again." -ForegroundColor Red
   exit 1
 }
-Write-Host "Done. Model: $selected  Provider: local (paid API disabled)  No ports published, no firewall rules added." -ForegroundColor Green
+Write-Host "Done. Provider: $(if ($ClaudeMode) { 'Claude Code (3 accounts, subscription sign-in, no API key)' } else { "local, model $selected" }) (paid API disabled)  No ports published, no firewall rules added." -ForegroundColor Green

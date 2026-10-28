@@ -149,7 +149,7 @@ test("[AIB-RUNNER] PowerShell scripts pass a light static lint and are ASCII-onl
   assert.doesNotMatch(install, /New-NetFirewallRule|netsh\s+advfirewall/i, "no inbound firewall rules");
   assert.match(install, /OLLAMA_HOST = "127\.0\.0\.1:11434"/);
   assert.match(install, /key = "RUNNER_ALLOW_PAID_PROVIDER"; value = "false"/);
-  assert.match(install, /key = "RUNNER_AGENT_PROVIDER"; value = "local"/);
+  assert.match(install, /key = "RUNNER_AGENT_PROVIDER"; value = \$\(if \(\$ClaudeMode\) \{ "claude-code" \} else \{ "local" \}\) \}/, "local by default; claude-code only with -Provider ClaudeCode");
   assert.match(install, /if \(-not \$Install\)/, "installs only with -Install");
   assert.match(install, /Read-Host -AsSecureString/, "secret entered hidden, never echoed");
   assert.match(install, /ZeroFreeBSTR/, "the unmanaged copy of the secret is zeroed");
@@ -253,7 +253,10 @@ test("[AIB-RUNNER] compose + proxy policy: no published ports, internal networks
   assert.match(runner, /NODE_USE_ENV_PROXY: "1"/);
   const squid = readFileSync(path.join(WIN, "proxy", "squid.conf.template"), "utf8");
   const order = squid.split("\n").filter((l) => l.startsWith("http_access"));
-  assert.equal(order[0], "http_access deny paid_ai", "paid AI denial comes first");
+  // V3: the Claude worker rule precedes the denial; it matches only the claude network and only the exact Claude Code
+  // hosts with -Provider ClaudeCode (egress-compose.test.ts proves every other network still hits the denial).
+  assert.equal(order[0], "http_access allow claude_net CONNECT claude_service");
+  assert.equal(order[1], "http_access deny paid_ai", "paid AI denial comes first for every other request");
   assert.equal(order.at(-1), "http_access deny all");
   assert.ok(order.includes("http_access allow install_net CONNECT npm_registry"));
   assert.ok(!order.some((l) => /allow install_net/.test(l) && !/npm_registry/.test(l)), "install network reaches only the registry");

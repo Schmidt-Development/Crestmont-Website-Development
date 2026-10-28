@@ -68,6 +68,10 @@ jobs:
             echo "::warning file=runner/agent-sdk/package.json::runner/agent-sdk/package-lock.json (optional paid adapter) is not committed."
             (cd runner/agent-sdk && npm install --package-lock-only --ignore-scripts --no-audit --no-fund) || echo "::warning::could not resolve runner/agent-sdk dependencies"
           fi
+          if [ ! -f runner/claude-code/package-lock.json ]; then
+            echo "::warning file=runner/claude-code/package.json::runner/claude-code/package-lock.json (V3 Claude Code workers) is not committed; generated for review in the runner-lockfiles artifact."
+            (cd runner/claude-code && npm install --package-lock-only --ignore-scripts --no-audit --no-fund) || echo "::warning::could not resolve runner/claude-code dependencies"
+          fi
       - name: Upload lockfiles for review
         uses: actions/upload-artifact@v4
         with:
@@ -77,6 +81,7 @@ jobs:
             runner/package-lock.json
             runner/sandbox/package-lock.json
             runner/agent-sdk/package-lock.json
+            runner/claude-code/package-lock.json
       - name: Build runner image (default local provider, no paid SDK)
         run: docker buildx build --load --progress=plain -t crestmont-ai-runner:ci -f runner/Dockerfile runner
       - name: Build per-build sandbox image

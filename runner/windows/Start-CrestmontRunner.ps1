@@ -22,7 +22,8 @@ if ((Test-Path $log) -and (Get-Item $log).Length -gt 1MB) { Get-Content $log -Ta
 Log "start requested"
 $dockerDesktop = Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"
 if (-not (Get-Process "Docker Desktop" -ErrorAction SilentlyContinue) -and (Test-Path $dockerDesktop)) { Log "starting Docker Desktop"; Start-Process $dockerDesktop | Out-Null }
-if (-not $OllamaInDocker) {
+$claudeMode = Test-Path (Join-Path $InstallDir "compose\docker-compose.claude.yml")
+if (-not $OllamaInDocker -and -not $claudeMode) {
   $app = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama app.exe"
   if (-not (Get-Process "ollama" -ErrorAction SilentlyContinue) -and (Test-Path $app)) { Log "starting Ollama"; Start-Process $app | Out-Null }
 }
@@ -37,6 +38,8 @@ if ($LASTEXITCODE -ne 0) { Log "Docker engine did not come up within $WaitMinute
 $compose = Join-Path $InstallDir "compose"
 $composeArgs = @("compose", "-f", (Join-Path $compose "docker-compose.yml"), "--project-directory", $compose)
 if ($OllamaInDocker) { $composeArgs += @("--profile", "ollama-in-docker") }
+# Founder V3 (-Provider ClaudeCode): the Claude account workers instead of the local-model runner; no Ollama.
+if ($claudeMode) { $composeArgs += @("-f", (Join-Path $compose "docker-compose.claude.yml")) }
 & docker.exe @($composeArgs + @("up", "-d")) 2>&1 | ForEach-Object { Log $_ }
 if ($LASTEXITCODE -ne 0) { Log "docker compose up failed ($LASTEXITCODE)"; exit 1 }
 Log "runner stack is up"
