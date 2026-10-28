@@ -27,7 +27,7 @@ export type ResourceKind =
   | "session" | "revision" | "milestone" | "task" | "task2" | "assignment" | "refund" | "message" | "approvalRequest" | "customerInvitation"
   | "lead" | "leadTask" | "aiJob" | "quote" | "quoteToken" | "cmsRevision" | "cmsKey" | "portfolio" | "portfolioSlug" | "portfolioFile"
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
-  | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "priceRequest" | "suppression"
+  | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
   | "member" | "notification" | "staffNotification" | "buildJob";
 
@@ -91,6 +91,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/webhooks/voice": hook("x-crestmont-voice-signature"),
   "POST /api/webhooks/retell": hook("x-retell-signature"),
   "POST /api/webhooks/retell/functions": hook("x-retell-signature"),
+  "POST /api/webhooks/retell/inbound": hook("x-retell-signature"),
   "POST /api/webhooks/resend": hook("svix-signature"),
   "POST /api/readiness/deployments": signed("x-crestmont-signature"),
   "POST /api/readiness/release-candidates": signed("x-crestmont-signature"),
@@ -477,6 +478,13 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/voice/configs/diff": { ...staff(rolesWith("voice.manage")), query: "a={voiceVersion}&b={voiceVersion}" },
   "GET /staff/voice/calls/:id": staff(rolesWith("voice.manage"), P("call"), act("call.viewed")),
   "POST /staff/voice/test-event": staff(rolesWith("voice.manage"), undefined, act("voice.test_event_sent")),
+  "GET /staff/voice/operations": staff(rolesWith("voice.manage")),
+  "POST /staff/voice/operations/settings": staff(rolesWith("voice.manage"), undefined, act("voice.settings_updated")),
+  "POST /staff/voice/consultations/:id/decide": staff(rolesWith("voice.manage"), P("consultation"), act("consultation.confirmed")),
+  "POST /staff/voice/outbound": staff(rolesWith("voice.manage"), undefined, act("voice.outbound_requested")),
+  "POST /staff/voice/outbound/:id/decide": staff(rolesWith("voice.manage"), P("outboundRequest"), act("voice.outbound_decided")),
+  "POST /staff/voice/dnc": staff(rolesWith("voice.manage"), undefined, act("voice.dnc_added")),
+  "POST /staff/voice/caller-erasure": staff(rolesWith("voice.manage"), undefined, act("voice.caller_data_erased")),
 };
 
 export const routeKey = (method: string, pattern: string) => `${method} ${pattern}`;

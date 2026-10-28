@@ -221,7 +221,7 @@ async function voicePage(ctx: AppContext, errors: string[] = [], draft?: { instr
   const escalations = (await db.prepare(`SELECT id, provider_call_id, escalated_at, is_test FROM calls WHERE escalated_at IS NOT NULL ORDER BY escalated_at DESC LIMIT 20`).all<{ id: string; provider_call_id: string; escalated_at: string; is_test: number }>()).results;
   const n = (k: string) => Number(vol?.[k] ?? 0);
   const dev = env === "development";
-  const body = html`${pageHead("AI receptionist", undefined, "AI")}
+  const body = html`${pageHead("AI receptionist", linkButton("Operations: hours, scheduling, outbound", "/staff/voice/operations", "ghost", "sm"), "AI")}
 <div class="grid grid-3">
 <section class="card"><h2 class="card__title">Provider</h2><p>${badge(h("voice")?.status ?? "not_configured")}</p><p class="muted">${h("voice")?.detail ?? ""}</p>
 <p class="faint">Provider evaluation and recommendation awaiting Founder decision: <code>docs/voice/PROVIDER-EVALUATION.md</code> (BLK-009). Crestmont must use its own separate provider workspace; the other business's existing receptionist is never touched.</p></section>
