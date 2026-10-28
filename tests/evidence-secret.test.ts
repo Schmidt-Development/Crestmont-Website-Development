@@ -1,7 +1,8 @@
-// Regression tests for the evidence-secret blocker (INFRA-005, LAUNCH-002): the staging workflows used to
-// install a fresh random EVIDENCE_INGEST_SECRET on every deploy, restore drill and rollback rehearsal, so
-// the value held by GitHub (ci.yml, release.yml, deploy-production.yml) could never match the staging
-// readiness system and signed production release authorization always failed with 401.
+// Regression tests for the evidence-secret blocker (INFRA-005, LAUNCH-002). Staging used to install a fresh random
+// EVIDENCE_INGEST_SECRET on every deploy, drill and rehearsal, so (a) the value held by GitHub (ci.yml, release.yml,
+// deploy-production.yml) never matched staging and signed release authorization always failed with 401, and (b) every
+// secret change blocked Worker rollbacks (Cloudflare 10220). Now: the GitHub secret when configured, otherwise the key
+// derived from the Cloudflare token (scripts/staging-secrets.ts); never random, and put only when it changed.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -9,87 +10,87 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { resolveEvidenceSecret, fingerprint, MIN_SECRET_LENGTH } from "../scripts/evidence-secret.ts";
+import { deriveStagingKey } from "../scripts/staging-secrets.ts";
 import { signEvidence, verifyEvidenceSignature } from "../src/readiness/ingest.ts";
 
 const wf = (n: string) => readFileSync(`.github/workflows/${n}`, "utf8");
 const STABLE = "a1".repeat(32); // 64 hex chars, like `openssl rand -hex 32`
+const ROOT = "cf-token-for-tests-only";
 
-test("[INFRA-005] evidence secret: a configured GitHub secret is used verbatim on every run; only an unconfigured one falls back to a one-run value", () => {
-  const a = resolveEvidenceSecret(STABLE), b = resolveEvidenceSecret(`  ${STABLE}\n`);
+test("[INFRA-005] evidence secret: the GitHub secret is used verbatim when configured, else the stable derived key; never random", () => {
+  const a = resolveEvidenceSecret(STABLE, ROOT), b = resolveEvidenceSecret(`  ${STABLE}\n`, "another-root");
   assert.equal(a.mode, "stable");
   assert.equal(a.secret, STABLE);
-  assert.deepEqual(a, b, "same value every run (no rotation)");
+  assert.deepEqual(a, b, "the GitHub secret wins whatever the token is");
   assert.equal(a.fingerprint, fingerprint(STABLE));
   assert.match(a.fingerprint, /^[0-9a-f]{12}$/);
   assert.ok(!STABLE.includes(a.fingerprint), "fingerprint is not a substring of the secret");
 
-  let n = 0;
-  const e1 = resolveEvidenceSecret(undefined, () => `ephemeral-${++n}`.padEnd(64, "x"));
-  const e2 = resolveEvidenceSecret("", () => `ephemeral-${++n}`.padEnd(64, "x"));
-  assert.equal(e1.mode, "ephemeral");
-  assert.notEqual(e1.secret, e2.secret);
+  const d1 = resolveEvidenceSecret(undefined, ROOT), d2 = resolveEvidenceSecret("", ROOT);
+  assert.equal(d1.mode, "derived");
+  assert.deepEqual(d1, d2, "the fallback is identical on every run (no rotation)");
+  assert.equal(d1.secret, deriveStagingKey(ROOT, "evidence"), "same key the backend's staging-secrets.ts derives");
 
-  // A configured but weak or malformed value is refused, never silently replaced.
-  assert.throws(() => resolveEvidenceSecret("short"), new RegExp(`shorter than ${MIN_SECRET_LENGTH}`));
-  assert.throws(() => resolveEvidenceSecret(`${STABLE.slice(0, 40)} ${STABLE.slice(0, 40)}`), /whitespace/);
+  // Nothing to resolve from, or a configured but weak/malformed value: refused, never invented or replaced.
+  assert.throws(() => resolveEvidenceSecret(undefined, undefined), /refusing to invent/);
+  assert.throws(() => resolveEvidenceSecret("short", ROOT), new RegExp(`shorter than ${MIN_SECRET_LENGTH}`));
+  assert.throws(() => resolveEvidenceSecret(`${STABLE.slice(0, 40)} ${STABLE.slice(0, 40)}`, ROOT), /whitespace/);
 });
 
-test("[LAUNCH-002] evidence secret: signatures made by GitHub with the stable value verify on the staging Worker across runs", async () => {
-  const run1 = resolveEvidenceSecret(STABLE), run2 = resolveEvidenceSecret(STABLE);
+test("[LAUNCH-002] evidence secret: GitHub-side signatures verify against staging once the GitHub secret is configured", async () => {
+  const staging = resolveEvidenceSecret(STABLE, ROOT); // what deploy-staging.yml installs
   const canonical = `GET /api/readiness/release-authorization?commit=${"c".repeat(40)}`;
-  const sig = await signEvidence(run2.secret, canonical);
-  await verifyEvidenceSignature(run1.secret, canonical, sig); // deploy-production signs with what deploy-staging installed
-  const eph = resolveEvidenceSecret(undefined);
-  await assert.rejects(verifyEvidenceSignature(eph.secret, canonical, sig), "a rotated value is rejected (the old bug)");
+  const sig = await signEvidence(STABLE, canonical); // what deploy-production.yml signs with (secrets.EVIDENCE_INGEST_SECRET)
+  await verifyEvidenceSignature(staging.secret, canonical, sig);
+  const derivedOnly = resolveEvidenceSecret(undefined, ROOT);
+  await assert.rejects(verifyEvidenceSignature(derivedOnly.secret, canonical, sig), "without the GitHub secret, GitHub-side signing cannot match (warned)");
 });
 
-test("[INFRA-005] evidence-secret CLI: writes the value only to GITHUB_ENV and an ::add-mask:: command; warns when unconfigured; refuses a weak value", () => {
+test("[INFRA-005] evidence-secret CLI: value only in GITHUB_ENV / stdout of `print` (masked by the caller); warnings never captured; weak value refused", () => {
   const dir = mkdtempSync(join(tmpdir(), "evsec-"));
   try {
-    const run = (env: Record<string, string>) => {
+    const run = (cmd: string, env: Record<string, string>) => {
       const envFile = join(dir, "env"), outFile = join(dir, "out");
       writeFileSync(envFile, ""); writeFileSync(outFile, "");
-      const r = spawnSync(process.execPath, ["--no-warnings", "scripts/evidence-secret.ts", "resolve"],
+      const r = spawnSync(process.execPath, ["--no-warnings", "scripts/evidence-secret.ts", cmd],
         { env: { PATH: process.env.PATH ?? "", GITHUB_ENV: envFile, GITHUB_OUTPUT: outFile, ...env }, encoding: "utf8", timeout: 30_000 });
       return { ...r, envText: readFileSync(envFile, "utf8"), outText: readFileSync(outFile, "utf8") };
     };
-    const s = run({ EVIDENCE_INGEST_SECRET_STABLE: STABLE });
+    const s = run("resolve", { EVIDENCE_INGEST_SECRET_STABLE: STABLE, ACCESS_ROOT_KEY: ROOT });
     assert.equal(s.status, 0, s.stderr);
     assert.equal(s.envText, `EVIDENCE_INGEST_SECRET=${STABLE}\n`);
     assert.match(s.outText, /^mode=stable$/m);
     assert.match(s.outText, new RegExp(`^fingerprint=${fingerprint(STABLE)}$`, "m"));
     const visible = s.stdout.split("\n").filter((l) => !l.startsWith("::add-mask::")).join("\n") + s.stderr;
     assert.ok(!visible.includes(STABLE), "secret never printed outside the mask command");
-    assert.match(s.stdout, /^::add-mask::/m);
 
-    const e = run({});
-    assert.equal(e.status, 0);
-    assert.match(e.outText, /^mode=ephemeral$/m);
-    assert.match(e.stdout, /::warning title=EVIDENCE_INGEST_SECRET not configured::/);
+    const p = run("print", { ACCESS_ROOT_KEY: ROOT });
+    assert.equal(p.status, 0, p.stderr);
+    assert.equal(p.stdout, deriveStagingKey(ROOT, "evidence"), "print writes exactly the value, nothing else, to stdout");
+    assert.match(p.stderr, /::warning title=EVIDENCE_INGEST_SECRET not configured::/);
+    assert.ok(!p.stderr.includes(p.stdout), "the value is never in the warning");
+    assert.equal(run("print", { EVIDENCE_INGEST_SECRET_STABLE: STABLE, ACCESS_ROOT_KEY: ROOT }).stdout, STABLE);
 
-    const w = run({ EVIDENCE_INGEST_SECRET_STABLE: "tooshort" });
+    const w = run("resolve", { EVIDENCE_INGEST_SECRET_STABLE: "tooshort", ACCESS_ROOT_KEY: ROOT });
     assert.equal(w.status, 1);
     assert.equal(w.envText, "", "nothing exported for a refused value");
     assert.ok(!(w.stdout + w.stderr).includes("tooshort"));
+    assert.equal(run("print", {}).status, 1, "no inputs: refuses instead of inventing a value");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("[INFRA-005] [LAUNCH-002] staging workflows never generate a random evidence secret; all use the stable GitHub secret, and only install a one-run value when it is missing", () => {
+test("[INFRA-005] [LAUNCH-002] staging workflows: one resolver, no random secrets, put only when changed by the deploy, never by drill or rehearsal", () => {
   for (const n of ["deploy-staging.yml", "staging-restore-drill.yml", "staging-rollback-rehearsal.yml"]) {
     const s = wf(n);
-    assert.doesNotMatch(s, /randomBytes\(32\)/, `${n} does not mint its own evidence secret`);
+    assert.doesNotMatch(s, /randomBytes/, `${n} does not mint secrets`);
     assert.match(s, /EVIDENCE_INGEST_SECRET_STABLE: \$\{\{ secrets\.EVIDENCE_INGEST_SECRET \}\}/, n);
-    assert.match(s, /node --no-warnings scripts\/evidence-secret\.ts resolve/, n);
-    assert.doesNotMatch(s, /EVIDENCE_INGEST_SECRET="\$ev"/, `${n} posts with the resolved value`);
+    assert.match(s, /ev=\$\(node --no-warnings scripts\/evidence-secret\.ts print\)\s*\n\s*echo "::add-mask::\$ev"/, `${n} masks the value immediately`);
+    assert.doesNotMatch(s, /staging-secrets\.ts derive evidence/, `${n} uses the shared resolver`);
     assert.doesNotMatch(s, /--env production|crestmont-platform-production|crestmont-production/, `${n} never touches production`);
   }
-  for (const n of ["staging-restore-drill.yml", "staging-rollback-rehearsal.yml"]) {
-    const s = wf(n);
-    const put = s.indexOf("secret put EVIDENCE_INGEST_SECRET");
-    assert.ok(put > 0);
-    assert.match(s.slice(Math.max(0, put - 400), put), /outputs\.mode \}\}" = "ephemeral"/, `${n} only changes the Worker secret in ephemeral mode`);
-  }
-  // Every consumer reads the same GitHub secret name.
+  assert.match(wf("deploy-staging.yml"), /printf '%s' "\$ev" \| node --no-warnings scripts\/staging-secrets\.ts put EVIDENCE_INGEST_SECRET/, "the deploy puts it only when changed");
+  for (const n of ["staging-restore-drill.yml", "staging-rollback-rehearsal.yml"]) assert.doesNotMatch(wf(n), /secret put EVIDENCE_INGEST_SECRET|staging-secrets\.ts put EVIDENCE/, `${n} never changes the Worker secret`);
+  // Every GitHub-side consumer reads the same GitHub secret name.
   for (const n of ["ci.yml", "release.yml", "deploy-production.yml"]) assert.match(wf(n), /secrets\.EVIDENCE_INGEST_SECRET\b/, n);
   assert.match(wf("deploy-production.yml"), /scripts\/evidence-secret\.ts fingerprint/);
 });

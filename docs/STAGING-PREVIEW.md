@@ -22,7 +22,7 @@ automated by `.github/workflows/deploy-staging.yml`.
      repository is public**: artifacts of a public repository can be downloaded by anyone signed in to GitHub, so the
      access notes are encrypted with this passphrase, and are not issued at all without it.
    - **`EVIDENCE_INGEST_SECRET`** = `openssl rand -hex 32`, set once (docs/DEPLOYMENT.md §5). The same value is used
-     by every workflow; without it each run uses a one-run value and production release authorization cannot work.
+     by every workflow; without it staging uses a key derived from the Cloudflare token, and CI, releases and production release authorization cannot sign against staging.
 6. **Run it** — **Actions → Deploy staging → Run workflow** (it also runs on every push to `main`).
 
 ## What you get
