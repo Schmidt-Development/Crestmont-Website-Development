@@ -352,7 +352,7 @@ ${textarea({ name: "notes", label: "Notes (optional)", rows: 3, maxlength: 4000 
  *  the platform's own CI scripts (HTTP status codes, step names), never from users. Token-like strings are removed. */
 export function publicReason(f: { source: string; status: string; detail: string }): { reason?: string } {
   if (f.status !== "failing" || !/^(cron-triggers|recovery):|^job:_invocation$/.test(f.source)) return {};
-  const text = f.detail.replace(/^Last attempt failed:\s*/, "").replace(/[A-Za-z0-9_\-]{32,}/g, "[redacted]").replace(/[^\x20-\x7e]/g, "").slice(0, 200);
+  const text = f.detail.replace(/^Last attempt failed:\s*/, "").replace(/[A-Za-z0-9_\-]{32,}/g, "[redacted]").replace(/[^\x20-\x7e]/g, "").slice(0, 400);
   return text ? { reason: text } : {};
 }
 

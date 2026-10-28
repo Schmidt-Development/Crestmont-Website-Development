@@ -131,6 +131,16 @@ jobs:
           printf '%s' "$ev" | $WRANGLER secret put EVIDENCE_INGEST_SECRET --env staging > /dev/null
           echo "EVIDENCE_INGEST_SECRET=$ev" >> "$GITHUB_ENV"
 
+      - name: External scheduler key
+        # Derived from the Cloudflare token secret (scripts/trigger-scheduler.ts), so the health monitor can trigger the
+        # scheduled jobs when native Cron Triggers are unavailable on this account. Same value on every deploy.
+        env:
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          k=$(node --no-warnings scripts/trigger-scheduler.ts derive)
+          echo "::add-mask::$k"
+          printf '%s' "$k" | $WRANGLER secret put SCHEDULER_TRIGGER_SECRET --env staging > /dev/null
+
       - name: Verify cron triggers (and re-register them if missing)
         # READY-012 / INFRA-006: scheduled jobs had never run on staging. Compares Cloudflare's registered schedules
         # with wrangler.toml and repairs them through the Workers API. Non-fatal: the scheduler feed in

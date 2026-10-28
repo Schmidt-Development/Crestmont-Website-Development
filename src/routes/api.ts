@@ -9,7 +9,8 @@ import { buildReport, loadReadinessInput, requirementsCsv } from "../readiness/r
 import { verifyStripeSignature, recordStripeEvent, isStripeEventEnvelope, WebhookSignatureError, type StripeEvent } from "../domain/stripe-webhook.ts";
 import { processStripeEvent, stripeInvoiceLookup } from "../services/payments.ts";
 import { can } from "../domain/authz.ts";
-import { audit } from "../services/security.ts";
+import { audit, rateLimit } from "../services/security.ts";
+import { scheduled, SCHEDULE } from "../app/scheduled.ts";
 import { ingestPushedSnapshot, GithubPushError } from "../services/github.ts";
 
 const MAX_BODY = 1_000_000;
@@ -34,6 +35,23 @@ export async function verifyTurnstile(ctx: AppContext, token: unknown): Promise<
 }
 
 export function register(r: Router) {
+  // External scheduler (READY-012, INFRA-006): runs the same job sets as the Worker's Cron Triggers when those cannot
+  // be registered (staging's Cloudflare account is at the Workers Free limit of 5 cron triggers). HMAC-signed like the
+  // other machine endpoints; 503 when no key is configured; at most one run per job set per 5 minutes.
+  r.post("/api/scheduled/run", async (ctx) => {
+    const raw = await readBody(ctx.req);
+    if (!ctx.env.SCHEDULER_TRIGGER_SECRET) return jsonResponse(ctx, 503, { error: "External scheduler not configured" });
+    try { await verifyEvidenceSignature(ctx.env.SCHEDULER_TRIGGER_SECRET, raw, ctx.req.headers.get("x-crestmont-scheduler-signature")); }
+    catch (e) { if (e instanceof IngestAuthError) return jsonResponse(ctx, 401, { error: e.message }); throw e; }
+    let cron: unknown;
+    try { cron = (JSON.parse(raw) as { cron?: unknown }).cron; } catch { return jsonResponse(ctx, 400, { error: "Body must be JSON" }); }
+    if (typeof cron !== "string" || !SCHEDULE[cron]) return jsonResponse(ctx, 422, { error: "Unknown schedule" });
+    const rl = await rateLimit(ctx.db, `scheduler:${cron}`, 1, 300);
+    if (!rl.allowed) return jsonResponse(ctx, 429, { error: "Already ran within the last 5 minutes" });
+    await scheduled({ cron }, ctx.env);
+    return jsonResponse(ctx, 200, { ran: SCHEDULE[cron] });
+  });
+
   r.get("/api/health", async (ctx) => {
     await ctx.db.prepare("SELECT 1").first();
     return jsonResponse(ctx, 200, { status: "ok", environment: ctx.env.ENVIRONMENT });

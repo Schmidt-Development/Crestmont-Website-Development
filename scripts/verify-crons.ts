@@ -32,10 +32,15 @@ export function registeredCrons(body: unknown): string[] {
 }
 
 /** Signed-evidence document for the readiness API: feeds the public `cron-triggers:<env>` health signal. */
+/** Cloudflare error 10072: the account's Workers Free plan allows 5 cron triggers in total. */
+export const isCronLimit = (detail: string) => /\b10072\b|limit of \d+ cron triggers/i.test(detail);
+
 export function cronEvidence(o: { env: string; commit: string; runId: string; startedAt: string; ok: boolean; detail: string }) {
+  const limit = !o.ok && isCronLimit(o.detail);
   return {
     runId: o.runId, source: "ci", environment: o.env, commitSha: o.commit, startedAt: o.startedAt, finishedAt: new Date().toISOString(),
-    results: [{ requirementId: "INFRA-006", testName: `cron triggers registered on ${o.env} as declared in wrangler.toml`, outcome: o.ok ? "passed" : "failed", ...(o.ok ? {} : { message: o.detail.slice(0, 1000) }) }],
+    results: [{ requirementId: "INFRA-006", testName: `cron triggers registered on ${o.env} as declared in wrangler.toml`, outcome: o.ok ? "passed" : limit ? "skipped" : "failed",
+      ...(o.ok ? {} : { message: (limit ? "native Cron Triggers unavailable (Cloudflare Workers Free limit of 5 per account); jobs run through the external scheduler. " : "") + o.detail.slice(0, 900) }) }],
   };
 }
 
@@ -73,4 +78,8 @@ async function verify(args: string[]) {
   console.log(`::notice title=Cron triggers repaired::registered ${after.join(", ")} (were: ${before.join(", ") || "none"})`);
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) await main().catch((e) => { console.log(`::error title=Cron triggers::${(e as Error).message}`); process.exitCode = 1; });
+if (process.argv[1] === fileURLToPath(import.meta.url)) await main().catch((e) => {
+  const msg = (e as Error).message;
+  if (isCronLimit(msg)) { console.log(`::notice title=Cron triggers unavailable::Cloudflare Workers Free allows 5 cron triggers per account and they are in use; staging jobs run through the external scheduler (staging-health-monitor.yml). Upgrading to Workers Paid restores native triggers.`); return; }
+  console.log(`::error title=Cron triggers::${msg}`); process.exitCode = 1;
+});

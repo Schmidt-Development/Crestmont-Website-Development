@@ -34,7 +34,9 @@ test("[READY-012] [DOC-002] external alerting: an off-platform monitor probes se
   assert.match(m, /\/api\/readiness\/health/);
   assert.match(m, /for attempt in 1 2 3/);
   assert.match(m, /exit 1/);
-  assert.doesNotMatch(m, /secrets\./, "the monitor needs no secrets");
+  assert.deepEqual([...m.matchAll(/secrets\.([A-Z_]+)/g)].map((x) => x[1]), ["CLOUDFLARE_API_TOKEN"], "only the scheduler step uses a secret (to derive its key)");
+  assert.match(m, /scripts\/trigger-scheduler\.ts run --url "\$BASE"/);
+  assert.match(m, /persist-credentials: false/);
   const rb = readFileSync("docs/RUNBOOK.md", "utf8");
   assert.match(rb, /staging-health-monitor\.yml/);
   assert.match(rb, /Founder.*F-03|F-03/);

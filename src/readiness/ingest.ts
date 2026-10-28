@@ -127,7 +127,9 @@ export function recoveryDrillOutcomes(doc: EvidenceDoc): [string, boolean, strin
     if (st.length) out.push([feed, st.every((r) => r.outcome === "passed"), why(st)]);
   }
   const cron = doc.results.filter((r) => r.requirementId === "INFRA-006" && r.testName.startsWith("cron triggers registered"));
-  if (cron.length) out.push(["cron-triggers", cron.every((r) => r.outcome === "passed"), why(cron)]);
+  // "skipped" = native triggers unavailable on this account (Workers Free limit) and the external scheduler is used
+  // instead; whether jobs actually run is judged by the required `scheduler` feed.
+  if (cron.length) out.push(["cron-triggers", cron.every((r) => r.outcome !== "failed"), why(cron)]);
   if (rs.length) out.push(["recovery:restore", rs.every((r) => r.outcome === "passed")]);
   return out;
 }

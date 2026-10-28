@@ -53,7 +53,7 @@ jobs:
           set +e
           $WRANGLER versions deploy "${{ steps.pick.outputs.previous }}@100%" --env staging --message "Rollback rehearsal (run ${{ github.run_id }})" --yes > back.log 2>&1
           rc=$?; cat back.log
-          if [ $rc -ne 0 ]; then echo "reason=deploy_command_failed: $(grep -iE 'error|✘' back.log | head -1 | tr -d '\r' | cut -c1-160)" >> "$GITHUB_OUTPUT"; echo "::error::versions deploy failed"; exit 1; fi
+          if [ $rc -ne 0 ]; then echo "reason=deploy_command_failed: $(sed -e 's/\x1b\[[0-9;]*m//g' back.log | grep -iE 'code:|error|✘' | grep -v '^\s*$' | sed -E 's#/accounts/[^/]+/#/accounts/…/#' | tr -d '\r' | tr '\n' ' ' | cut -c1-400)" >> "$GITHUB_OUTPUT"; echo "::error::versions deploy failed"; exit 1; fi
           code=000
           for i in 1 2 3 4 5 6; do sleep 10; code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/health"); [ "$code" = "200" ] && exit 0; done
           echo "reason=health_check_failed: /api/health HTTP $code after 60 s" >> "$GITHUB_OUTPUT"

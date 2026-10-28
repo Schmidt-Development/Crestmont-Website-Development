@@ -40,3 +40,14 @@ test("[INFRA-006] failing infrastructure feeds expose a short sanitized public r
   assert.deepEqual(publicReason({ source: "recovery:rollback-step:staging", status: "healthy", detail: "x" }), {});
   assert.deepEqual(publicReason({ source: "ci", status: "failing", detail: "Last attempt failed: something" }), {}, "other feeds keep details staff-only");
 });
+
+test("[INFRA-006] the Workers Free cron limit is recorded as skipped (external scheduler in use), other registration errors fail", async () => {
+  const { cronEvidence, isCronLimit } = await import("../scripts/verify-crons.ts");
+  const { recoveryDrillOutcomes, parseEvidence } = await import("../src/readiness/ingest.ts");
+  const msg = 'PUT schedules: HTTP 400 {"errors":[{"code":10072,"message":"This account has reached the Workers Free limit of 5 cron triggers per account."}]}';
+  assert.equal(isCronLimit(msg), true);
+  const ev = cronEvidence({ env: "staging", commit: "a".repeat(40), runId: "r", startedAt: new Date().toISOString(), ok: false, detail: msg });
+  assert.equal(ev.results[0].outcome, "skipped");
+  assert.equal(recoveryDrillOutcomes(parseEvidence(ev))[0][1], true);
+  assert.equal(cronEvidence({ env: "staging", commit: "a".repeat(40), runId: "r", startedAt: new Date().toISOString(), ok: false, detail: "GET schedules: HTTP 403" }).results[0].outcome, "failed");
+});
