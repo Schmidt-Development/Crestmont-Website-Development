@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashPassword, base32Encode } from "../src/lib/auth-crypto.ts";
+import { putSecretIfChanged } from "./staging-secrets.ts";
 
 export const DEMO_DOMAIN = "crestmont-preview.test";
 const ALPHABET = "23456789abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ"; // no 0/O/1/l/I, no markdown-active characters
@@ -103,8 +104,10 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
   }
   const founder = !!o.fixedPreviewPassword;
   const previewPassword = founder ? o.fixedPreviewPassword! : await derivePassword(o.rootKey, salt, "preview");
-  // Always (re)applied: whatever happened before, the live secret now equals what this run reports.
-  await ops.putSecret("STAGING_ACCESS_PASSWORD", previewPassword);
+  // The live secret always equals what this run reports; it is re-put only when the value changed, because any secret
+  // change blocks Worker rollbacks to earlier versions (Cloudflare error 10220).
+  if (o.rootKey) await putSecretIfChanged(ops, o.rootKey, "STAGING_ACCESS_PASSWORD", previewPassword);
+  else await ops.putSecret("STAGING_ACCESS_PASSWORD", previewPassword);
   accounts.sort((a, b) => (ROLE_ORDER.indexOf(a.role) + 1 || 99) - (ROLE_ORDER.indexOf(b.role) + 1 || 99) || a.email.localeCompare(b.email));
   return { rotated, previewPassword, previewSource: founder ? "founder" : "derived", accounts };
 }
@@ -155,7 +158,7 @@ Rotate everything: Actions → Deploy staging → Run workflow → tick "rotate_
 }
 
 // ── CLI ──
-function wranglerOps(): D1Ops {
+export function wranglerOps(): D1Ops {
   const [cmd, ...base] = (process.env.WRANGLER ?? "npx --yes wrangler@4").split(" ").filter(Boolean);
   const run = (args: string[], input?: string) =>
     execFileSync(cmd, [...base, ...args], { input, stdio: ["pipe", "pipe", "pipe"], encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });

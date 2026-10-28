@@ -110,5 +110,5 @@ test("[READY-012] the monitor's scheduler client signs exactly what the Worker v
   await verifyEvidenceSignature(key, body, sign(key, body));
   assert.deepEqual([FREQUENT, DAILY].sort(), Object.keys(SCHEDULE).sort());
   const { readFileSync } = await import("node:fs");
-  assert.match(readFileSync(".github/workflows/deploy-staging.yml", "utf8"), /trigger-scheduler\.ts derive\)[\s\S]*secret put SCHEDULER_TRIGGER_SECRET --env staging/);
+  assert.match(readFileSync(".github/workflows/deploy-staging.yml", "utf8"), /trigger-scheduler\.ts derive\)[\s\S]*staging-secrets\.ts put SCHEDULER_TRIGGER_SECRET/);
 });

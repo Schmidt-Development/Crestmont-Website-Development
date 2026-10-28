@@ -125,10 +125,13 @@ jobs:
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
       - name: Evidence ingest secret
+        # Derived (stable) and put only when changed: any secret change blocks Worker rollbacks (Cloudflare 10220).
+        env:
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          ev=$(node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))')
+          ev=$(node --no-warnings scripts/staging-secrets.ts derive evidence)
           echo "::add-mask::$ev"
-          printf '%s' "$ev" | $WRANGLER secret put EVIDENCE_INGEST_SECRET --env staging > /dev/null
+          printf '%s' "$ev" | node --no-warnings scripts/staging-secrets.ts put EVIDENCE_INGEST_SECRET
           echo "EVIDENCE_INGEST_SECRET=$ev" >> "$GITHUB_ENV"
 
       - name: External scheduler key
@@ -139,7 +142,7 @@ jobs:
         run: |
           k=$(node --no-warnings scripts/trigger-scheduler.ts derive)
           echo "::add-mask::$k"
-          printf '%s' "$k" | $WRANGLER secret put SCHEDULER_TRIGGER_SECRET --env staging > /dev/null
+          printf '%s' "$k" | node --no-warnings scripts/staging-secrets.ts put SCHEDULER_TRIGGER_SECRET
 
       - name: Verify cron triggers (and re-register them if missing)
         # READY-012 / INFRA-006: scheduled jobs had never run on staging. Compares Cloudflare's registered schedules
@@ -163,8 +166,9 @@ jobs:
       - name: AI Builds runner secret (only when the Founder has provided one)
         env:
           RUNNER_SECRET: ${{ secrets.BUILD_RUNNER_SECRET }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          if [ -n "$RUNNER_SECRET" ]; then printf '%s' "$RUNNER_SECRET" | $WRANGLER secret put BUILD_RUNNER_SECRET --env staging > /dev/null && echo "BUILD_RUNNER_SECRET installed on staging."
+          if [ -n "$RUNNER_SECRET" ]; then printf '%s' "$RUNNER_SECRET" | node --no-warnings scripts/staging-secrets.ts put BUILD_RUNNER_SECRET
           else echo "BUILD_RUNNER_SECRET not provided: AI Builds execution stays unavailable on staging (builds wait in the queue)."; fi
 
       - name: Seed sample data and demo accounts (first run or on request)

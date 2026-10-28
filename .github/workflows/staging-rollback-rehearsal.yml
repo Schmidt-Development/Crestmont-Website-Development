@@ -69,12 +69,12 @@ jobs:
         if: always() && steps.pick.outcome == 'success'
         env:
           BACK_REASON: ${{ steps.back.outputs.reason }}   # passed via env, never interpolated into the script
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           node --no-warnings scripts/rollback-rehearsal.ts evidence --commit "$GITHUB_SHA" --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-rollback" --started "$STARTED" \
             --rollback "${{ steps.back.outcome == 'success' && 'passed' || 'failed' }}" --rollforward "${{ steps.fwd.outcome == 'success' && 'passed' || 'failed' }}" \
             --detail "$BACK_REASON" --out evidence/rollback.json
-          ev=$(node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))')
+          # The deploy installs this derived key; it is not rotated here (a secret change would block rollbacks).
+          ev=$(node --no-warnings scripts/staging-secrets.ts derive evidence)
           echo "::add-mask::$ev"
-          printf '%s' "$ev" | $WRANGLER secret put EVIDENCE_INGEST_SECRET --env staging > /dev/null
-          sleep 10
           READINESS_URL="$BASE" EVIDENCE_INGEST_SECRET="$ev" node --no-warnings scripts/post-evidence.ts evidence/rollback.json

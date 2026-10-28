@@ -37,6 +37,8 @@ Then run the E2E suite against staging and post the evidence (`npm run evidence:
 
 ## 3. Rollback
 
+**Secrets and rollbacks (Cloudflare error 10220).** Cloudflare refuses to roll a Worker back to a version if any secret changed since that version was active ("A secret has changed since this version was active … add ?force=true"). Found on staging 2026-10-28: the deploy re-put every secret and rotated `EVIDENCE_INGEST_SECRET` each run, so every rollback failed. The staging deploy now puts a secret only when its value changes (`scripts/staging-secrets.ts`, keyed fingerprints in D1) and derives machine keys from the Cloudflare token secret. **Production:** change secrets only in a separate, deliberate step — never in the same window as a deploy you might need to roll back. `provision-production.yml` re-puts the Turnstile secrets on every run, so re-running it between deploys makes the previous version un-rollbackable without a forced rollback.
+
 1. `wrangler deployments list --env <env>` → `wrangler rollback <id> --env <env> --message "<reason>"`.
 2. Confirm `/api/health` and the critical journeys.
 3. If the cause was a migration, follow BACKUP-RECOVERY §5. Database restores in production need Founder approval.
