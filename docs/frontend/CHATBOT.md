@@ -33,9 +33,16 @@ It is free for visitors (no account and no payment).
 - Same-origin JSON only (Origin must match; `application/json` required).
 - Per-IP limits of 8 requests per 2 minutes and 60 per day, and a site-wide limit of 1,500 per day.
 - Messages are capped at 600 characters, with the last 10 turns sent, replies of up to 450 tokens, and a 25-second
-  timeout with no retries.
+  timeout with no retries. Because the history is held by the visitor's browser, earlier assistant turns are
+  truncated to 1,200 characters and the whole history to 6,000 characters, which bounds the cost of every call.
+- **Its own budget cap:** the public assistant may use at most **50%** of the Owner's monthly AI budget
+  (`ASSISTANT_LIMITS.budgetShare`), so anonymous traffic can never exhaust staff drafting. When its share is used up it
+  shows the offline state. (Concurrent requests near the cap can overshoot it by a few calls, each a fraction of a
+  cent.)
+- **Invented-figure guardrail:** a reply is withheld if it states an amount that is not a published price — written
+  as `$…`, `USD …`, `US$…` or `… dollars` — or any percentage discount (none are published).
 - Each answer is an `ai_jobs` row (`workflow = website_assistant`) with token cost, counted against the Owner's
-  monthly budget and visible with other AI usage. **No visitor text is stored**; the row carries only a hashed
+  monthly budget (and the assistant's share of it) and visible with other AI usage. **No visitor text is stored**; the row carries only a hashed
   session reference.
 - The conversation is kept in the visitor's tab (`sessionStorage`) so it survives page changes. Restart clears it.
 

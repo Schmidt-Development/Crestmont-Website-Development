@@ -650,7 +650,7 @@
       name: (v) => (v.length >= 2 && v.length <= 120 ? "" : "Enter your name (2–120 characters)"),
       email: (v) => (/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v) && v.length <= 254 ? "" : "Enter a valid email address"),
       phone: (v) => (!v || /^[+0-9 ().-]{7,40}$/.test(v) ? "" : "Enter a valid phone number, or leave it blank"),
-      message: (v) => (v.length >= 10 && v.length <= 4000 ? "" : "Enter a message of 10–4000 characters"),
+      message: (v, el) => { const min = Number(el?.closest("form")?.dataset.minMessage) || 10; return v.length >= min && v.length <= 4000 ? "" : min === 20 ? "Describe your project in 20–4000 characters" : `Enter a message of ${min}–4000 characters`; },
     };
     const setError = (el, msg) => {
       const field = el.closest(".field"); if (!field) return;
@@ -661,7 +661,7 @@
         const d = new Set((el.getAttribute("aria-describedby") || "").split(" ").filter(Boolean)); d.add(id); el.setAttribute("aria-describedby", [...d].join(" "));
       } else if (err) { err.remove(); el.removeAttribute("aria-invalid"); el.setAttribute("aria-describedby", (el.getAttribute("aria-describedby") || "").split(" ").filter((x) => x && x !== id).join(" ")); }
     };
-    const check = (el) => { const r = RULES[el.name]; if (!r) return ""; const msg = r(el.value.trim()); setError(el, msg); return msg; };
+    const check = (el) => { const r = RULES[el.name]; if (!r) return ""; const msg = r(el.value.trim(), el); setError(el, msg); return msg; };
     document.querySelectorAll("[data-cx-form], [data-lead-form]").forEach((form) => {
       const cx = form.closest("[data-cx]");
       const send = form.querySelector('button[type="submit"]');
@@ -669,7 +669,7 @@
       const required = ["name", "email", "message"];
       const progress = () => {
         if (!bar) return;
-        let done = required.filter((n) => { const el = form.elements[n]; return el && !RULES[n](el.value.trim()); }).length;
+        let done = required.filter((n) => { const el = form.elements[n]; return el && !RULES[n](el.value.trim(), el); }).length;
         const topic = form.querySelector('input[name="interest"]:checked'); if (topic) done++;
         const total = required.length + 1;
         bar.style.width = `${(done / total) * 100}%`;

@@ -25,6 +25,10 @@ export const ASSISTANT_LIMITS = {
   perIpBurst: { limit: 8, windowS: 120 },
   perIpDaily: { limit: 60, windowS: 86_400 },
   siteDaily: { limit: 1_500, windowS: 86_400 },
+  maxAssistantTurnChars: 1_200,
+  maxHistoryChars: 6_000,
+  /** Share of the Owner's monthly AI budget the public assistant may use, so visitors can never exhaust staff drafting. */
+  budgetShare: 0.5,
 } as const;
 
 /** Site paths the assistant may point visitors to (the widget links only these). */
@@ -81,10 +85,15 @@ export function unpublishedAmounts(text: string, pricesCents: Record<string, num
   for (const p of Object.values(PACKAGES)) allowed.add(p.basePriceCents);
   for (const m of Object.values(MAINTENANCE_PLANS)) allowed.add(m.monthlyCents);
   const out: string[] = [];
-  for (const m of text.matchAll(/\$\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{2}))?/g)) {
-    const cents = Number(m[1].replace(/,/g, "")) * 100 + (m[2] ? Number(m[2]) : 0);
-    if (!allowed.has(cents)) out.push(m[0]);
-  }
+  const check = (raw: string, whole: string, frac?: string) => {
+    const cents = Number(whole.replace(/,/g, "")) * 100 + (frac ? Number(frac.padEnd(2, "0")) : 0);
+    if (!allowed.has(cents)) out.push(raw.trim());
+  };
+  const N = String.raw`(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?`;
+  for (const m of text.matchAll(new RegExp(String.raw`(?:\$|\bUSD\s?|\bUS\$\s?)\s?${N}`, "gi"))) check(m[0], m[1], m[2]);
+  for (const m of text.matchAll(new RegExp(String.raw`(?<![$\d,.])${N}\s*(?:dollars?|bucks|usd)\b`, "gi"))) check(m[0], m[1], m[2]);
+  for (const m of text.matchAll(/\b\d{1,3}(?:\.\d+)?\s*(?:%|percent)\s*(?:off|discount|cheaper|less|reduction)\b/gi)) out.push(m[0]);
+  for (const m of text.matchAll(/\b(?:discount|reduction)\s+of\s+\d{1,3}(?:\.\d+)?\s*(?:%|percent)/gi)) out.push(m[0]);
   return out;
 }
 
@@ -107,11 +116,14 @@ export function validateConversation(raw: unknown): { ok: true; turns: Assistant
     const text = content.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
     if (!text) return { ok: false, message: "Empty message" };
     if (role === "user" && text.length > ASSISTANT_LIMITS.maxMessageChars) return { ok: false, message: `Please keep messages under ${ASSISTANT_LIMITS.maxMessageChars} characters.` };
-    turns.push({ role, content: text.slice(0, 2_000) });
+    turns.push({ role, content: role === "assistant" ? text.slice(0, ASSISTANT_LIMITS.maxAssistantTurnChars) : text });
   }
   if (turns[turns.length - 1].role !== "user") return { ok: false, message: "The last message must be the visitor's." };
   // Only the most recent turns are sent; the conversation must start with a visitor message.
+  // Total history is capped too (the history is client-held, so its size bounds the cost of every call).
   let recent = turns.slice(-ASSISTANT_LIMITS.maxHistoryTurns);
+  const size = (t: AssistantTurn[]) => t.reduce((n, x) => n + x.content.length, 0);
+  while (recent.length > 1 && size(recent) > ASSISTANT_LIMITS.maxHistoryChars) recent = recent.slice(1);
   while (recent.length && recent[0].role !== "user") recent = recent.slice(1);
   return { ok: true, turns: recent };
 }
@@ -119,6 +131,12 @@ export function validateConversation(raw: unknown): { ok: true; turns: Assistant
 async function sha(s: string) {
   const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
   return [...new Uint8Array(d)].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** This month's public-assistant spend (its own cap: ASSISTANT_LIMITS.budgetShare of the Owner's AI budget). */
+export async function assistantSpentMicro(db: Db, now = new Date()): Promise<number> {
+  const r = await db.prepare(`SELECT COALESCE(SUM(cost_microusd), 0) AS s FROM ai_jobs WHERE workflow = 'website_assistant' AND provider = 'anthropic' AND substr(created_at, 1, 7) = ?`).bind(now.toISOString().slice(0, 7)).first<{ s: number }>();
+  return r?.s ?? 0;
 }
 
 /** Is a live AI answer possible right now? (Shown to the widget so it never pretends.) */
@@ -129,6 +147,7 @@ export async function assistantAvailability(db: Db, provider: AiBackend): Promis
     const b = await paidAiBudget(db);
     if (b.budgetMicro === null) return { available: false, reason: "not_configured" };
     if (b.spentMicro >= b.budgetMicro) return { available: false, reason: "budget_exhausted" };
+    if ((await assistantSpentMicro(db)) >= Math.floor(b.budgetMicro * ASSISTANT_LIMITS.budgetShare)) return { available: false, reason: "budget_exhausted" };
   }
   return { available: true, reason: "ok" };
 }

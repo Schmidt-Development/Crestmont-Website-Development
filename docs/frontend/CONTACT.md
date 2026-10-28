@@ -19,11 +19,18 @@ redirect. The topic select is now a group of radio chips that posts the same `in
 
 ## Reliability fixes
 
-- **Duplicate submissions:** a one-time `submission` token (not stored as lead data) is consumed only after validation
-  passes. A double click, a retry or a replay lands on the thank-you page without creating a second lead, and a token
-  survives a validation error. If saving fails, the token is released, so the visitor can resubmit and is never told
-  "received" falsely. The same guard applies to the quote form. Tested with two simultaneous identical submissions:
-  exactly one lead is created.
+- **Duplicate submissions:** a one-time `submission` token (`<issued unix seconds>-<96 random bits>`, not stored as
+  lead data) is claimed only after validation passes. Its issue time is the claim's fixed window, so it stays unique
+  for its whole 36-hour life (no reset at UTC midnight); older tokens are replaced with a fresh one.
+  - A duplicate reports success **only once the first submission's lead is saved** (it waits up to 6 seconds for it);
+    otherwise it says neutrally that the message is already being sent (HTTP 409). It never says "received" for a
+    lead that may not exist.
+  - If saving the lead fails, the token is released so the visitor can resubmit. Once the lead exists the token is
+    never released; a failure saving the quote's structured details is logged, not reported as "not saved" (the lead's
+    message already carries service, budget and timeline).
+  - Tested with two simultaneous identical submissions (exactly one lead), an in-flight claim, a saved claim and an
+    expired token. The same guard applies to the quote form, whose client-side message minimum (20) now matches the
+    server.
 - **Global double-submit guard (`app.js`):** it previously decided synchronously, so a submit cancelled by a later
   handler (client-side validation) left the button disabled with a spinner for 8 seconds. It now decides after all
   handlers have run.

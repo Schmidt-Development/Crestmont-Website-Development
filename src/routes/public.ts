@@ -330,8 +330,18 @@ export function turnstileWidget(ctx: AppContext): SafeHtml {
 
 /** One-time submission token (not lead data): a second submit of the same form — a double click or a retried request —
  *  lands on the same thank-you page without creating a second lead. Forms posted without it behave as before. */
-const SUBMISSION_RE = /^[a-f0-9]{24}$/;
-const submissionField = (v: FormVals) => html`<input type="hidden" name="submission" value="${SUBMISSION_RE.test(v.submission ?? "") ? v.submission : randomHex(12)}">`;
+// One-time submission token: "<issued unix seconds>-<96 random bits>". The issue time is the token's fixed rate_limits
+// window, so the claim stays unique for the token's whole life (no reset at a window boundary); retention purges it
+// after two days, by which time the token has expired (SUBMISSION_TTL_S) and is no longer honoured.
+const SUBMISSION_RE = /^(\d{10})-([a-f0-9]{24})$/;
+const SUBMISSION_TTL_S = 36 * 3600;
+const newSubmission = () => `${Math.floor(Date.now() / 1000)}-${randomHex(12)}`;
+function liveSubmission(token: string | undefined, now = Date.now()): { key: string; issued: number } | null {
+  const m = SUBMISSION_RE.exec(token ?? ""); if (!m) return null;
+  const issued = Number(m[1]), age = now / 1000 - issued;
+  return age >= -300 && age <= SUBMISSION_TTL_S ? { key: m[2], issued } : null;
+}
+const submissionField = (v: FormVals) => html`<input type="hidden" name="submission" value="${liveSubmission(v.submission) ? v.submission : newSubmission()}">`;
 function randomHex(bytes: number): string { const a = new Uint8Array(bytes); crypto.getRandomValues(a); return [...a].map((b) => b.toString(16).padStart(2, "0")).join(""); }
 
 const honeypot = () => html`<div class="hp" aria-hidden="true"><label for="f-${HONEYPOT}">Leave this field empty</label><input id="f-${HONEYPOT}" name="${HONEYPOT}" type="text" tabindex="-1" autocomplete="off"></div>`;
@@ -362,7 +372,7 @@ function validateLeadForm(v: FormVals, kind: "quote" | "contact"): { errors: Fie
 }
 
 function quoteForm(ctx: AppContext, v: FormVals, e: FieldErrors): SafeHtml {
-  return html`${formErrors(Object.values(e))}<form method="post" action="/quote" class="lead-form" novalidate data-lead-form>${csrf(ctx)}${honeypot()}${submissionField(v)}${attributionFields(requestAttribution(ctx))}
+  return html`${formErrors(Object.values(e))}<form method="post" action="/quote" class="lead-form" novalidate data-lead-form data-min-message="20">${csrf(ctx)}${honeypot()}${submissionField(v)}${attributionFields(requestAttribution(ctx))}
 ${contactFields(v, e)}
 ${input({ name: "website", label: "Current website (optional)", type: "url", value: v.website, placeholder: "https://", error: e.website, maxlength: 300 })}
 <div class="grid grid-2 form-grid">
@@ -407,23 +417,42 @@ async function handleLead(ctx: AppContext, kind: "quote" | "contact", rerender: 
   const { errors } = validateLeadForm(v, kind);
   if (Object.keys(errors).length) return rerender(v, errors, 422);
 
-  // Consumed only after validation passed, atomically: a duplicate never creates a second lead.
-  if (SUBMISSION_RE.test(v.submission)) {
-    const once = await rateLimit(ctx.db, `leadsub:${v.submission}`, 1, 86_400);
-    if (!once.allowed) return redirect(ctx, thanks, { kind: "success", text: kind === "quote" ? "Thank you — your quote request was received." : "Thank you — your message was received." });
-  }
+  // Claimed only after validation passed, atomically: a duplicate never creates a second lead. A duplicate reports
+  // success only once the first submission's lead is actually saved; while it is still being saved it waits briefly,
+  // and otherwise says so neutrally (never "received" for a lead that may not exist).
+  const okText = kind === "quote" ? "Thank you — your quote request was received." : "Thank you — your message was received.";
+  const sub = liveSubmission(v.submission);
+  if (sub) {
+    const claim = await ctx.db.prepare(`INSERT INTO rate_limits (key, window_start, count) VALUES (?, ?, 1) ON CONFLICT(key, window_start) DO UPDATE SET count = count + 1 RETURNING count`)
+      .bind(`leadsub:${sub.key}`, sub.issued).first<{ count: number }>();
+    if ((claim?.count ?? 1) > 1) {
+      const saved = () => ctx.db.prepare(`SELECT 1 AS ok FROM rate_limits WHERE key = ? AND window_start = ?`).bind(`leadsaved:${sub.key}`, sub.issued).first<{ ok: number }>();
+      for (let i = 0; i < 24 && !(await saved()); i++) await new Promise((r) => setTimeout(r, 250));
+      if (await saved()) return redirect(ctx, thanks, { kind: "success", text: okText });
+      return rerender(v, { form: "This message is already being sent. Please wait a minute and check your email before sending it again." }, 409);
+    }
+  } else v.submission = "";
   const service = v.service ? serviceBySlug(v.service) : undefined;
   const details = kind === "quote"
     ? [`Service: ${service?.name ?? "Not sure yet"}`, `Budget range: ${v.budget}`, `Timeline: ${v.timeline}`, "", v.message].join("\n")
     : v.message;
+  let leadId: string | undefined;
   try {
-    const { leadId } = await captureLead(ctx.db, {
+    ({ leadId } = await captureLead(ctx.db, {
       name: v.name, email: v.email, phone: v.phone || undefined, company: v.company || undefined, website: v.website || undefined,
       interest: v.interest, message: details, source: kind === "quote" ? "quote_form" : "web_form",
-    }, { ip: ctx.ip ?? undefined, attribution: submittedAttribution(ctx, f) });
+    }, { ip: ctx.ip ?? undefined, attribution: submittedAttribution(ctx, f) }));
+    // From here the lead exists: mark the token saved so duplicates report success and the token is never released.
+    if (sub) await ctx.db.prepare(`INSERT OR IGNORE INTO rate_limits (key, window_start, count) VALUES (?, ?, 1)`).bind(`leadsaved:${sub.key}`, sub.issued).run();
     if (kind === "quote") {
-      await ctx.db.prepare(`INSERT INTO lead_request_details (lead_id, service_slug, budget_range, timeline, created_at) VALUES (?,?,?,?,?)`)
-        .bind(leadId, service?.slug ?? null, v.budget, v.timeline, nowIso()).run();
+      // The lead's message already carries service, budget and timeline; the structured row is an index, so a failure
+      // here is logged rather than reported to the visitor as "not saved" (which would invite a duplicate lead).
+      try {
+        await ctx.db.prepare(`INSERT INTO lead_request_details (lead_id, service_slug, budget_range, timeline, created_at) VALUES (?,?,?,?,?)`)
+          .bind(leadId, service?.slug ?? null, v.budget, v.timeline, nowIso()).run();
+      } catch (err) {
+        console.error(JSON.stringify({ level: "error", msg: "lead request details not saved", leadId, error: (err as Error).message }));
+      }
     }
     try {
       await sendMail(ctx, { template: "lead_received", to: v.email.toLowerCase(), idempotencyKey: `lead-ack:${leadId}`, data: { name: v.name, kind: kind === "quote" ? "quote" : "contact" } });
@@ -432,11 +461,11 @@ async function handleLead(ctx: AppContext, kind: "quote" | "contact", rerender: 
     }
   } catch (err) {
     // The lead was not saved: release the one-time token so the visitor can resubmit, and never report success.
-    if (SUBMISSION_RE.test(v.submission)) await ctx.db.prepare(`DELETE FROM rate_limits WHERE key = ?`).bind(`leadsub:${v.submission}`).run().catch(() => undefined);
+    if (sub && !leadId) await ctx.db.prepare(`DELETE FROM rate_limits WHERE key = ? AND window_start = ?`).bind(`leadsub:${sub.key}`, sub.issued).run().catch(() => undefined);
     if (err instanceof ValidationError) return rerender(v, { form: err.issues.join(". ") }, 422);
     throw err;
   }
-  return redirect(ctx, thanks, { kind: "success", text: kind === "quote" ? "Thank you — your quote request was received." : "Thank you — your message was received." });
+  return redirect(ctx, thanks, { kind: "success", text: okText });
 }
 
 // ───────────────────────── public routes ─────────────────────────

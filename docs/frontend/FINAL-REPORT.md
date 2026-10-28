@@ -31,7 +31,7 @@ Contact: Turnstile is active on the preview, so the automated submission is skip
 
 Recordings and screenshots: artifact `frontend-preview-browser` on run 40656877851 (14-day retention, no credentials in it). The hosted live-link check passed in run 40646014955.
 
-Tests: **410 unit tests passing**. The local e2e and visual sweep also pass.
+Tests: **411 unit tests passing** (after the review fixes). The local e2e and visual sweep also pass.
 
 ## 3. Portfolio demos — status: BLOCKED (screenshot fallbacks in use)
 
@@ -74,7 +74,25 @@ The assistant is built and shown on all public pages.
 - Each answer's cost is recorded. Visitor text is not stored.
 - Invented prices are withheld, and only approved site paths are linked.
 
-## 7. Safety confirmation
+## 7. Triple-pass review
+
+1. Automated: the unit suite, the local e2e and visual sweep, and the hosted real-browser stage.
+2. Self-review: fixed during the work (pricing dashes, touch-target sizes, overflow at 375px, the contact selector
+   collision, the global submit guard).
+3. Independent review of the new server and client code. No critical issues were found: no XSS, no CSRF bypass and
+   no leaks. Six defects were found and fixed:
+   - a double-submit could show "received" when the first request then failed;
+   - a quote whose details row failed could be resubmitted and create a duplicate lead;
+   - submission tokens reset at UTC midnight;
+   - the public assistant could use up the whole staff AI budget (it now has its own 50% share, and its client-held
+     history is size-capped);
+   - the invented-price guardrail missed "dollars", "USD" and "% off";
+   - the quote form's client and server message minimums differed.
+
+   One minor point remains: without a session header, usage rows hash the IP unsalted. Visitors' browsers always send
+   a session id, so this applies only to non-browser callers.
+
+## 8. Safety confirmation
 
 The following were not touched:
 - `main` (not merged or pushed);
