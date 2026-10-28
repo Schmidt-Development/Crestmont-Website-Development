@@ -36,7 +36,7 @@ Account Resources: **Include → the Crestmont account** only. Zone Resources: *
 - **Environment variables** (needed by Stage 2, harmless now): `PRODUCTION_URL` = `https://crestmontwebsitedevelopment.com`, `READINESS_URL` = `https://crestmont-platform-staging.partners-df4.workers.dev`.
 
 ### Run it
-Actions → **Provision production** → *Run workflow* (branch `main`) → confirmation `provision crestmont-platform-production` → approve the `production` deployment when GitHub asks. The run summary shows the D1 `database_id` (not a secret) and the secret **names** installed. Re-running is safe.
+Actions → **Provision production** → *Run workflow* (branch `main`) → confirmation `provision crestmont-platform-production` → approve the `production` deployment when GitHub asks. The run summary shows the D1 `database_id` (not a secret) and the secret **names** installed. Re-running is safe and changes no existing Worker secret (a changed secret blocks rollbacks, Cloudflare 10220); to replace the Turnstile keys, tick *replace_turnstile*, and do it only between deploys.
 
 Then commit that `database_id` into `[env.production]` of `wrangler.toml` through a pull request; `deploy-production.yml` refuses to run until it is committed.
 
