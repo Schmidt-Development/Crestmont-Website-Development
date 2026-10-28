@@ -16,10 +16,10 @@ export type Permission =
   // area access (navigation + list pages); record-level checks still apply inside each area
   | "crm.access" | "delivery.access" | "support.access" | "ai.manage" | "voice.manage" | "customers.read"
   // AI Builds (paid-intake automation): read, operate (cancel/pause/retry/resume/revise), configure (limits, approve, backfill)
-  | "builds.read" | "builds.manage" | "builds.configure";
+  | "builds.read" | "builds.manage" | "builds.configure" | "ai.budget";
 
 const OWNER_ONLY: Permission[] = ["refund.decide", "refund.issue", "pricing.change", "release.approve_production",
-  "release.deploy_production", "security.exception", "builds.configure"];
+  "release.deploy_production", "security.exception", "builds.configure", "ai.budget"];
 
 const ALL_STAFF: Permission[] = ["readiness.read"];
 

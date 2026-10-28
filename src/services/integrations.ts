@@ -71,7 +71,7 @@ export async function assessConfiguration(d: IntegrationDeps, id: IntegrationId)
     }
     case "ai":
       if (!e.ANTHROPIC_API_KEY) return { status: "not_configured", detail: "ANTHROPIC_API_KEY is not set. AI drafting jobs fail with not_configured; nothing is generated.", fingerprint: null, probe: false };
-      return { status: "configured_unverified", detail: `API key set; model ${e.AI_MODEL ?? "default"}. Probe lists models.`, fingerprint: await fp(e.ANTHROPIC_API_KEY), probe: true };
+      return { status: "configured_unverified", detail: `API key set; model ${e.AI_MODEL ?? "default"}. ${e.AI_PROVIDER === "anthropic" ? "Selected as the AI backend (AI_PROVIDER=anthropic); paid calls also need the Owner's monthly AI budget." : `Not used: AI_PROVIDER is ${e.AI_PROVIDER ? `"${e.AI_PROVIDER}"` : "unset"}, so paid AI stays off.`} Probe lists models.`, fingerprint: await fp(e.ANTHROPIC_API_KEY), probe: true };
     case "voice":
       if (!e.VOICE_WEBHOOK_SECRET) return { status: "not_configured", detail: "No voice provider selected (BLK-009) and VOICE_WEBHOOK_SECRET is not set; the voice webhook rejects every request.", fingerprint: null, probe: false };
       return { status: "configured_unverified", detail: "VOICE_WEBHOOK_SECRET set, so signed events are accepted. No provider account is connected (BLK-009); there is no provider API to probe.", fingerprint: await fp(e.VOICE_WEBHOOK_SECRET), probe: false };

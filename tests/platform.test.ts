@@ -347,7 +347,7 @@ test("[AIOPS-002] retrying a failed job without a provider fails honestly and re
   assert.equal(first.status, "failed");
   assert.match(first.error!, /not configured/);
   const page = await (await c.get("/staff/ai")).text();
-  assert.match(page, /Not configured/);
+  assert.match(page, /No AI backend is selected/);
   assert.match(page, /not_configured: no AI provider key is set/);
   const r = await c.post(`/staff/ai/${first.jobId}/retry`);
   assert.equal(r.status, 303);

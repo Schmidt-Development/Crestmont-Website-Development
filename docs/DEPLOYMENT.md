@@ -68,7 +68,7 @@ Set with `npx wrangler@4 secret put <NAME> --env staging` (then again with `--en
 | `RESEND_WEBHOOK_SECRET` | with Resend webhooks | with Resend webhooks | Resend/Svix `whsec_…` |
 | `TURNSTILE_SECRET`, `TURNSTILE_SITE_KEY` | required (public forms, `/register` and `/password/forgot` fail closed without them) | required | Cloudflare Turnstile widget per hostname. Staging uses Cloudflare's always-pass test keys in `wrangler.toml`. |
 | `MFA_ENCRYPTION_KEY` | **required** (set manually; not derived by the deploy workflow) | **required**, different value | `openssl rand -base64 32` (exactly 32 bytes). AES-GCM key for TOTP secrets at rest. Without it, two-factor *enrolment* is refused on staging/production (existing users keep signing in). Never rotate in place (RUNBOOK §4). |
-| `ANTHROPIC_API_KEY` | optional | optional | Anthropic Console |
+| `ANTHROPIC_API_KEY` | optional | optional | Anthropic Console (console.anthropic.com → API keys; separate key per environment, workspace spend limit). Used **only** when the var `AI_PROVIDER = "anthropic"` is also set **and** the Owner sets a monthly AI budget at /staff/ai; a key alone never enables paid AI. Default backend is the self-hosted model (`AI_PROVIDER = "local-runner"` + `BUILD_RUNNER_SECRET`). |
 | `GITHUB_TOKEN`, `GITHUB_REPO` | recommended (readiness data source) | optional | fine-grained, read-only, this repository only |
 | `VOICE_WEBHOOK_SECRET`, `RETELL_API_KEY` | after the provider is approved (BLK-009) | same | voice provider |
 

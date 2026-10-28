@@ -14,10 +14,19 @@ export function rowsOf(wranglerJson: string): Rows {
 
 const SKIP = /^(sqlite_|_cf_|d1_migrations$)/;
 export function countSql(tables: string[]): string {
+  return countQueries(tables, Infinity)[0];
+}
+/** One counting query per batch of tables (D1 rejected a single ~95-table UNION ALL on staging). */
+export function countQueries(tables: string[], batch = 15): string[] {
   const ok = tables.filter((t) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(t) && !SKIP.test(t)).sort();
   if (!ok.length) throw new Error("no tables to count");
-  return ok.map((t) => `SELECT '${t}' AS t, COUNT(*) AS n FROM "${t}"`).join(" UNION ALL ");
+  const out: string[] = [];
+  for (let i = 0; i < ok.length; i += Number.isFinite(batch) ? batch : ok.length)
+    out.push(ok.slice(i, i + (Number.isFinite(batch) ? batch : ok.length)).map((t) => `SELECT '${t}' AS t, COUNT(*) AS n FROM "${t}"`).join(" UNION ALL "));
+  return out;
 }
+/** Rows from several `wrangler d1 execute --json` outputs (one per batch). */
+export function rowsOfAll(outputs: string[]): Rows { return outputs.flatMap(rowsOf); }
 
 export interface DrillResult { passed: boolean; tables: number; rows: number; problems: string[] }
 export function compareCounts(source: Rows, restored: Rows): DrillResult {
@@ -44,9 +53,10 @@ export function drillEvidence(r: DrillResult, o: { commit: string; runId: string
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [mode, a, b] = process.argv.slice(2);
   const arg = (n: string) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : undefined; };
-  if (mode === "sql") process.stdout.write(countSql(rowsOf(readFileSync(a, "utf8")).map((r) => String(r.name))));
+  if (mode === "sql") process.stdout.write(countQueries(rowsOf(readFileSync(a, "utf8")).map((r) => String(r.name))).join("\n") + "\n");
   else if (mode === "compare") {
-    const r = compareCounts(rowsOf(readFileSync(a, "utf8")), rowsOf(readFileSync(b, "utf8")));
+    // a / b: comma-separated lists of wrangler JSON outputs (one per counting batch).
+    const r = compareCounts(rowsOfAll(a.split(",").map((f) => readFileSync(f, "utf8"))), rowsOfAll(b.split(",").map((f) => readFileSync(f, "utf8"))));
     writeFileSync(arg("--out") ?? "evidence/restore-drill.json", JSON.stringify(drillEvidence(r, { commit: arg("--commit") ?? "0000000", runId: arg("--run-id") ?? `local-drill-${Date.now()}`, startedAt: arg("--started") ?? new Date().toISOString() })));
     console.log(`${r.passed ? "PASSED" : "FAILED"}: ${r.tables} tables, ${r.rows} rows${r.problems.length ? `; ${r.problems.join("; ")}` : ""}`);
     if (!r.passed) process.exit(1);

@@ -49,20 +49,26 @@ jobs:
         run: |
           echo "STARTED=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$GITHUB_ENV"
           mkdir -p drill evidence
-          fail() { echo "reason=$1: $(sed -e 's/\x1b\[[0-9;]*m//g' drill/err.log 2>/dev/null | grep -iE 'error|code:' | head -2 | tr '\n' ' ' | sed -E 's#/accounts/[^/]+/#/accounts/…/#' | cut -c1-300)" >> "$GITHUB_OUTPUT"; exit 1; }
+          fail() { echo "reason=$1: $(cat drill/err.log drill/out.log 2>/dev/null | sed -e 's/\x1b\[[0-9;]*m//g' | grep -iE 'error|code' | head -3 | tr '\n' ' ' | sed -E 's#/accounts/[^/]+/#/accounts/…/#' | cut -c1-300)" >> "$GITHUB_OUTPUT"; exit 1; }
+          count() { i=0; files=""; while IFS= read -r q; do [ -n "$q" ] || continue
+              $WRANGLER d1 execute "$1" $2 --json --command "$q" > "drill/$3-$i.json" 2> drill/err.log || { cp "drill/$3-$i.json" drill/out.log; return 1; }
+              files="$files${files:+,}drill/$3-$i.json"; i=$((i+1)); done < drill/count.sql; echo "$files" > "drill/$3.list"; }
           $WRANGLER d1 export crestmont-staging --remote --env staging --output drill/staging.sql > /dev/null 2> drill/err.log || fail "export"
           $WRANGLER d1 execute crestmont-staging --remote --env staging --json --command "SELECT name FROM sqlite_master WHERE type='table'" > drill/tables.json 2> drill/err.log || fail "list tables"
           node --no-warnings scripts/restore-drill.ts sql drill/tables.json > drill/count.sql
-          $WRANGLER d1 execute crestmont-staging --remote --env staging --json --command "$(cat drill/count.sql)" > drill/source.json 2> drill/err.log || fail "count source rows"
+          count crestmont-staging "--remote --env staging" source || fail "count source rows"
       - name: Restore into a scratch database and compare
         id: restore
         if: steps.pre.outputs.ok == 'true' && steps.export.outcome == 'success'
         run: |
-          fail() { echo "reason=$1: $(sed -e 's/\x1b\[[0-9;]*m//g' drill/err.log 2>/dev/null | grep -iE 'error|code:' | head -2 | tr '\n' ' ' | sed -E 's#/accounts/[^/]+/#/accounts/…/#' | cut -c1-300)" >> "$GITHUB_OUTPUT"; exit 1; }
+          fail() { echo "reason=$1: $(cat drill/err.log drill/out.log 2>/dev/null | sed -e 's/\x1b\[[0-9;]*m//g' | grep -iE 'error|code' | head -3 | tr '\n' ' ' | sed -E 's#/accounts/[^/]+/#/accounts/…/#' | cut -c1-300)" >> "$GITHUB_OUTPUT"; exit 1; }
+          count() { i=0; files=""; while IFS= read -r q; do [ -n "$q" ] || continue
+              $WRANGLER d1 execute "$1" $2 --json --command "$q" > "drill/$3-$i.json" 2> drill/err.log || { cp "drill/$3-$i.json" drill/out.log; return 1; }
+              files="$files${files:+,}drill/$3-$i.json"; i=$((i+1)); done < drill/count.sql; echo "$files" > "drill/$3.list"; }
           $WRANGLER d1 create "$SCRATCH" > /dev/null 2> drill/err.log || fail "create scratch database"
           $WRANGLER d1 execute "$SCRATCH" --remote --file drill/staging.sql --yes > /dev/null 2> drill/err.log || fail "import export into scratch"
-          $WRANGLER d1 execute "$SCRATCH" --remote --json --command "$(cat drill/count.sql)" > drill/restored.json 2> drill/err.log || fail "count restored rows"
-          node --no-warnings scripts/restore-drill.ts compare drill/source.json drill/restored.json \
+          count "$SCRATCH" "--remote" restored || fail "count restored rows"
+          node --no-warnings scripts/restore-drill.ts compare "$(cat drill/source.list)" "$(cat drill/restored.list)" \
             --commit "$GITHUB_SHA" --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-restore-drill" --started "$STARTED" --out evidence/restore-drill.json
       - name: Record evidence on staging
         if: always() && steps.pre.outputs.ok == 'true'

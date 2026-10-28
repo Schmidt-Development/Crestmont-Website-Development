@@ -25,3 +25,17 @@ test("[TEST-004] staging restore drill: counts every table, detects missing/extr
   assert.match(wf, /d1 delete "\$SCRATCH"/);
   assert.match(wf, /rm -rf drill/);
 });
+
+test("[TEST-004] [INFRA-006] restore drill counts tables in small batches (a single ~95-table UNION ALL was rejected on staging) and compares across batch outputs", async () => {
+  const { countQueries, rowsOfAll } = await import("../scripts/restore-drill.ts");
+  const tables = Array.from({ length: 40 }, (_, i) => `t${String(i).padStart(2, "0")}`).concat(["sqlite_sequence", "_cf_KV", "d1_migrations"]);
+  const qs = countQueries(tables, 15);
+  assert.equal(qs.length, 3);
+  assert.ok(qs.every((q) => (q.match(/SELECT '/g) ?? []).length <= 15));
+  assert.equal(qs.join(" ").match(/SELECT '/g)!.length, 40, "every user table counted once, internal tables skipped");
+  const out = (ts: string[]) => JSON.stringify([{ results: ts.map((t) => ({ t, n: 2 })), success: true }]);
+  assert.equal(rowsOfAll([out(["a", "b"]), out(["c"])]).length, 3);
+  const wf = (await import("node:fs")).readFileSync(".github/workflows/staging-restore-drill.yml", "utf8");
+  assert.match(wf, /count crestmont-staging "--remote --env staging" source \|\| fail "count source rows"/);
+  assert.match(wf, /compare "\$\(cat drill\/source\.list\)" "\$\(cat drill\/restored\.list\)"/);
+});
