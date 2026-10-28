@@ -36,9 +36,9 @@ export async function verifyTurnstile(ctx: AppContext, token: unknown): Promise<
 }
 
 export function register(r: Router) {
-  // External scheduler (READY-012, INFRA-006): runs the same job sets as the Worker's Cron Triggers when those cannot
-  // be registered (staging's Cloudflare account is at the Workers Free limit of 5 cron triggers). HMAC-signed like the
-  // other machine endpoints; 503 when no key is configured; at most one run per job set per 5 minutes.
+  // Backup scheduler (READY-012, INFRA-006): runs the same job sets as the Worker's Cron Triggers, on demand, if native
+  // triggers ever fail (they were unavailable on Workers Free; native triggers run since the Paid upgrade, 2026-10-28).
+  // HMAC-signed like the other machine endpoints; 503 when no key is configured; at most one run per set per 5 minutes.
   r.post("/api/scheduled/run", async (ctx) => {
     const raw = await readBody(ctx.req);
     if (!ctx.env.SCHEDULER_TRIGGER_SECRET) return jsonResponse(ctx, 503, { error: "External scheduler not configured" });

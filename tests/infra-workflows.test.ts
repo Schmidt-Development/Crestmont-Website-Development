@@ -36,6 +36,7 @@ test("[READY-012] [DOC-002] external alerting: an off-platform monitor probes se
   assert.match(m, /exit 1/);
   assert.deepEqual([...m.matchAll(/secrets\.([A-Z_]+)/g)].map((x) => x[1]), ["CLOUDFLARE_API_TOKEN"], "only the scheduler step uses a secret (to derive its key)");
   assert.match(m, /scripts\/trigger-scheduler\.ts run --url "\$BASE"/);
+  assert.match(m, /if: github\.event_name == 'workflow_dispatch' && inputs\.run_jobs/, "the backup job run is manual only (native Cron Triggers run the jobs)");
   assert.match(m, /persist-credentials: false/);
   const rb = readFileSync("docs/RUNBOOK.md", "utf8");
   assert.match(rb, /staging-health-monitor\.yml/);

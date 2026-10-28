@@ -14,9 +14,23 @@ export function rowsOf(wranglerJson: string): Rows {
 
 const SKIP = /^(sqlite_|_cf_|d1_migrations$)/;
 export function countSql(tables: string[]): string {
+  return countQueries(tables, Infinity)[0];
+}
+/** Counting queries for D1. D1 rejects compound SELECTs beyond a few terms ("too many terms in compound SELECT",
+ *  code 7500, seen on staging), so each query is ONE row of scalar sub-selects — no UNION — one column per table,
+ *  in batches to stay well under column limits. */
+export function countQueries(tables: string[], batch = 20): string[] {
   const ok = tables.filter((t) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(t) && !SKIP.test(t)).sort();
   if (!ok.length) throw new Error("no tables to count");
-  return ok.map((t) => `SELECT '${t}' AS t, COUNT(*) AS n FROM "${t}"`).join(" UNION ALL ");
+  const size = Number.isFinite(batch) ? batch : ok.length;
+  const out: string[] = [];
+  for (let i = 0; i < ok.length; i += size)
+    out.push(`SELECT ${ok.slice(i, i + size).map((t) => `(SELECT COUNT(*) FROM "${t}") AS "${t}"`).join(", ")}`);
+  return out;
+}
+/** {t, n} rows from several `wrangler d1 execute --json` outputs; accepts both the one-row-of-columns shape and {t, n} rows. */
+export function rowsOfAll(outputs: string[]): Rows {
+  return outputs.flatMap(rowsOf).flatMap((r) => ("t" in r && "n" in r ? [r] : Object.entries(r).map(([t, n]) => ({ t, n }))));
 }
 
 export interface DrillResult { passed: boolean; tables: number; rows: number; problems: string[] }
@@ -44,11 +58,17 @@ export function drillEvidence(r: DrillResult, o: { commit: string; runId: string
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [mode, a, b] = process.argv.slice(2);
   const arg = (n: string) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : undefined; };
-  if (mode === "sql") process.stdout.write(countSql(rowsOf(readFileSync(a, "utf8")).map((r) => String(r.name))));
+  if (mode === "sql") process.stdout.write(countQueries(rowsOf(readFileSync(a, "utf8")).map((r) => String(r.name))).join("\n") + "\n");
   else if (mode === "compare") {
-    const r = compareCounts(rowsOf(readFileSync(a, "utf8")), rowsOf(readFileSync(b, "utf8")));
+    // a / b: comma-separated lists of wrangler JSON outputs (one per counting batch).
+    const r = compareCounts(rowsOfAll(a.split(",").map((f) => readFileSync(f, "utf8"))), rowsOfAll(b.split(",").map((f) => readFileSync(f, "utf8"))));
     writeFileSync(arg("--out") ?? "evidence/restore-drill.json", JSON.stringify(drillEvidence(r, { commit: arg("--commit") ?? "0000000", runId: arg("--run-id") ?? `local-drill-${Date.now()}`, startedAt: arg("--started") ?? new Date().toISOString() })));
     console.log(`${r.passed ? "PASSED" : "FAILED"}: ${r.tables} tables, ${r.rows} rows${r.problems.length ? `; ${r.problems.join("; ")}` : ""}`);
     if (!r.passed) process.exit(1);
+  } else if (mode === "fail") {
+    // A step before the comparison failed (export, scratch database, import): record a failed drill with the reason,
+    // so the recovery:restore feed shows it instead of the drill silently leaving no evidence.
+    const reason = (arg("--reason") || "restore drill failed before the comparison").slice(0, 500);
+    writeFileSync(arg("--out") ?? "evidence/restore-drill.json", JSON.stringify(drillEvidence({ passed: false, tables: 0, rows: 0, problems: [reason] }, { commit: arg("--commit") ?? "0000000", runId: arg("--run-id") ?? `local-drill-${Date.now()}`, startedAt: arg("--started") ?? new Date().toISOString() })));
   } else { console.error("usage: restore-drill.ts sql <tables.json> | compare <source.json> <restored.json> [--commit --run-id --out --started]"); process.exit(2); }
 }

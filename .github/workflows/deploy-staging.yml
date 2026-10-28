@@ -96,10 +96,14 @@ jobs:
           grep -q "$id" wrangler.toml && echo "Staging D1: $id"
 
       - name: File storage (R2) if available, otherwise disable uploads honestly
+        id: r2
         run: |
-          if $WRANGLER r2 bucket list 2>/dev/null | grep -q "crestmont-files-staging" || $WRANGLER r2 bucket create crestmont-files-staging 2>/dev/null; then
-            echo "R2 bucket ready"
+          if $WRANGLER r2 bucket list > r2-list.log 2> r2.err && grep -q "crestmont-files-staging" r2-list.log || $WRANGLER r2 bucket create crestmont-files-staging >> r2.err 2>&1; then
+            echo "R2 bucket ready"; echo "state=bound" >> "$GITHUB_OUTPUT"
           else
+            echo "state=unavailable" >> "$GITHUB_OUTPUT"
+            # Why (for the public file-storage:staging feed): Cloudflare's error text, account id elided. Bucket names only.
+            echo "reason=$(sed -e 's/\x1b\[[0-9;]*m//g' r2.err | grep -iE 'error|code|not enabled|permission|auth' | head -2 | tr '\n' ' ' | sed -E 's#/accounts/[^/]+/#/accounts/…/#' | cut -c1-240) buckets visible: $(grep -oE 'name:\s*\S+' r2-list.log | sed 's/name:\s*//' | tr '\n' ' ' | cut -c1-120)" >> "$GITHUB_OUTPUT"
             echo "::warning title=File uploads disabled on staging::R2 is not enabled on this Cloudflare account. Pages that store files will say storage is not configured. Enable R2 in the Cloudflare dashboard to turn uploads on."
             node -e 'const fs=require("fs");let t=fs.readFileSync("wrangler.toml","utf8");t=t.replace(/^r2_buckets = \[\{ binding = "FILES", bucket_name = "crestmont-files-staging" \}\]\n/m,"");fs.writeFileSync("wrangler.toml",t)'
           fi
@@ -125,10 +129,13 @@ jobs:
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
       - name: Evidence ingest secret
+        # Derived (stable) and put only when changed: any secret change blocks Worker rollbacks (Cloudflare 10220).
+        env:
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          ev=$(node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))')
+          ev=$(node --no-warnings scripts/staging-secrets.ts derive evidence)
           echo "::add-mask::$ev"
-          printf '%s' "$ev" | $WRANGLER secret put EVIDENCE_INGEST_SECRET --env staging > /dev/null
+          printf '%s' "$ev" | node --no-warnings scripts/staging-secrets.ts put EVIDENCE_INGEST_SECRET
           echo "EVIDENCE_INGEST_SECRET=$ev" >> "$GITHUB_ENV"
 
       - name: External scheduler key
@@ -139,7 +146,17 @@ jobs:
         run: |
           k=$(node --no-warnings scripts/trigger-scheduler.ts derive)
           echo "::add-mask::$k"
-          printf '%s' "$k" | $WRANGLER secret put SCHEDULER_TRIGGER_SECRET --env staging > /dev/null
+          printf '%s' "$k" | node --no-warnings scripts/staging-secrets.ts put SCHEDULER_TRIGGER_SECRET
+
+      - name: Report file storage state (file-storage:staging feed)
+        continue-on-error: true
+        env:
+          READINESS_URL: ${{ steps.deploy.outputs.url }}
+          R2_STATE: ${{ steps.r2.outputs.state }}
+          R2_REASON: ${{ steps.r2.outputs.reason }}   # via env, never interpolated into the script
+        run: |
+          node --no-warnings scripts/storage-evidence.ts --state "$R2_STATE" --reason "$R2_REASON" --commit "$GITHUB_SHA" --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-r2" --out evidence/r2.json
+          node --no-warnings scripts/post-evidence.ts evidence/r2.json
 
       - name: Verify cron triggers (and re-register them if missing)
         # READY-012 / INFRA-006: scheduled jobs had never run on staging. Compares Cloudflare's registered schedules
@@ -163,8 +180,9 @@ jobs:
       - name: AI Builds runner secret (only when the Founder has provided one)
         env:
           RUNNER_SECRET: ${{ secrets.BUILD_RUNNER_SECRET }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          if [ -n "$RUNNER_SECRET" ]; then printf '%s' "$RUNNER_SECRET" | $WRANGLER secret put BUILD_RUNNER_SECRET --env staging > /dev/null && echo "BUILD_RUNNER_SECRET installed on staging."
+          if [ -n "$RUNNER_SECRET" ]; then printf '%s' "$RUNNER_SECRET" | node --no-warnings scripts/staging-secrets.ts put BUILD_RUNNER_SECRET
           else echo "BUILD_RUNNER_SECRET not provided: AI Builds execution stays unavailable on staging (builds wait in the queue)."; fi
 
       - name: Seed sample data and demo accounts (first run or on request)

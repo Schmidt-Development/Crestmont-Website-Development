@@ -205,7 +205,8 @@ test("[SUP-004] AI-drafted replies on sensitive tickets require explicit human a
     return new Response(JSON.stringify({ content: [{ type: "text", text: "We have received your billing question and will review the invoice." }], usage: { input_tokens: 10, output_tokens: 20 } }), { status: 200, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
   try {
-    const { db, a, s, agent, custA } = await setup({ ANTHROPIC_API_KEY: "sk-test-fake" });
+    const { db, a, s, agent, custA } = await setup({ AI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-test-fake" });
+    await db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('ai.monthly_budget_usd', '5', ?)`).bind(new Date().toISOString()).run();
     const id = await openTicket(a, { subject: "Charged twice", category: "billing", description: "My card was charged twice for the deposit invoice." });
     const res = await s.post(`/staff/support/${id}/draft`);
     const loc = res.headers.get("location")!;

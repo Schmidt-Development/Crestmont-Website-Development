@@ -24,6 +24,7 @@ export const STEP_UP_ROUTES: Readonly<Record<string, string>> = {
   "POST /staff/integrations/:name/verify": "integration credential probe",
   "POST /staff/ops/environments": "environment endpoints",
   "POST /staff/builds/settings": "automation limits and model",
+  "POST /staff/ai/budget": "paid AI budget",
   // MFA changes (replacing an enrolled authenticator; first enrolment is unaffected because no MFA exists yet)
   "GET /mfa/setup": "authenticator change",
   "POST /mfa/setup": "authenticator change",

@@ -30,7 +30,7 @@ test("[READY-012] [INFRA-006] deployed environments require the scheduler: never
   h = await health(t);
   assert.equal(h.code, 200);
   assert.equal(h.body.feeds.find((f) => f.source === "scheduler")!.status, "healthy");
-  // A 15-minute job that stopped 2 hours ago is stale (threshold 75 min).
+  // A 15-minute job that stopped 2 hours ago is stale (threshold 45 min).
   await t.db.prepare(`UPDATE ingestion_status SET last_success_at = ? WHERE source = 'job:build_sweep'`).bind(new Date(Date.now() - 2 * 3_600_000).toISOString()).run();
   h = await health(t);
   assert.equal(h.code, 503);
@@ -110,5 +110,5 @@ test("[READY-012] the monitor's scheduler client signs exactly what the Worker v
   await verifyEvidenceSignature(key, body, sign(key, body));
   assert.deepEqual([FREQUENT, DAILY].sort(), Object.keys(SCHEDULE).sort());
   const { readFileSync } = await import("node:fs");
-  assert.match(readFileSync(".github/workflows/deploy-staging.yml", "utf8"), /trigger-scheduler\.ts derive\)[\s\S]*secret put SCHEDULER_TRIGGER_SECRET --env staging/);
+  assert.match(readFileSync(".github/workflows/deploy-staging.yml", "utf8"), /trigger-scheduler\.ts derive\)[\s\S]*staging-secrets\.ts put SCHEDULER_TRIGGER_SECRET/);
 });

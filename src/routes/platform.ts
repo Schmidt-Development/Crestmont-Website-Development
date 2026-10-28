@@ -17,7 +17,7 @@ import { isOwner, can } from "../domain/authz.ts";
 import { audit } from "../services/security.ts";
 import { sendMail, renderTemplate, identityFrom, EMAIL_TEMPLATES, REQUIRED_WORKFLOWS, TEMPLATES, type EmailTemplate, type TemplateDef } from "../services/mailer.ts";
 import { ResendEmail } from "../adapters/email.ts";
-import { decideAiJob, aiProviderFromEnv, AI_WORKFLOWS, AI_FORBIDDEN } from "../services/ai.ts";
+import { decideAiJob, aiProviderFromEnv, AI_WORKFLOWS, AI_FORBIDDEN, LOCAL_RUNNER, paidAiBudget, priceKnown } from "../services/ai.ts";
 import * as emp from "../services/employees.ts";
 import * as wl from "../services/workload.ts";
 import { toCsv } from "../services/finance.ts";
@@ -933,6 +933,19 @@ ${textarea({ name: "evidence", label: "Evidence (row counts compared, checks run
       rows.map((j) => [j.id, j.created_at, j.updated_at, j.workflow, j.provider, j.model, j.status, j.input_ref, j.cost_microusd === null ? "" : (j.cost_microusd / 1e6).toFixed(6), j.cost_microusd === null ? "unknown" : "known", j.retries, j.retry_of ?? "", j.approver ?? "", j.error ?? ""]));
     return download(ctx, csv, `crestmont-ai-jobs-${nowIso().slice(0, 10)}.csv`, "text/csv; charset=utf-8");
   });
+  r.post("/staff/ai/budget", async (ctx) => {
+    requireStaff(ctx, "ai.budget"); // Owner-only (OWNER_ONLY in src/domain/authz.ts)
+    const raw = String((await ctx.form()).get("monthly_budget_usd") ?? "").trim();
+    const n = raw === "" ? 0 : Number(raw);
+    if (!Number.isFinite(n) || n < 0 || n > 100_000) return redirect(ctx, "/staff/ai", { kind: "error", text: "Enter a monthly budget between 0 and 100000 USD." });
+    const before = (await ctx.db.prepare(`SELECT value FROM business_settings WHERE key = 'ai.monthly_budget_usd'`).first<{ value: string }>())?.value ?? null;
+    const value = n > 0 ? String(Math.round(n * 100) / 100) : null;
+    if (value) await ctx.db.prepare(`INSERT INTO business_settings (key, value, updated_by, updated_at) VALUES ('ai.monthly_budget_usd', ?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at`).bind(value, ctx.user!.id, nowIso()).run();
+    else await ctx.db.prepare(`DELETE FROM business_settings WHERE key = 'ai.monthly_budget_usd'`).run();
+    await audit(ctx.db, { actorUserId: ctx.user!.id, action: "ai.budget_updated", subjectType: "setting", subjectId: "ai.monthly_budget_usd", details: { before, after: value } });
+    return redirect(ctx, "/staff/ai", { kind: "success", text: value ? `Paid AI budget set to $${value} per month.` : "Paid AI budget cleared: paid AI calls are off." });
+  });
+
   r.get("/staff/ai", async (ctx) => {
     requireStaff(ctx, "ai.manage");
     const { where, binds, status, workflow } = aiQuery(ctx);
@@ -943,12 +956,23 @@ ${textarea({ name: "evidence", label: "Evidence (row counts compared, checks run
       .all<{ id: string; workflow: string; provider: string; model: string; status: string; input_ref: string; cost_microusd: number | null; error: string | null; retries: number; retry_of: string | null; created_at: string; approver: string | null; retryable: number | null }>()).results;
     const totals = await ctx.db.prepare(`SELECT COUNT(*) AS n, SUM(CASE WHEN status='awaiting_approval' THEN 1 ELSE 0 END) AS waiting, SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
         SUM(COALESCE(cost_microusd,0)) AS known_cost, SUM(CASE WHEN cost_microusd IS NULL AND status NOT IN ('failed','queued','running') THEN 1 ELSE 0 END) AS unknown_cost FROM ai_jobs`).first<{ n: number; waiting: number | null; failed: number | null; known_cost: number | null; unknown_cost: number | null }>();
-    const configured = !!ctx.env.ANTHROPIC_API_KEY;
+    const backend = aiProviderFromEnv(ctx.env);
+    const budget = await paidAiBudget(ctx.db);
+    const owner = can(ctx.actor!, "ai.budget");
+    const providerCard = backend === LOCAL_RUNNER
+      ? html`<p>${badge("configured_unverified", "Self-hosted model")}</p><p class="muted">Drafts are queued for the self-hosted model on the build runner (AI_PROVIDER=local-runner). No per-token fee; no paid fallback.</p>`
+      : backend
+        ? html`<p>${badge("configured_unverified", "Anthropic (paid)")}</p><p class="muted">Anthropic Messages API · model <code>${backend.model}</code>${priceKnown(backend.model) ? "" : " (price unknown — calls are refused)"}. The key is never displayed. Verify it on the <a href="/staff/integrations">integrations page</a>.</p>`
+        : html`<p>${badge("not_configured", "Off")}</p><p class="muted">No AI backend is selected. Set AI_PROVIDER to <code>local-runner</code> (self-hosted, with BUILD_RUNNER_SECRET) or <code>anthropic</code> (paid, with ANTHROPIC_API_KEY). A key alone never switches paid AI on. Every AI job fails with not_configured; nothing is generated or simulated.</p>`;
+    const budgetCard = html`<section class="card"><h2 class="card__title">Paid AI monthly budget</h2>
+<p>${budget.budgetMicro === null ? badge("not_configured", "Not set — paid calls refused") : html`${microUsd(budget.spentMicro)} of ${microUsd(budget.budgetMicro)} used this month`}</p>
+<p class="muted">Applies to paid providers only (the self-hosted model has no per-token fee). When the budget is used up, new paid drafts are refused until next month or until the Owner raises it.</p>
+${owner ? html`<form method="post" action="/staff/ai/budget" class="row">${csrf(ctx)}${input({ name: "monthly_budget_usd", label: "Monthly budget (USD)", type: "number", value: budget.budgetMicro === null ? "" : String(budget.budgetMicro / 1_000_000), hint: "0 or empty turns paid AI calls off." })}${button("Save budget", { variant: "secondary" })}</form>` : html`<p class="faint">Set by the Owner.</p>`}</section>`;
     const aiExportQs = new URLSearchParams(ctx.url.search); aiExportQs.delete("page");
     const body = html`${pageHead("AI operations", linkButton("Export CSV", `/staff/ai/export.csv${aiExportQs.toString() ? `?${aiExportQs}` : ""}`, "ghost", "sm"), "AI")}
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Provider</h2>
-<p>${configured ? badge("configured_unverified", "API key present") : badge("not_configured", "Not configured")}</p>
-<p class="muted">${configured ? html`Anthropic Messages API · model <code>${ctx.env.AI_MODEL ?? "claude-sonnet-5-5 (default)"}</code>. The key is never displayed. Verify it on the <a href="/staff/integrations">integrations page</a>.` : "ANTHROPIC_API_KEY is not set. Every AI job fails with not_configured; no text is generated or simulated."}</p></section>
+${providerCard}</section>
+${budgetCard}
 <section class="card"><h2 class="card__title">Permission boundaries</h2><p class="muted">AI output is always a draft that a person approves before it is used. AI jobs run with no Founder-protected permissions (enforced in <code>src/domain/authz.ts</code>): AI <strong>cannot</strong> issue or approve refunds, execute contracts or agreements, change prices, or approve or deploy production releases.</p>
 <p class="faint">Never requested by any workflow: ${AI_FORBIDDEN.join(", ")}.</p></section></div>
 <div class="kpis grid grid-4">${kpi("Jobs", totals?.n ?? 0)}${kpi("Awaiting approval", totals?.waiting ?? 0)}${kpi("Failed", totals?.failed ?? 0)}${kpi("Known cost", microUsd(totals?.known_cost ?? 0), totals?.unknown_cost ? `${totals.unknown_cost} completed jobs with unknown cost` : undefined)}</div>

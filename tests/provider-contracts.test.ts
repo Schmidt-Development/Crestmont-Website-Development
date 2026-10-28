@@ -94,7 +94,8 @@ test("[AIOPS-002] AI provider contract (simulated): Messages API request shape, 
   let mode: "ok" | "overloaded" = "ok";
   const r = recorder(() => mode === "ok" ? json(200, { content: [{ type: "text", text: "Draft reply for review." }], usage: { input_tokens: 1000, output_tokens: 200 } })
     : json(529, { type: "error", error: { type: "overloaded_error", message: "Overloaded" } }));
-  const p = new AnthropicProvider("sk-ant-test-SECRET", "claude-sonnet-5-5", r.f);
+  const p = new AnthropicProvider("sk-ant-test-SECRET", "claude-sonnet-5-5", r.f, async () => {});
+  await t.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('ai.monthly_budget_usd', '5', ?)`).bind(new Date().toISOString()).run();
   const res = await requestAiDraft(t.db, p, { workflow: "support_reply", inputRef: "ticket:tkt_1", prompt: "Customer asks about invoice timing.", requestedBy: null });
   assert.equal(res.status, "awaiting_approval");
   const c = r.calls[0];
@@ -113,4 +114,37 @@ test("[AIOPS-002] AI provider contract (simulated): Messages API request shape, 
   const err = (await t.db.prepare(`SELECT error FROM ai_jobs WHERE id = ?`).bind(failed.jobId).first<{ error: string }>())!.error;
   assert.match(err, /Anthropic 529: Overloaded/);
   assert.doesNotMatch(err, /SECRET/);
+});
+
+test("[AIOPS-002] paid AI is opt-in, budget-capped and resilient: a key alone never enables it; no Owner budget → refused; budget exhausted → refused; 429 retried once honouring retry-after; unknown-price model refused", async () => {
+  const { aiProviderFromEnv, paidAiBudget, costMicroUsd, priceKnown } = await import("../src/services/ai.ts");
+  assert.equal(aiProviderFromEnv({ ANTHROPIC_API_KEY: "sk-ant-x" }), null, "a key without AI_PROVIDER=anthropic never switches paid AI on");
+  assert.equal((aiProviderFromEnv({ AI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-ant-x" }) as { name: string }).name, "anthropic");
+  assert.equal(aiProviderFromEnv({ AI_PROVIDER: "anthropic" }), null);
+  assert.equal(aiProviderFromEnv({ AI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "k", AI_MODEL: "bad model; drop" }), null, "invalid model id → off");
+  assert.equal(costMicroUsd("claude-sonnet-5-5", 1000, 200), 6000);
+  assert.equal(priceKnown("some-other-model"), false);
+
+  const t = await createTestApp();
+  let calls = 0;
+  const sleeps: number[] = [];
+  const r = recorder(() => { calls++; return calls === 1 ? new Response(JSON.stringify({ error: { message: "rate limited" } }), { status: 429, headers: { "retry-after": "3" } })
+    : json(200, { content: [{ type: "text", text: "ok" }], usage: { input_tokens: 1000, output_tokens: 200 } }); });
+  const p = new AnthropicProvider("sk-ant-test", "claude-sonnet-5-5", r.f, async (ms) => { sleeps.push(ms); });
+  const req = { workflow: "support_reply" as const, inputRef: "ticket:b", prompt: "x", requestedBy: null };
+  const noBudget = await requestAiDraft(t.db, p, req);
+  assert.equal(noBudget.status, "failed");
+  assert.match(noBudget.error!, /monthly budget/);
+  assert.equal(calls, 0, "no paid call without an Owner budget");
+  await t.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('ai.monthly_budget_usd', '0.01', ?)`).bind(new Date().toISOString()).run();
+  const ok = await requestAiDraft(t.db, p, req);
+  assert.equal(ok.status, "awaiting_approval");
+  assert.deepEqual([calls, sleeps], [2, [3000]], "429 retried once after retry-after");
+  assert.equal((await paidAiBudget(t.db)).spentMicro, 6000);
+  await t.db.prepare(`UPDATE ai_jobs SET cost_microusd = 20000 WHERE id = ?`).bind(ok.jobId).run();
+  const capped = await requestAiDraft(t.db, p, req);
+  assert.match(capped.error!, /budget is used up/);
+  assert.equal(calls, 2, "no call once the budget is used up");
+  const unknown = await requestAiDraft(t.db, new AnthropicProvider("k", "claude-mystery-1", r.f), req);
+  assert.match(unknown.error!, /price is unknown/);
 });

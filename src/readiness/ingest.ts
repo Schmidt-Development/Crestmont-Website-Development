@@ -108,6 +108,15 @@ export async function ingestEvidence(db: Db, rawBody: string): Promise<IngestRes
     // Recovery drills get their own feed per environment, so a failed or missing rollback/restore is visible (and, when
     // failing, turns /api/readiness/health to 503 so the external monitor alerts). Status and timestamp only.
     for (const [feed, r, reason] of recoveryDrillOutcomes(doc)) await recordIngestion(db, `${feed}:${doc.environment}`, attemptAt, r ? null : (reason ?? "drill failed — see /staff/readiness/requirements/TEST-004"));
+    // Journey 9 on the deployed site (upload → preview → delete): the end-to-end proof that file storage works.
+    const uploads = doc.source === "staging_e2e" ? doc.results.filter((r) => r.requirementId === "FILE-001") : [];
+    if (uploads.length) {
+      const failed = uploads.find((r) => r.outcome === "failed");
+      await recordIngestion(db, `file-uploads:${doc.environment}`, attemptAt, failed ? (failed.message ?? "upload journey failed").slice(0, 300) : null, uploads.every((r) => r.outcome === "passed"));
+    }
+    // Optional platform services (FILE-001): bound → healthy; skipped (service not enabled) → "unavailable", never failing.
+    const storage = doc.results.find((r) => r.requirementId === "FILE-001" && r.testName.startsWith("file storage (R2)"));
+    if (storage) await recordIngestion(db, `file-storage:${doc.environment}`, attemptAt, storage.outcome === "passed" ? null : (storage.message ?? "not bound"), storage.outcome === "passed");
     return { status: "ingested", runId: doc.runId, accepted: accepted.length, unknownRequirements: unknown };
   } catch (err) {
     await recordIngestion(db, doc.source, attemptAt, (err as Error).message);
@@ -130,7 +139,7 @@ export function recoveryDrillOutcomes(doc: EvidenceDoc): [string, boolean, strin
   // "skipped" = native triggers unavailable on this account (Workers Free limit) and the external scheduler is used
   // instead; whether jobs actually run is judged by the required `scheduler` feed.
   if (cron.length) out.push(["cron-triggers", cron.every((r) => r.outcome !== "failed"), why(cron)]);
-  if (rs.length) out.push(["recovery:restore", rs.every((r) => r.outcome === "passed")]);
+  if (rs.length) out.push(["recovery:restore", rs.every((r) => r.outcome === "passed"), why(rs)]);
   return out;
 }
 
