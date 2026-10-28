@@ -487,10 +487,126 @@
     });
   };
 
+  // About · capabilities constellation: select a node to see its scope, links and services; connections light up.
+  engines.constellation = (v) => {
+    const C = $(v.body, ".cst"), nodes = $$(C, "[data-cst]");
+    const pick = (b, focus) => {
+      const k = b.dataset.cst; C.dataset.node = k;
+      nodes.forEach((n) => n.setAttribute("aria-pressed", String(n === b)));
+      $$(C, "[data-cst-detail]").forEach((d) => d.toggleAttribute("data-on", d.dataset.cstDetail === k));
+      $$(C, "[data-spoke]").forEach((l) => l.classList.toggle("is-on", l.dataset.spoke === k));
+      $$(C, "[data-link]").forEach((l) => l.classList.toggle("is-on", l.dataset.link.split("|").includes(k)));
+      const linked = new Set($$(C, "[data-link].is-on").flatMap((l) => l.dataset.link.split("|")));
+      nodes.forEach((n) => n.classList.toggle("is-linked", n !== b && linked.has(n.dataset.cst)));
+      if (focus) b.focus();
+      const d = $(C, `[data-cst-detail="${k}"]`);
+      v.say(`${$(d, ".cst__h").textContent}. ${$(d, "p").textContent} ${$(d, ".cst__connects").textContent}`);
+    };
+    C.addEventListener("click", (e) => { const b = e.target.closest("[data-cst]"); if (b) pick(b, false); });
+    C.addEventListener("keydown", (e) => {
+      const b = e.target.closest("[data-cst]"); if (!b) return;
+      const d = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key]; if (!d) return;
+      e.preventDefault(); pick(nodes[(nodes.indexOf(b) + d + nodes.length) % nodes.length], true);
+    });
+    pick(nodes[0], false); v.say("");
+  };
+
+  // About · journey: step through the real process; a gold line fills from "Your idea" towards "Live website".
+  engines.journey = (v) => {
+    const J = $(v.body, ".jr"), stops = $$(J, "[data-jr]"), n = stops.length;
+    const go = (i, focus) => {
+      i = Math.max(0, Math.min(n - 1, i)); J.dataset.step = String(i);
+      J.style.setProperty("--p", String(n > 1 ? i / (n - 1) : 1));
+      stops.forEach((b, j) => { b.setAttribute("aria-pressed", String(j === i)); b.classList.toggle("is-past", j < i); });
+      $$(J, "[data-jr-card]").forEach((c) => c.toggleAttribute("data-on", Number(c.dataset.jrCard) === i));
+      $(v.fig, "[data-jr-prev]").disabled = i === 0;
+      const next = $(v.fig, "[data-jr-next]"); next.disabled = i === n - 1; next.textContent = i === n - 1 ? "Live" : "Next step";
+      if (focus) stops[i].focus();
+      const card = $(J, `[data-jr-card="${i}"]`);
+      v.say(`Step ${i + 1} of ${n}: ${$(card, ".jr__h").textContent}. ${$(card, "p:last-child").textContent}`);
+    };
+    v.fig.addEventListener("click", (e) => {
+      const b = e.target.closest("button"); if (!b) return; const cur = Number(J.dataset.step);
+      if (b.dataset.jr) go(Number(b.dataset.jr), false); else if (b.hasAttribute("data-jr-next")) go(cur + 1, false); else if (b.hasAttribute("data-jr-prev")) go(cur - 1, false);
+    });
+    J.addEventListener("keydown", (e) => {
+      const b = e.target.closest("[data-jr]"); if (!b) return;
+      const d = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+      if (d) { e.preventDefault(); go(Number(b.dataset.jr) + d, true); } else if (e.key === "Home") { e.preventDefault(); go(0, true); } else if (e.key === "End") { e.preventDefault(); go(n - 1, true); }
+    });
+    go(0, false); v.say("");
+  };
+
+  // About · craft & quality lab. Width, keyboard order, grid and contrast are live, not claimed.
+  engines.lab = (v) => {
+    const L = $(v.body, ".lab"), site = $(L, "[data-lab-site]"), view = $(L, "[data-lab-view]"), tabs = $$(L, "[data-lab-tab]");
+    const lum = (rgb) => { const [r, g, b] = rgb.map((c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+    const parse = (c) => (c.match(/\d+(\.\d+)?/g) || [0, 0, 0]).slice(0, 3).map(Number);
+    const bgOf = (el) => { for (let e = el; e; e = e.parentElement) { const c = getComputedStyle(e).backgroundColor; if (c && !/rgba\(0, 0, 0, 0\)|transparent/.test(c)) return c; } return "rgb(255,255,255)"; };
+    const ratio = (el) => { const a = lum(parse(getComputedStyle(el).color)), b = lum(parse(bgOf(el))); return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05); };
+    const fitWidth = () => {
+      const w = Number($(L, "[data-lab-width]").value), avail = view.clientWidth - 2;
+      const s = Math.min(1, avail / w);
+      site.style.setProperty("--lab-w", w + "px"); site.style.width = w + "px"; site.style.transform = `scale(${s})`;
+      view.style.height = Math.ceil(site.offsetHeight * s) + "px";
+      $(L, "[data-lab-w]").textContent = `${w}px · ${w < 600 ? "phone" : w < 960 ? "tablet" : "desktop"} layout${s < 1 ? " (scaled to fit)" : ""}`;
+    };
+    const ratios = () => {
+      const out = $(L, "[data-lab-ratios]"); out.innerHTML = "";
+      const label = { heading: "Heading", body: "Body text", button: "Button label", muted: "Card label" };
+      $$(site, "[data-contrast]").forEach((el) => {
+        const r = ratio(el), li = document.createElement("li"), need = el.dataset.contrast === "heading" ? 3 : 4.5;
+        li.textContent = `${label[el.dataset.contrast]}: ${r.toFixed(1)}:1 — ${r >= need ? "passes" : "fails"} AA (${need}:1)`;
+        li.className = r >= need ? "ok" : "bad"; out.append(li);
+      });
+    };
+    const selectTab = (b, focus) => {
+      tabs.forEach((t) => { const on = t === b; t.setAttribute("aria-selected", String(on)); t.tabIndex = on ? 0 : -1; });
+      $$(L, ".lab__panel").forEach((pn) => pn.toggleAttribute("data-on", pn.id === b.getAttribute("aria-controls")));
+      L.dataset.tab = b.dataset.labTab; if (focus) b.focus();
+      if (b.dataset.labTab === "access" && site.classList.contains("show-contrast")) ratios();
+      v.say(`${b.textContent}. ${$(L, `#${b.getAttribute("aria-controls")} p`).textContent}`);
+    };
+    L.addEventListener("click", (e) => {
+      const b = e.target.closest("button"); if (!b) return;
+      if (b.dataset.labTab) selectTab(b, false);
+      else if (b.dataset.labToggle) {
+        const on = b.getAttribute("aria-pressed") !== "true"; b.setAttribute("aria-pressed", String(on));
+        site.classList.toggle(`show-${b.dataset.labToggle}`, on); view.classList.toggle(`show-${b.dataset.labToggle}`, on);
+        if (b.dataset.labToggle === "contrast") { if (on) ratios(); else $(L, "[data-lab-ratios]").innerHTML = ""; }
+        v.say(`${b.textContent}: ${on ? "on" : "off"}.`);
+      } else if (b.dataset.labAccent) {
+        $$(L, "[data-lab-accent]").forEach((x) => x.setAttribute("aria-checked", String(x === b)));
+        site.style.setProperty("--lab-accent", b.dataset.labAccent);
+        v.say(`Accent token set to ${b.textContent.trim()}. The button, links and highlights updated together.`);
+      }
+    });
+    L.addEventListener("keydown", (e) => {
+      const t = e.target.closest("[data-lab-tab]"), sw = e.target.closest("[data-lab-accent]");
+      const d = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key]; if (!d) return;
+      if (t) { e.preventDefault(); selectTab(tabs[(tabs.indexOf(t) + d + tabs.length) % tabs.length], true); }
+      else if (sw) { e.preventDefault(); const all = $$(L, "[data-lab-accent]"); const nb = all[(all.indexOf(sw) + d + all.length) % all.length]; nb.focus(); nb.click(); }
+    });
+    $(L, "[data-lab-width]").addEventListener("input", () => { fitWidth(); });
+    if ("ResizeObserver" in window) new ResizeObserver(fitWidth).observe(view); else window.addEventListener("resize", fitWidth);
+    fitWidth();
+  };
+
+  // About: the footer's oversized CRESTMONT wordmark draws itself in gold as the closing section hands over to it.
+  const aboutWordmark = () => {
+    const word = document.querySelector(".footer-word");
+    if (!word || !document.querySelector("[data-about-close]")) return;
+    word.classList.add("footer-word--about");
+    if (reduce.matches || !("IntersectionObserver" in window)) { word.classList.add("is-drawn"); return; }
+    const io = new IntersectionObserver((es) => { if (es.some((x) => x.isIntersecting)) { word.classList.add("is-drawn"); io.disconnect(); } }, { threshold: 0.35 });
+    io.observe(word);
+  };
+
   const start = () => $$(document, "[data-sv]").forEach((fig) => {
     if (fig.hasAttribute("data-js")) return;
     const kind = fig.dataset.sv.split(" ")[0]; const eng = engines[kind];
     if (eng) try { eng(setup(fig)); } catch (err) { fig.removeAttribute("data-js"); console.error("[services]", err); }
   });
-  document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", start) : start();
+  const boot = () => { start(); aboutWordmark(); };
+  document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", boot) : boot();
 })();

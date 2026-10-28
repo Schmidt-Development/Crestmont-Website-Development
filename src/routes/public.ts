@@ -23,6 +23,7 @@ import { lineDiff } from "../services/voice.ts";
 import * as pf from "../services/portfolio.ts";
 import { serviceVisual } from "../ui/service-visuals.ts";
 import { receptionistConsole, voiceLibrary } from "../ui/receptionist.ts";
+import { constellation, journey, qualityLab } from "../ui/about.ts";
 import { portfolioExplorer } from "../ui/portfolio-explorer.ts";
 import { SERVICES, SERVICE_GROUPS, serviceBySlug, servicePath, PRICING_NOTE, type ServiceDef } from "../content/services.ts";
 import { CMS_KEYS, cmsKeyDef, parseItems, paragraphs, type CmsKeyDef } from "../content/registry.ts";
@@ -584,11 +585,30 @@ ${tms.length ? section("Testimonials", "What they said", html`<div class="grid g
     return serveImage(ctx, p.fileId, "public, max-age=3600");
   });
 
-  r.get("/about", (ctx) => page(ctx, "about", ["about.page"], (c) => {
+  // About (docs/frontend/ABOUT.md): the CMS heading, lede and body stay the source of truth; the page adds interactive
+  // views built only from the service catalogue and the CMS process steps, and leads into the footer's CRESTMONT wordmark.
+  r.get("/about", (ctx) => page(ctx, "about", ["about.page", "process.page"], (c) => {
     const a = c.get("about.page");
-    return html`${pageHero("About", a.heading, a.lede)}<section class="section section--flush"><div class="container grid grid-2"><div class="prose">${renderMarkdown(a.body)}</div>
-<div class="card card--gold"><h3 class="card__title">What we will not do</h3><ul class="plain-list">${WILL_NOT.map((x) => html`<li>${x}</li>`)}</ul>
-<p><a href="/process">How a project runs</a> · <a href="/legal/disclosures">Business disclosures</a></p></div></div></section>`;
+    const steps = parseItems(c.get("process.page").steps);
+    const chapters = a.body.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);
+    return html`<section class="hero hero--page hero--about"><div class="container about-hero"><div class="about-hero__copy">
+<div class="eyebrow">About</div><h1 class="hero-title about__title">${a.heading}</h1>${a.lede ? html`<p class="lede hero-seq" style="--seq:0">${a.lede}</p>` : ""}
+<div class="row hero-seq" style="--seq:1">${linkButton("How a project runs", "/process")}${linkButton("Our services", "/services", "secondary")}</div></div>
+<div class="about-hero__art hero-seq hero-seq--art" style="--seq:0" aria-hidden="true"><img src="/assets/art/stage-launch.webp" width="720" height="720" alt="" decoding="async"></div></div></section>
+<section class="statement statement--pinned" id="about-principles" data-statement aria-labelledby="about-principles-title"><div class="statement__stage"><div>
+<h2 class="statement__text scroll-words" id="about-principles-title">Published prices. Counted revisions. Nothing goes live without your approval.</h2></div></div></section>
+${section("How we work", "Principles, in practice", html`<ol class="chapters" data-reveal-group>${chapters.map((ch, i) => html`<li class="chapter" data-reveal><span class="chapter__n" aria-hidden="true">${String(i + 1).padStart(2, "0")}</span><div class="chapter__body prose">${renderMarkdown(ch)}</div></li>`)}</ol>`, { id: "principles" })}
+${section("Capabilities", "One team, connected disciplines", html`<div data-reveal>${constellation()}</div>`, { id: "capabilities", lede: "Design, development, integrations, AI, search and ongoing care are planned together, so each part supports the others." })}
+${section("The journey", "From first conversation to launch", html`<div data-reveal>${journey(steps)}</div><p class="section__more"><a href="/process">The full process</a></p>`, { id: "journey", lede: "Every project follows the same recorded path. Step through it to see what happens at each stage." })}
+${section("Craft", "Quality you can check", html`<div data-reveal>${qualityLab()}</div>`, { id: "craft", lede: "Responsive layouts, accessibility, consistency and maintainability are built in from the start — try them on a live miniature." })}
+<section class="section" id="commitments"><div class="container"><p class="section__label">Commitments</p>
+<div class="versus" data-reveal-group><div class="versus__panel on-dark" data-reveal><p class="versus__title"><span class="brand__tile" aria-hidden="true"><img class="brand__mark" src="/assets/brand/crestmont-crest.png" width="42" height="41" alt=""></span>What you can hold us to</p>
+<ul class="versus__list">${["A written scope and published prices before work starts", "Every revision round counted and recorded", "Your approval before anything goes live", "Your domain registered to you", "People decide scope, price, refunds, contracts and releases"].map((x) => html`<li><span>${x}</span></li>`)}</ul></div>
+<div class="versus__panel versus__panel--not reveal--slide" data-reveal style="--rd:160ms"><p class="versus__title">What we will not do</p><ul class="versus__list">${WILL_NOT.map((x) => html`<li><span>${x}</span></li>`)}</ul></div></div>
+<p class="section__more"><a href="/legal/disclosures">Business disclosures</a></p></div></section>
+<section class="section about-close" data-about-close><div class="container"><p class="section__label">Next</p><h2 class="about-close__title reveal-words" data-reveal>Start with a conversation.</h2>
+<p class="lede" data-reveal style="--rd:120ms">Tell us what you need. We'll answer plainly, scope it in writing and show you the price before anything begins.</p>
+<div class="hero__actions" data-reveal style="--rd:200ms">${ctaLink("Request a quote", "/quote", "primary")}${ctaLink("Contact us", "/contact", "secondary")}</div></div></section>`;
   }));
 
   r.get("/process", (ctx) => page(ctx, "process", ["process.page"], (c) => {
