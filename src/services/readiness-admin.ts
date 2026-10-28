@@ -1,3 +1,4 @@
+import { UNAVAILABLE_PREFIX } from "../readiness/ingest.ts";
 // Launch Readiness Command Center write paths and read models (READY-001..012, §36–§50).
 // Everything is derived from stored records via buildReport(); nothing here keeps a manual
 // percentage. Founder approval is recorded only by the Owner (isOwner + release.approve_production).
@@ -64,7 +65,7 @@ export async function feedStatuses(ctx: Pick<AppContext, "db" | "env" | "now">, 
   const requiredIds = new Set(required.map((r) => r.source));
   const others: FeedStatus[] = input.ingestion.filter((r) => !requiredIds.has(r.source) && r.source !== "github").map((r) => {
     // An optional service that is simply not enabled (file storage) is "unavailable", never a failure that degrades health.
-    const optionalOff = r.source.startsWith("file-storage:");
+    const optionalOff = r.source.startsWith("file-storage:") || (r.last_error ?? "").startsWith(UNAVAILABLE_PREFIX);
     const failing = !optionalOff && !!(r.last_error && r.last_attempt_at && (!r.last_success_at || r.last_attempt_at > r.last_success_at));
     const stale = !failing && r.last_success_at !== null && now.getTime() - Date.parse(r.last_success_at) > 72 * 3_600_000;
     const offNow = optionalOff && !!r.last_error && (!r.last_success_at || (r.last_attempt_at ?? "") > r.last_success_at);
