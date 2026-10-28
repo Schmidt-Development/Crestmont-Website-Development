@@ -45,7 +45,12 @@ export async function planReencryption(rows: TotpRow[], rawKey: string): Promise
   return { sql, plaintext, alreadyEncrypted };
 }
 
-interface Ops { rows(): Promise<TotpRow[]>; apply(sql: string[]): Promise<void>; deploymentEnvironments?(): Promise<string[]> }
+interface Ops {
+  rows(): Promise<TotpRow[]>; apply(sql: string[]): Promise<void>; deploymentEnvironments?(): Promise<string[]>;
+  /** Records a recovery point immediately before writing and returns how to restore it (D1 Time Travel bookmark, or a
+   *  file copy for a local database). Required for --yes: without a recovery point nothing is written. */
+  recoveryPoint?(): Promise<string>;
+}
 
 // ── Database identity safeguards (remote D1) ──
 /** The D1 database_name wrangler.toml binds for `[env.<env>]`. */
@@ -83,6 +88,10 @@ export async function run(ops: Ops, rawKey: string, write: boolean, log: (s: str
   log(`TOTP secrets: ${plan.plaintext} stored in plaintext, ${plan.alreadyEncrypted} already encrypted (all decrypt with this key).`);
   if (!plan.sql.length) { log("Nothing to do."); return plan; }
   if (!write) { log(`Dry run: re-run with --yes to encrypt ${plan.plaintext} value(s).`); return plan; }
+  if (!ops.recoveryPoint) throw new Error("no recovery point can be recorded for this target; nothing was written");
+  let restore: string;
+  try { restore = await ops.recoveryPoint(); } catch (e) { throw new Error(`could not record a recovery point (${String((e as Error).message ?? e).split("\n")[0].slice(0, 160)}); nothing was written`); }
+  log(`Recovery point recorded. To undo this run: ${restore}`);
   await ops.apply(plan.sql);
   log(`Encrypted ${plan.plaintext} value(s).`);
   return plan;
@@ -93,6 +102,12 @@ function localOps(path: string): Ops {
     async rows() {
       const { openDb } = await import("../dev/sqlite-d1.ts");
       return openDb(path).raw.prepare(SELECT_ROWS).all() as unknown as TotpRow[];
+    },
+    async recoveryPoint() {
+      const { copyFileSync } = await import("node:fs");
+      const copy = `${path}.pre-totp-encrypt-${new Date().toISOString().replace(/[:.]/g, "-")}.bak`;
+      copyFileSync(path, copy);
+      return `replace ${path} with ${copy}`;
     },
     async apply(sql) {
       const { openDb } = await import("../dev/sqlite-d1.ts");
@@ -108,6 +123,13 @@ function remoteOps(database: string, env: string): Ops & { deploymentEnvironment
   const d1 = ["d1", "execute", database, "--remote", "--env", env];
   const exec = (args: string[]) => execFileSync(cmd, [...base, ...d1, ...args], { stdio: ["pipe", "pipe", "pipe"], encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   return {
+    async recoveryPoint() {
+      // D1 Time Travel: a point-in-time bookmark of the database as it is now (no data is copied anywhere).
+      const out = execFileSync(cmd, [...base, "d1", "time-travel", "info", database, "--env", env, "--json"], { stdio: ["pipe", "pipe", "pipe"], encoding: "utf8" });
+      const bookmark = (JSON.parse(out.slice(out.indexOf("{"))) as { bookmark?: string }).bookmark;
+      if (!bookmark || !/^[0-9a-f-]{8,}$/i.test(bookmark)) throw new Error("D1 Time Travel returned no bookmark");
+      return `npx wrangler@4 d1 time-travel restore ${database} --env ${env} --bookmark ${bookmark}`;
+    },
     async deploymentEnvironments() {
       const out = exec(["--json", "--command", "SELECT DISTINCT environment FROM deployments WHERE status = 'succeeded'"]);
       return ((JSON.parse(out.slice(out.indexOf("[")))[0]?.results ?? []) as { environment: string }[]).map((r) => r.environment);

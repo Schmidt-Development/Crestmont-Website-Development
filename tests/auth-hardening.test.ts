@@ -483,7 +483,7 @@ test("[SEC-004] scripts/encrypt-totp-secrets.ts re-encrypts plaintext rows (dry 
     assert.equal(rows().find((r) => r.id === "usr_1")!.totp_secret, plain[0], "dry run writes nothing");
     const wet = cli("--db", path, "--yes");
     assert.equal(wet.status, 0, wet.stderr);
-    assert.match(wet.stdout, /Encrypted 2 value/);
+    assert.match(wet.stdout, /Recovery point recorded\. To undo this run: replace .*pre-totp-encrypt-[\s\S]*Encrypted 2 value/);
     const out = dry.stdout + dry.stderr + wet.stdout + wet.stderr;
     for (const v of [...plain, key]) assert.ok(!out.includes(v), "no secret or key in the output");
     const after = rows();
@@ -503,7 +503,14 @@ test("[SEC-004] scripts/encrypt-totp-secrets.ts re-encrypts plaintext rows (dry 
     await assert.rejects(planReencryption([], "short"), /32 bytes|base64/);
     // run() with in-memory ops, as used for remote D1.
     const applied: string[][] = [];
-    await encryptRun({ rows: async () => [{ id: "u", totp_secret: plain[0], totp_pending_secret: null }], apply: async (s) => { applied.push(s); } }, key, true, () => {});
+    const rowsU = async () => [{ id: "u", totp_secret: plain[0], totp_pending_secret: null }];
+    // No recovery point → nothing is written; a failing recovery point → nothing is written.
+    await assert.rejects(encryptRun({ rows: rowsU, apply: async (s) => { applied.push(s); } }, key, true, () => {}), /recovery point[\s\S]*nothing was written/);
+    await assert.rejects(encryptRun({ rows: rowsU, apply: async (s) => { applied.push(s); }, recoveryPoint: async () => { throw new Error("time travel unavailable"); } }, key, true, () => {}), /could not record a recovery point[\s\S]*nothing was written/);
+    assert.equal(applied.length, 0);
+    const logs: string[] = [];
+    await encryptRun({ rows: rowsU, apply: async (s) => { applied.push(s); }, recoveryPoint: async () => "restore bookmark B1" }, key, true, (l) => logs.push(l));
+    assert.ok(logs.some((l) => l.includes("To undo this run: restore bookmark B1")), "the restore instruction is printed before writing");
     assert.equal(applied[0].length, 1);
     assert.ok(!applied[0][0].includes(plain[0]), "the SQL carries ciphertext only");
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -581,4 +588,61 @@ test("[AUTH-001] password hashes carry algorithm and cost; a hash with older par
   assert.deepEqual(JSON.parse(au!.details_json), { from: "pbkdf2$1000" });
   assert.equal((await app.client().post("/login", { email: cu.email, password: TEST_PASSWORD })).status, 303);
   assert.equal((await one<{ n: number }>(app.db, `SELECT COUNT(*) n FROM audit_logs WHERE action = 'user.password_rehashed' AND subject_id = ?`, cu.id))?.n, 1, "rehashed once");
+});
+
+// ───────────── MFA/encryption completion (2026-10-28 audit findings 5 and 6) ─────────────
+
+test("[AUTH-002] [AUTH-005] wrong second-factor codes are capped per rolling 24 hours (successes never count); re-enrolment clears the cap", async () => {
+  const { MFA_DAILY_FAILURES } = await import("../src/services/auth.ts");
+  const app = await createTestApp();
+  const s = await createStaff(app.db, "sales", "cap@crestmont.test");
+  const c = app.client();
+  await c.post("/login", { email: s.email, password: TEST_PASSWORD });
+  const fail = (at: string) => app.db.prepare(`INSERT INTO security_events (kind, user_id, detail, created_at) VALUES ('mfa_failed', ?, 'login', ?)`).bind(s.id, at).run();
+  const old = new Date(Date.now() - 25 * 3_600_000).toISOString();
+  for (let i = 0; i < 50; i++) await fail(old); // more than a day ago: ignored
+  for (let i = 0; i < MFA_DAILY_FAILURES - 1; i++) await fail(new Date().toISOString());
+  // Successes in between never count.
+  await nextWindow(app.db, s.id);
+  assert.equal(loc(await c.post("/mfa", { code: await totpCode(s.secret) })), "/staff", "under the cap: a valid code signs in");
+  const c2 = app.client();
+  await c2.post("/login", { email: s.email, password: TEST_PASSWORD });
+  await nextWindow(app.db, s.id);
+  assert.equal((await c2.post("/mfa", { code: "000000" })).status, 401, "the last allowed wrong code");
+  await nextWindow(app.db, s.id);
+  const blocked = await c2.post("/mfa", { code: await totpCode(s.secret) });
+  assert.equal(blocked.status, 401, "at the cap even a valid code is refused (whether it was valid is not revealed)");
+  assert.match(await blocked.text(), /Too many incorrect codes in the last 24 hours/);
+  assert.equal((await one<{ n: number }>(app.db, `SELECT COUNT(*) n FROM security_events WHERE user_id = ? AND kind = 'mfa_locked'`, s.id))?.n, 1, "recorded for the operator");
+  assert.notEqual(loc(await c2.get("/staff")), "", "still not signed in");
+  // Step-up and recovery-code regeneration share the cap.
+  await nextWindow(app.db, s.id);
+  const su = await c.post("/mfa/step-up?next=%2Fstaff", { code: await totpCode(s.secret) });
+  assert.match(await su.text(), /Too many incorrect codes in the last 24 hours/);
+  // An administrator MFA reset + re-enrolment (user.mfa_enabled) starts a fresh count.
+  await app.db.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, created_at) VALUES (?, 'user', 'user.mfa_enabled', 'user', ?, ?)`).bind(s.id, s.id, new Date(Date.now() + 1000).toISOString()).run();
+  await new Promise((r) => setTimeout(r, 1100));
+  await nextWindow(app.db, s.id);
+  assert.equal(loc(await c2.post("/mfa", { code: await totpCode(s.secret) })), "/staff", "unblocked after re-enrolment");
+});
+
+test("[AUTH-002] [AUTH-007] replacing the authenticator signs out every other session; the old authenticator stops working", async () => {
+  const app = await createTestApp();
+  const owner = await createStaff(app.db, "owner", "replace@crestmont.test");
+  const device = await app.client().login(owner.email, TEST_PASSWORD, owner.secret);
+  await nextWindow(app.db, owner.id);
+  const lost = await app.client().login(owner.email, TEST_PASSWORD, owner.secret); // e.g. a stolen laptop
+  assert.equal((await lost.get("/staff")).status, 200);
+  const setup = await (await device.get("/mfa/setup")).text();
+  const secret = /data-testid="totp-secret">([A-Z2-7 ]+)</.exec(setup)?.[1].replace(/ /g, "");
+  assert.ok(secret && secret !== owner.secret, "a new setup key is shown (step-up was satisfied by the fresh sign-in)");
+  assert.equal((await device.post("/mfa/setup", { code: await totpCode(secret) })).status, 200);
+  assert.equal((await device.get("/staff")).status, 200, "the session that replaced it stays signed in");
+  assert.match(loc(await lost.get("/staff")), /^\/login/, "the other session is signed out");
+  assert.ok((await one<{ n: number }>(app.db, `SELECT COUNT(*) n FROM sessions WHERE user_id = ? AND revoked_at IS NULL`, owner.id))!.n === 1);
+  // Stored encrypted? (development without a key stores plaintext — covered with a key in the SEC-004 tests.) Old secret refused:
+  await nextWindow(app.db, owner.id);
+  await assert.rejects(app.client().login(owner.email, TEST_PASSWORD, owner.secret));
+  await nextWindow(app.db, owner.id);
+  await app.client().login(owner.email, TEST_PASSWORD, secret);
 });

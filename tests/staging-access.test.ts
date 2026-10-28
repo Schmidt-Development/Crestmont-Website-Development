@@ -118,15 +118,31 @@ test("[INFRA-002] [SEC-004] staging access writes a demo 2FA secret only when it
   s.db.raw.prepare("UPDATE users SET totp_last_step = NULL").run();
   await verifyStagingAccess({ base: BASE, previewPassword: r2.previewPassword, owner: ownerOf(r2) }, s.fetchFor({ ...s.env(), MFA_ENCRYPTION_KEY: mfaKey }));
 
-  // A secret that was cleared (e.g. an MFA reset) is written again even though the fingerprint matches.
+  // A secret that was cleared (e.g. an MFA reset) is written again even though the marker matches. A deploy key is
+  // given, but no secret encrypted by the Worker exists yet to prove it is the Worker's key: written in plaintext.
   s.db.raw.prepare(`UPDATE users SET totp_secret = NULL WHERE id = ?`).run(id);
-  await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false, mfaKey });
-  assert.match(stored(id)!, /^v1:/, "rewritten sealed when the key is available");
+  const r4 = await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false, mfaKey });
+  assert.equal(r4.totpStorage, "plaintext-unverified");
+  assert.equal(stored(id), owner.totp);
+  // The real sign-in path (Worker holds the key) encrypts it at rest.
+  s.db.raw.prepare("UPDATE users SET totp_last_step = NULL").run();
+  await verifyStagingAccess({ base: BASE, previewPassword: r4.previewPassword, owner: ownerOf(r4) }, s.fetchFor({ ...s.env(), MFA_ENCRYPTION_KEY: mfaKey }));
+  assert.match(stored(id)!, /^v1:/, "encrypted by the Worker at sign-in");
   assert.equal(await openWithKey(mfaKey, id, stored(id)!), owner.totp);
   await assert.rejects(openWithKey(mfaKey, "usr_other", stored(id)!)); // bound to this user
 
-  // Rotation with the key: every demo secret is new and stored encrypted, none in plaintext.
+  // A deploy key that is NOT the Worker's (or is malformed) stops the run before anything is written — even a rotation.
+  const before = s.db.raw.prepare(`SELECT key, value FROM _staging_access ORDER BY key`).all();
+  const usersBefore = s.db.raw.prepare(`SELECT id, password_hash, totp_secret FROM users ORDER BY id`).all();
+  const wrongKey = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+  await assert.rejects(applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: true, mfaKey: wrongKey }), /does not match the staging Worker's MFA_ENCRYPTION_KEY[\s\S]*nothing was written/);
+  await assert.rejects(applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: true, mfaKey: "short" }), /malformed[\s\S]*nothing was written/);
+  assert.deepEqual(s.db.raw.prepare(`SELECT key, value FROM _staging_access ORDER BY key`).all(), before);
+  assert.deepEqual(s.db.raw.prepare(`SELECT id, password_hash, totp_secret FROM users ORDER BY id`).all(), usersBefore);
+
+  // Rotation with the proven key: every demo secret is new and stored encrypted, none in plaintext.
   const r3 = await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: true, mfaKey });
+  assert.equal(r3.totpStorage, "encrypted");
   assert.notEqual(ownerOf(r3).totp, owner.totp);
   const demo = s.db.raw.prepare(`SELECT id, totp_secret AS t FROM users WHERE email LIKE '%@crestmont-preview.test' AND totp_secret IS NOT NULL`).all() as { id: string; t: string }[];
   assert.ok(demo.length > 0);
@@ -134,10 +150,21 @@ test("[INFRA-002] [SEC-004] staging access writes a demo 2FA secret only when it
   assert.equal(await openWithKey(mfaKey, id, stored(id)!), ownerOf(r3).totp);
   s.db.raw.prepare("UPDATE users SET totp_last_step = NULL").run();
   await verifyStagingAccess({ base: BASE, previewPassword: r3.previewPassword, owner: ownerOf(r3) }, s.fetchFor({ ...s.env(), MFA_ENCRYPTION_KEY: mfaKey }));
+  // A redeploy without rotation leaves every encrypted secret byte-for-byte unchanged.
+  const sealedAll = s.db.raw.prepare(`SELECT id, totp_secret FROM users ORDER BY id`).all();
+  const r6 = await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false, mfaKey });
+  assert.deepEqual(ownerOf(r6), ownerOf(r3));
+  assert.deepEqual(s.db.raw.prepare(`SELECT id, totp_secret FROM users ORDER BY id`).all(), sealedAll);
 
-  // The artifact and SQL files never carry the key; the fingerprints stored are HMACs, not the setup key.
+  // If the root key changes (Cloudflare token replaced) the derived setup keys change, so they are rewritten and the
+  // reported key always matches the stored one.
+  const r7 = await applyAccess(s.ops, { rootKey: KEY + "-replaced", epoch: "2", rotate: false, mfaKey });
+  assert.notEqual(ownerOf(r7).totp, ownerOf(r3).totp);
+  assert.equal(await openWithKey(mfaKey, id, stored(id)!), ownerOf(r7).totp);
+
+  // Stored markers are 64-hex HMACs over derivation inputs; the artifact never carries the key.
   const meta = s.db.raw.prepare(`SELECT key, value FROM _staging_access WHERE key LIKE 'totp_fp:%'`).all() as { key: string; value: string }[];
   assert.ok(meta.length >= demo.length);
-  for (const m of meta) { assert.match(m.value, /^[0-9a-f]{64}$/); assert.notEqual(m.value, ownerOf(r3).totp); }
-  assert.ok(!accessReadme(BASE, r3, "2026-10-28T00:00:00.000Z").includes(mfaKey));
+  for (const m of meta) { assert.match(m.value, /^[0-9a-f]{64}$/); assert.notEqual(m.value, ownerOf(r7).totp); }
+  assert.ok(!accessReadme(BASE, r7, "2026-10-28T00:00:00.000Z").includes(mfaKey));
 });
