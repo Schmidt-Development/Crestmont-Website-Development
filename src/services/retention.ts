@@ -97,7 +97,7 @@ export async function runRetention(deps: { db: Db; storage: StorageAdapter | nul
         const due = (await db.prepare(`SELECT id, r2_key FROM files f WHERE deleted_at IS NOT NULL AND deleted_at < ? AND purged_at IS NULL
             AND NOT EXISTS (SELECT 1 FROM handoffs h WHERE h.documentation_file_id = f.id)
             AND NOT EXISTS (SELECT 1 FROM portfolio_projects p WHERE p.desktop_screenshot_file_id = f.id OR p.mobile_screenshot_file_id = f.id)
-            LIMIT 500`).bind(cut).all<{ id: string; r2_key: string }>()).results;
+            LIMIT 200`).bind(cut).all<{ id: string; r2_key: string }>()).results; // 2 calls per file; the daily job set shares one invocation's budget (D1 Paid: 1,000 queries)
         if (!deps.storage) { detail += `; ${due.length} due but no object storage is bound — nothing purged`; break; }
         let failed = 0;
         for (const f of due) {
