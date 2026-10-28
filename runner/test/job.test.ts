@@ -345,11 +345,12 @@ test("[AIB-RUNNER] failing acceptance checks get one repair round, then fail hon
 
 test("[AIB-RUNNER] preview deploy runs the configured command with preview credentials the agent never had [mock SDK]", async () => {
   const envDump = path.join(tmp("aib-prev-"), "env.json");
-  const cmd = `node -e "require('fs').writeFileSync('${envDump}', JSON.stringify(process.env)); console.log('Deployed'); console.log('PREVIEW_URL=https://' + process.env.CRESTMONT_PREVIEW_NAME + '.preview.workers.dev')"`;
-  const { cp, cfg, client, job } = await setup({ cfg: { preview: { command: cmd, envNames: ["CLOUDFLARE_API_TOKEN"], timeoutMs: 30_000 } } });
+  // Constant command; the dump path arrives through PREVIEW_DEPLOY_ENV like the credential (no paths spliced into a shell string).
+  const cmd = `node -e "require('fs').writeFileSync(process.env.PREVIEW_TEST_DUMP, JSON.stringify(process.env)); console.log('Deployed'); console.log('PREVIEW_URL=https://' + process.env.CRESTMONT_PREVIEW_NAME + '.preview.workers.dev')"`;
+  const { cp, cfg, client, job } = await setup({ cfg: { preview: { command: cmd, envNames: ["CLOUDFLARE_API_TOKEN", "PREVIEW_TEST_DUMP"], timeoutMs: 30_000 } } });
   try {
     const sdk = fakeSdk(happyAgent());
-    const proxied = { ...POLLUTED_ENV, HTTPS_PROXY: "http://egress-proxy:3128", NO_PROXY: "localhost,127.0.0.1", HTTP_PROXY: "http://user:pw@leaky-proxy:3128" };
+    const proxied = { ...POLLUTED_ENV, PREVIEW_TEST_DUMP: envDump, HTTPS_PROXY: "http://egress-proxy:3128", NO_PROXY: "localhost,127.0.0.1", HTTP_PROXY: "http://user:pw@leaky-proxy:3128" };
     const s = await runJob(job, deps(cfg, client, sdk, { processEnv: proxied }));
     assert.equal(s.outcome, "ready_for_review", String(s.complete?.error));
     assert.equal(s.complete?.previewUrl, "https://cm-prv-prj-test1-b0.preview.workers.dev");

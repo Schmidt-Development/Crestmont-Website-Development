@@ -4,7 +4,7 @@
 // windows-scripts job and the Windows PowerShell 5.1 workflow); the static checks below always run.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, copyFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import {
@@ -177,4 +177,33 @@ test("[AIB-RUNNER] Collect-Evidence.ps1: one folder for monitor + job (or the la
   assert.doesNotMatch(ev, /health\.json/, "the header names the file actually written (health.txt)");
   assert.match(ev, /-JobId must look like bld_/, "JobId validated before it reaches a shell script");
   assert.doesNotMatch(ev, /secrets\\\\|Copy-Item[^\n]*secrets/i, "the secrets folder is never collected");
+});
+
+const HAS_COMPOSE = spawnSync("docker", ["compose", "version"], { encoding: "utf8", timeout: 30_000 }).status === 0;
+
+test("[AIB-RUNNER] real docker-compose.yml: runner.local.env is optional, runner.env wins on every managed key, and a single-quoted preview command keeps $CRESTMONT_PREVIEW_NAME", { skip: HAS_COMPOSE ? false : "docker CLI with the compose plugin not installed (CI has it)" }, () => {
+  const dir = path.join(tmp("aib-compose-env-"), "compose");
+  mkdirSync(path.join(dir, "proxy"), { recursive: true });
+  copyFileSync(path.join(WIN, "docker-compose.yml"), path.join(dir, "docker-compose.yml"));
+  copyFileSync(path.join(WIN, "proxy", "Dockerfile"), path.join(dir, "proxy", "Dockerfile"));
+  const runnerEnv = (): Record<string, string> => {
+    const r = spawnSync("docker", ["compose", "config", "--format", "json"], { cwd: dir, encoding: "utf8", timeout: 60_000 });
+    assert.equal(r.status, 0, r.stderr);
+    return (JSON.parse(r.stdout) as { services: { runner: { environment: Record<string, string> } } }).services.runner.environment;
+  };
+  writeFileSync(path.join(dir, "runner.env"), renderRunnerEnv(managed()));
+  assert.equal(runnerEnv().RUNNER_ALLOW_PAID_PROVIDER, "false", "works without runner.local.env");
+  writeFileSync(path.join(dir, "runner.local.env"), [
+    "RUNNER_ALLOW_PAID_PROVIDER=true", "LOCAL_MODEL=other:1",
+    `PREVIEW_DEPLOY_COMMAND='npx --yes wrangler@4.0.0 deploy --name "$CRESTMONT_PREVIEW_NAME"'`,
+    `UNQUOTED=deploy --name "$CRESTMONT_PREVIEW_NAME"`, "PROJECT_REPO_OWNER=crestmont-builds",
+  ].join("\n") + "\n");
+  const env = runnerEnv();
+  assert.equal(env.RUNNER_ALLOW_PAID_PROVIDER, "false", "a managed key in the local file never wins (the installer also refuses it)");
+  assert.equal(env.LOCAL_MODEL, "qwen3-coder:30b");
+  assert.equal(env.PROJECT_REPO_OWNER, "crestmont-builds", "the Founder's own settings reach the runner");
+  // Compose escapes a literal $ as $$ in `config` output; the container receives a single $.
+  assert.equal(env.PREVIEW_DEPLOY_COMMAND.replaceAll("$$", "$"), `npx --yes wrangler@4.0.0 deploy --name "$CRESTMONT_PREVIEW_NAME"`);
+  assert.equal(env.UNQUOTED, `deploy --name ""`, "why PREVIEW-DEPLOYMENT.md requires single quotes");
+  assert.equal(env.HTTPS_PROXY, "http://egress-proxy:3128", "compose environment: still wins over both files");
 });

@@ -119,6 +119,8 @@ export async function startFakeControlPlane(o: FakeCPOptions = {}): Promise<Fake
   const jobs = [...(o.jobs ?? [])];
   const leased = new Map<string, string>();
   const archives = new Map<string, string>();
+  // A Map, not an object indexed by the request path: no prototype keys, no dynamic property dispatch.
+  const extraRoutes = new Map(Object.entries(o.extraRoutes ?? {}));
   let hb = 0;
   let ckpt = 0;
   const server = createServer((req, res) => {
@@ -145,8 +147,8 @@ export async function startFakeControlPlane(o: FakeCPOptions = {}): Promise<Fake
         leased.delete(String(body.jobId));
         return send(200, ans);
       }
-      const extra = o.extraRoutes?.[p.replace("/api/builds/runner/", "")];
-      if (extra) return send(200, extra(body));
+      const extra = extraRoutes.get(p.replace("/api/builds/runner/", ""));
+      if (typeof extra === "function") return send(200, extra(body));
       if (p === "/api/builds/runner/previews/claim" || p === "/api/builds/runner/previews/deleted") return send(404, { error: "unknown" });
       if (p === "/api/builds/runner/claim") {
         const job = jobs.shift();
