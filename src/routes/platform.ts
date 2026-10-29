@@ -142,7 +142,13 @@ const ENVS = ["development", "staging", "production"] as const;
 
 // ───────────── 8. Settings ─────────────
 const SETTING_KEYS = ["business.legal_name", "business.address", "contact.email", "contact.phone", "support.staffed_hours",
-  "backup.rpo_target_hours", "backup.rto_target_hours", "voice.phone_number"] as const;
+  "backup.rpo_target_hours", "backup.rto_target_hours", "voice.phone_number", "crm.default_lead_owner"] as const;
+
+/** Active staff who may own leads (CREST-GAP-005 default lead owner). */
+async function leadOwnerOptions(ctx: AppContext) {
+  return (await ctx.db.prepare(`SELECT DISTINCT u.id, u.display_name, u.email FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id IN ('owner','administrator','sales') AND u.disabled_at IS NULL ORDER BY u.display_name`)
+    .all<{ id: string; display_name: string; email: string }>()).results;
+}
 
 /** Recovery targets from business settings; null when not set (never a built-in default). */
 export function recoveryTargets(settings: Record<string, string>): { rpoHours: number | null; rtoHours: number | null } {
@@ -171,6 +177,8 @@ ${input({ name: "contact.phone", id: "f-cphone", label: "Public phone", value: v
 <p class="hint">Used by the Backups page to judge restore drills. Leave blank until the Founder approves targets; nothing is assumed when blank.</p>
 <div class="grid grid-2">${input({ name: "backup.rpo_target_hours", id: "f-rpo", label: "Recovery point objective (hours of data loss)", type: "number", min: 1, max: 720, value: val("backup.rpo_target_hours") })}
 ${input({ name: "backup.rto_target_hours", id: "f-rto", label: "Recovery time objective (hours to restore)", type: "number", min: 1, max: 720, value: val("backup.rto_target_hours") })}</div>
+<h2 class="card__title">Sales</h2>
+${select({ name: "crm.default_lead_owner", label: "Default owner for new web leads", options: (await leadOwnerOptions(ctx)).map((u) => ({ value: u.id, label: `${u.display_name} (${u.email})` })), value: val("crm.default_lead_owner"), includeBlank: "Unassigned (Owners and sales are notified)" })}
 <h2 class="card__title">AI receptionist</h2>
 ${input({ name: "voice.phone_number", id: "f-voice", label: "Receptionist phone number (only once purchased)", value: val("voice.phone_number"), maxlength: 40, hint: "Record the number only after the Founder-approved provider has provisioned it. The AI receptionist page shows this value; blank means no number." })}
 <h2 class="card__title">Support</h2>
@@ -888,6 +896,7 @@ ${textarea({ name: "evidence", label: "Evidence (row counts compared, checks run
       if (v[k] && (!/^\d+$/.test(v[k]) || Number(v[k]) < 1 || Number(v[k]) > 720)) e.push(`${name} must be a whole number of hours between 1 and 720`);
     }
     if (v["contact.email"].length > 254) e.push("Contact email is too long");
+    if (v["crm.default_lead_owner"] && !(await leadOwnerOptions(ctx)).some((u) => u.id === v["crm.default_lead_owner"])) e.push("The default lead owner must be an active Owner, administrator or sales user");
     if (/<[^>]*>/.test(v["business.legal_name"] + v["business.address"])) e.push("Business name and address must be plain text");
     if (v.staffed_hours.length < 3 || v.staffed_hours.length > 160) e.push("Enter staffed support hours");
     if (/24\s*\/\s*7|24 hours|around the clock/i.test(v.staffed_hours)) e.push("Staffed hours must not claim 24/7 human coverage unless it is actually staffed — describe the real staffed hours");
