@@ -9,7 +9,12 @@ export async function rateLimit(db: Db, key: string, limit: number, windowSecond
      ON CONFLICT(key, window_start) DO UPDATE SET count = count + 1 RETURNING count`,
   ).bind(key, windowStart).first<{ count: number }>();
   const count = row?.count ?? 1;
-  return { allowed: count <= limit, remaining: Math.max(0, limit - count) };
+  // Sliding-window approximation (CREST-GAP-102): the previous window still counts in proportion to how much of it
+  // overlaps the last `windowSeconds`, so a client cannot burst to twice the limit across a window boundary.
+  const prev = await db.prepare(`SELECT count FROM rate_limits WHERE key = ? AND window_start = ?`).bind(key, windowStart - windowSeconds).first<{ count: number }>();
+  const overlap = 1 - (now / 1000 - windowStart) / windowSeconds;
+  const effective = count + (prev?.count ?? 0) * overlap;
+  return { allowed: effective <= limit, remaining: Math.max(0, Math.floor(limit - effective)) };
 }
 
 /** Current count of a fixed-window counter without incrementing it (0 when no event happened in this window). */

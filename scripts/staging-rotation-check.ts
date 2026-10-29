@@ -54,7 +54,7 @@ export class Client {
     }
   }
   loc(r: Response) { return new URL(r.headers.get("location") ?? "/", this.base).pathname; }
-  csrf() { return this.jar.get("cm_csrf") ?? ""; }
+  csrf() { return this.jar.get("__Host-cm_csrf") ?? this.jar.get("cm_csrf") ?? ""; }
   /** Email + password; true when the site asks for the second factor. */
   async password(email: string, password: string): Promise<boolean> {
     let r = await this.send("GET", "/login"); await r.arrayBuffer();
@@ -103,7 +103,7 @@ export async function capture(o: { base: string; ops: D1Ops; rootKey: string; ep
     notes.push("the current Owner credentials were not accepted before the rotation (not testable)");
     return { oldOwner: cur.owner, sessionCookie: null, oldRecoveryCode: null, notes };
   }
-  const sessionCookie = c.jar.get("cm_session") ?? null;
+  const sessionCookie = c.jar.get("__Host-cm_session") ?? c.jar.get("cm_session") ?? null;
   const codes = await generateRecoveryCodes(c, cur.owner.totp, sleep);
   for (const v of [sessionCookie, ...codes]) mask(v, out);
   if (!codes.length) notes.push("no recovery code could be generated before the rotation");

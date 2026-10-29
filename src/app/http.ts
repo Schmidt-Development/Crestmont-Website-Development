@@ -68,6 +68,16 @@ export function isSecure(ctx: AppContext): boolean {
   return ctx.url.protocol === "https:";
 }
 
+/**
+ * Cookie names (CREST-GAP-086): over HTTPS the session and CSRF cookies use the `__Host-` prefix, which browsers only
+ * accept with Secure, Path=/ and no Domain — so a sibling subdomain or another *.workers.dev site cannot plant or
+ * shadow them. Plain-HTTP development keeps the bare names. Reads accept both, so existing sessions keep working.
+ */
+export const hostCookieName = (base: "cm_session" | "cm_csrf", secure: boolean) => (secure ? `__Host-${base}` : base);
+export function readHostCookie(cookies: Record<string, string>, base: "cm_session" | "cm_csrf"): string | undefined {
+  return cookies[`__Host-${base}`] ?? cookies[base];
+}
+
 function withCookies(ctx: AppContext, headers: Headers): void {
   for (const c of ctx.setCookies) headers.append("set-cookie", c);
 }
@@ -113,7 +123,7 @@ export async function assertCsrf(ctx: AppContext): Promise<void> {
   }
   const form = await ctx.form();
   const sent = String(form.get("_csrf") ?? "");
-  const cookieVal = parseCookies(ctx.req.headers.get("cookie")).cm_csrf ?? "";
+  const cookieVal = readHostCookie(parseCookies(ctx.req.headers.get("cookie")), "cm_csrf") ?? "";
   if (!sent || !cookieVal || sent.length !== cookieVal.length || !timingSafeEqualHex(sent, cookieVal)) {
     throw new HttpError(403, "Your form expired. Reload the page and try again.");
   }
