@@ -25,7 +25,9 @@ test("[AIB-RUNNER] client signs every request; the fake control plane rejects a 
     const good = new ControlPlaneClient({ baseUrl: cp.url, secret: SECRET, runnerId: "r1" });
     const r = await good.claim(["agent-sdk", "git"]);
     assert.ok(r.job, "claimed");
-    assert.deepEqual(cp.calls[0].body, { runnerId: "r1", version: RUNNER_VERSION, capabilities: ["agent-sdk", "git"] });
+    const { _nonce, ...claimBody } = cp.calls[0].body;
+    assert.deepEqual(claimBody, { runnerId: "r1", version: RUNNER_VERSION, capabilities: ["agent-sdk", "git"] });
+    assert.match(String(_nonce), /^[0-9a-f]{32}$/, "every signed body carries a replay-protection nonce (CREST-GAP-087)");
     let fetches = 0;
     const counting: typeof fetch = (input, init) => { fetches++; return fetch(input, init); };
     const bad = new ControlPlaneClient({ baseUrl: cp.url, secret: "wrong-secret-0000000000", runnerId: "r1", fetchImpl: counting, sleep: async () => {} });
@@ -77,7 +79,7 @@ test("[AIB-RUNNER] heartbeat/complete payloads follow the protocol field names a
   const f: typeof fetch = async (_u, init) => { bodies.push(JSON.parse(String(init?.body))); return new Response(JSON.stringify({ continue: true, leaseExpiresAt: "x" }), { status: 200 }); };
   const c = new ControlPlaneClient({ baseUrl: "https://cp.test/", secret: SECRET, runnerId: "r", fetchImpl: f });
   await c.heartbeat({ id: "bld_1", leaseToken: "t" }, { stage: "verifying", runCostUsd: 1.234567, turns: 7, sessionId: "s1", activity: [{ kind: "tool", message: "x".repeat(900) }] });
-  assert.deepEqual(Object.keys(bodies[0]).sort(), ["activity", "jobId", "leaseToken", "runCostUsd", "sessionId", "stage", "turns"]);
+  assert.deepEqual(Object.keys(bodies[0]).sort(), ["_nonce", "activity", "jobId", "leaseToken", "runCostUsd", "sessionId", "stage", "turns"]);
   assert.equal(bodies[0].runCostUsd, 1.2346);
   assert.equal((bodies[0].activity as { message: string }[])[0].message.length, 500);
   await c.complete({ id: "bld_1", leaseToken: "t" }, {
@@ -87,4 +89,5 @@ test("[AIB-RUNNER] heartbeat/complete payloads follow the protocol field names a
   assert.ok(Buffer.byteLength(String(bodies[1].report)) <= 50 * 1024);
   assert.equal(String(bodies[1].error).length, 2000);
   assert.ok(truncateBytes("short", 10) === "short");
+  assert.notEqual(bodies[0]._nonce, bodies[1]._nonce, "each request has its own nonce");
 });
