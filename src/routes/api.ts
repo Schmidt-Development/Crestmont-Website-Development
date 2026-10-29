@@ -61,7 +61,9 @@ export function register(r: Router) {
 
   r.get("/api/health", async (ctx) => {
     await ctx.db.prepare("SELECT 1").first();
-    return jsonResponse(ctx, 200, { status: "ok", environment: ctx.env.ENVIRONMENT });
+    // CREST-GAP-055: the running Worker states whether its FILES (R2) binding exists, independent of the deploy-time
+    // file-storage:<env> feed. "not_configured" = uploads are disabled on this environment. Binding presence only.
+    return jsonResponse(ctx, 200, { status: "ok", environment: ctx.env.ENVIRONMENT, fileStorage: ctx.storage ? "bound" : "not_configured" });
   });
 
   r.post("/api/leads", async (ctx) => {

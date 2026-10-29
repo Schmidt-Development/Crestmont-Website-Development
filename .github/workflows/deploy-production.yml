@@ -45,7 +45,7 @@ jobs:
       # F-23: free-text input reaches scripts only through this variable, never interpolated into `run:`.
       RELEASE_TAG: ${{ inputs.tag }}
       DEPLOYMENT_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-production
-      WRANGLER: npx --yes wrangler@4
+      WRANGLER: npx --yes wrangler@4.149.0
     steps:
       - name: Validate inputs (F-23)
         run: |
@@ -70,7 +70,7 @@ jobs:
           fi
           echo "$TARGET_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || { echo "::error::inputs.commit must be the full 40-character lowercase SHA."; exit 1; }
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.commit }}
           fetch-depth: 0
@@ -84,7 +84,7 @@ jobs:
             echo "::error::wrangler.toml [env.production] still has an empty database_id (docs/DEPLOYMENT.md §2)."; exit 1
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"
 
@@ -106,7 +106,7 @@ jobs:
         run: node --no-warnings scripts/release-authorization.ts --commit "$TARGET_COMMIT" --config "${{ steps.cfg.outputs.sha256 }}"
 
       - name: Install dev tooling
-        run: npm install --no-save typescript@5 @types/node@22
+        run: npm install --no-save --ignore-scripts typescript@5 @types/node@22
 
       - name: Typecheck
         run: npx tsc -p tsconfig.json
@@ -216,6 +216,13 @@ jobs:
           node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment production --commit "$TARGET_COMMIT" --status rolled_back --verification failed --by "github-actions:${{ github.actor }}" \
             --notes "Rolled back by deploy-production.yml after failed post-deploy checks. Database migrations are NOT rolled back (BACKUP-RECOVERY §5)."
           echo "Open a production_incident blocker at /staff/readiness/blockers and follow docs/RUNBOOK.md §3 and §10."
+          # CREST-GAP-068: on the FIRST release (empty database marker from the safety-export step) the "previous version"
+          # is the empty draft Worker from provision-production.yml, so this rollback restores "not launched", not a working
+          # site. That is intended (failed code never keeps serving), but it is an outage of the new domain, not a recovery.
+          if [ -f backups/EMPTY-DATABASE.txt ]; then
+            echo "::warning title=First release rolled back::The custom domain now serves the empty draft Worker (the site is not live). Fix forward with a new release candidate; see docs/RUNBOOK.md §3.1 (first release)."
+            echo "First release: rolled back to the empty draft Worker. The domain answers but the site is not live; fix forward (docs/RUNBOOK.md §3.1)." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Record failed deployment
         env:

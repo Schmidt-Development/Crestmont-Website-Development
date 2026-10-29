@@ -55,7 +55,29 @@ export async function loadReport(ctx: Pick<AppContext, "db" | "now">): Promise<{
 
 // ───────────── Self-monitoring (READY-012, §50) ─────────────
 
-export interface FeedStatus { source: string; status: "healthy" | "stale" | "failing" | "unavailable" | "not_configured"; detail: string; required: boolean; lastSuccessAt: string | null; lastAttemptAt: string | null }
+/** `advisory`: a known configuration gap that is shown as failing but does not make /api/readiness/health 503 (the health
+ *  monitors would otherwise alert every 30 minutes until a provider-side change, masking real outages). */
+export interface FeedStatus { source: string; status: "healthy" | "stale" | "failing" | "unavailable" | "not_configured"; detail: string; required: boolean; lastSuccessAt: string | null; lastAttemptAt: string | null; advisory?: boolean }
+
+/** Cloudflare's documented Turnstile TEST keys (always pass / always fail / force challenge): 1x…, 2x…, 3x… followed by zeros. */
+export const TURNSTILE_TEST_KEY = /^[123]x0{20,}[A-F]{2}$/;
+
+/**
+ * CREST-GAP-019 (engineering part): the `turnstile:<env>` feed. Failing, with a public reason, while staging or production
+ * runs on Cloudflare's always-pass test keys: every token then verifies, so /register, password reset and the lead forms
+ * have no real bot challenge. On staging this is advisory (known gap awaiting real staging keys from the Founder); on
+ * production it is a real failure. Computed from the Worker's own configuration; values are never shown.
+ */
+export function turnstileFeed(env: Pick<AppContext["env"], "ENVIRONMENT" | "TURNSTILE_SITE_KEY" | "TURNSTILE_SECRET">, now: Date): FeedStatus | null {
+  if (env.ENVIRONMENT !== "staging" && env.ENVIRONMENT !== "production") return null;
+  const source = `turnstile:${env.ENVIRONMENT}`;
+  const at = now.toISOString();
+  const test = [env.TURNSTILE_SITE_KEY, env.TURNSTILE_SECRET].filter((k) => k && TURNSTILE_TEST_KEY.test(k.trim())).length;
+  if (test) return { source, status: "failing", required: false, advisory: env.ENVIRONMENT === "staging", lastSuccessAt: null, lastAttemptAt: at,
+    detail: `Turnstile uses Cloudflare's always-pass TEST keys on ${env.ENVIRONMENT}: forms accept any token, so there is no real bot challenge. Create a Turnstile widget for this hostname and install its site key and secret.` };
+  if (!env.TURNSTILE_SITE_KEY || !env.TURNSTILE_SECRET) return { source, status: "not_configured", required: false, lastSuccessAt: null, lastAttemptAt: at, detail: "TURNSTILE_SITE_KEY / TURNSTILE_SECRET are not set; protected forms fail closed." };
+  return { source, status: "healthy", required: false, lastSuccessAt: at, lastAttemptAt: at, detail: "Real (non-test) Turnstile keys are configured." };
+}
 
 export async function feedStatuses(ctx: Pick<AppContext, "db" | "env" | "now">, input: ReadinessInput): Promise<FeedStatus[]> {
   const now = ctx.now();
@@ -76,7 +98,8 @@ export async function feedStatuses(ctx: Pick<AppContext, "db" | "env" | "now">, 
   });
   const gh = await githubFeedStatus(ctx);
   const cron = await scheduledJobsFeed(ctx, input);
-  return [...required, gh, ...(cron ? [cron] : []), ...(await mfaFeeds(ctx)), ...others];
+  const turnstile = turnstileFeed(ctx.env, now);
+  return [...required, gh, ...(cron ? [cron] : []), ...(await mfaFeeds(ctx)), ...others, ...(turnstile ? [turnstile] : [])];
 }
 
 /** MFA encryption at rest (docs/AUTH-PRODUCTION.md gap 3) on deployed environments — status only, never the key, a secret
@@ -132,7 +155,7 @@ export async function scheduledJobsFeed(ctx: Pick<AppContext, "db" | "env" | "no
 
 /** Overall health of the readiness system's own inputs. Unhealthy whenever a required feed is not healthy, or a configured source is failing. */
 export function overallFeedHealth(feeds: FeedStatus[]): { ok: boolean; reason: string } {
-  const bad = feeds.filter((f) => (f.required && f.status !== "healthy") || (!f.required && f.status === "failing"));
+  const bad = feeds.filter((f) => !f.advisory && ((f.required && f.status !== "healthy") || (!f.required && f.status === "failing")));
   return bad.length ? { ok: false, reason: bad.map((f) => `${f.source}: ${f.status} (${f.detail})`).join("; ") } : { ok: true, reason: "All required evidence feeds are healthy" };
 }
 
@@ -378,8 +401,34 @@ export async function createReleaseCandidate(db: Db, userId: string, v: { commit
  * Records the Founder's launch decision bound to the current release candidate commit, config and
  * evidence set. Only the Owner, with MFA, in a user session (never AI/automation) may do this.
  */
-export async function recordFounderDecision(ctx: Pick<AppContext, "db" | "now" | "ip">, actor: Actor, userId: string, v: { decision: string; notes: string; confirmCommit: string; expectedEvidenceSet: string }): Promise<string> {
+/** Seeded staging demo accounts (scripts/seed-staging.ts, scripts/staging-access.ts) live under this reserved domain. */
+export const DEMO_ACCOUNT_DOMAIN = "@crestmont-preview.test";
+export const NOT_FOUNDER = "approver is not the Founder";
+
+/**
+ * CREST-GAP-020: a production launch approval must come from the Founder, not merely from some Owner account. Demo Owner
+ * accounts (public staging) never qualify; when FOUNDER_EMAIL is configured, only that exact account does.
+ * Returns null when the approver qualifies, otherwise the refusal reason.
+ */
+export function founderProblem(approverEmail: string | null | undefined, founderEmail: string | undefined): string | null {
+  const email = (approverEmail ?? "").trim().toLowerCase();
+  if (!email || email.endsWith(DEMO_ACCOUNT_DOMAIN)) return NOT_FOUNDER;
+  const founder = (founderEmail ?? "").trim().toLowerCase();
+  if (founder && email !== founder) return NOT_FOUNDER;
+  return null;
+}
+
+export async function approverEmail(db: Db, userId: string): Promise<string | null> {
+  return (await db.prepare(`SELECT email FROM users WHERE id = ?`).bind(userId).first<{ email: string }>())?.email ?? null;
+}
+
+export async function recordFounderDecision(ctx: Pick<AppContext, "db" | "now" | "ip"> & { env?: Pick<AppContext["env"], "FOUNDER_EMAIL"> }, actor: Actor, userId: string, v: { decision: string; notes: string; confirmCommit: string; expectedEvidenceSet: string }): Promise<string> {
   if (actor.kind !== "user" || !isOwner(actor) || !can(actor, "release.approve_production")) throw new ReadinessError("Only the Owner can record a production launch decision.", 403);
+  const notFounder = founderProblem(await approverEmail(ctx.db, userId), ctx.env?.FOUNDER_EMAIL);
+  if (notFounder) {
+    await audit(ctx.db, { actorUserId: userId, action: "release.founder_decision_refused", subjectType: "release", ip: ctx.ip, details: { reason: notFounder } });
+    throw new ReadinessError(`Refused: ${notFounder}. Only the Founder's own account can record a production launch decision.`, 403);
+  }
   if (v.decision !== "approved" && v.decision !== "rejected") throw new ReadinessError("Choose approve or reject");
   const rc = await currentReleaseCandidate(ctx.db);
   if (!rc) throw new ReadinessError("There is no release candidate to decide on.", 409);

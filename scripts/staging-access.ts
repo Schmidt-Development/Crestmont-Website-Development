@@ -11,7 +11,7 @@
 //
 // CLI (used by .github/workflows/deploy-staging.yml):
 //   node --no-warnings scripts/staging-access.ts --url <preview url> --out <dir>
-//   env: ACCESS_ROOT_KEY (required), ACCESS_EPOCH, ROTATE=true|false, WRANGLER (default "npx --yes wrangler@4")
+//   env: ACCESS_ROOT_KEY (required), ACCESS_EPOCH, ROTATE=true|false, WRANGLER (default "npx --yes wrangler@4.149.0")
 // Writes <dir>/README.md (the private artifact), <dir>/demo-accounts.md and <dir>/private.json (for the
 // verifier and the browser journey; not uploaded). Prints no credential except as ::add-mask:: commands.
 import { execFileSync } from "node:child_process";
@@ -258,7 +258,7 @@ Rotate everything: Actions → Deploy staging → Run workflow → tick "rotate_
 
 // ── CLI ──
 export function wranglerOps(): D1Ops {
-  const [cmd, ...base] = (process.env.WRANGLER ?? "npx --yes wrangler@4").split(" ").filter(Boolean);
+  const [cmd, ...base] = (process.env.WRANGLER ?? "npx --yes wrangler@4.149.0").split(" ").filter(Boolean);
   const run = (args: string[], input?: string) =>
     execFileSync(cmd, [...base, ...args], { input, stdio: ["pipe", "pipe", "pipe"], encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   const d1 = ["d1", "execute", "crestmont-staging", "--remote", "--env", "staging"];

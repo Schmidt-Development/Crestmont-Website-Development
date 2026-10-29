@@ -53,6 +53,14 @@ export interface Env {
   MFA_ENCRYPTION_KEY?: string;
   /** "off" disables the per-request env_metrics UPSERT (READY-006). Default on. */
   ENV_METRICS?: string;
+  /** Fraction (0–1) of successful, non-bot requests written to env_metrics; errors are always written. Default 0.1. CREST-GAP-066. */
+  ENV_METRICS_SAMPLE?: string;
+  /** Strict-Transport-Security max-age in seconds. Unset = 63072000 with includeSubDomains (staging, development). CREST-GAP-029. */
+  HSTS_MAX_AGE?: string;
+  /** "on" adds includeSubDomains when HSTS_MAX_AGE is set. Only once every subdomain serves HTTPS. */
+  HSTS_INCLUDE_SUBDOMAINS?: string;
+  /** The Founder's sign-in email. When set, only that account can record or carry a production launch approval. CREST-GAP-020. */
+  FOUNDER_EMAIL?: string;
   FILES?: unknown;             // R2 bucket binding
   ASSETS?: { fetch(req: Request): Promise<Response> };
   /** Test/dev hook: overrides the computed adapters. */

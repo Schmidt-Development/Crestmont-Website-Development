@@ -1,7 +1,7 @@
 // Request pipeline: build context → load session → CSRF for forms → route → render errors.
 import type { AppContext, Env } from "./context.ts";
 import { Router } from "../lib/router.ts";
-import { HttpError, assertCsrf, cookie, hostCookieName, htmlResponse, isSecure, jsonResponse, parseCookies, readHostCookie, redirect } from "./http.ts";
+import { HttpError, assertCsrf, cookie, hostCookieName, hstsValue, htmlResponse, isSecure, jsonResponse, parseCookies, readHostCookie, redirect } from "./http.ts";
 import { randomToken } from "../lib/auth-crypto.ts";
 import { loadSession } from "../services/auth.ts";
 import { OutboxEmail, ResendEmail, recipientPolicy } from "../adapters/email.ts";
@@ -15,7 +15,7 @@ import { can, STAFF_ROLES, type Permission } from "../domain/authz.ts";
 import { recordAppError } from "../services/monitoring.ts";
 import { rateLimit, securityEvent } from "../services/security.ts";
 import { previewGate } from "./preview-gate.ts";
-import { recordRequestMetric } from "../services/env-metrics.ts";
+import { metricWeight, recordRequestMetric } from "../services/env-metrics.ts";
 import { STEP_UP_MAX_AGE_MINUTES, stepUpAction, stepUpReturnPath } from "./step-up.ts";
 
 let router: Router | null = null;
@@ -158,20 +158,27 @@ export async function handle(req: Request, env: Env, exec?: ExecLike): Promise<R
   // One UPSERT per request, after the response on Cloudflare (waitUntil); no path, id or user is stored.
   const started = Date.now();
   const mark = { unhandled: false };
-  const res = withNoindex(env, await dispatch(req, env, url, mark));
+  const res = withHeaders(await dispatch(req, env, url, mark), {
+    ...(env.ENVIRONMENT === "production" ? {} : { "x-robots-tag": "noindex, nofollow" }),
+    "strict-transport-security": hstsValue(env),
+  });
   if (env.ENV_METRICS !== "off") {
-    const write = recordRequestMetric(env.DB, { environment: env.ENVIRONMENT, pathname: url.pathname, status: res.status, durationMs: Date.now() - started, unhandled: mark.unhandled, at: env.overrides?.now?.() ?? new Date() });
-    if (exec && typeof exec.waitUntil === "function") exec.waitUntil(write); else await write;
+    // CREST-GAP-066: no write for asset paths or known crawlers; successful requests are sampled (weighted, so the
+    // totals stay unbiased) and every 5xx / unhandled error is written.
+    const weight = metricWeight({ pathname: url.pathname, userAgent: req.headers.get("user-agent"), status: res.status, unhandled: mark.unhandled, sample: env.ENV_METRICS_SAMPLE });
+    if (weight > 0) {
+      const write = recordRequestMetric(env.DB, { environment: env.ENVIRONMENT, pathname: url.pathname, status: res.status, durationMs: Date.now() - started, unhandled: mark.unhandled, at: env.overrides?.now?.() ?? new Date(), weight });
+      if (exec && typeof exec.waitUntil === "function") exec.waitUntil(write); else await write;
+    }
   }
   return res;
 }
 
-/** Outside production every Worker response (pages, JSON, files, redirects) tells crawlers not to index or follow it,
- *  in addition to robots.txt (Disallow: /) and the page-level noindex meta tag. Production is unchanged. */
-function withNoindex(env: Env, res: Response): Response {
-  if (env.ENVIRONMENT === "production") return res;
-  try { res.headers.set("x-robots-tag", "noindex, nofollow"); return res; }
-  catch { const h = new Headers(res.headers); h.set("x-robots-tag", "noindex, nofollow"); return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h }); }
+/** Response headers applied to every Worker response. Outside production that includes X-Robots-Tag noindex (with
+ *  robots.txt Disallow: / and the page-level meta tag); everywhere the environment's HSTS value (CREST-GAP-029). */
+function withHeaders(res: Response, set: Record<string, string>): Response {
+  try { for (const [k, v] of Object.entries(set)) res.headers.set(k, v); return res; }
+  catch { const h = new Headers(res.headers); for (const [k, v] of Object.entries(set)) h.set(k, v); return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h }); }
 }
 
 async function dispatch(req: Request, env: Env, url: URL, mark: { unhandled: boolean }): Promise<Response> {

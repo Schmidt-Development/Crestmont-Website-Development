@@ -18,13 +18,14 @@ import { probeEnvironments } from "../services/deployments.ts";
 import { runRetention } from "../services/retention.ts";
 import { sweepBuilds } from "../services/builds.ts";
 import { processOutboundQueue } from "../services/voice-outbound.ts";
+import { runOpsAlerts } from "../services/monitoring.ts";
 
 export type JobName = "requirements" | "stripe_reconcile" | "support_escalation" | "github_sync" | "inactivity" | "integration_health"
-  | "stripe_side_reconcile" | "stripe_ledger_reconcile" | "cost_import" | "env_probe" | "retention" | "build_sweep" | "payment_repair" | "email_retry" | "voice_outbound";
+  | "stripe_side_reconcile" | "stripe_ledger_reconcile" | "cost_import" | "env_probe" | "retention" | "build_sweep" | "payment_repair" | "email_retry" | "voice_outbound" | "ops_alerts";
 
-/** Cron expression → jobs. Must match [triggers] crons in wrangler.toml. */
+/** Cron expression → jobs. Must match [triggers] crons in wrangler.toml. ops_alerts runs last so it sees this run's results. */
 export const SCHEDULE: Record<string, JobName[]> = {
-  "*/15 * * * *": ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep", "voice_outbound"],
+  "*/15 * * * *": ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep", "voice_outbound", "ops_alerts"],
   "17 11 * * *": ["requirements", "inactivity", "integration_health", "stripe_side_reconcile", "stripe_ledger_reconcile", "cost_import", "retention"],
 };
 
@@ -64,6 +65,9 @@ export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string,
         case "build_sweep": detail = await sweepBuilds(ctx.db); break;
         // Outbound calls (VOICE-003): no-op ("skipped: outbound disabled") until RETELL_OUTBOUND=on AND the Owner enables it.
         case "voice_outbound": detail = (await processOutboundQueue({ db: ctx.db, env, fetch: env.overrides?.fetch ?? fetch, now: env.overrides?.now })).detail; break;
+        // CREST-GAP-015/-089/-024: Owner emails (critical_incident) for dead-lettered Stripe events, new reconciliation findings,
+        // a stuck email queue, failing evidence feeds and security-event bursts; deduplicated per item/window (ops_alerts).
+        case "ops_alerts": { const r = await runOpsAlerts(ctx); detail = `${r.raised} new of ${r.checked} alert items; ${r.emailed} emails to ${r.recipients} owner(s)${r.categories.length ? ` (${r.categories.join(", ")})` : ""}`; break; }
         case "retention": detail = (await runRetention({ db: ctx.db, storage: ctx.storage })).map((r) => `${r.category}:${r.mode === "skipped" ? "off" : r.affected}`).join(", "); break;
       }
       results[job] = { ok: true, detail };

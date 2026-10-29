@@ -147,7 +147,8 @@ test("[INFRA-002] workflows: no plaintext credential or database artifact; stagi
   assert.doesNotMatch(staging, /path:\s*access\/README\.md/);
   assert.doesNotMatch(staging, /openssl enc|upload=plain|aes-256-cbc/);
   assert.match(staging, /preflight:\n(?:\s+#.*\n)*\s+if: github\.ref == 'refs\/heads\/main'/);
-  const uploads = [...staging.matchAll(/upload-artifact@v\d+[\s\S]*?path:\s*(\S+)/g)].map((m) => m[1]);
+  // Any version tag or SHA pin (CREST-GAP-063).
+  const uploads = [...staging.matchAll(/upload-artifact@(?:v\d+|[0-9a-f]{40})[\s\S]*?path:\s*(\S+)/g)].map((m) => m[1]);
   assert.ok(uploads.includes("access/staging-access.sealed") && uploads.includes("forensics/staging-forensics.sealed"), uploads.join());
   for (const p of uploads) assert.ok(/\.sealed$/.test(p) || /^evidence/.test(p), `unexpected upload ${p}`);
   const order = ["Credential delivery gate", "Forensic snapshot", "Apply D1 migrations", "Capture the pre-rotation access", "Apply staging access", "Verify the full access sequence", "Prove the old access is revoked", "Seal the access notes", "Remove credentials and evidence"];

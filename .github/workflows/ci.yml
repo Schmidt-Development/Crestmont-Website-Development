@@ -12,8 +12,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"   # >= 22.18 for native TypeScript
       - name: Install dev tooling
@@ -41,7 +41,7 @@ jobs:
             fi
           done
           echo "Audited $audited lockfile(s)." | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: ci-evidence
@@ -63,8 +63,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"
       - name: hadolint (pinned release binary, checksum verified)
@@ -85,7 +85,7 @@ jobs:
             (cd runner/agent-sdk && npm install --package-lock-only --ignore-scripts --no-audit --no-fund) || echo "::warning::could not resolve runner/agent-sdk dependencies"
           fi
       - name: Upload lockfiles for review
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: runner-lockfiles
           if-no-files-found: ignore
@@ -126,8 +126,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"
       - name: Parse every script and run PSScriptAnalyzer (Windows PowerShell 5.1 compatibility rules)

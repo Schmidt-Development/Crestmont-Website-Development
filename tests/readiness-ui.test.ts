@@ -29,10 +29,11 @@ test("[READY-010] fresh databases carry the real discovery blocker register with
   const { db, o } = await setup();
   const rows = (await db.prepare(`SELECT id, status FROM blockers ORDER BY id`).all<{ id: string; status: string }>()).results;
   assert.deepEqual(rows.map((r) => r.id), Array.from({ length: 14 }, (_, i) => `BLK-${String(i + 1).padStart(3, "0")}`));
-  assert.deepEqual(rows.filter((r) => r.status === "resolved").map((r) => r.id), ["BLK-001", "BLK-002"]);
+  // BLK-003 (Cloudflare access), BLK-012 (registries) and BLK-013 (Actions billing) were resolved with evidence by migration 0045.
+  assert.deepEqual(rows.filter((r) => r.status === "resolved").map((r) => r.id), ["BLK-001", "BLK-002", "BLK-003", "BLK-012", "BLK-013"]);
   const page = await (await o.get("/staff/readiness/blockers")).text();
   for (const c of ["engineering", "external_account", "security", "legal", "founder_approval", "production_incident"]) assert.match(page, new RegExp(`data-category="${c}"`));
-  assert.match(page, /BLK-013/);
+  assert.match(page, /BLK-011/, "open blockers are listed");
   // Requirement links are applied once requirement rows exist.
   assert.ok(await db.prepare(`SELECT 1 FROM blocker_requirements WHERE blocker_id = 'BLK-013' AND requirement_id = 'READY-005'`).first());
 });

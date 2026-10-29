@@ -128,7 +128,7 @@ function localOps(path: string): Ops {
 }
 
 function remoteOps(database: string, env: string): Ops & { deploymentEnvironments(): Promise<string[]> } {
-  const [cmd, ...base] = (process.env.WRANGLER ?? "npx --yes wrangler@4").split(" ").filter(Boolean);
+  const [cmd, ...base] = (process.env.WRANGLER ?? "npx --yes wrangler@4.149.0").split(" ").filter(Boolean);
   const d1 = ["d1", "execute", database, "--remote", "--env", env];
   const exec = (args: string[]) => execFileSync(cmd, [...base, ...d1, ...args], { stdio: ["pipe", "pipe", "pipe"], encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   return {
@@ -138,7 +138,7 @@ function remoteOps(database: string, env: string): Ops & { deploymentEnvironment
       const out = execFileSync(cmd, [...base, "d1", "time-travel", "info", database, "--env", env, "--json"], { stdio: ["pipe", "pipe", "pipe"], encoding: "utf8" });
       const bookmark = (JSON.parse(out.slice(out.indexOf("{"))) as { bookmark?: string }).bookmark;
       if (!bookmark || !/^[0-9a-f-]{8,}$/i.test(bookmark)) throw new Error("D1 Time Travel returned no bookmark");
-      return `npx wrangler@4 d1 time-travel restore ${database} --env ${env} --bookmark ${bookmark}`;
+      return `npx wrangler@4.149.0 d1 time-travel restore ${database} --env ${env} --bookmark ${bookmark}`;
     },
     async deploymentEnvironments() {
       const out = exec(["--json", "--command", "SELECT DISTINCT environment FROM deployments WHERE status = 'succeeded'"]);
