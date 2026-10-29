@@ -33,7 +33,8 @@ each finding's state; this file records batches, PRs and what to do next.
 | 5 | #31 | claude/closeout-086-session-cookies | 086, 102 | stacked on #29 |
 | — | #30 | claude/closeout-hardening | 012, 017, 056, 087, 101 | independent of the stack |
 | — | #32 | claude/closeout-retell | 053, 100 (supersedes #17) | migration 0042; CI green; Retell dashboard steps in docs/voice/RETELL-CONNECTION-GUIDE.md |
-| — | (agents) | claude/closeout-commerce / -modules / -ops / -frontend | see each PR | migrations: commerce 0043, modules 0044, ops 0045 |
+| — | #33 | claude/closeout-modules | 040–044, 070–074, 079, 081 | migration 0044; CI green; staging: verify 0044 CRM backfill and email-change delivery |
+| — | (agents) | claude/closeout-commerce / -ops / -frontend | see each PR | migrations: commerce 0043, ops 0045 |
 
 Reserved migration numbers: 0040 (#28 security readiness), 0041 (#28 deleted-task links), 0042 Retell, 0043 commerce,
 0044 modules, 0045 ops, 0046 known devices (#29). After everything merges, run `tests/migrations` uniqueness test (ops PR).
