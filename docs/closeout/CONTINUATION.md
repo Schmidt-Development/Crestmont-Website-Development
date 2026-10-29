@@ -27,15 +27,20 @@ each finding's state; this file records batches, PRs and what to do next.
 | Order | PR | Branch | Findings | Notes |
 | --- | --- | --- | --- | --- |
 | 1 | #26 | claude/closeout-001-invitation-takeover | 001, 004 | P0 — merge first (staging is public) |
-| 2 | #27 | claude/closeout-register | register, validator, this file | docs/tests only; updated at the end of the run |
-| 3 | #28 | claude/closeout-018-branch-consolidation | 018, 002, 021–027 (partly), 030, 052 (contract), 069, 092 | PRs #18/#19/d1-closeout/staging-health-closeout landed without the preview gate; migrations 0040, 0041 |
+| 2 | #27 | claude/closeout-register | register, validator, this file | docs/tests only |
+| 3 | #28 | claude/closeout-018-branch-consolidation | 002, 018, 021–023, 025, 026, 030, 052 (contract), 069, 092 | PRs #18/#19/d1-closeout/staging-health-closeout without the preview gate; migrations 0040, 0041 |
 | 4 | #29 | claude/closeout-003-login-throttling | 003, 085 | stacked on #28; migration 0046 |
 | 5 | #31 | claude/closeout-086-session-cookies | 086, 102 | stacked on #29 |
-| — | #30 | claude/closeout-hardening | 012, 017, 056, 087, 101 | independent of the stack |
-| — | #32 | claude/closeout-retell | 053, 100 (supersedes #17) | migration 0042; CI green; Retell dashboard steps in docs/voice/RETELL-CONNECTION-GUIDE.md |
-| — | #33 | claude/closeout-modules | 040–044, 070–074, 079, 081 | migration 0044; CI green; staging: verify 0044 CRM backfill and email-change delivery |
-| — | #34 | claude/closeout-frontend | 043 (policy link), 045–049, 051, 061, 075–078, 090, 095–099, 103 | no migration; CI green; e2e 37/0 locally |
-| — | (agents) | claude/closeout-commerce / -ops | see each PR | migrations: commerce 0043, ops 0045 |
+| 6 | #30 | claude/closeout-hardening | 012, 017, 056 (scope), 087, 101 | independent |
+| 7 | #35 | claude/closeout-commerce | 005–008, 010, 031–039, 080, 082, 083, 091, 093, 094 | contains 1–6 (merge commits); migration 0043 |
+| 8 | #32 | claude/closeout-retell | 053, 100 (supersedes #17) | contains 1–7; migration 0042 |
+| 9 | #33 | claude/closeout-modules | 040–044, 070–074, 079, 081 | contains 1–8; migration 0044 |
+| 10 | #34 | claude/closeout-frontend | 043 (policy link), 045–049, 051, 061, 075–078, 090, 095–099, 103 | contains 1–9 |
+| 11 | #36 | claude/closeout-ops | 014 (prep), 015, 016, 019, 020, 024, 027–029, 055, 058, 062–068, 089, 104, CREST-NEW-001 | contains 1–10; migration 0045. Whole stack at this head: 605/605 unit, runner 92/92, e2e 37/0, tsc clean |
+| — | glassly#1, better-lansing-mechanics#24 | claude/demo-closeout-059(-060) | 059 (2 of 4 demos), 060 | base crestmont/portfolio-demo; merging deploys only the demo Worker |
+
+Every later PR already contains the earlier ones, so each merges without conflicts when the order is kept. Merging out
+of order re-opens conflicts in src/services/mailer.ts, src/app/scheduled.ts and .github/workflows/ci.yml.
 
 Reserved migration numbers: 0040 (#28 security readiness), 0041 (#28 deleted-task links), 0042 Retell, 0043 commerce,
 0044 modules, 0045 ops, 0046 known devices (#29). After everything merges, run `tests/migrations` uniqueness test (ops PR).
