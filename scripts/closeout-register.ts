@@ -74,7 +74,7 @@ export function counters(reg: Register) {
   };
 }
 
-const cell = (v: unknown) => (v === null || v === undefined || v === "" ? "—" : String(v).replace(/\|/g, "\\|").replace(/\n/g, " "));
+const cell = (v: unknown) => (v === null || v === undefined || v === "" ? "—" : String(v).replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " "));
 
 export function render(reg: Register): string {
   const k = counters(reg);
