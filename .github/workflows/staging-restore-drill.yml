@@ -38,7 +38,7 @@ jobs:
           HAS: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
         run: |
           if [ "$HAS" != "true" ]; then echo "::notice title=Restore drill skipped::Cloudflare secrets are not configured."; echo "ok=false" >> "$GITHUB_OUTPUT"; else echo "ok=true" >> "$GITHUB_OUTPUT"; fi
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.pre.outputs.ok == 'true'
       - uses: actions/setup-node@v4
         if: steps.pre.outputs.ok == 'true'

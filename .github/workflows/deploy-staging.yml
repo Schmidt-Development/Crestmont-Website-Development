@@ -76,7 +76,7 @@ jobs:
       ACCESS_EPOCH: "3"
       WRANGLER: npx --yes wrangler@4
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false   # the token is passed only to the snapshot step, never left in .git/config
       - uses: actions/setup-node@v4
