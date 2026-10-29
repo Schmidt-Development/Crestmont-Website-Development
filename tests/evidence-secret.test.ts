@@ -113,7 +113,8 @@ test("[SEC-004] [INFRA-005] public repository: no workflow uploads plaintext cre
   // whatever the repository's visibility (2026-10-28 incident).
   assert.match(staging, /node --no-warnings scripts\/seal\.ts seal access\/README\.md access\/staging-access\.sealed/);
   assert.doesNotMatch(staging, /openssl enc|aes-256-cbc|upload=plain|REPO_PRIVATE/);
-  const uploads = [...staging.matchAll(/- uses: actions\/upload-artifact@v4\s*\n\s*if: ([^\n]+)\n[\s\S]*?path: ([^\n]+)/g)].map((m) => [m[1].trim(), m[2].trim()]);
+  // Any version or SHA pin of upload-artifact (CREST-GAP-063: Dependabot bumps used to fail this check).
+  const uploads = [...staging.matchAll(/- uses: actions\/upload-artifact@[^\s]+(?: #[^\n]*)?\s*\n\s*if: ([^\n]+)\n[\s\S]*?path: ([^\n]+)/g)].map((m) => [m[1].trim(), m[2].trim()]);
   assert.deepEqual(uploads, [
     ["steps.gate.outputs.pending == 'true'", "forensics/staging-forensics.sealed"],
     ["always() && steps.protect.outputs.upload == 'sealed'", "access/staging-access.sealed"],

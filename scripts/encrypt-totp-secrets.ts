@@ -74,7 +74,7 @@ function localOps(path: string): Ops {
 }
 
 function remoteOps(database: string, env: string): Ops {
-  const [cmd, ...base] = (process.env.WRANGLER ?? "npx --yes wrangler@4").split(" ").filter(Boolean);
+  const [cmd, ...base] = (process.env.WRANGLER ?? "npx --yes wrangler@4.149.0").split(" ").filter(Boolean);
   const d1 = ["d1", "execute", database, "--remote", "--env", env];
   const exec = (args: string[]) => execFileSync(cmd, [...base, ...d1, ...args], { stdio: ["pipe", "pipe", "pipe"], encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   return {

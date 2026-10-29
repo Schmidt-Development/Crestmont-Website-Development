@@ -102,3 +102,52 @@ test("[SEC-007] F-18/F-19: no workflow uploads unsealed access notes, credential
   assert.doesNotMatch(staging, /upload == 'plain'|REPO_PRIVATE/, "no plaintext path, whatever the repository visibility");
   assert.match(staging, /scripts\/seal\.ts seal access\/README\.md access\/staging-access\.sealed/);
 });
+
+// ───────────── CI supply chain (CREST-GAP-028, -063) ─────────────
+
+const nonComment = (src: string) => src.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+
+test("[SEC-004] every action is pinned to a full 40-character commit SHA with a trailing # vN comment (tags can be moved; SHAs cannot)", () => {
+  const bad: string[] = [];
+  let pinned = 0;
+  for (const f of files) for (const l of read(f).split("\n")) {
+    const m = /^\s*(?:-\s+)?uses:\s*(\S+)(.*)$/.exec(l);
+    if (!m) continue;
+    if (m[1].startsWith("./")) continue; // local composite action (none today)
+    if (!/^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/.test(m[1]) || !/^\s+# v\d+(\.\d+){0,2}\s*$/.test(m[2])) bad.push(`${f}: ${l.trim()}`);
+    else pinned++;
+  }
+  assert.deepEqual(bad, [], "pin with: owner/repo@<40-hex sha> # vN (Dependabot updates both)");
+  assert.ok(pinned >= 25, `all workflow actions found (${pinned})`);
+});
+
+test("[SEC-004] wrangler is pinned to an exact version in every workflow and script default (never wrangler@4 or latest)", () => {
+  const bad: string[] = [];
+  const sources = [...files.map((f) => [`${DIR}/${f}`, read(f)] as const), ...readdirSync("scripts").filter((f) => f.endsWith(".ts")).map((f) => [`scripts/${f}`, readFileSync(`scripts/${f}`, "utf8")] as const)];
+  for (const [name, src] of sources) for (const m of nonComment(src).matchAll(/wrangler@([^\s"'`]*)/g)) if (!/^\d+\.\d+\.\d+$/.test(m[1])) bad.push(`${name}: wrangler@${m[1]}`);
+  assert.deepEqual(bad, []);
+  const versions = new Set(sources.flatMap(([, src]) => [...nonComment(src).matchAll(/wrangler@(\d+\.\d+\.\d+)/g)].map((m) => m[1])));
+  assert.equal(versions.size, 1, `one wrangler version everywhere: ${[...versions].join(", ")}`);
+});
+
+test("[SEC-007] F-24: in workflows that hold the Cloudflare token, npm installs never run package lifecycle scripts (--ignore-scripts)", () => {
+  const bad: string[] = [];
+  for (const f of files) {
+    const src = read(f);
+    if (!/secrets\.CLOUDFLARE_API_TOKEN/.test(src)) continue;
+    for (const l of nonComment(src).split("\n")) if (/\bnpm (install|i|ci)\b/.test(l) && !/--ignore-scripts/.test(l)) bad.push(`${f}: ${l.trim()}`);
+  }
+  assert.deepEqual(bad, [], "Playwright/axe/TypeScript installs in jobs that later hold CLOUDFLARE_API_TOKEN must not execute install scripts");
+  const staging = read("deploy-staging.yml");
+  assert.match(staging, /npm install --prefix \.pw [^\n]*--ignore-scripts playwright@/);
+  assert.match(staging, /npm install --prefix \.pwf [^\n]*--ignore-scripts playwright@/);
+});
+
+test("[INFRA-005] CREST-GAP-058: no workflow on main deploys the retired crestmont-platform-frontend-preview Worker", () => {
+  assert.deepEqual(files.filter((f) => /frontend-preview/.test(f)), [], "no deploy-frontend-preview workflow");
+  const bad: string[] = [];
+  for (const f of files) for (const l of nonComment(read(f)).split("\n")) if (/frontend-preview/.test(l)) bad.push(`${f}: ${l.trim()}`);
+  assert.deepEqual(bad, [], "the retired Worker is named only in comments");
+  const toml = readFileSync("wrangler.toml", "utf8").replace(/#.*$/gm, "");
+  assert.doesNotMatch(toml, /frontend-preview|\[env\.(preview|frontend)/, "wrangler.toml has no preview environment");
+});

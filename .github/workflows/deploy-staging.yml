@@ -75,17 +75,17 @@ jobs:
       # 3 = rotation after plaintext access notes were exposed as public artifacts (2026-10-27/28). Lands in the same
       #     deploy that first protects the notes, so the new credentials are never uploaded in plaintext.
       ACCESS_EPOCH: "3"
-      WRANGLER: npx --yes wrangler@4
+      WRANGLER: npx --yes wrangler@4.149.0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false   # the token is passed only to the snapshot step, never left in .git/config
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"   # >= 22.18 for native TypeScript
 
       - name: Install dev tooling
-        run: npm install --no-save typescript@5 @types/node@22
+        run: npm install --no-save --ignore-scripts typescript@5 @types/node@22
 
       - name: Typecheck and tests (staging only receives code that passes)
         run: npx tsc -p tsconfig.json && npm test
@@ -158,7 +158,7 @@ jobs:
           node --no-warnings scripts/seal.ts seal forensics/snapshot.json forensics/staging-forensics.sealed
           rm -f forensics/snapshot.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.gate.outputs.pending == 'true'
         with:
           name: staging-forensics-sealed
@@ -390,7 +390,7 @@ jobs:
           AXE_PATH: ${{ github.workspace }}/.pw/node_modules/axe-core/axe.min.js
         run: |
           unset EVIDENCE_INGEST_SECRET   # set via GITHUB_ENV earlier; third-party packages below never see it (F-24)
-          npm install --prefix .pw --no-save --no-audit --no-fund playwright@1.48.2 axe-core@4.10.2 > /dev/null
+          npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 axe-core@4.10.2 > /dev/null
           .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
           node --no-warnings --test --test-concurrency=1 --test-reporter=./scripts/evidence-reporter.mjs tests/e2e/staging.e2e.ts tests/e2e/staging-quality.e2e.ts tests/e2e/staging-journeys.e2e.ts
 
@@ -412,7 +412,7 @@ jobs:
 
       - name: Upload frontend recordings and screenshots (public pages only; no credentials)
         if: always() && steps.frontend_browser.outcome != 'skipped'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: staging-frontend-browser
           path: evidence/frontend-browser
@@ -483,7 +483,7 @@ jobs:
             echo "::warning title=Access notes not issued::No usable ACCESS_ARTIFACT_PASSPHRASE secret (32+ characters), so no credentials were uploaded. See docs/STAGING-PREVIEW.md."
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always() && steps.protect.outputs.upload == 'sealed'
         with:
           name: staging-access-sealed
