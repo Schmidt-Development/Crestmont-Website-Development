@@ -14,7 +14,10 @@ export type AiWorkflow = (typeof AI_WORKFLOWS)[number];
 /** Actions an AI job is never allowed to request, whatever its prompt says. */
 export const AI_FORBIDDEN = ["refund", "contract", "agreement execution", "production release", "price change"] as const;
 
-export interface AiProvider { readonly name: string; readonly model: string; complete(system: string, prompt: string): Promise<{ text: string; inputTokens: number; outputTokens: number }> }
+/** Optional per-call settings (backward compatible): a multi-turn conversation instead of a single prompt, a smaller
+ *  output budget and a shorter timeout — used by the public website assistant (services/assistant.ts). */
+export interface AiCallOptions { messages?: { role: "user" | "assistant"; content: string }[]; maxTokens?: number; timeoutMs?: number }
+export interface AiProvider { readonly name: string; readonly model: string; complete(system: string, prompt: string, opts?: AiCallOptions): Promise<{ text: string; inputTokens: number; outputTokens: number }> }
 
 /** Per-million-token prices in USD for models whose price the platform knows. A paid model not listed here is refused,
  *  because the monthly budget could not be enforced for it (unknown ≠ zero). */
@@ -38,7 +41,7 @@ export class AnthropicProvider implements AiProvider {
     if (!/^[a-z0-9][a-z0-9.-]{2,63}$/.test(model)) throw new Error("AI_MODEL is not a valid model id");
     this.key = key; this.model = model; this.fetchImpl = fetchImpl; this.sleep = sleep;
   }
-  async complete(system: string, prompt: string) {
+  async complete(system: string, prompt: string, opts: AiCallOptions = {}) {
     // One retry for rate limits, overload and transient errors, honouring retry-after up to 10 s; 60 s timeout per call.
     for (let attempt = 1; ; attempt++) {
       let r: Response;
@@ -46,16 +49,16 @@ export class AnthropicProvider implements AiProvider {
         r = await this.fetchImpl("https://api.anthropic.com/v1/messages", {
           method: "POST",
           headers: { "x-api-key": this.key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-          body: JSON.stringify({ model: this.model, max_tokens: 1500, system, messages: [{ role: "user", content: prompt }] }),
-          signal: AbortSignal.timeout(60_000),
+          body: JSON.stringify({ model: this.model, max_tokens: opts.maxTokens ?? 1500, system, messages: opts.messages ?? [{ role: "user", content: prompt }] }),
+          signal: AbortSignal.timeout(opts.timeoutMs ?? 60_000),
         });
       } catch (e) {
-        if (attempt < 2) { await this.sleep(2_000); continue; }
-        throw new Error(`Anthropic request failed: ${(e as Error).name === "TimeoutError" ? "timed out after 60 s" : (e as Error).message}`);
+        if (attempt < 2 && !opts.timeoutMs) { await this.sleep(2_000); continue; }
+        throw new Error(`Anthropic request failed: ${(e as Error).name === "TimeoutError" ? `timed out after ${Math.round((opts.timeoutMs ?? 60_000) / 1000)} s` : (e as Error).message}`);
       }
       const body = (await r.json().catch(() => ({}))) as { content?: { type: string; text?: string }[]; usage?: { input_tokens: number; output_tokens: number }; error?: { message: string } };
       if (!r.ok) {
-        if (attempt < 2 && RETRYABLE.has(r.status)) { await this.sleep(Math.min(10_000, Math.max(1_000, Number(r.headers.get("retry-after") ?? 2) * 1000))); continue; }
+        if (attempt < 2 && RETRYABLE.has(r.status) && !opts.timeoutMs) { await this.sleep(Math.min(10_000, Math.max(1_000, Number(r.headers.get("retry-after") ?? 2) * 1000))); continue; }
         throw new Error(`Anthropic ${r.status}: ${body.error?.message ?? "error"}`);
       }
       return { text: (body.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n"), inputTokens: body.usage?.input_tokens ?? 0, outputTokens: body.usage?.output_tokens ?? 0 };

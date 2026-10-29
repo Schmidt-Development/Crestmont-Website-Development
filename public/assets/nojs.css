@@ -1,0 +1,28 @@
+/* Loaded only when scripting is disabled (<noscript><link>, CSP-compliant). app.css assumes JavaScript; these rules
+   restore the complete no-JS experience: the off-canvas sidebar stays in the flow on phones, the process and the
+   "Anatomy of a build" concept render as complete readable lists, and nothing depends on a script to appear. */
+.intro { display: none !important; }
+.hero-title, .hero-seq { animation: none !important; opacity: 1 !important; transform: none !important; }
+.anatomy__tab { cursor: default; }
+.anatomy__tab::after { display: none; }
+.anatomy__detail { display: block !important; padding: 0 0 var(--s-4) calc(2.5rem + var(--s-3) + var(--s-4)) !important; }
+.stages__aside { display: none; }
+.stages { grid-template-columns: 1fr; }
+.stage { min-height: 0; }
+.stage__art-m { display: block; position: relative; width: min(64vw, 260px); aspect-ratio: 1 / 1; margin-bottom: var(--s-4); }
+@media (max-width: 960px) {
+  .sidebar { position: static; transform: none; visibility: visible; width: auto; height: auto; box-shadow: none; border-right: 0; border-bottom: 1px solid var(--line); }
+  .topbar .nav-toggle { display: none !important; }
+}
+/* Portfolio explorer without JavaScript: an accessible list of projects with screenshots and links. */
+.pfx__row { display: block; }
+.pfx__arrow, .pfx__bar, .pfx__chrome .pfx__flag { display: none; }
+.pfx__window { overflow: visible; border-radius: 0; }
+.pfx__track { display: grid; gap: var(--s-8); transform: none !important; }
+.pfx__screen { height: auto; aspect-ratio: 16 / 10; }
+/* Service visuals without JavaScript: every step, layer and explanation is visible as a readable list; controls that
+   need scripting are hidden. */
+.sv__controls, .sv-actions, .sv-flow__toggles, .sv-book__rules, .sv-wf__opts { display: none !important; }
+.sv-compare { cursor: default; } .sv-compare__handle { display: none; }
+.hero--service .hero-service { align-items: start; }
+.sv-flow__panel { min-height: 0; }

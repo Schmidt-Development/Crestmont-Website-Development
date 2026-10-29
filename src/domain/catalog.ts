@@ -13,26 +13,70 @@ export interface PackageDef {
   priceIsFloor: boolean;     // Premium is "$4,999+"
   pageLimit: number;
   revisionRounds: number;
+  /** Every deliverable, in the package's own words — derived from PACKAGE_FEATURES (cumulative: Starter ⊆ Business ⊆ Premium).
+   *  Used verbatim for contract scope text, proposals, build briefs and package cards. */
   includes: string[];
 }
 
+/** One capability and what each package includes of it. A string is the package's scope wording; `null` means not included.
+ *  Packages are cumulative (Founder directive 2026-10-28): anything a lower tier includes, every higher tier includes too —
+ *  at the same or a larger scope. tests/pricing-inheritance.test.ts enforces this. */
+export interface PackageFeature {
+  id: string;
+  label: string;
+  /** Plain-language explanation shown with the comparison row. */
+  note: string;
+  levels: Record<PackageId, string | null>;
+}
+
+const PKG_IDS: PackageId[] = ["starter", "business", "premium"];
+const PAGE_LIMIT = { starter: 5, business: 12, premium: 25 } as const;
+const REVISIONS = { starter: 2, business: 3, premium: 4 } as const;
+const same = (s: string): Record<PackageId, string> => ({ starter: s, business: s, premium: s });
+
+export const PACKAGE_FEATURES: readonly PackageFeature[] = Object.freeze([
+  { id: "pages", label: "Pages", note: "The number of distinct pages designed and built. Larger Premium projects are scoped in writing.",
+    levels: { starter: "Up to 5 pages", business: "Up to 12 pages", premium: "Up to 25 pages within approved scope" } },
+  { id: "responsive", label: "Responsive website", note: "Layouts built and checked for phones, tablets and desktops.", levels: same("Responsive website") },
+  { id: "design", label: "Design customization", note: "How far the design is tailored to your brand: expanded customization, or a bespoke premium design.",
+    levels: { starter: null, business: "Expanded design customization", premium: "Bespoke premium design" } },
+  { id: "layouts", label: "Advanced layouts and interactions", note: "Richer page compositions and interactive elements within the approved scope.",
+    levels: { starter: null, business: null, premium: "Advanced layouts and interactions" } },
+  { id: "content", label: "Content structure", note: "Planning of page hierarchy and content sections beyond a small brochure site.",
+    levels: { starter: null, business: "More extensive content structure", premium: "More extensive content structure" } },
+  { id: "copy", label: "AI-assisted draft copy", note: "Draft copy prepared with AI assistance for you to review and approve. Specialist copywriting is not included.", levels: same("AI-assisted draft copy") },
+  { id: "imagery", label: "Licensed imagery", note: "Imagery that is appropriately licensed, or supplied by you.", levels: same("Appropriately licensed imagery") },
+  { id: "forms", label: "Forms", note: "A contact form on every package; Business and Premium add advanced forms within the documented scope.",
+    levels: { starter: "Contact form", business: "Contact form and advanced forms within documented scope", premium: "Contact form and advanced forms within documented scope" } },
+  { id: "integrations", label: "Integrations", note: "Connections to third-party services named in your written scope; the third party's own fees are separate.",
+    levels: { starter: null, business: "Defined integrations", premium: "Defined integrations" } },
+  { id: "seo", label: "Technical SEO", note: "Titles, descriptions, sitemap and crawlability (Basic), with broader page-level work at Expanded and Enhanced. Rankings are never guaranteed.",
+    levels: { starter: "Basic technical SEO", business: "Expanded technical SEO", premium: "Enhanced technical SEO" } },
+  { id: "analytics", label: "Analytics", note: "Basic analytics configuration in an account owned by you.", levels: same("Basic analytics configuration") },
+  { id: "performance", label: "Performance optimization", note: "Dedicated optimization of load speed and layout stability.",
+    levels: { starter: null, business: null, premium: "Performance optimization" } },
+  { id: "revisions", label: "Revision rounds", note: "Counted rounds of changes during the project; every round is recorded.",
+    levels: { starter: `${REVISIONS.starter} revision rounds`, business: `${REVISIONS.business} revision rounds`, premium: `${REVISIONS.premium} revision rounds` } },
+  { id: "approval", label: "Customer review and approval", note: "You review and approve milestones before work moves on.", levels: same("Customer review and approval") },
+  { id: "launch", label: "Launch and handoff", note: "Deployment and handoff on every package, with enhanced onboarding (Business and Premium) and expanded project management and launch support (Premium).",
+    levels: { starter: "Deployment and handoff", business: "Deployment, enhanced onboarding and handoff", premium: "Deployment, enhanced onboarding and handoff, with expanded project management and launch support" } },
+] satisfies PackageFeature[]);
+
+const includesFor = (id: PackageId) => PACKAGE_FEATURES.flatMap((f) => (f.levels[id] ? [f.levels[id]!] : []));
+
 export const PACKAGES: Readonly<Record<PackageId, PackageDef>> = Object.freeze({
-  starter: {
-    id: "starter", name: "Starter", basePriceCents: 99_900, priceIsFloor: false, pageLimit: 5, revisionRounds: 2,
-    includes: ["Up to 5 pages", "Responsive website", "Basic technical SEO", "Contact form", "Basic analytics configuration",
-      "AI-assisted draft copy", "Appropriately licensed imagery", "2 revision rounds", "Customer review and approval", "Deployment and handoff"],
-  },
-  business: {
-    id: "business", name: "Business", basePriceCents: 249_900, priceIsFloor: false, pageLimit: 12, revisionRounds: 3,
-    includes: ["Up to 12 pages", "Expanded design customization", "More extensive content structure", "Advanced forms within documented scope",
-      "Defined integrations", "Expanded technical SEO", "3 revision rounds", "Enhanced onboarding and handoff"],
-  },
-  premium: {
-    id: "premium", name: "Premium", basePriceCents: 499_900, priceIsFloor: true, pageLimit: 25, revisionRounds: 4,
-    includes: ["Up to 25 pages within approved scope", "Bespoke premium design", "Advanced layouts and interactions", "Defined integrations",
-      "Enhanced technical SEO", "Performance optimization", "4 revision rounds", "Expanded project management and launch support"],
-  },
+  starter: { id: "starter", name: "Starter", basePriceCents: 99_900, priceIsFloor: false, pageLimit: PAGE_LIMIT.starter, revisionRounds: REVISIONS.starter, includes: includesFor("starter") },
+  business: { id: "business", name: "Business", basePriceCents: 249_900, priceIsFloor: false, pageLimit: PAGE_LIMIT.business, revisionRounds: REVISIONS.business, includes: includesFor("business") },
+  premium: { id: "premium", name: "Premium", basePriceCents: 499_900, priceIsFloor: true, pageLimit: PAGE_LIMIT.premium, revisionRounds: REVISIONS.premium, includes: includesFor("premium") },
 });
+
+/** Items a package adds or upgrades compared with the tier below it (for "Everything in Business, plus" summaries). */
+export function packageAdditions(id: PackageId): string[] {
+  const i = PKG_IDS.indexOf(id);
+  if (i <= 0) return [...PACKAGES[id].includes];
+  const below = PKG_IDS[i - 1];
+  return PACKAGE_FEATURES.flatMap((f) => (f.levels[id] && f.levels[id] !== f.levels[below] ? [f.levels[id]!] : []));
+}
 
 export interface MaintenanceDef {
   id: MaintenanceId;
@@ -143,7 +187,7 @@ export function milestoneSplit(totalCents: number): PriceBreakdown["installments
 export const APPROVED_SERVICES = [
   "Website design and development", "Website redesign", "E-commerce development", "Custom web applications",
   "Customer and administrative portals", "Booking and scheduling systems", "Payment and subscription integrations",
-  "AI chatbots and workflow automation", "Hosting and maintenance", "API integrations", "Technical SEO",
+  "AI chatbots and workflow automation", "AI receptionist voice agents (inbound and outbound calls)", "Hosting and maintenance", "API integrations", "Technical SEO",
   "Search Console and analytics setup", "Google Business Profile setup assistance for eligible businesses",
   "Conversion-focused landing pages", "Email automation infrastructure", "CRM integrations", "Website performance optimization",
 ] as const;

@@ -142,6 +142,7 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/portfolio/:id/screenshot", fields: () => ({ kind: "mobile", captured_on: day(-1), screenshot: png("mobile.png") }) },
     { key: "POST /staff/portfolio/:id/verify-link", fields: () => ({ verified_on: day(-1) }) },
     { key: "POST /staff/portfolio/:id/relationship", fields: () => ({ relationship: "Website built by the Crestmont Founder for a related business", evidence: "Founder authorization letter on file, dated 2026-10-26" }) },
+    { key: "POST /staff/portfolio/:id/demo", fields: () => ({ demo_url: "", demo_status: "none", demo_revision: "matrix-site@abc1234", demo_verified_on: "", poster_desktop_asset: "/assets/portfolio/matrix-desktop.webp", poster_mobile_asset: "" }) },
     { key: "POST /staff/portfolio/:id/publish" },
     { key: "POST /staff/portfolio/:id/move", fields: () => ({ dir: "up" }) },
     { key: "POST /staff/portfolio/:id/testimonials", fields: () => ({ author: "B. Person", body: "Clear, careful and on time.", evidence: "Email from author dated 2026-10-26 granting permission" }) },

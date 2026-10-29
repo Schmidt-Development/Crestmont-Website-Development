@@ -15,6 +15,10 @@ export interface PortfolioProject {
   verified_features_json: string; technology_summary: string | null; desktop_screenshot_file_id: string | null; mobile_screenshot_file_id: string | null;
   screenshot_captured_at: string | null; link_verified_at: string | null; link_verified_by: string | null; position: number; published: number; updated_at: string;
   relationship_documented_at: string | null; relationship_documented_by: string | null; relationship_evidence: string | null; published_at: string | null;
+  /** Isolated demonstration deployment (never the production site) — migration 0038. */
+  demo_url: string | null; demo_status: "none" | "ready" | "unavailable"; demo_verified_at: string | null; demo_verified_by: string | null; demo_revision: string | null;
+  /** Genuine screenshots bundled under /assets/portfolio/ (survive preview database rebuilds; no R2 needed). */
+  poster_desktop_asset: string | null; poster_mobile_asset: string | null; poster_tablet_asset: string | null;
 }
 export interface Testimonial { id: string; portfolio_project_id: string | null; author_name: string; body: string; verification_evidence: string; verified_by: string; published: number; created_at: string | null }
 
@@ -38,11 +42,79 @@ export const features = (p: Pick<PortfolioProject, "verified_features_json">): s
 /** Reasons a project cannot be published right now (empty = publishable). */
 export function publishBlockers(p: PortfolioProject): string[] {
   const out: string[] = [];
-  if (!p.desktop_screenshot_file_id) out.push("A genuine desktop screenshot of the live site has not been uploaded.");
-  if (!p.mobile_screenshot_file_id) out.push("A genuine mobile screenshot of the live site has not been uploaded.");
+  if (!p.desktop_screenshot_file_id && !p.poster_desktop_asset) out.push("A genuine desktop screenshot of the live site has not been uploaded.");
+  if (!p.mobile_screenshot_file_id && !p.poster_mobile_asset) out.push("A genuine mobile screenshot of the live site has not been uploaded.");
   if (!p.relationship_documented_at || /pending/i.test(p.relationship)) out.push("Crestmont's relationship to this business has not been documented.");
   if (!p.link_verified_at) out.push("The live link has not been verified.");
   return out;
+}
+
+// ── Interactive demos (isolated deployments only) ──
+const ORIGIN_RE = /^https:\/\/[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:\d{1,5})?$/;
+export const POSTER_RE = /^\/assets\/portfolio\/[a-z0-9]+(-[a-z0-9]+)*\.webp$/;
+
+/** Approved demo origins from configuration (PORTFOLIO_DEMO_ORIGINS, comma/space separated). Anything that is
+ *  not a bare https origin is ignored, so a misconfiguration can never widen what the site will frame. */
+const LOCAL_RE = /^http:\/\/(localhost|127\.0\.0\.1)(:\d{1,5})?$/;
+export function approvedDemoOrigins(config: string | undefined | null, opts: { allowLocal?: boolean } = {}): Set<string> {
+  return new Set((config ?? "").split(/[\s,]+/).map((o) => o.trim().toLowerCase()).filter((o) => ORIGIN_RE.test(o) || (opts.allowLocal === true && LOCAL_RE.test(o))));
+}
+/** Development only: local demo servers on http://localhost / 127.0.0.1 may be approved. Never staging/production. */
+export const allowLocalDemos = (environment: string | undefined) => environment === "development";
+const originOf = (u: string | null | undefined): string | null => { try { const x = new URL(u ?? ""); const o = x.origin.toLowerCase(); return x.protocol === "https:" || LOCAL_RE.test(o) ? o : null; } catch { return null; } };
+
+export type DemoState = { kind: "embed"; url: string; origin: string } | { kind: "unavailable"; reason: string } | { kind: "none" };
+/** Whether a project's demo may be embedded right now: ready, verified, on an approved origin, not production. */
+export function demoState(p: Pick<PortfolioProject, "demo_url" | "demo_status" | "demo_verified_at" | "live_url">, approved: Set<string>): DemoState {
+  if (p.demo_status === "none" || !p.demo_url) return { kind: "none" };
+  const origin = originOf(p.demo_url);
+  if (p.demo_status === "unavailable") return { kind: "unavailable", reason: "The interactive demo is temporarily unavailable." };
+  if (!origin || !approved.has(origin) || origin === originOf(p.live_url)) return { kind: "unavailable", reason: "The interactive demo is not available in this environment." };
+  if (!p.demo_verified_at) return { kind: "unavailable", reason: "The interactive demo has not been verified yet." };
+  return { kind: "embed", url: p.demo_url, origin };
+}
+
+export interface DemoInput { demo_url: string; demo_status: string; demo_revision: string; verified_on: string; poster_desktop_asset: string; poster_mobile_asset: string; poster_tablet_asset?: string }
+export function validateDemo(input: DemoInput, liveUrl: string, approved: Set<string>): { values: { demo_url: string | null; demo_status: "none" | "ready" | "unavailable"; demo_revision: string | null; verified_on: string | null; poster_desktop_asset: string | null; poster_mobile_asset: string | null; poster_tablet_asset: string | null }; issues: string[] } {
+  const t = (x: string | undefined) => (x ?? "").trim();
+  const issues: string[] = [];
+  const status = t(input.demo_status) || "none";
+  if (!["none", "ready", "unavailable"].includes(status)) issues.push("Demo status must be none, ready or unavailable");
+  const url = t(input.demo_url) || null;
+  if (url) {
+    const origin = originOf(url);
+    if (!origin) issues.push("Demo link must be a full https:// address");
+    else if (!approved.has(origin)) issues.push(`The demo origin ${origin} is not on the approved list (PORTFOLIO_DEMO_ORIGINS)`);
+    else if (origin === originOf(liveUrl)) issues.push("The demo must be a separate demonstration deployment, never the production website");
+  }
+  if (status !== "none" && !url) issues.push("A demo link is required unless the status is none");
+  const revision = t(input.demo_revision) || null;
+  if (revision && (revision.length > 120 || !/^[A-Za-z0-9._\/@-]+$/.test(revision))) issues.push("Source revision must look like repository@commit (letters, numbers, . _ / @ -)");
+  const verified = t(input.verified_on) || null;
+  if (verified && (!/^\d{4}-\d{2}-\d{2}$/.test(verified) || Number.isNaN(Date.parse(verified)) || Date.parse(verified) > Date.now() + 86_400_000)) issues.push("Demo verification date must be a valid date, not in the future");
+  if (status === "ready" && !verified) issues.push("Record the date the demo was verified before marking it ready");
+  const pd = t(input.poster_desktop_asset) || null, pm = t(input.poster_mobile_asset) || null, pt = t(input.poster_tablet_asset) || null;
+  if ([pd, pm, pt].some((x) => x && !POSTER_RE.test(x))) issues.push("Bundled posters must be /assets/portfolio/<name>.webp");
+  return { values: { demo_url: url, demo_status: status as "none" | "ready" | "unavailable", demo_revision: revision, verified_on: verified, poster_desktop_asset: pd, poster_mobile_asset: pm, poster_tablet_asset: pt }, issues };
+}
+
+export async function setDemo(db: Db, actor: Actor, id: string, input: DemoInput, approved: Set<string>, ip?: string | null) {
+  guard(actor);
+  const p = await getById(db, id);
+  if (!p) throw new PortfolioError(404, "Project not found");
+  const { values: v, issues } = validateDemo(input, p.live_url, approved);
+  if (issues.length) throw new PortfolioError(422, "Please fix the demo details", issues);
+  const urlChanged = v.demo_url !== p.demo_url;
+  // A changed demo link must be verified again: keep the previous verification only when the link is unchanged
+  // and no new date was entered.
+  const verifiedAt = v.verified_on ? `${v.verified_on}T00:00:00.000Z` : urlChanged ? null : p.demo_verified_at;
+  const status = v.demo_status === "ready" && !verifiedAt ? "unavailable" : v.demo_status;
+  await db.batch([
+    db.prepare(`UPDATE portfolio_projects SET demo_url = ?, demo_status = ?, demo_revision = ?, demo_verified_at = ?, demo_verified_by = CASE WHEN ? THEN ? ELSE demo_verified_by END,
+      poster_desktop_asset = ?, poster_mobile_asset = ?, poster_tablet_asset = ?, updated_at = ? WHERE id = ?`)
+      .bind(v.demo_url, status, v.demo_revision, verifiedAt, v.verified_on ? 1 : 0, actor.userId ?? null, v.poster_desktop_asset, v.poster_mobile_asset, v.poster_tablet_asset, nowIso(), id),
+    auditStmt(db, actor, "portfolio.demo_updated", id, { demoUrl: v.demo_url, status, revision: v.demo_revision, verifiedOn: v.verified_on, posters: [v.poster_desktop_asset, v.poster_tablet_asset, v.poster_mobile_asset] }, ip),
+  ]);
 }
 
 export async function listPublished(db: Db): Promise<PortfolioProject[]> {
