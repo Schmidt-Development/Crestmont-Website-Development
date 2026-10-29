@@ -26,6 +26,11 @@ import { effectivePrice } from "../services/pricing-approvals.ts";
 import { loadTaxConfig, taxLabel } from "../services/tax.ts";
 import { computeTax, type TaxResult } from "../domain/tax.ts";
 import { usd } from "../services/finance-documents.ts";
+import { businessDate } from "../lib/business-time.ts";
+import { requireVerifiedForPayment } from "./verify-gate.ts";
+import { effectivePrices } from "../services/pricing-approvals.ts";
+import { staffCanSeeProject } from "../services/projects.ts";
+import { disabledOwnerFlag } from "../services/offboarding.ts";
 
 /** LEGAL-005: estimated tax per quote line under the current configuration (null when tax is not configured). */
 async function quoteTax(ctx: AppContext, packageId: string | null, lines: QuoteLine[]): Promise<TaxResult | null> {
@@ -73,7 +78,7 @@ ${total ? html`<div class="grid grid-3">${col("Source", a.source)}${col("Medium"
 const safeBack = (s: string, fallback: string) => (/^\/staff\/[A-Za-z0-9/_.?=&-]*$/.test(s) && !s.startsWith("//") ? s : fallback);
 
 const pct = (r: number | null) => (r === null ? "—" : `${(r * 100).toFixed(1)}%`);
-const today = (ctx: AppContext) => ctx.now().toISOString().slice(0, 10);
+const today = (ctx: AppContext) => businessDate(ctx.now()); // CREST-GAP-094: Eastern calendar date
 
 function leadFilter(ctx: AppContext): crm.LeadFilter {
   const p = ctx.url.searchParams;
@@ -189,7 +194,7 @@ ${actionForm(ctx, "/staff/crm/duplicates/dismiss", "Not a duplicate", { variant:
   ], { caption: "Possible duplicate leads" })}</section>` : html``;
   const body = html`${pageHead(lead.contact_name, html`${badge(lead.stage)}${can(actor, "quote.write") && writable && !lead.merged_into_lead_id ? linkButton("New quote", `/staff/quotes/new?lead=${id}`, "primary", "sm") : ""}`, lead.company_name ?? "Lead")}
 ${lead.merged_into_lead_id ? alert("info", html`This lead was merged into <a href="/staff/crm/leads/${lead.merged_into_lead_id}">lead ${lead.merged_into_lead_id}</a>. Its history moved there; this record is archived and kept for reference.`) : ""}
-${formErrors(errors)}${dupCard}
+${formErrors(errors)}${dupCard}${await (async () => { const flag = await disabledOwnerFlag(ctx.db, ["lead"], id); return (flag ? alert("warn", html`<strong>Owner disabled.</strong> ${flag.name}'s account was disabled; ${flag.status === "ended" ? "their assignment was ended, so this needs a new owner." : "this is waiting in the offboarding queue for a new owner."}`) : ""); })()}
 <div class="grid grid-2">
 <section class="card stack"><h2 style="font-size:1.2rem">Contact &amp; company</h2>
 ${dl([["Name", lead.contact_name], ["Email", lead.contact_email ? html`<a href="mailto:${lead.contact_email}">${lead.contact_email}</a>` : "—"], ["Phone", lead.contact_phone], ["Company", lead.company_name],
@@ -262,11 +267,16 @@ async function leadAction(ctx: AppContext, id: string, fn: (lead: crm.LeadRow) =
 async function duplicatesPage(ctx: AppContext) {
   requireStaff(ctx, "crm.access");
   const actor = ctx.actor!;
-  const clusters = await dedupe.findDuplicateClusters(ctx.db, actor);
+  const pageNo = parseInt(ctx.url.searchParams.get("page") ?? "1", 10) || 1;
+  const result = await dedupe.findDuplicateClusters(ctx.db, actor, { page: pageNo });
+  const clusters = result.clusters;
+  const offset = (result.page - 1) * dedupe.CLUSTERS_PER_PAGE;
   const canWrite = (l: dedupe.DupLead) => can(actor, "lead.write_all") || (can(actor, "lead.write_assigned") && l.owner_user_id === actor.userId);
   return staffPage(ctx, "Duplicate leads", html`${pageHead("Duplicate leads", linkButton("Pipeline", "/staff/crm", "ghost", "sm"), can(actor, "lead.read_all") ? "All leads" : "Leads assigned to you")}
 <p class="muted">Leads are grouped when their contacts share a normalized email address, a phone number (digits only, US country code ignored) or the same name at the same company. The suggested survivor is the most advanced lead (then the oldest). Merging is audited and cannot silently drop data: activities, quotes, orders and calls move to the survivor, blank contact fields are filled, and the merged lead is archived with a link to the survivor.</p>
-${clusters.length ? clusters.map((c, i) => {
+${result.truncated ? alert("warn", html`More than ${dedupe.MAX_DUPLICATE_ROWS} matching lead keys were found; groups are built from the first ${dedupe.MAX_DUPLICATE_ROWS}. Merge or dismiss these, then reload to see the rest.`) : ""}
+${result.totalClusters > clusters.length ? html`<p class="faint" data-showing>Showing groups ${offset + (clusters.length ? 1 : 0)}–${offset + clusters.length} of ${result.totalClusters}.</p>` : ""}
+${clusters.length ? clusters.map((c, j) => { const i = offset + j;
     const survivor = c.leads.find((l) => l.id === c.survivorId)!;
     return html`<section class="card stack" data-cluster="${i + 1}"><h2 style="font-size:1.2rem">${survivor.contact_name} · ${c.leads.length} leads <span class="faint">matched on ${c.reasons.map((r) => label(r)).join(", ")}</span></h2>
 ${table(c.leads, [
@@ -276,7 +286,8 @@ ${table(c.leads, [
       { header: "", cell: (l) => l.id === c.survivorId || !canWrite(l) || !canWrite(survivor) ? "" : html`${actionForm(ctx, `/staff/crm/leads/${l.id}/merge`, "Merge into survivor", { hidden: { into: c.survivorId, back: "/staff/crm/duplicates" }, confirm: `Merge ${l.contact_name} (${l.id}) into ${c.survivorId}?` })}
 ${actionForm(ctx, "/staff/crm/duplicates/dismiss", "Not a duplicate", { variant: "ghost", hidden: { a: l.id, b: c.survivorId, back: "/staff/crm/duplicates" } })}` },
     ], { caption: `Duplicate group ${i + 1}` })}<p class="faint">To keep a different lead, open it and merge the others into it from its page.</p></section>`;
-  }) : emptyState("No duplicates found", "No two visible leads share an email, phone number, or name and company.")}`);
+  }) : emptyState(result.page > 1 ? "No more duplicate groups" : "No duplicates found", "No two visible leads share an email, phone number, or name and company.")}
+${result.totalClusters > dedupe.CLUSTERS_PER_PAGE || result.page > 1 ? pagination(ctx, result.page, result.hasNext) : ""}`);
 }
 
 // ── contacts / customers ──
@@ -313,19 +324,40 @@ ${table(rows.slice(0, limit), [
     { empty: emptyState("No customers yet", "Customer organizations are created when someone registers or buys.") })}${pagination(ctx, page, rows.length > limit)}`);
 }
 
+/** Prev/next links and "showing N of M" for one customer sub-table; other sections keep their page (CREST-GAP-071). */
+function sectionPager(ctx: AppContext, key: crm.CustomerSection, s: crm.SectionPage<unknown>, noun: string): SafeHtml {
+  if (s.total <= s.rows.length && s.page === 1) return html``;
+  const href = (p: number) => { const u = new URL(ctx.url); u.searchParams.set(`${key}_page`, String(p)); return `${u.pathname}${u.search}#${key}`; };
+  const from = (s.page - 1) * crm.CUSTOMER_SECTION_SIZE + (s.rows.length ? 1 : 0), to = (s.page - 1) * crm.CUSTOMER_SECTION_SIZE + s.rows.length;
+  return html`<nav class="pagination" aria-label="${noun} pages" data-showing><span class="faint">Showing ${from}–${to} of ${s.total} ${noun}</span>${s.page > 1 ? html`<a class="btn btn--ghost btn--sm" href="${href(s.page - 1)}">Previous</a>` : ""}${s.hasNext ? html`<a class="btn btn--ghost btn--sm" href="${href(s.page + 1)}">Next</a>` : ""}</nav>`;
+}
+
 async function customerPage(ctx: AppContext, id: string) {
   requireStaff(ctx, "customers.read");
-  const d = await crm.customerDetail(ctx.db, id);
-  const leadLink = (lid: string) => (can(ctx.actor!, "crm.access") ? html`<a href="/staff/crm/leads/${lid}">${lid}</a>` : html`${lid}`);
+  const actor = ctx.actor!, me = ctx.user!.id;
+  const pages = Object.fromEntries(crm.CUSTOMER_SECTIONS.map((k) => [k, parseInt(ctx.url.searchParams.get(`${k}_page`) ?? "1", 10) || 1]));
+  const d = await crm.customerDetail(ctx.db, id, pages);
+  // CREST-GAP-070: staff visibility of customer records stays broad by Founder decision, but every view is audited.
+  await audit(ctx.db, { actorUserId: me, action: "customer.viewed", subjectType: "organization", subjectId: d.org.id, organizationId: d.org.id, ip: ctx.ip });
+  // CREST-GAP-079: link only what this viewer can open. Leads: crm.access plus lead visibility (all, or owned).
+  const canLead = (owner: string | null | undefined) => can(actor, "crm.access") && (can(actor, "lead.read_all") || (can(actor, "lead.read_assigned") && owner === me));
+  const leadIds = [...new Set([...d.leads.rows.map((l) => l.id), ...d.orders.rows.map((o) => o.lead_id).filter((x): x is string => !!x)])];
+  const leadOwners = new Map<string, string | null>();
+  if (leadIds.length) for (const l of (await ctx.db.prepare(`SELECT id, owner_user_id FROM leads WHERE id IN (${leadIds.map(() => "?").join(",")})`).bind(...leadIds).all<{ id: string; owner_user_id: string | null }>()).results) leadOwners.set(l.id, l.owner_user_id);
+  const leadLink = (lid: string) => (canLead(leadOwners.get(lid)) ? html`<a href="/staff/crm/leads/${lid}">${lid}</a>` : html`${lid}`);
+  // Projects: delivery.access plus project visibility (read_all, or PM / assigned).
+  const visibleProjects = new Set<string>();
+  if (can(actor, "delivery.access")) for (const p of d.projects.rows) if (await staffCanSeeProject(ctx.db, actor, me, p.id)) visibleProjects.add(p.id);
+  const projectCell = (p: { id: string; name: string }) => (visibleProjects.has(p.id) ? html`<a href="/staff/projects/${p.id}">${p.name}</a>` : html`${p.name}`);
   return staffPage(ctx, d.org.name, html`${pageHead(d.org.name, linkButton("General conversation", `/staff/conversations/${d.org.id}`, "secondary", "sm"), "Customer")}
 ${dl([["Customer since", formatDate(d.org.created_at)], ["Stripe customer", d.org.stripe_customer_id ? "Linked" : "Not linked yet"], ["Members", d.members.map((m) => `${m.display_name} <${m.email}> (${label(m.role_id)})`).join(", ") || "—"]])}
 <div class="grid grid-2">
-<section class="card"><h2 style="font-size:1.2rem">Orders</h2>${table(d.orders, [{ header: "Order", cell: (o) => o.id }, { header: "Kind", cell: (o) => label(o.kind) }, { header: "Status", cell: (o) => badge(o.status) }, { header: "Total", cell: (o) => formatCents(o.total_cents), numeric: true }, { header: "Lead", cell: (o) => (o.lead_id ? leadLink(o.lead_id) : "—") }], { empty: html`<p class="muted">No orders.</p>` })}</section>
-<section class="card"><h2 style="font-size:1.2rem">Invoices</h2>${table(d.invoices, [{ header: "Invoice", cell: (i) => i.description ?? i.id }, { header: "Status", cell: (i) => badge(i.status) }, { header: "Amount", cell: (i) => formatCents(i.amount_cents), numeric: true }, { header: "Issued", cell: (i) => formatDate(i.created_at) }], { empty: html`<p class="muted">No invoices.</p>` })}</section>
-<section class="card"><h2 style="font-size:1.2rem">Projects</h2>${table(d.projects, [{ header: "Project", cell: (p) => html`<a href="/staff/projects/${p.id}">${p.name}</a>` }, { header: "Status", cell: (p) => badge(p.status) }], { empty: html`<p class="muted">No projects.</p>` })}</section>
-<section class="card"><h2 style="font-size:1.2rem">Subscriptions</h2>${table(d.subscriptions, [{ header: "Plan", cell: (s) => label(s.product_id) }, { header: "Status", cell: (s) => badge(s.status) }, { header: "Renews", cell: (s) => formatDate(s.current_period_end) }], { empty: html`<p class="muted">No maintenance plans.</p>` })}</section>
-<section class="card"><h2 style="font-size:1.2rem">Support tickets</h2>${table(d.tickets, [{ header: "Subject", cell: (t) => t.subject }, { header: "Status", cell: (t) => badge(t.status) }, { header: "Opened", cell: (t) => formatDate(t.created_at) }], { empty: html`<p class="muted">No tickets.</p>` })}</section>
-<section class="card"><h2 style="font-size:1.2rem">Leads</h2>${table(d.leads, [{ header: "Lead", cell: (l) => leadLink(l.id) }, { header: "Stage", cell: (l) => badge(l.stage) }, { header: "Source", cell: (l) => label(l.source) }, { header: "Created", cell: (l) => formatDate(l.created_at) }], { empty: html`<p class="muted">No linked leads.</p>` })}</section>
+<section class="card" id="orders"><h2 style="font-size:1.2rem">Orders</h2>${table(d.orders.rows, [{ header: "Order", cell: (o) => o.id }, { header: "Kind", cell: (o) => label(o.kind) }, { header: "Status", cell: (o) => badge(o.status) }, { header: "Total", cell: (o) => formatCents(o.total_cents), numeric: true }, { header: "Lead", cell: (o) => (o.lead_id ? leadLink(o.lead_id) : "—") }], { empty: html`<p class="muted">No orders.</p>` })}${sectionPager(ctx, "orders", d.orders, "orders")}</section>
+<section class="card" id="invoices"><h2 style="font-size:1.2rem">Invoices</h2>${table(d.invoices.rows, [{ header: "Invoice", cell: (i) => i.description ?? i.id }, { header: "Status", cell: (i) => badge(i.status) }, { header: "Amount", cell: (i) => formatCents(i.amount_cents), numeric: true }, { header: "Issued", cell: (i) => formatDate(i.created_at) }], { empty: html`<p class="muted">No invoices.</p>` })}${sectionPager(ctx, "invoices", d.invoices, "invoices")}</section>
+<section class="card" id="projects"><h2 style="font-size:1.2rem">Projects</h2>${table(d.projects.rows, [{ header: "Project", cell: projectCell }, { header: "Status", cell: (p) => badge(p.status) }], { empty: html`<p class="muted">No projects.</p>` })}${sectionPager(ctx, "projects", d.projects, "projects")}</section>
+<section class="card" id="subscriptions"><h2 style="font-size:1.2rem">Subscriptions</h2>${table(d.subscriptions.rows, [{ header: "Plan", cell: (s) => label(s.product_id) }, { header: "Status", cell: (s) => badge(s.status) }, { header: "Renews", cell: (s) => formatDate(s.current_period_end) }], { empty: html`<p class="muted">No maintenance plans.</p>` })}${sectionPager(ctx, "subscriptions", d.subscriptions, "plans")}</section>
+<section class="card" id="tickets"><h2 style="font-size:1.2rem">Support tickets</h2>${table(d.tickets.rows, [{ header: "Subject", cell: (t) => t.subject }, { header: "Status", cell: (t) => badge(t.status) }, { header: "Opened", cell: (t) => formatDate(t.created_at) }], { empty: html`<p class="muted">No tickets.</p>` })}${sectionPager(ctx, "tickets", d.tickets, "tickets")}</section>
+<section class="card" id="leads"><h2 style="font-size:1.2rem">Leads</h2>${table(d.leads.rows, [{ header: "Lead", cell: (l) => leadLink(l.id) }, { header: "Stage", cell: (l) => badge(l.stage) }, { header: "Source", cell: (l) => label(l.source) }, { header: "Created", cell: (l) => formatDate(l.created_at) }], { empty: html`<p class="muted">No linked leads.</p>` })}${sectionPager(ctx, "leads", d.leads, "leads")}</section>
 </div>`);
 }
 
@@ -473,6 +505,10 @@ async function proposalPage(ctx: AppContext, token: string, errors: string[] = [
 <div class="row">${linkButton("Sign in", `/login?next=${encodeURIComponent(self)}`, "primary")}${linkButton("Create account", "/register", "secondary")}</div><p class="faint">After creating an account, confirm your email, sign in, and return to this link.</p></div>`;
   else if (!signedInMatch) acceptBlock = alert("warn", html`You are signed in as ${ctx.user.email}, but this proposal was sent to a different address. <form method="post" action="/logout" style="display:inline">${csrf(ctx)}<button class="btn btn--ghost btn--sm" type="submit">Sign out</button></form> and sign in with the address the proposal was sent to.`);
   else if (!ctx.user.emailVerified) acceptBlock = alert("warn", "Confirm your email address first — check your inbox for the confirmation link — then return to this page.");
+  else if (quotes.isPackageQuote(p.version)) acceptBlock = html`<form method="post" action="${self}/accept" class="card card--gold stack">${csrf(ctx)}<h2 style="font-size:1.3rem">Accept this proposal</h2>
+${checkbox("agree", "I accept this proposal, its scope and payment schedule, the Development Agreement, the Refund Policy, the Data Processing Addendum and the Terms of Service.", { required: true })}
+<p class="faint"><a href="/legal/development-agreement">Development agreement</a> · <a href="/legal/refunds">Refund policy</a> · <a href="/legal/data-processing">Data processing addendum</a> · <a href="/legal/terms">Terms</a></p>
+<div class="form-actions">${button("Accept and continue to payment")}</div></form>`;
   else acceptBlock = html`<form method="post" action="${self}/accept" class="card card--gold stack">${csrf(ctx)}<h2 style="font-size:1.3rem">Accept this proposal</h2>
 ${checkbox("agree", "I accept this proposal, its scope and payment schedule, the Custom Development Agreement, the Data Processing Addendum and the Terms of Service.", { required: true })}
 <p class="faint"><a href="/legal/custom-development-agreement">Custom development agreement</a> · <a href="/legal/data-processing">Data processing addendum</a> · <a href="/legal/terms">Terms</a> · <a href="/legal/refunds">Refund policy</a></p>
@@ -495,8 +531,8 @@ async function acceptProposalRoute(ctx: AppContext, token: string) {
   if (!ctx.user.emailVerified) return proposalPage(ctx, token, ["Confirm your email address before accepting."], 403);
   const f = await ctx.form();
   if (!f.get("agree")) return proposalPage(ctx, token, ["Tick the box to accept the proposal and agreements."], 422);
+  // CREST-GAP-032: acceptance, order, invoice and agreement records commit together inside acceptProposal.
   const order = await quotes.acceptProposal(ctx, p, { id: ctx.user.id, email: ctx.user.email }, org.organizationId);
-  await recordAcceptance(ctx, { userId: ctx.user.id, organizationId: org.organizationId, context: "quote_acceptance", contextId: p.version.id });
   return redirect(ctx, `/portal/billing/invoices/${order.invoiceId}`, { kind: "success", text: "Proposal accepted. Pay the first invoice to start your project." });
 }
 
@@ -534,11 +570,13 @@ async function checkoutPost(ctx: AppContext, packageId: string) {
   if (!pkg) throw new HttpError(404, "That package does not exist.");
   const org = requireCustomerOrg(ctx);
   if (!can(ctx.actor!, "customer.billing", { organizationId: org.organizationId })) throw new HttpError(403, "Only an account administrator can make purchases for this organization.");
+  const unverified = requireVerifiedForPayment(ctx); // CREST-GAP-031
+  if (unverified) return unverified;
   if (!ctx.payments.configured) return checkoutPage(ctx, packageId, [`${NOT_CONFIGURED} No order was created.`], 409);
   const f = await ctx.form();
   if (!f.get("terms")) return checkoutPage(ctx, packageId, ["You must accept the agreements to continue."], 422);
   // Any client-supplied price/amount fields are ignored: the order total comes from PACKAGES.
-  const res = await startPackageCheckout(ctx, { id: ctx.user!.id, email: ctx.user!.email }, org.organizationId, pkg.id);
+  const res = await startPackageCheckout(ctx, { id: ctx.user!.id, email: ctx.user!.email, name: ctx.user!.displayName }, org.organizationId, pkg.id);
   await recordAcceptance(ctx, { userId: ctx.user!.id, organizationId: org.organizationId, context: "package_checkout", contextId: res.orderId });
   return stripeRedirect(ctx, res.url);
 }
@@ -562,12 +600,23 @@ ${ctx.payments.configured ? html`<form method="post" action="/checkout/maintenan
       : html`<div class="card stack">${alert("warn", NOT_CONFIGURED)}<div class="row">${linkButton("Contact us", "/contact", "primary")}</div></div>`}</div></section>`));
   }
   if (!can(ctx.actor!, "customer.billing", { organizationId: org.organizationId })) throw new HttpError(403, "Only an account administrator can subscribe for this organization.");
+  const unverified = requireVerifiedForPayment(ctx); // CREST-GAP-031
+  if (unverified) return unverified;
   if (!ctx.payments.configured) throw new HttpError(409, NOT_CONFIGURED);
   const f = await ctx.form();
   if (!f.get("terms")) throw new HttpError(422, "You must accept the terms to subscribe.");
   const res = await startMaintenanceCheckout(ctx, { id: ctx.user!.id, email: ctx.user!.email }, org.organizationId, plan.id);
   await recordAcceptance(ctx, { userId: ctx.user!.id, organizationId: org.organizationId, context: "maintenance_checkout", contextId: plan.id });
   return stripeRedirect(ctx, res.url);
+}
+
+/** CREST-GAP-080: the AI qualification prompt quotes the Founder-approved effective prices, never hard-coded ones. */
+async function approvedPackagesLine(ctx: AppContext): Promise<string> {
+  const prices = await effectivePrices(ctx.db, ctx.now());
+  return (Object.keys(PACKAGES) as PackageId[]).map((id) => {
+    const p = PACKAGES[id];
+    return `${p.name} ${p.priceIsFloor ? "from " : ""}${formatCents(prices[`package:${id}`] ?? p.basePriceCents).replace(/\.00$/, "")} (${p.pageLimit} pages)`;
+  }).join(", ");
 }
 
 export function register(r: Router): void {
@@ -658,7 +707,7 @@ export function register(r: Router): void {
     if (!can(ctx.actor!, "lead.write_all") && lead.owner_user_id !== ctx.actor!.userId) throw new HttpError(403, "This lead is not assigned to you.");
     const prompt = [`Draft lead qualification notes for a website development agency.`, `Interest: ${lead.interest ?? "unknown"}`, `Source: ${lead.source}`, `Company: ${lead.company_name ?? "unknown"}`, `Website: ${lead.company_website ?? "none given"}`,
       `Message from the prospect:\n${lead.message ?? "(none)"}`, `Existing notes:\n${lead.qualification_notes ?? "(none)"}`,
-      `Approved packages: Starter $999 (5 pages), Business $2,499 (12 pages), Premium from $4,999 (25 pages); larger work is a custom quote. Summarize fit, likely package, open questions, and suggested next step. Do not quote new prices or promise dates.`].join("\n");
+      `Approved packages: ${await approvedPackagesLine(ctx)}; larger work is a custom quote. Summarize fit, likely package, open questions, and suggested next step. Do not quote new prices or promise dates.`].join("\n");
     const res = await requestAiDraft(ctx.db, aiProviderFromEnv(ctx.env), { workflow: "lead_qualification", inputRef: `lead:${lead.id}`, prompt, requestedBy: ctx.user!.id });
     return redirect(ctx, `/staff/crm/leads/${p.id}`, res.status === "failed" ? { kind: "error", text: res.error ?? "AI draft failed." } : res.status === "queued" ? { kind: "info", text: "Draft requested from the self-hosted model; reload this page in a minute to review it. Nothing has been sent." } : { kind: "success", text: "AI draft ready for review." });
   });
@@ -727,7 +776,11 @@ export function register(r: Router): void {
   r.post("/staff/quotes/:id/send", async (ctx, p) => {
     requireStaff(ctx, "quote.send");
     const res = await quotes.sendQuote(ctx, ctx.actor!, p.id);
-    return redirect(ctx, `/staff/quotes/${p.id}`, { kind: res.stageNote ? "info" : "success", text: `Proposal emailed.${res.stageNote ? " " + res.stageNote : ""}` });
+    // CREST-GAP-034: the flash says what really happened to the email, with the link to share by hand when it did not go.
+    const note = res.stageNote ? " " + res.stageNote : "";
+    if (res.delivery === "sent") return redirect(ctx, `/staff/quotes/${p.id}`, { kind: res.stageNote ? "info" : "success", text: `Proposal emailed.${note}` });
+    const why = res.delivery === "queued" ? "The email is queued and has not been delivered yet (Email operations shows its status)." : `The email was NOT delivered (${res.delivery}${res.deliveryError ? `: ${res.deliveryError.slice(0, 80)}` : ""}).`;
+    return redirect(ctx, `/staff/quotes/${p.id}`, { kind: "error", text: `Proposal link created. ${why} Share this link with the contact: ${res.url}${note}`.slice(0, 300) });
   });
 
   r.get("/q/:token", (ctx, p) => proposalPage(ctx, p.token));

@@ -122,7 +122,11 @@ test("[PORT-006] explorer without approved origins (or unverified demos) shows g
   const res = await client().get("/portfolio");
   const html = await res.text();
   assert.doesNotMatch(html, /data-demo-url=/);
-  assert.match(html, /The interactive demo is not available in this environment\./);
+  // Visitors are not told about environments (CREST-GAP-047): the poster is labelled "Screenshot" and the hint says what
+  // it shows; the internal reason stays in Staff → Portfolio.
+  assert.doesNotMatch(html, /in this environment/);
+  assert.match(html, /<span class="pfx__flag">Screenshot<\/span>/);
+  assert.match(html, /Screenshots of each website&#39;s demonstration build, which uses sample data\./);
   assert.match(html, /src="\/assets\/portfolio\/glassly-auto-glass-desktop\.webp"/);
   assert.doesNotMatch(res.headers.get("content-security-policy")!, /workers\.dev/);
 });

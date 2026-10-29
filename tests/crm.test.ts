@@ -9,6 +9,7 @@ import type { Env } from "../src/app/context.ts";
 import { MAINTENANCE_PLANS, type MaintenanceDef } from "../src/domain/catalog.ts";
 import { startMaintenanceCheckout } from "../src/services/billing.ts";
 import { buildContext } from "../src/app/app.ts";
+import { endOfBusinessDay } from "../src/lib/business-time.ts";
 
 class FakePayments implements PaymentsAdapter {
   readonly configured = true;
@@ -293,7 +294,8 @@ test("[CRM-004] stage transitions are validated, lost requires a reason, leads c
   assert.equal((await owner.c.post(`${base}/task`, { body: "Send case studies", due: "" })).status, 422);
   assert.equal((await owner.c.post(`${base}/task`, { body: "Send case studies", due: future(3) })).status, 303);
   const task = await one<{ id: string; due_at: string }>(t.db, `SELECT id, due_at FROM crm_activities WHERE lead_id = ? AND kind = 'task'`, leadId);
-  assert.ok(task.due_at.startsWith(future(3)));
+  // CREST-GAP-094: a due date means the end of that day in Eastern time.
+  assert.equal(task.due_at, endOfBusinessDay(future(3)));
   assert.equal((await owner.c.post(`${base}/tasks/${task.id}/complete`)).status, 303);
   assert.equal((await owner.c.post(`${base}/tasks/${task.id}/complete`)).status, 409);
   const page = await (await owner.c.get(base)).text();

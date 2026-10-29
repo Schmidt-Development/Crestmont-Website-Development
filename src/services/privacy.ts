@@ -15,6 +15,7 @@ import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { audit } from "./security.ts";
 import { revokeAllSessions } from "./auth.ts";
+import { holdBlockingUser } from "./legal-holds.ts";
 
 export class PrivacyError extends Error {
   readonly status: number;
@@ -46,7 +47,8 @@ export async function buildExport(db: Db, userId: string): Promise<Record<string
     orgs.push({
       organization: await db.prepare(`SELECT id, name, created_at FROM organizations WHERE id = ?`).bind(orgId).first(),
       projects: await q(`SELECT id, name, status, payment_schedule, live_url, created_at, updated_at FROM projects WHERE organization_id = ?`),
-      messages: await q(`SELECT m.id, m.project_id, m.body, m.created_at, u.display_name AS author FROM messages m JOIN users u ON u.id = m.author_user_id WHERE m.organization_id = ? ORDER BY m.created_at`),
+      // Staff internal notes (messages.internal = 1) are excluded, as everywhere else customers read messages.
+      messages: await q(`SELECT m.id, m.project_id, m.body, m.created_at, u.display_name AS author FROM messages m JOIN users u ON u.id = m.author_user_id WHERE m.organization_id = ? AND m.internal = 0 ORDER BY m.created_at`),
       tickets: await q(`SELECT id, subject, category, priority, status, created_at, resolved_at FROM tickets WHERE organization_id = ?`),
       // Internal staff notes (internal = 1) are excluded.
       ticketMessages: await q(`SELECT tm.ticket_id, tm.body, tm.created_at FROM ticket_messages tm JOIN tickets t ON t.id = tm.ticket_id WHERE t.organization_id = ? AND tm.internal = 0 ORDER BY tm.created_at`),
@@ -97,6 +99,12 @@ export async function processDeletion(db: Db, staffUserId: string, requestId: st
   }
   const owner = await db.prepare(`SELECT 1 FROM memberships WHERE user_id = ? AND role_id = 'owner'`).bind(r.user_id).first();
   if (owner) throw new PrivacyError("The Owner account cannot be anonymised through this workflow.", 403);
+  // Legal hold (F-25): anonymisation is irreversible, so it waits while data is preserved for a dispute or investigation.
+  const held = await holdBlockingUser(db, r.user_id);
+  if (held) {
+    await audit(db, { actorUserId: staffUserId, action: "privacy.deletion_blocked_by_hold", subjectType: "privacy_request", subjectId: requestId, details: { reason: held } });
+    throw new PrivacyError(`${held}, so this account cannot be anonymised yet. Leave the request open, or deny it with the legal reason.`, 409);
+  }
   const u = r.user_id;
   const anonEmail = `deleted+${u}@deleted.invalid`;
   await db.batch([

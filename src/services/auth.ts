@@ -7,7 +7,7 @@ import { hashPassword, verifyPassword, randomToken, hashToken, passwordProblems,
 import { MfaKeyError, assertCanStoreTotpSecret, isEncryptedTotpSecret, openTotpSecret, sealTotpSecret, sealWithKey, type MfaKeyEnv } from "../lib/totp-secrets.ts";
 import { STAFF_ROLES, type Actor, type Role } from "../domain/authz.ts";
 import type { SessionUser, Env } from "../app/context.ts";
-import { rateLimit, securityEvent, audit } from "./security.ts";
+import { rateLimit, peekRateLimit, securityEvent, audit } from "./security.ts";
 
 export const SESSION_TTL_STAFF_S = 12 * 3600;
 export const SESSION_TTL_CUSTOMER_S = 7 * 24 * 3600;
@@ -15,12 +15,39 @@ export const SESSION_TTL_CUSTOMER_S = 7 * 24 * 3600;
 export const SESSION_IDLE_STAFF_S = 2 * 3600;
 export const SESSION_IDLE_CUSTOMER_S = 24 * 3600;
 const LAST_SEEN_WRITE_INTERVAL_MS = 5 * 60e3;
-const LOCK_AFTER = 8;
-const LOCK_MINUTES = 15;
+// Abuse-resistant sign-in throttling (CREST-GAP-003). There is no account lockout: a hard lock let any anonymous
+// visitor who knew an address keep that account (including the Owner) locked indefinitely. Instead:
+//  - a device that has completed a sign-in for the account before ("known device" cookie) is never challenged or
+//    blocked by other people's failures; its own wrong guesses are limited per device;
+//  - after CHALLENGE_AFTER failures for an address in a 15-minute window, unknown devices must pass the Turnstile
+//    challenge to try that address. The decision is made before the password is looked at, and is identical for
+//    existing and unknown addresses, so it reveals neither a correct password nor whether an account exists;
+//  - each IP is limited per address and overall; only FAILED attempts count toward the per-address limits.
+export const CHALLENGE_AFTER = 5;
+const FAIL_WINDOW_S = 15 * 60;
+const PER_IP_ADDRESS_FAILS = 10;
+const PER_IP_ATTEMPTS = 30;
+const PER_DEVICE_FAILS = 10;
+export const DEVICE_COOKIE = "cm_device";
+export const DEVICE_MAX_AGE_S = 180 * 86400;
+export const CHALLENGE_MESSAGE = "For your security, complete the check below and sign in again.";
 
+/** Signals the route to show the bot challenge (status 403); carries no information about the password. */
 export class AuthError extends Error {
   readonly status: number;
   constructor(message: string, status = 400) { super(message); this.status = status; }
+}
+
+/** A wrong password (always the same message). `notifyEmail` is set once per window, when an existing account starts
+ *  requiring the challenge, so the route can tell the account holder. */
+export class LoginFailed extends AuthError {
+  readonly notifyUserId: string | null;
+  readonly notifyEmail: string | null;
+  constructor(notifyUserId: string | null, notifyEmail: string | null) { super("Email or password is incorrect.", 401); this.notifyUserId = notifyUserId; this.notifyEmail = notifyEmail; }
+}
+
+export class SignInChallengeRequired extends AuthError {
+  constructor() { super(CHALLENGE_MESSAGE, 403); }
 }
 
 /**
@@ -73,14 +100,16 @@ export async function registerCustomer(db: Db, input: { email: string; name: str
     db.prepare(`INSERT INTO auth_tokens (token_hash, user_id, purpose, expires_at, created_at) VALUES (?,?,'email_verify',?,?)`)
       .bind(await hashToken(token), userId, new Date(Date.now() + 48 * 3600e3).toISOString(), at),
   ]);
-  await linkContactsToUser(db, userId, email);
+  // CRM contacts are NOT linked here: until the address is verified nobody has proven they own it, and the link
+  // would expose that contact's CRM record (CREST-GAP-004). verifyEmail and acceptInvitation link them.
   await audit(db, { actorUserId: userId, action: "user.registered", subjectType: "user", subjectId: userId, organizationId: orgId, ip });
   return { userId, verifyToken: token, existed: false, organizationId: orgId };
 }
 
 /** Attach any CRM contacts with this email to the new user so their quotes/orders appear. */
 async function linkContactsToUser(db: Db, userId: string, email: string) {
-  await db.prepare(`UPDATE contacts SET user_id = ? WHERE email = ? AND user_id IS NULL`).bind(userId, email).run();
+  // lower(): lead emails may have been stored as typed (CREST-GAP-093).
+  await db.prepare(`UPDATE contacts SET user_id = ? WHERE lower(email) = lower(?) AND user_id IS NULL`).bind(userId, email).run();
 }
 
 export async function consumeToken(db: Db, token: string, purpose: "email_verify" | "password_reset"): Promise<string> {
@@ -95,6 +124,8 @@ export async function consumeToken(db: Db, token: string, purpose: "email_verify
 export async function verifyEmail(db: Db, token: string) {
   const userId = await consumeToken(db, token, "email_verify");
   await db.prepare(`UPDATE users SET email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?`).bind(nowIso(), userId).run();
+  const u = await db.prepare(`SELECT email FROM users WHERE id = ?`).bind(userId).first<{ email: string }>();
+  if (u) await linkContactsToUser(db, userId, u.email);
   await audit(db, { actorUserId: userId, action: "user.email_verified", subjectType: "user", subjectId: userId });
   return userId;
 }
@@ -108,28 +139,71 @@ export async function newEmailVerifyToken(db: Db, userId: string): Promise<strin
 
 export type LoginResult = { status: "ok"; sessionToken: string; userId: string; mfaRequired: boolean; maxAge: number };
 
-export async function login(db: Db, emailRaw: string, password: string, meta: { ip: string | null; userAgent: string | null }): Promise<LoginResult> {
-  const email = emailRaw.trim().toLowerCase();
-  const ipRl = await rateLimit(db, `login-ip:${meta.ip ?? "unknown"}`, 30, 900);
-  const emRl = await rateLimit(db, `login-email:${email}`, 10, 900);
-  if (!ipRl.allowed || !emRl.allowed) {
-    await securityEvent(db, "rate_limited", { email, ip: meta.ip, detail: "login" });
-    throw new AuthError("Too many sign-in attempts. Wait a few minutes and try again.", 429);
+/** True if this device cookie was issued to this user by an earlier completed sign-in and has not been revoked. */
+export async function isKnownDevice(db: Db, userId: string, token: string | null | undefined): Promise<boolean> {
+  if (!token || !/^[0-9a-f]{64}$/.test(token)) return false;
+  const row = await db.prepare(`SELECT 1 AS x FROM known_devices WHERE token_hash = ? AND user_id = ? AND revoked_at IS NULL`).bind(await hashToken(token), userId).first();
+  return !!row;
+}
+
+/** Remembers this browser for the user after a completed sign-in (password, plus MFA when enabled). Returns the
+ *  cookie value to set; reuses the existing one when it already belongs to this user. */
+export async function rememberDevice(db: Db, userId: string, existing: string | null | undefined): Promise<string> {
+  const at = nowIso();
+  if (existing && await isKnownDevice(db, userId, existing)) {
+    await db.prepare(`UPDATE known_devices SET last_seen_at = ? WHERE token_hash = ?`).bind(at, await hashToken(existing)).run();
+    return existing;
   }
-  const u = await db.prepare(`SELECT id, password_hash, disabled_at, locked_until, failed_logins, totp_secret FROM users WHERE email = ?`).bind(email)
-    .first<{ id: string; password_hash: string | null; disabled_at: string | null; locked_until: string | null; failed_logins: number; totp_secret: string | null }>();
+  const token = randomToken();
+  await db.prepare(`INSERT INTO known_devices (token_hash, user_id, created_at, last_seen_at) VALUES (?,?,?,?)`).bind(await hashToken(token), userId, at, at).run();
+  return token;
+}
+
+export async function login(db: Db, emailRaw: string, password: string, meta: { ip: string | null; userAgent: string | null; deviceToken?: string | null; challengePassed?: boolean }): Promise<LoginResult> {
+  const email = emailRaw.trim().toLowerCase();
+  const ip = meta.ip ?? "unknown";
+  const u = await db.prepare(`SELECT id, password_hash, disabled_at, totp_secret FROM users WHERE email = ?`).bind(email)
+    .first<{ id: string; password_hash: string | null; disabled_at: string | null; totp_secret: string | null }>();
+  const known = u ? await isKnownDevice(db, u.id, meta.deviceToken) : false;
+  const deviceKey = known ? `login-fail-device:${await hashToken(meta.deviceToken!)}` : null;
+  // Everything below is decided before the password result is used, and the same way for unknown addresses.
+  if (known) {
+    if (await peekRateLimit(db, deviceKey!, FAIL_WINDOW_S) >= PER_DEVICE_FAILS) {
+      await securityEvent(db, "rate_limited", { userId: u!.id, email, ip: meta.ip, detail: "login: known device" });
+      throw new AuthError("Too many sign-in attempts from this browser. Wait a few minutes and try again.", 429);
+    }
+  } else {
+    const perIp = await rateLimit(db, `login-ip:${ip}`, PER_IP_ATTEMPTS, FAIL_WINDOW_S);
+    const perIpAddress = await peekRateLimit(db, `login-fail-ip:${ip}:${email}`, FAIL_WINDOW_S);
+    if (!perIp.allowed || perIpAddress >= PER_IP_ADDRESS_FAILS) {
+      await securityEvent(db, "rate_limited", { email, ip: meta.ip, detail: "login" });
+      throw new AuthError("Too many sign-in attempts. Wait a few minutes and try again.", 429);
+    }
+    if (await peekRateLimit(db, `login-fail:${email}`, FAIL_WINDOW_S) >= CHALLENGE_AFTER && !meta.challengePassed) {
+      await securityEvent(db, "login_challenge_required", { userId: u?.id, email, ip: meta.ip });
+      throw new SignInChallengeRequired();
+    }
+  }
   const ok = await verifyPassword(password, u?.password_hash ?? null);
   if (!u || !ok || u.disabled_at) {
-    if (u) {
-      const fails = u.failed_logins + 1;
-      const lock = fails >= LOCK_AFTER ? new Date(Date.now() + LOCK_MINUTES * 60e3).toISOString() : null;
-      await db.prepare(`UPDATE users SET failed_logins = ?, locked_until = COALESCE(?, locked_until) WHERE id = ?`).bind(fails, lock, u.id).run();
-      if (lock) await securityEvent(db, "login_locked", { userId: u.id, email, ip: meta.ip });
+    if (known) await rateLimit(db, deviceKey!, PER_DEVICE_FAILS, FAIL_WINDOW_S);
+    else {
+      const fails = await rateLimit(db, `login-fail:${email}`, CHALLENGE_AFTER, FAIL_WINDOW_S);
+      await rateLimit(db, `login-fail-ip:${ip}:${email}`, PER_IP_ADDRESS_FAILS, FAIL_WINDOW_S);
+      // Recorded once per window, when the address starts requiring the challenge; the account holder is told.
+      if (fails.remaining === 0 && fails.allowed) {
+        await securityEvent(db, "login_challenge_started", { userId: u?.id, email, ip: meta.ip });
+        if (u) {
+          await db.prepare(`UPDATE users SET failed_logins = failed_logins + 1 WHERE id = ?`).bind(u.id).run();
+          await securityEvent(db, "login_failed", { userId: u.id, email, ip: meta.ip });
+          throw new LoginFailed(u.id, email);
+        }
+      }
     }
+    if (u) await db.prepare(`UPDATE users SET failed_logins = failed_logins + 1 WHERE id = ?`).bind(u.id).run();
     await securityEvent(db, "login_failed", { userId: u?.id, email, ip: meta.ip });
-    throw new AuthError("Email or password is incorrect.", 401);
+    throw new LoginFailed(null, null);
   }
-  if (u.locked_until && u.locked_until > nowIso()) throw new AuthError("This account is temporarily locked after repeated failed sign-ins. Try again later.", 423);
   await db.prepare(`UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?`).bind(u.id).run();
   // Versioned hash format (docs/AUTH-PRODUCTION.md gap 6): a hash made with older parameters is replaced with
   // one made with the current algorithm and cost, now that the plaintext is known to be correct.
@@ -240,6 +314,31 @@ async function useRecoveryCode(db: Db, userId: string, input: string): Promise<n
   return null;
 }
 
+/** Wrong second-factor codes allowed per user in any rolling 24 hours before further attempts are refused. */
+export const MFA_DAILY_FAILURES = 30;
+
+/** Second-factor attempt limit: 8 codes (any kind) per user per 15 minutes. */
+async function assertMfaRate(db: Db, userId: string): Promise<void> {
+  const rl = await rateLimit(db, `mfa:${userId}`, 8, 900);
+  if (!rl.allowed) throw new AuthError("Too many codes entered. Wait a few minutes.", 429);
+}
+
+/** Daily cap on WRONG 6-digit codes: at most MFA_DAILY_FAILURES in any rolling 24 hours since the user's last
+ *  (re-)enrolment or provisioning. One password-only session could otherwise keep guessing 8 codes per window all
+ *  day (≈0.2 % chance per day of a valid TOTP code). Recovery codes are not subject to it (each is ~60 bits, so
+ *  guessing is hopeless within the 15-minute limit), which keeps a way in for a user whose password is known to
+ *  someone who exhausts the cap; replays (a double submit) do not count. */
+async function assertTotpDailyCap(db: Db, userId: string, ip: string | null, purpose: string): Promise<void> {
+  const since = new Date(Date.now() - 24 * 3_600_000).toISOString();
+  const failures = (await db.prepare(`SELECT COUNT(*) AS n FROM security_events WHERE user_id = ? AND kind = 'mfa_failed' AND detail LIKE 'totp%'
+      AND created_at > max(?, COALESCE((SELECT MAX(created_at) FROM audit_logs WHERE subject_type = 'user' AND subject_id = ? AND action IN ('user.mfa_enabled', 'user.mfa_provisioned')), ''))`)
+    .bind(userId, since, userId).first<{ n: number }>())?.n ?? 0;
+  if (failures >= MFA_DAILY_FAILURES) {
+    await securityEvent(db, "mfa_locked", { userId, ip, detail: purpose });
+    throw new AuthError("Too many incorrect authenticator codes in the last 24 hours. Sign in with a recovery code, try again later, or ask an administrator to reset your two-factor authentication.", 429);
+  }
+}
+
 export type SecondFactorResult = { method: "totp" } | { method: "recovery"; remaining: number };
 
 /**
@@ -249,18 +348,19 @@ export type SecondFactorResult = { method: "totp" } | { method: "recovery"; rema
  */
 export async function verifySecondFactor(env: MfaKeyEnv, db: Db, sessionId: string, userId: string, codeRaw: string, ip: string | null,
   purpose: "login" | "step_up", opts: { allowRecovery?: boolean } = { allowRecovery: true }): Promise<SecondFactorResult> {
-  const rl = await rateLimit(db, `mfa:${userId}`, 8, 900);
-  if (!rl.allowed) throw new AuthError("Too many codes entered. Wait a few minutes.", 429);
+  await assertMfaRate(db, userId);
   const compact = codeRaw.replace(/\s/g, "");
   let result: SecondFactorResult | null = null;
-  if (/^\d{6}$/.test(compact)) {
+  const isTotp = /^\d{6}$/.test(compact);
+  if (isTotp) {
+    await assertTotpDailyCap(db, userId, ip, purpose);
     if (await checkTotp(env, db, userId, compact, ip)) result = { method: "totp" };
   } else if (opts.allowRecovery) {
     const remaining = await useRecoveryCode(db, userId, codeRaw);
     if (remaining !== null) result = { method: "recovery", remaining };
   }
   if (!result) {
-    await securityEvent(db, "mfa_failed", { userId, ip, detail: purpose });
+    await securityEvent(db, "mfa_failed", { userId, ip, detail: `${isTotp ? "totp" : "recovery"}; ${purpose}` });
     throw new AuthError("That code is not valid.", 401);
   }
   await db.prepare(`UPDATE sessions SET mfa_verified = 1, mfa_verified_at = ? WHERE id = ? AND user_id = ?`).bind(nowIso(), sessionId, userId).run();
@@ -310,8 +410,11 @@ export async function confirmTotpEnrollment(env: MfaKeyEnv, db: Db, userId: stri
   await db.batch([
     db.prepare(`UPDATE users SET totp_secret = ?, totp_pending_secret = NULL, mfa_enabled = 1, totp_last_step = ? WHERE id = ?`).bind(sealed, step, userId),
     db.prepare(`UPDATE sessions SET mfa_verified = 1, mfa_verified_at = ? WHERE id = ?`).bind(at, sessionId),
+    // Enrolling or REPLACING the authenticator signs out every other session: a session verified with the old
+    // authenticator (for example on a lost or stolen device) must not stay signed in after the replacement.
+    db.prepare(`UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND id IS NOT ? AND revoked_at IS NULL`).bind(at, userId, sessionId),
   ]);
-  await audit(db, { actorUserId: userId, action: "user.mfa_enabled", subjectType: "user", subjectId: userId });
+  await audit(db, { actorUserId: userId, action: "user.mfa_enabled", subjectType: "user", subjectId: userId, details: { otherSessionsRevoked: true } });
   const codes = await issueRecoveryCodes(db, userId);
   await audit(db, { actorUserId: userId, action: "user.mfa_recovery_codes_generated", subjectType: "user", subjectId: userId, details: { count: codes.length } });
   return codes;
@@ -341,11 +444,11 @@ async function issueRecoveryCodes(db: Db, userId: string): Promise<string[]> {
  * (a recovery code cannot mint new recovery codes). Audited and recorded as a security event.
  */
 export async function regenerateRecoveryCodes(env: MfaKeyEnv, db: Db, sessionId: string, userId: string, code: string, ip: string | null): Promise<string[]> {
-  const rl = await rateLimit(db, `mfa:${userId}`, 8, 900);
-  if (!rl.allowed) throw new AuthError("Too many codes entered. Wait a few minutes.", 429);
+  await assertMfaRate(db, userId);
+  await assertTotpDailyCap(db, userId, ip, "recovery_codes");
   const compact = code.replace(/\s/g, "");
   if (!/^\d{6}$/.test(compact) || !(await checkTotp(env, db, userId, compact, ip))) {
-    await securityEvent(db, "mfa_failed", { userId, ip, detail: "recovery code regeneration" });
+    await securityEvent(db, "mfa_failed", { userId, ip, detail: "totp; recovery code regeneration" });
     throw new AuthError("Enter the current 6-digit code from your authenticator app.", 401);
   }
   await db.prepare(`UPDATE sessions SET mfa_verified_at = ? WHERE id = ? AND user_id = ? AND mfa_verified = 1`).bind(nowIso(), sessionId, userId).run();
@@ -366,6 +469,19 @@ export async function clearMfa(db: Db, userId: string): Promise<void> {
     db.prepare(`UPDATE users SET totp_secret = NULL, totp_pending_secret = NULL, totp_last_step = NULL, mfa_enabled = 0 WHERE id = ?`).bind(userId),
     db.prepare(`DELETE FROM mfa_recovery_codes WHERE user_id = ?`).bind(userId),
   ]);
+}
+
+/**
+ * Issues a new token for an existing session (CREST-GAP-086): called when a session is elevated by completing MFA, so
+ * a token observed before the second factor (password-only stage) is worthless afterwards. Returns the new token and
+ * the seconds left on the session for the cookie's Max-Age.
+ */
+export async function rotateSessionToken(db: Db, sessionId: string): Promise<{ token: string; maxAge: number } | null> {
+  const s = await db.prepare(`SELECT expires_at FROM sessions WHERE id = ? AND revoked_at IS NULL`).bind(sessionId).first<{ expires_at: string }>();
+  if (!s) return null;
+  const token = randomToken();
+  await db.prepare(`UPDATE sessions SET token_hash = ? WHERE id = ? AND revoked_at IS NULL`).bind(await hashToken(token), sessionId).run();
+  return { token, maxAge: Math.max(0, Math.floor((Date.parse(s.expires_at) - Date.now()) / 1000)) };
 }
 
 export async function revokeSession(db: Db, sessionId: string, byUserId: string) {
@@ -398,13 +514,25 @@ export async function requestPasswordReset(db: Db, emailRaw: string, ip: string 
   return { userId: u.id, token };
 }
 
+/**
+ * After a password is reset or changed, every other outstanding reset link for the account stops working.
+ * Otherwise a reset link sent earlier (for example to a mailbox an attacker can read) would stay valid for its
+ * full hour and could undo the change.
+ */
+export async function invalidateResetTokens(db: Db, userId: string): Promise<void> {
+  await db.prepare(`UPDATE auth_tokens SET used_at = ? WHERE user_id = ? AND purpose = 'password_reset' AND used_at IS NULL`).bind(nowIso(), userId).run();
+}
+
 export async function resetPassword(db: Db, token: string, newPassword: string, ip: string | null) {
   const userId = await consumeToken(db, token, "password_reset");
   const u = await db.prepare(`SELECT email FROM users WHERE id = ?`).bind(userId).first<{ email: string }>();
   const problems = passwordProblems(newPassword, u?.email);
   if (problems.length) throw new AuthError(problems.join(". "));
   await db.prepare(`UPDATE users SET password_hash = ?, failed_logins = 0, locked_until = NULL WHERE id = ?`).bind(await hashPassword(newPassword), userId).run();
+  await invalidateResetTokens(db, userId);
   await revokeAllSessions(db, userId, null, userId);
+  // Account recovery forgets every remembered browser (CREST-GAP-003): they must complete a sign-in again.
+  await db.prepare(`UPDATE known_devices SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`).bind(nowIso(), userId).run();
   await audit(db, { actorUserId: userId, action: "user.password_reset", subjectType: "user", subjectId: userId, ip });
   return userId;
 }
@@ -415,6 +543,7 @@ export async function changePassword(db: Db, userId: string, current: string, ne
   const problems = passwordProblems(next, u.email);
   if (problems.length) throw new AuthError(problems.join(". "));
   await db.prepare(`UPDATE users SET password_hash = ? WHERE id = ?`).bind(await hashPassword(next), userId).run();
+  await invalidateResetTokens(db, userId);
   await audit(db, { actorUserId: userId, action: "user.password_changed", subjectType: "user", subjectId: userId });
   await revokeAllSessions(db, userId, keepSessionId, userId);
 }
@@ -435,23 +564,86 @@ export async function invitationByToken(db: Db, token: string) {
     .bind(await hashToken(token)).first<{ id: string; email: string; role_id: Role; organization_id: string; expires_at: string; accepted_at: string | null; org_name: string }>();
 }
 
-export async function acceptInvitation(db: Db, token: string, name: string, password: string) {
+/** Raised when the invited email already belongs to a verified account: only that account holder may accept. */
+export class InvitationSignInRequired extends AuthError {
+  constructor() { super("An account already exists for this email address. Sign in to that account, then open the invitation link from your email again to accept it.", 403); }
+}
+
+/**
+ * How an invitation can be accepted (CREST-GAP-001). The invitation token was delivered to the invited address,
+ * so holding it proves control of that mailbox — but it does NOT prove ownership of an account that already
+ * uses the address:
+ *  - "new":     no account exists → create one, already verified (the token proved the address).
+ *  - "claim":   an account exists but its email was never verified, so nobody has proven they own it (it may have
+ *               been pre-registered by someone else). The token holder is the proven owner: the account is
+ *               reclaimed — new password, every factor, session, recovery code and outstanding token revoked,
+ *               and every membership the unverified account gave itself removed — before the role is granted.
+ *  - "sign_in": a verified account exists → the token alone is not enough; the person must be signed in to that
+ *               account (password + MFA if enabled). No password is set from the invitation form.
+ *  - "confirm": the current session is that verified account → accept with one click.
+ */
+export type InvitationMode = "new" | "claim" | "sign_in" | "confirm";
+
+export async function invitationMode(db: Db, email: string, sessionUserId: string | null | undefined): Promise<InvitationMode> {
+  const u = await db.prepare(`SELECT id, email_verified_at FROM users WHERE email = ?`).bind(email).first<{ id: string; email_verified_at: string | null }>();
+  if (!u) return "new";
+  if (!u.email_verified_at) return "claim";
+  return sessionUserId && sessionUserId === u.id ? "confirm" : "sign_in";
+}
+
+/**
+ * Accepts an invitation. `sessionUserId` is the id of the fully signed-in user making the request (null if not
+ * signed in, or if the session has not completed MFA). Returns the user id and which path was taken.
+ */
+export async function acceptInvitation(db: Db, token: string, name: string, password: string, opts: { sessionUserId?: string | null; ip?: string | null } = {}) {
   const inv = await invitationByToken(db, token);
   if (!inv || inv.accepted_at || inv.expires_at < nowIso()) throw new AuthError("This invitation is invalid or has expired.");
-  const problems = passwordProblems(password, inv.email);
-  if (problems.length) throw new AuthError(problems.join(". "));
-  const at = nowIso();
-  let user = await db.prepare(`SELECT id FROM users WHERE email = ?`).bind(inv.email).first<{ id: string }>();
-  const stmts = [];
-  if (!user) {
-    user = { id: newId("usr") };
-    stmts.push(db.prepare(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, created_at) VALUES (?,?,?,?,?,?)`).bind(user.id, inv.email, name.trim(), await hashPassword(password), at, at));
+  const existing = await db.prepare(`SELECT id, email_verified_at FROM users WHERE email = ?`).bind(inv.email).first<{ id: string; email_verified_at: string | null }>();
+  const mode = await invitationMode(db, inv.email, opts.sessionUserId);
+  if (mode === "sign_in") throw new InvitationSignInRequired();
+  if (mode === "new" || mode === "claim") {
+    const problems = passwordProblems(password, inv.email);
+    if (problems.length) throw new AuthError(problems.join(". "));
+    if (!name.trim()) throw new AuthError("Enter your name.");
   }
-  stmts.push(
-    db.prepare(`INSERT INTO memberships (id, user_id, organization_id, role_id, created_at) VALUES (?,?,?,?,?) ON CONFLICT(user_id, organization_id) DO UPDATE SET role_id = excluded.role_id`).bind(newId("mbr"), user.id, inv.organization_id, inv.role_id, at),
-    db.prepare(`UPDATE invitations SET accepted_at = ? WHERE id = ? AND accepted_at IS NULL`).bind(at, inv.id),
-  );
-  await db.batch(stmts);
-  await audit(db, { actorUserId: user.id, action: "invitation.accepted", subjectType: "invitation", subjectId: inv.id, organizationId: inv.organization_id, details: { role: inv.role_id } });
-  return user.id;
+  const at = nowIso();
+  // Claim the invitation first: single use even when two acceptances race. Released again if the rest fails.
+  const claimed = await db.prepare(`UPDATE invitations SET accepted_at = ? WHERE id = ? AND accepted_at IS NULL AND expires_at >= ?`).bind(at, inv.id, at).run();
+  if (claimed.meta.changes !== 1) throw new AuthError("This invitation is invalid or has expired.");
+  let userId: string;
+  let removedOrgs: string[] = [];
+  try {
+    const stmts = [];
+    if (mode === "new") {
+      userId = newId("usr");
+      stmts.push(db.prepare(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, created_at) VALUES (?,?,?,?,?,?)`).bind(userId, inv.email, name.trim(), await hashPassword(password), at, at));
+    } else if (mode === "claim") {
+      userId = existing!.id;
+      removedOrgs = (await db.prepare(`SELECT organization_id FROM memberships WHERE user_id = ? AND organization_id != ?`).bind(userId, inv.organization_id).all<{ organization_id: string }>()).results.map((r) => r.organization_id);
+      stmts.push(
+        // Guarded on email_verified_at IS NULL so a verified account can never be overwritten by this path.
+        db.prepare(`UPDATE users SET display_name = ?, password_hash = ?, email_verified_at = ?, totp_secret = NULL, totp_pending_secret = NULL, totp_last_step = NULL, mfa_enabled = 0, failed_logins = 0, locked_until = NULL WHERE id = ? AND email_verified_at IS NULL`)
+          .bind(name.trim(), await hashPassword(password), at, userId),
+        db.prepare(`UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`).bind(at, userId),
+        db.prepare(`DELETE FROM mfa_recovery_codes WHERE user_id = ?`).bind(userId),
+        db.prepare(`UPDATE auth_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL`).bind(at, userId),
+        db.prepare(`DELETE FROM memberships WHERE user_id = ? AND organization_id != ?`).bind(userId, inv.organization_id),
+        db.prepare(`UPDATE contacts SET user_id = NULL WHERE user_id = ?`).bind(userId),
+      );
+    } else {
+      userId = existing!.id;
+    }
+    stmts.push(db.prepare(`INSERT INTO memberships (id, user_id, organization_id, role_id, created_at) VALUES (?,?,?,?,?) ON CONFLICT(user_id, organization_id) DO UPDATE SET role_id = excluded.role_id`).bind(newId("mbr"), userId, inv.organization_id, inv.role_id, at));
+    await db.batch(stmts);
+  } catch (e) {
+    await db.prepare(`UPDATE invitations SET accepted_at = NULL WHERE id = ? AND accepted_at = ?`).bind(inv.id, at).run();
+    throw e;
+  }
+  // The address is now proven, so CRM contacts with it may be linked (CREST-GAP-004).
+  await linkContactsToUser(db, userId, inv.email);
+  if (mode === "claim") {
+    await securityEvent(db, "account_reclaimed_by_invitation", { userId, email: inv.email, ip: opts.ip ?? null, detail: `unverified account reclaimed; removed memberships: ${removedOrgs.length}` });
+  }
+  await audit(db, { actorUserId: userId, action: "invitation.accepted", subjectType: "invitation", subjectId: inv.id, organizationId: inv.organization_id, ip: opts.ip ?? null, details: { role: inv.role_id, mode, removedOrganizations: removedOrgs } });
+  return userId;
 }

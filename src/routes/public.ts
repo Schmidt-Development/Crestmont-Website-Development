@@ -5,7 +5,7 @@ import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, raw, safeUrl, formatCents, formatDate, formatDateTime, type SafeHtml } from "../lib/html.ts";
 import { HttpError, htmlResponse, redirect, str, securityHeaders } from "../app/http.ts";
-import { publicLayout, appLayout, crestRing } from "../ui/layout.ts";
+import { publicLayout, appLayout, crestRing, metaDescription } from "../ui/layout.ts";
 import { csrf, input, textarea, select, button, linkButton, ctaLink, ARROW_SVG, actionForm, formErrors, alert, table, badge, emptyState, pageHead, dl, fileInput, attributionFields, richText } from "../ui/components.ts";
 import { requireStaff } from "../app/app.ts";
 import { staffNav } from "./nav.ts";
@@ -13,7 +13,7 @@ import { verifyTurnstile } from "./api.ts";
 import { PACKAGES, PACKAGE_FEATURES, packageAdditions, MAINTENANCE_PLANS, type PackageId } from "../domain/catalog.ts";
 import { effectivePrices } from "../services/pricing-approvals.ts";
 import { can } from "../domain/authz.ts";
-import { captureLead, requestAttribution, submittedAttribution } from "../services/leads.ts";
+import { captureLead, requestAttribution, submittedAttribution, notifyNewLead } from "../services/leads.ts";
 import { rateLimit, securityEvent } from "../services/security.ts";
 import { sendMail } from "../services/mailer.ts";
 import { ValidationError } from "../lib/validate.ts";
@@ -51,10 +51,14 @@ export const PUBLIC_PATHS = [
 
 type Content = Awaited<ReturnType<typeof cms.loadContent>>;
 
-async function page(ctx: AppContext, seoKey: string, keys: string[], render: (c: Content) => SafeHtml | Promise<SafeHtml>, status = 200): Promise<Response> {
+/** `meta`, when given, derives the page's own title and description from its content instead of the shared SEO key. */
+async function page(ctx: AppContext, seoKey: string, keys: string[], render: (c: Content) => SafeHtml | Promise<SafeHtml>, status = 200, meta?: (c: Content) => { title: string; description: string }): Promise<Response> {
   const c = await cms.loadContent(ctx, [`seo.${seoKey}`, ...keys]);
   effective = await effectivePrices(ctx.db, ctx.now());
-  const seo = c.get(`seo.${seoKey}`);
+  // CREST-GAP-010: in production, while online checkout is closed (draft policies, unnamed entity or live payments not
+  // authorised — the same condition that disables the payments adapter), package CTAs lead to a quote request instead.
+  checkoutClosed = ctx.env.ENVIRONMENT === "production" && !ctx.payments.configured;
+  const seo = meta ? meta(c) : c.get(`seo.${seoKey}`);
   const body = await render(c);
   const banner = c.previewing
     ? html`<div class="preview-banner" role="status">Preview of an unpublished revision (${c.previewing}). Visitors still see the published version. <a href="/staff/cms/${c.previewing}">Back to the editor</a></div>`
@@ -82,6 +86,10 @@ const itemCards = (text: string) => html`<div class="experience" data-reveal-gro
 /** Capability cards (three columns). */
 const ledger = (text: string) => html`<ul class="ledger" data-reveal-group>${parseItems(text).map((i) => html`<li data-reveal><h3>${i.title}</h3><p>${i.body}</p></li>`)}</ul>`;
 
+let checkoutClosed = false;
+/** Where a package's "Choose" call to action leads (CREST-GAP-010). */
+const packageCta = (id: string) => (checkoutClosed ? `/quote?package=${id}` : `/checkout/${id}`);
+
 function packageCards(c: Content, opts: { compact?: boolean } = {}): SafeHtml {
   const pr = c.get("pricing.presentation");
   return html`<div class="grid grid-3 pricing-grid" data-reveal-group>${PKG_ORDER.map((id, i) => {
@@ -94,13 +102,16 @@ function packageCards(c: Content, opts: { compact?: boolean } = {}): SafeHtml {
 <h3 class="card__title" id="pkg-${id}">${p.name}</h3><p class="muted">${pr[`${id}_tagline`] ?? ""}</p>
 <div class="price" data-testid="price-${id}">${pkgPrice(id)}</div><p class="faint package__terms">${p.priceIsFloor ? "Starting price · final price in your written scope · " : "Fixed price · "}paid 100% upfront</p>
 ${i > 0 ? html`<p class="package__inherits">Everything in ${PACKAGES[PKG_ORDER[i - 1]].name}, plus:</p>` : ""}<ul class="checklist">${shown.map((it) => html`<li>${it}</li>`)}</ul>${opts.compact && items.length > shown.length ? html`<p class="package__more"><a href="/pricing/compare">See everything in ${p.name}</a></p>` : ""}
-<div class="package__actions">${ctaLink(`Choose ${p.name}`, `/checkout/${id}`, featured ? "primary" : "secondary")}${id === "premium" ? html` <a class="btn btn--ghost" href="/quote?package=premium">Discuss a larger scope</a>` : ""}</div>
+<div class="package__actions">${ctaLink(`Choose ${p.name}`, packageCta(id), featured ? "primary" : "secondary")}${id === "premium" ? html` <a class="btn btn--ghost" href="/quote?package=premium">Discuss a larger scope</a>` : ""}</div>
 </article>`;
   })}</div>`;
 }
 
+/** Maintenance plans are on sale only once their entitlements are approved (CAT-006); billing copy waits for that (CREST-GAP-090). */
+const plansApproved = () => plans().every((m) => m.entitlementsStatus === "approved");
+
 function maintenanceCards(): SafeHtml {
-  const approved = plans().every((m) => m.entitlementsStatus === "approved");
+  const approved = plansApproved();
   return html`<div class="grid grid-3 pricing-grid" data-reveal-group>${plans().map((m) => html`<div class="card package" data-reveal><h3 class="card__title">${m.name}</h3><div class="price" data-testid="price-${m.id}">${formatCents(effective[`maintenance:${m.id}`] ?? m.monthlyCents)}<small> / month</small></div>
 ${approved ? html`<ul class="checklist">${Object.values(m.proposedEntitlements).map((e) => html`<li>${e}</li>`)}</ul>` : html`<p class="muted">Full plan details will be published here once finalised.</p>`}</div>`)}</div>
 ${approved ? "" : html`<p class="muted">Each plan will have explicit, published limits for hosting, maintenance time, content updates, security updates, monitoring, backups and support response targets — with no unlimited development or unlimited support. Have a question in the meantime? <a href="/contact?topic=maintenance">Ask us about maintenance</a>.</p>`}`;
@@ -115,17 +126,21 @@ function portfolioCard(p: pf.PortfolioProject): SafeHtml {
 function shot(p: pf.PortfolioProject, kind: "desktop" | "mobile", viewer = false): SafeHtml {
   const id = kind === "desktop" ? p.desktop_screenshot_file_id : p.mobile_screenshot_file_id;
   const asset = kind === "desktop" ? p.poster_desktop_asset : p.poster_mobile_asset;
-  const alt = `${kind === "desktop" ? "Desktop" : "Mobile"} screenshot of ${p.name} (${p.live_url})`;
+  // CREST-GAP-048: bundled posters are captures of the project's isolated demonstration build (sample data), and the
+  // alt text says so; an uploaded screenshot is described without claiming where it was taken.
+  const alt = `${kind === "desktop" ? "Desktop" : "Mobile"} screenshot of the ${p.name} website${id ? "" : " (demonstration build with sample data)"}`;
   if (!id && !asset) return html`<div class="shot shot--pending${kind === "mobile" ? " shot--mobile" : ""}" role="img" aria-label="${alt} — capture pending"><span>Verified screenshot capture pending</span></div>`;
   const src = id ? `/portfolio-media/${id}` : asset!;
-  const img = html`<img src="${src}" alt="${alt}" loading="lazy" decoding="async">`;
+  // CREST-GAP-078: intrinsic size reserves the space before the image loads (desktop 1440×900, phone 390×844 CSS px).
+  const [w, h] = kind === "desktop" ? [1440, 900] : [390, 844];
+  const img = html`<img src="${src}" alt="${alt}" width="${String(w)}" height="${String(h)}" loading="lazy" decoding="async">`;
   return viewer ? html`<a class="shot${kind === "mobile" ? " shot--mobile" : ""}" href="${src}" data-viewer data-alt="${alt}">${img}<span class="visually-hidden">Open full-screen</span></a>` : html`<div class="shot">${img}</div>`;
 }
 
 /** Large two-up project presentation (M05): image group enters before its text group. */
 function showcase(projects: pf.PortfolioProject[]): SafeHtml {
   return html`<div class="showcase" data-reveal-group>${projects.slice(0, 2).map((p) => html`<a class="showcase__item" href="/portfolio/${p.slug}" data-reveal>
-<div class="showcase__media">${p.desktop_screenshot_file_id ? html`<img src="/portfolio-media/${p.desktop_screenshot_file_id}" alt="Desktop screenshot of ${p.name} (${p.live_url})" loading="lazy" decoding="async">` : html`<div class="shot shot--pending" role="img" aria-label="Screenshot of ${p.name} — capture pending"><span>Verified screenshot capture pending</span></div>`}</div>
+<div class="showcase__media">${p.desktop_screenshot_file_id ? html`<img src="/portfolio-media/${p.desktop_screenshot_file_id}" alt="Desktop screenshot of the ${p.name} website" width="1440" height="900" loading="lazy" decoding="async">` : html`<div class="shot shot--pending" role="img" aria-label="Screenshot of ${p.name} — capture pending"><span>Verified screenshot capture pending</span></div>`}</div>
 <div data-reveal style="--rd:120ms"><p class="faint" style="margin:0 0 .25rem">${p.industry}</p><h3 class="card__title" style="font-size:1.35rem">${p.name}</h3><p class="muted" style="margin:0">${p.description.length > 160 ? p.description.slice(0, 157) + "…" : p.description}</p></div></a>`)}</div>`;
 }
 
@@ -213,42 +228,43 @@ function processStages(steps: { title: string; body: string }[]): SafeHtml {
 <ol class="stage__steps">${ph.steps.map((s) => html`<li><strong>${s.title}</strong><span>${s.body}</span></li>`)}</ol></li>`)}</ol></div>`;
 }
 
-/** AI Receptionist (docs/frontend/AI-RECEPTIONIST.md): the dedicated service page. Copy is factual — natural, humanlike
- *  conversation is the design goal, never a claim that callers cannot tell; the assistant always identifies itself as AI. */
+/** AI Receptionist (docs/frontend/AI-RECEPTIONIST.md): the dedicated service page. CREST-GAP-051: every statement is
+ *  either something Crestmont delivers or worded as custom, per-client configuration built on the voice provider the
+ *  client chooses — nothing here describes booking, text messages, live transfers or outbound calling as a built-in
+ *  feature (tests/support/content-rules.ts RECEPTIONIST_UNBUILT). Natural, humanlike conversation is the design goal,
+ *  never a claim that callers cannot tell; the assistant always identifies itself as AI. */
 const RC_INBOUND: [string, string][] = [
-  ["Answers every call", "Picks up on the first ring, during or after hours when configured, and greets callers in your business's voice."],
-  ["Questions and intake", "Answers questions from your approved information, asks follow-up questions and collects the details your team needs."],
-  ["Scheduling", "Checks availability, books and reschedules appointments in your calendar and sends a confirmation."],
-  ["Routing and urgency", "Recognises urgent or sensitive calls and transfers them to the right person, or creates a callback task."],
-  ["CRM records", "Creates or updates the contact and logs the outcome, so nobody retypes a phone message."],
-  ["Summaries", "Every call ends with a structured summary — who called, what they needed and what happens next."],
+  ["Answering", "Answers the calls you route to it, at the hours you choose, with a greeting written for your business."],
+  ["Questions and intake", "Answers from the information you approve, asks follow-up questions and collects the details your team needs."],
+  ["Appointment requests", "Takes appointment and callback requests. Booking straight into your calendar can be built where your scheduling tool and the provider support it."],
+  ["Urgent calls", "Recognises the call types you define as urgent and follows your rules — a callback task, an alert to your team, or a transfer where your phone setup supports it."],
+  ["Records", "Can send each caller's details and the outcome to your CRM, if it has an API we can connect within the scope."],
+  ["Summaries", "Each call can end with a written summary: who called, what they needed and what happens next."],
 ];
 const RC_OUTBOUND: [string, string][] = [
-  ["Confirmations and reminders", "Confirms upcoming appointments and reminds customers about scheduled visits."],
-  ["Follow-ups", "Calls back leads and customers who asked to be contacted, and passes interested contacts to a person."],
-  ["Feedback", "Asks customers who agreed to it how a visit went, and records the answers."],
-  ["Outcomes logged", "Every call updates your CRM with the result and the next action."],
+  ["Scoped separately", "Outbound calls are not part of a standard setup. Where a client needs them — for example confirming visits customers booked — they are designed and quoted individually."],
+  ["Consent first", "Only for contacts who have given the consent the law requires for that kind of call."],
 ];
 const RC_SAFEGUARDS = [
-  "Calls only contacts who have given the consent the law requires for that kind of call",
-  "Checks do-not-call and suppression lists before every call, and honours opt-outs immediately",
-  "Calls only within permitted hours in the contact's local time",
-  "Identifies itself as an AI assistant calling on behalf of your business",
-  "Follows the recording and transcription consent rules that apply to the call",
+  "Call only contacts who have given the consent the law requires for that kind of call",
+  "Check do-not-call and suppression lists before every call, and honour opt-outs immediately",
+  "Call only within permitted hours in the contact's local time",
+  "Identify itself as an AI assistant calling on behalf of your business",
+  "Follow the recording and transcription consent rules that apply to the call",
 ];
 const RC_USES: [string, string, string][] = [
-  ["Home and repair services", "Books estimate visits after hours, captures job details and photos-to-follow, and puts emergencies straight through to the on-call person.", "Inbound · Scheduling · Urgent routing"],
-  ["Appointment-based studios", "Handles bookings, changes and cancellations, answers the common questions, and sends reminders to customers who opted in.", "Inbound · Outbound reminders"],
-  ["Professional offices", "Greets callers, runs a short intake, routes to the right person and keeps a clean record of every enquiry.", "Inbound · Intake · CRM"],
-  ["Rental and hospitality", "Answers availability and policy questions from your approved information and follows up with guests who asked to be called.", "Inbound · Outbound follow-up"],
+  ["Home and repair services", "Takes estimate requests after hours, captures job details and flags emergencies for the on-call person under your rules.", "Inbound · Intake · Urgent rules"],
+  ["Appointment-based studios", "Answers the common questions and takes booking or change requests; direct booking can be connected where your scheduling tool allows it.", "Inbound · Appointment requests"],
+  ["Professional offices", "Greets callers, runs a short intake and records each enquiry for the right person to follow up.", "Inbound · Intake · Records"],
+  ["Rental and hospitality", "Answers availability and policy questions from your approved information and records callback requests.", "Inbound · Callback requests"],
 ];
 const RC_FLOW: [string, string][] = [
-  ["Phone call", "Your existing number forwards to the agent, or a new number is set up with the provider."],
-  ["AI receptionist", "Understands the request, asks follow-up questions and keeps the context of the whole call."],
-  ["Calendar", "Real availability is checked before a time is offered; bookings and changes are written back."],
-  ["CRM", "Contacts, notes and outcomes are created or updated automatically."],
-  ["Website and forms", "The same assistant knowledge can power your website chat, so answers stay consistent."],
-  ["Your team", "Urgent and sensitive calls transfer to a person, with the call summary attached."],
+  ["Phone call", "Calls reach the agent through the voice provider you choose — forwarded from your existing number or on a new one."],
+  ["AI receptionist", "Follows the script and guardrails you approve and keeps the context of the call."],
+  ["Calendar", "Optional: connected where your calendar or booking tool and the provider support it."],
+  ["CRM", "Optional: caller details and outcomes sent to your CRM through its API."],
+  ["Website and forms", "The same approved information can power your website assistant, so answers stay consistent."],
+  ["Your team", "Urgent and sensitive calls follow your rules — a callback task, an alert, or a transfer where your phone setup supports it."],
 ];
 const RC_STEPS: [string, string][] = [
   ["Discovery", "Your call types, hours, rules for urgent calls and the systems to connect."],
@@ -259,34 +275,35 @@ const RC_STEPS: [string, string][] = [
   ["Launch and review", "Go live on your number, then review call outcomes and refine together."],
 ];
 const RC_FAQ: [string, string][] = [
+  ["Is it a ready-made product?", "No. Each AI Receptionist is a custom configuration built for one client on the voice provider they choose. What it can do depends on that provider and on the systems connected, and it is agreed in the written scope before work starts."],
   ["Will callers know they are talking to AI?", "Yes. The agent identifies itself as an AI assistant. It is designed to sound natural and conversational — not to pretend to be a person."],
-  ["What happens when the AI can't help?", "It transfers the call to a person or creates a callback task with a summary, depending on your hours and rules. Every agent has a path to a person."],
-  ["Can it make outbound calls?", "Yes, for contacts who have given the consent the law requires — for example appointment confirmations and reminders, or follow-ups a customer asked for. It checks do-not-call and suppression lists, calls only within permitted hours and honours opt-outs. Unsolicited automated calling is not something we set up."],
+  ["What happens when the AI can't help?", "It follows the rules you set: a callback task with a summary, an alert to your team or, where your phone setup supports it, a transfer. Every agent has a path to a person."],
+  ["Can it make outbound calls?", "Only if your project scopes it. Outbound calling is not part of a standard setup; where a client needs it — for example confirming visits customers booked — it is designed and quoted individually, for contacts who have given the consent the law requires, with do-not-call checks, permitted hours and opt-outs. Unsolicited automated calling is not something we set up."],
   ["Which voices and languages are available?", "That depends on the voice provider chosen for your project. You choose a voice and pace during setup; English is standard and other languages, such as Spanish, can be configured where the provider supports them."],
-  ["How is it priced?", "It is quoted in writing after a scoping call, like all custom work. Phone numbers, call minutes and voice-provider usage are billed by the provider, and you can see usage and cost per call."],
+  ["How is it priced?", "It is quoted in writing after a scoping call, like all custom work. Phone numbers, call minutes and voice-provider usage are billed by the provider."],
 ];
 
 function aiReceptionistPage(s: ServiceDef, copy: Record<string, string>, email: string): SafeHtml {
   const quote = `/quote?service=${s.slug}`;
-  return html`${serviceHero("Inbound & outbound voice agents", s.name, copy.summary ?? s.summary, html`${linkButton("Request a quote", quote)}${linkButton("Contact us", "/contact", "secondary")}`, receptionistConsole({ id: "rc-page" }))}
-<section class="section"><div class="container section__inner"><p class="section__label">Conversations</p><div class="section__head"><h2 class="reveal-words" data-reveal>Natural conversations, real outcomes</h2><div class="prose" data-reveal style="--rd:140ms">${renderMarkdown(copy.intro ?? s.intro)}</div></div>
+  return html`${serviceHero("Custom AI voice agents", s.name, copy.summary ?? s.summary, html`${linkButton("Request a quote", quote)}${linkButton("Contact us", "/contact", "secondary")}`, receptionistConsole({ id: "rc-page" }))}
+<section class="section"><div class="container section__inner"><p class="section__label">What it can do</p><div class="section__head"><h2 class="reveal-words" data-reveal>Configured around your calls</h2><div class="prose" data-reveal style="--rd:140ms">${renderMarkdown(copy.intro ?? s.intro)}</div></div>
 <div class="versus rc-dir" data-reveal-group>
-<div class="versus__panel on-dark" data-reveal><p class="versus__title">Inbound — answering your calls</p><ul class="versus__list">${RC_INBOUND.map(([t, b]) => html`<li><span><strong>${t}</strong><span>${b}</span></span></li>`)}</ul></div>
-<div class="versus__panel on-dark" data-reveal style="--rd:140ms"><p class="versus__title">Outbound — calls customers asked for</p><ul class="versus__list">${RC_OUTBOUND.map(([t, b]) => html`<li><span><strong>${t}</strong><span>${b}</span></span></li>`)}</ul>
-<p class="rc-safe__title">Safeguards on every outbound call</p><ul class="rc-safe">${RC_SAFEGUARDS.map((x) => html`<li>${x}</li>`)}</ul></div></div></div></section>
-${section("Voice", "Choose how it sounds", html`<div data-reveal>${voiceLibrary()}</div>`, { id: "voices", lede: "Warm, polished, conversational, calm or energetic — the agent speaks with natural pacing, handles interruptions and keeps the context of the call." })}
+<div class="versus__panel on-dark" data-reveal><p class="versus__title">Inbound — what we can configure</p><ul class="versus__list">${RC_INBOUND.map(([t, b]) => html`<li><span><strong>${t}</strong><span>${b}</span></span></li>`)}</ul></div>
+<div class="versus__panel on-dark" data-reveal style="--rd:140ms"><p class="versus__title">Outbound — only when scoped</p><ul class="versus__list">${RC_OUTBOUND.map(([t, b]) => html`<li><span><strong>${t}</strong><span>${b}</span></span></li>`)}</ul>
+<p class="rc-safe__title">Any outbound calling we configure must</p><ul class="rc-safe">${RC_SAFEGUARDS.map((x) => html`<li>${x}</li>`)}</ul></div></div></div></section>
+${section("Voice", "Choose how it sounds", html`<div data-reveal>${voiceLibrary()}</div>`, { id: "voices", lede: "Pick a voice style during setup from the voices your chosen provider offers. The styles below are text previews of tone, not recordings." })}
 ${section("Where it helps", "Built around your calls", html`<ul class="ledger rc-uses" data-reveal-group>${RC_USES.map(([t, b, tag]) => html`<li data-reveal><p class="rc-uses__tag">${tag}</p><h3>${t}</h3><p>${b}</p></li>`)}</ul><p class="muted rc-uses__note">Examples of how the service can be configured — not client results.</p>`, { id: "uses" })}
-${section("Connected", "One call, every system updated", html`<ol class="rc-flow" data-reveal-group>${RC_FLOW.map(([t, b], i) => html`<li class="rc-flow__node${i === 1 ? " rc-flow__node--core" : ""}" data-reveal style="${`--rd:${i * 70}ms`}"><span class="rc-flow__n">${String(i + 1).padStart(2, "0")}</span><strong>${t}</strong><span>${b}</span></li>`)}</ol>`, { id: "workflow", lede: "The receptionist works inside your existing tools — calendar, CRM, website and team — within the written scope of your project." })}
-<section class="section" id="handoff"><div class="container section__inner"><p class="section__label">People stay in charge</p><div class="section__head"><h2 class="reveal-words" data-reveal>A person is always one step away</h2><p class="lede" data-reveal style="--rd:140ms">Urgent, sensitive or complicated calls go to your team — transferred live with a summary, or as a callback task when nobody is available. Try the “Urgent → a person” scenario in the control centre above to see a handoff.</p></div>
+${section("Connected", "How it can connect", html`<ol class="rc-flow" data-reveal-group>${RC_FLOW.map(([t, b], i) => html`<li class="rc-flow__node${i === 1 ? " rc-flow__node--core" : ""}" data-reveal style="${`--rd:${i * 70}ms`}"><span class="rc-flow__n">${String(i + 1).padStart(2, "0")}</span><strong>${t}</strong><span>${b}</span></li>`)}</ol>`, { id: "workflow", lede: "Each connection is optional and is agreed in the written scope of your project, depending on what your provider and systems support." })}
+<section class="section" id="handoff"><div class="container section__inner"><p class="section__label">People stay in charge</p><div class="section__head"><h2 class="reveal-words" data-reveal>A person is always one step away</h2><p class="lede" data-reveal style="--rd:140ms">Urgent, sensitive or complicated calls go to your team under rules you set — as a callback task with a summary, an alert, or a live transfer where your phone setup supports it. The “Urgent → a person” scenario in the simulated call above shows one way a handoff can be configured.</p></div>
 <div class="versus" data-reveal-group>
-<div class="versus__panel on-dark" data-reveal><p class="versus__title">What it is designed to do</p><ul class="versus__list">${["Hold natural, expressive conversations with sensible pacing", "Handle interruptions and change of plans mid-sentence", "Remember what the caller said earlier in the same call", "Answer from your approved information only", "Work around the clock when you configure it to"].map((x) => html`<li><span>${x}</span></li>`)}</ul></div>
+<div class="versus__panel on-dark" data-reveal><p class="versus__title">What we design for</p><ul class="versus__list">${["Natural conversation with sensible pacing, using your provider's voice technology", "Handling interruptions and changes of plan, as far as the provider supports it", "Remembering what the caller said earlier in the same call", "Answering from your approved information only", "Working at the hours you choose"].map((x) => html`<li><span>${x}</span></li>`)}</ul></div>
 <div class="versus__panel versus__panel--not" data-reveal style="--rd:160ms"><p class="versus__title">What to know</p><ul class="versus__list">${s.boundaries.map((x) => html`<li><span>${x}</span></li>`)}</ul></div></div></div></section>
 ${section("Setup", "From first call to launch", html`<ol class="rc-steps" data-reveal-group>${RC_STEPS.map(([t, b], i) => html`<li data-reveal><span class="rc-steps__n">${String(i + 1).padStart(2, "0")}</span><strong>${t}</strong><span>${b}</span></li>`)}</ol>
 <div class="card rc-price" data-reveal><h3 class="card__title">How it is priced</h3><p>${PRICING_NOTE[s.pricing]}</p><p class="muted">Custom projects are billed 50% as a deposit, 25% after the approved design milestone and 25% before production launch. Phone numbers, call minutes and voice-provider usage are billed by the provider.</p><div class="row">${linkButton("Request a quote", quote)}</div></div>`, { id: "setup" })}
 <section class="section" id="faq"><div class="container faq"><div class="faq__aside"><p class="section__label">FAQs</p><h2 class="faq__title reveal-words" data-reveal>AI Receptionist questions</h2>
 <p data-reveal style="--rd:120ms">Another question? <a href="/contact">Contact us</a> or write to <a href="mailto:${email}">${email}</a>.</p></div>
 <div data-reveal>${RC_FAQ.map(([q, a]) => html`<details class="disclosure"><summary>${q}</summary><div class="disclosure__body"><p>${a}</p></div></details>`)}</div></div></section>
-<section class="section"><div class="container"><div class="cta-band on-dark rc-cta" data-reveal-group><p class="section__label" data-reveal>AI Receptionist</p><h2 class="reveal-words" data-reveal>Never miss the call that matters</h2><p class="lede" data-reveal>Tell us how your calls work today. We'll scope an agent around your hours, systems and rules, and quote it in writing.</p><div class="hero__actions" data-reveal>${ctaLink("Request a quote", quote, "primary")}${ctaLink("Talk to us", "/contact", "secondary")}</div></div></div></section>`;
+<section class="section"><div class="container"><div class="cta-band on-dark rc-cta" data-reveal-group><p class="section__label" data-reveal>AI Receptionist</p><h2 class="reveal-words" data-reveal>Designed around the calls that matter</h2><p class="lede" data-reveal>Tell us how your calls work today. We'll scope an agent around your hours, systems and rules, and quote it in writing.</p><div class="hero__actions" data-reveal>${ctaLink("Request a quote", quote, "primary")}${ctaLink("Talk to us", "/contact", "secondary")}</div></div></div></section>`;
 }
 
 /** Things Crestmont will not do (shown on About and in the homepage comparison; approved copy). */
@@ -409,13 +426,15 @@ async function handleLead(ctx: AppContext, kind: "quote" | "contact", rerender: 
     await securityEvent(ctx.db, "lead_form_honeypot", { ip: ctx.ip, detail: kind });
     return redirect(ctx, thanks);
   }
-  const rl = await rateLimit(ctx.db, `leadform:${ctx.ip ?? "unknown"}`, 10, 3600);
-  if (!rl.allowed) return rerender(v, { form: "Too many submissions from your network. Please wait an hour or email us directly." }, 429);
   if (!(await verifyTurnstile(ctx, f.get("cf-turnstile-response")))) {
     return rerender(v, { form: "We could not verify that this submission came from a person. Please try again." }, 400);
   }
   const { errors } = validateLeadForm(v, kind);
   if (Object.keys(errors).length) return rerender(v, errors, 422);
+  // CREST-GAP-082: only submissions that passed bot verification and validation count toward the per-network budget,
+  // so a visitor correcting typos is never locked out.
+  const rl = await rateLimit(ctx.db, `leadform:${ctx.ip ?? "unknown"}`, 10, 3600);
+  if (!rl.allowed) return rerender(v, { form: "Too many submissions from your network. Please wait an hour or email us directly." }, 429);
 
   // Claimed only after validation passed, atomically: a duplicate never creates a second lead. A duplicate reports
   // success only once the first submission's lead is actually saved; while it is still being saved it waits briefly,
@@ -459,6 +478,9 @@ async function handleLead(ctx: AppContext, kind: "quote" | "contact", rerender: 
     } catch (err) {
       console.error(JSON.stringify({ level: "warn", msg: "lead acknowledgement email failed", leadId, error: (err as Error).message }));
     }
+    // CREST-GAP-005: Crestmont staff are told about the lead (in-app + one staff email, idempotent per lead).
+    try { await notifyNewLead(ctx, leadId, kind); }
+    catch (err) { console.error(JSON.stringify({ level: "error", msg: "staff lead notification failed", leadId, error: (err as Error).message })); }
   } catch (err) {
     // The lead was not saved: release the one-time token so the visitor can resubmit, and never report success.
     if (sub && !leadId) await ctx.db.prepare(`DELETE FROM rate_limits WHERE key = ? AND window_start = ?`).bind(`leadsub:${sub.key}`, sub.issued).run().catch(() => undefined);
@@ -497,9 +519,9 @@ export function register(r: Router): void {
 <h2 class="statement__text scroll-words" id="principles-title">Published prices. Counted revisions. Nothing goes live without your approval.</h2>
 <ul class="statement__labels">${whyItems.slice(0, 4).map((w) => html`<li class="statement__label">${w.title}</li>`)}</ul></div></div></section>
 ${section("Our services", "What we build", html`${serviceBento(featured, c)}<p class="section__more"><a href="/services">All services</a></p>`, { id: "services", lede: c.get("services.overview").lede })}
-${section("New · AI Receptionist", "Every call answered, every detail captured", html`<div class="rc-home"><div class="rc-home__copy" data-reveal-group>
-<p class="lede" data-reveal>Natural-sounding AI voice agents for inbound and outbound calls. They answer questions, book and reschedule appointments, update your CRM and hand urgent calls to your team — with a summary of every call.</p>
-<ul class="rc-home__points" data-reveal>${["Inbound: answers, intake, scheduling and urgent routing", "Outbound: confirmations, reminders and follow-ups customers asked for", "Connected to your calendar, CRM and website", "Identifies itself as AI; a person is always one step away"].map((x) => html`<li>${x}</li>`)}</ul>
+${section("New · AI Receptionist", "AI voice agents, configured for your calls", html`<div class="rc-home"><div class="rc-home__copy" data-reveal-group>
+<p class="lede" data-reveal>Custom AI voice agents, built for your business on the voice provider you choose. They can answer questions from your approved information, collect caller details and requests, and pass urgent calls to your team under your rules — each one scoped and quoted in writing.</p>
+<ul class="rc-home__points" data-reveal>${["A custom configuration for each client, on the provider you choose", "Answers questions and collects caller details and requests", "Optional calendar, CRM and website connections within the written scope", "Identifies itself as AI; a person is always one step away"].map((x) => html`<li>${x}</li>`)}</ul>
 <div class="hero__actions" data-reveal>${ctaLink("Explore AI Receptionist", "/services/ai-receptionist", "primary")}${ctaLink("Request a quote", "/quote?service=ai-receptionist", "secondary")}</div></div>
 <div class="rc-home__demo" data-reveal style="--rd:140ms">${receptionistConsole({ compact: true, id: "rc-home" })}</div></div>`, { id: "ai-receptionist" })}
 ${section("Latest work", c.get("portfolio.intro").heading === "Portfolio" ? "Real websites" : c.get("portfolio.intro").heading, projects.length ? html`${portfolioExplorer(ctx, projects, { variant: "home" })}<p class="section__more"><a href="/portfolio">View the portfolio</a></p>`
@@ -541,6 +563,9 @@ ${section("Not offered", "What we do not offer", html`<p class="muted">We do not
   r.get("/services/:slug", async (ctx, p) => {
     const s = serviceBySlug(p.slug);
     if (!s || s.pricing === "maintenance") throw new HttpError(404, "That service page does not exist.");
+    // CREST-GAP-046: each service page has its own title (the service name) and description (its summary, which the
+    // CMS can override per service through `service.<slug>`).
+    const serviceMeta = (c: Content) => ({ title: s.name, description: metaDescription(c.get(`service.${s.slug}`).summary || s.summary) });
     return page(ctx, "services", [`service.${s.slug}`, "pricing.presentation"], (c) => {
       const copy = c.get(`service.${s.slug}`);
       if (s.slug === "ai-receptionist") return aiReceptionistPage(s, copy, ctx.settings["contact.email"] ?? SUPPORT_EMAIL);
@@ -551,7 +576,7 @@ ${section("Not offered", "What we do not offer", html`<p class="muted">We do not
 <div>${s.includes.length ? html`<div class="card"><h3 class="card__title">What is included</h3><ul class="checklist">${s.includes.map((i) => html`<li>${i}</li>`)}</ul></div>` : ""}
 ${s.boundaries.length ? html`<div class="card card--quiet"><h3 class="card__title">Good to know</h3><ul class="plain-list">${s.boundaries.map((i) => html`<li>${i}</li>`)}</ul></div>` : ""}</div></div></section>
 ${related.length ? section("Related", "Related services", serviceList(related)) : ""}`;
-    });
+    }, 200, serviceMeta);
   });
 
   r.get("/pricing", (ctx) => page(ctx, "pricing", ["pricing.presentation"], (c) => {
@@ -591,7 +616,7 @@ ${ids.map((fid) => { const f = top(fid); return html`<tr><th scope="row"><span c
 <tbody><tr class="compare__group"><th scope="rowgroup" colspan="4">Payment</th></tr>
 <tr><th scope="row"><span class="compare__label">Price</span></th>${PKG_ORDER.map((id) => html`<td class="compare__scope"><strong>${pkgPrice(id)}</strong>${PACKAGES[id].priceIsFloor ? html`<span class="compare__sub">final price in your written scope</span>` : ""}</td>`)}</tr>
 <tr><th scope="row"><span class="compare__label">Payment</span></th>${PKG_ORDER.map(() => html`<td class="compare__scope">100% upfront</td>`)}</tr>
-<tr class="compare__actions"><th scope="row"><span class="visually-hidden">Choose a package</span></th>${PKG_ORDER.map((id) => html`<td>${linkButton(`Choose ${PACKAGES[id].name}`, `/checkout/${id}`, id === "premium" ? "primary" : "secondary", "sm")}</td>`)}</tr></tbody>
+<tr class="compare__actions"><th scope="row"><span class="visually-hidden">Choose a package</span></th>${PKG_ORDER.map((id) => html`<td>${linkButton(`Choose ${PACKAGES[id].name}`, packageCta(id), id === "premium" ? "primary" : "secondary", "sm")}</td>`)}</tr></tbody>
 </table></div>
 <p class="muted compare__foot">A gold check means the item is included at the same scope in that package; where the scope grows, the package's own wording is shown. Need more than Premium? <a href="/quote?package=custom">Request a custom quote</a>.</p></div></section>`;
   }));
@@ -609,11 +634,11 @@ ${ids.map((fid) => { const f = top(fid); return html`<tr><th scope="row"><span c
     const proj = await pf.getBySlug(ctx.db, p.slug);
     if (!proj || !proj.published) throw new HttpError(404, "That portfolio project is not available.");
     const tms = await pf.publishedTestimonials(ctx.db, proj.id);
-    return htmlResponse(ctx, publicLayout(ctx, { title: `${proj.name} — case study`, description: proj.description.slice(0, 160) }, html`
+    return htmlResponse(ctx, publicLayout(ctx, { title: `${proj.name} — case study`, description: metaDescription(proj.description) }, html`
 ${pageHero(proj.industry, proj.name, undefined, html`<a class="btn btn--primary" href="${safeUrl(proj.live_url)}" rel="noopener noreferrer" target="_blank">Visit live website</a>${linkButton("All projects", "/portfolio", "ghost")}`)}
 <section class="section section--flush"><div class="container">${portfolioExplorer(ctx, [proj], { variant: "case", headingLevel: 2 })}</div></section>
-<section class="section section--flush"><div class="container case-shots"><figure>${shot(proj, "desktop", true)}<figcaption class="faint">Desktop${proj.screenshot_captured_at ? ` · captured ${formatDate(proj.screenshot_captured_at)}` : ""}</figcaption></figure>
-<figure>${shot(proj, "mobile", true)}<figcaption class="faint">Mobile</figcaption></figure></div></section>
+<section class="section section--flush"><div class="container case-shots"><figure>${shot(proj, "desktop", true)}<figcaption class="faint">Desktop${proj.desktop_screenshot_file_id ? (proj.screenshot_captured_at ? ` · captured ${formatDate(proj.screenshot_captured_at)}` : "") : " · demonstration build with sample data"}</figcaption></figure>
+<figure>${shot(proj, "mobile", true)}<figcaption class="faint">Mobile${proj.mobile_screenshot_file_id ? "" : " · demonstration build"}</figcaption></figure></div></section>
 <section class="section"><div class="container grid grid-2"><div class="prose"><h2>About the project</h2>${paragraphs(proj.description).map((x) => html`<p>${x}</p>`)}
 ${proj.technology_summary ? html`<h3>Technology</h3><p>${proj.technology_summary}</p>` : ""}<p class="faint">${proj.relationship}</p></div>
 <div class="card"><h3 class="card__title">Verified features</h3><ul class="checklist">${pf.features(proj).map((f) => html`<li>${f}</li>`)}</ul>
@@ -668,7 +693,7 @@ ${parseItems(c.get("faq.items").items).map((q) => html`<details class="disclosur
     const h = c.get("hosting.page");
     return html`${serviceHero("Ongoing care", h.heading, h.lede, html`${linkButton("Ask about maintenance", "/contact?topic=maintenance")}`, serviceVisual("hosting-maintenance"))}
 <section class="section section--flush"><div class="container">${maintenanceCards()}</div></section>
-${section("Ownership", "Your site, your choice", html`<ul class="plain-list"><li>Maintenance plans are optional. Your domain always remains registered to you.</li><li>You can use your own domain registrar or agency-managed DNS services.</li><li>Plans renew monthly by automatic billing, with self-service payment management in your customer portal; see the <a href="/legal/cancellation">cancellation policy</a>.</li><li>Support tickets can be submitted at any time; see the <a href="/legal/support">support policy</a> for staffed hours.</li></ul>`)}`;
+${section("Ownership", "Your site, your choice", html`<ul class="plain-list"><li>Maintenance plans are optional. Your domain always remains registered to you.</li><li>You can use your own domain registrar or agency-managed DNS services.</li>${plansApproved() ? html`<li>Plans renew monthly by automatic billing, with self-service payment management in your customer portal; see the <a href="/legal/cancellation">cancellation policy</a>.</li>` : ""}<li>Support tickets can be submitted at any time; see the <a href="/legal/support">support policy</a> for staffed hours.</li></ul>`)}`;
   }));
 
   // ── lead forms ──
@@ -700,6 +725,7 @@ ${section("Ownership", "Your site, your choice", html`<ul class="plain-list"><li
     return htmlResponse(ctx, publicLayout(ctx, { title: d.title, description: d.summary }, html`${pageHero("Policies", d.title, d.summary)}
 <section class="section section--flush"><div class="container"><div class="legal-draft" role="note"><strong>Draft — pending attorney review.</strong> ${DRAFT_BANNER.replace(/^Draft — pending attorney review\.\s*/, "")}</div>
 <article class="prose legal">${d.sections.map((s) => html`<h2>${s.heading}</h2>${(s.paras ?? []).map((x) => html`<p>${x}</p>`)}${s.list ? html`<ul>${s.list.map((x) => html`<li>${x}</li>`)}</ul>` : ""}`)}</article>
+${d.slug === "privacy" ? html`<p class="legal-account-link" data-privacy-self-service><strong>Signed in?</strong> Download or delete your data at <a href="/account/privacy">/account/privacy</a>.</p>` : ""}
 <hr><nav aria-label="Other policies" class="legal-nav"><span class="faint">Other policies:</span> <a href="/legal">All policies</a> ${LEGAL_SLUGS.filter((s) => s !== d.slug).map((s) => html`<a href="/legal/${s}">${docs[s].title}</a> `)}</nav></div></section>`));
   });
 
@@ -754,7 +780,8 @@ ${turnstileWidget(ctx)}
 function renderContact(ctx: AppContext, v: FormVals, e: FieldErrors, status: number) {
   return page(ctx, "contact", ["contact.page"], (c) => {
     const cp = c.get("contact.page");
-    const hours = ctx.settings["support.staffed_hours"];
+    // CREST-GAP-049: the line appears only once real staffed hours are set (Owner → business settings).
+    const hours = ctx.settings["support.staffed_hours"]?.trim() || null;
     const email = ctx.settings["contact.email"] ?? SUPPORT_EMAIL;
     const channel = (title: string, addr: string, note: string) => html`<a class="cx-channel" href="mailto:${addr}" data-reveal><span class="cx-channel__title">${title}</span><span class="cx-channel__addr">${addr}</span><span class="cx-channel__note">${note}</span><span class="cx-channel__go" aria-hidden="true">${ARROW_SVG}</span></a>`;
     return html`<section class="hero hero--page hero--contact"><div class="container cx-hero"><div class="eyebrow">Contact</div><h1 class="hero-title">${cp.heading}</h1>${cp.lede ? html`<p class="lede hero-seq" style="--seq:0">${cp.lede}</p>` : ""}</div></section>
@@ -774,12 +801,21 @@ ${channel("General & support", email, "Questions, existing projects and anything
 ${channel("Sales", SALES_EMAIL, "Packages, quotes and new projects")}
 ${channel("Billing", BILLING_EMAIL, "Invoices and payments")}
 </div>
-<div class="cx-more" data-reveal><p><strong>Staffed hours:</strong> ${hours ?? "published here once confirmed"}.</p><p>Existing customers can open support tickets any time in the <a href="/login">customer portal</a>. Planning a project? The <a href="/quote">custom quote form</a> collects the details we need.</p></div>
+<div class="cx-more" data-reveal>${hours ? html`<p><strong>Staffed hours:</strong> ${hours}.</p>` : ""}<p>Existing customers can open support tickets any time in the <a href="/login">customer portal</a>. Planning a project? The <a href="/quote">custom quote form</a> collects the details we need.</p></div>
 </div></section>`;
   }, status);
 }
 
+/** CREST-GAP-097: the confirmation is shown only on the redirect that follows a saved submission (the one-time success
+ *  flash set by handleLead). A direct visit, a reload or a bookmark gets neutral text that confirms nothing. */
 function thanksPage(ctx: AppContext, title: string, body: string) {
+  if (ctx.flash?.kind !== "success") {
+    const quote = ctx.url.pathname.startsWith("/quote");
+    return htmlResponse(ctx, publicLayout(ctx, { title: quote ? "Request a quote" : "Contact", noindex: true }, html`<section class="hero hero--page hero--thanks"><div class="container cx-thanks">
+<div class="eyebrow">${quote ? "Custom quote" : "Contact"}</div><h1>${quote ? "Request a custom quote" : "Send us a message"}</h1>
+<p class="lede">This page confirms a ${quote ? "quote request" : "message"} right after it is sent. If you have already sent one, we will reply by email; otherwise, use the form to send it.</p>
+<div class="row">${linkButton(quote ? "Request a quote" : "Contact us", quote ? "/quote" : "/contact")}${linkButton("Return home", "/", "secondary")}</div></div></section>`));
+  }
   return htmlResponse(ctx, publicLayout(ctx, { title, noindex: true }, html`<section class="hero hero--page hero--thanks"><div class="container cx-thanks">
 <svg class="cx-check" viewBox="0 0 64 64" width="72" height="72" aria-hidden="true"><circle cx="32" cy="32" r="29" fill="none" stroke="currentColor" stroke-width="2"/><path d="M19 33l9 9 17-19" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
 <div class="eyebrow">Received</div><h1>${title}</h1><p class="lede">${body}</p>

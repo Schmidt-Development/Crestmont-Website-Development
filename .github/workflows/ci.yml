@@ -12,8 +12,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"   # >= 22.18 for native TypeScript
       - name: Install dev tooling
@@ -24,13 +24,29 @@ jobs:
         run: npm test
       - name: Build runner (AI Builds) — typecheck and mock tests
         run: npx tsc -p runner/tsconfig.json && node --no-warnings --test 'runner/test/*.test.ts'
-      - name: Dependency audit
-        run: npm audit --audit-level=high || true   # becomes blocking once runtime dependencies exist
-      - uses: actions/upload-artifact@v4
+      # ASVS F-10. The previous step (`npm audit ... || true` at the root) could never fail: the root has no
+      # lockfile, so npm audit exited with ENOLOCK and the error was swallowed. This audits every committed
+      # lockfile that actually lists packages and fails on high/critical advisories. A package.json that declares
+      # dependencies without a committed lockfile is reported as a warning (the runner-images job generates those).
+      - name: Dependency audit (npm audit on every committed lockfile; blocking on high)
+        run: |
+          set -euo pipefail
+          audited=0
+          for pj in $(git ls-files '*package.json' | grep -v node_modules); do
+            dir=$(dirname "$pj")
+            if [ -f "$dir/package-lock.json" ] && node -e 'const l=require(process.argv[1]);process.exit(Object.keys(l.packages||{}).filter(k=>k).length?0:1)' "$PWD/$dir/package-lock.json"; then
+              echo "::group::npm audit $dir"; (cd "$dir" && npm audit --audit-level=high --omit=optional); echo "::endgroup::"; audited=$((audited+1))
+            elif node -e 'const p=require(process.argv[1]);process.exit(Object.keys({...p.dependencies,...p.devDependencies,...p.optionalDependencies}).length?0:1)' "$PWD/$pj"; then
+              echo "::warning file=$pj::$dir declares dependencies but has no committed lockfile with packages; it was not audited."
+            fi
+          done
+          echo "Audited $audited lockfile(s)." | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: ci-evidence
           path: evidence/ci-evidence.json
+          retention-days: 14
       - name: Post evidence to staging readiness API
         if: always() && github.ref == 'refs/heads/main' && vars.READINESS_URL != ''
         env:
@@ -47,8 +63,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"
       - name: hadolint (pinned release binary, checksum verified)
@@ -69,7 +85,7 @@ jobs:
             (cd runner/agent-sdk && npm install --package-lock-only --ignore-scripts --no-audit --no-fund) || echo "::warning::could not resolve runner/agent-sdk dependencies"
           fi
       - name: Upload lockfiles for review
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: runner-lockfiles
           if-no-files-found: ignore
@@ -110,8 +126,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"
       - name: Parse every script and run PSScriptAnalyzer (Windows PowerShell 5.1 compatibility rules)

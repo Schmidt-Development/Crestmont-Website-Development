@@ -49,3 +49,38 @@ test("[INFRA-002] staging seed applies cleanly on a migrated database and demo a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("[INFRA-002] staging re-seed (reseed_demo_accounts) adds sample data alongside the existing demo accounts instead of failing on foreign keys", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "reseed-"));
+  try {
+    const gen = (n: number) => {
+      execFileSync(process.execPath, ["--no-warnings", "scripts/seed-staging.ts", "--out", join(dir, `seed${n}.sql`), "--credentials", join(dir, `creds${n}.md`)], { stdio: "pipe" });
+      return { sql: readFileSync(join(dir, `seed${n}.sql`), "utf8"), creds: readFileSync(join(dir, `creds${n}.md`), "utf8") };
+    };
+    const first = gen(1), second = gen(2);   // two runs: same demo emails, different random ids
+    const db = openDb(":memory:");
+    await syncRequirements(db);
+    db.raw.exec("PRAGMA foreign_keys = ON");
+    // D1 applies a --file as one unit; a foreign-key failure anywhere rejected the whole re-seed before this fix.
+    const apply = (sql: string) => { db.raw.exec("BEGIN"); try { db.raw.exec(sql); db.raw.exec("COMMIT"); } catch (e) { db.raw.exec("ROLLBACK"); throw e; } };
+    apply(first.sql);
+    const count = (t: string) => (db.raw.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n;
+    const before = { users: count("users"), projects: count("projects"), leads: count("leads") };
+    apply(second.sql);
+    assert.equal(count("users"), before.users, "demo accounts are not duplicated");
+    assert.equal(count("projects"), before.projects * 2, "the re-seed adds its sample projects alongside");
+    assert.equal(count("leads"), before.leads * 2);
+    assert.equal((db.raw.prepare("PRAGMA foreign_key_check").all() as unknown[]).length, 0, "nothing references a user that does not exist");
+    // The existing accounts keep their credentials: the first run's owner password and 2FA still sign in.
+    const [, ownerEmail, ownerPw, ownerTotp] = [...first.creds.matchAll(/^\| (\w+) \| (\S+) \| `([^`]+)` \| (?:`([A-Z2-7]+)`|—) \|/gm)].map((m) => m.slice(1)).find((a) => a[0] === "owner")!;
+    const env: Env = { DB: db, ENVIRONMENT: "development", APP_URL: "http://crestmont.test" };
+    const o = await new TestClient(env).login(ownerEmail, ownerPw, ownerTotp);
+    assert.equal((await o.get("/staff/projects")).status, 200);
+    // Re-seeded sample rows are attached to the existing owner/sales accounts, not to the discarded ids.
+    const owners = db.raw.prepare(`SELECT DISTINCT owner_user_id AS u FROM leads`).all() as { u: string }[];
+    assert.equal(owners.length, 1, "both runs' leads belong to the one existing sales account");
+    assert.ok(second.sql.includes(`(SELECT id FROM users WHERE email = 'sales@crestmont-preview.test')`));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

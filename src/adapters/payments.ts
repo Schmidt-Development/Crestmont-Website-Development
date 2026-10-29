@@ -1,9 +1,27 @@
-// Stripe adapter (PAY-001, PAY-004, PAY-006, PAY-009). TEST MODE ONLY until the Founder authorises live payments
-// after the legal entity exists (PAY-010). A live secret key is refused at construction.
+// Stripe adapter (PAY-001, PAY-004, PAY-006, PAY-009). Every class is constructed for one expected mode ("test" by
+// default). A key of the other mode is refused at construction and any Stripe object whose livemode differs from the
+// expected mode is refused (CREST-GAP-007/008). Live mode is only ever requested by src/domain/payments-mode.ts, which
+// allows it on production behind the Founder's PAYMENTS_LIVE_AUTHORIZED flag (PAY-010).
 // When no key is configured the platform reports payments as "not configured" and checkout
 // buttons explain that online payment is unavailable — nothing is simulated.
 
+import { keyMode, type StripeMode } from "../domain/payments-mode.ts";
+
 export class LivePaymentsNotAuthorized extends Error {}
+
+function assertKeyMode(secretKey: string, mode: StripeMode) {
+  if (keyMode(secretKey) !== mode) {
+    throw new LivePaymentsNotAuthorized(mode === "test"
+      ? "Only Stripe test-mode keys are accepted until live payments are authorised by the Founder"
+      : "Live mode requires a live Stripe key; test keys are refused on production");
+  }
+}
+/** A Stripe object whose livemode does not match the expected mode is refused. */
+function assertObjectMode(body: { livemode?: boolean }, mode: StripeMode) {
+  if (typeof body.livemode === "boolean" && body.livemode !== (mode === "live")) {
+    throw new LivePaymentsNotAuthorized(body.livemode ? "Stripe returned a live-mode object; live payments are not authorised" : "Stripe returned a test-mode object where live mode is expected");
+  }
+}
 
 /** One Checkout line. Sales tax (LEGAL-005) is sent as its own line per jurisdiction, tagged with taxJurisdictionId. */
 export interface CheckoutLine { name: string; amountCents: number; quantity?: number; taxJurisdictionId?: string }
@@ -11,6 +29,8 @@ export interface CheckoutRequest {
   mode: "payment" | "subscription";
   lines: CheckoutLine[];
   customerEmail: string;
+  /** CREST-GAP-038: the organization's stored Stripe Customer; without one, payment-mode Checkout creates one. */
+  customerId?: string | null;
   successUrl: string;
   cancelUrl: string;
   metadata: Record<string, string>;
@@ -20,7 +40,7 @@ export interface CheckoutRequest {
 
 export interface PaymentsAdapter {
   readonly configured: boolean;
-  readonly mode: "test" | "none";
+  readonly mode: "test" | "live" | "none";
   createCheckout(req: CheckoutRequest): Promise<{ id: string; url: string }>;
   createBillingPortal(customerId: string, returnUrl: string): Promise<{ url: string }>;
   createRefund(paymentIntentId: string, amountCents: number, idempotencyKey: string): Promise<{ id: string; status: string }>;
@@ -29,6 +49,9 @@ export interface PaymentsAdapter {
 export class NoPayments implements PaymentsAdapter {
   readonly configured = false;
   readonly mode = "none" as const;
+  /** Why payments are unavailable here. */
+  readonly reason: string;
+  constructor(reason = "STRIPE_SECRET_KEY is not set.") { this.reason = reason; }
   async createCheckout(): Promise<never> { throw new Error("Payments are not configured"); }
   async createBillingPortal(): Promise<never> { throw new Error("Payments are not configured"); }
   async createRefund(): Promise<never> { throw new Error("Payments are not configured"); }
@@ -42,15 +65,13 @@ export class NoPayments implements PaymentsAdapter {
  */
 export const STRIPE_API_VERSION = "2025-02-24.acacia";
 
-export class StripeTestPayments implements PaymentsAdapter {
+export class StripePayments implements PaymentsAdapter {
   readonly configured = true;
-  readonly mode = "test" as const;
+  readonly mode: StripeMode;
   private key: string; private fetchImpl: typeof fetch;
-  constructor(secretKey: string, fetchImpl: typeof fetch = fetch) {
-    if (!secretKey.startsWith("sk_test_") && !secretKey.startsWith("rk_test_")) {
-      throw new LivePaymentsNotAuthorized("Only Stripe test-mode keys are accepted until live payments are authorised by the Founder");
-    }
-    this.key = secretKey; this.fetchImpl = fetchImpl;
+  constructor(secretKey: string, fetchImpl: typeof fetch = fetch, mode: StripeMode = "test") {
+    assertKeyMode(secretKey, mode);
+    this.key = secretKey; this.fetchImpl = fetchImpl; this.mode = mode;
   }
 
   private async call<T>(path: string, form: Record<string, string>, idem?: string): Promise<T> {
@@ -59,15 +80,21 @@ export class StripeTestPayments implements PaymentsAdapter {
       headers: { authorization: `Bearer ${this.key}`, "stripe-version": STRIPE_API_VERSION, "content-type": "application/x-www-form-urlencoded", ...(idem ? { "idempotency-key": idem } : {}) },
       body: new URLSearchParams(form).toString(),
     });
-    const body = (await r.json()) as T & { error?: { message: string } };
+    const body = (await r.json()) as T & { error?: { message: string }; livemode?: boolean };
     if (!r.ok) throw new Error(`Stripe: ${body.error?.message ?? r.status}`);
+    assertObjectMode(body, this.mode);
     return body;
   }
 
   async createCheckout(req: CheckoutRequest) {
-    const form: Record<string, string> = {
-      mode: req.mode, success_url: req.successUrl, cancel_url: req.cancelUrl, customer_email: req.customerEmail,
-    };
+    const form: Record<string, string> = { mode: req.mode, success_url: req.successUrl, cancel_url: req.cancelUrl };
+    // CREST-GAP-038: reuse the stored Customer; otherwise make Checkout create one (subscription mode always does),
+    // so the billing portal works after the first payment. `customer` and `customer_email` are mutually exclusive.
+    if (req.customerId) form.customer = req.customerId;
+    else {
+      form.customer_email = req.customerEmail;
+      if (req.mode === "payment") form.customer_creation = "always";
+    }
     req.lines.forEach((l, i) => {
       form[`line_items[${i}][quantity]`] = String(l.quantity ?? 1);
       form[`line_items[${i}][price_data][currency]`] = "usd";
@@ -78,6 +105,8 @@ export class StripeTestPayments implements PaymentsAdapter {
     });
     for (const [k, v] of Object.entries(req.metadata)) form[`metadata[${k}]`] = v;
     if (req.mode === "payment") for (const [k, v] of Object.entries(req.metadata)) form[`payment_intent_data[metadata][${k}]`] = v;
+    // CREST-GAP-083: the Subscription carries the same metadata, so customer.subscription.* events resolve the organization.
+    if (req.mode === "subscription") for (const [k, v] of Object.entries(req.metadata)) form[`subscription_data[metadata][${k}]`] = v;
     const s = await this.call<{ id: string; url: string }>("checkout/sessions", form, req.idempotencyKey);
     return { id: s.id, url: s.url };
   }
@@ -91,6 +120,11 @@ export class StripeTestPayments implements PaymentsAdapter {
   }
 }
 
+/** Test-mode adapter (the only mode outside an authorised production). */
+export class StripeTestPayments extends StripePayments {
+  constructor(secretKey: string, fetchImpl: typeof fetch = fetch) { super(secretKey, fetchImpl, "test"); }
+}
+
 /**
  * Read-only Stripe API access for fee import (FIN-002) and Stripe-side reconciliation (PAY-009).
  * GET requests only: this class has no method that can create, change or refund anything.
@@ -98,11 +132,10 @@ export class StripeTestPayments implements PaymentsAdapter {
  */
 export class StripeReadOnly {
   private key: string; private fetchImpl: typeof fetch;
-  constructor(secretKey: string, fetchImpl: typeof fetch = fetch) {
-    if (!secretKey.startsWith("sk_test_") && !secretKey.startsWith("rk_test_")) {
-      throw new LivePaymentsNotAuthorized("Only Stripe test-mode keys are accepted until live payments are authorised by the Founder");
-    }
-    this.key = secretKey; this.fetchImpl = fetchImpl;
+  readonly mode: StripeMode;
+  constructor(secretKey: string, fetchImpl: typeof fetch = fetch, mode: StripeMode = "test") {
+    assertKeyMode(secretKey, mode);
+    this.key = secretKey; this.fetchImpl = fetchImpl; this.mode = mode;
   }
 
   async get<T>(path: string, query: [string, string][] = []): Promise<T> {
@@ -111,9 +144,12 @@ export class StripeReadOnly {
     const r = await this.fetchImpl(`https://api.stripe.com/v1/${path}${qs}`, { method: "GET", headers: { authorization: `Bearer ${this.key}`, "stripe-version": STRIPE_API_VERSION } });
     const body = (await r.json().catch(() => ({}))) as T & { error?: { message: string }; livemode?: boolean };
     if (!r.ok) throw new Error(`Stripe ${r.status}: ${body.error?.message ?? "error"}`);
-    if (body.livemode === true) throw new LivePaymentsNotAuthorized("Stripe returned a live-mode object; live payments are not authorised");
+    assertObjectMode(body, this.mode);
     return body;
   }
+
+  /** Refuses a listed object whose livemode differs from this reader's mode. */
+  assertMode(o: { livemode?: boolean }) { assertObjectMode(o, this.mode); }
 
   /** PaymentIntent with its latest charge and that charge's balance transaction (fee). */
   retrievePaymentIntentWithFee(id: string) {
@@ -187,12 +223,11 @@ export interface StripePayout { id: string; amount: number; currency: string; st
 export class StripeInvoicing {
   private key: string; private fetchImpl: typeof fetch;
   readonly reader: StripeReadOnly;
-  constructor(secretKey: string, fetchImpl: typeof fetch = fetch) {
-    if (!secretKey.startsWith("sk_test_") && !secretKey.startsWith("rk_test_")) {
-      throw new LivePaymentsNotAuthorized("Only Stripe test-mode keys are accepted until live payments are authorised by the Founder");
-    }
-    this.key = secretKey; this.fetchImpl = fetchImpl;
-    this.reader = new StripeReadOnly(secretKey, fetchImpl);
+  readonly mode: StripeMode;
+  constructor(secretKey: string, fetchImpl: typeof fetch = fetch, mode: StripeMode = "test") {
+    assertKeyMode(secretKey, mode);
+    this.key = secretKey; this.fetchImpl = fetchImpl; this.mode = mode;
+    this.reader = new StripeReadOnly(secretKey, fetchImpl, mode);
   }
 
   private async post<T>(path: string, form: [string, string][], idempotencyKey: string): Promise<T> {
@@ -204,7 +239,7 @@ export class StripeInvoicing {
     });
     const body = (await r.json().catch(() => ({}))) as T & { error?: { message: string }; livemode?: boolean };
     if (!r.ok) throw new Error(`Stripe ${r.status}: ${body.error?.message ?? "error"}`);
-    if (body.livemode === true) throw new LivePaymentsNotAuthorized("Stripe returned a live-mode object; live payments are not authorised");
+    assertObjectMode(body, this.mode);
     return body;
   }
 

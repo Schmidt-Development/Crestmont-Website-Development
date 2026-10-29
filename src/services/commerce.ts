@@ -1,6 +1,6 @@
 // Orders, invoices and project provisioning (SALES-004, PAY-005, PAY-006).
 // Prices always come from the server catalog or a stored quote version — never from the client.
-import type { Db } from "../lib/db.ts";
+import type { Db, DbStatement } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { PACKAGES, MAINTENANCE_PLANS, milestoneSplit, type PackageId, type MaintenanceId } from "../domain/catalog.ts";
 import { milestoneInvoiceAllowed } from "../domain/project.ts";
@@ -11,48 +11,100 @@ import { taxForNewInvoice, quoteProductKey, checkoutLinesFor } from "./tax.ts";
 
 export interface InvoiceRow { id: string; organization_id: string; order_id: string | null; project_id: string | null; milestone_kind: string | null; amount_cents: number; status: string; description: string | null }
 
-export async function createPackageOrder(db: Db, organizationId: string, packageId: PackageId, actorUserId: string, now: Date = new Date()) {
+export async function createPackageOrder(db: Db, organizationId: string, packageId: PackageId, actorUserId: string, now: Date = new Date(), opts: { leadId?: string | null } = {}) {
   const pkg = PACKAGES[packageId];
   if (!pkg) throw new HttpError(400, "Unknown package");
   // CAT-007: the Founder-approved effective price (catalog price unless an approved override is in force).
   const price = await effectivePackagePrice(db, pkg.id, now);
   const amount = price.cents;
   const at = nowIso(() => now);
-  const orderId = newId("ord"), invoiceId = newId("inv");
   // LEGAL-005: tax (if the Owner configured it) is added on top of the price; the order total stays pre-tax.
   const tax = await taxForNewInvoice(db, { description: `${pkg.name} package — 100% upfront`, amountCents: amount, productKey: pkg.id });
+  const description = `${pkg.name} website package`;
+  // CREST-GAP-036: one open invoice per organization and package. A repeat checkout reuses it (same amounts), so
+  // abandoned clicks do not pile up as receivables and two separate invoices can never both be paid. If the price or
+  // tax changed since, the stale invoice is voided and a new one is issued.
+  const open = await db.prepare(`SELECT i.id AS invoice_id, o.id AS order_id, o.lead_id, o.total_cents, i.amount_cents, i.subtotal_cents, i.tax_cents, i.tax_detail_json FROM invoices i JOIN orders o ON o.id = i.order_id
+      WHERE o.organization_id = ? AND o.kind = 'package' AND o.product_id = ? AND o.status = 'pending_payment' AND i.status = 'open' AND i.milestone_kind = 'full'
+      ORDER BY i.created_at DESC LIMIT 1`).bind(organizationId, pkg.id)
+    .first<{ invoice_id: string; order_id: string; lead_id: string | null; total_cents: number; amount_cents: number; subtotal_cents: number | null; tax_cents: number; tax_detail_json: string | null }>();
+  if (open) {
+    if (open.total_cents === amount && open.amount_cents === tax.amountCents && (open.tax_detail_json ?? null) === (tax.detailJson ?? null)) {
+      if (opts.leadId && !open.lead_id) await db.prepare(`UPDATE orders SET lead_id = ? WHERE id = ? AND lead_id IS NULL`).bind(opts.leadId, open.order_id).run();
+      await audit(db, { actorUserId, action: "order.reused", subjectType: "order", subjectId: open.order_id, organizationId, details: { packageId, invoiceId: open.invoice_id } });
+      return { orderId: open.order_id, invoiceId: open.invoice_id, amountCents: open.amount_cents, description, reused: true,
+        checkoutLines: checkoutLinesFor({ description, amount_cents: open.amount_cents, subtotal_cents: open.subtotal_cents, tax_detail_json: open.tax_detail_json }, description) };
+    }
+    await db.batch([
+      db.prepare(`UPDATE invoices SET status = 'void' WHERE id = ? AND status = 'open'`).bind(open.invoice_id),
+      db.prepare(`UPDATE orders SET status = 'cancelled' WHERE id = ? AND status = 'pending_payment'`).bind(open.order_id),
+    ]);
+    await audit(db, { actorUserId, action: "invoice.voided_price_changed", subjectType: "invoice", subjectId: open.invoice_id, organizationId, details: { packageId, oldAmountCents: open.amount_cents, newAmountCents: tax.amountCents } });
+  }
+  const orderId = newId("ord"), invoiceId = newId("inv");
   await db.batch([
-    db.prepare(`INSERT INTO orders (id, organization_id, product_id, total_cents, status, kind, created_at) VALUES (?,?,?,?, 'pending_payment','package',?)`).bind(orderId, organizationId, pkg.id, amount, at),
+    db.prepare(`INSERT INTO orders (id, organization_id, product_id, total_cents, status, kind, lead_id, created_at) VALUES (?,?,?,?, 'pending_payment','package',?,?)`).bind(orderId, organizationId, pkg.id, amount, opts.leadId ?? null, at),
     db.prepare(`INSERT INTO invoices (id, organization_id, order_id, milestone_kind, amount_cents, subtotal_cents, tax_cents, tax_detail_json, status, description, created_at) VALUES (?,?,?, 'full', ?, ?, ?, ?, 'open', ?, ?)`)
       .bind(invoiceId, organizationId, orderId, tax.amountCents, tax.subtotalCents, tax.taxCents, tax.detailJson, `${pkg.name} package — 100% upfront`, at),
   ]);
   await audit(db, { actorUserId, action: "order.created", subjectType: "order", subjectId: orderId, organizationId, details: { packageId, totalCents: amount, taxCents: tax.taxCents, priceSource: price.source, priceOverrideId: price.overrideId } });
-  const description = `${pkg.name} website package`;
-  return { orderId, invoiceId, amountCents: tax.amountCents, description,
+  return { orderId, invoiceId, amountCents: tax.amountCents, description, reused: false,
     checkoutLines: checkoutLinesFor({ description, amount_cents: tax.amountCents, subtotal_cents: tax.subtotalCents, tax_detail_json: tax.detailJson }, description) };
 }
 
-/** Accepting a quote version creates the order and the first invoice (full or 50% deposit). */
-export async function createQuoteOrder(db: Db, organizationId: string, quoteVersion: { id: string; total_cents: number; payment_schedule: string; quote_id: string }, leadId: string | null, actorUserId: string) {
+/**
+ * The product an accepted quote provisions as (CREST-GAP-033): a package quote keeps its package identity (revision
+ * allowance, build strategy, agreements); custom work is "custom" (or none for an upfront custom quote, as before).
+ */
+export function quoteOrderProduct(v: { package_id?: string | null; payment_schedule: string }): string | null {
+  if (v.package_id && v.package_id in PACKAGES) return v.package_id;
+  return v.payment_schedule === "upfront" ? null : "custom";
+}
+
+/**
+ * Statements that create the order and the first invoice (full or 50% deposit) for an accepted quote version, for the
+ * caller to commit in the same batch as the acceptance itself (CREST-GAP-032: all or nothing).
+ */
+export async function prepareQuoteOrder(db: Db, organizationId: string, quoteVersion: { id: string; total_cents: number; payment_schedule: string; quote_id: string; package_id?: string | null }, leadId: string | null,
+  guard?: { sql: string; binds: unknown[] }) {
   const at = nowIso();
   const orderId = newId("ord"), invoiceId = newId("inv");
   const first = quoteVersion.payment_schedule === "milestone_50_25_25" ? milestoneSplit(quoteVersion.total_cents)[0] : { kind: "full" as const, amountCents: quoteVersion.total_cents };
   const description = first.kind === "deposit_50" ? "50% deposit" : "Payment in full";
   const tax = await taxForNewInvoice(db, { description, amountCents: first.amountCents, productKey: await quoteProductKey(db, quoteVersion.id) });
-  await db.batch([
-    db.prepare(`INSERT INTO orders (id, organization_id, quote_version_id, product_id, total_cents, status, kind, lead_id, created_at) VALUES (?,?,?,?,?, 'pending_payment','quote',?,?)`)
-      .bind(orderId, organizationId, quoteVersion.id, quoteVersion.payment_schedule === "upfront" ? null : "custom", quoteVersion.total_cents, leadId, at),
-    db.prepare(`INSERT INTO invoices (id, organization_id, order_id, milestone_kind, amount_cents, subtotal_cents, tax_cents, tax_detail_json, status, description, created_at) VALUES (?,?,?,?,?,?,?,?, 'open', ?, ?)`)
-      .bind(invoiceId, organizationId, orderId, first.kind, tax.amountCents, tax.subtotalCents, tax.taxCents, tax.detailJson, description, at),
-  ]);
-  await audit(db, { actorUserId, action: "order.created", subjectType: "order", subjectId: orderId, organizationId, details: { quoteVersionId: quoteVersion.id, taxCents: tax.taxCents } });
-  return { orderId, invoiceId, amountCents: tax.amountCents };
+  // With a guard, the order is created only when the guard holds and no order exists for this version yet, and the
+  // invoice only when that order was created: safe to place in the same batch as the acceptance (CREST-GAP-032).
+  const statements: DbStatement[] = [
+    db.prepare(`INSERT INTO orders (id, organization_id, quote_version_id, product_id, total_cents, status, kind, lead_id, created_at) SELECT ?,?,?,?,?, 'pending_payment','quote',?,?
+                WHERE NOT EXISTS (SELECT 1 FROM orders WHERE quote_version_id = ? AND kind = 'quote')${guard ? ` AND ${guard.sql}` : ""}`)
+      .bind(orderId, organizationId, quoteVersion.id, quoteOrderProduct(quoteVersion), quoteVersion.total_cents, leadId, at, quoteVersion.id, ...(guard?.binds ?? [])),
+    db.prepare(`INSERT INTO invoices (id, organization_id, order_id, milestone_kind, amount_cents, subtotal_cents, tax_cents, tax_detail_json, status, description, created_at) SELECT ?,?,?,?,?,?,?,?, 'open', ?, ? WHERE EXISTS (SELECT 1 FROM orders WHERE id = ?)`)
+      .bind(invoiceId, organizationId, orderId, first.kind, tax.amountCents, tax.subtotalCents, tax.taxCents, tax.detailJson, description, at, orderId),
+  ];
+  return { orderId, invoiceId, amountCents: tax.amountCents, taxCents: tax.taxCents, statements };
+}
+
+/** Accepting a quote version creates the order and the first invoice (full or 50% deposit). */
+export async function createQuoteOrder(db: Db, organizationId: string, quoteVersion: { id: string; total_cents: number; payment_schedule: string; quote_id: string; package_id?: string | null }, leadId: string | null, actorUserId: string) {
+  const o = await prepareQuoteOrder(db, organizationId, quoteVersion, leadId);
+  await db.batch(o.statements);
+  await audit(db, { actorUserId, action: "order.created", subjectType: "order", subjectId: o.orderId, organizationId, details: { quoteVersionId: quoteVersion.id, taxCents: o.taxCents } });
+  return { orderId: o.orderId, invoiceId: o.invoiceId, amountCents: o.amountCents };
 }
 
 /** Idempotent: provisions exactly one project per paid order. */
 export async function provisionProject(db: Db, orderId: string): Promise<string> {
+  return (await provisionProjectOnce(db, orderId)).projectId;
+}
+
+/**
+ * Exactly one project per order (CREST-GAP-006): the unique index uq_projects_order (migration 0043) plus INSERT OR
+ * IGNORE means a concurrent or repeated call never creates a second project; the dependent rows are only inserted
+ * when this call's project row was the one created. `created` is true only for that call.
+ */
+export async function provisionProjectOnce(db: Db, orderId: string): Promise<{ projectId: string; created: boolean }> {
   const existing = await db.prepare(`SELECT id FROM projects WHERE order_id = ?`).bind(orderId).first<{ id: string }>();
-  if (existing) return existing.id;
+  if (existing) return { projectId: existing.id, created: false };
   const o = await db.prepare(
     `SELECT o.id, o.organization_id, o.product_id, o.quote_version_id, o.kind, org.name AS org_name, qv.payment_schedule, qv.scope_text
      FROM orders o JOIN organizations org ON org.id = o.organization_id LEFT JOIN quote_versions qv ON qv.id = o.quote_version_id WHERE o.id = ?`,
@@ -65,16 +117,22 @@ export async function provisionProject(db: Db, orderId: string): Promise<string>
   const projectId = newId("prj");
   const scope = o.scope_text ?? (pkg ? `${pkg.name} package: ${pkg.includes.join("; ")}.` : "Scope per accepted quote.");
   const milestoneNames = ["Onboarding", "Scope review", "Design", "Development", "Internal QA", "Customer review", "Launch"];
-  await db.batch([
-    db.prepare(`INSERT INTO projects (id, organization_id, order_id, product_id, name, status, revision_allowance, payment_schedule, last_customer_activity_at, created_at, updated_at)
+  const mine = `EXISTS (SELECT 1 FROM projects WHERE id = ?)`;
+  const res = await db.batch([
+    db.prepare(`INSERT OR IGNORE INTO projects (id, organization_id, order_id, product_id, name, status, revision_allowance, payment_schedule, last_customer_activity_at, created_at, updated_at)
                 VALUES (?,?,?,?,?, 'awaiting_onboarding', ?, ?, ?, ?, ?)`)
       .bind(projectId, o.organization_id, o.id, o.product_id, `${o.org_name} — ${pkg ? pkg.name + " website" : "custom project"}`, allowance, schedule, at, at, at),
-    db.prepare(`INSERT INTO project_scopes (id, project_id, version, scope_text) VALUES (?,?,1,?)`).bind(newId("scp"), projectId, scope),
-    ...milestoneNames.map((n, i) => db.prepare(`INSERT INTO milestones (id, project_id, name, position, status) VALUES (?,?,?,?, 'pending')`).bind(newId("ms"), projectId, n, i + 1)),
-    db.prepare(`UPDATE invoices SET project_id = ? WHERE order_id = ?`).bind(projectId, o.id),
+    db.prepare(`INSERT INTO project_scopes (id, project_id, version, scope_text) SELECT ?,?,1,? WHERE ${mine}`).bind(newId("scp"), projectId, scope, projectId),
+    ...milestoneNames.map((n, i) => db.prepare(`INSERT INTO milestones (id, project_id, name, position, status) SELECT ?,?,?,?, 'pending' WHERE ${mine}`).bind(newId("ms"), projectId, n, i + 1, projectId)),
+    db.prepare(`UPDATE invoices SET project_id = ? WHERE order_id = ? AND project_id IS NULL AND ${mine}`).bind(projectId, o.id, projectId),
   ]);
+  if (res[0].meta.changes !== 1) {
+    const winner = await db.prepare(`SELECT id FROM projects WHERE order_id = ?`).bind(orderId).first<{ id: string }>();
+    if (!winner) throw new Error(`Project for order ${orderId} was not created`);
+    return { projectId: winner.id, created: false };
+  }
   await audit(db, { actorKind: "system", action: "project.provisioned", subjectType: "project", subjectId: projectId, organizationId: o.organization_id, details: { orderId } });
-  return projectId;
+  return { projectId, created: true };
 }
 
 /** Issues the next 25% milestone invoice when its project approval exists; refuses duplicates. */

@@ -29,7 +29,7 @@ function staffPage(ctx: AppContext, title: string, body: SafeHtml, status = 200)
 
 const versionHref = (kind: string, version: string) => `/legal/${ag.slugForKind(kind) ?? kind}/versions/${encodeURIComponent(version)}`;
 const docTitle = (r: { title: string | null; kind: string }) => r.title ?? label(r.kind);
-const CONTEXT_LABEL: Record<string, string> = { registration: "Account registration", quote_acceptance: "Proposal acceptance", package_checkout: "Package checkout", maintenance_checkout: "Maintenance subscription" };
+const CONTEXT_LABEL: Record<string, string> = { registration: "Account registration", quote_acceptance: "Proposal acceptance", package_quote_acceptance: "Package proposal acceptance", package_checkout: "Package checkout", maintenance_checkout: "Maintenance subscription" };
 const reviewBadge = (reviewed: number) => (reviewed ? badge("verified", "Attorney reviewed") : badge("pending", "Draft — not attorney reviewed"));
 
 // ───────────────────────── LEGAL-003 ─────────────────────────

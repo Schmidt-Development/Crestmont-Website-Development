@@ -1,12 +1,13 @@
 // Request pipeline: build context → load session → CSRF for forms → route → render errors.
 import type { AppContext, Env } from "./context.ts";
 import { Router } from "../lib/router.ts";
-import { HttpError, assertCsrf, cookie, htmlResponse, isSecure, jsonResponse, parseCookies, redirect } from "./http.ts";
+import { HttpError, assertCsrf, cookie, hostCookieName, hstsValue, htmlResponse, isSecure, jsonResponse, parseCookies, readHostCookie, redirect } from "./http.ts";
 import { randomToken } from "../lib/auth-crypto.ts";
 import { loadSession } from "../services/auth.ts";
 import { OutboxEmail, ResendEmail, recipientPolicy } from "../adapters/email.ts";
 import { R2Storage, type R2BucketLike } from "../adapters/storage.ts";
-import { NoPayments, StripeTestPayments } from "../adapters/payments.ts";
+import { NoPayments, StripePayments } from "../adapters/payments.ts";
+import { paymentsMode, commerceBlock } from "../domain/payments-mode.ts";
 import { ValidationError } from "../lib/validate.ts";
 import { errorPage } from "../ui/layout.ts";
 import { registerAll } from "../routes/index.ts";
@@ -14,7 +15,7 @@ import { can, STAFF_ROLES, type Permission } from "../domain/authz.ts";
 import { recordAppError } from "../services/monitoring.ts";
 import { rateLimit, securityEvent } from "../services/security.ts";
 import { previewGate } from "./preview-gate.ts";
-import { recordRequestMetric } from "../services/env-metrics.ts";
+import { metricWeight, recordRequestMetric } from "../services/env-metrics.ts";
 import { STEP_UP_MAX_AGE_MINUTES, stepUpAction, stepUpReturnPath } from "./step-up.ts";
 
 let router: Router | null = null;
@@ -34,12 +35,13 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
       ? new ResendEmail(env.DB, env.RESEND_API_KEY, env.EMAIL_FROM ?? "Crestmont <support@crestmontwebsitedevelopment.com>", undefined, recipientPolicy(env), env.ENVIRONMENT)
       : new OutboxEmail(env.DB)),
     storage: env.overrides?.storage !== undefined ? env.overrides.storage : env.FILES ? new R2Storage(env.FILES as R2BucketLike) : null,
-    payments: env.overrides?.payments ?? (env.STRIPE_SECRET_KEY ? new StripeTestPayments(env.STRIPE_SECRET_KEY) : new NoPayments()),
+    // CREST-GAP-007/008: the environment decides the Stripe mode (production: live only, behind the Founder flag).
+    payments: env.overrides?.payments ?? ((pm) => pm.mode === "none" ? new NoPayments(pm.reason) : new StripePayments(pm.key, fetch, pm.mode))(paymentsMode(env)),
     ip: req.headers.get("cf-connecting-ip") ?? req.headers.get("x-forwarded-for")?.split(",")[0].trim() ?? null,
     now,
     baseUrl: env.APP_URL ?? url.origin,
     user: null, actor: null, sessionId: null, sessionMfaVerified: false, sessionMfaAt: null,
-    csrfToken: cookies.cm_csrf && /^[0-9a-f]{32}$/.test(cookies.cm_csrf) ? cookies.cm_csrf : "",
+    csrfToken: ((v) => (v && /^[0-9a-f]{32}$/.test(v) ? v : ""))(readHostCookie(cookies, "cm_csrf")),
     flash: null,
     setCookies: [],
     settings: {},
@@ -48,9 +50,12 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
       return formCache;
     },
   };
-  if (!ctx.csrfToken) {
-    ctx.csrfToken = randomToken(16);
-    ctx.setCookies.push(cookie("cm_csrf", ctx.csrfToken, { secure: isSecure(ctx), httpOnly: true, sameSite: "Strict", maxAge: 60 * 60 * 24 }));
+  const secure = isSecure(ctx);
+  if (!ctx.csrfToken || (secure && !cookies["__Host-cm_csrf"])) {
+    // New token, or a token still held under the legacy name over HTTPS: (re)issue it under the __Host- name.
+    ctx.csrfToken ||= randomToken(16);
+    ctx.setCookies.push(cookie(hostCookieName("cm_csrf", secure), ctx.csrfToken, { secure, httpOnly: true, sameSite: "Strict", maxAge: 60 * 60 * 24 }));
+    if (secure && cookies.cm_csrf) ctx.setCookies.push(cookie("cm_csrf", "", { maxAge: 0, secure }));
   }
   if (cookies.cm_flash && !url.pathname.startsWith("/live/")) {
     try {
@@ -62,7 +67,7 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
   // ASVS F-08: /api/* skips CSRF, so a state-changing /api/* request never gets a cookie session at all. Such routes
   // must authenticate by signature (webhooks, CI evidence, runner) or be public; a cookie can never authorize them.
   const cookieAuth = !(url.pathname.startsWith("/api/") && req.method !== "GET" && req.method !== "HEAD");
-  const session = cookieAuth ? await loadSession(env.DB, cookies.cm_session, { passive: url.pathname.startsWith("/live/") }) : null;
+  const session = cookieAuth ? await loadSession(env.DB, readHostCookie(cookies, "cm_session"), { passive: url.pathname.startsWith("/live/") }) : null;
   if (session) {
     ctx.user = session.user; ctx.actor = session.actor; ctx.sessionId = session.sessionId; ctx.sessionMfaVerified = session.mfaVerified; ctx.sessionMfaAt = session.mfaVerifiedAt;
   } else if (env.resolveActor && cookieAuth) {
@@ -72,6 +77,9 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
     const rows = (await env.DB.prepare(`SELECT key, value FROM business_settings`).all<{ key: string; value: string }>()).results;
     for (const r of rows) ctx.settings[r.key] = r.value;
   } catch { /* table may not exist in legacy test databases */ }
+  // CREST-GAP-010: production checkout stays closed while policies are drafts or the entity is unnamed.
+  const block = commerceBlock(env, ctx.settings);
+  if (block) ctx.payments = new NoPayments(block);
   return ctx;
 }
 
@@ -150,20 +158,27 @@ export async function handle(req: Request, env: Env, exec?: ExecLike): Promise<R
   // One UPSERT per request, after the response on Cloudflare (waitUntil); no path, id or user is stored.
   const started = Date.now();
   const mark = { unhandled: false };
-  const res = withNoindex(env, await dispatch(req, env, url, mark));
+  const res = withHeaders(await dispatch(req, env, url, mark), {
+    ...(env.ENVIRONMENT === "production" ? {} : { "x-robots-tag": "noindex, nofollow" }),
+    "strict-transport-security": hstsValue(env),
+  });
   if (env.ENV_METRICS !== "off") {
-    const write = recordRequestMetric(env.DB, { environment: env.ENVIRONMENT, pathname: url.pathname, status: res.status, durationMs: Date.now() - started, unhandled: mark.unhandled, at: env.overrides?.now?.() ?? new Date() });
-    if (exec && typeof exec.waitUntil === "function") exec.waitUntil(write); else await write;
+    // CREST-GAP-066: no write for asset paths or known crawlers; successful requests are sampled (weighted, so the
+    // totals stay unbiased) and every 5xx / unhandled error is written.
+    const weight = metricWeight({ pathname: url.pathname, userAgent: req.headers.get("user-agent"), status: res.status, unhandled: mark.unhandled, sample: env.ENV_METRICS_SAMPLE });
+    if (weight > 0) {
+      const write = recordRequestMetric(env.DB, { environment: env.ENVIRONMENT, pathname: url.pathname, status: res.status, durationMs: Date.now() - started, unhandled: mark.unhandled, at: env.overrides?.now?.() ?? new Date(), weight });
+      if (exec && typeof exec.waitUntil === "function") exec.waitUntil(write); else await write;
+    }
   }
   return res;
 }
 
-/** Outside production every Worker response (pages, JSON, files, redirects) tells crawlers not to index or follow it,
- *  in addition to robots.txt (Disallow: /) and the page-level noindex meta tag. Production is unchanged. */
-function withNoindex(env: Env, res: Response): Response {
-  if (env.ENVIRONMENT === "production") return res;
-  try { res.headers.set("x-robots-tag", "noindex, nofollow"); return res; }
-  catch { const h = new Headers(res.headers); h.set("x-robots-tag", "noindex, nofollow"); return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h }); }
+/** Response headers applied to every Worker response. Outside production that includes X-Robots-Tag noindex (with
+ *  robots.txt Disallow: / and the page-level meta tag); everywhere the environment's HSTS value (CREST-GAP-029). */
+function withHeaders(res: Response, set: Record<string, string>): Response {
+  try { for (const [k, v] of Object.entries(set)) res.headers.set(k, v); return res; }
+  catch { const h = new Headers(res.headers); for (const [k, v] of Object.entries(set)) h.set(k, v); return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h }); }
 }
 
 async function dispatch(req: Request, env: Env, url: URL, mark: { unhandled: boolean }): Promise<Response> {
@@ -201,7 +216,7 @@ async function dispatch(req: Request, env: Env, url: URL, mark: { unhandled: boo
     }
     if (err instanceof StepUpRequired && isApi) return jsonResponse(ctx, 401, { error: "Recent two-factor verification required. Verify at /mfa/step-up and retry." });
     if (status && status >= 400 && status < 500) {
-      return isApi ? jsonResponse(ctx, status, { error: (err as Error).message }) : htmlError(ctx, req, env, status, status === 403 ? "Access denied" : "Request could not be completed", (err as Error).message);
+      return isApi ? jsonResponse(ctx, status, { error: (err as Error).message }) : htmlError(ctx, req, env, status, status === 403 ? "Access denied" : status === 404 ? "Page not found" : "Request could not be completed", (err as Error).message);
     }
     mark.unhandled = true;
     await recordAppError(env.DB, { path: url.pathname, method: req.method, message: (err as Error).message, stack: (err as Error).stack, environment: env.ENVIRONMENT });

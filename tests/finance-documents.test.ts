@@ -295,6 +295,11 @@ test("[PAY-006] milestone invoices become Stripe Invoices (customer → invoice 
   assert.deepEqual({ ...row }, { stripe_invoice_id: "in_test_1", stripe_invoice_status: "open", stripe_invoice_number: "CRST-0001", stripe_hosted_invoice_url: "https://invoice.stripe.com/i/acct_test/in_test_1", status: "open" }, "local invoice stays open until the webhook");
   assert.equal((await one<{ stripe_customer_id: string }>(t.db, `SELECT stripe_customer_id FROM organizations WHERE id = ?`, a.organizationId)).stripe_customer_id, "cus_test_1");
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM audit_logs WHERE action = 'invoice.stripe_invoice_created' AND subject_id = ? AND actor_user_id = ?`, s.d25, owner.id), 1);
+  // CREST-GAP-039: the billing administrator receives the Stripe-hosted invoice link by email (once).
+  const linkMail = await t.db.prepare(`SELECT d.template, m.text_body FROM email_deliveries d JOIN email_messages m ON m.delivery_id = d.id WHERE d.to_email = 'billing@milestone.example' AND d.idempotency_key LIKE 'stripe-invoice-link:%'`).all<{ template: string; text_body: string }>();
+  assert.equal(linkMail.results.length, 1);
+  assert.equal(linkMail.results[0].template, "invoice");
+  assert.match(linkMail.results[0].text_body, /https:\/\/invoice\.stripe\.com\/i\/acct_test\/in_test_1/);
 
   // Retry of a finalized invoice: no Stripe call at all.
   const before = stripe.calls.length;

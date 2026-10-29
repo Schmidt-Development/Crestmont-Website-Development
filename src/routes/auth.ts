@@ -2,7 +2,7 @@
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html } from "../lib/html.ts";
-import { cookie, htmlResponse, isSecure, redirect, str } from "../app/http.ts";
+import { cookie, hostCookieName, htmlResponse, isSecure, parseCookies, redirect, str } from "../app/http.ts";
 import { authLayout, appLayout } from "../ui/layout.ts";
 import { csrf, input, button, formErrors, alert, table, actionForm, badge, checkbox } from "../ui/components.ts";
 import * as auth from "../services/auth.ts";
@@ -23,23 +23,47 @@ import { safeNextPath } from "../app/step-up.ts";
 const safeNext = (n: string | null, fallback: string) => safeNextPath(n, fallback);
 const BOT_CHECK_FAILED = "We could not verify that this request came from a person. Please try again.";
 
-function sessionCookie(ctx: AppContext, token: string, maxAge: number) {
-  return cookie("cm_session", token, { maxAge, secure: isSecure(ctx), httpOnly: true, sameSite: "Lax" });
+/** New session token once the second factor is complete (CREST-GAP-086). */
+async function rotateSessionCookie(ctx: AppContext) {
+  const r = await auth.rotateSessionToken(ctx.db, ctx.sessionId!);
+  if (r) ctx.setCookies.push(sessionCookie(ctx, r.token, r.maxAge));
 }
 
-function loginPage(ctx: AppContext, errors: string[] = [], email = "") {
+/** The remembered-device cookie for abuse-resistant sign-in (CREST-GAP-003). */
+function deviceCookieValue(ctx: AppContext): string | null {
+  const v = parseCookies(ctx.req.headers.get("cookie"))[auth.DEVICE_COOKIE];
+  return v && /^[0-9a-f]{64}$/.test(v) ? v : null;
+}
+async function setDeviceCookie(ctx: AppContext, userId: string, existing: string | null) {
+  const token = await auth.rememberDevice(ctx.db, userId, existing);
+  if (token !== existing) ctx.setCookies.push(cookie(auth.DEVICE_COOKIE, token, { maxAge: auth.DEVICE_MAX_AGE_S, secure: isSecure(ctx), httpOnly: true, sameSite: "Lax" }));
+}
+/** Whether this sign-in passed the bot challenge. Without a configured widget, development cannot show the challenge,
+ *  so it counts as passed there; elsewhere an unconfigured or failed challenge never passes. */
+async function signInChallengePassed(ctx: AppContext, token: FormDataEntryValue | null): Promise<boolean> {
+  if (!ctx.env.TURNSTILE_SITE_KEY && !ctx.env.TURNSTILE_SECRET && ctx.env.ENVIRONMENT === "development") return true;
+  if (typeof token !== "string" || !token) return false;
+  return verifyTurnstile(ctx, token);
+}
+
+function sessionCookie(ctx: AppContext, token: string, maxAge: number) {
+  return cookie(hostCookieName("cm_session", isSecure(ctx)), token, { maxAge, secure: isSecure(ctx), httpOnly: true, sameSite: "Lax" });
+}
+
+function loginPage(ctx: AppContext, errors: string[] = [], email = "", status?: number) {
   const next = ctx.url.searchParams.get("next") ?? "";
-  return htmlResponse(ctx, authLayout(ctx, { title: "Sign in" }, html`<h1 style="font-size:2rem">Sign in</h1>
+  return htmlResponse(ctx, authLayout(ctx, { title: "Sign in", description: "Sign in to the Crestmont customer portal to follow your project, approvals, files, invoices and support requests." }, html`<h1 style="font-size:2rem">Sign in</h1>
 ${formErrors(errors)}
 <form method="post" action="/login${next ? `?next=${encodeURIComponent(next)}` : ""}">${csrf(ctx)}
 ${input({ name: "email", label: "Email", type: "email", value: email, autocomplete: "email", required: true })}
 ${input({ name: "password", label: "Password", type: "password", autocomplete: "current-password", required: true })}
+${turnstileWidget(ctx)}
 <div class="form-actions">${button("Sign in")}<a class="btn btn--ghost" href="/password/forgot">Forgot password?</a></div></form>
-<hr><p class="muted">New to Crestmont? <a href="/register">Create an account</a></p>`), errors.length ? 400 : 200);
+<hr><p class="muted">New to Crestmont? <a href="/register">Create an account</a></p>`), status ?? (errors.length ? 400 : 200));
 }
 
 function registerPage(ctx: AppContext, errors: string[] = [], v: Record<string, string> = {}, status?: number) {
-  return htmlResponse(ctx, authLayout(ctx, { title: "Create account" }, html`<h1 style="font-size:2rem">Create your account</h1>
+  return htmlResponse(ctx, authLayout(ctx, { title: "Create account", description: "Create a Crestmont customer account to buy a website package and follow your project in the customer portal." }, html`<h1 style="font-size:2rem">Create your account</h1>
 <p class="muted">Use your account to purchase a package, accept a quote, and manage your project.</p>${formErrors(errors)}
 <form method="post" action="/register">${csrf(ctx)}
 ${input({ name: "name", label: "Your name", value: v.name, autocomplete: "name", required: true })}
@@ -59,13 +83,21 @@ export function register(r: Router) {
     const f = await ctx.form();
     const email = str(f, "email");
     try {
-      const res = await auth.login(ctx.db, email, String(f.get("password") ?? ""), { ip: ctx.ip, userAgent: ctx.req.headers.get("user-agent") });
+      const deviceToken = deviceCookieValue(ctx);
+      const res = await auth.login(ctx.db, email, String(f.get("password") ?? ""), { ip: ctx.ip, userAgent: ctx.req.headers.get("user-agent"), deviceToken, challengePassed: await signInChallengePassed(ctx, f.get("cf-turnstile-response")) });
       ctx.setCookies.push(sessionCookie(ctx, res.sessionToken, res.maxAge));
+      // A device is remembered only after a COMPLETE sign-in: here when no second factor is needed, else after /mfa.
+      if (!res.mfaRequired) await setDeviceCookie(ctx, res.userId, deviceToken);
       const next = safeNext(ctx.url.searchParams.get("next"), "");
       if (res.mfaRequired) return redirect(ctx, `/mfa${next ? `?next=${encodeURIComponent(next)}` : ""}`);
       const roles = (await ctx.db.prepare(`SELECT role_id FROM memberships WHERE user_id = ?`).bind(res.userId).all<{ role_id: string }>()).results;
       return redirect(ctx, next || (roles.some((x) => !x.role_id.startsWith("customer_")) ? "/staff" : "/portal"));
     } catch (e) {
+      if (e instanceof auth.LoginFailed && e.notifyEmail) {
+        // Once per 15-minute window per account: the holder learns that strangers are guessing (CREST-GAP-003, -085).
+        await sendMail(ctx, { template: "security_notification", to: e.notifyEmail, idempotencyKey: `signin-attempts:${e.notifyUserId}:${Math.floor(Date.now() / 900e3)}`, data: { event: "sign_in_attempts" } });
+      }
+      if (e instanceof auth.SignInChallengeRequired) return loginPage(ctx, [e.message], email, 403);
       if (e instanceof auth.AuthError) return loginPage(ctx, [e.message], email);
       throw e;
     }
@@ -74,6 +106,7 @@ export function register(r: Router) {
   r.post("/logout", async (ctx) => {
     if (ctx.sessionId && ctx.user) await auth.revokeSession(ctx.db, ctx.sessionId, ctx.user.id);
     ctx.setCookies.push(cookie("cm_session", "", { maxAge: 0, secure: isSecure(ctx) }));
+    if (isSecure(ctx)) ctx.setCookies.push(cookie(hostCookieName("cm_session", true), "", { maxAge: 0, secure: true }));
     return redirect(ctx, "/", { kind: "info", text: "You are signed out." });
   });
 
@@ -143,6 +176,8 @@ export function register(r: Router) {
     const f = await ctx.form();
     try {
       const res = await auth.completeMfa(ctx.env, ctx.db, ctx.sessionId!, ctx.user!.id, str(f, "code"), ctx.ip);
+      await rotateSessionCookie(ctx);
+      await setDeviceCookie(ctx, ctx.user!.id, deviceCookieValue(ctx));
       const dest = safeNext(ctx.url.searchParams.get("next"), ctx.user!.isStaff ? "/staff" : "/portal");
       if (res.method === "recovery") return redirect(ctx, dest, await recoveryUsed(ctx, res.remaining));
       return redirect(ctx, dest);
@@ -169,6 +204,8 @@ export function register(r: Router) {
     const f = await ctx.form();
     try {
       const codes = await auth.confirmTotpEnrollment(ctx.env, ctx.db, ctx.user!.id, ctx.sessionId!, str(f, "code").replace(/\s/g, ""));
+      await rotateSessionCookie(ctx);
+      await setDeviceCookie(ctx, ctx.user!.id, deviceCookieValue(ctx));
       await sendMail(ctx, { template: "security_notification", to: ctx.user!.email, idempotencyKey: `mfa-on:${ctx.user!.id}:${Date.now()}`, data: { event: "mfa_enabled" } });
       // The recovery codes are shown exactly once, in this response; only their hashes are stored.
       return recoveryCodesPage(ctx, codes, safeNext(ctx.url.searchParams.get("next"), ctx.user!.isStaff ? "/staff" : "/account"), "Two-factor authentication is enabled");
@@ -237,7 +274,13 @@ export function register(r: Router) {
     const f = await ctx.form();
     try {
       await auth.assertPasswordNotBreached(ctx.env, ctx.db, String(f.get("password") ?? ""));
-      await auth.resetPassword(ctx.db, str(f, "token"), String(f.get("password") ?? ""), ctx.ip);
+      const resetUserId = await auth.resetPassword(ctx.db, str(f, "token"), String(f.get("password") ?? ""), ctx.ip);
+      // CREST-GAP-039: security notice that the reset completed (a mail failure never blocks the reset).
+      const resetUser = await ctx.db.prepare(`SELECT email FROM users WHERE id = ?`).bind(resetUserId).first<{ email: string }>();
+      if (resetUser) {
+        try { await sendMail(ctx, { template: "security_notification", to: resetUser.email, idempotencyKey: `reset-done:${resetUserId}:${str(f, "token").slice(0, 16)}`, data: { event: "password_reset_completed" } }); }
+        catch (e) { console.error(JSON.stringify({ level: "warn", msg: "reset notice email failed", error: (e as Error).message })); }
+      }
       return redirect(ctx, "/login", { kind: "success", text: "Password updated. Sign in with your new password." });
     } catch (e) {
       if (e instanceof auth.AuthError) return resetPage(ctx, [e.message], str(f, "token"));
@@ -250,19 +293,25 @@ export function register(r: Router) {
     const token = ctx.url.searchParams.get("token") ?? "";
     const inv = /^[0-9a-f]{64}$/.test(token) ? await auth.invitationByToken(ctx.db, token) : null;
     if (!inv || inv.accepted_at || inv.expires_at < new Date().toISOString()) return htmlResponse(ctx, authLayout(ctx, { title: "Invitation" }, html`<h1 style="font-size:2rem">Invitation not valid</h1><p>This invitation has expired or was already used. Ask the person who invited you to send a new one.</p>`), 400);
-    return invitePage(ctx, token, inv.email, inv.org_name, inv.role_id);
+    return invitePage(ctx, token, inv.email, inv.org_name, inv.role_id, await auth.invitationMode(ctx.db, inv.email, invitationSessionUser(ctx)));
   });
   r.post("/invite", async (ctx) => {
     const f = await ctx.form();
     const token = str(f, "token");
+    const sessionUserId = invitationSessionUser(ctx);
     try {
-      await auth.assertPasswordNotBreached(ctx.env, ctx.db, String(f.get("password") ?? ""));
-      await auth.acceptInvitation(ctx.db, token, str(f, "name"), String(f.get("password") ?? ""));
-      return redirect(ctx, "/login", { kind: "success", text: "Invitation accepted. Sign in to continue — you will set up two-factor authentication next." });
+      const inv0 = /^[0-9a-f]{64}$/.test(token) ? await auth.invitationByToken(ctx.db, token) : null;
+      const mode = inv0 ? await auth.invitationMode(ctx.db, inv0.email, sessionUserId) : "new";
+      if (mode === "new" || mode === "claim") await auth.assertPasswordNotBreached(ctx.env, ctx.db, String(f.get("password") ?? ""));
+      await auth.acceptInvitation(ctx.db, token, str(f, "name"), String(f.get("password") ?? ""), { sessionUserId, ip: ctx.ip });
+      if (mode === "confirm") return redirect(ctx, inv0!.role_id.startsWith("customer_") ? "/portal" : "/staff", { kind: "success", text: "Invitation accepted." });
+      return redirect(ctx, "/login", { kind: "success", text: "Invitation accepted. Sign in to continue — staff accounts set up two-factor authentication next." });
     } catch (e) {
       if (e instanceof auth.AuthError) {
         const inv = await auth.invitationByToken(ctx.db, token);
-        return inv ? invitePage(ctx, token, inv.email, inv.org_name, inv.role_id, [e.message]) : redirect(ctx, "/login", { kind: "error", text: e.message });
+        if (!inv) return redirect(ctx, "/login", { kind: "error", text: e.message });
+        if (inv.accepted_at || inv.expires_at < new Date().toISOString()) return htmlResponse(ctx, authLayout(ctx, { title: "Invitation" }, html`<h1 style="font-size:2rem">Invitation not valid</h1><p>This invitation has expired or was already used. Ask the person who invited you to send a new one.</p>`), 400);
+        return invitePage(ctx, token, inv.email, inv.org_name, inv.role_id, await auth.invitationMode(ctx.db, inv.email, sessionUserId), [e.message]);
       }
       throw e;
     }
@@ -277,7 +326,8 @@ export function register(r: Router) {
     const recovery = await auth.recoveryCodeStatus(ctx.db, ctx.user!.id);
     const body = html`<div class="page-head"><h1>Account</h1></div>
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Profile</h2><p>${ctx.user!.displayName}<br><span class="muted">${ctx.user!.email}</span> ${ctx.user!.emailVerified ? badge("verified", "Email verified") : badge("pending", "Email not confirmed")}</p>
-${ctx.user!.memberships.map((m) => html`<p class="faint">${m.organizationName} · ${label(m.role)}</p>`)}</section>
+${ctx.user!.memberships.map((m) => html`<p class="faint">${m.organizationName} · ${label(m.role)}</p>`)}
+<p data-account-links>${ctx.user!.isStaff ? "" : html`<a href="/account/profile">Edit name or email</a> · `}<a href="/account/privacy">Privacy &amp; your data</a> — download your data or request deletion.</p></section>
 <section class="card"><h2 class="card__title">Two-factor authentication</h2>
 ${ctx.user!.mfaEnabled ? html`<p>${badge("active", "Enabled")} Codes from your authenticator app are required at sign-in.</p>
 <p data-testid="recovery-status">Recovery codes: ${recovery.total ? html`<strong>${recovery.remaining}</strong> of ${recovery.total} unused` : html`${badge("pending", "None")} generate a set now so a lost phone does not lock you out`}.</p>
@@ -399,7 +449,22 @@ function resetPage(ctx: AppContext, errors: string[] = [], token = ctx.url.searc
 <form method="post" action="/password/reset">${csrf(ctx)}<input type="hidden" name="token" value="${token}">${input({ name: "password", label: "New password", type: "password", autocomplete: "new-password", required: true, hint: "At least 12 characters." })}<div class="form-actions">${button("Update password")}</div></form>`), errors.length ? 400 : 200);
 }
 
-function invitePage(ctx: AppContext, token: string, email: string, org: string, role: string, errors: string[] = []) {
-  return htmlResponse(ctx, authLayout(ctx, { title: "Accept invitation" }, html`<h1 style="font-size:2rem">Join ${org}</h1><p class="muted">You have been invited as <strong>${label(role)}</strong> using <strong>${email}</strong>.</p>${formErrors(errors)}
+/** The signed-in user id that may accept an invitation: only a session that has completed MFA (when enabled). */
+function invitationSessionUser(ctx: AppContext): string | null {
+  if (!ctx.user) return null;
+  if (ctx.user.mfaEnabled && !ctx.sessionMfaVerified) return null;
+  return ctx.user.id;
+}
+
+function invitePage(ctx: AppContext, token: string, email: string, org: string, role: string, mode: auth.InvitationMode, errors: string[] = []) {
+  const head = html`<h1 style="font-size:2rem">Join ${org}</h1><p class="muted">You have been invited as <strong>${label(role)}</strong> using <strong>${email}</strong>.</p>${formErrors(errors)}`;
+  if (mode === "sign_in") {
+    return htmlResponse(ctx, authLayout(ctx, { title: "Accept invitation" }, html`${head}<p>An account already uses this email address. Sign in to that account, then open the invitation link from your email again to accept it.</p><p><a class="btn" href="/login">Sign in</a></p>`), errors.length ? 403 : 200);
+  }
+  if (mode === "confirm") {
+    return htmlResponse(ctx, authLayout(ctx, { title: "Accept invitation" }, html`${head}<p>You are signed in as <strong>${email}</strong>.</p>
+<form method="post" action="/invite">${csrf(ctx)}<input type="hidden" name="token" value="${token}"><div class="form-actions">${button("Accept invitation")}</div></form>`), errors.length ? 400 : 200);
+  }
+  return htmlResponse(ctx, authLayout(ctx, { title: "Accept invitation" }, html`${head}
 <form method="post" action="/invite">${csrf(ctx)}<input type="hidden" name="token" value="${token}">${input({ name: "name", label: "Your name", autocomplete: "name", required: true })}${input({ name: "password", label: "Choose a password", type: "password", autocomplete: "new-password", required: true, hint: "At least 12 characters." })}<div class="form-actions">${button("Accept invitation")}</div></form>`), errors.length ? 400 : 200);
 }

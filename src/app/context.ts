@@ -12,6 +12,8 @@ export interface Env {
   EVIDENCE_INGEST_SECRET?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   STRIPE_SECRET_KEY?: string;
+  /** Founder flag (CREST-GAP-008, PAY-010): exactly "yes" allows live Stripe keys on production only. Unset = no live payments anywhere. */
+  PAYMENTS_LIVE_AUTHORIZED?: string;
   TURNSTILE_SECRET?: string;
   TURNSTILE_SITE_KEY?: string;
   RESEND_API_KEY?: string;
@@ -25,6 +27,8 @@ export interface Env {
   VOICE_WEBHOOK_SECRET?: string;
   /** Retell workspace API key that carries the webhook badge (verifies X-Retell-Signature). VOICE-003. */
   RETELL_API_KEY?: string;
+  /** "on" enables outbound calling in this environment (default off). The Owner's receptionist setting must also be on. */
+  RETELL_OUTBOUND?: string;
   /** Emergency re-lock only: password for the preview gate (src/app/preview-gate.ts); ignored unless PREVIEW_GATE = "required". */
   STAGING_ACCESS_PASSWORD?: string;
   /** Approved isolated portfolio demo origins (https only, comma/space separated). Only these may be framed. */
@@ -35,6 +39,8 @@ export interface Env {
   AI_PROVIDER?: string;
   /** Shared HMAC secret for the AI Builds runner API (docs/ai-builds/RUNNER-PROTOCOL.md). Unset = execution unavailable. */
   BUILD_RUNNER_SECRET?: string;
+  /** "yes" refuses runner requests without a replay-protection nonce (CREST-GAP-087). */
+  RUNNER_REQUIRE_NONCE?: string;
   /** HMAC key for POST /api/scheduled/run (external scheduler when native Cron Triggers are unavailable). */
   SCHEDULER_TRIGGER_SECRET?: string;
   /** "on" | "off": per-user limits on authenticated form submissions (default on outside development). ASVS F-15. */
@@ -47,6 +53,14 @@ export interface Env {
   MFA_ENCRYPTION_KEY?: string;
   /** "off" disables the per-request env_metrics UPSERT (READY-006). Default on. */
   ENV_METRICS?: string;
+  /** Fraction (0–1) of successful, non-bot requests written to env_metrics; errors are always written. Default 0.1. CREST-GAP-066. */
+  ENV_METRICS_SAMPLE?: string;
+  /** Strict-Transport-Security max-age in seconds. Unset = 63072000 with includeSubDomains (staging, development). CREST-GAP-029. */
+  HSTS_MAX_AGE?: string;
+  /** "on" adds includeSubDomains when HSTS_MAX_AGE is set. Only once every subdomain serves HTTPS. */
+  HSTS_INCLUDE_SUBDOMAINS?: string;
+  /** The Founder's sign-in email. When set, only that account can record or carry a production launch approval. CREST-GAP-020. */
+  FOUNDER_EMAIL?: string;
   FILES?: unknown;             // R2 bucket binding
   ASSETS?: { fetch(req: Request): Promise<Response> };
   /** Test/dev hook: overrides the computed adapters. */

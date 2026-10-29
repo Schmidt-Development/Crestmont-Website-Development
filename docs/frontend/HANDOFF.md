@@ -1,5 +1,13 @@
 # Frontend redesign — integration handoff
 
+> **Historical record (updated 2026-10-29, CREST-GAP-061).** This document describes the retired
+> `crestmont-platform-frontend-preview` Worker and the `claude/frontend-redesign` branch. That work is merged into `main`
+> and is deployed only to `crestmont-platform-staging` by `.github/workflows/deploy-staging.yml`. Evidence quoted below
+> (including the preview's 256/256 hosted checks) came from the preview origin and is kept as history only; the current
+> verification is the staging workflow's steps *Portfolio projects and their isolated demos*, *Frontend assets and
+> homepage served by this commit*, *Browser journey on the live site* and *Frontend browser verification on staging*.
+> See [`docs/CONSOLIDATION.md`](../CONSOLIDATION.md).
+
 For the backend session and whoever merges `claude/frontend-redesign`. The design specification is
 [DESIGN.md](DESIGN.md) (v3, reference-matched), the motion specification and M01–M10 checklist is
 [MOTION.md](MOTION.md), research is [RESEARCH.md](RESEARCH.md), and route coverage is [COVERAGE.md](COVERAGE.md).
@@ -57,7 +65,7 @@ These are backend-owned decisions. The frontend did not hide them with CSS, beca
    - Several route templates set inline `style="font-size:…"` on `h2`. They render correctly, but should move to classes over time.
    - The owner "Open command center" link has button padding that offsets it from the card's text edge.
 
-## 4. Independent frontend preview
+## 4. Independent frontend preview (historical — retired; superseded by staging)
 
 - **Worker:** `crestmont-platform-frontend-preview`, at `https://crestmont-platform-frontend-preview.<workers-subdomain>.workers.dev`.
   - The subdomain matches the staging account (`partners-df4`). The full hostname is inferred from the deploy convention; it has not been browsed from the build environment.

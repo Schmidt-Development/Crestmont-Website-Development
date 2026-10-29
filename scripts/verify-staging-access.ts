@@ -63,9 +63,11 @@ export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log:
 
   // 3. Owner email and password.
   r = await send("GET", "/login");
-  if (r.status !== 200 || !jar.has("cm_csrf")) fail("sign-in page", `HTTP ${r.status}`);
+  // Over HTTPS the CSRF cookie is __Host-cm_csrf (CREST-GAP-086); plain HTTP keeps cm_csrf.
+  const csrfToken = () => jar.get("__Host-cm_csrf") ?? jar.get("cm_csrf");
+  if (r.status !== 200 || !csrfToken()) fail("sign-in page", `HTTP ${r.status}`);
   await r.arrayBuffer();
-  r = await send("POST", "/login", { _csrf: jar.get("cm_csrf")!, email: v.owner.email, password: v.owner.password });
+  r = await send("POST", "/login", { _csrf: csrfToken()!, email: v.owner.email, password: v.owner.password });
   if (r.status !== 303 || !loc(r).startsWith("/mfa")) fail("Owner password", `expected the 2FA step, got HTTP ${r.status} → ${r.status === 303 ? loc(r) : "page"}`);
   log("3/6 Owner email and password accepted; 2FA requested");
 
@@ -75,7 +77,7 @@ export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log:
 
   // 4. Current 2FA code. Wait for a fresh 30-second step if the current one is nearly over.
   if (30 - (Math.floor(Date.now() / 1000) % 30) < 5) await new Promise((res) => setTimeout(res, 6_000));
-  r = await send("POST", "/mfa", { _csrf: jar.get("cm_csrf")!, code: await totpCode(v.owner.totp) });
+  r = await send("POST", "/mfa", { _csrf: csrfToken()!, code: await totpCode(v.owner.totp) });
   if (r.status !== 303 || !loc(r).startsWith("/staff")) fail("2FA code", `not accepted (HTTP ${r.status})`);
   log("5/6 2FA code accepted");
 
@@ -96,7 +98,7 @@ export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log:
   if (broken.length) fail("Owner modules", broken.join(", "));
   log(`6/6 all ${pages} Owner modules load`);
 
-  await send("POST", "/logout", { _csrf: jar.get("cm_csrf")! });
+  await send("POST", "/logout", { _csrf: csrfToken()! });
   return { modules: OWNER_MODULE_LABELS.length, pages };
 }
 

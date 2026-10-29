@@ -1,0 +1,64 @@
+name: Production health monitor
+
+# CREST-GAP-015 / INFRA-006: the production twin of staging-health-monitor.yml. Probes the public production health
+# endpoints from GitHub's infrastructure (outside Cloudflare) every 30 minutes, three attempts a minute apart, and fails
+# loudly. A failed run is the alert: GitHub emails the account that last changed this schedule and anyone watching the
+# repository's Actions ("Actions: failed workflows" must be on in that account's notification settings).
+#
+# Reads only public endpoints and uses NO secret. It deliberately does not use the `production` environment: that
+# environment has required reviewers, which would pause every scheduled run for approval. The URL therefore comes from
+# the REPOSITORY variable PRODUCTION_URL (Settings → Secrets and variables → Actions → Variables → Repository). Until that
+# variable exists (production not launched), every run skips cleanly with a notice.
+on:
+  schedule:
+    - cron: "26,56 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-health-monitor
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    if: github.ref == 'refs/heads/main'   # main only (see deploy-staging.yml)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      BASE: ${{ vars.PRODUCTION_URL }}
+    steps:
+      - name: Skip until production has a URL
+        id: pre
+        run: |
+          if [ -z "$BASE" ]; then
+            echo "::notice title=Production health monitor skipped::The repository variable PRODUCTION_URL is not set (production not launched). Nothing was probed."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          elif ! printf '%s' "$BASE" | grep -Eq '^https://[A-Za-z0-9.-]+$'; then
+            echo "::error title=PRODUCTION_URL invalid::PRODUCTION_URL must be a bare https origin such as https://crestmontwebsitedevelopment.com"
+            exit 1
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Service and evidence-feed health (retries before alerting)
+        if: steps.pre.outputs.ok == 'true'
+        run: |
+          fail=""
+          for attempt in 1 2 3; do
+            fail=""
+            app=$(curl -s -o /tmp/app.json -w '%{http_code}' --max-time 20 "$BASE/api/health" || echo 000)
+            feeds=$(curl -s -o /tmp/feeds.json -w '%{http_code}' --max-time 20 "$BASE/api/readiness/health" || echo 000)
+            [ "$app" = "200" ] || fail="$fail /api/health=$app"
+            [ "$feeds" = "200" ] || fail="$fail /api/readiness/health=$feeds"
+            [ -z "$fail" ] && break
+            sleep 60
+          done
+          {
+            echo "### Production health $(date -u +%Y-%m-%dT%H:%MZ)"
+            echo "- /api/health: $app"
+            echo "- /api/readiness/health: $feeds"
+            echo '```json'; cat /tmp/feeds.json 2>/dev/null | head -c 4000; echo; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$fail" ]; then echo "::error title=Production unhealthy::$fail (after 3 attempts)"; exit 1; fi

@@ -94,7 +94,7 @@ test("[READY-012] [INFRA-006] external scheduler endpoint: HMAC-signed, 503 with
   assert.equal((await post(t, '{"cron":"* * * * *"}', await signEvidence("sched-key", '{"cron":"* * * * *"}'))).status, 422);
   const ok = await post(t, body, await signEvidence("sched-key", body));
   assert.equal(ok.status, 200);
-  assert.deepEqual(((await ok.json()) as { ran: string[] }).ran, ["stripe_reconcile", "support_escalation", "github_sync", "env_probe", "build_sweep"]);
+  assert.deepEqual(((await ok.json()) as { ran: string[] }).ran, ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep", "voice_outbound", "ops_alerts"]);
   assert.ok(await t.db.prepare(`SELECT 1 FROM ingestion_status WHERE source = 'job:build_sweep' AND last_success_at IS NOT NULL`).first(), "jobs recorded exactly as a cron run");
   assert.equal((await post(t, body, await signEvidence("sched-key", body))).status, 429, "at most once per 5 minutes");
 });

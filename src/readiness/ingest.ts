@@ -107,7 +107,8 @@ export async function ingestEvidence(db: Db, rawBody: string): Promise<IngestRes
     await recordIngestion(db, doc.source, attemptAt, unknown.length ? `Unknown requirement ids: ${unknown.join(", ")}` : null, true);
     // Recovery drills get their own feed per environment, so a failed or missing rollback/restore is visible (and, when
     // failing, turns /api/readiness/health to 503 so the external monitor alerts). Status and timestamp only.
-    for (const [feed, r, reason] of recoveryDrillOutcomes(doc)) await recordIngestion(db, `${feed}:${doc.environment}`, attemptAt, r ? null : (reason ?? "drill failed — see /staff/readiness/requirements/TEST-004"));
+    for (const [feed, r, reason, unavailable] of recoveryDrillOutcomes(doc))
+      await recordIngestion(db, `${feed}:${doc.environment}`, attemptAt, unavailable ? `${UNAVAILABLE_PREFIX}${reason ?? "not applicable"}` : r ? null : (reason ?? "drill failed — see /staff/readiness/requirements/TEST-004"), r && !unavailable);
     // Journey 9 on the deployed site (upload → preview → delete): the end-to-end proof that file storage works.
     const uploads = doc.source === "staging_e2e" ? doc.results.filter((r) => r.requirementId === "FILE-001") : [];
     if (uploads.length) {
@@ -124,16 +125,22 @@ export async function ingestEvidence(db: Db, rawBody: string): Promise<IngestRes
   }
 }
 
-/** rollback rehearsal → INFRA-005 "rollback automation exercised"; restore drill → INFRA-006 "restore drill:". */
-export function recoveryDrillOutcomes(doc: EvidenceDoc): [string, boolean, string?][] {
-  const out: [string, boolean, string?][] = [];
+/** A feed whose last attempt could not apply (e.g. no safe rollback target right after a secret change) is recorded with
+ *  this prefix: readiness shows it as "unavailable" with the reason, never as failing and never as a success. */
+export const UNAVAILABLE_PREFIX = "unavailable: ";
+
+/** rollback rehearsal → INFRA-005 "rollback automation exercised"; restore drill → INFRA-006 "restore drill:".
+ *  Each entry: [feed, passed, reason?, unavailable?] — `unavailable` when every result of the drill was skipped. */
+export function recoveryDrillOutcomes(doc: EvidenceDoc): [string, boolean, string?, true?][] {
+  const out: [string, boolean, string?, true?][] = [];
+  const skippedAll = (rs: EvidenceDoc["results"]) => rs.length > 0 && rs.every((r) => r.outcome === "skipped");
   const why = (rs: EvidenceDoc["results"]) => rs.find((r) => r.outcome === "failed" && r.message)?.message;
   const rb = doc.results.filter((r) => r.requirementId === "INFRA-005" && r.testName.startsWith("rollback automation exercised"));
   const rs = doc.results.filter((r) => r.requirementId === "INFRA-006" && r.testName.startsWith("restore drill:"));
-  if (rb.length) out.push(["recovery:rollback", rb.every((r) => r.outcome === "passed")]);
+  if (rb.length) out.push(skippedAll(rb) ? ["recovery:rollback", false, rb[0].message, true] : ["recovery:rollback", rb.every((r) => r.outcome === "passed")]);
   for (const [prefix, feed] of [["rollback step:", "recovery:rollback-step"], ["roll-forward step:", "recovery:rollforward-step"]] as const) {
     const st = doc.results.filter((r) => r.requirementId === "INFRA-005" && r.testName.startsWith(prefix));
-    if (st.length) out.push([feed, st.every((r) => r.outcome === "passed"), why(st)]);
+    if (st.length) out.push(skippedAll(st) ? [feed, false, st[0].message, true] : [feed, st.every((r) => r.outcome === "passed"), why(st)]);
   }
   const cron = doc.results.filter((r) => r.requirementId === "INFRA-006" && r.testName.startsWith("cron triggers registered"));
   // "skipped" = native triggers unavailable on this account (Workers Free limit) and the external scheduler is used

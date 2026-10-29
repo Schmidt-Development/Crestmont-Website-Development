@@ -5,7 +5,7 @@
 // Without JavaScript the same markup is an accessible project list with links (nojs.css).
 import { html, safeUrl, type SafeHtml } from "../lib/html.ts";
 import type { AppContext } from "../app/context.ts";
-import { approvedDemoOrigins, allowLocalDemos, demoState, type PortfolioProject } from "../services/portfolio.ts";
+import { approvedDemoOrigins, allowLocalDemos, demoState, type DemoState, type PortfolioProject } from "../services/portfolio.ts";
 
 const ARROW_L = html`<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const ARROW_R = html`<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M9.5 5.5 16 12l-6.5 6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
@@ -18,8 +18,16 @@ const posterOf = (p: PortfolioProject, kind: "desktop" | "tablet" | "mobile"): s
   const file = kind === "desktop" ? p.desktop_screenshot_file_id : p.mobile_screenshot_file_id;
   return file ? `/portfolio-media/${file}` : asset;
 };
+/** True when the image is an uploaded screenshot file rather than a bundled demonstration-build poster (CREST-GAP-048). */
+const file = (p: PortfolioProject, kind: "desktop" | "mobile"): boolean => Boolean(kind === "desktop" ? p.desktop_screenshot_file_id : p.mobile_screenshot_file_id);
 /** Device viewports a demo is rendered at (CSS px). The frame scales the whole viewport down to fit — never crops it. */
 export const PFX_DEVICES = { desktop: [1440, 900], tablet: [820, 1180], mobile: [390, 844] } as const;
+
+/** Visitor-facing status over the screenshot. Internal reasons (origin not approved here, not yet verified) stay in
+ *  Staff → Portfolio; a visitor only hears about a demo that is normally offered and is temporarily down. */
+function visitorStatus(p: PortfolioProject, st: DemoState): string {
+  return st.kind === "unavailable" && p.demo_status === "unavailable" ? "The interactive demo is temporarily unavailable, so a screenshot is shown instead." : "";
+}
 
 export interface ExplorerOptions { variant: "home" | "portfolio" | "case"; headingLevel?: 2 | 3 }
 
@@ -42,11 +50,11 @@ export function portfolioExplorer(ctx: AppContext, projects: PortfolioProject[],
   <div class="pfx__chrome" aria-hidden="true"><span class="pfx__dots"><i></i><i></i><i></i></span><span class="pfx__url" data-pfx-url>${demoHost}</span><span class="pfx__flag">${st.kind === "embed" ? "Demo" : "Screenshot"}</span></div>
   <div class="pfx__screen" data-pfx-screen>
     <div class="pfx__stage" data-pfx-stage>
-    ${desk ? html`<img class="pfx__poster pfx__poster--desktop" src="${desk}" alt="${`Screenshot of the ${p.name} website on a desktop screen`}" width="1440" height="900" loading="${i === 0 ? "eager" : "lazy"}" decoding="async">` : html`<div class="pfx__poster pfx__poster--missing">Screenshot pending</div>`}
-    ${tab ? html`<img class="pfx__poster pfx__poster--tablet" src="${tab}" alt="${`Screenshot of the ${p.name} website on a tablet`}" width="820" height="1180" loading="lazy" decoding="async">` : ""}
-    ${mob ? html`<img class="pfx__poster pfx__poster--mobile" src="${mob}" alt="${`Screenshot of the ${p.name} website on a phone`}" width="390" height="844" loading="lazy" decoding="async">` : ""}
+    ${desk ? html`<img class="pfx__poster pfx__poster--desktop" src="${desk}" alt="${`Screenshot of the ${p.name} website on a desktop screen${file(p, "desktop") ? "" : " (demonstration build with sample data)"}`}" width="1440" height="900" loading="${i === 0 ? "eager" : "lazy"}" decoding="async">` : html`<div class="pfx__poster pfx__poster--missing">Screenshot pending</div>`}
+    ${tab ? html`<img class="pfx__poster pfx__poster--tablet" src="${tab}" alt="${`Screenshot of the ${p.name} website on a tablet (demonstration build with sample data)`}" width="820" height="1180" loading="lazy" decoding="async">` : ""}
+    ${mob ? html`<img class="pfx__poster pfx__poster--mobile" src="${mob}" alt="${`Screenshot of the ${p.name} website on a phone${file(p, "mobile") ? "" : " (demonstration build with sample data)"}`}" width="390" height="844" loading="lazy" decoding="async">` : ""}
     </div>
-    <div class="pfx__status" data-pfx-status role="status">${st.kind === "embed" ? "" : st.kind === "unavailable" ? st.reason : "An interactive demo is not available for this project; the screenshot shows the live website."}</div>
+    <div class="pfx__status" data-pfx-status role="status">${visitorStatus(p, st)}</div>
   </div>
 </div>
 <div class="pfx__meta">
@@ -66,6 +74,12 @@ export function portfolioExplorer(ctx: AppContext, projects: PortfolioProject[],
   });
 
   const many = n > 1;
+  // CREST-GAP-047: without an embeddable demo (production shows posters only) there is nothing to click inside or reset,
+  // so the Reset control is not rendered and the hint describes what the visitor actually sees.
+  const anyDemo = states.some((s) => s.kind === "embed");
+  const hint = anyDemo
+    ? `Scroll and click inside the demo to explore it${many ? "; the arrows switch projects" : ""}. Demos are isolated demonstration copies with sample data — nothing you do reaches the real businesses.`
+    : `Screenshots of ${many ? "each website's" : "the website's"} demonstration build, which uses sample data.${many ? " Use the arrows to switch projects, or" : ""} ${many ? "visit" : "Visit"} the live website to explore it.`;
   return html`<div class="pfx pfx--${opts.variant}${many ? "" : " pfx--single"}" data-pfx data-mode="desktop" data-count="${n}" role="region" aria-roledescription="carousel" aria-label="Portfolio projects">
 <p class="visually-hidden" aria-live="polite" data-pfx-live></p>
 <div class="pfx__row">
@@ -77,10 +91,10 @@ export function portfolioExplorer(ctx: AppContext, projects: PortfolioProject[],
   ${many ? html`<div class="pfx__pages" role="group" aria-label="Choose a project">${projects.map((p, i) => html`<button type="button" class="pfx__page" data-pfx-go="${i}" aria-label="${`Show ${p.name} (${i + 1} of ${n})`}"${i === 0 ? html` aria-current="true"` : ""}><span>${p.name}</span></button>`)}</div>` : ""}
   <div class="pfx__tools" role="group" aria-label="Demo controls">
     <div class="pfx__seg" role="group" aria-label="Device viewport"><button type="button" class="pfx__tool" data-pfx-mode="desktop" aria-pressed="true">Desktop</button><button type="button" class="pfx__tool" data-pfx-mode="tablet" aria-pressed="false">Tablet</button><button type="button" class="pfx__tool" data-pfx-mode="mobile" aria-pressed="false">Mobile</button></div>
-    <button type="button" class="pfx__tool" data-pfx-reset>Reset demo</button>
+    ${anyDemo ? html`<button type="button" class="pfx__tool" data-pfx-reset>Reset demo</button>` : ""}
     <button type="button" class="pfx__tool" data-pfx-expand aria-pressed="false">Expand</button>
   </div>
 </div>
-<p class="pfx__hint">Scroll and click inside the website to explore it; the arrows switch projects. Demos use isolated demonstration copies with sample data — nothing you do reaches the real businesses.</p>
+<p class="pfx__hint">${hint}</p>
 </div><script src="/assets/portfolio.js" defer></script>`;
 }

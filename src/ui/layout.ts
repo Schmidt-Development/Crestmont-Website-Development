@@ -1,5 +1,5 @@
 // Page shells. Every surface shares the design system in /assets/app.css (BRAND-006) — see docs/frontend/DESIGN.md.
-import { html, safeUrl, type SafeHtml } from "../lib/html.ts";
+import { html, raw, safeUrl, type SafeHtml } from "../lib/html.ts";
 import type { AppContext } from "../app/context.ts";
 import { can, type Permission } from "../domain/authz.ts";
 import { csrf, drawerShell, skeleton, ctaLink } from "./components.ts";
@@ -11,6 +11,37 @@ const PRELOAD_FONTS = ["/assets/fonts/InterDisplay-Medium.woff", "/assets/fonts/
 
 export interface PageMeta { title: string; description?: string; path?: string; noindex?: boolean; canonical?: string }
 
+/** Social preview image (CREST-GAP-075): rendered from the brand crest and wordmark by tools/brand/render-og-image.mjs. */
+export const OG_IMAGE = { path: "/assets/brand/og-image.png", width: 1200, height: 630, alt: "Crestmont Website Development — the gold crest and CRESTMONT wordmark on black" } as const;
+
+/** Collapses whitespace and shortens to at most `max` characters at a word boundary (CREST-GAP-096). */
+export function metaDescription(text: string, max = 155): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max - 1);
+  const at = cut.lastIndexOf(" ");
+  return (at > max / 2 ? cut.slice(0, at) : cut).replace(/[\s,;:.\-–—]+$/, "") + "…";
+}
+
+/**
+ * Organization + WebSite structured data on the homepage (CREST-GAP-075). Production only, so staging and development never describe
+ * themselves as the business. Facts only: name, address of the site, logo and contact email — no ratings or reviews.
+ * JSON is embedded with "<" escaped, so no value can close the script element.
+ */
+function structuredData(ctx: AppContext): SafeHtml {
+  if (ctx.env.ENVIRONMENT !== "production") return html``;
+  const url = ctx.baseUrl.replace(/\/$/, "");
+  const email = ctx.settings["contact.email"]?.trim() || "support@crestmontwebsitedevelopment.com";
+  const data = {
+    "@context": "https://schema.org",
+    "@graph": [
+      { "@type": "Organization", "@id": `${url}/#organization`, name: "Crestmont Website Development", url: `${url}/`, logo: `${url}/assets/brand/crestmont-logo-original.png`, email, contactPoint: [{ "@type": "ContactPoint", contactType: "customer support", email, url: `${url}/contact` }] },
+      { "@type": "WebSite", "@id": `${url}/#website`, name: "Crestmont Website Development", url: `${url}/`, publisher: { "@id": `${url}/#organization` }, inLanguage: "en-US" },
+    ],
+  };
+  return html`<script type="application/ld+json">${raw(JSON.stringify(data).replace(/</g, "\\u003c"))}</script>`;
+}
+
 function head(ctx: AppContext, m: PageMeta): SafeHtml {
   const title = m.title.includes("Crestmont") ? m.title : `${m.title} · Crestmont Website Development`;
   const canonical = m.canonical ?? (ctx.baseUrl + (m.path ?? ctx.url.pathname));
@@ -19,6 +50,10 @@ function head(ctx: AppContext, m: PageMeta): SafeHtml {
 ${m.description ? html`<meta name="description" content="${m.description}">` : ""}
 ${m.noindex || ctx.env.ENVIRONMENT !== "production" ? html`<meta name="robots" content="noindex, nofollow">` : html`<link rel="canonical" href="${canonical}">`}
 <meta property="og:title" content="${title}"><meta property="og:type" content="website">${m.description ? html`<meta property="og:description" content="${m.description}">` : ""}
+<meta property="og:url" content="${canonical}"><meta property="og:site_name" content="Crestmont Website Development">
+<meta property="og:image" content="${ctx.baseUrl}${OG_IMAGE.path}"><meta property="og:image:width" content="${String(OG_IMAGE.width)}"><meta property="og:image:height" content="${String(OG_IMAGE.height)}"><meta property="og:image:alt" content="${OG_IMAGE.alt}">
+<meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="${title}">${m.description ? html`<meta name="twitter:description" content="${m.description}">` : ""}<meta name="twitter:image" content="${ctx.baseUrl}${OG_IMAGE.path}">
+${!m.noindex && ctx.url.pathname === "/" ? structuredData(ctx) : ""}
 <meta name="theme-color" content="#080808"><meta name="color-scheme" content="dark">
 <link rel="icon" type="image/png" sizes="32x32" href="/assets/brand/favicon-32.png"><link rel="icon" type="image/png" sizes="16x16" href="/assets/brand/favicon-16.png">
 ${PRELOAD_FONTS.map((f) => html`<link rel="preload" href="${f}" as="font" type="font/woff" crossorigin>`)}<link rel="stylesheet" href="/assets/app.css">
@@ -157,7 +192,7 @@ function siteFooter(ctx: AppContext): SafeHtml {
 }
 
 export function authLayout(ctx: AppContext, meta: PageMeta, body: SafeHtml): SafeHtml {
-  return html`<html lang="en">${head(ctx, { ...meta, noindex: true })}<body>${envBanner(ctx)}
+  return html`<html lang="en">${head(ctx, { ...meta, noindex: true })}<body><a class="skip" href="#main">Skip to content</a>${envBanner(ctx)}
 <div class="auth-shell auth-shell--split"><main id="main" class="auth-main"><div class="auth-card card card--gold">${brandMark()}${body}</div></main>
 <aside class="auth-aside" aria-label="Crestmont Website Development">
 ${brandMark()}

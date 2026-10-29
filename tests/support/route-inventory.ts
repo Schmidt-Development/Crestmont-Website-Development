@@ -27,7 +27,7 @@ export type ResourceKind =
   | "session" | "revision" | "milestone" | "task" | "task2" | "assignment" | "refund" | "message" | "approvalRequest" | "customerInvitation"
   | "lead" | "leadTask" | "aiJob" | "quote" | "quoteToken" | "cmsRevision" | "cmsKey" | "portfolio" | "portfolioSlug" | "portfolioFile"
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
-  | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "priceRequest" | "suppression"
+  | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
   | "member" | "notification" | "staffNotification" | "buildJob";
 
@@ -93,6 +93,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/webhooks/voice": hook("x-crestmont-voice-signature"),
   "POST /api/webhooks/retell": hook("x-retell-signature"),
   "POST /api/webhooks/retell/functions": hook("x-retell-signature"),
+  "POST /api/webhooks/retell/inbound": hook("x-retell-signature"),
   "POST /api/webhooks/resend": hook("svix-signature"),
   "POST /api/readiness/deployments": signed("x-crestmont-signature"),
   "POST /api/readiness/release-candidates": signed("x-crestmont-signature"),
@@ -137,6 +138,14 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /account/sessions/:id/revoke": session(act("session.revoked"), P("session")),
   "POST /account/sessions/revoke-others": session(act("session.revoked_all")),
   "GET /account/privacy": session(),
+  // Customer profile self-service (CREST-GAP-073, src/routes/account-profile.ts). Customers only; staff emails are managed by administrators.
+  "GET /account/profile": cust(),
+  "POST /account/profile": cust(undefined, act("user.profile_updated")),
+  "POST /account/email": cust(undefined, act("user.email_change_requested")),
+  "POST /account/email/cancel": cust(undefined, act("user.email_change_cancelled")),
+  "GET /account/email/confirm": token("email change confirmation token (?token=)"),
+  "POST /account/email/confirm": token("email change confirmation token (form field)"),
+  "POST /portal/notices/mfa-reminder/dismiss": cust(undefined, act("user.mfa_reminder_dismissed")),
   "POST /account/privacy/export": session(act("privacy.export_generated")),
   "POST /account/privacy/delete": session(act("privacy.deletion_requested")),
 
@@ -258,7 +267,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/crm/leads/:id/ai-draft/:jobId": staff(rolesWith("lead.write_all", "lead.write_assigned"), { id: "lead", jobId: "aiJob" }, act("ai.draft_approved")),
   "GET /staff/customers": staff(rolesWith("customers.read")),
   "GET /staff/customers/export.csv": staff(rolesWith("customers.read"), undefined, act("customer.exported")),
-  "GET /staff/customers/:id": staff(rolesWith("customers.read"), P("org")),
+  "GET /staff/customers/:id": staff(rolesWith("customers.read"), P("org"), act("customer.viewed")),
   "GET /staff/sales": staff(crm),
   "GET /staff/quotes": staff(rolesWith("quote.write")),
   "GET /staff/quotes/export.csv": staff(rolesWith("quote.write"), undefined, act("quote.exported")),
@@ -278,7 +287,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   // ── Delivery: my work, conversations, projects, tasks (src/routes/projects.ts) ──
   "GET /staff": staff(STAFF_ROLES),
   "GET /staff/conversations": staff(rolesWith("customers.read")),
-  "GET /staff/conversations/:orgId": staff(rolesWith("customers.read"), { orgId: "org" }),
+  "GET /staff/conversations/:orgId": staff(rolesWith("customers.read"), { orgId: "org" }, act("conversation.viewed")),
   "POST /staff/conversations/:orgId": staff(rolesWith("customers.read"), { orgId: "org" }, act("message.posted")),
   "POST /staff/notifications/read": staff(STAFF_ROLES, undefined, exempt("marks the caller's own notifications as read")),
   "GET /staff/projects": staff(delivery),
@@ -431,6 +440,8 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/employees/:id/disable": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.disabled")),
   "POST /staff/employees/:id/enable": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.enabled")),
   "POST /staff/employees/:id/mfa-reset": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.mfa_reset")),
+  "GET /staff/employees/:id/offboarding": staff(rolesWith("employee.manage"), P("staffUser")),
+  "POST /staff/employees/:id/offboarding": staff(rolesWith("employee.manage"), P("staffUser"), act("offboarding.resolved")),
   "GET /staff/email": staff(ops),
   "GET /staff/email/export.csv": staff(ops, undefined, act("email.log_exported")),
   "GET /staff/email/templates": staff(ops),
@@ -478,8 +489,17 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/voice/configs": staff(rolesWith("voice.manage"), undefined, act("voice.config_version_created")),
   "POST /staff/voice/configs/:version/activate": staff(rolesWith("voice.manage"), { version: "voiceVersion" }, act("voice.config_activated")),
   "GET /staff/voice/configs/diff": { ...staff(rolesWith("voice.manage")), query: "a={voiceVersion}&b={voiceVersion}" },
+  "POST /staff/voice/prompt-sync": staff(rolesWith("voice.manage"), undefined, act("voice.prompt_sync")),
+  "POST /staff/voice/budget": staff(rolesWith("voice.manage"), undefined, act("voice.budget_updated")),
   "GET /staff/voice/calls/:id": staff(rolesWith("voice.manage"), P("call"), act("call.viewed")),
   "POST /staff/voice/test-event": staff(rolesWith("voice.manage"), undefined, act("voice.test_event_sent")),
+  "GET /staff/voice/operations": staff(rolesWith("voice.manage")),
+  "POST /staff/voice/operations/settings": staff(rolesWith("voice.manage"), undefined, act("voice.settings_updated")),
+  "POST /staff/voice/consultations/:id/decide": staff(rolesWith("voice.manage"), P("consultation"), act("consultation.confirmed")),
+  "POST /staff/voice/outbound": staff(rolesWith("voice.manage"), undefined, act("voice.outbound_requested")),
+  "POST /staff/voice/outbound/:id/decide": staff(rolesWith("voice.manage"), P("outboundRequest"), act("voice.outbound_decided")),
+  "POST /staff/voice/dnc": staff(rolesWith("voice.manage"), undefined, act("voice.dnc_added")),
+  "POST /staff/voice/caller-erasure": staff(rolesWith("voice.manage"), undefined, act("voice.caller_data_erased")),
 };
 
 export const routeKey = (method: string, pattern: string) => `${method} ${pattern}`;

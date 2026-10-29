@@ -1,6 +1,7 @@
 // Provider webhooks and their staff review pages (VOICE-003, EMAIL-003, FIN-002, PAY-009).
 //  POST /api/webhooks/retell            Retell call events (call_started / call_ended / call_analyzed)
 //  POST /api/webhooks/retell/functions  Retell custom-function calls → voice service functions
+//  POST /api/webhooks/retell/inbound    Retell inbound-call webhook (per phone number): number binding, env stamp, dynamic variables
 //  POST /api/webhooks/resend            Resend (Svix-signed) delivery events → delivery status + suppressions
 //  GET  /staff/email-suppressions       suppression list (settings.operational); POST …/:id/remove
 //  GET  /staff/finance/reconciliation   Stripe reconciliation findings, payouts + cost-import ledger (finance.read; src/routes/reconciliation.ts)
@@ -15,13 +16,13 @@ import { textarea, button, alert, badge, table, emptyState, pagination, pagePara
 import { staffPage } from "./crm.ts";
 import { readBody } from "./api.ts";
 import { handleVoiceEvent } from "../services/voice.ts";
-import { verifyRetellSignature, translateRetellEvent, translateRetellFunction, RetellAuthError, RetellPayloadError, type Translated } from "../adapters/retell.ts";
+import { verifyRetellSignature, translateRetellEvent, translateRetellFunction, translateRetellInbound, RetellAuthError, RetellPayloadError, type Translated, type RetellCtx } from "../adapters/retell.ts";
 import * as mail from "../services/email-events.ts";
 import { registerReconciliation } from "./reconciliation.ts";
 
 const q = (ctx: AppContext, k: string, max = 120) => (ctx.url.searchParams.get(k) ?? "").trim().slice(0, max);
 
-async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: string) => Promise<Translated>, fn: boolean): Promise<Response> {
+async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: string, rc: RetellCtx) => Promise<Translated>, fn: boolean): Promise<Response> {
   const raw = await readBody(ctx.req);
   try {
     await verifyRetellSignature(ctx.env.RETELL_API_KEY, raw, ctx.req.headers.get("x-retell-signature"));
@@ -29,13 +30,15 @@ async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: st
     if (e instanceof RetellAuthError) throw new HttpError(401, e.message);
     throw e;
   }
+  const now = ctx.env.overrides?.now;
   let t: Translated;
-  try { t = await translate(ctx.db, raw); } catch (e) {
-    if (e instanceof RetellPayloadError) return jsonResponse(ctx, 422, { error: e.message });
+  try { t = await translate(ctx.db, raw, { environment: ctx.env.ENVIRONMENT, now }); } catch (e) {
+    if (e instanceof RetellPayloadError || e instanceof SyntaxError) return jsonResponse(ctx, 422, { error: e instanceof SyntaxError ? "Body is not valid JSON" : e.message });
     throw e;
   }
-  if (t.kind === "ack") return jsonResponse(ctx, 200, fn ? (t.body.result ?? t.body) : t.body);
-  const res = await handleVoiceEvent(ctx.db, t.body);
+  if (t.kind === "ack") return jsonResponse(ctx, t.status ?? 200, fn ? ((t.body.result as Record<string, unknown> | undefined) ?? t.body) : t.body);
+  // Consultation confirmations go through the platform's existing mail pipeline (Resend outside development).
+  const res = await handleVoiceEvent(ctx.db, t.body, { mail: { email: ctx.email, db: ctx.db, settings: ctx.settings }, baseUrl: ctx.baseUrl, now });
   // Retell gives the function response body to the agent's LLM: return only the result object.
   if (fn) return jsonResponse(ctx, res.status, (res.body.result as Record<string, unknown> | undefined) ?? res.body);
   return jsonResponse(ctx, res.status, res.body);
@@ -44,6 +47,7 @@ async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: st
 export function register(r: Router): void {
   r.post("/api/webhooks/retell", (ctx) => retell(ctx, translateRetellEvent, false));
   r.post("/api/webhooks/retell/functions", (ctx) => retell(ctx, translateRetellFunction, true));
+  r.post("/api/webhooks/retell/inbound", (ctx) => retell(ctx, translateRetellInbound, false));
 
   r.post("/api/webhooks/resend", async (ctx) => {
     const raw = await readBody(ctx.req);

@@ -121,6 +121,22 @@ export function pagination(ctx: AppContext, page: number, hasNext: boolean): Saf
   return html`<nav class="pagination" aria-label="Pagination">${page > 1 ? html`<a class="btn btn--ghost btn--sm" href="${link(page - 1)}">Previous</a>` : ""}<span class="faint">Page ${page}</span>${hasNext ? html`<a class="btn btn--ghost btn--sm" href="${link(page + 1)}">Next</a>` : ""}</nav>`;
 }
 
+/**
+ * "Earlier messages" / "Back to latest" links for a message thread (CREST-GAP-040). `before` is the cursor
+ * query parameter; other query parameters (e.g. ?tab=messages) are preserved.
+ */
+export function threadEarlierNav(ctx: AppContext, t: { earlierCount: number; earlierCursor: string | null; olderWindow: boolean }): SafeHtml {
+  const href = (before: string | null) => { const u = new URL(ctx.url); if (before) u.searchParams.set("before", before); else u.searchParams.delete("before"); return u.pathname + u.search; };
+  if (!t.earlierCount && !t.olderWindow) return html``;
+  return html`<nav class="pagination thread-nav" aria-label="Conversation history">${t.earlierCount && t.earlierCursor ? html`<a class="btn btn--ghost btn--sm" href="${href(t.earlierCursor)}" data-earlier-messages>Show earlier messages (${t.earlierCount} more)</a>` : html`<span class="faint">Start of the conversation</span>`}${t.olderWindow ? html`<a class="btn btn--ghost btn--sm" href="${href(null)}">Back to latest messages</a>` : ""}</nav>`;
+}
+
+/** "Showing N of M" note for capped or paginated lists (CREST-GAP-071). */
+export function showingOf(shown: number, total: number, noun = "records"): SafeHtml {
+  if (total <= shown) return html``;
+  return html`<p class="faint" data-showing>Showing ${shown} of ${total} ${noun}.</p>`;
+}
+
 export function pageParam(ctx: AppContext): { page: number; limit: number; offset: number } {
   const page = Math.max(1, Math.min(10_000, parseInt(ctx.url.searchParams.get("page") ?? "1", 10) || 1));
   const limit = 25;

@@ -14,7 +14,7 @@ export function portalNav(_ctx: AppContext): NavGroup[] {
   return [
     { label: "Overview", items: [{ href: "/portal", label: "Dashboard" }, { href: "/portal/projects", label: "Projects" }, { href: "/portal/notifications", label: "Notifications" }] },
     { label: "Collaborate", items: [{ href: "/portal/messages", label: "Messages" }, { href: "/portal/files", label: "Files" }, { href: "/portal/approvals", label: "Approvals" }] },
-    { label: "Account", items: [{ href: "/portal/billing", label: "Billing" }, { href: "/portal/maintenance", label: "Maintenance" }, { href: "/portal/agreements", label: "Agreements" }, { href: "/portal/support", label: "Support" }, { href: "/portal/team", label: "Team" }] },
+    { label: "Account", items: [{ href: "/portal/billing", label: "Billing" }, { href: "/portal/maintenance", label: "Maintenance" }, { href: "/portal/agreements", label: "Agreements" }, { href: "/portal/support", label: "Support" }, { href: "/portal/team", label: "Team" }, { href: "/account", label: "Profile & security" }, { href: "/account/privacy", label: "Privacy & your data" }] },
   ];
 }
 

@@ -30,8 +30,17 @@ Staff → Portfolio → *Interactive demo* edits them (`POST /staff/portfolio/:i
 changing the URL clears verification). Order, publication and copy use the existing controls. Counts, arrows and
 labels are derived from the published records.
 
-A demo is embedded only when **all** of the following hold. Otherwise the explorer shows the genuine poster with an
-honest status line.
+A demo is embedded only when **all** of the following hold. Otherwise the explorer shows the genuine poster. Visitors
+see a status line only when a demo is normally offered and marked `unavailable`; the internal reasons (origin not
+approved in this environment, not yet verified) are shown in Staff → Portfolio only (CREST-GAP-047).
+
+**Production is poster-only** (no `PORTFOLIO_DEMO_ORIGINS`): the explorer then omits the *Reset demo* control and its
+hint describes screenshots rather than "click inside".
+
+**Screenshot provenance (CREST-GAP-048).** The bundled posters are captures of each project's isolated demonstration
+build with sample data — not of the production sites. Public copy and alt text say so ("demonstration build with
+sample data"); an uploaded screenshot (Staff → Portfolio) is described without claiming where it was taken. If posters
+are ever recaptured from the live sites, update `portfolio.intro` and the alt text in the same change.
 
 1. `demo_status = ready` with a verification date.
 2. Its origin is listed in `PORTFOLIO_DEMO_ORIGINS`. Only https origins qualify, plus loopback http in
@@ -47,9 +56,11 @@ node --no-warnings scripts/portfolio-setup.ts --out portfolio.sql --origins "<or
 ```
 
 The script emits idempotent upserts with fixed ids, writes each audit row only once, and publishes a project only
-when `publishBlockers()` is empty. The frontend-preview workflow runs it on every rebuild. Before marking a demo as
-verified, the workflow checks from the runner that each demo answers `/__demo/info` with `"demo":true` and that its
-`frame-ancestors` names the preview origin.
+when `publishBlockers()` is empty. `.github/workflows/deploy-staging.yml` runs it on every staging deploy (step
+*Portfolio projects and their isolated demos*). Before marking a demo as verified, that step checks from the runner
+that each demo answers `/__demo/info` with `"demo":true` and that its `frame-ancestors` names the staging origin; the
+run summary lists "demo verified for staging" per project. (The retired frontend-preview workflow did the same for
+the preview origin.)
 
 ## Demo contract (each demo deployment)
 
@@ -70,7 +81,7 @@ verified, the workflow checks from the runner that each demo answers `/__demo/in
   - owner, staff, portal, webhook and cron surfaces return 404;
   - no scheduled triggers or routes.
 
-| Project | Demo worker | Source revision | Branch (not yet pushed) |
+| Project | Demo worker | Source revision | Branch (pushed and deployed — see *Deployment status* below) |
 |---|---|---|---|
 | Lansing Car Rentals | lansing-car-rentals-portfolio-demo | lansing-car-rentals@e11bf33 | lansing-car-rentals:crestmont/portfolio-demo-rentals |
 | Glassly Auto Glass | glassly-portfolio-demo | glassly@dadad20 | glassly:crestmont/portfolio-demo |
@@ -87,7 +98,7 @@ smoke-checks the contract above. Each repository needs `CLOUDFLARE_API_TOKEN` an
 - Migration 0038 is applied to staging by deploy-staging.yml (consolidation PR). Production receives it only through the Founder-approved production deploy.
 - Set `PORTFOLIO_DEMO_ORIGINS` for the backend-owned environments when the demos are approved for them. The value
   is a space-separated list of https origins; unset means posters only.
-- Optional: an R2 binding for the preview, if uploaded screenshots should replace the bundled posters.
+- Optional: R2 storage on staging/production, if uploaded screenshots should replace the bundled posters.
 
 ## Deployment status (2026-10-28, 19:50 ET) — all four demos live and connected
 
@@ -101,9 +112,16 @@ Isolation audit run 40783606013: ISOLATED for every repository (Workers Builds t
 | Glassly Auto Glass | https://glassly-portfolio-demo.partners-df4.workers.dev/ | glassly 40785026514 |
 | Better Lansing Mechanics | https://better-lansing-mechanics-portfolio-demo.partners-df4.workers.dev/ | better-lansing-mechanics 40785531768 |
 
-Each demo workflow passed its scope guard, isolation, framing and blocked-route smoke checks. Frontend preview run
+Each demo workflow passed its scope guard, isolation, framing and blocked-route smoke checks. *Historical (retired
+preview origin):* frontend preview run
 40787390976 (commit 98ba751) verified each demo from the runner, connected all four, and passed 256/256 hosted
 browser checks, including every demo's scroll containment, navigation, reset, device controls and simulated transaction.
+
+**Staging (2026-10-29):** live checks showed that all four demos already list the staging origin
+`https://crestmont-platform-staging.partners-df4.workers.dev` in `frame-ancestors`, so staging can embed them (blocker
+B1 in [`docs/CONSOLIDATION.md`](../CONSOLIDATION.md) is resolved). Current verification is the staging deploy's
+*Portfolio projects and their isolated demos* step (run summary: "demo verified for staging") and *Frontend browser
+verification on staging*.
 
 Demo token scope guard: listing zones is not evidence of zone permissions — the token (Account › Workers Scripts ›
 Edit, Account › D1 › Edit) sees zone metadata, but every zone surface (settings, DNS, Workers routes, rulesets, page
