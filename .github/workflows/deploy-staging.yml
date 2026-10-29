@@ -499,6 +499,16 @@ jobs:
         if: always()
         run: rm -rf access forensics "$RUNNER_TEMP/rotation-state.json"
 
+      # Staging certification (33 required journeys) — published on every run; only 33/33 passed is "certified".
+      - name: Staging certification summary
+        if: always() && steps.e2e.outcome != 'skipped'
+        run: |
+          if [ -f evidence/staging-certification.json ]; then
+            node -e 'const c=require("./evidence/staging-certification.json");const l=[`### Staging certification: ${c.certified?"CERTIFIED":"NOT CERTIFIED"} (${c.passed}/${c.required} passed, ${c.failed} failed)`,"",...c.notPassed.map(j=>`- journey ${j.journey}: ${j.outcome}`)];console.log(l.join("\n"))' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Staging certification: NOT CERTIFIED (the journey summary did not run)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       # CREST-GAP-030: the browser journeys are a deployment gate. They run with continue-on-error only so that evidence,
       # deployment records, sealed access notes and cleanup above still happen; this last step then fails the run.
       - name: Fail the deploy when the staging browser journeys failed
