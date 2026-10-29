@@ -218,42 +218,43 @@ function processStages(steps: { title: string; body: string }[]): SafeHtml {
 <ol class="stage__steps">${ph.steps.map((s) => html`<li><strong>${s.title}</strong><span>${s.body}</span></li>`)}</ol></li>`)}</ol></div>`;
 }
 
-/** AI Receptionist (docs/frontend/AI-RECEPTIONIST.md): the dedicated service page. Copy is factual — natural, humanlike
- *  conversation is the design goal, never a claim that callers cannot tell; the assistant always identifies itself as AI. */
+/** AI Receptionist (docs/frontend/AI-RECEPTIONIST.md): the dedicated service page. CREST-GAP-051: every statement is
+ *  either something Crestmont delivers or worded as custom, per-client configuration built on the voice provider the
+ *  client chooses — nothing here describes booking, text messages, live transfers or outbound calling as a built-in
+ *  feature (tests/support/content-rules.ts RECEPTIONIST_UNBUILT). Natural, humanlike conversation is the design goal,
+ *  never a claim that callers cannot tell; the assistant always identifies itself as AI. */
 const RC_INBOUND: [string, string][] = [
-  ["Answers every call", "Picks up on the first ring, during or after hours when configured, and greets callers in your business's voice."],
-  ["Questions and intake", "Answers questions from your approved information, asks follow-up questions and collects the details your team needs."],
-  ["Scheduling", "Checks availability, books and reschedules appointments in your calendar and sends a confirmation."],
-  ["Routing and urgency", "Recognises urgent or sensitive calls and transfers them to the right person, or creates a callback task."],
-  ["CRM records", "Creates or updates the contact and logs the outcome, so nobody retypes a phone message."],
-  ["Summaries", "Every call ends with a structured summary — who called, what they needed and what happens next."],
+  ["Answering", "Answers the calls you route to it, at the hours you choose, with a greeting written for your business."],
+  ["Questions and intake", "Answers from the information you approve, asks follow-up questions and collects the details your team needs."],
+  ["Appointment requests", "Takes appointment and callback requests. Booking straight into your calendar can be built where your scheduling tool and the provider support it."],
+  ["Urgent calls", "Recognises the call types you define as urgent and follows your rules — a callback task, an alert to your team, or a transfer where your phone setup supports it."],
+  ["Records", "Can send each caller's details and the outcome to your CRM, if it has an API we can connect within the scope."],
+  ["Summaries", "Each call can end with a written summary: who called, what they needed and what happens next."],
 ];
 const RC_OUTBOUND: [string, string][] = [
-  ["Confirmations and reminders", "Confirms upcoming appointments and reminds customers about scheduled visits."],
-  ["Follow-ups", "Calls back leads and customers who asked to be contacted, and passes interested contacts to a person."],
-  ["Feedback", "Asks customers who agreed to it how a visit went, and records the answers."],
-  ["Outcomes logged", "Every call updates your CRM with the result and the next action."],
+  ["Scoped separately", "Outbound calls are not part of a standard setup. Where a client needs them — for example confirming visits customers booked — they are designed and quoted individually."],
+  ["Consent first", "Only for contacts who have given the consent the law requires for that kind of call."],
 ];
 const RC_SAFEGUARDS = [
-  "Calls only contacts who have given the consent the law requires for that kind of call",
-  "Checks do-not-call and suppression lists before every call, and honours opt-outs immediately",
-  "Calls only within permitted hours in the contact's local time",
-  "Identifies itself as an AI assistant calling on behalf of your business",
-  "Follows the recording and transcription consent rules that apply to the call",
+  "Call only contacts who have given the consent the law requires for that kind of call",
+  "Check do-not-call and suppression lists before every call, and honour opt-outs immediately",
+  "Call only within permitted hours in the contact's local time",
+  "Identify itself as an AI assistant calling on behalf of your business",
+  "Follow the recording and transcription consent rules that apply to the call",
 ];
 const RC_USES: [string, string, string][] = [
-  ["Home and repair services", "Books estimate visits after hours, captures job details and photos-to-follow, and puts emergencies straight through to the on-call person.", "Inbound · Scheduling · Urgent routing"],
-  ["Appointment-based studios", "Handles bookings, changes and cancellations, answers the common questions, and sends reminders to customers who opted in.", "Inbound · Outbound reminders"],
-  ["Professional offices", "Greets callers, runs a short intake, routes to the right person and keeps a clean record of every enquiry.", "Inbound · Intake · CRM"],
-  ["Rental and hospitality", "Answers availability and policy questions from your approved information and follows up with guests who asked to be called.", "Inbound · Outbound follow-up"],
+  ["Home and repair services", "Takes estimate requests after hours, captures job details and flags emergencies for the on-call person under your rules.", "Inbound · Intake · Urgent rules"],
+  ["Appointment-based studios", "Answers the common questions and takes booking or change requests; direct booking can be connected where your scheduling tool allows it.", "Inbound · Appointment requests"],
+  ["Professional offices", "Greets callers, runs a short intake and records each enquiry for the right person to follow up.", "Inbound · Intake · Records"],
+  ["Rental and hospitality", "Answers availability and policy questions from your approved information and records callback requests.", "Inbound · Callback requests"],
 ];
 const RC_FLOW: [string, string][] = [
-  ["Phone call", "Your existing number forwards to the agent, or a new number is set up with the provider."],
-  ["AI receptionist", "Understands the request, asks follow-up questions and keeps the context of the whole call."],
-  ["Calendar", "Real availability is checked before a time is offered; bookings and changes are written back."],
-  ["CRM", "Contacts, notes and outcomes are created or updated automatically."],
-  ["Website and forms", "The same assistant knowledge can power your website chat, so answers stay consistent."],
-  ["Your team", "Urgent and sensitive calls transfer to a person, with the call summary attached."],
+  ["Phone call", "Calls reach the agent through the voice provider you choose — forwarded from your existing number or on a new one."],
+  ["AI receptionist", "Follows the script and guardrails you approve and keeps the context of the call."],
+  ["Calendar", "Optional: connected where your calendar or booking tool and the provider support it."],
+  ["CRM", "Optional: caller details and outcomes sent to your CRM through its API."],
+  ["Website and forms", "The same approved information can power your website assistant, so answers stay consistent."],
+  ["Your team", "Urgent and sensitive calls follow your rules — a callback task, an alert, or a transfer where your phone setup supports it."],
 ];
 const RC_STEPS: [string, string][] = [
   ["Discovery", "Your call types, hours, rules for urgent calls and the systems to connect."],
@@ -264,34 +265,35 @@ const RC_STEPS: [string, string][] = [
   ["Launch and review", "Go live on your number, then review call outcomes and refine together."],
 ];
 const RC_FAQ: [string, string][] = [
+  ["Is it a ready-made product?", "No. Each AI Receptionist is a custom configuration built for one client on the voice provider they choose. What it can do depends on that provider and on the systems connected, and it is agreed in the written scope before work starts."],
   ["Will callers know they are talking to AI?", "Yes. The agent identifies itself as an AI assistant. It is designed to sound natural and conversational — not to pretend to be a person."],
-  ["What happens when the AI can't help?", "It transfers the call to a person or creates a callback task with a summary, depending on your hours and rules. Every agent has a path to a person."],
-  ["Can it make outbound calls?", "Yes, for contacts who have given the consent the law requires — for example appointment confirmations and reminders, or follow-ups a customer asked for. It checks do-not-call and suppression lists, calls only within permitted hours and honours opt-outs. Unsolicited automated calling is not something we set up."],
+  ["What happens when the AI can't help?", "It follows the rules you set: a callback task with a summary, an alert to your team or, where your phone setup supports it, a transfer. Every agent has a path to a person."],
+  ["Can it make outbound calls?", "Only if your project scopes it. Outbound calling is not part of a standard setup; where a client needs it — for example confirming visits customers booked — it is designed and quoted individually, for contacts who have given the consent the law requires, with do-not-call checks, permitted hours and opt-outs. Unsolicited automated calling is not something we set up."],
   ["Which voices and languages are available?", "That depends on the voice provider chosen for your project. You choose a voice and pace during setup; English is standard and other languages, such as Spanish, can be configured where the provider supports them."],
-  ["How is it priced?", "It is quoted in writing after a scoping call, like all custom work. Phone numbers, call minutes and voice-provider usage are billed by the provider, and you can see usage and cost per call."],
+  ["How is it priced?", "It is quoted in writing after a scoping call, like all custom work. Phone numbers, call minutes and voice-provider usage are billed by the provider."],
 ];
 
 function aiReceptionistPage(s: ServiceDef, copy: Record<string, string>, email: string): SafeHtml {
   const quote = `/quote?service=${s.slug}`;
-  return html`${serviceHero("Inbound & outbound voice agents", s.name, copy.summary ?? s.summary, html`${linkButton("Request a quote", quote)}${linkButton("Contact us", "/contact", "secondary")}`, receptionistConsole({ id: "rc-page" }))}
-<section class="section"><div class="container section__inner"><p class="section__label">Conversations</p><div class="section__head"><h2 class="reveal-words" data-reveal>Natural conversations, real outcomes</h2><div class="prose" data-reveal style="--rd:140ms">${renderMarkdown(copy.intro ?? s.intro)}</div></div>
+  return html`${serviceHero("Custom AI voice agents", s.name, copy.summary ?? s.summary, html`${linkButton("Request a quote", quote)}${linkButton("Contact us", "/contact", "secondary")}`, receptionistConsole({ id: "rc-page" }))}
+<section class="section"><div class="container section__inner"><p class="section__label">What it can do</p><div class="section__head"><h2 class="reveal-words" data-reveal>Configured around your calls</h2><div class="prose" data-reveal style="--rd:140ms">${renderMarkdown(copy.intro ?? s.intro)}</div></div>
 <div class="versus rc-dir" data-reveal-group>
-<div class="versus__panel on-dark" data-reveal><p class="versus__title">Inbound — answering your calls</p><ul class="versus__list">${RC_INBOUND.map(([t, b]) => html`<li><span><strong>${t}</strong><span>${b}</span></span></li>`)}</ul></div>
-<div class="versus__panel on-dark" data-reveal style="--rd:140ms"><p class="versus__title">Outbound — calls customers asked for</p><ul class="versus__list">${RC_OUTBOUND.map(([t, b]) => html`<li><span><strong>${t}</strong><span>${b}</span></span></li>`)}</ul>
-<p class="rc-safe__title">Safeguards on every outbound call</p><ul class="rc-safe">${RC_SAFEGUARDS.map((x) => html`<li>${x}</li>`)}</ul></div></div></div></section>
-${section("Voice", "Choose how it sounds", html`<div data-reveal>${voiceLibrary()}</div>`, { id: "voices", lede: "Warm, polished, conversational, calm or energetic — the agent speaks with natural pacing, handles interruptions and keeps the context of the call." })}
+<div class="versus__panel on-dark" data-reveal><p class="versus__title">Inbound — what we can configure</p><ul class="versus__list">${RC_INBOUND.map(([t, b]) => html`<li><span><strong>${t}</strong><span>${b}</span></span></li>`)}</ul></div>
+<div class="versus__panel on-dark" data-reveal style="--rd:140ms"><p class="versus__title">Outbound — only when scoped</p><ul class="versus__list">${RC_OUTBOUND.map(([t, b]) => html`<li><span><strong>${t}</strong><span>${b}</span></span></li>`)}</ul>
+<p class="rc-safe__title">Any outbound calling we configure must</p><ul class="rc-safe">${RC_SAFEGUARDS.map((x) => html`<li>${x}</li>`)}</ul></div></div></div></section>
+${section("Voice", "Choose how it sounds", html`<div data-reveal>${voiceLibrary()}</div>`, { id: "voices", lede: "Pick a voice style during setup from the voices your chosen provider offers. The styles below are text previews of tone, not recordings." })}
 ${section("Where it helps", "Built around your calls", html`<ul class="ledger rc-uses" data-reveal-group>${RC_USES.map(([t, b, tag]) => html`<li data-reveal><p class="rc-uses__tag">${tag}</p><h3>${t}</h3><p>${b}</p></li>`)}</ul><p class="muted rc-uses__note">Examples of how the service can be configured — not client results.</p>`, { id: "uses" })}
-${section("Connected", "One call, every system updated", html`<ol class="rc-flow" data-reveal-group>${RC_FLOW.map(([t, b], i) => html`<li class="rc-flow__node${i === 1 ? " rc-flow__node--core" : ""}" data-reveal style="${`--rd:${i * 70}ms`}"><span class="rc-flow__n">${String(i + 1).padStart(2, "0")}</span><strong>${t}</strong><span>${b}</span></li>`)}</ol>`, { id: "workflow", lede: "The receptionist works inside your existing tools — calendar, CRM, website and team — within the written scope of your project." })}
-<section class="section" id="handoff"><div class="container section__inner"><p class="section__label">People stay in charge</p><div class="section__head"><h2 class="reveal-words" data-reveal>A person is always one step away</h2><p class="lede" data-reveal style="--rd:140ms">Urgent, sensitive or complicated calls go to your team — transferred live with a summary, or as a callback task when nobody is available. Try the “Urgent → a person” scenario in the control centre above to see a handoff.</p></div>
+${section("Connected", "How it can connect", html`<ol class="rc-flow" data-reveal-group>${RC_FLOW.map(([t, b], i) => html`<li class="rc-flow__node${i === 1 ? " rc-flow__node--core" : ""}" data-reveal style="${`--rd:${i * 70}ms`}"><span class="rc-flow__n">${String(i + 1).padStart(2, "0")}</span><strong>${t}</strong><span>${b}</span></li>`)}</ol>`, { id: "workflow", lede: "Each connection is optional and is agreed in the written scope of your project, depending on what your provider and systems support." })}
+<section class="section" id="handoff"><div class="container section__inner"><p class="section__label">People stay in charge</p><div class="section__head"><h2 class="reveal-words" data-reveal>A person is always one step away</h2><p class="lede" data-reveal style="--rd:140ms">Urgent, sensitive or complicated calls go to your team under rules you set — as a callback task with a summary, an alert, or a live transfer where your phone setup supports it. The “Urgent → a person” scenario in the simulated call above shows one way a handoff can be configured.</p></div>
 <div class="versus" data-reveal-group>
-<div class="versus__panel on-dark" data-reveal><p class="versus__title">What it is designed to do</p><ul class="versus__list">${["Hold natural, expressive conversations with sensible pacing", "Handle interruptions and change of plans mid-sentence", "Remember what the caller said earlier in the same call", "Answer from your approved information only", "Work around the clock when you configure it to"].map((x) => html`<li><span>${x}</span></li>`)}</ul></div>
+<div class="versus__panel on-dark" data-reveal><p class="versus__title">What we design for</p><ul class="versus__list">${["Natural conversation with sensible pacing, using your provider's voice technology", "Handling interruptions and changes of plan, as far as the provider supports it", "Remembering what the caller said earlier in the same call", "Answering from your approved information only", "Working at the hours you choose"].map((x) => html`<li><span>${x}</span></li>`)}</ul></div>
 <div class="versus__panel versus__panel--not" data-reveal style="--rd:160ms"><p class="versus__title">What to know</p><ul class="versus__list">${s.boundaries.map((x) => html`<li><span>${x}</span></li>`)}</ul></div></div></div></section>
 ${section("Setup", "From first call to launch", html`<ol class="rc-steps" data-reveal-group>${RC_STEPS.map(([t, b], i) => html`<li data-reveal><span class="rc-steps__n">${String(i + 1).padStart(2, "0")}</span><strong>${t}</strong><span>${b}</span></li>`)}</ol>
 <div class="card rc-price" data-reveal><h3 class="card__title">How it is priced</h3><p>${PRICING_NOTE[s.pricing]}</p><p class="muted">Custom projects are billed 50% as a deposit, 25% after the approved design milestone and 25% before production launch. Phone numbers, call minutes and voice-provider usage are billed by the provider.</p><div class="row">${linkButton("Request a quote", quote)}</div></div>`, { id: "setup" })}
 <section class="section" id="faq"><div class="container faq"><div class="faq__aside"><p class="section__label">FAQs</p><h2 class="faq__title reveal-words" data-reveal>AI Receptionist questions</h2>
 <p data-reveal style="--rd:120ms">Another question? <a href="/contact">Contact us</a> or write to <a href="mailto:${email}">${email}</a>.</p></div>
 <div data-reveal>${RC_FAQ.map(([q, a]) => html`<details class="disclosure"><summary>${q}</summary><div class="disclosure__body"><p>${a}</p></div></details>`)}</div></div></section>
-<section class="section"><div class="container"><div class="cta-band on-dark rc-cta" data-reveal-group><p class="section__label" data-reveal>AI Receptionist</p><h2 class="reveal-words" data-reveal>Never miss the call that matters</h2><p class="lede" data-reveal>Tell us how your calls work today. We'll scope an agent around your hours, systems and rules, and quote it in writing.</p><div class="hero__actions" data-reveal>${ctaLink("Request a quote", quote, "primary")}${ctaLink("Talk to us", "/contact", "secondary")}</div></div></div></section>`;
+<section class="section"><div class="container"><div class="cta-band on-dark rc-cta" data-reveal-group><p class="section__label" data-reveal>AI Receptionist</p><h2 class="reveal-words" data-reveal>Designed around the calls that matter</h2><p class="lede" data-reveal>Tell us how your calls work today. We'll scope an agent around your hours, systems and rules, and quote it in writing.</p><div class="hero__actions" data-reveal>${ctaLink("Request a quote", quote, "primary")}${ctaLink("Talk to us", "/contact", "secondary")}</div></div></div></section>`;
 }
 
 /** Things Crestmont will not do (shown on About and in the homepage comparison; approved copy). */
@@ -502,9 +504,9 @@ export function register(r: Router): void {
 <h2 class="statement__text scroll-words" id="principles-title">Published prices. Counted revisions. Nothing goes live without your approval.</h2>
 <ul class="statement__labels">${whyItems.slice(0, 4).map((w) => html`<li class="statement__label">${w.title}</li>`)}</ul></div></div></section>
 ${section("Our services", "What we build", html`${serviceBento(featured, c)}<p class="section__more"><a href="/services">All services</a></p>`, { id: "services", lede: c.get("services.overview").lede })}
-${section("New · AI Receptionist", "Every call answered, every detail captured", html`<div class="rc-home"><div class="rc-home__copy" data-reveal-group>
-<p class="lede" data-reveal>Natural-sounding AI voice agents for inbound and outbound calls. They answer questions, book and reschedule appointments, update your CRM and hand urgent calls to your team — with a summary of every call.</p>
-<ul class="rc-home__points" data-reveal>${["Inbound: answers, intake, scheduling and urgent routing", "Outbound: confirmations, reminders and follow-ups customers asked for", "Connected to your calendar, CRM and website", "Identifies itself as AI; a person is always one step away"].map((x) => html`<li>${x}</li>`)}</ul>
+${section("New · AI Receptionist", "AI voice agents, configured for your calls", html`<div class="rc-home"><div class="rc-home__copy" data-reveal-group>
+<p class="lede" data-reveal>Custom AI voice agents, built for your business on the voice provider you choose. They can answer questions from your approved information, collect caller details and requests, and pass urgent calls to your team under your rules — each one scoped and quoted in writing.</p>
+<ul class="rc-home__points" data-reveal>${["A custom configuration for each client, on the provider you choose", "Answers questions and collects caller details and requests", "Optional calendar, CRM and website connections within the written scope", "Identifies itself as AI; a person is always one step away"].map((x) => html`<li>${x}</li>`)}</ul>
 <div class="hero__actions" data-reveal>${ctaLink("Explore AI Receptionist", "/services/ai-receptionist", "primary")}${ctaLink("Request a quote", "/quote?service=ai-receptionist", "secondary")}</div></div>
 <div class="rc-home__demo" data-reveal style="--rd:140ms">${receptionistConsole({ compact: true, id: "rc-home" })}</div></div>`, { id: "ai-receptionist" })}
 ${section("Latest work", c.get("portfolio.intro").heading === "Portfolio" ? "Real websites" : c.get("portfolio.intro").heading, projects.length ? html`${portfolioExplorer(ctx, projects, { variant: "home" })}<p class="section__more"><a href="/portfolio">View the portfolio</a></p>`
