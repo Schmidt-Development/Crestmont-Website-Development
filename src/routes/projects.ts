@@ -8,7 +8,7 @@ import { requireStaff } from "../app/app.ts";
 import { appLayout } from "../ui/layout.ts";
 import { staffNav } from "./nav.ts";
 import {
-  csrf, button, linkButton, actionForm, input, textarea, select, checkbox, formErrors, alert, badge, table, emptyState, kpi, dl, tabs, pageHead, nl2br, pagination, pageParam,
+  csrf, button, linkButton, actionForm, input, textarea, select, checkbox, formErrors, alert, badge, table, emptyState, kpi, dl, tabs, pageHead, nl2br, pagination, pageParam, threadEarlierNav, showingOf,
 } from "../ui/components.ts";
 import { toCsv } from "../services/finance.ts";
 import * as P from "../services/projects.ts";
@@ -137,11 +137,12 @@ ${table(rows, [
     requireStaff(ctx, "customers.read");
     const org = await ctx.db.prepare(`SELECT id, name FROM organizations WHERE id = ? AND kind = 'customer'`).bind(orgId).first<{ id: string; name: string }>();
     if (!org) throw new HttpError(404, "Customer not found");
-    const msgs = await M.listThread(ctx.db, { userId: ctx.user!.id, organizationId: org.id, staff: true }, null);
-    await M.markThreadRead(ctx.db, ctx.user!.id, org.id, null, true);
+    const thread = await M.listThread(ctx.db, { userId: ctx.user!.id, organizationId: org.id, staff: true }, null, { before: ctx.url.searchParams.get("before") });
+    const msgs = thread.messages;
+    await M.markThreadRead(ctx.db, ctx.user!.id, org.id, null, true, msgs.map((m) => m.id));
     const body = html`${pageHead(org.name, html`${linkButton("All conversations", "/staff/conversations", "ghost", "sm")}${linkButton("Customer record", `/staff/customers/${org.id}`, "ghost", "sm")}`, "General conversation")}
 ${formErrors(errors)}
-<div class="thread">${msgs.length ? msgs.map((m) => html`<article class="msg${m.internal ? " msg--internal" : m.author_is_staff ? " msg--staff" : ""}"><div class="msg__meta">${m.internal ? "Internal note · " : ""}${m.author_name}${m.author_is_staff ? " · Crestmont" : " · Customer"} · ${formatDateTime(m.created_at)}${!m.internal && m.author_is_staff ? (m.read_by_other_side ? " · Seen by customer" : " · Not yet read by customer") : ""}</div>${nl2br(m.body)}${m.attachment_file_id ? html`<p><a href="/files/${m.attachment_file_id}">Attachment: ${m.attachment_name ?? "file"}</a></p>` : ""}</article>`) : emptyState("No messages yet", "Send the first message, or leave an internal note for the team.")}</div>
+${threadEarlierNav(ctx, thread)}<div class="thread">${msgs.length ? msgs.map((m) => html`<article class="msg${m.internal ? " msg--internal" : m.author_is_staff ? " msg--staff" : ""}"><div class="msg__meta">${m.internal ? "Internal note · " : ""}${m.author_name}${m.author_is_staff ? " · Crestmont" : " · Customer"} · ${formatDateTime(m.created_at)}${!m.internal && m.author_is_staff ? (m.read_by_other_side ? " · Seen by customer" : " · Not yet read by customer") : ""}</div>${nl2br(m.body)}${m.attachment_file_id ? html`<p><a href="/files/${m.attachment_file_id}">Attachment: ${m.attachment_name ?? "file"}</a></p>` : ""}</article>`) : emptyState("No messages yet", "Send the first message, or leave an internal note for the team.")}</div>
 <form method="post" action="/staff/conversations/${org.id}" enctype="multipart/form-data" class="card" style="margin-top:1.5rem">${csrf(ctx)}${textarea({ name: "body", label: "Message", required: true, rows: 4, maxlength: 10000, value: draft })}
 <div class="field"><label for="f-attachment">Attachment (optional)</label><input class="input" id="f-attachment" type="file" name="attachment"${ctx.storage ? "" : html` disabled`}></div>
 ${checkbox("internal", "Internal note — not visible to the customer")}<div class="form-actions">${button("Send")}</div></form>`;
@@ -371,9 +372,10 @@ ${coord && proj.status === "completed" ? html`<p class="faint">Move to Maintenan
 <section class="card" style="margin-top:1.5rem"><h2 class="card__title">Approval log</h2>${table(approvals, [{ header: "Approval", cell: (a) => P.APPROVAL_LABELS[a.kind] ?? a.kind }, { header: "Decision", cell: (a) => badge(a.decision) }, { header: "By", cell: (a) => a.display_name }, { header: "Notes", cell: (a) => a.notes ?? "—" }, { header: "When", cell: (a) => formatDateTime(a.created_at) }], { empty: html`<p class="muted">No approvals recorded.</p>` })}
 <h3>Customer approval requests</h3>${table(requests, [{ header: "Approval", cell: (a) => P.APPROVAL_LABELS[a.kind] }, { header: "Note", cell: (a) => a.note ?? "—" }, { header: "Requested", cell: (a) => fmtDay(a.created_at) }, { header: "Status", cell: (a) => (a.resolved_at ? badge("resolved") : badge("pending_customer", "Waiting on customer")) }], { empty: html`<p class="muted">No requests sent.</p>` })}</section>`;
     } else if (tab === "messages") {
-      const msgs = await M.listThread(db, { userId: ctx.user!.id, organizationId: proj.organization_id, staff: true }, proj.id);
-      await M.markThreadRead(db, ctx.user!.id, proj.organization_id, proj.id, true);
-      content = html`<div class="thread">${msgs.length ? msgs.map((m) => html`<article class="msg${m.internal ? " msg--internal" : m.author_is_staff ? " msg--staff" : ""}"><div class="msg__meta">${m.internal ? "Internal note · " : ""}${m.author_name}${m.author_is_staff ? " · Crestmont" : " · Customer"} · ${formatDateTime(m.created_at)}${!m.internal && m.author_is_staff ? (m.read_by_other_side ? " · Seen by customer" : " · Not yet read by customer") : ""}</div>${nl2br(m.body)}${m.attachment_file_id ? html`<p><a href="/files/${m.attachment_file_id}">Attachment: ${m.attachment_name ?? "file"}</a></p>` : ""}</article>`) : emptyState("No messages yet", "Start the conversation with the customer, or leave an internal note.")}</div>
+      const thread = await M.listThread(db, { userId: ctx.user!.id, organizationId: proj.organization_id, staff: true }, proj.id, { before: ctx.url.searchParams.get("before") });
+      const msgs = thread.messages;
+      await M.markThreadRead(db, ctx.user!.id, proj.organization_id, proj.id, true, msgs.map((m) => m.id));
+      content = html`${threadEarlierNav(ctx, thread)}<div class="thread">${msgs.length ? msgs.map((m) => html`<article class="msg${m.internal ? " msg--internal" : m.author_is_staff ? " msg--staff" : ""}"><div class="msg__meta">${m.internal ? "Internal note · " : ""}${m.author_name}${m.author_is_staff ? " · Crestmont" : " · Customer"} · ${formatDateTime(m.created_at)}${!m.internal && m.author_is_staff ? (m.read_by_other_side ? " · Seen by customer" : " · Not yet read by customer") : ""}</div>${nl2br(m.body)}${m.attachment_file_id ? html`<p><a href="/files/${m.attachment_file_id}">Attachment: ${m.attachment_name ?? "file"}</a></p>` : ""}</article>`) : emptyState("No messages yet", "Start the conversation with the customer, or leave an internal note.")}</div>
 <form method="post" action="/staff/projects/${proj.id}/messages" enctype="multipart/form-data" class="card" style="margin-top:1.5rem">${csrf(ctx)}${textarea({ name: "body", label: "Message", required: true, rows: 4, maxlength: 10000 })}
 <div class="field"><label for="f-attachment">Attachment (optional)</label><input class="input" id="f-attachment" type="file" name="attachment"${ctx.storage ? "" : html` disabled`}></div>
 ${checkbox("internal", "Internal note — not visible to the customer")}<div class="form-actions">${button("Send")}</div></form>`;

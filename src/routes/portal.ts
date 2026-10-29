@@ -8,7 +8,7 @@ import { requireCustomerOrg, requireStaff } from "../app/app.ts";
 import { appLayout, publicLayout } from "../ui/layout.ts";
 import { portalNav, staffNav } from "./nav.ts";
 import {
-  csrf, button, linkButton, actionForm, input, textarea, select, checkbox, formErrors, alert, badge, table, emptyState, kpi, dl, tabs, pageHead, nl2br,
+  csrf, button, linkButton, actionForm, input, textarea, select, checkbox, formErrors, alert, badge, table, emptyState, kpi, dl, tabs, pageHead, nl2br, threadEarlierNav, showingOf, pagination, pageParam,
 } from "../ui/components.ts";
 import * as P from "../services/projects.ts";
 import * as F from "../services/files.ts";
@@ -468,11 +468,12 @@ ${table(rows, [
 
   // General (non-project) conversation with Crestmont (PORTAL-005). project_id IS NULL, scoped to the caller's organization.
   const generalThreadPage = async (ctx: AppContext, org: Org, errors: string[] = [], status = 200, draft = "") => {
-    const msgs = await M.listThread(ctx.db, { userId: ctx.user!.id, organizationId: org.organizationId, staff: false }, null);
-    await M.markThreadRead(ctx.db, ctx.user!.id, org.organizationId, null, false);
+    const thread = await M.listThread(ctx.db, { userId: ctx.user!.id, organizationId: org.organizationId, staff: false }, null, { before: ctx.url.searchParams.get("before") });
+    const msgs = thread.messages;
+    await M.markThreadRead(ctx.db, ctx.user!.id, org.organizationId, null, false, msgs.map((m) => m.id));
     const body = html`${pageHead("General conversation", linkButton("All messages", "/portal/messages", "ghost", "sm"), org.organizationName)}
 <p class="muted">Messages here go to the Crestmont team, not to a specific project. Project questions are answered faster in that project's own conversation.</p>
-<div class="thread" aria-live="polite">${msgs.length ? msgs.map((m) => html`<article class="msg${m.author_is_staff ? " msg--staff" : ""}"><div class="msg__meta">${m.author_name}${m.author_is_staff ? " · Crestmont" : ""} · ${formatDateTime(m.created_at)}${m.author_user_id === ctx.user!.id ? (m.read_by_other_side ? " · Seen by Crestmont" : " · Not yet read") : m.read_by_me ? "" : " · New"}</div>
+${threadEarlierNav(ctx, thread)}<div class="thread" aria-live="polite">${msgs.length ? msgs.map((m) => html`<article class="msg${m.author_is_staff ? " msg--staff" : ""}"><div class="msg__meta">${m.author_name}${m.author_is_staff ? " · Crestmont" : ""} · ${formatDateTime(m.created_at)}${m.author_user_id === ctx.user!.id ? (m.read_by_other_side ? " · Seen by Crestmont" : " · Not yet read") : m.read_by_me ? "" : " · New"}</div>
 ${nl2br(m.body)}${m.attachment_file_id ? html`<p><a href="/files/${m.attachment_file_id}">Attachment: ${m.attachment_name ?? "file"}</a></p>` : ""}</article>`) : emptyState("No messages yet", "Ask a question or tell us what you need below.")}</div>
 ${formErrors(errors)}
 <form method="post" action="/portal/messages/general" enctype="multipart/form-data" class="card" style="margin-top:1.5rem">${csrf(ctx)}
@@ -494,10 +495,11 @@ ${button("Send message")}</form>`;
 
   const threadPage = async (ctx: AppContext, org: Org, id: string, errors: string[] = [], status = 200, draft = "") => {
     const proj = await P.getOrgProject(ctx.db, org.organizationId, id);
-    const msgs = await M.listThread(ctx.db, { userId: ctx.user!.id, organizationId: org.organizationId, staff: false }, proj.id);
-    await M.markThreadRead(ctx.db, ctx.user!.id, org.organizationId, proj.id, false);
+    const thread = await M.listThread(ctx.db, { userId: ctx.user!.id, organizationId: org.organizationId, staff: false }, proj.id, { before: ctx.url.searchParams.get("before") });
+    const msgs = thread.messages;
+    await M.markThreadRead(ctx.db, ctx.user!.id, org.organizationId, proj.id, false, msgs.map((m) => m.id));
     const body = html`${pageHead("Messages", undefined, proj.name)}${projectTabs(ctx, proj.id)}
-<div class="thread" aria-live="polite">${msgs.length ? msgs.map((m) => html`<article class="msg${m.author_is_staff ? " msg--staff" : ""}"><div class="msg__meta">${m.author_name}${m.author_is_staff ? " · Crestmont" : ""} · ${formatDateTime(m.created_at)}${m.author_user_id === ctx.user!.id ? (m.read_by_other_side ? " · Seen by team" : " · Not yet read") : m.read_by_me ? "" : " · New"}</div>
+${threadEarlierNav(ctx, thread)}<div class="thread" aria-live="polite">${msgs.length ? msgs.map((m) => html`<article class="msg${m.author_is_staff ? " msg--staff" : ""}"><div class="msg__meta">${m.author_name}${m.author_is_staff ? " · Crestmont" : ""} · ${formatDateTime(m.created_at)}${m.author_user_id === ctx.user!.id ? (m.read_by_other_side ? " · Seen by team" : " · Not yet read") : m.read_by_me ? "" : " · New"}</div>
 ${nl2br(m.body)}${m.attachment_file_id ? html`<p><a href="/files/${m.attachment_file_id}">Attachment: ${m.attachment_name ?? "file"}</a></p>` : ""}</article>`) : emptyState("No messages yet", "Ask a question or share an update with your team below.")}</div>
 ${formErrors(errors)}
 <form method="post" action="/portal/projects/${proj.id}/messages" enctype="multipart/form-data" class="card" style="margin-top:1.5rem">${csrf(ctx)}
