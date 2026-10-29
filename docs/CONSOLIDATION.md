@@ -42,7 +42,7 @@ The two lines of work touched disjoint files except `wrangler.toml`, and git mer
 | `migrations/0037_portfolio_demos.sql` → `0038_portfolio_demos.sql` | Both branches created a `0037_*`. Wrangler tracks by filename, so both would apply, but a unique, ordered number keeps staging and the later production release unambiguous. Additive only (nullable columns + CHECKs). |
 | `PORTFOLIO_DEMO_ORIGINS` added to `[env.staging]` vars | Without it staging refuses to frame any demo. Same four origins the preview used. Production still has none. |
 | `[env.frontend-preview]` removed from `wrangler.toml`; `deploy-frontend-preview.yml`, `scripts/frontend-preview-access.ts`, `scripts/frontend-preview-check.ts` removed from `main` | `main` can now deploy only staging and production. The preview Worker itself is untouched and can still be redeployed from `claude/frontend-redesign` (rollback, §4). |
-| `deploy-staging.yml`: new step **Portfolio projects and their isolated demos** | Idempotent upsert of the four portfolio projects (fixed ids matching migration 0005), every deploy. A demo is marked ready only if, from the runner, it answers `/__demo/info` and its `frame-ancestors` names the **staging** origin. |
+| `deploy-staging.yml`: new step **Portfolio projects and their isolated demos** | Every deploy, with `--preserve-edits`: full setup only for rows nobody has documented yet (the migration-0005 placeholders); afterwards only demo verification is refreshed, so Staff → Portfolio edits (copy, order, unpublishing, posters) are never overwritten. A demo is marked ready only if, from the runner, it answers `/__demo/info` and its `frame-ancestors` names the **staging** origin. |
 | `deploy-staging.yml`: new step **Frontend assets and homepage served by this commit** | sha256 of 10 key assets must equal the commit's files; gated homepage must contain the v3 markers; 9 public pages must return 200. No secrets. |
 | `deploy-staging.yml`: new step **Frontend browser verification on staging** + artifact `staging-frontend-browser` | The preview's real-browser suite, now against staging. Installs Playwright with no secrets in the step (F-24); screenshots are written under `evidence/` (INFRA-002 upload rule). |
 | `scripts/frontend-preview-browser.mjs` → `scripts/frontend-browser-check.mjs`; contact submission opt-in (`ALLOW_TEST_SUBMISSION=1`) | Staging's database persists and Resend is live, so the browser suite fills the contact form but never submits it there. |
@@ -62,7 +62,7 @@ MFA, step-up, encryption and secret scoping are as on `main`.
 | `npm test` | **441 passed, 0 failed** (`main`: 420 passed). Includes F-23/F-24/INFRA-002 workflow-security tests on the new steps. |
 | `npm run e2e` (local Chromium) | **34 passed, 0 failed, 38 skipped** (skipped = staging-only journeys that need the deployed URL) |
 | Frontend browser suite against a local server of the merged code, seeded with the staging seed + portfolio setup | **176 passed, 0 failed** (desktop + phone, all 10 public pages, pricing inheritance, services, About diagram, portfolio explorer, assistant launcher, contact form) |
-| Portfolio setup run twice on a migrated database | 4 projects, 16 audit rows (idempotent; no slug conflicts with migration 0005 rows) |
+| Portfolio setup on a migrated database | First run publishes the 4 projects with posters; after a Founder unpublish + rename, the next run keeps both and only updates demo status; idempotent, no slug conflicts with migration 0005 rows |
 | Security headers on `/`, `/portfolio`, `/login`, `/api/health` | CSP, `X-Frame-Options: DENY`, HSTS, nosniff present; no demo origin in `frame-src` while none is verified |
 | `[env.production]` block | byte-identical to `main` |
 
@@ -74,6 +74,15 @@ demo verified for staging they are skipped and the explorer shows posters (see �
 Restore point (D1 Time Travel bookmark) → migrations (0038) → deploy → access rotation checks → smoke →
 **frontend assets/markers** → existing staging E2E (`staging*.e2e.ts`: auth, MFA, journeys, quality/axe) →
 **frontend browser suite** → evidence posted to the readiness command center.
+
+### Carried into the next production release (not deployed by this PR)
+
+Production receives this code only through a Founder-approved release. When that happens:
+- migration 0038 applies to the production database (additive);
+- `POST /api/assistant` exists but stays unavailable unless `AI_PROVIDER=anthropic`, an API key and a monthly budget are set;
+- a bundled `/assets/portfolio/*.webp` poster counts as the genuine screenshot required to publish a portfolio project
+  (`publishBlockers`), a policy change from today's production behavior;
+- production has no `PORTFOLIO_DEMO_ORIGINS`, so it frames no demo (posters only).
 
 ## 4. Rollback
 

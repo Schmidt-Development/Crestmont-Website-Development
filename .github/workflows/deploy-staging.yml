@@ -270,8 +270,8 @@ jobs:
             echo "seeded=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Consolidated from the frontend-preview Worker (docs/CONSOLIDATION.md). Idempotent upserts with fixed ids
-      # (scripts/portfolio-setup.ts), so it runs every deploy. A demo is marked ready only when, checked from this runner,
+      # Consolidated from the frontend-preview Worker (docs/CONSOLIDATION.md). Fixed ids; --preserve-edits keeps Staff → Portfolio edits
+      # (only the demo verification is refreshed after first setup), so it runs every deploy. A demo is marked ready only when, checked from this runner,
       # it answers /__demo/info AND its frame-ancestors names THIS staging origin; otherwise the explorer shows the poster.
       - name: Portfolio projects and their isolated demos (verified for the staging origin)
         id: portfolio
@@ -291,7 +291,7 @@ jobs:
             if echo "$info" | grep -q '"demo":true' && echo "$fa" | grep -qF "https://$host"; then verified="$verified,$slug"; report="$report\n- $slug: demo verified for staging ($demo)"
             else report="$report\n- $slug: not embeddable on staging yet (frame-ancestors must name https://$host) — poster shown"; fi
           done
-          node --no-warnings scripts/portfolio-setup.ts --out portfolio.sql --origins "$origins" --verified "${verified#,}" | tee portfolio-report.txt
+          node --no-warnings scripts/portfolio-setup.ts --out portfolio.sql --origins "$origins" --verified "${verified#,}" --preserve-edits | tee portfolio-report.txt
           $WRANGLER d1 execute crestmont-staging --remote --env staging --file portfolio.sql --yes > /dev/null
           { echo "### Portfolio"; echo; sed 's/^/- /' portfolio-report.txt; printf "$report\n"; } >> "$GITHUB_STEP_SUMMARY"
 
@@ -407,7 +407,7 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pwf/browsers
         run: |
           unset EVIDENCE_INGEST_SECRET   # set via GITHUB_ENV earlier; third-party packages below never see it (F-24)
-          npm install --prefix .pwf --no-save --no-audit --no-fund playwright@1.63.0 > pwf-install.log 2>&1 || { echo "::error title=Playwright install failed::$(tail -c 600 pwf-install.log | tr '\n' ' ')"; exit 1; }
+          npm install --prefix .pwf --no-save --no-audit --no-fund --ignore-scripts playwright@1.63.0 > pwf-install.log 2>&1 || { echo "::error title=Playwright install failed::$(tail -c 600 pwf-install.log | tr '\n' ' ')"; exit 1; }
           .pwf/node_modules/.bin/playwright install --with-deps chromium > pwf-browsers.log 2>&1 || { echo "::error title=Chromium install failed::$(tail -c 600 pwf-browsers.log | tr '\n' ' ')"; exit 1; }
           PREVIEW_PASSWORD=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("access/private.json","utf8")).previewPassword)') \
             node --no-warnings scripts/frontend-browser-check.mjs "$BASE" evidence/frontend-browser

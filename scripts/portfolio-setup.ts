@@ -21,6 +21,10 @@ const local = all("--demo-override").length > 0;
 const approved = approvedDemoOrigins(opt("--origins") ?? process.env.PORTFOLIO_DEMO_ORIGINS ?? "", { allowLocal: local });
 const verified = new Set((opt("--verified") ?? "").split(",").map((s) => s.trim()).filter(Boolean));
 const verifiedOn = opt("--verified-on") ?? new Date().toISOString().slice(0, 10);
+// --preserve-edits (persistent databases such as staging): full setup only for rows not yet documented (missing, or the
+// migration-0005 placeholders). Afterwards only the runner-verified demo fields are refreshed, and only while the stored
+// demo URL is still the verified one. Copy, order, publication, evidence and posters edited in Staff → Portfolio stay.
+const preserve = args.includes("--preserve-edits");
 const overrides = Object.fromEntries(all("--demo-override").map((x) => { const i = x.indexOf("="); return [x.slice(0, i), x.slice(i + 1)]; }));
 
 const q = (v: string | number | null) => (v === null ? "NULL" : typeof v === "number" ? String(v) : `'${v.replace(/'/g, "''")}'`);
@@ -51,7 +55,8 @@ ON CONFLICT(id) DO UPDATE SET slug = excluded.slug, name = excluded.name, indust
   verified_features_json = excluded.verified_features_json, technology_summary = excluded.technology_summary, position = excluded.position, published = excluded.published, updated_at = excluded.updated_at,
   relationship_documented_at = excluded.relationship_documented_at, relationship_evidence = excluded.relationship_evidence, link_verified_at = excluded.link_verified_at,
   published_at = COALESCE(portfolio_projects.published_at, excluded.published_at), demo_url = excluded.demo_url, demo_status = excluded.demo_status, demo_verified_at = excluded.demo_verified_at,
-  demo_revision = excluded.demo_revision, poster_desktop_asset = excluded.poster_desktop_asset, poster_mobile_asset = excluded.poster_mobile_asset, poster_tablet_asset = excluded.poster_tablet_asset;`);
+  demo_revision = excluded.demo_revision, poster_desktop_asset = excluded.poster_desktop_asset, poster_mobile_asset = excluded.poster_mobile_asset, poster_tablet_asset = excluded.poster_tablet_asset${preserve ? " WHERE portfolio_projects.relationship_documented_at IS NULL" : ""};`);
+  if (preserve) sql.push(`UPDATE portfolio_projects SET demo_status = ${q(demo.values.demo_status)}, demo_verified_at = ${q(demoAt)}, demo_revision = ${q(demo.values.demo_revision)}, updated_at = ${q(now)} WHERE id = ${q(p.id)} AND demo_url IS ${q(demo.values.demo_url)};`);
   audit(p.id, "portfolio.relationship_documented", { relationship: FOUNDER_AUTHORIZATION.relationship, source: "founder-authorization-2026-10-27" });
   audit(p.id, "portfolio.link_verified", { date: p.linkVerifiedOn, url: p.liveUrl });
   audit(p.id, "portfolio.demo_updated", { demoUrl: demo.values.demo_url, status: demo.values.demo_status, revision: p.demoRevision, verifiedOn: isVerified ? verifiedOn : null });
