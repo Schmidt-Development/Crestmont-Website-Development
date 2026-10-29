@@ -467,6 +467,19 @@ export async function clearMfa(db: Db, userId: string): Promise<void> {
   ]);
 }
 
+/**
+ * Issues a new token for an existing session (CREST-GAP-086): called when a session is elevated by completing MFA, so
+ * a token observed before the second factor (password-only stage) is worthless afterwards. Returns the new token and
+ * the seconds left on the session for the cookie's Max-Age.
+ */
+export async function rotateSessionToken(db: Db, sessionId: string): Promise<{ token: string; maxAge: number } | null> {
+  const s = await db.prepare(`SELECT expires_at FROM sessions WHERE id = ? AND revoked_at IS NULL`).bind(sessionId).first<{ expires_at: string }>();
+  if (!s) return null;
+  const token = randomToken();
+  await db.prepare(`UPDATE sessions SET token_hash = ? WHERE id = ? AND revoked_at IS NULL`).bind(await hashToken(token), sessionId).run();
+  return { token, maxAge: Math.max(0, Math.floor((Date.parse(s.expires_at) - Date.now()) / 1000)) };
+}
+
 export async function revokeSession(db: Db, sessionId: string, byUserId: string) {
   await db.prepare(`UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`).bind(nowIso(), sessionId).run();
   await audit(db, { actorUserId: byUserId, action: "session.revoked", subjectType: "session", subjectId: sessionId });

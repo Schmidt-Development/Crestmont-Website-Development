@@ -2,7 +2,7 @@
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html } from "../lib/html.ts";
-import { cookie, htmlResponse, isSecure, parseCookies, redirect, str } from "../app/http.ts";
+import { cookie, hostCookieName, htmlResponse, isSecure, parseCookies, redirect, str } from "../app/http.ts";
 import { authLayout, appLayout } from "../ui/layout.ts";
 import { csrf, input, button, formErrors, alert, table, actionForm, badge, checkbox } from "../ui/components.ts";
 import * as auth from "../services/auth.ts";
@@ -23,6 +23,12 @@ import { safeNextPath } from "../app/step-up.ts";
 const safeNext = (n: string | null, fallback: string) => safeNextPath(n, fallback);
 const BOT_CHECK_FAILED = "We could not verify that this request came from a person. Please try again.";
 
+/** New session token once the second factor is complete (CREST-GAP-086). */
+async function rotateSessionCookie(ctx: AppContext) {
+  const r = await auth.rotateSessionToken(ctx.db, ctx.sessionId!);
+  if (r) ctx.setCookies.push(sessionCookie(ctx, r.token, r.maxAge));
+}
+
 /** The remembered-device cookie for abuse-resistant sign-in (CREST-GAP-003). */
 function deviceCookieValue(ctx: AppContext): string | null {
   const v = parseCookies(ctx.req.headers.get("cookie"))[auth.DEVICE_COOKIE];
@@ -41,7 +47,7 @@ async function signInChallengePassed(ctx: AppContext, token: FormDataEntryValue 
 }
 
 function sessionCookie(ctx: AppContext, token: string, maxAge: number) {
-  return cookie("cm_session", token, { maxAge, secure: isSecure(ctx), httpOnly: true, sameSite: "Lax" });
+  return cookie(hostCookieName("cm_session", isSecure(ctx)), token, { maxAge, secure: isSecure(ctx), httpOnly: true, sameSite: "Lax" });
 }
 
 function loginPage(ctx: AppContext, errors: string[] = [], email = "", status?: number) {
@@ -100,6 +106,7 @@ export function register(r: Router) {
   r.post("/logout", async (ctx) => {
     if (ctx.sessionId && ctx.user) await auth.revokeSession(ctx.db, ctx.sessionId, ctx.user.id);
     ctx.setCookies.push(cookie("cm_session", "", { maxAge: 0, secure: isSecure(ctx) }));
+    if (isSecure(ctx)) ctx.setCookies.push(cookie(hostCookieName("cm_session", true), "", { maxAge: 0, secure: true }));
     return redirect(ctx, "/", { kind: "info", text: "You are signed out." });
   });
 
@@ -169,6 +176,7 @@ export function register(r: Router) {
     const f = await ctx.form();
     try {
       const res = await auth.completeMfa(ctx.env, ctx.db, ctx.sessionId!, ctx.user!.id, str(f, "code"), ctx.ip);
+      await rotateSessionCookie(ctx);
       await setDeviceCookie(ctx, ctx.user!.id, deviceCookieValue(ctx));
       const dest = safeNext(ctx.url.searchParams.get("next"), ctx.user!.isStaff ? "/staff" : "/portal");
       if (res.method === "recovery") return redirect(ctx, dest, await recoveryUsed(ctx, res.remaining));
@@ -196,6 +204,7 @@ export function register(r: Router) {
     const f = await ctx.form();
     try {
       const codes = await auth.confirmTotpEnrollment(ctx.env, ctx.db, ctx.user!.id, ctx.sessionId!, str(f, "code").replace(/\s/g, ""));
+      await rotateSessionCookie(ctx);
       await setDeviceCookie(ctx, ctx.user!.id, deviceCookieValue(ctx));
       await sendMail(ctx, { template: "security_notification", to: ctx.user!.email, idempotencyKey: `mfa-on:${ctx.user!.id}:${Date.now()}`, data: { event: "mfa_enabled" } });
       // The recovery codes are shown exactly once, in this response; only their hashes are stored.

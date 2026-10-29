@@ -1,7 +1,7 @@
 // Request pipeline: build context → load session → CSRF for forms → route → render errors.
 import type { AppContext, Env } from "./context.ts";
 import { Router } from "../lib/router.ts";
-import { HttpError, assertCsrf, cookie, htmlResponse, isSecure, jsonResponse, parseCookies, redirect } from "./http.ts";
+import { HttpError, assertCsrf, cookie, hostCookieName, htmlResponse, isSecure, jsonResponse, parseCookies, readHostCookie, redirect } from "./http.ts";
 import { randomToken } from "../lib/auth-crypto.ts";
 import { loadSession } from "../services/auth.ts";
 import { OutboxEmail, ResendEmail, recipientPolicy } from "../adapters/email.ts";
@@ -39,7 +39,7 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
     now,
     baseUrl: env.APP_URL ?? url.origin,
     user: null, actor: null, sessionId: null, sessionMfaVerified: false, sessionMfaAt: null,
-    csrfToken: cookies.cm_csrf && /^[0-9a-f]{32}$/.test(cookies.cm_csrf) ? cookies.cm_csrf : "",
+    csrfToken: ((v) => (v && /^[0-9a-f]{32}$/.test(v) ? v : ""))(readHostCookie(cookies, "cm_csrf")),
     flash: null,
     setCookies: [],
     settings: {},
@@ -48,9 +48,12 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
       return formCache;
     },
   };
-  if (!ctx.csrfToken) {
-    ctx.csrfToken = randomToken(16);
-    ctx.setCookies.push(cookie("cm_csrf", ctx.csrfToken, { secure: isSecure(ctx), httpOnly: true, sameSite: "Strict", maxAge: 60 * 60 * 24 }));
+  const secure = isSecure(ctx);
+  if (!ctx.csrfToken || (secure && !cookies["__Host-cm_csrf"])) {
+    // New token, or a token still held under the legacy name over HTTPS: (re)issue it under the __Host- name.
+    ctx.csrfToken ||= randomToken(16);
+    ctx.setCookies.push(cookie(hostCookieName("cm_csrf", secure), ctx.csrfToken, { secure, httpOnly: true, sameSite: "Strict", maxAge: 60 * 60 * 24 }));
+    if (secure && cookies.cm_csrf) ctx.setCookies.push(cookie("cm_csrf", "", { maxAge: 0, secure }));
   }
   if (cookies.cm_flash && !url.pathname.startsWith("/live/")) {
     try {
@@ -62,7 +65,7 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
   // ASVS F-08: /api/* skips CSRF, so a state-changing /api/* request never gets a cookie session at all. Such routes
   // must authenticate by signature (webhooks, CI evidence, runner) or be public; a cookie can never authorize them.
   const cookieAuth = !(url.pathname.startsWith("/api/") && req.method !== "GET" && req.method !== "HEAD");
-  const session = cookieAuth ? await loadSession(env.DB, cookies.cm_session, { passive: url.pathname.startsWith("/live/") }) : null;
+  const session = cookieAuth ? await loadSession(env.DB, readHostCookie(cookies, "cm_session"), { passive: url.pathname.startsWith("/live/") }) : null;
   if (session) {
     ctx.user = session.user; ctx.actor = session.actor; ctx.sessionId = session.sessionId; ctx.sessionMfaVerified = session.mfaVerified; ctx.sessionMfaAt = session.mfaVerifiedAt;
   } else if (env.resolveActor && cookieAuth) {
