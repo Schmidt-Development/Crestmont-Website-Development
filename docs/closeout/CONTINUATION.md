@@ -12,8 +12,8 @@ each finding's state; this file records batches, PRs and what to do next.
 - Never merge branches that restore the staging preview gate (`PREVIEW_GATE = "required"`) or roll
   `ACCESS_EPOCH` back from 3. PRs #8, #18, #19 predate public staging: cherry-pick their `src/` changes only.
 - Do not recreate `crestmont-platform-frontend-preview`. Do not deploy production.
-- **Merging requires a human.** The session's safety policy refuses merges without a review, so every PR is
-  opened green and handed to the Founder to merge, in the order below. Merging to `main` triggers Deploy staging.
+- **Merging requires a human.** The session's safety policy refuses merges without a review, so the single
+  consolidated PR (#37) is opened green and handed to the Founder. Merging to `main` triggers Deploy staging.
 
 ## Tooling notes
 
@@ -22,35 +22,55 @@ each finding's state; this file records batches, PRs and what to do next.
   then `/opt/npm-tools/node_modules/.bin/tsc -p tsconfig.json`.
 - Register: edit the JSON, then `node --no-warnings scripts/closeout-register.ts` (CI test fails if the markdown is stale).
 
-## Batches (PRs are opened green; the Founder merges, in this order)
+## Current state (2026-10-29)
 
-| Order | PR | Branch | Findings | Notes |
-| --- | --- | --- | --- | --- |
-| 1 | #26 | claude/closeout-001-invitation-takeover | 001, 004 | P0 — merge first (staging is public) |
-| 2 | #27 | claude/closeout-register | register, validator, this file | docs/tests only |
-| 3 | #28 | claude/closeout-018-branch-consolidation | 002, 018, 021–023, 025, 026, 030, 052 (contract), 069, 092 | PRs #18/#19/d1-closeout/staging-health-closeout without the preview gate; migrations 0040, 0041 |
-| 4 | #29 | claude/closeout-003-login-throttling | 003, 085 | stacked on #28; migration 0046 |
-| 5 | #31 | claude/closeout-086-session-cookies | 086, 102 | stacked on #29 |
-| 6 | #30 | claude/closeout-hardening | 012, 017, 056 (scope), 087, 101 | independent |
-| 7 | #35 | claude/closeout-commerce | 005–008, 010, 031–039, 080, 082, 083, 091, 093, 094 | contains 1–6 (merge commits); migration 0043 |
-| 8 | #32 | claude/closeout-retell | 053, 100 (supersedes #17) | contains 1–7; migration 0042 |
-| 9 | #33 | claude/closeout-modules | 040–044, 070–074, 079, 081 | contains 1–8; migration 0044 |
-| 10 | #34 | claude/closeout-frontend | 043 (policy link), 045–049, 051, 061, 075–078, 090, 095–099, 103 | contains 1–9 |
-| 11 | #36 | claude/closeout-ops | 014 (prep), 015, 016, 019, 020, 024, 027–029, 055, 058, 062–068, 089, 104, CREST-NEW-001 | contains 1–10; migration 0045. Whole stack at this head: 605/605 unit, runner 92/92, e2e 37/0, tsc clean |
-| — | glassly#1, better-lansing-mechanics#24 | claude/demo-closeout-059(-060) | 059 (2 of 4 demos), 060 | base crestmont/portfolio-demo; merging deploys only the demo Worker |
+- **One PR: #37 `claude/crestmont-final-104-closeout` → main.** It contains every commit of #26–#36 (verified by
+  ancestry and a line-level loss check) plus CREST-NEW-002. Engineering head `1bdd603`: 606/606 unit, runner 92/92,
+  e2e 37 passed / 0 failed (38 staging-only), tsc clean, migrations 0040–0046 replay cleanly on main's schema.
+- Register: 70 EC-staging, 17 EC-external, 16 blocked on humans, 1 N/A, **0 open**; supplemental CREST-NEW-001/-002.
+- Nothing merged, nothing deployed since the audit; staging still runs `92fee96` (the P0 is live there until #37 merges).
+- Demo repos (separate, Founder merges): glassly#1, better-lansing-mechanics#24. lansing-car-rentals was not
+  accessible to this workflow (059: two demos still list the retired preview origin).
+- Live checks from the closeout workspace were not possible (shell egress blocked, robots.txt refuses the fetch tool,
+  the browser bridge was offline). Observed: crestmontwebsitedevelopment.com answers (robots.txt served); the retired
+  preview Worker returns a client error.
 
-Every later PR already contains the earlier ones, so each merges without conflicts when the order is kept. Merging out
-of order re-opens conflicts in src/services/mailer.ts, src/app/scheduled.ts and .github/workflows/ci.yml.
+## Next step for a new session
 
-Reserved migration numbers: 0040 (#28 security readiness), 0041 (#28 deleted-task links), 0042 Retell, 0043 commerce,
-0044 modules, 0045 ops, 0046 known devices (#29). After everything merges, run `tests/migrations` uniqueness test (ops PR).
+1. If #37 is not merged: check its CI (`gh api repos/Schmidt-Development/Crestmont-Website-Development/pulls/37`),
+   fix anything red on the same branch, and wait for the Founder's review. Do not reopen the 11 PRs.
+2. After #37 merges: read the Deploy staging run (exact commit, migrations 0040–0046, cron registration) and the
+   "Staging certification" summary. For each journey that passed, move its findings to CLOSED — VERIFIED in the
+   register with the run link; failures are fixed on a new branch, never by weakening a journey.
+3. Close #17 and #26–#36 with a comment pointing to #37 (their commits are in main), then follow
+   docs/BRANCH-CLEANUP.md.
+4. As the Founder completes provider steps (below), re-run Deploy staging and close the EC-external items.
 
-The container restarted once mid-run (OOM with six concurrent test suites). Keep at most three engineering agents at a
-time and have them run focused tests; the full suite at most twice per branch.
+## Founder actions (deduplicated, by provider)
 
-## Next executable tasks
+- **GitHub:** review and merge #37; production secret `PRODUCTION_MFA_ENCRYPTION_KEY` then Provision production
+  (009); `v*` tag ruleset and production reviewer = Founder (054); variable `PRODUCTION_URL` at launch (015); five
+  `BACKUP_*` production secrets, then one manual production-backup run (016); `@dependabot recreate` on #3/#5/#6/#7
+  (063); merge glassly#1 and better-lansing-mechanics#24, and remove the preview origin from the two
+  lansing-car-rentals demos (059).
+- **Cloudflare:** confirm the zone, SSL Full (strict) and www redirect for the now-resolving domain (013); enable R2
+  (055); real staging Turnstile keys (019); `wrangler secret put FOUNDER_EMAIL --env production` (020); delete the
+  retired preview Worker and `frontend-preview` environment (058); `RUNNER_REQUIRE_NONCE=yes` once runners update (087).
+- **Stripe:** account in test mode; webhook at 2025-02-24.acacia with the 17 events; billing portal, dunning,
+  branding, dispute emails; staging test key (unlocks journeys 5–7, 24) (017, 038, 083). Live only after legal
+  approval: `PAYMENTS_LIVE_AUTHORIZED=yes` + live key + live webhook secret (007, 008, 010).
+- **Resend:** reported configured by the Founder; confirm the next Deploy staging shows the sending domain verified
+  (012). Only if not: DNS records from docs/EMAIL-DNS.md.
+- **Retell:** approve provider, workspaces, key, agent, URLs, number, spending limit, Owner budget, one test call
+  (053; docs/voice/RETELL-CONNECTION-GUIDE.md) — unlocks journeys 27–28.
+- **Business / legal / tax:** entity and address (011); attorney review of 12 policies (010); maintenance
+  entitlements (050, 090); retention periods (057); accountant review of Michigan tax (084); approve RPO 24 h / RTO 4 h
+  (016); staffed hours (049); AI Receptionist copy review (051); malware-scanner choice (052).
+- **Security vendor:** commission the pen test from docs/security/PENTEST-SCOPE.md (056).
+- **Other:** fix any published CMS `portfolio.intro` revision claiming production screenshots (048).
 
-1. Branch consolidation (CREST-GAP-018): rebase PR #18 (security-legal), #19 (staging MFA encryption),
-   `claude/d1-closeout`, `claude/staging-health-closeout` onto main; cherry-pick `src/` + tests; unique migration numbers.
-2. Lockout throttling (003) and Turnstile guards (019).
-3. Commerce stream (005–008, 031–039 …), then ops, modules/frontend, Retell.
+## Staging certification rule
+
+CERTIFIED = 33/33 required journeys passed on one Deploy staging run (evidence/staging-certification.json). Today the
+following cannot pass on staging by construction and keep it NOT CERTIFIED until their provider exists: 5–7, 17, 19,
+24 (Stripe test key), 25 (needs a Stripe test clock — manual check), 27–28 (Retell), 31–33 (production launch).
