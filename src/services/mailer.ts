@@ -26,7 +26,7 @@ export const REQUIRED_WORKFLOWS = [
   "support_reply", "refund_request", "refund_decision", "project_completion", "handoff", "security_notification",
   "critical_incident",
 ] as const;
-export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received"] as const;
+export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "email_change_confirm"] as const;
 export type EmailTemplate = (typeof EMAIL_TEMPLATES)[number];
 export type MailCategory = "transactional" | "marketing";
 export type Audience = "customer" | "staff" | "prospect" | "any";
@@ -86,13 +86,15 @@ export interface TemplateData {
     | { event: "issued"; amountCents: number; reference: string; url: string };
   project_completion: ProjectBase;
   handoff: ProjectBase;
-  security_notification: { event: "mfa_enabled" | "password_changed" | "deletion_requested" | "mfa_recovery_code_used" | "mfa_recovery_codes_regenerated" | "mfa_reset" };
+  security_notification: { event: "mfa_enabled" | "password_changed" | "deletion_requested" | "mfa_recovery_code_used" | "mfa_recovery_codes_regenerated" | "mfa_reset" | "email_change_requested" | "email_changed" };
   /** Staff alert for a critical production incident (no automated incident source exists yet). */
   critical_incident: { summary: string; occurredAt: string; url: string };
   password_reset: { resetUrl: string };
   staff_invitation: { inviterName: string; roleLabel: string; acceptUrl: string };
   quote_sent: { contactName: string; totalCents: number; validUntil: string | null; proposalUrl: string };
   lead_received: { name: string; kind: "quote" | "contact" };
+  /** Sent to the NEW address of a requested account email change (CREST-GAP-073); the change applies only after confirmation. */
+  email_change_confirm: { confirmUrl: string };
 }
 
 export interface MailContent { subject: string; heading: string; paragraphs: string[]; cta?: { label: string; url: string } }
@@ -358,11 +360,15 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
           paragraphs: ["A new set of two-factor recovery codes was generated for your Crestmont account. Every earlier recovery code stopped working.", "If this was not you, reset your password immediately and contact support."] };
         case "mfa_reset": return { subject: "Two-factor authentication was reset", heading: "Two-factor authentication reset",
           paragraphs: ["An administrator reset two-factor authentication on your Crestmont account and signed you out everywhere. You will set up a new authenticator the next time you sign in.", "If you did not ask for this, contact the Crestmont Owner immediately."] };
+        case "email_change_requested": return { subject: "Email address change requested", heading: "Email change requested",
+          paragraphs: ["Someone signed in to your Crestmont account asked to change its email address. Nothing changes until the new address is confirmed from the link we sent to it.", "If this was not you, change your password now and contact support. Your current address keeps working."] };
+        case "email_changed": return { subject: "Your account email address was changed", heading: "Email address changed",
+          paragraphs: ["The email address on your Crestmont account was changed after the new address was confirmed. Sign-in and notifications now use the new address.", "If you did not make this change, contact support immediately."] };
         case "deletion_requested": return { subject: "We received your deletion request", heading: "Deletion request received",
           paragraphs: ["We received a request to delete your Crestmont account. A staff member will review it and confirm when it is complete.", "If you did not make this request, sign in and change your password, then contact support."] };
       }
     },
-    samples: [{ event: "mfa_enabled" }, { event: "password_changed" }, { event: "deletion_requested" }, { event: "mfa_recovery_code_used" }, { event: "mfa_recovery_codes_regenerated" }, { event: "mfa_reset" }],
+    samples: [{ event: "mfa_enabled" }, { event: "password_changed" }, { event: "deletion_requested" }, { event: "mfa_recovery_code_used" }, { event: "mfa_recovery_codes_regenerated" }, { event: "mfa_reset" }, { event: "email_change_requested" }, { event: "email_changed" }],
   },
   critical_incident: {
     name: "critical_incident", category: "transactional", audience: "staff",
@@ -373,6 +379,16 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
       cta: { label: "Open monitoring", url: d.url },
     }),
     samples: [{ summary: "Error rate above threshold on the customer portal", occurredAt: "2026-01-01 12:00 UTC", url: "https://example.com/staff/monitoring" }],
+  },
+  email_change_confirm: {
+    name: "email_change_confirm", category: "transactional", audience: "customer",
+    description: "Confirmation link sent to the new address when a customer changes their account email (the change applies only after confirmation).",
+    render: (d) => ({
+      subject: "Confirm your new email address — Crestmont", heading: "Confirm your new email address",
+      paragraphs: ["Someone asked to use this address for their Crestmont account. If that was you, confirm within 48 hours to finish the change.", "If you did not ask for this, ignore this email; nothing changes."],
+      cta: { label: "Confirm new email", url: d.confirmUrl },
+    }),
+    samples: [{ confirmUrl: "https://example.com/account/email/confirm?token=preview" }],
   },
   password_reset: {
     name: "password_reset", category: "transactional", audience: "any",
