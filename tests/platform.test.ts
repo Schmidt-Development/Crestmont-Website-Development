@@ -194,7 +194,7 @@ test("[INFRA-006] recordAppError feeds the monitoring page; alerting is reported
   const { c } = await staffClient(app, "administrator");
   const html = await (await c.get("/staff/monitoring")).text();
   assert.match(html, /\/staff\/boom/);
-  assert.match(html, /No external alerting is configured/);
+  assert.match(html, /Alerting: email to the Owners, no paging/, "the page states exactly which alerting exists");
   assert.match(html, /5xx errors \(24 h\)<\/div><div class="kpi__value">1</);
 });
 

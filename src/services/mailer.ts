@@ -87,7 +87,7 @@ export interface TemplateData {
   project_completion: ProjectBase;
   handoff: ProjectBase;
   security_notification: { event: "mfa_enabled" | "password_changed" | "deletion_requested" | "mfa_recovery_code_used" | "mfa_recovery_codes_regenerated" | "mfa_reset" };
-  /** Staff alert for a critical production incident (no automated incident source exists yet). */
+  /** Owner alert raised by the scheduled ops_alerts job (src/services/monitoring.ts#runOpsAlerts). */
   critical_incident: { summary: string; occurredAt: string; url: string };
   password_reset: { resetUrl: string };
   staff_invitation: { inviterName: string; roleLabel: string; acceptUrl: string };
@@ -366,7 +366,7 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
   },
   critical_incident: {
     name: "critical_incident", category: "transactional", audience: "staff",
-    description: "Staff alert for a critical incident. Not sent yet: no automated incident source exists.",
+    description: "Owner alert from the scheduled ops_alerts job: dead-lettered Stripe events, new reconciliation findings, a stuck email queue, failing evidence feeds, repeated security events. Each item is sent once.",
     render: (d) => ({
       subject: `Critical incident: ${d.summary}`, heading: "Critical incident",
       paragraphs: [d.summary, `Detected ${d.occurredAt}. Follow the incident runbook and record actions in the monitoring page.`],
