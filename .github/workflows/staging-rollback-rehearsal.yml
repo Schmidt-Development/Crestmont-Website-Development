@@ -28,13 +28,23 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      WRANGLER: npx --yes wrangler@4
+      WRANGLER: npx --yes wrangler@4.149.0
       BASE: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"
+      # CREST-GAP-065: wrangler.toml leaves the staging database_id empty (the id is not committed). Inject the real id into
+      # the workspace copy exactly as deploy-staging.yml does, so every `--env staging` command reads the same configuration
+      # the deploy used. Lookup only: this workflow never creates the staging database.
+      - name: Resolve the staging D1 database id (same injection as deploy-staging.yml)
+        run: |
+          id=$($WRANGLER d1 list --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s).find(d=>d.name==="crestmont-staging");process.stdout.write(r?r.uuid:"")})')
+          [ -n "$id" ] || { echo "::error::The crestmont-staging D1 database was not found (deploy-staging.yml creates it)."; exit 1; }
+          # Inject the id into the staging block only (workspace copy; nothing is committed).
+          node -e 'const fs=require("fs");let t=fs.readFileSync("wrangler.toml","utf8");t=t.replace(/(database_name = "crestmont-staging", database_id = )""/, `$1"${process.argv[1]}"`);fs.writeFileSync("wrangler.toml",t)' "$id"
+          grep -q "$id" wrangler.toml && echo "Staging D1: $id"
       - name: Identify the serving and previous versions
         id: pick
         run: |
