@@ -12,6 +12,8 @@ export interface Env {
   EVIDENCE_INGEST_SECRET?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   STRIPE_SECRET_KEY?: string;
+  /** Founder flag (CREST-GAP-008, PAY-010): exactly "yes" allows live Stripe keys on production only. Unset = no live payments anywhere. */
+  PAYMENTS_LIVE_AUTHORIZED?: string;
   TURNSTILE_SECRET?: string;
   TURNSTILE_SITE_KEY?: string;
   RESEND_API_KEY?: string;

@@ -4,6 +4,7 @@
 // recorded as "failing" with the provider's error. Secrets are never stored or displayed — only
 // a short SHA-256 fingerprint, used to notice when a key changes so stale verification is dropped.
 import { STRIPE_API_VERSION } from "../adapters/payments.ts";
+import { paymentsMode, keyMode } from "../domain/payments-mode.ts";
 import type { Db } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import { sha256Hex } from "../lib/crypto.ts";
@@ -51,9 +52,11 @@ export async function assessConfiguration(d: IntegrationDeps, id: IntegrationId)
     case "stripe": {
       const k = e.STRIPE_SECRET_KEY;
       if (!k) return { status: "not_configured", detail: "STRIPE_SECRET_KEY is not set. Online payment is not available.", fingerprint: null, probe: false };
-      if (!k.startsWith("sk_test_") && !k.startsWith("rk_test_")) return { status: "blocked", detail: "A non-test Stripe key is set. Live payments are not authorised (PAY-010); the adapter refuses this key.", fingerprint: await fp(k), probe: false };
+      // CREST-GAP-007/008: the key must match this environment's expected mode (production: live behind the Founder flag).
+      const pm = paymentsMode(e);
+      if (pm.mode === "none") return { status: "blocked", detail: `${keyMode(k) === "test" ? "A test-mode" : "A non-test"} Stripe key is set and refused here: ${pm.reason} Live payments are not authorised (PAY-010) unless this is production with the Founder flag.`, fingerprint: await fp(k), probe: false };
       const wh = e.STRIPE_WEBHOOK_SECRET ? "Webhook secret set." : "STRIPE_WEBHOOK_SECRET is not set — webhooks will be rejected.";
-      return { status: "configured_unverified", detail: `Test-mode key set. ${wh} Run the probe to verify.`, fingerprint: await fp(k + "|" + (e.STRIPE_WEBHOOK_SECRET ?? "")), probe: true };
+      return { status: "configured_unverified", detail: `${pm.mode === "live" ? "Live-mode key set (Founder-authorised)." : "Test-mode key set."} ${wh} Run the probe to verify.`, fingerprint: await fp(k + "|" + (e.STRIPE_WEBHOOK_SECRET ?? "")), probe: true };
     }
     case "resend": {
       if (!e.RESEND_API_KEY) return { status: "not_configured", detail: "RESEND_API_KEY is not set. Email is captured in the development outbox only; nothing is delivered and no sending domain is authenticated.", fingerprint: null, probe: false };
@@ -164,8 +167,9 @@ export async function verifyIntegration(d: IntegrationDeps, id: IntegrationId, a
         const r = await f("https://api.stripe.com/v1/balance", { headers: { authorization: `Bearer ${d.env.STRIPE_SECRET_KEY}`, "stripe-version": STRIPE_API_VERSION } });
         const b = await jsonOrNull(r);
         if (!r.ok) { detail = providerError("Stripe", r, b); break; }
-        if (b?.livemode === true) { status = "blocked"; detail = "Stripe reports livemode=true for this key; live payments are not authorised."; break; }
-        status = "verified"; detail = "GET /v1/balance succeeded in test mode.";
+        const live = paymentsMode(d.env).mode === "live";
+        if (typeof b?.livemode === "boolean" && b.livemode !== live) { status = "blocked"; detail = b.livemode ? "Stripe reports livemode=true for this key; live payments are not authorised." : "Stripe reports livemode=false where live mode is expected."; break; }
+        status = "verified"; detail = `GET /v1/balance succeeded in ${live ? "live" : "test"} mode.`;
         break;
       }
       case "resend": {

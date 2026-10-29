@@ -6,7 +6,8 @@ import { randomToken } from "../lib/auth-crypto.ts";
 import { loadSession } from "../services/auth.ts";
 import { OutboxEmail, ResendEmail, recipientPolicy } from "../adapters/email.ts";
 import { R2Storage, type R2BucketLike } from "../adapters/storage.ts";
-import { NoPayments, StripeTestPayments } from "../adapters/payments.ts";
+import { NoPayments, StripePayments } from "../adapters/payments.ts";
+import { paymentsMode, commerceBlock } from "../domain/payments-mode.ts";
 import { ValidationError } from "../lib/validate.ts";
 import { errorPage } from "../ui/layout.ts";
 import { registerAll } from "../routes/index.ts";
@@ -34,7 +35,8 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
       ? new ResendEmail(env.DB, env.RESEND_API_KEY, env.EMAIL_FROM ?? "Crestmont <support@crestmontwebsitedevelopment.com>", undefined, recipientPolicy(env), env.ENVIRONMENT)
       : new OutboxEmail(env.DB)),
     storage: env.overrides?.storage !== undefined ? env.overrides.storage : env.FILES ? new R2Storage(env.FILES as R2BucketLike) : null,
-    payments: env.overrides?.payments ?? (env.STRIPE_SECRET_KEY ? new StripeTestPayments(env.STRIPE_SECRET_KEY) : new NoPayments()),
+    // CREST-GAP-007/008: the environment decides the Stripe mode (production: live only, behind the Founder flag).
+    payments: env.overrides?.payments ?? ((pm) => pm.mode === "none" ? new NoPayments(pm.reason) : new StripePayments(pm.key, fetch, pm.mode))(paymentsMode(env)),
     ip: req.headers.get("cf-connecting-ip") ?? req.headers.get("x-forwarded-for")?.split(",")[0].trim() ?? null,
     now,
     baseUrl: env.APP_URL ?? url.origin,
@@ -72,6 +74,9 @@ export async function buildContext(req: Request, env: Env): Promise<AppContext> 
     const rows = (await env.DB.prepare(`SELECT key, value FROM business_settings`).all<{ key: string; value: string }>()).results;
     for (const r of rows) ctx.settings[r.key] = r.value;
   } catch { /* table may not exist in legacy test databases */ }
+  // CREST-GAP-010: production checkout stays closed while policies are drafts or the entity is unnamed.
+  const block = commerceBlock(env, ctx.settings);
+  if (block) ctx.payments = new NoPayments(block);
   return ctx;
 }
 

@@ -9,6 +9,7 @@ import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { StripeReadOnly, LivePaymentsNotAuthorized, type StripeCheckoutSessionSummary, type StripeBalanceTransaction } from "../adapters/payments.ts";
 import { audit } from "./security.ts";
+import { paymentsMode } from "../domain/payments-mode.ts";
 import { toCsv } from "./finance.ts";
 
 export const RECONCILE_WINDOW_DAYS = 30;
@@ -21,10 +22,12 @@ export type StripeReader = { ok: true; client: StripeReadOnly } | { ok: false; r
 /** Stripe read access when payments are configured with a test-mode key; otherwise why not. */
 export function stripeReader(env: Env): StripeReader {
   if (!env.STRIPE_SECRET_KEY) return { ok: false, reason: "payments not configured" };
+  const pm = paymentsMode(env);
+  if (pm.mode === "none") return { ok: false, reason: `the Stripe key is refused here; live payments are not authorised (PAY-010): ${pm.reason}` };
   try {
-    return { ok: true, client: new StripeReadOnly(env.STRIPE_SECRET_KEY, env.overrides?.fetch ?? fetch) };
+    return { ok: true, client: new StripeReadOnly(pm.key, env.overrides?.fetch ?? fetch, pm.mode) };
   } catch (e) {
-    if (e instanceof LivePaymentsNotAuthorized) return { ok: false, reason: "a non-test Stripe key is set; live payments are not authorised (PAY-010)" };
+    if (e instanceof LivePaymentsNotAuthorized) return { ok: false, reason: "the Stripe key does not match this environment's mode; live payments are not authorised (PAY-010)" };
     throw e;
   }
 }
@@ -100,7 +103,7 @@ export async function runStripeReconciliation(db: Db, env: Env, now = Date.now()
     const findings: Finding[] = [];
     const paidPis = new Set<string>();
     for (const cs of sessions) {
-      if (cs.livemode === true) throw new LivePaymentsNotAuthorized("Stripe returned a live-mode session");
+      reader.client.assertMode(cs);
       const settled = nowS - cs.created > WEBHOOK_GRACE_SECONDS;
       if (cs.mode === "payment" && cs.payment_status === "paid") {
         if (cs.payment_intent) paidPis.add(cs.payment_intent);
@@ -262,13 +265,13 @@ const srcId = (bt: StripeBalanceTransaction): string | null => (typeof bt.source
 const CHARGE_TYPES = new Set(["charge", "payment"]);
 const REFUND_TYPES = new Set(["refund", "payment_refund"]);
 
-async function listAll<T extends { id: string; livemode?: boolean }>(page: (after?: string) => Promise<{ data: T[]; has_more: boolean }>): Promise<{ items: T[]; truncated: boolean }> {
+async function listAll<T extends { id: string; livemode?: boolean }>(page: (after?: string) => Promise<{ data: T[]; has_more: boolean }>, reader: StripeReadOnly): Promise<{ items: T[]; truncated: boolean }> {
   const items: T[] = [];
   let after: string | undefined;
   for (let p = 0; ; p++) {
     if (p === MAX_PAGES) return { items, truncated: true };
     const r = await page(after);
-    for (const x of r.data) if (x.livemode === true) throw new LivePaymentsNotAuthorized("Stripe returned a live-mode object");
+    for (const x of r.data) reader.assertMode(x); // CREST-GAP-008: compared with the expected mode, never just "not live"
     items.push(...r.data);
     if (!r.has_more || !r.data.length) return { items, truncated: false };
     after = r.data[r.data.length - 1].id;
@@ -299,7 +302,7 @@ export async function runStripeLedgerReconciliation(db: Db, env: Env, now = Date
     let checked = 0;
 
     // A. Stripe Invoices (non-Checkout) vs local invoices.
-    const invs = await listAll((after) => stripe.listInvoices({ createdGte: since, startingAfter: after }));
+    const invs = await listAll((after) => stripe.listInvoices({ createdGte: since, startingAfter: after }), stripe);
     checked += invs.items.length;
     const seen = new Set<string>();
     for (const si of invs.items) {
@@ -344,7 +347,7 @@ export async function runStripeLedgerReconciliation(db: Db, env: Env, now = Date
     }
 
     // B. Balance transactions (charges and refunds) vs payments and refunds.
-    const bts = await listAll((after) => stripe.listBalanceTransactions({ createdGte: since, startingAfter: after }));
+    const bts = await listAll((after) => stripe.listBalanceTransactions({ createdGte: since, startingAfter: after }), stripe);
     checked += bts.items.length;
     for (const bt of bts.items) {
       if (nowS - bt.created <= WEBHOOK_GRACE_SECONDS) continue;
@@ -377,7 +380,7 @@ export async function runStripeLedgerReconciliation(db: Db, env: Env, now = Date
     }
 
     // C. Payouts: each payout's balance transactions vs its amount, and vs local records.
-    const pos = await listAll((after) => stripe.listPayouts(since, after));
+    const pos = await listAll((after) => stripe.listPayouts(since, after), stripe);
     checked += pos.items.length;
     const at = nowIso();
     for (const po of pos.items) {
@@ -388,7 +391,7 @@ export async function runStripeLedgerReconciliation(db: Db, env: Env, now = Date
         state = "failed";
         if (po.status === "failed") findings.push({ kind: "payout_failed", key: po.id, stripeObjectId: po.id, stripeAmount: po.amount, detail: `Payout ${po.id} for ${po.amount} ${po.currency} failed${po.failure_message ? `: ${po.failure_message}` : ""}. Check the bank account in Stripe.` });
       } else {
-        const txns = await listAll((after) => stripe.listBalanceTransactions({ payout: po.id, startingAfter: after }));
+        const txns = await listAll((after) => stripe.listBalanceTransactions({ payout: po.id, startingAfter: after }), stripe);
         const members = txns.items.filter((t) => t.type !== "payout");
         txnCount = members.length;
         net = members.reduce((s, t) => s + t.net, 0);
