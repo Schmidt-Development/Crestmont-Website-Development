@@ -22,12 +22,23 @@ each finding's state; this file records batches, PRs and what to do next.
   then `/opt/npm-tools/node_modules/.bin/tsc -p tsconfig.json`.
 - Register: edit the JSON, then `node --no-warnings scripts/closeout-register.ts` (CI test fails if the markdown is stale).
 
-## Batches
+## Batches (PRs are opened green; the Founder merges, in this order)
 
-| # | PR | Branch | Findings | State |
+| Order | PR | Branch | Findings | Notes |
 | --- | --- | --- | --- | --- |
-| 1 | #26 | claude/closeout-001-invitation-takeover | 001, 004 | Green; awaiting Founder merge (urgent: staging is public) |
-| 2 | (this PR) | claude/closeout-register | register, validation test, this file | Green when opened |
+| 1 | #26 | claude/closeout-001-invitation-takeover | 001, 004 | P0 — merge first (staging is public) |
+| 2 | #27 | claude/closeout-register | register, validator, this file | docs/tests only; updated at the end of the run |
+| 3 | #28 | claude/closeout-018-branch-consolidation | 018, 002, 021–027 (partly), 030, 052 (contract), 069, 092 | PRs #18/#19/d1-closeout/staging-health-closeout landed without the preview gate; migrations 0040, 0041 |
+| 4 | #29 | claude/closeout-003-login-throttling | 003, 085 | stacked on #28; migration 0046 |
+| 5 | #31 | claude/closeout-086-session-cookies | 086 | stacked on #29 |
+| — | #30 | claude/closeout-hardening | 012, 017, 056, 087, 101 | independent of the stack |
+| — | (agents) | claude/closeout-commerce / -modules / -ops / -retell / -frontend | see each PR | migrations: commerce 0043, modules 0044, ops 0045, retell 0042 |
+
+Reserved migration numbers: 0040 (#28 security readiness), 0041 (#28 deleted-task links), 0042 Retell, 0043 commerce,
+0044 modules, 0045 ops, 0046 known devices (#29). After everything merges, run `tests/migrations` uniqueness test (ops PR).
+
+The container restarted once mid-run (OOM with six concurrent test suites). Keep at most three engineering agents at a
+time and have them run focused tests; the full suite at most twice per branch.
 
 ## Next executable tasks
 
