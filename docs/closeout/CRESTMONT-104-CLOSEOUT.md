@@ -7,124 +7,125 @@ Generated from `docs/closeout/crestmont-104-register.json` by `scripts/closeout-
 | Measure | Count |
 | --- | --- |
 | Original findings | 104 |
-| Engineering complete (incl. closed) | 2 |
-| With automated tests | 2 |
+| Engineering complete (incl. closed) | 87 |
+| With automated tests | 95 |
 | Staging certified (CLOSED — VERIFIED) | 0 |
-| Awaiting external or human action | 9 |
+| Awaiting external or human action | 33 |
 | CLOSED — VERIFIED | 0 |
-| ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | 2 |
-| ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | 0 |
-| BLOCKED — HUMAN ACTION | 9 |
+| ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | 70 |
+| ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | 17 |
+| BLOCKED — HUMAN ACTION | 16 |
 | BLOCKED — PROVIDER ACCESS | 0 |
-| OPEN — ENGINEERING | 93 |
-| NOT APPLICABLE — EVIDENCE BACKED | 0 |
-| Supplemental findings (CREST-NEW) | 0 |
+| OPEN — ENGINEERING | 0 |
+| NOT APPLICABLE — EVIDENCE BACKED | 1 |
+| Supplemental findings (CREST-NEW) | 1 |
 
 ## Findings
 
 | ID | Priority | Stream | Disposition | PR | Commit | Tests | Staging verification | Unblock action / notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| CREST-GAP-001 | P0 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #26 | 00429e0 | tests/invitation-security.test.ts | — | Awaiting Founder merge of PR #26 and the resulting Deploy staging run. |
-| CREST-GAP-002 | P1 | 4-owner-staff-customer-ops | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-003 | P1 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-004 | P1 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #26 | 00429e0 | tests/invitation-security.test.ts | — | Awaiting Founder merge of PR #26. |
-| CREST-GAP-005 | P1 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-006 | P1 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-007 | P1 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-008 | P1 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
+| CREST-GAP-001 | P0 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #26 | 00429e0 | tests/invitation-security.test.ts | — | — |
+| CREST-GAP-002 | P1 | 4-owner-staff-customer-ops | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #28 | cca0415 | tests/security-readiness.test.ts | — | — |
+| CREST-GAP-003 | P1 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #29 | 908d21c | tests/login-throttling.test.ts, tests/auth.test.ts, tests/production-auth.test.ts, tests/security-readiness.test.ts | — | Founder default applied: progressive throttling, no indefinite lockout. |
+| CREST-GAP-004 | P1 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #26 | 00429e0 | tests/invitation-security.test.ts | — | — |
+| CREST-GAP-005 | P1 | 2-commerce-sales | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts, tests/owner-delivery.test.ts | — | notifyNewLead: in-app to owner+sales, one idempotent lead_alert email (default owner > contact.email > first Owner); setting crm.default_lead_owner |
+| CREST-GAP-006 | P1 | 2-commerce-sales | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts | — | Follow-ups idempotent on every delivery; migration 0043 uq_projects_order + INSERT OR IGNORE; payment_repair scheduled sweep. Migration fails if an env already has duplicate projects per order (review by hand). |
+| CREST-GAP-007 | P1 | 2-commerce-sales | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts, tests/stripe-versions.test.ts | — | src/domain/payments-mode.ts; production refuses test keys and livemode:false events |
+| CREST-GAP-008 | P1 | 2-commerce-sales | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts | — | Live allowed only ENVIRONMENT=production AND flag; all livemode guards compare with expected mode |
 | CREST-GAP-009 | P1 | 3-cloudflare-d1-ci-release | BLOCKED — HUMAN ACTION | — | — | — | — | GitHub → Settings → Environments → production → add secret PRODUCTION_MFA_ENCRYPTION_KEY (base64 of 32 random bytes, kept in the Founder's password manager), then Actions → Provision production → Run workflow on main and approve. |
-| CREST-GAP-010 | P1 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
+| CREST-GAP-010 | P1 | 2-commerce-sales | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts | — | commerceBlock(): production checkout closed, CTAs -> /quote?package=, POST /checkout 409 |
 | CREST-GAP-011 | P1 | 7-business-legal | BLOCKED — HUMAN ACTION | — | — | — | — | Form the legal entity and set a registered address; engage an accountant; then fill business.legal_name, business.address and contact.email in /staff/settings on staging and production. |
-| CREST-GAP-012 | P1 | 6-integrations-ai | OPEN — ENGINEERING | — | — | — | — | — |
+| CREST-GAP-012 | P1 | 6-integrations-ai | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #30 | ca67138 | tests/hardening-closeout.test.ts | — | — |
 | CREST-GAP-013 | P1 | 3-cloudflare-d1-ci-release | BLOCKED — HUMAN ACTION | — | — | — | — | Cloudflare → Websites → Add site crestmontwebsitedevelopment.com on the Crestmont account; switch nameservers at the registrar; remove apex CNAME/A/AAAA records; SSL/TLS Full (strict). |
-| CREST-GAP-014 | P1 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-015 | P1 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-016 | P1 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-017 | P1 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-018 | P1 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-019 | P2 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-020 | P2 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-021 | P2 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-022 | P2 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-023 | P2 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-024 | P2 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-025 | P2 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-026 | P2 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-027 | P2 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-028 | P2 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-029 | P2 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-030 | P2 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-031 | P2 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-032 | P2 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-033 | P2 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-034 | P2 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-035 | P2 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-036 | P2 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-037 | P2 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-038 | P2 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-039 | P2 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-040 | P2 | 4-owner-staff-customer-ops | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-041 | P2 | 4-owner-staff-customer-ops | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-042 | P2 | 4-owner-staff-customer-ops | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-043 | P2 | 4-owner-staff-customer-ops | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-044 | P2 | 4-owner-staff-customer-ops | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-045 | P2 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-046 | P2 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-047 | P2 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-048 | P2 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-049 | P2 | 5-frontend-portfolio-a11y-seo | BLOCKED — HUMAN ACTION | — | — | — | — | Founder sets support.staffed_hours in /staff/settings (engineering hides the line until it is set). |
+| CREST-GAP-014 | P1 | 3-cloudflare-d1-ci-release | BLOCKED — HUMAN ACTION | #36 | b04db72 | tests/ops-closeout.test.ts | — | Merge #26 → #27 → #28 → #29 → #31 → #30 → #35 → #32 → #33 → #34 → #36; confirm staging certification; tag v* on the release commit; approve the production deployment as the Founder. |
+| CREST-GAP-015 | P1 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #36 | b04db72 | tests/ops-alerts.test.ts, tests/ops-closeout.test.ts (Workers Logs), tests/infra-workflows.test.ts (production health monitor), tests/platform.test.ts, tests/scheduler-health.test.ts | — | Stripe dispute emails are not part of this job (payments.ts is outside this stream); the audit's dispute alert stays with the payments stream. |
+| CREST-GAP-016 | P1 | 3-cloudflare-d1-ci-release | BLOCKED — HUMAN ACTION | #36 | b04db72 | tests/offsite-backup.test.ts, tests/infra-workflows.test.ts (CREST-GAP-016) | — | Create the bucket and a scoped key, add the five secrets, run production-backup.yml once manually and check that the restore-verify job passes. |
+| CREST-GAP-017 | P1 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #30 | ca67138 | tests/stripe-webhook-probe.test.ts, tests/platform.test.ts | — | — |
+| CREST-GAP-018 | P1 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #28 | cca0415 | tests/security-readiness.test.ts, tests/staging-access.test.ts, tests/portal.test.ts, tests/projects.test.ts, tests/staging-closeout.test.ts | — | PRs #18, #19 and the two closeout branches can be closed after #28 merges (docs/BRANCH-CLEANUP.md). |
+| CREST-GAP-019 | P2 | 1-security-identity | BLOCKED — HUMAN ACTION | #36 | b04db72 | tests/ops-closeout.test.ts ([SEC-002] turnstile:staging feed) | — | Replace the staging keys; the feed turns healthy on the next request. |
+| CREST-GAP-020 | P2 | 1-security-identity | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #36 | b04db72 | tests/ops-closeout.test.ts ([READY-008] [LAUNCH-002] x2) | — | releaseCheckFor (post-deploy match) still uses only the Owner check; the deploy itself is gated by releaseAuthorization. |
+| CREST-GAP-021 | P2 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #28 | cca0415 | tests/security-readiness.test.ts | — | — |
+| CREST-GAP-022 | P2 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #28 | cca0415 | tests/security-readiness.test.ts | — | — |
+| CREST-GAP-023 | P2 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #28 | cca0415 | tests/security-readiness.test.ts, tests/auth-hardening.test.ts | — | — |
+| CREST-GAP-024 | P2 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #36 | b04db72 | tests/ops-alerts.test.ts | — | Alert part only; services/auth.ts not edited. |
+| CREST-GAP-025 | P2 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #28 | cca0415 | tests/staging-access.test.ts, tests/mfa-encryption-rollout.test.ts | — | — |
+| CREST-GAP-026 | P2 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #28 | cca0415 | tests/portal.test.ts | — | — |
+| CREST-GAP-027 | P2 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #36 | b04db72 | tests/ops-closeout.test.ts ([DATA-001] unique 4-digit prefix) | — | — |
+| CREST-GAP-028 | P2 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #36 | b04db72 | tests/workflow-security.test.ts (SHA pins, exact wrangler, --ignore-scripts), tests/evidence-secret.test.ts, tests/ops.test.ts, tests/staging-remediation.test.ts | — | Runner lockfiles (also in the audit text) are not committed here: the npm registry is unreachable from this workspace. |
+| CREST-GAP-029 | P2 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #36 | b04db72 | tests/ops-closeout.test.ts ([SEC-002] HSTS) | — | Can only be verified on production after launch. |
+| CREST-GAP-030 | P2 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #28 | cca0415 | tests/staging-e2e-gate.test.ts, tests/staging-closeout.test.ts | — | — |
+| CREST-GAP-031 | P2 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts | — | requireVerifiedForPayment on /checkout/:id, /checkout/maintenance/:id, invoice pay; 403 with resend action |
+| CREST-GAP-032 | P2 | 2-commerce-sales | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts | — | One guarded batch (acceptProposal + prepareQuoteOrder + prepareAcceptance); fault-injection test |
+| CREST-GAP-033 | P2 | 2-commerce-sales | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts | — | quoteOrderProduct keeps package_id; package_quote_acceptance set |
+| CREST-GAP-034 | P2 | 2-commerce-sales | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts | — | Flash/activity reflect sent/queued/failed with link |
+| CREST-GAP-035 | P2 | 2-commerce-sales | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts, tests/scheduler-health.test.ts | — | email_retry job (5/10/20/40 min backoff), stuck count + daily Owner notice |
+| CREST-GAP-036 | P2 | 2-commerce-sales | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts | — | Reuse open package invoice per org+package (per-day session key); void+cancel on checkout.session.expired for latest session only; void excluded from outstanding |
+| CREST-GAP-037 | P2 | 2-commerce-sales | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts | — | Owners + project managers notified once (created flag from unique-index insert) |
+| CREST-GAP-038 | P2 | 2-commerce-sales | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts | — | customer or customer_creation=always; stored id reused |
+| CREST-GAP-039 | P2 | 2-commerce-sales | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts, tests/finance-documents.test.ts | — | password_reset_completed notice, proposal_accepted (agreement versions), Stripe hosted invoice link, Dashboard refund email, dispute_opened to Owners |
+| CREST-GAP-040 | P2 | 4-owner-staff-customer-ops | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #33 | 95f00ce | tests/closeout-modules.test.ts: [PORTAL-005] CREST-GAP-040 | — | Page size 50; cursor scoped to the viewer's own thread. |
+| CREST-GAP-041 | P2 | 4-owner-staff-customer-ops | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #33 | 95f00ce | tests/closeout-modules.test.ts: [EMP-002] CREST-GAP-041, tests/security-audit.test.ts (offboarding.resolved scenario), tests/security-matrix.test.ts (role matrix covers the new routes) | — | Queue mode keeps the work assigned (flagged) until it is reassigned or ended; re-enabling restores pending items. |
+| CREST-GAP-042 | P2 | 4-owner-staff-customer-ops | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #33 | 95f00ce | tests/closeout-modules.test.ts: [OWN-002] CREST-GAP-042, tests/readiness-ui.test.ts [OWN-002] | — | — |
+| CREST-GAP-043 | P2 | 4-owner-staff-customer-ops | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #33 | 95f00ce | tests/closeout-frontend.test.ts: the privacy policy page links signed-in visitors to /account/privacy (CREST-GAP-043), tests/closeout-modules.test.ts: [SEC-006] CREST-GAP-043, tests/navigation.test.ts [PORTAL-009] | — | No link added from the public privacy policy page (src/routes/public.ts was out of scope). Policy-page link added in PR #34 (claude/closeout-frontend). |
+| CREST-GAP-044 | P2 | 4-owner-staff-customer-ops | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #33 | 95f00ce | tests/closeout-modules.test.ts: [EMP-003] CREST-GAP-044, tests/projects.test.ts | — | Deleted-task unlinking was left to the separate PR. |
+| CREST-GAP-045 | P2 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: touch targets >= 44px ... (CREST-GAP-045), tests/e2e/core.e2e.ts: 390px phone: the audited controls are at least 44x44 px (CREST-GAP-045) | — | Journey stops on phones become wrapping 44px numbered buttons (11 stops cannot share one 358px rail at 44px). .cb__send also raised to 44px. |
+| CREST-GAP-046 | P2 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: every service page has its own title and description ... (CREST-GAP-046) | — | hosting-maintenance lives at /hosting-maintenance with its own SEO key. |
+| CREST-GAP-047 | P2 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: production portfolio is poster-only with visitor-facing copy (CREST-GAP-047), tests/portfolio-explorer.test.ts: explorer without approved origins ... | — | — |
+| CREST-GAP-048 | P2 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: screenshot provenance ... (CREST-GAP-048) ... (CREST-GAP-078) | — | Copy corrected rather than recaptured; nothing fabricated. |
+| CREST-GAP-049 | P2 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: /contact shows 'Staffed hours' only once support.staffed_hours is set (CREST-GAP-049) | — | Engineering part only, as assigned. |
 | CREST-GAP-050 | P2 | 2-commerce-sales | BLOCKED — HUMAN ACTION | — | — | — | — | Founder approves or amends the proposed maintenance entitlements in src/domain/catalog.ts (CAT-006 / BLK-010). |
-| CREST-GAP-051 | P2 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-052 | P2 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-053 | P2 (P1 if voice launches) | 6-integrations-ai | OPEN — ENGINEERING | — | — | — | — | — |
+| CREST-GAP-051 | P2 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: AI Receptionist copy ... (CREST-GAP-051), tests/support/content-rules.ts RECEPTIONIST_UNBUILT | — | — |
+| CREST-GAP-052 | P2 | 1-security-identity | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #28 | cca0415 | tests/security-readiness.test.ts, tests/portal.test.ts | — | Founder decision: scanner vendor. |
+| CREST-GAP-053 | P2 (P1 if voice launches) | 6-integrations-ai | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #32 | da84713 | tests/voice-retell-closeout.test.ts (12 tests: prompt sync not_configured / in_sync / drift / failed, staging-production isolation, fail-closed signatures, voicemail-only mode without budget, budget exhaustion + cost recording + outbound stop, escalation transfer vs task+email, redaction/consent), tests/voice-retell-backend.test.ts, tests/voice.test.ts, tests/integrations.test.ts, tests/email-templates.test.ts, tests/security-matrix.test.ts (new routes /staff/voice/prompt-sync, /staff/voice/budget) | — | Agent versions are never published from the platform; the push writes the Retell LLM's general_prompt only. No live Retell connection has been verified. |
 | CREST-GAP-054 | P2 | 3-cloudflare-d1-ci-release | BLOCKED — HUMAN ACTION | — | — | — | — | GitHub → Settings → Rules → Rulesets: protect v* tags; Settings → Environments → production: confirm required reviewer = Founder and deployment branches = main. |
-| CREST-GAP-055 | P2 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-056 | P2 | 6-integrations-ai | BLOCKED — HUMAN ACTION | — | — | — | — | Choose a penetration-test vendor and commission a test against staging once CREST-GAP-001..004 are merged; engineering supplies scope and evidence. |
+| CREST-GAP-055 | P2 | 3-cloudflare-d1-ci-release | BLOCKED — HUMAN ACTION | #36 | b04db72 | tests/ops-closeout.test.ts ([FILE-001] fileStorage), tests/verify-crons.test.ts (existing file-storage:staging feed) | — | Founder enables R2; the next deploy turns the feed healthy and /api/health reports bound. |
+| CREST-GAP-056 | P2 | 6-integrations-ai | BLOCKED — HUMAN ACTION | #30 | ca67138 | — | — | Choose a penetration-test vendor and commission a test against staging once CREST-GAP-001..004 are merged; engineering supplies scope and evidence. |
 | CREST-GAP-057 | P2 | 4-owner-staff-customer-ops | BLOCKED — HUMAN ACTION | — | — | — | — | Founder and attorney approve the retention periods in docs/RETENTION-SCHEDULE.md; then enable them in /staff/ops/retention. |
-| CREST-GAP-058 | P3 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-059 | P3 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-060 | P3 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-061 | P3 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-062 | P3 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-063 | P3 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-064 | P3 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-065 | P3 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-066 | P3 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-067 | P3 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-068 | P3 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-069 | P3 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-070 | P3 | 4-owner-staff-customer-ops | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-071 | P3 | 4-owner-staff-customer-ops | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-072 | P3 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | Founder default recorded 2026-10-29: prompt customer administrators to enrol MFA; require MFA for staff and Owner. Engineering implements the prompt. |
-| CREST-GAP-073 | P3 | 4-owner-staff-customer-ops | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-074 | P3 | 4-owner-staff-customer-ops | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-075 | P3 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-076 | P3 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-077 | P3 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-078 | P3 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-079 | P3 | 4-owner-staff-customer-ops | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-080 | P3 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-081 | P3 | 4-owner-staff-customer-ops | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-082 | P3 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-083 | P3 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
+| CREST-GAP-058 | P3 | 3-cloudflare-d1-ci-release | BLOCKED — HUMAN ACTION | #36 | b04db72 | tests/workflow-security.test.ts ([INFRA-005] CREST-GAP-058) | — | A repository admin performs the deletions listed in docs/BRANCH-CLEANUP.md §7. |
+| CREST-GAP-059 | P3 | 5-frontend-portfolio-a11y-seo | BLOCKED — HUMAN ACTION | — | 9511130 | better-lansing-mechanics: portfolio-demo/demo-kit.test.mjs | — | Merge glassly#1 and better-lansing-mechanics#24; in lansing-car-rentals (both demo configs) remove https://crestmont-platform-frontend-preview.partners-df4.workers.dev from DEMO_FRAME_ANCESTORS on the demo branches, or grant this workflow access to that repository. |
+| CREST-GAP-060 | P3 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | — | 9511130 | better-lansing-mechanics: portfolio-demo/demo-kit.test.mjs | — | Merging deploys only the isolated demo Worker; Founder merges. |
+| CREST-GAP-061 | P3 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #34 | 6505394 | tests/workflow-security.test.ts ([INFRA-005] CREST-GAP-058) | — | Docs only; the guard test from CREST-GAP-058 (PR #36) fails if any workflow on main deploys the retired preview Worker. |
+| CREST-GAP-062 | P3 | 3-cloudflare-d1-ci-release | BLOCKED — HUMAN ACTION | #36 | b04db72 | — | — | Follow docs/BRANCH-CLEANUP.md after PR #28 merges. |
+| CREST-GAP-063 | P3 | 3-cloudflare-d1-ci-release | BLOCKED — HUMAN ACTION | #36 | b04db72 | tests/evidence-secret.test.ts, tests/ops.test.ts, tests/staging-remediation.test.ts, tests/workflow-security.test.ts | — | Recreate and review the four Dependabot PRs after this PR merges. |
+| CREST-GAP-064 | P3 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #36 | b04db72 | tests/ops-closeout.test.ts ([READY-010] migration 0045), tests/readiness-ui.test.ts | — | — |
+| CREST-GAP-065 | P3 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #36 | b04db72 | tests/infra-workflows.test.ts ([TEST-004] [INFRA-002] CREST-GAP-065) | — | — |
+| CREST-GAP-066 | P3 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #36 | b04db72 | tests/ops-closeout.test.ts ([READY-006] env_metrics sampling), tests/readiness-sources.test.ts | — | A Cloudflare usage alert (audit suggestion) is a dashboard setting for the Founder. |
+| CREST-GAP-067 | P3 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #36 | b04db72 | tests/ops-closeout.test.ts ([AUTH-003] bootstrap-owner), tests/production-auth.test.ts | — | — |
+| CREST-GAP-068 | P3 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #36 | b04db72 | tests/infra-workflows.test.ts ([DOC-002] [INFRA-005] CREST-GAP-068) | — | Attaching the custom domain only after the checks: documented as not feasible. |
+| CREST-GAP-069 | P3 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #28 | cca0415 | tests/dependency-audit-gate.test.ts, tests/infra-workflows.test.ts | — | — |
+| CREST-GAP-070 | P3 | 4-owner-staff-customer-ops | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #33 | 95f00ce | tests/closeout-modules.test.ts: [EMP-002] CREST-GAP-070, tests/security-audit.test.ts (customer.viewed, conversation.viewed scenarios) | — | Founder default applied (broad visibility kept). Revisit if least-privilege access is wanted later. |
+| CREST-GAP-071 | P3 | 4-owner-staff-customer-ops | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #33 | 95f00ce | tests/closeout-modules.test.ts: [PORTAL-004] CREST-GAP-071 | — | The files.ts change is limited to the list-pagination query plus countFiles. |
+| CREST-GAP-072 | P3 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #33 | 95f00ce | tests/closeout-modules.test.ts: [AUTH-003] CREST-GAP-072, tests/security-audit.test.ts (user.mfa_reminder_dismissed) | — | Founder default applied (prompt, not require). |
+| CREST-GAP-073 | P3 | 4-owner-staff-customer-ops | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #33 | 95f00ce | tests/closeout-modules.test.ts: [AUTH-001] CREST-GAP-073, tests/email-templates.test.ts, tests/security-audit.test.ts, security-matrix, security-tenancy, security-fuzz (new routes) | — | Customers only; staff email changes stay with administrators. |
+| CREST-GAP-074 | P3 | 4-owner-staff-customer-ops | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #33 | 95f00ce | tests/closeout-modules.test.ts: [PORTAL-007] CREST-GAP-074 | — | — |
+| CREST-GAP-075 | P3 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: social metadata ... JSON-LD ... only in production (CREST-GAP-075) | — | — |
+| CREST-GAP-076 | P3 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #34 | 6505394 | tests/e2e/core.e2e.ts: expanded portfolio view is a modal dialog ... (CREST-GAP-076) | — | — |
+| CREST-GAP-077 | P3 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: ... no-JS mobile nav is visible (CREST-GAP-077), tests/e2e/core.e2e.ts: without JavaScript the primary navigation is visible at 390px (CREST-GAP-077) | — | — |
+| CREST-GAP-078 | P3 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: ... case-study screenshots have dimensions (CREST-GAP-078), tests/e2e/core.e2e.ts: ... case-study screenshots reserve their space (CREST-GAP-078) | — | — |
+| CREST-GAP-079 | P3 | 4-owner-staff-customer-ops | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #33 | 95f00ce | tests/closeout-modules.test.ts: [AUTH-007] CREST-GAP-079 | — | — |
+| CREST-GAP-080 | P3 | 2-commerce-sales | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts | — | Effective prices in both. Note: voice configProblems still validates config text against catalog prices only |
+| CREST-GAP-081 | P3 | 4-owner-staff-customer-ops | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #33 | 95f00ce | tests/closeout-modules.test.ts: [CRM-002] CREST-GAP-081, tests/owner-modules.test.ts [CRM-002] | — | Each run reads at most 5000 key memberships; the page says so if the cap is reached. |
+| CREST-GAP-082 | P3 | 2-commerce-sales | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts, tests/preview-gate.test.ts | — | Counted after Turnstile and validation (forms and /api/leads) |
+| CREST-GAP-083 | P3 | 2-commerce-sales | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts, tests/stripe-versions.test.ts | — | — |
 | CREST-GAP-084 | P3 | 2-commerce-sales | BLOCKED — HUMAN ACTION | — | — | — | — | Accountant reviews the Michigan sales-tax position for web services and the /staff/settings/tax configuration; record the review. |
-| CREST-GAP-085 | P3 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-086 | P3 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-087 | P3 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-088 | P3 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-089 | P3 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-090 | P3 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-091 | P3 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-092 | P3 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-093 | P4 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-094 | P4 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-095 | P4 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-096 | P4 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-097 | P4 | 2-commerce-sales | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-098 | P4 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-099 | P4 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-100 | P4 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-101 | P4 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-102 | P4 | 1-security-identity | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-103 | P4 | 5-frontend-portfolio-a11y-seo | OPEN — ENGINEERING | — | — | — | — | — |
-| CREST-GAP-104 | P4 | 3-cloudflare-d1-ci-release | OPEN — ENGINEERING | — | — | — | — | — |
+| CREST-GAP-085 | P3 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #29 | 908d21c | tests/login-throttling.test.ts | — | New-device sign-in notice is covered by the remembered-browser model: unknown browsers are challenged, and the user is emailed. |
+| CREST-GAP-086 | P3 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #31 | 7395539 | tests/session-cookies.test.ts | — | — |
+| CREST-GAP-087 | P3 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #30 | ca67138 | tests/hardening-closeout.test.ts, runner/test/control-plane.test.ts, runner/test/local-job.test.ts | — | Set RUNNER_REQUIRE_NONCE=yes once every runner is updated. |
+| CREST-GAP-088 | P3 | 1-security-identity | NOT APPLICABLE — EVIDENCE BACKED | — | — | tests/verify-crons.test.ts | — | Revisit if the Founder wants staging registration restricted. |
+| CREST-GAP-089 | P3 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #36 | b04db72 | tests/ops-alerts.test.ts ([INFRA-006] [SEC-004] security alerting) | — | login_challenge_started is emitted by the login-throttling PR #29; the alert already handles it. |
+| CREST-GAP-090 | P3 | 2-commerce-sales | ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: hosting page ... automatic-billing renewal line ... (CREST-GAP-090) | — | — |
+| CREST-GAP-091 | P3 | 2-commerce-sales | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts | — | ensureCheckoutLead links open lead or creates source=checkout lead with cm_attr; converted on payment |
+| CREST-GAP-092 | P3 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #28 | cca0415 | tests/auth-hardening.test.ts | — | — |
+| CREST-GAP-093 | P4 | 2-commerce-sales | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts | — | Trim+lowercase in captureLead and voice createCallLead (contacts.email is NOCASE, so linking already matched case; normalization fixes storage/dedupe) |
+| CREST-GAP-094 | P4 | 2-commerce-sales | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #35 | 1e1a739 | tests/commerce-closeout.test.ts, tests/crm.test.ts | — | src/lib/business-time.ts end of day America/New_York |
+| CREST-GAP-095 | P4 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: auth pages start with a skip link (CREST-GAP-095) | — | — |
+| CREST-GAP-096 | P4 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: case-study descriptions are single-line and cut at a word (CREST-GAP-096) | — | — |
+| CREST-GAP-097 | P4 | 2-commerce-sales | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: /quote/thanks confirms receipt only after a saved submission (CREST-GAP-097), tests/contact.test.ts: the thank-you page states only what happened ... (CREST-GAP-097) | — | — |
+| CREST-GAP-098 | P4 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: 404s raised inside routes are titled 'Page not found' (CREST-GAP-098) | — | — |
+| CREST-GAP-099 | P4 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: simulation field text meets 4.5:1 (CREST-GAP-099) | — | — |
+| CREST-GAP-100 | P4 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #32 | da84713 | tests/voice-retell-closeout.test.ts: [VOICE-006] [SEC-002] a provider-supplied recording URL renders only when https; javascript: renders as # (CREST-GAP-100) | — | A row holding a javascript: URL (for example one written before this validation existed) renders as an inert '#' link labelled 'Recording link withheld (not an https URL)'. |
+| CREST-GAP-101 | P4 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #30 | ca67138 | tests/hardening-closeout.test.ts | — | — |
+| CREST-GAP-102 | P4 | 1-security-identity | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #31 | 7395539 | tests/rate-limit-window.test.ts | — | — |
+| CREST-GAP-103 | P4 | 5-frontend-portfolio-a11y-seo | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #34 | 6505394 | tests/closeout-frontend.test.ts: /login and /register have descriptions (CREST-GAP-103) | — | — |
+| CREST-GAP-104 | P4 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #36 | b04db72 | tests/ops-closeout.test.ts ([READY-010] [DATA-001] migration 0045, EXPLAIN QUERY PLAN) | — | — |
+| CREST-NEW-001 | P2 | 3-cloudflare-d1-ci-release | ENGINEERING COMPLETE — STAGING VERIFICATION PENDING | #36 | b04db72 | tests/scheduler-health.test.ts, tests/stripe-webhook-probe.test.ts | — | Merge order is mandatory (docs/closeout/CONTINUATION.md). |
