@@ -67,6 +67,9 @@ export function register(r: Router) {
     const raw = await readBody(ctx.req);
     const body = JSON.parse(raw) as Record<string, unknown>;
     if (!body || typeof body !== "object" || Array.isArray(body)) return jsonResponse(ctx, 400, { error: "Body must be a JSON object" });
+    // Same per-IP budget as the browser lead forms (shared key), so the JSON API is not an unthrottled side door.
+    const rl = await rateLimit(ctx.db, `leadform:${ctx.ip ?? "unknown"}`, 10, 3600);
+    if (!rl.allowed) return jsonResponse(ctx, 429, { error: "Too many submissions from your network. Please wait an hour." });
     if (!(await verifyTurnstile(ctx, body.turnstileToken))) return jsonResponse(ctx, 400, { error: "Bot verification failed" });
     const { leadId } = await captureLead(ctx.db, body, { ip: ctx.ip ?? undefined });
     return jsonResponse(ctx, 201, { leadId });

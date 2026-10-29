@@ -97,6 +97,17 @@ function actionList(actions: CustomerAction[]): SafeHtml {
 
 // ───────────── Routes ─────────────
 
+/**
+ * Outside production, a customer account must have a verified email address before it can upload, replace or share
+ * files. Staging is public (2026-10-28) and sends email only to its allowlist, so a self-registered stranger can never
+ * verify and therefore cannot use staging to host or hand out files. Staff and invited/demo accounts (verified) are
+ * unaffected; production behaviour is unchanged.
+ */
+function requireVerifiedForFiles(ctx: AppContext): void {
+  if (ctx.env.ENVIRONMENT === "production" || !ctx.user || ctx.user.isStaff || ctx.user.emailVerified) return;
+  throw new HttpError(403, "Verify your email address before uploading or sharing files.");
+}
+
 export function register(r: Router): void {
   // ── Dashboard ──
   r.get("/portal", async (ctx) => {
@@ -278,6 +289,7 @@ ${button("Upload", { disabled: !ctx.storage })}</form></section>
     return page(ctx, "Files", body, status);
   };
   const handleUpload = async (ctx: AppContext, org: Org, projectFromUrl: string | null) => {
+    requireVerifiedForFiles(ctx);
     const f = await ctx.form();
     const projectId = projectFromUrl ?? (str(f, "project_id") || null);
     return orRerender((errs, st) => filesPage(ctx, org, projectFromUrl, errs, st), async () => {
@@ -312,6 +324,7 @@ ${versions.length ? html`<section style="margin-top:1.5rem"><h2>Earlier versions
   r.get("/portal/files/:id", async (ctx, p) => fileDetail(ctx, requireCustomerOrg(ctx), p.id));
   r.post("/portal/files/:id/replace", async (ctx, p) => {
     const org = requireCustomerOrg(ctx);
+    requireVerifiedForFiles(ctx);
     const old = await F.getOrgFile(ctx.db, org.organizationId, p.id);
     const form = await ctx.form();
     return orRerender((errs, st) => fileDetail(ctx, org, p.id, errs, st), async () => {
@@ -359,6 +372,7 @@ ${dl([["File", f.filename], ["Size", F.humanSize(f.size_bytes)], ["Malware scan"
   };
   r.get("/files/:id/share", async (ctx, p) => sharePage(ctx, p.id));
   r.post("/files/:id/share", async (ctx, p) => {
+    requireVerifiedForFiles(ctx);
     const f = await shareFile(ctx, p.id);
     if (!(await S.canManageShares(ctx, f))) throw new HttpError(403, "Only an account administrator or Crestmont staff can create share links for this file.");
     const form = await ctx.form();

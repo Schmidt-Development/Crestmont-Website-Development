@@ -56,6 +56,8 @@ export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log:
   for (const path of ["/staff", "/portal", "/account"]) {
     const a = await fetchAnonymous(f, base, path);
     if (a.status === 200) fail("anonymous access", `${path} returned 200 without a session`);
+    const toLogin = a.status === 303 && new URL(a.headers.get("location") ?? "/", base).pathname === "/login";
+    if (!toLogin && a.status !== 401 && a.status !== 403) fail("anonymous access", `${path} should redirect to sign-in, got HTTP ${a.status}`);
   }
   log("2/6 staff, portal and account areas refuse anonymous visitors");
 

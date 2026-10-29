@@ -105,3 +105,30 @@ test("[INFRA-002] production responses are unchanged: no X-Robots-Tag, canonical
   assert.match(await r.text(), /<link rel="canonical"/);
   assert.match(await (await req(env, "/robots.txt")).text(), /Allow: \/\n/);
 });
+
+test("[SEC-003] public staging: forms are rate-limited even with always-pass Turnstile; an unverified self-registered account cannot upload or share files", async () => {
+  // Staging's Turnstile test keys always pass: simulate exactly that.
+  const app = await createTestApp({ ENVIRONMENT: "staging", TURNSTILE_SECRET: "1x0000000000000000000000000000000AA", TURNSTILE_SITE_KEY: "1x00000000000000000000AA" });
+  app.env.overrides = { ...app.env.overrides, fetch: (async () => new Response(JSON.stringify({ success: true }))) as never };
+  // JSON lead API: same per-IP budget as the browser forms (10/hour).
+  const statuses: number[] = [];
+  for (let i = 0; i < 11; i++) statuses.push((await req(app.env, "/api/leads", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": "198.51.100.7" }, body: JSON.stringify({ name: "Spam " + i, email: `s${i}@example.com`, message: "hello there, this is a message", turnstileToken: "x" }) })).status);
+  assert.ok(statuses.slice(0, 10).every((s) => s !== 429), statuses.join());
+  assert.equal(statuses[10], 429, "11th lead from one IP within the hour is refused");
+
+  // A stranger self-registers (staging sends email only to its allowlist, so they can never verify).
+  const c = app.client();
+  const reg = await c.post("/register", { name: "Stranger", organization: "Stranger Co", email: "stranger@example.org", password: TEST_PASSWORD, terms: "1", "cf-turnstile-response": "x" });
+  assert.equal(reg.status, 200);
+  assert.equal((await c.post("/login", { email: "stranger@example.org", password: TEST_PASSWORD, "cf-turnstile-response": "x" })).headers.get("location"), "/portal");
+  const PDF = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x0a]);
+  const up = await c.post("/portal/files", { file: new File([PDF], "x.pdf") });
+  assert.equal(up.status, 403, "unverified account cannot upload on staging");
+  assert.match(await up.text(), /Verify your email address/);
+  const n = await app.db.prepare(`SELECT COUNT(*) AS n FROM files`).first<{ n: number }>();
+  assert.equal(n?.n, 0, "nothing was stored");
+  // Once verified (an invited or demo customer), uploads work as before.
+  await app.db.prepare(`UPDATE users SET email_verified_at = ? WHERE email = ?`).bind(new Date().toISOString(), "stranger@example.org").run();
+  const ok = await c.post("/portal/files", { file: new File([PDF], "x.pdf") });
+  assert.equal(ok.status, 303, "verified customer can upload");
+});

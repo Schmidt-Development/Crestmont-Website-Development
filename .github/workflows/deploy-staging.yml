@@ -343,7 +343,10 @@ jobs:
           grep -qi '^x-robots-tag: noindex, nofollow' home.h || { echo "::error::homepage is missing X-Robots-Tag noindex"; exit 1; }
           [ "$(curl -s "$BASE/robots.txt")" = "$(printf 'User-agent: *\nDisallow: /')" ] || { echo "::error::robots.txt does not disallow all"; exit 1; }
           for path in /staff /staff/owner /portal /account; do
-            c=$(curl -s -o /dev/null -w '%{http_code}' "$BASE$path"); [ "$c" != "200" ] && echo "ok   $path refused anonymously ($c)" || { echo "::error::$path opened without a session"; exit 1; }
+            r=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$BASE$path")
+            case "$r" in "303 $BASE/login"*|401*|403*) echo "ok   $path refused anonymously ($r)";;
+              "200 "*) echo "::error::$path opened without a session"; exit 1;;
+              *) echo "::error::$path should redirect to sign-in, got $r"; exit 1;; esac
           done
           rm -f home.h
           node --no-warnings scripts/production-checks.ts --base "$BASE" --environment staging --commit "$GITHUB_SHA" \
