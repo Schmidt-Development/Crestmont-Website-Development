@@ -30,9 +30,10 @@ each finding's state; this file records batches, PRs and what to do next.
 | 2 | #27 | claude/closeout-register | register, validator, this file | docs/tests only; updated at the end of the run |
 | 3 | #28 | claude/closeout-018-branch-consolidation | 018, 002, 021–027 (partly), 030, 052 (contract), 069, 092 | PRs #18/#19/d1-closeout/staging-health-closeout landed without the preview gate; migrations 0040, 0041 |
 | 4 | #29 | claude/closeout-003-login-throttling | 003, 085 | stacked on #28; migration 0046 |
-| 5 | #31 | claude/closeout-086-session-cookies | 086 | stacked on #29 |
+| 5 | #31 | claude/closeout-086-session-cookies | 086, 102 | stacked on #29 |
 | — | #30 | claude/closeout-hardening | 012, 017, 056, 087, 101 | independent of the stack |
-| — | (agents) | claude/closeout-commerce / -modules / -ops / -retell / -frontend | see each PR | migrations: commerce 0043, modules 0044, ops 0045, retell 0042 |
+| — | #32 | claude/closeout-retell | 053, 100 (supersedes #17) | migration 0042; CI green; Retell dashboard steps in docs/voice/RETELL-CONNECTION-GUIDE.md |
+| — | (agents) | claude/closeout-commerce / -modules / -ops / -frontend | see each PR | migrations: commerce 0043, modules 0044, ops 0045 |
 
 Reserved migration numbers: 0040 (#28 security readiness), 0041 (#28 deleted-task links), 0042 Retell, 0043 commerce,
 0044 modules, 0045 ops, 0046 known devices (#29). After everything merges, run `tests/migrations` uniqueness test (ops PR).
