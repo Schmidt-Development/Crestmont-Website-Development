@@ -12,6 +12,8 @@ import { sendMail } from "./mailer.ts";
 import { effectivePrice, pricedItem } from "./pricing-approvals.ts";
 import { checkoutLinesFor, loadTaxConfig, taxLines } from "./tax.ts";
 import { computeTax } from "../domain/tax.ts";
+import { parseAttributionCookie, privacySignal, ATTRIBUTION_COOKIE } from "./leads.ts";
+import { parseCookies } from "../app/http.ts";
 
 export const NOT_CONFIGURED = "Online payment is not configured yet.";
 
@@ -22,25 +24,67 @@ export function maintenanceById(id: string) {
   return id in MAINTENANCE_PLANS ? MAINTENANCE_PLANS[id as MaintenanceId] : null;
 }
 
-export interface CheckoutUser { id: string; email: string }
+export interface CheckoutUser { id: string; email: string; name?: string }
+
+async function stripeCustomerOf(db: Db, organizationId: string): Promise<string | null> {
+  return (await db.prepare(`SELECT stripe_customer_id FROM organizations WHERE id = ?`).bind(organizationId).first<{ stripe_customer_id: string | null }>())?.stripe_customer_id ?? null;
+}
+
+const OPEN_LEAD_STAGES = `('new','qualified','quote_required','quote_sent','negotiation','accepted','awaiting_payment')`;
+
+/**
+ * CREST-GAP-091: a direct package purchase appears in the CRM. The buyer's open lead (matched by contact email) is
+ * linked and moved to awaiting payment; without one, a lead with source "checkout" is created carrying the first-party
+ * campaign attribution cookie (referrer dropped under DNT/GPC). The paid webhook then converts it.
+ */
+export async function ensureCheckoutLead(ctx: AppContext, user: CheckoutUser, organizationId: string, pkg: { id: string; name: string }): Promise<string> {
+  const db = ctx.db;
+  const email = user.email.trim().toLowerCase();
+  const at = nowIso(ctx.now);
+  const existing = await db.prepare(`SELECT l.id, l.stage FROM leads l JOIN contacts c ON c.id = l.contact_id WHERE c.email = ? AND l.merged_into_lead_id IS NULL AND l.stage IN ${OPEN_LEAD_STAGES} ORDER BY l.updated_at DESC LIMIT 1`)
+    .bind(email).first<{ id: string; stage: string }>();
+  if (existing) {
+    if (existing.stage !== "awaiting_payment") {
+      const r = await db.prepare(`UPDATE leads SET stage = 'awaiting_payment', updated_at = ? WHERE id = ? AND stage = ?`).bind(at, existing.id, existing.stage).run();
+      if (r.meta.changes === 1) await db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'stage_change',?,?)`).bind(newId("act"), existing.id, `Stage: ${existing.stage} → awaiting_payment (customer started ${pkg.name} package checkout)`, at).run();
+    }
+    return existing.id;
+  }
+  const attr = parseAttributionCookie(parseCookies(ctx.req.headers.get("cookie"))[ATTRIBUTION_COOKIE]);
+  if (privacySignal(ctx.req.headers)) delete attr.referrer;
+  const org = await db.prepare(`SELECT name FROM organizations WHERE id = ?`).bind(organizationId).first<{ name: string }>();
+  const companyId = newId("co"), contactId = newId("ct"), leadId = newId("ld");
+  await db.batch([
+    db.prepare(`INSERT INTO companies (id, name, organization_id, created_at) VALUES (?,?,?,?)`).bind(companyId, org?.name ?? "Customer", organizationId, at),
+    db.prepare(`INSERT INTO contacts (id, company_id, name, email, user_id, created_at) VALUES (?,?,?,?,?,?)`).bind(contactId, companyId, user.name?.trim() || email, email, user.id, at),
+    db.prepare(`INSERT INTO leads (id, contact_id, source, stage, interest, message, utm_source, utm_medium, utm_campaign, utm_term, utm_content, referrer, landing_page, created_at, updated_at) VALUES (?,?,'checkout','awaiting_payment',?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(leadId, contactId, pkg.id, `Started ${pkg.name} package checkout online.`, attr.utm_source ?? null, attr.utm_medium ?? null, attr.utm_campaign ?? null, attr.utm_term ?? null, attr.utm_content ?? null, attr.referrer ?? null, attr.landing_page ?? null, at, at),
+    db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`).bind(newId("act"), leadId, `Lead created by ${pkg.name} package checkout${attr.utm_source ? ` (campaign source: ${attr.utm_source})` : ""}`, at),
+  ]);
+  await audit(db, { actorUserId: user.id, action: "lead.created", subjectType: "lead", subjectId: leadId, organizationId, details: { source: "checkout", packageId: pkg.id, ...(Object.keys(attr).length ? { attribution: attr } : {}) } });
+  return leadId;
+}
 
 /** Standard package checkout (fixed price, 100% upfront). Premium above the floor goes through quotes. */
 export async function startPackageCheckout(ctx: AppContext, user: CheckoutUser, organizationId: string, packageId: string) {
   const pkg = packageById(packageId);
   if (!pkg) throw new HttpError(404, "Unknown package.");
   if (!ctx.payments.configured) throw new HttpError(409, NOT_CONFIGURED);
-  const order = await createPackageOrder(ctx.db, organizationId, pkg.id, user.id, ctx.now());
+  const leadId = await ensureCheckoutLead(ctx, user, organizationId, pkg);
+  const order = await createPackageOrder(ctx.db, organizationId, pkg.id, user.id, ctx.now(), { leadId });
   const session = await ctx.payments.createCheckout({
     mode: "payment",
     lines: order.checkoutLines,
     customerEmail: user.email,
+    customerId: await stripeCustomerOf(ctx.db, organizationId),
     successUrl: `${ctx.baseUrl}/portal/billing?checkout=success`,
     cancelUrl: `${ctx.baseUrl}/checkout/${pkg.id}?checkout=cancelled`,
     metadata: { organization_id: organizationId, order_id: order.orderId, invoice_id: order.invoiceId, kind: "package" },
-    idempotencyKey: `checkout:${order.invoiceId}`,
+    // One Stripe session per invoice per day: a repeat click on the reused invoice returns the same session (CREST-GAP-036).
+    idempotencyKey: `checkout:${order.invoiceId}:${nowIso(ctx.now).slice(0, 10)}`,
   });
   await recordCheckoutSession(ctx.db, order.invoiceId, session.id);
-  await audit(ctx.db, { actorUserId: user.id, action: "checkout.started", subjectType: "invoice", subjectId: order.invoiceId, organizationId, details: { packageId: pkg.id, amountCents: order.amountCents } });
+  await audit(ctx.db, { actorUserId: user.id, action: "checkout.started", subjectType: "invoice", subjectId: order.invoiceId, organizationId, details: { packageId: pkg.id, amountCents: order.amountCents, reusedInvoice: order.reused } });
   return { url: session.url, orderId: order.orderId, invoiceId: order.invoiceId };
 }
 
@@ -71,6 +115,7 @@ export async function startInvoiceCheckout(ctx: AppContext, user: CheckoutUser, 
     mode: "payment",
     lines: checkoutLinesFor(inv, "Crestmont invoice"),
     customerEmail: user.email,
+    customerId: await stripeCustomerOf(ctx.db, organizationId),
     successUrl: `${ctx.baseUrl}/portal/billing?checkout=success`,
     cancelUrl: `${ctx.baseUrl}/portal/billing/invoices/${inv.id}?checkout=cancelled`,
     metadata: { organization_id: organizationId, invoice_id: inv.id, order_id: inv.order_id ?? "", kind },
@@ -102,6 +147,7 @@ export async function startMaintenanceCheckout(ctx: AppContext, user: CheckoutUs
     recurringInterval: "month",
     lines: [{ name: `${plan.name} maintenance (monthly)`, amountCents: monthly }, ...(tax.configured ? taxLines(tax) : [])],
     customerEmail: user.email,
+    customerId: await stripeCustomerOf(ctx.db, organizationId),
     successUrl: `${ctx.baseUrl}/portal/billing?checkout=success`,
     cancelUrl: `${ctx.baseUrl}/checkout/maintenance/${plan.id}?checkout=cancelled`,
     metadata: { organization_id: organizationId, product_id: plan.id, kind: "subscription" },

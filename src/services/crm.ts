@@ -9,6 +9,7 @@ import { LEAD_STAGES, type LeadStage } from "../domain/crm.ts";
 import { HttpError } from "../app/http.ts";
 import { audit } from "./security.ts";
 import type { DateRange } from "./finance.ts";
+import { endOfBusinessDay } from "../lib/business-time.ts";
 
 export const LEAD_SOURCES = ["web_form", "quote_form", "ai_receptionist", "referral", "manual", "checkout"] as const;
 
@@ -156,7 +157,7 @@ export async function addTask(db: Db, actor: Actor, lead: LeadRow, body: string,
   if (!/^\d{4}-\d{2}-\d{2}$/.test(due) || Number.isNaN(Date.parse(due))) issues.push("Choose a due date");
   if (issues.length) return { ok: false as const, issues };
   await db.prepare(`INSERT INTO crm_activities (id, lead_id, actor_user_id, kind, body, due_at, created_at) VALUES (?,?,?,'task',?,?,?)`)
-    .bind(newId("act"), lead.id, actor.userId ?? null, body, `${due}T17:00:00.000Z`, nowIso()).run();
+    .bind(newId("act"), lead.id, actor.userId ?? null, body, endOfBusinessDay(due), nowIso()).run(); // CREST-GAP-094: end of the due day, Eastern
   return { ok: true as const };
 }
 

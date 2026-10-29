@@ -6,7 +6,8 @@ import { buildContext } from "./app.ts";
 import { nowIso } from "../lib/db.ts";
 import { syncRequirements } from "../readiness/ingest.ts";
 import { applySeedBlockerLinks } from "../services/readiness-admin.ts";
-import { retryFailedStripeEvents, stripeInvoiceLookup } from "../services/payments.ts";
+import { retryFailedStripeEvents, stripeEventCtx, repairPaidInvoicesWithoutProject } from "../services/payments.ts";
+import { retryQueuedEmails } from "../services/email-retry.ts";
 import { runSupportEscalationSweep } from "../services/support.ts";
 import { runInactivitySweep } from "../services/projects.ts";
 import { syncGithub } from "../services/github.ts";
@@ -18,11 +19,11 @@ import { runRetention } from "../services/retention.ts";
 import { sweepBuilds } from "../services/builds.ts";
 
 export type JobName = "requirements" | "stripe_reconcile" | "support_escalation" | "github_sync" | "inactivity" | "integration_health"
-  | "stripe_side_reconcile" | "stripe_ledger_reconcile" | "cost_import" | "env_probe" | "retention" | "build_sweep";
+  | "stripe_side_reconcile" | "stripe_ledger_reconcile" | "cost_import" | "env_probe" | "retention" | "build_sweep" | "payment_repair" | "email_retry";
 
 /** Cron expression → jobs. Must match [triggers] crons in wrangler.toml. */
 export const SCHEDULE: Record<string, JobName[]> = {
-  "*/15 * * * *": ["stripe_reconcile", "support_escalation", "github_sync", "env_probe", "build_sweep"],
+  "*/15 * * * *": ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep"],
   "17 11 * * *": ["requirements", "inactivity", "integration_health", "stripe_side_reconcile", "stripe_ledger_reconcile", "cost_import", "retention"],
 };
 
@@ -35,7 +36,11 @@ export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string,
       let detail: string;
       switch (job) {
         case "requirements": { const r = await syncRequirements(ctx.db); const l = await applySeedBlockerLinks(ctx.db); detail = `${r.upserted} requirements synced, ${l} blocker links applied`; break; }
-        case "stripe_reconcile": detail = `${await retryFailedStripeEvents({ db: ctx.db, email: ctx.email, baseUrl: ctx.baseUrl, stripeLookup: stripeInvoiceLookup(env.STRIPE_SECRET_KEY, env.overrides?.fetch ?? fetch) })} stored events retried`; break;
+        case "stripe_reconcile": detail = `${await retryFailedStripeEvents(stripeEventCtx(ctx, env))} stored events retried`; break;
+        // CREST-GAP-006: paid full/deposit invoices without a project get their idempotent follow-ups.
+        case "payment_repair": { const r = await repairPaidInvoicesWithoutProject(ctx); detail = `${r.repaired} of ${r.checked} paid invoices without a project repaired${r.failed ? `, ${r.failed} failed` : ""}`; if (r.failed) throw new Error(detail); break; }
+        // CREST-GAP-035: queued Resend deliveries retried with backoff; stuck count reported.
+        case "email_retry": { const r = await retryQueuedEmails(ctx); detail = r.detail; break; }
         case "support_escalation": { const r = await runSupportEscalationSweep(ctx); detail = `${r.flagged} of ${r.checked} tickets flagged${r.note ? ` (${r.note})` : ""}`; break; }
         case "github_sync": {
           if (!env.GITHUB_TOKEN || !env.GITHUB_REPO) { detail = "skipped: GitHub source not configured"; break; }

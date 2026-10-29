@@ -3,11 +3,12 @@
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { HttpError, jsonResponse, securityHeaders } from "../app/http.ts";
-import { captureLead } from "../services/leads.ts";
+import { captureLead, leadInput, notifyNewLead } from "../services/leads.ts";
+import { parse } from "../lib/validate.ts";
 import { ingestEvidence, verifyEvidenceSignature, IngestAuthError } from "../readiness/ingest.ts";
 import { buildReport, loadReadinessInput, requirementsCsv } from "../readiness/report.ts";
 import { verifyStripeSignature, recordStripeEvent, isStripeEventEnvelope, WebhookSignatureError, type StripeEvent } from "../domain/stripe-webhook.ts";
-import { processStripeEvent, stripeInvoiceLookup } from "../services/payments.ts";
+import { processStripeEvent, stripeEventCtx } from "../services/payments.ts";
 import { can } from "../domain/authz.ts";
 import { audit, rateLimit } from "../services/security.ts";
 import { scheduled, SCHEDULE } from "../app/scheduled.ts";
@@ -67,11 +68,15 @@ export function register(r: Router) {
     const raw = await readBody(ctx.req);
     const body = JSON.parse(raw) as Record<string, unknown>;
     if (!body || typeof body !== "object" || Array.isArray(body)) return jsonResponse(ctx, 400, { error: "Body must be a JSON object" });
+    if (!(await verifyTurnstile(ctx, body.turnstileToken))) return jsonResponse(ctx, 400, { error: "Bot verification failed" });
+    parse(leadInput, body); // invalid input is rejected (422) before it counts toward the budget (CREST-GAP-082)
     // Same per-IP budget as the browser lead forms (shared key), so the JSON API is not an unthrottled side door.
     const rl = await rateLimit(ctx.db, `leadform:${ctx.ip ?? "unknown"}`, 10, 3600);
     if (!rl.allowed) return jsonResponse(ctx, 429, { error: "Too many submissions from your network. Please wait an hour." });
-    if (!(await verifyTurnstile(ctx, body.turnstileToken))) return jsonResponse(ctx, 400, { error: "Bot verification failed" });
     const { leadId } = await captureLead(ctx.db, body, { ip: ctx.ip ?? undefined });
+    // CREST-GAP-005: staff notification (in-app + one staff email); never turns a saved lead into an error.
+    try { await notifyNewLead(ctx, leadId, "api"); }
+    catch (err) { console.error(JSON.stringify({ level: "error", msg: "staff lead notification failed", leadId, error: (err as Error).message })); }
     return jsonResponse(ctx, 201, { leadId });
   });
 
@@ -139,7 +144,7 @@ export function register(r: Router) {
     const evt = JSON.parse(raw) as StripeEvent;
     if (!isStripeEventEnvelope(evt)) return jsonResponse(ctx, 400, { error: "Malformed event" });
     const outcome = await recordStripeEvent(ctx.db, evt, raw);
-    if (outcome === "new") await processStripeEvent({ db: ctx.db, email: ctx.email, baseUrl: ctx.baseUrl, stripeLookup: stripeInvoiceLookup(ctx.env.STRIPE_SECRET_KEY, ctx.env.overrides?.fetch ?? fetch) }, evt);
+    if (outcome === "new") await processStripeEvent(stripeEventCtx(ctx, ctx.env), evt);
     return jsonResponse(ctx, 200, { received: true, duplicate: outcome === "duplicate" });
   });
 

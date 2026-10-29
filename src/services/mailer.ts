@@ -26,7 +26,7 @@ export const REQUIRED_WORKFLOWS = [
   "support_reply", "refund_request", "refund_decision", "project_completion", "handoff", "security_notification",
   "critical_incident",
 ] as const;
-export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received"] as const;
+export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "lead_alert", "proposal_accepted", "dispute_opened"] as const;
 export type EmailTemplate = (typeof EMAIL_TEMPLATES)[number];
 export type MailCategory = "transactional" | "marketing";
 export type Audience = "customer" | "staff" | "prospect" | "any";
@@ -66,8 +66,10 @@ export interface TemplateData {
   change_order:
     | ProjectBase & { event: "proposed" }
     | ProjectBase & { event: "decided"; decision: string; invoiceIssued: boolean };
-  invoice: ProjectBase & { milestone: string };
-  failed_payment: { url: string };
+  /** `hostedInvoiceUrl`: the Stripe-hosted page of a finalized Stripe invoice (CREST-GAP-039); the call to action pays there. */
+  invoice: ProjectBase & { milestone: string; hostedInvoiceUrl?: string | null };
+  /** `kind`: "plan" = maintenance renewal (invoice.payment_failed); "checkout" = a delayed checkout payment failed (CREST-GAP-083). */
+  failed_payment: { url: string; kind?: "plan" | "checkout" };
   subscription_update: { planName: string; status: string; url: string };
   support_ticket:
     | { event: "received"; name: string; subject: string; ticketRef: string; hoursNotice: string; url: string }
@@ -86,13 +88,19 @@ export interface TemplateData {
     | { event: "issued"; amountCents: number; reference: string; url: string };
   project_completion: ProjectBase;
   handoff: ProjectBase;
-  security_notification: { event: "mfa_enabled" | "password_changed" | "deletion_requested" | "mfa_recovery_code_used" | "mfa_recovery_codes_regenerated" | "mfa_reset" | "sign_in_attempts" };
+  security_notification: { event: "mfa_enabled" | "password_changed" | "password_reset_completed" | "deletion_requested" | "mfa_recovery_code_used" | "mfa_recovery_codes_regenerated" | "mfa_reset" | "sign_in_attempts" };
   /** Staff alert for a critical production incident (no automated incident source exists yet). */
   critical_incident: { summary: string; occurredAt: string; url: string };
   password_reset: { resetUrl: string };
   staff_invitation: { inviterName: string; roleLabel: string; acceptUrl: string };
   quote_sent: { contactName: string; totalCents: number; validUntil: string | null; proposalUrl: string };
   lead_received: { name: string; kind: "quote" | "contact" };
+  /** Staff alert for a new web lead (CREST-GAP-005). */
+  lead_alert: { kind: "quote" | "contact" | "lead"; name: string; company: string | null; interest: string | null; assigned: boolean; url: string };
+  /** Confirmation of an accepted proposal, listing the exact agreement versions accepted (CREST-GAP-039). */
+  proposal_accepted: { contactName: string; version: number; totalCents: number; firstInvoiceCents: number; agreements: string[]; url: string };
+  /** Owner alert: a payment dispute was opened (CREST-GAP-039). */
+  dispute_opened: { amountCents: number; evidenceDueBy: string | null; url: string };
 }
 
 export interface MailContent { subject: string; heading: string; paragraphs: string[]; cta?: { label: string; url: string } }
@@ -230,20 +238,23 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
     description: "A new invoice is ready to pay.",
     render: (d) => ({
       subject: "A new invoice is ready", heading: "A new invoice is ready",
-      paragraphs: [P(d), d.milestone === "design_25" ? "Your 25% design milestone invoice is ready to pay." : d.milestone === "prelaunch_25" ? "Your 25% pre-launch invoice is ready to pay." : "Your invoice is ready to pay."],
-      cta: { label: "Open your portal", url: d.url },
+      paragraphs: [P(d), d.milestone === "design_25" ? "Your 25% design milestone invoice is ready to pay." : d.milestone === "prelaunch_25" ? "Your 25% pre-launch invoice is ready to pay." : d.milestone === "deposit_50" ? "Your 50% deposit invoice is ready to pay." : "Your invoice is ready to pay.",
+        ...(d.hostedInvoiceUrl ? ["Pay securely on Stripe's invoice page with the button below. The invoice is also listed under Billing in your portal."] : [])],
+      cta: d.hostedInvoiceUrl ? { label: "Pay invoice", url: d.hostedInvoiceUrl } : { label: "Open your portal", url: d.url },
     }),
-    samples: [{ ...sampleProject, milestone: "design_25" }],
+    samples: [{ ...sampleProject, milestone: "design_25" }, { ...sampleProject, milestone: "deposit_50", hostedInvoiceUrl: "https://invoice.stripe.com/i/preview" }],
   },
   failed_payment: {
     name: "failed_payment", category: "transactional", audience: "customer",
     description: "A maintenance plan payment failed (from the verified Stripe webhook).",
     render: (d) => ({
       subject: "Action needed: payment failed", heading: "Your payment did not go through",
-      paragraphs: ["Your most recent maintenance plan payment failed. Please update your payment method to keep your plan active.", "Stripe will retry the payment automatically."],
-      cta: { label: "Update payment method", url: d.url },
+      paragraphs: d.kind === "checkout"
+        ? ["Your recent payment could not be completed by your bank, so nothing was charged and your invoice is still open.", "You can pay again from Billing in your portal, using another payment method if needed."]
+        : ["Your most recent maintenance plan payment failed. Please update your payment method to keep your plan active.", "Stripe will retry the payment automatically."],
+      cta: { label: d.kind === "checkout" ? "Pay from your portal" : "Update payment method", url: d.url },
     }),
-    samples: [{ url: "https://example.com/portal/billing" }],
+    samples: [{ url: "https://example.com/portal/billing" }, { url: "https://example.com/portal/billing/invoices/inv_preview", kind: "checkout" }],
   },
   subscription_update: {
     name: "subscription_update", category: "transactional", audience: "customer",
@@ -352,6 +363,8 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
           paragraphs: ["Two-factor authentication was enabled on your Crestmont account. If this was not you, reset your password immediately and contact support."] };
         case "password_changed": return { subject: "Your password was changed", heading: "Password changed",
           paragraphs: ["The password for your Crestmont account was changed and other sessions were signed out. If this was not you, reset your password now."] };
+        case "password_reset_completed": return { subject: "Your password was reset", heading: "Password reset completed",
+          paragraphs: ["The password for your Crestmont account was just reset using an emailed reset link, and every signed-in session was signed out.", "If this was not you, reset your password again immediately and contact support."] };
         case "mfa_recovery_code_used": return { subject: "A recovery code was used on your account", heading: "Recovery code used",
           paragraphs: ["One of your two-factor recovery codes was just used to verify a sign-in on your Crestmont account. That code no longer works.", "If this was not you, reset your password immediately and contact support. Otherwise, generate a new set of recovery codes from your account page."] };
         case "mfa_recovery_codes_regenerated": return { subject: "New two-factor recovery codes", heading: "Recovery codes replaced",
@@ -364,7 +377,7 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
           paragraphs: ["We received a request to delete your Crestmont account. A staff member will review it and confirm when it is complete.", "If you did not make this request, sign in and change your password, then contact support."] };
       }
     },
-    samples: [{ event: "mfa_enabled" }, { event: "password_changed" }, { event: "deletion_requested" }, { event: "mfa_recovery_code_used" }, { event: "mfa_recovery_codes_regenerated" }, { event: "mfa_reset" }, { event: "sign_in_attempts" }],
+    samples: [{ event: "mfa_enabled" }, { event: "password_changed" }, { event: "password_reset_completed" }, { event: "deletion_requested" }, { event: "mfa_recovery_code_used" }, { event: "mfa_recovery_codes_regenerated" }, { event: "mfa_reset" }, { event: "sign_in_attempts" }],
   },
   critical_incident: {
     name: "critical_incident", category: "transactional", audience: "staff",
@@ -419,6 +432,40 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
         "If you did not send this request, you can ignore this email."],
     }),
     samples: [{ name: "Morgan Hale", kind: "quote" }, { name: "Morgan Hale", kind: "contact" }],
+  },
+  lead_alert: {
+    name: "lead_alert", category: "transactional", audience: "staff",
+    description: "Staff alert: a new lead arrived from the public site or the lead API.",
+    render: (d) => ({
+      subject: d.kind === "quote" ? "New quote request" : d.kind === "contact" ? "New contact message" : "New lead",
+      heading: d.kind === "quote" ? "A new quote request arrived" : d.kind === "contact" ? "A new contact message arrived" : "A new lead arrived",
+      paragraphs: [`From: ${d.name}${d.company ? `, ${d.company}` : ""}.`, `Interest: ${d.interest ?? "not stated"}.`,
+        d.assigned ? "It was assigned to the default lead owner." : "It is not assigned yet. Assign an owner and reply from the CRM."],
+      cta: { label: "Open lead", url: d.url },
+    }),
+    samples: [{ kind: "quote", name: "Morgan Hale", company: "Sample Bakery", interest: "business", assigned: false, url: "https://example.com/staff/crm/leads/ld_preview" }],
+  },
+  proposal_accepted: {
+    name: "proposal_accepted", category: "transactional", audience: "customer",
+    description: "Confirms an accepted proposal and lists the exact agreement versions accepted.",
+    render: (d) => ({
+      subject: `Proposal accepted — version ${d.version}`, heading: "Your proposal is accepted",
+      paragraphs: [`Hello ${d.contactName}, thank you. You accepted proposal version ${d.version} for ${money(d.totalCents)}.`,
+        `Your first invoice is ${money(d.firstInvoiceCents)}. Your project starts once that payment is confirmed.`,
+        "You accepted these documents (exact versions are kept with your account under Agreements):", ...d.agreements],
+      cta: { label: "Pay the first invoice", url: d.url },
+    }),
+    samples: [{ contactName: "Morgan Hale", version: 2, totalCents: 800000, firstInvoiceCents: 400000, agreements: ["Custom development agreement (draft) — version 2026-10-draft-1", "Terms of service — version 2026-10-draft-1"], url: "https://example.com/portal/billing/invoices/inv_preview" }],
+  },
+  dispute_opened: {
+    name: "dispute_opened", category: "transactional", audience: "staff",
+    description: "Owner alert: a customer opened a payment dispute (from the verified Stripe webhook).",
+    render: (d) => ({
+      subject: `Payment dispute opened — ${money(d.amountCents)}`, heading: "A payment dispute was opened",
+      paragraphs: [`A customer disputed a payment of ${money(d.amountCents)}.`, d.evidenceDueBy ? `Evidence is due by ${d.evidenceDueBy}. Respond in Stripe before then.` : "Check the evidence deadline in Stripe."],
+      cta: { label: "Open disputes", url: d.url },
+    }),
+    samples: [{ amountCents: 99900, evidenceDueBy: "2026-12-01", url: "https://example.com/staff/disputes" }],
   },
 };
 

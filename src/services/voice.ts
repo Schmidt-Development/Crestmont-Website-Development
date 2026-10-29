@@ -21,6 +21,7 @@ import { hmacSha256Hex, timingSafeEqualHex } from "../lib/crypto.ts";
 import { parse, v, ValidationError } from "../lib/validate.ts";
 import { PACKAGES, MAINTENANCE_PLANS, APPROVED_SERVICES } from "../domain/catalog.ts";
 import { audit } from "./security.ts";
+import { effectivePrices } from "./pricing-approvals.ts";
 
 export class VoiceAuthError extends Error {}
 
@@ -54,16 +55,22 @@ const envelope = v.object({
 
 export interface VoiceResult { status: number; body: Record<string, unknown> }
 
-/** Published pricing facts for the receptionist. Maintenance entitlements are deliberately absent. */
-export function publishedPricing() {
+/**
+ * Published pricing facts for the receptionist. Maintenance entitlements are deliberately absent.
+ * `effective` (CREST-GAP-080): Founder-approved effective prices keyed "package:<id>" / "maintenance:<id>"
+ * (src/services/pricing-approvals.ts effectivePrices); without it the catalog prices are used.
+ */
+export function publishedPricing(effective: Record<string, number> = {}) {
   const dollars = (c: number) => `$${(c / 100).toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+  const pk = (id: string, catalog: number) => effective[`package:${id}`] ?? catalog;
+  const mt = (id: string, catalog: number) => effective[`maintenance:${id}`] ?? catalog;
   return {
     packages: Object.values(PACKAGES).map((p) => ({
-      name: p.name, price: `${dollars(p.basePriceCents)}${p.priceIsFloor ? "+" : ""}`, priceCents: p.basePriceCents, startingPrice: p.priceIsFloor,
+      name: p.name, price: `${dollars(pk(p.id, p.basePriceCents))}${p.priceIsFloor ? "+" : ""}`, priceCents: pk(p.id, p.basePriceCents), startingPrice: p.priceIsFloor,
       pageLimit: p.pageLimit, revisionRounds: p.revisionRounds,
     })),
     customDevelopment: "Quoted separately after a scoping conversation; no price is given by phone.",
-    maintenance: Object.values(MAINTENANCE_PLANS).map((m) => ({ name: m.name, monthly: `${dollars(m.monthlyCents)}/month`, monthlyCents: m.monthlyCents })),
+    maintenance: Object.values(MAINTENANCE_PLANS).map((m) => ({ name: m.name, monthly: `${dollars(mt(m.id, m.monthlyCents))}/month`, monthlyCents: mt(m.id, m.monthlyCents) })),
     maintenanceNote: "Plan details are being finalised. A team member will confirm what each plan includes.",
     paymentRules: "Standard packages are paid 100% upfront. Custom development is billed 50% deposit, 25% at design approval and 25% before launch.",
     services: [...APPROVED_SERVICES],
@@ -127,7 +134,7 @@ async function createCallLead(db: Db, call: CallRow, c: { name: string; email?: 
   const label = call.is_test ? "[TEST CALL] " : "";
   await db.batch([
     ...(companyId ? [db.prepare(`INSERT INTO companies (id, name, created_at) VALUES (?,?,?)`).bind(companyId, c.company, at)] : []),
-    db.prepare(`INSERT INTO contacts (id, company_id, name, email, phone, created_at) VALUES (?,?,?,?,?,?)`).bind(contactId, companyId, c.name, c.email ?? null, c.phone ?? null, at),
+    db.prepare(`INSERT INTO contacts (id, company_id, name, email, phone, created_at) VALUES (?,?,?,?,?,?)`).bind(contactId, companyId, c.name, c.email ? c.email.trim().toLowerCase() : null, c.phone ?? null, at), // CREST-GAP-093
     db.prepare(`INSERT INTO leads (id, contact_id, source, stage, interest, message, created_at, updated_at) VALUES (?,?,'ai_receptionist','new',?,?,?,?)`).bind(leadId, contactId, c.interest, label + c.message, at, at),
     db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'call',?,?)`).bind(newId("act"), leadId, `${label}Lead captured by AI receptionist (call ${call.provider_call_id})`, at),
     db.prepare(`UPDATE calls SET lead_id = COALESCE(lead_id, ?) WHERE id = ?`).bind(leadId, call.id),
@@ -183,7 +190,7 @@ const fnSchemas = {
 async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgs: unknown): Promise<Record<string, unknown>> {
   switch (name) {
     case "get_published_pricing":
-      return { pricing: publishedPricing() };
+      return { pricing: publishedPricing(await effectivePrices(db)) }; // CREST-GAP-080
     case "create_lead": {
       const a = parse(fnSchemas.create_lead, rawArgs ?? {});
       if (!a.email && !a.phone) throw new ValidationError(["email or phone is required"]);

@@ -16,6 +16,8 @@ import * as fin from "../services/finance.ts";
 import * as docs from "../services/finance-documents.ts";
 import { createStripeMilestoneInvoice, stripeInvoicer, stripeInvoiceBlocker, STRIPE_INVOICE_KINDS } from "../services/stripe-invoices.ts";
 import { audit } from "../services/security.ts";
+import { requireVerifiedForPayment } from "./verify-gate.ts";
+import { sendMail } from "../services/mailer.ts";
 import { parseTaxDetail, taxStatement, taxLabel } from "../services/tax.ts";
 import type { TaxResult } from "../domain/tax.ts";
 
@@ -381,6 +383,17 @@ ${table([...fin.EXPORT_KINDS], [{ header: "Export", cell: (k) => label(k) }, { h
 ${alert("info", "These exports summarize Crestmont's internal records. They are not tax or accounting advice. Reconcile against Stripe payouts and consult a qualified accountant.")}`);
 }
 
+async function emailStripeInvoiceLink(ctx: AppContext, invoiceId: string, hostedUrl: string) {
+  const inv = await ctx.db.prepare(`SELECT i.id, i.organization_id, i.milestone_kind, p.name AS project_name FROM invoices i LEFT JOIN projects p ON p.id = i.project_id WHERE i.id = ?`).bind(invoiceId)
+    .first<{ id: string; organization_id: string; milestone_kind: string | null; project_name: string | null }>();
+  if (!inv) return;
+  const admins = (await ctx.db.prepare(`SELECT u.email FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = ? AND m.role_id = 'customer_admin' AND u.disabled_at IS NULL`).bind(inv.organization_id).all<{ email: string }>()).results;
+  for (const a of admins) {
+    await sendMail(ctx, { template: "invoice", to: a.email, idempotencyKey: `stripe-invoice-link:${inv.id}:${a.email}`,
+      data: { projectName: inv.project_name ?? "Your Crestmont project", milestone: inv.milestone_kind ?? "", url: `${ctx.baseUrl}/portal/billing/invoices/${inv.id}`, hostedInvoiceUrl: hostedUrl } });
+  }
+}
+
 export function register(r: Router): void {
   // portal billing
   r.get("/portal/billing", (ctx) => billingPage(ctx));
@@ -388,6 +401,8 @@ export function register(r: Router): void {
   r.post("/portal/billing/invoices/:id/pay", async (ctx, p) => {
     const org = requireCustomerOrg(ctx);
     if (!can(ctx.actor!, "customer.billing", { organizationId: org.organizationId })) throw new HttpError(403, "Only an account administrator can pay invoices.");
+    const unverified = requireVerifiedForPayment(ctx); // CREST-GAP-031
+    if (unverified) return unverified;
     const res = await startInvoiceCheckout(ctx, { id: ctx.user!.id, email: ctx.user!.email }, org.organizationId, p.id);
     return stripeRedirect(ctx, res.url);
   });
@@ -439,6 +454,8 @@ export function register(r: Router): void {
     requireStaff(ctx, "finance.read");
     try {
       const res = await createStripeMilestoneInvoice(ctx.db, ctx.env, ctx.user!.id, p.id);
+      // CREST-GAP-039: the customer's billing administrators get the Stripe-hosted invoice link by email, once per invoice.
+      if (res.hostedUrl) await emailStripeInvoiceLink(ctx, p.id, res.hostedUrl);
       return redirect(ctx, `/staff/finance/invoices/${p.id}`, { kind: "success", text: res.outcome === "already_finalized" ? "This invoice already has a finalized Stripe invoice; nothing new was created." : `Stripe invoice ${res.number ?? res.stripeInvoiceId} finalized (not emailed). The customer can pay it from the portal.` });
     } catch (e) {
       const st = (e as { status?: number }).status;

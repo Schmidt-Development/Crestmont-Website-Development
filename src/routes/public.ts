@@ -13,7 +13,7 @@ import { verifyTurnstile } from "./api.ts";
 import { PACKAGES, PACKAGE_FEATURES, packageAdditions, MAINTENANCE_PLANS, type PackageId } from "../domain/catalog.ts";
 import { effectivePrices } from "../services/pricing-approvals.ts";
 import { can } from "../domain/authz.ts";
-import { captureLead, requestAttribution, submittedAttribution } from "../services/leads.ts";
+import { captureLead, requestAttribution, submittedAttribution, notifyNewLead } from "../services/leads.ts";
 import { rateLimit, securityEvent } from "../services/security.ts";
 import { sendMail } from "../services/mailer.ts";
 import { ValidationError } from "../lib/validate.ts";
@@ -54,6 +54,9 @@ type Content = Awaited<ReturnType<typeof cms.loadContent>>;
 async function page(ctx: AppContext, seoKey: string, keys: string[], render: (c: Content) => SafeHtml | Promise<SafeHtml>, status = 200): Promise<Response> {
   const c = await cms.loadContent(ctx, [`seo.${seoKey}`, ...keys]);
   effective = await effectivePrices(ctx.db, ctx.now());
+  // CREST-GAP-010: in production, while online checkout is closed (draft policies, unnamed entity or live payments not
+  // authorised — the same condition that disables the payments adapter), package CTAs lead to a quote request instead.
+  checkoutClosed = ctx.env.ENVIRONMENT === "production" && !ctx.payments.configured;
   const seo = c.get(`seo.${seoKey}`);
   const body = await render(c);
   const banner = c.previewing
@@ -82,6 +85,10 @@ const itemCards = (text: string) => html`<div class="experience" data-reveal-gro
 /** Capability cards (three columns). */
 const ledger = (text: string) => html`<ul class="ledger" data-reveal-group>${parseItems(text).map((i) => html`<li data-reveal><h3>${i.title}</h3><p>${i.body}</p></li>`)}</ul>`;
 
+let checkoutClosed = false;
+/** Where a package's "Choose" call to action leads (CREST-GAP-010). */
+const packageCta = (id: string) => (checkoutClosed ? `/quote?package=${id}` : `/checkout/${id}`);
+
 function packageCards(c: Content, opts: { compact?: boolean } = {}): SafeHtml {
   const pr = c.get("pricing.presentation");
   return html`<div class="grid grid-3 pricing-grid" data-reveal-group>${PKG_ORDER.map((id, i) => {
@@ -94,7 +101,7 @@ function packageCards(c: Content, opts: { compact?: boolean } = {}): SafeHtml {
 <h3 class="card__title" id="pkg-${id}">${p.name}</h3><p class="muted">${pr[`${id}_tagline`] ?? ""}</p>
 <div class="price" data-testid="price-${id}">${pkgPrice(id)}</div><p class="faint package__terms">${p.priceIsFloor ? "Starting price · final price in your written scope · " : "Fixed price · "}paid 100% upfront</p>
 ${i > 0 ? html`<p class="package__inherits">Everything in ${PACKAGES[PKG_ORDER[i - 1]].name}, plus:</p>` : ""}<ul class="checklist">${shown.map((it) => html`<li>${it}</li>`)}</ul>${opts.compact && items.length > shown.length ? html`<p class="package__more"><a href="/pricing/compare">See everything in ${p.name}</a></p>` : ""}
-<div class="package__actions">${ctaLink(`Choose ${p.name}`, `/checkout/${id}`, featured ? "primary" : "secondary")}${id === "premium" ? html` <a class="btn btn--ghost" href="/quote?package=premium">Discuss a larger scope</a>` : ""}</div>
+<div class="package__actions">${ctaLink(`Choose ${p.name}`, packageCta(id), featured ? "primary" : "secondary")}${id === "premium" ? html` <a class="btn btn--ghost" href="/quote?package=premium">Discuss a larger scope</a>` : ""}</div>
 </article>`;
   })}</div>`;
 }
@@ -409,13 +416,15 @@ async function handleLead(ctx: AppContext, kind: "quote" | "contact", rerender: 
     await securityEvent(ctx.db, "lead_form_honeypot", { ip: ctx.ip, detail: kind });
     return redirect(ctx, thanks);
   }
-  const rl = await rateLimit(ctx.db, `leadform:${ctx.ip ?? "unknown"}`, 10, 3600);
-  if (!rl.allowed) return rerender(v, { form: "Too many submissions from your network. Please wait an hour or email us directly." }, 429);
   if (!(await verifyTurnstile(ctx, f.get("cf-turnstile-response")))) {
     return rerender(v, { form: "We could not verify that this submission came from a person. Please try again." }, 400);
   }
   const { errors } = validateLeadForm(v, kind);
   if (Object.keys(errors).length) return rerender(v, errors, 422);
+  // CREST-GAP-082: only submissions that passed bot verification and validation count toward the per-network budget,
+  // so a visitor correcting typos is never locked out.
+  const rl = await rateLimit(ctx.db, `leadform:${ctx.ip ?? "unknown"}`, 10, 3600);
+  if (!rl.allowed) return rerender(v, { form: "Too many submissions from your network. Please wait an hour or email us directly." }, 429);
 
   // Claimed only after validation passed, atomically: a duplicate never creates a second lead. A duplicate reports
   // success only once the first submission's lead is actually saved; while it is still being saved it waits briefly,
@@ -459,6 +468,9 @@ async function handleLead(ctx: AppContext, kind: "quote" | "contact", rerender: 
     } catch (err) {
       console.error(JSON.stringify({ level: "warn", msg: "lead acknowledgement email failed", leadId, error: (err as Error).message }));
     }
+    // CREST-GAP-005: Crestmont staff are told about the lead (in-app + one staff email, idempotent per lead).
+    try { await notifyNewLead(ctx, leadId, kind); }
+    catch (err) { console.error(JSON.stringify({ level: "error", msg: "staff lead notification failed", leadId, error: (err as Error).message })); }
   } catch (err) {
     // The lead was not saved: release the one-time token so the visitor can resubmit, and never report success.
     if (sub && !leadId) await ctx.db.prepare(`DELETE FROM rate_limits WHERE key = ? AND window_start = ?`).bind(`leadsub:${sub.key}`, sub.issued).run().catch(() => undefined);
@@ -591,7 +603,7 @@ ${ids.map((fid) => { const f = top(fid); return html`<tr><th scope="row"><span c
 <tbody><tr class="compare__group"><th scope="rowgroup" colspan="4">Payment</th></tr>
 <tr><th scope="row"><span class="compare__label">Price</span></th>${PKG_ORDER.map((id) => html`<td class="compare__scope"><strong>${pkgPrice(id)}</strong>${PACKAGES[id].priceIsFloor ? html`<span class="compare__sub">final price in your written scope</span>` : ""}</td>`)}</tr>
 <tr><th scope="row"><span class="compare__label">Payment</span></th>${PKG_ORDER.map(() => html`<td class="compare__scope">100% upfront</td>`)}</tr>
-<tr class="compare__actions"><th scope="row"><span class="visually-hidden">Choose a package</span></th>${PKG_ORDER.map((id) => html`<td>${linkButton(`Choose ${PACKAGES[id].name}`, `/checkout/${id}`, id === "premium" ? "primary" : "secondary", "sm")}</td>`)}</tr></tbody>
+<tr class="compare__actions"><th scope="row"><span class="visually-hidden">Choose a package</span></th>${PKG_ORDER.map((id) => html`<td>${linkButton(`Choose ${PACKAGES[id].name}`, packageCta(id), id === "premium" ? "primary" : "secondary", "sm")}</td>`)}</tr></tbody>
 </table></div>
 <p class="muted compare__foot">A gold check means the item is included at the same scope in that package; where the scope grows, the package's own wording is shown. Need more than Premium? <a href="/quote?package=custom">Request a custom quote</a>.</p></div></section>`;
   }));

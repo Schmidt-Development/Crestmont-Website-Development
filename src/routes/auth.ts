@@ -274,7 +274,13 @@ export function register(r: Router) {
     const f = await ctx.form();
     try {
       await auth.assertPasswordNotBreached(ctx.env, ctx.db, String(f.get("password") ?? ""));
-      await auth.resetPassword(ctx.db, str(f, "token"), String(f.get("password") ?? ""), ctx.ip);
+      const resetUserId = await auth.resetPassword(ctx.db, str(f, "token"), String(f.get("password") ?? ""), ctx.ip);
+      // CREST-GAP-039: security notice that the reset completed (a mail failure never blocks the reset).
+      const resetUser = await ctx.db.prepare(`SELECT email FROM users WHERE id = ?`).bind(resetUserId).first<{ email: string }>();
+      if (resetUser) {
+        try { await sendMail(ctx, { template: "security_notification", to: resetUser.email, idempotencyKey: `reset-done:${resetUserId}:${str(f, "token").slice(0, 16)}`, data: { event: "password_reset_completed" } }); }
+        catch (e) { console.error(JSON.stringify({ level: "warn", msg: "reset notice email failed", error: (e as Error).message })); }
+      }
       return redirect(ctx, "/login", { kind: "success", text: "Password updated. Sign in with your new password." });
     } catch (e) {
       if (e instanceof auth.AuthError) return resetPage(ctx, [e.message], str(f, "token"));
