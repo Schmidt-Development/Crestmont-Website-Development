@@ -109,7 +109,10 @@ export async function assertCsrf(ctx: AppContext): Promise<void> {
   if (origin && origin !== ctx.url.origin) throw new HttpError(403, "Cross-origin request blocked");
   if (!origin) {
     const ref = ctx.req.headers.get("referer");
-    if (ref && new URL(ref).origin !== ctx.url.origin) throw new HttpError(403, "Cross-origin request blocked");
+    // A malformed Referer is refused like a foreign one (403), never a 500 (CREST-GAP-101).
+    let refOrigin: string | null = null;
+    if (ref) { try { refOrigin = new URL(ref).origin; } catch { refOrigin = "invalid"; } }
+    if (ref && refOrigin !== ctx.url.origin) throw new HttpError(403, "Cross-origin request blocked");
   }
   const form = await ctx.form();
   const sent = String(form.get("_csrf") ?? "");

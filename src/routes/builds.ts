@@ -12,6 +12,7 @@ import { staffPage } from "./crm.ts";
 import * as B from "../services/builds.ts";
 import * as AIR from "../services/ai-runner.ts";
 import { notify } from "../services/notifications.ts";
+import { claimSignatureOnce } from "../services/security.ts";
 
 const RUNNER = "/api/builds/runner";
 const usd = (n: number) => `$${n.toFixed(2)}`;
@@ -34,6 +35,12 @@ async function runnerBody(ctx: AppContext): Promise<Record<string, unknown>> {
   let body: unknown;
   try { body = JSON.parse(raw); } catch { throw new HttpError(400, "Malformed JSON"); }
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "Body must be a JSON object");
+  // Replay protection (CREST-GAP-087): runners put a random `_nonce` in every signed body; a captured request cannot
+  // be sent again. Runners older than the nonce are accepted until RUNNER_REQUIRE_NONCE=yes.
+  const nonce = (body as Record<string, unknown>)._nonce;
+  if (typeof nonce === "string" && /^[0-9a-f]{32,64}$/.test(nonce)) {
+    if (!(await claimSignatureOnce(ctx.db, `runner:${nonce}`))) throw new HttpError(409, "Replayed request");
+  } else if (ctx.env.RUNNER_REQUIRE_NONCE === "yes") throw new HttpError(400, "Signed body must carry a _nonce");
   return body as Record<string, unknown>;
 }
 

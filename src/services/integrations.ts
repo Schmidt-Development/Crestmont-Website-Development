@@ -5,6 +5,7 @@
 // a short SHA-256 fingerprint, used to notice when a key changes so stale verification is dropped.
 import { STRIPE_API_VERSION } from "../adapters/payments.ts";
 import { paymentsMode, keyMode } from "../domain/payments-mode.ts";
+import { STRIPE_WEBHOOK_EVENTS } from "../domain/stripe-events.ts";
 import type { Db } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import { sha256Hex } from "../lib/crypto.ts";
@@ -169,7 +170,14 @@ export async function verifyIntegration(d: IntegrationDeps, id: IntegrationId, a
         if (!r.ok) { detail = providerError("Stripe", r, b); break; }
         const live = paymentsMode(d.env).mode === "live";
         if (typeof b?.livemode === "boolean" && b.livemode !== live) { status = "blocked"; detail = b.livemode ? "Stripe reports livemode=true for this key; live payments are not authorised." : "Stripe reports livemode=false where live mode is expected."; break; }
-        status = "verified"; detail = `GET /v1/balance succeeded in ${live ? "live" : "test"} mode.`;
+        const modeLabel = live ? "live" : "test";
+        // CREST-GAP-017: the webhook endpoint is registered by hand in the Stripe Dashboard; check it (read-only).
+        const w = await f("https://api.stripe.com/v1/webhook_endpoints?limit=100", { headers: { authorization: `Bearer ${d.env.STRIPE_SECRET_KEY}`, "stripe-version": STRIPE_API_VERSION } });
+        const wb = await jsonOrNull(w);
+        if (!w.ok) { detail = providerError("Stripe webhook endpoints", w, wb); break; }
+        const problem = webhookEndpointProblem((Array.isArray(wb?.data) ? wb!.data : []) as StripeWebhookEndpoint[], d.env.APP_URL);
+        if (problem) { status = "degraded"; detail = `GET /v1/balance succeeded in ${modeLabel} mode, but ${problem}`; break; }
+        status = "verified"; detail = `GET /v1/balance succeeded in ${modeLabel} mode; the webhook endpoint is enabled at API version ${STRIPE_API_VERSION} with every handled event.`;
         break;
       }
       case "resend": {
@@ -270,4 +278,19 @@ export const SECRET_NAMES = ["EVIDENCE_INGEST_SECRET", "STRIPE_SECRET_KEY", "STR
 export function secretPresence(env: Env): { name: string; present: boolean }[] {
   const e = env as unknown as Record<string, unknown>;
   return SECRET_NAMES.map((name) => ({ name, present: typeof e[name] === "string" && (e[name] as string).length > 0 }));
+}
+
+export interface StripeWebhookEndpoint { url?: string; status?: string; api_version?: string | null; enabled_events?: string[] }
+
+/** Why the registered Stripe webhook endpoints cannot deliver every event the platform handles (null = fine). */
+export function webhookEndpointProblem(endpoints: StripeWebhookEndpoint[], appUrl: string | undefined): string | null {
+  const target = `${(appUrl ?? "").replace(/\/$/, "")}/api/webhooks/stripe`;
+  const ep = endpoints.find((e) => e.url === target);
+  if (!ep) return `no webhook endpoint is registered for ${target}.`;
+  if (ep.status !== "enabled") return `the webhook endpoint for ${target} is ${ep.status ?? "not enabled"}.`;
+  if (ep.api_version !== STRIPE_API_VERSION) return `the webhook endpoint uses API version ${ep.api_version ?? "default"}, expected ${STRIPE_API_VERSION}.`;
+  const enabled = new Set(ep.enabled_events ?? []);
+  if (enabled.has("*")) return null;
+  const missing = STRIPE_WEBHOOK_EVENTS.filter((e) => !enabled.has(e));
+  return missing.length ? `the webhook endpoint does not send: ${missing.join(", ")}.` : null;
 }
