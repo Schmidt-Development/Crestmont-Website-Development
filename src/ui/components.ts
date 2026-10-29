@@ -12,6 +12,17 @@ export function linkButton(text: string, href: string, variant: "primary" | "sec
   return html`<a class="btn btn--${variant}${size ? " btn--sm" : ""}" href="${safeUrl(href)}">${text}</a>`;
 }
 
+/** Arrow glyph used in CTA squares and card links (decorative). */
+export const ARROW_SVG = html`<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M4.5 11.5l7-7M6 4.5h5.5V10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+/**
+ * Call-to-action link (M03): label layer plus an arrow square. The square is aria-hidden, so the accessible name is
+ * exactly the label. app.js adds the tile-fill hover layer on first hover/focus.
+ */
+export function ctaLink(text: string, href: string, variant: "primary" | "secondary" = "primary", size?: "sm", extraClass = ""): SafeHtml {
+  return html`<a class="btn btn--${variant} btn--cta${size ? " btn--sm" : ""}${extraClass ? ` ${extraClass}` : ""}" href="${safeUrl(href)}"><span class="btn__label">${text}</span><span class="btn__arrow" aria-hidden="true">${ARROW_SVG}</span></a>`;
+}
+
 /** Inline POST form with a single button (for actions like "Approve"). */
 export function actionForm(ctx: AppContext, action: string, text: string, opts: { variant?: "primary" | "secondary" | "ghost" | "danger"; hidden?: Record<string, string>; confirm?: string; size?: "sm" } = {}): SafeHtml {
   const hidden = Object.entries(opts.hidden ?? {}).map(([k, v]) => html`<input type="hidden" name="${k}" value="${v}">`);

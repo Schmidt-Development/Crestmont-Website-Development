@@ -27,6 +27,8 @@ export interface Env {
   RETELL_API_KEY?: string;
   /** Staging only: password for the outer preview gate (src/app/preview-gate.ts). Ignored in production. */
   STAGING_ACCESS_PASSWORD?: string;
+  /** Approved isolated portfolio demo origins (https only, comma/space separated). Only these may be framed. */
+  PORTFOLIO_DEMO_ORIGINS?: string;
   /** "required" on the deployed staging Worker: the preview gate stays locked when no password is set. */
   PREVIEW_GATE?: string;
   /** "local-runner": AI drafts are served by the self-hosted model through the build runner (no paid API). */
@@ -83,6 +85,8 @@ export interface AppContext {
   csrfToken: string;
   flash: { kind: "success" | "error" | "info"; text: string } | null;
   setCookies: string[];
+  /** Extra frame-src origins for this response (already validated against PORTFOLIO_DEMO_ORIGINS). */
+  frameSrc?: string[];
   /** business_settings key/values (brand logo, contact details, staffed hours...). */
   settings: Record<string, string>;
   /** Parsed urlencoded or multipart body, cached. */

@@ -33,6 +33,7 @@ const env: Env = {
   VOICE_WEBHOOK_SECRET: process.env.VOICE_WEBHOOK_SECRET,
   // Lets the staging browser suite rehearse the preview gate locally (gate is never active in production).
   STAGING_ACCESS_PASSWORD: process.env.STAGING_ACCESS_PASSWORD,
+  PORTFOLIO_DEMO_ORIGINS: process.env.PORTFOLIO_DEMO_ORIGINS,
   overrides: { storage },
 };
 
