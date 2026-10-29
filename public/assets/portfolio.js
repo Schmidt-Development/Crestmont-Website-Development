@@ -147,13 +147,33 @@
     });
     // Expanding takes the explorer out of the flow; a spacer holds its place so the page never shortens (which would
     // clamp the scroll position), and the exact position is restored on close.
-    let spacer = null, savedY = 0;
+    // While expanded the explorer is a modal dialog (CREST-GAP-076): role=dialog + aria-modal, everything outside it is
+    // inert (not focusable, hidden from assistive technology), focus starts on Close, Tab wraps inside the overlay, and
+    // Escape closes it — also when a demo forwards the key ({source:"crestmont-demo", type:"key", key:"Escape"}),
+    // since key presses inside a cross-origin frame never reach this page.
+    let spacer = null, savedY = 0, inerted = [], savedAttrs = null;
+    const inertOutside = (el) => {
+      const out = [];
+      for (let node = el; node && node.parentElement; node = node.parentElement) {
+        for (const sib of node.parentElement.children) if (sib !== node && !sib.inert && sib.tagName !== "SCRIPT") { sib.inert = true; out.push(sib); }
+        if (node.parentElement === document.body) break;
+      }
+      return out;
+    };
     const setExpanded = (on) => {
       if (on === root.classList.contains("pfx--expanded")) return;
       if (on) {
         savedY = window.scrollY;
         spacer = document.createElement("div"); spacer.setAttribute("aria-hidden", "true"); spacer.style.height = root.offsetHeight + "px";
         root.before(spacer);
+        savedAttrs = ["role", "aria-roledescription", "aria-label", "aria-modal"].map((a) => [a, root.getAttribute(a)]);
+        root.setAttribute("role", "dialog"); root.setAttribute("aria-modal", "true"); root.removeAttribute("aria-roledescription");
+        root.setAttribute("aria-label", `Expanded view: ${name(cur)}`);
+        inerted = inertOutside(root);
+      } else {
+        inerted.forEach((x) => { x.inert = false; }); inerted = [];
+        if (savedAttrs) savedAttrs.forEach(([a, v]) => (v === null ? root.removeAttribute(a) : root.setAttribute(a, v)));
+        savedAttrs = null;
       }
       root.classList.toggle("pfx--expanded", on);
       document.documentElement.classList.toggle("pfx-lock", on);
@@ -162,9 +182,24 @@
       // A larger frame: re-pick the device unless the visitor chose one, then refit.
       if (!userMode) setMode(autoMode(), false); else fit();
       if (on && live) live.textContent = `Expanded view of ${name(cur)}. Press Escape or Close expanded view to return.`;
+      if (expandBtn) expandBtn.focus({ preventScroll: true });
     };
-    expandBtn && expandBtn.addEventListener("click", () => setExpanded(!root.classList.contains("pfx--expanded")));
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && root.classList.contains("pfx--expanded")) { setExpanded(false); expandBtn && expandBtn.focus({ preventScroll: true }); } });
+    const isOpen = () => root.classList.contains("pfx--expanded");
+    expandBtn && expandBtn.addEventListener("click", () => setExpanded(!isOpen()));
+    const focusables = () => [...root.querySelectorAll("a[href], button:not([disabled]), iframe, [tabindex]:not([tabindex='-1'])")]
+      .filter((x) => !x.closest("[inert]") && !x.hidden && x.getClientRects().length);
+    document.addEventListener("keydown", (e) => {
+      if (!isOpen()) return;
+      if (e.key === "Escape") { e.preventDefault(); setExpanded(false); return; }
+      if (e.key !== "Tab") return;
+      const f = focusables(); if (!f.length) return;
+      const first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && (document.activeElement === first || !root.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (document.activeElement === last || !root.contains(document.activeElement))) { e.preventDefault(); first.focus(); }
+    });
+    window.addEventListener("message", (e) => {
+      if (isOpen() && allowed.has(e.origin) && e.data && e.data.source === "crestmont-demo" && e.data.type === "key" && e.data.key === "Escape") setExpanded(false);
+    });
 
     if (reduce.matches) track.style.transition = "none";
     setMode(autoMode(), false);

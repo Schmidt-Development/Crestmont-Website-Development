@@ -116,17 +116,21 @@ function portfolioCard(p: pf.PortfolioProject): SafeHtml {
 function shot(p: pf.PortfolioProject, kind: "desktop" | "mobile", viewer = false): SafeHtml {
   const id = kind === "desktop" ? p.desktop_screenshot_file_id : p.mobile_screenshot_file_id;
   const asset = kind === "desktop" ? p.poster_desktop_asset : p.poster_mobile_asset;
-  const alt = `${kind === "desktop" ? "Desktop" : "Mobile"} screenshot of ${p.name} (${p.live_url})`;
+  // CREST-GAP-048: bundled posters are captures of the project's isolated demonstration build (sample data), and the
+  // alt text says so; an uploaded screenshot is described without claiming where it was taken.
+  const alt = `${kind === "desktop" ? "Desktop" : "Mobile"} screenshot of the ${p.name} website${id ? "" : " (demonstration build with sample data)"}`;
   if (!id && !asset) return html`<div class="shot shot--pending${kind === "mobile" ? " shot--mobile" : ""}" role="img" aria-label="${alt} — capture pending"><span>Verified screenshot capture pending</span></div>`;
   const src = id ? `/portfolio-media/${id}` : asset!;
-  const img = html`<img src="${src}" alt="${alt}" loading="lazy" decoding="async">`;
+  // CREST-GAP-078: intrinsic size reserves the space before the image loads (desktop 1440×900, phone 390×844 CSS px).
+  const [w, h] = kind === "desktop" ? [1440, 900] : [390, 844];
+  const img = html`<img src="${src}" alt="${alt}" width="${String(w)}" height="${String(h)}" loading="lazy" decoding="async">`;
   return viewer ? html`<a class="shot${kind === "mobile" ? " shot--mobile" : ""}" href="${src}" data-viewer data-alt="${alt}">${img}<span class="visually-hidden">Open full-screen</span></a>` : html`<div class="shot">${img}</div>`;
 }
 
 /** Large two-up project presentation (M05): image group enters before its text group. */
 function showcase(projects: pf.PortfolioProject[]): SafeHtml {
   return html`<div class="showcase" data-reveal-group>${projects.slice(0, 2).map((p) => html`<a class="showcase__item" href="/portfolio/${p.slug}" data-reveal>
-<div class="showcase__media">${p.desktop_screenshot_file_id ? html`<img src="/portfolio-media/${p.desktop_screenshot_file_id}" alt="Desktop screenshot of ${p.name} (${p.live_url})" loading="lazy" decoding="async">` : html`<div class="shot shot--pending" role="img" aria-label="Screenshot of ${p.name} — capture pending"><span>Verified screenshot capture pending</span></div>`}</div>
+<div class="showcase__media">${p.desktop_screenshot_file_id ? html`<img src="/portfolio-media/${p.desktop_screenshot_file_id}" alt="Desktop screenshot of the ${p.name} website" width="1440" height="900" loading="lazy" decoding="async">` : html`<div class="shot shot--pending" role="img" aria-label="Screenshot of ${p.name} — capture pending"><span>Verified screenshot capture pending</span></div>`}</div>
 <div data-reveal style="--rd:120ms"><p class="faint" style="margin:0 0 .25rem">${p.industry}</p><h3 class="card__title" style="font-size:1.35rem">${p.name}</h3><p class="muted" style="margin:0">${p.description.length > 160 ? p.description.slice(0, 157) + "…" : p.description}</p></div></a>`)}</div>`;
 }
 
