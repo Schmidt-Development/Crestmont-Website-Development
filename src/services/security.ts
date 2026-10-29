@@ -12,6 +12,13 @@ export async function rateLimit(db: Db, key: string, limit: number, windowSecond
   return { allowed: count <= limit, remaining: Math.max(0, limit - count) };
 }
 
+/** Current count of a fixed-window counter without incrementing it (0 when no event happened in this window). */
+export async function peekRateLimit(db: Db, key: string, windowSeconds: number, now = Date.now()): Promise<number> {
+  const windowStart = Math.floor(now / 1000 / windowSeconds) * windowSeconds;
+  const row = await db.prepare(`SELECT count FROM rate_limits WHERE key = ? AND window_start = ?`).bind(key, windowStart).first<{ count: number }>();
+  return row?.count ?? 0;
+}
+
 export async function securityEvent(db: Db, kind: string, data: { userId?: string | null; email?: string | null; ip?: string | null; detail?: string }): Promise<void> {
   await db.prepare(`INSERT INTO security_events (kind, user_id, email, ip, detail, created_at) VALUES (?,?,?,?,?,?)`)
     .bind(kind, data.userId ?? null, data.email ?? null, data.ip ?? null, data.detail ?? null, nowIso()).run();

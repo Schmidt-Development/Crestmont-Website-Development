@@ -2,7 +2,7 @@
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html } from "../lib/html.ts";
-import { cookie, htmlResponse, isSecure, redirect, str } from "../app/http.ts";
+import { cookie, htmlResponse, isSecure, parseCookies, redirect, str } from "../app/http.ts";
 import { authLayout, appLayout } from "../ui/layout.ts";
 import { csrf, input, button, formErrors, alert, table, actionForm, badge, checkbox } from "../ui/components.ts";
 import * as auth from "../services/auth.ts";
@@ -23,19 +23,37 @@ import { safeNextPath } from "../app/step-up.ts";
 const safeNext = (n: string | null, fallback: string) => safeNextPath(n, fallback);
 const BOT_CHECK_FAILED = "We could not verify that this request came from a person. Please try again.";
 
+/** The remembered-device cookie for abuse-resistant sign-in (CREST-GAP-003). */
+function deviceCookieValue(ctx: AppContext): string | null {
+  const v = parseCookies(ctx.req.headers.get("cookie"))[auth.DEVICE_COOKIE];
+  return v && /^[0-9a-f]{64}$/.test(v) ? v : null;
+}
+async function setDeviceCookie(ctx: AppContext, userId: string, existing: string | null) {
+  const token = await auth.rememberDevice(ctx.db, userId, existing);
+  if (token !== existing) ctx.setCookies.push(cookie(auth.DEVICE_COOKIE, token, { maxAge: auth.DEVICE_MAX_AGE_S, secure: isSecure(ctx), httpOnly: true, sameSite: "Lax" }));
+}
+/** Whether this sign-in passed the bot challenge. Without a configured widget, development cannot show the challenge,
+ *  so it counts as passed there; elsewhere an unconfigured or failed challenge never passes. */
+async function signInChallengePassed(ctx: AppContext, token: FormDataEntryValue | null): Promise<boolean> {
+  if (!ctx.env.TURNSTILE_SITE_KEY && !ctx.env.TURNSTILE_SECRET && ctx.env.ENVIRONMENT === "development") return true;
+  if (typeof token !== "string" || !token) return false;
+  return verifyTurnstile(ctx, token);
+}
+
 function sessionCookie(ctx: AppContext, token: string, maxAge: number) {
   return cookie("cm_session", token, { maxAge, secure: isSecure(ctx), httpOnly: true, sameSite: "Lax" });
 }
 
-function loginPage(ctx: AppContext, errors: string[] = [], email = "") {
+function loginPage(ctx: AppContext, errors: string[] = [], email = "", status?: number) {
   const next = ctx.url.searchParams.get("next") ?? "";
   return htmlResponse(ctx, authLayout(ctx, { title: "Sign in" }, html`<h1 style="font-size:2rem">Sign in</h1>
 ${formErrors(errors)}
 <form method="post" action="/login${next ? `?next=${encodeURIComponent(next)}` : ""}">${csrf(ctx)}
 ${input({ name: "email", label: "Email", type: "email", value: email, autocomplete: "email", required: true })}
 ${input({ name: "password", label: "Password", type: "password", autocomplete: "current-password", required: true })}
+${turnstileWidget(ctx)}
 <div class="form-actions">${button("Sign in")}<a class="btn btn--ghost" href="/password/forgot">Forgot password?</a></div></form>
-<hr><p class="muted">New to Crestmont? <a href="/register">Create an account</a></p>`), errors.length ? 400 : 200);
+<hr><p class="muted">New to Crestmont? <a href="/register">Create an account</a></p>`), status ?? (errors.length ? 400 : 200));
 }
 
 function registerPage(ctx: AppContext, errors: string[] = [], v: Record<string, string> = {}, status?: number) {
@@ -59,13 +77,21 @@ export function register(r: Router) {
     const f = await ctx.form();
     const email = str(f, "email");
     try {
-      const res = await auth.login(ctx.db, email, String(f.get("password") ?? ""), { ip: ctx.ip, userAgent: ctx.req.headers.get("user-agent") });
+      const deviceToken = deviceCookieValue(ctx);
+      const res = await auth.login(ctx.db, email, String(f.get("password") ?? ""), { ip: ctx.ip, userAgent: ctx.req.headers.get("user-agent"), deviceToken, challengePassed: await signInChallengePassed(ctx, f.get("cf-turnstile-response")) });
       ctx.setCookies.push(sessionCookie(ctx, res.sessionToken, res.maxAge));
+      // A device is remembered only after a COMPLETE sign-in: here when no second factor is needed, else after /mfa.
+      if (!res.mfaRequired) await setDeviceCookie(ctx, res.userId, deviceToken);
       const next = safeNext(ctx.url.searchParams.get("next"), "");
       if (res.mfaRequired) return redirect(ctx, `/mfa${next ? `?next=${encodeURIComponent(next)}` : ""}`);
       const roles = (await ctx.db.prepare(`SELECT role_id FROM memberships WHERE user_id = ?`).bind(res.userId).all<{ role_id: string }>()).results;
       return redirect(ctx, next || (roles.some((x) => !x.role_id.startsWith("customer_")) ? "/staff" : "/portal"));
     } catch (e) {
+      if (e instanceof auth.LoginFailed && e.notifyEmail) {
+        // Once per 15-minute window per account: the holder learns that strangers are guessing (CREST-GAP-003, -085).
+        await sendMail(ctx, { template: "security_notification", to: e.notifyEmail, idempotencyKey: `signin-attempts:${e.notifyUserId}:${Math.floor(Date.now() / 900e3)}`, data: { event: "sign_in_attempts" } });
+      }
+      if (e instanceof auth.SignInChallengeRequired) return loginPage(ctx, [e.message], email, 403);
       if (e instanceof auth.AuthError) return loginPage(ctx, [e.message], email);
       throw e;
     }
@@ -143,6 +169,7 @@ export function register(r: Router) {
     const f = await ctx.form();
     try {
       const res = await auth.completeMfa(ctx.env, ctx.db, ctx.sessionId!, ctx.user!.id, str(f, "code"), ctx.ip);
+      await setDeviceCookie(ctx, ctx.user!.id, deviceCookieValue(ctx));
       const dest = safeNext(ctx.url.searchParams.get("next"), ctx.user!.isStaff ? "/staff" : "/portal");
       if (res.method === "recovery") return redirect(ctx, dest, await recoveryUsed(ctx, res.remaining));
       return redirect(ctx, dest);
@@ -169,6 +196,7 @@ export function register(r: Router) {
     const f = await ctx.form();
     try {
       const codes = await auth.confirmTotpEnrollment(ctx.env, ctx.db, ctx.user!.id, ctx.sessionId!, str(f, "code").replace(/\s/g, ""));
+      await setDeviceCookie(ctx, ctx.user!.id, deviceCookieValue(ctx));
       await sendMail(ctx, { template: "security_notification", to: ctx.user!.email, idempotencyKey: `mfa-on:${ctx.user!.id}:${Date.now()}`, data: { event: "mfa_enabled" } });
       // The recovery codes are shown exactly once, in this response; only their hashes are stored.
       return recoveryCodesPage(ctx, codes, safeNext(ctx.url.searchParams.get("next"), ctx.user!.isStaff ? "/staff" : "/account"), "Two-factor authentication is enabled");

@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createCustomer, createStaff, lastEmail, linkFrom, TEST_PASSWORD } from "./support/app.ts";
-import { LOCK_AFTER, LOCKED_MESSAGE } from "../src/services/auth.ts";
+import { CHALLENGE_AFTER, CHALLENGE_MESSAGE } from "../src/services/auth.ts";
 import { storeUpload } from "../src/services/files.ts";
 import { recordScanResult, filesAwaitingScan, ScanResultError } from "../src/services/malware-scan.ts";
 import { placeHold, releaseHold, activeHolds, LegalHoldError } from "../src/services/legal-holds.ts";
@@ -20,38 +20,37 @@ const NEW_PASSWORD = "an-entirely-different-passphrase-42";
 
 const loginMessage = async (res: Response) => {
   const body = await res.text();
-  return body.includes(LOCKED_MESSAGE) ? "locked" : /Email or password is incorrect/.test(body) ? "incorrect" : /Too many sign-in attempts/.test(body) ? "rate_limited" : `other:${res.status}`;
+  return body.includes(CHALLENGE_MESSAGE) ? "challenge" : /Email or password is incorrect/.test(body) ? "incorrect" : /Too many sign-in attempts/.test(body) ? "rate_limited" : `other:${res.status}`;
 };
 
-test("[AUTH-005] lockout does not confirm a correct password: a locked account answers 'locked' to right and wrong passwords alike", async () => {
-  const { db, client } = await createTestApp();
+test("[AUTH-005] the sign-in challenge does not confirm a correct password: right and wrong passwords get the same answer (CREST-GAP-003)", async () => {
+  const { db, client } = await createTestApp({ TURNSTILE_SITE_KEY: "site", TURNSTILE_SECRET: "secret" });
   const cust = await createCustomer(db, "lock-oracle@example.com");
   const c = client();
-  for (let i = 0; i < LOCK_AFTER; i++) await c.post("/login", { email: cust.email, password: `wrong-guess-${i}-xx` });
-  assert.ok((await db.prepare(`SELECT locked_until FROM users WHERE id = ?`).bind(cust.id).first<{ locked_until: string | null }>())?.locked_until, "locked after the threshold");
+  for (let i = 0; i < CHALLENGE_AFTER; i++) await c.post("/login", { email: cust.email, password: `wrong-guess-${i}-xx` });
   const wrong = await loginMessage(await c.post("/login", { email: cust.email, password: "yet-another-wrong-guess" }));
   const right = await c.post("/login", { email: cust.email, password: TEST_PASSWORD });
-  assert.equal(right.status, 400, "no session for the right password while locked");
+  assert.equal(right.status, 403, "no session for the right password without the challenge");
   assert.equal((await db.prepare(`SELECT COUNT(*) n FROM sessions WHERE user_id = ?`).bind(cust.id).first<{ n: number }>())?.n, 0, "no session created");
-  assert.equal(wrong, "locked");
-  assert.equal(await loginMessage(right), "locked", "the right password gets exactly the same answer as a wrong one");
-  const ev = await db.prepare(`SELECT COUNT(*) n FROM security_events WHERE kind = 'login_blocked_locked' AND user_id = ?`).bind(cust.id).first<{ n: number }>();
+  assert.equal(wrong, "challenge");
+  assert.equal(await loginMessage(right), "challenge", "the right password gets exactly the same answer as a wrong one");
+  const ev = await db.prepare(`SELECT COUNT(*) n FROM security_events WHERE kind = 'login_challenge_required' AND user_id = ?`).bind(cust.id).first<{ n: number }>();
   assert.equal(ev?.n, 2);
 });
 
-test("[AUTH-005] lockout does not reveal which emails have accounts: an unknown address locks the same way", async () => {
-  const { db, client } = await createTestApp();
+test("[AUTH-005] the sign-in challenge does not reveal which emails have accounts: an unknown address behaves the same way (CREST-GAP-003)", async () => {
+  const { db, client } = await createTestApp({ TURNSTILE_SITE_KEY: "site", TURNSTILE_SECRET: "secret" });
   const known = await createCustomer(db, "known@example.com");
   const answers = async (email: string) => {
     const c = client();
     const seen: string[] = [];
-    for (let i = 0; i < LOCK_AFTER + 1; i++) seen.push(await loginMessage(await c.post("/login", { email, password: `wrong-guess-${i}-xx` })));
+    for (let i = 0; i < CHALLENGE_AFTER + 1; i++) seen.push(await loginMessage(await c.post("/login", { email, password: `wrong-guess-${i}-xx` })));
     return seen;
   };
   const a = await answers(known.email), b = await answers("nobody-here@example.com");
   assert.deepEqual(a, b, "identical answer sequence for an existing and a non-existent account");
-  assert.equal(a.at(-1), "locked");
-  assert.ok(a.slice(0, LOCK_AFTER).every((x) => x === "incorrect"));
+  assert.equal(a.at(-1), "challenge");
+  assert.ok(a.slice(0, CHALLENGE_AFTER).every((x) => x === "incorrect"));
 });
 
 test("[AUTH-002] resetting or changing a password invalidates every other outstanding reset link", async () => {
