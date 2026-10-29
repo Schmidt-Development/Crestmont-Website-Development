@@ -26,6 +26,7 @@ import { hoursStatus, loadVoiceConfig, transferAvailability, toE164, type VoiceC
 import * as sched from "./voice-scheduling.ts";
 import { addDnc, applyOutboundResult, recordCallConsent, requestOutbound } from "./voice-outbound.ts";
 import { sendMail, type MailerCtx } from "./mailer.ts";
+import { safeHttpsUrl } from "../lib/html.ts";
 
 export class VoiceAuthError extends Error {}
 
@@ -39,9 +40,18 @@ export type VoiceFunction = (typeof VOICE_FUNCTIONS)[number];
 
 const READ_ONLY = new Set<VoiceFunction>(["get_published_pricing", "get_business_hours", "check_transfer_availability", "check_consultation_availability"]);
 
+/**
+ * voice_events key marking a call that the inbound webhook answered in voicemail-only mode because the Owner's
+ * monthly voice budget is unset or reached (src/services/voice-budget.ts). On such a call only these functions run.
+ */
+export const VOICEMAIL_MODE_EVENT = "inbound_mode:voicemail";
+const VOICEMAIL_FUNCTIONS = new Set<VoiceFunction>(["request_callback", "escalate", "record_opt_out", "get_business_hours"]);
+
 /** Optional collaborators for handleVoiceEvent. Every one has a safe default (no mail, real clock, no calendar). */
 export interface VoiceDeps {
   mail?: MailerCtx;
+  /** Absolute site origin for links in staff emails (escalations). Without it no escalation email is sent. */
+  baseUrl?: string;
   now?: () => Date;
   calendar?: sched.CalendarAdapter;
 }
@@ -249,6 +259,28 @@ async function mailConsultation(deps: VoiceDeps, row: sched.ConsultationRow, eve
   } catch { /* delivery problems are recorded by the mail adapter; never fail the caller's booking */ }
 }
 
+async function isVoicemailCall(db: Db, call: CallRow): Promise<boolean> {
+  return !!(await db.prepare(`SELECT 1 FROM voice_events WHERE call_id = ? AND event_key = ?`).bind(call.id, VOICEMAIL_MODE_EVENT).first());
+}
+
+/** Emails every active Owner about an escalation (voice_escalation template). Returns how many were sent. */
+async function emailOwnersEscalation(db: Db, deps: VoiceDeps, call: CallRow, e: { reason: string; caller: string; transfer: string }): Promise<number> {
+  if (!deps.mail || !deps.baseUrl) return 0;
+  const owners = (await db.prepare(`SELECT DISTINCT u.id, u.email FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id = 'owner' AND u.disabled_at IS NULL AND u.email IS NOT NULL`).all<{ id: string; email: string }>()).results;
+  const ref = newId("vesc");
+  let sent = 0;
+  for (const o of owners) {
+    try {
+      await sendMail(deps.mail, { template: "voice_escalation", to: o.email, idempotencyKey: `voice_escalation:${call.id}:${o.id}:${ref}`,
+        data: { reason: e.reason.slice(0, 500), caller: e.caller.slice(0, 200), test: !!call.is_test,
+          why: e.transfer === "closed" ? "outside_hours" : e.transfer === "not_configured" ? "no_transfer" : "unavailable",
+          url: `${deps.baseUrl}/staff/voice/calls/${call.id}` } });
+      sent++;
+    } catch { /* delivery problems are recorded by the mail adapter; the task and in-app alert already exist */ }
+  }
+  return sent;
+}
+
 /** Every string argument is redacted (card numbers, SSNs) before validation and storage. */
 function redactArgs(raw: unknown): unknown {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
@@ -319,11 +351,25 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
     case "escalate": {
       const a = parse(fnSchemas.escalate, rawArgs ?? {});
       await db.prepare(`UPDATE calls SET escalated_at = COALESCE(escalated_at, ?) WHERE id = ?`).bind(nowIso(), call.id).run();
-      const leadId = call.lead_id ?? (a.phone ? await createCallLead(db, call, { name: a.name ?? "Unknown caller", phone: a.phone, interest: "other", message: `Escalated call: ${a.reason}` }) : null);
-      if (leadId) await addTask(db, leadId, `ESCALATION from AI receptionist: ${a.reason}`, 4);
-      await notifyOwners(db, "voice_escalation", `${call.is_test ? "[TEST] " : ""}AI receptionist escalated a call: ${a.reason}`, "call", call.id);
-      await audit(db, { actorKind: "ai", action: "call.escalated", subjectType: "call", subjectId: call.id });
-      return { escalated: true, message: "I'm passing this to a member of the Crestmont team who will follow up during staffed hours." };
+      const tag = call.is_test ? "[TEST] " : "";
+      // Staffed hours + Founder-approved transfer number + normal (in-budget) mode → live transfer. The number itself
+      // is never returned to the model: Retell's transfer tool dials {{transfer_number}} from the inbound webhook.
+      // A transfer that does not connect (transfer_cancelled) becomes a callback task and an Owner alert (adapter).
+      const t = transferAvailability(await cfg(), now);
+      if (call.direction === "inbound" && t.available && !(await isVoicemailCall(db, call))) {
+        if (call.lead_id) await addLeadNote(db, call.lead_id, `Escalated and transferred live: ${a.reason}`);
+        await notifyOwners(db, "voice_escalation", `${tag}AI receptionist is transferring a caller to the team now: ${a.reason}`, "call", call.id);
+        await audit(db, { actorKind: "ai", action: "call.escalated", subjectType: "call", subjectId: call.id, details: { route: "transfer" } });
+        return { escalated: true, transfer: true, transfer_available: true,
+          message: "A team member is available. Tell the caller you are transferring them now, then use the transfer tool." };
+      }
+      // Otherwise: a CRM task (always, so nothing is lost) and an email to every Owner.
+      const leadId = call.lead_id ?? await createCallLead(db, call, { name: a.name ?? "Unknown caller", phone: a.phone ?? call.from_number, interest: "other", message: `Escalated call: ${a.reason}` });
+      await addTask(db, leadId, `ESCALATION from AI receptionist: ${a.reason}${a.phone ?? call.from_number ? ` — call back ${a.phone ?? call.from_number}` : ""}`, 4);
+      await notifyOwners(db, "voice_escalation", `${tag}AI receptionist escalated a call: ${a.reason}`, "call", call.id);
+      const emailed = await emailOwnersEscalation(db, deps, call, { reason: a.reason, caller: [a.name, a.phone ?? call.from_number].filter(Boolean).join(", ") || "Unknown caller", transfer: t.reason });
+      await audit(db, { actorKind: "ai", action: "call.escalated", subjectType: "call", subjectId: call.id, details: { route: "task_email", emailed, transfer: t.reason } });
+      return { escalated: true, transfer: false, transfer_available: false, message: "I'm passing this to a member of the Crestmont team who will follow up during staffed hours." };
     }
     case "get_business_hours": {
       parse(fnSchemas.get_business_hours, rawArgs ?? {});
@@ -461,7 +507,8 @@ export async function handleVoiceEvent(db: Db, rawBody: string, deps: VoiceDeps 
     await db.prepare(`UPDATE calls SET outcome = ?, ended_at = ?, cost_microusd = ?, recording_consent = ?, transcript = ?, recording_url = ?, summary = ?, error = ?, duration_ms = COALESCE(?, duration_ms), disconnection_reason = COALESCE(?, disconnection_reason) WHERE id = ?`)
       .bind(outcome, nowIso(), cost, consentNow ? 1 : 0,
         keep ? text("transcript", 100_000) : null,
-        keep && recording && /^https:\/\//.test(recording) ? recording : null,
+        // Provider-supplied link: stored only when it is a well-formed https URL (CREST-GAP-100; rendering re-checks).
+        keep && recording && safeHttpsUrl(recording) !== "#" ? recording : null,
         keep ? text("summary", 4000) : null,
         outcome === "error" ? (str("error", 1000) ?? "Provider reported an error") : null, duration, reason, call.id).run();
     await finishEvent(db, claim.eventId, "ok", { callId: call.id, outcome }, discarded);
@@ -483,6 +530,12 @@ export async function handleVoiceEvent(db: Db, rawBody: string, deps: VoiceDeps 
   const key = READ_ONLY.has(fn) ? `fn:${base.event_id}:${newId("ro")}` : `fn:${base.event_id}`;
   const claim = await claimEvent(db, call.id, key, `fn:${fn}`);
   if (claim.duplicate) return { status: 200, body: { ok: true, duplicate: true, result: claim.result } };
+  if (!VOICEMAIL_FUNCTIONS.has(fn) && await isVoicemailCall(db, call)) {
+    // Enforced here, not only in the prompt: a voicemail-mode call (budget unset or reached) can only leave a message.
+    const result = { refused: "voicemail_mode", message: "I can only take a message right now. Ask for the caller's name, number and message, then call request_callback." };
+    await finishEvent(db, claim.eventId, "ok", result, "refused: receptionist in voicemail mode (voice budget)");
+    return { status: 200, body: { ok: true, result } };
+  }
   try {
     const result = await runFunction(db, call, fn, (json.function as { arguments?: unknown }).arguments, deps);
     await finishEvent(db, claim.eventId, "ok", result);

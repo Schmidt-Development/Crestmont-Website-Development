@@ -41,10 +41,11 @@ Founder decision, made in the Retell dashboard; nothing in the backend depends o
 | `business_open_now`, `business_hours_configured`, `business_hours` | inbound webhook | `"true"`/`"false"`, text |
 | `transfer_available`, `transfer_number` | inbound webhook | `"true"`/`"false"`; number only when approved **and** open, else `""` |
 | `scheduling_available` | inbound webhook | `"true"`/`"false"` |
+| `receptionist_mode` | inbound webhook | `"full"`, or `"voicemail"` when the Owner's monthly voice budget is unset or reached (CREST-GAP-053). In voicemail mode the webhook also sends `agent_override` (3-minute maximum call, message-only greeting) and the backend refuses every function except `request_callback`, `escalate`, `record_opt_out` and `get_business_hours`. Prompt: "If {{receptionist_mode}} is voicemail, only take the caller's name, number and message with request_callback." |
 | `contact_name`, `call_purpose` | outbound creation | text; `callback` / `consultation_reminder` / `support_followup` |
 | `direction`, `user_number`, `call_id`, `current_time_America/Detroit` | Retell system variables | — |
 
-Set agent **Default Dynamic Variables** so an unset value never reads aloud as `{{...}}`: `transfer_available = "false"`, `transfer_number = ""`, `scheduling_available = "false"`, `business_open_now = "false"`, `call_purpose = ""`, `contact_name = ""`.
+Set agent **Default Dynamic Variables** so an unset value never reads aloud as `{{...}}`: `transfer_available = "false"`, `transfer_number = ""`, `scheduling_available = "false"`, `business_open_now = "false"`, `receptionist_mode = "voicemail"`, `call_purpose = ""`, `contact_name = ""`.
 
 ## 6. Functions
 
@@ -59,7 +60,7 @@ The 14 custom functions in `RETELL-INTEGRATION.md` §6 (exact JSON), all on `htt
 | Situation | Agent behaviour | Backend effect |
 |---|---|---|
 | Caller asks for a person | `check_transfer_availability` → transfer, else `request_callback` | Callback task + consented, approval-pending callback request |
-| Complaint, refund, contract, project status, outage, anything urgent | `escalate` (reason in caller's words) | Call flagged, 4-hour task, Owner notification |
+| Complaint, refund, contract, project status, outage, anything urgent | `escalate` (reason in caller's words) | Open + transfer number + in budget: returns `transfer: true` → use Transfer Call (`{{transfer_number}}`). Otherwise: call flagged, 4-hour CRM task, Owner in-app notification **and** `voice_escalation` email to every Owner |
 | Function returns an error message | Read the message, offer a callback | Error recorded on `/staff/voice` |
 | Booking details don't verify | Offer a callback; never hint which detail was wrong | Locked after 3 failures per call |
 | Caller starts reading card details | Interrupt politely: payments only through secure links Crestmont emails | Digits redacted before storage anyway |

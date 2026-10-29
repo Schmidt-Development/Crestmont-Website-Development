@@ -166,7 +166,21 @@ The scheduled job `voice_outbound` (every 15 minutes) dials up to 5 due requests
 
 The daily `cost_import` job (`src/services/cost-import.ts`) charges AI usage to projects by `ai_jobs.input_ref` (`project:`, `ticket:`, `lead:`/`quote:`; anything else company-wide). Voice call costs (`calls.cost_microusd`, and `voice_outbound_requests.cost_microusd`) are shown on `/staff/voice` and `/staff/voice/operations` and are not imported into project costs, because calls are not project work. No Retell price is hard-coded anywhere; only provider-reported costs are summed, and calls without a reported cost are counted as "unknown", never as $0.
 
-## 9. Sources (checked 2026-10-28)
+### 8a. Owner monthly voice budget (CREST-GAP-053)
+
+`/staff/voice` → *Monthly voice budget* (Owner only, `voice.monthly_budget_usd`, audit `voice.budget_updated`). Spend = sum of provider-reported `calls.cost_microusd` for calls started this UTC month, test calls included (Retell bills them). Fail closed like the paid-AI budget: when the budget is **unset or reached**, `/api/webhooks/retell/inbound` answers with `receptionist_mode = "voicemail"`, no transfer, no scheduling and `agent_override` (`agent.max_call_duration_ms = 180000`, `retell_llm.begin_message` = message-only greeting); the voice service refuses every function on that call except `request_callback`, `escalate`, `record_opt_out` and `get_business_hours`, and the outbound job dials nothing. Owners get one in-app notification per month when the budget is reached; `/staff/monitoring` shows *AI receptionist budget* (not configured / healthy / failing). The Retell workspace spending limit remains the hard stop.
+
+### 8b. Prompt synchronisation (CREST-GAP-053)
+
+Activating a configuration version (or *Push active version to Retell*) calls `GET /get-agent/{agent_id}` → `response_engine.llm_id`, `PATCH /update-retell-llm/{llm_id}` with `{ general_prompt: <guardrails + instructions> }`, then `GET /get-retell-llm/{llm_id}` and compares the returned `general_prompt` byte for byte. The agent id is *Inbound agent id* (else *Outbound agent id*) in `/staff/voice/operations`. Each run is stored in `voice_prompt_syncs` (`in_sync` / `drift` / `failed` / `not_configured`, SHA-256 prefixes only) and audited as `voice.prompt_sync`; drift and failures notify the Owners and turn the *Retell prompt sync* monitoring check to failing (stale when a newer version is active). Without `RETELL_API_KEY`, or without an agent id, nothing is sent and the result is `not_configured` — never success. Agent versions are not published from the platform.
+
+### 8c. Escalation
+
+`escalate` during staffed hours with an enabled transfer number (and not in voicemail mode) returns `{ escalated: true, transfer: true, transfer_available: true }` and the agent uses Transfer Call with `{{transfer_number}}`; the number is never returned in the function response. Otherwise the call is flagged, a 4-hour CRM task is created (a lead is created for the caller if needed), the Owners get an in-app notification and a `voice_escalation` email (`/staff/email` previews).
+
+## 9. Sources (checked 2026-10-28; prompt-sync endpoints 2026-10-29)
+
+- Get agent: https://docs.retellai.com/api-references/get-agent · Update Retell LLM: https://docs.retellai.com/api-references/update-retell-llm · Get Retell LLM: https://docs.retellai.com/api-references/get-retell-llm
 
 - Secure the webhook: https://docs.retellai.com/features/secure-webhook.md
 - Webhook overview (events, defaults, retries, ordering, dedupe keys): https://docs.retellai.com/features/webhook-overview.md

@@ -1,6 +1,6 @@
 -- Retell backend completion (VOICE-003..006): call detail, business hours / transfers / scheduling
--- configuration, consultation bookings, and the consent-gated outbound-call foundation.
--- Numbered 0042: 0040, 0041, 0043-0045 are reserved for other closeout streams (CREST-GAP-053).
+-- configuration, consultation bookings, the consent-gated outbound-call foundation, and Retell prompt-sync records.
+-- Numbered 0042: 0040, 0041, 0043-0046 are reserved for other closeout streams (CREST-GAP-053).
 -- Every new capability is OFF / unconfigured by default. Nothing here contacts Retell.
 
 -- ───────────── Call detail from Retell's call object ─────────────
@@ -100,3 +100,23 @@ CREATE TABLE voice_outbound_requests (
 );
 CREATE INDEX idx_voice_outbound_status ON voice_outbound_requests(status, next_attempt_at);
 CREATE INDEX idx_voice_outbound_phone ON voice_outbound_requests(phone_e164, created_at);
+
+-- ───────────── Prompt synchronisation with Retell (CREST-GAP-053) ─────────────
+-- One row per push or drift check of the active configuration version against the Retell LLM's general_prompt.
+-- status: in_sync (read-back equals the composed prompt), drift (it does not), failed (Retell call failed),
+-- not_configured (no RETELL_API_KEY / no agent id / no active version: nothing was sent). Hashes only, never prompts.
+CREATE TABLE voice_prompt_syncs (
+  id TEXT PRIMARY KEY,
+  config_version INTEGER,
+  mode TEXT NOT NULL CHECK (mode IN ('push','check')),
+  status TEXT NOT NULL CHECK (status IN ('in_sync','drift','failed','not_configured')),
+  detail TEXT NOT NULL,
+  agent_id TEXT,
+  llm_id TEXT,
+  llm_version INTEGER,
+  expected_sha256 TEXT,
+  remote_sha256 TEXT,
+  created_by TEXT REFERENCES users(id),
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_voice_prompt_syncs_created ON voice_prompt_syncs(created_at);

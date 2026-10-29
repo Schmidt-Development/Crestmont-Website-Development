@@ -26,7 +26,7 @@ export const REQUIRED_WORKFLOWS = [
   "support_reply", "refund_request", "refund_decision", "project_completion", "handoff", "security_notification",
   "critical_incident",
 ] as const;
-export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "consultation"] as const;
+export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "consultation", "voice_escalation"] as const;
 export type EmailTemplate = (typeof EMAIL_TEMPLATES)[number];
 export type MailCategory = "transactional" | "marketing";
 export type Audience = "customer" | "staff" | "prospect" | "any";
@@ -95,6 +95,8 @@ export interface TemplateData {
   lead_received: { name: string; kind: "quote" | "contact" };
   /** Consultation booked by phone with the AI receptionist (VOICE-003). `when` is pre-formatted in the business time zone. */
   consultation: { event: "requested" | "confirmed" | "rescheduled" | "cancelled"; name: string; when: string; code: string };
+  /** Staff alert: the AI receptionist escalated a call that could not be transferred live (CREST-GAP-053). */
+  voice_escalation: { reason: string; caller: string; why: "outside_hours" | "no_transfer" | "unavailable"; test: boolean; url: string };
 }
 
 export interface MailContent { subject: string; heading: string; paragraphs: string[]; cta?: { label: string; url: string } }
@@ -442,6 +444,24 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
       { event: "confirmed", name: "Morgan Hale", when: "Tuesday, November 3 at 10:00 AM EST", code: "K7MP4Q" },
       { event: "rescheduled", name: "Morgan Hale", when: "Thursday, November 5 at 2:30 PM EST", code: "R2WX9T" },
       { event: "cancelled", name: "Morgan Hale", when: "Tuesday, November 3 at 10:00 AM EST", code: "K7MP4Q" },
+    ],
+  },
+  voice_escalation: {
+    name: "voice_escalation", category: "transactional", audience: "staff",
+    description: "Owner alert: the AI receptionist escalated a call and no live transfer was possible, so a callback task was created.",
+    render: (d) => {
+      const why = d.why === "outside_hours" ? "It is outside staffed hours, so the call could not be transferred."
+        : d.why === "no_transfer" ? "No live-transfer number is configured, so the call could not be transferred."
+        : "A live transfer was not available for this call.";
+      return {
+        subject: `${d.test ? "[TEST] " : ""}AI receptionist escalation — call back needed`, heading: "A caller needs a person",
+        paragraphs: [`Reason given: ${d.reason}`, `Caller: ${d.caller}`, why, "A CRM task due within 4 hours was created on the caller's lead. Do not discuss account details until you have verified the caller's identity."],
+        cta: { label: "Open the call", url: d.url },
+      };
+    },
+    samples: [
+      { reason: "Wants to discuss changing their contract", caller: "Morgan Hale, +15550100123", why: "outside_hours", test: false, url: "https://example.com/staff/voice/calls/call_sample" },
+      { reason: "Asked for a person", caller: "Unknown caller", why: "no_transfer", test: true, url: "https://example.com/staff/voice/calls/call_sample" },
     ],
   },
 };

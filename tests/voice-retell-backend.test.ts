@@ -37,6 +37,8 @@ async function app(extra: Partial<Env> = {}, now?: Date) {
     return { res, json: (await res.json()) as Record<string, any> };
   };
   const owner = await createStaff(t.db, "owner");
+  // Owner voice budget (CREST-GAP-053): without one, calls are answered in voicemail-only mode. TEST DATA.
+  await t.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('voice.monthly_budget_usd', '50', ?)`).bind(new Date().toISOString()).run();
   return { ...t, post, owner };
 }
 

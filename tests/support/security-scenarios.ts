@@ -368,6 +368,9 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/voice/configs", fields: () => ({ instructions: "Greet the caller warmly, state you are an AI assistant, and help with questions about services and packages.\nAlways offer a callback.", note: "Callback" }) },
     { key: "POST /staff/voice/configs/:version/activate" },
     { key: "POST /staff/voice/test-event", fields: () => ({ scenario: "callback" }) },
+    // No agent id is recorded in the matrix world, so this records "not_configured" without any Retell request.
+    { key: "POST /staff/voice/prompt-sync", fields: () => ({ mode: "check" }) },
+    { key: "POST /staff/voice/budget", fields: () => ({ monthly_budget_usd: "40" }) },
     { key: "GET /staff/voice/calls/:id" },
     { key: "POST /staff/voice/operations/settings", fields: () => ({ timezone: "America/Detroit", "hours.mon": "09:00-17:00", "hours.tue": "09:00-17:00", "inbound.mode": "answer",
       "scheduling.duration_minutes": "30", "scheduling.min_notice_hours": "24", "scheduling.horizon_days": "21", "outbound.window_start": "09:00", "outbound.window_end": "20:00",

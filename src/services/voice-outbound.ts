@@ -15,6 +15,7 @@ import { audit } from "./security.ts";
 import { loadVoiceConfig, nextCallingWindow, withinCallingWindow, toE164, validTimeZone, OUTBOUND_PURPOSES, type OutboundPurpose, type VoiceConfig } from "./voice-settings.ts";
 import { createRetellPhoneCall } from "../adapters/retell.ts";
 import { addLeadTask, notifyOwners } from "./voice-common.ts";
+import { voiceBudget, budgetOpen, noteBudgetClosed } from "./voice-budget.ts";
 
 export const OUTBOUND_ENV_FLAG = "RETELL_OUTBOUND";
 
@@ -173,6 +174,12 @@ export async function processOutboundQueue(d: OutboundDeps): Promise<{ detail: s
   const cfg = await loadVoiceConfig(d.db);
   const gate = outboundGate(d.env, cfg);
   if (!gate.enabled) return { detail: `skipped: outbound disabled (${gate.reasons.join("; ")})`, dialled: 0 };
+  // Cost control (CREST-GAP-053): nothing is dialled without an Owner voice budget, or once it is reached.
+  const budget = await voiceBudget(d.db, now());
+  if (!budgetOpen(budget)) {
+    await noteBudgetClosed(d.db, budget);
+    return { detail: `skipped: voice budget ${budget.state === "not_set" ? "not set" : "reached"}`, dialled: 0 };
+  }
   // Recovery: a request whose call result never arrived (lost webhook, Worker stopped after the claim) is handed
   // to a person rather than staying in 'dialing' for ever. It is never re-dialled automatically.
   const stale = (await d.db.prepare(`SELECT * FROM voice_outbound_requests WHERE status = 'dialing' AND updated_at < ?`)

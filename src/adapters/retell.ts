@@ -17,10 +17,11 @@
 import type { Db } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import { hmacSha256Hex, sha256Hex, timingSafeEqualHex } from "../lib/crypto.ts";
-import { VOICE_FUNCTIONS, ensureCall, recordCallEvent, type CallOutcome } from "../services/voice.ts";
+import { VOICE_FUNCTIONS, VOICEMAIL_MODE_EVENT, ensureCall, recordCallEvent, type CallOutcome } from "../services/voice.ts";
 import { loadVoiceConfig, hoursStatus, transferAvailability, describeHours } from "../services/voice-settings.ts";
 import { addLeadTask, notifyOwners, redactSensitive } from "../services/voice-common.ts";
 import { audit } from "../services/security.ts";
+import { voiceBudget, budgetOpen, noteBudgetClosed } from "../services/voice-budget.ts";
 
 /** Environment the request is being processed in (env.ENVIRONMENT). */
 export interface RetellCtx { environment: "development" | "staging" | "production"; now?: () => Date }
@@ -209,24 +210,38 @@ export async function translateRetellInbound(db: Db, raw: string, ctx: RetellCtx
   };
   if (cfg.inbound.mode === "reject") return reject("receptionist paused");
   if (cfg.inbound.numbers.length && !cfg.inbound.numbers.includes(to)) return reject("number not bound to this environment");
-  await ensureCall(db, RETELL_PROVIDER, callId, { from: from && /^[+0-9 ().-]{7,40}$/.test(from) ? from : null, to: to || null, direction: "inbound", environment: ctx.environment, isTest: false, agentVersion: null });
+  const { call: row } = await ensureCall(db, RETELL_PROVIDER, callId, { from: from && /^[+0-9 ().-]{7,40}$/.test(from) ? from : null, to: to || null, direction: "inbound", environment: ctx.environment, isTest: false, agentVersion: null });
   const h = hoursStatus(cfg, now);
-  const t = transferAvailability(cfg, now);
+  // Cost control (CREST-GAP-053): without an Owner budget, or once this month's spend reaches it, the call is
+  // answered in "voicemail" mode only. The voice service also refuses every other function on such a call.
+  const budget = await voiceBudget(db, now);
+  const closed = !budgetOpen(budget);
+  if (closed) {
+    await recordCallEvent(db, row.id, VOICEMAIL_MODE_EVENT, "inbound_mode", { mode: "voicemail", budget: budget.state });
+    await noteBudgetClosed(db, budget);
+  }
+  const t = closed ? { available: false } : transferAvailability(cfg, now);
   const body: Record<string, unknown> = {
     dynamic_variables: {
       crestmont_env: ctx.environment,
+      receptionist_mode: closed ? "voicemail" : "full",
       business_open_now: String(h.open),
       business_hours_configured: String(h.configured),
       business_hours: describeHours(cfg),
       transfer_available: String(t.available),
       transfer_number: t.available ? cfg.transfer.number! : "",
-      scheduling_available: String(cfg.scheduling.enabled && !!cfg.timezone),
+      scheduling_available: String(!closed && cfg.scheduling.enabled && !!cfg.timezone),
     },
     metadata: { crestmont_env: ctx.environment },
   };
   if (cfg.inbound.agent_id) body.override_agent_id = cfg.inbound.agent_id;
+  // Documented per-call overrides (agent_override.agent.max_call_duration_ms, agent_override.retell_llm.begin_message).
+  if (closed) body.agent_override = { agent: { max_call_duration_ms: VOICEMAIL_MAX_CALL_MS }, retell_llm: { begin_message: VOICEMAIL_GREETING } };
   return { kind: "ack", body: { call_inbound: body } };
 }
+
+export const VOICEMAIL_MAX_CALL_MS = 180_000;
+export const VOICEMAIL_GREETING = "Thank you for calling Crestmont Website Development. I'm an AI assistant and I can only take a message right now. Please tell me your name, your phone number and a short message, and a team member will call you back during staffed hours.";
 
 /** Retell-only consent capture: the agent calls `record_consent` after asking the caller (VOICE-006). */
 export const RETELL_ONLY_FUNCTIONS = ["record_consent"] as const;
@@ -322,4 +337,61 @@ export async function createRetellPhoneCall(opts: {
     if (attempt <= maxRetries) await sleep(500 * 2 ** (attempt - 1));
   }
   return last;
+}
+
+// ───────────── Prompt synchronisation API (CREST-GAP-053) ─────────────
+// Sources (checked 2026-10-29):
+//  - https://docs.retellai.com/api-references/get-agent         GET   /get-agent/{agent_id}
+//      → { agent_id, version, is_published, response_engine: { type: "retell-llm", llm_id, version } | … }
+//  - https://docs.retellai.com/api-references/update-retell-llm PATCH /update-retell-llm/{llm_id}  body { general_prompt }
+//      → RetellLLMResponse { llm_id, version, is_published, general_prompt, last_modification_timestamp }
+//  - https://docs.retellai.com/api-references/get-retell-llm    GET   /get-retell-llm/{llm_id}  (same response shape)
+//  Auth `Authorization: Bearer <API key>`; errors `{ status: "error", message }` with 400/401/404/412/422/500.
+// Only `general_prompt` is written. The agent is never published from here (publish-agent-version is a
+// dashboard decision), so a push changes nothing beyond the LLM's draft prompt. Tests use a fake fetch;
+// nothing in the test suite reaches api.retellai.com.
+
+export type RetellApiResult<T> = { ok: true; status: number; body: T } | { ok: false; status: number | null; error: string };
+
+export interface RetellAgentInfo { agent_id?: string; version?: number; is_published?: boolean; response_engine?: { type?: string; llm_id?: string; version?: number } }
+export interface RetellLlmInfo { llm_id?: string; version?: number; is_published?: boolean; general_prompt?: string | null }
+
+const RETELL_ID = /^[A-Za-z0-9_-]{4,80}$/;
+
+async function retellRequest<T>(opts: { apiKey: string; fetch: typeof fetch; method: "GET" | "PATCH"; path: string; body?: unknown; timeoutMs?: number }): Promise<RetellApiResult<T>> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), opts.timeoutMs ?? 10_000);
+  try {
+    const res = await opts.fetch(`${RETELL_API_BASE}${opts.path}`, {
+      method: opts.method, signal: ac.signal,
+      headers: { authorization: `Bearer ${opts.apiKey}`, ...(opts.body === undefined ? {} : { "content-type": "application/json" }) },
+      ...(opts.body === undefined ? {} : { body: JSON.stringify(opts.body) }),
+    });
+    const text = await res.text();
+    if (res.status < 200 || res.status > 299) {
+      let msg = "";
+      try { const m = (JSON.parse(text) as { message?: unknown }).message; if (typeof m === "string") msg = m; } catch { /* not JSON */ }
+      return { ok: false, status: res.status, error: `Retell ${res.status}${msg ? `: ${msg.replace(/[^\x20-\x7E]/g, " ").slice(0, 160)}` : ""}` };
+    }
+    try { return { ok: true, status: res.status, body: JSON.parse(text) as T }; } catch { return { ok: false, status: res.status, error: "Retell returned a response that is not JSON" }; }
+  } catch (e) {
+    return { ok: false, status: null, error: (e as Error).name === "AbortError" ? "Retell request timed out" : `Retell request failed: ${(e as Error).message}`.slice(0, 200) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function getRetellAgent(o: { apiKey: string; fetch: typeof fetch; agentId: string }): Promise<RetellApiResult<RetellAgentInfo>> {
+  if (!RETELL_ID.test(o.agentId)) return Promise.resolve({ ok: false, status: null, error: "invalid agent id" });
+  return retellRequest<RetellAgentInfo>({ apiKey: o.apiKey, fetch: o.fetch, method: "GET", path: `/get-agent/${o.agentId}` });
+}
+
+export function getRetellLlm(o: { apiKey: string; fetch: typeof fetch; llmId: string }): Promise<RetellApiResult<RetellLlmInfo>> {
+  if (!RETELL_ID.test(o.llmId)) return Promise.resolve({ ok: false, status: null, error: "invalid llm id" });
+  return retellRequest<RetellLlmInfo>({ apiKey: o.apiKey, fetch: o.fetch, method: "GET", path: `/get-retell-llm/${o.llmId}` });
+}
+
+export function updateRetellLlmPrompt(o: { apiKey: string; fetch: typeof fetch; llmId: string; generalPrompt: string }): Promise<RetellApiResult<RetellLlmInfo>> {
+  if (!RETELL_ID.test(o.llmId)) return Promise.resolve({ ok: false, status: null, error: "invalid llm id" });
+  return retellRequest<RetellLlmInfo>({ apiKey: o.apiKey, fetch: o.fetch, method: "PATCH", path: `/update-retell-llm/${o.llmId}`, body: { general_prompt: o.generalPrompt } });
 }

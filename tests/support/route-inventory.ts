@@ -479,6 +479,8 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/voice/configs": staff(rolesWith("voice.manage"), undefined, act("voice.config_version_created")),
   "POST /staff/voice/configs/:version/activate": staff(rolesWith("voice.manage"), { version: "voiceVersion" }, act("voice.config_activated")),
   "GET /staff/voice/configs/diff": { ...staff(rolesWith("voice.manage")), query: "a={voiceVersion}&b={voiceVersion}" },
+  "POST /staff/voice/prompt-sync": staff(rolesWith("voice.manage"), undefined, act("voice.prompt_sync")),
+  "POST /staff/voice/budget": staff(rolesWith("voice.manage"), undefined, act("voice.budget_updated")),
   "GET /staff/voice/calls/:id": staff(rolesWith("voice.manage"), P("call"), act("call.viewed")),
   "POST /staff/voice/test-event": staff(rolesWith("voice.manage"), undefined, act("voice.test_event_sent")),
   "GET /staff/voice/operations": staff(rolesWith("voice.manage")),
