@@ -112,8 +112,9 @@ test("[SEC-003] public staging: forms are rate-limited even with always-pass Tur
   app.env.overrides = { ...app.env.overrides, fetch: (async () => new Response(JSON.stringify({ success: true }))) as never };
   // JSON lead API: same per-IP budget as the browser forms (10/hour).
   const statuses: number[] = [];
-  for (let i = 0; i < 11; i++) statuses.push((await req(app.env, "/api/leads", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": "198.51.100.7" }, body: JSON.stringify({ name: "Spam " + i, email: `s${i}@example.com`, message: "hello there, this is a message", turnstileToken: "x" }) })).status);
-  assert.ok(statuses.slice(0, 10).every((s) => s !== 429), statuses.join());
+  for (let i = 0; i < 11; i++) statuses.push((await req(app.env, "/api/leads", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": "198.51.100.7" }, body: JSON.stringify({ name: "Spam " + i, email: `s${i}@example.com`, interest: "other", source: "web_form", message: "hello there, this is a message", turnstileToken: "x" }) })).status);
+  // Valid, bot-verified submissions (CREST-GAP-082: invalid ones are rejected without consuming the budget).
+  assert.ok(statuses.slice(0, 10).every((s) => s === 201), statuses.join());
   assert.equal(statuses[10], 429, "11th lead from one IP within the hour is refused");
 
   // A stranger self-registers (staging sends email only to its allowlist, so they can never verify).
