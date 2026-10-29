@@ -22,11 +22,13 @@ const LAST_SEEN_WRITE_INTERVAL_MS = 5 * 60e3;
 //  - after CHALLENGE_AFTER failures for an address in a 15-minute window, unknown devices must pass the Turnstile
 //    challenge to try that address. The decision is made before the password is looked at, and is identical for
 //    existing and unknown addresses, so it reveals neither a correct password nor whether an account exists;
-//  - each IP is limited per address and overall; only FAILED attempts count toward the per-address limits.
+//  - each IP is limited per address and overall, counting FAILED attempts only (the audit's fix: "count failures
+//    only"); successful sign-ins never count, so many people behind one address — an office, a carrier NAT, or the
+//    deploy runner signing in every demo account (deploy #61) — are not refused for signing in correctly.
 export const CHALLENGE_AFTER = 5;
 const FAIL_WINDOW_S = 15 * 60;
 const PER_IP_ADDRESS_FAILS = 10;
-const PER_IP_ATTEMPTS = 30;
+const PER_IP_FAILS = 30;
 const PER_DEVICE_FAILS = 10;
 export const DEVICE_COOKIE = "cm_device";
 export const DEVICE_MAX_AGE_S = 180 * 86400;
@@ -173,9 +175,9 @@ export async function login(db: Db, emailRaw: string, password: string, meta: { 
       throw new AuthError("Too many sign-in attempts from this browser. Wait a few minutes and try again.", 429);
     }
   } else {
-    const perIp = await rateLimit(db, `login-ip:${ip}`, PER_IP_ATTEMPTS, FAIL_WINDOW_S);
+    const perIp = await peekRateLimit(db, `login-fail-ip:${ip}`, FAIL_WINDOW_S);
     const perIpAddress = await peekRateLimit(db, `login-fail-ip:${ip}:${email}`, FAIL_WINDOW_S);
-    if (!perIp.allowed || perIpAddress >= PER_IP_ADDRESS_FAILS) {
+    if (perIp >= PER_IP_FAILS || perIpAddress >= PER_IP_ADDRESS_FAILS) {
       await securityEvent(db, "rate_limited", { email, ip: meta.ip, detail: "login" });
       throw new AuthError("Too many sign-in attempts. Wait a few minutes and try again.", 429);
     }
@@ -190,6 +192,7 @@ export async function login(db: Db, emailRaw: string, password: string, meta: { 
     else {
       const fails = await rateLimit(db, `login-fail:${email}`, CHALLENGE_AFTER, FAIL_WINDOW_S);
       await rateLimit(db, `login-fail-ip:${ip}:${email}`, PER_IP_ADDRESS_FAILS, FAIL_WINDOW_S);
+      await rateLimit(db, `login-fail-ip:${ip}`, PER_IP_FAILS, FAIL_WINDOW_S);
       // Recorded once per window, when the address starts requiring the challenge; the account holder is told.
       if (fails.remaining === 0 && fails.allowed) {
         await securityEvent(db, "login_challenge_started", { userId: u?.id, email, ip: meta.ip });

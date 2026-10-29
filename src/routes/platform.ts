@@ -41,6 +41,14 @@ const q = (ctx: AppContext, k: string, max = 120) => (ctx.url.searchParams.get(k
 /** Stored mail keeps single-use secrets (password reset, email verification, invitation, proposal and share links)
  *  so a failed delivery can be retried. Staff views never show them: whoever reads one can act as the recipient. */
 const redactSecrets = (s: string) => s.replace(/(token=|\/q\/|\/share\/)[A-Za-z0-9_-]{16,}/g, "$1[redacted]");
+/** The staging journeys' synthetic customers (tests/e2e/staging-journeys.e2e.ts). `.example` is reserved (RFC 2606), so
+ *  these addresses can never belong to or reach a real person. */
+export const JOURNEY_EMAIL_DOMAIN = "@staging-journeys.example";
+export const isJourneyAddress = (email: string) => email.trim().toLowerCase().endsWith(JOURNEY_EMAIL_DOMAIN);
+/** Links in stored emails carry live tokens (proposal, verification, reset, share), so staff never see them (EMP-002) —
+ *  with one exception: on STAGING, mail to the journeys' own synthetic domain, whose "recipient" is the test itself and
+ *  must follow the links it was sent (deploy #61, journey 4). Development, tests and production always redact. */
+const bodyForStaff = (ctx: AppContext, to: string, s: string) => (ctx.env.ENVIRONMENT === "staging" && isJourneyAddress(to) ? s : redactSecrets(s));
 const isDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(s));
 const microUsd = (v: number | null | undefined) => (v === null || v === undefined ? "Unknown" : `$${(v / 1e6).toFixed(4)}`);
 const yesNo = (b: boolean) => (b ? badge("active", "Present") : badge("not_configured", "Not set"));
@@ -593,15 +601,15 @@ ${def.samples.map((_, i) => {
     const body = html`${pageHead(d.subject ?? label(d.template), linkButton("Back to log", "/staff/email", "ghost", "sm"), "Email delivery")}
 ${dl([["Template", label(d.template)], ["To", d.to_email], ["Provider", d.provider ?? "—"], ["Status", d.provider === "dev-outbox" ? badge("queued", "Dev outbox (not sent)") : badge(d.status)], ["Attempts", d.attempts], ["Provider message id", d.provider_message_id], ["Last error", d.last_error], ["Created", formatDateTime(d.created_at)], ["Updated", formatDateTime(d.updated_at)]])}
 ${d.provider === "resend" && ["failed", "queued"].includes(d.status) ? (canRetry ? html`<p>${actionForm(ctx, `/staff/email/${d.id}/retry`, "Retry delivery", { variant: "primary" })}</p>` : alert("warn", "Retry is unavailable: Resend is not configured in this environment.")) : ""}
-<section class="section--tight"><h2>Text body</h2>${d.text_body ? html`<pre class="code-block">${redactSecrets(d.text_body)}</pre><p><a class="btn btn--ghost btn--sm" href="/staff/email/${d.id}/html">Download HTML version</a></p>` : emptyState("No stored content", "The rendered body was not stored for this delivery.")}</section>`;
+<section class="section--tight"><h2>Text body</h2>${d.text_body ? html`<pre class="code-block">${bodyForStaff(ctx, d.to_email, d.text_body)}</pre><p><a class="btn btn--ghost btn--sm" href="/staff/email/${d.id}/html">Download HTML version</a></p>` : emptyState("No stored content", "The rendered body was not stored for this delivery.")}</section>`;
     return staffPage(ctx, "Email delivery", body);
   });
   r.get("/staff/email/:id/html", async (ctx, p) => {
     requireStaff(ctx, "settings.operational");
-    const m = await ctx.db.prepare(`SELECT html_body FROM email_messages WHERE delivery_id = ?`).bind(p.id).first<{ html_body: string }>();
+    const m = await ctx.db.prepare(`SELECT m.html_body, d.to_email FROM email_messages m JOIN email_deliveries d ON d.id = m.delivery_id WHERE m.delivery_id = ?`).bind(p.id).first<{ html_body: string; to_email: string }>();
     if (!m) throw new HttpError(404, "No stored HTML for this delivery");
     await audit(ctx.db, { actorUserId: ctx.user!.id, action: "email.body_downloaded", subjectType: "email_delivery", subjectId: p.id });
-    return download(ctx, redactSecrets(m.html_body), `email-${p.id}.html`, "text/html; charset=utf-8");
+    return download(ctx, bodyForStaff(ctx, m.to_email, m.html_body), `email-${p.id}.html`, "text/html; charset=utf-8");
   });
   r.post("/staff/email/:id/retry", async (ctx, p) => {
     requireStaff(ctx, "settings.operational");

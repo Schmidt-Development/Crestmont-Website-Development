@@ -190,7 +190,7 @@ function journey(n: number, tags: string[], title: string, opts: { needs?: numbe
       await fn!({ skip: (reason: string) => { skipped = reason; t.skip(reason); } });
       outcome.set(n, skipped || "passed");
     } catch (e) {
-      outcome.set(n, `failed: ${(e as Error).message.split("\n")[0].slice(0, 160)}`);
+      outcome.set(n, `failed: ${(e as Error).message.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 8).join(" ").replace(/\s+/g, " ").slice(0, 400)}`);
       for (const [who, a] of Object.entries(people)) console.error(`[${who}] ${a.page.url()} ${await alerts(a.page)}`);
       throw e;
     }
@@ -820,17 +820,23 @@ function evidenceFile(env: string, fallback: string): string | null {
   const f = process.env[env] ?? fallback;
   return existsSync(f) ? f : null;
 }
+/** Signed ingestion of `file`: done here when the secret is present (development), otherwise read from the receipt the
+ *  deploy workflow's first-party step wrote (the browser step never holds the secret). null = neither is available. */
+async function ingested(file: string, receipt: string): Promise<{ status: number; json: { status?: string; accepted?: number; runId?: string } } | null> {
+  if (process.env.EVIDENCE_INGEST_SECRET) return postEvidence(readFileSync(file, "utf8"));
+  return existsSync(receipt) ? (JSON.parse(readFileSync(receipt, "utf8")) as { status: number; json: { status?: string; accepted?: number; runId?: string } }) : null;
+}
 
 journey(29, ["READY-004"], "launch readiness ingests this run's CI evidence (signed) and shows it to the Owner", {}, async (t) => {
   const file = evidenceFile("E2E_CI_EVIDENCE_FILE", "evidence/ci-evidence.json");
-  if (!process.env.EVIDENCE_INGEST_SECRET || !file) {
-    t.skip("needs EVIDENCE_INGEST_SECRET and the CI evidence document of this run (provided by the deploy workflow: `npm test` writes evidence/ci-evidence.json)");
+  const r = file ? await ingested(file, process.env.E2E_CI_RECEIPT ?? "evidence/receipts/ci.json") : null;
+  if (!file || !r) {
+    t.skip("needs this run's CI evidence document and its signed ingestion (the deploy workflow's 'Post this run's evidence' step writes evidence/receipts/ci.json)");
     return;
   }
   const body = readFileSync(file, "utf8");
   const doc = JSON.parse(body) as { runId: string; results: unknown[] };
   assert.equal((await postEvidence(body, "not-the-ingest-secret")).status, 401, "a wrongly signed document is refused");
-  const r = await postEvidence(body);
   assert.equal(r.status, 200, JSON.stringify(r.json));
   assert.match(String(r.json.status), /^(ingested|duplicate)$/);
   const o = await as("owner");
@@ -850,14 +856,14 @@ journey(29, ["READY-004"], "launch readiness ingests this run's CI evidence (sig
 
 journey(30, ["READY-006"], "staging verification of this deployment updates readiness (staging environment view and LAUNCH-003)", {}, async (t) => {
   const file = evidenceFile("E2E_STAGING_CHECK_FILE", "evidence/staging-check.json");
-  if (!process.env.EVIDENCE_INGEST_SECRET || !file) {
-    t.skip("needs EVIDENCE_INGEST_SECRET and this deployment's verification document (provided by the deploy workflow's smoke step: evidence/staging-check.json)");
+  const r = file ? await ingested(file, process.env.E2E_STAGING_CHECK_RECEIPT ?? "evidence/receipts/staging-check.json") : null;
+  if (!file || !r) {
+    t.skip("needs this deployment's verification document and its signed ingestion (the deploy workflow's 'Post this run's evidence' step writes evidence/receipts/staging-check.json)");
     return;
   }
   const body = readFileSync(file, "utf8");
   const doc = JSON.parse(body) as { runId: string; environment: string; results: { requirementId: string }[] };
   assert.equal(doc.environment, "staging");
-  const r = await postEvidence(body);
   assert.equal(r.status, 200, JSON.stringify(r.json));
   const o = await as("owner");
   await o.goto(BASE + "/staff/readiness/env/staging");
