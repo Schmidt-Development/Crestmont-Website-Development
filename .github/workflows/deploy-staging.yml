@@ -157,7 +157,7 @@ jobs:
           node --no-warnings scripts/seal.ts seal forensics/snapshot.json forensics/staging-forensics.sealed
           rm -f forensics/snapshot.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: steps.gate.outputs.pending == 'true'
         with:
           name: staging-forensics-sealed
@@ -414,7 +414,7 @@ jobs:
 
       - name: Upload frontend recordings and screenshots (public pages only; no credentials)
         if: always() && steps.frontend_browser.outcome != 'skipped'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: staging-frontend-browser
           path: evidence/frontend-browser
@@ -485,7 +485,7 @@ jobs:
             echo "::warning title=Access notes not issued::No usable ACCESS_ARTIFACT_PASSPHRASE secret (32+ characters), so no credentials were uploaded. See docs/STAGING-PREVIEW.md."
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && steps.protect.outputs.upload == 'sealed'
         with:
           name: staging-access-sealed

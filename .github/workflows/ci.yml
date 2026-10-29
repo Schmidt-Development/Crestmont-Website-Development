@@ -26,7 +26,7 @@ jobs:
         run: npx tsc -p runner/tsconfig.json && node --no-warnings --test 'runner/test/*.test.ts'
       - name: Dependency audit
         run: npm audit --audit-level=high || true   # becomes blocking once runtime dependencies exist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ci-evidence
@@ -69,7 +69,7 @@ jobs:
             (cd runner/agent-sdk && npm install --package-lock-only --ignore-scripts --no-audit --no-fund) || echo "::warning::could not resolve runner/agent-sdk dependencies"
           fi
       - name: Upload lockfiles for review
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: runner-lockfiles
           if-no-files-found: ignore
