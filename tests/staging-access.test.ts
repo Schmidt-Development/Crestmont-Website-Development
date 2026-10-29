@@ -210,5 +210,5 @@ test("[INFRA-002] [SEC-004] staging access: adopts secrets the Worker already en
   assert.ok(s.db.raw.prepare(`SELECT 1 FROM audit_logs WHERE action = 'user.mfa_provisioned' AND subject_id = ?`).get(id), "provisioning recorded");
   s.db.raw.prepare("UPDATE users SET totp_last_step = NULL").run();
   await new Promise((r) => setTimeout(r, 5));
-  await verifyStagingAccess({ base: BASE, previewPassword: r4.previewPassword, owner: ownerOf(r4) }, s.fetchFor({ ...s.env(), MFA_ENCRYPTION_KEY: mfaKey }));
+  await verifyStagingAccess({ base: BASE, owner: ownerOf(r4) }, s.fetchFor({ ...s.env(), MFA_ENCRYPTION_KEY: mfaKey }));
 });
