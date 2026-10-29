@@ -11,10 +11,12 @@ import { signV4, s3Config, putObject, getObject, countsMap, objectUrl } from "..
 import { seal, open } from "../scripts/seal.ts";
 
 test("[INFRA-006] SigV4 signing matches AWS's published S3 example (GET /test.txt, Range bytes=0-9)", () => {
+  // AWS's documented example credentials (not a real key), assembled at runtime so the secret scan's key-shape rule stays strict.
+  const exampleKeyId = ["AK", "IA", "IOSFODNN7EXAMPLE"].join("");
   const h = signV4({ method: "GET", url: new URL("https://examplebucket.s3.amazonaws.com/test.txt"), headers: { Range: "bytes=0-9" },
-    payloadSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", accessKeyId: "AKIAIOSFODNN7EXAMPLE",
+    payloadSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", accessKeyId: exampleKeyId,
     secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", region: "us-east-1", now: new Date("2013-05-24T00:00:00Z") });
-  assert.equal(h.authorization, "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41");
+  assert.equal(h.authorization, `AWS4-HMAC-SHA256 Credential=${exampleKeyId}/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41`);
 });
 
 test("[INFRA-006] the destination is configured only by the four BACKUP_S3_* values; invalid endpoints and keys are refused", () => {

@@ -84,3 +84,5 @@ observability = { enabled = true }
 #   RESEND_API_KEY, ANTHROPIC_API_KEY, GITHUB_TOKEN, GITHUB_REPO, VOICE_WEBHOOK_SECRET,
 #   RESEND_WEBHOOK_SECRET (Svix whsec_…), RETELL_API_KEY (Crestmont Retell workspace key with webhook badge),
 #   MFA_ENCRYPTION_KEY (base64 of 32 random bytes; required on staging/production for two-factor enrolment)
+#   FOUNDER_EMAIL (production: the Founder's sign-in address; only that account's launch approval authorizes a release,
+#   CREST-GAP-020. Not secret, but a personal address, so it is set with `wrangler secret put` instead of committed here)
