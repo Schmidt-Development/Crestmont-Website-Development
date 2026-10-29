@@ -142,15 +142,24 @@ test("[AUTH-002] [AUTH-004] production: password reset is single-use, signs out 
   assert.equal((await b.post("/login", { email: cust.email, password: NEW })).headers.get("location"), "/portal");
 });
 
-test("[AUTH-005] production: sign-in is rate limited and accounts lock after repeated failures, with security events recorded", async () => {
+test("[AUTH-005] production: repeated failures never lock an account; a remembered browser keeps signing in; strangers are challenged (CREST-GAP-003)", async () => {
   const { db, client } = await productionApp();
   const cust = await createCustomer(db, "lock@example.com");
-  const c = client();
-  for (let i = 0; i < 9; i++) assert.equal((await c.post("/login", { email: cust.email, password: "wrong-password-attempt" })).status, 400);
-  assert.ok((await db.prepare(`SELECT locked_until FROM users WHERE id = ?`).bind(cust.id).first<{ locked_until: string | null }>())?.locked_until, "account locked");
-  const locked = await c.post("/login", { email: cust.email, password: TEST_PASSWORD });
-  assert.notEqual(locked.status, 303, "correct password refused while locked");
-  assert.equal(locked.headers.getSetCookie().some((x) => x.startsWith("cm_session=") && !/max-age=0/i.test(x)), false, "no session issued while locked");
-  const ev = await db.prepare(`SELECT COUNT(*) n FROM security_events WHERE kind IN ('login_failed','login_locked','rate_limited')`).first<{ n: number }>();
-  assert.ok((ev?.n ?? 0) >= 9);
+  // The account holder signs in once from their own browser: it becomes a known device.
+  const owner = client();
+  assert.equal((await owner.post("/login", { email: cust.email, password: TEST_PASSWORD })).status, 303);
+  assert.ok(owner.cookies.get("cm_device"), "a remembered-device cookie is set after a completed sign-in");
+  await owner.post("/logout");
+  // An anonymous attacker hammers the address from another browser.
+  const attacker = client();
+  for (let i = 0; i < 5; i++) assert.equal((await attacker.post("/login", { email: cust.email, password: "wrong-password-attempt" })).status, 400);
+  for (let i = 0; i < 20; i++) assert.notEqual((await attacker.post("/login", { email: cust.email, password: "wrong-password-attempt" })).status, 303);
+  const strangerRight = await attacker.post("/login", { email: cust.email, password: TEST_PASSWORD });
+  assert.notEqual(strangerRight.status, 303, "an unknown browser without the challenge gets no session");
+  assert.equal(strangerRight.headers.getSetCookie().some((x) => x.startsWith("cm_session=") && !/max-age=0/i.test(x)), false);
+  // The real holder's remembered browser is unaffected.
+  assert.equal((await owner.post("/login", { email: cust.email, password: TEST_PASSWORD })).status, 303, "known device signs in despite the attack");
+  assert.equal((await db.prepare(`SELECT locked_until FROM users WHERE id = ?`).bind(cust.id).first<{ locked_until: string | null }>())?.locked_until, null);
+  const ev = await db.prepare(`SELECT COUNT(*) n FROM security_events WHERE kind IN ('login_failed','login_challenge_required','rate_limited')`).first<{ n: number }>();
+  assert.ok((ev?.n ?? 0) >= 20);
 });

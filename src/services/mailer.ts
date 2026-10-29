@@ -86,7 +86,7 @@ export interface TemplateData {
     | { event: "issued"; amountCents: number; reference: string; url: string };
   project_completion: ProjectBase;
   handoff: ProjectBase;
-  security_notification: { event: "mfa_enabled" | "password_changed" | "deletion_requested" | "mfa_recovery_code_used" | "mfa_recovery_codes_regenerated" | "mfa_reset" };
+  security_notification: { event: "mfa_enabled" | "password_changed" | "deletion_requested" | "mfa_recovery_code_used" | "mfa_recovery_codes_regenerated" | "mfa_reset" | "sign_in_attempts" };
   /** Staff alert for a critical production incident (no automated incident source exists yet). */
   critical_incident: { summary: string; occurredAt: string; url: string };
   password_reset: { resetUrl: string };
@@ -358,11 +358,13 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
           paragraphs: ["A new set of two-factor recovery codes was generated for your Crestmont account. Every earlier recovery code stopped working.", "If this was not you, reset your password immediately and contact support."] };
         case "mfa_reset": return { subject: "Two-factor authentication was reset", heading: "Two-factor authentication reset",
           paragraphs: ["An administrator reset two-factor authentication on your Crestmont account and signed you out everywhere. You will set up a new authenticator the next time you sign in.", "If you did not ask for this, contact the Crestmont Owner immediately."] };
+        case "sign_in_attempts": return { subject: "Repeated failed sign-ins on your account", heading: "Failed sign-in attempts",
+          paragraphs: ["Several sign-in attempts with a wrong password were made for your Crestmont account. Your account is not locked: browsers you have signed in with before keep working, and new browsers must now pass a security check.", "If these attempts were not you, no action is needed unless you think your password is known — then reset it from the sign-in page."] };
         case "deletion_requested": return { subject: "We received your deletion request", heading: "Deletion request received",
           paragraphs: ["We received a request to delete your Crestmont account. A staff member will review it and confirm when it is complete.", "If you did not make this request, sign in and change your password, then contact support."] };
       }
     },
-    samples: [{ event: "mfa_enabled" }, { event: "password_changed" }, { event: "deletion_requested" }, { event: "mfa_recovery_code_used" }, { event: "mfa_recovery_codes_regenerated" }, { event: "mfa_reset" }],
+    samples: [{ event: "mfa_enabled" }, { event: "password_changed" }, { event: "deletion_requested" }, { event: "mfa_recovery_code_used" }, { event: "mfa_recovery_codes_regenerated" }, { event: "mfa_reset" }, { event: "sign_in_attempts" }],
   },
   critical_incident: {
     name: "critical_incident", category: "transactional", audience: "staff",

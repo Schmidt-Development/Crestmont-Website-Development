@@ -7,7 +7,7 @@ import { hashPassword, verifyPassword, randomToken, hashToken, passwordProblems,
 import { MfaKeyError, assertCanStoreTotpSecret, isEncryptedTotpSecret, openTotpSecret, sealTotpSecret, sealWithKey, type MfaKeyEnv } from "../lib/totp-secrets.ts";
 import { STAFF_ROLES, type Actor, type Role } from "../domain/authz.ts";
 import type { SessionUser, Env } from "../app/context.ts";
-import { rateLimit, securityEvent, audit } from "./security.ts";
+import { rateLimit, peekRateLimit, securityEvent, audit } from "./security.ts";
 
 export const SESSION_TTL_STAFF_S = 12 * 3600;
 export const SESSION_TTL_CUSTOMER_S = 7 * 24 * 3600;
@@ -15,13 +15,39 @@ export const SESSION_TTL_CUSTOMER_S = 7 * 24 * 3600;
 export const SESSION_IDLE_STAFF_S = 2 * 3600;
 export const SESSION_IDLE_CUSTOMER_S = 24 * 3600;
 const LAST_SEEN_WRITE_INTERVAL_MS = 5 * 60e3;
-export const LOCK_AFTER = 8;
-const LOCK_MINUTES = 15;
-export const LOCKED_MESSAGE = "This account is temporarily locked after repeated failed sign-ins. Try again later.";
+// Abuse-resistant sign-in throttling (CREST-GAP-003). There is no account lockout: a hard lock let any anonymous
+// visitor who knew an address keep that account (including the Owner) locked indefinitely. Instead:
+//  - a device that has completed a sign-in for the account before ("known device" cookie) is never challenged or
+//    blocked by other people's failures; its own wrong guesses are limited per device;
+//  - after CHALLENGE_AFTER failures for an address in a 15-minute window, unknown devices must pass the Turnstile
+//    challenge to try that address. The decision is made before the password is looked at, and is identical for
+//    existing and unknown addresses, so it reveals neither a correct password nor whether an account exists;
+//  - each IP is limited per address and overall; only FAILED attempts count toward the per-address limits.
+export const CHALLENGE_AFTER = 5;
+const FAIL_WINDOW_S = 15 * 60;
+const PER_IP_ADDRESS_FAILS = 10;
+const PER_IP_ATTEMPTS = 30;
+const PER_DEVICE_FAILS = 10;
+export const DEVICE_COOKIE = "cm_device";
+export const DEVICE_MAX_AGE_S = 180 * 86400;
+export const CHALLENGE_MESSAGE = "For your security, complete the check below and sign in again.";
 
+/** Signals the route to show the bot challenge (status 403); carries no information about the password. */
 export class AuthError extends Error {
   readonly status: number;
   constructor(message: string, status = 400) { super(message); this.status = status; }
+}
+
+/** A wrong password (always the same message). `notifyEmail` is set once per window, when an existing account starts
+ *  requiring the challenge, so the route can tell the account holder. */
+export class LoginFailed extends AuthError {
+  readonly notifyUserId: string | null;
+  readonly notifyEmail: string | null;
+  constructor(notifyUserId: string | null, notifyEmail: string | null) { super("Email or password is incorrect.", 401); this.notifyUserId = notifyUserId; this.notifyEmail = notifyEmail; }
+}
+
+export class SignInChallengeRequired extends AuthError {
+  constructor() { super(CHALLENGE_MESSAGE, 403); }
 }
 
 /**
@@ -113,37 +139,70 @@ export async function newEmailVerifyToken(db: Db, userId: string): Promise<strin
 
 export type LoginResult = { status: "ok"; sessionToken: string; userId: string; mfaRequired: boolean; maxAge: number };
 
-export async function login(db: Db, emailRaw: string, password: string, meta: { ip: string | null; userAgent: string | null }): Promise<LoginResult> {
+/** True if this device cookie was issued to this user by an earlier completed sign-in and has not been revoked. */
+export async function isKnownDevice(db: Db, userId: string, token: string | null | undefined): Promise<boolean> {
+  if (!token || !/^[0-9a-f]{64}$/.test(token)) return false;
+  const row = await db.prepare(`SELECT 1 AS x FROM known_devices WHERE token_hash = ? AND user_id = ? AND revoked_at IS NULL`).bind(await hashToken(token), userId).first();
+  return !!row;
+}
+
+/** Remembers this browser for the user after a completed sign-in (password, plus MFA when enabled). Returns the
+ *  cookie value to set; reuses the existing one when it already belongs to this user. */
+export async function rememberDevice(db: Db, userId: string, existing: string | null | undefined): Promise<string> {
+  const at = nowIso();
+  if (existing && await isKnownDevice(db, userId, existing)) {
+    await db.prepare(`UPDATE known_devices SET last_seen_at = ? WHERE token_hash = ?`).bind(at, await hashToken(existing)).run();
+    return existing;
+  }
+  const token = randomToken();
+  await db.prepare(`INSERT INTO known_devices (token_hash, user_id, created_at, last_seen_at) VALUES (?,?,?,?)`).bind(await hashToken(token), userId, at, at).run();
+  return token;
+}
+
+export async function login(db: Db, emailRaw: string, password: string, meta: { ip: string | null; userAgent: string | null; deviceToken?: string | null; challengePassed?: boolean }): Promise<LoginResult> {
   const email = emailRaw.trim().toLowerCase();
-  const ipRl = await rateLimit(db, `login-ip:${meta.ip ?? "unknown"}`, 30, 900);
-  const emRl = await rateLimit(db, `login-email:${email}`, 10, 900);
-  if (!ipRl.allowed || !emRl.allowed) {
-    await securityEvent(db, "rate_limited", { email, ip: meta.ip, detail: "login" });
-    throw new AuthError("Too many sign-in attempts. Wait a few minutes and try again.", 429);
-  }
-  const u = await db.prepare(`SELECT id, password_hash, disabled_at, locked_until, failed_logins, totp_secret FROM users WHERE email = ?`).bind(email)
-    .first<{ id: string; password_hash: string | null; disabled_at: string | null; locked_until: string | null; failed_logins: number; totp_secret: string | null }>();
-  const ok = await verifyPassword(password, u?.password_hash ?? null);
-  // Lockout is decided BEFORE the password result is used, and looks the same for every email address.
-  // Previously a locked account answered "locked" only to the correct password (and "incorrect" to wrong
-  // ones), which confirmed a guessed password during the lockout. Unknown addresses get an equivalent
-  // counter so the "locked" answer does not reveal which addresses have accounts.
-  const locked = u
-    ? !!(u.locked_until && u.locked_until > nowIso())
-    : !(await rateLimit(db, `login-fail:${email}`, LOCK_AFTER, LOCK_MINUTES * 60)).allowed;
-  if (locked) {
-    await securityEvent(db, "login_blocked_locked", { userId: u?.id, email, ip: meta.ip });
-    throw new AuthError(LOCKED_MESSAGE, 423);
-  }
-  if (!u || !ok || u.disabled_at) {
-    if (u) {
-      const fails = u.failed_logins + 1;
-      const lock = fails >= LOCK_AFTER ? new Date(Date.now() + LOCK_MINUTES * 60e3).toISOString() : null;
-      await db.prepare(`UPDATE users SET failed_logins = ?, locked_until = COALESCE(?, locked_until) WHERE id = ?`).bind(fails, lock, u.id).run();
-      if (lock) await securityEvent(db, "login_locked", { userId: u.id, email, ip: meta.ip });
+  const ip = meta.ip ?? "unknown";
+  const u = await db.prepare(`SELECT id, password_hash, disabled_at, totp_secret FROM users WHERE email = ?`).bind(email)
+    .first<{ id: string; password_hash: string | null; disabled_at: string | null; totp_secret: string | null }>();
+  const known = u ? await isKnownDevice(db, u.id, meta.deviceToken) : false;
+  const deviceKey = known ? `login-fail-device:${await hashToken(meta.deviceToken!)}` : null;
+  // Everything below is decided before the password result is used, and the same way for unknown addresses.
+  if (known) {
+    if (await peekRateLimit(db, deviceKey!, FAIL_WINDOW_S) >= PER_DEVICE_FAILS) {
+      await securityEvent(db, "rate_limited", { userId: u!.id, email, ip: meta.ip, detail: "login: known device" });
+      throw new AuthError("Too many sign-in attempts from this browser. Wait a few minutes and try again.", 429);
     }
+  } else {
+    const perIp = await rateLimit(db, `login-ip:${ip}`, PER_IP_ATTEMPTS, FAIL_WINDOW_S);
+    const perIpAddress = await peekRateLimit(db, `login-fail-ip:${ip}:${email}`, FAIL_WINDOW_S);
+    if (!perIp.allowed || perIpAddress >= PER_IP_ADDRESS_FAILS) {
+      await securityEvent(db, "rate_limited", { email, ip: meta.ip, detail: "login" });
+      throw new AuthError("Too many sign-in attempts. Wait a few minutes and try again.", 429);
+    }
+    if (await peekRateLimit(db, `login-fail:${email}`, FAIL_WINDOW_S) >= CHALLENGE_AFTER && !meta.challengePassed) {
+      await securityEvent(db, "login_challenge_required", { userId: u?.id, email, ip: meta.ip });
+      throw new SignInChallengeRequired();
+    }
+  }
+  const ok = await verifyPassword(password, u?.password_hash ?? null);
+  if (!u || !ok || u.disabled_at) {
+    if (known) await rateLimit(db, deviceKey!, PER_DEVICE_FAILS, FAIL_WINDOW_S);
+    else {
+      const fails = await rateLimit(db, `login-fail:${email}`, CHALLENGE_AFTER, FAIL_WINDOW_S);
+      await rateLimit(db, `login-fail-ip:${ip}:${email}`, PER_IP_ADDRESS_FAILS, FAIL_WINDOW_S);
+      // Recorded once per window, when the address starts requiring the challenge; the account holder is told.
+      if (fails.remaining === 0 && fails.allowed) {
+        await securityEvent(db, "login_challenge_started", { userId: u?.id, email, ip: meta.ip });
+        if (u) {
+          await db.prepare(`UPDATE users SET failed_logins = failed_logins + 1 WHERE id = ?`).bind(u.id).run();
+          await securityEvent(db, "login_failed", { userId: u.id, email, ip: meta.ip });
+          throw new LoginFailed(u.id, email);
+        }
+      }
+    }
+    if (u) await db.prepare(`UPDATE users SET failed_logins = failed_logins + 1 WHERE id = ?`).bind(u.id).run();
     await securityEvent(db, "login_failed", { userId: u?.id, email, ip: meta.ip });
-    throw new AuthError("Email or password is incorrect.", 401);
+    throw new LoginFailed(null, null);
   }
   await db.prepare(`UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?`).bind(u.id).run();
   // Versioned hash format (docs/AUTH-PRODUCTION.md gap 6): a hash made with older parameters is replaced with
@@ -459,6 +518,8 @@ export async function resetPassword(db: Db, token: string, newPassword: string, 
   await db.prepare(`UPDATE users SET password_hash = ?, failed_logins = 0, locked_until = NULL WHERE id = ?`).bind(await hashPassword(newPassword), userId).run();
   await invalidateResetTokens(db, userId);
   await revokeAllSessions(db, userId, null, userId);
+  // Account recovery forgets every remembered browser (CREST-GAP-003): they must complete a sign-in again.
+  await db.prepare(`UPDATE known_devices SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`).bind(nowIso(), userId).run();
   await audit(db, { actorUserId: userId, action: "user.password_reset", subjectType: "user", subjectId: userId, ip });
   return userId;
 }

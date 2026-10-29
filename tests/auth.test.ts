@@ -83,20 +83,23 @@ test("[AUTH-003] staff without MFA are sent to enrolment and can enable TOTP", a
   assert.equal((await db.prepare(`SELECT mfa_enabled FROM users WHERE id = ?`).bind(s.id).first<{ mfa_enabled: number }>())?.mfa_enabled, 1);
 });
 
-test("[AUTH-005] repeated failed sign-ins are rate limited, locked and logged", async () => {
-  const { db, client } = await createTestApp();
+test("[AUTH-005] repeated failed sign-ins never lock the account: unknown browsers must pass the challenge, failures are logged (CREST-GAP-003)", async () => {
+  // Turnstile configured; the stubbed siteverify passes only the token "pass".
+  const turnstile: typeof fetch = async (_u, init) => new Response(JSON.stringify({ success: (init?.body as FormData).get("response") === "pass" }));
+  const { db, client } = await createTestApp({ TURNSTILE_SITE_KEY: "site", TURNSTILE_SECRET: "secret", PASSWORD_BREACH_CHECK: "off", overrides: { fetch: turnstile } });
   const cust = await createCustomer(db, "victim@example.com");
   const c = client();
   const statuses: number[] = [];
-  for (let i = 0; i < 11; i++) statuses.push((await c.post("/login", { email: cust.email, password: "wrong-password-xx" })).status);
-  assert.ok(statuses.slice(0, 8).every((s) => s === 400));
-  assert.ok(statuses.includes(400) && statuses.at(-1) === 400);
-  const locked = await db.prepare(`SELECT locked_until FROM users WHERE id = ?`).bind(cust.id).first<{ locked_until: string | null }>();
-  assert.ok(locked?.locked_until, "account locked after repeated failures");
-  const right = await c.post("/login", { email: cust.email, password: TEST_PASSWORD });
-  assert.notEqual(right.status, 303, "locked or rate-limited account cannot sign in even with the right password");
-  const events = await db.prepare(`SELECT COUNT(*) n FROM security_events WHERE kind IN ('login_failed','login_locked','rate_limited')`).first<{ n: number }>();
+  for (let i = 0; i < 8; i++) statuses.push((await c.post("/login", { email: cust.email, password: "wrong-password-xx" })).status);
+  assert.deepEqual(statuses, [400, 400, 400, 400, 400, 403, 403, 403], "after 5 failures an unknown browser is challenged, not locked out");
+  const noToken = await c.post("/login", { email: cust.email, password: TEST_PASSWORD });
+  assert.equal(noToken.status, 403, "the right password without the challenge gets the same answer as a wrong one");
+  const passed = await c.post("/login", { email: cust.email, password: TEST_PASSWORD, "cf-turnstile-response": "pass" });
+  assert.equal(passed.status, 303, "passing the challenge signs in");
+  assert.equal((await db.prepare(`SELECT locked_until FROM users WHERE id = ?`).bind(cust.id).first<{ locked_until: string | null }>())?.locked_until, null, "no account lockout");
+  const events = await db.prepare(`SELECT COUNT(*) n FROM security_events WHERE kind IN ('login_failed','login_challenge_required','login_challenge_started')`).first<{ n: number }>();
   assert.ok(events!.n >= 9);
+  assert.equal((await lastEmail(db, cust.email))?.template, "security_notification", "the account holder is told about the attempts");
 });
 
 test("[AUTH-004] sessions can be listed and revoked; password change signs out other sessions", async () => {
