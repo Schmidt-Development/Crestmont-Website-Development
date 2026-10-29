@@ -67,7 +67,7 @@ MFA, step-up, encryption and secret scoping are as on `main`.
 | `[env.production]` block | byte-identical to `main` |
 
 The preview's 256 hosted checks included ~80 interactive-demo checks that run only when a demo is embeddable; with no
-demo verified for staging they are skipped and the explorer shows posters (see §5 blocker B1).
+demo verified for staging they are skipped and the explorer shows posters (§5 blocker B1, resolved 2026-10-29: the demos now allow the staging origin).
 
 ### Done after merge (live, by `deploy-staging.yml` on push to `main`)
 
@@ -99,7 +99,7 @@ Production receives this code only through a Founder-approved release. When that
 
 | # | Dependency on the preview URL | Action |
 |---|---|---|
-| B1 | All four demo Workers allow framing **only** by `https://crestmont-platform-frontend-preview.partners-df4.workers.dev` and the production domain (`DEMO_FRAME_ANCESTORS` in each repo's `portfolio-demo/wrangler.jsonc`; confirmed in `glassly@crestmont/portfolio-demo`). Staging cannot embed them. | In `glassly`, `better-lansing-mechanics` and `lansing-car-rentals` (two demo branches), replace the preview origin with `https://crestmont-platform-staging.partners-df4.workers.dev`, redeploy each demo, then re-run *Deploy staging* and confirm the Portfolio summary says "demo verified for staging" for all four. |
+| B1 | **Resolved 2026-10-29.** Live checks showed all four demo Workers' `frame-ancestors` already include `https://crestmont-platform-staging.partners-df4.workers.dev`, so staging can embed them; the *Deploy staging* step *Portfolio projects and their isolated demos* verifies this on every deploy. *Original finding:* all four demo Workers allowed framing **only** by `https://crestmont-platform-frontend-preview.partners-df4.workers.dev` and the production domain (`DEMO_FRAME_ANCESTORS` in each repo's `portfolio-demo/wrangler.jsonc`; confirmed in `glassly@crestmont/portfolio-demo`). Staging could not embed them. | Done. Original action: in `glassly`, `better-lansing-mechanics` and `lansing-car-rentals` (two demo branches), replace the preview origin with `https://crestmont-platform-staging.partners-df4.workers.dev`, redeploy each demo, then re-run *Deploy staging* and confirm the Portfolio summary says "demo verified for staging" for all four. |
 | B2 | GitHub environment `frontend-preview` and its secrets `FRONTEND_PREVIEW_PASSWORD` / `FRONTEND_PREVIEW_DEMO_PASSWORD` | Remove after retirement (Settings → Environments). Staging is public and its demo accounts use their own sealed access notes. |
 | B3 | Bookmarks or links shared with reviewers | Tell them to use the staging URL and staging access. |
 
@@ -114,7 +114,7 @@ step 5, confirm none of them lists a `crestmont-platform-frontend-preview` URL a
 2. Open *Actions → Deploy staging* for the merge commit and confirm green: *Frontend assets and homepage*, *Browser
    journey*, *Frontend browser verification*; download `staging-frontend-browser` to see the screenshots.
 3. Open the staging URL (public since 2026-10-28; no preview password) and review the site (and `/login` → 2FA).
-4. Clear **B1** (or decide that posters on staging are acceptable for now and note it here).
+4. ~~Clear **B1**~~ — resolved 2026-10-29 (see the table above); confirm the latest *Deploy staging* summary lists "demo verified for staging" for all four projects.
 5. Reply with the written authorization: **"Retire crestmont-platform-frontend-preview."**
 
 ### Retirement (only after step 5)

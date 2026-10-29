@@ -1,6 +1,14 @@
 # Master frontend directive — final report
 
-Branch `claude/frontend-redesign` (not merged into `main`). Preview: https://crestmont-platform-frontend-preview.partners-df4.workers.dev
+> **Historical record (updated 2026-10-29, CREST-GAP-061).** This document describes the retired
+> `crestmont-platform-frontend-preview` Worker and the `claude/frontend-redesign` branch. That work is merged into `main`
+> and is deployed only to `crestmont-platform-staging` by `.github/workflows/deploy-staging.yml`. Evidence quoted below
+> (including the preview's 256/256 hosted checks) came from the preview origin and is kept as history only; the current
+> verification is the staging workflow's steps *Portfolio projects and their isolated demos*, *Frontend assets and
+> homepage served by this commit*, *Browser journey on the live site* and *Frontend browser verification on staging*.
+> See [`docs/CONSOLIDATION.md`](../CONSOLIDATION.md).
+
+Branch `claude/frontend-redesign` (at the time of this report not merged into `main`; it has since been merged). Retired preview: https://crestmont-platform-frontend-preview.partners-df4.workers.dev
 (password-gated; its own Worker and a disposable D1 database recreated on every deploy).
 
 ## 1. Commits

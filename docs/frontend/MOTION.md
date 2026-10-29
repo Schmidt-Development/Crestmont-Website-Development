@@ -56,9 +56,9 @@ gold tiles; M09's pill is gold with a dark label.
 ## Status checklist (final, build `c60be7d`)
 
 Statuses: **Implemented and verified** = built and checked in a real browser (local Chromium 153 against the
-seeded dev server, frame captures and the recordings delivered with the handoff). The hosted preview is verified
-to serve these exact assets byte-for-byte (Actions run `40596685833`, step "Verify the preview serves this commit's
-frontend assets"), but could not be *viewed* from the build environment.
+seeded dev server, frame captures and the recordings delivered with the handoff). The (now retired) hosted preview
+was verified to serve these exact assets byte-for-byte (Actions run `40596685833`; historical). Staging is now verified
+by `deploy-staging.yml` (step *Frontend assets and homepage served by this commit*).
 
 | ID | Status | Evidence |
 |---|---|---|

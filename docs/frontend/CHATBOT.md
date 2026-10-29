@@ -10,7 +10,7 @@ It is free for visitors (no account and no payment).
   model's price is known, and a monthly AI budget (`ai.monthly_budget_usd`) is set and not exhausted.
 - **Availability:** `GET /api/assistant` reports whether live answers are available. When they are not, the widget
   says "Live AI answers off" and offers the pages and a person instead. It never shows scripted text as an AI reply.
-- **Current state of the preview and staging:** paid AI is not enabled, so the assistant correctly shows the offline
+- **Current state of staging** (the frontend preview Worker is retired): paid AI is not enabled, so the assistant correctly shows the offline
   state. Turning it on is the Owner's decision: set the provider and key as Worker secrets and the monthly budget on
   the AI operations page.
 
