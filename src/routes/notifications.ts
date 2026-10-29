@@ -9,7 +9,7 @@ import { requireStaff, requireCustomerOrg } from "../app/app.ts";
 import { appLayout } from "../ui/layout.ts";
 import { actionForm, badge, emptyState, pageHead, pagination, pageParam, table, tabs } from "../ui/components.ts";
 import { staffNav, portalNav } from "./nav.ts";
-import { markNotificationsRead, notificationHref, pageNotifications, unreadNotificationCount } from "../services/notifications.ts";
+import { markNotificationsRead, liveNotificationHrefs, pageNotifications, unreadNotificationCount } from "../services/notifications.ts";
 
 async function notificationsPage(ctx: AppContext, area: "staff" | "portal") {
   const base = `/${area}/notifications`;
@@ -17,11 +17,12 @@ async function notificationsPage(ctx: AppContext, area: "staff" | "portal") {
   const { page, limit, offset } = pageParam(ctx);
   const rows = await pageNotifications(ctx.db, ctx.user!.id, { unreadOnly, limit: limit + 1, offset });
   const unread = await unreadNotificationCount(ctx.db, ctx.user!.id);
+  const hrefs = await liveNotificationHrefs(ctx.db, { actor: ctx.actor!, userId: ctx.user!.id }, rows, area);
   const body = html`${pageHead("Notifications", unread ? actionForm(ctx, `/${area}/notifications/read`, "Mark all read", { variant: "ghost", hidden: { back: base } }) : undefined, `${unread} unread`)}
 ${tabs([{ href: base, label: "All", current: !unreadOnly }, { href: `${base}?unread=1`, label: `Unread (${unread})`, current: unreadOnly }], "Notification views")}
 ${table(rows.slice(0, limit), [
     { header: "", cell: (n) => (n.read_at ? "" : badge("new", "New")) },
-    { header: "Notification", cell: (n) => { const href = notificationHref(n, area); return href ? html`<a href="${href}">${n.body}</a>` : n.body; } },
+    { header: "Notification", cell: (n) => { const href = hrefs.get(n.id); return href ? html`<a href="${href}">${n.body}</a>` : n.body; } },
     { header: "Type", cell: (n) => label(n.kind.replace(/\./g, "_")) },
     { header: "When", cell: (n) => formatDateTime(n.created_at) },
     { header: "", cell: (n) => (n.read_at ? html`<span class="faint">Read ${formatDateTime(n.read_at)}</span>` : actionForm(ctx, `/${area}/notifications/${n.id}/read`, "Mark read", { variant: "ghost" })) },

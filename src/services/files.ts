@@ -74,14 +74,27 @@ export async function getOrgFile(db: Db, organizationId: string, id: string): Pr
   return f;
 }
 
-export async function listFiles(db: Db, organizationId: string, opts: { projectId?: string | null; folder?: string | null; includeReplaced?: boolean } = {}): Promise<(FileRow & { uploader: string })[]> {
+function fileListWhere(organizationId: string, opts: { projectId?: string | null; folder?: string | null; includeReplaced?: boolean }) {
   const where = ["f.organization_id = ?", "f.deleted_at IS NULL"];
   const binds: unknown[] = [organizationId];
   if (opts.projectId) { where.push("f.project_id = ?"); binds.push(opts.projectId); }
   if (opts.folder) { where.push("(f.folder = ? OR f.folder LIKE ?)"); binds.push(opts.folder, `${opts.folder}/%`); }
   if (!opts.includeReplaced) where.push("f.replaced_by IS NULL");
-  return (await db.prepare(`SELECT f.*, u.display_name AS uploader FROM files f JOIN users u ON u.id = f.uploaded_by WHERE ${where.join(" AND ")} ORDER BY COALESCE(f.folder,''), f.created_at DESC LIMIT 500`)
-    .bind(...binds).all<FileRow & { uploader: string }>()).results;
+  return { where: where.join(" AND "), binds };
+}
+
+/** One page of files (default: the first 500). Pass limit/offset to page; see countFiles for the total (CREST-GAP-071). */
+export async function listFiles(db: Db, organizationId: string, opts: { projectId?: string | null; folder?: string | null; includeReplaced?: boolean; limit?: number; offset?: number } = {}): Promise<(FileRow & { uploader: string })[]> {
+  const { where, binds } = fileListWhere(organizationId, opts);
+  const limit = Math.max(1, Math.min(500, opts.limit ?? 500)), offset = Math.max(0, opts.offset ?? 0);
+  return (await db.prepare(`SELECT f.*, u.display_name AS uploader FROM files f JOIN users u ON u.id = f.uploaded_by WHERE ${where} ORDER BY COALESCE(f.folder,''), f.created_at DESC, f.id LIMIT ? OFFSET ?`)
+    .bind(...binds, limit, offset).all<FileRow & { uploader: string }>()).results;
+}
+
+/** Number of files listFiles would page through with the same filters. */
+export async function countFiles(db: Db, organizationId: string, opts: { projectId?: string | null; folder?: string | null; includeReplaced?: boolean } = {}): Promise<number> {
+  const { where, binds } = fileListWhere(organizationId, opts);
+  return (await db.prepare(`SELECT COUNT(*) AS n FROM files f WHERE ${where}`).bind(...binds).first<{ n: number }>())?.n ?? 0;
 }
 
 export async function fileVersions(db: Db, organizationId: string, id: string): Promise<FileRow[]> {

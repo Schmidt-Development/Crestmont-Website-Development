@@ -49,6 +49,10 @@ export function customerPostFields(w: World, t: Tenant): Record<string, () => Fi
     "POST /account/sessions/revoke-others": () => ({}),
     "POST /account/privacy/export": () => ({}),
     "POST /account/privacy/delete": () => ({ confirm: "1", reason: "no longer needed" }),
+    "POST /account/profile": () => ({ display_name: `${t.marker} Admin` }),
+    "POST /account/email": () => ({ new_email: `changed-${Math.random().toString(16).slice(2, 8)}@${t.marker.toLowerCase()}.example`, current_password: TEST_PASSWORD }),
+    "POST /account/email/cancel": () => ({}),
+    "POST /portal/notices/mfa-reminder/dismiss": () => ({}),
   };
 }
 
@@ -125,6 +129,11 @@ export function auditScenarios(w: World): Scenario[] {
       return { res: await spare.c.post(`/account/sessions/${sid}/revoke`), actorId: spare.id };
     } },
     { key: "POST /account/sessions/revoke-others", as: spareAs, setup: async () => { await w.app.client().post("/login", { email: spare.email, password: NEWPW }); } },
+    // CREST-GAP-072 / 073
+    { key: "POST /account/profile", as: spareAs, fields: () => ({ display_name: "Spare Account Holder" }) },
+    { key: "POST /account/email", as: spareAs, fields: () => ({ new_email: "spare-new-address@matrix.example", current_password: NEWPW }) },
+    { key: "POST /account/email/cancel", as: spareAs },
+    { key: "POST /portal/notices/mfa-reminder/dismiss", as: spareAs },
     { key: "POST /account/privacy/export", as: spareAs },
     { key: "POST /account/privacy/delete", as: spareAs, fields: () => ({ confirm: "1", reason: "matrix" }) },
 
@@ -340,6 +349,13 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/employees/:id/enable" },
     { key: "POST /staff/employees/:id/mfa-reset" },
     { key: "POST /staff/employees/:id/profile", fields: () => ({ job_title: "Front-end developer", weekly_capacity_hours: "30" }) },
+    // CREST-GAP-041: a disabled person's queued work is ended from the offboarding queue.
+    { key: "POST /staff/employees/:id/offboarding", fields: () => ({ item: "all", action: "end" }), setup: async () => {
+      await w.db.prepare(`UPDATE users SET disabled_at = ? WHERE id = ?`).bind(nowIso(), w.ids.staffUser).run();
+      await w.db.prepare(`INSERT INTO offboarding_items (id, user_id, subject_type, subject_id, label, status, created_at) VALUES (?, ?, 'task', ?, 'Matrix task', 'pending', ?)`).bind(newId("off"), w.ids.staffUser, w.a.ids.task, nowIso()).run();
+    } },
+    { key: "GET /staff/customers/:id" },
+    { key: "GET /staff/conversations/:orgId" },
     { key: "GET /staff/employees/export.csv" },
     { key: "GET /staff/email/export.csv" },
     { key: "GET /staff/security/events.csv" },

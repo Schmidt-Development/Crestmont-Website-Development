@@ -25,16 +25,6 @@ export function normPhone(s: string | null | undefined): string | null {
   if (d.length === 11 && d.startsWith("1")) d = d.slice(1);
   return d.length >= 7 ? d : null;
 }
-const normText = (s: string | null | undefined) => (s ?? "").trim().toLowerCase().replace(/\s+/g, " ") || null;
-
-function keysOf(l: DupLead): [DuplicateReason, string][] {
-  const out: [DuplicateReason, string][] = [];
-  const e = normEmail(l.contact_email); if (e) out.push(["email", e]);
-  const p = normPhone(l.contact_phone); if (p) out.push(["phone", p]);
-  const n = normText(l.contact_name), c = normText(l.company_name);
-  if (n && c) out.push(["name_company", `${n}|${c}`]);
-  return out;
-}
 
 /** Stage order used to pick the suggested survivor: the most advanced lead keeps its record. */
 const STAGE_RANK: Record<string, number> = { converted: 9, awaiting_payment: 8, accepted: 7, negotiation: 6, quote_sent: 5, quote_required: 4, qualified: 3, new: 2, lost: 1, rejected: 1, archived: 0 };
@@ -44,67 +34,112 @@ export function suggestSurvivor(leads: DupLead[]): DupLead {
 
 const pairKey = (a: string, b: string) => (a < b ? `${a}|${b}` : `${b}|${a}`);
 
-async function candidates(db: Db, actor: Actor): Promise<DupLead[]> {
+// ───────────── Detection on indexed normalized columns (CREST-GAP-081) ─────────────
+// contacts.email_norm / phone_norm / name_company_norm are maintained by triggers (migrations/0044) and indexed.
+// Detection never loads every lead: it asks the database only for leads whose key is shared by another visible,
+// unmerged lead (GROUP BY ... HAVING on the indexed column), bounded by MAX_DUPLICATE_ROWS, then pages the clusters.
+
+const KEY_COLUMNS: Record<DuplicateReason, string> = { email: "email_norm", phone: "phone_norm", name_company: "name_company_norm" };
+/** Upper bound on (key, lead) rows read per detection run. Beyond it the page says so; nothing is silently dropped. */
+export const MAX_DUPLICATE_ROWS = 5000;
+export const CLUSTERS_PER_PAGE = 20;
+/** D1 allows at most 100 bound parameters per statement. */
+const ID_CHUNK = 90;
+
+const LEAD_COLUMNS = `l.id, l.stage, l.source, l.created_at, l.updated_at, l.owner_user_id, u.display_name AS owner_name,
+      c.name AS contact_name, c.email AS contact_email, c.phone AS contact_phone, co.name AS company_name`;
+const LEAD_FROM = `FROM leads l JOIN contacts c ON c.id = l.contact_id LEFT JOIN companies co ON co.id = c.company_id LEFT JOIN users u ON u.id = l.owner_user_id`;
+
+async function leadsByIds(db: Db, ids: string[]): Promise<Map<string, DupLead>> {
+  const out = new Map<string, DupLead>();
+  for (let i = 0; i < ids.length; i += ID_CHUNK) {
+    const chunk = ids.slice(i, i + ID_CHUNK);
+    for (const r of (await db.prepare(`SELECT ${LEAD_COLUMNS} ${LEAD_FROM} WHERE l.id IN (${chunk.map(() => "?").join(",")})`).bind(...chunk).all<DupLead>()).results) out.set(r.id, r);
+  }
+  return out;
+}
+
+/** (reason, key, lead) rows for every visible, unmerged lead whose key is shared with another such lead. */
+async function duplicateMemberships(db: Db, actor: Actor): Promise<{ rows: { reason: DuplicateReason; k: string; lead_id: string }[]; truncated: boolean }> {
   const scope = leadScope(actor);
-  return (await db.prepare(`SELECT l.id, l.stage, l.source, l.created_at, l.updated_at, l.owner_user_id, u.display_name AS owner_name,
-      c.name AS contact_name, c.email AS contact_email, c.phone AS contact_phone, co.name AS company_name
-    FROM leads l JOIN contacts c ON c.id = l.contact_id LEFT JOIN companies co ON co.id = c.company_id LEFT JOIN users u ON u.id = l.owner_user_id
-    WHERE ${scope.sql} AND l.merged_into_lead_id IS NULL ORDER BY l.created_at LIMIT 20000`).bind(...scope.binds).all<DupLead>()).results;
+  const parts: string[] = [], binds: unknown[] = [];
+  for (const [reason, col] of Object.entries(KEY_COLUMNS)) {
+    parts.push(`SELECT '${reason}' AS reason, c.${col} AS k, l.id AS lead_id FROM leads l JOIN contacts c ON c.id = l.contact_id
+      WHERE ${scope.sql} AND l.merged_into_lead_id IS NULL AND c.${col} IN (
+        SELECT c.${col} FROM leads l JOIN contacts c ON c.id = l.contact_id WHERE ${scope.sql} AND l.merged_into_lead_id IS NULL AND c.${col} IS NOT NULL
+        GROUP BY c.${col} HAVING COUNT(*) > 1)`);
+    binds.push(...scope.binds, ...scope.binds);
+  }
+  const rows = (await db.prepare(`${parts.join(" UNION ALL ")} ORDER BY lead_id, reason LIMIT ?`).bind(...binds, MAX_DUPLICATE_ROWS + 1)
+    .all<{ reason: DuplicateReason; k: string; lead_id: string }>()).results;
+  return { rows: rows.slice(0, MAX_DUPLICATE_ROWS), truncated: rows.length > MAX_DUPLICATE_ROWS };
 }
 
+/** Dismissed pairs among unmerged leads (human decisions; small). */
 async function dismissedPairs(db: Db): Promise<Set<string>> {
-  return new Set((await db.prepare(`SELECT lead_a, lead_b FROM crm_duplicate_dismissals`).all<{ lead_a: string; lead_b: string }>()).results.map((r) => pairKey(r.lead_a, r.lead_b)));
+  return new Set((await db.prepare(`SELECT d.lead_a, d.lead_b FROM crm_duplicate_dismissals d JOIN leads a ON a.id = d.lead_a JOIN leads b ON b.id = d.lead_b
+      WHERE a.merged_into_lead_id IS NULL AND b.merged_into_lead_id IS NULL`).all<{ lead_a: string; lead_b: string }>()).results.map((r) => pairKey(r.lead_a, r.lead_b)));
 }
 
-/** Groups visible, unmerged leads into duplicate clusters (connected by any shared key, minus dismissed pairs). */
-export async function findDuplicateClusters(db: Db, actor: Actor): Promise<DuplicateCluster[]> {
-  const leads = await candidates(db, actor);
+export interface DuplicateClusterPage { clusters: DuplicateCluster[]; page: number; totalClusters: number; hasNext: boolean; truncated: boolean }
+
+/**
+ * Groups visible, unmerged leads into duplicate clusters (connected by any shared key, minus dismissed pairs) and
+ * returns one page of them. Only leads that share a key are read; lead details are fetched for the page only.
+ */
+export async function findDuplicateClusters(db: Db, actor: Actor, opts: { page?: number } = {}): Promise<DuplicateClusterPage> {
+  const { rows, truncated } = await duplicateMemberships(db, actor);
   const dismissed = await dismissedPairs(db);
-  const byKey = new Map<string, DupLead[]>();
-  for (const l of leads) for (const [r, k] of keysOf(l)) { const key = `${r}:${k}`; byKey.set(key, [...(byKey.get(key) ?? []), l]); }
+  const byKey = new Map<string, string[]>();
+  for (const r of rows) { const key = `${r.reason}:${r.k}`; const g = byKey.get(key); if (g) { if (!g.includes(r.lead_id)) g.push(r.lead_id); } else byKey.set(key, [r.lead_id]); }
   const parent = new Map<string, string>();
   const find = (x: string): string => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x)!)!); x = parent.get(x)!; } return x; };
-  for (const l of leads) parent.set(l.id, l.id);
+  for (const r of rows) parent.set(r.lead_id, r.lead_id);
   const edgeReasons = new Map<string, Set<DuplicateReason>>();
   for (const [key, group] of byKey) {
     if (group.length < 2) continue;
     const reason = key.slice(0, key.indexOf(":")) as DuplicateReason;
     for (let i = 0; i < group.length; i++) for (let j = i + 1; j < group.length; j++) {
-      const pk = pairKey(group[i].id, group[j].id);
+      const pk = pairKey(group[i], group[j]);
       if (dismissed.has(pk)) continue;
       edgeReasons.set(pk, new Set([...(edgeReasons.get(pk) ?? []), reason]));
-      parent.set(find(group[i].id), find(group[j].id));
+      parent.set(find(group[i]), find(group[j]));
     }
   }
-  const clusters = new Map<string, DupLead[]>();
-  for (const l of leads) {
-    const root = find(l.id);
-    clusters.set(root, [...(clusters.get(root) ?? []), l]);
-  }
-  const out: DuplicateCluster[] = [];
-  for (const members of clusters.values()) {
-    if (members.length < 2) continue;
-    const ids = new Set(members.map((m) => m.id));
+  const members = new Map<string, string[]>();
+  for (const id of parent.keys()) { const root = find(id); members.set(root, [...(members.get(root) ?? []), id]); }
+  const groups = [...members.values()].filter((m) => m.length >= 2).map((m) => m.sort())
+    .sort((a, b) => b.length - a.length || a[0].localeCompare(b[0]));
+  const page = Math.max(1, Math.min(10_000, Math.floor(opts.page ?? 1)));
+  const slice = groups.slice((page - 1) * CLUSTERS_PER_PAGE, page * CLUSTERS_PER_PAGE);
+  const details = await leadsByIds(db, slice.flat());
+  const clusters: DuplicateCluster[] = slice.map((ids) => {
+    const leads = ids.map((id) => details.get(id)!).filter(Boolean).sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+    const set = new Set(ids);
     const reasons = new Set<DuplicateReason>();
-    for (const [pk, rs] of edgeReasons) { const [a, b] = pk.split("|"); if (ids.has(a) && ids.has(b)) rs.forEach((r) => reasons.add(r)); }
-    out.push({ leads: members, reasons: [...reasons].sort(), survivorId: suggestSurvivor(members).id });
-  }
-  return out.sort((a, b) => b.leads.length - a.leads.length || a.leads[0].created_at.localeCompare(b.leads[0].created_at));
+    for (const [pk, rs] of edgeReasons) { const [x, y] = pk.split("|"); if (set.has(x) && set.has(y)) rs.forEach((r) => reasons.add(r)); }
+    return { leads, reasons: [...reasons].sort(), survivorId: suggestSurvivor(leads).id };
+  });
+  return { clusters, page, totalClusters: groups.length, hasNext: page * CLUSTERS_PER_PAGE < groups.length, truncated };
 }
 
-/** Possible duplicates of one lead (shared key, visible to the actor, not merged, not dismissed). */
+/** Possible duplicates of one lead (shared key, visible to the actor, not merged, not dismissed). One indexed, bounded query. */
 export async function duplicatesOf(db: Db, actor: Actor, lead: LeadRow): Promise<(DupLead & { reasons: DuplicateReason[] })[]> {
-  const mine = keysOf({ ...lead, contact_name: lead.contact_name, company_name: lead.company_name } as DupLead);
-  if (!mine.length) return [];
-  const dismissed = await dismissedPairs(db);
-  const out: (DupLead & { reasons: DuplicateReason[] })[] = [];
-  for (const l of await candidates(db, actor)) {
-    if (l.id === lead.id || dismissed.has(pairKey(l.id, lead.id))) continue;
-    const theirs = new Map(keysOf(l));
-    const reasons = mine.filter(([r, k]) => theirs.get(r) === k).map(([r]) => r);
-    if (reasons.length) out.push({ ...l, reasons });
-  }
-  return out;
+  const mine = await db.prepare(`SELECT email_norm, phone_norm, name_company_norm FROM contacts WHERE id = ?`).bind(lead.contact_id)
+    .first<{ email_norm: string | null; phone_norm: string | null; name_company_norm: string | null }>();
+  if (!mine || (!mine.email_norm && !mine.phone_norm && !mine.name_company_norm)) return [];
+  const scope = leadScope(actor);
+  const rows = (await db.prepare(`SELECT ${LEAD_COLUMNS}, c.email_norm, c.phone_norm, c.name_company_norm ${LEAD_FROM}
+      WHERE ${scope.sql} AND l.merged_into_lead_id IS NULL AND l.id <> ?
+        AND (c.email_norm = ? OR c.phone_norm = ? OR c.name_company_norm = ?)
+        AND NOT EXISTS (SELECT 1 FROM crm_duplicate_dismissals d WHERE (d.lead_a = l.id AND d.lead_b = ?) OR (d.lead_a = ? AND d.lead_b = l.id))
+      ORDER BY l.created_at, l.id LIMIT 50`).bind(...scope.binds, lead.id, mine.email_norm, mine.phone_norm, mine.name_company_norm, lead.id, lead.id)
+    .all<DupLead & { email_norm: string | null; phone_norm: string | null; name_company_norm: string | null }>()).results;
+  return rows.map(({ email_norm, phone_norm, name_company_norm, ...l }) => ({
+    ...l,
+    reasons: ([["email", email_norm === mine.email_norm && !!email_norm], ["phone", phone_norm === mine.phone_norm && !!phone_norm], ["name_company", name_company_norm === mine.name_company_norm && !!name_company_norm]] as const)
+      .filter(([, hit]) => hit).map(([r]) => r as DuplicateReason),
+  }));
 }
 
 export class MergeError extends Error {

@@ -326,7 +326,8 @@ export function register(r: Router) {
     const recovery = await auth.recoveryCodeStatus(ctx.db, ctx.user!.id);
     const body = html`<div class="page-head"><h1>Account</h1></div>
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Profile</h2><p>${ctx.user!.displayName}<br><span class="muted">${ctx.user!.email}</span> ${ctx.user!.emailVerified ? badge("verified", "Email verified") : badge("pending", "Email not confirmed")}</p>
-${ctx.user!.memberships.map((m) => html`<p class="faint">${m.organizationName} · ${label(m.role)}</p>`)}</section>
+${ctx.user!.memberships.map((m) => html`<p class="faint">${m.organizationName} · ${label(m.role)}</p>`)}
+<p data-account-links>${ctx.user!.isStaff ? "" : html`<a href="/account/profile">Edit name or email</a> · `}<a href="/account/privacy">Privacy &amp; your data</a> — download your data or request deletion.</p></section>
 <section class="card"><h2 class="card__title">Two-factor authentication</h2>
 ${ctx.user!.mfaEnabled ? html`<p>${badge("active", "Enabled")} Codes from your authenticator app are required at sign-in.</p>
 <p data-testid="recovery-status">Recovery codes: ${recovery.total ? html`<strong>${recovery.remaining}</strong> of ${recovery.total} unused` : html`${badge("pending", "None")} generate a set now so a lost phone does not lock you out`}.</p>

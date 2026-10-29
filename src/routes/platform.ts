@@ -19,6 +19,7 @@ import { sendMail, renderTemplate, identityFrom, EMAIL_TEMPLATES, REQUIRED_WORKF
 import { ResendEmail } from "../adapters/email.ts";
 import { decideAiJob, aiProviderFromEnv, AI_WORKFLOWS, AI_FORBIDDEN, LOCAL_RUNNER, paidAiBudget, priceKnown } from "../services/ai.ts";
 import * as emp from "../services/employees.ts";
+import * as off from "../services/offboarding.ts";
 import * as wl from "../services/workload.ts";
 import { toCsv } from "../services/finance.ts";
 import * as integ from "../services/integrations.ts";
@@ -99,7 +100,8 @@ ${table(staff, [
     return html`<form method="post" action="/staff/employees/${s.id}/role" class="row">${csrf(ctx)}<label class="visually-hidden" for="role-${s.id}">Role for ${s.display_name}</label><select class="select" id="role-${s.id}" name="role">${roleOpts.map((o) => html`<option value="${o.value}"${o.value === s.role ? html` selected` : ""}>${o.label}</option>`)}</select>${button("Change role", { variant: "secondary", size: "sm" })}</form>
 ${s.disabled_at
   ? actionForm(ctx, `/staff/employees/${s.id}/enable`, "Enable account", { variant: "secondary" })
-  : html`<form method="post" action="/staff/employees/${s.id}/disable" class="row" data-confirm="Disable this account and sign them out everywhere?">${csrf(ctx)}<label class="visually-hidden" for="reason-${s.id}">Reason</label><input class="input" id="reason-${s.id}" name="reason" placeholder="Reason" maxlength="300" required>${button("Disable", { variant: "danger", size: "sm" })}</form>`}
+  : html`<form method="post" action="/staff/employees/${s.id}/disable" class="row" data-confirm="Disable this account and sign them out everywhere?">${csrf(ctx)}<label class="visually-hidden" for="reason-${s.id}">Reason</label><input class="input" id="reason-${s.id}" name="reason" placeholder="Reason" maxlength="300" required>
+<label class="visually-hidden" for="offb-${s.id}">Their open work</label><select class="select" id="offb-${s.id}" name="offboarding"><option value="queue">Queue their work for reassignment</option><option value="end">End their assignments now</option></select>${button("Disable", { variant: "danger", size: "sm" })}</form>`}
 ${s.mfa ? actionForm(ctx, `/staff/employees/${s.id}/mfa-reset`, "Reset 2FA", { variant: "ghost", confirm: "Reset this person's two-factor authentication? Their authenticator and recovery codes stop working, they are signed out everywhere, and they must set up a new authenticator at next sign-in." }) : ""}`;
   } },
 ], { empty: emptyState(fq || frole || fstatus ? "No staff match" : "No staff yet", fq || frole || fstatus ? "Adjust the filters." : "Invite your first team member below.") })}</section>
@@ -345,6 +347,7 @@ export function register(r: Router): void {
     const tickets = (await ctx.db.prepare(`SELECT t.id, t.subject, t.priority, t.status FROM assignments a JOIN tickets t ON t.id = a.subject_id WHERE a.subject_type = 'ticket' AND a.user_id = ? AND a.ended_at IS NULL AND t.status NOT IN ('resolved','closed') ORDER BY t.updated_at DESC LIMIT 100`).bind(id).all<{ id: string; subject: string; priority: string; status: string }>()).results;
     const time = (await ctx.db.prepare(`SELECT te.worked_on, te.minutes, t.id AS task_id, t.title FROM time_entries te JOIN tasks t ON t.id = te.task_id WHERE te.user_id = ? ORDER BY te.worked_on DESC LIMIT 20`).bind(id).all<{ worked_on: string; minutes: number; task_id: string; title: string }>()).results;
     const activity = (await ctx.db.prepare(`SELECT action, subject_type, subject_id, created_at FROM audit_logs WHERE actor_user_id = ? ORDER BY id DESC LIMIT 20`).bind(id).all<{ action: string; subject_type: string; subject_id: string | null; created_at: string }>()).results;
+    const offPending = await off.pendingCount(ctx.db, id);
     const body = html`${pageHead(s.display_name, linkButton("All employees", "/staff/employees", "ghost", "sm"), `${label(s.role)}${w.jobTitle ? ` · ${w.jobTitle}` : ""}`)}
 ${formErrors(errors)}
 <div class="kpis grid grid-4">${kpi("Open tasks", w.openTasks, w.overdueTasks ? `${w.overdueTasks} overdue` : "None overdue")}${kpi("Due in 7 days", w.dueNext7)}${kpi("Waiting on dependencies", w.blockedTasks)}${kpi("Open estimate", wl.hours(w.openEstimateMinutes), w.unestimatedTasks ? `${w.unestimatedTasks} task(s) not estimated` : "All open tasks estimated")}</div>
@@ -363,7 +366,8 @@ ${input({ name: "weekly_capacity_hours", label: "Weekly capacity (hours)", type:
 <section class="card"><h2 class="card__title">Tickets</h2>${table(tickets, [{ header: "Ticket", cell: (t) => html`<a href="/staff/support/${t.id}">${t.subject}</a>` }, { header: "Priority", cell: (t) => badge(t.priority) }, { header: "Status", cell: (t) => badge(t.status) }], { empty: html`<p class="muted">No open tickets.</p>` })}</section>
 <section class="card"><h2 class="card__title">Recent time</h2>${table(time, [{ header: "Date", cell: (x) => x.worked_on }, { header: "Task", cell: (x) => html`<a href="/staff/tasks/${x.task_id}">${x.title}</a>` }, { header: "Time", cell: (x) => wl.hours(x.minutes), numeric: true }], { empty: html`<p class="muted">No time logged.</p>` })}</section>
 <section class="card"><h2 class="card__title">Recent activity</h2>${table(activity, [{ header: "When", cell: (a) => formatDateTime(a.created_at) }, { header: "Action", cell: (a) => html`<code>${a.action}</code>` }, { header: "Subject", cell: (a) => `${a.subject_type}${a.subject_id ? ` ${a.subject_id}` : ""}` }], { empty: html`<p class="muted">No recorded activity.</p>` })}
-<p><a href="/staff/audit?actor=${encodeURIComponent(s.email)}">Full history in the audit log</a></p></section></div>`;
+<p><a href="/staff/audit?actor=${encodeURIComponent(s.email)}">Full history in the audit log</a></p></section></div>
+<section class="card" style="margin-top:1.5rem"><h2 class="card__title">Offboarding</h2>${s.disabled_at ? html`<p>${offPending ? html`${badge("blocked", `${offPending} item${offPending === 1 ? "" : "s"} owner disabled`)} ` : ""}${offPending ? "Open work still needs a new owner." : "No work is waiting for reassignment."}</p>` : html`<p class="muted">When this account is disabled, its open work is queued for reassignment.</p>`}${linkButton(s.disabled_at ? "Open the reassignment queue" : "Preview open work", `/staff/employees/${s.id}/offboarding`, "secondary", "sm")}</section>`;
     return staffPage(ctx, s.display_name, body, status);
   };
   r.get("/staff/employees/:id", (ctx, p) => employeeDetail(ctx, p.id));
@@ -432,8 +436,10 @@ ${input({ name: "weekly_capacity_hours", label: "Weekly capacity (hours)", type:
     r.post(`/staff/employees/:id/${action}`, async (ctx, p) => {
       requireStaff(ctx, "employee.manage");
       try {
-        await emp.setStaffDisabled(ctx.db, actorOf(ctx), p.id, action === "disable", str(await ctx.form(), "reason"));
-        return redirect(ctx, "/staff/employees", { kind: "success", text: action === "disable" ? "Account disabled and all sessions revoked." : "Account enabled." });
+        const f = await ctx.form();
+        const res = await emp.setStaffDisabled(ctx.db, actorOf(ctx), p.id, action === "disable", str(f, "reason"), str(f, "offboarding") === "end" ? "end" : "queue");
+        if (action === "disable" && res.queued) return redirect(ctx, `/staff/employees/${p.id}/offboarding`, { kind: "success", text: `Account disabled and all sessions revoked. ${res.queued} open item${res.queued === 1 ? "" : "s"} of work need a new owner.` });
+        return redirect(ctx, "/staff/employees", { kind: "success", text: action === "disable" ? `Account disabled and all sessions revoked.${res.ended ? ` ${res.ended} assignment${res.ended === 1 ? " was" : "s were"} ended and flagged "owner disabled".` : ""}` : `Account enabled.${res.restored ? ` ${res.restored} queued item${res.restored === 1 ? "" : "s"} returned to them.` : ""}` });
       } catch (e) {
         if (e instanceof emp.EmployeeError) {
           if (e.status === 403) throw new HttpError(403, e.message);
@@ -443,6 +449,52 @@ ${input({ name: "weekly_capacity_hours", label: "Weekly capacity (hours)", type:
       }
     });
   }
+
+  // ── Offboarding queue (CREST-GAP-041) ──
+  const offboardingPage = async (ctx: AppContext, id: string, errors: string[] = [], status = 200) => {
+    requireStaff(ctx, "employee.manage");
+    const s = (await emp.listStaff(ctx.db)).find((x) => x.id === id);
+    if (!s) throw new HttpError(404, "Staff member not found");
+    const items = await off.listItems(ctx.db, id);
+    const pending = items.filter((i) => i.status === "pending");
+    const live = s.disabled_at ? [] : await off.openWork(ctx.db, id);
+    const people = await off.eligibleAssignees(ctx.db, id);
+    const href = (i: { subject_type: off.OffboardingSubject; subject_id: string }) => i.subject_type === "task" ? `/staff/tasks/${i.subject_id}` : i.subject_type === "lead" ? `/staff/crm/leads/${i.subject_id}` : i.subject_type === "ticket" ? `/staff/support/${i.subject_id}` : `/staff/projects/${i.subject_id}`;
+    const who = (i: off.OffboardingItem) => html`<label class="visually-hidden" for="to-${i.id}">New owner for ${i.label}</label><select class="select" id="to-${i.id}" name="to_user_id">${people.filter((u) => off.canTake(i.subject_type, u.role_id)).map((u) => html`<option value="${u.id}">${u.display_name} (${label(u.role_id)})</option>`)}</select>`;
+    const body = html`${pageHead(`Offboarding: ${s.display_name}`, linkButton("Employee record", `/staff/employees/${s.id}`, "ghost", "sm"), s.disabled_at ? "Account disabled" : "Account active")}
+${formErrors(errors)}
+${s.disabled_at ? alert(pending.length ? "warn" : "success", pending.length ? html`<strong>${pending.length} item${pending.length === 1 ? "" : "s"} of work still belong to this disabled account</strong> and are flagged “owner disabled”. Reassign each one, or end the assignment so a coordinator picks it up.` : "Nothing is waiting: every piece of this person's work has a new owner or was ended.")
+      : alert("info", html`This account is active. Its open work is listed below; when the account is disabled from the employee list, this work is queued here (or ended at once, if you choose that).`)}
+${s.disabled_at && pending.length ? html`<section class="card"><h2 class="card__title">Everything at once</h2><form method="post" action="/staff/employees/${s.id}/offboarding" class="row">${csrf(ctx)}<input type="hidden" name="item" value="all">
+<label class="visually-hidden" for="to-all">New owner</label><select class="select" id="to-all" name="to_user_id">${people.map((u) => html`<option value="${u.id}">${u.display_name} (${label(u.role_id)})</option>`)}</select>
+${button("Reassign all", { name: "action", value: "reassign", variant: "secondary", size: "sm" })}${button("End all assignments", { name: "action", value: "end", variant: "danger", size: "sm" })}</form>
+<p class="faint">Items the chosen person's role cannot take (for example a ticket for a developer) are skipped and stay in the queue.</p></section>` : ""}
+${s.disabled_at ? table(items, [
+      { header: "Work", cell: (i) => html`<a href="${href(i)}">${i.label}</a><br><span class="faint">${off.SUBJECT_LABELS[i.subject_type]}</span>` },
+      { header: "Status", cell: (i) => i.status === "pending" ? badge("blocked", "Owner disabled") : i.status === "reassigned" ? badge("done", `Reassigned to ${i.resolved_to_name ?? "—"}`) : i.status === "ended" ? badge("paused", "Ended — owner disabled") : badge("active", "Returned on re-enable") },
+      { header: "Since", cell: (i) => formatDateTime(i.created_at) },
+      { header: "", cell: (i) => i.status !== "pending" ? (i.resolved_at ? html`<span class="faint">${formatDateTime(i.resolved_at)}</span>` : "") : html`<form method="post" action="/staff/employees/${s.id}/offboarding" class="row">${csrf(ctx)}<input type="hidden" name="item" value="${i.id}">${who(i)}${button("Reassign", { name: "action", value: "reassign", variant: "secondary", size: "sm" })}${button("End", { name: "action", value: "end", variant: "ghost", size: "sm" })}</form>` },
+    ], { empty: emptyState("No offboarding items", "This person had no open assignments, projects, leads or tickets when the account was disabled."), caption: "Offboarding queue" })
+    : table(live, [{ header: "Work", cell: (i) => html`<a href="${href(i)}">${i.label}</a>` }, { header: "Kind", cell: (i) => off.SUBJECT_LABELS[i.subject_type] }], { empty: emptyState("No open work", "No open task or project assignments, managed projects, leads or tickets."), caption: "Open work" })}`;
+    return staffPage(ctx, `Offboarding: ${s.display_name}`, body, status);
+  };
+  r.get("/staff/employees/:id/offboarding", (ctx, p) => offboardingPage(ctx, p.id));
+  r.post("/staff/employees/:id/offboarding", async (ctx, p) => {
+    requireStaff(ctx, "employee.manage");
+    const s = (await emp.listStaff(ctx.db)).find((x) => x.id === p.id);
+    if (!s) throw new HttpError(404, "Staff member not found");
+    if (!s.disabled_at) return offboardingPage(ctx, p.id, ["Work is reassigned here only after the account is disabled. Use the project, lead and ticket pages for an active person."], 409);
+    const f = await ctx.form();
+    const item = str(f, "item");
+    const action = str(f, "action") === "end" ? "end" : "reassign";
+    try {
+      const res = await off.resolveItems(ctx.db, ctx.user!.id, p.id, item === "all" ? "all" : [item], action, str(f, "to_user_id") || null, ctx.ip);
+      return redirect(ctx, `/staff/employees/${p.id}/offboarding`, { kind: res.skipped.length ? "info" : "success", text: `${res.done} item${res.done === 1 ? "" : "s"} ${action === "end" ? "ended" : "reassigned"}.${res.skipped.length ? ` ${res.skipped.length} skipped because that person's role cannot take them.` : ""}` });
+    } catch (e) {
+      if (e instanceof off.OffboardingError) return offboardingPage(ctx, p.id, [e.message], e.status);
+      throw e;
+    }
+  });
 
   // ── Email operations ──
   const emailQuery = (ctx: AppContext) => {
