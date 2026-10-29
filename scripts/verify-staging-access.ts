@@ -1,6 +1,8 @@
-// Verifies the complete staging access sequence over real HTTP, exactly as the Founder will use it:
-//   preview gate (401) → preview password → Owner email + password → current 2FA code → Owner command
-//   center, with all 32 Owner modules present in the navigation and each one loading (200).
+// Verifies the complete staging access sequence over real HTTP, exactly as the Founder will use it, on the PUBLIC
+// staging site (no preview password since 2026-10-28):
+//   public homepage loads with no cookies → staff and portal areas refuse anonymous visitors → Owner email + password
+//   → the staff area is still refused before 2FA → current 2FA code → Owner command center, with all 32 Owner modules
+//   present in the navigation and each one loading (200).
 // Signs out at the end. Never prints a credential; failures name the step only.
 //
 // CLI: node --no-warnings scripts/verify-staging-access.ts --access access/access.json --url <url> --readme access/README.md
@@ -11,25 +13,19 @@ import { totpCode } from "../src/lib/auth-crypto.ts";
 import { OWNER_MODULE_LABELS } from "../src/routes/nav.ts";
 import { accessReadme, type AccessResult } from "./staging-access.ts";
 
-export interface VerifyInput { base: string; previewPassword: string; owner: { email: string; password: string; totp: string } }
+export interface VerifyInput { base: string; owner: { email: string; password: string; totp: string } }
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
-type Sleep = (ms: number) => Promise<void>;
-const realSleep: Sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
-/**
- * A changed STAGING_ACCESS_PASSWORD reaches Cloudflare's edge locations at different moments. The preview pass cookie is
- * an HMAC keyed by that secret, so for a while a pass issued by an instance that already has the new password is refused
- * (401, the gate page) by one that still has the old password. Deploy #56 (2026-10-28) failed exactly there, right after
- * the credential rotation. The verifier therefore waits until the pass is honoured consistently before going on.
- * It re-sends the same cookie (no extra password attempts, so the gate's rate limit is not spent) and gives up at a
- * deadline: a pass that is never honoured still fails, and any other response fails at once.
- */
-export const PROPAGATION = { deadlineMs: 120_000, retryMs: 5_000, confirmMs: 2_000, consecutive: 3 } as const;
-const isGatePage = (status: number, body: string) => status === 401 && body.includes('action="/__preview-access"');
+/** A request with no cookies at all (a fresh visitor). */
+async function fetchAnonymous(f: Fetch, base: string, path: string): Promise<Response> {
+  const r = await f(base + path, { method: "GET", headers: { "user-agent": "crestmont-staging-verifier" }, redirect: "manual" });
+  await r.arrayBuffer();
+  return r;
+}
 
 const decode = (s: string) => s.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&#39;|&#x27;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, " ").trim();
 
-export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log: (s: string) => void = () => {}, sleep: Sleep = realSleep, propagation: { deadlineMs: number; retryMs: number; confirmMs: number; consecutive: number } = PROPAGATION): Promise<{ modules: number; pages: number }> {
+export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log: (s: string) => void = () => {}): Promise<{ modules: number; pages: number }> {
   const base = v.base.replace(/\/$/, "");
   const jar = new Map<string, string>();
   const send = async (method: string, path: string, form?: Record<string, string>) => {
@@ -49,51 +45,37 @@ export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log:
   const fail = (step: string, detail: string) => { throw new Error(`${step}: ${detail}`); };
   const loc = (r: Response) => new URL(r.headers.get("location") ?? "/", base).pathname;
 
-  // 1. The gate is in front of the site.
+  // 1. The public site loads directly: no preview gate, no cookie needed.
   let r = await send("GET", "/");
-  if (r.status !== 401) fail("preview gate", `expected 401 before the password, got ${r.status}`);
-  log("1/5 preview gate is locked");
+  const home = await r.text();
+  if (r.status !== 200) fail("public homepage", `expected 200 with no cookies, got ${r.status}`);
+  if (home.includes('action="/__preview-access"')) fail("public homepage", "the preview password page is still shown");
+  log("1/6 public homepage loads with no cookies or credentials");
 
-  // 2. Preview password (a propagating secret can take a few seconds to reach every edge location).
-  for (let attempt = 1; ; attempt++) {
-    r = await send("POST", "/__preview-access", { password: v.previewPassword, next: "/login" });
-    if (r.status === 303 && jar.has("cm_preview")) break;
-    if (r.status === 429) fail("preview password", "rate limited");
-    if (attempt >= 6) fail("preview password", `not accepted (HTTP ${r.status})`);
-    await sleep(10_000);
+  // 2. Protected areas refuse anonymous visitors (redirect to sign-in or refuse; never 200).
+  for (const path of ["/staff", "/portal", "/account"]) {
+    const a = await fetchAnonymous(f, base, path);
+    if (a.status === 200) fail("anonymous access", `${path} returned 200 without a session`);
   }
-  log("2/5 preview password accepted");
-
-  // 2b. The pass must be honoured consistently (see PROPAGATION) before anything else is checked.
-  for (let streak = 0, waited = 0, refused = 0; ;) {
-    r = await send("GET", "/login");
-    const body = await r.text();
-    if (r.status === 200 && jar.has("cm_csrf")) {
-      if (++streak >= propagation.consecutive) {
-        if (refused) log(`2b/5 preview pass honoured everywhere after ${Math.round(waited / 1000)}s (${refused} refusal${refused === 1 ? "" : "s"} while the password change propagated)`);
-        break;
-      }
-      await sleep(propagation.confirmMs); waited += propagation.confirmMs;
-      continue;
-    }
-    if (!isGatePage(r.status, body)) fail("sign-in page", `HTTP ${r.status}`);
-    streak = 0; refused++;
-    if (waited >= propagation.deadlineMs) fail("sign-in page", `HTTP 401: the preview pass for the accepted password was still refused after ${Math.round(waited / 1000)}s (the password change has not reached every edge location)`);
-    await sleep(propagation.retryMs); waited += propagation.retryMs;
-  }
+  log("2/6 staff, portal and account areas refuse anonymous visitors");
 
   // 3. Owner email and password.
   r = await send("GET", "/login");
   if (r.status !== 200 || !jar.has("cm_csrf")) fail("sign-in page", `HTTP ${r.status}`);
+  await r.arrayBuffer();
   r = await send("POST", "/login", { _csrf: jar.get("cm_csrf")!, email: v.owner.email, password: v.owner.password });
   if (r.status !== 303 || !loc(r).startsWith("/mfa")) fail("Owner password", `expected the 2FA step, got HTTP ${r.status} → ${r.status === 303 ? loc(r) : "page"}`);
-  log("3/5 Owner email and password accepted; 2FA requested");
+  log("3/6 Owner email and password accepted; 2FA requested");
+
+  // 3b. Mandatory MFA: a password-only session must not reach the staff area.
+  { const pre = await send("GET", "/staff"); await pre.arrayBuffer(); if (pre.status === 200) fail("Owner MFA", "the staff area opened before the 2FA code"); }
+  log("4/6 staff area still refused before 2FA");
 
   // 4. Current 2FA code. Wait for a fresh 30-second step if the current one is nearly over.
   if (30 - (Math.floor(Date.now() / 1000) % 30) < 5) await new Promise((res) => setTimeout(res, 6_000));
   r = await send("POST", "/mfa", { _csrf: jar.get("cm_csrf")!, code: await totpCode(v.owner.totp) });
   if (r.status !== 303 || !loc(r).startsWith("/staff")) fail("2FA code", `not accepted (HTTP ${r.status})`);
-  log("4/5 2FA code accepted");
+  log("5/6 2FA code accepted");
 
   // 5. Owner command center: all 32 modules in the navigation, each loads.
   r = await send("GET", "/staff");
@@ -110,7 +92,7 @@ export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log:
     await p.arrayBuffer();
   }
   if (broken.length) fail("Owner modules", broken.join(", "));
-  log(`5/5 all ${pages} Owner modules load`);
+  log(`6/6 all ${pages} Owner modules load`);
 
   await send("POST", "/logout", { _csrf: jar.get("cm_csrf")! });
   return { modules: OWNER_MODULE_LABELS.length, pages };
@@ -122,10 +104,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const url = arg("--url")!;
   const owner = access.accounts.find((a) => a.role === "owner")!;
   try {
-    const res = await verifyStagingAccess({ base: url, previewPassword: access.previewPassword, owner: { email: owner.email, password: owner.password, totp: owner.totp! } }, fetch, console.log);
+    const res = await verifyStagingAccess({ base: url, owner: { email: owner.email, password: owner.password, totp: owner.totp! } }, fetch, console.log);
     const readme = arg("--readme");
     if (readme) writeFileSync(readme, accessReadme(url, access, new Date().toISOString()), { mode: 0o600 });
-    console.log(`Verified: ${res.pages}/${res.modules} Owner modules reachable through the full access sequence.`);
+    console.log(`Verified: ${res.pages}/${res.modules} Owner modules reachable through the full access sequence (public site, MFA enforced).`);
   } catch (e) {
     console.error(`::error::Staging access verification failed at ${String((e as Error).message).slice(0, 300)}`);
     process.exit(1);

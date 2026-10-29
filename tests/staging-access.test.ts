@@ -27,7 +27,8 @@ async function stagingDb() {
     async execFile(path) { db.raw.exec(readFileSync(path, "utf8")); },
     async putSecret(name, value) { secrets[name] = value; },
   };
-  const env = (): Env => ({ DB: db, ENVIRONMENT: "staging", PREVIEW_GATE: "required", APP_URL: BASE, STAGING_ACCESS_PASSWORD: secrets.STAGING_ACCESS_PASSWORD });
+  // The deployed staging configuration: public (no PREVIEW_GATE), even if an old STAGING_ACCESS_PASSWORD secret is still set.
+  const env = (): Env => ({ DB: db, ENVIRONMENT: "staging", APP_URL: BASE, STAGING_ACCESS_PASSWORD: "leftover-old-preview-secret" });
   const fetchFor = (e: Env) => async (url: string, init?: RequestInit) => handle(new Request(url, init), e);
   return { db, ops, secrets, env, fetchFor, seedCreds };
 }
@@ -35,58 +36,54 @@ async function stagingDb() {
 const ownerOf = (r: Awaited<ReturnType<typeof applyAccess>>) => { const o = r.accounts.find((a) => a.role === "owner")!; return { email: o.email, password: o.password, totp: o.totp! }; };
 const KEY = "test-root-key-0123456789abcdef";
 
-test("[INFRA-002] staging access: live secret and artifact always agree; full Owner sequence verified; rotation revokes old credentials", async () => {
+test("[INFRA-002] staging access: public site, artifact and live accounts agree; full Owner sequence with MFA verified; rotation revokes old credentials", async () => {
   const s = await stagingDb();
 
-  // First run after this change: rotates (no salt yet), applies the secret and demo credentials.
+  // First run after this change: rotates (no salt yet) and applies the demo credentials. No preview password is issued.
   const r1 = await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false });
   assert.equal(r1.rotated, true);
-  assert.equal(s.secrets.STAGING_ACCESS_PASSWORD, r1.previewPassword, "the Worker secret is exactly the reported password");
-  assert.match(r1.previewPassword, /^[2-9a-km-zA-HJ-NP-Z]{5}(-[2-9a-km-zA-HJ-NP-Z]{5}){3}$/, "unambiguous characters, no markdown-active symbols");
+  assert.equal(s.secrets.STAGING_ACCESS_PASSWORD, undefined, "no preview password secret is written");
+  assert.match(ownerOf(r1).password, /^[2-9a-km-zA-HJ-NP-Z]{5}(-[2-9a-km-zA-HJ-NP-Z]{5}){3}$/, "unambiguous characters, no markdown-active symbols");
   assert.equal(r1.accounts.length, 8);
   const owner1 = ownerOf(r1);
   assert.match(owner1.totp, /^[A-Z2-7]{32}$/);
 
   // The complete sequence the Founder follows, over the real request pipeline.
-  const v = await verifyStagingAccess({ base: BASE, previewPassword: r1.previewPassword, owner: owner1 }, s.fetchFor(s.env()));
+  const v = await verifyStagingAccess({ base: BASE, owner: owner1 }, s.fetchFor(s.env()));
   assert.deepEqual(v, { modules: 32, pages: 32 });
 
   // The seed's own random credentials (what an older artifact would have held) no longer work.
   const seedOwner = /^\| owner \| (\S+) \| `([^`]+)` \| `([A-Z2-7]+)` \|/m.exec(s.seedCreds)!;
-  await assert.rejects(verifyStagingAccess({ base: BASE, previewPassword: r1.previewPassword, owner: { email: seedOwner[1], password: seedOwner[2], totp: seedOwner[3] } }, s.fetchFor(s.env())), /Owner password/);
+  await assert.rejects(verifyStagingAccess({ base: BASE, owner: { email: seedOwner[1], password: seedOwner[2], totp: seedOwner[3] } }, s.fetchFor(s.env())), /Owner password/);
 
   // A later run without rotation reports identical credentials (no silent drift between runs).
   const r2 = await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false });
   assert.equal(r2.rotated, false);
-  assert.equal(r2.previewPassword, r1.previewPassword);
   assert.deepEqual(r2.accounts, r1.accounts);
   s.db.raw.prepare("UPDATE users SET totp_last_step = NULL").run(); // next 30 s window
-  await verifyStagingAccess({ base: BASE, previewPassword: r2.previewPassword, owner: ownerOf(r2) }, s.fetchFor(s.env()));
+  await verifyStagingAccess({ base: BASE, owner: ownerOf(r2) }, s.fetchFor(s.env()));
 
   // An Owner session exists; rotation must revoke it along with every old credential.
   const sessionsBefore = (s.db.raw.prepare(`SELECT COUNT(*) AS n FROM sessions`).get() as { n: number }).n;
   assert.ok(sessionsBefore > 0);
   const r3 = await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: true });
   assert.equal(r3.rotated, true);
-  assert.notEqual(r3.previewPassword, r1.previewPassword);
   assert.notEqual(ownerOf(r3).password, owner1.password);
   assert.notEqual(ownerOf(r3).totp, owner1.totp, "2FA setup key rotated");
   assert.equal((s.db.raw.prepare(`SELECT COUNT(*) AS n FROM sessions s JOIN users u ON u.id = s.user_id WHERE u.email LIKE '%@crestmont-preview.test'`).get() as { n: number }).n, 0, "demo sessions revoked");
-  await assert.rejects(verifyStagingAccess({ base: BASE, previewPassword: r1.previewPassword, owner: owner1 }, s.fetchFor(s.env())), /preview password/);
+  await assert.rejects(verifyStagingAccess({ base: BASE, owner: owner1 }, s.fetchFor(s.env())), /Owner password/, "old Owner password refused after rotation");
   s.db.raw.prepare("UPDATE users SET totp_last_step = NULL").run();
-  await verifyStagingAccess({ base: BASE, previewPassword: r3.previewPassword, owner: ownerOf(r3) }, s.fetchFor(s.env()));
+  await verifyStagingAccess({ base: BASE, owner: ownerOf(r3) }, s.fetchFor(s.env()));
 
   // Bumping ACCESS_EPOCH in the workflow forces a rotation without anyone ticking a box.
   assert.equal((await applyAccess(s.ops, { rootKey: KEY, epoch: "3", rotate: false })).rotated, true);
 
-  // A Founder-chosen preview password is honoured and applied as-is.
-  const r5 = await applyAccess(s.ops, { rootKey: KEY, epoch: "3", rotate: false, fixedPreviewPassword: "founder chosen phrase 42" });
-  assert.equal(s.secrets.STAGING_ACCESS_PASSWORD, "founder chosen phrase 42");
-  assert.equal(r5.previewSource, "founder");
+  assert.equal(s.secrets.STAGING_ACCESS_PASSWORD, undefined, "still no preview password secret after rotations");
 
-  // The artifact README carries the five required items.
+  // The artifact README carries the required items and no preview password.
   const md = accessReadme(BASE, r3, "2026-10-27T08:00:00.000Z");
-  for (const item of [BASE, r3.previewPassword, ownerOf(r3).email, ownerOf(r3).password, ownerOf(r3).totp]) assert.ok(md.includes(item));
+  assert.doesNotMatch(md, /## \d\. Preview password/);
+  for (const item of [BASE, ownerOf(r3).email, ownerOf(r3).password, ownerOf(r3).totp]) assert.ok(md.includes(item));
   assert.match(md, /Verified by the deploy run/);
 });
 

@@ -1,19 +1,17 @@
-// Staging preview access: one source of truth for the preview password and the demo-account credentials.
+// Staging access: one source of truth for the demo-account credentials (Owner, staff, customers).
+// The staging website itself is public (Founder decision 2026-10-28): no preview password is issued any more.
 //
-// Why: the preview password used to be generated only when the Worker secret looked missing (or on request),
-// so a later run could overwrite the secret while an earlier access artifact still held the old value, and a
-// run that kept the secret could not say what it was. Demo credentials had the same drift (a reseed issued new
-// passwords that INSERT OR IGNORE never applied). Now every run DERIVES all access credentials from
+// Why: demo credentials used to drift (a reseed issued new passwords that INSERT OR IGNORE never applied). Now
+// every run DERIVES all access credentials from
 //   HMAC-SHA256(root key = the CLOUDFLARE_API_TOKEN secret, salt stored in staging D1)
-// and re-applies them (Worker secret + demo users in D1), so the live site and the access artifact always
+// and re-applies them (demo users in D1), so the live site and the access artifact always
 // agree. Rotation = a new random salt (on request, or when ACCESS_EPOCH changes), which also revokes every
 // demo-account session and pending token. The salt alone is useless without the root key; the root key never
 // leaves GitHub's secret store. Production is never touched (this only addresses the staging Worker and D1).
 //
 // CLI (used by .github/workflows/deploy-staging.yml):
 //   node --no-warnings scripts/staging-access.ts --url <preview url> --out <dir>
-//   env: ACCESS_ROOT_KEY (required), ACCESS_EPOCH, ROTATE=true|false, FIXED_PREVIEW_PASSWORD (optional),
-//        WRANGLER (default "npx --yes wrangler@4")
+//   env: ACCESS_ROOT_KEY (required), ACCESS_EPOCH, ROTATE=true|false, WRANGLER (default "npx --yes wrangler@4")
 // Writes <dir>/README.md (the private artifact), <dir>/demo-accounts.md and <dir>/private.json (for the
 // verifier and the browser journey; not uploaded). Prints no credential except as ::add-mask:: commands.
 import { execFileSync } from "node:child_process";
@@ -22,7 +20,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashPassword, base32Encode } from "../src/lib/auth-crypto.ts";
-import { putSecretIfChanged } from "./staging-secrets.ts";
 
 export const DEMO_DOMAIN = "crestmont-preview.test";
 const ALPHABET = "23456789abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ"; // no 0/O/1/l/I, no markdown-active characters
@@ -36,7 +33,7 @@ export interface D1Ops {
 export interface DemoAccount { role: string; email: string; password: string; totp: string | null; note: string }
 /** What a rotation revoked beyond passwords and 2FA keys (counts only; for logs and evidence). */
 export interface Revoked { sessions: number; authTokens: number; recoveryCodes: number; invitations: number }
-export interface AccessResult { rotated: boolean; previewPassword: string; previewSource: "derived" | "founder"; accounts: DemoAccount[]; revoked?: Revoked }
+export interface AccessResult { rotated: boolean; accounts: DemoAccount[]; revoked?: Revoked }
 
 const enc = new TextEncoder();
 async function hmac(key: string, msg: string): Promise<Uint8Array> {
@@ -67,7 +64,7 @@ const NOTES: Record<string, string> = {
   project_manager: "Staff (project manager)", support: "Staff (support)",
 };
 
-export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: string; rotate: boolean; fixedPreviewPassword?: string }): Promise<AccessResult> {
+export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: string; rotate: boolean }): Promise<AccessResult> {
   if (!o.rootKey || o.rootKey.length < 16) throw new Error("ACCESS_ROOT_KEY is missing or too short");
   await ops.query(`CREATE TABLE IF NOT EXISTS _staging_access (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
   const meta = Object.fromEntries((await ops.query<{ key: string; value: string }>(`SELECT key, value FROM _staging_access`)).map((r) => [r.key, r.value]));
@@ -120,14 +117,8 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-  const founder = !!o.fixedPreviewPassword;
-  const previewPassword = founder ? o.fixedPreviewPassword! : await derivePassword(o.rootKey, salt, "preview");
-  // The live secret always equals what this run reports; it is re-put only when the value changed, because any secret
-  // change blocks Worker rollbacks to earlier versions (Cloudflare error 10220).
-  if (o.rootKey) await putSecretIfChanged(ops, o.rootKey, "STAGING_ACCESS_PASSWORD", previewPassword);
-  else await ops.putSecret("STAGING_ACCESS_PASSWORD", previewPassword);
   accounts.sort((a, b) => (ROLE_ORDER.indexOf(a.role) + 1 || 99) - (ROLE_ORDER.indexOf(b.role) + 1 || 99) || a.email.localeCompare(b.email));
-  return { rotated, previewPassword, previewSource: founder ? "founder" : "derived", accounts, revoked };
+  return { rotated, accounts, revoked };
 }
 
 /** Whether the next applyAccess() call will rotate (read-only). */
@@ -141,10 +132,9 @@ export async function rotationPending(ops: D1Ops, o: { epoch: string; rotate: bo
 /**
  * READ-ONLY: the credentials that are live right now (before a rotation), derived exactly as applyAccess() derived
  * them. Used only by scripts/staging-rotation-check.ts to prove that these stop working after the rotation; the values
- * never leave the runner. The preview password may be Founder-fixed, so both candidates are returned for the caller
- * to test against the live gate.
+ * never leave the runner.
  */
-export async function currentAccess(ops: D1Ops, rootKey: string, fixedPreviewPassword?: string): Promise<{ previewCandidates: string[]; owner: { email: string; password: string; totp: string } } | null> {
+export async function currentAccess(ops: D1Ops, rootKey: string): Promise<{ owner: { email: string; password: string; totp: string } } | null> {
   const rows = await ops.query<{ key: string; value: string }>(`SELECT key, value FROM _staging_access WHERE key = 'salt'`).catch(() => []);
   const salt = rows[0]?.value;
   if (!salt) return null;
@@ -152,9 +142,7 @@ export async function currentAccess(ops: D1Ops, rootKey: string, fixedPreviewPas
     `SELECT u.email, u.mfa_enabled FROM users u JOIN memberships m ON m.user_id = u.id
       WHERE m.role_id = 'owner' AND u.email LIKE '%@${DEMO_DOMAIN}' AND u.password_hash IS NOT NULL ORDER BY u.email LIMIT 1`))[0];
   if (!owner?.mfa_enabled) return null;
-  const derived = await derivePassword(rootKey, salt, "preview");
   return {
-    previewCandidates: [...new Set([fixedPreviewPassword, derived].filter((v): v is string => !!v))],
     owner: { email: owner.email, password: await derivePassword(rootKey, salt, `password:${owner.email}`), totp: await deriveTotp(rootKey, salt, owner.email) },
   };
 }
@@ -166,21 +154,17 @@ export function accountsTable(accounts: DemoAccount[]): string {
 
 export function accessReadme(url: string, r: AccessResult, verifiedAt: string | null): string {
   const owner = r.accounts.find((a) => a.role === "owner")!;
-  return `# Crestmont staging preview — private access
+  return `# Crestmont staging — private access
 
 Keep this file private. It is issued only through this GitHub Actions artifact.
-${verifiedAt ? `Verified by the deploy run at ${verifiedAt}: preview password → Owner sign-in → 2FA → all 32 Owner modules.` : "NOT VERIFIED — do not rely on these values."}
-${r.rotated ? "These credentials were rotated in this run; all earlier preview passwords, demo passwords, 2FA keys, recovery codes, demo sessions and pending demo invitations no longer work." : "Credentials unchanged since the last rotation."}
+${verifiedAt ? `Verified by the deploy run at ${verifiedAt}: public site (no preview password) → Owner sign-in → 2FA → all 32 Owner modules.` : "NOT VERIFIED — do not rely on these values."}
+${r.rotated ? "These credentials were rotated in this run; all earlier demo passwords, 2FA keys, recovery codes, demo sessions and pending demo invitations no longer work." : "Credentials unchanged since the last rotation."}
 
-## 1. Staging website
+## 1. Staging website (public — no preview password)
 
 ${url}
 
-## 2. Preview password
-
-\`${r.previewPassword}\`${r.previewSource === "founder" ? "  (your STAGING_PREVIEW_PASSWORD repository secret)" : ""}
-
-## 3. Owner sign-in
+## 2. Owner sign-in (${url.replace(/\/$/, "")}/login)
 
 - Email: \`${owner.email}\`
 - Password: \`${owner.password}\`
@@ -189,7 +173,7 @@ ${url}
 
 ## Steps
 
-1. Open the website and enter the preview password.
+1. Open the website (it loads directly) and choose Sign in.
 2. Sign in with the Owner email and password.
 3. Enter the 6-digit code from your authenticator app.
 4. The Owner command center opens with all 32 modules in the left navigation.
@@ -231,15 +215,15 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
     const r = await applyAccess(wranglerOps(), {
       rootKey: process.env.ACCESS_ROOT_KEY ?? "", epoch: process.env.ACCESS_EPOCH ?? "1",
-      rotate: process.env.ROTATE === "true", fixedPreviewPassword: process.env.FIXED_PREVIEW_PASSWORD || undefined,
+      rotate: process.env.ROTATE === "true",
     });
-    for (const v of [r.previewPassword, ...r.accounts.flatMap((a) => [a.password, a.totp ?? ""])].filter(Boolean)) console.log(`::add-mask::${v}`);
+    for (const v of [...r.accounts.flatMap((a) => [a.password, a.totp ?? ""])].filter(Boolean)) console.log(`::add-mask::${v}`);
     mkdirSync(out, { recursive: true });
     const owner = r.accounts.find((a) => a.role === "owner")!;
-    writeFileSync(join(out, "private.json"), JSON.stringify({ url, previewPassword: r.previewPassword, owner: { email: owner.email, password: owner.password, totp: owner.totp }, rotated: r.rotated, previewSource: r.previewSource }), { mode: 0o600 });
+    writeFileSync(join(out, "private.json"), JSON.stringify({ url, owner: { email: owner.email, password: owner.password, totp: owner.totp }, rotated: r.rotated }), { mode: 0o600 });
     writeFileSync(join(out, "demo-accounts.md"), accountsTable(r.accounts) + "\n", { mode: 0o600 });
     writeFileSync(join(out, "access.json"), JSON.stringify(r), { mode: 0o600 });
-    console.log(`Staging access applied: ${r.accounts.length} demo accounts, ${r.rotated ? "rotated" : "unchanged"}, preview password ${r.previewSource}.`);
+    console.log(`Staging access applied: ${r.accounts.length} demo accounts, ${r.rotated ? "rotated" : "unchanged"} (public site: no preview password).`);
     if (r.revoked) console.log(`Revoked with the rotation: ${r.revoked.sessions} demo sessions, ${r.revoked.authTokens} one-time tokens, ${r.revoked.recoveryCodes} recovery codes, ${r.revoked.invitations} pending invitations issued by demo accounts.`);
   } catch (e) {
     // wrangler errors can echo arguments; print only the first line of our own message.

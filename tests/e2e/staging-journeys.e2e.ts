@@ -1,8 +1,7 @@
-// The 33 required E2E journeys (directive §69, TEST-002) against the DEPLOYED staging preview.
-// Uses only what a real person has: a browser, the preview password and the demo accounts the deploy
+// The 33 required E2E journeys (directive §69, TEST-002) against the DEPLOYED, public staging site.
+// Uses only what a real person has: a browser and the demo accounts the deploy
 // workflow issues (access/demo-accounts.md). No database access, no webhook secrets, no fixtures.
 //   E2E_BASE_URL          https://crestmont-platform-staging.<subdomain>.workers.dev
-//   E2E_PREVIEW_PASSWORD  the preview password
 //   E2E_ACCOUNTS_FILE     demo-accounts.md (| role | email | `password` | `TOTPKEY` or — | note |)
 // Journeys 29–30 additionally act as the CI client of the readiness API (as the deploy workflow does):
 //   EVIDENCE_INGEST_SECRET          set by the workflow's "Evidence ingest secret" step
@@ -30,9 +29,8 @@ import { totpCode } from "../../src/lib/auth-crypto.ts";
 import { signEvidence } from "../../src/readiness/ingest.ts";
 
 const BASE = process.env.E2E_BASE_URL?.replace(/\/$/, "");
-const PREVIEW_PW = process.env.E2E_PREVIEW_PASSWORD;
 const ACCOUNTS = process.env.E2E_ACCOUNTS_FILE;
-const unset = !BASE || !PREVIEW_PW || !ACCOUNTS ? "E2E_BASE_URL / E2E_PREVIEW_PASSWORD / E2E_ACCOUNTS_FILE not set (staging journeys run only against a deployed preview)" : "";
+const unset = !BASE || !ACCOUNTS ? "E2E_BASE_URL / E2E_ACCOUNTS_FILE not set (staging journeys run only against deployed staging)" : "";
 const RUN = `e2e-${Date.now().toString(36)}`;
 const TIMEOUT = 30_000;
 
@@ -70,26 +68,16 @@ function watch(page: Page) {
 }
 function assertClean() { assert.deepEqual(issues.splice(0), [], "no CSP violations, JS errors or 5xx responses"); }
 
-/** A fresh browser context (own session cookies) that holds the preview pass. The password is entered once
- * through the gate form, like a team member would; later contexts reuse that pass cookie, because the gate
- * allows only 10 password submissions per IP per 15 minutes (shared with the other deploy steps). */
-let previewPass: unknown[] | null = null;
+/** A fresh browser context with NO cookies (a first-time visitor): staging is public since 2026-10-28, so the homepage
+ * must load directly, with no preview password prompt. Each actor then signs in with its own demo account. */
 async function previewContext(): Promise<Actor> {
   const ctx = await browser.newContext();
   ctx.setDefaultTimeout(TIMEOUT);
-  if (previewPass) await ctx.addCookies(previewPass);
   const page = await ctx.newPage();
   watch(page);
   const r = await page.goto(BASE + "/");
-  if (!previewPass) {
-    assert.equal(r?.status(), 401, "preview gate in front of the site");
-    await page.fill("#f-preview", PREVIEW_PW!);
-    await nav(page, "button[type=submit]");
-    const pass = (await ctx.cookies()).filter((c: { name: string }) => c.name === "cm_preview");
-    previewPass = pass;
-    assert.equal(pass.length, 1, `preview pass issued (${await alerts(page)} ${(await text(page, "body")).slice(0, 200)})`);
-  }
-  assert.doesNotMatch(await page.content(), /Preview password/i, "preview pass accepted");
+  assert.equal(r?.status(), 200, "public homepage loads for a fresh visitor");
+  assert.doesNotMatch(await page.content(), /Preview password|__preview-access/i, "no preview password prompt");
   return { ctx, page };
 }
 

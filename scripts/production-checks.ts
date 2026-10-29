@@ -25,7 +25,7 @@ if (!["staging", "production"].includes(environment)) { console.error("--environ
 interface Check { requirementId: string; testName: string; critical: boolean; run: () => Promise<string | null> } // null = pass, string = failure reason
 
 async function get200(path: string, expect: (r: Response, body: string) => string | null): Promise<string | null> {
-  // Staging sits behind the preview gate: CHECK_COOKIE carries a preview pass (never used for production).
+  // Staging is public (2026-10-28) and needs no cookie. CHECK_COOKIE remains only for an emergency re-locked staging (never production).
   const headers: Record<string, string> = { "user-agent": "crestmont-post-deploy-check" };
   if (process.env.CHECK_COOKIE && environment === "staging") headers.cookie = process.env.CHECK_COOKIE;
   const r = await fetch(base + path, { redirect: "manual", headers, signal: AbortSignal.timeout(15_000) });

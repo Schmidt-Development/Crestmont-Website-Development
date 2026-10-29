@@ -3,7 +3,8 @@ name: Deploy staging
 # Staging preview for the Founder (INFRA-002/INFRA-005). Self-provisioning: the ONLY prerequisites are the
 # repository (or `staging` environment) secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID — see
 # docs/STAGING-PREVIEW.md. The workflow creates the staging D1 database if missing, applies migrations,
-# deploys the Worker behind the private preview gate, seeds clearly-labelled sample data and demo accounts
+# deploys the Worker as a PUBLIC staging website (no preview password since 2026-10-28; noindex, staging banner,
+# allowlisted email only), seeds clearly-labelled sample data and demo accounts
 # on first run, and hands the access details to the Founder as a private workflow artifact.
 # Production is never touched here (see deploy-production.yml, which requires Founder approval).
 
@@ -13,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       rotate_credentials:
-        description: "Rotate the preview password and every demo account password and 2FA key (old ones stop working)"
+        description: "Rotate every demo account password (Owner included) and 2FA key (old ones stop working)"
         type: boolean
         default: false
       reseed_demo_accounts:
@@ -65,7 +66,7 @@ jobs:
       security-events: read
     # F-24: no secret is set for the whole job. The Cloudflare token and account id are given only to the steps that run
     # wrangler or call the Cloudflare API (including the delivery gate, forensic snapshot, capture and revocation proof,
-    # which read staging D1 through wrangler); STAGING_PREVIEW_PASSWORD only to the steps that use it. npm install, the
+    # which read staging D1 through wrangler); no preview password exists any more. npm install, the
     # tests and the browser journey (third-party package code) receive none. tests/workflow-security.test.ts enforces this.
     env:
       DEPLOYMENT_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-staging
@@ -132,8 +133,8 @@ jobs:
             node -e 'const j=JSON.parse(require("fs").readFileSync("tt.json","utf8"));console.log("Pre-deploy D1 bookmark: "+(j.bookmark??JSON.stringify(j)))' | tee -a "$GITHUB_STEP_SUMMARY"
           rm -f tt.json
 
-      # A rotation must never leave the Founder without a way to receive the new Owner credentials, and must actually
-      # change the preview password. Checked BEFORE anything is changed; nothing is printed but the verdict.
+      # A rotation must never leave the Founder without a way to receive the new Owner credentials.
+      # Checked BEFORE anything is changed; nothing is printed but the verdict.
       - name: Credential delivery gate (before any rotation)
         id: gate
         env:
@@ -171,7 +172,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: $WRANGLER d1 migrations apply crestmont-staging --remote --env staging
 
-      - name: Deploy Worker (staging, behind the preview gate)
+      - name: Deploy Worker (staging, public website)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -295,28 +296,20 @@ jobs:
           $WRANGLER d1 execute crestmont-staging --remote --env staging --file portfolio.sql --yes > /dev/null
           { echo "### Portfolio"; echo; sed 's/^/- /' portfolio-report.txt; printf "$report\n"; } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Preview password will change (before the rotation)
-        env:
-          FIXED_PREVIEW_PASSWORD: ${{ secrets.STAGING_PREVIEW_PASSWORD }}
-        if: steps.gate.outputs.pending == 'true'
-        run: node --no-warnings scripts/staging-rotation-check.ts override --url "${{ steps.deploy.outputs.url }}"
-
       # Before rotating: sign in with the credentials that are live now and keep that session and one recovery code, so
       # the run can PROVE they stop working. Values stay on the runner (RUNNER_TEMP, 0600, masked) and are never uploaded.
       - name: Capture the pre-rotation access (for the revocation proof)
         if: steps.gate.outputs.pending == 'true'
         continue-on-error: true
         env:
-          FIXED_PREVIEW_PASSWORD: ${{ secrets.STAGING_PREVIEW_PASSWORD }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           ROTATE: ${{ inputs.rotate_credentials }}
         run: node --no-warnings scripts/staging-rotation-check.ts capture --url "${{ steps.deploy.outputs.url }}" --state "$RUNNER_TEMP/rotation-state.json"
 
-      - name: Apply staging access (preview password + demo accounts, rotated when due)
+      - name: Apply staging access (demo accounts, rotated when due)
         env:
-          FIXED_PREVIEW_PASSWORD: ${{ secrets.STAGING_PREVIEW_PASSWORD }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -330,27 +323,34 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: node --no-warnings scripts/staging-rotation-check.ts state
 
-      - name: Verify the full access sequence on the live preview
+      - name: Verify the full access sequence on the live site
         id: verify
         run: |
           node --no-warnings scripts/verify-staging-access.ts --access access/access.json \
             --url "${{ steps.deploy.outputs.url }}" --readme access/README.md
 
-      - name: Smoke checks through the preview gate
+      # Public staging (2026-10-28): a fresh visitor with NO cookies sees the website; protected areas still refuse
+      # anonymous visitors; every response is noindex and robots.txt disallows all. No credential is used here.
+      - name: Smoke checks on the public site (fresh visitor, no cookies)
         id: smoke
         env:
           BASE: ${{ steps.deploy.outputs.url }}
         run: |
           code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/health"); [ "$code" = "200" ] || { echo "::error::/api/health returned $code"; exit 1; }
-          code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/"); [ "$code" = "401" ] || { echo "::error::preview gate not active on / (HTTP $code)"; exit 1; }
-          PW=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("access/private.json","utf8")).previewPassword)')
-          cookie=$(curl -s -D - -o /dev/null --data-urlencode "password=$PW" --data-urlencode "next=/" "$BASE/__preview-access" | grep -i '^set-cookie: cm_preview=' | sed -E 's/^set-cookie: ([^;]+);.*/\1/I' | tr -d '\r')
-          [ -n "$cookie" ] || { echo "::error::preview password was not accepted"; exit 1; }
-          CHECK_COOKIE="$cookie" node --no-warnings scripts/production-checks.ts --base "$BASE" --environment staging --commit "$GITHUB_SHA" \
+          home=$(curl -s -D home.h "$BASE/"); code=$(head -1 home.h | awk '{print $2}')
+          [ "$code" = "200" ] || { echo "::error::public homepage returned HTTP $code with no cookies"; exit 1; }
+          if printf '%s' "$home" | grep -q '__preview-access'; then echo "::error::the preview password page is still shown"; exit 1; fi
+          grep -qi '^x-robots-tag: noindex, nofollow' home.h || { echo "::error::homepage is missing X-Robots-Tag noindex"; exit 1; }
+          [ "$(curl -s "$BASE/robots.txt")" = "$(printf 'User-agent: *\nDisallow: /')" ] || { echo "::error::robots.txt does not disallow all"; exit 1; }
+          for path in /staff /staff/owner /portal /account; do
+            c=$(curl -s -o /dev/null -w '%{http_code}' "$BASE$path"); [ "$c" != "200" ] && echo "ok   $path refused anonymously ($c)" || { echo "::error::$path opened without a session"; exit 1; }
+          done
+          rm -f home.h
+          node --no-warnings scripts/production-checks.ts --base "$BASE" --environment staging --commit "$GITHUB_SHA" \
             --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}" --out evidence/staging-check.json
 
       # Proves staging serves THIS commit's frontend (consolidated from the frontend-preview Worker): sha256 of key assets
-      # equals the repository files, and the gated homepage carries the approved design markers. No secrets.
+      # equals the repository files, and the public homepage carries the approved design markers. No secrets, no cookies.
       - name: Frontend assets and homepage served by this commit
         id: frontend
         if: steps.smoke.outcome == 'success'
@@ -362,20 +362,17 @@ jobs:
             want=$(sha256sum "public/$f" | cut -d' ' -f1); got=$(curl -s "$BASE/$f" | sha256sum | cut -d' ' -f1)
             if [ "$want" = "$got" ]; then echo "ok   $f"; else echo "::error::$f served $got, expected $want"; fail=1; fi
           done
-          PW=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("access/private.json","utf8")).previewPassword)')
-          cookie=$(curl -s -D - -o /dev/null --data-urlencode "password=$PW" --data-urlencode "next=/" "$BASE/__preview-access" | grep -i '^set-cookie: cm_preview=' | sed -E 's/^set-cookie: ([^;]+);.*/\1/I' | tr -d '\r')
-          [ -n "$cookie" ] || { echo "::error::preview password was not accepted"; exit 1; }
-          home=$(curl -s -H "cookie: $cookie" "$BASE/")
+          home=$(curl -s "$BASE/")
           for marker in 'class="intro"' 'data-statement' 'data-stages' 'class="bento"' 'data-switch' 'hero-build.webp' 'data-cb-launch'; do
             if printf '%s' "$home" | grep -q "$marker"; then echo "ok   homepage contains $marker"; else echo "::error::homepage is missing $marker"; fail=1; fi
           done
           for path in /services /pricing /pricing/compare /portfolio /process /about /contact /faq /login; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' -H "cookie: $cookie" "$BASE$path"); [ "$code" = "200" ] && echo "ok   $path 200" || { echo "::error::$path returned $code"; fail=1; }
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE$path"); [ "$code" = "200" ] && echo "ok   $path 200" || { echo "::error::$path returned $code"; fail=1; }
           done
           [ "$fail" = 0 ] && echo "Staging serves the consolidated frontend of ${GITHUB_SHA}." >> "$GITHUB_STEP_SUMMARY"
           exit $fail
 
-      - name: Browser journey on the preview (staging E2E evidence)
+      - name: Browser journey on the live site (staging E2E evidence)
         id: e2e
         if: steps.smoke.outcome == 'success'
         continue-on-error: true
@@ -392,7 +389,6 @@ jobs:
           unset EVIDENCE_INGEST_SECRET   # set via GITHUB_ENV earlier; third-party packages below never see it (F-24)
           npm install --prefix .pw --no-save --no-audit --no-fund playwright@1.48.2 axe-core@4.10.2 > /dev/null
           .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
-          export E2E_PREVIEW_PASSWORD=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("access/private.json","utf8")).previewPassword)')
           node --no-warnings --test --test-concurrency=1 --test-reporter=./scripts/evidence-reporter.mjs tests/e2e/staging.e2e.ts tests/e2e/staging-quality.e2e.ts tests/e2e/staging-journeys.e2e.ts
 
       # The frontend's hosted browser suite (previously run only against the frontend-preview Worker): every public page at
@@ -409,8 +405,7 @@ jobs:
           unset EVIDENCE_INGEST_SECRET   # set via GITHUB_ENV earlier; third-party packages below never see it (F-24)
           npm install --prefix .pwf --no-save --no-audit --no-fund --ignore-scripts playwright@1.63.0 > pwf-install.log 2>&1 || { echo "::error title=Playwright install failed::$(tail -c 600 pwf-install.log | tr '\n' ' ')"; exit 1; }
           .pwf/node_modules/.bin/playwright install --with-deps chromium > pwf-browsers.log 2>&1 || { echo "::error title=Chromium install failed::$(tail -c 600 pwf-browsers.log | tr '\n' ' ')"; exit 1; }
-          PREVIEW_PASSWORD=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("access/private.json","utf8")).previewPassword)') \
-            node --no-warnings scripts/frontend-browser-check.mjs "$BASE" evidence/frontend-browser
+          node --no-warnings scripts/frontend-browser-check.mjs "$BASE" evidence/frontend-browser
 
       - name: Upload frontend recordings and screenshots (public pages only; no credentials)
         if: always() && steps.frontend_browser.outcome != 'skipped'
@@ -458,8 +453,8 @@ jobs:
         run: |
           rm -f access/private.json access/access.json access/demo-accounts.md
           if [ "${{ steps.verify.outcome }}" = "success" ]; then
-            echo "### Staging preview deployed and verified: ${{ steps.deploy.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
-            echo "Preview password → Owner sign-in → 2FA → all 32 Owner modules verified on the live site." >> "$GITHUB_STEP_SUMMARY"
+            echo "### Staging deployed and verified (public website): ${{ steps.deploy.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "Public site with no cookies → protected areas refused anonymously → Owner sign-in → 2FA required → all 32 Owner modules verified on the live site." >> "$GITHUB_STEP_SUMMARY"
             echo "Credentials: **staging-access-sealed** artifact of this run (AES-256-GCM; only the ACCESS_ARTIFACT_PASSPHRASE opens it; never in logs)." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "### Staging access NOT verified — no access artifact was issued for this run." >> "$GITHUB_STEP_SUMMARY"

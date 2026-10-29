@@ -1,9 +1,10 @@
 // Real-browser verification of the deployed frontend on staging (deploy-staging.yml; formerly the frontend preview). Runs on the GitHub runner,
-// which can reach the preview; signs in through the preview password gate by cookie (nothing is typed on screen), then
+// which can reach staging. Staging is public (no preview password since 2026-10-28): every browser context starts with NO
+// cookies, exactly like a first-time visitor. Then
 // drives the hosted pages at phone and desktop sizes. Produces screenshots and recorded tours (no credentials appear in
 // them) and one annotation with the results. Exit 1 if any check fails.
 //
-//   PREVIEW_PASSWORD=… PLAYWRIGHT_MODULE=… node scripts/frontend-browser-check.mjs <base-url> <out-dir>
+//   PLAYWRIGHT_MODULE=… node scripts/frontend-browser-check.mjs <base-url> <out-dir>
 import fs from "node:fs";
 // Any crash is reported as an annotation (the job log is not always readable where the results are reviewed).
 const crash = (e) => { console.log(`::error title=Browser verification crashed::${String(e?.stack || e).replace(/\n/g, " | ").slice(0, 1500)}`); process.exit(1); };
@@ -12,20 +13,12 @@ const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright")
 const { checkLocation, checkInteractive, checkFlow } = await import("./preview-explorer-checks.mjs");
 const { checkConstellation } = await import("./preview-about-checks.mjs");
 const base = (process.argv[2] ?? "").replace(/\/$/, ""), out = process.argv[3] ?? "preview-browser";
-const pw = process.env.PREVIEW_PASSWORD ?? "";
 const local = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(base); // dry runs against dev/server.ts (no gate)
-if (!local && (!/^https:\/\//.test(base) || !pw)) { console.log("::error::usage: PREVIEW_PASSWORD=… frontend-browser-check.mjs <https base> <out>"); process.exit(1); }
+if (!local && !/^https:\/\//.test(base)) { console.log("::error::usage: frontend-browser-check.mjs <https base> <out>"); process.exit(1); }
 fs.mkdirSync(`${out}/video`, { recursive: true }); fs.mkdirSync(`${out}/screens`, { recursive: true });
 process.env.PREVIEW_SHOTS = `${out}/screens`;
 
-// Gate cookie (POST /__preview-access → cm_preview).
-let gate = "";
-for (let i = 0; i < 12 && !gate && !local; i++) {
-  const r = await fetch(`${base}/__preview-access`, { method: "POST", redirect: "manual", body: new URLSearchParams({ password: pw, next: "/" }) });
-  for (const c of r.headers.getSetCookie()) if (c.startsWith("cm_preview=")) gate = c.split(";")[0].slice("cm_preview=".length);
-  if (!gate) await new Promise((r) => setTimeout(r, 5000));
-}
-if (!gate && !local) { console.log("::error::the preview did not accept the preview password"); process.exit(1); }
+// No gate: contexts carry no cookies (fresh visitor).
 const host = new URL(base).hostname;
 
 const results = [], fails = [];
@@ -34,7 +27,6 @@ const step = async (label, fn) => { try { await fn(); } catch (e) { ok(false, `$
 const b = await chromium.launch();
 async function context(name, viewport, mobile, extra = {}) {
   const ctx = await b.newContext({ viewport, isMobile: mobile, hasTouch: mobile, deviceScaleFactor: mobile ? 2 : 1, recordVideo: { dir: `${out}/video/${name}`, size: viewport }, ...extra });
-  if (!local) await ctx.addCookies([{ name: "cm_preview", value: gate, domain: host, path: "/", secure: true, httpOnly: true, sameSite: "Lax" }]);
   return ctx;
 }
 const PAGES = ["/", "/services", "/services/ai-receptionist", "/pricing", "/pricing/compare", "/portfolio", "/process", "/about", "/contact", "/faq"];

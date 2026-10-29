@@ -150,12 +150,20 @@ export async function handle(req: Request, env: Env, exec?: ExecLike): Promise<R
   // One UPSERT per request, after the response on Cloudflare (waitUntil); no path, id or user is stored.
   const started = Date.now();
   const mark = { unhandled: false };
-  const res = await dispatch(req, env, url, mark);
+  const res = withNoindex(env, await dispatch(req, env, url, mark));
   if (env.ENV_METRICS !== "off") {
     const write = recordRequestMetric(env.DB, { environment: env.ENVIRONMENT, pathname: url.pathname, status: res.status, durationMs: Date.now() - started, unhandled: mark.unhandled, at: env.overrides?.now?.() ?? new Date() });
     if (exec && typeof exec.waitUntil === "function") exec.waitUntil(write); else await write;
   }
   return res;
+}
+
+/** Outside production every Worker response (pages, JSON, files, redirects) tells crawlers not to index or follow it,
+ *  in addition to robots.txt (Disallow: /) and the page-level noindex meta tag. Production is unchanged. */
+function withNoindex(env: Env, res: Response): Response {
+  if (env.ENVIRONMENT === "production") return res;
+  try { res.headers.set("x-robots-tag", "noindex, nofollow"); return res; }
+  catch { const h = new Headers(res.headers); h.set("x-robots-tag", "noindex, nofollow"); return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h }); }
 }
 
 async function dispatch(req: Request, env: Env, url: URL, mark: { unhandled: boolean }): Promise<Response> {
