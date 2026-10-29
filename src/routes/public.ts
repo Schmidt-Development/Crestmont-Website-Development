@@ -100,8 +100,11 @@ ${i > 0 ? html`<p class="package__inherits">Everything in ${PACKAGES[PKG_ORDER[i
   })}</div>`;
 }
 
+/** Maintenance plans are on sale only once their entitlements are approved (CAT-006); billing copy waits for that (CREST-GAP-090). */
+const plansApproved = () => plans().every((m) => m.entitlementsStatus === "approved");
+
 function maintenanceCards(): SafeHtml {
-  const approved = plans().every((m) => m.entitlementsStatus === "approved");
+  const approved = plansApproved();
   return html`<div class="grid grid-3 pricing-grid" data-reveal-group>${plans().map((m) => html`<div class="card package" data-reveal><h3 class="card__title">${m.name}</h3><div class="price" data-testid="price-${m.id}">${formatCents(effective[`maintenance:${m.id}`] ?? m.monthlyCents)}<small> / month</small></div>
 ${approved ? html`<ul class="checklist">${Object.values(m.proposedEntitlements).map((e) => html`<li>${e}</li>`)}</ul>` : html`<p class="muted">Full plan details will be published here once finalised.</p>`}</div>`)}</div>
 ${approved ? "" : html`<p class="muted">Each plan will have explicit, published limits for hosting, maintenance time, content updates, security updates, monitoring, backups and support response targets — with no unlimited development or unlimited support. Have a question in the meantime? <a href="/contact?topic=maintenance">Ask us about maintenance</a>.</p>`}`;
@@ -678,7 +681,7 @@ ${parseItems(c.get("faq.items").items).map((q) => html`<details class="disclosur
     const h = c.get("hosting.page");
     return html`${serviceHero("Ongoing care", h.heading, h.lede, html`${linkButton("Ask about maintenance", "/contact?topic=maintenance")}`, serviceVisual("hosting-maintenance"))}
 <section class="section section--flush"><div class="container">${maintenanceCards()}</div></section>
-${section("Ownership", "Your site, your choice", html`<ul class="plain-list"><li>Maintenance plans are optional. Your domain always remains registered to you.</li><li>You can use your own domain registrar or agency-managed DNS services.</li><li>Plans renew monthly by automatic billing, with self-service payment management in your customer portal; see the <a href="/legal/cancellation">cancellation policy</a>.</li><li>Support tickets can be submitted at any time; see the <a href="/legal/support">support policy</a> for staffed hours.</li></ul>`)}`;
+${section("Ownership", "Your site, your choice", html`<ul class="plain-list"><li>Maintenance plans are optional. Your domain always remains registered to you.</li><li>You can use your own domain registrar or agency-managed DNS services.</li>${plansApproved() ? html`<li>Plans renew monthly by automatic billing, with self-service payment management in your customer portal; see the <a href="/legal/cancellation">cancellation policy</a>.</li>` : ""}<li>Support tickets can be submitted at any time; see the <a href="/legal/support">support policy</a> for staffed hours.</li></ul>`)}`;
   }));
 
   // ── lead forms ──
@@ -764,7 +767,8 @@ ${turnstileWidget(ctx)}
 function renderContact(ctx: AppContext, v: FormVals, e: FieldErrors, status: number) {
   return page(ctx, "contact", ["contact.page"], (c) => {
     const cp = c.get("contact.page");
-    const hours = ctx.settings["support.staffed_hours"];
+    // CREST-GAP-049: the line appears only once real staffed hours are set (Owner → business settings).
+    const hours = ctx.settings["support.staffed_hours"]?.trim() || null;
     const email = ctx.settings["contact.email"] ?? SUPPORT_EMAIL;
     const channel = (title: string, addr: string, note: string) => html`<a class="cx-channel" href="mailto:${addr}" data-reveal><span class="cx-channel__title">${title}</span><span class="cx-channel__addr">${addr}</span><span class="cx-channel__note">${note}</span><span class="cx-channel__go" aria-hidden="true">${ARROW_SVG}</span></a>`;
     return html`<section class="hero hero--page hero--contact"><div class="container cx-hero"><div class="eyebrow">Contact</div><h1 class="hero-title">${cp.heading}</h1>${cp.lede ? html`<p class="lede hero-seq" style="--seq:0">${cp.lede}</p>` : ""}</div></section>
@@ -784,12 +788,21 @@ ${channel("General & support", email, "Questions, existing projects and anything
 ${channel("Sales", SALES_EMAIL, "Packages, quotes and new projects")}
 ${channel("Billing", BILLING_EMAIL, "Invoices and payments")}
 </div>
-<div class="cx-more" data-reveal><p><strong>Staffed hours:</strong> ${hours ?? "published here once confirmed"}.</p><p>Existing customers can open support tickets any time in the <a href="/login">customer portal</a>. Planning a project? The <a href="/quote">custom quote form</a> collects the details we need.</p></div>
+<div class="cx-more" data-reveal>${hours ? html`<p><strong>Staffed hours:</strong> ${hours}.</p>` : ""}<p>Existing customers can open support tickets any time in the <a href="/login">customer portal</a>. Planning a project? The <a href="/quote">custom quote form</a> collects the details we need.</p></div>
 </div></section>`;
   }, status);
 }
 
+/** CREST-GAP-097: the confirmation is shown only on the redirect that follows a saved submission (the one-time success
+ *  flash set by handleLead). A direct visit, a reload or a bookmark gets neutral text that confirms nothing. */
 function thanksPage(ctx: AppContext, title: string, body: string) {
+  if (ctx.flash?.kind !== "success") {
+    const quote = ctx.url.pathname.startsWith("/quote");
+    return htmlResponse(ctx, publicLayout(ctx, { title: quote ? "Request a quote" : "Contact", noindex: true }, html`<section class="hero hero--page hero--thanks"><div class="container cx-thanks">
+<div class="eyebrow">${quote ? "Custom quote" : "Contact"}</div><h1>${quote ? "Request a custom quote" : "Send us a message"}</h1>
+<p class="lede">This page confirms a ${quote ? "quote request" : "message"} right after it is sent. If you have already sent one, we will reply by email; otherwise, use the form to send it.</p>
+<div class="row">${linkButton(quote ? "Request a quote" : "Contact us", quote ? "/quote" : "/contact")}${linkButton("Return home", "/", "secondary")}</div></div></section>`));
+  }
   return htmlResponse(ctx, publicLayout(ctx, { title, noindex: true }, html`<section class="hero hero--page hero--thanks"><div class="container cx-thanks">
 <svg class="cx-check" viewBox="0 0 64 64" width="72" height="72" aria-hidden="true"><circle cx="32" cy="32" r="29" fill="none" stroke="currentColor" stroke-width="2"/><path d="M19 33l9 9 17-19" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
 <div class="eyebrow">Received</div><h1>${title}</h1><p class="lede">${body}</p>
