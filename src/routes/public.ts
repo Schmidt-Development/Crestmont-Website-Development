@@ -5,7 +5,7 @@ import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, raw, safeUrl, formatCents, formatDate, formatDateTime, type SafeHtml } from "../lib/html.ts";
 import { HttpError, htmlResponse, redirect, str, securityHeaders } from "../app/http.ts";
-import { publicLayout, appLayout, crestRing } from "../ui/layout.ts";
+import { publicLayout, appLayout, crestRing, metaDescription } from "../ui/layout.ts";
 import { csrf, input, textarea, select, button, linkButton, ctaLink, ARROW_SVG, actionForm, formErrors, alert, table, badge, emptyState, pageHead, dl, fileInput, attributionFields, richText } from "../ui/components.ts";
 import { requireStaff } from "../app/app.ts";
 import { staffNav } from "./nav.ts";
@@ -51,10 +51,11 @@ export const PUBLIC_PATHS = [
 
 type Content = Awaited<ReturnType<typeof cms.loadContent>>;
 
-async function page(ctx: AppContext, seoKey: string, keys: string[], render: (c: Content) => SafeHtml | Promise<SafeHtml>, status = 200): Promise<Response> {
+/** `meta`, when given, derives the page's own title and description from its content instead of the shared SEO key. */
+async function page(ctx: AppContext, seoKey: string, keys: string[], render: (c: Content) => SafeHtml | Promise<SafeHtml>, status = 200, meta?: (c: Content) => { title: string; description: string }): Promise<Response> {
   const c = await cms.loadContent(ctx, [`seo.${seoKey}`, ...keys]);
   effective = await effectivePrices(ctx.db, ctx.now());
-  const seo = c.get(`seo.${seoKey}`);
+  const seo = meta ? meta(c) : c.get(`seo.${seoKey}`);
   const body = await render(c);
   const banner = c.previewing
     ? html`<div class="preview-banner" role="status">Preview of an unpublished revision (${c.previewing}). Visitors still see the published version. <a href="/staff/cms/${c.previewing}">Back to the editor</a></div>`
@@ -541,6 +542,9 @@ ${section("Not offered", "What we do not offer", html`<p class="muted">We do not
   r.get("/services/:slug", async (ctx, p) => {
     const s = serviceBySlug(p.slug);
     if (!s || s.pricing === "maintenance") throw new HttpError(404, "That service page does not exist.");
+    // CREST-GAP-046: each service page has its own title (the service name) and description (its summary, which the
+    // CMS can override per service through `service.<slug>`).
+    const serviceMeta = (c: Content) => ({ title: s.name, description: metaDescription(c.get(`service.${s.slug}`).summary || s.summary) });
     return page(ctx, "services", [`service.${s.slug}`, "pricing.presentation"], (c) => {
       const copy = c.get(`service.${s.slug}`);
       if (s.slug === "ai-receptionist") return aiReceptionistPage(s, copy, ctx.settings["contact.email"] ?? SUPPORT_EMAIL);
@@ -551,7 +555,7 @@ ${section("Not offered", "What we do not offer", html`<p class="muted">We do not
 <div>${s.includes.length ? html`<div class="card"><h3 class="card__title">What is included</h3><ul class="checklist">${s.includes.map((i) => html`<li>${i}</li>`)}</ul></div>` : ""}
 ${s.boundaries.length ? html`<div class="card card--quiet"><h3 class="card__title">Good to know</h3><ul class="plain-list">${s.boundaries.map((i) => html`<li>${i}</li>`)}</ul></div>` : ""}</div></div></section>
 ${related.length ? section("Related", "Related services", serviceList(related)) : ""}`;
-    });
+    }, 200, serviceMeta);
   });
 
   r.get("/pricing", (ctx) => page(ctx, "pricing", ["pricing.presentation"], (c) => {
@@ -609,11 +613,11 @@ ${ids.map((fid) => { const f = top(fid); return html`<tr><th scope="row"><span c
     const proj = await pf.getBySlug(ctx.db, p.slug);
     if (!proj || !proj.published) throw new HttpError(404, "That portfolio project is not available.");
     const tms = await pf.publishedTestimonials(ctx.db, proj.id);
-    return htmlResponse(ctx, publicLayout(ctx, { title: `${proj.name} — case study`, description: proj.description.slice(0, 160) }, html`
+    return htmlResponse(ctx, publicLayout(ctx, { title: `${proj.name} — case study`, description: metaDescription(proj.description) }, html`
 ${pageHero(proj.industry, proj.name, undefined, html`<a class="btn btn--primary" href="${safeUrl(proj.live_url)}" rel="noopener noreferrer" target="_blank">Visit live website</a>${linkButton("All projects", "/portfolio", "ghost")}`)}
 <section class="section section--flush"><div class="container">${portfolioExplorer(ctx, [proj], { variant: "case", headingLevel: 2 })}</div></section>
-<section class="section section--flush"><div class="container case-shots"><figure>${shot(proj, "desktop", true)}<figcaption class="faint">Desktop${proj.screenshot_captured_at ? ` · captured ${formatDate(proj.screenshot_captured_at)}` : ""}</figcaption></figure>
-<figure>${shot(proj, "mobile", true)}<figcaption class="faint">Mobile</figcaption></figure></div></section>
+<section class="section section--flush"><div class="container case-shots"><figure>${shot(proj, "desktop", true)}<figcaption class="faint">Desktop${proj.desktop_screenshot_file_id ? (proj.screenshot_captured_at ? ` · captured ${formatDate(proj.screenshot_captured_at)}` : "") : " · demonstration build with sample data"}</figcaption></figure>
+<figure>${shot(proj, "mobile", true)}<figcaption class="faint">Mobile${proj.mobile_screenshot_file_id ? "" : " · demonstration build"}</figcaption></figure></div></section>
 <section class="section"><div class="container grid grid-2"><div class="prose"><h2>About the project</h2>${paragraphs(proj.description).map((x) => html`<p>${x}</p>`)}
 ${proj.technology_summary ? html`<h3>Technology</h3><p>${proj.technology_summary}</p>` : ""}<p class="faint">${proj.relationship}</p></div>
 <div class="card"><h3 class="card__title">Verified features</h3><ul class="checklist">${pf.features(proj).map((f) => html`<li>${f}</li>`)}</ul>

@@ -29,7 +29,7 @@ function sessionCookie(ctx: AppContext, token: string, maxAge: number) {
 
 function loginPage(ctx: AppContext, errors: string[] = [], email = "") {
   const next = ctx.url.searchParams.get("next") ?? "";
-  return htmlResponse(ctx, authLayout(ctx, { title: "Sign in" }, html`<h1 style="font-size:2rem">Sign in</h1>
+  return htmlResponse(ctx, authLayout(ctx, { title: "Sign in", description: "Sign in to the Crestmont customer portal to follow your project, approvals, files, invoices and support requests." }, html`<h1 style="font-size:2rem">Sign in</h1>
 ${formErrors(errors)}
 <form method="post" action="/login${next ? `?next=${encodeURIComponent(next)}` : ""}">${csrf(ctx)}
 ${input({ name: "email", label: "Email", type: "email", value: email, autocomplete: "email", required: true })}
@@ -39,7 +39,7 @@ ${input({ name: "password", label: "Password", type: "password", autocomplete: "
 }
 
 function registerPage(ctx: AppContext, errors: string[] = [], v: Record<string, string> = {}, status?: number) {
-  return htmlResponse(ctx, authLayout(ctx, { title: "Create account" }, html`<h1 style="font-size:2rem">Create your account</h1>
+  return htmlResponse(ctx, authLayout(ctx, { title: "Create account", description: "Create a Crestmont customer account to buy a website package and follow your project in the customer portal." }, html`<h1 style="font-size:2rem">Create your account</h1>
 <p class="muted">Use your account to purchase a package, accept a quote, and manage your project.</p>${formErrors(errors)}
 <form method="post" action="/register">${csrf(ctx)}
 ${input({ name: "name", label: "Your name", value: v.name, autocomplete: "name", required: true })}
