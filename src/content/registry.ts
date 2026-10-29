@@ -141,7 +141,7 @@ export const CMS_KEYS: CmsKeyDef[] = [
     defaults: { heading: "Contact Crestmont", lede: "Send us a message and a member of the team will reply by email. For project-specific work, the custom quote form collects the details we need." } },
   { key: "portfolio.intro", label: "Portfolio introduction", group: "Portfolio", previewPath: "/portfolio",
     fields: [t("heading", "Heading"), ta("lede", "Lead paragraph", 800)],
-    defaults: { heading: "Portfolio", lede: "Real, live websites. Every screenshot is captured from the production site, and every project links to the site itself." } },
+    defaults: { heading: "Portfolio", lede: "Real websites for real businesses, each linked to the live site. Screenshots are captured from an isolated demonstration build of each site that uses sample data." } },
   { key: "hosting.page", label: "Hosting & maintenance", group: "Pages", previewPath: "/hosting-maintenance",
     fields: [t("heading", "Heading"), ta("lede", "Lead paragraph", 800)],
     defaults: { heading: "Hosting & maintenance", lede: "Optional monthly plans to keep your website hosted, updated, monitored and backed up after launch. There are no unlimited development or unlimited support promises — each plan will have explicit, published limits." } },

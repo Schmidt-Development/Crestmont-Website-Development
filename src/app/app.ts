@@ -209,7 +209,7 @@ async function dispatch(req: Request, env: Env, url: URL, mark: { unhandled: boo
     }
     if (err instanceof StepUpRequired && isApi) return jsonResponse(ctx, 401, { error: "Recent two-factor verification required. Verify at /mfa/step-up and retry." });
     if (status && status >= 400 && status < 500) {
-      return isApi ? jsonResponse(ctx, status, { error: (err as Error).message }) : htmlError(ctx, req, env, status, status === 403 ? "Access denied" : "Request could not be completed", (err as Error).message);
+      return isApi ? jsonResponse(ctx, status, { error: (err as Error).message }) : htmlError(ctx, req, env, status, status === 403 ? "Access denied" : status === 404 ? "Page not found" : "Request could not be completed", (err as Error).message);
     }
     mark.unhandled = true;
     await recordAppError(env.DB, { path: url.pathname, method: req.method, message: (err as Error).message, stack: (err as Error).stack, environment: env.ENVIRONMENT });

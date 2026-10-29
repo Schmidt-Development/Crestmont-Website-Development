@@ -37,12 +37,22 @@ test("[WEB-004] a double submit creates one lead; a token survives a validation 
   assert.equal((await c.post("/contact", body, { csrf: false })).status, 403);
 });
 
-test("[WEB-004] the thank-you page states only what happened", async () => {
+test("[WEB-004] the thank-you page states only what happened: confirmation only after a saved submission (CREST-GAP-097)", async () => {
   const { client } = await createTestApp();
-  const h = await (await client().get("/contact/thanks")).text();
+  const c = client();
+  const sent = await c.post("/contact", { name: "Riley Park", email: "riley@example.com", interest: "other", message: "Do you host sites built elsewhere?" });
+  assert.equal(sent.headers.get("location"), "/contact/thanks");
+  const h = await (await c.get("/contact/thanks")).text();
   assert.match(h, /Message received/);
   assert.match(h, /Reply by email/);
   assert.doesNotMatch(h, /within \d+ (hours|minutes)|guarantee/i, "no invented response-time promises");
+  // The success flash is one-time: a reload, a bookmark or a direct visit confirms nothing.
+  for (const [path, fresh] of [["/contact/thanks", false], ["/contact/thanks", true], ["/quote/thanks", true]] as const) {
+    const d = await (await (fresh ? client() : c).get(path)).text();
+    assert.doesNotMatch(d, /Message received|Quote request received|Received<\/div>|is now in our CRM|Recorded/, `${path}: neutral text without the flash`);
+    assert.match(d, /confirms a (message|quote request) right after it is sent/);
+    assert.match(d, /<meta name="robots" content="noindex, nofollow">/);
+  }
 });
 
 test("[WEB-004] submission tokens: a duplicate reports success only for a saved lead; tokens don't reset at midnight; stale tokens are replaced", async () => {

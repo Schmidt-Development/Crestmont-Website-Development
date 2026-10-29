@@ -102,7 +102,7 @@ ${s.checks ? html`<ul class="rc-checks" aria-label="Checks before an outbound ca
 <figcaption class="sv__head"><span class="sv__tag">Simulated call · no real call, no audio</span><span class="sv__title" id="sv-${id}-t">AI receptionist control centre</span></figcaption>
 <div class="sv__body">${body}</div>
 <div class="sv__controls" role="group" aria-label="Call playback"><button type="button" class="sv__opt sv__opt--gold" data-play>Play call</button><button type="button" class="sv__opt" data-step>Next line</button><button type="button" class="sv__opt sv__opt--quiet" data-reset>Replay</button></div>
-<p class="sv__hint">${opts.compact ? "A fictional business and callers. Switch between inbound and outbound and follow the calendar, CRM and team updates." : "A fictional business and callers on fictional numbers. Every step is shown as text, so the demonstration works without sound. Play runs the call; Next line steps through it at your own pace."}</p>
+<p class="sv__hint">${opts.compact ? "A scripted illustration of one possible custom configuration, with a fictional business and callers. Switch between inbound and outbound and follow the simulated updates." : "A scripted illustration of one possible custom configuration — what a client's agent does depends on their provider and connected systems. A fictional business and callers on fictional numbers; every step is shown as text, so it works without sound. Play runs the call; Next line steps through it at your own pace."}</p>
 <p class="visually-hidden" data-sv-live aria-live="polite"></p>
 </figure><script src="/assets/services.js" defer></script>`;
 }
