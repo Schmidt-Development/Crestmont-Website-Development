@@ -38,8 +38,24 @@ export function securityHeaders(kind: "page" | "api" = "page", frameSrc: string[
     "x-frame-options": "DENY",
     "referrer-policy": "strict-origin-when-cross-origin",
     "permissions-policy": "camera=(), microphone=(), geolocation=()",
-    "strict-transport-security": "max-age=63072000; includeSubDomains",
+    // Replaced per environment by src/app/app.ts (hstsValue) on every Worker response.
+    "strict-transport-security": DEFAULT_HSTS,
   };
+}
+
+export const DEFAULT_HSTS = "max-age=63072000; includeSubDomains";
+
+/**
+ * Strict-Transport-Security for this environment (CREST-GAP-029). Without HSTS_MAX_AGE the long-standing default
+ * (2 years, includeSubDomains) is kept, which is what staging and development send. With HSTS_MAX_AGE (production's first
+ * release uses 300) the header is exactly that max-age, and includeSubDomains only when HSTS_INCLUDE_SUBDOMAINS = "on".
+ * An unusable value falls back to 300 rather than to the 2-year default, so a typo can never pin browsers for years.
+ */
+export function hstsValue(env: { HSTS_MAX_AGE?: string; HSTS_INCLUDE_SUBDOMAINS?: string }): string {
+  const raw = env.HSTS_MAX_AGE?.trim();
+  if (raw === undefined || raw === "") return DEFAULT_HSTS;
+  const n = /^\d{1,9}$/.test(raw) ? Number(raw) : 300;
+  return `max-age=${n}${env.HSTS_INCLUDE_SUBDOMAINS === "on" ? "; includeSubDomains" : ""}`;
 }
 
 export function parseCookies(header: string | null): Record<string, string> {
