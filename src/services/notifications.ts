@@ -2,6 +2,7 @@
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import type { AppContext } from "../app/context.ts";
+import { can, type Actor } from "../domain/authz.ts";
 import { sendMail, templateContent, type EmailTemplate, type TemplateData, type MailSpec } from "./mailer.ts";
 
 export type MailCtx = Pick<AppContext, "db" | "email" | "baseUrl">;
@@ -40,6 +41,36 @@ export function notificationHref(n: Pick<NotificationRow, "subject_type" | "subj
   if (!n.subject_type || !n.subject_id) return null;
   const f = (area === "staff" ? STAFF_LINKS : PORTAL_LINKS)[n.subject_type];
   return f ? f(encodeURIComponent(n.subject_id)) : null;
+}
+
+/**
+ * Links for a list of notifications, with dead links removed (CREST-GAP-044): a staff notification about a task
+ * or project the viewer can no longer open (unassigned, removed from the project) renders as plain text instead of
+ * a link that would 403/404. Visibility mirrors staffCanSeeProject in src/services/projects.ts.
+ */
+export async function liveNotificationHrefs(db: Db, viewer: { actor: Actor; userId: string }, rows: Pick<NotificationRow, "id" | "subject_type" | "subject_id">[], area: "staff" | "portal"): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>();
+  for (const n of rows) out.set(n.id, notificationHref(n, area));
+  if (area !== "staff" || can(viewer.actor, "project.read_all")) return out;
+  const ids = (t: string) => [...new Set(rows.filter((n) => n.subject_type === t && n.subject_id && out.get(n.id)).map((n) => n.subject_id!))];
+  const visibleProjectSql = `(p.project_manager_id = ?
+       OR EXISTS (SELECT 1 FROM assignments a WHERE a.subject_type = 'project' AND a.subject_id = p.id AND a.user_id = ? AND a.ended_at IS NULL)
+       OR EXISTS (SELECT 1 FROM assignments a JOIN tasks tt ON tt.id = a.subject_id WHERE a.subject_type = 'task' AND tt.project_id = p.id AND a.user_id = ? AND a.ended_at IS NULL))`;
+  const canReadAssigned = can(viewer.actor, "project.read_assigned");
+  const live = new Set<string>();
+  const taskIds = ids("task"), projectIds = ids("project");
+  if (canReadAssigned && taskIds.length) {
+    for (const r of (await db.prepare(`SELECT t.id FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id IN (${taskIds.map(() => "?").join(",")}) AND ${visibleProjectSql}`)
+      .bind(...taskIds, viewer.userId, viewer.userId, viewer.userId).all<{ id: string }>()).results) live.add(`task:${r.id}`);
+  }
+  if (canReadAssigned && projectIds.length) {
+    for (const r of (await db.prepare(`SELECT p.id FROM projects p WHERE p.id IN (${projectIds.map(() => "?").join(",")}) AND ${visibleProjectSql}`)
+      .bind(...projectIds, viewer.userId, viewer.userId, viewer.userId).all<{ id: string }>()).results) live.add(`project:${r.id}`);
+  }
+  for (const n of rows) {
+    if ((n.subject_type === "task" || n.subject_type === "project") && out.get(n.id) && !live.has(`${n.subject_type}:${n.subject_id}`)) out.set(n.id, null);
+  }
+  return out;
 }
 
 export async function unreadNotificationCount(db: Db, userId: string): Promise<number> {

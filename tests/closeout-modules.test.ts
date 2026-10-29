@@ -80,3 +80,39 @@ test("[OWN-002] CREST-GAP-042 a failing metric query shows Unknown — query fai
   assert.ok(errs.some((e) => e.path === "/staff/owner" && /metric query failed/.test(e.message)));
   await db.prepare(`ALTER TABLE refunds_broken RENAME TO refunds`).run();
 });
+
+// ───────────── CREST-GAP-044 ─────────────
+test("[EMP-003] CREST-GAP-044 an unassigned developer sees no live task link and gets an explanation, not a bare 404; unknown ids still 404", async () => {
+  const { db, client } = await createTestApp();
+  const cust = await createCustomer(db, "tasks@a.example", "Task Co");
+  const pm = await createStaff(db, "project_manager");
+  const dev = await createStaff(db, "developer");
+  const stranger = await createStaff(db, "developer", "stranger@crestmont.test");
+  const pid = await makeProject(db, cust.organizationId);
+  const pmC = await client().login(pm.email, undefined, pm.secret);
+  const devC = await client().login(dev.email, undefined, dev.secret);
+  const strangerC = await client().login(stranger.email, undefined, stranger.secret);
+  assert.equal((await pmC.post(`/staff/projects/${pid}/tasks`, { title: "Build the gallery", assignee_id: dev.id })).status, 303);
+  const task = (await db.prepare(`SELECT id FROM tasks WHERE title = 'Build the gallery'`).first<{ id: string }>())!.id;
+  // While assigned: the notification links to the task and the task opens.
+  assert.match(await (await devC.get("/staff/notifications")).text(), new RegExp(`href="/staff/tasks/${task}"`));
+  assert.equal((await devC.get(`/staff/tasks/${task}`)).status, 200);
+  // Unassign.
+  const asg = (await db.prepare(`SELECT id FROM assignments WHERE subject_id = ? AND user_id = ? AND ended_at IS NULL`).bind(task, dev.id).first<{ id: string }>())!.id;
+  assert.equal((await pmC.post(`/staff/assignments/${asg}/end`)).status, 303);
+  for (const p of ["/staff/notifications", "/staff"]) {
+    const page = await (await devC.get(p)).text();
+    assert.match(page, /You were assigned a task/, `${p} still lists the notification`);
+    assert.doesNotMatch(page, new RegExp(`href="/staff/tasks/${task}"`), `${p} renders no dead task link`);
+  }
+  const res = await devC.get(`/staff/tasks/${task}`);
+  assert.equal(res.status, 403);
+  const body = await res.text();
+  assert.match(body, /You no longer have access to this task/);
+  assert.doesNotMatch(body, /Build the gallery|Task Co/, "nothing about the task or project is revealed");
+  // Unknown ids and tasks the person was never linked to stay 404.
+  assert.equal((await devC.get(`/staff/tasks/tsk_doesnotexist`)).status, 404);
+  assert.equal((await strangerC.get(`/staff/tasks/${task}`)).status, 404);
+  // The PM (project.read_all) keeps the live link and the page.
+  assert.equal((await pmC.get(`/staff/tasks/${task}`)).status, 200);
+});

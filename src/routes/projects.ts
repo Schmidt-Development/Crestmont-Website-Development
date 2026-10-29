@@ -15,7 +15,7 @@ import * as P from "../services/projects.ts";
 import * as F from "../services/files.ts";
 import * as M from "../services/messages.ts";
 import * as O from "../services/onboarding.ts";
-import { listNotifications, markNotificationsRead, notificationHref } from "../services/notifications.ts";
+import { listNotifications, markNotificationsRead, liveNotificationHrefs } from "../services/notifications.ts";
 import { audit } from "../services/security.ts";
 import { can, isOwner } from "../domain/authz.ts";
 import { PROJECT_STATUSES, PROJECT_TRANSITIONS, type ProjectStatus } from "../domain/project.ts";
@@ -78,6 +78,7 @@ export function register(r: Router): void {
         WHERE a.subject_type = 'ticket' AND a.user_id = ? AND a.ended_at IS NULL AND t.status NOT IN ('resolved','closed') ORDER BY CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, t.updated_at LIMIT 25`).bind(me)
       .all<{ id: string; subject: string; priority: string; status: string; updated_at: string; org: string }>()).results;
     const notes = await listNotifications(db, me, 15);
+    const noteHrefs = await liveNotificationHrefs(db, { actor, userId: me }, notes, "staff");
     const activity = (await db.prepare(`SELECT action, subject_type, details_json, created_at FROM audit_logs WHERE actor_user_id = ? ORDER BY id DESC LIMIT 15`).bind(me).all<{ action: string; subject_type: string; details_json: string | null; created_at: string }>()).results;
     const unreadMsgs = can(actor, "delivery.access") ? await M.unreadCountForStaff(db, me, can(actor, "project.read_all") ? "all" : myProjects.map((p) => p.id)) : 0;
     const since30 = new Date(ctx.now().getTime() - 30 * 86400e3).toISOString();
@@ -104,7 +105,7 @@ ${can(actor, "customers.read") ? await generalConversationsNotice(ctx) : ""}
   { header: "Due", cell: (t) => (t.due_at ? html`${fmtDay(t.due_at)}${t.due_at < today ? html` ${badge("past_due", "Overdue")}` : ""}` : "—") },
 ], { empty: html`<p class="muted">No open tasks assigned to you.</p>` })}</section>
 <section class="card"><div class="row row--between"><h2 class="card__title">Notifications</h2><div class="row">${notes.some((n) => !n.read_at) ? actionForm(ctx, "/staff/notifications/read", "Mark all read", { variant: "ghost" }) : ""}${linkButton("View all", "/staff/notifications", "ghost", "sm")}</div></div>
-${notes.length ? html`<ul class="timeline">${notes.map((n) => { const href = notificationHref(n, "staff"); return html`<li>${n.read_at ? "" : badge("new", "New")} ${href ? html`<a href="${href}">${n.body}</a>` : n.body}<br><span class="faint">${formatDateTime(n.created_at)}</span></li>`; })}</ul>` : html`<p class="muted">No notifications.</p>`}</section>
+${notes.length ? html`<ul class="timeline">${notes.map((n) => { const href = noteHrefs.get(n.id); return html`<li>${n.read_at ? "" : badge("new", "New")} ${href ? html`<a href="${href}">${n.body}</a>` : n.body}<br><span class="faint">${formatDateTime(n.created_at)}</span></li>`; })}</ul>` : html`<p class="muted">No notifications.</p>`}</section>
 ${can(actor, "delivery.access") ? html`<section class="card"><h2 class="card__title">My projects</h2>${table(myProjects, [
   { header: "Project", cell: (p) => html`<a href="/staff/projects/${p.id}">${p.name}</a><br><span class="faint">${p.org}</span>` }, { header: "Status", cell: (p) => badge(p.status) },
 ], { empty: html`<p class="muted">You are not assigned to any active project.</p>` })}</section>` : ""}
@@ -677,6 +678,17 @@ ${pagination(ctx, pageNo, hasNext)}`;
     requireStaff(ctx, "delivery.access");
     const t = await P.getTask(ctx.db, id);
     if (!t) throw new HttpError(404, "Task not found");
+    // CREST-GAP-044: the task exists but is no longer visible to this person (unassigned or removed from the
+    // project). Explain instead of a bare 404; nothing about the task or project is revealed. Unknown ids still 404,
+    // and so do tasks the person never had any link to (no past assignment or notification), so ids cannot be probed.
+    if (!(await P.staffCanSeeProject(ctx.db, ctx.actor!, ctx.user!.id, t.project_id))) {
+      const hadLink = await ctx.db.prepare(`SELECT 1 FROM assignments WHERE subject_type = 'task' AND subject_id = ?1 AND user_id = ?2
+          UNION ALL SELECT 1 FROM notifications WHERE subject_type = 'task' AND subject_id = ?1 AND user_id = ?2 LIMIT 1`).bind(t.id, ctx.user!.id).first();
+      if (!hadLink) throw new HttpError(404, "Project not found");
+      return page(ctx, "No access to this task", html`${pageHead("You no longer have access to this task")}
+${alert("info", html`This task exists, but it is not assigned to you and you are not on its project team any more — for example, you were unassigned or the project was reassigned. If you still need it, ask the project manager to add you again.`)}
+<p>${linkButton("Back to my work", "/staff", "secondary", "sm")} ${linkButton("Notifications", "/staff/notifications", "ghost", "sm")}</p>`, 403);
+    }
     const proj = await P.getStaffProject(ctx, t.project_id);
     const actor = ctx.actor!, coord = can(actor, "project.coordinate");
     const assigned = await P.isAssignedToTask(ctx.db, ctx.user!.id, t.id);
