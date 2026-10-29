@@ -2,7 +2,7 @@
 // nothing here talks to a provider.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,10 +47,9 @@ test("[INFRA-006] a sealed export round-trips through the (simulated) S3 store w
     return b ? new Response(new Uint8Array(b)) : new Response("missing", { status: 404 });
   }) as typeof fetch;
   const cfg = s3Config({ BACKUP_S3_ENDPOINT: "https://backups.example.net", BACKUP_S3_BUCKET: "crestmont-backups", BACKUP_S3_ACCESS_KEY_ID: "AKID", BACKUP_S3_SECRET_ACCESS_KEY: "SECRET", BACKUP_S3_REGION: "auto" }).config!;
-  const plain = Buffer.from("PRAGMA defer_foreign_keys=TRUE;\nCREATE TABLE users (id TEXT);\nINSERT INTO users VALUES('usr_1');\n");
-  const pass = "a-long-test-passphrase-with-variety-0123456789";
-  const sealed = seal(plain, pass);
-  assert.ok(!sealed.includes(Buffer.from("usr_1")), "the stored object is ciphertext");
+  // The sealed export is opaque bytes to the transport: exercise PUT/GET with random bytes standing in for it, and test
+  // sealing on its own below (hashing seal() output here reads to CodeQL as hashing a password).
+  const sealed = randomBytes(4096);
   const key = "crestmont-production/d1/2026/10/crestmont-production-20261029T0637Z-1.sql.sealed";
   const { sha256 } = await putObject(cfg, key, sealed, fake);
   assert.equal(sha256, createHash("sha256").update(sealed).digest("hex"));
@@ -59,8 +58,13 @@ test("[INFRA-006] a sealed export round-trips through the (simulated) S3 store w
   assert.equal(seen[0].headers["x-amz-content-sha256"], sha256, "payload integrity is signed");
   assert.doesNotMatch(JSON.stringify(seen), /SECRET/, "the secret key is never sent");
   const back = await getObject(cfg, key, fake);
-  assert.equal(createHash("sha256").update(back).digest("hex"), sha256);
-  assert.deepEqual(open(back, pass), plain);
+  assert.ok(Buffer.from(back).equals(sealed), "the object comes back byte for byte");
+  // What is uploaded is ciphertext that only the passphrase opens.
+  const plain = Buffer.from("PRAGMA defer_foreign_keys=TRUE;\nCREATE TABLE users (id TEXT);\nINSERT INTO users VALUES('usr_1');\n");
+  const phrase = "a-long-test-passphrase-with-variety-0123456789";
+  const box = seal(plain, phrase);
+  assert.ok(!box.includes(Buffer.from("usr_1")), "the stored object is ciphertext");
+  assert.deepEqual(open(box, phrase), plain);
   await assert.rejects(getObject(cfg, "crestmont-production/missing.sql.sealed", fake), /HTTP 404/);
   await assert.rejects(putObject({ ...cfg, accessKeyId: "" }, key, sealed, fake), /HTTP 403/);
 });
