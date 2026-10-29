@@ -410,7 +410,7 @@
       "disposition": "BLOCKED — HUMAN ACTION",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/ops-closeout.test.ts"
       ],
@@ -440,7 +440,7 @@
       "disposition": "ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/ops-alerts.test.ts",
         "tests/ops-closeout.test.ts (Workers Logs)",
@@ -474,7 +474,7 @@
       "disposition": "BLOCKED — HUMAN ACTION",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/offsite-backup.test.ts",
         "tests/infra-workflows.test.ts (CREST-GAP-016)"
@@ -570,7 +570,7 @@
       "disposition": "BLOCKED — HUMAN ACTION",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/ops-closeout.test.ts ([SEC-002] turnstile:staging feed)"
       ],
@@ -600,7 +600,7 @@
       "disposition": "ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/ops-closeout.test.ts ([READY-008] [LAUNCH-002] x2)"
       ],
@@ -721,7 +721,7 @@
       "disposition": "ENGINEERING COMPLETE — STAGING VERIFICATION PENDING",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/ops-alerts.test.ts"
       ],
@@ -812,7 +812,7 @@
       "disposition": "ENGINEERING COMPLETE — STAGING VERIFICATION PENDING",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/ops-closeout.test.ts ([DATA-001] unique 4-digit prefix)"
       ],
@@ -842,7 +842,7 @@
       "disposition": "ENGINEERING COMPLETE — STAGING VERIFICATION PENDING",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/workflow-security.test.ts (SHA pins, exact wrangler, --ignore-scripts)",
         "tests/evidence-secret.test.ts",
@@ -854,7 +854,7 @@
       "externalRequirements": null,
       "unblockAction": null,
       "evidence": "checkout@11d5960a… # v4, setup-node@49933ea5… # v4, upload-artifact@ea165f8d… # v4, codeql-action@4bfa242a… # v3 (annotated tag dereferenced); wrangler@4.149.0 (2026-10-08) in workflows and script defaults; --ignore-scripts on the Playwright/axe/TypeScript installs in deploy-staging and deploy-production.",
-      "notes": "Runner lockfiles (also in the audit text) are not committed here: the npm registry is unreachable from this workspace."
+      "notes": "Runner lockfiles (also in the audit text) are not committed here: the npm registry is unreachable from this workspace. Runner lockfiles not committed: the npm registry is unreachable from the closeout workspace."
     },
     {
       "id": "CREST-GAP-029",
@@ -875,7 +875,7 @@
       "disposition": "ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/ops-closeout.test.ts ([SEC-002] HSTS)"
       ],
@@ -1669,7 +1669,7 @@
       "disposition": "BLOCKED — HUMAN ACTION",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/ops-closeout.test.ts ([FILE-001] fileStorage)",
         "tests/verify-crons.test.ts (existing file-storage:staging feed)"
@@ -1756,7 +1756,7 @@
       "disposition": "BLOCKED — HUMAN ACTION",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/workflow-security.test.ts ([INFRA-005] CREST-GAP-058)"
       ],
@@ -1876,7 +1876,7 @@
       "disposition": "BLOCKED — HUMAN ACTION",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [],
       "deployment": "not deployed",
       "stagingVerification": null,
@@ -1904,7 +1904,7 @@
       "disposition": "BLOCKED — HUMAN ACTION",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/evidence-secret.test.ts",
         "tests/ops.test.ts",
@@ -1937,7 +1937,7 @@
       "disposition": "ENGINEERING COMPLETE — STAGING VERIFICATION PENDING",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/ops-closeout.test.ts ([READY-010] migration 0045)",
         "tests/readiness-ui.test.ts"
@@ -1968,7 +1968,7 @@
       "disposition": "ENGINEERING COMPLETE — STAGING VERIFICATION PENDING",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/infra-workflows.test.ts ([TEST-004] [INFRA-002] CREST-GAP-065)"
       ],
@@ -1998,7 +1998,7 @@
       "disposition": "ENGINEERING COMPLETE — STAGING VERIFICATION PENDING",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/ops-closeout.test.ts ([READY-006] env_metrics sampling)",
         "tests/readiness-sources.test.ts"
@@ -2029,7 +2029,7 @@
       "disposition": "ENGINEERING COMPLETE — STAGING VERIFICATION PENDING",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/ops-closeout.test.ts ([AUTH-003] bootstrap-owner)",
         "tests/production-auth.test.ts"
@@ -2060,7 +2060,7 @@
       "disposition": "ENGINEERING COMPLETE — EXTERNAL VERIFICATION PENDING",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/infra-workflows.test.ts ([DOC-002] [INFRA-005] CREST-GAP-068)"
       ],
@@ -2700,7 +2700,7 @@
       "disposition": "ENGINEERING COMPLETE — STAGING VERIFICATION PENDING",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/ops-alerts.test.ts ([INFRA-006] [SEC-004] security alerting)"
       ],
@@ -3152,7 +3152,7 @@
       "disposition": "ENGINEERING COMPLETE — STAGING VERIFICATION PENDING",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/ops-closeout.test.ts ([READY-010] [DATA-001] migration 0045, EXPLAIN QUERY PLAN)"
       ],
@@ -3184,7 +3184,7 @@
       "disposition": "ENGINEERING COMPLETE — STAGING VERIFICATION PENDING",
       "branch": "claude/closeout-ops",
       "pr": 36,
-      "commit": "b04db72d5054d21a2cf59811db7836cd25e6fbf8",
+      "commit": "1b4ed51cc2f9b3ef556aee82131e6c71d03af6f6",
       "tests": [
         "tests/scheduler-health.test.ts",
         "tests/stripe-webhook-probe.test.ts"
