@@ -168,6 +168,18 @@ test("[WEB-005] /quote/thanks confirms receipt only after a saved submission (PR
   assert.doesNotMatch(await (await c.get("/quote/thanks")).text(), /Quote request received/, "a reload no longer confirms");
 });
 
+test("[WEB-008] [LEGAL-001] the privacy policy page links signed-in visitors to data download and deletion at /account/privacy, outside the policy text (CREST-GAP-043)", async () => {
+  const { client } = await createTestApp();
+  const h = await (await client().get("/legal/privacy")).text();
+  const article = /<article class="prose legal">[\s\S]*?<\/article>/.exec(h)![0];
+  const line = /<p class="legal-account-link" data-privacy-self-service>([\s\S]*?)<\/p>/.exec(h);
+  assert.ok(line, "the page-level line is present");
+  assert.match(line![1], /Signed in\?<\/strong> Download or delete your data at <a href="\/account\/privacy">\/account\/privacy<\/a>/);
+  assert.ok(h.indexOf(line![0]) > h.indexOf(article) + article.length - 1, "outside (after) the policy text");
+  assert.doesNotMatch(article, /data-privacy-self-service/);
+  for (const other of ["/legal/terms", "/legal/refunds"]) assert.doesNotMatch(await (await client().get(other)).text(), /data-privacy-self-service/, other);
+});
+
 test("[WEB-009] 404s raised inside routes are titled 'Page not found', like unmatched paths (CREST-GAP-098)", async () => {
   const { client } = await createTestApp();
   for (const path of ["/services/no-such-service", "/portfolio/no-such-project", "/legal/no-such-policy", "/no-such-page"]) {

@@ -819,6 +819,7 @@ a.shot { display: block; cursor: zoom-in; }
 .legal-draft { border: 1px solid var(--line-gold); background: color-mix(in srgb, var(--gold-2) 14%, var(--ink-2)); color: var(--text); padding: var(--s-3) var(--s-4); border-radius: var(--r-2); margin-bottom: var(--s-7); font-size: var(--fs-sm); max-width: 68ch; }
 .legal-nav { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); align-items: baseline; }
 .legal-nav a { font-size: var(--fs-sm); }
+.legal-account-link { margin: var(--s-6) 0 0; max-width: 68ch; padding: var(--s-3) var(--s-4); border: 1px solid var(--line); border-radius: var(--r-2); background: var(--ink-2); font-size: var(--fs-sm); color: var(--text-2); }
 .draft-banner { background: #0d0d0d; box-shadow: inset 0 -1px 0 var(--line); color: var(--gold-1); font-size: var(--fs-xs); padding: 7px var(--gutter); text-align: center; line-height: 1.4; }
 .preview-banner { background: color-mix(in srgb, var(--info) 10%, var(--ink-2)); border-bottom: 1px solid color-mix(in srgb, var(--info) 30%, transparent); color: var(--info); text-align: center; padding: var(--s-2) var(--s-4); font-size: var(--fs-sm); }
 .cms-pre { white-space: pre-wrap; font: inherit; color: var(--text-2); background: var(--ink-3); border: 1px solid var(--line); border-radius: var(--r-2); padding: var(--s-3); }

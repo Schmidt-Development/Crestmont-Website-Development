@@ -713,6 +713,7 @@ ${section("Ownership", "Your site, your choice", html`<ul class="plain-list"><li
     return htmlResponse(ctx, publicLayout(ctx, { title: d.title, description: d.summary }, html`${pageHero("Policies", d.title, d.summary)}
 <section class="section section--flush"><div class="container"><div class="legal-draft" role="note"><strong>Draft — pending attorney review.</strong> ${DRAFT_BANNER.replace(/^Draft — pending attorney review\.\s*/, "")}</div>
 <article class="prose legal">${d.sections.map((s) => html`<h2>${s.heading}</h2>${(s.paras ?? []).map((x) => html`<p>${x}</p>`)}${s.list ? html`<ul>${s.list.map((x) => html`<li>${x}</li>`)}</ul>` : ""}`)}</article>
+${d.slug === "privacy" ? html`<p class="legal-account-link" data-privacy-self-service><strong>Signed in?</strong> Download or delete your data at <a href="/account/privacy">/account/privacy</a>.</p>` : ""}
 <hr><nav aria-label="Other policies" class="legal-nav"><span class="faint">Other policies:</span> <a href="/legal">All policies</a> ${LEGAL_SLUGS.filter((s) => s !== d.slug).map((s) => html`<a href="/legal/${s}">${docs[s].title}</a> `)}</nav></div></section>`));
   });
 
