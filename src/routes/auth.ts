@@ -250,19 +250,25 @@ export function register(r: Router) {
     const token = ctx.url.searchParams.get("token") ?? "";
     const inv = /^[0-9a-f]{64}$/.test(token) ? await auth.invitationByToken(ctx.db, token) : null;
     if (!inv || inv.accepted_at || inv.expires_at < new Date().toISOString()) return htmlResponse(ctx, authLayout(ctx, { title: "Invitation" }, html`<h1 style="font-size:2rem">Invitation not valid</h1><p>This invitation has expired or was already used. Ask the person who invited you to send a new one.</p>`), 400);
-    return invitePage(ctx, token, inv.email, inv.org_name, inv.role_id);
+    return invitePage(ctx, token, inv.email, inv.org_name, inv.role_id, await auth.invitationMode(ctx.db, inv.email, invitationSessionUser(ctx)));
   });
   r.post("/invite", async (ctx) => {
     const f = await ctx.form();
     const token = str(f, "token");
+    const sessionUserId = invitationSessionUser(ctx);
     try {
-      await auth.assertPasswordNotBreached(ctx.env, ctx.db, String(f.get("password") ?? ""));
-      await auth.acceptInvitation(ctx.db, token, str(f, "name"), String(f.get("password") ?? ""));
-      return redirect(ctx, "/login", { kind: "success", text: "Invitation accepted. Sign in to continue — you will set up two-factor authentication next." });
+      const inv0 = /^[0-9a-f]{64}$/.test(token) ? await auth.invitationByToken(ctx.db, token) : null;
+      const mode = inv0 ? await auth.invitationMode(ctx.db, inv0.email, sessionUserId) : "new";
+      if (mode === "new" || mode === "claim") await auth.assertPasswordNotBreached(ctx.env, ctx.db, String(f.get("password") ?? ""));
+      await auth.acceptInvitation(ctx.db, token, str(f, "name"), String(f.get("password") ?? ""), { sessionUserId, ip: ctx.ip });
+      if (mode === "confirm") return redirect(ctx, inv0!.role_id.startsWith("customer_") ? "/portal" : "/staff", { kind: "success", text: "Invitation accepted." });
+      return redirect(ctx, "/login", { kind: "success", text: "Invitation accepted. Sign in to continue — staff accounts set up two-factor authentication next." });
     } catch (e) {
       if (e instanceof auth.AuthError) {
         const inv = await auth.invitationByToken(ctx.db, token);
-        return inv ? invitePage(ctx, token, inv.email, inv.org_name, inv.role_id, [e.message]) : redirect(ctx, "/login", { kind: "error", text: e.message });
+        if (!inv) return redirect(ctx, "/login", { kind: "error", text: e.message });
+        if (inv.accepted_at || inv.expires_at < new Date().toISOString()) return htmlResponse(ctx, authLayout(ctx, { title: "Invitation" }, html`<h1 style="font-size:2rem">Invitation not valid</h1><p>This invitation has expired or was already used. Ask the person who invited you to send a new one.</p>`), 400);
+        return invitePage(ctx, token, inv.email, inv.org_name, inv.role_id, await auth.invitationMode(ctx.db, inv.email, sessionUserId), [e.message]);
       }
       throw e;
     }
@@ -399,7 +405,22 @@ function resetPage(ctx: AppContext, errors: string[] = [], token = ctx.url.searc
 <form method="post" action="/password/reset">${csrf(ctx)}<input type="hidden" name="token" value="${token}">${input({ name: "password", label: "New password", type: "password", autocomplete: "new-password", required: true, hint: "At least 12 characters." })}<div class="form-actions">${button("Update password")}</div></form>`), errors.length ? 400 : 200);
 }
 
-function invitePage(ctx: AppContext, token: string, email: string, org: string, role: string, errors: string[] = []) {
-  return htmlResponse(ctx, authLayout(ctx, { title: "Accept invitation" }, html`<h1 style="font-size:2rem">Join ${org}</h1><p class="muted">You have been invited as <strong>${label(role)}</strong> using <strong>${email}</strong>.</p>${formErrors(errors)}
+/** The signed-in user id that may accept an invitation: only a session that has completed MFA (when enabled). */
+function invitationSessionUser(ctx: AppContext): string | null {
+  if (!ctx.user) return null;
+  if (ctx.user.mfaEnabled && !ctx.sessionMfaVerified) return null;
+  return ctx.user.id;
+}
+
+function invitePage(ctx: AppContext, token: string, email: string, org: string, role: string, mode: auth.InvitationMode, errors: string[] = []) {
+  const head = html`<h1 style="font-size:2rem">Join ${org}</h1><p class="muted">You have been invited as <strong>${label(role)}</strong> using <strong>${email}</strong>.</p>${formErrors(errors)}`;
+  if (mode === "sign_in") {
+    return htmlResponse(ctx, authLayout(ctx, { title: "Accept invitation" }, html`${head}<p>An account already uses this email address. Sign in to that account, then open the invitation link from your email again to accept it.</p><p><a class="btn" href="/login">Sign in</a></p>`), errors.length ? 403 : 200);
+  }
+  if (mode === "confirm") {
+    return htmlResponse(ctx, authLayout(ctx, { title: "Accept invitation" }, html`${head}<p>You are signed in as <strong>${email}</strong>.</p>
+<form method="post" action="/invite">${csrf(ctx)}<input type="hidden" name="token" value="${token}"><div class="form-actions">${button("Accept invitation")}</div></form>`), errors.length ? 400 : 200);
+  }
+  return htmlResponse(ctx, authLayout(ctx, { title: "Accept invitation" }, html`${head}
 <form method="post" action="/invite">${csrf(ctx)}<input type="hidden" name="token" value="${token}">${input({ name: "name", label: "Your name", autocomplete: "name", required: true })}${input({ name: "password", label: "Choose a password", type: "password", autocomplete: "new-password", required: true, hint: "At least 12 characters." })}<div class="form-actions">${button("Accept invitation")}</div></form>`), errors.length ? 400 : 200);
 }

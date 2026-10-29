@@ -73,14 +73,16 @@ export async function registerCustomer(db: Db, input: { email: string; name: str
     db.prepare(`INSERT INTO auth_tokens (token_hash, user_id, purpose, expires_at, created_at) VALUES (?,?,'email_verify',?,?)`)
       .bind(await hashToken(token), userId, new Date(Date.now() + 48 * 3600e3).toISOString(), at),
   ]);
-  await linkContactsToUser(db, userId, email);
+  // CRM contacts are NOT linked here: until the address is verified nobody has proven they own it, and the link
+  // would expose that contact's CRM record (CREST-GAP-004). verifyEmail and acceptInvitation link them.
   await audit(db, { actorUserId: userId, action: "user.registered", subjectType: "user", subjectId: userId, organizationId: orgId, ip });
   return { userId, verifyToken: token, existed: false, organizationId: orgId };
 }
 
 /** Attach any CRM contacts with this email to the new user so their quotes/orders appear. */
 async function linkContactsToUser(db: Db, userId: string, email: string) {
-  await db.prepare(`UPDATE contacts SET user_id = ? WHERE email = ? AND user_id IS NULL`).bind(userId, email).run();
+  // lower(): lead emails may have been stored as typed (CREST-GAP-093).
+  await db.prepare(`UPDATE contacts SET user_id = ? WHERE lower(email) = lower(?) AND user_id IS NULL`).bind(userId, email).run();
 }
 
 export async function consumeToken(db: Db, token: string, purpose: "email_verify" | "password_reset"): Promise<string> {
@@ -95,6 +97,8 @@ export async function consumeToken(db: Db, token: string, purpose: "email_verify
 export async function verifyEmail(db: Db, token: string) {
   const userId = await consumeToken(db, token, "email_verify");
   await db.prepare(`UPDATE users SET email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?`).bind(nowIso(), userId).run();
+  const u = await db.prepare(`SELECT email FROM users WHERE id = ?`).bind(userId).first<{ email: string }>();
+  if (u) await linkContactsToUser(db, userId, u.email);
   await audit(db, { actorUserId: userId, action: "user.email_verified", subjectType: "user", subjectId: userId });
   return userId;
 }
@@ -435,23 +439,86 @@ export async function invitationByToken(db: Db, token: string) {
     .bind(await hashToken(token)).first<{ id: string; email: string; role_id: Role; organization_id: string; expires_at: string; accepted_at: string | null; org_name: string }>();
 }
 
-export async function acceptInvitation(db: Db, token: string, name: string, password: string) {
+/** Raised when the invited email already belongs to a verified account: only that account holder may accept. */
+export class InvitationSignInRequired extends AuthError {
+  constructor() { super("An account already exists for this email address. Sign in to that account, then open the invitation link from your email again to accept it.", 403); }
+}
+
+/**
+ * How an invitation can be accepted (CREST-GAP-001). The invitation token was delivered to the invited address,
+ * so holding it proves control of that mailbox — but it does NOT prove ownership of an account that already
+ * uses the address:
+ *  - "new":     no account exists → create one, already verified (the token proved the address).
+ *  - "claim":   an account exists but its email was never verified, so nobody has proven they own it (it may have
+ *               been pre-registered by someone else). The token holder is the proven owner: the account is
+ *               reclaimed — new password, every factor, session, recovery code and outstanding token revoked,
+ *               and every membership the unverified account gave itself removed — before the role is granted.
+ *  - "sign_in": a verified account exists → the token alone is not enough; the person must be signed in to that
+ *               account (password + MFA if enabled). No password is set from the invitation form.
+ *  - "confirm": the current session is that verified account → accept with one click.
+ */
+export type InvitationMode = "new" | "claim" | "sign_in" | "confirm";
+
+export async function invitationMode(db: Db, email: string, sessionUserId: string | null | undefined): Promise<InvitationMode> {
+  const u = await db.prepare(`SELECT id, email_verified_at FROM users WHERE email = ?`).bind(email).first<{ id: string; email_verified_at: string | null }>();
+  if (!u) return "new";
+  if (!u.email_verified_at) return "claim";
+  return sessionUserId && sessionUserId === u.id ? "confirm" : "sign_in";
+}
+
+/**
+ * Accepts an invitation. `sessionUserId` is the id of the fully signed-in user making the request (null if not
+ * signed in, or if the session has not completed MFA). Returns the user id and which path was taken.
+ */
+export async function acceptInvitation(db: Db, token: string, name: string, password: string, opts: { sessionUserId?: string | null; ip?: string | null } = {}) {
   const inv = await invitationByToken(db, token);
   if (!inv || inv.accepted_at || inv.expires_at < nowIso()) throw new AuthError("This invitation is invalid or has expired.");
-  const problems = passwordProblems(password, inv.email);
-  if (problems.length) throw new AuthError(problems.join(". "));
-  const at = nowIso();
-  let user = await db.prepare(`SELECT id FROM users WHERE email = ?`).bind(inv.email).first<{ id: string }>();
-  const stmts = [];
-  if (!user) {
-    user = { id: newId("usr") };
-    stmts.push(db.prepare(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, created_at) VALUES (?,?,?,?,?,?)`).bind(user.id, inv.email, name.trim(), await hashPassword(password), at, at));
+  const existing = await db.prepare(`SELECT id, email_verified_at FROM users WHERE email = ?`).bind(inv.email).first<{ id: string; email_verified_at: string | null }>();
+  const mode = await invitationMode(db, inv.email, opts.sessionUserId);
+  if (mode === "sign_in") throw new InvitationSignInRequired();
+  if (mode === "new" || mode === "claim") {
+    const problems = passwordProblems(password, inv.email);
+    if (problems.length) throw new AuthError(problems.join(". "));
+    if (!name.trim()) throw new AuthError("Enter your name.");
   }
-  stmts.push(
-    db.prepare(`INSERT INTO memberships (id, user_id, organization_id, role_id, created_at) VALUES (?,?,?,?,?) ON CONFLICT(user_id, organization_id) DO UPDATE SET role_id = excluded.role_id`).bind(newId("mbr"), user.id, inv.organization_id, inv.role_id, at),
-    db.prepare(`UPDATE invitations SET accepted_at = ? WHERE id = ? AND accepted_at IS NULL`).bind(at, inv.id),
-  );
-  await db.batch(stmts);
-  await audit(db, { actorUserId: user.id, action: "invitation.accepted", subjectType: "invitation", subjectId: inv.id, organizationId: inv.organization_id, details: { role: inv.role_id } });
-  return user.id;
+  const at = nowIso();
+  // Claim the invitation first: single use even when two acceptances race. Released again if the rest fails.
+  const claimed = await db.prepare(`UPDATE invitations SET accepted_at = ? WHERE id = ? AND accepted_at IS NULL AND expires_at >= ?`).bind(at, inv.id, at).run();
+  if (claimed.meta.changes !== 1) throw new AuthError("This invitation is invalid or has expired.");
+  let userId: string;
+  let removedOrgs: string[] = [];
+  try {
+    const stmts = [];
+    if (mode === "new") {
+      userId = newId("usr");
+      stmts.push(db.prepare(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, created_at) VALUES (?,?,?,?,?,?)`).bind(userId, inv.email, name.trim(), await hashPassword(password), at, at));
+    } else if (mode === "claim") {
+      userId = existing!.id;
+      removedOrgs = (await db.prepare(`SELECT organization_id FROM memberships WHERE user_id = ? AND organization_id != ?`).bind(userId, inv.organization_id).all<{ organization_id: string }>()).results.map((r) => r.organization_id);
+      stmts.push(
+        // Guarded on email_verified_at IS NULL so a verified account can never be overwritten by this path.
+        db.prepare(`UPDATE users SET display_name = ?, password_hash = ?, email_verified_at = ?, totp_secret = NULL, totp_pending_secret = NULL, totp_last_step = NULL, mfa_enabled = 0, failed_logins = 0, locked_until = NULL WHERE id = ? AND email_verified_at IS NULL`)
+          .bind(name.trim(), await hashPassword(password), at, userId),
+        db.prepare(`UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`).bind(at, userId),
+        db.prepare(`DELETE FROM mfa_recovery_codes WHERE user_id = ?`).bind(userId),
+        db.prepare(`UPDATE auth_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL`).bind(at, userId),
+        db.prepare(`DELETE FROM memberships WHERE user_id = ? AND organization_id != ?`).bind(userId, inv.organization_id),
+        db.prepare(`UPDATE contacts SET user_id = NULL WHERE user_id = ?`).bind(userId),
+      );
+    } else {
+      userId = existing!.id;
+    }
+    stmts.push(db.prepare(`INSERT INTO memberships (id, user_id, organization_id, role_id, created_at) VALUES (?,?,?,?,?) ON CONFLICT(user_id, organization_id) DO UPDATE SET role_id = excluded.role_id`).bind(newId("mbr"), userId, inv.organization_id, inv.role_id, at));
+    await db.batch(stmts);
+  } catch (e) {
+    await db.prepare(`UPDATE invitations SET accepted_at = NULL WHERE id = ? AND accepted_at = ?`).bind(inv.id, at).run();
+    throw e;
+  }
+  // The address is now proven, so CRM contacts with it may be linked (CREST-GAP-004).
+  await linkContactsToUser(db, userId, inv.email);
+  if (mode === "claim") {
+    await securityEvent(db, "account_reclaimed_by_invitation", { userId, email: inv.email, ip: opts.ip ?? null, detail: `unverified account reclaimed; removed memberships: ${removedOrgs.length}` });
+  }
+  await audit(db, { actorUserId: userId, action: "invitation.accepted", subjectType: "invitation", subjectId: inv.id, organizationId: inv.organization_id, ip: opts.ip ?? null, details: { role: inv.role_id, mode, removedOrganizations: removedOrgs } });
+  return userId;
 }

@@ -68,6 +68,12 @@ export async function inviteStaff(db: Db, byUserId: string, emailRaw: string, ro
   if (!orgId) throw new EmployeeError("The internal Crestmont organization does not exist yet.", 409);
   const existing = await db.prepare(`SELECT m.role_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = ? AND m.organization_id = ?`).bind(email, orgId).first<{ role_id: string }>();
   if (existing) throw new EmployeeError("That person is already a staff member. Change their role instead.", 409);
+  // A verified customer account must not silently become a staff account (CREST-GAP-001): staff use a separate work
+  // address. Unverified accounts are not refused here — that would let anyone block an invitation by pre-registering
+  // the address — they are reclaimed by the invitee on acceptance instead.
+  const customer = await db.prepare(`SELECT 1 AS x FROM users u JOIN memberships m ON m.user_id = u.id JOIN organizations o ON o.id = m.organization_id
+     WHERE u.email = ? AND u.email_verified_at IS NOT NULL AND o.kind != 'internal' LIMIT 1`).bind(email).first();
+  if (customer) throw new EmployeeError("That address belongs to a customer account. Invite the person with a separate work email address.", 409);
   const token = await createInvitation(db, byUserId, email, role as Role, orgId);
   return { token, email, role: role as Role };
 }
