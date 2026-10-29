@@ -22,29 +22,29 @@ each finding's state; this file records batches, PRs and what to do next.
   then `/opt/npm-tools/node_modules/.bin/tsc -p tsconfig.json`.
 - Register: edit the JSON, then `node --no-warnings scripts/closeout-register.ts` (CI test fails if the markdown is stale).
 
-## Current state (2026-10-29)
+## Current state (2026-10-29, after deploy #61)
 
-- **One PR: #37 `claude/crestmont-final-104-closeout` → main.** It contains every commit of #26–#36 (verified by
-  ancestry and a line-level loss check) plus CREST-NEW-002. Engineering head `1bdd603`: 606/606 unit, runner 92/92,
-  e2e 37 passed / 0 failed (38 staging-only), tsc clean, migrations 0040–0046 replay cleanly on main's schema.
-- Register: 70 EC-staging, 17 EC-external, 16 blocked on humans, 1 N/A, **0 open**; supplemental CREST-NEW-001/-002.
-- Nothing merged, nothing deployed since the audit; staging still runs `92fee96` (the P0 is live there until #37 merges).
-- Demo repos (separate, Founder merges): glassly#1, better-lansing-mechanics#24. lansing-car-rentals was not
-  accessible to this workflow (059: two demos still list the retired preview origin).
-- Live checks from the closeout workspace were not possible (shell egress blocked, robots.txt refuses the fetch tool,
-  the browser bridge was offline). Observed: crestmontwebsitedevelopment.com answers (robots.txt served); the retired
-  preview Worker returns a client error.
+- #37 merged as `64985d3`. Deploy staging run 61 (40919077179): build, tests, D1 provisioning, **migrations applied**,
+  Worker deployed, access verified, smoke checks and "frontend served by this commit" all passed, so staging runs
+  `64985d3` with migrations 0040–0046. Only the final gate failed: three staging browser tests failed.
+- Root causes (reproduced on a local staging replica; the raw job log is not downloadable outside GitHub):
+  1. Journey 4 opened `/q/[redacted` — the Owner's email viewer redacts tokens (correct for real customers), so the
+     journeys could never follow their own proposal/verification links (CREST-NEW-003). Masked before CREST-GAP-030.
+  2. The per-IP sign-in limit counted successful sign-ins (CREST-NEW-004); the deploy runner signs in every demo account
+     many times from one IP, so later journeys were refused (probable cause of the other two failures; deploy #61's log
+     could not be read — the next run publishes each failure as an annotation).
+  3. Journeys 29–30 could never run (secret withheld from the browser step) (CREST-NEW-005); failure text truncated
+     (CREST-NEW-006).
+- Recovery PR: `claude/staging-61-recovery` (fixes above). Local staging replica after the fix: 19/33 passed, 0 failed;
+  plus 29–30 pass through receipts — 21/33 expected on staging, the other 12 need Stripe/Retell/production.
 
 ## Next step for a new session
 
-1. If #37 is not merged: check its CI (`gh api repos/Schmidt-Development/Crestmont-Website-Development/pulls/37`),
-   fix anything red on the same branch, and wait for the Founder's review. Do not reopen the 11 PRs.
-2. After #37 merges: read the Deploy staging run (exact commit, migrations 0040–0046, cron registration) and the
-   "Staging certification" summary. For each journey that passed, move its findings to CLOSED — VERIFIED in the
-   register with the run link; failures are fixed on a new branch, never by weakening a journey.
-3. Close #17 and #26–#36 with a comment pointing to #37 (their commits are in main), then follow
-   docs/BRANCH-CLEANUP.md.
-4. As the Founder completes provider steps (below), re-run Deploy staging and close the EC-external items.
+1. Read the recovery PR's CI; after merge, read the Deploy staging run's annotations:
+   `gh api repos/Schmidt-Development/Crestmont-Website-Development/check-runs/<deploy job id>/annotations` — each
+   failed journey is an `::error` with its message; "Staging certification" is a notice.
+2. Fix any engineering failure on a new branch (never weaken a journey); record passes in the register.
+3. Close #17 and #26–#36 (superseded; their commits are in main).
 
 ## Founder actions (deduplicated, by provider)
 
@@ -71,6 +71,6 @@ each finding's state; this file records batches, PRs and what to do next.
 
 ## Staging certification rule
 
-CERTIFIED = 33/33 required journeys passed on one Deploy staging run (evidence/staging-certification.json). Today the
-following cannot pass on staging by construction and keep it NOT CERTIFIED until their provider exists: 5–7, 17, 19,
-24 (Stripe test key), 25 (needs a Stripe test clock — manual check), 27–28 (Retell), 31–33 (production launch).
+CERTIFIED = 33/33 required journeys passed on one Deploy staging run (evidence/staging-certification.json). These
+cannot pass until their dependency exists: 5–7, 17, 19, 24 (Stripe test key on staging), 25 (Stripe test clock — manual
+check), 27–28 (Retell), 31–33 (Founder launch decision and a production deployment).

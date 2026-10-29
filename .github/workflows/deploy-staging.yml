@@ -379,6 +379,20 @@ jobs:
           [ "$fail" = 0 ] && echo "Staging serves the consolidated frontend of ${GITHUB_SHA}." >> "$GITHUB_STEP_SUMMARY"
           exit $fail
 
+      # Journeys 29 and 30 check that readiness shows THIS run's signed evidence. Signing needs EVIDENCE_INGEST_SECRET,
+      # which the browser step must never hold (F-24: it runs third-party packages), so the documents are signed and
+      # posted here by first-party code only, and the journeys read the receipts. Deploy #61: both were unrunnable.
+      - name: Post this run's evidence for the readiness journeys (signed; first-party code only)
+        id: ingest
+        if: steps.smoke.outcome == 'success'
+        continue-on-error: true
+        env:
+          READINESS_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          mkdir -p evidence/receipts
+          [ -f evidence/ci-evidence.json ] && node --no-warnings scripts/post-evidence.ts evidence/ci-evidence.json --receipt evidence/receipts/ci.json > /dev/null || echo "::warning title=CI evidence not posted::evidence/ci-evidence.json missing or refused"
+          [ -f evidence/staging-check.json ] && node --no-warnings scripts/post-evidence.ts evidence/staging-check.json --receipt evidence/receipts/staging-check.json > /dev/null || echo "::warning title=Staging verification not posted::evidence/staging-check.json missing or refused"
+
       - name: Browser journey on the live site (staging E2E evidence)
         id: e2e
         if: steps.smoke.outcome == 'success'
@@ -505,6 +519,8 @@ jobs:
         run: |
           if [ -f evidence/staging-certification.json ]; then
             node -e 'const c=require("./evidence/staging-certification.json");const l=[`### Staging certification: ${c.certified?"CERTIFIED":"NOT CERTIFIED"} (${c.passed}/${c.required} passed, ${c.failed} failed)`,"",...c.notPassed.map(j=>`- journey ${j.journey}: ${j.outcome}`)];console.log(l.join("\n"))' >> "$GITHUB_STEP_SUMMARY"
+            # The same result as annotations (readable through the checks API without the job log).
+            node -e 'const c=require("./evidence/staging-certification.json");const e=(v)=>String(v).replace(/%/g,"%25").replace(/\r/g,"%0D").replace(/\n/g,"%0A");console.log(`::notice title=Staging certification::${c.certified?"CERTIFIED":"NOT CERTIFIED"} ${c.passed}/${c.required} passed, ${c.failed} failed, ${c.required-c.passed-c.failed} skipped or blocked`);for(const j of c.notPassed)console.log(`::${j.outcome.startsWith("failed")?"error":"warning"} title=Staging journey ${j.journey}::${e(j.outcome.slice(0,500))}`)'
           else
             echo "### Staging certification: NOT CERTIFIED (the journey summary did not run)" >> "$GITHUB_STEP_SUMMARY"
           fi
