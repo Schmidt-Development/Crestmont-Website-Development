@@ -368,7 +368,27 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/voice/configs", fields: () => ({ instructions: "Greet the caller warmly, state you are an AI assistant, and help with questions about services and packages.\nAlways offer a callback.", note: "Callback" }) },
     { key: "POST /staff/voice/configs/:version/activate" },
     { key: "POST /staff/voice/test-event", fields: () => ({ scenario: "callback" }) },
+    // No agent id is recorded in the matrix world, so this records "not_configured" without any Retell request.
+    { key: "POST /staff/voice/prompt-sync", fields: () => ({ mode: "check" }) },
+    { key: "POST /staff/voice/budget", fields: () => ({ monthly_budget_usd: "40" }) },
     { key: "GET /staff/voice/calls/:id" },
+    { key: "POST /staff/voice/operations/settings", fields: () => ({ timezone: "America/Detroit", "hours.mon": "09:00-17:00", "hours.tue": "09:00-17:00", "inbound.mode": "answer",
+      "scheduling.duration_minutes": "30", "scheduling.min_notice_hours": "24", "scheduling.horizon_days": "21", "outbound.window_start": "09:00", "outbound.window_end": "20:00",
+      "outbound.max_per_number_per_day": "1", "outbound.max_per_number_per_week": "3" }) },
+    { key: "POST /staff/voice/consultations/:id/decide", fields: () => ({ decision: "confirm" }), setup: async () => {
+      w.ids.consultation = newId("cns");
+      const start = new Date(Date.now() + 5 * 86400e3).toISOString();
+      await w.db.prepare(`INSERT INTO consultations (id, name, phone, starts_at, duration_minutes, timezone, status, confirmation_code, source, is_test, created_at, updated_at)
+          VALUES (?, 'Matrix Caller', '+15550100990', ?, 30, 'America/Detroit', 'requested', ?, 'ai_receptionist', 1, ?, ?)`).bind(w.ids.consultation, start, w.ids.consultation.slice(-6).toUpperCase(), nowIso(), nowIso()).run();
+    } },
+    { key: "POST /staff/voice/outbound", fields: () => ({ purpose: "callback", phone: "+15550100991", name: "Matrix Caller", reason: "TEST DATA: caller asked for a callback", consent: "Asked by email for a callback (TEST DATA)" }) },
+    { key: "POST /staff/voice/outbound/:id/decide", fields: () => ({ decision: "cancel", note: "matrix" }), setup: async () => {
+      w.ids.outboundRequest = newId("vob");
+      await w.db.prepare(`INSERT INTO voice_outbound_requests (id, purpose, phone_e164, reason, status, idempotency_key, is_test, created_at, updated_at)
+          VALUES (?, 'callback', '+15550100992', 'TEST DATA', 'pending_approval', ?, 1, ?, ?)`).bind(w.ids.outboundRequest, `crestmont_${w.ids.outboundRequest}`, nowIso(), nowIso()).run();
+    } },
+    { key: "POST /staff/voice/dnc", fields: () => ({ phone: "+15550100993", detail: "Matrix opt-out (TEST DATA)" }) },
+    { key: "POST /staff/voice/caller-erasure", fields: () => ({ phone: "+15550100994", note: "Matrix erasure request by email (TEST DATA)" }) },
 
     // ── AI Builds (owner controls) ──
     { key: "POST /staff/ai/budget", fields: () => ({ monthly_budget_usd: "25" }) },

@@ -5,6 +5,8 @@ import { nowIso } from "../lib/db.ts";
 import type { StorageAdapter } from "../adapters/storage.ts";
 import { requestAiDraft, type AiDraftRequest, type AiProvider, type AiBackend } from "./ai.ts";
 import { audit as auditLog } from "./security.ts";
+import { voiceBudget } from "./voice-budget.ts";
+import { latestPromptSync } from "./voice-prompt-sync.ts";
 
 /**
  * Record an unhandled server error. Called by the 500 handler in src/app/app.ts. Never throws:
@@ -54,6 +56,20 @@ export async function serviceChecks(db: Db, storage: StorageAdapter | null, now 
       out.push({ name: "Object storage", status: "failing", detail: (e as Error).message.slice(0, 200) });
     }
   }
+  // AI receptionist cost and prompt-sync signals (CREST-GAP-053).
+  try {
+    const b = await voiceBudget(db, now);
+    const usd = (m: number) => `$${(m / 1e6).toFixed(2)}`;
+    out.push(b.state === "not_set"
+      ? { name: "AI receptionist budget", status: "not_configured", detail: "No monthly voice budget is set: Retell calls are answered in voicemail-only mode and nothing is dialled." }
+      : { name: "AI receptionist budget", status: b.state === "exhausted" ? "failing" : "healthy",
+          detail: `${usd(b.spentMicro)} of ${usd(b.budgetMicro!)} used in ${b.month}${b.state === "warning" ? " (over 80%)" : ""}${b.state === "exhausted" ? " — budget reached; calls go to voicemail" : ""}${b.unknownCostCalls ? ` · ${b.unknownCostCalls} calls with unknown cost` : ""}` });
+    const s = await latestPromptSync(db);
+    const active = (await db.prepare(`SELECT version FROM voice_agent_configs WHERE active = 1`).first<{ version: number }>())?.version ?? null;
+    if (!s) out.push({ name: "Retell prompt sync", status: "not_configured", detail: "The active receptionist prompt has never been pushed to or checked against Retell." });
+    else if (s.status === "in_sync" && s.config_version !== active) out.push({ name: "Retell prompt sync", status: "stale", detail: `Last in sync for v${s.config_version}, but v${active ?? "none"} is active now. Push the active version.` });
+    else out.push({ name: "Retell prompt sync", status: s.status === "in_sync" ? "healthy" : s.status === "not_configured" ? "not_configured" : "failing", detail: `${s.status.replace(/_/g, " ")} (${s.mode}, ${s.created_at}): ${s.detail.slice(0, 200)}` });
+  } catch { /* voice tables unavailable: the voice page reports this itself */ }
   const feeds = (await db.prepare(`SELECT source, last_success_at, last_attempt_at, last_error FROM ingestion_status ORDER BY source`).all<{ source: string; last_success_at: string | null; last_attempt_at: string | null; last_error: string | null }>()).results;
   if (!feeds.length) out.push({ name: "Evidence feed", status: "unavailable", detail: "No CI evidence has ever been ingested (CI cannot run: BLK-013)." });
   for (const f of feeds) {

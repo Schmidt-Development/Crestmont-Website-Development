@@ -96,7 +96,7 @@ export async function assessConfiguration(d: IntegrationDeps, id: IntegrationId)
       return { status: "configured_unverified", detail: "Turnstile keys set. Probe confirms the secret is accepted by siteverify.", fingerprint: await fp(e.TURNSTILE_SECRET), probe: true };
     case "retell":
       if (!e.RETELL_API_KEY) return { status: "not_configured", detail: "RETELL_API_KEY is not set; /api/webhooks/retell and /api/webhooks/retell/functions reject every request. No Retell workspace exists for Crestmont yet (BLK-009).", fingerprint: null, probe: false };
-      return { status: "configured_unverified", detail: "Retell webhook key set, so signed Retell events are accepted. Unverified until a test call from the Crestmont workspace is received; there is no read-only probe.", fingerprint: await fp(e.RETELL_API_KEY), probe: false };
+      return { status: "configured_unverified", detail: `Retell webhook key set, so signed Retell events are accepted. Unverified until a test call from the Crestmont workspace is received; there is no read-only probe. Outbound calling: ${e.RETELL_OUTBOUND === "on" ? "environment switch on (the Owner setting must also be on)" : "off (RETELL_OUTBOUND not on)"}.`, fingerprint: await fp(e.RETELL_API_KEY), probe: false };
     case "resend_webhooks":
       if (!e.RESEND_WEBHOOK_SECRET) return { status: "not_configured", detail: "RESEND_WEBHOOK_SECRET is not set; /api/webhooks/resend rejects every request, so bounces and complaints are not recorded.", fingerprint: null, probe: false };
       return { status: "configured_unverified", detail: "Svix signing secret set; signed Resend delivery events are accepted. Unverified until Resend delivers a real event.", fingerprint: await fp(e.RESEND_WEBHOOK_SECRET), probe: false };

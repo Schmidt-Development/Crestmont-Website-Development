@@ -4,7 +4,7 @@
 // Every staff route calls requireStaff(ctx, perm) with the permission its nav link declares.
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
-import { html, formatDateTime, formatDate, label, type SafeHtml } from "../lib/html.ts";
+import { html, formatDateTime, formatDate, label, safeHttpsUrl, type SafeHtml } from "../lib/html.ts";
 import { HttpError, htmlResponse, jsonResponse, redirect, download, str } from "../app/http.ts";
 import { requireStaff, requireUser } from "../app/app.ts";
 import { appLayout } from "../ui/layout.ts";
@@ -25,6 +25,8 @@ import * as integ from "../services/integrations.ts";
 import * as mon from "../services/monitoring.ts";
 import * as priv from "../services/privacy.ts";
 import * as voice from "../services/voice.ts";
+import { voiceBudget, setVoiceBudget, VoiceBudgetError } from "../services/voice-budget.ts";
+import { syncPrompt, latestPromptSync, type PromptSyncResult } from "../services/voice-prompt-sync.ts";
 import { readBody } from "./api.ts";
 import { ValidationError } from "../lib/validate.ts";
 import { newId, nowIso } from "../lib/db.ts";
@@ -229,7 +231,22 @@ async function voicePage(ctx: AppContext, errors: string[] = [], draft?: { instr
   const escalations = (await db.prepare(`SELECT id, provider_call_id, escalated_at, is_test FROM calls WHERE escalated_at IS NOT NULL ORDER BY escalated_at DESC LIMIT 20`).all<{ id: string; provider_call_id: string; escalated_at: string; is_test: number }>()).results;
   const n = (k: string) => Number(vol?.[k] ?? 0);
   const dev = env === "development";
-  const body = html`${pageHead("AI receptionist", undefined, "AI")}
+  const budget = await voiceBudget(db);
+  const sync = await latestPromptSync(db);
+  const usd2 = (m: number) => `$${(m / 1e6).toFixed(2)}`;
+  const syncBadge = !sync ? badge("not_configured", "Never synchronised")
+    : sync.status === "in_sync" && sync.config_version !== (activeCfg?.version ?? null) ? badge("degraded", `Stale: last in sync for v${sync.config_version}`)
+    : badge(sync.status === "in_sync" ? "verified" : sync.status === "not_configured" ? "not_configured" : "failing", label(sync.status));
+  const costCards = html`<div class="grid grid-2" style="margin-top:1.5rem">
+<section class="card" id="budget" data-testid="voice-budget"><h2 class="card__title">Monthly voice budget</h2>
+<p>${budget.state === "not_set" ? badge("not_configured", "Not set") : badge(budget.state === "exhausted" ? "failing" : budget.state === "warning" ? "degraded" : "active", `${usd2(budget.spentMicro)} of ${usd2(budget.budgetMicro!)} used (${budget.month})`)}</p>
+<p class="muted">${budget.state === "not_set" ? "Without a budget, Retell calls are answered in voicemail-only mode (take a message, no transfer, no booking) and no outbound call is dialled." : budget.state === "exhausted" ? "Budget reached: calls are answered in voicemail-only mode until the budget is raised or the month ends." : "Spend is the provider-reported cost of every call this month, test calls included."}${budget.unknownCostCalls ? ` ${budget.unknownCostCalls} ended calls have no cost reported yet (not counted as zero).` : ""} Also set a spending limit in the Retell dashboard.</p>
+<form method="post" action="/staff/voice/budget" class="row">${csrf(ctx)}${input({ name: "monthly_budget_usd", label: "Monthly budget (USD, blank = off)", type: "number", min: 0, max: 100000, value: budget.budgetMicro ? String(budget.budgetMicro / 1e6) : "" })}<div class="field">${button("Save budget", { variant: "secondary", size: "sm" })}</div></form></section>
+<section class="card" id="prompt-sync" data-testid="voice-prompt-sync"><h2 class="card__title">Retell prompt synchronisation</h2>
+<p>${syncBadge}</p><p class="muted">${sync ? html`${label(sync.mode)} at ${formatDateTime(sync.created_at)}: ${sync.detail}` : "The active configuration has not been pushed to Retell from this environment."}</p>
+<p class="faint">${ctx.env.RETELL_API_KEY ? "Activating a version pushes its full prompt (guardrails + instructions) to the Retell LLM behind this environment's agent and reads it back. Publishing an agent version stays a Retell dashboard action." : "Provider not configured: RETELL_API_KEY is not set in this environment, so nothing can be pushed to Retell."}</p>
+<form method="post" action="/staff/voice/prompt-sync" class="row">${csrf(ctx)}${select({ name: "mode", label: "Action", options: [{ value: "push", label: "Push active version to Retell" }, { value: "check", label: "Check for drift (read only)" }] })}<div class="field">${button("Run", { variant: "secondary", size: "sm" })}</div></form></section></div>`;
+  const body = html`${pageHead("AI receptionist", linkButton("Operations: hours, scheduling, outbound", "/staff/voice/operations", "ghost", "sm"), "AI")}
 <div class="grid grid-3">
 <section class="card"><h2 class="card__title">Provider</h2><p>${badge(h("voice")?.status ?? "not_configured")}</p><p class="muted">${h("voice")?.detail ?? ""}</p>
 <p class="faint">Provider evaluation and recommendation awaiting Founder decision: <code>docs/voice/PROVIDER-EVALUATION.md</code> (BLK-009). Crestmont must use its own separate provider workspace; the other business's existing receptionist is never touched.</p></section>
@@ -238,6 +255,7 @@ async function voicePage(ctx: AppContext, errors: string[] = [], draft?: { instr
   : html`<p>${badge("not_configured", "None recorded")}</p><p class="muted">No receptionist number is recorded in Business settings. Purchasing a number requires Founder approval of the provider recommendation and its cost; this platform never buys numbers.</p>`}</section>
 <section class="card"><h2 class="card__title">Agent</h2>${activeCfg ? html`<p>${badge("active", `Configuration v${activeCfg.version} active`)}</p><p class="muted">Activated ${formatDateTime(activeCfg.activated_at)}. It is not live on any phone line until a provider and number exist.</p>` : html`<p>${badge("not_configured", "No active configuration")}</p><p class="muted">Create and activate a configuration version below.</p>`}</section>
 </div>
+${costCards}
 <div class="kpis grid grid-4" style="margin-top:1.5rem">${kpi("Calls (30 days)", n("real"), `${n("test")} test calls excluded`)}${kpi("Calls with a CRM lead", n("with_lead"))}${kpi("Escalations", n("escalated"))}${kpi("Call errors", n("errors"))}</div>
 <div class="kpis grid grid-4">${kpi("Usage cost (known, 30 days)", microUsd(n("cost_known")), n("cost_unknown") ? `${n("cost_unknown")} calls with unknown cost` : "All call costs known")}</div>
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Outcomes (all real calls)</h2>${outcomes.length ? barChart(outcomes.map((o) => ({ label: label(o.outcome), value: o.n, display: String(o.n) }))) : emptyState("No calls yet", "Calls appear once a provider sends signed events.")}</section>
@@ -284,6 +302,15 @@ ${dev ? html`<section class="card" style="margin-top:1.5rem"><h2 class="card__ti
   { value: "callback", label: "Callback request" }, { value: "escalate", label: "Escalation" },
 ] })}${button("Send test event", { variant: "secondary" })}</form></section>` : ""}`;
   return staffPage(ctx, "AI receptionist", body, errors.length ? 422 : 200);
+}
+
+function syncSentence(s: PromptSyncResult): string {
+  switch (s.status) {
+    case "in_sync": return `Retell prompt in sync: ${s.detail}`;
+    case "drift": return `Retell prompt DRIFT detected: ${s.detail}`;
+    case "failed": return `Retell prompt sync failed: ${s.detail}`;
+    case "not_configured": return `Not pushed to Retell. ${s.detail}`;
+  }
 }
 
 // ───────────── registration ─────────────
@@ -1063,7 +1090,25 @@ ${dl([["Job id", j.id], ["Status", badge(j.status)], ["Provider / model", `${j.p
       if (errStatus(e) === 404 || errStatus(e) === 409) return redirect(ctx, "/staff/voice#config", { kind: "error", text: (e as Error).message });
       throw e;
     }
-    return redirect(ctx, "/staff/voice#config", { kind: "success", text: `Configuration v${v} is now active.` });
+    // CREST-GAP-053: push the composed prompt to Retell and read it back. Never reported as synced unless Retell's read-back matches.
+    const s = await syncPrompt({ db: ctx.db, env: ctx.env, fetch: ctx.env.overrides?.fetch ?? fetch, userId: ctx.user!.id, mode: "push" });
+    return redirect(ctx, "/staff/voice#prompt-sync", { kind: s.status === "in_sync" ? "success" : s.status === "not_configured" ? "info" : "error", text: `Configuration v${v} is now active on the platform. ${syncSentence(s)}` });
+  });
+  r.post("/staff/voice/prompt-sync", async (ctx) => {
+    requireStaff(ctx, "voice.manage");
+    const mode = str(await ctx.form(), "mode") === "check" ? "check" : "push";
+    const s = await syncPrompt({ db: ctx.db, env: ctx.env, fetch: ctx.env.overrides?.fetch ?? fetch, userId: ctx.user!.id, mode });
+    return redirect(ctx, "/staff/voice#prompt-sync", { kind: s.status === "in_sync" ? "success" : "error", text: syncSentence(s) });
+  });
+  r.post("/staff/voice/budget", async (ctx) => {
+    requireStaff(ctx, "voice.manage"); // Owner-only (src/domain/authz.ts)
+    try {
+      const value = await setVoiceBudget(ctx.db, ctx.user!.id, str(await ctx.form(), "monthly_budget_usd"));
+      return redirect(ctx, "/staff/voice#budget", { kind: "success", text: value ? `Voice budget set to $${value} per month.` : "Voice budget cleared: Retell calls are answered in voicemail-only mode and nothing is dialled." });
+    } catch (e) {
+      if (e instanceof VoiceBudgetError) return redirect(ctx, "/staff/voice#budget", { kind: "error", text: e.message });
+      throw e;
+    }
   });
   r.get("/staff/voice/configs/diff", async (ctx) => {
     requireStaff(ctx, "voice.manage");
@@ -1090,7 +1135,10 @@ ${dl([["Provider", c.provider], ["Caller", c.from_number ?? "Unknown"], ["Starte
       ["Lead", c.lead_id ? `${c.lead_id} (${label(c.lead_stage ?? "")})` : "—"], ["Escalated", formatDateTime(c.escalated_at)], ["Recording consent", c.recording_consent ? "Given" : "Not given"],
       ["Agent configuration", c.agent_config_version ? `v${c.agent_config_version}` : "None active"], ["Cost", microUsd(c.cost_microusd)], ["Error", c.error]])}
 <section class="section--tight"><h2>Summary &amp; transcript</h2>${c.recording_consent
-      ? html`${c.summary ? html`<p>${c.summary}</p>` : ""}${c.transcript ? html`<pre class="code-block">${c.transcript}</pre>` : emptyState("No transcript", "The provider did not send a transcript.")}${c.recording_url ? html`<p><a href="${c.recording_url}" rel="noopener noreferrer">Recording (provider-hosted)</a></p>` : ""}`
+      ? html`${c.summary ? html`<p>${c.summary}</p>` : ""}${c.transcript ? html`<pre class="code-block">${c.transcript}</pre>` : emptyState("No transcript", "The provider did not send a transcript.")}${c.recording_url ? (safeHttpsUrl(c.recording_url) === "#"
+        // CREST-GAP-100: a provider-supplied link that is not https is never made clickable.
+        ? html`<p data-testid="recording-link"><a href="#" rel="noopener noreferrer">Recording link withheld (not an https URL)</a></p>`
+        : html`<p data-testid="recording-link"><a href="${safeHttpsUrl(c.recording_url)}" rel="noopener noreferrer">Recording (provider-hosted)</a></p>`) : ""}`
       : emptyState("Not stored", "The caller did not consent to recording or transcription, so no transcript, summary or recording was stored.")}</section>
 <section class="section--tight"><h2>Events</h2>${table(events, [
       { header: "When", cell: (e) => formatDateTime(e.created_at) }, { header: "Event", cell: (e) => e.kind }, { header: "Status", cell: (e) => badge(e.status === "ok" ? "active" : "failed", e.status) }, { header: "Detail", cell: (e) => e.detail ?? "—" },

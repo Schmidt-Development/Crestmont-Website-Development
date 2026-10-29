@@ -40,6 +40,21 @@ export function safeUrl(u: string | null | undefined): string {
   return "#";
 }
 
+/**
+ * https-only, for links supplied by third parties (e.g. a provider's call-recording URL, CREST-GAP-100).
+ * Anything that is not a well-formed https URL without embedded credentials — javascript:, data:, http:,
+ * protocol-relative or relative paths — becomes "#".
+ */
+export function safeHttpsUrl(u: string | null | undefined): string {
+  if (!u) return "#";
+  const s = u.trim();
+  if (!/^https:\/\//i.test(s)) return "#";
+  try {
+    const x = new URL(s);
+    return x.protocol === "https:" && x.hostname && !x.username && !x.password ? x.href : "#";
+  } catch { return "#"; }
+}
+
 export function formatCents(cents: number | null | undefined): string {
   if (cents === null || cents === undefined) return "Unknown";
   return (cents / 100).toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: cents % 100 ? 2 : 0 });

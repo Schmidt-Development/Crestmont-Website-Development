@@ -17,13 +17,14 @@ import { runStripeReconciliation, runStripeLedgerReconciliation } from "../servi
 import { probeEnvironments } from "../services/deployments.ts";
 import { runRetention } from "../services/retention.ts";
 import { sweepBuilds } from "../services/builds.ts";
+import { processOutboundQueue } from "../services/voice-outbound.ts";
 
 export type JobName = "requirements" | "stripe_reconcile" | "support_escalation" | "github_sync" | "inactivity" | "integration_health"
-  | "stripe_side_reconcile" | "stripe_ledger_reconcile" | "cost_import" | "env_probe" | "retention" | "build_sweep" | "payment_repair" | "email_retry";
+  | "stripe_side_reconcile" | "stripe_ledger_reconcile" | "cost_import" | "env_probe" | "retention" | "build_sweep" | "payment_repair" | "email_retry" | "voice_outbound";
 
 /** Cron expression → jobs. Must match [triggers] crons in wrangler.toml. */
 export const SCHEDULE: Record<string, JobName[]> = {
-  "*/15 * * * *": ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep"],
+  "*/15 * * * *": ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep", "voice_outbound"],
   "17 11 * * *": ["requirements", "inactivity", "integration_health", "stripe_side_reconcile", "stripe_ledger_reconcile", "cost_import", "retention"],
 };
 
@@ -61,6 +62,8 @@ export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string,
         // SEC-006: always purges expired operational data; personal-data periods only when staff set them.
         // AI Builds: expired runner leases, lost enqueues and newly ineligible orders.
         case "build_sweep": detail = await sweepBuilds(ctx.db); break;
+        // Outbound calls (VOICE-003): no-op ("skipped: outbound disabled") until RETELL_OUTBOUND=on AND the Owner enables it.
+        case "voice_outbound": detail = (await processOutboundQueue({ db: ctx.db, env, fetch: env.overrides?.fetch ?? fetch, now: env.overrides?.now })).detail; break;
         case "retention": detail = (await runRetention({ db: ctx.db, storage: ctx.storage })).map((r) => `${r.category}:${r.mode === "skipped" ? "off" : r.affected}`).join(", "); break;
       }
       results[job] = { ok: true, detail };

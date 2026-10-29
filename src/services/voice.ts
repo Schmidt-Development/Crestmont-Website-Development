@@ -22,13 +22,40 @@ import { parse, v, ValidationError } from "../lib/validate.ts";
 import { PACKAGES, MAINTENANCE_PLANS, APPROVED_SERVICES } from "../domain/catalog.ts";
 import { audit } from "./security.ts";
 import { effectivePrices } from "./pricing-approvals.ts";
+import { addLeadNote, addLeadTask, notifyOwners, redactSensitive } from "./voice-common.ts";
+import { hoursStatus, loadVoiceConfig, transferAvailability, toE164, type VoiceConfig } from "./voice-settings.ts";
+import * as sched from "./voice-scheduling.ts";
+import { addDnc, applyOutboundResult, recordCallConsent, requestOutbound } from "./voice-outbound.ts";
+import { sendMail, type MailerCtx } from "./mailer.ts";
+import { safeHttpsUrl } from "../lib/html.ts";
 
 export class VoiceAuthError extends Error {}
 
 export const CALL_OUTCOMES = ["lead_captured", "callback_requested", "support_routed", "escalated", "info_only", "abandoned", "error"] as const;
 export type CallOutcome = (typeof CALL_OUTCOMES)[number];
-export const VOICE_FUNCTIONS = ["get_published_pricing", "create_lead", "request_callback", "route_support", "escalate"] as const;
+export const VOICE_FUNCTIONS = ["get_published_pricing", "create_lead", "request_callback", "route_support", "escalate",
+  // Retell backend completion (migration 0042): hours, transfer, consultations, opt-out.
+  "get_business_hours", "check_transfer_availability", "check_consultation_availability", "book_consultation",
+  "lookup_consultation", "reschedule_consultation", "cancel_consultation", "record_opt_out"] as const;
 export type VoiceFunction = (typeof VOICE_FUNCTIONS)[number];
+
+const READ_ONLY = new Set<VoiceFunction>(["get_published_pricing", "get_business_hours", "check_transfer_availability", "check_consultation_availability"]);
+
+/**
+ * voice_events key marking a call that the inbound webhook answered in voicemail-only mode because the Owner's
+ * monthly voice budget is unset or reached (src/services/voice-budget.ts). On such a call only these functions run.
+ */
+export const VOICEMAIL_MODE_EVENT = "inbound_mode:voicemail";
+const VOICEMAIL_FUNCTIONS = new Set<VoiceFunction>(["request_callback", "escalate", "record_opt_out", "get_business_hours"]);
+
+/** Optional collaborators for handleVoiceEvent. Every one has a safe default (no mail, real clock, no calendar). */
+export interface VoiceDeps {
+  mail?: MailerCtx;
+  /** Absolute site origin for links in staff emails (escalations). Without it no escalation email is sent. */
+  baseUrl?: string;
+  now?: () => Date;
+  calendar?: sched.CalendarAdapter;
+}
 
 export async function signVoiceEvent(secret: string, body: string, t = Math.floor(Date.now() / 1000)): Promise<string> {
   return `t=${t},v1=${await hmacSha256Hex(secret, `${t}.${body}`)}`;
@@ -97,14 +124,26 @@ export function inventedPrices(text: string): string[] {
 
 const digits = (s: string | null | undefined) => (s ?? "").replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
 
-interface CallRow { id: string; provider: string; provider_call_id: string; lead_id: string | null; recording_consent: number; is_test: number; ended_at: string | null }
+interface CallRow { id: string; provider: string; provider_call_id: string; lead_id: string | null; recording_consent: number; is_test: number; ended_at: string | null; direction: string; from_number: string | null; to_number: string | null; outbound_request_id: string | null }
+const CALL_COLS = `id, provider, provider_call_id, lead_id, recording_consent, is_test, ended_at, direction, from_number, to_number, outbound_request_id`;
 
-async function ensureCall(db: Db, provider: string, providerCallId: string, data: { from?: string | null; consent?: boolean; isTest: boolean; agentVersion: number | null }): Promise<{ call: CallRow; created: boolean }> {
+export interface CallData { from?: string | null; to?: string | null; direction?: "inbound" | "outbound"; environment?: string | null; outboundRequestId?: string | null; consent?: boolean; isTest: boolean; agentVersion: number | null }
+
+/** Creates the call row once per provider call id (any later event only fills fields that are still empty). */
+export async function ensureCall(db: Db, provider: string, providerCallId: string, data: CallData): Promise<{ call: CallRow; created: boolean }> {
   const at = nowIso();
-  const res = await db.prepare(`INSERT INTO calls (id, provider, provider_call_id, from_number, direction, recording_consent, started_at, is_test, agent_config_version, created_at)
-      VALUES (?,?,?,?, 'inbound', ?, ?, ?, ?, ?) ON CONFLICT(provider, provider_call_id) DO NOTHING`)
-    .bind(newId("call"), provider, providerCallId, data.from ?? null, data.consent ? 1 : 0, at, data.isTest ? 1 : 0, data.agentVersion, at).run();
-  const call = await db.prepare(`SELECT id, provider, provider_call_id, lead_id, recording_consent, is_test, ended_at FROM calls WHERE provider = ? AND provider_call_id = ?`).bind(provider, providerCallId).first<CallRow>();
+  const env = data.environment && ["development", "staging", "production"].includes(data.environment) ? data.environment : null;
+  // An outbound request id is accepted only if that request really exists (it arrives in signed metadata the platform set).
+  const ob = data.outboundRequestId && /^vob_[A-Za-z0-9_-]{1,60}$/.test(data.outboundRequestId)
+    ? (await db.prepare(`SELECT id FROM voice_outbound_requests WHERE id = ?`).bind(data.outboundRequestId).first<{ id: string }>())?.id ?? null : null;
+  const res = await db.prepare(`INSERT INTO calls (id, provider, provider_call_id, from_number, to_number, direction, recording_consent, started_at, is_test, agent_config_version, environment, outbound_request_id, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider, provider_call_id) DO NOTHING`)
+    .bind(newId("call"), provider, providerCallId, data.from ?? null, data.to ?? null, data.direction ?? "inbound", data.consent ? 1 : 0, at, data.isTest ? 1 : 0, data.agentVersion, env, ob, at).run();
+  if (res.meta.changes !== 1 && (data.from || data.to || env || ob)) {
+    await db.prepare(`UPDATE calls SET from_number = COALESCE(from_number, ?), to_number = COALESCE(to_number, ?), environment = COALESCE(environment, ?), outbound_request_id = COALESCE(outbound_request_id, ?) WHERE provider = ? AND provider_call_id = ?`)
+      .bind(data.from ?? null, data.to ?? null, env, ob, provider, providerCallId).run();
+  }
+  const call = await db.prepare(`SELECT ${CALL_COLS} FROM calls WHERE provider = ? AND provider_call_id = ?`).bind(provider, providerCallId).first<CallRow>();
   return { call: call!, created: res.meta.changes === 1 };
 }
 
@@ -118,12 +157,25 @@ async function claimEvent(db: Db, callId: string, key: string, kind: string): Pr
   const res = await db.prepare(`INSERT INTO voice_events (id, call_id, event_key, kind, status, created_at) VALUES (?,?,?,?, 'ok', ?) ON CONFLICT(call_id, event_key) DO NOTHING`)
     .bind(id, callId, key, kind, nowIso()).run();
   if (res.meta.changes === 1) return { duplicate: false, eventId: id };
-  const prev = await db.prepare(`SELECT result_json FROM voice_events WHERE call_id = ? AND event_key = ?`).bind(callId, key).first<{ result_json: string | null }>();
+  const prev = await db.prepare(`SELECT id, status, result_json FROM voice_events WHERE call_id = ? AND event_key = ?`).bind(callId, key).first<{ id: string; status: string; result_json: string | null }>();
+  // A failed attempt is not an answer: the provider's retry gets a fresh attempt instead of the stored error.
+  if (prev && prev.status === "error") {
+    const retry = await db.prepare(`UPDATE voice_events SET status = 'ok', result_json = NULL, detail = NULL WHERE id = ? AND status = 'error'`).bind(prev.id).run();
+    if (retry.meta.changes === 1) return { duplicate: false, eventId: prev.id };
+  }
   return { duplicate: true, result: prev?.result_json ? JSON.parse(prev.result_json) : {} };
 }
 
 async function finishEvent(db: Db, eventId: string, status: "ok" | "error", result: Record<string, unknown>, detail?: string) {
   await db.prepare(`UPDATE voice_events SET status = ?, result_json = ?, detail = ? WHERE id = ?`).bind(status, JSON.stringify(result), detail?.slice(0, 1000) ?? null, eventId).run();
+}
+
+/** Records a provider event once per (call, key). Returns false when it was already recorded (a retry). */
+export async function recordCallEvent(db: Db, callId: string, key: string, kind: string, result: Record<string, unknown>, detail?: string): Promise<boolean> {
+  const claim = await claimEvent(db, callId, key.slice(0, 200), kind);
+  if (claim.duplicate) return false;
+  await finishEvent(db, claim.eventId, "ok", result, detail);
+  return true;
 }
 
 /** Creates (or reuses) the lead attached to this call so tasks and callbacks have a CRM home. */
@@ -143,17 +195,12 @@ async function createCallLead(db: Db, call: CallRow, c: { name: string; email?: 
   return leadId;
 }
 
-async function addTask(db: Db, leadId: string, body: string, dueHours = 24) {
-  await db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, due_at, created_at) VALUES (?,?,'task',?,?,?)`)
-    .bind(newId("act"), leadId, body.slice(0, 2000), new Date(Date.now() + dueHours * 3600e3).toISOString(), nowIso()).run();
-}
+const addTask = addLeadTask;
 
-async function notifyOwners(db: Db, body: string, subjectId: string) {
-  const owners = (await db.prepare(`SELECT DISTINCT m.user_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id IN ('owner') AND u.disabled_at IS NULL`).all<{ user_id: string }>()).results;
-  for (const o of owners) {
-    await db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES (?,?,'voice_escalation','call',?,?,?)`)
-      .bind(newId("ntf"), o.user_id, subjectId, body.slice(0, 500), nowIso()).run();
-  }
+/** True when `phoneE164` is the number this call comes from (inbound) or was placed to (outbound). */
+function isCallersOwn(call: CallRow, phoneE164: string): boolean {
+  const own = toE164(call.direction === "outbound" ? call.to_number : call.from_number);
+  return !!own && own === phoneE164;
 }
 
 const SUPPORT_RESPONSE = "Thank you. I've passed this to our support team. If we can match it to an existing account, they'll follow up through that account; otherwise someone will call you back during staffed hours.";
@@ -185,9 +232,74 @@ const fnSchemas = {
     name: v.string({ optional: true, max: 120 }),
     phone: v.string({ optional: true, pattern: phonePattern }),
   }),
+  get_business_hours: v.object({}),
+  check_transfer_availability: v.object({ department: v.enumOf(["sales", "support", "urgent"] as const, { optional: true }) }),
+  check_consultation_availability: v.object({ preferred_date: v.string({ optional: true, pattern: /^\d{4}-\d{2}-\d{2}$/ }) }),
+  book_consultation: v.object({
+    name: v.string({ min: 2, max: 120 }),
+    phone: v.string({ pattern: phonePattern }),
+    email: v.email({ optional: true }),
+    start_time: v.string({ min: 16, max: 40 }),
+    topic: v.string({ min: 3, max: 1000 }),
+    reminder_call_ok: v.enumOf(["true", "false"] as const, { optional: true }),
+  }),
+  lookup_consultation: v.object({ confirmation_code: v.string({ min: 4, max: 20 }), phone: v.string({ pattern: phonePattern }) }),
+  reschedule_consultation: v.object({ confirmation_code: v.string({ min: 4, max: 20 }), phone: v.string({ pattern: phonePattern }), new_start_time: v.string({ min: 16, max: 40 }) }),
+  cancel_consultation: v.object({ confirmation_code: v.string({ min: 4, max: 20 }), phone: v.string({ pattern: phonePattern }), reason: v.string({ optional: true, max: 500 }) }),
+  record_opt_out: v.object({ phone: v.string({ optional: true, pattern: phonePattern }) }),
 };
 
-async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgs: unknown): Promise<Record<string, unknown>> {
+/** Same answer for every unverified booking request: never reveals whether a booking exists. */
+const NOT_VERIFIED = { verified: false, message: "I couldn't find an upcoming consultation with that reference and phone number. I can ask a team member to call you back." };
+const MAX_VERIFY_FAILURES = 3;
+
+async function verifyFailures(db: Db, call: CallRow): Promise<number> {
+  return (await db.prepare(`SELECT COUNT(*) AS n FROM voice_events WHERE call_id = ? AND kind IN ('fn:lookup_consultation','fn:reschedule_consultation','fn:cancel_consultation') AND result_json LIKE '%"verified":false%'`)
+    .bind(call.id).first<{ n: number }>())!.n;
+}
+
+async function mailConsultation(deps: VoiceDeps, row: sched.ConsultationRow, event: "requested" | "confirmed" | "rescheduled" | "cancelled"): Promise<void> {
+  if (!deps.mail || !row.email) return;
+  try {
+    await sendMail(deps.mail, { template: "consultation", to: row.email, idempotencyKey: `consultation:${row.id}:${event}`,
+      data: { event, name: row.name, when: sched.labelOf(row), code: row.confirmation_code } });
+  } catch { /* delivery problems are recorded by the mail adapter; never fail the caller's booking */ }
+}
+
+async function isVoicemailCall(db: Db, call: CallRow): Promise<boolean> {
+  return !!(await db.prepare(`SELECT 1 FROM voice_events WHERE call_id = ? AND event_key = ?`).bind(call.id, VOICEMAIL_MODE_EVENT).first());
+}
+
+/** Emails every active Owner about an escalation (voice_escalation template). Returns how many were sent. */
+async function emailOwnersEscalation(db: Db, deps: VoiceDeps, call: CallRow, e: { reason: string; caller: string; transfer: string }): Promise<number> {
+  if (!deps.mail || !deps.baseUrl) return 0;
+  const owners = (await db.prepare(`SELECT DISTINCT u.id, u.email FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id = 'owner' AND u.disabled_at IS NULL AND u.email IS NOT NULL`).all<{ id: string; email: string }>()).results;
+  const ref = newId("vesc");
+  let sent = 0;
+  for (const o of owners) {
+    try {
+      await sendMail(deps.mail, { template: "voice_escalation", to: o.email, idempotencyKey: `voice_escalation:${call.id}:${o.id}:${ref}`,
+        data: { reason: e.reason.slice(0, 500), caller: e.caller.slice(0, 200), test: !!call.is_test,
+          why: e.transfer === "closed" ? "outside_hours" : e.transfer === "not_configured" ? "no_transfer" : "unavailable",
+          url: `${deps.baseUrl}/staff/voice/calls/${call.id}` } });
+      sent++;
+    } catch { /* delivery problems are recorded by the mail adapter; the task and in-app alert already exist */ }
+  }
+  return sent;
+}
+
+/** Every string argument is redacted (card numbers, SSNs) before validation and storage. */
+function redactArgs(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  return Object.fromEntries(Object.entries(raw as Record<string, unknown>).map(([k, val]) => [k, typeof val === "string" ? redactSensitive(val) : typeof val === "boolean" ? String(val) : val]));
+}
+
+async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn: unknown, deps: VoiceDeps): Promise<Record<string, unknown>> {
+  const rawArgs = redactArgs(rawArgsIn);
+  const now = deps.now?.() ?? new Date();
+  let cfgCache: VoiceConfig | null = null;
+  const cfg = async () => (cfgCache ??= await loadVoiceConfig(db));
+  const cal = deps.calendar ?? sched.NO_CALENDAR;
   switch (name) {
     case "get_published_pricing":
       return { pricing: publishedPricing(await effectivePrices(db)) }; // CREST-GAP-080
@@ -205,6 +317,13 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgs: 
       const a = parse(fnSchemas.request_callback, rawArgs ?? {});
       const leadId = call.lead_id ?? await createCallLead(db, call, { name: a.name, phone: a.phone, interest: "other", message: `Callback requested: ${a.reason}` });
       await addTask(db, leadId, `Call back ${a.name} at ${a.phone}${a.preferred_time ? ` (preferred: ${a.preferred_time})` : ""}: ${a.reason}`);
+      // The caller asked to be called back: that request is the consent, scoped to the callback purpose only.
+      // The outbound request still waits for staff approval, and outbound calling is off by default.
+      // Consent counts only for the number the caller is actually calling from: a caller cannot consent for someone else.
+      const phone = toE164(a.phone);
+      if (phone && isCallersOwn(call, phone) && await recordCallConsent(db, phone, "callback", "caller_request", `call:${call.id}`)) {
+        await requestOutbound(db, { purpose: "callback", phone, name: a.name, reason: `Caller asked for a callback${a.preferred_time ? ` (preferred: ${a.preferred_time})` : ""}: ${a.reason}`, leadId, isTest: !!call.is_test });
+      }
       return { callbackRequested: true, message: "Thanks. Someone will call you back during staffed hours." };
     }
     case "route_support": {
@@ -239,24 +358,136 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgs: 
     case "escalate": {
       const a = parse(fnSchemas.escalate, rawArgs ?? {});
       await db.prepare(`UPDATE calls SET escalated_at = COALESCE(escalated_at, ?) WHERE id = ?`).bind(nowIso(), call.id).run();
-      const leadId = call.lead_id ?? (a.phone ? await createCallLead(db, call, { name: a.name ?? "Unknown caller", phone: a.phone, interest: "other", message: `Escalated call: ${a.reason}` }) : null);
-      if (leadId) await addTask(db, leadId, `ESCALATION from AI receptionist: ${a.reason}`, 4);
-      await notifyOwners(db, `${call.is_test ? "[TEST] " : ""}AI receptionist escalated a call: ${a.reason}`, call.id);
-      await audit(db, { actorKind: "ai", action: "call.escalated", subjectType: "call", subjectId: call.id });
-      return { escalated: true, message: "I'm passing this to a member of the Crestmont team who will follow up during staffed hours." };
+      const tag = call.is_test ? "[TEST] " : "";
+      // Staffed hours + Founder-approved transfer number + normal (in-budget) mode → live transfer. The number itself
+      // is never returned to the model: Retell's transfer tool dials {{transfer_number}} from the inbound webhook.
+      // A transfer that does not connect (transfer_cancelled) becomes a callback task and an Owner alert (adapter).
+      const t = transferAvailability(await cfg(), now);
+      if (call.direction === "inbound" && t.available && !(await isVoicemailCall(db, call))) {
+        if (call.lead_id) await addLeadNote(db, call.lead_id, `Escalated and transferred live: ${a.reason}`);
+        await notifyOwners(db, "voice_escalation", `${tag}AI receptionist is transferring a caller to the team now: ${a.reason}`, "call", call.id);
+        await audit(db, { actorKind: "ai", action: "call.escalated", subjectType: "call", subjectId: call.id, details: { route: "transfer" } });
+        return { escalated: true, transfer: true, transfer_available: true,
+          message: "A team member is available. Tell the caller you are transferring them now, then use the transfer tool." };
+      }
+      // Otherwise: a CRM task (always, so nothing is lost) and an email to every Owner.
+      const leadId = call.lead_id ?? await createCallLead(db, call, { name: a.name ?? "Unknown caller", phone: a.phone ?? call.from_number, interest: "other", message: `Escalated call: ${a.reason}` });
+      await addTask(db, leadId, `ESCALATION from AI receptionist: ${a.reason}${a.phone ?? call.from_number ? ` — call back ${a.phone ?? call.from_number}` : ""}`, 4);
+      await notifyOwners(db, "voice_escalation", `${tag}AI receptionist escalated a call: ${a.reason}`, "call", call.id);
+      const emailed = await emailOwnersEscalation(db, deps, call, { reason: a.reason, caller: [a.name, a.phone ?? call.from_number].filter(Boolean).join(", ") || "Unknown caller", transfer: t.reason });
+      await audit(db, { actorKind: "ai", action: "call.escalated", subjectType: "call", subjectId: call.id, details: { route: "task_email", emailed, transfer: t.reason } });
+      return { escalated: true, transfer: false, transfer_available: false, message: "I'm passing this to a member of the Crestmont team who will follow up during staffed hours." };
+    }
+    case "get_business_hours": {
+      parse(fnSchemas.get_business_hours, rawArgs ?? {});
+      const c = await cfg();
+      const h = hoursStatus(c, now);
+      if (!h.configured) return { configured: false, open_now: false, hours: h.summary, message: "Our business hours aren't published yet. I can take your details and have someone call you back." };
+      return { configured: true, open_now: h.open, hours: h.summary, next_open: h.nextOpenAt && h.timezone ? new Intl.DateTimeFormat("en-US", { timeZone: h.timezone, weekday: "long", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(h.nextOpenAt)) : null };
+    }
+    case "check_transfer_availability": {
+      parse(fnSchemas.check_transfer_availability, rawArgs ?? {});
+      const t = transferAvailability(await cfg(), now);
+      // The destination number is never given to the model: Retell's transfer tool reads {{transfer_number}},
+      // which the inbound webhook supplies only when a Founder-approved number is configured.
+      return t.available
+        ? { transfer_available: true, message: "A team member may be available. Let the caller know you are transferring them now." }
+        : { transfer_available: false, reason: t.reason, message: "Nobody is available to take the call live right now. Offer to take a message with request_callback." };
+    }
+    case "check_consultation_availability": {
+      const a = parse(fnSchemas.check_consultation_availability, rawArgs ?? {});
+      const av = await sched.availability(db, await cfg(), now, cal, { fromDate: a.preferred_date });
+      if (!av.available) {
+        return { available: false, reason: av.reason, message: av.reason === "no_slots" ? "There are no open consultation times in the booking window. Offer to take a callback request." : "I can't book consultations by phone right now. Offer to take a callback request." };
+      }
+      return { available: true, timezone: av.timezone, slots: av.slots.map((x) => ({ start_time: x.startsAt, label: x.label })),
+        message: "Offer these times exactly as labelled. When the caller chooses one, call book_consultation with its start_time." };
+    }
+    case "book_consultation": {
+      const a = parse(fnSchemas.book_consultation, rawArgs ?? {});
+      const c = await cfg();
+      const phone = toE164(a.phone) ?? a.phone;
+      if (!c.scheduling.enabled || !c.timezone) return { booked: false, reason: "scheduling_disabled", message: "I can't book consultations by phone right now. Offer to take a callback request." };
+      try {
+        // Only the caller's own number is checked for an existing booking: saying "you already have one" for any
+        // other number would reveal whether that number has a booking.
+        const { booking, existing } = await sched.book(db, c, now, cal, { name: a.name, phone, email: a.email ?? null, startsAt: a.start_time, topic: a.topic, leadId: call.lead_id, callId: call.id, isTest: !!call.is_test, source: "ai_receptionist", checkExisting: isCallersOwn(call, phone) });
+        if (existing) return { booked: false, already_booked: true, message: "You already have an upcoming consultation with us. I can reschedule or cancel it if you give me your booking reference." };
+        const leadId = call.lead_id ?? await createCallLead(db, call, { name: a.name, email: a.email, phone, interest: "other", message: `Consultation requested by phone: ${a.topic}` });
+        await db.prepare(`UPDATE consultations SET lead_id = COALESCE(lead_id, ?) WHERE id = ?`).bind(leadId, booking.id).run();
+        await addLeadNote(db, leadId, `Consultation ${booking.status} for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) via AI receptionist`);
+        if (booking.status === "requested") await addLeadTask(db, leadId, `Confirm or decline the consultation requested for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}). Check your calendar first: no calendar is connected.`, 4);
+        await notifyOwners(db, "voice_consultation", `${call.is_test ? "[TEST] " : ""}Consultation ${booking.status} by phone: ${a.name}, ${sched.labelOf(booking)}`, "consultation", booking.id);
+        if (a.reminder_call_ok === "true" && isCallersOwn(call, phone)) await recordCallConsent(db, phone, "consultation_reminder", "caller_request", `call:${call.id}`);
+        await mailConsultation(deps, booking, booking.status === "confirmed" ? "confirmed" : "requested");
+        return { booked: true, status: booking.status, when: sched.labelOf(booking), confirmation_code: booking.confirmation_code,
+          message: booking.status === "confirmed"
+            ? `The consultation is booked for ${sched.labelOf(booking)}. Read the booking reference to the caller letter by letter.`
+            : `The time is held for the caller. A team member will confirm it${booking.email ? " by email" : ""}. Read the booking reference to the caller letter by letter.` };
+      } catch (e) {
+        if (!(e instanceof sched.SlotUnavailableError)) throw e;
+        const alt = await sched.availability(db, c, now, cal);
+        return { booked: false, reason: e.message, slots: alt.available ? alt.slots.map((x) => ({ start_time: x.startsAt, label: x.label })) : [],
+          message: alt.available ? "That time isn't available. Offer one of these instead." : "That time isn't available and nothing else is open. Offer a callback." };
+      }
+    }
+    case "lookup_consultation":
+    case "reschedule_consultation":
+    case "cancel_consultation": {
+      if (await verifyFailures(db, call) >= MAX_VERIFY_FAILURES) return { verified: false, locked: true, message: "I can't look that up on this call. I can ask a team member to call you back." };
+      const a = parse(fnSchemas[name] as typeof fnSchemas.reschedule_consultation, rawArgs ?? {}) as { confirmation_code: string; phone: string; new_start_time?: string; reason?: string };
+      const row = await sched.findVerified(db, a.confirmation_code, a.phone);
+      if (!row) return NOT_VERIFIED;
+      if (name === "lookup_consultation") return { verified: true, when: sched.labelOf(row), status: row.status === "confirmed" ? "confirmed" : "awaiting confirmation" };
+      if (name === "cancel_consultation") {
+        await sched.cancel(db, row, a.reason ?? "Cancelled by caller", { kind: "ai" });
+        if (row.lead_id) await addLeadNote(db, row.lead_id, `Consultation ${sched.labelOf(row)} cancelled by caller via AI receptionist`);
+        await notifyOwners(db, "voice_consultation", `${call.is_test ? "[TEST] " : ""}Consultation cancelled by phone: ${row.name}, ${sched.labelOf(row)}`, "consultation", row.id);
+        await mailConsultation(deps, row, "cancelled");
+        return { verified: true, cancelled: true, message: "The consultation is cancelled." };
+      }
+      const c = await cfg();
+      try {
+        const next = await sched.reschedule(db, c, now, cal, row, a.new_start_time!, { kind: "ai" });
+        if (row.lead_id) {
+          await addLeadNote(db, row.lead_id, `Consultation moved from ${sched.labelOf(row)} to ${sched.labelOf(next)} (new ref ${next.confirmation_code}) via AI receptionist`);
+          if (next.status === "requested") await addLeadTask(db, row.lead_id, `Confirm the rescheduled consultation ${sched.labelOf(next)} (ref ${next.confirmation_code}).`, 4);
+        }
+        await notifyOwners(db, "voice_consultation", `${call.is_test ? "[TEST] " : ""}Consultation rescheduled by phone: ${row.name}, now ${sched.labelOf(next)}`, "consultation", next.id);
+        await mailConsultation(deps, next, "rescheduled");
+        return { verified: true, rescheduled: true, when: sched.labelOf(next), confirmation_code: next.confirmation_code, status: next.status,
+          message: "The consultation has moved. Read the NEW booking reference to the caller letter by letter." };
+      } catch (e) {
+        if (!(e instanceof sched.SlotUnavailableError)) throw e;
+        const alt = await sched.availability(db, c, now, cal, { exceptId: row.id });
+        return { verified: true, rescheduled: false, reason: e.message, slots: alt.available ? alt.slots.map((x) => ({ start_time: x.startsAt, label: x.label })) : [],
+          message: "That time isn't available. The original booking is unchanged." };
+      }
+    }
+    case "record_opt_out": {
+      const a = parse(fnSchemas.record_opt_out, rawArgs ?? {});
+      const phone = toE164(a.phone ?? call.from_number);
+      if (phone) await addDnc(db, phone, "caller_request", `Requested on call ${call.id}`);
+      return { recorded: true, message: "Understood. We won't call this number again." };
     }
   }
 }
 
 /** Handles one verified webhook event. The caller has already checked the signature. */
-export async function handleVoiceEvent(db: Db, rawBody: string): Promise<VoiceResult> {
+export async function handleVoiceEvent(db: Db, rawBody: string, deps: VoiceDeps = {}): Promise<VoiceResult> {
   const json = JSON.parse(rawBody) as Record<string, unknown>;
   if (!json || typeof json !== "object" || Array.isArray(json)) throw new ValidationError(["Event body must be a JSON object"]);
   const base = parse(envelope, { ...json, test: json.test === undefined ? undefined : String(json.test) });
   const isTest = base.test === "true";
   const consent = json.recording_consent === true;
-  const from = typeof json.from_number === "string" && phonePattern.test(json.from_number) ? json.from_number : null;
-  const { call } = await ensureCall(db, base.provider, base.call_id, { from, consent, isTest, agentVersion: await activeAgentVersion(db) });
+  const phoneOf = (k: string) => (typeof json[k] === "string" && phonePattern.test(json[k] as string) ? json[k] as string : null);
+  const from = phoneOf("from_number");
+  const direction = json.direction === "outbound" ? "outbound" : "inbound";
+  const { call } = await ensureCall(db, base.provider, base.call_id, {
+    from, to: phoneOf("to_number"), direction, environment: typeof json.environment === "string" ? json.environment : null,
+    outboundRequestId: typeof json.outbound_request_id === "string" ? json.outbound_request_id : null,
+    consent, isTest, agentVersion: await activeAgentVersion(db),
+  });
 
   if (base.event === "call_started") {
     const claim = await claimEvent(db, call.id, "call_started", "call_started");
@@ -277,15 +508,24 @@ export async function handleVoiceEvent(db: Db, rawBody: string): Promise<VoiceRe
     const recording = str("recording_url", 500);
     const keep = consentNow;
     const discarded = !keep && (json.transcript || json.recording_url || json.summary) ? "transcript/recording/summary discarded: no recording consent" : undefined;
-    await db.prepare(`UPDATE calls SET outcome = ?, ended_at = ?, cost_microusd = ?, recording_consent = ?, transcript = ?, recording_url = ?, summary = ?, error = ? WHERE id = ?`)
+    const duration = typeof json.duration_ms === "number" && Number.isInteger(json.duration_ms) && json.duration_ms >= 0 ? json.duration_ms : null;
+    const reason = typeof json.disconnection_reason === "string" && /^[a-z_]{1,60}$/.test(json.disconnection_reason) ? json.disconnection_reason : null;
+    const text = (k: string, max: number) => { const t = str(k, max); return t === null ? null : redactSensitive(t); };
+    await db.prepare(`UPDATE calls SET outcome = ?, ended_at = ?, cost_microusd = ?, recording_consent = ?, transcript = ?, recording_url = ?, summary = ?, error = ?, duration_ms = COALESCE(?, duration_ms), disconnection_reason = COALESCE(?, disconnection_reason) WHERE id = ?`)
       .bind(outcome, nowIso(), cost, consentNow ? 1 : 0,
-        keep ? str("transcript", 100_000) : null,
-        keep && recording && /^https:\/\//.test(recording) ? recording : null,
-        keep ? str("summary", 4000) : null,
-        outcome === "error" ? (str("error", 1000) ?? "Provider reported an error") : null, call.id).run();
+        keep ? text("transcript", 100_000) : null,
+        // Provider-supplied link: stored only when it is a well-formed https URL (CREST-GAP-100; rendering re-checks).
+        keep && recording && safeHttpsUrl(recording) !== "#" ? recording : null,
+        keep ? text("summary", 4000) : null,
+        outcome === "error" ? (str("error", 1000) ?? "Provider reported an error") : null, duration, reason, call.id).run();
     await finishEvent(db, claim.eventId, "ok", { callId: call.id, outcome }, discarded);
-    if (call.lead_id) {
-      await db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'call',?,?)`).bind(newId("act"), call.lead_id, `Call ended · outcome: ${outcome}`, nowIso()).run();
+    if (call.lead_id) await addLeadNote(db, call.lead_id, `Call ended · outcome: ${outcome}`);
+    // Missed inbound call: nobody spoke and no function ran. Owners are alerted; nothing is dialled automatically.
+    if (call.direction === "inbound" && outcome === "abandoned" && !call.is_test && (from ?? call.from_number)) {
+      await notifyOwners(db, "voice_missed_call", `Missed call from ${from ?? call.from_number} — the caller hung up before speaking with the receptionist.`, "call", call.id);
+    }
+    if (call.direction === "outbound" && call.outbound_request_id) {
+      await applyOutboundResult(db, call.outbound_request_id, reason, cost, deps.now?.() ?? new Date());
     }
     return { status: 200, body: { ok: true, callId: call.id, outcome } };
   }
@@ -293,10 +533,18 @@ export async function handleVoiceEvent(db: Db, rawBody: string): Promise<VoiceRe
   // function_call
   const fn = parse(v.enumOf(VOICE_FUNCTIONS), (json.function as { name?: unknown } | undefined)?.name);
   if (!base.event_id) throw new ValidationError(["event_id is required for function calls (idempotency key)"]);
-  const claim = await claimEvent(db, call.id, `fn:${base.event_id}`, `fn:${fn}`);
+  // Read-only answers can change during a call (availability, hours): log them, never replay a stored one.
+  const key = READ_ONLY.has(fn) ? `fn:${base.event_id}:${newId("ro")}` : `fn:${base.event_id}`;
+  const claim = await claimEvent(db, call.id, key, `fn:${fn}`);
   if (claim.duplicate) return { status: 200, body: { ok: true, duplicate: true, result: claim.result } };
+  if (!VOICEMAIL_FUNCTIONS.has(fn) && await isVoicemailCall(db, call)) {
+    // Enforced here, not only in the prompt: a voicemail-mode call (budget unset or reached) can only leave a message.
+    const result = { refused: "voicemail_mode", message: "I can only take a message right now. Ask for the caller's name, number and message, then call request_callback." };
+    await finishEvent(db, claim.eventId, "ok", result, "refused: receptionist in voicemail mode (voice budget)");
+    return { status: 200, body: { ok: true, result } };
+  }
   try {
-    const result = await runFunction(db, call, fn, (json.function as { arguments?: unknown }).arguments);
+    const result = await runFunction(db, call, fn, (json.function as { arguments?: unknown }).arguments, deps);
     await finishEvent(db, claim.eventId, "ok", result);
     return { status: 200, body: { ok: true, result } };
   } catch (e) {
@@ -327,7 +575,10 @@ export function defaultAgentPrompt(): string {
 Greet the caller, say you are an AI assistant, and ask how you can help.
 Answer questions about services and published packages using get_published_pricing.
 For new projects, collect the caller's name, email or phone, business name, which package interests them (or custom work) and their requirements, then call create_lead.
-If the caller wants to speak to someone, call request_callback. For existing-customer support, call route_support. For anything complex, sensitive or outside these rules, call escalate.
+If the caller wants to speak to someone, call check_transfer_availability; transfer only when it returns transfer_available true, otherwise call request_callback. For existing-customer support, call route_support. For anything complex, sensitive or outside these rules, call escalate.
+For a consultation, call check_consultation_availability, offer only the returned times, then book_consultation with the chosen start_time and read the booking reference back letter by letter. To check, move or cancel a booking, ask for the booking reference and phone number and use lookup_consultation, reschedule_consultation or cancel_consultation.
+For opening hours use get_business_hours. If the caller asks not to be called again, call record_opt_out.
+Never ask for, repeat or write down card numbers, bank details or passwords. Payments are made only through the secure links Crestmont sends by email.
 Keep answers short and accurate. Staffed hours are published on the website; human staff are not available around the clock.`;
 }
 

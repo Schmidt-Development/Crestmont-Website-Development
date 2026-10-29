@@ -224,6 +224,13 @@ async function buildStaffRecords(w: World) {
   ids.voiceVersion = "1";
   await ok(o.post("/staff/voice/test-event", { scenario: "lead" }), "voice test call");
   ids.call = (await one<{ id: string }>(db, `SELECT id FROM calls ORDER BY started_at DESC LIMIT 1`)).id;
+  // Receptionist operations (migration 0042): one requested consultation and one outbound request awaiting approval.
+  ids.consultation = newId("cns");
+  await db.prepare(`INSERT INTO consultations (id, name, phone, starts_at, duration_minutes, timezone, status, confirmation_code, source, is_test, created_at, updated_at)
+      VALUES (?, 'World Caller', '+15550100980', ?, 30, 'America/Detroit', 'requested', 'WRLD42', 'ai_receptionist', 1, ?, ?)`).bind(ids.consultation, new Date(Date.now() + 7 * 86400e3).toISOString(), nowIso(), nowIso()).run();
+  ids.outboundRequest = newId("vob");
+  await db.prepare(`INSERT INTO voice_outbound_requests (id, purpose, phone_e164, reason, status, idempotency_key, is_test, created_at, updated_at)
+      VALUES (?, 'callback', '+15550100981', 'TEST DATA', 'pending_approval', ?, 1, ?, ?)`).bind(ids.outboundRequest, `crestmont_${ids.outboundRequest}`, nowIso(), nowIso()).run();
   const tomorrow = new Date(Date.now() + 86400e3).toISOString().slice(0, 10);
   await ok(w.staff.sales.c.post("/staff/pricing", { item: "package:starter", proposed: "1099", effective_date: tomorrow, reason: "Matrix market adjustment (TEST DATA)" }), "price change request");
   ids.priceRequest = (await one<{ id: string }>(db, `SELECT id FROM price_change_requests ORDER BY requested_at DESC LIMIT 1`)).id;

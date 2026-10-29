@@ -26,7 +26,7 @@ export const REQUIRED_WORKFLOWS = [
   "support_reply", "refund_request", "refund_decision", "project_completion", "handoff", "security_notification",
   "critical_incident",
 ] as const;
-export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "lead_alert", "proposal_accepted", "dispute_opened"] as const;
+export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "lead_alert", "proposal_accepted", "dispute_opened", "consultation", "voice_escalation"] as const;
 export type EmailTemplate = (typeof EMAIL_TEMPLATES)[number];
 export type MailCategory = "transactional" | "marketing";
 export type Audience = "customer" | "staff" | "prospect" | "any";
@@ -101,6 +101,10 @@ export interface TemplateData {
   proposal_accepted: { contactName: string; version: number; totalCents: number; firstInvoiceCents: number; agreements: string[]; url: string };
   /** Owner alert: a payment dispute was opened (CREST-GAP-039). */
   dispute_opened: { amountCents: number; evidenceDueBy: string | null; url: string };
+  /** Consultation booked by phone with the AI receptionist (VOICE-003). `when` is pre-formatted in the business time zone. */
+  consultation: { event: "requested" | "confirmed" | "rescheduled" | "cancelled"; name: string; when: string; code: string };
+  /** Staff alert: the AI receptionist escalated a call that could not be transferred live (CREST-GAP-053). */
+  voice_escalation: { reason: string; caller: string; why: "outside_hours" | "no_transfer" | "unavailable"; test: boolean; url: string };
 }
 
 export interface MailContent { subject: string; heading: string; paragraphs: string[]; cta?: { label: string; url: string } }
@@ -466,6 +470,48 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
       cta: { label: "Open disputes", url: d.url },
     }),
     samples: [{ amountCents: 99900, evidenceDueBy: "2026-12-01", url: "https://example.com/staff/disputes" }],
+  },
+  consultation: {
+    name: "consultation", category: "transactional", audience: "prospect",
+    description: "Consultation requested, confirmed, rescheduled or cancelled (booked by phone with the AI receptionist).",
+    render: (d) => {
+      const ref = `Your booking reference is ${d.code}. Quote it, with the phone number you gave us, if you call to change the booking.`;
+      const notMe = "If you did not book this consultation, you can ignore this email.";
+      switch (d.event) {
+        case "requested": return { subject: "Consultation request received — Crestmont", heading: "We received your consultation request",
+          paragraphs: [`Hello ${d.name}, thank you for calling Crestmont Website Development.`, `We are holding ${d.when} for you. A team member will confirm the time by email.`, ref, notMe] };
+        case "confirmed": return { subject: "Consultation confirmed — Crestmont", heading: "Your consultation is confirmed",
+          paragraphs: [`Hello ${d.name}, your consultation with Crestmont Website Development is confirmed for ${d.when}.`, ref, notMe] };
+        case "rescheduled": return { subject: "Consultation rescheduled — Crestmont", heading: "Your consultation has moved",
+          paragraphs: [`Hello ${d.name}, your consultation is now ${d.when}.`, ref, notMe] };
+        case "cancelled": return { subject: "Consultation cancelled — Crestmont", heading: "Your consultation is cancelled",
+          paragraphs: [`Hello ${d.name}, your consultation for ${d.when} has been cancelled.`, "Call us or use the contact form if you would like to book another time.", notMe] };
+      }
+    },
+    samples: [
+      { event: "requested", name: "Morgan Hale", when: "Tuesday, November 3 at 10:00 AM EST", code: "K7MP4Q" },
+      { event: "confirmed", name: "Morgan Hale", when: "Tuesday, November 3 at 10:00 AM EST", code: "K7MP4Q" },
+      { event: "rescheduled", name: "Morgan Hale", when: "Thursday, November 5 at 2:30 PM EST", code: "R2WX9T" },
+      { event: "cancelled", name: "Morgan Hale", when: "Tuesday, November 3 at 10:00 AM EST", code: "K7MP4Q" },
+    ],
+  },
+  voice_escalation: {
+    name: "voice_escalation", category: "transactional", audience: "staff",
+    description: "Owner alert: the AI receptionist escalated a call and no live transfer was possible, so a callback task was created.",
+    render: (d) => {
+      const why = d.why === "outside_hours" ? "It is outside staffed hours, so the call could not be transferred."
+        : d.why === "no_transfer" ? "No live-transfer number is configured, so the call could not be transferred."
+        : "A live transfer was not available for this call.";
+      return {
+        subject: `${d.test ? "[TEST] " : ""}AI receptionist escalation — call back needed`, heading: "A caller needs a person",
+        paragraphs: [`Reason given: ${d.reason}`, `Caller: ${d.caller}`, why, "A CRM task due within 4 hours was created on the caller's lead. Do not discuss account details until you have verified the caller's identity."],
+        cta: { label: "Open the call", url: d.url },
+      };
+    },
+    samples: [
+      { reason: "Wants to discuss changing their contract", caller: "Morgan Hale, +15550100123", why: "outside_hours", test: false, url: "https://example.com/staff/voice/calls/call_sample" },
+      { reason: "Asked for a person", caller: "Unknown caller", why: "no_transfer", test: true, url: "https://example.com/staff/voice/calls/call_sample" },
+    ],
   },
 };
 
