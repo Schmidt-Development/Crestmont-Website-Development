@@ -1,7 +1,6 @@
-// Browser journey against a deployed staging preview (TEST-002 staging evidence).
-// Runs only when pointed at a preview:
+// Browser journey against the deployed, PUBLIC staging site (TEST-002 staging evidence; no preview password since 2026-10-28).
+// Runs only when pointed at staging:
 //   E2E_BASE_URL          https://crestmont-platform-staging.<subdomain>.workers.dev
-//   E2E_PREVIEW_PASSWORD  the preview password
 //   E2E_ACCOUNTS_FILE     demo-accounts.md written by scripts/seed-staging.ts
 // With EVIDENCE_ENVIRONMENT=staging the results are recorded as staging evidence. Without the
 // variables the suite reports itself skipped, so local `npm run e2e` is unaffected.
@@ -13,9 +12,8 @@ import { launchBrowser } from "./support.ts";
 import { totpCode } from "../../src/lib/auth-crypto.ts";
 
 const BASE = process.env.E2E_BASE_URL?.replace(/\/$/, "");
-const PREVIEW_PW = process.env.E2E_PREVIEW_PASSWORD;
 const ACCOUNTS = process.env.E2E_ACCOUNTS_FILE;
-const skip = !BASE || !PREVIEW_PW || !ACCOUNTS ? "E2E_BASE_URL / E2E_PREVIEW_PASSWORD / E2E_ACCOUNTS_FILE not set" : false;
+const skip = !BASE || !ACCOUNTS ? "E2E_BASE_URL / E2E_ACCOUNTS_FILE not set" : false;
 
 type Page = any; // eslint-disable-line @typescript-eslint/no-explicit-any -- Playwright is loaded at runtime (zero-dependency repo)
 type Account = { role: string; email: string; password: string; totp?: string };
@@ -28,14 +26,14 @@ let browser: Awaited<ReturnType<typeof launchBrowser>>;
 before(async () => { if (!skip) browser = await launchBrowser(); });
 after(async () => { await browser?.close(); });
 
+/** A fresh browser context with NO cookies or credentials: the public website must load directly. */
 async function previewContext() {
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
   const r = await page.goto(BASE + "/");
-  assert.equal(r?.status(), 401, "preview gate in front of the site");
-  await page.fill("#f-preview", PREVIEW_PW!);
-  await Promise.all([page.waitForLoadState("load"), page.click("button[type=submit]")]);
-  assert.doesNotMatch(await page.content(), /Preview password/, "preview password accepted");
+  assert.equal(r?.status(), 200, "public homepage loads for a fresh visitor");
+  assert.doesNotMatch(await page.content(), /Preview password|__preview-access/, "no preview password prompt");
+  assert.equal(r?.headers()["x-robots-tag"], "noindex, nofollow", "staging is not indexable");
   return { ctx, page };
 }
 
@@ -55,7 +53,7 @@ async function signIn(page: Page, a: Account) {
   assert.doesNotMatch(new URL(page.url()).pathname, /^\/(login|mfa)/, `signed in as ${a.role}`);
 }
 
-test("[TEST-002] staging preview: gate, public site, customer portal and Owner command center in a real browser", { skip }, async () => {
+test("[TEST-002] public staging: fresh visitor sees the site; customer portal and Owner command center still need their own sign-in", { skip }, async () => {
   const { ctx, page } = await previewContext();
   // Every public page linked from the homepage header and footer must load.
   await page.goto(BASE + "/");
@@ -66,9 +64,11 @@ test("[TEST-002] staging preview: gate, public site, customer portal and Owner c
     const r = await page.goto(BASE + p);
     assert.ok(r && r.status() < 400, `${p} → ${r?.status()}`);
   }
-  // Staff area still requires its own sign-in behind the preview gate.
-  await page.goto(BASE + "/staff");
-  assert.match(new URL(page.url()).pathname, /^\/login/, "preview pass is not a staff session");
+  // Protected areas still require their own sign-in.
+  for (const p of ["/staff", "/portal"]) {
+    await page.goto(BASE + p);
+    assert.match(new URL(page.url()).pathname, /^\/login/, `${p} redirects an anonymous visitor to sign-in`);
+  }
 
   const all = accounts();
   const customer = all.find((a) => a.email.startsWith("customer.harbor"))!;

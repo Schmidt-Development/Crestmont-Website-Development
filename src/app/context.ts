@@ -25,11 +25,11 @@ export interface Env {
   VOICE_WEBHOOK_SECRET?: string;
   /** Retell workspace API key that carries the webhook badge (verifies X-Retell-Signature). VOICE-003. */
   RETELL_API_KEY?: string;
-  /** Staging only: password for the outer preview gate (src/app/preview-gate.ts). Ignored in production. */
+  /** Emergency re-lock only: password for the preview gate (src/app/preview-gate.ts); ignored unless PREVIEW_GATE = "required". */
   STAGING_ACCESS_PASSWORD?: string;
   /** Approved isolated portfolio demo origins (https only, comma/space separated). Only these may be framed. */
   PORTFOLIO_DEMO_ORIGINS?: string;
-  /** "required" on the deployed staging Worker: the preview gate stays locked when no password is set. */
+  /** Emergency re-lock: "required" turns the staging preview gate on (fails closed without a password). Unset = public. */
   PREVIEW_GATE?: string;
   /** "local-runner": AI drafts are served by the self-hosted model through the build runner (no paid API). */
   AI_PROVIDER?: string;

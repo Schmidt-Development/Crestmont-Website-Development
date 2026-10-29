@@ -100,7 +100,7 @@ Production receives this code only through a Founder-approved release. When that
 | # | Dependency on the preview URL | Action |
 |---|---|---|
 | B1 | All four demo Workers allow framing **only** by `https://crestmont-platform-frontend-preview.partners-df4.workers.dev` and the production domain (`DEMO_FRAME_ANCESTORS` in each repo's `portfolio-demo/wrangler.jsonc`; confirmed in `glassly@crestmont/portfolio-demo`). Staging cannot embed them. | In `glassly`, `better-lansing-mechanics` and `lansing-car-rentals` (two demo branches), replace the preview origin with `https://crestmont-platform-staging.partners-df4.workers.dev`, redeploy each demo, then re-run *Deploy staging* and confirm the Portfolio summary says "demo verified for staging" for all four. |
-| B2 | GitHub environment `frontend-preview` and its secrets `FRONTEND_PREVIEW_PASSWORD` / `FRONTEND_PREVIEW_DEMO_PASSWORD` | Remove after retirement (Settings → Environments). Staging uses its own access (`STAGING_PREVIEW_PASSWORD`, sealed notes). |
+| B2 | GitHub environment `frontend-preview` and its secrets `FRONTEND_PREVIEW_PASSWORD` / `FRONTEND_PREVIEW_DEMO_PASSWORD` | Remove after retirement (Settings → Environments). Staging is public and its demo accounts use their own sealed access notes. |
 | B3 | Bookmarks or links shared with reviewers | Tell them to use the staging URL and staging access. |
 
 From the repository side nothing else depends on the preview: it had no R2 binding and no cron triggers, its workflow
@@ -113,7 +113,7 @@ step 5, confirm none of them lists a `crestmont-platform-frontend-preview` URL a
 1. **Review and merge this PR** into `main` (this is the approval to deploy the consolidated code to staging only).
 2. Open *Actions → Deploy staging* for the merge commit and confirm green: *Frontend assets and homepage*, *Browser
    journey*, *Frontend browser verification*; download `staging-frontend-browser` to see the screenshots.
-3. Open the staging URL with your staging preview password and review the site (and `/login` → 2FA).
+3. Open the staging URL (public since 2026-10-28; no preview password) and review the site (and `/login` → 2FA).
 4. Clear **B1** (or decide that posters on staging are acceptable for now and note it here).
 5. Reply with the written authorization: **"Retire crestmont-platform-frontend-preview."**
 

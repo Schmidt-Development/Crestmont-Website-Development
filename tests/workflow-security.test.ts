@@ -79,9 +79,8 @@ test("[SEC-007] F-24: deploy workflows hold no secret at job level, and steps th
         bad.push(`${f} › ${s.name}: has the Cloudflare token but does not use Cloudflare`);
     }
   }
-  // The Founder's preview-password override only where it is used (override check, capture, applying access).
-  for (const s of steps(read("deploy-staging.yml")))
-    if (/secrets\.STAGING_PREVIEW_PASSWORD/.test(s.env) && !/staging-access\.ts|staging-rotation-check\.ts (override|capture)/.test(s.run)) bad.push(`deploy-staging.yml › ${s.name}: has STAGING_PREVIEW_PASSWORD but does not use it`);
+  // Staging is public since 2026-10-28: no step may receive or reference the retired preview-password secret.
+  if (/STAGING_PREVIEW_PASSWORD|FIXED_PREVIEW_PASSWORD/.test(read("deploy-staging.yml"))) bad.push("deploy-staging.yml: references the retired preview password");
   assert.deepEqual(bad, []);
   const e2e = steps(read("deploy-staging.yml")).find((s) => /Browser journey/.test(s.name))!;
   assert.ok(e2e.run.indexOf("unset EVIDENCE_INGEST_SECRET") >= 0 && e2e.run.indexOf("unset EVIDENCE_INGEST_SECRET") < e2e.run.indexOf("npm install"), "evidence secret dropped before npm install");

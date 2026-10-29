@@ -1,9 +1,12 @@
-// Staging preview access gate. When STAGING_ACCESS_PASSWORD is set (staging only — refused in
-// production), every page requires a preview pass before the normal application (and its own
-// authentication, MFA and permissions) is reached. It is an extra outer lock, never a substitute
-// for platform authorization: signing in to the portal or staff area still works exactly as in
-// production. Signed machine endpoints (webhooks, CI evidence, deployments) and the health check
-// stay reachable because they authenticate themselves.
+// Emergency re-lock for staging (OFF by default). Founder decision 2026-10-28: the staging website is public, like a
+// normal website; no preview password is issued and the deploy workflow no longer sets one. Owner, staff and customer
+// accounts keep their own authentication, mandatory staff MFA, step-up, rate limits and authorization exactly as in
+// production — none of those ever depended on this gate.
+//
+// The gate runs ONLY when the deployment explicitly sets PREVIEW_GATE = "required" (never in production). A leftover
+// STAGING_ACCESS_PASSWORD secret alone does nothing. To re-lock staging in an emergency: set PREVIEW_GATE = "required"
+// in [env.staging] and a STAGING_ACCESS_PASSWORD secret (it fails closed with 503 until the secret exists). Signed
+// machine endpoints (webhooks, CI evidence, deployments), the health check and assets stay reachable when locked.
 import type { Env } from "./context.ts";
 import { hmacSha256Hex, timingSafeEqualHex } from "../lib/crypto.ts";
 import { escapeHtml } from "../lib/html.ts";
@@ -14,14 +17,10 @@ const PASS_TTL_S = 12 * 3600;
 
 const EXEMPT = [/^\/api\/health$/, /^\/api\/webhooks\//, /^\/api\/builds\/runner\//, /^\/api\/readiness\/(evidence|deployments|release-candidates|release-authorization|health|github-snapshot)$/, /^\/api\/scheduled\/run$/, /^\/assets\//];
 
-/**
- * Never in production. Required (fail closed even without a password) when the deployment sets
- * PREVIEW_GATE = "required" — the deployed staging Worker does, in wrangler.toml. Otherwise on when a
- * preview password is configured.
- */
+/** Never in production. Only when the deployment explicitly sets PREVIEW_GATE = "required" (then fails closed without a password). */
 export function previewGateEnabled(env: Env): boolean {
   if (env.ENVIRONMENT === "production") return false;
-  return env.PREVIEW_GATE === "required" || !!env.STAGING_ACCESS_PASSWORD;
+  return env.PREVIEW_GATE === "required";
 }
 
 async function passValue(env: Env, issuedAt: number): Promise<string> {

@@ -525,7 +525,8 @@ test("[INFRA-005] deployment workflows are gated: staging skips without Cloudfla
   for (const m of staging.matchAll(/upload-artifact@v4\n\s+if: ([^\n]+)/g)) assert.match(m[1], /steps\.protect\.outputs\.upload == 'sealed'|steps\.gate\.outputs\.pending == 'true'/, "access artifact only after the live sequence verified");
   assert.match(staging, /rm -f access\/private\.json access\/access\.json/);
   assert.doesNotMatch(staging, /upload-artifact[\s\S]*?path: (backups|access\/(private|access))/, "no other artifact carries credentials");
-  assert.match(staging, /preview gate not active/);
+  assert.match(staging, /public homepage returned HTTP \$code with no cookies/, "staging smoke proves the public site loads without credentials");
+  assert.match(staging, /opened without a session/, "staging smoke proves protected areas refuse anonymous visitors");
   assert.match(staging, /scripts\/seed-staging\.ts/);
   assert.match(staging, /name: staging-access-sealed/);
   assert.doesNotMatch(staging, /name: staging-preview-access/, "the name of the exposed plaintext artifacts is retired");
