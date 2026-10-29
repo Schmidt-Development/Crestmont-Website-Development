@@ -116,6 +116,18 @@ export function sanitizeExport(sql: string): { sql: string; removed: Record<stri
   return { sql: out.join("\n") + (out.length ? "\n" : ""), removed };
 }
 
+/** A failure reason is built from wrangler's error output and ends up on the public /api/readiness/health feed.
+ *  D1 errors can quote the failing SQL, so row data (string literals, blobs, email addresses) and anything
+ *  token-like are removed; the error class, code and SQL keywords that explain the failure are kept. */
+export function redactReason(s: string): string {
+  return s
+    .replace(/X'[0-9A-Fa-f]*'/g, "X'…'")
+    .replace(/'(?:[^']|'')*'/g, "'…'")
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g, "[email]")
+    .replace(/\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{24,}\b/g, "[redacted]")   // tokens/ids mix letters and digits; long table names do not
+    .slice(0, 500);
+}
+
 export interface DrillResult { passed: boolean; tables: number; rows: number; problems: string[] }
 export function compareCounts(source: Rows, restored: Rows): DrillResult {
   const a = new Map(source.map((r) => [String(r.t), Number(r.n)]));
@@ -155,7 +167,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   } else if (mode === "fail") {
     // A step before the comparison failed (export, scratch database, import): record a failed drill with the reason,
     // so the recovery:restore feed shows it instead of the drill silently leaving no evidence.
-    const reason = (arg("--reason") || "restore drill failed before the comparison").slice(0, 500);
+    const reason = redactReason(arg("--reason") || "restore drill failed before the comparison");
     writeFileSync(arg("--out") ?? "evidence/restore-drill.json", JSON.stringify(drillEvidence({ passed: false, tables: 0, rows: 0, problems: [reason] }, { commit: arg("--commit") ?? "0000000", runId: arg("--run-id") ?? `local-drill-${Date.now()}`, startedAt: arg("--started") ?? new Date().toISOString() })));
   } else { console.error("usage: restore-drill.ts sql <tables.json> | compare <source.json> <restored.json> [--commit --run-id --out --started]"); process.exit(2); }
 }

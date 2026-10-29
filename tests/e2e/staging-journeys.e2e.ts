@@ -139,7 +139,14 @@ function linkIn(body: string, path: string): string {
 /** Staging uses Cloudflare Turnstile (always-pass test keys); wait for its token before submitting. */
 async function awaitTurnstile(page: Page) {
   if (!(await page.locator(".cf-turnstile").count())) return; // development: no widget
-  await page.waitForFunction(() => (document.querySelector("[name='cf-turnstile-response']") as HTMLInputElement | null)?.value, undefined, { timeout: TIMEOUT });
+  // Not page.waitForFunction: Playwright evaluates its predicate in the page with new Function(), which the site's CSP
+  // (script-src without 'unsafe-eval') refuses — deploy #57 journey 1 failed with exactly that EvalError. Locator reads
+  // run in Playwright's own context, so the real CSP stays in force for everything the page itself does.
+  const token = page.locator("[name='cf-turnstile-response']").first();
+  for (const until = Date.now() + TIMEOUT; ; await page.waitForTimeout(250)) {
+    if ((await token.count()) && (await token.inputValue())) return;
+    if (Date.now() > until) throw new Error(`Turnstile produced no token within ${TIMEOUT / 1000}s`);
+  }
 }
 /** Step-up MFA before a sensitive action (src/app/step-up.ts). Codes are single-use per 30 s step, so on a replay wait for the next step. */
 async function freshMfa(page: Page, a: Account) {

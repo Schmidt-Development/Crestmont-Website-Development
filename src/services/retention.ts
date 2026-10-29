@@ -12,6 +12,7 @@
 import type { Db } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import type { StorageAdapter } from "../adapters/storage.ts";
+import { activeHolds, notIn } from "./legal-holds.ts";
 
 const DAY = 86_400_000;
 
@@ -59,10 +60,18 @@ export async function runRetention(deps: { db: Db; storage: StorageAdapter | nul
   const iso = (msAgo: number) => new Date(now.getTime() - msAgo).toISOString();
   const results: RetentionResult[] = [];
 
+  // Legal holds (F-25, src/services/legal-holds.ts) are read once per run and narrow every deletion below.
+  const holds = await activeHolds(db);
+
   // ── Tier 1: always ──
   const sessCut = iso(30 * DAY);
-  const s = await db.prepare(`DELETE FROM sessions WHERE (revoked_at IS NOT NULL AND revoked_at < ?) OR expires_at < ?`).bind(sessCut, sessCut).run();
-  results.push({ category: "sessions", mode: "always", affected: s.meta.changes, cutoff: sessCut, detail: "expired or revoked before cutoff" });
+  if (holds.global) {
+    results.push({ category: "sessions", mode: "skipped", affected: 0, cutoff: null, detail: "legal hold: sign-in records preserved" });
+  } else {
+    const u = notIn("user_id", holds.users);
+    const s = await db.prepare(`DELETE FROM sessions WHERE ((revoked_at IS NOT NULL AND revoked_at < ?) OR expires_at < ?)${u.sql}`).bind(sessCut, sessCut, ...u.binds).run();
+    results.push({ category: "sessions", mode: "always", affected: s.meta.changes, cutoff: sessCut, detail: `expired or revoked before cutoff${holds.users.size ? `; ${holds.users.size} held account(s) kept` : ""}` });
+  }
 
   const rlCutSeconds = Math.floor((now.getTime() - 2 * DAY) / 1000);
   const rl = await db.prepare(`DELETE FROM rate_limits WHERE window_start < ?`).bind(rlCutSeconds).run();
@@ -82,11 +91,16 @@ export async function runRetention(deps: { db: Db; storage: StorageAdapter | nul
     const days = configuredDays(settings, rule);
     if (days === null) { results.push({ category: rule.category, mode: "skipped", affected: 0, cutoff: null, detail: `not configured (${rule.key} unset; proposed ${rule.proposedDays} days pending Founder/attorney approval)` }); continue; }
     if (typeof days === "string") { results.push({ category: rule.category, mode: "skipped", affected: 0, cutoff: null, detail: `${rule.key}: ${days}` }); continue; }
+    if (holds.global) { results.push({ category: rule.category, mode: "skipped", affected: 0, cutoff: null, detail: `legal hold in place: nothing deleted (${days} days configured)` }); continue; }
     const cut = iso(days * DAY);
     let affected = 0, detail = `${days} days`;
     switch (rule.category) {
-      case "security_events":
-        affected = (await db.prepare(`DELETE FROM security_events WHERE created_at < ?`).bind(cut).run()).meta.changes; break;
+      case "security_events": {
+        const u = notIn("user_id", holds.users);
+        affected = (await db.prepare(`DELETE FROM security_events WHERE created_at < ?${u.sql}`).bind(cut, ...u.binds).run()).meta.changes;
+        if (holds.users.size) detail += `; events of ${holds.users.size} held account(s) kept`;
+        break;
+      }
       case "email_bodies":
         affected = (await db.prepare(`DELETE FROM email_messages WHERE delivery_id IN (SELECT id FROM email_deliveries WHERE created_at < ?)`).bind(cut).run()).meta.changes; break;
       case "app_errors":
@@ -94,10 +108,12 @@ export async function runRetention(deps: { db: Db; storage: StorageAdapter | nul
       case "voice_transcripts":
         affected = (await db.prepare(`UPDATE calls SET transcript = NULL, recording_url = NULL WHERE COALESCE(ended_at, started_at) < ? AND (transcript IS NOT NULL OR recording_url IS NOT NULL)`).bind(cut).run()).meta.changes; break;
       case "deleted_files": {
+        const o = notIn("f.organization_id", holds.organizations);
         const due = (await db.prepare(`SELECT id, r2_key FROM files f WHERE deleted_at IS NOT NULL AND deleted_at < ? AND purged_at IS NULL
             AND NOT EXISTS (SELECT 1 FROM handoffs h WHERE h.documentation_file_id = f.id)
-            AND NOT EXISTS (SELECT 1 FROM portfolio_projects p WHERE p.desktop_screenshot_file_id = f.id OR p.mobile_screenshot_file_id = f.id)
-            LIMIT 200`).bind(cut).all<{ id: string; r2_key: string }>()).results; // 2 calls per file; the daily job set shares one invocation's budget (D1 Paid: 1,000 queries)
+            AND NOT EXISTS (SELECT 1 FROM portfolio_projects p WHERE p.desktop_screenshot_file_id = f.id OR p.mobile_screenshot_file_id = f.id)${o.sql}
+            LIMIT 200`).bind(cut, ...o.binds).all<{ id: string; r2_key: string }>()).results; // 2 calls per file; the daily job set shares one invocation's budget (D1 Paid: 1,000 queries)
+        if (holds.organizations.size) detail += `; files of ${holds.organizations.size} held organization(s) kept`;
         if (!deps.storage) { detail += `; ${due.length} due but no object storage is bound — nothing purged`; break; }
         let failed = 0;
         for (const f of due) {

@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashPassword, base32Encode } from "../src/lib/auth-crypto.ts";
+import { sealWithKey, openWithKey, importMfaKey } from "../src/lib/totp-secrets.ts";
 
 export const DEMO_DOMAIN = "crestmont-preview.test";
 const ALPHABET = "23456789abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ"; // no 0/O/1/l/I, no markdown-active characters
@@ -33,7 +34,10 @@ export interface D1Ops {
 export interface DemoAccount { role: string; email: string; password: string; totp: string | null; note: string }
 /** What a rotation revoked beyond passwords and 2FA keys (counts only; for logs and evidence). */
 export interface Revoked { sessions: number; authTokens: number; recoveryCodes: number; invitations: number }
-export interface AccessResult { rotated: boolean; accounts: DemoAccount[]; revoked?: Revoked }
+export interface AccessResult { rotated: boolean; accounts: DemoAccount[]; revoked?: Revoked; totpStorage: TotpStorage }
+/** How demo 2FA secrets written by this run are stored: "encrypted" (deploy key proven to match the Worker's),
+ *  "plaintext-unverified" (a deploy key was given but nothing encrypted exists yet to prove it matches), "plaintext" (no deploy key). */
+export type TotpStorage = "encrypted" | "plaintext-unverified" | "plaintext";
 
 const enc = new TextEncoder();
 async function hmac(key: string, msg: string): Promise<Uint8Array> {
@@ -64,7 +68,33 @@ const NOTES: Record<string, string> = {
   project_manager: "Staff (project manager)", support: "Staff (support)",
 };
 
-export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: string; rotate: boolean }): Promise<AccessResult> {
+/** Marker of the inputs a demo account's TOTP secret is derived from (root key, salt, email; see deriveTotp). It changes
+ *  exactly when the derived secret would change, so a deploy can tell whether the stored secret (which may now be
+ *  encrypted at rest) is still the one it would issue, without reading, decrypting or hashing the secret itself. */
+async function totpDerivationMarker(rootKey: string, salt: string, userId: string, email: string): Promise<string> {
+  return [...await hmac(rootKey, `crestmont-staging-access:v2:totp-inputs:${userId}:${email}:${salt}`)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Decides whether this run may write demo 2FA secrets encrypted with the deploy's copy of MFA_ENCRYPTION_KEY
+ *  (GitHub secret STAGING_MFA_ENCRYPTION_KEY). Writing with a key that differs from the Worker's would make those
+ *  accounts' 2FA unreadable, so the key is used only once it is PROVEN to be the Worker's: it must decrypt secrets
+ *  the Worker itself already encrypted (AES-GCM authenticates, so a different key cannot succeed). Nothing is
+ *  revealed: no value is printed or compared outside this process. A malformed key, or one that fails to open the
+ *  stored ciphertext, stops the run before anything is written. */
+export async function deployKeyStorage(ops: D1Ops, mfaKey: string | undefined): Promise<TotpStorage> {
+  if (!mfaKey) return "plaintext";
+  try { await importMfaKey(mfaKey); } catch { throw new Error("STAGING_MFA_ENCRYPTION_KEY is malformed (must be base64 of exactly 32 bytes); nothing was written"); }
+  const rows = await ops.query<{ id: string; totp_secret: string }>(`SELECT id, totp_secret FROM users WHERE totp_secret LIKE 'v1:%' ORDER BY id LIMIT 3`);
+  if (!rows.length) return "plaintext-unverified";
+  for (const r of rows) {
+    try { await openWithKey(mfaKey, r.id, r.totp_secret); } catch {
+      throw new Error("STAGING_MFA_ENCRYPTION_KEY does not match the staging Worker's MFA_ENCRYPTION_KEY (it cannot open the two-factor secrets the Worker encrypted); nothing was written. Set it to the same value or remove it.");
+    }
+  }
+  return "encrypted";
+}
+
+export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: string; rotate: boolean; mfaKey?: string }): Promise<AccessResult> {
   if (!o.rootKey || o.rootKey.length < 16) throw new Error("ACCESS_ROOT_KEY is missing or too short");
   await ops.query(`CREATE TABLE IF NOT EXISTS _staging_access (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
   const meta = Object.fromEntries((await ops.query<{ key: string; value: string }>(`SELECT key, value FROM _staging_access`)).map((r) => [r.key, r.value]));
@@ -73,8 +103,17 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
   crypto.getRandomValues(saltBytes);
   const salt = rotated ? [...saltBytes].map((b) => b.toString(16).padStart(2, "0")).join("") : meta.salt;
 
-  const users = await ops.query<{ id: string; email: string; mfa_enabled: number; roles: string | null }>(
-    `SELECT u.id, u.email, u.mfa_enabled, (SELECT group_concat(m.role_id) FROM memberships m WHERE m.user_id = u.id) AS roles
+  const totpStorage = await deployKeyStorage(ops, o.mfaKey);
+  const sealKey = totpStorage === "encrypted" ? o.mfaKey : undefined;
+  const now = new Date().toISOString();
+  const dayAgo = new Date(Date.now() - 24 * 3_600_000).toISOString();
+  // totp_secret is read only to compare it with the secret this run would issue (never printed or written elsewhere);
+  // enrolled_at = the last time the person re-enrolled an authenticator themselves (POST /mfa/setup).
+  const users = await ops.query<{ id: string; email: string; mfa_enabled: number; totp_secret: string | null; enrolled_at: string | null; mfa_fails: number; roles: string | null }>(
+    `SELECT u.id, u.email, u.mfa_enabled, u.totp_secret,
+            (SELECT MAX(a.created_at) FROM audit_logs a WHERE a.subject_type = 'user' AND a.subject_id = u.id AND a.action = 'user.mfa_enabled') AS enrolled_at,
+            (SELECT COUNT(*) FROM security_events e WHERE e.user_id = u.id AND e.kind = 'mfa_failed' AND e.created_at > ${q(dayAgo)}) AS mfa_fails,
+            (SELECT group_concat(m.role_id) FROM memberships m WHERE m.user_id = u.id) AS roles
        FROM users u WHERE u.email LIKE '%@${DEMO_DOMAIN}' AND u.password_hash IS NOT NULL ORDER BY u.email`);
   const accounts: DemoAccount[] = [];
   const sql: string[] = [];
@@ -83,7 +122,33 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
     const password = await derivePassword(o.rootKey, salt, `password:${u.email}`);
     const totp = u.mfa_enabled ? await deriveTotp(o.rootKey, salt, u.email) : null;
     accounts.push({ role, email: u.email, password, totp, note: NOTES[role] ?? "Customer portal (sample organization)" });
-    sql.push(`UPDATE users SET password_hash = ${q(await hashPassword(password))}, totp_secret = ${totp ? q(totp) : "totp_secret"}, totp_last_step = NULL, failed_logins = 0, locked_until = NULL WHERE id = ${q(u.id)};`);
+    // The TOTP secret is written only when the stored one is not (or may not be) the one this run issues. Re-writing it
+    // on every deploy would replace a secret the Worker has since encrypted at rest (MFA_ENCRYPTION_KEY) with plaintext.
+    let totpSql = "totp_secret";
+    if (totp) {
+      const fp = await totpDerivationMarker(o.rootKey, salt, u.id, u.email);
+      const stored = u.totp_secret;
+      const encrypted = !!stored && stored.startsWith("v1:");
+      const marker = meta[`totp_fp:${u.id}`], markedAt = meta[`totp_at:${u.id}`] ?? "";
+      let write: boolean;
+      if (rotated || !stored) write = true;                                     // new or cleared (e.g. an MFA reset)
+      else if (u.enrolled_at && u.enrolled_at > markedAt) write = true;         // someone replaced the authenticator: heal
+      else if (!encrypted) write = stored !== totp;                             // plaintext: compare directly
+      else if (sealKey) write = await openWithKey(sealKey, u.id, stored).then((p) => p !== totp, () => true); // proven key: compare
+      else if (marker) write = marker !== fp;                                   // derivation inputs changed (root key replaced)
+      else write = false; // encrypted, no marker yet (first run of this logic): earlier deploys always wrote the derived secret, so adopt it
+      if (write) {
+        // With the proven key the secret is written already encrypted; otherwise in plaintext, and the Worker
+        // encrypts it at that account's next successful sign-in.
+        totpSql = q(sealKey ? await sealWithKey(sealKey, u.id, totp) : totp);
+      }
+      if (write || marker !== fp) sql.push(`INSERT OR REPLACE INTO _staging_access (key, value) VALUES (${q(`totp_fp:${u.id}`)}, ${q(fp)}), (${q(`totp_at:${u.id}`)}, ${q(now)});`);
+      // Re-provisioning (or repeated wrong codes from reviewers sharing the demo credentials) restarts the daily
+      // wrong-code count, so a shared demo account cannot stay locked across deploys.
+      if (write || u.mfa_fails > 0) sql.push(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, organization_id, details_json, ip, created_at)
+        VALUES (NULL, 'system', 'user.mfa_provisioned', 'user', ${q(u.id)}, NULL, ${q(JSON.stringify({ source: "staging-access", secretWritten: write }))}, NULL, ${q(now)});`);
+    }
+    sql.push(`UPDATE users SET password_hash = ${q(await hashPassword(password))}, totp_secret = ${totpSql}, totp_last_step = NULL, failed_logins = 0, locked_until = NULL WHERE id = ${q(u.id)};`);
   }
   let revoked: Revoked | undefined;
   if (rotated) {
@@ -118,7 +183,7 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
     rmSync(dir, { recursive: true, force: true });
   }
   accounts.sort((a, b) => (ROLE_ORDER.indexOf(a.role) + 1 || 99) - (ROLE_ORDER.indexOf(b.role) + 1 || 99) || a.email.localeCompare(b.email));
-  return { rotated, accounts, revoked };
+  return { rotated, accounts, revoked, totpStorage };
 }
 
 /** Whether the next applyAccess() call will rotate (read-only). */
@@ -216,6 +281,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const r = await applyAccess(wranglerOps(), {
       rootKey: process.env.ACCESS_ROOT_KEY ?? "", epoch: process.env.ACCESS_EPOCH ?? "1",
       rotate: process.env.ROTATE === "true",
+      mfaKey: process.env.MFA_ENCRYPTION_KEY || undefined, // optional: the SAME value as the staging Worker secret
     });
     for (const v of [...r.accounts.flatMap((a) => [a.password, a.totp ?? ""])].filter(Boolean)) console.log(`::add-mask::${v}`);
     mkdirSync(out, { recursive: true });
@@ -224,6 +290,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     writeFileSync(join(out, "demo-accounts.md"), accountsTable(r.accounts) + "\n", { mode: 0o600 });
     writeFileSync(join(out, "access.json"), JSON.stringify(r), { mode: 0o600 });
     console.log(`Staging access applied: ${r.accounts.length} demo accounts, ${r.rotated ? "rotated" : "unchanged"} (public site: no preview password).`);
+    console.log(r.totpStorage === "encrypted" ? "Demo 2FA secrets written by this run: encrypted (STAGING_MFA_ENCRYPTION_KEY proven to match the Worker key)."
+      : r.totpStorage === "plaintext-unverified" ? "Demo 2FA secrets written by this run: plaintext — STAGING_MFA_ENCRYPTION_KEY is set but no encrypted secret exists yet to prove it matches the Worker key; the Worker encrypts each at its next sign-in."
+      : "Demo 2FA secrets written by this run: plaintext (no STAGING_MFA_ENCRYPTION_KEY); the Worker encrypts each at its next sign-in.");
     if (r.revoked) console.log(`Revoked with the rotation: ${r.revoked.sessions} demo sessions, ${r.revoked.authTokens} one-time tokens, ${r.revoked.recoveryCodes} recovery codes, ${r.revoked.invitations} pending invitations issued by demo accounts.`);
   } catch (e) {
     // wrangler errors can echo arguments; print only the first line of our own message.

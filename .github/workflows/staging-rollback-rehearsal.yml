@@ -42,13 +42,18 @@ jobs:
           mkdir -p drill evidence
           $WRANGLER deployments status --env staging --json > drill/status.json
           $WRANGLER versions list --env staging --json > drill/versions.json
-          pair=$(node --no-warnings scripts/rollback-rehearsal.ts pick drill/status.json drill/versions.json)
-          cur=${pair%% *}; prev=${pair##* }
+          read -r cur prev secrets <<< "$(node --no-warnings scripts/rollback-rehearsal.ts pick drill/status.json drill/versions.json)"
           [ -n "$cur" ] && [ -n "$prev" ] && [ "$cur" != "$prev" ] || { echo "::error::could not identify the serving and previous versions"; exit 1; }
-          echo "current=$cur" >> "$GITHUB_OUTPUT"; echo "previous=$prev" >> "$GITHUB_OUTPUT"
-          echo "Serving $cur; rehearsing rollback to $prev"
+          echo "current=$cur" >> "$GITHUB_OUTPUT"; echo "previous=$prev" >> "$GITHUB_OUTPUT"; echo "secrets=$secrets" >> "$GITHUB_OUTPUT"
+          if [ "$secrets" = "secret-changed" ]; then
+            # Cloudflare refuses this rollback (10220) and forcing it would restore the old secret values. Not attempted.
+            echo "::notice title=Rollback rehearsal not applicable::A secret changed after $prev was active, so there is no safe rollback target until the next deploy. Recorded as skipped (unavailable), not failed."
+          else
+            echo "Serving $cur; rehearsing rollback to $prev"
+          fi
       - name: Roll back to the previous version and verify
         id: back
+        if: steps.pick.outputs.secrets != 'secret-changed'
         continue-on-error: true
         run: |
           set +e
@@ -61,7 +66,7 @@ jobs:
           echo "::error::health check failed after rollback"; exit 1
       - name: Roll forward to the version that was serving and verify
         id: fwd
-        if: always()
+        if: always() && steps.pick.outcome == 'success' && steps.pick.outputs.secrets != 'secret-changed'
         run: |
           $WRANGLER versions deploy "${{ steps.pick.outputs.current }}@100%" --env staging --message "Rollback rehearsal: restore (run ${{ github.run_id }})" --yes
           for i in 1 2 3 4 5 6; do sleep 10; [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/health")" = "200" ] && exit 0; done
@@ -74,7 +79,8 @@ jobs:
           EVIDENCE_INGEST_SECRET_STABLE: ${{ secrets.EVIDENCE_INGEST_SECRET }}
         run: |
           node --no-warnings scripts/rollback-rehearsal.ts evidence --commit "$GITHUB_SHA" --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-rollback" --started "$STARTED" \
-            --rollback "${{ steps.back.outcome == 'success' && 'passed' || 'failed' }}" --rollforward "${{ steps.fwd.outcome == 'success' && 'passed' || 'failed' }}" \
+            --rollback "${{ steps.pick.outputs.secrets == 'secret-changed' && 'skipped' || steps.back.outcome == 'success' && 'passed' || 'failed' }}" \
+            --rollforward "${{ steps.pick.outputs.secrets == 'secret-changed' && 'skipped' || steps.fwd.outcome == 'success' && 'passed' || 'failed' }}" \
             --detail "$BACK_REASON" --out evidence/rollback.json
           # The same value deploy-staging.yml installed (GitHub secret, else the derived key); never put or rotated here,
           # because a secret change would block rollbacks.

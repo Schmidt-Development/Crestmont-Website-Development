@@ -85,6 +85,12 @@ rm owner-mfa-reset.sql
 
 For a local or restored database file use `--db <path>` instead of `--print-sql` (it also refuses a non-Owner email). The script clears the Owner's authenticator, pending enrolment and recovery codes, revokes every Owner session, and writes `owner.mfa_break_glass_reset` to `audit_logs` (actor `system`, with operator and reason) plus a `mfa_reset_break_glass` security event. It never changes the password. The Owner then signs in with the password (or resets it by email) and enrols a new authenticator immediately; check /staff/audit for the entry.
 
+**Second-factor attempt limits.** 8 codes per person per 15 minutes, and at most 30 **wrong authenticator** codes in any rolling 24 hours (security event `mfa_locked` when reached). A valid recovery code still signs in at the cap, so someone who knows a password cannot lock its owner out; a replayed code (double submit) does not count; on staging each deploy restarts the count for demo accounts. Reaching the daily cap with a password-only session means someone may hold that person's password: confirm with them, have them change the password, and if needed reset their 2FA (above) — re-enrolment starts a fresh count. Enrolling or replacing an authenticator signs out every other session of that person.
+
+**Losing or exposing `MFA_ENCRYPTION_KEY`.** The key is never rotated in place (§4). If it is *lost* (not in the password manager and not recoverable), encrypted two-factor secrets cannot be read: every affected person is reset as above (the Owner via break-glass) and re-enrols; recovery codes and passwords are not affected. If it is *exposed*, the stored secrets are only at risk together with a database copy: reset and re-enrol staff in priority order (Owner, Administrators), then plan a key change as a reviewed release (new key + re-encryption run), never by overwriting the Worker secret.
+
+**Before `scripts/encrypt-totp-secrets.ts --yes`.** The script itself refuses a target whose identity is not proven (DEPLOYMENT.md, "Re-encryption safeguards") and records a D1 Time Travel bookmark before writing, printing the exact `wrangler d1 time-travel restore … --bookmark …` command to undo the run. On a remote database `--yes` also refuses until at least one secret the Worker itself encrypted exists (it proves the key you supplied is the Worker's; sign in once with any two-factor account if needed). Always run the dry run first and check the counts; a second run reports `0 stored in plaintext` and writes nothing (already-encrypted values are never encrypted twice).
+
 ## 4b. Step-up checks
 
 Release approval, staff invitations / role changes / disable / enable / 2FA reset, refund decisions and issuing, integration probes and environment/automation settings, every data export, and replacing an authenticator require a two-factor check within the last 10 minutes (list: `src/app/step-up.ts`). The person is sent to "Confirm it is you", enters a current code (or a recovery code), and returns to the page; a form must then be submitted again. JSON exports answer 401 until the check is done in the browser.
@@ -119,6 +125,8 @@ Release approval, staff invitations / role changes / disable / enable / 2FA rese
 3. Security-sensitive tickets (suspected account takeover, data exposure): treat as an incident (§10).
 
 ## 10. Incident response
+
+Full procedure — severity levels, evidence preservation with legal holds, and playbooks for credential compromise, data exposure, outage, database corruption, payments, provider outages and malware — is in `docs/INCIDENT-RESPONSE.md`. The short version:
 
 1. **Detect / declare:** anyone may declare an incident. Create an `production_incident` blocker in /staff/readiness with a severity.
 2. **Contain:** roll back (§3), disable affected accounts (§4), rotate exposed secrets, turn off the affected feature (for example remove the voice number's webhook), or put the site in maintenance through Cloudflare.
