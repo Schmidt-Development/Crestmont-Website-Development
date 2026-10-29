@@ -3246,7 +3246,7 @@
       "disposition": "ENGINEERING COMPLETE — STAGING VERIFICATION PENDING",
       "branch": "claude/staging-61-recovery",
       "pr": null,
-      "commit": "pending",
+      "commit": "f8dc4fbefc62b5635ffd9c6c42d441825a98ef42",
       "tests": [
         "tests/staging-recovery.test.ts",
         "tests/security-matrix.test.ts ([EMP-002])"
@@ -3277,7 +3277,7 @@
       "disposition": "ENGINEERING COMPLETE — STAGING VERIFICATION PENDING",
       "branch": "claude/staging-61-recovery",
       "pr": null,
-      "commit": "pending",
+      "commit": "f8dc4fbefc62b5635ffd9c6c42d441825a98ef42",
       "tests": [
         "tests/staging-recovery.test.ts",
         "tests/login-throttling.test.ts"
@@ -3308,7 +3308,7 @@
       "disposition": "ENGINEERING COMPLETE — STAGING VERIFICATION PENDING",
       "branch": "claude/staging-61-recovery",
       "pr": null,
-      "commit": "pending",
+      "commit": "f8dc4fbefc62b5635ffd9c6c42d441825a98ef42",
       "tests": [
         "tests/e2e/staging-journeys.e2e.ts (journeys 29, 30)"
       ],
@@ -3338,7 +3338,7 @@
       "disposition": "ENGINEERING COMPLETE — STAGING VERIFICATION PENDING",
       "branch": "claude/staging-61-recovery",
       "pr": null,
-      "commit": "pending",
+      "commit": "f8dc4fbefc62b5635ffd9c6c42d441825a98ef42",
       "tests": [
         "scripts/evidence-reporter.mjs",
         "tests/e2e/staging-journeys.e2e.ts (certification summary)"
