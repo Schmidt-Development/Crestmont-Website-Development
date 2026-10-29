@@ -498,3 +498,11 @@ jobs:
       - name: Remove credentials and evidence from the runner
         if: always()
         run: rm -rf access forensics "$RUNNER_TEMP/rotation-state.json"
+
+      # CREST-GAP-030: the browser journeys are a deployment gate. They run with continue-on-error only so that evidence,
+      # deployment records, sealed access notes and cleanup above still happen; this last step then fails the run.
+      - name: Fail the deploy when the staging browser journeys failed
+        if: always() && steps.e2e.outcome == 'failure'
+        run: |
+          echo "::error title=Staging E2E failed::One or more staging browser journeys failed; see the 'Browser journey on the live site' step."
+          exit 1
