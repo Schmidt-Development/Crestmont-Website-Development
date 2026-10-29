@@ -250,20 +250,38 @@ export async function listCustomers(db: Db, q: string, page: { limit: number; of
     FROM organizations o WHERE ${conds.join(" AND ")} ORDER BY o.created_at DESC, o.id LIMIT ? OFFSET ?`)
     .bind(...binds, page.limit + 1, page.offset).all<CustomerListRow>()).results;
 }
-export async function customerDetail(db: Db, orgId: string) {
+/** Rows per sub-table on the staff customer record (CREST-GAP-071). */
+export const CUSTOMER_SECTION_SIZE = 25;
+export const CUSTOMER_SECTIONS = ["orders", "invoices", "projects", "subscriptions", "tickets", "leads"] as const;
+export type CustomerSection = (typeof CUSTOMER_SECTIONS)[number];
+/** One page of a customer sub-table: up to CUSTOMER_SECTION_SIZE rows, the page number and the true total. */
+export interface SectionPage<T> { rows: T[]; page: number; total: number; hasNext: boolean }
+
+/**
+ * Staff customer record. Every sub-table is paginated (page per section, 25 rows each) and carries its true total,
+ * so nothing is silently truncated (CREST-GAP-071).
+ */
+export async function customerDetail(db: Db, orgId: string, pages: Partial<Record<CustomerSection, number>> = {}) {
   const org = await db.prepare(`SELECT id, name, created_at, stripe_customer_id FROM organizations WHERE id = ? AND kind = 'customer'`).bind(orgId).first<{ id: string; name: string; created_at: string; stripe_customer_id: string | null }>();
   if (!org) throw new HttpError(404, "Customer not found.");
-  const q = <T>(sql: string) => db.prepare(sql).bind(orgId).all<T>().then((r) => r.results);
+  const size = CUSTOMER_SECTION_SIZE;
+  const section = async <T>(key: CustomerSection, select: string, from: string, order: string): Promise<SectionPage<T>> => {
+    const page = Math.max(1, Math.min(10_000, Math.floor(pages[key] ?? 1)));
+    const total = (await db.prepare(`SELECT COUNT(*) AS n FROM (SELECT ${select} ${from})`).bind(orgId).first<{ n: number }>())?.n ?? 0;
+    const rows = (await db.prepare(`SELECT ${select} ${from} ORDER BY ${order} LIMIT ${size + 1} OFFSET ${(page - 1) * size}`).bind(orgId).all<T>()).results;
+    return { rows: rows.slice(0, size), page, total, hasNext: rows.length > size };
+  };
   return {
     org,
-    members: await q<{ display_name: string; email: string; role_id: string }>(`SELECT u.display_name, u.email, m.role_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = ? ORDER BY m.created_at`),
-    orders: await q<{ id: string; status: string; total_cents: number; kind: string; created_at: string; lead_id: string | null }>(`SELECT id, status, total_cents, kind, created_at, lead_id FROM orders WHERE organization_id = ? ORDER BY created_at DESC`),
-    invoices: await q<{ id: string; status: string; amount_cents: number; description: string | null; created_at: string }>(`SELECT id, status, amount_cents, description, created_at FROM invoices WHERE organization_id = ? ORDER BY created_at DESC`),
-    projects: await q<{ id: string; name: string; status: string; created_at: string }>(`SELECT id, name, status, created_at FROM projects WHERE organization_id = ? ORDER BY created_at DESC`),
-    subscriptions: await q<{ id: string; product_id: string; status: string; current_period_end: string | null }>(`SELECT id, product_id, status, current_period_end FROM subscriptions WHERE organization_id = ? ORDER BY created_at DESC`),
-    tickets: await q<{ id: string; subject: string; status: string; created_at: string }>(`SELECT id, subject, status, created_at FROM tickets WHERE organization_id = ? ORDER BY created_at DESC LIMIT 50`),
-    leads: await q<{ id: string; stage: string; source: string; created_at: string }>(`SELECT DISTINCT l.id, l.stage, l.source, l.created_at FROM leads l JOIN contacts c ON c.id = l.contact_id LEFT JOIN companies co ON co.id = c.company_id
-      LEFT JOIN memberships m ON m.user_id = c.user_id WHERE co.organization_id = ?1 OR m.organization_id = ?1 OR l.id IN (SELECT lead_id FROM orders WHERE organization_id = ?1) ORDER BY l.created_at DESC`),
+    members: (await db.prepare(`SELECT u.display_name, u.email, m.role_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = ? ORDER BY m.created_at`).bind(orgId)
+      .all<{ display_name: string; email: string; role_id: string }>()).results,
+    orders: await section<{ id: string; status: string; total_cents: number; kind: string; created_at: string; lead_id: string | null }>("orders", `id, status, total_cents, kind, created_at, lead_id`, `FROM orders WHERE organization_id = ?1`, `created_at DESC, id`),
+    invoices: await section<{ id: string; status: string; amount_cents: number; description: string | null; created_at: string }>("invoices", `id, status, amount_cents, description, created_at`, `FROM invoices WHERE organization_id = ?1`, `created_at DESC, id`),
+    projects: await section<{ id: string; name: string; status: string; created_at: string }>("projects", `id, name, status, created_at`, `FROM projects WHERE organization_id = ?1`, `created_at DESC, id`),
+    subscriptions: await section<{ id: string; product_id: string; status: string; current_period_end: string | null; created_at: string }>("subscriptions", `id, product_id, status, current_period_end, created_at`, `FROM subscriptions WHERE organization_id = ?1`, `created_at DESC, id`),
+    tickets: await section<{ id: string; subject: string; status: string; created_at: string }>("tickets", `id, subject, status, created_at`, `FROM tickets WHERE organization_id = ?1`, `created_at DESC, id`),
+    leads: await section<{ id: string; stage: string; source: string; created_at: string; owner_user_id: string | null }>("leads", `DISTINCT l.id, l.stage, l.source, l.created_at, l.owner_user_id`, `FROM leads l JOIN contacts c ON c.id = l.contact_id LEFT JOIN companies co ON co.id = c.company_id
+      LEFT JOIN memberships m ON m.user_id = c.user_id WHERE co.organization_id = ?1 OR m.organization_id = ?1 OR l.id IN (SELECT lead_id FROM orders WHERE organization_id = ?1)`, `l.created_at DESC, l.id`),
   };
 }
 

@@ -156,7 +156,7 @@ async function notifyGeneral(ctx: AppContext, organizationId: string, messageId:
 }
 
 /** Organizations with a general conversation (or every customer org when `all`), newest activity first, with unread counts for this staff user. */
-export async function listGeneralConversations(db: Db, staffUserId: string, opts: { q?: string; limit?: number } = {}) {
+export async function listGeneralConversations(db: Db, staffUserId: string, opts: { q?: string; limit?: number; offset?: number } = {}) {
   const like = opts.q ? `%${opts.q.replace(/[\\%_]/g, (m) => "\\" + m)}%` : null;
   return (await db.prepare(`SELECT o.id, o.name,
       (SELECT COUNT(*) FROM messages m WHERE m.organization_id = o.id AND m.project_id IS NULL AND m.internal = 0) AS total,
@@ -166,8 +166,15 @@ export async function listGeneralConversations(db: Db, staffUserId: string, opts
       (SELECT MAX(created_at) FROM messages m WHERE m.organization_id = o.id AND m.project_id IS NULL) AS last_at
     FROM organizations o WHERE o.kind = 'customer' ${like ? `AND o.name LIKE ? ESCAPE '\\'` : ""}
       AND (${like ? "1=1" : "EXISTS (SELECT 1 FROM messages m WHERE m.organization_id = o.id AND m.project_id IS NULL)"})
-    ORDER BY COALESCE(last_at, '') DESC, o.name LIMIT ?`).bind(staffUserId, staffUserId, ...(like ? [like] : []), opts.limit ?? 100)
+    ORDER BY COALESCE(last_at, '') DESC, o.name, o.id LIMIT ? OFFSET ?`).bind(staffUserId, staffUserId, ...(like ? [like] : []), opts.limit ?? 100, opts.offset ?? 0)
     .all<{ id: string; name: string; total: number; unread: number; last_at: string | null }>()).results;
+}
+
+/** How many organizations listGeneralConversations pages through with the same filter (CREST-GAP-071). */
+export async function countGeneralConversations(db: Db, opts: { q?: string } = {}): Promise<number> {
+  const like = opts.q ? `%${opts.q.replace(/[\\%_]/g, (m) => "\\" + m)}%` : null;
+  return (await db.prepare(`SELECT COUNT(*) AS n FROM organizations o WHERE o.kind = 'customer' ${like ? `AND o.name LIKE ? ESCAPE '\\'` : ""}
+      AND (${like ? "1=1" : "EXISTS (SELECT 1 FROM messages m WHERE m.organization_id = o.id AND m.project_id IS NULL)"})`).bind(...(like ? [like] : [])).first<{ n: number }>())?.n ?? 0;
 }
 
 export async function generalUnreadForStaff(db: Db, staffUserId: string): Promise<number> {

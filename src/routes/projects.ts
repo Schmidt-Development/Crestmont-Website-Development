@@ -17,6 +17,7 @@ import * as M from "../services/messages.ts";
 import * as O from "../services/onboarding.ts";
 import { listNotifications, markNotificationsRead, liveNotificationHrefs } from "../services/notifications.ts";
 import { audit } from "../services/security.ts";
+import { disabledOwnerFlag } from "../services/offboarding.ts";
 import { can, isOwner } from "../domain/authz.ts";
 import { PROJECT_STATUSES, PROJECT_TRANSITIONS, type ProjectStatus } from "../domain/project.ts";
 import { PACKAGES, type PackageId } from "../domain/catalog.ts";
@@ -65,13 +66,23 @@ export function register(r: Router): void {
     const tasks = (await db.prepare(`SELECT t.id, t.title, t.status, t.due_at, p.id AS project_id, p.name AS project_name FROM assignments a JOIN tasks t ON t.id = a.subject_id JOIN projects p ON p.id = t.project_id
         WHERE a.subject_type = 'task' AND a.user_id = ? AND a.ended_at IS NULL AND t.status <> 'done' ORDER BY CASE WHEN t.due_at IS NULL THEN 1 ELSE 0 END, t.due_at LIMIT 50`).bind(me)
       .all<{ id: string; title: string; status: string; due_at: string | null; project_id: string; project_name: string }>()).results;
-    const overdue = tasks.filter((t) => t.due_at && t.due_at < today).length;
-    const dueSoon = tasks.filter((t) => t.due_at && t.due_at >= today && t.due_at <= new Date(ctx.now().getTime() + 7 * 86400e3).toISOString().slice(0, 10)).length;
+    // CREST-GAP-071: KPIs and "showing N of M" use true totals, not the length of the capped lists.
+    const in7 = new Date(ctx.now().getTime() + 7 * 86400e3).toISOString().slice(0, 10);
+    const taskTotals = (await db.prepare(`SELECT COUNT(*) AS n, SUM(t.due_at IS NOT NULL AND t.due_at < ?) AS overdue, SUM(t.due_at IS NOT NULL AND t.due_at >= ? AND t.due_at <= ?) AS soon
+        FROM assignments a JOIN tasks t ON t.id = a.subject_id WHERE a.subject_type = 'task' AND a.user_id = ? AND a.ended_at IS NULL AND t.status <> 'done'`).bind(today, today, in7, me).first<{ n: number; overdue: number | null; soon: number | null }>())!;
+    const overdue = taskTotals.overdue ?? 0, dueSoon = taskTotals.soon ?? 0;
     const vis = P.visibleProjectsSql(actor, me);
     const myProjects = can(actor, "delivery.access") ? (await db.prepare(`SELECT p.id, p.name, p.status, o.name AS org FROM projects p JOIN organizations o ON o.id = p.organization_id
         WHERE (p.project_manager_id = ? OR EXISTS (SELECT 1 FROM assignments a WHERE a.subject_type = 'project' AND a.subject_id = p.id AND a.user_id = ? AND a.ended_at IS NULL)
           OR EXISTS (SELECT 1 FROM assignments a JOIN tasks t ON t.id = a.subject_id WHERE a.subject_type = 'task' AND t.project_id = p.id AND a.user_id = ? AND a.ended_at IS NULL))
           AND p.status NOT IN ('completed','maintenance','cancelled') ORDER BY p.updated_at DESC LIMIT 25`).bind(me, me, me).all<{ id: string; name: string; status: string; org: string }>()).results : [];
+    const myProjectsTotal = can(actor, "delivery.access") ? (await db.prepare(`SELECT COUNT(*) AS n FROM projects p WHERE (p.project_manager_id = ? OR EXISTS (SELECT 1 FROM assignments a WHERE a.subject_type = 'project' AND a.subject_id = p.id AND a.user_id = ? AND a.ended_at IS NULL)
+          OR EXISTS (SELECT 1 FROM assignments a JOIN tasks t ON t.id = a.subject_id WHERE a.subject_type = 'task' AND t.project_id = p.id AND a.user_id = ? AND a.ended_at IS NULL))
+          AND p.status NOT IN ('completed','maintenance','cancelled')`).bind(me, me, me).first<{ n: number }>())!.n : 0;
+    const leadsTotal = (await db.prepare(`SELECT COUNT(*) AS n FROM leads l WHERE l.owner_user_id = ? AND l.stage NOT IN ('converted','lost','rejected','archived')`).bind(me).first<{ n: number }>())!.n;
+    const ticketsTotal = (await db.prepare(`SELECT COUNT(*) AS n FROM assignments a JOIN tickets t ON t.id = a.subject_id WHERE a.subject_type = 'ticket' AND a.user_id = ? AND a.ended_at IS NULL AND t.status NOT IN ('resolved','closed')`).bind(me).first<{ n: number }>())!.n;
+    /** "Showing N of M" with a link to the full, paginated list (only when the list is capped). */
+    const more = (shown: number, total: number, noun: string, href: string | null) => (total > shown ? html`<p class="faint" data-showing>Showing ${shown} of ${total} ${noun}.${href ? html` <a href="${href}">View all</a>` : ""}</p>` : "");
     const leads = (await db.prepare(`SELECT l.id, l.stage, l.interest, l.updated_at, c.name FROM leads l JOIN contacts c ON c.id = l.contact_id WHERE l.owner_user_id = ? AND l.stage NOT IN ('converted','lost','rejected','archived') ORDER BY l.updated_at DESC LIMIT 25`).bind(me)
       .all<{ id: string; stage: string; interest: string | null; updated_at: string; name: string }>()).results;
     const tickets = (await db.prepare(`SELECT t.id, t.subject, t.priority, t.status, t.updated_at, o.name AS org FROM assignments a JOIN tickets t ON t.id = a.subject_id JOIN organizations o ON o.id = t.organization_id
@@ -93,28 +104,28 @@ export function register(r: Router): void {
       const pendingCo = (await db.prepare(`SELECT COUNT(*) AS n FROM revisions WHERE included = 0 AND billable_change_order_id IS NULL AND status = 'submitted'`).first<{ n: number }>())!.n;
       roleKpis.push(kpi("Active projects", c.active), kpi("Paused", c.paused ?? 0), kpi("Without a PM", c.unassigned ?? 0), kpi("Revisions needing a change order", pendingCo));
     }
-    if (can(actor, "crm.access")) roleKpis.push(kpi("My open leads", leads.length));
-    if (can(actor, "support.access")) roleKpis.push(kpi("My open tickets", tickets.length));
+    if (can(actor, "crm.access")) roleKpis.push(kpi("My open leads", leadsTotal));
+    if (can(actor, "support.access")) roleKpis.push(kpi("My open tickets", ticketsTotal));
     const body = html`${pageHead("My work", undefined, label(ctx.user!.memberships.find((m) => m.organizationId)?.role ?? "staff"))}
-<div class="kpis">${kpi("Open tasks", tasks.length, overdue ? `${overdue} overdue` : "None overdue")}${kpi("Due in 7 days", dueSoon)}${kpi("Unread customer messages", unreadMsgs)}${roleKpis}</div>
+<div class="kpis">${kpi("Open tasks", taskTotals.n, overdue ? `${overdue} overdue` : "None overdue")}${kpi("Due in 7 days", dueSoon)}${kpi("Unread customer messages", unreadMsgs)}${roleKpis}</div>
 ${can(actor, "customers.read") ? await generalConversationsNotice(ctx) : ""}
 <div class="grid grid-2">
 <section class="card"><h2 class="card__title">Assigned tasks</h2>${table(tasks, [
   { header: "Task", cell: (t) => html`<a href="/staff/tasks/${t.id}">${t.title}</a><br><span class="faint">${t.project_name}</span>` },
   { header: "Status", cell: (t) => badge(t.status) },
   { header: "Due", cell: (t) => (t.due_at ? html`${fmtDay(t.due_at)}${t.due_at < today ? html` ${badge("past_due", "Overdue")}` : ""}` : "—") },
-], { empty: html`<p class="muted">No open tasks assigned to you.</p>` })}</section>
+], { empty: html`<p class="muted">No open tasks assigned to you.</p>` })}${more(tasks.length, taskTotals.n, "open tasks", can(actor, "delivery.access") ? "/staff/tasks?assignee=me" : null)}</section>
 <section class="card"><div class="row row--between"><h2 class="card__title">Notifications</h2><div class="row">${notes.some((n) => !n.read_at) ? actionForm(ctx, "/staff/notifications/read", "Mark all read", { variant: "ghost" }) : ""}${linkButton("View all", "/staff/notifications", "ghost", "sm")}</div></div>
 ${notes.length ? html`<ul class="timeline">${notes.map((n) => { const href = noteHrefs.get(n.id); return html`<li>${n.read_at ? "" : badge("new", "New")} ${href ? html`<a href="${href}">${n.body}</a>` : n.body}<br><span class="faint">${formatDateTime(n.created_at)}</span></li>`; })}</ul>` : html`<p class="muted">No notifications.</p>`}</section>
 ${can(actor, "delivery.access") ? html`<section class="card"><h2 class="card__title">My projects</h2>${table(myProjects, [
   { header: "Project", cell: (p) => html`<a href="/staff/projects/${p.id}">${p.name}</a><br><span class="faint">${p.org}</span>` }, { header: "Status", cell: (p) => badge(p.status) },
-], { empty: html`<p class="muted">You are not assigned to any active project.</p>` })}</section>` : ""}
+], { empty: html`<p class="muted">You are not assigned to any active project.</p>` })}${more(myProjects.length, myProjectsTotal, "active projects", "/staff/projects")}</section>` : ""}
 ${can(actor, "crm.access") || leads.length ? html`<section class="card"><h2 class="card__title">Assigned leads</h2>${table(leads, [
   { header: "Lead", cell: (l) => html`<a href="/staff/crm/leads/${l.id}">${l.name}</a>${l.interest ? html`<br><span class="faint">${l.interest}</span>` : ""}` }, { header: "Stage", cell: (l) => badge(l.stage) }, { header: "Updated", cell: (l) => fmtDay(l.updated_at) },
-], { empty: html`<p class="muted">No open leads assigned to you.</p>` })}</section>` : ""}
+], { empty: html`<p class="muted">No open leads assigned to you.</p>` })}${more(leads.length, leadsTotal, "open leads", can(actor, "crm.access") ? `/staff/crm?view=list&owner=${encodeURIComponent(me)}` : null)}</section>` : ""}
 ${can(actor, "support.access") || tickets.length ? html`<section class="card"><h2 class="card__title">Assigned tickets</h2>${table(tickets, [
   { header: "Ticket", cell: (t) => html`<a href="/staff/support/${t.id}">${t.subject}</a><br><span class="faint">${t.org}</span>` }, { header: "Priority", cell: (t) => badge(t.priority) }, { header: "Status", cell: (t) => badge(t.status) },
-], { empty: html`<p class="muted">No open tickets assigned to you.</p>` })}</section>` : ""}
+], { empty: html`<p class="muted">No open tickets assigned to you.</p>` })}${more(tickets.length, ticketsTotal, "open tickets", can(actor, "support.access") ? "/staff/support?assignee=me" : null)}</section>` : ""}
 <section class="card"><h2 class="card__title">My recent activity</h2>${activity.length ? html`<ul class="timeline">${activity.map((a) => html`<li>${a.action.replace(/[._]/g, " ")} <span class="faint">(${a.subject_type})</span><br><span class="faint">${formatDateTime(a.created_at)}</span></li>`)}</ul>` : html`<p class="muted">No activity recorded yet.</p>`}</section>
 </div>`;
     return page(ctx, "My work", body);
@@ -124,7 +135,10 @@ ${can(actor, "support.access") || tickets.length ? html`<section class="card"><h
   r.get("/staff/conversations", async (ctx) => {
     requireStaff(ctx, "customers.read");
     const q = (ctx.url.searchParams.get("q") ?? "").trim().slice(0, 120);
-    const rows = await M.listGeneralConversations(ctx.db, ctx.user!.id, { q: q || undefined });
+    // CREST-GAP-071: paginated with the true total instead of a silent 100-row cap.
+    const { page: pg, limit, offset } = pageParam(ctx);
+    const rows = await M.listGeneralConversations(ctx.db, ctx.user!.id, { q: q || undefined, limit, offset });
+    const total = await M.countGeneralConversations(ctx.db, { q: q || undefined });
     return page(ctx, "Conversations", html`${pageHead("General conversations", undefined, "Customer messages outside projects")}
 <form method="get" class="filters" action="/staff/conversations">${input({ name: "q", label: "Find a customer", value: q, placeholder: "Organization name" })}${button("Search", { variant: "secondary", size: "sm" })}</form>
 ${table(rows, [
@@ -132,7 +146,8 @@ ${table(rows, [
   { header: "Messages", cell: (x) => x.total, numeric: true },
   { header: "Unread", cell: (x) => (x.unread ? badge("new", `${x.unread} unread`) : "—") },
   { header: "Last message", cell: (x) => formatDateTime(x.last_at) },
-], { empty: emptyState(q ? "No customers match" : "No general conversations yet", q ? "Try another name." : "Customers start one from Messages in their portal. Search for a customer to message them first.") })}`);
+], { empty: emptyState(q ? "No customers match" : "No general conversations yet", q ? "Try another name." : "Customers start one from Messages in their portal. Search for a customer to message them first.") })}
+${total > limit ? html`<p class="faint" data-showing>Showing ${offset + (rows.length ? 1 : 0)}–${offset + rows.length} of ${total} conversations.</p>${pagination(ctx, pg, offset + rows.length < total)}` : ""}`);
   });
   const conversationPage = async (ctx: AppContext, orgId: string, errors: string[] = [], status = 200, draft = "") => {
     requireStaff(ctx, "customers.read");
@@ -141,6 +156,8 @@ ${table(rows, [
     const thread = await M.listThread(ctx.db, { userId: ctx.user!.id, organizationId: org.id, staff: true }, null, { before: ctx.url.searchParams.get("before") });
     const msgs = thread.messages;
     await M.markThreadRead(ctx.db, ctx.user!.id, org.id, null, true, msgs.map((m) => m.id));
+    // CREST-GAP-070: broad staff visibility is kept by Founder decision; each view of a customer conversation is audited.
+    if (status === 200) await audit(ctx.db, { actorUserId: ctx.user!.id, action: "conversation.viewed", subjectType: "organization", subjectId: org.id, organizationId: org.id, ip: ctx.ip, details: { before: ctx.url.searchParams.get("before") } });
     const body = html`${pageHead(org.name, html`${linkButton("All conversations", "/staff/conversations", "ghost", "sm")}${linkButton("Customer record", `/staff/customers/${org.id}`, "ghost", "sm")}`, "General conversation")}
 ${formErrors(errors)}
 ${threadEarlierNav(ctx, thread)}<div class="thread">${msgs.length ? msgs.map((m) => html`<article class="msg${m.internal ? " msg--internal" : m.author_is_staff ? " msg--staff" : ""}"><div class="msg__meta">${m.internal ? "Internal note · " : ""}${m.author_name}${m.author_is_staff ? " · Crestmont" : " · Customer"} · ${formatDateTime(m.created_at)}${!m.internal && m.author_is_staff ? (m.read_by_other_side ? " · Seen by customer" : " · Not yet read by customer") : ""}</div>${nl2br(m.body)}${m.attachment_file_id ? html`<p><a href="/files/${m.attachment_file_id}">Attachment: ${m.attachment_name ?? "file"}</a></p>` : ""}</article>`) : emptyState("No messages yet", "Send the first message, or leave an internal note for the team.")}</div>
@@ -699,7 +716,8 @@ ${alert("info", html`This task exists, but it is not assigned to you and you are
     const assignees = (await ctx.db.prepare(`SELECT a.id, u.display_name FROM assignments a JOIN users u ON u.id = a.user_id WHERE a.subject_type = 'task' AND a.subject_id = ? AND a.ended_at IS NULL`).bind(t.id).all<{ id: string; display_name: string }>()).results;
     const time = (await ctx.db.prepare(`SELECT te.minutes, te.hourly_cost_cents, te.worked_on, u.display_name FROM time_entries te JOIN users u ON u.id = te.user_id WHERE te.task_id = ? ORDER BY te.worked_on DESC`).bind(t.id).all<{ minutes: number; hourly_cost_cents: number | null; worked_on: string; display_name: string }>()).results;
     const ms = coord ? (await ctx.db.prepare(`SELECT id, name FROM milestones WHERE project_id = ? ORDER BY position`).bind(t.project_id).all<{ id: string; name: string }>()).results : [];
-    const body = html`${pageHead(t.title, badge(t.status), proj.name)}${formErrors(errors)}
+    const flag = await disabledOwnerFlag(ctx.db, ["task"], t.id);
+    const body = html`${pageHead(t.title, badge(t.status), proj.name)}${formErrors(errors)}${(flag ? alert("warn", html`<strong>Owner disabled.</strong> ${flag.name}'s account was disabled; ${flag.status === "ended" ? "their assignment was ended, so this needs a new owner." : "this is waiting in the offboarding queue for a new owner."}`) : "")}
 <div class="grid grid-2"><section class="card">${dl([["Project", html`<a href="/staff/projects/${proj.id}?tab=plan">${proj.name}</a>`], ["Status", badge(t.status)], ["Estimate", t.estimate_minutes === null ? "Not estimated" : `${t.estimate_minutes} min`], ["Due", fmtDay(t.due_at)], ["Completed", formatDateTime(t.completed_at)], ["Assignees", assignees.map((a) => a.display_name).join(", ") || "Unassigned"]])}
 ${t.description ? html`<div class="prose">${nl2br(t.description)}</div>` : ""}
 ${canEdit ? html`<form method="post" action="/staff/tasks/${t.id}/status" class="row" style="margin-top:1rem">${csrf(ctx)}${select({ name: "status", label: "Status", options: [...P.TASK_STATUSES], value: t.status })}${button("Update status", { size: "sm" })}</form>` : html`<p class="faint">Only assignees and project managers can update this task.</p>`}</section>

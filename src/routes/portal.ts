@@ -13,6 +13,7 @@ import {
 import * as P from "../services/projects.ts";
 import * as F from "../services/files.ts";
 import * as M from "../services/messages.ts";
+import { mfaReminder } from "./account-profile.ts";
 import * as O from "../services/onboarding.ts";
 import * as S from "../services/share-links.ts";
 import { sharePanel } from "../ui/share.ts";
@@ -121,7 +122,7 @@ export function register(r: Router): void {
     const notes = await listNotifications(db, ctx.user!.id, 8);
     const actions = await requiredActions(ctx, org);
     const active = projects.filter((p) => !["completed", "maintenance", "cancelled"].includes(p.status));
-    const body = html`${pageHead(`Welcome, ${ctx.user!.displayName}`, undefined, org.organizationName)}
+    const body = html`${pageHead(`Welcome, ${ctx.user!.displayName}`, undefined, org.organizationName)}${await mfaReminder(ctx, org)}
 ${projects.length === 0 ? html`<section class="card card--gold">${emptyState("You have no projects yet",
   "Projects appear here as soon as a package purchase or an accepted quote is paid. Choose a package, or ask for a custom quote and we will prepare a fixed proposal.",
   html`<div class="row" style="justify-content:center">${linkButton("View packages", "/pricing")}${linkButton("Request a custom quote", "/quote", "secondary")}</div>`)}</section>` : html`
@@ -156,10 +157,14 @@ ${notes.length ? html`<ul class="timeline">${notes.map((n) => { const href = not
   // ── Projects ──
   r.get("/portal/projects", async (ctx) => {
     const org = requireCustomerOrg(ctx);
+    // CREST-GAP-071: paginated, with the true total.
+    const { page: pg, limit, offset } = pageParam(ctx);
+    const total = (await ctx.db.prepare(`SELECT COUNT(*) AS n FROM projects WHERE organization_id = ?`).bind(org.organizationId).first<{ n: number }>())?.n ?? 0;
     const rows = (await ctx.db.prepare(`SELECT p.id, p.name, p.status, p.product_id, p.target_launch_at, p.updated_at,
         (SELECT COUNT(*) FROM milestones m WHERE m.project_id = p.id AND m.status = 'done') AS ms_done, (SELECT COUNT(*) FROM milestones m WHERE m.project_id = p.id) AS ms_total
-        FROM projects p WHERE p.organization_id = ? ORDER BY p.created_at DESC`).bind(org.organizationId)
+        FROM projects p WHERE p.organization_id = ? ORDER BY p.created_at DESC, p.id LIMIT ? OFFSET ?`).bind(org.organizationId, limit, offset)
       .all<{ id: string; name: string; status: string; product_id: string | null; target_launch_at: string | null; updated_at: string; ms_done: number; ms_total: number }>()).results;
+    const pager = total > limit ? html`<p class="faint" data-showing>Showing ${offset + (rows.length ? 1 : 0)}–${offset + rows.length} of ${total} projects.</p>${pagination(ctx, pg, offset + rows.length < total)}` : html``;
     return page(ctx, "Projects", html`${pageHead("Projects")}${table(rows, [
       { header: "Project", cell: (p) => html`<a href="/portal/projects/${p.id}">${p.name}</a>` },
       { header: "Package", cell: (p) => packageName(p.product_id) },
@@ -167,7 +172,7 @@ ${notes.length ? html`<ul class="timeline">${notes.map((n) => { const href = not
       { header: "Milestones", cell: (p) => `${p.ms_done} / ${p.ms_total}` },
       { header: "Target launch", cell: (p) => fmtDay(p.target_launch_at) },
       { header: "Updated", cell: (p) => fmtDay(p.updated_at) },
-    ], { empty: emptyState("No projects yet", "Purchase a package or request a custom quote to start a project.", html`<div class="row" style="justify-content:center">${linkButton("View packages", "/pricing")}${linkButton("Request a quote", "/quote", "secondary")}</div>`) })}`);
+    ], { empty: emptyState("No projects yet", "Purchase a package or request a custom quote to start a project.", html`<div class="row" style="justify-content:center">${linkButton("View packages", "/pricing")}${linkButton("Request a quote", "/quote", "secondary")}</div>`) })}${pager}`);
   });
 
   r.get("/portal/projects/:id", async (ctx, p) => {
@@ -262,7 +267,11 @@ ${rec && !done ? html`<p class="faint">Draft last saved ${formatDateTime(rec.upd
   const filesPage = async (ctx: AppContext, org: Org, projectId: string | null, errors: string[] = [], status = 200) => {
     const proj = projectId ? await P.getOrgProject(ctx.db, org.organizationId, projectId) : null;
     const folder = F.normalizeFolder(ctx.url.searchParams.get("folder"));
-    const files = await F.listFiles(ctx.db, org.organizationId, { projectId: proj?.id ?? null, folder });
+    // CREST-GAP-071: paginated (25 per page) with the true total instead of a silent 500-row cap.
+    const { page: filePage, limit: fileLimit, offset: fileOffset } = pageParam(ctx);
+    const fileFilter = { projectId: proj?.id ?? null, folder };
+    const files = await F.listFiles(ctx.db, org.organizationId, { ...fileFilter, limit: fileLimit, offset: fileOffset });
+    const fileTotal = await F.countFiles(ctx.db, org.organizationId, fileFilter);
     const folders = (await ctx.db.prepare(`SELECT DISTINCT folder FROM files WHERE organization_id = ? AND deleted_at IS NULL AND folder IS NOT NULL ${proj ? "AND project_id = ?" : ""} ORDER BY folder`).bind(org.organizationId, ...(proj ? [proj.id] : [])).all<{ folder: string }>()).results.map((x) => x.folder);
     const projects = proj ? [] : (await ctx.db.prepare(`SELECT id, name FROM projects WHERE organization_id = ? ORDER BY created_at DESC`).bind(org.organizationId).all<{ id: string; name: string }>()).results;
     const base = proj ? `/portal/projects/${proj.id}/files` : "/portal/files";
@@ -285,7 +294,8 @@ ${button("Upload", { disabled: !ctx.storage })}</form></section>
   { header: "Uploaded", cell: (x) => html`${fmtDay(x.created_at)}<br><span class="faint">${x.uploader}</span>` },
   { header: "Scan", cell: (x) => badge(x.scan_status === "pending" ? "test_pending" : x.scan_status, F.scanLabel(x.scan_status)) },
   { header: "", cell: (x) => html`<a class="btn btn--ghost btn--sm" href="/files/${x.id}">Download</a>${F.PREVIEWABLE.has(x.content_type) ? html` <a class="btn btn--ghost btn--sm" href="/files/${x.id}/preview" target="_blank" rel="noopener">Preview</a>` : ""}${isAdmin(org) ? html` <a class="btn btn--ghost btn--sm" href="/files/${x.id}/share">Share</a>` : ""}` },
-], { empty: emptyState("No files yet", "Upload logos, content, images and documents for your project here.") })}</section>`;
+], { empty: emptyState("No files yet", "Upload logos, content, images and documents for your project here.") })}
+${fileTotal > fileLimit ? html`<p class="faint" data-showing>Showing ${fileOffset + (files.length ? 1 : 0)}–${fileOffset + files.length} of ${fileTotal} files.</p>${pagination(ctx, filePage, fileOffset + files.length < fileTotal)}` : ""}</section>`;
     return page(ctx, "Files", body, status);
   };
   const handleUpload = async (ctx: AppContext, org: Org, projectFromUrl: string | null) => {
@@ -572,7 +582,11 @@ ${c.invoice_id ? html`<p>Invoice: ${badge(c.invoice_status ?? "open")} ${c.invoi
   r.get("/portal/approvals", async (ctx) => {
     const org = requireCustomerOrg(ctx);
     const open = (await ctx.db.prepare(`SELECT r.id, r.kind, r.note, r.created_at, p.id AS project_id, p.name FROM approval_requests r JOIN projects p ON p.id = r.project_id WHERE p.organization_id = ? AND r.resolved_at IS NULL ORDER BY r.created_at`).bind(org.organizationId).all<{ id: string; kind: string; note: string | null; created_at: string; project_id: string; name: string }>()).results;
-    const past = (await ctx.db.prepare(`SELECT a.kind, a.decision, a.notes, a.created_at, p.id AS project_id, p.name, u.display_name FROM approvals a JOIN projects p ON p.id = a.project_id JOIN users u ON u.id = a.decided_by WHERE p.organization_id = ? AND a.kind IN ('scope','design','revision','customer_launch','final_acceptance') ORDER BY a.created_at DESC LIMIT 100`).bind(org.organizationId).all<{ kind: string; decision: string; notes: string | null; created_at: string; project_id: string; name: string; display_name: string }>()).results;
+    // CREST-GAP-071: decision history is paginated (25 per page) with the true total instead of a silent 100-row cap.
+    const { page: pg, limit, offset } = pageParam(ctx);
+    const pastWhere = `FROM approvals a JOIN projects p ON p.id = a.project_id JOIN users u ON u.id = a.decided_by WHERE p.organization_id = ? AND a.kind IN ('scope','design','revision','customer_launch','final_acceptance')`;
+    const pastTotal = (await ctx.db.prepare(`SELECT COUNT(*) AS n ${pastWhere}`).bind(org.organizationId).first<{ n: number }>())?.n ?? 0;
+    const past = (await ctx.db.prepare(`SELECT a.kind, a.decision, a.notes, a.created_at, p.id AS project_id, p.name, u.display_name ${pastWhere} ORDER BY a.created_at DESC, a.rowid DESC LIMIT ? OFFSET ?`).bind(org.organizationId, limit, offset).all<{ kind: string; decision: string; notes: string | null; created_at: string; project_id: string; name: string; display_name: string }>()).results;
     return page(ctx, "Approvals", html`${pageHead("Approvals")}
 <section class="card"><h2 class="card__title">Waiting for your decision</h2>${table(open, [
   { header: "Approval", cell: (a) => P.APPROVAL_LABELS[a.kind] },
@@ -587,7 +601,8 @@ ${c.invoice_id ? html`<p>Invoice: ${badge(c.invoice_status ?? "open")} ${c.invoi
   { header: "By", cell: (a) => a.display_name },
   { header: "Notes", cell: (a) => a.notes ?? "—" },
   { header: "When", cell: (a) => formatDateTime(a.created_at) },
-], { empty: emptyState("No decisions yet", "Your scope, design, revision, launch and acceptance decisions are recorded here.") })}</section>`);
+], { empty: emptyState("No decisions yet", "Your scope, design, revision, launch and acceptance decisions are recorded here.") })}
+${pastTotal > limit ? html`<p class="faint" data-showing>Showing ${offset + (past.length ? 1 : 0)}–${offset + past.length} of ${pastTotal} decisions.</p>${pagination(ctx, pg, offset + past.length < pastTotal)}` : ""}</section>`);
   });
 
   const approvalsPage = async (ctx: AppContext, org: Org, id: string, errors: string[] = [], status = 200) => {

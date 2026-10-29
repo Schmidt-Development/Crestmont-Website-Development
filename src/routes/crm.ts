@@ -26,6 +26,8 @@ import { effectivePrice } from "../services/pricing-approvals.ts";
 import { loadTaxConfig, taxLabel } from "../services/tax.ts";
 import { computeTax, type TaxResult } from "../domain/tax.ts";
 import { usd } from "../services/finance-documents.ts";
+import { staffCanSeeProject } from "../services/projects.ts";
+import { disabledOwnerFlag } from "../services/offboarding.ts";
 
 /** LEGAL-005: estimated tax per quote line under the current configuration (null when tax is not configured). */
 async function quoteTax(ctx: AppContext, packageId: string | null, lines: QuoteLine[]): Promise<TaxResult | null> {
@@ -189,7 +191,7 @@ ${actionForm(ctx, "/staff/crm/duplicates/dismiss", "Not a duplicate", { variant:
   ], { caption: "Possible duplicate leads" })}</section>` : html``;
   const body = html`${pageHead(lead.contact_name, html`${badge(lead.stage)}${can(actor, "quote.write") && writable && !lead.merged_into_lead_id ? linkButton("New quote", `/staff/quotes/new?lead=${id}`, "primary", "sm") : ""}`, lead.company_name ?? "Lead")}
 ${lead.merged_into_lead_id ? alert("info", html`This lead was merged into <a href="/staff/crm/leads/${lead.merged_into_lead_id}">lead ${lead.merged_into_lead_id}</a>. Its history moved there; this record is archived and kept for reference.`) : ""}
-${formErrors(errors)}${dupCard}
+${formErrors(errors)}${dupCard}${await (async () => { const flag = await disabledOwnerFlag(ctx.db, ["lead"], id); return (flag ? alert("warn", html`<strong>Owner disabled.</strong> ${flag.name}'s account was disabled; ${flag.status === "ended" ? "their assignment was ended, so this needs a new owner." : "this is waiting in the offboarding queue for a new owner."}`) : ""); })()}
 <div class="grid grid-2">
 <section class="card stack"><h2 style="font-size:1.2rem">Contact &amp; company</h2>
 ${dl([["Name", lead.contact_name], ["Email", lead.contact_email ? html`<a href="mailto:${lead.contact_email}">${lead.contact_email}</a>` : "—"], ["Phone", lead.contact_phone], ["Company", lead.company_name],
@@ -262,11 +264,16 @@ async function leadAction(ctx: AppContext, id: string, fn: (lead: crm.LeadRow) =
 async function duplicatesPage(ctx: AppContext) {
   requireStaff(ctx, "crm.access");
   const actor = ctx.actor!;
-  const clusters = await dedupe.findDuplicateClusters(ctx.db, actor);
+  const pageNo = parseInt(ctx.url.searchParams.get("page") ?? "1", 10) || 1;
+  const result = await dedupe.findDuplicateClusters(ctx.db, actor, { page: pageNo });
+  const clusters = result.clusters;
+  const offset = (result.page - 1) * dedupe.CLUSTERS_PER_PAGE;
   const canWrite = (l: dedupe.DupLead) => can(actor, "lead.write_all") || (can(actor, "lead.write_assigned") && l.owner_user_id === actor.userId);
   return staffPage(ctx, "Duplicate leads", html`${pageHead("Duplicate leads", linkButton("Pipeline", "/staff/crm", "ghost", "sm"), can(actor, "lead.read_all") ? "All leads" : "Leads assigned to you")}
 <p class="muted">Leads are grouped when their contacts share a normalized email address, a phone number (digits only, US country code ignored) or the same name at the same company. The suggested survivor is the most advanced lead (then the oldest). Merging is audited and cannot silently drop data: activities, quotes, orders and calls move to the survivor, blank contact fields are filled, and the merged lead is archived with a link to the survivor.</p>
-${clusters.length ? clusters.map((c, i) => {
+${result.truncated ? alert("warn", html`More than ${dedupe.MAX_DUPLICATE_ROWS} matching lead keys were found; groups are built from the first ${dedupe.MAX_DUPLICATE_ROWS}. Merge or dismiss these, then reload to see the rest.`) : ""}
+${result.totalClusters > clusters.length ? html`<p class="faint" data-showing>Showing groups ${offset + (clusters.length ? 1 : 0)}–${offset + clusters.length} of ${result.totalClusters}.</p>` : ""}
+${clusters.length ? clusters.map((c, j) => { const i = offset + j;
     const survivor = c.leads.find((l) => l.id === c.survivorId)!;
     return html`<section class="card stack" data-cluster="${i + 1}"><h2 style="font-size:1.2rem">${survivor.contact_name} · ${c.leads.length} leads <span class="faint">matched on ${c.reasons.map((r) => label(r)).join(", ")}</span></h2>
 ${table(c.leads, [
@@ -276,7 +283,8 @@ ${table(c.leads, [
       { header: "", cell: (l) => l.id === c.survivorId || !canWrite(l) || !canWrite(survivor) ? "" : html`${actionForm(ctx, `/staff/crm/leads/${l.id}/merge`, "Merge into survivor", { hidden: { into: c.survivorId, back: "/staff/crm/duplicates" }, confirm: `Merge ${l.contact_name} (${l.id}) into ${c.survivorId}?` })}
 ${actionForm(ctx, "/staff/crm/duplicates/dismiss", "Not a duplicate", { variant: "ghost", hidden: { a: l.id, b: c.survivorId, back: "/staff/crm/duplicates" } })}` },
     ], { caption: `Duplicate group ${i + 1}` })}<p class="faint">To keep a different lead, open it and merge the others into it from its page.</p></section>`;
-  }) : emptyState("No duplicates found", "No two visible leads share an email, phone number, or name and company.")}`);
+  }) : emptyState(result.page > 1 ? "No more duplicate groups" : "No duplicates found", "No two visible leads share an email, phone number, or name and company.")}
+${result.totalClusters > dedupe.CLUSTERS_PER_PAGE || result.page > 1 ? pagination(ctx, result.page, result.hasNext) : ""}`);
 }
 
 // ── contacts / customers ──
@@ -313,19 +321,40 @@ ${table(rows.slice(0, limit), [
     { empty: emptyState("No customers yet", "Customer organizations are created when someone registers or buys.") })}${pagination(ctx, page, rows.length > limit)}`);
 }
 
+/** Prev/next links and "showing N of M" for one customer sub-table; other sections keep their page (CREST-GAP-071). */
+function sectionPager(ctx: AppContext, key: crm.CustomerSection, s: crm.SectionPage<unknown>, noun: string): SafeHtml {
+  if (s.total <= s.rows.length && s.page === 1) return html``;
+  const href = (p: number) => { const u = new URL(ctx.url); u.searchParams.set(`${key}_page`, String(p)); return `${u.pathname}${u.search}#${key}`; };
+  const from = (s.page - 1) * crm.CUSTOMER_SECTION_SIZE + (s.rows.length ? 1 : 0), to = (s.page - 1) * crm.CUSTOMER_SECTION_SIZE + s.rows.length;
+  return html`<nav class="pagination" aria-label="${noun} pages" data-showing><span class="faint">Showing ${from}–${to} of ${s.total} ${noun}</span>${s.page > 1 ? html`<a class="btn btn--ghost btn--sm" href="${href(s.page - 1)}">Previous</a>` : ""}${s.hasNext ? html`<a class="btn btn--ghost btn--sm" href="${href(s.page + 1)}">Next</a>` : ""}</nav>`;
+}
+
 async function customerPage(ctx: AppContext, id: string) {
   requireStaff(ctx, "customers.read");
-  const d = await crm.customerDetail(ctx.db, id);
-  const leadLink = (lid: string) => (can(ctx.actor!, "crm.access") ? html`<a href="/staff/crm/leads/${lid}">${lid}</a>` : html`${lid}`);
+  const actor = ctx.actor!, me = ctx.user!.id;
+  const pages = Object.fromEntries(crm.CUSTOMER_SECTIONS.map((k) => [k, parseInt(ctx.url.searchParams.get(`${k}_page`) ?? "1", 10) || 1]));
+  const d = await crm.customerDetail(ctx.db, id, pages);
+  // CREST-GAP-070: staff visibility of customer records stays broad by Founder decision, but every view is audited.
+  await audit(ctx.db, { actorUserId: me, action: "customer.viewed", subjectType: "organization", subjectId: d.org.id, organizationId: d.org.id, ip: ctx.ip });
+  // CREST-GAP-079: link only what this viewer can open. Leads: crm.access plus lead visibility (all, or owned).
+  const canLead = (owner: string | null | undefined) => can(actor, "crm.access") && (can(actor, "lead.read_all") || (can(actor, "lead.read_assigned") && owner === me));
+  const leadIds = [...new Set([...d.leads.rows.map((l) => l.id), ...d.orders.rows.map((o) => o.lead_id).filter((x): x is string => !!x)])];
+  const leadOwners = new Map<string, string | null>();
+  if (leadIds.length) for (const l of (await ctx.db.prepare(`SELECT id, owner_user_id FROM leads WHERE id IN (${leadIds.map(() => "?").join(",")})`).bind(...leadIds).all<{ id: string; owner_user_id: string | null }>()).results) leadOwners.set(l.id, l.owner_user_id);
+  const leadLink = (lid: string) => (canLead(leadOwners.get(lid)) ? html`<a href="/staff/crm/leads/${lid}">${lid}</a>` : html`${lid}`);
+  // Projects: delivery.access plus project visibility (read_all, or PM / assigned).
+  const visibleProjects = new Set<string>();
+  if (can(actor, "delivery.access")) for (const p of d.projects.rows) if (await staffCanSeeProject(ctx.db, actor, me, p.id)) visibleProjects.add(p.id);
+  const projectCell = (p: { id: string; name: string }) => (visibleProjects.has(p.id) ? html`<a href="/staff/projects/${p.id}">${p.name}</a>` : html`${p.name}`);
   return staffPage(ctx, d.org.name, html`${pageHead(d.org.name, linkButton("General conversation", `/staff/conversations/${d.org.id}`, "secondary", "sm"), "Customer")}
 ${dl([["Customer since", formatDate(d.org.created_at)], ["Stripe customer", d.org.stripe_customer_id ? "Linked" : "Not linked yet"], ["Members", d.members.map((m) => `${m.display_name} <${m.email}> (${label(m.role_id)})`).join(", ") || "—"]])}
 <div class="grid grid-2">
-<section class="card"><h2 style="font-size:1.2rem">Orders</h2>${table(d.orders, [{ header: "Order", cell: (o) => o.id }, { header: "Kind", cell: (o) => label(o.kind) }, { header: "Status", cell: (o) => badge(o.status) }, { header: "Total", cell: (o) => formatCents(o.total_cents), numeric: true }, { header: "Lead", cell: (o) => (o.lead_id ? leadLink(o.lead_id) : "—") }], { empty: html`<p class="muted">No orders.</p>` })}</section>
-<section class="card"><h2 style="font-size:1.2rem">Invoices</h2>${table(d.invoices, [{ header: "Invoice", cell: (i) => i.description ?? i.id }, { header: "Status", cell: (i) => badge(i.status) }, { header: "Amount", cell: (i) => formatCents(i.amount_cents), numeric: true }, { header: "Issued", cell: (i) => formatDate(i.created_at) }], { empty: html`<p class="muted">No invoices.</p>` })}</section>
-<section class="card"><h2 style="font-size:1.2rem">Projects</h2>${table(d.projects, [{ header: "Project", cell: (p) => html`<a href="/staff/projects/${p.id}">${p.name}</a>` }, { header: "Status", cell: (p) => badge(p.status) }], { empty: html`<p class="muted">No projects.</p>` })}</section>
-<section class="card"><h2 style="font-size:1.2rem">Subscriptions</h2>${table(d.subscriptions, [{ header: "Plan", cell: (s) => label(s.product_id) }, { header: "Status", cell: (s) => badge(s.status) }, { header: "Renews", cell: (s) => formatDate(s.current_period_end) }], { empty: html`<p class="muted">No maintenance plans.</p>` })}</section>
-<section class="card"><h2 style="font-size:1.2rem">Support tickets</h2>${table(d.tickets, [{ header: "Subject", cell: (t) => t.subject }, { header: "Status", cell: (t) => badge(t.status) }, { header: "Opened", cell: (t) => formatDate(t.created_at) }], { empty: html`<p class="muted">No tickets.</p>` })}</section>
-<section class="card"><h2 style="font-size:1.2rem">Leads</h2>${table(d.leads, [{ header: "Lead", cell: (l) => leadLink(l.id) }, { header: "Stage", cell: (l) => badge(l.stage) }, { header: "Source", cell: (l) => label(l.source) }, { header: "Created", cell: (l) => formatDate(l.created_at) }], { empty: html`<p class="muted">No linked leads.</p>` })}</section>
+<section class="card" id="orders"><h2 style="font-size:1.2rem">Orders</h2>${table(d.orders.rows, [{ header: "Order", cell: (o) => o.id }, { header: "Kind", cell: (o) => label(o.kind) }, { header: "Status", cell: (o) => badge(o.status) }, { header: "Total", cell: (o) => formatCents(o.total_cents), numeric: true }, { header: "Lead", cell: (o) => (o.lead_id ? leadLink(o.lead_id) : "—") }], { empty: html`<p class="muted">No orders.</p>` })}${sectionPager(ctx, "orders", d.orders, "orders")}</section>
+<section class="card" id="invoices"><h2 style="font-size:1.2rem">Invoices</h2>${table(d.invoices.rows, [{ header: "Invoice", cell: (i) => i.description ?? i.id }, { header: "Status", cell: (i) => badge(i.status) }, { header: "Amount", cell: (i) => formatCents(i.amount_cents), numeric: true }, { header: "Issued", cell: (i) => formatDate(i.created_at) }], { empty: html`<p class="muted">No invoices.</p>` })}${sectionPager(ctx, "invoices", d.invoices, "invoices")}</section>
+<section class="card" id="projects"><h2 style="font-size:1.2rem">Projects</h2>${table(d.projects.rows, [{ header: "Project", cell: projectCell }, { header: "Status", cell: (p) => badge(p.status) }], { empty: html`<p class="muted">No projects.</p>` })}${sectionPager(ctx, "projects", d.projects, "projects")}</section>
+<section class="card" id="subscriptions"><h2 style="font-size:1.2rem">Subscriptions</h2>${table(d.subscriptions.rows, [{ header: "Plan", cell: (s) => label(s.product_id) }, { header: "Status", cell: (s) => badge(s.status) }, { header: "Renews", cell: (s) => formatDate(s.current_period_end) }], { empty: html`<p class="muted">No maintenance plans.</p>` })}${sectionPager(ctx, "subscriptions", d.subscriptions, "plans")}</section>
+<section class="card" id="tickets"><h2 style="font-size:1.2rem">Support tickets</h2>${table(d.tickets.rows, [{ header: "Subject", cell: (t) => t.subject }, { header: "Status", cell: (t) => badge(t.status) }, { header: "Opened", cell: (t) => formatDate(t.created_at) }], { empty: html`<p class="muted">No tickets.</p>` })}${sectionPager(ctx, "tickets", d.tickets, "tickets")}</section>
+<section class="card" id="leads"><h2 style="font-size:1.2rem">Leads</h2>${table(d.leads.rows, [{ header: "Lead", cell: (l) => leadLink(l.id) }, { header: "Stage", cell: (l) => badge(l.stage) }, { header: "Source", cell: (l) => label(l.source) }, { header: "Created", cell: (l) => formatDate(l.created_at) }], { empty: html`<p class="muted">No linked leads.</p>` })}${sectionPager(ctx, "leads", d.leads, "leads")}</section>
 </div>`);
 }
 
