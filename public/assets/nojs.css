@@ -26,3 +26,15 @@
 .sv-compare { cursor: default; } .sv-compare__handle { display: none; }
 .hero--service .hero-service { align-items: start; }
 .sv-flow__panel { min-height: 0; }
+/* Primary navigation without JavaScript (CREST-GAP-077): the Menu button needs a script, so below 1020px the links are
+   shown in the header as a wrapping row instead of the off-canvas panel. The header scrolls away with the page. */
+@media (max-width: 1020px) {
+  .site-header { position: static; }
+  .site-header .container { flex-wrap: wrap; row-gap: 0; padding-bottom: var(--s-3); }
+  .site-header .nav-toggle { display: none !important; }
+  .site-header .nav { position: static; flex: 1 1 100%; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 0 var(--s-1); height: auto; max-height: none; overflow: visible;
+    padding: 0; margin: 0; border: 0; background: none; visibility: visible; opacity: 1; transform: none; pointer-events: auto; transition: none; }
+  .site-header .nav a:not(.btn) { font: 500 var(--fs-sm)/1 var(--font-body); letter-spacing: 0; color: var(--text-2); display: inline-flex; align-items: center; min-height: 44px; padding: 0 var(--s-2); border-bottom: 0; }
+  .site-header .nav a[aria-current="page"] { color: var(--gold-1); }
+  .site-header .nav .btn { margin: var(--s-2) 0 0; min-height: 44px; font-size: var(--fs-sm); flex: 1 1 100%; }
+}
