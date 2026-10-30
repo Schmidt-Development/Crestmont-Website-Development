@@ -139,7 +139,27 @@ const summary = {
     note: "A small sample at concurrency 16 from one GitHub-hosted runner, including a forced re-check wait for possibly broken sites. Not a 24-hour measurement and not Node 1." },
   resources: { before: r0, after: await snapshot(process.cwd()) },
   externalFees: "$0",
+  diagnostics: diagnostics(),
 };
+
+/** Aggregate-only quality diagnostics (codes and categories, never names, domains or numbers). */
+function diagnostics() {
+  const rows = (state.db.prepare(`SELECT result FROM candidates WHERE result IS NOT NULL`).all() as { result: string }[]).map((r) => JSON.parse(r.result) as { website: { classification: string; identitySignals?: string[]; checks?: { stage: string; result: string }[] }; findings?: { code: string; severity: string; confidence: number }[] });
+  const inc = (m: Record<string, number>, k: string) => { m[k] = (m[k] ?? 0) + 1; };
+  const findingCodes: Record<string, number> = {}, issuesDrivers: Record<string, number> = {}, unverified: Record<string, number> = {}, stageC: Record<string, number> = {}, stageD: Record<string, number> = {};
+  for (const r of rows) {
+    for (const f of r.findings ?? []) inc(findingCodes, `${f.code}:${f.severity}`);
+    if (r.website.classification === "VERIFIED_WEBSITE_ISSUES") for (const f of r.findings ?? []) if (f.confidence >= 0.6 && f.severity !== "low") inc(issuesDrivers, f.code);
+    if (r.website.classification === "WEBSITE_UNVERIFIED") for (const s of r.website.identitySignals ?? []) inc(unverified,
+      /loads but does not match/.test(s) ? "listed_site_loads_identity_not_confirmed" : /HTTP (\d)\d\d/.test(s) ? `http_${/HTTP (\d)/.exec(s)![1]}xx` : /does not load/.test(s) ? "unlisted_candidate_not_loading" : /non-public/.test(s) ? "non_public_address" : /restricts automated/.test(s) ? "restricted_robots_or_401_403_429" : /parked|placeholder/.test(s) ? "parked_unlisted" : "other");
+    for (const c of r.website.checks ?? []) {
+      if (c.stage === "C") inc(stageC, /^HTTP (\d)/.test(c.result) ? `http_${/^HTTP (\d)/.exec(c.result)![1]}xx` : c.result.split(":")[0].slice(0, 30));
+      if (c.stage === "D" && /^not confirmed/.test(c.result)) inc(stageD, /different phone/.test(c.result) ? "different_phone_on_page" : /no matching signals/.test(c.result) ? "no_matching_signals" : /name on page/.test(c.result) ? "name_only_no_phone_or_street" : "weak_signals");
+      if (c.stage === "D" && /^official/.test(c.result)) inc(stageD, "official");
+    }
+  }
+  return { findingCodes, issuesDrivers, unverifiedReasons: unverified, stageCResults: stageC, stageDResults: stageD };
+}
 writeFileSync(join(OUT, "summary.json"), JSON.stringify(summary, null, 2));
 
 // ── 7. Private detail for the Founder's manual review (sealed by the workflow; never printed) ──
