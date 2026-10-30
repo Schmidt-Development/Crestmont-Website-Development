@@ -191,6 +191,7 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
     // The website assistant accepts same-origin JSON only; the Origin header is its "signature".
     "POST /api/assistant": async () => ({ origin: "http://crestmont.test" }),
     "POST /api/scheduled/run": async (b) => ({ "x-crestmont-scheduler-signature": await signEvidence(SECRETS.scheduler, b) }),
+    "POST /api/crm/v1/imports": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.crmImport, b), "idempotency-key": `fuzz-${Math.random().toString(16).slice(2, 12)}` }),
     ...Object.fromEntries(["claim", "heartbeat", "checkpoint", "checkpoint/fetch", "requirements", "files", "complete", "ai/claim", "ai/complete"].map((x) => [`POST /api/builds/runner/${x}`, async (b: string) => ({ "x-crestmont-runner-signature": await signEvidence(SECRETS.runner, b) })])),
   };
   const jsonPosts = classified().filter((r) => r.method === "POST" && (r.spec.access.kind === "signed" || r.spec.access.kind === "webhook" || r.spec.api));

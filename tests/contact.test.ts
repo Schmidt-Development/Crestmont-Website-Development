@@ -30,8 +30,15 @@ test("[WEB-004] a double submit creates one lead; a token survives a validation 
   assert.equal(await count(), 1, "exactly one lead");
   assert.equal((await c.post("/contact", body)).status, 303);
   assert.equal(await count(), 1, "a later replay still creates nothing");
-  // Without a token the form behaves exactly as before (one lead per submit).
-  await c.post("/contact", { ...body, submission: "" });
+  // Without a token, a second message from the same person continues their open lead (CRM duplicate protection):
+  // no second lead, the message is in its history and a reply task is due.
+  await c.post("/contact", { ...body, submission: "", message: "Also: can you migrate our email?" });
+  assert.equal(await count(), 1);
+  const acts = (await db.prepare(`SELECT kind, body FROM crm_activities ORDER BY created_at, rowid`).all<{ kind: string; body: string }>()).results;
+  assert.ok(acts.some((x) => x.kind === "system" && /can you migrate our email/.test(x.body)));
+  assert.ok(acts.some((x) => x.kind === "task" && /Reply to the new message from Riley Park/.test(x.body)));
+  // A different person still gets their own lead.
+  await c.post("/contact", { ...body, submission: "", name: "Sam Ortiz", email: "sam@example.com" });
   assert.equal(await count(), 2);
   // Cross-site posts are still refused.
   assert.equal((await c.post("/contact", body, { csrf: false })).status, 403);

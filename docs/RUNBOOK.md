@@ -10,6 +10,8 @@ Staffed hours are set at /staff/settings. Outside those hours, nobody is paged.
 
 **Recovery is rehearsed automatically.** After every successful staging deploy, `staging-rollback-rehearsal.yml` rolls the Worker back to the previous code version, verifies health, rolls forward and verifies again, and `staging-restore-drill.yml` restores a fresh staging export into a scratch database and compares every table's row count. Both post signed evidence (TEST-004, INFRA-005, INFRA-006) visible at /staff/readiness. A failed rehearsal or drill alerts the same way as the monitor.
 
+**CRM duplicate protection** (contact identity, review queue, outbound dial ledger, research import API, historical duplicate audit and the 0047 rollback): [docs/crm-identity/RUNBOOK.md](crm-identity/RUNBOOK.md).
+
 ## 1. Daily checks (staffed hours)
 
 1. /staff/monitoring: service health, 5xx counts, failed email, Stripe failed/dead-letter events, failed AI jobs, voice errors.

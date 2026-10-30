@@ -8,6 +8,8 @@ import { require as requirePerm, can, type Actor } from "../domain/authz.ts";
 import type { AppContext } from "../app/context.ts";
 import { cookie, isSecure, parseCookies } from "../app/http.ts";
 import { sendMail } from "./mailer.ts";
+import { intake } from "./contact-identity.ts";
+import { businessDate, endOfBusinessDay } from "../lib/business-time.ts";
 
 export const leadInput = v.object({
   name: v.string({ min: 2, max: 120 }),
@@ -122,28 +124,26 @@ export const normalizeEmail = (e: string) => e.trim().toLowerCase();
 export const DEFAULT_LEAD_OWNER_KEY = "crm.default_lead_owner";
 const ACTIVE_SALES_USER = `SELECT m.user_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id IN ('owner','administrator','sales') AND u.disabled_at IS NULL`;
 
-export async function captureLead(db: Db, body: unknown, meta: { ip?: string; attribution?: Attribution } = {}) {
+export async function captureLead(db: Db, body: unknown, meta: { ip?: string; attribution?: Attribution; channel?: "web_form" | "quote_form" | "api_lead" } = {}) {
   const input = parse(leadInput, body);
   input.email = normalizeEmail(input.email);
   const attr = sanitizeAttribution((meta.attribution ?? {}) as Record<string, string | undefined>);
-  const at = nowIso();
-  const companyId = input.company ? newId("co") : null;
-  const contactId = newId("ct");
-  const leadId = newId("ld");
-  const stmts = [
-    ...(companyId ? [db.prepare(`INSERT INTO companies (id, name, website, created_at) VALUES (?,?,?,?)`).bind(companyId, input.company, input.website ?? null, at)] : []),
-    db.prepare(`INSERT INTO contacts (id, company_id, name, email, phone, created_at) VALUES (?,?,?,?,?,?)`)
-      .bind(contactId, companyId, input.name, input.email, input.phone ?? null, at),
-    db.prepare(`INSERT INTO leads (id, contact_id, source, stage, owner_user_id, interest, message, utm_source, utm_medium, utm_campaign, utm_term, utm_content, referrer, landing_page, created_at, updated_at)
-                VALUES (?,?,?,'new',(SELECT value FROM business_settings WHERE key = '${DEFAULT_LEAD_OWNER_KEY}' AND value IN (${ACTIVE_SALES_USER})),?,?,?,?,?,?,?,?,?,?,?)`)
-      .bind(leadId, contactId, input.source, input.interest, input.message, attr.utm_source ?? null, attr.utm_medium ?? null, attr.utm_campaign ?? null, attr.utm_term ?? null, attr.utm_content ?? null, attr.referrer ?? null, attr.landing_page ?? null, at, at),
-    db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`)
-      .bind(newId("act"), leadId, `Lead captured via ${input.source}${attr.utm_source ? ` (campaign source: ${attr.utm_source}${attr.utm_medium ? ` / ${attr.utm_medium}` : ""})` : ""}`, at),
-    db.prepare(`INSERT INTO audit_logs (actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES ('system','lead.created','lead',?,?,?,?)`)
-      .bind(leadId, JSON.stringify({ source: input.source, ...(Object.keys(attr).length ? { attribution: attr } : {}) }), meta.ip ?? null, at),
-  ];
-  await db.batch(stmts);
-  return { leadId };
+  const owner = await db.prepare(`SELECT value FROM business_settings WHERE key = '${DEFAULT_LEAD_OWNER_KEY}' AND value IN (${ACTIVE_SALES_USER})`).first<{ value: string }>();
+  // CRM duplicate protection: a person already in the CRM (same email or phone) continues their open lead; the new
+  // message is added to its history with a follow-up task, instead of a second lead being created.
+  const res = await intake(db, { contactName: input.name, businessName: input.company ?? null, website: input.website ?? null, emails: [{ value: input.email }], phones: input.phone ? [{ value: input.phone }] : [] }, {
+    channel: meta.channel ?? input.source, ip: meta.ip ?? null,
+    lead: { source: input.source, interest: input.interest, message: input.message, ownerUserId: owner?.value ?? null, utm: attr,
+      activityBody: `Lead captured via ${input.source}${attr.utm_source ? ` (campaign source: ${attr.utm_source}${attr.utm_medium ? ` / ${attr.utm_medium}` : ""})` : ""}` },
+    continuedStatements: (leadId) => [db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, due_at, created_at) VALUES (?,?,'task',?,?,?)`)
+      .bind(newId("act"), leadId, `Reply to the new ${input.source === "quote_form" ? "quote request" : "message"} from ${input.name}`, endOfBusinessDay(businessDate(new Date())), nowIso())],
+  });
+  if (!res.leadId) throw Object.assign(new Error("We could not save this request. Please check your email address and try again."), { status: 422 });
+  if (res.leadCreated) {
+    await db.prepare(`INSERT INTO audit_logs (actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES ('system','lead.created','lead',?,?,?,?)`)
+      .bind(res.leadId, JSON.stringify({ source: input.source, ...(Object.keys(attr).length ? { attribution: attr } : {}) }), meta.ip ?? null, nowIso()).run();
+  }
+  return { leadId: res.leadId, outcome: res.outcome, created: res.leadCreated };
 }
 
 /**

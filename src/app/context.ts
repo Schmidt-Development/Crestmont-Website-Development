@@ -45,6 +45,8 @@ export interface Env {
   RUNNER_REQUIRE_NONCE?: string;
   /** HMAC key for POST /api/scheduled/run (external scheduler when native Cron Triggers are unavailable). */
   SCHEDULER_TRIGGER_SECRET?: string;
+  /** HMAC secret for the research-agent / CRM import API (POST /api/crm/v1/imports). Unset = the endpoint answers 503. */
+  CRM_IMPORT_SECRET?: string;
   /** "on" | "off": per-user limits on authenticated form submissions (default on outside development). ASVS F-15. */
   ACTION_RATE_LIMIT?: string;
   /** "on" | "off": breached-password check (default on outside development). ASVS F-06. */

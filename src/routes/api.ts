@@ -18,6 +18,7 @@ import { loadContent } from "../services/cms.ts";
 import { parseItems } from "../content/registry.ts";
 import { effectivePrices } from "../services/pricing-approvals.ts";
 import { ingestPushedSnapshot, GithubPushError } from "../services/github.ts";
+import { runImport, ImportError, IMPORT_BATCHES_PER_HOUR } from "../services/crm-import.ts";
 
 const MAX_BODY = 1_000_000;
 export async function readBody(req: Request): Promise<string> {
@@ -59,6 +60,29 @@ export function register(r: Router) {
     return jsonResponse(ctx, 200, { ran: SCHEDULE[cron] });
   });
 
+  // Research-agent / CRM import API v1 (docs/crm-identity/IMPORT-API.md). HMAC-signed machine endpoint (no cookies):
+  // 503 until CRM_IMPORT_SECRET is set, 401 on a bad signature, rate-limited per client, idempotent per batch and record.
+  r.post("/api/crm/v1/imports", async (ctx) => {
+    const raw = await readBody(ctx.req);
+    if (!ctx.env.CRM_IMPORT_SECRET) return jsonResponse(ctx, 503, { error: "CRM import API not configured" });
+    try { await verifyEvidenceSignature(ctx.env.CRM_IMPORT_SECRET, raw, ctx.req.headers.get("x-crestmont-signature")); }
+    catch (e) { if (e instanceof IngestAuthError) return jsonResponse(ctx, 401, { error: e.message }); throw e; }
+    // The client name comes from the SIGNED body (a header could be swapped on a replayed request).
+    let client = "research-agent";
+    try { const b = JSON.parse(raw) as { client?: unknown }; if (b && typeof b === "object" && b.client !== undefined) client = String(b.client); } catch { /* runImport reports invalid JSON */ }
+    if (!/^[a-z0-9][a-z0-9-]{1,39}$/.test(client)) return jsonResponse(ctx, 400, { error: "client must be 2–40 lowercase letters, digits or -" });
+    const rl = await rateLimit(ctx.db, `crm-import:${client}`, IMPORT_BATCHES_PER_HOUR, 3600);
+    if (!rl.allowed) return jsonResponse(ctx, 429, { error: `At most ${IMPORT_BATCHES_PER_HOUR} batches per hour`, retryAfterSeconds: 3600 - (Math.floor(Date.now() / 1000) % 3600) });
+    try {
+      const res = await runImport(ctx.db, raw, { client, idempotencyKey: (ctx.req.headers.get("idempotency-key") ?? "").trim() });
+      await audit(ctx.db, { actorKind: "system", action: "crm.import_batch", subjectType: "crm_import_batch", subjectId: res.batchId, ip: ctx.ip ?? null, details: { client, dryRun: res.dryRun, replayed: res.replayed, counts: res.counts } });
+      return jsonResponse(ctx, 200, res);
+    } catch (e) {
+      if (e instanceof ImportError) return jsonResponse(ctx, e.status, { error: e.message });
+      throw e;
+    }
+  });
+
   r.get("/api/health", async (ctx) => {
     await ctx.db.prepare("SELECT 1").first();
     // CREST-GAP-055: the running Worker states whether its FILES (R2) binding exists, independent of the deploy-time
@@ -75,7 +99,7 @@ export function register(r: Router) {
     // Same per-IP budget as the browser lead forms (shared key), so the JSON API is not an unthrottled side door.
     const rl = await rateLimit(ctx.db, `leadform:${ctx.ip ?? "unknown"}`, 10, 3600);
     if (!rl.allowed) return jsonResponse(ctx, 429, { error: "Too many submissions from your network. Please wait an hour." });
-    const { leadId } = await captureLead(ctx.db, body, { ip: ctx.ip ?? undefined });
+    const { leadId } = await captureLead(ctx.db, body, { ip: ctx.ip ?? undefined, channel: "api_lead" });
     // CREST-GAP-005: staff notification (in-app + one staff email); never turns a saved lead into an error.
     try { await notifyNewLead(ctx, leadId, "api"); }
     catch (err) { console.error(JSON.stringify({ level: "error", msg: "staff lead notification failed", leadId, error: (err as Error).message })); }

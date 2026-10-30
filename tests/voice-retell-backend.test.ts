@@ -428,7 +428,15 @@ test("[VOICE-003] outbound eligibility: consent required, DNC and opt-out enforc
   const r3 = await requestOutbound(t.db, { purpose: "callback", phone: "+15550100154", reason: "Callback", consentEvidence: "Caller asked on a call", requestedBy: t.owner.id });
   await decideOutbound(t.db, t.owner.id, r3.id, "approve");
   assert.equal((await t.run()).dialled, 1);
+  // CRM duplicate protection: while r3 is open (dialing) a second request for the number folds into it.
+  const dup = await requestOutbound(t.db, { purpose: "support_followup", phone: "+15550100154", reason: "Another reason", requestedBy: t.owner.id });
+  assert.equal(dup.id, r3.id);
+  assert.equal(dup.duplicateOf, r3.id);
+  // Once that call has ended, a new request may be created, and the per-number daily cap still stops the dial.
+  await t.post("/api/webhooks/retell", { event: "call_ended", call: { ...phoneCall("call_e1"), direction: "outbound", to_number: "+15550100154", disconnection_reason: "user_hangup" } });
+  assert.equal((await one<{ status: string }>(t.db, `SELECT status FROM voice_outbound_requests WHERE id = ?`, r3.id)).status, "completed");
   const r4 = await requestOutbound(t.db, { purpose: "callback", phone: "+15550100154", reason: "Second callback", consentEvidence: "Caller asked again", requestedBy: t.owner.id });
+  assert.notEqual(r4.id, r3.id);
   await decideOutbound(t.db, t.owner.id, r4.id, "approve");
   assert.equal((await t.run()).dialled, 0);
   assert.match((await one<{ status_detail: string }>(t.db, `SELECT status_detail FROM voice_outbound_requests WHERE id = ?`, r4.id)).status_detail, /daily call limit/);

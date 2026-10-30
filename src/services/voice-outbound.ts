@@ -16,6 +16,7 @@ import { loadVoiceConfig, nextCallingWindow, withinCallingWindow, toE164, validT
 import { createRetellPhoneCall } from "../adapters/retell.ts";
 import { addLeadTask, notifyOwners } from "./voice-common.ts";
 import { voiceBudget, budgetOpen, noteBudgetClosed } from "./voice-budget.ts";
+import { reservePhone, releasePhone, markDialing, recoverExpiredLeases, recordPhoneOutcome } from "./outreach-ledger.ts";
 
 export const OUTBOUND_ENV_FLAG = "RETELL_OUTBOUND";
 
@@ -85,7 +86,7 @@ export interface OutboundInput {
 }
 
 /** Creates a request awaiting staff approval. Nothing dials until approval AND every gate passes. */
-export async function requestOutbound(db: Db, i: OutboundInput): Promise<OutboundRow> {
+export async function requestOutbound(db: Db, i: OutboundInput): Promise<OutboundRow & { duplicateOf?: string }> {
   if (!(OUTBOUND_PURPOSES as readonly string[]).includes(i.purpose)) throw new OutboundError("Unsupported call purpose");
   const phone = toE164(i.phone);
   if (!phone) throw new OutboundError("Enter the number in a dialable format (E.164, e.g. +15551234567)");
@@ -97,10 +98,19 @@ export async function requestOutbound(db: Db, i: OutboundInput): Promise<Outboun
   const dnc = await isDnc(db, phone);
   const id = newId("vob"), at = nowIso();
   const consent = await db.prepare(`SELECT id FROM voice_call_consents WHERE phone_e164 = ? AND purpose = ? AND revoked_at IS NULL`).bind(phone, i.purpose).first<{ id: string }>();
-  await db.prepare(`INSERT INTO voice_outbound_requests (id, purpose, phone_e164, contact_name, reason, lead_id, consultation_id, consent_id, status, status_detail, requested_by, idempotency_key, is_test, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+  // Outbound dial deduplication (CRM duplicate protection): at most one open request (awaiting approval, approved or
+  // dialing) per number, whatever its purpose. One guarded INSERT, so two simultaneous requests cannot both be created.
+  // A blocked (DNC) request is still recorded for the audit trail.
+  const ins = await db.prepare(`INSERT INTO voice_outbound_requests (id, purpose, phone_e164, contact_name, reason, lead_id, consultation_id, consent_id, status, status_detail, requested_by, idempotency_key, is_test, created_at, updated_at)
+      SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ? = 1 OR NOT EXISTS (SELECT 1 FROM voice_outbound_requests WHERE phone_e164 = ? AND is_test = ? AND status IN ('pending_approval','approved','dialing'))`)
     .bind(id, i.purpose, phone, i.name?.slice(0, 120) ?? null, reason, i.leadId ?? null, i.consultationId ?? null, consent?.id ?? null,
-      dnc ? "blocked" : "pending_approval", dnc ? "Number is on the do-not-call list" : null, i.requestedBy ?? null, `crestmont_${id}`, i.isTest ? 1 : 0, at, at).run();
+      dnc ? "blocked" : "pending_approval", dnc ? "Number is on the do-not-call list" : null, i.requestedBy ?? null, `crestmont_${id}`, i.isTest ? 1 : 0, at, at, dnc ? 1 : 0, phone, i.isTest ? 1 : 0).run();
+  if (ins.meta.changes !== 1) {
+    const open = (await db.prepare(`SELECT * FROM voice_outbound_requests WHERE phone_e164 = ? AND is_test = ? AND status IN ('pending_approval','approved','dialing') ORDER BY created_at LIMIT 1`).bind(phone, i.isTest ? 1 : 0).first<OutboundRow>())!;
+    await audit(db, { actorUserId: i.requestedBy ?? null, actorKind: i.requestedBy ? "user" : "ai", action: "voice.outbound_duplicate_suppressed", subjectType: "voice_outbound_request", subjectId: open.id, details: { purpose: i.purpose, existingPurpose: open.purpose } });
+    if (i.leadId && open.lead_id !== i.leadId) await addLeadTask(db, i.leadId, `${i.isTest ? "[TEST] " : ""}Another ${i.purpose.replace(/_/g, " ")} call was requested for ${i.name ?? "this contact"}, but request ${open.id} (${open.purpose.replace(/_/g, " ")}) is already open for the same number. Handle both in that one call.`, 1);
+    return Object.assign(open, { duplicateOf: open.id });
+  }
   await audit(db, { actorUserId: i.requestedBy ?? null, actorKind: i.requestedBy ? "user" : "ai", action: "voice.outbound_requested", subjectType: "voice_outbound_request", subjectId: id, details: { purpose: i.purpose, blocked: dnc } });
   return (await getOutbound(db, id))!;
 }
@@ -126,6 +136,7 @@ export async function decideOutbound(db: Db, userId: string, id: string, decisio
   } else {
     if (!["pending_approval", "approved", "no_answer"].includes(row.status)) throw new OutboundError("This request can no longer be cancelled", 409);
     await db.prepare(`UPDATE voice_outbound_requests SET status = 'cancelled', status_detail = ?, updated_at = ? WHERE id = ?`).bind(note.trim().slice(0, 300) || "Cancelled by staff", nowIso(), id).run();
+    await releasePhone(db, row.phone_e164, { type: "voice_outbound_request", id }, "cancelled");
   }
   await audit(db, { actorUserId: userId, action: "voice.outbound_decided", subjectType: "voice_outbound_request", subjectId: id, details: { decision } });
   return (await getOutbound(db, id))!;
@@ -159,11 +170,14 @@ export async function eligibility(db: Db, cfg: VoiceConfig, row: OutboundRow, at
 /** A dial with no call result after this long is treated as lost (Retell calls are capped at hours, results arrive in minutes). */
 export const STALE_DIALING_MS = 3 * 3_600_000;
 const MAX_TRANSIENT_FAILURES = 3;
+/** A number's lease outlives the dial it protects; stale-dial recovery (above) releases it, expiry is the backstop. */
+export const DIAL_LEASE_MS = STALE_DIALING_MS + 30 * 60_000;
 
 export interface OutboundDeps { db: Db; env: Pick<Env, "RETELL_API_KEY" | "RETELL_OUTBOUND" | "ENVIRONMENT">; fetch: typeof fetch; now?: () => Date; sleep?: (ms: number) => Promise<void> }
 
 async function failToHuman(db: Db, row: OutboundRow, status: "failed" | "no_answer" | "blocked", detail: string) {
   await db.prepare(`UPDATE voice_outbound_requests SET status = ?, status_detail = ?, next_attempt_at = NULL, updated_at = ? WHERE id = ?`).bind(status, detail.slice(0, 500), nowIso(), row.id).run();
+  await releasePhone(db, row.phone_e164, { type: "voice_outbound_request", id: row.id }, `${status}: ${detail}`);
   const text = `${row.is_test ? "[TEST] " : ""}Outbound ${row.purpose.replace(/_/g, " ")} to ${row.contact_name ?? "contact"} (${row.phone_e164}) needs a person: ${detail}`;
   if (row.lead_id) await addLeadTask(db, row.lead_id, text, 4);
   await notifyOwners(db, "voice_outbound", text, "voice_outbound_request", row.id);
@@ -185,6 +199,8 @@ export async function processOutboundQueue(d: OutboundDeps): Promise<{ detail: s
   const stale = (await d.db.prepare(`SELECT * FROM voice_outbound_requests WHERE status = 'dialing' AND updated_at < ?`)
     .bind(new Date(now().getTime() - STALE_DIALING_MS).toISOString()).all<OutboundRow>()).results;
   for (const row of stale) await failToHuman(d.db, row, "failed", "no call result was received from Retell; check the Retell call log before calling again");
+  // Crash recovery for number leases whose holder never released them.
+  const recovered = await recoverExpiredLeases(d.db, now());
   const due = (await d.db.prepare(`SELECT * FROM voice_outbound_requests WHERE status = 'approved' AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY created_at LIMIT 5`)
     .bind(now().toISOString()).all<OutboundRow>()).results;
   let dialled = 0;
@@ -198,10 +214,19 @@ export async function processOutboundQueue(d: OutboundDeps): Promise<{ detail: s
       continue;
     }
     const attempt = row.attempts + 1;
+    const ref = { type: "voice_outbound_request" as const, id: row.id };
+    // Number-level lease (outreach ledger): no other request, worker or run can dial this number while it is held.
+    const lease = await reservePhone(d.db, row.phone_e164, ref, row.purpose, DIAL_LEASE_MS, now());
+    if (!lease.ok) {
+      if (lease.reason === "do_not_call") await failToHuman(d.db, row, "blocked", lease.detail);
+      else await d.db.prepare(`UPDATE voice_outbound_requests SET next_attempt_at = ?, status_detail = ?, updated_at = ? WHERE id = ?`).bind(lease.retryAt ?? new Date(now().getTime() + 30 * 60_000).toISOString(), lease.detail, nowIso(), row.id).run();
+      notes.push(`${row.id}: ${lease.detail}`);
+      continue;
+    }
     // Claim before calling Retell so an overlapping run cannot dial the same request twice.
     const claim = await d.db.prepare(`UPDATE voice_outbound_requests SET status = 'dialing', attempts = ?, updated_at = ? WHERE id = ? AND status = 'approved' AND attempts = ?`)
       .bind(attempt, nowIso(), row.id, row.attempts).run();
-    if (claim.meta.changes !== 1) continue;
+    if (claim.meta.changes !== 1) { await releasePhone(d.db, row.phone_e164, ref, "claim_lost"); continue; }
     const res = await createRetellPhoneCall({
       apiKey: d.env.RETELL_API_KEY, fetch: d.fetch, sleep: d.sleep,
       body: {
@@ -225,6 +250,7 @@ export async function processOutboundQueue(d: OutboundDeps): Promise<{ detail: s
               environment = COALESCE(calls.environment, excluded.environment), is_test = MAX(calls.is_test, excluded.is_test)`)
           .bind(newId("call"), res.callId, cfg.outbound.from_number, row.phone_e164, at, row.is_test, d.env.ENVIRONMENT, row.id, row.lead_id, at),
       ]);
+      await markDialing(d.db, row.phone_e164, lease.reservationId, res.callId, now());
       await audit(d.db, { actorKind: "system", action: "voice.outbound_dialled", subjectType: "voice_outbound_request", subjectId: row.id, details: { attempt } });
       dialled++;
     } else if (res.retryable && row.transient_failures + 1 < MAX_TRANSIENT_FAILURES) {
@@ -232,12 +258,14 @@ export async function processOutboundQueue(d: OutboundDeps): Promise<{ detail: s
       // therefore the idempotency key stay the same. A retry with that key can never place a second call.
       await d.db.prepare(`UPDATE voice_outbound_requests SET status = 'approved', attempts = ?, transient_failures = transient_failures + 1, status_detail = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
         .bind(row.attempts, res.error, new Date(now().getTime() + 30 * 60_000).toISOString(), nowIso(), row.id).run();
+      await releasePhone(d.db, row.phone_e164, ref, `transient: ${res.error}`);
       notes.push(`${row.id}: ${res.error} (will retry with the same idempotency key)`);
     } else {
       await failToHuman(d.db, row, "failed", res.error);
       notes.push(`${row.id}: ${res.error}`);
     }
   }
+  if (recovered.length) notes.push(`${recovered.length} expired number lease(s) recovered`);
   return { detail: `${dialled} dialled of ${due.length} due${notes.length ? `; ${notes.join("; ")}` : ""}`.slice(0, 900), dialled };
 }
 
@@ -251,9 +279,12 @@ export async function applyOutboundResult(db: Db, requestId: string, disconnecti
   const row = await getOutbound(db, requestId);
   if (!row || row.status !== "dialing") return null;
   const reason = disconnectionReason ?? "";
+  const ref = { type: "voice_outbound_request" as const, id: row.id };
+  await recordPhoneOutcome(db, row.phone_e164, reason || "ended", ref, at);
   if (costMicroUsd !== null) await db.prepare(`UPDATE voice_outbound_requests SET cost_microusd = COALESCE(cost_microusd, 0) + ? WHERE id = ?`).bind(costMicroUsd, row.id).run();
   if (reason === "user_requested_dnc") {
     await db.prepare(`UPDATE voice_outbound_requests SET status = 'completed', status_detail = 'Recipient asked not to be called again', updated_at = ? WHERE id = ?`).bind(nowIso(), row.id).run();
+    await releasePhone(db, row.phone_e164, ref, "user_requested_dnc", { now: at });
     await addDnc(db, row.phone_e164, "provider_dnc", `Retell user_requested_dnc on request ${row.id}`);
     return "completed";
   }
@@ -262,6 +293,8 @@ export async function applyOutboundResult(db: Db, requestId: string, disconnecti
       // Spaced well apart; eligibility re-checks the window and caps when it comes due.
       await db.prepare(`UPDATE voice_outbound_requests SET status = 'approved', status_detail = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?`)
         .bind(`No answer (${reason}); one more attempt later`, new Date(at.getTime() + 4 * 3_600_000).toISOString(), nowIso(), row.id).run();
+      // Retry policy is enforced at the number level too: nobody may reserve it again before the retry time.
+      await releasePhone(db, row.phone_e164, ref, `no_answer: ${reason}`, { retryAfter: new Date(at.getTime() + 4 * 3_600_000).toISOString(), now: at });
       return "approved";
     }
     await failToHuman(db, row, "no_answer", `no answer after ${row.attempts} attempt(s) (${reason})`);
@@ -272,5 +305,6 @@ export async function applyOutboundResult(db: Db, requestId: string, disconnecti
     return "failed";
   }
   await db.prepare(`UPDATE voice_outbound_requests SET status = 'completed', status_detail = ?, updated_at = ? WHERE id = ?`).bind(reason ? `Ended: ${reason}` : null, nowIso(), row.id).run();
+  await releasePhone(db, row.phone_e164, ref, reason ? `completed: ${reason}` : "completed", { now: at });
   return "completed";
 }

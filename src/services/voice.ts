@@ -15,9 +15,10 @@
 //    no customer information returned).
 //  - No function exists for refunds, agreements, pricing changes, project status or delivery dates.
 //  - Transcripts, summaries and recordings are stored only when recording_consent is true.
+import { intake } from "./contact-identity.ts";
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
-import { hmacSha256Hex, timingSafeEqualHex } from "../lib/crypto.ts";
+import { hmacSha256Hex, timingSafeEqualHex, sha256Hex } from "../lib/crypto.ts";
 import { parse, v, ValidationError } from "../lib/validate.ts";
 import { PACKAGES, MAINTENANCE_PLANS, APPROVED_SERVICES } from "../domain/catalog.ts";
 import { audit } from "./security.ts";
@@ -178,21 +179,32 @@ export async function recordCallEvent(db: Db, callId: string, key: string, kind:
   return true;
 }
 
-/** Creates (or reuses) the lead attached to this call so tasks and callbacks have a CRM home. */
+/**
+ * Creates (or reuses) the lead attached to this call so tasks and callbacks have a CRM home. Goes through the CRM
+ * intake engine: a caller already in the CRM (same phone or email) continues their open lead instead of getting a
+ * duplicate one (src/services/contact-identity.ts).
+ */
 async function createCallLead(db: Db, call: CallRow, c: { name: string; email?: string | null; phone?: string | null; company?: string | null; interest: string; message: string }): Promise<string> {
-  const at = nowIso();
-  const contactId = newId("ct"), leadId = newId("ld");
-  const companyId = c.company ? newId("co") : null;
   const label = call.is_test ? "[TEST CALL] " : "";
-  await db.batch([
-    ...(companyId ? [db.prepare(`INSERT INTO companies (id, name, created_at) VALUES (?,?,?)`).bind(companyId, c.company, at)] : []),
-    db.prepare(`INSERT INTO contacts (id, company_id, name, email, phone, created_at) VALUES (?,?,?,?,?,?)`).bind(contactId, companyId, c.name, c.email ? c.email.trim().toLowerCase() : null, c.phone ?? null, at), // CREST-GAP-093
-    db.prepare(`INSERT INTO leads (id, contact_id, source, stage, interest, message, created_at, updated_at) VALUES (?,?,'ai_receptionist','new',?,?,?,?)`).bind(leadId, contactId, c.interest, label + c.message, at, at),
-    db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'call',?,?)`).bind(newId("act"), leadId, `${label}Lead captured by AI receptionist (call ${call.provider_call_id})`, at),
-    db.prepare(`UPDATE calls SET lead_id = COALESCE(lead_id, ?) WHERE id = ?`).bind(leadId, call.id),
-  ]);
-  await audit(db, { actorKind: "ai", action: "lead.created", subjectType: "lead", subjectId: leadId, details: { source: "ai_receptionist", call: call.id, test: !!call.is_test } });
-  return leadId;
+  const res = await intake(db, { contactName: c.name, businessName: c.company ?? null, emails: c.email ? [{ value: c.email }] : [], phones: c.phone ? [{ value: c.phone }] : [] }, {
+    channel: "ai_receptionist", idempotencyKey: `receptionist:${call.id}:${(await sha256Hex(c.phone ?? c.email ?? c.name)).slice(0, 16)}`, sourceRef: call.id,
+    lead: { source: "ai_receptionist", interest: c.interest, message: label + c.message, isTest: !!call.is_test, activityKind: "call", activityBody: `${label}Lead captured by AI receptionist (call ${call.provider_call_id})` },
+    extraStatements: (leadId) => [db.prepare(`UPDATE calls SET lead_id = COALESCE(lead_id, ?) WHERE id = ?`).bind(leadId, call.id)],
+  });
+  if (!res.leadId) {
+    // Rejected (no usable phone/email) or held for review: keep the old behaviour of always giving the call a CRM home.
+    const at = nowIso(), contactId = newId("ct"), leadId = newId("ld");
+    await db.batch([
+      db.prepare(`INSERT INTO contacts (id, name, email, phone, created_at) VALUES (?,?,?,?,?)`).bind(contactId, c.name, c.email ? c.email.trim().toLowerCase() : null, c.phone ?? null, at),
+      db.prepare(`INSERT INTO leads (id, contact_id, source, stage, interest, message, intake_decision_id, created_at, updated_at) VALUES (?,?,'ai_receptionist','new',?,?,?,?,?)`).bind(leadId, contactId, c.interest, label + c.message, res.decisionId, at, at),
+      db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'call',?,?)`).bind(newId("act"), leadId, `${label}Lead captured by AI receptionist (call ${call.provider_call_id}); ${res.outcome === "POSSIBLE_DUPLICATE_REVIEW" ? "possible duplicate, see the CRM review queue" : "no usable phone or email"}`, at),
+      db.prepare(`UPDATE calls SET lead_id = COALESCE(lead_id, ?) WHERE id = ?`).bind(leadId, call.id),
+    ]);
+    await audit(db, { actorKind: "ai", action: "lead.created", subjectType: "lead", subjectId: leadId, details: { source: "ai_receptionist", call: call.id, test: !!call.is_test, intake: res.outcome } });
+    return leadId;
+  }
+  if (res.leadCreated) await audit(db, { actorKind: "ai", action: "lead.created", subjectType: "lead", subjectId: res.leadId, details: { source: "ai_receptionist", call: call.id, test: !!call.is_test, intake: res.outcome } });
+  return res.leadId;
 }
 
 const addTask = addLeadTask;
