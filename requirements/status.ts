@@ -30,11 +30,12 @@ import { OWNER_MODULES } from "./status/owner-modules.ts";
 import { BACKEND } from "./status/backend.ts";
 import { E2E } from "./status/e2e.ts";
 import { AI_BUILDS } from "./status/ai-builds.ts";
+import { SALES_OPT } from "./status/sales-opt.ts";
 import { REAUDIT_MISSING } from "./status/reaudit.ts";
 import { CLOSURES, STARTED } from "./status/closeout.ts";
 
 export const IMPLEMENTATION: Record<string, ImplementationRecord> = {
-  ...FOUNDATION, ...CORE, ...PUBLIC_SITE, ...PROJECTS, ...SALES_FINANCE, ...SUPPORT_OWNER, ...PLATFORM, ...INTEGRATION, ...LEGAL_COMMERCE, ...INTEGRATIONS, ...OPS, ...UX, ...SECURITY_MATRIX, ...FINANCE_DOCS, ...OWNER_MODULES, ...E2E, ...BACKEND, ...AI_BUILDS,
+  ...FOUNDATION, ...CORE, ...PUBLIC_SITE, ...PROJECTS, ...SALES_FINANCE, ...SUPPORT_OWNER, ...PLATFORM, ...INTEGRATION, ...LEGAL_COMMERCE, ...INTEGRATIONS, ...OPS, ...UX, ...SECURITY_MATRIX, ...FINANCE_DOCS, ...OWNER_MODULES, ...E2E, ...BACKEND, ...AI_BUILDS, ...SALES_OPT,
 };
 for (const [id, missing] of Object.entries(REAUDIT_MISSING)) if (IMPLEMENTATION[id]?.status === "in_progress") IMPLEMENTATION[id] = { ...IMPLEMENTATION[id], missing };
 for (const [id, rec] of Object.entries(STARTED)) if (IMPLEMENTATION[id]?.status !== "implemented") IMPLEMENTATION[id] = rec;

@@ -29,7 +29,7 @@ export type ResourceKind =
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
-  | "member" | "notification" | "staffNotification" | "buildJob" | "runnerDiagnostic";
+  | "member" | "notification" | "staffNotification" | "buildJob" | "soVersion" | "soStage" | "soExperiment" | "runnerDiagnostic";
 
 export type Access =
   | { kind: "public" }
@@ -472,7 +472,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/ai/:id": staff(rolesWith("ai.manage"), P("aiJob")),
   // AI Builds owner dashboard (src/routes/builds.ts)
   "GET /staff/builds": staff(rolesWith("builds.read")),
-  // Node 1 dispatch-to-GPU diagnostic (migration 0047)
+  // Node 1 dispatch-to-GPU diagnostic (migration 0048)
   "GET /staff/builds/diagnostics": staff(rolesWith("builds.configure")),
   "POST /staff/builds/diagnostics": staff(rolesWith("builds.configure"), undefined, act("builds.diagnostic_created")),
   "GET /staff/builds/diagnostics/:id": staff(rolesWith("builds.configure"), P("runnerDiagnostic")),
@@ -504,6 +504,20 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/voice/outbound": staff(rolesWith("voice.manage"), undefined, act("voice.outbound_requested")),
   "POST /staff/voice/outbound/:id/decide": staff(rolesWith("voice.manage"), P("outboundRequest"), act("voice.outbound_decided")),
   "POST /staff/voice/dnc": staff(rolesWith("voice.manage"), undefined, act("voice.dnc_added")),
+  // ── AI Sales Optimization (src/routes/sales-optimization.ts): view salesopt.read, decisions salesopt.decide (both Owner-only) ──
+  "GET /staff/sales-optimization": staff(rolesWith("salesopt.read")),
+  "GET /staff/sales-optimization/versions/:id": staff(rolesWith("salesopt.read"), P("soVersion")),
+  "POST /staff/sales-optimization/control": staff(rolesWith("salesopt.decide"), undefined, act("salesopt.control_changed")),
+  "POST /staff/sales-optimization/targets": staff(rolesWith("salesopt.decide"), undefined, act("salesopt.target_set")),
+  "POST /staff/sales-optimization/targets/:stage/verify": staff(rolesWith("salesopt.decide"), { stage: "soStage" }, act("salesopt.target_verified")),
+  "POST /staff/sales-optimization/versions": staff(rolesWith("salesopt.read"), undefined, act("salesopt.version_created")),
+  "POST /staff/sales-optimization/versions/:id/evaluate": staff(rolesWith("salesopt.read"), P("soVersion"), act("salesopt.eval_started")),
+  "POST /staff/sales-optimization/versions/:id/decide": staff(rolesWith("salesopt.decide"), P("soVersion"), act("salesopt.version_rejected")),
+  "POST /staff/sales-optimization/deploy": staff(rolesWith("salesopt.decide"), undefined, blocked("needs an evaluated version and a verified Retell sales agent; refused with an error otherwise")),
+  "POST /staff/sales-optimization/rollback": staff(rolesWith("salesopt.decide"), undefined, blocked("needs an earlier verified deployment on the stage; refused with an error otherwise")),
+  "POST /staff/sales-optimization/experiments": staff(rolesWith("salesopt.decide"), undefined, blocked("needs a version verified on the production sales agent; refused with an error otherwise")),
+  "POST /staff/sales-optimization/experiments/:id/decide": staff(rolesWith("salesopt.decide"), P("soExperiment"), act("salesopt.experiment_start")),
+  "POST /staff/sales-optimization/run": staff(rolesWith("salesopt.decide"), undefined, act("salesopt.cycle_run")),
   "POST /staff/voice/caller-erasure": staff(rolesWith("voice.manage"), undefined, act("voice.caller_data_erased")),
 };
 

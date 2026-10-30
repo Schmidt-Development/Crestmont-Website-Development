@@ -76,7 +76,7 @@ export function register(r: Router): void {
   // Self-hosted AI drafts (ai_jobs with provider local-runner), same signed channel.
   r.post(`${RUNNER}/ai/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await AIR.claimAiJob(ctx.db, typeof b.runnerId === "string" ? b.runnerId : "", ctx.now())); }));
   r.post(`${RUNNER}/ai/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await AIR.completeAiJob(ctx.db, await runnerBody(ctx)))));
-  // Node 1 diagnostic: runner-side checkpoints D07–D11 (lease-token authenticated, migration 0047).
+  // Node 1 diagnostic: runner-side checkpoints D07–D11 (lease-token authenticated, migration 0048).
   r.post(`${RUNNER}/ai/checkpoint`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await DX.recordRunnerCheckpoint(ctx.db, await runnerBody(ctx)))));
   r.post(`${RUNNER}/requirements`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.reportRequirements(ctx.db, await runnerBody(ctx)))));
   r.post(`${RUNNER}/files`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.runnerFile(ctx.db, ctx.storage, await runnerBody(ctx)))));

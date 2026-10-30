@@ -1097,6 +1097,8 @@ ${pagination(ctx, page, jobs.length > limit)}`;
     const j = await ctx.db.prepare(`SELECT j.*, u.display_name AS approver FROM ai_jobs j LEFT JOIN users u ON u.id = j.approved_by WHERE j.id = ?`).bind(p.id)
       .first<{ id: string; workflow: string; provider: string; model: string; status: string; input_ref: string; output_ref: string | null; cost_microusd: number | null; error: string | null; retries: number; retry_of: string | null; created_at: string; updated_at: string; approver: string | null }>();
     if (!j) throw new HttpError(404, "AI job not found");
+    // Sales-optimization jobs can hold consented transcript text: their output is shown only on the Owner-only dashboard.
+    if (j.workflow.startsWith("salesopt_")) j.output_ref = null;
     const body = html`${pageHead(`AI job · ${label(j.workflow)}`, linkButton("All jobs", "/staff/ai", "ghost", "sm"), "AI operations")}
 ${dl([["Job id", j.id], ["Status", badge(j.status)], ["Provider / model", `${j.provider} / ${j.model}`], ["Input reference", j.input_ref], ["Cost", microUsd(j.cost_microusd)], ["Retries", j.retries], ["Retry of", j.retry_of], ["Error", j.error], ["Approved / decided by", j.approver], ["Created", formatDateTime(j.created_at)], ["Updated", formatDateTime(j.updated_at)]])}
 <section class="section--tight"><h2>Output (draft)</h2>${j.output_ref ? (j.status === "awaiting_approval"
