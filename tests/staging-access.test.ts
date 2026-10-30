@@ -214,7 +214,7 @@ test("[INFRA-002] [SEC-004] staging access: adopts secrets the Worker already en
 });
 
 // CodeQL js/double-escaping: the verifier's HTML decoder must decode each character reference exactly once.
-import { decode, decodeEntities } from "../scripts/verify-staging-access.ts";
+import { decode, decodeEntities, stripTags } from "../scripts/verify-staging-access.ts";
 
 test("[INFRA-002] [SEC-001] staging verifier decodes HTML entities in a single pass: nested references stay literal", () => {
   assert.equal(decodeEntities("&amp;#39;"), "&#39;");
@@ -239,4 +239,13 @@ test("[INFRA-002] [SEC-001] staging verifier leaves malformed references alone a
   assert.equal(decodeEntities("&#0;&#xD800;&#1114112;"), "���");
   assert.equal(decodeEntities("&#99999999999;"), "&#99999999999;");
   assert.doesNotThrow(() => decode("&".repeat(5000) + "<".repeat(5000)));
+});
+
+test("[INFRA-002] [SEC-001] staging verifier strips nested and split tags to a fixed point (no tag can reassemble)", () => {
+  assert.equal(stripTags("<<b>script>alert(1)<</b>/script>"), "alert(1)");
+  assert.equal(stripTags("<scr<i>ipt>x"), "x");
+  assert.equal(stripTags("<<<a>>>b"), "b", "repeated passes peel every nested layer");
+  assert.doesNotMatch(stripTags("<<<<<<x>>>>>>"), /<[^<>]*>/);
+  assert.equal(decode("<a>&lt;script&gt;</a>"), "<script>", "an escaped label is decoded once into plain text (compared, never rendered)");
+  assert.equal(stripTags("Refunds & disputes > 30 days"), "Refunds & disputes > 30 days", "a lone '>' or '&' in text is kept");
 });

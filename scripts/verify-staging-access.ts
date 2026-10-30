@@ -36,8 +36,14 @@ export function decodeEntities(s: string): string {
     return cp > 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff) ? String.fromCodePoint(cp) : "\uFFFD";
   });
 }
-/** Visible text of an HTML fragment: tags removed first, then entities decoded once, whitespace collapsed. */
-export const decode = (s: string) => decodeEntities(s.replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim();
+/** Removes tags until none are left, so split or nested markup ("<<b>script>") cannot reassemble into a tag. */
+export function stripTags(s: string): string {
+  let prev: string;
+  do { prev = s; s = s.replace(/<[^<>]*>/g, ""); } while (s !== prev);
+  return s;
+}
+/** Visible text of an HTML fragment: tags removed first (to a fixed point), then entities decoded once, whitespace collapsed. */
+export const decode = (s: string) => decodeEntities(stripTags(s)).replace(/\s+/g, " ").trim();
 
 export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log: (s: string) => void = () => {}): Promise<{ modules: number; pages: number }> {
   const base = v.base.replace(/\/$/, "");
