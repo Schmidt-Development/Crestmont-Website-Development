@@ -9,13 +9,13 @@
 //
 // What happens, in ONE atomic batch (safe to retry: a second run finds nothing left and changes nothing):
 //   1. Subject contacts are anonymised ('Deleted contact', no email/phone). They are the contacts named by the caller
-//      plus every NON-customer contact identified only by the person's identifiers. The 0047 trigger then removes their
+//      plus every NON-customer contact identified only by the person's identifiers. The 0048 trigger then removes their
 //      identity links, field history and review items. Their leads keep stage/history but lose the person's message.
 //   2. EXCLUSIVE identifiers (no remaining holder outside the subject) are deleted from contact_identities (with their
 //      email campaign enrollments), and every held research candidate, review value and field-history value that
 //      normalizes to them is deleted or scrubbed, wherever it is attached.
 //   3. SHARED identifiers (still used by another business, e.g. a receptionist line) stay with that business.
-//   4. Optionally a salted-hash tombstone per exclusive identifier blocks automated re-import (migration 0048).
+//   4. Optionally a salted-hash tombstone per exclusive identifier blocks automated re-import (migration 0049).
 //   5. Suppression is preserved: voice_dnc and email_suppressions rows are kept (honouring an opt-out requires
 //      remembering it); the phone outreach ledger keeps the number for per-number call limits (as calls already do).
 // The audit entry holds counts only, never the identifiers.
@@ -167,7 +167,7 @@ async function eraseOnce(db: Db, actorUserId: string | null, req: ErasureRequest
     stmts.push(db.prepare(`UPDATE leads SET message = 'Details erased at the person''s request' WHERE contact_id IN (${ph(chunk.length)}) AND message IS NOT NULL`).bind(...chunk));
     stmts.push(db.prepare(`UPDATE crm_activities SET body = 'Details erased at the person''s request' WHERE lead_id IN (SELECT id FROM leads WHERE contact_id IN (${ph(chunk.length)}))
         AND kind IN ('system','call') AND (body LIKE 'New % from this contact%' OR body LIKE '%Lead captured by AI receptionist%' OR body LIKE 'Matching % data received%')`).bind(...chunk));
-    // The erased trigger (migration 0047) removes their identity links, field history and review items.
+    // The erased trigger (migration 0048) removes their identity links, field history and review items.
     stmts.push(db.prepare(`UPDATE contacts SET name = 'Deleted contact', email = NULL, phone = NULL WHERE id IN (${ph(chunk.length)})`).bind(...chunk));
   }
 

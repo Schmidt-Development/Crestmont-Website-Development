@@ -1,5 +1,5 @@
 -- CRM identity privacy erasure (PR #50 follow-up). ADDITIVE ONLY: one new table, no existing row touched.
--- Rollback: docs/crm-identity/rollback-0048.sql (drops this table; nothing else depends on it at the schema level).
+-- Rollback: docs/crm-identity/rollback-0049.sql (drops this table; nothing else depends on it at the schema level).
 --
 -- When a person's CRM data is erased (account deletion, receptionist caller erasure, or the Owner's CRM identity
 -- erasure), the raw phone numbers and email addresses are removed everywhere (src/services/identity-erasure.ts).

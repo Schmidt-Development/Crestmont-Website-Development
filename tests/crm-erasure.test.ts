@@ -1,4 +1,4 @@
-// CRM identity privacy erasure (src/services/identity-erasure.ts, migration 0048) through all three entry points:
+// CRM identity privacy erasure (src/services/identity-erasure.ts, migration 0049) through all three entry points:
 // the Owner's CRM erasure, receptionist caller erasure, and account deletion. All records are TEST DATA.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -241,7 +241,7 @@ test("[AUTH-007] assigned-only sales reps cannot read the duplicate review queue
   assert.match(await (await oc.get("/staff/crm/duplicates?view=review")).text(), /Quinn Private/);
 });
 
-test("[CRM-002] migrations 0047 + 0048 on a representative pre-0047 database (duplicates, then unlinked research candidates); erasure; both rollbacks keep every original row and referential integrity", async () => {
+test("[CRM-002] migrations 0048 + 0049 on a representative pre-0048 database (duplicates, then unlinked research candidates); erasure; both rollbacks keep every original row and referential integrity", async () => {
   const { DatabaseSync } = await import("node:sqlite");
   const { readdirSync, readFileSync } = await import("node:fs");
   const { join } = await import("node:path");
@@ -250,15 +250,15 @@ test("[CRM-002] migrations 0047 + 0048 on a representative pre-0047 database (du
   raw.exec("PRAGMA foreign_keys = ON");
   raw.exec(`CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TEXT NOT NULL)`);
   const apply = (f: string) => { raw.exec("BEGIN"); raw.exec(readFileSync(join(MIGRATIONS_DIR, f), "utf8")); raw.prepare(`INSERT INTO d1_migrations (name, applied_at) VALUES (?, ?)`).run(f, nowIso()); raw.exec("COMMIT"); };
-  for (const f of readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql") && f < "0047").sort()) apply(f);
+  for (const f of readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql") && f < "0048").sort()) apply(f);
   const at = nowIso();
   raw.exec(`INSERT INTO companies (id, name, website, created_at) VALUES ('co1','Harbor Coffee','https://harbor.example','${at}'), ('co2','Harbor Coffee LLC','https://www.harbor.example','${at}'), ('co3','Lakeside Dental','https://lakeside.example','${at}');
     INSERT INTO contacts (id, company_id, name, email, phone, created_at) VALUES ('c1','co1','Morgan Reyes','morgan@harbor.example','(313) 555-0142','${at}'), ('c2','co2','Morgan Reyes','Morgan@Harbor.example','313-555-0142','${at}'), ('c3','co3','Front Desk',NULL,'+1 734 555 0101','${at}');
     INSERT INTO leads (id, contact_id, source, stage, created_at, updated_at) VALUES ('l1','c1','web_form','new','${at}','${at}'), ('l2','c2','manual','qualified','${at}','${at}'), ('l3','c3','web_form','new','${at}','${at}');`);
   const original = () => JSON.stringify([["companies", "name"], ["contacts", "name"], ["leads", "stage"]].map(([t, c]) => raw.prepare(`SELECT id, ${c} AS v FROM ${t} ORDER BY id`).all()));
   const before = original();
-  apply("0047_contact_identity.sql");
-  apply("0048_crm_identity_erasure.sql");
+  apply("0048_contact_identity.sql");
+  apply("0049_crm_identity_erasure.sql");
   assert.equal(original(), before);
   // Unlinked research candidates and an erasure, through the real services on this database.
   const db: SqliteDb = { raw, prepare: (sql) => { const st = raw.prepare(sql); let v: unknown[] = []; const o = { bind: (...x: unknown[]) => { v = x.map((y) => y === undefined ? null : y); return o; }, all: async () => ({ results: st.all(...(v as never[])) }), first: async () => (st.get(...(v as never[])) ?? null), run: async () => { const r = st.run(...(v as never[])); return { meta: { changes: Number(r.changes) } }; }, runSync: () => { const r = st.run(...(v as never[])); return { meta: { changes: Number(r.changes) } }; } }; return o as never; },
@@ -270,13 +270,13 @@ test("[CRM-002] migrations 0047 + 0048 on a representative pre-0047 database (du
   assert.deepEqual(raw.prepare("PRAGMA foreign_key_check").all(), []);
   assert.equal((raw.prepare("PRAGMA integrity_check").get() as { integrity_check: string }).integrity_check, "ok");
   // Rollbacks in reverse order.
-  raw.exec(readFileSync(join(import.meta.dirname, "../docs/crm-identity/rollback-0048.sql"), "utf8"));
+  raw.exec(readFileSync(join(import.meta.dirname, "../docs/crm-identity/rollback-0049.sql"), "utf8"));
   assert.equal(raw.prepare(`SELECT name FROM sqlite_master WHERE name = 'crm_erasure_tombstones'`).get(), undefined);
-  raw.exec(readFileSync(join(import.meta.dirname, "../docs/crm-identity/rollback-0047.sql"), "utf8"));
+  raw.exec(readFileSync(join(import.meta.dirname, "../docs/crm-identity/rollback-0048.sql"), "utf8"));
   const after = JSON.parse(original()) as { id: string }[][];
   for (const [i, t] of (JSON.parse(before) as { id: string }[][]).entries()) for (const row of t) assert.ok(after[i].some((r) => r.id === row.id), `original row ${row.id} kept`);
   assert.deepEqual(raw.prepare("PRAGMA foreign_key_check").all(), []);
-  assert.equal((raw.prepare(`SELECT COUNT(*) n FROM d1_migrations WHERE name >= '0047'`).get() as { n: number }).n, 0);
-  apply("0047_contact_identity.sql"); apply("0048_crm_identity_erasure.sql");
+  assert.equal((raw.prepare(`SELECT COUNT(*) n FROM d1_migrations WHERE name >= '0048'`).get() as { n: number }).n, 0);
+  apply("0048_contact_identity.sql"); apply("0049_crm_identity_erasure.sql");
   assert.ok((raw.prepare(`SELECT COUNT(*) n FROM contact_identities`).get() as { n: number }).n >= 2, "both can be re-applied");
 });

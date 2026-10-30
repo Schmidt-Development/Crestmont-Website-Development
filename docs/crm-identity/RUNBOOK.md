@@ -1,6 +1,6 @@
 # CRM duplicate protection — operational runbook
 
-Covers migrations `0047_contact_identity.sql` and `0048_crm_identity_erasure.sql`, `src/services/contact-identity.ts` (intake engine), `src/services/identity-erasure.ts` (privacy erasure),
+Covers migrations `0048_contact_identity.sql` and `0049_crm_identity_erasure.sql`, `src/services/contact-identity.ts` (intake engine), `src/services/identity-erasure.ts` (privacy erasure),
 `src/services/outreach-ledger.ts` (dial and email dedupe), `src/services/crm-import.ts` (import API),
 `scripts/crm-duplicate-audit.ts` (historical audit). Background: [AUDIT.md](AUDIT.md). API: [IMPORT-API.md](IMPORT-API.md).
 
@@ -31,7 +31,7 @@ secret then get `401`; retry with the same idempotency key is safe).
 ## 3. Release sequence
 
 1. **Founder approves the PR.** Merging to `main` deploys staging automatically: typecheck, tests, D1 Time Travel
-   bookmark, `wrangler d1 migrations apply` (0047 runs here), deploy, smoke and browser checks.
+   bookmark, `wrangler d1 migrations apply` (0048 runs here), deploy, smoke and browser checks.
 2. **Verify staging** (checklist below). Record results on the PR.
 3. **Production** only through the release workflow (Founder approval; export + migrations + deploy). Set
    `CRM_IMPORT_SECRET` in production only when the research engine is ready.
@@ -138,17 +138,17 @@ by someone holding the database. They contain nothing else and are needed only t
 
 Code rollback does not undo migrations (DEPLOYMENT.md). In order of preference:
 
-1. **Code only** (most issues): redeploy the previous Worker version. The 0047 tables stay; the old code ignores them;
+1. **Code only** (most issues): redeploy the previous Worker version. The 0048 tables stay; the old code ignores them;
    triggers keep registering identities harmlessly.
 2. **Database point-in-time** (data damage): D1 Time Travel restore to the bookmark the deploy workflow took before
-   applying 0047 (`npx wrangler@4.149.0 d1 time-travel restore crestmont-<env> --env <env> --bookmark <id>`). Loses every
+   applying 0048 (`npx wrangler@4.149.0 d1 time-travel restore crestmont-<env> --env <env> --bookmark <id>`). Loses every
    write after the bookmark.
-3. **Schema rollback** (remove 0048 / 0047 but keep later data): deploy the previous code first, export, then apply
-   [`rollback-0048.sql`](rollback-0048.sql) (drops only the tombstone table: erased identifiers become importable
-   again; erasures are not undone) and, if needed, [`rollback-0047.sql`](rollback-0047.sql). It drops only what 0047 added (identity, ledger, review, decision
-   tables, triggers, views, the added columns) and removes the `d1_migrations` row so 0047 can be re-applied later.
+3. **Schema rollback** (remove 0049 / 0048 but keep later data): deploy the previous code first, export, then apply
+   [`rollback-0049.sql`](rollback-0049.sql) (drops only the tombstone table: erased identifiers become importable
+   again; erasures are not undone) and, if needed, [`rollback-0048.sql`](rollback-0048.sql). It drops only what 0048 added (identity, ledger, review, decision
+   tables, triggers, views, the added columns) and removes the `d1_migrations` row so 0048 can be re-applied later.
    Contacts, companies, leads and calls are untouched (tests: case 20 in `tests/crm-identity.test.ts`, and the
-   0047 + 0048 migration/rollback test in `tests/crm-erasure.test.ts`).
+   0048 + 0049 migration/rollback test in `tests/crm-erasure.test.ts`).
 
 ## 7. Known limitations (honest list)
 

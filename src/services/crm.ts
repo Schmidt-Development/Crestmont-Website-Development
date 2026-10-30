@@ -165,7 +165,7 @@ export async function updateContact(db: Db, actor: Actor, lead: LeadRow, input: 
   const at = nowIso();
   const newEmail = input.email ? input.email.toLowerCase() : null, newPhone = input.phone || null;
   // Field-level audit trail (and the marker that these values were entered by a person, so automated data never
-  // overwrites them). Identity links follow automatically (migrations/0047 triggers).
+  // overwrites them). Identity links follow automatically (migrations/0048 triggers).
   const changes: [string, string | null, string | null][] = ([["name", lead.contact_name, input.name], ["email", lead.contact_email, newEmail], ["phone", lead.contact_phone, newPhone],
     ["company_name", lead.company_name, input.company || lead.company_name], ["website", lead.company_website, input.website || null]] as [string, string | null, string | null][]).filter(([, a, b]) => (a ?? "") !== (b ?? ""));
   // Editing an identifier into one another record already uses is allowed (shared lines exist) but goes to review.

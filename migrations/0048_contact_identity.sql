@@ -1,6 +1,6 @@
 -- CRM duplicate protection and canonical contact identity (CRM-002, CRM-005, CRM-007, VOICE-005, EMAIL-003).
 -- ADDITIVE ONLY: new tables, views, triggers, indexes and nullable columns. No existing row is deleted or merged.
--- Rollback procedure: docs/crm-identity/RUNBOOK.md §6 (docs/crm-identity/rollback-0047.sql).
+-- Rollback procedure: docs/crm-identity/RUNBOOK.md §6 (docs/crm-identity/rollback-0048.sql).
 --
 -- Model
 --   contact_identities        one row per canonical phone number (E.164) or email address (trim + lowercase only:

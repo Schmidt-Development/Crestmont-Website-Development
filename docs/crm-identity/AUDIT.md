@@ -35,7 +35,7 @@ path into contacts/leads, uniqueness, imports, outreach queue, suppression, depl
 
 ## 3. How each path is covered now
 
-- **All contacts writes (1–9 and any future path):** SQLite triggers on `contacts` (migration 0047) register canonical
+- **All contacts writes (1–9 and any future path):** SQLite triggers on `contacts` (migration 0048) register canonical
   identities and links on every insert/update and scrub them on erasure. Nothing can write a contact without its
   identifiers being registered.
 - **Decisions (1, 2, 3, research/CRM API):** go through `contact-identity.ts intake()` — create / link / update / merge /
@@ -50,7 +50,7 @@ path into contacts/leads, uniqueness, imports, outreach queue, suppression, depl
 This session has no access to production or staging D1 (no Cloudflare credentials), so the historical audit was not
 run against real data. `scripts/crm-duplicate-audit.ts` is the read-only tool for that (RUNBOOK §4). It was run
 against a database built from migrations 0001–0046 plus the staging seed and injected test duplicates: 8 contacts,
-2 groups (1 safe exact duplicate, 1 shared contact identity), migration 0047 applied in 16 ms with every existing row
+2 groups (1 safe exact duplicate, 1 shared contact identity), migration 0048 applied in 16 ms with every existing row
 unchanged, foreign-key and integrity checks clean.
 
 ## 5. Deployment facts that shape the rollout
@@ -78,7 +78,7 @@ Locations where a person's identifiers could remain, and how each is now handled
 | `crm_import_batches` | holds no record payload (hash and counts only) |
 | `leads.message` / intake-written activity text of erased contacts | replaced with "Details erased at the person's request" |
 | `phone_outreach_ledger` / events, `voice_dnc`, `email_suppressions` | kept (call limits and opt-outs); ledger loses its identity reference |
-| re-import | optional salted-hash tombstone (`crm_erasure_tombstones`, migration 0048) |
+| re-import | optional salted-hash tombstone (`crm_erasure_tombstones`, migration 0049) |
 
 Also fixed in the same pass: the duplicate review queue was readable by assigned-only sales reps (it shows contact
 details of any record); it now requires `lead.read_all`.

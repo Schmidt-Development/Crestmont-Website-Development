@@ -2,7 +2,7 @@
 //
 // Every channel that brings a person or business into the CRM (manual entry, public forms, the JSON lead API, the AI
 // receptionist, the research-agent import API) calls intake(). It normalizes the identifiers, looks up canonical
-// identities (migrations/0047), checks customers and suppression, decides one of eight outcomes, writes everything for
+// identities (migrations/0048), checks customers and suppression, decides one of eight outcomes, writes everything for
 // that decision in ONE D1 batch (atomic), and records the decision with its evidence and idempotency key.
 //
 // Rules that are deliberately conservative:
@@ -30,7 +30,7 @@ const AUTOMATED: ReadonlySet<IntakeChannel> = new Set(["research_agent", "crm_ap
 const OPEN_STAGES = `('new','qualified','quote_required','quote_sent','negotiation','accepted','awaiting_payment')`;
 export const RACE_GUARD = "crm_identity_race";
 
-/** Salted hash of a normalized identifier, used for erasure tombstones (migration 0048, identity-erasure.ts). */
+/** Salted hash of a normalized identifier, used for erasure tombstones (migration 0049, identity-erasure.ts). */
 export async function tombstoneHash(kind: "phone" | "email", value: string): Promise<string> {
   return sha256Hex(`crestmont-crm-erasure:v1|${kind}:${value}`);
 }

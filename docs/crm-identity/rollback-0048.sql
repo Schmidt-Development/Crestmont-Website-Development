@@ -1,7 +1,37 @@
--- Rollback for migrations/0048_crm_identity_erasure.sql. NOT in migrations/ on purpose: never applied automatically.
--- Runbook: docs/crm-identity/RUNBOOK.md §6. Deploy the code from before 0048 first (it reads this table).
--- Effect: erasure tombstones are lost, so identifiers erased with "block re-import" become importable again by the
--- research engine. The erasures themselves are NOT undone (erased data stays erased). Apply with:
+-- Rollback for migrations/0048_contact_identity.sql. If 0049 is applied, run rollback-0049.sql FIRST.
+-- NOT in migrations/ on purpose: it is never applied automatically.
+-- Runbook: docs/crm-identity/RUNBOOK.md §6. Take a D1 Time Travel bookmark and export first:
+--   npx wrangler@4.149.0 d1 time-travel info crestmont-<env> --env <env>
+--   npx wrangler@4.149.0 d1 export crestmont-<env> --remote --env <env> --output pre-rollback-0048.sql
+-- What it removes: identity, ledger, review and decision tables (their history is lost: export first), the triggers and
+-- views added by 0048, and the nullable columns it added. It does NOT touch contacts, companies, leads, calls or any
+-- other pre-existing row. Before rolling back the database, deploy the code from before this release (the code
+-- reads these tables). Apply with:
 --   npx wrangler@4.149.0 d1 execute crestmont-<env> --remote --env <env> --file docs/crm-identity/rollback-0048.sql
-DROP TABLE IF EXISTS crm_erasure_tombstones;
-DELETE FROM d1_migrations WHERE name = '0048_crm_identity_erasure.sql';
+DROP TRIGGER IF EXISTS contacts_identity_ai;
+DROP TRIGGER IF EXISTS contacts_identity_au;
+DROP TRIGGER IF EXISTS contacts_identity_erased;
+DROP TRIGGER IF EXISTS companies_domain_ai;
+DROP TRIGGER IF EXISTS companies_domain_au;
+DROP VIEW IF EXISTS contact_identity_norm_v;
+DROP VIEW IF EXISTS contact_identity_business_count_v;
+DROP VIEW IF EXISTS company_domain_v;
+DROP INDEX IF EXISTS idx_voice_outbound_open_phone;
+DROP INDEX IF EXISTS idx_companies_domain;
+DROP INDEX IF EXISTS idx_leads_intake_decision;
+DROP TABLE IF EXISTS crm_write_guard;
+DROP TABLE IF EXISTS crm_field_changes;
+DROP TABLE IF EXISTS crm_identity_reviews;
+DROP TABLE IF EXISTS email_outreach_enrollments;
+DROP TABLE IF EXISTS phone_outreach_events;
+DROP TABLE IF EXISTS phone_outreach_ledger;
+DROP TABLE IF EXISTS crm_intake_decisions;
+DROP TABLE IF EXISTS crm_import_batches;
+DROP TABLE IF EXISTS contact_identity_links;
+DROP TABLE IF EXISTS contact_identities;
+ALTER TABLE leads DROP COLUMN intake_decision_id;
+ALTER TABLE leads DROP COLUMN origin;
+ALTER TABLE companies DROP COLUMN location_norm;
+ALTER TABLE companies DROP COLUMN location;
+ALTER TABLE companies DROP COLUMN domain_norm;
+DELETE FROM d1_migrations WHERE name = '0048_contact_identity.sql';

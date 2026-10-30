@@ -1,4 +1,4 @@
-// CRM duplicate protection and canonical contact identity (migrations/0047, src/services/contact-identity.ts,
+// CRM duplicate protection and canonical contact identity (migrations/0048, src/services/contact-identity.ts,
 // src/services/outreach-ledger.ts, src/services/crm-import.ts). Covers the 20 required scenarios plus the HTTP surfaces.
 // All records are TEST DATA: names are invented, domains use .example, phone numbers use the 555-01xx fiction range.
 import { test } from "node:test";
@@ -368,13 +368,13 @@ test("[VOICE-005] case 19: an expired lease is recovered (crash recovery) and th
   assert.equal(await n(db, `SELECT COUNT(*) AS n FROM phone_outreach_events WHERE event = 'expired'`), 2);
 });
 
-test("[CRM-002] case 20: historical migration — 0047 backfills identities on existing data without deleting or merging anything; the audit is read-only; the rollback restores the prior schema with data intact", async () => {
+test("[CRM-002] case 20: historical migration — 0048 backfills identities on existing data without deleting or merging anything; the audit is read-only; the rollback restores the prior schema with data intact", async () => {
   const raw = new DatabaseSync(":memory:");
   raw.exec("PRAGMA foreign_keys = ON");
   raw.exec(`CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TEXT NOT NULL)`);
   const files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql")).sort();
   const apply = (f: string) => { raw.exec("BEGIN"); raw.exec(readFileSync(join(MIGRATIONS_DIR, f), "utf8")); raw.prepare(`INSERT INTO d1_migrations (name, applied_at) VALUES (?, ?)`).run(f, nowIso()); raw.exec("COMMIT"); };
-  for (const f of files.filter((f) => f < "0047")) apply(f);
+  for (const f of files.filter((f) => f < "0048")) apply(f);
   // Pre-existing (historical) duplicates, written before identities existed.
   const at = nowIso();
   raw.exec(`INSERT INTO companies (id, name, website, created_at) VALUES ('co1','Harbor Coffee','https://harbor.example','${at}'), ('co2','Harbor Coffee LLC','https://www.harbor.example','${at}'), ('co3','Lakeside Dental','https://lakeside.example','${at}')`);
@@ -384,7 +384,7 @@ test("[CRM-002] case 20: historical migration — 0047 backfills identities on e
   raw.exec(`INSERT INTO leads (id, contact_id, source, stage, created_at, updated_at) VALUES ('l1','c1','web_form','new','${at}','${at}'), ('l2','c2','manual','qualified','${at}','${at}'), ('l3','c3','web_form','new','${at}','${at}'), ('l4','c4','web_form','new','${at}','${at}')`);
   const snapshot = () => JSON.stringify(["contacts", "companies", "leads"].map((t) => raw.prepare(`SELECT * FROM ${t} ORDER BY id`).all().map((r) => Object.fromEntries(Object.entries(r as object).filter(([k]) => !["email_norm", "phone_norm", "name_company_norm", "domain_norm", "location", "location_norm", "origin", "intake_decision_id"].includes(k))))));
   const before = snapshot();
-  apply("0047_contact_identity.sql");
+  apply("0048_contact_identity.sql");
   assert.equal(snapshot(), before, "no existing row changed, deleted or merged");
   assert.equal((raw.prepare(`SELECT COUNT(*) n FROM contact_identities WHERE kind = 'phone'`).get() as { n: number }).n, 1);
   assert.equal((raw.prepare(`SELECT COUNT(*) n FROM contact_identities WHERE kind = 'email'`).get() as { n: number }).n, 2);
@@ -399,12 +399,12 @@ test("[CRM-002] case 20: historical migration — 0047 backfills identities on e
   assert.equal(report.invalidIdentifiers.phones, 1);
   assert.equal(snapshot(), before);
   // Rollback safeguard: the documented rollback restores the 0046 schema and leaves every original row intact.
-  raw.exec(readFileSync(join(import.meta.dirname, "../docs/crm-identity/rollback-0047.sql"), "utf8"));
+  raw.exec(readFileSync(join(import.meta.dirname, "../docs/crm-identity/rollback-0048.sql"), "utf8"));
   assert.equal(raw.prepare(`SELECT name FROM sqlite_master WHERE name = 'contact_identities'`).get(), undefined);
   assert.equal(snapshot(), before);
-  assert.equal((raw.prepare(`SELECT COUNT(*) n FROM d1_migrations WHERE name = '0047_contact_identity.sql'`).get() as { n: number }).n, 0);
-  // And 0047 can be applied again after a rollback.
-  apply("0047_contact_identity.sql");
+  assert.equal((raw.prepare(`SELECT COUNT(*) n FROM d1_migrations WHERE name = '0048_contact_identity.sql'`).get() as { n: number }).n, 0);
+  // And 0048 can be applied again after a rollback.
+  apply("0048_contact_identity.sql");
   assert.equal((raw.prepare(`SELECT COUNT(*) n FROM contact_identities`).get() as { n: number }).n, 3);
 });
 
