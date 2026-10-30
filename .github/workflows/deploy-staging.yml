@@ -343,6 +343,20 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: node --no-warnings scripts/staging-rotation-check.ts state
 
+      # Deploys #71-#72: every second-factor attempt counts toward the account's limit (8 per 15 minutes,
+      # src/services/auth.ts), so back-to-back deploys left the shared demo Owner without attempts: the access check below
+      # and five browser journeys were refused ("Too many codes entered"). This read-only check applies the app's own
+      # window rule to staging D1 and waits until this run's Owner codes fit: the access check (1), sign-ins in
+      # staging.e2e, staging-quality and the journeys (3) and two journey step-ups (2). The CRM E2E guards its own budget.
+      # The limit itself is unchanged.
+      - name: Wait for the Owner's two-factor attempts (rate window; read-only)
+        id: mfa_budget
+        timeout-minutes: 35
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node --no-warnings scripts/wait-mfa-budget.ts --accounts access/demo-accounts.md --role owner --need 6 --timeout 1920
+
       - name: Verify the full access sequence on the live site
         id: verify
         run: |
@@ -434,6 +448,9 @@ jobs:
       - name: CRM duplicate protection E2E (live staging + D1)
         id: crm_e2e
         if: steps.smoke.outcome == 'success'
+        # Gate like the browser journeys (CREST-GAP-030): continue so hosted verification, evidence and cleanup still run;
+        # the last step fails the deploy when this failed.
+        continue-on-error: true
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -566,4 +583,10 @@ jobs:
         if: always() && steps.e2e.outcome == 'failure'
         run: |
           echo "::error title=Staging E2E failed::One or more staging browser journeys failed; see the 'Browser journey on the live site' step."
+          exit 1
+
+      - name: Fail the deploy when the CRM duplicate protection E2E failed
+        if: always() && steps.crm_e2e.outcome == 'failure'
+        run: |
+          echo "::error title=CRM staging E2E failed::The CRM duplicate protection E2E failed; see its annotations and the 'CRM duplicate protection E2E' step."
           exit 1
