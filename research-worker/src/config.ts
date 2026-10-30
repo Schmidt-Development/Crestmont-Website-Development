@@ -77,7 +77,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         brokenRecheckAfterMs: int(env.BROKEN_RECHECK_AFTER_MS, 6 * 3600_000, 60_000, 7 * 86400_000),
         brokenAttempts: int(env.BROKEN_ATTEMPTS, 2, 1, 5),
       },
-      browser: { enabled: on(env.PLAYWRIGHT, true) },
+      browser: { enabled: on(env.PLAYWRIGHT, false) },
       lighthouse: { path: env.LIGHTHOUSE_PATH ?? null },
       model: {
         baseUrl: modelUrl.replace(/\/+$/, ""), name: env.RESEARCH_MODEL ?? null,

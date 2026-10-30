@@ -41,7 +41,7 @@ Windows workstation (research-worker/)                         Cloudflare (this 
   - a do-not-call number means `suppressed`, and opt-outs recorded later propagate immediately;
   - a shared phone between distinct businesses means `review`, never merged;
   - repeated or concurrent batches and concurrent promotions are idempotent.
-- The worker never reaches private networks (DNS-level filter on every socket and every browser sub-request). It honours robots.txt and Crawl-delay, never submits forms, and never works around 401/403/429 or CAPTCHAs.
+- The worker's own HTTP client never reaches private networks: IP-literal hosts are checked on every hop (including redirects), and every name is resolved through a filter inside the socket's own lookup, so DNS cannot change between check and connect. The optional Playwright check (off by default) filters sub-requests and WebSockets but resolves names separately from Chromium, so DNS rebinding is not fully prevented there (RUNBOOK §1). The worker honours robots.txt and Crawl-delay (a delay over 60 s counts as "restricted"), never submits forms, and never works around 401/403/429 or CAPTCHAs.
 - Ollama must be on 127.0.0.1. The configuration refuses anything else.
 - Research ships paused. Sources whose terms are not settled are off on the platform and refused at ingest.
 

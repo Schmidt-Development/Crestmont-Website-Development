@@ -1,22 +1,28 @@
 // Optional rendering checks with Playwright (free; `npm i -g playwright && npx playwright install chromium` on the
-// workstation). Absent → the audit uses HTML-only checks and says so. Every sub-request the page makes is checked:
-// requests to non-public addresses are aborted (the workstation sits on a private network).
+// workstation). OFF by default (PLAYWRIGHT=on enables it). HTTP(S) sub-requests and WebSockets to non-public
+// addresses are aborted, but the check resolves names separately from Chromium, so a site that rebinds its DNS to a
+// private address between the check and Chromium's own lookup is NOT fully prevented. Enable only on a workstation
+// whose LAN has nothing reachable without authentication, or behind a filtering proxy (docs/research/RUNBOOK.md §1).
 import { lookup } from "node:dns/promises";
 import { spawn } from "node:child_process";
 import { isPublicAddress } from "./http.ts";
 
 export interface BrowserCheck { viewport: string; viewportWidth: number; scrollWidth: number; overflowPx: number; textLength: number; consoleErrors: number; firstErrors: string[]; smallTapTargets: number; error: string | null }
 
-type PwPage = { on(e: string, cb: (x: { type(): string; text(): string }) => void): void; route(p: string, h: (r: { request(): { url(): string }; abort(): Promise<void>; continue(): Promise<void> }) => Promise<void>): Promise<void>; goto(u: string, o: object): Promise<unknown>; evaluate<T>(fn: () => T): Promise<T>; close(): Promise<void> };
+type PwWsRoute = { url(): string; close(): Promise<void>; connectToServer(): unknown };
+type PwPage = { routeWebSocket?(p: string | RegExp, h: (ws: PwWsRoute) => Promise<void> | void): Promise<void>; on(e: string, cb: (x: { type(): string; text(): string }) => void): void; route(p: string, h: (r: { request(): { url(): string }; abort(): Promise<void>; continue(): Promise<void> }) => Promise<void>): Promise<void>; goto(u: string, o: object): Promise<unknown>; evaluate<T>(fn: () => T): Promise<T>; close(): Promise<void> };
 type PwBrowser = { newContext(o: object): Promise<{ newPage(): Promise<PwPage>; close(): Promise<void> }>; close(): Promise<void> };
 
-const hostOk = new Map<string, boolean>();
+const hostOk = new Map<string, { ok: boolean; at: number }>();
 async function publicHost(host: string): Promise<boolean> {
-  if (hostOk.has(host)) return hostOk.get(host)!;
+  const lit = host.replace(/^\[|\]$/g, "");
+  if (/^[\d.]+$|:/.test(lit)) return isPublicAddress(lit);
+  const hit = hostOk.get(host);
+  if (hit && Date.now() - hit.at < 60_000) return hit.ok;
   let ok = false;
   try { const a = await lookup(host, { all: true }); ok = a.length > 0 && a.every((x) => isPublicAddress(x.address)); } catch { ok = false; }
   if (hostOk.size > 50_000) hostOk.clear();
-  hostOk.set(host, ok);
+  hostOk.set(host, { ok, at: Date.now() });
   return ok;
 }
 
@@ -46,6 +52,11 @@ export class Browser {
         let ok = false;
         try { const u = new URL(r.request().url()); ok = /^https?:$/.test(u.protocol) ? await publicHost(u.hostname) : u.protocol === "data:" || u.protocol === "blob:"; } catch { ok = false; }
         return ok ? r.continue() : r.abort();
+      });
+      if (page.routeWebSocket) await page.routeWebSocket(/.*/, async (ws) => {
+        let ok = false;
+        try { ok = await publicHost(new URL(ws.url()).hostname); } catch { ok = false; }
+        if (ok) ws.connectToServer(); else await ws.close();
       });
       await page.goto(url, { waitUntil: "load", timeout: timeoutMs });
       const m = await page.evaluate(() => {

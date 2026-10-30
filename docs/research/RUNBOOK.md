@@ -19,7 +19,7 @@ Architecture and vocabulary: `README.md`. Licences: `DATA-SOURCES.md`. Calling r
    - registers the `CrestmontResearch-Worker` scheduled task (starts at logon, restarts on failure, no time limit).
 
    Optional tools:
-   - Playwright, for mobile rendering checks: `npm i -g playwright && npx playwright install chromium`;
+   - Playwright, for mobile rendering checks: `npm i -g playwright && npx playwright install chromium`, then set `PLAYWRIGHT=on` in `settings.env`. It is off by default because Chromium resolves names itself: a hostile site could rebind DNS to an address on your LAN. Turn it on only if nothing on the workstation's network answers without authentication (router admin, NAS, printers), or put the workstation on an isolated network/VLAN;
    - Lighthouse, for indicators only: set `LIGHTHOUSE_PATH`. Lighthouse loads third-party subresources in its own Chrome, which the worker's private-address filter does not cover. Leave it off unless that is acceptable.
 4. **Resume.** In `/staff/research` (Owner): review the Sources table, untick *Pause research*, then save.
 

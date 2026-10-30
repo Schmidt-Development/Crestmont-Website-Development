@@ -291,3 +291,38 @@ test("[TEST-001] platform-side ingest benchmark: 10,000 prospects through the si
   console.log(`[benchmark] platform ingest: 10,000 prospects in ${ms} ms (${Math.round(10_000 / (ms / 3600e3))}/hour) on in-memory SQLite`);
   assert.equal((raw(db).prepare(`SELECT COUNT(*) AS n FROM research_prospects`).get() as { n: number }).n, 10_000);
 });
+
+test("[CRM-005] decisions made while a worker batch is in flight are never overwritten: dismissed stays dismissed, promoted keeps its CRM link", async () => {
+  const { client, db } = await setup();
+  await send(client(), "batch", batch([prospect({ businessKey: "overture:r1" }), prospect({ businessKey: "overture:r2", phones: ["517-555-2190"] })]));
+  const pid = (k: string) => (raw(db).prepare(`SELECT id FROM research_prospects WHERE business_key = ?`).get(k) as { id: string }).id;
+  const owner = await createStaff(db, "owner");
+  const actor = { kind: "user" as const, userId: owner.id, roles: [{ role: "owner" as const, organizationId: "org_crestmont" }], mfaVerified: true };
+  // Simulate the race: the batch read the prospects before these decisions, and writes after them.
+  const realBatch = db.batch.bind(db);
+  (db as { batch: typeof db.batch }).batch = async (stmts) => {
+    (db as { batch: typeof db.batch }).batch = realBatch;
+    await R.dismiss(db, actor, pid("overture:r1"), "Not a fit (TEST DATA)");
+    await R.promote(db, actor, pid("overture:r2"));
+    return realBatch(stmts);
+  };
+  const changed = (p: ProspectInput) => ({ ...p, findings: [{ ...p.findings![0], evidence: "Status 503 on 4 of 4 attempts" }] });
+  await send(client(), "batch", batch([changed(prospect({ businessKey: "overture:r1" })), changed(prospect({ businessKey: "overture:r2", phones: ["517-555-2190"] }))]));
+  const row = (k: string) => raw(db).prepare(`SELECT status, crm_lead_id FROM research_prospects WHERE business_key = ?`).get(k) as { status: string; crm_lead_id: string | null };
+  assert.equal(row("overture:r1").status, "dismissed");
+  assert.equal(row("overture:r2").status, "promoted");
+  assert.ok(row("overture:r2").crm_lead_id, "CRM link kept");
+  await assert.rejects(R.dismiss(db, actor, pid("overture:r2"), "too late"), /CRM lead/);
+});
+
+test("[SEC-001] an unparsable website URL rejects only its own record; opt-outs on a secondary number suppress the prospect", async () => {
+  const { client, db } = await setup();
+  const bad = prospect({ businessKey: "overture:u1" });
+  bad.website = { ...bad.website, url: "http://%%%" };
+  const r = await (await send(client(), "batch", batch([bad, prospect({ businessKey: "overture:u2", phones: ["517-555-2191", "517-555-2192"] })]))).json() as R.BatchResult;
+  assert.equal(r.created, 1);
+  assert.equal(r.rejected.length, 1);
+  await addDnc(db, "517-555-2192", "staff", "TEST DATA");
+  await R.applySuppressions(db);
+  assert.equal((raw(db).prepare(`SELECT status FROM research_prospects WHERE business_key = 'overture:u2'`).get() as { status: string }).status, "suppressed");
+});

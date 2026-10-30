@@ -94,7 +94,7 @@ Step "4. settings.env"
 $settings = @(
   "CRESTMONT_URL=$PlatformUrl", "RESEARCH_RUNNER_ID=$RunnerId", "RESEARCH_DATA_DIR=$Data", "RESEARCH_STATES=$States",
   "DUCKDB_PATH=$($duck.Source)", "OLLAMA_URL=http://127.0.0.1:11434", "RESEARCH_MODEL=$Model", "LIGHTHOUSE_PATH=$LighthousePath",
-  "OVERTURE=on", "COMMON_CRAWL=on", "FOURSQUARE_OS=off", "OSM=off", "HEALTH_PORT=8789"
+  "OVERTURE=on", "COMMON_CRAWL=on", "FOURSQUARE_OS=off", "OSM=off", "PLAYWRIGHT=off", "HEALTH_PORT=8789"
 )
 $settings | Set-Content -Path (Join-Path $InstallDir "settings.env") -Encoding ASCII
 Copy-Item (Join-Path $PSScriptRoot "Start-ResearchWorker.ps1") $InstallDir -Force

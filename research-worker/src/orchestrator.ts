@@ -21,6 +21,8 @@ import { errMsg } from "./log.ts";
 import { snapshot } from "./resources.ts";
 
 export const VERSION = "0.1.0";
+/** After this many failed deliveries a batch is parked (about two days with the backoff), never retried forever. */
+export const MAX_BATCH_ATTEMPTS = 60;
 export const ALL_STATES = Object.keys(US_STATE_TZ);
 const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((r) => { const t = setTimeout(r, ms); signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true }); });
 
@@ -34,6 +36,8 @@ export class ResearchWorker {
   private readonly sourceStatus: Record<string, { state: string; release?: string; lastRefreshAt?: string; error?: string; progress?: string }> = {};
   private platformState: { ok: boolean; lastError: string | null; lastHeartbeatAt: string | null; authFailed: boolean } = { ok: false, lastError: null, lastHeartbeatAt: null, authFailed: false };
   private inFlight = 0;
+  /** Lowered after a 413 (payload too large) and kept for the life of the process, so a heartbeat cannot undo it. */
+  private batchCap = Number.MAX_SAFE_INTEGER;
   private server: Server | null = null;
   constructor(d: WorkerDeps) {
     this.d = d;
@@ -155,7 +159,7 @@ export class ResearchWorker {
   async deliverOnce(): Promise<{ sent: number; paused?: boolean }> {
     if (this.paused) return { sent: 0, paused: true };
     const now = new Date();
-    while (this.d.state.enqueueBatch(this.controls.maxBatch, now)) { /* move all ready results into batches */ }
+    while (this.d.state.enqueueBatch(Math.min(this.controls.maxBatch, this.batchCap), now)) { /* move all ready results into batches */ }
     let sent = 0;
     for (let ob = this.d.state.nextOutbox(now); ob; ob = this.d.state.nextOutbox(new Date())) {
       try {
@@ -166,8 +170,13 @@ export class ResearchWorker {
       } catch (e) {
         const s = e instanceof PlatformError ? e.status : 0;
         if (s === 409 && /paused/i.test(errMsg(e))) { this.controls = { ...this.controls, paused: true, pauseReason: errMsg(e) }; this.d.state.retryOutbox(ob.batch_id, errMsg(e), 60_000, new Date()); return { sent, paused: true }; }
-        if (s === 413) { this.d.state.splitOutbox(ob.batch_id, new Date()); this.controls = { ...this.controls, maxBatch: Math.max(1, Math.floor(this.controls.maxBatch / 2)) }; return { sent }; }
+        if (s === 413) { this.d.state.splitOutbox(ob.batch_id, new Date()); this.batchCap = Math.max(1, Math.floor(Math.min(this.batchCap, this.controls.maxBatch) / 2)); return { sent }; }
         if (s === 401 || s === 403) { this.platformState.authFailed = true; this.d.state.retryOutbox(ob.batch_id, errMsg(e), 600_000, new Date()); this.d.log.error("platform refused the worker's credentials; delivery stopped until the secret is fixed", { status: s }); return { sent }; }
+        if ((s === 400 || s === 422) || ob.attempts + 1 >= MAX_BATCH_ATTEMPTS) {
+          this.d.state.parkOutbox(ob.batch_id, `platform refused the batch (${s || "network"}, attempt ${ob.attempts + 1}): ${errMsg(e)}`, new Date());
+          this.d.log.error("batch parked; its records are marked failed with the reason", { batch: ob.batch_id, status: s, error: errMsg(e) });
+          continue;
+        }
         const delay = Math.min(3600_000, 30_000 * 2 ** Math.min(ob.attempts, 7)) * (0.8 + Math.random() * 0.4);
         this.d.state.retryOutbox(ob.batch_id, errMsg(e), delay, new Date());
         this.d.log.warn("batch delivery failed; will retry with the same batch id", { batch: ob.batch_id, status: s, error: errMsg(e) });

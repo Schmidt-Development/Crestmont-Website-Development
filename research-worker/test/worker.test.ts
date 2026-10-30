@@ -226,3 +226,48 @@ test("outbox: a batch keeps its id across retries; 413 puts its records back for
   st.markRejected([{ businessKey: "overture:o1", issues: ["bad"] }], t);
   assert.equal(st.stages().failed, 1);
 });
+
+// ───────────── regressions from the independent review ─────────────
+
+test("[review] IP-literal hosts (including redirect targets) are refused; NAT64, 6to4 and IPv4-compatible IPv6 are not public", async () => {
+  const { createServer } = await import("node:http");
+  const srv = createServer((req, res) => { if (req.url === "/robots.txt") { res.writeHead(404).end(); return; } res.writeHead(200, { "content-type": "text/html" }).end("INTERNAL"); });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+  const port = (srv.address() as { port: number }).port;
+  try {
+    const http = new Http({ userAgent: "t", robotsToken: "CrestmontResearchBot", timeoutMs: 2000, perHostIntervalMs: 1000, concurrency: 2, maxBytes: 100000 });
+    const r = await http.get(`http://127.0.0.1:${port}/secret`);
+    assert.equal(r.status, null);
+    assert.equal(r.error?.kind, "blocked_address");
+    assert.equal(r.body, "");
+    for (const u of ["http://[::1]/", "http://192.168.1.1/admin", "http://169.254.169.254/latest/meta-data/"]) assert.equal((await http.get(u)).error?.kind, "blocked_address", u);
+  } finally { srv.close(); }
+  for (const ip of ["64:ff9b::c0a8:101", "2002:c0a8:101::1", "::192.168.1.1", "::ffff:c0a8:101"]) assert.equal(isPublicAddress(ip), false, ip);
+});
+
+test("[review] a Crawl-delay over 60 s marks the site restricted instead of holding a worker slot", () => {
+  const r = parseRobots("User-agent: *\nCrawl-delay: 86400\n");
+  assert.equal(robotsDecision(r, "CrestmontResearchBot", "/").crawlDelay, 86400);
+  // Http.allowed() treats it as disallowed; verified through the decision the client uses:
+  const http = new Http({ userAgent: "t", robotsToken: "CrestmontResearchBot", timeoutMs: 2000, perHostIntervalMs: 1000, concurrency: 1, maxBytes: 1000 });
+  (http as unknown as { hosts: Map<string, unknown> }).hosts.set("slow.example", { next: 0, busy: false, robots: { at: Date.now(), r } });
+  return http.allowed(new URL("https://slow.example/")).then((ok) => assert.equal(ok, false));
+});
+
+test("[review] a batch the platform refuses permanently is parked with the reason, not retried forever; 413 never resurrects re-queued work", () => {
+  const st = new State(":memory:");
+  const t = new Date();
+  for (let i = 0; i < 3; i++) st.upsertCandidate(cand({ businessKey: `overture:p${i}` }), "MI", t, 30);
+  st.claim(10, t, 60_000);
+  for (let i = 0; i < 3; i++) st.finish(`overture:p${i}`, { i }, t);
+  const b = st.enqueueBatch(10, t)!;
+  st.parkOutbox(b.batchId, "platform refused the batch (422)", t);
+  assert.equal(st.outboxDepth(), 0);
+  assert.equal(st.stages().failed, 3);
+  const st2 = new State(":memory:");
+  st2.upsertCandidate(cand({ businessKey: "overture:q1" }), "MI", t, 30); st2.claim(1, t, 60_000); st2.finish("overture:q1", { a: 1 }, t);
+  const b2 = st2.enqueueBatch(10, t)!;
+  st2.upsertCandidate({ ...cand({ businessKey: "overture:q1" }), phones: ["+15175552199"] }, "MI", t, 30); // source changed meanwhile
+  st2.splitOutbox(b2.batchId, t);
+  assert.equal(st2.stages().pending, 1, "re-verified, not re-sent with the old result");
+});

@@ -158,6 +158,11 @@ export function stableJson(v: unknown): string {
 
 // ───────────── Validation of what the worker sends ─────────────
 
+/** http(s) URL that the WHATWG parser accepts (a regex alone lets "http://%%%" through). */
+const httpUrl = (x: unknown): string | null => {
+  if (typeof x !== "string" || x.length > 500) return null;
+  try { const u = new URL(x); return (u.protocol === "http:" || u.protocol === "https:") && u.hostname ? u.href : null; } catch { return null; }
+};
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 const clean = (s: unknown, max: number): string | null => {
   if (typeof s !== "string") return null;
@@ -206,7 +211,7 @@ export function validateProspect(raw: unknown): { ok: true; value: CleanProspect
   if (wConf === null) issues.push("website.confidence must be 0..1");
   const checkedAt = typeof w?.checkedAt === "string" && ISO.test(w.checkedAt) ? w.checkedAt : null;
   if (!checkedAt) issues.push("website.checkedAt must be an ISO timestamp");
-  const wUrl = typeof w?.url === "string" && /^https?:\/\/[^\s]{3,500}$/.test(w.url) ? w.url : null;
+  const wUrl = httpUrl(w?.url);
   if ((cls === "VERIFIED_OFFICIAL_WEBSITE" || cls === "VERIFIED_WEBSITE_BROKEN" || cls === "VERIFIED_WEBSITE_ISSUES") && !wUrl) issues.push("a verified website classification needs the verified url");
   if (cls === "NO_OFFICIAL_WEBSITE_FOUND" && !arr(w?.checks, 20).length) issues.push("NO_OFFICIAL_WEBSITE_FOUND needs the documented checks that were run");
   const checks: WebsiteCheck[] = arr(w?.checks, 20).flatMap((c) => {
@@ -220,7 +225,7 @@ export function validateProspect(raw: unknown): { ok: true; value: CleanProspect
     const o = (f ?? {}) as Record<string, unknown>;
     const code = typeof o.code === "string" && /^[a-z0-9_]{2,60}$/.test(o.code) ? o.code : null;
     const sev = (SEVERITIES as readonly string[]).includes(o.severity as string) ? (o.severity as Severity) : null;
-    const conf = unit(o.confidence), title = clean(o.title, 200), url = typeof o.url === "string" && /^https?:\/\/[^\s]{3,500}$/.test(o.url) ? o.url : null;
+    const conf = unit(o.confidence), title = clean(o.title, 200), url = httpUrl(o.url);
     const method = clean(o.method, 120), evidence = clean(o.evidence, 500), observedAt = typeof o.observedAt === "string" && ISO.test(o.observedAt) ? o.observedAt : null;
     // A finding without evidence, URL, method and timestamp is not a finding (no unsupported claims reach the CRM).
     if (!code || !sev || conf === null || !title || !url || !method || !evidence || !observedAt) { issues.push(`finding ${code ?? "?"} is missing evidence, url, method, timestamp, severity or confidence`); continue; }

@@ -133,8 +133,16 @@ export class State {
   splitOutbox(batchId: string, now: Date) {
     const r = this.db.prepare(`SELECT keys FROM outbox WHERE batch_id = ?`).get(batchId) as { keys: string } | undefined;
     if (!r) return;
-    const upd = this.db.prepare(`UPDATE candidates SET stage = 'ready', updated_at = ? WHERE business_key = ?`);
+    // Only records still as they were sent go back to ready; one re-queued meanwhile (changed source data) is re-verified instead.
+    const upd = this.db.prepare(`UPDATE candidates SET stage = 'ready', updated_at = ? WHERE business_key = ? AND stage = 'sent'`);
     for (const k of JSON.parse(r.keys) as string[]) upd.run(now.toISOString(), k);
+    this.db.prepare(`DELETE FROM outbox WHERE batch_id = ?`).run(batchId);
+  }
+  /** A batch the platform refuses permanently (400/422) or after too many attempts: its records are marked failed with the reason. */
+  parkOutbox(batchId: string, reason: string, now: Date) {
+    const r = this.db.prepare(`SELECT keys FROM outbox WHERE batch_id = ?`).get(batchId) as { keys: string } | undefined;
+    if (!r) return;
+    this.markRejected((JSON.parse(r.keys) as string[]).map((k) => ({ businessKey: k, issues: [reason] })), now);
     this.db.prepare(`DELETE FROM outbox WHERE batch_id = ?`).run(batchId);
   }
   /** Records the platform rejected (validation) are marked failed with the reason; they are not retried blindly. */

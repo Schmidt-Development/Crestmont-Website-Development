@@ -61,7 +61,8 @@ export async function heartbeat(db: Db, body: Record<string, unknown>, now: Date
   if (!runnerId) throw new HttpError(422, "runnerId must be 1-64 characters of [A-Za-z0-9._:-]");
   const version = typeof body.version === "string" ? body.version.slice(0, 40) : null;
   const status = body.status && typeof body.status === "object" && !Array.isArray(body.status) ? body.status as Record<string, unknown> : {};
-  const statusJson = JSON.stringify(status).slice(0, 20_000);
+  let statusJson = JSON.stringify(status);
+  if (statusJson.length > 20_000) statusJson = JSON.stringify({ truncated: true, evaluated: status.evaluated, websitesChecked: status.websitesChecked, failedJobs: status.failedJobs, queueDepth: status.queueDepth });
   const at = now.toISOString();
   const day = typeof status.day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(status.day) ? status.day : today(now);
   // Counters are cumulative for the worker's day; MAX keeps a restarted worker (which resumes from its checkpoint) from lowering them.
@@ -181,7 +182,9 @@ export async function ingestBatch(db: Db, body: Record<string, unknown>, now: Da
       updated++;
       writes.push(db.prepare(`UPDATE research_prospects SET name=?, name_norm=?, category=?, address_line=?, city=?, state=?, zip=?, lat=?, lon=?, phone_e164=?, phone_norm=?, phones_json=?, email=?, emails_json=?, domain=?, domains_json=?, time_zone=?,
           sources_json=?, website_class=?, website_url=?, website_json=?, findings_json=?, findings_count=?, max_severity=?, identity_confidence=?, score=?, qualified=?, qualification_json=?, recommended_package=?, summary=?, brief=?, model=?,
-          status=?, status_detail=?, crm_lead_id=?, crm_contact_id=?, shared_phone=?, eligibility=?, eligibility_json=?, content_hash=?, last_verified_at=?, updated_at=? WHERE id = ?`).bind(...vals, prev.id));
+          status = CASE WHEN status IN ('promoted','dismissed') THEN status ELSE ? END, status_detail = CASE WHEN status IN ('promoted','dismissed') THEN status_detail ELSE ? END,
+          crm_lead_id = CASE WHEN status = 'promoted' THEN crm_lead_id ELSE ? END, crm_contact_id = CASE WHEN status = 'promoted' THEN crm_contact_id ELSE ? END,
+          shared_phone=?, eligibility=?, eligibility_json=?, content_hash=?, last_verified_at=?, updated_at=? WHERE id = ?`).bind(...vals, prev.id));
     } else {
       created++;
       writes.push(db.prepare(`INSERT INTO research_prospects (name, name_norm, category, address_line, city, state, zip, lat, lon, phone_e164, phone_norm, phones_json, email, emails_json, domain, domains_json, time_zone,
@@ -190,6 +193,7 @@ export async function ingestBatch(db: Db, body: Record<string, unknown>, now: Da
           VALUES (${Array(45).fill("?").join(",")})`).bind(...vals, newId("rp"), p.businessKey, at));
     }
   }
+  // (A person's decision made while this batch was in flight is re-read at write time above and never overwritten.)
   // Earlier holders of a now-shared number are flagged too; a qualified one goes to review so only a person can pick who is called.
   for (const ph of sharedPhones) {
     writes.push(db.prepare(`UPDATE research_prospects SET shared_phone = 1, status = CASE WHEN status = 'qualified' THEN 'review' ELSE status END,
@@ -214,7 +218,7 @@ export async function ingestBatch(db: Db, body: Record<string, unknown>, now: Da
 /** Opt-outs recorded after ingest (voice_dnc) take effect on prospects immediately, before anyone can promote them. */
 export async function applySuppressions(db: Db): Promise<number> {
   const r = await db.prepare(`UPDATE research_prospects SET status = 'suppressed', status_detail = 'Number is on the do-not-call list', updated_at = ?
-      WHERE status IN ('qualified','not_qualified','review') AND phone_e164 IN (SELECT phone_e164 FROM voice_dnc)`).bind(nowIso()).run();
+      WHERE status IN ('qualified','not_qualified','review') AND EXISTS (SELECT 1 FROM json_each(research_prospects.phones_json) j JOIN voice_dnc d ON d.phone_e164 = j.value)`).bind(nowIso()).run();
   return r.meta?.changes ?? 0;
 }
 
@@ -263,10 +267,12 @@ export async function promote(db: Db, actor: Actor, id: string): Promise<{ leadI
     return new HttpError(409, why);
   };
   if (!["qualified", "review"].includes(p.status)) throw await block(`This prospect cannot be promoted (status: ${p.status.replace("_", " ")})`);
-  const phones = JSON.parse((await db.prepare(`SELECT phones_json FROM research_prospects WHERE id = ?`).bind(id).first<{ phones_json: string }>())!.phones_json) as string[];
+  const lists = (await db.prepare(`SELECT phones_json, emails_json FROM research_prospects WHERE id = ?`).bind(id).first<{ phones_json: string; emails_json: string }>())!;
+  const phones = (JSON.parse(lists.phones_json) as string[]).slice(0, 10);
+  const emails = (JSON.parse(lists.emails_json) as string[]).slice(0, 10);
   const norms = phones.map(crmPhoneNorm).filter((x): x is string => !!x);
   const crm = (norms.length ? await db.prepare(`SELECT id FROM contacts WHERE phone_norm IN (${norms.map(() => "?").join(",")}) LIMIT 1`).bind(...norms).first<{ id: string }>() : null)
-    ?? (p.email ? await db.prepare(`SELECT id FROM contacts WHERE email_norm = ? LIMIT 1`).bind(p.email).first<{ id: string }>() : null);
+    ?? (emails.length ? await db.prepare(`SELECT id FROM contacts WHERE email_norm IN (${emails.map(() => "?").join(",")}) LIMIT 1`).bind(...emails).first<{ id: string }>() : null);
   if (crm) {
     await db.prepare(`UPDATE research_prospects SET crm_contact_id = ? WHERE id = ?`).bind(crm.id, id).run();
     throw await block("The phone number or email already belongs to a CRM contact", "existing_crm");
@@ -299,7 +305,8 @@ export async function dismiss(db: Db, actor: Actor, id: string, reason: string):
   if (r.length < 3 || r.length > 300) throw new HttpError(422, "Give a short reason (3-300 characters)");
   const p = await getProspect(db, id);
   if (p.status === "promoted") throw new HttpError(409, "Already a CRM lead; manage it in the CRM");
-  await db.prepare(`UPDATE research_prospects SET status = 'dismissed', status_detail = ?, decided_by = ?, decided_at = ?, updated_at = ? WHERE id = ?`).bind(r, actor.userId ?? null, nowIso(), nowIso(), id).run();
+  const res = await db.prepare(`UPDATE research_prospects SET status = 'dismissed', status_detail = ?, decided_by = ?, decided_at = ?, updated_at = ? WHERE id = ? AND status <> 'promoted'`).bind(r, actor.userId ?? null, nowIso(), nowIso(), id).run();
+  if (!res.meta?.changes) throw new HttpError(409, "Already a CRM lead; manage it in the CRM");
   await audit(db, { actorUserId: actor.userId, action: "research.prospect_dismissed", subjectType: "research_prospect", subjectId: id, details: { reason: r } });
 }
 

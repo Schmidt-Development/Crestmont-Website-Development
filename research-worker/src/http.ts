@@ -34,8 +34,9 @@ export function isPublicAddress(ip: string): boolean {
   if (isIP(ip) === 6) {
     const s = ip.toLowerCase();
     if (s === "::" || s === "::1" || s.startsWith("fe8") || s.startsWith("fe9") || s.startsWith("fea") || s.startsWith("feb") || s.startsWith("fc") || s.startsWith("fd") || s.startsWith("ff")) return false;
-    const m = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(s);
+    const m = /^::(?:ffff:)?(\d+\.\d+\.\d+\.\d+)$/.exec(s);   // IPv4-mapped and IPv4-compatible
     if (m) return isPublicAddress(m[1]);
+    if (s.startsWith("::ffff:") || s.startsWith("64:ff9b:") || s.startsWith("2002:") || s.startsWith("2001:db8:") || s.startsWith("100::")) return false; // mapped hex form, NAT64, 6to4, documentation, discard
     return true;
   }
   return false;
@@ -99,6 +100,8 @@ export function robotsDecision(r: Robots, token: string, path: string): { allowe
 // ───────────── Fetcher ─────────────
 export interface HttpOptions { userAgent: string; robotsToken: string; timeoutMs: number; perHostIntervalMs: number; concurrency: number; maxBytes: number; allowLoopback?: boolean }
 
+/** A Crawl-delay above this means the site does not want automated visits at our pace: treated as restricted. */
+export const MAX_CRAWL_DELAY_S = 60;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function classify(e: unknown): { kind: NetErrorKind; message: string } {
@@ -124,15 +127,20 @@ export class Http {
   constructor(opts: HttpOptions) { this.opts = opts; }
 
   private async slot<T>(host: string, fn: () => Promise<T>): Promise<T> {
-    while (this.active >= this.opts.concurrency) await new Promise<void>((r) => this.waiters.push(r));
+    const h = this.hosts.get(host) ?? this.hosts.set(host, { next: 0, busy: false }).get(host)!;
+    // Wait for this host's turn BEFORE taking a global slot, so one slow host cannot hold the pool.
+    for (;;) {
+      while (h.busy || Date.now() < h.next) await sleep(Math.max(50, Math.min(h.next - Date.now(), 60_000)));
+      while (this.active >= this.opts.concurrency) await new Promise<void>((r) => this.waiters.push(r));
+      if (!h.busy && Date.now() >= h.next) break;
+      this.waiters.shift()?.();
+    }
     this.active++;
     try {
-      const h = this.hosts.get(host) ?? this.hosts.set(host, { next: 0, busy: false }).get(host)!;
-      while (h.busy || Date.now() < h.next) await sleep(Math.max(50, h.next - Date.now()));
       h.busy = true;
       try { return await fn(); }
       finally {
-        const delay = h.robots && typeof h.robots.r === "object" ? Math.max(this.opts.perHostIntervalMs, (robotsDecision(h.robots.r, this.opts.robotsToken, "/").crawlDelay ?? 0) * 1000) : this.opts.perHostIntervalMs;
+        const delay = h.robots && typeof h.robots.r === "object" ? Math.max(this.opts.perHostIntervalMs, Math.min(MAX_CRAWL_DELAY_S, robotsDecision(h.robots.r, this.opts.robotsToken, "/").crawlDelay ?? 0) * 1000) : this.opts.perHostIntervalMs;
         h.next = Date.now() + delay; h.busy = false;
       }
     } finally { this.active--; this.waiters.shift()?.(); }
@@ -183,7 +191,8 @@ export class Http {
     const r = await this.robots(u);
     if (r === "allow") return true;
     if (r === "deny") return false;
-    return robotsDecision(r, this.opts.robotsToken, u.pathname + u.search).allowed;
+    const d = robotsDecision(r, this.opts.robotsToken, u.pathname + u.search);
+    return d.allowed && (d.crawlDelay ?? 0) <= MAX_CRAWL_DELAY_S;
   }
 
   /** GET with redirects followed manually (≤ 5 hops), robots and address checks on every hop. */
@@ -194,6 +203,11 @@ export class Http {
     try { url = new URL(input); } catch { return { url: input, finalUrl: input, status: null, chain, headers: {}, body: "", bytes: 0, ms: 0, error: { kind: "other", message: "invalid URL" }, robotsBlocked: false }; }
     for (let hop = 0; hop <= 5; hop++) {
       if (url.protocol !== "http:" && url.protocol !== "https:") return { url: input, finalUrl: url.href, status: null, chain, headers: {}, body: "", bytes: 0, ms: Date.now() - started, error: { kind: "other", message: `unsupported scheme ${url.protocol}` }, robotsBlocked: false };
+      // Node never calls the lookup hook for IP-literal hosts, so literals (e.g. a redirect to http://192.168.1.1/) are checked here.
+      const literal = url.hostname.replace(/^\[|\]$/g, "");
+      if (isIP(literal) && !isPublicAddress(literal) && !(this.opts.allowLoopback && (literal === "127.0.0.1" || literal === "::1"))) {
+        return { url: input, finalUrl: url.href, status: null, chain, headers: {}, body: "", bytes: 0, ms: Date.now() - started, error: { kind: "blocked_address", message: `${literal} is not a public address` }, robotsBlocked: false };
+      }
       if (!(await this.allowed(url))) return { url: input, finalUrl: url.href, status: null, chain, headers: {}, body: "", bytes: 0, ms: Date.now() - started, error: null, robotsBlocked: true };
       let res;
       try { res = await this.slot(url.host, () => { this.requests++; return this.raw(url, method); }); }
