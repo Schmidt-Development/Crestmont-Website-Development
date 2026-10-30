@@ -29,7 +29,7 @@ export type ResourceKind =
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
-  | "member" | "notification" | "staffNotification" | "buildJob" | "soVersion" | "soStage" | "soExperiment" | "runnerDiagnostic";
+  | "member" | "notification" | "staffNotification" | "buildJob" | "soVersion" | "soStage" | "soExperiment" | "runnerDiagnostic" | "researchProspect" | "researchProspect2";
 
 export type Access =
   | { kind: "public" }
