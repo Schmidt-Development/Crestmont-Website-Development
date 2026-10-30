@@ -232,7 +232,7 @@ if ($InferenceProbe) {
     $samples = New-Object System.Collections.ArrayList
     $smiPath = (Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue).Source
     $sampler = $null
-    if ($smiPath) { $sampler = Start-Job -ScriptBlock { param($p) for ($i = 0; $i -lt 640; $i++) { & $p --query-gpu=memory.used,utilization.gpu --format=csv,noheader,nounits; Start-Sleep -Milliseconds 500 } } -ArgumentList $smiPath }
+    if ($smiPath) { $sampler = Start-Job -ScriptBlock { for ($i = 0; $i -lt 640; $i++) { & $using:smiPath --query-gpu=memory.used,utilization.gpu --format=csv,noheader,nounits; Start-Sleep -Milliseconds 500 } } }
     $body = @{ model = $model; stream = $false; keep_alive = "10m"; options = @{ temperature = 0; seed = 42; num_predict = 400 }
       messages = @(@{ role = "system"; content = "Reply with one complete HTML document and nothing else." }, @{ role = "user"; content = "Generate a minimal HTML document containing a title, heading and paragraph for a fictional junk removal company called Junk in the Trunk." }) } | ConvertTo-Json -Depth 5
     try {
