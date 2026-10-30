@@ -1,4 +1,4 @@
-// Node 1 dispatch-to-GPU diagnostic (Founder P0 directive, 2026-10-30; migration 0048).
+// Node 1 dispatch-to-GPU diagnostic (Founder P0 directive, 2026-10-30; migration 0050).
 //
 // A diagnostic is ONE real, small, deterministic job on the existing signed runner channel: an ai_jobs row with
 // workflow "gpu_diagnostic" and provider "local-runner". The self-hosted runner claims it like any AI draft
@@ -63,7 +63,7 @@ async function addCheckpoint(db: Db, diagnosticId: string, c: { code: Checkpoint
     .bind(diagnosticId, c.code, c.ok ? 1 : 0, c.at ?? now, now, c.source, c.component.slice(0, 60), c.worker ? sanitize(c.worker, 80) : null, c.error ? sanitize(c.error, 1000) : null, evid(c.evidence, trusted)).run();
 }
 
-/** The diagnostic for an ai_job, or null. Tolerates a Worker running before migration 0048 (drafts keep working). */
+/** The diagnostic for an ai_job, or null. Tolerates a Worker running before migration 0050 (drafts keep working). */
 async function diagnosticForJob(db: Db, aiJobId: string) {
   try {
     return await db.prepare(`SELECT id, correlation_id FROM runner_diagnostics WHERE ai_job_id = ?`).bind(aiJobId).first<{ id: string; correlation_id: string }>();

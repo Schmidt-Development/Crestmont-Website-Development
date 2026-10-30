@@ -185,7 +185,7 @@ const ANATOMY: { title: string; stage: string; body: string }[] = [
 function anatomy(): SafeHtml {
   const last = ANATOMY.length;
   return html`<p class="anatomy__note">Illustrative concept — not a client project</p><div class="anatomy" data-anatomy>
-<div data-reveal><ol class="anatomy__layers" role="tablist" aria-label="Layers of a website build" aria-orientation="vertical">${ANATOMY.map((l, i) => html`<li class="anatomy__layer">
+<div data-reveal><ol class="anatomy__layers" role="tablist" aria-label="Layers of a website build" aria-orientation="vertical">${ANATOMY.map((l, i) => html`<li class="anatomy__layer" role="presentation">
 <button class="anatomy__tab" type="button" role="tab" id="anatomy-tab-${i + 1}" aria-controls="anatomy-stage" aria-selected="${i === last - 1 ? "true" : "false"}"><span class="anatomy__tab-title">${l.title}</span><span class="anatomy__tab-stage">Process stage: ${l.stage}</span></button>
 <p class="anatomy__detail">${l.body}</p></li>`)}</ol></div>
 <div class="anatomy__stage" id="anatomy-stage" role="tabpanel" aria-label="Miniature website preview" data-reveal style="--rd:140ms">
@@ -342,7 +342,10 @@ type FieldErrors = Record<string, string>;
 /** Cloudflare Turnstile widget (renders nothing without a site key, e.g. in development). Also used by /register and /password/forgot. */
 export function turnstileWidget(ctx: AppContext): SafeHtml {
   if (!ctx.env.TURNSTILE_SITE_KEY) return html``;
-  return html`<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script><div class="cf-turnstile field" data-sitekey="${ctx.env.TURNSTILE_SITE_KEY}"></div>`;
+  // Rendered explicitly by app.js (cmTurnstile) so the widget's size fits its field: Turnstile's standard widget is a
+  // fixed 300px, wider than the sign-up card's content at 375px (deploy #64: /register overflowed by 7px) and on 360px
+  // phones. "flexible" fills fields >= 300px wide; "compact" is used below that. Same field, key and token name.
+  return html`<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&amp;onload=cmTurnstile" async defer></script><div class="cf-turnstile field" data-sitekey="${ctx.env.TURNSTILE_SITE_KEY}"></div>`;
 }
 
 /** One-time submission token (not lead data): a second submit of the same form — a double click or a retried request —

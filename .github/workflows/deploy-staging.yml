@@ -211,6 +211,22 @@ jobs:
           echo "::add-mask::$k"
           printf '%s' "$k" | node --no-warnings scripts/staging-secrets.ts put SCHEDULER_TRIGGER_SECRET
 
+      - name: CRM import and erasure keys (derived; put only when changed)
+        # PR #50. CRM_IMPORT_SECRET signs research-engine imports (POST /api/crm/v1/imports); CRM_ERASURE_HMAC_KEY keys the
+        # privacy-erasure re-import tombstones. Derived from the Cloudflare token secret like the scheduler key: 256-bit,
+        # stable across deploys, never printed (masked) and never committed.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          imp=$(node --no-warnings scripts/staging-secrets.ts derive crmImport)
+          echo "::add-mask::$imp"
+          printf '%s' "$imp" | node --no-warnings scripts/staging-secrets.ts put CRM_IMPORT_SECRET
+          era=$(node --no-warnings scripts/staging-secrets.ts derive crmErasure)
+          echo "::add-mask::$era"
+          printf '%s' "$era" | node --no-warnings scripts/staging-secrets.ts put CRM_ERASURE_HMAC_KEY
+
       - name: Report file storage state (file-storage:staging feed)
         continue-on-error: true
         env:
@@ -411,6 +427,25 @@ jobs:
           npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 axe-core@4.10.2 > /dev/null
           .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
           node --no-warnings --test --test-concurrency=1 --test-reporter=./scripts/evidence-reporter.mjs tests/e2e/staging.e2e.ts tests/e2e/staging-quality.e2e.ts tests/e2e/staging-journeys.e2e.ts
+
+      # PR #50: CRM duplicate protection against the live Worker and the real staging D1 (synthetic data only, erased at
+      # the end): migrations 0048/0049, schema, backfill, signed research imports, idempotency, concurrent duplicates,
+      # shared lines, suppression and do-not-call, the manual duplicate warning and privacy erasure via the Owner route.
+      - name: CRM duplicate protection E2E (live staging + D1)
+        id: crm_e2e
+        if: steps.smoke.outcome == 'success'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          E2E_BASE_URL: ${{ steps.deploy.outputs.url }}
+          E2E_ACCOUNTS_FILE: access/demo-accounts.md
+        run: |
+          unset EVIDENCE_INGEST_SECRET
+          CRM_IMPORT_SECRET=$(node --no-warnings scripts/staging-secrets.ts derive crmImport)
+          echo "::add-mask::$CRM_IMPORT_SECRET"
+          export CRM_IMPORT_SECRET
+          node --no-warnings scripts/crm-staging-e2e.ts
 
       # The frontend's hosted browser suite (previously run only against the frontend-preview Worker): every public page at
       # desktop and phone size, interactions, the portfolio explorer and each verified demo, recorded tours. No secrets;

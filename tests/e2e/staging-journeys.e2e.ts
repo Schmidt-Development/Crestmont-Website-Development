@@ -24,7 +24,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
-import { launchBrowser } from "./support.ts";
+import { launchBrowser, evidenceRunLink } from "./support.ts";
 import { totpCode } from "../../src/lib/auth-crypto.ts";
 import { signEvidence } from "../../src/readiness/ingest.ts";
 
@@ -841,8 +841,9 @@ journey(29, ["READY-004"], "launch readiness ingests this run's CI evidence (sig
   assert.match(String(r.json.status), /^(ingested|duplicate)$/);
   const o = await as("owner");
   await o.goto(BASE + "/staff/readiness/engineering");
-  assert.match(await text(o), re(doc.runId), "run listed under CI evidence");
-  await nav(o, o.getByRole("link", { name: doc.runId }).first());
+  const link = evidenceRunLink(o, doc.runId) as { count(): Promise<number>; first(): { click(): Promise<void> } };
+  assert.equal(await link.count(), 1, `run ${doc.runId} listed under CI evidence (exactly this id, not a sibling run)`);
+  await nav(o, link.first());
   const run = await text(o);
   const m = /(\d+) passed\/skipped, (\d+) failed/.exec(run);
   assert.ok(m, `run summary shown: ${run.slice(0, 300)}`);

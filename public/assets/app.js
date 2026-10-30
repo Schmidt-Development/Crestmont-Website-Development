@@ -5,6 +5,19 @@
   root.classList.add("js");
   const reduceMotion = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : { matches: false };
 
+  // ── Bot check (Cloudflare Turnstile, explicit render): size chosen from the field's width so it never overflows ──
+  // The API script calls cmTurnstile when it loads; if it loaded before this script, render now instead.
+  const renderTurnstile = () => {
+    const ts = window.turnstile;
+    if (!ts || typeof ts.render !== "function") return;
+    for (const el of document.querySelectorAll(".cf-turnstile[data-sitekey]:not([data-ts-rendered])")) {
+      el.setAttribute("data-ts-rendered", "");
+      ts.render(el, { sitekey: el.getAttribute("data-sitekey"), size: el.clientWidth >= 300 ? "flexible" : "compact" });
+    }
+  };
+  window.cmTurnstile = renderTurnstile;
+  renderTurnstile();
+
   // ── Header: hairline appears once the page scrolls (passive, rAF-throttled) ──
   const header = document.querySelector("[data-site-header]");
   if (header) {
@@ -52,6 +65,31 @@
   // ── Confirm dangerous actions (runs before the busy-state handler below) ──
   document.querySelectorAll("form[data-confirm]").forEach((f) => {
     f.addEventListener("submit", (e) => { if (!window.confirm(f.getAttribute("data-confirm"))) { e.preventDefault(); e.stopImmediatePropagation(); } });
+  });
+
+  // ── CRM: live duplicate hint on the Add-lead form (the server checks again on save; works without JS) ──
+  document.querySelectorAll("form[data-dup-check]").forEach((f) => {
+    const out = f.querySelector("[data-dup-preview]");
+    if (!out) return;
+    let timer = 0, seq = 0;
+    const check = () => {
+      const q = new URLSearchParams();
+      for (const k of ["name", "email", "phone", "company", "website"]) { const el = f.elements.namedItem(k); if (el && el.value.trim()) q.set(k, el.value.trim()); }
+      if (!q.get("email") && !q.get("phone") && !q.get("website")) { out.replaceChildren(); return; }
+      const mine = ++seq;
+      fetch(`${f.getAttribute("data-dup-check")}?${q}`, { credentials: "same-origin", headers: { accept: "text/html" } })
+        .then((r) => (r.ok ? r.text() : ""))
+        .then((t) => {
+          if (mine !== seq || !t) return;
+          const hint = new DOMParser().parseFromString(t, "text/html").querySelector("[data-dup-hint]");
+          if (hint) { hint.querySelectorAll("script").forEach((s) => s.remove()); out.replaceChildren(document.importNode(hint, true)); }
+        })
+        .catch(() => {});
+    };
+    ["email", "phone", "website", "company"].forEach((k) => {
+      const el = f.elements.namedItem(k);
+      if (el) el.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(check, 450); });
+    });
   });
 
   // ── Prevent double submission; the pressed button shows a busy state ──

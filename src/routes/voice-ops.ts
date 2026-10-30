@@ -156,8 +156,9 @@ ${input({ name: "phone", label: "Number", maxlength: 20, required: true })}${inp
 <div>${button("Add to do-not-call", { variant: "secondary" })}</div>
 ${dnc.length ? html`<ul class="faint">${dnc.map((d) => html`<li>${d.phone_e164} · ${label(d.source)} · ${formatDateTime(d.created_at)}</li>`)}</ul>` : html`<p class="faint">No numbers yet.</p>`}</form>
 <form method="post" action="/staff/voice/caller-erasure" class="card stack">${csrf(ctx)}<h3>Erase a caller's data</h3>
-<p class="muted">For callers without an account (account holders use privacy requests). Clears transcripts, recordings, summaries and the number on their calls, and anonymises their consultations and receptionist-created contacts. A do-not-call entry is kept so the opt-out is still honoured.</p>
+<p class="muted">For callers without an account (account holders use privacy requests). Clears transcripts, recordings, summaries and the number on their calls, anonymises their consultations and the CRM contacts identified only by this number (receptionist- or research-created; customers and businesses that share the number are kept), and removes the number from CRM identity records and the duplicate review queue. A do-not-call entry is kept so the opt-out is still honoured.</p>
 ${input({ name: "phone", label: "Caller's number", maxlength: 20, required: true })}${textarea({ name: "note", label: "Who asked, and how", rows: 2, maxlength: 300, required: true })}
+<label class="checkbox"><input type="checkbox" name="allow_reimport" value="1"> Allow research imports to add this number again (by default a one-way hash is kept so it is not re-imported)</label>
 <div>${button("Erase caller data", { variant: "danger" })}</div></form>
 </div>`;
   return staffPage(ctx, "Receptionist operations", body, status);
@@ -239,7 +240,7 @@ export function register(r: Router): void {
     requireStaff(ctx, "voice.manage");
     const f = await ctx.form();
     try {
-      const n = await eraseCallerData(ctx.db, ctx.user!.id, str(f, "phone"), str(f, "note"));
+      const n = await eraseCallerData(ctx.db, ctx.user!.id, str(f, "phone"), str(f, "note"), { blockReimport: str(f, "allow_reimport") !== "1" });
       return back(ctx, `Caller data erased: ${n.calls} calls, ${n.consultations} consultations, ${n.contacts} contacts.`);
     } catch (e) {
       if (statusOf(e) === 422) return opsPage(ctx, [(e as Error).message], undefined, 422);

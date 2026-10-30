@@ -37,7 +37,7 @@ export async function claimAiJob(db: Db, runnerId: string, now = new Date()) {
       continue;
     }
     if (job.workflow === DIAGNOSTIC_WORKFLOW) {
-      // Node 1 diagnostic (migration 0048): D03–D06 are written here, at the moment of the claim.
+      // Node 1 diagnostic (migration 0050): D03–D06 are written here, at the moment of the claim.
       const attempt = (await db.prepare(`SELECT attempts FROM ai_job_leases WHERE job_id = ?`).bind(c.id).first<{ attempts: number }>())?.attempts ?? 1;
       // A cold load of a large model can take minutes: the diagnostic gets a longer lease than a draft.
       const diagExpires = new Date(now.getTime() + DIAGNOSTIC_LEASE_S * 1000).toISOString();

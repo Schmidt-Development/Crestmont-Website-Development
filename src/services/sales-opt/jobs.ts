@@ -8,6 +8,7 @@ import { audit } from "../security.ts";
 import { LOCAL_RUNNER } from "../ai.ts";
 import { SALES_OPT_WORKFLOW_PREFIX } from "../ai-runner.ts";
 import { redactSensitive } from "../voice-common.ts";
+import { scrubOrphanedProposalEvidence } from "../sales-opt-erasure.ts";
 import { ANALYZER_VERSION, analysisPrompt, deterministicFindings, extractJson, groundAnalysis, parseProposal, proposalPrompt, type EvidenceItem, type GroundedFinding, type ProposalContext } from "../../domain/sales-opt/analysis.ts";
 import { SCENARIOS, assertScenario, simulationPrompt } from "../../domain/sales-opt/evaluation.ts";
 import { composeSalesPrompt, hasProtectedPolicy, salesPolicyViolations } from "../../domain/sales-opt/policy.ts";
@@ -122,7 +123,10 @@ export async function consumeAnalyses(db: Db, now = new Date()): Promise<{ done:
 /** Retention: evidence quotes go when the call's transcript goes (retention.voice_transcripts_days / caller erasure). */
 export async function purgeOrphanedEvidence(db: Db): Promise<number> {
   // The model-written label can paraphrase the caller, so it goes too (replaced by the category).
-  return (await db.prepare(`UPDATE so_findings SET evidence_quote = NULL, label = category WHERE (evidence_quote IS NOT NULL OR label <> category) AND call_id IN (SELECT id FROM calls WHERE transcript IS NULL)`).run()).meta.changes;
+  const n = (await db.prepare(`UPDATE so_findings SET evidence_quote = NULL, label = category WHERE (evidence_quote IS NOT NULL OR label <> category) AND call_id IN (SELECT id FROM calls WHERE transcript IS NULL)`).run()).meta.changes;
+  // Proposal jobs copied quotes and labels into evidence_json; they go too (privacy erasure audit, PR #50).
+  await scrubOrphanedProposalEvidence(db);
+  return n;
 }
 
 // ───────────── Evaluation ─────────────

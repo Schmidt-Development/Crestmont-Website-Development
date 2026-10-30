@@ -1,6 +1,7 @@
 // Scheduled jobs (Cloudflare Cron Triggers → worker `scheduled`). Each job is isolated: one failing
 // job never stops the others, and every run is recorded in ingestion_status ("job:<name>") so the
 // Readiness self-monitoring can show stale or failing automation instead of silently trusting it.
+import { configureErasureKeysFromEnv } from "../services/contact-identity.ts";
 import type { Env } from "./context.ts";
 import { buildContext } from "./app.ts";
 import { nowIso } from "../lib/db.ts";
@@ -93,6 +94,7 @@ async function record(env: Env, job: string, at: string, error: string | null) {
 }
 
 export async function scheduled(controller: { cron: string }, env: Env): Promise<void> {
+  configureErasureKeysFromEnv(env);
   const jobs = SCHEDULE[controller.cron];
   if (!jobs) { console.error(JSON.stringify({ level: "error", message: `No jobs for cron ${controller.cron}` })); return; }
   const at = nowIso();

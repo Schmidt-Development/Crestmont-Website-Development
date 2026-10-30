@@ -417,8 +417,9 @@ details.card[open] > summary { margin-bottom: var(--s-4); }
    Rendered by the server on the first public page view of a browser session. Pure CSS timeline:
    mark 0–450 ms, tiles clear in seeded random order (each 110 ms, starts spread over 230 ms), overlay hidden at
    ~900 ms and removed by app.js. pointer-events:none throughout; hidden for reduced motion and without JS. */
-.intro { --hold: 430ms; position: fixed; inset: 0; z-index: 300; pointer-events: none; animation: intro-done 1ms linear forwards; animation-delay: 950ms; }
-.intro__tiles { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(12, 1fr); grid-template-rows: repeat(7, 1fr); }
+.intro { --hold: 430ms; position: fixed; inset: 0; z-index: 300; pointer-events: none; overflow: hidden; animation: intro-done 1ms linear forwards; animation-delay: 950ms; }
+/* minmax(0, …): 12 tiles must fit any phone (a 1fr track keeps its content's minimum, which made the intro 360px wide on 320–359px screens). */
+.intro__tiles { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); grid-template-rows: repeat(7, minmax(0, 1fr)); }
 .intro__tiles i { background: #141414; box-shadow: 0 0 0 1px #141414; animation: intro-tile 110ms linear forwards; animation-delay: calc(var(--hold) + var(--d, 0ms)); }
 .intro__mark { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 12px; color: #fff; animation: intro-mark-in 160ms var(--ease-out) both, intro-mark-out 60ms linear forwards; animation-delay: 0ms, calc(var(--hold) - 40ms); }
 .intro__mark img { width: 42px; height: 41px; }
@@ -784,7 +785,9 @@ a.shot { display: block; cursor: zoom-in; }
 .faq__title { font: 500 clamp(2.2rem, 4.4vw, 3.6rem)/1.02 var(--font-display); letter-spacing: -.045em; max-width: 9ch; margin: 0; }
 .faq__aside { position: sticky; top: calc(var(--header-h) + 24px); }
 .faq__aside p { color: var(--text-2); margin-top: var(--s-5); max-width: 22rem; }
-@media (max-width: 860px) { .faq { grid-template-columns: 1fr; } .faq__aside { position: static; } }
+/* minmax(0, 1fr) + anywhere-wrap: the long support address must wrap on 320–360px phones, never widen the page. */
+.faq__aside a { overflow-wrap: anywhere; }
+@media (max-width: 860px) { .faq { grid-template-columns: minmax(0, 1fr); } .faq__aside { position: static; } }
 
 /* M10 — closing CTA band */
 .cta-band { position: relative; overflow: hidden; border-radius: var(--r-4); margin: 0 var(--gutter); }
@@ -1895,7 +1898,7 @@ html.has-intro .cb { animation: show-now 1ms linear 2.4s backwards; }
 .cx-card { position: relative; z-index: 2; width: min(100%, 760px); padding: clamp(1.25rem, 4vw, 2.75rem); border-radius: 26px; border: 1px solid var(--line-gold); background: linear-gradient(180deg, rgba(26,22,14,.92), rgba(12,12,12,.96)); box-shadow: 0 50px 100px -40px rgba(0,0,0,.95), 0 0 0 1px rgba(0,0,0,.6), 0 0 80px -30px rgba(215,181,111,calc(.15 + var(--cx-p) * .35)); backdrop-filter: blur(8px); transition: box-shadow 600ms var(--ease-out); }
 .cx-card::before { content: ""; position: absolute; left: 10%; right: 10%; top: -1px; height: 1px; background: linear-gradient(90deg, transparent, var(--gold-2), transparent); opacity: calc(.4 + var(--cx-p) * .6); }
 /* the workspace around the card */
-.cx-ws { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+.cx-ws { position: absolute; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; } /* decorative orbs drift: never widen the page (contact, 320–360px phones) */
 .cx-ws__item { position: absolute; display: grid; gap: 6px; padding: 14px; border-radius: 16px; border: 1px solid var(--line-2); background: linear-gradient(160deg, var(--ink-3), var(--ink-1)); box-shadow: 0 24px 50px -24px rgba(0,0,0,.9); opacity: .55; transform: translate(var(--tx, 0), var(--ty, 0)) rotate(var(--rot, 0deg)); transition: opacity 500ms var(--ease-out), border-color 500ms, box-shadow 500ms, transform 700ms var(--ease-out); }
 .cx-ws__item i { display: block; height: 6px; border-radius: 3px; background: var(--ink-4); }
 .cx-ws__item em { font: 600 18px/1 var(--font-mono); color: var(--text-3); font-style: normal; }

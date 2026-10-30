@@ -41,7 +41,7 @@ Questions for the Founder and attorney before any of these are switched on:
 
 ## 4. Deletion requests vs. retention
 
-A customer's deletion request (`/account/privacy`) is processed by staff (`src/services/privacy.ts`). It anonymises the user, revokes sessions and keeps the financial and agreement records the law requires. The retention job is separate. It applies time limits to operational data regardless of requests.
+A customer's deletion request (`/account/privacy`) is processed by staff (`src/services/privacy.ts`). It anonymises the user, revokes sessions and keeps the financial and agreement records the law requires. It also erases the person's phone numbers and email addresses from the CRM identity records, including held research candidates and duplicate-review items (`src/services/identity-erasure.ts`; details and what is kept, such as do-not-call entries and optional re-import tombstones keyed with a Worker secret, and the sales-analysis text of their calls, in `docs/crm-identity/RUNBOOK.md` §5a). Receptionist caller erasure and the Owner's CRM identity erasure run the same step. The retention job is separate. It applies time limits to operational data regardless of requests.
 
 ## 5. Backups
 

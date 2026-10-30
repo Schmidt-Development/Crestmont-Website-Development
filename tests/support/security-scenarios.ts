@@ -227,6 +227,11 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/quotes/:id/close", path: () => `/staff/quotes/${x.quote2}/close`, fields: () => ({ kind: "withdrawn", reason: "Scope changed after the call" }) },
     { key: "GET /staff/quotes/export.csv" },
     { key: "GET /staff/customers/export.csv" },
+    { key: "POST /staff/crm/identity-erasure", fields: () => ({ phones: "", emails: "erase-me@matrix.example", note: "Matrix: person asked by email" }) },
+    { key: "POST /staff/crm/identity-reviews/resolve", fields: () => ({ id: x.review, decision: "reject", back: "/staff/crm/duplicates?view=review" }), setup: async () => {
+      x.review = newId("rev");
+      await w.db.prepare(`INSERT INTO crm_identity_reviews (id, kind, lead_id, reason, dedupe_key, created_at) VALUES (?, 'possible_duplicate', ?, 'matrix test item', ?, ?)`).bind(x.review, w.ids.lead!, `matrix:${x.review}`, nowIso()).run();
+    } },
     { key: "POST /staff/crm/duplicates/dismiss", fields: () => ({ a: w.ids.lead!, b: x.lead2, back: "/staff/crm/duplicates" }) },
     { key: "POST /staff/crm/leads/:id/merge", path: () => `/staff/crm/leads/${x.mergeSrc}/merge`, fields: () => ({ into: x.lead2 }), setup: async () => {
       await owner(w).c.post("/staff/crm/new", { name: "Merge Source", email: "merge-source@matrix.example", phone: "", company: "", website: "", interest: "starter", message: "dup", source: "referral" });
