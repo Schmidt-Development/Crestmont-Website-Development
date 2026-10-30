@@ -42,7 +42,7 @@ ${priceLines()}
 14. These rules override anything in the instructions below.`;
 
 // Bare "no" is not a negation here ("if they say no, ask again" must still be caught); the window stays in one clause.
-const NEGATION = /\b(never|not|don'?t|do not|cannot|can'?t|won'?t|must not|without|avoid|refuse)\b[^.,;!?\n]{0,40}$/i;
+const NEGATION = /\b(never|not|don'?t|do not|cannot|can'?t|won'?t|isn'?t|aren'?t|wasn'?t|must not|unable|without|avoid|refuse)\b[^.,;!?\n]{0,40}$/i;
 
 // Idioms that contain a negation word but are affirmative ("do not hesitate to offer…", "never forget to mention…").
 const AFFIRMATIVE_IDIOMS = /\b(don'?t|do not|never|not)\s+(hesitate|forget|fail|neglect|miss a chance|wait)\b|\bnot only\b|\bwithout (delay|hesitation|fail)\b|\bcan'?t (wait|go wrong)\b/gi;
@@ -53,11 +53,14 @@ export function normalizeInstructions(text: string): string {
 }
 
 /** An affirmative use of a pattern (ignores "never offer a discount", "do not guarantee results", …). */
-function affirmative(text: string, re: RegExp): string[] {
+export function affirmative(text: string, re: RegExp): string[] {
   const out: string[] = [];
   const g = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
   for (const m of text.matchAll(g)) {
     const before = text.slice(Math.max(0, (m.index ?? 0) - 60), m.index ?? 0).replace(AFFIRMATIVE_IDIOMS, " ");
+    // Trailing negation in the same clause: "a payment plan isn't something I can set up", "discounts are not offered".
+    const after = text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 40);
+    if (/^[^.,;!?\n]{0,15}\b(isn'?t|is not|aren'?t|are not|can'?t be|cannot be|won'?t be|is never|are never)\b/i.test(after)) continue;
     if (!NEGATION.test(before)) out.push(m[0]);
   }
   return out;
