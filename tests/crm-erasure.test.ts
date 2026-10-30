@@ -4,7 +4,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, type SqliteDb } from "../dev/sqlite-d1.ts";
 import { createTestApp, createStaff, createCustomer, TEST_PASSWORD } from "./support/app.ts";
-import { intake, type IntakeOptions } from "../src/services/contact-identity.ts";
+import { intake, configureErasureKeys, configureErasureKeysFromEnv, type IntakeOptions } from "../src/services/contact-identity.ts";
+import { createVersion } from "../src/services/sales-opt/registry.ts";
+import { purgeOrphanedEvidence } from "../src/services/sales-opt/jobs.ts";
+import { sha256Hex } from "../src/lib/crypto.ts";
+
+// Tombstones are keyed with the Worker secret CRM_ERASURE_HMAC_KEY; tests use a throwaway key (≥32 chars).
+const TEST_KEY = "test-erasure-hmac-key-not-a-real-secret-0001";
+configureErasureKeys({ current: TEST_KEY });
 import { eraseIdentityData } from "../src/services/identity-erasure.ts";
 import { eraseCallerData } from "../src/services/voice-ops.ts";
 import { addDnc } from "../src/services/voice-outbound.ts";
@@ -352,4 +359,93 @@ test("[CRM-002] second-review regressions: dedupe keys hold no raw value; long i
   await eraseIdentityData(racing, null, { phones: ["313-555-0161"], blockReimport: true });
   assert.equal(await n(db5, `SELECT COUNT(*) AS n FROM crm_identity_reviews WHERE id = 'rev_mid'`), 0);
   assert.equal(await mentions(db5, "3135550161", "pat@solo.example"), 0);
+});
+
+
+test("[CRM-002] tombstones are keyed HMACs: no fixed-salt hash, a database copy alone cannot test guesses, rotation keeps old tombstones with the previous key, no key = no tombstone (erasure still runs)", async () => {
+  const db = openDb();
+  await seedPerson(db);
+  await eraseIdentityData(db, null, { phones: ["313-555-0161"], blockReimport: true });
+  const rows = (await db.prepare(`SELECT key_hash, key_id FROM crm_erasure_tombstones`).all<{ key_hash: string; key_id: string }>()).results;
+  assert.equal(rows.length, 2);
+  // Not derivable without the key: neither the old fixed-salt scheme nor a plain hash of the value matches.
+  for (const guess of [await sha256Hex("crestmont-crm-erasure:v1|phone:+13135550161"), await sha256Hex("+13135550161"), await sha256Hex("crestmont-crm-erasure:v2|phone:+13135550161")]) {
+    assert.ok(!rows.some((r) => r.key_hash === guess));
+  }
+  assert.ok(rows.every((r) => /^[0-9a-f]{12}$/.test(r.key_id) && !TEST_KEY.includes(r.key_id)));
+  // Another key does not recognise the tombstone…
+  const NEW_KEY = "rotated-erasure-hmac-key-not-real-000000002";
+  configureErasureKeys({ current: NEW_KEY });
+  assert.equal((await intake(db, { businessName: "Solo Repairs", phones: [{ value: "313-555-0161" }] }, research("k1"))).outcome, "CREATED");
+  // …but with the old key kept as PREVIOUS after a rotation, it still blocks.
+  const db2 = openDb();
+  configureErasureKeys({ current: TEST_KEY });
+  await seedPerson(db2);
+  await eraseIdentityData(db2, null, { phones: ["313-555-0161"], blockReimport: true });
+  configureErasureKeys({ current: NEW_KEY, previous: TEST_KEY });
+  assert.equal((await intake(db2, { businessName: "Solo Repairs", phones: [{ value: "313-555-0161" }] }, research("k2"))).outcome, "SUPPRESSED");
+  // Deployed environment without the secret: erasure still erases, but reports that no tombstone could be written.
+  configureErasureKeysFromEnv({ ENVIRONMENT: "staging" });
+  const db3 = openDb();
+  await seedPerson(db3);
+  const r = await eraseIdentityData(db3, null, { phones: ["313-555-0161"], blockReimport: true });
+  assert.equal(r.tombstoneSkipped, true);
+  assert.equal(r.tombstones, 0);
+  assert.equal(await n(db3, `SELECT COUNT(*) AS n FROM crm_erasure_tombstones`), 0);
+  assert.equal(await mentions(db3, "3135550161", "pat@solo.example"), 0, "erasure itself is never blocked by a missing key");
+  // A short key is rejected (treated as not configured): an identifier not in the CRM would get a tombstone, so it is skipped.
+  configureErasureKeys({ current: "too-short" });
+  assert.equal((await eraseIdentityData(openDb(), null, { phones: ["313-555-0199"], blockReimport: true })).tombstoneSkipped, true);
+  configureErasureKeys({ current: TEST_KEY });
+});
+
+/** Sales-optimization data (PR #49) for one call: a finding with a quote, a queued analysis with its model input, and a proposal job that copied the evidence. */
+async function seedSalesCall(db: SqliteDb, callId: string, leadId: string | null, phone: string) {
+  const at = nowIso();
+  const v = await createVersion(db, { parentId: null, instructions: "Baseline sales instructions used only by the privacy erasure tests. They describe a polite, honest sales call.", rationale: "Baseline for tests", authorKind: "import", author: "test" });
+  await db.batch([
+    db.prepare(`INSERT INTO calls (id, provider, provider_call_id, from_number, direction, started_at, lead_id, transcript, summary) VALUES (?,?,?,?,?,?,?,?,?)`).bind(callId, "retell", `p_${callId}`, phone, "inbound", at, leadId, "Agent: hi. Caller: I'm Pat at 313-555-0161.", "Pat asked about pricing"),
+    db.prepare(`INSERT INTO so_analyses (id, call_id, analyzer, status, ai_job_id, created_at) VALUES (?,?,?,?,?,?)`).bind(`ana_${callId}`, callId, "v1", "done", null, at),
+    db.prepare(`INSERT INTO so_findings (id, analysis_id, call_id, category, label, basis, evidence_line, evidence_quote, confidence, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(`fnd_${callId}`, `ana_${callId}`, callId, "objection_price", "Pat said it is too expensive", "observed", 2, "I'm Pat, that's too expensive", 0.9, at),
+    db.prepare(`INSERT INTO ai_jobs (id, workflow, provider, model, status, input_ref, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`).bind(`job_${callId}`, "so_analysis", "local", "m", "queued", `so_analysis:q_${callId}`, at, at),
+    db.prepare(`INSERT INTO ai_job_inputs (job_id, prompt, created_at) VALUES (?,?,?)`).bind(`job_${callId}`, "Transcript: Caller: I'm Pat at 313-555-0161", at),
+    db.prepare(`INSERT INTO so_analyses (id, call_id, analyzer, status, ai_job_id, created_at) VALUES (?,?,?,?,?,?)`).bind(`q_${callId}`, callId, "v2", "queued", `job_${callId}`, at),
+    db.prepare(`INSERT INTO so_proposal_jobs (ai_job_id, parent_version_id, evidence_json, status, created_at) VALUES (?,?,?,?,?)`)
+      .bind(`pj_${callId}`, v.id, JSON.stringify({ currentInstructions: "x", evidence: [{ id: `fnd_${callId}`, category: "objection_price", label: "Pat said it is too expensive", quote: "I'm Pat, that's too expensive" }, { id: "fnd_other", category: "x", label: "x", quote: "other caller" }] }), "accepted", at),
+  ]);
+}
+const salesPii = (db: SqliteDb, callId: string) => n(db, `SELECT
+  (SELECT COUNT(*) FROM so_findings WHERE call_id = ? AND (evidence_quote IS NOT NULL OR label <> category)) +
+  (SELECT COUNT(*) FROM ai_job_inputs WHERE job_id = ?) +
+  (SELECT COUNT(*) FROM so_proposal_jobs WHERE evidence_json LIKE '%Pat%') +
+  (SELECT COUNT(*) FROM calls WHERE id = ? AND (transcript IS NOT NULL OR summary IS NOT NULL OR from_number IS NOT NULL)) +
+  (SELECT COUNT(*) FROM so_analyses WHERE call_id = ? AND status = 'queued') AS n`, callId, `job_${callId}`, callId, callId);
+
+test("[VOICE-005] PR #49 sales-optimization data is erased with the caller: finding quotes and labels, queued model inputs, proposal evidence copies; metrics rows stay", async () => {
+  const db = openDb();
+  const s = await createStaff(db, "owner");
+  await seedSalesCall(db, "call_so1", null, "+13135550161");
+  await db.prepare(`INSERT INTO so_call_facts (call_id, provider_call_id, stage, agent_id, last_event, last_event_rank, updated_at) VALUES ('call_so1','p_call_so1','staging','agent','call_ended',2,?)`).bind(nowIso()).run();
+  assert.ok(await salesPii(db, "call_so1") >= 5);
+  await eraseCallerData(db, s.id, "313-555-0161", "Caller asked by phone");
+  assert.equal(await salesPii(db, "call_so1"), 0);
+  assert.equal(await n(db, `SELECT COUNT(*) AS n FROM so_proposal_jobs WHERE evidence_json LIKE '%other caller%'`), 1, "other callers' evidence is untouched");
+  assert.equal(await n(db, `SELECT COUNT(*) AS n FROM so_call_facts WHERE call_id = 'call_so1'`), 1, "metrics facts (no identifiers) stay");
+  assert.equal(await n(db, `SELECT COUNT(*) AS n FROM so_findings WHERE call_id = 'call_so1'`), 1, "the finding's category stays for aggregate reporting");
+});
+
+test("[CRM-002] CRM identity erasure / account deletion also erase call transcripts and sales-analysis text for the person's leads; retention purge scrubs proposal evidence copies", async () => {
+  const db = openDb();
+  const p = await seedPerson(db);
+  await seedSalesCall(db, "call_so2", p.leadId, "+13135550161");
+  const r = await eraseIdentityData(db, null, { contactIds: [p.contactId!], blockReimport: true });
+  assert.equal(r.calls, 1);
+  assert.equal(r.salesFindingsScrubbed, 1);
+  assert.equal(await salesPii(db, "call_so2"), 0);
+  // Retention path (PR #49 purgeOrphanedEvidence) now also scrubs copies held by proposal jobs.
+  const db2 = openDb();
+  await seedSalesCall(db2, "call_so3", null, "+13135550164");
+  await db2.prepare(`UPDATE calls SET transcript = NULL WHERE id = 'call_so3'`).run();
+  await purgeOrphanedEvidence(db2);
+  assert.equal(await n(db2, `SELECT COUNT(*) AS n FROM so_proposal_jobs WHERE evidence_json LIKE '%Pat%'`), 0);
 });

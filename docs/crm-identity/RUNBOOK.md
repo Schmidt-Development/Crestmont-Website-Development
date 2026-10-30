@@ -21,12 +21,26 @@ record is Owner-only by design.
 
 ## 2. Configuration (per environment)
 
+| Worker secret | Purpose | Staging | Production |
+|---|---|---|---|
+| `CRM_IMPORT_SECRET` | signs research/CRM API imports | derived and put by `deploy-staging.yml` (step *CRM import and erasure keys*) | put manually when the research engine is ready |
+| `CRM_ERASURE_HMAC_KEY` | keys privacy-erasure re-import tombstones (≥32 chars) | derived and put by `deploy-staging.yml` | **put before the first production erasure** |
+| `CRM_ERASURE_HMAC_KEY_PREVIOUS` | the old key after a rotation (old tombstones keep working) | not used | only during/after a rotation |
+
+Staging values are HMAC-derived from the Cloudflare token secret (`scripts/staging-secrets.ts`, labels `crmImport`,
+`crmErasure`): 256-bit, never printed (masked), never committed, stable across deploys (a changing secret blocks
+Worker rollbacks), and put only when they change. Production:
 ```bash
-openssl rand -hex 32 | npx wrangler@4.149.0 secret put CRM_IMPORT_SECRET --env staging      # then production
+openssl rand -hex 32 | npx wrangler@4.149.0 secret put CRM_ERASURE_HMAC_KEY --env production
+openssl rand -hex 32 | npx wrangler@4.149.0 secret put CRM_IMPORT_SECRET --env production   # when the engine is ready
 ```
-Store it in the Founder's password manager and give the same value to the research engine. Until it is set the import
-endpoint answers `503` (fail closed). Rotate by putting a new value and updating the engine (requests signed with the old
-secret then get `401`; retry with the same idempotency key is safe).
+Store both in the Founder's password manager; give `CRM_IMPORT_SECRET` to the research engine. Without
+`CRM_IMPORT_SECRET` the import endpoint answers `503`. Without `CRM_ERASURE_HMAC_KEY` erasures still run but no
+re-import tombstone is written (the Owner sees a warning and the audit entry records `tombstoneSkipped`).
+
+**Rotating the erasure key.** Tombstones cannot be re-keyed (they hold no raw value). Put the current value as
+`CRM_ERASURE_HMAC_KEY_PREVIOUS`, then a new `CRM_ERASURE_HMAC_KEY`; keep PREVIOUS for as long as earlier tombstones
+must keep blocking re-import. `crm_erasure_tombstones.key_id` shows which key wrote each row.
 
 ## 3. Release sequence
 
@@ -45,6 +59,10 @@ secret then get `401`; retry with the same idempotency key is safe).
 - [ ] Lead page shows **Contact identity & provenance**; CRM → Duplicates → Review queue and Duplicate prevention render.
 - [ ] Import API: unsigned request → 401; with `CRM_IMPORT_SECRET` set on staging, a signed `dryRun` batch → 200 and
       no rows written; a signed real batch with one known number → `NO_CHANGE`/`EXISTING_*`, with a DNC number → `SUPPRESSED`.
+
+These checks are automated: every staging deploy runs `scripts/crm-staging-e2e.ts` (step *CRM duplicate protection
+E2E*) against the live Worker and the real staging D1 with synthetic data, and reports per-check results in the run
+summary and as annotations.
 - [ ] Owner: CRM → Duplicates → Review queue → *Erase a person's CRM data* for a test research record → its contact,
       identifiers and review items are gone; re-importing it returns `SUPPRESSED`; `crm_erasure_tombstones` has one row
       per identifier and no raw value.
@@ -53,6 +71,11 @@ secret then get `401`; retry with the same idempotency key is safe).
 ## 4. Historical duplicate remediation (dry run first, never automatic)
 
 ```bash
+# Preferred: Actions → "CRM duplicate audit (production, read-only)" → Run workflow. It runs in the `production`
+# environment (Founder approval), sends SELECT statements only (no export, the database is never paused) and prints
+# counts by class. Locally, with production credentials:
+node --no-warnings scripts/crm-duplicate-audit.ts --remote crestmont-production --env production
+# For per-record review (Founder only, never commit the output):
 npx wrangler@4.149.0 d1 export crestmont-production --remote --env production --output crm-export.sql
 sqlite3 crm.sqlite < crm-export.sql
 node --no-warnings scripts/crm-duplicate-audit.ts --db crm.sqlite --out audit.json --md audit.md          # ids only
@@ -116,7 +139,12 @@ What it removes (one atomic batch):
   held research candidate, review value or field-history value that normalizes to them (any formatting or case),
   **including review items that were never linked to a contact**. An item attached to another, legitimate record is
   kept for that record but its candidate data and matching values are replaced with `[erased]`.
-- **Optionally (default on)** a re-import tombstone: salted SHA-256 of the normalized identifier, no name, no id.
+- **Calls of the erased contacts' leads**: transcript, recording link, summary and inbound number, plus the
+  sales-optimization text derived from them (PR #49): `so_findings` quotes and labels, queued model inputs
+  (`ai_job_inputs`), and quotes/labels copied into `so_proposal_jobs.evidence_json`. Call outcomes, timings, costs and
+  `so_call_facts` / `so_attributions` (ids, flags, payment links; no direct identifiers) stay for reporting.
+- **Optionally (default on)** a re-import tombstone: HMAC-SHA256 keyed with the Worker secret `CRM_ERASURE_HMAC_KEY`
+  (never in D1 or the source), no name, no id.
   Research/CRM API imports of it return `SUPPRESSED` (`erased_at_request`). A person who contacts Crestmont again
   themselves (form, call) is not blocked. Untick *Allow research imports…* to skip the tombstone.
 
@@ -136,8 +164,18 @@ tombstone. The erasure re-plans if any identity link, review item or field-histo
 and its commit (`crm_write_guard`); held research candidates are decoded and checked row by row (no text filter, no
 truncation). Review dedupe keys hold a digest, never the proposed value.
 
-Tombstones are minimization, not anonymity: a phone number's keyspace is small enough that a hash can be brute-forced
-by someone holding the database. They contain nothing else and are needed only to honour the request.
+Tombstones are keyed: without the Worker secret, a copy of the database cannot be used to test whether a given phone
+number or email was erased. With the secret the check is possible by design (that is how re-import is refused).
+
+PR #49 sales-optimization audit (what holds personal data and how erasure treats it):
+
+| Table / field | Personal data | Erasure |
+|---|---|---|
+| `so_findings.evidence_quote`, `label` | redacted transcript quote; model paraphrase of the caller | scrubbed in the erasure batch (label → category) |
+| `so_proposal_jobs.evidence_json` | copies of quotes and labels | scrubbed in the erasure batch; the retention purge now also scrubs copies |
+| `ai_job_inputs` of queued analyses | redacted transcript sent to the local model | deleted; the analysis is marked skipped |
+| `so_call_facts`, `so_attributions`, `so_analyses.detail`, `so_webhook_receipts`, `so_eval_*` | ids, flags, counts, payment links, simulated transcripts | kept (no direct identifiers) |
+| `so_versions.rationale` | AI-written text that could paraphrase a call | **cannot be scrubbed** (versions are immutable by design, PR #49). Evidence there is ids/categories only. Residual risk: review AI rationales before approving a version |
 
 ## 6. Rollback
 
@@ -150,7 +188,7 @@ Code rollback does not undo migrations (DEPLOYMENT.md). In order of preference:
    write after the bookmark.
 3. **Schema rollback** (remove 0049 / 0048 but keep later data): deploy the previous code first, export, then apply
    [`rollback-0049.sql`](rollback-0049.sql) (drops only the tombstone table: erased identifiers become importable
-   again; erasures are not undone) and, if needed, [`rollback-0048.sql`](rollback-0048.sql). It drops only what 0048 added (identity, ledger, review, decision
+   again; erasures are not undone; the Worker secrets can stay) and, if needed, [`rollback-0048.sql`](rollback-0048.sql). It drops only what 0048 added (identity, ledger, review, decision
    tables, triggers, views, the added columns) and removes the `d1_migrations` row so 0048 can be re-applied later.
    Contacts, companies, leads and calls are untouched (tests: case 20 in `tests/crm-identity.test.ts`, and the
    0048 + 0049 migration/rollback test in `tests/crm-erasure.test.ts`).

@@ -28,6 +28,8 @@ const env: Env = {
   ENVIRONMENT: "development",
   APP_URL: process.env.APP_URL ?? `http://localhost:${port}`,
   EVIDENCE_INGEST_SECRET: process.env.EVIDENCE_INGEST_SECRET,
+  CRM_IMPORT_SECRET: process.env.CRM_IMPORT_SECRET,
+  CRM_ERASURE_HMAC_KEY: process.env.CRM_ERASURE_HMAC_KEY,
   STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET,
   STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY,
   VOICE_WEBHOOK_SECRET: process.env.VOICE_WEBHOOK_SECRET,

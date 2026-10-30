@@ -1,5 +1,6 @@
 // Owner reporting and caller privacy for the AI receptionist (VOICE-005, VOICE-006, SEC-006).
 import { eraseIdentityData } from "./identity-erasure.ts";
+import { salesOptErasureStatements } from "./sales-opt-erasure.ts";
 import type { Db } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import { audit } from "./security.ts";
@@ -99,6 +100,8 @@ export async function eraseCallerData(db: Db, staffUserId: string, phoneRaw: str
     ...leadIds.map((id) => db.prepare(`UPDATE leads SET message = 'Details erased at the caller''s request' WHERE id = ? AND source = 'ai_receptionist'`).bind(id)),
     ...leadIds.map((id) => db.prepare(`UPDATE crm_activities SET body = 'Details erased at the caller''s request' WHERE lead_id = ? AND kind IN ('call','task') AND lead_id IN (SELECT id FROM leads WHERE source = 'ai_receptionist')`).bind(id)),
     ...(subjects.length ? [db.prepare(`DELETE FROM notifications WHERE subject_id IN (${inList(subjects.length)})`).bind(...subjects)] : []),
+    // Sales-analysis text derived from these calls (quotes, labels, queued model inputs, proposal evidence copies).
+    ...(await salesOptErasureStatements(db, callIds)).stmts,
     db.prepare(`UPDATE voice_dnc SET detail = NULL WHERE phone_e164 = ?`).bind(phone),
     // Order matters: detach outbound requests from consents before deleting them.
     db.prepare(`UPDATE voice_outbound_requests SET consent_id = NULL WHERE phone_e164 = ? OR consent_id IN (SELECT id FROM voice_call_consents WHERE phone_e164 = ?)`).bind(phone, phone),

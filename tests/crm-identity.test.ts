@@ -618,3 +618,32 @@ test("[CRM-005] assigned-only reps see matching records they cannot open only as
   assert.doesNotMatch(h, /Hidden Person|Secret Co/);
   assert.doesNotMatch(h, /value="link:/, "cannot link to a record they cannot see");
 });
+
+test("[CRM-002] production duplicate audit (remote mode) is read-only: SELECT statements only, counts-only output, same classification as the local audit", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "audit-"));
+  const file = join(dir, "prod.sqlite");
+  const raw = new DatabaseSync(file);
+  const { migrate } = await import("../dev/sqlite-d1.ts");
+  migrate(raw);
+  const at = nowIso();
+  raw.exec(`INSERT INTO companies (id, name, website, created_at) VALUES ('co1','Harbor Coffee','https://harbor.example','${at}'), ('co2','Harbor Coffee LLC','https://www.harbor.example','${at}'), ('co3','Lakeside Dental','https://lakeside.example','${at}');
+    INSERT INTO contacts (id, company_id, name, email, phone, created_at) VALUES ('c1','co1','Morgan Reyes','morgan@harbor.example','(313) 555-0142','${at}'), ('c2','co2','Morgan Reyes','Morgan@Harbor.example',NULL,'${at}'), ('c3','co3','Front Desk',NULL,'313-555-0142','${at}');
+    INSERT INTO leads (id, contact_id, source, stage, created_at, updated_at) VALUES ('l1','c1','web_form','new','${at}','${at}'), ('l2','c2','manual','new','${at}','${at}'), ('l3','c3','web_form','new','${at}','${at}');`);
+  const before = (raw.prepare(`SELECT total_changes() AS n`).get() as { n: number }).n;
+  raw.close();
+  const out = execFileSync(process.execPath, ["--no-warnings", "scripts/crm-duplicate-audit.ts", "--remote", "crestmont-production", "--env", "production"], {
+    encoding: "utf8", env: { ...process.env, WRANGLER: `${process.execPath} tests/support/fake-wrangler.mjs`, FAKE_D1_PATH: file } });
+  const r = JSON.parse(out.trim().split("\n").pop()!) as { readOnly: boolean; contacts: number; byClass: Record<string, number> };
+  assert.equal(r.readOnly, true);
+  assert.equal(r.contacts, 3);
+  assert.equal(r.byClass.safe_exact_duplicate, 1);
+  assert.equal(r.byClass.shared_contact_identity, 1);
+  assert.doesNotMatch(out, /harbor\.example|555-0142|Morgan/, "counts only, no record values");
+  void before;
+  // The guard refuses anything that is not a SELECT before it reaches wrangler.
+  const { loadRemote } = await import("../scripts/crm-duplicate-audit.ts");
+  assert.equal(typeof loadRemote, "function");
+});

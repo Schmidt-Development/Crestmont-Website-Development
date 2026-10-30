@@ -22,6 +22,7 @@
 // founder review queue (kind historical_duplicate); applying that file is a separate, deliberate step.
 import { DatabaseSync } from "node:sqlite";
 import { writeFileSync, existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { phoneKey, emailKey, domainKey, companyKey } from "../src/services/contact-identity.ts";
 
 type Klass = "existing_customer_conflict" | "shared_contact_identity" | "conflicting_records" | "safe_exact_duplicate" | "probable_duplicate";
@@ -154,8 +155,47 @@ export function markdown(report: AuditReport, values?: Map<string, AuditContact>
   return out.join("\n");
 }
 
+/**
+ * READ-ONLY remote mode: pulls only the columns the audit needs from a D1 database with SELECT statements (no export,
+ * so the database is never paused or locked) into an in-memory SQLite copy, then audits that copy. Every statement is
+ * built here and checked to be a SELECT before it is sent.
+ */
+export function loadRemote(database: string, env: string): DatabaseSync {
+  const [cmd, ...base] = (process.env.WRANGLER ?? "npx --yes wrangler@4.149.0").split(" ").filter(Boolean);
+  const select = (sql: string): Record<string, unknown>[] => {
+    if (!/^\s*SELECT\b/i.test(sql) || /;\s*\S/.test(sql) || /\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|PRAGMA|ATTACH)\b/i.test(sql)) throw new Error("read-only audit: refusing a non-SELECT statement");
+    const out = execFileSync(cmd, [...base, "d1", "execute", database, "--remote", "--env", env, "--json", "--command", sql], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
+    return (JSON.parse(out.slice(out.indexOf("["))) as { results: Record<string, unknown>[] }[])[0]?.results ?? [];
+  };
+  const cols = (table: string) => new Set(select(`SELECT name FROM pragma_table_info('${table}')`).map((r) => String(r.name)));
+  const mem = new DatabaseSync(":memory:");
+  const spec: [string, string[]][] = [
+    ["companies", ["id", "name", "website", "organization_id", ...(cols("companies").has("location_norm") ? ["location_norm"] : [])]],
+    ["contacts", ["id", "company_id", "name", "email", "phone", "user_id"]],
+    ["leads", ["id", "contact_id", "stage", ...(cols("leads").has("merged_into_lead_id") ? ["merged_into_lead_id"] : [])]],
+    ["memberships", ["user_id", "organization_id", "role_id"]],
+  ];
+  for (const [t, c] of spec) {
+    mem.exec(`CREATE TABLE ${t} (${c.map((x) => `${x} TEXT`).join(", ")})`);
+    const ins = mem.prepare(`INSERT INTO ${t} VALUES (${c.map(() => "?").join(",")})`);
+    for (let offset = 0; ; offset += 5000) {
+      const rows = select(`SELECT ${c.join(", ")} FROM ${t} ORDER BY rowid LIMIT 5000 OFFSET ${offset}`);
+      for (const r of rows) ins.run(...c.map((x) => (r[x] === undefined ? null : r[x]) as string | null));
+      if (rows.length < 5000) break;
+    }
+  }
+  return mem;
+}
+
 if (import.meta.main) {
   const arg = (k: string) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : undefined; };
+  if (arg("--remote")) {
+    // Counts and ids only (the repository and its logs are public): never --show-values in remote mode.
+    const report = auditDatabase(loadRemote(arg("--remote")!, arg("--env") ?? "production"));
+    if (arg("--out")) writeFileSync(arg("--out")!, JSON.stringify({ ...report, groupsDetail: report.groupsDetail.map((g) => ({ id: g.id, klass: g.klass, size: g.contacts.length, keys: g.keys })) }, null, 2));
+    console.log(JSON.stringify({ database: arg("--remote"), readOnly: true, contacts: report.contacts, groups: report.groups, byClass: report.byClass, invalidIdentifiers: report.invalidIdentifiers }));
+    process.exit(0);
+  }
   const path = arg("--db");
   if (!path || !existsSync(path)) { console.error("Usage: node --no-warnings scripts/crm-duplicate-audit.ts --db <sqlite file> [--out report.json] [--md report.md] [--emit-review-sql file.sql] [--show-values]"); process.exit(2); }
   const db = new DatabaseSync(path, { readOnly: true });

@@ -21,7 +21,8 @@
 // The audit entry holds counts only, never the identifiers.
 import type { Db, DbStatement } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
-import { phoneKey, emailKey, RACE_GUARD, tombstoneHash } from "./contact-identity.ts";
+import { phoneKey, emailKey, RACE_GUARD, tombstoneHash, currentErasureKeyId, erasureKeyConfigured } from "./contact-identity.ts";
+import { salesOptErasureStatements } from "./sales-opt-erasure.ts";
 
 export interface ErasureRequest {
   phones?: string[];
@@ -34,6 +35,10 @@ export interface ErasureRequest {
 export interface ErasureResult {
   identifiers: number; exclusive: number; sharedKept: number; contacts: number; leadsScrubbed: number;
   reviewsDeleted: number; reviewsScrubbed: number; fieldChangesScrubbed: number; identitiesDeleted: number; enrollmentsDeleted: number; tombstones: number;
+  /** Re-import block requested but CRM_ERASURE_HMAC_KEY is not configured: no tombstone could be written. */
+  tombstoneSkipped: boolean;
+  /** Calls of the erased contacts' leads whose transcript/recording/summary and sales-analysis text were erased. */
+  calls: number; salesFindingsScrubbed: number;
 }
 export class ErasureError extends Error {
   readonly status: number;
@@ -244,13 +249,26 @@ async function eraseOnce(db: Db, actorUserId: string | null, req: ErasureRequest
 
   // 4. Tombstones (exclusive identifiers only: a shared line must stay importable for the business that owns it).
   let tombstones = 0;
-  if (req.blockReimport) for (const k of exclusiveKeys) {
-    stmts.push(db.prepare(`INSERT INTO crm_erasure_tombstones (key_hash, kind, reason, created_at) VALUES (?, ?, 'erasure_request', ?) ON CONFLICT(key_hash) DO NOTHING`).bind(await tombstoneHash(k.kind, k.value), k.kind, at));
+  const tombstoneSkipped = req.blockReimport && exclusiveKeys.length > 0 && !erasureKeyConfigured();
+  if (req.blockReimport && !tombstoneSkipped) for (const k of exclusiveKeys) {
+    const h = (await tombstoneHash(k.kind, k.value))!;
+    stmts.push(db.prepare(`INSERT INTO crm_erasure_tombstones (key_hash, kind, reason, key_id, created_at) VALUES (?, ?, 'erasure_request', ?, ?) ON CONFLICT(key_hash) DO NOTHING`).bind(h, k.kind, await currentErasureKeyId(), at));
     tombstones++;
   }
 
+  // 5. Calls of the erased contacts' leads: transcript, recording, summary and inbound number, plus the sales-analysis
+  //    text derived from them (PR #49 so_* tables). Outcomes, timings and costs stay for reporting.
+  const callIds = subjectIds.length ? (await chunked(subjectIds, 80, async (c) => (await db.prepare(`SELECT id FROM calls WHERE lead_id IN (SELECT id FROM leads WHERE contact_id IN (${ph(c.length)}))`).bind(...c).all<{ id: string }>()).results.map((r) => r.id))) : [];
+  for (let i = 0; i < callIds.length; i += 80) {
+    const c = callIds.slice(i, i + 80);
+    stmts.push(db.prepare(`UPDATE calls SET transcript = NULL, recording_url = NULL, summary = NULL, from_number = CASE WHEN direction = 'inbound' THEN NULL ELSE from_number END WHERE id IN (${ph(c.length)})`).bind(...c));
+  }
+  const so = await salesOptErasureStatements(db, callIds);
+  stmts.push(...so.stmts);
+
   const result: ErasureResult = { identifiers: keyList.length, exclusive: exclusiveKeys.length, sharedKept: keyList.length - exclusiveKeys.length, contacts: subjectIds.length, leadsScrubbed,
-    reviewsDeleted, reviewsScrubbed, fieldChangesScrubbed, identitiesDeleted: exclusiveIdentityIds.length, enrollmentsDeleted, tombstones };
+    reviewsDeleted, reviewsScrubbed, fieldChangesScrubbed, identitiesDeleted: exclusiveIdentityIds.length, enrollmentsDeleted, tombstones, tombstoneSkipped,
+    calls: callIds.length, salesFindingsScrubbed: so.findings };
   stmts.push(db.prepare(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES (?,?,?,?,?,?,?,?)`)
     .bind(actorUserId, actorUserId ? "user" : "system", opts.action ?? "crm.identity_erased", "crm_identity", null, JSON.stringify({ ...result, blockReimport: req.blockReimport, ...(opts.note ? { note: opts.note.slice(0, 300) } : {}) }), opts.ip ?? null, at));
   await db.batch(stmts);

@@ -17,7 +17,7 @@
 //    do-not-call, calling window, caps) and outreach-ledger.ts; both fail closed.
 import type { Db, DbStatement } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
-import { sha256Hex } from "../lib/crypto.ts";
+import { sha256Hex, hmacSha256Hex } from "../lib/crypto.ts";
 import type { Actor } from "../domain/authz.ts";
 import { can } from "../domain/authz.ts";
 
@@ -37,9 +37,29 @@ function fnv1a(str: string): string {
   return h.toString(16);
 }
 
-/** Salted hash of a normalized identifier, used for erasure tombstones (migration 0049, identity-erasure.ts). */
-export async function tombstoneHash(kind: "phone" | "email", value: string): Promise<string> {
-  return sha256Hex(`crestmont-crm-erasure:v1|${kind}:${value}`);
+// ───────────── Erasure tombstone keys (secret-backed keyed HMAC) ─────────────
+// Tombstones (migration 0049) are HMAC-SHA256(CRM_ERASURE_HMAC_KEY, identifier). The key is a Worker secret, never in
+// the database or the source, so someone holding only a database copy cannot test guesses (a phone number's small
+// keyspace made the earlier fixed-salt hash brute-forceable). CRM_ERASURE_HMAC_KEY_PREVIOUS (optional) keeps tombstones
+// written before a rotation effective. Without a key no tombstone is written or matched (erasure itself still runs).
+const erasureKeys: { current: string | null; previous: string | null } = { current: null, previous: null };
+const MIN_KEY_LENGTH = 32;
+const validKey = (k: string | null | undefined) => (k && k.length >= MIN_KEY_LENGTH ? k : null);
+export function configureErasureKeys(k: { current?: string | null; previous?: string | null }): void {
+  erasureKeys.current = validKey(k.current);
+  erasureKeys.previous = validKey(k.previous);
+}
+/** Per request / scheduled run. Deployed environments use exactly what is configured; development keeps a test key. */
+export function configureErasureKeysFromEnv(env: { CRM_ERASURE_HMAC_KEY?: string; CRM_ERASURE_HMAC_KEY_PREVIOUS?: string; ENVIRONMENT?: string }): void {
+  if (env.CRM_ERASURE_HMAC_KEY || env.ENVIRONMENT === "staging" || env.ENVIRONMENT === "production") configureErasureKeys({ current: env.CRM_ERASURE_HMAC_KEY, previous: env.CRM_ERASURE_HMAC_KEY_PREVIOUS });
+}
+export const erasureKeyConfigured = () => erasureKeys.current !== null;
+/** Short public identifier of a key (for rotation bookkeeping); reveals nothing about the key. */
+export async function erasureKeyId(key: string): Promise<string> { return (await hmacSha256Hex(key, "crestmont-crm-erasure-key-id")).slice(0, 12); }
+export async function currentErasureKeyId(): Promise<string | null> { return erasureKeys.current ? erasureKeyId(erasureKeys.current) : null; }
+/** Keyed tombstone hash of a normalized identifier under the current key (null when no key is configured). */
+export async function tombstoneHash(kind: "phone" | "email", value: string, key: string | null = erasureKeys.current): Promise<string | null> {
+  return key ? hmacSha256Hex(key, `crestmont-crm-erasure:v2|${kind}:${value}`) : null;
 }
 
 // ───────────── Normalization ─────────────
@@ -227,8 +247,15 @@ async function linkedContacts(db: Db, identityIds: string[]): Promise<{ identity
 }
 
 export interface Suppression { phone: boolean; email: boolean; /** an erasure tombstone exists for one of the identifiers */ erased: boolean }
+/** Hashes under every configured key (current and previous), for lookups. */
 async function tombstoneHashes(phones: string[], emails: string[]): Promise<string[]> {
-  return [...await Promise.all(phones.map((p) => tombstoneHash("phone", p))), ...await Promise.all(emails.map((e) => tombstoneHash("email", e)))];
+  const out: string[] = [];
+  for (const key of [erasureKeys.current, erasureKeys.previous]) {
+    if (!key) continue;
+    for (const p of phones) out.push((await tombstoneHash("phone", p, key))!);
+    for (const e of emails) out.push((await tombstoneHash("email", e, key))!);
+  }
+  return out;
 }
 export async function suppressionFor(db: Db, phones: string[], emails: string[]): Promise<Suppression> {
   const phone = phones.length ? !!(await db.prepare(`SELECT 1 AS x FROM voice_dnc WHERE phone_e164 IN (${placeholders(phones.length)}) LIMIT 1`).bind(...phones).first()) : false;

@@ -78,7 +78,19 @@ Locations where a person's identifiers could remain, and how each is now handled
 | `crm_import_batches` | holds no record payload (hash and counts only) |
 | `leads.message` / intake-written activity text of erased contacts | replaced with "Details erased at the person's request" |
 | `phone_outreach_ledger` / events, `voice_dnc`, `email_suppressions` | kept (call limits and opt-outs); ledger loses its identity reference |
-| re-import | optional salted-hash tombstone (`crm_erasure_tombstones`, migration 0049) |
+| re-import | optional tombstone keyed with the Worker secret `CRM_ERASURE_HMAC_KEY` (`crm_erasure_tombstones`, migration 0049) |
 
 Also fixed in the same pass: the duplicate review queue was readable by assigned-only sales reps (it shows contact
 details of any record); it now requires `lead.read_all`.
+
+## 7. Pre-merge follow-up (2026-10-30, Founder request)
+
+- **Tombstone hash:** the fixed in-source salt let anyone holding a database copy brute-force erased phone numbers.
+  Tombstones are now HMAC-SHA256 keyed with the Worker secret `CRM_ERASURE_HMAC_KEY` (staging: derived by the deploy;
+  production: put manually), with `CRM_ERASURE_HMAC_KEY_PREVIOUS` for rotation and a public `key_id` per row.
+- **PR #49 sales-optimization tables:** audited (RUNBOOK §5a table). Gaps fixed: finding quotes/labels and queued
+  model inputs are erased inside the erasure batch (not only at the next sales job), proposal-job evidence copies are
+  scrubbed (they were never purged, by erasure or retention), and account deletion / CRM erasure now also erase call
+  transcripts of the person's leads. Residual: immutable `so_versions.rationale`.
+- **Production audit:** read-only remote mode (SELECT only) and a `production`-environment workflow; it waits for the
+  Founder's approval like every production job.

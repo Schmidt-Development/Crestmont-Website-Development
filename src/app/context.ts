@@ -47,6 +47,10 @@ export interface Env {
   SCHEDULER_TRIGGER_SECRET?: string;
   /** HMAC secret for the research-agent / CRM import API (POST /api/crm/v1/imports). Unset = the endpoint answers 503. */
   CRM_IMPORT_SECRET?: string;
+  /** HMAC key for CRM erasure tombstones (≥32 chars). Unset on staging/production = no re-import tombstones. */
+  CRM_ERASURE_HMAC_KEY?: string;
+  /** The previous tombstone key after a rotation, so earlier tombstones keep blocking re-import. */
+  CRM_ERASURE_HMAC_KEY_PREVIOUS?: string;
   /** "on" | "off": per-user limits on authenticated form submissions (default on outside development). ASVS F-15. */
   ACTION_RATE_LIMIT?: string;
   /** "on" | "off": breached-password check (default on outside development). ASVS F-06. */

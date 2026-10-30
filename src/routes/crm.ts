@@ -786,7 +786,7 @@ export function register(r: Router): void {
     if (note.length < 5) return redirect(ctx, back, { kind: "error", text: "Describe who asked for the erasure, and how." });
     try {
       const r = await eraseIdentityData(ctx.db, ctx.user!.id, { phones: list("phones"), emails: list("emails"), blockReimport: str(f, "allow_reimport") !== "1" }, { ip: ctx.ip, note });
-      return redirect(ctx, back, { kind: "success", text: `Erased: ${r.contacts} contact(s), ${r.identitiesDeleted} identifier(s), ${r.reviewsDeleted + r.reviewsScrubbed} review item(s), ${r.fieldChangesScrubbed} history value(s).${r.sharedKept ? ` ${r.sharedKept} identifier(s) shared with another business were kept for that business.` : ""}` });
+      return redirect(ctx, back, { kind: "success", text: `Erased: ${r.contacts} contact(s), ${r.identitiesDeleted} identifier(s), ${r.reviewsDeleted + r.reviewsScrubbed} review item(s), ${r.fieldChangesScrubbed} history value(s).${r.sharedKept ? ` ${r.sharedKept} identifier(s) shared with another business were kept for that business.` : ""}${r.tombstoneSkipped ? " Re-import block NOT recorded: CRM_ERASURE_HMAC_KEY is not configured in this environment." : ""}` });
     } catch (e) {
       if (e instanceof ErasureError) return redirect(ctx, back, { kind: "error", text: e.message });
       throw e;
