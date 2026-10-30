@@ -58,11 +58,13 @@ class Session {
   cookies = new Map<string, string>();
   private absorb(res: Response) { for (const c of res.headers.getSetCookie()) { const [pair, ...attrs] = c.split(";"); const i = pair.indexOf("="); const k = pair.slice(0, i).trim(); if (attrs.some((a) => a.trim().toLowerCase() === "max-age=0")) this.cookies.delete(k); else this.cookies.set(k, decodeURIComponent(pair.slice(i + 1))); } }
   async req(method: string, path: string, form?: Record<string, string>) {
-    if (form && !this.cookies.has("cm_csrf")) await this.req("GET", "/login");
+    // Over HTTPS the CSRF cookie is "__Host-cm_csrf" (CREST-GAP-086); plain "cm_csrf" only on http://localhost.
+    const csrf = () => this.cookies.get("__Host-cm_csrf") ?? this.cookies.get("cm_csrf");
+    if (form && !csrf()) await this.req("GET", "/login");
     const headers: Record<string, string> = { origin: BASE };
     if (this.cookies.size) headers.cookie = [...this.cookies].map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("; ");
     let body: string | undefined;
-    if (form) { const sp = new URLSearchParams({ _csrf: this.cookies.get("cm_csrf") ?? "", ...form }); body = sp.toString(); headers["content-type"] = "application/x-www-form-urlencoded"; }
+    if (form) { const sp = new URLSearchParams({ _csrf: csrf() ?? "", ...form }); body = sp.toString(); headers["content-type"] = "application/x-www-form-urlencoded"; }
     const res = await fetch(`${BASE}${path}`, { method, headers, body, redirect: "manual" });
     this.absorb(res);
     return res;
