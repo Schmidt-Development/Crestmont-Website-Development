@@ -250,6 +250,23 @@ export const REQUIREMENTS: RequirementDef[] = [
     ["AIB-010", "Build runner on the official Claude Agent SDK: isolated workspaces, versioned starters, curated skills, checks, previews", "P0", "engineering", ["AIB-003"]],
     ["AIB-011", "Real provider-backed end-to-end staging build (test payment → intake → isolated session → preview → owner review)", "P0", "integration", ["AIB-010", "INFRA-002"]],
   ]),
+  // Founder brief, 2026-10-30: Retell AI sales self-improvement engine (docs/voice/SALES-OPTIMIZATION.md). Added scope.
+  // It optimizes a registered Retell SALES agent; it never places calls. A sales-calling path does not exist and is
+  // outside this addendum (Founder decision D-14: outbound sales calling needs counsel's TCPA review first).
+  ...group("AI Sales Optimization (addendum)", "Addendum 2026-10-30", [
+    ["SALESOPT-001", "Authenticated, idempotent, replay- and order-safe ingestion of Retell call events for the registered sales agent", "P1", "engineering", ["VOICE-003"]],
+    ["SALESOPT-002", "Verified sales attribution from webhook-verified Stripe payments (delayed and multi-touch; refunds, disputes, cancellations, repeat customers)", "P1", "engineering", ["SALESOPT-001", "PAY-003"]],
+    ["SALESOPT-003", "Self-hosted model call analysis with transcript-grounded evidence, confidence and deterministic compliance checks", "P1", "engineering", ["SALESOPT-001", "AIOPS-002"]],
+    ["SALESOPT-004", "Performance metrics by prompt version and lead segment (conversion with confidence intervals, revenue, cost, opt-out, complaint, refund, compliance)", "P1", "engineering", ["SALESOPT-002", "SALESOPT-003"]],
+    ["SALESOPT-005", "Protected policy layer optimization cannot overwrite, and evidence-cited improvement proposals from the self-hosted model", "P1", "security", ["SALESOPT-003"]],
+    ["SALESOPT-006", "Immutable, versioned agent-prompt registry with parent, diff, rationale, evidence, author, approval and deployment status", "P1", "engineering"],
+    ["SALESOPT-007", "Evaluation harness: required sales scenarios, deterministic policy assertions, advisory local-model simulation", "P1", "engineering", ["SALESOPT-005", "SALESOPT-006"]],
+    ["SALESOPT-008", "Safe Retell deployment: snapshot, drift check, Founder approval, staging first, read-back verification, lock, rollback, audit", "P1", "security", ["SALESOPT-006", "SALESOPT-007"]],
+    ["SALESOPT-009", "Controlled experiments: deterministic assignment, minimum samples, confidence intervals, safety stops, no automatic promotion", "P1", "engineering", ["SALESOPT-004", "SALESOPT-008"]],
+    ["SALESOPT-010", "Owner dashboard \"AI Sales Optimization\" with Founder controls (pause, approve/reject, deploy, roll back, activate)", "P1", "engineering", ["SALESOPT-006", "SALESOPT-008"]],
+    ["SALESOPT-011", "Operations: scheduled cycle, post-deployment safety monitoring and automatic rollback, retention of transcript evidence, restricted access", "P1", "security", ["SALESOPT-008"]],
+    ["SALESOPT-012", "Real end-to-end staging run: Retell call → ingestion → Stripe outcome → local analysis → proposal → evaluation → approval → Retell update → verification", "P1", "integration", ["SALESOPT-011", "VOICE-002", "AIOPS-002"]],
+  ]),
 ];
 
 /** The original Founder-approved registry (154). The AI Builds addendum is reported separately. */

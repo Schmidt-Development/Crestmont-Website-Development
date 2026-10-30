@@ -250,6 +250,15 @@ async function buildStaffRecords(w: World) {
   await db.prepare(`INSERT INTO build_jobs (id, project_id, organization_id, order_id, kind, revision, dedupe_key, state, state_reason, strategy, package_id, trigger, preview_url, agent_session_id, created_at, updated_at)
                     SELECT ?, p.id, p.organization_id, p.order_id, 'first_build', 0, p.id || ':first', 'ready_for_review', 'matrix fixture', 'standard', 'business', 'sweep', 'https://preview.matrix.example', 'sess-matrix', ?, ? FROM projects p WHERE p.id = ?`)
     .bind(ids.buildJob, nowIso(), nowIso(), w.a.ids.project).run();
+  // AI Sales Optimization: baseline v1, a second draft version and a proposed experiment (TEST DATA; no Retell agent).
+  const { ensureBaseline, createVersion } = await import("../../src/services/sales-opt/registry.ts");
+  const { baselineSalesInstructions } = await import("../../src/domain/sales-opt/policy.ts");
+  const sv1 = await ensureBaseline(db, baselineSalesInstructions());
+  const sv2 = await createVersion(db, { parentId: sv1.id, instructions: `${sv1.instructions}\nAsk which pages matter most before recommending a package.`, rationale: "Matrix version", authorKind: "user", author: w.staff.owner.id });
+  ids.soVersion = sv2.id;
+  ids.soStage = "staging";
+  ids.soExperiment = newId("soex");
+  await db.prepare(`INSERT INTO so_experiments (id, baseline_version_id, candidate_version_id, candidate_share, min_connected_per_arm, status, created_at) VALUES (?,?,?, 0.2, 400, 'proposed', ?)`).bind(ids.soExperiment, sv1.id, sv2.id, nowIso()).run();
   // Public identifiers
   ids.serviceSlug = "website-design-development";
   ids.legalSlug = "terms";

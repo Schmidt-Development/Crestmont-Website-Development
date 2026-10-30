@@ -7,6 +7,7 @@ import { pathFor } from "./security-helpers.ts";
 import { ROUTE_INVENTORY } from "./route-inventory.ts";
 import { newId, nowIso } from "../../src/lib/db.ts";
 import { totpCode } from "../../src/lib/auth-crypto.ts";
+import { baselineSalesInstructions as baselineSales } from "../../src/domain/sales-opt/policy.ts";
 
 type Fields = Record<string, string | string[] | File>;
 const day = (n: number) => new Date(Date.now() + n * 86400e3).toISOString().slice(0, 10);
@@ -405,6 +406,26 @@ export function auditScenarios(w: World): Scenario[] {
     } },
     { key: "POST /staff/voice/dnc", fields: () => ({ phone: "+15550100993", detail: "Matrix opt-out (TEST DATA)" }) },
     { key: "POST /staff/voice/caller-erasure", fields: () => ({ phone: "+15550100994", note: "Matrix erasure request by email (TEST DATA)" }) },
+
+    // ── AI Sales Optimization (TEST DATA; Retell is a fixture that answers only api.retellai.com) ──
+    { key: "POST /staff/sales-optimization/control", fields: () => ({ paused: "1", auto_rollback: "1", minConnected: "50", maxOptOutRate: "15", maxComplianceRate: "2", maxComplaintRate: "5", maxErrorRate: "5", maxRefundRate: "20" }) },
+    { key: "POST /staff/sales-optimization/targets", fields: () => ({ stage: "staging", agent_id: "agent_matrix_sales" }) },
+    { key: "POST /staff/sales-optimization/targets/:stage/verify", setup: async () => {
+      const real = globalThis.fetch;
+      w.env.overrides = { ...w.env.overrides, fetch: (async (input: RequestInfo | URL, init?: RequestInit) => String(input).startsWith("https://api.retellai.com/")
+        ? new Response(JSON.stringify({ agent_id: "agent_matrix_sales", response_engine: { type: "retell-llm", llm_id: "llm_matrix_sales" } }), { status: 200 })
+        : real(input, init)) as typeof fetch };
+    } },
+    { key: "POST /staff/sales-optimization/versions", fields: () => ({ parent_id: w.ids.soVersion!, instructions: `${baselineSales()}\nRepeat the email address back before ending the call.`, rationale: "Matrix: confirm email" }) },
+    { key: "POST /staff/sales-optimization/versions/:id/evaluate" },
+    { key: "POST /staff/sales-optimization/versions/:id/decide", fields: () => ({ decision: "reject", note: "matrix" }), path: () => `/staff/sales-optimization/versions/${x.soDraft}/decide`, setup: async () => {
+      x.soDraft = (await w.db.prepare(`SELECT id FROM so_versions WHERE status = 'draft' ORDER BY seq DESC LIMIT 1`).first<{ id: string }>())!.id;
+    } },
+    { key: "POST /staff/sales-optimization/deploy", fields: () => ({ stage: "staging", version_id: w.ids.soVersion!, expected_current: "" }) },
+    { key: "POST /staff/sales-optimization/rollback", fields: () => ({ stage: "staging" }) },
+    { key: "POST /staff/sales-optimization/experiments", fields: () => ({ baseline_id: w.ids.soVersion!, candidate_id: w.ids.soVersion!, share: "20", min: "400" }) },
+    { key: "POST /staff/sales-optimization/experiments/:id/decide", fields: () => ({ action: "start" }) },
+    { key: "POST /staff/sales-optimization/run" },
 
     // ── AI Builds (owner controls) ──
     { key: "POST /staff/ai/budget", fields: () => ({ monthly_budget_usd: "25" }) },

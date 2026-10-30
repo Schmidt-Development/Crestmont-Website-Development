@@ -19,6 +19,8 @@ import { handleVoiceEvent } from "../services/voice.ts";
 import { verifyRetellSignature, translateRetellEvent, translateRetellFunction, translateRetellInbound, RetellAuthError, RetellPayloadError, type Translated, type RetellCtx } from "../adapters/retell.ts";
 import * as mail from "../services/email-events.ts";
 import { registerReconciliation } from "./reconciliation.ts";
+import { ingestSalesEvent } from "../services/sales-opt/ingest.ts";
+import { audit } from "../services/security.ts";
 
 const q = (ctx: AppContext, k: string, max = 120) => (ctx.url.searchParams.get(k) ?? "").trim().slice(0, max);
 
@@ -36,9 +38,20 @@ async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: st
     if (e instanceof RetellPayloadError || e instanceof SyntaxError) return jsonResponse(ctx, 422, { error: e instanceof SyntaxError ? "Body is not valid JSON" : e.message });
     throw e;
   }
-  if (t.kind === "ack") return jsonResponse(ctx, t.status ?? 200, fn ? ((t.body.result as Record<string, unknown> | undefined) ?? t.body) : t.body);
+  // Sales-optimization facts (SALESOPT-001): recorded after the voice handler, only for a registered sales agent.
+  // A failure here never changes the response to Retell (the voice handler's result stands) but is audited.
+  const salesFacts = async () => {
+    if (translate !== translateRetellEvent) return;
+    try { await ingestSalesEvent(ctx.db, raw, ctx.req.headers.get("x-retell-signature"), { environment: ctx.env.ENVIRONMENT, now }); }
+    catch (e) {
+      try { await audit(ctx.db, { actorKind: "webhook", action: "salesopt.ingest_failed", subjectType: "webhook", subjectId: "retell", details: { error: (e as Error).message.slice(0, 200) } }); }
+      catch { /* never fail the receptionist's response because of the optimizer */ }
+    }
+  };
+  if (t.kind === "ack") { await salesFacts(); return jsonResponse(ctx, t.status ?? 200, fn ? ((t.body.result as Record<string, unknown> | undefined) ?? t.body) : t.body); }
   // Consultation confirmations go through the platform's existing mail pipeline (Resend outside development).
   const res = await handleVoiceEvent(ctx.db, t.body, { mail: { email: ctx.email, db: ctx.db, settings: ctx.settings }, baseUrl: ctx.baseUrl, now });
+  if (res.status < 300) await salesFacts();
   // Retell gives the function response body to the agent's LLM: return only the result object.
   if (fn) return jsonResponse(ctx, res.status, (res.body.result as Record<string, unknown> | undefined) ?? res.body);
   return jsonResponse(ctx, res.status, res.body);
