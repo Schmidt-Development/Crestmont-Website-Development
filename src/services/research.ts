@@ -8,6 +8,7 @@ import { HttpError } from "../app/http.ts";
 import { can, type Actor } from "../domain/authz.ts";
 import { sha256Hex } from "../lib/crypto.ts";
 import { audit } from "./security.ts";
+import { intake, IntakeError, type IntakeOutcome } from "./contact-identity.ts";
 import {
   validateProspect, qualify, modelTextProblems, outboundEligibility, crmPhoneNorm, timeZoneForState, stableJson,
   WEBSITE_CLASSES, WEBSITE_CLASS_LABELS, type CleanProspect, type ProspectStatus, type WebsiteClass, type SourceId,
@@ -253,50 +254,55 @@ export function evidenceText(p: ProspectRow): string {
 }
 
 /**
- * Creates the CRM company, contact and lead for a prospect, in one atomic batch. Every insert is conditioned on the
- * prospect still being promotable, so two people promoting at once create one lead, not two. The CRM duplicate check
- * runs again at this moment (a contact may have been added since ingest).
+ * Hands a prospect to the CRM's authoritative intake engine (src/services/contact-identity.ts, channel
+ * "research_agent"): it alone decides whether this is a new contact, an existing one, a shared identifier that needs a
+ * person, a customer, or a suppressed number, and it records that decision with its evidence. The idempotency key is
+ * fixed per prospect, so two people promoting at once (or a retry) get the same decision and at most one lead.
+ * Research only reflects the outcome on its own record; automated calling stays off whatever the outcome.
  */
-export async function promote(db: Db, actor: Actor, id: string): Promise<{ leadId: string }> {
+export async function promote(db: Db, actor: Actor, id: string): Promise<{ leadId: string; outcome: IntakeOutcome }> {
   if (!can(actor, "lead.write_all")) throw new HttpError(403, "You do not have permission to do that.");
   await applySuppressions(db);
   const p = await getProspect(db, id);
-  const block = async (why: string, status?: ProspectStatus) => {
-    if (status) await db.prepare(`UPDATE research_prospects SET status = ?, status_detail = ?, updated_at = ? WHERE id = ?`).bind(status, why, nowIso(), id).run();
-    await audit(db, { actorUserId: actor.userId, action: "research.promotion_blocked", subjectType: "research_prospect", subjectId: id, details: { reason: why } });
+  const block = async (why: string, status?: ProspectStatus, extra: Record<string, unknown> = {}) => {
+    if (status) await db.prepare(`UPDATE research_prospects SET status = ?, status_detail = ?, updated_at = ? WHERE id = ? AND status IN ('qualified','review')`).bind(status, why.slice(0, 300), nowIso(), id).run();
+    await audit(db, { actorUserId: actor.userId, action: "research.promotion_blocked", subjectType: "research_prospect", subjectId: id, details: { reason: why, ...extra } });
     return new HttpError(409, why);
   };
   if (!["qualified", "review"].includes(p.status)) throw await block(`This prospect cannot be promoted (status: ${p.status.replace("_", " ")})`);
   const lists = (await db.prepare(`SELECT phones_json, emails_json FROM research_prospects WHERE id = ?`).bind(id).first<{ phones_json: string; emails_json: string }>())!;
   const phones = (JSON.parse(lists.phones_json) as string[]).slice(0, 10);
   const emails = (JSON.parse(lists.emails_json) as string[]).slice(0, 10);
-  const norms = phones.map(crmPhoneNorm).filter((x): x is string => !!x);
-  const crm = (norms.length ? await db.prepare(`SELECT id FROM contacts WHERE phone_norm IN (${norms.map(() => "?").join(",")}) LIMIT 1`).bind(...norms).first<{ id: string }>() : null)
-    ?? (emails.length ? await db.prepare(`SELECT id FROM contacts WHERE email_norm IN (${emails.map(() => "?").join(",")}) LIMIT 1`).bind(...emails).first<{ id: string }>() : null);
-  if (crm) {
-    await db.prepare(`UPDATE research_prospects SET crm_contact_id = ? WHERE id = ?`).bind(crm.id, id).run();
-    throw await block("The phone number or email already belongs to a CRM contact", "existing_crm");
+  const verifiedSite = p.website_class === "VERIFIED_WEBSITE_ISSUES" || p.website_class === "VERIFIED_WEBSITE_BROKEN" || p.website_class === "VERIFIED_OFFICIAL_WEBSITE";
+  const res = await intake(db, {
+    businessName: p.name, contactName: null, website: verifiedSite ? p.website_url : null,
+    location: { city: p.city, region: p.state, postalCode: p.zip },
+    phones: phones.map((value, i) => ({ value, label: i === 0 ? "main" as const : "other" as const })), emails: emails.map((value) => ({ value })),
+    verifiedFields: verifiedSite ? ["website"] : [],
+  }, {
+    channel: "research_agent", actor, idempotencyKey: `research_agent:promote:${p.id}`, sourceRef: p.business_key,
+    confidence: Math.round(p.identity_confidence * 100), requestFingerprint: { prospect: p.id },
+    lead: { source: "manual", interest: p.recommended_package ?? "other", message: evidenceText(p),
+      utm: { utm_source: "crestmont-research", utm_medium: "research-agent", utm_campaign: p.website_class.toLowerCase() },
+      activityBody: `Promoted from lead research (${p.id}); research evidence last verified ${p.last_verified_at}. Public listing data: not consent to call or email. Not released for automated calling.` },
+  }).catch(async (e) => { throw e instanceof IntakeError && e.status === 409 ? await block(e.message) : e; });
+  if (res.outcome === "SUPPRESSED") throw await block("The CRM has this number or email suppressed (do-not-call, email suppression or erasure)", "suppressed", { decision: res.decisionId });
+  if (res.outcome === "REJECTED_INVALID") throw await block(`The CRM rejected the record: ${res.reasons.join("; ").slice(0, 200)}`, undefined, { decision: res.decisionId });
+  if (res.outcome === "POSSIBLE_DUPLICATE_REVIEW") throw await block("Possible duplicate: the CRM put this record in its duplicate review queue for a person to decide", "review", { decision: res.decisionId, reviews: res.reviewIds });
+  if (!res.leadCreated && res.contactId) {
+    await db.prepare(`UPDATE research_prospects SET status = 'existing_crm', status_detail = ?, crm_lead_id = COALESCE(?, crm_lead_id), crm_contact_id = ?, updated_at = ? WHERE id = ? AND status IN ('qualified','review')`)
+      .bind(`Matched an existing CRM record (${res.outcome.toLowerCase().replace(/_/g, " ")})`, res.leadId, res.contactId, nowIso(), id).run();
+    throw await block("The phone number, email or business already belongs to a CRM contact; no second lead was created", undefined, { decision: res.decisionId, outcome: res.outcome });
   }
+  if (!res.leadId) throw await block("The CRM did not create a lead");
   const at = nowIso();
-  const companyId = newId("co"), contactId = newId("ct"), leadId = newId("ld");
-  const guard = `EXISTS (SELECT 1 FROM research_prospects WHERE id = ? AND status IN ('qualified','review'))`;
-  const interest = p.recommended_package ?? "other";
-  await db.batch([
-    db.prepare(`INSERT INTO companies (id, name, website, industry, created_at) SELECT ?,?,?,?,? WHERE ${guard}`).bind(companyId, p.name, p.website_url, p.category, at, id),
-    db.prepare(`INSERT INTO contacts (id, company_id, name, email, phone, created_at) SELECT ?,?,?,?,?,? WHERE ${guard}`).bind(contactId, companyId, p.name, p.email, p.phone_e164, at, id),
-    db.prepare(`INSERT INTO leads (id, contact_id, source, stage, interest, message, qualification_notes, utm_source, utm_medium, utm_campaign, created_at, updated_at)
-                SELECT ?,?,'manual','new',?,?,?,'crestmont-research','research-agent',?,?,? WHERE ${guard}`)
-      .bind(leadId, contactId, interest, evidenceText(p), p.summary ? `AI draft (local model ${p.model ?? "unknown"}), verify before use: ${p.summary}` : null, p.website_class.toLowerCase(), at, at, id),
-    db.prepare(`INSERT INTO crm_activities (id, lead_id, actor_user_id, kind, body, created_at) SELECT ?,?,?,'system',?,? WHERE ${guard}`)
-      .bind(newId("act"), leadId, actor.userId ?? null, `Promoted from lead research (${p.id}); research evidence last verified ${p.last_verified_at}. Not released for automated calling.`, at, id),
-    db.prepare(`UPDATE research_prospects SET status = 'promoted', status_detail = NULL, crm_lead_id = ?, crm_contact_id = ?, decided_by = ?, decided_at = ?, updated_at = ? WHERE id = ? AND status IN ('qualified','review')`)
-      .bind(leadId, contactId, actor.userId ?? null, at, at, id),
-  ]);
-  const after = await db.prepare(`SELECT crm_lead_id FROM research_prospects WHERE id = ?`).bind(id).first<{ crm_lead_id: string | null }>();
-  if (after?.crm_lead_id !== leadId) throw await block("Another person promoted or changed this prospect at the same moment");
-  await audit(db, { actorUserId: actor.userId, action: "lead.created", subjectType: "lead", subjectId: leadId, details: { source: "manual", via: "research", prospect: id } });
-  await audit(db, { actorUserId: actor.userId, action: "research.prospect_promoted", subjectType: "research_prospect", subjectId: id, details: { leadId, websiteClass: p.website_class, score: p.score } });
-  return { leadId };
+  await db.prepare(`UPDATE research_prospects SET status = 'promoted', status_detail = NULL, crm_lead_id = ?, crm_contact_id = ?, decided_by = COALESCE(decided_by, ?), decided_at = COALESCE(decided_at, ?), updated_at = ? WHERE id = ?`)
+    .bind(res.leadId, res.contactId, actor.userId ?? null, at, at, id).run();
+  if (!res.replayed) {
+    await audit(db, { actorUserId: actor.userId, action: "lead.created", subjectType: "lead", subjectId: res.leadId, details: { source: "manual", origin: "research_agent", prospect: id, decision: res.decisionId } });
+    await audit(db, { actorUserId: actor.userId, action: "research.prospect_promoted", subjectType: "research_prospect", subjectId: id, details: { leadId: res.leadId, decision: res.decisionId, websiteClass: p.website_class, score: p.score } });
+  }
+  return { leadId: res.leadId, outcome: res.outcome };
 }
 
 export async function dismiss(db: Db, actor: Actor, id: string, reason: string): Promise<void> {

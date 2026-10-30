@@ -326,3 +326,23 @@ test("[SEC-001] an unparsable website URL rejects only its own record; opt-outs 
   await R.applySuppressions(db);
   assert.equal((raw(db).prepare(`SELECT status FROM research_prospects WHERE business_key = 'overture:u2'`).get() as { status: string }).status, "suppressed");
 });
+
+test("[CRM-002] [CRM-005] promotion is an authoritative CRM intake decision (channel research_agent): origin and decision recorded; an existing CRM business is linked, never duplicated", async () => {
+  const { client, db } = await setup();
+  await send(client(), "batch", batch([prospect({ businessKey: "overture:i1" }), prospect({ businessKey: "overture:i2", name: "Lakeview Dental (TEST DATA)", phones: ["517-555-2195"] })]));
+  const pid = (k: string) => (raw(db).prepare(`SELECT id FROM research_prospects WHERE business_key = ?`).get(k) as { id: string }).id;
+  const owner = await createStaff(db, "owner");
+  const actor = { kind: "user" as const, userId: owner.id, roles: [{ role: "owner" as const, organizationId: "org_crestmont" }], mfaVerified: true };
+  const r = await R.promote(db, actor, pid("overture:i1"));
+  assert.equal(r.outcome, "CREATED");
+  const lead = raw(db).prepare(`SELECT origin, intake_decision_id, utm_source FROM leads WHERE id = ?`).get(r.leadId) as { origin: string; intake_decision_id: string; utm_source: string };
+  assert.deepEqual([lead.origin, lead.utm_source], ["research_agent", "crestmont-research"]);
+  assert.ok(raw(db).prepare(`SELECT 1 FROM crm_intake_decisions WHERE id = ?`).get(lead.intake_decision_id), "the CRM's decision record exists");
+  // A contact for the second business is added to the CRM after ingest (another channel); promotion links, no second lead.
+  const o = await client().login(owner.email, undefined, owner.secret);
+  assert.equal((await o.post("/staff/crm/new", { name: "Front desk", email: "", phone: "(517) 555-2195", company: "Lakeview Dental (TEST DATA)", website: "", interest: "business", message: "x", source: "referral" })).status, 303);
+  const leads0 = (raw(db).prepare(`SELECT COUNT(*) AS n FROM leads`).get() as { n: number }).n;
+  await assert.rejects(R.promote(db, actor, pid("overture:i2")), /CRM contact|duplicate review/);
+  assert.equal((raw(db).prepare(`SELECT COUNT(*) AS n FROM leads`).get() as { n: number }).n, leads0, "no second lead");
+  assert.match((raw(db).prepare(`SELECT status FROM research_prospects WHERE id = ?`).get(pid("overture:i2")) as { status: string }).status, /existing_crm|review/);
+});

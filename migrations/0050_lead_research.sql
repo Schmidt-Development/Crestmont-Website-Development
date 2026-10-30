@@ -1,4 +1,4 @@
--- Lead research, numbered 0050: 0047 is sales optimization (merged), 0048-0049 are reserved by open PR #50 (CRM identity) and 0048 by PR #52 (runner diagnostics). Independent additive tables, so apply order between them does not matter. (Proposed RESEARCH-001..006; tests tagged with existing CRM/DATA/SEC/OWN ids until the inventory is extended.)
+-- Lead research, numbered 0050: 0047 is sales optimization (merged), 0048-0049 are PR #50 (CRM identity, merged) and open PR #52 also claims 0048. Independent additive tables, so apply order between them does not matter. (Proposed RESEARCH-001..006; tests tagged with existing CRM/DATA/SEC/OWN ids until the inventory is extended.)
 -- The Windows research worker (research-worker/) does the bulk work locally (DuckDB over open datasets, website
 -- verification, audits, local model). This database receives only candidate prospects with their evidence, through
 -- the HMAC-signed API in src/routes/research.ts. The CRM (leads/contacts/companies) stays the system of record:

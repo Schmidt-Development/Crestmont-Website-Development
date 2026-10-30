@@ -35,10 +35,10 @@ No new paid service, API key or subscription is involved.
 
 ## 5. CRM and D1 compatibility
 - **Ingest** reads `contacts.phone_norm`/`email_norm`, the CRM's own duplicate keys from migration 0044, and `voice_dnc`.
-- **Promotion** writes `companies`, `contacts`, `leads` and `crm_activities` in one atomic, guarded `db.batch`. It never sets `leads.source` outside the existing CHECK.
+- **Promotion** goes through the CRM intake engine (`contact-identity.ts`, PR #50, channel `research_agent`). That engine owns the company, contact, lead and activity writes, the identity links and the decision record. The lead gets `source=manual` (inside the existing CHECK) and `origin=research_agent`.
 - **D1 limits:** every statement stays under 100 bound parameters (45 at most). Each batch reads in chunks of 90.
 - **Batch size:** the 100-record default keeps an ingest under about 1,000 D1 queries per invocation. Lower `max_batch` in `/staff/research` on a Workers plan with tighter limits.
-- **PR #50:** when it merges, its triggers register research-created contacts automatically. The follow-up is to route `promote()` through its intake engine (`README.md`, Coordination).
+- **PR #50 is integrated.** Its `0048`/`0049` migrations precede 0050.
 
 ## 6. Monitoring
 - **`/staff/research`:** worker online/offline, last check-in, queue depth, failed jobs, rejected records, per-source refresh, the 24-hour throughput chart, and import success rate.
