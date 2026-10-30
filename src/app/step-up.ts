@@ -25,6 +25,13 @@ export const STEP_UP_ROUTES: Readonly<Record<string, string>> = {
   "POST /staff/ops/environments": "environment endpoints",
   "POST /staff/builds/settings": "automation limits and model",
   "POST /staff/ai/budget": "paid AI budget",
+  // AI Sales Optimization (Founder decisions that can change the live sales agent)
+  "POST /staff/sales-optimization/control": "sales optimizer controls",
+  "POST /staff/sales-optimization/targets": "sales agent targets",
+  "POST /staff/sales-optimization/versions/:id/decide": "sales prompt approval",
+  "POST /staff/sales-optimization/deploy": "sales agent deployment",
+  "POST /staff/sales-optimization/rollback": "sales agent rollback",
+  "POST /staff/sales-optimization/experiments/:id/decide": "sales experiment decision",
   // MFA changes (replacing an enrolled authenticator; first enrolment is unaffected because no MFA exists yet)
   "GET /mfa/setup": "authenticator change",
   "POST /mfa/setup": "authenticator change",
