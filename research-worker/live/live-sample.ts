@@ -124,7 +124,7 @@ const summary = {
   kind: "REAL DATA, controlled sample (Overture + live websites + Common Crawl); CRM = real platform pipeline on in-memory SQLite, NOT staging",
   overtureRelease: found.release, commonCrawl: crawl, bboxAreaDeg2: Number(((req.bbox.xmax - req.bbox.xmin) * (req.bbox.ymax - req.bbox.ymin)).toFixed(5)),
   discovered: { placesInBbox: found.rows, candidates: found.candidates.length, withPhone: withPhone.length, phoneAvailability: found.candidates.length ? Number((withPhone.length / found.candidates.length).toFixed(3)) : null },
-  sampled: chosen.length, attemptsTimed: processed, unfinished: state.backlog(), failed: failures.length,
+  sampled: chosen.length, brandManagedLocations: chosen.filter((c) => c.brandWikidata).length, attemptsTimed: processed, unfinished: state.backlog(), failed: failures.length,
   failureKinds: failures.reduce<Record<string, number>>((m, f) => { const k = (f.last_error ?? "").split(":")[0].slice(0, 40); m[k] = (m[k] ?? 0) + 1; return m; }, {}),
   classes: status.classCounts,
   websitesChecked: status.websitesChecked, robotsBlockedChecks: checks.filter((c) => /robots\.txt disallows/.test(c.result)).length,

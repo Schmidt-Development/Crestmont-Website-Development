@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
-import { stableJson } from "../../src/domain/research.ts";
+import { stableJson, normDomain, isCandidateOfficialDomain } from "../../src/domain/research.ts";
 import type { Candidate } from "./sources/types.ts";
 
 export type Stage = "pending" | "working" | "ready" | "sent" | "skipped" | "failed";
@@ -43,6 +43,8 @@ export class State {
     const prev = this.db.prepare(`SELECT source_hash, stage, verified_at FROM candidates WHERE business_key = ?`).get(c.businessKey) as { source_hash: string; stage: Stage; verified_at: string | null } | undefined;
     const at = now.toISOString();
     for (const p of c.phones) this.db.prepare(`INSERT OR IGNORE INTO phone_index (phone, business_key) VALUES (?, ?)`).run(p, c.businessKey);
+    // Listed websites (official-candidate domains only) let several locations of one business find each other.
+    for (const w of c.websites) { const d = normDomain(w); if (d && isCandidateOfficialDomain(d)) this.indexDomain(d, c.businessKey, c.sources[0]?.source ?? "source"); }
     if (!prev) {
       this.db.prepare(`INSERT INTO candidates (business_key, payload, source_hash, state, stage, next_at, updated_at) VALUES (?,?,?,?,'pending',?,?)`).run(c.businessKey, payload, hash, state, at, at);
       return "new";

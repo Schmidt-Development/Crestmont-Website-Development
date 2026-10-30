@@ -79,7 +79,7 @@ export interface IdentityResult { score: number; official: boolean; signals: str
  * Official requires a hard signal (phone or street address) with score ≥ 0.6 — or listing by a source plus a strong
  * name match and no contradicting contact details. A different phone with no shared signal is a contradiction (likely a different business).
  */
-export function identity(c: Candidate, f: PageFacts, listedBy: string[]): IdentityResult {
+export function identity(c: Candidate, f: PageFacts, listedBy: string[], siblingLocations = 0): IdentityResult {
   const signals: string[] = [], contradictions: string[] = [];
   let score = 0, hard = false;
   const pagePhones = new Set([...f.phones, ...f.jsonLd.flatMap((j) => (j.telephone ?? []).map(phoneE164).filter((p): p is string => !!p))]);
@@ -95,7 +95,9 @@ export function identity(c: Candidate, f: PageFacts, listedBy: string[]): Identi
   score = Math.min(1, Math.round(score * 100) / 100);
   // Hard evidence (phone / street) with enough total weight; or an independent listing plus a strong name match and no
   // contradicting contact details on the page.
-  const official = (hard && score >= 0.6) || (!hard && listedBy.length > 0 && nameScore >= 0.6 && !contradictions.length);
+  // Multi-location: the same site listed for other same-named locations explains a central phone number on the page.
+  if (siblingLocations > 0 && listedBy.length && nameScore >= 0.6) signals.push(`same website listed for ${siblingLocations} other location(s) of this business`);
+  const official = (hard && score >= 0.6) || (!hard && listedBy.length > 0 && nameScore >= 0.6 && (!contradictions.length || siblingLocations > 0));
   return { score, official, signals, contradictions };
 }
 

@@ -14,6 +14,7 @@ export interface OvertureRow {
   id: string; name: string | null; category: string | null; line: string | null; city: string | null; state: string | null; zip: string | null;
   lat: number | null; lon: number | null; phones: string[] | null; emails: string[] | null; websites: string[] | null; socials: string[] | null;
   confidence: number | null; operating_status: string | null; datasets: string[] | null; licenses: (string | null)[] | null;
+  brand?: string | null; brand_wikidata?: string | null;
 }
 
 const PREAMBLE = `INSTALL httpfs; LOAD httpfs; SET s3_region='us-west-2';`;
@@ -44,11 +45,15 @@ export function snapshotQuery(base: string, release: string, cols: Map<string, s
   const confidence = cols.has("confidence") ? "confidence" : "NULL::DOUBLE";
   const status = cols.has("operating_status") ? "operating_status" : "NULL::VARCHAR";
   const hasLicense = /license\s+VARCHAR/i.test(cols.get("sources") ?? "");
+  const brandType = cols.get("brand") ?? "";
+  const brand = /names/i.test(brandType) ? "brand.names.primary" : "NULL::VARCHAR";
+  const brandWd = /wikidata/i.test(brandType) ? "brand.wikidata" : "NULL::VARCHAR";
   return `SELECT id, names.primary AS name, ${category} AS category,
       addresses[1].freeform AS line, addresses[1].locality AS city, regexp_replace(addresses[1].region, '^US-', '') AS state, addresses[1].postcode AS zip,
       (bbox.ymin + bbox.ymax) / 2 AS lat, (bbox.xmin + bbox.xmax) / 2 AS lon,
       phones, ${emails} AS emails, websites, ${socials} AS socials, ${confidence} AS confidence, ${status} AS operating_status,
-      list_transform(sources, s -> s.dataset) AS datasets, ${hasLicense ? "list_transform(sources, s -> s.license)" : "NULL::VARCHAR[]"} AS licenses
+      list_transform(sources, s -> s.dataset) AS datasets, ${hasLicense ? "list_transform(sources, s -> s.license)" : "NULL::VARCHAR[]"} AS licenses,
+      ${brand} AS brand, ${brandWd} AS brand_wikidata
     FROM read_parquet(${lit(`${base}/${release}/theme=places/type=place/*.parquet`)}, hive_partitioning = false)
     WHERE len(addresses) > 0 AND addresses[1].country = 'US' AND names.primary IS NOT NULL
       AND coalesce(${confidence}, 1) >= ${minConfidence}
@@ -71,6 +76,8 @@ export function toCandidate(r: OvertureRow, release: string, retrievedAt: string
     sources: [{ source: "overture", sourceId: r.id, license: rowLicense(r.datasets, r.licenses), release, retrievedAt }],
     sourceConfidence: typeof r.confidence === "number" ? r.confidence : null,
     operatingStatus: r.operating_status ?? null,
+    brand: r.brand ?? null,
+    brandWikidata: typeof r.brand_wikidata === "string" && /^Q\d{1,12}$/.test(r.brand_wikidata) ? r.brand_wikidata : null,
   };
 }
 

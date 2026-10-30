@@ -102,6 +102,12 @@ export async function evaluate(c: Candidate, deps: Deps, probe: Probe | null): P
     return { kind: "done", cls, prospect, send: SEND_CLASSES.includes(cls) && c.phones.length > 0 };
   };
   if (recConf < 0.5) return done("BUSINESS_IDENTITY_UNCERTAIN", { url: null, confidence: recConf, identitySignals: [`record confidence ${recConf}`] }, [], recConf);
+  // Recognised chain / franchise location (the source links it to a brand with a Wikidata id): its website is run by the
+  // brand, so it is not a website-development prospect. Not fetched, not sent.
+  if (c.brandWikidata) {
+    checks.push({ stage: "A", method: "source brand link", result: `location of brand "${(c.brand ?? "?").slice(0, 60)}" (Wikidata ${c.brandWikidata}); website managed by the brand`, at: iso() });
+    return { kind: "done", cls: "WEBSITE_UNVERIFIED", prospect: { ...base, website: { classification: "WEBSITE_UNVERIFIED", url: null, confidence: 0.5, checkedAt: iso(), checks, identitySignals: ["brand-managed chain location: not researched as a prospect"] }, findings: [], identityConfidence: recConf }, send: false };
+  }
 
   let restricted = false, loadedUnconfirmed = false;
   const unconfirmedReasons: string[] = [];
@@ -140,7 +146,9 @@ export async function evaluate(c: Candidate, deps: Deps, probe: Probe | null): P
       checks.push({ stage: "D", method: "identity by listing", result: `listed by ${d.listedBy.join(", ")}; page is a placeholder`, at: iso() });
       return done("VERIFIED_WEBSITE_BROKEN", { url: home.finalUrl, confidence: 0.75, identitySignals: [`listed by ${d.listedBy.join(", ")}`, "placeholder page"] }, [finding], recConf);
     }
-    const id = identity(c, facts, d.listedBy);
+    const siblings = deps.state.businessesForDomain(d.domain).filter((b) => b.business_key !== c.businessKey)
+      .map((b) => deps.state.candidate(b.business_key)).filter((o) => o && nameOverlap(c.name, o.name) >= 0.6).length;
+    const id = identity(c, facts, d.listedBy, siblings);
     checks.push({ stage: "D", method: "page vs record (phone, street, city, name, listings)", result: `${id.official ? "official" : "not confirmed"} (score ${id.score}): ${[...id.signals, ...id.contradictions].join("; ") || "no matching signals"}`, at: iso() });
     if (!id.official) { loadedUnconfirmed = true; unconfirmedReasons.push(`${d.domain} loads but does not match this business`); continue; }
     deps.state.indexDomain(d.domain, c.businessKey, c.sources[0]?.source ?? "source");

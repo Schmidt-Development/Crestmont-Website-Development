@@ -15,6 +15,8 @@ export interface Candidate {
   sources: SourceRef[];
   sourceConfidence: number | null;  // the dataset's own existence confidence, when it publishes one
   operatingStatus: string | null;   // e.g. "open" / "permanently_closed" when published
+  brand?: string | null;            // brand name when the source links the place to a brand (chain / franchise)
+  brandWikidata?: string | null;    // Wikidata id of that brand (a recognised national/regional chain)
 }
 
 export interface SourceAdapter {

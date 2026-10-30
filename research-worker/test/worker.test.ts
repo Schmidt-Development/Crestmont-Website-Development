@@ -366,3 +366,22 @@ test("[live] robots.txt redirects are followed (RFC 9309); a redirect into a pri
     assert.ok(hits.includes("/real-robots.txt"));
   } finally { srv.close(); }
 });
+
+test("[live] franchise and multi-location handling: brand-managed chain locations are not prospects; same-site locations of one business are recognised", async () => {
+  const st = new State(":memory:");
+  const chain = await evaluate(cand({ businessKey: "overture:chain1", name: "Big Burger", brand: "Big Burger", brandWikidata: "Q123" }), deps(new FakeHttp({}), st), null);
+  assert.ok(chain.kind === "done" && chain.send === false && chain.cls === "WEBSITE_UNVERIFIED");
+  if (chain.kind === "done") assert.match(chain.prospect.website.checks!.find((c) => c.stage === "A" && /brand/.test(c.result))!.result, /Q123/);
+  // Two locations of one local business share a website that shows the central phone number.
+  const site = "https://riverside-plumbing.example/";
+  const centralPage = page({ phone: "(517) 555-2900", street: "1 Central Ave" });
+  const a = cand({ businessKey: "overture:loc1", phones: ["+15175552142"], address: { line: "120 Main St", city: "Lansing", state: "MI", zip: "48933" } });
+  const b = cand({ businessKey: "overture:loc2", phones: ["+15175552143"], address: { line: "9 Oak St", city: "Lansing", state: "MI", zip: "48912" } });
+  st.upsertCandidate(a, "MI", new Date(), 30); st.upsertCandidate(b, "MI", new Date(), 30);
+  const r = await evaluate(a, deps(new FakeHttp({ [site]: ok(site, centralPage, { responseMs: 200 }) }), st), null);
+  assert.ok(r.kind === "done" && r.cls === "VERIFIED_OFFICIAL_WEBSITE", JSON.stringify(r).slice(0, 300));
+  if (r.kind === "done") assert.ok(r.prospect.website.identitySignals!.some((s) => /other location/.test(s)));
+  // Without a sibling location, a different phone on a listed page is still not confirmed (no false identity).
+  const solo = await evaluate(cand({ businessKey: "overture:solo" }), deps(new FakeHttp({ [site]: ok(site, centralPage, { responseMs: 200 }) }), new State(":memory:")), null);
+  assert.ok(solo.kind === "done" && solo.cls === "WEBSITE_UNVERIFIED");
+});
