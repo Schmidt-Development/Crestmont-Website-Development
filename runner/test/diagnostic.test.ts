@@ -20,7 +20,7 @@ const HTML = "<!doctype html><html><head><title>Junk in the Trunk</title></head>
 const GB = 1024 ** 3;
 
 /** Fake Ollama native API. `mode` selects a failure. */
-function fakeOllama(mode: "ok" | "down" | "missing" | "cpu" = "ok") {
+function fakeOllama(mode: "ok" | "down" | "missing" | "cpu" | "partial" = "ok") {
   const calls: { path: string; body: unknown }[] = [];
   const fetchImpl = (async (url: string, init?: RequestInit) => {
     const path = new URL(url).pathname;
@@ -29,13 +29,13 @@ function fakeOllama(mode: "ok" | "down" | "missing" | "cpu" = "ok") {
     const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
     if (path === "/api/version") return json(200, { version: "0.32.0" });
     if (path === "/api/generate") return mode === "missing" ? json(404, { error: `model '${MODEL}' not found` }) : json(200, { done: true });
-    if (path === "/api/ps") return json(200, { models: [{ name: MODEL, size: 24 * GB, size_vram: mode === "cpu" ? 0 : 24 * GB, details: { parameter_size: "35B", quantization_level: "Q4_K_M" } }] });
+    if (path === "/api/ps") return json(200, { models: [{ name: MODEL, size: 24 * GB, size_vram: mode === "cpu" ? 0 : mode === "partial" ? 12 * GB : 24 * GB, details: { parameter_size: "35B", quantization_level: "Q4_K_M" } }] });
     if (path === "/api/chat") return json(200, { model: MODEL, message: { role: "assistant", content: "```html\n" + HTML + "\n```" }, done_reason: "stop", total_duration: 3.2e9, load_duration: 0.4e9, prompt_eval_count: 51, prompt_eval_duration: 0.1e9, eval_count: 88, eval_duration: 1.6e9 });
     return json(404, { error: "unknown" });
   }) as unknown as typeof fetch;
   return { calls, fetchImpl };
 }
-async function run(mode: "ok" | "down" | "missing" | "cpu") {
+async function run(mode: "ok" | "down" | "missing" | "cpu" | "partial") {
   const cp = await startFakeControlPlane({ jobs: [], aiJobs: [job()] });
   const o = fakeOllama(mode);
   try {
@@ -55,6 +55,7 @@ test("[AIB-021] runner diagnostic: D07–D11 reported in order with Ollama's own
   assert.deepEqual(r.cps.map((c) => [c.code, c.ok]), [["D07", true], ["D08", true], ["D09", true], ["D10", true], ["D11", true]]);
   for (const c of r.cps) { assert.equal(c.correlationId, "corr_0123456789abcdef"); assert.equal(c.leaseToken, "d".repeat(64)); assert.ok(!Number.isNaN(Date.parse(c.at))); }
   assert.equal(r.cps[0].evidence.configuredModel, MODEL);
+  assert.ok("hostLabel" in r.cps[0].evidence && "containerHost" in r.cps[0].evidence);
   assert.equal(r.cps[2].evidence.model.gpuPercent, 100);
   assert.equal(r.cps[4].evidence.tokensPerSecond, 55);
   assert.equal(r.cps[4].evidence.looksLikeRequestedHtml, true);
@@ -82,4 +83,7 @@ test("[AIB-021] runner diagnostic: stops at the first failing step and says why 
   const cpu = await run("cpu");
   assert.equal(cpu.cps.at(-1)!.code, "D09");
   assert.match(cpu.cps.at(-1)!.error, /none of it is in GPU memory/);
+  const partial = await run("partial");
+  assert.equal(partial.cps.at(-1)!.code, "D09");
+  assert.match(partial.cps.at(-1)!.error, /only 50% of the model is in GPU memory/);
 });

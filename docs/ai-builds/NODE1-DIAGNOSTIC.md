@@ -27,7 +27,7 @@ There's no push from the cloud and no Claude session anywhere in this path. If t
 | power | no sleep or hibernate on AC | script L2 |
 | 3 network | DNS, TCP 443 and HTTPS to the platform | script L3 |
 | 4 runner running | Docker engine, `runner` container running, auto-start task registered | script L4 |
-| 5 authenticated | runner's last claim succeeded (503 = secret not set on the platform; 401 = secret mismatch) | script L5; platform page "Rejected runner calls" (new) |
+| 5 authenticated | runner's last claim succeeded (503 = secret not set on the platform; 401 = secret mismatch) | script L5; platform page "Rejected runner calls" (new: correctly signed calls with a wrong secret or clock) |
 | 6 receiving jobs | `build_runners.last_seen_at` fresh; diagnostic D03–D06 | platform page **Owner → AI builds → Node diagnostics** |
 | 7 Ollama | `/api/version`; configured `LOCAL_MODEL` installed | script L7; diagnostic D08 |
 | 8 GPU | `nvidia-smi` | script L8 |
@@ -40,7 +40,7 @@ There's no push from the cloud and no Claude session anywhere in this path. If t
 3. **Staging runs `main`, which has none of the V4 builder.** Staging deploys only from `main` (`deploy-staging.yml`). PR #16 (GPU worker registry, worker keys, `/workers/status`, dual-model routing, migrations 0041–0043) and PR #51 are not merged. A runner built from PR #16 can't register against staging, and the V4 installer needs a worker id and key that only V4 staging can issue. **Today Node 1 can only work against `main`'s single-model runner protocol.**
 4. **Staging itself deploys.** The latest four `deploy-staging` runs (head 095e349) applied migrations and deployed the Worker; only the browser verification of the portfolio pages fails afterwards. `staging-health-monitor` has been failing at "Service and evidence-feed health". Its log storage is blocked from Claude's sandbox, so the reason isn't confirmed here.
 5. **Whether staging has `BUILD_RUNNER_SECRET` can't be confirmed from here.** The deploy step passes either way, and its log is unreadable from the sandbox. Without the secret every runner call is answered 503.
-6. **An observability gap (fixed here):** a runner that was running but sent a wrong signature left no trace on the platform. Rejected signatures are now recorded, at most once a minute, with the reason only.
+6. **An observability gap (fixed here):** a runner that was running but sent a wrong signature left no trace on the platform. Correctly formed but rejected signatures are now recorded, at most once a minute: the reason, the path and the caller's IP (as Cloudflare reports it). Never the header or the body. Unsigned requests from scanners are not recorded.
 7. **A design risk for an always-on machine (unverified on Node 1):** the runner starts only when the installing user signs in. After any reboot, such as a Windows Update, Node 1 is "on" but does not poll until someone signs in. Sleep on AC power has the same effect. The script reports both.
 8. **Migration numbering:** `main` already has `0044_modules_closeout`, `0045_ops_closeout` and `0046_known_devices`, and PR #51 adds `0044_simulated_payments`. D1 applies files by name, so this works, but PR #51 should be renumbered before merging. This branch uses `0047`.
 
@@ -50,11 +50,11 @@ There's no push from the cloud and no Claude session anywhere in this path. If t
   - D01 created and D02 persisted (read back).
   - D03 runner registered and D04 fresh (taken from `build_runners` at the moment of the claim).
   - D05 offered and D06 claimed (lease).
-  - D07 runner acknowledged: host, pid, runner version, configured model.
+  - D07 runner acknowledged: the Windows computer name (`RUNNER_HOST_LABEL`, written by the installer), the container id, pid, runner version, configured model.
   - D08 Ollama answering (`/api/version`).
-  - D09 model loaded, with its share of GPU memory from `/api/ps` `size_vram`.
+  - D09 model loaded **and at least 95% resident in GPU memory** (`/api/ps` `size_vram`). Partial CPU offload fails this step.
   - D10 inference sent (prompt hash).
-  - D11 completed: Ollama's own durations, token counts and tokens per second.
+  - D11 completed: Ollama's own durations, token counts and tokens per second. It fails if Ollama answers with a different model than the configured one.
   - D12 result received (bytes, SHA-256).
   - D13 terminal state persisted.
 
@@ -62,6 +62,8 @@ There's no push from the cloud and no Claude session anywhere in this path. If t
 - **Platform connectivity view** on the same page: whether `BUILD_RUNNER_SECRET` is set, every runner that has ever authenticated with how fresh it is, and the latest rejected runner calls.
 - **`runner/windows/Test-Node1Dispatch.ps1`**: a read-only report on layers 1–8, plus an optional real inference with `nvidia-smi` sampling (layer 9). It writes no secrets and is copied to `C:\CrestmontRunner` by the installer.
 - **Tests:** `tests/runner-diagnostics.test.ts` and `runner/test/diagnostic.test.ts`. They are signed HTTP fixtures and a fake Ollama: they prove the recording is honest and **are not evidence of GPU execution**.
+
+**What the platform trace proves, and what it doesn't.** D01–D06, D12 and D13 are the platform's own observations. D07–D11 are reported by whichever runner holds that job's lease. Nobody without the lease can forge them, but any machine holding `BUILD_RUNNER_SECRET` could run a runner. Independent evidence that the work ran on Node 1's RTX 5090 comes from `Test-Node1Dispatch.ps1 -InferenceProbe`, run on Node 1 (`nvidia-smi` sampled during the inference), and from D07's computer name. The diagnostic lease is 15 minutes, and the runner budgets the model load and the inference within it, so a slow cold load is reported as a D09 or D11 failure rather than a lost lease.
 
 ## 4. Founder steps (in this order)
 

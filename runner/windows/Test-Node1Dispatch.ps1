@@ -117,26 +117,31 @@ try {
 } catch { Add-Check 1 "shutdowns, restarts and sleep (14 days)" $null $_.Exception.Message }
 
 # -- 2 Power settings --
-function Get-PowerMinutes([string]$Sub, [string]$Setting) {
+function Get-PowerTimeout([string]$Sub, [string]$Setting) {
   $out = (& powercfg.exe /query SCHEME_CURRENT $Sub $Setting 2>$null) | Out-String
   if ($out -match 'Current AC Power Setting Index:\s*0x([0-9a-fA-F]+)') { return [int][Convert]::ToInt32($Matches[1], 16) / 60 }
   return $null
 }
-$sleepMin = Get-PowerMinutes "SUB_SLEEP" "STANDBYIDLE"
-$hibMin = Get-PowerMinutes "SUB_SLEEP" "HIBERNATEIDLE"
+$sleepMin = Get-PowerTimeout "SUB_SLEEP" "STANDBYIDLE"
+$hibMin = Get-PowerTimeout "SUB_SLEEP" "HIBERNATEIDLE"
 Add-Check 2 "sleep on AC power" $(if ($null -eq $sleepMin) { $null } else { $sleepMin -eq 0 }) $(if ($null -eq $sleepMin) { "could not read powercfg" } elseif ($sleepMin -eq 0) { "never sleeps" } else { "sleeps after $sleepMin min idle: a sleeping PC cannot poll for work" })
 Add-Check 2 "hibernate on AC power" $(if ($null -eq $hibMin) { $null } else { $hibMin -eq 0 }) $(if ($null -eq $hibMin) { "could not read powercfg" } elseif ($hibMin -eq 0) { "never hibernates" } else { "hibernates after $hibMin min idle" })
 
 # -- 3 Network --
 if ($platform) {
-  try {
-    $uri = [Uri]$platform
-    $ips = @(Resolve-DnsName -Name $uri.Host -ErrorAction Stop | Where-Object { $_.IPAddress } | ForEach-Object { $_.IPAddress })
-    Add-Check 3 "DNS $($uri.Host)" ($ips.Count -gt 0) ("resolves to {0}" -f ($ips -join ", "))
+  $uri = $null
+  try { $uri = [Uri]$platform } catch { $uri = $null }
+  if (-not $uri -or -not $uri.Host) { Add-Check 3 "platform URL" $false "CONTROL_PLANE_URL is not a valid URL: $platform" }
+  else {
+    try {
+      $ips = @(Resolve-DnsName -Name $uri.Host -ErrorAction Stop | Where-Object { $_.IPAddress } | ForEach-Object { $_.IPAddress })
+      Add-Check 3 "DNS $($uri.Host)" ($ips.Count -gt 0) ("resolves to {0}" -f ($ips -join ", "))
+    } catch { Add-Check 3 "DNS $($uri.Host)" $false "name does not resolve: $($_.Exception.Message)" }
+    $okTcp = $false; $tcpErr = "no TCP connection within 8 s (firewall, proxy or network)"
     $tcp = New-Object Net.Sockets.TcpClient
-    $okTcp = $tcp.ConnectAsync($uri.Host, 443).Wait(8000) -and $tcp.Connected
+    try { $okTcp = $tcp.ConnectAsync($uri.Host, 443).Wait(8000) -and $tcp.Connected } catch { $tcpErr = "TCP 443 refused or failed: $($_.Exception.GetBaseException().Message)" }
     $tcp.Close()
-    Add-Check 3 "TCP 443 to the platform" $okTcp $(if ($okTcp) { "connected" } else { "no TCP connection within 8 s (firewall, proxy or network)" })
+    Add-Check 3 "TCP 443 to the platform" $okTcp $(if ($okTcp) { "connected" } else { $tcpErr })
     try {
       $r = Invoke-WebRequest -Uri ($platform.TrimEnd("/") + "/health") -UseBasicParsing -TimeoutSec 15 -MaximumRedirection 0 -ErrorAction Stop
       Add-Check 3 "HTTPS to the platform" $true ("GET /health -> {0}" -f $r.StatusCode)
@@ -144,7 +149,7 @@ if ($platform) {
       $code = $null; if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
       Add-Check 3 "HTTPS to the platform" $(if ($code) { $true } else { $false }) $(if ($code) { "GET /health -> HTTP $code (the server answered)" } else { "no HTTPS answer: $($_.Exception.Message)" })
     }
-  } catch { Add-Check 3 "platform URL" $false "CONTROL_PLANE_URL is not a valid URL: $platform" }
+  }
 } else { Add-Check 3 "platform URL" $false "CONTROL_PLANE_URL not configured (runner.env missing or incomplete)" }
 
 # -- 4 Runner process --
@@ -227,7 +232,7 @@ if ($InferenceProbe) {
     $samples = New-Object System.Collections.ArrayList
     $smiPath = (Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue).Source
     $sampler = $null
-    if ($smiPath) { $sampler = Start-Job -ScriptBlock { param($p) for ($i = 0; $i -lt 240; $i++) { & $p --query-gpu=memory.used,utilization.gpu --format=csv,noheader,nounits; Start-Sleep -Milliseconds 500 } } -ArgumentList $smiPath }
+    if ($smiPath) { $sampler = Start-Job -ScriptBlock { param($p) for ($i = 0; $i -lt 640; $i++) { & $p --query-gpu=memory.used,utilization.gpu --format=csv,noheader,nounits; Start-Sleep -Milliseconds 500 } } -ArgumentList $smiPath }
     $body = @{ model = $model; stream = $false; keep_alive = "10m"; options = @{ temperature = 0; seed = 42; num_predict = 400 }
       messages = @(@{ role = "system"; content = "Reply with one complete HTML document and nothing else." }, @{ role = "user"; content = "Generate a minimal HTML document containing a title, heading and paragraph for a fictional junk removal company called Junk in the Trunk." }) } | ConvertTo-Json -Depth 5
     try {

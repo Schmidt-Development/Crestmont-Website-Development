@@ -86,7 +86,9 @@ export async function runDiagnostic(d: DiagnosticDeps, job: AiDraftJob & { diagn
 
   try {
     // D07: this process received the job.
-    await report({ code: "D07", ok: true, component: "runner", evidence: { host: hostname(), pid: process.pid, runnerVersion: RUNNER_VERSION, node: process.version, platform: process.platform, configuredModel: d.modelName } });
+    // The container's hostname is its id; the installer passes the Windows computer name as RUNNER_HOST_LABEL.
+    // Self-reported by whoever holds the runner secret: independent machine evidence is Test-Node1Dispatch.ps1.
+    await report({ code: "D07", ok: true, component: "runner", evidence: { hostLabel: process.env.RUNNER_HOST_LABEL ?? null, containerHost: hostname(), pid: process.pid, runnerVersion: RUNNER_VERSION, node: process.version, platform: process.platform, configuredModel: d.modelName } });
 
     // D08: the local model server answers.
     let version: string;
@@ -112,10 +114,12 @@ export async function runDiagnostic(d: DiagnosticDeps, job: AiDraftJob & { diagn
     const loaded = await ps();
     metrics.loadWaitMs = clock() - t9;
     metrics.residency = loaded.model;
-    const onGpu = !!loaded.model && (loaded.model.sizeVramBytes ?? 0) > 0;
-    await report({ code: "D09", ok: onGpu, component: "ollama", error: !loaded.model ? `model ${d.modelName} is not listed by /api/ps after loading (loaded: ${loaded.loaded.join(", ") || "none"})` : onGpu ? undefined : "the model is loaded but none of it is in GPU memory (size_vram = 0): CPU only",
+    // Fully (>= 95 %) in GPU memory: a partly CPU-offloaded model is not "GPU inference".
+    const pct = loaded.model?.gpuPercent ?? 0;
+    const onGpu = !!loaded.model && pct >= 95;
+    await report({ code: "D09", ok: onGpu, component: "ollama", error: !loaded.model ? `model ${d.modelName} is not listed by /api/ps after loading (loaded: ${loaded.loaded.join(", ") || "none"})` : onGpu ? undefined : pct === 0 ? "the model is loaded but none of it is in GPU memory (size_vram = 0): CPU only" : `only ${pct}% of the model is in GPU memory; the rest runs on the CPU (not enough free VRAM)`,
       evidence: { model: loaded.model, loadWaitMs: metrics.loadWaitMs } });
-    if (!onGpu) return await finish({ error: "model not resident on the GPU" });
+    if (!onGpu) return await finish({ error: pct === 0 ? "model not resident on the GPU" : `model only ${pct}% resident on the GPU` });
 
     // D10: the inference request is sent.
     const promptSha = createHash("sha256").update(job.system + "\n" + job.prompt).digest("hex");
@@ -143,7 +147,9 @@ export async function runDiagnostic(d: DiagnosticDeps, job: AiDraftJob & { diagn
       reportedModel: res.model ?? null, residencyAfter: after?.model ?? null,
     });
     const looksHtml = /<html[\s>]/i.test(content) && /<h1[\s>]/i.test(content) && /<p[\s>]/i.test(content) && /<title[\s>]/i.test(content);
-    await report({ code: "D11", ok: !!content, component: "ollama", error: content ? undefined : "the model returned no text",
+    const reported = typeof res.model === "string" ? res.model : "";
+    const sameAsConfigured = !reported || sameModel(reported, d.modelName);
+    await report({ code: "D11", ok: !!content && sameAsConfigured, component: "ollama", error: !content ? "the model returned no text" : sameAsConfigured ? undefined : `Ollama answered with ${reported}, not the configured ${d.modelName}`,
       evidence: { totalMs: metrics.totalMs, loadMs: metrics.loadMs, evalCount, evalMs, tokensPerSecond: metrics.tokensPerSecond, doneReason: metrics.doneReason, outputChars: content.length, looksLikeRequestedHtml: looksHtml, gpuPercentAfter: after?.model?.gpuPercent ?? null } });
     if (!content) return await finish({ error: "the model returned no text", inputTokens: Number(res.prompt_eval_count) || 0, outputTokens: evalCount });
     return await finish({ text: content, inputTokens: Number(res.prompt_eval_count) || 0, outputTokens: evalCount });

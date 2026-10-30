@@ -42,8 +42,19 @@ export const DIAGNOSTIC_LEASE_S = 15 * 60;
 export const DIAGNOSTIC_SYSTEM = "You are a diagnostic workload for Crestmont's self-hosted model server. Reply with one complete HTML document and nothing else: no explanation, no Markdown fences.";
 export const DIAGNOSTIC_PROMPT = "Generate a minimal HTML document containing a title, heading and paragraph for a fictional junk removal company called Junk in the Trunk.";
 
-/** Runner-supplied evidence is untrusted text: redacted and capped. Platform evidence is written as is (it holds hashes). */
-const evid = (v: unknown, trusted = false) => trusted ? JSON.stringify(v ?? null).slice(0, 4000) : sanitize(JSON.stringify(v ?? null), 4000);
+/**
+ * Runner-supplied evidence is untrusted: credential-shaped strings are redacted and the size is capped. Unlike the
+ * general sanitize(), hex digests (prompt hashes, model digests) are kept: they are the evidence.
+ */
+export function redactEvidence(text: string): string {
+  return text
+    .replace(/\b(?:ghp|gho|ghs|github_pat)_[A-Za-z0-9_]{10,}/g, "[redacted-token]")
+    .replace(/\b(?:sk-ant|sk|rk|pk|whsec)[-_][A-Za-z0-9_-]{10,}/g, "[redacted-key]")
+    .replace(/\b(Bearer|token)\s+[A-Za-z0-9._~+/=-]{16,}/gi, "$1 [redacted]")
+    .replace(/[A-Za-z0-9+/]{48,}={0,2}/g, (m) => /^[0-9a-f]+$/i.test(m) ? m : "[redacted-blob]")
+    .slice(0, 4000);
+}
+const evid = (v: unknown, trusted = false) => trusted ? JSON.stringify(v ?? null).slice(0, 4000) : redactEvidence(JSON.stringify(v ?? null));
 
 async function addCheckpoint(db: Db, diagnosticId: string, c: { code: CheckpointCode; ok: boolean; at?: string; source: "platform" | "runner"; component: string; worker?: string | null; error?: string | null; evidence?: unknown }) {
   const trusted = c.source === "platform";
@@ -52,9 +63,16 @@ async function addCheckpoint(db: Db, diagnosticId: string, c: { code: Checkpoint
     .bind(diagnosticId, c.code, c.ok ? 1 : 0, c.at ?? now, now, c.source, c.component.slice(0, 60), c.worker ? sanitize(c.worker, 80) : null, c.error ? sanitize(c.error, 1000) : null, evid(c.evidence, trusted)).run();
 }
 
+/** The diagnostic for an ai_job, or null. Tolerates a Worker running before migration 0047 (drafts keep working). */
 async function diagnosticForJob(db: Db, aiJobId: string) {
-  return db.prepare(`SELECT id, correlation_id FROM runner_diagnostics WHERE ai_job_id = ?`).bind(aiJobId).first<{ id: string; correlation_id: string }>();
+  try {
+    return await db.prepare(`SELECT id, correlation_id FROM runner_diagnostics WHERE ai_job_id = ?`).bind(aiJobId).first<{ id: string; correlation_id: string }>();
+  } catch (e) {
+    if (/no such table/i.test((e as Error).message)) return null;
+    throw e;
+  }
 }
+export async function isDiagnosticJob(db: Db, aiJobId: string): Promise<boolean> { return !!(await diagnosticForJob(db, aiJobId)); }
 
 /** D01 + D02: the Owner creates one diagnostic job; it is read back from the database before D02 is written. */
 export async function createDiagnostic(db: Db, userId: string): Promise<{ id: string; correlationId: string; aiJobId: string }> {
@@ -165,7 +183,9 @@ export async function getDiagnostic(db: Db, id: string): Promise<DiagnosticView 
 }
 
 export async function listDiagnostics(db: Db, limit = 20) {
-  return (await db.prepare(`SELECT d.id, d.correlation_id, d.created_at, j.status, (SELECT COUNT(DISTINCT c.code) FROM runner_diagnostic_checkpoints c WHERE c.diagnostic_id = d.id AND c.ok = 1) AS passed
+  // Same rule as the detail page: a step counts when its LATEST row passed.
+  return (await db.prepare(`SELECT d.id, d.correlation_id, d.created_at, j.status, (SELECT COUNT(*) FROM runner_diagnostic_checkpoints c WHERE c.diagnostic_id = d.id AND c.ok = 1
+                               AND c.id = (SELECT MAX(c2.id) FROM runner_diagnostic_checkpoints c2 WHERE c2.diagnostic_id = d.id AND c2.code = c.code)) AS passed
                              FROM runner_diagnostics d JOIN ai_jobs j ON j.id = d.ai_job_id ORDER BY d.created_at DESC LIMIT ?`).bind(limit)
     .all<{ id: string; correlation_id: string; created_at: string; status: string; passed: number }>()).results;
 }

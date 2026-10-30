@@ -257,6 +257,7 @@ $runnerEnv = @(
   "CONTROL_PLANE_URL=$PlatformUrl"
   "BUILD_RUNNER_SECRET_FILE=/run/secrets/build_runner_secret"
   "RUNNER_ID=$RunnerId"
+  "RUNNER_HOST_LABEL=$env:COMPUTERNAME"
   "RUNNER_AGENT_PROVIDER=local"
   "RUNNER_ALLOW_PAID_PROVIDER=false"
   "LOCAL_MODEL=$selected"

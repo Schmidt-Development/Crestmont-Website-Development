@@ -56,7 +56,13 @@ test("[AIB-021] diagnostic trace: created, persisted, worker known and fresh, of
   assert.equal((await cp("D12")).status, 422, "the runner cannot claim platform checkpoints");
   assert.equal((await cp("D08", { correlationId: "corr_other" })).status, 422);
   assert.equal((await cp("D08", { leaseToken: "0".repeat(64) })).status, 409);
-  for (const c of ["D08", "D09", "D10", "D11"]) assert.equal((await cp(c)).status, 200, c);
+  for (const c of ["D08", "D09", "D11"]) assert.equal((await cp(c)).status, 200, c);
+  // Runner evidence keeps digests (they are the evidence) but credential-shaped strings are redacted.
+  const sha = "a".repeat(64);
+  assert.equal((await cp("D10", { evidence: { promptSha256: sha, leaked: "Bearer abcdefghijklmnopqrstuvwxyz012345", key: "sk-ant-api03-SECRETSECRETSECRET" } })).status, 200);
+  const d10 = (await DX.getDiagnostic(t.db, id))!.steps.find((s) => s.code === "D10")!.row!.evidence!;
+  assert.match(d10, new RegExp(sha));
+  assert.doesNotMatch(d10, /abcdefghijklmnopqrstuvwxyz012345|SECRETSECRET/);
   const html = "<!doctype html><html><head><title>Junk in the Trunk</title></head><body><h1>Junk in the Trunk</h1><p>We haul it away.</p><script>alert(1)</script></body></html>";
   const done = await signed(t, "ai/complete", { jobId: job.id, leaseToken: job.leaseToken, text: html, model: "qwen3.6:35b-a3b-q4_K_M", inputTokens: 51, outputTokens: 88, correlationId: job.diagnostic.correlationId, diagnostic: { tokensPerSecond: 61.2, residency: { gpuPercent: 100 } } });
   assert.deepEqual(done.json, { status: "succeeded" });
@@ -102,6 +108,11 @@ test("[AIB-021] the first unproven step is named: unregistered or stale runner, 
   assert.equal(vb.firstFailure?.code, "D07");
   assert.match(vb.steps.find((s) => s.code === "D12")!.row!.evidence!, /runner predates diagnostics/);
   assert.match(await (await t.oc.get(`/staff/builds/diagnostics/${b}`)).text(), /this runner version predates diagnostics/);
+  // A current runner whose checkpoints did not arrive is not mistaken for an old runner.
+  const e = await queue(t);
+  const n = (await signed(t, "ai/claim", { runnerId: "old-runner" })).json.job;
+  await signed(t, "ai/complete", { jobId: n.id, leaseToken: n.leaseToken, text: "<html><title>x</title><h1>x</h1><p>x</p></html>", model: "llama", correlationId: n.diagnostic.correlationId });
+  assert.match(await (await t.oc.get(`/staff/builds/diagnostics/${e}`)).text(), /checkpoint never arrived/);
 
   // Claimed, then silence: the lease sweep fails it (no retry) and the gap is recorded at D12.
   const c = await queue(t);
@@ -119,6 +130,9 @@ test("[AIB-021] connectivity view: no secret on the platform; rejected runner si
   assert.match(await (await none.oc.get("/staff/builds/diagnostics")).text(), /BUILD_RUNNER_SECRET is not set on this Worker/);
 
   const t = await app();
+  // Unsigned requests (internet scanners) are refused without taking the logging slot.
+  assert.equal((await t.client().request("POST", "/api/builds/runner/claim", { body: "{}", headers: { "content-type": "application/json" } })).status, 401);
+  assert.equal((await t.db.prepare(`SELECT COUNT(*) AS n FROM security_events WHERE kind = 'runner_auth_failed'`).first<{ n: number }>())!.n, 0);
   for (let i = 0; i < 3; i++) assert.equal((await signed(t, "claim", { runnerId: "node1" }, "wrong-secret")).status, 401);
   const ev = (await t.db.prepare(`SELECT detail FROM security_events WHERE kind = 'runner_auth_failed'`).all<{ detail: string }>()).results;
   assert.equal(ev.length, 1, "recorded at most once a minute");

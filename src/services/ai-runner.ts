@@ -48,10 +48,10 @@ export async function completeAiJob(db: Db, b: Record<string, unknown>) {
   const lease = token ? await db.prepare(`SELECT l.token_hash, l.attempts, l.runner_id, j.status FROM ai_job_leases l JOIN ai_jobs j ON j.id = l.job_id WHERE l.job_id = ?`).bind(id).first<{ token_hash: string; attempts: number; runner_id: string; status: string }>() : null;
   if (!lease || lease.status !== "running" || !lease.token_hash || !timingSafeEqualHex(lease.token_hash, await sha256Hex(token!))) throw new HttpError(409, "lease_lost");
   const at = nowIso();
-  // Node 1 diagnostic: D12/D13, no retry, never in the draft-approval queue.
-  await db.prepare(`DELETE FROM ai_job_leases WHERE job_id = ? AND EXISTS (SELECT 1 FROM runner_diagnostics WHERE ai_job_id = ?)`).bind(id, id).run();
+  // Node 1 diagnostic: D12/D13, no retry, never in the draft-approval queue. The lease is removed only after the
+  // terminal state is written, so a failed write leaves a lease the sweep can still recover.
   const diag = await onDiagnosticComplete(db, id, b, lease.runner_id);
-  if (diag) return diag;
+  if (diag) { await db.prepare(`DELETE FROM ai_job_leases WHERE job_id = ?`).bind(id).run(); return diag; }
   const model = typeof b.model === "string" && /^[\w.:/-]{1,100}$/.test(b.model) ? `self-hosted:${b.model}` : "self-hosted";
   const text = typeof b.text === "string" ? b.text.trim().slice(0, 20_000) : "";
   await db.prepare(`DELETE FROM ai_job_leases WHERE job_id = ?`).bind(id).run();

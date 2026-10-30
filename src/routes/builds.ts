@@ -37,7 +37,9 @@ async function runnerBody(ctx: AppContext): Promise<Record<string, unknown>> {
   } catch (e) {
     // Observability (Node 1 diagnostic): a runner that is running but cannot authenticate was invisible before.
     // Recorded at most once a minute (runners poll every few seconds); the reason only, never the header or body.
-    if (e instanceof B.RunnerAuthError) {
+    // Only well-formed signatures (a runner with the wrong secret or clock), so unsigned internet scanners never
+    // take the once-a-minute slot.
+    if (e instanceof B.RunnerAuthError && !/Missing or malformed/.test(e.message)) {
       const recent = await ctx.db.prepare(`SELECT 1 FROM security_events WHERE kind = 'runner_auth_failed' AND created_at > ?`).bind(new Date(ctx.now().getTime() - 60_000).toISOString()).first();
       if (!recent) await securityEvent(ctx.db, "runner_auth_failed", { ip: ctx.ip, detail: `${e.message} on ${ctx.url.pathname}` });
     }
@@ -323,7 +325,9 @@ async function diagnosticDetail(ctx: AppContext, id: string) {
   if (!d) throw new HttpError(404, "Diagnostic not found");
   const f = d.firstFailure;
   const body = html`${pageHead(`Diagnostic ${d.correlationId}`, linkButton("All diagnostics", "/staff/builds/diagnostics", "ghost", "sm"), "Node diagnostics")}
-${f ? alert(f.status === "fail" ? "error" : "warn", html`First ${f.status === "fail" ? "failed" : "unproven"} step: <strong>${f.code} — ${f.label}</strong>${f.row?.error ? html`: ${f.row.error}` : f.status === "missing" ? (DX.RUNNER_CHECKPOINTS.includes(f.code) && d.steps.some((s) => s.code === "D12" && s.status === "pass") ? " (not reported: this runner version predates diagnostics)" : " (not reached yet)") : ""}`) : alert("success", "All 13 steps recorded as passed.")}
+${f ? alert(f.status === "fail" ? "error" : "warn", html`First ${f.status === "fail" ? "failed" : "unproven"} step: <strong>${f.code} — ${f.label}</strong>${f.row?.error ? html`: ${f.row.error}` : f.status === "missing" ? (DX.RUNNER_CHECKPOINTS.includes(f.code) && d.steps.some((s) => s.code === "D12" && s.row)
+  ? (/runner predates diagnostics/.test(d.steps.find((s) => s.code === "D12")!.row!.evidence ?? "") ? " (not reported: this runner version predates diagnostics)" : " (the runner sent a result but this checkpoint never arrived: see the runner log)")
+  : " (not reached yet)") : ""}`) : alert("success", "All 13 steps recorded as passed.")}
 ${dl([["Job", `${d.aiJobId} (${d.jobStatus})`], ["Model reported", d.model ?? "—"], ["Error", d.jobError ?? "—"]])}
 ${table(d.steps, [
   { header: "Step", cell: (s) => html`<strong>${s.code}</strong> ${s.label}` },
