@@ -1,0 +1,67 @@
+name: Research live sample (real data, controlled)
+
+# Lead research, Phase 5: a small, resource-limited research run on REAL data (Overture places in the bounding box of
+# research-worker/live/request.json, the businesses' live websites with robots.txt honoured, Common Crawl index
+# evidence) into the real platform pipeline on in-memory SQLite. It never touches staging or production and dials no one.
+# The repository is PUBLIC: logs, annotations and the summary contain AGGREGATE COUNTS ONLY. Per-business evidence and
+# the manual-review sheet are sealed with the Founder's ACCESS_ARTIFACT_PASSPHRASE (scripts/seal.ts) or not uploaded.
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/lead-research-agent]
+    paths: ["research-worker/live/request.json", ".github/workflows/research-live-sample.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-live-sample
+  cancel-in-progress: false
+
+jobs:
+  sample:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: DuckDB (Python package, pinned major) behind the worker's CLI contract
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check "duckdb>=1.1,<2"
+          python3 -c "import duckdb; print('duckdb', duckdb.__version__)"
+      - name: Run the controlled real-data sample (aggregates only in the log)
+        env:
+          DUCKDB_PATH: ${{ github.workspace }}/research-worker/live/duckdb-shim.py
+        run: node --no-warnings research-worker/live/live-sample.ts --request research-worker/live/request.json --out live-out > live-out.log
+      - name: Publish aggregate summary (annotations + job summary; no business names, numbers or URLs)
+        if: always()
+        run: |
+          if [ -f live-out/summary.json ]; then
+            node -e 'const s=JSON.stringify(require("./live-out/summary.json"));for(let i=0;i<s.length&&i<35000;i+=3500)console.log(`::notice title=research-live-sample ${i/3500+1}::${s.slice(i,i+3500)}`)'
+            { echo '### Research live sample (aggregates)'; echo '```json'; cat live-out/summary.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error title=research-live-sample::no summary produced"; exit 1
+          fi
+      - name: Seal per-business evidence for the Founder (skipped when the passphrase is unavailable)
+        if: always()
+        env:
+          ACCESS_ARTIFACT_PASSPHRASE: ${{ secrets.ACCESS_ARTIFACT_PASSPHRASE }}
+        run: |
+          mkdir -p sealed
+          if node --no-warnings scripts/seal.ts check > /dev/null 2>&1 && [ -f live-out/details.json ]; then
+            tar -czf live-private.tgz -C live-out details.json review.md
+            node --no-warnings scripts/seal.ts seal live-private.tgz sealed/research-live-sample.sealed
+            echo "::notice title=research-live-sample sealed::per-business evidence sealed (AES-256-GCM)"
+          else
+            echo "::notice title=research-live-sample sealed::passphrase unavailable to this run; per-business evidence NOT uploaded"
+          fi
+          rm -rf live-out/*.private live-out/details.json live-out/review.md live-private.tgz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: research-live-sample-sealed
+          path: sealed/
+          if-no-files-found: ignore
+          retention-days: 14

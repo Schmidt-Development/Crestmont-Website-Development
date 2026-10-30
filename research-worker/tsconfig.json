@@ -13,5 +13,5 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true
   },
-  "include": ["src", "test", "bench", "../src/domain/research.ts"]
+  "include": ["src", "test", "bench", "live", "../src/domain/research.ts"]
 }

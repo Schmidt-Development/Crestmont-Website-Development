@@ -29,9 +29,14 @@ export function rowLicense(datasets: string[] | null, licenses: (string | null)[
 }
 
 /** Builds the snapshot SELECT for the probed schema (column → type). Exported for tests. */
-export function snapshotQuery(base: string, release: string, cols: Map<string, string>, minConfidence: number): string {
+export interface Bbox { xmin: number; ymin: number; xmax: number; ymax: number }
+export function validBbox(b: Bbox): boolean {
+  return [b.xmin, b.ymin, b.xmax, b.ymax].every((n) => typeof n === "number" && Number.isFinite(n)) && b.xmin < b.xmax && b.ymin < b.ymax && b.xmin >= -180 && b.xmax <= 180 && b.ymin >= -90 && b.ymax <= 90;
+}
+export function snapshotQuery(base: string, release: string, cols: Map<string, string>, minConfidence: number, bbox?: Bbox): string {
   const need = ["id", "names", "addresses", "phones", "websites", "bbox", "sources"];
   const missing = need.filter((c) => !cols.has(c));
+  if (bbox && !validBbox(bbox)) throw new Error("invalid bounding box");
   if (missing.length) throw new Error(`Overture ${release} places schema is missing ${missing.join(", ")}; update research-worker/src/sources/overture.ts`);
   const category = cols.has("basic_category") ? "basic_category" : cols.has("categories") ? "categories.primary" : "NULL";
   const emails = cols.has("emails") ? "emails" : "NULL::VARCHAR[]";
@@ -47,7 +52,8 @@ export function snapshotQuery(base: string, release: string, cols: Map<string, s
     FROM read_parquet(${lit(`${base}/${release}/theme=places/type=place/*.parquet`)}, hive_partitioning = false)
     WHERE len(addresses) > 0 AND addresses[1].country = 'US' AND names.primary IS NOT NULL
       AND coalesce(${confidence}, 1) >= ${minConfidence}
-      AND coalesce(${status}, 'open') <> 'permanently_closed'`;
+      AND coalesce(${status}, 'open') <> 'permanently_closed'${bbox ? `
+      AND bbox.xmin >= ${bbox.xmin} AND bbox.xmax <= ${bbox.xmax} AND bbox.ymin >= ${bbox.ymin} AND bbox.ymax <= ${bbox.ymax}` : ""}`;
 }
 
 export function toCandidate(r: OvertureRow, release: string, retrievedAt: string): Candidate | null {
@@ -97,15 +103,33 @@ export class OvertureSource implements SourceAdapter {
     const target = this.snapshotPath(release);
     if (existsSync(target)) return { release };
     mkdirSync(this.dir(release), { recursive: true });
-    const describe = await this.db.exec(`${PREAMBLE}
-      SELECT column_name || '|' || column_type FROM (DESCRIBE SELECT * FROM read_parquet(${lit(`${this.opts.base}/${release}/theme=places/type=place/*.parquet`)}, hive_partitioning = false));`, { timeoutMs: 600_000 });
-    const cols = new Map(csvColumn(describe).map((l) => { const i = l.indexOf("|"); return [l.slice(0, i), l.slice(i + 1)] as [string, string]; }));
+    const cols = await this.probe(release);
     this.opts.log.info("overture snapshot starting", { release, columns: [...cols.keys()].length });
     // One remote scan (projected columns, US rows) → local ZSTD Parquet. Hours on first run; resumable by re-running.
     await copyAtomic(this.db, snapshotQuery(this.opts.base, release, cols, this.opts.minConfidence), target, "PARQUET", 12 * 3600_000, PREAMBLE)
       .catch((e) => { throw new Error(`Overture snapshot failed: ${(e as Error).message}`); });
     this.opts.log.info("overture snapshot ready", { release, path: target });
     return { release };
+  }
+
+  /** Columns of a release, probed from its Parquet schema (name → DuckDB type). */
+  async probe(release: string): Promise<Map<string, string>> {
+    const describe = await this.db.exec(`${PREAMBLE}
+      SELECT column_name || '|' || column_type FROM (DESCRIBE SELECT * FROM read_parquet(${lit(`${this.opts.base}/${release}/theme=places/type=place/*.parquet`)}, hive_partitioning = false));`, { timeoutMs: 600_000 });
+    return new Map(csvColumn(describe).map((l) => { const i = l.indexOf("|"); return [l.slice(0, i), l.slice(i + 1)] as [string, string]; }));
+  }
+
+  /** Controlled test: places inside a bounding box only (row groups pruned by bbox statistics; no US snapshot). */
+  async sample(bbox: Bbox, out: string): Promise<{ release: string; candidates: Candidate[]; rows: number }> {
+    const release = await this.latestRelease();
+    this.release = release;
+    const cols = await this.probe(release);
+    await copyAtomic(this.db, snapshotQuery(this.opts.base, release, cols, this.opts.minConfidence, bbox), out, "JSON", 1800_000, PREAMBLE);
+    const at = new Date().toISOString();
+    const candidates: Candidate[] = [];
+    let rows = 0;
+    for await (const r of readJsonLines<OvertureRow>(out)) { rows++; const c = toCandidate(r, release, at); if (c) candidates.push(c); }
+    return { release, candidates, rows };
   }
 
   async *candidates(state: string): AsyncIterable<Candidate> {
