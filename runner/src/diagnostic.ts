@@ -42,6 +42,9 @@ export async function runDiagnostic(d: DiagnosticDeps, job: AiDraftJob & { diagn
   const corr = job.diagnostic.correlationId;
   const log = d.log.child({ aiJobId: job.id, correlationId: corr, diagnostic: true });
   const metrics: Record<string, unknown> = { runnerVersion: RUNNER_VERSION, configuredModel: d.modelName };
+  // Every step must finish inside the lease (minus 30 s to deliver the result), whatever the platform granted.
+  const leaseEnd = Date.parse(job.leaseExpiresAt);
+  const left = (cap: number) => Math.max(5_000, Math.min(cap, (Number.isFinite(leaseEnd) ? leaseEnd : clock() + 300_000) - clock() - 30_000));
 
   const report = async (cp: Omit<DiagnosticCheckpoint, "at"> & { at?: string }) => {
     const full: DiagnosticCheckpoint = { at: iso(), ...cp };
@@ -100,7 +103,7 @@ export async function runDiagnostic(d: DiagnosticDeps, job: AiDraftJob & { diagn
     // D09: the configured model is loaded, and how much of it is in GPU memory.
     const t9 = clock();
     try {
-      await getJson("/api/generate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: d.modelName, prompt: "", stream: false, keep_alive: "10m" }) }, 300_000);
+      await getJson("/api/generate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: d.modelName, prompt: "", stream: false, keep_alive: "10m" }) }, left(600_000));
     } catch (err) {
       const msg = `model ${d.modelName} did not load: ${errorMessage(err)}`;
       await report({ code: "D09", ok: false, component: "ollama", error: msg, evidence: { model: d.modelName, waitedMs: clock() - t9 } });
@@ -123,7 +126,7 @@ export async function runDiagnostic(d: DiagnosticDeps, job: AiDraftJob & { diagn
     try {
       res = await getJson("/api/chat", { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ model: d.modelName, stream: false, keep_alive: "10m", messages: [{ role: "system", content: job.system }, { role: "user", content: job.prompt }],
-          options: { temperature: 0, seed: 42, num_predict: Math.max(64, Math.min(job.maxOutputTokens || 800, 2000)) } }) }, 240_000);
+          options: { temperature: 0, seed: 42, num_predict: Math.max(64, Math.min(job.maxOutputTokens || 800, 2000)) } }) }, left(300_000));
     } catch (err) {
       const msg = `inference failed: ${errorMessage(err)}`;
       await report({ code: "D11", ok: false, component: "ollama", error: msg });

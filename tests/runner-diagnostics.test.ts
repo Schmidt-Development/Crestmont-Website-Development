@@ -106,10 +106,10 @@ test("[AIB-021] the first unproven step is named: unregistered or stale runner, 
   // Claimed, then silence: the lease sweep fails it (no retry) and the gap is recorded at D12.
   const c = await queue(t);
   await signed(t, "ai/claim", { runnerId: "old-runner" });
-  assert.equal(await sweepAiLeases(t.db, new Date(Date.now() + 10 * 60e3)), 1);
+  assert.equal(await sweepAiLeases(t.db, new Date(Date.now() + 20 * 60e3)), 1);
   const vc = (await DX.getDiagnostic(t.db, c))!;
   assert.equal(vc.jobStatus, "failed");
-  assert.match(vc.steps.find((s) => s.code === "D12")!.row!.error!, /no result arrived before the 5-minute lease expired/);
+  assert.match(vc.steps.find((s) => s.code === "D12")!.row!.error!, /no result arrived before the 15-minute lease expired/);
   assert.equal((await signed(t, "ai/claim", { runnerId: "old-runner" })).json.job, null, "not requeued");
 });
 

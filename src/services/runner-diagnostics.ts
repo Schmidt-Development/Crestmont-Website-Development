@@ -35,6 +35,8 @@ export const CHECKPOINT_LABELS: Record<CheckpointCode, string> = {
 };
 /** A runner is "fresh" when it called the platform within this window (same rule as the AI builds runner status). */
 export const FRESH_MS = 5 * 60_000;
+/** Diagnostic lease: cold model load (minutes for a large model) + inference + upload. */
+export const DIAGNOSTIC_LEASE_S = 15 * 60;
 
 /** Small, deterministic workload (Founder's suggested prompt). Temperature 0 on the runner. */
 export const DIAGNOSTIC_SYSTEM = "You are a diagnostic workload for Crestmont's self-hosted model server. Reply with one complete HTML document and nothing else: no explanation, no Markdown fences.";
@@ -130,7 +132,7 @@ export async function onDiagnosticLeaseExpired(db: Db, aiJobId: string, runnerId
   const d = await diagnosticForJob(db, aiJobId);
   if (!d) return false;
   await db.prepare(`UPDATE ai_jobs SET status = 'failed', error = 'runner lease expired before the result arrived', updated_at = ? WHERE id = ?`).bind(nowIso(), aiJobId).run();
-  await addCheckpoint(db, d.id, { code: "D12", ok: false, source: "platform", component: "lease sweep", worker: runnerId, error: "the runner claimed the job but no result arrived before the 5-minute lease expired" });
+  await addCheckpoint(db, d.id, { code: "D12", ok: false, source: "platform", component: "lease sweep", worker: runnerId, error: `the runner claimed the job but no result arrived before the ${DIAGNOSTIC_LEASE_S / 60}-minute lease expired` });
   return true;
 }
 

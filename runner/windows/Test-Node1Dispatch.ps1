@@ -88,7 +88,7 @@ $cfgView = [ordered]@{}
 foreach ($k in ($cfg.Keys | Sort-Object)) { if ($showKeys -contains $k) { $cfgView[$k] = $cfg[$k] } else { $cfgView[$k] = "(set)" } }
 $platform = $cfg["CONTROL_PLANE_URL"]
 $model = $cfg["LOCAL_MODEL"]; if (-not $model) { $model = $cfg["LOCAL_MODEL_B"] }
-Add-Check 4 "runner configuration" (Test-Path $envFile) $(if (Test-Path $envFile) { "runner.env found; platform $platform; model $model" } else { "no runner.env at $envFile: the runner was never installed here (or in another folder: use -InstallDir)" }) $cfgView
+Add-Check 4 "runner configuration" (Test-Path $envFile) $(if (Test-Path $envFile) { "runner.env found; platform $platform; model $model" } else { "no runner.env at ${envFile}: the runner was never installed here (or in another folder: use -InstallDir)" }) $cfgView
 $secretFile = Join-Path $InstallDir "secrets\build_runner_secret"
 if (Test-Path $secretFile) {
   $len = (Get-Item $secretFile).Length

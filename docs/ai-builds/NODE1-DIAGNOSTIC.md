@@ -81,5 +81,5 @@ There's no push from the cloud and no Claude session anywhere in this path. If t
 ## 5. Not done (needs the machine or your authorization)
 
 - No real D01–D13 run has happened: staging doesn't have this code until it's merged, and Node 1 wasn't reachable from this session.
-- Restart, reconnect and duplicate-execution drills on Node 1. Leases already prevent double execution: one lease per job, and the 5-minute sweep fails a diagnostic instead of re-running it.
+- Restart, reconnect and duplicate-execution drills on Node 1. Leases already prevent double execution: one lease per job, and when a diagnostic's 15-minute lease expires, the sweep fails it instead of re-running it.
 - No settings, services or models were changed on Node 1.

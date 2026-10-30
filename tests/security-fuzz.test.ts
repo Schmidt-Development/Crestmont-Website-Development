@@ -191,7 +191,7 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
     // The website assistant accepts same-origin JSON only; the Origin header is its "signature".
     "POST /api/assistant": async () => ({ origin: "http://crestmont.test" }),
     "POST /api/scheduled/run": async (b) => ({ "x-crestmont-scheduler-signature": await signEvidence(SECRETS.scheduler, b) }),
-    ...Object.fromEntries(["claim", "heartbeat", "checkpoint", "checkpoint/fetch", "requirements", "files", "complete", "ai/claim", "ai/complete"].map((x) => [`POST /api/builds/runner/${x}`, async (b: string) => ({ "x-crestmont-runner-signature": await signEvidence(SECRETS.runner, b) })])),
+    ...Object.fromEntries(["claim", "heartbeat", "checkpoint", "checkpoint/fetch", "requirements", "files", "complete", "ai/claim", "ai/complete", "ai/checkpoint"].map((x) => [`POST /api/builds/runner/${x}`, async (b: string) => ({ "x-crestmont-runner-signature": await signEvidence(SECRETS.runner, b) })])),
   };
   const jsonPosts = classified().filter((r) => r.method === "POST" && (r.spec.access.kind === "signed" || r.spec.access.kind === "webhook" || r.spec.api));
   assert.deepEqual(jsonPosts.map((r) => r.key).filter((k) => !sign[k]), [], "every JSON POST route has a signer");

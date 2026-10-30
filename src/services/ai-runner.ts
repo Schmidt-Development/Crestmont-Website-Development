@@ -7,7 +7,7 @@ import { randomToken } from "../lib/auth-crypto.ts";
 import { sha256Hex, timingSafeEqualHex } from "../lib/crypto.ts";
 import { audit } from "./security.ts";
 import { AI_SYSTEM_PROMPT, LOCAL_RUNNER } from "./ai.ts";
-import { DIAGNOSTIC_WORKFLOW, DIAGNOSTIC_SYSTEM, onDiagnosticClaim, onDiagnosticComplete, onDiagnosticLeaseExpired } from "./runner-diagnostics.ts";
+import { DIAGNOSTIC_WORKFLOW, DIAGNOSTIC_SYSTEM, DIAGNOSTIC_LEASE_S, onDiagnosticClaim, onDiagnosticComplete, onDiagnosticLeaseExpired } from "./runner-diagnostics.ts";
 
 const LEASE_S = 300;
 const MAX_TRIES = 3;
@@ -31,8 +31,11 @@ export async function claimAiJob(db: Db, runnerId: string, now = new Date()) {
     if (job.workflow === DIAGNOSTIC_WORKFLOW) {
       // Node 1 diagnostic (migration 0047): D03–D06 are written here, at the moment of the claim.
       const attempt = (await db.prepare(`SELECT attempts FROM ai_job_leases WHERE job_id = ?`).bind(c.id).first<{ attempts: number }>())?.attempts ?? 1;
-      const diag = await onDiagnosticClaim(db, c.id, runnerId, expires, attempt, now);
-      if (diag) return { job: { id: job.id, workflow: job.workflow, system: DIAGNOSTIC_SYSTEM, prompt: job.prompt, leaseToken: token, leaseExpiresAt: expires, maxOutputTokens: 800, diagnostic: { correlationId: diag.correlationId } } };
+      // A cold load of a large model can take minutes: the diagnostic gets a longer lease than a draft.
+      const diagExpires = new Date(now.getTime() + DIAGNOSTIC_LEASE_S * 1000).toISOString();
+      await db.prepare(`UPDATE ai_job_leases SET expires_at = ? WHERE job_id = ?`).bind(diagExpires, c.id).run();
+      const diag = await onDiagnosticClaim(db, c.id, runnerId, diagExpires, attempt, now);
+      if (diag) return { job: { id: job.id, workflow: job.workflow, system: DIAGNOSTIC_SYSTEM, prompt: job.prompt, leaseToken: token, leaseExpiresAt: diagExpires, maxOutputTokens: 800, diagnostic: { correlationId: diag.correlationId } } };
     }
     return { job: { id: job.id, workflow: job.workflow, system: AI_SYSTEM_PROMPT, prompt: job.prompt, leaseToken: token, leaseExpiresAt: expires, maxOutputTokens: 1500 } };
   }
