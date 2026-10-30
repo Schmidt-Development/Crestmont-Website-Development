@@ -29,7 +29,8 @@ import { snapshot } from "../src/resources.ts";
 import type { SqliteDb } from "../../dev/sqlite-d1.ts";
 
 const arg = (k: string, d?: string) => { const i = process.argv.indexOf(`--${k}`); return i > 0 ? process.argv[i + 1] : d; };
-const req = JSON.parse(readFileSync(arg("request", "research-worker/live/request.json")!, "utf8")) as { bbox: Bbox; limit: number; brokenRecheckMinutes: number };
+const req = JSON.parse(readFileSync(arg("request", "research-worker/live/request.json")!, "utf8")) as { bbox: Bbox; limit: number; brokenRecheckMinutes: number; concurrency?: number };
+const CONCURRENCY = Math.min(64, Math.max(1, Math.floor(req.concurrency ?? 16)));
 if (!validBbox(req.bbox) || (req.bbox.xmax - req.bbox.xmin) * (req.bbox.ymax - req.bbox.ymin) > 0.05) throw new Error("bbox invalid or too large for a controlled run");
 const LIMIT = Math.min(200, Math.max(1, Math.floor(req.limit)));
 const OUT = arg("out", "live-out")!;
@@ -71,8 +72,8 @@ try {
 } catch (e) { log.warn("common crawl unavailable", { error: (e as Error).message }); }
 
 // ── 4. Verify + audit with the real worker ──
-const cfg = loadConfig({ CRESTMONT_URL: "https://crestmont.test", RESEARCH_RUNNER_SECRET: SECRET, COMMON_CRAWL: "off", PLAYWRIGHT: "off", HTTP_CONCURRENCY: "16" });
-const http = new Http({ userAgent: UA, robotsToken: "CrestmontResearchBot", timeoutMs: 15_000, perHostIntervalMs: 5_000, concurrency: 16, maxBytes: 3_000_000 });
+const cfg = loadConfig({ CRESTMONT_URL: "https://crestmont.test", RESEARCH_RUNNER_SECRET: SECRET, COMMON_CRAWL: "off", PLAYWRIGHT: "off", HTTP_CONCURRENCY: String(CONCURRENCY) });
+const http = new Http({ userAgent: UA, robotsToken: "CrestmontResearchBot", timeoutMs: 15_000, perHostIntervalMs: 5_000, concurrency: CONCURRENCY, maxBytes: 3_000_000 });
 const state = new State(join(OUT, "state.sqlite.private"));
 const worker = new ResearchWorker({ cfg: { ...cfg, http: { ...cfg.http, brokenAttempts: 2, brokenRecheckAfterMs: Math.max(1, req.brokenRecheckMinutes) * 60_000 } },
   state, http, platform: new Platform(cfg.platformUrl, SECRET, fetchImpl), sources: [], cc, browser: null, model: null, log: silentLogger });
@@ -124,6 +125,8 @@ const summary = {
   kind: "REAL DATA, controlled sample (Overture + live websites + Common Crawl); CRM = real platform pipeline on in-memory SQLite, NOT staging",
   overtureRelease: found.release, commonCrawl: crawl, bboxAreaDeg2: Number(((req.bbox.xmax - req.bbox.xmin) * (req.bbox.ymax - req.bbox.ymin)).toFixed(5)),
   discovered: { placesInBbox: found.rows, candidates: found.candidates.length, withPhone: withPhone.length, phoneAvailability: found.candidates.length ? Number((withPhone.length / found.candidates.length).toFixed(3)) : null },
+  concurrency: CONCURRENCY,
+  brands: { inBboxWithBrandName: found.candidates.filter((c) => c.brand).length, inBboxWithBrandWikidata: found.candidates.filter((c) => c.brandWikidata).length },
   sampled: chosen.length, brandManagedLocations: chosen.filter((c) => c.brandWikidata).length, attemptsTimed: processed, unfinished: state.backlog(), failed: failures.length,
   failureKinds: failures.reduce<Record<string, number>>((m, f) => { const k = (f.last_error ?? "").split(":")[0].slice(0, 40); m[k] = (m[k] ?? 0) + 1; return m; }, {}),
   classes: status.classCounts,
@@ -139,7 +142,7 @@ const summary = {
   timing: { totalMs: elapsedMs, overtureQueryMs: overtureMs, verifyPhaseMs: verifyMs, perBusinessMs: { avg: processed ? Math.round(sorted.reduce((a, b) => a + b, 0) / processed) : null, p50: pct(0.5), p90: pct(0.9), max: sorted.at(-1) ?? null } },
   httpRequests: http.requests,
   throughput: { businessesPerHourMeasured: processed && verifyMs > 0 ? Math.round(processed / (verifyMs / 3600e3)) : null,
-    note: "A small sample at concurrency 16 from one GitHub-hosted runner, including a forced re-check wait for possibly broken sites. Not a 24-hour measurement and not Node 1." },
+    note: "A small sample from one GitHub-hosted runner, including a forced re-check wait for possibly broken sites. Not a 24-hour measurement and not Node 1." },
   resources: { before: r0, after: await snapshot(process.cwd()) },
   externalFees: "$0",
   diagnostics: diagnostics(),

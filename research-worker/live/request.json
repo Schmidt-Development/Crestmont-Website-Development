@@ -1,5 +1,5 @@
 {
-  "purpose": "First controlled real-data run: Overture places in a small Lansing, MI area; real websites; Common Crawl evidence. Run 5: same 200 businesses with franchise/brand and multi-location handling. Edit this file to trigger a new run (workflow research-live-sample.yml).",
+  "purpose": "First controlled real-data run: Overture places in a small Lansing, MI area; real websites; Common Crawl evidence. Run 6: same 200 businesses at concurrency 48 (throughput scaling) with brand statistics. Edit this file to trigger a new run (workflow research-live-sample.yml).",
   "bbox": {
     "xmin": -84.565,
     "ymin": 42.725,
@@ -7,5 +7,6 @@
     "ymax": 42.745
   },
   "limit": 200,
-  "brokenRecheckMinutes": 5
+  "brokenRecheckMinutes": 5,
+  "concurrency": 48
 }

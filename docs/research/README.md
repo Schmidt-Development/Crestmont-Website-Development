@@ -54,9 +54,14 @@ The inventory is the Founder-approved denominator, so these were not added. Test
 - `RESEARCH-005` CRM integration with duplicate and suppression protection
 - `RESEARCH-006` Fail-closed outbound eligibility gate and research dashboard
 
+## Coordination with other open workstreams (2026-10-30)
+- **Migrations.** This PR uses `0050_lead_research.sql`. `0047` is the merged sales-optimization migration. Open PR #50 (CRM contact identity) reserves `0048`–`0049`, and open PR #52 (Node 1 diagnostics) also reserves `0048`, so whichever of #50/#52 merges second must renumber. All of these are additive and independent, and D1 records applied migrations by name, so their relative order does not matter.
+- **CRM identity (PR #50).** When #50 merges, its triggers on `contacts` will register every research promotion in `contact_identities` automatically. Follow-up: route `promote()` through #50's intake engine (`contact-identity.ts`), so its intake decision and review queue become authoritative for research too. The research prospect store stays evidence-only. Until then, `promote()` re-checks CRM phone/email keys for every number and address immediately before its guarded atomic write.
+- **Node 1 (PR #52).** The research worker uses its own HMAC secret and endpoints. It does not share the build runner's lease channel: research batches are idempotent pushes, not leased jobs. It reuses the runner's conventions (signature format, nonce, DPAPI secret, scheduled task).
+
 ## Not built yet (honest list)
 - **Live benchmark** on the RTX 5090 workstation, and the manually verified false-positive sample. This session had no access to the workstation (RUNBOOK §4).
-- **A real-data run of the Overture / Common Crawl adapters.** The build container cannot reach S3 or Common Crawl. The SQL is built from the probed schema and unit-tested, but it has not been executed against a live release.
+- **Real data at scale.** Controlled real-data runs (Overture `2026-10-21.0`, live websites, Common Crawl `CC-MAIN-2026-43`; `BENCHMARK.md` §3) ran on a GitHub-hosted runner, not Node 1, with the CRM in-process. Neither the full US snapshot nor staging ingestion has run.
 - **Founder decisions:** Foursquare OS access, OSM internal-use, and any outbound consent design with counsel.
 - **Data.gov / state open-data enrichment.** The source is registered but off, and no dataset has been reviewed.
-- **Multi-location, franchise and parent/subsidiary modelling** beyond the shared-phone review flag. Chains currently appear as separate location records, each with its own source id.
+- **Parent/subsidiary modelling.** Recognised brand locations (Overture brand + Wikidata) are excluded as brand-managed, and multi-location businesses that share one website are recognised. Corporate parent/subsidiary trees are not modelled.
