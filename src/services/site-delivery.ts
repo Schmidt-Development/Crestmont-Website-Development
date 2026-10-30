@@ -21,7 +21,7 @@ import { sha256Hex, timingSafeEqualHex } from "../lib/crypto.ts";
 import { randomToken } from "../lib/auth-crypto.ts";
 import { audit } from "./security.ts";
 import { notifyCustomer, type MailCtx } from "./notifications.ts";
-import { getJob, LeaseLostError, sanitize, type BuildJob } from "./builds.ts";
+import { getJob, LeaseLostError, sanitize, projectPaidBySimulation, type BuildJob } from "./builds.ts";
 
 type OwnerCtx = Pick<AppContext, "db"> & { userId: string };
 
@@ -107,6 +107,7 @@ export async function setSiteHostname(c: OwnerCtx, projectId: string, hostname: 
 /** Why the approved build cannot be released yet (empty = ready). Mirrors the Founder's workflow steps 1–5. */
 export async function releaseBlockers(db: Db, job: BuildJob, customerReviewNotApplicable: string): Promise<string[]> {
   const out: string[] = [];
+  if (await projectPaidBySimulation(db, job.project_id)) out.push("This project was paid by a SIMULATED payment (internal test); it can never be released to production.");
   if (job.state !== "approved") out.push("The owner has not approved this build (step 5).");
   const latest = await db.prepare(`SELECT id FROM build_jobs WHERE project_id = ? AND state = 'approved' ORDER BY approved_at DESC LIMIT 1`).bind(job.project_id).first<{ id: string }>();
   if (job.state === "approved" && latest?.id !== job.id) out.push("A newer build of this project was approved; release that one (earlier versions are restored with a rollback).");
@@ -124,6 +125,7 @@ const nextVersion = async (db: Db, projectId: string) =>
   ((await db.prepare(`SELECT COALESCE(MAX(version), 0) AS v FROM site_deployments WHERE project_id = ?`).bind(projectId).first<{ v: number }>())?.v ?? 0) + 1;
 
 async function insertDeployment(c: OwnerCtx, t: SiteTarget, job: BuildJob, kind: "release" | "rollback", rollbackOf: string | null, reason: string | null): Promise<string> {
+  if (await projectPaidBySimulation(c.db, job.project_id)) throw new HttpError(409, "This project was paid by a SIMULATED payment (internal test); it can never be released to production.");
   const id = newId("sd");
   const version = await nextVersion(c.db, job.project_id);
   try {
