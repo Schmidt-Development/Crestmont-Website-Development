@@ -271,3 +271,46 @@ test("[review] a batch the platform refuses permanently is parked with the reaso
   st2.splitOutbox(b2.batchId, t);
   assert.equal(st2.stages().pending, 1, "re-verified, not re-sent with the old result");
 });
+
+// ───────────── CodeQL js/double-escaping regression (identity.ts decodeEntities) ─────────────
+import { decodeEntities } from "../src/identity.ts";
+
+test("[review] HTML entities are decoded exactly once: double-encoded and nested references stay literal text", () => {
+  // Double-encoded: one decoding step only.
+  assert.equal(decodeEntities("&amp;lt;script&amp;gt;"), "&lt;script&gt;");
+  assert.equal(decodeEntities("&amp;amp;"), "&amp;");
+  assert.equal(decodeEntities("&amp;#38;"), "&#38;");
+  assert.equal(decodeEntities("&#38;lt;"), "&lt;", "numeric & followed by an entity name is not decoded again");
+  assert.equal(decodeEntities("&#x26;quot;"), "&quot;");
+  assert.equal(decodeEntities("&amp;amp;amp;"), "&amp;amp;");
+  // Decoding the output again is a separate, explicit step (never done by the worker): each step peels one layer.
+  assert.equal(decodeEntities(decodeEntities("&amp;amp;lt;")), "&lt;");
+});
+
+test("[review] legitimate business names with ampersands and common entities decode correctly", () => {
+  assert.equal(decodeEntities("Smith &amp; Sons Plumbing"), "Smith & Sons Plumbing");
+  assert.equal(decodeEntities("Smith & Sons Plumbing"), "Smith & Sons Plumbing", "a bare & is kept");
+  assert.equal(decodeEntities("A&amp;B Auto &#8211; Lansing&nbsp;MI"), "A&B Auto – Lansing MI");
+  assert.equal(decodeEntities("Joe&#39;s &quot;Best&quot; Pizza &#x2014; O&apos;Neil"), "Joe's \"Best\" Pizza — O'Neil");
+  assert.equal(decodeEntities("Caf&#233; &AMP; Bakery"), "Café & Bakery");
+  // Identity matching still works for an ampersand name rendered with &amp; on the page.
+  const c = cand({ name: "Smith & Sons Plumbing", phones: ["+15175552142"] });
+  const r = identity(c, pageFacts(page({ title: "Smith &amp; Sons Plumbing" })), []);
+  assert.ok(r.signals.some((s) => s.includes("business name")), JSON.stringify(r));
+  assert.equal(pageFacts("<title>Smith &amp;amp; Sons</title>").title, "Smith &amp; Sons");
+});
+
+test("[review] malformed and out-of-range references never throw and never produce invalid characters", () => {
+  assert.equal(decodeEntities("&amp"), "&amp", "no semicolon: left as written");
+  assert.equal(decodeEntities("&unknownentity;"), "&unknownentity;");
+  assert.equal(decodeEntities("&#;&#x;&#xZZ;"), "&#;&#x;&#xZZ;");
+  assert.equal(decodeEntities("&#0;"), "�");
+  assert.equal(decodeEntities("&#xD800;"), "�", "lone surrogate");
+  assert.equal(decodeEntities("&#1114112;"), "�", "above U+10FFFF");
+  assert.equal(decodeEntities("&#99999999999;"), "&#99999999999;", "absurdly long number is not a reference");
+  assert.equal(decodeEntities("&#60;b&#62;"), "<b>", "decoded angle brackets are plain text; tags were stripped before decoding");
+  assert.doesNotThrow(() => decodeEntities("&".repeat(10000) + "amp;".repeat(10000)));
+  // pageFacts strips tags before decoding, so encoded markup cannot become a tag that is then stripped or matched.
+  const f = pageFacts("<h1>&lt;img src=x onerror=alert(1)&gt; Riverside</h1>");
+  assert.equal(f.h1, "<img src=x onerror=alert(1)> Riverside");
+});

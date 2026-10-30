@@ -7,9 +7,19 @@ import type { Candidate } from "./sources/types.ts";
 
 export interface PageFacts { title: string; text: string; phones: string[]; jsonLd: { name?: string; telephone?: string[]; street?: string; city?: string; region?: string }[]; generator: string | null; siteName: string | null; h1: string | null }
 
+const NAMED_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+/**
+ * Decodes HTML character references in ONE pass: every reference in the input is replaced exactly once and the
+ * output is never scanned again, so "&amp;lt;" becomes the literal text "&lt;" (not "<"). Numeric references that
+ * are not valid Unicode scalar values (0, surrogates, > U+10FFFF) become U+FFFD. Unknown names are left as written.
+ * Callers strip tags BEFORE decoding, so decoded "<" / ">" can never form markup.
+ */
 export function decodeEntities(s: string): string {
-  return s.replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
-    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n) % 0x110000)).replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16) % 0x110000));
+  return s.replace(/&(?:#(\d{1,8})|#[xX]([0-9a-fA-F]{1,7})|([A-Za-z]{2,8}));/g, (whole, dec: string | undefined, hex: string | undefined, name: string | undefined) => {
+    if (name !== undefined) return NAMED_ENTITIES[name.toLowerCase()] ?? whole;
+    const cp = dec !== undefined ? Number(dec) : parseInt(hex!, 16);
+    return cp > 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff) ? String.fromCodePoint(cp) : "\uFFFD";
+  });
 }
 const tagText = (html: string, tag: string) => { const m = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, "i").exec(html); return m ? decodeEntities(m[1].replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim() : null; };
 const meta = (html: string, key: string) => {
