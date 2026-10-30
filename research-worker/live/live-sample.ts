@@ -12,6 +12,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { randomBytes } from "node:crypto";
 import { createTestApp, createStaff } from "../../tests/support/app.ts";
 import { handle } from "../../src/app/app.ts";
 import { addDnc } from "../../src/services/voice-outbound.ts";
@@ -50,7 +51,8 @@ const withPhone = found.candidates.filter((c) => c.phones.length);
 const chosen = [...withPhone].sort((a, b) => a.businessKey.localeCompare(b.businessKey)).slice(0, LIMIT);
 
 // ── 2. Platform (real pipeline, in-memory D1 stand-in) and CRM controls from the real sample ──
-const SECRET = `live-${Date.now()}-${Math.random().toString(16).slice(2)}-research-secret`;
+// Ephemeral secret for the in-process platform only; still drawn from the CSPRNG.
+const SECRET = randomBytes(32).toString("hex");
 const app = await createTestApp({ RESEARCH_RUNNER_SECRET: SECRET });
 const raw = (app.db as SqliteDb).raw;
 raw.prepare(`UPDATE research_settings SET paused = 0, max_batch = 100 WHERE id = 1`).run();
