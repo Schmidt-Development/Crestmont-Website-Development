@@ -64,7 +64,21 @@ export async function checkLocation(p, base, path, label, ok) {
     states[g.name] = state;
     ok(g.full && !g.gap, `${label} ${path} · ${g.name}: full width, aspect kept (${g.mode}, ${g.media})`);
     ok(g.arrowsOutside, `${label} ${path} · ${g.name}: switching arrows sit outside the frame`);
-    ok(state !== "loading", `${label} ${path} · ${g.name}: state reported — ${state}${state === "unavailable" ? ` ("${g.status.slice(0, 90)}")` : ""}`);
+    // Unavailable: say why, from the runner's side — the demo's own page (not /__demo/info, which answers without the
+    // site or its database): HTTP status, time to answer, and whether the page carries the handshake script.
+    let why = "";
+    if (state === "unavailable") {
+      const demoUrl = await p.evaluate(() => document.querySelector(".pfx__slide:not([inert])")?.dataset.demoUrl || "");
+      if (demoUrl) {
+        const t0 = Date.now();
+        try {
+          const r = await p.context().request.get(demoUrl, { timeout: 25_000, maxRedirects: 3 });
+          const body = await r.text().catch(() => "");
+          why = `; demo page ${r.status()} in ${Date.now() - t0} ms${/\/__demo\/embed\.js/.test(body) ? ", handshake script present" : ", NO handshake script"}`;
+        } catch (e) { why = `; demo page did not answer within ${Math.round((Date.now() - t0) / 1000)} s (${String(e.message).split("\n")[0].slice(0, 80)})`; }
+      }
+    }
+    ok(state !== "loading", `${label} ${path} · ${g.name}: state reported — ${state}${state === "unavailable" ? ` ("${g.status.slice(0, 90)}"${why})` : ""}`);
   }
   return states;
 }
@@ -150,10 +164,34 @@ export async function checkInteractive(p, label, ok, { touch = false } = {}) {
     const label2 = await p.locator(".pfx__slide:not([inert]) [data-pfx-url]").textContent().catch(() => "");
     ok(moved && p.url() === topUrl, `${tag}: internal navigation to ${target} stays in the demo (Crestmont URL unchanged; frame shows ${label2?.trim()})`);
   }
-  // A forged message from any other origin cannot relabel the frame.
-  const lbl = await p.locator(".pfx__slide:not([inert]) [data-pfx-url]").textContent().catch(() => "");
-  await p.evaluate(() => window.postMessage({ source: "crestmont-demo", type: "navigate", href: "https://attacker.example/x" }, "*")); await sleep(200);
-  ok((await p.locator(".pfx__slide:not([inert]) [data-pfx-url]").textContent().catch(() => "")) === lbl, `${tag}: messages from other origins are ignored`);
+  // Forged messages cannot relabel the frame. First let the demo's own handshake for the page it just navigated to
+  // arrive: the frame URL changes before the new page's embed posts "navigate", and that legitimate update landing
+  // inside the check's window was reported as a forgery being accepted (hosted desktop BLM, deploy #63).
+  const urlText = () => p.locator(".pfx__slide:not([inert]) [data-pfx-url]").textContent().then((t) => (t || "").trim()).catch(() => "");
+  const expected = () => { const f = demoFrame(p, info.origin); if (!f) return null; const u = new URL(f.url()); return u.host + (u.pathname === "/" ? "" : u.pathname); };
+  let lbl = await urlText(), since = Date.now();
+  for (const t0 = Date.now(); Date.now() - t0 < 15_000; await sleep(200)) {
+    const now = await urlText();
+    if (now !== lbl) { lbl = now; since = Date.now(); }
+    if (lbl === expected() && Date.now() - since >= 1000) break;
+  }
+  const settled = lbl === expected();
+  // 1) from Crestmont's own window (not an approved demo origin), also malformed and unknown-type payloads;
+  // 2) from a frame of the APPROVED demo origin that is not the explorer's own frame (forged source): its embed posts a
+  //    real "navigate" for /__demo/leave. None may change the label; neither forged destination may ever appear.
+  await p.evaluate((origin) => {
+    const forged = { source: "crestmont-demo", type: "navigate", href: "https://attacker.example/x" };
+    window.postMessage(forged, "*");
+    window.postMessage("crestmont-demo navigate https://attacker.example/x", "*");
+    window.postMessage([forged], "*");
+    window.postMessage({ ...forged, type: "takeover" }, "*");
+    const f = document.createElement("iframe"); f.hidden = true; f.setAttribute("data-pfx-forged", "");
+    f.src = origin + "/__demo/leave"; document.body.append(f);
+  }, info.origin);
+  await sleep(4000);
+  await p.evaluate(() => document.querySelector("[data-pfx-forged]")?.remove());
+  const after = await urlText();
+  ok(settled && after === lbl && !/attacker|__demo\/leave/i.test(after), `${tag}: messages from other origins are ignored (label "${lbl}" → "${after}"${settled ? "" : "; the demo's own label never settled on its page"})`);
 
   // Reset returns to the start page, re-announced by the demo.
   await p.locator("[data-pfx-reset]").first().click();
