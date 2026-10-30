@@ -74,15 +74,31 @@ class Session {
   async login(email: string, password: string, totp: string | null) {
     const r = await this.req("POST", "/login", { email, password });
     assert(r.status === 303, `login returned ${r.status}`);
-    if ((r.headers.get("location") ?? "").startsWith("/mfa")) {
-      assert(totp, "account needs a TOTP key");
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const m = await this.req("POST", "/mfa", { code: await totpCode(totp) });
-        if (m.status === 303 && !(m.headers.get("location") ?? "").startsWith("/mfa")) return;
-        await new Promise((ok) => setTimeout(ok, 31_000)); // the code was already used in this 30 s window (replay protection)
-      }
-      throw new Error("two-factor sign-in failed");
+    if (!(r.headers.get("location") ?? "").includes("/mfa")) return;
+    assert(totp, "account needs a TOTP key");
+    // The browser journey signs the same demo account in moments earlier, and a code is accepted once per 30 s step
+    // (replay protection): start in a fresh step. At most two attempts; never continue into a lockout (429).
+    let last = "";
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const msIntoStep = Date.now() % 30_000;
+      await new Promise((ok) => setTimeout(ok, 30_000 - msIntoStep + 1_500));
+      const m = await this.req("POST", "/mfa", { code: await totpCode(totp) });
+      const loc = m.headers.get("location") ?? "";
+      if (m.status === 303 && new URL(loc, BASE).pathname !== "/mfa") return;
+      const page = m.status === 303 ? "" : await m.text();
+      const msg = (page.match(/class="form-errors[^>]*>([\s\S]*?)<\/div>/)?.[1] ?? page.match(/<li>([^<]{3,200})<\/li>/)?.[1] ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+      last = `HTTP ${m.status}${loc ? ` → ${new URL(loc, BASE).pathname}` : ""}${msg ? `: ${msg}` : ""}`;
+      if (m.status === 503) break;
+      // 8 attempts per user per 15-minute window (src/services/auth.ts assertMfaRate), successes included: the browser
+      // journeys sign this demo account in repeatedly just before this step. Wait for the next window (aligned to the
+      // clock) instead of failing; the attempt that got 429 did not count as a wrong code.
+      if (m.status === 429 && attempt === 0) {
+        const wait = 900_000 - (Date.now() % 900_000) + 3_000;
+        console.log(`two-factor rate window full (${msg || "429"}); waiting ${Math.round(wait / 1000)} s for the next window`);
+        await new Promise((ok) => setTimeout(ok, wait - 31_500 > 0 ? wait - 31_500 : 0)); // the loop adds the step wait
+      } else if (m.status === 429) break;
     }
+    throw new Error(`two-factor sign-in failed (${last})`);
   }
 }
 function accounts(): { role: string; email: string; password: string; totp: string | null }[] {
@@ -104,7 +120,13 @@ async function main() {
   // Never reuse a fictional number that already exists in staging (e.g. a synthetic shared line kept by design).
   for (const r of await q<{ value_norm: string }>(`SELECT value_norm FROM contact_identities WHERE kind = 'phone' AND value_norm LIKE '%55501__'`)) usedPhones.add(r.value_norm);
   const os = new Session();
-  await check("owner.sign_in", async () => { await os.login(owner.email, owner.password, owner.totp); });
+  await check("owner.sign_in", async () => {
+    try { await os.login(owner.email, owner.password, owner.totp); }
+    catch (e) {
+      const f = (await q<{ n: number }>(`SELECT COUNT(*) AS n FROM security_events WHERE kind IN ('mfa_failed','mfa_locked') AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 day') AND user_id = (SELECT id FROM users WHERE email = ${lit(owner.email)})`).catch(() => [{ n: -1 }]))[0]?.n;
+      throw new Error(`${(e as Error).message}; owner two-factor failures in the last 24 h: ${f}`);
+    }
+  });
   await check("cleanup.earlier_runs", async () => {
     // Synthetic records an earlier (failed) run could not erase: erase their identifiers through the Owner route.
     const rows = await q<{ kind: string; value_norm: string }>(`SELECT DISTINCT ci.kind, ci.value_norm FROM contacts c LEFT JOIN companies co ON co.id = c.company_id
