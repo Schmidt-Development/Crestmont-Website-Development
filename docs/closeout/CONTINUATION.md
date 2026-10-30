@@ -12,8 +12,8 @@ each finding's state; this file records batches, PRs and what to do next.
 - Never merge branches that restore the staging preview gate (`PREVIEW_GATE = "required"`) or roll
   `ACCESS_EPOCH` back from 3. PRs #8, #18, #19 predate public staging: cherry-pick their `src/` changes only.
 - Do not recreate `crestmont-platform-frontend-preview`. Do not deploy production.
-- **Merging requires a human.** The session's safety policy refuses merges without a review, so the single
-  consolidated PR (#37) is opened green and handed to the Founder. Merging to `main` triggers Deploy staging.
+- Merging: on 2026-10-30 the Founder authorized sessions to merge passing PRs and deploy **staging** (never
+  production). Merging to `main` triggers Deploy staging; required check `test` and branch protection stay on.
 
 ## Tooling notes
 
@@ -37,6 +37,44 @@ each finding's state; this file records batches, PRs and what to do next.
      (CREST-NEW-006).
 - Recovery PR: `claude/staging-61-recovery` (fixes above). Local staging replica after the fix: 19/33 passed, 0 failed;
   plus 29–30 pass through receipts — 21/33 expected on staging, the other 12 need Stripe/Retell/production.
+
+## Staging recovery closeout (2026-10-30, deploy #76) — COMPLETE for the staging recovery scope
+
+Staging serves `main` at `b0e7985` ([Deploy staging #76](https://github.com/Schmidt-Development/Crestmont-Website-Development/actions/runs/41143396093),
+conclusion success, GitHub deployment 7450816755). Version proof: the "Frontend assets and homepage served by this
+commit" step matched the SHA-256 of 10 served assets (including `app.css` and `app.js`) to the commit.
+A full green run also happened on `fb348ca`, deploy #73.
+
+| PR | Merge | What |
+| --- | --- | --- |
+| #53 | `e0ec01d` | Journey 29 exact run link; `/portfolio` 400 (harness `?to=`); Turnstile flexible/compact sizing (`/login`, `/register` 375px); contact orbs, FAQ address, intro grid; headings readable (axe under reduced motion plus a normal-motion readability pass) |
+| #55 | `eca45a2` | axe `listitem`: `/about` journey `<ol role=group>`, GBP checklist, home anatomy tablist `<li role=presentation>` |
+| #60 | `e629b3a` | A CRM E2E failure no longer skips hosted verification (continue-on-error plus a final gate) |
+| #62 | `b0e7985` | The deploy waits, read-only, for the Owner's two-factor attempts (8 per 15 minutes) before using them; journeys enter codes in fresh steps |
+
+Concurrent session (kept, not modified): #50 CRM identity, plus #56, #58, #59 and #61 (CRM staging E2E fixes). #57 was
+closed as a duplicate of #56.
+
+### Deploy #76 evidence
+
+- **Hosted browser verification:** 256/256, with no console or page errors on desktop and phone.
+  - Portfolio: 198/198, with all four demos interactive (no `/portfolio` 400).
+  - Pages and interactions: 48/48, including no horizontal overflow on every public page at desktop and phone.
+  - About: 10/10.
+- **Staging tests:** design language (no overflow at 375px, `/login` and `/register` included), axe WCAG 2.1 A/AA, links
+  and claims, and public/auth separation all passed.
+- **Journeys:** 20/33 passed, 0 failed, including journey 29. That journey ingests this run's CI evidence document and
+  checks that every result is shown on the exact run's page. This is the controlled count check: ingest → D1 → page.
+- **CRM staging E2E:** 24/24.
+
+### Not verified here
+
+- **13 journeys** wait on external services (see below).
+- **Mobile widths 320 and 360px** are covered by the local `tests/e2e/mobile-layout.e2e.ts` only. Hosted checks run at
+  phone size and staging tests at 375px.
+- **2 runner lockfile tests** are skipped until the lockfiles are committed.
+
+This closes the staging recovery only; it is **not** a production-readiness statement.
 
 ## Next step for a new session
 
