@@ -58,6 +58,40 @@ async function protectedLlmIds(d: DeployDeps, stage: Stage): Promise<{ ids: Map<
   return { ids, error: null };
 }
 
+/**
+ * The four Retell facts this platform keeps apart (docs/voice/SALES-OPTIMIZATION.md §1):
+ *  1. draft      — does the LLM's editable general_prompt equal the version the platform last verified here? (read-only check)
+ *  2. published  — Retell's is_published for that LLM version (publishing is a dashboard step; never done here)
+ *  3. assignment — which agent version a phone number serves (Phone Numbers tab; never read or changed here)
+ *  4. traffic    — whether real calls reach the agent (this platform never places or routes calls)
+ * Only (1) can be verified by this engine; (2) is reported as Retell states it; (3) and (4) are always "not managed".
+ */
+export interface RetellState {
+  llmId: string; llmVersion: number | null; published: boolean | null;
+  draft: "matches_verified" | "differs_from_verified" | "no_verified_deployment" | "unreadable";
+  verifiedVersionSeq: number | null; detail: string | null;
+}
+
+export async function retellState(d: DeployDeps, stage: Stage, llmId: string): Promise<RetellState> {
+  // A verified deployment counts only for the LLM it was written to (the stage may have been re-registered since).
+  const dep = await d.db.prepare(`SELECT version_id, llm_id FROM so_deployments WHERE stage = ? AND status = 'verified' ORDER BY created_at DESC, rowid DESC LIMIT 1`).bind(stage).first<{ version_id: string; llm_id: string | null }>();
+  const cur = dep && dep.llm_id === llmId ? await getVersion(d.db, dep.version_id) : null;
+  const back = await getRetellLlm({ apiKey: d.env.RETELL_API_KEY!, fetch: d.fetch, llmId });
+  if (!back.ok) return { llmId, llmVersion: null, published: null, draft: "unreadable", verifiedVersionSeq: cur?.seq ?? null, detail: back.error };
+  const text = typeof back.body.general_prompt === "string" ? back.body.general_prompt : "";
+  return {
+    llmId, llmVersion: typeof back.body.version === "number" ? back.body.version : null,
+    published: typeof back.body.is_published === "boolean" ? back.body.is_published : null,
+    draft: !cur ? "no_verified_deployment" : (await sha256Hex(text)) === cur.prompt_sha256 ? "matches_verified" : "differs_from_verified",
+    verifiedVersionSeq: cur?.seq ?? null, detail: null,
+  };
+}
+
+export function describeRetellState(s: RetellState): string {
+  const draft = { matches_verified: `matches verified v${s.verifiedVersionSeq}`, differs_from_verified: `DIFFERS from verified v${s.verifiedVersionSeq} (edited outside the platform?)`, no_verified_deployment: "no version verified here yet", unreadable: `could not be read (${s.detail ?? "error"})` }[s.draft];
+  return `Draft prompt: ${draft}. Retell LLM version ${s.llmVersion ?? "unknown"}, published: ${s.published === null ? "unknown" : s.published ? "yes" : "no"}. Phone-number version assignment and live traffic: not managed by this platform.`;
+}
+
 export interface ProductionGate { open: boolean; reasons: string[] }
 export async function productionGate(db: Db, env: DeployDeps["env"]): Promise<ProductionGate> {
   const reasons: string[] = [];
@@ -93,9 +127,11 @@ export async function verifyTarget(d: DeployDeps, stage: Stage, userId: string |
   }
   await d.db.prepare(`UPDATE so_targets SET engine_type = ?, llm_id = ?, verified_at = ?, updated_by = COALESCE(?, updated_by) WHERE stage = ?`)
     .bind(type, type === "retell-llm" && eng.llm_id ? eng.llm_id : null, nowIso(), userId, stage).run();
-  return type === "retell-llm" && eng.llm_id
-    ? done(true, `Agent uses Retell LLM ${eng.llm_id}; the general prompt can be managed here.`, type)
-    : done(false, `Agent uses a "${type}" response engine. Only Retell LLM agents are supported; conversation-flow and custom-LLM agents need a different update method that is not implemented.`, type);
+  if (type === "retell-llm" && eng.llm_id) {
+    const st = await retellState(d, stage, eng.llm_id);
+    return done(true, `Agent uses Retell LLM ${eng.llm_id}; the general prompt can be managed here. ${describeRetellState(st)}`, type);
+  }
+  return done(false, `Agent uses a "${type}" response engine. Only Retell LLM agents are supported; conversation-flow and custom-LLM agents need a different update method that is not implemented.`, type);
 }
 
 export async function deploy(d: DeployDeps, r: DeployRequest): Promise<DeployResult> {

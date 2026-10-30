@@ -2,7 +2,7 @@
 
 **Status (2026-10-30): built and tested against fixtures. Not activated and not live.** No Retell sales agent exists, no
 real call or payment has gone through the engine, and the self-hosted runner has not run any of its jobs. Requirements
-SALESOPT-001…012 are all `in_progress` (see `requirements/status/sales-opt.ts`).
+SALESOPT-001…012 are all `in_progress` (see `requirements/status/sales-opt.ts`). §8 holds the acceptance ledger.
 
 > **Scope boundary.** The engine *evaluates and improves* the prompt of a registered Retell **sales** agent. It never places
 > calls. This platform has no sales-calling path. Outbound calling is limited to three consented purposes
@@ -39,7 +39,7 @@ Retell (sales agent) ──signed webhook──▶ /api/webhooks/retell ──�
                                                         └──────▶ sales-opt ingest ──▶ so_call_facts
 Stripe ──verified webhook──▶ payments (existing) ──▶ attribution (15-min job) ──▶ so_attributions
 so_call_facts + calls.transcript (consented) ──▶ analysis jobs ──runner──▶ Ollama/Qwen ──▶ grounded so_findings
-so_findings + metrics ──▶ proposal job ──runner──▶ candidate so_versions (author ai) ──▶ evaluation (19 scenarios)
+so_findings + metrics ──▶ proposal job ──runner──▶ candidate so_versions (author ai) ──▶ evaluation (19 required + 3 adversarial scenarios)
 Founder: approve ──▶ deploy staging (read-back verified) ──▶ deploy production (gated) ──▶ monitor ──▶ auto-rollback
 ```
 
@@ -79,7 +79,7 @@ The end-to-end flow has **not** been demonstrated. To run it on staging:
 1. Create two Retell agents that are *not* the receptionist (for example "Crestmont Sales — staging" and "— production"), each with a Retell LLM. Give them the same custom functions as the receptionist (`RETELL-INTEGRATION.md` §6) and the webhook URL `https://<staging host>/api/webhooks/retell`.
 2. Set `RETELL_API_KEY` as a staging Worker secret. Register the staging agent id on the dashboard and press **Verify with Retell**.
 3. Enable AI drafts on the runner (`docs/ai-builds/RUNNER-SETUP.md`). Sales-opt jobs use the same claim endpoint.
-4. Unpause optimization. Run version 1's evaluation and review the 19 simulated transcripts. Deploy to the staging agent and check the read-back.
+4. Unpause optimization. Run version 1's evaluation and review the 22 simulated transcripts (19 required, 3 adversarial). Deploy to the staging agent and check the read-back.
 5. Place **web/test calls** from the Retell dashboard (they are marked as tests and excluded from metrics) and record consent. Confirm ingestion, analysis and findings.
 6. Create a Stripe test-mode order for a lead linked by metadata `crestmont_lead_id` on a non-test staging call, then confirm attribution.
 
@@ -109,3 +109,38 @@ Production stays untouched until the Founder sets `SALES_OPT_PRODUCTION=on` on p
 - Conversation-flow and custom-LLM agents are not supported, and the engine refuses them.
 - The policy checks and scenario assertions are heuristics. Offline simulation shows only policy adherence on scripted scenarios, not real-world sales improvement.
 - The quality of the local model's analysis and proposals is unmeasured until real consented calls exist.
+
+## 8. Acceptance ledger (2026-10-30)
+
+Statuses, as defined by the Founder brief:
+- **IMPLEMENTED** — the code exists and automated tests pass.
+- **STAGING E2E VERIFIED** — the connected staging workflow passed, with recorded evidence.
+- **BLOCKED — EXTERNAL DEPENDENCY** — a credential, account or provider action is missing.
+
+The full-chain test `tests/sales-optimization-e2e.test.ts` runs steps 1–20 through the real HTTP pipeline: signed Retell webhooks, the signed Stripe webhook, the signed runner API, and the Owner routes with MFA and step-up. Retell's REST API, the Stripe event and the model are **fixtures**, so this test counts as IMPLEMENTED, never as STAGING E2E VERIFIED.
+
+| Criterion | Status | Evidence / what is missing |
+|---|---|---|
+| Automated tests, TypeScript | IMPLEMENTED | `npm test`, `tsc` (CI on every PR) |
+| Migration 0047 applied on staging | STAGING E2E VERIFIED | Deploy staging run 41115599003, step "Apply D1 migrations: success" (merge of PR #49, `3940650`) |
+| Staging deployment passes; restore drill passes | Pending | The staging browser failures were fixed by PR #53 (another session). The restore drill runs only after a successful deploy. |
+| Retell call ingestion (signatures, replay, order, agent isolation) | IMPLEMENTED | Fixture tests. **BLOCKED** for staging: no Retell staging sales agent and no `RETELL_API_KEY` on staging (BLK-009). |
+| Stripe test-mode attribution | IMPLEMENTED | Signed-fixture webhook. **BLOCKED** for staging: no Stripe test key on staging (BLK-004). |
+| Local Qwen analysis on Node 1 | IMPLEMENTED (runner protocol) | **BLOCKED**: there is no evidence that Node 1 has claimed any job. Per-step tracing is PR #52 (D01–D13), which awaits Founder authorization. The dashboard reports "Never" until a job is completed by `self-hosted:<model>`. |
+| 19 evaluation scenarios (+3 adversarial) | IMPLEMENTED | Deterministic assertions plus a scripted model. **BLOCKED** for live runs: same Node 1 dependency. |
+| Proposal → evaluation → approval | IMPLEMENTED | Fixture E2E steps 9–13 |
+| Staging Retell update + read-back | IMPLEMENTED | Fixture E2E steps 13–15. **BLOCKED** for staging: Retell staging agent and key. |
+| Rollback | IMPLEMENTED | Fixture E2E steps 17–18 (automatic, on a safety breach) |
+| Retell publish / phone-number assignment / live traffic | Manual, never automated | Retell dashboard: agent → Deploy/Publish; Phone Numbers → choose the agent version. The engine reports these as "not managed". |
+| Production isolation; no live calls; no production Retell change | IMPLEMENTED | Gates in `deploy.ts#productionGate`. No dialler exists (D-14). Fixture E2E step 20. |
+| Owner dashboard (status, runner, diagnostics, KPIs per stage) | IMPLEMENTED | `tests/sales-optimization.test.ts` [SALESOPT-010], fixture E2E step 16 |
+
+### Founder actions (all of the external blockers above)
+1. **Retell** (dashboard.retellai.com): create two agents, "Crestmont Sales — staging" and "— production". Each needs its **own** Retell LLM, because the engine refuses shared LLMs. Give them the custom functions in `RETELL-INTEGRATION.md` §6 and the webhook URL `https://crestmont-platform-staging.partners-df4.workers.dev/api/webhooks/retell`. Create a webhook-badged API key. *Cannot be automated: no Retell account credentials exist in any environment this session can reach.*
+2. **Cloudflare** (Workers & Pages → crestmont-platform-staging → Settings → Variables and Secrets): set `RETELL_API_KEY` (secret). Set `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` (test mode, `sk_test_…` / `whsec_…`) for BLK-004. *Secrets cannot be read or written from this session.*
+3. **Node 1**: approve and merge PR #52, set `BUILD_RUNNER_SECRET` as a GitHub secret (the staging deploy installs it), and sign in on Node 1 so the runner polls with AI drafts enabled (`docs/ai-builds/RUNNER-SETUP.md`). *The runner is a machine only the Founder controls.*
+4. **Afterwards, on staging:**
+   - Register the staging agent on `/staff/sales-optimization` and press Verify. Expect "Draft prompt: no version verified here yet".
+   - Unpause, evaluate v1 and deploy it to staging.
+   - Place a Retell **web test call** with recording consent, then pay a Stripe test checkout for that lead.
+   - The dashboard (`?stage=staging`) then shows the call, the sale, Node 1's findings and the read-back. These are the STAGING E2E VERIFIED proofs.

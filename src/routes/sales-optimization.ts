@@ -64,8 +64,11 @@ async function dashboard(ctx: AppContext, errors: string[] = [], status = 200) {
   const prod = await reg.deployedVersion(db, "production");
   const stg = await reg.deployedVersion(db, "staging");
   const from = new Date(t.getTime() - 30 * 86_400_000).toISOString();
-  const m = await computeMetrics(db, { stage: "production", from, to: t.toISOString() });
-  const ms = await computeMetrics(db, { stage: "staging", from, to: t.toISOString() });
+  // KPI stage: production by default; ?stage=staging shows the staging agent's own measurements (validation runs).
+  const kStage: reg.Stage = ctx.url.searchParams.get("stage") === "staging" ? "staging" : "production";
+  const other: reg.Stage = kStage === "production" ? "staging" : "production";
+  const m = await computeMetrics(db, { stage: kStage, from, to: t.toISOString() });
+  const ms = await computeMetrics(db, { stage: other, from, to: t.toISOString() });
   const top = await topFindings(db, from);
   const versions = await reg.listVersions(db, 30);
   const evals = new Map((await db.prepare(`SELECT version_id, status, summary FROM so_eval_runs e WHERE created_at = (SELECT MAX(created_at) FROM so_eval_runs WHERE version_id = e.version_id)`).all<{ version_id: string; status: string; summary: string | null }>()).results.map((r) => [r.version_id, r]));
@@ -78,6 +81,22 @@ async function dashboard(ctx: AppContext, errors: string[] = [], status = 200) {
   const experiments = (await db.prepare(`SELECT e.*, b.seq AS bseq, c.seq AS cseq FROM so_experiments e JOIN so_versions b ON b.id = e.baseline_version_id JOIN so_versions c ON c.id = e.candidate_version_id ORDER BY e.created_at DESC LIMIT 5`)
     .all<{ id: string; status: string; bseq: number; cseq: number; candidate_share: number; min_connected_per_arm: number; decision: string | null; decision_detail: string | null; created_at: string }>()).results;
   const rbStaging = await rollbackCandidate(db, "staging"), rbProd = await rollbackCandidate(db, "production");
+  // Runner status for sales-optimization jobs, from what the platform itself observed (ai_jobs + leases). A queued job
+  // proves nothing about Node 1: only a claim (lease) or a completion stamped "self-hosted:<model>" does.
+  const rj = (await db.prepare(`SELECT
+      COALESCE(SUM(status = 'queued'), 0) AS queued, MIN(CASE WHEN status = 'queued' THEN created_at END) AS oldest_queued,
+      COALESCE(SUM(status = 'running'), 0) AS running,
+      COALESCE(SUM(status = 'failed' AND updated_at >= ?), 0) AS failed_30d
+    FROM ai_jobs WHERE workflow LIKE 'salesopt_%'`).bind(from).first<{ queued: number; oldest_queued: string | null; running: number; failed_30d: number }>())!;
+  // "ai.analysis_completed" is written only when a runner returned a model result for a sales-opt job (ai-runner.ts).
+  const lastDone = await db.prepare(`SELECT created_at, details_json FROM audit_logs WHERE action = 'ai.analysis_completed' ORDER BY id DESC LIMIT 1`).first<{ created_at: string; details_json: string | null }>();
+  let lastModel = "";
+  try { const m = (JSON.parse(lastDone?.details_json ?? "{}") as { model?: unknown }).model; lastModel = typeof m === "string" ? m.slice(0, 80) : ""; } catch { lastModel = ""; }
+  const failures = (await db.prepare(`SELECT error, COUNT(*) AS n FROM ai_jobs WHERE workflow LIKE 'salesopt_%' AND status = 'failed' AND updated_at >= ? GROUP BY error ORDER BY n DESC LIMIT 5`).bind(from).all<{ error: string | null; n: number }>()).results;
+  const classify = (e: string | null) => !e ? "unknown" : /abandoned|did not complete/.test(e) ? "runner never finished (offline or not polling)" : /lease/.test(e) ? "runner lease expired (stopped mid-job)" : /local model|empty/.test(e) ? "model error on the runner" : e.slice(0, 80);
+  const diag = (await db.prepare(`SELECT action, details_json, created_at FROM audit_logs WHERE action IN ('salesopt.ingest_failed','salesopt.deploy_failed','salesopt.deploy_aborted','salesopt.rollback_failed','salesopt.rollback_aborted','salesopt.proposal_rejected_automatically','salesopt.safety_breach','salesopt.webhook_replay_ignored','salesopt.target_verified') ORDER BY id DESC LIMIT 10`)
+    .all<{ action: string; details_json: string | null; created_at: string }>()).results;
+  const ageMin = rj.oldest_queued ? Math.round((t.getTime() - Date.parse(rj.oldest_queued)) / 60_000) : null;
   const canDecide = !!ctx.actor && can(ctx.actor, "salesopt.decide");
   const th = ctl.thresholds;
   const latest = versions[0];
@@ -92,12 +111,13 @@ async function dashboard(ctx: AppContext, errors: string[] = [], status = 200) {
   const body = html`${pageHead("AI Sales Optimization", html`<form method="post" action="${BASE}/run" class="row">${csrf(ctx)}${button("Run cycle now", { size: "sm", variant: "secondary" })}</form>`, "AI")}
 ${formErrors(errors)}
 ${alert("warn", html`<strong>Scope.</strong> This engine evaluates and improves a <em>registered Retell sales agent</em>. It never places calls. This platform has no sales-calling path: outbound calls are limited to consented callbacks, reminders and support follow-ups (Founder decision D-14, MSA Sched. C.7). Enabling sales calling needs counsel's TCPA review and a separate, Founder-approved change.`)}
+<p class="row"><span class="faint">Metrics shown for:</span> ${kStage === "production" ? html`<strong>production</strong> · <a href="${BASE}?stage=staging">staging</a>` : html`<a href="${BASE}">production</a> · <strong>staging</strong>`}</p>
 ${ctl.paused ? alert("info", "Optimization is paused: no analyses or proposals are queued. Safety monitoring keeps running.") : ""}
 
 <div class="kpis grid grid-4">
 ${kpi("Production prompt version", prod ? `v${prod.seq}` : "None deployed", stg ? `Staging: v${stg.seq}` : "Staging: none")}
 ${kpi("Last optimization run", ctl.lastRunAt ? formatDateTime(ctl.lastRunAt) : "Never", ctl.lastRunDetail?.slice(0, 90) ?? undefined)}
-${kpi("Call attempts (30 days)", m.attempts, `${ms.attempts} on staging · test calls excluded`)}
+${kpi(`Call attempts, ${kStage} (30 days)`, m.attempts, `${ms.attempts} on ${other} · test calls excluded`)}
 ${kpi("Connection rate", pct(m.connectionRate), `${m.connected} connected`)}
 </div>
 <div class="kpis grid grid-4">
@@ -107,6 +127,24 @@ ${kpi("Opt-out rate", pct(m.optOutRate), `${m.optOuts} opt-outs`)}
 ${kpi("Compliance incidents", m.complianceFindings, `${pct(m.complianceRate)} of ${m.analysed} analysed calls`)}
 </div>
 
+<section class="card stack"><h2 class="card__title">Self-hosted model runner (Node 1)</h2>
+${dl([
+  ["Runner channel", ctx.env.BUILD_RUNNER_SECRET ? "BUILD_RUNNER_SECRET is set in this environment" : "BUILD_RUNNER_SECRET is not set: no runner can claim jobs"],
+  ["Last job completed by a local model", lastDone ? `${formatDateTime(lastDone.created_at)}${lastModel ? ` (${lastModel})` : ""}` : "Never — no sales-optimization job has been completed by a self-hosted model in this environment"],
+  ["Waiting", `${rj.queued} queued${ageMin !== null ? `, oldest ${ageMin} min` : ""} · ${rj.running} claimed and running`],
+  ["Failed (30 days)", failures.length ? failures.map((f) => `${f.n}× ${classify(f.error)}`).join(" · ") : `${rj.failed_30d}`],
+])}
+<p class="faint">A queued job does not mean Node 1 is connected. Jobs not finished within 6 hours are abandoned; analyses then keep only the deterministic compliance checks, and evaluations end as errors (the version does not pass). Per-step runner tracing (D01–D13) is the Node diagnostics page of AI builds once that change is merged.</p>
+</section>
+
+<section class="card stack"><h2 class="card__title">Failure diagnostics</h2>
+${diag.length ? table(diag, [
+  { header: "When", cell: (r) => formatDateTime(r.created_at) },
+  { header: "Event", cell: (r) => label(r.action.replace("salesopt.", "")) },
+  { header: "Detail", cell: (r) => html`<span class="faint">${(r.details_json ?? "").slice(0, 160)}</span>` },
+]) : html`<p class="faint">No ingestion, deployment, proposal or safety events yet.</p>`}
+</section>
+
 <section class="card stack"><h2 class="card__title">Integration health</h2>
 ${dl([
   ["Retell API key", ctx.env.RETELL_API_KEY ? "Set in this environment" : "Not set — nothing is sent to Retell"],
@@ -114,6 +152,7 @@ ${dl([
   ["Self-hosted model jobs (30 days)", jobs.length ? jobs.map((j) => `${label(j.status)} ${j.n}`).join(" · ") : "None yet (needs the build runner with AI drafts enabled)"],
   ["Protected policy", `${SALES_POLICY_VERSION} (prices generated from the catalog)`],
   ["Attribution source", "Webhook-verified Stripe payments on orders linked to the call's lead (14-day window)"],
+  ["Retell states (kept separate)", "1 draft prompt updated and read back — done here · 2 version published — Retell dashboard · 3 version assigned to a phone number — Retell Phone Numbers tab · 4 live traffic — never started by this platform"],
 ])}
 <div class="table-wrap"><table class="table"><thead><tr><th scope="col">Stage</th><th scope="col">Retell agent</th><th scope="col">Verified</th><th scope="col"></th></tr></thead><tbody>${targetRow("staging")}${targetRow("production")}</tbody></table></div>
 ${canDecide ? html`<form method="post" action="${BASE}/targets" class="row">${csrf(ctx)}${select({ name: "stage", label: "Stage", options: [{ value: "staging", label: "Staging" }, { value: "production", label: "Production" }] })}${input({ name: "agent_id", label: "Sales agent id (never the receptionist)", maxlength: 80, required: true })}${button("Register agent", { variant: "secondary" })}</form>` : ""}
