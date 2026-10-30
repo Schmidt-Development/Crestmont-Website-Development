@@ -36,6 +36,8 @@ const usedPhones = new Set<string>();
 const phone = () => { for (;;) { const p = `+1${areas[Math.floor(Math.random() * areas.length)]}55501${String(Math.floor(Math.random() * 100)).padStart(2, "0")}`; if (!usedPhones.has(p)) { usedPhones.add(p); return p; } } };
 const fmt = (e164: string) => `(${e164.slice(2, 5)}) ${e164.slice(5, 8)}-${e164.slice(8)}`;
 const dom = (s: string) => `${s}-${RUN}.example`;
+/** Synthetic names carry the run id, so a record left by an earlier run never looks like the same business. */
+const nm = (s: string) => `CRM E2E ${RUN} ${s}`;
 const erase = { phones: new Set<string>(), emails: new Set<string>() };
 
 // ── signed import client ──
@@ -95,6 +97,26 @@ const traces = async (e164: string | null, email: string | null) => Number((awai
   (SELECT COUNT(*) FROM crm_identity_reviews WHERE lower(COALESCE(candidate_json,'') || COALESCE(proposed_value,'')) LIKE '%' || ${lit(email ?? "-")} || '%') AS n`))[0]?.n ?? 0);
 
 async function main() {
+  // ── 0. Owner session, and cleanup of synthetic data earlier runs could not erase ──
+  const all = accounts();
+  const owner = all.find((a) => a.role === "owner"), sales = all.find((a) => a.role === "sales");
+  if (!owner) { results.push({ id: "owner.session", ok: false, detail: "no owner demo account in E2E_ACCOUNTS_FILE" }); return; }
+  // Never reuse a fictional number that already exists in staging (e.g. a synthetic shared line kept by design).
+  for (const r of await q<{ value_norm: string }>(`SELECT value_norm FROM contact_identities WHERE kind = 'phone' AND value_norm LIKE '%55501__'`)) usedPhones.add(r.value_norm);
+  const os = new Session();
+  await check("owner.sign_in", async () => { await os.login(owner.email, owner.password, owner.totp); });
+  await check("cleanup.earlier_runs", async () => {
+    // Synthetic records an earlier (failed) run could not erase: erase their identifiers through the Owner route.
+    const rows = await q<{ kind: string; value_norm: string }>(`SELECT DISTINCT ci.kind, ci.value_norm FROM contacts c LEFT JOIN companies co ON co.id = c.company_id
+        JOIN contact_identity_links l ON l.contact_id = c.id AND l.removed_at IS NULL JOIN contact_identities ci ON ci.id = l.identity_id
+        WHERE (c.name LIKE 'CRM E2E %' OR co.name LIKE 'CRM E2E %') AND (ci.value_norm LIKE '%55501__' OR ci.value_norm LIKE '%.example') LIMIT 200`);
+    const phones = rows.filter((r) => r.kind === "phone").map((r) => r.value_norm), emails = rows.filter((r) => r.kind === "email").map((r) => r.value_norm);
+    for (let i = 0; i < Math.max(phones.length, emails.length); i += 10) {
+      const r = await os.req("POST", "/staff/crm/identity-erasure", { phones: phones.slice(i, i + 10).join("\n"), emails: emails.slice(i, i + 10).join("\n"), note: `CRM E2E ${RUN} cleanup of earlier synthetic runs`, allow_reimport: "1" });
+      assert(r.status === 303, `cleanup returned ${r.status}`);
+    }
+    return `${phones.length} phone(s), ${emails.length} email(s) from earlier runs`;
+  });
   // ── 1. Migrations and schema on the real staging D1 ──
   await check("d1.migrations_applied", async () => {
     const names = (await q<{ name: string }>(`SELECT name FROM d1_migrations WHERE name IN ('0047_sales_optimization.sql','0048_contact_identity.sql','0049_crm_identity_erasure.sql') ORDER BY name`)).map((r) => r.name);
@@ -126,20 +148,20 @@ async function main() {
 
   // ── 2. Signed import API ──
   const pA = phone(), eA = `owner@${dom("harbor")}`;
-  await check("api.unsigned_401", async () => { const r = await signedImport(batch([rec("u", { business: { name: "CRM E2E Unsigned" }, phones: [{ value: phone() }] })]), `e2e-${RUN}-u`, { sign: "none" }); assert(r.status === 401, `got ${r.status}`); });
-  await check("api.bad_signature_401", async () => { const r = await signedImport(batch([rec("b", { business: { name: "CRM E2E Bad" }, phones: [{ value: phone() }] })]), `e2e-${RUN}-b`, { sign: "bad" }); assert(r.status === 401, `got ${r.status}`); });
+  await check("api.unsigned_401", async () => { const r = await signedImport(batch([rec("u", { business: { name: nm("Unsigned") }, phones: [{ value: phone() }] })]), `e2e-${RUN}-u`, { sign: "none" }); assert(r.status === 401, `got ${r.status}`); });
+  await check("api.bad_signature_401", async () => { const r = await signedImport(batch([rec("b", { business: { name: nm("Bad") }, phones: [{ value: phone() }] })]), `e2e-${RUN}-b`, { sign: "bad" }); assert(r.status === 401, `got ${r.status}`); });
   if (!SECRET) { results.push({ id: "api.signed", ok: false, detail: "CRM_IMPORT_SECRET not available to the E2E step" }); }
-  await check("api.missing_idempotency_400", async () => { const r = await signedImport(batch([rec("k", { business: { name: "CRM E2E NoKey" }, phones: [{ value: phone() }] })]), ""); assert(r.status === 400, `got ${r.status}`); });
+  await check("api.missing_idempotency_400", async () => { const r = await signedImport(batch([rec("k", { business: { name: nm("NoKey") }, phones: [{ value: phone() }] })]), ""); assert(r.status === 400, `got ${r.status}`); });
   await check("api.dry_run_writes_nothing", async () => {
     const before = Number((await q<{ n: number }>(`SELECT COUNT(*) AS n FROM crm_intake_decisions`))[0].n);
-    const r = await signedImport(batch([rec("dry", { business: { name: "CRM E2E Dry" }, phones: [{ value: pA }] })], { dryRun: true }), `e2e-${RUN}-dry`);
+    const r = await signedImport(batch([rec("dry", { business: { name: nm("Dry") }, phones: [{ value: pA }] })], { dryRun: true }), `e2e-${RUN}-dry`);
     assert(r.status === 200 && r.json?.dryRun === true, `got ${r.status}`);
     const after = Number((await q<{ n: number }>(`SELECT COUNT(*) AS n FROM crm_intake_decisions`))[0].n);
     assert(after === before, "a dry run wrote a decision");
   });
   let leadA = "";
   await check("api.create_research_prospect", async () => {
-    const r = await signedImport(batch([rec("a", { business: { name: "CRM E2E Harbor", website: `https://${dom("harbor")}` }, contact: { name: "CRM E2E Person A" }, phones: [{ value: fmt(pA) }], emails: [{ value: eA.toUpperCase() }], evidence: { sourceUrl: `https://${dom("harbor")}/contact` } })]), `e2e-${RUN}-a`);
+    const r = await signedImport(batch([rec("a", { business: { name: nm("Harbor"), website: `https://${dom("harbor")}` }, contact: { name: nm("Person A") }, phones: [{ value: fmt(pA) }], emails: [{ value: eA.toUpperCase() }], evidence: { sourceUrl: `https://${dom("harbor")}/contact` } })]), `e2e-${RUN}-a`);
     assert(r.status === 200 && r.json.results[0].outcome === "CREATED", `got ${r.status} ${r.json?.results?.[0]?.outcome}`);
     leadA = r.json.results[0].leadId;
     const row = (await q<{ origin: string; source: string }>(`SELECT origin, source FROM leads WHERE id = ${lit(leadA)}`))[0];
@@ -150,21 +172,21 @@ async function main() {
     return `lead ${leadA}`;
   });
   await check("api.idempotent_replay", async () => {
-    const body = batch([rec("a", { business: { name: "CRM E2E Harbor", website: `https://${dom("harbor")}` }, contact: { name: "CRM E2E Person A" }, phones: [{ value: fmt(pA) }], emails: [{ value: eA.toUpperCase() }], evidence: { sourceUrl: `https://${dom("harbor")}/contact` } })]);
+    const body = batch([rec("a", { business: { name: nm("Harbor"), website: `https://${dom("harbor")}` }, contact: { name: nm("Person A") }, phones: [{ value: fmt(pA) }], emails: [{ value: eA.toUpperCase() }], evidence: { sourceUrl: `https://${dom("harbor")}/contact` } })]);
     const r = await signedImport(body, `e2e-${RUN}-a`);
     assert(r.status === 200 && r.json.replayed === true && r.json.results[0].leadId === leadA, `replay gave ${r.json?.results?.[0]?.leadId}`);
     const conflict = await signedImport({ ...body, records: [{ ...(body.records[0] as object), business: { name: "Different" } }] }, `e2e-${RUN}-a`);
     assert(conflict.status === 409, `key reuse with a different body gave ${conflict.status}`);
   });
   await check("api.same_phone_other_format_links", async () => {
-    const r = await signedImport(batch([rec("a2", { business: { name: "CRM E2E Harbor", website: `https://www.${dom("harbor")}/menu` }, phones: [{ value: `${pA.slice(2, 5)}.${pA.slice(5, 8)}.${pA.slice(8)}` }] })]), `e2e-${RUN}-a2`);
+    const r = await signedImport(batch([rec("a2", { business: { name: nm("Harbor"), website: `https://www.${dom("harbor")}/menu` }, phones: [{ value: `${pA.slice(2, 5)}.${pA.slice(5, 8)}.${pA.slice(8)}` }] })]), `e2e-${RUN}-a2`);
     assert(r.status === 200 && ["NO_CHANGE", "EXISTING_CONTACT_LINKED", "EXISTING_BUSINESS_UPDATED"].includes(r.json.results[0].outcome), `outcome ${r.json?.results?.[0]?.outcome}`);
     assert(await leadsForPhone(pA) === 1, "a second lead exists for the number");
     return r.json.results[0].outcome;
   });
   await check("api.concurrent_duplicate_imports", async () => {
     const pC = phone(); erase.phones.add(pC);
-    const rs = await Promise.all([0, 1, 2, 3, 4].map((i) => signedImport(batch([rec(`c${i}`, { business: { name: "CRM E2E Concurrent", website: `https://${dom("concurrent")}` }, phones: [{ value: i % 2 ? fmt(pC) : pC }] })]), `e2e-${RUN}-c${i}`)));
+    const rs = await Promise.all([0, 1, 2, 3, 4].map((i) => signedImport(batch([rec(`c${i}`, { business: { name: nm("Concurrent"), website: `https://${dom("concurrent")}` }, phones: [{ value: i % 2 ? fmt(pC) : pC }] })]), `e2e-${RUN}-c${i}`)));
     assert(rs.every((r) => r.status === 200), `statuses ${rs.map((r) => r.status).join(",")}`);
     const outcomes = rs.map((r) => r.json.results[0].outcome);
     assert(outcomes.filter((o) => o === "CREATED").length === 1, `outcomes ${outcomes.join(",")}`);
@@ -174,8 +196,8 @@ async function main() {
   });
   await check("api.shared_line_two_businesses", async () => {
     const pS = phone(); erase.phones.add(pS);
-    const a = await signedImport(batch([rec("s1", { business: { name: "CRM E2E Lakeside Dental", website: `https://${dom("lakeside")}` }, phones: [{ value: pS, label: "shared_line" }] })]), `e2e-${RUN}-s1`);
-    const b = await signedImport(batch([rec("s2", { business: { name: "CRM E2E Maple Orthodontics", website: `https://${dom("maple")}` }, phones: [{ value: fmt(pS) }] })]), `e2e-${RUN}-s2`);
+    const a = await signedImport(batch([rec("s1", { business: { name: nm("Lakeside Dental"), website: `https://${dom("lakeside")}` }, phones: [{ value: pS, label: "shared_line" }] })]), `e2e-${RUN}-s1`);
+    const b = await signedImport(batch([rec("s2", { business: { name: nm("Maple Orthodontics"), website: `https://${dom("maple")}` }, phones: [{ value: fmt(pS) }] })]), `e2e-${RUN}-s2`);
     assert(a.json.results[0].outcome === "CREATED" && b.json.results[0].outcome === "CREATED", `outcomes ${a.json?.results?.[0]?.outcome}/${b.json?.results?.[0]?.outcome}`);
     const r = (await q<{ shared: number; contacts: number }>(`SELECT ci.shared, (SELECT COUNT(*) FROM contact_identity_links l WHERE l.identity_id = ci.id AND l.removed_at IS NULL) AS contacts FROM contact_identities ci WHERE ci.kind = 'phone' AND ci.value_norm = ${lit(pS)}`))[0];
     assert(Number(r?.shared) === 1 && Number(r.contacts) === 2, `shared=${r?.shared} contacts=${r?.contacts}`);
@@ -183,33 +205,28 @@ async function main() {
   });
   await check("api.ambiguous_held_for_review", async () => {
     const pH = phone(); erase.phones.add(pH);
-    await signedImport(batch([rec("h1", { business: { name: "CRM E2E Pine Studio", website: `https://${dom("pine")}` }, phones: [{ value: pH }] })]), `e2e-${RUN}-h1`);
-    const r = await signedImport(batch([rec("h2", { business: { name: "CRM E2E Pine Studio", website: `https://${dom("pinestudio")}` }, phones: [{ value: pH }] })]), `e2e-${RUN}-h2`);
+    await signedImport(batch([rec("h1", { business: { name: nm("Pine Studio"), website: `https://${dom("pine")}` }, phones: [{ value: pH }] })]), `e2e-${RUN}-h1`);
+    const r = await signedImport(batch([rec("h2", { business: { name: nm("Pine Studio"), website: `https://${dom("pinestudio")}` }, phones: [{ value: pH }] })]), `e2e-${RUN}-h2`);
     assert(r.json.results[0].outcome === "POSSIBLE_DUPLICATE_REVIEW" && r.json.results[0].reviewIds.length >= 1, `outcome ${r.json?.results?.[0]?.outcome}`);
   });
   await check("api.suppressed_email_refused", async () => {
     // Synthetic fixture written directly to staging D1: an active suppression for a fictional address of this run.
     const eS = `bounced@${dom("suppressed")}`; erase.emails.add(eS);
     await q(`INSERT INTO email_suppressions (id, email, reason, detail, created_at) VALUES ('sup_e2e_${RUN}', ${lit(eS)}, 'hard_bounce', 'CRM E2E synthetic', strftime('%Y-%m-%dT%H:%M:%fZ','now'))`);
-    const r = await signedImport(batch([rec("sup", { business: { name: "CRM E2E Suppressed" }, emails: [{ value: eS.toUpperCase() }] })]), `e2e-${RUN}-sup`);
+    const r = await signedImport(batch([rec("sup", { business: { name: nm("Suppressed") }, emails: [{ value: eS.toUpperCase() }] })]), `e2e-${RUN}-sup`);
     assert(r.json.results[0].outcome === "SUPPRESSED" && !r.json.results[0].leadId, `outcome ${r.json?.results?.[0]?.outcome}`);
   });
 
   // ── 3. Owner routes: do-not-call, manual duplicate warning, privacy erasure ──
-  const all = accounts();
-  const owner = all.find((a) => a.role === "owner"), sales = all.find((a) => a.role === "sales");
-  if (!owner) { results.push({ id: "owner.session", ok: false, detail: "no owner demo account in E2E_ACCOUNTS_FILE" }); return; }
-  const os = new Session();
-  await check("owner.sign_in", async () => { await os.login(owner.email, owner.password, owner.totp); });
   await check("api.do_not_call_refused", async () => {
     const pD = phone(); erase.phones.add(pD);
     const r = await os.req("POST", "/staff/voice/dnc", { phone: pD, detail: `CRM E2E ${RUN} synthetic opt-out` });
     assert(r.status === 303, `adding do-not-call returned ${r.status}`);
-    const imp = await signedImport(batch([rec("dnc", { business: { name: "CRM E2E Quiet Co" }, phones: [{ value: fmt(pD) }] })]), `e2e-${RUN}-dnc`);
+    const imp = await signedImport(batch([rec("dnc", { business: { name: nm("Quiet Co") }, phones: [{ value: fmt(pD) }] })]), `e2e-${RUN}-dnc`);
     assert(imp.json.results[0].outcome === "SUPPRESSED", `outcome ${imp.json?.results?.[0]?.outcome}`);
   });
   await check("ui.manual_duplicate_warning", async () => {
-    const r = await os.req("POST", "/staff/crm/new", { name: "CRM E2E Person A2", email: eA, phone: "", company: "", website: "", interest: "custom", message: "", source: "manual" });
+    const r = await os.req("POST", "/staff/crm/new", { name: nm("Person A2"), email: eA, phone: "", company: "", website: "", interest: "custom", message: "", source: "manual" });
     const h = await r.text();
     assert(r.status === 409 && h.includes("data-duplicate-warning"), `status ${r.status}`);
     assert(await leadsForPhone(pA) === 1, "the warning wrote a lead");
@@ -236,7 +253,7 @@ async function main() {
     return `${tomb} tombstone(s)`;
   });
   await check("erasure.reimport_refused", async () => {
-    const r = await signedImport(batch([rec("re", { business: { name: "CRM E2E Harbor" }, phones: [{ value: pA }] })]), `e2e-${RUN}-re`);
+    const r = await signedImport(batch([rec("re", { business: { name: nm("Harbor") }, phones: [{ value: pA }] })]), `e2e-${RUN}-re`);
     assert(r.json.results[0].outcome === "SUPPRESSED" && r.json.results[0].suppressed?.erased === true, `outcome ${r.json?.results?.[0]?.outcome}`);
   });
   await check("erasure.repeat_is_safe", async () => {
@@ -255,7 +272,7 @@ async function main() {
       const r = await os.req("POST", "/staff/crm/identity-erasure", { phones: phones.slice(i, i + 10).join("\n"), emails: emails.slice(i, i + 10).join("\n"), note: `CRM E2E ${RUN} cleanup of synthetic data`, allow_reimport: "1" });
       assert(r.status === 303, `cleanup returned ${r.status}`);
     }
-    const left = Number((await q<{ n: number }>(`SELECT COUNT(*) AS n FROM contacts WHERE name LIKE 'CRM E2E%'`))[0].n);
+    const left = Number((await q<{ n: number }>(`SELECT COUNT(*) AS n FROM contacts WHERE name LIKE ${lit(`CRM E2E ${RUN}%`)}`))[0].n);
     // Shared-line businesses keep their identifier by design until both are erased; the cleanup erases all of them.
     return `${left} synthetic contact name(s) left (anonymised rows read 'Deleted contact')`;
   });
