@@ -1,4 +1,4 @@
-// Lead research — persistence and CRM integration (proposed RESEARCH-001..006; see migrations/0047_lead_research.sql).
+// Lead research — persistence and CRM integration (proposed RESEARCH-001..006; see migrations/0048_lead_research.sql).
 // The worker pushes evidence; this module validates it, recomputes qualification itself (the worker's opinion is not
 // trusted), checks the CRM / do-not-call list / other prospects for duplicates, and keeps the fail-closed outbound
 // eligibility result next to each prospect. Promotion to a CRM lead is a person's decision, audited.

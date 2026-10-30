@@ -522,6 +522,13 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/sales-optimization/experiments": staff(rolesWith("salesopt.decide"), undefined, blocked("needs a version verified on the production sales agent; refused with an error otherwise")),
   "POST /staff/sales-optimization/experiments/:id/decide": staff(rolesWith("salesopt.decide"), P("soExperiment"), act("salesopt.experiment_start")),
   "POST /staff/sales-optimization/run": staff(rolesWith("salesopt.decide"), undefined, act("salesopt.cycle_run")),
+  // ── Lead research (worker API signed with RESEARCH_RUNNER_SECRET; dashboard for lead.read_all; decisions lead.write_all; controls Owner) ──
+  "POST /api/research/runner/heartbeat": signed("x-crestmont-research-signature"),
+  "POST /api/research/runner/batch": signed("x-crestmont-research-signature"),
+  "GET /staff/research": staff(rolesWith("lead.read_all")),
+  "POST /staff/research/settings": staff(OWNER, undefined, act("research.settings_updated")),
+  "POST /staff/research/promote": staff(rolesWith("lead.write_all"), undefined, act("research.prospect_promoted")),
+  "POST /staff/research/dismiss": staff(rolesWith("lead.write_all"), undefined, act("research.prospect_dismissed")),
   "POST /staff/voice/caller-erasure": staff(rolesWith("voice.manage"), undefined, act("voice.caller_data_erased")),
 };
 
