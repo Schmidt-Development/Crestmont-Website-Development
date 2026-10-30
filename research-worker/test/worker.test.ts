@@ -347,3 +347,22 @@ test("[live] results that are not sent are kept locally for diagnostics and neve
   assert.equal(st.enqueueBatch(10, t), null);
   assert.ok((st.db.prepare(`SELECT result FROM candidates`).get() as { result: string | null }).result);
 });
+
+test("[live] robots.txt redirects are followed (RFC 9309); a redirect into a private address is refused", async () => {
+  const { createServer } = await import("node:http");
+  const hits: string[] = [];
+  const srv = createServer((req, res) => {
+    hits.push(req.url ?? "");
+    if (req.url === "/robots.txt") { res.writeHead(301, { location: "/real-robots.txt" }).end(); return; }
+    if (req.url === "/real-robots.txt") { res.writeHead(200, { "content-type": "text/plain" }).end("User-agent: *\nDisallow: /private\n"); return; }
+    res.writeHead(200, { "content-type": "text/html" }).end("<title>ok</title>");
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+  const port = (srv.address() as { port: number }).port;
+  try {
+    const http = new Http({ userAgent: "t", robotsToken: "CrestmontResearchBot", timeoutMs: 2000, perHostIntervalMs: 1000, concurrency: 2, maxBytes: 100000, allowLoopback: true });
+    assert.equal(await http.allowed(new URL(`http://127.0.0.1:${port}/`)), true, "redirected robots.txt read: / allowed");
+    assert.equal(await http.allowed(new URL(`http://127.0.0.1:${port}/private/x`)), false, "and its rules applied");
+    assert.ok(hits.includes("/real-robots.txt"));
+  } finally { srv.close(); }
+});

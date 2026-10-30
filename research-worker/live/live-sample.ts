@@ -53,7 +53,10 @@ const SECRET = `live-${Date.now()}-${Math.random().toString(16).slice(2)}-resear
 const app = await createTestApp({ RESEARCH_RUNNER_SECRET: SECRET });
 const raw = (app.db as SqliteDb).raw;
 raw.prepare(`UPDATE research_settings SET paused = 0, max_batch = 100 WHERE id = 1`).run();
-const crmControl = chosen[0], dncControl = chosen[1];
+// Controls come from businesses with no website field (they are evaluated and sent as "no website found"), so the
+// duplicate and do-not-call checks are exercised at ingest on real records.
+const noSite = chosen.filter((c) => !c.websites.length);
+const crmControl = noSite[0], dncControl = noSite[1];
 if (crmControl) raw.prepare(`INSERT INTO contacts (id, name, phone, created_at) VALUES ('ct_live_control', 'TEST DATA: CRM duplicate control', ?, ?)`).run(crmControl.phones[0], new Date().toISOString());
 if (dncControl) await addDnc(app.db, dncControl.phones[0], "staff", "TEST DATA: do-not-call control for the live sample");
 const fetchImpl = (async (url: string | URL, init?: RequestInit) => handle(new Request(url, init), app.env)) as typeof fetch;
@@ -151,7 +154,7 @@ function diagnostics() {
     for (const f of r.findings ?? []) inc(findingCodes, `${f.code}:${f.severity}`);
     if (r.website.classification === "VERIFIED_WEBSITE_ISSUES") for (const f of r.findings ?? []) if (f.confidence >= 0.6 && f.severity !== "low") inc(issuesDrivers, f.code);
     if (r.website.classification === "WEBSITE_UNVERIFIED") for (const s of r.website.identitySignals ?? []) inc(unverified,
-      /loads but does not match/.test(s) ? "listed_site_loads_identity_not_confirmed" : /HTTP (\d)\d\d/.test(s) ? `http_${/HTTP (\d)/.exec(s)![1]}xx` : /does not load/.test(s) ? "unlisted_candidate_not_loading" : /non-public/.test(s) ? "non_public_address" : /restricts automated/.test(s) ? "restricted_robots_or_401_403_429" : /parked|placeholder/.test(s) ? "parked_unlisted" : "other");
+      /restricts automated/.test(s) ? "restricted_robots_or_401_403_429" : /loads but does not match/.test(s) ? "listed_site_loads_identity_not_confirmed" : /HTTP (\d)\d\d/.test(s) ? `http_${/HTTP (\d)/.exec(s)![1]}xx` : /does not load/.test(s) ? "unlisted_candidate_not_loading" : /non-public/.test(s) ? "non_public_address" : /restricts automated/.test(s) ? "restricted_robots_or_401_403_429" : /parked|placeholder/.test(s) ? "parked_unlisted" : "other");
     for (const c of r.website.checks ?? []) {
       if (c.stage === "C") inc(stageC, /^HTTP (\d)/.test(c.result) ? `http_${/^HTTP (\d)/.exec(c.result)![1]}xx` : c.result.split(":")[0].slice(0, 30));
       if (c.stage === "D" && /^not confirmed/.test(c.result)) inc(stageD, /different phone/.test(c.result) ? "different_phone_on_page" : /no matching signals/.test(c.result) ? "no_matching_signals" : /name on page/.test(c.result) ? "name_only_no_phone_or_street" : "weak_signals");

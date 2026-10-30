@@ -182,10 +182,24 @@ export class Http {
   async robots(origin: URL): Promise<Robots | "deny" | "allow"> {
     const h = this.hosts.get(origin.host) ?? this.hosts.set(origin.host, { next: 0, busy: false }).get(origin.host)!;
     if (h.robots && Date.now() - h.robots.at < 86400e3) return h.robots.r;
-    let r: Robots | "deny" | "allow";
+    let r: Robots | "deny" | "allow" = "deny";
     try {
-      const res = await this.slot(origin.host, () => { this.requests++; return this.raw(new URL("/robots.txt", origin), "GET"); });
-      r = res.status >= 200 && res.status < 300 ? parseRobots(res.body) : res.status >= 400 && res.status < 500 ? "allow" : "deny";
+      // RFC 9309 §2.3.1.2: follow at least five redirects; a robots.txt that cannot be reached that way is "unavailable"
+      // (treated like 4xx: allowed). Every hop gets the same public-address checks as page requests.
+      let u = new URL("/robots.txt", origin);
+      for (let hop = 0; ; hop++) {
+        const lit = u.hostname.replace(/^\[|\]$/g, "");
+        if ((isIP(lit) && !isPublicAddress(lit) && !(this.opts.allowLoopback && (lit === "127.0.0.1" || lit === "::1"))) || !/^https?:$/.test(u.protocol)) { r = "deny"; break; }
+        const target = u;
+        const res = await this.slot(target.host, () => { this.requests++; return this.raw(target, "GET"); });
+        if (res.status >= 300 && res.status < 400) {
+          if (hop >= 5 || !res.headers.location) { r = "allow"; break; }
+          u = new URL(res.headers.location, u);
+          continue;
+        }
+        r = res.status >= 200 && res.status < 300 ? parseRobots(res.body) : res.status >= 400 && res.status < 500 ? "allow" : "deny";
+        break;
+      }
     } catch { r = "deny"; }
     h.robots = { at: Date.now(), r };
     return r;

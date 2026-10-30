@@ -1,5 +1,5 @@
 {
-  "purpose": "First controlled real-data run: Overture places in a small Lansing, MI area; real websites; Common Crawl evidence. Run 3: same 200 businesses after the slow_response timing and JS-contact fixes. Edit this file to trigger a new run (workflow research-live-sample.yml).",
+  "purpose": "First controlled real-data run: Overture places in a small Lansing, MI area; real websites; Common Crawl evidence. Run 4: same 200 businesses after following robots.txt redirects (RFC 9309). Edit this file to trigger a new run (workflow research-live-sample.yml).",
   "bbox": {
     "xmin": -84.565,
     "ymin": 42.725,
