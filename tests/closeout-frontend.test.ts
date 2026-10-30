@@ -240,3 +240,22 @@ test("[BRAND-006] [TEST-003] touch targets ≥ 44px under (pointer: coarse), (ma
   assert.match(nav, /\.site-header \.nav \{[^}]*visibility: visible;[^}]*opacity: 1;/);
   assert.match(nav, /\.site-header \.nav-toggle \{ display: none !important; \}/);
 });
+
+test("[TEST-003] [BRAND-006] lists keep their list semantics: no <ul>/<ol> carries a role that orphans its <li> items (axe listitem, staging deploy #66 /about)", async () => {
+  const { client } = await createTestApp();
+  const paths = ["/", "/about", "/services", "/pricing", "/pricing/compare", "/process", "/contact", "/faq", "/portfolio", "/login", "/register", "/password/forgot",
+    ...SERVICES.map((s) => servicePath(s))];
+  const bad: string[] = [];
+  for (const path of [...new Set(paths)]) {
+    const res = await client().get(path);
+    if (res.status !== 200) continue;
+    const h = await res.text();
+    // A list may take another role only when each <li> takes its own (e.g. role="presentation" around role="tab").
+    for (const m of h.matchAll(/<(ul|ol)\b[^>]*\brole="([^"]+)"[^>]*>([\s\S]*?)<\/\1>/g)) {
+      if (m[2] === "list") continue;
+      const orphans = [...m[3]!.matchAll(/<li\b(?![^>]*\brole=)[^>]*>/g)].length;
+      if (orphans) bad.push(`${path}: <${m[1]} role="${m[2]}"> with ${orphans} <li> without a role`);
+    }
+  }
+  assert.deepEqual(bad, []);
+});

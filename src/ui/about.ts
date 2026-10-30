@@ -51,7 +51,7 @@ export function journey(steps: { title: string; body: string }[]): SafeHtml {
 <figcaption class="sv__head"><span class="sv__tag">Interactive</span><span class="sv__title" id="sv-jr-t">From your idea to a live website</span></figcaption>
 <div class="sv__body"><div class="jr" data-step="0" style="--p:0">
 <div class="jr__rail"><span class="jr__end jr__end--start">Your idea</span>
-<ol class="jr__stops" role="group" aria-label="Project steps">${steps.map((s, i) => html`<li><button type="button" class="jr__stop" data-jr="${i}" aria-pressed="${i === 0 ? "true" : "false"}" aria-label="${`Step ${i + 1} of ${steps.length}: ${s.title}`}"><span class="jr__dot" aria-hidden="true"></span><span class="jr__lbl" aria-hidden="true">${String(i + 1).padStart(2, "0")}</span></button></li>`)}</ol>
+<ol class="jr__stops" aria-label="Project steps">${steps.map((s, i) => html`<li><button type="button" class="jr__stop" data-jr="${i}" aria-pressed="${i === 0 ? "true" : "false"}" aria-label="${`Step ${i + 1} of ${steps.length}: ${s.title}`}"><span class="jr__dot" aria-hidden="true"></span><span class="jr__lbl" aria-hidden="true">${String(i + 1).padStart(2, "0")}</span></button></li>`)}</ol>
 <span class="jr__end jr__end--live">Live website</span><span class="jr__fill" aria-hidden="true"></span></div>
 <div class="jr__cards">${steps.map((s, i) => html`<article class="jr__card" data-jr-card="${i}"${i === 0 ? html` data-on` : ""}><p class="jr__meta"><span class="jr__n">${String(i + 1).padStart(2, "0")} / ${String(steps.length).padStart(2, "0")}</span>${phaseOf(i) ? html`<span class="jr__phase">${phaseOf(i)}</span>` : ""}</p><h3 class="jr__h">${s.title}</h3><p>${s.body}</p></article>`)}</div>
 </div></div>
