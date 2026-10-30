@@ -6,8 +6,41 @@
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** A visitor scrolls inside the demo to reach a control before using it; the demo's own scrollIntoView keeps that
  *  scrolling inside the frame, so the automation never has to move the Crestmont page to reach it. */
-const reveal = (l) => l.evaluate((el) => el.scrollIntoView({ block: "center", behavior: "instant" })).catch(() => {});
-const click = async (l) => { await reveal(l); await l.click(); };
+const reveal = (l) => l.evaluate((el) => {
+  el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+  // A visitor swipes a horizontal list (BLM's appointment day strip) to reach an item; do the same for any scrolling
+  // ancestor inside the demo, whose embed may only scroll vertically. Never touches the page around the frame.
+  for (let a = el.parentElement; a && a !== document.documentElement; a = a.parentElement) {
+    const c = getComputedStyle(a);
+    if (!/(auto|scroll|overlay)/.test(c.overflowX) || a.scrollWidth <= a.clientWidth) continue;
+    const ar = a.getBoundingClientRect(), er = el.getBoundingClientRect();
+    if (er.left < ar.left) a.scrollLeft -= ar.left - er.left; else if (er.right > ar.right) a.scrollLeft += er.right - ar.right;
+  }
+}).catch(() => {});
+/** Clicks like a visitor: reveal the control inside the demo, wait until it is steady and actually under the pointer,
+ *  then press the mouse at that spot. Not Playwright's locator.click(): when a target is briefly covered or still
+ *  moving (a re-render, a transition — likelier on the hosted demo's real network), Playwright retries by re-scrolling
+ *  the target with forced alignments from its own isolated script world. That native scroll is invisible to the
+ *  demo's embed overrides and scrolls Crestmont's page around the frame, which a visitor's click never does
+ *  (reproduced: 432 → 367px; hosted desktop BLM failed with 432 → 288px). A control that genuinely cannot be reached
+ *  without moving Crestmont's page fails here, loudly, instead of being reached by scrolling it. */
+export const click = async (l, ms = 10_000) => {
+  await reveal(l);
+  const page = l.page(), t0 = Date.now();
+  let last = null;
+  for (;;) {
+    const box = await l.boundingBox().catch(() => null); // main-viewport coordinates; does not scroll
+    const hit = box && await l.evaluate((el) => { const r = el.getBoundingClientRect(); const t = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!t && (t === el || el.contains(t)); }).catch(() => false);
+    const vp = page.viewportSize();
+    const steady = box && last && Math.abs(box.x - last.x) < 0.5 && Math.abs(box.y - last.y) < 0.5 && Math.abs(box.width - last.width) < 0.5;
+    if (box && hit && steady && (!vp || (box.y + box.height / 2 > 0 && box.y + box.height / 2 < vp.height && box.x + box.width / 2 > 0 && box.x + box.width / 2 < vp.width))) {
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      return;
+    }
+    if (Date.now() - t0 > ms) throw new Error(`control not clickable within ${ms / 1000}s (${!box ? "not rendered" : !hit ? "covered by another element" : "outside the visible frame or still moving"})`);
+    last = box; await sleep(100); if (box && !hit) await reveal(l);
+  }
+};
 
 /** Fills the visible fields of `scope` (Page, Frame or Locator) by typing, with synthetic values. */
 export async function fillVisible(scope) {
@@ -59,8 +92,10 @@ async function pickSlot(f, dayRe, timeRe) {
   for (let k = 0; k < 40 && !(await days.count()); k++) await sleep(500);
   const n = await days.count();
   for (let d = 0; d < Math.min(n, 12); d++) {
-    await click(days.nth(d)); await sleep(300);
+    await click(days.nth(d));
+    // The day's times load after the click (slower on the hosted demo): wait for them before trying the next day.
     const t = f.locator("main button:not([disabled])", { hasText: timeRe }).filter({ visible: true });
+    for (let k = 0; k < 16 && !(await t.count()); k++) await sleep(250);
     if (await t.count()) { await click(t.first()); await sleep(250); return; }
   }
   const seen = await f.evaluate(() => [...document.querySelectorAll("main button")].filter((b) => b.offsetParent).map((b) => `${b.disabled ? "×" : ""}${b.textContent.trim().replace(/\s+/g, " ").slice(0, 14)}`).slice(0, 24).join(", "));
