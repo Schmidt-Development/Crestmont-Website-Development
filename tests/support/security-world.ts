@@ -12,6 +12,7 @@ import { STAFF_ROLES, type Role } from "../../src/domain/authz.ts";
 import type { PaymentsAdapter } from "../../src/adapters/payments.ts";
 import type { Env } from "../../src/app/context.ts";
 import type { ResourceKind } from "./route-inventory.ts";
+import { createDiagnostic } from "../../src/services/runner-diagnostics.ts";
 
 export type StaffRole = (typeof STAFF_ROLES)[number];
 export const SECRETS = { scheduler: "matrix-scheduler-secret", runner: "matrix-runner-secret", evidence: "matrix-evidence-secret", voice: "matrix-voice-secret", stripe: "whsec_matrixstripe", retell: "matrix-retell-key", resend: "whsec_" + Buffer.from("matrix-resend-secret").toString("base64") };
@@ -250,6 +251,8 @@ async function buildStaffRecords(w: World) {
   await db.prepare(`INSERT INTO build_jobs (id, project_id, organization_id, order_id, kind, revision, dedupe_key, state, state_reason, strategy, package_id, trigger, preview_url, agent_session_id, created_at, updated_at)
                     SELECT ?, p.id, p.organization_id, p.order_id, 'first_build', 0, p.id || ':first', 'ready_for_review', 'matrix fixture', 'standard', 'business', 'sweep', 'https://preview.matrix.example', 'sess-matrix', ?, ? FROM projects p WHERE p.id = ?`)
     .bind(ids.buildJob, nowIso(), nowIso(), w.a.ids.project).run();
+  // Node 1 diagnostic record (created exactly as the Owner action does).
+  ids.runnerDiagnostic = (await createDiagnostic(db, w.staff.owner.id)).id;
   // Public identifiers
   ids.serviceSlug = "website-design-development";
   ids.legalSlug = "terms";

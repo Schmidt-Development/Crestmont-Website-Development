@@ -6,7 +6,7 @@
 import { createHmac } from "node:crypto";
 import type {
   ClaimResponse, HeartbeatRequest, HeartbeatResponse, CheckpointRequest, RequirementItem, CompleteRequest, Job,
-  AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest,
+  AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest, DiagnosticCheckpoint,
 } from "./protocol.ts";
 import { RUNNER_VERSION, LIMITS } from "./protocol.ts";
 import type { Logger } from "./log.ts";
@@ -184,7 +184,13 @@ export class ControlPlaneClient {
     return this.post("/api/builds/runner/ai/complete", {
       jobId: job.id, leaseToken: job.leaseToken, model: req.model, inputTokens: req.inputTokens, outputTokens: req.outputTokens,
       ...(req.text !== undefined ? { text: req.text } : {}), ...(req.error ? { error: req.error.slice(0, LIMITS.error) } : {}),
+      ...(req.correlationId ? { correlationId: req.correlationId } : {}), ...(req.diagnostic ? { diagnostic: req.diagnostic } : {}),
     }, { jobId: job.id });
+  }
+
+  /** Node 1 diagnostic: one runner-side checkpoint (D07–D11), authenticated by the job's lease token. */
+  aiCheckpoint(job: Pick<AiDraftJob, "id" | "leaseToken">, correlationId: string, cp: DiagnosticCheckpoint): Promise<{ recorded: boolean }> {
+    return this.post("/api/builds/runner/ai/checkpoint", { jobId: job.id, leaseToken: job.leaseToken, correlationId, ...cp, ...(cp.error ? { error: cp.error.slice(0, LIMITS.error) } : {}) }, { jobId: job.id });
   }
 
   complete(job: Pick<Job, "id" | "leaseToken">, req: CompleteRequest): Promise<unknown> {
