@@ -1,0 +1,62 @@
+# Lead research — architecture
+
+A nationwide business-research engine that fills the existing CRM with evidence-backed website prospects. It adds **$0** in external API, data or inference fees: open bulk datasets, the workstation's own CPU/GPU, Ollama on localhost.
+
+```
+Windows workstation (research-worker/)                         Cloudflare (this Worker + D1)
+┌───────────────────────────────────────────────┐   HMAC-signed   ┌──────────────────────────────────────────┐
+│ Overture snapshot (DuckDB) ─┐                 │   heartbeat ──▶ │ research_runners / runner_days           │
+│ [FSQ OS, OSM: off]          ├▶ state.sqlite   │ ◀── controls    │ research_settings (pause, threshold)     │
+│ Common Crawl index (cached) │   (queue, leases│   batch ──────▶ │ ingest: validate → recompute score →     │
+│ HTTP verify (robots, polite)│    outbox, ckpt)│  (idempotent)   │   CRM contact / DNC / shared-phone checks│
+│ audit (+Playwright opt.)    │                 │                 │ research_prospects (evidence, provenance)│
+│ Ollama 127.0.0.1 (drafts)  ─┘                 │                 │ /staff/research → promote → CRM lead     │
+└───────────────────────────────────────────────┘                 └──────────────────────────────────────────┘
+```
+
+## Where things run
+- **Workstation:** bulk data (tens of millions of rows), website checks, audits, and the local model. These are the heavy, long-running parts with no per-request cost.
+- **Cloudflare:** only candidate prospects with their evidence (opportunity classes with a phone number), their validation, duplicate protection against the CRM, the decisions people make, and the dashboard. The CRM stays the system of record. A prospect becomes a lead only through an audited promotion.
+
+## Vocabulary (reported separately everywhere)
+| Term | Meaning | Source of the number |
+|---|---|---|
+| evaluated | a candidate record the worker finished checking | worker counter, per day |
+| received | records the platform got in batches | `research_batches` |
+| qualified | meets the deterministic rule in `src/domain/research.ts#qualify` | platform, recomputed on ingest |
+| callable | released by the outbound eligibility gate | always 0 today (`COMPLIANCE-GATE.md`) |
+
+## Classifications
+`VERIFIED_OFFICIAL_WEBSITE`, `VERIFIED_WEBSITE_BROKEN`, `VERIFIED_WEBSITE_ISSUES`, `NO_OFFICIAL_WEBSITE_FOUND`, `WEBSITE_UNVERIFIED`, `BUSINESS_IDENTITY_UNCERTAIN`.
+
+- **"No official website found"** is reported only after stages A–C ran, and the checks are stored with it. It is never inferred from an empty dataset field, and it is never presented as proof that no website exists.
+- **"Broken"** requires a site that a source lists for this business, failing repeatedly at times hours apart.
+- **"Official"** requires a phone or street-address match on the page, or a source listing plus a strong name match with no contradicting contact details. A similar name alone is never enough.
+
+## Guarantees enforced in code (with tests)
+- Findings without evidence, URL, method, timestamp, severity and confidence are refused at ingest.
+- The score, qualification and package are computed from evidence by code. The model only drafts wording, and drafts that add prices, percentages, guarantees, insults or domains not in the evidence are discarded.
+- No duplicate calling opportunities:
+  - a phone or email already on a CRM contact means `existing_crm`;
+  - a do-not-call number means `suppressed`, and opt-outs recorded later propagate immediately;
+  - a shared phone between distinct businesses means `review`, never merged;
+  - repeated or concurrent batches and concurrent promotions are idempotent.
+- The worker never reaches private networks (DNS-level filter on every socket and every browser sub-request). It honours robots.txt and Crawl-delay, never submits forms, and never works around 401/403/429 or CAPTCHAs.
+- Ollama must be on 127.0.0.1. The configuration refuses anything else.
+- Research ships paused. Sources whose terms are not settled are off on the platform and refused at ingest.
+
+## Proposed requirement IDs
+The inventory is the Founder-approved denominator, so these were not added. Tests are tagged with existing CRM / DATA / SEC / OWN / AIOPS / TEST ids in the meantime.
+- `RESEARCH-001` Open-data ingestion with licence provenance
+- `RESEARCH-002` Website verification and classification (A–E)
+- `RESEARCH-003` Evidence-backed website audit
+- `RESEARCH-004` Deterministic qualification with local-model drafts
+- `RESEARCH-005` CRM integration with duplicate and suppression protection
+- `RESEARCH-006` Fail-closed outbound eligibility gate and research dashboard
+
+## Not built yet (honest list)
+- **Live benchmark** on the RTX 5090 workstation, and the manually verified false-positive sample. This session had no access to the workstation (RUNBOOK §4).
+- **A real-data run of the Overture / Common Crawl adapters.** The build container cannot reach S3 or Common Crawl. The SQL is built from the probed schema and unit-tested, but it has not been executed against a live release.
+- **Founder decisions:** Foursquare OS access, OSM internal-use, and any outbound consent design with counsel.
+- **Data.gov / state open-data enrichment.** The source is registered but off, and no dataset has been reviewed.
+- **Multi-location, franchise and parent/subsidiary modelling** beyond the shared-phone review flag. Chains currently appear as separate location records, each with its own source id.

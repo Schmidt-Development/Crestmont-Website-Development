@@ -99,6 +99,8 @@ async function page(ctx: AppContext): Promise<Response> {
   const online = runner ? now.getTime() - Date.parse(runner.last_seen_at) < R.RUNNER_ONLINE_S * 1000 : false;
   const refresh = (runnerStatus?.sources ?? {}) as Record<string, { lastRefreshAt?: string; release?: string; state?: string; error?: string }>;
   const owner = isOwner(ctx.actor!);
+  const wc = runnerStatus?.classCounts;
+  const workerClasses = wc && typeof wc === "object" && !Array.isArray(wc) ? Object.fromEntries(Object.entries(wc as Record<string, unknown>).filter(([, v]) => typeof v === "number" && Number.isFinite(v)).map(([k, v]) => [k, Math.max(0, Math.floor(v as number))])) as Record<string, number> : null;
   const body = html`
 ${pageHead("Lead research", undefined, "Sales")}
 ${settings.paused ? alert("warn", html`<strong>Research is paused.</strong> ${settings.pause_reason ?? ""} The worker keeps its queue and sends nothing until resumed.`) : ""}
@@ -127,6 +129,7 @@ ${runner ? dl([
   ]) : emptyState("No worker has connected", "Install the research worker on the Windows workstation (docs/research/RUNBOOK.md). Until then nothing is researched.")}
 </section>
 <section class="card"><h2 class="card__title">Website classification</h2>
+${workerClasses ? html`<h3 class="faint">Everything the worker evaluated (worker-reported)</h3>${barChart(WEBSITE_CLASSES.map((k) => ({ label: WEBSITE_CLASS_LABELS[k], value: workerClasses[k] ?? 0, display: String(workerClasses[k] ?? 0) })))}<h3 class="faint">Sent to the platform as possible opportunities</h3>` : ""}
 ${d.total ? barChart(d.byClass.map((c) => ({ label: c.label, value: c.n, display: String(c.n) }))) : html`<p class="faint">No prospects yet.</p>`}
 <p class="faint">"No official website found" means the documented checks found none; it is not proof that the business has no website.</p>
 </section>
