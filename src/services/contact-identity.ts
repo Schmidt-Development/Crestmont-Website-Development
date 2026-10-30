@@ -30,6 +30,13 @@ const AUTOMATED: ReadonlySet<IntakeChannel> = new Set(["research_agent", "crm_ap
 const OPEN_STAGES = `('new','qualified','quote_required','quote_sent','negotiation','accepted','awaiting_payment')`;
 export const RACE_GUARD = "crm_identity_race";
 
+/** 64-bit FNV-1a, hex: a compact digest for review dedupe keys (not a security hash). */
+function fnv1a(str: string): string {
+  let h = 0xcbf29ce484222325n;
+  for (const ch of new TextEncoder().encode(str)) { h ^= BigInt(ch); h = (h * 0x100000001b3n) & 0xffffffffffffffffn; }
+  return h.toString(16);
+}
+
 /** Salted hash of a normalized identifier, used for erasure tombstones (migration 0049, identity-erasure.ts). */
 export async function tombstoneHash(kind: "phone" | "email", value: string): Promise<string> {
   return sha256Hex(`crestmont-crm-erasure:v1|${kind}:${value}`);
@@ -449,7 +456,8 @@ async function decideAndWrite(db: Db, candidate: Candidate, opts: IntakeOptions,
 
   const review = (kind: "possible_duplicate" | "field_conflict" | "customer_match", p: { contactId?: string | null; leadId?: string | null; field?: Field; current?: string | null; proposed?: string | null; reason: string; candidate?: boolean }) => {
     const id = newId("rev");
-    const dedupe = `${kind}:${p.contactId ?? "-"}:${p.field ?? "-"}:${(p.proposed ?? "").toLowerCase()}:${p.candidate ? hash.slice(0, 16) : ""}`;
+    // The dedupe key never holds the proposed value itself (privacy erasure must not have to find it there).
+    const dedupe = `${kind}:${p.contactId ?? "-"}:${p.field ?? "-"}:${fnv1a((p.proposed ?? "").toLowerCase())}:${p.candidate ? hash.slice(0, 16) : ""}`;
     stmts.push(db.prepare(`INSERT INTO crm_identity_reviews (id, kind, contact_id, lead_id, decision_id, field, current_value, proposed_value, proposed_source, proposed_confidence, candidate_json, reason, dedupe_key, created_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(dedupe_key) WHERE status = 'open' DO NOTHING`)
       .bind(id, kind, p.contactId ?? null, p.leadId ?? null, decisionId, p.field ?? null, p.current ?? null, p.proposed ?? null, ch, confidence,

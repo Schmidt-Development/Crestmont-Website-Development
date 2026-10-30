@@ -108,42 +108,42 @@ async function eraseOnce(db: Db, actorUserId: string | null, req: ErasureRequest
   // D1 allows 100 bound parameters per statement; the review pre-filter binds 3 per identifier.
   if (keys.size > 30) throw new ErasureError(422, "At most 30 identifiers per erasure.");
 
-  // Who holds each identifier, and which holders are the person's own records. Expanded to a fixpoint: a contact that
-  // becomes part of the subject contributes its other identifiers (they are erased only if no other business uses them).
-  type Holder = { contact_id: string; identity_id: string; kind: "phone" | "email"; value_norm: string; customer: number; business: string };
+  // Who holds each identifier, and which holders are the person's own records. Strict attribution (never guess):
+  // a contact is the person's when one of the person's identifiers is that contact's PRIMARY email/phone and NO other
+  // contact holds it. A line or inbox held by two contacts (housemates, a receptionist, an office line the person
+  // listed) proves nothing about either, so neither is pulled in and the identifier stays with them. Customers are
+  // never pulled in. A pulled-in contact's other identifiers are erased only if nobody else holds them.
+  type Holder = { contact_id: string; identity_id: string; kind: "phone" | "email"; value_norm: string; role: string; customer: number };
   const holderRows = async (ks: Key[]): Promise<Holder[]> => {
     const out: Holder[] = [];
     for (let i = 0; i < ks.length; i += 40) {
       const c = ks.slice(i, i + 40);
-      out.push(...(await db.prepare(`SELECT l.contact_id, ci.id AS identity_id, ci.kind, ci.value_norm,
-          (c.user_id IS NOT NULL OR co.organization_id IS NOT NULL OR EXISTS (SELECT 1 FROM leads x WHERE x.contact_id = c.id AND (x.stage = 'converted' OR EXISTS (SELECT 1 FROM orders o WHERE o.lead_id = x.id)))) AS customer,
-          COALESCE(co.domain_norm, lower(trim(co.name)), 'contact:' || c.id) AS business
+      out.push(...(await db.prepare(`SELECT l.contact_id, ci.id AS identity_id, ci.kind, ci.value_norm, l.role,
+          (c.user_id IS NOT NULL OR co.organization_id IS NOT NULL OR EXISTS (SELECT 1 FROM leads x WHERE x.contact_id = c.id AND (x.stage = 'converted' OR EXISTS (SELECT 1 FROM orders o WHERE o.lead_id = x.id)))) AS customer
         FROM contact_identities ci JOIN contact_identity_links l ON l.identity_id = ci.id AND l.removed_at IS NULL JOIN contacts c ON c.id = l.contact_id LEFT JOIN companies co ON co.id = c.company_id
         WHERE ${c.map(() => "(ci.kind = ? AND ci.value_norm = ?)").join(" OR ")}`).bind(...c.flatMap((k) => [k.kind, k.value])).all<Holder>()).results);
     }
     return out;
   };
   const subject = new Set(named);
-  let holders: Holder[] = [];
-  for (let round = 0; round < 5; round++) {
-    holders = await holderRows([...keys.values()]);
-    let grew = false;
+  for (let round = 0; round < 10; round++) {
+    const hs = await holderRows([...keys.values()]);
     const byKey = new Map<string, Holder[]>();
-    for (const h of holders) byKey.set(`${h.kind}:${h.value_norm}`, [...(byKey.get(`${h.kind}:${h.value_norm}`) ?? []), h]);
-    for (const [, hs] of byKey) {
-      const others = hs.filter((h) => !subject.has(h.contact_id));
-      if (!others.length) continue;
-      // One business across ALL holders (a contact without a company fits any business) and no customer among the
-      // others: the identifier is the person's, and so are those records. Two businesses = a shared line/inbox: kept.
-      const businesses = new Set(hs.map((h) => h.business).filter((b) => !b.startsWith("contact:")));
-      if (businesses.size <= 1 && others.every((h) => !h.customer)) {
-        for (const h of others) if (!subject.has(h.contact_id)) { subject.add(h.contact_id); grew = true; }
-      }
+    for (const h of hs) byKey.set(`${h.kind}:${h.value_norm}`, [...(byKey.get(`${h.kind}:${h.value_norm}`) ?? []), h]);
+    let grew = false;
+    for (const [, list] of byKey) {
+      const contacts = new Set(list.map((h) => h.contact_id));
+      if (contacts.size !== 1) continue;
+      const h = list[0];
+      if (subject.has(h.contact_id) || h.customer || h.role !== "primary") continue;
+      subject.add(h.contact_id); grew = true;
     }
     if (!grew) break;
     for (const r of await chunked([...subject], 80, async (c) => (await db.prepare(`SELECT ci.kind, ci.value_norm FROM contact_identity_links l JOIN contact_identities ci ON ci.id = l.identity_id WHERE l.removed_at IS NULL AND l.contact_id IN (${ph(c.length)})`).bind(...c).all<{ kind: "phone" | "email"; value_norm: string }>()).results)) keys.set(`${r.kind}:${r.value_norm}`, { kind: r.kind, value: r.value_norm });
     if (keys.size > 30) throw new ErasureError(422, "These records carry more than 30 identifiers; erase them in parts or contact engineering.");
   }
+  // Holders recomputed for the FINAL key set (exclusivity and the race guard must see every key).
+  const holders = await holderRows([...keys.values()]);
   const keyList = [...keys.values()];
   const idRows = keyList.length ? (await db.prepare(`SELECT id, kind, value_norm FROM contact_identities WHERE ${keyList.map(() => "(kind = ? AND value_norm = ?)").join(" OR ")}`)
     .bind(...keyList.flatMap((k) => [k.kind, k.value])).all<{ id: string; kind: "phone" | "email"; value_norm: string }>()).results : [];
@@ -159,6 +159,13 @@ async function eraseOnce(db: Db, actorUserId: string | null, req: ErasureRequest
   // Race guard: commit only if nobody linked these identifiers since the plan (a concurrent import re-plans us).
   if (keyList.length) stmts.push(db.prepare(`INSERT INTO crm_write_guard (ok) SELECT 0 WHERE (SELECT COUNT(*) FROM contact_identity_links l JOIN contact_identities ci ON ci.id = l.identity_id
       WHERE l.removed_at IS NULL AND (${keyList.map(() => "(ci.kind = ? AND ci.value_norm = ?)").join(" OR ")})) <> ?`).bind(...keyList.flatMap((k) => [k.kind, k.value]), links.length));
+  // Review items and field history can be written without an identity link (e.g. a proposal for a customer record):
+  // any write to those tables since the scan below re-plans the erasure, so nothing written meanwhile is missed.
+  const tableState = async () => (await db.prepare(`SELECT (SELECT COUNT(*) FROM crm_identity_reviews) || ':' || (SELECT COALESCE(MAX(rowid),0) FROM crm_identity_reviews) || ':' ||
+      (SELECT COUNT(*) FROM crm_field_changes) || ':' || (SELECT COALESCE(MAX(rowid),0) FROM crm_field_changes) AS s`).first<{ s: string }>())!.s;
+  const stateAtScan = await tableState();
+  stmts.push(db.prepare(`INSERT INTO crm_write_guard (ok) SELECT 0 WHERE ((SELECT COUNT(*) FROM crm_identity_reviews) || ':' || (SELECT COALESCE(MAX(rowid),0) FROM crm_identity_reviews) || ':' ||
+      (SELECT COUNT(*) FROM crm_field_changes) || ':' || (SELECT COALESCE(MAX(rowid),0) FROM crm_field_changes)) <> ?`).bind(stateAtScan));
 
   // 1. Subject contacts and the person's own text on their leads (stage, quotes, orders and history rows stay).
   let leadsScrubbed = 0;
@@ -174,9 +181,23 @@ async function eraseOnce(db: Db, actorUserId: string | null, req: ErasureRequest
   // 2. Held candidates, review values and field history that mention an exclusive identifier, wherever they sit.
   let reviewsDeleted = 0, reviewsScrubbed = 0, fieldChangesScrubbed = 0;
   if (exclusiveKeys.length) {
-    const [rw, rb] = prefilter(exclusiveKeys, ["candidate_json", "proposed_value", "current_value"]);
-    const reviews = (await db.prepare(`SELECT id, contact_id, current_value, proposed_value, candidate_json FROM crm_identity_reviews WHERE ${rw} LIMIT 5000`).bind(...rb)
-      .all<{ id: string; contact_id: string | null; current_value: string | null; proposed_value: string | null; candidate_json: string | null }>()).results;
+    // Held candidates are JSON (escaping can hide a value from a text filter), so EVERY row with a candidate is decoded
+    // and checked, paged by rowid; plain value columns use the pre-filter. No truncation.
+    type Rev = { rid: number; id: string; contact_id: string | null; current_value: string | null; proposed_value: string | null; candidate_json: string | null };
+    const reviews: Rev[] = [];
+    for (let after = 0; ;) {
+      const page = (await db.prepare(`SELECT rowid AS rid, id, contact_id, current_value, proposed_value, candidate_json FROM crm_identity_reviews WHERE candidate_json IS NOT NULL AND rowid > ? ORDER BY rowid LIMIT 500`).bind(after).all<Rev>()).results;
+      reviews.push(...page);
+      if (page.length < 500) break;
+      after = page[page.length - 1].rid;
+    }
+    const [rw, rb] = prefilter(exclusiveKeys, ["proposed_value", "current_value"]);
+    for (let after = 0; ;) {
+      const page = (await db.prepare(`SELECT rowid AS rid, id, contact_id, current_value, proposed_value, candidate_json FROM crm_identity_reviews WHERE candidate_json IS NULL AND (${rw}) AND rowid > ? ORDER BY rowid LIMIT 500`).bind(...rb, after).all<Rev>()).results;
+      reviews.push(...page);
+      if (page.length < 500) break;
+      after = page[page.length - 1].rid;
+    }
     const hits = (s: Set<string>) => [...s].some((k) => exclusive.has(k));
     for (const r of reviews) {
       if (r.contact_id && subject.has(r.contact_id)) continue; // removed by the trigger with the contact
@@ -186,13 +207,19 @@ async function eraseOnce(db: Db, actorUserId: string | null, req: ErasureRequest
       // Attached to another (legitimate) record: keep the item for that record's audit trail, drop the person's data.
       stmts.push(db.prepare(`UPDATE crm_identity_reviews SET candidate_json = CASE WHEN ? THEN NULL ELSE candidate_json END,
           proposed_value = CASE WHEN ? THEN ? ELSE proposed_value END, current_value = CASE WHEN ? THEN ? ELSE current_value END,
-          status = CASE WHEN status = 'open' THEN 'rejected' ELSE status END, resolved_at = COALESCE(resolved_at, ?), resolution_note = COALESCE(resolution_note, 'Erased at the data subject''s request') WHERE id = ?`)
+          dedupe_key = 'erased:' || id, status = CASE WHEN status = 'open' THEN 'rejected' ELSE status END, resolved_at = COALESCE(resolved_at, ?), resolution_note = COALESCE(resolution_note, 'Erased at the data subject''s request') WHERE id = ?`)
         .bind(inCand ? 1 : 0, inProp ? 1 : 0, ERASED, inCur ? 1 : 0, ERASED, at, r.id));
       reviewsScrubbed++;
     }
     const [fw, fb] = prefilter(exclusiveKeys, ["old_value", "new_value"]);
-    const changes = (await db.prepare(`SELECT id, contact_id, old_value, new_value FROM crm_field_changes WHERE ${fw} LIMIT 5000`).bind(...fb)
-      .all<{ id: string; contact_id: string | null; old_value: string | null; new_value: string | null }>()).results;
+    const changes: { rid: number; id: string; contact_id: string | null; old_value: string | null; new_value: string | null }[] = [];
+    for (let after = 0; ;) {
+      const page = (await db.prepare(`SELECT rowid AS rid, id, contact_id, old_value, new_value FROM crm_field_changes WHERE (${fw}) AND rowid > ? ORDER BY rowid LIMIT 500`).bind(...fb, after)
+        .all<{ rid: number; id: string; contact_id: string | null; old_value: string | null; new_value: string | null }>()).results;
+      changes.push(...page);
+      if (page.length < 500) break;
+      after = page[page.length - 1].rid;
+    }
     for (const f of changes) {
       if (f.contact_id && subject.has(f.contact_id)) continue;
       const o = hits(keysIn(f.old_value)), nv = hits(keysIn(f.new_value));

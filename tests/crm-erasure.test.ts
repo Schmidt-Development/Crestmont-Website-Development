@@ -280,3 +280,76 @@ test("[CRM-002] migrations 0048 + 0049 on a representative pre-0048 database (du
   apply("0048_contact_identity.sql"); apply("0049_crm_identity_erasure.sql");
   assert.ok((raw.prepare(`SELECT COUNT(*) n FROM contact_identities`).get() as { n: number }).n >= 2, "both can be re-applied");
 });
+
+test("[CRM-002] second-review regressions: strict attribution (housemates, an office line the person listed, an email merged into a business) never erases the other party", async () => {
+  const db = openDb();
+  const at = nowIso();
+  await db.batch([
+    // Housemates sharing a home phone, no company.
+    db.prepare(`INSERT INTO contacts (id, name, email, phone, created_at) VALUES ('ct_alice','Alice Home','alice@home.example','313-555-0141',?), ('ct_bob','Bob Home','bob@home.example','(313) 555-0141',?)`).bind(at, at),
+    // A person (no company) who listed Acme's office line; Acme is a research prospect.
+    db.prepare(`INSERT INTO companies (id, name, created_at) VALUES ('co_acme2','Acme Plumbing',?)`).bind(at),
+    db.prepare(`INSERT INTO contacts (id, company_id, name, email, phone, created_at) VALUES ('ct_acme2','co_acme2','Acme Office','info@acme.example','313-555-0142',?), ('ct_pers','','Pers Onal','pers@mail.example','313-555-0142',?)`.replace("'',", "NULL,")).bind(at, at),
+  ]);
+  // A business whose record got the person's email merged in as an ADDITIONAL identifier.
+  const biz = await intake(db, { businessName: "Ridge Cafe", website: "https://ridge.example", phones: [{ value: "313-555-0143" }] }, research("rr1"));
+  await intake(db, { businessName: "Ridge Cafe", website: "https://ridge.example", phones: [{ value: "313-555-0143" }], emails: [{ value: "dana@mail.example" }] }, research("rr2"));
+  await db.prepare(`UPDATE contacts SET email = 'cafe@ridge.example' WHERE id = ?`).bind(biz.contactId).run();
+  await eraseIdentityData(db, null, { contactIds: ["ct_alice"], blockReimport: true });
+  assert.equal((await db.prepare(`SELECT name, phone, email FROM contacts WHERE id = 'ct_bob'`).first<{ name: string; email: string }>())!.email, "bob@home.example", "housemate kept");
+  assert.equal(await n(db, `SELECT COUNT(*) AS n FROM contact_identities WHERE value_norm = '+13135550141'`), 1, "shared home phone kept for Bob");
+  await eraseIdentityData(db, null, { contactIds: ["ct_pers"], blockReimport: true });
+  assert.equal((await db.prepare(`SELECT name FROM contacts WHERE id = 'ct_acme2'`).first<{ name: string }>())!.name, "Acme Office", "the business whose line was listed is kept");
+  assert.equal(await n(db, `SELECT COUNT(*) AS n FROM contact_identities WHERE value_norm = 'info@acme.example'`), 1);
+  const r = await eraseIdentityData(db, null, { emails: ["dana@mail.example"], blockReimport: true });
+  assert.equal(r.contacts, 0, "an additional identifier does not make the business the person's record");
+  assert.equal((await db.prepare(`SELECT name FROM contacts WHERE id = ?`).bind(biz.contactId).first<{ name: string }>())!.name, "Ridge Cafe");
+  assert.equal(await n(db, `SELECT COUNT(*) AS n FROM crm_erasure_tombstones`), 3, "only the erased people's own identifiers (alice email, pers email, dana email)");
+});
+
+test("[CRM-002] second-review regressions: dedupe keys hold no raw value; long identifier chains complete; unusual account emails never block deletion; JSON-escaped candidates are found; a review written mid-erasure is erased too", async () => {
+  // Dedupe key: never the raw proposed value, and scrubbed on erasure.
+  const db = openDb();
+  const cust = await createCustomer(db, "owner@jane-co.example", "Jane Co");
+  const at = nowIso();
+  await db.batch([
+    db.prepare(`INSERT INTO companies (id, name, website, organization_id, created_at) VALUES ('co_jane','Jane Co','https://jane-co.example',?,?)`).bind(cust.organizationId, at),
+    db.prepare(`INSERT INTO contacts (id, company_id, name, phone, user_id, created_at) VALUES ('ct_jane','co_jane','Jane Office','313-555-0151',?,?)`).bind(cust.id, at),
+  ]);
+  await intake(db, { businessName: "Jane Co", website: "https://jane-co.example", phones: [{ value: "313-555-0151" }], emails: [{ value: "jane.person@mail.example" }] }, research("dk1"));
+  assert.equal(await n(db, `SELECT COUNT(*) AS n FROM crm_identity_reviews WHERE dedupe_key LIKE '%jane.person%'`), 0);
+  await eraseIdentityData(db, null, { emails: ["jane.person@mail.example"], blockReimport: true });
+  assert.equal(await n(db, `SELECT COUNT(*) AS n FROM crm_identity_reviews WHERE (proposed_value || dedupe_key || COALESCE(candidate_json,'')) LIKE '%jane.person%'`), 0);
+  // A chain of 7 contacts sharing identifiers pairwise (A–B phone, B–C email, …) completes (shared links are kept).
+  const db2 = openDb();
+  const stm = [];
+  for (let i = 0; i < 7; i++) stm.push(db2.prepare(`INSERT INTO contacts (id, name, email, phone, created_at) VALUES (?,?,?,?,?)`).bind(`ct_ch${i}`, `Chain ${i}`, `chain${Math.floor((i + 1) / 2)}@x.example`, `313-555-02${String(Math.floor(i / 2)).padStart(2, "0")}`, at));
+  await db2.batch(stm);
+  const ch = await eraseIdentityData(db2, null, { contactIds: ["ct_ch0"], blockReimport: false });
+  assert.equal(ch.contacts, 1);
+  assert.equal(await n(db2, `SELECT COUNT(*) AS n FROM contacts WHERE name LIKE 'Chain %'`), 6);
+  // Account deletion with an email the normalizer rejects still completes.
+  const db3 = openDb();
+  const admin = await createStaff(db3, "administrator");
+  const odd = await createCustomer(db3, "admin@localhost", "Legacy Org");
+  const reqId = await requestDeletion(db3, odd.id, "Delete me");
+  await processDeletion(db3, admin.id, reqId, "complete", "");
+  assert.equal((await db3.prepare(`SELECT status FROM privacy_requests WHERE id = ?`).bind(reqId).first<{ status: string }>())!.status, "completed");
+  // JSON escaping (a tab inside a stored phone, quotes in an email) does not hide a held candidate.
+  const db4 = openDb();
+  await db4.prepare(`INSERT INTO crm_identity_reviews (id, kind, reason, candidate_json, dedupe_key, created_at) VALUES ('rev_tab','customer_match','held',?, 'k:tab', ?)`)
+    .bind(JSON.stringify({ candidate: { phones: [{ value: "313-555\t0177" }], emails: [] } }), at).run();
+  const t4 = await eraseIdentityData(db4, null, { phones: ["313-555-0177"], blockReimport: false });
+  assert.equal(t4.reviewsDeleted, 1);
+  // A review written between the erasure's scan and its commit triggers a re-plan, so it is erased too.
+  const db5 = openDb();
+  await seedPerson(db5);
+  let injected = false;
+  const racing: SqliteDb = { ...db5, batch: async (st) => {
+    if (!injected) { injected = true; await db5.prepare(`INSERT INTO crm_identity_reviews (id, kind, reason, candidate_json, dedupe_key, created_at) VALUES ('rev_mid','customer_match','mid',?, 'k:mid', ?)`).bind(JSON.stringify({ candidate: { phones: [{ value: "313 555 0161" }] } }), at).run(); }
+    return db5.batch(st);
+  } };
+  await eraseIdentityData(racing, null, { phones: ["313-555-0161"], blockReimport: true });
+  assert.equal(await n(db5, `SELECT COUNT(*) AS n FROM crm_identity_reviews WHERE id = 'rev_mid'`), 0);
+  assert.equal(await mentions(db5, "3135550161", "pat@solo.example"), 0);
+});

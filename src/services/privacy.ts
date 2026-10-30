@@ -11,7 +11,8 @@
 // to the user, and revokes every session. Financial and contractual records (orders, invoices,
 // payments, refunds, agreement acceptances, audit logs) are retained as legally required; they
 // then reference an anonymised user id rather than a name or email.
-import { eraseIdentityData } from "./identity-erasure.ts";
+import { eraseIdentityData, ErasureError } from "./identity-erasure.ts";
+import { emailKey } from "./contact-identity.ts";
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { audit } from "./security.ts";
@@ -111,7 +112,11 @@ export async function processDeletion(db: Db, staffUserId: string, requestId: st
   // tombstones). It is idempotent, so if anything below fails the request stays open and can simply be retried.
   const acct = await db.prepare(`SELECT email FROM users WHERE id = ?`).bind(u).first<{ email: string }>();
   const own = (await db.prepare(`SELECT id FROM contacts WHERE user_id = ?`).bind(u).all<{ id: string }>()).results.map((c) => c.id);
-  await eraseIdentityData(db, staffUserId, { emails: acct && !acct.email.endsWith("@deleted.invalid") ? [acct.email] : [], contactIds: own, blockReimport: true }, { action: "privacy.crm_identity_erased" });
+  const acctEmails = acct && !acct.email.endsWith("@deleted.invalid") && emailKey(acct.email) ? [acct.email] : [];
+  if (acctEmails.length || own.length) {
+    try { await eraseIdentityData(db, staffUserId, { emails: acctEmails, contactIds: own, blockReimport: true }, { action: "privacy.crm_identity_erased" }); }
+    catch (e) { if (e instanceof ErasureError) throw new PrivacyError(`CRM identity erasure could not run: ${e.message}`, e.status); throw e; }
+  }
   const anonEmail = `deleted+${u}@deleted.invalid`;
   await db.batch([
     db.prepare(`UPDATE users SET email = ?, display_name = 'Deleted user', password_hash = NULL, totp_secret = NULL, totp_pending_secret = NULL, mfa_enabled = 0, disabled_at = COALESCE(disabled_at, ?) WHERE id = ?`).bind(anonEmail, at, u),

@@ -102,13 +102,16 @@ audited (counts only, never the identifiers) and safe to repeat:
 | Entry point | Who | When |
 |---|---|---|
 | Staff → Security → privacy requests → Complete | `employee.manage` + fresh two-factor (step-up) | Account holder asked to be deleted |
-| Staff → AI receptionist → Operations → Erase a caller's data | `voice.manage` | Caller without an account |
+| Staff → AI receptionist → Operations → Erase a caller's data | `voice.manage` + step-up | Caller without an account |
 | CRM → Duplicates → Review queue → *Erase a person's CRM data* | **Owner only** + step-up | Anyone else (e.g. a research-imported prospect who writes in) |
 
 What it removes (one atomic batch):
 - **The person's contacts**: the account holder's own contacts / the caller's receptionist contacts, plus every
-  non-customer contact whose identifier belongs to a single business: research-created prospects included. They
-  become `Deleted contact`; their leads keep stage and history but lose the person's message.
+  non-customer contact whose **primary** email or phone is one of the person's identifiers **and is held by no other
+  contact** (research-created prospects included). Attribution is strict on purpose: a number or inbox held by two
+  contacts (housemates, a receptionist, an office line the person listed) and an identifier merged into a business as
+  an *additional* one do not make that record the person's. Erased contacts become `Deleted contact`; their leads keep
+  stage and history but lose the person's message.
 - **Identifiers used by nobody else**: their `contact_identities`, all links, email campaign enrollments, and any
   held research candidate, review value or field-history value that normalizes to them (any formatting or case),
   **including review items that were never linked to a contact**. An item attached to another, legitimate record is
@@ -118,7 +121,7 @@ What it removes (one atomic batch):
   themselves (form, call) is not blocked. Untick *Allow research imports…* to skip the tombstone.
 
 What it keeps, on purpose:
-- A **shared identifier** (a line or inbox used by two different businesses, or by a customer) stays with those
+- A **shared identifier** (a line or inbox held by any other contact, or by a customer) stays with those
   records; the result says how many were kept. A shared line never gets a tombstone, so the businesses that own it
   stay importable.
 - **Customers'** records are not anonymised unless they are the named subject (account deletion).
@@ -129,7 +132,9 @@ What it keeps, on purpose:
   are hashed).
 
 Concurrency: an import racing an erasure either commits first and is erased with it, or is refused afterwards by the
-tombstone (both sides use the `crm_write_guard` race guard and re-plan on conflict).
+tombstone. The erasure re-plans if any identity link, review item or field-history row was written between its scan
+and its commit (`crm_write_guard`); held research candidates are decoded and checked row by row (no text filter, no
+truncation). Review dedupe keys hold a digest, never the proposed value.
 
 Tombstones are minimization, not anonymity: a phone number's keyspace is small enough that a hash can be brute-forced
 by someone holding the database. They contain nothing else and are needed only to honour the request.
