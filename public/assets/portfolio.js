@@ -105,17 +105,29 @@
       }, READY_TIMEOUT);
     }
 
-    // Origin-checked handshake from the demo's embed script: {source:"crestmont-demo", type:"ready"|"navigate", href}
-    window.addEventListener("message", (e) => {
-      if (!allowed.has(e.origin) || !e.data || e.data.source !== "crestmont-demo") return;
+    // Origin-checked handshake from the demo's embed script: {source:"crestmont-demo", type:"ready"|"navigate", href}.
+    // A message is accepted only when ALL hold: its origin is an approved demo origin, it was sent by one of this
+    // explorer's own frames (event.source), that frame's slide expects exactly this origin, and the payload is a plain
+    // object of a known type with a same-origin, bounded href. Anything else is ignored without changing the UI.
+    const MSG_TYPES = new Set(["ready", "navigate"]);
+    const demoMessage = (e, types) => {
+      const d = e.data;
+      if (!allowed.has(e.origin) || !d || typeof d !== "object" || Array.isArray(d)) return null;
+      if (d.source !== "crestmont-demo" || typeof d.type !== "string" || !types.has(d.type)) return null;
+      if (d.href !== undefined && (typeof d.href !== "string" || d.href.length > 2048)) return null;
       for (const [i, rec] of frames) {
-        if (rec.f.contentWindow !== e.source) continue;
-        const s = slides[i];
-        if (s.dataset.demoOrigin !== e.origin) return;
-        if (!rec.ready) { rec.ready = true; clearTimeout(rec.timer); s.classList.add("is-ready"); delete s.dataset.unavailable; status(s, ""); }
-        if (typeof e.data.href === "string") {
-          try { const u = new URL(e.data.href); if (u.origin === e.origin) urlLabel(s, u.host + (u.pathname === "/" ? "" : u.pathname)); } catch { /* ignore */ }
-        }
+        if (!rec.f.contentWindow || rec.f.contentWindow !== e.source) continue;
+        return slides[i].dataset.demoOrigin === e.origin ? { i, rec, d } : null;
+      }
+      return null; // not one of this explorer's frames (another window or frame, even of an approved origin)
+    };
+    window.addEventListener("message", (e) => {
+      const m = demoMessage(e, MSG_TYPES);
+      if (!m) return;
+      const s = slides[m.i], rec = m.rec;
+      if (!rec.ready) { rec.ready = true; clearTimeout(rec.timer); s.classList.add("is-ready"); delete s.dataset.unavailable; status(s, ""); }
+      if (typeof m.d.href === "string") {
+        try { const u = new URL(m.d.href); if (u.origin === e.origin) urlLabel(s, u.host + (u.pathname === "/" ? "" : u.pathname)); } catch { /* ignore */ }
       }
     });
 
@@ -197,8 +209,12 @@
       if (e.shiftKey && (document.activeElement === first || !root.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
       else if (!e.shiftKey && (document.activeElement === last || !root.contains(document.activeElement))) { e.preventDefault(); first.focus(); }
     });
+    // Escape pressed inside the demo (its embed forwards it): same checks as the handshake, including event.source.
+    const KEY_TYPES = new Set(["key"]);
     window.addEventListener("message", (e) => {
-      if (isOpen() && allowed.has(e.origin) && e.data && e.data.source === "crestmont-demo" && e.data.type === "key" && e.data.key === "Escape") setExpanded(false);
+      if (!isOpen()) return;
+      const m = demoMessage(e, KEY_TYPES);
+      if (m && m.d.key === "Escape") setExpanded(false);
     });
 
     if (reduce.matches) track.style.transition = "none";
