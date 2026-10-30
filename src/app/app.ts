@@ -1,4 +1,5 @@
 // Request pipeline: build context → load session → CSRF for forms → route → render errors.
+import { configureErasureKeysFromEnv } from "../services/contact-identity.ts";
 import type { AppContext, Env } from "./context.ts";
 import { Router } from "../lib/router.ts";
 import { HttpError, assertCsrf, cookie, hostCookieName, hstsValue, htmlResponse, isSecure, jsonResponse, parseCookies, readHostCookie, redirect } from "./http.ts";
@@ -25,6 +26,7 @@ function getRouter(): Router {
 }
 
 export async function buildContext(req: Request, env: Env): Promise<AppContext> {
+  configureErasureKeysFromEnv(env); // CRM erasure tombstone keys (Worker secrets)
   const url = new URL(req.url);
   const cookies = parseCookies(req.headers.get("cookie"));
   let formCache: Promise<FormData> | null = null;

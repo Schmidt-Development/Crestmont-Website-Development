@@ -10,6 +10,7 @@ import { HttpError } from "../app/http.ts";
 import { audit } from "./security.ts";
 import type { DateRange } from "./finance.ts";
 import { endOfBusinessDay } from "../lib/business-time.ts";
+import { intake, previewMatches, IntakeError, phoneKey, emailKey, type IntakeOutcome } from "./contact-identity.ts";
 
 export const LEAD_SOURCES = ["web_form", "quote_form", "ai_receptionist", "referral", "manual", "checkout"] as const;
 
@@ -86,32 +87,69 @@ function assertCanWrite(actor: Actor, lead: LeadRow) {
   throw new HttpError(403, "This lead is not assigned to you.");
 }
 
-export async function createManualLead(db: Db, actor: Actor, input: { name: string; email: string; phone: string; company: string; website: string; interest: string; message: string; source: string }) {
+/**
+ * Duplicate previews for staff limited to their assigned leads: a matching record they cannot open is reported only as
+ * "a record owned by someone else" (no name, company, stage or customer flag), so the warning cannot be used to look
+ * up other people's leads.
+ */
+export async function redactPreview(db: Db, actor: Actor, p: Awaited<ReturnType<typeof previewMatches>>): Promise<Awaited<ReturnType<typeof previewMatches>>> {
+  if (can(actor, "lead.read_all")) return p;
+  const scope = leadScope(actor);
+  const matches = [];
+  for (const m of p.matches) {
+    const visible = await db.prepare(`SELECT 1 AS x FROM leads l WHERE l.contact_id = ? AND ${scope.sql} LIMIT 1`).bind(m.contactId, ...scope.binds).first();
+    matches.push(visible ? m : { ...m, contactId: "", leadId: null, contactName: "A record owned by someone else", companyName: null, customer: false, organizationId: null, stage: null });
+  }
+  return { ...p, matches };
+}
+
+export type ManualLeadResult =
+  | { ok: true; leadId: string; outcome: IntakeOutcome; linked: boolean }
+  | { ok: false; issues: string[]; duplicates?: Awaited<ReturnType<typeof previewMatches>> };
+
+/**
+ * Manual lead entry through the CRM intake engine. When the email/phone/business already exists the person is shown the
+ * matching records first (nothing is written) and chooses: add the lead to an existing contact, or create a separate
+ * record anyway (audited, and shared identifiers still map to one canonical identity and one outreach ledger row).
+ */
+export async function createManualLead(db: Db, actor: Actor, input: { name: string; email: string; phone: string; company: string; website: string; interest: string; message: string; source: string; resolution?: string }, opts: { ip?: string | null } = {}): Promise<ManualLeadResult> {
   const issues: string[] = [];
   if (input.name.length < 2 || input.name.length > 120) issues.push("Enter the contact's name");
   if (input.email && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(input.email)) issues.push("Enter a valid email address");
   if (!input.email && !input.phone) issues.push("Enter an email or phone number");
   if (input.phone && !/^[+0-9 ().-]{7,40}$/.test(input.phone)) issues.push("Enter a valid phone number");
+  if (input.phone && !phoneKey(input.phone)) issues.push("Enter the phone number with its area code (or +country code)");
   if (input.website && !/^https?:\/\/[^\s]+$/.test(input.website)) issues.push("Website must start with http:// or https://");
   if (!["manual", "referral"].includes(input.source)) issues.push("Source must be manual or referral");
   if (!["starter", "business", "premium", "custom", "maintenance", "other"].includes(input.interest)) issues.push("Choose what they are interested in");
   if (input.message.length > 5000) issues.push("Notes are too long");
   if (input.company.length > 160) issues.push("Company name is too long");
   if (issues.length) return { ok: false as const, issues };
-  const at = nowIso();
-  const companyId = input.company ? newId("co") : null, contactId = newId("ct"), leadId = newId("ld");
+  const r = input.resolution ?? "";
+  const resolution = r === "create_new" ? { kind: "create_new" as const } : r.startsWith("link:") ? { kind: "link" as const, contactId: r.slice(5) } : null;
   // Sales reps own the leads they enter so they can keep working them.
   const owner = can(actor, "lead.write_all") ? null : actor.userId ?? null;
-  await db.batch([
-    ...(companyId ? [db.prepare(`INSERT INTO companies (id, name, website, created_at) VALUES (?,?,?,?)`).bind(companyId, input.company, input.website || null, at)] : []),
-    db.prepare(`INSERT INTO contacts (id, company_id, name, email, phone, user_id, created_at) VALUES (?,?,?,?,?,(SELECT id FROM users WHERE email = ?),?)`)
-      .bind(contactId, companyId, input.name, input.email ? input.email.toLowerCase() : null, input.phone || null, input.email.toLowerCase(), at),
-    db.prepare(`INSERT INTO leads (id, contact_id, source, stage, owner_user_id, interest, message, created_at, updated_at) VALUES (?,?,?,'new',?,?,?,?,?)`)
-      .bind(leadId, contactId, input.source, owner, input.interest, input.message || null, at, at),
-    db.prepare(`INSERT INTO crm_activities (id, lead_id, actor_user_id, kind, body, created_at) VALUES (?,?,?,'system',?,?)`).bind(newId("act"), leadId, actor.userId ?? null, `Lead entered manually (source: ${input.source})`, at),
-  ]);
-  await audit(db, { actorUserId: actor.userId, action: "lead.created", subjectType: "lead", subjectId: leadId, details: { source: input.source } });
-  return { ok: true as const, leadId };
+  if (resolution?.kind === "link") {
+    // Linking needs read access to the chosen contact's lead (assigned-only reps can link only to their own records).
+    const scope = leadScope(actor);
+    const visible = await db.prepare(`SELECT 1 AS x FROM leads l WHERE l.contact_id = ? AND ${scope.sql} LIMIT 1`).bind(resolution.contactId, ...scope.binds).first();
+    if (!visible && !can(actor, "lead.write_all")) return { ok: false as const, issues: ["That contact is owned by someone else. Ask an administrator to add the lead for you."] };
+  }
+  try {
+    const res = await intake(db, { contactName: input.name, businessName: input.company || null, website: input.website || null, emails: input.email ? [{ value: input.email }] : [], phones: input.phone ? [{ value: input.phone }] : [] }, {
+      channel: "manual", actor, resolution, ip: opts.ip ?? null,
+      lead: { source: input.source as "manual" | "referral", interest: input.interest, message: input.message || null, ownerUserId: owner, activityBody: `Lead entered manually (source: ${input.source})${resolution?.kind === "create_new" ? " — created separately after a duplicate warning" : resolution?.kind === "link" ? " — added to an existing contact after a duplicate warning" : ""}` },
+    });
+    if (!res.leadId) return { ok: false as const, issues: ["This lead could not be created. Check the email and phone number."] };
+    await audit(db, { actorUserId: actor.userId, action: "lead.created", subjectType: "lead", subjectId: res.leadId, ip: opts.ip ?? null, details: { source: input.source, intake: res.outcome, resolution: resolution?.kind ?? null } });
+    return { ok: true as const, leadId: res.leadId, outcome: res.outcome, linked: resolution?.kind === "link" };
+  } catch (e) {
+    if (e instanceof IntakeError && e.status === 409 && (e as IntakeError & { preview?: Awaited<ReturnType<typeof previewMatches>> }).preview) {
+      return { ok: false as const, issues: [], duplicates: await redactPreview(db, actor, (e as IntakeError & { preview: Awaited<ReturnType<typeof previewMatches>> }).preview) };
+    }
+    if (e instanceof IntakeError) return { ok: false as const, issues: [e.message] };
+    throw e;
+  }
 }
 
 export async function updateContact(db: Db, actor: Actor, lead: LeadRow, input: { name: string; email: string; phone: string; company: string; website: string; qualificationNotes: string }) {
@@ -123,9 +161,25 @@ export async function updateContact(db: Db, actor: Actor, lead: LeadRow, input: 
   if (input.website && !/^https?:\/\/[^\s]+$/.test(input.website)) issues.push("Website must start with http:// or https://");
   if (input.qualificationNotes.length > 5000) issues.push("Qualification notes are too long");
   if (issues.length) return { ok: false as const, issues };
+  if (input.phone && !phoneKey(input.phone)) return { ok: false as const, issues: ["Enter the phone number with its area code (or +country code)"] };
   const at = nowIso();
+  const newEmail = input.email ? input.email.toLowerCase() : null, newPhone = input.phone || null;
+  // Field-level audit trail (and the marker that these values were entered by a person, so automated data never
+  // overwrites them). Identity links follow automatically (migrations/0048 triggers).
+  const changes: [string, string | null, string | null][] = ([["name", lead.contact_name, input.name], ["email", lead.contact_email, newEmail], ["phone", lead.contact_phone, newPhone],
+    ["company_name", lead.company_name, input.company || lead.company_name], ["website", lead.company_website, input.website || null]] as [string, string | null, string | null][]).filter(([, a, b]) => (a ?? "") !== (b ?? ""));
+  // Editing an identifier into one another record already uses is allowed (shared lines exist) but goes to review.
+  const collisions = (newEmail && emailKey(newEmail) !== emailKey(lead.contact_email)) || (newPhone && phoneKey(newPhone) !== phoneKey(lead.contact_phone))
+    ? (await previewMatches(db, { contactName: input.name, businessName: input.company || lead.company_name, website: input.website || null,
+        emails: newEmail && emailKey(newEmail) !== emailKey(lead.contact_email) ? [{ value: newEmail }] : [], phones: newPhone && phoneKey(newPhone) !== phoneKey(lead.contact_phone) ? [{ value: newPhone }] : [] }))
+      .matches.filter((m) => m.contactId !== lead.contact_id && m.strength !== "weak")
+    : [];
   const stmts = [
-    db.prepare(`UPDATE contacts SET name = ?, email = ?, phone = ? WHERE id = ?`).bind(input.name, input.email ? input.email.toLowerCase() : null, input.phone || null, lead.contact_id),
+    db.prepare(`UPDATE contacts SET name = ?, email = ?, phone = ? WHERE id = ?`).bind(input.name, newEmail, newPhone, lead.contact_id),
+    ...changes.map(([field, a, b]) => db.prepare(`INSERT INTO crm_field_changes (id, contact_id, company_id, field, old_value, new_value, source, rule, actor_user_id, created_at) VALUES (?,?,?,?,?,?,'contact_edit','manual_edit',?,?)`)
+      .bind(newId("fch"), lead.contact_id, lead.company_id, field, a, b, actor.userId ?? null, at)),
+    ...collisions.slice(0, 5).map((m) => db.prepare(`INSERT INTO crm_identity_reviews (id, kind, contact_id, lead_id, reason, dedupe_key, created_at) VALUES (?, 'possible_duplicate', ?, ?, ?, ?, ?) ON CONFLICT(dedupe_key) WHERE status = 'open' DO NOTHING`)
+      .bind(newId("rev"), lead.contact_id, lead.id, `A contact edit gave this lead the same ${m.reasons.filter((x) => x === "email" || x === "phone").join(" and ")} as lead ${m.leadId ?? m.contactId} (${m.contactName}). Merge them or confirm they are different businesses.`, `edit:${[lead.contact_id, m.contactId].sort().join(":")}`, at)),
     db.prepare(`UPDATE leads SET qualification_notes = ?, updated_at = ? WHERE id = ?`).bind(input.qualificationNotes || null, at, lead.id),
   ];
   if (lead.company_id) stmts.push(db.prepare(`UPDATE companies SET name = ?, website = ? WHERE id = ?`).bind(input.company || lead.company_name, input.website || null, lead.company_id));
@@ -135,8 +189,8 @@ export async function updateContact(db: Db, actor: Actor, lead: LeadRow, input: 
     stmts.push(db.prepare(`UPDATE contacts SET company_id = ? WHERE id = ?`).bind(co, lead.contact_id));
   }
   await db.batch(stmts);
-  await audit(db, { actorUserId: actor.userId, action: "lead.contact_updated", subjectType: "lead", subjectId: lead.id });
-  return { ok: true as const };
+  await audit(db, { actorUserId: actor.userId, action: "lead.contact_updated", subjectType: "lead", subjectId: lead.id, details: { fields: changes.map(([f]) => f), possibleDuplicates: collisions.length } });
+  return { ok: true as const, possibleDuplicates: collisions.length };
 }
 
 export async function addNote(db: Db, actor: Actor, lead: LeadRow, body: string, kind: "note" | "call" | "email" = "note") {

@@ -11,7 +11,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { wranglerOps, type D1Ops } from "./staging-access.ts";
 
-export const DERIVED_LABELS = { evidence: "crestmont-staging-evidence:v1", scheduler: "crestmont-staging-scheduler:v1" } as const;
+export const DERIVED_LABELS = { evidence: "crestmont-staging-evidence:v1", scheduler: "crestmont-staging-scheduler:v1",
+  // CRM duplicate protection (PR #50): research import signing key and erasure-tombstone HMAC key. 256-bit, stable across
+  // deploys (a changing secret blocks rollbacks), held only by Cloudflare and derivable only with the token secret.
+  crmImport: "crestmont-staging-crm-import:v1", crmErasure: "crestmont-staging-crm-erasure:v1" } as const;
 export const deriveStagingKey = (root: string, label: keyof typeof DERIVED_LABELS) => createHmac("sha256", root).update(DERIVED_LABELS[label]).digest("hex");
 /**
  * Fingerprint of a secret value stored in staging D1 to detect changes (and retired passwords) without storing the

@@ -1,4 +1,6 @@
 // Owner reporting and caller privacy for the AI receptionist (VOICE-005, VOICE-006, SEC-006).
+import { eraseIdentityData } from "./identity-erasure.ts";
+import { salesOptErasureStatements } from "./sales-opt-erasure.ts";
 import type { Db } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import { audit } from "./security.ts";
@@ -64,7 +66,7 @@ const digits = (s: string) => s.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
  * outcomes, timings and costs remain for reporting, and outbound calls keep the dialled number so per-number
  * call limits still apply.
  */
-export async function eraseCallerData(db: Db, staffUserId: string, phoneRaw: string, note: string): Promise<Record<string, number>> {
+export async function eraseCallerData(db: Db, staffUserId: string, phoneRaw: string, note: string, opts: { blockReimport?: boolean } = {}): Promise<Record<string, number>> {
   const phone = toE164(phoneRaw);
   if (!phone) throw Object.assign(new Error("Enter the caller's number in a dialable format (e.g. +15551234567)"), { status: 422 });
   if (note.trim().length < 5) throw Object.assign(new Error("Describe the request (who asked, and how)"), { status: 422 });
@@ -81,6 +83,9 @@ export async function eraseCallerData(db: Db, staffUserId: string, phoneRaw: str
     ...(contactIds.length ? (await db.prepare(`SELECT id FROM leads WHERE contact_id IN (${contactIds.map(() => "?").join(",")})`).bind(...contactIds).all<{ id: string }>()).results.map((r) => r.id) : []),
     ...(callIds.length ? (await db.prepare(`SELECT lead_id AS id FROM calls WHERE lead_id IS NOT NULL AND id IN (${callIds.map(() => "?").join(",")})`).bind(...callIds).all<{ id: string }>()).results.map((r) => r.id) : []),
   ])];
+  // CRM identity data for this number (research-created prospects, held research candidates, review/field history,
+  // identities; customers and businesses that share the number are kept). Idempotent, so a failure below is retryable.
+  const crm = await eraseIdentityData(db, staffUserId, { phones: [phone], contactIds, blockReimport: opts.blockReimport ?? true }, { action: "voice.caller_crm_identity_erased" });
   const at = nowIso();
   const inList = (n: number) => Array.from({ length: n }, () => "?").join(",");
   const subjects = [...callIds, ...consultationIds, ...outboundIds];
@@ -95,6 +100,8 @@ export async function eraseCallerData(db: Db, staffUserId: string, phoneRaw: str
     ...leadIds.map((id) => db.prepare(`UPDATE leads SET message = 'Details erased at the caller''s request' WHERE id = ? AND source = 'ai_receptionist'`).bind(id)),
     ...leadIds.map((id) => db.prepare(`UPDATE crm_activities SET body = 'Details erased at the caller''s request' WHERE lead_id = ? AND kind IN ('call','task') AND lead_id IN (SELECT id FROM leads WHERE source = 'ai_receptionist')`).bind(id)),
     ...(subjects.length ? [db.prepare(`DELETE FROM notifications WHERE subject_id IN (${inList(subjects.length)})`).bind(...subjects)] : []),
+    // Sales-analysis text derived from these calls (quotes, labels, queued model inputs, proposal evidence copies).
+    ...(await salesOptErasureStatements(db, callIds)).stmts,
     db.prepare(`UPDATE voice_dnc SET detail = NULL WHERE phone_e164 = ?`).bind(phone),
     // Order matters: detach outbound requests from consents before deleting them.
     db.prepare(`UPDATE voice_outbound_requests SET consent_id = NULL WHERE phone_e164 = ? OR consent_id IN (SELECT id FROM voice_call_consents WHERE phone_e164 = ?)`).bind(phone, phone),
@@ -102,7 +109,8 @@ export async function eraseCallerData(db: Db, staffUserId: string, phoneRaw: str
     db.prepare(`DELETE FROM voice_call_consents WHERE phone_e164 = ?`).bind(phone),
   ];
   await db.batch(stmts);
-  const counts = { calls: callIds.length, consultations: consultationIds.length, contacts: contactIds.length };
+  // CRM identity counts are in their own audit entry (voice.caller_crm_identity_erased).
+  const counts = { calls: callIds.length, consultations: consultationIds.length, contacts: Math.max(contactIds.length, crm.contacts) };
   // Only the last four digits are logged; the number itself is the data being erased.
   await audit(db, { actorUserId: staffUserId, action: "voice.caller_data_erased", subjectType: "phone", subjectId: `…${phone.slice(-4)}`, details: { ...counts, note: note.trim().slice(0, 300) } });
   return counts;
