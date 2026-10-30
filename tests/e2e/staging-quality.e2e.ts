@@ -60,12 +60,36 @@ test("[TEST-003] staging: axe-core WCAG 2.1 A/AA scan of public pages, sign-in a
   const browser = await launchBrowser();
   try {
     // bypassCSP only lets the test inject axe itself; the site's CSP is unchanged for real visitors.
-    const ctx = await browser.newContext({ bypassCSP: true });
+    // Contrast is measured on the text as it is READ. Headings reveal word by word (hero on load; sections as they scroll
+    // into view, and back out when they leave), so at an arbitrary instant many words sit at 10–12% opacity — deploy
+    // #64's axe failures on /, /services and /pricing were exactly those mid-animation words. With reduced motion the
+    // site renders every word in its settled state (same colours, full opacity), which is what axe must judge; a
+    // second, normal-motion pass below proves each animated heading really reaches that state when it is on screen.
+    const ctx = await browser.newContext({ bypassCSP: true, reducedMotion: "reduce" });
     const page = await ctx.newPage();
+    const motion = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const mp = await motion.newPage();
+    const readable = async (path: string) => {
+      await mp.goto(BASE + path);
+      const stuck = await mp.evaluate(async () => {
+        const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+        const heads = [...new Set([...document.querySelectorAll(".w")].map((w) => w.parentElement!).filter((h) => h.getClientRects().length))];
+        const out: string[] = [];
+        for (const h of heads) {
+          h.scrollIntoView({ block: "center", behavior: "instant" });
+          let faint: Element[] = [];
+          for (let t = 0; t < 30; t++) { await wait(100); faint = [...h.querySelectorAll(".w")].filter((w) => Number(getComputedStyle(w).opacity) < 0.99); if (!faint.length) break; }
+          if (faint.length) out.push(`"${(h.textContent || "").trim().slice(0, 40)}" (${faint.length} word(s) below full opacity while on screen)`);
+        }
+        return out;
+      });
+      for (const x of stuck) failures.push(`${path}: animated heading never becomes fully readable: ${x}`);
+    };
     const pages = ["/", "/services", "/pricing", "/portfolio", "/about", "/contact", "/quote", "/legal", "/legal/privacy", "/login", "/register"];
     const failures: string[] = [];
     const scan = async (path: string) => {
       await page.goto(BASE + path);
+      await page.waitForTimeout(300); // reduced motion: reveals complete immediately; let the first frame settle
       await page.addScriptTag({ content: axeSource });
       const res = await page.evaluate(async () => {
         const r = await (window as unknown as { axe: { run: (ctx: Document, o: unknown) => Promise<{ violations: { id: string; impact: string; nodes: { target: string[] }[] }[] }> } }).axe.run(document, { runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"] } });
@@ -73,7 +97,8 @@ test("[TEST-003] staging: axe-core WCAG 2.1 A/AA scan of public pages, sign-in a
       });
       for (const v of res) if (v.impact === "serious" || v.impact === "critical") failures.push(`${path}: ${v.id} (${v.impact}) ${v.targets.join(", ")}`);
     };
-    for (const p of pages) await scan(p);
+    for (const p of pages) { await scan(p); await readable(p); }
+    await motion.close();
     const accounts = process.env.E2E_ACCOUNTS_FILE && existsSync(process.env.E2E_ACCOUNTS_FILE) ? readFileSync(process.env.E2E_ACCOUNTS_FILE, "utf8") : "";
     const cust = /^\| customer_admin \| (customer\.harbor@\S+) \| `([^`]+)` \|/m.exec(accounts);
     if (cust) {

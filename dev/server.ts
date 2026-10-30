@@ -35,6 +35,8 @@ const env: Env = {
   PREVIEW_GATE: process.env.PREVIEW_GATE,
   STAGING_ACCESS_PASSWORD: process.env.STAGING_ACCESS_PASSWORD,
   PORTFOLIO_DEMO_ORIGINS: process.env.PORTFOLIO_DEMO_ORIGINS,
+  // Optional: renders the Turnstile widget like staging (development accepts any token when no secret is set).
+  TURNSTILE_SITE_KEY: process.env.TURNSTILE_SITE_KEY,
   overrides: { storage },
 };
 

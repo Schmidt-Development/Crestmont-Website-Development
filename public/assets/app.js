@@ -5,6 +5,19 @@
   root.classList.add("js");
   const reduceMotion = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : { matches: false };
 
+  // ── Bot check (Cloudflare Turnstile, explicit render): size chosen from the field's width so it never overflows ──
+  // The API script calls cmTurnstile when it loads; if it loaded before this script, render now instead.
+  const renderTurnstile = () => {
+    const ts = window.turnstile;
+    if (!ts || typeof ts.render !== "function") return;
+    for (const el of document.querySelectorAll(".cf-turnstile[data-sitekey]:not([data-ts-rendered])")) {
+      el.setAttribute("data-ts-rendered", "");
+      ts.render(el, { sitekey: el.getAttribute("data-sitekey"), size: el.clientWidth >= 300 ? "flexible" : "compact" });
+    }
+  };
+  window.cmTurnstile = renderTurnstile;
+  renderTurnstile();
+
   // ── Header: hairline appears once the page scrolls (passive, rAF-throttled) ──
   const header = document.querySelector("[data-site-header]");
   if (header) {

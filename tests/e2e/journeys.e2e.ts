@@ -10,7 +10,7 @@
 //    are labelled fixtures: they prove our webhook handling, not the external services.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, launchBrowser, latestEmail, linkIn } from "./support.ts";
+import { startServer, launchBrowser, latestEmail, linkIn, evidenceRunLink } from "./support.ts";
 import { hashPassword, totpCode, newTotpSecret } from "../../src/lib/auth-crypto.ts";
 import { hmacSha256Hex } from "../../src/lib/crypto.ts";
 
@@ -732,10 +732,17 @@ test("[READY-004] signed CI evidence fixture is ingested and shown in the readin
   assert.equal(res.json.status, "ingested");
   assert.equal((await signedPost("/api/readiness/evidence", "x-crestmont-signature", "wrong-secret", { runId })).status, 401);
 
+  // As on staging, a newer one-result run whose id extends this one (deploy #64 journey 29 opened such a sibling).
+  const later = new Date(Date.now() + 1000).toISOString();
+  assert.equal((await signedPost("/api/readiness/evidence", "x-crestmont-signature", "e2e-ingest-secret", {
+    runId: `${runId}-r2`, source: "ci", environment: "development", commitSha: COMMIT_A, branch: "main", startedAt: later, finishedAt: later,
+    results: [{ requirementId: "CRM-001", testName: "e2e fixture: sibling run", outcome: "passed" }] })).status, 200);
+
   const o = owner.page;
   await o.goto(srv.base + "/staff/readiness/engineering");
   assert.match(await text(o), new RegExp(runId, "i"));
-  await nav(o, o.getByRole("link", { name: runId }));
+  await nav(o, (evidenceRunLink(o, runId) as { first(): { click(): Promise<void> } }).first());
+  assert.equal(new URL(o.url()).pathname, `/staff/readiness/runs/${encodeURIComponent(runId)}`, "the exact run, not the sibling");
   const run = await text(o);
   assert.match(run, /2 passed\/skipped, 1 failed/);
   assert.match(run, /e2e fixture: deliberately failing row/);
