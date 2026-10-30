@@ -123,7 +123,8 @@ The full-chain test `tests/sales-optimization-e2e.test.ts` runs steps 1–20 thr
 |---|---|---|
 | Automated tests, TypeScript | IMPLEMENTED | `npm test`, `tsc` (CI on every PR) |
 | Migration 0047 applied on staging | STAGING E2E VERIFIED | Deploy staging run 41115599003, step "Apply D1 migrations: success" (merge of PR #49, `3940650`) |
-| Staging deployment passes; restore drill passes | Pending | The staging browser failures were fixed by PR #53 (another session). The restore drill runs only after a successful deploy. |
+| Staging restore drill (with 0047–0049 applied) | STAGING E2E VERIFIED | Staging restore drill run 41137309601 (manual dispatch, 2026-10-30 22:19 UTC): export → scratch restore → compare → scratch deleted, all steps green |
+| Staging deployment passes | Pending (another workstream) | Deploy staging for `dce4aff`: migrations, Worker, smoke checks and browser journeys (20/33 passed, 0 failed) are green. The job fails only on PR #50's own "CRM duplicate protection E2E" step, which that workstream is still fixing (PR #56 was its first fix). The browser failures were fixed by #53 (journey 29, overflow, contrast, `/portfolio`) and #55 (axe `listitem`). |
 | Retell call ingestion (signatures, replay, order, agent isolation) | IMPLEMENTED | Fixture tests. **BLOCKED** for staging: no Retell staging sales agent and no `RETELL_API_KEY` on staging (BLK-009). |
 | Stripe test-mode attribution | IMPLEMENTED | Signed-fixture webhook. **BLOCKED** for staging: no Stripe test key on staging (BLK-004). |
 | Local Qwen analysis on Node 1 | IMPLEMENTED (runner protocol) | **BLOCKED**: there is no evidence that Node 1 has claimed any job. Per-step tracing is PR #52 (D01–D13), which awaits Founder authorization. The dashboard reports "Never" until a job is completed by `self-hosted:<model>`. |
