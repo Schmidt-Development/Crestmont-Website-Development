@@ -32,7 +32,7 @@ const arg = (k: string, d?: string) => { const i = process.argv.indexOf(`--${k}`
 const req = JSON.parse(readFileSync(arg("request", "research-worker/live/request.json")!, "utf8")) as { bbox: Bbox; limit: number; brokenRecheckMinutes: number; concurrency?: number };
 const CONCURRENCY = Math.min(64, Math.max(1, Math.floor(req.concurrency ?? 16)));
 if (!validBbox(req.bbox) || (req.bbox.xmax - req.bbox.xmin) * (req.bbox.ymax - req.bbox.ymin) > 0.05) throw new Error("bbox invalid or too large for a controlled run");
-const LIMIT = Math.min(200, Math.max(1, Math.floor(req.limit)));
+const LIMIT = Math.min(1500, Math.max(1, Math.floor(req.limit)));
 const OUT = arg("out", "live-out")!;
 mkdirSync(OUT, { recursive: true });
 const log = createLogger({ level: "warn", sink: (l) => process.stderr.write(`${l.length > 300 ? l.slice(0, 300) + "…" : l}\n`) });
