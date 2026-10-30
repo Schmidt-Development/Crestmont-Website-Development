@@ -246,7 +246,7 @@ export async function listCustomers(db: Db, q: string, page: { limit: number; of
       (SELECT COUNT(*) FROM projects x WHERE x.organization_id = o.id) AS projects,
       (SELECT COUNT(*) FROM subscriptions x WHERE x.organization_id = o.id AND x.status IN ('active','trialing','past_due')) AS subscriptions,
       (SELECT COUNT(*) FROM tickets x WHERE x.organization_id = o.id AND x.status NOT IN ('resolved','closed')) AS open_tickets,
-      (SELECT COALESCE(SUM(amount_cents),0) FROM payments x WHERE x.organization_id = o.id AND x.status IN ('succeeded','partially_refunded','disputed')) AS paid_cents
+      (SELECT COALESCE(SUM(amount_cents),0) FROM payments x WHERE x.organization_id = o.id AND x.provider <> 'simulated' AND x.status IN ('succeeded','partially_refunded','disputed')) AS paid_cents
     FROM organizations o WHERE ${conds.join(" AND ")} ORDER BY o.created_at DESC, o.id LIMIT ? OFFSET ?`)
     .bind(...binds, page.limit + 1, page.offset).all<CustomerListRow>()).results;
 }
@@ -302,9 +302,9 @@ export async function salesReport(db: Db, actor: Actor, range: DateRange) {
   const accepted = await db.prepare(`SELECT COUNT(*) AS n FROM quote_versions qv JOIN quotes q ON q.id = qv.quote_id JOIN leads l ON l.id = q.lead_id WHERE ${scope.sql} AND qv.accepted_at >= ? AND qv.accepted_at < ?`).bind(...scope.binds, ...r).first<{ n: number }>();
   const revenue = can(actor, "lead.read_all")
     ? (await db.prepare(`SELECT COALESCE(l.source, 'no lead (direct checkout)') AS source, SUM(p.amount_cents) AS cents FROM payments p JOIN orders o ON o.id = p.order_id LEFT JOIN leads l ON l.id = o.lead_id
-        WHERE p.status IN ('succeeded','partially_refunded','refunded','disputed') AND p.created_at >= ? AND p.created_at < ? GROUP BY source ORDER BY cents DESC`).bind(...r).all<{ source: string; cents: number }>()).results
+        WHERE p.status IN ('succeeded','partially_refunded','refunded','disputed') AND p.provider <> 'simulated' AND p.created_at >= ? AND p.created_at < ? GROUP BY source ORDER BY cents DESC`).bind(...r).all<{ source: string; cents: number }>()).results
     : (await db.prepare(`SELECT l.source AS source, SUM(p.amount_cents) AS cents FROM payments p JOIN orders o ON o.id = p.order_id JOIN leads l ON l.id = o.lead_id
-        WHERE ${scope.sql} AND p.status IN ('succeeded','partially_refunded','refunded','disputed') AND p.created_at >= ? AND p.created_at < ? GROUP BY l.source ORDER BY cents DESC`).bind(...scope.binds, ...r).all<{ source: string; cents: number }>()).results;
+        WHERE ${scope.sql} AND p.status IN ('succeeded','partially_refunded','refunded','disputed') AND p.provider <> 'simulated' AND p.created_at >= ? AND p.created_at < ? GROUP BY l.source ORDER BY cents DESC`).bind(...scope.binds, ...r).all<{ source: string; cents: number }>()).results;
   const attribution = await attributionReport(db, actor, range);
   return { bySource, funnel: Object.fromEntries(funnel.map((f) => [f.stage, f.n])) as Record<string, number>, created, converted, rate: created ? converted / created : null, quotesSent: sent?.n ?? 0, quotesAccepted: accepted?.n ?? 0, revenue, attribution };
 }

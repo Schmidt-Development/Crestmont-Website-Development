@@ -177,16 +177,27 @@ export async function processStripeEvent(ctx: EventCtx, evt: StripeEvent): Promi
   }
 }
 
-/**
- * Records a confirmed payment for a local invoice and runs the follow-ups (project provisioning, change
- * order, lead conversion, receipt email). Shared by Checkout (checkout.session.completed) and Stripe
- * Invoices (invoice.paid, PAY-006). Idempotent through markInvoicePaid.
- */
 async function applyInvoicePayment(ctx: Pick<AppContext, "db" | "email" | "baseUrl">, evt: StripeEvent, invoiceId: string,
   payment: { amountCents: number; paymentIntentId: string | null; chargeId: string | null }, to: string | null): Promise<void> {
+  await confirmInvoicePayment(ctx, { provider: "stripe", eventId: evt.id }, invoiceId, payment, to);
+}
+
+/** Where a confirmed payment came from: a verified Stripe webhook, or the test-only payment simulation (0044). */
+export type PaymentSource = { provider: "stripe"; eventId: string } | { provider: "simulated"; eventId: string; transactionId: string };
+
+/**
+ * The internal payment-confirmation handler. Records a confirmed payment for a local invoice and runs the
+ * follow-ups (project provisioning, build eligibility, change order, lead conversion, receipt email). Shared by
+ * Checkout (checkout.session.completed), Stripe Invoices (invoice.paid, PAY-006) and the test-only payment
+ * simulation (src/services/payment-simulation.ts), which is the reason it is provider-neutral. Idempotent
+ * through markInvoicePaid. A simulated payment sends no receipt: it is not a real transaction.
+ */
+export async function confirmInvoicePayment(ctx: Pick<AppContext, "db" | "email" | "baseUrl">, source: PaymentSource, invoiceId: string,
+  payment: { amountCents: number; paymentIntentId: string | null; chargeId: string | null }, to: string | null): Promise<{ alreadyPaid: boolean; projectId: string | null }> {
   const db = ctx.db;
-  const res = await markInvoicePaid(db, invoiceId, payment);
-  if (res.alreadyPaid) return;
+  const simulated = source.provider === "simulated";
+  const res = await markInvoicePaid(db, invoiceId, { ...payment, provider: source.provider, simulatedTransactionId: simulated ? source.transactionId : null });
+  if (res.alreadyPaid) return { alreadyPaid: true, projectId: res.invoice.project_id };
   const inv = res.invoice;
   let projectId = inv.project_id;
   if (!projectId && inv.order_id && (inv.milestone_kind === "full" || inv.milestone_kind === "deposit_50")) projectId = await provisionProject(db, inv.order_id);
@@ -200,12 +211,14 @@ async function applyInvoicePayment(ctx: Pick<AppContext, "db" | "email" | "baseU
     if (lead?.lead_id) {
       await db.batch([
         db.prepare(`UPDATE leads SET stage = 'converted', updated_at = ? WHERE id = ? AND stage IN ('accepted','awaiting_payment')`).bind(nowIso(), lead.lead_id),
-        db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`).bind(newId("act"), lead.lead_id, `Payment confirmed by Stripe webhook (${evt.id}); lead converted`, nowIso()),
+        db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`).bind(newId("act"), lead.lead_id,
+          simulated ? `SIMULATED payment confirmed by the test-only payment simulation (${source.eventId}; no real transaction); lead converted` : `Payment confirmed by Stripe webhook (${source.eventId}); lead converted`, nowIso()),
       ]);
     }
   }
-  if (to) await sendMail(ctx, { template: "receipt", to, idempotencyKey: `receipt:${inv.id}`,
+  if (to && !simulated) await sendMail(ctx, { template: "receipt", to, idempotencyKey: `receipt:${inv.id}`,
     data: { amountCents: inv.amount_cents, next: projectId ? "onboarding" : "billing", url: `${ctx.baseUrl}/portal${projectId ? `/projects/${projectId}/onboarding` : "/billing"}` } });
+  return { alreadyPaid: false, projectId };
 }
 
 async function syncBuildsForPaymentIntent(db: AppContext["db"], pi: string) {

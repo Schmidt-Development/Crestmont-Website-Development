@@ -36,6 +36,9 @@ export const STEP_UP_ROUTES: Readonly<Record<string, string>> = {
   "POST /staff/builds/:id/share-preview": "sharing a website preview with the customer",
   "POST /staff/builds/:id/approve": "final approval of an AI-built website",
   "POST /staff/ai/budget": "paid AI budget",
+  // Test-only payment simulation (internal E2E benchmarks; refused in production)
+  "POST /staff/test-payments/organizations/:id/mark": "marking a fictional test organization",
+  "POST /staff/test-payments/simulate": "simulated test payment",
   // MFA changes (replacing an enrolled authenticator; first enrolment is unaffected because no MFA exists yet)
   "GET /mfa/setup": "authenticator change",
   "POST /mfa/setup": "authenticator change",

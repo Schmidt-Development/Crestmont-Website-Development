@@ -12,6 +12,11 @@ export interface Env {
   EVIDENCE_INGEST_SECRET?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   STRIPE_SECRET_KEY?: string;
+  /**
+   * "true" enables the test-only payment simulation (src/services/payment-simulation.ts) for organizations the Owner
+   * marked as fictional test organizations. Always refused when ENVIRONMENT is "production", whatever this says.
+   */
+  PAYMENT_SIMULATION_ENABLED?: string;
   TURNSTILE_SECRET?: string;
   TURNSTILE_SITE_KEY?: string;
   RESEND_API_KEY?: string;
