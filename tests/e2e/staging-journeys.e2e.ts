@@ -91,6 +91,11 @@ const text = async (page: Page, sel = "main") => (await page.locator(sel).first(
 const alerts = async (page: Page) => (await page.locator(".alert, .toast").allInnerTexts().catch(() => [])).join(" | ");
 const re = (s: string) => new RegExp(esc(s), "i");
 
+/** Every code attempt counts toward the account's limit (8 per 15 minutes, refused ones included), and a code is
+ * accepted once per 30 s step. Entering each code in a fresh step means no attempt is spent on a replay of a code
+ * another sign-in of the same account used moments earlier (deploy #71). */
+const freshTotpStep = () => new Promise((r) => setTimeout(r, 30_000 - (Date.now() % 30_000) + 1_000));
+
 /** Sign in through the real login page. Staff complete TOTP; a code is single-use per 30 s step, so when the
  * current step was already used (another sign-in of the same account moments ago) wait for the next one. */
 async function signIn(page: Page, a: Account) {
@@ -100,7 +105,8 @@ async function signIn(page: Page, a: Account) {
   await nav(page, "button[type=submit]");
   for (let attempt = 0; new URL(page.url()).pathname.startsWith("/mfa") && attempt < 2; attempt++) {
     assert.ok(a.totp, `${a.role} needs a TOTP key`);
-    if (attempt > 0) await new Promise((r) => setTimeout(r, (31 - (Math.floor(Date.now() / 1000) % 30)) * 1000));
+    if (attempt > 0 && /Too many codes/i.test(await alerts(page))) break; // never retry into the attempt limit
+    await freshTotpStep();
     await page.fill("#f-code", await totpCode(a.totp!));
     await nav(page, "button[type=submit]");
   }
@@ -153,7 +159,8 @@ async function freshMfa(page: Page, a: Account) {
   const back = new URL(page.url()).pathname + new URL(page.url()).search;
   await page.goto(`${BASE}/mfa/step-up?next=${encodeURIComponent(back)}`);
   for (let attempt = 0; new URL(page.url()).pathname === "/mfa/step-up" && attempt < 2; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, (31 - (Math.floor(Date.now() / 1000) % 30)) * 1000));
+    if (attempt > 0 && /Too many codes/i.test(await alerts(page))) break; // never retry into the attempt limit
+    await freshTotpStep();
     await page.fill("#f-code", await totpCode(a.totp!));
     await nav(page, "button[type=submit]");
   }
