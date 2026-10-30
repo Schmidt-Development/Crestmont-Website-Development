@@ -178,7 +178,8 @@ export async function checkInteractive(p, label, ok, { touch = false } = {}) {
   const settled = lbl === expected();
   // 1) from Crestmont's own window (not an approved demo origin), also malformed and unknown-type payloads;
   // 2) from a frame of the APPROVED demo origin that is not the explorer's own frame (forged source): its embed posts a
-  //    real "navigate" for /__demo/leave. None may change the label; neither forged destination may ever appear.
+  //    real "navigate" for /__demo/leave (with a valid ?to=, so the page is a 200 — a bare /__demo/leave is the demo's
+  //    own 400 "link not available" page, which deploy #64 reported as console errors on /portfolio). None may change the label; neither forged destination may ever appear.
   await p.evaluate((origin) => {
     const forged = { source: "crestmont-demo", type: "navigate", href: "https://attacker.example/x" };
     window.postMessage(forged, "*");
@@ -186,7 +187,7 @@ export async function checkInteractive(p, label, ok, { touch = false } = {}) {
     window.postMessage([forged], "*");
     window.postMessage({ ...forged, type: "takeover" }, "*");
     const f = document.createElement("iframe"); f.hidden = true; f.setAttribute("data-pfx-forged", "");
-    f.src = origin + "/__demo/leave"; document.body.append(f);
+    f.src = origin + "/__demo/leave?to=" + encodeURIComponent("https://example.com/"); document.body.append(f); // a valid (200) demo page
   }, info.origin);
   await sleep(4000);
   await p.evaluate(() => document.querySelector("[data-pfx-forged]")?.remove());
