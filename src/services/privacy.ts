@@ -11,6 +11,7 @@
 // to the user, and revokes every session. Financial and contractual records (orders, invoices,
 // payments, refunds, agreement acceptances, audit logs) are retained as legally required; they
 // then reference an anonymised user id rather than a name or email.
+import { eraseIdentityData } from "./identity-erasure.ts";
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { audit } from "./security.ts";
@@ -106,6 +107,11 @@ export async function processDeletion(db: Db, staffUserId: string, requestId: st
     throw new PrivacyError(`${held}, so this account cannot be anonymised yet. Leave the request open, or deny it with the legal reason.`, 409);
   }
   const u = r.user_id;
+  // CRM identity data first (contacts, identities, held research candidates, review and field history, re-import
+  // tombstones). It is idempotent, so if anything below fails the request stays open and can simply be retried.
+  const acct = await db.prepare(`SELECT email FROM users WHERE id = ?`).bind(u).first<{ email: string }>();
+  const own = (await db.prepare(`SELECT id FROM contacts WHERE user_id = ?`).bind(u).all<{ id: string }>()).results.map((c) => c.id);
+  await eraseIdentityData(db, staffUserId, { emails: acct && !acct.email.endsWith("@deleted.invalid") ? [acct.email] : [], contactIds: own, blockReimport: true }, { action: "privacy.crm_identity_erased" });
   const anonEmail = `deleted+${u}@deleted.invalid`;
   await db.batch([
     db.prepare(`UPDATE users SET email = ?, display_name = 'Deleted user', password_hash = NULL, totp_secret = NULL, totp_pending_secret = NULL, mfa_enabled = 0, disabled_at = COALESCE(disabled_at, ?) WHERE id = ?`).bind(anonEmail, at, u),

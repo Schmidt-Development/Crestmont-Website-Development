@@ -1,4 +1,5 @@
--- Rollback for migrations/0047_contact_identity.sql. NOT in migrations/ on purpose: it is never applied automatically.
+-- Rollback for migrations/0047_contact_identity.sql. If 0048 is applied, run rollback-0048.sql FIRST.
+-- NOT in migrations/ on purpose: it is never applied automatically.
 -- Runbook: docs/crm-identity/RUNBOOK.md §6. Take a D1 Time Travel bookmark and export first:
 --   npx wrangler@4.149.0 d1 time-travel info crestmont-<env> --env <env>
 --   npx wrangler@4.149.0 d1 export crestmont-<env> --remote --env <env> --output pre-rollback-0047.sql

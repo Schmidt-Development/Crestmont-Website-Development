@@ -40,6 +40,7 @@ export const STEP_UP_ROUTES: Readonly<Record<string, string>> = {
   // Added by the security readiness review (2026-10-28): irreversible data deletion, retention periods,
   // Founder-protected pricing and tax settings, and membership changes not covered above.
   "POST /staff/privacy/:id/process": "privacy deletion (anonymisation)",
+  "POST /staff/crm/identity-erasure": "CRM identity erasure",
   "POST /staff/ops/retention": "data retention periods",
   "POST /staff/pricing/:id/decide": "price change decision",
   "POST /staff/settings/tax": "tax configuration",

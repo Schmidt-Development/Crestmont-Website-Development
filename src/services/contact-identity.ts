@@ -30,6 +30,11 @@ const AUTOMATED: ReadonlySet<IntakeChannel> = new Set(["research_agent", "crm_ap
 const OPEN_STAGES = `('new','qualified','quote_required','quote_sent','negotiation','accepted','awaiting_payment')`;
 export const RACE_GUARD = "crm_identity_race";
 
+/** Salted hash of a normalized identifier, used for erasure tombstones (migration 0048, identity-erasure.ts). */
+export async function tombstoneHash(kind: "phone" | "email", value: string): Promise<string> {
+  return sha256Hex(`crestmont-crm-erasure:v1|${kind}:${value}`);
+}
+
 // ───────────── Normalization ─────────────
 
 /** E.164, identical to the SQL view contact_identity_norm_v and to toE164(): +digits kept, 10 digits → +1, 1+10 → +. */
@@ -143,7 +148,7 @@ export interface IntakeResult {
   replayed: boolean;
   matches: IdentityMatch[];
   reviewIds: string[];
-  suppressed: { phone: boolean; email: boolean };
+  suppressed: Suppression;
   reasons: string[];
   /** Always false: duplicate protection is never permission to call. See voice-outbound.ts eligibility(). */
   outreachEligible: false;
@@ -214,10 +219,16 @@ async function linkedContacts(db: Db, identityIds: string[]): Promise<{ identity
     .bind(...identityIds).all<{ identity_id: string; contact_id: string }>()).results;
 }
 
-export async function suppressionFor(db: Db, phones: string[], emails: string[]): Promise<{ phone: boolean; email: boolean }> {
+export interface Suppression { phone: boolean; email: boolean; /** an erasure tombstone exists for one of the identifiers */ erased: boolean }
+async function tombstoneHashes(phones: string[], emails: string[]): Promise<string[]> {
+  return [...await Promise.all(phones.map((p) => tombstoneHash("phone", p))), ...await Promise.all(emails.map((e) => tombstoneHash("email", e)))];
+}
+export async function suppressionFor(db: Db, phones: string[], emails: string[]): Promise<Suppression> {
   const phone = phones.length ? !!(await db.prepare(`SELECT 1 AS x FROM voice_dnc WHERE phone_e164 IN (${placeholders(phones.length)}) LIMIT 1`).bind(...phones).first()) : false;
   const email = emails.length ? !!(await db.prepare(`SELECT 1 AS x FROM email_suppressions WHERE removed_at IS NULL AND lower(email) IN (${placeholders(emails.length)}) LIMIT 1`).bind(...emails).first()) : false;
-  return { phone, email };
+  const hashes = await tombstoneHashes(phones, emails);
+  const erased = hashes.length ? !!(await db.prepare(`SELECT 1 AS x FROM crm_erasure_tombstones WHERE key_hash IN (${placeholders(hashes.length)}) LIMIT 1`).bind(...hashes).first()) : false;
+  return { phone, email, erased };
 }
 
 async function customerAccountsByEmail(db: Db, emails: string[]): Promise<{ organization_id: string; user_id: string }[]> {
@@ -324,7 +335,7 @@ async function evaluate(db: Db, n: Normalized): Promise<Evaluation> {
 const toPublicMatch = ({ row: _row, relation: _rel, ...m }: IdentityMatch & { row?: ContactRow; relation?: Relation }): IdentityMatch => m;
 
 /** Read-only duplicate preview (used by the manual-entry warning and the import dry run). */
-export async function previewMatches(db: Db, c: Candidate): Promise<{ matches: IdentityMatch[]; suppressed: { phone: boolean; email: boolean }; invalid: string[] }> {
+export async function previewMatches(db: Db, c: Candidate): Promise<{ matches: IdentityMatch[]; suppressed: Suppression; invalid: string[] }> {
   const n = normalizeCandidate(c);
   const ev = await evaluate(db, n);
   const business = ev.businessMatches.map((row) => ({ contactId: row.id, leadId: row.open_lead_id ?? row.any_lead_id, contactName: row.name, companyName: row.company_name,
@@ -385,9 +396,9 @@ async function replayDecision(db: Db, key: string, hash: string): Promise<Intake
     .first<{ id: string; outcome: IntakeOutcome; lead_id: string | null; contact_id: string | null; request_hash: string | null; evidence_json: string }>();
   if (!d) return null;
   if (d.request_hash && d.request_hash !== hash) throw new IntakeError(409, "This idempotency key was already used for a different request.");
-  const ev = JSON.parse(d.evidence_json) as { reviewIds?: string[]; suppressed?: { phone: boolean; email: boolean }; reasons?: string[]; matches?: IdentityMatch[]; leadCreated?: boolean };
+  const ev = JSON.parse(d.evidence_json) as { reviewIds?: string[]; suppressed?: Suppression; reasons?: string[]; matches?: IdentityMatch[]; leadCreated?: boolean };
   return { outcome: d.outcome, decisionId: d.id, leadId: d.lead_id, contactId: d.contact_id, leadCreated: false, replayed: true, matches: ev.matches ?? [], reviewIds: ev.reviewIds ?? [],
-    suppressed: ev.suppressed ?? { phone: false, email: false }, reasons: ev.reasons ?? [], outreachEligible: false };
+    suppressed: { phone: false, email: false, erased: false, ...ev.suppressed }, reasons: ev.reasons ?? [], outreachEligible: false };
 }
 
 /** Normalize, match, decide and write. Retries the decision when a concurrent writer linked the same identifier first. */
@@ -418,8 +429,8 @@ async function decideAndWrite(db: Db, candidate: Candidate, opts: IntakeOptions,
   /** A person already decided (manual warning or review queue): the automated hold rules do not apply again. */
   const decided = !!opts.resolution;
 
-  const finish = (outcome: IntakeOutcome, extra: { leadId?: string | null; contactId?: string | null; leadCreated?: boolean; matches?: IdentityMatch[]; suppressed?: { phone: boolean; email: boolean } } = {}) => {
-    const suppressed = extra.suppressed ?? { phone: false, email: false };
+  const finish = (outcome: IntakeOutcome, extra: { leadId?: string | null; contactId?: string | null; leadCreated?: boolean; matches?: IdentityMatch[]; suppressed?: Suppression } = {}) => {
+    const suppressed = extra.suppressed ?? { phone: false, email: false, erased: false };
     const evidence = { rule: reasons[0] ?? null, reasons, reviewIds, suppressed, leadCreated: !!extra.leadCreated, confidence,
       matches: (extra.matches ?? []).map((m) => ({ ...m, contactName: undefined, companyName: undefined })),
       identifiers: { emails: n.emails.length, phones: n.phones.length, domain: !!n.domain, location: !!n.location }, sourceRef: opts.sourceRef ?? null };
@@ -457,6 +468,7 @@ async function decideAndWrite(db: Db, candidate: Candidate, opts: IntakeOptions,
   // 2. Evaluate identities, customers and suppression.
   const ev = await evaluate(db, n);
   const suppressed = await suppressionFor(db, n.phones.map((p) => p.key), n.emails.map((e) => e.key));
+  const erasureHashes = automated ? await tombstoneHashes(n.phones.map((p) => p.key), n.emails.map((e) => e.key)) : [];
   let strong = ev.matches.filter((m) => m.strength === "strong");
   const ambiguousMatches = ev.matches.filter((m) => m.strength === "ambiguous");
   const shared = ev.matches.filter((m) => m.strength === "shared");
@@ -478,13 +490,15 @@ async function decideAndWrite(db: Db, candidate: Candidate, opts: IntakeOptions,
   const guard = () => {
     const keys = [...n.emails.map((e) => ["email", e.key]), ...n.phones.map((p) => ["phone", p.key])];
     const seen = keys.reduce((s, [, k]) => s + ev.identities.filter((i) => i.value_norm === k).reduce((t, i) => t + (ev.linkCounts.get(i.id) ?? 0), 0), 0);
+    // Automated data also aborts if an erasure tombstone for these identifiers was written meanwhile (concurrent erasure).
+    if (automated && erasureHashes.length) stmts.unshift(db.prepare(`INSERT INTO crm_write_guard (ok) SELECT 0 WHERE EXISTS (SELECT 1 FROM crm_erasure_tombstones WHERE key_hash IN (${placeholders(erasureHashes.length)}))`).bind(...erasureHashes));
     stmts.unshift(db.prepare(`INSERT INTO crm_write_guard (ok) SELECT 0 WHERE (SELECT COUNT(*) FROM contact_identity_links l JOIN contact_identities ci ON ci.id = l.identity_id
         WHERE l.removed_at IS NULL AND (${keys.map(() => "(ci.kind = ? AND ci.value_norm = ?)").join(" OR ")})) <> ?`).bind(...keys.flat(), seen));
   };
 
   // Automated data for a suppressed identifier never creates, links or reactivates anything.
-  if (automated && (suppressed.phone || suppressed.email)) {
-    reasons.push(suppressed.phone ? "phone_on_do_not_call_list" : "email_suppressed");
+  if (automated && (suppressed.phone || suppressed.email || suppressed.erased)) {
+    reasons.push(suppressed.phone ? "phone_on_do_not_call_list" : suppressed.email ? "email_suppressed" : "erased_at_request");
     return commit(finish("SUPPRESSED", { matches: publicMatches, suppressed, contactId: strong[0]?.contactId ?? null, leadId: strong[0]?.leadId ?? null }));
   }
 

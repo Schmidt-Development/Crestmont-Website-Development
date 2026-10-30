@@ -252,6 +252,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/crm/export.csv": staff(crm, undefined, act("lead.exported")),
   "GET /staff/crm/new": staff(crm),
   "GET /staff/crm/new/matches": staff(rolesWith("lead.write_all", "lead.write_assigned")),
+  "POST /staff/crm/identity-erasure": staff(OWNER, undefined, act("crm.identity_erased")),
   "POST /staff/crm/identity-reviews/resolve": staff(rolesWith("lead.write_all"), undefined, act("crm.identity_review_resolved")),
   "POST /staff/crm/new": staff(rolesWith("lead.write_all", "lead.write_assigned"), undefined, act("lead.created")),
   "GET /staff/crm/contacts": staff(crm),

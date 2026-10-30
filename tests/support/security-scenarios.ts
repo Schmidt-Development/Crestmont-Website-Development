@@ -227,6 +227,7 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/quotes/:id/close", path: () => `/staff/quotes/${x.quote2}/close`, fields: () => ({ kind: "withdrawn", reason: "Scope changed after the call" }) },
     { key: "GET /staff/quotes/export.csv" },
     { key: "GET /staff/customers/export.csv" },
+    { key: "POST /staff/crm/identity-erasure", fields: () => ({ phones: "", emails: "erase-me@matrix.example", note: "Matrix: person asked by email" }) },
     { key: "POST /staff/crm/identity-reviews/resolve", fields: () => ({ id: x.review, decision: "reject", back: "/staff/crm/duplicates?view=review" }), setup: async () => {
       x.review = newId("rev");
       await w.db.prepare(`INSERT INTO crm_identity_reviews (id, kind, lead_id, reason, dedupe_key, created_at) VALUES (?, 'possible_duplicate', ?, 'matrix test item', ?, ?)`).bind(x.review, w.ids.lead!, `matrix:${x.review}`, nowIso()).run();

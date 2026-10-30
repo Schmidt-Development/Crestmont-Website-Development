@@ -1,6 +1,6 @@
 # CRM duplicate protection — operational runbook
 
-Covers migration `0047_contact_identity.sql`, `src/services/contact-identity.ts` (intake engine),
+Covers migrations `0047_contact_identity.sql` and `0048_crm_identity_erasure.sql`, `src/services/contact-identity.ts` (intake engine), `src/services/identity-erasure.ts` (privacy erasure),
 `src/services/outreach-ledger.ts` (dial and email dedupe), `src/services/crm-import.ts` (import API),
 `scripts/crm-duplicate-audit.ts` (historical audit). Background: [AUDIT.md](AUDIT.md). API: [IMPORT-API.md](IMPORT-API.md).
 
@@ -15,7 +15,8 @@ Covers migration `0047_contact_identity.sql`, `src/services/contact-identity.ts`
 | Staff/Owner | CRM → Duplicates gains **Review queue** and **Duplicate prevention** tabs; each lead shows **Contact identity & provenance** |
 | Outbound calling | A second request for a number that already has an open request folds into it; two runs can never dial one number at once |
 
-Only the Owner (the only role with `lead.write_all`) resolves review items. Applying anything to an existing customer's
+Only the Owner (the only role with `lead.write_all`) resolves review items, and only staff who can see all leads can
+open the review queue (it shows contact details of any record). Applying anything to an existing customer's
 record is Owner-only by design.
 
 ## 2. Configuration (per environment)
@@ -44,6 +45,9 @@ secret then get `401`; retry with the same idempotency key is safe).
 - [ ] Lead page shows **Contact identity & provenance**; CRM → Duplicates → Review queue and Duplicate prevention render.
 - [ ] Import API: unsigned request → 401; with `CRM_IMPORT_SECRET` set on staging, a signed `dryRun` batch → 200 and
       no rows written; a signed real batch with one known number → `NO_CHANGE`/`EXISTING_*`, with a DNC number → `SUPPRESSED`.
+- [ ] Owner: CRM → Duplicates → Review queue → *Erase a person's CRM data* for a test research record → its contact,
+      identifiers and review items are gone; re-importing it returns `SUPPRESSED`; `crm_erasure_tombstones` has one row
+      per identifier and no raw value.
 - [ ] Outbound stays off on staging (`RETELL_OUTBOUND` not `on`); `phone_outreach_ledger` has no stuck reservations.
 
 ## 4. Historical duplicate remediation (dry run first, never automatic)
@@ -90,6 +94,46 @@ SELECT kind, COUNT(*) FROM crm_identity_reviews WHERE status = 'open' GROUP BY k
 SELECT phone_e164, reserved_for_id, lease_expires_at FROM phone_outreach_ledger WHERE reservation_id IS NOT NULL AND lease_expires_at < strftime('%Y-%m-%dT%H:%M:%fZ','now');
 ```
 
+## 5a. Privacy erasure of CRM identity data
+
+Three entry points run the same erasure (`src/services/identity-erasure.ts`), each authenticated, permission-checked,
+audited (counts only, never the identifiers) and safe to repeat:
+
+| Entry point | Who | When |
+|---|---|---|
+| Staff → Security → privacy requests → Complete | `employee.manage` + fresh two-factor (step-up) | Account holder asked to be deleted |
+| Staff → AI receptionist → Operations → Erase a caller's data | `voice.manage` | Caller without an account |
+| CRM → Duplicates → Review queue → *Erase a person's CRM data* | **Owner only** + step-up | Anyone else (e.g. a research-imported prospect who writes in) |
+
+What it removes (one atomic batch):
+- **The person's contacts**: the account holder's own contacts / the caller's receptionist contacts, plus every
+  non-customer contact whose identifier belongs to a single business: research-created prospects included. They
+  become `Deleted contact`; their leads keep stage and history but lose the person's message.
+- **Identifiers used by nobody else**: their `contact_identities`, all links, email campaign enrollments, and any
+  held research candidate, review value or field-history value that normalizes to them (any formatting or case),
+  **including review items that were never linked to a contact**. An item attached to another, legitimate record is
+  kept for that record but its candidate data and matching values are replaced with `[erased]`.
+- **Optionally (default on)** a re-import tombstone: salted SHA-256 of the normalized identifier, no name, no id.
+  Research/CRM API imports of it return `SUPPRESSED` (`erased_at_request`). A person who contacts Crestmont again
+  themselves (form, call) is not blocked. Untick *Allow research imports…* to skip the tombstone.
+
+What it keeps, on purpose:
+- A **shared identifier** (a line or inbox used by two different businesses, or by a customer) stays with those
+  records; the result says how many were kept. A shared line never gets a tombstone, so the businesses that own it
+  stay importable.
+- **Customers'** records are not anonymised unless they are the named subject (account deletion).
+- **Suppression**: `voice_dnc` and `email_suppressions` rows stay, so the opt-out is still honoured.
+- **Outbound ledger** keeps the number for per-number call limits (as `calls` already do). Orders, invoices,
+  payments, quotes, contracts and audit logs are untouched. Staff-written qualification notes stay.
+- Intake decisions keep their outcome and record ids; they never held raw identifiers (receptionist idempotency keys
+  are hashed).
+
+Concurrency: an import racing an erasure either commits first and is erased with it, or is refused afterwards by the
+tombstone (both sides use the `crm_write_guard` race guard and re-plan on conflict).
+
+Tombstones are minimization, not anonymity: a phone number's keyspace is small enough that a hash can be brute-forced
+by someone holding the database. They contain nothing else and are needed only to honour the request.
+
 ## 6. Rollback
 
 Code rollback does not undo migrations (DEPLOYMENT.md). In order of preference:
@@ -99,10 +143,12 @@ Code rollback does not undo migrations (DEPLOYMENT.md). In order of preference:
 2. **Database point-in-time** (data damage): D1 Time Travel restore to the bookmark the deploy workflow took before
    applying 0047 (`npx wrangler@4.149.0 d1 time-travel restore crestmont-<env> --env <env> --bookmark <id>`). Loses every
    write after the bookmark.
-3. **Schema rollback** (remove 0047 but keep later data): deploy the previous code first, export, then apply
-   [`rollback-0047.sql`](rollback-0047.sql). It drops only what 0047 added (identity, ledger, review, decision
+3. **Schema rollback** (remove 0048 / 0047 but keep later data): deploy the previous code first, export, then apply
+   [`rollback-0048.sql`](rollback-0048.sql) (drops only the tombstone table: erased identifiers become importable
+   again; erasures are not undone) and, if needed, [`rollback-0047.sql`](rollback-0047.sql). It drops only what 0047 added (identity, ledger, review, decision
    tables, triggers, views, the added columns) and removes the `d1_migrations` row so 0047 can be re-applied later.
-   Contacts, companies, leads and calls are untouched (proven by test case 20).
+   Contacts, companies, leads and calls are untouched (tests: case 20 in `tests/crm-identity.test.ts`, and the
+   0047 + 0048 migration/rollback test in `tests/crm-erasure.test.ts`).
 
 ## 7. Known limitations (honest list)
 
@@ -115,10 +161,11 @@ Code rollback does not undo migrations (DEPLOYMENT.md). In order of preference:
 - No marketing email automation exists; `enrollEmailCampaign()` is the gate future sequences must use, and an
   unsubscribe table should be added with the first marketing sequence.
 - Import throughput figures are local SQLite measurements; D1 latency will be higher.
+- The checkout path (`billing.ts ensureCheckoutLead`) keeps its own rule (link the buyer's open lead by email, else a
+  new contact for the verified account holder); its identities are registered by the triggers.
+- Erasure matches by normalized phone/email only. A held research record about the person that carries neither of the
+  identifiers given (e.g. only their name) is not found; give every phone/email the person used.
 - `contact_identities.shared` is only ever set, never cleared, when businesses stop sharing an identifier (conservative:
   a stale flag only makes matching more cautious).
-- Privacy erasure removes identity links, field history and review items of the erased contact; a held research
-  candidate (`crm_identity_reviews.candidate_json` with no contact) that mentions the person is not found by contact id.
-  Include `crm_identity_reviews` in the manual check of a privacy request until erasure searches it by value.
 - `enrollEmailCampaign()` reports `already_enrolled` (not `suppressed`) if a suppression lands between its check and its
   insert; the insert itself still refuses the suppressed address.

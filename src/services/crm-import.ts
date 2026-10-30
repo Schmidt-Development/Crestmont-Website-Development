@@ -46,7 +46,7 @@ export interface RecordResult {
   externalId: string | null;
   outcome: IntakeOutcome | "ERROR";
   decisionId?: string | null; leadId?: string | null; contactId?: string | null;
-  replayed?: boolean; reviewIds?: string[]; suppressed?: { phone: boolean; email: boolean };
+  replayed?: boolean; reviewIds?: string[]; suppressed?: { phone: boolean; email: boolean; erased: boolean };
   reasons?: string[]; errors?: string[]; retryable?: boolean;
   /** Dry run only: what intake would match. */
   matches?: { leadId: string | null; strength: string; reasons: string[]; customer: boolean }[];

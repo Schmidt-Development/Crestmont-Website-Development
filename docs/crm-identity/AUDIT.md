@@ -58,3 +58,27 @@ unchanged, foreign-key and integrity checks clean.
 - Merging to `main` deploys **staging automatically** and applies migrations (after a D1 Time Travel bookmark).
 - Production deploys only through the release workflow with Founder approval; migrations must stay additive.
 - The repository is **public**: fixtures use `.example` domains and 555-01xx numbers; reports default to ids only.
+
+## 6. Privacy-erasure follow-up (2026-10-30)
+
+Reproduced before the fix: a receptionist caller erasure for a number left the research-created contact for that
+number, its canonical identities and links, and a held research candidate (`crm_identity_reviews.candidate_json`)
+fully intact; account deletion only anonymised contacts carrying the account's `user_id`.
+
+Locations where a person's identifiers could remain, and how each is now handled (`src/services/identity-erasure.ts`):
+
+| Location | Handling |
+|---|---|
+| `contacts` identified by the person (incl. research/receptionist prospects) | anonymised unless a customer or shared with another business |
+| `contact_identities`, `contact_identity_links` | deleted for identifiers nobody else uses; kept for shared ones |
+| `crm_identity_reviews` (candidate_json, proposed/current value), linked or not | deleted when unlinked or on an erased contact; scrubbed to `[erased]` on another record |
+| `crm_field_changes` | deleted with the erased contact (trigger); values scrubbed on other records |
+| `email_outreach_enrollments` | deleted for erased email identities |
+| `crm_intake_decisions` | no raw identifiers stored (evidence holds ids/reasons; receptionist keys hashed) |
+| `crm_import_batches` | holds no record payload (hash and counts only) |
+| `leads.message` / intake-written activity text of erased contacts | replaced with "Details erased at the person's request" |
+| `phone_outreach_ledger` / events, `voice_dnc`, `email_suppressions` | kept (call limits and opt-outs); ledger loses its identity reference |
+| re-import | optional salted-hash tombstone (`crm_erasure_tombstones`, migration 0048) |
+
+Also fixed in the same pass: the duplicate review queue was readable by assigned-only sales reps (it shows contact
+details of any record); it now requires `lead.read_all`.

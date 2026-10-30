@@ -17,6 +17,8 @@ import * as crm from "../services/crm.ts";
 import * as quotes from "../services/quotes.ts";
 import * as dedupe from "../services/crm-dedupe.ts";
 import * as identity from "../services/contact-identity.ts";
+import { eraseIdentityData, ErasureError } from "../services/identity-erasure.ts";
+import { isOwner } from "../domain/authz.ts";
 import { startPackageCheckout, startMaintenanceCheckout, packageById, maintenanceById, NOT_CONFIGURED, stripeRedirect } from "../services/billing.ts";
 import { requestAiDraft, aiProviderFromEnv, decideAiJob } from "../services/ai.ts";
 import { audit } from "../services/security.ts";
@@ -153,7 +155,7 @@ type DupPreview = Awaited<ReturnType<typeof identity.previewMatches>>;
 function duplicateWarning(ctx: AppContext, d: DupPreview, v: Record<string, string>): SafeHtml {
   const canLink = (m: DupPreview["matches"][number]) => !!m.contactId && (m.strength !== "weak" || !!m.leadId);
   return html`<section class="card stack" data-duplicate-warning role="alert"><h2 style="font-size:1.2rem">This contact may already be in the CRM</h2>
-<p class="muted">Nothing has been saved yet. ${d.suppressed.phone ? html`<strong>The phone number is on the do-not-call list.</strong> ` : ""}${d.suppressed.email ? html`<strong>The email address is suppressed.</strong> ` : ""}A shared phone line or inbox can belong to several businesses, so check the company before linking.</p>
+<p class="muted">Nothing has been saved yet. ${d.suppressed.phone ? html`<strong>The phone number is on the do-not-call list.</strong> ` : ""}${d.suppressed.email ? html`<strong>The email address is suppressed.</strong> ` : ""}${d.suppressed.erased ? html`<strong>An erasure request is on file for this person.</strong> ` : ""}A shared phone line or inbox can belong to several businesses, so check the company before linking.</p>
 ${table(d.matches, [
     { header: "Record", cell: (m) => m.leadId ? html`<a href="/staff/crm/leads/${m.leadId}" target="_blank" rel="noopener">${m.contactName}</a>` : m.contactName },
     { header: "Company", cell: (m) => m.companyName ?? "—" },
@@ -340,7 +342,7 @@ async function duplicatesPage(ctx: AppContext) {
   if (view === "review") return reviewQueuePage(ctx);
   if (view === "analytics") return duplicateAnalyticsPage(ctx);
   const actor = ctx.actor!;
-  const openReviews = (await ctx.db.prepare(`SELECT COUNT(*) AS n FROM crm_identity_reviews WHERE status = 'open'`).first<{ n: number }>())?.n ?? 0;
+  const openReviews = !can(actor, "lead.read_all") ? 0 : (await ctx.db.prepare(`SELECT COUNT(*) AS n FROM crm_identity_reviews WHERE status = 'open'`).first<{ n: number }>())?.n ?? 0;
   const pageNo = parseInt(ctx.url.searchParams.get("page") ?? "1", 10) || 1;
   const result = await dedupe.findDuplicateClusters(ctx.db, actor, { page: pageNo });
   const clusters = result.clusters;
@@ -370,6 +372,11 @@ const REVIEW_KIND: Record<string, string> = { possible_duplicate: "Possible dupl
 async function reviewQueuePage(ctx: AppContext) {
   requireStaff(ctx, "crm.access");
   const actor = ctx.actor!;
+  // Review items carry names and proposed phone numbers/emails for any record: only staff who can see every lead.
+  if (!can(actor, "lead.read_all")) {
+    return staffPage(ctx, "Duplicate review queue", html`${pageHead("Duplicate review queue", linkButton("Pipeline", "/staff/crm", "ghost", "sm"), "CRM duplicate protection")}
+${duplicateTabs(ctx, "review", 0)}${emptyState("Handled by the Owner", "Possible duplicates and conflicting contact details are reviewed by the Owner. Duplicates of your own leads are shown on each lead's page.")}`);
+  }
   const status = ctx.url.searchParams.get("status") ?? "open";
   const pageNo = parseInt(ctx.url.searchParams.get("page") ?? "1", 10) || 1;
   const { rows, total, hasNext } = await identity.listReviews(ctx.db, { status, page: pageNo });
@@ -396,7 +403,14 @@ ${r.has_candidate && r.contact_id ? act(r, "link", "Link to this record", "prima
 ${r.has_candidate ? act(r, "create_new", "Create separately", "secondary", "Create a separate CRM record for this business?") : ""}
 ${act(r, "reject", r.has_candidate ? "Discard" : "Keep existing", "ghost")}` },
   ], { caption: "Duplicate review queue" }) : emptyState(status === "open" ? "Nothing to review" : "No items", status === "open" ? "Imports, forms and edits that need a person's decision appear here." : "No review items with this status.")}
-${total > 25 || pageNo > 1 ? pagination(ctx, pageNo, hasNext) : ""}`);
+${total > 25 || pageNo > 1 ? pagination(ctx, pageNo, hasNext) : ""}
+${owner ? html`<details class="card stack" data-identity-erasure><summary><strong>Erase a person's CRM data (privacy request)</strong></summary>
+<p class="muted">For someone who is not an account holder or receptionist caller (those have their own erasure flows, which also run this). Removes their phone numbers and email addresses from contacts identified only by them, from CRM identity records, held research records, review items and field history. Customers, payments, contracts and businesses that share a number or inbox are kept. Do-not-call and email suppressions are kept so opt-outs are honoured. You will be asked to confirm your authenticator.</p>
+<form method="post" action="/staff/crm/identity-erasure" class="stack" data-confirm="Erase this person's CRM data? This cannot be undone.">${csrf(ctx)}
+${textarea({ name: "phones", label: "Phone numbers (one per line)", rows: 2 })}${textarea({ name: "emails", label: "Email addresses (one per line)", rows: 2 })}
+${textarea({ name: "note", label: "Who asked, and how", rows: 2, required: true })}
+<label class="checkbox"><input type="checkbox" name="allow_reimport" value="1"> Allow research imports to add these identifiers again (by default a one-way hash is kept so they are not re-imported)</label>
+<div class="form-actions">${button("Erase CRM data", { variant: "danger" })}</div></form></details>` : ""}`);
 }
 
 async function duplicateAnalyticsPage(ctx: AppContext) {
@@ -762,6 +776,22 @@ export function register(r: Router): void {
     return redirect(ctx, `/staff/crm/leads/${res.leadId}`, { kind: "success", text: res.linked ? "Lead added to the existing contact." : "Lead created." });
   });
   r.get("/staff/crm/new/matches", newLeadMatches);
+  r.post("/staff/crm/identity-erasure", async (ctx) => {
+    requireStaff(ctx, "crm.access");
+    if (!isOwner(ctx.actor!)) throw new HttpError(403, "Only the Owner can erase CRM identity data.");
+    const f = await ctx.form();
+    const list = (k: string) => str(f, k).split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean).slice(0, 30);
+    const note = str(f, "note").trim();
+    const back = "/staff/crm/duplicates?view=review";
+    if (note.length < 5) return redirect(ctx, back, { kind: "error", text: "Describe who asked for the erasure, and how." });
+    try {
+      const r = await eraseIdentityData(ctx.db, ctx.user!.id, { phones: list("phones"), emails: list("emails"), blockReimport: str(f, "allow_reimport") !== "1" }, { ip: ctx.ip, note });
+      return redirect(ctx, back, { kind: "success", text: `Erased: ${r.contacts} contact(s), ${r.identitiesDeleted} identifier(s), ${r.reviewsDeleted + r.reviewsScrubbed} review item(s), ${r.fieldChangesScrubbed} history value(s).${r.sharedKept ? ` ${r.sharedKept} identifier(s) shared with another business were kept for that business.` : ""}` });
+    } catch (e) {
+      if (e instanceof ErasureError) return redirect(ctx, back, { kind: "error", text: e.message });
+      throw e;
+    }
+  });
   r.post("/staff/crm/identity-reviews/resolve", async (ctx) => {
     requireStaff(ctx, "crm.access");
     if (!can(ctx.actor!, "lead.write_all")) throw new HttpError(403, "Only staff who can edit all leads can resolve the review queue.");
