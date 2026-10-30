@@ -320,9 +320,11 @@ async function useRecoveryCode(db: Db, userId: string, input: string): Promise<n
 /** Wrong second-factor codes allowed per user in any rolling 24 hours before further attempts are refused. */
 export const MFA_DAILY_FAILURES = 30;
 
-/** Second-factor attempt limit: 8 codes (any kind) per user per 15 minutes. */
+/** Second-factor attempt limit: 8 codes (any kind, refused ones included) per user per 15 minutes. */
+export const MFA_ATTEMPT_LIMIT = 8, MFA_ATTEMPT_WINDOW_SECONDS = 900;
+export const mfaRateKey = (userId: string) => `mfa:${userId}`;
 async function assertMfaRate(db: Db, userId: string): Promise<void> {
-  const rl = await rateLimit(db, `mfa:${userId}`, 8, 900);
+  const rl = await rateLimit(db, mfaRateKey(userId), MFA_ATTEMPT_LIMIT, MFA_ATTEMPT_WINDOW_SECONDS);
   if (!rl.allowed) throw new AuthError("Too many codes entered. Wait a few minutes.", 429);
 }
 
