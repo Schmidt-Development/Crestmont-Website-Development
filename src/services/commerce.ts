@@ -104,7 +104,16 @@ export async function markInvoicePaid(db: Db, invoiceId: string, payment: { amou
   /** Test-only payment simulation (migration 0044); Stripe otherwise. */ provider?: "stripe" | "simulated"; simulatedTransactionId?: string | null }) {
   const inv = await db.prepare(`SELECT * FROM invoices WHERE id = ?`).bind(invoiceId).first<InvoiceRow>();
   if (!inv) throw new Error(`Invoice ${invoiceId} not found`);
-  if (inv.status === "paid") return { alreadyPaid: true, invoice: inv };
+  if (inv.status === "paid") {
+    if ((payment.provider ?? "stripe") !== "simulated" && payment.paymentIntentId) {
+      // A real payment for an invoice an internal test marked paid by SIMULATION: never acknowledge it silently.
+      // Throwing marks the Stripe event failed (retried, then dead-lettered) so it shows in reconciliation.
+      const sim = await db.prepare(`SELECT 1 FROM payments WHERE invoice_id = ? AND provider = 'simulated'`).bind(invoiceId).first();
+      const known = await db.prepare(`SELECT 1 FROM payments WHERE stripe_payment_intent_id = ?`).bind(payment.paymentIntentId).first();
+      if (sim && !known) throw new Error(`Real Stripe payment ${payment.paymentIntentId} for invoice ${invoiceId}, which an internal test marked paid by SIMULATION: needs manual review`);
+    }
+    return { alreadyPaid: true, invoice: inv };
+  }
   if (payment.amountCents !== inv.amount_cents) throw new Error(`Amount mismatch for ${invoiceId}: paid ${payment.amountCents}, expected ${inv.amount_cents}`);
   const at = nowIso();
   await db.batch([
@@ -119,7 +128,7 @@ export async function markInvoicePaid(db: Db, invoiceId: string, payment: { amou
     const status = totals && totals.paid >= totals.total_cents ? "paid" : "partially_paid";
     await db.prepare(`UPDATE orders SET status = ? WHERE id = ?`).bind(status, inv.order_id).run();
   }
-  await audit(db, { actorKind: "webhook", action: "invoice.paid", subjectType: "invoice", subjectId: invoiceId, organizationId: inv.organization_id, details: { amountCents: payment.amountCents, provider: payment.provider ?? "stripe" } });
+  await audit(db, { actorKind: payment.provider === "simulated" ? "system" : "webhook", action: "invoice.paid", subjectType: "invoice", subjectId: invoiceId, organizationId: inv.organization_id, details: { amountCents: payment.amountCents, provider: payment.provider ?? "stripe" } });
   return { alreadyPaid: false, invoice: inv };
 }
 

@@ -79,7 +79,7 @@ export async function loadInvoiceDoc(db: Db, invoiceId: string, organizationId: 
 
   const pays = (await db.prepare(`SELECT p.id, p.amount_cents, p.status, p.created_at, p.stripe_payment_intent_id,
         (SELECT COALESCE(SUM(r.amount_cents),0) FROM refunds r WHERE r.payment_id = p.id AND r.status = 'issued') AS refunded_cents
-      FROM payments p WHERE p.invoice_id = ? AND p.organization_id = ? AND p.status <> 'failed' ORDER BY p.created_at`).bind(invoice.id, org)
+      FROM payments p WHERE p.invoice_id = ? AND p.organization_id = ? AND p.status <> 'failed' AND p.provider <> 'simulated' ORDER BY p.created_at`).bind(invoice.id, org)
     .all<Omit<InvoiceDocData["payments"][number], "receipt_number">>()).results;
   const payments: InvoiceDocData["payments"] = [];
   for (const p of pays) payments.push({ ...p, receipt_number: await ensureReceiptNumber(db, p.id) });

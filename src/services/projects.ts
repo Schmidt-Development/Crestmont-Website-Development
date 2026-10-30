@@ -268,6 +268,9 @@ export async function releaseReadiness(db: Db, projectId: string): Promise<{ rea
   const reviewed = !!(await db.prepare(`SELECT 1 FROM audit_logs WHERE subject_type = 'project' AND subject_id = ? AND action = 'project.status_changed' AND details_json LIKE '%"to":"customer_review"%' LIMIT 1`).bind(projectId).first());
   const openChangeOrders = invoices.filter((i) => i.milestone_kind === "change_order" && i.status === "open").length;
   const missing = [...base.missing];
+  // A project paid by the test-only payment simulation can never be released (migration 0044).
+  const simulated = !!(await db.prepare(`SELECT 1 FROM payments pay JOIN projects pr ON pr.order_id = pay.order_id WHERE pr.id = ? AND pay.provider = 'simulated' LIMIT 1`).bind(projectId).first());
+  if (simulated) missing.push("payment:simulated_test_payment");
   if (!reviewed) missing.push("customer_review");
   if (openChangeOrders) missing.push("payment:change_order");
   const latest = (k: string) => { const r = approvals.filter((a) => a.kind === k).at(-1); return r ? r.decision : null; };
@@ -282,8 +285,8 @@ export async function releaseReadiness(db: Db, projectId: string): Promise<{ rea
     check("security_accessibility", "3. Security and accessibility checks"),
     { key: "customer_review", label: "4. Customer review", ok: reviewed, detail: reviewed ? "Customer review stage reached" : "Project has not been in customer review" },
     check("customer_launch", "5. Customer approval (final launch approval)"),
-    { key: "payment_verified", label: "6. Required payment verification", ok: !paymentMissing && !openChangeOrders,
-      detail: paymentMissing ? `Unpaid: ${paymentMissing.slice(8).split(",").join(", ")}` : openChangeOrders ? `${openChangeOrders} change-order invoice(s) unpaid` : "All required invoices paid" },
+    { key: "payment_verified", label: "6. Required payment verification", ok: !paymentMissing && !openChangeOrders && !simulated,
+      detail: simulated ? "Paid by a SIMULATED test payment: this project can never be released" : paymentMissing ? `Unpaid: ${paymentMissing.slice(8).split(",").join(", ")}` : openChangeOrders ? `${openChangeOrders} change-order invoice(s) unpaid` : "All required invoices paid" },
     check("deployment_authorized", "7. Deployment authorization"),
   ];
   return { ready: missing.length === 0, missing, checks };
@@ -323,6 +326,9 @@ export async function saveHandoff(ctx: MailCtx, actor: Actor, projectId: string,
   requireCoordinator(actor);
   const p = await getProject(ctx.db, projectId);
   if (!p) throw new HttpError(404, "Project not found");
+  if (publish && !!(await ctx.db.prepare(`SELECT 1 FROM payments pay WHERE pay.order_id = (SELECT order_id FROM projects WHERE id = ?) AND pay.provider = 'simulated' LIMIT 1`).bind(projectId).first())) {
+    throw new HttpError(409, "This project was paid by a SIMULATED payment (internal test); its handoff can never be published to the customer.");
+  }
   if (h.website_url && !/^https?:\/\//i.test(h.website_url)) throw new HttpError(422, "Website URL must start with https://");
   if (h.documentation_file_id) {
     const f = await ctx.db.prepare(`SELECT 1 FROM files WHERE id = ? AND organization_id = ? AND deleted_at IS NULL`).bind(h.documentation_file_id, p.organization_id).first();

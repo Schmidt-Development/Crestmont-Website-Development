@@ -52,7 +52,8 @@ export class SimulationDisabled extends HttpError {}
 
 /** Refuses the whole feature unless this is a non-production environment with the explicit flag set. */
 export function assertSimulationAllowed(env: Pick<Env, "ENVIRONMENT" | "PAYMENT_SIMULATION_ENABLED">): void {
-  if (env.ENVIRONMENT === "production") throw new SimulationDisabled(403, "Payment simulation is never available in production.");
+  // Allow-list, so a missing or misspelled ENVIRONMENT fails closed.
+  if (env.ENVIRONMENT !== "development" && env.ENVIRONMENT !== "staging") throw new SimulationDisabled(403, "Payment simulation is never available in production (only in development or staging).");
   if (env.PAYMENT_SIMULATION_ENABLED !== "true") throw new SimulationDisabled(403, "Payment simulation is disabled (PAYMENT_SIMULATION_ENABLED is not \"true\" in this environment).");
 }
 
@@ -62,6 +63,23 @@ export function simulationAvailable(env: Pick<Env, "ENVIRONMENT" | "PAYMENT_SIMU
 
 // ── test organizations ──
 
+/** Addresses that cannot belong to a real customer: reserved test domains (RFC 2606/6761) or Crestmont's own domain. */
+const FICTIONAL_EMAIL = /(?:\.(?:test|example|invalid|localhost)|@crestmontwebsitedevelopment\.com)$/i;
+
+/**
+ * Why an organization cannot be (or stay) a fictional test organization, or null. Re-checked on every simulated
+ * payment, not only when marking: real money arriving later, or a real person joining, ends simulation for it.
+ */
+export async function fictionalOrgProblem(db: Db, organizationId: string): Promise<string | null> {
+  const real = await db.prepare(`SELECT 1 FROM payments WHERE organization_id = ? AND provider <> 'simulated' LIMIT 1`).bind(organizationId).first();
+  if (real) return "the organization has real (Stripe) payments; a real customer can never be paid by simulation";
+  const people = (await db.prepare(`SELECT u.email FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = ?`).bind(organizationId).all<{ email: string }>()).results;
+  if (!people.length) return "the organization has no members";
+  const realPerson = people.find((p) => !FICTIONAL_EMAIL.test(p.email));
+  if (realPerson) return "a member uses a real email domain; test organizations may only contain reserved test addresses (.test, .example, .invalid, .localhost) or @crestmontwebsitedevelopment.com";
+  return null;
+}
+
 /** The Owner marks (or unmarks) a customer organization as a fictional test organization. */
 export async function markTestOrganization(ctx: Pick<AppContext, "db" | "env">, actorUserId: string, organizationId: string, mark: boolean, confirmName: string): Promise<void> {
   assertSimulationAllowed(ctx.env);
@@ -70,8 +88,8 @@ export async function markTestOrganization(ctx: Pick<AppContext, "db" | "env">, 
   if (org.kind !== "customer") throw new HttpError(409, "Only customer organizations can be test organizations.");
   if (confirmName.trim() !== org.name) throw new HttpError(422, `Type the organization's exact name (${org.name}) to confirm.`);
   if (mark) {
-    const real = await ctx.db.prepare(`SELECT 1 FROM payments WHERE organization_id = ? AND provider <> 'simulated' LIMIT 1`).bind(organizationId).first();
-    if (real) throw new HttpError(409, "This organization has real (Stripe) payments. A real customer can never be marked as a test organization.");
+    const problem = await fictionalOrgProblem(ctx.db, organizationId);
+    if (problem) throw new HttpError(409, `This organization cannot be marked as a test organization: ${problem}.`);
   }
   if (!!org.simulation_test_org === mark) return;
   await ctx.db.prepare(`UPDATE organizations SET simulation_test_org = ?, simulation_marked_by = ?, simulation_marked_at = ? WHERE id = ?`)
@@ -142,6 +160,8 @@ async function evaluate(db: Db, env: Pick<Env, "ENVIRONMENT">, e: SimulatedPayme
   if (c.order_id !== e.orderId) return reject("the invoice does not belong to that order", c);
   if (packageRef(c) !== e.packageId) return reject("the package does not match the order", c);
   if (!c.simulation_test_org) return reject("the organization is not a marked test organization; simulated payments can never pay a real customer's invoice", c);
+  const problem = await fictionalOrgProblem(db, c.organization_id);
+  if (problem) return reject(problem, c);
   const admin = await db.prepare(`SELECT 1 FROM memberships WHERE organization_id = ? AND user_id = ? AND role_id = 'customer_admin'`).bind(c.organization_id, e.customerId).first();
   if (!admin) return reject("the customer is not an administrator of the invoice's organization", c);
   if (e.currency !== "usd") return reject(`incorrect currency: ${e.currency} (invoices are in usd)`, c);
@@ -149,6 +169,7 @@ async function evaluate(db: Db, env: Pick<Env, "ENVIRONMENT">, e: SimulatedPayme
   if (e.paymentStatus === SIMULATED_FAILED) return { outcome: "failed_payment", reason: "simulated payment failure", ctx: c };
   if (e.paymentStatus !== SIMULATED_PAID) return reject(`unknown payment status: ${String(e.paymentStatus).slice(0, 40)}`, c);
   if (c.status === "paid") return { outcome: "duplicate_order", reason: "the invoice is already paid; no second payment was recorded", ctx: c };
+  if (c.status !== "open") return reject(`the invoice is ${c.status}; only open invoices can be paid`, c);
   return { outcome: "applied", reason: null, ctx: c };
 }
 
@@ -180,12 +201,20 @@ export async function deliverSimulatedEvent(ctx: Pick<AppContext, "db" | "env" |
       projectId = r.projectId;
       if (r.alreadyPaid) v = { ...v, outcome: "duplicate_order", reason: "the invoice was paid meanwhile; no second payment was recorded" };
     } catch (err) {
-      // Two different events for one invoice at the same moment: the unique index (one simulated payment per
-      // invoice) rejects the second; the batch rolled back, so nothing of it was recorded.
-      if (!/UNIQUE/i.test((err as Error).message)) throw err;
-      v = { ...v, outcome: "duplicate_order", reason: "a simulated payment for this invoice already exists; no second payment was recorded" };
+      const msg = (err as Error).message;
+      const ours = await db.prepare(`SELECT 1 FROM payments WHERE simulated_transaction_id = ?`).bind(e.transactionId).first();
+      if (!ours && /UNIQUE constraint failed: payments\./i.test(msg)) {
+        // Two different events for one invoice at the same moment: the unique index (one simulated payment per
+        // invoice) rejects the second; its batch rolled back, so nothing of it was recorded.
+        v = { ...v, outcome: "duplicate_order", reason: "a simulated payment for this invoice already exists; no second payment was recorded" };
+      } else if (ours) {
+        // The payment is recorded; a follow-up (provisioning, lead, build sync) failed. The sweep re-evaluates the build.
+        v = { ...v, reason: `payment recorded; a follow-up step failed: ${msg.slice(0, 300)}` };
+      } else {
+        v = { outcome: "rejected", reason: `not applied: ${msg.slice(0, 300)}`, ctx: v.ctx };
+      }
     }
-    if (v.outcome !== "applied") await db.prepare(`UPDATE simulated_payment_events SET outcome = ?, reason = ? WHERE id = ?`).bind(v.outcome, v.reason, e.id).run();
+    if (v.outcome !== "applied" || v.reason) await db.prepare(`UPDATE simulated_payment_events SET outcome = ?, reason = ? WHERE id = ?`).bind(v.outcome, v.reason, e.id).run();
   }
   await audit(db, { actorUserId, action: `payments.simulated_${v.outcome}`, subjectType: "invoice", subjectId: e.invoiceId ?? null, organizationId: v.ctx?.organization_id ?? null,
     details: { event: e.id, transaction: e.transactionId, amountCents: e.amountCents, currency: e.currency, status: e.paymentStatus, correlationId: e.correlationId, reason: v.reason } });

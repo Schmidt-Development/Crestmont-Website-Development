@@ -12,6 +12,11 @@ import * as B from "../src/services/builds.ts";
 import * as W from "../src/services/build-workers.ts";
 import * as SIM from "../src/services/payment-simulation.ts";
 import { releaseBlockers } from "../src/services/site-delivery.ts";
+import { markInvoicePaid } from "../src/services/commerce.ts";
+import { releaseReadiness, saveHandoff } from "../src/services/projects.ts";
+import { financeDashboard } from "../src/services/finance.ts";
+import { loadReceipt } from "../src/services/receipts.ts";
+import { customerBilling } from "../src/services/billing.ts";
 import { STEP_UP_ROUTES } from "../src/app/step-up.ts";
 import { JUNK_IN_THE_TRUNK as JT } from "./fixtures/junk-in-the-trunk.ts";
 import type { Env } from "../src/app/context.ts";
@@ -232,6 +237,30 @@ test("[AIB-019] simulated payment adapter: success, duplicate delivery, duplicat
   await assert.rejects(SIM.markTestOrganization(t, t.owner.id, real.cu.organizationId, true, "Real Customer Co"), /real \(Stripe\) payments/);
   await assert.rejects(SIM.markTestOrganization(t, t.owner.id, b.cu.organizationId, false, "wrong name"), /exact name/);
 
+  // Review fixes. (1) Real money arriving AFTER the mark ends simulation for that organization.
+  const late = await testInvoice(t, "Late Real Money Org");
+  const second = await createPackageOrder(t.db, late.cu.organizationId, "starter", late.cu.id);
+  await t.db.prepare(`INSERT INTO payments (id, organization_id, invoice_id, order_id, amount_cents, stripe_payment_intent_id, status, created_at) VALUES ('pay_late', ?, NULL, NULL, 100, 'pi_late_1', 'succeeded', ?)`).bind(late.cu.organizationId, new Date().toISOString()).run();
+  r = await deliver(await make(second.invoiceId));
+  assert.equal(r.outcome, "rejected"); assert.match(r.reason!, /real \(Stripe\) payments/);
+  // (1) An organization with a member on a real email domain can never be marked.
+  const realDomain = await createCustomer(t.db, `owner${Date.now()}@realbusiness.com`, "Real Domain Co");
+  await assert.rejects(SIM.markTestOrganization(t, t.owner.id, realDomain.organizationId, true, "Real Domain Co"), /real email domain/);
+  // (3) Only open invoices: a void invoice is never "paid".
+  const v = await testInvoice(t, "Void Invoice Org");
+  await t.db.prepare(`UPDATE invoices SET status = 'void' WHERE id = ?`).bind(v.order.invoiceId).run();
+  r = await deliver(await make(v.order.invoiceId));
+  assert.equal(r.outcome, "rejected"); assert.match(r.reason!, /invoice is void/);
+  assert.equal(await count(t, `SELECT 1 FROM projects WHERE order_id = ?`, v.order.orderId), 0);
+  // (2) A real Stripe payment for a simulation-paid invoice is never silently acknowledged (the webhook event fails → reconciliation).
+  await assert.rejects(markInvoicePaid(t.db, a.order.invoiceId, { amountCents: 99_900, paymentIntentId: "pi_real_after_sim" }), /SIMULATION: needs manual review/);
+  // Concurrency: two different valid events for one fresh invoice at once → one payment.
+  const cc = await testInvoice(t, "Concurrent Org");
+  const [e1, e2] = await Promise.all([make(cc.order.invoiceId, { correlationId: "corr_c1" }), make(cc.order.invoiceId, { correlationId: "corr_c2" })]);
+  const outs = (await Promise.all([deliver(e1), deliver(e2)])).map((x) => x.outcome).sort();
+  assert.deepEqual(outs, ["applied", "duplicate_order"]);
+  assert.equal(await paidCount(cc.order.invoiceId), 1);
+
   // Every outcome is in the event log and the audit log.
   for (const o of ["applied", "rejected", "failed_payment", "duplicate_order"]) assert.ok(await count(t, `SELECT 1 FROM simulated_payment_events WHERE outcome = ?`, o) > 0, o);
   assert.ok(await count(t, `SELECT 1 FROM audit_logs WHERE action LIKE 'payments.simulated_%'`) >= 10);
@@ -244,6 +273,8 @@ test("[AIB-019] unauthorized simulation attempts: production, flag off, non-Owne
     assert.throws(() => SIM.assertSimulationAllowed(env), SIM.SimulationDisabled, JSON.stringify(env));
   }
   assert.doesNotThrow(() => SIM.assertSimulationAllowed({ ENVIRONMENT: "staging", PAYMENT_SIMULATION_ENABLED: "true" }));
+  // Allow-list: a missing or misspelled environment fails closed.
+  for (const bad of [undefined, "Production", "prod", ""]) assert.throws(() => SIM.assertSimulationAllowed({ ENVIRONMENT: bad as never, PAYMENT_SIMULATION_ENABLED: "true" }), SIM.SimulationDisabled);
 
   const t = await app();
   const { cu, order } = await testInvoice(t, "Unauthorized Test Org");
@@ -295,6 +326,19 @@ test("[AIB-019] a simulated payment never authorizes real customer fulfillment: 
   assert.equal((await B.getJob(t.db, job.id))!.customer_preview_shared_at, null, "never shown to the customer");
   const blockers = await releaseBlockers(t.db, { ...(await B.getJob(t.db, job.id))!, state: "approved" }, "not applicable");
   assert.match(blockers.join(" "), /SIMULATED payment .* can never be released to production/);
+
+  // The manual delivery path is closed too: release readiness fails and the handoff cannot be published.
+  const rr = await releaseReadiness(t.db, pid);
+  assert.ok(rr.missing.includes("payment:simulated_test_payment"));
+  await assert.rejects(saveHandoff({ db: t.db, email: undefined as never, baseUrl: "" } as never, { kind: "user", userId: t.owner.id, roles: [{ role: "owner", organizationId: "org_crestmont" }], mfaVerified: true }, pid,
+    { website_url: "https://guard.example", documentation: "x", access_instructions: "x", ownership_notes: "x", training_notes: "x", documentation_file_id: null }, true), /SIMULATED payment/);
+  // Simulated money is not revenue, not refundable and has no receipt.
+  const day = 86_400_000;
+  const dash = await financeDashboard(t.db, { fromIso: new Date(Date.now() - day).toISOString(), toIso: new Date(Date.now() + day).toISOString() } as never);
+  assert.equal(dash.gross, 0, "simulated payments are excluded from revenue");
+  const payId = (await one<{ id: string }>(t, `SELECT id FROM payments WHERE order_id = ?`, order.orderId)).id;
+  assert.equal((await customerBilling(t.db, cu.organizationId)).payments[0].refundable, 0);
+  await assert.rejects(loadReceipt(t.db, payId, cu.organizationId), /Receipt not found/);
 
   // Removing the test mark makes the project ineligible: the sweep cancels the build.
   await SIM.markTestOrganization(t, t.owner.id, cu.organizationId, false, "Guard Test Org");

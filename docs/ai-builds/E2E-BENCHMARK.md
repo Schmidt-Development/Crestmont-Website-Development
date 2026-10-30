@@ -20,15 +20,18 @@ A verified Stripe webhook arrives at `POST /api/webhooks/stripe`, which calls `p
 | Control | Where |
 |---|---|
 | Owner-only permission `payments.simulate` (AI and system actors never hold it); MFA step-up on both actions | `src/domain/authz.ts`, `src/app/step-up.ts` |
-| Refused when `ENVIRONMENT=production`, whatever else is set; refused unless `PAYMENT_SIMULATION_ENABLED="true"` | `assertSimulationAllowed` |
-| Pays only organizations the Owner marked as fictional test organizations (the exact name must be typed); an organization with any Stripe payment can never be marked | `markTestOrganization`, `evaluate` |
+| Allowed only when `ENVIRONMENT` is `development` or `staging` (an allow-list, so a missing or misspelled value fails closed) and `PAYMENT_SIMULATION_ENABLED="true"` | `assertSimulationAllowed` |
+| Pays only organizations the Owner marked as fictional test organizations (the exact name must be typed). Every member must use a reserved test address (`.test`, `.example`, `.invalid`, `.localhost`) or `@crestmontwebsitedevelopment.com`, and the organization must have no Stripe payment. Both rules are re-checked on every event, not only when marking | `fictionalOrgProblem`, `markTestOrganization`, `evaluate` |
+| Only open invoices can be paid; void or other non-open invoices are rejected | `evaluate` |
+| A real Stripe payment for an invoice already paid by simulation is never acknowledged silently: the Stripe event fails, is retried, then dead-letters, so it shows in reconciliation | `markInvoicePaid` |
 | Event fields: event id, transaction id, order, invoice, customer, package, amount (cents), currency, `SIMULATED_PAID` / `SIMULATED_FAILED`, timestamp, environment, correlation id | `SimulatedPaymentEvent` |
 | Deterministic: the same inputs always give the same event and transaction ids | `createSimulatedEvent` |
 | Stored once per event id. A duplicate delivery returns the original outcome and is never re-applied | `deliverSimulatedEvent` |
 | Rejected: wrong amount or currency; wrong order, package or customer; another environment; timestamp outside 5 minutes; a transaction id re-sent under a new event id; unknown status; forged schema | `evaluate` |
 | Duplicate-order protection: a paid invoice records no second payment; a unique index allows one simulated payment per invoice | `evaluate`, migration 0044 |
-| No receipt email; payment rows are `provider='simulated'` with no Stripe ids; the CRM note says SIMULATED | `confirmInvoicePayment` |
-| Never authorizes real fulfillment: a simulated payment from an unmarked organization makes the build ineligible, and unmarking cancels it. Customer preview sharing and production release are refused | `decideEligibility`, `sharePreview`, `releaseBlockers` / `insertDeployment` |
+| No receipt email, no receipt page or PDF, not refundable. Payment rows are `provider='simulated'` with no Stripe ids, and the CRM note says SIMULATED | `confirmInvoicePayment`, `loadReceipt`, `customerBilling`, `requestRefund` |
+| Not revenue: excluded from the finance dashboard (gross, net, by month, by kind, order value), the Owner dashboard revenue, CRM customer totals and revenue by source, and invoice documents. The transactions CSV labels these rows "SIMULATED (test, not revenue)" | `finance.ts`, `owner.ts`, `crm.ts`, `finance-documents.ts` |
+| Never authorizes real fulfillment: a simulated payment from an unmarked organization makes the build ineligible, and unmarking cancels it. Customer preview sharing, AI-builder production release, manual deployment recording (release readiness) and handoff publishing are all refused | `decideEligibility`, `sharePreview`, `releaseBlockers` / `insertDeployment`, `releaseReadiness`, `saveHandoff` |
 | Owner page **Staff → `/staff/test-payments`**: open invoices, mark a test organization, deliver an event, event log | `src/routes/test-payments.ts` |
 
 **Not tested** (Stripe is not configured): Stripe Checkout, Stripe signature verification, settlement, payouts, refunds and disputes.
@@ -99,6 +102,18 @@ A verified Stripe webhook arrives at `POST /api/webhooks/stripe`, which calls `p
 | Automated tests | the build page's runner checks, `.crestmont/runner-checks.json`, requirement statuses |
 | Screenshots and private preview | `.crestmont/screenshots/` in the project repository, and the gated preview URL (needs the Cloudflare preview account; otherwise there is no preview) |
 | Human interventions | build events; anything in needs-information |
+
+Other customer-facing emails the real workflow sends, such as onboarding, project updates and milestone invoices, go to the test organization's members. The address rule above means those are only reserved test addresses or Crestmont's own domain.
+
+An independent review found six defects in the first version. All six are fixed and covered by regression tests:
+1. A test mark was not re-checked after real money arrived.
+2. A real Stripe payment was silently dropped on an invoice already paid by simulation.
+3. Void invoices could be paid.
+4. Release was possible through the manual delivery path.
+5. Simulated money was counted as revenue.
+6. Follow-up errors were mislabelled as duplicate orders.
+
+Two gaps remain. The step-up requirement is proven by the route map rather than by an HTTP request with a stale session. A build that is already running when the organization is unmarked is stopped through the existing "no longer eligible" stop request, which this test does not exercise.
 
 ## 6. Known QA gaps (not hidden, not yet fixed)
 
