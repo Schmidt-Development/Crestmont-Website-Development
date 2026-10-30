@@ -56,13 +56,15 @@ const batch = (records: unknown[], extra: Record<string, unknown> = {}) => ({ ap
 // ── browser-less staff session (cookie jar + CSRF), for the Owner routes ──
 class Session {
   cookies = new Map<string, string>();
+  // Over HTTPS (staging) the app issues the CSRF cookie as __Host-cm_csrf (CREST-GAP-086); over HTTP as cm_csrf.
+  private csrf(): string { return this.cookies.get("__Host-cm_csrf") ?? this.cookies.get("cm_csrf") ?? ""; }
   private absorb(res: Response) { for (const c of res.headers.getSetCookie()) { const [pair, ...attrs] = c.split(";"); const i = pair.indexOf("="); const k = pair.slice(0, i).trim(); if (attrs.some((a) => a.trim().toLowerCase() === "max-age=0")) this.cookies.delete(k); else this.cookies.set(k, decodeURIComponent(pair.slice(i + 1))); } }
   async req(method: string, path: string, form?: Record<string, string>) {
-    if (form && !this.cookies.has("cm_csrf")) await this.req("GET", "/login");
+    if (form && !this.csrf()) await this.req("GET", "/login");
     const headers: Record<string, string> = { origin: BASE };
     if (this.cookies.size) headers.cookie = [...this.cookies].map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("; ");
     let body: string | undefined;
-    if (form) { const sp = new URLSearchParams({ _csrf: this.cookies.get("cm_csrf") ?? "", ...form }); body = sp.toString(); headers["content-type"] = "application/x-www-form-urlencoded"; }
+    if (form) { const sp = new URLSearchParams({ _csrf: this.csrf(), ...form }); body = sp.toString(); headers["content-type"] = "application/x-www-form-urlencoded"; }
     const res = await fetch(`${BASE}${path}`, { method, headers, body, redirect: "manual" });
     this.absorb(res);
     return res;
