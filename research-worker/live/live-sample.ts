@@ -103,7 +103,7 @@ for (const p of promotable) {
 }
 const leadsAfterPromote = (raw.prepare(`SELECT COUNT(*) AS n FROM leads`).get() as { n: number }).n;
 // The same results arrive again in a new batch: nothing new may be created.
-const results = (state.db.prepare(`SELECT result FROM candidates WHERE result IS NOT NULL`).all() as { result: string }[]).map((r) => JSON.parse(r.result));
+const results = (state.db.prepare(`SELECT result FROM candidates WHERE result IS NOT NULL AND stage = 'sent'`).all() as { result: string }[]).map((r) => JSON.parse(r.result));
 const resend = results.length ? await new Platform(cfg.platformUrl, SECRET, fetchImpl).batch(cfg.runnerId, `rb_live_resend_${Date.now()}`, JSON.stringify(results.slice(0, 100))) : null;
 for (const p of raw.prepare(`SELECT id FROM research_prospects WHERE status IN ('qualified','review')`).all() as { id: string }[]) { try { await R.promote(app.db, actor, p.id); } catch { /* blocked as expected */ } }
 const leadsAfterResend = (raw.prepare(`SELECT COUNT(*) AS n FROM leads`).get() as { n: number }).n;
@@ -169,7 +169,7 @@ const details = (state.db.prepare(`SELECT business_key, stage, last_error, resul
   const cand = chosen.find((x) => x.businessKey === c.business_key)!;
   const res = c.result ? JSON.parse(c.result) : null;
   return { businessKey: c.business_key, name: cand.name, address: cand.address, phone: cand.phones[0] ?? null, listedWebsites: cand.websites, stage: c.stage, error: c.last_error,
-    classification: res?.website?.classification ?? "(not sent: see worker class counts)", websiteUrl: res?.website?.url ?? null, identitySignals: res?.website?.identitySignals ?? [], checks: res?.website?.checks ?? [],
+    classification: res?.website?.classification ?? "(no result)", sentToPlatform: c.stage === "sent", websiteUrl: res?.website?.url ?? null, identitySignals: res?.website?.identitySignals ?? [], checks: res?.website?.checks ?? [],
     findings: res?.findings ?? [], platform: byKey.get(c.business_key) ?? null };
 });
 writeFileSync(join(OUT, "details.json"), JSON.stringify(details, null, 2));

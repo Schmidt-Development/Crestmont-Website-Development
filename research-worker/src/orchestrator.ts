@@ -118,7 +118,7 @@ export class ResearchWorker {
       }, row.probe ? JSON.parse(row.probe) as Probe : null);
       if (out.kind === "defer") { this.d.state.defer(row.business_key, out.until, out.probe, out.note); return; }
       this.classCounts[out.cls] = (this.classCounts[out.cls] ?? 0) + 1;
-      if (!out.send) { this.d.state.finish(row.business_key, null, new Date()); this.finishedAt.push(Date.now()); return; }
+      if (!out.send) { this.d.state.finish(row.business_key, out.prospect, new Date(), false); this.finishedAt.push(Date.now()); return; }
       const v = validateProspect(out.prospect);
       if (!v.ok) { this.d.state.fail(row.business_key, `invalid result: ${v.issues.join("; ")}`, now, 1); return; }
       // Drafts only for prospects that qualify on the same deterministic rule the platform applies (saves GPU time).

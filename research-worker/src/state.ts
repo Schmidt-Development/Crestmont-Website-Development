@@ -96,11 +96,12 @@ export class State {
     this.bump("failed_jobs", now);
   }
   /** Finished: result recorded; "ready" results are batched to the platform, "skipped" ones are not sent. */
-  finish(key: string, result: unknown | null, now: Date) {
+  /** send=false keeps the result locally (diagnostics, re-verification) without ever batching it to the platform. */
+  finish(key: string, result: unknown | null, now: Date, send = true) {
     const json = result === null ? null : stableJson(result);
     const hash = json ? sha256(json) : null;
-    const prev = this.db.prepare(`SELECT result_hash, stage FROM candidates WHERE business_key = ?`).get(key) as { result_hash: string | null } | undefined;
-    const stage: Stage = !json ? "skipped" : prev?.result_hash === hash ? "sent" : "ready";
+    const prev = this.db.prepare(`SELECT result_hash, stage FROM candidates WHERE business_key = ?`).get(key) as { result_hash: string | null; stage: Stage } | undefined;
+    const stage: Stage = !json || !send ? "skipped" : prev?.result_hash === hash && prev?.stage !== "skipped" ? "sent" : "ready";
     this.db.prepare(`UPDATE candidates SET stage = ?, result = COALESCE(?, result), result_hash = COALESCE(?, result_hash), lease_until = NULL, last_error = NULL, verified_at = ?, updated_at = ? WHERE business_key = ?`)
       .run(stage, json, hash, now.toISOString(), now.toISOString(), key);
     this.bump("evaluated", now);

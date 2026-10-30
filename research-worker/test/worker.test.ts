@@ -314,3 +314,36 @@ test("[review] malformed and out-of-range references never throw and never produ
   const f = pageFacts("<h1>&lt;img src=x onerror=alert(1)&gt; Riverside</h1>");
   assert.equal(f.h1, "<img src=x onerror=alert(1)> Riverside");
 });
+
+// ───────────── regressions from the first real-data runs (aggregate diagnostics) ─────────────
+
+test("[live] politeness and robots waits never count as a slow website; only the final HTML response time does", () => {
+  const html = page();
+  const waited = ok(SITE, html, { ms: 9000, responseMs: 350 });
+  assert.ok(!htmlFindings(waited, pageFacts(html), html).some((f) => f.code === "slow_response"), "9 s of our own waiting is not the site's fault");
+  const slow = ok(SITE, html, { ms: 9000, responseMs: 6200 });
+  const f = htmlFindings(slow, pageFacts(html), html).find((x) => x.code === "slow_response");
+  assert.ok(f && /6200 ms/.test(f.evidence));
+  assert.ok(!htmlFindings(ok(SITE, html, { ms: 9000 }), pageFacts(html), html).some((x) => x.code === "slow_response"), "no measurement, no finding");
+});
+
+test("[live] a script-built page without visible contact details is recorded, but cannot make a healthy site 'with issues' on its own", async () => {
+  const jsPage = `<!doctype html><html lang="en"><head><title>Riverside Plumbing</title><meta name="viewport" content="width=device-width"><meta name="description" content="x"></head><body><h1>Riverside Plumbing</h1><p>120 Main Street, Lansing</p><div id="app"></div><script src="/app.js"></script></body></html>`;
+  const r = await evaluate(cand(), deps(new FakeHttp({ [SITE]: ok(SITE, jsPage, { responseMs: 300 }) }), new State(":memory:")), null);
+  assert.ok(r.kind === "done");
+  if (r.kind !== "done") return;
+  const nc = r.prospect.findings!.find((f) => f.code === "no_contact_method");
+  assert.ok(nc && nc.confidence < 0.6, "recorded with low confidence");
+  assert.equal(r.cls, "VERIFIED_OFFICIAL_WEBSITE");
+  assert.equal(r.send, false);
+});
+
+test("[live] results that are not sent are kept locally for diagnostics and never batched", () => {
+  const st = new State(":memory:");
+  const t = new Date();
+  st.upsertCandidate(cand(), "MI", t, 30); st.claim(1, t, 60_000);
+  st.finish("overture:t1", { website: { classification: "VERIFIED_OFFICIAL_WEBSITE" } }, t, false);
+  assert.equal(st.stages().skipped, 1);
+  assert.equal(st.enqueueBatch(10, t), null);
+  assert.ok((st.db.prepare(`SELECT result FROM candidates`).get() as { result: string | null }).result);
+});

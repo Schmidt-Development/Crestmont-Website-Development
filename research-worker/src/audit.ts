@@ -54,8 +54,12 @@ export function htmlFindings(home: FetchResult, facts: PageFacts, html: string, 
   const years = [...facts.text.matchAll(/(?:©|&copy;|copyright)\s*(?:\d{4}\s*[-–]\s*)?((?:19|20)\d{2})/gi)].map((m) => Number(m[1]));
   const latest = years.length ? Math.max(...years) : null;
   if (latest && latest <= now.getUTCFullYear() - 4) out.push(f("stale_copyright", `Copyright notice last updated ${latest} (indicator the site is not maintained)`, "low", 0.6, url, GET, `Footer copyright year ${latest}`));
-  if (!facts.phones.length && !/href=["']mailto:/i.test(html) && !/<form/i.test(html)) out.push(f("no_contact_method", "No phone number, email link or contact form on the home page", "medium", 0.7, url, GET, "No tel:/phone pattern, mailto: link or <form> found in the home page HTML"));
-  if (home.ms > 4000) out.push(f("slow_response", `Home page took ${(home.ms / 1000).toFixed(1)} s to load (HTML only)`, "medium", 0.6, url, GET, `${home.ms} ms for the HTML document from the workstation`, "Indicator only; network conditions vary"));
+  // Without a rendering browser, script-built pages may show contact details we cannot see: recorded, but below the
+  // 0.6 confidence that lets a finding drive classification or score.
+  if (!facts.phones.length && !/href=["']mailto:/i.test(html) && !/<form/i.test(html)) out.push(f("no_contact_method", "No phone number, email link or contact form in the home page HTML", "medium", /<script/i.test(html) ? 0.4 : 0.7, url, GET, `No tel:/phone pattern, mailto: link or <form> found in the server-rendered HTML${/<script/i.test(html) ? " (page uses scripts; content added by JavaScript was not seen)" : ""}`));
+  // Only the final HTML request's own network time counts (never robots.txt fetches or our politeness waits).
+  const rt = home.responseMs ?? null;
+  if (rt !== null && rt > 4000) out.push(f("slow_response", `Home page HTML took ${(rt / 1000).toFixed(1)} s to arrive`, "medium", 0.6, url, GET, `${rt} ms for the final HTML response (redirects excluded), measured from the research workstation`, "Indicator only; network conditions vary"));
   if (facts.text.length < 40 && !/<script/i.test(html)) out.push(f("empty_page", "Home page has almost no content", "high", 0.75, url, GET, `${facts.text.length} characters of visible text`));
   return out;
 }

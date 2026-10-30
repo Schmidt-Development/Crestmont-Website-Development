@@ -16,7 +16,11 @@ export type NetErrorKind = "dns" | "refused" | "timeout" | "tls" | "reset" | "bl
 export interface Hop { url: string; status: number; location?: string }
 export interface FetchResult {
   url: string; finalUrl: string; status: number | null; chain: Hop[]; headers: Record<string, string>; body: string; bytes: number;
-  ms: number; error: { kind: NetErrorKind; message: string } | null; robotsBlocked: boolean;
+  /** Wall time including robots.txt and politeness waits (for throughput accounting). */
+  ms: number;
+  /** Network time of the final request only (what a visitor would wait for the HTML); null when no response. */
+  responseMs?: number | null;
+  error: { kind: NetErrorKind; message: string } | null; robotsBlocked: boolean;
 }
 
 // ───────────── Address safety ─────────────
@@ -209,8 +213,8 @@ export class Http {
         return { url: input, finalUrl: url.href, status: null, chain, headers: {}, body: "", bytes: 0, ms: Date.now() - started, error: { kind: "blocked_address", message: `${literal} is not a public address` }, robotsBlocked: false };
       }
       if (!(await this.allowed(url))) return { url: input, finalUrl: url.href, status: null, chain, headers: {}, body: "", bytes: 0, ms: Date.now() - started, error: null, robotsBlocked: true };
-      let res;
-      try { res = await this.slot(url.host, () => { this.requests++; return this.raw(url, method); }); }
+      let res, reqMs = 0;
+      try { res = await this.slot(url.host, async () => { this.requests++; const t = Date.now(); try { return await this.raw(url, method); } finally { reqMs = Date.now() - t; } }); }
       catch (e) { return { url: input, finalUrl: url.href, status: null, chain, headers: {}, body: "", bytes: 0, ms: Date.now() - started, error: classify(e), robotsBlocked: false }; }
       const loc = res.headers.location;
       chain.push({ url: url.href, status: res.status, ...(loc ? { location: loc } : {}) });
@@ -219,7 +223,7 @@ export class Http {
         if (chain.some((c) => c.url === url.href)) return { url: input, finalUrl: url.href, status: res.status, chain, headers: res.headers, body: "", bytes: 0, ms: Date.now() - started, error: { kind: "other", message: "redirect loop" }, robotsBlocked: false };
         continue;
       }
-      return { url: input, finalUrl: url.href, status: res.status, chain, headers: res.headers, body: res.body, bytes: res.bytes, ms: Date.now() - started, error: null, robotsBlocked: false };
+      return { url: input, finalUrl: url.href, status: res.status, chain, headers: res.headers, body: res.body, bytes: res.bytes, ms: Date.now() - started, responseMs: reqMs, error: null, robotsBlocked: false };
     }
     return { url: input, finalUrl: url.href, status: chain.at(-1)?.status ?? null, chain, headers: {}, body: "", bytes: 0, ms: Date.now() - started, error: { kind: "other", message: "more than 5 redirects" }, robotsBlocked: false };
   }
