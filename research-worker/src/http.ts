@@ -153,10 +153,10 @@ export class Http {
   }
 
   /** One raw request (no redirects followed), size-capped and decompressed. */
-  private raw(url: URL, method: "GET" | "HEAD"): Promise<{ status: number; headers: Record<string, string>; body: string; bytes: number }> {
+  private raw(url: URL, method: "GET" | "HEAD", timeoutMs = this.opts.timeoutMs): Promise<{ status: number; headers: Record<string, string>; body: string; bytes: number }> {
     return new Promise((resolve, reject) => {
       const req = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
-        method, lookup: safeLookup(this.opts.allowLoopback) as never, timeout: this.opts.timeoutMs,
+        method, lookup: safeLookup(this.opts.allowLoopback) as never, timeout: timeoutMs,
         headers: { "user-agent": this.opts.userAgent, accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5", "accept-encoding": "gzip, deflate, br", "accept-language": "en-US,en;q=0.8" },
       }, (res: IncomingMessage) => {
         const headers: Record<string, string> = {};
@@ -233,7 +233,8 @@ export class Http {
   }
 
   /** GET with redirects followed manually (≤ 5 hops), robots and address checks on every hop. */
-  async get(input: string, method: "GET" | "HEAD" = "GET"): Promise<FetchResult> {
+  /** `timeoutMs` overrides the idle timeout for this request only (used to confirm a suspected timeout patiently). */
+  async get(input: string, method: "GET" | "HEAD" = "GET", opts: { timeoutMs?: number } = {}): Promise<FetchResult> {
     const started = Date.now();
     const chain: Hop[] = [];
     let url: URL;
@@ -249,7 +250,7 @@ export class Http {
       if (rb.netError) return { url: input, finalUrl: url.href, status: null, chain, headers: {}, body: "", bytes: 0, ms: Date.now() - started, error: rb.netError, robotsBlocked: false };
       if (!(await this.allowed(url))) return { url: input, finalUrl: url.href, status: null, chain, headers: {}, body: "", bytes: 0, ms: Date.now() - started, error: null, robotsBlocked: true };
       let res, reqMs = 0;
-      try { res = await this.slot(url.host, async () => { this.requests++; const t = Date.now(); try { return await this.raw(url, method); } finally { reqMs = Date.now() - t; } }); }
+      try { res = await this.slot(url.host, async () => { this.requests++; const t = Date.now(); try { return await this.raw(url, method, opts.timeoutMs ?? this.opts.timeoutMs); } finally { reqMs = Date.now() - t; } }); }
       catch (e) { return { url: input, finalUrl: url.href, status: null, chain, headers: {}, body: "", bytes: 0, ms: Date.now() - started, error: classify(e), robotsBlocked: false }; }
       const loc = res.headers.location;
       chain.push({ url: url.href, status: res.status, ...(loc ? { location: loc } : {}) });

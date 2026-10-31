@@ -101,7 +101,10 @@ const verifyMs = Date.now() - started - overtureMs;
 for (let i = 0; i < 20 && state.outboxDepth() + (state.stages().ready ?? 0) > 0; i++) await worker.deliverOnce();
 const owner = await createStaff(app.db, "owner", "owner-live@crestmont.test");
 const actor = { kind: "user" as const, userId: owner.id, roles: [{ role: "owner" as const, organizationId: "org_crestmont" }], mfaVerified: true };
-const promotable = raw.prepare(`SELECT id FROM research_prospects WHERE status IN ('qualified','review')`).all() as { id: string }[];
+// Only 'qualified' records are promoted unattended. 'review' records (shared phone, same website or same name and street
+// as another record) are held for a person to decide which record is the business, as the product does; counted below.
+const promotable = raw.prepare(`SELECT id FROM research_prospects WHERE status = 'qualified'`).all() as { id: string }[];
+const heldForReview = (raw.prepare(`SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'review'`).get() as { n: number }).n;
 const promoteOutcomes: Record<string, number> = {};
 for (const p of promotable) {
   try { await R.promote(app.db, actor, p.id); promoteOutcomes.created = (promoteOutcomes.created ?? 0) + 1; }
@@ -111,7 +114,7 @@ const leadsAfterPromote = (raw.prepare(`SELECT COUNT(*) AS n FROM leads`).get() 
 // The same results arrive again in a new batch: nothing new may be created.
 const results = (state.db.prepare(`SELECT result FROM candidates WHERE result IS NOT NULL AND stage = 'sent'`).all() as { result: string }[]).map((r) => JSON.parse(r.result));
 const resend = results.length ? await new Platform(cfg.platformUrl, SECRET, fetchImpl).batch(cfg.runnerId, `rb_live_resend_${Date.now()}`, JSON.stringify(results.slice(0, 100))) : null;
-for (const p of raw.prepare(`SELECT id FROM research_prospects WHERE status IN ('qualified','review')`).all() as { id: string }[]) { try { await R.promote(app.db, actor, p.id); } catch { /* blocked as expected */ } }
+for (const p of raw.prepare(`SELECT id FROM research_prospects WHERE status IN ('qualified','promoted')`).all() as { id: string }[]) { try { await R.promote(app.db, actor, p.id); } catch { /* blocked as expected */ } }
 const leadsAfterResend = (raw.prepare(`SELECT COUNT(*) AS n FROM leads`).get() as { n: number }).n;
 
 // ── 6. Measure ──
@@ -139,7 +142,7 @@ const summary = {
   controls: { crmDuplicate: crmControl ? (raw.prepare(`SELECT status FROM research_prospects WHERE business_key = ?`).get(crmControl.businessKey) as { status: string } | undefined)?.status ?? "not sent" : "none",
     doNotCall: dncControl ? (raw.prepare(`SELECT status FROM research_prospects WHERE business_key = ?`).get(dncControl.businessKey) as { status: string } | undefined)?.status ?? "not sent" : "none" },
   duplicatesPrevented: q(`SELECT COALESCE(SUM(duplicates_prevented), 0) AS n FROM research_batches`),
-  crm: { promotionAttempts: promotable.length, outcomes: promoteOutcomes, leadsAfterPromote, resend: resend ? { accepted: resend.accepted, created: resend.created, updated: resend.updated, unchanged: resend.unchanged } : null, leadsAfterResend, duplicateLeadsCreated: leadsAfterResend - leadsAfterPromote },
+  crm: { promotionAttempts: promotable.length, heldForReview, outcomes: promoteOutcomes, leadsAfterPromote, resend: resend ? { accepted: resend.accepted, created: resend.created, updated: resend.updated, unchanged: resend.unchanged } : null, leadsAfterResend, duplicateLeadsCreated: leadsAfterResend - leadsAfterPromote },
   callableEligible: q(`SELECT COUNT(*) AS n FROM research_prospects WHERE eligibility = 'eligible'`),
   timing: { totalMs: elapsedMs, overtureQueryMs: overtureMs, verifyPhaseMs: verifyMs, perBusinessMs: { avg: processed ? Math.round(sorted.reduce((a, b) => a + b, 0) / processed) : null, p50: pct(0.5), p90: pct(0.9), max: sorted.at(-1) ?? null } },
   httpRequests: http.requests,

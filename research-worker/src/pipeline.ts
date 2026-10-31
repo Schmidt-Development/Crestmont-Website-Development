@@ -39,6 +39,7 @@ export function probeDomains(name: string): string[] {
 
 const iso = () => new Date().toISOString();
 /** Classes that can be a website-development opportunity; the rest are counted locally and not sent. */
+export const PATIENT_TIMEOUT_MS = 45_000;
 export const SEND_CLASSES: WebsiteClass[] = ["VERIFIED_WEBSITE_BROKEN", "VERIFIED_WEBSITE_ISSUES", "NO_OFFICIAL_WEBSITE_FOUND"];
 
 /** Stage A + B candidate domains, with who lists each. */
@@ -139,6 +140,12 @@ export async function evaluate(c: Candidate, deps: Deps, probe: Probe | null): P
     if (home.error?.kind === "tls" || (home.error && home.error.kind !== "dns" && home.error.kind !== "blocked_address")) {
       const plain = await deps.http.get(`http://${d.domain}/`);
       if (!plain.error && plain.status !== null && plain.status < 400) home = plain; // reachable without TLS: audited below (no_https finding)
+    }
+    // A timeout is often the moment (or our own load), not the site: confirm it once with a patient 45 s request.
+    if (home.error?.kind === "timeout") {
+      const patient = await deps.http.get(`https://${d.domain}/`, "GET", { timeoutMs: PATIENT_TIMEOUT_MS });
+      checks.push({ stage: "C", method: `patient re-try (${PATIENT_TIMEOUT_MS / 1000} s timeout) after a timeout`, result: patient.error ? `${patient.error.kind}: ${patient.error.message.slice(0, 120)}` : `HTTP ${patient.status} in ${patient.ms} ms`, at: iso() });
+      if (!patient.error || patient.error.kind !== "timeout") home = patient;
     }
     deps.state.bump("websites_checked", new Date());
     checks.push({ stage: "C", method: `HTTP GET https://${d.domain}/ (robots.txt honoured)`, result: home.robotsBlocked ? "not fetched: robots.txt disallows" : home.error ? `${home.error.kind}: ${home.error.message.slice(0, 120)}` : `HTTP ${home.status} at ${home.finalUrl} in ${home.ms} ms`, at: iso() });

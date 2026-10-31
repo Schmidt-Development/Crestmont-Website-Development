@@ -147,6 +147,27 @@ export async function ingestBatch(db: Db, body: Record<string, unknown>, now: Da
   const holders = new Map<string, Set<string>>();
   for (const h of otherHolders) (holders.get(h.phone_e164) ?? holders.set(h.phone_e164, new Set()).get(h.phone_e164)!).add(h.business_key);
   for (const p of valid) if (p.phones[0]) (holders.get(p.phones[0]) ?? holders.set(p.phones[0], new Set()).get(p.phones[0])!).add(p.businessKey);
+  // The same business can appear as several dataset records with different numbers (or the same website for several
+  // locations). A qualified record whose verified website, or whose name and street, already belongs to another record
+  // goes to a person instead of becoming a second lead (found by the independent lead audit, 2026-10-30).
+  const siteOf = (p: CleanProspect) => (p.website.url ? new URL(p.website.url).hostname.replace(/^www\d?\./, "") : null);
+  const placeOf = (nameNorm: string | null, line: string | null) => (nameNorm && line ? `${nameNorm}|${line.toLowerCase().replace(/\s+/g, " ").trim()}` : null);
+  const sites = [...new Set(valid.map(siteOf).filter((x): x is string => !!x))];
+  const siteHolders = new Map<string, Set<string>>();
+  for (const h of await selectIn<{ domain: string; business_key: string }>(db, (ph) => `SELECT domain, business_key FROM research_prospects WHERE website_url IS NOT NULL AND domain IN (${ph})`, sites))
+    (siteHolders.get(h.domain) ?? siteHolders.set(h.domain, new Set()).get(h.domain)!).add(h.business_key);
+  const placeHolders = new Map<string, Set<string>>();
+  for (const h of await selectIn<{ name_norm: string; address_line: string | null; business_key: string }>(db, (ph) => `SELECT name_norm, address_line, business_key FROM research_prospects WHERE name_norm IN (${ph})`, [...new Set(valid.map((p) => p.nameNorm).filter(Boolean))])) {
+    const k = placeOf(h.name_norm, h.address_line); if (k) (placeHolders.get(k) ?? placeHolders.set(k, new Set()).get(k)!).add(h.business_key);
+  }
+  const sameBusinessAs = (p: CleanProspect): string | null => {
+    const site = siteOf(p), place = placeOf(p.nameNorm, p.addressLine);
+    const other = (m: Map<string, Set<string>>, k: string | null) => (k ? [...(m.get(k) ?? [])].find((x) => x !== p.businessKey) ?? null : null);
+    const hit = other(siteHolders, site) ? "website" : other(placeHolders, place) ? "name and street" : null;
+    if (site) (siteHolders.get(site) ?? siteHolders.set(site, new Set()).get(site)!).add(p.businessKey);
+    if (place) (placeHolders.get(place) ?? placeHolders.set(place, new Set()).get(place)!).add(p.businessKey);
+    return hit;
+  };
 
   let created = 0, updated = 0, unchanged = 0, crmMatches = 0, duplicatesPrevented = 0;
   const writes = [];
@@ -157,6 +178,7 @@ export async function ingestBatch(db: Db, body: Record<string, unknown>, now: Da
     const phone = p.phones[0] ?? null;
     const shared = !!phone && (holders.get(phone)?.size ?? 0) > 1;
     if (shared) sharedPhones.add(phone!);
+    const sameAs = sameBusinessAs(p);
     if (prev && prev.content_hash === hash && !shared) { unchanged++; continue; }
     const q = qualify(p, { threshold: settings.qualify_threshold, now });
     const crm = p.phones.map((x) => crmByPhone.get(crmPhoneNorm(x) ?? "")).find(Boolean) ?? p.emails.map((e) => crmByEmail.get(e)).find(Boolean) ?? null;
@@ -170,9 +192,10 @@ export async function ingestBatch(db: Db, body: Record<string, unknown>, now: Da
     else if (crm) { status = "existing_crm"; detail = "Phone or email already belongs to a CRM contact"; }
     else if (onDnc) { status = "suppressed"; detail = "Number is on the do-not-call list"; }
     else if (shared && q.qualified) { status = "review"; detail = "Phone number shared with another business record"; }
+    else if (sameAs && q.qualified) { status = "review"; detail = `Same ${sameAs} as another business record (same business or another location)`; }
     else status = q.qualified ? "qualified" : "not_qualified";
     if (crm && !prev) crmMatches++;
-    if ((crm || (shared && q.qualified)) && !prev) duplicatesPrevented++;
+    if ((crm || (shared && q.qualified) || (sameAs && status === "review")) && !prev) duplicatesPrevented++;
     const elig = outboundEligibility({ phoneE164: phone, timeZone: tz, onDnc, existingCrmRecord: !!crm, sharedPhoneConflict: shared, complianceApproval: null, marketingConsentEvidence: null, lineType: "unknown" });
     const domain = p.website.url ? new URL(p.website.url).hostname.replace(/^www\d?\./, "") : p.domains[0] ?? null;
     const vals = [p.name, p.nameNorm, p.category, p.addressLine, p.city, p.state, p.zip, p.lat, p.lon, phone, crmPhoneNorm(phone), JSON.stringify(p.phones), p.emails[0] ?? null, JSON.stringify(p.emails), domain, JSON.stringify(p.domains), tz,

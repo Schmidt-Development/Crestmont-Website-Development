@@ -435,3 +435,14 @@ test("[audit] a dead listed domain is not 'broken' when the business has moved t
   assert.ok(other.kind === "done" && other.cls === "VERIFIED_WEBSITE_BROKEN");
   if (other.kind === "done") assert.ok(other.prospect.website.checks!.some((c) => c.method === "stale-listing check"));
 });
+
+test("[audit] a single timeout is confirmed with a patient request before it can count as a broken website", async () => {
+  const site = "https://riverside-plumbing.example/";
+  let n = 0;
+  const slowThenOk = new FakeHttp({ [site]: () => (++n === 1 ? fail(site, "timeout") : ok(site, page(), { responseMs: 9000 })) });
+  const r = await evaluate(cand(), deps(slowThenOk, new State(":memory:"), { brokenAttempts: 1 }), null);
+  assert.ok(r.kind === "done" && r.cls !== "VERIFIED_WEBSITE_BROKEN", JSON.stringify(r).slice(0, 200));
+  if (r.kind === "done") assert.ok(r.prospect.website.checks!.some((c) => /patient re-try/.test(c.method)));
+  const dead = await evaluate(cand(), deps(new FakeHttp({ [site]: fail(site, "timeout") }), new State(":memory:"), { brokenAttempts: 1 }), null);
+  assert.ok(dead.kind === "done" && dead.cls === "VERIFIED_WEBSITE_BROKEN", "still times out patiently: broken");
+});

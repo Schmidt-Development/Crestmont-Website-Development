@@ -204,6 +204,20 @@ test("[CRM-005] shared contact details: two distinct businesses with one phone n
   assert.deepEqual(rows.map((r) => [r.business_key, r.status, r.shared_phone]), [["overture:s1", "review", 1], ["overture:s2", "review", 1]]);
 });
 
+test("[CRM-005] one business seen as several dataset records (same website, or same name and street, different numbers) never becomes two leads: the later record is held for a person", async () => {
+  const { client, db } = await setup();
+  await send(client(), "batch", batch([prospect({ businessKey: "overture:w1", name: "Lakeside Bakery", phones: ["517-555-2171"] })]));
+  await send(client(), "batch", batch([
+    prospect({ businessKey: "overture:w2", name: "Lakeside Bakery & Cafe", phones: ["517-555-2172"], address: { line: "9 Elm St", city: "Lansing", state: "MI", zip: "48933" } }), // same (dead) website
+    prospect({ businessKey: "overture:w3", name: "Lakeside Bakery", phones: ["517-555-2173"], website: { ...prospect({ businessKey: "x:x" }).website, url: "https://other-bakery.example/" }, domains: ["other-bakery.example"] }), // same name and street
+    prospect({ businessKey: "overture:w4", name: "Hillside Florist", phones: ["517-555-2174"], address: { line: "40 Oak Ave", city: "Lansing", state: "MI", zip: "48933" }, website: { ...prospect({ businessKey: "x:x" }).website, url: "https://hillside-florist.example/" }, domains: ["hillside-florist.example"] }),
+  ]));
+  const rows = raw(db).prepare(`SELECT business_key, status, status_detail FROM research_prospects ORDER BY business_key`).all() as { business_key: string; status: string; status_detail: string | null }[];
+  assert.deepEqual(rows.map((r) => [r.business_key, r.status]), [["overture:w1", "qualified"], ["overture:w2", "review"], ["overture:w3", "review"], ["overture:w4", "qualified"]]);
+  assert.match(rows[1].status_detail!, /Same website as another business record/);
+  assert.match(rows[2].status_detail!, /Same name and street as another business record/);
+});
+
 test("[CRM-001] [CRM-002] promotion creates one CRM company, contact and lead with research attribution and evidence; never twice, and not after an opt-out", async () => {
   const { client, db } = await setup();
   const owner = await createStaff(db, "owner");
