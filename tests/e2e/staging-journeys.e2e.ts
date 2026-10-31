@@ -68,7 +68,7 @@ async function stripeDiagnostics() {
     await o.goto(`${BASE}/staff/integrations`);
     const row = o.locator("main tbody tr", { hasText: /^\s*Stripe/ }).first();
     await nav(o, row.getByRole("button", { name: "Run check" }));
-    probe = `${await alerts(o)} | row: ${((await o.locator("main tbody tr", { hasText: /^\s*Stripe/ }).first().innerText()) as string).replace(/\s+/g, " ").slice(0, 600)}`;
+    probe = `${await alerts(o)} | row: ${((await o.locator("main tbody tr", { hasText: /^\s*Stripe/ }).first().innerText()) as string).replace(/\s+/g, " ").slice(0, 2000)}`;
   } catch (e) { probe = `unavailable: ${(e as Error).message.split("\n")[0]}`; }
   const lines = [
     `stripe probe: ${probe}`,
