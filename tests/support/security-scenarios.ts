@@ -414,6 +414,14 @@ export function auditScenarios(w: World): Scenario[] {
           VALUES (?, 'callback', '+15550100992', 'TEST DATA', 'pending_approval', ?, 1, ?, ?)`).bind(w.ids.outboundRequest, `crestmont_${w.ids.outboundRequest}`, nowIso(), nowIso()).run();
     } },
     { key: "POST /staff/voice/dnc", fields: () => ({ phone: "+15550100993", detail: "Matrix opt-out (TEST DATA)" }) },
+    // ── Outbound AI sales calls (TEST DATA; nothing dials: RETELL_SALES_OUTBOUND is unset) ──
+    { key: "POST /staff/sales-outbound/settings", fields: () => ({ agent_id: "agent_matrix_sales_out", from_number: "+15550100970", max_concurrent: "1", max_per_run: "1", max_per_day: "5", max_attempts: "2", retry_after_hours: "48" }) },
+    { key: "POST /staff/sales-outbound/compliance", fields: () => ({ action: "approve", counsel_reference: "MATRIX-COUNSEL-REF (TEST DATA)", notes: "", confirm: "1" }) },
+    { key: "POST /staff/sales-outbound/consents", fields: () => ({ phone: "+15550100971", line_type: "landline", signer_name: "Matrix Signer", evidence_ref: "matrix-form-0001",
+      disclosure_text: "I agree Crestmont may call this number about website services using an AI (artificial) voice. TEST DATA.", captured_at: new Date(Date.now() - 86400e3).toISOString() }) },
+    { key: "POST /staff/sales-outbound/dnc-scrubs", fields: () => ({ phone: "+15550100972", registry: "national", result: "clear", source_ref: "MATRIX-SAN", checked_at: new Date(Date.now() - 3600e3).toISOString() }) },
+    { key: "POST /staff/sales-outbound/queue", fields: () => ({ lead_id: w.ids.lead! }) },
+    { key: "POST /staff/sales-outbound/queue/:id/cancel", fields: () => ({ note: "matrix" }) },
     // ── Lead research ──
     { key: "POST /staff/research/settings", fields: () => ({ paused: "1", reason: "Matrix pause (TEST DATA)", threshold: "60", max_batch: "100" }) },
     { key: "POST /staff/research/promote", fields: () => ({ prospect_id: w.ids.researchProspect! }), setup: async () => { w.ids.researchProspect = await insertResearchProspect(w, "+12025550143"); } },

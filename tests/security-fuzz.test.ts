@@ -186,6 +186,7 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
     "POST /api/webhooks/retell": async (b) => ({ "x-retell-signature": await signRetell(SECRETS.retell, b) }),
     "POST /api/webhooks/retell/functions": async (b) => ({ "x-retell-signature": await signRetell(SECRETS.retell, b) }),
     "POST /api/webhooks/retell/inbound": async (b) => ({ "x-retell-signature": await signRetell(SECRETS.retell, b) }),
+    "POST /api/webhooks/retell/outbound/functions": async (b) => ({ "x-retell-signature": await signRetell(SECRETS.retell, b) }),
     "POST /api/webhooks/resend": async (b) => signSvix(SECRETS.resend, `msg_${Math.random().toString(16).slice(2)}`, b),
     "POST /api/leads": async () => ({}),
     // The website assistant accepts same-origin JSON only; the Origin header is its "signature".
