@@ -23,10 +23,11 @@ import * as tax from "./tax.ts";
 import * as voiceOps from "./voice-ops.ts";
 import * as accountProfile from "./account-profile.ts";
 import * as salesOptimization from "./sales-optimization.ts";
+import * as research from "./research.ts";
 
 export function registerAll(r: Router): void {
   // reportsOps precedes finance so /staff/reports/operations is not captured by /staff/reports/:file.
-  for (const m of [api, auth, publicSite, portal, crm, projects, support, reportsOps, finance, owner, readiness, platform, legal, hooks, ops, notifications, portalMaintenance, live, builds, tax, voiceOps, salesOptimization, accountProfile]) m.register(r);
+  for (const m of [api, auth, publicSite, portal, crm, projects, support, reportsOps, finance, owner, readiness, platform, legal, hooks, ops, notifications, portalMaintenance, live, builds, tax, voiceOps, salesOptimization, accountProfile, research]) m.register(r);
 }
 
 /** Every registered method + path pattern, in match order (route security matrix, AUTH-007/SEC-001). */

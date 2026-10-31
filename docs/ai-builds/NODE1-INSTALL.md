@@ -12,8 +12,8 @@ connected to **staging** only. **Production is not touched by anything in this d
 |---|---|---|
 | Runner implementation | One runner: `runner/` (Node 22, Docker sandboxes, egress proxy, native Ollama). The installer is `runner/windows/Install-CrestmontRunner.ps1`. | Kept. No second runner was created. |
 | PR #52 (D01–D13) | Already on `main` (merged through #64), so staging has it. | — |
-| PR #16 (dual-model V4) | Not merged. It predates #52, and its migrations 0041–0043 collide with `main` (0041–0050 are already on staging). | Branch `claude/node1-runner-integration`: `main` merged in, 10 conflicts resolved, migrations renumbered to **0051–0053**, D07 computer-name evidence (`RUNNER_HOST_LABEL`) restored in the installer. |
-| PR #51 (simulated purchase) | Stacked on #16. Its `0044_simulated_payments` collides, and its payment handler conflicts with `main`'s idempotent CREST-GAP-006 rework. | Branch `claude/node1-e2e-integration`: migration renumbered to **0054**, payment path rebuilt on `main`'s idempotent follow-ups, and no receipt is sent for a simulated payment (also in the repair sweep). |
+| PR #16 (dual-model V4) | Not merged. It predates #52, and its migrations 0041–0043 collide with `main` (0041–0050 are already on staging). | Branch `claude/node1-runner-integration`: `main` merged in, 10 conflicts resolved, migrations renumbered to **0056–0058**, D07 computer-name evidence (`RUNNER_HOST_LABEL`) restored in the installer. |
+| PR #51 (simulated purchase) | Stacked on #16. Its `0044_simulated_payments` collides, and its payment handler conflicts with `main`'s idempotent CREST-GAP-006 rework. | Branch `claude/node1-e2e-integration`: migration renumbered to **0059**, payment path rebuilt on `main`'s idempotent follow-ups, and no receipt is sent for a simulated payment (also in the repair sweep). |
 | Staging protocol vs V4 runner | V4 additions are additive (v1.5). The runner works with today's staging in single-runner mode (no GPU worker id). | You install now against staging as it is. Worker enrollment comes after #16 is merged (§8). |
 | HQ/JARVIS safety | The installer rewrote Ollama's global settings and force-restarted Ollama. The GPU scheduler unloaded *any* model that didn't fit, including JARVIS's. | `-PreserveOllamaConfig`: Ollama is not changed or restarted. The scheduler only ever unloads Crestmont's own Model A/B (regression test). |
 | Rollback | There was none. | Images are kept as `:1-previous` before each rebuild, and `Uninstall-CrestmontRunner.ps1` offers stop, `-Rollback` and `-Remove`. |
@@ -172,7 +172,7 @@ service isn't possible with this architecture. Options:
 ## 8. After certification (Phase 6 and later; each step needs your authorization)
 
 1. Merge `claude/node1-runner-integration`, then `claude/node1-e2e-integration`, into `main`. The staging deploy
-   applies migrations 0051–0054.
+   applies migrations 0056–0059.
 2. Register the worker: **Owner → AI builds → GPU workers**, "Node 1 RTX 5090", 1 concurrent build. Save the key to
    `C:\CrestmontRunner\secrets\worker_key`, then re-run step E with `-WorkerId wkr_…`.
 3. Put the curated skills in `C:\CrestmontRunner\skills\` (`RUNNER-SETUP.md` §6), re-run step E without

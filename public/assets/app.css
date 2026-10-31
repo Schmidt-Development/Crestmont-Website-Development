@@ -2009,3 +2009,13 @@ html.has-intro .cb { animation: show-now 1ms linear 2.4s backwards; }
   .jr__stop[aria-pressed="true"] { background: var(--gold-2); border-color: var(--gold-2); }
   .jr__stop[aria-pressed="true"] .jr__lbl { color: var(--on-gold); }
 }
+
+/* ───────────── Lead research (/staff/research) ───────────── */
+.research-detail { margin-top: var(--s-2); }
+.research-detail > summary { cursor: pointer; color: var(--gold-2); }
+.research-detail h4 { margin: var(--s-3) 0 var(--s-1); font-size: 0.95rem; }
+.research-findings { padding-left: 1.1rem; }
+.research-findings li { margin-bottom: var(--s-2); }
+.research-findings a { word-break: break-all; }
+.inline-form { display: flex; gap: var(--s-2); align-items: end; flex-wrap: wrap; margin-top: var(--s-2); }
+.inline-form .field { margin: 0; flex: 1 1 14rem; }

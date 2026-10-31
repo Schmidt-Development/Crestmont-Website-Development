@@ -1,0 +1,6 @@
+{
+  "purpose": "Research staging E2E (deploy-staging.yml): a small batch of real Overture businesses researched live and sent to the real staging API, then promoted into the real staging CRM.",
+  "bbox": { "xmin": -84.5650, "ymin": 42.7250, "xmax": -84.5350, "ymax": 42.7450 },
+  "limit": 30,
+  "maxPromotions": 5
+}

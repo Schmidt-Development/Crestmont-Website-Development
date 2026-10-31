@@ -36,7 +36,7 @@ export interface BuildSettings {
   automation_enabled: number; globally_paused: number; pause_reason: string | null; auto_start_after: string;
   run_budget_micro: number; project_budget_micro: number; max_runtime_minutes: number; max_turns: number;
   max_concurrent: number; max_attempts: number; lease_seconds: number; model: string; updated_by: string | null; updated_at: string;
-  /** Founder policy for customer revision requests (migration 0051): off | owner_approval (default) | auto. */
+  /** Founder policy for customer revision requests (migration 0056): off | owner_approval (default) | auto. */
   customer_revision_mode: CustomerRevisionMode;
   /** Days before a superseded / finished build's preview is deleted; null = keep until an owner deletes it (0041). */
   preview_retention_days: number | null;

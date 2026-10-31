@@ -1,0 +1,12 @@
+{
+  "purpose": "First controlled real-data run: Overture places in a small Lansing, MI area; real websites; Common Crawl evidence. Run 10: every business with a phone in the box with all audit fixes, including corroborated existence for no-website leads. Edit this file to trigger a new run (workflow research-live-sample.yml).",
+  "bbox": {
+    "xmin": -84.565,
+    "ymin": 42.725,
+    "xmax": -84.535,
+    "ymax": 42.745
+  },
+  "limit": 1500,
+  "brokenRecheckMinutes": 5,
+  "concurrency": 48
+}

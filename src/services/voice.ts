@@ -21,7 +21,7 @@ import { newId, nowIso } from "../lib/db.ts";
 import { hmacSha256Hex, timingSafeEqualHex, sha256Hex } from "../lib/crypto.ts";
 import { parse, v, ValidationError } from "../lib/validate.ts";
 import { PACKAGES, MAINTENANCE_PLANS, APPROVED_SERVICES } from "../domain/catalog.ts";
-import { audit } from "./security.ts";
+import { audit, rateLimit } from "./security.ts";
 import { effectivePrices } from "./pricing-approvals.ts";
 import { addLeadNote, addLeadTask, notifyOwners, redactSensitive } from "./voice-common.ts";
 import { hoursStatus, loadVoiceConfig, transferAvailability, toE164, type VoiceConfig } from "./voice-settings.ts";
@@ -32,15 +32,30 @@ import { safeHttpsUrl } from "../lib/html.ts";
 
 export class VoiceAuthError extends Error {}
 
+/** The eight custom functions configured on Crestmont's inbound Retell agent, in register order. */
+export const INBOUND_FUNCTIONS = ["crm_customer_lookup", "crm_upsert_lead", "get_packages_pricing", "create_checkout_session",
+  "check_payment_status", "schedule_consultation", "create_support_ticket", "send_customer_email"] as const;
+
 export const CALL_OUTCOMES = ["lead_captured", "callback_requested", "support_routed", "escalated", "info_only", "abandoned", "error"] as const;
 export type CallOutcome = (typeof CALL_OUTCOMES)[number];
 export const VOICE_FUNCTIONS = ["get_published_pricing", "create_lead", "request_callback", "route_support", "escalate",
   // Retell backend completion (migration 0042): hours, transfer, consultations, opt-out.
   "get_business_hours", "check_transfer_availability", "check_consultation_availability", "book_consultation",
-  "lookup_consultation", "reschedule_consultation", "cancel_consultation", "record_opt_out"] as const;
+  "lookup_consultation", "reschedule_consultation", "cancel_consultation", "record_opt_out",
+  // Inbound receptionist register (migration 0055, docs/voice/RETELL-INBOUND-FUNCTION-REGISTER.md): the eight named
+  // functions configured in Retell. They reuse the services above; none of them adds a CRM, payment, scheduling or mail path.
+  ...INBOUND_FUNCTIONS] as const;
 export type VoiceFunction = (typeof VOICE_FUNCTIONS)[number];
 
-const READ_ONLY = new Set<VoiceFunction>(["get_published_pricing", "get_business_hours", "check_transfer_availability", "check_consultation_availability"]);
+const READ_ONLY = new Set<VoiceFunction>(["get_published_pricing", "get_business_hours", "check_transfer_availability", "check_consultation_availability",
+  "crm_customer_lookup", "get_packages_pricing", "check_payment_status"]);
+/** Read-only answers are never replayed from storage. schedule_consultation is read-only when it only lists times. */
+export function isReadOnlyCall(fn: string, args: unknown): boolean {
+  if (READ_ONLY.has(fn as VoiceFunction)) return true;
+  if (fn !== "schedule_consultation") return false;
+  const a = args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : {};
+  return typeof a.start_time !== "string" || a.start_time.trim() === "";
+}
 
 /**
  * voice_events key marking a call that the inbound webhook answered in voicemail-only mode because the Owner's
@@ -56,6 +71,8 @@ export interface VoiceDeps {
   baseUrl?: string;
   now?: () => Date;
   calendar?: sched.CalendarAdapter;
+  /** Whether Stripe (test mode on staging) is configured. create_checkout_session refuses honestly when it is not. */
+  paymentsConfigured?: boolean;
 }
 
 export async function signVoiceEvent(secret: string, body: string, t = Math.floor(Date.now() / 1000)): Promise<string> {
@@ -217,6 +234,10 @@ function isCallersOwn(call: CallRow, phoneE164: string): boolean {
 
 const SUPPORT_RESPONSE = "Thank you. I've passed this to our support team. If we can match it to an existing account, they'll follow up through that account; otherwise someone will call you back during staffed hours.";
 
+const CHECKOUT_PACKAGES = ["starter", "business", "premium"] as const;
+/** The only emails the receptionist can send on request. Fixed wording (mailer.ts voice_followup / consultation). */
+const EMAIL_KINDS = ["package_information", "consultation_details"] as const;
+
 const fnSchemas = {
   get_published_pricing: v.object({}),
   create_lead: v.object({
@@ -259,7 +280,82 @@ const fnSchemas = {
   reschedule_consultation: v.object({ confirmation_code: v.string({ min: 4, max: 20 }), phone: v.string({ pattern: phonePattern }), new_start_time: v.string({ min: 16, max: 40 }) }),
   cancel_consultation: v.object({ confirmation_code: v.string({ min: 4, max: 20 }), phone: v.string({ pattern: phonePattern }), reason: v.string({ optional: true, max: 500 }) }),
   record_opt_out: v.object({ phone: v.string({ optional: true, pattern: phonePattern }) }),
+  // ── Inbound register (INBOUND_FUNCTIONS) ──
+  crm_customer_lookup: v.object({
+    name: v.string({ optional: true, max: 120 }),
+    email: v.email({ optional: true }),
+    phone: v.string({ optional: true, pattern: phonePattern }),
+  }),
+  crm_upsert_lead: v.object({
+    name: v.string({ min: 2, max: 120 }),
+    email: v.email({ optional: true }),
+    phone: v.string({ optional: true, pattern: phonePattern }),
+    company: v.string({ optional: true, max: 160 }),
+    interest: v.enumOf(["starter", "business", "premium", "custom", "maintenance", "other"] as const),
+    requirements: v.string({ min: 5, max: 5000 }),
+  }),
+  get_packages_pricing: v.object({}),
+  create_checkout_session: v.object({
+    package: v.enumOf(CHECKOUT_PACKAGES),
+    name: v.string({ min: 2, max: 120 }),
+    email: v.email(),
+  }),
+  check_payment_status: v.object({
+    checkout_reference: v.string({ min: 4, max: 20 }),
+    email: v.email(),
+  }),
+  schedule_consultation: v.object({
+    name: v.string({ optional: true, min: 2, max: 120 }),
+    phone: v.string({ optional: true, pattern: phonePattern }),
+    email: v.email({ optional: true }),
+    topic: v.string({ optional: true, min: 3, max: 1000 }),
+    start_time: v.string({ optional: true, max: 40 }),
+    preferred_date: v.string({ optional: true, pattern: /^\d{4}-\d{2}-\d{2}$/ }),
+    reminder_call_ok: v.enumOf(["true", "false"] as const, { optional: true }),
+  }),
+  create_support_ticket: v.object({
+    name: v.string({ min: 2, max: 120 }),
+    email: v.email(),
+    phone: v.string({ pattern: phonePattern }),
+    summary: v.string({ min: 5, max: 4000 }),
+  }),
+  send_customer_email: v.object({
+    template: v.enumOf(EMAIL_KINDS),
+    name: v.string({ min: 2, max: 120 }),
+    email: v.email(),
+    confirmation_code: v.string({ optional: true, min: 4, max: 20 }),
+  }),
 };
+
+/** Emails per call (checkout links + send_customer_email together) and per recipient address per day. */
+export const MAX_EMAILS_PER_CALL = 3;
+export const MAX_EMAILS_PER_RECIPIENT_PER_DAY = 3;
+const NOT_VERIFIED_PAYMENT = { verified: false, message: "I couldn't match that checkout reference and email. Please check the reference in the email we sent, or I can ask a team member to follow up." };
+
+const refCode = () => sched.newConfirmationCode();
+
+/** Mail is counted only when it was actually handed to the mail pipeline on this call. */
+async function emailsSentOnCall(db: Db, call: CallRow): Promise<number> {
+  return (await db.prepare(`SELECT COUNT(*) AS n FROM voice_events WHERE call_id = ? AND kind IN ('fn:create_checkout_session','fn:send_customer_email') AND status = 'ok' AND result_json LIKE '%"email_sent":true%'`)
+    .bind(call.id).first<{ n: number }>())!.n;
+}
+
+/**
+ * Shared gate for every email the receptionist sends on a caller's request: needs the mail pipeline, the per-call cap
+ * and the per-recipient daily cap (rate_limits). The staging recipient allowlist and suppressions are applied by the
+ * email adapter itself, so an address outside the allowlist is recorded in the outbox and never sent.
+ */
+async function emailGate(db: Db, call: CallRow, deps: VoiceDeps, to: string): Promise<null | Record<string, unknown>> {
+  if (!deps.mail || !deps.baseUrl) return { email_sent: false, reason: "email_unavailable", message: "I can't send emails right now. I can ask a team member to follow up instead." };
+  if (await emailsSentOnCall(db, call) >= MAX_EMAILS_PER_CALL) return { email_sent: false, reason: "call_limit", message: "I've already sent the emails I can on this call. A team member can send anything else." };
+  const rl = await rateLimit(db, `voice-email:${to.trim().toLowerCase()}`, MAX_EMAILS_PER_RECIPIENT_PER_DAY, 86_400);
+  if (!rl.allowed) return { email_sent: false, reason: "recipient_limit", message: "That address has already received several emails from us today. A team member can follow up instead." };
+  return null;
+}
+
+const mailOutcome = (status: string) => status === "sent" || status === "queued" || status === "duplicate"
+  ? { email_sent: true, email_status: status }
+  : { email_sent: false, email_status: status };
 
 /** Same answer for every unverified booking request: never reveals whether a booking exists. */
 const NOT_VERIFIED = { verified: false, message: "I couldn't find an upcoming consultation with that reference and phone number. I can ask a team member to call you back." };
@@ -306,6 +402,48 @@ function redactArgs(raw: unknown): unknown {
   return Object.fromEntries(Object.entries(raw as Record<string, unknown>).map(([k, val]) => [k, typeof val === "string" ? redactSensitive(val) : typeof val === "boolean" ? String(val) : val]));
 }
 
+/**
+ * Support intake shared by route_support and create_support_ticket. A ticket is opened only for a verified account
+ * email AND a phone on that user's CRM contact; otherwise a CRM callback task is created. The response, including the
+ * shape of the spoken reference (SR-XXXXXX), is identical in both branches, so it never reveals whether an account exists.
+ */
+async function supportRequest(db: Db, call: CallRow, a: { name: string; email: string; phone: string; summary: string }, withRef: boolean): Promise<Record<string, unknown>> {
+  // route_support keeps its original byte-identical answer (no reference); create_support_ticket adds one.
+  const ref = withRef ? `SR-${refCode()}` : null;
+  // Match only on a verified account email AND a phone recorded on that user's CRM contact.
+  const user = await db.prepare(`SELECT u.id FROM users u WHERE u.email = ? AND u.email_verified_at IS NOT NULL AND u.disabled_at IS NULL`).bind(a.email.trim().toLowerCase()).first<{ id: string }>();
+  let orgId: string | null = null;
+  if (user) {
+    const phones = (await db.prepare(`SELECT phone FROM contacts WHERE user_id = ? AND phone IS NOT NULL`).bind(user.id).all<{ phone: string }>()).results;
+    const phoneOk = phones.some((p) => digits(p.phone).length >= 7 && digits(p.phone) === digits(a.phone));
+    if (phoneOk) {
+      orgId = (await db.prepare(`SELECT m.organization_id FROM memberships m JOIN organizations o ON o.id = m.organization_id WHERE m.user_id = ? AND o.kind = 'customer' ORDER BY m.created_at LIMIT 1`).bind(user.id).first<{ organization_id: string }>())?.organization_id ?? null;
+    }
+  }
+  if (user && orgId) {
+    const at = nowIso(), ticketId = newId("tkt");
+    await db.batch([
+      db.prepare(`INSERT INTO tickets (id, organization_id, subject, category, priority, status, opened_by, created_at, updated_at, voice_request_ref) VALUES (?,?,?, 'other', 'normal', 'open', ?, ?, ?, ?)`)
+        .bind(ticketId, orgId, `${call.is_test ? "[TEST CALL] " : ""}Phone support request${ref ? ` ${ref}` : ""}`, user.id, at, at, ref),
+      db.prepare(`INSERT INTO ticket_messages (id, ticket_id, author_user_id, body, internal, created_at) VALUES (?,?,NULL,?,0,?)`)
+        .bind(newId("tm"), ticketId, `Received by the AI receptionist (call ${call.provider_call_id}). Caller's description: ${a.summary}`, at),
+      db.prepare(`UPDATE calls SET outcome = COALESCE(outcome, 'support_routed') WHERE id = ?`).bind(call.id),
+    ]);
+    await audit(db, { actorKind: "ai", action: "ticket.created_by_receptionist", subjectType: "ticket", subjectId: ticketId, organizationId: orgId, details: { call: call.id, ...(ref ? { ref } : {}) } });
+  } else {
+    const leadId = call.lead_id ?? await createCallLead(db, call, { name: a.name, email: a.email, phone: a.phone, interest: "other", message: `Support callback (caller not matched to an account): ${a.summary}` });
+    await addTask(db, leadId, `Support callback${ref ? ` ${ref}` : ""} for ${a.name} at ${a.phone}. Caller could not be matched to an account by verified email and phone — verify identity before discussing any account details.`);
+  }
+  // Identical response in both branches: never confirms whether an account exists.
+  if (!ref) return { received: true, message: SUPPORT_RESPONSE };
+  return { received: true, request_reference: ref, message: `${SUPPORT_RESPONSE} Your request reference is ${ref.split("").join(" ")}.` };
+}
+
+async function paymentVerifyFailures(db: Db, call: CallRow): Promise<number> {
+  return (await db.prepare(`SELECT COUNT(*) AS n FROM voice_events WHERE call_id = ? AND kind = 'fn:check_payment_status' AND result_json LIKE '%"verified":false%'`)
+    .bind(call.id).first<{ n: number }>())!.n;
+}
+
 async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn: unknown, deps: VoiceDeps): Promise<Record<string, unknown>> {
   const rawArgs = redactArgs(rawArgsIn);
   const now = deps.now?.() ?? new Date();
@@ -315,15 +453,20 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
   switch (name) {
     case "get_published_pricing":
       return { pricing: publishedPricing(await effectivePrices(db)) }; // CREST-GAP-080
-    case "create_lead": {
-      const a = parse(fnSchemas.create_lead, rawArgs ?? {});
+    case "create_lead":
+    case "crm_upsert_lead": {
+      // crm_upsert_lead is create_lead under its register name: the CRM intake engine (contact-identity.ts) matches an
+      // existing contact by phone or email and continues their open lead instead of creating a duplicate. The answer is
+      // the same whether a record was matched or created, so it never reveals that the caller is already known.
+      const a = parse(fnSchemas[name] as typeof fnSchemas.create_lead, rawArgs ?? {});
       if (!a.email && !a.phone) throw new ValidationError(["email or phone is required"]);
       if (call.lead_id) {
         await db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'call',?,?)`).bind(newId("act"), call.lead_id, `Additional requirements from caller: ${a.requirements}`.slice(0, 4000), nowIso()).run();
-        return { leadCreated: false, message: "Thanks, I've added that to your request." };
+        return name === "crm_upsert_lead" ? { lead_saved: true, message: "Thanks, I've added that to your request." } : { leadCreated: false, message: "Thanks, I've added that to your request." };
       }
       await createCallLead(db, call, { name: a.name, email: a.email, phone: a.phone, company: a.company, interest: a.interest, message: a.requirements });
-      return { leadCreated: true, message: "Thank you. A Crestmont team member will follow up. I can't confirm prices beyond our published packages or commit to dates." };
+      const msg = "Thank you. A Crestmont team member will follow up. I can't confirm prices beyond our published packages or commit to dates.";
+      return name === "crm_upsert_lead" ? { lead_saved: true, message: msg } : { leadCreated: true, message: msg };
     }
     case "request_callback": {
       const a = parse(fnSchemas.request_callback, rawArgs ?? {});
@@ -338,34 +481,10 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       }
       return { callbackRequested: true, message: "Thanks. Someone will call you back during staffed hours." };
     }
-    case "route_support": {
-      const a = parse(fnSchemas.route_support, rawArgs ?? {});
-      // Match only on a verified account email AND a phone recorded on that user's CRM contact.
-      const user = await db.prepare(`SELECT u.id FROM users u WHERE u.email = ? AND u.email_verified_at IS NOT NULL AND u.disabled_at IS NULL`).bind(a.email.trim().toLowerCase()).first<{ id: string }>();
-      let orgId: string | null = null;
-      if (user) {
-        const phones = (await db.prepare(`SELECT phone FROM contacts WHERE user_id = ? AND phone IS NOT NULL`).bind(user.id).all<{ phone: string }>()).results;
-        const phoneOk = phones.some((p) => digits(p.phone).length >= 7 && digits(p.phone) === digits(a.phone));
-        if (phoneOk) {
-          orgId = (await db.prepare(`SELECT m.organization_id FROM memberships m JOIN organizations o ON o.id = m.organization_id WHERE m.user_id = ? AND o.kind = 'customer' ORDER BY m.created_at LIMIT 1`).bind(user.id).first<{ organization_id: string }>())?.organization_id ?? null;
-        }
-      }
-      if (user && orgId) {
-        const at = nowIso(), ticketId = newId("tkt");
-        await db.batch([
-          db.prepare(`INSERT INTO tickets (id, organization_id, subject, category, priority, status, opened_by, created_at, updated_at) VALUES (?,?,?, 'other', 'normal', 'open', ?, ?, ?)`)
-            .bind(ticketId, orgId, `${call.is_test ? "[TEST CALL] " : ""}Phone support request`, user.id, at, at),
-          db.prepare(`INSERT INTO ticket_messages (id, ticket_id, author_user_id, body, internal, created_at) VALUES (?,?,NULL,?,0,?)`)
-            .bind(newId("tm"), ticketId, `Received by the AI receptionist (call ${call.provider_call_id}). Caller's description: ${a.summary}`, at),
-          db.prepare(`UPDATE calls SET outcome = COALESCE(outcome, 'support_routed') WHERE id = ?`).bind(call.id),
-        ]);
-        await audit(db, { actorKind: "ai", action: "ticket.created_by_receptionist", subjectType: "ticket", subjectId: ticketId, organizationId: orgId, details: { call: call.id } });
-      } else {
-        const leadId = call.lead_id ?? await createCallLead(db, call, { name: a.name, email: a.email, phone: a.phone, interest: "other", message: `Support callback (caller not matched to an account): ${a.summary}` });
-        await addTask(db, leadId, `Support callback for ${a.name} at ${a.phone}. Caller could not be matched to an account by verified email and phone — verify identity before discussing any account details.`);
-      }
-      // Identical response in both branches: never confirms whether an account exists.
-      return { received: true, message: SUPPORT_RESPONSE };
+    case "route_support":
+    case "create_support_ticket": {
+      const a = parse(fnSchemas[name] as typeof fnSchemas.route_support, rawArgs ?? {});
+      return supportRequest(db, call, a, name === "create_support_ticket");
     }
     case "escalate": {
       const a = parse(fnSchemas.escalate, rawArgs ?? {});
@@ -476,6 +595,120 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
           message: "That time isn't available. The original booking is unchanged." };
       }
     }
+    // ───── Inbound register functions (INBOUND_FUNCTIONS) ─────
+    case "crm_customer_lookup": {
+      // Guardrail 6 (VOICE_GUARDRAILS): a name, email or phone given on a call is not identity verification, so this
+      // function never queries customer records and never says whether a person or account exists. Same answer for
+      // every input; it tells the agent which function to use next. A verified lookup needs a Founder-approved method
+      // (RETELL-BACKEND-REPORT.md §4 item 7, e.g. a one-time code sent to the account email).
+      parse(fnSchemas.crm_customer_lookup, rawArgs ?? {});
+      return { identity_verified: false, account_details_available: false, details_captured_this_call: !!call.lead_id,
+        next_step: "For an existing customer's issue use create_support_ticket. For a new project or enquiry use crm_upsert_lead.",
+        message: "For privacy I can't look up or confirm account details by phone. I can pass your request to the team, who will follow up through your account." };
+    }
+    case "get_packages_pricing": {
+      parse(fnSchemas.get_packages_pricing, rawArgs ?? {});
+      const pricing = publishedPricing(await effectivePrices(db));
+      const purchasable = Object.values(MAINTENANCE_PLANS).filter((m) => m.entitlementsStatus === "approved").map((m) => m.name);
+      return { pricing: { ...pricing,
+        maintenancePurchasableOnline: purchasable,
+        addOns: [], addOnsNote: "No add-ons are approved for sale. Anything beyond a package's scope is quoted separately by a person.",
+        checkoutPackages: CHECKOUT_PACKAGES.map((id) => PACKAGES[id].name) } };
+    }
+    case "create_checkout_session": {
+      const a = parse(fnSchemas.create_checkout_session, rawArgs ?? {});
+      if (!deps.paymentsConfigured) return { link_sent: false, email_sent: false, reason: "payments_not_configured", message: "Online payment isn't available right now. I can ask a team member to follow up about payment options." };
+      const email = a.email.trim().toLowerCase();
+      const pkg = PACKAGES[a.package];
+      // A repeat request for the same package and address on this call reuses the first link (and its reference).
+      const prior = await db.prepare(`SELECT reference FROM voice_checkout_links WHERE call_id = ? AND package_id = ? AND email = ?`).bind(call.id, pkg.id, email).first<{ reference: string }>();
+      if (prior) return { link_sent: true, email_sent: true, already_sent: true, package: pkg.name, message: "I've already sent that secure link to this email on this call." };
+      const gate = await emailGate(db, call, deps, email);
+      if (gate) return { link_sent: false, ...gate };
+      const price = publishedPricing(await effectivePrices(db)).packages.find((p) => p.name === pkg.name)!.price;
+      const leadId = call.lead_id ?? await createCallLead(db, call, { name: a.name, email, phone: call.from_number, interest: pkg.id, message: `Asked the AI receptionist for a secure checkout link for the ${pkg.name} package.` });
+      const reference = refCode();
+      await db.prepare(`INSERT INTO voice_checkout_links (id, call_id, reference, package_id, email, lead_id, is_test, created_at) VALUES (?,?,?,?,?,?,?,?)`)
+        .bind(newId("vck"), call.id, reference, pkg.id, email, leadId, call.is_test, nowIso()).run();
+      const url = `${deps.baseUrl}/checkout/${pkg.id}`;
+      let status = "failed";
+      try {
+        status = (await sendMail(deps.mail!, { template: "voice_followup", to: email, idempotencyKey: `voice_checkout:${call.id}:${pkg.id}:${email}`,
+          data: { kind: "checkout_link", name: a.name, packageName: pkg.name, price, reference, url } })).status;
+      } catch { /* recorded by the mail adapter */ }
+      await addLeadNote(db, leadId, `AI receptionist emailed a secure ${pkg.name} checkout link (reference ${reference}, mail ${status}). Nothing is charged until the customer completes Stripe Checkout online.`);
+      await audit(db, { actorKind: "ai", action: "voice.checkout_link_sent", subjectType: "lead", subjectId: leadId, details: { call: call.id, package: pkg.id, mail: status } });
+      const out = mailOutcome(status);
+      // The reference is deliberately NOT returned: it is only in the email, so check_payment_status proves the caller can read that inbox.
+      return { link_sent: out.email_sent, ...out, package: pkg.name, price,
+        message: out.email_sent
+          ? `I've emailed a secure link to buy the ${pkg.name} package. It opens our website, where you sign in, review the agreements and pay through Stripe. I never take card details by phone.`
+          : "I couldn't send an email to that address. I can ask a team member to follow up instead." };
+    }
+    case "check_payment_status": {
+      if (await paymentVerifyFailures(db, call) >= MAX_VERIFY_FAILURES) return { verified: false, locked: true, message: "I can't check that on this call. I can ask a team member to follow up." };
+      const a = parse(fnSchemas.check_payment_status, rawArgs ?? {});
+      const link = await db.prepare(`SELECT package_id, email, created_at FROM voice_checkout_links WHERE reference = ? AND email = ?`)
+        .bind(sched.normaliseCode(a.checkout_reference), a.email.trim().toLowerCase()).first<{ package_id: string; email: string; created_at: string }>();
+      if (!link) return NOT_VERIFIED_PAYMENT;
+      // Authoritative state: invoices.status becomes 'paid' only from a signature-verified Stripe webhook
+      // (src/services/payments.ts); checkout itself never marks anything paid. Only the package and address behind
+      // this reference are consulted, and only from the moment the link was sent.
+      const inv = await db.prepare(`SELECT i.status, i.stripe_checkout_session_id FROM invoices i JOIN orders o ON o.id = i.order_id
+          JOIN memberships m ON m.organization_id = i.organization_id JOIN users u ON u.id = m.user_id
+          WHERE lower(u.email) = ? AND o.kind = 'package' AND o.product_id = ? AND i.created_at >= ? AND i.status IN ('open','paid')
+          ORDER BY CASE i.status WHEN 'paid' THEN 0 ELSE 1 END, i.created_at DESC LIMIT 1`)
+        .bind(link.email, link.package_id, link.created_at).first<{ status: string; stripe_checkout_session_id: string | null }>();
+      const pkgName = PACKAGES[link.package_id as keyof typeof PACKAGES].name;
+      if (inv?.status === "paid") return { verified: true, payment_status: "paid", package: pkgName, message: `Payment for the ${pkgName} package is confirmed. A receipt has been emailed and the team will be in touch about next steps.` };
+      if (inv?.stripe_checkout_session_id) return { verified: true, payment_status: "checkout_started_not_paid", package: pkgName, message: "Checkout was started but we haven't received a confirmed payment yet. Stripe confirmations can take a few minutes." };
+      return { verified: true, payment_status: "not_started", package: pkgName, message: "We haven't received a payment for that link yet. The link in the email is still the way to pay." };
+    }
+    case "schedule_consultation": {
+      // One function for Retell, two existing steps: without start_time it lists real open slots
+      // (check_consultation_availability); with start_time it books through voice-scheduling.ts, where the database
+      // allows only one active booking per start time, so a slot can never be double-booked.
+      const a = parse(fnSchemas.schedule_consultation, rawArgs ?? {});
+      if (!a.start_time) {
+        const r = await runFunction(db, call, "check_consultation_availability", { ...(a.preferred_date ? { preferred_date: a.preferred_date } : {}) }, deps);
+        return { step: "availability", ...r };
+      }
+      const missing = (["name", "phone", "topic"] as const).filter((k) => !a[k]);
+      if (missing.length) throw new ValidationError(missing.map((k) => `${k} is required to book`));
+      const r = await runFunction(db, call, "book_consultation", { name: a.name, phone: a.phone, email: a.email, start_time: a.start_time, topic: a.topic, reminder_call_ok: a.reminder_call_ok }, deps);
+      return { step: "booking", ...r };
+    }
+    case "send_customer_email": {
+      const a = parse(fnSchemas.send_customer_email, rawArgs ?? {});
+      const email = a.email.trim().toLowerCase();
+      if (a.template === "consultation_details") {
+        // Only a booking made on THIS call can be re-sent, and only by its reference: never another caller's booking.
+        if (!a.confirmation_code) throw new ValidationError(["confirmation_code is required for consultation_details"]);
+        const row = await db.prepare(`SELECT * FROM consultations WHERE call_id = ? AND confirmation_code = ? AND status IN ('requested','confirmed')`)
+          .bind(call.id, sched.normaliseCode(a.confirmation_code)).first<sched.ConsultationRow>();
+        if (!row) return { email_sent: false, reason: "not_found", message: "I can only re-send details of a consultation booked on this call. I can ask a team member to help." };
+        const gate = await emailGate(db, call, deps, email);
+        if (gate) return gate;
+        let status = "failed";
+        try {
+          status = (await sendMail(deps.mail!, { template: "consultation", to: email, idempotencyKey: `voice_resend:${row.id}:${email}`,
+            data: { event: row.status === "confirmed" ? "confirmed" : "requested", name: row.name, when: sched.labelOf(row), code: row.confirmation_code } })).status;
+        } catch { /* recorded by the mail adapter */ }
+        const out = mailOutcome(status);
+        return { ...out, template: a.template, message: out.email_sent ? "I've emailed the consultation details." : "I couldn't send an email to that address. I can ask a team member to follow up instead." };
+      }
+      const gate = await emailGate(db, call, deps, email);
+      if (gate) return gate;
+      const pricing = publishedPricing(await effectivePrices(db));
+      let status = "failed";
+      try {
+        status = (await sendMail(deps.mail!, { template: "voice_followup", to: email, idempotencyKey: `voice_pricing:${call.id}:${email}`,
+          data: { kind: "package_information", name: a.name, packages: pricing.packages.map((p) => ({ name: p.name, price: p.price })), maintenance: pricing.maintenance.map((m) => ({ name: m.name, monthly: m.monthly })), url: `${deps.baseUrl}/pricing` } })).status;
+      } catch { /* recorded by the mail adapter */ }
+      if (call.lead_id) await addLeadNote(db, call.lead_id, `AI receptionist emailed published package prices at the caller's request (mail ${status}).`);
+      const out = mailOutcome(status);
+      return { ...out, template: a.template, message: out.email_sent ? "I've emailed our published package prices." : "I couldn't send an email to that address. I can ask a team member to follow up instead." };
+    }
     case "record_opt_out": {
       const a = parse(fnSchemas.record_opt_out, rawArgs ?? {});
       const phone = toE164(a.phone ?? call.from_number);
@@ -546,7 +779,7 @@ export async function handleVoiceEvent(db: Db, rawBody: string, deps: VoiceDeps 
   const fn = parse(v.enumOf(VOICE_FUNCTIONS), (json.function as { name?: unknown } | undefined)?.name);
   if (!base.event_id) throw new ValidationError(["event_id is required for function calls (idempotency key)"]);
   // Read-only answers can change during a call (availability, hours): log them, never replay a stored one.
-  const key = READ_ONLY.has(fn) ? `fn:${base.event_id}:${newId("ro")}` : `fn:${base.event_id}`;
+  const key = isReadOnlyCall(fn, (json.function as { arguments?: unknown }).arguments) ? `fn:${base.event_id}:${newId("ro")}` : `fn:${base.event_id}`;
   const claim = await claimEvent(db, call.id, key, `fn:${fn}`);
   if (claim.duplicate) return { status: 200, body: { ok: true, duplicate: true, result: claim.result } };
   if (!VOICEMAIL_FUNCTIONS.has(fn) && await isVoicemailCall(db, call)) {

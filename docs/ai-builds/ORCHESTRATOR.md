@@ -37,7 +37,7 @@ and Owner-controlled delivery. See `README.md`.
 | `build_workers` (Claude accounts, one website each, usage %) | MODIFY → GPU workers | many websites per worker up to measured capacity; telemetry (VRAM, utilization, loaded model, queue, throughput, switches) with its source; cost class (owned hardware only) |
 | One-website-per-worker index, lowest-usage ranking, rate-limit release | REMOVE | replaced by capacity-aware claims, Founder priority with aging, most-free-capacity dispatch |
 | Claude Code CLI provider, Claude advisor, `subscription-included` capability, `-Provider ClaudeCode`, `docker-compose.claude.yml`, Claude Code image variant and lockfile step, Claude egress rule | REMOVE | V3 history document kept |
-| Migration 0053 (was 0043) | MODIFY in place | never applied to a shared database (staging migrates from `main`); renumbered 0041–0043 → 0051–0053 when integrated with `main` (which already uses 0041–0050) |
+| Migration 0058 (was 0043) | MODIFY in place | never applied to a shared database (staging migrates from `main`); renumbered 0041–0043 → 0056–0058 when integrated with `main` (which already uses 0041–0050) |
 | Multi-session worktrees (`orchestrator/sessions.ts`) | KEEP, not wired | provider-independent; per-website parallel sessions would compete for the same GPU, so throughput comes from parallel websites instead |
 | Paid Claude Agent SDK adapter (`providers/claude-agent-sdk.ts`, `agent-sdk/`) | KEEP, **recommend removal** | needs `RUNNER_ALLOW_PAID_PROVIDER=true` *and* `BUILD_ALLOW_PAID_PROVIDER=true`; no fallback to it. Safe removal: delete the adapter, `agent-sdk/`, the two flags and their tests in one PR after Founder confirmation |
 | Model verification on Node 1, benchmarks, acceptance build | BLOCKED (hardware) | §12, §15 |
@@ -307,7 +307,7 @@ Run in an elevated PowerShell on Node 1, from a checkout of this branch (for exa
 ## 14. Founder-only checklist
 
 1. **Confirm the models:** `qwen3.8:27b-q4_K_M` (A) and `qwen3.6:35b-a3b-q4_K_M` (B), Apache-2.0, or name a substitution.
-2. **Approve applying migrations 0051–0053 to staging.** They only run through a merge to `main` plus the staging deploy.
+2. **Approve applying migrations 0056–0058 to staging.** They only run through a merge to `main` plus the staging deploy.
    Do not merge until you decide.
 3. Register Node 1 and save its key (§13 1–2).
 4. Run the installer, the health check and the benchmark (§13 3–6), then set the capacity.

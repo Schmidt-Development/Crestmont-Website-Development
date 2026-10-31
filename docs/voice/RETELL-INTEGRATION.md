@@ -2,6 +2,8 @@
 
 **Status:** Platform side built and tested with simulated, signed Retell payloads (`tests/integrations.test.ts`, `tests/voice-retell-backend.test.ts`). **No Retell workspace, agent or phone number exists for Crestmont.** Nothing has been purchased, no real call has been made, and nothing here is evidence of live Retell verification. VOICE-001 (provider decision) and VOICE-002 (number) stay with the Founder (BLK-009). Follow `PROVIDER-EVALUATION.md` §6: use a **new, separate Crestmont workspace**, and never touch the other business's receptionist.
 
+Inbound agent: the eight named functions and their exact Retell settings are in `RETELL-INBOUND-FUNCTION-REGISTER.md`.
+
 Related: `RETELL-AGENT-SPEC.md` (what to enter in Retell), `RETELL-CONNECTION-GUIDE.md` (Founder checklist, in order), `RETELL-BACKEND-REPORT.md` (inventory and acceptance).
 
 ## 1. How it fits

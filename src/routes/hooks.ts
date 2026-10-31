@@ -50,7 +50,7 @@ async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: st
   };
   if (t.kind === "ack") { await salesFacts(); return jsonResponse(ctx, t.status ?? 200, fn ? ((t.body.result as Record<string, unknown> | undefined) ?? t.body) : t.body); }
   // Consultation confirmations go through the platform's existing mail pipeline (Resend outside development).
-  const res = await handleVoiceEvent(ctx.db, t.body, { mail: { email: ctx.email, db: ctx.db, settings: ctx.settings }, baseUrl: ctx.baseUrl, now });
+  const res = await handleVoiceEvent(ctx.db, t.body, { mail: { email: ctx.email, db: ctx.db, settings: ctx.settings }, baseUrl: ctx.baseUrl, now, paymentsConfigured: ctx.payments.configured });
   if (res.status < 300) await salesFacts();
   // Retell gives the function response body to the agent's LLM: return only the result object.
   if (fn) return jsonResponse(ctx, res.status, (res.body.result as Record<string, unknown> | undefined) ?? res.body);
