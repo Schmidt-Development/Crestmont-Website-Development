@@ -40,3 +40,21 @@ test("[PAY-003] the report states plainly when no Stripe event has ever reached 
   const accepting = (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch;
   assert.equal((await report("https://staging.example", query, accepting)).ok, false, "accepting an unsigned event fails the check");
 });
+
+test("[PAY-003] the report names the staging Worker host and probes each registered webhook host's public health endpoint", async () => {
+  const query = async (sql: string) => sql.includes("integration_health")
+    ? [{ status: "degraded", checked_at: "2026-10-31T21:01:17Z", detail: "… but no webhook endpoint is registered for https://app.right.workers.dev/api/webhooks/stripe. Webhook endpoints in this account: https://app.wrong.workers.dev/api/webhooks/stripe (enabled, 2026-10-28.endive, 17 events)." }]
+    : sql.includes("WHERE id =") ? [{ n: 0 }] : [];
+  const seen: string[] = [];
+  const f = (async (u: string | URL, init?: RequestInit) => {
+    const url = String(u); seen.push(`${init?.method ?? "GET"} ${url}`);
+    if (url.includes("app.wrong")) throw new TypeError("fetch failed", { cause: "ENOTFOUND app.wrong.workers.dev" });
+    return new Response(url.endsWith("/api/health") ? '{"ok":true}' : "{}", { status: url.endsWith("/api/health") ? 200 : 401 });
+  }) as unknown as typeof fetch;
+  const r = await report("https://app.right.workers.dev", query, f, undefined, async () => "https://app.right.workers.dev");
+  const text = r.lines.join("\n");
+  assert.match(text, /Staging Worker host \(Cloudflare account workers\.dev subdomain\): https:\/\/app\.right\.workers\.dev; this check used https:\/\/app\.right\.workers\.dev/);
+  assert.match(text, /Registered webhook host https:\/\/app\.right\.workers\.dev: GET \/api\/health → HTTP 200 .*\(this is the staging URL\)/);
+  assert.match(text, /Registered webhook host https:\/\/app\.wrong\.workers\.dev: GET \/api\/health → unreachable \(ENOTFOUND/);
+  assert.ok(seen.filter((x) => x.includes("/api/health")).every((x) => x.startsWith("GET ")), "health probes are GETs");
+});

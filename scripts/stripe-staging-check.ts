@@ -39,7 +39,7 @@ export async function signatureChecks(base: string, f: typeof fetch = fetch): Pr
   return { unsigned: await post({}), forged: await post({ "stripe-signature": `t=${ts},v1=${"0".repeat(64)}` }) };
 }
 
-export async function report(base: string, query: Query, f: typeof fetch = fetch, bindings?: () => Promise<{ present: string[]; absent: string[] } | string>): Promise<{ lines: string[]; ok: boolean }> {
+export async function report(base: string, query: Query, f: typeof fetch = fetch, bindings?: () => Promise<{ present: string[]; absent: string[] } | string>, host?: () => Promise<string>): Promise<{ lines: string[]; ok: boolean }> {
   const q = readOnly(query);
   const lines: string[] = [];
   let ok = true;
@@ -52,6 +52,14 @@ export async function report(base: string, query: Query, f: typeof fetch = fetch
   lines.push(total ? `Stripe events received on staging: ${total} — ${events.map((e) => `${e.type} ${e.status} ×${e.n} (last ${e.last})`).join("; ")}` : "Stripe events received on staging: NONE — no signed Stripe event has ever been stored (none delivered, or every delivery was refused before storage)");
   const pays = await q(`SELECT provider, status, COUNT(*) AS n FROM payments GROUP BY provider, status`);
   lines.push(`Payments on staging: ${pays.length ? pays.map((p) => `${p.provider} ${p.status} ×${p.n}`).join("; ") : "none"}`);
+  // Which host is the staging Worker? The Cloudflare account's workers.dev subdomain, plus a public GET /api/health on
+  // every host a registered Stripe endpoint points at (read-only; no Stripe call).
+  if (host) lines.push(`Staging Worker host (Cloudflare account workers.dev subdomain): ${await host().catch((e: Error) => `unavailable (${e.message.slice(0, 120)})`)}; this check used ${base}`);
+  const urls = [...new Set([...String(probe?.detail ?? "").matchAll(/https:\/\/[^\s(]+\/api\/webhooks\/stripe/g)].map((m) => new URL(m[0]).origin))];
+  for (const origin of urls) {
+    const r = await f(`${origin}/api/health`).then(async (x) => `HTTP ${x.status}${x.ok ? ` ${(await x.text()).slice(0, 80).replace(/\s+/g, " ")}` : ""}`).catch((e: Error) => `unreachable (${String(e.cause ?? e.message).slice(0, 100)})`);
+    lines.push(`Registered webhook host ${origin}: GET /api/health → ${r}${origin === new URL(base).origin ? " (this is the staging URL)" : ""}`);
+  }
   const sig = await signatureChecks(base, f);
   const stored = (await q(`SELECT COUNT(*) AS n FROM stripe_events WHERE id = '${PROBE_EVENT_ID}'`))[0];
   const refused = sig.unsigned === 401 && sig.forged === 401 && Number(stored?.n ?? 0) === 0;
@@ -68,7 +76,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const script = tomlScriptName(readFileSync("wrangler.toml", "utf8"), "staging");
   try {
     const bindings = async () => { try { return founderReport(await liveBindings(script)); } catch (e) { return `unavailable (${String((e as Error).message).split("\n")[0].slice(0, 160)})`; } };
-    const { lines, ok } = await report(base, (sql) => ops.query(sql), fetch, bindings);
+    const host = async () => {
+      const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/workers/subdomain`, { headers: { authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}` } });
+      const b = (await r.json().catch(() => ({}))) as { result?: { subdomain?: string } };
+      if (!r.ok || !b.result?.subdomain) throw new Error(`HTTP ${r.status}`);
+      return `https://${script}.${b.result.subdomain}.workers.dev`;
+    };
+    const { lines, ok } = await report(base, (sql) => ops.query(sql), fetch, bindings, host);
     const enc = (v: string) => v.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
     for (const l of lines) console.log(`::notice title=Stripe staging check::${enc(l.slice(0, 3000))}`);
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, ["### Stripe staging check", "", ...lines.map((l) => `- ${l}`), ""].join("\n"));
