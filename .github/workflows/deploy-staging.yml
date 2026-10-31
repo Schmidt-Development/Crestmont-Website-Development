@@ -562,7 +562,8 @@ jobs:
           E2E_BASE_URL: ${{ steps.deploy.outputs.url }}
           RETELL_OUTBOUND_API_KEY: ${{ secrets.RETELL_OUTBOUND_API_KEY }}
           RETELL_INBOUND_API_KEY: ${{ secrets.RETELL_INBOUND_API_KEY }}
-          OUTBOUND_AGENT_ID: ${{ vars.OUTBOUND_AGENT_ID }}
+          # Signs the Worker's own read-only Retell audit (scheduler key derived from the Cloudflare token).
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           unset EVIDENCE_INGEST_SECRET
           node --no-warnings scripts/outbound-staging-e2e.ts

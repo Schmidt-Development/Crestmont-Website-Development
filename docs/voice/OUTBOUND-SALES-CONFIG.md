@@ -282,3 +282,18 @@ optionally register the agent as the sales optimizer's target (`/staff/sales-opt
 
 **Platform (Owner, `/staff/sales-outbound`):** compliance approval (Founder + counsel reference), per-number written
 consents, DNC scrubs, sales agent id + caller number, limits (start at concurrency 1).
+
+## Live configuration audit (read-only, run by the staging Worker)
+
+`POST /api/sales-outbound/retell-audit` (`src/services/retell-outbound-audit.ts`) reads the real Retell API with the
+Worker's own `RETELL_OUTBOUND_API_KEY` — `list-agents`, `get-agent`, `get-retell-llm`, `list-phone-numbers`; nothing is
+written and no call is placed — and checks: the key is on the Worker and accepted by Retell, the two workspace keys
+differ, the sales agent (from `/staff/sales-outbound`, else the SIE target, else discovered by webhook URL) is in the
+outbound workspace and is **not** a receptionist agent, SIE target registered and verified, webhook URL, call and transfer
+events, Retell LLM engine, the 8 functions against the backend's validators (URL, POST, args-only off, timeout, retries,
+fields, required), `record_consent` at the shared URL, End/Transfer Call, the 9 default variables (and no `lead_id`
+default), prompt byte-equal to the deployed SIE version (or the master prompt = SIE v1) and the caller number.
+
+The staging deploy and `outbound-staging-verify.yml` trigger it through `scripts/outbound-staging-e2e.ts` (signed with the
+scheduler key derived from the Cloudflare token) and print each finding as an annotation. Dashboard items still to do
+are reported as BLOCKED, never as an engineering failure. Output carries ids, URLs and settings only.

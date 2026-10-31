@@ -33,7 +33,8 @@ jobs:
           E2E_BASE_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
           RETELL_OUTBOUND_API_KEY: ${{ secrets.RETELL_OUTBOUND_API_KEY }}
           RETELL_INBOUND_API_KEY: ${{ secrets.RETELL_INBOUND_API_KEY }}
-          OUTBOUND_AGENT_ID: ${{ vars.OUTBOUND_AGENT_ID }}
+          # Signs the Worker's own read-only Retell audit (scheduler key derived from the Cloudflare token).
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: node --no-warnings scripts/outbound-staging-e2e.ts
       - name: Upload evidence (aggregate PASS/FAIL/BLOCKED only; no credentials)
         if: always()

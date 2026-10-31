@@ -66,10 +66,11 @@ export async function saveSalesSettings(db: Db, userId: string, i: { enabled: bo
   inRange(i.maxConcurrent, 1, 20, "Concurrent calls"); inRange(i.maxPerRun, 1, 20, "Dials per run"); inRange(i.maxPerDay, 1, 500, "Dials per day");
   inRange(i.maxAttempts, 1, 3, "Attempts per lead"); inRange(i.retryAfterHours, 4, 720, "Hours between attempts");
   if (i.enabled && (!agentId || !from)) problems.push("Outbound sales can only be switched on with a sales agent id and an approved caller number");
-  if (i.enabled) {
-    // The receptionist's agent must never be used for sales calls (it carries receptionist guardrails, not sales ones).
+  if (agentId) {
+    // The receptionist's agent must never be recorded as the sales agent, switched on or not: it carries receptionist
+    // guardrails, and the receptionist's prompt sync refuses agents recorded here (PR #72), so the overlap would block it.
     const cfg = await loadVoiceConfig(db);
-    if (agentId && (cfg.inbound.agent_id === agentId || cfg.outbound.agent_id === agentId)) problems.push("The sales agent must be a separate Retell agent from the receptionist and its follow-up agent");
+    if (cfg.inbound.agent_id === agentId || cfg.outbound.agent_id === agentId) problems.push("The sales agent must be a separate Retell agent from the receptionist and its follow-up agent");
   }
   if (problems.length) return problems;
   await db.prepare(`UPDATE sales_outbound_settings SET enabled = ?, agent_id = ?, from_number = ?, max_concurrent = ?, max_dials_per_run = ?, max_dials_per_day = ?, max_attempts_per_lead = ?, retry_after_hours = ?, updated_by = ?, updated_at = ? WHERE id = 1`)

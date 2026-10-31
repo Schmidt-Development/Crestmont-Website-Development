@@ -6,16 +6,15 @@
 // allowlisted @crestmontwebsitedevelopment.com address; every synthetic record is marked [TEST DATA] / is_test.
 // The repository is public: output is PASS / FAIL / BLOCKED lines with ids and counts only (no keys, agent ids or prompts).
 //
-//   env: E2E_BASE_URL, CLOUDFLARE_API_TOKEN/ACCOUNT_ID (D1 via wrangler), optional RETELL_OUTBOUND_API_KEY,
-//        RETELL_INBOUND_API_KEY, OUTBOUND_AGENT_ID
+//   env: E2E_BASE_URL, CLOUDFLARE_API_TOKEN/ACCOUNT_ID (D1 via wrangler), ACCESS_ROOT_KEY (= the Cloudflare token: signs
+//        the Worker's own read-only Retell audit), optional RETELL_OUTBOUND_API_KEY and RETELL_INBOUND_API_KEY
 //   node --no-warnings scripts/outbound-staging-e2e.ts
 // Exit 1 only for an engineering failure (FAIL). Missing external configuration is BLOCKED (exit 0) and named exactly.
 import { writeFileSync, mkdirSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { wranglerOps } from "./staging-access.ts";
 import { signRetell } from "../src/adapters/retell.ts";
-import { composeSalesPrompt, baselineSalesInstructions } from "../src/domain/sales-opt/policy.ts";
-import { SALES_FUNCTIONS } from "../src/services/sales-functions.ts";
+import { deriveSchedulerKey, sign } from "./trigger-scheduler.ts";
 
 const BASE = (process.env.E2E_BASE_URL ?? "").replace(/\/$/, "");
 const OUT_KEY = process.env.RETELL_OUTBOUND_API_KEY ?? "";
@@ -109,6 +108,7 @@ async function main() {
     const r = await post(FN_URL, { name: "get_packages_pricing", call: { call_id: "x" }, args: {} }, IN_KEY);
     assert(r.status === 401, `a request signed with the receptionist's workspace key returned ${r.status}`);
   });
+  await workerRetellAudit();
   if (!OUT_KEY) {
     await check("outbound_workspace_key", async () => { throw new Blocked("RETELL_OUTBOUND_API_KEY is not a `staging` environment secret in GitHub, so no signed outbound request can be made from CI"); });
     return;
@@ -217,68 +217,46 @@ async function main() {
     return "number on the shared do-not-call list";
   });
 
-  // ── 3. Retell outbound workspace (read-only) ──
-  const agentId = process.env.OUTBOUND_AGENT_ID || (await q<{ agent_id: string | null }>(`SELECT agent_id FROM sales_outbound_settings WHERE id = 1`))[0]?.agent_id
-    || (await q<{ agent_id: string }>(`SELECT agent_id FROM so_targets WHERE stage = 'staging'`))[0]?.agent_id || "";
-  const retell = async (path: string) => {
-    const r = await fetch(`${process.env.RETELL_API_BASE ?? "https://api.retellai.com"}${path}`, { headers: { authorization: `Bearer ${OUT_KEY}` } });
-    let body: Record<string, unknown> = {}; try { body = await r.json() as Record<string, unknown>; } catch { /* */ }
-    return { status: r.status, body };
-  };
-  await check("retell_outbound_key_works", async () => {
-    const r = await retell("/list-agents");
-    if (r.status === 401 || r.status === 403) throw new Blocked(`Retell refused the outbound key (${r.status}): RETELL_OUTBOUND_API_KEY is not a valid API key of the outbound workspace`);
-    assert(r.status === 200, `list-agents returned ${r.status}`);
-    return `${Array.isArray(r.body) ? (r.body as unknown[]).length : "?"} agent version(s) visible in the outbound workspace`;
+}
+
+/**
+ * The Worker audits the sales agent's live Retell configuration with ITS OWN RETELL_OUTBOUND_API_KEY
+ * (POST /api/sales-outbound/retell-audit, signed with the scheduler key derived from the Cloudflare token). This needs no
+ * Retell key in GitHub, and it is the only way to prove the key exists on the Worker without exposing it.
+ */
+async function workerRetellAudit() {
+  const root = process.env.ACCESS_ROOT_KEY ?? "";
+  if (!root) { await check("worker_retell_audit", async () => { throw new Blocked("ACCESS_ROOT_KEY is not available to this step, so the Worker's audit cannot be triggered"); }); return; }
+  const key = deriveSchedulerKey(root);
+  const body = JSON.stringify({ audit: "retell-outbound" });
+  const res = await fetch(`${BASE}/api/sales-outbound/retell-audit`, { method: "POST", headers: { "content-type": "application/json", "x-crestmont-scheduler-signature": sign(key, body) }, body });
+  const text = await res.text();
+  let a: { status: string; agentId: string | null; llmId: string | null; agents: { id: string; name: string | null }[]; findings: { check: string; ok: boolean; detail: string }[] } | null = null;
+  try { a = JSON.parse(text); } catch { /* not JSON */ }
+  await check("worker_retell_audit_endpoint", async () => {
+    if (res.status === 429) throw new Blocked("the audit ran within the last few minutes (rate limit); re-run outbound-staging-verify.yml later");
+    assert(res.status === 200 && a, `POST /api/sales-outbound/retell-audit returned ${res.status} ${text.replace(/\s+/g, " ").slice(0, 120)}`);
+    return `status ${a.status}; ${a.findings.filter((f) => f.ok).length}/${a.findings.length} checks pass; agent ${a.agentId ?? "?"}; llm ${a.llmId ?? "?"}; agents: ${a.agents.map((x) => x.id).join(", ") || "none"}`;
   });
-  if (!agentId) {
-    await check("retell_sales_agent_registered", async () => { throw new Blocked("no sales agent id is recorded on staging (Owner: /staff/sales-outbound settings, or the SIE staging target)"); });
-  } else {
-    let llmId = "";
-    await check("retell_sales_agent_config", async () => {
-      const r = await retell(`/get-agent/${agentId}`);
-      assert(r.status === 200, `get-agent returned ${r.status}`);
-      const eng = (r.body.response_engine ?? {}) as { type?: string; llm_id?: string };
-      assert(eng.type === "retell-llm" && eng.llm_id, `response engine is ${eng.type} (the SIE and this register need a Retell LLM single-prompt agent)`);
-      llmId = eng.llm_id;
-      const hook = r.body.webhook_url;
-      assert(hook === HOOK_URL, `agent webhook_url is ${hook ? "a different URL" : "not set"}; expected ${HOOK_URL}`);
-      const ev = Array.isArray(r.body.webhook_events) ? (r.body.webhook_events as string[]) : null;
-      if (ev) for (const e of ["call_started", "call_ended", "call_analyzed"]) assert(ev.includes(e), `webhook event ${e} is not enabled`);
-      return `retell-llm; webhook URL correct; events ${ev ? ev.length : "default"}`;
-    });
-    if (llmId) {
-      await check("retell_functions_registered", async () => {
-        const r = await retell(`/get-retell-llm/${llmId}`);
-        assert(r.status === 200, `get-retell-llm returned ${r.status}`);
-        const tools = (Array.isArray(r.body.general_tools) ? r.body.general_tools : []) as { type?: string; name?: string; url?: string; args_at_root?: boolean }[];
-        const byName = new Map(tools.map((t) => [t.name, t]));
-        const missing = SALES_FUNCTIONS.filter((n) => !byName.has(n));
-        assert(!missing.length, `missing custom functions: ${missing.join(", ")}`);
-        const wrongUrl = SALES_FUNCTIONS.filter((n) => !(byName.get(n)?.url ?? "").startsWith(FN_URL));
-        assert(!wrongUrl.length, `functions pointing elsewhere: ${wrongUrl.join(", ")}`);
-        const argsOnly = SALES_FUNCTIONS.filter((n) => byName.get(n)?.args_at_root === true);
-        assert(!argsOnly.length, `"Payload: args only" is ON for: ${argsOnly.join(", ")}`);
-        for (const b of ["end_call", "transfer_call"]) if (!tools.some((t) => t.type === b || t.name === b)) throw new Error(`built-in ${b} not found`);
-        const consent = byName.get("record_consent");
-        return `8/8 sales functions at the outbound URL; end_call + transfer_call present; record_consent ${consent ? "present" : "NOT configured (transcripts are discarded without consent; the SIE then has no transcript to analyse)"}`;
-      });
-      await check("retell_master_prompt_installed", async () => {
-        const r = await retell(`/get-retell-llm/${llmId}`);
-        const prompt = typeof r.body.general_prompt === "string" ? r.body.general_prompt : "";
-        if (prompt !== composeSalesPrompt(baselineSalesInstructions())) throw new Blocked(`the agent's prompt differs from docs/voice/outbound-sales-agent-prompt.txt (${prompt.length} vs ${composeSalesPrompt(baselineSalesInstructions()).length} characters)`);
-        return `byte-identical to SIE version 1 (${r.body.is_published === true ? "published" : "draft"})`;
-      });
-    }
-    await check("sie_registration", async () => {
-      const t = await q<{ agent_id: string; verified_at: string | null; engine_type: string | null }>(`SELECT agent_id, verified_at, engine_type FROM so_targets WHERE stage = 'staging'`);
-      if (!t[0]) throw new Blocked("the sales agent is not registered as the SIE staging target (/staff/sales-optimization → Targets)");
-      assert(t[0].agent_id === agentId, "the SIE staging target is a different agent than the outbound sales agent");
-      if (!t[0].verified_at) throw new Blocked("the SIE staging target is registered but not verified with Retell (press Verify with Retell)");
-      const v = await q<{ n: number }>(`SELECT COUNT(*) AS n FROM so_versions`);
-      return `registered and verified (${t[0].engine_type}); ${v[0]?.n} version(s)`;
-    });
-  }
+  if (!a) return;
+  const clean = (x: string) => x.replace(/[\r\n]+/g, " ").replace(/::/g, ": ").slice(0, 300);
+  for (const f of a.findings) console.log(`${f.ok ? "::notice" : "::warning"} title=Retell outbound ${f.ok ? "OK" : "TODO"} · ${clean(f.check)}::${clean(f.detail)}`);
+  const keyFinding = a.findings.find((f) => f.check === "outbound key on this Worker");
+  await check("worker_has_outbound_key_secret", async () => {
+    if (!keyFinding?.ok) throw new Blocked("RETELL_OUTBOUND_API_KEY is not set on the staging Worker (Cloudflare → Workers → crestmont-platform-staging → Settings → Variables and Secrets)");
+    return "present on the Worker (value never leaves Cloudflare)";
+  });
+  const works = a.findings.find((f) => f.check === "outbound key works with Retell");
+  if (keyFinding?.ok) await check("retell_outbound_key_works", async () => {
+    if (!works?.ok) throw new Blocked(works ? clean(works.detail) : "not checked");
+    return clean(works.detail);
+  });
+  // Dashboard settings the Founder still has to make are BLOCKED (external configuration), never an engineering FAIL.
+  if (works?.ok) await check("retell_sales_agent_configuration", async () => {
+    const todo = a!.findings.filter((f) => !f.ok);
+    if (todo.length) throw new Blocked(`${todo.length} dashboard item(s): ${todo.map((f) => `${f.check}: ${clean(f.detail)}`).join(" | ").slice(0, 1500)}`);
+    return "agent, webhook, events, 8 functions + record_consent, built-ins, defaults, prompt, SIE target and caller number all match";
+  });
 }
 
 await main().catch((e) => results.push({ id: "script", status: "FAIL", detail: String((e as Error).message ?? e).slice(0, 300) }));

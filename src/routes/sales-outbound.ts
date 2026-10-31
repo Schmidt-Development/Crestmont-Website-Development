@@ -1,6 +1,7 @@
 // Outbound AI sales representative: Retell custom-function endpoint, public purchase/unsubscribe links, and the Owner's
 // control page. Calls are never placed from a request handler; the scheduled job does that (src/app/scheduled.ts).
 //  POST /api/webhooks/retell/outbound/functions   Retell custom functions for the SALES agent (X-Retell-Signature)
+//  POST /api/sales-outbound/retell-audit         read-only live Retell audit of the sales agent (scheduler signature)
 //  GET  /buy/:token                               secure purchase link → existing /checkout/<package> flow
 //  GET  /sales/unsubscribe/:token                 sales email unsubscribe (confirm page); POST performs it
 //  GET  /staff/sales-outbound                     Owner page (voice.manage): switches, compliance records, queue
@@ -24,6 +25,9 @@ import { verifyRetellWorkspace } from "../adapters/retell-workspaces.ts";
 import { handleSalesFunction, openCheckoutLink, unsubscribeSalesEmail } from "../services/sales-functions.ts";
 import * as so from "../services/sales-outbound.ts";
 import { listTargets } from "../services/sales-opt/registry.ts";
+import { verifyEvidenceSignature, IngestAuthError } from "../readiness/ingest.ts";
+import { rateLimit, audit } from "../services/security.ts";
+import { auditOutboundRetell } from "../services/retell-outbound-audit.ts";
 
 async function salesFunctions(ctx: AppContext): Promise<Response> {
   const raw = await readBody(ctx.req);
@@ -117,6 +121,20 @@ ${table(queue, [
 
 export function register(r: Router): void {
   r.post("/api/webhooks/retell/outbound/functions", (ctx) => salesFunctions(ctx));
+  // Read-only audit of the sales agent's live Retell configuration (src/services/retell-outbound-audit.ts), run with this
+  // Worker's RETELL_OUTBOUND_API_KEY so no person or CI job needs the value. Machine endpoint signed like
+  // /api/scheduled/run (SCHEDULER_TRIGGER_SECRET). Nothing is written to Retell; no call is placed.
+  r.post("/api/sales-outbound/retell-audit", async (ctx) => {
+    const raw = await readBody(ctx.req);
+    if (!ctx.env.SCHEDULER_TRIGGER_SECRET) return jsonResponse(ctx, 503, { error: "Audit trigger not configured" });
+    try { await verifyEvidenceSignature(ctx.env.SCHEDULER_TRIGGER_SECRET, raw, ctx.req.headers.get("x-crestmont-scheduler-signature")); }
+    catch (e) { if (e instanceof IngestAuthError) return jsonResponse(ctx, 401, { error: e.message }); throw e; }
+    const rl = await rateLimit(ctx.db, "sales-retell-audit", 3, 300);
+    if (!rl.allowed) return jsonResponse(ctx, 429, { error: "Ran recently; try again in a few minutes" });
+    const result = await auditOutboundRetell({ db: ctx.db, env: ctx.env, fetch: ctx.env.overrides?.fetch ?? fetch, baseUrl: ctx.baseUrl });
+    await audit(ctx.db, { actorKind: "system", action: "sales_outbound.retell_audit", subjectType: "retell_agent", subjectId: result.agentId, details: { status: result.status, failed: result.findings.filter((f) => !f.ok).length, total: result.findings.length } });
+    return jsonResponse(ctx, 200, result);
+  });
 
   r.get("/buy/:token", async (ctx, p) => {
     const res = await openCheckoutLink(ctx.db, p.token, ctx.env.overrides?.now?.() ?? new Date());

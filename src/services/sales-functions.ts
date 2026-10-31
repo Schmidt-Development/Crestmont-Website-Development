@@ -108,6 +108,32 @@ const schemas = {
   }),
 };
 
+/**
+ * What the Retell function definitions must look like (parameter names and required ones), from the validators above
+ * plus the two arrays update_outbound_lead reads directly. Used by the live configuration audit (retell-outbound-audit.ts).
+ */
+export function outboundFunctionContracts(): Record<SalesFunction, { fields: string[]; required: string[] }> {
+  const fieldsOf = (k: SalesFunction) => {
+    const probe: string[] = [];
+    // The validators are closures; derive the field list from a parse that reports every missing required field.
+    const issues: string[] = [];
+    (schemas[k] as unknown as (v: unknown, path: string, issues: string[]) => unknown)({}, "", issues);
+    for (const i of issues) { const m = /^([a-z_]+) (is required|must be one of)/.exec(i); if (m) probe.push(m[1]); }
+    return probe;
+  };
+  const all: Record<SalesFunction, string[]> = {
+    get_outbound_lead_context: ["lead_id"],
+    update_outbound_lead: ["lead_id", "contact_name", "contact_role", "contact_email", "discovery_notes", "service_interests", "budget_range", "purchase_timeline", "objections", "qualification", "pipeline_stage", "sales_outcome", "next_steps"],
+    get_packages_pricing: [],
+    create_checkout_session: ["lead_id", "package", "email", "buyer_confirmed"],
+    check_payment_status: ["lead_id", "checkout_reference"],
+    send_sales_email: ["lead_id", "email_type", "email", "package"],
+    schedule_sales_followup: ["lead_id", "followup_type", "start_time", "preferred_date", "preferred_time", "name", "email", "topic", "prospect_agreed"],
+    record_do_not_call: ["lead_id", "phone", "also_stop_email"],
+  };
+  return Object.fromEntries(SALES_FUNCTIONS.map((k) => [k, { fields: all[k], required: fieldsOf(k) }])) as Record<SalesFunction, { fields: string[]; required: string[] }>;
+}
+
 /** Booleans → "true"/"false", string arguments redacted (card numbers, SSNs) before validation and storage. */
 function normaliseArgs(raw: unknown): Obj {
   const o = { ...obj(raw) };

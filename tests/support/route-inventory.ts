@@ -90,6 +90,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/readiness/github-snapshot": signed("x-crestmont-signature"),
   "POST /api/scheduled/run": signed("x-crestmont-scheduler-signature"),
   "POST /api/voice/retell-audit": signed("x-crestmont-scheduler-signature"),
+  "POST /api/sales-outbound/retell-audit": signed("x-crestmont-scheduler-signature"),
   "POST /api/crm/v1/imports": signed("x-crestmont-signature"),
   "POST /api/webhooks/stripe": hook("stripe-signature"),
   "GET /api/readiness": { access: { kind: "staff", roles: readiness }, api: true },
