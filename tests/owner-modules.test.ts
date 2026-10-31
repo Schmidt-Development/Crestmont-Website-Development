@@ -27,10 +27,22 @@ const future = (days = 30) => new Date(Date.now() + days * 86400e3).toISOString(
 test("[CRM-002] duplicate detection groups leads by email/phone/name+company; merge moves history, archives the duplicate and is audited", async () => {
   const t = await createTestApp();
   const v = t.client();
-  const a = await apiLead(v, { name: "Dana Fox", email: "dana@foxdesign.example", company: "Fox Design", phone: "+1 (517) 555-0142" });
-  const b = await apiLead(v, { name: "D. Fox", email: "DANA@FoxDesign.example", company: "Fox Design Studio", message: "Second form submission." });
-  const c = await apiLead(v, { name: "Unrelated Person", email: "other@else.example", company: "Else Co" });
-  const d = await apiLead(v, { name: "Phone Match", email: "pm@one.example", company: "One", phone: "517-555-0142" });
+  // Historical duplicates (written before intake duplicate protection existed): the public API now continues the
+  // existing lead instead of creating these, so they are inserted directly to exercise the after-the-fact merge tool.
+  void v;
+  const legacy = async (name: string, email: string, company: string, phone: string | null = null) => {
+    const co = newId("co"), ct = newId("ct"), ld = newId("ld"), at = new Date().toISOString();
+    await t.db.batch([
+      t.db.prepare(`INSERT INTO companies (id, name, created_at) VALUES (?,?,?)`).bind(co, company, at),
+      t.db.prepare(`INSERT INTO contacts (id, company_id, name, email, phone, created_at) VALUES (?,?,?,?,?,?)`).bind(ct, co, name, email.toLowerCase(), phone, at),
+      t.db.prepare(`INSERT INTO leads (id, contact_id, source, stage, created_at, updated_at) VALUES (?,?,'quote_form','new',?,?)`).bind(ld, ct, at, at),
+    ]);
+    return ld;
+  };
+  const a = await legacy("Dana Fox", "dana@foxdesign.example", "Fox Design", "+1 (517) 555-0142");
+  const b = await legacy("D. Fox", "DANA@FoxDesign.example", "Fox Design Studio");
+  const c = await legacy("Unrelated Person", "other@else.example", "Else Co");
+  const d = await legacy("Phone Match", "pm@one.example", "One", "517-555-0142");
   const owner = await staffClient(t, "owner");
 
   const page = await (await owner.c.get("/staff/crm/duplicates")).text();

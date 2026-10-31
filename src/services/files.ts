@@ -74,14 +74,27 @@ export async function getOrgFile(db: Db, organizationId: string, id: string): Pr
   return f;
 }
 
-export async function listFiles(db: Db, organizationId: string, opts: { projectId?: string | null; folder?: string | null; includeReplaced?: boolean } = {}): Promise<(FileRow & { uploader: string })[]> {
+function fileListWhere(organizationId: string, opts: { projectId?: string | null; folder?: string | null; includeReplaced?: boolean }) {
   const where = ["f.organization_id = ?", "f.deleted_at IS NULL"];
   const binds: unknown[] = [organizationId];
   if (opts.projectId) { where.push("f.project_id = ?"); binds.push(opts.projectId); }
   if (opts.folder) { where.push("(f.folder = ? OR f.folder LIKE ?)"); binds.push(opts.folder, `${opts.folder}/%`); }
   if (!opts.includeReplaced) where.push("f.replaced_by IS NULL");
-  return (await db.prepare(`SELECT f.*, u.display_name AS uploader FROM files f JOIN users u ON u.id = f.uploaded_by WHERE ${where.join(" AND ")} ORDER BY COALESCE(f.folder,''), f.created_at DESC LIMIT 500`)
-    .bind(...binds).all<FileRow & { uploader: string }>()).results;
+  return { where: where.join(" AND "), binds };
+}
+
+/** One page of files (default: the first 500). Pass limit/offset to page; see countFiles for the total (CREST-GAP-071). */
+export async function listFiles(db: Db, organizationId: string, opts: { projectId?: string | null; folder?: string | null; includeReplaced?: boolean; limit?: number; offset?: number } = {}): Promise<(FileRow & { uploader: string })[]> {
+  const { where, binds } = fileListWhere(organizationId, opts);
+  const limit = Math.max(1, Math.min(500, opts.limit ?? 500)), offset = Math.max(0, opts.offset ?? 0);
+  return (await db.prepare(`SELECT f.*, u.display_name AS uploader FROM files f JOIN users u ON u.id = f.uploaded_by WHERE ${where} ORDER BY COALESCE(f.folder,''), f.created_at DESC, f.id LIMIT ? OFFSET ?`)
+    .bind(...binds, limit, offset).all<FileRow & { uploader: string }>()).results;
+}
+
+/** Number of files listFiles would page through with the same filters. */
+export async function countFiles(db: Db, organizationId: string, opts: { projectId?: string | null; folder?: string | null; includeReplaced?: boolean } = {}): Promise<number> {
+  const { where, binds } = fileListWhere(organizationId, opts);
+  return (await db.prepare(`SELECT COUNT(*) AS n FROM files f WHERE ${where}`).bind(...binds).first<{ n: number }>())?.n ?? 0;
 }
 
 export async function fileVersions(db: Db, organizationId: string, id: string): Promise<FileRow[]> {
@@ -133,6 +146,13 @@ export async function serveFile(ctx: AppContext, id: string, inline: boolean): P
     if (f) await audit(ctx.db, { actorUserId: ctx.user.id, action: "file.download_denied", subjectType: "file", subjectId: f.id, organizationId: f.organization_id, ip: ctx.ip });
     throw new HttpError(404, "File not found");
   }
+  // Fail closed on scanner verdicts (F-02): a file flagged as infected, or whose scan failed, is quarantined.
+  // Nobody downloads or previews it through the portal (share links already refuse it). Files with no scan yet
+  // ('pending') stay downloadable because no scanner is connected; the UI labels them "Not yet scanned".
+  if (isQuarantined(f.scan_status)) {
+    await audit(ctx.db, { actorUserId: ctx.user.id, action: "file.download_blocked", subjectType: "file", subjectId: f.id, organizationId: f.organization_id, ip: ctx.ip, details: { scanStatus: f.scan_status } });
+    throw new HttpError(409, f.scan_status === "infected" ? "This file was flagged by the malware scan and is quarantined." : "The malware scan for this file failed, so it is quarantined until it is scanned again.");
+  }
   if (!ctx.storage) throw new HttpError(503, "File storage is not configured yet.");
   const obj = await ctx.storage.get(f.r2_key);
   if (!obj) throw new HttpError(404, "File content is missing from storage.");
@@ -155,6 +175,11 @@ export function humanSize(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** Scan states in which a file must not be served or shared. */
+export function isQuarantined(status: string): boolean {
+  return status === "infected" || status === "failed";
 }
 
 export function scanLabel(status: string): string {

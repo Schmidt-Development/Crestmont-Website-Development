@@ -228,7 +228,12 @@ export class InferenceScheduler {
       // Start-up / recovery: learn what is really loaded; the next pump decides whether a switch is needed.
       if (reconcileOnly) return false;
       if (loaded.some((m) => sameModel(m.model, target))) return false; // already in memory
-      for (const m of loaded) if (!this.canCoReside([m.model, target])) await this.o.residency.unload(m.model, signal);
+      // Only models this runner manages (Model A / Model B) are ever unloaded. Other residents belong to other
+      // applications sharing the same Ollama (on Node 1: HQ/JARVIS) and are never evicted by Crestmont; if the
+      // target does not fit next to them, Ollama's own scheduler decides, and D09 / `ollama ps` show any CPU spill.
+      const foreign = loaded.filter((m) => !this.profile(m.model));
+      if (foreign.length) this.o.log?.warn("other applications' models are resident; Crestmont does not unload them", { target, foreign: foreign.map((m) => m.model).slice(0, 5) });
+      for (const m of loaded) if (this.profile(m.model) && !this.canCoReside([m.model, target])) await this.o.residency.unload(m.model, signal);
       await this.o.residency.load(target, this.o.keepAlive, signal);
       this.resident = await this.o.residency.loaded(signal);
       return true;

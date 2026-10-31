@@ -12,6 +12,17 @@ export function linkButton(text: string, href: string, variant: "primary" | "sec
   return html`<a class="btn btn--${variant}${size ? " btn--sm" : ""}" href="${safeUrl(href)}">${text}</a>`;
 }
 
+/** Arrow glyph used in CTA squares and card links (decorative). */
+export const ARROW_SVG = html`<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M4.5 11.5l7-7M6 4.5h5.5V10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+/**
+ * Call-to-action link (M03): label layer plus an arrow square. The square is aria-hidden, so the accessible name is
+ * exactly the label. app.js adds the tile-fill hover layer on first hover/focus.
+ */
+export function ctaLink(text: string, href: string, variant: "primary" | "secondary" = "primary", size?: "sm", extraClass = ""): SafeHtml {
+  return html`<a class="btn btn--${variant} btn--cta${size ? " btn--sm" : ""}${extraClass ? ` ${extraClass}` : ""}" href="${safeUrl(href)}"><span class="btn__label">${text}</span><span class="btn__arrow" aria-hidden="true">${ARROW_SVG}</span></a>`;
+}
+
 /** Inline POST form with a single button (for actions like "Approve"). */
 export function actionForm(ctx: AppContext, action: string, text: string, opts: { variant?: "primary" | "secondary" | "ghost" | "danger"; hidden?: Record<string, string>; confirm?: string; size?: "sm" } = {}): SafeHtml {
   const hidden = Object.entries(opts.hidden ?? {}).map(([k, v]) => html`<input type="hidden" name="${k}" value="${v}">`);
@@ -108,6 +119,22 @@ export function kpi(labelText: string, value: string | number, sub?: string, met
 export function pagination(ctx: AppContext, page: number, hasNext: boolean): SafeHtml {
   const link = (p: number) => { const u = new URL(ctx.url); u.searchParams.set("page", String(p)); return u.pathname + u.search; };
   return html`<nav class="pagination" aria-label="Pagination">${page > 1 ? html`<a class="btn btn--ghost btn--sm" href="${link(page - 1)}">Previous</a>` : ""}<span class="faint">Page ${page}</span>${hasNext ? html`<a class="btn btn--ghost btn--sm" href="${link(page + 1)}">Next</a>` : ""}</nav>`;
+}
+
+/**
+ * "Earlier messages" / "Back to latest" links for a message thread (CREST-GAP-040). `before` is the cursor
+ * query parameter; other query parameters (e.g. ?tab=messages) are preserved.
+ */
+export function threadEarlierNav(ctx: AppContext, t: { earlierCount: number; earlierCursor: string | null; olderWindow: boolean }): SafeHtml {
+  const href = (before: string | null) => { const u = new URL(ctx.url); if (before) u.searchParams.set("before", before); else u.searchParams.delete("before"); return u.pathname + u.search; };
+  if (!t.earlierCount && !t.olderWindow) return html``;
+  return html`<nav class="pagination thread-nav" aria-label="Conversation history">${t.earlierCount && t.earlierCursor ? html`<a class="btn btn--ghost btn--sm" href="${href(t.earlierCursor)}" data-earlier-messages>Show earlier messages (${t.earlierCount} more)</a>` : html`<span class="faint">Start of the conversation</span>`}${t.olderWindow ? html`<a class="btn btn--ghost btn--sm" href="${href(null)}">Back to latest messages</a>` : ""}</nav>`;
+}
+
+/** "Showing N of M" note for capped or paginated lists (CREST-GAP-071). */
+export function showingOf(shown: number, total: number, noun = "records"): SafeHtml {
+  if (total <= shown) return html``;
+  return html`<p class="faint" data-showing>Showing ${shown} of ${total} ${noun}.</p>`;
 }
 
 export function pageParam(ctx: AppContext): { page: number; limit: number; offset: number } {

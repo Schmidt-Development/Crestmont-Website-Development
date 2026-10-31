@@ -12,7 +12,9 @@ import { priceQuote, PricingError, PACKAGES, type PackageId, type QuoteLine, typ
 import { randomToken, hashToken } from "../lib/auth-crypto.ts";
 import { HttpError } from "../app/http.ts";
 import { changeLeadStage } from "./leads.ts";
-import { createQuoteOrder } from "./commerce.ts";
+import { prepareQuoteOrder } from "./commerce.ts";
+import { prepareAcceptance, auditAcceptance, type AgreementRow } from "./agreements.ts";
+import { businessDate, endOfBusinessDay } from "../lib/business-time.ts";
 import { sendMail } from "./mailer.ts";
 import { audit } from "./security.ts";
 import { withEffectivePackagePrice } from "./pricing-approvals.ts";
@@ -110,7 +112,7 @@ export type QuoteListRow = { id: string; status: string; current_version: number
 function quoteFilterSql(actor: Actor, f: QuoteListFilter) {
   const scope = leadScope(actor);
   const conds = [scope.sql], binds: unknown[] = [...scope.binds];
-  const today = f.today ?? nowIso().slice(0, 10);
+  const today = f.today ?? businessDate(new Date()); // CREST-GAP-094: Eastern date
   if (f.status === "lapsed") { conds.push(`q.status IN ('draft','sent') AND qv.valid_until IS NOT NULL AND qv.valid_until < ?`); binds.push(today); }
   else if (f.status) { conds.push(`q.status = ?`); binds.push(f.status); }
   if (f.q) {
@@ -160,28 +162,37 @@ export async function sendQuote(ctx: AppContext, actor: Actor, quoteId: string) 
   if (quote.status === "accepted") throw new HttpError(409, "This quote is already accepted.");
   if (quote.status === "rejected") throw new HttpError(409, "This quote was withdrawn or declined. Save a new version to reopen it before sending.");
   if (!lead.contact_email) throw new HttpError(409, "The contact has no email address. Add one before sending the proposal.");
-  const today = ctx.now().toISOString().slice(0, 10);
+  const today = businessDate(ctx.now()); // CREST-GAP-094: the valid-until date is an Eastern calendar date
   if (current.valid_until && current.valid_until < today) throw new HttpError(409, "This version has expired. Save a new version with a later valid-until date.");
   const token = randomToken();
   const at = nowIso(ctx.now);
-  const expires = current.valid_until ? `${current.valid_until}T23:59:59.999Z` : new Date(ctx.now().getTime() + 30 * 86400e3).toISOString();
+  const expires = current.valid_until ? endOfBusinessDay(current.valid_until) : new Date(ctx.now().getTime() + 30 * 86400e3).toISOString();
   await ctx.db.batch([
     ctx.db.prepare(`INSERT INTO quote_access_tokens (token_hash, quote_id, contact_id, quote_version_id, expires_at, created_at) VALUES (?,?,?,?,?,?)`).bind(await hashToken(token), quoteId, lead.contact_id, current.id, expires, at),
     ctx.db.prepare(`UPDATE quotes SET status = 'sent', sent_at = COALESCE(sent_at, ?) WHERE id = ?`).bind(at, quoteId),
-    ctx.db.prepare(`INSERT INTO crm_activities (id, lead_id, actor_user_id, kind, body, created_at) VALUES (?,?,?,'email',?,?)`).bind(newId("act"), lead.id, actor.userId ?? null, `Proposal v${current.version} emailed to ${lead.contact_email}`, at),
   ]);
   const url = `${ctx.baseUrl}/q/${token}`;
-  await sendMail(ctx, {
-    template: "quote_sent", to: lead.contact_email, idempotencyKey: `quote:${current.id}:${token.slice(0, 12)}`,
-    data: { contactName: lead.contact_name, totalCents: current.total_cents, validUntil: current.valid_until ?? null, proposalUrl: url },
-  });
-  await audit(ctx.db, { actorUserId: actor.userId, action: "quote.sent", subjectType: "quote", subjectId: quoteId, details: { version: current.version } });
+  // CREST-GAP-034: report what actually happened to the email; never "emailed" for a failed or held delivery.
+  let delivery: "sent" | "queued" | "failed" | "suppressed" | "duplicate";
+  let deliveryError: string | null = null;
+  try {
+    const r = await sendMail(ctx, {
+      template: "quote_sent", to: lead.contact_email, idempotencyKey: `quote:${current.id}:${token.slice(0, 12)}`,
+      data: { contactName: lead.contact_name, totalCents: current.total_cents, validUntil: current.valid_until ?? null, proposalUrl: url },
+    });
+    delivery = r.status;
+    if (r.deliveryId && r.status !== "sent") deliveryError = (await ctx.db.prepare(`SELECT last_error FROM email_deliveries WHERE id = ?`).bind(r.deliveryId).first<{ last_error: string | null }>())?.last_error ?? null;
+  } catch (e) { delivery = "failed"; deliveryError = (e as Error).message; }
+  const activity = delivery === "sent" ? `Proposal v${current.version} emailed to ${lead.contact_email}`
+    : `Proposal v${current.version} link issued; email to ${lead.contact_email} ${delivery === "queued" ? "is queued, not yet delivered" : `was not delivered (${delivery})`}${deliveryError ? `: ${deliveryError}` : ""}`;
+  await ctx.db.prepare(`INSERT INTO crm_activities (id, lead_id, actor_user_id, kind, body, created_at) VALUES (?,?,?,'email',?,?)`).bind(newId("act"), lead.id, actor.userId ?? null, activity.slice(0, 2000), at).run();
+  await audit(ctx.db, { actorUserId: actor.userId, action: "quote.sent", subjectType: "quote", subjectId: quoteId, details: { version: current.version, delivery } });
   let stageNote: string | null = null;
   if (lead.stage !== "quote_sent") {
     if ((LEAD_TRANSITIONS[lead.stage] as readonly LeadStage[]).includes("quote_sent")) await changeLeadStage(ctx.db, actor, lead.id, "quote_sent");
     else stageNote = `Lead stays in "${lead.stage}" — moving to Quote Sent is not a valid transition from there.`;
   }
-  return { token, url, stageNote };
+  return { token, url, stageNote, delivery, deliveryError };
 }
 
 // ── public proposal ──
@@ -212,45 +223,75 @@ export async function loadProposal(db: Db, token: string, now: Date): Promise<Pr
   else if (quote.status === "accepted") state = "superseded"; // another version was accepted
   else if (version.version !== quote.current_version || quote.status === "superseded") state = "superseded";
   else if (quote.status === "rejected") state = "withdrawn";
-  else if (t.expires_at < nowS || (version.valid_until && `${version.valid_until}T23:59:59.999Z` < nowS) || quote.status === "expired") state = "expired";
+  else if (t.expires_at < nowS || (version.valid_until && endOfBusinessDay(version.valid_until) < nowS) || quote.status === "expired") state = "expired";
   return { tokenHash: h, quote, version, lines: parsed.lines, installments: parsed.installments, contact: { id: c!.id, name: c!.name, email: c!.email }, companyName: c!.company, state, leadId: quote.lead_id, leadStage: lead!.stage };
 }
 
-/** Customer acceptance. Caller has verified the signed-in user's organization (requireCustomerOrg). */
+/** True when the quote version is a standard package (it keeps the package's identity and documents, CREST-GAP-033). */
+export function isPackageQuote(v: { package_id: string | null }): boolean {
+  return !!v.package_id && v.package_id in PACKAGES;
+}
+
+/**
+ * Customer acceptance. Caller has verified the signed-in user's organization (requireCustomerOrg).
+ *
+ * CREST-GAP-032: the acceptance, the order with its first invoice, the contact/company links and the agreement
+ * acceptance records commit in ONE batch (one transaction). Every insert is guarded on the acceptance having been
+ * made by this request, so a failure anywhere leaves nothing accepted and the customer can simply try again, and a
+ * concurrent second acceptance creates nothing. Pipeline moves and notifications follow and never undo it.
+ */
 export async function acceptProposal(ctx: AppContext, p: Proposal, user: { id: string; email: string }, organizationId: string) {
   if (p.state !== "open") throw new HttpError(409, p.state === "accepted" ? "This proposal has already been accepted." : p.state === "superseded" ? "This proposal has been replaced by a newer version. Use the link in the latest email." : "This proposal is no longer open for acceptance.");
   if (!p.contact.email || p.contact.email.toLowerCase() !== user.email.toLowerCase()) {
     throw new HttpError(403, `This proposal was sent to a different email address. Sign in with the address the proposal was sent to.`);
   }
+  const db = ctx.db;
   const at = nowIso(ctx.now);
-  const res = await ctx.db.batch([
-    ctx.db.prepare(`UPDATE quote_versions SET accepted_at = ?, accepted_by_contact_id = ?, accepted_by_user_id = ? WHERE id = ? AND accepted_at IS NULL`).bind(at, p.contact.id, user.id, p.version.id),
-    ctx.db.prepare(`UPDATE quotes SET status = 'accepted' WHERE id = ? AND current_version = ? AND status <> 'accepted'`).bind(p.quote.id, p.version.version),
-    ctx.db.prepare(`UPDATE contacts SET user_id = COALESCE(user_id, ?) WHERE id = ?`).bind(user.id, p.contact.id),
+  const acceptedHere = { sql: `EXISTS (SELECT 1 FROM quote_versions WHERE id = ? AND accepted_by_user_id = ? AND accepted_at = ?)`, binds: [p.version.id, user.id, at] };
+  const order = await prepareQuoteOrder(db, organizationId, { id: p.version.id, total_cents: p.version.total_cents, payment_schedule: p.version.payment_schedule, quote_id: p.quote.id, package_id: p.version.package_id }, p.leadId, acceptedHere);
+  const context = isPackageQuote(p.version) ? "package_quote_acceptance" as const : "quote_acceptance" as const;
+  // Agreement acceptances are recorded only when this request's order was created.
+  const mine = { sql: `EXISTS (SELECT 1 FROM orders WHERE id = ?)`, binds: [order.orderId] };
+  const agreements = await prepareAcceptance(ctx, { userId: user.id, organizationId, context, contextId: p.version.id }, mine);
+  const res = await db.batch([
+    db.prepare(`UPDATE quote_versions SET accepted_at = ?, accepted_by_contact_id = ?, accepted_by_user_id = ? WHERE id = ? AND accepted_at IS NULL
+                AND EXISTS (SELECT 1 FROM quotes WHERE id = ? AND current_version = ? AND status NOT IN ('accepted','rejected'))`).bind(at, p.contact.id, user.id, p.version.id, p.quote.id, p.version.version),
+    db.prepare(`UPDATE quotes SET status = 'accepted' WHERE id = ? AND current_version = ? AND status <> 'accepted'
+                AND EXISTS (SELECT 1 FROM quote_versions WHERE id = ? AND accepted_by_user_id = ? AND accepted_at = ?)`).bind(p.quote.id, p.version.version, p.version.id, user.id, at),
+    ...order.statements,
+    db.prepare(`UPDATE contacts SET user_id = COALESCE(user_id, ?) WHERE id = ? AND EXISTS (SELECT 1 FROM orders WHERE id = ?)`).bind(user.id, p.contact.id, order.orderId),
     // Link the CRM company to the customer's organization (creates the customer record link).
-    ctx.db.prepare(`UPDATE companies SET organization_id = COALESCE(organization_id, ?) WHERE id = (SELECT company_id FROM contacts WHERE id = ?)`).bind(organizationId, p.contact.id),
+    db.prepare(`UPDATE companies SET organization_id = COALESCE(organization_id, ?) WHERE id = (SELECT company_id FROM contacts WHERE id = ?) AND EXISTS (SELECT 1 FROM orders WHERE id = ?)`).bind(organizationId, p.contact.id, order.orderId),
+    ...agreements.statements,
   ]);
-  if (res[0].meta.changes !== 1 || res[1].meta.changes !== 1) throw new HttpError(409, "This proposal changed while you were viewing it. Reload the page.");
-  await audit(ctx.db, { actorUserId: user.id, action: "quote.accepted", subjectType: "quote", subjectId: p.quote.id, organizationId, details: { version: p.version.version, totalCents: p.version.total_cents } });
+  if (res[0].meta.changes !== 1 || res[1].meta.changes !== 1 || res[2].meta.changes !== 1) throw new HttpError(409, "This proposal changed while you were viewing it. Reload the page.");
+  await audit(db, { actorUserId: user.id, action: "quote.accepted", subjectType: "quote", subjectId: p.quote.id, organizationId, details: { version: p.version.version, totalCents: p.version.total_cents } });
+  await audit(db, { actorUserId: user.id, action: "order.created", subjectType: "order", subjectId: order.orderId, organizationId, details: { quoteVersionId: p.version.id, taxCents: order.taxCents } });
+  await auditAcceptance(ctx, { userId: user.id, organizationId, context, contextId: p.version.id }, agreements.versions);
   // Pipeline: → accepted → awaiting_payment (only where the transition is valid).
   const notes: string[] = [];
   for (const to of ["accepted", "awaiting_payment"] as const) {
-    try { await changeLeadStage(ctx.db, SALES_AUTOMATION, p.leadId, to); }
+    try { await changeLeadStage(db, SALES_AUTOMATION, p.leadId, to); }
     catch (e) { notes.push(`Stage not moved to ${to}: ${(e as Error).message}`); }
   }
   if (notes.length) {
-    await ctx.db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`).bind(newId("act"), p.leadId, notes.join("; "), at).run();
+    await db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`).bind(newId("act"), p.leadId, notes.join("; "), at).run();
   }
-  const order = await createQuoteOrder(ctx.db, organizationId, { id: p.version.id, total_cents: p.version.total_cents, payment_schedule: p.version.payment_schedule, quote_id: p.quote.id }, p.leadId, user.id);
-  await ctx.db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`)
+  await db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`)
     .bind(newId("act"), p.leadId, `Customer accepted quote v${p.version.version}; order ${order.orderId} created with first invoice ${order.invoiceId}`, at).run();
   // Notify the lead owner.
-  const owner = await ctx.db.prepare(`SELECT owner_user_id FROM leads WHERE id = ?`).bind(p.leadId).first<{ owner_user_id: string | null }>();
+  const owner = await db.prepare(`SELECT owner_user_id FROM leads WHERE id = ?`).bind(p.leadId).first<{ owner_user_id: string | null }>();
   if (owner?.owner_user_id) {
-    await ctx.db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES (?,?,?,?,?,?,?)`)
+    await db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES (?,?,?,?,?,?,?)`)
       .bind(newId("ntf"), owner.owner_user_id, "quote_accepted", "lead", p.leadId, `${p.contact.name} accepted quote v${p.version.version}.`, at).run();
   }
-  return order;
+  // CREST-GAP-039: confirmation listing the exact agreement versions accepted. A mail failure never undoes acceptance.
+  try {
+    await sendMail(ctx, { template: "proposal_accepted", to: user.email, idempotencyKey: `quote-accepted:${p.version.id}`,
+      data: { contactName: p.contact.name, version: p.version.version, totalCents: p.version.total_cents, firstInvoiceCents: order.amountCents,
+        agreements: agreements.versions.map((v: AgreementRow) => `${v.title ?? v.kind} — version ${v.version}`), url: `${ctx.baseUrl}/portal/billing/invoices/${order.invoiceId}` } });
+  } catch (e) { console.error(JSON.stringify({ level: "warn", msg: "proposal acceptance email failed", quote: p.quote.id, error: (e as Error).message })); }
+  return { orderId: order.orderId, invoiceId: order.invoiceId, amountCents: order.amountCents, agreements: agreements.versions };
 }
 
 export function packageName(id: string | null) {

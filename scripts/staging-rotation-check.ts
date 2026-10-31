@@ -1,10 +1,10 @@
-// Proves, over real HTTP on the live staging preview, that a credential rotation actually revoked the old access.
+// Proves, over real HTTP on the live (public) staging site, that a credential rotation actually revoked the old access.
 //
 //   capture (BEFORE scripts/staging-access.ts rotates): derives the credentials that are live right now, confirms the
 //     live site accepts them, signs the demo Owner in (keeping that session) and mints one recovery code. Writes them to
 //     a 0600 state file on the runner only. Does nothing when no rotation is pending.
-//   verify (AFTER the rotation and the new-access check): old preview password, old Owner password, old 2FA key, old
-//     recovery code and old session must all be rejected; the new preview password, password and 2FA key must work; the
+//   verify (AFTER the rotation and the new-access check): old Owner password, old 2FA key, old recovery code and old
+//     session must all be rejected; the new password and 2FA key must work; the
 //     recovery-code mechanism must work end to end (generate with a fresh 2FA code → sign in with one code). Then deletes
 //     the codes it generated (nobody holds them) and confirms no demo recovery code or pending demo invitation remains.
 //
@@ -12,7 +12,7 @@
 // with PASS/FAIL only. Staging only (wranglerOps addresses crestmont-staging --env staging).
 //
 //   node --no-warnings scripts/staging-rotation-check.ts capture --url <url> --state <file>
-//     env: ACCESS_ROOT_KEY, ACCESS_EPOCH, ROTATE, FIXED_PREVIEW_PASSWORD
+//     env: ACCESS_ROOT_KEY, ACCESS_EPOCH, ROTATE
 //   node --no-warnings scripts/staging-rotation-check.ts verify --url <url> --state <file> --access access/access.json
 import { existsSync, readFileSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -23,7 +23,7 @@ import { passphraseProblem } from "./seal.ts";
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 type Sleep = (ms: number) => Promise<void>;
 export interface Owner { email: string; password: string; totp: string }
-export interface CaptureState { oldPreview: string | null; oldOwner: Owner; sessionCookie: string | null; oldRecoveryCode: string | null; notes: string[] }
+export interface CaptureState { oldOwner: Owner; sessionCookie: string | null; oldRecoveryCode: string | null; notes: string[] }
 export interface Check { name: string; ok: boolean; detail?: string }
 
 const realSleep: Sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -54,12 +54,7 @@ export class Client {
     }
   }
   loc(r: Response) { return new URL(r.headers.get("location") ?? "/", this.base).pathname; }
-  csrf() { return this.jar.get("cm_csrf") ?? ""; }
-  async gate(password: string): Promise<boolean> {
-    const r = await this.send("POST", "/__preview-access", { password, next: "/login" });
-    await r.arrayBuffer();
-    return r.status === 303 && this.jar.has("cm_preview");
-  }
+  csrf() { return this.jar.get("__Host-cm_csrf") ?? this.jar.get("cm_csrf") ?? ""; }
   /** Email + password; true when the site asks for the second factor. */
   async password(email: string, password: string): Promise<boolean> {
     let r = await this.send("GET", "/login"); await r.arrayBuffer();
@@ -96,26 +91,23 @@ export async function generateRecoveryCodes(c: Client, totp: string, sleep: Slee
 
 const mask = (v: string | null | undefined, out: (s: string) => void) => { if (v) out(`::add-mask::${v}`); };
 
-export async function capture(o: { base: string; ops: D1Ops; rootKey: string; epoch: string; rotate: boolean; fixedPreview?: string; f?: Fetch; sleep?: Sleep; out?: (s: string) => void }): Promise<CaptureState | null> {
+export async function capture(o: { base: string; ops: D1Ops; rootKey: string; epoch: string; rotate: boolean; f?: Fetch; sleep?: Sleep; out?: (s: string) => void }): Promise<CaptureState | null> {
   const out = o.out ?? console.log, sleep = o.sleep ?? realSleep;
   if (!(await rotationPending(o.ops, { epoch: o.epoch, rotate: o.rotate }))) return null;
-  const cur = await currentAccess(o.ops, o.rootKey, o.fixedPreview);
+  const cur = await currentAccess(o.ops, o.rootKey);
   if (!cur) throw new Error("no current access to capture (staging has never been issued access)");
-  for (const v of [...cur.previewCandidates, cur.owner.password, cur.owner.totp]) mask(v, out);
+  for (const v of [cur.owner.password, cur.owner.totp]) mask(v, out);
   const notes: string[] = [];
   const c = new Client(o.base, o.f ?? fetch, sleep);
-  let oldPreview: string | null = null;
-  for (const p of cur.previewCandidates) if (await c.gate(p)) { oldPreview = p; break; }
-  if (!oldPreview) { notes.push("the live preview password could not be derived (not testable)"); return { oldPreview, oldOwner: cur.owner, sessionCookie: null, oldRecoveryCode: null, notes }; }
   if (!(await c.password(cur.owner.email, cur.owner.password)) || !(await c.second(await freshTotp(cur.owner.totp, sleep)))) {
     notes.push("the current Owner credentials were not accepted before the rotation (not testable)");
-    return { oldPreview, oldOwner: cur.owner, sessionCookie: null, oldRecoveryCode: null, notes };
+    return { oldOwner: cur.owner, sessionCookie: null, oldRecoveryCode: null, notes };
   }
-  const sessionCookie = c.jar.get("cm_session") ?? null;
+  const sessionCookie = c.jar.get("__Host-cm_session") ?? c.jar.get("cm_session") ?? null;
   const codes = await generateRecoveryCodes(c, cur.owner.totp, sleep);
   for (const v of [sessionCookie, ...codes]) mask(v, out);
   if (!codes.length) notes.push("no recovery code could be generated before the rotation");
-  return { oldPreview, oldOwner: cur.owner, sessionCookie, oldRecoveryCode: codes[0] ?? null, notes };
+  return { oldOwner: cur.owner, sessionCookie, oldRecoveryCode: codes[0] ?? null, notes };
 }
 
 export async function verify(o: { base: string; ops: D1Ops; state: CaptureState; access: AccessResult; f?: Fetch; sleep?: Sleep; out?: (s: string) => void }): Promise<Check[]> {
@@ -126,25 +118,17 @@ export async function verify(o: { base: string; ops: D1Ops; state: CaptureState;
   const add = (name: string, ok: boolean, detail?: string) => checks.push({ name, ok, detail });
   const fresh = () => new Client(o.base, f, sleep);
 
-  // Preview password.
-  if (s.oldPreview === null) add("Old preview password rejected", false, "not testable: " + s.notes.join("; "));
-  else if (s.oldPreview === o.access.previewPassword) add("Old preview password rejected", false, "the preview password did not change (a STAGING_PREVIEW_PASSWORD override was left in place)");
-  else add("Old preview password rejected", !(await fresh().gate(s.oldPreview)));
-  const c = fresh();
-  add("New preview password accepted", await c.gate(o.access.previewPassword));
-
-  // Old session (behind the NEW preview cookie, so only the session decides).
+  // Old session (the site is public, so only the session cookie decides).
   if (s.sessionCookie) {
     const old = fresh();
-    old.jar.set("cm_preview", c.jar.get("cm_preview") ?? "");
     old.jar.set("cm_session", s.sessionCookie);
     add("Old Owner session invalid", !(await old.signedIn()));
   } else add("Old Owner session invalid", false, "not testable: no session was captured");
 
   // Passwords.
   if (s.oldOwner.password === owner.password) add("Old Owner password rejected", false, "the Owner password did not change");
-  else { const p = fresh(); p.jar = new Map(c.jar); add("Old Owner password rejected", !(await p.password(s.oldOwner.email, s.oldOwner.password))); }
-  const a = fresh(); a.jar = new Map(c.jar);
+  else { const p = fresh(); add("Old Owner password rejected", !(await p.password(s.oldOwner.email, s.oldOwner.password))); }
+  const a = fresh();
   add("New Owner password accepted (2FA requested)", await a.password(owner.email, owner.password));
 
   // Second factor: old recovery code and old 2FA key first, then the new key.
@@ -160,7 +144,7 @@ export async function verify(o: { base: string; ops: D1Ops; state: CaptureState;
     const codes = await generateRecoveryCodes(a, owner.totp, sleep);
     for (const v of codes) mask(v, out);
     await a.logout();
-    const b = fresh(); b.jar = new Map(c.jar);
+    const b = fresh();
     const ok = codes.length > 0 && (await b.password(owner.email, owner.password)) && (await b.second(codes[0]));
     add("New recovery codes can be generated and used", ok);
     if (ok) await b.logout();
@@ -186,12 +170,23 @@ export async function gate(o: { ops: D1Ops; epoch: string; rotate: boolean; pass
 }
 
 /**
- * Still before the rotation (the live site holds the current values): a STAGING_PREVIEW_PASSWORD override that the live
- * gate already accepts would survive the rotation unchanged. Tested against the live gate, so no value is hashed or stored.
+ * READ-ONLY, every deploy: the last rotation is complete in D1. Needs no credential, so it also covers a run where the
+ * HTTP revocation proof could not run (deploy #56: the rotation succeeded, the new-access check failed before the proof).
  */
-export async function overrideUnchanged(o: { base: string; fixedPreview?: string; f?: Fetch; sleep?: Sleep }): Promise<boolean> {
-  if (!o.fixedPreview) return false;
-  return new Client(o.base, o.f ?? fetch, o.sleep ?? realSleep).gate(o.fixedPreview);
+export async function rotationState(ops: D1Ops, epoch: string): Promise<Check[]> {
+  const meta = Object.fromEntries((await ops.query<{ key: string; value: string }>(`SELECT key, value FROM _staging_access`).catch(() => [])).map((r) => [r.key, r.value]));
+  const at = meta.rotated_at ?? "";
+  const demo = `(SELECT id FROM users WHERE email LIKE '%@${DEMO_DOMAIN}')`;
+  const n = async (sql: string) => Number((await ops.query<{ n: number }>(sql))[0]?.n ?? 0);
+  const checks: Check[] = [];
+  const add = (name: string, ok: boolean, detail?: string) => checks.push({ name, ok, detail });
+  add(`Access epoch is ${epoch}`, meta.epoch === epoch, meta.epoch ? `D1 holds epoch ${meta.epoch}` : "no access issued yet");
+  if (!at) { add("Rotation recorded", false, "no rotated_at in D1"); return checks; }
+  add("Rotation audited", (await n(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'staging.access_rotated' AND subject_id = '${epoch.replace(/'/g, "")}'`)) > 0);
+  add("No demo session from before the rotation", (await n(`SELECT COUNT(*) AS n FROM sessions WHERE user_id IN ${demo} AND created_at < '${at}'`)) === 0);
+  add("No demo one-time token from before the rotation", (await n(`SELECT COUNT(*) AS n FROM auth_tokens WHERE user_id IN ${demo} AND created_at < '${at}'`)) === 0);
+  add("No demo recovery code from before the rotation", (await n(`SELECT COUNT(*) AS n FROM mfa_recovery_codes WHERE user_id IN ${demo} AND created_at < '${at}'`)) === 0);
+  return checks;
 }
 
 export const report = (checks: Check[]) => ["| Check | Result |", "|---|---|", ...checks.map((c) => `| ${c.name} | ${c.ok ? "PASS" : "**FAIL**"}${c.detail ? ` (${c.detail})` : ""} |`)].join("\n");
@@ -207,21 +202,20 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         for (const p of g.problems) console.error(`::error title=Rotation blocked (nothing was changed)::${p}`);
         process.exit(1);
       }
-      console.log(g.pending ? "Rotation pending: secure delivery is configured and the preview password will change." : "No rotation pending.");
+      console.log(g.pending ? "Rotation pending: secure delivery is configured for the new Owner credentials." : "No rotation pending.");
       process.exit(0);
     }
-    if (mode === "override") {
-      if (!url) throw new Error("--url is required");
-      if (await overrideUnchanged({ base: url, fixedPreview: process.env.FIXED_PREVIEW_PASSWORD || undefined })) {
-        console.error("::error title=Rotation blocked (no credential was changed)::The STAGING_PREVIEW_PASSWORD secret is the live preview password, so the rotation would not change it. Set a new value or delete the secret, then re-run.");
-        process.exit(1);
-      }
-      console.log("The preview password will change with the rotation.");
+    if (mode === "state") {
+      const checks = await rotationState(wranglerOps(), process.env.ACCESS_EPOCH ?? "1");
+      const table = report(checks);
+      console.log(table);
+      if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Rotation state in D1 (read-only)\n\n${table}\n`);
+      if (checks.some((c) => !c.ok)) { console.error("::error title=Rotation incomplete::See the step summary (no values are shown)."); process.exit(1); }
       process.exit(0);
     }
     if (!url || !stateFile) throw new Error("--url and --state are required");
     if (mode === "capture") {
-      const st = await capture({ base: url, ops: wranglerOps(), rootKey: process.env.ACCESS_ROOT_KEY ?? "", epoch: process.env.ACCESS_EPOCH ?? "1", rotate: process.env.ROTATE === "true", fixedPreview: process.env.FIXED_PREVIEW_PASSWORD || undefined });
+      const st = await capture({ base: url, ops: wranglerOps(), rootKey: process.env.ACCESS_ROOT_KEY ?? "", epoch: process.env.ACCESS_EPOCH ?? "1", rotate: process.env.ROTATE === "true" });
       if (!st) { console.log("No rotation pending: old-credential checks are not needed for this run."); process.exit(0); }
       writeFileSync(stateFile, JSON.stringify(st), { mode: 0o600 });
       console.log(`Captured the pre-rotation access for the revocation checks${st.notes.length ? ` (${st.notes.join("; ")})` : ""}.`);

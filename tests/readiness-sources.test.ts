@@ -26,7 +26,8 @@ const kpiValue = (page: string, label: string) => new RegExp(`${label.replace(/[
 // ───────────── READY-006: error rate and latency ─────────────
 
 test("[READY-006] every request lands in one hourly env_metrics row per area: 5xx and unhandled exceptions counted, no paths or ids stored", async () => {
-  const app = await createTestApp();
+  // Sampling off (every request written) so exact counts can be asserted; sampling has its own test below.
+  const app = await createTestApp({ ENV_METRICS_SAMPLE: "1" });
   let boom = false;
   // Simulated outage: the health query throws, so /api/health becomes an unhandled exception → 500.
   const flaky = Object.create(app.db) as Env["DB"];

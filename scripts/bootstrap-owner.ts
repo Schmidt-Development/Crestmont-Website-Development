@@ -2,9 +2,11 @@
 // the platform: the Founder accepts this invitation, chooses a password and enrols MFA.
 //
 //   Local DB:   node --no-warnings scripts/bootstrap-owner.ts --email founder@example.com --db .dev/crestmont.db
-//   D1 (remote): node --no-warnings scripts/bootstrap-owner.ts --email founder@example.com --print-sql > owner.sql
+//   D1 (remote): node --no-warnings scripts/bootstrap-owner.ts --email founder@example.com --print-sql --url https://<host> > owner.sql
 //                wrangler d1 execute crestmont-staging --remote --file owner.sql
 //
+// --print-sql REQUIRES --url (CREST-GAP-067): the SQL is for a deployed database, and a defaulted localhost link would
+// hand the Founder a dead invitation for production. Without it the script exits 2 and prints nothing.
 // Refuses to run if an Owner already exists (local mode). Prints the invitation URL once; only its
 // SHA-256 hash is stored.
 import { randomToken, hashToken } from "../src/lib/auth-crypto.ts";
@@ -12,8 +14,14 @@ import { randomToken, hashToken } from "../src/lib/auth-crypto.ts";
 const args = process.argv.slice(2);
 const get = (k: string) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : undefined; };
 const email = get("--email")?.trim().toLowerCase();
-const baseUrl = get("--url") ?? "http://localhost:8787";
-if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) { console.error("Usage: --email <founder email> [--db path | --print-sql] [--url base]"); process.exit(2); }
+const USAGE = "Usage: --email <founder email> [--db path | --print-sql --url https://<deployed host>] [--url base]";
+if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) { console.error(USAGE); process.exit(2); }
+const urlArg = get("--url");
+if (args.includes("--print-sql") && (!urlArg || !/^https?:\/\/[^\s/]+/.test(urlArg))) {
+  console.error(`--print-sql needs --url: the base URL of the environment whose database will run this SQL (e.g. https://crestmontwebsitedevelopment.com), so the invitation link is correct.\n${USAGE}`);
+  process.exit(2);
+}
+const baseUrl = (urlArg ?? "http://localhost:8787").replace(/\/+$/, "");
 
 const token = randomToken();
 const tokenHash = await hashToken(token);

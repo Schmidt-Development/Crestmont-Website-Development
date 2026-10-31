@@ -15,7 +15,7 @@ A verified Stripe webhook arrives at `POST /api/webhooks/stripe`, which calls `p
 
 `confirmInvoicePayment` was `applyInvoicePayment` before this change. It is now provider-neutral and exported. The Stripe path behaves exactly as before. The simulation adapter calls the same function with `{ provider: "simulated" }`.
 
-## 2. The test-only payment adapter (`src/services/payment-simulation.ts`, migration 0044)
+## 2. The test-only payment adapter (`src/services/payment-simulation.ts`, migration 0054)
 
 | Control | Where |
 |---|---|
@@ -75,7 +75,7 @@ A verified Stripe webhook arrives at `POST /api/webhooks/stripe`, which calls `p
    - **(a) Recommended:** run the benchmark as the **Business package ($2,499.00, 100% upfront)**. It uses the standard website pipeline with the brochure starter, its checks and the runner's browser screenshots. The simulated event is then 249,900 cents.
    - **(b)** Keep the $2,500 custom quote and accept the deposit semantics and the weaker QA.
    - **(c)** Authorize a code change, such as an internal non-public test package or an upfront schedule for custom quotes. Each one changes CAT-004 or the catalog.
-2. **Merge and migrations.** Staging migrates only from `main`. The real run needs PR #16 and this branch merged, with migrations 0041 to 0044 applied to staging.
+2. **Merge and migrations.** Staging migrates only from `main`. The real run needs PR #16 and this branch merged, with migrations 0051 to 0054 applied to staging (renumbered from 0041–0044 when integrated with `main`).
 3. **Enable the simulation on staging only.** Add `PAYMENT_SIMULATION_ENABLED = "true"` to the staging `vars` in `wrangler.toml`. Production ignores it in every case.
 4. **The fictional customer's email.** Staging only delivers to the allow-list (`@crestmontwebsitedevelopment.com`), and email verification needs a delivered link. Use an allow-listed address such as `e2e+junkinthetrunk@crestmontwebsitedevelopment.com` for the customer, or add a specific test address to `EMAIL_RECIPIENT_ALLOWLIST`.
 

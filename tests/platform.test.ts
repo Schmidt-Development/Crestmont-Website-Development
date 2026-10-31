@@ -1,4 +1,6 @@
 import { test } from "node:test";
+import { STRIPE_WEBHOOK_EVENTS } from "../src/domain/stripe-events.ts";
+import { STRIPE_API_VERSION } from "../src/adapters/payments.ts";
 import assert from "node:assert/strict";
 import { createTestApp, createStaff, createCustomer, lastEmail, linkFrom, TEST_PASSWORD } from "./support/app.ts";
 import { newId, nowIso } from "../src/lib/db.ts";
@@ -129,13 +131,14 @@ test("[INFRA-006] integration verify marks verified only after a successful fake
   const app = await createTestApp();
   const env: Env = { ...app.env, STRIPE_SECRET_KEY: "sk_test_abc", STRIPE_WEBHOOK_SECRET: "whsec_x" };
   const calls: string[] = [];
-  const ok = fakeFetch((u) => { calls.push(u); return { status: 200, body: { object: "balance", livemode: false } }; });
+  const endpoint = { url: "http://crestmont.test/api/webhooks/stripe", status: "enabled", api_version: STRIPE_API_VERSION, enabled_events: [...STRIPE_WEBHOOK_EVENTS] };
+  const ok = fakeFetch((u) => { calls.push(u); return u.includes("webhook_endpoints") ? { status: 200, body: { data: [endpoint] } } : { status: 200, body: { object: "balance", livemode: false } }; });
   await refreshIntegrationHealth({ db: app.db, env, storage: null });
   const before = await app.db.prepare(`SELECT status FROM integration_health WHERE integration = 'stripe' AND environment = 'development'`).first<{ status: string }>();
   assert.equal(before!.status, "configured_unverified");
   const res = await verifyIntegration({ db: app.db, env, storage: null, fetchImpl: ok }, "stripe", null);
   assert.equal(res.status, "verified");
-  assert.deepEqual(calls, ["https://api.stripe.com/v1/balance"]);
+  assert.deepEqual(calls, ["https://api.stripe.com/v1/balance", "https://api.stripe.com/v1/webhook_endpoints?limit=100"]);
   const row = await app.db.prepare(`SELECT status, verified_at FROM integration_health WHERE integration = 'stripe' AND environment = 'development'`).first<{ status: string; verified_at: string | null }>();
   assert.equal(row!.status, "verified");
   assert.ok(row!.verified_at);
@@ -144,6 +147,15 @@ test("[INFRA-006] integration verify marks verified only after a successful fake
   assert.equal((await app.db.prepare(`SELECT status FROM integration_health WHERE integration = 'stripe'`).first<{ status: string }>())!.status, "verified");
   await refreshIntegrationHealth({ db: app.db, env: { ...env, STRIPE_SECRET_KEY: "sk_test_other" }, storage: null });
   assert.equal((await app.db.prepare(`SELECT status FROM integration_health WHERE integration = 'stripe'`).first<{ status: string }>())!.status, "configured_unverified");
+  // CREST-GAP-017: a missing endpoint, wrong API version or missing event is reported, never "verified".
+  const noEndpoint = fakeFetch((u) => (u.includes("webhook_endpoints") ? { status: 200, body: { data: [] } } : { status: 200, body: { object: "balance", livemode: false } }));
+  const ne = await verifyIntegration({ db: app.db, env, storage: null, fetchImpl: noEndpoint }, "stripe", null);
+  assert.equal(ne.status, "degraded");
+  assert.match(ne.detail, /no webhook endpoint is registered for http:\/\/crestmont\.test\/api\/webhooks\/stripe/);
+  const oldVersion = fakeFetch((u) => (u.includes("webhook_endpoints") ? { status: 200, body: { data: [{ ...endpoint, api_version: "2023-10-16" }] } } : { status: 200, body: { object: "balance", livemode: false } }));
+  assert.match((await verifyIntegration({ db: app.db, env, storage: null, fetchImpl: oldVersion }, "stripe", null)).detail, /expected 2025-02-24\.acacia/);
+  const fewEvents = fakeFetch((u) => (u.includes("webhook_endpoints") ? { status: 200, body: { data: [{ ...endpoint, enabled_events: ["invoice.paid"] }] } } : { status: 200, body: { object: "balance", livemode: false } }));
+  assert.match((await verifyIntegration({ db: app.db, env, storage: null, fetchImpl: fewEvents }, "stripe", null)).detail, /does not send: checkout\.session\.completed/);
   // Provider rejects → failing with the error.
   const bad = fakeFetch(() => ({ status: 401, body: { error: { message: "Invalid API Key provided" } } }));
   const f = await verifyIntegration({ db: app.db, env, storage: null, fetchImpl: bad }, "stripe", null);
@@ -194,7 +206,7 @@ test("[INFRA-006] recordAppError feeds the monitoring page; alerting is reported
   const { c } = await staffClient(app, "administrator");
   const html = await (await c.get("/staff/monitoring")).text();
   assert.match(html, /\/staff\/boom/);
-  assert.match(html, /No external alerting is configured/);
+  assert.match(html, /Alerting: email to the Owners, no paging/, "the page states exactly which alerting exists");
   assert.match(html, /5xx errors \(24 h\)<\/div><div class="kpi__value">1</);
 });
 

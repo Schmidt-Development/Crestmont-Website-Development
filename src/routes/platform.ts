@@ -4,7 +4,7 @@
 // Every staff route calls requireStaff(ctx, perm) with the permission its nav link declares.
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
-import { html, formatDateTime, formatDate, label, type SafeHtml } from "../lib/html.ts";
+import { html, formatDateTime, formatDate, label, safeHttpsUrl, type SafeHtml } from "../lib/html.ts";
 import { HttpError, htmlResponse, jsonResponse, redirect, download, str } from "../app/http.ts";
 import { requireStaff, requireUser } from "../app/app.ts";
 import { appLayout } from "../ui/layout.ts";
@@ -19,12 +19,15 @@ import { sendMail, renderTemplate, identityFrom, EMAIL_TEMPLATES, REQUIRED_WORKF
 import { ResendEmail } from "../adapters/email.ts";
 import { decideAiJob, aiProviderFromEnv, AI_WORKFLOWS, AI_FORBIDDEN, LOCAL_RUNNER, paidAiBudget, priceKnown } from "../services/ai.ts";
 import * as emp from "../services/employees.ts";
+import * as off from "../services/offboarding.ts";
 import * as wl from "../services/workload.ts";
 import { toCsv } from "../services/finance.ts";
 import * as integ from "../services/integrations.ts";
 import * as mon from "../services/monitoring.ts";
 import * as priv from "../services/privacy.ts";
 import * as voice from "../services/voice.ts";
+import { voiceBudget, setVoiceBudget, VoiceBudgetError } from "../services/voice-budget.ts";
+import { syncPrompt, latestPromptSync, type PromptSyncResult } from "../services/voice-prompt-sync.ts";
 import { readBody } from "./api.ts";
 import { ValidationError } from "../lib/validate.ts";
 import { newId, nowIso } from "../lib/db.ts";
@@ -38,6 +41,14 @@ const q = (ctx: AppContext, k: string, max = 120) => (ctx.url.searchParams.get(k
 /** Stored mail keeps single-use secrets (password reset, email verification, invitation, proposal and share links)
  *  so a failed delivery can be retried. Staff views never show them: whoever reads one can act as the recipient. */
 const redactSecrets = (s: string) => s.replace(/(token=|\/q\/|\/share\/)[A-Za-z0-9_-]{16,}/g, "$1[redacted]");
+/** The staging journeys' synthetic customers (tests/e2e/staging-journeys.e2e.ts). `.example` is reserved (RFC 2606), so
+ *  these addresses can never belong to or reach a real person. */
+export const JOURNEY_EMAIL_DOMAIN = "@staging-journeys.example";
+export const isJourneyAddress = (email: string) => email.trim().toLowerCase().endsWith(JOURNEY_EMAIL_DOMAIN);
+/** Links in stored emails carry live tokens (proposal, verification, reset, share), so staff never see them (EMP-002) —
+ *  with one exception: on STAGING, mail to the journeys' own synthetic domain, whose "recipient" is the test itself and
+ *  must follow the links it was sent (deploy #61, journey 4). Development, tests and production always redact. */
+const bodyForStaff = (ctx: AppContext, to: string, s: string) => (ctx.env.ENVIRONMENT === "staging" && isJourneyAddress(to) ? s : redactSecrets(s));
 const isDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(s));
 const microUsd = (v: number | null | undefined) => (v === null || v === undefined ? "Unknown" : `$${(v / 1e6).toFixed(4)}`);
 const yesNo = (b: boolean) => (b ? badge("active", "Present") : badge("not_configured", "Not set"));
@@ -97,7 +108,8 @@ ${table(staff, [
     return html`<form method="post" action="/staff/employees/${s.id}/role" class="row">${csrf(ctx)}<label class="visually-hidden" for="role-${s.id}">Role for ${s.display_name}</label><select class="select" id="role-${s.id}" name="role">${roleOpts.map((o) => html`<option value="${o.value}"${o.value === s.role ? html` selected` : ""}>${o.label}</option>`)}</select>${button("Change role", { variant: "secondary", size: "sm" })}</form>
 ${s.disabled_at
   ? actionForm(ctx, `/staff/employees/${s.id}/enable`, "Enable account", { variant: "secondary" })
-  : html`<form method="post" action="/staff/employees/${s.id}/disable" class="row" data-confirm="Disable this account and sign them out everywhere?">${csrf(ctx)}<label class="visually-hidden" for="reason-${s.id}">Reason</label><input class="input" id="reason-${s.id}" name="reason" placeholder="Reason" maxlength="300" required>${button("Disable", { variant: "danger", size: "sm" })}</form>`}
+  : html`<form method="post" action="/staff/employees/${s.id}/disable" class="row" data-confirm="Disable this account and sign them out everywhere?">${csrf(ctx)}<label class="visually-hidden" for="reason-${s.id}">Reason</label><input class="input" id="reason-${s.id}" name="reason" placeholder="Reason" maxlength="300" required>
+<label class="visually-hidden" for="offb-${s.id}">Their open work</label><select class="select" id="offb-${s.id}" name="offboarding"><option value="queue">Queue their work for reassignment</option><option value="end">End their assignments now</option></select>${button("Disable", { variant: "danger", size: "sm" })}</form>`}
 ${s.mfa ? actionForm(ctx, `/staff/employees/${s.id}/mfa-reset`, "Reset 2FA", { variant: "ghost", confirm: "Reset this person's two-factor authentication? Their authenticator and recovery codes stop working, they are signed out everywhere, and they must set up a new authenticator at next sign-in." }) : ""}`;
   } },
 ], { empty: emptyState(fq || frole || fstatus ? "No staff match" : "No staff yet", fq || frole || fstatus ? "Adjust the filters." : "Invite your first team member below.") })}</section>
@@ -142,7 +154,13 @@ const ENVS = ["development", "staging", "production"] as const;
 
 // ───────────── 8. Settings ─────────────
 const SETTING_KEYS = ["business.legal_name", "business.address", "contact.email", "contact.phone", "support.staffed_hours",
-  "backup.rpo_target_hours", "backup.rto_target_hours", "voice.phone_number"] as const;
+  "backup.rpo_target_hours", "backup.rto_target_hours", "voice.phone_number", "crm.default_lead_owner"] as const;
+
+/** Active staff who may own leads (CREST-GAP-005 default lead owner). */
+async function leadOwnerOptions(ctx: AppContext) {
+  return (await ctx.db.prepare(`SELECT DISTINCT u.id, u.display_name, u.email FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id IN ('owner','administrator','sales') AND u.disabled_at IS NULL ORDER BY u.display_name`)
+    .all<{ id: string; display_name: string; email: string }>()).results;
+}
 
 /** Recovery targets from business settings; null when not set (never a built-in default). */
 export function recoveryTargets(settings: Record<string, string>): { rpoHours: number | null; rtoHours: number | null } {
@@ -171,6 +189,8 @@ ${input({ name: "contact.phone", id: "f-cphone", label: "Public phone", value: v
 <p class="hint">Used by the Backups page to judge restore drills. Leave blank until the Founder approves targets; nothing is assumed when blank.</p>
 <div class="grid grid-2">${input({ name: "backup.rpo_target_hours", id: "f-rpo", label: "Recovery point objective (hours of data loss)", type: "number", min: 1, max: 720, value: val("backup.rpo_target_hours") })}
 ${input({ name: "backup.rto_target_hours", id: "f-rto", label: "Recovery time objective (hours to restore)", type: "number", min: 1, max: 720, value: val("backup.rto_target_hours") })}</div>
+<h2 class="card__title">Sales</h2>
+${select({ name: "crm.default_lead_owner", label: "Default owner for new web leads", options: (await leadOwnerOptions(ctx)).map((u) => ({ value: u.id, label: `${u.display_name} (${u.email})` })), value: val("crm.default_lead_owner"), includeBlank: "Unassigned (Owners and sales are notified)" })}
 <h2 class="card__title">AI receptionist</h2>
 ${input({ name: "voice.phone_number", id: "f-voice", label: "Receptionist phone number (only once purchased)", value: val("voice.phone_number"), maxlength: 40, hint: "Record the number only after the Founder-approved provider has provisioned it. The AI receptionist page shows this value; blank means no number." })}
 <h2 class="card__title">Support</h2>
@@ -221,7 +241,22 @@ async function voicePage(ctx: AppContext, errors: string[] = [], draft?: { instr
   const escalations = (await db.prepare(`SELECT id, provider_call_id, escalated_at, is_test FROM calls WHERE escalated_at IS NOT NULL ORDER BY escalated_at DESC LIMIT 20`).all<{ id: string; provider_call_id: string; escalated_at: string; is_test: number }>()).results;
   const n = (k: string) => Number(vol?.[k] ?? 0);
   const dev = env === "development";
-  const body = html`${pageHead("AI receptionist", undefined, "AI")}
+  const budget = await voiceBudget(db);
+  const sync = await latestPromptSync(db);
+  const usd2 = (m: number) => `$${(m / 1e6).toFixed(2)}`;
+  const syncBadge = !sync ? badge("not_configured", "Never synchronised")
+    : sync.status === "in_sync" && sync.config_version !== (activeCfg?.version ?? null) ? badge("degraded", `Stale: last in sync for v${sync.config_version}`)
+    : badge(sync.status === "in_sync" ? "verified" : sync.status === "not_configured" ? "not_configured" : "failing", label(sync.status));
+  const costCards = html`<div class="grid grid-2" style="margin-top:1.5rem">
+<section class="card" id="budget" data-testid="voice-budget"><h2 class="card__title">Monthly voice budget</h2>
+<p>${budget.state === "not_set" ? badge("not_configured", "Not set") : badge(budget.state === "exhausted" ? "failing" : budget.state === "warning" ? "degraded" : "active", `${usd2(budget.spentMicro)} of ${usd2(budget.budgetMicro!)} used (${budget.month})`)}</p>
+<p class="muted">${budget.state === "not_set" ? "Without a budget, Retell calls are answered in voicemail-only mode (take a message, no transfer, no booking) and no outbound call is dialled." : budget.state === "exhausted" ? "Budget reached: calls are answered in voicemail-only mode until the budget is raised or the month ends." : "Spend is the provider-reported cost of every call this month, test calls included."}${budget.unknownCostCalls ? ` ${budget.unknownCostCalls} ended calls have no cost reported yet (not counted as zero).` : ""} Also set a spending limit in the Retell dashboard.</p>
+<form method="post" action="/staff/voice/budget" class="row">${csrf(ctx)}${input({ name: "monthly_budget_usd", label: "Monthly budget (USD, blank = off)", type: "number", min: 0, max: 100000, value: budget.budgetMicro ? String(budget.budgetMicro / 1e6) : "" })}<div class="field">${button("Save budget", { variant: "secondary", size: "sm" })}</div></form></section>
+<section class="card" id="prompt-sync" data-testid="voice-prompt-sync"><h2 class="card__title">Retell prompt synchronisation</h2>
+<p>${syncBadge}</p><p class="muted">${sync ? html`${label(sync.mode)} at ${formatDateTime(sync.created_at)}: ${sync.detail}` : "The active configuration has not been pushed to Retell from this environment."}</p>
+<p class="faint">${ctx.env.RETELL_API_KEY ? "Activating a version pushes its full prompt (guardrails + instructions) to the Retell LLM behind this environment's agent and reads it back. Publishing an agent version stays a Retell dashboard action." : "Provider not configured: RETELL_API_KEY is not set in this environment, so nothing can be pushed to Retell."}</p>
+<form method="post" action="/staff/voice/prompt-sync" class="row">${csrf(ctx)}${select({ name: "mode", label: "Action", options: [{ value: "push", label: "Push active version to Retell" }, { value: "check", label: "Check for drift (read only)" }] })}<div class="field">${button("Run", { variant: "secondary", size: "sm" })}</div></form></section></div>`;
+  const body = html`${pageHead("AI receptionist", linkButton("Operations: hours, scheduling, outbound", "/staff/voice/operations", "ghost", "sm"), "AI")}
 <div class="grid grid-3">
 <section class="card"><h2 class="card__title">Provider</h2><p>${badge(h("voice")?.status ?? "not_configured")}</p><p class="muted">${h("voice")?.detail ?? ""}</p>
 <p class="faint">Provider evaluation and recommendation awaiting Founder decision: <code>docs/voice/PROVIDER-EVALUATION.md</code> (BLK-009). Crestmont must use its own separate provider workspace; the other business's existing receptionist is never touched.</p></section>
@@ -230,6 +265,7 @@ async function voicePage(ctx: AppContext, errors: string[] = [], draft?: { instr
   : html`<p>${badge("not_configured", "None recorded")}</p><p class="muted">No receptionist number is recorded in Business settings. Purchasing a number requires Founder approval of the provider recommendation and its cost; this platform never buys numbers.</p>`}</section>
 <section class="card"><h2 class="card__title">Agent</h2>${activeCfg ? html`<p>${badge("active", `Configuration v${activeCfg.version} active`)}</p><p class="muted">Activated ${formatDateTime(activeCfg.activated_at)}. It is not live on any phone line until a provider and number exist.</p>` : html`<p>${badge("not_configured", "No active configuration")}</p><p class="muted">Create and activate a configuration version below.</p>`}</section>
 </div>
+${costCards}
 <div class="kpis grid grid-4" style="margin-top:1.5rem">${kpi("Calls (30 days)", n("real"), `${n("test")} test calls excluded`)}${kpi("Calls with a CRM lead", n("with_lead"))}${kpi("Escalations", n("escalated"))}${kpi("Call errors", n("errors"))}</div>
 <div class="kpis grid grid-4">${kpi("Usage cost (known, 30 days)", microUsd(n("cost_known")), n("cost_unknown") ? `${n("cost_unknown")} calls with unknown cost` : "All call costs known")}</div>
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Outcomes (all real calls)</h2>${outcomes.length ? barChart(outcomes.map((o) => ({ label: label(o.outcome), value: o.n, display: String(o.n) }))) : emptyState("No calls yet", "Calls appear once a provider sends signed events.")}</section>
@@ -278,6 +314,15 @@ ${dev ? html`<section class="card" style="margin-top:1.5rem"><h2 class="card__ti
   return staffPage(ctx, "AI receptionist", body, errors.length ? 422 : 200);
 }
 
+function syncSentence(s: PromptSyncResult): string {
+  switch (s.status) {
+    case "in_sync": return `Retell prompt in sync: ${s.detail}`;
+    case "drift": return `Retell prompt DRIFT detected: ${s.detail}`;
+    case "failed": return `Retell prompt sync failed: ${s.detail}`;
+    case "not_configured": return `Not pushed to Retell. ${s.detail}`;
+  }
+}
+
 // ───────────── registration ─────────────
 export function register(r: Router): void {
   // ── Employees ──
@@ -310,6 +355,7 @@ export function register(r: Router): void {
     const tickets = (await ctx.db.prepare(`SELECT t.id, t.subject, t.priority, t.status FROM assignments a JOIN tickets t ON t.id = a.subject_id WHERE a.subject_type = 'ticket' AND a.user_id = ? AND a.ended_at IS NULL AND t.status NOT IN ('resolved','closed') ORDER BY t.updated_at DESC LIMIT 100`).bind(id).all<{ id: string; subject: string; priority: string; status: string }>()).results;
     const time = (await ctx.db.prepare(`SELECT te.worked_on, te.minutes, t.id AS task_id, t.title FROM time_entries te JOIN tasks t ON t.id = te.task_id WHERE te.user_id = ? ORDER BY te.worked_on DESC LIMIT 20`).bind(id).all<{ worked_on: string; minutes: number; task_id: string; title: string }>()).results;
     const activity = (await ctx.db.prepare(`SELECT action, subject_type, subject_id, created_at FROM audit_logs WHERE actor_user_id = ? ORDER BY id DESC LIMIT 20`).bind(id).all<{ action: string; subject_type: string; subject_id: string | null; created_at: string }>()).results;
+    const offPending = await off.pendingCount(ctx.db, id);
     const body = html`${pageHead(s.display_name, linkButton("All employees", "/staff/employees", "ghost", "sm"), `${label(s.role)}${w.jobTitle ? ` · ${w.jobTitle}` : ""}`)}
 ${formErrors(errors)}
 <div class="kpis grid grid-4">${kpi("Open tasks", w.openTasks, w.overdueTasks ? `${w.overdueTasks} overdue` : "None overdue")}${kpi("Due in 7 days", w.dueNext7)}${kpi("Waiting on dependencies", w.blockedTasks)}${kpi("Open estimate", wl.hours(w.openEstimateMinutes), w.unestimatedTasks ? `${w.unestimatedTasks} task(s) not estimated` : "All open tasks estimated")}</div>
@@ -328,7 +374,8 @@ ${input({ name: "weekly_capacity_hours", label: "Weekly capacity (hours)", type:
 <section class="card"><h2 class="card__title">Tickets</h2>${table(tickets, [{ header: "Ticket", cell: (t) => html`<a href="/staff/support/${t.id}">${t.subject}</a>` }, { header: "Priority", cell: (t) => badge(t.priority) }, { header: "Status", cell: (t) => badge(t.status) }], { empty: html`<p class="muted">No open tickets.</p>` })}</section>
 <section class="card"><h2 class="card__title">Recent time</h2>${table(time, [{ header: "Date", cell: (x) => x.worked_on }, { header: "Task", cell: (x) => html`<a href="/staff/tasks/${x.task_id}">${x.title}</a>` }, { header: "Time", cell: (x) => wl.hours(x.minutes), numeric: true }], { empty: html`<p class="muted">No time logged.</p>` })}</section>
 <section class="card"><h2 class="card__title">Recent activity</h2>${table(activity, [{ header: "When", cell: (a) => formatDateTime(a.created_at) }, { header: "Action", cell: (a) => html`<code>${a.action}</code>` }, { header: "Subject", cell: (a) => `${a.subject_type}${a.subject_id ? ` ${a.subject_id}` : ""}` }], { empty: html`<p class="muted">No recorded activity.</p>` })}
-<p><a href="/staff/audit?actor=${encodeURIComponent(s.email)}">Full history in the audit log</a></p></section></div>`;
+<p><a href="/staff/audit?actor=${encodeURIComponent(s.email)}">Full history in the audit log</a></p></section></div>
+<section class="card" style="margin-top:1.5rem"><h2 class="card__title">Offboarding</h2>${s.disabled_at ? html`<p>${offPending ? html`${badge("blocked", `${offPending} item${offPending === 1 ? "" : "s"} owner disabled`)} ` : ""}${offPending ? "Open work still needs a new owner." : "No work is waiting for reassignment."}</p>` : html`<p class="muted">When this account is disabled, its open work is queued for reassignment.</p>`}${linkButton(s.disabled_at ? "Open the reassignment queue" : "Preview open work", `/staff/employees/${s.id}/offboarding`, "secondary", "sm")}</section>`;
     return staffPage(ctx, s.display_name, body, status);
   };
   r.get("/staff/employees/:id", (ctx, p) => employeeDetail(ctx, p.id));
@@ -397,8 +444,10 @@ ${input({ name: "weekly_capacity_hours", label: "Weekly capacity (hours)", type:
     r.post(`/staff/employees/:id/${action}`, async (ctx, p) => {
       requireStaff(ctx, "employee.manage");
       try {
-        await emp.setStaffDisabled(ctx.db, actorOf(ctx), p.id, action === "disable", str(await ctx.form(), "reason"));
-        return redirect(ctx, "/staff/employees", { kind: "success", text: action === "disable" ? "Account disabled and all sessions revoked." : "Account enabled." });
+        const f = await ctx.form();
+        const res = await emp.setStaffDisabled(ctx.db, actorOf(ctx), p.id, action === "disable", str(f, "reason"), str(f, "offboarding") === "end" ? "end" : "queue");
+        if (action === "disable" && res.queued) return redirect(ctx, `/staff/employees/${p.id}/offboarding`, { kind: "success", text: `Account disabled and all sessions revoked. ${res.queued} open item${res.queued === 1 ? "" : "s"} of work need a new owner.` });
+        return redirect(ctx, "/staff/employees", { kind: "success", text: action === "disable" ? `Account disabled and all sessions revoked.${res.ended ? ` ${res.ended} assignment${res.ended === 1 ? " was" : "s were"} ended and flagged "owner disabled".` : ""}` : `Account enabled.${res.restored ? ` ${res.restored} queued item${res.restored === 1 ? "" : "s"} returned to them.` : ""}` });
       } catch (e) {
         if (e instanceof emp.EmployeeError) {
           if (e.status === 403) throw new HttpError(403, e.message);
@@ -408,6 +457,52 @@ ${input({ name: "weekly_capacity_hours", label: "Weekly capacity (hours)", type:
       }
     });
   }
+
+  // ── Offboarding queue (CREST-GAP-041) ──
+  const offboardingPage = async (ctx: AppContext, id: string, errors: string[] = [], status = 200) => {
+    requireStaff(ctx, "employee.manage");
+    const s = (await emp.listStaff(ctx.db)).find((x) => x.id === id);
+    if (!s) throw new HttpError(404, "Staff member not found");
+    const items = await off.listItems(ctx.db, id);
+    const pending = items.filter((i) => i.status === "pending");
+    const live = s.disabled_at ? [] : await off.openWork(ctx.db, id);
+    const people = await off.eligibleAssignees(ctx.db, id);
+    const href = (i: { subject_type: off.OffboardingSubject; subject_id: string }) => i.subject_type === "task" ? `/staff/tasks/${i.subject_id}` : i.subject_type === "lead" ? `/staff/crm/leads/${i.subject_id}` : i.subject_type === "ticket" ? `/staff/support/${i.subject_id}` : `/staff/projects/${i.subject_id}`;
+    const who = (i: off.OffboardingItem) => html`<label class="visually-hidden" for="to-${i.id}">New owner for ${i.label}</label><select class="select" id="to-${i.id}" name="to_user_id">${people.filter((u) => off.canTake(i.subject_type, u.role_id)).map((u) => html`<option value="${u.id}">${u.display_name} (${label(u.role_id)})</option>`)}</select>`;
+    const body = html`${pageHead(`Offboarding: ${s.display_name}`, linkButton("Employee record", `/staff/employees/${s.id}`, "ghost", "sm"), s.disabled_at ? "Account disabled" : "Account active")}
+${formErrors(errors)}
+${s.disabled_at ? alert(pending.length ? "warn" : "success", pending.length ? html`<strong>${pending.length} item${pending.length === 1 ? "" : "s"} of work still belong to this disabled account</strong> and are flagged “owner disabled”. Reassign each one, or end the assignment so a coordinator picks it up.` : "Nothing is waiting: every piece of this person's work has a new owner or was ended.")
+      : alert("info", html`This account is active. Its open work is listed below; when the account is disabled from the employee list, this work is queued here (or ended at once, if you choose that).`)}
+${s.disabled_at && pending.length ? html`<section class="card"><h2 class="card__title">Everything at once</h2><form method="post" action="/staff/employees/${s.id}/offboarding" class="row">${csrf(ctx)}<input type="hidden" name="item" value="all">
+<label class="visually-hidden" for="to-all">New owner</label><select class="select" id="to-all" name="to_user_id">${people.map((u) => html`<option value="${u.id}">${u.display_name} (${label(u.role_id)})</option>`)}</select>
+${button("Reassign all", { name: "action", value: "reassign", variant: "secondary", size: "sm" })}${button("End all assignments", { name: "action", value: "end", variant: "danger", size: "sm" })}</form>
+<p class="faint">Items the chosen person's role cannot take (for example a ticket for a developer) are skipped and stay in the queue.</p></section>` : ""}
+${s.disabled_at ? table(items, [
+      { header: "Work", cell: (i) => html`<a href="${href(i)}">${i.label}</a><br><span class="faint">${off.SUBJECT_LABELS[i.subject_type]}</span>` },
+      { header: "Status", cell: (i) => i.status === "pending" ? badge("blocked", "Owner disabled") : i.status === "reassigned" ? badge("done", `Reassigned to ${i.resolved_to_name ?? "—"}`) : i.status === "ended" ? badge("paused", "Ended — owner disabled") : badge("active", "Returned on re-enable") },
+      { header: "Since", cell: (i) => formatDateTime(i.created_at) },
+      { header: "", cell: (i) => i.status !== "pending" ? (i.resolved_at ? html`<span class="faint">${formatDateTime(i.resolved_at)}</span>` : "") : html`<form method="post" action="/staff/employees/${s.id}/offboarding" class="row">${csrf(ctx)}<input type="hidden" name="item" value="${i.id}">${who(i)}${button("Reassign", { name: "action", value: "reassign", variant: "secondary", size: "sm" })}${button("End", { name: "action", value: "end", variant: "ghost", size: "sm" })}</form>` },
+    ], { empty: emptyState("No offboarding items", "This person had no open assignments, projects, leads or tickets when the account was disabled."), caption: "Offboarding queue" })
+    : table(live, [{ header: "Work", cell: (i) => html`<a href="${href(i)}">${i.label}</a>` }, { header: "Kind", cell: (i) => off.SUBJECT_LABELS[i.subject_type] }], { empty: emptyState("No open work", "No open task or project assignments, managed projects, leads or tickets."), caption: "Open work" })}`;
+    return staffPage(ctx, `Offboarding: ${s.display_name}`, body, status);
+  };
+  r.get("/staff/employees/:id/offboarding", (ctx, p) => offboardingPage(ctx, p.id));
+  r.post("/staff/employees/:id/offboarding", async (ctx, p) => {
+    requireStaff(ctx, "employee.manage");
+    const s = (await emp.listStaff(ctx.db)).find((x) => x.id === p.id);
+    if (!s) throw new HttpError(404, "Staff member not found");
+    if (!s.disabled_at) return offboardingPage(ctx, p.id, ["Work is reassigned here only after the account is disabled. Use the project, lead and ticket pages for an active person."], 409);
+    const f = await ctx.form();
+    const item = str(f, "item");
+    const action = str(f, "action") === "end" ? "end" : "reassign";
+    try {
+      const res = await off.resolveItems(ctx.db, ctx.user!.id, p.id, item === "all" ? "all" : [item], action, str(f, "to_user_id") || null, ctx.ip);
+      return redirect(ctx, `/staff/employees/${p.id}/offboarding`, { kind: res.skipped.length ? "info" : "success", text: `${res.done} item${res.done === 1 ? "" : "s"} ${action === "end" ? "ended" : "reassigned"}.${res.skipped.length ? ` ${res.skipped.length} skipped because that person's role cannot take them.` : ""}` });
+    } catch (e) {
+      if (e instanceof off.OffboardingError) return offboardingPage(ctx, p.id, [e.message], e.status);
+      throw e;
+    }
+  });
 
   // ── Email operations ──
   const emailQuery = (ctx: AppContext) => {
@@ -506,15 +601,15 @@ ${def.samples.map((_, i) => {
     const body = html`${pageHead(d.subject ?? label(d.template), linkButton("Back to log", "/staff/email", "ghost", "sm"), "Email delivery")}
 ${dl([["Template", label(d.template)], ["To", d.to_email], ["Provider", d.provider ?? "—"], ["Status", d.provider === "dev-outbox" ? badge("queued", "Dev outbox (not sent)") : badge(d.status)], ["Attempts", d.attempts], ["Provider message id", d.provider_message_id], ["Last error", d.last_error], ["Created", formatDateTime(d.created_at)], ["Updated", formatDateTime(d.updated_at)]])}
 ${d.provider === "resend" && ["failed", "queued"].includes(d.status) ? (canRetry ? html`<p>${actionForm(ctx, `/staff/email/${d.id}/retry`, "Retry delivery", { variant: "primary" })}</p>` : alert("warn", "Retry is unavailable: Resend is not configured in this environment.")) : ""}
-<section class="section--tight"><h2>Text body</h2>${d.text_body ? html`<pre class="code-block">${redactSecrets(d.text_body)}</pre><p><a class="btn btn--ghost btn--sm" href="/staff/email/${d.id}/html">Download HTML version</a></p>` : emptyState("No stored content", "The rendered body was not stored for this delivery.")}</section>`;
+<section class="section--tight"><h2>Text body</h2>${d.text_body ? html`<pre class="code-block">${bodyForStaff(ctx, d.to_email, d.text_body)}</pre><p><a class="btn btn--ghost btn--sm" href="/staff/email/${d.id}/html">Download HTML version</a></p>` : emptyState("No stored content", "The rendered body was not stored for this delivery.")}</section>`;
     return staffPage(ctx, "Email delivery", body);
   });
   r.get("/staff/email/:id/html", async (ctx, p) => {
     requireStaff(ctx, "settings.operational");
-    const m = await ctx.db.prepare(`SELECT html_body FROM email_messages WHERE delivery_id = ?`).bind(p.id).first<{ html_body: string }>();
+    const m = await ctx.db.prepare(`SELECT m.html_body, d.to_email FROM email_messages m JOIN email_deliveries d ON d.id = m.delivery_id WHERE m.delivery_id = ?`).bind(p.id).first<{ html_body: string; to_email: string }>();
     if (!m) throw new HttpError(404, "No stored HTML for this delivery");
     await audit(ctx.db, { actorUserId: ctx.user!.id, action: "email.body_downloaded", subjectType: "email_delivery", subjectId: p.id });
-    return download(ctx, redactSecrets(m.html_body), `email-${p.id}.html`, "text/html; charset=utf-8");
+    return download(ctx, bodyForStaff(ctx, m.to_email, m.html_body), `email-${p.id}.html`, "text/html; charset=utf-8");
   });
   r.post("/staff/email/:id/retry", async (ctx, p) => {
     requireStaff(ctx, "settings.operational");
@@ -569,7 +664,7 @@ ${integ.ENVIRONMENTS.map((e) => { const c = cell(i.id, e); return html`<td>${c ?
     const failedMail = (await ctx.db.prepare(`SELECT id, template, to_email, last_error, updated_at FROM email_deliveries WHERE status IN ('failed','bounced') ORDER BY updated_at DESC LIMIT 10`).all<{ id: string; template: string; to_email: string; last_error: string | null; updated_at: string }>()).results;
     const failedAi = (await ctx.db.prepare(`SELECT id, workflow, error, updated_at FROM ai_jobs WHERE status = 'failed' ORDER BY updated_at DESC LIMIT 10`).all<{ id: string; workflow: string; error: string | null; updated_at: string }>()).results;
     const body = html`${pageHead("Monitoring", undefined, "Platform")}
-${alert("warn", html`<strong>No external alerting is configured.</strong> Errors are recorded in this log only; nobody is emailed, texted or paged automatically, and there is no external uptime monitor (INFRA-006, BLK-003). Check this page and the runbook (<code>docs/RUNBOOK.md</code>) during staffed hours.`)}
+${alert("info", html`<strong>Alerting: email to the Owners, no paging.</strong> Every 15 minutes the scheduled <code>ops_alerts</code> job emails the Owners once per item for dead-lettered Stripe events, new reconciliation findings, a stuck email queue, failing evidence feeds and repeated security events. Outages are caught from outside Cloudflare by the GitHub health monitors (<code>staging-health-monitor.yml</code>, <code>production-health-monitor.yml</code>). Nobody is texted or paged; check this page and the runbook (<code>docs/RUNBOOK.md</code>) during staffed hours.`)}
 <section><h2>Service health</h2>${table(checks, [
   { header: "Service", cell: (c) => c.name },
   { header: "Status", cell: (c) => badge(c.status === "healthy" ? "healthy" : c.status === "failing" ? "failing" : c.status === "stale" ? "stale" : "not_configured", label(c.status)) },
@@ -888,6 +983,7 @@ ${textarea({ name: "evidence", label: "Evidence (row counts compared, checks run
       if (v[k] && (!/^\d+$/.test(v[k]) || Number(v[k]) < 1 || Number(v[k]) > 720)) e.push(`${name} must be a whole number of hours between 1 and 720`);
     }
     if (v["contact.email"].length > 254) e.push("Contact email is too long");
+    if (v["crm.default_lead_owner"] && !(await leadOwnerOptions(ctx)).some((u) => u.id === v["crm.default_lead_owner"])) e.push("The default lead owner must be an active Owner, administrator or sales user");
     if (/<[^>]*>/.test(v["business.legal_name"] + v["business.address"])) e.push("Business name and address must be plain text");
     if (v.staffed_hours.length < 3 || v.staffed_hours.length > 160) e.push("Enter staffed support hours");
     if (/24\s*\/\s*7|24 hours|around the clock/i.test(v.staffed_hours)) e.push("Staffed hours must not claim 24/7 human coverage unless it is actually staffed — describe the real staffed hours");
@@ -1001,6 +1097,8 @@ ${pagination(ctx, page, jobs.length > limit)}`;
     const j = await ctx.db.prepare(`SELECT j.*, u.display_name AS approver FROM ai_jobs j LEFT JOIN users u ON u.id = j.approved_by WHERE j.id = ?`).bind(p.id)
       .first<{ id: string; workflow: string; provider: string; model: string; status: string; input_ref: string; output_ref: string | null; cost_microusd: number | null; error: string | null; retries: number; retry_of: string | null; created_at: string; updated_at: string; approver: string | null }>();
     if (!j) throw new HttpError(404, "AI job not found");
+    // Sales-optimization jobs can hold consented transcript text: their output is shown only on the Owner-only dashboard.
+    if (j.workflow.startsWith("salesopt_")) j.output_ref = null;
     const body = html`${pageHead(`AI job · ${label(j.workflow)}`, linkButton("All jobs", "/staff/ai", "ghost", "sm"), "AI operations")}
 ${dl([["Job id", j.id], ["Status", badge(j.status)], ["Provider / model", `${j.provider} / ${j.model}`], ["Input reference", j.input_ref], ["Cost", microUsd(j.cost_microusd)], ["Retries", j.retries], ["Retry of", j.retry_of], ["Error", j.error], ["Approved / decided by", j.approver], ["Created", formatDateTime(j.created_at)], ["Updated", formatDateTime(j.updated_at)]])}
 <section class="section--tight"><h2>Output (draft)</h2>${j.output_ref ? (j.status === "awaiting_approval"
@@ -1054,7 +1152,25 @@ ${dl([["Job id", j.id], ["Status", badge(j.status)], ["Provider / model", `${j.p
       if (errStatus(e) === 404 || errStatus(e) === 409) return redirect(ctx, "/staff/voice#config", { kind: "error", text: (e as Error).message });
       throw e;
     }
-    return redirect(ctx, "/staff/voice#config", { kind: "success", text: `Configuration v${v} is now active.` });
+    // CREST-GAP-053: push the composed prompt to Retell and read it back. Never reported as synced unless Retell's read-back matches.
+    const s = await syncPrompt({ db: ctx.db, env: ctx.env, fetch: ctx.env.overrides?.fetch ?? fetch, userId: ctx.user!.id, mode: "push" });
+    return redirect(ctx, "/staff/voice#prompt-sync", { kind: s.status === "in_sync" ? "success" : s.status === "not_configured" ? "info" : "error", text: `Configuration v${v} is now active on the platform. ${syncSentence(s)}` });
+  });
+  r.post("/staff/voice/prompt-sync", async (ctx) => {
+    requireStaff(ctx, "voice.manage");
+    const mode = str(await ctx.form(), "mode") === "check" ? "check" : "push";
+    const s = await syncPrompt({ db: ctx.db, env: ctx.env, fetch: ctx.env.overrides?.fetch ?? fetch, userId: ctx.user!.id, mode });
+    return redirect(ctx, "/staff/voice#prompt-sync", { kind: s.status === "in_sync" ? "success" : "error", text: syncSentence(s) });
+  });
+  r.post("/staff/voice/budget", async (ctx) => {
+    requireStaff(ctx, "voice.manage"); // Owner-only (src/domain/authz.ts)
+    try {
+      const value = await setVoiceBudget(ctx.db, ctx.user!.id, str(await ctx.form(), "monthly_budget_usd"));
+      return redirect(ctx, "/staff/voice#budget", { kind: "success", text: value ? `Voice budget set to $${value} per month.` : "Voice budget cleared: Retell calls are answered in voicemail-only mode and nothing is dialled." });
+    } catch (e) {
+      if (e instanceof VoiceBudgetError) return redirect(ctx, "/staff/voice#budget", { kind: "error", text: e.message });
+      throw e;
+    }
   });
   r.get("/staff/voice/configs/diff", async (ctx) => {
     requireStaff(ctx, "voice.manage");
@@ -1081,7 +1197,10 @@ ${dl([["Provider", c.provider], ["Caller", c.from_number ?? "Unknown"], ["Starte
       ["Lead", c.lead_id ? `${c.lead_id} (${label(c.lead_stage ?? "")})` : "—"], ["Escalated", formatDateTime(c.escalated_at)], ["Recording consent", c.recording_consent ? "Given" : "Not given"],
       ["Agent configuration", c.agent_config_version ? `v${c.agent_config_version}` : "None active"], ["Cost", microUsd(c.cost_microusd)], ["Error", c.error]])}
 <section class="section--tight"><h2>Summary &amp; transcript</h2>${c.recording_consent
-      ? html`${c.summary ? html`<p>${c.summary}</p>` : ""}${c.transcript ? html`<pre class="code-block">${c.transcript}</pre>` : emptyState("No transcript", "The provider did not send a transcript.")}${c.recording_url ? html`<p><a href="${c.recording_url}" rel="noopener noreferrer">Recording (provider-hosted)</a></p>` : ""}`
+      ? html`${c.summary ? html`<p>${c.summary}</p>` : ""}${c.transcript ? html`<pre class="code-block">${c.transcript}</pre>` : emptyState("No transcript", "The provider did not send a transcript.")}${c.recording_url ? (safeHttpsUrl(c.recording_url) === "#"
+        // CREST-GAP-100: a provider-supplied link that is not https is never made clickable.
+        ? html`<p data-testid="recording-link"><a href="#" rel="noopener noreferrer">Recording link withheld (not an https URL)</a></p>`
+        : html`<p data-testid="recording-link"><a href="${safeHttpsUrl(c.recording_url)}" rel="noopener noreferrer">Recording (provider-hosted)</a></p>`) : ""}`
       : emptyState("Not stored", "The caller did not consent to recording or transcription, so no transcript, summary or recording was stored.")}</section>
 <section class="section--tight"><h2>Events</h2>${table(events, [
       { header: "When", cell: (e) => formatDateTime(e.created_at) }, { header: "Event", cell: (e) => e.kind }, { header: "Status", cell: (e) => badge(e.status === "ok" ? "active" : "failed", e.status) }, { header: "Detail", cell: (e) => e.detail ?? "—" },

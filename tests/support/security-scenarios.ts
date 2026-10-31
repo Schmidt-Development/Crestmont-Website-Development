@@ -8,6 +8,7 @@ import { ROUTE_INVENTORY } from "./route-inventory.ts";
 import { newId, nowIso } from "../../src/lib/db.ts";
 import { createPackageOrder } from "../../src/services/commerce.ts";
 import { totpCode } from "../../src/lib/auth-crypto.ts";
+import { baselineSalesInstructions as baselineSales } from "../../src/domain/sales-opt/policy.ts";
 
 type Fields = Record<string, string | string[] | File>;
 const day = (n: number) => new Date(Date.now() + n * 86400e3).toISOString().slice(0, 10);
@@ -51,6 +52,10 @@ export function customerPostFields(w: World, t: Tenant): Record<string, () => Fi
     "POST /account/sessions/revoke-others": () => ({}),
     "POST /account/privacy/export": () => ({}),
     "POST /account/privacy/delete": () => ({ confirm: "1", reason: "no longer needed" }),
+    "POST /account/profile": () => ({ display_name: `${t.marker} Admin` }),
+    "POST /account/email": () => ({ new_email: `changed-${Math.random().toString(16).slice(2, 8)}@${t.marker.toLowerCase()}.example`, current_password: TEST_PASSWORD }),
+    "POST /account/email/cancel": () => ({}),
+    "POST /portal/notices/mfa-reminder/dismiss": () => ({}),
   };
 }
 
@@ -129,6 +134,11 @@ export function auditScenarios(w: World): Scenario[] {
       return { res: await spare.c.post(`/account/sessions/${sid}/revoke`), actorId: spare.id };
     } },
     { key: "POST /account/sessions/revoke-others", as: spareAs, setup: async () => { await w.app.client().post("/login", { email: spare.email, password: NEWPW }); } },
+    // CREST-GAP-072 / 073
+    { key: "POST /account/profile", as: spareAs, fields: () => ({ display_name: "Spare Account Holder" }) },
+    { key: "POST /account/email", as: spareAs, fields: () => ({ new_email: "spare-new-address@matrix.example", current_password: NEWPW }) },
+    { key: "POST /account/email/cancel", as: spareAs },
+    { key: "POST /portal/notices/mfa-reminder/dismiss", as: spareAs },
     { key: "POST /account/privacy/export", as: spareAs },
     { key: "POST /account/privacy/delete", as: spareAs, fields: () => ({ confirm: "1", reason: "matrix" }) },
 
@@ -146,6 +156,7 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/portfolio/:id/screenshot", fields: () => ({ kind: "mobile", captured_on: day(-1), screenshot: png("mobile.png") }) },
     { key: "POST /staff/portfolio/:id/verify-link", fields: () => ({ verified_on: day(-1) }) },
     { key: "POST /staff/portfolio/:id/relationship", fields: () => ({ relationship: "Website built by the Crestmont Founder for a related business", evidence: "Founder authorization letter on file, dated 2026-10-26" }) },
+    { key: "POST /staff/portfolio/:id/demo", fields: () => ({ demo_url: "", demo_status: "none", demo_revision: "matrix-site@abc1234", demo_verified_on: "", poster_desktop_asset: "/assets/portfolio/matrix-desktop.webp", poster_mobile_asset: "" }) },
     { key: "POST /staff/portfolio/:id/publish" },
     { key: "POST /staff/portfolio/:id/move", fields: () => ({ dir: "up" }) },
     { key: "POST /staff/portfolio/:id/testimonials", fields: () => ({ author: "B. Person", body: "Clear, careful and on time.", evidence: "Email from author dated 2026-10-26 granting permission" }) },
@@ -220,6 +231,11 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/quotes/:id/close", path: () => `/staff/quotes/${x.quote2}/close`, fields: () => ({ kind: "withdrawn", reason: "Scope changed after the call" }) },
     { key: "GET /staff/quotes/export.csv" },
     { key: "GET /staff/customers/export.csv" },
+    { key: "POST /staff/crm/identity-erasure", fields: () => ({ phones: "", emails: "erase-me@matrix.example", note: "Matrix: person asked by email" }) },
+    { key: "POST /staff/crm/identity-reviews/resolve", fields: () => ({ id: x.review, decision: "reject", back: "/staff/crm/duplicates?view=review" }), setup: async () => {
+      x.review = newId("rev");
+      await w.db.prepare(`INSERT INTO crm_identity_reviews (id, kind, lead_id, reason, dedupe_key, created_at) VALUES (?, 'possible_duplicate', ?, 'matrix test item', ?, ?)`).bind(x.review, w.ids.lead!, `matrix:${x.review}`, nowIso()).run();
+    } },
     { key: "POST /staff/crm/duplicates/dismiss", fields: () => ({ a: w.ids.lead!, b: x.lead2, back: "/staff/crm/duplicates" }) },
     { key: "POST /staff/crm/leads/:id/merge", path: () => `/staff/crm/leads/${x.mergeSrc}/merge`, fields: () => ({ into: x.lead2 }), setup: async () => {
       await owner(w).c.post("/staff/crm/new", { name: "Merge Source", email: "merge-source@matrix.example", phone: "", company: "", website: "", interest: "starter", message: "dup", source: "referral" });
@@ -343,6 +359,13 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/employees/:id/enable" },
     { key: "POST /staff/employees/:id/mfa-reset" },
     { key: "POST /staff/employees/:id/profile", fields: () => ({ job_title: "Front-end developer", weekly_capacity_hours: "30" }) },
+    // CREST-GAP-041: a disabled person's queued work is ended from the offboarding queue.
+    { key: "POST /staff/employees/:id/offboarding", fields: () => ({ item: "all", action: "end" }), setup: async () => {
+      await w.db.prepare(`UPDATE users SET disabled_at = ? WHERE id = ?`).bind(nowIso(), w.ids.staffUser).run();
+      await w.db.prepare(`INSERT INTO offboarding_items (id, user_id, subject_type, subject_id, label, status, created_at) VALUES (?, ?, 'task', ?, 'Matrix task', 'pending', ?)`).bind(newId("off"), w.ids.staffUser, w.a.ids.task, nowIso()).run();
+    } },
+    { key: "GET /staff/customers/:id" },
+    { key: "GET /staff/conversations/:orgId" },
     { key: "GET /staff/employees/export.csv" },
     { key: "GET /staff/email/export.csv" },
     { key: "GET /staff/security/events.csv" },
@@ -371,7 +394,47 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/voice/configs", fields: () => ({ instructions: "Greet the caller warmly, state you are an AI assistant, and help with questions about services and packages.\nAlways offer a callback.", note: "Callback" }) },
     { key: "POST /staff/voice/configs/:version/activate" },
     { key: "POST /staff/voice/test-event", fields: () => ({ scenario: "callback" }) },
+    // No agent id is recorded in the matrix world, so this records "not_configured" without any Retell request.
+    { key: "POST /staff/voice/prompt-sync", fields: () => ({ mode: "check" }) },
+    { key: "POST /staff/voice/budget", fields: () => ({ monthly_budget_usd: "40" }) },
     { key: "GET /staff/voice/calls/:id" },
+    { key: "POST /staff/voice/operations/settings", fields: () => ({ timezone: "America/Detroit", "hours.mon": "09:00-17:00", "hours.tue": "09:00-17:00", "inbound.mode": "answer",
+      "scheduling.duration_minutes": "30", "scheduling.min_notice_hours": "24", "scheduling.horizon_days": "21", "outbound.window_start": "09:00", "outbound.window_end": "20:00",
+      "outbound.max_per_number_per_day": "1", "outbound.max_per_number_per_week": "3" }) },
+    { key: "POST /staff/voice/consultations/:id/decide", fields: () => ({ decision: "confirm" }), setup: async () => {
+      w.ids.consultation = newId("cns");
+      const start = new Date(Date.now() + 5 * 86400e3).toISOString();
+      await w.db.prepare(`INSERT INTO consultations (id, name, phone, starts_at, duration_minutes, timezone, status, confirmation_code, source, is_test, created_at, updated_at)
+          VALUES (?, 'Matrix Caller', '+15550100990', ?, 30, 'America/Detroit', 'requested', ?, 'ai_receptionist', 1, ?, ?)`).bind(w.ids.consultation, start, w.ids.consultation.slice(-6).toUpperCase(), nowIso(), nowIso()).run();
+    } },
+    { key: "POST /staff/voice/outbound", fields: () => ({ purpose: "callback", phone: "+15550100991", name: "Matrix Caller", reason: "TEST DATA: caller asked for a callback", consent: "Asked by email for a callback (TEST DATA)" }) },
+    { key: "POST /staff/voice/outbound/:id/decide", fields: () => ({ decision: "cancel", note: "matrix" }), setup: async () => {
+      w.ids.outboundRequest = newId("vob");
+      await w.db.prepare(`INSERT INTO voice_outbound_requests (id, purpose, phone_e164, reason, status, idempotency_key, is_test, created_at, updated_at)
+          VALUES (?, 'callback', '+15550100992', 'TEST DATA', 'pending_approval', ?, 1, ?, ?)`).bind(w.ids.outboundRequest, `crestmont_${w.ids.outboundRequest}`, nowIso(), nowIso()).run();
+    } },
+    { key: "POST /staff/voice/dnc", fields: () => ({ phone: "+15550100993", detail: "Matrix opt-out (TEST DATA)" }) },
+    { key: "POST /staff/voice/caller-erasure", fields: () => ({ phone: "+15550100994", note: "Matrix erasure request by email (TEST DATA)" }) },
+
+    // ── AI Sales Optimization (TEST DATA; Retell is a fixture that answers only api.retellai.com) ──
+    { key: "POST /staff/sales-optimization/control", fields: () => ({ paused: "1", auto_rollback: "1", minConnected: "50", maxOptOutRate: "15", maxComplianceRate: "2", maxComplaintRate: "5", maxErrorRate: "5", maxRefundRate: "20" }) },
+    { key: "POST /staff/sales-optimization/targets", fields: () => ({ stage: "staging", agent_id: "agent_matrix_sales" }) },
+    { key: "POST /staff/sales-optimization/targets/:stage/verify", setup: async () => {
+      const real = globalThis.fetch;
+      w.env.overrides = { ...w.env.overrides, fetch: (async (input: RequestInfo | URL, init?: RequestInit) => String(input).startsWith("https://api.retellai.com/")
+        ? new Response(JSON.stringify({ agent_id: "agent_matrix_sales", response_engine: { type: "retell-llm", llm_id: "llm_matrix_sales" } }), { status: 200 })
+        : real(input, init)) as typeof fetch };
+    } },
+    { key: "POST /staff/sales-optimization/versions", fields: () => ({ parent_id: w.ids.soVersion!, instructions: `${baselineSales()}\nRepeat the email address back before ending the call.`, rationale: "Matrix: confirm email" }) },
+    { key: "POST /staff/sales-optimization/versions/:id/evaluate" },
+    { key: "POST /staff/sales-optimization/versions/:id/decide", fields: () => ({ decision: "reject", note: "matrix" }), path: () => `/staff/sales-optimization/versions/${x.soDraft}/decide`, setup: async () => {
+      x.soDraft = (await w.db.prepare(`SELECT id FROM so_versions WHERE status = 'draft' ORDER BY seq DESC LIMIT 1`).first<{ id: string }>())!.id;
+    } },
+    { key: "POST /staff/sales-optimization/deploy", fields: () => ({ stage: "staging", version_id: w.ids.soVersion!, expected_current: "" }) },
+    { key: "POST /staff/sales-optimization/rollback", fields: () => ({ stage: "staging" }) },
+    { key: "POST /staff/sales-optimization/experiments", fields: () => ({ baseline_id: w.ids.soVersion!, candidate_id: w.ids.soVersion!, share: "20", min: "400" }) },
+    { key: "POST /staff/sales-optimization/experiments/:id/decide", fields: () => ({ action: "start" }) },
+    { key: "POST /staff/sales-optimization/run" },
 
     // ── AI Builds (owner controls) ──
     { key: "POST /staff/ai/budget", fields: () => ({ monthly_budget_usd: "25" }) },
@@ -465,6 +528,7 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/builds/:id/resume", setup: async () => { await w.db.prepare(`UPDATE build_jobs SET state = 'paused' WHERE id = ?`).bind(w.ids.buildJob).run(); } },
     { key: "POST /staff/builds/:id/cancel", fields: () => ({ reason: "matrix cancel" }) },
     { key: "POST /staff/builds/backfill", fields: () => ({ project_id: w.b.ids.project! }) },
+    { key: "POST /staff/builds/diagnostics" },
 
     // Last: cancelling tenant A's project (Owner only).
     { key: "POST /staff/projects/:id/cancel", path: () => P(w, "POST /staff/projects/:id/cancel"), fields: () => ({ reason: "Customer requested cancellation in writing" }) },

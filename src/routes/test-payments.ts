@@ -1,4 +1,4 @@
-// Test-only payment simulation (Owner; refused in production; migration 0044; src/services/payment-simulation.ts).
+// Test-only payment simulation (Owner; refused in production; migration 0054; src/services/payment-simulation.ts).
 //  GET  /staff/test-payments                         status, test organizations' open invoices, event log
 //  POST /staff/test-payments/organizations/:id/mark  mark / unmark a fictional test organization (step-up)
 //  POST /staff/test-payments/simulate                deliver a synthetic SIMULATED_PAID or SIMULATED_FAILED event (step-up)

@@ -24,6 +24,7 @@ import { HttpError } from "../app/http.ts";
 import { StripeInvoicing, LivePaymentsNotAuthorized, type StripeInvoice } from "../adapters/payments.ts";
 import { audit } from "./security.ts";
 import { checkoutLinesFor } from "./tax.ts";
+import { paymentsMode } from "../domain/payments-mode.ts";
 
 export const STRIPE_INVOICE_KINDS = ["deposit_50", "design_25", "prelaunch_25"] as const;
 export const DAYS_UNTIL_DUE = 14;
@@ -33,8 +34,10 @@ export type StripeInvoicer = { ok: true; client: StripeInvoicing } | { ok: false
 
 export function stripeInvoicer(env: Env): StripeInvoicer {
   if (!env.STRIPE_SECRET_KEY) return { ok: false, reason: STRIPE_NOT_CONFIGURED };
+  const pm = paymentsMode(env); // CREST-GAP-007/008
+  if (pm.mode === "none") return { ok: false, reason: `The Stripe key is refused here; live payments are not authorised (PAY-010). ${pm.reason} Nothing was sent to Stripe.` };
   try {
-    return { ok: true, client: new StripeInvoicing(env.STRIPE_SECRET_KEY, env.overrides?.fetch ?? fetch) };
+    return { ok: true, client: new StripeInvoicing(pm.key, env.overrides?.fetch ?? fetch, pm.mode) };
   } catch (e) {
     if (e instanceof LivePaymentsNotAuthorized) return { ok: false, reason: "A non-test Stripe key is set; live payments are not authorised (PAY-010). Nothing was sent to Stripe." };
     throw e;

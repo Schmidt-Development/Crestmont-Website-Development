@@ -204,5 +204,5 @@ ALTER TABLE build_jobs ADD COLUMN internal_approval_note TEXT;
 -- Builds approved or shared before this review gate existed: record that approval as their internal approval
 -- (the staff decision was already taken), so they keep working and the record shows how it was set.
 UPDATE build_jobs SET internal_approved_at = COALESCE(approved_at, customer_preview_shared_at), internal_approved_by = COALESCE(approved_by, customer_preview_shared_by),
-  internal_approval_note = 'Recorded by migration 0043: approved or shared before the private internal review existed'
+  internal_approval_note = 'Recorded by migration 0053: approved or shared before the private internal review existed'
   WHERE internal_approved_at IS NULL AND (approved_at IS NOT NULL OR customer_preview_shared_at IS NOT NULL);

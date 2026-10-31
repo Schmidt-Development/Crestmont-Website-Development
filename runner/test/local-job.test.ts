@@ -254,7 +254,8 @@ test("[AIB-RUNNER] AI drafts: system + user exactly as given, no tools, low temp
     assert.deepEqual(q.messages, [{ role: "system", content: draft().system }, { role: "user", content: draft().prompt }]);
     assert.equal(q.max_tokens, 1500);
     assert.ok(q.temperature! <= 0.3);
-    const done = cp.byPath("ai/complete")[0].body;
+    const { _nonce, ...done } = cp.byPath("ai/complete")[0].body as Record<string, unknown>;
+    assert.match(String(_nonce), /^[0-9a-f]{32}$/, "every control-plane call carries a fresh replay nonce (CREST-GAP-087)");
     assert.deepEqual(done, { jobId: "aij_1", leaseToken: "e".repeat(64), model: "test-coder:30b", inputTokens: 120, outputTokens: 14, text: "Thanks for reaching out — we are looking into it." });
     assert.ok(!("runCostUsd" in done) && !("costUsd" in done));
     assert.equal(await serveOneDraft({ client, model: new OpenAICompatClient({ baseUrl: model.url, apiKey: "x", timeoutMs: 1000 }), modelName: "m", log: silentLogger }), "none");

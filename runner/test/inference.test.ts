@@ -57,6 +57,16 @@ function sched(res: Residency, over: Partial<ConstructorParameters<typeof Infere
 const job = (s: InferenceScheduler, model: string, projectId: string, ms = 20, order?: string[]) =>
   s.run({ model, projectId, task: model === A.tag ? "review" : "frontend" }, async () => { order?.push(`${projectId}:${model === A.tag ? "A" : "B"}`); await delay(ms); return { promptTokens: 100, completionTokens: 50, wallMs: ms }; }, undefined, (r) => r);
 
+test("[AIB-015] GPU scheduler: a model owned by another application on the same Ollama (Node 1: HQ/JARVIS) is never unloaded", async () => {
+  const jarvis = "qwen3:30b-a3b";
+  const f = fakeResidency({ initial: [{ model: jarvis, vramMb: 19000 }, { model: B.tag, vramMb: 25100 }] });
+  const s = sched(f.r);
+  await Promise.all([job(s, B.tag, "p1"), job(s, A.tag, "p2")]);
+  assert.ok(!f.log.includes(`unload ${jarvis}`), "the foreign model was not unloaded");
+  assert.deepEqual(f.log, [`unload ${B.tag}`, `load ${A.tag}`], "only Crestmont's own model was switched");
+  assert.ok(f.loaded.some((m) => m.model === jarvis), "the foreign model is still resident as far as the runner is concerned");
+});
+
 test("[AIB-015] GPU scheduler: Model A and Model B never share the 32 GB GPU when they do not fit (18 + 24 GB + reserve); one model at a time, switches unload then load", async () => {
   const f = fakeResidency({ initial: [{ model: B.tag, vramMb: 25100 }] });
   const s = sched(f.r);

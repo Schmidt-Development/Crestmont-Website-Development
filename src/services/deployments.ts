@@ -155,7 +155,7 @@ export interface Authorization {
  * Whether a valid Founder production approval exists for EXACTLY this commit and the current
  * evidence set. Never writes anything and never grants anything.
  */
-export async function releaseAuthorization(ctx: Pick<AppContext, "db" | "now">, commitRaw: string): Promise<Authorization> {
+export async function releaseAuthorization(ctx: Pick<AppContext, "db" | "now"> & { env?: Pick<AppContext["env"], "FOUNDER_EMAIL"> }, commitRaw: string): Promise<Authorization> {
   const commit = commitRaw.trim().toLowerCase();
   const { report } = await ra.loadReport(ctx);
   const rc = await ra.currentReleaseCandidate(ctx.db);
@@ -172,6 +172,9 @@ export async function releaseAuthorization(ctx: Pick<AppContext, "db" | "now">, 
   if (rc.commit_sha !== commit) return no(`Commit ${commit} is not the current release candidate (${rc.commit_sha}).`);
   if (!latest) return no("No Founder production approval has been recorded.");
   if (latest.release_id !== rc.id) return no("The latest Founder decision is not for the current release candidate.");
+  // CREST-GAP-020: an approval by a demo Owner account, or by anyone other than FOUNDER_EMAIL when it is set, never authorizes.
+  const notFounder = ra.founderProblem(await ra.approverEmail(ctx.db, latest.approver_user_id), ctx.env?.FOUNDER_EMAIL);
+  if (notFounder) return no(`The latest launch approval was refused: ${notFounder}.`);
   const valid = approvalValidity({ ...latest, decision: latest.decision as "approved" | "rejected", approver_is_owner: !!latest.approver_is_owner },
     { commit_sha: rc.commit_sha, config_sha256: rc.config_sha256 }, report.evidenceSetSha256);
   return valid.valid ? { ...base, authorized: true, reason: valid.reason } : no(valid.reason);

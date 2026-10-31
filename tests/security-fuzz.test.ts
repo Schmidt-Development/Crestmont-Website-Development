@@ -185,10 +185,14 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
     "POST /api/webhooks/voice": async (b) => ({ "x-crestmont-voice-signature": await signVoiceEvent(SECRETS.voice, b) }),
     "POST /api/webhooks/retell": async (b) => ({ "x-retell-signature": await signRetell(SECRETS.retell, b) }),
     "POST /api/webhooks/retell/functions": async (b) => ({ "x-retell-signature": await signRetell(SECRETS.retell, b) }),
+    "POST /api/webhooks/retell/inbound": async (b) => ({ "x-retell-signature": await signRetell(SECRETS.retell, b) }),
     "POST /api/webhooks/resend": async (b) => signSvix(SECRETS.resend, `msg_${Math.random().toString(16).slice(2)}`, b),
     "POST /api/leads": async () => ({}),
+    // The website assistant accepts same-origin JSON only; the Origin header is its "signature".
+    "POST /api/assistant": async () => ({ origin: "http://crestmont.test" }),
     "POST /api/scheduled/run": async (b) => ({ "x-crestmont-scheduler-signature": await signEvidence(SECRETS.scheduler, b) }),
-    ...Object.fromEntries(["claim", "heartbeat", "checkpoint", "checkpoint/fetch", "requirements", "files", "complete", "ai/claim", "ai/complete", "previews/claim", "previews/deleted", "deployments/claim", "deployments/complete", "pipeline/spec", "cycles/submit", "integrations/report", "approvals/request", "approvals/list", "workers/status"].map((x) => [`POST /api/builds/runner/${x}`, async (b: string) => ({ "x-crestmont-runner-signature": await signEvidence(SECRETS.runner, b) })])),
+    "POST /api/crm/v1/imports": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.crmImport, b), "idempotency-key": `fuzz-${Math.random().toString(16).slice(2, 12)}` }),
+    ...Object.fromEntries(["claim", "heartbeat", "checkpoint", "checkpoint/fetch", "requirements", "files", "complete", "ai/claim", "ai/complete", "ai/checkpoint", "previews/claim", "previews/deleted", "deployments/claim", "deployments/complete", "pipeline/spec", "cycles/submit", "integrations/report", "approvals/request", "approvals/list", "workers/status"].map((x) => [`POST /api/builds/runner/${x}`, async (b: string) => ({ "x-crestmont-runner-signature": await signEvidence(SECRETS.runner, b) })])),
   };
   const jsonPosts = classified().filter((r) => r.method === "POST" && (r.spec.access.kind === "signed" || r.spec.access.kind === "webhook" || r.spec.api));
   assert.deepEqual(jsonPosts.map((r) => r.key).filter((k) => !sign[k]), [], "every JSON POST route has a signer");
@@ -204,7 +208,8 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
   for (const r of jsonPosts) {
     // Unsigned: rejected before parsing (lead capture is the one public JSON endpoint).
     const unsigned = await anon.request("POST", r.pattern, { body: bodies.hostile, headers: { "content-type": "application/json" } });
-    if (r.key !== "POST /api/leads" && unsigned.status !== 401) problems.push(`${r.key} unsigned → ${unsigned.status}`);
+    if (r.key === "POST /api/assistant") { if (unsigned.status !== 403) problems.push(`${r.key} without Origin → ${unsigned.status}`); }
+    else if (r.key !== "POST /api/leads" && unsigned.status !== 401) problems.push(`${r.key} unsigned → ${unsigned.status}`);
     for (const [variant, body] of Object.entries(bodies)) {
       const e0 = appErrors(w.db);
       const res = await anon.request("POST", r.pattern, { body, headers: { "content-type": "application/json", ...(await sign[r.key](body)) } });

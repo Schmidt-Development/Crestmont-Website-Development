@@ -6,7 +6,7 @@
 import { createHmac } from "node:crypto";
 import type {
   ClaimResponse, HeartbeatRequest, HeartbeatResponse, CheckpointRequest, RequirementItem, CompleteRequest, Job,
-  AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest, ExpiredPreview, ExpiredPreviewsResponse,
+  AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest, DiagnosticCheckpoint, ExpiredPreview, ExpiredPreviewsResponse,
   SiteDeployment, DeploymentClaimResponse, DeploymentCompleteRequest, CycleSubmitResponse, WorkerStatus } from "./protocol.ts";
 import { RUNNER_VERSION, LIMITS } from "./protocol.ts";
 import type { Logger } from "./log.ts";
@@ -90,10 +90,16 @@ export class ControlPlaneClient {
     const fetchImpl = this.opts.fetchImpl ?? fetch;
     const sleep = this.opts.sleep ?? defaultSleep;
     const url = this.opts.baseUrl.replace(/\/+$/, "") + path;
-    const body = JSON.stringify(payload);
+    const withNonce = () => {
+      // A fresh random nonce in every signed request lets the control plane refuse replays of a captured request
+      // (CREST-GAP-087). Each attempt gets its own nonce, so a retry after a lost response behaves as before.
+      const nonce = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
+      return JSON.stringify(payload && typeof payload === "object" && !Array.isArray(payload) ? { ...(payload as Record<string, unknown>), _nonce: nonce } : payload);
+    };
     let lastErr: unknown;
     for (let attempt = 1; attempt <= this.retry.attempts; attempt++) {
       const t = Math.floor((this.opts.now ?? Date.now)() / 1000);
+      const body = withNonce();
       let res: Response;
       try {
         res = await fetchImpl(url, {
@@ -250,7 +256,13 @@ export class ControlPlaneClient {
     return this.post("/api/builds/runner/ai/complete", {
       jobId: job.id, leaseToken: job.leaseToken, model: req.model, inputTokens: req.inputTokens, outputTokens: req.outputTokens,
       ...(req.text !== undefined ? { text: req.text } : {}), ...(req.error ? { error: req.error.slice(0, LIMITS.error) } : {}),
+      ...(req.correlationId ? { correlationId: req.correlationId } : {}), ...(req.diagnostic ? { diagnostic: req.diagnostic } : {}),
     }, { jobId: job.id });
+  }
+
+  /** Node 1 diagnostic: one runner-side checkpoint (D07–D11), authenticated by the job's lease token. */
+  aiCheckpoint(job: Pick<AiDraftJob, "id" | "leaseToken">, correlationId: string, cp: DiagnosticCheckpoint): Promise<{ recorded: boolean }> {
+    return this.post("/api/builds/runner/ai/checkpoint", { jobId: job.id, leaseToken: job.leaseToken, correlationId, ...cp, ...(cp.error ? { error: cp.error.slice(0, LIMITS.error) } : {}) }, { jobId: job.id });
   }
 
   complete(job: Pick<Job, "id" | "leaseToken">, req: CompleteRequest): Promise<unknown> {

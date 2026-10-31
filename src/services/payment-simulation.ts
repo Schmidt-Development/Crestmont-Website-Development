@@ -1,4 +1,4 @@
-// Test-only payment provider simulation (Founder E2E benchmark directive, 2026-10-30; migration 0044).
+// Test-only payment provider simulation (Founder E2E benchmark directive, 2026-10-30; migration 0054).
 //
 // Stripe is not configured, so an internal end-to-end test of "customer pays → onboarding → AI build" needs a
 // stand-in for the payment provider. This module is that stand-in and nothing else:

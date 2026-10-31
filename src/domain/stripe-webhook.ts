@@ -25,6 +25,8 @@ export interface StripeEvent {
   id: string;
   type: string;
   created: number;
+  /** true for live-mode events; compared with the environment's expected mode (src/domain/payments-mode.ts). */
+  livemode?: boolean;
   data: { object: { id: string; [k: string]: unknown } };
 }
 

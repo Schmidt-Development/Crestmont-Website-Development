@@ -23,7 +23,17 @@ export default async function* reporter(source) {
     skip ? skipped++ : ok ? pass++ : fail++;
     const m = /^((?:\[[A-Z]+-\d{3}\]\s*)+)(.*)$/.exec(name);
     yield `${skip ? "-" : ok ? "✔" : "✖"} ${name}${skip ? ` # SKIP ${reason}` : ""}\n`;
-    if (!ok) yield `    ${String(event.data.details?.error?.cause?.message ?? event.data.details?.error?.message ?? "").split("\n")[0]}\n`;
+    if (!ok) {
+      // The first lines of the error, whitespace collapsed: a bare first line ("…regular expression. Input:") hid the
+      // actual page text in deploy #61. In GitHub Actions each failure is also an ::error annotation, which the checks
+      // API exposes even when the raw job log cannot be downloaded.
+      const msg = String(event.data.details?.error?.cause?.message ?? event.data.details?.error?.message ?? "").split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 12).join(" ").replace(/\s+/g, " ").slice(0, 600);
+      yield `    ${msg}\n`;
+      if (process.env.GITHUB_ACTIONS === "true") {
+        const enc = (v) => v.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+        yield `::error title=${enc(name.slice(0, 120)).replace(/[:,]/g, " ")}::${enc(msg)}\n`;
+      }
+    }
     if (!m) { untagged++; continue; }
     for (const requirementId of new Set(m[1].match(/[A-Z]+-\d{3}/g))) {
       results.push({ requirementId, testName: m[2], outcome: skip ? "skipped" : ok ? "passed" : "failed", durationMs: Math.round(event.data.details?.duration_ms ?? 0),

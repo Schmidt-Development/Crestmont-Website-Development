@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createStaff, lastEmail } from "./support/app.ts";
-import { findProhibitedClaims, PACKAGES, MAINTENANCE_PLANS, APPROVED_SERVICES, priceQuote } from "../src/domain/catalog.ts";
+import { findProhibitedClaims, PACKAGES, packageAdditions, MAINTENANCE_PLANS, APPROVED_SERVICES, priceQuote } from "../src/domain/catalog.ts";
 import { SERVICES, servicePath } from "../src/content/services.ts";
 import { PUBLIC_PATHS } from "../src/routes/public.ts";
 import { LEGAL_SLUGS } from "../src/content/legal.ts";
@@ -107,10 +107,13 @@ test("[WEB-003] [CAT-005] pricing comes only from the catalogue; maintenance ent
   assert.match(pricing, /data-testid="price-starter">\$999</);
   assert.match(pricing, /data-testid="price-business">\$2,499</);
   assert.match(pricing, /data-testid="price-premium">\$4,999\+</);
-  for (const p of Object.values(PACKAGES)) for (const i of p.includes) assert.ok(pricing.includes(i.replace(/&/g, "&amp;")), `${p.name}: ${i}`);
+  // Packages are cumulative: the cards list Starter in full and what each higher package adds ("Everything in …, plus").
+  for (const i of PACKAGES.starter.includes) assert.ok(pricing.includes(i.replace(/&/g, "&amp;")), `Starter: ${i}`);
+  for (const id of ["business", "premium"] as const) for (const i of packageAdditions(id)) assert.ok(pricing.includes(i.replace(/&/g, "&amp;")), `${id}: ${i}`);
   const compare = await (await c.get("/pricing/compare")).text();
-  assert.match(compare, /<table class="table compare">/);
-  for (const p of Object.values(PACKAGES)) assert.ok(compare.includes(`<td>${p.revisionRounds}</td>`));
+  assert.match(compare, /<table class="table compare" data-compare>/);
+  // Every catalogue item of every package appears in the comparison in the package's own words or as an "Included" tick.
+  for (const p of Object.values(PACKAGES)) assert.ok(compare.includes(`${p.revisionRounds} revision rounds`) && compare.includes(`Up to ${p.pageLimit} pages`), p.name);
   assert.ok(hrefs(compare).includes("/checkout/premium"));
   for (const page of ["/", "/pricing", "/hosting-maintenance"]) {
     const h = await (await c.get(page)).text();
@@ -342,7 +345,7 @@ test("[PORT-007] [PORT-006] full portfolio workflow: upload, replace, verify, do
   const csh = await cs.text();
   assert.match(csh, /<dialog id="viewer"/);
   assert.match(csh, /data-viewer/);
-  assert.match(csh, /href="https:\/\/lansingcarrentals\.com" rel="noopener" target="_blank">Visit live website/);
+  assert.match(csh, /href="https:\/\/lansingcarrentals\.com" rel="noopener noreferrer" target="_blank">Visit live website/);
   assert.match(csh, /Booking via links to Turo/);
   const media = await anon.get(`/portfolio-media/${second}`);
   assert.equal(media.status, 200);

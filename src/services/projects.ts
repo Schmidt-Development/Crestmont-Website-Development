@@ -268,7 +268,7 @@ export async function releaseReadiness(db: Db, projectId: string): Promise<{ rea
   const reviewed = !!(await db.prepare(`SELECT 1 FROM audit_logs WHERE subject_type = 'project' AND subject_id = ? AND action = 'project.status_changed' AND details_json LIKE '%"to":"customer_review"%' LIMIT 1`).bind(projectId).first());
   const openChangeOrders = invoices.filter((i) => i.milestone_kind === "change_order" && i.status === "open").length;
   const missing = [...base.missing];
-  // A project paid by the test-only payment simulation can never be released (migration 0044).
+  // A project paid by the test-only payment simulation can never be released (migration 0054).
   const simulated = !!(await db.prepare(`SELECT 1 FROM payments pay JOIN projects pr ON pr.order_id = pay.order_id WHERE pr.id = ? AND pay.provider = 'simulated' LIMIT 1`).bind(projectId).first());
   if (simulated) missing.push("payment:simulated_test_payment");
   if (!reviewed) missing.push("customer_review");
@@ -559,6 +559,8 @@ export async function deleteTask(db: Db, actor: Actor, taskId: string): Promise<
   if (await db.prepare(`SELECT 1 FROM change_orders WHERE task_id = ?`).bind(taskId).first()) throw new HttpError(409, "This task belongs to a change order and cannot be deleted.");
   await db.batch([
     db.prepare(`UPDATE assignments SET ended_at = ? WHERE subject_type = 'task' AND subject_id = ? AND ended_at IS NULL`).bind(nowIso(), taskId),
+    // Keep the notification text (the assignment happened) but drop its link: it would point at a page that is gone (404).
+    db.prepare(`UPDATE notifications SET subject_type = NULL, subject_id = NULL WHERE subject_type = 'task' AND subject_id = ?`).bind(taskId),
     db.prepare(`DELETE FROM tasks WHERE id = ?`).bind(taskId),
   ]);
   await audit(db, { actorUserId: actor.userId, action: "task.deleted", subjectType: "task", subjectId: taskId, organizationId: t.organization_id, details: { projectId: t.project_id, title: t.title } });

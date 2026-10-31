@@ -10,6 +10,16 @@ updates:
     directory: "/runner"
     schedule: { interval: weekly, day: monday }
     open-pull-requests-limit: 5
+  # The sandbox image (playwright) and the optional paid SDK adapter have their own package.json files and were not
+  # covered (security readiness review 2026-10-28). Commit their lockfiles so these PRs and the CI audit have input.
+  - package-ecosystem: npm
+    directory: "/runner/sandbox"
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+  - package-ecosystem: npm
+    directory: "/runner/agent-sdk"
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
   - package-ecosystem: github-actions
     directory: "/"
     schedule: { interval: weekly, day: monday }

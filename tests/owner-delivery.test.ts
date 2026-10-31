@@ -165,8 +165,9 @@ test("[EMP-003] employee workload: per-person open, overdue and estimated work, 
 
 test("[EMP-003] My work links leads to their records; notification pages page, filter, link and mark read without crossing users", async () => {
   const t = await createTestApp();
-  const sales = await staffClient(t, "sales", "s1@crestmont.test");
+  // The lead is captured before the sales user exists, so CREST-GAP-005's "new lead" notice does not apply to them here.
   const leadId = await apiLead(t.client(), { name: "Linked Lead", email: "ll@x.example" });
+  const sales = await staffClient(t, "sales", "s1@crestmont.test");
   await t.db.prepare(`UPDATE leads SET owner_user_id = ? WHERE id = ?`).bind(sales.id, leadId).run();
   await t.db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES (?,?,?,?,?,?,?)`).bind("ntf_one", sales.id, "lead_assigned", "lead", leadId, "A lead was assigned to you.", nowIso()).run();
   const other = await createStaff(t.db, "sales", "s2@crestmont.test");

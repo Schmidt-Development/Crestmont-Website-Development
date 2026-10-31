@@ -47,6 +47,11 @@
 .PARAMETER ExtraEgressDomains
   Extra hosts the runner may reach (e.g. github.com api.github.com api.cloudflare.com for repos/previews). Each must be
   a plain host name; hosted AI API domains are refused (SquidConf.ps1).
+.PARAMETER PreserveOllamaConfig
+  Native Ollama shared with other applications (Node 1: HQ/JARVIS): do NOT change Ollama's environment and do NOT stop
+  or restart Ollama. The values the runner would normally set are compared with the current ones and every difference
+  is reported (state\ollama-settings.json); the localhost-only check still applies. The runner's context size follows
+  an existing OLLAMA_CONTEXT_LENGTH so it never assumes more context than Ollama gives.
 .PARAMETER OllamaImage
   Image for the optional ollama-in-docker profile, pinned by tag AND digest (repo:tag@sha256:...), written to
   compose\.env as OLLAMA_IMAGE. Get a digest with: docker buildx imagetools inspect ollama/ollama:<tag>
@@ -74,6 +79,7 @@ param(
   [switch]$OllamaInDocker,
   [string]$OllamaImage = "ollama/ollama:0.32.0@sha256:57f573b47f1f71ebb445789f279fe3e596a8beab182f7cf486db9205bad87c5a",
   [switch]$SkipModelPull,
+  [switch]$PreserveOllamaConfig,
   [switch]$NoAutoStart,
   [switch]$NoStart
 )
@@ -231,6 +237,12 @@ foreach ($lock in @("package-lock.json", "sandbox\package-lock.json")) {
   }
 }
 if ($script:Problems.Count) { Exit-WithProblem }
+# Rollback point: keep the images currently in use as :1-previous before rebuilding (Uninstall-CrestmontRunner.ps1 -Rollback).
+foreach ($img in @("crestmont-ai-runner", "crestmont-build-sandbox", "crestmont-egress-proxy")) {
+  & docker.exe image inspect "${img}:1" 2>$null | Out-Null
+  if ($LASTEXITCODE -eq 0) { & docker.exe tag "${img}:1" "${img}:1-previous" | Out-Null }
+}
+if (Test-Path (Join-Path $Compose "runner.env")) { Copy-Item -Force (Join-Path $Compose "runner.env") (Join-Path $State "runner.env.previous") }
 Invoke-Checked "docker.exe" @("build", "-t", "crestmont-ai-runner:1", "-f", (Join-Path $RunnerSrc "Dockerfile"), $RunnerSrc) "docker build runner"
 Invoke-Checked "docker.exe" @("build", "-t", "crestmont-build-sandbox:1", "-f", (Join-Path $RunnerSrc "sandbox\Dockerfile"), (Join-Path $RunnerSrc "sandbox")) "docker build sandbox"
 Copy-Item -Force (Join-Path $PSScriptRoot "docker-compose.yml") (Join-Path $Compose "docker-compose.yml")
@@ -287,9 +299,23 @@ if ($OllamaInDocker) {
     OLLAMA_KV_CACHE_TYPE = "$($rec.ollama.kvCacheType)"
   }
   $changed = $false
-  foreach ($k in $ollamaEnv.Keys) {
-    if ([Environment]::GetEnvironmentVariable($k, "User") -ne $ollamaEnv[$k]) { [Environment]::SetEnvironmentVariable($k, $ollamaEnv[$k], "User"); $changed = $true }
-    Set-Item -Path "Env:$k" -Value $ollamaEnv[$k]
+  if ($PreserveOllamaConfig) {
+    # Shared Ollama (another application depends on it): report, never change or restart.
+    $drift = [ordered]@{}
+    foreach ($k in $ollamaEnv.Keys) {
+      $cur = [Environment]::GetEnvironmentVariable($k, "User"); if (-not $cur) { $cur = [Environment]::GetEnvironmentVariable($k, "Machine") }
+      if ("$cur" -ne $ollamaEnv[$k]) { $drift[$k] = [ordered]@{ current = $(if ($cur) { "$cur" } else { "(Ollama default)" }); recommended = $ollamaEnv[$k] }; Warn "$k is '$(if ($cur) { $cur } else { 'unset (Ollama default)' })'; Crestmont would use '$($ollamaEnv[$k])'. Left unchanged (-PreserveOllamaConfig)." }
+    }
+    $curCtx = [Environment]::GetEnvironmentVariable("OLLAMA_CONTEXT_LENGTH", "User"); if (-not $curCtx) { $curCtx = [Environment]::GetEnvironmentVariable("OLLAMA_CONTEXT_LENGTH", "Machine") }
+    if ($curCtx -match '^[0-9]+$' -and [int]$curCtx -lt $ctx) { Warn "Runner context lowered from $ctx to Ollama's OLLAMA_CONTEXT_LENGTH $curCtx (never assume more context than Ollama gives)."; $ctx = [int]$curCtx }
+    elseif (-not $curCtx) { Warn "OLLAMA_CONTEXT_LENGTH is not set: Ollama's default context may be smaller than the runner's $ctx tokens. Long builds can lose context; set it deliberately (Founder decision, affects every Ollama user) before Phase 6." }
+    [IO.File]::WriteAllText((Join-Path $State "ollama-settings.json"), (([ordered]@{ preserved = $true; at = (Get-Date).ToUniversalTime().ToString("o"); differences = $drift; runnerContextTokens = $ctx }) | ConvertTo-Json -Depth 4))
+    Ok "Ollama configuration left unchanged; $($drift.Count) difference(s) recorded in state\ollama-settings.json"
+  } else {
+    foreach ($k in $ollamaEnv.Keys) {
+      if ([Environment]::GetEnvironmentVariable($k, "User") -ne $ollamaEnv[$k]) { [Environment]::SetEnvironmentVariable($k, $ollamaEnv[$k], "User"); $changed = $true }
+      Set-Item -Path "Env:$k" -Value $ollamaEnv[$k]
+    }
   }
   if ($changed) {
     Warn "Ollama settings changed: restarting Ollama"
@@ -331,6 +357,7 @@ $managed = @(
   [pscustomobject]@{ key = "CONTROL_PLANE_URL"; value = $PlatformUrl }
   [pscustomobject]@{ key = "BUILD_RUNNER_SECRET_FILE"; value = "/run/secrets/build_runner_secret" }
   [pscustomobject]@{ key = "RUNNER_ID"; value = $RunnerId }
+  [pscustomobject]@{ key = "RUNNER_HOST_LABEL"; value = $env:COMPUTERNAME }
   [pscustomobject]@{ key = "RUNNER_AGENT_PROVIDER"; value = "local" }
   [pscustomobject]@{ key = "RUNNER_ALLOW_PAID_PROVIDER"; value = "false" }
   [pscustomobject]@{ key = "LOCAL_MODEL"; value = $selected }
@@ -382,7 +409,7 @@ $composeEnv | Set-Content -Encoding ascii (Join-Path $Compose ".env")
 Ok "Wrote docker-compose.yml, proxy\squid.conf, runner.env (managed, no secret values); runner.local.env kept"
 # Tool scripts next to the install, whether or not auto-start is registered (Get-RunnerHealth, Collect-Evidence, ...).
 New-Item -ItemType Directory -Force -Path (Join-Path $State "telemetry") | Out-Null
-foreach ($tool in @("Start-CrestmontRunner.ps1", "Get-RunnerHealth.ps1", "Collect-Evidence.ps1", "Discover-Hardware.ps1", "Write-GpuTelemetry.ps1")) {
+foreach ($tool in @("Start-CrestmontRunner.ps1", "Get-RunnerHealth.ps1", "Collect-Evidence.ps1", "Discover-Hardware.ps1", "Write-GpuTelemetry.ps1", "Test-Node1Dispatch.ps1", "Uninstall-CrestmontRunner.ps1")) {
   Copy-Item -Force (Join-Path $PSScriptRoot $tool) (Join-Path $InstallDir $tool)
 }
 
@@ -420,8 +447,11 @@ if (-not $NoAutoStart) {
   $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"{0}`" -InstallDir `"{1}`"{2}" -f (Join-Path $InstallDir "Start-CrestmontRunner.ps1"), $InstallDir, $(if ($OllamaInDocker) { " -OllamaInDocker" } else { "" }))
   # Docker Desktop and the Ollama tray app run in a user session, so the task runs at this user's logon.
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
-  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -ExecutionTimeLimit (New-TimeSpan -Hours 1)
-  Register-ScheduledTask -TaskName "CrestmontRunner-Start" -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force | Out-Null
+  # Watchdog: the same idempotent start script every 5 minutes, so a stopped Docker Desktop or compose stack comes back
+  # without anyone signing in again (containers that crash restart on their own: restart unless-stopped).
+  $watchdog = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5)
+  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew
+  Register-ScheduledTask -TaskName "CrestmontRunner-Start" -Action $action -Trigger @($trigger, $watchdog) -Settings $settings -RunLevel Limited -Force | Out-Null
   Ok "Scheduled task 'CrestmontRunner-Start' runs at logon of $env:USERNAME (see WINDOWS-SUPERCOMPUTER.md for unattended reboots)"
   # V4: GPU telemetry every minute (nvidia-smi on the host -> state\telemetry\gpu.json, read-only in the runner).
   $gAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"{0}`" -InstallDir `"{1}`"" -f (Join-Path $InstallDir "Write-GpuTelemetry.ps1"), $InstallDir)

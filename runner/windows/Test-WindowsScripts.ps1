@@ -48,7 +48,11 @@ if (-not $SkipAnalyzer) {
   Write-Output ("PSScriptAnalyzer {0}, PowerShell {1}" -f (Get-Module PSScriptAnalyzer).Version, $PSVersionTable.PSVersion)
   $settings = Join-Path $PSScriptRoot "PSScriptAnalyzerSettings.psd1"
   $findings = @(Invoke-ScriptAnalyzer -Path $PSScriptRoot -Settings $settings)
-  foreach ($x in $findings) { Write-Output ("FAIL pssa   {0}:{1} [{2}] {3}: {4}" -f $x.ScriptName, $x.Line, $x.Severity, $x.RuleName, $x.Message) }
+  foreach ($x in $findings) {
+    Write-Output ("FAIL pssa   {0}:{1} [{2}] {3}: {4}" -f $x.ScriptName, $x.Line, $x.Severity, $x.RuleName, $x.Message)
+    # In GitHub Actions, also an annotation, so the finding shows on the pull request without opening the log.
+    if ($env:GITHUB_ACTIONS -eq "true") { Write-Output ("::error file=runner/windows/{0},line={1}::{2}: {3}" -f $x.ScriptName, $x.Line, $x.RuleName, ($x.Message -replace "[\r\n]+", " ")) }
+  }
   if ($findings.Count) { $failures++ } else { Write-Output "OK   pssa   no Error/Warning findings in $($scripts.Count) scripts" }
 }
 

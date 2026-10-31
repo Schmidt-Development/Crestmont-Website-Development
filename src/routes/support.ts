@@ -13,6 +13,7 @@ import {
 import { portalNav, staffNav } from "./nav.ts";
 import { can } from "../domain/authz.ts";
 import * as sup from "../services/support.ts";
+import { disabledOwnerFlag } from "../services/offboarding.ts";
 
 const portalPage = (ctx: AppContext, title: string, body: SafeHtml, status = 200) =>
   htmlResponse(ctx, appLayout(ctx, { title, nav: portalNav(ctx), home: "/portal", area: "Customer portal" }, body), status);
@@ -94,7 +95,8 @@ async function staffTicketPage(ctx: AppContext, id: string, errors: string[] = [
     : timing.state === "breached" ? (timing.firstResponseHours !== null ? `Missed: first response after ${timing.firstResponseHours} h (target ${timing.targetHours} h)` : `Overdue: ${timing.elapsedHours} h without a first response (target ${timing.targetHours} h)`)
     : `${timing.elapsedHours} h elapsed of ${timing.targetHours} h target`;
 
-  return staffPage(ctx, t.subject, html`${pageHead(t.subject, linkButton("Queue", "/staff/support", "ghost", "sm"), `Ticket ${t.id} · ${org?.name ?? ""}`)}
+  const flag = await disabledOwnerFlag(ctx.db, ["ticket"], t.id);
+  return staffPage(ctx, t.subject, html`${pageHead(t.subject, linkButton("Queue", "/staff/support", "ghost", "sm"), `Ticket ${t.id} · ${org?.name ?? ""}`)}${(flag ? alert("warn", html`<strong>Owner disabled.</strong> ${flag.name}'s account was disabled; ${flag.status === "ended" ? "their assignment was ended, so this needs a new owner." : "this is waiting in the offboarding queue for a new owner."}`) : "")}
 ${formErrors(errors)}
 <div class="grid grid-2" style="align-items:start"><section class="stack">${thread(msgs, "staff")}
 ${canManage ? html`<form class="card stack" method="post" action="/staff/support/${t.id}/reply" enctype="multipart/form-data" id="reply">${csrf(ctx)}

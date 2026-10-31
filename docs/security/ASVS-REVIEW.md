@@ -2,6 +2,8 @@
 
 **Requirement:** SEC-007 · **Scope:** the code in this repository as of 2026-10-26, findings status updated 2026-10-27 (development only; no staging or production exists) · **Reviewer:** engineering, self-review.
 
+> **Update 2026-10-28:** findings F-18–F-28 and status corrections for F-06, F-08, F-11, F-13 and F-15 are recorded in `docs/security/SECURITY-READINESS-2026-10-28.md` and in `security_findings` (migration 0040). That document is the current register summary.
+
 > **This is not a compliance claim.** Crestmont is **not** ASVS-compliant or certified, and nothing here should be presented that way. This is a self-review by the same team that wrote the code. It is not an independent assessment or a penetration test. It checks the source against the ASVS 4.0.3 chapters at roughly Level 2 depth and lists the gaps. An independent review and a staging penetration test are still needed before launch (F-16).
 
 Severity: **High** = plausible exploitation or loss of an essential control before launch · **Medium** = defence-in-depth gap or a missing operational control · **Low** = hardening.
