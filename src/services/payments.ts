@@ -10,7 +10,8 @@ import { audit } from "./security.ts";
 import { sendMail } from "./mailer.ts";
 import { MAINTENANCE_PLANS } from "../domain/catalog.ts";
 import { syncProjectBuildSafe } from "./builds.ts";
-import { invoiceSubscription, invoicePaymentIntent, invoiceCharge, invoiceLacksPaymentLink, subscriptionPeriodEnd } from "../domain/stripe-shapes.ts";
+import { invoiceSubscription, invoicePaymentIntent, invoiceCharge, invoiceLacksPaymentLink, subscriptionPeriodEnd, chargeLatestRefund, chargeLacksRefundList, type ChargeRefund } from "../domain/stripe-shapes.ts";
+import { notifyRefundIssued } from "./refunds.ts";
 import { StripeReadOnly } from "../adapters/payments.ts";
 
 /** Resolves an invoice's payment link through the API at the pinned version (where Invoice.payment_intent exists),
@@ -27,16 +28,35 @@ export function stripeInvoiceLookup(env: PaymentsEnv, fetchImpl: typeof fetch = 
     return { paymentIntentId: invoicePaymentIntent(inv), chargeId: invoiceCharge(inv) };
   };
 }
+/** Newest refund of a charge through the API at the pinned version, for charge payloads (2022-11-15+) that omit
+ *  Charge.refunds. GET /v1/refunds lists newest first; Stripe recommends this over expanding Charge.refunds. */
+export type StripeRefundLookup = (chargeId: string) => Promise<ChargeRefund | null>;
+export function stripeRefundLookup(env: PaymentsEnv, fetchImpl: typeof fetch = fetch): StripeRefundLookup | undefined {
+  const pm = paymentsMode(env); // CREST-GAP-007/008: the key must match the environment's expected mode
+  if (pm.mode === "none") return undefined;
+  let reader: StripeReadOnly;
+  try { reader = new StripeReadOnly(pm.key, fetchImpl, pm.mode); } catch { return undefined; }
+  return async (chargeId) => {
+    if (!/^(ch|py)_[A-Za-z0-9]+$/.test(chargeId)) throw new Error("Invalid Stripe charge id");
+    const list = await reader.get<{ data?: Record<string, unknown>[] }>("refunds", [["charge", chargeId], ["limit", "1"]]);
+    const first = Array.isArray(list.data) ? list.data[0] : undefined;
+    if (!first || typeof first.id !== "string") return null;
+    reader.assertMode(first as { livemode?: boolean });
+    return { id: first.id, amount: typeof first.amount === "number" ? first.amount : null };
+  };
+}
+
 /**
  * `expectedLivemode`: the livemode every event must carry in this environment (src/domain/payments-mode.ts); null
  * refuses every event (production before the Founder authorises live payments). Omitted = false (test mode): live
  * mode is never assumed.
  */
-type EventCtx = Pick<AppContext, "db" | "email" | "baseUrl"> & { stripeLookup?: StripeInvoiceLookup; expectedLivemode?: boolean | null };
+type EventCtx = Pick<AppContext, "db" | "email" | "baseUrl"> & { stripeLookup?: StripeInvoiceLookup; stripeRefundLookup?: StripeRefundLookup; expectedLivemode?: boolean | null };
 
 /** Builds the webhook-processing context for an environment (used by the webhook route and the scheduled retry). */
 export function stripeEventCtx(ctx: Pick<AppContext, "db" | "email" | "baseUrl">, env: PaymentsEnv & { overrides?: { fetch?: typeof fetch } }): EventCtx {
-  return { db: ctx.db, email: ctx.email, baseUrl: ctx.baseUrl, stripeLookup: stripeInvoiceLookup(env, env.overrides?.fetch ?? fetch), expectedLivemode: expectedLivemode(env) };
+  const f = env.overrides?.fetch ?? fetch;
+  return { db: ctx.db, email: ctx.email, baseUrl: ctx.baseUrl, stripeLookup: stripeInvoiceLookup(env, f), stripeRefundLookup: stripeRefundLookup(env, f), expectedLivemode: expectedLivemode(env) };
 }
 
 type Obj = Record<string, unknown>;
@@ -177,22 +197,42 @@ export async function processStripeEvent(ctx: EventCtx, evt: StripeEvent): Promi
         const refunded = n(o, "amount_refunded") ?? 0;
         const total = n(o, "amount") ?? 0;
         if (pi) {
+          // Which Stripe refund this event is about. Charge payloads at 2022-11-15+ (every supported endpoint version) omit
+          // Charge.refunds, so it is looked up at the pinned version BEFORE anything is written: without it the event cannot
+          // be matched to the platform's refund request (the old code then emailed every platform refund a second time),
+          // so it fails and is retried by reconciliation, exactly like invoice.paid's payment-link lookup.
+          let latest = chargeLatestRefund(o);
+          if (!latest && chargeLacksRefundList(o)) {
+            if (!ctx.stripeRefundLookup) throw new Error(`charge ${o.id} payload has no refund list and Stripe is not configured to look it up`);
+            latest = await ctx.stripeRefundLookup(String(o.id));
+          }
+          const refundId = latest?.id ?? null;
           await db.prepare(`UPDATE payments SET status = ? WHERE stripe_payment_intent_id = ?`).bind(refunded >= total ? "refunded" : "partially_refunded", pi).run();
-          // Refunds approved in the platform but issued from the Stripe dashboard are completed here too.
-          const latestRefund = ((o.refunds as Obj | undefined)?.data as Obj[] | undefined)?.[0];
-          const refundId = latestRefund ? s(latestRefund, "id") : null;
-          // CREST-GAP-039: the platform's own issue step already emailed the customer; anything else (a Dashboard refund,
-          // or an approved request completed in the Dashboard) is emailed here, once per Stripe refund.
-          const platformNotified = refundId ? await db.prepare(`SELECT 1 AS x FROM refunds WHERE stripe_refund_id = ? AND status = 'issued' AND customer_notified_at IS NOT NULL`).bind(refundId).first() : null;
-          await db.prepare(`UPDATE refunds SET status = 'issued', issued_at = COALESCE(issued_at, ?), stripe_refund_id = COALESCE(stripe_refund_id, ?)
-                            WHERE status IN ('approved','failed') AND payment_id IN (SELECT id FROM payments WHERE stripe_payment_intent_id = ?)`)
-            .bind(nowIso(), latestRefund ? s(latestRefund, "id") : null, pi).run();
-          await audit(db, { actorKind: "webhook", action: "payment.refunded", subjectType: "payment", subjectId: pi, details: { event: evt.id, refunded } });
-          if (!platformNotified) {
+          // Platform refund requests this Stripe refund belongs to: the one the issue step already recorded, or else one
+          // approved request (or failed issue) completed by it — issued from the Stripe Dashboard, or by the issue step
+          // whose Stripe call has not returned yet. stripe_refund_id is UNIQUE, so exactly one request is claimed.
+          const owned = refundId ? await db.prepare(`SELECT id FROM refunds WHERE stripe_refund_id = ?`).bind(refundId).first<{ id: string }>() : null;
+          let platformRefundId = owned?.id ?? null;
+          if (!owned) {
+            const claim = await db.prepare(`SELECT r.id FROM refunds r JOIN payments p ON p.id = r.payment_id WHERE p.stripe_payment_intent_id = ? AND r.status IN ('approved','failed') AND r.stripe_refund_id IS NULL
+                                            ORDER BY CASE WHEN r.amount_cents = ? THEN 0 ELSE 1 END, r.created_at LIMIT 1`).bind(pi, latest?.amount ?? -1).first<{ id: string }>();
+            if (claim) {
+              const r = await db.prepare(`UPDATE refunds SET status = 'issued', issued_at = COALESCE(issued_at, ?), stripe_refund_id = COALESCE(stripe_refund_id, ?) WHERE id = ? AND status IN ('approved','failed')`)
+                .bind(nowIso(), refundId, claim.id).run();
+              if (r.meta.changes === 1) platformRefundId = claim.id;
+            }
+          }
+          await audit(db, { actorKind: "webhook", action: "payment.refunded", subjectType: "payment", subjectId: pi, details: { event: evt.id, refunded, refund: refundId, refundRequest: platformRefundId } });
+          if (platformRefundId) {
+            // CREST-GAP-039: same idempotency key as the issue step (refund:<request>:issued), so the customer is emailed
+            // once whichever of the two runs first.
+            await notifyRefundIssued(ctx, platformRefundId, refundId ?? s(o, "id") ?? "Stripe refund");
+          } else {
+            // A refund made only in the Stripe Dashboard: emailed here, once per Stripe refund.
             const pay = await db.prepare(`SELECT organization_id FROM payments WHERE stripe_payment_intent_id = ?`).bind(pi).first<{ organization_id: string }>();
             const billing = (o.billing_details ?? {}) as Obj;
             const to = s(o, "receipt_email") ?? s(billing, "email") ?? (pay ? await orgBillingEmail(db, pay.organization_id) : null);
-            const amount = latestRefund ? n(latestRefund, "amount") ?? refunded : refunded;
+            const amount = latest?.amount ?? refunded;
             if (to && amount > 0) await sendMail(ctx, { template: "refund_decision", to, idempotencyKey: `refund:stripe:${refundId ?? evt.id}`, data: { event: "issued", amountCents: amount, reference: refundId ?? s(o, "id") ?? "Stripe refund", url: `${ctx.baseUrl}/portal/billing` } });
           }
           await syncBuildsForPaymentIntent(db, pi);
