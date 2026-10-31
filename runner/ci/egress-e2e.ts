@@ -8,6 +8,7 @@
 //   runner -> platform host  -> not denied;  runner -> model (CONNECT and plain GET) -> 200 from the fake model
 //   install -> registry.npmjs.org -> not denied; install -> platform / model / github -> 403
 //   no proxy                 -> no route out of either internal network
+//   host.docker.internal     -> an IPv6 pin reproduces Node 1's 503 ERR_CONNECT_FAIL; the installer's IPv4 pin -> 200
 // Also the LOCAL-VALIDATION.md tripwire, which must fail when the proxy is stopped. Exit 0 = all as expected.
 // "Not denied" means the proxy did not answer 403; whether the upstream then answers depends on the network the
 // daemon has (CI: internet; elsewhere maybe none), and is printed.
@@ -65,16 +66,44 @@ try {
   for (const [img, tag] of [[runnerImage, "crestmont-ai-runner:1"], [proxyImage, "crestmont-egress-proxy:1"]]) {
     if (img !== tag) await docker(["tag", img, tag]);
   }
-  const up = await docker(["compose", "up", "-d", "--no-build", "egress-proxy"], compose, 180_000);
-  check("docker compose up egress-proxy", up.code === 0, up.stderr.slice(-400));
-  let running = "";
-  for (let i = 0; i < 20; i++) {
-    await new Promise((r) => setTimeout(r, 1000));
-    running = (await docker(["compose", "ps", "--format", "{{.State}}", "egress-proxy"], compose)).stdout.trim();
-    if (running === "running") break;
-  }
-  await new Promise((r) => setTimeout(r, 2000));
-  check("proxy stays running (no crash loop)", running === "running", running || "(no state)");
+  const startProxy = async (label: string, recreate: boolean) => {
+    const up = await docker(["compose", "up", "-d", "--no-build", ...(recreate ? ["--force-recreate"] : []), "egress-proxy"], compose, 180_000);
+    check(`docker compose up egress-proxy (${label})`, up.code === 0, up.stderr.slice(-400));
+    let running = "";
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      running = (await docker(["compose", "ps", "--format", "{{.State}}", "egress-proxy"], compose)).stdout.trim();
+      if (running === "running") break;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+    check(`proxy stays running (no crash loop) (${label})`, running === "running", running || "(no state)");
+  };
+  const proxyHosts = async () => (await docker(["compose", "exec", "-T", "egress-proxy", "cat", "/etc/hosts"], compose)).stdout
+    .split("\n").filter((l) => /\shost\.docker\.internal(\s|$)/.test(l.replace(/#.*/, ""))).map((l) => l.trim().split(/\s+/)[0]);
+
+  // Node 1 (Docker Desktop dual-stack): host.docker.internal had an IPv6 address the proxy's IPv4-only networks cannot
+  // reach, and Squid answered CONNECT host.docker.internal:11434 with 503 ERR_CONNECT_FAIL 101. Reproduce with an
+  // IPv6-only pin (written straight to .env here; the installer only ever writes a validated IPv4).
+  writeFileSync(path.join(compose, ".env"), "CRESTMONT_HOST_GATEWAY_IPV4=fdc4:f303:9324::254\n");
+  await startProxy("IPv6 pin, Node 1 reproduction", false);
+  const v6 = await probe("crestmont_runner", "CONNECT", "host.docker.internal:11434");
+  check("REPRODUCED: an IPv6 host.docker.internal makes Squid answer CONNECT :11434 with 503 (ERR_CONNECT_FAIL)", v6 === "503", v6);
+
+  // The fix, exactly as Install-CrestmontRunner.ps1 generates it: host-gateway-probe.cjs in a throw-away container
+  // finds the host IPv4 that reaches :11434, compose .env pins it, the proxy is recreated and sees only that address.
+  const hg = await docker(["run", "--rm", "--network", "bridge", "--add-host", "crestmont-host-gateway.invalid:host-gateway",
+    "-v", `${path.join(RUNNER_DIR, "windows", "host-gateway-probe.cjs")}:/probe/host-gateway-probe.cjs:ro`, "--entrypoint", "node", runnerImage,
+    "/probe/host-gateway-probe.cjs", "11434", "host.docker.internal", "crestmont-host-gateway.invalid"], undefined, 60_000);
+  let ipv4 = "";
+  try {
+    const doc = JSON.parse(hg.stdout.trim().split("\n").filter((l) => l.startsWith("{")).pop() ?? "{}") as { candidates?: { address: string | null; reachable: boolean }[] };
+    ipv4 = doc.candidates?.find((c) => c.reachable && c.address && /^\d+\.\d+\.\d+\.\d+$/.test(c.address) && !c.address.startsWith("127."))?.address ?? "";
+  } catch { ipv4 = ""; }
+  check("installer probe: a reachable IPv4 address of the Docker host on :11434", ipv4 !== "", (hg.stdout || hg.stderr).trim().slice(0, 300));
+  writeFileSync(path.join(compose, ".env"), `CRESTMONT_HOST_GATEWAY_IPV4=${ipv4}\n`);
+  await startProxy("IPv4 pin from the installer probe", true);
+  const pinned = await proxyHosts();
+  check("FIXED: the proxy's /etc/hosts maps host.docker.internal to the pinned IPv4 only", pinned.length === 1 && pinned[0] === ipv4, pinned.join(", "));
 
   const nets = (await docker(["network", "inspect", "crestmont_runner", "crestmont_install", "--format", "{{.Name}}={{.Internal}}"])).stdout.trim().split("\n");
   check("crestmont_runner and crestmont_install are internal networks", nets.length === 2 && nets.every((n) => n.endsWith("=true")), nets.join(", "));

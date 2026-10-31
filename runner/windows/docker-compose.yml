@@ -24,8 +24,12 @@ services:
     volumes:
       - ./proxy/squid.conf:/etc/squid/squid.conf:ro
     extra_hosts:
-      # Docker Desktop provides host.docker.internal itself; this line makes plain Linux engines behave the same.
-      - "host.docker.internal:host-gateway"
+      # IPv4 only. Install-CrestmontRunner.ps1 writes CRESTMONT_HOST_GATEWAY_IPV4 to .env: the Docker host's IPv4
+      # address that a container reached Ollama on. On Docker Desktop with dual-stack networking, host-gateway and
+      # host.docker.internal also have an IPv6 address; these networks are IPv4-only, so Squid's CONNECT to it failed
+      # with ERR_CONNECT_FAIL 101 (Node 1). Squid reads /etc/hosts before DNS, so one IPv4 line here settles it.
+      # Unset (plain Linux engines, CI): host-gateway, which those engines map to the bridge's IPv4 gateway.
+      - "host.docker.internal:${CRESTMONT_HOST_GATEWAY_IPV4:-host-gateway}"
     cpus: 0.5
     mem_limit: 256m
     pids_limit: 128
