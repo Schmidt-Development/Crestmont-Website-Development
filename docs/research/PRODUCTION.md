@@ -6,13 +6,13 @@
 | Setting | Where | Value |
 |---|---|---|
 | `RESEARCH_RUNNER_SECRET` | `wrangler secret put RESEARCH_RUNNER_SECRET --env production` | 32 random bytes as hex. **Different from staging.** Stored on Node 1 by `Install-ResearchWorker.ps1` (DPAPI) |
-| `research_settings` | D1 row created by migration 0050 | Ships **paused**. Owner resumes in `/staff/research` |
-| `research_sources` | D1 rows created by migration 0050 | Overture and Common Crawl on. Foursquare OS, OSM and open-data off until the Founder decides (`DATA-SOURCES.md`) |
+| `research_settings` | D1 row created by migration 0051 | Ships **paused**. Owner resumes in `/staff/research` |
+| `research_sources` | D1 rows created by migration 0051 | Overture and Common Crawl on. Foursquare OS, OSM and open-data off until the Founder decides (`DATA-SOURCES.md`) |
 | Worker `settings.env` | Node 1 `C:\CrestmontResearch` | `CRESTMONT_URL=https://crestmontwebsitedevelopment.com` only after staging sign-off |
 
 No new paid service, API key or subscription is involved.
 
-## 2. Migration safety (`0050_lead_research.sql`)
+## 2. Migration safety (`0051_lead_research.sql`)
 - **Additive only:** six new tables and their indexes, plus seed rows for settings and sources. It does not alter, rebuild or delete any existing table. In particular, `leads`, whose rebuild in D1 would cascade-delete `crm_activities`, is untouched.
 - **Foreign keys** point only from the new tables to `users`, `leads` and `contacts`, so existing rows are unaffected.
 - **Independent of the open migrations:** `0048`/`0049` in PR #50 and `0048` in PR #52 touch none of these tables, and D1 applies by name.
@@ -38,7 +38,7 @@ No new paid service, API key or subscription is involved.
 - **Promotion** goes through the CRM intake engine (`contact-identity.ts`, PR #50, channel `research_agent`). That engine owns the company, contact, lead and activity writes, the identity links and the decision record. The lead gets `source=manual` (inside the existing CHECK) and `origin=research_agent`.
 - **D1 limits:** every statement stays under 100 bound parameters (45 at most). Each batch reads in chunks of 90.
 - **Batch size:** the 100-record default keeps an ingest under about 1,000 D1 queries per invocation. Lower `max_batch` in `/staff/research` on a Workers plan with tighter limits.
-- **PR #50 is integrated.** Its `0048`/`0049` migrations precede 0050.
+- **PR #50 is integrated.** Its `0048`/`0049` migrations, and #64's `0050`, precede 0051.
 
 ## 6. Monitoring
 - **`/staff/research`:** worker online/offline, last check-in, queue depth, failed jobs, rejected records, per-source refresh, the 24-hour throughput chart, and import success rate.
@@ -46,7 +46,7 @@ No new paid service, API key or subscription is involved.
 - **Alerting gap (not built):** a stale-worker alert into `ops_alerts`. Proposed follow-up: a scheduled check that raises an alert when no research heartbeat has arrived for 30 minutes while research is resumed.
 
 ## 7. Deployment plan
-1. Merge PR #48 to `main`. That deploys **staging only** and applies migration 0050 on staging.
+1. Merge PR #48 to `main`. That deploys **staging only** and applies migration 0051 on staging.
 2. Set the staging secret; install the worker on Node 1 against staging (`RUNBOOK.md` §1); resume research for one state.
 3. Run 24 hours on staging and fill in `BENCHMARK.md` §2. The Founder manually reviews 100 sealed results.
 4. With the Founder's approval: run `deploy-production.yml` for the release tag. It requires the GitHub `production` environment approval plus the Founder's release authorization. Then set the production secret.

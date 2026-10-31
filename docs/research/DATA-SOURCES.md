@@ -1,6 +1,6 @@
 # Lead research — data sources, licences and permitted use
 
-Checked on **2026-10-30** against the publishers' own pages. This is an engineering summary, **not legal advice**. Before production use, counsel should confirm it, together with the outbound-calling questions in `COMPLIANCE-GATE.md`. The platform's register (`research_sources`, migration 0050) records the same facts. A source that is off there is refused at ingest, even if a worker still has it configured.
+Checked on **2026-10-30** against the publishers' own pages. This is an engineering summary, **not legal advice**. Before production use, counsel should confirm it, together with the outbound-calling questions in `COMPLIANCE-GATE.md`. The platform's register (`research_sources`, migration 0051) records the same facts. A source that is off there is refused at ingest, even if a worker still has it configured.
 
 | Source | Role | Licence | Commercial use | Access | Status |
 |---|---|---|---|---|---|

@@ -7,7 +7,7 @@ Architecture and vocabulary: `README.md`. Licences: `DATA-SOURCES.md`. Calling r
    `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`, then
    `wrangler secret put RESEARCH_RUNNER_SECRET --env staging`.
    Production gets its own, different value, and only after the Founder approves production activation.
-2. **Migration 0050.** It is applied by the normal staging deploy, which runs only from `main`. Research starts **paused**.
+2. **Migration 0051.** It is applied by the normal staging deploy, which runs only from `main`. Research starts **paused**.
 3. **Workstation.** In an elevated PowerShell, from a checkout of this repository:
    ```powershell
    .\research-worker\windows\Install-ResearchWorker.ps1 -PlatformUrl https://<staging host> -States "MI" -Model "<pulled Ollama model>" -Install
@@ -70,7 +70,7 @@ Architecture and vocabulary: `README.md`. Licences: `DATA-SOURCES.md`. Calling r
 ## 6. Recovery and rollback
 - **Worker crash or reboot.** Nothing to do: leases expire and work resumes from `data\state.sqlite`.
 - **Corrupted state file.** Stop the task and rename `state.sqlite` to keep it. On restart everything is re-ingested. That is safe: the platform skips unchanged records and batch ids are new.
-- **Platform rollback.** Migration 0050 only adds tables. Rolling the Worker back to a version without `src/routes/research.ts` leaves the tables unused. Delete nothing.
+- **Platform rollback.** Migration 0051 only adds tables. Rolling the Worker back to a version without `src/routes/research.ts` leaves the tables unused. Delete nothing.
 - **Stop research for good.** Pause in `/staff/research`, unregister the `CrestmontResearch-Worker` task, then remove `RESEARCH_RUNNER_SECRET` from the environment.
 
 ## 7. Production activation (Founder approval gate)

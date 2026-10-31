@@ -476,7 +476,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/ai/:id": staff(rolesWith("ai.manage"), P("aiJob")),
   // AI Builds owner dashboard (src/routes/builds.ts)
   "GET /staff/builds": staff(rolesWith("builds.read")),
-  // Node 1 dispatch-to-GPU diagnostic (migration 0050)
+  // Node 1 dispatch-to-GPU diagnostic (migration 0051)
   "GET /staff/builds/diagnostics": staff(rolesWith("builds.configure")),
   "POST /staff/builds/diagnostics": staff(rolesWith("builds.configure"), undefined, act("builds.diagnostic_created")),
   "GET /staff/builds/diagnostics/:id": staff(rolesWith("builds.configure"), P("runnerDiagnostic")),
