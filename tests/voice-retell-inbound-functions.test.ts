@@ -308,3 +308,34 @@ test("[VOICE-003] a call stamped for another environment is refused before any r
   assert.equal(r.status, 409);
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM leads`), 0);
 });
+
+// ───────────── Master prompt and deploy wiring ─────────────
+
+test("[VOICE-004] the inbound master instructions pass the platform's own prompt checks and name only real functions", async () => {
+  const { INBOUND_MASTER_INSTRUCTIONS, defaultAgentPrompt, configProblems, composePrompt, VOICE_GUARDRAILS, VOICE_FUNCTIONS } = await import("../src/services/voice.ts");
+  const { RETELL_ONLY_FUNCTIONS } = await import("../src/adapters/retell.ts");
+  assert.equal(defaultAgentPrompt(), INBOUND_MASTER_INSTRUCTIONS, "/staff/voice pre-fills the master instructions");
+  assert.deepEqual(configProblems(INBOUND_MASTER_INSTRUCTIONS), [], "no invented prices, no guardrail contradictions, ≤ 8,000 characters");
+  assert.ok(composePrompt(INBOUND_MASTER_INSTRUCTIONS).startsWith(VOICE_GUARDRAILS), "activatable: guardrails come first");
+  assert.doesNotMatch(INBOUND_MASTER_INSTRUCTIONS, /\$\s?\d/, "prices come only from get_packages_pricing");
+  for (const n of INBOUND_FUNCTIONS) assert.match(INBOUND_MASTER_INSTRUCTIONS, new RegExp(`\\b${n}\\b`), `${n} is used by the prompt`);
+  const known = new Set<string>([...VOICE_FUNCTIONS, ...RETELL_ONLY_FUNCTIONS]);
+  const fields = new Set(["receptionist_mode", "link_sent", "scheduling_available", "start_time", "preferred_date", "reminder_call_ok", "confirmation_code",
+    "already_booked", "next_step", "transfer_available", "package_information", "consultation_details", "business_hours"]);
+  const unknown = [...INBOUND_MASTER_INSTRUCTIONS.matchAll(/\b([a-z]+(?:_[a-z]+)+)\b/g)].map((m) => m[1]).filter((n) => !known.has(n) && !fields.has(n));
+  assert.deepEqual([...new Set(unknown)], [], "every snake_case name is a deployed function, a documented response field or a dynamic variable");
+  assert.match(VOICE_GUARDRAILS, /create_support_ticket/);
+  assert.match(VOICE_GUARDRAILS, /get_packages_pricing/);
+});
+
+test("[INFRA-005] [SEC-007] the staging deploy puts RETELL_API_KEY only when the staging environment secret is provided, change-aware", async () => {
+  const { readFileSync } = await import("node:fs");
+  const wf = readFileSync(".github/workflows/deploy-staging.yml", "utf8");
+  const i = wf.indexOf("- name: Retell API key (only when the Founder has provided one)");
+  assert.ok(i > 0);
+  const step = wf.slice(i, wf.indexOf("- name:", i + 10));
+  assert.match(step, /RETELL_KEY: \$\{\{ secrets\.RETELL_API_KEY \}\}/);
+  assert.match(step, /if \[ -n "\$RETELL_KEY" \]; then printf '%s' "\$RETELL_KEY" \| node --no-warnings scripts\/staging-secrets\.ts put RETELL_API_KEY/);
+  assert.doesNotMatch(step, /echo[^\n]*\$RETELL_KEY/, "never echoes the key");
+  assert.ok(wf.indexOf("Deploy Worker (staging") < i, "after the Worker exists");
+});

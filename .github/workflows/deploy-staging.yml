@@ -271,6 +271,20 @@ jobs:
           if [ -n "$RUNNER_SECRET" ]; then printf '%s' "$RUNNER_SECRET" | node --no-warnings scripts/staging-secrets.ts put BUILD_RUNNER_SECRET
           else echo "BUILD_RUNNER_SECRET not provided: AI Builds execution stays unavailable on staging (builds wait in the queue)."; fi
 
+      # Inbound AI receptionist (docs/voice/RETELL-INBOUND-FUNCTION-REGISTER.md): every Retell route fails closed (401) until the
+      # Worker has RETELL_API_KEY. The Founder adds the webhook-badge key of the STAGING Retell workspace as the `staging`
+      # environment secret RETELL_API_KEY; this step puts it only when it changed (rollback-safe). Absent → nothing is touched,
+      # so a key already set on the Worker by hand (wrangler CLI) is never overwritten or removed.
+      - name: Retell API key (only when the Founder has provided one)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          RETELL_KEY: ${{ secrets.RETELL_API_KEY }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$RETELL_KEY" ]; then printf '%s' "$RETELL_KEY" | node --no-warnings scripts/staging-secrets.ts put RETELL_API_KEY
+          else echo "RETELL_API_KEY not provided as a staging environment secret: the Worker's existing value (if any) is left as is; without one every Retell route answers 401."; fi
+
       - name: Seed sample data and demo accounts (first run or on request)
         id: seed
         env:
