@@ -15,7 +15,8 @@ import path from "node:path";
 import { RUNNER_DIR, REPO_ROOT, tmp } from "./helpers.ts";
 
 const WIN = path.join(RUNNER_DIR, "windows");
-const read = (f: string) => readFileSync(path.join(WIN, f), "utf8");
+// Windows checkouts may use CRLF (core.autocrlf); the static checks compare LF text.
+const read = (f: string) => readFileSync(path.join(WIN, f), "utf8").replace(/\r\n/g, "\n");
 const MODEL_A = "qwen3.8:27b-q4_K_M";
 const MODEL_B = "qwen3.6:35b-a3b-q4_K_M";
 
@@ -219,7 +220,7 @@ test("[AIB-RUNNER] installer: Ollama detection uses OllamaProbe.ps1, never the l
 });
 
 test("[AIB-RUNNER] Node 1 install command: verified dual-model tags, one slot, no auto-start, Ollama preserved, from main", () => {
-  const doc = readFileSync(path.join(REPO_ROOT, "docs", "ai-builds", "NODE1-INSTALL.md"), "utf8");
+  const doc = readFileSync(path.join(REPO_ROOT, "docs", "ai-builds", "NODE1-INSTALL.md"), "utf8").replace(/\r\n/g, "\n");
   const install = read("Install-CrestmontRunner.ps1");
   const cmd = doc.slice(doc.indexOf("**E. Install**"), doc.indexOf("## 5. What the installer changes"));
   for (const flag of [`-ModelA ${MODEL_A}`, `-ModelB ${MODEL_B}`, "-Slots 1", "-GpuConcurrency 1", "-PreserveOllamaConfig", "-NoAutoStart", "-NoStart"]) {
