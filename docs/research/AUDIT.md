@@ -67,16 +67,16 @@ These are provisional criteria from the Founder:
 
 ## Results (automated; per-lead tables are sealed, aggregates only)
 
-| | Baseline: run 41145776120 (audit 41152469504) | After fixes 1–3: run 41153598151 at `980be67` (audit 41156571952) |
-|---|---|---|
-| Leads audited | 159 | 328 |
-| A / B / C / D | 17 / 45 / 89 / 8 | 158 / 138 / 3 / 29 |
-| A + B | 39.0% | 90.2% |
-| Material claims supported (of tested) | 68% (17 of 25) | 86.2% (187 of 217) |
-| False "no website" | 7 | 2 |
-| Duplicates among promoted | 0 | 4 |
-| False-positive rate (D) | 5.0% | 8.8% |
-| Gate | fails | fails (claims < 90%, duplicates > 0) |
+| | Baseline: run 41145776120 (audit 41152469504) | After fixes 1–3: run 41153598151 at `980be67` (audit 41156571952) | After fixes 1–6: run 41158326197 at `0267671` (audit 41160629448) |
+|---|---|---|---|
+| Leads audited | 159 | 328 | 284 |
+| A / B / C / D | 17 / 45 / 89 / 8 | 158 / 138 / 3 / 29 | 145 / 132 / 2 / 5 |
+| A + B | 39.0% | 90.2% | 97.5% |
+| Material claims supported (of tested) | 68% (17 of 25) | 86.2% (187 of 217) | 93.4% (169 of 181); 128 not testable |
+| False "no website" | 7 | 2 | 3 |
+| Duplicates among promoted | 0 | 4 | 0 (54 records held for a person) |
+| False-positive rate (D) | 5.0% | 8.8% | 1.8% |
+| Gate | fails | fails (claims < 90%, duplicates > 0) | **passes** |
 
 Root causes fixed, each with a regression test (no threshold was changed):
 1. DNS-dead listed domains were recorded as "robots.txt disallows" (`a2a54e6`).
@@ -85,5 +85,7 @@ Root causes fixed, each with a regression test (no threshold was changed):
 4. A dead listing was called "broken" even when the business had moved to a new domain (`89dfa87`).
 5. 20 of 35 timeout claims did not reproduce: a single timeout is now confirmed with a patient 45 s request (`0267671`).
 6. Records of one business with different numbers shared a website or name + street and became two leads: the later record is now held for a person (`0267671`). The live sample promotes only `qualified` records unattended; `review` records are counted, not promoted.
+
+Caveats on the passing result: 123 of the 132 B leads are "no website found" records. Their absence of a website survived the falsification probe and their existence is independently corroborated, but absence cannot be proven, so that claim is counted as not testable (never as supported) and these leads are B with low confidence. Wrong website matches: 4. False "no website": 3.
 
 The audit is automated. Commercial fit (budget, intent, decision-maker) is never inferred and needs a person.
