@@ -7,9 +7,10 @@
 //   in_sync        the Retell LLM's general_prompt equals the active version exactly
 //   drift          it differs (someone edited it in the Retell dashboard, or a push did not stick)
 //   failed         a Retell call failed (status and sanitised message recorded)
-//   not_configured nothing was sent: RETELL_API_KEY not set, no agent id recorded, or no active version
+//   not_configured nothing was sent: RETELL_INBOUND_API_KEY not set, no agent id recorded, or no active version
 // No outcome is ever reported as success unless Retell's own read-back matches. Drift and failures notify
 // the Owners and appear on /staff/voice and the monitoring page.
+import { retellKey } from "../adapters/retell-workspaces.ts";
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { sha256Hex } from "../lib/crypto.ts";
@@ -23,11 +24,11 @@ export type PromptSyncStatus = "in_sync" | "drift" | "failed" | "not_configured"
 export interface PromptSyncResult { status: PromptSyncStatus; detail: string; version: number | null }
 export interface PromptSyncRow { status: PromptSyncStatus; mode: "push" | "check"; detail: string; config_version: number | null; agent_id: string | null; llm_id: string | null; llm_version: number | null; created_at: string }
 
-export const PROVIDER_NOT_CONFIGURED = "Retell provider not configured: RETELL_API_KEY is not set in this environment. Nothing was sent to Retell.";
+export const PROVIDER_NOT_CONFIGURED = "Retell provider not configured: RETELL_INBOUND_API_KEY is not set in this environment (the receptionist workspace key). Nothing was sent to Retell.";
 
 const short = async (s: string) => (await sha256Hex(s)).slice(0, 16);
 
-export async function syncPrompt(d: { db: Db; env: Pick<Env, "RETELL_API_KEY" | "ENVIRONMENT">; fetch: typeof fetch; userId: string | null; mode: "push" | "check" }): Promise<PromptSyncResult> {
+export async function syncPrompt(d: { db: Db; env: Pick<Env, "RETELL_INBOUND_API_KEY" | "ENVIRONMENT">; fetch: typeof fetch; userId: string | null; mode: "push" | "check" }): Promise<PromptSyncResult> {
   const active = await d.db.prepare(`SELECT version, prompt_text FROM voice_agent_configs WHERE active = 1`).first<{ version: number; prompt_text: string }>();
   const cfg = await loadVoiceConfig(d.db);
   const agentId = cfg.inbound.agent_id ?? cfg.outbound.agent_id;
@@ -42,10 +43,11 @@ export async function syncPrompt(d: { db: Db; env: Pick<Env, "RETELL_API_KEY" | 
     }
     return { status, detail, version: active?.version ?? null };
   };
-  if (!d.env.RETELL_API_KEY) return record("not_configured", PROVIDER_NOT_CONFIGURED);
+  // The receptionist agent lives in the inbound workspace: only that key is ever used here (retell-workspaces.ts).
+  const key = retellKey(d.env, "inbound");
+  if (!key) return record("not_configured", PROVIDER_NOT_CONFIGURED);
   if (!active) return record("not_configured", "No configuration version is active. Activate one first; nothing was sent to Retell.");
   if (!agentId) return record("not_configured", "No Retell agent id is recorded for this environment (Operations → inbound agent id). Nothing was sent to Retell.");
-  const key = d.env.RETELL_API_KEY;
   const expected = await short(active.prompt_text);
   const agent = await getRetellAgent({ apiKey: key, fetch: d.fetch, agentId });
   if (!agent.ok) return record("failed", `Reading agent ${agentId}: ${agent.error}`, { expected });

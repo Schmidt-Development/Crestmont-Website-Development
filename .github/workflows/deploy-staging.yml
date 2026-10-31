@@ -271,6 +271,23 @@ jobs:
           if [ -n "$RUNNER_SECRET" ]; then printf '%s' "$RUNNER_SECRET" | node --no-warnings scripts/staging-secrets.ts put BUILD_RUNNER_SECRET
           else echo "BUILD_RUNNER_SECRET not provided: AI Builds execution stays unavailable on staging (builds wait in the queue)."; fi
 
+      # Retell, two workspaces (src/adapters/retell-workspaces.ts): RETELL_INBOUND_API_KEY (receptionist) and
+      # RETELL_OUTBOUND_API_KEY (sales agent + Self-Improvement Engine). Keys already set on the Worker by hand are kept:
+      # a key is put only when the matching `staging` environment secret exists AND its value changed (rollback-safe);
+      # an absent GitHub secret touches nothing. Without RETELL_INBOUND_API_KEY the receptionist routes answer 401.
+      - name: Retell workspace keys (only those the Founder has provided)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          RETELL_INBOUND_KEY: ${{ secrets.RETELL_INBOUND_API_KEY }}
+          RETELL_OUTBOUND_KEY: ${{ secrets.RETELL_OUTBOUND_API_KEY }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$RETELL_INBOUND_KEY" ]; then printf '%s' "$RETELL_INBOUND_KEY" | node --no-warnings scripts/staging-secrets.ts put RETELL_INBOUND_API_KEY
+          else echo "RETELL_INBOUND_API_KEY not provided as a staging environment secret: the Worker's existing value (if any) is kept."; fi
+          if [ -n "$RETELL_OUTBOUND_KEY" ]; then printf '%s' "$RETELL_OUTBOUND_KEY" | node --no-warnings scripts/staging-secrets.ts put RETELL_OUTBOUND_API_KEY
+          else echo "RETELL_OUTBOUND_API_KEY not provided as a staging environment secret: the Worker's existing value (if any) is kept."; fi
+
       - name: Seed sample data and demo accounts (first run or on request)
         id: seed
         env:

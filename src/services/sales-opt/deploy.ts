@@ -15,6 +15,7 @@
 //
 // Production additionally requires: the environment is production, SALES_OPT_PRODUCTION=on, the Founder's
 // activation switch, a Founder-approved version, and a prior verified staging deployment of that same version.
+import { retellKey } from "../../adapters/retell-workspaces.ts";
 import type { Db } from "../../lib/db.ts";
 import { newId, nowIso } from "../../lib/db.ts";
 import { sha256Hex } from "../../lib/crypto.ts";
@@ -29,7 +30,7 @@ export const PRODUCTION_FLAG = "SALES_OPT_PRODUCTION";
 export const MAX_DEPLOYS_PER_DAY = 6;
 export const MIN_GAP_MS = 60_000;
 
-export interface DeployDeps { db: Db; env: Pick<Env, "RETELL_API_KEY" | "ENVIRONMENT" | "SALES_OPT_PRODUCTION">; fetch: typeof fetch; now?: () => Date }
+export interface DeployDeps { db: Db; env: Pick<Env, "RETELL_OUTBOUND_API_KEY" | "ENVIRONMENT" | "SALES_OPT_PRODUCTION">; fetch: typeof fetch; now?: () => Date }
 export interface DeployRequest { stage: Stage; versionId: string; expectedCurrentVersionId: string | null; kind: "deploy" | "rollback"; userId: string | null; reason: string }
 export interface DeployResult { id: string; status: "verified" | "failed" | "aborted"; detail: string; published: boolean | null }
 
@@ -46,7 +47,7 @@ async function protectedLlmIds(d: DeployDeps, stage: Stage): Promise<{ ids: Map<
   const agents: [string, string][] = [...(await receptionistAgentIds(d.db))].map((a) => [a, "the AI receptionist"]);
   if (other) agents.push([other.agent_id, `the ${other.stage} sales agent`]);
   for (const [agentId, who] of agents) {
-    const a = await getRetellAgent({ apiKey: d.env.RETELL_API_KEY!, fetch: d.fetch, agentId });
+    const a = await getRetellAgent({ apiKey: retellKey(d.env, "outbound")!, fetch: d.fetch, agentId });
     if (!a.ok) {
       // A receptionist/other agent that cannot be read cannot be proven separate.
       if (a.status === 404) continue;
@@ -76,7 +77,7 @@ export async function retellState(d: DeployDeps, stage: Stage, llmId: string): P
   // A verified deployment counts only for the LLM it was written to (the stage may have been re-registered since).
   const dep = await d.db.prepare(`SELECT version_id, llm_id FROM so_deployments WHERE stage = ? AND status = 'verified' ORDER BY created_at DESC, rowid DESC LIMIT 1`).bind(stage).first<{ version_id: string; llm_id: string | null }>();
   const cur = dep && dep.llm_id === llmId ? await getVersion(d.db, dep.version_id) : null;
-  const back = await getRetellLlm({ apiKey: d.env.RETELL_API_KEY!, fetch: d.fetch, llmId });
+  const back = await getRetellLlm({ apiKey: retellKey(d.env, "outbound")!, fetch: d.fetch, llmId });
   if (!back.ok) return { llmId, llmVersion: null, published: null, draft: "unreadable", verifiedVersionSeq: cur?.seq ?? null, detail: back.error };
   const text = typeof back.body.general_prompt === "string" ? back.body.general_prompt : "";
   return {
@@ -98,7 +99,7 @@ export async function productionGate(db: Db, env: DeployDeps["env"]): Promise<Pr
   if (env.ENVIRONMENT !== "production") reasons.push(`this is the ${env.ENVIRONMENT} environment; production deployments run only from production`);
   if (env.SALES_OPT_PRODUCTION !== "on") reasons.push(`${PRODUCTION_FLAG} is not "on"`);
   if (!(await loadControl(db)).productionActivated) reasons.push("the Founder has not activated production deployment");
-  if (!env.RETELL_API_KEY) reasons.push("RETELL_API_KEY is not set");
+  if (!retellKey(env, "outbound")) reasons.push("RETELL_OUTBOUND_API_KEY is not set");
   const t = (await listTargets(db)).production;
   if (!t) reasons.push("no production sales agent is registered");
   else if (t.engine_type !== "retell-llm" || !t.llm_id) reasons.push("the production sales agent has not been verified as a Retell LLM agent");
@@ -113,9 +114,9 @@ export async function verifyTarget(d: DeployDeps, stage: Stage, userId: string |
     await audit(d.db, { actorUserId: userId, actorKind: userId ? "user" : "system", action: "salesopt.target_verified", subjectType: "so_target", subjectId: stage, details: { ok, engine } });
     return { ok, detail };
   };
-  if (!d.env.RETELL_API_KEY) return done(false, "RETELL_API_KEY is not set in this environment. Nothing was sent to Retell.", null);
+  if (!retellKey(d.env, "outbound")) return done(false, "RETELL_OUTBOUND_API_KEY (the sales workspace key) is not set in this environment. Nothing was sent to Retell.", null);
   if ((await receptionistAgentIds(d.db)).has(t.agent_id)) return done(false, "This agent id is now used by the AI receptionist; refusing.", null);
-  const a = await getRetellAgent({ apiKey: d.env.RETELL_API_KEY, fetch: d.fetch, agentId: t.agent_id });
+  const a = await getRetellAgent({ apiKey: retellKey(d.env, "outbound")!, fetch: d.fetch, agentId: t.agent_id });
   if (!a.ok) return done(false, `Reading agent: ${a.error}`, null);
   const eng = a.body.response_engine ?? {};
   const type = typeof eng.type === "string" ? eng.type.slice(0, 30) : "unknown";
@@ -142,7 +143,7 @@ export async function deploy(d: DeployDeps, r: DeployRequest): Promise<DeployRes
   const targets = await listTargets(db);
   const target = targets[r.stage];
   if (!target) throw new SalesOptError(`No ${r.stage} sales agent is registered.`, 409);
-  if (!d.env.RETELL_API_KEY) throw new SalesOptError("RETELL_API_KEY is not set in this environment. Nothing was sent to Retell.", 409);
+  if (!retellKey(d.env, "outbound")) throw new SalesOptError("RETELL_OUTBOUND_API_KEY (the sales workspace key) is not set in this environment. Nothing was sent to Retell.", 409);
   if ((await receptionistAgentIds(db)).has(target.agent_id)) throw new SalesOptError("The registered sales agent is the AI receptionist. Refusing to change it.", 409);
   if (r.stage === "staging" && !["eval_passed", "approved"].includes(v.status) && r.kind === "deploy") throw new SalesOptError("Only a version that passed evaluation can be deployed to staging.", 409);
   if (r.stage === "production") {
@@ -175,7 +176,8 @@ export async function deploy(d: DeployDeps, r: DeployRequest): Promise<DeployRes
     if (/UNIQUE/.test((e as Error).message)) throw new SalesOptError(`Another ${r.stage} deployment is in progress.`, 409);
     throw e;
   }
-  const key = d.env.RETELL_API_KEY;
+  // The sales agent and its Self-Improvement Engine live in the outbound workspace: only that key is used.
+  const key = retellKey(d.env, "outbound")!; // checked above: no key → refused before any lock
   const finish = async (status: DeployResult["status"], detail: string, extra: Partial<{ llm: string; snapSha: string; snap: string; snapVer: number | null; readback: string; verAfter: number | null; published: boolean | null }> = {}): Promise<DeployResult> => {
     await db.prepare(`UPDATE so_deployments SET status = ?, detail = ?, llm_id = COALESCE(?, llm_id), snapshot_prompt_sha256 = COALESCE(?, snapshot_prompt_sha256), snapshot_prompt = COALESCE(?, snapshot_prompt),
         snapshot_retell_version = COALESCE(?, snapshot_retell_version), readback_sha256 = ?, retell_version_after = ?, published = ?, completed_at = ? WHERE id = ?`)

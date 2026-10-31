@@ -15,19 +15,39 @@ import { requireStaff } from "../app/app.ts";
 import { textarea, button, alert, badge, table, emptyState, pagination, pageParam, pageHead, linkButton, input, csrf, select } from "../ui/components.ts";
 import { staffPage } from "./crm.ts";
 import { readBody } from "./api.ts";
-import { handleVoiceEvent } from "../services/voice.ts";
-import { verifyRetellSignature, translateRetellEvent, translateRetellFunction, translateRetellInbound, RetellAuthError, RetellPayloadError, type Translated, type RetellCtx } from "../adapters/retell.ts";
+import { handleVoiceEvent, VOICE_FUNCTIONS } from "../services/voice.ts";
+import { translateRetellEvent, translateRetellFunction, translateRetellInbound, RetellAuthError, RetellPayloadError, type Translated, type RetellCtx } from "../adapters/retell.ts";
 import * as mail from "../services/email-events.ts";
 import { registerReconciliation } from "./reconciliation.ts";
+import { verifyRetellWorkspace, type RetellWorkspace } from "../adapters/retell-workspaces.ts";
 import { ingestSalesEvent } from "../services/sales-opt/ingest.ts";
 import { audit } from "../services/security.ts";
 
 const q = (ctx: AppContext, k: string, max = 120) => (ctx.url.searchParams.get(k) ?? "").trim().slice(0, max);
 
-async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: string, rc: RetellCtx) => Promise<Translated>, fn: boolean): Promise<Response> {
+// Which Retell workspace may call each route (retell-workspaces.ts). The workspace is proven by the signature itself.
+// Call events: both (the sales agent's events feed the sales optimizer through this route). Functions and the inbound-call
+// webhook: the receptionist's (inbound) workspace only.
+// Functions: both workspaces may call the endpoint (the sales agent records consent with record_consent), but every
+// receptionist function except record_consent is refused unless the inbound workspace signed the request.
+const EVENT_WORKSPACES = ["inbound", "outbound"] as const;
+const FUNCTION_WORKSPACES = ["inbound", "outbound"] as const;
+const RECEPTIONIST_ONLY = ["inbound"] as const;
+const RECEPTIONIST_FUNCTIONS = new Set<string>(VOICE_FUNCTIONS);
+
+async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: string, rc: RetellCtx) => Promise<Translated>, fn: boolean, workspaces: readonly RetellWorkspace[]): Promise<Response> {
   const raw = await readBody(ctx.req);
   try {
-    await verifyRetellSignature(ctx.env.RETELL_API_KEY, raw, ctx.req.headers.get("x-retell-signature"));
+    const ws = await verifyRetellWorkspace(ctx.env, workspaces, raw, ctx.req.headers.get("x-retell-signature"));
+    if (fn && ws === "outbound") {
+      // The body is authentic (the outbound key verified it); its function name decides whether that workspace may run it.
+      let name: unknown;
+      try { name = (JSON.parse(raw) as { name?: unknown }).name; } catch { /* invalid JSON is answered below */ }
+      if (typeof name === "string" && RECEPTIONIST_FUNCTIONS.has(name)) {
+        await audit(ctx.db, { actorKind: "webhook", action: "voice.wrong_workspace", subjectType: "webhook", subjectId: "retell", details: { function: name.slice(0, 60), workspace: ws } });
+        return jsonResponse(ctx, 403, { error: "This function belongs to the receptionist's Retell workspace.", result: { error: "This function isn't available on this line. Apologise and offer a callback." } });
+      }
+    }
   } catch (e) {
     if (e instanceof RetellAuthError) throw new HttpError(401, e.message);
     throw e;
@@ -58,9 +78,9 @@ async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: st
 }
 
 export function register(r: Router): void {
-  r.post("/api/webhooks/retell", (ctx) => retell(ctx, translateRetellEvent, false));
-  r.post("/api/webhooks/retell/functions", (ctx) => retell(ctx, translateRetellFunction, true));
-  r.post("/api/webhooks/retell/inbound", (ctx) => retell(ctx, translateRetellInbound, false));
+  r.post("/api/webhooks/retell", (ctx) => retell(ctx, translateRetellEvent, false, EVENT_WORKSPACES));
+  r.post("/api/webhooks/retell/functions", (ctx) => retell(ctx, translateRetellFunction, true, FUNCTION_WORKSPACES));
+  r.post("/api/webhooks/retell/inbound", (ctx) => retell(ctx, translateRetellInbound, false, RECEPTIONIST_ONLY));
 
   r.post("/api/webhooks/resend", async (ctx) => {
     const raw = await readBody(ctx.req);

@@ -8,6 +8,7 @@
 //    immediately before dialling, not only when the request was created.
 //  - Opt-outs (the caller says "don't call me", Retell's user_requested_dnc, or staff) go on voice_dnc and
 //    block every future request, and the request is cancelled.
+import { retellKey } from "../adapters/retell-workspaces.ts";
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import type { Env } from "../app/context.ts";
@@ -21,13 +22,14 @@ import { reservePhone, releasePhone, markDialing, recoverExpiredLeases, recordPh
 export const OUTBOUND_ENV_FLAG = "RETELL_OUTBOUND";
 
 export interface OutboundGate { enabled: boolean; reasons: string[] }
-export function outboundGate(env: Pick<Env, "RETELL_API_KEY" | "RETELL_OUTBOUND" | "ENVIRONMENT">, cfg: VoiceConfig): OutboundGate {
+export function outboundGate(env: Pick<Env, "RETELL_INBOUND_API_KEY" | "RETELL_OUTBOUND" | "ENVIRONMENT">, cfg: VoiceConfig): OutboundGate {
   const reasons: string[] = [];
   if (env.RETELL_OUTBOUND !== "on") reasons.push(`${OUTBOUND_ENV_FLAG} is not "on" in this environment`);
   if (!cfg.outbound.enabled) reasons.push("Outbound calling is off in receptionist settings");
   if (!cfg.outbound.from_number) reasons.push("No approved outbound caller number");
   if (!cfg.outbound.agent_id) reasons.push("No outbound agent id");
-  if (!env.RETELL_API_KEY) reasons.push("RETELL_API_KEY is not set");
+  // Receptionist follow-up calls are placed by the receptionist agent, which lives in the inbound workspace.
+  if (!retellKey(env, "inbound")) reasons.push("RETELL_INBOUND_API_KEY is not set");
   return { enabled: reasons.length === 0, reasons };
 }
 
@@ -173,7 +175,7 @@ const MAX_TRANSIENT_FAILURES = 3;
 /** A number's lease outlives the dial it protects; stale-dial recovery (above) releases it, expiry is the backstop. */
 export const DIAL_LEASE_MS = STALE_DIALING_MS + 30 * 60_000;
 
-export interface OutboundDeps { db: Db; env: Pick<Env, "RETELL_API_KEY" | "RETELL_OUTBOUND" | "ENVIRONMENT">; fetch: typeof fetch; now?: () => Date; sleep?: (ms: number) => Promise<void> }
+export interface OutboundDeps { db: Db; env: Pick<Env, "RETELL_INBOUND_API_KEY" | "RETELL_OUTBOUND" | "ENVIRONMENT">; fetch: typeof fetch; now?: () => Date; sleep?: (ms: number) => Promise<void> }
 
 async function failToHuman(db: Db, row: OutboundRow, status: "failed" | "no_answer" | "blocked", detail: string) {
   await db.prepare(`UPDATE voice_outbound_requests SET status = ?, status_detail = ?, next_attempt_at = NULL, updated_at = ? WHERE id = ?`).bind(status, detail.slice(0, 500), nowIso(), row.id).run();
@@ -228,7 +230,7 @@ export async function processOutboundQueue(d: OutboundDeps): Promise<{ detail: s
       .bind(attempt, nowIso(), row.id, row.attempts).run();
     if (claim.meta.changes !== 1) { await releasePhone(d.db, row.phone_e164, ref, "claim_lost"); continue; }
     const res = await createRetellPhoneCall({
-      apiKey: d.env.RETELL_API_KEY, fetch: d.fetch, sleep: d.sleep,
+      apiKey: retellKey(d.env, "inbound"), fetch: d.fetch, sleep: d.sleep,
       body: {
         from_number: cfg.outbound.from_number!, to_number: row.phone_e164, override_agent_id: cfg.outbound.agent_id!,
         idempotency_key: `${row.idempotency_key}_a${attempt}`, honor_internal_dnc: true,

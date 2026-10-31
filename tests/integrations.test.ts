@@ -32,7 +32,7 @@ async function staffClient(t: { db: Env["DB"]; client: () => TestClient }, role:
 // ───────────── Retell (VOICE-003) ─────────────
 
 async function retellApp(extra: Partial<Env> = {}) {
-  const t = await createTestApp({ RETELL_API_KEY: RETELL_KEY, ...extra });
+  const t = await createTestApp({ RETELL_INBOUND_API_KEY: RETELL_KEY, ...extra });
   const c = t.client();
   const post = async (path: string, payload: unknown, opts: { header?: string | null; key?: string; ms?: number } = {}) => {
     const raw = JSON.stringify(payload);
@@ -405,10 +405,10 @@ test("[VOICE-003] [EMAIL-003] retell and resend_webhooks integrations are not_co
   const rows = await refreshIntegrationHealth({ db: t.db, env: t.env, storage: null });
   assert.equal(rows.find((r) => r.integration === "retell")!.status, "not_configured");
   assert.equal(rows.find((r) => r.integration === "resend_webhooks")!.status, "not_configured");
-  const rows2 = await refreshIntegrationHealth({ db: t.db, env: { ...t.env, RETELL_API_KEY: RETELL_KEY, RESEND_WEBHOOK_SECRET: WHSEC }, storage: null });
+  const rows2 = await refreshIntegrationHealth({ db: t.db, env: { ...t.env, RETELL_INBOUND_API_KEY: RETELL_KEY, RESEND_WEBHOOK_SECRET: WHSEC }, storage: null });
   assert.equal(rows2.find((r) => r.integration === "retell")!.status, "configured_unverified");
   assert.equal(rows2.find((r) => r.integration === "resend_webhooks")!.status, "configured_unverified");
-  const p = secretPresence({ ...t.env, RETELL_API_KEY: RETELL_KEY });
-  assert.equal(p.find((x) => x.name === "RETELL_API_KEY")!.present, true);
+  const p = secretPresence({ ...t.env, RETELL_INBOUND_API_KEY: RETELL_KEY });
+  assert.equal(p.find((x) => x.name === "RETELL_INBOUND_API_KEY")!.present, true);
   assert.equal(p.find((x) => x.name === "RESEND_WEBHOOK_SECRET")!.present, false);
 });

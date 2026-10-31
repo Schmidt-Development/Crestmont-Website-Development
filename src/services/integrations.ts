@@ -3,6 +3,7 @@
 // to the provider. Nothing is ever marked verified without a successful call; a probe failure is
 // recorded as "failing" with the provider's error. Secrets are never stored or displayed — only
 // a short SHA-256 fingerprint, used to notice when a key changes so stale verification is dropped.
+import { retellKey, keysAmbiguous } from "../adapters/retell-workspaces.ts";
 import { STRIPE_API_VERSION, SUPPORTED_WEBHOOK_API_VERSIONS } from "../adapters/payments.ts";
 import { paymentsMode, keyMode } from "../domain/payments-mode.ts";
 import { STRIPE_WEBHOOK_EVENTS } from "../domain/stripe-events.ts";
@@ -95,8 +96,16 @@ export async function assessConfiguration(d: IntegrationDeps, id: IntegrationId)
       }
       return { status: "configured_unverified", detail: "Turnstile keys set. Probe confirms the secret is accepted by siteverify.", fingerprint: await fp(e.TURNSTILE_SECRET), probe: true };
     case "retell":
-      if (!e.RETELL_API_KEY) return { status: "not_configured", detail: "RETELL_API_KEY is not set; /api/webhooks/retell and /api/webhooks/retell/functions reject every request. No Retell workspace exists for Crestmont yet (BLK-009).", fingerprint: null, probe: false };
-      return { status: "configured_unverified", detail: `Retell webhook key set, so signed Retell events are accepted. Unverified until a test call from the Crestmont workspace is received; there is no read-only probe. Outbound calling: ${e.RETELL_OUTBOUND === "on" ? "environment switch on (the Owner setting must also be on)" : "off (RETELL_OUTBOUND not on)"}.`, fingerprint: await fp(e.RETELL_API_KEY), probe: false };
+    {
+      // Two workspaces (src/adapters/retell-workspaces.ts). This row is the receptionist's (inbound) key; the sales
+      // workspace key is reported alongside. Only names and presence are shown, never values.
+      const inb = retellKey(e, "inbound"), out = retellKey(e, "outbound");
+      const legacy = e.RETELL_API_KEY ? " RETELL_API_KEY is also set but is no longer read; remove it to avoid confusion." : "";
+      const sales = `Sales workspace key (RETELL_OUTBOUND_API_KEY): ${out ? "set" : "not set"}.`;
+      if (keysAmbiguous(e)) return { status: "not_configured", detail: "RETELL_INBOUND_API_KEY and RETELL_OUTBOUND_API_KEY are identical, so the workspace of a request cannot be told apart: every Retell request is refused. Set each to its own workspace's key.", fingerprint: null, probe: false };
+      if (!inb) return { status: "not_configured", detail: `RETELL_INBOUND_API_KEY is not set; the receptionist's Retell routes (/api/webhooks/retell/functions, /api/webhooks/retell/inbound) reject every request. ${sales}${legacy}`, fingerprint: null, probe: false };
+      return { status: "configured_unverified", detail: `Receptionist workspace key (RETELL_INBOUND_API_KEY) set, so signed receptionist events and functions are accepted. ${sales} Unverified until a test call is received; there is no read-only probe. Follow-up calling: ${e.RETELL_OUTBOUND === "on" ? "environment switch on (the Owner setting must also be on)" : "off (RETELL_OUTBOUND not on)"}.${legacy}`, fingerprint: await fp(inb), probe: false };
+    }
     case "resend_webhooks":
       if (!e.RESEND_WEBHOOK_SECRET) return { status: "not_configured", detail: "RESEND_WEBHOOK_SECRET is not set; /api/webhooks/resend rejects every request, so bounces and complaints are not recorded.", fingerprint: null, probe: false };
       return { status: "configured_unverified", detail: "Svix signing secret set; signed Resend delivery events are accepted. Unverified until Resend delivers a real event.", fingerprint: await fp(e.RESEND_WEBHOOK_SECRET), probe: false };
@@ -274,7 +283,7 @@ export async function verifyIntegration(d: IntegrationDeps, id: IntegrationId, a
 
 /** Environment variable names the platform reads as secrets. Values are never displayed. */
 export const SECRET_NAMES = ["EVIDENCE_INGEST_SECRET", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "RESEND_API_KEY", "ANTHROPIC_API_KEY",
-  "GITHUB_TOKEN", "TURNSTILE_SECRET", "VOICE_WEBHOOK_SECRET", "RETELL_API_KEY", "RESEND_WEBHOOK_SECRET", "MFA_ENCRYPTION_KEY"] as const;
+  "GITHUB_TOKEN", "TURNSTILE_SECRET", "VOICE_WEBHOOK_SECRET", "RETELL_INBOUND_API_KEY", "RETELL_OUTBOUND_API_KEY", "RESEND_WEBHOOK_SECRET", "MFA_ENCRYPTION_KEY"] as const;
 
 export function secretPresence(env: Env): { name: string; present: boolean }[] {
   const e = env as unknown as Record<string, unknown>;

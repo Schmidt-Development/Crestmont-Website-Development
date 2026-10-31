@@ -147,7 +147,7 @@ ${diag.length ? table(diag, [
 
 <section class="card stack"><h2 class="card__title">Integration health</h2>
 ${dl([
-  ["Retell API key", ctx.env.RETELL_API_KEY ? "Set in this environment" : "Not set — nothing is sent to Retell"],
+  ["Retell sales workspace key (RETELL_OUTBOUND_API_KEY)", ctx.env.RETELL_OUTBOUND_API_KEY ? "Set in this environment" : "Not set — nothing is sent to Retell"],
   ["Production deployment gate", gate.open ? "Open" : `Closed: ${gate.reasons.join("; ")}`],
   ["Self-hosted model jobs (30 days)", jobs.length ? jobs.map((j) => `${label(j.status)} ${j.n}`).join(" · ") : "None yet (needs the build runner with AI drafts enabled)"],
   ["Protected policy", `${SALES_POLICY_VERSION} (prices generated from the catalog)`],

@@ -2,7 +2,16 @@
 
 Branch `claude/retell-inbound-8-functions`. Implementation: `src/services/voice.ts` (`INBOUND_FUNCTIONS`), migration `0055_voice_inbound_functions.sql`, template `voice_followup` (`src/services/mailer.ts`). Tests: `tests/voice-retell-inbound-functions.test.ts` (signed fixtures only, not live verification).
 
-**Status of all eight: NOT YET DEPLOYED.** Staging deploys only from `main` (`deploy-staging.yml`). After this PR is merged, the endpoint below serves all eight names. Until then, staging answers `422` ("unknown function") for these names.
+**Status:** deployed to staging with PR #68 (merge `d7a8a15`).
+
+**Two workspaces, two keys** (`src/adapters/retell-workspaces.ts`):
+- `RETELL_INBOUND_API_KEY` belongs to the receptionist's workspace. It covers the function and inbound-call webhooks, receptionist events, receptionist prompt sync and receptionist callbacks.
+- `RETELL_OUTBOUND_API_KEY` belongs to the sales agent's workspace. It covers the sales agent's events and `record_consent` calls, plus the sales Self-Improvement Engine.
+- Which workspace sent a request is decided only by which key's signature verifies.
+- There is no fallback between keys. The legacy `RETELL_API_KEY` is never read.
+- If the two keys are identical, every request is refused.
+
+Without `RETELL_INBOUND_API_KEY`, the receptionist routes answer `401 Retell webhook key not configured (RETELL_INBOUND_API_KEY)`.
 
 ## Settings shared by all eight functions
 
@@ -18,7 +27,7 @@ Branch `claude/retell-inbound-8-functions`. Implementation: `src/services/voice.
 | Response variables | None required. Retell passes the JSON response to the LLM. |
 | Execution mode | Wait for completion (none of these run in the background) |
 
-**Secret:** Crestmont verifies the signature with the `RETELL_API_KEY` Worker secret: `wrangler secret put RETELL_API_KEY --env staging`, with the staging workspace's webhook-badge API key as the value. Never paste it into Retell fields, the repo, chat or tickets. Without it, every request gets `401`.
+**Secret:** Crestmont verifies the signature with the `RETELL_INBOUND_API_KEY` Worker secret: the receptionist workspace's API key that has the webhook badge. Set it either on the Worker directly (`wrangler secret put RETELL_INBOUND_API_KEY --env staging`) or as the GitHub `staging` environment secret of the same name; the deploy puts it only when it changed. Never paste it into Retell fields, the repo, chat or tickets.
 
 ## Functions
 
@@ -115,3 +124,31 @@ Output: `email_sent` (bool), `email_status`, `template`, `reason`, `message`. Li
 - In voicemail mode (no Owner budget, or budget reached), all eight are refused.
 - Card numbers and SSNs are redacted from every argument before validation and storage.
 - Write functions replay their stored result on an identical retry. Read-only answers are always fresh.
+
+## Webhooks (agent level)
+
+| Retell setting | Value |
+|---|---|
+| Agent → Webhook URL | `https://crestmont-platform-staging.partners-df4.workers.dev/api/webhooks/retell` |
+| Events | `call_started`, `call_ended`, `call_analyzed`, `transfer_started`, `transfer_bridged`, `transfer_cancelled`, `transfer_ended` |
+| Phone number → Inbound Webhook URL | `https://crestmont-platform-staging.partners-df4.workers.dev/api/webhooks/retell/inbound` |
+| Auth | `X-Retell-Signature` signed with the webhook-badge API key. There are no custom headers. |
+
+## Existing functions the master prompt also uses
+
+These are on the same URL with the same settings. Their JSON is in `RETELL-INTEGRATION.md` §6:
+- `record_consent`
+- `request_callback`
+- `escalate`
+- `check_transfer_availability`
+- `get_business_hours`
+- `record_opt_out`
+- `lookup_consultation`
+- `reschedule_consultation`
+- `cancel_consultation`
+
+The built-in tools are Transfer Call (destination `{{transfer_number}}`) and End Call.
+
+## Master prompt
+
+The instructions are `INBOUND_MASTER_INSTRUCTIONS` in `src/services/voice.ts`. `/staff/voice` → Create a new version pre-fills them. Activating the version pushes guardrails + instructions to the agent's Retell LLM `general_prompt` and reads it back. Do not edit the prompt in the Retell dashboard: activation overwrites it, and the drift check reports any difference.

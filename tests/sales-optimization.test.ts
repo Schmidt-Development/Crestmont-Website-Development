@@ -32,7 +32,7 @@ const one = async <T>(db: Db, sql: string, ...b: unknown[]) => (await db.prepare
 const count = async (db: Db, sql: string, ...b: unknown[]) => (await one<{ n: number }>(db, sql, ...b)).n;
 
 async function app(extra: Partial<Env> = {}, fetchImpl?: typeof fetch) {
-  const t = await createTestApp({ RETELL_API_KEY: KEY, ...extra });
+  const t = await createTestApp({ RETELL_OUTBOUND_API_KEY: KEY, ...extra });
   t.env.overrides = { storage: t.storage, ...(fetchImpl ? { fetch: fetchImpl } : {}) };
   const owner = await createStaff(t.db, "owner", "owner@crestmontwebsitedevelopment.com");
   const cfg = defaultVoiceConfig();

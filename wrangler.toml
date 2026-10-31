@@ -86,7 +86,8 @@ observability = { enabled = true }
 # (full list and who owns each in docs/DEPLOYMENT.md §4):
 #   EVIDENCE_INGEST_SECRET, STRIPE_WEBHOOK_SECRET, STRIPE_SECRET_KEY, TURNSTILE_SECRET, TURNSTILE_SITE_KEY,
 #   RESEND_API_KEY, ANTHROPIC_API_KEY, GITHUB_TOKEN, GITHUB_REPO, VOICE_WEBHOOK_SECRET,
-#   RESEND_WEBHOOK_SECRET (Svix whsec_…), RETELL_API_KEY (Crestmont Retell workspace key with webhook badge),
+#   RESEND_WEBHOOK_SECRET (Svix whsec_…), RETELL_INBOUND_API_KEY (receptionist Retell workspace key with webhook badge),
+#   RETELL_OUTBOUND_API_KEY (sales Retell workspace key with webhook badge; sales agent + Self-Improvement Engine),
 #   RETELL_OUTBOUND ("on" only after Founder approval; outbound calling stays off without it — docs/voice/RETELL-INTEGRATION.md §7),
 #   MFA_ENCRYPTION_KEY (base64 of 32 random bytes; required on staging/production for two-factor enrolment)
 #   FOUNDER_EMAIL (production: the Founder's sign-in address; only that account's launch approval authorizes a release,
