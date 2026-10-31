@@ -26,7 +26,7 @@ export const REQUIRED_WORKFLOWS = [
   "support_reply", "refund_request", "refund_decision", "project_completion", "handoff", "security_notification",
   "critical_incident",
 ] as const;
-export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "lead_alert", "proposal_accepted", "dispute_opened", "consultation", "voice_escalation", "email_change_confirm"] as const;
+export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "lead_alert", "proposal_accepted", "dispute_opened", "consultation", "voice_escalation", "email_change_confirm", "voice_followup"] as const;
 export type EmailTemplate = (typeof EMAIL_TEMPLATES)[number];
 export type MailCategory = "transactional" | "marketing";
 export type Audience = "customer" | "staff" | "prospect" | "any";
@@ -107,6 +107,13 @@ export interface TemplateData {
   voice_escalation: { reason: string; caller: string; why: "outside_hours" | "no_transfer" | "unavailable"; test: boolean; url: string };
   /** Sent to the NEW address of a requested account email change (CREST-GAP-073); the change applies only after confirmation. */
   email_change_confirm: { confirmUrl: string };
+  /**
+   * Requested by the caller during a call with the AI receptionist (send_customer_email / create_checkout_session).
+   * Fixed wording only: the AI supplies the name and picks the kind; it can never write the body.
+   */
+  voice_followup:
+    | { kind: "package_information"; name: string; packages: { name: string; price: string }[]; maintenance: { name: string; monthly: string }[]; url: string }
+    | { kind: "checkout_link"; name: string; packageName: string; price: string; reference: string; url: string };
 }
 
 export interface MailContent { subject: string; heading: string; paragraphs: string[]; cta?: { label: string; url: string } }
@@ -527,6 +534,33 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
     samples: [
       { reason: "Wants to discuss changing their contract", caller: "Morgan Hale, +15550100123", why: "outside_hours", test: false, url: "https://example.com/staff/voice/calls/call_sample" },
       { reason: "Asked for a person", caller: "Unknown caller", why: "no_transfer", test: true, url: "https://example.com/staff/voice/calls/call_sample" },
+    ],
+  },
+  voice_followup: {
+    name: "voice_followup", category: "transactional", audience: "prospect",
+    description: "Sent only when a caller asks the AI receptionist for it during a call: published package prices, or a secure link to buy a package online. Fixed wording; the AI cannot change the text.",
+    render: (d) => {
+      const notMe = "You are receiving this because someone asked Crestmont's AI phone assistant to send it to this address. If that wasn't you, you can ignore this email; nothing else will be sent.";
+      if (d.kind === "package_information") return {
+        subject: "Crestmont website packages and prices", heading: "Our website packages",
+        paragraphs: [`Hello ${d.name}, thank you for calling Crestmont Website Development. Here are our published prices.`,
+          ...d.packages.map((p) => `${p.name}: ${p.price}`),
+          ...(d.maintenance.length ? ["Maintenance plans (plan details are being finalised; a team member will confirm what each includes):", ...d.maintenance.map((m) => `${m.name}: ${m.monthly}`)] : []),
+          "Standard packages are paid 100% upfront. Custom development is quoted separately after a scoping conversation.", notMe],
+        cta: { label: "Compare packages", url: d.url },
+      };
+      return {
+        subject: `Your secure link to buy the ${d.packageName} package`, heading: `${d.packageName} website package`,
+        paragraphs: [`Hello ${d.name}, here is the secure link you asked for on your call with Crestmont Website Development.`,
+          `Package: ${d.packageName}, ${d.price}, paid 100% upfront. Any sales tax is shown before you pay.`,
+          "The link opens our website. You will sign in or create an account, confirm your email address and review the agreements before paying through Stripe's secure checkout. We never take card details by phone or email.",
+          `Your checkout reference is ${d.reference}. If you call us to check whether your payment went through, we will ask for this reference and this email address.`, notMe],
+        cta: { label: "Continue to secure checkout", url: d.url },
+      };
+    },
+    samples: [
+      { kind: "package_information", name: "Morgan Hale", packages: [{ name: "Starter", price: "$999" }, { name: "Business", price: "$2,499" }, { name: "Premium", price: "$4,999+" }], maintenance: [{ name: "Essential", monthly: "$99/month" }], url: "https://example.com/pricing" },
+      { kind: "checkout_link", name: "Morgan Hale", packageName: "Business", price: "$2,499", reference: "K7MP4Q", url: "https://example.com/checkout/business" },
     ],
   },
 };

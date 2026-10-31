@@ -84,11 +84,14 @@ async function deriveOutcome(db: Db, callId: string, call: Obj): Promise<CallOut
   const status = str(call, "call_status");
   const reason = str(call, "disconnection_reason") ?? "";
   if (status === "error" || reason.startsWith("error")) return "error";
-  const kinds = new Set((await db.prepare(`SELECT e.kind FROM voice_events e JOIN calls c ON c.id = e.call_id WHERE c.provider = ? AND c.provider_call_id = ? AND e.status = 'ok'`)
-    .bind(RETELL_PROVIDER, callId).all<{ kind: string }>()).results.map((r) => r.kind));
+  const rows = (await db.prepare(`SELECT e.kind, e.result_json FROM voice_events e JOIN calls c ON c.id = e.call_id WHERE c.provider = ? AND c.provider_call_id = ? AND e.status = 'ok'`)
+    .bind(RETELL_PROVIDER, callId).all<{ kind: string; result_json: string | null }>()).results;
+  const kinds = new Set(rows.map((r) => r.kind));
+  // schedule_consultation only lists times unless it booked one.
+  const booked = rows.some((r) => r.kind === "fn:schedule_consultation" && /"booked":true/.test(r.result_json ?? ""));
   if (kinds.has("fn:escalate")) return "escalated";
-  if (kinds.has("fn:route_support")) return "support_routed";
-  if (kinds.has("fn:create_lead") || kinds.has("fn:book_consultation")) return "lead_captured";
+  if (kinds.has("fn:route_support") || kinds.has("fn:create_support_ticket")) return "support_routed";
+  if (kinds.has("fn:create_lead") || kinds.has("fn:crm_upsert_lead") || kinds.has("fn:book_consultation") || booked || kinds.has("fn:create_checkout_session")) return "lead_captured";
   if (kinds.has("fn:request_callback")) return "callback_requested";
   const talked = (str(call, "transcript") ?? "").trim().length > 0 || [...kinds].some((k) => k.startsWith("fn:"));
   return talked ? "info_only" : "abandoned";
