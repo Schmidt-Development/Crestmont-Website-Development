@@ -178,6 +178,31 @@ Uses the receptionist's scheduling service (off until the Owner enables phone sc
 Effects: `voice_dnc` (SHARED with the receptionist: revokes follow-up consents, cancels follow-up requests), sales consents revoked, queued sales calls and AI follow-ups cancelled, research prospects with the number suppressed (re-imports are never callable), optional sales-email opt-out, CRM note, audit `sales_outbound.do_not_call`. Retell's own `user_requested_dnc` disconnection reason triggers the same path from the webhook.
 6. **Max retries:** 2 · 11. Wait · 12. **Talk While Waiting:** Off · 13. **Typing sound:** Off
 
+### Additional function — `record_consent` (SHARED receptionist endpoint, required for SIE transcripts)
+
+The protected sales policy (rule 2) and the master prompt ask for recording consent and call `record_consent`. Without
+it the platform discards the transcript (consent-gated storage), so the Self-Improvement Engine has nothing to analyse.
+#73 lets the outbound workspace call exactly this one receptionist function.
+
+| Field | Value |
+|---|---|
+| Name | `record_consent` |
+| Description | `Record whether the person agreed to the call being recorded and transcribed. Call once, right after asking.` |
+| Method / URL | POST `https://crestmont-platform-staging.partners-df4.workers.dev/api/webhooks/retell/functions` (SHARED; outbound-signed requests may call only this function there) |
+| Timeout / retries | 10000 ms / 1 |
+| Query parameters / headers | none |
+| Payload: args only | Off |
+| Parameters | `{ "type": "object", "required": ["consent"], "properties": { "consent": { "type": "boolean", "description": "true only if the person clearly agreed" } } }` |
+| Response | `{ "recorded": true, "message": "…" }` |
+| Execution mode / Talk While Waiting / typing sound | Wait for completion / Off / Off |
+
+### SIE registration (Self-Improvement Engine)
+
+Register the outbound sales agent as the **staging** target on `/staff/sales-optimization` and press *Verify with Retell*
+(uses `RETELL_OUTBOUND_API_KEY`). Only then do calls carry `crestmont_so_version` and feed SIE metrics and attribution.
+Version 1 of the SIE is the master prompt's instructions, so the engine's deployment of v1 and a hand-pasted
+`outbound-sales-agent-prompt.txt` are byte-identical.
+
 ### Function 9 — `record_call_outcome` → **agent-level webhook, not a custom function**
 
 Decision and reasons: `OUTBOUND-SALES.md` §6. Retell UI (sales agent → Webhook settings):
@@ -217,8 +242,7 @@ missing value is never spoken:
 
 ## Master prompt
 
-Paste-ready text for the sales agent's Prompt field: [`outbound-sales-agent-prompt.txt`](outbound-sales-agent-prompt.txt).
-`tests/outbound-sales.test.ts` checks that it names only real tools and variables and contains no hard-coded prices.
+Paste-ready text for the sales agent's Prompt field: [`outbound-sales-agent-prompt.txt`](outbound-sales-agent-prompt.txt). It is the SIE's protected sales policy followed by version 1 of the optimizable instructions (`composeSalesPrompt(baselineSalesInstructions())`, tested byte for byte); prices in the policy come from the catalog. `tests/outbound-sales.test.ts` checks that it names only real tools and variables.
 
 ---
 
