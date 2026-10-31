@@ -60,8 +60,19 @@ async function stripeDiagnostics() {
   if (unset || !people.newCustomer || !people.owner) return;
   const grab = async (pg: Page, url: string, sel = "main") => { try { await pg.goto(url); return (await text(pg, sel)).replace(/\s+/g, " ").slice(0, 900); } catch (e) { return `unavailable: ${(e as Error).message.split("\n")[0]}`; } };
   const o = people.owner.page, c = people.newCustomer.page;
+  const section = async (pg: Page, url: string, heading: string) => { try { await pg.goto(url); return ((await pg.locator("section.card", { hasText: heading }).first().innerText()) as string).replace(/\s+/g, " ").slice(0, 900); } catch (e) { return `unavailable: ${(e as Error).message.split("\n")[0]}`; } };
+  // The read-only Stripe probe (GET /v1/balance and /v1/webhook_endpoints): is a webhook endpoint registered for
+  // <APP_URL>/api/webhooks/stripe, enabled, at a supported version, with every handled event?
+  let probe = "";
+  try {
+    await o.goto(`${BASE}/staff/integrations`);
+    const row = o.locator("main tbody tr", { hasText: /^\s*Stripe/ }).first();
+    await nav(o, row.getByRole("button", { name: "Run check" }));
+    probe = `${await alerts(o)} | row: ${((await o.locator("main tbody tr", { hasText: /^\s*Stripe/ }).first().innerText()) as string).replace(/\s+/g, " ").slice(0, 600)}`;
+  } catch (e) { probe = `unavailable: ${(e as Error).message.split("\n")[0]}`; }
   const lines = [
-    `monitoring: ${await grab(o, `${BASE}/staff/monitoring`)}`,
+    `stripe probe: ${probe}`,
+    `stripe events needing attention: ${await section(o, `${BASE}/staff/monitoring`, "Stripe events needing attention")}`,
     `disputes: ${await grab(o, `${BASE}/staff/disputes`)}`,
     `customer billing: ${await grab(c, `${BASE}/portal/billing`)}`,
     `customer projects: ${await grab(c, `${BASE}/portal/projects`)}`,
@@ -397,9 +408,20 @@ journey(5, ["PAY-001"], "customer completes payment in Stripe test mode", { need
 
 journey(6, ["PAY-003"], "payment webhook creates the order", { needs: [5] }, async () => {
   const p = people.newCustomer.page;
-  await until(p, depositInvoiceUrl, /\bPaid\b/, "the signed Stripe webhook marking the deposit paid");
-  const billing = await until(p, `${BASE}/portal/billing`, /Receipt/, "a receipt for the deposit");
-  assert.match(billing, new RegExp(esc(usd(Math.floor(total / 2)))), "the receipt shows the deposit amount, charged once");
+  // The invoice's own status badge must read Paid. (Deploy 41187430075 passed this journey on the words "Paid to date"
+  // and "Receipts" while the invoice was still Open and no payment had been recorded.)
+  const end = Date.now() + 120_000;
+  for (;;) {
+    await p.goto(depositInvoiceUrl);
+    const status = ((await p.locator("main .badge").first().innerText().catch(() => "")) as string).trim();
+    if (/^Paid$/i.test(status)) break;
+    if (Date.now() > end) assert.fail(`the signed Stripe webhook did not mark the deposit paid within 120s (invoice status "${status}")`);
+    await p.waitForTimeout(5_000);
+  }
+  await p.goto(`${BASE}/portal/billing`);
+  const receipts = p.locator('main a[href^="/portal/billing/receipts/"]');
+  assert.equal(await receipts.filter({ hasText: /^Receipt$/ }).count(), 1, "exactly one receipt for the deposit (charged once)");
+  assert.match(await text(p), new RegExp(esc(usd(Math.floor(total / 2)))), "the receipt shows the deposit amount");
   assertClean();
 });
 
