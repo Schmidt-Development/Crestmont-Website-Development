@@ -113,6 +113,68 @@ demo Owner's password, and `scripts/bootstrap-owner.ts` creates an invitation on
 already has the demo Owner, so it would do nothing). A password changed in the app is real but temporary: it is
 replaced by the derived one on the next deploy.
 
+## The Founder's own Owner account on staging
+
+The demo Owner stays (CI, the browser journey and the access check sign in with it on every deploy). Next to it the
+Founder can hold a personal Owner account: own address, own password, own authenticator, never re-derived by deploys.
+It is created once, by invitation, with `scripts/bootstrap-owner.ts --staging-additional-owner`
+(tests/staging-founder-owner.test.ts). Use an address that is **not** your customer account (a customer account is never
+promoted, CREST-GAP-001), e.g. a `+staging-owner` alias.
+
+### What the SQL does
+
+Four statements, each carrying the same guard: staging D1 only (reads `_staging_access`; anywhere else every statement
+fails with "no such table"), no Owner outside the demo domain yet, address not already staff, address not a verified
+customer. Eligible: adds `org_crestmont` / `usr_system` only if missing, inserts one Owner invitation (72 h, token hash
+only, random id `inv_owner_staging_…`), then expires earlier pending Owner invitations — the last step runs only if that
+new invitation row exists, so an ineligible run changes **no row at all**. Re-applying the same file is a no-op.
+
+### Keeping the invitation token private
+
+The link is the credential (single use, 72 h). The script enforces:
+- refuses to run in CI (`CI`, `GITHUB_ACTIONS`, `TF_BUILD`); there is no workflow that runs it;
+- prints nothing secret: the console shows the invitation id and file paths only;
+- writes the link and the SQL to two files that must lie **outside the repository checkout** and must not exist yet
+  (never overwritten; 0600 where the OS honours it); the SQL holds only the SHA-256 hash, and the invitation id is
+  independent of the token;
+- writes UTF-8 itself (no `>` redirection: Windows PowerShell 5.1 would write UTF-16, which wrangler cannot read).
+
+You: run it on your own computer only; do not run it under `Start-Transcript`, screen sharing or a recorded terminal;
+never `Get-Content`/`cat` the link file, paste it into chat, tickets or commits; open it straight into the browser;
+delete the link file once the invitation is accepted (it is dead after use anyway).
+
+### Procedure (Windows PowerShell, from a checkout of `main`, Node 22.18+)
+
+```powershell
+# 0. Sign wrangler in through the browser (no API token in the shell or its history)
+npx --yes wrangler@4.149.0 login
+
+# 1. Private output folder outside the repository, readable only by you
+$dir = Join-Path $env:LOCALAPPDATA "Crestmont\staging-owner"
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+icacls $dir /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F" | Out-Null
+$sql  = Join-Path $dir "founder-owner.sql"
+$link = Join-Path $dir "invite-link.txt"
+
+# 2. Read-only pre-checks (expect: only the demo Owner holds 'owner'; no pending Owner invitation)
+npx --yes wrangler@4.149.0 d1 execute crestmont-staging --remote --env staging --command "SELECT u.email, m.role_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id = 'owner'"
+
+# 3. Generate (writes the two files; prints only the invitation id and paths)
+node --no-warnings scripts/bootstrap-owner.ts --staging-additional-owner --email <address> --url <staging APP_URL> --out-sql $sql --out-link $link
+
+# 4. Review the SQL (contains no token), then apply
+Get-Content $sql
+npx --yes wrangler@4.149.0 d1 execute crestmont-staging --remote --env staging --file $sql
+
+# 5. Open the invitation directly in the browser, then delete the link file after accepting
+Start-Process ((Get-Content $link -Raw).Trim())
+Remove-Item $link
+```
+
+Then: choose name and password, sign in, enrol the authenticator (required before any staff page), save the recovery
+codes in your password manager. Afterwards the deploy's forensic summary reports 1 "Owner-role holder outside the demo
+domain": that is this account. Removal: disable the account at `/staff/employees` or delete its `memberships` row.
+
 Lockout note: the demo Owner email is visible in this public repository, so anyone can deliberately trip its
 sign-in lockout (8 wrong attempts → 15 minutes). It cannot be taken over that way (20-character random password
 plus 2FA). The next deploy clears the counter.

@@ -13,3 +13,6 @@ backups/
 access/
 drill/
 .pw/
+# Founder staging Owner invitation output (scripts/bootstrap-owner.ts refuses paths in the checkout; belt and braces)
+founder-owner*.sql
+invite-link*.txt
