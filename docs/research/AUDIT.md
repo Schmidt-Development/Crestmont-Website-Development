@@ -34,6 +34,7 @@ Each claim gets one verdict: `supported`, `not_supported` (refuted) or `not_test
 ## Categories
 - **D (invalid):**
   - a duplicate of another promoted lead (same phone, website, or name + street);
+  - a "broken" listing whose business has a working site elsewhere (stale listing; found by the same falsification probe as below);
   - the rendered page shows another business's contact details;
   - a "broken" claim that no longer reproduces;
   - every testable material claim refuted.
@@ -63,3 +64,26 @@ These are provisional criteria from the Founder:
 - 0 duplicate promotions;
 - 0 do-not-call releases;
 - 0 automated cold-call releases.
+
+## Results (automated; per-lead tables are sealed, aggregates only)
+
+| | Baseline: run 41145776120 (audit 41152469504) | After fixes 1–3: run 41153598151 at `980be67` (audit 41156571952) |
+|---|---|---|
+| Leads audited | 159 | 328 |
+| A / B / C / D | 17 / 45 / 89 / 8 | 158 / 138 / 3 / 29 |
+| A + B | 39.0% | 90.2% |
+| Material claims supported (of tested) | 68% (17 of 25) | 86.2% (187 of 217) |
+| False "no website" | 7 | 2 |
+| Duplicates among promoted | 0 | 4 |
+| False-positive rate (D) | 5.0% | 8.8% |
+| Gate | fails | fails (claims < 90%, duplicates > 0) |
+
+Root causes fixed, each with a regression test (no threshold was changed):
+1. DNS-dead listed domains were recorded as "robots.txt disallows" (`a2a54e6`).
+2. "No website found" was never falsified; ISSUES sites could not qualify on evidence (`a2a54e6`).
+3. Uncorroborated "no website" records qualified (`980be67`).
+4. A dead listing was called "broken" even when the business had moved to a new domain (`89dfa87`).
+5. 20 of 35 timeout claims did not reproduce: a single timeout is now confirmed with a patient 45 s request (`0267671`).
+6. Records of one business with different numbers shared a website or name + street and became two leads: the later record is now held for a person (`0267671`). The live sample promotes only `qualified` records unattended; `review` records are counted, not promoted.
+
+The audit is automated. Commercial fit (budget, intent, decision-maker) is never inferred and needs a person.

@@ -1,5 +1,5 @@
 {
-  "purpose": "Independent audit of every lead promoted by research-live-sample run 41153598151 (at 980be67: DNS-listing fix, no-website probe, issues qualification, corroboration rule), for the before/after comparison with the 159-lead baseline (run 41145776120). The auditor now also falsifies 'broken' claims (stale listings). Edit this file to trigger a new audit (workflow research-lead-audit.yml).",
-  "runId": 41153598151,
+  "purpose": "Independent audit of every lead promoted by research-live-sample run 41158326197 (at 0267671: all six root-cause fixes, including stale listings, patient timeout confirmation and same-business review). Compared with the 159-lead baseline (run 41145776120) and the intermediate run 41153598151. Edit this file to trigger a new audit (workflow research-lead-audit.yml).",
+  "runId": 41158326197,
   "artifact": "research-live-sample-sealed"
 }
