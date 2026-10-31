@@ -7,7 +7,9 @@ import { createPackageOrder, provisionProject } from "../src/services/commerce.t
 import { hmacSha256Hex } from "../src/lib/crypto.ts";
 import { FakePayments } from "./support/security-world.ts";
 import * as B from "../src/services/builds.ts";
+import * as D from "../src/services/site-delivery.ts";
 import type { Env } from "../src/app/context.ts";
+import { getPipeline } from "../src/services/build-pipeline.ts";
 
 const RUNNER_SECRET = "test-runner-secret";
 const WHSEC = "whsec_buildtest";
@@ -20,8 +22,12 @@ async function app(extra: Partial<Env> = {}) {
   return { ...t, owner, oc };
 }
 
+/** What the self-hosted runner (local provider) announces; claims without capabilities get these. */
+const LOCAL_CAPS = ["local-model", "container-sandbox", "zero-token-cost", "git"];
+
 async function runner(t: App, path: string, body: unknown, secret = RUNNER_SECRET) {
-  const raw = JSON.stringify(body);
+  const withCaps = path === "claim" && body && typeof body === "object" && !("capabilities" in body) ? { ...body, capabilities: LOCAL_CAPS } : body;
+  const raw = JSON.stringify(withCaps);
   const ts = Math.floor(Date.now() / 1000);
   const res = await t.client().request("POST", `/api/builds/runner/${path}`, { body: raw, headers: { "content-type": "application/json", "x-crestmont-runner-signature": `t=${ts},v1=${await hmacSha256Hex(secret, `${ts}.${raw}`)}` } });
   return { status: res.status, json: await res.json() as Record<string, any> }; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -111,6 +117,10 @@ test("[AIB-001] intake first, payment second; unpaid orders never queue; histori
   assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.backfill_authorized'`).first());
 });
 
+const stageOf = async (t: { db: App["db"] }, pid: string) => (await getPipeline(t.db, pid))?.stage;
+/** V4: the private internal review comes before the final approval (no AI review cycle ran in these fixtures). */
+const internalOk = async (t: { oc: TestClient }, id: string) => { await t.oc.post(`/staff/builds/${id}/internal-approve`, { note: "Reviewed by hand in the fixture (no AI review cycle)" }); };
+
 async function queuedProject(t: App) {
   const { cu, c, order } = await customerWithOrder(t);
   await stripe(t, "checkout.session.completed", session(cu.organizationId, order));
@@ -120,7 +130,8 @@ async function queuedProject(t: App) {
 }
 
 test("[AIB-002] controlled-fixture pipeline: one durable job → one leased session → checkpoint, requirements, preview → owner review → approval (mock runner, not a real build)", async () => {
-  const t = await app();
+  // This fixture plays the optional PAID adapter (agent-sdk, per-token cost), so the platform's second key is set.
+  const t = await app({ BUILD_ALLOW_PAID_PROVIDER: "true" });
   const { pid, job } = await queuedProject(t);
   const claim = await runner(t, "claim", { runnerId: "runner-a", version: "1.0.0", capabilities: ["agent-sdk"] });
   assert.equal(claim.status, 200);
@@ -163,6 +174,7 @@ test("[AIB-002] controlled-fixture pipeline: one durable job → one leased sess
   assert.match(page, /\$3\.21/);
   const api = await (await t.oc.get(`/api/builds/${j.id}`)).json() as { summary: B.BuildSummary };
   assert.deepEqual(api.summary.requirements, { remaining: api.summary.requirements.remaining, implemented_unverified: 0, verified: 1, blocked: 1 });
+  await internalOk(t, j.id);
   assert.equal((await t.oc.post(`/staff/builds/${j.id}/approve`, { notes: "Looks good" })).status, 303);
   assert.equal((await B.getJob(t.db, j.id))!.state, "approved");
   assert.equal((await t.db.prepare(`SELECT status FROM projects WHERE id = ?`).bind(pid).first<{ status: string }>())!.status, "scope_review", "approval changes no project or delivery state on its own");
@@ -371,4 +383,601 @@ test("[AIB-004] protocol v1.1: a runner on another host fetches the job's own ch
   assert.equal(Buffer.from(got.json.archiveBase64, "base64").toString(), "session transcript archive");
   assert.equal((await runner(t, "checkpoint/fetch", { jobId: c2.id, leaseToken: c2.leaseToken, checkpointKey: "builds/other-job/ckpt-1.tgz" })).status, 404, "only the job's own checkpoint");
   assert.equal((await runner(t, "checkpoint/fetch", { jobId: c2.id, leaseToken: c.leaseToken, checkpointKey: ck.json.checkpointKey })).json.error, "lease_lost");
+});
+
+// ── AI Website Builder readiness (2026-10-28): paid-provider second key, preview hosts, revision previews ──
+
+test("[AIB-005] [AIB-007] paid AI needs the platform's second key: a runner without zero token cost gets no build unless BUILD_ALLOW_PAID_PROVIDER=true; claims record the provider kind", async () => {
+  const t = await app();
+  const { job } = await queuedProject(t);
+  for (const caps of [["agent-sdk", "git"], [], ["local-model", "git"]]) {
+    assert.deepEqual((await runner(t, "claim", { runnerId: "paid-1", capabilities: caps })).json, { job: null, reason: "paid_provider_not_authorized" }, `refused: ${caps.join(",") || "(none)"}`);
+  }
+  assert.equal((await B.getJob(t.db, job.id))!.state, "queued", "the refused claim leaves the build queued");
+  assert.equal((await B.getJob(t.db, job.id))!.attempts, 0);
+  const page = await (await t.oc.get("/staff/builds")).text();
+  assert.match(page, /Paid provider refused/);
+  // The self-hosted runner (declares zero token cost) is unaffected, and its claim is audited as zero-cost.
+  const c = (await runner(t, "claim", { runnerId: "local-1" })).json.job;
+  assert.equal(c.id, job.id);
+  const ev = (await t.db.prepare(`SELECT message, data_json FROM build_events WHERE job_id = ? AND message LIKE 'Claimed by runner%'`).bind(job.id).first<{ message: string; data_json: string }>())!;
+  assert.match(ev.message, /zero-cost provider/);
+  // The attempt records what actually ran: provider and model from the runner, zero-cost from its capabilities.
+  await runner(t, "heartbeat", { jobId: c.id, leaseToken: c.leaseToken, stage: "building", runCostUsd: 0, turns: 3, provider: "local", model: "qwen3-coder:30b" });
+  await runner(t, "heartbeat", { jobId: c.id, leaseToken: c.leaseToken, stage: "building", runCostUsd: 0, turns: 4, provider: "bad provider!", model: "x\ny" });
+  const run = (await t.db.prepare(`SELECT provider, model, zero_cost FROM build_runs WHERE job_id = ?`).bind(job.id).first<{ provider: string; model: string; zero_cost: number }>())!;
+  assert.deepEqual({ ...run }, { provider: "local", model: "qwen3-coder:30b", zero_cost: 1 }, "malformed values never overwrite");
+  assert.match(await (await t.oc.get(`/staff/builds/${job.id}`)).text(), /local · qwen3-coder:30b/);
+  assert.equal(JSON.parse(ev.data_json).paidProvider, false);
+  assert.ok(JSON.parse(ev.data_json).capabilities.includes("zero-token-cost"));
+
+  // With the second key the paid runner may claim, and that attempt is recorded as PAID.
+  const t2 = await app({ BUILD_ALLOW_PAID_PROVIDER: "true" });
+  const q2 = await queuedProject(t2);
+  const c2 = (await runner(t2, "claim", { runnerId: "paid-1", capabilities: ["agent-sdk", "git"] })).json.job;
+  assert.equal(c2.id, q2.job.id);
+  const ev2 = (await t2.db.prepare(`SELECT message, data_json FROM build_events WHERE job_id = ? AND message LIKE 'Claimed by runner%'`).bind(q2.job.id).first<{ message: string; data_json: string }>())!;
+  assert.match(ev2.message, /PAID provider/);
+  assert.equal(JSON.parse(ev2.data_json).paidProvider, true);
+  assert.equal(B.paidProviderRefused(["agent-sdk"], false), true);
+  assert.equal(B.paidProviderRefused(["agent-sdk"], true), false);
+  assert.equal(B.paidProviderRefused(["zero-token-cost"], false), false);
+});
+
+test("[AIB-006] preview URLs: only allowed preview hosts are recorded; a revision never shows the previous build's preview and cannot be approved without its own", async () => {
+  assert.equal(B.previewUrlAllowed("https://cm-prv-p1.acct.workers.dev", B.DEFAULT_PREVIEW_HOSTS), true);
+  assert.equal(B.previewUrlAllowed("https://workers.dev", B.DEFAULT_PREVIEW_HOSTS), false, "the bare suffix is not a preview");
+  assert.equal(B.previewUrlAllowed("https://evil-workers.dev", B.DEFAULT_PREVIEW_HOSTS), false);
+  assert.equal(B.previewUrlAllowed("https://workers.dev.evil.example", B.DEFAULT_PREVIEW_HOSTS), false);
+  assert.equal(B.previewUrlAllowed("https://u:p@x.acct.workers.dev", B.DEFAULT_PREVIEW_HOSTS), false, "no credentials in preview URLs");
+  assert.equal(B.previewUrlAllowed("http://x.acct.workers.dev", B.DEFAULT_PREVIEW_HOSTS), false);
+  assert.deepEqual(B.previewHostList(" .pages.dev , preview.crestmont.example ,bad host"), [".pages.dev", "preview.crestmont.example"]);
+  assert.deepEqual(B.previewHostList(""), [".workers.dev"]);
+  assert.equal(B.previewUrlAllowed("https://a.preview.crestmont.example/x", ["preview.crestmont.example"]), true);
+
+  const t = await app();
+  const { pid } = await queuedProject(t);
+  // 1. A preview on a host outside the allow-list is not recorded (an error event says why), so it cannot be approved.
+  const c = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  await runner(t, "complete", { jobId: c.id, leaseToken: c.leaseToken, outcome: "ready_for_review", runCostUsd: 0, previewUrl: "https://customer-domain.example/" });
+  let j = (await B.getJob(t.db, c.id))!;
+  assert.equal(j.state, "ready_for_review");
+  assert.equal(j.preview_url, null);
+  assert.ok(await t.db.prepare(`SELECT 1 FROM build_events WHERE job_id = ? AND kind = 'error' AND message LIKE 'Preview URL not recorded%'`).bind(c.id).first());
+  await internalOk(t, c.id);
+  const refused = await t.oc.post(`/staff/builds/${c.id}/approve`, { notes: "" });
+  assert.match(decodeURIComponent(refused.headers.getSetCookie().join(";")), /no preview to approve/);
+
+  // 2. A revision of an approved build: its record starts without a preview, and a revision that deploys none
+  //    reaches review without the old URL (approval refused); the original build keeps its own preview and history.
+  await t.db.prepare(`UPDATE build_jobs SET preview_url = 'https://first.acct.workers.dev' WHERE id = ?`).bind(c.id).run();
+  await internalOk(t, c.id);
+  assert.equal((await t.oc.post(`/staff/builds/${c.id}/approve`, { notes: "first build ok" })).status, 303);
+  assert.equal((await t.oc.post(`/staff/builds/${c.id}/revision`, { instruction: "Add opening hours to the contact page." })).status, 303);
+  const rev = (await jobOf(t, pid)).find((x) => x.kind === "revision")!;
+  assert.equal(rev.preview_url, null, "the revision does not inherit the previous preview");
+  const rc = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  assert.equal(rc.id, rev.id);
+  await runner(t, "complete", { jobId: rc.id, leaseToken: rc.leaseToken, outcome: "ready_for_review", runCostUsd: 0, previewUrl: null });
+  j = (await B.getJob(t.db, rev.id))!;
+  assert.equal(j.state, "ready_for_review");
+  assert.equal(j.preview_url, null);
+  await internalOk(t, rev.id);
+  const refused2 = await t.oc.post(`/staff/builds/${rev.id}/approve`, { notes: "" });
+  assert.match(decodeURIComponent(refused2.headers.getSetCookie().join(";")), /no preview to approve/);
+  const first = (await B.getJob(t.db, c.id))!;
+  assert.equal(first.state, "approved");
+  assert.equal(first.preview_url, "https://first.acct.workers.dev", "the original build and its preview are preserved");
+});
+
+test("[AIB-005] the model setting accepts provider-neutral identifiers (self-hosted tags, namespaced ids) and still rejects junk", async () => {
+  const t = await app();
+  const base = { automationEnabled: true, runBudgetUsd: 25, projectBudgetUsd: 75, maxRuntimeMinutes: 120, maxTurns: 200, maxConcurrent: 2, maxAttempts: 3 };
+  const ctx = { db: t.db, userId: t.owner.id };
+  for (const model of ["qwen3-coder:30b", "claude-sonnet-5-5", "org/model-7b", "gpt-oss:20b"]) {
+    await B.updateBuildSettings(ctx, { ...base, model });
+    assert.equal((await B.getBuildSettings(t.db)).model, model);
+  }
+  for (const model of ["", "a", "../etc", "x y", "model;rm", "org//model"]) {
+    await assert.rejects(B.updateBuildSettings(ctx, { ...base, model }), /model identifier/, model);
+  }
+});
+
+// ── Customer revision requests → AI revisions (readiness pass 2) ──
+
+/** A project whose first AI build is in owner review with a preview, and whose status allows customer revisions. */
+async function reviewedProject(t: App) {
+  const q = await queuedProject(t);
+  const c = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  await runner(t, "complete", { jobId: c.id, leaseToken: c.leaseToken, outcome: "ready_for_review", runCostUsd: 0, sourceCommit: "first0000001", previewUrl: "https://first.acct.workers.dev" });
+  await t.db.prepare(`UPDATE projects SET status = 'customer_review' WHERE id = ?`).bind(q.pid).run();
+  return { ...q, firstJobId: c.id };
+}
+const revisionsOf = async (t: App, pid: string) => (await t.db.prepare(`SELECT * FROM revisions WHERE project_id = ? ORDER BY round`).bind(pid).all<{ id: string; round: number; status: string; included: number }>()).results;
+const flash = (res: Response) => decodeURIComponent(res.headers.getSetCookie().join(";"));
+
+test("[AIB-006] [AIB-007] customer revision request → owner forwards it → AI revision with its own preview; tenant isolation, duplicate protection, delivery stays with staff", async () => {
+  const t = await app();
+  const { pid, c, firstJobId } = await reviewedProject(t);
+  // Another customer cannot request revisions on this project.
+  const other = await customerWithOrder(t);
+  assert.equal((await other.c.post(`/portal/projects/${pid}/revisions`, { request: "Change the whole site to purple please." })).status, 404);
+  // The project's own customer admin can (existing portal flow, included round 1).
+  assert.equal((await c.post(`/portal/projects/${pid}/revisions`, { request: "Please add our Saturday opening hours (8am-2pm) to the contact page." })).status, 303);
+  const [rev] = await revisionsOf(t, pid);
+  assert.equal(rev.round, 1);
+  assert.equal(rev.included, 1);
+  // Default policy: owner approval. Nothing is queued and nothing spends until an owner forwards it.
+  assert.equal((await B.getBuildSettings(t.db)).customer_revision_mode, "owner_approval");
+  assert.equal((await jobOf(t, pid)).length, 1, "no AI revision created automatically");
+  const dash = await (await t.oc.get("/staff/builds")).text();
+  assert.match(dash, /Customer revision requests/);
+  assert.match(dash, /Saturday opening hours/);
+  assert.match(dash, new RegExp(`/staff/builds/customer-revisions/${rev.id}/forward`));
+  const api = await (await t.oc.get("/api/builds")).json() as { customerRevisions: B.CustomerRevision[]; settings: { customerRevisionMode: string } };
+  assert.equal(api.settings.customerRevisionMode, "owner_approval");
+  assert.equal(api.customerRevisions[0].id, rev.id);
+  assert.equal(api.customerRevisions[0].entitled, true);
+
+  // The owner forwards it with an edited instruction.
+  const fwd = await t.oc.post(`/staff/builds/customer-revisions/${rev.id}/forward`, { instruction: "Contact page: add opening hours 'Saturday 8am-2pm' under the address." });
+  assert.equal(fwd.status, 303);
+  const revJob = (await jobOf(t, pid)).find((j) => j.kind === "revision")!;
+  assert.equal(revJob.customer_revision_id, rev.id);
+  assert.equal(revJob.instruction, "Contact page: add opening hours 'Saturday 8am-2pm' under the address.");
+  assert.equal(revJob.preview_url, null);
+  assert.equal(revJob.source_commit, "first0000001", "continues from the reviewed build's source");
+  assert.equal((await revisionsOf(t, pid))[0].status, "in_progress", "the customer's revisions page shows work in progress");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.customer_revision_forwarded' AND subject_id = ?`).bind(revJob.id).first());
+  // Duplicate protection: the same request cannot be forwarded twice while its AI build is live.
+  assert.match(flash(await t.oc.post(`/staff/builds/customer-revisions/${rev.id}/forward`, { instruction: "" })), /already has an AI build in progress/);
+  await assert.rejects(B.forwardCustomerRevision(t.db, rev.id, { kind: "system" }), /already has an AI build in progress/);
+
+  // The runner builds it; its own preview is recorded on the revision build only.
+  const rc = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  assert.equal(rc.id, revJob.id);
+  assert.equal(rc.kind, "revision");
+  await runner(t, "complete", { jobId: rc.id, leaseToken: rc.leaseToken, outcome: "ready_for_review", runCostUsd: 0, sourceCommit: "rev10000001", previewUrl: "https://rev1.acct.workers.dev" });
+  assert.equal((await B.getJob(t.db, revJob.id))!.preview_url, "https://rev1.acct.workers.dev");
+  assert.equal((await B.getJob(t.db, firstJobId))!.preview_url, "https://first.acct.workers.dev", "the first build's record and preview are preserved");
+  const detail = await (await t.oc.get(`/staff/builds/${revJob.id}`)).text();
+  assert.match(detail, /Round 1/);
+  const tab = await (await t.oc.get(`/staff/projects/${pid}?tab=revisions`)).text();
+  assert.match(tab, new RegExp(`/staff/builds/${revJob.id}`));
+  // D3: previews are reached through the platform's signed sign-in route, never as a raw URL on the page.
+  assert.match(tab, new RegExp(`/staff/builds/${revJob.id}/preview`));
+  assert.doesNotMatch(tab, /rev1\.acct\.workers\.dev/);
+
+  // Approval records the decision; it does not deliver the round to the customer.
+  await internalOk(t, revJob.id);
+  assert.equal((await t.oc.post(`/staff/builds/${revJob.id}/approve`, { notes: "" })).status, 303);
+  assert.equal((await B.getJob(t.db, revJob.id))!.state, "approved");
+  assert.equal((await revisionsOf(t, pid))[0].status, "in_progress", "delivery is still a staff step");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM build_events WHERE job_id = ? AND message LIKE 'AI result approved for this customer revision%'`).bind(revJob.id).first());
+  const status = await (await c.get(`/portal/projects/${pid}/build-status`)).json() as { status: string };
+  assert.equal(status.status, "In internal review", "the customer sees no internal detail");
+});
+
+test("[AIB-006] customer revisions follow the existing entitlement rules and the Founder's policy (off / owner approval / auto); a failed AI revision can be sent again", async () => {
+  const t = await app();
+  const { pid, c } = await reviewedProject(t);
+  // Beyond the allowance: recorded as a billable round; no AI work before its change order is approved.
+  await t.db.prepare(`UPDATE projects SET revision_allowance = 0 WHERE id = ?`).bind(pid).run();
+  assert.equal((await c.post(`/portal/projects/${pid}/revisions`, { request: "Add a careers page with three open roles." })).status, 303);
+  const [billable] = await revisionsOf(t, pid);
+  assert.equal(billable.included, 0);
+  const q1 = (await B.customerRevisionQueue(t.db)).find((r) => r.id === billable.id)!;
+  assert.equal(q1.entitled, false);
+  await assert.rejects(B.forwardCustomerRevision(t.db, billable.id, { kind: "user", userId: t.owner.id }), /change order must be approved/);
+  assert.doesNotMatch(await (await t.oc.get("/staff/builds")).text(), new RegExp(`customer-revisions/${billable.id}/forward`), "no forward button for an unentitled round");
+  // Approving the change order entitles the round (mirrors the staff rule in updateRevisionStatus).
+  await t.db.prepare(`INSERT INTO change_orders (id, project_id, scope_text, price_cents, status, created_at) VALUES ('co_t1', ?, 'Careers page', 20000, 'approved', ?)`).bind(pid, new Date().toISOString()).run();
+  await t.db.prepare(`UPDATE revisions SET billable_change_order_id = 'co_t1' WHERE id = ?`).bind(billable.id).run();
+  assert.equal((await B.getCustomerRevision(t.db, billable.id))!.entitled, true);
+
+  // Policy off: nothing reaches the AI builder.
+  await t.db.prepare(`UPDATE build_settings SET customer_revision_mode = 'off'`).run();
+  await assert.rejects(B.forwardCustomerRevision(t.db, billable.id, { kind: "user", userId: t.owner.id }), /not sent to the AI builder/);
+  assert.equal(await B.syncCustomerRevisionSafe(t.db, billable.id), null);
+
+  // Policy auto: the entitled request is queued by the system, and its build fails honestly after its attempts.
+  await t.db.prepare(`UPDATE build_settings SET customer_revision_mode = 'auto', max_attempts = 1`).run();
+  const autoId = await B.syncCustomerRevisionSafe(t.db, billable.id);
+  assert.ok(autoId, "queued automatically");
+  const autoJob = (await B.getJob(t.db, autoId!))!;
+  assert.equal(autoJob.customer_revision_id, billable.id);
+  assert.equal(autoJob.created_by, null);
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.customer_revision_forwarded' AND actor_kind = 'system' AND subject_id = ?`).bind(autoId).first());
+  assert.equal(await B.syncCustomerRevisionSafe(t.db, billable.id), null, "idempotent: no second build while one is live");
+  const ac = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  assert.equal(ac.id, autoId);
+  await runner(t, "complete", { jobId: ac.id, leaseToken: ac.leaseToken, outcome: "failed", runCostUsd: 0, error: "model server down" });
+  assert.equal((await B.getJob(t.db, autoId!))!.state, "failed");
+  // Safe failure: the request stays open (in progress) with no live AI build, and can be sent again.
+  const after = (await B.getCustomerRevision(t.db, billable.id))!;
+  assert.equal(after.status, "in_progress");
+  assert.equal(after.liveJob, null);
+  assert.equal(after.latestJob?.state, "failed");
+  // A failed revision does not block the project: the next revision starts from the last reviewed build (never the
+  // failed attempt's partial source) and takes the next unused revision number.
+  const again = await B.forwardCustomerRevision(t.db, billable.id, { kind: "user", userId: t.owner.id });
+  assert.notEqual(again, autoId);
+  const againJob = (await B.getJob(t.db, again))!;
+  assert.equal(againJob.revision, autoJob.revision + 1);
+  assert.equal(againJob.source_commit, "first0000001", "based on the reviewed first build");
+  assert.equal(autoJob.source_commit, "first0000001");
+  assert.equal((await B.getJob(t.db, autoId!))!.state, "failed", "the failed attempt and its history are kept");
+
+  // Auto mode from the portal itself: a new included round is queued as soon as the customer submits it,
+  // but only once the project's latest build is back in review (one active build per project).
+  await t.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review' WHERE id = ?`).bind(again).run();
+  await t.db.prepare(`UPDATE projects SET revision_allowance = 5 WHERE id = ?`).bind(pid).run();
+  assert.equal((await c.post(`/portal/projects/${pid}/revisions`, { request: "Swap the hero photo for the bakery storefront image." })).status, 303);
+  const newest = (await revisionsOf(t, pid)).at(-1)!;
+  assert.ok((await jobOf(t, pid)).some((j) => j.customer_revision_id === newest.id), "queued from the portal submission");
+
+  // Eligibility still applies: a refunded order gets no AI revision.
+  await t.db.prepare(`UPDATE build_settings SET customer_revision_mode = 'owner_approval'`).run();
+  const order = await t.db.prepare(`SELECT order_id FROM projects WHERE id = ?`).bind(pid).first<{ order_id: string }>();
+  await t.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review' WHERE customer_revision_id = ?`).bind(newest.id).run();
+  await t.db.prepare(`UPDATE build_jobs SET state = 'canceled' WHERE id = ?`).bind(again).run();
+  await t.db.prepare(`UPDATE orders SET status = 'refunded' WHERE id = ?`).bind(order!.order_id).run();
+  await assert.rejects(B.forwardCustomerRevision(t.db, billable.id, { kind: "user", userId: t.owner.id }), /not eligible for an automated build: order is refunded/);
+  // Settings validation.
+  const base = { automationEnabled: true, runBudgetUsd: 25, projectBudgetUsd: 75, maxRuntimeMinutes: 120, maxTurns: 200, maxConcurrent: 2, maxAttempts: 3, model: "qwen3-coder:30b" };
+  await assert.rejects(B.updateBuildSettings({ db: t.db, userId: t.owner.id }, { ...base, customerRevisionMode: "sometimes" as B.CustomerRevisionMode }), /customer revision/);
+  await B.updateBuildSettings({ db: t.db, userId: t.owner.id }, base);
+  assert.equal((await B.getBuildSettings(t.db)).customer_revision_mode, "owner_approval", "omitted = unchanged");
+});
+
+test("[AIB-006] D2: previews are kept while in work or review, the approved one until its production deployment is verified, superseded ones 30 days after approval; owners can preserve or extend; cleanup is scheduled, audited and retried", async () => {
+  const t = await app();
+  const { pid, firstJobId } = await reviewedProject(t);
+  const DAY = 86400_000;
+  const setJob = (id: string, cols: string, ...v: unknown[]) => t.db.prepare(`UPDATE build_jobs SET ${cols} WHERE id = ?`).bind(...v, id).run();
+  assert.equal((await B.getBuildSettings(t.db)).preview_retention_days, 30, "Founder decision: 30 days");
+  // The first build's preview, recoverable from its project repository.
+  await setJob(firstJobId, "preview_name = 'cm-prv-first-b0', source_repo = 'https://github.com/crestmont-builds/x', source_commit = 'first0000001'");
+  // A revision reports its own preview Worker (a malformed name would not be stored).
+  assert.equal((await t.oc.post(`/staff/builds/${firstJobId}/revision`, { instruction: "Add the opening hours to the footer of every page." })).status, 303);
+  const rc = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  await runner(t, "complete", { jobId: rc.id, leaseToken: rc.leaseToken, outcome: "ready_for_review", runCostUsd: 0, sourceRepo: "https://github.com/crestmont-builds/x", sourceCommit: "rev10000001", previewUrl: "https://cm-prv-x-r1.acct.workers.dev", previewName: "cm-prv-x-r1" });
+  assert.equal((await B.getJob(t.db, rc.id))!.preview_name, "cm-prv-x-r1");
+
+  // Nothing is approved yet: no preview expires, however old.
+  const long = new Date(Date.now() + 400 * DAY);
+  assert.equal(await B.sweepPreviewRetention(t.db, long), 0);
+  let plan = await B.previewRetentionPlan(t.db, pid, long);
+  assert.equal(plan.get(rc.id)!.status, "in_progress", "awaiting owner review: never automatic");
+
+  // The owner approves the revision: the superseded first-build preview is scheduled 30 days later; the approved one is kept.
+  await internalOk(t, rc.id);
+  assert.equal((await t.oc.post(`/staff/builds/${rc.id}/approve`, { notes: "final" })).status, 303);
+  const approvedAt = (await B.getJob(t.db, rc.id))!.approved_at!;
+  plan = await B.previewRetentionPlan(t.db, pid);
+  assert.equal(plan.get(firstJobId)!.status, "scheduled");
+  assert.equal(plan.get(firstJobId)!.deleteAfter, new Date(Date.parse(approvedAt) + 30 * DAY).toISOString());
+  assert.equal(plan.get(rc.id)!.status, "approved_kept");
+  assert.match(await (await t.oc.get(`/staff/builds/${firstJobId}`)).text(), /Scheduled for deletion on/);
+  assert.match(await (await t.oc.get("/staff/builds")).text(), /Deletes \d{4}-\d{2}-\d{2}/);
+  assert.match(flash(await t.oc.post(`/staff/builds/${rc.id}/delete-preview`)), /kept until its production deployment is verified/);
+
+  // Before the date: nothing. After it: a deletion request, audited; the runner claims it; a failure is retried.
+  assert.equal(await B.sweepPreviewRetention(t.db, new Date(Date.parse(approvedAt) + 29 * DAY)), 0);
+  // The owner extends it by 30 days first: the date moves.
+  assert.equal((await t.oc.post(`/staff/builds/${firstJobId}/preview-retention`, { action: "extend" })).status, 303);
+  const extended = (await B.previewRetentionFor(t.db, (await B.getJob(t.db, firstJobId))!)).deleteAfter!;
+  assert.equal(extended, new Date(Date.parse(approvedAt) + 60 * DAY).toISOString());
+  assert.equal(await B.sweepPreviewRetention(t.db, new Date(Date.parse(approvedAt) + 31 * DAY)), 0, "extended");
+  assert.equal(await B.sweepPreviewRetention(t.db, new Date(Date.parse(approvedAt) + 61 * DAY)), 1);
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.preview_expired' AND subject_id = ? AND actor_kind = 'system'`).bind(firstJobId).first());
+  assert.deepEqual((await runner(t, "previews/claim", { runnerId: "r1" })).json, { previews: [{ jobId: firstJobId, previewName: "cm-prv-first-b0" }] });
+  assert.deepEqual((await runner(t, "previews/claim", { runnerId: "r1" })).json, { previews: [] }, "handed out once until reported");
+  await runner(t, "previews/deleted", { runnerId: "r1", jobId: firstJobId, ok: false, error: "token expired" });
+  assert.ok(await t.db.prepare(`SELECT 1 FROM build_events WHERE job_id = ? AND message LIKE 'Preview deletion failed (retried within the hour): token expired%'`).bind(firstJobId).first());
+  assert.equal((await runner(t, "previews/claim", { runnerId: "r1" })).json.previews.length, 1, "retried");
+  await runner(t, "previews/deleted", { runnerId: "r1", jobId: firstJobId, ok: true });
+  assert.ok((await B.getJob(t.db, firstJobId))!.preview_deleted_at);
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.preview_deleted' AND subject_id = ?`).bind(firstJobId).first());
+  assert.equal((await runner(t, "previews/deleted", { runnerId: "r1", jobId: firstJobId, ok: true })).status, 404);
+
+  // The approved preview after a verified production deployment: retention starts then (unless preserved).
+  const verifiedAt = new Date(Date.parse(approvedAt) + 5 * DAY).toISOString();
+  await t.db.prepare(`INSERT INTO site_targets (id, project_id, organization_id, worker_name, created_at, updated_at) SELECT 'st_t', id, organization_id, 'cm-site-test', ?, ? FROM projects WHERE id = ?`).bind(verifiedAt, verifiedAt, pid).run();
+  await t.db.prepare(`INSERT INTO site_deployments (id, target_id, project_id, organization_id, build_job_id, version, kind, state, source_commit, worker_name, prepared_at, verified_at, created_at, updated_at)
+    SELECT 'sd_t', 'st_t', project_id, organization_id, id, 1, 'release', 'live', 'rev10000001', 'cm-site-test', ?, ?, ?, ? FROM build_jobs WHERE id = ?`).bind(verifiedAt, verifiedAt, verifiedAt, verifiedAt, rc.id).run();
+  assert.equal((await B.previewRetentionFor(t.db, (await B.getJob(t.db, rc.id))!)).deleteAfter, new Date(Date.parse(verifiedAt) + 30 * DAY).toISOString());
+  assert.equal((await t.oc.post(`/staff/builds/${rc.id}/preview-retention`, { action: "preserve" })).status, 303);
+  assert.equal((await B.previewRetentionFor(t.db, (await B.getJob(t.db, rc.id))!)).status, "preserved");
+  assert.equal(await B.sweepPreviewRetention(t.db, new Date(Date.parse(verifiedAt) + 400 * DAY)), 0, "preserved: never deleted automatically");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.preview_retention_changed' AND subject_id = ?`).bind(rc.id).first());
+
+  // Never the only recoverable copy: without a project repository or checkpoint the preview is kept.
+  await setJob(rc.id, "preview_preserved = 0, source_repo = 'runner-local:r1/ws', checkpoint_key = NULL");
+  assert.equal((await B.previewRetentionFor(t.db, (await B.getJob(t.db, rc.id))!)).status, "kept_unrecoverable");
+  assert.match(flash(await t.oc.post(`/staff/builds/${rc.id}/delete-preview`)), /only recoverable copy/);
+  // Settings: required, 1–365.
+  const settings = { run_budget: "25", project_budget: "75", model: "qwen3-coder:30b", max_runtime: "120", max_turns: "200", max_concurrent: "2", max_attempts: "3", automation_enabled: "1", customer_revision_mode: "owner_approval", preview_retention_days: "" };
+  assert.match(flash(await t.oc.post("/staff/builds/settings", settings)), /Preview retention must be 1–365 days/);
+  assert.equal((await t.oc.post("/staff/builds/settings", { ...settings, preview_retention_days: "45" })).status, 303);
+  assert.equal((await B.getBuildSettings(t.db)).preview_retention_days, 45);
+});
+
+// ── Founder decision D3 (2026-10-28): private previews ──
+test("[AIB-006] D3: previews are private: staff and the project's own customer get signed 5-minute sign-in links; nothing public, no cross-tenant access, customer review recorded", async () => {
+  const GATE = "platform-preview-gate-secret-0123456789abcdef";
+  const t = await app({ BUILD_PREVIEW_GATE_SECRET: GATE });
+  const q = await queuedProject(t);
+  const pid = q.pid;
+  const job = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  await runner(t, "complete", { jobId: job.id, leaseToken: job.leaseToken, outcome: "ready_for_review", runCostUsd: 0, sourceCommit: "first0000001", previewUrl: "https://cm-prv-alpha-b0.acct.workers.dev", previewName: "cm-prv-alpha-b0", previewGated: true });
+  let j = (await B.getJob(t.db, job.id))!;
+  assert.equal(j.preview_gated, 1);
+
+  // Staff: a 303 to the preview's own sign-in path with a token for THIS preview, owner audience, 5 minutes.
+  const open = await t.oc.get(`/staff/builds/${job.id}/preview?next=/about.html`);
+  assert.equal(open.status, 303);
+  assert.equal(open.headers.get("referrer-policy"), "no-referrer");
+  const link = new URL(open.headers.get("location")!);
+  assert.equal(link.origin, "https://cm-prv-alpha-b0.acct.workers.dev");
+  assert.equal(link.pathname, "/__crestmont/auth");
+  const payload = JSON.parse(Buffer.from(link.searchParams.get("t")!.split(".")[0], "base64url").toString());
+  assert.equal(payload.p, "cm-prv-alpha-b0");
+  assert.equal(payload.a, "owner");
+  assert.equal(payload.n, "/about.html");
+  assert.ok(payload.exp - Date.now() / 1000 <= 300 && payload.exp - Date.now() / 1000 > 290);
+  assert.ok(!link.href.includes(GATE));
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.preview_opened' AND subject_id = ?`).bind(job.id).first());
+  const detail = await (await t.oc.get(`/staff/builds/${job.id}`)).text();
+  assert.match(detail, /Open preview/);
+  assert.doesNotMatch(detail, /href="https:\/\/cm-prv-alpha-b0/, "no raw preview link");
+
+  // The customer: nothing until the owner shares it.
+  assert.equal((await q.c.get(`/portal/projects/${pid}/previews/${job.id}`)).status, 404);
+  assert.doesNotMatch(await (await q.c.get(`/portal/projects/${pid}/revisions`)).text(), /Website previews/);
+  // V4 §7 F: nothing reaches the customer before the private internal review approves it.
+  assert.match(flash(await t.oc.post(`/staff/builds/${job.id}/share-preview`, { action: "share" })), /Approve this build internally first/);
+  assert.equal(await stageOf(t, pid), "AWAITING_INTERNAL_APPROVAL");
+  assert.match(flash(await t.oc.post(`/staff/builds/${job.id}/internal-approve`, { note: "" })), /did not pass the automated acceptance review/);
+  assert.equal((await t.oc.post(`/staff/builds/${job.id}/internal-approve`, { note: "Reviewed the preview by hand; no AI review ran (D3 test)" })).status, 303);
+  assert.equal(await stageOf(t, pid), "READY_FOR_CUSTOMER_PREVIEW");
+  assert.equal((await q.c.get(`/portal/projects/${pid}/previews/${job.id}`)).status, 404, "internal approval alone shares nothing");
+  assert.equal((await t.oc.post(`/staff/builds/${job.id}/share-preview`, { action: "share" })).status, 303);
+  assert.equal(await stageOf(t, pid), "CUSTOMER_PREVIEW");
+  assert.match(flash(await t.oc.post(`/staff/builds/${job.id}/share-preview`, { action: "share" })), /already shared/);
+  const note = await t.db.prepare(`SELECT body FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`).bind(q.cu.id).first<{ body: string }>();
+  assert.match(note!.body, /private preview of your website is ready/);
+  const portal = await (await q.c.get(`/portal/projects/${pid}/revisions`)).text();
+  assert.match(portal, /Website previews/);
+  assert.match(portal, new RegExp(`/portal/projects/${pid}/previews/${job.id}`));
+  assert.doesNotMatch(portal, /cm-prv-alpha-b0\.acct/, "the customer never sees a raw preview URL");
+  const copen = await q.c.get(`/portal/projects/${pid}/previews/${job.id}`);
+  assert.equal(copen.status, 303);
+  const clink = new URL(copen.headers.get("location")!);
+  assert.equal(JSON.parse(Buffer.from(clink.searchParams.get("t")!.split(".")[0], "base64url").toString()).a, "customer");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'portal.preview_opened' AND subject_id = ? AND actor_user_id = ?`).bind(job.id, q.cu.id).first());
+
+  // Another customer: not their project, not their build (wrong project id, or right project id).
+  const other = await customerWithOrder(t);
+  assert.equal((await other.c.get(`/portal/projects/${pid}/previews/${job.id}`)).status, 404);
+  const otherPid = await (async () => { await stripe(t, "checkout.session.completed", session(other.cu.organizationId, other.order)); return projectOf(t, other.order.orderId); })();
+  assert.equal((await other.c.get(`/portal/projects/${otherPid}/previews/${job.id}`)).status, 404);
+  assert.equal((await other.c.post(`/portal/projects/${otherPid}/previews/${job.id}/review`, { decision: "approved", note: "" })).status, 404);
+  // A non-admin member of the right organization can open it but not review it.
+  const member = await createCustomer(t.db, `m${Date.now()}@harbor.example`, "ignored");
+  await t.db.prepare(`UPDATE memberships SET organization_id = ?, role_id = 'customer_member' WHERE user_id = ?`).bind(q.cu.organizationId, member.id).run();
+  const mc = await t.client().login(member.email, TEST_PASSWORD);
+  assert.equal((await mc.get(`/portal/projects/${pid}/previews/${job.id}`)).status, 303);
+  assert.equal((await mc.post(`/portal/projects/${pid}/previews/${job.id}/review`, { decision: "approved", note: "" })).status, 403);
+
+  // Customer review (step 4): changes need a reason; recorded, audited, shown to staff, team notified.
+  assert.match(flash(await q.c.post(`/portal/projects/${pid}/previews/${job.id}/review`, { decision: "changes_requested", note: "" })), /Describe what should change/);
+  assert.equal((await q.c.post(`/portal/projects/${pid}/previews/${job.id}/review`, { decision: "changes_requested", note: "Please use our new logo." })).status, 303);
+  j = (await B.getJob(t.db, job.id))!;
+  assert.equal(j.customer_review, "changes_requested");
+  assert.equal(j.customer_review_note, "Please use our new logo.");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'portal.preview_reviewed' AND subject_id = ?`).bind(job.id).first());
+  assert.match(await (await t.oc.get(`/staff/builds/${job.id}`)).text(), /Customer requested changes/);
+  assert.match(await (await q.c.get(`/portal/projects/${pid}/revisions`)).text(), /Changes requested/);
+
+  // Unsharing ends customer access; deletion ends everyone's.
+  assert.equal((await t.oc.post(`/staff/builds/${job.id}/share-preview`, { action: "unshare" })).status, 303);
+  assert.equal((await q.c.get(`/portal/projects/${pid}/previews/${job.id}`)).status, 404);
+  await t.db.prepare(`UPDATE build_jobs SET customer_preview_shared_at = ?, preview_deleted_at = ? WHERE id = ?`).bind(new Date().toISOString(), new Date().toISOString(), job.id).run();
+  assert.match(flash(await q.c.get(`/portal/projects/${pid}/previews/${job.id}`)), /not available any more/);
+  assert.match(flash(await t.oc.get(`/staff/builds/${job.id}/preview`)), /was deleted/);
+  assert.match(await (await q.c.get(`/portal/projects/${pid}/revisions`)).text(), /No longer available/);
+
+  // A preview reported without the gate (an older runner) is never shared and is labelled public.
+  await t.db.prepare(`UPDATE build_jobs SET preview_deleted_at = NULL, preview_gated = 0, customer_preview_shared_at = NULL WHERE id = ?`).bind(job.id).run();
+  assert.match(flash(await t.oc.post(`/staff/builds/${job.id}/share-preview`, { action: "share" })), /Only a private \(gated\) preview/);
+  assert.match(await (await t.oc.get(`/staff/builds/${job.id}`)).text(), /Public \(legacy\)/);
+  const legacy = await t.oc.get(`/staff/builds/${job.id}/preview`);
+  assert.equal(legacy.headers.get("location"), "https://cm-prv-alpha-b0.acct.workers.dev");
+  // The platform without its gate secret issues no links.
+  const t2 = await app();
+  const q2 = await queuedProject(t2);
+  const j2 = (await runner(t2, "claim", { runnerId: "r1" })).json.job;
+  await runner(t2, "complete", { jobId: j2.id, leaseToken: j2.leaseToken, outcome: "ready_for_review", runCostUsd: 0, sourceCommit: "x1", previewUrl: "https://cm-prv-b-b0.acct.workers.dev", previewName: "cm-prv-b-b0", previewGated: true });
+  assert.match(flash(await t2.oc.get(`/staff/builds/${j2.id}/preview`)), /BUILD_PREVIEW_GATE_SECRET is not configured/);
+  void q2;
+});
+
+// ── Founder decision D5 (2026-10-28): owner-controlled customer production delivery ──
+test("[AIB-006] D5: approval never publishes; a release is prepared, explicitly Owner-authorized, deployed by the runner to the customer's own target, verified, versioned and reversible", async () => {
+  const t = await app();
+  const { pid, firstJobId, cu } = await reviewedProject(t);
+  const REPO = "https://github.com/crestmont-builds/crestmont-build-x";
+  await t.db.prepare(`UPDATE build_jobs SET source_repo = ? WHERE id = ?`).bind(REPO, firstJobId).run();
+  const deliveryUrl = `/staff/builds/projects/${pid}/delivery`;
+  const caps = { runnerId: "r1", capabilities: [...LOCAL_CAPS, "production-deploy"] };
+  // Steps 1-5 first: nothing to release before the owner approves the build.
+  assert.match(await (await t.oc.get(deliveryUrl)).text(), /No approved build yet/);
+  assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "x" })), /has not approved this build/);
+  await internalOk(t, firstJobId);
+  assert.equal((await t.oc.post(`/staff/builds/${firstJobId}/approve`, { notes: "final" })).status, 303);
+  assert.equal(await t.db.prepare(`SELECT COUNT(*) AS n FROM site_deployments`).first<{ n: number }>().then((r) => r!.n), 0, "approval publishes nothing");
+  assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "Owner-run" })), /Create the project's production target first/);
+
+  // Deployment identity: cm-site-<project>, unique; never a preview or Crestmont name.
+  assert.equal((await t.oc.post(`/staff/builds/projects/${pid}/site-target`)).status, 303);
+  const target = (await t.db.prepare(`SELECT * FROM site_targets WHERE project_id = ?`).bind(pid).first<{ worker_name: string; id: string }>())!;
+  assert.match(target.worker_name, /^cm-site-[a-z0-9-]+$/);
+  assert.match(flash(await t.oc.post(`/staff/builds/projects/${pid}/site-target`)), /already has a production target/);
+  // Domains: the customer's own only, typed twice, unique across customers.
+  assert.match(flash(await t.oc.post(`/staff/builds/projects/${pid}/site-domain`, { hostname: "app.crestmontwebsites.com", confirm: "app.crestmontwebsites.com" })), /Crestmont and workers.dev domains are not allowed/);
+  assert.match(flash(await t.oc.post(`/staff/builds/projects/${pid}/site-domain`, { hostname: "x.acct.workers.dev", confirm: "x.acct.workers.dev" })), /not allowed/);
+  assert.match(flash(await t.oc.post(`/staff/builds/projects/${pid}/site-domain`, { hostname: "www.harbor.example", confirm: "www.harbor.exampl" })), /Type the domain again/);
+  assert.equal((await t.oc.post(`/staff/builds/projects/${pid}/site-domain`, { hostname: "www.harbor.example", confirm: "www.harbor.example" })).status, 303);
+  const other = await reviewedProject(t);
+  await t.oc.post(`/staff/builds/projects/${other.pid}/site-target`);
+  assert.match(flash(await t.oc.post(`/staff/builds/projects/${other.pid}/site-domain`, { hostname: "www.harbor.example", confirm: "www.harbor.example" })), /already assigned to another customer/);
+  const otherTarget = (await t.db.prepare(`SELECT worker_name FROM site_targets WHERE project_id = ?`).bind(other.pid).first<{ worker_name: string }>())!;
+  assert.notEqual(otherTarget.worker_name, target.worker_name, "one deployment identity per customer project");
+
+  // Step 4: a shared preview needs the customer's approval; an unshared one needs a recorded reason.
+  await t.db.prepare(`UPDATE build_jobs SET customer_preview_shared_at = ? WHERE id = ?`).bind(new Date().toISOString(), firstJobId).run();
+  assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`)), /customer has not reviewed the shared preview/);
+  await t.db.prepare(`UPDATE build_jobs SET customer_preview_shared_at = NULL WHERE id = ?`).bind(firstJobId).run();
+  assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`)), /record why customer review does not apply/);
+  // Step 6: prepare v1 (deploys nothing).
+  assert.equal((await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "Owner-managed site; reviewed on a call." })).status, 303);
+  const v1 = (await t.db.prepare(`SELECT * FROM site_deployments WHERE project_id = ? AND version = 1`).bind(pid).first<{ id: string; state: string; worker_name: string; hostname: string }>())!;
+  assert.equal(v1.state, "prepared");
+  assert.equal(v1.worker_name, target.worker_name);
+  assert.equal(v1.hostname, "www.harbor.example");
+  assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "again" })), /already prepared or in progress/);
+  // Nothing is offered to a runner before authorization, nor to one without the capability.
+  assert.deepEqual((await runner(t, "deployments/claim", caps)).json, { deployment: null });
+
+  // Step 7: Owner-only, typed confirmation. Another staff role cannot authorize.
+  const admin = await createStaff(t.db, "administrator", "admin-d5@crestmont.test");
+  const ac = await t.client().login(admin.email, undefined, admin.secret);
+  assert.equal((await ac.post(`/staff/builds/releases/${v1.id}/authorize`, { confirm: v1.worker_name })).status, 403);
+  assert.match(flash(await t.oc.post(`/staff/builds/releases/${v1.id}/authorize`, { confirm: "cm-site-wrong" })), /Type the site's Worker name/);
+  assert.equal((await t.oc.post(`/staff/builds/releases/${v1.id}/authorize`, { confirm: v1.worker_name, note: "Go live" })).status, 303);
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.site_release_authorized' AND actor_user_id = ?`).bind(t.owner.id).first());
+  assert.deepEqual((await runner(t, "deployments/claim", { runnerId: "r1" })).json, { deployment: null }, "a runner without production-deploy never gets a release");
+
+  // Steps 8-10: the runner claims it (lease), deploys and reports verification evidence.
+  const c1 = (await runner(t, "deployments/claim", caps)).json.deployment;
+  assert.deepEqual({ ...c1, leaseToken: "x" }, { id: v1.id, leaseToken: "x", kind: "release", version: 1, projectId: pid, workerName: v1.worker_name, hostname: "www.harbor.example", sourceRepo: REPO, sourceCommit: "first0000001" });
+  assert.equal((await runner(t, "deployments/claim", caps)).json.deployment, null, "claimed once");
+  assert.equal((await runner(t, "deployments/complete", { deploymentId: v1.id, leaseToken: "0".repeat(64), result: "deployed" })).status, 409);
+  const sha = "a".repeat(64);
+  const verified = { url: "https://www.harbor.example/", httpStatus: 200, expectedSha256: sha, actualSha256: sha, matched: true, attempts: 1 };
+  assert.deepEqual((await runner(t, "deployments/complete", { deploymentId: v1.id, leaseToken: c1.leaseToken, result: "deployed", deployedUrl: "https://cm-site-x.acct.workers.dev", contentSha256: sha, verification: verified })).json, { state: "live" });
+  assert.equal((await runner(t, "deployments/complete", { deploymentId: v1.id, leaseToken: c1.leaseToken, result: "deployed" })).status, 409, "reported once");
+  const note = await t.db.prepare(`SELECT body FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`).bind(cu.id).first<{ body: string }>();
+  assert.match(note!.body, /Version 1 of your website was published and verified at https:\/\/www.harbor.example/);
+  // D2 hand-off: the approved preview's retention starts only now that its production deployment is verified.
+  assert.equal((await B.previewRetentionFor(t.db, (await B.getJob(t.db, firstJobId))!)).status, "scheduled");
+  const page = await (await t.oc.get(deliveryUrl)).text();
+  assert.match(page, /Live and verified/);
+  assert.match(page, /content matches the release/);
+  assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "again" })), /already live/);
+
+  // A newer approved build: v2 deploys but fails verification (v1 stays live); v3 goes live and supersedes v1.
+  assert.equal((await t.oc.post(`/staff/builds/${firstJobId}/revision`, { instruction: "Add the opening hours to the footer of every page." })).status, 303);
+  const rc = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  await runner(t, "complete", { jobId: rc.id, leaseToken: rc.leaseToken, outcome: "ready_for_review", runCostUsd: 0, sourceRepo: REPO, sourceCommit: "rev10000001", previewUrl: "https://cm-prv-x-r1.acct.workers.dev", previewName: "cm-prv-x-r1", previewGated: true });
+  await internalOk(t, rc.id);
+  assert.equal((await t.oc.post(`/staff/builds/${rc.id}/approve`, { notes: "" })).status, 303);
+  assert.match(flash(await t.oc.post(`/staff/builds/${firstJobId}/prepare-release`, { customer_review_na: "old" })), /newer build of this project was approved/);
+  const release = async (expectState: string, verification: unknown) => {
+    assert.equal((await t.oc.post(`/staff/builds/${rc.id}/prepare-release`, { customer_review_na: "Owner-managed site." })).status, 303);
+    const d = (await t.db.prepare(`SELECT id, worker_name, version FROM site_deployments WHERE project_id = ? ORDER BY version DESC LIMIT 1`).bind(pid).first<{ id: string; worker_name: string; version: number }>())!;
+    await t.oc.post(`/staff/builds/releases/${d.id}/authorize`, { confirm: d.worker_name });
+    const c = (await runner(t, "deployments/claim", caps)).json.deployment;
+    assert.equal((await runner(t, "deployments/complete", { deploymentId: d.id, leaseToken: c.leaseToken, result: "deployed", contentSha256: sha, verification })).json.state, expectState);
+    return d;
+  };
+  const v2 = await release("verification_failed", { ...verified, actualSha256: "b".repeat(64), matched: false });
+  assert.equal((await D.getDeployment(t.db, v1.id))!.state, "live", "a failed verification does not replace the live version");
+  assert.equal(v2.version, 2);
+  const v3 = await release("live", verified);
+  assert.equal((await D.getDeployment(t.db, v1.id))!.state, "superseded");
+  // Rollback: a new version from v1's source, authorized like any release.
+  assert.equal((await t.oc.post(`/staff/builds/releases/${v1.id}/rollback`)).status, 303);
+  const v4 = (await t.db.prepare(`SELECT * FROM site_deployments WHERE project_id = ? AND version = 4`).bind(pid).first<{ id: string; kind: string; rollback_of: string; source_commit: string; state: string }>())!;
+  assert.deepEqual([v4.kind, v4.rollback_of, v4.source_commit, v4.state], ["rollback", v1.id, "first0000001", "prepared"]);
+  assert.match(flash(await t.oc.post(`/staff/builds/releases/${v3.id}/rollback`)), /is the one live now/);
+  assert.equal((await t.oc.post(`/staff/builds/releases/${v4.id}/authorize`, { confirm: target.worker_name })).status, 303);
+  // The runner vanishes mid-deployment: failed, never retried automatically.
+  const c4 = (await runner(t, "deployments/claim", caps)).json.deployment;
+  assert.equal(c4.sourceCommit, "first0000001");
+  await B.sweepBuilds(t.db, new Date(Date.now() + 2 * 3600_000));
+  assert.equal((await D.getDeployment(t.db, v4.id))!.state, "failed");
+  assert.equal((await runner(t, "deployments/claim", caps)).json.deployment, null);
+  assert.equal((await D.getDeployment(t.db, v3.id))!.state, "live", "the live version is untouched");
+  // Cancel: a prepared release can be withdrawn with a reason.
+  assert.equal((await t.oc.post(`/staff/builds/releases/${v1.id}/rollback`)).status, 303);
+  const v5 = (await t.db.prepare(`SELECT id FROM site_deployments WHERE project_id = ? AND version = 5`).bind(pid).first<{ id: string }>())!;
+  assert.equal((await t.oc.post(`/staff/builds/releases/${v5.id}/cancel`, { reason: "Not today" })).status, 303);
+  assert.equal((await D.getDeployment(t.db, v5.id))!.state, "canceled");
+  for (const a of ["builds.site_target_created", "builds.site_domain_changed", "builds.site_release_prepared", "builds.site_release_live", "builds.site_release_failed", "builds.site_rollback_prepared", "builds.site_release_canceled"])
+    assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = ?`).bind(a).first(), a);
+  // Customers have no access to delivery controls.
+  assert.equal((await other.c.get(deliveryUrl)).status, 403);
+});
+
+// ── Founder decision D1 (2026-10-28): owner approval of customer revisions ──
+
+test("[AIB-006] [AIB-007] D1: customer revisions wait for the owner; rejection starts no build, frees the round and tells the customer; duplicates are one request; approval notifies and queues", async () => {
+  const t = await app();
+  const { pid, c } = await reviewedProject(t);
+  assert.equal((await B.getBuildSettings(t.db)).customer_revision_mode, "owner_approval", "automatic generation is off by default");
+  // Duplicate submissions (double click / resubmit) are one request, one round.
+  const text = "Please add a gallery page with six photos of our cakes.";
+  assert.equal((await c.post(`/portal/projects/${pid}/revisions`, { request: text })).status, 303);
+  const dupRes = await c.post(`/portal/projects/${pid}/revisions`, { request: `  ${text.toUpperCase()}  ` });
+  assert.match(flash(dupRes), /We already have this request \(round 1\)/);
+  let revs = await revisionsOf(t, pid);
+  assert.equal(revs.length, 1);
+  const rev = revs[0];
+  // The customer sees an accurate status: awaiting review.
+  assert.match(await (await c.get(`/portal/projects/${pid}/revisions`)).text(), /Awaiting review/);
+  // The owner sees it with the project's current website, and nothing has been built.
+  const dash = await (await t.oc.get("/staff/builds")).text();
+  assert.match(dash, /Awaiting owner review/);
+  assert.match(dash, /Approve and start AI build/);
+  assert.match(dash, new RegExp(`/staff/builds/customer-revisions/${rev.id}/reject`));
+  assert.equal((await jobOf(t, pid)).length, 1);
+
+  // Reject: no AI build, closed for staff work, round not used, customer told why, audited.
+  assert.match(flash(await t.oc.post(`/staff/builds/customer-revisions/${rev.id}/reject`, { reason: "" })), /Give the customer a reason/);
+  assert.equal((await t.oc.post(`/staff/builds/customer-revisions/${rev.id}/reject`, { reason: "A gallery is not part of the Starter package; we can quote it separately." })).status, 303);
+  assert.equal((await jobOf(t, pid)).length, 1, "rejected requests trigger no AI build");
+  const after = (await B.getCustomerRevision(t.db, rev.id))!;
+  assert.equal(after.decision, "rejected");
+  assert.ok(!(await B.customerRevisionQueue(t.db)).some((r) => r.id === rev.id), "gone from the owner's queue");
+  await assert.rejects(B.forwardCustomerRevision(t.db, rev.id, { kind: "user", userId: t.owner.id }), /was rejected/);
+  const st = await t.oc.post(`/staff/revisions/${rev.id}/status`, { status: "in_progress" });
+  assert.ok([303, 409].includes(st.status), `status ${st.status}`);
+  assert.equal((await revisionsOf(t, pid))[0].status, "submitted", "staff cannot start a rejected request either");
+  assert.equal((await t.db.prepare(`SELECT COUNT(*) AS n FROM revisions WHERE project_id = ? AND included = 1 AND COALESCE(ai_decision,'') <> 'rejected'`).bind(pid).first<{ n: number }>())!.n, 0, "the round is not used");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.customer_revision_rejected' AND actor_user_id = ?`).bind(t.owner.id).first());
+  const portal = await (await c.get(`/portal/projects/${pid}/revisions`)).text();
+  assert.match(portal, /Not accepted/);
+  assert.match(portal, /not part of the Starter package/);
+  assert.ok(await t.db.prepare(`SELECT 1 FROM notifications n JOIN memberships m ON m.user_id = n.user_id WHERE m.role_id = 'customer_admin' AND n.kind = 'revision' AND n.body LIKE '%was not accepted: A gallery is not part%'`).first(), "customer notified with the reason");
+  // A rejected request can be resubmitted (it is closed, so the same text is a new request).
+  assert.equal((await c.post(`/portal/projects/${pid}/revisions`, { request: text })).status, 303);
+  revs = await revisionsOf(t, pid);
+  assert.equal(revs.length, 2);
+  assert.match(flash(await t.oc.post(`/staff/builds/customer-revisions/${rev.id}/reject`, { reason: "again" })), /already rejected/);
+
+  // Approve the new one: queued for the AI builder, customer told work started, cannot be rejected afterwards.
+  const second = revs[1];
+  assert.equal((await t.oc.post(`/staff/builds/customer-revisions/${second.id}/forward`, { instruction: "" })).status, 303);
+  const job = (await jobOf(t, pid)).find((j) => j.customer_revision_id === second.id)!;
+  assert.equal(job.state, "queued", "approved requests enter the existing build queue");
+  assert.equal((await B.getCustomerRevision(t.db, second.id))!.decision, "approved");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM notifications n JOIN memberships m ON m.user_id = n.user_id WHERE m.role_id = 'customer_admin' AND n.kind = 'revision' AND n.body LIKE 'Revision round % was accepted%'`).first(), "customer told work started");
+  assert.match(await (await c.get(`/portal/projects/${pid}/revisions`)).text(), /In progress/);
+  assert.match(flash(await t.oc.post(`/staff/builds/customer-revisions/${second.id}/reject`, { reason: "Changed my mind" })), /AI build is working on this request/);
+  // Tenant isolation: another customer cannot see or act on these requests.
+  const other = await customerWithOrder(t);
+  assert.equal((await other.c.get(`/portal/projects/${pid}/revisions`)).status, 404);
+  assert.equal((await other.c.post(`/staff/builds/customer-revisions/${second.id}/reject`, { reason: "nope nope" })).status, 403);
 });

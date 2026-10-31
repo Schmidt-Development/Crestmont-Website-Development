@@ -1,4 +1,4 @@
-# AI Builds — runner protocol (v1.1)
+# AI Builds — runner protocol (v1.1; additive revisions to v1.5)
 
 The Crestmont Worker is the **control plane** (eligibility, queue, leases, budgets, state, owner controls, records).
 Coding runs in a separate **build runner** (Node 22 process) that pulls work over HTTPS. By default it uses a
@@ -42,6 +42,13 @@ Body `{ "runnerId": "string (≤64)", "version": "runner semver", "capabilities"
 ```
 Claiming is atomic: one job per lease, at most `max_concurrent` active jobs, never two active jobs for a project.
 
+**Paid-provider gate (platform side).** A runner whose `capabilities` do not include `"zero-token-cost"` (the paid
+Agent SDK adapter, or an unknown/older runner) is treated as paid and answered
+`{ "job": null, "reason": "paid_provider_not_authorized" }` unless the Worker sets `BUILD_ALLOW_PAID_PROVIDER=true`.
+Paid AI therefore needs both keys (runner `RUNNER_ALLOW_PAID_PROVIDER=true` and platform `BUILD_ALLOW_PAID_PROVIDER=true`)
+plus the budgets. Runners treat an unknown reason like `paused` (back off, keep polling). Every claim event records
+the runner version, its capabilities and whether the provider is zero-cost or paid (`build_events.data_json`).
+
 ### `POST /api/builds/runner/heartbeat`
 `{ "jobId", "leaseToken", "stage": "preparing" | "building" | "verifying", "runCostUsd": number (cumulative this attempt),
   "turns": number, "sessionId"?: string, "activity"?: [ { "kind": "step"|"tool"|"check"|"note", "message": "≤500 chars" } ] }`
@@ -76,6 +83,11 @@ Only `verified` may claim a check ran (evidence names the command/screenshot). U
   "sourceRepo": "…", "sourceBranch": "…", "sourceCommit": "…", "previewUrl": "https://…" | null,
   "report": "markdown owner report ≤ 50 KB", "missingInformation"?: ["…"], "error"?: "≤2000" }
 ```
+`previewUrl` is recorded only when it is `https`, has no credentials and its host is under an allowed preview host
+(Worker `BUILD_PREVIEW_HOSTS`, comma-separated, default `.workers.dev`); otherwise it is dropped and an `error` event
+names the rejected URL. For `ready_for_review` only the preview reported by *this* completion is kept (an earlier
+attempt's URL is cleared), and a revision starts with no preview, so the owner can only approve a preview of the
+build under review.
 `released` (v1.1: runner shutdown; work checkpointed) requeues the build without spending an attempt.
 `failed` is retried automatically (bounded by `max_attempts`, resuming the session when a checkpoint exists);
 `stopped` lands in the state the server asked for (`canceled`, `paused`, `budget_paused`).
@@ -104,6 +116,59 @@ calls them only while no build is running, one draft at a time.
 The runner makes one model call per draft, without tools: `system` is the trusted system message and `prompt` is
 untrusted user content, both sent exactly as given. It finishes inside the lease or reports an error. A `404` on
 `ai/claim` disables draft polling until the runner restarts.
+
+## Provider records and preview lifecycle (v1.3, 2026-10-28; additive, older runners keep working)
+
+- `heartbeat` and `complete` may carry `"provider"` (`local` | `claude-agent-sdk` | …, `^[a-z0-9][a-z0-9._-]{0,39}$`)
+  and `"model"` (the model that actually ran, e.g. `qwen3-coder:30b`). The platform stores both per attempt
+  (`build_runs.provider`, `.model`) with `zero_cost` taken from the claim's capabilities; malformed values are ignored.
+- `complete` may carry `"previewName"`: the preview Worker's name (`^cm-prv-[a-z0-9][a-z0-9-]{1,55}$`, one per build:
+  `cm-prv-<project>-b0` / `-r<n>`). Stored only together with an accepted `previewUrl`.
+- `POST /api/builds/runner/previews/claim` `{ "runnerId" }` → `{ "previews": [ { "jobId", "previewName" } ] }` (≤ 10):
+  previews an owner asked to delete, or past the retention period (`PREVIEW-DEPLOYMENT.md` §3). Each is handed out
+  once per hour until reported.
+- `POST /api/builds/runner/previews/deleted` `{ "runnerId", "jobId", "ok": boolean, "error"? }` → `{ "ok": true }`;
+  `404` when no deletion is pending for that build. Same signature header; no lease token (no build is running).
+- Runners call these only while idle and only with `PREVIEW_DELETE` / `PREVIEW_DELETE_COMMAND` configured; a `404` on
+  `previews/claim` (an older platform) disables polling until restart.
+- Claim capability `"preview-cleanup"` is announced when deletion is configured.
+
+## Private previews and customer delivery (v1.4, 2026-10-28; additive)
+- `complete` may include `previewGated: true` when the preview was deployed behind the private-preview gate
+  (Founder decision D3, `PREVIEW-DEPLOYMENT.md` §2a). Only gated previews can be opened by customers; previews
+  reported without it are shown as public legacy previews.
+- Capabilities: `private-preview` (runner has `PREVIEW_GATE_SECRET`), `production-deploy` (runner has
+  `PRODUCTION_DEPLOY_COMMAND` and project repositories).
+- `POST /api/builds/runner/deployments/claim` and `.../deployments/complete`: Owner-authorized customer releases
+  (Founder decision D5). Bodies, lease and states: `DELIVERY.md` §3. The platform hands a release only to a runner
+  declaring `production-deploy`; an expired deployment lease fails the release (never retried automatically).
+- Older platforms answer 404 to these endpoints; the runner then stops polling them until restart.
+
+## GPU workers and orchestration (v1.5, Founder V4, 2026-10-28; additive)
+Details: `ORCHESTRATOR.md`. All endpoints keep the v1 signature and lease rules; older platforms answer 404 and the
+runner falls back to the v1.4 single-repair behavior.
+- `claim` may carry `workerId`, `workerKey` (the Owner-issued enrollment key, stored hashed) and `workerStatus`. When any
+  GPU worker is registered, only enrolled workers get work: builds of the websites assigned to that worker, at most its
+  `max_active_projects` at once, highest effective priority first (Founder priority + 1 per 4 h waiting), refused for a
+  paused worker or one that is not owned hardware. The claimed job includes `spec` (if stored) and `worker`.
+- `POST /api/builds/runner/workers/status`: `{runnerId, workerId, workerKey, status}`. `status` =
+  `{gpu: {name, driver, vramTotalMb, vramUsedMb, utilPercent, source} | null, inference: {state, active, queued,
+  maxConcurrent, loaded[], throughput, switches}, models: [{tag, role, family, parameterSize, quantization,
+  contextTokens, vramMb, vramSource, license, tokensPerSecond, requests, lastOkAt, lastError}], slotsTotal, slotsBusy}`.
+  VRAM figures are stored only with a named source; `gpu: null` clears them.
+- `heartbeat` may include `orchestration: {activity, model, task}`; activity is one of preparing, gpu_running,
+  gpu_waiting, model_switching, testing, reviewing, idle (the dashboard's scheduler view).
+- `POST /api/builds/runner/pipeline/spec`: `{jobId, leaseToken, spec, provider}`; the architect's MasterSpec, validated.
+- `POST /api/builds/runner/cycles/submit`: `{jobId, leaseToken, cycle, evidence, decision, nextPrompt, addresses, prompt,
+  promptSource, reviewerProvider, builderModel, reviewerModel, routing, sessions}`; the platform referee returns the
+  decision (evidence overrules "ready"), the next prompt, or `ESCALATED`, and records the automated acceptance verdict.
+  `READY_FOR_FOUNDER_APPROVAL` from older runners is read as `READY_FOR_INTERNAL_APPROVAL`.
+- `POST /api/builds/runner/integrations/report`, `.../approvals/request`, `.../approvals/list`: the integration
+  checklist (the runner never marks one live; `sandboxStatus`/`sandboxEvidence` come only from the runner's trusted
+  integration layer) and approvals, including `integration_operation` with an `operation` id.
+- `complete` with outcome `released` may include `notBefore` (ISO time, at most 8 days ahead), e.g. when a model could not
+  be loaded: the build is requeued without using an attempt and resumes from its checkpoint. No paid fallback.
+- Capability `dual-model`: the runner serves Model A and Model B. `zero-token-cost` is still required.
 
 ## Lease expiry
 A lease lasts `lease_seconds` (default 180 s) and is renewed by every successful heartbeat. When it expires, the

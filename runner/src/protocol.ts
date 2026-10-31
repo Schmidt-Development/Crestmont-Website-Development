@@ -89,10 +89,16 @@ export interface Job {
   requirements: RequirementItem[];
   limits: JobLimits;
   resume: JobResume | null;
+  /** V2: the Architect's master specification for this website, when the platform has one. */
+  spec?: { version: number; content: unknown } | null;
+  /** V4: the GPU worker this job was assigned to (worker mode). */
+  worker?: { id: string; label: string; maxActiveProjects?: number } | null;
 }
 
 export type ClaimResponse =
-  | { job: null; reason: "none_queued" | "paused" | "at_capacity" }
+  // paid_provider_not_authorized: this runner does not declare zero token cost and the platform has not enabled paid
+  // providers (BUILD_ALLOW_PAID_PROVIDER). Treated like "paused": back off and keep polling.
+  | { job: null; reason: "none_queued" | "paused" | "at_capacity" | "paid_provider_not_authorized" }
   | { job: Job };
 
 export type Stage = "preparing" | "building" | "verifying";
@@ -100,12 +106,17 @@ export type StopReason = "canceled" | "paused" | "budget" | "runtime" | "ineligi
 
 export interface Activity { kind: "step" | "tool" | "check" | "note"; message: string }
 
-export interface HeartbeatRequest {
+/** Which agent provider and model actually run this attempt (optional; protocol v1.2, ignored by older platforms). */
+export interface ProviderReport { provider?: string; model?: string }
+
+export interface HeartbeatRequest extends ProviderReport {
   stage: Stage;
   runCostUsd: number;
   turns: number;
   sessionId?: string;
   activity?: Activity[];
+  /** V4 scheduler view: what the website's agent is doing now (GPU running/waiting/switching, tests, review). */
+  orchestration?: { activity: string; model: string | null; task: string | null };
 }
 
 export type HeartbeatResponse =
@@ -123,7 +134,7 @@ export interface CheckpointRequest {
 
 export type Outcome = "ready_for_review" | "needs_information" | "failed" | "stopped" | "released";
 
-export interface CompleteRequest {
+export interface CompleteRequest extends ProviderReport {
   outcome: Outcome;
   runCostUsd: number;
   turns: number;
@@ -132,9 +143,15 @@ export interface CompleteRequest {
   sourceBranch: string;
   sourceCommit: string;
   previewUrl: string | null;
+  /** The preview Worker's name (protocol v1.2), so the platform can later ask the runner to delete it. */
+  previewName?: string;
+  /** True when the preview was deployed behind the private-preview gate (protocol v1.4; Founder decision D3). */
+  previewGated?: boolean;
   report: string;
   missingInformation?: string[];
   error?: string;
+  /** V3 (outcome "released"): the account's plan capacity returns at this time; requeue not before it. */
+  notBefore?: string;
 }
 
 // ── AI drafts (platform ai_jobs: support replies, lead notes, ...) served by the self-hosted model ──
@@ -185,3 +202,57 @@ export const LIMITS = {
   archiveBytes: 20 * 1024 * 1024,
   runnerId: 64,
 };
+
+// ── Preview lifecycle (protocol v1.2) ──
+/** A preview the platform wants deleted (owner request, or past the retention period). */
+export interface ExpiredPreview { jobId: string; previewName: string }
+export interface ExpiredPreviewsResponse { previews: ExpiredPreview[] }
+
+// ── Customer production delivery (protocol v1.4; Founder decision D5) ──
+/**
+ * A release the Owner explicitly authorized: deploy this project's committed source (sourceRepo @ sourceCommit) to
+ * the customer's own Worker (cm-site-*) on the customer-hosting account, then verify it. Offered only to a runner
+ * that declares the "production-deploy" capability (PRODUCTION_DEPLOY_COMMAND configured).
+ */
+export interface SiteDeployment {
+  id: string;
+  leaseToken: string;
+  kind: "release" | "rollback";
+  version: number;
+  projectId: string;
+  workerName: string;
+  /** A customer domain the Owner authorized separately (attached as a Workers custom domain), or null. */
+  hostname: string | null;
+  sourceRepo: string;
+  sourceCommit: string;
+}
+export interface DeploymentClaimResponse { deployment: SiteDeployment | null }
+export interface DeploymentVerification { url: string | null; httpStatus: number | null; expectedSha256: string | null; actualSha256: string | null; matched: boolean | null; attempts: number }
+export interface DeploymentCompleteRequest {
+  deploymentId: string;
+  leaseToken: string;
+  /** "deployed": the deploy command succeeded (see verification); "failed": nothing was (knowingly) changed. */
+  result: "deployed" | "failed";
+  deployedUrl: string | null;
+  contentSha256: string | null;
+  verification: DeploymentVerification | null;
+  error?: string;
+}
+
+// ── Architecture V2: orchestrator ⇄ platform (additive; older platforms answer 404) ──
+export interface CycleSubmitResponse { cycle: number; decision: string; reason: string; continue: boolean; prompt: string | null }
+/** V4 GPU worker status (with every claim and every minute). Values as measured; absent = not reported. */
+export interface WorkerStatus {
+  gpu?: { name: string | null; driver: string | null; vramTotalMb: number | null; vramUsedMb: number | null; utilPercent: number | null; source: string } | null;
+  inference?: {
+    state: string; active: number; queued: number; maxConcurrent: number; loaded: { model: string; vramMb: number | null }[];
+    throughput: Record<string, { tokensPerSecond: number | null; requests: number }>; switches: { count: number; failures: number; avgMs: number | null };
+  };
+  models?: {
+    tag: string; role: "architect_reviewer" | "builder" | "single"; family: string | null; parameterSize: string | null; quantization: string | null; contextTokens: number;
+    vramMb: number | null; vramSource: "measured" | "configured-estimate" | null; license: string | null; tokensPerSecond: number | null; requests: number; lastOkAt: string | null; lastError: string | null;
+  }[];
+  slotsTotal?: number;
+  slotsBusy?: number;
+  error?: string | null;
+}

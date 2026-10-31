@@ -14,7 +14,8 @@ import { TransitionError } from "../domain/state-machine.ts";
 import { issueMilestoneInvoice } from "./commerce.ts";
 import { taxForNewInvoice } from "./tax.ts";
 import { notify, notifyCustomer, notifyProjectTeam, type MailCtx } from "./notifications.ts";
-import { syncProjectBuildSafe } from "./builds.ts";
+import { syncProjectBuildSafe, syncCustomerRevisionSafe } from "./builds.ts";
+import { sha256Hex } from "../lib/crypto.ts";
 
 export interface ProjectRow {
   id: string; organization_id: string; order_id: string | null; product_id: string | null; name: string; status: ProjectStatus;
@@ -355,7 +356,7 @@ export async function closureChecklist(db: Db, projectId: string): Promise<{ rea
   const openTasks = await n(`SELECT COUNT(*) AS n FROM tasks WHERE project_id = ? AND status <> 'done'`);
   const unpaid = await n(`SELECT COUNT(*) AS n FROM invoices WHERE project_id = ? AND status IN ('draft','open')`);
   const openCos = await n(`SELECT COUNT(*) AS n FROM change_orders WHERE project_id = ? AND status IN ('proposed','approved')`);
-  const openRevs = await n(`SELECT COUNT(*) AS n FROM revisions WHERE project_id = ? AND status IN ('submitted','in_progress')`);
+  const openRevs = await n(`SELECT COUNT(*) AS n FROM revisions WHERE project_id = ? AND status IN ('submitted','in_progress') AND COALESCE(ai_decision, '') <> 'rejected'`);
   const checks: ClosureCheck[] = [
     { key: "deployment", label: "Deployment recorded", ok: !!dep, required: true, detail: dep ? `${dep.url} on ${dep.deployed_at.slice(0, 10)}` : "no deployment recorded" },
     { key: "handoff", label: "Handoff published to the customer", ok: !!h?.published_at, required: true, detail: h?.published_at ? `published ${h.published_at.slice(0, 10)}` : "handoff not published" },
@@ -612,31 +613,42 @@ export async function logTime(db: Db, actor: Actor, userId: string, taskId: stri
 
 // ───────────── Revisions & change orders ─────────────
 
-export interface RevisionRow { id: string; project_id: string; round: number; request_text: string; status: string; billable_change_order_id: string | null; submitted_by: string; created_at: string; included: number; delivered_at: string | null; delivery_notes: string | null }
+export interface RevisionRow { id: string; project_id: string; round: number; request_text: string; status: string; billable_change_order_id: string | null; submitted_by: string; created_at: string; included: number; delivered_at: string | null; delivery_notes: string | null;
+  /** Owner decision on the request (Owner -> AI builds): null = awaiting review. */
+  ai_decision?: "approved" | "rejected" | null; ai_decided_at?: string | null; ai_decision_note?: string | null }
 
 export async function revisionUsage(db: Db, projectId: string): Promise<{ allowance: number; used: number; total: number }> {
-  const r = await db.prepare(`SELECT p.revision_allowance AS allowance, (SELECT COUNT(*) FROM revisions WHERE project_id = p.id AND included = 1) AS used, (SELECT COUNT(*) FROM revisions WHERE project_id = p.id) AS total FROM projects p WHERE p.id = ?`).bind(projectId).first<{ allowance: number; used: number; total: number }>();
+  // A request the Owner rejected (Owner -> AI builds) does not use one of the included rounds.
+  const r = await db.prepare(`SELECT p.revision_allowance AS allowance, (SELECT COUNT(*) FROM revisions WHERE project_id = p.id AND included = 1 AND COALESCE(ai_decision, '') <> 'rejected') AS used, (SELECT COUNT(*) FROM revisions WHERE project_id = p.id) AS total FROM projects p WHERE p.id = ?`).bind(projectId).first<{ allowance: number; used: number; total: number }>();
   return r ?? { allowance: 0, used: 0, total: 0 };
 }
 
 const REVISION_OPEN_STATUSES: ProjectStatus[] = ["design", "development", "internal_qa", "customer_review", "revisions", "final_approval"];
 
 /** Customer submits a revision request. Within the allowance it is an included round; beyond it, the round is recorded as billable and a change order is required. */
-export async function requestRevision(ctx: MailCtx, input: { organizationId: string; projectId: string; userId: string; text: string }): Promise<{ revisionId: string; decision: ReturnType<typeof decideRevision> }> {
+export async function requestRevision(ctx: MailCtx, input: { organizationId: string; projectId: string; userId: string; text: string }): Promise<{ revisionId: string; decision: ReturnType<typeof decideRevision>; duplicate?: boolean }> {
   const text = input.text.trim();
   if (text.length < 10) throw new HttpError(422, "Describe the changes you need (at least 10 characters).");
   if (text.length > 10_000) throw new HttpError(422, "Revision requests are limited to 10,000 characters.");
   const p = await getOrgProject(ctx.db, input.organizationId, input.projectId);
   if (!REVISION_OPEN_STATUSES.includes(p.status)) throw new HttpError(409, "Revisions can be requested once design work has started and before launch.");
-  const pending = await ctx.db.prepare(`SELECT 1 FROM revisions WHERE project_id = ? AND included = 0 AND billable_change_order_id IS NULL AND status = 'submitted'`).bind(p.id).first();
+  // Duplicate submission (double click, resubmitted form): the same open request is returned, not a new round.
+  const requestHash = await sha256Hex(text.toLowerCase().replace(/\s+/g, " "));
+  const dup = await ctx.db.prepare(`SELECT id, round, included FROM revisions WHERE project_id = ? AND request_hash = ? AND status IN ('submitted','in_progress') AND COALESCE(ai_decision, '') <> 'rejected' ORDER BY round DESC LIMIT 1`)
+    .bind(p.id, requestHash).first<{ id: string; round: number; included: number }>();
+  if (dup) {
+    const usageNow = await revisionUsage(ctx.db, p.id);
+    return { revisionId: dup.id, duplicate: true, decision: dup.included ? { kind: "included", round: dup.round, remainingAfter: Math.max(0, usageNow.allowance - usageNow.used) } : { kind: "change_order_required", round: dup.round } };
+  }
+  const pending = await ctx.db.prepare(`SELECT 1 FROM revisions WHERE project_id = ? AND included = 0 AND billable_change_order_id IS NULL AND status = 'submitted' AND COALESCE(ai_decision, '') <> 'rejected'`).bind(p.id).first();
   if (pending) throw new HttpError(409, "A request beyond your included revisions is waiting for a change-order proposal. We will send pricing shortly.");
   const usage = await revisionUsage(ctx.db, p.id);
   const decision = decideRevision(p.revision_allowance, usage.used);
   const id = newId("rev");
   const at = nowIso();
   await ctx.db.batch([
-    ctx.db.prepare(`INSERT INTO revisions (id, project_id, round, request_text, status, submitted_by, created_at, included) VALUES (?,?,?,?, 'submitted', ?,?,?)`)
-      .bind(id, p.id, usage.total + 1, text, input.userId, at, decision.kind === "included" ? 1 : 0),
+    ctx.db.prepare(`INSERT INTO revisions (id, project_id, round, request_text, status, submitted_by, created_at, included, request_hash) VALUES (?,?,?,?, 'submitted', ?,?,?,?)`)
+      .bind(id, p.id, usage.total + 1, text, input.userId, at, decision.kind === "included" ? 1 : 0, requestHash),
     ctx.db.prepare(`UPDATE projects SET last_customer_activity_at = ?, updated_at = ? WHERE id = ?`).bind(at, at, p.id),
   ]);
   await audit(ctx.db, { actorUserId: input.userId, action: "revision.requested", subjectType: "project", subjectId: p.id, organizationId: p.organization_id, details: { revisionId: id, round: usage.total + 1, decision: decision.kind } });
@@ -647,6 +659,9 @@ export async function requestRevision(ctx: MailCtx, input: { organizationId: str
     mail: decision.kind === "included" ? { template: "revision_update", data: { event: "requested", round: decision.round, allowance: p.revision_allowance } }
       : { template: "revision_update", data: { event: "beyond_allowance", allowance: p.revision_allowance } },
     path: `/staff/projects/${p.id}?tab=revisions`, key: `rev:${id}` });
+  // AI builder policy (Owner -> AI builds): with "auto", an entitled request is queued as an AI revision now;
+  // otherwise it waits in the owner's queue. Never fails the customer's request.
+  await syncCustomerRevisionSafe(ctx.db, id);
   return { revisionId: id, decision };
 }
 
@@ -654,6 +669,7 @@ export async function updateRevisionStatus(ctx: MailCtx, actor: Actor, userId: s
   const r = await ctx.db.prepare(`SELECT r.*, p.organization_id FROM revisions r JOIN projects p ON p.id = r.project_id WHERE r.id = ?`).bind(revisionId).first<RevisionRow & { organization_id: string }>();
   if (!r) throw new HttpError(404, "Revision not found");
   if (!can(actor, "project.coordinate") && !(can(actor, "task.update_assigned") && (await staffCanSeeProject(ctx.db, actor, userId, r.project_id)))) throw new HttpError(403, "You cannot update revisions on this project.");
+  if ((r as RevisionRow & { ai_decision?: string | null }).ai_decision === "rejected") throw new HttpError(409, "The owner rejected this revision request; it is closed.");
   if (!r.included) {
     const co = r.billable_change_order_id ? await ctx.db.prepare(`SELECT status FROM change_orders WHERE id = ?`).bind(r.billable_change_order_id).first<{ status: string }>() : null;
     if (!co || !["approved", "paid", "completed"].includes(co.status)) throw new HttpError(409, "This round is beyond the included allowance; its change order must be approved first.");
@@ -727,6 +743,12 @@ export async function decideChangeOrder(ctx: MailCtx, actor: Actor, input: { org
   await ctx.db.prepare(`UPDATE projects SET last_customer_activity_at = ? WHERE id = ?`).bind(at, co.project_id).run();
   await audit(ctx.db, { actorUserId: input.userId, action: `change_order.${input.decision}`, subjectType: "change_order", subjectId: co.id, organizationId: co.organization_id, details: { projectId: co.project_id, invoiceId, priceCents: co.price_cents } });
   await notifyProjectTeam(ctx, co.project_id, { kind: "change_order", mail: { template: "change_order", data: { event: "decided", decision: input.decision, invoiceIssued: !!invoiceId } }, path: `/staff/projects/${co.project_id}?tab=revisions`, key: `codec:${co.id}` });
+  // An approved change order entitles its revision round: with the "auto" AI policy it is queued now.
+  if (input.decision === "approved") {
+    for (const r of (await ctx.db.prepare(`SELECT id FROM revisions WHERE billable_change_order_id = ? AND status IN ('submitted','in_progress')`).bind(co.id).all<{ id: string }>()).results) {
+      await syncCustomerRevisionSafe(ctx.db, r.id);
+    }
+  }
   return { invoiceId };
 }
 
@@ -740,8 +762,14 @@ export async function listChangeOrders(db: Db, projectId: string): Promise<Chang
   return (await db.prepare(`SELECT c.*, i.status AS invoice_status FROM change_orders c LEFT JOIN invoices i ON i.id = c.invoice_id WHERE c.project_id = ? ORDER BY c.created_at DESC`).bind(projectId).all<ChangeOrderRow>()).results;
 }
 
-export async function listRevisions(db: Db, projectId: string): Promise<(RevisionRow & { co_status: string | null; co_price: number | null })[]> {
-  return (await db.prepare(`SELECT r.*, c.status AS co_status, c.price_cents AS co_price FROM revisions r LEFT JOIN change_orders c ON c.id = r.billable_change_order_id WHERE r.project_id = ? ORDER BY r.round DESC`).bind(projectId).all<RevisionRow & { co_status: string | null; co_price: number | null }>()).results;
+export async function listRevisions(db: Db, projectId: string): Promise<(RevisionRow & { co_status: string | null; co_price: number | null; ai_job_id: string | null; ai_job_state: string | null; ai_preview_url: string | null })[]> {
+  // The most recent AI build for each request (Owner -> AI builds forwards customer revisions to the AI builder).
+  return (await db.prepare(`SELECT r.*, c.status AS co_status, c.price_cents AS co_price,
+      (SELECT j.id FROM build_jobs j WHERE j.customer_revision_id = r.id ORDER BY j.created_at DESC LIMIT 1) AS ai_job_id,
+      (SELECT j.state FROM build_jobs j WHERE j.customer_revision_id = r.id ORDER BY j.created_at DESC LIMIT 1) AS ai_job_state,
+      (SELECT j.preview_url FROM build_jobs j WHERE j.customer_revision_id = r.id ORDER BY j.created_at DESC LIMIT 1) AS ai_preview_url
+    FROM revisions r LEFT JOIN change_orders c ON c.id = r.billable_change_order_id WHERE r.project_id = ? ORDER BY r.round DESC`).bind(projectId)
+    .all<RevisionRow & { co_status: string | null; co_price: number | null; ai_job_id: string | null; ai_job_state: string | null; ai_preview_url: string | null }>()).results;
 }
 
 // ───────────── History ─────────────

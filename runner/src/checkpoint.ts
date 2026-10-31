@@ -12,6 +12,7 @@ import { createBundle, cloneFromBundle } from "./git.ts";
 import type { GitCtx } from "./git.ts";
 import type { Workspace } from "./workspace.ts";
 import { LIMITS } from "./protocol.ts";
+import { resolveWithin } from "./paths.ts";
 
 export interface CheckpointMeta {
   schema: "crestmont.runner-checkpoint/1";
@@ -58,7 +59,7 @@ export async function buildCheckpoint(ws: Workspace, git: GitCtx, meta: Omit<Che
   writeFileSync(path.join(stage, "meta.json"), JSON.stringify(full, null, 2));
 
   const file = path.join(ws.checkpoints, `ckpt-${n}.tgz`);
-  await tarCreate(stage, file, pathEnv, ws.home);
+  await tarCreate(ws, stage, file, pathEnv);
   let bytes = statSync(file).size;
   let note: string | null = null;
   if (bytes > maxBytes && contents.includes("repo.bundle")) {
@@ -66,7 +67,7 @@ export async function buildCheckpoint(ws: Workspace, git: GitCtx, meta: Omit<Che
     rmSync(path.join(stage, "repo.bundle"));
     full.contents = contents.filter((c) => c !== "repo.bundle");
     writeFileSync(path.join(stage, "meta.json"), JSON.stringify(full, null, 2));
-    await tarCreate(stage, file, pathEnv, ws.home);
+    await tarCreate(ws, stage, file, pathEnv);
     bytes = statSync(file).size;
     note = "checkpoint archive exceeded 20 MB; the git bundle was left out (source is in git)";
   }
@@ -83,8 +84,10 @@ function nextIndex(ws: Workspace): number {
   return nums.length ? Math.max(...nums) + 1 : 1;
 }
 
-async function tarCreate(dir: string, file: string, pathEnv: string, home: string): Promise<void> {
-  const r = await run("tar", ["-czf", file, "-C", dir, "."], { env: baseEnv(pathEnv, home), timeoutMs: 120_000 });
+/** Both paths must be inside the job's workspace (absolute, so tar can never read them as options). */
+async function tarCreate(ws: Workspace, dir: string, file: string, pathEnv: string): Promise<void> {
+  const src = resolveWithin(ws.dir, dir), out = resolveWithin(ws.dir, file);
+  const r = await run("tar", ["-czf", out, "-C", src, "."], { env: baseEnv(pathEnv, ws.home), timeoutMs: 120_000 });
   if (r.code !== 0) throw new Error(`tar failed: ${r.stderr.slice(0, 300)}`);
 }
 
@@ -95,9 +98,9 @@ export interface RestoreResult { meta: CheckpointMeta | null; repoRestored: bool
  * still empty) and the transcripts into <home>/.claude/projects/. Archive members are validated before extraction.
  */
 export async function restoreCheckpoint(ws: Workspace, git: GitCtx, archive: Buffer, sessionId: string | null, pathEnv: string, branch: string | null): Promise<RestoreResult> {
-  const dir = path.join(ws.tmp, `restore-${counter++}`);
+  const dir = resolveWithin(ws.dir, path.join(ws.tmp, `restore-${counter++}`));
   mkdirSync(dir, { recursive: true });
-  const archiveFile = path.join(dir, "..", `restore-${counter++}.tgz`);
+  const archiveFile = resolveWithin(ws.dir, path.join(ws.tmp, `restore-${counter++}.tgz`));
   writeFileSync(archiveFile, archive);
   const env = baseEnv(pathEnv, ws.home);
   const list = await run("tar", ["-tzf", archiveFile], { env, timeoutMs: 60_000 });

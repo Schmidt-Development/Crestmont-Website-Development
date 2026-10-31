@@ -1,4 +1,4 @@
-// Node 1 dispatch-to-GPU diagnostic, platform side (migration 0051). Every runner call here is a SIGNED HTTP FIXTURE
+// Node 1 dispatch-to-GPU diagnostic, platform side (migration 0050). Every runner call here is a SIGNED HTTP FIXTURE
 // made by the test: no runner process, no Ollama, no GPU. These tests prove that the platform records each checkpoint
 // honestly (and refuses forged ones). They are NOT evidence that Node 1 executed anything.
 import { test } from "node:test";

@@ -23,6 +23,7 @@ import { sendMail } from "../services/mailer.ts";
 import { audit } from "../services/security.ts";
 import { PACKAGES, type PackageId } from "../domain/catalog.ts";
 import * as T from "../services/customer-team.ts";
+import { customerPreviews } from "../services/builds.ts";
 
 type Org = ReturnType<typeof requireCustomerOrg>;
 
@@ -538,7 +539,17 @@ ${button("Send message")}</form>`;
     const cos = await P.listChangeOrders(ctx.db, proj.id);
     const usage = await P.revisionUsage(ctx.db, proj.id);
     const remaining = Math.max(0, proj.revision_allowance - usage.used);
-    const body = html`${pageHead("Revisions", undefined, proj.name)}${projectTabs(ctx, proj.id)}
+    const previews = await customerPreviews(ctx.db, org.organizationId, proj.id);
+    const previewSection = previews.length ? html`<section class="card" style="margin-bottom:1.5rem"><h2 class="card__title">Website previews</h2>
+<p class="muted">Previews are private: they open only from this page while you are signed in, and links expire after a few minutes.</p>
+${table(previews, [
+  { header: "Preview", cell: (v) => v.label },
+  { header: "Shared", cell: (v) => fmtDay(v.sharedAt) },
+  { header: "Your review", cell: (v) => v.review ? html`${badge(v.review === "approved" ? "approved" : "pending", v.review === "approved" ? "Ready" : "Changes requested")}${v.reviewNote ? html`<br><span class="faint">${v.reviewNote}</span>` : ""}` : badge("pending", "Awaiting your review") },
+  { header: "", cell: (v) => v.available ? html`<a class="btn btn--secondary btn--sm" href="/portal/projects/${proj.id}/previews/${v.buildId}" target="_blank" rel="noopener noreferrer">Open preview</a>
+${isAdmin(org) ? html`<form method="post" action="/portal/projects/${proj.id}/previews/${v.buildId}/review" class="stack" style="margin-top:.5rem">${csrf(ctx)}${textarea({ name: "note", label: "Comments (required when asking for changes)", maxlength: 2000, rows: 2, id: `prv-note-${v.buildId}` })}<div class="row">${button("It is ready", { name: "decision", value: "approved", size: "sm" })}${button("Request changes", { variant: "ghost", name: "decision", value: "changes_requested", size: "sm" })}</div></form>` : ""}` : html`<span class="faint">No longer available</span>` },
+])}</section>` : "";
+    const body = html`${pageHead("Revisions", undefined, proj.name)}${projectTabs(ctx, proj.id)}${previewSection}
 <div class="kpis">${kpi("Included rounds", proj.revision_allowance, packageName(proj.product_id))}${kpi("Used", usage.used)}${kpi("Remaining", remaining, remaining ? undefined : "Further changes need a change order")}</div>
 ${formErrors(errors)}
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Request a revision</h2>
@@ -550,7 +561,10 @@ ${c.invoice_id ? html`<p>Invoice: ${badge(c.invoice_status ?? "open")} ${c.invoi
 <section style="margin-top:1.5rem"><h2>Revision rounds</h2>${table(revs, [
   { header: "Round", cell: (x) => html`${x.round}${x.included ? "" : html` ${badge("requested", "Billable")}`}` },
   { header: "Request", cell: (x) => nl2br(x.request_text.length > 300 ? x.request_text.slice(0, 297) + "…" : x.request_text) },
-  { header: "Status", cell: (x) => (!x.included && !x.billable_change_order_id ? badge("pending", "Awaiting change-order quote") : badge(x.status)) },
+  { header: "Status", cell: (x) => x.ai_decision === "rejected" ? html`${badge("rejected", "Not accepted")}${x.ai_decision_note ? html`<br><span class="faint">${x.ai_decision_note}</span>` : ""}`
+    : !x.included && !x.billable_change_order_id ? badge("pending", "Awaiting change-order quote")
+    : x.status === "submitted" && !x.ai_decision ? badge("pending", "Awaiting review")
+    : x.status === "in_progress" ? badge("in_progress", "In progress") : badge(x.status) },
   { header: "Change order", cell: (x) => (x.co_status ? html`${badge(x.co_status)} ${formatCents(x.co_price)}` : "—") },
   { header: "Submitted", cell: (x) => fmtDay(x.created_at) },
   { header: "", cell: (x) => (x.status === "delivered" ? html`<a class="btn btn--secondary btn--sm" href="/portal/projects/${proj.id}/approvals">Review &amp; approve</a>` : "") },
@@ -563,7 +577,8 @@ ${c.invoice_id ? html`<p>Invoice: ${badge(c.invoice_status ?? "open")} ${c.invoi
     const f = await ctx.form();
     return orRerender((errs, st) => revisionsPage(ctx, org, p.id, errs, st), async () => {
       const res = await P.requestRevision(ctx, { organizationId: org.organizationId, projectId: p.id, userId: ctx.user!.id, text: str(f, "request") });
-      return redirect(ctx, `/portal/projects/${p.id}/revisions`, { kind: "success", text: res.decision.kind === "included" ? `Revision round ${res.decision.round} submitted.` : "Request received. Your included rounds are used, so we will send a change order for approval." });
+      if (res.duplicate) return redirect(ctx, `/portal/projects/${p.id}/revisions`, { kind: "info", text: `We already have this request (round ${res.decision.round}); nothing new was submitted.` });
+      return redirect(ctx, `/portal/projects/${p.id}/revisions`, { kind: "success", text: res.decision.kind === "included" ? `Revision round ${res.decision.round} submitted. We will review it and let you know when work starts.` : "Request received. Your included rounds are used, so we will send a change order for approval." });
     });
   });
   r.post("/portal/change-orders/:id/decide", async (ctx, p) => {

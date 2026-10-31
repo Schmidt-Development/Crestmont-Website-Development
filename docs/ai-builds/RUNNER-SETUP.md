@@ -89,6 +89,9 @@ It is never written to `.git/config` and never reaches the agent. Branches pushe
 
 ## 5. Preview deploys (optional)
 
+**On the Windows build machine follow `PREVIEW-DEPLOYMENT.md`** (settings go in `runner.local.env`, single-quoted;
+per-build Worker names, sanitized export, deletion and retention). The steps below are the original Linux-host notes.
+
 Without this, reports say "Preview unavailable".
 
 1. Create a **separate Cloudflare account** for previews only (for example "Crestmont Previews"). Never the
@@ -109,7 +112,13 @@ The runner (not the agent) runs the command in the job repository after the acce
 `PREVIEW_DEPLOY_ENV` added to a secret-free environment. It reads the URL from a `PREVIEW_URL=https://…` line or the
 last `*.workers.dev` URL in the output. It refuses to deploy when the project's Wrangler config has a custom
 `build` command, routes or custom domains. `workers.dev` previews are public to anyone with the link; put Cloudflare
-Access in front of the preview account if that matters.
+Access in front of the preview account if that matters. The platform records a preview URL only when its host is
+under `BUILD_PREVIEW_HOSTS` (Worker variable, default `.workers.dev`); set it if previews use another host.
+
+On the Windows compose stack the runner's network has no route out except the egress proxy: git push and the preview
+command use the runner's `HTTPS_PROXY` (passed to those commands only, never to the agent), and the proxy must allow
+their hosts. Add them with the installer's `-ExtraEgressDomains github.com,api.github.com,api.cloudflare.com` (plus
+`registry.npmjs.org` when the deploy command runs `npx wrangler`).
 
 ## 6. Curated skills
 
@@ -227,6 +236,10 @@ v1.1), which requeues it without spending an attempt; the next attempt resumes t
 
 ## 9. First real run (acceptance)
 
+This section is for the optional paid Agent SDK adapter on a Linux host. For the default self-hosted runner on the
+Windows machine, follow `LOCAL-VALIDATION.md` (and `FOUNDER-RUNNER-INSTALL.md`) instead: logs come from
+`docker compose -f C:\CrestmontRunner\compose\docker-compose.yml logs -f runner` and the spend is always $0.
+
 1. Run `--preflight` (section 8) until it passes.
 2. In the platform, queue one internal test project on the Starter package with a low run budget (for example $5).
 3. Watch `docker logs -f crestmont-ai-runner` and the owner dashboard: stages preparing → building → verifying,
@@ -243,7 +256,8 @@ path, sanitized again server-side). Registered secret values and common token sh
 
 Workspaces under `/workspaces` contain customer project data (brief, files, code, session transcripts) and are kept
 after each attempt for resume and debugging. Delete old ones according to `docs/RETENTION-SCHEDULE.md`, for example
-`find /var/lib/docker/volumes/crestmont-ai-workspaces/_data -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} +`.
+`find /var/lib/docker/volumes/crestmont-ai-workspaces/_data -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} +`
+(on the Windows machine the volume is `crestmont-workspaces`, inside Docker Desktop's WSL 2 VM).
 
 ## 11. Cost controls (from hardest to softest)
 
@@ -268,11 +282,10 @@ fails on `npm install`, `npx --yes` or `curl | sh` in a Dockerfile).
 | Manifest | What it installs | Lockfile |
 | --- | --- | --- |
 | `runner/package.json` | Nothing: the local default (agent loop, model client, sandbox, drafts) uses only Node built-ins. | `runner/package-lock.json`, committed. Generated with `npm install --package-lock-only --offline` (there is nothing to resolve). The runner image runs `npm ci --omit=dev --ignore-scripts`, which fails if the two disagree. |
-| `runner/sandbox/package.json` | `playwright` 1.63.0 (exact) for `browser-check.mjs`; the image then downloads that Playwright's Chromium. 1.63.0 is the version the real-Chromium browser-check test ran with. | `runner/sandbox/package-lock.json`: **not committed yet** (no registry access where this was written; a hand-written lockfile would be fabricated). |
+| `runner/sandbox/package.json` | `playwright` 1.63.0 (exact) for `browser-check.mjs`; the image then downloads that Playwright's Chromium. 1.63.0 is the version the real-Chromium browser-check test ran with. | `runner/sandbox/package-lock.json`: committed 2026-10-28 (playwright + playwright-core 1.63.0; integrity hashes from an independent install of those exact versions, registry URLs). CI's sandbox image build ran `npm ci` from it, which verifies every hash against the registry tarballs, and passed. CI now fails if it is missing. |
 | `runner/agent-sdk/package.json` | Optional paid adapter only: `@anthropic-ai/claude-agent-sdk` and `playwright` (exact). Moved out of `optionalDependencies` so the default lockfile is complete. | `runner/agent-sdk/package-lock.json`: not committed. `--build-arg INSTALL_AGENT_SDK=true` refuses to build without it. |
 
-To create a missing lockfile: take it from the `runner-lockfiles` artifact of the CI job `runner-images` (CI
-generates it for that build and prints a warning), or on any machine with registry access run
+To regenerate a lockfile (for example after changing a pinned version), on any machine with registry access run
 `cd runner/sandbox && npm install --package-lock-only --ignore-scripts`. Review it (every `resolved` URL is
 `https://registry.npmjs.org/...`, every entry has a `sha512-` integrity) and commit it; the supply-chain test then
 validates it on every run. `Install-CrestmontRunner.ps1` stops before building when a lockfile is missing.
@@ -280,10 +293,10 @@ validates it on every run. `Install-CrestmontRunner.ps1` stops before building w
 **Base images** are exact version tags, never floating: `node:22.23.4-bookworm-slim` (runner and sandbox; the Node
 version the tests ran on), `docker:27.5.1-cli` (Docker CLI copied into the runner), `debian:12.12-slim` (proxy),
 `ollama/ollama:0.32.0` (optional ollama-in-docker profile; the installer's `-OllamaImage`). They are `ARG`s at the top
-of each Dockerfile. Digests could not be fetched here (Docker Hub was unreachable), so they are **not** pinned by
-digest yet: the `runner-images` job writes the digest each tag resolved to into its job summary. After reviewing a
-green build, append them (`ARG NODE_IMAGE=node:22.23.4-bookworm-slim@sha256:<digest>`); the test accepts
-`tag@sha256:<digest>`. Debian packages are not version-pinned (bookworm security updates win); hadolint's DL3008 is
+of each Dockerfile. Since 2026-10-28 every one is **pinned by tag and digest** (`tag@sha256:<digest>`, the digests
+CI's `runner-images` job resolved; the compose default and the installer's `-OllamaImage` default included), and the
+supply-chain test requires a digest. The CI job reports each tag's current digest as a "Base image digest" annotation
+and says whether the pin is still current; re-pin only after reviewing what changed. Debian packages are not version-pinned (bookworm security updates win); hadolint's DL3008 is
 ignored inline for that reason only.
 
 **CI image build** (`.github/workflows/ci.yml`, job `runner-images`, `contents: read`, nothing pushed): hadolint

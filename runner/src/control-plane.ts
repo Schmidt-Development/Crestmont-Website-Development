@@ -6,8 +6,8 @@
 import { createHmac } from "node:crypto";
 import type {
   ClaimResponse, HeartbeatRequest, HeartbeatResponse, CheckpointRequest, RequirementItem, CompleteRequest, Job,
-  AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest, DiagnosticCheckpoint,
-} from "./protocol.ts";
+  AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest, DiagnosticCheckpoint, ExpiredPreview, ExpiredPreviewsResponse,
+  SiteDeployment, DeploymentClaimResponse, DeploymentCompleteRequest, CycleSubmitResponse, WorkerStatus } from "./protocol.ts";
 import { RUNNER_VERSION, LIMITS } from "./protocol.ts";
 import type { Logger } from "./log.ts";
 import { silentLogger, errorMessage } from "./log.ts";
@@ -58,6 +58,8 @@ export class ControlPlaneError extends Error {
 export interface RetryPolicy { attempts: number; baseMs: number; maxMs: number }
 
 export interface ControlPlaneOptions {
+  /** V2 worker mode: the builder worker this runner process serves (id + Crestmont enrollment key). */
+  worker?: { id: string; key: string } | null;
   baseUrl: string;
   secret: string;
   runnerId: string;
@@ -137,7 +139,45 @@ export class ControlPlaneClient {
   claim(capabilities: string[]): Promise<ClaimResponse> {
     return this.post<ClaimResponse>("/api/builds/runner/claim", {
       runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId), version: RUNNER_VERSION, capabilities,
+      ...(this.opts.worker ? { workerId: this.opts.worker.id, workerKey: this.opts.worker.key, workerStatus: this.workerStatus } : {}),
     });
+  }
+
+  /** V2 worker mode: latest status reported with every claim (usage only from an authorized interface). */
+  workerStatus: WorkerStatus = {};
+
+  async reportWorkerStatus(status: WorkerStatus): Promise<void> {
+    this.workerStatus = status;
+    if (!this.opts.worker) return;
+    await this.post("/api/builds/runner/workers/status", { runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId), workerId: this.opts.worker.id, workerKey: this.opts.worker.key, status });
+  }
+
+  /** V2: store the Architect's specification. null = this platform has no V2 endpoints. */
+  async storeSpec(job: Pick<Job, "id" | "leaseToken">, spec: unknown, provider: string): Promise<{ specVersion: number } | null> {
+    try { return await this.post("/api/builds/runner/pipeline/spec", { jobId: job.id, leaseToken: job.leaseToken, spec, provider }); }
+    catch (err) { if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null; throw err; }
+  }
+
+  /** V2: one completed implementation cycle with the reviewer's proposal; the platform returns the authoritative decision. */
+  async submitCycle(job: Pick<Job, "id" | "leaseToken">, body: Record<string, unknown>): Promise<CycleSubmitResponse | null> {
+    try { return await this.post<CycleSubmitResponse>("/api/builds/runner/cycles/submit", { jobId: job.id, leaseToken: job.leaseToken, ...body }); }
+    catch (err) { if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null; throw err; }
+  }
+
+  async reportIntegrations(job: Pick<Job, "id" | "leaseToken">, items: unknown[]): Promise<void> {
+    try { await this.post("/api/builds/runner/integrations/report", { jobId: job.id, leaseToken: job.leaseToken, items }); }
+    catch (err) { if (!(err instanceof ControlPlaneError && (err.status === 404 || err.status === 405))) throw err; }
+  }
+
+  /** Decisions on this job's approval requests (null = a platform without the endpoint). */
+  async listApprovals(job: Pick<Job, "id" | "leaseToken">): Promise<{ id: string; kind: string; summary: string; operation: string | null; status: string; decision_note: string | null }[] | null> {
+    try { return (await this.post<{ approvals: { id: string; kind: string; summary: string; operation: string | null; status: string; decision_note: string | null }[] }>("/api/builds/runner/approvals/list", { jobId: job.id, leaseToken: job.leaseToken })).approvals; }
+    catch (err) { if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null; throw err; }
+  }
+
+  async requestApproval(job: Pick<Job, "id" | "leaseToken">, req: { kind: string; summary: string; detail?: string; operation?: string }): Promise<{ id: string; status: string } | null> {
+    try { return await this.post("/api/builds/runner/approvals/request", { runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId), jobId: job.id, leaseToken: job.leaseToken, ...req }); }
+    catch (err) { if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null; throw err; }
   }
 
   heartbeat(job: Pick<Job, "id" | "leaseToken">, req: HeartbeatRequest): Promise<HeartbeatResponse> {
@@ -145,6 +185,8 @@ export class ControlPlaneClient {
     return this.post<HeartbeatResponse>("/api/builds/runner/heartbeat", {
       jobId: job.id, leaseToken: job.leaseToken, stage: req.stage, runCostUsd: round4(req.runCostUsd), turns: req.turns,
       ...(req.sessionId ? { sessionId: req.sessionId } : {}), ...(activity && activity.length ? { activity } : {}),
+      ...(req.provider ? { provider: req.provider.slice(0, 40) } : {}), ...(req.model ? { model: req.model.slice(0, 120) } : {}),
+      ...(req.orchestration ? { orchestration: { activity: req.orchestration.activity.slice(0, 30), model: req.orchestration.model?.slice(0, 120) ?? null, task: req.orchestration.task?.slice(0, 40) ?? null } } : {}),
     }, { jobId: job.id });
   }
 
@@ -172,6 +214,36 @@ export class ControlPlaneClient {
       if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null;
       throw err;
     }
+  }
+
+  /** Preview lifecycle (v1.2): previews the platform wants deleted. null = the platform does not offer it (404/405). */
+  async expiredPreviews(): Promise<ExpiredPreview[] | null> {
+    try {
+      const r = await this.post<ExpiredPreviewsResponse>("/api/builds/runner/previews/claim", { runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId) });
+      return Array.isArray(r.previews) ? r.previews.slice(0, 20) : [];
+    } catch (err) {
+      if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null;
+      throw err;
+    }
+  }
+
+  /** Customer production delivery: one Owner-authorized release (or null). null result = the platform has no such endpoint. */
+  async claimDeployment(capabilities: string[]): Promise<SiteDeployment | null | "unsupported"> {
+    try {
+      const r = await this.post<DeploymentClaimResponse>("/api/builds/runner/deployments/claim", { runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId), capabilities });
+      return r.deployment ?? null;
+    } catch (err) {
+      if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return "unsupported";
+      throw err;
+    }
+  }
+
+  completeDeployment(req: DeploymentCompleteRequest): Promise<{ state: string }> {
+    return this.post("/api/builds/runner/deployments/complete", { runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId), ...req, ...(req.error ? { error: req.error.slice(0, LIMITS.error) } : {}) });
+  }
+
+  previewDeleted(jobId: string, ok: boolean, error: string | null): Promise<unknown> {
+    return this.post("/api/builds/runner/previews/deleted", { runnerId: this.opts.runnerId.slice(0, LIMITS.runnerId), jobId, ok, ...(error ? { error: error.slice(0, 500) } : {}) });
   }
 
   /** AI drafts: claim one short draft job (or {job:null}). Same HMAC signing as every runner endpoint. */

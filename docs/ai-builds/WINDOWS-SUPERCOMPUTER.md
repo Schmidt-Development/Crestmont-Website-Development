@@ -152,27 +152,33 @@ Set-ExecutionPolicy -Scope Process Bypass
 ```
 
 The installer is idempotent. It:
-1. checks Windows ≥ build 19045, WSL 2, Docker Desktop (Linux containers, engine ≥ 26) and Ollama. With `-Install`
+1. checks Windows ≥ build 19045, that `wsl --status` succeeds (the WSL 2 default version itself is not checked; confirm
+   `wsl --status` shows "Default Version: 2"), Docker Desktop (Linux containers, engine ≥ 26) and Ollama. With `-Install`
    it runs `winget install --exact --id Docker.DockerDesktop` / `Ollama.Ollama` and `wsl --install --no-distribution`
    (a reboot follows; re-run afterwards). The winget package ids are from memory: check them with `winget show <id>`.
 2. writes `C:\CrestmontRunner\state\hardware.json`.
 3. creates `C:\CrestmontRunner\{compose,state,secrets,skills,logs,evidence}`. Inheritance is removed, and only
    SYSTEM, Administrators and your account have access. The secret is entered hidden (or `-SecretFile`), stored
    without a newline and never printed.
-4. builds `crestmont-ai-runner:1`, `crestmont-build-sandbox:1` and `crestmont-egress-proxy:1` (pinned base image
-   tags, `npm ci` from the committed lockfiles; it stops first if `runner\sandbox\package-lock.json` is missing, see
-   `RUNNER-SETUP.md` §12). CI builds the same three images on every push.
-5. writes `state\recommendation.json` and stops with the reasons when the machine is insufficient (`-Model <tag>`
-   overrides).
+4. builds `crestmont-ai-runner:1` and `crestmont-build-sandbox:1` (`crestmont-egress-proxy:1` is built at step 8) (pinned base image
+   tags pinned by digest, `npm ci` from the committed lockfiles, see `RUNNER-SETUP.md` §12). CI builds the same three
+   images on every push.
+5. writes `state\recommendation.json` and stops with the reasons when the machine is insufficient. `-Model <tag>`
+   overrides only the model choice (`modelChoiceBlockers`); driver, disk, WSL and Docker blockers still stop it.
 6. sets Ollama's user environment (`OLLAMA_HOST=127.0.0.1:11434`, context length, parallelism, keep-alive, flash
    attention, KV cache type), restarts Ollama, verifies that it listens on loopback only, and pulls the model.
 7. writes `compose\docker-compose.yml`, `compose\proxy\squid.conf` (the allow-list with your platform host,
    rendered by `SquidConf.ps1`, which validates every host and refuses hosted AI domains as `-ExtraEgressDomains`;
-   the same rendering is unit-tested as `egress-policy.ts`) and `compose\runner.env`, which holds names, URLs and
-   limits only. The secret is mounted from `secrets\`. `compose\.env` pins `OLLAMA_IMAGE` (`-OllamaImage`).
+   the same rendering is unit-tested as `egress-policy.ts`), the managed `compose\runner.env` (names, URLs and
+   limits only; rewritten on every run, backed up when it changes) and, once, `compose\runner.local.env` for your
+   own settings (never overwritten; managed or sandbox-weakening keys there stop the installer; `RunnerEnv.ps1`).
+   The secret is mounted from `secrets\`. `compose\.env` pins `OLLAMA_IMAGE` (`-OllamaImage`).
 8. checks that a container on the internal network can list the model through the proxy, then runs the runner's
    `--preflight` (skills, model present, sandbox image present).
 9. runs `docker compose up -d` and registers the `CrestmontRunner-Start` scheduled task at your logon.
+
+**Exact Founder sequence, prerequisites, decisions and known installer issues (2026-10-28 audit):**
+`FOUNDER-RUNNER-INSTALL.md`. Read it before running the installer.
 
 Copy the curated skills to `C:\CrestmontRunner\skills\` first (see `RUNNER-SETUP.md` §6). For the local model they
 are reference guides the agent reads, not Claude skills. Required ones still fail preflight when missing.
@@ -193,6 +199,35 @@ are reference guides the agent reads, not Claude skills. Required ones still fai
 - **Proxy rule for the model (either mode).** Node's `fetch` behind `HTTP_PROXY` (`NODE_USE_ENV_PROXY=1`) tunnels
   even `http://` URLs with CONNECT, so the proxy allows CONNECT to `host.docker.internal`/`ollama` on port 11434 from
   the runner network only. Without that rule every model call was denied (found with a real Squid locally).
+
+## Founder decision D4: native Windows Ollama (2026-10-28)
+
+Approved as the preferred inference architecture, **subject to hardware validation (not done yet)**. What the kit
+enforces and what is still to be measured on the machine:
+
+| Requirement | How |
+| --- | --- |
+| Docker sandbox kept for untrusted code | Every build command runs in a per-build container with `--network none`, read-only root, all capabilities dropped, uid 10001, CPU/memory/PID limits (`runner/src/sandbox.ts`) |
+| Inference separate from the untrusted container | Ollama runs natively on the Windows host; the sandbox has no network at all and no route to it |
+| Only an authorized endpoint through a controlled gateway | Only the runner container reaches `host.docker.internal:11434`, and only through the Squid egress proxy's allow-list; install containers are refused the model host (`runner/test/egress-compose.test.ts`) |
+| Ollama never exposed | `OLLAMA_HOST=127.0.0.1:11434`; the installer stops if Ollama listens on any other address; compose publishes no ports |
+| Model availability, GPU, memory | Installer: `Discover-Hardware.ps1` + `select-model.ts` (VRAM/RAM → model and context); runtime: the runner probes `/v1/models` every 5 minutes and reads `/api/ps` for GPU residency; `Get-RunnerHealth.ps1` prints both and warns when part of the model runs on the CPU |
+| Health check | Runner `/health` (`modelReachable`, `modelGpuShare`, last model error), no claims while the model server is down |
+| Swappable provider | The runner speaks the OpenAI-compatible API (`LOCAL_MODEL_BASE_URL`); `/api/ps` is optional and ignored for other servers |
+| No install without authorized access | Nothing is installed remotely; the Founder runs the installer |
+
+Hardware validation (Founder): install, then `ollama ps` (expect `100% GPU`), `Get-RunnerHealth.ps1` (expect model
+reachable, GPU residency 100%), then the first build of `LOCAL-VALIDATION.md`. Until then, native Ollama on this
+machine is **untested**.
+
+## Founder V4: two models on one GPU (2026-10-28)
+Dual-model mode (`-ModelA` + `-ModelB`) pulls both models and writes `LOCAL_MODEL_A` / `LOCAL_MODEL_B`, `RUNNER_SLOTS`,
+`INFERENCE_MAX_CONCURRENT` (= `OLLAMA_NUM_PARALLEL`), `GPU_VRAM_TOTAL_MB` (from the hardware check, only when reliable)
+and the GPU worker id. Ollama keeps `OLLAMA_MAX_LOADED_MODELS=1`: the runner's scheduler decides which model is in GPU
+memory and switches by unloading (`keep_alive: 0`) and loading (empty prompt) through Ollama's native API. A scheduled
+task (`CrestmontRunner-GpuTelemetry`, every minute) writes `state\telemetry\gpu.json` from `nvidia-smi`; it is mounted
+read-only into the runner and reported to the GPU workers page. Sizes, context and concurrency are estimates until the
+benchmark (`ORCHESTRATOR.md` §12) measures them on this machine.
 
 ## Isolation details
 

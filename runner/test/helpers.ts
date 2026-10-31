@@ -3,7 +3,8 @@
 
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync, chmodSync } from "node:fs";
+import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { verifySignature, SIGNATURE_HEADER } from "../src/control-plane.ts";
@@ -110,6 +111,8 @@ export interface FakeCPOptions {
   /** Answer for /ai/complete: "lease_lost" -> 409. */
   aiComplete?: (body: Record<string, unknown>) => "lease_lost" | { status: string };
   secret?: string;
+  /** Extra endpoints without a lease (path after /api/builds/runner/), e.g. "previews/claim". Others answer 404. */
+  extraRoutes?: Record<string, (body: Record<string, unknown>) => unknown>;
 }
 
 export async function startFakeControlPlane(o: FakeCPOptions = {}): Promise<FakeCP> {
@@ -117,6 +120,8 @@ export async function startFakeControlPlane(o: FakeCPOptions = {}): Promise<Fake
   const jobs = [...(o.jobs ?? [])];
   const leased = new Map<string, string>();
   const archives = new Map<string, string>();
+  // A Map, not an object indexed by the request path: no prototype keys, no dynamic property dispatch.
+  const extraRoutes = new Map(Object.entries(o.extraRoutes ?? {}));
   let hb = 0;
   let ckpt = 0;
   const server = createServer((req, res) => {
@@ -148,6 +153,9 @@ export async function startFakeControlPlane(o: FakeCPOptions = {}): Promise<Fake
         if (leased.get(String(body.jobId)) !== body.leaseToken) return send(409, { error: "lease_lost" });
         return send(200, { recorded: true });
       }
+      const extra = extraRoutes.get(p.replace("/api/builds/runner/", ""));
+      if (typeof extra === "function") return send(200, extra(body));
+      if (p === "/api/builds/runner/previews/claim" || p === "/api/builds/runner/previews/deleted") return send(404, { error: "unknown" });
       if (p === "/api/builds/runner/claim") {
         const job = jobs.shift();
         if (!job) return send(200, { job: null, reason: "none_queued" });
@@ -259,6 +267,20 @@ export function resultMsg(sessionId: string, totalCost: number, turns: number, s
   return { type: "result", subtype, session_id: sessionId, is_error: subtype !== "success", num_turns: turns, total_cost_usd: totalCost, ...(subtype === "success" ? { result: "done" } : {}) };
 }
 
+/** What a compliant agent does with the starter: the customer's business details from BRIEF.json, then no placeholders. */
+export function fillStarterFromBrief(repo: string): void {
+  let b = { name: "", publicEmail: "", publicPhone: "" };
+  try { b = JSON.parse(readFileSync(path.join(repo, "BRIEF.json"), "utf8")).customerData.business; } catch { /* no brief: placeholders only */ }
+  for (const f of walkFiles(path.join(repo, "public"))) {
+    if (!/\.(html|xml|txt)$/.test(f)) continue;
+    let t = readFileSync(f, "utf8");
+    if (b.name) t = t.replace(/STARTER-PLACEHOLDER Business name/g, b.name);
+    if (b.publicEmail) t = t.replace(/STARTER-PLACEHOLDER public email/g, b.publicEmail);
+    if (b.publicPhone) t = t.replace(/STARTER-PLACEHOLDER public phone/g, b.publicPhone);
+    writeFileSync(f, t.replace(/STARTER-PLACEHOLDER ?/g, ""));
+  }
+}
+
 /** A well-behaved fake agent for the brochure starter: plans, replaces placeholders, records honest statuses. */
 export function happyAgent(opts: { sessionId?: string; costPerPhase?: number; stepDelayMs?: number; startTotal?: number } = {}) {
   // Like Claude Code, a resumed session's results include the spend restored from earlier calls (startTotal).
@@ -279,10 +301,7 @@ export function happyAgent(opts: { sessionId?: string; costPerPhase?: number; st
       ]));
     } else if (ctx.prompt.includes("Phase 2 of 3")) {
       yield toolMsg(`m${ctx.call}a`, "Edit", { file_path: "public/index.html" }, sid);
-      for (const f of walkFiles(path.join(cwd, "public"))) {
-        if (!/\.(html|xml|txt)$/.test(f)) continue;
-        writeFileSync(f, readFileSync(f, "utf8").replace(/STARTER-PLACEHOLDER ?/g, ""));
-      }
+      fillStarterFromBrief(cwd);
       writeFileSync(path.join(st, "requirements.json"), JSON.stringify([
         { key: "page:home", status: "implemented_unverified" }, { key: "page:contact", status: "implemented_unverified" },
       ]));
@@ -358,6 +377,13 @@ export function makeConfig(over: Partial<RunnerConfig> & { controlPlaneUrl: stri
     maxCustomerFileBytes: 5 * 1024 * 1024,
     repo: null,
     preview: null,
+    delivery: null,
+    worker: null,
+    models: (() => { const single = { tag: "test-coder:30b", role: "single" as const, contextTokens: 32_768, vramMb: 0, quantization: null, reasoning: null, vision: false, license: null }; return { a: single, b: single, mode: "single" as const }; })(),
+    inference: { maxConcurrent: 1, vramTotalMb: 0, vramReserveMb: 4096, switchTimeoutMs: 30_000, maxWaitBeforeSwitchMs: 180_000, keepAlive: "30m", telemetryFile: "/nonexistent/gpu.json" },
+    slots: 1,
+    routing: { escalateAfterRepeats: 2 },
+    advisor: { architect: "none", reviewer: "deterministic", maxTurns: 30, maxCycles: 8 },
     platformRepoPatterns: [/Crestmont-Website-Development/i],
     gitAuthorName: "Test Runner",
     gitAuthorEmail: "runner@test.invalid",
@@ -450,8 +476,26 @@ export interface FakeDocker {
   override?: (args: string[]) => import("../src/exec.ts").ExecResult | undefined | Promise<import("../src/exec.ts").ExecResult | undefined>;
 }
 
+/** What `docker inspect` reports for a container started with these `docker run` args (enough for evaluateIsolation). */
+export function inspectFromRunArgs(args: string[]): Record<string, unknown> {
+  const all = (flag: string) => args.flatMap((a, i) => (a === flag ? [args[i + 1]] : []));
+  const one = (flag: string) => all(flag)[0];
+  const mem = /^(\d+)([gm])$/i.exec(one("--memory") ?? "");
+  return {
+    Config: { User: one("--user"), Image: args.find((a) => a.startsWith("crestmont-build-sandbox")) ?? "img", Labels: Object.fromEntries(all("--label").map((l) => l.split("="))) },
+    HostConfig: {
+      NetworkMode: one("--network"), ReadonlyRootfs: args.includes("--read-only"), CapDrop: all("--cap-drop"), CapAdd: null,
+      SecurityOpt: all("--security-opt"), Privileged: args.includes("--privileged"),
+      Memory: mem ? Number(mem[1]) * (mem[2].toLowerCase() === "g" ? 1024 ** 3 : 1024 ** 2) : 0,
+      NanoCpus: Math.round(Number(one("--cpus") ?? 0) * 1e9), PidsLimit: Number(one("--pids-limit") ?? 0), PortBindings: {},
+    },
+    Mounts: all("--mount").map((m) => ({ Type: /type=(\w+)/.exec(m)?.[1], Source: /src=([^,]+)/.exec(m)?.[1], Destination: /dst=([^,]+)/.exec(m)?.[1], RW: true })),
+  };
+}
+
 export function fakeDocker(opts: { passthrough?: boolean; override?: FakeDocker["override"] } = {}): FakeDocker {
   const repos = new Map<string, string>();
+  const runs = new Map<string, string[]>();
   const ok = (stdout = "") => ({ code: 0, stdout, stderr: "", timedOut: false, notFound: false });
   const state: FakeDocker = { calls: [], override: opts.override, executor: null as unknown as FakeDocker["executor"] };
   state.executor = async (args, o) => {
@@ -463,7 +507,12 @@ export function fakeDocker(opts: { passthrough?: boolean; override?: FakeDocker[
       const mount = args.find((a) => a.includes("dst=/workspace/repo"));
       const src = /src=([^,]+)/.exec(mount ?? "")?.[1];
       if (src) repos.set(name, src);
+      runs.set(name, [...args]);
       return ok("container-id");
+    }
+    if (args[0] === "inspect") {
+      const run = runs.get(args[args.length - 1]);
+      return run ? ok(JSON.stringify([inspectFromRunArgs(run)])) : { code: 1, stdout: "", stderr: "No such container", timedOut: false, notFound: false };
     }
     if (args[0] === "exec") {
       const name = args[3];
@@ -471,12 +520,35 @@ export function fakeDocker(opts: { passthrough?: boolean; override?: FakeDocker[
       const argv = args.slice(t + 4);
       if (argv[0] === "node" && String(argv[1]).endsWith("browser-check.mjs")) return ok("browser check: 5 pages x 2 viewports OK (fake)");
       if (opts.passthrough === false || !repos.has(name)) return ok("");
-      const { run } = await import("../src/exec.ts");
-      return run(argv[0], argv.slice(1), { cwd: repos.get(name)!, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: tmp("aib-fakehome-") }, timeoutMs: o.timeoutMs });
+      // Emulates the job container: the container's own shell runs the agent's command. (Deliberately not the runner's
+      // exec helper, which refuses shells on the runner host.)
+      return containerExec(argv, repos.get(name)!, o.timeoutMs);
     }
     return ok("");
   };
   return state;
+}
+
+function containerExec(argv: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean; notFound: boolean }> {
+  return new Promise((resolve) => {
+    execFile(argv[0], argv.slice(1), { cwd, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: tmp("aib-fakehome-") }, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const e = err as (NodeJS.ErrnoException & { code?: number | string; killed?: boolean }) | null;
+      resolve({ code: e ? (typeof e.code === "number" ? e.code : 127) : 0, stdout: String(stdout), stderr: String(stderr), timedOut: !!e?.killed, notFound: e?.code === "ENOENT" });
+    });
+  });
+}
+
+/**
+ * A stand-in `wrangler` executable (Node script) in a fresh bin directory. Returns the PATH to give the runner
+ * (cfg.agentPath): the fake first, then the system PATH. The deploy commands under test are real allow-listed
+ * invocations (`wrangler deploy`, `npx ... wrangler@x.y.z` is not used here because npx would download).
+ */
+export function fakeWrangler(body: string): { dir: string; agentPath: string } {
+  const dir = tmp("aib-fake-wrangler-");
+  const file = path.join(dir, "wrangler");
+  writeFileSync(file, `#!/usr/bin/env node\n${body}\n`);
+  chmodSync(file, 0o755);
+  return { dir, agentPath: `${dir}${path.delimiter}${process.env.PATH ?? "/usr/bin:/bin"}` };
 }
 
 /** A process environment full of secrets the agent must never see. */

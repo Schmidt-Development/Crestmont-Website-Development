@@ -61,10 +61,11 @@ function serve(root) {
 async function main() {
   const o = args(process.argv.slice(2));
   if (!existsSync(o.root)) { console.error(`browser-check: ${o.root} does not exist`); process.exit(2); }
-  const require = createRequire(path.join(process.cwd(), "noop.js"));
+  // Only the image's own Playwright (/opt/crestmont/node_modules, found from this script's location or NODE_PATH).
+  // Never the project's node_modules: that is agent-controlled and could fake the browser results.
   let chromium;
-  try { ({ chromium } = require("playwright")); } catch {
-    try { ({ chromium } = createRequire(import.meta.url)("playwright")); } catch { console.error("browser-check: the playwright package is not available (build image problem)"); process.exit(2); }
+  try { ({ chromium } = createRequire(import.meta.url)("playwright")); } catch {
+    console.error("browser-check: the playwright package is not available (build image problem)"); process.exit(2);
   }
   const list = pages(o.root);
   if (!list.length) { console.error(`browser-check: no .html pages under ${o.root}`); process.exit(1); }

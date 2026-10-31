@@ -2,7 +2,8 @@
 // Offline acceptance check for the brochure starter (no network, no dependencies).
 //   npm run check -- --package starter|business|premium [--allow-placeholders] [--root <dir>] [--json]
 // Checks: HTML validation-lite (doctype, lang, charset, tag balance, duplicate ids), internal links/assets/anchors,
-// SEO meta per package level, accessibility basics, responsive CSS, package page limit, contact form, leftovers.
+// SEO meta per package level, accessibility basics, responsive CSS, package page limit, contact form, leftovers
+// (starter placeholders, lorem ipsum, bracketed/template fill-ins, TODO/FIXME, placeholder image services).
 // Exit code 1 when any ERROR is found. WARNINGs are printed but do not fail the check.
 
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
@@ -27,6 +28,9 @@ function parseArgs(argv) {
 const VOID = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]);
 const OPTIONAL_CLOSE = new Set(["p", "li", "dt", "dd", "option", "tr", "td", "th", "thead", "tbody", "tfoot"]);
 const EXTERNAL = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
+// Generic AI/template leftovers the customer would see: bracketed fill-ins and unrendered template variables.
+const TEMPLATE_TOKEN = /\[(?:your|insert|enter|add|company|business|client|placeholder)\b[^\]\n]{0,60}\]|\{\{[^}\n]{1,60}\}\}/i;
+const PLACEHOLDER_IMAGES = /\b(?:via\.placeholder\.com|placeholder\.com|placehold\.(?:co|it)|picsum\.photos|dummyimage\.com|placekitten\.com|loremflickr\.com)\b/i;
 
 /** @param {string} dir @returns {string[]} */
 function walk(dir) {
@@ -68,9 +72,39 @@ function tokenize(html) {
   return { clean, tags };
 }
 
-/** @param {string} html */
+/**
+ * Visible text of an HTML fragment (for matching only, never output). A scanner, not a regex: comments and
+ * script/style elements are removed even when unterminated or closed as `</script >`; then every tag and any stray
+ * angle bracket.
+ * @param {string} html
+ */
 function textOf(html) {
-  return html.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/&[a-z]+;|&#\d+;/gi, " ").replace(/\s+/g, " ").trim();
+  const lower = html.toLowerCase();
+  let out = "";
+  let i = 0;
+  while (i < html.length) {
+    const lt = html.indexOf("<", i);
+    if (lt < 0) { out += html.slice(i); break; }
+    out += html.slice(i, lt);
+    let end;
+    if (lower.startsWith("<!--", lt)) {
+      const c = lower.indexOf("-->", lt + 4);
+      end = c < 0 ? html.length : c + 3;
+    } else {
+      const m = /^<(script|style)\b/.exec(lower.slice(lt, lt + 8));
+      if (m) {
+        const close = lower.indexOf(`</${m[1]}`, lt + 1);
+        const gt = close < 0 ? -1 : lower.indexOf(">", close);
+        end = gt < 0 ? html.length : gt + 1;
+      } else {
+        const gt = html.indexOf(">", lt + 1);
+        end = gt < 0 ? html.length : gt + 1;
+      }
+    }
+    out += " ";
+    i = end;
+  }
+  return out.replace(/[<>]/g, " ").replace(/&[a-z]+;|&#\d+;/gi, " ").replace(/\s+/g, " ").trim();
 }
 
 export function runCheck(opts) {
@@ -100,6 +134,13 @@ export function runCheck(opts) {
     const t = readFileSync(f, "utf8");
     if (!opts.allowPlaceholders && t.includes("STARTER-PLACEHOLDER")) err(rel(f), "starter placeholder text remains (STARTER-PLACEHOLDER)");
     if (/lorem ipsum/i.test(t)) err(rel(f), "lorem ipsum filler text");
+    if (PLACEHOLDER_IMAGES.test(t)) err(rel(f), "placeholder image service (not licensed imagery, and unavailable offline)");
+    if (f.endsWith(".html")) {
+      const text = textOf(t);
+      const token = TEMPLATE_TOKEN.exec(text);
+      if (token) err(rel(f), `unfilled template text "${token[0].slice(0, 60)}"`);
+      if (/\b(?:TODO|FIXME)\b/.test(text)) err(rel(f), "TODO/FIXME left in page text");
+    }
   }
 
   const titles = new Map();

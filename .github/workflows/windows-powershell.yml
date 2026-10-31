@@ -43,6 +43,20 @@ jobs:
         env:
           PWSH: powershell
         run: node --no-warnings --test --test-name-pattern "SquidConf.ps1" runner/test/egress-compose.test.ts
+      - name: RunnerEnv.ps1 under Windows PowerShell 5.1 produces what runner-env.ts produces
+        shell: bash
+        env:
+          PWSH: powershell
+        run: |
+          set -o pipefail
+          if ! node --no-warnings --test --test-name-pattern "RunnerEnv.ps1" runner/test/runner-env.test.ts > "$RUNNER_TEMP/runnerenv.txt" 2>&1; then
+            cat "$RUNNER_TEMP/runnerenv.txt"
+            # One annotation with the failing test's details (readable through the checks API, unlike the job log).
+            msg=$(sed -n '/^not ok/,/^  \.\.\.$/p' "$RUNNER_TEMP/runnerenv.txt" | head -120 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=RunnerEnv.ps1 parity::$msg"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/runnerenv.txt"
       - name: Discover-Hardware.ps1 (read-only) -> select-model.ts
         shell: powershell
         run: |

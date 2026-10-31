@@ -19,8 +19,20 @@ validation (`LOCAL-VALIDATION.md`) and a real end-to-end staging run succeed (re
     tokens and model time are reported. When idle, the runner also serves the platform's short AI drafts (`ai_jobs`)
     with the same local model.
   - `claude-agent-sdk` (optional, paid): the original Agent SDK adapter. It needs `RUNNER_ALLOW_PAID_PROVIDER=true`
-    and is never an automatic fallback.
+    on the runner **and** `BUILD_ALLOW_PAID_PROVIDER=true` on the Worker (the platform gives no work to a runner that
+    does not declare zero token cost), and is never an automatic fallback.
   Deployment: `WINDOWS-SUPERCOMPUTER.md` (Windows + WSL 2 + Docker Desktop, outbound-only, no public port).
+  **Node 1 (current):** `NODE1-INSTALL.md` (integration status, exact install, verify, certify and rollback steps).
+
+## Founder architecture V4 (2026-10-28): local dual-model on owned GPUs
+`ORCHESTRATOR.md`. Node 1 (RTX 5090) runs two open-weight models through Ollama: **Model A** `qwen3.8:27b-q4_K_M`
+(architect, fresh read-only reviewer, hard repairs) and **Model B** `qwen3.6:35b-a3b-q4_K_M` (builder). One shared GPU
+scheduler loads one model at a time (they do not fit together in 32 GB), batches by model and serves several websites
+at once (runner slots). The platform tracks every website, dispatches by GPU capacity and Founder priority, and parks
+finished websites in a **private internal review**: the customer sees nothing until staff approve the build internally
+and share its preview. Integrations that need credentials go through a trusted, Owner-approved runner layer; agents
+never see secrets. $0 metered inference; the V3 Claude-subscription worker was removed (history: `history/`).
+Status: implemented and simulated-tested; nothing has run on Node 1 yet.
 
 ## When a build starts
 A first build is queued automatically when all hold (re-checked on payment, intake, refunds, disputes, cancellation and every 15 min):
@@ -37,9 +49,23 @@ selected projects. Staging sample data is excluded the same way.
 ## Operations (Owner → AI builds)
 - Pause all automation or one project; cancel; retry; resume a saved session; submit a revision; approve a preview.
 - Limits: per-run and per-project (cumulative, revisions included) spending, runtime, turns, concurrency, attempts, model.
-- Approving a preview records the decision only. Nothing here publishes to production, changes domains, charges customers,
-  emails customers or migrates production databases.
+- Approving a preview records the decision only. Publishing a customer site is the separate, Owner-authorized
+  release workflow of `DELIVERY.md`; nothing here changes Crestmont's own production, charges customers or migrates
+  production databases.
+
+## Founder decisions (2026-10-28)
+| # | Decision | Implementation |
+| --- | --- | --- |
+| D1 | Owner approval of customer revisions | Requests wait in Owner → AI builds; *Approve and start AI build* queues one build (existing queue, no duplicate jobs); *Reject* (reason sent to the customer) starts nothing and does not use a round. Identical resubmissions are not new rounds; failed/canceled builds stay eligible. Tenant-scoped, audited; the portal shows Awaiting review / In progress / Not accepted. Automatic mode exists but is off by default. |
+| D2 | Preview retention: 30 days after final approval | `PREVIEW-DEPLOYMENT.md` §3: in-progress and in-review previews never expire; the approved one is kept until its production deployment is verified; never the only recoverable copy; dates shown; preserve/extend; scheduled, audited, retried. |
+| D3 | Private previews with authentication | `PREVIEW-DEPLOYMENT.md` §2a: runner-generated gate + platform-signed 5-minute links (staff, or the project's own customer for a shared preview). $0; Cloudflare Access not needed. |
+| D4 | Native Windows Ollama | `WINDOWS-SUPERCOMPUTER.md` "Founder decision D4": inference on the host (localhost only), sandbox without network, runner reaches the model through the egress gateway; model + GPU residency health check. **Not yet validated on the Founder's hardware.** |
+| D5 | Owner-controlled customer production delivery | `DELIVERY.md`: prepare → explicit Owner authorization (MFA step-up) → runner deploy to `cm-site-<project>` → verification → versions, rollback, audit. Framework only; nothing deployed. |
 
 ## Contracts
 - Runner protocol: `RUNNER-PROTOCOL.md` · Frontend: `FRONTEND-CONTRACT.md` · Runner setup: `RUNNER-SETUP.md` · Starters: `STARTERS.md`.
 - Windows build machine (local model, default): `WINDOWS-SUPERCOMPUTER.md` · Validation plan: `LOCAL-VALIDATION.md`.
+- Founder order of work for the first real build (decisions, install, known installer issues): `FOUNDER-RUNNER-INSTALL.md`.
+- Preview account, private access, lifecycle and secret inventory: `PREVIEW-DEPLOYMENT.md`.
+- Customer production delivery: `DELIVERY.md`.
+- V4 dual-model orchestrator, GPU scheduling, private review gate, Node 1 installation and benchmarks: `ORCHESTRATOR.md`.

@@ -112,6 +112,11 @@ export interface Recommendation {
   reasons: string[];
   warnings: string[];
   blockers: string[];
+  /**
+   * The subset of `blockers` that only concerns the model choice (no recommended tier fits). The installer's -Model
+   * override may clear these, and only these: driver, disk, WSL, Docker and schema blockers always stop the install.
+   */
+  modelChoiceBlockers: string[];
   sources: string[];
 }
 
@@ -208,6 +213,7 @@ export function selectModel(input: Hardware): Recommendation {
   const reasons: string[] = [];
   const warnings: string[] = [];
   const blockers: string[] = [];
+  const modelChoiceBlockers: string[] = [];
   if (hw.schema !== "crestmont.hardware/1") blockers.push(`unexpected hardware schema ${String(hw.schema)} (run Discover-Hardware.ps1 from this release)`);
   const ram = Number(hw.memory?.totalGB) || 0;
   const threads = Number(hw.cpu?.logicalProcessors) || Number(hw.cpu?.cores) || 1;
@@ -246,7 +252,8 @@ export function selectModel(input: Hardware): Recommendation {
     pick = CANDIDATES["qwen3-coder-30b-q4"]; tier = "E"; accel = "cpu-only";
     warnings.push("CPU-only inference: workable for the validation build because the model activates ~3B parameters per token (S1), but expect long build times. Not recommended for production volume.");
   } else {
-    blockers.push(`Insufficient hardware for an agentic coding model: needs at least a 16 GB NVIDIA/AMD GPU with 32 GB RAM, or 48 GB RAM and 8+ CPU threads for slow CPU-only inference (found ${vram.totalGB} GB GPU, ${ram} GB RAM, ${threads} threads).`);
+    modelChoiceBlockers.push(`Insufficient hardware for an agentic coding model: needs at least a 16 GB NVIDIA/AMD GPU with 32 GB RAM, or 48 GB RAM and 8+ CPU threads for slow CPU-only inference (found ${vram.totalGB} GB GPU, ${ram} GB RAM, ${threads} threads).`);
+    blockers.push(...modelChoiceBlockers);
   }
 
   // Context: 32K default (S1 OOM advice; S11 needs >= 22000), 64K when memory clearly allows.
@@ -278,7 +285,7 @@ export function selectModel(input: Hardware): Recommendation {
     model: pick?.model ?? null, quantization: pick?.quantization ?? null, license: pick?.license ?? null,
     contextTokens: ctx,
     ollama: { numParallel, flashAttention: accel !== "cpu-only" && accel !== "none", kvCacheType, keepAlive: "60m", contextLength: ctx },
-    jobLimits, acceleration: accel, alternatives, reasons: pick ? [...reasons, pick.note] : reasons, warnings, blockers,
+    jobLimits, acceleration: accel, alternatives, reasons: pick ? [...reasons, pick.note] : reasons, warnings, blockers, modelChoiceBlockers,
     sources: pick?.sources ?? [],
   };
 }

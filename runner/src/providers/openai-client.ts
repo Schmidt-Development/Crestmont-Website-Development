@@ -11,9 +11,12 @@ export interface ChatToolCall {
   function: { name: string; arguments: string };
 }
 
+/** Content parts (OpenAI format) for a user message with images; Ollama accepts base64 data URLs for vision models. */
+export type ContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
+
 export type ChatMessage =
   | { role: "system"; content: string }
-  | { role: "user"; content: string }
+  | { role: "user"; content: string | ContentPart[] }
   | { role: "assistant"; content: string | null; tool_calls?: ChatToolCall[] }
   | { role: "tool"; tool_call_id: string; name?: string; content: string };
 
@@ -28,6 +31,15 @@ export interface ChatRequest {
   tools?: ToolSpec[];
   temperature?: number;
   max_tokens?: number;
+  /** Qwen thinking models: how much to think (Ollama's OpenAI compatibility accepts reasoning_effort). */
+  reasoning_effort?: "high" | "medium" | "low";
+}
+
+/** Plain text of a message's content (images count as a marker). */
+export function contentText(c: string | ContentPart[] | null): string {
+  if (c === null) return "";
+  if (typeof c === "string") return c;
+  return c.map((p) => p.type === "text" ? p.text : "[image]").join("\n");
 }
 
 export interface ChatResponse {

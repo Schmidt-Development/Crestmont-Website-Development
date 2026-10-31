@@ -27,6 +27,7 @@ export function customerPostFields(w: World, t: Tenant): Record<string, () => Fi
     "POST /portal/messages/general": () => ({ body: `${t.marker} another general message` }),
     "POST /portal/projects/:id/messages": () => ({ body: `${t.marker} another project message` }),
     "POST /portal/projects/:id/revisions": () => ({ request: `${t.marker} please adjust the footer spacing` }),
+    "POST /portal/projects/:id/previews/:buildId/review": () => ({ decision: "changes_requested", note: `${t.marker} please use the new logo` }),
     "POST /portal/change-orders/:id/decide": () => ({ decision: "approved", notes: "ok" }),
     "POST /portal/projects/:id/approvals": () => ({ kind: "scope", decision: "approved", notes: "Looks right" }),
     "POST /portal/team": () => ({ email: `invitee-${Math.random().toString(16).slice(2, 8)}@${t.marker.toLowerCase()}.example` }),
@@ -443,12 +444,76 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/builds/projects/:projectId/pause", fields: () => ({ paused: "1", reason: "matrix project pause" }) },
     { key: "POST /staff/builds/projects/:projectId/budget", fields: () => ({ project_budget: "50" }) },
     // Earlier refund scenarios made tenant A's order ineligible, which (correctly) canceled its build; restore the fixture state.
-    { key: "POST /staff/builds/:id/approve", fields: () => ({ notes: "matrix approval" }), setup: async () => { await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review' WHERE id = ?`).bind(w.ids.buildJob).run(); } },
+    // V4 §7 F: the private internal review, then the final approval.
+    { key: "POST /staff/builds/:id/internal-approve", fields: () => ({ note: "Matrix: reviewed the preview by hand" }), setup: async () => { await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review', internal_approved_at = NULL, preview_url = COALESCE(preview_url, 'https://cm-prv-matrix-b0.acct.workers.dev'), preview_deleted_at = NULL, preview_delete_requested_at = NULL WHERE id = ?`).bind(w.ids.buildJob).run(); } },
+    { key: "POST /staff/builds/:id/approve", fields: () => ({ notes: "matrix approval" }), setup: async () => { await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review', internal_approved_at = COALESCE(internal_approved_at, ?), preview_url = COALESCE(preview_url, 'https://cm-prv-matrix-b0.acct.workers.dev'), preview_deleted_at = NULL, preview_delete_requested_at = NULL WHERE id = ?`).bind(nowIso(), w.ids.buildJob).run(); } },
     { key: "POST /staff/builds/:id/revision", fields: () => ({ instruction: "Make the hero heading larger and add the opening hours to the footer." }), setup: async () => {
       // Eligibility for new automated work: submitted intake, no approved/issued refund on the order.
       await w.db.prepare(`UPDATE onboarding_responses SET completed_at = ? WHERE project_id = ?`).bind(nowIso(), w.a.ids.project).run();
       await w.db.prepare(`UPDATE refunds SET status = 'denied' WHERE status IN ('approved','issued') AND payment_id IN (SELECT id FROM payments WHERE order_id = (SELECT order_id FROM projects WHERE id = ?))`).bind(w.a.ids.project).run();
       await w.db.prepare(`UPDATE payments SET status = 'succeeded' WHERE order_id = (SELECT order_id FROM projects WHERE id = ?)`).bind(w.a.ids.project).run();
+    } },
+    // Founder decision D1: the owner rejects a customer's revision request (no AI build; customer told why).
+    { key: "POST /staff/builds/customer-revisions/:id/reject", fields: () => ({ reason: "Outside the agreed scope for this package." }), setup: async () => {
+      await w.db.prepare(`UPDATE build_jobs SET state = 'canceled' WHERE customer_revision_id = ?`).bind(w.a.ids.revision).run();
+      await w.db.prepare(`UPDATE revisions SET status = 'submitted', included = 1, ai_decision = NULL, ai_decided_by = NULL, ai_decided_at = NULL, ai_decision_note = NULL WHERE id = ?`).bind(w.a.ids.revision).run();
+    } },
+    // A customer's open, included revision request forwarded to the AI builder (owner_approval policy).
+    { key: "POST /staff/builds/customer-revisions/:id/forward", fields: () => ({ instruction: "Add the opening hours to the contact page footer." }), setup: async () => {
+      await w.db.prepare(`UPDATE build_jobs SET state = 'canceled' WHERE project_id = ? AND id <> ?`).bind(w.a.ids.project, w.ids.buildJob).run();
+      await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review' WHERE id = ?`).bind(w.ids.buildJob).run();
+      await w.db.prepare(`UPDATE revisions SET status = 'submitted', included = 1, ai_decision = NULL, ai_decided_by = NULL, ai_decided_at = NULL, ai_decision_note = NULL WHERE id = ?`).bind(w.a.ids.revision).run();
+      await w.db.prepare(`UPDATE onboarding_responses SET completed_at = ? WHERE project_id = ?`).bind(nowIso(), w.a.ids.project).run();
+      await w.db.prepare(`UPDATE refunds SET status = 'denied' WHERE status IN ('approved','issued') AND payment_id IN (SELECT id FROM payments WHERE order_id = (SELECT order_id FROM projects WHERE id = ?))`).bind(w.a.ids.project).run();
+      await w.db.prepare(`UPDATE payments SET status = 'succeeded' WHERE order_id = (SELECT order_id FROM projects WHERE id = ?)`).bind(w.a.ids.project).run();
+    } },
+    { key: "POST /staff/builds/:id/preview-retention", fields: () => ({ action: "extend" }), setup: async () => {
+      await w.db.prepare(`UPDATE build_jobs SET preview_name = 'cm-prv-matrix-b0', preview_deleted_at = NULL, preview_delete_claimed_at = NULL WHERE id = ?`).bind(w.ids.buildJob).run();
+    } },
+    // Founder decision D3: private previews (owner opens/shares; the project's customer opens/reviews a shared one).
+    { key: "GET /staff/builds/:id/preview", setup: async () => {
+      await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review', preview_url = 'https://cm-prv-matrix-b0.acct.workers.dev', preview_name = 'cm-prv-matrix-b0', preview_gated = 1, preview_deleted_at = NULL, customer_preview_shared_at = NULL WHERE id = ?`).bind(w.ids.buildJob).run();
+    } },
+    { key: "POST /staff/builds/:id/share-preview", fields: () => ({ action: "share" }), setup: async () => { await w.db.prepare(`UPDATE build_jobs SET internal_approved_at = COALESCE(internal_approved_at, ?) WHERE id = ?`).bind(nowIso(), w.ids.buildJob).run(); } },
+    { key: "GET /portal/projects/:id/previews/:buildId", as: custA, path: () => `/portal/projects/${a.ids.project}/previews/${w.ids.buildJob}` },
+    { key: "POST /portal/projects/:id/previews/:buildId/review", as: custA, path: () => `/portal/projects/${a.ids.project}/previews/${w.ids.buildJob}/review`, fields: () => ({ decision: "changes_requested", note: "Please use the new logo." }) },
+    // Founder decision D5: customer production delivery (framework only; nothing is deployed in tests).
+    { key: "POST /staff/builds/projects/:id/site-target", setup: async () => {
+      await w.db.prepare(`DELETE FROM site_deployment_events WHERE deployment_id IN (SELECT id FROM site_deployments WHERE project_id = ?)`).bind(a.ids.project).run();
+      await w.db.prepare(`DELETE FROM site_deployments WHERE project_id = ?`).bind(a.ids.project).run();
+      await w.db.prepare(`DELETE FROM site_targets WHERE project_id = ?`).bind(a.ids.project).run();
+    } },
+    { key: "POST /staff/builds/projects/:id/site-domain", fields: () => ({ hostname: "www.matrix-customer.example", confirm: "www.matrix-customer.example" }) },
+    { key: "POST /staff/builds/:id/prepare-release", fields: () => ({ customer_review_na: "Owner-managed site; customer reviewed in a meeting." }), setup: async () => {
+      await w.db.prepare(`UPDATE build_jobs SET state = 'canceled' WHERE project_id = ? AND id <> ? AND state = 'approved'`).bind(a.ids.project, w.ids.buildJob).run();
+      await w.db.prepare(`UPDATE build_jobs SET state = 'approved', approved_at = ?, source_repo = 'https://github.com/crestmont-builds/matrix', source_commit = 'def5678', customer_preview_shared_at = NULL WHERE id = ?`).bind(nowIso(), w.ids.buildJob).run();
+    } },
+    { key: "POST /staff/builds/releases/:id/authorize", setup: async () => {
+      await w.db.prepare(`UPDATE site_deployments SET state = 'canceled' WHERE project_id = ? AND state IN ('prepared','authorized','deploying')`).bind(a.ids.project).run();
+      const t = await w.db.prepare(`SELECT id, worker_name, hostname FROM site_targets WHERE project_id = ?`).bind(a.ids.project).first<{ id: string; worker_name: string; hostname: string | null }>();
+      x.siteWorker = t!.worker_name;
+      await w.db.prepare(`INSERT INTO site_deployments (id, target_id, project_id, organization_id, build_job_id, version, kind, state, state_reason, source_repo, source_commit, worker_name, hostname, prepared_at, created_at, updated_at)
+        SELECT ?, ?, project_id, organization_id, id, 100, 'release', 'prepared', 'Customer review not applicable: matrix', source_repo, source_commit, ?, ?, ?, ?, ? FROM build_jobs WHERE id = ?`)
+        .bind(w.ids.siteDeployment, t!.id, t!.worker_name, t!.hostname, nowIso(), nowIso(), nowIso(), w.ids.buildJob).run();
+    }, fields: () => ({ confirm: x.siteWorker ?? "cm-site-matrix-a", note: "matrix" }), path: () => `/staff/builds/releases/${w.ids.siteDeployment}/authorize` },
+    { key: "POST /staff/builds/releases/:id/cancel", fields: () => ({ reason: "Matrix cancellation" }) },
+    { key: "POST /staff/builds/releases/:id/rollback", setup: async () => {
+      await w.db.prepare(`UPDATE site_deployments SET state = 'superseded', verified_at = ? WHERE id = ?`).bind(nowIso(), w.ids.siteDeployment).run();
+    } },
+    // V4: GPU workers, priority
+    { key: "POST /staff/builds/workers", fields: () => ({ label: "Node 9 GPU", cost_class: "owned-hardware", max_active_projects: "2" }) },
+    { key: "POST /staff/builds/projects/:id/priority", fields: () => ({ priority: "2" }) },
+    { key: "POST /staff/builds/workers/:id/update", fields: () => ({ action: "pause", reason: "Matrix pause" }) },
+    { key: "POST /staff/builds/workers/:id/rotate-key" },
+    { key: "POST /staff/builds/projects/:id/reassign", fields: () => ({ reason: "Matrix reassignment" }), setup: async () => {
+      await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review' WHERE project_id = ? AND state IN ('preparing','building','verifying')`).bind(a.ids.project).run();
+      await w.db.prepare(`UPDATE build_assignments SET released_at = ? WHERE project_id = ? AND released_at IS NULL`).bind(nowIso(), a.ids.project).run();
+      await w.db.prepare(`INSERT INTO build_assignments (id, project_id, organization_id, worker_id, assigned_at) SELECT 'asg_matrix', id, organization_id, ?, ? FROM projects WHERE id = ?`).bind(w.ids.buildWorker, nowIso(), a.ids.project).run();
+    } },
+    { key: "POST /staff/builds/approvals/:id/decide", fields: () => ({ decision: "approve", note: "Matrix" }) },
+    { key: "POST /staff/builds/integrations/:id/live", fields: () => ({ live: "1" }) },
+    { key: "POST /staff/builds/:id/delete-preview", setup: async () => {
+      await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review', preview_name = 'cm-prv-matrix-b0', preview_deleted_at = NULL, preview_delete_requested_at = NULL, source_commit = 'abc123', checkpoint_key = 'builds/matrix/ckpt-1.tgz' WHERE id = ?`).bind(w.ids.buildJob).run();
     } },
     { key: "POST /staff/builds/:id/retry", setup: async () => {
       await w.db.prepare(`UPDATE build_jobs SET state = 'canceled' WHERE project_id = ? AND kind = 'revision'`).bind(w.a.ids.project).run();

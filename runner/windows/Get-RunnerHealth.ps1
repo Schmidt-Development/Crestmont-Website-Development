@@ -19,6 +19,11 @@ if ($null -ne $h.modelReachable) {
   $state = if ($h.modelReachable) { "reachable" } else { "NOT reachable" }
   Write-Host "Model server: $state (model $($h.model), checked $($h.modelCheckedAt))"
   if ($h.lastModelError) { Write-Host "Last model error: $($h.lastModelError)" }
+  if ($null -ne $h.modelGpuShare) {
+    $pct = [int][math]::Round([double]$h.modelGpuShare * 100)
+    if ($pct -ge 100) { Write-Host "Model GPU residency: 100% (fully in GPU memory)" }
+    else { Write-Host "Model GPU residency: $pct% - part of the model runs on the CPU; builds will be slow (choose a smaller model or context)" }
+  }
 }
 if ($h.lastJobError) { Write-Host "Last job ($($h.lastJobOutcome)): $($h.lastJobError)" }
 $ollama = $null

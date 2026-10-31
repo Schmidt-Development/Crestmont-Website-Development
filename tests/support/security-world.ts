@@ -154,7 +154,7 @@ export async function buildWorld(): Promise<World> {
   const payments = new FakePayments();
   const app = await createTestApp({
     EVIDENCE_INGEST_SECRET: SECRETS.evidence, VOICE_WEBHOOK_SECRET: SECRETS.voice, STRIPE_WEBHOOK_SECRET: SECRETS.stripe,
-    RETELL_API_KEY: SECRETS.retell, RESEND_WEBHOOK_SECRET: SECRETS.resend, BUILD_RUNNER_SECRET: SECRETS.runner, RESEARCH_RUNNER_SECRET: SECRETS.research, SCHEDULER_TRIGGER_SECRET: SECRETS.scheduler, CRM_IMPORT_SECRET: SECRETS.crmImport,
+    RETELL_API_KEY: SECRETS.retell, RESEND_WEBHOOK_SECRET: SECRETS.resend, BUILD_RUNNER_SECRET: SECRETS.runner, RESEARCH_RUNNER_SECRET: SECRETS.research, BUILD_PREVIEW_GATE_SECRET: "matrix-preview-gate-secret-0123456789abcdef", SCHEDULER_TRIGGER_SECRET: SECRETS.scheduler, CRM_IMPORT_SECRET: SECRETS.crmImport,
     overrides: { storage: new MemoryStorage(), payments },
   });
   const db = app.db;
@@ -248,9 +248,28 @@ async function buildStaffRecords(w: World) {
   await db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES (?, ?, 'system', 'project', NULL, 'Matrix staff notification', ?)`).bind(ids.staffNotification, w.staff.owner.id, nowIso()).run();
   // AI build record for tenant A's project (normally created by the payment/intake hooks).
   ids.buildJob = newId("bld");
-  await db.prepare(`INSERT INTO build_jobs (id, project_id, organization_id, order_id, kind, revision, dedupe_key, state, state_reason, strategy, package_id, trigger, preview_url, agent_session_id, created_at, updated_at)
-                    SELECT ?, p.id, p.organization_id, p.order_id, 'first_build', 0, p.id || ':first', 'ready_for_review', 'matrix fixture', 'standard', 'business', 'sweep', 'https://preview.matrix.example', 'sess-matrix', ?, ? FROM projects p WHERE p.id = ?`)
+  await db.prepare(`INSERT INTO build_jobs (id, project_id, organization_id, order_id, kind, revision, dedupe_key, state, state_reason, strategy, package_id, trigger, preview_url, preview_name, preview_gated, customer_preview_shared_at, agent_session_id, created_at, updated_at)
+                    SELECT ?, p.id, p.organization_id, p.order_id, 'first_build', 0, p.id || ':first', 'ready_for_review', 'matrix fixture', 'standard', 'business', 'sweep', 'https://cm-prv-matrix-b0.acct.workers.dev', 'cm-prv-matrix-b0', 1, datetime('now'), 'sess-matrix', ?, ? FROM projects p WHERE p.id = ?`)
     .bind(ids.buildJob, nowIso(), nowIso(), w.a.ids.project).run();
+  // Tenant B's own shared private preview (so the customer preview routes are tenant-addressed in the matrix).
+  w.b.ids.buildJob = newId("bld");
+  await db.prepare(`INSERT INTO build_jobs (id, project_id, organization_id, order_id, kind, revision, dedupe_key, state, state_reason, strategy, package_id, trigger, preview_url, preview_name, preview_gated, customer_preview_shared_at, created_at, updated_at)
+                    SELECT ?, p.id, p.organization_id, p.order_id, 'first_build', 0, p.id || ':first', 'ready_for_review', 'matrix fixture', 'standard', 'business', 'sweep', 'https://cm-prv-matrix-bb0.acct.workers.dev', 'cm-prv-matrix-bb0', 1, datetime('now'), ?, ? FROM projects p WHERE p.id = ?`)
+    .bind(w.b.ids.buildJob, nowIso(), nowIso(), w.b.ids.project).run();
+  // Customer production delivery (Founder decision D5): tenant A's target with a superseded v1 and a live v2.
+  ids.siteDeployment = newId("sd");
+  await db.prepare(`INSERT INTO site_targets (id, project_id, organization_id, worker_name, created_at, updated_at) SELECT 'st_matrix', id, organization_id, 'cm-site-matrix-a', ?, ? FROM projects WHERE id = ?`).bind(nowIso(), nowIso(), w.a.ids.project).run();
+  for (const [id, v, state] of [[ids.siteDeployment, 1, "superseded"], [newId("sd"), 2, "live"]] as const) {
+    await db.prepare(`INSERT INTO site_deployments (id, target_id, project_id, organization_id, build_job_id, version, kind, state, source_repo, source_commit, worker_name, prepared_at, verified_at, created_at, updated_at)
+      SELECT ?, 'st_matrix', project_id, organization_id, id, ?, 'release', ?, 'https://github.com/crestmont-builds/matrix', 'abc1234', 'cm-site-matrix-a', ?, ?, ?, ? FROM build_jobs WHERE id = ?`).bind(id, v, state, nowIso(), nowIso(), nowIso(), nowIso(), ids.buildJob).run();
+  }
+  // Architecture V2 fixtures: a builder worker (turns worker mode on: claims must name it), an approval and an integration.
+  ids.buildWorker = newId("wkr");
+  await db.prepare(`INSERT INTO build_workers (id, label, provider_kind, cost_class, enabled, dispatch_paused, enrollment_key_hash, created_at, updated_at) VALUES (?, 'Matrix worker', 'local-gpu', 'owned-hardware', 1, 0, ?, ?, ?)`).bind(ids.buildWorker, "0".repeat(64), nowIso(), nowIso()).run();
+  ids.buildApproval = newId("apv");
+  await db.prepare(`INSERT INTO build_approvals (id, project_id, organization_id, job_id, kind, summary, dedupe_key, requested_by, requested_at) SELECT ?, project_id, organization_id, id, 'credential_request', 'Stripe secret key for live payments', 'matrix-apv', 'runner', ? FROM build_jobs WHERE id = ?`).bind(ids.buildApproval, nowIso(), ids.buildJob).run();
+  ids.buildIntegration = newId("int");
+  await db.prepare(`INSERT INTO build_integrations (id, project_id, organization_id, key, name, purpose, credentials_required, setup_instructions, permissions_required, human_action, responsible, updated_at) SELECT ?, project_id, organization_id, 'stripe', 'Stripe payments', 'Payments', 'keys', 'setup', 'owner', 'Provide keys', 'customer', ? FROM build_jobs WHERE id = ?`).bind(ids.buildIntegration, nowIso(), ids.buildJob).run();
   // AI Sales Optimization: baseline v1, a second draft version and a proposed experiment (TEST DATA; no Retell agent).
   const { ensureBaseline, createVersion } = await import("../../src/services/sales-opt/registry.ts");
   const { baselineSalesInstructions } = await import("../../src/domain/sales-opt/policy.ts");

@@ -10,6 +10,8 @@
 param(
   [string]$InstallDir = "C:\CrestmontRunner",
   [switch]$OllamaInDocker,
+  # Shared native Ollama (Node 1: HQ/JARVIS): never start or stop it from here.
+  [switch]$NoOllamaStart,
   [int]$WaitMinutes = 10
 )
 $ErrorActionPreference = "Continue"
@@ -22,7 +24,7 @@ if ((Test-Path $log) -and (Get-Item $log).Length -gt 1MB) { Get-Content $log -Ta
 Log "start requested"
 $dockerDesktop = Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"
 if (-not (Get-Process "Docker Desktop" -ErrorAction SilentlyContinue) -and (Test-Path $dockerDesktop)) { Log "starting Docker Desktop"; Start-Process $dockerDesktop | Out-Null }
-if (-not $OllamaInDocker) {
+if (-not $OllamaInDocker -and -not $NoOllamaStart) {
   $app = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama app.exe"
   if (-not (Get-Process "ollama" -ErrorAction SilentlyContinue) -and (Test-Path $app)) { Log "starting Ollama"; Start-Process $app | Out-Null }
 }

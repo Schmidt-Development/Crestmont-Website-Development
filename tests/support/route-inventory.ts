@@ -29,7 +29,8 @@ export type ResourceKind =
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
-  | "member" | "notification" | "staffNotification" | "buildJob" | "soVersion" | "soStage" | "soExperiment" | "runnerDiagnostic" | "researchProspect" | "researchProspect2";
+  | "member" | "notification" | "staffNotification" | "buildJob" | "siteDeployment" | "buildWorker" | "buildApproval" | "buildIntegration"
+  | "soVersion" | "soStage" | "soExperiment" | "runnerDiagnostic" | "researchProspect" | "researchProspect2";
 
 export type Access =
   | { kind: "public" }
@@ -49,6 +50,8 @@ export interface RouteSpec {
   audit?: AuditClass;
   /** JSON API route (/api/*): denials are JSON 401/403, never a redirect. */
   api?: true;
+  /** GET answers 303 to an off-site URL (a signed preview sign-in link), not a page. */
+  offsite?: true;
   /** Query string the page needs to render, with {resourceKind} placeholders (e.g. "lead={lead}"). */
   query?: string;
 }
@@ -110,6 +113,16 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/builds/runner/ai/checkpoint": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/files": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/complete": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/previews/claim": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/previews/deleted": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/deployments/claim": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/deployments/complete": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/pipeline/spec": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/cycles/submit": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/integrations/report": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/approvals/request": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/approvals/list": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/workers/status": signed("x-crestmont-runner-signature"),
   "GET /api/builds": { access: { kind: "staff", roles: rolesWith("builds.read") }, api: true },
   "GET /api/builds/:id": { access: { kind: "staff", roles: rolesWith("builds.read") }, api: true, params: { id: "buildJob" } },
 
@@ -476,7 +489,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/ai/:id": staff(rolesWith("ai.manage"), P("aiJob")),
   // AI Builds owner dashboard (src/routes/builds.ts)
   "GET /staff/builds": staff(rolesWith("builds.read")),
-  // Node 1 dispatch-to-GPU diagnostic (migration 0051)
+  // Node 1 dispatch-to-GPU diagnostic (migration 0050)
   "GET /staff/builds/diagnostics": staff(rolesWith("builds.configure")),
   "POST /staff/builds/diagnostics": staff(rolesWith("builds.configure"), undefined, act("builds.diagnostic_created")),
   "GET /staff/builds/diagnostics/:id": staff(rolesWith("builds.configure"), P("runnerDiagnostic")),
@@ -490,7 +503,36 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/builds/:id/retry": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.retry")),
   "POST /staff/builds/:id/resume": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.resume")),
   "POST /staff/builds/:id/revision": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.revision_submitted")),
+  "POST /staff/builds/:id/internal-approve": staff(rolesWith("builds.configure"), P("buildJob"), act("builds.internal_approved")),
+  "POST /staff/builds/projects/:id/priority": staff(rolesWith("builds.manage"), P("project"), act("builds.project_priority")),
   "POST /staff/builds/:id/approve": staff(rolesWith("builds.configure"), P("buildJob"), act("builds.preview_approved")),
+  "POST /staff/builds/customer-revisions/:id/forward": staff(rolesWith("builds.manage"), P("revision"), act("builds.customer_revision_forwarded")),
+  "POST /staff/builds/customer-revisions/:id/reject": staff(rolesWith("builds.manage"), P("revision"), act("builds.customer_revision_rejected")),
+  "POST /staff/builds/:id/delete-preview": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.preview_delete_requested")),
+  "POST /staff/builds/:id/preview-retention": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.preview_retention_changed")),
+  // Founder decision D3: private previews. Opening one issues a signed 5-minute sign-in link (audited).
+  "GET /staff/builds/:id/preview": { ...staff(rolesWith("builds.read"), P("buildJob"), act("builds.preview_opened")), offsite: true },
+  "POST /staff/builds/:id/share-preview": staff(rolesWith("builds.manage"), P("buildJob"), act("builds.preview_shared")),
+  "GET /portal/projects/:id/previews/:buildId": { ...cust({ id: "project", buildId: "buildJob" }, act("portal.preview_opened")), offsite: true },
+  "POST /portal/projects/:id/previews/:buildId/review": cust({ id: "project", buildId: "buildJob" }, act("portal.preview_reviewed"), { admin: true }),
+  // Founder decision D5: customer production delivery (Owner only; authorization and domains need a recent MFA step-up).
+  "GET /staff/builds/projects/:id/delivery": staff(rolesWith("builds.read"), P("project")),
+  // Architecture V2: builder accounts, pipeline, approvals, integrations.
+  "GET /staff/builds/workers": staff(rolesWith("builds.read")),
+  "POST /staff/builds/workers": staff(rolesWith("builds.configure"), undefined, act("builds.worker_registered")),
+  "POST /staff/builds/workers/:id/update": staff(rolesWith("builds.configure"), P("buildWorker"), act("builds.worker_updated")),
+  "POST /staff/builds/workers/:id/rotate-key": staff(rolesWith("builds.configure"), P("buildWorker"), act("builds.worker_updated")),
+  "POST /staff/builds/projects/:id/reassign": staff(rolesWith("builds.manage"), P("project"), act("builds.project_reassigned")),
+  "GET /staff/builds/pipeline": staff(rolesWith("builds.read")),
+  "GET /staff/builds/projects/:id/pipeline": staff(rolesWith("builds.read"), P("project")),
+  "POST /staff/builds/approvals/:id/decide": staff(rolesWith("builds.configure"), P("buildApproval"), act("builds.approval_decided")),
+  "POST /staff/builds/integrations/:id/live": staff(rolesWith("builds.configure"), P("buildIntegration"), act("builds.integration_live_status")),
+  "POST /staff/builds/projects/:id/site-target": staff(rolesWith("builds.configure"), P("project"), act("builds.site_target_created")),
+  "POST /staff/builds/projects/:id/site-domain": staff(rolesWith("builds.configure"), P("project"), act("builds.site_domain_changed")),
+  "POST /staff/builds/:id/prepare-release": staff(rolesWith("builds.configure"), P("buildJob"), act("builds.site_release_prepared")),
+  "POST /staff/builds/releases/:id/authorize": staff(rolesWith("builds.configure"), P("siteDeployment"), act("builds.site_release_authorized")),
+  "POST /staff/builds/releases/:id/cancel": staff(rolesWith("builds.configure"), P("siteDeployment"), act("builds.site_release_canceled")),
+  "POST /staff/builds/releases/:id/rollback": staff(rolesWith("builds.configure"), P("siteDeployment"), act("builds.site_rollback_prepared")),
   "POST /staff/ai/:id/decide": staff(rolesWith("ai.manage"), P("aiJob"), act("ai.draft_approved")),
   "POST /staff/ai/:id/retry": staff(rolesWith("ai.manage"), P("aiJob"), act("ai.job_retried")),
   "POST /staff/ai/budget": staff(rolesWith("ai.budget"), undefined, act("ai.budget_updated")),

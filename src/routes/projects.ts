@@ -341,6 +341,7 @@ ${textarea({ name: "description", label: "Description", rows: 2, maxlength: 5000
   { header: "Request", cell: (x) => nl2br(x.request_text) },
   { header: "Status", cell: (x) => badge(x.status) },
   { header: "Change order", cell: (x) => x.co_status ? html`${badge(x.co_status)} ${formatCents(x.co_price)}` : x.included ? "—" : badge("pending", "Needs proposal") },
+  { header: "AI build", cell: (x) => x.ai_job_id ? html`<a href="/staff/builds/${x.ai_job_id}">${(x.ai_job_state ?? "").replace(/_/g, " ")}</a>${x.ai_preview_url ? html` · <a href="/staff/builds/${x.ai_job_id}/preview" rel="noopener noreferrer" target="_blank">preview</a>` : ""}` : "—" },
   { header: "Actions", cell: (x) => {
     if (x.status === "approved" || x.status === "delivered") return x.delivered_at ? html`<span class="faint">Delivered ${fmtDay(x.delivered_at)}</span>` : "";
     if (!x.included && !["approved", "paid", "completed"].includes(x.co_status ?? "")) {

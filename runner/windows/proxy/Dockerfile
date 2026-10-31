@@ -8,7 +8,7 @@
 # would switch to `proxy` and then fail with "FATAL: Cannot open '/dev/stdout' for writing" because the container's
 # stdout pipe belongs to root (reproduced locally with Squid 5.7; see LOCAL-VALIDATION.md "Validation status").
 # Running as `proxy` also means the container needs no capabilities at all (compose: cap_drop ALL, no cap_add).
-ARG DEBIAN_IMAGE=debian:12.12-slim
+ARG DEBIAN_IMAGE=debian:12.12-slim@sha256:d5d3f9c23164ea16f31852f95bd5959aad1c5e854332fe00f7b3a20fcc9f635c
 FROM ${DEBIAN_IMAGE}
 # hadolint ignore=DL3008
 RUN apt-get update \

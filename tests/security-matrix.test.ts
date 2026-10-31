@@ -131,7 +131,8 @@ test("[EMP-002] role matrix: every staff role without the route's permission is 
     const roles = (r.spec.access as { roles: readonly string[] }).roles;
     for (const role of r.spec.params ? roles.filter((x) => x === "owner") : roles) {
       const res = await w.staff[role as keyof World["staff"]].c.get(pathFor(w, r));
-      if (res.status !== 200) served.push(`${role}: ${r.key} → ${await describe(res)}`);
+      const ok = r.spec.offsite ? res.status === 303 && /^https:\/\//.test(res.headers.get("location") ?? "") : res.status === 200;
+      if (!ok) served.push(`${role}: ${r.key} → ${await describe(res)}`);
     }
   }
   assert.deepEqual(served, [], "permitted roles are served");

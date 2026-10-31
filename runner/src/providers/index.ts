@@ -11,6 +11,7 @@ import { PaidProviderRefusedError } from "./types.ts";
 import { LocalProvider } from "./local.ts";
 import type { LocalLimits } from "./local.ts";
 import { ClaudeAgentSdkProvider } from "./claude-agent-sdk.ts";
+import type { InferenceScheduler } from "../inference/scheduler.ts";
 import type { QueryFn } from "./claude-agent-sdk.ts";
 
 export interface ProviderDeps {
@@ -23,6 +24,8 @@ export interface ProviderDeps {
   localLimits?: Partial<LocalLimits>;
   clientRetries?: number;
   clientSleep?: (ms: number) => Promise<void>;
+  /** V4: the runner's shared GPU scheduler (local provider). */
+  scheduler?: InferenceScheduler | null;
 }
 
 export function assertProviderAllowed(cfg: Pick<RunnerConfig, "agentProvider" | "allowPaidProvider">): void {
@@ -43,7 +46,7 @@ export function createProvider(cfg: RunnerConfig, deps: ProviderDeps): AgentProv
     executor: deps.dockerExecutor ?? cliDockerExecutor(cfg.jobSandbox.dockerBin, {
       PATH: cfg.agentPath, HOME: "/tmp", LANG: "C.UTF-8", ...(process.env.DOCKER_HOST ? { DOCKER_HOST: process.env.DOCKER_HOST } : {}),
     }),
-    clientRetries: deps.clientRetries, clientSleep: deps.clientSleep,
+    clientRetries: deps.clientRetries, clientSleep: deps.clientSleep, scheduler: deps.scheduler ?? null,
   });
 }
 

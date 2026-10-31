@@ -24,6 +24,17 @@ export const STEP_UP_ROUTES: Readonly<Record<string, string>> = {
   "POST /staff/integrations/:name/verify": "integration credential probe",
   "POST /staff/ops/environments": "environment endpoints",
   "POST /staff/builds/settings": "automation limits and model",
+  // Customer production delivery (Founder decision D5): the Owner's explicit authorizations
+  "POST /staff/builds/releases/:id/authorize": "customer production release",
+  "POST /staff/builds/projects/:id/site-domain": "customer domain authorization",
+  // AI builder V4: GPU worker enrollment keys, sensitive-action approvals, the private review gate before a customer
+  // can see a website, and the final approval before delivery
+  "POST /staff/builds/workers": "GPU worker enrollment",
+  "POST /staff/builds/workers/:id/rotate-key": "GPU worker key rotation",
+  "POST /staff/builds/approvals/:id/decide": "AI builder sensitive-action approval",
+  "POST /staff/builds/:id/internal-approve": "internal approval of an AI-built website",
+  "POST /staff/builds/:id/share-preview": "sharing a website preview with the customer",
+  "POST /staff/builds/:id/approve": "final approval of an AI-built website",
   "POST /staff/ai/budget": "paid AI budget",
   // AI Sales Optimization (Founder decisions that can change the live sales agent)
   "POST /staff/sales-optimization/control": "sales optimizer controls",

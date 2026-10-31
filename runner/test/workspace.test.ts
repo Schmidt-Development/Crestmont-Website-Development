@@ -78,6 +78,10 @@ test("[AIB-RUNNER] .claude/settings.json denies network tools, .git edits and re
   assert.ok(withRefs.permissions.allow.includes("WebFetch(domain:reference.example)"));
   assert.ok(!withRefs.permissions.deny.includes("WebFetch"));
   assert.equal(withRefs.sandbox, undefined);
+  // Extra private directories are off limits to the agent's tools and commands.
+  const cc = claudeSettings({ repo: "/w/repo", secretsDir: "/run/secrets", allowedDomains: [], referenceDomains: [], fetchReferences: false, sandbox: "on", privateDirs: ["/claude/claude-1"] }) as { permissions: { deny: string[] }; sandbox: { filesystem: { denyRead: string[] } } };
+  for (const r of ["Read(//claude/claude-1/**)", "Edit(//claude/claude-1/**)"]) assert.ok(cc.permissions.deny.includes(r), r);
+  assert.deepEqual(cc.sandbox.filesystem.denyRead, ["/run/secrets", "/claude/claude-1"]);
 });
 
 test("[AIB-RUNNER] config reads secrets from *_FILE, requires the essentials and redacts secret values from logs", () => {
@@ -94,7 +98,7 @@ test("[AIB-RUNNER] config reads secrets from *_FILE, requires the essentials and
   assert.equal(cfg.repo, null);
   assert.equal(cfg.preview, null);
   assert.equal(cfg.sandbox, "on", "sandbox on by default");
-  assert.throws(() => loadConfig({ PATH: "/usr/bin" }), /CONTROL_PLANE_URL, BUILD_RUNNER_SECRET, LOCAL_MODEL, RUNNER_WORKSPACES, SKILLS_SOURCE_DIR/);
+  assert.throws(() => loadConfig({ PATH: "/usr/bin" }), /CONTROL_PLANE_URL, BUILD_RUNNER_SECRET, LOCAL_MODEL_B \(or LOCAL_MODEL\), RUNNER_WORKSPACES, SKILLS_SOURCE_DIR/);
   assert.throws(() => loadConfig({ PATH: "/usr/bin", RUNNER_AGENT_PROVIDER: "claude-agent-sdk" }), /CONTROL_PLANE_URL, BUILD_RUNNER_SECRET, ANTHROPIC_API_KEY, RUNNER_WORKSPACES, SKILLS_SOURCE_DIR/);
   const lines: string[] = [];
   const log = createLogger({ sink: (l) => lines.push(l) });

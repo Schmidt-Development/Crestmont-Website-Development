@@ -268,6 +268,15 @@ export const REQUIREMENTS: RequirementDef[] = [
     ["SALESOPT-011", "Operations: scheduled cycle, post-deployment safety monitoring and automatic rollback, retention of transcript evidence, restricted access", "P1", "security", ["SALESOPT-008"]],
     ["SALESOPT-012", "Real end-to-end staging run: Retell call → ingestion → Stripe outcome → local analysis → proposal → evaluation → approval → Retell update → verification", "P1", "integration", ["SALESOPT-011", "VOICE-002", "AIOPS-002"]],
   ]),
+  ...group("AI Builds V4 (Founder architecture)", "Founder directive V4 2026-10-28: local dual-model on owned GPUs (supersedes V2/V3)", [
+    ["AIB-012", "GPU worker registry and GPU-capacity-aware scheduling: many websites per worker up to its measured capacity, waiting websites hold no capacity, Founder priority with aging, owned hardware only, GPU workers and AI models dashboard", "P0", "engineering", ["AIB-003"]],
+    ["AIB-013", "Architect master specification and autonomous BUILD→TEST→REVIEW→CORRECT loop with evidence gates, traceable continuations, loop guards and the models of every cycle recorded", "P0", "engineering", ["AIB-012"]],
+    ["AIB-014", "Sensitive-action approval queue and nonblocking external-integration checklist (never marked live by the builder)", "P0", "engineering", ["AIB-013"]],
+    ["AIB-015", "Local dual-model orchestrator: Model A (architect, fresh read-only reviewer, hard repairs) and Model B (builder) with task routing, a shared GPU inference scheduler (load/unload, VRAM tracking, switch timeouts and recovery, batching, fairness, performance log), concurrent website slots and $0 metered inference enforcement", "P0", "engineering", ["AIB-012"]],
+    ["AIB-016", "Node 1 verification and acceptance: both models pulled and measured on the RTX 5090 (VRAM, throughput, switching, 1/2/4/8 concurrency), then one real internal website through the full lifecycle", "P0", "integration", ["AIB-015"]],
+    ["AIB-017", "Private Crestmont review gate: a finished website is invisible to the customer (no preview, notification, review results or status detail) until staff approve it internally (MFA step-up) and explicitly share it; final approval only after internal approval", "P0", "security", ["AIB-006"]],
+    ["AIB-018", "Trusted integration-execution layer: agents request catalogued test-environment operations; the runner runs them with scoped credentials the agent never sees, after Owner approval, with sanitized evidence", "P0", "security", ["AIB-014"]],
+  ]),
 ];
 
 /** The original Founder-approved registry (154). The AI Builds addendum is reported separately. */
