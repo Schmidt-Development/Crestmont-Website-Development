@@ -23,6 +23,7 @@ import { Http } from "../src/http.ts";
 import { Browser, type RenderedPage } from "../src/browser.ts";
 import { pageFacts, identity, parkedPage } from "../src/identity.ts";
 import { probeDomains } from "../src/pipeline.ts";
+const AUDITED_RUN = String((JSON.parse((await import("node:fs")).readFileSync(new URL("./audit-request.json", import.meta.url), "utf8")) as { runId: number }).runId);
 import { normDomain, normName, phoneE164, recommendPackage, isCandidateOfficialDomain, type WebsiteClass, type Finding as DomainFinding } from "../../src/domain/research.ts";
 import type { Candidate } from "../src/sources/types.ts";
 import { snapshot } from "../src/resources.ts";
@@ -113,6 +114,27 @@ interface Audit {
   duplicateOf: string | null; category: "A" | "B" | "C" | "D"; confidence: "high" | "medium" | "low"; explanation: string;
 }
 
+// Tries to falsify "this business has no (working) website": a wider set of name-derived domains than the pipeline uses
+// (.com/.net/.biz/.us, with and without the city), rendered in a real browser. Only a page showing this business's phone
+// or street counts as its own site.
+async function findOwnSite(d: Detail, exclude: string | null = null): Promise<{ variants: string[]; tried: string[]; found: { domain: string; signals: string[] } | null }> {
+  const stems = probeDomains(d.name).map((x) => x.replace(/\.com$/, ""));
+  const city = (d.address.city ?? "").toLowerCase().replace(/[^a-z]/g, "");
+  const variants = [...new Set(stems.flatMap((s) => [s, city && s.length + city.length <= 40 ? `${s}${city}` : null]).filter((x): x is string => !!x).flatMap((s) => ["com", "net", "biz", "us"].map((t) => `${s}.${t}`)))].filter((v) => v !== exclude).slice(0, 10);
+  const cand = { businessKey: d.businessKey, name: d.name, category: null, address: d.address, lat: null, lon: null, phones: d.phone ? [phoneE164(d.phone)!].filter(Boolean) : [], emails: [], websites: [], sources: [], sourceConfidence: null, operatingStatus: null } as Candidate;
+  const tried: string[] = [];
+  for (const v of variants) {
+    const r = await http.get(`https://${v}/`);
+    if (r.error || r.robotsBlocked || (r.status ?? 500) >= 400) continue;
+    tried.push(v);
+    const page = await browser!.inspect(`https://${v}/`, { width: 1366, height: 900, mobile: false });
+    const facts = page.ok && page.html ? pageFacts(page.html) : pageFacts(r.body);
+    const id = identity(cand, facts, []);
+    if (id.official && id.signals.some((x) => /phone|street/.test(x))) return { variants, tried, found: { domain: v, signals: id.signals } };
+  }
+  return { variants, tried, found: null };
+}
+
 async function auditOne(d: Detail): Promise<Audit> {
   const base = { businessKey: d.businessKey, name: d.name, location: [d.address.line, d.address.city, d.address.state].filter(Boolean).join(", "), website: d.websiteUrl,
     researchClass: d.classification, researchScore: d.platform?.score ?? 0,
@@ -123,23 +145,9 @@ async function auditOne(d: Detail): Promise<Audit> {
     // uses (.com/.net/.biz/.us, with and without the city), rendered in a real browser. A site whose rendered page shows
     // this business's phone or street refutes the claim (D). Existence is corroborated only by an independent online
     // profile listed for the business (social / directory page). Otherwise the evidence is insufficient (C).
-    const stems = probeDomains(d.name).map((x) => x.replace(/\.com$/, ""));
-    const city = (d.address.city ?? "").toLowerCase().replace(/[^a-z]/g, "");
-    const variants = [...new Set(stems.flatMap((s) => [s, city && s.length + city.length <= 40 ? `${s}${city}` : null]).filter((x): x is string => !!x).flatMap((s) => ["com", "net", "biz", "us"].map((t) => `${s}.${t}`)))].slice(0, 10);
-    const cand = { businessKey: d.businessKey, name: d.name, category: null, address: d.address, lat: null, lon: null, phones: d.phone ? [phoneE164(d.phone)!].filter(Boolean) : [], emails: [], websites: [], sources: [], sourceConfidence: null, operatingStatus: null } as Candidate;
-    const tried: string[] = [];
-    for (const v of variants) {
-      const r = await http.get(`https://${v}/`);
-      if (r.error || r.robotsBlocked || (r.status ?? 500) >= 400) continue;
-      tried.push(v);
-      const page = await browser!.inspect(`https://${v}/`, { width: 1366, height: 900, mobile: false });
-      const facts = page.ok && page.html ? pageFacts(page.html) : pageFacts(r.body);
-      const id = identity(cand, facts, []);
-      if (id.official && id.signals.some((x) => /phone|street/.test(x))) {
-        return { ...base, operational: true, mobileFriendly: null, identity: "contradicted", claims: [{ code: "no_official_website", severity: "high", material: true, verdict: "not_supported", how: `found ${v}: ${id.signals.join("; ")}` }],
-          evidenceUrls: [`https://${v}/`], category: "D", confidence: "high", explanation: `False "no website": the business's own site exists at ${v} (${id.signals.join("; ")}).` };
-      }
-    }
+    const { variants, tried, found } = await findOwnSite(d);
+    if (found) return { ...base, operational: true, mobileFriendly: null, identity: "contradicted", claims: [{ code: "no_official_website", severity: "high", material: true, verdict: "not_supported", how: `found ${found.domain}: ${found.signals.join("; ")}` }],
+      evidenceUrls: [`https://${found.domain}/`], category: "D", confidence: "high", explanation: `False "no website": the business's own site exists at ${found.domain} (${found.signals.join("; ")}).` };
     const profiles = [...d.listedWebsites.map((w) => normDomain(w)).filter((x): x is string => !!x && !isCandidateOfficialDomain(x)),
       ...d.identitySignals.filter((x) => /^listed by \d+ independent datasets/.test(x))];
     const claim = { code: "no_official_website", severity: "high", material: true, verdict: "not_testable" as Verdict, how: `${variants.length} name-derived domains tried, ${tried.length} loaded, none showed this business's phone or street; absence of a website cannot be proven` };
@@ -168,6 +176,9 @@ async function auditOne(d: Detail): Promise<Audit> {
   const out = (category: Audit["category"], confidence: Audit["confidence"], explanation: string): Audit => ({ ...base, operational, mobileFriendly, identity: idState, claims, evidenceUrls, category, confidence, explanation });
   if (idState === "contradicted" && !broken) return out("D", "medium", "The rendered page shows contact details of a different business; the website match is not confirmed.");
   if (broken) {
+    // A dead listing is only a broken website if the business has no working site elsewhere (stale listings are common).
+    const moved = sup.length ? (await findOwnSite(d, normDomain(d.websiteUrl))).found : null;
+    if (moved) return out("D", "high", `Stale listing, not a broken website: the business's current site is ${moved.domain} (${moved.signals.join("; ")}).`);
     if (sup.length) return out("A", listed ? "high" : "medium", `Still broken on independent re-check (${sup.map((c) => c.how).join("; ")}). Listed as the business's website by the dataset.`);
     if (ref.length) return out("D", "high", `The "broken" claim did not reproduce: ${ref.map((c) => c.how).join("; ")}.`);
     return out("C", "low", "The broken-site claim could not be re-tested (access restricted): insufficient evidence.");
@@ -198,8 +209,8 @@ const claimStats: Record<string, { supported: number; not_supported: number; not
 for (const r of results) for (const c of r.claims.filter((x) => x.material)) { const s = claimStats[c.code] ??= { supported: 0, not_supported: 0, not_testable: 0 }; s[c.verdict]++; }
 const pct = (x: number, d = n) => (d ? Math.round((x / d) * 1000) / 10 : null);
 const summary = {
-  kind: "Independent automated re-verification (fresh fetch + real Chromium desktop/mobile render) of the leads promoted by research-live-sample run 41145776120",
-  leadsAudited: n, expected: 159,
+  kind: `Independent automated re-verification (fresh fetch + real Chromium desktop/mobile render) of the leads promoted by research-live-sample run ${AUDITED_RUN}`,
+  leadsAudited: n,
   categories: { A: count("A"), B: count("B"), C: count("C"), D: count("D") },
   percentages: { A: pct(count("A")), B: pct(count("B")), C: pct(count("C")), D: pct(count("D")), AorB: pct(count("A") + count("B")) },
   byResearchClass: { VERIFIED_WEBSITE_BROKEN: byClass("VERIFIED_WEBSITE_BROKEN"), VERIFIED_WEBSITE_ISSUES: byClass("VERIFIED_WEBSITE_ISSUES"), NO_OFFICIAL_WEBSITE_FOUND: byClass("NO_OFFICIAL_WEBSITE_FOUND") },
@@ -225,7 +236,7 @@ writeFileSync(join(OUT, "audit.json"), JSON.stringify(results, null, 2));
 const esc = (s: unknown) => String(s ?? "").replace(/\|/g, "/").replace(/\n/g, " ").slice(0, 220);
 writeFileSync(join(OUT, "audit-report.md"), [
   "# Independent audit of promoted research leads (PRIVATE)", "",
-  `Run 41145776120, ${n} leads. Method and rubric: docs/research/AUDIT.md. Commercial fit is not assessed by machine.`, "",
+  `Run ${AUDITED_RUN}, ${n} leads. Method and rubric: docs/research/AUDIT.md. Commercial fit is not assessed by machine.`, "",
   `A ${summary.categories.A} · B ${summary.categories.B} · C ${summary.categories.C} · D ${summary.categories.D}. Material claims supported: ${supported}/${tested.length} tested (${allMat.length - tested.length} not testable).`, "",
   "| # | Cat | Conf | Business | Location | Website | Research class / score | Identity | Operational | Mobile-friendly | Claims (verdict) | Package | Why |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
   ...results.map((r, i) => `| ${i + 1} | ${r.category} | ${r.confidence} | ${esc(r.name)} | ${esc(r.location)} | ${esc(r.website ?? "none found")} | ${esc(r.researchClass)} / ${r.researchScore} | ${r.identity} | ${r.operational ?? "?"} | ${r.mobileFriendly ?? "?"} | ${esc(r.claims.filter((c) => c.material).map((c) => `${c.code}: ${c.verdict}`).join("; "))} | ${r.category <= "B" ? esc(r.recommendedPackage) : ""} | ${esc(r.explanation)} |`),

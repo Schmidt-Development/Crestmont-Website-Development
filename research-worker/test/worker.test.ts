@@ -421,3 +421,17 @@ test("[audit] the pipeline records independent existence corroboration for 'no w
   const bare = await evaluate(cand({ websites: [], datasets: ["meta"] }), deps(new FakeHttp({}), new State(":memory:")), null);
   assert.ok(bare.kind === "done" && !bare.prospect.website.identitySignals!.some((s) => /online profile|independent datasets/.test(s)));
 });
+
+test("[audit] a dead listed domain is not 'broken' when the business has moved to a working site (stale listing); it stays broken otherwise", async () => {
+  const own = "https://riversideplumbing.com/";
+  const moved = await evaluate(cand(), deps(new FakeHttp({ [own]: ok(own, page(), { responseMs: 200 }) }), new State(":memory:"), { brokenAttempts: 1 }), null);
+  assert.ok(moved.kind === "done" && moved.cls === "VERIFIED_OFFICIAL_WEBSITE", JSON.stringify(moved).slice(0, 300));
+  if (moved.kind === "done") {
+    assert.equal(moved.prospect.website.url, own);
+    assert.ok(moved.prospect.website.checks!.some((c) => /current website found at riversideplumbing\.com/.test(c.result)));
+  }
+  // A similarly named site of another business does not rescue it: the dead listing is still reported as broken.
+  const other = await evaluate(cand(), deps(new FakeHttp({ [own]: ok(own, page({ phone: "(616) 555-2900", street: "9 Elm St", city: "Holland" }), { responseMs: 200 }) }), new State(":memory:"), { brokenAttempts: 1 }), null);
+  assert.ok(other.kind === "done" && other.cls === "VERIFIED_WEBSITE_BROKEN");
+  if (other.kind === "done") assert.ok(other.prospect.website.checks!.some((c) => c.method === "stale-listing check"));
+});

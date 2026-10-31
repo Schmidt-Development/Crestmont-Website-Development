@@ -125,7 +125,16 @@ export async function evaluate(c: Candidate, deps: Deps, probe: Probe | null): P
 
   let restricted = false, loadedUnconfirmed = false;
   const unconfirmedReasons: string[] = [];
-  for (const d of domains) {
+  // A listed website that is dead or parked is only "broken" if the business has no working site elsewhere: listings go
+  // stale when a business moves to a new domain. So the broken conclusion waits until the other candidate domains and the
+  // name-derived probes (accepted only on a phone or street match) have been tried.
+  let pendingBroken: Outcome | null = null;
+  const queue = [...domains];
+  const lookElsewhere = (deadDomain: string) => {
+    for (const p of probeDomains(c.name)) if (!queue.some((q) => q.domain === p)) queue.push({ domain: p, listedBy: [], via: PROBE_VIA });
+    checks.push({ stage: "C", method: "stale-listing check", result: `${deadDomain} does not work; looking for a current website before calling it broken`, at: iso() });
+  };
+  for (const d of queue) {
     let home = await deps.http.get(`https://${d.domain}/`);
     if (home.error?.kind === "tls" || (home.error && home.error.kind !== "dns" && home.error.kind !== "blocked_address")) {
       const plain = await deps.http.get(`http://${d.domain}/`);
@@ -151,7 +160,9 @@ export async function evaluate(c: Candidate, deps: Deps, probe: Probe | null): P
       checks.push({ stage: "D", method: "identity by listing", result: `listed as this business's website by ${d.listedBy.join(", ")}${e?.captures ? `; captured ${e.captures}× by Common Crawl` : ""}`, at: iso() });
       const finding: Finding = { code: broken.code, title: broken.title, severity: "critical", confidence: 0.9, url: home.url, method: `HTTP GET (no JS), ${failures.length} attempts`, observedAt: failures.at(-1)!.at,
         evidence: failures.map((x) => `${x.at}: ${x.evidence}`).join(" | ").slice(0, 500), reproduction: `Open ${home.url}` };
-      return done("VERIFIED_WEBSITE_BROKEN", { url: home.url, confidence: conf, identitySignals: [`listed by ${d.listedBy.join(", ")}`] }, [finding], Math.max(recConf, conf));
+      if (!pendingBroken) pendingBroken = done("VERIFIED_WEBSITE_BROKEN", { url: home.url, confidence: conf, identitySignals: [`listed by ${d.listedBy.join(", ")}`] }, [finding], Math.max(recConf, conf));
+      lookElsewhere(d.domain);
+      continue;
     }
     if (home.status === null || home.status >= 400) { unconfirmedReasons.push(`${d.domain}: HTTP ${home.status}`); continue; }
     const facts = pageFacts(home.body);
@@ -161,7 +172,9 @@ export async function evaluate(c: Candidate, deps: Deps, probe: Probe | null): P
       if (!d.listedBy.length) { unconfirmedReasons.push(`${d.domain} is a parked/placeholder page`); continue; }
       const finding: Finding = { code: "listed_domain_parked", title: "The listed website shows a parked or placeholder page", severity: "critical", confidence: 0.85, url: home.finalUrl, method: "HTTP GET (no JS)", observedAt: iso(), evidence: `Page text includes "${parked}"`, reproduction: `Open ${home.finalUrl}` };
       checks.push({ stage: "D", method: "identity by listing", result: `listed by ${d.listedBy.join(", ")}; page is a placeholder`, at: iso() });
-      return done("VERIFIED_WEBSITE_BROKEN", { url: home.finalUrl, confidence: 0.75, identitySignals: [`listed by ${d.listedBy.join(", ")}`, "placeholder page"] }, [finding], recConf);
+      if (!pendingBroken) pendingBroken = done("VERIFIED_WEBSITE_BROKEN", { url: home.finalUrl, confidence: 0.75, identitySignals: [`listed by ${d.listedBy.join(", ")}`, "placeholder page"] }, [finding], recConf);
+      lookElsewhere(d.domain);
+      continue;
     }
     const siblings = deps.state.businessesForDomain(d.domain).filter((b) => b.business_key !== c.businessKey)
       .map((b) => deps.state.candidate(b.business_key)).filter((o) => o && nameOverlap(c.name, o.name) >= 0.6).length;
@@ -169,6 +182,7 @@ export async function evaluate(c: Candidate, deps: Deps, probe: Probe | null): P
     checks.push({ stage: "D", method: "page vs record (phone, street, city, name, listings)", result: `${id.official ? "official" : "not confirmed"} (score ${id.score}): ${[...id.signals, ...id.contradictions].join("; ") || "no matching signals"}`, at: iso() });
     if (isProbe && !(id.official && id.signals.some((x) => /phone|street/.test(x)))) continue; // someone else's site, or not provably ours
     if (!id.official) { loadedUnconfirmed = true; unconfirmedReasons.push(`${d.domain} loads but does not match this business`); continue; }
+    if (pendingBroken) checks.push({ stage: "D", method: "stale-listing check", result: `current website found at ${d.domain}; the dead listing is not reported as a broken website`, at: iso() });
     deps.state.indexDomain(d.domain, c.businessKey, c.sources[0]?.source ?? "source");
     const findings = await audit(deps, home, home.body);
     const material = findings.some((f) => f.confidence >= 0.6 && (f.severity === "medium" || f.severity === "high" || f.severity === "critical"));
@@ -177,6 +191,7 @@ export async function evaluate(c: Candidate, deps: Deps, probe: Probe | null): P
     return done(renderBroken ? "VERIFIED_WEBSITE_BROKEN" : material ? "VERIFIED_WEBSITE_ISSUES" : "VERIFIED_OFFICIAL_WEBSITE",
       { url: home.finalUrl, confidence: id.score, identitySignals: id.signals }, findings, Math.max(recConf, id.score));
   }
+  if (pendingBroken) return pendingBroken;
   if (restricted) return done("WEBSITE_UNVERIFIED", { url: null, confidence: 0.3, identitySignals: ["site restricts automated access (robots.txt or HTTP 401/403/429); not tested"] }, [], recConf);
   if (loadedUnconfirmed || domains.some((d) => d.listedBy.length)) return done("WEBSITE_UNVERIFIED", { url: null, confidence: 0.4, identitySignals: unconfirmedReasons }, [], recConf);
   if (!c.phones.length && !(c.address.line && c.address.city)) return done("BUSINESS_IDENTITY_UNCERTAIN", { url: null, confidence: recConf, identitySignals: ["no phone or street address to confirm the business"] }, [], recConf);
