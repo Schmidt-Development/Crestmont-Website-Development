@@ -1,0 +1,24 @@
+# TEMPORARY, read-only: never merged. Unauthenticated requests to staging that reveal, without any credential,
+# which AI-builder routes are deployed and whether BUILD_RUNNER_SECRET is configured (503 = not set, 401 = set).
+name: Staging builder probe (temporary)
+on:
+  push:
+    branches: [claude/staging-builder-probe]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe builder routes (no credentials sent)
+        env:
+          BASE: https://crestmont-platform-staging.partners-df4.workers.dev
+        run: |
+          post() { curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' --data '{}' "$BASE$1"; }
+          get()  { curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$BASE$1"; }
+          for p in /api/builds/runner/claim /api/builds/runner/ai/claim /api/builds/runner/ai/checkpoint /api/builds/runner/workers/status /api/builds/runner/cycles/submit /api/builds/runner/pipeline/spec /api/builds/runner/deployments/claim /api/builds/runner/previews/claim /api/builds/runner/does-not-exist /api/research/runner/heartbeat; do
+            echo "::notice title=POST $p::$(post $p)"
+          done
+          for p in /staff/builds /staff/builds/diagnostics /staff/builds/workers /staff/builds/pipeline /staff/test-payments /staff/does-not-exist; do
+            echo "::notice title=GET $p::$(get $p)"
+          done
