@@ -30,7 +30,15 @@ export interface Env {
   GITHUB_TOKEN?: string;
   GITHUB_REPO?: string;
   VOICE_WEBHOOK_SECRET?: string;
-  /** Retell workspace API key that carries the webhook badge (verifies X-Retell-Signature). VOICE-003. */
+  /**
+   * Retell keys, one per workspace (src/adapters/retell-workspaces.ts). Each is that workspace's API key with the webhook
+   * badge: it verifies X-Retell-Signature and authorises REST calls to that workspace only. VOICE-003.
+   * INBOUND = AI receptionist (events, functions, inbound webhook, receptionist prompt sync and callbacks).
+   * OUTBOUND = AI sales representative and the sales Self-Improvement Engine.
+   */
+  RETELL_INBOUND_API_KEY?: string;
+  RETELL_OUTBOUND_API_KEY?: string;
+  /** Legacy single key: never read. If still set it is reported on /staff/integrations as ambiguous. */
   RETELL_API_KEY?: string;
   /** "on" enables outbound calling in this environment (default off). The Owner's receptionist setting must also be on. */
   RETELL_OUTBOUND?: string;

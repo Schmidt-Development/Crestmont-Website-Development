@@ -2,7 +2,16 @@
 
 Branch `claude/retell-inbound-8-functions`. Implementation: `src/services/voice.ts` (`INBOUND_FUNCTIONS`), migration `0055_voice_inbound_functions.sql`, template `voice_followup` (`src/services/mailer.ts`). Tests: `tests/voice-retell-inbound-functions.test.ts` (signed fixtures only, not live verification).
 
-**Status:** deployed to staging with PR #68 (merge `d7a8a15`). Every Retell route fails closed with `401 Retell webhook key not configured (RETELL_API_KEY)` until the staging Worker has `RETELL_API_KEY`. Add the key as the GitHub `staging` environment secret `RETELL_API_KEY`; the next staging deploy puts it on the Worker (the "Retell API key" step in `deploy-staging.yml`).
+**Status:** deployed to staging with PR #68 (merge `d7a8a15`).
+
+**Two workspaces, two keys** (`src/adapters/retell-workspaces.ts`):
+- `RETELL_INBOUND_API_KEY` belongs to the receptionist's workspace. It covers the function and inbound-call webhooks, receptionist events, receptionist prompt sync and receptionist callbacks.
+- `RETELL_OUTBOUND_API_KEY` belongs to the sales agent's workspace. It covers the sales agent's events and `record_consent` calls, plus the sales Self-Improvement Engine.
+- Which workspace sent a request is decided only by which key's signature verifies.
+- There is no fallback between keys. The legacy `RETELL_API_KEY` is never read.
+- If the two keys are identical, every request is refused.
+
+Without `RETELL_INBOUND_API_KEY`, the receptionist routes answer `401 Retell webhook key not configured (RETELL_INBOUND_API_KEY)`.
 
 ## Settings shared by all eight functions
 
@@ -18,7 +27,7 @@ Branch `claude/retell-inbound-8-functions`. Implementation: `src/services/voice.
 | Response variables | None required. Retell passes the JSON response to the LLM. |
 | Execution mode | Wait for completion (none of these run in the background) |
 
-**Secret:** Crestmont verifies the signature with the `RETELL_API_KEY` Worker secret: `wrangler secret put RETELL_API_KEY --env staging`, with the staging workspace's webhook-badge API key as the value. Never paste it into Retell fields, the repo, chat or tickets. Without it, every request gets `401`.
+**Secret:** Crestmont verifies the signature with the `RETELL_INBOUND_API_KEY` Worker secret: the receptionist workspace's API key that has the webhook badge. Set it either on the Worker directly (`wrangler secret put RETELL_INBOUND_API_KEY --env staging`) or as the GitHub `staging` environment secret of the same name; the deploy puts it only when it changed. Never paste it into Retell fields, the repo, chat or tickets.
 
 ## Functions
 

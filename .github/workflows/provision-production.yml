@@ -147,7 +147,7 @@ jobs:
           $WRANGLER secret list --env production --format json > secrets.json
           node --no-warnings scripts/provision-production.ts secret-names secrets.json > names.txt; rm -f secrets.json
           for n in TURNSTILE_SITE_KEY TURNSTILE_SECRET EVIDENCE_INGEST_SECRET; do grep -qx "$n" names.txt || { echo "::error::$n is not set on $WORKER"; exit 1; }; done
-          if grep -qxE 'STRIPE_SECRET_KEY|RESEND_API_KEY|RETELL_API_KEY|ANTHROPIC_API_KEY|BUILD_RUNNER_SECRET|STAGING_ACCESS_PASSWORD' names.txt; then
+          if grep -qxE 'STRIPE_SECRET_KEY|RESEND_API_KEY|RETELL_API_KEY|RETELL_INBOUND_API_KEY|RETELL_OUTBOUND_API_KEY|ANTHROPIC_API_KEY|BUILD_RUNNER_SECRET|STAGING_ACCESS_PASSWORD' names.txt; then
             echo "::warning title=Live-service secret present::$WORKER holds a payments/email/voice/AI or preview secret that this setup never installs. Review it in the Cloudflare dashboard."
           fi
           echo "Worker \`$WORKER\` secrets: $(tr '\n' ' ' < names.txt)(names only)." >> "$GITHUB_STEP_SUMMARY"; rm -f names.txt

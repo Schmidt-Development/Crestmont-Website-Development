@@ -38,7 +38,7 @@ export async function signRetell(apiKey: string, rawBody: string, nowMs = Date.n
 
 /** Fails closed: no key → every request refused. */
 export async function verifyRetellSignature(apiKey: string | undefined, rawBody: string, header: string | null, nowMs = Date.now()): Promise<void> {
-  if (!apiKey) throw new RetellAuthError("Retell webhook key not configured (RETELL_API_KEY)");
+  if (!apiKey) throw new RetellAuthError("Retell webhook key not configured");
   const m = /^v=(\d{10,16}),d=([0-9a-f]{64})$/.exec((header ?? "").trim());
   if (!m) throw new RetellAuthError("Missing or malformed X-Retell-Signature");
   if (Math.abs(nowMs - Number(m[1])) > RETELL_TOLERANCE_MS) throw new RetellAuthError("Signature timestamp outside tolerance");
@@ -314,7 +314,7 @@ export async function createRetellPhoneCall(opts: {
   apiKey: string | undefined; fetch: typeof fetch; body: CreatePhoneCallRequest;
   timeoutMs?: number; maxRetries?: number; sleep?: (ms: number) => Promise<void>;
 }): Promise<CreatePhoneCallResult> {
-  if (!opts.apiKey) return { ok: false, status: null, retryable: false, error: "RETELL_API_KEY is not configured", attempts: 0 };
+  if (!opts.apiKey) return { ok: false, status: null, retryable: false, error: "RETELL_INBOUND_API_KEY is not configured", attempts: 0 };
   if (!/^[A-Za-z0-9_-]{5,255}$/.test(opts.body.idempotency_key)) return { ok: false, status: null, retryable: false, error: "invalid idempotency_key", attempts: 0 };
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const maxRetries = Math.min(Math.max(opts.maxRetries ?? 2, 0), 3);

@@ -40,7 +40,7 @@ const TRANSCRIPT = [
 
 test("[SALESOPT-001] [SALESOPT-002] [SALESOPT-003] [SALESOPT-005] [SALESOPT-007] [SALESOPT-008] [SALESOPT-010] [SALESOPT-011] FIXTURE E2E: call → Stripe → local analysis → proposal → evaluation → approval → staging Retell update → read-back → regression rollback; production untouched", async () => {
   const retell = fakeRetell();
-  const t = await createTestApp({ RETELL_API_KEY: RETELL_KEY, STRIPE_WEBHOOK_SECRET: WHSEC, BUILD_RUNNER_SECRET: RUNNER, AI_PROVIDER: "local-runner" });
+  const t = await createTestApp({ RETELL_OUTBOUND_API_KEY: RETELL_KEY, STRIPE_WEBHOOK_SECRET: WHSEC, BUILD_RUNNER_SECRET: RUNNER, AI_PROVIDER: "local-runner" });
   t.env.overrides = { storage: t.storage, fetch: retell.f };
   const db = t.db;
   const owner = await createStaff(db, "owner", "owner@crestmontwebsitedevelopment.com");

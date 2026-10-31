@@ -52,7 +52,7 @@ function configured(over: Partial<VoiceConfig> = {}): VoiceConfig {
 }
 
 async function app(extra: Partial<Env> = {}, opts: { now?: Date; budget?: string | null; fetch?: typeof fetch } = {}) {
-  const t = await createTestApp({ RETELL_API_KEY: KEY, ...extra });
+  const t = await createTestApp({ RETELL_INBOUND_API_KEY: KEY, ...extra });
   t.env.overrides = { storage: t.storage, ...(opts.now ? { now: () => opts.now! } : {}), ...(opts.fetch ? { fetch: opts.fetch } : {}) };
   const c = t.client();
   const post = async (path: string, payload: unknown, key = KEY) => {
@@ -72,9 +72,9 @@ const fn = (id: string, name: string, args: Record<string, unknown>) => ({ name,
 
 // ───────────── Prompt synchronisation ─────────────
 
-test("[VOICE-004] [VOICE-005] prompt sync without RETELL_API_KEY is refused as 'provider not configured' and sends nothing (fixture)", async () => {
+test("[VOICE-004] [VOICE-005] prompt sync without RETELL_INBOUND_API_KEY is refused as 'provider not configured' and sends nothing (fixture)", async () => {
   const r = fakeRetell();
-  const t = await app({ RETELL_API_KEY: undefined }, { fetch: r.f });
+  const t = await app({ RETELL_INBOUND_API_KEY: undefined }, { fetch: r.f });
   await saveVoiceConfig(t.db, t.owner.id, configured({ inbound: { mode: "answer", numbers: [], agent_id: "agent_fixture01" } }));
   const c = await t.staff();
   assert.equal((await c.post("/staff/voice/configs", { instructions: INSTRUCTIONS, note: "Initial" })).status, 303);
@@ -87,9 +87,9 @@ test("[VOICE-004] [VOICE-005] prompt sync without RETELL_API_KEY is refused as '
   assert.equal(r.calls.length, 0, "no request reaches Retell without a key");
   const rows = (await t.db.prepare(`SELECT status, detail FROM voice_prompt_syncs`).all<{ status: string; detail: string }>()).results;
   assert.equal(rows.length, 2);
-  assert.ok(rows.every((x) => x.status === "not_configured" && /RETELL_API_KEY is not set/.test(x.detail)));
+  assert.ok(rows.every((x) => x.status === "not_configured" && /RETELL_INBOUND_API_KEY is not set/.test(x.detail)));
   const page = await (await c.get("/staff/voice")).text();
-  assert.match(page, /Provider not configured: RETELL_API_KEY is not set/);
+  assert.match(page, /Provider not configured: RETELL_INBOUND_API_KEY is not set/);
   assert.doesNotMatch(page, /badge--[a-z]+">In Sync/);
 });
 
@@ -197,8 +197,8 @@ test("[VOICE-003] [INFRA-002] staging and production never accept each other's R
   assert.equal(await count(p.db, `SELECT COUNT(*) n FROM calls`), 0);
 });
 
-test("[VOICE-003] [SEC-002] Retell webhooks fail closed without RETELL_API_KEY, even with a valid-looking signature (fixture)", async () => {
-  const t = await app({ RETELL_API_KEY: undefined });
+test("[VOICE-003] [SEC-002] Retell webhooks fail closed without RETELL_INBOUND_API_KEY, even with a valid-looking signature (fixture)", async () => {
+  const t = await app({ RETELL_INBOUND_API_KEY: undefined });
   for (const path of ["/api/webhooks/retell", "/api/webhooks/retell/functions", "/api/webhooks/retell/inbound"]) {
     assert.equal((await t.post(path, inbound("z_1"))).res.status, 401, path);
   }

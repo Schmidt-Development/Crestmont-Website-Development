@@ -25,7 +25,7 @@ const one = async <T>(db: Db, sql: string, ...b: unknown[]) => (await db.prepare
 const count = async (db: Db, sql: string, ...b: unknown[]) => (await one<{ n: number }>(db, sql, ...b)).n;
 
 async function app(extra: Partial<Env> = {}, now?: Date) {
-  const t = await createTestApp({ RETELL_API_KEY: KEY, ...extra, overrides: { ...(now ? { now: () => now } : {}), ...(extra.overrides ?? {}) } as Env["overrides"] });
+  const t = await createTestApp({ RETELL_INBOUND_API_KEY: KEY, ...extra, overrides: { ...(now ? { now: () => now } : {}), ...(extra.overrides ?? {}) } as Env["overrides"] });
   // createTestApp puts storage in overrides; keep it when we add a clock.
   t.env.overrides = { storage: t.storage, ...(t.env.overrides ?? {}), ...(now ? { now: () => now } : {}) };
   const c = t.client();

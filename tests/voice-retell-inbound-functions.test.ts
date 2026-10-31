@@ -29,7 +29,7 @@ function configured(scheduling = false): VoiceConfig {
 }
 
 async function app(opts: { stripe?: boolean; budget?: boolean; now?: Date } = {}) {
-  const t = await createTestApp({ RETELL_API_KEY: KEY, ...(opts.stripe ? { STRIPE_SECRET_KEY: "sk_test_fixture_inbound_0001" } : {}) });
+  const t = await createTestApp({ RETELL_INBOUND_API_KEY: KEY, ...(opts.stripe ? { STRIPE_SECRET_KEY: "sk_test_fixture_inbound_0001" } : {}) });
   t.env.overrides = { storage: t.storage, now: () => opts.now ?? MON_9AM };
   const owner = await createStaff(t.db, "owner", "owner@crestmontwebsitedevelopment.com");
   if (opts.budget !== false) await t.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('voice.monthly_budget_usd', '50', ?)`).bind(nowIso()).run();
@@ -59,7 +59,7 @@ test("[VOICE-003] [SEC-002] every inbound register function refuses unsigned, wr
   const noKey = await createTestApp({});
   const body = JSON.stringify({ name: "get_packages_pricing", call: { call_id: "c_nokey" }, args: {} });
   const r = await noKey.client().request("POST", URL_FN, { body, headers: { "x-retell-signature": await signRetell(KEY, body) } });
-  assert.equal(r.status, 401, "fails closed when RETELL_API_KEY is not set");
+  assert.equal(r.status, 401, "fails closed when RETELL_INBOUND_API_KEY is not set");
 });
 
 test("[VOICE-003] unknown function names and invalid JSON are rejected with 422; responses never contain the key (fixture)", async () => {
@@ -275,7 +275,7 @@ test("[EMAIL-001] [VOICE-003] send_customer_email sends only fixed templates, wi
 });
 
 test("[EMAIL-003] [VOICE-003] on staging, receptionist mail to an address outside the allowlist stays in the outbox (fixture)", async () => {
-  const t = await createTestApp({ RETELL_API_KEY: KEY, ENVIRONMENT: "staging", RESEND_API_KEY: "re_fixture_inbound_0001", EMAIL_RECIPIENT_ALLOWLIST: "@crestmontwebsitedevelopment.com" } as Partial<Env>);
+  const t = await createTestApp({ RETELL_INBOUND_API_KEY: KEY, ENVIRONMENT: "staging", RESEND_API_KEY: "re_fixture_inbound_0001", EMAIL_RECIPIENT_ALLOWLIST: "@crestmontwebsitedevelopment.com" } as Partial<Env>);
   let fetched = 0;
   t.env.overrides = { storage: t.storage, now: () => MON_9AM, fetch: (async () => { fetched++; return new Response("{}"); }) as unknown as typeof fetch };
   await t.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('voice.monthly_budget_usd', '50', ?)`).bind(nowIso()).run();
@@ -328,15 +328,18 @@ test("[VOICE-004] the inbound master instructions pass the platform's own prompt
   assert.match(VOICE_GUARDRAILS, /get_packages_pricing/);
 });
 
-test("[INFRA-005] [SEC-007] the staging deploy puts RETELL_API_KEY only when the staging environment secret is provided, change-aware", async () => {
+test("[INFRA-005] [SEC-007] the staging deploy puts each Retell workspace key only when its staging environment secret is provided, change-aware", async () => {
   const { readFileSync } = await import("node:fs");
   const wf = readFileSync(".github/workflows/deploy-staging.yml", "utf8");
-  const i = wf.indexOf("- name: Retell API key (only when the Founder has provided one)");
+  const i = wf.indexOf("- name: Retell workspace keys (only those the Founder has provided)");
   assert.ok(i > 0);
   const step = wf.slice(i, wf.indexOf("- name:", i + 10));
-  assert.match(step, /RETELL_KEY: \$\{\{ secrets\.RETELL_API_KEY \}\}/);
-  assert.match(step, /if \[ -n "\$RETELL_KEY" \]; then printf '%s' "\$RETELL_KEY" \| node --no-warnings scripts\/staging-secrets\.ts put RETELL_API_KEY/);
-  assert.doesNotMatch(step, /echo[^\n]*\$RETELL_KEY/, "never echoes the key");
+  for (const [v, name] of [["RETELL_INBOUND_KEY", "RETELL_INBOUND_API_KEY"], ["RETELL_OUTBOUND_KEY", "RETELL_OUTBOUND_API_KEY"]]) {
+    assert.match(step, new RegExp(`${v}: \\$\\{\\{ secrets\\.${name} \\}\\}`));
+    assert.match(step, new RegExp(`if \\[ -n "\\$${v}" \\]; then printf '%s' "\\$${v}" \\| node --no-warnings scripts/staging-secrets\\.ts put ${name}`));
+    assert.doesNotMatch(step, new RegExp(`echo[^\\n]*\\$${v}`), "never echoes a key");
+  }
+  assert.doesNotMatch(step, /RETELL_API_KEY\b/, "the legacy single key is not deployed");
   assert.ok(wf.indexOf("Deploy Worker (staging") < i, "after the Worker exists");
 });
 
