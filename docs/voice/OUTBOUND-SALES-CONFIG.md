@@ -18,7 +18,7 @@ staging workflow; repository variable `STAGING_URL` overrides it).
 | HTTP method | `POST` |
 | URL | `https://crestmont-platform-staging.partners-df4.workers.dev/api/webhooks/retell/outbound/functions` (one URL; the function is chosen by `name`) |
 | Query parameters | `lead_id` = `{{lead_id}}` (filled by Retell from the dynamic variable, never by the LLM; the server refuses a mismatch) |
-| Headers | none to add. Retell signs every request with `X-Retell-Signature` (HMAC-SHA256 with the workspace API key that has the webhook badge); the server verifies it fail-closed against the Worker secret `RETELL_API_KEY` and rejects timestamps > 5 min old. Do not put secrets in custom headers. |
+| Headers | none to add. Retell signs every request with `X-Retell-Signature` (HMAC-SHA256 with the workspace API key that has the webhook badge); the server verifies it fail-closed against the Worker secret `RETELL_OUTBOUND_API_KEY` only and rejects timestamps > 5 min old. Do not put secrets in custom headers. |
 | Payload: args only | **Off** (the server needs `name` and `call.call_id` / `call.metadata`) |
 | Timeout | `10000` ms |
 | Max retries | `1` (write functions are idempotent per call + name + arguments); `record_do_not_call`: `2` |
@@ -188,7 +188,7 @@ Decision and reasons: `OUTBOUND-SALES.md` §6. Retell UI (sales agent → Webhoo
 | Webhook Timeout | `10` seconds (Retell's documented webhook timeout; the handler answers well inside it) |
 | Webhook Events | `call_started`, `call_ended`, `call_analyzed`, `transfer_started`, `transfer_bridged`, `transfer_cancelled`, `transfer_ended` |
 | Leave off | `transcript_updated` (ignored by the platform; adds load only), all chat events |
-| Signature | automatic `X-Retell-Signature`, verified with the Worker secret `RETELL_API_KEY` (the workspace key with the webhook badge) |
+| Signature | automatic `X-Retell-Signature`, verified with the Worker secret `RETELL_OUTBOUND_API_KEY` (the OUTBOUND workspace key with the webhook badge; the receptionist key is refused) |
 | Post-call analysis (optional) | a selector field named exactly `sales_outcome` with choices `wrong_number`, `not_interested`, `interested`, `follow_up_requested`; any other field name is ignored by the platform |
 
 `transfer_cancelled` (a warm transfer that did not connect) creates an urgent CRM callback task on the call's lead and an Owner notification. Transfer events are deduplicated on event + call id + start timestamp + destination.
@@ -224,7 +224,7 @@ Paste-ready text for the sales agent's Prompt field: [`outbound-sales-agent-prom
 
 ## Call initiation (performed by the platform's `sales_outbound` job, not by you)
 
-`POST https://api.retellai.com/v2/create-phone-call` · `Authorization: Bearer <RETELL_API_KEY>` · `Content-Type: application/json`
+`POST https://api.retellai.com/v2/create-phone-call` · `Authorization: Bearer <RETELL_OUTBOUND_API_KEY>` · `Content-Type: application/json`
 ```json
 { "from_number": "+1… (sales_outbound_settings.from_number)",
   "to_number": "+1… (lead phone, E.164)",
@@ -244,7 +244,7 @@ and empty strings for the others, so a missing value never renders as a literal 
 ## Required configuration
 
 **Cloudflare Worker secrets / vars (staging; set with `wrangler secret put … --env staging`):**
-`RETELL_API_KEY` (Crestmont workspace key with the webhook badge — shared with the receptionist), `RETELL_SALES_OUTBOUND`
+`RETELL_OUTBOUND_API_KEY` (the outbound workspace key with the webhook badge; separate from the receptionist's `RETELL_INBOUND_API_KEY`), `RETELL_SALES_OUTBOUND`
 (leave unset; `on` only after counsel approval), `STRIPE_SECRET_KEY` (`sk_test_…` only), `STRIPE_WEBHOOK_SECRET`,
 `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_RECIPIENT_ALLOWLIST`, `RESEARCH_RUNNER_SECRET` (PR #48). Production
 gets its own values; nothing is shared.

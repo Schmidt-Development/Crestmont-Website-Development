@@ -18,6 +18,7 @@ import type { Env } from "../app/context.ts";
 import { audit } from "./security.ts";
 import { toE164, validTimeZone, loadVoiceConfig } from "./voice-settings.ts";
 import { createRetellPhoneCall, RETELL_PROVIDER } from "../adapters/retell.ts";
+import { retellKey, keysAmbiguous } from "../adapters/retell-workspaces.ts";
 import { addLeadNote, addLeadTask, notifyOwners } from "./voice-common.ts";
 import { addDnc, isDnc } from "./voice-outbound.ts";
 import { voiceBudget, budgetOpen, noteBudgetClosed } from "./voice-budget.ts";
@@ -25,6 +26,8 @@ import { reservePhone, releasePhone, markDialing, recordPhoneOutcome } from "./o
 import { suppressionFor } from "./contact-identity.ts";
 import { applySuppressions } from "./research.ts";
 import { timeZoneForState } from "../domain/research.ts";
+import { listTargets, deployedVersion } from "./sales-opt/registry.ts";
+import { experimentRouting } from "./sales-opt/monitor.ts";
 import {
   salesCallEligibility, spokenContext, dynamicVariables, withinSalesWindow, nextSalesWindow, resolveOutcome,
   type SalesGate, type ResearchFinding, type SpokenContext, type SalesOutcome,
@@ -204,6 +207,31 @@ export async function gateFor(db: Db, f: LeadFacts, now: Date, attemptsSoFar = 0
   return gate;
 }
 
+// ───────────── Self-Improvement Engine attribution (dialler contract, docs/voice/SALES-OPTIMIZATION.md §5) ─────────────
+
+export interface SieStamp { metadata: Record<string, string>; note: string }
+
+/**
+ * Metadata the SIE needs to attribute a sales call: crestmont_so_version (the version VERIFIED on the agent this call
+ * uses), crestmont_so_experiment (only when the lead's experiment arm is that same version) and crestmont_segment.
+ * Never stamps a version the call does not actually run: the SIE deploys to one agent per stage, so a candidate arm
+ * that is not the deployed version cannot be served by this agent and the call is left out of the experiment
+ * (it still attributes to the deployed version). Nothing is stamped when the sales agent is not the SIE target.
+ */
+export async function sieStamp(db: Db, environment: string, agentId: string, leadId: string, segment: string | null): Promise<SieStamp> {
+  const stage = environment === "production" ? "production" : "staging";
+  const md: Record<string, string> = {};
+  if (segment && /^[a-z0-9_-]{1,40}$/.test(segment)) md.crestmont_segment = segment;
+  const target = (await listTargets(db))[stage];
+  if (!target || target.agent_id !== agentId) return { metadata: md, note: `sales agent is not the SIE ${stage} target: no version attribution` };
+  const dep = await deployedVersion(db, stage);
+  if (!dep) return { metadata: md, note: `no verified SIE deployment on ${stage}` };
+  md.crestmont_so_version = dep.id;
+  const route = await experimentRouting(db, leadId);
+  if (route && route.versionId === dep.id) { md.crestmont_so_experiment = route.experimentId; return { metadata: md, note: `experiment ${route.experimentId} arm ${route.arm}` }; }
+  return { metadata: md, note: route ? `experiment ${route.experimentId} routed this lead to ${route.arm} (${route.versionId}), which this agent does not run: left out of the experiment` : `version ${dep.id}` };
+}
+
 // ───────────── Queue ─────────────
 
 export interface SalesCallRow {
@@ -259,21 +287,23 @@ export async function cancelSalesCall(db: Db, userId: string, id: string, note: 
 }
 
 export interface SalesGateStatus { enabled: boolean; reasons: string[] }
+export const outboundKeyConfigured = (env: Pick<Env, "RETELL_OUTBOUND_API_KEY">) => !!retellKey(env, "outbound");
 
 /** The environment/Owner switch, separate from per-lead eligibility. */
-export async function salesOutboundSwitch(db: Db, env: Pick<Env, "RETELL_API_KEY" | "RETELL_SALES_OUTBOUND">): Promise<SalesGateStatus> {
+export async function salesOutboundSwitch(db: Db, env: Pick<Env, "RETELL_OUTBOUND_API_KEY" | "RETELL_INBOUND_API_KEY" | "RETELL_SALES_OUTBOUND">): Promise<SalesGateStatus> {
   const s = await loadSalesSettings(db);
   const reasons: string[] = [];
   if (env.RETELL_SALES_OUTBOUND !== "on") reasons.push(`${SALES_OUTBOUND_ENV_FLAG} is not "on" in this environment`);
   if (!s.enabled) reasons.push("Outbound sales calling is off in the Owner's settings");
   if (!s.agent_id) reasons.push("No sales agent id");
   if (!s.from_number) reasons.push("No approved caller number");
-  if (!env.RETELL_API_KEY) reasons.push("RETELL_API_KEY is not set");
+  if (!retellKey(env, "outbound")) reasons.push("RETELL_OUTBOUND_API_KEY (the sales workspace key) is not set");
+  if (keysAmbiguous(env)) reasons.push("RETELL_INBOUND_API_KEY and RETELL_OUTBOUND_API_KEY are identical: the two workspaces cannot be told apart");
   if (!(await activeComplianceApproval(db))) reasons.push("No active compliance approval for AI-voice sales calls (Founder decision D-14; counsel review required)");
   return { enabled: reasons.length === 0, reasons };
 }
 
-export interface SalesQueueDeps { db: Db; env: Pick<Env, "RETELL_API_KEY" | "RETELL_SALES_OUTBOUND" | "ENVIRONMENT">; fetch: typeof fetch; now?: () => Date; sleep?: (ms: number) => Promise<void> }
+export interface SalesQueueDeps { db: Db; env: Pick<Env, "RETELL_OUTBOUND_API_KEY" | "RETELL_INBOUND_API_KEY" | "RETELL_SALES_OUTBOUND" | "ENVIRONMENT">; fetch: typeof fetch; now?: () => Date; sleep?: (ms: number) => Promise<void> }
 
 async function block(db: Db, row: SalesCallRow, status: "blocked" | "failed", detail: string, notify = true) {
   await db.prepare(`UPDATE sales_calls SET status = ?, status_detail = ?, updated_at = ? WHERE id = ?`).bind(status, detail.slice(0, 900), nowIso(), row.id).run();
@@ -332,12 +362,13 @@ export async function processSalesQueue(d: SalesQueueDeps): Promise<{ detail: st
     if (claim.meta.changes !== 1) { await releasePhone(d.db, row.phone_e164, leaseRef(row.id), "claim_lost"); continue; }
     const ctx = researchContext(f, now());
     const vars = dynamicVariables({ leadId: f.leadId, businessName: f.businessName, contactName: f.contactName, industry: f.industry, websiteUrl: f.prospect?.website_url ?? null, environment: d.env.ENVIRONMENT, ctx });
+    const sie = await sieStamp(d.db, d.env.ENVIRONMENT, s.agent_id!, row.lead_id, ctx.website_status);
     const res = await createRetellPhoneCall({
-      apiKey: d.env.RETELL_API_KEY, fetch: d.fetch, sleep: d.sleep,
+      apiKey: retellKey(d.env, "outbound"), fetch: d.fetch, sleep: d.sleep, // the sales workspace only; never the receptionist's key
       body: {
         from_number: s.from_number!, to_number: row.phone_e164, override_agent_id: s.agent_id!,
         idempotency_key: `${row.idempotency_key}_a${attempt}`, honor_internal_dnc: true,
-        metadata: { crestmont_env: d.env.ENVIRONMENT, crestmont_sales_call_id: row.id, crestmont_lead_id: row.lead_id, crestmont_test: row.is_test ? "true" : "false" },
+        metadata: { crestmont_env: d.env.ENVIRONMENT, crestmont_sales_call_id: row.id, crestmont_lead_id: row.lead_id, crestmont_test: row.is_test ? "true" : "false", ...sie.metadata },
         retell_llm_dynamic_variables: vars,
       },
     });
@@ -352,7 +383,7 @@ export async function processSalesQueue(d: SalesQueueDeps): Promise<{ detail: st
           .bind(newId("call"), RETELL_PROVIDER, res.callId, s.from_number, row.phone_e164, at, row.is_test, d.env.ENVIRONMENT, row.lead_id, at),
       ]);
       await markDialing(d.db, row.phone_e164, lease.reservationId, res.callId, now());
-      await audit(d.db, { actorKind: "system", action: "sales_outbound.dialled", subjectType: "sales_call", subjectId: row.id, details: { attempt, lead: row.lead_id } });
+      await audit(d.db, { actorKind: "system", action: "sales_outbound.dialled", subjectType: "sales_call", subjectId: row.id, details: { attempt, lead: row.lead_id, sie: sie.note } });
       dialled++;
     } else if (res.retryable && row.transient_failures + 1 < MAX_TRANSIENT_FAILURES) {
       // Same attempt number → same idempotency key on the retry: Retell can never place a second call for it.

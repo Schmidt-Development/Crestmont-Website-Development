@@ -19,14 +19,17 @@ import { csrf, input, textarea, select, checkbox, button, formErrors, alert, bad
 import { publicLayout } from "../ui/layout.ts";
 import { staffPage } from "./crm.ts";
 import { readBody } from "./api.ts";
-import { verifyRetellSignature, RetellAuthError } from "../adapters/retell.ts";
+import { RetellAuthError } from "../adapters/retell.ts";
+import { verifyRetellWorkspace } from "../adapters/retell-workspaces.ts";
 import { handleSalesFunction, openCheckoutLink, unsubscribeSalesEmail } from "../services/sales-functions.ts";
 import * as so from "../services/sales-outbound.ts";
+import { listTargets } from "../services/sales-opt/registry.ts";
 
 async function salesFunctions(ctx: AppContext): Promise<Response> {
   const raw = await readBody(ctx.req);
   try {
-    await verifyRetellSignature(ctx.env.RETELL_API_KEY, raw, ctx.req.headers.get("x-retell-signature"));
+    // Outbound (sales) workspace only: a request signed with the receptionist's key, or any other key, is refused (401).
+    await verifyRetellWorkspace(ctx.env, ["outbound"], raw, ctx.req.headers.get("x-retell-signature"));
   } catch (e) {
     if (e instanceof RetellAuthError) throw new HttpError(401, e.message);
     throw e;
@@ -53,6 +56,11 @@ async function ownerPage(ctx: AppContext, errors: string[] = [], status = 200): 
   const s = await so.loadSalesSettings(ctx.db);
   const sw = await so.salesOutboundSwitch(ctx.db, ctx.env);
   const approval = await so.activeComplianceApproval(ctx.db);
+  const stage = ctx.env.ENVIRONMENT === "production" ? "production" : "staging";
+  const sieTarget = (await listTargets(ctx.db))[stage];
+  const sieLine = !s.agent_id ? "No sales agent id saved yet." : !sieTarget ? `The sales agent is not registered as the Self-Improvement Engine's ${stage} target, so calls are not attributed to prompt versions.`
+    : sieTarget.agent_id !== s.agent_id ? `The Self-Improvement Engine's ${stage} target is a different agent; calls are not attributed to prompt versions.`
+    : `The sales agent is the Self-Improvement Engine's ${stage} target${sieTarget.verified_at ? " (verified with Retell)" : " (not verified with Retell yet)"}: calls carry crestmont_so_version.`;
   const queue = (await ctx.db.prepare(`SELECT s.*, co.name AS business FROM sales_calls s JOIN leads l ON l.id = s.lead_id JOIN contacts c ON c.id = l.contact_id LEFT JOIN companies co ON co.id = c.company_id
       ORDER BY CASE s.status WHEN 'dialing' THEN 0 WHEN 'in_progress' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, s.updated_at DESC LIMIT 50`).all<so.SalesCallRow & { business: string | null }>()).results;
   const consents = (await ctx.db.prepare(`SELECT id, phone_e164, line_type, signer_name, evidence_ref, captured_at, revoked_at FROM sales_call_consents ORDER BY recorded_at DESC LIMIT 20`).all<{ id: string; phone_e164: string; line_type: string; signer_name: string; evidence_ref: string; captured_at: string; revoked_at: string | null }>()).results;
@@ -60,6 +68,7 @@ async function ownerPage(ctx: AppContext, errors: string[] = [], status = 200): 
 ${formErrors(errors)}
 ${sw.enabled ? alert("warn", "Outbound AI sales calling is ON. Every call is still re-checked against the compliance gate immediately before dialling.") : alert("info", html`Outbound AI sales calling is <strong>off</strong>. ${sw.reasons.join(" · ")}`)}
 <p class="muted">Founder decision D-14 keeps AI-voice sales calls closed until counsel approves a consent design. A number in a public dataset is not consent. A lead is dialled only with documented prior express written consent covering AI-voice calls to that number, a National Do Not Call Registry check within 31 days, a known state and time zone, and inside the conservative calling window (weekdays 10:00–19:00 recipient time, no federal holidays).</p>
+<p class="muted">Retell workspace: outbound (RETELL_OUTBOUND_API_KEY ${so.outboundKeyConfigured(ctx.env) ? "configured" : "NOT configured"}). ${sieLine}</p>
 <section class="card stack"><h2 class="card__title">Compliance approval</h2>
 ${approval ? html`<p>${badge("active", "Active")} Counsel reference <strong>${approval.reference}</strong>, approved ${formatDateTime(approval.approvedAt)}.</p>
 <form method="post" action="/staff/sales-outbound/compliance">${csrf(ctx)}<input type="hidden" name="action" value="revoke">${button("Revoke approval (stops every queued call)", { variant: "danger", size: "sm" })}</form>`

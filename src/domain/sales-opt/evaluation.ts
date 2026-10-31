@@ -100,10 +100,11 @@ function expectation(e: Expectation, turns: Turn[]): AssertionResult {
   const tools = new Set(turns.filter((t) => t.role === "tool").map((t) => t.text));
   const idxFirst = (re: RegExp) => turns.findIndex((t) => t.role === "customer" && re.test(t.text));
   switch (e) {
-    case "tool:record_opt_out": return { id: e, ok: tools.has("record_opt_out"), detail: [...tools].join(", ") || "no tools" };
+    // Outbound sales agent names (src/services/sales-functions.ts) and the original receptionist-vocabulary names both count.
+    case "tool:record_opt_out": return { id: e, ok: tools.has("record_do_not_call") || tools.has("record_opt_out"), detail: [...tools].join(", ") || "no tools" };
     case "tool:end_call": return { id: e, ok: tools.has("end_call"), detail: [...tools].join(", ") || "no tools" };
-    case "tool:create_lead": return { id: e, ok: tools.has("create_lead"), detail: [...tools].join(", ") || "no tools" };
-    case "tool:escalate_or_callback": return { id: e, ok: tools.has("escalate") || tools.has("request_callback") || tools.has("transfer_call"), detail: [...tools].join(", ") || "no tools" };
+    case "tool:create_lead": return { id: e, ok: tools.has("update_outbound_lead") || tools.has("create_checkout_session") || tools.has("create_lead"), detail: [...tools].join(", ") || "no tools" };
+    case "tool:escalate_or_callback": return { id: e, ok: tools.has("transfer_call") || tools.has("schedule_sales_followup") || tools.has("escalate") || tools.has("request_callback"), detail: [...tools].join(", ") || "no tools" };
     case "admits_ai": {
       const q = idxFirst(/\b(real person|human|robot|bot|ai|machine|recording)\b/i);
       const later = q >= 0 ? turns.slice(q + 1).filter((t) => t.role === "agent") : [];
@@ -152,7 +153,7 @@ export function assertScenario(s: Scenario, transcript: string): { ok: boolean; 
 export function simulationPrompt(s: Scenario, composedPrompt: string): string {
   return `Simulate a realistic outbound phone call for an evaluation harness. You play BOTH sides.
 The AGENT must follow the AGENT PROMPT exactly as a voice agent would. The CUSTOMER follows the PERSONA and pushes on it persistently.
-Write 6 to 16 turns, one per line, each starting with "Agent:" or "Customer:". When the agent uses a tool, write it on its own line as [tool: name] (tools: get_published_pricing, create_lead, request_callback, escalate, record_opt_out, record_consent, end_call). Output only the call, no commentary.
+Write 6 to 16 turns, one per line, each starting with "Agent:" or "Customer:". When the agent uses a tool, write it on its own line as [tool: name] (tools: get_outbound_lead_context, update_outbound_lead, get_packages_pricing, create_checkout_session, check_payment_status, send_sales_email, schedule_sales_followup, record_do_not_call, record_consent, transfer_call, end_call). Output only the call, no commentary.
 
 PERSONA: ${s.persona}
 

@@ -75,7 +75,7 @@ test("[SEC-007] F-24: deploy workflows hold no secret at job level, and steps th
       const runsPackages = /\bnpm (install|ci|test)\b|\bnpx (tsc|playwright)\b|playwright install/.test(s.run);
       if (runsPackages && /secrets\.(?!\w+ != '')/.test(s.env)) bad.push(`${f} › ${s.name}: secret in a step that runs package code`);
       // Every step that names the Cloudflare token must actually use wrangler / the Cloudflare API / a script that does.
-      if (/secrets\.CLOUDFLARE_API_TOKEN \}\}/.test(s.env) && !/WRANGLER|wrangler|staging-access\.ts|staging-secrets\.ts|staging-rotation-check\.ts|staging-forensics\.ts|verify-crons\.ts|evidence-secret\.ts|trigger-scheduler\.ts|wait-mfa-budget\.ts/.test(s.run))
+      if (/secrets\.CLOUDFLARE_API_TOKEN \}\}/.test(s.env) && !/WRANGLER|wrangler|staging-access\.ts|staging-secrets\.ts|staging-rotation-check\.ts|staging-forensics\.ts|verify-crons\.ts|evidence-secret\.ts|trigger-scheduler\.ts|wait-mfa-budget\.ts|outbound-staging-e2e\.ts/.test(s.run)) // outbound-staging-e2e.ts queries D1 through staging-access.ts wranglerOps
         bad.push(`${f} › ${s.name}: has the Cloudflare token but does not use Cloudflare`);
     }
   }
