@@ -184,8 +184,26 @@ export async function verifyIntegration(d: IntegrationDeps, id: IntegrationId, a
         const w = await f("https://api.stripe.com/v1/webhook_endpoints?limit=100", { headers: { authorization: `Bearer ${d.env.STRIPE_SECRET_KEY}`, "stripe-version": STRIPE_API_VERSION } });
         const wb = await jsonOrNull(w);
         if (!w.ok) { detail = providerError("Stripe webhook endpoints", w, wb); break; }
-        const problem = webhookEndpointProblem((Array.isArray(wb?.data) ? wb!.data : []) as StripeWebhookEndpoint[], d.env.APP_URL);
-        if (problem) { status = "degraded"; detail = `GET /v1/balance succeeded in ${modeLabel} mode, but ${problem}`; break; }
+        const v1 = (Array.isArray(wb?.data) ? wb!.data : []) as StripeWebhookEndpoint[];
+        const problem = webhookEndpointProblem(v1, d.env.APP_URL);
+        if (problem) {
+          // Read-only context so a mismatch can be found without touching anything: which account this key belongs to,
+          // every webhook endpoint it has, and its Workbench event destinations (thin-payload destinations are not
+          // webhook endpoints, and this handler needs snapshot payloads).
+          const key = d.env.STRIPE_SECRET_KEY!;
+          const acctRes = await f("https://api.stripe.com/v1/account", { headers: { authorization: `Bearer ${key}`, "stripe-version": STRIPE_API_VERSION } }).catch(() => null);
+          const acct = acctRes?.ok ? await jsonOrNull(acctRes) : null;
+          const dest = await f("https://api.stripe.com/v2/core/event_destinations?limit=20", { headers: { authorization: `Bearer ${key}`, "stripe-version": STRIPE_V2_VERSION } }).catch(() => null);
+          const destBody = dest ? await jsonOrNull(dest) : null;
+          const destinations = dest?.ok && Array.isArray(destBody?.data) ? destBody!.data as StripeEventDestination[] : null;
+          if (destinations && !eventDestinationProblem(destinations, d.env.APP_URL)) {
+            status = "verified"; detail = `GET /v1/balance succeeded in ${modeLabel} mode; the event destination for ${webhookTarget(d.env.APP_URL)} is enabled with snapshot payloads at a supported API version and every handled event (requests pinned to ${STRIPE_API_VERSION}).`;
+            break;
+          }
+          status = "degraded";
+          detail = `GET /v1/balance succeeded in ${modeLabel} mode${typeof acct?.id === "string" ? ` for Stripe account ${acct.id}` : ""}, but ${problem} ${endpointInventory(v1, destinations, dest ? dest.status : null)}`;
+          break;
+        }
         const epVersion = webhookEndpointFor((Array.isArray(wb?.data) ? wb!.data : []) as StripeWebhookEndpoint[], d.env.APP_URL)?.api_version;
         status = "verified"; detail = `GET /v1/balance succeeded in ${modeLabel} mode; the webhook endpoint is enabled at API version ${epVersion} with every handled event (requests pinned to ${STRIPE_API_VERSION}).`;
         break;
@@ -291,6 +309,31 @@ export function secretPresence(env: Env): { name: string; present: boolean }[] {
 }
 
 export interface StripeWebhookEndpoint { url?: string; status?: string; api_version?: string | null; enabled_events?: string[] }
+
+/** Stripe-Version for the read-only v2 event-destination listing (v2 endpoints take the current release). */
+export const STRIPE_V2_VERSION = "2026-10-28.endive";
+export interface StripeEventDestination { id?: string; type?: string; status?: string; event_payload?: string; snapshot_api_version?: string | null; enabled_events?: string[]; webhook_endpoint?: { url?: string } | null }
+
+/** Why the account's v2 event destinations cannot deliver every handled event to APP_URL as snapshot events (null = fine). */
+export function eventDestinationProblem(destinations: StripeEventDestination[], appUrl: string | undefined): string | null {
+  const target = webhookTarget(appUrl);
+  const d = destinations.find((x) => x.webhook_endpoint?.url === target);
+  if (!d) return `no event destination is registered for ${target}.`;
+  if (d.status !== "enabled") return `the event destination for ${target} is ${d.status ?? "not enabled"}.`;
+  if (d.event_payload !== "snapshot") return `the event destination for ${target} sends ${d.event_payload ?? "unknown"} payloads; the handler needs snapshot payloads.`;
+  if (!d.snapshot_api_version || !SUPPORTED_WEBHOOK_API_VERSIONS.includes(d.snapshot_api_version)) return `the event destination uses API version ${d.snapshot_api_version ?? "default"}, expected ${SUPPORTED_WEBHOOK_API_VERSIONS.join(" or ")}.`;
+  const enabled = new Set(d.enabled_events ?? []);
+  if (enabled.has("*")) return null;
+  const missing = STRIPE_WEBHOOK_EVENTS.filter((e) => !enabled.has(e));
+  return missing.length ? `the event destination does not send: ${missing.join(", ")}.` : null;
+}
+
+/** What the account has, for the operator (URLs, status, payload style, version, event count; never secrets). */
+export function endpointInventory(v1: StripeWebhookEndpoint[], destinations: StripeEventDestination[] | null, destHttpStatus: number | null): string {
+  const ep = v1.slice(0, 5).map((e) => `${e.url ?? "?"} (${e.status ?? "?"}, ${e.api_version ?? "default"}, ${e.enabled_events?.includes("*") ? "all" : e.enabled_events?.length ?? 0} events)`);
+  const ds = destinations?.slice(0, 5).map((x) => `${x.webhook_endpoint?.url ?? x.type ?? "?"} (${x.status ?? "?"}, ${x.event_payload ?? "?"} payloads, ${x.snapshot_api_version ?? "no snapshot version"}, ${x.enabled_events?.length ?? 0} events)`);
+  return `Webhook endpoints in this account: ${ep.length ? ep.join("; ") : "none"}${v1.length > 5 ? ` (+${v1.length - 5} more)` : ""}. Event destinations: ${destinations === null ? `unavailable${destHttpStatus ? ` (HTTP ${destHttpStatus})` : ""}` : ds!.length ? ds!.join("; ") : "none"}.`;
+}
 
 const webhookTarget = (appUrl: string | undefined) => `${(appUrl ?? "").replace(/\/$/, "")}/api/webhooks/stripe`;
 function webhookEndpointFor(endpoints: StripeWebhookEndpoint[], appUrl: string | undefined): StripeWebhookEndpoint | undefined {
