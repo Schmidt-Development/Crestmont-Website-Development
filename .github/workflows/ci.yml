@@ -24,6 +24,8 @@ jobs:
         run: npm test
       - name: Build runner (AI Builds) — typecheck and mock tests
         run: npx tsc -p runner/tsconfig.json && node --no-warnings --test 'runner/test/*.test.ts'
+      - name: Lead-research worker — typecheck, unit and worker↔platform integration tests
+        run: npx tsc -p research-worker/tsconfig.json && node --no-warnings --test 'research-worker/test/*.test.ts'
       # ASVS F-10. The previous step (`npm audit ... || true` at the root) could never fail: the root has no
       # lockfile, so npm audit exited with ENOLOCK and the error was swallowed. This audits every committed
       # lockfile that actually lists packages and fails on high/critical advisories. A package.json that declares

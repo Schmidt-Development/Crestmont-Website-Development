@@ -35,6 +35,7 @@ export function staffNav(_ctx: AppContext): NavGroup[] {
     ] },
     { label: "Sales", items: [
       { href: "/staff/crm", label: "CRM", perm: "crm.access" },
+      { href: "/staff/research", label: "Lead research", perm: "lead.read_all" },
       { href: "/staff/sales", label: "Sales", perm: "crm.access" },
       { href: "/staff/quotes", label: "Quotes", perm: "quote.write" },
       { href: "/staff/pricing", label: "Pricing approvals", perm: "quote.write" },

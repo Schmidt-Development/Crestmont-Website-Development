@@ -193,6 +193,7 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
     "POST /api/scheduled/run": async (b) => ({ "x-crestmont-scheduler-signature": await signEvidence(SECRETS.scheduler, b) }),
     "POST /api/crm/v1/imports": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.crmImport, b), "idempotency-key": `fuzz-${Math.random().toString(16).slice(2, 12)}` }),
     ...Object.fromEntries(["claim", "heartbeat", "checkpoint", "checkpoint/fetch", "requirements", "files", "complete", "ai/claim", "ai/complete", "ai/checkpoint"].map((x) => [`POST /api/builds/runner/${x}`, async (b: string) => ({ "x-crestmont-runner-signature": await signEvidence(SECRETS.runner, b) })])),
+    ...Object.fromEntries(["heartbeat", "batch"].map((x) => [`POST /api/research/runner/${x}`, async (b: string) => ({ "x-crestmont-research-signature": await signEvidence(SECRETS.research, b) })])),
   };
   const jsonPosts = classified().filter((r) => r.method === "POST" && (r.spec.access.kind === "signed" || r.spec.access.kind === "webhook" || r.spec.api));
   assert.deepEqual(jsonPosts.map((r) => r.key).filter((k) => !sign[k]), [], "every JSON POST route has a signer");

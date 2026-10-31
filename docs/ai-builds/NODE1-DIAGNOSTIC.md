@@ -46,7 +46,7 @@ There's no push from the cloud and no Claude session anywhere in this path. If t
 
 ## 3. What this branch adds (focused on `main`, the code staging runs)
 
-- **A real diagnostic job** (`src/services/runner-diagnostics.ts`, migration 0050). The Owner presses **Queue diagnostic job** on **AI builds → Node diagnostics**. That creates one `ai_jobs` row (workflow `gpu_diagnostic`) on the existing signed draft channel. The workload is the Founder's minimal Junk in the Trunk HTML prompt at temperature 0. Each checkpoint is written by the side that observed it:
+- **A real diagnostic job** (`src/services/runner-diagnostics.ts`, migration 0051). The Owner presses **Queue diagnostic job** on **AI builds → Node diagnostics**. That creates one `ai_jobs` row (workflow `gpu_diagnostic`) on the existing signed draft channel. The workload is the Founder's minimal Junk in the Trunk HTML prompt at temperature 0. Each checkpoint is written by the side that observed it:
   - D01 created and D02 persisted (read back).
   - D03 runner registered and D04 fresh (taken from `build_runners` at the moment of the claim).
   - D05 offered and D06 claimed (lease).
@@ -74,7 +74,7 @@ There's no push from the cloud and no Claude session anywhere in this path. If t
    ```
    The second command loads the configured model and runs one small prompt. Attach `C:\CrestmontRunner\state\diagnostics\node1-diagnostic-<time>.txt` (it holds no secrets) to the Claude conversation. If the runner was installed in another folder, add `-InstallDir <folder>`.
 2. **Confirm `BUILD_RUNNER_SECRET`.** It must be set as a GitHub secret for staging, with the same value saved on Node 1 in `C:\CrestmontRunner\secrets\build_runner_secret`. The script's L5 line tells you which side is wrong.
-3. **Authorize merging this branch to `main`.** It applies migration 0050 on staging through the normal deploy. Then go to **AI builds → Node diagnostics → Queue diagnostic job** and wait for an idle poll (seconds to a few minutes).
+3. **Authorize merging this branch to `main`.** It applies migration 0051 on staging through the normal deploy. Then go to **AI builds → Node diagnostics → Queue diagnostic job** and wait for an idle poll (seconds to a few minutes).
 4. **If the report shows that nobody is signed in, or that the machine sleeps,** choose one of these for unattended operation. Each one is a security and operations trade-off that's yours to decide:
    - Windows auto-logon for a dedicated local account (physical-access risk).
    - Ollama as a service through NSSM, plus Docker Engine without Docker Desktop. That is a larger change, not made here.

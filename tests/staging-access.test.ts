@@ -212,3 +212,40 @@ test("[INFRA-002] [SEC-004] staging access: adopts secrets the Worker already en
   await new Promise((r) => setTimeout(r, 5));
   await verifyStagingAccess({ base: BASE, owner: ownerOf(r4) }, s.fetchFor({ ...s.env(), MFA_ENCRYPTION_KEY: mfaKey }));
 });
+
+// CodeQL js/double-escaping: the verifier's HTML decoder must decode each character reference exactly once.
+import { decode, decodeEntities, stripTags } from "../scripts/verify-staging-access.ts";
+
+test("[INFRA-002] [SEC-001] staging verifier decodes HTML entities in a single pass: nested references stay literal", () => {
+  assert.equal(decodeEntities("&amp;#39;"), "&#39;");
+  assert.equal(decodeEntities("&amp;quot;"), "&quot;");
+  assert.equal(decodeEntities("&amp;amp;"), "&amp;");
+  assert.equal(decodeEntities("&#38;lt;"), "&lt;");
+  assert.equal(decodeEntities("&#x26;#x27;"), "&#x27;");
+  assert.equal(decode("<a>Q&amp;A &amp;lt;b&amp;gt;</a>"), "Q&A &lt;b&gt;");
+});
+
+test("[INFRA-002] [SEC-001] staging verifier decodes legitimate encoded text exactly as escapeHtml produced it", async () => {
+  const { escapeHtml } = await import("../src/lib/html.ts");
+  for (const label of ["Refunds & disputes", "Owner's \"command\" center", "Tax <beta>", "a`b", "Plain label"]) assert.equal(decode(`<a class="side-link"><span>${escapeHtml(label)}</span></a>`), label, label);
+  assert.equal(decodeEntities("/staff/x?a=1&amp;b=2"), "/staff/x?a=1&b=2", "hrefs: &amp; separators");
+  assert.equal(decode("  Profit &nbsp; &amp;\n loss  "), "Profit & loss");
+});
+
+test("[INFRA-002] [SEC-001] staging verifier leaves malformed references alone and never yields invalid characters", () => {
+  assert.equal(decodeEntities("&amp"), "&amp");
+  assert.equal(decodeEntities("&bogus;"), "&bogus;");
+  assert.equal(decodeEntities("&#;&#x;&#xZZ;"), "&#;&#x;&#xZZ;");
+  assert.equal(decodeEntities("&#0;&#xD800;&#1114112;"), "���");
+  assert.equal(decodeEntities("&#99999999999;"), "&#99999999999;");
+  assert.doesNotThrow(() => decode("&".repeat(5000) + "<".repeat(5000)));
+});
+
+test("[INFRA-002] [SEC-001] staging verifier strips nested and split tags to a fixed point (no tag can reassemble)", () => {
+  assert.equal(stripTags("<<b>script>alert(1)<</b>/script>"), "alert(1)");
+  assert.equal(stripTags("<scr<i>ipt>x"), "x");
+  assert.equal(stripTags("<<<a>>>b"), "b", "repeated passes peel every nested layer");
+  assert.doesNotMatch(stripTags("<<<<<<x>>>>>>"), /<[^<>]*>/);
+  assert.equal(decode("<a>&lt;script&gt;</a>"), "<script>", "an escaped label is decoded once into plain text (compared, never rendered)");
+  assert.equal(stripTags("Refunds & disputes > 30 days"), "Refunds & disputes > 30 days", "a lone '>' or '&' in text is kept");
+});
