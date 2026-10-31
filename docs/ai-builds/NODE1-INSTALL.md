@@ -131,6 +131,24 @@ connect to port 11434 on every non-loopback address of the machine must fail. On
 and relies on the probe. Results go to `state\ollama-connectivity.json`. Model tags are matched exactly against
 Ollama's own list (`/api/tags`).
 
+**How the proxy reaches native Ollama (IPv4 pin).** On Docker Desktop with dual-stack networking,
+`host.docker.internal` (and `host-gateway`) also has an IPv6 address. The proxy's networks are IPv4-only, so Squid's
+`CONNECT host.docker.internal:11434` went to the IPv6 address and failed with `503 ERR_CONNECT_FAIL 101` (Node 1,
+2026-10-31), although a plain container reached Ollama. Squid 5.7 has no `dns_v4_first`, so do not add it. Instead,
+on every run the installer:
+- starts a throw-away runner container that resolves the host's **IPv4** addresses and connects to port 11434 (`runner\windows\host-gateway-probe.cjs`; the result goes to `state\host-gateway.json`);
+- writes the first address that answered to `compose\.env` as `CRESTMONT_HOST_GATEWAY_IPV4` (validated: a plain, usable IPv4);
+- maps `host.docker.internal` to that address alone in the proxy's `/etc/hosts`, which Squid answers from before DNS;
+- checks that the running proxy sees exactly that one address.
+
+The allow-list, the paid-AI denials and the internal networks are unchanged. No installed file needs editing by
+hand. If Docker Desktop's address ever changes, re-run the installer. When the container-to-Ollama probe still fails,
+the last proxy log lines are saved to `state\egress-proxy-tail.log`.
+
+**Re-running after a failed run** (secret, `runner.local.env`, models and Ollama are left as they are; the Research
+Agent in `C:\CrestmontResearch` is not touched). Use a fresh download of `main` (block A's first five lines), then
+block E. The secret prompt does not appear while `C:\CrestmontRunner\secrets\build_runner_secret` exists.
+
 ## 5. What the installer changes
 
 - **Creates** `C:\CrestmontRunner\{compose,state,secrets,skills,logs,evidence}`. Inheritance is removed. Access is

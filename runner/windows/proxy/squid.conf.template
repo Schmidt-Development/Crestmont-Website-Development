@@ -21,6 +21,10 @@ request_timeout 2 minutes
 access_log stdio:/dev/stdout squid
 cache_log /dev/stderr
 logfile_rotate 0
+# Names in /etc/hosts are answered from it, never from DNS. docker-compose.yml pins host.docker.internal there to the
+# Docker host's IPv4 address (the installer resolves it), so Squid never tries the IPv6 address Docker Desktop also
+# gives it: these networks are IPv4-only (Node 1: 503 ERR_CONNECT_FAIL 101). Squid 5.7 has no dns_v4_first.
+hosts_file /etc/hosts
 
 acl runner_net src 172.30.10.0/24
 acl install_net src 172.30.20.0/24

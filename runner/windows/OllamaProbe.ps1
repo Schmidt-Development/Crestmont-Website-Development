@@ -231,3 +231,54 @@ function Get-CrestmontOllamaModelName([int]$Port = 11434) {
   if (-not $t.ok) { throw "GET /api/tags failed: $($t.error)" }
   return @(@($t.data.models) | ForEach-Object { "$($_.name)"; "$($_.model)" } | Where-Object { $_ } | Sort-Object -Unique)
 }
+
+# -- host.docker.internal for the egress proxy: IPv4 only (Node 1, Docker Desktop dual-stack) --
+# Docker Desktop resolves host-gateway / host.docker.internal to an IPv4 AND an IPv6 address. The proxy's networks are
+# IPv4-only, so Squid's CONNECT host.docker.internal:11434 went to the IPv6 address and failed with
+# 503 ERR_CONNECT_FAIL 101 (network unreachable). Squid 5.7 has no dns_v4_first. The installer therefore resolves the
+# host's IPv4 address that actually reaches Ollama (host-gateway-probe.cjs in a throw-away container), writes it to
+# compose\.env as CRESTMONT_HOST_GATEWAY_IPV4, and docker-compose.yml pins host.docker.internal to it in the proxy's
+# /etc/hosts (Squid reads hosts_file before DNS). The Squid allow-list itself is unchanged: it still matches the NAME.
+
+# A plain dotted-quad IPv4 that may stand for the Docker host: no leading zeros, not 0.0.0.0/8, loopback, link-local,
+# multicast or broadcast. Returns the address; throws otherwise (it is written into compose\.env).
+function Assert-CrestmontHostGatewayIPv4([string]$Address) {
+  $a = "$Address".Trim()
+  if ($a -cnotmatch '^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$') {
+    throw "host gateway address '$a' is not a plain IPv4 address"
+  }
+  $o = @($a.Split(".") | ForEach-Object { [int]$_ })
+  if ($o[0] -eq 0 -or $o[0] -eq 127 -or ($o[0] -eq 169 -and $o[1] -eq 254) -or $o[0] -ge 224) {
+    throw "host gateway address $a is not usable for the Docker host (0/8, loopback, link-local, multicast or reserved)"
+  }
+  return $a
+}
+
+# From host-gateway-probe.cjs output: the first IPv4 candidate that accepted a TCP connection. ok=$false with a
+# problem text otherwise (never a guess: an unreachable or invalid address is not used).
+function Select-CrestmontHostGatewayIPv4([string]$ProbeOutput, [int]$Port = 11434) {
+  $line = @("$ProbeOutput" -split "`r?`n" | Where-Object { $_.Trim().StartsWith("{") } | Select-Object -Last 1)
+  $doc = $null
+  if ($line.Count) { try { $doc = $line[0] | ConvertFrom-Json } catch { $doc = $null } }
+  if (-not $doc) { return [pscustomobject]@{ ok = $false; address = $null; source = $null; candidates = @(); problem = "The host-gateway probe printed no result: $("$ProbeOutput".Trim())" } }
+  $cands = @($doc.candidates)
+  foreach ($c in $cands) {
+    if (-not $c.reachable -or -not $c.address) { continue }
+    try { $ip = Assert-CrestmontHostGatewayIPv4 "$($c.address)" } catch { continue }
+    return [pscustomobject]@{ ok = $true; address = $ip; source = "$($c.name)"; candidates = $cands; problem = $null }
+  }
+  $seen = @($cands | ForEach-Object { if ($_.address) { "$($_.name)=$($_.address) ($($_.error))" } else { "$($_.name): $($_.error)" } }) -join "; "
+  return [pscustomobject]@{ ok = $false; address = $null; source = $null; candidates = $cands
+    problem = "No IPv4 address of the Docker host reaches port $Port from a container ($seen). Containers must reach native Ollama over IPv4 (Docker Desktop: host.docker.internal); otherwise use -OllamaInDocker." }
+}
+
+# Addresses /etc/hosts text gives for a name (comments and other names ignored).
+function Get-CrestmontHostsAddress([string]$HostsText, [string]$Name) {
+  $out = New-Object System.Collections.ArrayList
+  foreach ($l in ("$HostsText" -split "`r?`n")) {
+    $t = @((($l -split '#', 2)[0]).Trim() -split '\s+' | Where-Object { $_ })
+    if ($t.Count -lt 2) { continue }
+    if (@($t[1..($t.Count - 1)]) -contains $Name) { [void]$out.Add($t[0]) }
+  }
+  return $out.ToArray()
+}

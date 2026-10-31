@@ -428,7 +428,23 @@ if ($null -ne $oldRunnerEnv -and $oldRunnerEnv -cne $merged.runnerEnv) {
 if (@($merged.moved).Count) { Warn "Moved your own settings from runner.env to runner.local.env: $(@($merged.moved) -join ', ')" }
 if ($null -eq $oldLocalEnv -or $oldLocalEnv -cne $merged.localEnv) { [IO.File]::WriteAllText($localEnvPath, $merged.localEnv) }
 [IO.File]::WriteAllText($runnerEnvPath, $merged.runnerEnv)
-$composeEnv = @("OLLAMA_IMAGE=$OllamaImage", "OLLAMA_CONTEXT_LENGTH=$ctx", "OLLAMA_NUM_PARALLEL=$numParallel", "OLLAMA_KEEP_ALIVE=$keepAlive", "OLLAMA_KV_CACHE_TYPE=$($rec.ollama.kvCacheType)")
+# The Docker host's IPv4 address for host.docker.internal in the egress proxy (native Ollama only). Docker Desktop
+# also gives it an IPv6 address, which the proxy's IPv4-only networks cannot reach (503 ERR_CONNECT_FAIL 101 on
+# Node 1; Squid 5.7 has no dns_v4_first). Resolved and connect-tested from a throw-away container on every run, so
+# a Docker Desktop change is picked up by re-running the installer. See OllamaProbe.ps1 / host-gateway-probe.cjs.
+$hostGatewayIPv4 = ""
+if (-not $OllamaInDocker) {
+  $probeFile = Join-Path $PSScriptRoot "host-gateway-probe.cjs"
+  $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+  $hgOut = @(& docker.exe run --rm --network bridge --add-host "crestmont-host-gateway.invalid:host-gateway" -v "${probeFile}:/probe/host-gateway-probe.cjs:ro" --entrypoint node crestmont-ai-runner:1 /probe/host-gateway-probe.cjs 11434 host.docker.internal crestmont-host-gateway.invalid 2>&1 | ForEach-Object { "$_" })
+  $ErrorActionPreference = $eap
+  $hg = Select-CrestmontHostGatewayIPv4 -ProbeOutput ($hgOut -join "`n") -Port 11434
+  [IO.File]::WriteAllText((Join-Path $State "host-gateway.json"), (([ordered]@{ at = (Get-Date).ToUniversalTime().ToString("o"); ok = $hg.ok; address = $hg.address; source = $hg.source; candidates = $hg.candidates; problem = $hg.problem }) | ConvertTo-Json -Depth 4))
+  if (-not $hg.ok) { Fail $hg.problem; Exit-WithProblem }
+  $hostGatewayIPv4 = $hg.address
+  Ok "host.docker.internal pinned to $hostGatewayIPv4 in the egress proxy (IPv4 that reached port 11434, via $($hg.source); IPv6 not used)"
+}
+$composeEnv = @("CRESTMONT_HOST_GATEWAY_IPV4=$hostGatewayIPv4", "OLLAMA_IMAGE=$OllamaImage", "OLLAMA_CONTEXT_LENGTH=$ctx", "OLLAMA_NUM_PARALLEL=$numParallel", "OLLAMA_KEEP_ALIVE=$keepAlive", "OLLAMA_KV_CACHE_TYPE=$($rec.ollama.kvCacheType)")
 $composeEnv | Set-Content -Encoding ascii (Join-Path $Compose ".env")
 Ok "Wrote docker-compose.yml, proxy\squid.conf, runner.env (managed, no secret values); runner.local.env kept"
 # Tool scripts next to the install, whether or not auto-start is registered (Get-RunnerHealth, Collect-Evidence, ...).
@@ -443,6 +459,18 @@ $composeArgs = @("compose", "-f", (Join-Path $Compose "docker-compose.yml"), "--
 if ($OllamaInDocker) { $composeArgs += @("--profile", "ollama-in-docker") }
 Invoke-Checked "docker.exe" ($composeArgs + @("build", "egress-proxy")) "docker compose build egress-proxy"
 Invoke-Checked "docker.exe" ($composeArgs + @("up", "-d", "egress-proxy")) "start egress proxy"
+if (-not $OllamaInDocker) {
+  # The generated pin must be what the running proxy sees: exactly one host.docker.internal line, the IPv4 above.
+  $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+  $proxyHosts = (& docker.exe @($composeArgs + @("exec", "-T", "egress-proxy", "cat", "/etc/hosts")) 2>&1 | Out-String)
+  $ErrorActionPreference = $eap
+  $pinned = @(Get-CrestmontHostsAddress -HostsText $proxyHosts -Name "host.docker.internal")
+  if ($pinned.Count -ne 1 -or $pinned[0] -ne $hostGatewayIPv4) {
+    Fail "The egress proxy's /etc/hosts maps host.docker.internal to '$($pinned -join ', ')', expected only $hostGatewayIPv4. Re-run the installer (it regenerates compose\.env and recreates the proxy)."
+    Exit-WithProblem
+  }
+  Ok "Egress proxy resolves host.docker.internal to $hostGatewayIPv4 only"
+}
 if ($OllamaInDocker) {
   Invoke-Checked "docker.exe" ($composeArgs + @("up", "-d", "ollama")) "start ollama container"
   if (-not $SkipModelPull) { foreach ($m in $pullList) { Invoke-Checked "docker.exe" ($composeArgs + @("exec", "ollama", "ollama", "pull", $m)) "ollama pull $m (container)" } }
@@ -451,6 +479,10 @@ if ($OllamaInDocker) {
 $probe = "fetch(process.env.U+'/models').then(r=>r.json()).then(j=>{console.log((j.data||[]).map(m=>m.id).join(','));process.exit(0)},e=>{console.error(String(e));process.exit(1)})"
 & docker.exe run --rm --network crestmont_runner -e "U=$modelBase" -e NODE_USE_ENV_PROXY=1 -e HTTP_PROXY=http://egress-proxy:3128 -e HTTPS_PROXY=http://egress-proxy:3128 --entrypoint node crestmont-ai-runner:1 -e $probe
 if ($LASTEXITCODE -ne 0) {
+  $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+  & docker.exe @($composeArgs + @("logs", "--no-color", "--tail", "100", "egress-proxy")) 2>&1 | ForEach-Object { "$_" } | Set-Content -Encoding ascii (Join-Path $State "egress-proxy-tail.log")
+  $ErrorActionPreference = $eap
+  Warn "Last proxy log lines saved to state\egress-proxy-tail.log (look for TCP_TUNNEL/503 or ERR_CONNECT_FAIL)."
   Fail ("Containers cannot reach the model server at $modelBase through the proxy. With native Ollama this usually means " +
     "host.docker.internal does not reach a localhost-only listener on this Docker Desktop version; re-run with -OllamaInDocker " +
     "(see WINDOWS-SUPERCOMPUTER.md, 'Ollama native vs in Docker').")
