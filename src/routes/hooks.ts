@@ -37,8 +37,9 @@ const RECEPTIONIST_FUNCTIONS = new Set<string>(VOICE_FUNCTIONS);
 
 async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: string, rc: RetellCtx) => Promise<Translated>, fn: boolean, workspaces: readonly RetellWorkspace[]): Promise<Response> {
   const raw = await readBody(ctx.req);
+  let ws: RetellWorkspace;
   try {
-    const ws = await verifyRetellWorkspace(ctx.env, workspaces, raw, ctx.req.headers.get("x-retell-signature"));
+    ws = await verifyRetellWorkspace(ctx.env, workspaces, raw, ctx.req.headers.get("x-retell-signature"));
     if (fn && ws === "outbound") {
       // The body is authentic (the outbound key verified it); its function name decides whether that workspace may run it.
       let name: unknown;
@@ -62,7 +63,7 @@ async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: st
   // A failure here never changes the response to Retell (the voice handler's result stands) but is audited.
   const salesFacts = async () => {
     if (translate !== translateRetellEvent) return;
-    try { await ingestSalesEvent(ctx.db, raw, ctx.req.headers.get("x-retell-signature"), { environment: ctx.env.ENVIRONMENT, now }); }
+    try { await ingestSalesEvent(ctx.db, raw, ctx.req.headers.get("x-retell-signature"), { environment: ctx.env.ENVIRONMENT, now }, ws); }
     catch (e) {
       try { await audit(ctx.db, { actorKind: "webhook", action: "salesopt.ingest_failed", subjectType: "webhook", subjectId: "retell", details: { error: (e as Error).message.slice(0, 200) } }); }
       catch { /* never fail the receptionist's response because of the optimizer */ }

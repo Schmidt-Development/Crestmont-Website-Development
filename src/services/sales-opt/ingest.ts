@@ -3,6 +3,10 @@
 // CRM effects). It only records structured facts in so_call_facts; it never changes receptionist behaviour.
 //
 //  - Only calls whose agent_id is a registered sales target (so_targets) are recorded; everything else is ignored.
+//  - Only events signed by the SALES (outbound) Retell workspace are recorded (src/adapters/retell-workspaces.ts). The
+//    route accepts both workspaces' call events, so an event signed by the receptionist's key naming the sales agent id
+//    (a mis-registered or receptionist-workspace agent) is refused and audited: it must never feed sales metrics,
+//    experiments or the automatic safety rollback.
 //  - Replay: an exact replay of an already-processed signed delivery (same X-Retell-Signature) is ignored.
 //    The receipt is written only after successful processing, so a delivery that failed is processed on retry.
 //  - Duplicates and out-of-order delivery: one row per call; each event has a rank (started 1 < ended 2 <
@@ -16,6 +20,7 @@ import { audit } from "../security.ts";
 import { ensureCall } from "../voice.ts";
 import { envMismatch, RETELL_PROVIDER, type RetellCtx } from "../../adapters/retell.ts";
 import { deployedVersion, stageForAgent } from "./registry.ts";
+import type { RetellWorkspace } from "../../adapters/retell-workspaces.ts";
 
 type Obj = Record<string, unknown>;
 const obj = (x: unknown): Obj => (x && typeof x === "object" && !Array.isArray(x) ? (x as Obj) : {});
@@ -28,18 +33,23 @@ export const EVENT_RANK: Readonly<Record<string, number>> = { call_started: 1, c
 export const NOT_CONNECTED = new Set(["dial_failed", "dial_no_answer", "dial_busy", "voicemail_reached", "invalid_destination", "telephony_provider_permission_denied",
   "telephony_provider_unavailable", "sip_routing_error", "marked_as_spam", "user_declined", "network_blocked", "no_valid_payment", "concurrency_limit_reached", "scam_detected"]);
 
-export type IngestResult = { recorded: false; reason: "not_sales_agent" | "environment_mismatch" | "unsupported_event" | "replay" } | { recorded: true; callId: string; stage: string; rank: number };
+export type IngestResult = { recorded: false; reason: "not_sales_agent" | "wrong_workspace" | "environment_mismatch" | "unsupported_event" | "replay" } | { recorded: true; callId: string; stage: string; rank: number };
 
 const SAFE = /^[A-Za-z0-9._:-]{1,120}$/;
 const SEGMENT = /^[a-z0-9_-]{1,40}$/;
 
-export async function ingestSalesEvent(db: Db, raw: string, signatureHeader: string | null, ctx: RetellCtx): Promise<IngestResult> {
+/** `workspace` is the Retell workspace whose key verified X-Retell-Signature (verifyRetellWorkspace); required, so a caller cannot skip it. */
+export async function ingestSalesEvent(db: Db, raw: string, signatureHeader: string | null, ctx: RetellCtx, workspace: RetellWorkspace): Promise<IngestResult> {
   const json = obj(JSON.parse(raw));
   const event = str(json, "event") ?? "";
   const rank = EVENT_RANK[event];
   const call = obj(json.call);
   const stage = await stageForAgent(db, str(call, "agent_id"));
   if (!stage) return { recorded: false, reason: "not_sales_agent" };
+  if (workspace !== "outbound") {
+    await audit(db, { actorKind: "webhook", action: "salesopt.wrong_workspace", subjectType: "call", subjectId: str(call, "call_id")?.slice(0, 120) ?? null, details: { event: event.slice(0, 40), stage, workspace } });
+    return { recorded: false, reason: "wrong_workspace" };
+  }
   if (!rank) return { recorded: false, reason: "unsupported_event" };
   if (envMismatch(call, ctx)) return { recorded: false, reason: "environment_mismatch" };
   const receipt = await sha256Hex(`${signatureHeader ?? ""}`);
