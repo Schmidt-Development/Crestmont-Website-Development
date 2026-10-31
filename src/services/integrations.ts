@@ -3,7 +3,7 @@
 // to the provider. Nothing is ever marked verified without a successful call; a probe failure is
 // recorded as "failing" with the provider's error. Secrets are never stored or displayed — only
 // a short SHA-256 fingerprint, used to notice when a key changes so stale verification is dropped.
-import { STRIPE_API_VERSION } from "../adapters/payments.ts";
+import { STRIPE_API_VERSION, SUPPORTED_WEBHOOK_API_VERSIONS } from "../adapters/payments.ts";
 import { paymentsMode, keyMode } from "../domain/payments-mode.ts";
 import { STRIPE_WEBHOOK_EVENTS } from "../domain/stripe-events.ts";
 import type { Db } from "../lib/db.ts";
@@ -177,7 +177,8 @@ export async function verifyIntegration(d: IntegrationDeps, id: IntegrationId, a
         if (!w.ok) { detail = providerError("Stripe webhook endpoints", w, wb); break; }
         const problem = webhookEndpointProblem((Array.isArray(wb?.data) ? wb!.data : []) as StripeWebhookEndpoint[], d.env.APP_URL);
         if (problem) { status = "degraded"; detail = `GET /v1/balance succeeded in ${modeLabel} mode, but ${problem}`; break; }
-        status = "verified"; detail = `GET /v1/balance succeeded in ${modeLabel} mode; the webhook endpoint is enabled at API version ${STRIPE_API_VERSION} with every handled event.`;
+        const epVersion = webhookEndpointFor((Array.isArray(wb?.data) ? wb!.data : []) as StripeWebhookEndpoint[], d.env.APP_URL)?.api_version;
+        status = "verified"; detail = `GET /v1/balance succeeded in ${modeLabel} mode; the webhook endpoint is enabled at API version ${epVersion} with every handled event (requests pinned to ${STRIPE_API_VERSION}).`;
         break;
       }
       case "resend": {
@@ -282,13 +283,20 @@ export function secretPresence(env: Env): { name: string; present: boolean }[] {
 
 export interface StripeWebhookEndpoint { url?: string; status?: string; api_version?: string | null; enabled_events?: string[] }
 
+const webhookTarget = (appUrl: string | undefined) => `${(appUrl ?? "").replace(/\/$/, "")}/api/webhooks/stripe`;
+function webhookEndpointFor(endpoints: StripeWebhookEndpoint[], appUrl: string | undefined): StripeWebhookEndpoint | undefined {
+  const target = webhookTarget(appUrl);
+  return endpoints.find((e) => e.url === target);
+}
+
 /** Why the registered Stripe webhook endpoints cannot deliver every event the platform handles (null = fine). */
 export function webhookEndpointProblem(endpoints: StripeWebhookEndpoint[], appUrl: string | undefined): string | null {
-  const target = `${(appUrl ?? "").replace(/\/$/, "")}/api/webhooks/stripe`;
-  const ep = endpoints.find((e) => e.url === target);
+  const target = webhookTarget(appUrl);
+  const ep = webhookEndpointFor(endpoints, appUrl);
   if (!ep) return `no webhook endpoint is registered for ${target}.`;
   if (ep.status !== "enabled") return `the webhook endpoint for ${target} is ${ep.status ?? "not enabled"}.`;
-  if (ep.api_version !== STRIPE_API_VERSION) return `the webhook endpoint uses API version ${ep.api_version ?? "default"}, expected ${STRIPE_API_VERSION}.`;
+  // The payload shape follows the endpoint's version; only versions whose shapes are tested are accepted.
+  if (!ep.api_version || !SUPPORTED_WEBHOOK_API_VERSIONS.includes(ep.api_version)) return `the webhook endpoint uses API version ${ep.api_version ?? "default"}, expected ${SUPPORTED_WEBHOOK_API_VERSIONS.join(" or ")}.`;
   const enabled = new Set(ep.enabled_events ?? []);
   if (enabled.has("*")) return null;
   const missing = STRIPE_WEBHOOK_EVENTS.filter((e) => !enabled.has(e));
