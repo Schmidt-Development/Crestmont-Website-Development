@@ -19,6 +19,11 @@ jobs:
           for p in /api/builds/runner/claim /api/builds/runner/ai/claim /api/builds/runner/ai/checkpoint /api/builds/runner/workers/status /api/builds/runner/cycles/submit /api/builds/runner/pipeline/spec /api/builds/runner/deployments/claim /api/builds/runner/previews/claim /api/builds/runner/does-not-exist /api/research/runner/heartbeat; do
             echo "::notice title=POST $p::$(post $p)"
           done
+      - name: Probe Owner pages (no session)
+        env:
+          BASE: https://crestmont-platform-staging.partners-df4.workers.dev
+        run: |
+          get()  { curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$BASE$1"; }
           for p in /staff/builds /staff/builds/diagnostics /staff/builds/workers /staff/builds/pipeline /staff/test-payments /staff/does-not-exist; do
             echo "::notice title=GET $p::$(get $p)"
           done
