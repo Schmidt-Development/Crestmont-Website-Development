@@ -45,12 +45,19 @@ test("[READY-012] [DOC-002] external alerting: an off-platform monitor probes se
   assert.doesNotMatch(rb, /No external alerting exists yet/);
 });
 
-test("[TEST-004] [DOC-002] recovery is rehearsed after every successful staging deploy: rollback rehearsal and restore drill share the deploy concurrency group and never touch production", () => {
+test("[TEST-004] [DOC-002] recovery is rehearsed after every successful staging deploy: rollback rehearsal and restore drill share the deploy concurrency group (job level, so a skipped run never displaces a pending deploy) and never touch production", () => {
   for (const n of ["staging-rollback-rehearsal.yml", "staging-restore-drill.yml"]) {
     const s = wf(n);
     assert.match(s, /workflow_run:\s*\n\s*workflows: \["Deploy staging"\]\s*\n\s*types: \[completed\]/, n);
     assert.match(s, /github\.event\.workflow_run\.conclusion == 'success'/, n);
     assert.match(s, /group: deploy-staging/, n);
+    // CREST-NEW-007: the group is taken at job level, after the success-only `if:`. A workflow-level group let the run
+    // created for a cancelled deploy take the single pending slot and cancel the next pending Deploy staging.
+    assert.doesNotMatch(s, /^concurrency:/m, `${n}: no workflow-level concurrency`);
+    const job = s.slice(s.indexOf("\njobs:"));
+    const ifAt = job.search(/\n    if: github\.ref == 'refs\/heads\/main' && \(github\.event_name != 'workflow_run' \|\| github\.event\.workflow_run\.conclusion == 'success'\)/);
+    const cAt = job.search(/\n    concurrency:\n      group: deploy-staging\b[^\n]*\n      cancel-in-progress: false/);
+    assert.ok(ifAt > 0 && cAt > ifAt, `${n}: job-level concurrency on the gated job`);
     assert.doesNotMatch(s, /--env production|crestmont-platform-production|crestmont-production/, n);
   }
   assert.match(wf("deploy-staging.yml"), /^name: Deploy staging$/m, "workflow_run names the real deploy workflow");
