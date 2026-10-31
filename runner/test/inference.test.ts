@@ -67,6 +67,15 @@ test("[AIB-015] GPU scheduler: a model owned by another application on the same 
   assert.ok(f.loaded.some((m) => m.model === jarvis), "the foreign model is still resident as far as the runner is concerned");
 });
 
+test("[AIB-015] GPU scheduler: a model the server evicts right after loading is a failed switch, not a success", async () => {
+  const f = fakeResidency({ initial: [{ model: B.tag, vramMb: 25100 }] });
+  const evicting: Residency = { ...f.r, async load(model) { await f.r.load(model, "30m"); await f.r.unload(model); } };
+  const s = sched(evicting);
+  await job(s, B.tag, "p1");
+  await assert.rejects(job(s, A.tag, "p2"));
+  assert.ok(s.status().switches.failures >= 1, "recorded as a failed switch");
+});
+
 test("[AIB-015] GPU scheduler: Model A and Model B never share the 32 GB GPU when they do not fit (18 + 24 GB + reserve); one model at a time, switches unload then load", async () => {
   const f = fakeResidency({ initial: [{ model: B.tag, vramMb: 25100 }] });
   const s = sched(f.r);

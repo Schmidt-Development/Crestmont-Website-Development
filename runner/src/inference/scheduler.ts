@@ -236,6 +236,9 @@ export class InferenceScheduler {
       for (const m of loaded) if (this.profile(m.model) && !this.canCoReside([m.model, target])) await this.o.residency.unload(m.model, signal);
       await this.o.residency.load(target, this.o.keepAlive, signal);
       this.resident = await this.o.residency.loaded(signal);
+      // Ollama may have evicted it again at once (another application's model, OLLAMA_MAX_LOADED_MODELS): a failed switch
+      // (retry, then cooldown), not a success that the pump would repeat after every dwell period.
+      if (!this.resident.some((m) => sameModel(m.model, target))) throw new Error(`${target} is not resident after loading (evicted by the model server)`);
       return true;
     };
     void (async () => {
