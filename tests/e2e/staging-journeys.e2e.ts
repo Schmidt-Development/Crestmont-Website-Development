@@ -51,7 +51,24 @@ const account = (key: string) => {
 
 let browser: Awaited<ReturnType<typeof launchBrowser>>;
 before(async () => { if (!unset) browser = await launchBrowser(); });
-after(async () => { for (const a of Object.values(people)) await a.ctx.close().catch(() => undefined); await browser?.close(); });
+after(async () => { await stripeDiagnostics().catch(() => undefined); for (const a of Object.values(people)) await a.ctx.close().catch(() => undefined); await browser?.close(); });
+
+/** Read-only Stripe diagnostics for the deploy log (the raw job log and artifacts are often unreadable from review
+ * sessions, so the workflow turns this file into annotations): the Owner's view of Stripe events needing attention,
+ * the newest disputes, and what the journey customer sees on billing and projects. Staff-visible data only; no secrets. */
+async function stripeDiagnostics() {
+  if (unset || !people.newCustomer || !people.owner) return;
+  const grab = async (pg: Page, url: string, sel = "main") => { try { await pg.goto(url); return (await text(pg, sel)).replace(/\s+/g, " ").slice(0, 900); } catch (e) { return `unavailable: ${(e as Error).message.split("\n")[0]}`; } };
+  const o = people.owner.page, c = people.newCustomer.page;
+  const lines = [
+    `monitoring: ${await grab(o, `${BASE}/staff/monitoring`)}`,
+    `disputes: ${await grab(o, `${BASE}/staff/disputes`)}`,
+    `customer billing: ${await grab(c, `${BASE}/portal/billing`)}`,
+    `customer projects: ${await grab(c, `${BASE}/portal/projects`)}`,
+  ];
+  mkdirSync("evidence", { recursive: true });
+  writeFileSync("evidence/stripe-diagnostics.txt", lines.join("\n") + "\n");
+}
 
 // ───────────── browser helpers ─────────────
 
@@ -772,8 +789,12 @@ journey(24, ["PAY-004"], "customer opens the Stripe billing portal to manage pay
   // billing portal the paying customer would use to manage a subscription: test-mode portal, created by checkout.
   const p = people.newCustomer.page;
   await p.goto(`${BASE}/portal/billing`);
-  await nav(p, btn(p, "Manage payment methods"));
-  await p.waitForURL(/^https:\/\/billing\.stripe\.com\//, { timeout: 60_000 });
+  // Wait for the redirect to Stripe to COMMIT, not for the portal page's load event (deploy 41187430075 timed out
+  // waiting for "load" after the click). An error from our side stays on BASE and is reported with its alerts.
+  await btn(p, "Manage payment methods").click();
+  await p.waitForURL(/^https:\/\/billing\.stripe\.com\//, { timeout: 60_000, waitUntil: "commit" }).catch(async (e: Error) => {
+    throw new Error(`no redirect to the Stripe billing portal (${e.message.split("\n")[0]}); page ${p.url()}: ${await alerts(p)} ${(await text(p).catch(() => "")).slice(0, 200)}`);
+  });
   assert.match(p.url(), /\/p\/session\/test_/, "a Stripe TEST-mode billing portal session");
   await p.goto(`${BASE}/portal/billing`);
   assertClean();
