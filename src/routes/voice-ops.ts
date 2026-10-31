@@ -23,6 +23,11 @@ import * as sched from "../services/voice-scheduling.ts";
 import * as outbound from "../services/voice-outbound.ts";
 import { voiceAnalytics, eraseCallerData } from "../services/voice-ops.ts";
 import { sendMail } from "../services/mailer.ts";
+import { jsonResponse } from "../app/http.ts";
+import { readBody } from "./api.ts";
+import { verifyEvidenceSignature, IngestAuthError } from "../readiness/ingest.ts";
+import { rateLimit, audit } from "../services/security.ts";
+import { auditInboundRetell } from "../services/retell-inbound-audit.ts";
 
 const DAY_LABEL: Record<Weekday, string> = { sun: "Sunday", mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday" };
 const microUsd = (v: number) => `$${(v / 1e6).toFixed(4)}`;
@@ -168,6 +173,20 @@ const back = (ctx: AppContext, text: string, kind: "success" | "error" = "succes
 const statusOf = (e: unknown) => (e as { status?: number }).status;
 
 export function register(r: Router): void {
+  // Read-only audit of the receptionist's live Retell configuration (src/services/retell-inbound-audit.ts), run with this
+  // Worker's RETELL_INBOUND_API_KEY. Machine endpoint signed like /api/scheduled/run (SCHEDULER_TRIGGER_SECRET, derived
+  // from the Cloudflare token); the staging deploy calls it and prints the findings. Nothing is written to Retell.
+  r.post("/api/voice/retell-audit", async (ctx) => {
+    const raw = await readBody(ctx.req);
+    if (!ctx.env.SCHEDULER_TRIGGER_SECRET) return jsonResponse(ctx, 503, { error: "Audit trigger not configured" });
+    try { await verifyEvidenceSignature(ctx.env.SCHEDULER_TRIGGER_SECRET, raw, ctx.req.headers.get("x-crestmont-scheduler-signature")); }
+    catch (e) { if (e instanceof IngestAuthError) return jsonResponse(ctx, 401, { error: e.message }); throw e; }
+    const rl = await rateLimit(ctx.db, "retell-audit", 3, 300);
+    if (!rl.allowed) return jsonResponse(ctx, 429, { error: "Ran recently; try again in a few minutes" });
+    const result = await auditInboundRetell({ db: ctx.db, env: ctx.env, fetch: ctx.env.overrides?.fetch ?? fetch, baseUrl: ctx.baseUrl });
+    await audit(ctx.db, { actorKind: "system", action: "voice.retell_audit", subjectType: "retell_agent", subjectId: result.agentId, details: { status: result.status, failed: result.findings.filter((f) => !f.ok).length, total: result.findings.length } });
+    return jsonResponse(ctx, 200, result);
+  });
   r.get("/staff/voice/operations", (ctx) => opsPage(ctx));
 
   r.post("/staff/voice/operations/settings", async (ctx) => {

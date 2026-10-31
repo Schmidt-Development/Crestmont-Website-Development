@@ -211,6 +211,16 @@ jobs:
           echo "::add-mask::$k"
           printf '%s' "$k" | node --no-warnings scripts/staging-secrets.ts put SCHEDULER_TRIGGER_SECRET
 
+      # Read-only audit of the receptionist's LIVE Retell configuration, run by the Worker with its own inbound key
+      # (src/services/retell-inbound-audit.ts): key validity, agent, webhook + events, data storage, the 17 functions
+      # against the backend contracts, Transfer/End Call, default variables, begin message, prompt sync and phone routing.
+      # Prints ids, URLs and settings only. Informational: never fails the deploy.
+      - name: Retell inbound configuration audit (read-only, live Retell API)
+        continue-on-error: true
+        env:
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: node --no-warnings scripts/trigger-scheduler.ts retell-audit --url "${{ steps.deploy.outputs.url }}"
+
       - name: CRM import and erasure keys (derived; put only when changed)
         # PR #50. CRM_IMPORT_SECRET signs research-engine imports (POST /api/crm/v1/imports); CRM_ERASURE_HMAC_KEY keys the
         # privacy-erasure re-import tombstones. Derived from the Cloudflare token secret like the scheduler key: 256-bit,

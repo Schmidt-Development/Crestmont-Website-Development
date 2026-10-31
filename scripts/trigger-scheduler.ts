@@ -19,7 +19,8 @@ async function main() {
   if (!root) throw new Error("ACCESS_ROOT_KEY is required");
   const key = deriveSchedulerKey(root);
   if (mode === "derive") { process.stdout.write(key); return; }
-  if (mode !== "run") throw new Error("usage: derive | run --url <base> [--daily]");
+  if (mode === "retell-audit") return retellAudit(key, rest);
+  if (mode !== "run") throw new Error("usage: derive | run --url <base> [--daily] | retell-audit --url <base>");
   const base = rest[rest.indexOf("--url") + 1]?.replace(/\/$/, "");
   if (!base || !/^https:\/\//.test(base)) throw new Error("--url https://… is required");
   const crons = [FREQUENT, ...(rest.includes("--daily") ? [DAILY] : [])];
@@ -32,6 +33,25 @@ async function main() {
     if (!r.ok && r.status !== 429) failed = true; // 429 = already ran in the last 5 minutes
   }
   if (failed) { console.log("::error title=External scheduler::a job-set trigger failed"); process.exitCode = 1; }
+}
+
+/**
+ * Asks the Worker to audit the receptionist's live Retell configuration with its own inbound key and prints the findings
+ * as annotations (ids, URLs, settings and booleans only). Never fails the job: missing dashboard settings are the
+ * Founder's to fix and must not block deploys; an HTTP failure is a warning.
+ */
+async function retellAudit(key: string, rest: string[]) {
+  const base = rest[rest.indexOf("--url") + 1]?.replace(/\/$/, "");
+  if (!base || !/^https:\/\//.test(base)) throw new Error("--url https://… is required");
+  const body = JSON.stringify({ audit: "retell-inbound" });
+  const r = await fetch(`${base}/api/voice/retell-audit`, { method: "POST", headers: { "content-type": "application/json", "x-crestmont-scheduler-signature": sign(key, body) }, body });
+  const text = await r.text();
+  if (!r.ok) { console.log(`::warning title=Retell inbound audit::HTTP ${r.status} ${text.replace(/[\r\n]+/g, " ").slice(0, 200)}`); return; }
+  const a = JSON.parse(text) as { status: string; agentId: string | null; llmId: string | null; agents: { id: string; name: string | null }[]; findings: { check: string; ok: boolean; detail: string }[] };
+  const clean = (x: string) => x.replace(/[\r\n]+/g, " ").replace(/::/g, ": ").slice(0, 300);
+  const failed = a.findings.filter((f) => !f.ok);
+  console.log(`::notice title=Retell inbound audit::${a.status.toUpperCase()} — ${a.findings.length - failed.length}/${a.findings.length} checks pass · agent ${a.agentId ?? "?"} · llm ${a.llmId ?? "?"} · agents in workspace: ${a.agents.map((x) => `${x.id}${x.name ? ` (${clean(x.name)})` : ""}`).join(", ") || "none"}`);
+  for (const f of a.findings) console.log(`${f.ok ? "::notice" : "::warning"} title=Retell ${f.ok ? "OK" : "TODO"} · ${clean(f.check)}::${clean(f.detail)}`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) await main().catch((e) => { console.log(`::error title=External scheduler::${(e as Error).message}`); process.exitCode = 1; });
