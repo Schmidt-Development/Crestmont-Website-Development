@@ -97,3 +97,18 @@ test("[VOICE-004] [SALESOPT-007] each Retell API caller uses only its own worksp
   assert.ok((await productionGate(t.db, { RETELL_INBOUND_API_KEY: IN, ENVIRONMENT: "production" } as Env)).reasons.includes("RETELL_OUTBOUND_API_KEY is not set"));
   void TEST_PASSWORD;
 });
+
+test("[SALESOPT-001] [SEC-002] the optimizer records only sales-workspace events: a receptionist-signed event naming the sales agent is refused and audited", async () => {
+  const t = await app({ RETELL_INBOUND_API_KEY: IN, RETELL_OUTBOUND_API_KEY: OUT });
+  const owner = await createStaff(t.db, "owner", "owner-ws@crestmont.test");
+  const { setTarget } = await import("../src/services/sales-opt/registry.ts");
+  await setTarget(t.db, owner.id, "staging", "agent_sales_ws_stg");
+  const ended = (id: string) => ({ event: "call_ended", call: { ...call(id), agent_id: "agent_sales_ws_stg", direction: "outbound", start_timestamp: Date.now() - 60_000, end_timestamp: Date.now(), disconnection_reason: "user_hangup" } });
+  // Signed by the receptionist's key: the voice handler answers as before, but no sales fact is recorded.
+  assert.equal((await t.post("/api/webhooks/retell", ended("c_ws_in"), IN)).status, 200, "the receptionist's response is unchanged");
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM so_call_facts`), 0, "a receptionist-signed event never feeds sales metrics");
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM audit_logs WHERE action = 'salesopt.wrong_workspace' AND subject_id = 'c_ws_in'`), 1, "the refusal is audited");
+  // The same event signed by the sales workspace is recorded.
+  assert.equal((await t.post("/api/webhooks/retell", ended("c_ws_out"), OUT)).status, 200);
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM so_call_facts WHERE provider_call_id = 'c_ws_out' AND stage = 'staging'`), 1, "sales-workspace events reach the optimizer");
+});
