@@ -522,10 +522,14 @@ test("[INFRA-005] deployment workflows are gated: staging skips without Cloudfla
   // The access notes are sealed only after the live sequence verified; the access upload depends on that step's
   // output, and the only other upload is the sealed pre-rotation forensic snapshot.
   assert.match(staging, /- name: Seal the access notes\n\s+id: protect\n\s+if: always\(\) && steps\.verify\.outcome == 'success'/, "access artifact only after the live sequence verified");
-  for (const m of staging.matchAll(/upload-artifact@v4\n\s+if: ([^\n]+)/g)) assert.match(m[1], /steps\.protect\.outputs\.upload == 'sealed'|steps\.gate\.outputs\.pending == 'true'/, "access artifact only after the live sequence verified");
+  // Any upload-artifact version or SHA pin (CREST-GAP-063: Dependabot bumps must not break this check).
+  const uploadsWithIf = [...staging.matchAll(/upload-artifact@[^\s]+(?: #[^\n]*)?\n\s+if: ([^\n]+)/g)];
+  assert.ok(uploadsWithIf.length >= 2, "the sealed forensic and access uploads are found");
+  for (const m of uploadsWithIf) assert.match(m[1], /steps\.protect\.outputs\.upload == 'sealed'|steps\.gate\.outputs\.pending == 'true'/, "access artifact only after the live sequence verified");
   assert.match(staging, /rm -f access\/private\.json access\/access\.json/);
   assert.doesNotMatch(staging, /upload-artifact[\s\S]*?path: (backups|access\/(private|access))/, "no other artifact carries credentials");
-  assert.match(staging, /preview gate not active/);
+  assert.match(staging, /public homepage returned HTTP \$code with no cookies/, "staging smoke proves the public site loads without credentials");
+  assert.match(staging, /opened without a session/, "staging smoke proves protected areas refuse anonymous visitors");
   assert.match(staging, /scripts\/seed-staging\.ts/);
   assert.match(staging, /name: staging-access-sealed/);
   assert.doesNotMatch(staging, /name: staging-preview-access/, "the name of the exposed plaintext artifacts is retired");

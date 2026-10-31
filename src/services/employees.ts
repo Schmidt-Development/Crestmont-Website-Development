@@ -12,6 +12,7 @@ import { nowIso } from "../lib/db.ts";
 import { STAFF_ROLES, type Role } from "../domain/authz.ts";
 import { audit, securityEvent } from "./security.ts";
 import { clearMfa, createInvitation, revokeAllSessions } from "./auth.ts";
+import { restoreOnEnable, startOffboarding } from "./offboarding.ts";
 
 /** Roles that can be assigned or invited through the UI (never 'owner'). */
 export const ASSIGNABLE_STAFF_ROLES = STAFF_ROLES.filter((r) => r !== "owner") as Exclude<(typeof STAFF_ROLES)[number], "owner">[];
@@ -68,6 +69,12 @@ export async function inviteStaff(db: Db, byUserId: string, emailRaw: string, ro
   if (!orgId) throw new EmployeeError("The internal Crestmont organization does not exist yet.", 409);
   const existing = await db.prepare(`SELECT m.role_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = ? AND m.organization_id = ?`).bind(email, orgId).first<{ role_id: string }>();
   if (existing) throw new EmployeeError("That person is already a staff member. Change their role instead.", 409);
+  // A verified customer account must not silently become a staff account (CREST-GAP-001): staff use a separate work
+  // address. Unverified accounts are not refused here — that would let anyone block an invitation by pre-registering
+  // the address — they are reclaimed by the invitee on acceptance instead.
+  const customer = await db.prepare(`SELECT 1 AS x FROM users u JOIN memberships m ON m.user_id = u.id JOIN organizations o ON o.id = m.organization_id
+     WHERE u.email = ? AND u.email_verified_at IS NOT NULL AND o.kind != 'internal' LIMIT 1`).bind(email).first();
+  if (customer) throw new EmployeeError("That address belongs to a customer account. Invite the person with a separate work email address.", 409);
   const token = await createInvitation(db, byUserId, email, role as Role, orgId);
   return { token, email, role: role as Role };
 }
@@ -88,21 +95,30 @@ export async function changeStaffRole(db: Db, actor: { userId: string; isOwner: 
   return { from: m.role_id, to: newRole as Role };
 }
 
-export async function setStaffDisabled(db: Db, actor: { userId: string; isOwner: boolean }, targetUserId: string, disable: boolean, reason: string): Promise<void> {
+/**
+ * Disable or re-enable a staff account. Disabling also starts offboarding (CREST-GAP-041, src/services/offboarding.ts):
+ * the person's open work is queued for reassignment (`offboarding` = "queue", default) or ended at once ("end").
+ */
+export async function setStaffDisabled(db: Db, actor: { userId: string; isOwner: boolean }, targetUserId: string, disable: boolean, reason: string, offboarding: "queue" | "end" = "queue"): Promise<{ queued: number; ended: number; restored: number }> {
   if (targetUserId === actor.userId) throw new EmployeeError("You cannot disable or enable your own account.", 403);
   const m = await staffMembership(db, targetUserId);
   if (!m) throw new EmployeeError("Staff member not found.", 404);
   if (m.role_id === "owner") throw new EmployeeError("The Owner account cannot be disabled through the platform.", 403);
   if (disable && reason.trim().length < 3) throw new EmployeeError("Give a short reason for disabling this account.");
+  const out = { queued: 0, ended: 0, restored: 0 };
   if (disable) {
-    if (m.disabled_at) return;
+    if (m.disabled_at) return out;
     await db.prepare(`UPDATE users SET disabled_at = ? WHERE id = ? AND disabled_at IS NULL`).bind(nowIso(), targetUserId).run();
     await revokeAllSessions(db, targetUserId, null, actor.userId);
+    Object.assign(out, await startOffboarding(db, actor.userId, targetUserId, offboarding === "end" ? "end" : "queue"));
   } else {
-    if (!m.disabled_at) return;
+    if (!m.disabled_at) return out;
     await db.prepare(`UPDATE users SET disabled_at = NULL, failed_logins = 0, locked_until = NULL WHERE id = ?`).bind(targetUserId).run();
+    out.restored = await restoreOnEnable(db, actor.userId, targetUserId);
   }
-  await audit(db, { actorUserId: actor.userId, action: disable ? "employee.disabled" : "employee.enabled", subjectType: "user", subjectId: targetUserId, organizationId: m.organization_id, details: disable ? { reason: reason.slice(0, 300) } : undefined });
+  await audit(db, { actorUserId: actor.userId, action: disable ? "employee.disabled" : "employee.enabled", subjectType: "user", subjectId: targetUserId, organizationId: m.organization_id,
+    details: disable ? { reason: reason.slice(0, 300), offboarding, queued: out.queued, ended: out.ended } : { restoredItems: out.restored } });
+  return out;
 }
 
 export async function revokeInvitation(db: Db, byUserId: string, invitationId: string): Promise<void> {

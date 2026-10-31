@@ -148,6 +148,11 @@ export async function startFakeControlPlane(o: FakeCPOptions = {}): Promise<Fake
         leased.delete(String(body.jobId));
         return send(200, ans);
       }
+      if (p === "/api/builds/runner/ai/checkpoint") {
+        if (!o.aiJobs) return send(404, { error: "unknown" });
+        if (leased.get(String(body.jobId)) !== body.leaseToken) return send(409, { error: "lease_lost" });
+        return send(200, { recorded: true });
+      }
       const extra = extraRoutes.get(p.replace("/api/builds/runner/", ""));
       if (typeof extra === "function") return send(200, extra(body));
       if (p === "/api/builds/runner/previews/claim" || p === "/api/builds/runner/previews/deleted") return send(404, { error: "unknown" });

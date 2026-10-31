@@ -36,11 +36,32 @@ export const STEP_UP_ROUTES: Readonly<Record<string, string>> = {
   "POST /staff/builds/:id/share-preview": "sharing a website preview with the customer",
   "POST /staff/builds/:id/approve": "final approval of an AI-built website",
   "POST /staff/ai/budget": "paid AI budget",
+  // AI Sales Optimization (Founder decisions that can change the live sales agent)
+  "POST /staff/sales-optimization/control": "sales optimizer controls",
+  "POST /staff/sales-optimization/targets": "sales agent targets",
+  "POST /staff/sales-optimization/versions/:id/decide": "sales prompt approval",
+  "POST /staff/sales-optimization/deploy": "sales agent deployment",
+  "POST /staff/sales-optimization/rollback": "sales agent rollback",
+  "POST /staff/sales-optimization/experiments/:id/decide": "sales experiment decision",
   // MFA changes (replacing an enrolled authenticator; first enrolment is unaffected because no MFA exists yet)
   "GET /mfa/setup": "authenticator change",
   "POST /mfa/setup": "authenticator change",
   // Data exports that are not file-named (the rest are matched by isDataExport)
   "POST /account/privacy/export": "personal data export",
+  // Added by the security readiness review (2026-10-28): irreversible data deletion, retention periods,
+  // Founder-protected pricing and tax settings, and membership changes not covered above.
+  "POST /staff/privacy/:id/process": "privacy deletion (anonymisation)",
+  "POST /staff/crm/identity-erasure": "CRM identity erasure",
+  "POST /staff/voice/caller-erasure": "caller data erasure",
+  "POST /staff/ops/retention": "data retention periods",
+  "POST /staff/pricing/:id/decide": "price change decision",
+  "POST /staff/settings/tax": "tax configuration",
+  "POST /staff/settings/tax/jurisdictions": "tax jurisdictions",
+  "POST /staff/employees/invitations/:id/revoke": "staff invitation revoke",
+  // Customer team changes (applies only to customers who enabled two-factor authentication)
+  "POST /portal/team": "customer team invitation",
+  "POST /portal/team/members/:userId/role": "customer role change",
+  "POST /portal/team/members/:userId/remove": "customer member removal",
 };
 
 /** Bulk data exports: CSV/JSON/Markdown downloads, finance report files, and ?format=csv views of staff pages. */

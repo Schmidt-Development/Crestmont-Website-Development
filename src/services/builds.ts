@@ -36,7 +36,7 @@ export interface BuildSettings {
   automation_enabled: number; globally_paused: number; pause_reason: string | null; auto_start_after: string;
   run_budget_micro: number; project_budget_micro: number; max_runtime_minutes: number; max_turns: number;
   max_concurrent: number; max_attempts: number; lease_seconds: number; model: string; updated_by: string | null; updated_at: string;
-  /** Founder policy for customer revision requests (migration 0041): off | owner_approval (default) | auto. */
+  /** Founder policy for customer revision requests (migration 0051): off | owner_approval (default) | auto. */
   customer_revision_mode: CustomerRevisionMode;
   /** Days before a superseded / finished build's preview is deleted; null = keep until an owner deletes it (0041). */
   preview_retention_days: number | null;
@@ -250,7 +250,7 @@ export async function buildBrief(db: Db, projectId: string): Promise<BuildBrief>
   const pkg = f.order?.product_id && f.order.product_id in PACKAGES ? PACKAGES[f.order.product_id as PackageId] : null;
   const quote = f.order?.quote_version_id ? await db.prepare(`SELECT scope_text, line_items_json FROM quote_versions WHERE id = ?`).bind(f.order.quote_version_id).first<{ scope_text: string | null; line_items_json: string | null }>().catch(() => null) : null;
   const scopeRow = await db.prepare(`SELECT scope_text FROM project_scopes WHERE project_id = ? ORDER BY version DESC LIMIT 1`).bind(projectId).first<{ scope_text: string }>();
-  const files = (await db.prepare(`SELECT id, filename, content_type, size_bytes, folder FROM files WHERE project_id = ? AND deleted_at IS NULL AND replaced_by IS NULL AND scan_status <> 'infected' ORDER BY created_at`).bind(projectId)
+  const files = (await db.prepare(`SELECT id, filename, content_type, size_bytes, folder FROM files WHERE project_id = ? AND deleted_at IS NULL AND replaced_by IS NULL AND scan_status NOT IN ('infected','failed') ORDER BY created_at`).bind(projectId)
     .all<{ id: string; filename: string; content_type: string; size_bytes: number; folder: string | null }>().catch(() => ({ results: [] as never[] }))).results;
   const requested = lines(a.pages);
   const limit = pkg?.pageLimit ?? 999;
@@ -576,7 +576,9 @@ export async function runnerFile(db: Db, storage: StorageAdapter | null, b: Reco
   const f = await db.prepare(`SELECT id, r2_key, filename, content_type, size_bytes, scan_status FROM files WHERE id = ? AND organization_id = ? AND (project_id = ? OR project_id IS NULL) AND deleted_at IS NULL`)
     .bind(String(b.fileId ?? ""), job.organization_id, job.project_id).first<{ id: string; r2_key: string; filename: string; content_type: string; size_bytes: number; scan_status: string }>();
   if (!f) throw new HttpError(404, "File not found for this build");
-  if (f.scan_status === "infected") throw new HttpError(409, "File failed malware scanning");
+  // Quarantined files (infected, or the scan itself failed) never reach the build sandbox. Unscanned files are passed
+  // with scanStatus "pending" so the runner never treats them as clean.
+  if (f.scan_status === "infected" || f.scan_status === "failed") throw new HttpError(409, f.scan_status === "infected" ? "File failed malware scanning" : "File is quarantined: its malware scan failed");
   if (f.size_bytes > 15_000_000) throw new HttpError(413, "File larger than 15 MB");
   const obj = await storage.get(f.r2_key);
   if (!obj) throw new HttpError(404, "File content missing");

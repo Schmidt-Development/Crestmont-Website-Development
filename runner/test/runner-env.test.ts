@@ -19,7 +19,7 @@ const read = (f: string) => readFileSync(path.join(WIN, f), "utf8");
 
 function managed(over: Record<string, string> = {}): EnvLine[] {
   const v: Record<string, string> = {
-    CONTROL_PLANE_URL: "https://staging.crestmont.example", BUILD_RUNNER_SECRET_FILE: "/run/secrets/build_runner_secret", RUNNER_ID: "win-build1",
+    CONTROL_PLANE_URL: "https://staging.crestmont.example", BUILD_RUNNER_SECRET_FILE: "/run/secrets/build_runner_secret", RUNNER_ID: "win-build1", RUNNER_HOST_LABEL: "NODE1",
     RUNNER_AGENT_PROVIDER: "local", RUNNER_ALLOW_PAID_PROVIDER: "false", LOCAL_MODEL: "qwen3-coder:30b", LOCAL_MODEL_BASE_URL: "http://host.docker.internal:11434/v1",
     LOCAL_MODEL_CONTEXT_TOKENS: "32768", RUNNER_SANDBOX_IMAGE: "crestmont-build-sandbox:1", RUNNER_JOB_CPUS: "4", RUNNER_JOB_MEMORY: "6g",
     RUNNER_JOB_DISK_MB: "4096", RUNNER_SERVE_AI_DRAFTS: "true", LOG_LEVEL: "info",
@@ -167,7 +167,7 @@ test("[AIB-RUNNER] installer: configuration preserved across re-runs, inputs val
   assert.match(install, /CrestmontRunner-GpuTelemetry/);
   const autoStart = install.slice(install.indexOf('if (-not $NoAutoStart) {'));
   assert.doesNotMatch(autoStart.slice(0, autoStart.indexOf("Register-ScheduledTask")), /Collect-Evidence\.ps1/, "tools are not copied only with auto-start");
-  assert.match(install, /foreach \(\$tool in @\("Start-CrestmontRunner\.ps1", "Get-RunnerHealth\.ps1", "Collect-Evidence\.ps1", "Discover-Hardware\.ps1", "Write-GpuTelemetry\.ps1"\)\)/);
+  assert.match(install, /foreach \(\$tool in @\("Start-CrestmontRunner\.ps1", "Get-RunnerHealth\.ps1", "Collect-Evidence\.ps1", "Discover-Hardware\.ps1", "Write-GpuTelemetry\.ps1", "Test-Node1Dispatch\.ps1", "Uninstall-CrestmontRunner\.ps1"\)\)/);
   assert.match(install, /\$healthExit = \$LASTEXITCODE[\s\S]{0,200}if \(\$healthExit -ne 0\) \{[\s\S]{0,300}exit 1/, "no 'Done' when health fails");
   assert.match(install, /KernelVersion[\s\S]{0,200}WSL2/, "WSL 2 backend detected from Docker Desktop's kernel");
   assert.match(install, /docker\.exe compose version --short/, "Compose >= 2.24 for the optional env file");

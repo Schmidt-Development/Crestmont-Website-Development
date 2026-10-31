@@ -1,0 +1,206 @@
+name: Production backup
+
+# CREST-GAP-016 / INFRA-006 (docs/BACKUP-RECOVERY.md §3.2). Daily, off-Cloudflare copy of the production database:
+#   1. backup:  `wrangler d1 export` of crestmont-production (READ-ONLY: export plus SELECT row counts, nothing else),
+#               sealed with scripts/seal.ts (AES-256-GCM, BACKUP_SEAL_PASSPHRASE), uploaded with a manifest (sha256 of the
+#               export and of the sealed object, per-table row counts) to an S3-compatible store outside Cloudflare.
+#   2. restore-verify: downloads that object back from the store, checks both sha256 values, opens it, restores it into a
+#               throw-away D1 database, compares every table's row count with the manifest, then deletes the scratch
+#               database (modelled on staging-restore-drill.yml). Production itself is never written.
+# The repository is public: the export is NEVER a workflow artifact and never printed; plaintext exists only on the
+# runner, briefly, and is removed in every outcome.
+#
+# Skips with a notice (nothing exported) until the destination is configured on the GitHub environment:
+#   secrets BACKUP_S3_ENDPOINT, BACKUP_S3_BUCKET, BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY,
+#   BACKUP_SEAL_PASSPHRASE (32+ characters, kept in the Founder's password manager); optional BACKUP_S3_REGION.
+# Environment: `production` (where CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID live). If that environment has required
+# reviewers, every scheduled run waits for approval; to run unattended, create an environment without reviewers holding
+# the same secrets and set the repository variable BACKUP_ENVIRONMENT to its name. Targets (pending Founder approval):
+# RPO 24 h, RTO 4 h.
+
+on:
+  schedule:
+    - cron: "37 6 * * *"   # daily 06:37 UTC (off-peak for US customers)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    if: github.ref == 'refs/heads/main'   # main only: a run from another branch would execute that branch's copy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ vars.BACKUP_ENVIRONMENT || 'production' }}
+    outputs:
+      object: ${{ steps.upload.outputs.object }}
+      manifest: ${{ steps.upload.outputs.manifest }}
+    env:
+      WRANGLER: npx --yes wrangler@4.149.0
+    steps:
+      - name: Check configuration (skip with a notice when the destination is not set)
+        id: pre
+        env:
+          HAS_CF: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+          HAS_S3: ${{ secrets.BACKUP_S3_ENDPOINT != '' && secrets.BACKUP_S3_BUCKET != '' && secrets.BACKUP_S3_ACCESS_KEY_ID != '' && secrets.BACKUP_S3_SECRET_ACCESS_KEY != '' }}
+          HAS_SEAL: ${{ secrets.BACKUP_SEAL_PASSPHRASE != '' }}
+        run: |
+          if [ "$HAS_CF" != "true" ]; then
+            echo "::notice title=Production backup skipped::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID are not available to this environment. Nothing was exported."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          elif [ "$HAS_S3" != "true" ] || [ "$HAS_SEAL" != "true" ]; then
+            echo "::notice title=Production backup skipped::Off-Cloudflare destination not configured. Set BACKUP_S3_ENDPOINT, BACKUP_S3_BUCKET, BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY and BACKUP_SEAL_PASSPHRASE on this environment (docs/BACKUP-RECOVERY.md §3.2). Nothing was exported."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: steps.pre.outputs.ok == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: steps.pre.outputs.ok == 'true'
+        with:
+          node-version: "22.x"
+
+      - name: Export production (read-only) and count rows
+        id: export
+        if: steps.pre.outputs.ok == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "STARTED=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$GITHUB_ENV"
+          name="crestmont-production-$(date -u +%Y%m%dT%H%MZ)-${{ github.run_id }}"
+          echo "NAME=$name" >> "$GITHUB_ENV"
+          mkdir -p backup && chmod 700 backup
+          # Read-only against production: one export and SELECT counts. No --file, no migrations, no restore.
+          $WRANGLER d1 export crestmont-production --remote --env production --output backup/export.sql > /dev/null
+          $WRANGLER d1 execute crestmont-production --remote --env production --json --command "SELECT name FROM sqlite_master WHERE type='table'" > backup/tables.json
+          node --no-warnings scripts/restore-drill.ts sql backup/tables.json > backup/count.sql
+          i=0; files=""
+          while IFS= read -r q; do [ -n "$q" ] || continue
+            $WRANGLER d1 execute crestmont-production --remote --env production --json --command "$q" > "backup/source-$i.json"
+            files="$files${files:+,}backup/source-$i.json"; i=$((i+1))
+          done < backup/count.sql
+          node --no-warnings scripts/offsite-backup.ts counts "$files" backup/counts.json
+          echo "Export: $(wc -c < backup/export.sql) bytes, $(node -e 'console.log(Object.keys(require("./backup/counts.json")).length)') tables."
+
+      - name: Seal the export (AES-256-GCM; plaintext removed)
+        id: seal
+        if: steps.pre.outputs.ok == 'true' && steps.export.outcome == 'success'
+        env:
+          ACCESS_ARTIFACT_PASSPHRASE: ${{ secrets.BACKUP_SEAL_PASSPHRASE }}
+        run: |
+          node --no-warnings scripts/seal.ts check > /dev/null || { echo "::error title=Seal passphrase unusable::BACKUP_SEAL_PASSPHRASE must be 32+ characters with some variety."; exit 1; }
+          plain=$(sha256sum backup/export.sql | cut -d' ' -f1)
+          node --no-warnings scripts/seal.ts seal backup/export.sql "backup/$NAME.sql.sealed"
+          rm -f backup/export.sql
+          sealed=$(sha256sum "backup/$NAME.sql.sealed" | cut -d' ' -f1)
+          node -e 'const fs=require("fs");const [n,p,s,c,r]=process.argv.slice(1);fs.writeFileSync(`backup/${n}.json`,JSON.stringify({object:`${n}.sql.sealed`,exportSha256:p,sealedSha256:s,commit:c,runId:r,createdAt:new Date().toISOString(),counts:JSON.parse(fs.readFileSync("backup/counts.json","utf8"))},null,1))' \
+            "$NAME" "$plain" "$sealed" "$GITHUB_SHA" "${{ github.run_id }}"
+          echo "plain=$plain" >> "$GITHUB_OUTPUT"; echo "sealed=$sealed" >> "$GITHUB_OUTPUT"
+
+      - name: Upload off-Cloudflare (S3-compatible)
+        id: upload
+        if: steps.pre.outputs.ok == 'true' && steps.seal.outcome == 'success'
+        env:
+          BACKUP_S3_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
+          BACKUP_S3_BUCKET: ${{ secrets.BACKUP_S3_BUCKET }}
+          BACKUP_S3_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
+          BACKUP_S3_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
+          BACKUP_S3_REGION: ${{ secrets.BACKUP_S3_REGION }}
+        run: |
+          prefix="crestmont-production/d1/$(date -u +%Y/%m)"
+          node --no-warnings scripts/offsite-backup.ts put "backup/$NAME.sql.sealed" "$prefix/$NAME.sql.sealed"
+          node --no-warnings scripts/offsite-backup.ts put "backup/$NAME.json" "$prefix/$NAME.json"
+          echo "object=$prefix/$NAME.sql.sealed" >> "$GITHUB_OUTPUT"; echo "manifest=$prefix/$NAME.json" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Production backup $(date -u +%Y-%m-%dT%H:%MZ)"
+            echo "- Object: \`$prefix/$NAME.sql.sealed\` ($(wc -c < "backup/$NAME.sql.sealed") bytes, sealed)"
+            echo "- sha256 (export): \`${{ steps.seal.outputs.plain }}\`"
+            echo "- sha256 (sealed object): \`${{ steps.seal.outputs.sealed }}\`"
+            echo "- Manifest: \`$prefix/$NAME.json\`. Record it at /staff/backups. Restore verification runs in the next job."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove the export from the runner
+        if: always()
+        run: rm -rf backup
+
+  restore-verify:
+    needs: backup
+    if: needs.backup.outputs.object != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ vars.BACKUP_ENVIRONMENT || 'production' }}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WRANGLER: npx --yes wrangler@4.149.0
+      SCRATCH: crestmont-backup-verify-${{ github.run_id }}
+      OBJECT: ${{ needs.backup.outputs.object }}
+      MANIFEST: ${{ needs.backup.outputs.manifest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Download the sealed export back from the store and verify sha256
+        env:
+          BACKUP_S3_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
+          BACKUP_S3_BUCKET: ${{ secrets.BACKUP_S3_BUCKET }}
+          BACKUP_S3_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
+          BACKUP_S3_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
+          BACKUP_S3_REGION: ${{ secrets.BACKUP_S3_REGION }}
+          ACCESS_ARTIFACT_PASSPHRASE: ${{ secrets.BACKUP_SEAL_PASSPHRASE }}
+        run: |
+          echo "STARTED=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$GITHUB_ENV"
+          mkdir -p verify evidence && chmod 700 verify
+          node --no-warnings scripts/offsite-backup.ts get "$MANIFEST" verify/manifest.json
+          node --no-warnings scripts/offsite-backup.ts get "$OBJECT" verify/export.sql.sealed
+          want=$(node -e 'console.log(require("./verify/manifest.json").sealedSha256)')
+          [ "$(sha256sum verify/export.sql.sealed | cut -d' ' -f1)" = "$want" ] || { echo "::error::sealed object sha256 does not match the manifest"; exit 1; }
+          node --no-warnings scripts/seal.ts open verify/export.sql.sealed verify/export.sql
+          want=$(node -e 'console.log(require("./verify/manifest.json").exportSha256)')
+          [ "$(sha256sum verify/export.sql | cut -d' ' -f1)" = "$want" ] || { echo "::error::export sha256 does not match the manifest"; exit 1; }
+          node -e 'const fs=require("fs");fs.writeFileSync("verify/source-counts.json",JSON.stringify(require("./verify/manifest.json").counts))'
+          echo "SEALED_SHA256=$(node -e 'console.log(require("./verify/manifest.json").sealedSha256)')" >> "$GITHUB_ENV"
+      - name: Restore into a scratch database and compare row counts
+        id: restore
+        run: |
+          $WRANGLER d1 create "$SCRATCH" > /dev/null
+          node --no-warnings scripts/restore-drill.ts sanitize verify/export.sql verify/import.sql
+          rm -f verify/export.sql
+          $WRANGLER d1 execute "$SCRATCH" --remote --file verify/import.sql --yes > /dev/null
+          rm -f verify/import.sql
+          $WRANGLER d1 execute "$SCRATCH" --remote --json --command "SELECT name FROM sqlite_master WHERE type='table'" > verify/tables.json
+          node --no-warnings scripts/restore-drill.ts sql verify/tables.json > verify/count.sql
+          i=0; files=""
+          while IFS= read -r q; do [ -n "$q" ] || continue
+            $WRANGLER d1 execute "$SCRATCH" --remote --json --command "$q" > "verify/restored-$i.json"
+            files="$files${files:+,}verify/restored-$i.json"; i=$((i+1))
+          done < verify/count.sql
+          node --no-warnings scripts/offsite-backup.ts compare verify/source-counts.json "$files" --commit "$GITHUB_SHA" \
+            --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-production-backup" --started "$STARTED" \
+            --object "$OBJECT" --sha256 "$SEALED_SHA256" --out evidence/production-backup.json | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Record backup evidence (when the readiness API is configured)
+        if: always() && hashFiles('evidence/production-backup.json') != ''
+        continue-on-error: true
+        env:
+          READINESS_URL: ${{ vars.READINESS_URL }}
+          EVIDENCE_INGEST_SECRET: ${{ secrets.EVIDENCE_INGEST_SECRET }}
+        run: |
+          if [ -z "$READINESS_URL" ] || [ -z "$EVIDENCE_INGEST_SECRET" ]; then echo "READINESS_URL / EVIDENCE_INGEST_SECRET not set; evidence kept in the run summary only."; exit 0; fi
+          node --no-warnings scripts/post-evidence.ts evidence/production-backup.json
+      - name: Delete the scratch database
+        if: always()
+        run: $WRANGLER d1 delete "$SCRATCH" --skip-confirmation > /dev/null 2>&1 || $WRANGLER d1 delete "$SCRATCH" -y > /dev/null 2>&1 || echo "::warning::Scratch database $SCRATCH could not be deleted automatically (or was never created); check the Cloudflare dashboard."
+      - name: Remove the export from the runner
+        if: always()
+        run: rm -rf verify evidence

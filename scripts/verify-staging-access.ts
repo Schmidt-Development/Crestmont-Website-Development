@@ -1,6 +1,8 @@
-// Verifies the complete staging access sequence over real HTTP, exactly as the Founder will use it:
-//   preview gate (401) → preview password → Owner email + password → current 2FA code → Owner command
-//   center, with all 32 Owner modules present in the navigation and each one loading (200).
+// Verifies the complete staging access sequence over real HTTP, exactly as the Founder will use it, on the PUBLIC
+// staging site (no preview password since 2026-10-28):
+//   public homepage loads with no cookies → staff and portal areas refuse anonymous visitors → Owner email + password
+//   → the staff area is still refused before 2FA → current 2FA code → Owner command center, with all 32 Owner modules
+//   present in the navigation and each one loading (200).
 // Signs out at the end. Never prints a credential; failures name the step only.
 //
 // CLI: node --no-warnings scripts/verify-staging-access.ts --access access/access.json --url <url> --readme access/README.md
@@ -11,8 +13,15 @@ import { totpCode } from "../src/lib/auth-crypto.ts";
 import { OWNER_MODULE_LABELS } from "../src/routes/nav.ts";
 import { accessReadme, type AccessResult } from "./staging-access.ts";
 
-export interface VerifyInput { base: string; previewPassword: string; owner: { email: string; password: string; totp: string } }
+export interface VerifyInput { base: string; owner: { email: string; password: string; totp: string } }
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
+
+/** A request with no cookies at all (a fresh visitor). */
+async function fetchAnonymous(f: Fetch, base: string, path: string): Promise<Response> {
+  const r = await f(base + path, { method: "GET", headers: { "user-agent": "crestmont-staging-verifier" }, redirect: "manual" });
+  await r.arrayBuffer();
+  return r;
+}
 
 const decode = (s: string) => s.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&#39;|&#x27;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, " ").trim();
 
@@ -36,33 +45,41 @@ export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log:
   const fail = (step: string, detail: string) => { throw new Error(`${step}: ${detail}`); };
   const loc = (r: Response) => new URL(r.headers.get("location") ?? "/", base).pathname;
 
-  // 1. The gate is in front of the site.
+  // 1. The public site loads directly: no preview gate, no cookie needed.
   let r = await send("GET", "/");
-  if (r.status !== 401) fail("preview gate", `expected 401 before the password, got ${r.status}`);
-  log("1/5 preview gate is locked");
+  const home = await r.text();
+  if (r.status !== 200) fail("public homepage", `expected 200 with no cookies, got ${r.status}`);
+  if (home.includes('action="/__preview-access"')) fail("public homepage", "the preview password page is still shown");
+  log("1/6 public homepage loads with no cookies or credentials");
 
-  // 2. Preview password (a propagating secret can take a few seconds to reach every edge location).
-  for (let attempt = 1; ; attempt++) {
-    r = await send("POST", "/__preview-access", { password: v.previewPassword, next: "/login" });
-    if (r.status === 303 && jar.has("cm_preview")) break;
-    if (r.status === 429) fail("preview password", "rate limited");
-    if (attempt >= 6) fail("preview password", `not accepted (HTTP ${r.status})`);
-    await new Promise((res) => setTimeout(res, 10_000));
+  // 2. Protected areas refuse anonymous visitors (redirect to sign-in or refuse; never 200).
+  for (const path of ["/staff", "/portal", "/account"]) {
+    const a = await fetchAnonymous(f, base, path);
+    if (a.status === 200) fail("anonymous access", `${path} returned 200 without a session`);
+    const toLogin = a.status === 303 && new URL(a.headers.get("location") ?? "/", base).pathname === "/login";
+    if (!toLogin && a.status !== 401 && a.status !== 403) fail("anonymous access", `${path} should redirect to sign-in, got HTTP ${a.status}`);
   }
-  log("2/5 preview password accepted");
+  log("2/6 staff, portal and account areas refuse anonymous visitors");
 
   // 3. Owner email and password.
   r = await send("GET", "/login");
-  if (r.status !== 200 || !jar.has("cm_csrf")) fail("sign-in page", `HTTP ${r.status}`);
-  r = await send("POST", "/login", { _csrf: jar.get("cm_csrf")!, email: v.owner.email, password: v.owner.password });
+  // Over HTTPS the CSRF cookie is __Host-cm_csrf (CREST-GAP-086); plain HTTP keeps cm_csrf.
+  const csrfToken = () => jar.get("__Host-cm_csrf") ?? jar.get("cm_csrf");
+  if (r.status !== 200 || !csrfToken()) fail("sign-in page", `HTTP ${r.status}`);
+  await r.arrayBuffer();
+  r = await send("POST", "/login", { _csrf: csrfToken()!, email: v.owner.email, password: v.owner.password });
   if (r.status !== 303 || !loc(r).startsWith("/mfa")) fail("Owner password", `expected the 2FA step, got HTTP ${r.status} → ${r.status === 303 ? loc(r) : "page"}`);
-  log("3/5 Owner email and password accepted; 2FA requested");
+  log("3/6 Owner email and password accepted; 2FA requested");
+
+  // 3b. Mandatory MFA: a password-only session must not reach the staff area.
+  { const pre = await send("GET", "/staff"); await pre.arrayBuffer(); if (pre.status === 200) fail("Owner MFA", "the staff area opened before the 2FA code"); }
+  log("4/6 staff area still refused before 2FA");
 
   // 4. Current 2FA code. Wait for a fresh 30-second step if the current one is nearly over.
   if (30 - (Math.floor(Date.now() / 1000) % 30) < 5) await new Promise((res) => setTimeout(res, 6_000));
-  r = await send("POST", "/mfa", { _csrf: jar.get("cm_csrf")!, code: await totpCode(v.owner.totp) });
+  r = await send("POST", "/mfa", { _csrf: csrfToken()!, code: await totpCode(v.owner.totp) });
   if (r.status !== 303 || !loc(r).startsWith("/staff")) fail("2FA code", `not accepted (HTTP ${r.status})`);
-  log("4/5 2FA code accepted");
+  log("5/6 2FA code accepted");
 
   // 5. Owner command center: all 32 modules in the navigation, each loads.
   r = await send("GET", "/staff");
@@ -79,9 +96,9 @@ export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log:
     await p.arrayBuffer();
   }
   if (broken.length) fail("Owner modules", broken.join(", "));
-  log(`5/5 all ${pages} Owner modules load`);
+  log(`6/6 all ${pages} Owner modules load`);
 
-  await send("POST", "/logout", { _csrf: jar.get("cm_csrf")! });
+  await send("POST", "/logout", { _csrf: csrfToken()! });
   return { modules: OWNER_MODULE_LABELS.length, pages };
 }
 
@@ -91,10 +108,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const url = arg("--url")!;
   const owner = access.accounts.find((a) => a.role === "owner")!;
   try {
-    const res = await verifyStagingAccess({ base: url, previewPassword: access.previewPassword, owner: { email: owner.email, password: owner.password, totp: owner.totp! } }, fetch, console.log);
+    const res = await verifyStagingAccess({ base: url, owner: { email: owner.email, password: owner.password, totp: owner.totp! } }, fetch, console.log);
     const readme = arg("--readme");
     if (readme) writeFileSync(readme, accessReadme(url, access, new Date().toISOString()), { mode: 0o600 });
-    console.log(`Verified: ${res.pages}/${res.modules} Owner modules reachable through the full access sequence.`);
+    console.log(`Verified: ${res.pages}/${res.modules} Owner modules reachable through the full access sequence (public site, MFA enforced).`);
   } catch (e) {
     console.error(`::error::Staging access verification failed at ${String((e as Error).message).slice(0, 300)}`);
     process.exit(1);

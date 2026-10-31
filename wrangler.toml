@@ -39,12 +39,20 @@ bucket_name = "crestmont-files-dev"
 name = "crestmont-platform-staging"
 workers_dev = true            # staging is served at crestmont-platform-staging.<account>.workers.dev until a custom domain exists
 # routes = [{ pattern = "staging.crestmontwebsitedevelopment.com", custom_domain = true }]   # after DNS control (BLK-011)
-# Turnstile: Cloudflare's documented always-pass TEST keys (public values, not secrets) so preview forms work.
-# Replace with real keys before any public exposure. STAGING_ACCESS_PASSWORD (secret) gates the whole preview.
-vars = { ENVIRONMENT = "staging", AI_PROVIDER = "local-runner", PREVIEW_GATE = "required", TURNSTILE_SITE_KEY = "1x00000000000000000000AA", TURNSTILE_SECRET = "1x0000000000000000000000000000000AA" }
+# PUBLIC (Founder decision 2026-10-28): no preview password. Accounts keep their own authentication and staff MFA;
+# every response carries X-Robots-Tag noindex and robots.txt disallows all; email goes only to EMAIL_RECIPIENT_ALLOWLIST.
+# Emergency re-lock: add PREVIEW_GATE = "required" to vars and set the STAGING_ACCESS_PASSWORD secret (src/app/preview-gate.ts).
+# Turnstile: Cloudflare's documented always-pass TEST keys (public values, not secrets). Now that staging is public,
+# replace them with real staging keys (TURNSTILE_SITE_KEY var + TURNSTILE_SECRET secret) so forms get a bot challenge.
+# PORTFOLIO_DEMO_ORIGINS: the ONLY origins staging may frame (isolated portfolio demo Workers; docs/frontend/PORTFOLIO.md).
+# Consolidated from the crestmont-platform-frontend-preview Worker (being retired; see docs/CONSOLIDATION.md). Production deliberately has none (posters only).
+vars = { ENVIRONMENT = "staging", AI_PROVIDER = "local-runner", TURNSTILE_SITE_KEY = "1x00000000000000000000AA", TURNSTILE_SECRET = "1x0000000000000000000000000000000AA", PORTFOLIO_DEMO_ORIGINS = "https://lansing-car-rentals-portfolio-demo.partners-df4.workers.dev https://glassly-portfolio-demo.partners-df4.workers.dev https://lcr-mentorship-portfolio-demo.partners-df4.workers.dev https://better-lansing-mechanics-portfolio-demo.partners-df4.workers.dev" }
 d1_databases = [{ binding = "DB", database_name = "crestmont-staging", database_id = "", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-staging" }]
 triggers = { crons = ["*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts
+# Workers Logs (CREST-GAP-015): console output and invocation logs kept by Cloudflare (Workers → crestmont-platform-staging → Logs).
+# Same as an [env.staging.observability] table with enabled = true; written inline so the env block stays one block.
+observability = { enabled = true }
 
 # ───────────── Production ─────────────
 # UNPROVISIONED (BLK-003). Deployed ONLY by .github/workflows/deploy-production.yml, which requires
@@ -59,14 +67,23 @@ preview_urls = false          # no per-version preview URLs for production (expl
 # www is NOT a second Worker hostname: it is a proxied placeholder record plus a Cloudflare Redirect Rule
 # (301 → https://crestmontwebsitedevelopment.com, path and query kept). See docs/DEPLOYMENT.md §7.
 routes = [{ pattern = "crestmontwebsitedevelopment.com", custom_domain = true }]
-vars = { ENVIRONMENT = "production", APP_URL = "https://crestmontwebsitedevelopment.com" }
+# HSTS_MAX_AGE (CREST-GAP-029): the first production release sends a 5-minute HSTS without includeSubDomains, so a
+# certificate or subdomain mistake cannot pin browsers for two years. Raise it in steps (86400, then 31536000) once the
+# apex and www have served HTTPS cleanly; add HSTS_INCLUDE_SUBDOMAINS = "on" only when every subdomain serves HTTPS.
+vars = { ENVIRONMENT = "production", APP_URL = "https://crestmontwebsitedevelopment.com", HSTS_MAX_AGE = "300" }
 d1_databases = [{ binding = "DB", database_name = "crestmont-production", database_id = "c667f1a9-0802-4c52-a0e1-b512219a6eea", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-production" }]
 triggers = { crons = ["*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts
+# Workers Logs (CREST-GAP-015): Cloudflare keeps the Worker's console output and invocation logs (dashboard: Workers &
+# Pages → crestmont-platform-production → Logs). Same as an [env.production.observability] table with enabled = true.
+observability = { enabled = true }
 
 # Secrets — NEVER in this file. Set per environment with `wrangler secret put <NAME> --env <env>`
 # (full list and who owns each in docs/DEPLOYMENT.md §4):
 #   EVIDENCE_INGEST_SECRET, STRIPE_WEBHOOK_SECRET, STRIPE_SECRET_KEY, TURNSTILE_SECRET, TURNSTILE_SITE_KEY,
 #   RESEND_API_KEY, ANTHROPIC_API_KEY, GITHUB_TOKEN, GITHUB_REPO, VOICE_WEBHOOK_SECRET,
 #   RESEND_WEBHOOK_SECRET (Svix whsec_…), RETELL_API_KEY (Crestmont Retell workspace key with webhook badge),
+#   RETELL_OUTBOUND ("on" only after Founder approval; outbound calling stays off without it — docs/voice/RETELL-INTEGRATION.md §7),
 #   MFA_ENCRYPTION_KEY (base64 of 32 random bytes; required on staging/production for two-factor enrolment)
+#   FOUNDER_EMAIL (production: the Founder's sign-in address; only that account's launch approval authorizes a release,
+#   CREST-GAP-020. Not secret, but a personal address, so it is set with `wrangler secret put` instead of committed here)

@@ -45,6 +45,8 @@ export const ACCEPTANCE_SETS = {
   registration: ["terms_of_service", "privacy_policy"],
   quote_acceptance: ["custom_development_agreement", "terms_of_service", "data_processing_addendum"],
   package_checkout: ["development_agreement", "terms_of_service", "refund_policy", "data_processing_addendum"],
+  /** CREST-GAP-033: a quoted standard package is governed by the package documents, not the custom development agreement. */
+  package_quote_acceptance: ["development_agreement", "terms_of_service", "refund_policy", "data_processing_addendum"],
   maintenance_checkout: ["maintenance_agreement", "terms_of_service", "support_policy", "cancellation_policy", "data_processing_addendum"],
 } as const satisfies Record<string, readonly AgreementKind[]>;
 export type AcceptanceContext = keyof typeof ACCEPTANCE_SETS;
@@ -136,17 +138,31 @@ export async function currentVersion(db: Db, r: RenderedAgreement, now: Date, ac
  * Callers must only call this after the person ticked the explicit acceptance checkbox.
  */
 export async function recordAcceptance(ctx: AppContext, a: { userId: string; organizationId: string; context: AcceptanceContext; contextId?: string | null }) {
+  const p = await prepareAcceptance(ctx, a);
+  await ctx.db.batch(p.statements);
+  await auditAcceptance(ctx, a, p.versions);
+  return p.versions;
+}
+
+/**
+ * The exact versions shown for `context` and the acceptance INSERTs, for a caller that must commit them in the same
+ * batch as the business change they belong to (CREST-GAP-032). `guard` (SQL) limits each insert to a committed change.
+ */
+export async function prepareAcceptance(ctx: AppContext, a: { userId: string; organizationId: string; context: AcceptanceContext; contextId?: string | null }, guard?: { sql: string; binds: unknown[] }) {
   const now = ctx.now();
   const rendered = await renderAll(factsFromSettings(ctx.settings));
   const kinds = ACCEPTANCE_SETS[a.context] as readonly string[];
   const versions: AgreementRow[] = [];
   for (const r of rendered.filter((x) => kinds.includes(x.kind))) versions.push(await currentVersion(ctx.db, r, now, a.userId));
   const at = nowIso(() => now);
-  await ctx.db.batch(versions.map((v) => ctx.db.prepare(`INSERT INTO agreement_acceptances (id, agreement_id, user_id, organization_id, ip, accepted_at, context_type, context_id, user_agent) VALUES (?,?,?,?,?,?,?,?,?)`)
-    .bind(newId("acc"), v.id, a.userId, a.organizationId, ctx.ip, at, a.context, a.contextId ?? null, ctx.req.headers.get("user-agent")?.slice(0, 300) ?? null)));
+  const statements = versions.map((v) => ctx.db.prepare(`INSERT INTO agreement_acceptances (id, agreement_id, user_id, organization_id, ip, accepted_at, context_type, context_id, user_agent) SELECT ?,?,?,?,?,?,?,?,?${guard ? ` WHERE ${guard.sql}` : ""}`)
+    .bind(newId("acc"), v.id, a.userId, a.organizationId, ctx.ip, at, a.context, a.contextId ?? null, ctx.req.headers.get("user-agent")?.slice(0, 300) ?? null, ...(guard?.binds ?? [])));
+  return { versions, statements };
+}
+
+export async function auditAcceptance(ctx: AppContext, a: { userId: string; organizationId: string; context: AcceptanceContext; contextId?: string | null }, versions: AgreementRow[]) {
   await audit(ctx.db, { actorUserId: a.userId, action: "agreements.accepted", subjectType: "organization", subjectId: a.organizationId, organizationId: a.organizationId, ip: ctx.ip,
     details: { context: a.context, contextId: a.contextId ?? null, versions: versions.map((v) => ({ kind: v.kind, version: v.version, sha256: v.body_sha256 })) } });
-  return versions;
 }
 
 export interface AcceptanceRow { id: string; accepted_at: string; ip: string | null; context_type: string | null; context_id: string | null; kind: string; version: string; title: string | null; body_sha256: string; attorney_reviewed: number; user_name: string; user_email: string; organization_id: string; org_name: string }

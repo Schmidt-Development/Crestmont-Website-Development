@@ -12,6 +12,8 @@ export interface Env {
   EVIDENCE_INGEST_SECRET?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   STRIPE_SECRET_KEY?: string;
+  /** Founder flag (CREST-GAP-008, PAY-010): exactly "yes" allows live Stripe keys on production only. Unset = no live payments anywhere. */
+  PAYMENTS_LIVE_AUTHORIZED?: string;
   TURNSTILE_SECRET?: string;
   TURNSTILE_SITE_KEY?: string;
   RESEND_API_KEY?: string;
@@ -25,9 +27,15 @@ export interface Env {
   VOICE_WEBHOOK_SECRET?: string;
   /** Retell workspace API key that carries the webhook badge (verifies X-Retell-Signature). VOICE-003. */
   RETELL_API_KEY?: string;
-  /** Staging only: password for the outer preview gate (src/app/preview-gate.ts). Ignored in production. */
+  /** "on" enables outbound calling in this environment (default off). The Owner's receptionist setting must also be on. */
+  RETELL_OUTBOUND?: string;
+  /** "on" lets the Founder-activated sales optimizer write to the PRODUCTION Retell sales agent (SALESOPT-008). Default off. */
+  SALES_OPT_PRODUCTION?: string;
+  /** Emergency re-lock only: password for the preview gate (src/app/preview-gate.ts); ignored unless PREVIEW_GATE = "required". */
   STAGING_ACCESS_PASSWORD?: string;
-  /** "required" on the deployed staging Worker: the preview gate stays locked when no password is set. */
+  /** Approved isolated portfolio demo origins (https only, comma/space separated). Only these may be framed. */
+  PORTFOLIO_DEMO_ORIGINS?: string;
+  /** Emergency re-lock: "required" turns the staging preview gate on (fails closed without a password). Unset = public. */
   PREVIEW_GATE?: string;
   /** "local-runner": AI drafts are served by the self-hosted model through the build runner (no paid API). */
   AI_PROVIDER?: string;
@@ -46,8 +54,16 @@ export interface Env {
    * same value (≥32 random characters) as the runner's PREVIEW_GATE_SECRET. Unset = previews cannot be opened.
    */
   BUILD_PREVIEW_GATE_SECRET?: string;
+  /** "yes" refuses runner requests without a replay-protection nonce (CREST-GAP-087). */
+  RUNNER_REQUIRE_NONCE?: string;
   /** HMAC key for POST /api/scheduled/run (external scheduler when native Cron Triggers are unavailable). */
   SCHEDULER_TRIGGER_SECRET?: string;
+  /** HMAC secret for the research-agent / CRM import API (POST /api/crm/v1/imports). Unset = the endpoint answers 503. */
+  CRM_IMPORT_SECRET?: string;
+  /** HMAC key for CRM erasure tombstones (≥32 chars). Unset on staging/production = no re-import tombstones. */
+  CRM_ERASURE_HMAC_KEY?: string;
+  /** The previous tombstone key after a rotation, so earlier tombstones keep blocking re-import. */
+  CRM_ERASURE_HMAC_KEY_PREVIOUS?: string;
   /** "on" | "off": per-user limits on authenticated form submissions (default on outside development). ASVS F-15. */
   ACTION_RATE_LIMIT?: string;
   /** "on" | "off": breached-password check (default on outside development). ASVS F-06. */
@@ -58,6 +74,14 @@ export interface Env {
   MFA_ENCRYPTION_KEY?: string;
   /** "off" disables the per-request env_metrics UPSERT (READY-006). Default on. */
   ENV_METRICS?: string;
+  /** Fraction (0–1) of successful, non-bot requests written to env_metrics; errors are always written. Default 0.1. CREST-GAP-066. */
+  ENV_METRICS_SAMPLE?: string;
+  /** Strict-Transport-Security max-age in seconds. Unset = 63072000 with includeSubDomains (staging, development). CREST-GAP-029. */
+  HSTS_MAX_AGE?: string;
+  /** "on" adds includeSubDomains when HSTS_MAX_AGE is set. Only once every subdomain serves HTTPS. */
+  HSTS_INCLUDE_SUBDOMAINS?: string;
+  /** The Founder's sign-in email. When set, only that account can record or carry a production launch approval. CREST-GAP-020. */
+  FOUNDER_EMAIL?: string;
   FILES?: unknown;             // R2 bucket binding
   ASSETS?: { fetch(req: Request): Promise<Response> };
   /** Test/dev hook: overrides the computed adapters. */
@@ -96,6 +120,8 @@ export interface AppContext {
   csrfToken: string;
   flash: { kind: "success" | "error" | "info"; text: string } | null;
   setCookies: string[];
+  /** Extra frame-src origins for this response (already validated against PORTFOLIO_DEMO_ORIGINS). */
+  frameSrc?: string[];
   /** business_settings key/values (brand logo, contact details, staffed hours...). */
   settings: Record<string, string>;
   /** Parsed urlencoded or multipart body, cached. */

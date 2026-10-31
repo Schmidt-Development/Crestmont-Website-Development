@@ -1,10 +1,10 @@
-// Content, visual-consistency and accessibility checks against the DEPLOYED staging preview (WEB-009, TEST-003, BRAND-006).
-//   E2E_BASE_URL, E2E_PREVIEW_PASSWORD  the preview (required; otherwise the file is skipped)
+// Content, visual-consistency and accessibility checks against the DEPLOYED, public staging site (WEB-009, TEST-003, BRAND-006).
+//   E2E_BASE_URL                        the staging URL (required; otherwise the file is skipped)
 //   E2E_ACCOUNTS_FILE                   demo accounts (optional; adds the customer portal to the accessibility scan)
 //   AXE_PATH                            path to axe-core's axe.min.js (installed by the deploy workflow; the
 //                                       accessibility test is skipped, with that reason, when it is absent)
-// Read-only: GET requests and one customer sign-in. The preview password is submitted once (the gate allows
-// 10 submissions per IP per 15 minutes) and its pass cookie is reused by the crawler and the browser.
+// Read-only: GET requests and one customer sign-in. Staging is public (no preview password since 2026-10-28), so the
+// crawler and every browser context start with no cookies, like a first-time visitor.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
@@ -15,20 +15,11 @@ import { findProhibitedClaims } from "../../src/domain/catalog.ts";
 import { FABRICATION } from "../support/content-rules.ts";
 
 const BASE = process.env.E2E_BASE_URL?.replace(/\/$/, "");
-const PREVIEW_PW = process.env.E2E_PREVIEW_PASSWORD;
 const AXE = process.env.AXE_PATH;
-const skip = !BASE || !PREVIEW_PW ? "E2E_BASE_URL / E2E_PREVIEW_PASSWORD not set (runs only against a deployed preview)" : false;
+const skip = !BASE ? "E2E_BASE_URL not set (runs only against deployed staging)" : false;
 
-let pass = "";
-before(async () => {
-  if (skip) return;
-  const r = await fetch(BASE + "/__preview-access", { method: "POST", redirect: "manual", body: new URLSearchParams({ password: PREVIEW_PW!, next: "/" }), headers: { "content-type": "application/x-www-form-urlencoded" } });
-  const c = r.headers.getSetCookie().find((x) => x.startsWith("cm_preview="));
-  assert.ok(c, `preview password accepted (HTTP ${r.status})`);
-  pass = c.split(";")[0];
-});
 
-const get = (path: string) => fetch(BASE + path, { headers: { cookie: pass, "user-agent": "crestmont-staging-quality" }, redirect: "manual" });
+const get = (path: string) => fetch(BASE + path, { headers: { "user-agent": "crestmont-staging-quality" }, redirect: "manual" });
 const text = (h: string) => h.replace(/<script[\s\S]*?<\/script>/g, " ").replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, " ");
 const links = (h: string) => [...h.matchAll(/(?:href|src)="([^"]+)"/g)].map((m) => m[1].replace(/&amp;/g, "&"));
 
@@ -69,14 +60,36 @@ test("[TEST-003] staging: axe-core WCAG 2.1 A/AA scan of public pages, sign-in a
   const browser = await launchBrowser();
   try {
     // bypassCSP only lets the test inject axe itself; the site's CSP is unchanged for real visitors.
-    const ctx = await browser.newContext({ bypassCSP: true });
-    const [name, value] = pass.split("=");
-    await ctx.addCookies([{ name, value, url: BASE! }]);
+    // Contrast is measured on the text as it is READ. Headings reveal word by word (hero on load; sections as they scroll
+    // into view, and back out when they leave), so at an arbitrary instant many words sit at 10–12% opacity — deploy
+    // #64's axe failures on /, /services and /pricing were exactly those mid-animation words. With reduced motion the
+    // site renders every word in its settled state (same colours, full opacity), which is what axe must judge; a
+    // second, normal-motion pass below proves each animated heading really reaches that state when it is on screen.
+    const ctx = await browser.newContext({ bypassCSP: true, reducedMotion: "reduce" });
     const page = await ctx.newPage();
+    const motion = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const mp = await motion.newPage();
+    const readable = async (path: string) => {
+      await mp.goto(BASE + path);
+      const stuck = await mp.evaluate(async () => {
+        const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+        const heads = [...new Set([...document.querySelectorAll(".w")].map((w) => w.parentElement!).filter((h) => h.getClientRects().length))];
+        const out: string[] = [];
+        for (const h of heads) {
+          h.scrollIntoView({ block: "center", behavior: "instant" });
+          let faint: Element[] = [];
+          for (let t = 0; t < 30; t++) { await wait(100); faint = [...h.querySelectorAll(".w")].filter((w) => Number(getComputedStyle(w).opacity) < 0.99); if (!faint.length) break; }
+          if (faint.length) out.push(`"${(h.textContent || "").trim().slice(0, 40)}" (${faint.length} word(s) below full opacity while on screen)`);
+        }
+        return out;
+      });
+      for (const x of stuck) failures.push(`${path}: animated heading never becomes fully readable: ${x}`);
+    };
     const pages = ["/", "/services", "/pricing", "/portfolio", "/about", "/contact", "/quote", "/legal", "/legal/privacy", "/login", "/register"];
     const failures: string[] = [];
     const scan = async (path: string) => {
       await page.goto(BASE + path);
+      await page.waitForTimeout(300); // reduced motion: reveals complete immediately; let the first frame settle
       await page.addScriptTag({ content: axeSource });
       const res = await page.evaluate(async () => {
         const r = await (window as unknown as { axe: { run: (ctx: Document, o: unknown) => Promise<{ violations: { id: string; impact: string; nodes: { target: string[] }[] }[] }> } }).axe.run(document, { runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"] } });
@@ -84,7 +97,8 @@ test("[TEST-003] staging: axe-core WCAG 2.1 A/AA scan of public pages, sign-in a
       });
       for (const v of res) if (v.impact === "serious" || v.impact === "critical") failures.push(`${path}: ${v.id} (${v.impact}) ${v.targets.join(", ")}`);
     };
-    for (const p of pages) await scan(p);
+    for (const p of pages) { await scan(p); await readable(p); }
+    await motion.close();
     const accounts = process.env.E2E_ACCOUNTS_FILE && existsSync(process.env.E2E_ACCOUNTS_FILE) ? readFileSync(process.env.E2E_ACCOUNTS_FILE, "utf8") : "";
     const cust = /^\| customer_admin \| (customer\.harbor@\S+) \| `([^`]+)` \|/m.exec(accounts);
     if (cust) {
@@ -115,12 +129,10 @@ test("[BRAND-006] [TEST-003] staging: shared design language holds on the deploy
   const problems: string[] = [];
   let pagesChecked = 0;
   try {
-    const [name, value] = pass.split("=");
     // Sign in once per role at desktop width, then reuse the session for every width.
     const states: { role: string; state: unknown; paths: string[] }[] = [];
     for (const a of want as Acct[]) {
       const ctx = await browser.newContext();
-      await ctx.addCookies([{ name, value, url: BASE! }]);
       const page = await ctx.newPage();
       await page.goto(BASE + "/login");
       await page.fill("#f-email", a.email);
@@ -146,7 +158,6 @@ test("[BRAND-006] [TEST-003] staging: shared design language holds on the deploy
       const groups = [{ role: "public", state: undefined as unknown, paths: publicPaths }, ...states];
       for (const g of groups) {
         const ctx = await browser.newContext({ viewport: { width, height: width < 800 ? 900 : 1000 }, deviceScaleFactor: width === 375 ? 2 : 1, isMobile: width === 375, hasTouch: width < 1000, ...(g.state ? { storageState: g.state } : {}) });
-        await ctx.addCookies([{ name, value, url: BASE! }]);
         const page = await ctx.newPage();
         page.on("pageerror", (e: Error) => problems.push(`JS error ${e.message} @ ${page.url()}`));
         for (const path of g.paths) {

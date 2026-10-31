@@ -553,6 +553,8 @@ export async function deleteTask(db: Db, actor: Actor, taskId: string): Promise<
   if (await db.prepare(`SELECT 1 FROM change_orders WHERE task_id = ?`).bind(taskId).first()) throw new HttpError(409, "This task belongs to a change order and cannot be deleted.");
   await db.batch([
     db.prepare(`UPDATE assignments SET ended_at = ? WHERE subject_type = 'task' AND subject_id = ? AND ended_at IS NULL`).bind(nowIso(), taskId),
+    // Keep the notification text (the assignment happened) but drop its link: it would point at a page that is gone (404).
+    db.prepare(`UPDATE notifications SET subject_type = NULL, subject_id = NULL WHERE subject_type = 'task' AND subject_id = ?`).bind(taskId),
     db.prepare(`DELETE FROM tasks WHERE id = ?`).bind(taskId),
   ]);
   await audit(db, { actorUserId: actor.userId, action: "task.deleted", subjectType: "task", subjectId: taskId, organizationId: t.organization_id, details: { projectId: t.project_id, title: t.title } });

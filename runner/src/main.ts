@@ -328,7 +328,7 @@ async function main(argv: string[]): Promise<number> {
   };
   await runSlots({
     cfg, client, queryFn, manifest, logger, shouldStop: () => stopping, once: argv.includes("--once"), health, jobDeps: { scheduler },
-    drafts: ds ? { serve: () => serveOneDraft({ client, model: ds.model, modelName: ds.modelName, log: logger, onError: onDraftError }) } : null,
+    drafts: ds ? { serve: () => serveOneDraft({ client, model: ds.model, modelName: ds.modelName, baseUrl: ds.baseUrl, log: logger, onError: onDraftError }) } : null,
     previews: cfg.previewDelete ? { sweep: () => sweepPreviews(cfg, client, logger) } : null,
     deployments: cfg.delivery && cfg.repo ? { serve: () => serveOneDeployment(cfg, client, capabilities(cfg), { logger }) } : null,
     // The local provider (and local drafts) need the model server; the paid adapter's model is not ours to probe.

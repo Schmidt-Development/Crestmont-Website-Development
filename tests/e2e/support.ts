@@ -48,3 +48,9 @@ export const linkIn = (text: string, base: string, path: string) => {
   if (!m) throw new Error(`no ${path} link in ${text}`);
   return base + m[1];
 };
+
+/** The readiness link to exactly this evidence run. Deploys post sibling runs whose ids EXTEND the CI run id
+ *  (gh-<run>-<attempt>-r2, -crons, -staging-check), so a link-text match (substring by default) can open the wrong
+ *  run — deploy #64 journey 29 showed a one-result sibling ("1 !== 727"). Matched by its exact href instead. */
+export const evidenceRunLink = (page: { locator(s: string): unknown }, runId: string) =>
+  page.locator(`a[href="/staff/readiness/runs/${encodeURIComponent(runId)}"]`);

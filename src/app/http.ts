@@ -25,15 +25,37 @@ export const PAGE_CSP = [
   "object-src 'none'",
 ].join("; ");
 
-export function securityHeaders(kind: "page" | "api" = "page"): Record<string, string> {
+/** PAGE_CSP with additional frame-src origins (portfolio demos). Only bare https origins are accepted. */
+export function pageCsp(extraFrameSrc: string[] = []): string {
+  const extra = extraFrameSrc.filter((o) => /^https:\/\/[a-z0-9.-]+(:\d{1,5})?$/.test(o) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d{1,5})?$/.test(o));
+  return extra.length ? PAGE_CSP.replace("frame-src https://challenges.cloudflare.com", `frame-src https://challenges.cloudflare.com ${[...new Set(extra)].join(" ")}`) : PAGE_CSP;
+}
+
+export function securityHeaders(kind: "page" | "api" = "page", frameSrc: string[] = []): Record<string, string> {
   return {
-    "content-security-policy": kind === "page" ? PAGE_CSP : "default-src 'none'; frame-ancestors 'none'",
+    "content-security-policy": kind === "page" ? pageCsp(frameSrc) : "default-src 'none'; frame-ancestors 'none'",
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY",
     "referrer-policy": "strict-origin-when-cross-origin",
     "permissions-policy": "camera=(), microphone=(), geolocation=()",
-    "strict-transport-security": "max-age=63072000; includeSubDomains",
+    // Replaced per environment by src/app/app.ts (hstsValue) on every Worker response.
+    "strict-transport-security": DEFAULT_HSTS,
   };
+}
+
+export const DEFAULT_HSTS = "max-age=63072000; includeSubDomains";
+
+/**
+ * Strict-Transport-Security for this environment (CREST-GAP-029). Without HSTS_MAX_AGE the long-standing default
+ * (2 years, includeSubDomains) is kept, which is what staging and development send. With HSTS_MAX_AGE (production's first
+ * release uses 300) the header is exactly that max-age, and includeSubDomains only when HSTS_INCLUDE_SUBDOMAINS = "on".
+ * An unusable value falls back to 300 rather than to the 2-year default, so a typo can never pin browsers for years.
+ */
+export function hstsValue(env: { HSTS_MAX_AGE?: string; HSTS_INCLUDE_SUBDOMAINS?: string }): string {
+  const raw = env.HSTS_MAX_AGE?.trim();
+  if (raw === undefined || raw === "") return DEFAULT_HSTS;
+  const n = /^\d{1,9}$/.test(raw) ? Number(raw) : 300;
+  return `max-age=${n}${env.HSTS_INCLUDE_SUBDOMAINS === "on" ? "; includeSubDomains" : ""}`;
 }
 
 export function parseCookies(header: string | null): Record<string, string> {
@@ -62,12 +84,22 @@ export function isSecure(ctx: AppContext): boolean {
   return ctx.url.protocol === "https:";
 }
 
+/**
+ * Cookie names (CREST-GAP-086): over HTTPS the session and CSRF cookies use the `__Host-` prefix, which browsers only
+ * accept with Secure, Path=/ and no Domain — so a sibling subdomain or another *.workers.dev site cannot plant or
+ * shadow them. Plain-HTTP development keeps the bare names. Reads accept both, so existing sessions keep working.
+ */
+export const hostCookieName = (base: "cm_session" | "cm_csrf", secure: boolean) => (secure ? `__Host-${base}` : base);
+export function readHostCookie(cookies: Record<string, string>, base: "cm_session" | "cm_csrf"): string | undefined {
+  return cookies[`__Host-${base}`] ?? cookies[base];
+}
+
 function withCookies(ctx: AppContext, headers: Headers): void {
   for (const c of ctx.setCookies) headers.append("set-cookie", c);
 }
 
 export function htmlResponse(ctx: AppContext, body: SafeHtml, status = 200): Response {
-  const headers = new Headers({ "content-type": "text/html; charset=utf-8", "cache-control": ctx.user ? "no-store" : "no-cache", ...securityHeaders("page") });
+  const headers = new Headers({ "content-type": "text/html; charset=utf-8", "cache-control": ctx.user ? "no-store" : "no-cache", ...securityHeaders("page", ctx.frameSrc) });
   withCookies(ctx, headers);
   return new Response("<!doctype html>" + body.value, { status, headers });
 }
@@ -103,11 +135,14 @@ export async function assertCsrf(ctx: AppContext): Promise<void> {
   if (origin && origin !== ctx.url.origin) throw new HttpError(403, "Cross-origin request blocked");
   if (!origin) {
     const ref = ctx.req.headers.get("referer");
-    if (ref && new URL(ref).origin !== ctx.url.origin) throw new HttpError(403, "Cross-origin request blocked");
+    // A malformed Referer is refused like a foreign one (403), never a 500 (CREST-GAP-101).
+    let refOrigin: string | null = null;
+    if (ref) { try { refOrigin = new URL(ref).origin; } catch { refOrigin = "invalid"; } }
+    if (ref && refOrigin !== ctx.url.origin) throw new HttpError(403, "Cross-origin request blocked");
   }
   const form = await ctx.form();
   const sent = String(form.get("_csrf") ?? "");
-  const cookieVal = parseCookies(ctx.req.headers.get("cookie")).cm_csrf ?? "";
+  const cookieVal = readHostCookie(parseCookies(ctx.req.headers.get("cookie")), "cm_csrf") ?? "";
   if (!sent || !cookieVal || sent.length !== cookieVal.length || !timingSafeEqualHex(sent, cookieVal)) {
     throw new HttpError(403, "Your form expired. Reload the page and try again.");
   }

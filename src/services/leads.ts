@@ -7,6 +7,9 @@ import { transitionLead, type LeadStage, isReopen } from "../domain/crm.ts";
 import { require as requirePerm, can, type Actor } from "../domain/authz.ts";
 import type { AppContext } from "../app/context.ts";
 import { cookie, isSecure, parseCookies } from "../app/http.ts";
+import { sendMail } from "./mailer.ts";
+import { intake } from "./contact-identity.ts";
+import { businessDate, endOfBusinessDay } from "../lib/business-time.ts";
 
 export const leadInput = v.object({
   name: v.string({ min: 2, max: 120 }),
@@ -114,26 +117,61 @@ export function submittedAttribution(ctx: AppContext, form: FormData): Attributi
   return merged;
 }
 
-export async function captureLead(db: Db, body: unknown, meta: { ip?: string; attribution?: Attribution } = {}) {
+/** CREST-GAP-093: lead emails are stored trimmed and lowercased, so they match accounts and duplicates reliably. */
+export const normalizeEmail = (e: string) => e.trim().toLowerCase();
+
+/** Business setting holding the default owner for new web leads (CREST-GAP-005). Ignored unless that user is active sales staff. */
+export const DEFAULT_LEAD_OWNER_KEY = "crm.default_lead_owner";
+const ACTIVE_SALES_USER = `SELECT m.user_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id IN ('owner','administrator','sales') AND u.disabled_at IS NULL`;
+
+export async function captureLead(db: Db, body: unknown, meta: { ip?: string; attribution?: Attribution; channel?: "web_form" | "quote_form" | "api_lead" } = {}) {
   const input = parse(leadInput, body);
+  input.email = normalizeEmail(input.email);
   const attr = sanitizeAttribution((meta.attribution ?? {}) as Record<string, string | undefined>);
+  const owner = await db.prepare(`SELECT value FROM business_settings WHERE key = '${DEFAULT_LEAD_OWNER_KEY}' AND value IN (${ACTIVE_SALES_USER})`).first<{ value: string }>();
+  // CRM duplicate protection: a person already in the CRM (same email or phone) continues their open lead; the new
+  // message is added to its history with a follow-up task, instead of a second lead being created.
+  const res = await intake(db, { contactName: input.name, businessName: input.company ?? null, website: input.website ?? null, emails: [{ value: input.email }], phones: input.phone ? [{ value: input.phone }] : [] }, {
+    channel: meta.channel ?? input.source, ip: meta.ip ?? null,
+    lead: { source: input.source, interest: input.interest, message: input.message, ownerUserId: owner?.value ?? null, utm: attr,
+      activityBody: `Lead captured via ${input.source}${attr.utm_source ? ` (campaign source: ${attr.utm_source}${attr.utm_medium ? ` / ${attr.utm_medium}` : ""})` : ""}` },
+    continuedStatements: (leadId) => [db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, due_at, created_at) VALUES (?,?,'task',?,?,?)`)
+      .bind(newId("act"), leadId, `Reply to the new ${input.source === "quote_form" ? "quote request" : "message"} from ${input.name}`, endOfBusinessDay(businessDate(new Date())), nowIso())],
+  });
+  if (!res.leadId) throw Object.assign(new Error("We could not save this request. Please check your email address and try again."), { status: 422 });
+  if (res.leadCreated) {
+    await db.prepare(`INSERT INTO audit_logs (actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES ('system','lead.created','lead',?,?,?,?)`)
+      .bind(res.leadId, JSON.stringify({ source: input.source, ...(Object.keys(attr).length ? { attribution: attr } : {}) }), meta.ip ?? null, nowIso()).run();
+  }
+  return { leadId: res.leadId, outcome: res.outcome, created: res.leadCreated };
+}
+
+/**
+ * CREST-GAP-005: a new web lead (/quote, /contact, /api/leads) notifies Crestmont. Every active Owner and sales user gets
+ * one in-app notification, and one staff email goes to the lead's default owner, else the public contact email
+ * (Business settings), else the first Owner. Both are idempotent per lead, so a retry never notifies twice.
+ */
+export async function notifyNewLead(ctx: Pick<AppContext, "db" | "email" | "baseUrl" | "settings">, leadId: string, kind: "quote" | "contact" | "api") {
+  const db = ctx.db;
+  const lead = await db.prepare(`SELECT l.id, l.interest, l.source, l.owner_user_id, c.name, co.name AS company FROM leads l JOIN contacts c ON c.id = l.contact_id LEFT JOIN companies co ON co.id = c.company_id WHERE l.id = ?`)
+    .bind(leadId).first<{ id: string; interest: string | null; source: string; owner_user_id: string | null; name: string; company: string | null }>();
+  if (!lead) return;
+  const what = kind === "quote" ? "quote request" : kind === "contact" ? "contact message" : "lead";
+  const body = `New ${what} from ${lead.name}${lead.company ? ` (${lead.company})` : ""}${lead.interest ? ` — interest: ${lead.interest}` : ""}.${lead.owner_user_id ? "" : " Unassigned."}`;
+  const staff = (await db.prepare(`SELECT DISTINCT m.user_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id IN ('owner','sales') AND u.disabled_at IS NULL`).all<{ user_id: string }>()).results;
   const at = nowIso();
-  const companyId = input.company ? newId("co") : null;
-  const contactId = newId("ct");
-  const leadId = newId("ld");
-  const stmts = [
-    ...(companyId ? [db.prepare(`INSERT INTO companies (id, name, website, created_at) VALUES (?,?,?,?)`).bind(companyId, input.company, input.website ?? null, at)] : []),
-    db.prepare(`INSERT INTO contacts (id, company_id, name, email, phone, created_at) VALUES (?,?,?,?,?,?)`)
-      .bind(contactId, companyId, input.name, input.email, input.phone ?? null, at),
-    db.prepare(`INSERT INTO leads (id, contact_id, source, stage, interest, message, utm_source, utm_medium, utm_campaign, utm_term, utm_content, referrer, landing_page, created_at, updated_at) VALUES (?,?,?,'new',?,?,?,?,?,?,?,?,?,?,?)`)
-      .bind(leadId, contactId, input.source, input.interest, input.message, attr.utm_source ?? null, attr.utm_medium ?? null, attr.utm_campaign ?? null, attr.utm_term ?? null, attr.utm_content ?? null, attr.referrer ?? null, attr.landing_page ?? null, at, at),
-    db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`)
-      .bind(newId("act"), leadId, `Lead captured via ${input.source}${attr.utm_source ? ` (campaign source: ${attr.utm_source}${attr.utm_medium ? ` / ${attr.utm_medium}` : ""})` : ""}`, at),
-    db.prepare(`INSERT INTO audit_logs (actor_kind, action, subject_type, subject_id, details_json, ip, created_at) VALUES ('system','lead.created','lead',?,?,?,?)`)
-      .bind(leadId, JSON.stringify({ source: input.source, ...(Object.keys(attr).length ? { attribution: attr } : {}) }), meta.ip ?? null, at),
-  ];
-  await db.batch(stmts);
-  return { leadId };
+  for (const s of staff) {
+    await db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) SELECT ?,?,'lead_new','lead',?,?,?
+        WHERE NOT EXISTS (SELECT 1 FROM notifications WHERE user_id = ? AND kind = 'lead_new' AND subject_id = ?)`)
+      .bind(newId("ntf"), s.user_id, leadId, body.slice(0, 500), at, s.user_id, leadId).run();
+  }
+  const ownerEmail = lead.owner_user_id ? (await db.prepare(`SELECT email FROM users WHERE id = ? AND disabled_at IS NULL`).bind(lead.owner_user_id).first<{ email: string }>())?.email : null;
+  const firstOwner = async () => (await db.prepare(`SELECT u.email FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id = 'owner' AND u.disabled_at IS NULL ORDER BY m.created_at LIMIT 1`).first<{ email: string }>())?.email ?? null;
+  const to = ownerEmail ?? (ctx.settings["contact.email"]?.trim() || null) ?? await firstOwner();
+  if (to) {
+    await sendMail(ctx, { template: "lead_alert", to, idempotencyKey: `lead-staff:${leadId}`,
+      data: { kind: kind === "api" ? "lead" : kind, name: lead.name, company: lead.company, interest: lead.interest, assigned: !!lead.owner_user_id, url: `${ctx.baseUrl}/staff/crm/leads/${leadId}` } });
+  }
 }
 
 export async function changeLeadStage(db: Db, actor: Actor, leadId: string, to: LeadStage, opts: { reason?: string } = {}) {

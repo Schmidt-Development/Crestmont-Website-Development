@@ -20,21 +20,44 @@ export function metricArea(pathname: string): MetricArea {
 
 export const hourBucket = (d: Date) => d.toISOString().slice(0, 13);
 
-export interface RequestMetric { environment: string; pathname: string; status: number; durationMs: number; unhandled: boolean; at: Date }
+/** `weight`: how many requests this row stands for (1/sample rate for a sampled request; 1 for errors). Default 1. */
+export interface RequestMetric { environment: string; pathname: string; status: number; durationMs: number; unhandled: boolean; at: Date; weight?: number }
+
+/** Crawlers, link previews, uptime probes and scripted clients (CREST-GAP-066). Not user traffic; never written. */
+export const BOT_UA = /bot[\/;-]|\bbot\b|crawl|spider|slurp|bingpreview|facebookexternalhit|embedly|preview|headless|lighthouse|pingdom|uptime|monitor|curl\/|wget\/|python-requests|python-urllib|go-http-client|okhttp|httpclient|axios\/|node-fetch|libwww|scrapy|ahrefs|semrush|mj12|dotbot|petalbot|yandex|baiduspider|duckduckgo|applebot|gptbot|claudebot|ccbot|bytespider/i;
+export const DEFAULT_METRICS_SAMPLE = 0.1;
+
+/**
+ * How many requests one env_metrics write should count for, or 0 for no write (CREST-GAP-066: on public staging every
+ * crawler hit used to cost a D1 write). Asset paths and known bot user agents are never written. Every 5xx / unhandled
+ * error is written with weight 1 (errors stay exact). Other requests are kept with probability ENV_METRICS_SAMPLE
+ * (default 0.1) and weight 1/sample, so request totals and the error rate remain unbiased estimates.
+ */
+export function metricWeight(r: { pathname: string; userAgent: string | null; status: number; unhandled: boolean; sample?: string; random?: () => number }): number {
+  if (r.pathname.startsWith("/assets/") || r.pathname === "/favicon.ico") return 0;
+  if (r.userAgent && BOT_UA.test(r.userAgent)) return 0;
+  if (r.status >= 500 || r.unhandled) return 1;
+  const parsed = r.sample === undefined || r.sample.trim() === "" ? DEFAULT_METRICS_SAMPLE : Number(r.sample);
+  const p = Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : DEFAULT_METRICS_SAMPLE;
+  if (p <= 0) return 0;
+  if (p >= 1) return 1;
+  return (r.random ?? Math.random)() < p ? Math.round(1 / p) : 0;
+}
 
 /** One UPSERT per request. Never throws: metrics must never turn a response into an error. */
 export async function recordRequestMetric(db: Db, m: RequestMetric): Promise<void> {
   if (m.environment !== "development" && m.environment !== "staging" && m.environment !== "production") return;
   const ms = Math.max(0, Math.round(Number.isFinite(m.durationMs) ? m.durationMs : 0));
-  const b = [ms <= 100, ms > 100 && ms <= 300, ms > 300 && ms <= 1000, ms > 1000 && ms <= 3000, ms > 3000].map((x) => (x ? 1 : 0));
-  const err = m.status >= 500 ? 1 : 0, unh = m.unhandled ? 1 : 0;
+  const w = Math.max(1, Math.round(m.weight ?? 1));
+  const b = [ms <= 100, ms > 100 && ms <= 300, ms > 300 && ms <= 1000, ms > 1000 && ms <= 3000, ms > 3000].map((x) => (x ? w : 0));
+  const err = m.status >= 500 ? w : 0, unh = m.unhandled ? w : 0;
   try {
     await db.prepare(`INSERT INTO env_metrics (environment, hour, area, requests, errors_5xx, unhandled, duration_ms_sum, duration_ms_max, le_100, le_300, le_1000, le_3000, gt_3000)
-      VALUES (?,?,?,1,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(environment, hour, area) DO UPDATE SET requests = requests + 1, errors_5xx = errors_5xx + excluded.errors_5xx, unhandled = unhandled + excluded.unhandled,
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(environment, hour, area) DO UPDATE SET requests = requests + excluded.requests, errors_5xx = errors_5xx + excluded.errors_5xx, unhandled = unhandled + excluded.unhandled,
         duration_ms_sum = duration_ms_sum + excluded.duration_ms_sum, duration_ms_max = MAX(duration_ms_max, excluded.duration_ms_max),
         le_100 = le_100 + excluded.le_100, le_300 = le_300 + excluded.le_300, le_1000 = le_1000 + excluded.le_1000, le_3000 = le_3000 + excluded.le_3000, gt_3000 = gt_3000 + excluded.gt_3000`)
-      .bind(m.environment, hourBucket(m.at), metricArea(m.pathname), err, unh, ms, ms, ...b).run();
+      .bind(m.environment, hourBucket(m.at), metricArea(m.pathname), w, err, unh, ms * w, ms, ...b).run();
   } catch { /* metrics table unavailable (legacy database); the request itself is unaffected */ }
 }
 

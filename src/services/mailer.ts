@@ -26,7 +26,7 @@ export const REQUIRED_WORKFLOWS = [
   "support_reply", "refund_request", "refund_decision", "project_completion", "handoff", "security_notification",
   "critical_incident",
 ] as const;
-export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received"] as const;
+export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "lead_alert", "proposal_accepted", "dispute_opened", "consultation", "voice_escalation", "email_change_confirm"] as const;
 export type EmailTemplate = (typeof EMAIL_TEMPLATES)[number];
 export type MailCategory = "transactional" | "marketing";
 export type Audience = "customer" | "staff" | "prospect" | "any";
@@ -71,8 +71,10 @@ export interface TemplateData {
   change_order:
     | ProjectBase & { event: "proposed" }
     | ProjectBase & { event: "decided"; decision: string; invoiceIssued: boolean };
-  invoice: ProjectBase & { milestone: string };
-  failed_payment: { url: string };
+  /** `hostedInvoiceUrl`: the Stripe-hosted page of a finalized Stripe invoice (CREST-GAP-039); the call to action pays there. */
+  invoice: ProjectBase & { milestone: string; hostedInvoiceUrl?: string | null };
+  /** `kind`: "plan" = maintenance renewal (invoice.payment_failed); "checkout" = a delayed checkout payment failed (CREST-GAP-083). */
+  failed_payment: { url: string; kind?: "plan" | "checkout" };
   subscription_update: { planName: string; status: string; url: string };
   support_ticket:
     | { event: "received"; name: string; subject: string; ticketRef: string; hoursNotice: string; url: string }
@@ -91,13 +93,25 @@ export interface TemplateData {
     | { event: "issued"; amountCents: number; reference: string; url: string };
   project_completion: ProjectBase;
   handoff: ProjectBase;
-  security_notification: { event: "mfa_enabled" | "password_changed" | "deletion_requested" | "mfa_recovery_code_used" | "mfa_recovery_codes_regenerated" | "mfa_reset" };
-  /** Staff alert for a critical production incident (no automated incident source exists yet). */
+  security_notification: { event: "mfa_enabled" | "password_changed" | "password_reset_completed" | "deletion_requested" | "mfa_recovery_code_used" | "mfa_recovery_codes_regenerated" | "mfa_reset" | "sign_in_attempts" | "email_change_requested" | "email_changed" };
+  /** Owner alert raised by the scheduled ops_alerts job (src/services/monitoring.ts#runOpsAlerts). */
   critical_incident: { summary: string; occurredAt: string; url: string };
   password_reset: { resetUrl: string };
   staff_invitation: { inviterName: string; roleLabel: string; acceptUrl: string };
   quote_sent: { contactName: string; totalCents: number; validUntil: string | null; proposalUrl: string };
   lead_received: { name: string; kind: "quote" | "contact" };
+  /** Staff alert for a new web lead (CREST-GAP-005). */
+  lead_alert: { kind: "quote" | "contact" | "lead"; name: string; company: string | null; interest: string | null; assigned: boolean; url: string };
+  /** Confirmation of an accepted proposal, listing the exact agreement versions accepted (CREST-GAP-039). */
+  proposal_accepted: { contactName: string; version: number; totalCents: number; firstInvoiceCents: number; agreements: string[]; url: string };
+  /** Owner alert: a payment dispute was opened (CREST-GAP-039). */
+  dispute_opened: { amountCents: number; evidenceDueBy: string | null; url: string };
+  /** Consultation booked by phone with the AI receptionist (VOICE-003). `when` is pre-formatted in the business time zone. */
+  consultation: { event: "requested" | "confirmed" | "rescheduled" | "cancelled"; name: string; when: string; code: string };
+  /** Staff alert: the AI receptionist escalated a call that could not be transferred live (CREST-GAP-053). */
+  voice_escalation: { reason: string; caller: string; why: "outside_hours" | "no_transfer" | "unavailable"; test: boolean; url: string };
+  /** Sent to the NEW address of a requested account email change (CREST-GAP-073); the change applies only after confirmation. */
+  email_change_confirm: { confirmUrl: string };
 }
 
 export interface MailContent { subject: string; heading: string; paragraphs: string[]; cta?: { label: string; url: string } }
@@ -250,20 +264,23 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
     description: "A new invoice is ready to pay.",
     render: (d) => ({
       subject: "A new invoice is ready", heading: "A new invoice is ready",
-      paragraphs: [P(d), d.milestone === "design_25" ? "Your 25% design milestone invoice is ready to pay." : d.milestone === "prelaunch_25" ? "Your 25% pre-launch invoice is ready to pay." : "Your invoice is ready to pay."],
-      cta: { label: "Open your portal", url: d.url },
+      paragraphs: [P(d), d.milestone === "design_25" ? "Your 25% design milestone invoice is ready to pay." : d.milestone === "prelaunch_25" ? "Your 25% pre-launch invoice is ready to pay." : d.milestone === "deposit_50" ? "Your 50% deposit invoice is ready to pay." : "Your invoice is ready to pay.",
+        ...(d.hostedInvoiceUrl ? ["Pay securely on Stripe's invoice page with the button below. The invoice is also listed under Billing in your portal."] : [])],
+      cta: d.hostedInvoiceUrl ? { label: "Pay invoice", url: d.hostedInvoiceUrl } : { label: "Open your portal", url: d.url },
     }),
-    samples: [{ ...sampleProject, milestone: "design_25" }],
+    samples: [{ ...sampleProject, milestone: "design_25" }, { ...sampleProject, milestone: "deposit_50", hostedInvoiceUrl: "https://invoice.stripe.com/i/preview" }],
   },
   failed_payment: {
     name: "failed_payment", category: "transactional", audience: "customer",
     description: "A maintenance plan payment failed (from the verified Stripe webhook).",
     render: (d) => ({
       subject: "Action needed: payment failed", heading: "Your payment did not go through",
-      paragraphs: ["Your most recent maintenance plan payment failed. Please update your payment method to keep your plan active.", "Stripe will retry the payment automatically."],
-      cta: { label: "Update payment method", url: d.url },
+      paragraphs: d.kind === "checkout"
+        ? ["Your recent payment could not be completed by your bank, so nothing was charged and your invoice is still open.", "You can pay again from Billing in your portal, using another payment method if needed."]
+        : ["Your most recent maintenance plan payment failed. Please update your payment method to keep your plan active.", "Stripe will retry the payment automatically."],
+      cta: { label: d.kind === "checkout" ? "Pay from your portal" : "Update payment method", url: d.url },
     }),
-    samples: [{ url: "https://example.com/portal/billing" }],
+    samples: [{ url: "https://example.com/portal/billing" }, { url: "https://example.com/portal/billing/invoices/inv_preview", kind: "checkout" }],
   },
   subscription_update: {
     name: "subscription_update", category: "transactional", audience: "customer",
@@ -372,27 +389,45 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
           paragraphs: ["Two-factor authentication was enabled on your Crestmont account. If this was not you, reset your password immediately and contact support."] };
         case "password_changed": return { subject: "Your password was changed", heading: "Password changed",
           paragraphs: ["The password for your Crestmont account was changed and other sessions were signed out. If this was not you, reset your password now."] };
+        case "password_reset_completed": return { subject: "Your password was reset", heading: "Password reset completed",
+          paragraphs: ["The password for your Crestmont account was just reset using an emailed reset link, and every signed-in session was signed out.", "If this was not you, reset your password again immediately and contact support."] };
         case "mfa_recovery_code_used": return { subject: "A recovery code was used on your account", heading: "Recovery code used",
           paragraphs: ["One of your two-factor recovery codes was just used to verify a sign-in on your Crestmont account. That code no longer works.", "If this was not you, reset your password immediately and contact support. Otherwise, generate a new set of recovery codes from your account page."] };
         case "mfa_recovery_codes_regenerated": return { subject: "New two-factor recovery codes", heading: "Recovery codes replaced",
           paragraphs: ["A new set of two-factor recovery codes was generated for your Crestmont account. Every earlier recovery code stopped working.", "If this was not you, reset your password immediately and contact support."] };
         case "mfa_reset": return { subject: "Two-factor authentication was reset", heading: "Two-factor authentication reset",
           paragraphs: ["An administrator reset two-factor authentication on your Crestmont account and signed you out everywhere. You will set up a new authenticator the next time you sign in.", "If you did not ask for this, contact the Crestmont Owner immediately."] };
+        case "sign_in_attempts": return { subject: "Repeated failed sign-ins on your account", heading: "Failed sign-in attempts",
+          paragraphs: ["Several sign-in attempts with a wrong password were made for your Crestmont account. Your account is not locked: browsers you have signed in with before keep working, and new browsers must now pass a security check.", "If these attempts were not you, no action is needed unless you think your password is known — then reset it from the sign-in page."] };
+        case "email_change_requested": return { subject: "Email address change requested", heading: "Email change requested",
+          paragraphs: ["Someone signed in to your Crestmont account asked to change its email address. Nothing changes until the new address is confirmed from the link we sent to it.", "If this was not you, change your password now and contact support. Your current address keeps working."] };
+        case "email_changed": return { subject: "Your account email address was changed", heading: "Email address changed",
+          paragraphs: ["The email address on your Crestmont account was changed after the new address was confirmed. Sign-in and notifications now use the new address.", "If you did not make this change, contact support immediately."] };
         case "deletion_requested": return { subject: "We received your deletion request", heading: "Deletion request received",
           paragraphs: ["We received a request to delete your Crestmont account. A staff member will review it and confirm when it is complete.", "If you did not make this request, sign in and change your password, then contact support."] };
       }
     },
-    samples: [{ event: "mfa_enabled" }, { event: "password_changed" }, { event: "deletion_requested" }, { event: "mfa_recovery_code_used" }, { event: "mfa_recovery_codes_regenerated" }, { event: "mfa_reset" }],
+    samples: [{ event: "mfa_enabled" }, { event: "password_changed" }, { event: "password_reset_completed" }, { event: "deletion_requested" }, { event: "mfa_recovery_code_used" }, { event: "mfa_recovery_codes_regenerated" }, { event: "mfa_reset" }, { event: "sign_in_attempts" }, { event: "email_change_requested" }, { event: "email_changed" }],
   },
   critical_incident: {
     name: "critical_incident", category: "transactional", audience: "staff",
-    description: "Staff alert for a critical incident. Not sent yet: no automated incident source exists.",
+    description: "Owner alert from the scheduled ops_alerts job: dead-lettered Stripe events, new reconciliation findings, a stuck email queue, failing evidence feeds, repeated security events. Each item is sent once.",
     render: (d) => ({
       subject: `Critical incident: ${d.summary}`, heading: "Critical incident",
       paragraphs: [d.summary, `Detected ${d.occurredAt}. Follow the incident runbook and record actions in the monitoring page.`],
       cta: { label: "Open monitoring", url: d.url },
     }),
     samples: [{ summary: "Error rate above threshold on the customer portal", occurredAt: "2026-01-01 12:00 UTC", url: "https://example.com/staff/monitoring" }],
+  },
+  email_change_confirm: {
+    name: "email_change_confirm", category: "transactional", audience: "customer",
+    description: "Confirmation link sent to the new address when a customer changes their account email (the change applies only after confirmation).",
+    render: (d) => ({
+      subject: "Confirm your new email address — Crestmont", heading: "Confirm your new email address",
+      paragraphs: ["Someone asked to use this address for their Crestmont account. If that was you, confirm within 48 hours to finish the change.", "If you did not ask for this, ignore this email; nothing changes."],
+      cta: { label: "Confirm new email", url: d.confirmUrl },
+    }),
+    samples: [{ confirmUrl: "https://example.com/account/email/confirm?token=preview" }],
   },
   password_reset: {
     name: "password_reset", category: "transactional", audience: "any",
@@ -437,6 +472,82 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
         "If you did not send this request, you can ignore this email."],
     }),
     samples: [{ name: "Morgan Hale", kind: "quote" }, { name: "Morgan Hale", kind: "contact" }],
+  },
+  lead_alert: {
+    name: "lead_alert", category: "transactional", audience: "staff",
+    description: "Staff alert: a new lead arrived from the public site or the lead API.",
+    render: (d) => ({
+      subject: d.kind === "quote" ? "New quote request" : d.kind === "contact" ? "New contact message" : "New lead",
+      heading: d.kind === "quote" ? "A new quote request arrived" : d.kind === "contact" ? "A new contact message arrived" : "A new lead arrived",
+      paragraphs: [`From: ${d.name}${d.company ? `, ${d.company}` : ""}.`, `Interest: ${d.interest ?? "not stated"}.`,
+        d.assigned ? "It was assigned to the default lead owner." : "It is not assigned yet. Assign an owner and reply from the CRM."],
+      cta: { label: "Open lead", url: d.url },
+    }),
+    samples: [{ kind: "quote", name: "Morgan Hale", company: "Sample Bakery", interest: "business", assigned: false, url: "https://example.com/staff/crm/leads/ld_preview" }],
+  },
+  proposal_accepted: {
+    name: "proposal_accepted", category: "transactional", audience: "customer",
+    description: "Confirms an accepted proposal and lists the exact agreement versions accepted.",
+    render: (d) => ({
+      subject: `Proposal accepted — version ${d.version}`, heading: "Your proposal is accepted",
+      paragraphs: [`Hello ${d.contactName}, thank you. You accepted proposal version ${d.version} for ${money(d.totalCents)}.`,
+        `Your first invoice is ${money(d.firstInvoiceCents)}. Your project starts once that payment is confirmed.`,
+        "You accepted these documents (exact versions are kept with your account under Agreements):", ...d.agreements],
+      cta: { label: "Pay the first invoice", url: d.url },
+    }),
+    samples: [{ contactName: "Morgan Hale", version: 2, totalCents: 800000, firstInvoiceCents: 400000, agreements: ["Custom development agreement (draft) — version 2026-10-draft-1", "Terms of service — version 2026-10-draft-1"], url: "https://example.com/portal/billing/invoices/inv_preview" }],
+  },
+  dispute_opened: {
+    name: "dispute_opened", category: "transactional", audience: "staff",
+    description: "Owner alert: a customer opened a payment dispute (from the verified Stripe webhook).",
+    render: (d) => ({
+      subject: `Payment dispute opened — ${money(d.amountCents)}`, heading: "A payment dispute was opened",
+      paragraphs: [`A customer disputed a payment of ${money(d.amountCents)}.`, d.evidenceDueBy ? `Evidence is due by ${d.evidenceDueBy}. Respond in Stripe before then.` : "Check the evidence deadline in Stripe."],
+      cta: { label: "Open disputes", url: d.url },
+    }),
+    samples: [{ amountCents: 99900, evidenceDueBy: "2026-12-01", url: "https://example.com/staff/disputes" }],
+  },
+  consultation: {
+    name: "consultation", category: "transactional", audience: "prospect",
+    description: "Consultation requested, confirmed, rescheduled or cancelled (booked by phone with the AI receptionist).",
+    render: (d) => {
+      const ref = `Your booking reference is ${d.code}. Quote it, with the phone number you gave us, if you call to change the booking.`;
+      const notMe = "If you did not book this consultation, you can ignore this email.";
+      switch (d.event) {
+        case "requested": return { subject: "Consultation request received — Crestmont", heading: "We received your consultation request",
+          paragraphs: [`Hello ${d.name}, thank you for calling Crestmont Website Development.`, `We are holding ${d.when} for you. A team member will confirm the time by email.`, ref, notMe] };
+        case "confirmed": return { subject: "Consultation confirmed — Crestmont", heading: "Your consultation is confirmed",
+          paragraphs: [`Hello ${d.name}, your consultation with Crestmont Website Development is confirmed for ${d.when}.`, ref, notMe] };
+        case "rescheduled": return { subject: "Consultation rescheduled — Crestmont", heading: "Your consultation has moved",
+          paragraphs: [`Hello ${d.name}, your consultation is now ${d.when}.`, ref, notMe] };
+        case "cancelled": return { subject: "Consultation cancelled — Crestmont", heading: "Your consultation is cancelled",
+          paragraphs: [`Hello ${d.name}, your consultation for ${d.when} has been cancelled.`, "Call us or use the contact form if you would like to book another time.", notMe] };
+      }
+    },
+    samples: [
+      { event: "requested", name: "Morgan Hale", when: "Tuesday, November 3 at 10:00 AM EST", code: "K7MP4Q" },
+      { event: "confirmed", name: "Morgan Hale", when: "Tuesday, November 3 at 10:00 AM EST", code: "K7MP4Q" },
+      { event: "rescheduled", name: "Morgan Hale", when: "Thursday, November 5 at 2:30 PM EST", code: "R2WX9T" },
+      { event: "cancelled", name: "Morgan Hale", when: "Tuesday, November 3 at 10:00 AM EST", code: "K7MP4Q" },
+    ],
+  },
+  voice_escalation: {
+    name: "voice_escalation", category: "transactional", audience: "staff",
+    description: "Owner alert: the AI receptionist escalated a call and no live transfer was possible, so a callback task was created.",
+    render: (d) => {
+      const why = d.why === "outside_hours" ? "It is outside staffed hours, so the call could not be transferred."
+        : d.why === "no_transfer" ? "No live-transfer number is configured, so the call could not be transferred."
+        : "A live transfer was not available for this call.";
+      return {
+        subject: `${d.test ? "[TEST] " : ""}AI receptionist escalation — call back needed`, heading: "A caller needs a person",
+        paragraphs: [`Reason given: ${d.reason}`, `Caller: ${d.caller}`, why, "A CRM task due within 4 hours was created on the caller's lead. Do not discuss account details until you have verified the caller's identity."],
+        cta: { label: "Open the call", url: d.url },
+      };
+    },
+    samples: [
+      { reason: "Wants to discuss changing their contract", caller: "Morgan Hale, +15550100123", why: "outside_hours", test: false, url: "https://example.com/staff/voice/calls/call_sample" },
+      { reason: "Asked for a person", caller: "Unknown caller", why: "no_transfer", test: true, url: "https://example.com/staff/voice/calls/call_sample" },
+    ],
   },
 };
 

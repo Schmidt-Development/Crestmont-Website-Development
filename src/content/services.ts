@@ -90,6 +90,14 @@ export const SERVICES: ServiceDef[] = [
     boundaries: ["AI output can be wrong; workflows are designed with human review where it matters", "Model provider usage fees are passed through or billed by the provider"],
   },
   {
+    slug: "ai-receptionist", name: "AI Receptionist", approved: ["AI receptionist voice agents (inbound and outbound calls)"], group: "Applications & systems", pricing: "custom",
+    // CREST-GAP-051: custom per-client work on a provider the client chooses; nothing is described as a built-in feature.
+    summary: "Custom AI voice agents, configured for your business on the voice provider you choose, that answer calls and hand the conversation to a person whenever it matters.",
+    intro: "We design, configure and connect AI voice agents as custom work for each client, built on the voice provider you choose. Depending on that provider and the systems you connect, an agent can answer questions from your approved information, collect caller details, take appointment or callback requests, send outcomes to your CRM and pass urgent or sensitive calls to your team.\n\nThe agent always identifies itself as an AI assistant, follows the recording-consent and calling rules that apply to you, and is configured, tested and approved by you before it takes a real call.",
+    includes: ["Discovery of your call types, hours and rules for urgent calls", "Script and guardrails written and approved with you", "Voice and tone selection from the voices your chosen provider offers", "Optional connections to your calendar, CRM and website forms within the written scope", "A path to a person for urgent calls: a callback task, an alert or, where your phone setup supports it, a transfer", "Call summaries and usage costs you can review, where your provider supplies them", "Testing on non-public numbers before launch, with your approval"],
+    boundaries: ["The assistant identifies itself as AI; it is designed to sound natural, not to pass as a person", "Outbound calling is scoped separately, needs the contact's prior consent where the law requires it, honours opt-outs and calls only within permitted hours", "Recording and transcription follow the consent rules that apply to your calls", "Telephone numbers, call minutes and voice-provider usage are billed by the provider", "AI can misunderstand; every agent has a path to a person"],
+  },
+  {
     slug: "api-integrations", name: "API integrations", approved: ["API integrations"], group: "Applications & systems", pricing: "custom",
     summary: "Connect your website or application to the services your business already uses.",
     intro: "We connect systems through their documented APIs — payment, scheduling, accounting, CRM, email and others — with retries, error logging and clear ownership of credentials.",

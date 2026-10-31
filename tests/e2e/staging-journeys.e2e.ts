@@ -1,8 +1,7 @@
-// The 33 required E2E journeys (directive §69, TEST-002) against the DEPLOYED staging preview.
-// Uses only what a real person has: a browser, the preview password and the demo accounts the deploy
+// The 33 required E2E journeys (directive §69, TEST-002) against the DEPLOYED, public staging site.
+// Uses only what a real person has: a browser and the demo accounts the deploy
 // workflow issues (access/demo-accounts.md). No database access, no webhook secrets, no fixtures.
 //   E2E_BASE_URL          https://crestmont-platform-staging.<subdomain>.workers.dev
-//   E2E_PREVIEW_PASSWORD  the preview password
 //   E2E_ACCOUNTS_FILE     demo-accounts.md (| role | email | `password` | `TOTPKEY` or — | note |)
 // Journeys 29–30 additionally act as the CI client of the readiness API (as the deploy workflow does):
 //   EVIDENCE_INGEST_SECRET          set by the workflow's "Evidence ingest secret" step
@@ -24,15 +23,14 @@
 //    interrupted earlier run (an open approval request, a pending refund) is resolved first.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
-import { launchBrowser } from "./support.ts";
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { launchBrowser, evidenceRunLink } from "./support.ts";
 import { totpCode } from "../../src/lib/auth-crypto.ts";
 import { signEvidence } from "../../src/readiness/ingest.ts";
 
 const BASE = process.env.E2E_BASE_URL?.replace(/\/$/, "");
-const PREVIEW_PW = process.env.E2E_PREVIEW_PASSWORD;
 const ACCOUNTS = process.env.E2E_ACCOUNTS_FILE;
-const unset = !BASE || !PREVIEW_PW || !ACCOUNTS ? "E2E_BASE_URL / E2E_PREVIEW_PASSWORD / E2E_ACCOUNTS_FILE not set (staging journeys run only against a deployed preview)" : "";
+const unset = !BASE || !ACCOUNTS ? "E2E_BASE_URL / E2E_ACCOUNTS_FILE not set (staging journeys run only against deployed staging)" : "";
 const RUN = `e2e-${Date.now().toString(36)}`;
 const TIMEOUT = 30_000;
 
@@ -62,34 +60,24 @@ function watch(page: Page) {
   page.on("dialog", (d: { accept(): Promise<void> }) => d.accept()); // data-confirm prompts
   page.on("console", (m: { type(): string; text(): string }) => {
     const t = m.text();
-    if (m.type() !== "error" || /fonts\.(googleapis|gstatic)\.com|challenges\.cloudflare\.com|turnstile/i.test(t)) return;
+    if (m.type() !== "error" || /fonts\.(googleapis|gstatic)\.com|challenges\.cloudflare\.com|turnstile/i.test(t) || !page.url().startsWith(BASE!)) return;
     if (/Content Security Policy|Refused to/i.test(t)) issues.push(`CSP: ${t} @ ${page.url()}`);
   });
-  page.on("pageerror", (e: Error) => issues.push(`JS error: ${e.message} @ ${page.url()}`));
+  page.on("pageerror", (e: Error) => { if (page.url().startsWith(BASE!)) issues.push(`JS error: ${e.message} @ ${page.url()}`); });
   page.on("response", (r: { status(): number; url(): string }) => { if (r.status() >= 500 && r.url().startsWith(BASE!)) issues.push(`HTTP ${r.status()} ${r.url()}`); });
 }
 function assertClean() { assert.deepEqual(issues.splice(0), [], "no CSP violations, JS errors or 5xx responses"); }
 
-/** A fresh browser context (own session cookies) that holds the preview pass. The password is entered once
- * through the gate form, like a team member would; later contexts reuse that pass cookie, because the gate
- * allows only 10 password submissions per IP per 15 minutes (shared with the other deploy steps). */
-let previewPass: unknown[] | null = null;
+/** A fresh browser context with NO cookies (a first-time visitor): staging is public since 2026-10-28, so the homepage
+ * must load directly, with no preview password prompt. Each actor then signs in with its own demo account. */
 async function previewContext(): Promise<Actor> {
   const ctx = await browser.newContext();
   ctx.setDefaultTimeout(TIMEOUT);
-  if (previewPass) await ctx.addCookies(previewPass);
   const page = await ctx.newPage();
   watch(page);
   const r = await page.goto(BASE + "/");
-  if (!previewPass) {
-    assert.equal(r?.status(), 401, "preview gate in front of the site");
-    await page.fill("#f-preview", PREVIEW_PW!);
-    await nav(page, "button[type=submit]");
-    const pass = (await ctx.cookies()).filter((c: { name: string }) => c.name === "cm_preview");
-    previewPass = pass;
-    assert.equal(pass.length, 1, `preview pass issued (${await alerts(page)} ${(await text(page, "body")).slice(0, 200)})`);
-  }
-  assert.doesNotMatch(await page.content(), /Preview password/i, "preview pass accepted");
+  assert.equal(r?.status(), 200, "public homepage loads for a fresh visitor");
+  assert.doesNotMatch(await page.content(), /Preview password|__preview-access/i, "no preview password prompt");
   return { ctx, page };
 }
 
@@ -103,6 +91,11 @@ const text = async (page: Page, sel = "main") => (await page.locator(sel).first(
 const alerts = async (page: Page) => (await page.locator(".alert, .toast").allInnerTexts().catch(() => [])).join(" | ");
 const re = (s: string) => new RegExp(esc(s), "i");
 
+/** Every code attempt counts toward the account's limit (8 per 15 minutes, refused ones included), and a code is
+ * accepted once per 30 s step. Entering each code in a fresh step means no attempt is spent on a replay of a code
+ * another sign-in of the same account used moments earlier (deploy #71). */
+const freshTotpStep = () => new Promise((r) => setTimeout(r, 30_000 - (Date.now() % 30_000) + 1_000));
+
 /** Sign in through the real login page. Staff complete TOTP; a code is single-use per 30 s step, so when the
  * current step was already used (another sign-in of the same account moments ago) wait for the next one. */
 async function signIn(page: Page, a: Account) {
@@ -112,7 +105,8 @@ async function signIn(page: Page, a: Account) {
   await nav(page, "button[type=submit]");
   for (let attempt = 0; new URL(page.url()).pathname.startsWith("/mfa") && attempt < 2; attempt++) {
     assert.ok(a.totp, `${a.role} needs a TOTP key`);
-    if (attempt > 0) await new Promise((r) => setTimeout(r, (31 - (Math.floor(Date.now() / 1000) % 30)) * 1000));
+    if (attempt > 0 && /Too many codes/i.test(await alerts(page))) break; // never retry into the attempt limit
+    await freshTotpStep();
     await page.fill("#f-code", await totpCode(a.totp!));
     await nav(page, "button[type=submit]");
   }
@@ -151,14 +145,22 @@ function linkIn(body: string, path: string): string {
 /** Staging uses Cloudflare Turnstile (always-pass test keys); wait for its token before submitting. */
 async function awaitTurnstile(page: Page) {
   if (!(await page.locator(".cf-turnstile").count())) return; // development: no widget
-  await page.waitForFunction(() => (document.querySelector("[name='cf-turnstile-response']") as HTMLInputElement | null)?.value, undefined, { timeout: TIMEOUT });
+  // Not page.waitForFunction: Playwright evaluates its predicate in the page with new Function(), which the site's CSP
+  // (script-src without 'unsafe-eval') refuses — deploy #57 journey 1 failed with exactly that EvalError. Locator reads
+  // run in Playwright's own context, so the real CSP stays in force for everything the page itself does.
+  const token = page.locator("[name='cf-turnstile-response']").first();
+  for (const until = Date.now() + TIMEOUT; ; await page.waitForTimeout(250)) {
+    if ((await token.count()) && (await token.inputValue())) return;
+    if (Date.now() > until) throw new Error(`Turnstile produced no token within ${TIMEOUT / 1000}s`);
+  }
 }
 /** Step-up MFA before a sensitive action (src/app/step-up.ts). Codes are single-use per 30 s step, so on a replay wait for the next step. */
 async function freshMfa(page: Page, a: Account) {
   const back = new URL(page.url()).pathname + new URL(page.url()).search;
   await page.goto(`${BASE}/mfa/step-up?next=${encodeURIComponent(back)}`);
   for (let attempt = 0; new URL(page.url()).pathname === "/mfa/step-up" && attempt < 2; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, (31 - (Math.floor(Date.now() / 1000) % 30)) * 1000));
+    if (attempt > 0 && /Too many codes/i.test(await alerts(page))) break; // never retry into the attempt limit
+    await freshTotpStep();
     await page.fill("#f-code", await totpCode(a.totp!));
     await nav(page, "button[type=submit]");
   }
@@ -195,7 +197,7 @@ function journey(n: number, tags: string[], title: string, opts: { needs?: numbe
       await fn!({ skip: (reason: string) => { skipped = reason; t.skip(reason); } });
       outcome.set(n, skipped || "passed");
     } catch (e) {
-      outcome.set(n, `failed: ${(e as Error).message.split("\n")[0].slice(0, 160)}`);
+      outcome.set(n, `failed: ${(e as Error).message.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 8).join(" ").replace(/\s+/g, " ").slice(0, 400)}`);
       for (const [who, a] of Object.entries(people)) console.error(`[${who}] ${a.page.url()} ${await alerts(a.page)}`);
       throw e;
     }
@@ -210,6 +212,9 @@ const total = lines.reduce((s, l) => s + l.cents, 0);
 const usd = (cents: number) => (cents / 100).toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: cents % 100 ? 2 : 0 });
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 let leadUrl = "", proposalUrl = "", taskTitle = "", ticketUrl = "";
+/** Set by journey 4 from what staging itself shows: "test" when the deposit invoice offers Stripe test-mode checkout. */
+let payments: "unconfigured" | "test" = "unconfigured";
+let depositInvoiceUrl = "";
 let revision: { mode: "included" | "billable"; allowance: number; usedBefore: number } | null = null;
 const HARBOR = /Harbor Dental/, RIDGELINE = /Ridgeline/;
 
@@ -302,8 +307,15 @@ journey(4, ["SALES-004"], "customer registers from the proposal, verifies the em
   const inv = await text(p);
   assert.match(inv, new RegExp(esc(usd(Math.floor(total / 2)))), "50% deposit invoice");
   assert.match(inv, /Open/i);
-  // Staging has no Stripe account (BLK-004): the page must say so instead of offering a payment button.
-  assert.match(inv, /Online payment is not configured yet\./);
+  // Without a Stripe test key (BLK-004) the page must say so instead of offering a payment button; with one it offers
+  // Stripe test-mode checkout. Either is correct; anything else (a pay button that is not Stripe, or neither) fails.
+  depositInvoiceUrl = p.url();
+  if (/Online payment is not configured yet\./.test(inv)) payments = "unconfigured";
+  else {
+    assert.match(inv, new RegExp(`Pay ${esc(usd(Math.floor(total / 2)))} securely`), "a Stripe checkout button for the deposit");
+    assert.match(inv, /taken to Stripe's secure checkout/);
+    payments = "test";
+  }
   const s = await as("sales");
   await s.goto(leadUrl);
   assert.match(await text(s), /Awaiting payment/i);
@@ -312,10 +324,64 @@ journey(4, ["SALES-004"], "customer registers from the proposal, verifies the em
 
 // ───────────── 5–7. Payment (Stripe) ─────────────
 
-const NO_STRIPE = "BLK-004: no Crestmont Stripe test-mode account is configured on staging, so no checkout, no payment and no signed Stripe webhook can occur (the development suite tests our handler with signed fixtures; staging must not)";
-journey(5, ["PAY-001"], "customer completes payment in Stripe test mode", { blocked: NO_STRIPE });
-journey(6, ["PAY-003"], "payment webhook creates the order", { blocked: NO_STRIPE });
-journey(7, ["SALES-004"], "project is provisioned after payment", { blocked: `${NO_STRIPE}; projects are provisioned only by the payment webhook` });
+const NO_STRIPE = "BLK-004: no Stripe test-mode key is configured on staging (the deposit invoice says online payment is not configured), so no checkout, payment or signed Stripe webhook can occur; the development suite covers the handler with signed fixtures";
+const STRIPE_TEST_CARD = { number: "4242 4242 4242 4242", expiry: "12 / 34", cvc: "123" }; // Stripe's published test card
+
+/** Completes Stripe's hosted Checkout in TEST mode with the published test card. Refuses anything but a test session. */
+async function payOnStripeCheckout(p: Page): Promise<void> {
+  await p.waitForURL(/^https:\/\/checkout\.stripe\.com\//, { timeout: 60_000 });
+  assert.match(p.url(), /\/c\/pay\/cs_test_/, "a Stripe TEST-mode checkout session (never live)");
+  const card = p.locator('[data-testid="card-accordion-item-button"]');
+  if (await card.count()) await card.first().click();
+  await p.locator("#cardNumber").fill(STRIPE_TEST_CARD.number);
+  await p.locator("#cardExpiry").fill(STRIPE_TEST_CARD.expiry);
+  await p.locator("#cardCvc").fill(STRIPE_TEST_CARD.cvc);
+  if (await p.locator("#billingName").count()) await p.locator("#billingName").fill(contact.name);
+  if (await p.locator("#billingPostalCode").isVisible().catch(() => false)) await p.locator("#billingPostalCode").fill("48933");
+  if (await p.locator("#email").isEditable().catch(() => false)) await p.locator("#email").fill(contact.email);
+  await p.locator('[data-testid="hosted-payment-submit-button"], .SubmitButton').first().click();
+  await p.waitForURL((u: URL) => u.href.startsWith(BASE!), { timeout: 90_000 });
+}
+/** Reloads `url` until `re` matches the page (the Stripe webhook arrives asynchronously). */
+async function until(p: Page, url: string, re: RegExp, what: string, ms = 120_000): Promise<string> {
+  const end = Date.now() + ms;
+  for (;;) {
+    await p.goto(url);
+    const t = await text(p);
+    if (re.test(t)) return t;
+    if (Date.now() > end) assert.fail(`${what} did not happen within ${ms / 1000}s. Page: ${t.slice(0, 200).replace(/\s+/g, " ")}`);
+    await p.waitForTimeout(5_000);
+  }
+}
+
+journey(5, ["PAY-001"], "customer completes payment in Stripe test mode", { needs: [4] }, async (t) => {
+  if (payments !== "test") { t.skip(NO_STRIPE); return; }
+  const p = people.newCustomer.page;
+  await p.goto(depositInvoiceUrl);
+  await nav(p, btn(p, `Pay ${usd(Math.floor(total / 2))} securely`));
+  await payOnStripeCheckout(p);
+  assert.match(new URL(p.url()).search + new URL(p.url()).pathname, /checkout=success|\/portal\/billing/, "Stripe returns to the portal");
+  assertClean();
+});
+
+journey(6, ["PAY-003"], "payment webhook creates the order", { needs: [5] }, async () => {
+  const p = people.newCustomer.page;
+  await until(p, depositInvoiceUrl, /\bPaid\b/, "the signed Stripe webhook marking the deposit paid");
+  const billing = await until(p, `${BASE}/portal/billing`, /Receipt/, "a receipt for the deposit");
+  assert.match(billing, new RegExp(esc(usd(Math.floor(total / 2)))), "the receipt shows the deposit amount, charged once");
+  assertClean();
+});
+
+journey(7, ["SALES-004"], "project is provisioned after payment", { needs: [6] }, async () => {
+  const p = people.newCustomer.page;
+  const list = await until(p, `${BASE}/portal/projects`, /prj_|Project/i, "project provisioning after the paid deposit");
+  assert.equal((list.match(new RegExp(esc(contact.company), "g")) ?? []).length <= 1, true, "exactly one project for the order (no duplicate provisioning)");
+  assert.ok(await p.locator('main a[href^="/portal/projects/prj_"]').count(), "the provisioned project is listed for the customer");
+  const s = await as("sales");
+  await s.goto(leadUrl);
+  assert.doesNotMatch(await text(s), /Awaiting payment/i, "the lead is no longer awaiting payment");
+  assertClean();
+});
 
 // ───────────── 8–9. Onboarding and files (seeded sample projects) ─────────────
 
@@ -687,8 +753,18 @@ journey(23, ["SUP-002"], "ticket is resolved and the customer sees it resolved",
 
 // ───────────── 24–26. Subscriptions, failed payments, refunds ─────────────
 
-journey(24, ["PAY-004"], "customer manages a subscription", { blocked: `${NO_STRIPE}; maintenance subscriptions are created and managed only through Stripe Billing` });
-journey(25, ["PAY-004"], "failed payment triggers recovery", { blocked: `${NO_STRIPE}; failed-payment recovery starts from Stripe invoice.payment_failed webhooks` });
+journey(24, ["PAY-004"], "customer opens the Stripe billing portal to manage payment methods and subscriptions", { needs: [6] }, async () => {
+  // Maintenance plans stay closed until their entitlements are approved (BLK-010), so the journey verifies the
+  // billing portal the paying customer would use to manage a subscription: test-mode portal, created by checkout.
+  const p = people.newCustomer.page;
+  await p.goto(`${BASE}/portal/billing`);
+  await nav(p, btn(p, "Manage payment methods"));
+  await p.waitForURL(/^https:\/\/billing\.stripe\.com\//, { timeout: 60_000 });
+  assert.match(p.url(), /\/p\/session\/test_/, "a Stripe TEST-mode billing portal session");
+  await p.goto(`${BASE}/portal/billing`);
+  assertClean();
+});
+journey(25, ["PAY-004"], "failed payment triggers recovery", { blocked: "needs a Stripe test clock to make a renewal fail on demand, which a browser journey cannot drive; invoice.payment_failed recovery is covered by signed-fixture tests (tests/commerce-closeout.test.ts) and must be checked once by hand in Stripe test mode" });
 
 journey(26, ["PAY-007"], "refund request enters the approval workflow: support review → recommendation → Founder decision (denied, so the sample payment stays clean)", {}, async () => {
   const c = await as("customer.harbor");
@@ -751,23 +827,30 @@ function evidenceFile(env: string, fallback: string): string | null {
   const f = process.env[env] ?? fallback;
   return existsSync(f) ? f : null;
 }
+/** Signed ingestion of `file`: done here when the secret is present (development), otherwise read from the receipt the
+ *  deploy workflow's first-party step wrote (the browser step never holds the secret). null = neither is available. */
+async function ingested(file: string, receipt: string): Promise<{ status: number; json: { status?: string; accepted?: number; runId?: string } } | null> {
+  if (process.env.EVIDENCE_INGEST_SECRET) return postEvidence(readFileSync(file, "utf8"));
+  return existsSync(receipt) ? (JSON.parse(readFileSync(receipt, "utf8")) as { status: number; json: { status?: string; accepted?: number; runId?: string } }) : null;
+}
 
 journey(29, ["READY-004"], "launch readiness ingests this run's CI evidence (signed) and shows it to the Owner", {}, async (t) => {
   const file = evidenceFile("E2E_CI_EVIDENCE_FILE", "evidence/ci-evidence.json");
-  if (!process.env.EVIDENCE_INGEST_SECRET || !file) {
-    t.skip("needs EVIDENCE_INGEST_SECRET and the CI evidence document of this run (provided by the deploy workflow: `npm test` writes evidence/ci-evidence.json)");
+  const r = file ? await ingested(file, process.env.E2E_CI_RECEIPT ?? "evidence/receipts/ci.json") : null;
+  if (!file || !r) {
+    t.skip("needs this run's CI evidence document and its signed ingestion (the deploy workflow's 'Post this run's evidence' step writes evidence/receipts/ci.json)");
     return;
   }
   const body = readFileSync(file, "utf8");
   const doc = JSON.parse(body) as { runId: string; results: unknown[] };
   assert.equal((await postEvidence(body, "not-the-ingest-secret")).status, 401, "a wrongly signed document is refused");
-  const r = await postEvidence(body);
   assert.equal(r.status, 200, JSON.stringify(r.json));
   assert.match(String(r.json.status), /^(ingested|duplicate)$/);
   const o = await as("owner");
   await o.goto(BASE + "/staff/readiness/engineering");
-  assert.match(await text(o), re(doc.runId), "run listed under CI evidence");
-  await nav(o, o.getByRole("link", { name: doc.runId }).first());
+  const link = evidenceRunLink(o, doc.runId) as { count(): Promise<number>; first(): { click(): Promise<void> } };
+  assert.equal(await link.count(), 1, `run ${doc.runId} listed under CI evidence (exactly this id, not a sibling run)`);
+  await nav(o, link.first());
   const run = await text(o);
   const m = /(\d+) passed\/skipped, (\d+) failed/.exec(run);
   assert.ok(m, `run summary shown: ${run.slice(0, 300)}`);
@@ -781,14 +864,14 @@ journey(29, ["READY-004"], "launch readiness ingests this run's CI evidence (sig
 
 journey(30, ["READY-006"], "staging verification of this deployment updates readiness (staging environment view and LAUNCH-003)", {}, async (t) => {
   const file = evidenceFile("E2E_STAGING_CHECK_FILE", "evidence/staging-check.json");
-  if (!process.env.EVIDENCE_INGEST_SECRET || !file) {
-    t.skip("needs EVIDENCE_INGEST_SECRET and this deployment's verification document (provided by the deploy workflow's smoke step: evidence/staging-check.json)");
+  const r = file ? await ingested(file, process.env.E2E_STAGING_CHECK_RECEIPT ?? "evidence/receipts/staging-check.json") : null;
+  if (!file || !r) {
+    t.skip("needs this deployment's verification document and its signed ingestion (the deploy workflow's 'Post this run's evidence' step writes evidence/receipts/staging-check.json)");
     return;
   }
   const body = readFileSync(file, "utf8");
   const doc = JSON.parse(body) as { runId: string; environment: string; results: { requirementId: string }[] };
   assert.equal(doc.environment, "staging");
-  const r = await postEvidence(body);
   assert.equal(r.status, 200, JSON.stringify(r.json));
   const o = await as("owner");
   await o.goto(BASE + "/staff/readiness/env/staging");
@@ -811,4 +894,12 @@ test("[TEST-002] staging journeys: summary of the 33 required journeys", { skip:
   const rows = [...Array(33)].map((_, i) => `${String(i + 1).padStart(2)}  ${outcome.get(i + 1) ?? "not run"}`);
   console.log(`Staging journeys (${RUN}):\n${rows.join("\n")}`);
   assert.equal(outcome.size, 33, "every journey ran or was explicitly skipped");
+  // Staging is CERTIFIED only when all 33 required journeys passed on this deployment; a skip or block is never a pass.
+  const list = [...Array(33)].map((_, i) => ({ journey: i + 1, outcome: outcome.get(i + 1) ?? "not run" }));
+  const passed = list.filter((j) => j.outcome === "passed").length;
+  const failed = list.filter((j) => j.outcome.startsWith("failed")).length;
+  const cert = { run: RUN, required: 33, passed, failed, notPassed: list.filter((j) => j.outcome !== "passed"), certified: passed === 33 };
+  mkdirSync("evidence", { recursive: true });
+  writeFileSync(process.env.E2E_CERTIFICATION_FILE ?? "evidence/staging-certification.json", JSON.stringify(cert, null, 2));
+  console.log(cert.certified ? "STAGING CERTIFIED: 33/33 required journeys passed" : `STAGING NOT CERTIFIED: ${passed}/33 passed, ${failed} failed, ${33 - passed - failed} skipped or blocked`);
 });

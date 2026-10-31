@@ -12,9 +12,10 @@ import { STAFF_ROLES, type Role } from "../../src/domain/authz.ts";
 import type { PaymentsAdapter } from "../../src/adapters/payments.ts";
 import type { Env } from "../../src/app/context.ts";
 import type { ResourceKind } from "./route-inventory.ts";
+import { createDiagnostic } from "../../src/services/runner-diagnostics.ts";
 
 export type StaffRole = (typeof STAFF_ROLES)[number];
-export const SECRETS = { scheduler: "matrix-scheduler-secret", runner: "matrix-runner-secret", evidence: "matrix-evidence-secret", voice: "matrix-voice-secret", stripe: "whsec_matrixstripe", retell: "matrix-retell-key", resend: "whsec_" + Buffer.from("matrix-resend-secret").toString("base64") };
+export const SECRETS = { scheduler: "matrix-scheduler-secret", crmImport: "crm-import-test-secret-not-real", runner: "matrix-runner-secret", evidence: "matrix-evidence-secret", voice: "matrix-voice-secret", stripe: "whsec_matrixstripe", retell: "matrix-retell-key", resend: "whsec_" + Buffer.from("matrix-resend-secret").toString("base64") };
 
 export const PDF = new TextEncoder().encode("%PDF-1.4\n%security matrix fixture\n");
 export const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 1, 2, 3, 4]);
@@ -153,7 +154,7 @@ export async function buildWorld(): Promise<World> {
   const payments = new FakePayments();
   const app = await createTestApp({
     EVIDENCE_INGEST_SECRET: SECRETS.evidence, VOICE_WEBHOOK_SECRET: SECRETS.voice, STRIPE_WEBHOOK_SECRET: SECRETS.stripe,
-    RETELL_API_KEY: SECRETS.retell, RESEND_WEBHOOK_SECRET: SECRETS.resend, BUILD_RUNNER_SECRET: SECRETS.runner, BUILD_PREVIEW_GATE_SECRET: "matrix-preview-gate-secret-0123456789abcdef", SCHEDULER_TRIGGER_SECRET: SECRETS.scheduler,
+    RETELL_API_KEY: SECRETS.retell, RESEND_WEBHOOK_SECRET: SECRETS.resend, BUILD_RUNNER_SECRET: SECRETS.runner, BUILD_PREVIEW_GATE_SECRET: "matrix-preview-gate-secret-0123456789abcdef", SCHEDULER_TRIGGER_SECRET: SECRETS.scheduler, CRM_IMPORT_SECRET: SECRETS.crmImport,
     overrides: { storage: new MemoryStorage(), payments },
   });
   const db = app.db;
@@ -224,6 +225,13 @@ async function buildStaffRecords(w: World) {
   ids.voiceVersion = "1";
   await ok(o.post("/staff/voice/test-event", { scenario: "lead" }), "voice test call");
   ids.call = (await one<{ id: string }>(db, `SELECT id FROM calls ORDER BY started_at DESC LIMIT 1`)).id;
+  // Receptionist operations (migration 0042): one requested consultation and one outbound request awaiting approval.
+  ids.consultation = newId("cns");
+  await db.prepare(`INSERT INTO consultations (id, name, phone, starts_at, duration_minutes, timezone, status, confirmation_code, source, is_test, created_at, updated_at)
+      VALUES (?, 'World Caller', '+15550100980', ?, 30, 'America/Detroit', 'requested', 'WRLD42', 'ai_receptionist', 1, ?, ?)`).bind(ids.consultation, new Date(Date.now() + 7 * 86400e3).toISOString(), nowIso(), nowIso()).run();
+  ids.outboundRequest = newId("vob");
+  await db.prepare(`INSERT INTO voice_outbound_requests (id, purpose, phone_e164, reason, status, idempotency_key, is_test, created_at, updated_at)
+      VALUES (?, 'callback', '+15550100981', 'TEST DATA', 'pending_approval', ?, 1, ?, ?)`).bind(ids.outboundRequest, `crestmont_${ids.outboundRequest}`, nowIso(), nowIso()).run();
   const tomorrow = new Date(Date.now() + 86400e3).toISOString().slice(0, 10);
   await ok(w.staff.sales.c.post("/staff/pricing", { item: "package:starter", proposed: "1099", effective_date: tomorrow, reason: "Matrix market adjustment (TEST DATA)" }), "price change request");
   ids.priceRequest = (await one<{ id: string }>(db, `SELECT id FROM price_change_requests ORDER BY requested_at DESC LIMIT 1`)).id;
@@ -262,6 +270,17 @@ async function buildStaffRecords(w: World) {
   await db.prepare(`INSERT INTO build_approvals (id, project_id, organization_id, job_id, kind, summary, dedupe_key, requested_by, requested_at) SELECT ?, project_id, organization_id, id, 'credential_request', 'Stripe secret key for live payments', 'matrix-apv', 'runner', ? FROM build_jobs WHERE id = ?`).bind(ids.buildApproval, nowIso(), ids.buildJob).run();
   ids.buildIntegration = newId("int");
   await db.prepare(`INSERT INTO build_integrations (id, project_id, organization_id, key, name, purpose, credentials_required, setup_instructions, permissions_required, human_action, responsible, updated_at) SELECT ?, project_id, organization_id, 'stripe', 'Stripe payments', 'Payments', 'keys', 'setup', 'owner', 'Provide keys', 'customer', ? FROM build_jobs WHERE id = ?`).bind(ids.buildIntegration, nowIso(), ids.buildJob).run();
+  // AI Sales Optimization: baseline v1, a second draft version and a proposed experiment (TEST DATA; no Retell agent).
+  const { ensureBaseline, createVersion } = await import("../../src/services/sales-opt/registry.ts");
+  const { baselineSalesInstructions } = await import("../../src/domain/sales-opt/policy.ts");
+  const sv1 = await ensureBaseline(db, baselineSalesInstructions());
+  const sv2 = await createVersion(db, { parentId: sv1.id, instructions: `${sv1.instructions}\nAsk which pages matter most before recommending a package.`, rationale: "Matrix version", authorKind: "user", author: w.staff.owner.id });
+  ids.soVersion = sv2.id;
+  ids.soStage = "staging";
+  ids.soExperiment = newId("soex");
+  await db.prepare(`INSERT INTO so_experiments (id, baseline_version_id, candidate_version_id, candidate_share, min_connected_per_arm, status, created_at) VALUES (?,?,?, 0.2, 400, 'proposed', ?)`).bind(ids.soExperiment, sv1.id, sv2.id, nowIso()).run();
+  // Node 1 diagnostic record (created exactly as the Owner action does).
+  ids.runnerDiagnostic = (await createDiagnostic(db, w.staff.owner.id)).id;
   // Public identifiers
   ids.serviceSlug = "website-design-development";
   ids.legalSlug = "terms";

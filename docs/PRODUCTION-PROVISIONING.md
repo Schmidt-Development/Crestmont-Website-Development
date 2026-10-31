@@ -49,7 +49,7 @@ Then commit that `database_id` into `[env.production]` of `wrangler.toml` throug
 
 ## Stage 3 — before opening to customers
 - Transactional email (Resend) authorised and configured: without it, sign-up confirmation and password-reset links are only recorded in the outbox, not delivered.
-- Production Owner account bootstrapped (`scripts/bootstrap-owner.ts --print-sql`), MFA enrolled; AI-build automation paused in Owner → AI builds until approved.
+- Production Owner account bootstrapped (`scripts/bootstrap-owner.ts --email <founder> --print-sql --url https://crestmontwebsitedevelopment.com`; `--url` is required), MFA enrolled; AI-build automation paused in Owner → AI builds until approved.
 - `www` → apex redirect rule, then HSTS (short max-age first).
 - The authentication gaps in `docs/AUTH-PRODUCTION.md` closed or accepted.
 - Live payments, calls and AI builds stay off until separately authorised (no secrets for them are installed by any workflow).

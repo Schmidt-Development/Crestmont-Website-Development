@@ -16,10 +16,12 @@ export type Permission =
   // area access (navigation + list pages); record-level checks still apply inside each area
   | "crm.access" | "delivery.access" | "support.access" | "ai.manage" | "voice.manage" | "customers.read"
   // AI Builds (paid-intake automation): read, operate (cancel/pause/retry/resume/revise), configure (limits, approve, backfill)
-  | "builds.read" | "builds.manage" | "builds.configure" | "ai.budget";
+  | "builds.read" | "builds.manage" | "builds.configure" | "ai.budget"
+  // AI Sales Optimization: view (owner/admin) and the Founder-only decisions (approve, production deploy/rollback, activation)
+  | "salesopt.read" | "salesopt.decide";
 
 const OWNER_ONLY: Permission[] = ["refund.decide", "refund.issue", "pricing.change", "release.approve_production",
-  "release.deploy_production", "security.exception", "builds.configure", "ai.budget"];
+  "release.deploy_production", "security.exception", "builds.configure", "ai.budget", "salesopt.decide"];
 
 const ALL_STAFF: Permission[] = ["readiness.read"];
 
@@ -28,7 +30,7 @@ export const ROLE_PERMISSIONS: Record<Role, ReadonlySet<Permission>> = {
     "lead.read_all", "lead.write_all", "lead.assign", "quote.write", "quote.send", "project.read_all", "project.coordinate",
     "task.update_assigned", "milestone.update", "ticket.manage", "ticket.internal_note", "refund.review", "settings.operational",
     "cms.edit", "cms.publish", "portfolio.manage", "finance.read", "audit.read", "employee.manage",
-    "crm.access", "delivery.access", "support.access", "ai.manage", "voice.manage", "customers.read", "builds.read", "builds.manage", ...OWNER_ONLY, ...ALL_STAFF,
+    "crm.access", "delivery.access", "support.access", "ai.manage", "voice.manage", "customers.read", "builds.read", "builds.manage", "salesopt.read", ...OWNER_ONLY, ...ALL_STAFF,
   ]),
   administrator: new Set<Permission>(["lead.read_all", "lead.assign", "project.read_all", "settings.operational", "cms.edit",
     "cms.publish", "portfolio.manage", "audit.read", "employee.manage", "crm.access", "delivery.access", "support.access",

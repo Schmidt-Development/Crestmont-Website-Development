@@ -105,3 +105,14 @@ Not blocking the next step: voice provider approval (`docs/voice/PROVIDER-EVALUA
   blocker ids); evidence reporter now records skipped tests as skipped.
 - **Hardening**: breached-password check, egress allowlist, PII redaction, per-user action limits, live unread
   counts (passive polling), legal drafts round 2 (custom development + maintenance agreements, DPA). Migration 0030.
+
+## Session — 2026-10-30 (AI Sales Optimization addendum)
+- **Retell sales self-improvement engine** (SALESOPT-001…012, all `in_progress`): sales-agent call facts from the
+  signed Retell webhook, Stripe-verified attribution, grounded self-hosted analysis, protected policy layer, immutable
+  version registry, 19-scenario evaluation harness, gated Retell deployment with read-back/rollback, experiments,
+  `/staff/sales-optimization`. Migration 0047. Paused and production-inactive by default; never places calls.
+  Sales calling remains out of scope (D-14). See `docs/voice/SALES-OPTIMIZATION.md`.
+- 2026-10-30 (closeout): fixture full-chain E2E for the sales optimizer (20 steps, real HTTP pipeline, external
+  parties faked), the four Retell states reported separately, 3 adversarial evaluation scenarios, a runner-status and
+  failure-diagnostics panel, and a per-stage KPI selector. Migration 0047 is applied on staging (run 41115599003). Live
+  staging verification remains blocked on Retell, Stripe test keys and Node 1 (SALES-OPTIMIZATION.md §8).

@@ -27,9 +27,10 @@ export type ResourceKind =
   | "session" | "revision" | "milestone" | "task" | "task2" | "assignment" | "refund" | "message" | "approvalRequest" | "customerInvitation"
   | "lead" | "leadTask" | "aiJob" | "quote" | "quoteToken" | "cmsRevision" | "cmsKey" | "portfolio" | "portfolioSlug" | "portfolioFile"
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
-  | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "priceRequest" | "suppression"
+  | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
-  | "member" | "notification" | "staffNotification" | "buildJob" | "siteDeployment" | "buildWorker" | "buildApproval" | "buildIntegration";
+  | "member" | "notification" | "staffNotification" | "buildJob" | "siteDeployment" | "buildWorker" | "buildApproval" | "buildIntegration"
+  | "soVersion" | "soStage" | "soExperiment" | "runnerDiagnostic";
 
 export type Access =
   | { kind: "public" }
@@ -83,9 +84,12 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   // ── JSON API, CI and provider webhooks (src/routes/api.ts, hooks.ts, ops.ts, platform.ts) ──
   "GET /api/health": pub,
   "POST /api/leads": { access: { kind: "public" }, api: true },
+  "GET /api/assistant": { access: { kind: "public" }, api: true },
+  "POST /api/assistant": { access: { kind: "public" }, api: true },
   "POST /api/readiness/evidence": signed("x-crestmont-signature"),
   "POST /api/readiness/github-snapshot": signed("x-crestmont-signature"),
   "POST /api/scheduled/run": signed("x-crestmont-scheduler-signature"),
+  "POST /api/crm/v1/imports": signed("x-crestmont-signature"),
   "POST /api/webhooks/stripe": hook("stripe-signature"),
   "GET /api/readiness": { access: { kind: "staff", roles: readiness }, api: true },
   "GET /api/readiness/requirements.csv": { access: { kind: "staff", roles: readiness }, api: true, audit: act("readiness.exported") },
@@ -93,6 +97,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/webhooks/voice": hook("x-crestmont-voice-signature"),
   "POST /api/webhooks/retell": hook("x-retell-signature"),
   "POST /api/webhooks/retell/functions": hook("x-retell-signature"),
+  "POST /api/webhooks/retell/inbound": hook("x-retell-signature"),
   "POST /api/webhooks/resend": hook("svix-signature"),
   "POST /api/readiness/deployments": signed("x-crestmont-signature"),
   "POST /api/readiness/release-candidates": signed("x-crestmont-signature"),
@@ -105,6 +110,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/builds/runner/checkpoint/fetch": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/ai/claim": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/ai/complete": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/ai/checkpoint": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/files": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/complete": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/previews/claim": signed("x-crestmont-runner-signature"),
@@ -147,6 +153,14 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /account/sessions/:id/revoke": session(act("session.revoked"), P("session")),
   "POST /account/sessions/revoke-others": session(act("session.revoked_all")),
   "GET /account/privacy": session(),
+  // Customer profile self-service (CREST-GAP-073, src/routes/account-profile.ts). Customers only; staff emails are managed by administrators.
+  "GET /account/profile": cust(),
+  "POST /account/profile": cust(undefined, act("user.profile_updated")),
+  "POST /account/email": cust(undefined, act("user.email_change_requested")),
+  "POST /account/email/cancel": cust(undefined, act("user.email_change_cancelled")),
+  "GET /account/email/confirm": token("email change confirmation token (?token=)"),
+  "POST /account/email/confirm": token("email change confirmation token (form field)"),
+  "POST /portal/notices/mfa-reminder/dismiss": cust(undefined, act("user.mfa_reminder_dismissed")),
   "POST /account/privacy/export": session(act("privacy.export_generated")),
   "POST /account/privacy/delete": session(act("privacy.deletion_requested")),
 
@@ -193,6 +207,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/portfolio/:id/screenshot": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.screenshot_uploaded")),
   "POST /staff/portfolio/:id/verify-link": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.link_verified")),
   "POST /staff/portfolio/:id/relationship": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.relationship_documented")),
+  "POST /staff/portfolio/:id/demo": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.demo_updated")),
   "POST /staff/portfolio/:id/publish": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.published")),
   "POST /staff/portfolio/:id/unpublish": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.unpublished")),
   "POST /staff/portfolio/:id/move": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.reordered")),
@@ -250,6 +265,9 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/crm": staff(crm),
   "GET /staff/crm/export.csv": staff(crm, undefined, act("lead.exported")),
   "GET /staff/crm/new": staff(crm),
+  "GET /staff/crm/new/matches": staff(rolesWith("lead.write_all", "lead.write_assigned")),
+  "POST /staff/crm/identity-erasure": staff(OWNER, undefined, act("crm.identity_erased")),
+  "POST /staff/crm/identity-reviews/resolve": staff(rolesWith("lead.write_all"), undefined, act("crm.identity_review_resolved")),
   "POST /staff/crm/new": staff(rolesWith("lead.write_all", "lead.write_assigned"), undefined, act("lead.created")),
   "GET /staff/crm/contacts": staff(crm),
   "GET /staff/crm/duplicates": staff(crm),
@@ -267,7 +285,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/crm/leads/:id/ai-draft/:jobId": staff(rolesWith("lead.write_all", "lead.write_assigned"), { id: "lead", jobId: "aiJob" }, act("ai.draft_approved")),
   "GET /staff/customers": staff(rolesWith("customers.read")),
   "GET /staff/customers/export.csv": staff(rolesWith("customers.read"), undefined, act("customer.exported")),
-  "GET /staff/customers/:id": staff(rolesWith("customers.read"), P("org")),
+  "GET /staff/customers/:id": staff(rolesWith("customers.read"), P("org"), act("customer.viewed")),
   "GET /staff/sales": staff(crm),
   "GET /staff/quotes": staff(rolesWith("quote.write")),
   "GET /staff/quotes/export.csv": staff(rolesWith("quote.write"), undefined, act("quote.exported")),
@@ -287,7 +305,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   // ── Delivery: my work, conversations, projects, tasks (src/routes/projects.ts) ──
   "GET /staff": staff(STAFF_ROLES),
   "GET /staff/conversations": staff(rolesWith("customers.read")),
-  "GET /staff/conversations/:orgId": staff(rolesWith("customers.read"), { orgId: "org" }),
+  "GET /staff/conversations/:orgId": staff(rolesWith("customers.read"), { orgId: "org" }, act("conversation.viewed")),
   "POST /staff/conversations/:orgId": staff(rolesWith("customers.read"), { orgId: "org" }, act("message.posted")),
   "POST /staff/notifications/read": staff(STAFF_ROLES, undefined, exempt("marks the caller's own notifications as read")),
   "GET /staff/projects": staff(delivery),
@@ -440,6 +458,8 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/employees/:id/disable": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.disabled")),
   "POST /staff/employees/:id/enable": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.enabled")),
   "POST /staff/employees/:id/mfa-reset": staff(rolesWith("employee.manage"), P("staffUser"), act("employee.mfa_reset")),
+  "GET /staff/employees/:id/offboarding": staff(rolesWith("employee.manage"), P("staffUser")),
+  "POST /staff/employees/:id/offboarding": staff(rolesWith("employee.manage"), P("staffUser"), act("offboarding.resolved")),
   "GET /staff/email": staff(ops),
   "GET /staff/email/export.csv": staff(ops, undefined, act("email.log_exported")),
   "GET /staff/email/templates": staff(ops),
@@ -469,6 +489,10 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/ai/:id": staff(rolesWith("ai.manage"), P("aiJob")),
   // AI Builds owner dashboard (src/routes/builds.ts)
   "GET /staff/builds": staff(rolesWith("builds.read")),
+  // Node 1 dispatch-to-GPU diagnostic (migration 0050)
+  "GET /staff/builds/diagnostics": staff(rolesWith("builds.configure")),
+  "POST /staff/builds/diagnostics": staff(rolesWith("builds.configure"), undefined, act("builds.diagnostic_created")),
+  "GET /staff/builds/diagnostics/:id": staff(rolesWith("builds.configure"), P("runnerDiagnostic")),
   "GET /staff/builds/:id": staff(rolesWith("builds.read"), P("buildJob")),
   "POST /staff/builds/pause": staff(rolesWith("builds.manage"), undefined, act("builds.paused_globally")),
   "POST /staff/builds/settings": staff(rolesWith("builds.configure"), undefined, act("builds.settings_updated")),
@@ -516,8 +540,31 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/voice/configs": staff(rolesWith("voice.manage"), undefined, act("voice.config_version_created")),
   "POST /staff/voice/configs/:version/activate": staff(rolesWith("voice.manage"), { version: "voiceVersion" }, act("voice.config_activated")),
   "GET /staff/voice/configs/diff": { ...staff(rolesWith("voice.manage")), query: "a={voiceVersion}&b={voiceVersion}" },
+  "POST /staff/voice/prompt-sync": staff(rolesWith("voice.manage"), undefined, act("voice.prompt_sync")),
+  "POST /staff/voice/budget": staff(rolesWith("voice.manage"), undefined, act("voice.budget_updated")),
   "GET /staff/voice/calls/:id": staff(rolesWith("voice.manage"), P("call"), act("call.viewed")),
   "POST /staff/voice/test-event": staff(rolesWith("voice.manage"), undefined, act("voice.test_event_sent")),
+  "GET /staff/voice/operations": staff(rolesWith("voice.manage")),
+  "POST /staff/voice/operations/settings": staff(rolesWith("voice.manage"), undefined, act("voice.settings_updated")),
+  "POST /staff/voice/consultations/:id/decide": staff(rolesWith("voice.manage"), P("consultation"), act("consultation.confirmed")),
+  "POST /staff/voice/outbound": staff(rolesWith("voice.manage"), undefined, act("voice.outbound_requested")),
+  "POST /staff/voice/outbound/:id/decide": staff(rolesWith("voice.manage"), P("outboundRequest"), act("voice.outbound_decided")),
+  "POST /staff/voice/dnc": staff(rolesWith("voice.manage"), undefined, act("voice.dnc_added")),
+  // ── AI Sales Optimization (src/routes/sales-optimization.ts): view salesopt.read, decisions salesopt.decide (both Owner-only) ──
+  "GET /staff/sales-optimization": staff(rolesWith("salesopt.read")),
+  "GET /staff/sales-optimization/versions/:id": staff(rolesWith("salesopt.read"), P("soVersion")),
+  "POST /staff/sales-optimization/control": staff(rolesWith("salesopt.decide"), undefined, act("salesopt.control_changed")),
+  "POST /staff/sales-optimization/targets": staff(rolesWith("salesopt.decide"), undefined, act("salesopt.target_set")),
+  "POST /staff/sales-optimization/targets/:stage/verify": staff(rolesWith("salesopt.decide"), { stage: "soStage" }, act("salesopt.target_verified")),
+  "POST /staff/sales-optimization/versions": staff(rolesWith("salesopt.read"), undefined, act("salesopt.version_created")),
+  "POST /staff/sales-optimization/versions/:id/evaluate": staff(rolesWith("salesopt.read"), P("soVersion"), act("salesopt.eval_started")),
+  "POST /staff/sales-optimization/versions/:id/decide": staff(rolesWith("salesopt.decide"), P("soVersion"), act("salesopt.version_rejected")),
+  "POST /staff/sales-optimization/deploy": staff(rolesWith("salesopt.decide"), undefined, blocked("needs an evaluated version and a verified Retell sales agent; refused with an error otherwise")),
+  "POST /staff/sales-optimization/rollback": staff(rolesWith("salesopt.decide"), undefined, blocked("needs an earlier verified deployment on the stage; refused with an error otherwise")),
+  "POST /staff/sales-optimization/experiments": staff(rolesWith("salesopt.decide"), undefined, blocked("needs a version verified on the production sales agent; refused with an error otherwise")),
+  "POST /staff/sales-optimization/experiments/:id/decide": staff(rolesWith("salesopt.decide"), P("soExperiment"), act("salesopt.experiment_start")),
+  "POST /staff/sales-optimization/run": staff(rolesWith("salesopt.decide"), undefined, act("salesopt.cycle_run")),
+  "POST /staff/voice/caller-erasure": staff(rolesWith("voice.manage"), undefined, act("voice.caller_data_erased")),
 };
 
 export const routeKey = (method: string, pattern: string) => `${method} ${pattern}`;

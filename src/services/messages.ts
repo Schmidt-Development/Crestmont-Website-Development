@@ -16,27 +16,66 @@ export interface MessageRow {
 
 const STAFF_ROLE_SQL = `('owner','administrator','sales','developer','project_manager','support')`;
 
-/** Thread for a project, oldest first. Customers never see internal notes. */
-export async function listThread(db: Db, viewer: { userId: string; organizationId: string; staff: boolean }, projectId: string | null): Promise<MessageRow[]> {
+/** Messages shown per thread page (CREST-GAP-040). Older ones are reached through the "earlier messages" link. */
+export const THREAD_PAGE_SIZE = 50;
+
+export interface ThreadPage {
+  /** The newest THREAD_PAGE_SIZE messages (or the page before `before`), displayed oldest first. */
+  messages: MessageRow[];
+  /** Messages older than the first one shown. */
+  earlierCount: number;
+  /** Id of the oldest shown message: the cursor for the next "earlier messages" page. */
+  earlierCursor: string | null;
+  /** True when this page is an older window (a "back to latest" link is shown). */
+  olderWindow: boolean;
+}
+
+/**
+ * Thread for a project (or the general conversation when projectId is null): the newest messages, or the
+ * page before the `before` cursor (a message id in this thread). Customers never see internal notes.
+ */
+export async function listThread(db: Db, viewer: { userId: string; organizationId: string; staff: boolean }, projectId: string | null, opts: { before?: string | null; limit?: number } = {}): Promise<ThreadPage> {
+  const limit = Math.max(1, Math.min(200, opts.limit ?? THREAD_PAGE_SIZE));
+  const scope = `m.organization_id = ? AND ${projectId ? "m.project_id = ?" : "m.project_id IS NULL"} ${viewer.staff ? "" : "AND m.internal = 0"}`;
+  const scopeBinds: unknown[] = [viewer.organizationId, ...(projectId ? [projectId] : [])];
+  // The cursor must be a message the viewer can see in this same thread; anything else falls back to the latest page.
+  let cursor: { created_at: string; rid: number } | null = null;
+  if (opts.before) {
+    cursor = await db.prepare(`SELECT m.created_at, m.rowid AS rid FROM messages m WHERE m.id = ? AND ${scope}`).bind(opts.before, ...scopeBinds).first<{ created_at: string; rid: number }>();
+  }
+  const older = cursor ? `AND (m.created_at < ? OR (m.created_at = ? AND m.rowid < ?))` : "";
+  const olderBinds = cursor ? [cursor.created_at, cursor.created_at, cursor.rid] : [];
   const sql = `SELECT m.id, m.organization_id, m.project_id, m.author_user_id, u.display_name AS author_name,
       EXISTS (SELECT 1 FROM memberships mm WHERE mm.user_id = m.author_user_id AND mm.role_id IN ${STAFF_ROLE_SQL}) AS author_is_staff,
-      m.body, m.attachment_file_id, f.filename AS attachment_name, m.internal, m.created_at,
+      m.body, m.attachment_file_id, f.filename AS attachment_name, m.internal, m.created_at, m.rowid AS rid,
       EXISTS (SELECT 1 FROM message_reads r WHERE r.message_id = m.id AND r.user_id = ?) AS read_by_me,
       EXISTS (SELECT 1 FROM message_reads r JOIN memberships rm ON rm.user_id = r.user_id WHERE r.message_id = m.id AND r.user_id <> m.author_user_id
               AND ((rm.role_id IN ${STAFF_ROLE_SQL}) <> EXISTS (SELECT 1 FROM memberships am WHERE am.user_id = m.author_user_id AND am.role_id IN ${STAFF_ROLE_SQL})))
         AS read_by_other_side
     FROM messages m JOIN users u ON u.id = m.author_user_id LEFT JOIN files f ON f.id = m.attachment_file_id AND f.deleted_at IS NULL
-    WHERE m.organization_id = ? AND ${projectId ? "m.project_id = ?" : "m.project_id IS NULL"} ${viewer.staff ? "" : "AND m.internal = 0"}
-    ORDER BY m.created_at ASC, m.rowid ASC LIMIT 500`;
-  const binds: unknown[] = [viewer.userId, viewer.organizationId];
-  if (projectId) binds.push(projectId);
-  return (await db.prepare(sql).bind(...binds).all<MessageRow>()).results;
+    WHERE ${scope} ${older}
+    ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`;
+  const rows = (await db.prepare(sql).bind(viewer.userId, ...scopeBinds, ...olderBinds, limit).all<MessageRow & { rid: number }>()).results.reverse();
+  let earlierCount = 0;
+  if (rows.length) {
+    const first = rows[0];
+    earlierCount = (await db.prepare(`SELECT COUNT(*) AS n FROM messages m WHERE ${scope} AND (m.created_at < ? OR (m.created_at = ? AND m.rowid < ?))`)
+      .bind(...scopeBinds, first.created_at, first.created_at, first.rid).first<{ n: number }>())?.n ?? 0;
+  }
+  return { messages: rows.map(({ rid: _rid, ...m }) => m), earlierCount, earlierCursor: earlierCount && rows.length ? rows[0].id : null, olderWindow: !!cursor };
 }
 
-export async function markThreadRead(db: Db, userId: string, organizationId: string, projectId: string | null, staff: boolean): Promise<void> {
+/**
+ * Marks messages read for this user. With `messageIds`, only those (the messages actually displayed) are marked,
+ * so a message the viewer has not been shown never counts as read (CREST-GAP-040). Never marks the viewer's own
+ * messages, and customers never get read receipts on internal notes.
+ */
+export async function markThreadRead(db: Db, userId: string, organizationId: string, projectId: string | null, staff: boolean, messageIds?: string[]): Promise<void> {
+  if (messageIds && !messageIds.length) return;
+  const ids = messageIds ? `AND m.id IN (${messageIds.map(() => "?").join(",")})` : "";
   await db.prepare(`INSERT OR IGNORE INTO message_reads (message_id, user_id, read_at)
-                    SELECT m.id, ?, ? FROM messages m WHERE m.organization_id = ? AND ${projectId ? "m.project_id = ?" : "m.project_id IS NULL"} AND m.author_user_id <> ? ${staff ? "" : "AND m.internal = 0"}`)
-    .bind(...[userId, nowIso(), organizationId, ...(projectId ? [projectId] : []), userId]).run();
+                    SELECT m.id, ?, ? FROM messages m WHERE m.organization_id = ? AND ${projectId ? "m.project_id = ?" : "m.project_id IS NULL"} AND m.author_user_id <> ? ${staff ? "" : "AND m.internal = 0"} ${ids}`)
+    .bind(...[userId, nowIso(), organizationId, ...(projectId ? [projectId] : []), userId, ...(messageIds ?? [])]).run();
 }
 
 export async function unreadCountForCustomer(db: Db, userId: string, organizationId: string): Promise<number> {
@@ -62,6 +101,11 @@ export async function postMessage(ctx: AppContext, input: {
   if (body.length < 1) throw new MessageError("Write a message before sending.");
   if (body.length > 10_000) throw new MessageError("Messages are limited to 10,000 characters.");
   if (input.internal && !input.fromStaff) throw new HttpError(403, "Only staff can write internal notes.");
+  // Files belong to the customer organization and appear in its portal file list, so an attachment on an
+  // internal note would be visible to (and downloadable by) the customer. Refuse instead of leaking it.
+  if (input.internal && input.attachment && input.attachment.size > 0) {
+    throw new MessageError("Internal notes cannot carry attachments: uploaded files are visible to the customer. Post the note without the file.");
+  }
   let attachmentId: string | null = null;
   if (input.attachment && input.attachment.size > 0) {
     try {
@@ -117,7 +161,7 @@ async function notifyGeneral(ctx: AppContext, organizationId: string, messageId:
 }
 
 /** Organizations with a general conversation (or every customer org when `all`), newest activity first, with unread counts for this staff user. */
-export async function listGeneralConversations(db: Db, staffUserId: string, opts: { q?: string; limit?: number } = {}) {
+export async function listGeneralConversations(db: Db, staffUserId: string, opts: { q?: string; limit?: number; offset?: number } = {}) {
   const like = opts.q ? `%${opts.q.replace(/[\\%_]/g, (m) => "\\" + m)}%` : null;
   return (await db.prepare(`SELECT o.id, o.name,
       (SELECT COUNT(*) FROM messages m WHERE m.organization_id = o.id AND m.project_id IS NULL AND m.internal = 0) AS total,
@@ -127,8 +171,15 @@ export async function listGeneralConversations(db: Db, staffUserId: string, opts
       (SELECT MAX(created_at) FROM messages m WHERE m.organization_id = o.id AND m.project_id IS NULL) AS last_at
     FROM organizations o WHERE o.kind = 'customer' ${like ? `AND o.name LIKE ? ESCAPE '\\'` : ""}
       AND (${like ? "1=1" : "EXISTS (SELECT 1 FROM messages m WHERE m.organization_id = o.id AND m.project_id IS NULL)"})
-    ORDER BY COALESCE(last_at, '') DESC, o.name LIMIT ?`).bind(staffUserId, staffUserId, ...(like ? [like] : []), opts.limit ?? 100)
+    ORDER BY COALESCE(last_at, '') DESC, o.name, o.id LIMIT ? OFFSET ?`).bind(staffUserId, staffUserId, ...(like ? [like] : []), opts.limit ?? 100, opts.offset ?? 0)
     .all<{ id: string; name: string; total: number; unread: number; last_at: string | null }>()).results;
+}
+
+/** How many organizations listGeneralConversations pages through with the same filter (CREST-GAP-071). */
+export async function countGeneralConversations(db: Db, opts: { q?: string } = {}): Promise<number> {
+  const like = opts.q ? `%${opts.q.replace(/[\\%_]/g, (m) => "\\" + m)}%` : null;
+  return (await db.prepare(`SELECT COUNT(*) AS n FROM organizations o WHERE o.kind = 'customer' ${like ? `AND o.name LIKE ? ESCAPE '\\'` : ""}
+      AND (${like ? "1=1" : "EXISTS (SELECT 1 FROM messages m WHERE m.organization_id = o.id AND m.project_id IS NULL)"})`).bind(...(like ? [like] : [])).first<{ n: number }>())?.n ?? 0;
 }
 
 export async function generalUnreadForStaff(db: Db, staffUserId: string): Promise<number> {

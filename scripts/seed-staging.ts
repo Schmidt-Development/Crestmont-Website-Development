@@ -123,19 +123,29 @@ db.raw.prepare(`INSERT INTO messages (id, organization_id, project_id, author_us
 // ── Export: INSERT OR IGNORE in foreign-key order ──
 // AI Builds rows are never seeded: sample projects must not become automated builds (and settings stay the Owner's).
 const SKIP = new Set(["d1_migrations", "sqlite_sequence", "sessions", "rate_limits", "security_events", "auth_tokens", "email_deliveries", "email_messages", "ingestion_status", "_cf_KV",
-  "build_settings", "build_project_controls", "build_briefs", "build_jobs", "build_runs", "build_events", "build_requirements", "build_runners"]);
+  "build_settings", "build_project_controls", "build_briefs", "build_jobs", "build_runs", "build_events", "build_requirements", "build_runners",
+  // Derived by triggers from contacts (migrations/0048): re-created with fresh ids when the contacts rows are applied.
+  "contact_identities", "contact_identity_links"]);
 const tables = (db.raw.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all() as { name: string }[]).map((r) => r.name).filter((t) => !SKIP.has(t));
 const deps = new Map(tables.map((t) => [t, new Set((db.raw.prepare(`PRAGMA foreign_key_list("${t}")`).all() as { table: string }[]).map((f) => f.table).filter((x) => x !== t && tables.includes(x)))]));
 const ordered: string[] = [];
 const visit = (t: string, seen = new Set<string>()) => { if (ordered.includes(t) || seen.has(t)) return; seen.add(t); for (const d of deps.get(t) ?? []) visit(d, seen); ordered.push(t); };
 tables.forEach((t) => visit(t));
 const lit = (v: unknown) => v === null || v === undefined ? "NULL" : typeof v === "number" || typeof v === "bigint" ? String(v) : `'${String(v).replace(/'/g, "''")}'`;
+// Demo users are keyed by their fixed email, but each run generates new random ids. On a re-seed
+// (reseed_demo_accounts) the users row is IGNOREd because the email already exists, so every row that pointed at this
+// run's id would reference a user that was never inserted: the whole file failed with "FOREIGN KEY constraint
+// failed". References to a demo user are therefore emitted as a lookup by email, which resolves to the user just
+// inserted on a first seed and to the existing account on a re-seed (its password and 2FA are left untouched).
+const demoUserEmail = new Map((db.raw.prepare(`SELECT id, email FROM users`).all() as { id: string; email: string }[]).map((u) => [u.id, u.email]));
+const value = (t: string, c: string, v: unknown) =>
+  typeof v === "string" && demoUserEmail.has(v) && !(t === "users" && c === "id") ? `(SELECT id FROM users WHERE email = ${lit(demoUserEmail.get(v))})` : lit(v);
 const lines = ["-- Crestmont STAGING preview seed (sample data, generated " + new Date().toISOString() + "). Never apply to production.", "PRAGMA defer_foreign_keys = on;"];
 let rows = 0;
 for (const t of ordered) {
   for (const r of db.raw.prepare(`SELECT * FROM "${t}"`).all() as Record<string, unknown>[]) {
     const cols = Object.keys(r);
-    lines.push(`INSERT OR IGNORE INTO "${t}" (${cols.map((c) => `"${c}"`).join(", ")}) VALUES (${cols.map((c) => lit(r[c])).join(", ")});`);
+    lines.push(`INSERT OR IGNORE INTO "${t}" (${cols.map((c) => `"${c}"`).join(", ")}) VALUES (${cols.map((c) => value(t, c, r[c])).join(", ")});`);
     rows++;
   }
 }

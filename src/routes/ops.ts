@@ -136,9 +136,10 @@ export async function buildFounderReport(ctx: Pick<AppContext, "db" | "now">): P
 const page = (ctx: AppContext, title: string, body: SafeHtml, status = 200) =>
   htmlResponse(ctx, appLayout(ctx, { title, nav: staffNav(ctx), home: "/staff", area: "Operations" }, body), status);
 
-const subnav = (ctx: AppContext) => tabs([
-  ["/staff/ops", "Deployments & environments"], ["/staff/ops/retention", "Data retention"], ["/staff/readiness/founder-report", "Founder status report"],
-].map(([href, l]) => ({ href, label: l, current: ctx.url.pathname === href })));
+/** Operations sub-navigation. Data retention needs settings.operational, so it is shown only to those who can open it (CREST-GAP-079). */
+const subnav = (ctx: AppContext) => tabs(([
+  ["/staff/ops", "Deployments & environments", "readiness.read"], ["/staff/ops/retention", "Data retention", "settings.operational"], ["/staff/readiness/founder-report", "Founder status report", "readiness.read"],
+] as const).filter(([, , perm]) => can(ctx.actor!, perm)).map(([href, l]) => ({ href, label: l, current: ctx.url.pathname === href })));
 
 const short = (s: string | null | undefined) => (s ? s.slice(0, 7) : "—");
 

@@ -370,3 +370,26 @@ test("[AUTH-006] customer admin invites colleagues as customer_member; members c
   assert.equal((await m.post("/portal/team", { email: "x@a.example" })).status, 403);
   assert.match(await (await m.get("/portal/team")).text(), /Only an account administrator can invite/);
 });
+
+test("[PORTAL-002] onboarding with more uploaded images than D1's 100 bound parameters still renders, listing only this customer's files", async () => {
+  const { db, a, b, pa, ca } = await twoTenants();
+  const file = (org: string, uploader: string, name: string) => {
+    const id = newId("fil");
+    return { id, stmt: db.prepare(`INSERT INTO files (id, organization_id, project_id, r2_key, filename, content_type, size_bytes, sha256, scan_status, folder, uploaded_by, created_at) VALUES (?,?,?,?,?, 'image/png', 12, 'x', 'clean', 'Onboarding/Images', ?, ?)`)
+      .bind(id, org, org === a.organizationId ? pa : null, `k/${id}`, name, uploader, nowIso()) };
+  };
+  // Uploads accumulate across draft saves with no cap; 120 ids is past D1's per-query limit when bound one by one.
+  const mine = Array.from({ length: 120 }, (_, i) => file(a.organizationId, a.id, `image-${String(i).padStart(3, "0")}.png`));
+  const theirs = file(b.organizationId, b.id, "other-tenant-secret.png");
+  await db.batch([...mine.map((f) => f.stmt), theirs.stmt]);
+  const ids = [...mine.map((f) => f.id), theirs.id];   // a foreign id smuggled into the answers must not be listed
+  await db.prepare(`INSERT INTO onboarding_responses (project_id, answers_json, updated_at) VALUES (?,?,?)`).bind(pa, JSON.stringify({ images_source: "customer", images: ids }), nowIso()).run();
+  const res = await ca.get(`/portal/projects/${pa}/onboarding`);
+  assert.equal(res.status, 200);
+  const page = await res.text();
+  assert.match(page, /image-000\.png/);
+  assert.match(page, /image-119\.png/);
+  assert.doesNotMatch(page, /other-tenant-secret/, "tenant isolation holds for file ids taken from stored answers");
+  // The local D1 stand-in enforces the same limit, so a per-id query would have failed here exactly as on Cloudflare.
+  assert.throws(() => db.prepare(`SELECT id FROM files WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids), /D1 limit: 121 bound parameters \(maximum 100\)/);
+});
