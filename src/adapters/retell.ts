@@ -246,6 +246,14 @@ export async function translateRetellInbound(db: Db, raw: string, ctx: RetellCtx
 export const VOICEMAIL_MAX_CALL_MS = 180_000;
 export const VOICEMAIL_GREETING = "Thank you for calling Crestmont Website Development. I'm an AI assistant and I can only take a message right now. Please tell me your name, your phone number and a short message, and a team member will call you back during staffed hours.";
 
+/**
+ * What the agent tells a caller who declines recording. Only what the platform enforces: without consent Crestmont
+ * discards the transcript, recording and summary (handleVoiceEvent, call_analyzed). Retell must still process the live
+ * audio to hold the conversation, and whether Retell itself keeps a copy depends on the agent's Data Storage setting
+ * (basic_attributes_only = Retell keeps none). So the agent never claims the call "is not being recorded".
+ */
+export const CONSENT_DECLINED_MESSAGE = "Understood. Crestmont won't keep a recording or transcript of this call. Say exactly this; do not say the call has stopped being recorded.";
+
 /** Retell-only consent capture: the agent calls `record_consent` after asking the caller (VOICE-006). */
 export const RETELL_ONLY_FUNCTIONS = ["record_consent"] as const;
 
@@ -272,7 +280,7 @@ export async function translateRetellFunction(db: Db, raw: string, ctx: RetellCt
     await db.prepare(`INSERT INTO retell_call_consents (provider_call_id, consent, recorded_at) VALUES (?,?,?)
         ON CONFLICT(provider_call_id) DO UPDATE SET consent = MAX(consent, excluded.consent), recorded_at = excluded.recorded_at`)
       .bind(callId, args.consent ? 1 : 0, nowIso()).run();
-    return { kind: "ack", body: { ok: true, result: { recorded: true, message: args.consent ? "Thank you. This call may be recorded and transcribed." : "Understood. This call will not be recorded or transcribed." } } };
+    return { kind: "ack", body: { ok: true, result: { recorded: true, message: args.consent ? "Thank you. This call may be recorded and transcribed." : CONSENT_DECLINED_MESSAGE } } };
   }
   const eventId = `retell-${(await sha256Hex(`${name}\n${JSON.stringify(args)}`)).slice(0, 40)}`;
   return { kind: "envelope", body: JSON.stringify({

@@ -339,3 +339,22 @@ test("[INFRA-005] [SEC-007] the staging deploy puts RETELL_API_KEY only when the
   assert.doesNotMatch(step, /echo[^\n]*\$RETELL_KEY/, "never echoes the key");
   assert.ok(wf.indexOf("Deploy Worker (staging") < i, "after the Worker exists");
 });
+
+test("[VOICE-006] declining recording: only what the platform enforces is said, and nothing is kept (fixture)", async () => {
+  const t = await app();
+  const { CONSENT_DECLINED_MESSAGE } = await import("../src/adapters/retell.ts");
+  const no = await t.call("c_cons_no", "record_consent", { consent: false });
+  assert.equal(no.status, 200);
+  assert.equal(no.json.message, CONSENT_DECLINED_MESSAGE);
+  assert.doesNotMatch(no.json.message, /will not be recorded|isn't being recorded|not recording/i, "never claims Retell stopped recording");
+  const ended = JSON.stringify({ event: "call_ended", call: { call_id: "c_cons_no", call_type: "phone_call", from_number: "+15550100123", call_status: "ended", transcript: "Agent: hello. User: my secret plans", recording_url: "https://example.com/rec.wav" } });
+  await t.client().request("POST", "/api/webhooks/retell", { body: ended, headers: { "x-retell-signature": await signRetell(KEY, ended) } });
+  const row = (await t.db.prepare(`SELECT transcript, recording_url, recording_consent FROM calls WHERE provider_call_id = 'c_cons_no'`).first<{ transcript: string | null; recording_url: string | null; recording_consent: number }>())!;
+  assert.equal(row.recording_consent, 0);
+  assert.equal(row.transcript, null, "transcript discarded without consent");
+  assert.equal(row.recording_url, null, "recording link discarded without consent");
+  const yes = await t.call("c_cons_yes", "record_consent", { consent: true });
+  assert.match(yes.json.message, /may be recorded and transcribed/);
+  const { INBOUND_MASTER_INSTRUCTIONS } = await import("../src/services/voice.ts");
+  assert.match(INBOUND_MASTER_INSTRUCTIONS, /never that the call has stopped being recorded/);
+});
