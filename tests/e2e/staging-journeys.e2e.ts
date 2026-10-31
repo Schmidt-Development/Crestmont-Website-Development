@@ -328,7 +328,7 @@ const NO_STRIPE = "BLK-004: no Stripe test-mode key is configured on staging (th
 const STRIPE_TEST_CARD = { number: "4242 4242 4242 4242", expiry: "12 / 34", cvc: "123" }; // Stripe's published test card
 
 /** Completes Stripe's hosted Checkout in TEST mode with the published test card. Refuses anything but a test session. */
-async function payOnStripeCheckout(p: Page): Promise<void> {
+async function payOnStripeCheckout(p: Page, testCard: { number: string; expiry: string; cvc: string } = STRIPE_TEST_CARD): Promise<void> {
   await p.waitForURL(/^https:\/\/checkout\.stripe\.com\//, { timeout: 60_000 });
   assert.match(p.url(), /\/c\/pay\/cs_test_/, "a Stripe TEST-mode checkout session (never live)");
   // Checkout shows the card form either directly or inside a payment-method accordion. When card is the first (or only)
@@ -340,9 +340,9 @@ async function payOnStripeCheckout(p: Page): Promise<void> {
   await Promise.any([cardNumber.waitFor({ state: "visible", timeout: 30_000 }), card.waitFor({ state: "visible", timeout: 30_000 })]).catch(() => undefined);
   if (!(await cardNumber.isVisible()) && (await card.isVisible())) await card.click();
   await cardNumber.waitFor({ state: "visible", timeout: 30_000 });
-  await cardNumber.fill(STRIPE_TEST_CARD.number);
-  await p.locator("#cardExpiry").fill(STRIPE_TEST_CARD.expiry);
-  await p.locator("#cardCvc").fill(STRIPE_TEST_CARD.cvc);
+  await cardNumber.fill(testCard.number);
+  await p.locator("#cardExpiry").fill(testCard.expiry);
+  await p.locator("#cardCvc").fill(testCard.cvc);
   if (await p.locator("#billingName").count()) await p.locator("#billingName").fill(contact.name);
   if (await p.locator("#billingPostalCode").isVisible().catch(() => false)) await p.locator("#billingPostalCode").fill("48933");
   if (await p.locator("#email").isEditable().catch(() => false)) await p.locator("#email").fill(contact.email);
@@ -864,6 +864,30 @@ test("[PAY-007] [PAY-003] Stripe test mode: the Founder issues a refund; the sig
   assert.match(await outbox(contact.email, "refund_decision", stripeRefund), /\$1\.00/);
   await c.goto(BASE + "/portal/billing");
   assert.match(await text(c), /Refund requests[\s\S]*\$1(\.00)?[\s\S]*Issued/i, "customer sees the refund issued");
+  assertClean();
+});
+
+// Not one of the 33 numbered journeys: a Stripe TEST-mode dispute. The journey customer buys a Starter package and pays with
+// Stripe's published dispute test card, which succeeds and then opens a fraudulent-reason dispute. The signed
+// charge.dispute.created webhook must record it for staff and email the Owner once. Test mode only.
+const STRIPE_DISPUTE_CARD = { number: "4000 0000 0000 0259", expiry: "12 / 34", cvc: "123" };
+test("[PAY-008] [PAY-003] Stripe test mode: a disputed payment reaches staff Disputes and the Owner is emailed once", { skip: unset || false }, async (t) => {
+  if (outcome.get(6) !== "passed") { t.skip(`needs journey 6 (${outcome.get(6) ?? "not run"})`); return; }
+  const o = await as("owner");
+  const ownerMail = `${BASE}/staff/email?to=${encodeURIComponent(account("owner").email)}&template=dispute_opened`;
+  const disputeMails = async () => { await o.goto(ownerMail); return (await o.locator("main table tbody tr", { hasText: /Payment dispute opened/i }).count()) as number; };
+  const before = await disputeMails();
+  const c = people.newCustomer.page;
+  await c.goto(`${BASE}/checkout/starter`);
+  await c.locator("input[name=terms]").check();
+  await nav(c, c.getByRole("button", { name: /^Pay \$[\d,.]+/ }).first());
+  await payOnStripeCheckout(c, STRIPE_DISPUTE_CARD);
+  const disputes = await until(o, `${BASE}/staff/disputes?q=${encodeURIComponent(contact.company)}`, /\b(dp|du)_[A-Za-z0-9]+/, "the signed charge.dispute.created webhook recording the dispute");
+  assert.match(disputes, re(contact.company), "the dispute is matched to the journey customer's payment");
+  const end = Date.now() + 120_000;
+  let after = await disputeMails();
+  while (after === before && Date.now() < end) { await o.waitForTimeout(5_000); after = await disputeMails(); }
+  assert.equal(after, before + 1, "exactly one new dispute email to the Owner");
   assertClean();
 });
 
