@@ -110,7 +110,11 @@ const schemas = {
 
 /** Booleans → "true"/"false", string arguments redacted (card numbers, SSNs) before validation and storage. */
 function normaliseArgs(raw: unknown): Obj {
-  const o = obj(raw);
+  const o = { ...obj(raw) };
+  // The lead comes from the signed call metadata. A lead_id argument that is not a lead id at all (an unrendered
+  // "{{lead_id}}", an empty string, a business name) is dropped instead of failing the call; a well-formed but
+  // different lead id is still refused by bind() as a cross-lead attempt.
+  if (o.lead_id !== undefined && !(typeof o.lead_id === "string" && LEAD_ID.test(o.lead_id))) delete o.lead_id;
   return Object.fromEntries(Object.entries(o).map(([k, val]) => [k, typeof val === "string" ? redactSensitive(val) : typeof val === "boolean" ? String(val) : Array.isArray(val) ? val.map((x) => (typeof x === "string" ? redactSensitive(x) : x)) : val]));
 }
 

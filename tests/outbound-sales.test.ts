@@ -279,6 +279,11 @@ test("[SEC-001] outbound functions: signature required; unbound calls, inbound c
   assert.equal((await t.post(FN, fn(callId, salesId, "issue_refund", {}))).res.status, 422);
   const wrongEnv = await t.post(FN, { name: "get_packages_pricing", call: { ...salesCall(callId, salesId), metadata: { crestmont_env: "production", crestmont_sales_call_id: salesId } }, args: {} });
   assert.equal(wrongEnv.res.status, 409);
+  // An unrendered placeholder or empty value is ignored (the binding comes from signed metadata), never a 422.
+  for (const junk of ["{{lead_id}}", "", "Buckeye Bakery"]) assert.equal((await t.post(FN, fn(callId, salesId, "get_packages_pricing", { lead_id: junk }))).res.status, 200, junk);
+  const rawBody = JSON.stringify(fn(callId, salesId, "get_packages_pricing", {}));
+  const placeholder = await t.client().request("POST", `${FN}?lead_id=%7B%7Blead_id%7D%7D`, { body: rawBody, headers: { "content-type": "application/json", "x-retell-signature": await signRetell(KEY, rawBody) } });
+  assert.equal(placeholder.status, 200, "an unrendered {{lead_id}} query value is ignored");
   const ok = await t.post(FN, fn(callId, salesId, "get_outbound_lead_context", { lead_id: leadId }));
   assert.equal(ok.res.status, 200);
   // The receptionist's endpoint does not know these functions.
@@ -510,4 +515,21 @@ test("[OWN-002] [SEC-005] Owner page: off by default with reasons, Owner-only, s
   const problems = await SO.saveSalesSettings(t.db, t.owner.id, { enabled: true, agentId: "agent_receptionist", fromNumber: "+16145550100", maxConcurrent: 1, maxPerRun: 1, maxPerDay: 1, maxAttempts: 1, retryAfterHours: 48 });
   assert.ok(problems.some((p) => /separate Retell agent/.test(p)));
   assert.ok((await SO.saveSalesSettings(t.db, t.owner.id, { enabled: true, agentId: "agent_x", fromNumber: "+16145550100", maxConcurrent: 50, maxPerRun: 1, maxPerDay: 1, maxAttempts: 1, retryAfterHours: 48 })).some((p) => /1–20/.test(p)), "concurrency capped at Retell's documented 20");
+});
+
+test("[VOICE-004] the Retell master prompt names only real tools and variables, quotes no prices and keeps the mandatory disclosures", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const prompt = await readFile(new URL("../docs/voice/outbound-sales-agent-prompt.txt", import.meta.url), "utf8");
+  const { SALES_FUNCTIONS } = await import("../src/services/sales-functions.ts");
+  const tools = new Set<string>([...SALES_FUNCTIONS, "transfer_call", "end_call"]);
+  for (const t of tools) assert.ok(prompt.includes(t), `prompt uses ${t}`);
+  for (const bad of ["route_support", "record_call_outcome", "send_sms", "get_published_pricing", "create_lead", "request_callback", "escalate"]) assert.ok(!new RegExp(`\\b${bad}\\b`).test(prompt), `no ${bad}`);
+  const vars = new Set([...prompt.matchAll(/\{\{\s*([a-z_]+)\s*\}\}/g)].map((m) => m[1]));
+  const allowed = new Set(["business_name", "first_name", "industry", "website_status", "verified_issue", "recommended_service", "research_verified", "agent_number"]);
+  for (const v of vars) assert.ok(allowed.has(v), `unknown variable {{${v}}}`);
+  assert.ok(!vars.has("lead_id"), "the lead id is never put in the spoken prompt");
+  assert.doesNotMatch(prompt, /\$\s?\d/, "no hard-coded prices: they come from get_packages_pricing");
+  for (const must of [/AI assistant/, /stop calling/, /recorded/, /record_do_not_call/, /payment_status "paid"/, /do not leave a message/i, /curly braces/]) assert.match(prompt, must);
+  // Every enum value the prompt tells the model to send exists in the server schemas.
+  for (const v of ["package_information", "approved_quote", "onboarding_instructions", "follow_up", "staff_callback", "consultation", "ai_follow_up_call", "quote_required", "not_interested", "wrong_number", "follow_up_requested", "interested"]) assert.ok(prompt.includes(`"${v}"`), v);
 });
