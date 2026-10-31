@@ -16,6 +16,7 @@ import { runJobs } from "../src/app/scheduled.ts";
 import { provisionProjectOnce, createPackageOrder } from "../src/services/commerce.ts";
 import { endOfBusinessDay } from "../src/lib/business-time.ts";
 import { signVoiceEvent } from "../src/services/voice.ts";
+import { notifyRefundIssued } from "../src/services/refunds.ts";
 
 /** FIXTURE: records Checkout requests; never contacts Stripe. */
 class FakePayments implements PaymentsAdapter {
@@ -331,12 +332,14 @@ test("[PAY-007] charge.refunded: Dashboard refunds email the customer once; plat
   assert.equal((await one<{ status: string }>(t.db, `SELECT status FROM payments WHERE stripe_payment_intent_id = 'pi_refund_1'`)).status, "refunded");
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM email_deliveries WHERE to_email = ? AND template = 'refund_decision'`, cu.email), 1);
   assert.match((await lastEmail(t.db, cu.email))!.text_body, /\$999\.00[\s\S]*re_dash_1/);
-  // A refund the platform issued (and already emailed) produces no second email.
+  // A refund the platform issued (and already emailed through its issue step) produces no second email.
   const pay = await one<{ id: string }>(t.db, `SELECT id FROM payments WHERE stripe_payment_intent_id = 'pi_refund_1'`);
   await t.db.prepare(`INSERT INTO refunds (id, organization_id, payment_id, amount_cents, reason, status, requested_by, stripe_refund_id, issued_at, customer_notified_at, created_at) VALUES ('rf_fixture', ?, ?, 500, 'fixture refund reason', 'issued', ?, 're_platform_1', ?, ?, ?)`)
     .bind(cu.organizationId, pay.id, cu.id, nowIso(), nowIso(), nowIso()).run();
+  await notifyRefundIssued({ db: t.db, email: new OutboxEmail(t.db), baseUrl: "http://crestmont.test" }, "rf_fixture", "re_platform_1"); // the issue step's own notice
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM email_deliveries WHERE to_email = ? AND template = 'refund_decision'`, cu.email), 2);
   await webhook(t, "charge.refunded", { ...charge, id: "ch_refund_2", refunds: { data: [{ id: "re_platform_1", amount: 500 }] } });
-  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM email_deliveries WHERE to_email = ? AND template = 'refund_decision'`, cu.email), 1);
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM email_deliveries WHERE to_email = ? AND template = 'refund_decision'`, cu.email), 2);
 });
 
 test("[PAY-008] dispute opened emails the Owner once (in-app notices unchanged)", async () => {

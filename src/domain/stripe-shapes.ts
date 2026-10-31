@@ -50,3 +50,22 @@ export function subscriptionPeriodEnd(sub: Obj): number | null {
   const ends = items.map((i) => obj(i)?.current_period_end).filter((x): x is number => typeof x === "number");
   return ends.length ? Math.max(...ends) : null;
 }
+
+// Charge.refunds is not included in Charge objects (API responses or webhook payloads) at 2022-11-15 or newer, which
+// covers both supported webhook endpoint versions (2025-02-24.acacia, 2026-10-28.endive). Only older payloads carry it.
+// https://docs.stripe.com/changelog/2022-11-15/deprecates-charges-auto-expand
+export interface ChargeRefund { id: string; amount: number | null }
+
+/** Newest refund listed on a charge payload (Stripe lists newest first), or null when the payload lists none. */
+export function chargeLatestRefund(ch: Obj): ChargeRefund | null {
+  const data = obj(ch.refunds)?.data;
+  if (!Array.isArray(data)) return null;
+  const first = obj(data[0]);
+  const id = first ? idOf(first) : null;
+  return id ? { id, amount: typeof first!.amount === "number" ? first!.amount : null } : null;
+}
+
+/** True when the charge payload has no refund list at all (2022-11-15+ shape), as opposed to an empty list. */
+export function chargeLacksRefundList(ch: Obj): boolean {
+  return !Array.isArray(obj(ch.refunds)?.data);
+}

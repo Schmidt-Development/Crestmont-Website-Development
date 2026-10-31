@@ -65,6 +65,17 @@ export class NoPayments implements PaymentsAdapter {
  */
 export const STRIPE_API_VERSION = "2025-02-24.acacia";
 
+/**
+ * API versions a webhook endpoint may use (CREST-GAP-017). Requests stay pinned to STRIPE_API_VERSION; only the webhook
+ * payload shape follows the endpoint. 2026-10-28.endive is the current version that new endpoints default to in the Stripe
+ * Dashboard and Workbench. Every breaking change from Basil through Endive that touches a field the handler reads is
+ * covered by src/domain/stripe-shapes.ts and tests/stripe-endive.test.ts (Invoice payment links and subscription moved
+ * in basil; Charge.refunds not included since 2022-11-15). Endive's own breaking changes (polymorphic billing_cycle_anchor,
+ * payment_method_types removed from Checkout/PaymentIntent creation) touch nothing the handler reads or sends.
+ * Add a version here only after its payload shapes are tested.
+ */
+export const SUPPORTED_WEBHOOK_API_VERSIONS: readonly string[] = [STRIPE_API_VERSION, "2026-10-28.endive"];
+
 export class StripePayments implements PaymentsAdapter {
   readonly configured = true;
   readonly mode: StripeMode;

@@ -53,13 +53,28 @@ function guard(actor: Actor, from: RefundStatus, to: RefundStatus, opts: { manda
 }
 
 type RefundMail = { event: "under_review" } | { event: "denied" } | { event: "approved"; amountCents: number } | { event: "issued"; amountCents: number; reference: string };
-async function notifyCustomer(ctx: AppContext, r: RefundRow, mail: RefundMail, key: string) {
+type NotifyCtx = Pick<AppContext, "db" | "email" | "baseUrl"> & { now?: AppContext["now"] };
+/** Emails the requester and adds the in-app notice, once per (refund, key): a repeat with the same key (for "issued",
+ *  the Stripe webhook and the issue step racing each other) sends nothing and adds no second notice. */
+async function notifyCustomer(ctx: NotifyCtx, r: Pick<RefundRow, "id" | "requester_email" | "requested_by">, mail: RefundMail, key: string) {
   const data = { ...mail, url: `${ctx.baseUrl}/portal/billing` };
-  await sendMail(ctx, { template: "refund_decision", to: r.requester_email, idempotencyKey: `refund:${r.id}:${key}`, data });
+  const sent = await sendMail(ctx, { template: "refund_decision", to: r.requester_email, idempotencyKey: `refund:${r.id}:${key}`, data });
+  if (sent.status === "duplicate") return;
   const heading = templateContent({ template: "refund_decision", data }).heading;
   await ctx.db.prepare(`UPDATE refunds SET customer_notified_at = ? WHERE id = ?`).bind(nowIso(ctx.now), r.id).run();
   await ctx.db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES (?,?,?,?,?,?,?)`)
     .bind(newId("ntf"), r.requested_by, "refund_update", "refund", r.id, heading, nowIso(ctx.now)).run();
+}
+
+/**
+ * The "refund issued" notice for a platform refund request (CREST-GAP-039). Both the Founder's issue step and the
+ * charge.refunded webhook call this with the same idempotency key, so the customer hears once whichever runs first.
+ */
+export async function notifyRefundIssued(ctx: NotifyCtx, refundId: string, reference: string) {
+  const r = await ctx.db.prepare(`SELECT r.id, r.amount_cents, r.requested_by, u.email AS requester_email FROM refunds r JOIN users u ON u.id = r.requested_by WHERE r.id = ?`)
+    .bind(refundId).first<{ id: string; amount_cents: number; requested_by: string; requester_email: string }>();
+  if (!r) return;
+  await notifyCustomer(ctx, r, { event: "issued", amountCents: r.amount_cents, reference }, "issued");
 }
 
 /** Support review steps: requested→under_review, under_review→recommended|denied. */
@@ -124,7 +139,7 @@ export async function issueRefund(ctx: AppContext, actor: Actor, id: string) {
   ]);
   await audit(ctx.db, { actorUserId: actor.userId, action: failed ? "refund.failed" : "refund.issued", subjectType: "refund", subjectId: id, organizationId: r.organization_id, details: { stripeRefundId: result.id, status: result.status, amountCents: r.amount_cents } });
   if (!failed) await syncBuildsForRefund(ctx.db, r.payment_id);
-  if (!failed) await notifyCustomer(ctx, r, { event: "issued", amountCents: r.amount_cents, reference: result.id }, "issued");
+  if (!failed) await notifyRefundIssued(ctx, r.id, result.id);
   return { stripeRefundId: result.id, status: failed ? "failed" : "issued" };
 }
 
