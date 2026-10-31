@@ -52,7 +52,9 @@ test("[AIB-RUNNER] D4: the Windows kit keeps inference separate from untrusted c
   const compose = readFileSync(path.join(dir, "docker-compose.yml"), "utf8");
   const installer = readFileSync(path.join(dir, "Install-CrestmontRunner.ps1"), "utf8");
   assert.match(installer, /OLLAMA_HOST = "127\.0\.0\.1:11434"/, "native Ollama bound to localhost");
-  assert.match(installer, /it must be localhost only/, "the installer stops if Ollama listens beyond localhost");
+  const probe = readFileSync(path.join(dir, "OllamaProbe.ps1"), "utf8");
+  assert.match(probe, /it must be localhost only/, "exposure is a problem (OllamaProbe.ps1; behaviour in ollama-probe.test.ts)");
+  assert.match(installer, /if \(-not \$ollamaState\.ok\) \{ Exit-WithProblem \}/, "the installer stops if Ollama listens beyond localhost");
   assert.doesNotMatch(compose, /^\s+ports:/m, "no published ports (Ollama is never exposed through Docker)");
   // The in-Docker alternative is opt-in only.
   assert.match(compose, /profiles: \["ollama-in-docker"\]/);

@@ -156,7 +156,7 @@ test("[AIB-RUNNER] installer: configuration preserved across re-runs, inputs val
   assert.match(install, /-OllamaImage must be pinned by tag and digest/);
   assert.match(install, /\$ollamaCli = if \(Test-Path \$ollamaExe\)/, "ollama by full path after a fresh install");
   assert.doesNotMatch(install, /& ollama list|"ollama" @\("pull"/);
-  assert.match(install, /\$want = if \(\$m\.Contains\(":"\)\)/, "exact tag match in ollama list (every model of the mode)");
+  assert.match(install, /Find-CrestmontMissingModel -Wanted \$pullList -Available \$names/, "exact tag match in Ollama's model list (every model of the mode; ollama-probe.test.ts)");
   // Founder V4: dual-model mode pulls and checks both models; one model is loaded at a time; GPU telemetry task.
   assert.match(install, /\[string\]\$ModelA = "",/);
   assert.match(install, /Dual-model mode needs both -ModelA \(architect\/reviewer\) and -ModelB \(builder\)/);

@@ -57,6 +57,11 @@ jobs:
             exit 1
           fi
           cat "$RUNNER_TEMP/runnerenv.txt"
+      - name: OllamaProbe.ps1 under Windows PowerShell 5.1 (Ollama API liveness, localhost-only, exact model tags; real Get-NetTCPConnection / netstat)
+        shell: pwsh
+        env:
+          PWSH: powershell
+        run: node --no-warnings --test runner/test/ollama-probe.test.ts
       - name: Discover-Hardware.ps1 (read-only) -> select-model.ts
         shell: powershell
         run: |
