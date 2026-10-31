@@ -36,7 +36,7 @@ export interface BuildSettings {
   automation_enabled: number; globally_paused: number; pause_reason: string | null; auto_start_after: string;
   run_budget_micro: number; project_budget_micro: number; max_runtime_minutes: number; max_turns: number;
   max_concurrent: number; max_attempts: number; lease_seconds: number; model: string; updated_by: string | null; updated_at: string;
-  /** Founder policy for customer revision requests (migration 0051): off | owner_approval (default) | auto. */
+  /** Founder policy for customer revision requests (migration 0056): off | owner_approval (default) | auto. */
   customer_revision_mode: CustomerRevisionMode;
   /** Days before a superseded / finished build's preview is deleted; null = keep until an owner deletes it (0041). */
   preview_retention_days: number | null;
@@ -124,7 +124,7 @@ export interface ProjectFacts {
   scopeRecorded: boolean;
   refunded: boolean;
   disputed: boolean;
-  /** The qualifying payment came from the test-only payment simulation (migration 0054). */
+  /** The qualifying payment came from the test-only payment simulation (migration 0059). */
   simulatedPayment?: boolean;
   /** The Owner marked the organization as a fictional test organization (required for a simulated payment to count). */
   simulationTestOrg?: boolean;
@@ -156,7 +156,7 @@ export async function projectFacts(db: Db, projectId: string): Promise<ProjectFa
   };
 }
 
-/** True when any payment on the project's order came from the test-only payment simulation (migration 0054). */
+/** True when any payment on the project's order came from the test-only payment simulation (migration 0059). */
 export async function projectPaidBySimulation(db: Db, projectId: string): Promise<boolean> {
   return !!(await db.prepare(`SELECT 1 FROM payments p JOIN projects pr ON pr.order_id = p.order_id WHERE pr.id = ? AND p.provider = 'simulated' LIMIT 1`).bind(projectId).first());
 }

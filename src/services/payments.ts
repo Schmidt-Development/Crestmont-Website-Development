@@ -257,7 +257,7 @@ export async function processStripeEvent(ctx: EventCtx, evt: StripeEvent): Promi
 /**
  * Records a confirmed payment for a local invoice and runs the follow-ups (project provisioning, build eligibility,
  * change order, lead conversion, staff notification, receipt email). Shared by Checkout (checkout.session.completed),
- * Stripe Invoices (invoice.paid, PAY-006) and the test-only payment simulation (payment-simulation.ts, migration 0054).
+ * Stripe Invoices (invoice.paid, PAY-006) and the test-only payment simulation (payment-simulation.ts, migration 0059).
  *
  * CREST-GAP-006: the follow-ups run on EVERY delivery, including when the invoice is already paid, and each one is
  * idempotent (one project per order by unique index, conditional lead conversion, keyed receipt). So a retry after a
@@ -268,7 +268,7 @@ async function applyInvoicePayment(ctx: Pick<AppContext, "db" | "email" | "baseU
   await confirmInvoicePayment(ctx, { provider: "stripe", eventId: evt.id }, invoiceId, payment, to);
 }
 
-/** Where a confirmed payment came from: a verified Stripe webhook, or the test-only payment simulation (0054). */
+/** Where a confirmed payment came from: a verified Stripe webhook, or the test-only payment simulation (0059). */
 export type PaymentSource = { provider: "stripe"; eventId: string } | { provider: "simulated"; eventId: string; transactionId: string };
 
 /** The provider-neutral payment-confirmation handler: marks the invoice paid (idempotent), then the shared follow-ups. */

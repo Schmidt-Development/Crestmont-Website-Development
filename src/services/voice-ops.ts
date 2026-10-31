@@ -95,6 +95,8 @@ export async function eraseCallerData(db: Db, staffUserId: string, phoneRaw: str
     ...callIds.map((id) => db.prepare(`UPDATE calls SET transcript = NULL, recording_url = NULL, summary = NULL,
         from_number = CASE WHEN direction = 'inbound' THEN NULL ELSE from_number END WHERE id = ?`).bind(id)),
     ...consultationIds.map((id) => db.prepare(`UPDATE consultations SET name = 'Deleted contact', phone = NULL, email = NULL, topic = NULL, updated_at = ? WHERE id = ?`).bind(at, id)),
+    // Checkout links the receptionist emailed during this caller's calls (migration 0055): the address goes.
+    ...callIds.map((id) => db.prepare(`UPDATE voice_checkout_links SET email = 'erased:' || id WHERE call_id = ?`).bind(id)),
     ...contactIds.map((id) => db.prepare(`UPDATE contacts SET name = 'Deleted contact', email = NULL, phone = NULL WHERE id = ?`).bind(id)),
     // Receptionist-written CRM text quotes names and numbers: replace it on this caller's receptionist leads.
     ...leadIds.map((id) => db.prepare(`UPDATE leads SET message = 'Details erased at the caller''s request' WHERE id = ? AND source = 'ai_receptionist'`).bind(id)),

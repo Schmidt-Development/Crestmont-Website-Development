@@ -1,0 +1,17 @@
+{
+  // Research worker typecheck: `npx tsc -p research-worker/tsconfig.json`. src/domain/research.ts is shared with the Worker.
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true
+  },
+  "include": ["src", "test", "bench", "live", "../src/domain/research.ts"]
+}

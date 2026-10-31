@@ -59,6 +59,8 @@ export interface Env {
    * same value (≥32 random characters) as the runner's PREVIEW_GATE_SECRET. Unset = previews cannot be opened.
    */
   BUILD_PREVIEW_GATE_SECRET?: string;
+  /** Shared HMAC secret for the lead-research worker API (docs/research/RUNBOOK.md). Unset = no worker can connect. */
+  RESEARCH_RUNNER_SECRET?: string;
   /** "yes" refuses runner requests without a replay-protection nonce (CREST-GAP-087). */
   RUNNER_REQUIRE_NONCE?: string;
   /** HMAC key for POST /api/scheduled/run (external scheduler when native Cron Triggers are unavailable). */

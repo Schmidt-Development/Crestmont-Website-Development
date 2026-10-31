@@ -23,7 +23,27 @@ async function fetchAnonymous(f: Fetch, base: string, path: string): Promise<Res
   return r;
 }
 
-const decode = (s: string) => s.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&#39;|&#x27;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, " ").trim();
+const NAMED: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+/**
+ * Decodes HTML character references in ONE pass (the platform's escapeHtml emits &amp; &lt; &gt; &quot; &#39; &#96;).
+ * Each reference is replaced exactly once and the output is never rescanned, so "&amp;#39;" stays the text "&#39;".
+ * Invalid code points become U+FFFD; unknown or malformed references are left as written.
+ */
+export function decodeEntities(s: string): string {
+  return s.replace(/&(?:#(\d{1,8})|#[xX]([0-9a-fA-F]{1,7})|([A-Za-z]{2,8}));/g, (whole, dec: string | undefined, hex: string | undefined, name: string | undefined) => {
+    if (name !== undefined) return NAMED[name.toLowerCase()] ?? whole;
+    const cp = dec !== undefined ? Number(dec) : parseInt(hex!, 16);
+    return cp > 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff) ? String.fromCodePoint(cp) : "\uFFFD";
+  });
+}
+/** Removes tags until none are left, so split or nested markup ("<<b>script>") cannot reassemble into a tag. */
+export function stripTags(s: string): string {
+  let prev: string;
+  do { prev = s; s = s.replace(/<[^<>]*>/g, ""); } while (s !== prev);
+  return s;
+}
+/** Visible text of an HTML fragment: tags removed first (to a fixed point), then entities decoded once, whitespace collapsed. */
+export const decode = (s: string) => decodeEntities(stripTags(s)).replace(/\s+/g, " ").trim();
 
 export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log: (s: string) => void = () => {}): Promise<{ modules: number; pages: number }> {
   const base = v.base.replace(/\/$/, "");
@@ -85,7 +105,7 @@ export async function verifyStagingAccess(v: VerifyInput, f: Fetch = fetch, log:
   r = await send("GET", "/staff");
   if (r.status !== 200) fail("Owner command center", `HTTP ${r.status}`);
   const links = new Map<string, string>();
-  for (const m of (await r.text()).matchAll(/<a\b[^>]*class="side-link"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)) links.set(decode(m[2].replace(/<span class="badge[\s\S]*?<\/span>/g, "")), m[1].replace(/&amp;/g, "&"));
+  for (const m of (await r.text()).matchAll(/<a\b[^>]*class="side-link"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)) links.set(decode(m[2].replace(/<span class="badge[\s\S]*?<\/span>/g, "")), decodeEntities(m[1]));
   const missing = OWNER_MODULE_LABELS.filter((l) => !links.has(l));
   if (missing.length) fail("Owner navigation", `missing modules: ${missing.join(", ")}`);
   let pages = 0;

@@ -1,0 +1,18 @@
+{
+  "name": "crestmont-research-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Crestmont lead-research worker for the Windows workstation: open business datasets (Overture Maps, optional Foursquare OS / OSM), Common Crawl website evidence, robots-respecting website verification and audits, local Ollama drafts, and signed delivery to the Crestmont CRM. No runtime npm dependencies; DuckDB CLI required; Playwright and Lighthouse optional.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node --no-warnings src/main.ts",
+    "preflight": "node --no-warnings src/main.ts --preflight",
+    "bench": "node --no-warnings bench/bench.ts",
+    "test": "node --no-warnings --test 'test/*.test.ts'",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {}
+}

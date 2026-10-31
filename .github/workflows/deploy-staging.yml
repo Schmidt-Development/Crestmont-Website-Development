@@ -226,6 +226,9 @@ jobs:
           era=$(node --no-warnings scripts/staging-secrets.ts derive crmErasure)
           echo "::add-mask::$era"
           printf '%s' "$era" | node --no-warnings scripts/staging-secrets.ts put CRM_ERASURE_HMAC_KEY
+          res=$(node --no-warnings scripts/staging-secrets.ts derive research)
+          echo "::add-mask::$res"
+          printf '%s' "$res" | node --no-warnings scripts/staging-secrets.ts put RESEARCH_RUNNER_SECRET
 
       - name: Report file storage state (file-storage:staging feed)
         continue-on-error: true
@@ -464,6 +467,38 @@ jobs:
           export CRM_IMPORT_SECRET
           node --no-warnings scripts/crm-staging-e2e.ts
 
+      # Lead research (PR #48). Real Overture places for a small public bounding box, extracted by a step that holds no
+      # credentials (the DuckDB package and the open-data download run without secrets), then researched by the real
+      # worker code against their live websites and delivered to this staging Worker and staging D1. A few qualified
+      # prospects are promoted into the staging CRM through the Owner route. Nothing is ever dialled (D-14).
+      - name: Lead research candidates (Overture open data; no credentials)
+        id: research_candidates
+        if: steps.smoke.outcome == 'success'
+        continue-on-error: true
+        env:
+          DUCKDB_PATH: ${{ github.workspace }}/research-worker/live/duckdb-shim.py
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check "duckdb>=1.1,<2"
+          node --no-warnings research-worker/live/overture-sample.ts --request research-worker/live/staging-e2e-request.json --out e2e/candidates.jsonl
+
+      - name: Lead research E2E (live staging + D1 + CRM)
+        id: research_e2e
+        if: steps.smoke.outcome == 'success'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          E2E_BASE_URL: ${{ steps.deploy.outputs.url }}
+          E2E_ACCOUNTS_FILE: access/demo-accounts.md
+        run: |
+          unset EVIDENCE_INGEST_SECRET
+          test -s e2e/candidates.jsonl || { echo "::error title=Lead research E2E::no Overture candidates were extracted"; exit 1; }
+          RESEARCH_RUNNER_SECRET=$(node --no-warnings scripts/staging-secrets.ts derive research)
+          echo "::add-mask::$RESEARCH_RUNNER_SECRET"
+          export RESEARCH_RUNNER_SECRET
+          node --no-warnings scripts/research-staging-e2e.ts --candidates e2e/candidates.jsonl --request research-worker/live/staging-e2e-request.json
+
       # The frontend's hosted browser suite (previously run only against the frontend-preview Worker): every public page at
       # desktop and phone size, interactions, the portfolio explorer and each verified demo, recorded tours. No secrets;
       # the contact form is filled but never submitted here (staging's database and email provider are persistent).
@@ -563,7 +598,7 @@ jobs:
 
       - name: Remove credentials and evidence from the runner
         if: always()
-        run: rm -rf access forensics "$RUNNER_TEMP/rotation-state.json"
+        run: rm -rf access forensics e2e "$RUNNER_TEMP/rotation-state.json"
 
       # Staging certification (33 required journeys) — published on every run; only 33/33 passed is "certified".
       - name: Staging certification summary
@@ -589,4 +624,10 @@ jobs:
         if: always() && steps.crm_e2e.outcome == 'failure'
         run: |
           echo "::error title=CRM staging E2E failed::The CRM duplicate protection E2E failed; see its annotations and the 'CRM duplicate protection E2E' step."
+          exit 1
+
+      - name: Fail the deploy when the lead research E2E failed
+        if: always() && (steps.research_candidates.outcome == 'failure' || steps.research_e2e.outcome == 'failure')
+        run: |
+          echo "::error title=Lead research staging E2E failed::See the 'Lead research E2E' step and its annotations."
           exit 1

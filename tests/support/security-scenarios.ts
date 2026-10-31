@@ -414,6 +414,10 @@ export function auditScenarios(w: World): Scenario[] {
           VALUES (?, 'callback', '+15550100992', 'TEST DATA', 'pending_approval', ?, 1, ?, ?)`).bind(w.ids.outboundRequest, `crestmont_${w.ids.outboundRequest}`, nowIso(), nowIso()).run();
     } },
     { key: "POST /staff/voice/dnc", fields: () => ({ phone: "+15550100993", detail: "Matrix opt-out (TEST DATA)" }) },
+    // ── Lead research ──
+    { key: "POST /staff/research/settings", fields: () => ({ paused: "1", reason: "Matrix pause (TEST DATA)", threshold: "60", max_batch: "100" }) },
+    { key: "POST /staff/research/promote", fields: () => ({ prospect_id: w.ids.researchProspect! }), setup: async () => { w.ids.researchProspect = await insertResearchProspect(w, "+12025550143"); } },
+    { key: "POST /staff/research/dismiss", fields: () => ({ prospect_id: w.ids.researchProspect2!, reason: "Matrix dismissal (TEST DATA)" }), setup: async () => { w.ids.researchProspect2 = await insertResearchProspect(w, "+12025550144"); } },
     { key: "POST /staff/voice/caller-erasure", fields: () => ({ phone: "+15550100994", note: "Matrix erasure request by email (TEST DATA)" }) },
 
     // ── AI Sales Optimization (TEST DATA; Retell is a fixture that answers only api.retellai.com) ──
@@ -535,3 +539,12 @@ export function auditScenarios(w: World): Scenario[] {
   ];
 }
 
+/** A qualified research prospect (TEST DATA) for the promote / dismiss audit scenarios. */
+async function insertResearchProspect(w: World, phone: string): Promise<string> {
+  const id = newId("rp"), at = nowIso();
+  await w.db.prepare(`INSERT INTO research_prospects (id, business_key, name, name_norm, state, phone_e164, phone_norm, phones_json, sources_json, website_class, website_json, identity_confidence, score, qualified, status, content_hash, last_verified_at, first_seen_at, updated_at)
+      VALUES (?, ?, 'Matrix Research Co (TEST DATA)', 'matrix research', 'MI', ?, ?, ?, '[{"source":"overture","sourceId":"t","license":"CDLA-Permissive-2.0","retrievedAt":"2026-10-30T00:00:00.000Z"}]', 'NO_OFFICIAL_WEBSITE_FOUND',
+      '{"confidence":0.8,"checkedAt":"2026-10-30T00:00:00.000Z","identitySignals":[],"checks":[]}', 0.9, 80, 1, 'qualified', 'x', ?, ?, ?)`)
+    .bind(id, `overture:${id}`, phone, phone.slice(2), JSON.stringify([phone]), at, at, at).run();
+  return id;
+}

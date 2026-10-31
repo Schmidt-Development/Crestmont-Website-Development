@@ -159,7 +159,7 @@ export async function issueMilestoneInvoice(db: Db, projectId: string, kind: "de
 }
 
 export async function markInvoicePaid(db: Db, invoiceId: string, payment: { amountCents: number; paymentIntentId: string | null; chargeId?: string | null; feeCents?: number | null;
-  /** Test-only payment simulation (migration 0054); Stripe otherwise. */ provider?: "stripe" | "simulated"; simulatedTransactionId?: string | null }) {
+  /** Test-only payment simulation (migration 0059); Stripe otherwise. */ provider?: "stripe" | "simulated"; simulatedTransactionId?: string | null }) {
   const inv = await db.prepare(`SELECT * FROM invoices WHERE id = ?`).bind(invoiceId).first<InvoiceRow>();
   if (!inv) throw new Error(`Invoice ${invoiceId} not found`);
   if (inv.status === "paid") {
