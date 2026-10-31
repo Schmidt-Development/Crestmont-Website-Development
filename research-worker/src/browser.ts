@@ -7,10 +7,14 @@ import { lookup } from "node:dns/promises";
 import { spawn } from "node:child_process";
 import { isPublicAddress } from "./http.ts";
 
+export interface RenderedPage {
+  ok: boolean; error: string | null; finalUrl: string; status: number | null; html: string; title: string; textLength: number; scrollWidth: number; innerWidth: number;
+  viewportMeta: boolean; images: number; imagesNoAlt: number; httpResources: number; insecureForms: number; consoleErrors: number; responseMs: number | null; loadMs: number | null;
+}
 export interface BrowserCheck { viewport: string; viewportWidth: number; scrollWidth: number; overflowPx: number; textLength: number; consoleErrors: number; firstErrors: string[]; smallTapTargets: number; error: string | null }
 
 type PwWsRoute = { url(): string; close(): Promise<void>; connectToServer(): unknown };
-type PwPage = { routeWebSocket?(p: string | RegExp, h: (ws: PwWsRoute) => Promise<void> | void): Promise<void>; on(e: string, cb: (x: { type(): string; text(): string }) => void): void; route(p: string, h: (r: { request(): { url(): string }; abort(): Promise<void>; continue(): Promise<void> }) => Promise<void>): Promise<void>; goto(u: string, o: object): Promise<unknown>; evaluate<T>(fn: () => T): Promise<T>; close(): Promise<void> };
+type PwPage = { content(): Promise<string>; routeWebSocket?(p: string | RegExp, h: (ws: PwWsRoute) => Promise<void> | void): Promise<void>; on(e: string, cb: (x: { type(): string; text(): string }) => void): void; route(p: string, h: (r: { request(): { url(): string }; abort(): Promise<void>; continue(): Promise<void> }) => Promise<void>): Promise<void>; goto(u: string, o: object): Promise<unknown>; evaluate<T>(fn: () => T): Promise<T>; close(): Promise<void> };
 type PwBrowser = { newContext(o: object): Promise<{ newPage(): Promise<PwPage>; close(): Promise<void> }>; close(): Promise<void> };
 
 const hostOk = new Map<string, { ok: boolean; at: number }>();
@@ -33,7 +37,7 @@ export class Browser {
   /** Null when Playwright or its Chromium is not installed. */
   static async open(userAgent: string): Promise<Browser | null> {
     try {
-      const pw = await (Function("m", "return import(m)") as (m: string) => Promise<{ chromium: { launch(o: object): Promise<PwBrowser> } }>)("playwright");
+      const pw = await (Function("m", "return import(m)") as (m: string) => Promise<{ chromium: { launch(o: object): Promise<PwBrowser> } }>)(process.env.PLAYWRIGHT_MODULE || "playwright");
       const b = new Browser(userAgent);
       b.browser = await pw.chromium.launch({ headless: true });
       return b;
@@ -68,6 +72,45 @@ export class Browser {
     } catch (e) { return { ...base, error: (e as Error).message.slice(0, 200) }; }
     finally { await ctx.close().catch(() => {}); }
   }
+  /**
+   * Independent inspection for audits: the page as a real browser renders it (JavaScript run), at the given viewport.
+   * Returns the rendered HTML and measurements taken in the page; nothing is clicked or submitted.
+   */
+  async inspect(url: string, viewport: { width: number; height: number; mobile: boolean }, timeoutMs = 45_000): Promise<RenderedPage> {
+    const empty: RenderedPage = { ok: false, error: null, finalUrl: url, status: null, html: "", title: "", textLength: 0, scrollWidth: 0, innerWidth: viewport.width, viewportMeta: false,
+      images: 0, imagesNoAlt: 0, httpResources: 0, insecureForms: 0, consoleErrors: 0, responseMs: null, loadMs: null };
+    if (!this.browser) return { ...empty, error: "browser not available" };
+    const ctx = await this.browser.newContext({ viewport: { width: viewport.width, height: viewport.height }, isMobile: viewport.mobile, hasTouch: viewport.mobile, userAgent: this.userAgent + (viewport.mobile ? " Mobile" : "") });
+    try {
+      const page = await ctx.newPage();
+      let errors = 0;
+      page.on("console", (m) => { if (m.type() === "error") errors++; });
+      if (page.routeWebSocket) await page.routeWebSocket(/.*/, async (ws) => { let ok = false; try { ok = await publicHost(new URL(ws.url()).hostname); } catch { ok = false; } if (ok) ws.connectToServer(); else await ws.close(); });
+      await page.route("**/*", async (r) => {
+        let ok = false;
+        try { const u = new URL(r.request().url()); ok = /^https?:$/.test(u.protocol) ? await publicHost(u.hostname) : u.protocol === "data:" || u.protocol === "blob:"; } catch { ok = false; }
+        return ok ? r.continue() : r.abort();
+      });
+      const resp = await page.goto(url, { waitUntil: "load", timeout: timeoutMs }) as { status(): number; url(): string } | null;
+      await new Promise((r) => setTimeout(r, 1500)); // late script content
+      const m = await page.evaluate(() => {
+        const d = document.documentElement;
+        const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+        const imgs = [...document.images].filter((i) => i.getBoundingClientRect().width > 1);
+        const https = location.protocol === "https:";
+        const httpRes = https ? performance.getEntriesByType("resource").filter((e) => e.name.startsWith("http:")).length : 0;
+        const forms = [...document.forms].filter((f) => https && f.action.startsWith("http:")).length;
+        return { title: document.title, text: (document.body?.innerText ?? "").trim().length, scrollWidth: d.scrollWidth, innerWidth: window.innerWidth,
+          viewportMeta: !!document.querySelector('meta[name="viewport"]'), images: imgs.length, imagesNoAlt: imgs.filter((i) => !i.hasAttribute("alt")).length, httpRes, forms,
+          responseMs: nav ? Math.round(nav.responseEnd - nav.requestStart) : null, loadMs: nav ? Math.round(nav.loadEventEnd || nav.duration) : null };
+      });
+      return { ok: true, error: null, finalUrl: resp?.url() ?? url, status: resp?.status() ?? null, html: (await page.content()).slice(0, 3_000_000), title: m.title, textLength: m.text,
+        scrollWidth: m.scrollWidth, innerWidth: m.innerWidth, viewportMeta: m.viewportMeta, images: m.images, imagesNoAlt: m.imagesNoAlt, httpResources: m.httpRes, insecureForms: m.forms,
+        consoleErrors: errors, responseMs: m.responseMs, loadMs: m.loadMs };
+    } catch (e) { return { ...empty, error: (e as Error).message.slice(0, 200) }; }
+    finally { await ctx.close().catch(() => {}); }
+  }
+
   async close() { await this.browser?.close().catch(() => {}); }
 }
 

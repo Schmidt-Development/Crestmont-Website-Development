@@ -1,0 +1,83 @@
+name: Research lead audit (independent re-verification)
+
+# Lead research quality gate: re-verifies every lead a research-live-sample run promoted, with a different method
+# (fresh fetch + real Chromium desktop/phone render), and classifies each A/B/C/D (docs/research/AUDIT.md).
+# The repository is PUBLIC: the decrypted input exists only on this runner; logs and annotations carry aggregates only;
+# the per-lead audit is sealed with the Founder's ACCESS_ARTIFACT_PASSPHRASE. Secrets reach only the decrypt and seal
+# steps, never a step that runs third-party package code.
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/lead-research-agent]
+    paths: ["research-worker/live/audit-request.json", ".github/workflows/research-lead-audit.yml"]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: research-lead-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Install Chromium (pinned Playwright)
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+      - name: Download the sealed research artifact named in audit-request.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          RUN_ID=$(node -e 'const r=require("./research-worker/live/audit-request.json");if(!/^\d{6,15}$/.test(String(r.runId)))process.exit(1);console.log(r.runId)')
+          NAME=$(node -e 'const r=require("./research-worker/live/audit-request.json");if(!/^[a-z0-9-]{3,80}$/.test(r.artifact))process.exit(1);console.log(r.artifact)')
+          gh run download "$RUN_ID" -R "$REPO" -n "$NAME" -D in
+          ls -la in
+      - name: Decrypt (passphrase only in this step)
+        env:
+          ACCESS_ARTIFACT_PASSPHRASE: ${{ secrets.ACCESS_ARTIFACT_PASSPHRASE }}
+        run: |
+          node --no-warnings scripts/seal.ts open in/research-live-sample.sealed in/private.tgz
+          tar -xzf in/private.tgz -C in details.json
+          rm -f in/private.tgz in/research-live-sample.sealed
+          node -e 'const d=require("./in/details.json");console.log("records",d.length,"promoted",d.filter(x=>x.platform&&x.platform.status==="promoted").length)'
+      - name: Independent audit (aggregates only in the log)
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+        run: node --no-warnings research-worker/live/audit-leads.ts --details in/details.json --out audit-out > audit-out.log
+      - name: Publish aggregate audit summary
+        if: always()
+        run: |
+          if [ -f audit-out/audit-summary.json ]; then
+            node -e 'const s=JSON.stringify(require("./audit-out/audit-summary.json"));for(let i=0;i<s.length&&i<35000;i+=3500)console.log(`::notice title=research-lead-audit ${i/3500+1}::${s.slice(i,i+3500)}`)'
+            { echo '### Research lead audit (aggregates)'; echo '```json'; cat audit-out/audit-summary.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error title=research-lead-audit::no summary produced"; exit 1
+          fi
+      - name: Seal the per-lead audit for the Founder
+        if: always()
+        env:
+          ACCESS_ARTIFACT_PASSPHRASE: ${{ secrets.ACCESS_ARTIFACT_PASSPHRASE }}
+        run: |
+          mkdir -p sealed
+          if [ -f audit-out/audit.json ] && node --no-warnings scripts/seal.ts check > /dev/null 2>&1; then
+            tar -czf audit-private.tgz -C audit-out audit.json audit-report.md
+            node --no-warnings scripts/seal.ts seal audit-private.tgz sealed/research-lead-audit.sealed
+            echo "::notice title=research-lead-audit sealed::per-lead audit sealed (AES-256-GCM)"
+          fi
+          rm -rf in audit-out/audit.json audit-out/audit-report.md audit-private.tgz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: research-lead-audit-sealed
+          path: sealed/
+          if-no-files-found: ignore
+          retention-days: 30
