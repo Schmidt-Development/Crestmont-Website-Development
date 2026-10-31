@@ -367,7 +367,8 @@ jobs:
       # src/services/auth.ts), so back-to-back deploys left the shared demo Owner without attempts: the access check below
       # and five browser journeys were refused ("Too many codes entered"). This read-only check applies the app's own
       # window rule to staging D1 and waits until this run's Owner codes fit: the access check (1), sign-ins in
-      # staging.e2e, staging-quality and the journeys (3) and two journey step-ups (2). The CRM E2E guards its own budget.
+      # staging.e2e, staging-quality and the journeys (3) and three journey step-ups (3: a stale-request cleanup in journey 26,
+      # journey 26's decision, and the Stripe test-mode refund issued after journey 26). The CRM E2E guards its own budget.
       # The limit itself is unchanged.
       - name: Wait for the Owner's two-factor attempts (rate window; read-only)
         id: mfa_budget
@@ -375,7 +376,7 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: node --no-warnings scripts/wait-mfa-budget.ts --accounts access/demo-accounts.md --role owner --need 6 --timeout 1920
+        run: node --no-warnings scripts/wait-mfa-budget.ts --accounts access/demo-accounts.md --role owner --need 7 --timeout 1920
 
       - name: Verify the full access sequence on the live site
         id: verify
