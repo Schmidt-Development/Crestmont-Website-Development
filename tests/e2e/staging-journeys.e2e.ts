@@ -331,9 +331,16 @@ const STRIPE_TEST_CARD = { number: "4242 4242 4242 4242", expiry: "12 / 34", cvc
 async function payOnStripeCheckout(p: Page): Promise<void> {
   await p.waitForURL(/^https:\/\/checkout\.stripe\.com\//, { timeout: 60_000 });
   assert.match(p.url(), /\/c\/pay\/cs_test_/, "a Stripe TEST-mode checkout session (never live)");
-  const card = p.locator('[data-testid="card-accordion-item-button"]');
-  if (await card.count()) await card.first().click();
-  await p.locator("#cardNumber").fill(STRIPE_TEST_CARD.number);
+  // Checkout shows the card form either directly or inside a payment-method accordion. When card is the first (or only)
+  // method its accordion item is ALREADY expanded, and Stripe makes an expanded header unclickable: clicking it
+  // unconditionally timed out (deploys 41173061886, 41174708920) although the card fields were on screen. So open the
+  // accordion only when the card number field is not visible yet, then wait for the field itself.
+  const cardNumber = p.locator("#cardNumber");
+  const card = p.locator('[data-testid="card-accordion-item-button"]').first();
+  await Promise.any([cardNumber.waitFor({ state: "visible", timeout: 30_000 }), card.waitFor({ state: "visible", timeout: 30_000 })]).catch(() => undefined);
+  if (!(await cardNumber.isVisible()) && (await card.isVisible())) await card.click();
+  await cardNumber.waitFor({ state: "visible", timeout: 30_000 });
+  await cardNumber.fill(STRIPE_TEST_CARD.number);
   await p.locator("#cardExpiry").fill(STRIPE_TEST_CARD.expiry);
   await p.locator("#cardCvc").fill(STRIPE_TEST_CARD.cvc);
   if (await p.locator("#billingName").count()) await p.locator("#billingName").fill(contact.name);
