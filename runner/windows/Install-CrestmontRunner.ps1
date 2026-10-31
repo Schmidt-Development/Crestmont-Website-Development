@@ -244,11 +244,17 @@ foreach ($lock in @("package-lock.json", "sandbox\package-lock.json")) {
 }
 if ($script:Problems.Count) { Exit-WithProblem }
 # Rollback point: keep the images currently in use as :1-previous before rebuilding (Uninstall-CrestmontRunner.ps1 -Rollback).
-foreach ($img in @("crestmont-ai-runner", "crestmont-build-sandbox", "crestmont-egress-proxy")) {
-  & docker.exe image inspect "${img}:1" 2>$null | Out-Null
-  if ($LASTEXITCODE -eq 0) { & docker.exe tag "${img}:1" "${img}:1-previous" | Out-Null }
+# Only a COMPLETED install is a rollback point (state\install.json is written at the end of a successful run), so a re-run
+# after a failed run never replaces the good :1-previous with the failed build. `image ls -q` writes nothing to stderr
+# when the image is absent (stderr from a native command is a terminating error under Stop in Windows PowerShell 5.1).
+$installRecord = Join-Path $State "install.json"
+if (Test-Path $installRecord) {
+  foreach ($img in @("crestmont-ai-runner", "crestmont-build-sandbox", "crestmont-egress-proxy")) {
+    if (& docker.exe image ls -q "${img}:1") { & docker.exe tag "${img}:1" "${img}:1-previous" | Out-Null }
+  }
+  if (Test-Path (Join-Path $Compose "runner.env")) { Copy-Item -Force (Join-Path $Compose "runner.env") (Join-Path $State "runner.env.previous") }
+  Remove-Item -Force $installRecord
 }
-if (Test-Path (Join-Path $Compose "runner.env")) { Copy-Item -Force (Join-Path $Compose "runner.env") (Join-Path $State "runner.env.previous") }
 Invoke-Checked "docker.exe" @("build", "-t", "crestmont-ai-runner:1", "-f", (Join-Path $RunnerSrc "Dockerfile"), $RunnerSrc) "docker build runner"
 Invoke-Checked "docker.exe" @("build", "-t", "crestmont-build-sandbox:1", "-f", (Join-Path $RunnerSrc "sandbox\Dockerfile"), (Join-Path $RunnerSrc "sandbox")) "docker build sandbox"
 Copy-Item -Force (Join-Path $PSScriptRoot "docker-compose.yml") (Join-Path $Compose "docker-compose.yml")
@@ -445,12 +451,20 @@ try {
   $required = @($manifest.workflows.PSObject.Properties | ForEach-Object { $_.Value.skills } | Where-Object { $_.required } | ForEach-Object { $_.name } | Sort-Object -Unique)
   foreach ($n in $required) { $src = $manifest.skills.$n.source; if (-not (Test-Path (Join-Path $Skills "$src\SKILL.md"))) { $missingSkills += $n } }
 } catch { Warn "Could not read runner\skills\manifest.json to check the skills folder: $($_.Exception.Message)" }
-& docker.exe @($composeArgs + @("run", "--rm", "--no-deps", "runner", "node", "--no-warnings", "src/main.ts", "--preflight"))
-if ($LASTEXITCODE -eq 0) { Ok "Runner preflight passed" }
-elseif ($AllowMissingSkills -and $missingSkills.Count) {
+# stderr is captured, not fatal: under Stop, Windows PowerShell 5.1 turns native stderr into a terminating error.
+$eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+$pfOut = @(& docker.exe @($composeArgs + @("run", "--rm", "--no-deps", "runner", "node", "--no-warnings", "src/main.ts", "--preflight")) 2>&1 | ForEach-Object { "$_" })
+$pfExit = $LASTEXITCODE
+$ErrorActionPreference = $eap
+$pfOut | ForEach-Object { Write-Host "    $_" }
+# Every error the preflight logged (JSON lines "preflight" and "preflight provider"); only "Required skill ..." errors may be waived.
+$pfErrors = @(foreach ($l in $pfOut) { try { $j = $l | ConvertFrom-Json -ErrorAction Stop; if ("$($j.msg)" -like "preflight*" -and $j.errors) { $j.errors } } catch { $null = $_ } })
+$otherErrors = @($pfErrors | Where-Object { "$_" -notlike "Required skill *" })
+if ($pfExit -eq 0) { Ok "Runner preflight passed" }
+elseif ($AllowMissingSkills -and $missingSkills.Count -and $pfErrors.Count -and -not $otherErrors.Count) {
   Warn ("Runner preflight failed with required skills missing ($($missingSkills -join ', ')). Continuing (-AllowMissingSkills): " +
     "keep AI builds PAUSED on the platform until the skills are in $Skills; the diagnostic job does not need them.")
-} else { throw "runner --preflight failed (exit $LASTEXITCODE)$(if ($missingSkills.Count) { "; required skills missing: $($missingSkills -join ', ')" })" }
+} else { throw "runner --preflight failed (exit $pfExit)$(if ($otherErrors.Count) { "; not only skills: $($otherErrors -join ' | ')" } elseif ($missingSkills.Count) { "; required skills missing: $($missingSkills -join ', ')" })" }
 
 # -- 9. start + auto-start --
 if (-not $NoStart) {
@@ -460,11 +474,13 @@ if (-not $NoStart) {
 }
 if (-not $NoAutoStart) {
   Step "Auto-start after reboot"
-  $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"{0}`" -InstallDir `"{1}`"{2}" -f (Join-Path $InstallDir "Start-CrestmontRunner.ps1"), $InstallDir, $(if ($OllamaInDocker) { " -OllamaInDocker" } else { "" }))
+  $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"{0}`" -InstallDir `"{1}`"{2}" -f (Join-Path $InstallDir "Start-CrestmontRunner.ps1"), $InstallDir, $(if ($OllamaInDocker) { " -OllamaInDocker" } elseif ($PreserveOllamaConfig) { " -NoOllamaStart" } else { "" }))
   # Docker Desktop and the Ollama tray app run in a user session, so the task runs at this user's logon.
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
-  # Watchdog: the same idempotent start script every 5 minutes, so a stopped Docker Desktop or compose stack comes back
-  # without anyone signing in again (containers that crash restart on their own: restart unless-stopped).
+  # Watchdog: the same idempotent start script every 5 minutes while the user is signed in, so a stopped Docker Desktop
+  # or compose stack comes back on its own (crashed containers restart by themselves: restart unless-stopped). It does
+  # not help before logon after a reboot (Docker Desktop needs a session; NODE1-INSTALL.md section 7).
+  # With -PreserveOllamaConfig it never starts Ollama either (-NoOllamaStart): a shared Ollama belongs to its owner.
   $watchdog = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5)
   $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew
   Register-ScheduledTask -TaskName "CrestmontRunner-Start" -Action $action -Trigger @($trigger, $watchdog) -Settings $settings -RunLevel Limited -Force | Out-Null
@@ -491,4 +507,5 @@ if ($healthExit -ne 0) {
   Write-Host "Installed, but the health check FAILED (see above). The runner is not ready: fix the reported problem and run Get-RunnerHealth.ps1 again." -ForegroundColor Red
   exit 1
 }
+[IO.File]::WriteAllText((Join-Path $State "install.json"), (([ordered]@{ completedAt = (Get-Date).ToUniversalTime().ToString("o"); ollamaInDocker = [bool]$OllamaInDocker; preserveOllamaConfig = [bool]$PreserveOllamaConfig; dualModel = [bool]$DualMode }) | ConvertTo-Json))
 Write-Host "Done. Model(s): $($pullList -join ', ')  Slots: $Slots  GPU concurrency: $numParallel  Provider: local (paid API disabled)  No ports published, no firewall rules added." -ForegroundColor Green

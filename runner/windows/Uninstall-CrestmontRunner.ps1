@@ -36,6 +36,9 @@ $Compose = Join-Path $InstallDir "compose"
 $State = Join-Path $InstallDir "state"
 $composeFile = Join-Path $Compose "docker-compose.yml"
 $composeArgs = @("compose", "-f", $composeFile, "--project-directory", $Compose, "--profile", "ollama-in-docker")
+# How it was installed (written by the installer at the end of a successful run).
+$mode = $null
+foreach ($f in @((Join-Path $State "install.json"))) { if (Test-Path $f) { try { $mode = Get-Content $f -Raw | ConvertFrom-Json } catch { $mode = $null } } }
 $images = @("crestmont-ai-runner", "crestmont-build-sandbox", "crestmont-egress-proxy")
 $tasks = @("CrestmontRunner-Start", "CrestmontRunner-GpuTelemetry")
 function Say([string]$m) { Write-Host "==> $m" -ForegroundColor Cyan }
@@ -60,7 +63,10 @@ if ($Rollback) {
   $prevEnv = Join-Path $State "runner.env.previous"
   if (Test-Path $prevEnv) { Copy-Item -Force $prevEnv (Join-Path $Compose "runner.env"); Write-Host "    runner.env restored" }
   foreach ($t in $tasks) { if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) { Enable-ScheduledTask -TaskName $t | Out-Null } }
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $InstallDir "Start-CrestmontRunner.ps1") -InstallDir $InstallDir
+  $startArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $InstallDir "Start-CrestmontRunner.ps1"), "-InstallDir", $InstallDir)
+  # Same Ollama mode as the install; never start a shared Ollama (unknown mode = do not start it).
+  if ($mode -and $mode.ollamaInDocker) { $startArgs += "-OllamaInDocker" } elseif (-not $mode -or $mode.preserveOllamaConfig) { $startArgs += "-NoOllamaStart" }
+  & powershell.exe @startArgs
   Say "Rolled back. Check: powershell -NoProfile -ExecutionPolicy Bypass -File $InstallDir\Get-RunnerHealth.ps1"
   exit 0
 }
