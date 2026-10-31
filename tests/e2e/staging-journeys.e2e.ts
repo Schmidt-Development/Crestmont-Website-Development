@@ -331,14 +331,16 @@ const STRIPE_TEST_CARD = { number: "4242 4242 4242 4242", expiry: "12 / 34", cvc
 async function payOnStripeCheckout(p: Page, testCard: { number: string; expiry: string; cvc: string } = STRIPE_TEST_CARD): Promise<void> {
   await p.waitForURL(/^https:\/\/checkout\.stripe\.com\//, { timeout: 60_000 });
   assert.match(p.url(), /\/c\/pay\/cs_test_/, "a Stripe TEST-mode checkout session (never live)");
-  // Checkout shows the card form either directly or inside a payment-method accordion. When card is the first (or only)
-  // method its accordion item is ALREADY expanded, and Stripe makes an expanded header unclickable: clicking it
-  // unconditionally timed out (deploys 41173061886, 41174708920) although the card fields were on screen. So open the
-  // accordion only when the card number field is not visible yet, then wait for the field itself.
+  // Checkout renders the card inputs (#cardNumber, #cardExpiry, #cardCvc) only once Card is SELECTED in its payment-method
+  // accordion. The accordion's card-accordion-item-button is a zero-size click overlay (classes "AccordionButton-open
+  // AccordionButton-expandedClickArea" even while collapsed), so Playwright reports it "not visible" and never clicks it
+  // (deploys 41173061886-41182841756). Inspected on Stripe's live test-mode Checkout (checkout.stripe.dev, 2026-10-31):
+  // a click event dispatched on that button selects Card and renders the inputs, which is what a real user's click on
+  // the visible Card header does.
   const cardNumber = p.locator("#cardNumber");
-  const card = p.locator('[data-testid="card-accordion-item-button"]').first();
-  await Promise.any([cardNumber.waitFor({ state: "visible", timeout: 30_000 }), card.waitFor({ state: "visible", timeout: 30_000 })]).catch(() => undefined);
-  if (!(await cardNumber.isVisible()) && (await card.isVisible())) await card.click();
+  const cardButton = p.locator('[data-testid="card-accordion-item-button"]').first();
+  await Promise.any([cardNumber.waitFor({ state: "visible", timeout: 30_000 }), cardButton.waitFor({ state: "attached", timeout: 30_000 })]).catch(() => undefined);
+  if (!(await cardNumber.isVisible()) && (await cardButton.count())) await cardButton.dispatchEvent("click");
   await cardNumber.waitFor({ state: "visible", timeout: 30_000 });
   await cardNumber.fill(testCard.number);
   await p.locator("#cardExpiry").fill(testCard.expiry);
@@ -346,6 +348,11 @@ async function payOnStripeCheckout(p: Page, testCard: { number: string; expiry: 
   if (await p.locator("#billingName").count()) await p.locator("#billingName").fill(contact.name);
   if (await p.locator("#billingPostalCode").isVisible().catch(() => false)) await p.locator("#billingPostalCode").fill("48933");
   if (await p.locator("#email").isEditable().catch(() => false)) await p.locator("#email").fill(contact.email);
+  // "Save my information with Link" is pre-checked and makes a phone number required, so the payment cannot submit.
+  // Opt out (no Link account is created for a test customer).
+  const link = p.locator("#enableStripePass");
+  if ((await link.count()) && (await link.isChecked())) await link.dispatchEvent("click");
+  if ((await link.count()) && (await link.isChecked())) await link.setChecked(false, { force: true });
   await p.locator('[data-testid="hosted-payment-submit-button"], .SubmitButton').first().click();
   await p.waitForURL((u: URL) => u.href.startsWith(BASE!), { timeout: 90_000 });
 }
