@@ -113,6 +113,26 @@ demo Owner's password, and `scripts/bootstrap-owner.ts` creates an invitation on
 already has the demo Owner, so it would do nothing). A password changed in the app is real but temporary: it is
 replaced by the derived one on the next deploy.
 
+## The Founder's own Owner account on staging
+
+The demo Owner stays (CI, the browser journey and the access check sign in with it on every deploy). Next to it the
+Founder can hold a personal Owner account: own address, own password, own authenticator, never re-derived by deploys.
+It is created once, by invitation, with `scripts/bootstrap-owner.ts --staging-additional-owner`
+(tests/staging-founder-owner.test.ts):
+
+1. On your own computer, in a checkout of `main`:
+   `node --no-warnings scripts/bootstrap-owner.ts --staging-additional-owner --print-sql --email <address> --url <staging APP_URL from wrangler.toml> > founder-owner.sql`
+   Use an address that is **not** your customer account (a customer account is never promoted; e.g. a `+staging-owner`
+   alias). The invitation link appears once in your terminal (72 h); `founder-owner.sql` holds only its hash.
+2. `npx --yes wrangler@4.149.0 d1 execute crestmont-staging --remote --env staging --file founder-owner.sql`
+3. Open the link, choose your name and password, sign in, enrol your authenticator (required before any staff page),
+   save the recovery codes.
+
+The SQL fails with "no such table: _staging_access" on any database other than staging D1, creates no invitation when an
+Owner outside the demo domain already exists, and never touches demo accounts. Afterwards the deploy's forensic
+summary reports 1 "Owner-role holder outside the demo domain": that is this account. Removal: disable the account at
+`/staff/employees` or delete its `memberships` row.
+
 Lockout note: the demo Owner email is visible in this public repository, so anyone can deliberately trip its
 sign-in lockout (8 wrong attempts → 15 minutes). It cannot be taken over that way (20-character random password
 plus 2FA). The next deploy clears the counter.
