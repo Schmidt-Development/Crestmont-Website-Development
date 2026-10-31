@@ -16,7 +16,7 @@ import { newId, nowIso } from "../lib/db.ts";
 import { sha256Hex } from "../lib/crypto.ts";
 import type { Env } from "../app/context.ts";
 import { getRetellAgent, getRetellLlm, updateRetellLlmPrompt } from "../adapters/retell.ts";
-import { loadVoiceConfig } from "./voice-settings.ts";
+import { loadVoiceConfig, salesAgentIds } from "./voice-settings.ts";
 import { audit } from "./security.ts";
 import { notifyOwners } from "./voice-common.ts";
 
@@ -48,6 +48,9 @@ export async function syncPrompt(d: { db: Db; env: Pick<Env, "RETELL_INBOUND_API
   if (!key) return record("not_configured", PROVIDER_NOT_CONFIGURED);
   if (!active) return record("not_configured", "No configuration version is active. Activate one first; nothing was sent to Retell.");
   if (!agentId) return record("not_configured", "No Retell agent id is recorded for this environment (Operations → inbound agent id). Nothing was sent to Retell.");
+  // Isolation: the receptionist prompt (VOICE_GUARDRAILS names receptionist-only functions like route_support) is never
+  // written to a sales agent, even if a sales agent id was stored in a receptionist field before this check existed.
+  if ((await salesAgentIds(d.db)).has(agentId)) return record("failed", `Agent ${agentId} is registered as a sales agent (sales optimizer or outbound sales). The receptionist prompt is never written to a sales agent; nothing was sent to Retell. Set the receptionist's own agent id in Operations.`);
   const expected = await short(active.prompt_text);
   const agent = await getRetellAgent({ apiKey: key, fetch: d.fetch, agentId });
   if (!agent.ok) return record("failed", `Reading agent ${agentId}: ${agent.error}`, { expected });
