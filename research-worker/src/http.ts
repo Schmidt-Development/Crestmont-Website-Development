@@ -124,6 +124,8 @@ function classify(e: unknown): { kind: NetErrorKind; message: string } {
 
 export class Http {
   private readonly hosts = new Map<string, { next: number; busy: boolean; robots?: { at: number; r: Robots | "deny" | "allow" } }>();
+  /** robots.txt per origin (scheme + host + port), including connection-level failures (the site itself is unreachable). */
+  private readonly robotsByOrigin = new Map<string, { at: number; r: Robots | "deny" | "allow"; netError?: { kind: NetErrorKind; message: string } }>();
   private active = 0;
   private readonly waiters: (() => void)[] = [];
   readonly opts: HttpOptions;
@@ -178,11 +180,22 @@ export class Http {
     });
   }
 
-  /** robots.txt for an origin, cached 24 h. 4xx → allow all; unreachable/5xx → disallow all (RFC 9309 §2.3.1). */
+  /**
+   * robots.txt for an origin, cached 24 h. 2xx → rules; 4xx or an unresolvable redirect chain → allow all; 5xx →
+   * disallow all (RFC 9309 §2.3.1). A connection-level failure (DNS, refused, timeout, TLS, reset) means the site
+   * itself cannot be reached: that is recorded as the site's network error (cached 60 s so re-checks re-test it),
+   * never as "robots.txt disallows".
+   */
   async robots(origin: URL): Promise<Robots | "deny" | "allow"> {
+    return (await this.robotsEntry(origin)).r;
+  }
+  private async robotsEntry(origin: URL) {
+    const key = origin.origin;
     const h = this.hosts.get(origin.host) ?? this.hosts.set(origin.host, { next: 0, busy: false }).get(origin.host)!;
-    if (h.robots && Date.now() - h.robots.at < 86400e3) return h.robots.r;
+    const cached = this.robotsByOrigin.get(key);
+    if (cached && Date.now() - cached.at < (cached.netError ? 60e3 : 86400e3)) return cached;
     let r: Robots | "deny" | "allow" = "deny";
+    let netError: { kind: NetErrorKind; message: string } | undefined;
     try {
       // RFC 9309 §2.3.1.2: follow at least five redirects; a robots.txt that cannot be reached that way is "unavailable"
       // (treated like 4xx: allowed). Every hop gets the same public-address checks as page requests.
@@ -200,9 +213,15 @@ export class Http {
         r = res.status >= 200 && res.status < 300 ? parseRobots(res.body) : res.status >= 400 && res.status < 500 ? "allow" : "deny";
         break;
       }
-    } catch { r = "deny"; }
-    h.robots = { at: Date.now(), r };
-    return r;
+    } catch (e) {
+      const c = classify(e);
+      r = "deny";
+      if (["dns", "refused", "timeout", "tls", "reset", "blocked_address"].includes(c.kind)) netError = c;
+    }
+    const entry = { at: Date.now(), r, netError };
+    this.robotsByOrigin.set(key, entry);
+    h.robots = { at: entry.at, r };
+    return entry;
   }
 
   async allowed(u: URL): Promise<boolean> {
@@ -226,6 +245,8 @@ export class Http {
       if (isIP(literal) && !isPublicAddress(literal) && !(this.opts.allowLoopback && (literal === "127.0.0.1" || literal === "::1"))) {
         return { url: input, finalUrl: url.href, status: null, chain, headers: {}, body: "", bytes: 0, ms: Date.now() - started, error: { kind: "blocked_address", message: `${literal} is not a public address` }, robotsBlocked: false };
       }
+      const rb = await this.robotsEntry(url);
+      if (rb.netError) return { url: input, finalUrl: url.href, status: null, chain, headers: {}, body: "", bytes: 0, ms: Date.now() - started, error: rb.netError, robotsBlocked: false };
       if (!(await this.allowed(url))) return { url: input, finalUrl: url.href, status: null, chain, headers: {}, body: "", bytes: 0, ms: Date.now() - started, error: null, robotsBlocked: true };
       let res, reqMs = 0;
       try { res = await this.slot(url.host, async () => { this.requests++; const t = Date.now(); try { return await this.raw(url, method); } finally { reqMs = Date.now() - t; } }); }

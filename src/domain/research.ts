@@ -268,8 +268,11 @@ export function qualify(p: Pick<CleanProspect, "website" | "findings" | "identit
   const counted = p.findings.filter((f) => f.confidence >= 0.6);
   const maxSeverity = counted.reduce<Severity | null>((m, f) => (!m || SEVERITY_RANK[f.severity] > SEVERITY_RANK[m] ? f.severity : m), null);
   const cls = p.website.classification;
-  let score = { VERIFIED_WEBSITE_BROKEN: 55, NO_OFFICIAL_WEBSITE_FOUND: 45, VERIFIED_WEBSITE_ISSUES: 25, VERIFIED_OFFICIAL_WEBSITE: 0, WEBSITE_UNVERIFIED: 0, BUSINESS_IDENTITY_UNCERTAIN: 0 }[cls];
-  const sevPoints = counted.reduce((s, f) => s + { critical: 15, high: 10, medium: 5, low: 1 }[f.severity] * f.confidence, 0);
+  // Issues base 46 is derived from the qualification rule, not tuned to results: the weakest case the rule accepts
+  // (one high-severity finding at confidence 0.6 = 7.2 points, identity 0.7 = -3, phone +10) must reach 60. The real-data
+  // audit of 2026-10-30 found the old base (25) let no evidenced-problem site qualify while unverified "no website" did.
+  let score = { VERIFIED_WEBSITE_BROKEN: 55, NO_OFFICIAL_WEBSITE_FOUND: 45, VERIFIED_WEBSITE_ISSUES: 46, VERIFIED_OFFICIAL_WEBSITE: 0, WEBSITE_UNVERIFIED: 0, BUSINESS_IDENTITY_UNCERTAIN: 0 }[cls];
+  const sevPoints = counted.reduce((s, f) => s + { critical: 15, high: 12, medium: 6, low: 1 }[f.severity] * f.confidence, 0);
   if (cls === "VERIFIED_WEBSITE_BROKEN" || cls === "VERIFIED_WEBSITE_ISSUES") score += Math.min(35, sevPoints);
   if (cls === "NO_OFFICIAL_WEBSITE_FOUND") score += Math.round(Math.min(1, p.website.confidence) * 15);
   if (p.phones.length) score += 10; else reasons.push("no usable phone number");
@@ -285,7 +288,10 @@ export function qualify(p: Pick<CleanProspect, "website" | "findings" | "identit
   if (cls === "VERIFIED_WEBSITE_ISSUES" && !counted.some((f) => SEVERITY_RANK[f.severity] >= 2)) reasons.push("no medium-or-higher issue with confidence ≥ 0.6");
   if (p.identityConfidence < 0.7) reasons.push("identity confidence below 0.7");
   if (score < threshold) reasons.push(`score ${score} below threshold ${threshold}`);
-  const classQualifies = cls === "VERIFIED_WEBSITE_BROKEN" || cls === "NO_OFFICIAL_WEBSITE_FOUND" || (cls === "VERIFIED_WEBSITE_ISSUES" && counted.some((f) => SEVERITY_RANK[f.severity] >= 2));
+  const material = counted.filter((f) => SEVERITY_RANK[f.severity] >= 2);
+  const evidencedIssues = material.some((f) => SEVERITY_RANK[f.severity] >= 3) || material.length >= 2;
+  if (cls === "VERIFIED_WEBSITE_ISSUES" && !evidencedIssues) reasons.push("needs one high-severity or two medium problems with confidence ≥ 0.6");
+  const classQualifies = cls === "VERIFIED_WEBSITE_BROKEN" || cls === "NO_OFFICIAL_WEBSITE_FOUND" || (cls === "VERIFIED_WEBSITE_ISSUES" && evidencedIssues);
   const qualified = classQualifies && p.identityConfidence >= 0.7 && p.phones.length > 0 && !stale && score >= threshold;
   return { score, qualified, reasons, recommendedPackage: qualified || classQualifies ? recommendPackage(cls, counted) : null, maxSeverity };
 }

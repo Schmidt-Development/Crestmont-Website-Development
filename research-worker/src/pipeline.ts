@@ -7,7 +7,7 @@
 //  E  classification with evidence, confidence, source and timestamps
 // Never guesses a domain from the business name. "No official website found" is reported only after A, B and C ran
 // and says so in its checks; it is not a claim that no website exists.
-import { isCandidateOfficialDomain, isFreeMailDomain, normDomain, type Finding, type ProspectInput, type WebsiteCheck, type WebsiteClass } from "../../src/domain/research.ts";
+import { isCandidateOfficialDomain, isFreeMailDomain, normDomain, normName, type Finding, type ProspectInput, type WebsiteCheck, type WebsiteClass } from "../../src/domain/research.ts";
 import type { Candidate } from "./sources/types.ts";
 import type { Http, FetchResult } from "./http.ts";
 import type { State } from "./state.ts";
@@ -24,6 +24,18 @@ export type Outcome =
   | { kind: "defer"; until: Date; probe: Probe; note: string };
 
 interface CandidateDomain { domain: string; listedBy: string[]; via: string }
+export const PROBE_VIA = "name-derived probe";
+/**
+ * Before "no official website found", a couple of obvious domains built from the business name are tried. This is a
+ * falsification test, not a guess: a probed site counts only when the page shows the business's own phone number or
+ * street address (hard identity); a probed site that belongs to someone else, or does not exist, is ignored.
+ */
+export function probeDomains(name: string): string[] {
+  const t = normName(name).split(" ").filter((x) => /^[a-z0-9&]+$/.test(x)).map((x) => x.replace(/&/g, "and")).filter(Boolean);
+  if (!t.length) return [];
+  const joined = t.join(""), hyph = t.join("-");
+  return [...new Set([joined, t.length > 1 ? hyph : null].filter((x): x is string => !!x && x.length >= 5 && x.length <= 40).map((x) => `${x}.com`))].slice(0, 2);
+}
 
 const iso = () => new Date().toISOString();
 /** Classes that can be a website-development opportunity; the rest are counted locally and not sent. */
@@ -55,6 +67,8 @@ export function candidateDomains(c: Candidate, state: State): { domains: Candida
   const emailDomains = c.emails.map((e) => e.split("@")[1]).filter((d) => d && !isFreeMailDomain(d));
   for (const d of emailDomains) add(d, null, "business email domain");
   checks.push({ stage: "B", method: "cross-source records (same phone and name) and business email domains", result: `${corroborating} matching record(s) in other datasets; ${emailDomains.length} business email domain(s)`, at: iso() });
+  if (!out.size) for (const d of probeDomains(c.name)) out.set(d, { domain: d, listedBy: [], via: PROBE_VIA });
+  if (!c.websites.length && [...out.values()].some((d) => d.via === PROBE_VIA)) checks.push({ stage: "B", method: "name-derived domain probe (accepted only on a phone or street match)", result: [...out.values()].filter((d) => d.via === PROBE_VIA).map((d) => d.domain).join(", "), at: iso() });
   return { domains: [...out.values()].slice(0, 4), checks };
 }
 
@@ -119,6 +133,8 @@ export async function evaluate(c: Candidate, deps: Deps, probe: Probe | null): P
     }
     deps.state.bump("websites_checked", new Date());
     checks.push({ stage: "C", method: `HTTP GET https://${d.domain}/ (robots.txt honoured)`, result: home.robotsBlocked ? "not fetched: robots.txt disallows" : home.error ? `${home.error.kind}: ${home.error.message.slice(0, 120)}` : `HTTP ${home.status} at ${home.finalUrl} in ${home.ms} ms`, at: iso() });
+    const isProbe = d.via === PROBE_VIA;
+    if (isProbe && (home.error || home.robotsBlocked || home.status === null || home.status >= 400)) continue; // nothing there (or not testable): no evidence either way
     if (home.error?.kind === "blocked_address") { unconfirmedReasons.push(`${d.domain} points at a non-public address`); continue; }
     if (accessRestricted(home)) { restricted = true; continue; }
     const broken = brokenReason(home);
@@ -141,6 +157,7 @@ export async function evaluate(c: Candidate, deps: Deps, probe: Probe | null): P
     const facts = pageFacts(home.body);
     const parked = parkedPage(facts);
     if (parked) {
+      if (isProbe) continue;
       if (!d.listedBy.length) { unconfirmedReasons.push(`${d.domain} is a parked/placeholder page`); continue; }
       const finding: Finding = { code: "listed_domain_parked", title: "The listed website shows a parked or placeholder page", severity: "critical", confidence: 0.85, url: home.finalUrl, method: "HTTP GET (no JS)", observedAt: iso(), evidence: `Page text includes "${parked}"`, reproduction: `Open ${home.finalUrl}` };
       checks.push({ stage: "D", method: "identity by listing", result: `listed by ${d.listedBy.join(", ")}; page is a placeholder`, at: iso() });
@@ -150,6 +167,7 @@ export async function evaluate(c: Candidate, deps: Deps, probe: Probe | null): P
       .map((b) => deps.state.candidate(b.business_key)).filter((o) => o && nameOverlap(c.name, o.name) >= 0.6).length;
     const id = identity(c, facts, d.listedBy, siblings);
     checks.push({ stage: "D", method: "page vs record (phone, street, city, name, listings)", result: `${id.official ? "official" : "not confirmed"} (score ${id.score}): ${[...id.signals, ...id.contradictions].join("; ") || "no matching signals"}`, at: iso() });
+    if (isProbe && !(id.official && id.signals.some((x) => /phone|street/.test(x)))) continue; // someone else's site, or not provably ours
     if (!id.official) { loadedUnconfirmed = true; unconfirmedReasons.push(`${d.domain} loads but does not match this business`); continue; }
     deps.state.indexDomain(d.domain, c.businessKey, c.sources[0]?.source ?? "source");
     const findings = await audit(deps, home, home.body);

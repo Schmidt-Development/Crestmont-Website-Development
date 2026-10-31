@@ -1,5 +1,5 @@
 {
-  "purpose": "Independent audit of every lead promoted by research-live-sample run 41145776120 (159 expected). Edit this file to trigger a new audit (workflow research-lead-audit.yml).",
+  "purpose": "Independent audit of every lead promoted by research-live-sample run 41145776120 (159 expected), re-run with the corrected rubric (the 'no website' claim is falsification-tested). Edit this file to trigger a new audit (workflow research-lead-audit.yml).",
   "runId": 41145776120,
   "artifact": "research-live-sample-sealed"
 }

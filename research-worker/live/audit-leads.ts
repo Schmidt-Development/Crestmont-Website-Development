@@ -9,8 +9,11 @@
 //               signal) · a "broken" claim that no longer reproduces · every testable material claim refuted
 //   A strong:   still broken on re-check (listed site) · a supported high-severity problem (no mobile viewport / sideways
 //               scroll / no HTTPS / insecure form / many broken links) on a site whose identity re-confirms
-//   B moderate: at least one supported material claim · or "no website found" (existence rests on the dataset only)
-//   C weak:     material claims could not be re-tested (insufficient evidence) or only minor problems reproduce
+//   B moderate: at least one supported material claim · or "no website found" that survives a wider name-derived probe
+//               AND whose existence is corroborated by an independent online profile listed for the business
+//   C weak:     claims could not be re-tested (insufficient evidence), or "no website found" with existence resting on
+//               the dataset alone, or only minor problems reproduce
+//   (D also: a "no website" claim refuted by finding the business's own site.)
 // Commercial fit (budget, intent, decision-maker) is NOT machine-assessable and is not inferred.
 //
 // Public output: aggregate counts only. Per-lead audit: sealed by the workflow.
@@ -19,7 +22,8 @@ import { join } from "node:path";
 import { Http } from "../src/http.ts";
 import { Browser, type RenderedPage } from "../src/browser.ts";
 import { pageFacts, identity, parkedPage } from "../src/identity.ts";
-import { normDomain, normName, phoneE164, recommendPackage, type WebsiteClass, type Finding as DomainFinding } from "../../src/domain/research.ts";
+import { probeDomains } from "../src/pipeline.ts";
+import { normDomain, normName, phoneE164, recommendPackage, isCandidateOfficialDomain, type WebsiteClass, type Finding as DomainFinding } from "../../src/domain/research.ts";
 import type { Candidate } from "../src/sources/types.ts";
 import { snapshot } from "../src/resources.ts";
 
@@ -115,8 +119,33 @@ async function auditOne(d: Detail): Promise<Audit> {
     recommendedPackage: d.platform?.recommended_package ?? recommendPackage(d.classification as WebsiteClass, d.findings.filter(MATERIAL) as unknown as DomainFinding[]), duplicateOf: duplicateOf.get(d.businessKey) ?? null };
   if (base.duplicateOf) return { ...base, operational: null, mobileFriendly: null, identity: "not_testable", claims: [], evidenceUrls: [], category: "D", confidence: "high", explanation: "Duplicate of another promoted lead (same phone, website or name and street)." };
   if (!d.websiteUrl) {
-    return { ...base, operational: null, mobileFriendly: null, identity: "no_website", claims: [], evidenceUrls: [], category: "B", confidence: "low",
-      explanation: "No website found by the research checks. Existence and location rest on the open dataset only (insufficient independent evidence); absence of a website cannot be proven without a search engine. Moderate, to be confirmed by a person." };
+    // The "no website" claim is tested by trying to falsify it: a wider set of name-derived domains than the pipeline
+    // uses (.com/.net/.biz/.us, with and without the city), rendered in a real browser. A site whose rendered page shows
+    // this business's phone or street refutes the claim (D). Existence is corroborated only by an independent online
+    // profile listed for the business (social / directory page). Otherwise the evidence is insufficient (C).
+    const stems = probeDomains(d.name).map((x) => x.replace(/\.com$/, ""));
+    const city = (d.address.city ?? "").toLowerCase().replace(/[^a-z]/g, "");
+    const variants = [...new Set(stems.flatMap((s) => [s, city && s.length + city.length <= 40 ? `${s}${city}` : null]).filter((x): x is string => !!x).flatMap((s) => ["com", "net", "biz", "us"].map((t) => `${s}.${t}`)))].slice(0, 10);
+    const cand = { businessKey: d.businessKey, name: d.name, category: null, address: d.address, lat: null, lon: null, phones: d.phone ? [phoneE164(d.phone)!].filter(Boolean) : [], emails: [], websites: [], sources: [], sourceConfidence: null, operatingStatus: null } as Candidate;
+    const tried: string[] = [];
+    for (const v of variants) {
+      const r = await http.get(`https://${v}/`);
+      if (r.error || r.robotsBlocked || (r.status ?? 500) >= 400) continue;
+      tried.push(v);
+      const page = await browser!.inspect(`https://${v}/`, { width: 1366, height: 900, mobile: false });
+      const facts = page.ok && page.html ? pageFacts(page.html) : pageFacts(r.body);
+      const id = identity(cand, facts, []);
+      if (id.official && id.signals.some((x) => /phone|street/.test(x))) {
+        return { ...base, operational: true, mobileFriendly: null, identity: "contradicted", claims: [{ code: "no_official_website", severity: "high", material: true, verdict: "not_supported", how: `found ${v}: ${id.signals.join("; ")}` }],
+          evidenceUrls: [`https://${v}/`], category: "D", confidence: "high", explanation: `False "no website": the business's own site exists at ${v} (${id.signals.join("; ")}).` };
+      }
+    }
+    const profiles = d.listedWebsites.map((w) => normDomain(w)).filter((x): x is string => !!x && !isCandidateOfficialDomain(x));
+    const claim = { code: "no_official_website", severity: "high", material: true, verdict: "not_testable" as Verdict, how: `${variants.length} name-derived domains tried, ${tried.length} loaded, none showed this business's phone or street; absence of a website cannot be proven` };
+    if (profiles.length) return { ...base, operational: null, mobileFriendly: null, identity: "no_website", claims: [claim], evidenceUrls: d.listedWebsites.slice(0, 3), category: "B", confidence: "low",
+      explanation: `No website found (falsification probe negative) and the business has an online profile (${[...new Set(profiles)].join(", ")}), which corroborates that it exists. Moderate: absence of a website is not proven.` };
+    return { ...base, operational: null, mobileFriendly: null, identity: "no_website", claims: [claim], evidenceUrls: [], category: "C", confidence: "low",
+      explanation: "No website found and none could be found by a wider name-derived probe, but existence rests on the open dataset alone: insufficient independent evidence." };
   }
   const fresh = await http.get(d.websiteUrl);
   const canRender = !fresh.robotsBlocked && !(fresh.error?.kind === "blocked_address");

@@ -346,3 +346,14 @@ test("[CRM-002] [CRM-005] promotion is an authoritative CRM intake decision (cha
   assert.equal((raw(db).prepare(`SELECT COUNT(*) AS n FROM leads`).get() as { n: number }).n, leads0, "no second lead");
   assert.match((raw(db).prepare(`SELECT status FROM research_prospects WHERE id = ?`).get(pid("overture:i2")) as { status: string }).status, /existing_crm|review/);
 });
+
+test("[CRM-005] evidenced-problem sites qualify on supported severity (one high or two medium), not on a single medium or low finding", () => {
+  const v = validateProspect(prospect({ businessKey: "overture:qs1", website: { classification: "VERIFIED_WEBSITE_ISSUES", url: "https://riverside-plumbing.example/", confidence: 0.9, checkedAt: NOW, checks: [] },
+    findings: [{ code: "no_viewport_meta", title: "No mobile viewport", severity: "high", confidence: 0.8, url: "https://riverside-plumbing.example/", method: "HTTP GET", observedAt: NOW, evidence: "no viewport tag" }] }));
+  assert.ok(v.ok);
+  assert.equal(qualify(v.value).qualified, true, "one supported high-severity problem");
+  const one = { ...v.value, findings: [{ ...v.value.findings[0], code: "images_without_alt", severity: "medium" as const }] };
+  assert.equal(qualify(one).qualified, false, "one medium problem is not enough");
+  assert.equal(qualify({ ...one, findings: [one.findings[0], { ...one.findings[0], code: "mixed_content" }] }).qualified, true, "two medium problems");
+  assert.equal(qualify({ ...v.value, findings: [{ ...v.value.findings[0], confidence: 0.5 }] }).qualified, false, "low-confidence evidence never qualifies");
+});

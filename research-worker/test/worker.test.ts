@@ -385,3 +385,28 @@ test("[live] franchise and multi-location handling: brand-managed chain location
   const solo = await evaluate(cand({ businessKey: "overture:solo" }), deps(new FakeHttp({ [site]: ok(site, centralPage, { responseMs: 200 }) }), new State(":memory:")), null);
   assert.ok(solo.kind === "done" && solo.cls === "WEBSITE_UNVERIFIED");
 });
+
+// ───────────── regressions from the independent lead audit (2026-10-30) ─────────────
+import { probeDomains } from "../src/pipeline.ts";
+
+test("[audit] a listed domain that does not exist is reported as a DNS failure (broken listing), not as 'robots.txt disallows'", async () => {
+  const http = new Http({ userAgent: "t", robotsToken: "CrestmontResearchBot", timeoutMs: 3000, perHostIntervalMs: 1000, concurrency: 2, maxBytes: 100000 });
+  const r = await http.get("https://does-not-exist-crestmont-audit-test.invalid/");
+  assert.equal(r.robotsBlocked, false);
+  assert.ok(r.error && ["dns", "timeout", "other"].includes(r.error.kind), JSON.stringify(r.error));
+  const st = new State(":memory:");
+  const listedDead = cand({ websites: ["https://does-not-exist-crestmont-audit-test.invalid/"] });
+  const out = await evaluate(listedDead, deps(http as never, st, { brokenAttempts: 1 }), null);
+  assert.ok(out.kind === "done" && out.cls === "VERIFIED_WEBSITE_BROKEN", JSON.stringify(out).slice(0, 300));
+});
+
+test("[audit] 'no website found' must survive a name-derived probe: the business's own site (phone match) is found; another business's site is ignored", async () => {
+  assert.deepEqual(probeDomains("Riverside Plumbing LLC"), ["riversideplumbing.com", "riverside-plumbing.com"]);
+  assert.deepEqual(probeDomains("A&B"), []);
+  const own = "https://riversideplumbing.com/";
+  const found = await evaluate(cand({ websites: [] }), deps(new FakeHttp({ [own]: ok(own, page(), { responseMs: 200 }) }), new State(":memory:")), null);
+  assert.ok(found.kind === "done" && found.cls === "VERIFIED_OFFICIAL_WEBSITE", "false 'no website' avoided");
+  const other = await evaluate(cand({ websites: [] }), deps(new FakeHttp({ [own]: ok(own, page({ phone: "(616) 555-2900", street: "9 Elm St", city: "Holland" }), { responseMs: 200 }) }), new State(":memory:")), null);
+  assert.ok(other.kind === "done" && other.cls === "NO_OFFICIAL_WEBSITE_FOUND", "a similarly named business is not this one");
+  if (other.kind === "done") assert.ok(other.prospect.website.checks!.some((c) => /name-derived domain probe/.test(c.method)));
+});

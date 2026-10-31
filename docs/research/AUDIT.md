@@ -43,8 +43,14 @@ Each claim gets one verdict: `supported`, `not_supported` (refuted) or `not_test
   - or two or more supported problems on a confirmed site that is not mobile-friendly.
 - **B (moderate):**
   - at least one supported material claim;
-  - or "no official website found". Existence rests on the open dataset only, and the absence of a website cannot be proven without a search engine.
-- **C (weak):** material claims not testable (insufficient evidence), or only minor problems reproduce.
+  - or "no official website found" that survives a **wider falsification probe** (name-derived `.com`/`.net`/`.biz`/`.us` domains, with and without the city, rendered in a browser) **and** whose existence is corroborated by an independent online profile listed for the business.
+- **C (weak):**
+  - claims not testable (insufficient evidence);
+  - or "no website found" whose existence rests on the open dataset alone;
+  - or only minor problems reproduce.
+- **D** also covers a "no website" claim **refuted** by finding the business's own site: its rendered page shows the business's phone or street.
+
+The first audit (run 41151326816) counted every "no website found" lead as B without testing that claim. That made A + B look like 99.4%, which was not meaningful, and the rubric was corrected before any re-run (`docs/research/BENCHMARK.md` §4).
 
 ## Metrics
 - **False-positive rate** = D ÷ audited.
