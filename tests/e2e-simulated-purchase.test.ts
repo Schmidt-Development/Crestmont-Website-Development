@@ -84,7 +84,9 @@ test("[AIB-020] [AIB-019] Junk in the Trunk: lead → $2,500 quote → sign-up �
 
   // ── Real checkout: unavailable, because Stripe is not configured (nothing is simulated on this path) ──
   const pay = await cust.post(`${invoicePath}/pay`);
-  assert.notEqual(pay.headers.get("location")?.startsWith("https://checkout.stripe.com"), true, "no Stripe checkout exists");
+  const payLocation = pay.headers.get("location");
+  const payHost = payLocation ? new URL(payLocation, "http://crestmont.test").hostname : null;
+  assert.ok(payHost === null || (payHost !== "stripe.com" && !payHost.endsWith(".stripe.com")), "no Stripe checkout exists");
   assert.equal(inv.status, "open");
 
   // ── Simulated payment: refused for an unmarked organization, then the Owner marks the fictional org ──
