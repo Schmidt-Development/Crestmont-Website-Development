@@ -76,6 +76,7 @@ export function toCandidate(r: OvertureRow, release: string, retrievedAt: string
     sources: [{ source: "overture", sourceId: r.id, license: rowLicense(r.datasets, r.licenses), release, retrievedAt }],
     sourceConfidence: typeof r.confidence === "number" ? r.confidence : null,
     operatingStatus: r.operating_status ?? null,
+    datasets: [...new Set((r.datasets ?? []).filter((x): x is string => typeof x === "string" && x.length < 60))].slice(0, 10),
     brand: r.brand ?? null,
     brandWikidata: typeof r.brand_wikidata === "string" && /^Q\d{1,12}$/.test(r.brand_wikidata) ? r.brand_wikidata : null,
   };

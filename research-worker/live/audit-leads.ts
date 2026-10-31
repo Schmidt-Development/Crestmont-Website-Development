@@ -140,10 +140,11 @@ async function auditOne(d: Detail): Promise<Audit> {
           evidenceUrls: [`https://${v}/`], category: "D", confidence: "high", explanation: `False "no website": the business's own site exists at ${v} (${id.signals.join("; ")}).` };
       }
     }
-    const profiles = d.listedWebsites.map((w) => normDomain(w)).filter((x): x is string => !!x && !isCandidateOfficialDomain(x));
+    const profiles = [...d.listedWebsites.map((w) => normDomain(w)).filter((x): x is string => !!x && !isCandidateOfficialDomain(x)),
+      ...d.identitySignals.filter((x) => /^listed by \d+ independent datasets/.test(x))];
     const claim = { code: "no_official_website", severity: "high", material: true, verdict: "not_testable" as Verdict, how: `${variants.length} name-derived domains tried, ${tried.length} loaded, none showed this business's phone or street; absence of a website cannot be proven` };
     if (profiles.length) return { ...base, operational: null, mobileFriendly: null, identity: "no_website", claims: [claim], evidenceUrls: d.listedWebsites.slice(0, 3), category: "B", confidence: "low",
-      explanation: `No website found (falsification probe negative) and the business has an online profile (${[...new Set(profiles)].join(", ")}), which corroborates that it exists. Moderate: absence of a website is not proven.` };
+      explanation: `No website found (falsification probe negative); existence corroborated by ${[...new Set(profiles)].join("; ")}. Moderate: absence of a website is not proven.` };
     return { ...base, operational: null, mobileFriendly: null, identity: "no_website", claims: [claim], evidenceUrls: [], category: "C", confidence: "low",
       explanation: "No website found and none could be found by a wider name-derived probe, but existence rests on the open dataset alone: insufficient independent evidence." };
   }
@@ -205,7 +206,8 @@ const summary = {
   materialClaims: { total: allMat.length, tested: tested.length, supported, refuted: tested.length - supported, notTestable: allMat.length - tested.length, supportedPctOfTested: pct(supported, tested.length) },
   claimStats,
   identity: Object.fromEntries(["confirmed", "weak", "contradicted", "no_website", "not_testable"].map((k) => [k, results.filter((r) => r.identity === k).length])),
-  incorrectWebsiteMatches: results.filter((r) => r.identity === "contradicted").length,
+  incorrectWebsiteMatches: results.filter((r) => r.identity === "contradicted" && r.website).length,
+  falseNoWebsiteClaims: results.filter((r) => !r.website && r.category === "D").length,
   duplicates: results.filter((r) => r.duplicateOf).length,
   operational: { yes: results.filter((r) => r.operational === true).length, no: results.filter((r) => r.operational === false).length, unknown: results.filter((r) => r.operational === null && r.website).length },
   mobileFriendly: { yes: results.filter((r) => r.mobileFriendly === true).length, no: results.filter((r) => r.mobileFriendly === false).length },

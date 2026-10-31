@@ -291,7 +291,12 @@ export function qualify(p: Pick<CleanProspect, "website" | "findings" | "identit
   const material = counted.filter((f) => SEVERITY_RANK[f.severity] >= 2);
   const evidencedIssues = material.some((f) => SEVERITY_RANK[f.severity] >= 3) || material.length >= 2;
   if (cls === "VERIFIED_WEBSITE_ISSUES" && !evidencedIssues) reasons.push("needs one high-severity or two medium problems with confidence ≥ 0.6");
-  const classQualifies = cls === "VERIFIED_WEBSITE_BROKEN" || cls === "NO_OFFICIAL_WEBSITE_FOUND" || (cls === "VERIFIED_WEBSITE_ISSUES" && evidencedIssues);
+  // "No website found" is an opportunity only when something beyond one dataset entry shows the business exists:
+  // an online profile listed for it, or two or more independent datasets (lead audit 2026-10-30: 89 of 141 such
+  // leads rested on the dataset alone).
+  const corroborated = (p.website.identitySignals ?? []).some((s) => /^online profile:|^listed by \d+ independent datasets/.test(s));
+  if (cls === "NO_OFFICIAL_WEBSITE_FOUND" && !corroborated) reasons.push("existence not independently corroborated (one dataset entry only)");
+  const classQualifies = cls === "VERIFIED_WEBSITE_BROKEN" || (cls === "NO_OFFICIAL_WEBSITE_FOUND" && corroborated) || (cls === "VERIFIED_WEBSITE_ISSUES" && evidencedIssues);
   const qualified = classQualifies && p.identityConfidence >= 0.7 && p.phones.length > 0 && !stale && score >= threshold;
   return { score, qualified, reasons, recommendedPackage: qualified || classQualifies ? recommendPackage(cls, counted) : null, maxSeverity };
 }

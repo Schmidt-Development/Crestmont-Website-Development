@@ -181,5 +181,9 @@ export async function evaluate(c: Candidate, deps: Deps, probe: Probe | null): P
   if (loadedUnconfirmed || domains.some((d) => d.listedBy.length)) return done("WEBSITE_UNVERIFIED", { url: null, confidence: 0.4, identitySignals: unconfirmedReasons }, [], recConf);
   if (!c.phones.length && !(c.address.line && c.address.city)) return done("BUSINESS_IDENTITY_UNCERTAIN", { url: null, confidence: recConf, identitySignals: ["no phone or street address to confirm the business"] }, [], recConf);
   checks.push({ stage: "E", method: "conclusion", result: `no official website found by stages A-C${unconfirmedReasons.length ? ` (${unconfirmedReasons.join("; ")})` : ""}; this is not proof that none exists`, at: iso() });
-  return done("NO_OFFICIAL_WEBSITE_FOUND", { url: null, confidence: deps.cc ? 0.7 : 0.6, identitySignals: [`record confidence ${recConf}`] }, [], recConf);
+  // Independent corroboration that the business exists (a dataset entry alone is not enough to call it an opportunity).
+  const profiles = [...new Set(c.websites.map(normDomain).filter((d): d is string => !!d && !isCandidateOfficialDomain(d)))];
+  const datasets = [...new Set(c.datasets ?? [])];
+  const corroboration = [...(profiles.length ? [`online profile: ${profiles.slice(0, 3).join(", ")}`] : []), ...(datasets.length >= 2 ? [`listed by ${datasets.length} independent datasets: ${datasets.slice(0, 4).join(", ")}`] : [])];
+  return done("NO_OFFICIAL_WEBSITE_FOUND", { url: null, confidence: deps.cc ? 0.7 : 0.6, identitySignals: [`record confidence ${recConf}`, ...corroboration] }, [], recConf);
 }

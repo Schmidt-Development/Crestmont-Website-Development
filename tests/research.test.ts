@@ -357,3 +357,12 @@ test("[CRM-005] evidenced-problem sites qualify on supported severity (one high 
   assert.equal(qualify({ ...one, findings: [one.findings[0], { ...one.findings[0], code: "mixed_content" }] }).qualified, true, "two medium problems");
   assert.equal(qualify({ ...v.value, findings: [{ ...v.value.findings[0], confidence: 0.5 }] }).qualified, false, "low-confidence evidence never qualifies");
 });
+
+test("[CRM-005] 'no website found' qualifies only with independent corroboration of the business (online profile or two datasets)", () => {
+  const mk = (signals: string[]) => { const v = validateProspect(prospect({ businessKey: "overture:nc1", findings: [], website: { classification: "NO_OFFICIAL_WEBSITE_FOUND", confidence: 0.7, checkedAt: NOW, identitySignals: signals, checks: [{ stage: "A", method: "m", result: "none", at: NOW }] } })); assert.ok(v.ok); return qualify(v.value); };
+  const alone = mk(["record confidence 0.9"]);
+  assert.equal(alone.qualified, false);
+  assert.ok(alone.reasons.some((r) => /not independently corroborated/.test(r)));
+  assert.equal(mk(["online profile: facebook.com"]).qualified, true);
+  assert.equal(mk(["listed by 2 independent datasets: meta, foursquare"]).qualified, true);
+});

@@ -410,3 +410,14 @@ test("[audit] 'no website found' must survive a name-derived probe: the business
   assert.ok(other.kind === "done" && other.cls === "NO_OFFICIAL_WEBSITE_FOUND", "a similarly named business is not this one");
   if (other.kind === "done") assert.ok(other.prospect.website.checks!.some((c) => /name-derived domain probe/.test(c.method)));
 });
+
+test("[audit] the pipeline records independent existence corroboration for 'no website found' (profiles, multiple datasets)", async () => {
+  const r = await evaluate(cand({ websites: ["https://www.facebook.com/riverside"], datasets: ["meta", "Foursquare"] }), deps(new FakeHttp({}), new State(":memory:")), null);
+  assert.ok(r.kind === "done" && r.cls === "NO_OFFICIAL_WEBSITE_FOUND");
+  if (r.kind === "done") {
+    assert.ok(r.prospect.website.identitySignals!.some((s) => /^online profile: facebook\.com/.test(s)));
+    assert.ok(r.prospect.website.identitySignals!.some((s) => /^listed by 2 independent datasets/.test(s)));
+  }
+  const bare = await evaluate(cand({ websites: [], datasets: ["meta"] }), deps(new FakeHttp({}), new State(":memory:")), null);
+  assert.ok(bare.kind === "done" && !bare.prospect.website.identitySignals!.some((s) => /online profile|independent datasets/.test(s)));
+});
