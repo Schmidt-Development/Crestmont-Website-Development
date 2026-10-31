@@ -618,6 +618,15 @@ jobs:
         if: always()
         run: rm -rf access forensics e2e "$RUNNER_TEMP/rotation-state.json"
 
+      # Read-only Stripe diagnostics written by the journeys (Owner's monitoring view, disputes, the journey customer's billing
+      # and projects pages), as annotations: review sessions can read annotations when the raw log is not downloadable.
+      - name: Stripe staging diagnostics (read-only)
+        if: always()
+        continue-on-error: true
+        run: |
+          [ -f evidence/stripe-diagnostics.txt ] || { echo "No Stripe diagnostics were written."; exit 0; }
+          while IFS= read -r line; do printf '::notice title=Stripe diagnostics::%s\n' "$(printf '%s' "$line" | sed -e 's/%/%25/g')"; done < evidence/stripe-diagnostics.txt
+
       # Staging certification (33 required journeys) — published on every run; only 33/33 passed is "certified".
       - name: Staging certification summary
         if: always() && steps.e2e.outcome != 'skipped'
