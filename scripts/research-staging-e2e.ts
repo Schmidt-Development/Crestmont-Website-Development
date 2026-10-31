@@ -175,7 +175,10 @@ async function main() {
     assert(b.replay === true && a.created === 0 && b.created === 0, `retry created records (first ${a.created}, retry ${b.created}, replay ${b.replay})`);
   });
   // ── 4. promotion into the real staging CRM (intake engine) ──
-  const promotable = await q<{ id: string }>(`SELECT id FROM research_prospects WHERE business_key IN ${inKeys} AND status IN ('qualified','review') ORDER BY score DESC, id LIMIT ${Math.max(1, Math.min(10, req.maxPromotions))}`);
+  // Only records not yet decided: the same public candidates are researched on every deploy, so earlier runs' promotions
+  // are already in staging and must not be counted (or promoted again) as this run's.
+  const promotable = await q<{ id: string }>(`SELECT id FROM research_prospects WHERE business_key IN ${inKeys} AND status = 'qualified' ORDER BY score DESC, id LIMIT ${Math.max(1, Math.min(10, req.maxPromotions))}`);
+  const ids = `(${promotable.map((p) => lit(p.id)).join(",") || "''"})`;
   let created = 0;
   await check("research.promote_into_staging_crm", async () => {
     if (!promotable.length) return "no qualified prospect in this batch (nothing to promote)";
@@ -188,7 +191,7 @@ async function main() {
     }
     created = await n(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent'`) - before.researchLeads;
     assert(!Object.keys(outcomes).some((k) => k.startsWith("http_")), `unexpected responses ${JSON.stringify(outcomes)}`);
-    const linked = await n(`SELECT COUNT(*) AS n FROM research_prospects p JOIN leads l ON l.id = p.crm_lead_id WHERE p.business_key IN ${inKeys} AND p.status = 'promoted' AND l.origin = 'research_agent' AND l.intake_decision_id IN (SELECT id FROM crm_intake_decisions) AND l.utm_source = 'crestmont-research'`);
+    const linked = await n(`SELECT COUNT(*) AS n FROM research_prospects p JOIN leads l ON l.id = p.crm_lead_id WHERE p.id IN ${ids} AND p.status = 'promoted' AND l.origin = 'research_agent' AND l.intake_decision_id IN (SELECT id FROM crm_intake_decisions) AND l.utm_source = 'crestmont-research'`);
     assert(linked === created, `${linked} promoted prospects linked to research leads with an intake decision, ${created} leads created`);
     const audited = await n(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'research.prospect_promoted' AND subject_id IN (${promotable.map((p) => lit(p.id)).join(",")})`);
     assert(audited === created, `${audited} audit rows for ${created} promotions`);
