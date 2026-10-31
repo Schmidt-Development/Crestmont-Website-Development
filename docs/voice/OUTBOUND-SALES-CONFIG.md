@@ -4,8 +4,8 @@ Every value below matches the server-side authority (`src/services/sales-functio
 `src/routes/sales-outbound.ts`). Architecture and compliance: [`OUTBOUND-SALES.md`](OUTBOUND-SALES.md).
 
 **Deployment status (2026-10-31): NOT DEPLOYED.** The staging Worker runs `main`; this code is on branch
-`claude/outbound-sales-agent`, stacked on PR #48. The staging URLs below are the exact URLs these routes will have once
-#48 and this PR are merged to `main` (staging deploys only from `main`). Until then they answer 404 on staging. The only
+`claude/outbound-sales-agent` (PR #69, now based on `main` after #48 merged). The staging URLs below are the exact URLs these routes will have once
+this PR is merged to `main` (staging deploys only from `main`). Until then they answer 404 on staging. The only
 endpoint already live on staging is the SHARED agent webhook, and it does not yet contain the sales outcome handler.
 
 Staging base URL: `https://crestmont-platform-staging.partners-df4.workers.dev` (the workers.dev address used by every
@@ -178,18 +178,47 @@ Uses the receptionist's scheduling service (off until the Owner enables phone sc
 Effects: `voice_dnc` (SHARED with the receptionist: revokes follow-up consents, cancels follow-up requests), sales consents revoked, queued sales calls and AI follow-ups cancelled, research prospects with the number suppressed (re-imports are never callable), optional sales-email opt-out, CRM note, audit `sales_outbound.do_not_call`. Retell's own `user_requested_dnc` disconnection reason triggers the same path from the webhook.
 6. **Max retries:** 2 · 11. Wait · 12. **Talk While Waiting:** Off · 13. **Typing sound:** Off
 
-### Function 9 — `record_call_outcome` → **agent webhook, not a custom function**
+### Function 9 — `record_call_outcome` → **agent-level webhook, not a custom function**
 
-Decision and reasons: `OUTBOUND-SALES.md` §6. Configure on the **sales agent**:
+Decision and reasons: `OUTBOUND-SALES.md` §6. Retell UI (sales agent → Webhook settings):
 
-| Field | Value |
+| Retell field | Value |
 |---|---|
-| Agent → Webhook URL | `https://crestmont-platform-staging.partners-df4.workers.dev/api/webhooks/retell` (**SHARED** with the receptionist; live on staging today without the sales handler) |
-| Events | `call_started`, `call_ended`, `call_analyzed` (Retell's defaults) |
-| Signature | `X-Retell-Signature`, same `RETELL_API_KEY` |
-| Optional post-call analysis | Selector field named exactly `sales_outcome`, choices `wrong_number`, `not_interested`, `interested`, `follow_up_requested`. Used only when nothing more reliable exists. |
+| Agent Level Webhook URL | `https://crestmont-platform-staging.partners-df4.workers.dev/api/webhooks/retell` (**SHARED** route with the receptionist; the route is matched by `src/routes/hooks.ts`) |
+| Webhook Timeout | `10` seconds (Retell's documented webhook timeout; the handler answers well inside it) |
+| Webhook Events | `call_started`, `call_ended`, `call_analyzed`, `transfer_started`, `transfer_bridged`, `transfer_cancelled`, `transfer_ended` |
+| Leave off | `transcript_updated` (ignored by the platform; adds load only), all chat events |
+| Signature | automatic `X-Retell-Signature`, verified with the Worker secret `RETELL_API_KEY` (the workspace key with the webhook badge) |
+| Post-call analysis (optional) | a selector field named exactly `sales_outcome` with choices `wrong_number`, `not_interested`, `interested`, `follow_up_requested`; any other field name is ignored by the platform |
+
+`transfer_cancelled` (a warm transfer that did not connect) creates an urgent CRM callback task on the call's lead and an Owner notification. Transfer events are deduplicated on event + call id + start timestamp + destination.
 
 Outcomes stored (`sales_calls.outcome`): `no_answer`, `voicemail`, `wrong_number`, `not_interested`, `interested`, `follow_up_requested`, `consultation_booked`, `checkout_sent`, `payment_confirmed`, `do_not_call`, `technical_failure`, plus `unclassified` (connected, nothing recorded → CRM task; never guessed). Stable key: Retell `call_id` bound to `crestmont_sales_call_id`; written once.
+
+## Agent-level default dynamic variables (Security & fallback settings → Default Dynamic Variables)
+
+Retell leaves an unset variable as the literal `{{name}}`; an empty string renders as nothing. Set these defaults so a
+missing value is never spoken:
+
+| Variable | Default |
+|---|---|
+| `business_name` | empty string |
+| `first_name` | empty string |
+| `industry` | empty string |
+| `website_url` | empty string |
+| `website_status` | `unknown` |
+| `verified_issue` | empty string |
+| `recommended_service` | empty string |
+| `research_verified` | `false` |
+| `crestmont_env` | empty string |
+| `lead_id` | **no default** (never a fabricated id; the server binds the lead from signed call metadata, and an unrendered `{{lead_id}}` is ignored) |
+
+`agent_number` is a Retell system variable (the calling number) and needs no default.
+
+## Master prompt
+
+Paste-ready text for the sales agent's Prompt field: [`outbound-sales-agent-prompt.txt`](outbound-sales-agent-prompt.txt).
+`tests/outbound-sales.test.ts` checks that it names only real tools and variables and contains no hard-coded prices.
 
 ---
 
