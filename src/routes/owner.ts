@@ -42,9 +42,9 @@ export async function executiveMetrics(ctx: AppContext) {
   const now = ctx.now();
   const iso30 = new Date(now.getTime() - 30 * 86_400_000).toISOString();
   const nowIsoStr = now.toISOString();
-  const revenueAll = await n(ctx, `SELECT COALESCE(SUM(amount_cents),0) AS n FROM payments WHERE status = 'succeeded'`);
-  const revenue30 = await n(ctx, `SELECT COALESCE(SUM(amount_cents),0) AS n FROM payments WHERE status = 'succeeded' AND created_at >= ?`, iso30);
-  const succeededCount = await n(ctx, `SELECT COUNT(*) AS n FROM payments WHERE status = 'succeeded'`);
+  const revenueAll = await n(ctx, `SELECT COALESCE(SUM(amount_cents),0) AS n FROM payments WHERE status = 'succeeded' AND provider <> 'simulated'`);
+  const revenue30 = await n(ctx, `SELECT COALESCE(SUM(amount_cents),0) AS n FROM payments WHERE status = 'succeeded' AND provider <> 'simulated' AND created_at >= ?`, iso30);
+  const succeededCount = await n(ctx, `SELECT COUNT(*) AS n FROM payments WHERE status = 'succeeded' AND provider <> 'simulated'`);
   const mrr = await n(ctx, `SELECT COALESCE(SUM(p.price_cents),0) AS n FROM subscriptions s JOIN products p ON p.id = s.product_id WHERE s.status = 'active' AND p.billing = 'monthly'`);
   const activeSubs = await n(ctx, `SELECT COUNT(*) AS n FROM subscriptions WHERE status = 'active'`);
   const unpricedSubs = await n(ctx, `SELECT COUNT(*) AS n FROM subscriptions s JOIN products p ON p.id = s.product_id WHERE s.status = 'active' AND (p.price_cents IS NULL OR p.billing <> 'monthly')`);

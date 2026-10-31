@@ -155,6 +155,7 @@ export async function buildWorld(): Promise<World> {
   const app = await createTestApp({
     EVIDENCE_INGEST_SECRET: SECRETS.evidence, VOICE_WEBHOOK_SECRET: SECRETS.voice, STRIPE_WEBHOOK_SECRET: SECRETS.stripe,
     RETELL_API_KEY: SECRETS.retell, RESEND_WEBHOOK_SECRET: SECRETS.resend, BUILD_RUNNER_SECRET: SECRETS.runner, RESEARCH_RUNNER_SECRET: SECRETS.research, BUILD_PREVIEW_GATE_SECRET: "matrix-preview-gate-secret-0123456789abcdef", SCHEDULER_TRIGGER_SECRET: SECRETS.scheduler, CRM_IMPORT_SECRET: SECRETS.crmImport,
+    PAYMENT_SIMULATION_ENABLED: "true",
     overrides: { storage: new MemoryStorage(), payments },
   });
   const db = app.db;

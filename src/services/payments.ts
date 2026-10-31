@@ -255,9 +255,9 @@ export async function processStripeEvent(ctx: EventCtx, evt: StripeEvent): Promi
 }
 
 /**
- * Records a confirmed payment for a local invoice and runs the follow-ups (project provisioning, change
- * order, lead conversion, staff notification, receipt email). Shared by Checkout (checkout.session.completed)
- * and Stripe Invoices (invoice.paid, PAY-006).
+ * Records a confirmed payment for a local invoice and runs the follow-ups (project provisioning, build eligibility,
+ * change order, lead conversion, staff notification, receipt email). Shared by Checkout (checkout.session.completed),
+ * Stripe Invoices (invoice.paid, PAY-006) and the test-only payment simulation (payment-simulation.ts, migration 0059).
  *
  * CREST-GAP-006: the follow-ups run on EVERY delivery, including when the invoice is already paid, and each one is
  * idempotent (one project per order by unique index, conditional lead conversion, keyed receipt). So a retry after a
@@ -265,15 +265,29 @@ export async function processStripeEvent(ctx: EventCtx, evt: StripeEvent): Promi
  */
 async function applyInvoicePayment(ctx: Pick<AppContext, "db" | "email" | "baseUrl">, evt: StripeEvent, invoiceId: string,
   payment: { amountCents: number; paymentIntentId: string | null; chargeId: string | null }, to: string | null): Promise<void> {
-  const res = await markInvoicePaid(ctx.db, invoiceId, payment);
-  await completePaidInvoice(ctx, res.invoice.id, to, `Stripe webhook (${evt.id})`);
+  await confirmInvoicePayment(ctx, { provider: "stripe", eventId: evt.id }, invoiceId, payment, to);
+}
+
+/** Where a confirmed payment came from: a verified Stripe webhook, or the test-only payment simulation (0059). */
+export type PaymentSource = { provider: "stripe"; eventId: string } | { provider: "simulated"; eventId: string; transactionId: string };
+
+/** The provider-neutral payment-confirmation handler: marks the invoice paid (idempotent), then the shared follow-ups. */
+export async function confirmInvoicePayment(ctx: Pick<AppContext, "db" | "email" | "baseUrl">, source: PaymentSource, invoiceId: string,
+  payment: { amountCents: number; paymentIntentId: string | null; chargeId: string | null }, to: string | null): Promise<{ alreadyPaid: boolean; projectId: string | null }> {
+  const simulated = source.provider === "simulated";
+  const res = await markInvoicePaid(ctx.db, invoiceId, { ...payment, provider: source.provider, simulatedTransactionId: simulated ? source.transactionId : null });
+  // A simulated delivery never sends a receipt, even onto an invoice that a real payment already settled.
+  const out = await completePaidInvoice(ctx, res.invoice.id, simulated ? null : to, simulated ? `the test-only payment simulation (${source.eventId}; no real transaction)` : `Stripe webhook (${source.eventId})`, { noReceipt: simulated });
+  return { alreadyPaid: res.alreadyPaid, projectId: out.projectId };
 }
 
 /** Idempotent follow-ups for a paid invoice. Safe to run any number of times (webhook retries and the repair sweep). */
-export async function completePaidInvoice(ctx: Pick<AppContext, "db" | "email" | "baseUrl">, invoiceId: string, to: string | null, source: string): Promise<{ projectId: string | null; provisioned: boolean }> {
+export async function completePaidInvoice(ctx: Pick<AppContext, "db" | "email" | "baseUrl">, invoiceId: string, to: string | null, source: string, opts: { noReceipt?: boolean } = {}): Promise<{ projectId: string | null; provisioned: boolean }> {
   const db = ctx.db;
   const inv = await db.prepare(`SELECT * FROM invoices WHERE id = ?`).bind(invoiceId).first<{ id: string; organization_id: string; order_id: string | null; project_id: string | null; milestone_kind: string | null; amount_cents: number; status: string }>();
   if (!inv || inv.status !== "paid") throw new Error(`Invoice ${invoiceId} is not paid`);
+  // Read from the payment record (not a parameter) so the repair sweep treats a simulated invoice the same way.
+  const simulated = !!(await db.prepare(`SELECT 1 FROM payments WHERE invoice_id = ? AND provider = 'simulated'`).bind(inv.id).first());
   let projectId = inv.project_id;
   let provisioned = false;
   if (!projectId && inv.order_id && (inv.milestone_kind === "full" || inv.milestone_kind === "deposit_50")) {
@@ -290,7 +304,7 @@ export async function completePaidInvoice(ctx: Pick<AppContext, "db" | "email" |
     if (lead?.lead_id) {
       const conv = await db.prepare(`UPDATE leads SET stage = 'converted', updated_at = ? WHERE id = ? AND stage IN ('accepted','awaiting_payment')`).bind(nowIso(), lead.lead_id).run();
       if (conv.meta.changes === 1) {
-        await db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`).bind(newId("act"), lead.lead_id, `Payment confirmed by ${source}; lead converted`, nowIso()).run();
+        await db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`).bind(newId("act"), lead.lead_id, simulated ? `SIMULATED payment confirmed by ${source}; lead converted` : `Payment confirmed by ${source}; lead converted`, nowIso()).run();
       }
     }
   }
@@ -300,7 +314,8 @@ export async function completePaidInvoice(ctx: Pick<AppContext, "db" | "email" |
     const staff = (await db.prepare(`SELECT DISTINCT m.user_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id IN ('owner','project_manager') AND u.disabled_at IS NULL`).all<{ user_id: string }>()).results;
     for (const u of staff) await notify(db, u.user_id, { kind: "project_provisioned", subjectType: "project", subjectId: projectId, body: `Payment confirmed: ${p?.name ?? "a new project"} (${p?.org_name ?? "customer"}) was provisioned and awaits onboarding. Assign a project manager.` });
   }
-  const recipient = to ?? await orgBillingEmail(db, inv.organization_id);
+  // A simulated payment is not a real transaction: no receipt is sent.
+  const recipient = simulated || opts.noReceipt ? null : to ?? await orgBillingEmail(db, inv.organization_id);
   if (recipient) await sendMail(ctx, { template: "receipt", to: recipient, idempotencyKey: `receipt:${inv.id}`,
     data: { amountCents: inv.amount_cents, next: projectId ? "onboarding" : "billing", url: `${ctx.baseUrl}/portal${projectId ? `/projects/${projectId}/onboarding` : "/billing"}` } });
   return { projectId, provisioned };

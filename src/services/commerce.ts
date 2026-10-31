@@ -158,24 +158,35 @@ export async function issueMilestoneInvoice(db: Db, projectId: string, kind: "de
   return id;
 }
 
-export async function markInvoicePaid(db: Db, invoiceId: string, payment: { amountCents: number; paymentIntentId: string | null; chargeId?: string | null; feeCents?: number | null }) {
+export async function markInvoicePaid(db: Db, invoiceId: string, payment: { amountCents: number; paymentIntentId: string | null; chargeId?: string | null; feeCents?: number | null;
+  /** Test-only payment simulation (migration 0059); Stripe otherwise. */ provider?: "stripe" | "simulated"; simulatedTransactionId?: string | null }) {
   const inv = await db.prepare(`SELECT * FROM invoices WHERE id = ?`).bind(invoiceId).first<InvoiceRow>();
   if (!inv) throw new Error(`Invoice ${invoiceId} not found`);
-  if (inv.status === "paid") return { alreadyPaid: true, invoice: inv };
+  if (inv.status === "paid") {
+    if ((payment.provider ?? "stripe") !== "simulated" && payment.paymentIntentId) {
+      // A real payment for an invoice an internal test marked paid by SIMULATION: never acknowledge it silently.
+      // Throwing marks the Stripe event failed (retried, then dead-lettered) so it shows in reconciliation.
+      const sim = await db.prepare(`SELECT 1 FROM payments WHERE invoice_id = ? AND provider = 'simulated'`).bind(invoiceId).first();
+      const known = await db.prepare(`SELECT 1 FROM payments WHERE stripe_payment_intent_id = ?`).bind(payment.paymentIntentId).first();
+      if (sim && !known) throw new Error(`Real Stripe payment ${payment.paymentIntentId} for invoice ${invoiceId}, which an internal test marked paid by SIMULATION: needs manual review`);
+    }
+    return { alreadyPaid: true, invoice: inv };
+  }
   if (payment.amountCents !== inv.amount_cents) throw new Error(`Amount mismatch for ${invoiceId}: paid ${payment.amountCents}, expected ${inv.amount_cents}`);
   const at = nowIso();
   await db.batch([
     db.prepare(`UPDATE invoices SET status = 'paid', paid_at = ? WHERE id = ? AND status <> 'paid'`).bind(at, invoiceId),
-    db.prepare(`INSERT INTO payments (id, organization_id, invoice_id, order_id, amount_cents, fee_cents, stripe_payment_intent_id, stripe_charge_id, status, created_at)
-                VALUES (?,?,?,?,?,?,?,?, 'succeeded', ?) ON CONFLICT(stripe_payment_intent_id) DO NOTHING`)
-      .bind(newId("pay"), inv.organization_id, inv.id, inv.order_id, payment.amountCents, payment.feeCents ?? null, payment.paymentIntentId, payment.chargeId ?? null, at),
+    db.prepare(`INSERT INTO payments (id, organization_id, invoice_id, order_id, amount_cents, fee_cents, stripe_payment_intent_id, stripe_charge_id, status, provider, simulated_transaction_id, created_at)
+                VALUES (?,?,?,?,?,?,?,?, 'succeeded', ?, ?, ?) ON CONFLICT(stripe_payment_intent_id) DO NOTHING`)
+      .bind(newId("pay"), inv.organization_id, inv.id, inv.order_id, payment.amountCents, payment.feeCents ?? null, payment.paymentIntentId, payment.chargeId ?? null,
+        payment.provider ?? "stripe", payment.simulatedTransactionId ?? null, at),
   ]);
   if (inv.order_id) {
     const totals = await db.prepare(`SELECT o.total_cents, COALESCE(SUM(COALESCE(i.subtotal_cents, i.amount_cents)),0) AS paid FROM orders o LEFT JOIN invoices i ON i.order_id = o.id AND i.status = 'paid' WHERE o.id = ? GROUP BY o.id`).bind(inv.order_id).first<{ total_cents: number; paid: number }>();
     const status = totals && totals.paid >= totals.total_cents ? "paid" : "partially_paid";
     await db.prepare(`UPDATE orders SET status = ? WHERE id = ?`).bind(status, inv.order_id).run();
   }
-  await audit(db, { actorKind: "webhook", action: "invoice.paid", subjectType: "invoice", subjectId: invoiceId, organizationId: inv.organization_id, details: { amountCents: payment.amountCents } });
+  await audit(db, { actorKind: payment.provider === "simulated" ? "system" : "webhook", action: "invoice.paid", subjectType: "invoice", subjectId: invoiceId, organizationId: inv.organization_id, details: { amountCents: payment.amountCents, provider: payment.provider ?? "stripe" } });
   return { alreadyPaid: false, invoice: inv };
 }
 

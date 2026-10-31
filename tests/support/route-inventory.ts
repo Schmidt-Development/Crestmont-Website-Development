@@ -536,6 +536,10 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/ai/:id/decide": staff(rolesWith("ai.manage"), P("aiJob"), act("ai.draft_approved")),
   "POST /staff/ai/:id/retry": staff(rolesWith("ai.manage"), P("aiJob"), act("ai.job_retried")),
   "POST /staff/ai/budget": staff(rolesWith("ai.budget"), undefined, act("ai.budget_updated")),
+  // Test-only payment simulation (Owner; refused in production; migration 0044)
+  "GET /staff/test-payments": staff(rolesWith("payments.simulate")),
+  "POST /staff/test-payments/organizations/:id/mark": staff(rolesWith("payments.simulate"), P("org"), act("payments.simulation_test_org_marked")),
+  "POST /staff/test-payments/simulate": staff(rolesWith("payments.simulate"), undefined, act("payments.simulated_applied")),
   "GET /staff/voice": staff(rolesWith("voice.manage")),
   "POST /staff/voice/configs": staff(rolesWith("voice.manage"), undefined, act("voice.config_version_created")),
   "POST /staff/voice/configs/:version/activate": staff(rolesWith("voice.manage"), { version: "voiceVersion" }, act("voice.config_activated")),

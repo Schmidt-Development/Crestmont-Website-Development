@@ -276,6 +276,8 @@ export const REQUIREMENTS: RequirementDef[] = [
     ["AIB-016", "Node 1 verification and acceptance: both models pulled and measured on the RTX 5090 (VRAM, throughput, switching, 1/2/4/8 concurrency), then one real internal website through the full lifecycle", "P0", "integration", ["AIB-015"]],
     ["AIB-017", "Private Crestmont review gate: a finished website is invisible to the customer (no preview, notification, review results or status detail) until staff approve it internally (MFA step-up) and explicitly share it; final approval only after internal approval", "P0", "security", ["AIB-006"]],
     ["AIB-018", "Trusted integration-execution layer: agents request catalogued test-environment operations; the runner runs them with scoped credentials the agent never sees, after Owner approval, with sanitized evidence", "P0", "security", ["AIB-014"]],
+    ["AIB-019", "Test-only payment simulation (Stripe not configured): Owner-only, MFA step-up, refused in production and unless enabled, fictional test organizations only, enters the real payment-confirmation handler; duplicate/replay/amount/currency/failed/unauthorized events never unlock fulfillment; a simulated payment is never shown to a customer or released", "P0", "security", ["AIB-001"]],
+    ["AIB-020", "Customer-to-website E2E benchmark: simulated payment → real CRM, quote, registration, onboarding, project and build dispatch → real Node 1 dual-model build, QA, repair cycles → private Founder review queue, with measured metrics", "P0", "integration", ["AIB-016", "AIB-019"]],
   ]),
 ];
 

@@ -17,11 +17,13 @@ export type Permission =
   | "crm.access" | "delivery.access" | "support.access" | "ai.manage" | "voice.manage" | "customers.read"
   // AI Builds (paid-intake automation): read, operate (cancel/pause/retry/resume/revise), configure (limits, approve, backfill)
   | "builds.read" | "builds.manage" | "builds.configure" | "ai.budget"
+  // Test-only payment simulation (internal E2E benchmarks; refused in production)
+  | "payments.simulate"
   // AI Sales Optimization: view (owner/admin) and the Founder-only decisions (approve, production deploy/rollback, activation)
   | "salesopt.read" | "salesopt.decide";
 
 const OWNER_ONLY: Permission[] = ["refund.decide", "refund.issue", "pricing.change", "release.approve_production",
-  "release.deploy_production", "security.exception", "builds.configure", "ai.budget", "salesopt.decide"];
+  "release.deploy_production", "security.exception", "builds.configure", "ai.budget", "payments.simulate", "salesopt.decide"];
 
 const ALL_STAFF: Permission[] = ["readiness.read"];
 

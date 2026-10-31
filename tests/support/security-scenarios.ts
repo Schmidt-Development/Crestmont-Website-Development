@@ -6,6 +6,7 @@ import { pdf, png, type World, type Tenant } from "./security-world.ts";
 import { pathFor } from "./security-helpers.ts";
 import { ROUTE_INVENTORY } from "./route-inventory.ts";
 import { newId, nowIso } from "../../src/lib/db.ts";
+import { createPackageOrder } from "../../src/services/commerce.ts";
 import { totpCode } from "../../src/lib/auth-crypto.ts";
 import { baselineSalesInstructions as baselineSales } from "../../src/domain/sales-opt/policy.ts";
 
@@ -97,6 +98,8 @@ export function auditScenarios(w: World): Scenario[] {
   const x: Record<string, string> = {};
   let spare: { id: string; email: string; c: TestClient; secret: string };
   const NEWPW = "a-brand-new-password-123";
+  let simOrg: { id: string; organizationId: string } | undefined;
+  let simInvoice: string | undefined;
   const spareAs = () => ({ c: spare.c, id: spare.id });
   return [
     // ── Authentication flow and account (a dedicated spare customer, so tenant A is unaffected) ──
@@ -439,6 +442,13 @@ export function auditScenarios(w: World): Scenario[] {
 
     // ── AI Builds (owner controls) ──
     { key: "POST /staff/ai/budget", fields: () => ({ monthly_budget_usd: "25" }) },
+    // Test-only payment simulation: a fresh fictional organization (the tenants have real Stripe payments and are refused).
+    { key: "POST /staff/test-payments/organizations/:id/mark", setup: async () => {
+      simOrg = await createCustomer(w.db, `sim-${Date.now()}@matrix.example`, "Matrix Simulation Test Org");
+    }, path: () => `/staff/test-payments/organizations/${simOrg!.organizationId}/mark`, fields: () => ({ mark: "1", confirm: "Matrix Simulation Test Org" }) },
+    { key: "POST /staff/test-payments/simulate", setup: async () => {
+      simInvoice = (await createPackageOrder(w.db, simOrg!.organizationId, "starter", simOrg!.id)).invoiceId;
+    }, fields: () => ({ invoice_id: simInvoice!, outcome: "paid" }) },
     { key: "POST /staff/builds/settings", fields: () => ({ run_budget: "30", project_budget: "90", model: "claude-sonnet-5-5", max_runtime: "120", max_turns: "200", max_concurrent: "2", max_attempts: "3", automation_enabled: "1" }) },
     { key: "POST /staff/builds/pause", fields: () => ({ paused: "1", reason: "matrix pause" }) },
     { key: "POST /staff/builds/projects/:projectId/pause", fields: () => ({ paused: "1", reason: "matrix project pause" }) },

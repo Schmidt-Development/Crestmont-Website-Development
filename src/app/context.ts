@@ -12,6 +12,11 @@ export interface Env {
   EVIDENCE_INGEST_SECRET?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   STRIPE_SECRET_KEY?: string;
+  /**
+   * "true" enables the test-only payment simulation (src/services/payment-simulation.ts) for organizations the Owner
+   * marked as fictional test organizations. Always refused when ENVIRONMENT is "production", whatever this says.
+   */
+  PAYMENT_SIMULATION_ENABLED?: string;
   /** Founder flag (CREST-GAP-008, PAY-010): exactly "yes" allows live Stripe keys on production only. Unset = no live payments anywhere. */
   PAYMENTS_LIVE_AUTHORIZED?: string;
   TURNSTILE_SECRET?: string;

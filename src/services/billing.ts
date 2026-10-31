@@ -170,7 +170,7 @@ export async function customerBilling(db: Db, organizationId: string) {
     orders: await q<{ id: string; kind: string; status: string; total_cents: number; created_at: string; product_id: string | null }>(`SELECT id, kind, status, total_cents, created_at, product_id FROM orders WHERE organization_id = ? ORDER BY created_at DESC`),
     invoices: await q<CustomerInvoice>(`SELECT id, organization_id, order_id, project_id, milestone_kind, amount_cents, subtotal_cents, tax_cents, tax_detail_json, status, description, created_at, paid_at, due_at, stripe_checkout_session_id, stripe_invoice_status, stripe_hosted_invoice_url FROM invoices WHERE organization_id = ? AND status <> 'draft' ORDER BY created_at DESC`),
     payments: await q<{ id: string; invoice_id: string | null; amount_cents: number; status: string; created_at: string; description: string | null; refundable: number }>(`SELECT p.id, p.invoice_id, p.amount_cents, p.status, p.created_at, i.description,
-        CASE WHEN p.status = 'succeeded' AND NOT EXISTS (SELECT 1 FROM refunds r WHERE r.payment_id = p.id AND r.status NOT IN ('denied','failed')) THEN 1 ELSE 0 END AS refundable
+        CASE WHEN p.status = 'succeeded' AND p.provider <> 'simulated' AND NOT EXISTS (SELECT 1 FROM refunds r WHERE r.payment_id = p.id AND r.status NOT IN ('denied','failed')) THEN 1 ELSE 0 END AS refundable
       FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id WHERE p.organization_id = ? ORDER BY p.created_at DESC`),
     subscriptions: await q<{ id: string; product_id: string; status: string; current_period_end: string | null; created_at: string }>(`SELECT id, product_id, status, current_period_end, created_at FROM subscriptions WHERE organization_id = ? ORDER BY created_at DESC`),
     refunds: await q<{ id: string; payment_id: string; amount_cents: number; reason: string; status: string; created_at: string; decided_at: string | null }>(`SELECT id, payment_id, amount_cents, reason, status, created_at, decided_at FROM refunds WHERE organization_id = ? ORDER BY created_at DESC`),
@@ -183,8 +183,9 @@ export async function requestRefund(ctx: AppContext, user: CheckoutUser, organiz
   const issues: string[] = [];
   if (input.reason.length < 10 || input.reason.length > 5000) issues.push("Explain the reason for your request (at least 10 characters)");
   if (input.evidence.length > 5000) issues.push("Supporting details are too long");
-  const pay = await ctx.db.prepare(`SELECT id, amount_cents, status FROM payments WHERE id = ? AND organization_id = ?`).bind(input.paymentId, organizationId).first<{ id: string; amount_cents: number; status: string }>();
+  const pay = await ctx.db.prepare(`SELECT id, amount_cents, status, provider FROM payments WHERE id = ? AND organization_id = ?`).bind(input.paymentId, organizationId).first<{ id: string; amount_cents: number; status: string; provider: string }>();
   if (!pay) issues.push("Choose one of your payments");
+  else if (pay.provider === "simulated") issues.push("This was a simulated test payment: no money was taken, so there is nothing to refund");
   else {
     if (pay.status !== "succeeded") issues.push("Only completed payments can be refunded");
     const amount = input.amountCents ?? pay.amount_cents;

@@ -36,7 +36,7 @@ export async function ensureReceiptNumber(db: Db, paymentId: string): Promise<st
 
 /** Loads a receipt. `organizationId` scopes customer access; staff pass null (route already checked finance.read). */
 export async function loadReceipt(db: Db, paymentId: string, organizationId: string | null): Promise<ReceiptData> {
-  const p = await db.prepare(`SELECT id, organization_id, invoice_id, order_id, amount_cents, status, created_at, stripe_payment_intent_id, stripe_charge_id FROM payments WHERE id = ?${organizationId ? " AND organization_id = ?" : ""}`)
+  const p = await db.prepare(`SELECT id, organization_id, invoice_id, order_id, amount_cents, status, created_at, stripe_payment_intent_id, stripe_charge_id FROM payments WHERE id = ? AND provider <> 'simulated'${organizationId ? " AND organization_id = ?" : ""}`)
     .bind(...(organizationId ? [paymentId, organizationId] : [paymentId]))
     .first<ReceiptData["payment"] & { organization_id: string; invoice_id: string | null; order_id: string | null }>();
   if (!p) throw new HttpError(404, "Receipt not found.");

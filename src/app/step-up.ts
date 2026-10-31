@@ -36,6 +36,9 @@ export const STEP_UP_ROUTES: Readonly<Record<string, string>> = {
   "POST /staff/builds/:id/share-preview": "sharing a website preview with the customer",
   "POST /staff/builds/:id/approve": "final approval of an AI-built website",
   "POST /staff/ai/budget": "paid AI budget",
+  // Test-only payment simulation (internal E2E benchmarks; refused in production)
+  "POST /staff/test-payments/organizations/:id/mark": "marking a fictional test organization",
+  "POST /staff/test-payments/simulate": "simulated test payment",
   // AI Sales Optimization (Founder decisions that can change the live sales agent)
   "POST /staff/sales-optimization/control": "sales optimizer controls",
   "POST /staff/sales-optimization/targets": "sales agent targets",

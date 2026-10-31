@@ -124,6 +124,10 @@ export interface ProjectFacts {
   scopeRecorded: boolean;
   refunded: boolean;
   disputed: boolean;
+  /** The qualifying payment came from the test-only payment simulation (migration 0059). */
+  simulatedPayment?: boolean;
+  /** The Owner marked the organization as a fictional test organization (required for a simulated payment to count). */
+  simulationTestOrg?: boolean;
 }
 
 export async function projectFacts(db: Db, projectId: string): Promise<ProjectFacts> {
@@ -134,12 +138,12 @@ export async function projectFacts(db: Db, projectId: string): Promise<ProjectFa
   // and upfront quotes, or the 50% deposit ("deposit_50") for milestone quotes. Later 25% milestones never gate the first build.
   const qualifying = order ? await db.prepare(`SELECT id, status, paid_at, milestone_kind FROM invoices WHERE order_id = ? AND milestone_kind IN ('full','deposit_50') ORDER BY created_at LIMIT 1`).bind(order.id).first<NonNullable<ProjectFacts["qualifying"]>>() : null;
   const onboarding = await db.prepare(`SELECT completed_at FROM onboarding_responses WHERE project_id = ?`).bind(projectId).first<{ completed_at: string | null }>();
-  const org = await db.prepare(`SELECT o.kind, EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = o.id AND m.role_id = 'customer_admin' AND u.email_verified_at IS NOT NULL AND u.disabled_at IS NULL) AS verified
-                                 FROM organizations o WHERE o.id = ?`).bind(project.organization_id).first<{ kind: string; verified: number }>();
+  const org = await db.prepare(`SELECT o.kind, o.simulation_test_org, EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = o.id AND m.role_id = 'customer_admin' AND u.email_verified_at IS NOT NULL AND u.disabled_at IS NULL) AS verified
+                                 FROM organizations o WHERE o.id = ?`).bind(project.organization_id).first<{ kind: string; simulation_test_org: number; verified: number }>();
   const scopeRecorded = !!order && (order.product_id && order.product_id in PACKAGES
     ? true
     : !!(order.quote_version_id && (await db.prepare(`SELECT 1 FROM quote_versions WHERE id = ? AND COALESCE(TRIM(scope_text),'') <> ''`).bind(order.quote_version_id).first())));
-  const pay = qualifying ? await db.prepare(`SELECT status FROM payments WHERE invoice_id = ? ORDER BY created_at DESC LIMIT 1`).bind(qualifying.id).first<{ status: string }>() : null;
+  const pay = qualifying ? await db.prepare(`SELECT status, provider FROM payments WHERE invoice_id = ? ORDER BY created_at DESC LIMIT 1`).bind(qualifying.id).first<{ status: string; provider: string }>() : null;
   const refundRow = order ? await db.prepare(`SELECT 1 FROM refunds r JOIN payments p ON p.id = r.payment_id WHERE p.order_id = ? AND r.status IN ('approved','issued')`).bind(order.id).first() : null;
   return {
     project, order, qualifying, intakeSubmittedAt: onboarding?.completed_at ?? null,
@@ -147,7 +151,14 @@ export async function projectFacts(db: Db, projectId: string): Promise<ProjectFa
     scopeRecorded,
     refunded: !!refundRow || pay?.status === "refunded" || pay?.status === "partially_refunded",
     disputed: pay?.status === "disputed",
+    simulatedPayment: pay?.provider === "simulated",
+    simulationTestOrg: !!org?.simulation_test_org,
   };
+}
+
+/** True when any payment on the project's order came from the test-only payment simulation (migration 0059). */
+export async function projectPaidBySimulation(db: Db, projectId: string): Promise<boolean> {
+  return !!(await db.prepare(`SELECT 1 FROM payments p JOIN projects pr ON pr.order_id = p.order_id WHERE pr.id = ? AND p.provider = 'simulated' LIMIT 1`).bind(projectId).first());
 }
 
 export type Eligibility = { verdict: "queued" | "awaiting_intake" | "awaiting_payment" | "ineligible"; reasons: string[] };
@@ -163,6 +174,8 @@ export function decideEligibility(f: ProjectFacts): Eligibility {
   if (!f.scopeRecorded) bad.push("the purchased package or accepted quote scope is not recorded");
   if (f.refunded) bad.push("a refund was approved or issued for this order");
   if (f.disputed) bad.push("the qualifying payment is disputed");
+  // A simulated payment (test-only adapter) only ever unlocks a build for a fictional test organization.
+  if (f.simulatedPayment && !f.simulationTestOrg) bad.push("the qualifying payment was simulated and the organization is not a marked test organization");
   if (bad.length) return { verdict: "ineligible", reasons: bad };
   const paid = f.qualifying?.status === "paid" && !!f.qualifying.paid_at;
   const intake = !!f.intakeSubmittedAt;
@@ -1202,6 +1215,7 @@ export async function sharePreview(c: OwnerCtx & { mail?: MailCtx }, id: string,
   } else {
     if (!j.preview_gated || !j.preview_name || !j.preview_url || j.preview_deleted_at) throw new HttpError(409, "Only a private (gated) preview that still exists can be shared with the customer.");
     if (!["ready_for_review", "approved"].includes(j.state)) throw new HttpError(409, "Share a preview once the build is in owner review or approved.");
+    if (await projectPaidBySimulation(c.db, j.project_id)) throw new HttpError(409, "This project was paid by a SIMULATED payment (internal test). Its website is never shown to a customer.");
     // V4 §7 F/G: the customer sees a website only after a staff member approved it in the private review.
     if (!j.internal_approved_at) throw new HttpError(409, "Approve this build internally first (private Crestmont review). The customer cannot see it before that.");
     if (j.customer_preview_shared_at) throw new HttpError(409, "This preview is already shared with the customer.");

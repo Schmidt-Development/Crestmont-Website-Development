@@ -77,21 +77,21 @@ export function planMonthlyCents(productId: string): number | null {
 export async function financeDashboard(db: Db, range: DateRange): Promise<Dashboard> {
   const r = [range.fromIso, range.toIso];
   const pay = await db.prepare(`SELECT COALESCE(SUM(amount_cents),0) AS gross, COALESCE(SUM(fee_cents),0) AS fees, COUNT(*) AS n, SUM(CASE WHEN fee_cents IS NULL THEN 1 ELSE 0 END) AS unknown
-    FROM payments WHERE status IN ${CAPTURED} AND created_at >= ? AND created_at < ?`).bind(...r).first<{ gross: number; fees: number; n: number; unknown: number | null }>();
+    FROM payments WHERE status IN ${CAPTURED} AND provider <> 'simulated' AND created_at >= ? AND created_at < ?`).bind(...r).first<{ gross: number; fees: number; n: number; unknown: number | null }>();
   const ref = await db.prepare(`SELECT COALESCE(SUM(amount_cents),0) AS c FROM refunds WHERE status = 'issued' AND COALESCE(issued_at, decided_at, created_at) >= ? AND COALESCE(issued_at, decided_at, created_at) < ?`).bind(...r).first<{ c: number }>();
   const subRev = await db.prepare(`SELECT COALESCE(SUM(p.amount_cents),0) AS c FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id LEFT JOIN orders o ON o.id = p.order_id
-    WHERE p.status IN ${CAPTURED} AND p.created_at >= ? AND p.created_at < ? AND (i.milestone_kind = 'subscription' OR o.kind = 'subscription')`).bind(...r).first<{ c: number }>();
+    WHERE p.status IN ${CAPTURED} AND p.provider <> 'simulated' AND p.created_at >= ? AND p.created_at < ? AND (i.milestone_kind = 'subscription' OR o.kind = 'subscription')`).bind(...r).first<{ c: number }>();
   const subs = (await db.prepare(`SELECT product_id, COUNT(*) AS n FROM subscriptions WHERE status = 'active' GROUP BY product_id`).all<{ product_id: string; n: number }>()).results;
   let mrr = 0, active = 0, unpriced = 0;
   for (const s of subs) { const m = planMonthlyCents(s.product_id); if (m === null) unpriced += s.n; else mrr += m * s.n; active += s.n; }
   const canceled = await db.prepare(`SELECT COUNT(*) AS n FROM subscriptions WHERE status = 'canceled' AND updated_at >= ? AND updated_at < ?`).bind(...r).first<{ n: number }>();
   const atStart = await db.prepare(`SELECT COUNT(*) AS n FROM subscriptions WHERE created_at < ? AND status NOT IN ('incomplete') AND NOT (status = 'canceled' AND updated_at < ?)`).bind(range.fromIso, range.fromIso).first<{ n: number }>();
   const out = await db.prepare(`SELECT COALESCE(SUM(amount_cents),0) AS c, COUNT(*) AS n FROM invoices WHERE status = 'open'`).first<{ c: number; n: number }>();
-  const aov = await db.prepare(`SELECT COALESCE(SUM(total_cents),0) AS c, COUNT(*) AS n FROM orders WHERE status IN ('paid','partially_paid') AND created_at >= ? AND created_at < ?`).bind(...r).first<{ c: number; n: number }>();
+  const aov = await db.prepare(`SELECT COALESCE(SUM(total_cents),0) AS c, COUNT(*) AS n FROM orders WHERE status IN ('paid','partially_paid') AND NOT EXISTS (SELECT 1 FROM payments sp WHERE sp.order_id = orders.id AND sp.provider = 'simulated') AND created_at >= ? AND created_at < ?`).bind(...r).first<{ c: number; n: number }>();
   const conv = await db.prepare(`SELECT COUNT(*) AS n, SUM(CASE WHEN stage = 'converted' THEN 1 ELSE 0 END) AS c FROM leads WHERE created_at >= ? AND created_at < ?`).bind(...r).first<{ n: number; c: number | null }>();
-  const byMonth = (await db.prepare(`SELECT substr(created_at,1,7) AS month, SUM(amount_cents) AS cents FROM payments WHERE status IN ${CAPTURED} AND created_at >= ? AND created_at < ? GROUP BY month ORDER BY month`).bind(...r).all<{ month: string; cents: number }>()).results;
+  const byMonth = (await db.prepare(`SELECT substr(created_at,1,7) AS month, SUM(amount_cents) AS cents FROM payments WHERE status IN ${CAPTURED} AND provider <> 'simulated' AND created_at >= ? AND created_at < ? GROUP BY month ORDER BY month`).bind(...r).all<{ month: string; cents: number }>()).results;
   const byKind = (await db.prepare(`SELECT COALESCE(i.milestone_kind, o.kind, 'other') AS kind, SUM(p.amount_cents) AS cents FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id LEFT JOIN orders o ON o.id = p.order_id
-    WHERE p.status IN ${CAPTURED} AND p.created_at >= ? AND p.created_at < ? GROUP BY kind ORDER BY cents DESC`).bind(...r).all<{ kind: string; cents: number }>()).results;
+    WHERE p.status IN ${CAPTURED} AND p.provider <> 'simulated' AND p.created_at >= ? AND p.created_at < ? GROUP BY kind ORDER BY cents DESC`).bind(...r).all<{ kind: string; cents: number }>()).results;
   const gross = pay?.gross ?? 0, refunds = ref?.c ?? 0;
   const c = canceled?.n ?? 0, s0 = atStart?.n ?? 0;
   return {
@@ -144,7 +144,7 @@ export async function listInvoices(db: Db, f: { status?: string; kind?: string; 
   if (f.range) { conds.push(`i.created_at >= ? AND i.created_at < ?`); binds.push(f.range.fromIso, f.range.toIso); }
   return (await db.prepare(`SELECT i.*, o.name AS org_name,
         (SELECT group_concat(p.id) FROM payments p WHERE p.invoice_id = i.id AND p.status <> 'failed') AS payment_ids,
-        (SELECT COALESCE(SUM(p.amount_cents),0) FROM payments p WHERE p.invoice_id = i.id AND p.status <> 'failed') AS paid_cents
+        (SELECT COALESCE(SUM(p.amount_cents),0) FROM payments p WHERE p.invoice_id = i.id AND p.status <> 'failed' AND p.provider <> 'simulated') AS paid_cents
       FROM invoices i JOIN organizations o ON o.id = i.organization_id ${conds.length ? "WHERE " + conds.join(" AND ") : ""} ORDER BY i.created_at DESC, i.rowid DESC LIMIT ? OFFSET ?`)
     .bind(...binds, f.limit + 1, f.offset).all<InvoiceListRow>()).results;
 }
@@ -219,11 +219,11 @@ export async function exportCsv(db: Db, kind: ExportKind, range: DateRange): Pro
   const r = [range.fromIso, range.toIso];
   switch (kind) {
     case "transactions": {
-      const rows = (await db.prepare(`SELECT p.id, p.created_at, o.name AS org, p.invoice_id, p.order_id, p.amount_cents, p.fee_cents, p.status, p.stripe_payment_intent_id, p.stripe_charge_id
+      const rows = (await db.prepare(`SELECT p.id, p.created_at, o.name AS org, p.invoice_id, p.order_id, p.amount_cents, p.fee_cents, p.status, p.stripe_payment_intent_id, p.stripe_charge_id, p.provider
         FROM payments p JOIN organizations o ON o.id = p.organization_id WHERE p.created_at >= ? AND p.created_at < ? ORDER BY p.created_at`).bind(...r)
-        .all<{ id: string; created_at: string; org: string; invoice_id: string | null; order_id: string | null; amount_cents: number; fee_cents: number | null; status: string; stripe_payment_intent_id: string | null; stripe_charge_id: string | null }>()).results;
-      return toCsv(["payment_id", "date", "customer", "invoice_id", "order_id", "amount_cents", "amount_usd", "fee_cents", "fee_usd", "fee_status", "status", "stripe_payment_intent", "stripe_charge"],
-        rows.map((x) => [x.id, x.created_at.slice(0, 10), x.org, x.invoice_id, x.order_id, x.amount_cents, dollars(x.amount_cents), x.fee_cents ?? "", dollars(x.fee_cents), x.fee_cents === null ? "unknown" : "known", x.status, x.stripe_payment_intent_id, x.stripe_charge_id]));
+        .all<{ id: string; created_at: string; org: string; invoice_id: string | null; order_id: string | null; amount_cents: number; fee_cents: number | null; status: string; stripe_payment_intent_id: string | null; stripe_charge_id: string | null; provider: string }>()).results;
+      return toCsv(["payment_id", "date", "customer", "invoice_id", "order_id", "amount_cents", "amount_usd", "fee_cents", "fee_usd", "fee_status", "status", "stripe_payment_intent", "stripe_charge", "provider"],
+        rows.map((x) => [x.id, x.created_at.slice(0, 10), x.org, x.invoice_id, x.order_id, x.amount_cents, dollars(x.amount_cents), x.fee_cents ?? "", dollars(x.fee_cents), x.fee_cents === null ? "unknown" : "known", x.status, x.stripe_payment_intent_id, x.stripe_charge_id, x.provider === "simulated" ? "SIMULATED (test, not revenue)" : x.provider]));
     }
     case "invoices": {
       const rows = (await db.prepare(`SELECT i.id, i.created_at, i.paid_at, i.due_at, o.name AS org, i.order_id, i.project_id, i.milestone_kind, i.description, i.amount_cents, i.status
