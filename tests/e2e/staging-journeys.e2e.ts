@@ -817,6 +817,56 @@ journey(26, ["PAY-007"], "refund request enters the approval workflow: support r
   assertClean();
 });
 
+// Not one of the 33 numbered journeys (certification is unchanged): a REAL Stripe test-mode refund of the deposit that
+// journeys 5–6 paid, issued by the Founder, then the signed charge.refunded webhook. Checks the refund confirmation is
+// emailed exactly once (the issue step and the webhook share one idempotency key; PR #71) and that the webhook matched
+// the platform's request via the pinned-version refund lookup. $1 of a journey-created fictional customer's TEST deposit.
+test("[PAY-007] [PAY-003] Stripe test mode: the Founder issues a refund; the signed charge.refunded webhook is matched and the customer is notified once", { skip: unset || false }, async (t) => {
+  if (outcome.get(6) !== "passed") { t.skip(`needs journey 6 (${outcome.get(6) ?? "not run"})`); return; }
+  const c = people.newCustomer.page;
+  const s = await as("support");
+  const o = await as("owner");
+  await c.goto(BASE + "/portal/billing");
+  await c.locator("summary", { hasText: "Request a refund" }).click();
+  await c.fill("#f-amount", "1");
+  await c.fill("#f-reason", `E2E ${RUN}: staging Stripe test-mode refund of the journey deposit.`);
+  await nav(c, btn(c, "Submit request"));
+  assert.match(await text(c), /Refund requests[\s\S]*\$1(\.00)?[\s\S]*Requested/i, await alerts(c));
+
+  await s.goto(`${BASE}/staff/refunds`);
+  await nav(s, s.locator("main table tr", { hasText: RUN }).locator("a").first());
+  const refundUrl = s.url();
+  await s.fill("#f-notes", "Checked the journey payment and the request.");
+  await nav(s, btn(s, "Start review"));
+  await s.fill("#f-notes", "Journey test: recommending a $1 Stripe test-mode refund.");
+  await nav(s, btn(s, "Recommend refund"));
+
+  await o.goto(refundUrl);
+  await freshMfa(o, account("owner"));
+  await o.fill("#f-notes", `E2E ${RUN}: approved — Stripe test-mode refund check.`);
+  await nav(o, btn(o, "Approve refund"));
+  assert.match(await text(o, ".page-head, main"), /Approved/i, await alerts(o));
+  await nav(o, btn(o, /^Issue \$1\.00 refund via Stripe$/));
+  const detail = await text(o);
+  assert.match(detail, /Issued/i, await alerts(o));
+  const stripeRefund = /\b(re_[A-Za-z0-9]+)\b/.exec(detail)?.[1];
+  assert.ok(stripeRefund, `a Stripe refund id on the request (${await alerts(o)})`);
+  const pi = /\b(pi_[A-Za-z0-9]+)\b/.exec(detail)?.[1];
+  assert.ok(pi, "the refunded payment's PaymentIntent");
+
+  // The signed charge.refunded webhook arrives asynchronously; it is audited with the refund it resolved.
+  await until(o, `${BASE}/staff/audit?action=payment.refunded&subject=${pi}`, new RegExp(esc(stripeRefund!)), "the signed charge.refunded webhook for the refund");
+
+  // Exactly one "refund issued" confirmation for this refund (no second one from the webhook).
+  await o.goto(`${BASE}/staff/email?to=${encodeURIComponent(contact.email)}&template=refund_decision`);
+  const rows: string[] = await o.locator("main table tbody tr").allInnerTexts();
+  assert.equal(rows.filter((r) => /issued/i.test(r)).length, 1, `one refund-issued email, got:\n${rows.join("\n")}`);
+  assert.match(await outbox(contact.email, "refund_decision", stripeRefund), /\$1\.00/);
+  await c.goto(BASE + "/portal/billing");
+  assert.match(await text(c), /Refund requests[\s\S]*\$1(\.00)?[\s\S]*Issued/i, "customer sees the refund issued");
+  assertClean();
+});
+
 // ───────────── 27–28. AI receptionist ─────────────
 
 const NO_VOICE = "BLK-009: no AI receptionist provider is selected or provisioned and staging has no voice webhook secret, so no call can reach the platform (the development suite tests the handler with signed fixtures)";
