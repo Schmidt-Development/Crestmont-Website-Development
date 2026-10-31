@@ -52,6 +52,11 @@
   or restart Ollama. The values the runner would normally set are compared with the current ones and every difference
   is reported (state\ollama-settings.json); the localhost-only check still applies. The runner's context size follows
   an existing OLLAMA_CONTEXT_LENGTH so it never assumes more context than Ollama gives.
+.PARAMETER AllowMissingSkills
+  Node 1 hardware certification before the curated skills are in place: when the runner preflight fails AND required
+  skills are missing from <InstallDir>\skills, continue with a warning instead of stopping. Any other preflight failure
+  still stops. Keep AI builds paused on the platform until the skills are installed: builds need them, the
+  D01-D13 diagnostic (draft channel) does not.
 .PARAMETER OllamaImage
   Image for the optional ollama-in-docker profile, pinned by tag AND digest (repo:tag@sha256:...), written to
   compose\.env as OLLAMA_IMAGE. Get a digest with: docker buildx imagetools inspect ollama/ollama:<tag>
@@ -80,6 +85,7 @@ param(
   [string]$OllamaImage = "ollama/ollama:0.32.0@sha256:57f573b47f1f71ebb445789f279fe3e596a8beab182f7cf486db9205bad87c5a",
   [switch]$SkipModelPull,
   [switch]$PreserveOllamaConfig,
+  [switch]$AllowMissingSkills,
   [switch]$NoAutoStart,
   [switch]$NoStart
 )
@@ -433,8 +439,18 @@ if ($LASTEXITCODE -ne 0) {
   Exit-WithProblem
 }
 Ok "Model server reachable from the container network"
-Invoke-Checked "docker.exe" ($composeArgs + @("run", "--rm", "--no-deps", "runner", "node", "--no-warnings", "src/main.ts", "--preflight")) "runner --preflight"
-Ok "Runner preflight passed"
+$missingSkills = @()
+try {
+  $manifest = Get-Content (Join-Path $RunnerSrc "skills\manifest.json") -Raw | ConvertFrom-Json
+  $required = @($manifest.workflows.PSObject.Properties | ForEach-Object { $_.Value.skills } | Where-Object { $_.required } | ForEach-Object { $_.name } | Sort-Object -Unique)
+  foreach ($n in $required) { $src = $manifest.skills.$n.source; if (-not (Test-Path (Join-Path $Skills "$src\SKILL.md"))) { $missingSkills += $n } }
+} catch { Warn "Could not read runner\skills\manifest.json to check the skills folder: $($_.Exception.Message)" }
+& docker.exe @($composeArgs + @("run", "--rm", "--no-deps", "runner", "node", "--no-warnings", "src/main.ts", "--preflight"))
+if ($LASTEXITCODE -eq 0) { Ok "Runner preflight passed" }
+elseif ($AllowMissingSkills -and $missingSkills.Count) {
+  Warn ("Runner preflight failed with required skills missing ($($missingSkills -join ', ')). Continuing (-AllowMissingSkills): " +
+    "keep AI builds PAUSED on the platform until the skills are in $Skills; the diagnostic job does not need them.")
+} else { throw "runner --preflight failed (exit $LASTEXITCODE)$(if ($missingSkills.Count) { "; required skills missing: $($missingSkills -join ', ')" })" }
 
 # -- 9. start + auto-start --
 if (-not $NoStart) {

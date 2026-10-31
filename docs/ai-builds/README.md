@@ -22,6 +22,7 @@ validation (`LOCAL-VALIDATION.md`) and a real end-to-end staging run succeed (re
     on the runner **and** `BUILD_ALLOW_PAID_PROVIDER=true` on the Worker (the platform gives no work to a runner that
     does not declare zero token cost), and is never an automatic fallback.
   Deployment: `WINDOWS-SUPERCOMPUTER.md` (Windows + WSL 2 + Docker Desktop, outbound-only, no public port).
+  **Node 1 (current):** `NODE1-INSTALL.md` (integration status, exact install, verify, certify and rollback steps).
 
 ## Founder architecture V4 (2026-10-28): local dual-model on owned GPUs
 `ORCHESTRATOR.md`. Node 1 (RTX 5090) runs two open-weight models through Ollama: **Model A** `qwen3.8:27b-q4_K_M`
