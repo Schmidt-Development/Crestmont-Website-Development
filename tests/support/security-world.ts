@@ -12,6 +12,7 @@ import { STAFF_ROLES, type Role } from "../../src/domain/authz.ts";
 import type { PaymentsAdapter } from "../../src/adapters/payments.ts";
 import type { Env } from "../../src/app/context.ts";
 import type { ResourceKind } from "./route-inventory.ts";
+import { createDiagnostic } from "../../src/services/runner-diagnostics.ts";
 
 export type StaffRole = (typeof STAFF_ROLES)[number];
 export const SECRETS = { scheduler: "matrix-scheduler-secret", crmImport: "crm-import-test-secret-not-real", runner: "matrix-runner-secret", evidence: "matrix-evidence-secret", voice: "matrix-voice-secret", stripe: "whsec_matrixstripe", retell: "matrix-retell-key", resend: "whsec_" + Buffer.from("matrix-resend-secret").toString("base64") };
@@ -259,6 +260,8 @@ async function buildStaffRecords(w: World) {
   ids.soStage = "staging";
   ids.soExperiment = newId("soex");
   await db.prepare(`INSERT INTO so_experiments (id, baseline_version_id, candidate_version_id, candidate_share, min_connected_per_arm, status, created_at) VALUES (?,?,?, 0.2, 400, 'proposed', ?)`).bind(ids.soExperiment, sv1.id, sv2.id, nowIso()).run();
+  // Node 1 diagnostic record (created exactly as the Owner action does).
+  ids.runnerDiagnostic = (await createDiagnostic(db, w.staff.owner.id)).id;
   // Public identifiers
   ids.serviceSlug = "website-design-development";
   ids.legalSlug = "terms";

@@ -453,6 +453,7 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/builds/:id/resume", setup: async () => { await w.db.prepare(`UPDATE build_jobs SET state = 'paused' WHERE id = ?`).bind(w.ids.buildJob).run(); } },
     { key: "POST /staff/builds/:id/cancel", fields: () => ({ reason: "matrix cancel" }) },
     { key: "POST /staff/builds/backfill", fields: () => ({ project_id: w.b.ids.project! }) },
+    { key: "POST /staff/builds/diagnostics" },
 
     // Last: cancelling tenant A's project (Owner only).
     { key: "POST /staff/projects/:id/cancel", path: () => P(w, "POST /staff/projects/:id/cancel"), fields: () => ({ reason: "Customer requested cancellation in writing" }) },

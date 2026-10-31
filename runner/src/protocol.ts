@@ -149,6 +149,8 @@ export interface AiDraftJob {
   leaseToken: string;
   leaseExpiresAt: string;
   maxOutputTokens: number;
+  /** Present on a Node 1 dispatch-to-GPU diagnostic (workflow gpu_diagnostic): report checkpoints D07–D11. */
+  diagnostic?: { correlationId: string };
 }
 
 export interface AiDraftClaimResponse { job: AiDraftJob | null }
@@ -159,6 +161,19 @@ export interface AiDraftCompleteRequest {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  /** Diagnostics only: the correlation id and the measured Ollama metrics. */
+  correlationId?: string;
+  diagnostic?: Record<string, unknown>;
+}
+
+export interface DiagnosticCheckpoint {
+  code: "D07" | "D08" | "D09" | "D10" | "D11";
+  ok: boolean;
+  /** Runner clock, ISO 8601. */
+  at: string;
+  component: string;
+  error?: string;
+  evidence?: Record<string, unknown>;
 }
 
 export const LIMITS = {

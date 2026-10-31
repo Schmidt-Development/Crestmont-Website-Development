@@ -249,6 +249,7 @@ export const REQUIREMENTS: RequirementDef[] = [
     ["AIB-009", "Owner AI Builds dashboard and documented frontend API/state contract", "P0", "engineering", ["AIB-006"]],
     ["AIB-010", "Build runner on the official Claude Agent SDK: isolated workspaces, versioned starters, curated skills, checks, previews", "P0", "engineering", ["AIB-003"]],
     ["AIB-011", "Real provider-backed end-to-end staging build (test payment → intake → isolated session → preview → owner review)", "P0", "integration", ["AIB-010", "INFRA-002"]],
+    ["AIB-021", "Node 1 dispatch-to-GPU diagnostic: one real job on the signed runner channel with checkpoints D01–D13 recorded by the side that observed them (platform or runner), the first failing or unproven step shown to the Owner, rejected runner signatures recorded, and a read-only Node 1 PowerShell diagnostic", "P0", "integration", ["AIB-010"]],
   ]),
   // Founder brief, 2026-10-30: Retell AI sales self-improvement engine (docs/voice/SALES-OPTIMIZATION.md). Added scope.
   // It optimizes a registered Retell SALES agent; it never places calls. A sales-calling path does not exist and is

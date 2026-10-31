@@ -12,7 +12,8 @@ import { staffPage } from "./crm.ts";
 import * as B from "../services/builds.ts";
 import * as AIR from "../services/ai-runner.ts";
 import { notify } from "../services/notifications.ts";
-import { claimSignatureOnce } from "../services/security.ts";
+import { claimSignatureOnce, securityEvent } from "../services/security.ts";
+import * as DX from "../services/runner-diagnostics.ts";
 
 const RUNNER = "/api/builds/runner";
 const usd = (n: number) => `$${n.toFixed(2)}`;
@@ -31,7 +32,19 @@ const runnerRoute = (fn: (ctx: AppContext) => Promise<Response>) => async (ctx: 
 async function runnerBody(ctx: AppContext): Promise<Record<string, unknown>> {
   const raw = await ctx.req.text();
   if (raw.length > 30_000_000) throw new HttpError(413, "Request too large");
-  await B.verifyRunnerSignature(ctx.env.BUILD_RUNNER_SECRET, raw, ctx.req.headers.get("x-crestmont-runner-signature"));
+  try {
+    await B.verifyRunnerSignature(ctx.env.BUILD_RUNNER_SECRET, raw, ctx.req.headers.get("x-crestmont-runner-signature"));
+  } catch (e) {
+    // Observability (Node 1 diagnostic): a runner that is running but cannot authenticate was invisible before.
+    // Recorded at most once a minute (runners poll every few seconds); the reason only, never the header or body.
+    // Only well-formed signatures (a runner with the wrong secret or clock), so unsigned internet scanners never
+    // take the once-a-minute slot.
+    if (e instanceof B.RunnerAuthError && !/Missing or malformed/.test(e.message)) {
+      const recent = await ctx.db.prepare(`SELECT 1 FROM security_events WHERE kind = 'runner_auth_failed' AND created_at > ?`).bind(new Date(ctx.now().getTime() - 60_000).toISOString()).first();
+      if (!recent) await securityEvent(ctx.db, "runner_auth_failed", { ip: ctx.ip, detail: `${e.message} on ${ctx.url.pathname}` });
+    }
+    throw e;
+  }
   let body: unknown;
   try { body = JSON.parse(raw); } catch { throw new HttpError(400, "Malformed JSON"); }
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "Body must be a JSON object");
@@ -63,6 +76,8 @@ export function register(r: Router): void {
   // Self-hosted AI drafts (ai_jobs with provider local-runner), same signed channel.
   r.post(`${RUNNER}/ai/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await AIR.claimAiJob(ctx.db, typeof b.runnerId === "string" ? b.runnerId : "", ctx.now())); }));
   r.post(`${RUNNER}/ai/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await AIR.completeAiJob(ctx.db, await runnerBody(ctx)))));
+  // Node 1 diagnostic: runner-side checkpoints D07–D11 (lease-token authenticated, migration 0050).
+  r.post(`${RUNNER}/ai/checkpoint`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await DX.recordRunnerCheckpoint(ctx.db, await runnerBody(ctx)))));
   r.post(`${RUNNER}/requirements`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.reportRequirements(ctx.db, await runnerBody(ctx)))));
   r.post(`${RUNNER}/files`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.runnerFile(ctx.db, ctx.storage, await runnerBody(ctx)))));
   r.post(`${RUNNER}/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.completeJob(ctx.db, await runnerBody(ctx), (j, to) => notifyStaff(ctx, j, to)))));
@@ -87,6 +102,15 @@ export function register(r: Router): void {
   });
 
   // ───── Owner dashboard ─────
+  // ───── Node 1 dispatch-to-GPU diagnostic (Owner) ─────
+  r.get("/staff/builds/diagnostics", (ctx) => diagnosticsPage(ctx));
+  r.post("/staff/builds/diagnostics", async (ctx) => {
+    requireStaff(ctx, "builds.configure");
+    const d = await DX.createDiagnostic(ctx.db, ctx.user!.id);
+    return redirect(ctx, `/staff/builds/diagnostics/${d.id}`, { kind: "success", text: `Diagnostic job queued (${d.correlationId}). The runner picks it up on its next idle poll.` });
+  });
+  r.get("/staff/builds/diagnostics/:id", (ctx, p) => diagnosticDetail(ctx, p.id));
+
   r.get("/staff/builds", async (ctx) => {
     requireStaff(ctx, "builds.read");
     const { page, limit, offset } = pageParam(ctx);
@@ -98,7 +122,7 @@ export function register(r: Router): void {
     const runner = await B.runnerStatus(ctx.db, ctx.now());
     const counts = Object.fromEntries((await ctx.db.prepare(`SELECT state, COUNT(*) AS n FROM build_jobs GROUP BY state`).all<{ state: string; n: number }>()).results.map((r) => [r.state, r.n]));
     const configure = can(ctx.actor!, "builds.configure");
-    const body = html`${pageHead("AI builds", undefined, "Automated first builds for paid intakes")}
+    const body = html`${pageHead("AI builds", can(ctx.actor!, "builds.configure") ? linkButton("Node diagnostics", "/staff/builds/diagnostics", "ghost", "sm") : undefined, "Automated first builds for paid intakes")}
 ${!ctx.env.BUILD_RUNNER_SECRET ? alert("warn", html`<strong>Execution unavailable.</strong> No build runner is configured on this environment (BUILD_RUNNER_SECRET is not set), so eligible builds wait in the queue and nothing is generated. Setup: docs/ai-builds/RUNNER-SETUP.md.`)
   : runner?.online ? alert("success", `Runner ${runner.runner_id} (v${runner.version ?? "?"}) last checked in ${formatDateTime(runner.last_seen_at)}.`)
   : alert("warn", runner ? `Runner ${runner.runner_id} last checked in ${formatDateTime(runner.last_seen_at)}; it is not polling now, so queued builds are waiting.` : "No build runner has connected yet; queued builds are waiting.")}
@@ -261,3 +285,59 @@ function settingsView(s: B.BuildSettings) {
   };
 }
 void actionForm;
+
+// ───── Node 1 diagnostic pages ─────
+const ago = (sec: number) => sec < 120 ? `${sec} s ago` : sec < 7200 ? `${Math.round(sec / 60)} min ago` : `${Math.round(sec / 3600)} h ago`;
+
+async function diagnosticsPage(ctx: AppContext) {
+  requireStaff(ctx, "builds.configure");
+  const c = await DX.runnerConnectivity(ctx.db, ctx.env, ctx.now());
+  const list = await DX.listDiagnostics(ctx.db);
+  const body = html`${pageHead("Node diagnostics", undefined, "AI builds")}
+<p class="muted">One small, real job on the runner channel: the self-hosted runner claims it, runs it on its local Ollama model and returns the result. Every step D01–D13 is recorded by the side that observed it, so the first step that fails or cannot be proven is visible here without access to the machine.</p>
+${c.secretConfigured ? "" : alert("error", "BUILD_RUNNER_SECRET is not set on this Worker: every runner call is answered 503, so no runner can receive work. Provide the secret (GitHub secret BUILD_RUNNER_SECRET for staging) and redeploy.")}
+<section class="section--tight"><h2>What the platform can see</h2>
+${table(c.runners, [
+  { header: "Runner", cell: (r) => r.runner_id },
+  { header: "Version", cell: (r) => r.version ?? "—" },
+  { header: "Last call", cell: (r) => html`${formatDateTime(r.last_seen_at)} (${ago(r.ageSeconds)}) ${r.fresh ? badge("ok", "fresh") : badge("bad", "stale")}` },
+  { header: "Capabilities", cell: (r) => r.capabilities ?? "—" },
+], { empty: emptyState("No runner has ever authenticated", "No signed claim has reached this platform. Either no runner is running, it points at another URL, or its secret does not match (see rejected calls below).") })}
+<h3>Rejected runner calls (latest)</h3>
+${table(c.rejected, [
+  { header: "When", cell: (r) => formatDateTime(r.created_at) }, { header: "Reason", cell: (r) => r.detail ?? "—" }, { header: "From", cell: (r) => r.ip ?? "—" },
+], { empty: emptyState("None recorded", "No runner call was rejected for a bad signature.") })}</section>
+<section class="section--tight"><h2>Run a diagnostic</h2>
+<form method="post" action="/staff/builds/diagnostics">${csrf(ctx)}<p class="faint">Workload: “${DX.DIAGNOSTIC_PROMPT}” on the runner's configured local model. It runs when the runner is idle (no build in progress). Results are kept here; nothing is sent to a customer.</p>${button("Queue diagnostic job")}</form></section>
+<section class="section--tight"><h2>Diagnostics</h2>
+${table(list, [
+  { header: "Created", cell: (d) => html`<a href="/staff/builds/diagnostics/${d.id}">${formatDateTime(d.created_at)}</a>` },
+  { header: "Correlation", cell: (d) => d.correlation_id },
+  { header: "Job", cell: (d) => d.status },
+  { header: "Checkpoints passed", cell: (d) => `${d.passed} / 13` },
+], { empty: emptyState("No diagnostics yet", "Queue one above.") })}</section>`;
+  return staffPage(ctx, "Node diagnostics", body);
+}
+
+async function diagnosticDetail(ctx: AppContext, id: string) {
+  requireStaff(ctx, "builds.configure");
+  const d = await DX.getDiagnostic(ctx.db, id);
+  if (!d) throw new HttpError(404, "Diagnostic not found");
+  const f = d.firstFailure;
+  const body = html`${pageHead(`Diagnostic ${d.correlationId}`, linkButton("All diagnostics", "/staff/builds/diagnostics", "ghost", "sm"), "Node diagnostics")}
+${f ? alert(f.status === "fail" ? "error" : "warn", html`First ${f.status === "fail" ? "failed" : "unproven"} step: <strong>${f.code} — ${f.label}</strong>${f.row?.error ? html`: ${f.row.error}` : f.status === "missing" ? (DX.RUNNER_CHECKPOINTS.includes(f.code) && d.steps.some((s) => s.code === "D12" && s.row)
+  ? (/runner predates diagnostics/.test(d.steps.find((s) => s.code === "D12")!.row!.evidence ?? "") ? " (not reported: this runner version predates diagnostics)" : " (the runner sent a result but this checkpoint never arrived: see the runner log)")
+  : " (not reached yet)") : ""}`) : alert("success", "All 13 steps recorded as passed.")}
+${dl([["Job", `${d.aiJobId} (${d.jobStatus})`], ["Model reported", d.model ?? "—"], ["Error", d.jobError ?? "—"]])}
+${table(d.steps, [
+  { header: "Step", cell: (s) => html`<strong>${s.code}</strong> ${s.label}` },
+  { header: "Result", cell: (s) => s.status === "pass" ? badge("ok", "pass") : s.status === "fail" ? badge("bad", "fail") : badge("muted", "not recorded") },
+  { header: "At (UTC)", cell: (s) => s.row ? html`${s.row.at}${s.row.source === "runner" ? html`<br><span class="faint">runner clock; received ${s.row.recorded_at}</span>` : ""}` : "—" },
+  { header: "+ elapsed", cell: (s) => s.elapsedMs === null ? "—" : `${(s.elapsedMs / 1000).toFixed(2)} s` },
+  { header: "Component / worker", cell: (s) => s.row ? html`${s.row.component}${s.row.worker ? html`<br><span class="faint">${s.row.worker}</span>` : ""}` : "—" },
+  { header: "Evidence / error", cell: (s) => s.row ? html`${s.row.error ? html`<span class="text-bad">${s.row.error}</span><br>` : ""}<code class="faint">${s.row.evidence ?? ""}</code>` : "—" },
+])}
+<section class="section--tight"><h2>Returned artifact</h2>${d.output ? html`<pre style="white-space:pre-wrap;max-height:28rem;overflow:auto">${d.output}</pre>` : emptyState("No artifact", "Nothing has been returned to the platform for this job.")}</section>
+<section class="section--tight"><h2>Runner-reported metrics</h2><pre style="white-space:pre-wrap">${JSON.stringify(d.result, null, 2)}</pre></section>`;
+  return staffPage(ctx, "Node diagnostic", body);
+}

@@ -29,7 +29,7 @@ export type ResourceKind =
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
-  | "member" | "notification" | "staffNotification" | "buildJob" | "soVersion" | "soStage" | "soExperiment";
+  | "member" | "notification" | "staffNotification" | "buildJob" | "soVersion" | "soStage" | "soExperiment" | "runnerDiagnostic";
 
 export type Access =
   | { kind: "public" }
@@ -107,6 +107,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/builds/runner/checkpoint/fetch": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/ai/claim": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/ai/complete": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/ai/checkpoint": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/files": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/complete": signed("x-crestmont-runner-signature"),
   "GET /api/builds": { access: { kind: "staff", roles: rolesWith("builds.read") }, api: true },
@@ -475,6 +476,10 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/ai/:id": staff(rolesWith("ai.manage"), P("aiJob")),
   // AI Builds owner dashboard (src/routes/builds.ts)
   "GET /staff/builds": staff(rolesWith("builds.read")),
+  // Node 1 dispatch-to-GPU diagnostic (migration 0050)
+  "GET /staff/builds/diagnostics": staff(rolesWith("builds.configure")),
+  "POST /staff/builds/diagnostics": staff(rolesWith("builds.configure"), undefined, act("builds.diagnostic_created")),
+  "GET /staff/builds/diagnostics/:id": staff(rolesWith("builds.configure"), P("runnerDiagnostic")),
   "GET /staff/builds/:id": staff(rolesWith("builds.read"), P("buildJob")),
   "POST /staff/builds/pause": staff(rolesWith("builds.manage"), undefined, act("builds.paused_globally")),
   "POST /staff/builds/settings": staff(rolesWith("builds.configure"), undefined, act("builds.settings_updated")),

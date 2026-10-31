@@ -216,7 +216,7 @@ async function main(argv: string[]): Promise<number> {
   };
   await runLoop({
     cfg, client, queryFn, manifest, logger, shouldStop: () => stopping, once: argv.includes("--once"), health,
-    drafts: ds ? { serve: () => serveOneDraft({ client, model: ds.model, modelName: ds.modelName, log: logger, onError: onDraftError }) } : null,
+    drafts: ds ? { serve: () => serveOneDraft({ client, model: ds.model, modelName: ds.modelName, baseUrl: ds.baseUrl, log: logger, onError: onDraftError }) } : null,
     // The local provider (and local drafts) need the model server; the paid adapter's model is not ours to probe.
     modelProbe: cfg.agentProvider === "local" ? { check: localModelProbe(cfg), intervalMs: 300_000 } : null,
   });

@@ -257,6 +257,7 @@ $runnerEnv = @(
   "CONTROL_PLANE_URL=$PlatformUrl"
   "BUILD_RUNNER_SECRET_FILE=/run/secrets/build_runner_secret"
   "RUNNER_ID=$RunnerId"
+  "RUNNER_HOST_LABEL=$env:COMPUTERNAME"
   "RUNNER_AGENT_PROVIDER=local"
   "RUNNER_ALLOW_PAID_PROVIDER=false"
   "LOCAL_MODEL=$selected"
@@ -309,6 +310,7 @@ if (-not $NoAutoStart) {
   Copy-Item -Force (Join-Path $PSScriptRoot "Get-RunnerHealth.ps1") (Join-Path $InstallDir "Get-RunnerHealth.ps1")
   Copy-Item -Force (Join-Path $PSScriptRoot "Collect-Evidence.ps1") (Join-Path $InstallDir "Collect-Evidence.ps1")
   Copy-Item -Force (Join-Path $PSScriptRoot "Discover-Hardware.ps1") (Join-Path $InstallDir "Discover-Hardware.ps1")
+  Copy-Item -Force (Join-Path $PSScriptRoot "Test-Node1Dispatch.ps1") (Join-Path $InstallDir "Test-Node1Dispatch.ps1")
   $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"{0}`" -InstallDir `"{1}`"{2}" -f (Join-Path $InstallDir "Start-CrestmontRunner.ps1"), $InstallDir, $(if ($OllamaInDocker) { " -OllamaInDocker" } else { "" }))
   # Docker Desktop and the Ollama tray app run in a user session, so the task runs at this user's logon.
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"

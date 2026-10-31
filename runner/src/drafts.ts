@@ -16,6 +16,7 @@ import type { Logger } from "./log.ts";
 import { errorMessage } from "./log.ts";
 import { OpenAICompatClient } from "./providers/openai-client.ts";
 import { assertLocalEndpoint } from "./providers/local.ts";
+import { runDiagnostic } from "./diagnostic.ts";
 
 export type DraftOutcome = "none" | "completed" | "failed" | "lease_lost" | "unsupported";
 
@@ -24,6 +25,9 @@ export interface DraftsDeps {
   model: OpenAICompatClient;
   modelName: string;
   log: Logger;
+  /** LOCAL_MODEL_BASE_URL: the Node 1 diagnostic talks to Ollama's native API at its root. */
+  baseUrl?: string;
+  fetchImpl?: typeof fetch;
   temperature?: number;
   now?: () => number;
   /** Called with the error text when a draft fails (health reporting). */
@@ -31,7 +35,7 @@ export interface DraftsDeps {
 }
 
 /** Decide whether this runner serves drafts, and with what. Returns null (with the reason logged) when it must not. */
-export function draftsServer(cfg: RunnerConfig, log: Logger, fetchImpl?: typeof fetch): { model: OpenAICompatClient; modelName: string } | null {
+export function draftsServer(cfg: RunnerConfig, log: Logger, fetchImpl?: typeof fetch): { model: OpenAICompatClient; modelName: string; baseUrl: string } | null {
   if (!cfg.aiDrafts.enabled) return null;
   if (cfg.aiDrafts.provider === "claude") {
     log.warn(cfg.allowPaidProvider
@@ -43,6 +47,7 @@ export function draftsServer(cfg: RunnerConfig, log: Logger, fetchImpl?: typeof 
   try { assertLocalEndpoint(cfg.local.baseUrl, cfg.local.model); } catch (err) { log.warn("AI drafts refused", { error: errorMessage(err) }); return null; }
   return {
     modelName: cfg.local.model,
+    baseUrl: cfg.local.baseUrl,
     model: new OpenAICompatClient({ baseUrl: cfg.local.baseUrl, apiKey: cfg.local.apiKey, timeoutMs: 240_000, fetchImpl, retries: 1 }),
   };
 }
@@ -60,6 +65,12 @@ export async function serveOneDraft(d: DraftsDeps): Promise<DraftOutcome> {
   const job = claimed.job;
   if (!job) return "none";
   const log = d.log.child({ aiJobId: job.id, workflow: job.workflow });
+  // Node 1 dispatch-to-GPU diagnostic: the same claim, measured step by step through Ollama's native API.
+  if (job.diagnostic?.correlationId && d.baseUrl) {
+    const out = await runDiagnostic({ client: d.client, baseUrl: d.baseUrl, modelName: d.modelName, log: d.log, fetchImpl: d.fetchImpl, now: d.now }, job as typeof job & { diagnostic: { correlationId: string } });
+    if (out === "failed") d.onError?.("diagnostic job failed (see Owner → AI builds → Node diagnostics)");
+    return out;
+  }
   // Finish well inside the 5-minute lease so the completion is not rejected as lease_lost.
   const now = (d.now ?? Date.now)();
   const leaseMs = Date.parse(job.leaseExpiresAt) - now;
