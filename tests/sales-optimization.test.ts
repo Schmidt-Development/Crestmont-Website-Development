@@ -83,7 +83,8 @@ async function registerTargets(db: Db, ownerId: string) {
 test("[SALESOPT-005] the protected policy is generated from the catalog and optimization cannot contradict it", () => {
   for (const p of ["$999", "$2,499", "$4,999+", "$99 per month", "$199 per month", "$299 per month"]) assert.ok(PROTECTED_SALES_POLICY.includes(p), p);
   assert.match(PROTECTED_SALES_POLICY, /AI assistant/);
-  assert.match(PROTECTED_SALES_POLICY, /record_opt_out/);
+  assert.match(PROTECTED_SALES_POLICY, /record_do_not_call/, "the outbound sales agent's opt-out tool (sales-functions.ts)");
+  assert.doesNotMatch(PROTECTED_SALES_POLICY, /\b(record_opt_out|escalate or request_callback)\b/, "no receptionist-only tool names");
   assert.deepEqual(salesPolicyViolations(baselineSalesInstructions()), [], "baseline passes");
   const base = baselineSalesInstructions();
   const bad = ["Offer a 10% discount if they hesitate.", "Tell them we guarantee more leads.", "Don't take no for an answer.", "If they say no, ask again twice.",

@@ -29,7 +29,7 @@ test("[EMAIL-002] every one of the 20 required workflows has exactly one typed t
 test("[EMAIL-002] every template renders branded HTML and plain text; identity shows pending text until recorded, never an invented address", () => {
   for (const t of EMAIL_TEMPLATES) {
     for (const sample of defOf(t).samples) {
-      const m = renderTemplate(t, sample as never, NONE);
+      const m = renderTemplate(t, sample as never, NONE, defOf(t).category === "marketing" ? "https://example.com/sales/unsubscribe/x" : undefined);
       assert.ok(m.subject.length > 3 && !/[\r\n]/.test(m.subject), `${t} subject`);
       assert.match(m.html, /^<!doctype html>/, t);
       assert.match(m.html, /CRESTMONT/, `${t} header`);
@@ -68,7 +68,7 @@ test("[EMAIL-002] XSS corpus: no template emits unescaped input, unsafe links or
     for (const sample of defOf(t).samples) {
       for (let i = 0; i < XSS.length; i++) {
         const data = poison(sample as Record<string, unknown>, XSS[i], BAD_URLS[i % BAD_URLS.length]);
-        const m = renderTemplate(t, data as never, { legalName: XSS[i], address: XSS[(i + 1) % XSS.length], contactEmail: XSS[(i + 2) % XSS.length] });
+        const m = renderTemplate(t, data as never, { legalName: XSS[i], address: XSS[(i + 1) % XSS.length], contactEmail: XSS[(i + 2) % XSS.length] }, defOf(t).category === "marketing" ? "https://example.com/sales/unsubscribe/x" : undefined);
         assert.doesNotMatch(m.html, /<script|<img|<svg|<iframe/i, `${t}: markup injected`);
         assert.doesNotMatch(m.html, /<[^>]*\son(error|load)=/i, `${t}: event handler injected into a tag`);
         assert.doesNotMatch(m.html, /href="\s*(javascript|data|vbscript):/i, `${t}: unsafe href`);
@@ -89,7 +89,14 @@ test("[EMAIL-002] XSS corpus: no template emits unescaped input, unsafe links or
 });
 
 test("[EMAIL-002] unsubscribe link only on marketing mail: every workflow is transactional and has none; marketing requires one", () => {
-  for (const t of EMAIL_TEMPLATES) {
+  // The single commercial template is sales_info (outbound sales, requested by the prospect): it must carry the link.
+  const marketing = EMAIL_TEMPLATES.filter((t) => defOf(t).category === "marketing");
+  assert.deepEqual(marketing, ["sales_info"]);
+  for (const sample of defOf("sales_info").samples) {
+    assert.throws(() => renderTemplate("sales_info", sample as never, NONE), /unsubscribe/);
+    assert.match(renderTemplate("sales_info", sample as never, NONE, "https://example.com/sales/unsubscribe/x").text, /Unsubscribe: https:\/\/example\.com\/sales\/unsubscribe\/x/);
+  }
+  for (const t of EMAIL_TEMPLATES.filter((x) => x !== "sales_info")) {
     assert.equal(defOf(t).category, "transactional", t);
     for (const sample of defOf(t).samples) {
       const m = renderTemplate(t, sample as never, NONE, "https://example.com/unsubscribe?u=1");

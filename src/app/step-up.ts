@@ -46,6 +46,9 @@ export const STEP_UP_ROUTES: Readonly<Record<string, string>> = {
   "POST /staff/sales-optimization/deploy": "sales agent deployment",
   "POST /staff/sales-optimization/rollback": "sales agent rollback",
   "POST /staff/sales-optimization/experiments/:id/decide": "sales experiment decision",
+  // Outbound AI sales calls (Founder + counsel approval and the switches that let the platform dial prospects)
+  "POST /staff/sales-outbound/settings": "outbound sales calling switches",
+  "POST /staff/sales-outbound/compliance": "outbound sales compliance approval",
   // MFA changes (replacing an enrolled authenticator; first enrolment is unaffected because no MFA exists yet)
   "GET /mfa/setup": "authenticator change",
   "POST /mfa/setup": "authenticator change",

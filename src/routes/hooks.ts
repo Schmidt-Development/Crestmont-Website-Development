@@ -21,6 +21,7 @@ import * as mail from "../services/email-events.ts";
 import { registerReconciliation } from "./reconciliation.ts";
 import { verifyRetellWorkspace, type RetellWorkspace } from "../adapters/retell-workspaces.ts";
 import { ingestSalesEvent } from "../services/sales-opt/ingest.ts";
+import { applySalesCallEvent } from "../services/sales-outbound.ts";
 import { audit } from "../services/security.ts";
 
 const q = (ctx: AppContext, k: string, max = 120) => (ctx.url.searchParams.get(k) ?? "").trim().slice(0, max);
@@ -63,6 +64,14 @@ async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: st
   // A failure here never changes the response to Retell (the voice handler's result stands) but is audited.
   const salesFacts = async () => {
     if (translate !== translateRetellEvent) return;
+    // Outbound AI sales calls (calls whose signed metadata names a sales call this platform placed): status and the
+    // final outcome. Only events the OUTBOUND (sales) workspace signed can touch the sales queue. Like the optimizer, a
+    // failure here never changes the response to Retell, but it is audited.
+    if (ws === "outbound") try { await applySalesCallEvent(ctx.db, raw, { environment: ctx.env.ENVIRONMENT, now }); }
+    catch (e) {
+      try { await audit(ctx.db, { actorKind: "webhook", action: "sales_outbound.webhook_failed", subjectType: "webhook", subjectId: "retell", details: { error: (e as Error).message.slice(0, 200) } }); }
+      catch { /* never fail the receptionist's response */ }
+    }
     try { await ingestSalesEvent(ctx.db, raw, ctx.req.headers.get("x-retell-signature"), { environment: ctx.env.ENVIRONMENT, now }, ws); }
     catch (e) {
       try { await audit(ctx.db, { actorKind: "webhook", action: "salesopt.ingest_failed", subjectType: "webhook", subjectId: "retell", details: { error: (e as Error).message.slice(0, 200) } }); }

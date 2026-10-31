@@ -230,6 +230,11 @@ async function buildStaffRecords(w: World) {
   ids.consultation = newId("cns");
   await db.prepare(`INSERT INTO consultations (id, name, phone, starts_at, duration_minutes, timezone, status, confirmation_code, source, is_test, created_at, updated_at)
       VALUES (?, 'World Caller', '+15550100980', ?, 30, 'America/Detroit', 'requested', 'WRLD42', 'ai_receptionist', 1, ?, ?)`).bind(ids.consultation, new Date(Date.now() + 7 * 86400e3).toISOString(), nowIso(), nowIso()).run();
+  ids.salesLinkToken = "0".repeat(64); // unknown link: the public page answers 404 (no real token is ever stored in plaintext)
+  ids.salesUnsubToken = "0".repeat(48);
+  ids.salesCall = newId("scall");
+  await db.prepare(`INSERT INTO sales_calls (id, lead_id, phone_e164, status, idempotency_key, is_test, created_at, updated_at) VALUES (?, ?, '+15550100982', 'queued', ?, 1, ?, ?)`)
+    .bind(ids.salesCall, ids.lead, `crestmont_${ids.salesCall}`, nowIso(), nowIso()).run();
   ids.outboundRequest = newId("vob");
   await db.prepare(`INSERT INTO voice_outbound_requests (id, purpose, phone_e164, reason, status, idempotency_key, is_test, created_at, updated_at)
       VALUES (?, 'callback', '+15550100981', 'TEST DATA', 'pending_approval', ?, 1, ?, ?)`).bind(ids.outboundRequest, `crestmont_${ids.outboundRequest}`, nowIso(), nowIso()).run();

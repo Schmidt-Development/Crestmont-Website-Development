@@ -42,6 +42,8 @@ export interface Env {
   RETELL_API_KEY?: string;
   /** "on" enables outbound calling in this environment (default off). The Owner's receptionist setting must also be on. */
   RETELL_OUTBOUND?: string;
+  /** "on" enables outbound AI SALES calls (separate from RETELL_OUTBOUND). Default off; also needs the Owner switch and an active compliance approval (D-14). */
+  RETELL_SALES_OUTBOUND?: string;
   /** "on" lets the Founder-activated sales optimizer write to the PRODUCTION Retell sales agent (SALESOPT-008). Default off. */
   SALES_OPT_PRODUCTION?: string;
   /** Emergency re-lock only: password for the preview gate (src/app/preview-gate.ts); ignored unless PREVIEW_GATE = "required". */
