@@ -46,7 +46,11 @@ workers_dev = true            # staging is served at crestmont-platform-staging.
 # replace them with real staging keys (TURNSTILE_SITE_KEY var + TURNSTILE_SECRET secret) so forms get a bot challenge.
 # PORTFOLIO_DEMO_ORIGINS: the ONLY origins staging may frame (isolated portfolio demo Workers; docs/frontend/PORTFOLIO.md).
 # Consolidated from the crestmont-platform-frontend-preview Worker (being retired; see docs/CONSOLIDATION.md). Production deliberately has none (posters only).
-vars = { ENVIRONMENT = "staging", AI_PROVIDER = "local-runner", TURNSTILE_SITE_KEY = "1x00000000000000000000AA", TURNSTILE_SECRET = "1x0000000000000000000000000000000AA", PORTFOLIO_DEMO_ORIGINS = "https://lansing-car-rentals-portfolio-demo.partners-df4.workers.dev https://glassly-portfolio-demo.partners-df4.workers.dev https://lcr-mentorship-portfolio-demo.partners-df4.workers.dev https://better-lansing-mechanics-portfolio-demo.partners-df4.workers.dev" }
+# APP_URL: the staging Worker's own workers.dev address (same host as STAGING_URL's default in the staging workflows).
+# Scheduled jobs have no incoming request, so without it retried Stripe events and other cron emails would link to
+# https://scheduled.invalid, and the Stripe integration probe would look for a webhook at "/api/webhooks/stripe".
+# Change it together with the Stripe test webhook endpoint when staging moves to its custom domain (BLK-011).
+vars = { ENVIRONMENT = "staging", APP_URL = "https://crestmont-platform-staging.partners-df4.workers.dev", AI_PROVIDER = "local-runner", TURNSTILE_SITE_KEY = "1x00000000000000000000AA", TURNSTILE_SECRET = "1x0000000000000000000000000000000AA", PORTFOLIO_DEMO_ORIGINS = "https://lansing-car-rentals-portfolio-demo.partners-df4.workers.dev https://glassly-portfolio-demo.partners-df4.workers.dev https://lcr-mentorship-portfolio-demo.partners-df4.workers.dev https://better-lansing-mechanics-portfolio-demo.partners-df4.workers.dev" }
 d1_databases = [{ binding = "DB", database_name = "crestmont-staging", database_id = "", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-staging" }]
 triggers = { crons = ["*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts
