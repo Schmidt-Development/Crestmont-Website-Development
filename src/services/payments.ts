@@ -276,12 +276,13 @@ export async function confirmInvoicePayment(ctx: Pick<AppContext, "db" | "email"
   payment: { amountCents: number; paymentIntentId: string | null; chargeId: string | null }, to: string | null): Promise<{ alreadyPaid: boolean; projectId: string | null }> {
   const simulated = source.provider === "simulated";
   const res = await markInvoicePaid(ctx.db, invoiceId, { ...payment, provider: source.provider, simulatedTransactionId: simulated ? source.transactionId : null });
-  const out = await completePaidInvoice(ctx, res.invoice.id, to, simulated ? `the test-only payment simulation (${source.eventId}; no real transaction)` : `Stripe webhook (${source.eventId})`);
+  // A simulated delivery never sends a receipt, even onto an invoice that a real payment already settled.
+  const out = await completePaidInvoice(ctx, res.invoice.id, simulated ? null : to, simulated ? `the test-only payment simulation (${source.eventId}; no real transaction)` : `Stripe webhook (${source.eventId})`, { noReceipt: simulated });
   return { alreadyPaid: res.alreadyPaid, projectId: out.projectId };
 }
 
 /** Idempotent follow-ups for a paid invoice. Safe to run any number of times (webhook retries and the repair sweep). */
-export async function completePaidInvoice(ctx: Pick<AppContext, "db" | "email" | "baseUrl">, invoiceId: string, to: string | null, source: string): Promise<{ projectId: string | null; provisioned: boolean }> {
+export async function completePaidInvoice(ctx: Pick<AppContext, "db" | "email" | "baseUrl">, invoiceId: string, to: string | null, source: string, opts: { noReceipt?: boolean } = {}): Promise<{ projectId: string | null; provisioned: boolean }> {
   const db = ctx.db;
   const inv = await db.prepare(`SELECT * FROM invoices WHERE id = ?`).bind(invoiceId).first<{ id: string; organization_id: string; order_id: string | null; project_id: string | null; milestone_kind: string | null; amount_cents: number; status: string }>();
   if (!inv || inv.status !== "paid") throw new Error(`Invoice ${invoiceId} is not paid`);
@@ -314,7 +315,7 @@ export async function completePaidInvoice(ctx: Pick<AppContext, "db" | "email" |
     for (const u of staff) await notify(db, u.user_id, { kind: "project_provisioned", subjectType: "project", subjectId: projectId, body: `Payment confirmed: ${p?.name ?? "a new project"} (${p?.org_name ?? "customer"}) was provisioned and awaits onboarding. Assign a project manager.` });
   }
   // A simulated payment is not a real transaction: no receipt is sent.
-  const recipient = simulated ? null : to ?? await orgBillingEmail(db, inv.organization_id);
+  const recipient = simulated || opts.noReceipt ? null : to ?? await orgBillingEmail(db, inv.organization_id);
   if (recipient) await sendMail(ctx, { template: "receipt", to: recipient, idempotencyKey: `receipt:${inv.id}`,
     data: { amountCents: inv.amount_cents, next: projectId ? "onboarding" : "billing", url: `${ctx.baseUrl}/portal${projectId ? `/projects/${projectId}/onboarding` : "/billing"}` } });
   return { projectId, provisioned };
