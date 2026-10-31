@@ -17,10 +17,10 @@ connected to **staging** only. **Production is not touched by anything in this d
 | Staging protocol vs V4 runner | V4 additions are additive (v1.5). The runner works with today's staging in single-runner mode (no GPU worker id). | You install now against staging as it is. Worker enrollment comes after #16 is merged (§8). |
 | HQ/JARVIS safety | The installer rewrote Ollama's global settings and force-restarted Ollama. The GPU scheduler unloaded *any* model that didn't fit, including JARVIS's. | `-PreserveOllamaConfig`: Ollama is not changed or restarted. The scheduler only ever unloads Crestmont's own Model A/B (regression test). |
 | Rollback | There was none. | Images are kept as `:1-previous` before each rebuild, and `Uninstall-CrestmontRunner.ps1` offers stop, `-Rollback` and `-Remove`. |
-| Crash/restart | Containers restart on crash. Nothing restarted a stopped Docker Desktop or compose stack. | The start task also runs every 5 minutes as a watchdog (idempotent). |
+| Crash/restart | Containers restart on crash. Nothing restarted a stopped Docker Desktop or compose stack. | The start task also runs every 5 minutes as a watchdog while you are signed in. With `-PreserveOllamaConfig` it never starts Ollama. |
 
 Tests on the integration branches: platform 690/690 (`node1-runner-integration`) and 694/694 (`node1-e2e-integration`).
-Runner: 160 passed, 0 failed, 4 skipped. The skipped tests need PowerShell or Squid and run in the repository's Windows CI
+Runner: 161 passed, 0 failed, 4 skipped. The skipped tests need PowerShell or Squid and run in the repository's Windows CI
 on push. **PowerShell parsing and PSScriptAnalyzer did not run where this was prepared.** They run in
 `windows-powershell.yml` when the branch is pushed. Don't run the installer until that job is green.
 
