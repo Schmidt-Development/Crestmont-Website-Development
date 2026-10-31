@@ -950,3 +950,23 @@ export function lineDiff(a: string, b: string): DiffLine[] {
   while (j < m) out.push({ op: "+", text: y[j++] });
   return out;
 }
+
+
+/**
+ * The live backend contract of every receptionist function (field names and required fields), read from the same
+ * validators that run on each call: a Proxy records which fields a schema reads, and an empty object shows which it
+ * requires. Used by the Retell inbound configuration audit to compare each Retell tool's JSON schema with the backend.
+ */
+export function functionContracts(): Record<string, { fields: string[]; required: string[] }> {
+  const out: Record<string, { fields: string[]; required: string[] }> = {};
+  for (const [name, check] of Object.entries(fnSchemas)) {
+    const fields: string[] = [];
+    const probe = new Proxy({}, { get: (_t, k) => { if (typeof k === "string") fields.push(k); return undefined; } });
+    (check as (v: unknown, p: string, i: string[]) => unknown)(probe, "", []);
+    const issues: string[] = [];
+    (check as (v: unknown, p: string, i: string[]) => unknown)({}, "", issues);
+    out[name] = { fields, required: [...new Set(issues.map((i) => /^(\w+) /.exec(i)?.[1]).filter((x): x is string => !!x && fields.includes(x)))] };
+  }
+  out.record_consent = { fields: ["consent"], required: ["consent"] }; // validated in src/adapters/retell.ts
+  return out;
+}
