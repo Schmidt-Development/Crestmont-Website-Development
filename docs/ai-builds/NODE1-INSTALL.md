@@ -19,10 +19,10 @@ connected to **staging** only. **Production is not touched by anything in this d
 | Rollback | There was none. | Images are kept as `:1-previous` before each rebuild, and `Uninstall-CrestmontRunner.ps1` offers stop, `-Rollback` and `-Remove`. |
 | Crash/restart | Containers restart on crash. Nothing restarted a stopped Docker Desktop or compose stack. | The start task also runs every 5 minutes as a watchdog while you are signed in. With `-PreserveOllamaConfig` it never starts Ollama. |
 
-Tests on the integration branches: platform 690/690 (`node1-runner-integration`) and 694/694 (`node1-e2e-integration`).
+Tests on the integration branches: platform 691/691 (`node1-runner-integration`) and 695/695 (`node1-e2e-integration`).
 Runner: 161 passed, 0 failed, 4 skipped. The skipped tests need PowerShell or Squid and run in the repository's Windows CI
-on push. **PowerShell parsing and PSScriptAnalyzer did not run where this was prepared.** They run in
-`windows-powershell.yml` when the branch is pushed. Don't run the installer until that job is green.
+on push. **PowerShell 5.1 parsing, PSScriptAnalyzer and renderer parity passed in CI** (PR #66), together with tests, runner image
+builds and CodeQL.
 
 ## 2. Models (verified on ollama.com, 2026-10-30)
 
@@ -55,6 +55,12 @@ partly spill to the CPU, and diagnostic step D09 fails (it requires ≥ 95 % in 
 
 ## 4. Installation (elevated PowerShell on Node 1, in this order)
 
+**0. Confirm staging has the diagnostic** (in a browser, signed in as Owner): open
+`https://crestmont-platform-staging.partners-df4.workers.dev/staff/builds/diagnostics`. If the page loads with
+**Queue diagnostic job** and a connectivity view, PR #52 is live on staging. (Deploy run 41149895924 on `bfacab4`
+applied migrations and deployed the Worker successfully, but its logs can't be read from Claude's sessions, so this page
+is the direct proof.)
+
 **A. Read-only report** (changes nothing, installs nothing):
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass -Force
@@ -81,8 +87,18 @@ ollama pull qwen3.6:35b-a3b-q4_K_M
 ollama show qwen3.8:27b-q4_K_M; ollama show qwen3.6:35b-a3b-q4_K_M
 ```
 
-**D. APPROVAL: the secret** (never shown on screen, in logs, in chat or in GitHub):
-- *If B said 401*, take the existing value from wherever you keep it. The installer prompts for it with hidden input.
+**D. APPROVAL: the secret** (never shown on screen, in logs, in chat or in GitHub).
+
+How the value reaches staging (verified in `.github/workflows/deploy-staging.yml` and `scripts/staging-secrets.ts`):
+a GitHub secret is **not** a Worker secret by itself. Only a **Deploy staging** run (a push to `main`, or
+Actions → Deploy staging → Run workflow) copies it. The step "AI Builds runner secret" runs
+`wrangler secret put BUILD_RUNNER_SECRET --env staging`, and **only when the value's fingerprint changed** since
+the last put (tracked in D1 `deploy_secret_fingerprints`). The job runs in the `staging` environment, so either an
+environment secret or a repository secret named `BUILD_RUNNER_SECRET` works (the environment one wins). Use **one**
+path only: a value put directly with `wrangler secret put` is not compared by the deploy and is never corrected by it.
+
+- *If B said 401*, staging already has a secret. Use the same value on Node 1: the installer prompts for it with
+  hidden input. If nobody has the value any more, generate a new one as below; the next deploy replaces it.
 - *If B said 503*, generate it on Node 1. It goes straight to the secrets file and the clipboard:
   ```powershell
   New-Item -ItemType Directory -Force C:\CrestmontRunner\secrets | Out-Null
@@ -90,9 +106,11 @@ ollama show qwen3.8:27b-q4_K_M; ollama show qwen3.6:35b-a3b-q4_K_M
   $v = ([Convert]::ToBase64String($b) -replace '[+/=]', ''); [IO.File]::WriteAllText("C:\CrestmontRunner\secrets\build_runner_secret", $v)
   Set-Clipboard -Value $v; $v = $null; $b = $null
   ```
-  In GitHub, go to **Settings → Environments → staging → Add secret**, name it `BUILD_RUNNER_SECRET` and paste the
-  value. Then run `Set-Clipboard -Value " "` to clear the clipboard, and re-run **Actions → Deploy staging**. Repeat B
-  until it says 401.
+  In GitHub, go to **Settings → Environments → staging → Add environment secret**, name it `BUILD_RUNNER_SECRET` and
+  paste the value. Then run `Set-Clipboard -Value " "` to clear the clipboard, and run **Actions → Deploy staging →
+  Run workflow** on `main` (this redeploys `main`, which is already on staging, and changes no code). Repeat B until
+  it says 401, and check **Owner → AI builds → Node diagnostics**: its connectivity view says whether
+  `BUILD_RUNNER_SECRET` is set.
 
 **E. Install** (add `-Install` only if step A showed WSL or Docker Desktop missing and you approved it):
 ```powershell
