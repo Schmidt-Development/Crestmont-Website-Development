@@ -19,6 +19,7 @@ import {
 import { STEP_UP_ROUTES } from "../src/app/step-up.ts";
 
 const KEY = "key_test_outbound_sales_0001";
+const INBOUND_KEY = "key_test_inbound_reception_0001";
 // Tuesday 3 November 2026, 15:00 UTC = 10:00 in Columbus, Ohio (EST). Inside the sales window.
 const TUE_10AM_ET = new Date("2026-11-03T15:00:00Z");
 type Db = Env["DB"];
@@ -60,7 +61,7 @@ function prospect(now: Date, over: Record<string, unknown> = {}) {
 
 async function app(opts: { now?: Date; payments?: boolean; env?: Partial<Env> } = {}) {
   const now = opts.now ?? TUE_10AM_ET;
-  const t = await createTestApp({ RETELL_API_KEY: KEY, ...opts.env });
+  const t = await createTestApp({ RETELL_OUTBOUND_API_KEY: KEY, RETELL_INBOUND_API_KEY: INBOUND_KEY, ...opts.env });
   const rf = retellFetch();
   t.env.overrides = { storage: t.storage, now: () => now, fetch: rf.fetchImpl, ...(opts.payments ? { payments: new FakePayments() } : {}) } as Env["overrides"];
   const c = t.client();
@@ -91,7 +92,7 @@ async function app(opts: { now?: Date; payments?: boolean; env?: Partial<Env> } 
   return { ...t, now, post, owner, actor, seedLead, authorise, retell: rf };
 }
 
-const env = (t: Awaited<ReturnType<typeof app>>, on = true) => ({ db: t.db, env: { RETELL_API_KEY: KEY, RETELL_SALES_OUTBOUND: on ? "on" : undefined, ENVIRONMENT: "development" as const }, fetch: t.retell.fetchImpl, now: () => t.now, sleep: async () => {} });
+const env = (t: Awaited<ReturnType<typeof app>>, on = true) => ({ db: t.db, env: { RETELL_OUTBOUND_API_KEY: KEY, RETELL_INBOUND_API_KEY: INBOUND_KEY, RETELL_SALES_OUTBOUND: on ? "on" : undefined, ENVIRONMENT: "development" as const }, fetch: t.retell.fetchImpl, now: () => t.now, sleep: async () => {} });
 const salesCall = (callId: string, salesId: string, extra: Record<string, unknown> = {}) => ({ call_id: callId, call_type: "phone_call", direction: "outbound", from_number: "+16145550100", to_number: "+16145552142", agent_id: "agent_sales_test",
   metadata: { crestmont_env: "development", crestmont_sales_call_id: salesId, crestmont_test: "true" }, ...extra });
 const fn = (callId: string, salesId: string, name: string, args: Record<string, unknown>) => ({ name, call: salesCall(callId, salesId), args });
@@ -229,7 +230,7 @@ test("[VOICE-005] dialling: dynamic variables, signed metadata, idempotency key,
   assert.equal(req.body.override_agent_id, "agent_sales_test");
   assert.equal(req.body.honor_internal_dnc, true);
   assert.equal(req.body.idempotency_key, `crestmont_${salesId}_a1`);
-  assert.deepEqual(req.body.metadata, { crestmont_env: "development", crestmont_sales_call_id: salesId, crestmont_lead_id: leadId, crestmont_test: "false" });
+  assert.deepEqual(req.body.metadata, { crestmont_env: "development", crestmont_sales_call_id: salesId, crestmont_lead_id: leadId, crestmont_test: "false", crestmont_segment: "broken_website" });
   const v = req.body.retell_llm_dynamic_variables;
   assert.equal(v.lead_id, leadId);
   assert.equal(v.business_name, "Buckeye Bakery (TEST DATA)");
@@ -286,8 +287,13 @@ test("[SEC-001] outbound functions: signature required; unbound calls, inbound c
   assert.equal(placeholder.status, 200, "an unrendered {{lead_id}} query value is ignored");
   const ok = await t.post(FN, fn(callId, salesId, "get_outbound_lead_context", { lead_id: leadId }));
   assert.equal(ok.res.status, 200);
-  // The receptionist's endpoint does not know these functions.
-  assert.equal((await t.post("/api/webhooks/retell/functions", fn(callId, salesId, "create_checkout_session", {}))).res.status, 422);
+  // Workspace isolation (src/adapters/retell-workspaces.ts): the receptionist's endpoint refuses the sales workspace's
+  // request for a receptionist function, and the sales endpoint refuses a request signed with the receptionist's key.
+  assert.equal((await t.post("/api/webhooks/retell/functions", fn(callId, salesId, "create_checkout_session", {}))).res.status, 403);
+  const inboundSigned = JSON.stringify(fn(callId, salesId, "get_outbound_lead_context", {}));
+  const wrongWs = await t.client().request("POST", FN, { body: inboundSigned, headers: { "content-type": "application/json", "x-retell-signature": await signRetell(INBOUND_KEY, inboundSigned) } });
+  assert.equal(wrongWs.status, 401, "the receptionist's workspace key cannot call the sales functions");
+  assert.equal((await wrongWs.json() as { error?: string }).error?.includes("Signature mismatch"), true);
 });
 
 test("[CRM-005] [VOICE-003] lead context is verified-only and minimal; CRM updates go through intake (no duplicates) and forward-only stages", async () => {
@@ -517,19 +523,113 @@ test("[OWN-002] [SEC-005] Owner page: off by default with reasons, Owner-only, s
   assert.ok((await SO.saveSalesSettings(t.db, t.owner.id, { enabled: true, agentId: "agent_x", fromNumber: "+16145550100", maxConcurrent: 50, maxPerRun: 1, maxPerDay: 1, maxAttempts: 1, retryAfterHours: 48 })).some((p) => /1–20/.test(p)), "concurrency capped at Retell's documented 20");
 });
 
-test("[VOICE-004] the Retell master prompt names only real tools and variables, quotes no prices and keeps the mandatory disclosures", async () => {
+test("[VOICE-004] [SALESOPT-005] the Retell master prompt is SIE version 1 verbatim, names only real tools and variables, and passes the protected policy", async () => {
   const { readFile } = await import("node:fs/promises");
-  const prompt = await readFile(new URL("../docs/voice/outbound-sales-agent-prompt.txt", import.meta.url), "utf8");
+  const prompt = (await readFile(new URL("../docs/voice/outbound-sales-agent-prompt.txt", import.meta.url), "utf8")).replace(/\n$/, "");
+  const { composeSalesPrompt, baselineSalesInstructions, salesPolicyViolations, hasProtectedPolicy, PROTECTED_SALES_POLICY } = await import("../src/domain/sales-opt/policy.ts");
+  assert.equal(prompt, composeSalesPrompt(baselineSalesInstructions()), "paste-ready file = what the SIE deploys as version 1 (byte-identical read-back)");
+  assert.ok(hasProtectedPolicy(prompt));
+  assert.deepEqual(salesPolicyViolations(baselineSalesInstructions()), []);
+  assert.ok(composeSalesPrompt(baselineSalesInstructions()).length < 15_000);
   const { SALES_FUNCTIONS } = await import("../src/services/sales-functions.ts");
-  const tools = new Set<string>([...SALES_FUNCTIONS, "transfer_call", "end_call"]);
+  const tools = new Set<string>([...SALES_FUNCTIONS, "record_consent", "transfer_call", "end_call"]);
   for (const t of tools) assert.ok(prompt.includes(t), `prompt uses ${t}`);
-  for (const bad of ["route_support", "record_call_outcome", "send_sms", "get_published_pricing", "create_lead", "request_callback", "escalate"]) assert.ok(!new RegExp(`\\b${bad}\\b`).test(prompt), `no ${bad}`);
+  for (const bad of ["route_support", "record_call_outcome", "send_sms", "get_published_pricing", "create_lead", "request_callback", "record_opt_out", "escalate"]) assert.ok(!new RegExp(`\\b${bad}\\b`).test(prompt), `no ${bad}`);
   const vars = new Set([...prompt.matchAll(/\{\{\s*([a-z_]+)\s*\}\}/g)].map((m) => m[1]));
   const allowed = new Set(["business_name", "first_name", "industry", "website_status", "verified_issue", "recommended_service", "research_verified", "agent_number"]);
   for (const v of vars) assert.ok(allowed.has(v), `unknown variable {{${v}}}`);
   assert.ok(!vars.has("lead_id"), "the lead id is never put in the spoken prompt");
-  assert.doesNotMatch(prompt, /\$\s?\d/, "no hard-coded prices: they come from get_packages_pricing");
-  for (const must of [/AI assistant/, /stop calling/, /recorded/, /record_do_not_call/, /payment_status "paid"/, /do not leave a message/i, /curly braces/]) assert.match(prompt, must);
-  // Every enum value the prompt tells the model to send exists in the server schemas.
+  assert.doesNotMatch(baselineSalesInstructions(), /\$\s?\d/, "instructions quote no prices; the protected policy and get_packages_pricing do");
+  assert.ok(PROTECTED_SALES_POLICY.includes("$999") && PROTECTED_SALES_POLICY.includes("$2,499"), "policy prices come from the catalog");
+  for (const must of [/AI assistant/, /stop calling/, /recorded and transcribed/, /record_do_not_call/, /payment_status is "paid"/, /leave no message/, /curly braces/]) assert.match(prompt, must);
   for (const v of ["package_information", "approved_quote", "onboarding_instructions", "follow_up", "staff_callback", "consultation", "ai_follow_up_call", "quote_required", "not_interested", "wrong_number", "follow_up_requested", "interested"]) assert.ok(prompt.includes(`"${v}"`), v);
+});
+
+// ───────────── Self-Improvement Engine compatibility ─────────────
+
+async function sieSetup(t: Awaited<ReturnType<typeof app>>) {
+  const reg = await import("../src/services/sales-opt/registry.ts");
+  const { baselineSalesInstructions } = await import("../src/domain/sales-opt/policy.ts");
+  const v1 = await reg.ensureBaseline(t.db, baselineSalesInstructions());
+  const v2 = await reg.createVersion(t.db, { parentId: v1.id, instructions: baselineSalesInstructions() + "\nKeep every answer under two sentences.", rationale: "Shorter answers (TEST)", authorKind: "user", author: t.owner.id });
+  await reg.setTarget(t.db, t.owner.id, "staging", "agent_sales_test");
+  const at = ISO(t.now);
+  await t.db.prepare(`INSERT INTO so_deployments (id, stage, version_id, kind, status, agent_id, llm_id, created_at, completed_at) VALUES ('sod_test', 'staging', ?, 'deploy', 'verified', 'agent_sales_test', 'llm_sales_test', ?, ?)`).bind(v1.id, at, at).run();
+  return { v1, v2 };
+}
+
+test("[SALESOPT-001] [SALESOPT-006] dialler stamps crestmont_so_version / crestmont_so_experiment only for the version the agent really runs", async () => {
+  const t = await app();
+  const { v1, v2 } = await sieSetup(t);
+  const leadId = await t.seedLead();
+  await t.authorise("+16145552142", leadId);
+  // Running experiment, 50% candidate share: whichever arm the lead lands in, only the deployed version may be stamped.
+  await t.db.prepare(`INSERT INTO so_experiments (id, baseline_version_id, candidate_version_id, candidate_share, min_connected_per_arm, status, created_at, started_at) VALUES ('soe_test', ?, ?, 0.5, 100, 'running', ?, ?)`).bind(v1.id, v2.id, ISO(t.now), ISO(t.now)).run();
+  const { experimentRouting } = await import("../src/services/sales-opt/monitor.ts");
+  const route = (await experimentRouting(t.db, leadId))!;
+  await SO.enqueueSalesCall(t.db, leadId, { requestedBy: t.owner.id, now: t.now });
+  assert.equal((await SO.processSalesQueue(env(t))).dialled, 1);
+  const md = t.retell.calls[0].body.metadata;
+  assert.equal(md.crestmont_so_version, v1.id, "the version verified on the staging agent");
+  assert.equal(md.crestmont_segment, "broken_website");
+  if (route.arm === "baseline") assert.equal(md.crestmont_so_experiment, "soe_test");
+  else assert.equal(md.crestmont_so_experiment, undefined, "a candidate arm this agent does not run is left out, never mis-attributed");
+  // Not the SIE target → no version attribution at all.
+  const s = await SO.sieStamp(t.db, "staging", "agent_other", leadId, null);
+  assert.deepEqual(s.metadata, {});
+});
+
+test("[SALESOPT-001] [SALESOPT-002] SIE ingests outbound calls: outbound tool names become facts; a Stripe-verified payment attributes to the call (checkout_link rule)", async () => {
+  const t = await app({ payments: true });
+  const { v1 } = await sieSetup(t);
+  const { salesId, callId, leadId } = await dialled(t);
+  const sc = (extra: Record<string, unknown> = {}) => ({ ...salesCall(callId, salesId), metadata: { crestmont_env: "development", crestmont_sales_call_id: salesId, crestmont_lead_id: leadId, crestmont_test: "false", crestmont_so_version: v1.id }, ...extra });
+  await t.post("/api/webhooks/retell", { event: "call_started", call: sc() });
+  await t.post(FN, fn(callId, salesId, "get_packages_pricing", {}));
+  await t.post(FN, fn(callId, salesId, "update_outbound_lead", { contact_email: "bea@buckeye-bakery.example", qualification: "qualified" }));
+  await t.post(FN, fn(callId, salesId, "create_checkout_session", { package: "business", email: "bea@buckeye-bakery.example", buyer_confirmed: true }));
+  await t.post(FN, fn(callId, salesId, "schedule_sales_followup", { followup_type: "staff_callback", preferred_date: "2026-11-05", prospect_agreed: true }));
+  const end = ISO(new Date(t.now.getTime() + 5 * 60_000));
+  await t.post("/api/webhooks/retell", { event: "call_ended", call: sc({ disconnection_reason: "agent_hangup", call_status: "ended", duration_ms: 300000, start_timestamp: t.now.getTime(), end_timestamp: Date.parse(end), transcript: "Agent: Hi\nUser: Hello" }) });
+  const f = await one<Record<string, number | string | null>>(t.db, `SELECT * FROM so_call_facts WHERE provider_call_id = ?`, callId);
+  assert.equal(f.stage, "staging");
+  assert.equal(f.version_id, v1.id);
+  assert.equal(f.lead_id, leadId);
+  assert.equal(f.connected, 1);
+  assert.equal(f.pricing_discussed, 1);
+  assert.equal(f.checkout_link_generated, 1);
+  assert.equal(f.checkout_link_delivered, 1);
+  assert.equal(f.follow_up_requested, 1);
+  assert.equal(f.opt_out, 0);
+  // Payment written as the verified Stripe webhook would (TEST DATA), after the call → attribution, never from the agent's words.
+  const pay = ISO(new Date(t.now.getTime() + 60 * 60_000));
+  await t.db.batch([
+    t.db.prepare(`INSERT INTO organizations (id, name, kind, created_at) VALUES ('org_sie','Buckeye (TEST)','customer',?)`).bind(pay),
+    t.db.prepare(`INSERT INTO orders (id, organization_id, product_id, total_cents, status, kind, lead_id, created_at) VALUES ('ord_sie','org_sie','business',249900,'paid','package',?,?)`).bind(leadId, pay),
+    t.db.prepare(`INSERT INTO invoices (id, organization_id, order_id, milestone_kind, amount_cents, status, description, created_at, paid_at) VALUES ('inv_sie','org_sie','ord_sie','full',249900,'paid','Business',?,?)`).bind(pay, pay),
+    t.db.prepare(`INSERT INTO payments (id, organization_id, invoice_id, order_id, amount_cents, stripe_payment_intent_id, status, created_at) VALUES ('pay_sie','org_sie','inv_sie','ord_sie',249900,'pi_test_sie','succeeded',?)`).bind(pay),
+  ]);
+  const { reconcileAttributions } = await import("../src/services/sales-opt/attribution.ts");
+  await reconcileAttributions(t.db, new Date(t.now.getTime() + 2 * 3_600_000));
+  const a = await one<{ rule: string; version_id: string; is_last_touch: number; status: string }>(t.db, `SELECT rule, version_id, is_last_touch, status FROM so_attributions WHERE payment_id = 'pay_sie'`);
+  assert.deepEqual({ ...a }, { rule: "checkout_link", version_id: v1.id, is_last_touch: 1, status: "paid" });
+  // A do-not-call on another call is recorded as an opt-out fact.
+  const t2 = await app();
+  await sieSetup(t2);
+  const d2 = await dialled(t2);
+  await t2.post(FN, fn(d2.callId, d2.salesId, "record_do_not_call", {}));
+  await t2.post("/api/webhooks/retell", { event: "call_ended", call: salesCall(d2.callId, d2.salesId, { disconnection_reason: "agent_hangup", call_status: "ended" }) });
+  assert.equal((await one<{ opt_out: number }>(t2.db, `SELECT opt_out FROM so_call_facts WHERE provider_call_id = ?`, d2.callId)).opt_out, 1);
+});
+
+test("[SALESOPT-007] SIE evaluation recognises the outbound agent's tools; simulations are told the real tool names", async () => {
+  const { SCENARIOS, assertScenario, simulationPrompt } = await import("../src/domain/sales-opt/evaluation.ts");
+  const removal = SCENARIOS.find((s) => s.id === "removal_request")!;
+  const ok = assertScenario(removal, "Agent: Hi, I'm Cimo, an AI assistant from Crestmont Website Development.\nCustomer: Take me off your list and never call again.\n[tool: record_do_not_call]\nAgent: Understood. We've taken this number off our call list. Goodbye.\n[tool: end_call]");
+  assert.ok(ok.results.find((r) => r.id === "tool:record_opt_out")!.ok, JSON.stringify(ok.results));
+  const human = SCENARIOS.find((s) => s.id === "wants_human")!;
+  assert.ok(assertScenario(human, "Agent: Hi, I'm an AI assistant for Crestmont.\nCustomer: Put a human on.\nAgent: I'll try to connect you now.\n[tool: transfer_call]").results.find((r) => r.id === "tool:escalate_or_callback")!.ok);
+  const p = simulationPrompt(removal, "PROMPT");
+  for (const tname of ["record_do_not_call", "schedule_sales_followup", "create_checkout_session", "transfer_call"]) assert.ok(p.includes(tname));
+  assert.ok(!/record_opt_out|request_callback|create_lead/.test(p));
 });

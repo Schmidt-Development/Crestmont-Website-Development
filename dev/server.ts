@@ -33,6 +33,9 @@ const env: Env = {
   STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET,
   STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY,
   VOICE_WEBHOOK_SECRET: process.env.VOICE_WEBHOOK_SECRET,
+  // Retell workspace keys for local rehearsal of the outbound staging E2E (scripts/outbound-staging-e2e.ts). Never dials.
+  RETELL_INBOUND_API_KEY: process.env.RETELL_INBOUND_API_KEY,
+  RETELL_OUTBOUND_API_KEY: process.env.RETELL_OUTBOUND_API_KEY,
   // Emergency re-lock rehearsal only: the gate runs when PREVIEW_GATE=required (never in production).
   PREVIEW_GATE: process.env.PREVIEW_GATE,
   STAGING_ACCESS_PASSWORD: process.env.STAGING_ACCESS_PASSWORD,

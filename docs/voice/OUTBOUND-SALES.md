@@ -99,7 +99,7 @@ Founder approval under the $0-fee rule).
 
 ## 5. Retell contract (verified against docs.retellai.com, 2026-10-31)
 
-`POST https://api.retellai.com/v2/create-phone-call`, `Authorization: Bearer <RETELL_API_KEY>`, `201` → call object.
+`POST https://api.retellai.com/v2/create-phone-call`, `Authorization: Bearer <RETELL_OUTBOUND_API_KEY>`, `201` → call object.
 Body fields used: `from_number`, `to_number` (E.164; US only from Retell numbers), `override_agent_id`, `metadata`,
 `retell_llm_dynamic_variables` (string values only), `idempotency_key` (5–255 `[A-Za-z0-9_-]`, no second call for one
 hour), `honor_internal_dnc` (400 when the contact is DNC). Documented errors 400/401/402/422/429/500; 429/5xx are retried
@@ -127,6 +127,6 @@ events ignored).
 2. Consent capture exists outside this branch (a signed web form) and consents are recorded per number with evidence.
 3. National DNC subscription (paid) and scrubs recorded (≤ 31 days).
 4. Retell: separate sales agent + number, functions and webhook per `OUTBOUND-SALES-CONFIG.md`, prompt written last.
-5. Staging: merge #48 then this PR (deploys staging only), set `RETELL_API_KEY`, Stripe test keys, Resend; test with a
+5. Staging: merge #48 then this PR (deploys staging only), set `RETELL_OUTBOUND_API_KEY`, Stripe test keys, Resend; test with a
    consenting internal number on the staging allowlist.
 6. Only then: `RETELL_SALES_OUTBOUND=on` on staging, Owner switch on, max concurrency 1.

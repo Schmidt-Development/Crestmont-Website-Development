@@ -71,6 +71,11 @@ export async function ingestSalesEvent(db: Db, raw: string, signatureHeader: str
   const kinds = (await db.prepare(`SELECT kind, status FROM voice_events WHERE call_id = ? AND kind LIKE 'fn:%'`).bind(row.id).all<{ kind: string; status: string }>()).results;
   const tools = new Map<string, boolean>();
   for (const k of kinds) tools.set(k.kind.slice(3), (tools.get(k.kind.slice(3)) ?? false) || k.status === "ok");
+  // Outbound sales agent (src/services/sales-functions.ts): its custom functions are recorded per Retell call id in
+  // sales_function_events (refusals are stored as 'error', so a refused checkout never counts as generated).
+  const salesFns = (await db.prepare(`SELECT name, status, result_json FROM sales_function_events WHERE provider_call_id = ?`).bind(providerCallId).all<{ name: string; status: string; result_json: string | null }>()).results;
+  for (const f of salesFns) tools.set(f.name, (tools.get(f.name) ?? false) || f.status === "ok");
+  const outboundLinkDelivered = salesFns.some((f) => f.status === "ok" && /"checkout_link_sent":true/.test(f.result_json ?? "") && /"delivery":"(sent|queued)"/.test(f.result_json ?? ""));
   // Retell built-in tools (end_call, transfer_call) appear only in transcript_with_tool_calls.
   for (const t of Array.isArray(call.transcript_with_tool_calls) ? call.transcript_with_tool_calls.slice(0, 500) : []) {
     const o = obj(t);
@@ -130,8 +135,12 @@ export async function ingestSalesEvent(db: Db, raw: string, signatureHeader: str
       seg && SEGMENT.test(seg) ? seg : null, isTest ? 1 : 0, iso(num(call, "start_timestamp")) ?? (rank === 1 ? at : null), iso(num(call, "end_timestamp")) ?? (rank >= 2 ? at : null),
       duration !== undefined && duration >= 0 ? Math.round(duration) : null, rank >= 2 ? (reason && /^[a-z_]{1,60}$/.test(reason) ? reason : null) : null, connected,
       str(call, "call_status")?.slice(0, 30) ?? null, JSON.stringify([...tools].map(([name, ok]) => ({ name, ok })).slice(0, 60)),
-      has("get_published_pricing") ? 1 : 0, has("send_checkout_link") ? 1 : 0, tools.get("send_checkout_link") === true ? 1 : 0,
-      has("request_callback") || has("book_consultation") ? 1 : 0, has("record_opt_out") || reason === "user_requested_dnc" || dnc ? 1 : 0,
+      // Receptionist-vocabulary names (the original sales-agent contract) and the outbound sales agent's names are both recognised.
+      has("get_published_pricing") || has("get_packages_pricing") ? 1 : 0,
+      has("send_checkout_link") || tools.get("create_checkout_session") === true ? 1 : 0,
+      tools.get("send_checkout_link") === true || outboundLinkDelivered ? 1 : 0,
+      has("request_callback") || has("book_consultation") || tools.get("schedule_sales_followup") === true ? 1 : 0,
+      has("record_opt_out") || has("record_do_not_call") || reason === "user_requested_dnc" || dnc ? 1 : 0,
       has("escalate") || has("transfer_call") || transfers > 0 || !!callRow?.escalated_at ? 1 : 0,
       sentiment && /^[A-Za-z ]{1,20}$/.test(sentiment) ? sentiment : null,
       str(call, "call_status") === "error" || (reason ?? "").startsWith("error") ? `Retell: ${(reason ?? "error").slice(0, 80)}` : null, event, rank, at).run();
