@@ -15,16 +15,18 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: deploy-staging
-  cancel-in-progress: false
-
 jobs:
   rehearse:
     runs-on: ubuntu-latest
     # main only: a manual run from another branch would execute that branch's (possibly older) copy of this file.
     if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     environment: staging
+    # Job-level, after `if:` (CREST-NEW-007): GitHub keeps ONE pending run per concurrency group. At workflow level,
+    # the run this workflow_run creates for a CANCELLED or failed deploy took that slot and cancelled the next pending
+    # Deploy staging (run 41148168046 for 1a2e97e) before skipping itself. A skipped job never enters the group.
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
