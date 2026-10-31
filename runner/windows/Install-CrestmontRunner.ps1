@@ -13,7 +13,9 @@
     4. Images: runner, per-build sandbox, egress proxy (docker build from -RepoPath\runner).
     5. Model selection (windows/select-model.ts inside the runner image) -> state\recommendation.json; -Model overrides.
     6. Ollama: user environment (OLLAMA_HOST=127.0.0.1:11434 = localhost only, context length, parallelism,
-       keep-alive, flash attention, KV cache type), restart, pull the selected model.
+       keep-alive, flash attention, KV cache type), restart, pull the selected model. Then (OllamaProbe.ps1): the
+       Ollama API must answer on 127.0.0.1:11434 and Ollama must be localhost only (OLLAMA_HOST in every scope, all
+       listener sources, and a connect probe of every non-loopback address); model tags are matched exactly.
     7. Compose files: docker-compose.yml, proxy\squid.conf (allow-list), runner.env (managed, no secrets inline) and
        runner.local.env (your own settings: created once, never overwritten; see RunnerEnv.ps1). An existing runner.env
        is backed up when it changes, and keys the installer does not manage are moved to runner.local.env.
@@ -94,6 +96,7 @@ $ErrorActionPreference = "Stop"
 $script:Problems = New-Object System.Collections.ArrayList
 . (Join-Path $PSScriptRoot "SquidConf.ps1")
 . (Join-Path $PSScriptRoot "RunnerEnv.ps1")
+. (Join-Path $PSScriptRoot "OllamaProbe.ps1")
 
 function Step([string]$Text) { Write-Host ""; Write-Host "==> $Text" -ForegroundColor Cyan }
 function Ok([string]$Text) { Write-Host "    OK   $Text" -ForegroundColor Green }
@@ -337,23 +340,32 @@ if ($OllamaInDocker) {
     if (Test-Path $app) { Start-Process -FilePath $app | Out-Null } else { Start-Process -FilePath $ollamaExe -ArgumentList "serve" -WindowStyle Hidden | Out-Null }
     Start-Sleep -Seconds 5
   }
-  $listen = Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue
-  if (-not $listen) { Fail "Ollama is not listening on port 11434."; Exit-WithProblem }
-  $public = @($listen | Where-Object { $_.LocalAddress -notin @("127.0.0.1", "::1") })
-  if ($public.Count) { Fail "Ollama listens on $($public.LocalAddress -join ', '): it must be localhost only. Remove OLLAMA_HOST overrides (system scope too)."; Exit-WithProblem }
-  Ok "Ollama listening on localhost only"
-  if (-not $ollamaCli) { Fail "The ollama CLI was not found (open a new elevated PowerShell after installing Ollama, then re-run)."; Exit-WithProblem }
+  # Liveness is the Ollama API itself, and localhost-only is checked from OLLAMA_HOST (every scope), every listener
+  # source and an active probe of this machine's non-loopback addresses (OllamaProbe.ps1). A TCP listener list alone
+  # is not proof: on Node 1 (build 26300) Get-NetTCPConnection -State Listen listed nothing while Ollama served.
+  $ollamaState = Get-CrestmontOllamaState -Port 11434
+  # Right after a restart (settings changed above) Ollama can take a few seconds before the API answers.
+  for ($i = 0; $changed -and -not $ollamaState.apiResponding -and $i -lt 6; $i++) { Start-Sleep -Seconds 5; $ollamaState = Get-CrestmontOllamaState -Port 11434 }
+  [IO.File]::WriteAllText((Join-Path $State "ollama-connectivity.json"), (([ordered]@{ at = (Get-Date).ToUniversalTime().ToString("o"); ok = $ollamaState.ok; version = $ollamaState.version; listenerEnumerated = $ollamaState.listenerEnumerated; problems = $ollamaState.problems; warnings = $ollamaState.warnings; evidence = $ollamaState.evidence }) | ConvertTo-Json -Depth 5))
+  foreach ($w in $ollamaState.warnings) { Warn $w }
+  foreach ($p in $ollamaState.problems) { Fail $p }
+  if (-not $ollamaState.ok) { Exit-WithProblem }
+  Ok "Ollama $($ollamaState.version) answering on 127.0.0.1:11434, localhost only (details: state\ollama-connectivity.json)"
   if (-not $SkipModelPull) {
+    if (-not $ollamaCli) { Fail "The ollama CLI was not found (open a new elevated PowerShell after installing Ollama, then re-run)."; Exit-WithProblem }
     foreach ($m in $pullList) {
       Write-Host "    Pulling $m (this can take a long time)"
       Invoke-Checked $ollamaCli @("pull", $m) "ollama pull $m"
     }
   }
-  # Exact tag match on the NAME column (a bare name means :latest), not a substring of the listing.
-  $names = @(& $ollamaCli list | Select-Object -Skip 1 | ForEach-Object { ("$_".Trim() -split '\s+')[0] } | Where-Object { $_ })
-  foreach ($m in $pullList) {
-    $want = if ($m.Contains(":")) { $m } else { "${m}:latest" }
-    if (-not ($names -contains $want)) { Fail "Model $want is not in 'ollama list' (found: $($names -join ', '))."; Exit-WithProblem }
+  # Exact tag match against Ollama's own list (GET /api/tags; a bare name means :latest), not a substring.
+  $names = @()
+  try { $names = @(Get-CrestmontOllamaModelName -Port 11434) } catch { Fail "Could not list Ollama's models: $($_.Exception.Message)"; Exit-WithProblem }
+  $missingModels = @(Find-CrestmontMissingModel -Wanted $pullList -Available $names)
+  if ($missingModels.Count) {
+    Fail ("Model(s) not in Ollama: $($missingModels -join ', ') (Ollama has: $(if ($names.Count) { $names -join ', ' } else { 'none' })). " +
+      "Pull them first: $(($missingModels | ForEach-Object { "ollama pull $_" }) -join '; '), or re-run without -SkipModelPull.")
+    Exit-WithProblem
   }
   Ok "Model(s) available: $($pullList -join ', ')"
   $modelBase = "http://host.docker.internal:11434/v1"

@@ -64,7 +64,7 @@ is the direct proof.)
 **A. Read-only report** (changes nothing, installs nothing):
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass -Force
-$branch = "claude/node1-runner-integration"
+$branch = "main"
 $zip = "$env:TEMP\crestmont-runner.zip"; $root = "C:\CrestmontRunner-src"
 Invoke-WebRequest "https://github.com/Schmidt-Development/Crestmont-Website-Development/archive/refs/heads/$branch.zip" -OutFile $zip -UseBasicParsing
 Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue; Expand-Archive $zip $root -Force
@@ -116,10 +116,20 @@ path only: a value put directly with `wrangler secret put` is not compared by th
 ```powershell
 & "$src\runner\windows\Install-CrestmontRunner.ps1" -PlatformUrl https://crestmont-platform-staging.partners-df4.workers.dev `
   -ModelA qwen3.8:27b-q4_K_M -ModelB qwen3.6:35b-a3b-q4_K_M -Slots 1 -GpuConcurrency 1 `
-  -PreserveOllamaConfig -SkipModelPull -AllowMissingSkills
+  -PreserveOllamaConfig -SkipModelPull -AllowMissingSkills -NoAutoStart -NoStart
 ```
 The installer is idempotent, so you can re-run it after a reboot or a fix. It stops with a list of problems if something is
-missing.
+missing. `-NoAutoStart -NoStart` configure and check everything (images, preflight, the container-to-Ollama probe) but
+register no scheduled task and leave the runner stopped; starting it is a separate, approved step.
+
+**How the installer checks Ollama** (`runner/windows/OllamaProbe.ps1`, read-only). Ollama counts as running only when
+`GET http://127.0.0.1:11434/api/version` answers (an open TCP port is not enough). Localhost-only is checked three
+ways, and any one showing exposure stops the install: `OLLAMA_HOST` in the Process, User and Machine scopes must be
+loopback or unset; every listener reported by `Get-NetTCPConnection`, .NET and `netstat` must be loopback; and a
+connect to port 11434 on every non-loopback address of the machine must fail. On Node 1 (build 26300)
+`Get-NetTCPConnection -State Listen` listed nothing while Ollama was serving; the installer now says so as a warning
+and relies on the probe. Results go to `state\ollama-connectivity.json`. Model tags are matched exactly against
+Ollama's own list (`/api/tags`).
 
 ## 5. What the installer changes
 

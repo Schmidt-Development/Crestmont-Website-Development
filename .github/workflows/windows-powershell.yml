@@ -57,6 +57,19 @@ jobs:
             exit 1
           fi
           cat "$RUNNER_TEMP/runnerenv.txt"
+      - name: OllamaProbe.ps1 under Windows PowerShell 5.1 (Ollama API liveness, localhost-only, exact model tags; real Get-NetTCPConnection / netstat)
+        shell: bash
+        env:
+          PWSH: powershell
+        run: |
+          set -o pipefail
+          if ! node --no-warnings --test runner/test/ollama-probe.test.ts > "$RUNNER_TEMP/ollamaprobe.txt" 2>&1; then
+            cat "$RUNNER_TEMP/ollamaprobe.txt"
+            msg=$(sed -n '/^not ok/,/^  \.\.\.$/p' "$RUNNER_TEMP/ollamaprobe.txt" | head -120 | sed -e 's/%/%25/g' -e 's/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=OllamaProbe.ps1 under 5.1::$msg"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/ollamaprobe.txt"
       - name: Discover-Hardware.ps1 (read-only) -> select-model.ts
         shell: powershell
         run: |
