@@ -4,18 +4,20 @@
 import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const esc = (s: unknown) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" } as Record<string, string>)[c]);
 
-export function buildFixtureSite(starterDir, dest, config, brand = {}) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Config = any;
+export function buildFixtureSite(starterDir: string, dest: string, config: Config, brand: Record<string, string> = {}): string {
   cpSync(starterDir, dest, { recursive: true });
   writeFileSync(path.join(dest, "business.config.json"), JSON.stringify(config, null, 2) + "\n");
   const b = config.business;
   const f = config.features;
-  const pages = [["index.html", "Home"], ["services.html", "Services"], ["contact.html", "Contact"]];
+  const pages: [string, string][] = [["index.html", "Home"], ["services.html", "Services"], ["contact.html", "Contact"]];
   if (f.quotes) pages.push(["quote.html", "Get a quote"]);
   if (f.booking) pages.push(["book.html", "Book online"]);
-  const nav = (cur) => `<nav class="site-nav" aria-label="Main"><ul id="site-menu">${pages.map(([p, l]) => `<li><a href="/${p === "index.html" ? "" : p}"${p === cur ? ' aria-current="page"' : ""}>${esc(l)}</a></li>`).join("")}<li><a href="/booking/manage.html">Manage a booking</a></li></ul></nav>`;
-  const page = (file, label, body, extraHead = "") => `<!doctype html>
+  const nav = (cur: string) => `<nav class="site-nav" aria-label="Main"><ul id="site-menu">${pages.map(([p, l]) => `<li><a href="/${p === "index.html" ? "" : p}"${p === cur ? ' aria-current="page"' : ""}>${esc(l)}</a></li>`).join("")}<li><a href="/booking/manage.html">Manage a booking</a></li></ul></nav>`;
+  const page = (file: string, label: string, body: string, extraHead = "") => `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -34,13 +36,13 @@ export function buildFixtureSite(starterDir, dest, config, brand = {}) {
   <a class="skip-link" href="#main">Skip to content</a>
   <header class="site-header"><div class="container"><a class="brand" href="/">${esc(b.name)}</a><button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-menu">Menu</button>${nav(file)}</div></header>
   <main id="main">${body}</main>
-  <footer class="site-footer"><div class="container"><p>${esc(b.name)} · <a href="tel:${esc(b.phone.replace(/[^+\d]/g, ""))}">${esc(b.phone)}</a> · <a href="mailto:${esc(b.email)}">${esc(b.email)}</a></p></div></footer>
+  <footer class="site-footer"><div class="container"><p>${esc(b.name)}${b.phone ? ` · <a href="tel:${esc(String(b.phone).replace(/[^+\d]/g, ""))}">${esc(b.phone)}</a>` : ""}${b.email ? ` · <a href="mailto:${esc(b.email)}">${esc(b.email)}</a>` : ""}</p></div></footer>
 </body>
 </html>
 `;
-  const services = config.services.map((s) => `<article class="card"><h3>${esc(s.name)}</h3><p>${esc(s.description)}</p><p class="price">${s.priceCents ? `$${(s.priceCents / 100).toFixed(2)}` : esc(s.priceNote ?? "")}</p></article>`).join("");
-  const ld = `<script type="application/ld+json">${JSON.stringify({ "@context": "https://schema.org", "@type": "LocalBusiness", name: b.name, description: b.description, telephone: b.phone, email: b.email })}</script>`;
-  const out = {
+  const services = config.services.map((s: Config) => `<article class="card"><h3>${esc(s.name)}</h3><p>${esc(s.description)}</p><p class="price">${s.priceCents ? `$${(s.priceCents / 100).toFixed(2)}` : esc(s.priceNote ?? "")}</p></article>`).join("");
+  const ld = `<script type="application/ld+json">${JSON.stringify({ "@context": "https://schema.org", "@type": "LocalBusiness", name: b.name, description: b.description, ...(b.phone ? { telephone: b.phone } : {}), ...(b.email ? { email: b.email } : {}) })}</script>`;
+  const out: Record<string, string> = {
     "index.html": page("index.html", "Home", `<section class="hero"><div class="container"><h1>${esc(b.name)}</h1><p>${esc(b.description)}</p></div></section><section class="section"><div class="container"><h2>Services</h2><div class="grid three">${services}</div></div></section>`, ld),
     "services.html": page("services.html", "Services", `<section class="section"><div class="container"><h1>Services</h1><div class="grid three">${services}</div></div></section>`),
     "contact.html": page("contact.html", "Contact", `<section class="section"><div class="container"><h1>Contact us</h1><form data-api="/api/contact" class="card"><div class="status" role="status" tabindex="-1"></div>

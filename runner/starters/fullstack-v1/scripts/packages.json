@@ -1,0 +1,169 @@
+{
+  "schema": "crestmont.package-capabilities/1",
+  "note": "Protected copy of the package capability matrix (runner starters/fullstack-v1/starter.json \u2192 packages). Restored by the runner before every acceptance run.",
+  "packages": {
+    "starter": {
+      "maxPages": 5,
+      "seo": "basic",
+      "revisionRounds": 2,
+      "capabilities": [
+        "contact",
+        "admin",
+        "notifications"
+      ],
+      "requirements": [
+        {
+          "key": "pkg:pages-within-limit",
+          "label": "Up to 5 pages"
+        },
+        {
+          "key": "pkg:responsive",
+          "label": "Responsive website (desktop and mobile verified)"
+        },
+        {
+          "key": "pkg:contact-form",
+          "label": "Working contact form: validated, stored, staff notified"
+        },
+        {
+          "key": "pkg:admin-inbox",
+          "label": "Administration to read and answer messages"
+        },
+        {
+          "key": "pkg:seo-basic",
+          "label": "Basic technical SEO (titles, descriptions, sitemap, robots)"
+        },
+        {
+          "key": "pkg:security",
+          "label": "Security baseline (validation, rate limits, headers, no secrets in source)"
+        }
+      ]
+    },
+    "business": {
+      "maxPages": 12,
+      "seo": "expanded",
+      "revisionRounds": 3,
+      "capabilities": [
+        "contact",
+        "admin",
+        "notifications",
+        "quotes",
+        "booking",
+        "payments"
+      ],
+      "requirements": [
+        {
+          "key": "pkg:pages-within-limit",
+          "label": "Up to 12 pages"
+        },
+        {
+          "key": "pkg:responsive",
+          "label": "Responsive website (desktop and mobile verified)"
+        },
+        {
+          "key": "pkg:design-customization",
+          "label": "Expanded design customization from the brand"
+        },
+        {
+          "key": "pkg:forms-advanced",
+          "label": "Working forms and database-backed workflows within the documented scope"
+        },
+        {
+          "key": "pkg:integrations-defined",
+          "label": "Defined integrations on the customer's own accounts (verified in test mode before launch)"
+        },
+        {
+          "key": "pkg:admin-dashboard",
+          "label": "Core administration dashboard"
+        },
+        {
+          "key": "pkg:seo-expanded",
+          "label": "Expanded technical SEO (canonical, Open Graph, structured data)"
+        },
+        {
+          "key": "pkg:security",
+          "label": "Security baseline (authentication, authorization, CSRF, rate limits, verified webhooks)"
+        }
+      ]
+    },
+    "premium": {
+      "maxPages": 25,
+      "seo": "enhanced",
+      "revisionRounds": 4,
+      "capabilities": [
+        "contact",
+        "admin",
+        "notifications",
+        "quotes",
+        "booking",
+        "payments",
+        "customer_accounts"
+      ],
+      "requirements": [
+        {
+          "key": "pkg:pages-within-limit",
+          "label": "Up to 25 pages within approved scope"
+        },
+        {
+          "key": "pkg:responsive",
+          "label": "Responsive website (desktop and mobile verified)"
+        },
+        {
+          "key": "pkg:design-bespoke",
+          "label": "Bespoke premium design"
+        },
+        {
+          "key": "pkg:layouts-interactions",
+          "label": "Advanced layouts and interactions"
+        },
+        {
+          "key": "pkg:integrations-defined",
+          "label": "Defined integrations on the customer's own accounts (verified in test mode before launch)"
+        },
+        {
+          "key": "pkg:admin-dashboard",
+          "label": "Advanced administration"
+        },
+        {
+          "key": "pkg:seo-enhanced",
+          "label": "Enhanced technical SEO"
+        },
+        {
+          "key": "pkg:performance",
+          "label": "Performance optimization (measured)"
+        },
+        {
+          "key": "pkg:security",
+          "label": "Security baseline (authentication, authorization, CSRF, rate limits, verified webhooks)"
+        }
+      ]
+    },
+    "custom": {
+      "maxPages": 40,
+      "seo": "expanded",
+      "revisionRounds": 3,
+      "capabilities": [
+        "contact",
+        "admin",
+        "notifications",
+        "quotes",
+        "booking",
+        "payments",
+        "customer_accounts"
+      ],
+      "requirements": [
+        {
+          "key": "pkg:scope-as-quoted",
+          "label": "Everything in the accepted quote's scope (SPEC.json acceptance criteria)"
+        },
+        {
+          "key": "pkg:responsive",
+          "label": "Responsive website (desktop and mobile verified)"
+        },
+        {
+          "key": "pkg:security",
+          "label": "Security baseline"
+        }
+      ]
+    }
+  }
+}

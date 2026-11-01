@@ -159,7 +159,7 @@ function fullstackPhase(job: Job, phase: Phase, starter: string, local: boolean)
   if (phase === "plan") return [
     "Phase 1 of 3: plan.",
     `The repository contains the approved full-stack starter "${starter}": a working Cloudflare Worker backend, its own D1 database, booking, quotes, contact, payments on the customer's own Stripe account, email outbox, administration and acceptance gates. Read STARTER.md first, then BRIEF.md and BRIEF.json (exact values), REVISION-REQUEST.md if present, and customer-files/INDEX.json.`,
-    "Fill business.config.json ONLY from the brief: facts the customer did not give stay null and are listed in missingInformation (never invent addresses, hours, prices, licences, reviews or results); your own reasonable choices go in assumptions. Enable only features the customer asked for that this package includes (starter.json → packages." + pkg + ".capabilities); anything else is a scope change, recorded, not built.",
+    "Fill business.config.json ONLY from the brief: facts the customer did not give stay null and are listed in missingInformation (never invent addresses, hours, prices, licences, reviews or results); your own reasonable choices go in assumptions. Enable only features the customer asked for that this package includes (scripts/packages.json → packages." + pkg + ".capabilities); anything else is a scope change, recorded, not built.",
     "Produce .crestmont/plan.md: sitemap within the package page limit, content outline per page, design direction (tokens from the customer's brand), which features and backend extensions the scope needs, and the requirement keys each part satisfies.",
     "Write .crestmont/requirements.json from the seed, every item \"remaining\" unless it already exists.",
   ];

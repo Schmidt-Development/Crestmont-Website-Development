@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { app, bookable, CONFIG, off, openDate, person } from "./helpers.mjs";
+import { app, book, bookable, CONFIG, off, openDate, person } from "./helpers.mjs";
 import { processOutbox } from "../../src/lib/notify.js";
 
 const skip = off("admin");
@@ -57,7 +57,7 @@ test("[admin] [booking] the administrator sees bookings, reschedules, completes 
   const t = await app();
   const svc = bookable();
   const slots = (await t.get(`/api/availability?service=${svc.id}&date=${openDate(t.now())}`)).json.slots;
-  await t.post("/api/bookings", { serviceId: svc.id, start: slots[0].start, ...person(1) });
+  await book(t, svc.id, slots[0].start, 1);
   await t.signInOwner();
   const list = await t.get("/api/admin/bookings");
   assert.equal(list.json.items.length, 1);
@@ -66,7 +66,8 @@ test("[admin] [booking] the administrator sees bookings, reschedules, completes 
   assert.equal((await t.adminPost(`/api/admin/bookings/${id}/complete`, {})).status, 200);
   assert.equal((await t.adminPost(`/api/admin/bookings/${id}/complete`, {})).status, 409);
   const hist = await t.get(`/api/admin/bookings/${id}/history`);
-  assert.deepEqual(hist.json.items.map((h) => h.to_status), ["confirmed", "confirmed", "completed"]);
+  assert.deepEqual(hist.json.items.map((h) => h.to_status).slice(-2), ["confirmed", "completed"], "rescheduled (still confirmed), then completed");
+  assert.ok(hist.json.items.some((h) => /^rescheduled from /.test(h.note ?? "")));
   const audit = await t.get("/api/admin/audit");
   assert.ok(audit.json.items.some((a) => a.action === "booking.reschedule") && audit.json.items.some((a) => a.action === "booking.complete"));
 });
@@ -117,8 +118,8 @@ test("[customer-accounts] customers register and sign in, and see only their own
   const svc = bookable();
   if (svc) {
     const slots = (await t.get(`/api/availability?service=${svc.id}&date=${openDate(t.now())}`)).json.slots;
-    await t.post("/api/bookings", { serviceId: svc.id, start: slots[0].start, ...person(1) });
-    await t.post("/api/bookings", { serviceId: svc.id, start: slots.at(-1).start, ...person(2) });
+    await book(t, svc.id, slots[0].start, 1);
+    await book(t, svc.id, slots.at(-1).start, 2);
   }
   const reg = await t.adminPost("/api/account/register", { name: "Customer One", email: "customer1@example.test", password: "customer-password-1" });
   assert.equal(reg.status, 201);

@@ -607,6 +607,13 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           tracker.note({ kind: "check", message: `restored protected checker files: ${restored.join(", ")}` });
         }
       }
+      // Evidence the runner trusts is produced in THIS run only: stale or planted gate results and screenshots are
+      // removed first, and provider verifications come from the runner's own broker record (outside the agent's
+      // reach), never from files the agent can write.
+      rmSync(path.join(ws!.repo, ".crestmont", "quality", "gates.json"), { force: true });
+      rmSync(path.join(ws!.repo, ".crestmont", "screenshots"), { recursive: true, force: true });
+      writeInside(ws!.repo, path.join(".crestmont", "quality", "verifications.json"), JSON.stringify(trustedVerifications(ws!.dir), null, 2) + "\n");
+      verificationsChanged = false;
       begin("acceptance", "runner acceptance checks");
       const out = await runChecks(ws!.repo, commands, checkEnv, cfg.checkTimeoutMs, checkExecutor);
       if (job.strategy === "standard" || starterSpec) {
@@ -628,6 +635,8 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
 
     // ── runner acceptance checks → fresh Model A review session → routed corrections (B, or A when hard) → repeat ──
     let checks: CheckOutcome[] = [];
+    let commands: { id: string; label: string; command: string[] }[] = [];
+    let verificationsChanged = false;
     // Every build the platform marks "required", and every starter that declares the quality engine, is gated.
     const qualityRequired = job.quality === "required" || !!starterSpec?.quality;
     let lastCard: Scorecard | null = null;
@@ -636,7 +645,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     let scoreNow: (verdict: ReviewVerdict | null, previewDeployed: boolean | null, iteration: number) => Scorecard = () => { throw new Error("scorecard before acceptance"); };
     if (!stop.reason && !st.localLimit && !st.agentError) {
       stage = "verifying";
-      const commands = acceptanceCommands(starterSpec, ws.repo, effectivePackage);
+      commands = acceptanceCommands(starterSpec, ws.repo, effectivePackage);
       if (sandbox && cfg.jobSandbox.browserCheck && existsSync(path.join(ws.repo, "public", "index.html"))) {
         commands.push({ id: "browser-check", label: "Headless Chromium: every page at desktop and mobile width (console errors, failed requests, horizontal overflow, screenshots)", command: ["node", BROWSER_CHECK, "--root", "public", "--out", ".crestmont/screenshots"] });
       }
@@ -687,7 +696,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           // checkpoint cannot lose the record and run the external operation again after a resume.
           const doneFile = path.join(ws.dir, "integration-operations-done.json");
           const doneNow = existsSync(doneFile) ? readFileSync(doneFile, "utf8") : "";
-          if (doneNow !== opsRecorded) { opsRecorded = doneNow; await checkpoint(`after integration operations (cycle ${cycle})`); }
+          if (doneNow !== opsRecorded) { opsRecorded = doneNow; verificationsChanged = true; await checkpoint(`after integration operations (cycle ${cycle})`); }
           if (memory) remember.integrations(memory, [...ints, ...ops.map((o) => ({ key: o.operation.split(".")[0], operation: o.operation, status: o.status }))]);
         } catch (err) { if (err instanceof LeaseLostError) { markLeaseLost(); throw err; } log.warn("integration/approval report failed", { error: errorMessage(err) }); }
         // C. Independent review: a fresh Model A session (falls back to the deterministic reviewer if it is unavailable).
@@ -820,6 +829,11 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       return await finish("failed", { error: st.agentError, checks });
     }
 
+    // A provider verification the broker ran after the last acceptance run is evidence the gates have not seen yet.
+    if (qualityRequired && lastCard && !lastCard.eligible && verificationsChanged && !stop.reason && commands.length) {
+      checks = await acceptance(commands);
+      for (const c of checks) tracker.note({ kind: "check", message: `${c.ok ? "PASS" : "FAIL"} ${c.command} (re-run with new provider verifications)` });
+    }
     // ── preview ──
     const failedChecks = checks.filter((c) => !c.ok);
     let preview = { url: null as string | null, note: "not attempted because acceptance checks failed", name: null as string | null };
@@ -884,6 +898,13 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     if (runtimeTimer) clearTimeout(runtimeTimer);
     await provider?.close().catch((err: unknown) => log.warn("provider close failed", { error: errorMessage(err) }));
   }
+}
+
+/** Provider-side verifications the runner's trusted broker actually ran and passed (integration-operations-done.json). */
+export function trustedVerifications(jobDir: string): { schema: string; source: string; operations: { operation: string; status: string }[] } {
+  let done: Record<string, { status?: string }> = {};
+  try { done = JSON.parse(readFileSync(path.join(jobDir, "integration-operations-done.json"), "utf8")); } catch { done = {}; }
+  return { schema: "crestmont.verifications/1", source: "runner broker record (written by the runner, not the builder)", operations: Object.entries(done).map(([operation, r]) => ({ operation, status: String(r?.status ?? "unknown") })) };
 }
 
 function referenceHosts(job: Job): string[] {

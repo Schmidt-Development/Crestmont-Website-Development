@@ -28,8 +28,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 const arg = (n, d = null) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : d; };
 const pkgId = arg("package", "business");
-const starter = JSON.parse(readFileSync(path.join(ROOT, "starter.json"), "utf8"));
-const pkg = starter.packages[pkgId];
+// The package capability matrix (protected copy of the runner's starter manifest; restored before every run).
+const matrix = JSON.parse(readFileSync(path.join(ROOT, "scripts", "packages.json"), "utf8"));
+const pkg = matrix.packages[pkgId];
 const out = { schema: "crestmont.quality-gates/1", package: pkgId, generatedAt: new Date().toISOString(), gates: {}, features: {}, requested: [], scopeChanges: [], missingInformation: [], tests: null };
 const gate = (id, name) => (out.gates[id] = { id, name, status: "pass", findings: [], evidence: [] });
 const fail = (g, msg) => { g.status = "fail"; g.findings.push(msg); };
@@ -66,7 +67,11 @@ out.requested = [...requested];
 const testFiles = [];
 const walk = (d) => { for (const e of readdirSync(d)) { const p = path.join(d, e); if (statSync(p).isDirectory()) walk(p); else if (/\.test\.m?js$/.test(e)) testFiles.push(p); } };
 if (existsSync(path.join(ROOT, "tests"))) walk(path.join(ROOT, "tests"));
-const run = spawnSync(process.execPath, ["--no-warnings", "--test", "--test-reporter=tap", ...testFiles], { cwd: ROOT, encoding: "utf8", timeout: 600_000, env: { ...process.env, NODE_OPTIONS: "" } });
+// An independent test run: no inherited test-runner context (a parent `node --test` would otherwise capture the
+// results) and no inherited NODE_OPTIONS.
+const testEnv = { ...process.env, NODE_OPTIONS: "" };
+delete testEnv.NODE_TEST_CONTEXT;
+const run = spawnSync(process.execPath, ["--no-warnings", "--test", "--test-reporter=tap", ...testFiles], { cwd: ROOT, encoding: "utf8", timeout: 600_000, env: testEnv });
 const tests = [];
 for (const line of (run.stdout ?? "").split("\n")) {
   const m = /^(\s*)(not ok|ok) \d+ - (.*?)(?:\s+#\s+(SKIP|TODO)\b.*)?$/.exec(line);
@@ -79,8 +84,10 @@ if (run.status !== 0 && !tests.some((t) => t.status === "failed")) tests.push({ 
 const byTag = (tag) => tests.filter((t) => t.tags.includes(tag));
 // A test may be skipped only because a feature it exercises is NOT enabled for this website. A skipped test whose
 // feature tags are all enabled (or that has no feature tag) is a required test that did not run: it fails the gate.
-const FEATURE_TAG = { contact: "contact", quotes: "quotes", booking: "booking", payments: "payments", notifications: "notifications", admin: "admin", "customer-accounts": "customer_accounts" };
-const skipJustified = (t) => t.tags.some((tag) => FEATURE_TAG[tag] && !features[FEATURE_TAG[tag]]);
+const FEATURE_TAG = { contact: "contact", quotes: "quotes", booking: "booking", payments: "payments", notifications: "notifications", admin: "admin", "customer-accounts": "customer_accounts", "service-area": "service_area" };
+// Configuration-derived "features": a postal-code service area exists only when the business configured one.
+const derived = { ...features, service_area: Array.isArray(config?.serviceArea?.postalCodes) && config.serviceArea.postalCodes.length > 0 };
+const skipJustified = (t) => t.tags.some((tag) => FEATURE_TAG[tag] && !derived[FEATURE_TAG[tag]]);
 /** A tag is satisfied only when at least one test with it PASSED and none failed or was skipped without reason. */
 function require(g, tag, why) {
   const ts = byTag(tag);
@@ -142,8 +149,10 @@ if (features.booking) require(D, "concurrency", "double-booking prevention");
 
 // ── E integrations ──
 const E = gate("E", "integrations");
+// Provider verifications are read ONLY from the file the Crestmont runner writes right before this run, from its own
+// broker record (the builder's .crestmont/integration-results.json is informational and never trusted here).
 let results = [];
-try { results = JSON.parse(readFileSync(path.join(ROOT, ".crestmont", "integration-results.json"), "utf8")); } catch { results = []; }
+try { const v = JSON.parse(readFileSync(path.join(ROOT, ".crestmont", "quality", "verifications.json"), "utf8")); results = v?.schema === "crestmont.verifications/1" && Array.isArray(v.operations) ? v.operations : []; } catch { results = []; }
 const verified = (op) => results.some((r) => r.operation === op && r.status === "passed");
 out.integrations = [];
 if (features.payments) {
@@ -155,8 +164,9 @@ if (features.payments) {
 }
 if (features.notifications) {
   require(E, "notifications", "transactional email outbox");
-  out.integrations.push({ key: "resend", offline: "tested", providerVerification: "pending", paidBy: "customer" });
-  if (E.status === "pass") { E.status = "pending_external"; E.findings.push("Email: delivery through the customer's own mail provider is verified only on staging with its credentials"); }
+  const v = verified("resend.verify_sending_domain");
+  out.integrations.push({ key: "resend", offline: "tested", providerVerification: v ? "verified_domain" : "pending", paidBy: "customer" });
+  if (!v && E.status === "pass") { E.status = "pending_external"; E.findings.push("Email: the customer's own Resend account has no verified sending domain yet (approved operation resend.verify_sending_domain)"); }
 }
 if (!features.payments && !features.notifications) E.status = "not_applicable";
 

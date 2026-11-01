@@ -1,0 +1,8 @@
+{
+  "schema": "crestmont.business-config/1", "configured": true, "version": 1,
+  "business": { "name": "Bright Ledger Bookkeeping", "description": "Fictional bookkeeping firm test business for Crestmont acceptance: monthly bookkeeping for small businesses.", "industry": "Accounting", "email": "hello@brightledger.example", "phone": "+1 555 0123", "timeZone": "America/New_York", "address": null },
+  "features": { "contact": true, "notifications": true, "admin": true },
+  "services": [ { "id": "monthly", "name": "Monthly bookkeeping", "description": "Reconciliations and monthly reports.", "priceCents": null, "priceNote": "From a fixed monthly fee, quoted per business", "bookable": false, "payable": false } ],
+  "notifications": { "businessEmail": "hello@brightledger.example" },
+  "assumptions": [], "missingInformation": []
+}

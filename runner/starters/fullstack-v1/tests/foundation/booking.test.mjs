@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { app, bookable, CONFIG, off, openDate, person } from "./helpers.mjs";
+import { app, book, bookable, CONFIG, off, openDate, person } from "./helpers.mjs";
 import { candidateSlots } from "../../src/lib/booking.js";
 import { localDate, zonedParts, zonedToUtc } from "../../src/lib/time.js";
 
@@ -59,13 +59,12 @@ test("[booking] [database] a booking is validated, persisted with history and a 
   const slot = (await t.get(`/api/availability?service=${svc.id}&date=${openDate(t.now())}`)).json.slots[0];
   const bad = await t.post("/api/bookings", { serviceId: svc.id, start: slot.start, name: "", email: "x" });
   assert.equal(bad.status, 422);
-  const r = await t.post("/api/bookings", { serviceId: svc.id, start: slot.start, ...person(1) });
-  assert.equal(r.status, 201, JSON.stringify(r.json));
+  const r = { json: await book(t, svc.id, slot.start, 1) };
   assert.match(r.json.booking.reference, /^BK-[A-Z0-9]{8}$/);
   const row = await t.db.prepare(`SELECT * FROM bookings WHERE reference = ?`).bind(r.json.booking.reference).first();
   assert.equal(row.start_at, slot.start);
   assert.notEqual(row.manage_token_hash, r.json.manageToken, "the manage token is stored only as a hash");
-  assert.equal((await t.db.prepare(`SELECT COUNT(*) AS n FROM booking_history WHERE booking_id = ?`).bind(row.id).first()).n, 1);
+  assert.equal((await t.db.prepare(`SELECT COUNT(*) AS n FROM booking_history WHERE booking_id = ?`).bind(row.id).first()).n, svc.payable && CONFIG.features?.payments ? 2 : 1, "created (and paid) in the history");
   const n = await t.db.prepare(`SELECT template, to_address FROM notifications ORDER BY created_at`).all();
   assert.ok(n.results.some((x) => x.to_address === "customer1@example.test"));
   const view = await t.get(`/api/bookings/${r.json.booking.reference}`, { "x-manage-token": r.json.manageToken });
@@ -91,7 +90,7 @@ test("[booking] customers cancel and reschedule with their link inside the notic
   const svc = bookable();
   const date = openDate(t.now(), Math.ceil(CONFIG.booking.cancellationNoticeHours / 24) + 2);
   const slots = (await t.get(`/api/availability?service=${svc.id}&date=${date}`)).json.slots;
-  const b = (await t.post("/api/bookings", { serviceId: svc.id, start: slots[0].start, ...person(2) })).json;
+  const b = await book(t, svc.id, slots[0].start, 2);
   const h = { "x-manage-token": b.manageToken };
   const target = slots.at(-1).start;
   const moved = await t.post(`/api/bookings/${b.booking.reference}/reschedule`, { start: target }, h);

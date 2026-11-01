@@ -1,0 +1,14 @@
+{
+  "schema": "crestmont.business-config/1", "configured": true, "version": 1,
+  "business": { "name": "Northwind Pottery Classes", "description": "Fictional pottery studio test business for Crestmont acceptance: paid classes booked and paid online, with customer accounts.", "industry": "Arts education", "email": "studio@northwind.example", "phone": "+1 555 0190", "timeZone": "America/Los_Angeles", "address": { "city": "Portland", "state": "OR", "postalCode": "97205", "country": "US", "street": null } },
+  "features": { "contact": true, "booking": true, "payments": true, "customer_accounts": true, "notifications": true, "admin": true },
+  "services": [
+    { "id": "wheel-intro", "name": "Intro to the wheel", "description": "Two-hour beginner class; clay and firing included.", "priceCents": 6500, "durationMinutes": 120, "bookable": true, "payable": true },
+    { "id": "open-studio", "name": "Open studio", "description": "Three hours of studio time for members.", "priceCents": 2500, "durationMinutes": 180, "bookable": true, "payable": true }
+  ],
+  "hours": { "mon": [{ "open": "10:00", "close": "21:00" }], "tue": [{ "open": "10:00", "close": "21:00" }], "wed": [{ "open": "10:00", "close": "21:00" }], "thu": [{ "open": "10:00", "close": "21:00" }], "fri": [{ "open": "10:00", "close": "21:00" }], "sat": [{ "open": "10:00", "close": "18:00" }], "sun": [{ "open": "12:00", "close": "18:00" }] },
+  "booking": { "slotIntervalMinutes": 60, "leadTimeMinutes": 60, "bufferMinutes": 0, "maxDaysAhead": 90, "cancellationNoticeHours": 48, "blackoutDates": [], "resources": [{ "id": "studio", "name": "Studio", "capacity": 8 }] },
+  "payments": { "provider": "stripe", "currency": "usd", "accountOwner": "customer" },
+  "notifications": { "businessEmail": "studio@northwind.example" },
+  "assumptions": [], "missingInformation": []
+}

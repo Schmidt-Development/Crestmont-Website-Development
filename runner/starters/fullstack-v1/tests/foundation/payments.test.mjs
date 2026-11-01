@@ -25,7 +25,7 @@ test("[payments] [security] test and live keys are kept apart by environment; li
 });
 
 test("[payments] without the customer's Stripe keys a paid service cannot be booked online (honest refusal, nothing faked)", { skip }, async () => {
-  const t = await app();
+  const t = await app({ noKeys: true });
   const svc = payable();
   const slot = (await t.get(`/api/availability?service=${svc.id}&date=${openDate(t.now())}`)).json.slots[0];
   const r = await t.post("/api/bookings", { serviceId: svc.id, start: slot.start, ...person(1) });

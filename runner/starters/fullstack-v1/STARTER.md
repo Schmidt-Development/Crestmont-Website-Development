@@ -11,7 +11,7 @@ You are building a real business website: a frontend, a backend, a database and 
 - **Set `configured: true`.**
 - **Enable features in `features`.** Each one must be both:
   - something the customer asked for, and
-  - included in the package (see `starter.json` → `packages.<id>.capabilities`).
+  - included in the package (see `scripts/packages.json` → `packages.<id>.capabilities`).
 
   Requested features outside the package are scope changes. Do not build them; the gates record them for a change order.
 - **Services.** Use `id`, `name`, `description`, `priceCents` (whole cents, or `null` with a `priceNote`), `durationMinutes`, `bookable` and `payable`. Prices for payment always come from here or from the admin, never from the browser.
