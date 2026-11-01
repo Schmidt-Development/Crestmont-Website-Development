@@ -393,3 +393,62 @@ test("[PORTAL-002] onboarding with more uploaded images than D1's 100 bound para
   // The local D1 stand-in enforces the same limit, so a per-id query would have failed here exactly as on Cloudflare.
   assert.throws(() => db.prepare(`SELECT id FROM files WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids), /D1 limit: 121 bound parameters \(maximum 100\)/);
 });
+
+test("[AIB-QUALITY] [PORTAL-006] Crestmont's defects never use a revision round; problem reports wait for triage; scope changes need a change order; every classification is audited", async () => {
+  const { db, ca, pa, client } = await twoTenants();
+  const pm = await createStaff(db, "project_manager", "pm2@crestmont.test");
+  await db.prepare(`UPDATE projects SET project_manager_id = ?, revision_allowance = 2 WHERE id = ?`).bind(pm.id, pa).run();
+  await setStatus(db, pa, "customer_review");
+  const sc = await client().login(pm.email, TEST_PASSWORD, pm.secret);
+  const rev = async (round: number) => (await db.prepare(`SELECT * FROM revisions WHERE project_id = ? AND round = ?`).bind(pa, round).first<Record<string, unknown>>())!;
+  const { revisionUsage } = await import("../src/services/projects.ts");
+
+  // 1. A problem report uses no round while staff triage it.
+  assert.equal((await ca.post(`/portal/projects/${pa}/revisions`, { kind: "problem", request: "The booking form shows an error when I pick Saturday." })).status, 303);
+  const p1 = await rev(1);
+  assert.equal((await sc.post(`/staff/revisions/${p1.id}/status`, { status: "in_progress" })).status, 409, "no work on an untriaged problem report");
+  assert.equal(p1.customer_kind, "problem");
+  assert.equal((await revisionUsage(db, pa)).used, 0, "untriaged problem report uses no round");
+  assert.match(await (await ca.get(`/portal/projects/${pa}/revisions`)).text(), /Problem report: we are checking it/);
+
+  // Classification needs a reason; customers cannot classify.
+  assert.equal((await ca.post(`/staff/revisions/${p1.id}/classify`, { category: "builder_defect", reason: "customer tries to self-classify" })).status >= 400, true);
+  await sc.post(`/staff/revisions/${p1.id}/classify`, { category: "builder_defect", reason: "x" });
+  assert.equal((await rev(1)).category_at, null, "no reason, no classification");
+
+  // 2. Staff confirm it is Crestmont's defect: it never uses a round.
+  assert.equal((await sc.post(`/staff/revisions/${p1.id}/classify`, { category: "builder_defect", reason: "Saturday slots were generated in UTC; our defect against the approved booking scope." })).status, 303);
+  assert.deepEqual([(await rev(1)).category, (await rev(1)).included, (await revisionUsage(db, pa)).used], ["builder_defect", 1, 0]);
+  assert.match(await (await ca.get(`/portal/projects/${pa}/revisions`)).text(), /Our fix: no round used/);
+
+  // 3. A customer change uses a round; a builder-defect reclassification gives it back.
+  await ca.post(`/portal/projects/${pa}/revisions`, { kind: "change", request: "Please make the logo a little larger in the header." });
+  assert.equal((await revisionUsage(db, pa)).used, 1);
+  const c2 = await rev(2);
+  await sc.post(`/staff/revisions/${c2.id}/classify`, { category: "builder_defect", reason: "The approved design specified the larger logo; we shipped the wrong size." });
+  assert.equal((await revisionUsage(db, pa)).used, 0, "Crestmont's mistake does not consume the customer's round");
+
+  // Work already started becomes billable only under a change order the customer APPROVED (a proposal is not enough).
+  await ca.post(`/portal/projects/${pa}/revisions`, { request: "Please swap the footer photo for the team photo." });
+  const w3 = await rev(3);
+  assert.equal((await sc.post(`/staff/revisions/${w3.id}/status`, { status: "in_progress" })).status, 303);
+  await sc.post(`/staff/projects/${pa}/change-orders`, { revision_id: String(w3.id), scope: "Footer photo swap", price: "50" });
+  assert.equal((await rev(3)).billable_change_order_id !== null, true);
+  await sc.post(`/staff/revisions/${w3.id}/classify`, { category: "scope_change", reason: "Trying to make started work billable with only a proposal." });
+  assert.deepEqual([(await rev(3)).category, (await rev(3)).included], ["customer_revision", 1], "refused: the change order is only proposed");
+
+  // 4. A scope change is never included and cannot start before an approved change order.
+  await ca.post(`/portal/projects/${pa}/revisions`, { request: "Add an online shop with 40 products and shipping rates." });
+  const s3 = await rev(4);
+  assert.equal(s3.included, 1, "within the allowance until classified");
+  assert.equal((await sc.post(`/staff/revisions/${s3.id}/classify`, { category: "scope_change", reason: "An online shop is not part of the approved Business scope; it needs a change order." })).status, 303);
+  assert.deepEqual([(await rev(4)).category, (await rev(4)).included], ["scope_change", 0]);
+  assert.equal((await sc.post(`/staff/revisions/${s3.id}/status`, { status: "in_progress" })).status, 409, "no work before an approved change order");
+  assert.equal((await revisionUsage(db, pa)).used, 1, "only the footer-photo change uses a round");
+
+  // 5. Audit trail with the reason.
+  const audits = (await db.prepare(`SELECT details_json FROM audit_logs WHERE action = 'revision.classified' ORDER BY rowid`).all<{ details_json: string }>()).results.map((r) => JSON.parse(r.details_json));
+  assert.equal(audits.length, 3, "the refused classification wrote nothing");
+  assert.equal(audits[0].from, "untriaged problem");
+  assert.match(audits[2].reason, /not part of the approved Business scope/);
+});

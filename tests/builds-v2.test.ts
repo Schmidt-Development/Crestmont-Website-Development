@@ -9,6 +9,7 @@ import { FakePayments } from "./support/security-world.ts";
 import * as B from "../src/services/builds.ts";
 import * as W from "../src/services/build-workers.ts";
 import * as PL from "../src/services/build-pipeline.ts";
+import { withQuality } from "./support/quality.ts";
 
 const RUNNER_SECRET = "test-runner-secret";
 const WHSEC = "whsec_buildtest";
@@ -22,7 +23,7 @@ async function app(): Promise<App> {
   return { ...t, owner, oc } as App;
 }
 async function runner(t: App, path: string, body: unknown) {
-  const raw = JSON.stringify(body);
+  const raw = JSON.stringify(withQuality(path, body));
   const ts = Math.floor(Date.now() / 1000);
   const res = await t.client().request("POST", `/api/builds/runner/${path}`, { body: raw, headers: { "content-type": "application/json", "x-crestmont-runner-signature": `t=${ts},v1=${await hmacSha256Hex(RUNNER_SECRET, `${ts}.${raw}`)}` } });
   return { status: res.status, json: await res.json() as Record<string, any> }; // eslint-disable-line @typescript-eslint/no-explicit-any

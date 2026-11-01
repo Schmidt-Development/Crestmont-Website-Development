@@ -71,6 +71,13 @@ export interface ReviewVerdict {
   findings: string[];
   /** Corrective prompt for the same project worker (required for continuation decisions). */
   nextPrompt: string | null;
+  /**
+   * The reviewer's own judgement of the subjective quality criteria (quality scorecard). Optional for compatibility;
+   * without it those criteria stay "unsupported" and the build cannot reach 10/10.
+   */
+  assessment?: Partial<Record<"visual_design" | "brand_consistency" | "maintainability" | "customer_experience", { verdict: "pass" | "fail"; note?: string }>>;
+  /** Screenshots the reviewer actually received as images (set by the runner, never by the model). */
+  imagesSeen?: number;
 }
 
 export const REVIEW_JSON_SCHEMA = {
@@ -79,6 +86,10 @@ export const REVIEW_JSON_SCHEMA = {
     decision: { type: "string", enum: [...REVIEW_DECISIONS] },
     addresses: { type: "array", items: { type: "string" } }, findings: { type: "array", items: { type: "string" } },
     nextPrompt: { type: ["string", "null"] },
+    assessment: {
+      type: "object", additionalProperties: false,
+      properties: Object.fromEntries(["visual_design", "brand_consistency", "maintainability", "customer_experience"].map((k) => [k, { type: "object", additionalProperties: false, required: ["verdict", "note"], properties: { verdict: { type: "string", enum: ["pass", "fail"] }, note: { type: "string" } } }])),
+    },
   },
 } as const;
 
@@ -87,7 +98,13 @@ export function parseVerdict(raw: unknown): ReviewVerdict | null {
   if (o && o.decision === "READY_FOR_FOUNDER_APPROVAL") o.decision = "READY_FOR_INTERNAL_APPROVAL"; // older wording
   if (!o || !(REVIEW_DECISIONS as readonly string[]).includes(o.decision as string)) return null;
   const strs = (v: unknown) => (Array.isArray(v) ? v : []).filter((x): x is string => typeof x === "string").map((x) => x.slice(0, 1000)).slice(0, 100);
-  return { decision: o.decision as ReviewDecision, addresses: strs(o.addresses), findings: strs(o.findings), nextPrompt: typeof o.nextPrompt === "string" && o.nextPrompt.trim() ? o.nextPrompt.slice(0, 60000) : null };
+  const assessment: NonNullable<ReviewVerdict["assessment"]> = {};
+  const a = o.assessment && typeof o.assessment === "object" ? o.assessment as Record<string, unknown> : {};
+  for (const k of ["visual_design", "brand_consistency", "maintainability", "customer_experience"] as const) {
+    const v = a[k] as { verdict?: unknown; note?: unknown } | undefined;
+    if (v && (v.verdict === "pass" || v.verdict === "fail")) assessment[k] = { verdict: v.verdict, note: typeof v.note === "string" ? v.note.slice(0, 500) : undefined };
+  }
+  return { decision: o.decision as ReviewDecision, addresses: strs(o.addresses), findings: strs(o.findings), nextPrompt: typeof o.nextPrompt === "string" && o.nextPrompt.trim() ? o.nextPrompt.slice(0, 60000) : null, ...(Object.keys(assessment).length ? { assessment } : {}) };
 }
 
 /** Outstanding work the evidence shows (same rule as the platform's referee). */

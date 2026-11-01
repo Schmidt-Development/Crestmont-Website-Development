@@ -17,12 +17,29 @@ import * as PL from "../services/build-pipeline.ts";
 import { notify } from "../services/notifications.ts";
 import { claimSignatureOnce, securityEvent } from "../services/security.ts";
 import * as DX from "../services/runner-diagnostics.ts";
+import { latestQuality } from "../services/build-quality.ts";
 
 const RUNNER = "/api/builds/runner";
 const usd = (n: number) => `$${n.toFixed(2)}`;
 const dur = (s: number | null) => s === null ? "—" : s < 3600 ? `${Math.floor(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`;
 const STATE_BADGE: Partial<Record<BuildState, string>> = { ready_for_review: "ok", approved: "ok", failed: "bad", canceled: "muted", needs_information: "warn", budget_paused: "warn", paused: "warn", building: "info", verifying: "info", preparing: "info", queued: "info" };
 const stateBadge = (s: BuildState) => badge(STATE_BADGE[s] ?? "info", BUILD_STATE_LABELS[s]);
+
+type QualityCriterionRow = { id: string; applicable: boolean; status: string; evidence: string[]; reason: string | null };
+/** Staff view of the latest quality scorecard (platform-verified). Read-only: there is no manual score override. */
+function qualityCard(q: Awaited<ReturnType<typeof latestQuality>>): SafeHtml {
+  if (!q) return html`<section class="card"><h2 class="card__title">Quality scorecard</h2>${alert("warn", "This build requires the quality engine and has no scorecard yet; it cannot be approved internally.")}</section>`;
+  const problems = JSON.parse(q.verification_problems_json) as string[];
+  const criteria = JSON.parse(q.criteria_json) as QualityCriterionRow[];
+  const tone = (s: string) => s === "pass" ? "ok" : s === "fail" ? "bad" : s === "pending_external" ? "warn" : s === "not_applicable" ? "muted" : "info";
+  return html`<section class="card"><h2 class="card__title">Quality scorecard</h2>
+<p><strong>${String(q.score)}/10</strong> · ${q.passed} of ${q.applicable} applicable criteria pass · iteration ${q.iteration} · attempt ${q.attempt} · ${q.package_id}
+ ${q.verified ? badge("ok", "Verified by the platform") : badge("bad", "Failed platform verification")} ${q.eligible ? badge("ok", "Eligible for internal approval") : q.waiting_external ? badge("warn", "Waiting on customer setup") : badge("bad", "Not eligible")}</p>
+${problems.length ? alert("error", html`<strong>Verification problems:</strong> ${problems.slice(0, 10).join("; ")}`) : ""}
+${table(criteria, [{ header: "Criterion", cell: (c) => c.id.replace(/_/g, " ") }, { header: "Status", cell: (c) => badge(tone(c.status), c.status.replace(/_/g, " ")) },
+  { header: "Evidence / reason", cell: (c) => c.reason ?? (c.evidence.slice(0, 3).join("; ") || "—") }], { empty: emptyState("No criteria", "The scorecard has no criteria.") })}
+<p class="faint">Recorded ${formatDateTime(q.created_at)}. Scores are computed from evidence and re-verified by the platform; they cannot be edited.</p></section>`;
+}
 
 class RunnerUnavailable extends Error {}
 const unavailable = (ctx: AppContext) => jsonResponse(ctx, 503, { error: "Build runner not configured" });
@@ -305,6 +322,7 @@ ${button("Register worker", { size: "sm" })}</form><p class="faint">Rented GPUs 
     const j = d.job, x = d.summary;
     const manage = can(ctx.actor!, "builds.manage"), configure = can(ctx.actor!, "builds.configure");
     const previewAccess = B.previewAccess(j, ctx.env.BUILD_PREVIEW_GATE_SECRET);
+    const q = await latestQuality(ctx.db, j.id);
     const act = (path: string, label: string, extra: SafeHtml = html``, variant: "primary" | "secondary" | "danger" = "secondary") =>
       html`<form method="post" action="/staff/builds/${j.id}/${path}" class="row">${csrf(ctx)}${extra}${button(label, { variant, size: "sm" })}</form>`;
     const body = html`${pageHead(`${x.organizationName} — ${x.kind === "revision" ? `revision ${x.revision}` : "first build"}`, linkButton("All builds", "/staff/builds", "ghost", "sm"), x.projectName)}
@@ -324,6 +342,7 @@ ${dl([["Project", html`<a href="/staff/projects/${x.projectId}">${x.projectName}
   ["Preview retention", x.previewRetention.status === "scheduled" ? `Scheduled for deletion on ${formatDateTime(x.previewRetention.deleteAfter!)}${j.preview_retain_until ? " (extended)" : ""}` : x.previewRetention.note],
   ["Brief", d.brief ? `version ${(d.brief as { version: number }).version}` : "—"], ["Revision instruction", j.instruction],
   ["Customer revision", x.customerRevision ? html`Round ${x.customerRevision.round} (<a href="/staff/projects/${x.projectId}?tab=revisions">project revisions</a>)` : "—"]])}
+${q || j.quality_required ? qualityCard(q) : j.starter_ref === "brochure-v1" || (!j.starter_ref && j.attempts > 0) ? html`<section class="card"><h2 class="card__title">Quality scorecard</h2>${alert("warn", "Legacy website (built before the full-stack foundation): this revision keeps its original starter and is not scored by the quality engine. Moving it to fullstack v1 is a rebuild decision for the Owner.")}</section>` : ""}
 ${d.missingInformation.length ? alert("warn", html`<strong>Information needed:</strong> ${d.missingInformation.join("; ")}`) : ""}
 <section class="card"><h2 class="card__title">Requirements</h2><p class="faint">Statuses come from the runner with evidence; "verified" requires a check that ran. Counts are not a completion promise.</p>
 ${table(d.requirements as { key: string; label: string; status: string; evidence: string | null; blocker: string | null }[], [

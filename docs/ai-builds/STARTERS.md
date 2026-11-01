@@ -1,8 +1,9 @@
 # AI Builds: approved starters
 
-Standard packages (Starter $999, Business, Premium) are built from an **approved, versioned starter** so every
-first build begins from reviewed structure, accessibility and checks rather than from a blank directory. Custom
-(quoted) projects use no starter.
+Every package (Starter, Business, Premium and Custom) is built from an **approved, versioned starter**, so every
+first build begins from reviewed structure, accessibility and checks rather than from a blank directory. New
+builds are dispatched on **fullstack v1** with the quality engine required (`QUALITY-ENGINE.md`). The brochure v1
+starter remains for builds that were started on it.
 
 ## How a starter is selected
 
@@ -90,3 +91,30 @@ No starter. The agent is asked for `.crestmont/requirements-map.md` (scoped line
 `ARCHITECTURE.md` (stack, data model, integrations, real vs stubbed), a scaffold with meaningful implementation of
 the highest-priority requirements, and `REMAINING-WORK.md` (prioritized, sized). The runner runs whichever of the
 project's `check`, `build` and `test` npm scripts exist; with none, the report says no automated checks were run.
+
+## fullstack v1
+
+A real business website: Cloudflare Worker + D1 + static assets, with no runtime dependencies. Configured from
+`business.config.json`, which is filled only from the customer's brief; unknown facts stay `null` and are listed as
+missing information.
+
+| Area | What the foundation provides |
+| --- | --- |
+| Data | `migrations/0001_foundation.sql` (protected): settings, services, resources, customers, bookings + history, quotes, contact messages, payments, webhook events, idempotency keys, admin users, sessions, rate limits, audit log, notification outbox |
+| Booking | Slots from hours, lead time, buffers, capacity, blackout dates and service area; time-zone and DST correct (`src/lib/time.js`); atomic capacity check on insert (no double booking); reschedule and cancellation rules |
+| Payments | The **customer's own** Stripe account; server-side prices; idempotent Checkout sessions; signed webhooks with a timestamp tolerance; the amount is checked before a payment is marked paid; test and live modes are kept separate, and live needs `PAYMENTS_LIVE_AUTHORIZED`. No card data is ever stored |
+| Admin | One-time setup with `ADMIN_SETUP_TOKEN`, roles, `__Host-` session cookie, CSRF (Origin + header), rate limits, audit log |
+| Notifications | Outbox through the customer's own Resend account; queued until the sending domain is verified |
+| Gates | `scripts/gates.mjs --package <id>`: A requirements, B frontend, C backend, D database, E integrations, F security, G performance, J deployment. The runner adds H (browser) and I (independent review) |
+
+Package capabilities (from `scripts/packages.json`, protected):
+
+| Package | Capabilities |
+| --- | --- |
+| Starter | contact, admin, notifications |
+| Business | + quotes, booking, payments |
+| Premium / Custom | + customer accounts |
+
+A requested feature outside the package is recorded as a scope change for a change order; it is never silently
+built or dropped. Public package descriptions are unchanged by this starter; any change to them needs the
+Owner's approval.

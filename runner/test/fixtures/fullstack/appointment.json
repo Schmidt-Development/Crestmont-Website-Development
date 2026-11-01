@@ -1,0 +1,13 @@
+{
+  "schema": "crestmont.business-config/1", "configured": true, "version": 1,
+  "business": { "name": "Maple Street Hair Studio", "description": "Fictional hair salon test business for Crestmont acceptance: cuts, colour and styling by appointment.", "industry": "Hair salon", "email": "book@maplestreet.example", "phone": "+1 555 0177", "timeZone": "America/Chicago", "address": { "city": "Madison", "state": "WI", "postalCode": "53703", "country": "US", "street": null } },
+  "features": { "contact": true, "booking": true, "notifications": true, "admin": true },
+  "services": [
+    { "id": "haircut", "name": "Haircut", "description": "Wash, cut and style.", "priceCents": 4500, "durationMinutes": 45, "bookable": true, "payable": false },
+    { "id": "colour", "name": "Colour", "description": "Full colour with a consultation.", "priceCents": 12000, "durationMinutes": 120, "bookable": true, "payable": false }
+  ],
+  "hours": { "tue": [{ "open": "09:00", "close": "12:00" }, { "open": "13:00", "close": "19:00" }], "wed": [{ "open": "09:00", "close": "19:00" }], "thu": [{ "open": "09:00", "close": "19:00" }], "fri": [{ "open": "09:00", "close": "19:00" }], "sat": [{ "open": "08:00", "close": "15:00" }] },
+  "booking": { "slotIntervalMinutes": 15, "leadTimeMinutes": 120, "bufferMinutes": 10, "maxDaysAhead": 45, "cancellationNoticeHours": 12, "requirePhone": true, "blackoutDates": [], "resources": [{ "id": "stylist-ana", "name": "Ana", "capacity": 1 }, { "id": "stylist-ben", "name": "Ben", "capacity": 1, "services": ["haircut"] }] },
+  "notifications": { "businessEmail": "book@maplestreet.example" },
+  "assumptions": ["10-minute buffer between appointments for cleaning"], "missingInformation": []
+}

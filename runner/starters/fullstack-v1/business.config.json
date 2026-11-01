@@ -1,0 +1,21 @@
+{
+  "schema": "crestmont.business-config/1",
+  "configured": false,
+  "version": 1,
+  "business": {
+    "name": "STARTER-PLACEHOLDER business name",
+    "description": "STARTER-PLACEHOLDER one-sentence description",
+    "industry": "STARTER-PLACEHOLDER industry",
+    "email": "STARTER-PLACEHOLDER public email",
+    "phone": "STARTER-PLACEHOLDER public phone",
+    "timeZone": "America/New_York",
+    "address": null
+  },
+  "features": { "contact": true, "admin": true, "notifications": true },
+  "services": [],
+  "hours": null,
+  "serviceArea": null,
+  "notifications": { "businessEmail": null },
+  "assumptions": [],
+  "missingInformation": []
+}

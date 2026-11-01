@@ -494,7 +494,7 @@ export function inspectFromRunArgs(args: string[]): Record<string, unknown> {
   };
 }
 
-export function fakeDocker(opts: { passthrough?: boolean; override?: FakeDocker["override"] } = {}): FakeDocker {
+export function fakeDocker(opts: { passthrough?: boolean; override?: FakeDocker["override"]; /** browser check writes desktop+mobile screenshots of every public page, like the real one */ screenshots?: boolean } = {}): FakeDocker {
   const repos = new Map<string, string>();
   const runs = new Map<string, string[]>();
   const ok = (stdout = "") => ({ code: 0, stdout, stderr: "", timedOut: false, notFound: false });
@@ -519,7 +519,17 @@ export function fakeDocker(opts: { passthrough?: boolean; override?: FakeDocker[
       const name = args[3];
       const t = args.indexOf("timeout");
       const argv = args.slice(t + 4);
-      if (argv[0] === "node" && String(argv[1]).endsWith("browser-check.mjs")) return ok("browser check: 5 pages x 2 viewports OK (fake)");
+      if (argv[0] === "node" && String(argv[1]).endsWith("browser-check.mjs")) {
+        const repo = repos.get(name);
+        if (opts.screenshots && repo) {
+          const pub = path.join(repo, "public");
+          const shots = path.join(repo, ".crestmont", "screenshots");
+          mkdirSync(shots, { recursive: true });
+          const png = Buffer.from("89504e470d0a1a0a", "hex"); // FAKE: a PNG signature, not a rendered page
+          for (const f of readdirSync(pub).filter((x) => x.endsWith(".html") && x !== "404.html")) for (const vp of ["desktop", "mobile"]) writeFileSync(path.join(shots, `${f.replace(/\.html$/, "")}-${vp}.png`), png);
+        }
+        return ok("browser check: 5 pages x 2 viewports OK (fake)");
+      }
       if (opts.passthrough === false || !repos.has(name)) return ok("");
       // Emulates the job container: the container's own shell runs the agent's command. (Deliberately not the runner's
       // exec helper, which refuses shells on the runner host.)

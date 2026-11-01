@@ -14,6 +14,8 @@ import {
   type BriefGap, type BuildBrief, type BuildState, type RequirementStatus, REQUIREMENT_STATUSES,
 } from "../domain/builds.ts";
 import { audit } from "./security.ts";
+import { assertQualityForApproval, recordQuality } from "./build-quality.ts";
+
 import { redact } from "./monitoring.ts";
 import { getOnboarding, allFields, isVisible, type Answers } from "./onboarding.ts";
 import { sweepAiLeases } from "./ai-runner.ts";
@@ -22,6 +24,25 @@ import { previewSignInUrl, safePreviewPath } from "../lib/preview-token.ts";
 import { sweepDeployments } from "./site-delivery.ts";
 import { setStage, syncStageFromJob, seedIntegrationsFromBrief } from "./build-pipeline.ts";
 import { activeBuilds, authenticateWorker, dispatch, effectivePriority, recordWorkerStatus, releaseAssignment, sweepWorkers, workerModeOn } from "./build-workers.ts";
+
+/** The approved foundation every new build starts from (runner/starters/fullstack-v1). */
+export const STARTER = Object.freeze({ name: "fullstack", version: "1" });
+
+/**
+ * A project keeps the starter it was first built on: revisions of a website built before the full-stack foundation
+ * (no starter_ref recorded) continue on brochure v1, because the full-stack gates and protected files would break
+ * that repository. Such legacy revisions cannot be scored by the quality engine; the staff page says so, and moving
+ * the website to fullstack v1 is a rebuild decision for the Owner. Every new project starts on fullstack v1.
+ */
+async function starterFor(db: Db, job: { id: string; project_id: string; strategy: string }): Promise<{ starter: { name: string; version: string } | null; ref: string | null; quality: boolean }> {
+  const prior = await db.prepare(`SELECT starter_ref FROM build_jobs WHERE project_id = ? AND id <> ? AND source_commit IS NOT NULL ORDER BY created_at LIMIT 1`).bind(job.project_id, job.id).first<{ starter_ref: string | null }>();
+  if (prior && !prior.starter_ref) return job.strategy === "standard" ? { starter: { name: "brochure", version: "1" }, ref: "brochure-v1", quality: false } : { starter: null, ref: null, quality: false };
+  if (prior?.starter_ref && prior.starter_ref !== `${STARTER.name}-v${STARTER.version}`) {
+    const m = /^(.+)-v(\d+)$/.exec(prior.starter_ref);
+    if (m) return { starter: { name: m[1], version: m[2] }, ref: prior.starter_ref, quality: m[1] === "fullstack" };
+  }
+  return { starter: { ...STARTER }, ref: `${STARTER.name}-v${STARTER.version}`, quality: true };
+}
 
 const MICRO = 1_000_000;
 export const usdToMicro = (usd: unknown): number => {
@@ -71,6 +92,8 @@ export interface BuildJob {
   worker_id: string | null; activity_state: string | null; current_model: string | null; current_task: string | null; activity_at: string | null;
   ai_acceptance: "passed" | "passed_pending_integrations" | "failed" | null;
   internal_approved_at: string | null; internal_approved_by: string | null; internal_approval_note: string | null;
+  /** Quality engine (migration 0063): this job may enter internal approval only with a verified 10/10 scorecard. */
+  quality_required?: number; starter_ref?: string | null;
 }
 
 export async function getJob(db: Db, id: string): Promise<BuildJob | null> {
@@ -421,13 +444,15 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
     const budget = await projectBudgetMicro(db, c.project_id, s);
     const spent = await projectSpendMicro(db, c.project_id);
     if (spent >= budget) { await transition(db, c, "budget_paused", `Project budget reached ($${microToUsd(spent).toFixed(2)} of $${microToUsd(budget).toFixed(2)}); raise the limit to continue`, { kind: "system" }); continue; }
+    const pick = await starterFor(db, c);
     const token = randomToken(32);
     const leaseUntil = new Date(now.getTime() + s.lease_seconds * 1000).toISOString();
     const r = await db.prepare(`UPDATE build_jobs SET state = 'preparing', state_reason = 'claimed by runner', lease_runner = ?, lease_token_hash = ?, lease_expires_at = ?, heartbeat_at = ?,
-        run_started_at = ?, started_at = COALESCE(started_at, ?), attempts = attempts + 1, stop_reason = NULL, worker_id = COALESCE(?, worker_id), updated_at = ?
+        run_started_at = ?, started_at = COALESCE(started_at, ?), attempts = attempts + 1, stop_reason = NULL, worker_id = COALESCE(?, worker_id), updated_at = ?,
+        quality_required = ?, starter_ref = ?
       WHERE id = ? AND state = 'queued' AND (SELECT COUNT(*) FROM build_jobs WHERE state IN ('preparing','building','verifying')) < ?
         AND (? IS NULL OR (SELECT COUNT(*) FROM build_jobs WHERE worker_id = ? AND state IN ('preparing','building','verifying')) < (SELECT max_active_projects FROM build_workers WHERE id = ?))`)
-      .bind(runnerId, await sha256Hex(token), leaseUntil, at, at, at, worker?.id ?? null, at, c.id, s.max_concurrent, worker?.id ?? null, worker?.id ?? null, worker?.id ?? null).run();
+      .bind(runnerId, await sha256Hex(token), leaseUntil, at, at, at, worker?.id ?? null, at, pick.quality ? 1 : 0, pick.ref, c.id, s.max_concurrent, worker?.id ?? null, worker?.id ?? null, worker?.id ?? null).run();
     if (!r.meta?.changes) continue; // another runner won this job (or capacity filled): try the next
     const job = (await getJob(db, c.id))!;
     await db.prepare(`INSERT OR IGNORE INTO build_runs (id, job_id, attempt, runner_id, started_at, session_id, zero_cost) VALUES (?,?,?,?,?,?,?)`)
@@ -443,7 +468,10 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
       job: {
         id: job.id, projectId: job.project_id, attempt: job.attempts, kind: job.kind, revision: job.revision,
         leaseToken: token, leaseExpiresAt: leaseUntil, heartbeatSeconds: Math.max(10, Math.floor(s.lease_seconds / 4)),
-        strategy: job.strategy, packageId: job.package_id, starter: job.strategy === "standard" ? { name: "brochure", version: "1" } : null,
+        // Full-Stack Builder V2: every package, and custom builds, start from the full-stack foundation and are scored by
+        // the permanent quality engine (protocol v1.5). A runner that ignores "quality" still cannot get past
+        // completeJob / internalApprove without a verified 10/10 scorecard.
+        strategy: job.strategy, packageId: job.package_id ?? (job.strategy === "custom" ? "custom" : null), starter: pick.starter, ...(pick.quality ? { quality: "required" as const } : {}),
         brief: brief ? { id: brief.id, version: brief.version, sha256: brief.sha256, content: JSON.parse(brief.content_json) } : null,
         instruction: job.instruction, requirements: reqs,
         // V2: the Architect's master specification when one exists (the orchestrator then skips the architect step).
@@ -647,6 +675,23 @@ export async function completeJob(db: Db, b: Record<string, unknown>, notify?: (
   let to: BuildState;
   let reason: string;
   let extra: Record<string, unknown> = {};
+  // Quality engine: every reported scorecard is verified and stored; a quality-required build cannot be delivered
+  // to internal approval without a verified, eligible (10/10) one. There is no exception per package.
+  const quality = b.quality !== undefined && b.quality !== null ? await recordQuality(db, job, outcome, b.quality) : null;
+  if (outcome === "ready_for_review" && job.quality_required && (!quality || !quality.eligible)) {
+    to = "failed";
+    reason = !quality ? "Quality engine: the build reported no quality scorecard; it cannot enter internal approval"
+      : !quality.ok ? `Quality engine: the scorecard failed the platform's verification (${quality.problems.slice(0, 3).join("; ")})`
+      : `Quality engine: ${quality.score}/10 within the approved scope; only a verified 10/10 can enter internal approval`;
+    extra = { activity_state: null };
+    await db.prepare(`UPDATE build_runs SET ended_at = ?, outcome = 'failed', error = ? WHERE job_id = ? AND attempt = ?`).bind(at, reason, job.id, job.attempts).run();
+    const ok = await transition(db, job, to, reason, { kind: "runner" }, { ...common, preview_url: job.preview_url, preview_name: job.preview_name, preview_gated: job.preview_gated, ...extra });
+    if (!ok) throw new LeaseLostError("lease_lost");
+    await setStage(db, job.project_id, "FAILED_NEEDS_INTERVENTION", reason, "system");
+    await audit(db, { actorKind: "system", action: "builds.quality_refused", subjectType: "build_job", subjectId: job.id, organizationId: job.organization_id, details: { score: quality?.score ?? null, verified: quality?.ok ?? false } });
+    if (notify) await notify((await getJob(db, job.id))!, to);
+    return { state: to };
+  }
   if (outcome === "ready_for_review") { to = "ready_for_review"; reason = "Build finished: awaiting private internal approval (not visible to the customer)"; extra = { activity_state: null }; }
   else if (outcome === "needs_information") {
     to = "needs_information"; reason = "Blocked on information only the customer or owner can provide";
@@ -948,6 +993,8 @@ export async function forwardCustomerRevision(db: Db, revisionId: string, actor:
   if (r.decision === "rejected") throw new HttpError(409, "This revision request was rejected; it cannot start an AI build.");
   if (!["submitted", "in_progress"].includes(r.status)) throw new HttpError(409, `This revision request is ${r.status.replace(/_/g, " ")}; only open requests can be sent to the AI builder.`);
   if (!r.entitled) throw new HttpError(409, "This round is beyond the included revisions; its change order must be approved before any work starts.");
+  const triage = await db.prepare(`SELECT customer_kind, category_at FROM revisions WHERE id = ?`).bind(revisionId).first<{ customer_kind: string; category_at: string | null }>();
+  if (triage?.customer_kind === "problem" && !triage.category_at) throw new HttpError(409, "Classify this problem report first (project → Revisions); no AI build starts before triage.");
   if (r.liveJob) throw new HttpError(409, "This customer revision already has an AI build in progress.");
   const instruction = (opts.instruction ?? "").trim() || r.text.trim();
   if (instruction.length > 5000) throw new HttpError(422, "The customer's request is longer than 5,000 characters; edit it into an instruction before sending it to the AI builder.");
@@ -989,6 +1036,9 @@ export async function syncCustomerRevisionSafe(db: Db, revisionId: string): Prom
     const s = await getBuildSettings(db);
     if (s.customer_revision_mode !== "auto" || s.globally_paused || !s.automation_enabled) return null;
     const r = await getCustomerRevision(db, revisionId);
+    const triage = await db.prepare(`SELECT customer_kind, category, category_at FROM revisions WHERE id = ?`).bind(revisionId).first<{ customer_kind: string; category: string; category_at: string | null }>();
+    // A customer's problem report waits for staff triage; a scope change waits for its change order (entitled below).
+    if (!triage || (triage.customer_kind === "problem" && !triage.category_at)) return null;
     if (!r || !r.entitled || r.liveJob || r.decision === "rejected" || !["submitted", "in_progress"].includes(r.status) || r.text.trim().length > 5000) return null;
     if ((await projectControls(db, r.projectId))?.paused) return null;
     return await forwardCustomerRevision(db, revisionId, { kind: "system" });
@@ -1192,6 +1242,7 @@ export async function internalApprove(c: OwnerCtx, id: string, note: string) {
   // Builds approved before the internal review existed can be recorded too, so their previews can still be shared.
   if (j.state !== "ready_for_review" && j.state !== "approved") throw new HttpError(409, "Only a finished build that is awaiting internal approval can be approved internally.");
   if (j.internal_approved_at) throw new HttpError(409, "This build is already approved internally.");
+  await assertQualityForApproval(c.db, { id: j.id, quality_required: j.quality_required ?? 0 });
   if (!j.preview_url || j.preview_deleted_at || j.preview_delete_requested_at) throw new HttpError(409, "Review the preview first: this build has no preview that still exists.");
   const text = note.trim().slice(0, 1000);
   if (j.ai_acceptance !== "passed" && j.ai_acceptance !== "passed_pending_integrations" && text.length < 10) {

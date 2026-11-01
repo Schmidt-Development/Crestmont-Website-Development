@@ -619,20 +619,30 @@ export async function logTime(db: Db, actor: Actor, userId: string, taskId: stri
 
 // ───────────── Revisions & change orders ─────────────
 
-export interface RevisionRow { id: string; project_id: string; round: number; request_text: string; status: string; billable_change_order_id: string | null; submitted_by: string; created_at: string; included: number; delivered_at: string | null; delivery_notes: string | null;
+export interface RevisionRow { id: string; project_id: string; round: number; category?: string; category_reason?: string | null; category_at?: string | null; customer_kind?: string; request_text: string; status: string; billable_change_order_id: string | null; submitted_by: string; created_at: string; included: number; delivered_at: string | null; delivery_notes: string | null;
   /** Owner decision on the request (Owner -> AI builds): null = awaiting review. */
   ai_decision?: "approved" | "rejected" | null; ai_decided_at?: string | null; ai_decision_note?: string | null }
 
+/** SQL predicate (on table `revisions`) for a request that uses one of the customer's included rounds. */
+const ROUND_CONSUMING = `included = 1 AND COALESCE(ai_decision, '') <> 'rejected' AND category = 'customer_revision' AND (customer_kind = 'change' OR category_at IS NOT NULL)`;
+export const REVISION_CATEGORIES = ["customer_revision", "builder_defect", "scope_change"] as const;
+export type RevisionCategory = (typeof REVISION_CATEGORIES)[number];
+
 export async function revisionUsage(db: Db, projectId: string): Promise<{ allowance: number; used: number; total: number }> {
-  // A request the Owner rejected (Owner -> AI builds) does not use one of the included rounds.
-  const r = await db.prepare(`SELECT p.revision_allowance AS allowance, (SELECT COUNT(*) FROM revisions WHERE project_id = p.id AND included = 1 AND COALESCE(ai_decision, '') <> 'rejected') AS used, (SELECT COUNT(*) FROM revisions WHERE project_id = p.id) AS total FROM projects p WHERE p.id = ?`).bind(projectId).first<{ allowance: number; used: number; total: number }>();
+  // A request the Owner rejected (Owner -> AI builds) does not use one of the included rounds. Nor does a request
+  // Crestmont classified as its own defect (builder_defect) or as a scope change (change order), nor a customer's
+  // problem report that staff have not triaged yet (Quality engine addendum §6).
+  const r = await db.prepare(`SELECT p.revision_allowance AS allowance, (SELECT COUNT(*) FROM revisions WHERE project_id = p.id AND ${ROUND_CONSUMING}) AS used, (SELECT COUNT(*) FROM revisions WHERE project_id = p.id) AS total FROM projects p WHERE p.id = ?`).bind(projectId).first<{ allowance: number; used: number; total: number }>();
   return r ?? { allowance: 0, used: 0, total: 0 };
 }
 
 const REVISION_OPEN_STATUSES: ProjectStatus[] = ["design", "development", "internal_qa", "customer_review", "revisions", "final_approval"];
 
 /** Customer submits a revision request. Within the allowance it is an included round; beyond it, the round is recorded as billable and a change order is required. */
-export async function requestRevision(ctx: MailCtx, input: { organizationId: string; projectId: string; userId: string; text: string }): Promise<{ revisionId: string; decision: ReturnType<typeof decideRevision>; duplicate?: boolean }> {
+export async function requestRevision(ctx: MailCtx, input: { organizationId: string; projectId: string; userId: string; text: string; kind?: "change" | "problem" }): Promise<{ revisionId: string; decision: ReturnType<typeof decideRevision>; duplicate?: boolean; problemReport?: boolean }> {
+  // "problem": the customer reports that something does not work as agreed. It uses no round while staff triage it;
+  // if it is Crestmont's defect it never does (builder_defect), otherwise staff reclassify it with a reason.
+  const problem = input.kind === "problem";
   const text = input.text.trim();
   if (text.length < 10) throw new HttpError(422, "Describe the changes you need (at least 10 characters).");
   if (text.length > 10_000) throw new HttpError(422, "Revision requests are limited to 10,000 characters.");
@@ -646,19 +656,19 @@ export async function requestRevision(ctx: MailCtx, input: { organizationId: str
     const usageNow = await revisionUsage(ctx.db, p.id);
     return { revisionId: dup.id, duplicate: true, decision: dup.included ? { kind: "included", round: dup.round, remainingAfter: Math.max(0, usageNow.allowance - usageNow.used) } : { kind: "change_order_required", round: dup.round } };
   }
-  const pending = await ctx.db.prepare(`SELECT 1 FROM revisions WHERE project_id = ? AND included = 0 AND billable_change_order_id IS NULL AND status = 'submitted' AND COALESCE(ai_decision, '') <> 'rejected'`).bind(p.id).first();
+  const pending = problem ? null : await ctx.db.prepare(`SELECT 1 FROM revisions WHERE project_id = ? AND included = 0 AND billable_change_order_id IS NULL AND status = 'submitted' AND COALESCE(ai_decision, '') <> 'rejected'`).bind(p.id).first();
   if (pending) throw new HttpError(409, "A request beyond your included revisions is waiting for a change-order proposal. We will send pricing shortly.");
   const usage = await revisionUsage(ctx.db, p.id);
-  const decision = decideRevision(p.revision_allowance, usage.used);
+  const decision: ReturnType<typeof decideRevision> = problem ? { kind: "included", round: usage.total + 1, remainingAfter: Math.max(0, p.revision_allowance - usage.used) } : decideRevision(p.revision_allowance, usage.used);
   const id = newId("rev");
   const at = nowIso();
   await ctx.db.batch([
-    ctx.db.prepare(`INSERT INTO revisions (id, project_id, round, request_text, status, submitted_by, created_at, included, request_hash) VALUES (?,?,?,?, 'submitted', ?,?,?,?)`)
-      .bind(id, p.id, usage.total + 1, text, input.userId, at, decision.kind === "included" ? 1 : 0, requestHash),
+    ctx.db.prepare(`INSERT INTO revisions (id, project_id, round, request_text, status, submitted_by, created_at, included, request_hash, customer_kind) VALUES (?,?,?,?, 'submitted', ?,?,?,?,?)`)
+      .bind(id, p.id, usage.total + 1, text, input.userId, at, decision.kind === "included" ? 1 : 0, requestHash, problem ? "problem" : "change"),
     ctx.db.prepare(`UPDATE projects SET last_customer_activity_at = ?, updated_at = ? WHERE id = ?`).bind(at, at, p.id),
   ]);
-  await audit(ctx.db, { actorUserId: input.userId, action: "revision.requested", subjectType: "project", subjectId: p.id, organizationId: p.organization_id, details: { revisionId: id, round: usage.total + 1, decision: decision.kind } });
-  if (decision.kind === "included" && p.status === "customer_review") {
+  await audit(ctx.db, { actorUserId: input.userId, action: "revision.requested", subjectType: "project", subjectId: p.id, organizationId: p.organization_id, details: { revisionId: id, round: usage.total + 1, decision: decision.kind, kind: problem ? "problem" : "change" } });
+  if (!problem && decision.kind === "included" && p.status === "customer_review") {
     await changeProjectStatus(ctx, p.id, "revisions", { actorUserId: input.userId, actorKind: "user", note: `Revision round ${decision.round} requested` }).catch(() => undefined);
   }
   await notifyProjectTeam(ctx, p.id, { kind: "revision",
@@ -667,8 +677,46 @@ export async function requestRevision(ctx: MailCtx, input: { organizationId: str
     path: `/staff/projects/${p.id}?tab=revisions`, key: `rev:${id}` });
   // AI builder policy (Owner -> AI builds): with "auto", an entitled request is queued as an AI revision now;
   // otherwise it waits in the owner's queue. Never fails the customer's request.
+  // An untriaged problem report is not queued automatically (syncCustomerRevisionSafe checks the triage).
   await syncCustomerRevisionSafe(ctx.db, id);
-  return { revisionId: id, decision };
+  return { revisionId: id, decision, ...(problem ? { problemReport: true } : {}) };
+}
+
+/**
+ * Staff classify a revision request (Quality engine addendum §6), with a reason, audited:
+ *  - builder_defect: Crestmont's own defect against the approved scope; repaired without using a customer round;
+ *  - customer_revision: a change the customer asked for; uses an included round (beyond the allowance it needs a change order);
+ *  - scope_change: outside the approved scope; never included, it needs an approved change order before work starts.
+ * The original approved scope stays in project_scopes; classification never edits it.
+ */
+export async function classifyRevision(db: Db, actor: Actor, revisionId: string, category: RevisionCategory, reason: string): Promise<{ projectId: string; included: boolean }> {
+  requireCoordinator(actor);
+  if (!(REVISION_CATEGORIES as readonly string[]).includes(category)) throw new HttpError(422, "Unknown revision category.");
+  const why = reason.trim();
+  if (why.length < 10 || why.length > 1000) throw new HttpError(422, "Explain the classification (10–1000 characters); the customer can see it.");
+  const r = await db.prepare(`SELECT r.*, p.organization_id, p.revision_allowance FROM revisions r JOIN projects p ON p.id = r.project_id WHERE r.id = ?`).bind(revisionId).first<RevisionRow & { organization_id: string; revision_allowance: number; category: string; customer_kind: string; category_at: string | null }>();
+  if (!r) throw new HttpError(404, "Revision not found");
+  if (r.ai_decision === "rejected") throw new HttpError(409, "This request was rejected; it is closed.");
+  if (["delivered", "approved"].includes(r.status)) throw new HttpError(409, "This request was already delivered; its classification is final.");
+  let included: boolean;
+  if (category === "builder_defect") included = true;
+  else if (category === "scope_change") included = false;
+  else {
+    const others = await db.prepare(`SELECT COUNT(*) AS n FROM revisions WHERE project_id = ? AND id <> ? AND ${ROUND_CONSUMING}`).bind(r.project_id, r.id).first<{ n: number }>();
+    included = (others?.n ?? 0) < r.revision_allowance;
+  }
+  if (!included && r.status !== "submitted") {
+    // Work has started: it may become billable only under a change order the customer already approved.
+    const co = r.billable_change_order_id ? await db.prepare(`SELECT status FROM change_orders WHERE id = ?`).bind(r.billable_change_order_id).first<{ status: string }>() : null;
+    if (!co || !["approved", "paid", "completed"].includes(co.status)) throw new HttpError(409, "Work on this request has started; it cannot become billable without a change order the customer approved.");
+  }
+  const live = await db.prepare(`SELECT 1 FROM build_jobs WHERE customer_revision_id = ? AND state IN ('queued','preparing','building','verifying')`).bind(r.id).first();
+  if (!included && live) throw new HttpError(409, "An AI build is working on this request; cancel it before classifying it as billable.");
+  const at = nowIso();
+  await db.prepare(`UPDATE revisions SET category = ?, category_reason = ?, category_by = ?, category_at = ?, included = ? WHERE id = ?`).bind(category, why, actor.userId, at, included ? 1 : 0, r.id).run();
+  await audit(db, { actorUserId: actor.userId, action: "revision.classified", subjectType: "project", subjectId: r.project_id, organizationId: r.organization_id,
+    details: { revisionId: r.id, from: r.category_at ? r.category : `untriaged ${r.customer_kind}`, to: category, included, reason: why.slice(0, 300) } });
+  return { projectId: r.project_id, included };
 }
 
 export async function updateRevisionStatus(ctx: MailCtx, actor: Actor, userId: string, revisionId: string, status: "in_progress" | "delivered", notes: string): Promise<string> {
@@ -676,6 +724,7 @@ export async function updateRevisionStatus(ctx: MailCtx, actor: Actor, userId: s
   if (!r) throw new HttpError(404, "Revision not found");
   if (!can(actor, "project.coordinate") && !(can(actor, "task.update_assigned") && (await staffCanSeeProject(ctx.db, actor, userId, r.project_id)))) throw new HttpError(403, "You cannot update revisions on this project.");
   if ((r as RevisionRow & { ai_decision?: string | null }).ai_decision === "rejected") throw new HttpError(409, "The owner rejected this revision request; it is closed.");
+  if (r.customer_kind === "problem" && !r.category_at) throw new HttpError(409, "Classify this problem report first (Crestmont defect, customer revision or scope change); no work starts before triage.");
   if (!r.included) {
     const co = r.billable_change_order_id ? await ctx.db.prepare(`SELECT status FROM change_orders WHERE id = ?`).bind(r.billable_change_order_id).first<{ status: string }>() : null;
     if (!co || !["approved", "paid", "completed"].includes(co.status)) throw new HttpError(409, "This round is beyond the included allowance; its change order must be approved first.");

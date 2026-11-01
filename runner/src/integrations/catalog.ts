@@ -70,6 +70,21 @@ export const OPERATIONS: Operation[] = [
       return { ok: true, evidence: `${data.length} test-mode webhook endpoint(s)${urls.length ? `: ${urls.slice(0, 5).join(", ")}` : ""}` };
     },
   },
+  {
+    id: "resend.verify_sending_domain", integration: "resend", description: "Check that the customer's own Resend account has a VERIFIED sending domain (GET /domains; read-only, sends nothing).",
+    secrets: ["RESEND_API_KEY"], hosts: ["api.resend.com"],
+    async run(ctx) {
+      const key = ctx.secrets.RESEND_API_KEY ?? "";
+      if (!/^re_[A-Za-z0-9_]{10,}$/.test(key)) throw new RefusedOperationError("only a Resend API key (re_…) is accepted");
+      const res = await ctx.fetchImpl("https://api.resend.com/domains", { headers: { authorization: `Bearer ${key}` }, signal: ctx.signal });
+      let body: Record<string, unknown> = {};
+      try { body = await res.json() as Record<string, unknown>; } catch { /* non-JSON */ }
+      if (res.status !== 200) return { ok: false, evidence: `Resend API answered ${res.status}` };
+      const data = Array.isArray(body.data) ? body.data as Record<string, unknown>[] : [];
+      const verified = data.filter((d) => d.status === "verified").map((d) => String(d.name ?? "?"));
+      return verified.length ? { ok: true, evidence: `${verified.length} verified sending domain(s): ${verified.slice(0, 3).join(", ")}` } : { ok: false, evidence: `no verified sending domain (${data.length} domain(s) found)` };
+    },
+  },
 ];
 
 export function findOperation(id: string): Operation | null {
