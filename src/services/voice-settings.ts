@@ -173,11 +173,29 @@ export class VoiceConfigError extends Error {
   constructor(problems: string[]) { super(problems.join(" ")); this.problems = problems; }
 }
 
+/**
+ * Retell agent ids that belong to a SALES agent: the sales optimizer's targets (so_targets) and, once the outbound
+ * sales agent ships (PR #69, sales_outbound_settings), that agent. The receptionist's prompt and guardrails (which name
+ * receptionist-only functions such as route_support) must never be written to one of these, and a receptionist agent
+ * id field may never hold one. A table that does not exist in this environment simply contributes nothing.
+ */
+export async function salesAgentIds(db: Db): Promise<Set<string>> {
+  const ids = new Set<string>();
+  for (const sql of [`SELECT agent_id FROM so_targets`, `SELECT agent_id FROM sales_outbound_settings WHERE agent_id IS NOT NULL`]) {
+    try { for (const r of (await db.prepare(sql).all<{ agent_id: string | null }>()).results) if (r.agent_id) ids.add(r.agent_id); }
+    catch { /* table not present in this environment */ }
+  }
+  return ids;
+}
+
 export async function saveVoiceConfig(db: Db, userId: string, next: VoiceConfig): Promise<{ changed: string[] }> {
   const c = normalise(next);
   c.holidays = [...new Set(c.holidays)].sort();
   c.inbound.numbers = [...new Set(c.inbound.numbers)];
   const problems = voiceConfigProblems(c);
+  const sales = await salesAgentIds(db);
+  if (c.inbound.agent_id && sales.has(c.inbound.agent_id)) problems.push("The inbound agent id is registered as a sales agent. The receptionist and the sales agent must be separate Retell agents.");
+  if (c.outbound.agent_id && sales.has(c.outbound.agent_id)) problems.push("The follow-up (outbound) agent id is registered as a sales agent. Receptionist follow-up calls and sales calls must use separate Retell agents.");
   if (problems.length) throw new VoiceConfigError(problems);
   const prev = await loadVoiceConfig(db);
   const changed = (Object.keys(c) as (keyof VoiceConfig)[]).filter((k) => JSON.stringify(prev[k]) !== JSON.stringify(c[k]));
