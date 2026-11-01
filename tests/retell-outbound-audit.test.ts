@@ -208,3 +208,19 @@ test("[VOICE-005] voicemail callback number may be spelled out; a missing one fa
   const none = await auditOutboundRetell({ db: t.db, env: t.env, fetch: fakeRetell(goodConfig({ agent: { voicemail_option: { action: { type: "static_text", text: "Hi, this is Cimo, an AI assistant with Crestmont Website Development. We'll try again soon." } } } })).f, baseUrl: BASE });
   assert.match(failing(none)["voicemail message content"], /gives a callback number: false/);
 });
+
+test("[VOICE-005] V17 only in the draft: the published agent version's prompt is compared and a difference fails", async () => {
+  const t = await setup();
+  const cfg = goodConfig({ versions: [{ agent_id: AGENT, version: 1, is_published: true }, { agent_id: AGENT, version: 2, is_published: false }] });
+  const old = { ...cfg.llm, version: 1, is_published: true, general_prompt: "CRESTMONT OUTBOUND — V16 (older)", general_tools: (cfg.llm.general_tools as Record<string, unknown>[]).filter((x) => x.name !== "record_consent") };
+  const base = fakeRetell(cfg).f;
+  const f = (async (url: string, init?: RequestInit) => {
+    const u = new URL(url);
+    if (u.pathname === "/get-retell-llm/llm_sales01" && u.searchParams.get("version") === "1") return new Response(JSON.stringify(old));
+    return base(url, init);
+  }) as unknown as typeof fetch;
+  const a = await auditOutboundRetell({ db: t.db, env: t.env, fetch: f, baseUrl: BASE });
+  const bad = failing(a);
+  assert.match(bad["published version carries the audited prompt"], /published agent v1 uses a DIFFERENT prompt .*V17 marker absent/);
+  assert.match(bad["published version functions"], /lacks: record_consent/);
+});

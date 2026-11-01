@@ -169,11 +169,13 @@ export async function auditOutboundRetell(d: { db: Db; env: Env; fetch: typeof f
   let versions = await call(key, d.fetch, "GET", `/list-agent-versions/${encodeURIComponent(agentId)}`);
   if (!versions.ok && (versions.status === 404 || versions.status === 400)) versions = await call(key, d.fetch, "GET", `/get-agent-versions/${encodeURIComponent(agentId)}`);
   let publishedLlmVersion: number | null = null;
+  let publishedAgentVersion: number | null = null;
   if (!versions.ok) add("published agent version", "UNVERIFIED", `list-agent-versions: ${versions.error}`);
   else {
     const vs = items(versions.json).map(obj);
     const pub = vs.filter((v) => v.is_published === true).sort((a, b) => (n(b.version) ?? 0) - (n(a.version) ?? 0))[0];
     publishedLlmVersion = pub ? n(obj(pub.response_engine).version) : null;
+    publishedAgentVersion = pub ? n(pub.version) : null;
     pf("published agent version", !!pub, pub ? `version ${n(pub.version)}${s(pub.version_title) ? ` "${s(pub.version_title)}"` : ""} is published (draft is version ${n(agent.version) ?? "?"})${publishedLlmVersion !== null ? `; it uses LLM version ${publishedLlmVersion}` : ""}` : "no published version: calls would use an unpublished draft", pub ? `v${n(pub.version)}` : "none", "a published version");
   }
 
@@ -248,6 +250,23 @@ export async function auditOutboundRetell(d: { db: Db; env: Env; fetch: typeof f
   // A draft is never published by definition: only the published agent's LLM version can be judged.
   if (publishedLlmVersion !== null) add("LLM published flag", llm.is_published === true ? "PASS" : "FAIL", `LLM version ${n(llm.version) ?? "?"} (the published agent's version); is_published ${String(llm.is_published)}`);
   else add("LLM published flag", "UNVERIFIED", `the published agent version could not be read, so the draft LLM (version ${n(llm.version) ?? "?"}, is_published ${String(llm.is_published)}) was audited`);
+
+  // Real calls use the PUBLISHED agent version. When the version list does not name its LLM version, Retell's agent and
+  // LLM versions are published together, so the LLM version with the published agent's number is read for comparison.
+  if (publishedLlmVersion === null && publishedAgentVersion !== null && publishedAgentVersion !== n(llm.version)) {
+    const pubLlm = await call(key, d.fetch, "GET", `/get-retell-llm/${encodeURIComponent(llmId)}?version=${publishedAgentVersion}`);
+    const pl = obj(pubLlm.json);
+    if (!pubLlm.ok || n(pl.version) !== publishedAgentVersion) add("published version carries the audited prompt", "UNVERIFIED", `could not read LLM version ${publishedAgentVersion} (${pubLlm.error ?? `got version ${n(pl.version) ?? "?"}`})`);
+    else {
+      const pp = s(pl.general_prompt) ?? "", same = pp === (s(llm.general_prompt) ?? "");
+      const pa = analysePrompt(pp, [...EXPECTED_CUSTOM_FUNCTIONS]);
+      pf("published version carries the audited prompt", same, same ? `published agent v${publishedAgentVersion} uses the same prompt as the draft`
+        : `published agent v${publishedAgentVersion} uses a DIFFERENT prompt ("${pa.title}", ${pp.length} characters, V17 marker ${pa.v17 ? "present" : "absent"}): calls use the published version until the draft is published in Retell`, same ? "same" : "different", "same as the audited draft");
+      const pubTools = arr(pl.general_tools).map(obj).filter((x) => s(x.type) === "custom").map((x) => s(x.name) ?? "");
+      const missingPub = EXPECTED_CUSTOM_FUNCTIONS.filter((f) => !pubTools.includes(f));
+      if (missingPub.length) pf("published version functions", false, `the published version lacks: ${missingPub.join(", ")}`);
+    }
+  }
 
   // Prompt (Founder V17 authoritative): usable, consistent with the tools and per-call variables, adopted by the SIE.
   const prompt = s(llm.general_prompt) ?? "";
