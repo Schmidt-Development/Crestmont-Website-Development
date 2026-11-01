@@ -11,7 +11,7 @@
 //  - warm transfer, an approved voicemail message, 60-minute maximum call duration.
 //
 // Retell API (docs.retellai.com, checked 2026-11-01): POST /v2/list-agents · GET /get-agent/{id} ·
-// GET /get-agent-versions/{id} · GET /get-retell-llm/{id} · GET /v2/list-phone-numbers ({ items, has_more }) ·
+// GET /list-agent-versions/{id} (GET /get-agent-versions was removed on 2026-09-15) · GET /get-retell-llm/{id} · GET /v2/list-phone-numbers ({ items, has_more }) ·
 // GET /get-concurrency.
 //
 // Output is safe to print in a public CI log: ids, URLs, setting values, counts, hashes and booleans. Never a key, never
@@ -146,7 +146,9 @@ export async function auditOutboundRetell(d: { db: Db; env: Env; fetch: typeof f
   if (!vm) pf("voicemail", false, "voicemail detection is off (voicemail_option unset): the agent would talk to answering machines", "off", "detection on + approved message");
   else if (vmType === "hangup") pf("voicemail", false, "detection on but the action is hang up; the Founder decided to leave an approved voicemail", "hangup", "static_text or prompt");
   else if (vmType === "static_text" || vmType === "prompt") {
-    const ident = /crestmont/i.test(vmText), number = /\{\{\s*agent_number\s*\}\}|\+?1?[\s(.-]*\d{3}[\s).-]*\d{3}[\s.-]*\d{4}/.test(vmText), ai = /\b(ai|artificial|automated|virtual assistant)\b/i.test(vmText);
+    // A callback number may be written as digits, as {{agent_number}}, or spelled out ("five one seven, three zero zero…").
+    const spelled = (vmText.toLowerCase().match(/\b(zero|oh|one|two|three|four|five|six|seven|eight|nine)\b/g) ?? []).length >= 10;
+    const ident = /crestmont/i.test(vmText), number = spelled || /\{\{\s*agent_number\s*\}\}|\+?1?[\s(.-]*\d{3}[\s).-]*\d{3}[\s.-]*\d{4}/.test(vmText), ai = /\b(ai|artificial|automated|virtual assistant)\b/i.test(vmText);
     pf("voicemail", true, `approved ${vmType === "static_text" ? "fixed" : "generated"} message, ${vmText.length} characters (sha ${(await sha256Hex(vmText)).slice(0, 12)})`, vmType, "static_text or prompt");
     add("voicemail message content", ident && number && ai ? "PASS" : "FAIL", `identifies Crestmont: ${ident}; gives a callback number: ${number}; discloses AI: ${ai} (47 CFR 64.1200(b) identification and number; AI voices are artificial voices)`);
   } else add("voicemail", "UNVERIFIED", `voicemail_option present with action ${vmType ?? "unknown"}`);
@@ -155,16 +157,19 @@ export async function auditOutboundRetell(d: { db: Db; env: Env; fetch: typeof f
   add("data storage", "INFO", `data_storage_setting = ${s(agent.data_storage_setting) ?? "everything (default)"}; PII redaction ${obj(agent.pii_config).mode ? `${s(obj(agent.pii_config).mode)} (${arr(obj(agent.pii_config).categories).length} categories)` : "off"}. The platform keeps transcripts only after record_consent; Retell's own retention is this setting (privacy decision for counsel)`);
   const pca = arr(agent.post_call_analysis_data).map(obj);
   const so = pca.find((x) => s(x.name) === "sales_outcome");
-  add("post-call analysis", "INFO", pca.length ? `${pca.length} field(s): ${pca.map((x) => `${s(x.name)}:${s(x.type)}`).join(", ").slice(0, 300)}${so ? `; sales_outcome choices ${arr(so.choices).join("/")}` : "; no sales_outcome field (optional fallback)"}` : "none configured (optional)");
+  const soOk = so && s(so.type) === "enum" && arr(so.choices).every((c) => ["wrong_number", "not_interested", "interested", "follow_up_requested"].includes(String(c)));
+  add("post-call analysis", "INFO", pca.length ? `${pca.length} field(s): ${pca.map((x) => `${s(x.name)}:${s(x.type)}`).join(", ").slice(0, 300)}${so ? `; sales_outcome is ${s(so.type)}${soOk ? " with the 4 values the backend reads" : ` — the backend uses it only as a fallback and only when it equals wrong_number, not_interested, interested or follow_up_requested (an enum with those choices makes it usable)`}` : "; no sales_outcome field (optional fallback)"}` : "none configured (optional)");
   const engine = obj(agent.response_engine);
   const llmId = s(engine.llm_id);
   pf("response engine", s(engine.type) === "retell-llm" && !!llmId, "the SIE manages prompts only on a retell-llm agent", `${s(engine.type) ?? "?"}${llmId ? ` ${llmId}` : ""}`, "retell-llm");
   if (!llmId) return out("issues", { agents, agentId });
 
   // 4. Published version (what real calls use) vs the draft.
-  const versions = await call(key, d.fetch, "GET", `/get-agent-versions/${encodeURIComponent(agentId)}`);
+  // Retell removed GET /get-agent-versions on 2026-09-15 (deprecation notice): GET /list-agent-versions/{agent_id}.
+  let versions = await call(key, d.fetch, "GET", `/list-agent-versions/${encodeURIComponent(agentId)}`);
+  if (!versions.ok && (versions.status === 404 || versions.status === 400)) versions = await call(key, d.fetch, "GET", `/get-agent-versions/${encodeURIComponent(agentId)}`);
   let publishedLlmVersion: number | null = null;
-  if (!versions.ok) add("published agent version", "UNVERIFIED", `get-agent-versions: ${versions.error}`);
+  if (!versions.ok) add("published agent version", "UNVERIFIED", `list-agent-versions: ${versions.error}`);
   else {
     const vs = items(versions.json).map(obj);
     const pub = vs.filter((v) => v.is_published === true).sort((a, b) => (n(b.version) ?? 0) - (n(a.version) ?? 0))[0];
@@ -240,7 +245,9 @@ export async function auditOutboundRetell(d: { db: Db; env: Env; fetch: typeof f
   pf("Default Dynamic Variables", dvKeys.length === 0, dvKeys.length ? `Founder decision is NONE; found ${dvKeys.join(", ")}` : "none (Founder decision); the dialler sends the lead's variables on every call", String(dvKeys.length), "0");
   add("knowledge base", "INFO", `${arr(llm.knowledge_base_ids).length} knowledge base(s) attached${obj(llm.kb_config).top_k ? `; top_k ${n(obj(llm.kb_config).top_k)}` : ""}`);
   add("speak first", "INFO", `start_speaker = ${s(llm.start_speaker) ?? "?"}; begin message ${llm.begin_message === "" ? "empty string (waits for the person)" : s(llm.begin_message) ? `set (${(s(llm.begin_message) ?? "").length} characters)` : "unset (generated)"}; begin_after_user_silence_ms ${n(llm.begin_after_user_silence_ms) ?? "unset"}; model ${s(obj(llm.model_config).primary) ?? s(llm.model) ?? "?"}`);
-  add("LLM published flag", llm.is_published === true ? "PASS" : llm.is_published === false ? "FAIL" : "UNVERIFIED", `LLM version ${n(llm.version) ?? "?"} read${publishedLlmVersion !== null ? " (the published agent's version)" : " (draft)"}; is_published ${String(llm.is_published)}`);
+  // A draft is never published by definition: only the published agent's LLM version can be judged.
+  if (publishedLlmVersion !== null) add("LLM published flag", llm.is_published === true ? "PASS" : "FAIL", `LLM version ${n(llm.version) ?? "?"} (the published agent's version); is_published ${String(llm.is_published)}`);
+  else add("LLM published flag", "UNVERIFIED", `the published agent version could not be read, so the draft LLM (version ${n(llm.version) ?? "?"}, is_published ${String(llm.is_published)}) was audited`);
 
   // Prompt (Founder V17 authoritative): usable, consistent with the tools and per-call variables, adopted by the SIE.
   const prompt = s(llm.general_prompt) ?? "";

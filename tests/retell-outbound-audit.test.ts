@@ -56,7 +56,8 @@ function fakeRetell(cfg: ReturnType<typeof goodConfig>, opts: { status?: number 
     if (opts.status) return new Response(JSON.stringify({ message: "Unauthorized" }), { status: opts.status });
     if (u.pathname === "/v2/list-agents") return new Response(JSON.stringify({ items: [{ agent_id: AGENT, agent_name: "Cimo — Crestmont Sales" }], has_more: false }));
     if (u.pathname === `/get-agent/${AGENT}`) return new Response(JSON.stringify(cfg.agent));
-    if (u.pathname === `/get-agent-versions/${AGENT}`) return new Response(JSON.stringify(cfg.versions));
+    if (u.pathname === `/list-agent-versions/${AGENT}`) return new Response(JSON.stringify(cfg.versions));
+    if (u.pathname === `/get-agent-versions/${AGENT}`) return new Response("removed", { status: 404 });
     if (u.pathname === "/get-retell-llm/llm_sales01") return new Response(JSON.stringify(cfg.llm));
     if (u.pathname === "/v2/list-phone-numbers") return new Response(JSON.stringify(cfg.numbers));
     if (u.pathname === "/get-concurrency") return new Response(JSON.stringify({ current_concurrency: 0, concurrency_limit: 20 }));
@@ -148,6 +149,7 @@ test("[VOICE-005] missing key, identical keys, a rejected key, no published vers
   const a = await auditOutboundRetell({ db: t.db, env: t.env, fetch: fakeRetell(goodConfig({ versions: [{ agent_id: AGENT, version: 3, is_published: false }] })).f, baseUrl: BASE, expectedCallerNumber: NUMBER });
   const bad = failing(a);
   assert.match(bad["published agent version"], /no published version/);
+  assert.equal(a.findings.find((f) => f.check === "LLM published flag")!.state, "UNVERIFIED", "a draft LLM is not judged as unpublished");
   assert.match(bad["caller number recorded"], /save …7764/);
   assert.ok(a.findings.some((f) => f.check === "caller number …7764 in the outbound workspace" && f.ok));
 });
@@ -196,4 +198,13 @@ test("[SEC-001] POST /api/sales-outbound/retell-audit: scheduler-signed, rate-li
   await post(t, "{}", await signEvidence("sched-key", "{}"));
   await post(t, "{}", await signEvidence("sched-key", "{}"));
   assert.equal((await post(t, "{}", await signEvidence("sched-key", "{}"))).status, 429);
+});
+
+test("[VOICE-005] voicemail callback number may be spelled out; a missing one fails the content check", async () => {
+  const t = await setup();
+  const spoken = "Hi, this is Cimo, an AI assistant with Crestmont Website Development. Call us at five one seven, three zero zero, seven seven six four.";
+  const a = await auditOutboundRetell({ db: t.db, env: t.env, fetch: fakeRetell(goodConfig({ agent: { voicemail_option: { action: { type: "static_text", text: spoken } } } })).f, baseUrl: BASE });
+  assert.equal(a.findings.find((f) => f.check === "voicemail message content")!.state, "PASS");
+  const none = await auditOutboundRetell({ db: t.db, env: t.env, fetch: fakeRetell(goodConfig({ agent: { voicemail_option: { action: { type: "static_text", text: "Hi, this is Cimo, an AI assistant with Crestmont Website Development. We'll try again soon." } } } })).f, baseUrl: BASE });
+  assert.match(failing(none)["voicemail message content"], /gives a callback number: false/);
 });
