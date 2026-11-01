@@ -1,0 +1,27 @@
+{
+  "schema": "crestmont.business-config/1",
+  "configured": true,
+  "version": 1,
+  "business": {
+    "name": "Junk in the Trunk",
+    "description": "Fictional junk removal test business for Crestmont acceptance (not a real company).",
+    "industry": "Junk removal",
+    "email": "hello@junkinthetrunk.example",
+    "phone": "+1 555 0142",
+    "timeZone": "America/New_York",
+    "address": { "city": "Lansing", "state": "MI", "postalCode": "48933", "country": "US", "street": null }
+  },
+  "features": { "contact": true, "quotes": true, "booking": true, "payments": true, "notifications": true, "admin": true },
+  "services": [
+    { "id": "single-item", "name": "Single item pickup", "description": "One bulky item such as a couch or appliance.", "priceCents": 8900, "durationMinutes": 60, "bookable": true, "payable": true },
+    { "id": "garage-cleanout", "name": "Garage clean-out", "description": "Estimate on site; quote first.", "priceCents": null, "priceNote": "Quoted after a free estimate", "durationMinutes": 120, "bookable": true, "payable": false },
+    { "id": "estate-cleanout", "name": "Estate clean-out", "description": "Whole-home clean-outs, quoted individually.", "priceCents": null, "priceNote": "Custom quote", "bookable": false, "payable": false }
+  ],
+  "hours": { "mon": [{ "open": "08:00", "close": "17:00" }], "tue": [{ "open": "08:00", "close": "17:00" }], "wed": [{ "open": "08:00", "close": "17:00" }], "thu": [{ "open": "08:00", "close": "17:00" }], "fri": [{ "open": "08:00", "close": "17:00" }], "sat": [{ "open": "09:00", "close": "13:00" }] },
+  "booking": { "slotIntervalMinutes": 60, "leadTimeMinutes": 1440, "bufferMinutes": 30, "maxDaysAhead": 60, "cancellationNoticeHours": 24, "requireAddress": true, "requirePhone": true, "blackoutDates": [], "resources": [{ "id": "truck-1", "name": "Truck 1", "capacity": 1 }, { "id": "truck-2", "name": "Truck 2", "capacity": 1 }] },
+  "serviceArea": { "postalCodes": ["48933", "48906", "48910", "48911", "48912", "48915", "48917"], "cities": ["Lansing", "East Lansing"] },
+  "payments": { "provider": "stripe", "currency": "usd", "accountOwner": "customer" },
+  "notifications": { "businessEmail": "hello@junkinthetrunk.example" },
+  "assumptions": [],
+  "missingInformation": []
+}

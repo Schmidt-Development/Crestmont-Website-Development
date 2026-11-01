@@ -1,0 +1,13 @@
+{
+  "name": "customer-site",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Full-stack business website (Crestmont full-stack starter v1): Cloudflare Worker + D1 backend, static frontend, admin dashboard.",
+  "scripts": {
+    "check": "node --no-warnings scripts/gates.mjs",
+    "test": "node --no-warnings --test tests/",
+    "serve": "node --no-warnings scripts/serve.mjs",
+    "dev": "npx wrangler dev"
+  }
+}

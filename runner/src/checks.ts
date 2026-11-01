@@ -9,8 +9,12 @@ import type { ExecResult } from "./exec.ts";
 
 export interface StarterPackageSpec {
   maxPages: number;
-  contactForm: boolean;
+  contactForm?: boolean;
   requirements: { key: string; label: string }[];
+  /** Full-stack starter: the package capability matrix (what this package may include). */
+  capabilities?: string[];
+  seo?: string;
+  revisionRounds?: number;
 }
 
 export interface StarterSpec {
@@ -20,6 +24,8 @@ export interface StarterSpec {
   description: string;
   packages: Record<string, StarterPackageSpec>;
   acceptance: { id: string; label: string; command: string[] }[];
+  /** Starters that declare the quality engine ("crestmont.quality-scorecard/1") are always scored and gated. */
+  quality?: string;
   /**
    * Starter files the acceptance checks depend on (the checker and its package profiles). The agent can edit any file
    * in its workspace, so the runner restores these from its own starter copy before every acceptance run: a weakened

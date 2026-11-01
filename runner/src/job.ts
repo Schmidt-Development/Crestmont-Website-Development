@@ -50,6 +50,9 @@ import type { InferenceScheduler } from "./inference/scheduler.ts";
 import { runIntegrationOperations } from "./integrations/broker.ts";
 import { buildTask, repairTask, revisionTask, route, type Route, type Task } from "./inference/router.ts";
 import type { InFlight, ProjectMemory } from "./memory.ts";
+import type { Scorecard } from "./quality.ts";
+import { readGates, requestedCapabilities, score, scorecardOutstanding } from "./quality.ts";
+import type { CycleEvidence } from "./orchestrator/contracts.ts";
 import { ineffectiveRepairs, loadMemory, memoryDigest, remember, saveMemory } from "./memory.ts";
 
 /** A repair that left the same defect in place this many times ends the build as stalled (never the same fix forever). */
@@ -128,6 +131,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
   let pf: PreflightResult | null = null;
   const missingFiles: string[] = [];
   const branch = job.kind === "revision" ? `ai-build/revision-${job.revision}` : "ai-build/first-build";
+  const effectivePackage: string = job.packageId ?? (job.strategy === "custom" ? "custom" : "starter");
   const turnCap = Math.max(1, Math.min(job.limits.maxTurns, cfg.localMaxTurns));
   const budgetCap = Math.max(0, Math.min(job.limits.runBudgetUsd, job.limits.projectBudgetRemainingUsd, cfg.localMaxBudgetUsd));
   const runtimeMs = deps.runtimeMs ?? Math.min(job.limits.maxRuntimeMinutes, cfg.localMaxRuntimeMinutes) * 60_000;
@@ -278,14 +282,14 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     }
   };
 
-  const finish = async (outcome: Outcome, fields: { error?: string | null; checks?: CheckOutcome[]; preview?: { url: string | null; note: string; name?: string | null }; stopReason?: string | null; notBefore?: string | null }): Promise<JobSummary> => {
+  const finish = async (outcome: Outcome, fields: { error?: string | null; checks?: CheckOutcome[]; preview?: { url: string | null; note: string; name?: string | null }; stopReason?: string | null; notBefore?: string | null; quality?: Scorecard | null; missingInformation?: string[] }): Promise<JobSummary> => {
     guard();
     if (memory && remember.isOpen(memory)) await endSegment(outcome);
     const commit = git ? await headCommit(git) : null;
     const seed = job.requirements;
     const agentReqs = ws ? readRequirements(ws.repo, seed) : seed;
     const requirements = [...agentReqs, ...checkRequirements(fields.checks ?? [])];
-    const missingInformation = ws ? readStringList(ws.repo, "needs-information.json") : [];
+    const missingInformation = [...(ws ? readStringList(ws.repo, "needs-information.json") : []), ...(fields.missingInformation ?? [])];
     const assumptions = [...job.brief.content.assumptions, ...(ws ? readStringList(ws.repo, "assumptions.json") : [])];
     if (missingFiles.length) assumptions.push(`Customer files that could not be downloaded: ${missingFiles.join(", ")}`);
     const costCaveats = tracker.costUnknownPhases.length
@@ -314,6 +318,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       ...(outcome === "needs_information" ? { missingInformation } : {}),
       ...(fields.error ? { error: fields.error } : {}),
       ...(fields.notBefore ? { notBefore: fields.notBefore } : {}),
+      ...(fields.quality ? { quality: fields.quality } : {}),
     };
     await stopHeartbeats();
     guard();
@@ -353,12 +358,13 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     pf.ok = pf.errors.length === 0;
     for (const w of pf.warnings) tracker.note({ kind: "note", message: w });
     if (!pf.ok) return await finish("failed", { error: `Preflight failed: ${pf.errors.join("; ")}` });
-    if (job.strategy === "standard") {
-      if (!job.starter) return await finish("failed", { error: "Standard job without a starter reference" });
+    if (job.strategy === "standard" && !job.starter) return await finish("failed", { error: "Standard job without a starter reference" });
+    // Protocol v1.5: custom builds may also start from the full-stack foundation (package profile "custom").
+    if (job.starter) {
       const dir = starterDir(cfg.startersDir, job.starter);
       starterSpec = loadStarter(dir);
       starterLabel = `${starterSpec.name}-v${starterSpec.version}`;
-      if (job.packageId && !starterSpec.packages[job.packageId]) return await finish("failed", { error: `Starter ${starterLabel} has no acceptance profile for package ${job.packageId}` });
+      if (!starterSpec.packages[effectivePackage]) return await finish("failed", { error: `Starter ${starterLabel} has no acceptance profile for package ${effectivePackage}` });
     }
 
     // ── source: resume or fresh ──
@@ -419,7 +425,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     const repoEmpty = readdirSync(ws.repo).length === 0;
     if (repoEmpty) {
       await initRepo(git, { name: cfg.gitAuthorName, email: cfg.gitAuthorEmail }, branch);
-      if (job.strategy === "standard" && job.starter) {
+      if (job.starter) {
         copyStarter(starterDir(cfg.startersDir, job.starter), ws.repo);
         await commitAll(git, `Start from approved starter ${starterLabel}`);
       }
@@ -603,7 +609,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       }
       begin("acceptance", "runner acceptance checks");
       const out = await runChecks(ws!.repo, commands, checkEnv, cfg.checkTimeoutMs, checkExecutor);
-      if (job.strategy === "standard") {
+      if (job.strategy === "standard" || starterSpec) {
         const b = job.brief.content.customerData.business;
         const bc = briefConformance(ws!.repo, { businessName: b.name, publicEmail: b.publicEmail, publicPhone: b.publicPhone });
         if (bc) out.push(bc);
@@ -622,9 +628,15 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
 
     // ── runner acceptance checks → fresh Model A review session → routed corrections (B, or A when hard) → repeat ──
     let checks: CheckOutcome[] = [];
+    // Every build the platform marks "required", and every starter that declares the quality engine, is gated.
+    const qualityRequired = job.quality === "required" || !!starterSpec?.quality;
+    let lastCard: Scorecard | null = null;
+    let lastVerdict: ReviewVerdict | null = null;
+    let lastEvidence: CycleEvidence | null = null;
+    let scoreNow: (verdict: ReviewVerdict | null, previewDeployed: boolean | null, iteration: number) => Scorecard = () => { throw new Error("scorecard before acceptance"); };
     if (!stop.reason && !st.localLimit && !st.agentError) {
       stage = "verifying";
-      const commands = acceptanceCommands(starterSpec, ws.repo, job.packageId);
+      const commands = acceptanceCommands(starterSpec, ws.repo, effectivePackage);
       if (sandbox && cfg.jobSandbox.browserCheck && existsSync(path.join(ws.repo, "public", "index.html"))) {
         commands.push({ id: "browser-check", label: "Headless Chromium: every page at desktop and mobile width (console errors, failed requests, horizontal overflow, screenshots)", command: ["node", BROWSER_CHECK, "--root", "public", "--out", ".crestmont/screenshots"] });
       }
@@ -636,6 +648,13 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       for (const c of checks) tracker.note({ kind: "check", message: `${c.ok ? "PASS" : "FAIL"} ${c.command}` });
       const reviewer = advisorFor("reviewer")!;
       let cycleBase = buildBase;
+      const requested = requestedCapabilities(job.brief.content.customerData.features ?? [], job.brief.content.customerData.integrations ?? []);
+      const caps = starterSpec?.packages[effectivePackage]?.capabilities ?? null;
+      scoreNow = (verdict, previewDeployed, iteration) => {
+        const ev = lastEvidence;
+        return score({ packageId: effectivePackage, capabilities: caps, requested, checks, gates: readGates(ws!.repo), screenshots: ev?.screenshots ?? [], review: verdict,
+          requirements: readRequirements(ws!.repo, job.requirements), criteria: ev?.criteria ?? [], securityFindings: ev?.securityFindings ?? [], previewDeployed, iteration });
+      };
       let promptUsed = spec?.masterPrompt ?? "Runner build phases (plan, build, verify) from BRIEF.md";
       let promptSource: "architect" | "reviewer" | "runner" = spec ? "architect" : "runner";
       let cycleRoute: Route = buildRoute;
@@ -650,6 +669,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         if (checks.some((c) => !c.ok)) writeInside(ws.repo, path.join(".crestmont", "runner-checks.json"), JSON.stringify(checks.map(({ id, command, ok, code, outputTail }) => ({ id, command, ok, code, outputTail })), null, 2));
         await commitAll(git!, `AI build: cycle ${cycle} evidence`);
         const evidence = await collectEvidence({ repo: ws.repo, pathEnv: cfg.agentPath, home: ws.home, baseCommit: cycleBase, checks, requirements: readRequirements(ws.repo, job.requirements), spec });
+        lastEvidence = evidence;
         // Builder outputs: integration status and sensitive-action requests (the build continues meanwhile).
         try {
           // The builder's own status is code + mock only; it cannot set test-environment or live status.
@@ -672,7 +692,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         } catch (err) { if (err instanceof LeaseLostError) { markLeaseLost(); throw err; } log.warn("integration/approval report failed", { error: errorMessage(err) }); }
         // C. Independent review: a fresh Model A session (falls back to the deterministic reviewer if it is unavailable).
         stage = "verifying";
-        const open = outstanding(evidence);
+        let open = outstanding(evidence);
         const reviewRoute = route(open.length ? "review" : "final_review", models);
         Object.assign(now, { activity: "reviewing", model: reviewRoute.model.tag, task: reviewRoute.task });
         let verdict: ReviewVerdict;
@@ -683,6 +703,22 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           sessionNotes.push(`Review session for cycle ${cycle} failed (${errorMessage(err).slice(0, 200)}); the deterministic reviewer judged this cycle.`);
           reviewerName = "deterministic";
           verdict = await new DeterministicReviewer().review(spec, evidence);
+        }
+        // Quality scorecard (every build, every iteration): failing criteria are outstanding work for this cycle, and a
+        // reviewer "ready" without a verified 10/10 becomes a targeted repair (or a wait for external verification).
+        const card = scoreNow(verdict, null, cycle);
+        lastCard = card; lastVerdict = verdict;
+        writeInside(ws.repo, path.join(".crestmont", "quality", "scorecard.json"), JSON.stringify(card, null, 2) + "\n");
+        if (memory) remember.quality(memory, card);
+        tracker.note({ kind: "check", message: `quality scorecard (cycle ${cycle}): ${card.score}/10 (${card.passed} of ${card.applicable} applicable criteria)${card.eligible ? "" : card.waitingExternal ? "; waiting for external verification" : `; failing: ${card.criteria.filter((c) => c.applicable && c.status !== "pass").map((c) => c.id).join(", ")}`}` });
+        if (qualityRequired) for (const d of scorecardOutstanding(card)) if (!evidence.defects.includes(d)) evidence.defects.push(d);
+        if (qualityRequired && card.waitingExternal) for (const c of card.criteria.filter((x) => x.status === "pending_external")) evidence.integrationBlockers.push(`${c.name}: ${c.reason ?? "provider-side verification pending"}`.slice(0, 300));
+        open = outstanding(evidence);
+        if (qualityRequired && /^READY_/.test(verdict.decision) && !card.eligible) {
+          verdict = card.waitingExternal && !open.length
+            ? { ...verdict, decision: "WAIT_FOR_EXTERNAL_SETUP", nextPrompt: null, findings: [...verdict.findings, "Quality engine: everything else passes; waiting for the customer's provider-side verification."] }
+            : { ...verdict, decision: "FIX_DEFECTS", addresses: open, findings: [...verdict.findings, `Quality engine: ${card.score}/10 is below the required 10/10.`],
+              nextPrompt: ["The website is not finished: the quality scorecard is below 10/10 within the approved scope. Fix each item, re-run `npm run check`, and keep everything that already passes:", ...card.defects.map((d) => `- ${d.detail}`)].join("\n") };
         }
         writeReview(ws.repo, cycle, verdict.decision, verdict.nextPrompt, verdict.findings);
         const reviewerModel = reviewerName.startsWith("local:") ? reviewerName.slice(6) : null;
@@ -795,16 +831,39 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       if (memory) remember.preview(memory, preview);
     }
 
+    // ── quality gate: the final scorecard (with the private staging preview) decides whether the build may enter
+    // internal approval. Required for every build the platform marks quality "required" and for every starter that
+    // declares the quality engine; nothing below a verified 10/10 within the approved scope gets through.
+    let finalCard: Scorecard | null = null;
+    if (lastEvidence || qualityRequired) {
+      try { finalCard = scoreNow(lastVerdict, cfg.preview ? !!preview.url : null, lastCard?.iteration ?? 0); }
+      catch { finalCard = null; }
+      if (finalCard) {
+        writeInside(ws.repo, path.join(".crestmont", "quality", "scorecard.json"), JSON.stringify(finalCard, null, 2) + "\n");
+        if (memory) remember.quality(memory, finalCard);
+      }
+    }
     await commitAndPush(`AI build ${job.kind === "revision" ? `revision ${job.revision}` : "first build"}: ready for owner review`);
-    await endSegment(failedChecks.length ? "failed" : "completed");
+    const qualityBlocked = qualityRequired && !failedChecks.length && (!finalCard || !finalCard.eligible);
+    await endSegment(failedChecks.length || qualityBlocked ? "failed" : "completed");
     await checkpoint("final");
     if (failedChecks.length) {
       return await finish("failed", { error: `Acceptance checks failed: ${failedChecks.map((c) => c.id).join(", ")}`, checks, preview });
     }
+    if (qualityBlocked) {
+      const card = finalCard;
+      if (card?.waitingExternal) {
+        const pending = card.criteria.filter((c) => c.status === "pending_external").map((c) => `${c.name}: ${c.reason ?? "provider-side verification of the customer's own account"}`);
+        return await finish("needs_information", { checks, preview, quality: card, missingInformation: pending });
+      }
+      const why = card ? `${card.score}/10 (${card.passed} of ${card.applicable} applicable criteria); not met: ${card.criteria.filter((c) => c.applicable && c.status !== "pass").map((c) => `${c.id} (${(c.reason ?? c.status).slice(0, 80)})`).join("; ").slice(0, 900)}` : "no scorecard could be computed (the acceptance evidence is missing)";
+      // Not retried automatically: the repair loop already ran its bounded cycles; a person decides the next step.
+      return await finish("stopped", { error: `Quality engine: the website is not eligible for internal approval: ${why}`, stopReason: "quality_not_met", checks, preview, quality: card });
+    }
     const needsInfo = readStringList(ws.repo, "needs-information.json");
     const reqs = readRequirements(ws.repo, job.requirements);
     if (needsInfo.length && reqs.some((r) => r.status === "blocked")) return await finish("needs_information", { checks, preview });
-    return await finish("ready_for_review", { checks, preview });
+    return await finish("ready_for_review", { checks, preview, quality: finalCard });
   } catch (err) {
     if (err instanceof LeaseLostError || leaseLost) {
       stop.request("lease_lost");

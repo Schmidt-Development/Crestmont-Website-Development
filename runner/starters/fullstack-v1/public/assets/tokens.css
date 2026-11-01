@@ -1,0 +1,22 @@
+/* Design tokens: the builder sets these from the customer's brand (colors, type, radius, spacing scale).
+   Every component reads only these variables, so a brand change is one file. Text/background pairs must keep a
+   WCAG AA contrast ratio of at least 4.5:1 (the acceptance gates measure --color-text on --color-bg and
+   --color-on-primary on --color-primary). STARTER-PLACEHOLDER: replace these defaults with the brand. */
+:root {
+  --color-primary: #1f3a5f;
+  --color-on-primary: #ffffff;
+  --color-accent: #b8860b;
+  --color-bg: #ffffff;
+  --color-surface: #f4f6f8;
+  --color-text: #1b1f24;
+  --color-muted: #4a5561;
+  --color-border: #d5dbe1;
+  --color-danger: #a4161a;
+  --color-success: #1e6b3a;
+  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-heading: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --radius: 8px;
+  --space: 1rem;
+  --max-width: 72rem;
+  --shadow: 0 1px 3px rgb(0 0 0 / 12%), 0 4px 16px rgb(0 0 0 / 6%);
+}

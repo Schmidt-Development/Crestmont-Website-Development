@@ -71,6 +71,8 @@ export interface ProjectMemory {
   integrations: { key: string; codeStatus?: string; mockStatus?: string; operation?: string; status?: string }[];
   approvalsPending: string[];
   preview: { url: string | null; note: string | null; at: string | null };
+  /** Quality scorecard history (runner-computed from evidence; survives context resets, restarts and segments). */
+  quality?: { iteration: number; score: number; eligible: boolean; waitingExternal: boolean; failing: string[]; at: string }[];
   /** Builder's own finish summaries: model-reported, bounded, never authoritative. */
   notes: { at: string; phase: string; text: string; source: "model-reported" }[];
   /** Operational metrics only (local inference has no per-token billing and no cumulative ceiling). */
@@ -286,6 +288,10 @@ export const remember = {
     m.integrations = [...byKey.values()].slice(0, 60);
     m.approvalsPending = m.integrations.filter((i) => i.status === "awaiting_approval" || i.status === "missing_credentials").map((i) => `${i.operation ?? i.key}: ${i.status}`).slice(0, 30);
   },
+  quality(m: ProjectMemory, card: { iteration: number; score: number; eligible: boolean; waitingExternal: boolean; criteria: { id: string; applicable: boolean; status: string }[] }): void {
+    (m.quality ??= []).push({ iteration: card.iteration, score: card.score, eligible: card.eligible, waitingExternal: card.waitingExternal, failing: card.criteria.filter((c) => c.applicable && c.status !== "pass").map((c) => c.id), at: new Date().toISOString() });
+    if (m.quality.length > 40) m.quality.splice(0, m.quality.length - 40);
+  },
   preview(m: ProjectMemory, p: { url: string | null; note: string | null }): void { m.preview = { url: p.url ? scrub(p.url, 300) : null, note: p.note ? scrub(p.note, 300) : null, at: new Date().toISOString() }; },
 };
 
@@ -324,6 +330,8 @@ export function memoryDigest(m: ProjectMemory, maxChars: number): string {
     const failed = d.repairs.filter((r) => r.resolved === false).length;
     lines.push(`  - ${d.summary[0] ?? d.id} (seen in ${d.occurrences} cycle(s) since cycle ${d.firstCycle}${failed ? `; ${failed} earlier repair(s) did NOT fix it: use a different approach` : ""})`);
   }
+  const q = m.quality?.at(-1);
+  if (q) lines.push(`Quality scorecard (iteration ${q.iteration}): ${q.score}/10${q.eligible ? " — all applicable criteria pass" : `; not yet passing: ${q.failing.join(", ")}`}. Only a verified 10/10 within the approved scope reaches internal approval (.crestmont/quality/scorecard.json has the evidence).`);
   if (m.approvalsPending.length) lines.push(`Waiting on people (do not fake these; build and mock-test around them): ${m.approvalsPending.join("; ")}.`);
   const ints = m.integrations.filter((i) => i.codeStatus || i.mockStatus);
   if (ints.length) lines.push(`Integrations: ${ints.map((i) => `${i.key} code=${i.codeStatus ?? "?"} mock=${i.mockStatus ?? "?"}`).join("; ")}.`);

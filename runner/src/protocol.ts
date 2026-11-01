@@ -82,7 +82,7 @@ export interface Job {
   leaseExpiresAt: string;
   heartbeatSeconds: number;
   strategy: "standard" | "custom";
-  packageId: "starter" | "business" | "premium" | null;
+  packageId: "starter" | "business" | "premium" | "custom" | null;
   starter: { name: string; version: string } | null;
   brief: { id: string; version: number; sha256: string; content: BuildBrief };
   instruction: string | null;
@@ -93,6 +93,11 @@ export interface Job {
   spec?: { version: number; content: unknown } | null;
   /** V4: the GPU worker this job was assigned to (worker mode). */
   worker?: { id: string; label: string; maxActiveProjects?: number } | null;
+  /**
+   * Quality engine (protocol v1.5): "required" ⇒ the build may complete as ready_for_review only with an eligible
+   * (10/10) quality scorecard, which the platform re-verifies. Absent on older platforms (legacy behaviour).
+   */
+  quality?: "required";
 }
 
 export type ClaimResponse =
@@ -152,6 +157,8 @@ export interface CompleteRequest extends ProviderReport {
   error?: string;
   /** V3 (outcome "released"): the account's plan capacity returns at this time; requeue not before it. */
   notBefore?: string;
+  /** Quality scorecard of this build iteration (protocol v1.5); the platform stores and re-verifies it. */
+  quality?: unknown;
 }
 
 // ── AI drafts (platform ai_jobs: support replies, lead notes, ...) served by the self-hosted model ──

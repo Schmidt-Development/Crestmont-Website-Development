@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Administration</title>
+  <meta name="description" content="Private administration area for the business: bookings, quote requests, messages, payments and settings.">
+  <meta name="robots" content="noindex, nofollow">
+  <link rel="stylesheet" href="/assets/tokens.css">
+  <link rel="stylesheet" href="/assets/site.css">
+  <script src="/admin/admin.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <main id="main" class="section">
+    <div class="container">
+      <h1>Administration</h1>
+      <div class="status" role="status" tabindex="-1"></div>
+      <form id="login" class="card" hidden>
+        <h2>Sign in</h2>
+        <div class="field"><label for="login-email">Email</label><input id="login-email" name="email" type="email" autocomplete="username" required></div>
+        <div class="field"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required></div>
+        <button type="submit">Sign in</button>
+      </form>
+      <section id="app" hidden>
+        <p class="muted" id="whoami"></p>
+        <div class="stats" id="stats"></div>
+        <div class="tabs" role="tablist" aria-label="Records">
+          <button type="button" role="tab" aria-selected="true" data-tab="bookings">Bookings</button>
+          <button type="button" role="tab" aria-selected="false" data-tab="quotes">Quote requests</button>
+          <button type="button" role="tab" aria-selected="false" data-tab="messages">Messages</button>
+          <button type="button" role="tab" aria-selected="false" data-tab="payments">Payments</button>
+          <button type="button" role="tab" aria-selected="false" data-tab="notifications">Email</button>
+          <button type="button" role="tab" aria-selected="false" data-tab="audit">Audit log</button>
+        </div>
+        <div class="admin-scroll" id="panel" role="tabpanel" tabindex="0"></div>
+        <p><button class="button secondary" type="button" id="logout">Sign out</button></p>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

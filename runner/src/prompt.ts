@@ -153,6 +153,32 @@ export function localSystemPrompt(job: Job, skillNames: string[]): string {
   ].join("\n");
 }
 
+function fullstackPhase(job: Job, phase: Phase, starter: string, local: boolean): string[] {
+  const pkg = job.packageId ?? "custom";
+  const check = `npm run check -- --package ${pkg}`;
+  if (phase === "plan") return [
+    "Phase 1 of 3: plan.",
+    `The repository contains the approved full-stack starter "${starter}": a working Cloudflare Worker backend, its own D1 database, booking, quotes, contact, payments on the customer's own Stripe account, email outbox, administration and acceptance gates. Read STARTER.md first, then BRIEF.md and BRIEF.json (exact values), REVISION-REQUEST.md if present, and customer-files/INDEX.json.`,
+    "Fill business.config.json ONLY from the brief: facts the customer did not give stay null and are listed in missingInformation (never invent addresses, hours, prices, licences, reviews or results); your own reasonable choices go in assumptions. Enable only features the customer asked for that this package includes (starter.json → packages." + pkg + ".capabilities); anything else is a scope change, recorded, not built.",
+    "Produce .crestmont/plan.md: sitemap within the package page limit, content outline per page, design direction (tokens from the customer's brand), which features and backend extensions the scope needs, and the requirement keys each part satisfies.",
+    "Write .crestmont/requirements.json from the seed, every item \"remaining\" unless it already exists.",
+  ];
+  if (phase === "build") return [
+    "Phase 2 of 3: build.",
+    "Configure and build the complete website from .crestmont/plan.md, following STARTER.md: business.config.json, design tokens in public/assets/tokens.css (WCAG AA contrast), every page (real copy from the customer data, never lorem ipsum or placeholders), working forms (data-api), the booking widget and manage pages where booking is enabled, structured data with real facts only.",
+    "Extend the backend only where the customer's scope needs more than the foundation, with the starter's patterns (validation, parameterized SQL, rate limits, idempotency, sessions/roles, audit, notifications outbox) and a new numbered migration for schema changes; add tests in tests/site/ for every new behaviour, tagged [feature:<intake key>] for requested features the foundation does not cover.",
+    "Secrets never go into the repository, config, frontend or logs; external services use the CUSTOMER's own accounts (never Crestmont's), free tiers first, no paid plans.",
+    local ? "Report requirement statuses with report_requirement as you go (implemented_unverified until verified). Write each file completely; prefer edit_file for small changes." : "Update .crestmont/requirements.json as you go (implemented_unverified until verified).",
+  ];
+  return [
+    "Phase 3 of 3: verify and report.",
+    `Run \`${check}\`${local ? " with run_command" : ""} and fix every failing gate (A requirements, B frontend, C backend, D database, F security, G performance, J deployment). Gate E stays pending_external until the customer's own provider account is verified by the runner's approved operation: request it in .crestmont/integration-operations.json; never fake it. A skipped test never counts as passed.`,
+    "After this phase the runner restores the protected checker files, runs the gates itself, loads every page in a headless browser at desktop and mobile widths, and an independent reviewer scores the website on 20 criteria; only a verified 10/10 within the approved scope goes to Crestmont's internal approval.",
+    "Mark requirements verified only with evidence (command + result, or screenshot path). Fill .crestmont/needs-information.json, .crestmont/assumptions.json and .crestmont/agent-report.md.",
+    ...(local ? ["Then call finish."] : []),
+  ];
+}
+
 export function phasePrompt(job: Job, phase: Phase, ctx: { starter: string | null; resumed: boolean; previousNote: string | null; toolset?: "claude" | "local" }): string {
   const local = ctx.toolset === "local";
   const lines: string[] = [];
@@ -162,6 +188,8 @@ export function phasePrompt(job: Job, phase: Phase, ctx: { starter: string | nul
     lines.push("");
   }
   const standard = job.strategy === "standard";
+  // Full-stack starter (all packages, protocol v1.5): a working backend, database and admin to configure and extend.
+  if (ctx.starter?.startsWith("fullstack-") && phase !== "repair") return [...lines, ...fullstackPhase(job, phase, ctx.starter, local)].join("\n");
   if (phase === "plan") {
     lines.push("Phase 1 of 3: plan.");
     lines.push("Read BRIEF.md (and BRIEF.json for exact values), REVISION-REQUEST.md if present, and customer-files/INDEX.json if present.");

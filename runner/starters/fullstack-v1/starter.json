@@ -1,0 +1,67 @@
+{
+  "schema": "crestmont.starter/1",
+  "name": "fullstack",
+  "version": "1",
+  "description": "Approved full-stack starter for every package: Cloudflare Worker backend with the website's own D1 database (versioned migrations), business configuration from the intake (business.config.json), booking with time zones, buffers, capacity and atomic double-booking prevention, quote requests with service areas, contact, Stripe Checkout on the customer's own account (server-side prices, verified webhooks, reconciliation, refunds), transactional email outbox through the customer's own provider, administration dashboard with roles, sessions, CSRF, rate limits and audit log, customer accounts; offline acceptance gates A-J (`npm run check`).",
+  "quality": "crestmont.quality-scorecard/1",
+  "packages": {
+    "starter": {
+      "maxPages": 5, "seo": "basic", "revisionRounds": 2,
+      "capabilities": ["contact", "admin", "notifications"],
+      "requirements": [
+        { "key": "pkg:pages-within-limit", "label": "Up to 5 pages" },
+        { "key": "pkg:responsive", "label": "Responsive website (desktop and mobile verified)" },
+        { "key": "pkg:contact-form", "label": "Working contact form: validated, stored, staff notified" },
+        { "key": "pkg:admin-inbox", "label": "Administration to read and answer messages" },
+        { "key": "pkg:seo-basic", "label": "Basic technical SEO (titles, descriptions, sitemap, robots)" },
+        { "key": "pkg:security", "label": "Security baseline (validation, rate limits, headers, no secrets in source)" }
+      ]
+    },
+    "business": {
+      "maxPages": 12, "seo": "expanded", "revisionRounds": 3,
+      "capabilities": ["contact", "admin", "notifications", "quotes", "booking", "payments"],
+      "requirements": [
+        { "key": "pkg:pages-within-limit", "label": "Up to 12 pages" },
+        { "key": "pkg:responsive", "label": "Responsive website (desktop and mobile verified)" },
+        { "key": "pkg:design-customization", "label": "Expanded design customization from the brand" },
+        { "key": "pkg:forms-advanced", "label": "Working forms and database-backed workflows within the documented scope" },
+        { "key": "pkg:integrations-defined", "label": "Defined integrations on the customer's own accounts (verified in test mode before launch)" },
+        { "key": "pkg:admin-dashboard", "label": "Core administration dashboard" },
+        { "key": "pkg:seo-expanded", "label": "Expanded technical SEO (canonical, Open Graph, structured data)" },
+        { "key": "pkg:security", "label": "Security baseline (authentication, authorization, CSRF, rate limits, verified webhooks)" }
+      ]
+    },
+    "premium": {
+      "maxPages": 25, "seo": "enhanced", "revisionRounds": 4,
+      "capabilities": ["contact", "admin", "notifications", "quotes", "booking", "payments", "customer_accounts"],
+      "requirements": [
+        { "key": "pkg:pages-within-limit", "label": "Up to 25 pages within approved scope" },
+        { "key": "pkg:responsive", "label": "Responsive website (desktop and mobile verified)" },
+        { "key": "pkg:design-bespoke", "label": "Bespoke premium design" },
+        { "key": "pkg:layouts-interactions", "label": "Advanced layouts and interactions" },
+        { "key": "pkg:integrations-defined", "label": "Defined integrations on the customer's own accounts (verified in test mode before launch)" },
+        { "key": "pkg:admin-dashboard", "label": "Advanced administration" },
+        { "key": "pkg:seo-enhanced", "label": "Enhanced technical SEO" },
+        { "key": "pkg:performance", "label": "Performance optimization (measured)" },
+        { "key": "pkg:security", "label": "Security baseline (authentication, authorization, CSRF, rate limits, verified webhooks)" }
+      ]
+    },
+    "custom": {
+      "maxPages": 40, "seo": "expanded", "revisionRounds": 3,
+      "capabilities": ["contact", "admin", "notifications", "quotes", "booking", "payments", "customer_accounts"],
+      "requirements": [
+        { "key": "pkg:scope-as-quoted", "label": "Everything in the accepted quote's scope (SPEC.json acceptance criteria)" },
+        { "key": "pkg:responsive", "label": "Responsive website (desktop and mobile verified)" },
+        { "key": "pkg:security", "label": "Security baseline" }
+      ]
+    }
+  },
+  "acceptance": [
+    { "id": "quality-gates", "label": "Acceptance gates A-J: requirements, frontend, backend, database, integrations, security, performance, deployment (offline, real code paths)", "command": ["node", "--no-warnings", "scripts/gates.mjs", "--package", "{package}"] }
+  ],
+  "protected": [
+    "scripts/gates.mjs", "scripts/lib/d1.mjs", "scripts/lib/harness.mjs", "scripts/lib/frontend.mjs",
+    "tests/foundation/helpers.mjs", "tests/foundation/core.test.mjs", "tests/foundation/booking.test.mjs", "tests/foundation/payments.test.mjs", "tests/foundation/admin.test.mjs",
+    "migrations/0001_foundation.sql"
+  ]
+}
