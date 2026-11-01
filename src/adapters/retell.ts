@@ -17,7 +17,7 @@
 import type { Db } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import { hmacSha256Hex, sha256Hex, timingSafeEqualHex } from "../lib/crypto.ts";
-import { VOICE_FUNCTIONS, VOICEMAIL_MODE_EVENT, ensureCall, recordCallEvent, type CallOutcome } from "../services/voice.ts";
+import { VOICE_FUNCTIONS, VOICEMAIL_MODE_EVENT, callStartedAt, ensureCall, recordCallEvent, type CallOutcome } from "../services/voice.ts";
 import { loadVoiceConfig, hoursStatus, transferAvailability, describeHours } from "../services/voice-settings.ts";
 import { addLeadTask, notifyOwners, redactSensitive } from "../services/voice-common.ts";
 import { audit } from "../services/security.ts";
@@ -129,8 +129,10 @@ export async function translateRetellEvent(db: Db, raw: string, ctx: RetellCtx):
     provider: RETELL_PROVIDER, call_id: callId, test: isTest(call), from_number: str(call, "from_number"), to_number: str(call, "to_number"),
     direction: str(call, "direction") === "outbound" ? "outbound" : "inbound", environment: str(obj(call.metadata), "crestmont_env"),
     outbound_request_id: str(obj(call.metadata), "crestmont_outbound_request_id"),
+    // Retell's own call start (ms since epoch); the platform records it as started_at instead of the arrival time.
+    start_timestamp: num(call, "start_timestamp"),
   };
-  if (event && TRANSFER_EVENTS.has(event)) return transferEvent(db, event, call, callId, base);
+  if (event && TRANSFER_EVENTS.has(event)) return transferEvent(db, event, call, callId, base, ctx);
   switch (event) {
     case "call_started":
       return { kind: "envelope", body: JSON.stringify({ ...base, event: "call_started", recording_consent: await consentFor(db, callId) }) };
@@ -167,10 +169,11 @@ export async function translateRetellEvent(db: Db, raw: string, ctx: RetellCtx):
  * event + call_id + start_timestamp (+ destination), as Retell documents: a call can hold several attempts.
  * A cancelled (failed) transfer becomes a callback task and an Owner alert, so the caller is not lost.
  */
-async function transferEvent(db: Db, event: string, call: Obj, callId: string, base: Record<string, unknown>): Promise<Translated> {
+async function transferEvent(db: Db, event: string, call: Obj, callId: string, base: Record<string, unknown>, ctx: RetellCtx): Promise<Translated> {
   const { call: row } = await ensureCall(db, RETELL_PROVIDER, callId, {
     from: base.from_number as string | undefined, to: base.to_number as string | undefined, direction: base.direction as "inbound" | "outbound",
     environment: base.environment as string | undefined, isTest: !!base.test, agentVersion: null,
+    startedAt: callStartedAt(base.start_timestamp, (ctx.now ?? (() => new Date()))()), now: ctx.now,
   });
   const dest = obj(call.transfer_destination);
   const key = `${event}:${num(call, "start_timestamp") ?? ""}:${str(dest, "number") ?? ""}${str(dest, "extension") ?? ""}`;
