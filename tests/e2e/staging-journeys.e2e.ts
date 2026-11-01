@@ -635,7 +635,10 @@ journey(14, ["PORTAL-006"], "customer submits a revision request (included round
   const submit = async () => {
     await c.goto(page);
     await c.fill("#f-request", `E2E ${RUN}: warmer hero photo, larger booking button on mobile.`);
-    await nav(c, btn(c, /^(Submit revision request|Request a change-order quote)$/i)); // the label changes once the allowance is used
+    // PR #105 renamed the button ("Submit request"; once the allowance is used, "Submit request (changes need a
+    // change-order quote)") and added a change/problem choice whose default, "change", is what this journey submits.
+    // The old labels made deploy #121 time out here waiting for a navigation that never started.
+    await nav(c, btn(c, /^Submit request( \(changes need a change-order quote\))?$/i));
     return alerts(c);
   };
   let res = await submit();

@@ -468,7 +468,7 @@ step("[PORTAL-006] customer reviews the design, uses the included revision round
   for (let round = 1; round <= allowance; round++) {
     assert.match(await text(c, ".kpis"), new RegExp(`Used\\s+${round - 1}\\s[\\s\\S]*Remaining\\s+${allowance - round + 1}`, "i"));
     await c.fill("#f-request", `Round ${round}: enlarge the menu photos and move the order button above the fold.`);
-    await nav(c, btn(c, "Submit revision request"));
+    await nav(c, btn(c, "Submit request"));
     assert.match(await text(c, ".toast"), new RegExp(`Revision round ${round} submitted`, "i"));
     if (round === 1) {
       // The team delivers round 1 and the customer approves it.
@@ -482,7 +482,7 @@ step("[PORTAL-006] customer reviews the design, uses the included revision round
   assert.match(await text(c, ".kpis"), new RegExp(`Used\\s+${allowance}[\\s\\S]*Remaining\\s+0`, "i"));
   assert.match(await text(c), /Further changes need a change order/i);
   await c.fill("#f-request", "Add a gift-card page with online purchase.");
-  await nav(c, btn(c, "Request a change-order quote"));
+  await nav(c, btn(c, "Submit request (changes need a change-order quote)"));
   assert.match(await text(c), /Awaiting change-order quote/i);
 
   // PM prices it; customer approves; an invoice is created and the pay link opens the invoice honestly.
