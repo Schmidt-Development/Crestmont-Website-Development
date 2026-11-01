@@ -1017,6 +1017,9 @@ export async function syncCustomerRevisionSafe(db: Db, revisionId: string): Prom
     const s = await getBuildSettings(db);
     if (s.customer_revision_mode !== "auto" || s.globally_paused || !s.automation_enabled) return null;
     const r = await getCustomerRevision(db, revisionId);
+    const triage = await db.prepare(`SELECT customer_kind, category, category_at FROM revisions WHERE id = ?`).bind(revisionId).first<{ customer_kind: string; category: string; category_at: string | null }>();
+    // A customer's problem report waits for staff triage; a scope change waits for its change order (entitled below).
+    if (!triage || (triage.customer_kind === "problem" && !triage.category_at)) return null;
     if (!r || !r.entitled || r.liveJob || r.decision === "rejected" || !["submitted", "in_progress"].includes(r.status) || r.text.trim().length > 5000) return null;
     if ((await projectControls(db, r.projectId))?.paused) return null;
     return await forwardCustomerRevision(db, revisionId, { kind: "system" });

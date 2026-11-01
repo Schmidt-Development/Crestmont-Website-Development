@@ -57,6 +57,8 @@ async function generalConversationsNotice(ctx: AppContext): Promise<SafeHtml> {
   return n ? html`<div class="alert alert--info" role="status">${n} unread general customer message${n === 1 ? "" : "s"} (outside projects). <a href="/staff/conversations">Open conversations</a></div>` : html``;
 }
 
+const REVISION_CATEGORY_LABEL: Record<string, string> = { customer_revision: "Customer revision (uses a round)", builder_defect: "Crestmont defect (no round used)", scope_change: "Scope change (change order)" };
+
 export function register(r: Router): void {
   // ───────────── My work ─────────────
   r.get("/staff", async (ctx) => {
@@ -339,6 +341,8 @@ ${textarea({ name: "description", label: "Description", rows: 2, maxlength: 5000
 <section class="card"><h2 class="card__title">Revision queue</h2>${table(revs, [
   { header: "Round", cell: (x) => html`${x.round} ${x.included ? badge("active", "Included") : badge("requested", "Billable")}` },
   { header: "Request", cell: (x) => nl2br(x.request_text) },
+  { header: "Category", cell: (x) => html`${x.customer_kind === "problem" && !x.category_at ? badge("pending", "Problem report: triage") : badge(x.category === "builder_defect" ? "active" : x.category === "scope_change" ? "requested" : "draft", REVISION_CATEGORY_LABEL[x.category ?? "customer_revision"])}${x.category_reason ? html`<br><span class="faint">${x.category_reason}</span>` : ""}
+${coord && !["delivered", "approved"].includes(x.status) && x.ai_decision !== "rejected" ? html`<form method="post" action="/staff/revisions/${x.id}/classify" class="stack" style="margin-top:.5rem">${csrf(ctx)}${select({ name: "category", label: "Classify", id: `rc-${x.id}`, options: P.REVISION_CATEGORIES.map((c) => ({ value: c, label: REVISION_CATEGORY_LABEL[c] })), value: x.category ?? "customer_revision" })}${input({ name: "reason", label: "Reason (shown to the customer)", required: true, maxlength: 1000, id: `rcr-${x.id}` })}${button("Save classification", { variant: "secondary", size: "sm" })}</form>` : ""}` },
   { header: "Status", cell: (x) => badge(x.status) },
   { header: "Change order", cell: (x) => x.co_status ? html`${badge(x.co_status)} ${formatCents(x.co_price)}` : x.included ? "—" : badge("pending", "Needs proposal") },
   { header: "AI build", cell: (x) => x.ai_job_id ? html`<a href="/staff/builds/${x.ai_job_id}">${(x.ai_job_state ?? "").replace(/_/g, " ")}</a>${x.ai_preview_url ? html` · <a href="/staff/builds/${x.ai_job_id}/preview" rel="noopener noreferrer" target="_blank">preview</a>` : ""}` : "—" },
@@ -549,6 +553,17 @@ ${input({ name: "description", label: "Description", required: true, maxlength: 
       if (price === null) throw new HttpError(422, "Enter a price for the change order.");
       await P.proposeChangeOrder(ctx, ctx.actor!, p.id, { scope: str(f, "scope"), priceCents: price, revisionId: str(f, "revision_id") || null });
       return "Change order proposed. The customer was asked to approve it.";
+    });
+  });
+  r.post("/staff/revisions/:id/classify", async (ctx, p) => {
+    requireStaff(ctx, "delivery.access");
+    if (!can(ctx.actor!, "project.coordinate")) throw new HttpError(403, "Only a project coordinator can classify revision requests.");
+    const f = await ctx.form();
+    const rev = await ctx.db.prepare(`SELECT project_id FROM revisions WHERE id = ?`).bind(p.id).first<{ project_id: string }>();
+    if (!rev) throw new HttpError(404, "Revision not found");
+    return act(ctx, rev.project_id, "revisions", async () => {
+      const res = await P.classifyRevision(ctx.db, ctx.actor!, p.id, str(f, "category") as P.RevisionCategory, str(f, "reason"));
+      return res.included ? "Classification saved." : "Classification saved. This request needs an approved change order before work starts.";
     });
   });
   r.post("/staff/revisions/:id/status", async (ctx, p) => {

@@ -586,6 +586,10 @@ test("[AIB-006] customer revisions follow the existing entitlement rules and the
 
   // Policy auto: the entitled request is queued by the system, and its build fails honestly after its attempts.
   await t.db.prepare(`UPDATE build_settings SET customer_revision_mode = 'auto', max_attempts = 1`).run();
+  // [AIB-QUALITY] A customer's problem report waits for staff triage: it is never queued automatically before.
+  await t.db.prepare(`UPDATE revisions SET customer_kind = 'problem' WHERE id = ?`).bind(billable.id).run();
+  assert.equal(await B.syncCustomerRevisionSafe(t.db, billable.id), null, "untriaged problem report is not auto-queued");
+  await t.db.prepare(`UPDATE revisions SET customer_kind = 'change' WHERE id = ?`).bind(billable.id).run();
   const autoId = await B.syncCustomerRevisionSafe(t.db, billable.id);
   assert.ok(autoId, "queued automatically");
   const autoJob = (await B.getJob(t.db, autoId!))!;

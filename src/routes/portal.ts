@@ -554,13 +554,17 @@ ${isAdmin(org) ? html`<form method="post" action="/portal/projects/${proj.id}/pr
 ${formErrors(errors)}
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Request a revision</h2>
 ${remaining ? html`<p class="muted">This will use round ${usage.used + 1} of ${proj.revision_allowance}. Group all changes for this round into one request.</p>` : html`<p class="muted">You have used every included round. You can still submit a request: we will reply with a change order (scope and price) for your approval before any work starts.</p>`}
-<form method="post" action="/portal/projects/${proj.id}/revisions">${csrf(ctx)}${textarea({ name: "request", label: "What should change?", required: true, maxlength: 10000, rows: 6 })}${button(remaining ? "Submit revision request" : "Request a change-order quote")}</form></section>
+<form method="post" action="/portal/projects/${proj.id}/revisions">${csrf(ctx)}<fieldset class="stack"><legend>What kind of request is this?</legend>
+<label><input type="radio" name="kind" value="change" checked> A change I would like (uses a revision round)</label>
+<label><input type="radio" name="kind" value="problem"> Something does not work as agreed (no round is used while we check it; if it is our mistake, it never uses one)</label></fieldset>
+${textarea({ name: "request", label: "What should change?", required: true, maxlength: 10000, rows: 6 })}${button(remaining ? "Submit request" : "Submit request (changes need a change-order quote)")}</form></section>
 <section class="card"><h2 class="card__title">Change orders</h2>${cos.length ? cos.map((c) => html`<div class="msg" style="margin-bottom:.75rem"><div class="row row--between"><strong>${formatCents(c.price_cents)}</strong>${badge(c.status)}</div><p>${nl2br(c.scope_text)}</p>
 ${c.status === "proposed" ? isAdmin(org) ? html`<form method="post" action="/portal/change-orders/${c.id}/decide">${csrf(ctx)}${input({ name: "notes", label: "Notes (optional)", maxlength: 1000, id: `co-notes-${c.id}` })}<div class="row">${button("Approve change order", { name: "decision", value: "approved", size: "sm" })}${button("Decline", { variant: "ghost", name: "decision", value: "rejected", size: "sm" })}</div></form>` : html`<p class="faint">An account administrator must approve change orders.</p>` : ""}
 ${c.invoice_id ? html`<p>Invoice: ${badge(c.invoice_status ?? "open")} ${c.invoice_status === "open" ? html`<a class="btn btn--primary btn--sm" href="/portal/billing/invoices/${c.invoice_id}">Pay invoice</a>` : ""}</p>` : ""}</div>`) : html`<p class="muted">No change orders.</p>`}</section></div>
 <section style="margin-top:1.5rem"><h2>Revision rounds</h2>${table(revs, [
   { header: "Round", cell: (x) => html`${x.round}${x.included ? "" : html` ${badge("requested", "Billable")}`}` },
   { header: "Request", cell: (x) => nl2br(x.request_text.length > 300 ? x.request_text.slice(0, 297) + "…" : x.request_text) },
+  { header: "Type", cell: (x) => html`${x.customer_kind === "problem" && !x.category_at ? badge("pending", "Problem report: we are checking it") : x.category === "builder_defect" ? badge("approved", "Our fix: no round used") : x.category === "scope_change" ? badge("requested", "New scope: change order") : badge("in_progress", "Revision round")}${x.category_reason ? html`<br><span class="faint">${x.category_reason}</span>` : ""}` },
   { header: "Status", cell: (x) => x.ai_decision === "rejected" ? html`${badge("rejected", "Not accepted")}${x.ai_decision_note ? html`<br><span class="faint">${x.ai_decision_note}</span>` : ""}`
     : !x.included && !x.billable_change_order_id ? badge("pending", "Awaiting change-order quote")
     : x.status === "submitted" && !x.ai_decision ? badge("pending", "Awaiting review")
@@ -576,7 +580,8 @@ ${c.invoice_id ? html`<p>Invoice: ${badge(c.invoice_status ?? "open")} ${c.invoi
     const org = requireCustomerOrg(ctx);
     const f = await ctx.form();
     return orRerender((errs, st) => revisionsPage(ctx, org, p.id, errs, st), async () => {
-      const res = await P.requestRevision(ctx, { organizationId: org.organizationId, projectId: p.id, userId: ctx.user!.id, text: str(f, "request") });
+      const res = await P.requestRevision(ctx, { organizationId: org.organizationId, projectId: p.id, userId: ctx.user!.id, text: str(f, "request"), kind: str(f, "kind") === "problem" ? "problem" : "change" });
+      if (res.problemReport && !res.duplicate) return redirect(ctx, `/portal/projects/${p.id}/revisions`, { kind: "success", text: "Problem report received. We will check it; it does not use a revision round while we do, and never does if it is our mistake." });
       if (res.duplicate) return redirect(ctx, `/portal/projects/${p.id}/revisions`, { kind: "info", text: `We already have this request (round ${res.decision.round}); nothing new was submitted.` });
       return redirect(ctx, `/portal/projects/${p.id}/revisions`, { kind: "success", text: res.decision.kind === "included" ? `Revision round ${res.decision.round} submitted. We will review it and let you know when work starts.` : "Request received. Your included rounds are used, so we will send a change order for approval." });
     });
