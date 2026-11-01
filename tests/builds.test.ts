@@ -10,6 +10,10 @@ import * as B from "../src/services/builds.ts";
 import * as D from "../src/services/site-delivery.ts";
 import type { Env } from "../src/app/context.ts";
 import { getPipeline } from "../src/services/build-pipeline.ts";
+import { withQuality, passingScorecard } from "./support/quality.ts";
+import { verifyScorecard, requiredCapabilities, PACKAGE_CAPABILITIES } from "../src/domain/quality.ts";
+import { decideImprovement } from "../src/services/build-quality.ts";
+import { readFileSync as readFileSyncQ } from "node:fs";
 
 const RUNNER_SECRET = "test-runner-secret";
 const WHSEC = "whsec_buildtest";
@@ -27,7 +31,7 @@ const LOCAL_CAPS = ["local-model", "container-sandbox", "zero-token-cost", "git"
 
 async function runner(t: App, path: string, body: unknown, secret = RUNNER_SECRET) {
   const withCaps = path === "claim" && body && typeof body === "object" && !("capabilities" in body) ? { ...body, capabilities: LOCAL_CAPS } : body;
-  const raw = JSON.stringify(withCaps);
+  const raw = JSON.stringify(withQuality(path, withCaps));
   const ts = Math.floor(Date.now() / 1000);
   const res = await t.client().request("POST", `/api/builds/runner/${path}`, { body: raw, headers: { "content-type": "application/json", "x-crestmont-runner-signature": `t=${ts},v1=${await hmacSha256Hex(secret, `${ts}.${raw}`)}` } });
   return { status: res.status, json: await res.json() as Record<string, any> }; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -980,4 +984,97 @@ test("[AIB-006] [AIB-007] D1: customer revisions wait for the owner; rejection s
   const other = await customerWithOrder(t);
   assert.equal((await other.c.get(`/portal/projects/${pid}/revisions`)).status, 404);
   assert.equal((await other.c.post(`/staff/builds/customer-revisions/${second.id}/reject`, { reason: "nope nope" })).status, 403);
+});
+
+// ── Quality engine (platform side): dispatch, verification of reported scorecards, internal-approval gate ──
+
+
+async function claimed(t: App, pkg: "starter" | "business" = "starter", functionality: string[] = ["contact_form"]) {
+  const cu = await createCustomer(t.db, `q${Math.random().toString(16).slice(2, 8)}@ex.example`, "Harbor Bakery");
+  const c = await t.client().login(cu.email, TEST_PASSWORD);
+  const order = await createPackageOrder(t.db, cu.organizationId, pkg, cu.id);
+  await stripe(t, "checkout.session.completed", session(cu.organizationId, order));
+  const pid = await projectOf(t, order.orderId);
+  await c.post(`/portal/projects/${pid}/onboarding`, { ...INTAKE, functionality, ...(functionality.includes("booking") ? { booking_details: "Customers book a pickup time for an order." } : {}) });
+  const claim = await runner(t, "claim", { runnerId: "runner-q", version: "1.5.0" });
+  return { pid, j: claim.json.job };
+}
+const completeRaw = (t: App, j: { id: string; leaseToken: string }, extra: Record<string, unknown>) =>
+  runner(t, "complete", { jobId: j.id, leaseToken: j.leaseToken, outcome: "ready_for_review", runCostUsd: 0, sourceCommit: "q0000001", previewUrl: "https://cm-prv-q-b0.acct.workers.dev", previewName: "cm-prv-q-b0", previewGated: true, ...extra });
+
+test("[AIB-QUALITY] every package is dispatched on the full-stack foundation with the quality engine required", async () => {
+  const t = await app();
+  const { j } = await claimed(t, "business", ["contact_form", "booking"]);
+  assert.deepEqual(j.starter, { name: "fullstack", version: "1" });
+  assert.equal(j.quality, "required");
+  assert.equal(j.packageId, "business");
+  const row = await t.db.prepare(`SELECT quality_required, starter_ref FROM build_jobs WHERE id = ?`).bind(j.id).first<{ quality_required: number; starter_ref: string }>();
+  assert.deepEqual({ ...row }, { quality_required: 1, starter_ref: "fullstack-v1" });
+  // The platform's matrix is the runner starter's matrix (one source of truth).
+  const runnerMatrix = JSON.parse(readFileSyncQ(new URL("../runner/starters/fullstack-v1/scripts/packages.json", import.meta.url), "utf8")).packages;
+  for (const p of ["starter", "business", "premium", "custom"] as const) assert.deepEqual([...PACKAGE_CAPABILITIES[p]], runnerMatrix[p].capabilities, p);
+});
+
+test("[AIB-QUALITY] a ready build without a verified 10/10 scorecard never reaches internal approval: missing, fabricated or below 10 are refused, with no override", async () => {
+  for (const [label, quality, why] of [
+    ["missing", undefined, /no quality scorecard/],
+    ["below 10", { ...passingScorecard(), score: 9.4, eligible: false, criteria: passingScorecard().criteria.map((c) => (c.id === "performance" ? { ...c, status: "fail", evidence: [], reason: "p95 120 ms" } : c)) }, /9\.4\/10/],
+    ["pass without evidence", { ...passingScorecard(), criteria: passingScorecard().criteria.map((c) => (c.id === "security" ? { ...c, evidence: [] } : c)) }, /failed the platform's verification \(criterion security: "pass" without evidence/],
+    ["inflated score", { ...passingScorecard(), criteria: passingScorecard().criteria.map((c) => (c.id === "seo" ? { ...c, status: "fail", evidence: [] } : c)) }, /reported (score|eligible)/],
+  ] as const) {
+    const t = await app();
+    const { pid, j } = await claimed(t);
+    const r = await (quality === undefined ? runner(t, "complete", { jobId: j.id, leaseToken: j.leaseToken, outcome: "ready_for_review", runCostUsd: 0, previewUrl: "https://cm-prv-q-b0.acct.workers.dev", quality: null }) : completeRaw(t, j, { quality }));
+    assert.equal(r.json.state, "failed", label);
+    const job = await t.db.prepare(`SELECT state, state_reason FROM build_jobs WHERE id = ?`).bind(j.id).first<{ state: string; state_reason: string }>();
+    assert.match(job!.state_reason, why, label);
+    assert.equal(await stageOf(t, pid), "FAILED_NEEDS_INTERVENTION");
+    // Staff cannot approve it internally either, not even with a written reason.
+    await t.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review' WHERE id = ?`).bind(j.id).run();
+    const res = await t.oc.post(`/staff/builds/${j.id}/internal-approve`, { note: "I want to approve it anyway, override please" });
+    const shown = res.status >= 300 && res.status < 400 ? await (await t.oc.get(res.headers.get("location")!)).text() : await res.text();
+    assert.match(shown, /Quality engine/, label);
+    assert.equal((await t.db.prepare(`SELECT internal_approved_at FROM build_jobs WHERE id = ?`).bind(j.id).first<{ internal_approved_at: string | null }>())!.internal_approved_at, null, label);
+  }
+});
+
+test("[AIB-QUALITY] applicability is the platform's: a Business build whose customer asked for booking cannot drop the booking criterion as 'not applicable'", async () => {
+  const t = await app();
+  const { j } = await claimed(t, "business", ["contact_form", "booking"]);
+  const dropped = passingScorecard({ booking: false });
+  const r = await completeRaw(t, j, { quality: dropped });
+  assert.equal(r.json.state, "failed");
+  assert.match((await t.db.prepare(`SELECT state_reason FROM build_jobs WHERE id = ?`).bind(j.id).first<{ state_reason: string }>())!.state_reason, /criterion workflows is required by this website's scope but was reported not applicable/);
+  const req = requiredCapabilities("business", [{ key: "booking" }], []);
+  assert.ok(verifyScorecard(passingScorecard({ booking: true }), { packageId: "business", required: req }).eligible);
+  assert.ok(verifyScorecard(passingScorecard(), { packageId: "starter", required: requiredCapabilities("starter", [{ key: "booking" }], []) }).eligible, "booking outside the Starter package is a scope change, not a criterion");
+});
+
+test("[AIB-QUALITY] a verified 10/10 build enters internal approval; every scorecard is stored with its verification for staff", async () => {
+  const t = await app();
+  const { j } = await claimed(t);
+  const r = await completeRaw(t, j, { quality: passingScorecard({ iteration: 3 }) });
+  assert.equal(r.json.state, "ready_for_review");
+  const q = await t.db.prepare(`SELECT score, eligible, verified, iteration, package_id FROM build_quality WHERE job_id = ?`).bind(j.id).first<Record<string, unknown>>();
+  assert.deepEqual({ ...q }, { score: 10, eligible: 1, verified: 1, iteration: 3, package_id: "starter" });
+  await internalOk(t, j.id);
+  assert.ok((await t.db.prepare(`SELECT internal_approved_at FROM build_jobs WHERE id = ?`).bind(j.id).first<{ internal_approved_at: string | null }>())!.internal_approved_at);
+  const page = await (await t.oc.get(`/staff/builds/${j.id}`)).text();
+  assert.match(page, /Quality scorecard/);
+  assert.match(page, /10\/10/);
+});
+
+test("[AIB-QUALITY] reusable defect classes become builder improvement proposals (deduplicated, counted); they change nothing until a person decides", async () => {
+  const t = await app();
+  const { j } = await claimed(t);
+  const card = { ...passingScorecard(), score: 9.4, eligible: false,
+    criteria: passingScorecard().criteria.map((c) => (c.id === "accessibility" ? { ...c, status: "fail", evidence: [], reason: "contrast 3.1:1" } : c)),
+    defects: [{ criterion: "accessibility", class: "starter", detail: "Accessibility: contrast of --color-muted on --color-bg is 3.1:1" }, { criterion: "frontend", class: "website", detail: "Frontend: page about.html missing h1" }] };
+  await runner(t, "complete", { jobId: j.id, leaseToken: j.leaseToken, outcome: "failed", runCostUsd: 0, error: "x", quality: card });
+  const rows = (await t.db.prepare(`SELECT * FROM builder_improvements`).all<Record<string, unknown>>()).results;
+  assert.equal(rows.length, 1, "only the reusable (starter) cause; the website's own defect is repaired in the website");
+  assert.equal(rows[0].status, "proposed");
+  for (const k of ["root_cause", "proposed_fix", "regression_test", "affected_components", "risk", "evidence_json"]) assert.ok(String(rows[0][k]).length > 5, k);
+  await decideImprovement(t.db, t.owner.id, String(rows[0].id), "approved", "Fix the token default in the starter");
+  await assert.rejects(decideImprovement(t.db, t.owner.id, String(rows[0].id), "rejected", "again"), /already decided/);
 });
