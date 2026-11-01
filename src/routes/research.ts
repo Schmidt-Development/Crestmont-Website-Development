@@ -23,13 +23,22 @@ const MAX_BODY = 5_000_000;
 
 /** Signed worker body: HMAC over `t.body` with RESEARCH_RUNNER_SECRET, a mandatory single-use _nonce, JSON object. */
 async function runnerBody(ctx: AppContext): Promise<Record<string, unknown>> {
-  const secret = ctx.env.RESEARCH_RUNNER_SECRET;
+  // RESEARCH_RUNNER_SECRET is the Founder's (shared with the Node 1 worker, docs/research/RUNBOOK.md §1). On staging only,
+  // the deploy-derived RESEARCH_E2E_RUNNER_SECRET is also accepted so the deploy's live E2E can authenticate without
+  // overwriting the Founder's value (it did, silently, when the two drifted apart: every heartbeat → "Signature mismatch").
+  // Production never honours the E2E key.
+  const secrets = [ctx.env.RESEARCH_RUNNER_SECRET, ctx.env.ENVIRONMENT === "staging" ? ctx.env.RESEARCH_E2E_RUNNER_SECRET : undefined].filter((s): s is string => !!s);
   // Not configured → no worker can authenticate (fail closed with 401, the same answer as a bad signature).
-  if (!secret) throw new HttpError(401, "Research worker not configured");
+  if (!secrets.length) throw new HttpError(401, "Research worker not configured");
   const raw = await ctx.req.text();
   if (raw.length > MAX_BODY) throw new HttpError(413, "Request too large");
-  try { await verifyRunnerSignature(secret, raw, ctx.req.headers.get("x-crestmont-research-signature")); }
-  catch (e) { throw new HttpError(401, (e as Error).message); }
+  const header = ctx.req.headers.get("x-crestmont-research-signature");
+  let lastError: Error | null = null;
+  for (const secret of secrets) {
+    try { await verifyRunnerSignature(secret, raw, header); lastError = null; break; }
+    catch (e) { lastError = e as Error; }
+  }
+  if (lastError) throw new HttpError(401, lastError.message);
   let body: unknown;
   try { body = JSON.parse(raw); } catch { throw new HttpError(400, "Malformed JSON"); }
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "Body must be a JSON object");

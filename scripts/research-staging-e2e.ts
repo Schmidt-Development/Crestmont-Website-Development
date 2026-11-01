@@ -110,9 +110,12 @@ async function main() {
     assert(r.status === 401, `unsigned heartbeat → ${r.status}`);
     assert((await signedRaw("/api/research/runner/heartbeat", { runnerId: RUNNER }, { secret: "wrong-" + SECRET })) === 401, "wrong signature not refused");
   });
+  let signedOk = false;
   await check("research.replay_refused", async () => {
     const nonce = randomBytes(16).toString("hex");
-    assert((await signedRaw("/api/research/runner/heartbeat", { runnerId: RUNNER }, { nonce })) === 200, "first heartbeat refused");
+    const first = await signedRaw("/api/research/runner/heartbeat", { runnerId: RUNNER }, { nonce });
+    assert(first === 200, `first signed heartbeat refused (${first}): the staging Worker does not hold this run's research key (RESEARCH_E2E_RUNNER_SECRET)`);
+    signedOk = true;
     assert((await signedRaw("/api/research/runner/heartbeat", { runnerId: RUNNER }, { nonce })) === 409, "replayed nonce accepted");
   });
   const initial = (await q<{ paused: number; qualify_threshold: number; max_batch: number }>(`SELECT paused, qualify_threshold, max_batch FROM research_settings WHERE id = 1`))[0];
@@ -148,6 +151,8 @@ async function main() {
   const worker = new ResearchWorker({ cfg: { ...cfg, http: { ...cfg.http, brokenAttempts: 2, brokenRecheckAfterMs: 3 * 60_000 } }, state, http, platform, sources: [], cc: null, browser: null, model: null, log: silentLogger });
   let sent = 0;
   await check("research.real_batch_to_staging_d1", async () => {
+    // Without a working key every delivery is refused: fail now instead of waiting out the 20-minute research window.
+    assert(signedOk, "not attempted: the signed heartbeat was refused (see research.replay_refused)");
     await worker.heartbeat();
     for (const c of candidates) state.upsertCandidate(c, c.address.state ?? "MI", new Date(), 30);
     const ac = new AbortController();

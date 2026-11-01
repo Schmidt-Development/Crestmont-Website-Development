@@ -71,6 +71,8 @@ export interface Env {
   BUILD_PREVIEW_GATE_SECRET?: string;
   /** Shared HMAC secret for the lead-research worker API (docs/research/RUNBOOK.md). Unset = no worker can connect. */
   RESEARCH_RUNNER_SECRET?: string;
+  /** Staging only: deploy-derived key for the live research E2E (ignored in every other environment). */
+  RESEARCH_E2E_RUNNER_SECRET?: string;
   /** "yes" refuses runner requests without a replay-protection nonce (CREST-GAP-087). */
   RUNNER_REQUIRE_NONCE?: string;
   /** HMAC key for POST /api/scheduled/run (external scheduler when native Cron Triggers are unavailable). */
