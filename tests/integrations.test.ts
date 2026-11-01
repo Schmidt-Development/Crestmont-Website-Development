@@ -323,6 +323,37 @@ test("[FIN-002] Stripe fees are read (GET only) for payments missing fee_cents, 
   assert.deepEqual(calls.slice(before).map((x) => x.url.split("?")[0]), ["/v1/payment_intents/pi_test_pending"]);
 });
 
+test("[FIN-002] a PaymentIntent Stripe does not know (seeded sample, deleted, other account) is reported and skipped; the job still succeeds and other fees import", async () => {
+  // Staging seeds paid sample orders with pi_sample_* ids (scripts/seed-staging.ts). Once a Stripe test key was installed,
+  // the daily cost_import asked Stripe for them, got 404, and the whole job failed every day (job:cost_import failing,
+  // /api/readiness/health 503). A missing PaymentIntent must not wedge the job; any other Stripe error still fails it.
+  const fees: Record<string, unknown> = {
+    pi_test_settled: { id: "pi_test_settled", status: "succeeded", latest_charge: { id: "ch_1", balance_transaction: { id: "txn_1", fee: 2927, currency: "usd" } } },
+  };
+  let outage = false;
+  const fake = (async (u: string | URL | Request) => {
+    const id = new URL(String(u)).pathname.split("/").pop()!;
+    if (outage) return new Response(JSON.stringify({ error: { message: "Invalid API Key provided" } }), { status: 401 });
+    return new Response(JSON.stringify(fees[id] ?? { error: { type: "invalid_request_error", code: "resource_missing", message: `No such payment_intent: '${id}'` } }), { status: fees[id] ? 200 : 404 });
+  }) as typeof fetch;
+  const t = await createTestApp({ STRIPE_SECRET_KEY: "sk_test_fake", overrides: { fetch: fake } });
+  const cust = await createCustomer(t.db);
+  await seedProject(t.db, cust.organizationId, "prj_missing");
+  const sample = await seedPayment(t.db, cust.organizationId, { projectId: "prj_missing", pi: "pi_sample_abc123" });
+  const real = await seedPayment(t.db, cust.organizationId, { projectId: "prj_missing", pi: "pi_test_settled" });
+  const r = await runCostImport(t.db, t.env);
+  assert.equal(r.feesFetched, 1, "the real fee after the missing one is still read");
+  assert.equal(r.feesMissing, 1);
+  assert.match(r.detail, /1 not found in this Stripe account/);
+  assert.equal((await one<{ fee_cents: number | null }>(t.db, `SELECT fee_cents FROM payments WHERE id = ?`, sample.pay)).fee_cents, null, "a missing fee stays unknown, never 0");
+  assert.equal((await one<{ fee_cents: number }>(t.db, `SELECT fee_cents FROM payments WHERE id = ?`, real.pay)).fee_cents, 2927);
+  // Through the scheduler the job is ok (the readiness feed is healthy), not failing.
+  assert.equal((await runJobs(t.env, ["cost_import"])).cost_import.ok, true);
+  // A Stripe outage or a revoked key is still a failure, never silently skipped.
+  outage = true;
+  await assert.rejects(runCostImport(t.db, t.env), /Stripe 401/);
+});
+
 // ───────────── Stripe-side reconciliation (PAY-009) ─────────────
 
 test("[PAY-009] reconciliation is skipped when payments are not configured and refuses live keys", async () => {

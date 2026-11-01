@@ -21,10 +21,14 @@
 //     (https://docs.stripe.com/expand/use-cases, https://docs.stripe.com/api/balance_transactions/object)
 //     and store payments.fee_cents (only while still NULL). Every payment with a known fee is then
 //     imported once as a 'payment_fee' cost on the invoice's project (no project → ledger only).
+//     A PaymentIntent this Stripe account does not have (404: a seeded pi_sample_* id on staging, a deleted object, a
+//     payment from another account) is counted as "not found" and its fee stays Unknown; it must not abort the run for
+//     every other payment. Any other Stripe error (outage, revoked key) still fails the job.
 import type { Env } from "../app/context.ts";
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { stripeReader } from "./stripe-reconcile.ts";
+import { StripeHttpError } from "../adapters/payments.ts";
 import { audit } from "./security.ts";
 
 export const AI_FINAL_STATUSES = ["succeeded", "failed", "awaiting_approval", "approved", "rejected"] as const;
@@ -97,7 +101,7 @@ async function importOnce(db: Db, source: "ai_job" | "stripe_fee", sourceId: str
   return res[res.length - 1].meta.changes === 1;
 }
 
-export interface CostImportResult { aiImported: number; aiUnattributed: number; aiUnknown: number; aiSkipped: number; feesFetched: number; feesUnavailable: number; feeImports: number; stripe: string }
+export interface CostImportResult { aiImported: number; aiUnattributed: number; aiUnknown: number; aiSkipped: number; feesFetched: number; feesUnavailable: number; feesMissing: number; feeImports: number; stripe: string }
 
 export async function importAiCosts(db: Db): Promise<Pick<CostImportResult, "aiImported" | "aiUnattributed" | "aiUnknown" | "aiSkipped">> {
   const out = { aiImported: 0, aiUnattributed: 0, aiUnknown: 0, aiSkipped: 0 };
@@ -136,8 +140,8 @@ function feeOf(pi: Expanded): { fee: number; chargeId: string | null } | null {
   return { fee: bt.fee, chargeId: ch.id ?? null };
 }
 
-export async function importStripeFees(db: Db, env: Env): Promise<Pick<CostImportResult, "feesFetched" | "feesUnavailable" | "feeImports" | "stripe">> {
-  const out = { feesFetched: 0, feesUnavailable: 0, feeImports: 0, stripe: "" };
+export async function importStripeFees(db: Db, env: Env): Promise<Pick<CostImportResult, "feesFetched" | "feesUnavailable" | "feesMissing" | "feeImports" | "stripe">> {
+  const out = { feesFetched: 0, feesUnavailable: 0, feesMissing: 0, feeImports: 0, stripe: "" };
   const reader = stripeReader(env);
   if (!reader.ok) out.stripe = `fee lookup skipped: ${reader.reason}`;
   else {
@@ -145,12 +149,15 @@ export async function importStripeFees(db: Db, env: Env): Promise<Pick<CostImpor
         AND status IN ('succeeded','partially_refunded','refunded','disputed') ORDER BY created_at LIMIT ?`).bind(FEE_FETCH_LIMIT).all<{ id: string; stripe_payment_intent_id: string }>()).results;
     for (const p of missing) {
       if (!/^pi_[A-Za-z0-9_]{1,100}$/.test(p.stripe_payment_intent_id)) { out.feesUnavailable++; continue; }
-      const fee = feeOf(await reader.client.retrievePaymentIntentWithFee(p.stripe_payment_intent_id));
+      let pi: Expanded;
+      try { pi = await reader.client.retrievePaymentIntentWithFee(p.stripe_payment_intent_id); }
+      catch (e) { if (e instanceof StripeHttpError && e.status === 404) { out.feesMissing++; continue; } throw e; }
+      const fee = feeOf(pi);
       if (!fee) { out.feesUnavailable++; continue; } // not settled yet / non-USD: stays NULL (Unknown)
       const res = await db.prepare(`UPDATE payments SET fee_cents = ?, stripe_charge_id = COALESCE(stripe_charge_id, ?) WHERE id = ? AND fee_cents IS NULL`).bind(fee.fee, fee.chargeId, p.id).run();
       if (res.meta.changes === 1) out.feesFetched++;
     }
-    out.stripe = `${out.feesFetched} fees read from Stripe, ${out.feesUnavailable} not available yet`;
+    out.stripe = `${out.feesFetched} fees read from Stripe, ${out.feesUnavailable} not available yet${out.feesMissing ? `, ${out.feesMissing} not found in this Stripe account (fee stays Unknown)` : ""}`;
   }
   // Import every known fee once, whether it came from Stripe here or was recorded at payment time.
   const known = (await db.prepare(`SELECT p.id, p.fee_cents, p.created_at, p.stripe_payment_intent_id, i.project_id FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id
