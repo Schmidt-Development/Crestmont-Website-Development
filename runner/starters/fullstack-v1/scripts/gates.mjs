@@ -15,14 +15,20 @@
 //   J deployment     Worker/D1 configuration, migrations, health check, rollback notes, no secrets in config
 // Gates H (browser E2E) and I (independent review) are run by the Crestmont runner, not by this script.
 //
+// Integrity: this process never loads the website's own modules (src/). Tests and the performance server run in
+// separate process groups that are killed afterwards; the configuration is judged by a protected validator. The last
+// line of output is "CRESTMONT-GATES-SHA256 <hex>" of the gates.json written, which the runner checks.
+//
 // Usage: node scripts/gates.mjs --package business [--brief BRIEF.json] [--json]
 
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runFrontend } from "./lib/frontend.mjs";
 import { migratedDb } from "./lib/d1.mjs";
+import { validateConfig } from "./lib/config-check.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -40,7 +46,6 @@ if (!pkg) { console.error(`unknown package ${pkgId}`); process.exit(2); }
 // ── configuration ──
 let config = null;
 try { config = JSON.parse(readFileSync(path.join(ROOT, "business.config.json"), "utf8")); } catch (e) { config = null; }
-const { validateConfig } = await import(path.join(ROOT, "src/lib/config.js"));
 const cfgCheck = config ? validateConfig(config) : { problems: ["business.config.json is missing or not JSON"], missing: [] };
 out.missingInformation = cfgCheck.missing;
 const features = Object.fromEntries(Object.entries(config?.features ?? {}).filter(([, v]) => v === true));
@@ -63,24 +68,64 @@ for (const i of cd?.integrations ?? []) if (/stripe|payment/i.test(String(i))) r
 for (const k of ["contact", "admin", "notifications"]) if (pkg.capabilities.includes(k)) requested.add(k);
 out.requested = [...requested];
 
-// ── tests: run every test file once, record each test's tags and outcome ──
+// ── tests ──
+// Child processes run in their own process group, which is killed when they finish (nothing they start outlives
+// them). No inherited test-runner context (a parent `node --test` would capture the results) and no NODE_OPTIONS.
+const childEnv = { ...process.env, NODE_OPTIONS: "" };
+delete childEnv.NODE_TEST_CONTEXT;
+function runChild(argv, timeoutMs) {
+  return new Promise((resolve) => {
+    const c = spawn(process.execPath, argv, { cwd: ROOT, env: childEnv, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "";
+    c.stdout.on("data", (d) => { if (stdout.length < 20_000_000) stdout += d; });
+    c.stderr.on("data", (d) => { if (stderr.length < 2_000_000) stderr += d; });
+    const killGroup = () => { try { process.kill(-c.pid, "SIGKILL"); } catch { /* already gone */ } };
+    const timer = setTimeout(killGroup, timeoutMs);
+    c.on("close", (code) => { clearTimeout(timer); killGroup(); resolve({ status: code, stdout, stderr }); });
+    c.on("error", () => { clearTimeout(timer); resolve({ status: -1, stdout, stderr }); });
+  });
+}
+function parseTap(text) {
+  const list = [];
+  for (const line of text.split("\n")) {
+    const m = /^(\s*)(not ok|ok) \d+ - (.*?)(?:\s+#\s+(SKIP|TODO)\b.*)?$/.exec(line);
+    if (!m || m[1].length > 0) continue; // top-level tests only
+    const title = m[3];
+    // A file-level result (node reports a whole file under its path) is not a test: an "ok" for a file that exited
+    // early proves nothing; a "not ok" for a file that failed to load is a failure.
+    if (/\.test\.m?js$/.test(title)) { if (m[2] === "not ok") list.push({ title: `${title} (failed to run)`, status: "failed", tags: [] }); continue; }
+    list.push({ title, status: m[4] ? "skipped" : m[2] === "ok" ? "passed" : "failed", tags: [...title.matchAll(/\[([a-z0-9:_-]+)\]/g)].map((x) => x[1]) });
+  }
+  return list;
+}
 const testFiles = [];
 const walk = (d) => { for (const e of readdirSync(d)) { const p = path.join(d, e); if (statSync(p).isDirectory()) walk(p); else if (/\.test\.m?js$/.test(e)) testFiles.push(p); } };
 if (existsSync(path.join(ROOT, "tests"))) walk(path.join(ROOT, "tests"));
-// An independent test run: no inherited test-runner context (a parent `node --test` would otherwise capture the
-// results) and no inherited NODE_OPTIONS.
-const testEnv = { ...process.env, NODE_OPTIONS: "" };
-delete testEnv.NODE_TEST_CONTEXT;
-const run = spawnSync(process.execPath, ["--no-warnings", "--test", "--test-reporter=tap", ...testFiles], { cwd: ROOT, encoding: "utf8", timeout: 600_000, env: testEnv });
+// The protected foundation suites run one file at a time: each must load and report at least one passing test, so a
+// website cannot make a protected file crash on import and replace its coverage with its own trivial tests.
+const FOUNDATION = ["core", "booking", "payments", "admin"].map((n) => path.join(ROOT, "tests", "foundation", `${n}.test.mjs`));
 const tests = [];
-for (const line of (run.stdout ?? "").split("\n")) {
-  const m = /^(\s*)(not ok|ok) \d+ - (.*?)(?:\s+#\s+(SKIP|TODO)\b.*)?$/.exec(line);
-  if (!m || m[1].length > 0) continue; // top-level tests only
-  const title = m[3];
-  tests.push({ title, status: m[4] ? "skipped" : m[2] === "ok" ? "passed" : "failed", tags: [...title.matchAll(/\[([a-z0-9:_-]+)\]/g)].map((x) => x[1]) });
+const integrity = [];
+for (const f of FOUNDATION) {
+  const r = await runChild(["--no-warnings", "--test", "--test-reporter=tap", f], 600_000);
+  const got = parseTap(r.stdout ?? "");
+  tests.push(...got);
+  const rel = path.relative(ROOT, f);
+  // Every test the protected file declares must report a result (passed, failed or skipped): a website cannot make
+  // part of a protected suite silently not run (for example by exiting the process early).
+  const declared = (readFileSync(f, "utf8").match(/^test\(/gm) ?? []).length;
+  if (!got.some((t) => t.status === "passed")) integrity.push(`protected suite ${rel} did not run (no passing test; exit ${r.status})`);
+  else if (got.length !== declared) integrity.push(`protected suite ${rel} reported ${got.length} of its ${declared} tests (it did not run completely)`);
+  else if (r.status !== 0 && !got.some((t) => t.status === "failed")) integrity.push(`protected suite ${rel} exited ${r.status} without reporting a failed test`);
 }
-out.tests = { passed: tests.filter((t) => t.status === "passed").length, failed: tests.filter((t) => t.status === "failed").length, skipped: tests.filter((t) => t.status === "skipped").length, files: testFiles.length, exitCode: run.status };
-if (run.status !== 0 && !tests.some((t) => t.status === "failed")) tests.push({ title: "(test runner failed to start or crashed)", status: "failed", tags: ["backend"] });
+const siteFiles = testFiles.filter((f) => !FOUNDATION.includes(f) && !f.endsWith(`${path.sep}helpers.mjs`));
+if (siteFiles.length) {
+  const r = await runChild(["--no-warnings", "--test", "--test-reporter=tap", ...siteFiles], 600_000);
+  const got = parseTap(r.stdout ?? "");
+  tests.push(...got);
+  if (r.status !== 0 && !got.some((t) => t.status === "failed")) integrity.push(`site tests exited ${r.status} without reporting a failed test (crashed or failed to load)`);
+}
+out.tests = { passed: tests.filter((t) => t.status === "passed").length, failed: tests.filter((t) => t.status === "failed").length, skipped: tests.filter((t) => t.status === "skipped").length, files: FOUNDATION.length + siteFiles.length };
 const byTag = (tag) => tests.filter((t) => t.tags.includes(tag));
 // A test may be skipped only because a feature it exercises is NOT enabled for this website. A skipped test whose
 // feature tags are all enabled (or that has no feature tag) is a required test that did not run: it fails the gate.
@@ -99,6 +144,14 @@ function require(g, tag, why) {
   for (const t of skipped) fail(g, `SKIPPED (a required test never counts as passed): ${t.title}`);
   if (passed && !failed.length && !skipped.length) g.evidence.push(`[${tag}] ${passed} test(s) passed`);
 }
+
+// Any failed test, any skipped test without a feature reason, and any suite that did not run fails gate C, whatever
+// its tags (a file that fails to load is reported untagged, under its path).
+const globalProblems = [
+  ...integrity,
+  ...tests.filter((t) => t.status === "failed").map((t) => `FAILED: ${t.title}`),
+  ...tests.filter((t) => t.status === "skipped" && !skipJustified(t)).map((t) => `SKIPPED without a disabled-feature reason (never counts as passed): ${t.title}`),
+];
 
 // ── A requirements ──
 const A = gate("A", "requirements");
@@ -127,6 +180,7 @@ if (!fe.errors.some((e) => e.area !== "security")) B.evidence.push(`${fe.pages.l
 
 // ── C backend ──
 const C = gate("C", "backend");
+for (const p of new Set(globalProblems)) fail(C, p);
 require(C, "backend", "API behaviour");
 require(C, "errors", "structured error handling");
 for (const f of ["contact", "quotes", "booking"]) if (features[f]) require(C, f, `${f} API`);
@@ -184,17 +238,34 @@ const pub = path.join(ROOT, "public");
 const weight = (p) => { let n = 0; const html = readFileSync(p, "utf8"); n += Buffer.byteLength(html); for (const m of html.matchAll(/(?:href|src)=["'](\/assets\/[^"']+\.(?:css|js))["']/g)) { const f = path.join(pub, m[1]); if (existsSync(f)) n += statSync(f).size; } return n; };
 for (const p of fe.pages) { const w = weight(path.join(ROOT, p)); if (w > 250_000) fail(G, `${p}: ${Math.round(w / 1024)} KB of HTML/CSS/JS (budget 250 KB)`); }
 for (const e of fe.errors.filter((x) => x.area === "performance")) fail(G, `${e.file}: ${e.message}`);
-try {
-  const { app } = await import(path.join(ROOT, "scripts/lib/harness.mjs"));
-  const t = await app();
-  const times = [];
-  for (let i = 0; i < 40; i++) { const s = performance.now(); await t.get("/api/services"); await t.get("/api/config"); times.push(performance.now() - s); }
-  times.sort((a, b) => a - b);
-  const p95 = times[Math.floor(times.length * 0.95)];
-  out.performance = { localApiP95Ms: Math.round(p95 * 10) / 10, note: "measured offline against the local database; staging latency is measured by the runner's browser checks" };
-  if (p95 > 100) fail(G, `local API p95 ${p95.toFixed(1)} ms exceeds the 100 ms budget`);
-  else G.evidence.push(`local API p95 ${p95.toFixed(1)} ms; page weight within budget`);
-} catch (e) { fail(G, `performance measurement failed: ${String(e.message).slice(0, 200)}`); }
+// Latency is measured from THIS process over HTTP against the Worker running in a separate process group.
+{
+  let server = null;
+  try {
+    server = spawn(process.execPath, ["--no-warnings", path.join(ROOT, "scripts", "lib", "serve.mjs")], { cwd: ROOT, env: childEnv, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const port = await new Promise((resolve, reject) => {
+      let buf = "";
+      const t = setTimeout(() => reject(new Error("the website did not start within 20 s")), 20_000);
+      server.stdout.on("data", (d) => { buf += d; const m = /\{"port":(\d+)\}/.exec(buf); if (m) { clearTimeout(t); resolve(Number(m[1])); } });
+      server.on("exit", (code) => { clearTimeout(t); reject(new Error(`the website exited (${code}) before serving`)); });
+    });
+    const base = `http://127.0.0.1:${port}`;
+    const times = [];
+    for (let i = 0; i < 40; i++) {
+      const s0 = performance.now();
+      const a = await fetch(`${base}/api/services`), b = await fetch(`${base}/api/config`);
+      await a.arrayBuffer(); await b.arrayBuffer();
+      if (!a.ok || !b.ok) throw new Error(`API answered ${a.status}/${b.status}`);
+      times.push(performance.now() - s0);
+    }
+    times.sort((x, y) => x - y);
+    const p95 = times[Math.floor(times.length * 0.95)];
+    out.performance = { localApiP95Ms: Math.round(p95 * 10) / 10, note: "measured offline over local HTTP against the local database; staging latency is measured by the runner's browser checks" };
+    if (p95 > 100) fail(G, `local API p95 ${p95.toFixed(1)} ms exceeds the 100 ms budget`);
+    else G.evidence.push(`local API p95 ${p95.toFixed(1)} ms; page weight within budget`);
+  } catch (e) { fail(G, `performance measurement failed: ${String(e.message).slice(0, 200)}`); }
+  finally { if (server?.pid) { try { process.kill(-server.pid, "SIGKILL"); } catch { /* gone */ } } }
+}
 
 // ── J deployment readiness ──
 const J = gate("J", "deployment");
@@ -215,7 +286,8 @@ const required = ["A", "B", "C", "D", "F", "G", "J"];
 const failed = Object.values(out.gates).filter((g) => g.status === "fail");
 out.summary = { failed: failed.map((g) => g.id), pendingExternal: Object.values(out.gates).filter((g) => g.status === "pending_external").map((g) => g.id), passed: Object.values(out.gates).filter((g) => g.status === "pass").map((g) => g.id) };
 mkdirSync(path.join(ROOT, ".crestmont", "quality"), { recursive: true });
-writeFileSync(path.join(ROOT, ".crestmont", "quality", "gates.json"), JSON.stringify(out, null, 2) + "\n");
+const serialized = JSON.stringify(out, null, 2) + "\n";
+writeFileSync(path.join(ROOT, ".crestmont", "quality", "gates.json"), serialized);
 if (args.includes("--json")) process.stdout.write(JSON.stringify(out, null, 2) + "\n");
 else {
   for (const g of Object.values(out.gates)) {
@@ -225,4 +297,5 @@ else {
   if (out.scopeChanges.length) process.stdout.write(`\nScope changes (not built; need authorization): ${out.scopeChanges.map((s) => s.feature).join(", ")}\n`);
   process.stdout.write(`\nTests: ${out.tests.passed} passed, ${out.tests.failed} failed, ${out.tests.skipped} skipped. Gates failed: ${out.summary.failed.join(", ") || "none"}; pending external verification: ${out.summary.pendingExternal.join(", ") || "none"}.\n`);
 }
+process.stdout.write(`CRESTMONT-GATES-SHA256 ${createHash("sha256").update(serialized).digest("hex")}\n`);
 process.exit(failed.some((g) => required.includes(g.id) || g.id === "E") ? 1 : 0);

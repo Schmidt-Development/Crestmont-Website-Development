@@ -38,8 +38,16 @@ The website's own code cannot produce its evidence:
 
 - Protected starter files (gates, test harness, foundation tests, the first migration, the package matrix) are
   restored by the runner before every acceptance run.
+- The gate process never loads the website's own modules. Tests and the performance server run in separate process
+  groups that are killed when they finish. The configuration is judged by a protected validator, and latency is
+  measured over HTTP from outside the website's process.
+- Every protected foundation suite must run completely (each declared test reports a result). Any failed test, and
+  any skipped test without a disabled-feature reason, fails gate C whatever its tags.
 - Stale `gates.json` files and screenshots are deleted before acceptance. `gates.json` is trusted only when the
-  runner's own `quality-gates` check ran it.
+  runner's own `quality-gates` check ran in this pass, its output contains exactly one `CRESTMONT-GATES-SHA256` line
+  matching the file's bytes, and its exit status agrees with the file.
+- The final scorecard uses the reviewer's assessment only if no repair happened after that review; otherwise the
+  review-based criteria have no evidence and the build cannot reach 10/10.
 - Provider verifications (for example `stripe.verify_test_key`, `resend.verify_sending_domain`) are read only from
   `.crestmont/quality/verifications.json`, which the runner writes from the integration broker's completed
   operations. Without one, gate E is `pending_external`, never `pass`.
@@ -81,6 +89,9 @@ The original approved scope stays in `project_scopes`; classification never edit
 
 ## Not yet covered (stated honestly)
 
+- A process started by website test code that escapes its process group (a new session) could still run after the
+  tests. It cannot change the result: the runner rejects a gates file whose bytes do not match the gate's single
+  digest line. At worst it voids the evidence, and the build does not pass.
 - Websites built before the full-stack foundation keep their original starter for revisions (brochure v1). The
   full-stack gates would break those repositories, so these revisions are **not scored**; the staff page says so.
   Moving such a website to fullstack v1 is a rebuild, which is the Owner's decision.

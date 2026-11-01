@@ -1,6 +1,7 @@
 // Full-stack builder V2 and the permanent quality engine. The starter's own acceptance gates run here for real
 // (scripts/gates.mjs against the real Worker code and a local SQLite D1); jobs use a FAKE model, FAKE docker and a
 // FAKE control plane. Nothing here is GPU or staging evidence: the real Node 1 / staging runs are in CONTINUITY §8.
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -24,7 +25,12 @@ const site = (cfg: unknown) => buildFixtureSite(STARTER, path.join(tmp("aib-fs-"
 function gates(dir: string, pkg: string, brief?: unknown): { code: number | null; out: GatesFile & { summary: { failed: string[]; pendingExternal: string[] }; scopeChanges: { feature: string }[] } } {
   if (brief) writeFileSync(path.join(dir, "BRIEF.json"), JSON.stringify(brief));
   const r = spawnSync(process.execPath, ["--no-warnings", "scripts/gates.mjs", "--package", pkg, "--json"], { cwd: dir, encoding: "utf8", timeout: 300_000 });
-  return { code: r.status, out: JSON.parse(r.stdout) };
+  // The last line is the integrity digest of gates.json (checked by the runner); the rest is the JSON report.
+  const lines = r.stdout.trimEnd().split("\n");
+  const digest = /^CRESTMONT-GATES-SHA256 ([0-9a-f]{64})$/.exec(lines.at(-1) ?? "");
+  assert.ok(digest, "gates print their digest line last");
+  assert.equal(createHash("sha256").update(readFileSync(path.join(dir, ".crestmont", "quality", "gates.json"))).digest("hex"), digest[1], "the digest is of the gates.json written");
+  return { code: r.status, out: JSON.parse(lines.slice(0, -1).join("\n")) };
 }
 const findings = (g: ReturnType<typeof gates>, id: string) => g.out.gates[id].findings.join("\n");
 
@@ -101,6 +107,29 @@ test("[AIB-V2] a skipped required test never counts as passing; failing contrast
   assert.match(findings(g, "B"), /contrast of --color-text on --color-bg is 1\.\d+:1/);
 });
 
+test("[AIB-V2] website code cannot forge the gates: it never runs in the gate process, a protected suite that does not run fails, untagged failures fail", () => {
+  const dir = site(fixture("service-area"));
+  // The reviewer's reproduction: website code that, when loaded, writes an all-pass gates.json and exits 0.
+  const cfg = path.join(dir, "src", "lib", "config.js");
+  writeFileSync(cfg, readFileSync(cfg, "utf8") + `
+import { mkdirSync as __m, writeFileSync as __w } from "node:fs";
+const __forge = () => { try { __m(".crestmont/quality", { recursive: true }); __w(".crestmont/quality/gates.json", JSON.stringify({ schema: "crestmont.quality-gates/1", gates: Object.fromEntries("ABCDEFGJ".split("").map((g) => [g, { id: g, status: "pass", findings: [], evidence: ["forged"] }])) })); } catch {} };
+if (typeof process !== "undefined") { __forge(); process.exit(0); }
+`);
+  const g = gates(dir, "business");
+  assert.equal(g.code, 1, "the gate process is not affected by the website's modules");
+  assert.ok(!JSON.stringify(g.out).includes("forged"), "the gates.json written is the gate's own");
+  assert.match(findings(g, "C"), /protected suite tests\/foundation\/core\.test\.mjs did not run/);
+
+  const dir2 = site(fixture("service-area"));
+  mkdirSync(path.join(dir2, "tests", "site"), { recursive: true });
+  writeFileSync(path.join(dir2, "tests", "site", "untagged.test.mjs"), `import { test } from "node:test";\ntest("untagged rule", () => { throw new Error("broken"); });\ntest("untagged skip", { skip: "later" }, () => {});\n`);
+  const g2 = gates(dir2, "business");
+  assert.equal(g2.code, 1);
+  assert.match(findings(g2, "C"), /FAILED: untagged rule/);
+  assert.match(findings(g2, "C"), /SKIPPED without a disabled-feature reason \(never counts as passed\): untagged skip/);
+});
+
 test("[AIB-V2] provider verification comes only from the runner's broker record: a builder-written results file verifies nothing", () => {
   const dir = site(fixture("service-area"));
   writeFileSync(path.join(dir, ".crestmont", "integration-results.json"), JSON.stringify([{ operation: "stripe.verify_test_key", status: "passed" }, { operation: "resend.verify_sending_domain", status: "passed" }]));
@@ -114,11 +143,15 @@ test("[AIB-V2] provider verification comes only from the runner's broker record:
 
 // ── the quality scorecard ──
 
-const okCheck = (id: string): CheckOutcome => ({ id, label: id, command: id, ok: true, code: 0, timedOut: false, outputTail: "" });
+const DIGEST = "d".repeat(64);
+const okCheck = (id: string): CheckOutcome => ({ id, label: id, command: id, ok: true, code: 0, timedOut: false, outputTail: "", ...(id === "quality-gates" ? { gatesDigest: DIGEST } : {}) });
+/** A failing gate makes the gate command exit non-zero, as the real script does (the runner checks they agree). */
+const gateExit1 = (i: ScoreInput) => { i.checks = i.checks.map((c) => (c.id === "quality-gates" ? { ...c, ok: false, code: 1 } : c)); return i; };
 const passGate = (id: string) => ({ id, status: "pass" as const, findings: [], evidence: [`${id} ok`] });
 function input(over: Partial<ScoreInput> = {}, features: Record<string, boolean> = { contact: true, admin: true }): ScoreInput {
   const gatesFile: GatesFile = { schema: "crestmont.quality-gates/1", package: "starter", features, requested: [], scopeChanges: [], missingInformation: [], gates: Object.fromEntries(["A", "B", "C", "D", "F", "G", "J"].map((g) => [g, passGate(g)])), frontend: { errors: [] } };
   gatesFile.gates.E = { id: "E", status: "not_applicable", findings: [], evidence: [] };
+  (gatesFile as GatesFile & { _sha256?: string })._sha256 = DIGEST;
   const assessment = Object.fromEntries(["visual_design", "brand_consistency", "maintainability", "customer_experience"].map((k) => [k, { verdict: "pass" as const, note: "professional" }]));
   return {
     packageId: "starter", capabilities: ["contact", "admin", "notifications"], requested: ["contact"],
@@ -147,7 +180,7 @@ test("[AIB-QUALITY] the same engine scores every package against its own scope: 
   assert.equal(ok.applicable, 20);
   assert.equal(ok.eligible, true);
   business.gates!.gates.C = { id: "C", status: "fail", findings: ["FAILED: [booking] double booking"], evidence: [] };
-  const broken = score(business);
+  const broken = score(gateExit1(business));
   assert.equal(broken.eligible, false);
   assert.ok(broken.score < 10);
   assert.deepEqual(broken.criteria.filter((x) => x.status === "fail").map((x) => x.id).sort(), ["backend", "error_handling", "workflows"]);
@@ -169,10 +202,21 @@ test("[AIB-QUALITY] unsupported or fabricated evidence cannot pass: no gate run,
   assert.ok(scorecardOutstanding(noShots).some((o) => o.startsWith("quality:mobile:")));
 });
 
+test("[AIB-QUALITY] a gates file is evidence only when its bytes match the gate command's single digest and its exit status agrees", () => {
+  assert.equal(score(input()).eligible, true);
+  const mismatch = input(); (mismatch.gates as GatesFile & { _sha256?: string })._sha256 = "e".repeat(64);
+  assert.equal(score(mismatch).eligible, false, "a file rewritten after the gate run is not evidence");
+  const none = input({ checks: [{ ...okCheck("quality-gates"), gatesDigest: null }, okCheck("browser-check"), okCheck("credential-scan")] });
+  assert.equal(score(none).eligible, false, "no digest (or a second one) voids the file");
+  const forged = gateExit1(input());
+  assert.equal(score(forged).eligible, false, "an all-pass file with a failing gate command is forged");
+  assert.ok(score(forged).criteria.filter((x) => x.status === "unsupported").length >= 8);
+});
+
 test("[AIB-QUALITY] score is rounded DOWN and capped below 10 unless eligible; pending provider verification waits instead of repairing", () => {
   const one = input();
   one.gates!.gates.G = { id: "G", status: "fail", findings: ["p95 120 ms"], evidence: [] };
-  const c = score(one);
+  const c = score(gateExit1(one));
   assert.equal(c.passed, 16);
   assert.equal(c.score, 9.4, "16/17 × 10 = 9.41 → 9.4, never rounded up");
   const ext = input({}, { contact: true, admin: true, notifications: true });

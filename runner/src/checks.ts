@@ -34,7 +34,9 @@ export interface StarterSpec {
   protected?: string[];
 }
 
-export interface CheckOutcome { id: string; label: string; command: string; ok: boolean; code: number; timedOut: boolean; outputTail: string }
+export interface CheckOutcome { id: string; label: string; command: string; ok: boolean; code: number; timedOut: boolean; outputTail: string;
+  /** The gate script's "CRESTMONT-GATES-SHA256 <hex>" line, when its full output contains exactly one (else null). */
+  gatesDigest?: string | null }
 
 export function starterDir(startersDir: string, starter: { name: string; version: string }): string {
   if (!/^[a-z0-9-]{1,40}$/.test(starter.name) || !/^[0-9]{1,4}$/.test(starter.version)) throw new Error(`Invalid starter reference ${starter.name}@${starter.version}`);
@@ -129,7 +131,9 @@ export async function runChecks(repo: string, commands: { id: string; label: str
       : program ? await run(program, args, { cwd: repo, env, timeoutMs })
       : { code: 126, stdout: "", stderr: `refused: ${String(cmd).slice(0, 60)} is not an allow-listed program`, timedOut: false, notFound: false, refused: true };
     const tail = (r.stdout + "\n" + r.stderr).trim().split("\n").slice(-25).join("\n").slice(-3000);
-    out.push({ id: c.id, label: c.label, command: c.command.join(" "), ok: r.code === 0, code: r.code, timedOut: r.timedOut, outputTail: tail });
+    // Exactly one digest line in the whole output: a second one (anything else writing to this output) voids it.
+    const digests = [...(r.stdout ?? "").matchAll(/^CRESTMONT-GATES-SHA256 ([0-9a-f]{64})$/gm)].map((m) => m[1]);
+    out.push({ id: c.id, label: c.label, command: c.command.join(" "), ok: r.code === 0, code: r.code, timedOut: r.timedOut, outputTail: tail, gatesDigest: digests.length === 1 ? digests[0] : null });
   }
   return out;
 }

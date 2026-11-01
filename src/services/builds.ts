@@ -993,6 +993,8 @@ export async function forwardCustomerRevision(db: Db, revisionId: string, actor:
   if (r.decision === "rejected") throw new HttpError(409, "This revision request was rejected; it cannot start an AI build.");
   if (!["submitted", "in_progress"].includes(r.status)) throw new HttpError(409, `This revision request is ${r.status.replace(/_/g, " ")}; only open requests can be sent to the AI builder.`);
   if (!r.entitled) throw new HttpError(409, "This round is beyond the included revisions; its change order must be approved before any work starts.");
+  const triage = await db.prepare(`SELECT customer_kind, category_at FROM revisions WHERE id = ?`).bind(revisionId).first<{ customer_kind: string; category_at: string | null }>();
+  if (triage?.customer_kind === "problem" && !triage.category_at) throw new HttpError(409, "Classify this problem report first (project → Revisions); no AI build starts before triage.");
   if (r.liveJob) throw new HttpError(409, "This customer revision already has an AI build in progress.");
   const instruction = (opts.instruction ?? "").trim() || r.text.trim();
   if (instruction.length > 5000) throw new HttpError(422, "The customer's request is longer than 5,000 characters; edit it into an instruction before sending it to the AI builder.");

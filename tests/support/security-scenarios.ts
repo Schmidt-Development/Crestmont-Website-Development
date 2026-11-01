@@ -272,6 +272,7 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/projects/:id/handoff", path: () => P(w, "POST /staff/projects/:id/handoff"), fields: () => ({ intent: "draft", website_url: "https://a.matrix.example", documentation: "Editing guide" }) },
     { key: "POST /staff/projects/:id/costs", path: () => P(w, "POST /staff/projects/:id/costs"), fields: () => ({ category: "hosting", amount: "12.50", description: "Hosting October", incurred_on: day(-2) }) },
     { key: "POST /staff/projects/:id/change-orders", path: () => P(w, "POST /staff/projects/:id/change-orders"), fields: () => ({ scope: "Add a gallery page with lightbox", price: "300" }) },
+    { key: "POST /staff/revisions/:id/classify", path: () => P(w, "POST /staff/revisions/:id/classify"), fields: () => ({ category: "builder_defect", reason: "Our defect against the approved scope; no round is used." }) },
     { key: "POST /staff/revisions/:id/status", path: () => P(w, "POST /staff/revisions/:id/status"), fields: () => ({ status: "in_progress" }) },
     { key: "POST /staff/projects/:id/messages", path: () => P(w, "POST /staff/projects/:id/messages"), fields: () => ({ body: "Design draft is ready." }) },
     { key: "POST /staff/projects/:id/files", path: () => P(w, "POST /staff/projects/:id/files"), fields: () => ({ file: pdf("design-draft.pdf") }) },

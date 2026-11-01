@@ -91,3 +91,40 @@ test("[payments] [reconciliation] a missed webhook is recovered by reading the s
   const list = await t.get("/api/admin/payments");
   assert.equal(list.json.items[0].status, "refunded", "visible to the administrator");
 });
+
+test("[payments] [concurrency] the slot stays reserved for the whole Checkout window; a payment after the hold lapsed never confirms a second booking", { skip }, async () => {
+  const stripe = fakeStripe();
+  const t = await app({ env: KEYS, fetch: stripe });
+  const { svc, booking, manageToken } = await pendingBooking(t);
+  const held = async () => (await t.db.prepare(`SELECT hold_expires_at FROM bookings WHERE reference = ?`).bind(booking.reference).first()).hold_expires_at;
+  const firstHold = Date.parse(await held());
+  t.setNow(t.now() + 25 * 60_000);
+  assert.equal((await t.post(`/api/bookings/${booking.reference}/checkout`, {}, { "x-manage-token": manageToken })).status, 200);
+  const sent = stripe.calls.find((c) => c.path === "/v1/checkout/sessions");
+  const sessionEnd = Number(sent.body.expires_at) * 1000;
+  assert.ok(Date.parse(await held()) > sessionEnd && sessionEnd > firstHold, "the hold covers the whole Checkout session");
+  // The customer pays after the hold lapsed (the slot may have been sold again): paid, flagged, never confirmed.
+  t.setNow(Date.parse(await held()) + 60_000);
+  const late = await t.stripeEvent({ id: "evt_late", type: "checkout.session.completed", data: { object: { id: "cs_test_1", payment_status: "paid", amount_total: svc.priceCents, currency: CONFIG.payments.currency, payment_intent: "pi_late" } } });
+  assert.equal(late.json.outcome, "paid_needs_review");
+  assert.equal((await t.db.prepare(`SELECT status FROM bookings WHERE reference = ?`).bind(booking.reference).first()).status, "pending_payment");
+  assert.ok(await t.db.prepare(`SELECT 1 FROM audit_log WHERE action = 'payment.needs_review'`).first());
+  // An expired hold cannot be re-extended by starting a new checkout.
+  assert.equal((await t.post(`/api/bookings/${booking.reference}/checkout`, {}, { "x-manage-token": manageToken })).status, 409);
+});
+
+test("[payments] [webhooks] an event that fails while being applied is not lost: Stripe's retry is processed", { skip }, async () => {
+  const stripe = fakeStripe();
+  const t = await app({ env: KEYS, fetch: stripe });
+  const { svc, booking, manageToken } = await pendingBooking(t);
+  await t.post(`/api/bookings/${booking.reference}/checkout`, {}, { "x-manage-token": manageToken });
+  const event = { id: "evt_retry", type: "checkout.session.completed", data: { object: { id: "cs_test_1", payment_status: "paid", amount_total: svc.priceCents, currency: CONFIG.payments.currency, payment_intent: "pi_retry" } } };
+  const prepare = t.env.DB.prepare.bind(t.env.DB);
+  t.env.DB.prepare = (sql) => { if (/^UPDATE bookings SET status = 'confirmed'/.test(sql)) throw new Error("database unavailable"); return prepare(sql); };
+  const first = await t.stripeEvent(event);
+  assert.ok(first.status >= 500, "a failure is reported so Stripe retries");
+  t.env.DB.prepare = prepare;
+  const retry = await t.stripeEvent(event);
+  assert.equal(retry.json.outcome, "paid");
+  assert.equal((await t.db.prepare(`SELECT status FROM bookings WHERE reference = ?`).bind(booking.reference).first()).status, "confirmed");
+});

@@ -641,6 +641,9 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     const qualityRequired = job.quality === "required" || !!starterSpec?.quality;
     let lastCard: Scorecard | null = null;
     let lastVerdict: ReviewVerdict | null = null;
+    // The final scorecard may use the reviewer's assessment only of the code that reviewer saw: after any repair that
+    // was not reviewed again (the loop ended on its cycle limit), the review-based criteria have no evidence.
+    let reviewCurrent = false;
     let lastEvidence: CycleEvidence | null = null;
     let scoreNow: (verdict: ReviewVerdict | null, previewDeployed: boolean | null, iteration: number) => Scorecard = () => { throw new Error("scorecard before acceptance"); };
     if (!stop.reason && !st.localLimit && !st.agentError) {
@@ -716,7 +719,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         // Quality scorecard (every build, every iteration): failing criteria are outstanding work for this cycle, and a
         // reviewer "ready" without a verified 10/10 becomes a targeted repair (or a wait for external verification).
         const card = scoreNow(verdict, null, cycle);
-        lastCard = card; lastVerdict = verdict;
+        lastCard = card; lastVerdict = verdict; reviewCurrent = true;
         writeInside(ws.repo, path.join(".crestmont", "quality", "scorecard.json"), JSON.stringify(card, null, 2) + "\n");
         if (memory) remember.quality(memory, card);
         tracker.note({ kind: "check", message: `quality scorecard (cycle ${cycle}): ${card.score}/10 (${card.passed} of ${card.applicable} applicable criteria)${card.eligible ? "" : card.waitingExternal ? "; waiting for external verification" : `; failing: ${card.criteria.filter((c) => c.applicable && c.status !== "pass").map((c) => c.id).join(", ")}`}` });
@@ -762,6 +765,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         promptSource = "reviewer";
         // Without the orchestration endpoints the classic repair prompt is used (runner-checks.json); otherwise the reviewer's prompt.
         if (memory) remember.repair(memory, rec.open, { cycle, model: cycleRoute.model.tag, task: cycleRoute.task, commitBefore: cycleBase });
+        reviewCurrent = false;
         await runOne("repair", null, res ? `${promptUsed}\n\nThe full review is in .crestmont/review-${String(cycle).padStart(2, "0")}.md.` : null, cycleRoute);
         lastBuildModel = cycleRoute.model.tag;
         if (memory) remember.repairDone(memory, rec.open, await commitAll(git!, `AI build: cycle ${cycle} repair`).then(() => headCommit(git!)));
@@ -850,7 +854,8 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     // declares the quality engine; nothing below a verified 10/10 within the approved scope gets through.
     let finalCard: Scorecard | null = null;
     if (lastEvidence || qualityRequired) {
-      try { finalCard = scoreNow(lastVerdict, cfg.preview ? !!preview.url : null, lastCard?.iteration ?? 0); }
+      if (!reviewCurrent && lastVerdict) tracker.note({ kind: "note", message: "quality: the last repair was not reviewed again; review-based criteria have no evidence for the final code" });
+      try { finalCard = scoreNow(reviewCurrent ? lastVerdict : null, cfg.preview ? !!preview.url : null, lastCard?.iteration ?? 0); }
       catch { finalCard = null; }
       if (finalCard) {
         writeInside(ws.repo, path.join(".crestmont", "quality", "scorecard.json"), JSON.stringify(finalCard, null, 2) + "\n");

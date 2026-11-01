@@ -113,20 +113,29 @@ test("[notifications] the outbox is never reported as sent without the customer'
   assert.equal(r3.sent, 0, "nothing is sent twice");
 });
 
-test("[customer-accounts] customers register and sign in, and see only their own bookings", { skip: off("customer_accounts") }, async () => {
+test("[customer-accounts] [security] customers register and sign in, and see only bookings they made signed in or proved with the booking's manage link", { skip: off("customer_accounts") }, async () => {
   const t = await app();
   const svc = bookable();
-  if (svc) {
-    const slots = (await t.get(`/api/availability?service=${svc.id}&date=${openDate(t.now())}`)).json.slots;
-    await book(t, svc.id, slots[0].start, 1);
-    await book(t, svc.id, slots.at(-1).start, 2);
-  }
   const reg = await t.adminPost("/api/account/register", { name: "Customer One", email: "customer1@example.test", password: "customer-password-1" });
   assert.equal(reg.status, 201);
+  // Registering an email that already has an account changes nothing and reveals nothing.
+  const again = await t.adminPost("/api/account/register", { name: "Attacker", email: "customer1@example.test", password: "attacker-password-9" });
+  assert.deepEqual([again.status, again.json], [reg.status, reg.json]);
   assert.equal((await t.get("/api/account")).status, 401);
+  assert.equal((await t.adminPost("/api/account/login", { email: "customer1@example.test", password: "attacker-password-9" })).status, 401, "no takeover of an existing account");
+  let guest = null;
+  if (svc) {
+    const slots = (await t.get(`/api/availability?service=${svc.id}&date=${openDate(t.now())}`)).json.slots;
+    guest = await book(t, svc.id, slots.at(-1).start, 1); // a guest booking under the SAME email as the account
+  }
   assert.equal((await t.adminPost("/api/account/login", { email: "customer1@example.test", password: "customer-password-1" })).status, 200);
   const me = await t.get("/api/account");
   assert.equal(me.json.customer.email, "customer1@example.test");
-  if (svc) assert.equal(me.json.bookings.length, 1, "only the signed-in customer's booking");
+  if (svc) {
+    assert.equal(me.json.bookings.length, 0, "an unverified email address never exposes a guest's bookings");
+    assert.equal((await t.adminPost("/api/account/link-booking", { reference: guest.booking.reference, token: "0".repeat(48) })).status, 404, "a wrong manage token links nothing");
+    assert.equal((await t.adminPost("/api/account/link-booking", { reference: guest.booking.reference, token: guest.manageToken })).status, 200);
+    assert.equal((await t.get("/api/account")).json.bookings.length, 1, "linked with the booking's own manage link");
+  }
   assert.equal((await t.get("/api/admin/dashboard")).status, 401, "a customer session is not an admin session");
 });

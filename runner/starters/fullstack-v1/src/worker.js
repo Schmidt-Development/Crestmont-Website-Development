@@ -27,6 +27,7 @@ const ROUTES = [
   ["POST", /^\/api\/account\/login$/, (env, req) => cus.customerLogin(env, req)],
   ["POST", /^\/api\/account\/logout$/, (env, req) => cus.customerLogout(env, req)],
   ["GET", /^\/api\/account$/, (env, req) => cus.myAccount(env, req)],
+  ["POST", /^\/api\/account\/link-booking$/, (env, req) => cus.linkBooking(env, req)],
   ["POST", /^\/api\/admin\/setup$/, (env, req) => adm.setup(env, req)],
   ["POST", /^\/api\/admin\/login$/, (env, req) => adm.login(env, req)],
   ["POST", /^\/api\/admin\/logout$/, (env, req) => adm.logout(env, req)],

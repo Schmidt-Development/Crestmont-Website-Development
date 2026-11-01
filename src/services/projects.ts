@@ -705,7 +705,11 @@ export async function classifyRevision(db: Db, actor: Actor, revisionId: string,
     const others = await db.prepare(`SELECT COUNT(*) AS n FROM revisions WHERE project_id = ? AND id <> ? AND ${ROUND_CONSUMING}`).bind(r.project_id, r.id).first<{ n: number }>();
     included = (others?.n ?? 0) < r.revision_allowance;
   }
-  if (!included && !r.billable_change_order_id && r.status !== "submitted") throw new HttpError(409, "Work on this request has started; it cannot become billable without a change order. Propose one first.");
+  if (!included && r.status !== "submitted") {
+    // Work has started: it may become billable only under a change order the customer already approved.
+    const co = r.billable_change_order_id ? await db.prepare(`SELECT status FROM change_orders WHERE id = ?`).bind(r.billable_change_order_id).first<{ status: string }>() : null;
+    if (!co || !["approved", "paid", "completed"].includes(co.status)) throw new HttpError(409, "Work on this request has started; it cannot become billable without a change order the customer approved.");
+  }
   const live = await db.prepare(`SELECT 1 FROM build_jobs WHERE customer_revision_id = ? AND state IN ('queued','preparing','building','verifying')`).bind(r.id).first();
   if (!included && live) throw new HttpError(409, "An AI build is working on this request; cancel it before classifying it as billable.");
   const at = nowIso();
@@ -720,6 +724,7 @@ export async function updateRevisionStatus(ctx: MailCtx, actor: Actor, userId: s
   if (!r) throw new HttpError(404, "Revision not found");
   if (!can(actor, "project.coordinate") && !(can(actor, "task.update_assigned") && (await staffCanSeeProject(ctx.db, actor, userId, r.project_id)))) throw new HttpError(403, "You cannot update revisions on this project.");
   if ((r as RevisionRow & { ai_decision?: string | null }).ai_decision === "rejected") throw new HttpError(409, "The owner rejected this revision request; it is closed.");
+  if (r.customer_kind === "problem" && !r.category_at) throw new HttpError(409, "Classify this problem report first (Crestmont defect, customer revision or scope change); no work starts before triage.");
   if (!r.included) {
     const co = r.billable_change_order_id ? await ctx.db.prepare(`SELECT status FROM change_orders WHERE id = ?`).bind(r.billable_change_order_id).first<{ status: string }>() : null;
     if (!co || !["approved", "paid", "completed"].includes(co.status)) throw new HttpError(409, "This round is beyond the included allowance; its change order must be approved first.");

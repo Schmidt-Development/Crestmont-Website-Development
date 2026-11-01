@@ -51,8 +51,9 @@ export async function createCheckoutSession(env, fetchImpl, p) {
     metadata: { payment_id: p.paymentId, booking_id: p.bookingId ?? "" },
     line_items: { 0: { quantity: 1, price_data: { currency: p.currency, unit_amount: p.amountCents, product_data: { name: p.description } } } },
     payment_intent_data: { metadata: { payment_id: p.paymentId } },
-    expires_at: Math.floor((p.nowMs + 30 * 60_000) / 1000),
-  }, `checkout_${p.paymentId}`);
+    // Stripe accepts 30 minutes to 24 hours; the booking's hold is extended to cover this window (routes/public.js).
+    expires_at: Math.floor((p.expiresAtMs ?? p.nowMs + 31 * 60_000) / 1000),
+  }, `checkout_${p.paymentId}_${Math.floor((p.expiresAtMs ?? p.nowMs) / 1000)}`);
   if (!s.id || !s.url) throw new HttpError(502, "payment_provider_error", "The payment provider returned an incomplete answer.");
   return { id: s.id, url: s.url, mode: m.mode, livemode: s.livemode === true };
 }

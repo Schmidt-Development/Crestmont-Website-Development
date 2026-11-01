@@ -14,7 +14,13 @@ export async function stripeWebhook(env, request) {
   const event = await verifyWebhook(env, payload, request.headers.get("stripe-signature"), nowMs(env));
   const seen = await env.DB.prepare(`INSERT OR IGNORE INTO webhook_events (provider, event_id, type, received_at, outcome) VALUES ('stripe', ?, ?, ?, 'processing')`).bind(String(event.id), String(event.type), nowIso(env)).run();
   if (seen.meta.changes !== 1) return json({ received: true, duplicate: true });
-  const outcome = await apply(env, event);
+  let outcome;
+  try { outcome = await apply(env, event); }
+  catch (e) {
+    // Not processed: forget the event so Stripe's retry is applied instead of being answered as a duplicate.
+    await env.DB.prepare(`DELETE FROM webhook_events WHERE provider = 'stripe' AND event_id = ? AND outcome = 'processing'`).bind(String(event.id)).run();
+    throw e;
+  }
   await env.DB.prepare(`UPDATE webhook_events SET outcome = ? WHERE provider = 'stripe' AND event_id = ?`).bind(outcome, String(event.id)).run();
   return json({ received: true, outcome });
 }
@@ -53,14 +59,25 @@ export async function markPaid(env, session, actor) {
     return "amount_mismatch";
   }
   const b = p.booking_id ? await one(env.DB, `SELECT b.*, s.name AS service_name FROM bookings b JOIN services s ON s.id = b.service_id WHERE b.id = ?`, p.booking_id) : null;
-  const stmts = [env.DB.prepare(`UPDATE payments SET status = 'paid', payment_intent_id = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'expired', 'failed')`).bind(session.payment_intent ? String(session.payment_intent) : null, nowIso(env), p.id)];
+  // The booking is confirmed only while its hold still reserves the slot. A payment that arrives after the hold
+  // lapsed (the slot may have been sold again) is recorded as paid and flagged for a refund or a manual rebooking;
+  // it never creates a second confirmed booking for the same capacity.
+  let confirmed = false;
   if (b && b.status === "pending_payment") {
-    stmts.push(env.DB.prepare(`UPDATE bookings SET status = 'confirmed', hold_expires_at = NULL, updated_at = ? WHERE id = ? AND status = 'pending_payment'`).bind(nowIso(env), b.id));
+    const c = await env.DB.prepare(`UPDATE bookings SET status = 'confirmed', hold_expires_at = NULL, updated_at = ? WHERE id = ? AND status = 'pending_payment' AND (hold_expires_at IS NULL OR hold_expires_at > ?)`).bind(nowIso(env), b.id, nowIso(env)).run();
+    confirmed = c.meta.changes === 1;
+  }
+  const stmts = [env.DB.prepare(`UPDATE payments SET status = 'paid', payment_intent_id = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'expired', 'failed')`).bind(session.payment_intent ? String(session.payment_intent) : null, nowIso(env), p.id)];
+  if (confirmed) {
     stmts.push(env.DB.prepare(`INSERT INTO booking_history (booking_id, from_status, to_status, actor, note, at) VALUES (?, 'pending_payment', 'confirmed', ?, 'payment received', ?)`).bind(b.id, actor.split(":")[0], nowIso(env)));
     const payload = { name: b.customer_name, reference: b.reference, serviceName: b.service_name, when: formatWhen(b.start_at), amount: money(p.amount_cents, p.currency), manageUrl: "" };
     stmts.push(queueStmt(env, `payment:${p.id}:paid`, b.customer_email, "payment_received", payload));
   }
   await env.DB.batch(stmts);
   await audit(env, actor, "payment.paid", "payment", p.id, { amountCents: p.amount_cents, currency: p.currency, mode: p.mode, business: CONFIG.business?.name });
-  return b && b.status === "cancelled" ? "paid_for_cancelled_booking_needs_review" : "paid";
+  if (b && !confirmed) {
+    await audit(env, actor, "payment.needs_review", "booking", b.id, { paymentId: p.id, bookingStatus: b.status, reason: b.status === "pending_payment" ? "hold expired before payment" : `booking is ${b.status}` });
+    return "paid_needs_review";
+  }
+  return "paid";
 }

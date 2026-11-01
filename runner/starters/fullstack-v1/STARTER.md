@@ -52,7 +52,7 @@ You are building a real business website: a frontend, a backend, a database and 
 
 This runs gates A–J and writes `.crestmont/quality/gates.json`.
 
-- **Protected files are restored by the runner.** These are `scripts/gates.mjs`, `scripts/lib/*`, `tests/foundation/*` and `migrations/0001_foundation.sql`; changing them has no effect.
+- **Protected files are restored by the runner.** These are `scripts/gates.mjs`, `scripts/lib/*`, `tests/foundation/*` and `migrations/0001_foundation.sql`; changing them has no effect. The gates never load your `src/` modules in their own process, every protected suite must run completely, and any failed or unjustified skipped test fails gate C.
 - **A skipped test never counts as passing.** Fix the cause instead of skipping.
 - **Gate E (integrations) stays `pending_external`** until the runner's approved test-mode operation has verified the customer's own provider account. That is expected; do not fake it.
 

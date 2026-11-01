@@ -13,6 +13,7 @@
 //  - "pending_external" (a provider-side verification that needs the customer's account) blocks 10/10 like a failure
 //    but is classified separately so the build waits instead of repairing.
 
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { CheckOutcome } from "./checks.ts";
@@ -66,13 +67,31 @@ export interface GatesFile {
   tests?: { passed: number; failed: number; skipped: number };
 }
 
-export function readGates(repo: string): GatesFile | null {
+/** The gates file plus the sha256 of its exact bytes (compared with the digest the gate command printed). */
+export function readGates(repo: string): (GatesFile & { _sha256?: string }) | null {
   const f = path.join(repo, ".crestmont", "quality", "gates.json");
   if (!existsSync(f)) return null;
   try {
-    const g = JSON.parse(readFileSync(f, "utf8")) as GatesFile;
-    return g && g.schema === "crestmont.quality-gates/1" && g.gates && typeof g.gates === "object" ? g : null;
+    const raw = readFileSync(f);
+    const g = JSON.parse(raw.toString("utf8")) as GatesFile & { _sha256?: string };
+    if (!(g && g.schema === "crestmont.quality-gates/1" && g.gates && typeof g.gates === "object")) return null;
+    g._sha256 = createHash("sha256").update(raw).digest("hex");
+    return g;
   } catch { return null; }
+}
+
+/**
+ * A gates file is trusted only when (1) the runner's own quality-gates check ran in this acceptance pass, (2) the
+ * file's bytes match the single digest that check printed, and (3) its exit status agrees with the file (exit 0
+ * exactly when no required gate failed). Anything else — a file written by other code, a second digest, a forged
+ * "pass" with a failing exit code — is treated as no gate evidence at all.
+ */
+export function trustedGates(g: (GatesFile & { _sha256?: string }) | null, gateCheck: CheckOutcome | undefined): GatesFile | null {
+  if (!g || !gateCheck || gateCheck.timedOut) return null;
+  if (!gateCheck.gatesDigest || gateCheck.gatesDigest !== g._sha256) return null;
+  const blocking = Object.values(g.gates).some((x) => x && x.status === "fail");
+  if (gateCheck.ok === blocking) return null;
+  return g;
 }
 
 export interface ScoreInput {
@@ -112,7 +131,7 @@ export function score(i: ScoreInput): Scorecard {
   const g = i.gates;
   const gateCheck = i.checks.find((c) => c.id === "quality-gates");
   // A gates file is trusted only together with the runner's own run of the gate command in this acceptance pass.
-  const gates = g && gateCheck ? g : null;
+  const gates = trustedGates(g, gateCheck);
   const gate = (id: string) => gates?.gates[id] ?? null;
   const check = (id: string) => i.checks.find((c) => c.id === id) ?? null;
   const enabled = (f: string) => !!gates?.features?.[f];

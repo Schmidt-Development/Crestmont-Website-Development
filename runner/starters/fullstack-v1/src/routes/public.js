@@ -4,7 +4,7 @@ import { CONFIG, enabled, inServiceArea } from "../lib/config.js";
 import { HttpError, json, readJson } from "../lib/http.js";
 import { Validator, POSTAL_US } from "../lib/validate.js";
 import { all, audit, nowIso, nowMs, one, run, settings } from "../lib/db.js";
-import { idempotent, rateLimit } from "../lib/guards.js";
+import { idempotent, rateLimit, requireSession } from "../lib/guards.js";
 import { newId, newReference, randomToken, sha256Hex } from "../lib/crypto.js";
 import { availability, cancellable, formatWhen, insertBooking, moveBooking } from "../lib/booking.js";
 import { queueStmt } from "../lib/notify.js";
@@ -63,14 +63,19 @@ export async function createBooking(env, request) {
       queueStmt(env, `booking:${id}:created`, d.email, paymentRequired ? "booking_received" : "booking_confirmed", payload),
       ...(staff ? [queueStmt(env, `booking:${id}:staff`, staff, "staff_new_booking", payload)] : []),
     ];
-    const made = await insertBooking(env, { id, reference, serviceId: d.serviceId, start: d.start, name: d.name, email: d.email, phone: d.phone, address: d.address, postalCode: d.postalCode, notes: d.notes, tokenHash: await sha256Hex(token), paymentRequired }, extra);
+    // Signed-in customers (feature customer_accounts) own their new bookings; guests link one later with its manage link.
+    let customerId = null;
+    if (enabled(CONFIG, "customer_accounts") && /(?:^|;\s*)__Host-sid=/.test(request.headers.get("cookie") ?? "")) {
+      try { customerId = (await requireSession(env, request, "customer")).subject_id; } catch { customerId = null; }
+    }
+    const made = await insertBooking(env, { customerId, id, reference, serviceId: d.serviceId, start: d.start, name: d.name, email: d.email, phone: d.phone, address: d.address, postalCode: d.postalCode, notes: d.notes, tokenHash: await sha256Hex(token), paymentRequired }, extra);
     return { status: 201, body: { booking: { id, reference, status: paymentRequired ? "pending_payment" : "confirmed", start: new Date(made.start).toISOString(), end: new Date(made.end).toISOString(), when, paymentRequired }, manageToken: token } };
   });
   return json(r.body, r.status);
 }
 
 /** A booking addressed by reference + manage token (the token is never stored in clear). */
-async function bookingByToken(env, ref, token) {
+export async function bookingByToken(env, ref, token) {
   if (!/^BK-[A-Z0-9]{8}$/.test(ref ?? "") || !/^[0-9a-f]{48}$/.test(token ?? "")) throw new HttpError(404, "not_found", "Booking not found.");
   const b = await one(env.DB, `SELECT b.*, s.name AS service_name FROM bookings b JOIN services s ON s.id = b.service_id WHERE b.reference = ? AND b.manage_token_hash = ?`, ref, await sha256Hex(token));
   if (!b) throw new HttpError(404, "not_found", "Booking not found.");
@@ -165,10 +170,16 @@ export async function checkout(env, request, ref, fetchImpl = fetch) {
   if (b.hold_expires_at && b.hold_expires_at <= nowIso(env)) throw new HttpError(409, "hold_expired", "The time held for payment has passed. Please book again.");
   const svc = await one(env.DB, `SELECT * FROM services WHERE id = ?`, b.service_id);
   if (!svc?.payable || !(svc.price_cents > 0)) throw new HttpError(409, "not_payable", "This service is not paid online.");
+  // The seat stays reserved for the whole Checkout window: the hold is extended (while it is still valid) to just after
+  // the session expires, so the slot cannot be sold twice while this customer is paying.
+  const sessionExpiresMs = nowMs(env) + 31 * 60_000;
+  const held = await env.DB.prepare(`UPDATE bookings SET hold_expires_at = ?, updated_at = ? WHERE id = ? AND status = 'pending_payment' AND hold_expires_at > ?`)
+    .bind(new Date(sessionExpiresMs + 2 * 60_000).toISOString(), nowIso(env), b.id, nowIso(env)).run();
+  if (held.meta.changes !== 1) throw new HttpError(409, "hold_expired", "The time held for payment has passed. Please book again.");
   const existing = await one(env.DB, `SELECT * FROM payments WHERE booking_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1`, b.id);
   const paymentId = existing?.id ?? newId("pay");
   const mode = stripeMode(env);
-  const session = await createCheckoutSession(env, fetchImpl, { paymentId, bookingId: b.id, reference: b.reference, email: b.customer_email, amountCents: svc.price_cents, currency: CONFIG.payments.currency, description: `${svc.name} (${b.reference})`, origin: origin(request), nowMs: nowMs(env) });
+  const session = await createCheckoutSession(env, fetchImpl, { paymentId, bookingId: b.id, reference: b.reference, email: b.customer_email, amountCents: svc.price_cents, currency: CONFIG.payments.currency, description: `${svc.name} (${b.reference})`, origin: origin(request), nowMs: nowMs(env), expiresAtMs: sessionExpiresMs });
   if (session.livemode !== (mode.mode === "live")) throw new HttpError(502, "payment_mode_mismatch", "The payment provider answered in an unexpected mode.");
   if (existing) await run(env.DB, `UPDATE payments SET checkout_session_id = ?, updated_at = ? WHERE id = ?`, session.id, nowIso(env), paymentId);
   else await run(env.DB, `INSERT INTO payments (id, booking_id, provider, mode, checkout_session_id, amount_cents, currency, status, created_at, updated_at) VALUES (?,?, 'stripe', ?,?,?,?, 'pending', ?, ?)`, paymentId, b.id, mode.mode, session.id, svc.price_cents, CONFIG.payments.currency, nowIso(env), nowIso(env));

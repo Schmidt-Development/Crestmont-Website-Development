@@ -589,6 +589,7 @@ test("[AIB-006] customer revisions follow the existing entitlement rules and the
   // [AIB-QUALITY] A customer's problem report waits for staff triage: it is never queued automatically before.
   await t.db.prepare(`UPDATE revisions SET customer_kind = 'problem' WHERE id = ?`).bind(billable.id).run();
   assert.equal(await B.syncCustomerRevisionSafe(t.db, billable.id), null, "untriaged problem report is not auto-queued");
+  await assert.rejects(B.forwardCustomerRevision(t.db, billable.id, { kind: "user", userId: t.owner.id }), /Classify this problem report first/, "nor forwarded by the owner before triage");
   await t.db.prepare(`UPDATE revisions SET customer_kind = 'change' WHERE id = ?`).bind(billable.id).run();
   const autoId = await B.syncCustomerRevisionSafe(t.db, billable.id);
   assert.ok(autoId, "queued automatically");

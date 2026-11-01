@@ -188,6 +188,8 @@
     "scripts/lib/d1.mjs",
     "scripts/lib/harness.mjs",
     "scripts/lib/frontend.mjs",
+    "scripts/lib/serve.mjs",
+    "scripts/lib/config-check.mjs",
     "tests/foundation/helpers.mjs",
     "tests/foundation/core.test.mjs",
     "tests/foundation/booking.test.mjs",
