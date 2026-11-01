@@ -361,3 +361,14 @@ test("[VOICE-006] declining recording: only what the platform enforces is said, 
   const { INBOUND_MASTER_INSTRUCTIONS } = await import("../src/services/voice.ts");
   assert.match(INBOUND_MASTER_INSTRUCTIONS, /never that the call has stopped being recorded/);
 });
+
+test("[VOICE-005] the voice budget is enforced on functions even when the number's inbound webhook never ran (fixture)", async () => {
+  const t = await app({ budget: false });
+  // No /api/webhooks/retell/inbound call for this call id: the number has no inbound webhook configured.
+  const r = await t.call("c_nowh", "crm_upsert_lead", { name: "No Webhook", phone: "+15550100180", interest: "starter", requirements: "Wants a website" });
+  assert.equal(r.json.refused, "voicemail_mode", "no budget → message-only, whatever the webhook setup");
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM leads`), 0);
+  assert.equal((await t.call("c_nowh", "request_callback", { name: "No Webhook", phone: "+15550100180", reason: "Call me back" })).json.callbackRequested, true, "a message can always be left");
+  await t.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('voice.monthly_budget_usd', '50', ?)`).bind(nowIso()).run();
+  assert.equal((await t.call("c_nowh2", "crm_upsert_lead", { name: "No Webhook", phone: "+15550100181", interest: "starter", requirements: "Wants a website" })).json.lead_saved, true, "with a budget the full receptionist works");
+});

@@ -28,6 +28,7 @@ import { hoursStatus, loadVoiceConfig, transferAvailability, toE164, type VoiceC
 import * as sched from "./voice-scheduling.ts";
 import { addDnc, applyOutboundResult, recordCallConsent, requestOutbound } from "./voice-outbound.ts";
 import { sendMail, type MailerCtx } from "./mailer.ts";
+import { voiceBudget, budgetOpen } from "./voice-budget.ts";
 import { safeHttpsUrl } from "../lib/html.ts";
 
 export class VoiceAuthError extends Error {}
@@ -782,7 +783,9 @@ export async function handleVoiceEvent(db: Db, rawBody: string, deps: VoiceDeps 
   const key = isReadOnlyCall(fn, (json.function as { arguments?: unknown }).arguments) ? `fn:${base.event_id}:${newId("ro")}` : `fn:${base.event_id}`;
   const claim = await claimEvent(db, call.id, key, `fn:${fn}`);
   if (claim.duplicate) return { status: 200, body: { ok: true, duplicate: true, result: claim.result } };
-  if (!VOICEMAIL_FUNCTIONS.has(fn) && await isVoicemailCall(db, call)) {
+  // Cost control (CREST-GAP-053) holds even when the phone number's inbound webhook is not configured (no voicemail-mode
+  // event recorded at call start): for Retell calls the Owner's monthly budget is also checked live, here.
+  if (!VOICEMAIL_FUNCTIONS.has(fn) && (await isVoicemailCall(db, call) || (base.provider === "retell" && !budgetOpen(await voiceBudget(db, deps.now?.() ?? new Date()))))) {
     // Enforced here, not only in the prompt: a voicemail-mode call (budget unset or reached) can only leave a message.
     const result = { refused: "voicemail_mode", message: "I can only take a message right now. Ask for the caller's name, number and message, then call request_callback." };
     await finishEvent(db, claim.eventId, "ok", result, "refused: receptionist in voicemail mode (voice budget)");

@@ -73,6 +73,8 @@ test("[VOICE-003] [SEC-002] Retell endpoints verify X-Retell-Signature exactly a
 
 test("[VOICE-003] Retell call + function events map into the voice service: idempotent, ai_receptionist lead, catalog-only pricing", async () => {
   const t = await retellApp();
+  // Full-service mode needs the Owner's monthly voice budget (CREST-GAP-053), checked live on every Retell function call.
+  await t.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('voice.monthly_budget_usd', '50', ?)`).bind(new Date().toISOString()).run();
   const id = "call_retell_1";
   assert.equal((await t.post("/api/webhooks/retell", { event: "call_started", call: phoneCall(id) })).res.status, 200);
   assert.equal((await t.post("/api/webhooks/retell", { event: "call_started", call: phoneCall(id) })).json.duplicate, true, "Retell retry is a duplicate");
