@@ -432,7 +432,7 @@ test("[AIB-QUALITY] [PORTAL-006] Crestmont's defects never use a revision round;
   await ca.post(`/portal/projects/${pa}/revisions`, { request: "Please swap the footer photo for the team photo." });
   const w3 = await rev(3);
   assert.equal((await sc.post(`/staff/revisions/${w3.id}/status`, { status: "in_progress" })).status, 303);
-  await sc.post(`/staff/projects/${pa}/change-orders`, { revision_id: w3.id, scope: "Footer photo swap", price: "50" });
+  await sc.post(`/staff/projects/${pa}/change-orders`, { revision_id: String(w3.id), scope: "Footer photo swap", price: "50" });
   assert.equal((await rev(3)).billable_change_order_id !== null, true);
   await sc.post(`/staff/revisions/${w3.id}/classify`, { category: "scope_change", reason: "Trying to make started work billable with only a proposal." });
   assert.deepEqual([(await rev(3)).category, (await rev(3)).included], ["customer_revision", 1], "refused: the change order is only proposed");
