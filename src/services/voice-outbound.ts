@@ -156,7 +156,11 @@ export async function eligibility(db: Db, cfg: VoiceConfig, row: OutboundRow, at
   const consent = await db.prepare(`SELECT 1 AS x FROM voice_call_consents WHERE phone_e164 = ? AND purpose = ? AND revoked_at IS NULL`).bind(row.phone_e164, row.purpose).first();
   if (!consent) return { eligible: false, terminal: true, reason: "consent for this purpose was revoked or never recorded" };
   const since = (h: number) => new Date(at.getTime() - h * 3_600_000).toISOString();
-  const placed = async (h: number) => (await db.prepare(`SELECT COUNT(*) AS n FROM calls WHERE direction = 'outbound' AND to_number = ? AND started_at >= ?`).bind(row.phone_e164, since(h)).first<{ n: number }>())!.n;
+  // A call already linked to THIS request that has not ended is this request's in-flight attempt (Retell placed it, but
+  // the create-phone-call response was lost and call_started arrived first): re-sending the same idempotency key cannot
+  // place a second call, so it is not counted against the request's own per-number limits. Ended calls always count.
+  const placed = async (h: number) => (await db.prepare(`SELECT COUNT(*) AS n FROM calls WHERE direction = 'outbound' AND to_number = ? AND started_at >= ?
+      AND NOT (COALESCE(outbound_request_id, '') = ? AND ended_at IS NULL)`).bind(row.phone_e164, since(h), row.id).first<{ n: number }>())!.n;
   if (await placed(24) >= cfg.outbound.max_per_number_per_day) return { eligible: false, terminal: false, reason: "daily call limit for this number reached", retryAt: new Date(at.getTime() + 24 * 3_600_000).toISOString() };
   if (await placed(24 * 7) >= cfg.outbound.max_per_number_per_week) return { eligible: false, terminal: true, reason: "weekly call limit for this number reached" };
   const tz = recipientTz && validTimeZone(recipientTz) ? recipientTz : null;

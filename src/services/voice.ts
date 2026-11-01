@@ -146,18 +146,34 @@ const digits = (s: string | null | undefined) => (s ?? "").replace(/\D/g, "").re
 interface CallRow { id: string; provider: string; provider_call_id: string; lead_id: string | null; recording_consent: number; is_test: number; ended_at: string | null; direction: string; from_number: string | null; to_number: string | null; outbound_request_id: string | null }
 const CALL_COLS = `id, provider, provider_call_id, lead_id, recording_consent, is_test, ended_at, direction, from_number, to_number, outbound_request_id`;
 
-export interface CallData { from?: string | null; to?: string | null; direction?: "inbound" | "outbound"; environment?: string | null; outboundRequestId?: string | null; consent?: boolean; isTest: boolean; agentVersion: number | null }
+export interface CallData {
+  from?: string | null; to?: string | null; direction?: "inbound" | "outbound"; environment?: string | null; outboundRequestId?: string | null; consent?: boolean; isTest: boolean; agentVersion: number | null;
+  /** When the call started, as the provider reports it (Retell start_timestamp). Preferred over the arrival time. */
+  startedAt?: string | null;
+  /** The platform's clock (injectable): used when the provider gave no start time. Never a second, separate clock. */
+  now?: () => Date;
+}
+
+/** A provider start time is used only when it is a real, plausible instant (not in the future beyond clock skew). */
+export function callStartedAt(providerStart: unknown, now: Date): string {
+  const ms = typeof providerStart === "number" ? providerStart : typeof providerStart === "string" && /^\d{10,16}$/.test(providerStart) ? Number(providerStart) : NaN;
+  if (Number.isFinite(ms) && ms > Date.UTC(2020, 0, 1) && ms <= now.getTime() + 10 * 60_000) return new Date(ms).toISOString();
+  return now.toISOString();
+}
 
 /** Creates the call row once per provider call id (any later event only fills fields that are still empty). */
 export async function ensureCall(db: Db, provider: string, providerCallId: string, data: CallData): Promise<{ call: CallRow; created: boolean }> {
-  const at = nowIso();
+  // One clock: the per-number outbound caps compare started_at with the same clock (voice-outbound eligibility).
+  const clock = (data.now ?? (() => new Date()))();
+  const at = clock.toISOString();
+  const started = data.startedAt && !Number.isNaN(Date.parse(data.startedAt)) ? new Date(data.startedAt).toISOString() : at;
   const env = data.environment && ["development", "staging", "production"].includes(data.environment) ? data.environment : null;
   // An outbound request id is accepted only if that request really exists (it arrives in signed metadata the platform set).
   const ob = data.outboundRequestId && /^vob_[A-Za-z0-9_-]{1,60}$/.test(data.outboundRequestId)
     ? (await db.prepare(`SELECT id FROM voice_outbound_requests WHERE id = ?`).bind(data.outboundRequestId).first<{ id: string }>())?.id ?? null : null;
   const res = await db.prepare(`INSERT INTO calls (id, provider, provider_call_id, from_number, to_number, direction, recording_consent, started_at, is_test, agent_config_version, environment, outbound_request_id, created_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider, provider_call_id) DO NOTHING`)
-    .bind(newId("call"), provider, providerCallId, data.from ?? null, data.to ?? null, data.direction ?? "inbound", data.consent ? 1 : 0, at, data.isTest ? 1 : 0, data.agentVersion, env, ob, at).run();
+    .bind(newId("call"), provider, providerCallId, data.from ?? null, data.to ?? null, data.direction ?? "inbound", data.consent ? 1 : 0, started, data.isTest ? 1 : 0, data.agentVersion, env, ob, at).run();
   if (res.meta.changes !== 1 && (data.from || data.to || env || ob)) {
     await db.prepare(`UPDATE calls SET from_number = COALESCE(from_number, ?), to_number = COALESCE(to_number, ?), environment = COALESCE(environment, ?), outbound_request_id = COALESCE(outbound_request_id, ?) WHERE provider = ? AND provider_call_id = ?`)
       .bind(data.from ?? null, data.to ?? null, env, ob, provider, providerCallId).run();
@@ -733,6 +749,7 @@ export async function handleVoiceEvent(db: Db, rawBody: string, deps: VoiceDeps 
     from, to: phoneOf("to_number"), direction, environment: typeof json.environment === "string" ? json.environment : null,
     outboundRequestId: typeof json.outbound_request_id === "string" ? json.outbound_request_id : null,
     consent, isTest, agentVersion: await activeAgentVersion(db),
+    startedAt: callStartedAt(json.start_timestamp, (deps.now ?? (() => new Date()))()), now: deps.now,
   });
 
   if (base.event === "call_started") {

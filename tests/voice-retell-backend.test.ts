@@ -664,6 +664,37 @@ test("[VOICE-003] outbound recovery: webhook-first call rows are linked; lost re
   await assert.rejects(requestOutbound(slow.db, { purpose: "callback", phone: "+442071234567", reason: "Callback", requestedBy: slow.owner.id }), /\+1/);
 });
 
+test("[VOICE-003] call rows use one clock: Retell's start_timestamp when given, else the platform clock (never a separate wall clock); a request's own in-flight call does not count against its caps, other calls do", async () => {
+  const { callStartedAt } = await import("../src/services/voice.ts");
+  const now = new Date("2026-11-02T19:00:00Z");
+  assert.equal(callStartedAt(Date.parse("2026-11-02T18:59:30Z"), now), "2026-11-02T18:59:30.000Z", "provider start time");
+  assert.equal(callStartedAt(undefined, now), now.toISOString(), "no provider time: the injected clock");
+  assert.equal(callStartedAt(Date.parse("2026-11-03T19:00:00Z"), now), now.toISOString(), "a start time far in the future is not trusted");
+  assert.equal(callStartedAt("not-a-number", now), now.toISOString());
+
+  // call_started before the dial (create-phone-call response lost): the row carries the PLATFORM clock, not the real date.
+  const t = await outboundApp([{ status: 201, body: { call_id: "call_c1" } }], MON_2PM);
+  await t.post("/api/webhooks/retell", { event: "call_started", call: { ...phoneCall("call_c0"), direction: "outbound", to_number: "+15550100230" } });
+  assert.equal((await one<{ started_at: string }>(t.db, `SELECT started_at FROM calls WHERE provider_call_id = 'call_c0'`)).started_at, MON_2PM.toISOString());
+  await t.post("/api/webhooks/retell", { event: "call_started", call: { ...phoneCall("call_c00", { start_timestamp: MON_2PM.getTime() - 60_000 }), direction: "outbound", to_number: "+15550100231" } });
+  assert.equal((await one<{ started_at: string }>(t.db, `SELECT started_at FROM calls WHERE provider_call_id = 'call_c00'`)).started_at, new Date(MON_2PM.getTime() - 60_000).toISOString(), "Retell's start time wins");
+
+  // An earlier, ENDED call to the number still blocks a new request for the day (cap 1/day is unchanged).
+  const a = await requestOutbound(t.db, { purpose: "callback", phone: "+15550100230", reason: "Callback", consentEvidence: "Caller asked on a call", requestedBy: t.owner.id });
+  await decideOutbound(t.db, t.owner.id, a.id, "approve");
+  await t.db.prepare(`UPDATE calls SET ended_at = ? WHERE provider_call_id = 'call_c0'`).bind(MON_2PM.toISOString()).run();
+  await t.run();
+  const blocked = await one<{ status: string; status_detail: string }>(t.db, `SELECT status, status_detail FROM voice_outbound_requests WHERE id = ?`, a.id);
+  assert.deepEqual([blocked.status, blocked.status_detail], ["approved", "daily call limit for this number reached"]);
+  assert.equal(t.fake.calls.length, 0, "nothing dialled");
+  // A call still in flight to the same number that is NOT this request's own (here: not linked to any request) also blocks.
+  const b = await requestOutbound(t.db, { purpose: "callback", phone: "+15550100231", reason: "Callback", consentEvidence: "Caller asked on a call", requestedBy: t.owner.id });
+  await decideOutbound(t.db, t.owner.id, b.id, "approve");
+  await t.run();
+  assert.equal((await one<{ status_detail: string }>(t.db, `SELECT status_detail FROM voice_outbound_requests WHERE id = ?`, b.id)).status_detail, "daily call limit for this number reached");
+  assert.equal(t.fake.calls.length, 0);
+});
+
 test("[VOICE-006] call_analyzed summaries are redacted; erasure scrubs CRM notes, lead text and notifications", async () => {
   const t = await app();
   const from = { from_number: "+15550100230" };
