@@ -51,7 +51,12 @@ async function retellAudit(key: string, rest: string[]) {
   const clean = (x: string) => x.replace(/[\r\n]+/g, " ").replace(/::/g, ": ").slice(0, 300);
   const failed = a.findings.filter((f) => !f.ok);
   console.log(`::notice title=Retell inbound audit::${a.status.toUpperCase()} — ${a.findings.length - failed.length}/${a.findings.length} checks pass · agent ${a.agentId ?? "?"} · llm ${a.llmId ?? "?"} · agents in workspace: ${a.agents.map((x) => `${x.id}${x.name ? ` (${clean(x.name)})` : ""}`).join(", ") || "none"}`);
-  for (const f of a.findings) console.log(`${f.ok ? "::notice" : "::warning"} title=Retell ${f.ok ? "OK" : "TODO"} · ${clean(f.check)}::${clean(f.detail)}`);
+  // GitHub keeps at most 10 notices and 10 warnings per step, so the findings are grouped into one annotation each
+  // (the first deploy with one annotation per check lost 10 of 30 findings). Annotation messages hold up to 64 KB.
+  const list = (fs: typeof a.findings) => fs.map((f) => `${clean(f.check)}: ${clean(f.detail)}`).join(" | ");
+  if (failed.length) console.log(`::warning title=Retell inbound audit TODO (${failed.length})::${list(failed)}`);
+  const passed = a.findings.filter((f) => f.ok);
+  if (passed.length) console.log(`::notice title=Retell inbound audit OK (${passed.length})::${list(passed)}`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) await main().catch((e) => { console.log(`::error title=External scheduler::${(e as Error).message}`); process.exitCode = 1; });

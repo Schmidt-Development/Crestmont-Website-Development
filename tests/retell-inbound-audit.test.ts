@@ -121,3 +121,12 @@ test("[VOICE-005] [SEC-002] POST /api/voice/retell-audit is a signed machine end
   assert.equal(((await ok.json()) as { status: string }).status, "ok");
   assert.equal((await t.db.prepare(`SELECT COUNT(*) n FROM audit_logs WHERE action = 'voice.retell_audit'`).first<{ n: number }>())!.n, 1);
 });
+
+test("[VOICE-005] the deploy prints all audit findings in at most three annotations (GitHub keeps 10 per level per step)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync("scripts/trigger-scheduler.ts", "utf8");
+  const fn = src.slice(src.indexOf("async function retellAudit"), src.indexOf("if (process.argv[1]"));
+  assert.doesNotMatch(fn, /for \(const f of a\.findings\) console\.log/, "no per-finding annotations");
+  const ok = fn.slice(fn.indexOf("const a = JSON.parse"));
+  assert.equal((ok.match(/console\.log\(`::(notice|warning)/g) ?? []).length, 3, "success path: summary + TODO list + OK list");
+});
