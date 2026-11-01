@@ -1,12 +1,23 @@
 name: Stripe staging check
 
-# Narrow, read-only Stripe staging check (scripts/stripe-staging-check.ts): about a minute instead of a full staging
-# deploy (45-50 min, whose results appear only when the whole job ends). Founder-managed binding names, the last Stripe
-# probe (account, endpoints, event destinations), Stripe events received, payments recorded, and a live check that the
-# webhook refuses unsigned and forged events. Reads D1 with SELECT only; never calls Stripe; never prints a value;
-# never writes a secret, variable or webhook destination. Full-deploy certification is unchanged.
+# Independent Stripe staging check (scripts/stripe-staging-check.ts), about two minutes instead of a full staging deploy.
+# Each run: a FRESH read-only Stripe query made by the staging Worker (which holds the key; this workflow never does),
+# one genuine Stripe test-mode event delivered to the configured destination and verified as stored (signature checked
+# with the configured signing secret), binding names, events received, and a live check that unsigned and forged events
+# are refused. D1 is read with SELECT only; no secret, variable or webhook destination is ever written. Full-deploy
+# certification is unchanged.
 on:
   workflow_dispatch:
+    inputs:
+      deliver:
+        description: "Also request one genuine Stripe test-mode event (a $1 Checkout Session created and expired at once) and verify its signed delivery"
+        type: boolean
+        default: true
+  # After every staging deploy (whatever its certification outcome), so the check always runs against the deployed Worker.
+  workflow_run:
+    workflows: ["Deploy staging"]
+    types: [completed]
+    branches: [main]
   push:
     branches: [main]
     paths:
@@ -22,9 +33,9 @@ concurrency:
 
 jobs:
   check:
-    if: github.ref == 'refs/heads/main'   # main only (see deploy-staging.yml)
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     environment: staging
     env:
       BASE: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
@@ -40,4 +51,6 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}   # derives the scheduler key that signs the Worker check request
+          STRIPE_CHECK_DELIVER: ${{ github.event_name != 'workflow_dispatch' || inputs.deliver }}
         run: node --no-warnings scripts/stripe-staging-check.ts --url "$BASE"

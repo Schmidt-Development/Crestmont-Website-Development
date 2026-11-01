@@ -126,6 +126,12 @@ export class StripePayments implements PaymentsAdapter {
     return this.call<{ url: string }>("billing_portal/sessions", { customer: customerId, return_url: returnUrl });
   }
 
+  /** Expires an open Checkout Session (Stripe then sends checkout.session.expired). */
+  async expireCheckout(sessionId: string) {
+    if (!/^cs_(test|live)_[A-Za-z0-9]+$/.test(sessionId)) throw new Error("Invalid Checkout Session id");
+    return this.call<{ id: string; status: string }>(`checkout/sessions/${sessionId}/expire`, {});
+  }
+
   async createRefund(paymentIntentId: string, amountCents: number, idempotencyKey: string) {
     return this.call<{ id: string; status: string }>("refunds", { payment_intent: paymentIntentId, amount: String(amountCents) }, idempotencyKey);
   }

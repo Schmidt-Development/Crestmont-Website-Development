@@ -19,6 +19,7 @@ import { parseItems } from "../content/registry.ts";
 import { effectivePrices } from "../services/pricing-approvals.ts";
 import { ingestPushedSnapshot, GithubPushError } from "../services/github.ts";
 import { runImport, ImportError, IMPORT_BATCHES_PER_HOUR } from "../services/crm-import.ts";
+import { runStripeStagingCheck, StripeCheckRefused } from "../services/stripe-staging-check.ts";
 
 const MAX_BODY = 1_000_000;
 export async function readBody(req: Request): Promise<string> {
@@ -156,6 +157,30 @@ export function register(r: Router) {
     } catch (e) {
       if (e instanceof GithubPushError) return jsonResponse(ctx, e.status, { error: e.message });
       throw e;
+    }
+  });
+
+  // Staging-only Stripe check (scripts/stripe-staging-check.ts): a fresh read-only Stripe query and, on request, one
+  // genuine test-mode event delivered to the configured webhook destination. Signed with the scheduler key (derived from
+  // the Cloudflare token, like /api/voice/retell-audit); refused on production and outside Stripe test mode.
+  r.post("/api/payments/stripe-staging-check", async (ctx) => {
+    const raw = await readBody(ctx.req);
+    if (!ctx.env.SCHEDULER_TRIGGER_SECRET) return jsonResponse(ctx, 503, { error: "Check trigger not configured" });
+    try { await verifyEvidenceSignature(ctx.env.SCHEDULER_TRIGGER_SECRET, raw, ctx.req.headers.get("x-crestmont-scheduler-signature")); }
+    catch (e) { if (e instanceof IngestAuthError) return jsonResponse(ctx, 401, { error: e.message }); throw e; }
+    let body: { check?: unknown; deliver?: unknown };
+    try { body = JSON.parse(raw) as typeof body; } catch { return jsonResponse(ctx, 400, { error: "Body must be JSON" }); }
+    if (body?.check !== "stripe") return jsonResponse(ctx, 422, { error: "Unknown check" });
+    const deliver = body.deliver === true;
+    const rl = await rateLimit(ctx.db, deliver ? "stripe-staging-check:deliver" : "stripe-staging-check", deliver ? 4 : 10, 3600);
+    if (!rl.allowed) return jsonResponse(ctx, 429, { error: "Ran too often in the last hour" });
+    try {
+      const result = await runStripeStagingCheck({ db: ctx.db, env: ctx.env, baseUrl: ctx.baseUrl, fetch: ctx.env.overrides?.fetch ?? fetch }, { deliver });
+      await audit(ctx.db, { actorKind: "system", action: "stripe.staging_check", subjectType: "integration", subjectId: "stripe", details: { probe: result.probe.status, session: result.delivery?.sessionId ?? null } });
+      return jsonResponse(ctx, 200, result);
+    } catch (e) {
+      if (e instanceof StripeCheckRefused) return jsonResponse(ctx, e.status, { error: e.message });
+      return jsonResponse(ctx, 502, { error: `Stripe: ${(e as Error).message.slice(0, 200)}` });
     }
   });
 
