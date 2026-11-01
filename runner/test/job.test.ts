@@ -413,6 +413,7 @@ test("[AIB-RUNNER] custom strategy uses no starter and asks for a requirements m
     assert.match(sdk.calls[0].prompt, /ARCHITECTURE\.md/);
     assert.match(sdk.calls[2].prompt, /REMAINING-WORK\.md/);
     assert.equal(s.outcome, "ready_for_review");
-    assert.match(String(s.complete?.report), /No automated acceptance checks were run/);
+    // No acceptance commands for a custom build without a starter: the runner's own credential scan is the only check.
+    assert.match(String(s.complete?.report), /## Checks run by the runner\n- PASS `runner: credential scan of the files git would commit` \(exit 0\)\n/);
   } finally { await cp.close(); }
 });

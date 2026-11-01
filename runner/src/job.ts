@@ -32,7 +32,7 @@ import { preflight, provisionSkills } from "./skills.ts";
 import { buildCheckpoint, restoreCheckpoint } from "./checkpoint.ts";
 import type { StarterSpec, CheckOutcome, CheckExecutor } from "./checks.ts";
 import { previewKey, planGatedPreview, applyGatedPreview } from "./preview-gate.ts";
-import { starterDir, loadStarter, copyStarter, acceptanceCommands, runChecks, previewConfigProblems, restoreProtectedFiles, briefConformance, isolationCheck, previewName, PREVIEW_NAME, PREVIEW_EXPORT_STRIP } from "./checks.ts";
+import { starterDir, loadStarter, copyStarter, acceptanceCommands, runChecks, previewConfigProblems, restoreProtectedFiles, briefConformance, isolationCheck, credentialScan, previewName, PREVIEW_NAME, PREVIEW_EXPORT_STRIP } from "./checks.ts";
 import { writeBriefFiles, systemPromptAppend, phasePrompt } from "./prompt.ts";
 import type { Phase } from "./prompt.ts";
 import { readRequirements, checkRequirements, readStringList, readAgentReport } from "./requirements.ts";
@@ -49,6 +49,11 @@ import type { SessionRecord } from "./orchestrator/sessions.ts";
 import type { InferenceScheduler } from "./inference/scheduler.ts";
 import { runIntegrationOperations } from "./integrations/broker.ts";
 import { buildTask, repairTask, revisionTask, route, type Route, type Task } from "./inference/router.ts";
+import type { DefectRecord, InFlight, ProjectMemory } from "./memory.ts";
+import { ineffectiveRepairs, loadMemory, memoryDigest, remember, saveMemory } from "./memory.ts";
+
+/** A repair that left the same defect in place this many times ends the build as stalled (never the same fix forever). */
+export const MAX_INEFFECTIVE_REPAIRS = 3;
 
 export interface JobDeps {
   cfg: RunnerConfig;
@@ -132,6 +137,28 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
   const repoUrl = repoTarget ? projectRepoUrl(repoTarget, job.projectId) : null;
   let pushed = false;
   let pushNote = repoTarget ? "" : "PROJECT_REPO_* is not configured: commits are kept in the runner workspace and in the checkpoint git bundle.";
+
+  // Durable project memory (runner-written; see memory.ts): loaded once the workspace and any checkpoint are in place.
+  let memory: ProjectMemory | null = null;
+  let milestone = false;
+  const synced = { modelCalls: 0, inputTokens: 0, outputTokens: 0 };
+  const saveMem = () => {
+    if (!memory || !ws) return;
+    // Operational token metrics only: accumulate this attempt's counters since the last save (no ceiling, no billing).
+    remember.usage(memory, { modelCalls: tracker.modelCalls - synced.modelCalls, inputTokens: tracker.inputTokens - synced.inputTokens, outputTokens: tracker.outputTokens - synced.outputTokens });
+    Object.assign(synced, { modelCalls: tracker.modelCalls, inputTokens: tracker.inputTokens, outputTokens: tracker.outputTokens });
+    try { saveMemory(ws.dir, memory); } catch (err) { log.warn("project memory could not be saved", { error: errorMessage(err) }); }
+  };
+  const begin = (kind: InFlight["kind"], label: string) => { if (memory) { remember.begin(memory, kind, label); saveMem(); } };
+  const done = () => { if (memory) remember.done(memory); };
+  /** Close this attempt's segment in the memory (before the last checkpoint of every terminal path). */
+  const endSegment = async (end: string): Promise<boolean> => {
+    if (!memory || !remember.isOpen(memory)) return false;
+    const head = git ? await headCommit(git).catch(() => null) : null;
+    const progress = remember.segmentEnd(memory, end, head, { modelCalls: tracker.modelCalls, inputTokens: tracker.inputTokens, outputTokens: tracker.outputTokens }, milestone);
+    saveMem();
+    return progress;
+  };
 
   const guard = () => { if (leaseLost) throw new LeaseLostError(job.id); };
   const markLeaseLost = () => { leaseLost = true; stop.request("lease_lost"); };
@@ -231,6 +258,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
   const checkpoint = async (label: string) => {
     guard();
     if (!ws || !git) return;
+    saveMem();
     const commit = await commitAndPush(`AI build checkpoint: ${label}`);
     try {
       const built = await buildCheckpoint(ws, git, {
@@ -252,6 +280,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
 
   const finish = async (outcome: Outcome, fields: { error?: string | null; checks?: CheckOutcome[]; preview?: { url: string | null; note: string; name?: string | null }; stopReason?: string | null; notBefore?: string | null }): Promise<JobSummary> => {
     guard();
+    if (memory && remember.isOpen(memory)) await endSegment(outcome);
     const commit = git ? await headCommit(git) : null;
     const seed = job.requirements;
     const agentReqs = ws ? readRequirements(ws.repo, seed) : seed;
@@ -398,6 +427,19 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       await configureRepo(git, { name: cfg.gitAuthorName, email: cfg.gitAuthorEmail });
     }
 
+    // ── durable project memory: restored with the checkpoint (agent/), bound to this project and build ──
+    {
+      const loaded = loadMemory(ws.dir, { projectId: job.projectId, jobId: job.id, kind: job.kind, revision: job.revision, brief: job.brief, packageId: job.packageId });
+      if (loaded.status === "foreign") sessionNotes.push("A project memory for a different build was found in the restored checkpoint and ignored (tenant isolation).");
+      if (loaded.status === "corrupt") sessionNotes.push("The restored project memory could not be read; a new one was started (the repository and the platform remain authoritative).");
+      memory = loaded.memory;
+      memory.spec = { present: !!job.spec, version: job.spec?.version ?? null };
+      const recovered = remember.segmentStart(memory, job.attempt, await headCommit(git).catch(() => null));
+      if (recovered) sessionNotes.push(`Recovered after an interruption: ${recovered.note}; the build resumed from the last checkpoint${recovered.interrupted ? " and that step runs again" : ""}. Completed phases are not repeated.`);
+      if (loaded.status === "loaded") sessionNotes.push(`Project memory restored: this is segment ${memory.totals.segments} of the build; phases completed ${memory.phasesCompleted.join(", ") || "none"}, review cycles ${memory.cyclesCompleted}, context resets ${memory.totals.compactions}, ${memory.totals.outputTokens} output tokens so far.`);
+      saveMem();
+    }
+
     // ── brief, customer files, agent configuration, skills ──
     writeBriefFiles(ws.repo, job, job.requirements);
     await downloadCustomerFiles(job, ws.repo, client, cfg.maxCustomerFileBytes, missingFiles, () => markLeaseLost());
@@ -480,12 +522,25 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       Object.assign(now, { activity: "gpu_running", model: r.model.tag, task: r.task });
       tracker.note({ kind: "step", message: `phase ${phase}: ${r.reason} (${r.model.tag})` });
       const base = promptOverride ?? phasePrompt(job, phase, { starter: starterLabel, resumed: !!job.resume, previousNote, toolset });
+      begin(phase === "repair" ? "repair" : "phase", `${phase} (${r.model.tag})`);
       const res = await provider!.run({
         phase,
         prompt: spec ? `${base}\n\nSPEC.json holds the architect's master specification for this website; it is authoritative for design, structure and acceptance criteria.\n\n${BUILDER_CONTRACT}` : base,
         maxTurns: phaseTurns, maxBudgetUsd: remainingBudget, maxWallMs: Math.max(1000, runtimeDeadline - Date.now()),
         resumeSessionId: tracker.sessionId, tracker, stop, model: r.model.tag, task: r.task,
+        memory: (maxChars) => (memory ? memoryDigest(memory, maxChars) : ""),
+        // Every context reset is a durable checkpoint: memory + transcript + source, so a crash right after it loses nothing.
+        onCompaction: async (info) => {
+          if (memory) remember.usage(memory, { compactions: 1 });
+          await checkpoint(`after context reset ${info.compactions} (${phase})`);
+        },
       });
+      if (memory) {
+        remember.phase(memory, phase, res.status, res.summary ?? null);
+        if (res.status === "success" && phase !== "repair") milestone = true;
+      }
+      done();
+      saveMem();
       if (res.status === "max_budget") st.localLimit = "budget";
       if (res.status === "max_turns" && tracker.turns() >= turnCap) st.localLimit = "turns";
       if (res.status === "max_output_tokens") st.localLimit = "output tokens";
@@ -503,12 +558,16 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     let lastBuildModel = buildRoute.model.tag;
     for (const phase of (spec ? ["build", "verify"] : ["plan", "build", "verify"]) as Phase[]) {
       if (stop.reason || st.localLimit || st.agentError) break;
+      // Crash recovery / continuation: a phase an earlier segment completed is not run again.
+      if (memory?.phasesCompleted.includes(phase)) { tracker.note({ kind: "step", message: `phase ${phase}: already completed in an earlier segment (project memory); skipped` }); continue; }
       if (phase === "verify") stage = "verifying";
       const r = phase === "plan" ? route("planning", models) : phase === "build" ? buildRoute : route("debugging", models, "verify and fix → Model B");
       await runOne(phase, phase === "plan" ? previousNote : null, null, r);
       if (phase !== "plan") lastBuildModel = r.model.tag;
       guard();
-      await sendRequirements(readRequirements(ws.repo, job.requirements));
+      const reqsNow = readRequirements(ws.repo, job.requirements);
+      if (memory && remember.requirements(memory, reqsNow)) milestone = true;
+      await sendRequirements(reqsNow);
       await checkpoint(`after ${phase}`);
     }
 
@@ -529,15 +588,22 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           tracker.note({ kind: "check", message: `restored protected checker files: ${restored.join(", ")}` });
         }
       }
+      begin("acceptance", "runner acceptance checks");
       const out = await runChecks(ws!.repo, commands, checkEnv, cfg.checkTimeoutMs, checkExecutor);
       if (job.strategy === "standard") {
         const b = job.brief.content.customerData.business;
         const bc = briefConformance(ws!.repo, { businessName: b.name, publicEmail: b.publicEmail, publicPhone: b.publicPhone });
         if (bc) out.push(bc);
       }
+      // Customer-owned credentials never live in the website's source (only file:line is reported, never the value).
+      const listed = await run("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: ws!.repo, env: { PATH: cfg.agentPath, HOME: ws!.home, GIT_CONFIG_NOSYSTEM: "1" }, timeoutMs: 60_000 });
+      if (listed.code === 0) out.push(credentialScan(ws!.repo, listed.stdout.split("\0")));
       // Every container this job ran (agent phases and these checks), as Docker actually configured it.
       const iso = sandbox ? isolationCheck(sandbox.isolation) : null;
       if (iso) out.push(iso);
+      if (memory && remember.checks(memory, out)) milestone = true;
+      done();
+      saveMem();
       return out;
     };
 
@@ -560,8 +626,11 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       let promptUsed = spec?.masterPrompt ?? "Runner build phases (plan, build, verify) from BRIEF.md";
       let promptSource: "architect" | "reviewer" | "runner" = spec ? "architect" : "runner";
       let cycleRoute: Route = buildRoute;
-      const signatures: string[] = [];
-      for (let cycle = 1; cycle <= cfg.advisor.maxCycles; cycle++) {
+      // Cycle numbers and the repair bound are cumulative across segments (project memory): a continuation never
+      // resets the bounded repair loop, and the platform sees cycle N+1 after N.
+      const firstCycle = (memory?.cyclesCompleted ?? 0) + 1;
+      if (firstCycle > 1) tracker.note({ kind: "step", message: `review cycles continue at ${firstCycle} (${firstCycle - 1} completed in earlier segments; limit ${cfg.advisor.maxCycles})` });
+      for (let cycle = firstCycle; cycle <= cfg.advisor.maxCycles; cycle++) {
         if (stop.reason || st.localLimit || st.agentError) break;
         if (checks.some((c) => !c.ok)) writeInside(ws.repo, path.join(".crestmont", "runner-checks.json"), JSON.stringify(checks.map(({ id, command, ok, code, outputTail }) => ({ id, command, ok, code, outputTail })), null, 2));
         await commitAll(git!, `AI build: cycle ${cycle} evidence`);
@@ -579,6 +648,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
             approvals: () => client.listApprovals(job), requestApproval: (r) => client.requestApproval(job, r), report: (items) => client.reportIntegrations(job, items), fetchImpl: deps.fetchImpl,
           });
           for (const o of ops) tracker.note({ kind: "note", message: `integration operation ${o.operation}: ${o.status}` });
+          if (memory) remember.integrations(memory, [...ints, ...ops.map((o) => ({ key: o.operation.split(".")[0], operation: o.operation, status: o.status }))]);
         } catch (err) { if (err instanceof LeaseLostError) { markLeaseLost(); throw err; } log.warn("integration/approval report failed", { error: errorMessage(err) }); }
         // C. Independent review: a fresh Model A session (falls back to the deterministic reviewer if it is unavailable).
         stage = "verifying";
@@ -602,20 +672,31 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         // Older platform without the orchestration endpoints: the earlier behaviour (one repair round when checks failed).
         const decision = res ?? { cycle, decision: verdict.decision, reason: "local", continue: cycle === 1 && checks.some((c) => !c.ok), prompt: verdict.nextPrompt };
         tracker.note({ kind: "step", message: `cycle ${cycle}: ${decision.decision}${res ? "" : " (platform without orchestration endpoints)"}` });
+        const resolvedBefore = memory ? memory.defects.filter((d) => d.resolved).length : 0;
+        const defect: DefectRecord | null = memory ? remember.cycle(memory, { cycle, decision: decision.decision, outstanding: open, reviewer: reviewerName }) : null;
+        if (memory && memory.defects.filter((d) => d.resolved).length > resolvedBefore) milestone = true;
+        saveMem();
         if (!decision.continue) break;
+        // Never the same failed fix forever: a defect that survived MAX_INEFFECTIVE_REPAIRS repairs stops the loop.
+        if (ineffectiveRepairs(defect) >= MAX_INEFFECTIVE_REPAIRS) {
+          st.agentError = `Repair loop stalled: the same defect (${defect!.id}: ${defect!.summary.slice(0, 3).join("; ").slice(0, 300)}) survived ${ineffectiveRepairs(defect)} targeted repairs; escalated for a person instead of repeating the fix`;
+          break;
+        }
         // D. Corrective prompt → routed: ordinary defects to Model B; repeated, architectural or integration-heavy to A.
-        const sig = [...open].sort().join("\n");
-        signatures.push(sig);
+        // Consecutive cycles with this same defect, across segments (project memory).
         let repeats = 0;
-        for (let i = signatures.length - 1; i >= 0 && signatures[i] === sig; i--) repeats++;
+        if (memory && defect) for (let i = memory.cycles.length - 1; i >= 0 && memory.cycles[i].defect === defect.id; i--) repeats++;
+        else repeats = 1;
         const rt = repairTask({ outstanding: open, sameFailureRepeats: repeats, findings: verdict.findings, escalateAfterRepeats: cfg.routing.escalateAfterRepeats });
         cycleRoute = route(rt.task, models, rt.reason);
         cycleBase = await headCommit(git!);
         promptUsed = decision.prompt ?? "Repair: fix the failing checks listed in .crestmont/runner-checks.json.";
         promptSource = "reviewer";
         // Without the orchestration endpoints the classic repair prompt is used (runner-checks.json); otherwise the reviewer's prompt.
+        if (memory) remember.repair(memory, defect, { cycle, model: cycleRoute.model.tag, task: cycleRoute.task, commitBefore: cycleBase });
         await runOne("repair", null, res ? `${promptUsed}\n\nThe full review is in .crestmont/review-${String(cycle).padStart(2, "0")}.md.` : null, cycleRoute);
         lastBuildModel = cycleRoute.model.tag;
+        if (memory) remember.repairDone(memory, defect, await commitAll(git!, `AI build: cycle ${cycle} repair`).then(() => headCommit(git!)));
         guard();
         if (stop.reason || st.localLimit || st.agentError) break;
         checks = await acceptance(commands);
@@ -626,6 +707,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
 
     // ── a model could not be loaded on the GPU: checkpoint and give the build back without spending an attempt ──
     if (st.agentError && /could not be loaded|ModelUnavailableError/.test(st.agentError) && !stop.reason) {
+      await endSegment("released");
       await checkpoint("model unavailable");
       const until = new Date(Date.now() + 10 * 60_000).toISOString();
       return await finish("released", { error: `${st.agentError.slice(0, 300)}; work is checkpointed and resumes when the model loads again (no paid fallback).`, stopReason: "model_unavailable", checks, notBefore: until });
@@ -635,18 +717,42 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     if (stop.reason || st.localLimit) {
       const reason = stop.reason ?? `local:${st.localLimit}`;
       if (reason === "lease_lost") throw new LeaseLostError(job.id);
-      await checkpoint("before stopping");
+      if (git) await commitAll(git, "AI build: segment end");
       if (!serverStopReason) {
         // Local cap: report the final numbers; the server decides (it is authoritative on budget/runtime).
         await heartbeatOnce();
         guard();
       }
+      // Continuation (local, zero-cost providers): the per-attempt turn / runtime / output-token limits — the runner's
+      // own and the platform's per-run runtime/turn limit — end a SEGMENT, not the build. With measurable progress the
+      // build is released (requeued without spending an attempt) and the next segment resumes from this checkpoint.
+      // Cancel, pause, budget and eligibility stops from the platform are never overridden.
+      const segmentLimit = serverStopReason ? serverStopReason === "runtime" : ["local:turns", "local:runtime", "local:output tokens"].includes(reason);
+      if (segmentLimit && cfg.continuation.enabled && !provider.paid && memory) {
+        const progress = await endSegment("continuation");
+        const why = serverStopReason ? "the platform's per-run runtime/turn limit" : `the runner's per-segment ${reason.replace("local:", "")} limit`;
+        if (memory.idleSegments >= cfg.continuation.maxIdleSegments || memory.segmentsSinceMilestone >= cfg.continuation.maxSegmentsWithoutMilestone) {
+          await checkpoint("stalled");
+          const detail = memory.idleSegments >= cfg.continuation.maxIdleSegments
+            ? `${memory.idleSegments} consecutive segments reached ${why} without measurable progress (no new commit, completed phase, or improved requirement/check)`
+            : `${memory.segmentsSinceMilestone} consecutive segments produced commits but no milestone (no phase completed, no requirement or check improved, no defect resolved)`;
+          return await finish("failed", { error: `Stalled: ${detail}; stopped to avoid a non-productive loop. Work is checkpointed.`, stopReason: "stalled", checks });
+        }
+        await checkpoint(`segment ${memory.totals.segments} end (continuation)`);
+        return await finish("released", {
+          error: `Continuation: segment ${memory.totals.segments} reached ${why}${progress ? " with measurable progress" : " (no progress this segment; the stall guard allows " + (cfg.continuation.maxIdleSegments - memory.idleSegments) + " more)"}; work is checkpointed and the next segment resumes it. ${memory.totals.outputTokens} output tokens over ${memory.totals.segments} segment(s) and ${memory.totals.compactions} context reset(s) so far; local inference, $0.`,
+          stopReason: "continuation", checks,
+        });
+      }
+      await endSegment(serverStopReason ? "stopped" : reason === "local:shutdown" ? "released" : "failed");
+      await checkpoint("before stopping");
       if (serverStopReason) return await finish("stopped", { stopReason: `control plane requested stop (${serverStopReason})`, checks });
       // Protocol v1.1: "released" requeues without spending an attempt.
       if (reason === "local:shutdown") return await finish("released", { error: "Runner shutdown before the build finished; work was checkpointed.", stopReason: reason, checks });
       return await finish("failed", { error: `Local safety limit reached (${reason.replace("local:", "")}) before the build finished; the control plane did not request a stop.`, stopReason: reason, checks });
     }
     if (st.agentError) {
+      await endSegment("failed");
       await checkpoint("after agent error");
       return await finish("failed", { error: st.agentError, checks });
     }
@@ -654,9 +760,16 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     // ── preview ──
     const failedChecks = checks.filter((c) => !c.ok);
     let preview = { url: null as string | null, note: "not attempted because acceptance checks failed", name: null as string | null };
-    if (!failedChecks.length) preview = await deployPreview(cfg, ws, git, job, checkEnv, deps.processEnv ?? process.env, log);
+    if (!failedChecks.length) {
+      // Idempotent: one preview Worker per build (previewName); a re-run after a crash replaces the same Worker.
+      begin("preview", "private preview deploy");
+      preview = await deployPreview(cfg, ws, git, job, checkEnv, deps.processEnv ?? process.env, log);
+      done();
+      if (memory) remember.preview(memory, preview);
+    }
 
     await commitAndPush(`AI build ${job.kind === "revision" ? `revision ${job.revision}` : "first build"}: ready for owner review`);
+    await endSegment(failedChecks.length ? "failed" : "completed");
     await checkpoint("final");
     if (failedChecks.length) {
       return await finish("failed", { error: `Acceptance checks failed: ${failedChecks.map((c) => c.id).join(", ")}`, checks, preview });

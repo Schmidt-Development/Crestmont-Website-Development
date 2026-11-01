@@ -370,6 +370,7 @@ export function makeConfig(over: Partial<RunnerConfig> & { controlPlaneUrl: stri
     localMaxTurns: 300,
     localMaxBudgetUsd: 50,
     localMaxRuntimeMinutes: 180,
+    continuation: { enabled: true, maxIdleSegments: 2, maxSegmentsWithoutMilestone: 8 },
     heartbeatSecondsOverride: null,
     pollMinMs: 10,
     pollMaxMs: 50,

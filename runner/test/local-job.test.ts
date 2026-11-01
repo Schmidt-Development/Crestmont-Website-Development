@@ -167,7 +167,8 @@ test("[AIB-RUNNER] server stop interrupts the local agent mid-request, checkpoin
 });
 
 test("[AIB-RUNNER] transcript checkpoint + resume on another host continues the same local conversation [fake model]", async () => {
-  // Attempt 1: the turn cap ends the plan phase after two model calls; the transcript is checkpointed.
+  // Attempt 1: the turn cap ends the plan phase after two model calls: a SEGMENT limit. The work (a new commit) is
+  // measurable progress, so the build is released for the next segment (continuation), with the transcript checkpointed.
   const r = await rig({
     job: { limits: { model: "claude-ignored", maxTurns: 2, maxRuntimeMinutes: 120, runBudgetUsd: 0, projectBudgetRemainingUsd: 0 } },
     cp: { serveCheckpointFetch: true },
@@ -175,8 +176,8 @@ test("[AIB-RUNNER] transcript checkpoint + resume on another host continues the 
   });
   try {
     const s1 = await runJob(r.job, deps(r));
-    assert.equal(s1.outcome, "failed");
-    assert.match(String(s1.complete?.error), /Local safety limit reached \(turns\)/);
+    assert.equal(s1.outcome, "released");
+    assert.match(String(s1.complete?.error), /^Continuation: segment 1 reached the runner's per-segment turns limit with measurable progress/);
     const ck = r.cp.byPath("checkpoint").filter((c) => c.body.archiveBase64).at(-1)!;
     const sessionId = String(ck.body.sessionId);
     assert.match(sessionId, /^local-/);
@@ -196,6 +197,7 @@ test("[AIB-RUNNER] transcript checkpoint + resume on another host continues the 
     assert.ok(convo.includes("MARKER-FROM-ATTEMPT-1"), "the earlier tool results are in the resumed conversation");
     assert.ok(first.messages.some((m) => m.role === "assistant" && m.tool_calls?.[0]?.function.name === "write_file"), "earlier tool calls replayed");
     assert.match(String(s2.complete?.report), new RegExp(`Resumed local agent session ${sessionId}`));
+    assert.match(String(s2.complete?.report), /Project memory restored: this is segment 2 of the build; phases completed none, review cycles 0, context resets 0, 200 output tokens so far/);
     assert.equal(s2.complete?.sessionId, sessionId);
     assert.equal(s2.complete?.runCostUsd, 0);
   } finally { await r.cp.close(); await r.model.close(); }
@@ -327,4 +329,122 @@ test("[AIB-RUNNER] health endpoint reports status without secrets; unhealthy aft
     assert.equal((await fetch(`http://127.0.0.1:${port}/other`)).status, 404);
     assert.equal(healthStatus({ ...h, lastClaimOk: true, lastClaimAt: new Date(Date.now() - 3_600_000).toISOString() }).ok, false);
   } finally { server.close(); }
+});
+
+// ── Continuation segments, stall guard and crash recovery (mock: fake model, fake docker, fake control plane) ──
+
+const activityOf = (cp: FakeCP) => cp.byPath("heartbeat").flatMap((h) => (h.body.activity as { message: string }[] | undefined) ?? []).map((a) => a.message).join("\n");
+/** Claim the next segment of the same build: resume from the latest uploaded checkpoint (the platform's view). */
+async function nextSegment(r: Rig, attempt: number, extra: Partial<Job> = {}): Promise<Job> {
+  const ck = r.cp.byPath("checkpoint").filter((c) => c.body.archiveBase64).at(-1)!;
+  r.cp.jobs.push(makeJob({ id: r.job.id, attempt, leaseToken: String(attempt).repeat(64).slice(0, 64), resume: { sessionId: String(ck.body.sessionId), workspaceRef: String(ck.body.workspaceRef), checkpointKey: [...r.cp.archives.keys()].at(-1)!, sourceBranch: "ai-build/first-build" }, ...extra }));
+  return claimFrom(r.cp);
+}
+
+test("[AIB-CONTINUITY] a build longer than one segment: segment limits release the build with a checkpoint, the next segment (another host) skips completed phases and finishes [fake model]", async () => {
+  // Segment 1: 6 turns. The plan phase completes; build and verify keep writing files without finishing.
+  let w = 0;
+  const r = await rig({
+    job: { limits: { model: "x", maxTurns: 6, maxRuntimeMinutes: 120, runBudgetUsd: 0, projectBudgetRemainingUsd: 0 } },
+    cp: { serveCheckpointFetch: true },
+    handler: (q) => phaseOf(q) === "plan" ? scriptedBuilder(q) : call("write_file", { path: `notes/part${++w}.md`, content: `part ${w}\n` }),
+  });
+  try {
+    const s1 = await runJob(r.job, deps(r));
+    assert.equal(s1.outcome, "released", String(s1.complete?.error));
+    assert.match(String(s1.complete?.error), /^Continuation: segment 1 reached the runner's per-segment turns limit with measurable progress; work is checkpointed and the next segment resumes it\. \d+ output tokens over 1 segment\(s\)/);
+    assert.match(String(s1.complete?.error), /local inference, \$0\.$/);
+    assert.equal(s1.complete?.runCostUsd, 0);
+    // Segment 2 on another host, from the uploaded checkpoint.
+    const job2 = await nextSegment(r, 1);
+    const cfg2 = { ...r.cfg, workspacesRoot: tmp("aib-seg2-") };
+    const m2 = await startFakeModel(scriptedBuilder);
+    const s2 = await runJob(job2, { ...deps(r), cfg: { ...cfg2, local: { ...cfg2.local, baseUrl: m2.url } } });
+    await m2.close();
+    assert.equal(s2.outcome, "ready_for_review", String(s2.complete?.error));
+    for (let i = 1; i <= w; i++) assert.ok(existsSync(path.join(s2.workspace!, "repo", "notes", `part${i}.md`)), `segment 1 work restored (part${i})`);
+    assert.ok(existsSync(path.join(s2.workspace!, "repo", ".crestmont", "plan.md")), "git-ignored status files come back with the checkpoint");
+    assert.match(activityOf(r.cp), /phase plan: already completed in an earlier segment \(project memory\); skipped/);
+    assert.ok(!m2.requests.some((q) => phaseOf(q) === "plan"), "no model call for the completed plan phase");
+    assert.match(String(s2.complete?.report), /Project memory restored: this is segment 2 of the build; phases completed plan/);
+    const mem = JSON.parse(readFileSync(path.join(s2.workspace!, "agent", "project-memory.json"), "utf8"));
+    assert.deepEqual(mem.segments.map((s: { end: string }) => s.end), ["continuation", "completed"]);
+    assert.equal(mem.totals.continuations, 1);
+    assert.ok(mem.totals.outputTokens >= (6 + m2.requests.length) * 100, "token metrics accumulate across segments");
+  } finally { await r.cp.close(); await r.model.close(); }
+});
+
+test("[AIB-CONTINUITY] stall guard: segments that reach their limit without progress end the build (no infinite non-productive loop) [fake model]", async () => {
+  const idle = (q: FakeModelRequest) => (phaseOf(q) === "plan" ? call("list_dir", { path: "." }) : call("read_file", { path: "public/index.html" }));
+  const r = await rig({ job: { limits: { model: "x", maxTurns: 3, maxRuntimeMinutes: 120, runBudgetUsd: 0, projectBudgetRemainingUsd: 0 } }, cp: { serveCheckpointFetch: true }, handler: idle, cfg: { localLimits: undefined } as Partial<RunnerConfig> });
+  try {
+    const s1 = await runJob(r.job, deps(r, { localLimits: { loopRepeats: 99 } }));
+    assert.equal(s1.outcome, "released");
+    assert.match(String(s1.complete?.error), /no progress this segment; the stall guard allows 1 more/);
+    const job2 = await nextSegment(r, 1, { limits: r.job.limits });
+    const s2 = await runJob(job2, deps(r, { localLimits: { loopRepeats: 99 } }));
+    assert.equal(s2.outcome, "failed");
+    assert.match(String(s2.complete?.error), /^Stalled: 2 consecutive segments reached the runner's per-segment turns limit without measurable progress/);
+  } finally { await r.cp.close(); await r.model.close(); }
+});
+
+test("[AIB-CONTINUITY] the platform's per-run runtime limit ends a segment (released), while cancel/pause stops are never overridden [fake model]", async () => {
+  let building = false;
+  const r = await rig({
+    handler: async (q, _n, sig) => {
+      if (phaseOf(q) === "plan") return scriptedBuilder(q);
+      building = true;
+      while (!sig.aborted) await delay(10);
+      return call("finish", { summary: "late" });
+    },
+    cp: { heartbeat: () => (building ? { continue: false, reason: "runtime" } : { continue: true, leaseExpiresAt: "x" }) },
+  });
+  try {
+    const s = await runJob(r.job, deps(r));
+    assert.equal(s.outcome, "released", String(s.complete?.error));
+    assert.match(String(s.complete?.error), /reached the platform's per-run runtime\/turn limit with measurable progress/);
+  } finally { await r.cp.close(); await r.model.close(); }
+  for (const reason of ["paused", "budget", "canceled"] as const) {
+    building = false;
+    const p = await rig({
+      handler: async (q, _n, sig) => { if (phaseOf(q) === "plan") return scriptedBuilder(q); building = true; while (!sig.aborted) await delay(10); return call("finish", { summary: "late" }); },
+      cp: { heartbeat: () => (building ? { continue: false, reason } : { continue: true, leaseExpiresAt: "x" }) },
+    });
+    try {
+      const s = await runJob(p.job, deps(p));
+      assert.equal(s.outcome, "stopped", `${reason} is a real stop, not a segment boundary`);
+    } finally { await p.cp.close(); await p.model.close(); }
+  }
+});
+
+test("[AIB-CONTINUITY] crash recovery: after a lost lease mid-build, the next attempt restores the last checkpoint on the same host, records the interruption, does not repeat the completed plan and finishes [fake model]", async () => {
+  let crash = false;
+  const r = await rig({
+    handler: async (q, _n, sig) => {
+      if (phaseOf(q) === "plan") return scriptedBuilder(q);
+      crash = true; // the runner "dies" during the build phase (its lease is lost)
+      while (!sig.aborted) await delay(10);
+      return call("finish", { summary: "never" });
+    },
+    cp: { heartbeat: () => (crash ? "lease_lost" : { continue: true, leaseExpiresAt: "x" }) },
+  });
+  try {
+    const s1 = await runJob(r.job, deps(r));
+    assert.equal(s1.outcome, "lease_lost");
+    assert.equal(r.cp.byPath("complete").length, 0, "nothing completed after the lease was lost");
+    const ref = path.basename(s1.workspace!);
+    // The platform re-queues the build after the lease expired; the same host still has the workspace and its checkpoint.
+    r.cp.jobs.push(makeJob({ id: r.job.id, attempt: 2, leaseToken: "e".repeat(64), resume: { sessionId: null, workspaceRef: ref, checkpointKey: null, sourceBranch: "ai-build/first-build" } }));
+    const job2 = await claimFrom(r.cp);
+    crash = false;
+    const m2 = await startFakeModel(scriptedBuilder);
+    const s2 = await runJob(job2, { ...deps(r), cfg: { ...r.cfg, local: { ...r.cfg.local, baseUrl: m2.url } } });
+    await m2.close();
+    assert.equal(s2.outcome, "ready_for_review", String(s2.complete?.error));
+    assert.match(String(s2.complete?.report), /Recovered after an interruption: the previous segment ended without a recorded end \(runner restart, crash or lost lease\); the build resumed from the last checkpoint\. Completed phases are not repeated\./);
+    assert.ok(!m2.requests.some((q) => phaseOf(q) === "plan"), "the plan completed before the crash is not redone");
+    const mem = JSON.parse(readFileSync(path.join(s2.workspace!, "agent", "project-memory.json"), "utf8"));
+    assert.equal(mem.segments[0].end, "interrupted");
+    assert.equal(mem.recovered.length, 1);
+  } finally { await r.cp.close(); await r.model.close(); }
 });

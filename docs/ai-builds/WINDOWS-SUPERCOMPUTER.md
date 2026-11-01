@@ -295,7 +295,7 @@ not mitigated beyond the flags above. `workers.dev` previews (if enabled) are pu
 | `LOCAL_MODEL` | (required for local) | Ollama tag, e.g. `qwen3-coder:30b` |
 | `LOCAL_MODEL_BASE_URL` | `http://host.docker.internal:11434/v1` | OpenAI-compatible base; hosted AI API hosts are refused |
 | `LOCAL_MODEL_CONTEXT_TOKENS` | `32768` | must match `OLLAMA_CONTEXT_LENGTH`; drives context management |
-| `LOCAL_MODEL_MAX_OUTPUT_TOKENS` / `RUNNER_LOCAL_MAX_OUTPUT_TOKENS` | `8192` / `2000000` | per call / per attempt |
+| `LOCAL_MODEL_MAX_OUTPUT_TOKENS` / `RUNNER_LOCAL_MAX_OUTPUT_TOKENS` | `8192` / `2000000` | per call / per segment (not cumulative: a segment limit continues in the next segment, `CONTINUITY.md`) |
 | `LOCAL_MODEL_TEMPERATURE`, `LOCAL_MODEL_REQUEST_TIMEOUT_SECONDS` | `0.2`, `900` | |
 | `RUNNER_SANDBOX_IMAGE` | `crestmont-build-sandbox:1` | per-build image |
 | `RUNNER_SANDBOX_VOLUME` | (empty = bind mounts) | `crestmont-workspaces` in compose |

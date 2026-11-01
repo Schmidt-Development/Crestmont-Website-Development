@@ -1,6 +1,8 @@
 // Checkpoint archives (tar.gz ≤ 20 MB): meta.json + repo.bundle (git bundle --all) + the provider's session
 // transcripts that `resume` needs: the Agent SDK's under <job home>/.claude/projects/ ("claude-projects") and the
-// local provider's under <job dir>/agent/ ("local-agent").
+// local provider's under <job dir>/agent/ ("local-agent", which also holds the durable project memory), plus the
+// runner's own idempotency records from the job directory ("runner-state": operations already run), so a resumed
+// attempt on any host never repeats an external side effect.
 // Transcript location: https://code.claude.com/docs/en/agent-sdk/sessions ("Claude Code stores sessions under
 // ~/.claude/projects/<encoded-cwd>/*.jsonl ... If you set CLAUDE_CONFIG_DIR, look under $CLAUDE_CONFIG_DIR/projects/";
 // "Resume across hosts: Move the session file ... restore it inside any directory under ~/.claude/projects/").
@@ -33,6 +35,9 @@ export interface BuiltCheckpoint { file: string; base64: string | null; bytes: n
 
 let counter = 0;
 
+/** Runner-owned records in <job dir> (outside the agent's repository) that make retries idempotent. */
+export const RUNNER_STATE_FILES = ["integration-operations-done.json"] as const;
+
 /** cpSync filter: copy directories and regular files only (symlinks and special files are left out of checkpoints). */
 function regularOnly(src: string): boolean {
   try { const st = lstatSync(src); return st.isDirectory() || st.isFile(); } catch { return false; }
@@ -53,6 +58,19 @@ export async function buildCheckpoint(ws: Workspace, git: GitCtx, meta: Omit<Che
   if (existsSync(localAgent)) {
     cpSync(localAgent, path.join(stage, "local-agent"), { recursive: true, filter: regularOnly });
     contents.push("local-agent");
+  }
+  const state = RUNNER_STATE_FILES.filter((f) => existsSync(path.join(ws.dir, f)) && lstatSync(path.join(ws.dir, f)).isFile());
+  if (state.length) {
+    mkdirSync(path.join(stage, "runner-state"));
+    for (const f of state) cpSync(path.join(ws.dir, f), path.join(stage, "runner-state", f));
+    contents.push("runner-state");
+  }
+  // The agent's status files (.crestmont/: plan, requirements, reviews, integration requests) are git-ignored in the
+  // project repository, so the bundle does not carry them: archive them (no screenshots) for a resume on another host.
+  const status = path.join(ws.repo, ".crestmont");
+  if (existsSync(status) && lstatSync(status).isDirectory()) {
+    cpSync(status, path.join(stage, "crestmont-status"), { recursive: true, filter: (src) => regularOnly(src) && path.basename(src) !== "screenshots" });
+    contents.push("crestmont-status");
   }
   if (await createBundle(git, path.join(stage, "repo.bundle"))) contents.push("repo.bundle");
   const full: CheckpointMeta = { schema: "crestmont.runner-checkpoint/1", createdAt: new Date().toISOString(), contents, ...meta };
@@ -135,6 +153,15 @@ export async function restoreCheckpoint(ws: Workspace, git: GitCtx, archive: Buf
   }
   const localAgent = path.join(dir, "local-agent");
   if (existsSync(localAgent)) cpSync(localAgent, path.join(ws.dir, "agent"), { recursive: true });
+  const status = path.join(dir, "crestmont-status");
+  const target = path.join(ws.repo, ".crestmont");
+  // Restored only into a restored git checkout (an empty repo directory must stay empty for the clone from the project
+  // repository), only where the workspace has nothing newer (never over an existing file), never through a link.
+  if (existsSync(status) && existsSync(path.join(ws.repo, ".git")) && !(existsSync(target) && !lstatSync(target).isDirectory())) cpSync(status, target, { recursive: true, force: false, errorOnExist: false });
+  for (const f of RUNNER_STATE_FILES) {
+    const src = path.join(dir, "runner-state", f);
+    if (existsSync(src) && lstatSync(src).isFile()) cpSync(src, path.join(ws.dir, f));
+  }
   rmSync(dir, { recursive: true, force: true });
   rmSync(archiveFile, { force: true });
   return { meta, repoRestored, sessionFileFound: sessionId ? sessionFileExists(ws.home, sessionId) : false };

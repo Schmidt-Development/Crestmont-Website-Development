@@ -202,6 +202,9 @@ No automatic Claude, OpenAI or other paid fallback exists:
 
 The dashboard shows "Metered AI spend" from recorded runs; it must stay $0.00.
 
+There is no cumulative local-token ceiling: long builds continue through unlimited context resets and segments, with
+stall and repair-loop guards (`CONTINUITY.md`).
+
 ## 11. Dashboard (Owner → AI builds)
 
 - **GPU workers and AI models** (`/staff/builds/workers`):
