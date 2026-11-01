@@ -10,6 +10,11 @@ const server = http.createServer(async (req, res) => {
     const r = await t.call(req.method ?? "GET", req.url ?? "/");
     res.writeHead(r.status, { "content-type": r.headers.get("content-type") ?? "text/plain" });
     res.end(r.text);
-  } catch (e) { res.writeHead(500); res.end(String(e?.message ?? e).slice(0, 200)); }
+  } catch (e) {
+    // Details go to this helper's stderr (read by the gate), never into a response body.
+    process.stderr.write(`serve: ${String(e?.message ?? e).slice(0, 200)}\n`);
+    res.writeHead(500, { "content-type": "text/plain" });
+    res.end("internal error");
+  }
 });
 server.listen(0, "127.0.0.1", () => process.stdout.write(JSON.stringify({ port: server.address().port }) + "\n"));

@@ -32,10 +32,38 @@ function attrs(s) {
   return out;
 }
 
+/**
+ * Where a comment that starts at `start` (at "<!--") ends, the way browsers parse it: "<!-->" and "<!--->" close at
+ * once, otherwise the first "-->" or "--!>"; an unterminated comment runs to the end of the document. A scanner, not
+ * a regex, so content a browser renders can never be skipped as a "comment" by this checker.
+ * @param {string} html @param {number} start
+ */
+function commentEnd(html, start) {
+  const body = start + 4;
+  if (html.startsWith(">", body)) return body + 1;
+  if (html.startsWith("->", body)) return body + 2;
+  const a = html.indexOf("-->", body), b = html.indexOf("--!>", body);
+  const ends = [a < 0 ? Infinity : a + 3, b < 0 ? Infinity : b + 4];
+  const e = Math.min(...ends);
+  return e === Infinity ? html.length : e;
+}
+
+/** The document with every comment removed (browser comment rules; see commentEnd). @param {string} html */
+function stripComments(html) {
+  let out = "";
+  let i = 0;
+  for (;;) {
+    const c = html.indexOf("<!--", i);
+    if (c < 0) return out + html.slice(i);
+    out += html.slice(i, c);
+    i = commentEnd(html, c);
+  }
+}
+
 /** Minimal tokenizer: returns tags (with attributes) and the text between them; script/style bodies are skipped. */
 /** @param {string} html */
 function tokenize(html) {
-  const clean = html.replace(/<!--[\s\S]*?-->/g, "");
+  const clean = stripComments(html);
   /** @type {{type:"open"|"close", name:string, attrs:Record<string,string>, selfClose:boolean, index:number}[]} */
   const tags = [];
   const re = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)\b((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
@@ -67,8 +95,7 @@ function textOf(html) {
     out += html.slice(i, lt);
     let end;
     if (lower.startsWith("<!--", lt)) {
-      const c = lower.indexOf("-->", lt + 4);
-      end = c < 0 ? html.length : c + 3;
+      end = commentEnd(lower, lt);
     } else {
       const m = /^<(script|style)\b/.exec(lower.slice(lt, lt + 8));
       if (m) {
@@ -86,7 +113,14 @@ function textOf(html) {
   return out.replace(/[<>]/g, " ").replace(/&[a-z]+;|&#\d+;/gi, " ").replace(/\s+/g, " ").trim();
 }
 
-export { tokenize, textOf, attrs, walk };
+/** Body of a parsed <script> element (to its closing tag, or the end of the document). */
+function scriptBody(clean, tag) {
+  const open = clean.indexOf(">", tag.index);
+  const close = clean.toLowerCase().indexOf("</script", open + 1);
+  return clean.slice(open + 1, close < 0 ? clean.length : close);
+}
+
+export { tokenize, textOf, attrs, walk, stripComments };
 
 /** WCAG relative luminance contrast of two #rrggbb colors. */
 export function contrast(a, b) {
@@ -127,8 +161,11 @@ export function runFrontend(o) {
       const token = TEMPLATE_TOKEN.exec(text);
       if (token) err("frontend", rel(f), `unfilled template text "${token[0].slice(0, 60)}"`);
       if (/\b(?:TODO|FIXME)\b/.test(text)) err("frontend", rel(f), "TODO/FIXME left in page text");
-      if (/\son[a-z]+\s*=/i.test(t.replace(/<script[\s\S]*?<\/script>/gi, ""))) err("security", rel(f), "inline event handler (on…=): not allowed by the Content-Security-Policy");
-      if (/<script\b(?![^>]*\bsrc=)(?![^>]*application\/ld\+json)[^>]*>[\s\S]*?\S[\s\S]*?<\/script>/i.test(t)) err("security", rel(f), "inline script: move it to a file (Content-Security-Policy script-src 'self')");
+      // Judged on the parsed tags (browser comment rules, script bodies skipped), never on a stripped copy of the
+      // text: no markup trick can hide an inline handler or script from this check.
+      const parsed = tokenize(t);
+      if (parsed.tags.some((g) => g.type === "open" && Object.keys(g.attrs).some((a) => /^on[a-z]/.test(a)))) err("security", rel(f), "inline event handler (on…=): not allowed by the Content-Security-Policy");
+      if (parsed.tags.some((g) => g.type === "open" && g.name === "script" && !("src" in g.attrs) && !/application\/ld\+json/i.test(g.attrs.type ?? "") && scriptBody(parsed.clean, g).trim())) err("security", rel(f), "inline script: move it to a file (Content-Security-Policy script-src 'self')");
       if (/<script\b[^>]*\bsrc=["']https?:/i.test(t)) err("security", rel(f), "third-party script: not allowed by the Content-Security-Policy");
     }
   }

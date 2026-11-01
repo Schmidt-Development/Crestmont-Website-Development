@@ -130,6 +130,22 @@ if (typeof process !== "undefined") { __forge(); process.exit(0); }
   assert.match(findings(g2, "C"), /SKIPPED without a disabled-feature reason \(never counts as passed\): untagged skip/);
 });
 
+test("[AIB-V2] markup tricks cannot hide an inline handler or script from the security gate (browser comment and end-tag rules)", () => {
+  for (const [label, html] of [
+    ["</script > swallowing a handler", `<script src="/assets/a.js"></script ><img src="/x.png" alt="x" width="1" height="1" onerror="alert(1)"><script src="/assets/b.js"></script>`],
+    ["--!> ends a comment in browsers", `<!-- note --!><button type="button" onclick="alert(1)">Go</button> -->`],
+    ["abrupt <!--> comment", `<!--><img src="/x.png" alt="x" width="1" height="1" onload="alert(1)">-->`],
+    ["inline script closed as </script >", `<script>alert(1)</script >`],
+  ] as const) {
+    const dir = site(fixture("starter-contact"));
+    const page = path.join(dir, "public", "index.html");
+    writeFileSync(page, readFileSync(page, "utf8").replace("</main>", `${html}</main>`));
+    const g = gates(dir, "starter");
+    assert.equal(g.code, 1, label);
+    assert.match(findings(g, "F"), /inline (event handler|script)/, label);
+  }
+});
+
 test("[AIB-V2] provider verification comes only from the runner's broker record: a builder-written results file verifies nothing", () => {
   const dir = site(fixture("service-area"));
   writeFileSync(path.join(dir, ".crestmont", "integration-results.json"), JSON.stringify([{ operation: "stripe.verify_test_key", status: "passed" }, { operation: "resend.verify_sending_domain", status: "passed" }]));
