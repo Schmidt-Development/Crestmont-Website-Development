@@ -126,3 +126,13 @@ test("[SEC-004] [INFRA-005] public repository: no workflow uploads plaintext cre
   for (const n of ["deploy-staging.yml", "staging-restore-drill.yml", "staging-rollback-rehearsal.yml"])
     assert.doesNotMatch(wf(n), /path: (drill|backups)\//, `${n} never uploads a database export`);
 });
+
+test("[INFRA-006] staging secret names may contain digits (RESEARCH_E2E_RUNNER_SECRET); anything that could break the SQL is refused", async () => {
+  const { putSecretIfChanged } = await import("../scripts/staging-secrets.ts");
+  const puts: string[] = [];
+  const ops = { query: async () => [] as never, execFile: async () => {}, putSecret: async (n: string) => { puts.push(n); } };
+  // The first deploy after #96 failed: "invalid secret name RESEARCH_E2E_RUNNER_SECRET" (digits were not allowed).
+  assert.equal(await putSecretIfChanged(ops as never, "root-key", "RESEARCH_E2E_RUNNER_SECRET", "value-1").catch((e) => (e as Error).message), "updated");
+  assert.deepEqual(puts, ["RESEARCH_E2E_RUNNER_SECRET"]);
+  for (const bad of ["bad", "X'; DROP TABLE x;--", "2FA_KEY", "A-B-C"]) await assert.rejects(putSecretIfChanged(ops as never, "root-key", bad, "v"), /invalid secret name/);
+});
