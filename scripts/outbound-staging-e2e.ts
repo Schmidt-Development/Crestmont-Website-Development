@@ -124,7 +124,8 @@ async function main() {
     assert(r.status === 401, `a request signed with an unknown key returned ${r.status}`);
   });
   if (IN_KEY || SIGNER === "worker") await check("inbound_workspace_key_rejected", async () => {
-    const r = await post(FN_URL, { name: "get_packages_pricing", call: { call_id: "x" }, args: {} }, "inbound");
+    // A synthetic call id: the Worker signer only dispatches call_e2e… ids (and the route must refuse the inbound key anyway).
+    const r = await post(FN_URL, { name: "get_packages_pricing", call: { call_id: `call_${RUN}k` }, args: {} }, "inbound");
     assert(r.status === 401, `a request signed with the receptionist's workspace key returned ${r.status}`);
   });
   await workerRetellAudit();
