@@ -255,9 +255,12 @@ jobs:
           era=$(node --no-warnings scripts/staging-secrets.ts derive crmErasure)
           echo "::add-mask::$era"
           printf '%s' "$era" | node --no-warnings scripts/staging-secrets.ts put CRM_ERASURE_HMAC_KEY
+          # The research E2E signs with its own derived key (accepted on staging only, src/routes/research.ts).
+          # RESEARCH_RUNNER_SECRET belongs to the Founder and the Node 1 worker (docs/research/RUNBOOK.md §1): the deploy
+          # never puts it, so it cannot overwrite the worker's value (and the fingerprint cannot hide a drift).
           res=$(node --no-warnings scripts/staging-secrets.ts derive research)
           echo "::add-mask::$res"
-          printf '%s' "$res" | node --no-warnings scripts/staging-secrets.ts put RESEARCH_RUNNER_SECRET
+          printf '%s' "$res" | node --no-warnings scripts/staging-secrets.ts put RESEARCH_E2E_RUNNER_SECRET
 
       - name: Report file storage state (file-storage:staging feed)
         continue-on-error: true

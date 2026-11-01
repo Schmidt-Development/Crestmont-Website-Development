@@ -132,6 +132,21 @@ test("[SEC-002] research worker API: unsigned, wrongly signed, replayed and nonc
   assert.equal((await send(c, "heartbeat", { runnerId: "ws" })).status, 401);
 });
 
+test("[SEC-002] research worker API: the deploy-derived E2E key is accepted on staging only, alongside the Founder's worker key", async () => {
+  const E2E = "deploy-derived-e2e-research-key";
+  for (const environment of ["staging", "production", "development"] as const) {
+    const { client } = await createTestApp({ RESEARCH_RUNNER_SECRET: SECRET, RESEARCH_E2E_RUNNER_SECRET: E2E, ENVIRONMENT: environment });
+    const c = client();
+    assert.equal((await send(c, "heartbeat", { runnerId: "ws" })).status, 200, `${environment}: Founder key always works`);
+    assert.equal((await send(c, "heartbeat", { runnerId: "e2e" }, { secret: E2E })).status, environment === "staging" ? 200 : 401, `${environment}: E2E key`);
+    assert.equal((await send(c, "heartbeat", { runnerId: "x" }, { secret: "wrong" })).status, 401, `${environment}: wrong key`);
+  }
+  // Staging with only the E2E key: the E2E authenticates; nothing else does.
+  const { client } = await createTestApp({ RESEARCH_E2E_RUNNER_SECRET: E2E, ENVIRONMENT: "staging" });
+  assert.equal((await send(client(), "heartbeat", { runnerId: "e2e" }, { secret: E2E })).status, 200);
+  assert.equal((await send(client(), "heartbeat", { runnerId: "x" })).status, 401);
+});
+
 test("[OWN-003] research ships paused; the worker is told to hold, batches are refused with 409 until the Owner resumes", async () => {
   const { client, db } = await createTestApp({ RESEARCH_RUNNER_SECRET: SECRET });
   const c = client();
