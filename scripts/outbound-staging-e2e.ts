@@ -74,10 +74,32 @@ const call = (callId: string, salesId: string, extra: Record<string, unknown> = 
   from_number: "+16145550100", to_number: "+16145550101", metadata: { crestmont_env: ENV_NAME, crestmont_sales_call_id: salesId, crestmont_test: "true" }, ...extra });
 const fn = (callId: string, salesId: string, name: string, args: Record<string, unknown>) => ({ name, call: call(callId, salesId), args });
 
+/**
+ * A fictional 614-555-01xx number not used by an open sales call, not on the do-not-call list and not already a CRM
+ * contact: the pool has only 100 numbers, and earlier runs leave DNC entries (the DNC check) and contacts behind, which the
+ * intake engine would correctly match (duplicate prevention) or refuse (suppression).
+ */
+const usedPhones = new Set<string>();
+async function freePhone(): Promise<string> {
+  const taken = new Set((await q<{ p: string }>(`SELECT phone_e164 AS p FROM voice_dnc WHERE phone_e164 LIKE '+16145550%' UNION SELECT phone_e164 FROM sales_calls WHERE phone_e164 LIKE '+16145550%' AND status IN ('queued','dialing','in_progress') UNION SELECT phone FROM contacts WHERE phone LIKE '+16145550%'`)).map((r) => r.p));
+  const start = parseInt(randomBytes(1).toString("hex"), 16) % 100;
+  for (let i = 0; i < 100; i++) {
+    const p = `+1614555${String(100 + ((start + i) % 100)).padStart(4, "0")}`;
+    if (!taken.has(p) && !usedPhones.has(p)) { usedPhones.add(p); return p; }
+  }
+  throw new Blocked("every fictional 614-555-01xx number is used by earlier E2E data; erase old synthetic contacts on staging");
+}
+
+/** Earlier runs that stopped mid-way leave synthetic sales calls open; they would block a new one for the same number. */
+async function closeSyntheticCalls(note: string): Promise<number> {
+  const open = await q<{ n: number }>(`SELECT COUNT(*) AS n FROM sales_calls WHERE is_test = 1 AND id LIKE 'scall_e2e%' AND status IN ('queued','dialing','in_progress')`);
+  await q(`UPDATE sales_calls SET status = 'cancelled', status_detail = ${lit(note)}, updated_at = ${lit(new Date().toISOString())} WHERE is_test = 1 AND id LIKE 'scall_e2e%' AND status IN ('queued','dialing','in_progress')`);
+  return Number(open[0]?.n ?? 0);
+}
+
 /** One synthetic CRM lead + a sales call row in 'dialing' (what the dialler writes just before Retell answers). */
 async function syntheticCall(tag: string): Promise<{ leadId: string; salesId: string; callId: string; phone: string }> {
-  const n = 100 + (parseInt(randomBytes(1).toString("hex"), 16) % 100);
-  const phone = `+1614555${String(n).padStart(4, "0")}`;
+  const phone = await freePhone();
   const id = (p: string) => `${p}_${RUN}${tag}`;
   const at = new Date().toISOString();
   await q(`INSERT INTO companies (id, name, industry, created_at) VALUES (${lit(id("co"))}, ${lit(`Outbound E2E Bakery ${RUN}${tag} (TEST DATA)`)}, 'bakery', ${lit(at)})`);
@@ -93,8 +115,7 @@ async function syntheticCall(tag: string): Promise<{ leadId: string; salesId: st
  * Cloudflare's documented always-pass Turnstile test keys, so the dummy token is accepted.
  */
 async function syntheticIntakeCall(email: string): Promise<{ leadId: string; salesId: string; callId: string; phone: string }> {
-  const n = 100 + (parseInt(randomBytes(1).toString("hex"), 16) % 100);
-  const phone = `+1614555${String(n).padStart(4, "0")}`;
+  const phone = await freePhone();
   const res = await fetch(`${BASE}/api/leads`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
     name: "Pat Tester (TEST DATA)", email, phone, company: `Outbound E2E Bakery ${RUN} (TEST DATA)`, interest: "starter",
     message: "[TEST DATA] outbound staging E2E synthetic lead; nothing is dialled", source: "web_form", turnstileToken: "XXXX.DUMMY.TOKEN.XXXX" }) });
@@ -124,7 +145,8 @@ async function main() {
     assert(r.status === 401, `a request signed with an unknown key returned ${r.status}`);
   });
   if (IN_KEY || SIGNER === "worker") await check("inbound_workspace_key_rejected", async () => {
-    const r = await post(FN_URL, { name: "get_packages_pricing", call: { call_id: "x" }, args: {} }, "inbound");
+    // A synthetic call id: the Worker signer only dispatches call_e2e… ids (and the route must refuse the inbound key anyway).
+    const r = await post(FN_URL, { name: "get_packages_pricing", call: { call_id: `call_${RUN}k` }, args: {} }, "inbound");
     assert(r.status === 401, `a request signed with the receptionist's workspace key returned ${r.status}`);
   });
   await workerRetellAudit();
@@ -142,6 +164,7 @@ async function main() {
   });
 
   // ── 2. Functions end to end on staging D1 (synthetic lead) ──
+  await check("synthetic_data_cleanup", async () => `${await closeSyntheticCalls("E2E cleanup: left open by an earlier run")} open synthetic sales call(s) from earlier runs closed`);
   const email = `outbound-e2e+${RUN}@crestmontwebsitedevelopment.com`;
   let a: Awaited<ReturnType<typeof syntheticCall>> | null = null;
   await check("synthetic_lead_via_crm_intake", async () => { a = await syntheticIntakeCall(email); return "1 lead through the public lead API (CRM intake), 1 sales call (dialing)"; });
@@ -322,6 +345,7 @@ async function workerRetellAudit() {
 }
 
 await main().catch((e) => results.push({ id: "script", status: "FAIL", detail: String((e as Error).message ?? e).slice(0, 300) }));
+await closeSyntheticCalls(`E2E cleanup: end of run ${RUN}`).catch(() => 0);
 mkdirSync("evidence", { recursive: true });
 writeFileSync("evidence/outbound-staging-e2e.json", JSON.stringify({ run: RUN, base: BASE, at: new Date().toISOString(), results }, null, 2));
 const by = (s: Status) => results.filter((r) => r.status === s);

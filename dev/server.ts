@@ -36,6 +36,8 @@ const env: Env = {
   // Retell workspace keys for local rehearsal of the outbound staging E2E (scripts/outbound-staging-e2e.ts). Never dials.
   RETELL_INBOUND_API_KEY: process.env.RETELL_INBOUND_API_KEY,
   RETELL_OUTBOUND_API_KEY: process.env.RETELL_OUTBOUND_API_KEY,
+  // Worker-signed staging E2E rehearsal (POST /api/sales-outbound/test-dispatch) and the Retell audit route.
+  SCHEDULER_TRIGGER_SECRET: process.env.SCHEDULER_TRIGGER_SECRET,
   // Emergency re-lock rehearsal only: the gate runs when PREVIEW_GATE=required (never in production).
   PREVIEW_GATE: process.env.PREVIEW_GATE,
   STAGING_ACCESS_PASSWORD: process.env.STAGING_ACCESS_PASSWORD,
