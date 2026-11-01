@@ -11,7 +11,7 @@ import { sendMail } from "./mailer.ts";
 import { MAINTENANCE_PLANS } from "../domain/catalog.ts";
 import { syncProjectBuildSafe } from "./builds.ts";
 import { invoiceSubscription, invoicePaymentIntent, invoiceCharge, invoiceLacksPaymentLink, subscriptionPeriodEnd, chargeLatestRefund, chargeLacksRefundList, type ChargeRefund } from "../domain/stripe-shapes.ts";
-import { notifyRefundIssued } from "./refunds.ts";
+import { notifyRefundIssued, DISPUTE_CLOSED } from "./refunds.ts";
 import { StripeReadOnly } from "../adapters/payments.ts";
 
 /** Resolves an invoice's payment link through the API at the pinned version (where Invoice.payment_intent exists),
@@ -245,11 +245,14 @@ export async function processStripeEvent(ctx: EventCtx, evt: StripeEvent): Promi
         const pi = s(o, "payment_intent");
         const pay = pi ? await db.prepare(`SELECT id, organization_id FROM payments WHERE stripe_payment_intent_id = ?`).bind(pi).first<{ id: string; organization_id: string }>() : null;
         const due = n((o.evidence_details ?? {}) as Obj, "due_by");
-        await db.prepare(`INSERT INTO disputes (id, organization_id, payment_id, stripe_dispute_id, amount_cents, reason, status, evidence_due_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)
+        // The PaymentIntent is kept so a dispute that arrives before its payment (events are unordered) is linked when the
+        // payment is recorded (linkDisputesForPayment).
+        await db.prepare(`INSERT INTO disputes (id, organization_id, payment_id, stripe_dispute_id, amount_cents, reason, status, evidence_due_by, created_at, updated_at, stripe_payment_intent_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)
                           ON CONFLICT(stripe_dispute_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at, amount_cents = excluded.amount_cents,
                             reason = COALESCE(excluded.reason, disputes.reason), evidence_due_by = COALESCE(excluded.evidence_due_by, disputes.evidence_due_by),
-                            organization_id = COALESCE(disputes.organization_id, excluded.organization_id), payment_id = COALESCE(disputes.payment_id, excluded.payment_id)`)
-          .bind(newId("dsp"), pay?.organization_id ?? null, pay?.id ?? null, evt.data.object.id, n(o, "amount") ?? 0, s(o, "reason"), s(o, "status") ?? "unknown", due ? new Date(due * 1000).toISOString() : null, nowIso(), nowIso()).run();
+                            organization_id = COALESCE(disputes.organization_id, excluded.organization_id), payment_id = COALESCE(disputes.payment_id, excluded.payment_id),
+                            stripe_payment_intent_id = COALESCE(disputes.stripe_payment_intent_id, excluded.stripe_payment_intent_id)`)
+          .bind(newId("dsp"), pay?.organization_id ?? null, pay?.id ?? null, evt.data.object.id, n(o, "amount") ?? 0, s(o, "reason"), s(o, "status") ?? "unknown", due ? new Date(due * 1000).toISOString() : null, nowIso(), nowIso(), pi).run();
         if (pay) {
           // A dispute closed in the merchant's favour ("won") returns the payment to its pre-dispute state.
           if (evt.type === "charge.dispute.closed" && s(o, "status") === "won") {
@@ -316,9 +319,28 @@ export async function confirmInvoicePayment(ctx: Pick<AppContext, "db" | "email"
   payment: { amountCents: number; paymentIntentId: string | null; chargeId: string | null }, to: string | null): Promise<{ alreadyPaid: boolean; projectId: string | null }> {
   const simulated = source.provider === "simulated";
   const res = await markInvoicePaid(ctx.db, invoiceId, { ...payment, provider: source.provider, simulatedTransactionId: simulated ? source.transactionId : null });
+  if (!simulated && payment.paymentIntentId) await linkDisputesForPayment(ctx.db, payment.paymentIntentId);
   // A simulated delivery never sends a receipt, even onto an invoice that a real payment already settled.
   const out = await completePaidInvoice(ctx, res.invoice.id, simulated ? null : to, simulated ? `the test-only payment simulation (${source.eventId}; no real transaction)` : `Stripe webhook (${source.eventId})`, { noReceipt: simulated });
   return { alreadyPaid: res.alreadyPaid, projectId: out.projectId };
+}
+
+/**
+ * Links disputes recorded before their payment existed (Stripe sends events in no guaranteed order: on staging a
+ * charge.dispute.created was processed 40 ms after checkout.session.completed, before the payment row was written).
+ * The dispute gets its customer and payment, and an open dispute marks the payment disputed, exactly as if the events
+ * had arrived in order. Idempotent.
+ */
+export async function linkDisputesForPayment(db: AppContext["db"], paymentIntentId: string): Promise<number> {
+  const pay = await db.prepare(`SELECT id, organization_id FROM payments WHERE stripe_payment_intent_id = ?`).bind(paymentIntentId).first<{ id: string; organization_id: string }>();
+  if (!pay) return 0;
+  const linked = await db.prepare(`UPDATE disputes SET payment_id = ?, organization_id = COALESCE(organization_id, ?), updated_at = ? WHERE stripe_payment_intent_id = ? AND payment_id IS NULL`)
+    .bind(pay.id, pay.organization_id, nowIso(), paymentIntentId).run();
+  if (!linked.meta.changes) return 0;
+  const open = await db.prepare(`SELECT COUNT(*) AS n FROM disputes WHERE payment_id = ? AND status NOT IN (${DISPUTE_CLOSED.map((x) => `'${x}'`).join(",")})`).bind(pay.id).first<{ n: number }>();
+  if (open?.n) await db.prepare(`UPDATE payments SET status = 'disputed' WHERE id = ?`).bind(pay.id).run();
+  await audit(db, { actorKind: "webhook", action: "dispute.linked_late", subjectType: "payment", subjectId: pay.id, organizationId: pay.organization_id, details: { paymentIntent: paymentIntentId, disputes: linked.meta.changes } });
+  return linked.meta.changes;
 }
 
 /** Idempotent follow-ups for a paid invoice. Safe to run any number of times (webhook retries and the repair sweep). */
