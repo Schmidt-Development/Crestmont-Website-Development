@@ -38,7 +38,7 @@ export interface SegmentRecord {
 }
 
 export interface DefectRecord {
-  /** Short hash of the outstanding-items signature (same failure ⇒ same id). */
+  /** Short hash of ONE outstanding item (check, criterion, defect or security finding): same item ⇒ same id. */
   id: string;
   summary: string[];
   firstCycle: number;
@@ -60,8 +60,11 @@ export interface ProjectMemory {
   brief: { id: string | null; version: number | null; sha256: string | null; business: string | null; packageId: string | null };
   spec: { present: boolean; version: number | null };
   requirements: { key: string; label: string; status: string }[];
+  /** Best status each requirement ever reached (rank), so flipping statuses back and forth is never a milestone. */
+  requirementBest?: Record<string, number>;
   phasesCompleted: string[];
   cyclesCompleted: number;
+  /** `defect`: hash of the cycle's whole outstanding set (consecutive-repeat routing); per-item records are in `defects`. */
   cycles: { cycle: number; decision: string; outstanding: number; defect: string | null; reviewer: string; at: string }[];
   checks: { id: string; ok: boolean; at: string }[];
   defects: DefectRecord[];
@@ -135,9 +138,24 @@ export function loadMemory(jobDir: string, id: MemoryIdentity): LoadResult {
   try { m = JSON.parse(readFileSync(f, "utf8")) as ProjectMemory; } catch { return { memory: newMemory(id), status: "corrupt" }; }
   if (!m || m.schema !== MEMORY_SCHEMA || !Array.isArray(m.segments)) return { memory: newMemory(id), status: "corrupt" };
   if (m.projectId !== id.projectId || m.jobId !== id.jobId || m.kind !== id.kind || m.revision !== id.revision) return { memory: newMemory(id), status: "foreign" };
+  // Older or partial files: every missing field takes its default (a NaN counter would switch a guard off).
+  const d = newMemory(id);
+  const num = (v: unknown, dflt: number) => (typeof v === "number" && Number.isFinite(v) ? v : dflt);
+  const arr = <T>(v: unknown, dflt: T[]): T[] => (Array.isArray(v) ? v as T[] : dflt);
+  const norm: ProjectMemory = {
+    ...d, ...m,
+    brief: { ...d.brief, ...(m.brief ?? {}) }, spec: { ...d.spec, ...(m.spec ?? {}) }, preview: { ...d.preview, ...(m.preview ?? {}) },
+    requirements: arr(m.requirements, []), phasesCompleted: arr(m.phasesCompleted, []), cycles: arr(m.cycles, []), checks: arr(m.checks, []),
+    defects: arr<DefectRecord>(m.defects, []).map((x) => ({ ...x, repairs: arr(x?.repairs, []), summary: arr(x?.summary, []) })),
+    integrations: arr(m.integrations, []), approvalsPending: arr(m.approvalsPending, []), notes: arr(m.notes, []), recovered: arr(m.recovered, []),
+    requirementBest: m.requirementBest && typeof m.requirementBest === "object" ? m.requirementBest : {},
+    cyclesCompleted: num(m.cyclesCompleted, 0), idleSegments: num(m.idleSegments, 0), segmentsSinceMilestone: num(m.segmentsSinceMilestone, 0),
+    totals: Object.fromEntries(Object.entries(d.totals).map(([k, v]) => [k, num((m.totals as Record<string, unknown> | undefined)?.[k], v)])) as ProjectMemory["totals"],
+    inFlight: m.inFlight ?? null,
+  };
   // The brief may have a newer version (owner edit): keep the record, update the identity.
-  if (id.brief?.sha256 && m.brief.sha256 !== id.brief.sha256) m.brief = newMemory(id).brief;
-  return { memory: m, status: "loaded" };
+  if (id.brief?.sha256 && norm.brief.sha256 !== id.brief.sha256) norm.brief = d.brief;
+  return { memory: norm, status: "loaded" };
 }
 
 export function saveMemory(jobDir: string, m: ProjectMemory): void {
@@ -196,13 +214,22 @@ export const remember = {
   begin(m: ProjectMemory, kind: InFlight["kind"], label: string): void { m.inFlight = { kind, label: scrub(label, 120), startedAt: new Date().toISOString() }; },
   done(m: ProjectMemory): void { m.inFlight = null; },
   phase(m: ProjectMemory, phase: string, status: string, summary: string | null): void {
-    if (status === "success" && !m.phasesCompleted.includes(phase) && phase !== "repair") m.phasesCompleted.push(phase);
+    // Planning is best-effort: a plan phase that used its turn share counts as done (the build phase follows it anyway),
+    // so it is not re-run in every later segment.
+    const done = status === "success" || (phase === "plan" && status === "max_turns");
+    if (done && !m.phasesCompleted.includes(phase) && phase !== "repair") m.phasesCompleted.push(phase);
     if (summary) { m.notes.push({ at: new Date().toISOString(), phase, text: scrub(summary, 300), source: "model-reported" }); if (m.notes.length > MAX.notes) m.notes.splice(0, m.notes.length - MAX.notes); }
   },
+  /** Returns true only when a requirement reaches a status it has NEVER reached before (high-water mark). */
   requirements(m: ProjectMemory, items: { key: string; label?: string; status: string }[]): boolean {
-    const before = new Map(m.requirements.map((r) => [r.key, r.status]));
     m.requirements = items.slice(0, 300).map((r) => ({ key: scrub(r.key, 80), label: scrub(r.label ?? "", 160), status: scrub(r.status, 40) }));
-    return m.requirements.some((r) => before.get(r.key) !== r.status && /verified|implemented/.test(r.status));
+    const best = (m.requirementBest ??= {});
+    let improved = false;
+    for (const r of m.requirements) {
+      const rank = REQUIREMENT_RANK[r.status] ?? 0;
+      if (rank > (best[r.key] ?? 0)) { best[r.key] = rank; improved = true; }
+    }
+    return improved;
   },
   checks(m: ProjectMemory, checks: { id: string; ok: boolean }[]): boolean {
     const failedBefore = m.checks.filter((c) => !c.ok).length;
@@ -211,31 +238,44 @@ export const remember = {
     const failedNow = m.checks.filter((c) => !c.ok).length;
     return m.checks.length > 0 && failedNow < failedBefore;
   },
-  cycle(m: ProjectMemory, c: { cycle: number; decision: string; outstanding: string[]; reviewer: string }): DefectRecord | null {
+  /**
+   * Record a review cycle. Defects are tracked PER outstanding item, so an unrelated item appearing or disappearing
+   * never makes a persistent failure look new or fixed. Returns the open defect records of this cycle and how many
+   * earlier-open items were resolved by it.
+   */
+  cycle(m: ProjectMemory, c: { cycle: number; decision: string; outstanding: string[]; reviewer: string }): { open: DefectRecord[]; resolved: number } {
     m.cyclesCompleted = Math.max(m.cyclesCompleted, c.cycle);
-    let defect: DefectRecord | null = null;
-    if (c.outstanding.length) {
-      const id = defectId(c.outstanding);
-      defect = m.defects.find((d) => d.id === id) ?? null;
-      if (defect) { defect.lastCycle = c.cycle; defect.occurrences++; defect.resolved = false; }
-      else { defect = { id, summary: c.outstanding.slice(0, 8).map((s) => scrub(s, 160)), firstCycle: c.cycle, lastCycle: c.cycle, occurrences: 1, resolved: false, repairs: [] }; m.defects.push(defect); }
+    const open: DefectRecord[] = [];
+    for (const item of [...new Set(c.outstanding)].slice(0, 60)) {
+      const id = defectId([item]);
+      let d = m.defects.find((x) => x.id === id) ?? null;
+      if (d) {
+        if (d.lastCycle < c.cycle) { d.occurrences++; d.lastCycle = c.cycle; }
+        d.resolved = false;
+        // Still outstanding after a repair: that repair did not fix this item.
+        const r = d.repairs.at(-1); if (r && r.resolved === null && r.cycle < c.cycle) r.resolved = false;
+      } else {
+        d = { id, summary: [scrub(item, 160)], firstCycle: c.cycle, lastCycle: c.cycle, occurrences: 1, resolved: false, repairs: [] };
+        m.defects.push(d);
+      }
+      open.push(d);
     }
-    // Every other open defect that is no longer reported is resolved; its last repair worked.
-    for (const d of m.defects) if (!d.resolved && d !== defect) { d.resolved = true; const r = d.repairs.at(-1); if (r && r.resolved === null) r.resolved = true; }
-    if (defect) { const r = defect.repairs.at(-1); if (r && r.resolved === null && r.cycle < c.cycle) r.resolved = false; }
-    if (m.defects.length > MAX.defects) m.defects.splice(0, m.defects.length - MAX.defects);
-    m.cycles.push({ cycle: c.cycle, decision: scrub(c.decision, 60), outstanding: c.outstanding.length, defect: defect?.id ?? null, reviewer: scrub(c.reviewer, 80), at: new Date().toISOString() });
+    let resolved = 0;
+    for (const d of m.defects) if (!d.resolved && !open.includes(d)) { d.resolved = true; resolved++; const r = d.repairs.at(-1); if (r && r.resolved === null) r.resolved = true; }
+    // Bound the history: drop the oldest resolved records first.
+    while (m.defects.length > MAX.defects) { const i = m.defects.findIndex((x) => x.resolved); m.defects.splice(i >= 0 ? i : 0, 1); }
+    m.cycles.push({ cycle: c.cycle, decision: scrub(c.decision, 60), outstanding: c.outstanding.length, defect: c.outstanding.length ? defectId(c.outstanding) : null, reviewer: scrub(c.reviewer, 80), at: new Date().toISOString() });
     if (m.cycles.length > MAX.cycles) m.cycles.splice(0, m.cycles.length - MAX.cycles);
-    return defect;
+    return { open, resolved };
   },
-  repair(m: ProjectMemory, defect: DefectRecord | null, r: { cycle: number; model: string; task: string; commitBefore: string | null }): void {
-    if (!defect) return;
-    defect.repairs.push({ ...r, model: scrub(r.model, 80), task: scrub(r.task, 40), commitAfter: null, resolved: null });
-    if (defect.repairs.length > MAX.repairs) defect.repairs.splice(0, defect.repairs.length - MAX.repairs);
+  repair(m: ProjectMemory, defects: DefectRecord[], r: { cycle: number; model: string; task: string; commitBefore: string | null }): void {
+    for (const d of defects) {
+      d.repairs.push({ ...r, model: scrub(r.model, 80), task: scrub(r.task, 40), commitAfter: null, resolved: null });
+      if (d.repairs.length > MAX.repairs) d.repairs.splice(0, d.repairs.length - MAX.repairs);
+    }
   },
-  repairDone(m: ProjectMemory, defect: DefectRecord | null, commitAfter: string | null): void {
-    const r = defect?.repairs.at(-1);
-    if (r) r.commitAfter = commitAfter;
+  repairDone(m: ProjectMemory, defects: DefectRecord[], commitAfter: string | null): void {
+    for (const d of defects) { const r = d.repairs.at(-1); if (r) r.commitAfter = commitAfter; }
   },
   integrations(m: ProjectMemory, items: { key: string; codeStatus?: string; mockStatus?: string; operation?: string; status?: string }[]): void {
     const byKey = new Map(m.integrations.map((i) => [i.operation ?? i.key, i]));
@@ -249,11 +289,14 @@ export const remember = {
   preview(m: ProjectMemory, p: { url: string | null; note: string | null }): void { m.preview = { url: p.url ? scrub(p.url, 300) : null, note: p.note ? scrub(p.note, 300) : null, at: new Date().toISOString() }; },
 };
 
-/** Whether the same defect has already been "repaired" without effect at least `n` times (stall / repeated-fix guard). */
-export function ineffectiveRepairs(d: DefectRecord | null): number {
-  if (!d) return 0;
-  return d.repairs.filter((r) => r.resolved === false).length;
+/** Most targeted repairs any one of these still-open items has survived (stall / repeated-fix guard). */
+export function ineffectiveRepairs(defects: DefectRecord | DefectRecord[] | null): number {
+  const list = defects === null ? [] : Array.isArray(defects) ? defects : [defects];
+  return list.reduce((n, d) => Math.max(n, d.repairs.filter((r) => r.resolved === false).length), 0);
 }
+
+/** Requirement status order for the high-water mark (blocked is not an improvement). */
+const REQUIREMENT_RANK: Record<string, number> = { remaining: 0, blocked: 0, implemented_unverified: 1, verified: 2 };
 
 /**
  * Model-facing digest of the memory: what is done, what is open, what to re-read. Bounded to `maxChars`; the most
@@ -276,10 +319,10 @@ export function memoryDigest(m: ProjectMemory, maxChars: number): string {
   const failing = m.checks.filter((c) => !c.ok);
   if (m.checks.length) lines.push(failing.length ? `Runner acceptance checks failing: ${failing.map((c) => c.id).join(", ")} (details: .crestmont/runner-checks.json).` : "Runner acceptance checks: all passed at the last run.");
   const unresolved = m.defects.filter((d) => !d.resolved);
-  for (const d of unresolved.slice(0, 8)) {
+  if (unresolved.length) lines.push("Unresolved defects (from the runner's checks and the independent review):");
+  for (const d of unresolved.slice(0, 15)) {
     const failed = d.repairs.filter((r) => r.resolved === false).length;
-    lines.push(`Unresolved defect ${d.id} (seen ${d.occurrences}x since cycle ${d.firstCycle}${failed ? `; ${failed} earlier repair(s) did NOT fix it: use a different approach` : ""}):`);
-    for (const s of d.summary.slice(0, 5)) lines.push(`  - ${s}`);
+    lines.push(`  - ${d.summary[0] ?? d.id} (seen in ${d.occurrences} cycle(s) since cycle ${d.firstCycle}${failed ? `; ${failed} earlier repair(s) did NOT fix it: use a different approach` : ""})`);
   }
   if (m.approvalsPending.length) lines.push(`Waiting on people (do not fake these; build and mock-test around them): ${m.approvalsPending.join("; ")}.`);
   const ints = m.integrations.filter((i) => i.codeStatus || i.mockStatus);

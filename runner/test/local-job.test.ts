@@ -3,7 +3,8 @@
 // runs against the starter). No real model, Docker daemon or paid API is used; this is not a real build.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { run } from "../src/exec.ts";
 import path from "node:path";
 import { runJob } from "../src/job.ts";
 import type { JobDeps } from "../src/job.ts";
@@ -197,7 +198,7 @@ test("[AIB-RUNNER] transcript checkpoint + resume on another host continues the 
     assert.ok(convo.includes("MARKER-FROM-ATTEMPT-1"), "the earlier tool results are in the resumed conversation");
     assert.ok(first.messages.some((m) => m.role === "assistant" && m.tool_calls?.[0]?.function.name === "write_file"), "earlier tool calls replayed");
     assert.match(String(s2.complete?.report), new RegExp(`Resumed local agent session ${sessionId}`));
-    assert.match(String(s2.complete?.report), /Project memory restored: this is segment 2 of the build; phases completed none, review cycles 0, context resets 0, 200 output tokens so far/);
+    assert.match(String(s2.complete?.report), /Project memory restored: this is segment 2 of the build; phases completed plan, review cycles 0, context resets 0, 200 output tokens so far/);
     assert.equal(s2.complete?.sessionId, sessionId);
     assert.equal(s2.complete?.runCostUsd, 0);
   } finally { await r.cp.close(); await r.model.close(); }
@@ -383,7 +384,9 @@ test("[AIB-CONTINUITY] stall guard: segments that reach their limit without prog
     assert.match(String(s1.complete?.error), /no progress this segment; the stall guard allows 1 more/);
     const job2 = await nextSegment(r, 1, { limits: r.job.limits });
     const s2 = await runJob(job2, deps(r, { localLimits: { loopRepeats: 99 } }));
-    assert.equal(s2.outcome, "failed");
+    // "stopped" without a server request: a final failed state on the platform, so a stall is not retried (review finding 4).
+    assert.equal(s2.outcome, "stopped");
+    assert.equal(r.cp.byPath("complete").at(-1)!.body.outcome, "stopped");
     assert.match(String(s2.complete?.error), /^Stalled: 2 consecutive segments reached the runner's per-segment turns limit without measurable progress/);
   } finally { await r.cp.close(); await r.model.close(); }
 });
@@ -446,5 +449,38 @@ test("[AIB-CONTINUITY] crash recovery: after a lost lease mid-build, the next at
     const mem = JSON.parse(readFileSync(path.join(s2.workspace!, "agent", "project-memory.json"), "utf8"));
     assert.equal(mem.segments[0].end, "interrupted");
     assert.equal(mem.recovered.length, 1);
+  } finally { await r.cp.close(); await r.model.close(); }
+});
+
+test("[AIB-CONTINUITY] a resume whose checkpoint lost the source (no git bundle, no project repository) discards the completed-phase record and builds again instead of skipping over a missing site [fake model]", async () => {
+  let w = 0;
+  const r = await rig({
+    job: { limits: { model: "x", maxTurns: 6, maxRuntimeMinutes: 120, runBudgetUsd: 0, projectBudgetRemainingUsd: 0 } },
+    cp: { serveCheckpointFetch: true },
+    handler: (q) => phaseOf(q) === "plan" ? scriptedBuilder(q) : call("write_file", { path: `notes/part${++w}.md`, content: `part ${w}\n` }),
+  });
+  try {
+    const s1 = await runJob(r.job, deps(r));
+    assert.equal(s1.outcome, "released");
+    // The stored archive loses its git bundle (as for an archive over 20 MB).
+    const key = [...r.cp.archives.keys()].at(-1)!;
+    const dir = tmp("aib-strip-");
+    const arc = path.join(dir, "a.tgz");
+    writeFileSync(arc, Buffer.from(r.cp.archives.get(key)!, "base64"));
+    const x = path.join(dir, "x");
+    mkdirSync(x);
+    const env = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
+    assert.equal((await run("tar", ["-xzf", arc, "-C", x], { env, timeoutMs: 30_000 })).code, 0);
+    rmSync(path.join(x, "repo.bundle"));
+    assert.equal((await run("tar", ["-czf", arc, "-C", x, "."], { env, timeoutMs: 30_000 })).code, 0);
+    r.cp.archives.set(key, readFileSync(arc).toString("base64"));
+    const job2 = await nextSegment(r, 1);
+    const cfg2 = { ...r.cfg, workspacesRoot: tmp("aib-lost-") };
+    const m2 = await startFakeModel(scriptedBuilder);
+    const s2 = await runJob(job2, { ...deps(r), cfg: { ...cfg2, local: { ...cfg2.local, baseUrl: m2.url } } });
+    await m2.close();
+    assert.match(String(s2.complete?.report), /The restored source does not contain the last recorded commit \([0-9a-f]{12}\): the project memory's completed phases \(plan\) were discarded and run again/);
+    assert.ok(m2.requests.some((q) => phaseOf(q) === "plan"), "the plan runs again on the restarted source");
+    assert.equal(s2.outcome, "ready_for_review", String(s2.complete?.error));
   } finally { await r.cp.close(); await r.model.close(); }
 });

@@ -49,7 +49,7 @@ import type { SessionRecord } from "./orchestrator/sessions.ts";
 import type { InferenceScheduler } from "./inference/scheduler.ts";
 import { runIntegrationOperations } from "./integrations/broker.ts";
 import { buildTask, repairTask, revisionTask, route, type Route, type Task } from "./inference/router.ts";
-import type { DefectRecord, InFlight, ProjectMemory } from "./memory.ts";
+import type { InFlight, ProjectMemory } from "./memory.ts";
 import { ineffectiveRepairs, loadMemory, memoryDigest, remember, saveMemory } from "./memory.ts";
 
 /** A repair that left the same defect in place this many times ends the build as stalled (never the same fix forever). */
@@ -434,6 +434,18 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       if (loaded.status === "corrupt") sessionNotes.push("The restored project memory could not be read; a new one was started (the repository and the platform remain authoritative).");
       memory = loaded.memory;
       memory.spec = { present: !!job.spec, version: job.spec?.version ?? null };
+      // The memory must describe THIS source. If the last recorded commit is not in the restored repository (the git
+      // bundle was left out of an oversized checkpoint and no project repository was reachable, a clone failed, ...),
+      // the completed-phase record is void: the phases run again instead of being skipped over a missing site.
+      if (loaded.status === "loaded") {
+        const known = [...memory.segments].reverse().map((sg) => sg.endCommit ?? sg.startCommit).find((c) => !!c) ?? null;
+        const present = known ? (await run("git", ["cat-file", "-e", `${known}^{commit}`], { cwd: ws.repo, env: { PATH: cfg.agentPath, HOME: ws.home, GIT_CONFIG_NOSYSTEM: "1" }, timeoutMs: 30_000 })).code === 0 : true;
+        if (!present && memory.phasesCompleted.length) {
+          sessionNotes.push(`The restored source does not contain the last recorded commit (${known!.slice(0, 12)}): the project memory's completed phases (${memory.phasesCompleted.join(", ")}) were discarded and run again.`);
+          memory.phasesCompleted = [];
+          memory.requirementBest = {};
+        }
+      }
       const recovered = remember.segmentStart(memory, job.attempt, await headCommit(git).catch(() => null));
       if (recovered) sessionNotes.push(`Recovered after an interruption: ${recovered.note}; the build resumed from the last checkpoint${recovered.interrupted ? " and that step runs again" : ""}. Completed phases are not repeated.`);
       if (loaded.status === "loaded") sessionNotes.push(`Project memory restored: this is segment ${memory.totals.segments} of the build; phases completed ${memory.phasesCompleted.join(", ") || "none"}, review cycles ${memory.cyclesCompleted}, context resets ${memory.totals.compactions}, ${memory.totals.outputTokens} output tokens so far.`);
@@ -456,7 +468,8 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
 
     // ── agent phases ──
     stage = "building";
-    const st: { localLimit: string | null; agentError: string | null } = { localLimit: null, agentError: null };
+    // terminal: a stall is not retried by the platform (completed as "stopped" without a server request ⇒ failed state).
+    const st: { localLimit: string | null; agentError: string | null; terminal: boolean } = { localLimit: null, agentError: null, terminal: false };
     // Single-model mode: the one model is LOCAL_MODEL (cfg.local.model) for every role.
     // Architect/review sessions stop with the job (cancel, lease loss, shutdown, runtime limit all go through `stop`).
     const advisorAbort = new AbortController();
@@ -629,6 +642,8 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       // Cycle numbers and the repair bound are cumulative across segments (project memory): a continuation never
       // resets the bounded repair loop, and the platform sees cycle N+1 after N.
       const firstCycle = (memory?.cyclesCompleted ?? 0) + 1;
+      const opsFile = path.join(ws.dir, "integration-operations-done.json");
+      let opsRecorded = existsSync(opsFile) ? readFileSync(opsFile, "utf8") : "";
       if (firstCycle > 1) tracker.note({ kind: "step", message: `review cycles continue at ${firstCycle} (${firstCycle - 1} completed in earlier segments; limit ${cfg.advisor.maxCycles})` });
       for (let cycle = firstCycle; cycle <= cfg.advisor.maxCycles; cycle++) {
         if (stop.reason || st.localLimit || st.agentError) break;
@@ -648,6 +663,11 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
             approvals: () => client.listApprovals(job), requestApproval: (r) => client.requestApproval(job, r), report: (items) => client.reportIntegrations(job, items), fetchImpl: deps.fetchImpl,
           });
           for (const o of ops) tracker.note({ kind: "note", message: `integration operation ${o.operation}: ${o.status}` });
+          // An operation that just ran is recorded in the job directory: checkpoint at once, so a crash before the next
+          // checkpoint cannot lose the record and run the external operation again after a resume.
+          const doneFile = path.join(ws.dir, "integration-operations-done.json");
+          const doneNow = existsSync(doneFile) ? readFileSync(doneFile, "utf8") : "";
+          if (doneNow !== opsRecorded) { opsRecorded = doneNow; await checkpoint(`after integration operations (cycle ${cycle})`); }
           if (memory) remember.integrations(memory, [...ints, ...ops.map((o) => ({ key: o.operation.split(".")[0], operation: o.operation, status: o.status }))]);
         } catch (err) { if (err instanceof LeaseLostError) { markLeaseLost(); throw err; } log.warn("integration/approval report failed", { error: errorMessage(err) }); }
         // C. Independent review: a fresh Model A session (falls back to the deterministic reviewer if it is unavailable).
@@ -672,20 +692,23 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         // Older platform without the orchestration endpoints: the earlier behaviour (one repair round when checks failed).
         const decision = res ?? { cycle, decision: verdict.decision, reason: "local", continue: cycle === 1 && checks.some((c) => !c.ok), prompt: verdict.nextPrompt };
         tracker.note({ kind: "step", message: `cycle ${cycle}: ${decision.decision}${res ? "" : " (platform without orchestration endpoints)"}` });
-        const resolvedBefore = memory ? memory.defects.filter((d) => d.resolved).length : 0;
-        const defect: DefectRecord | null = memory ? remember.cycle(memory, { cycle, decision: decision.decision, outstanding: open, reviewer: reviewerName }) : null;
-        if (memory && memory.defects.filter((d) => d.resolved).length > resolvedBefore) milestone = true;
+        const rec = memory ? remember.cycle(memory, { cycle, decision: decision.decision, outstanding: open, reviewer: reviewerName }) : { open: [], resolved: 0 };
+        if (rec.resolved > 0) milestone = true;
         saveMem();
         if (!decision.continue) break;
-        // Never the same failed fix forever: a defect that survived MAX_INEFFECTIVE_REPAIRS repairs stops the loop.
-        if (ineffectiveRepairs(defect) >= MAX_INEFFECTIVE_REPAIRS) {
-          st.agentError = `Repair loop stalled: the same defect (${defect!.id}: ${defect!.summary.slice(0, 3).join("; ").slice(0, 300)}) survived ${ineffectiveRepairs(defect)} targeted repairs; escalated for a person instead of repeating the fix`;
+        // Never the same failed fix forever: an outstanding item (tracked per item, across segments) that survived
+        // MAX_INEFFECTIVE_REPAIRS targeted repairs ends the loop for a person; the build is not retried automatically.
+        const worst = ineffectiveRepairs(rec.open);
+        if (worst >= MAX_INEFFECTIVE_REPAIRS) {
+          const stuck = rec.open.filter((d) => ineffectiveRepairs(d) >= MAX_INEFFECTIVE_REPAIRS).map((d) => d.summary[0] ?? d.id);
+          st.agentError = `Repair loop stalled: ${stuck.slice(0, 4).join("; ").slice(0, 400)} survived ${worst} targeted repairs; escalated for a person instead of repeating the fix`;
+          st.terminal = true;
           break;
         }
         // D. Corrective prompt → routed: ordinary defects to Model B; repeated, architectural or integration-heavy to A.
-        // Consecutive cycles with this same defect, across segments (project memory).
+        // Consecutive cycles with this same outstanding set, across segments (project memory).
         let repeats = 0;
-        if (memory && defect) for (let i = memory.cycles.length - 1; i >= 0 && memory.cycles[i].defect === defect.id; i--) repeats++;
+        if (memory && open.length) for (let i = memory.cycles.length - 1; i >= 0 && memory.cycles[i].defect === memory.cycles.at(-1)!.defect; i--) repeats++;
         else repeats = 1;
         const rt = repairTask({ outstanding: open, sameFailureRepeats: repeats, findings: verdict.findings, escalateAfterRepeats: cfg.routing.escalateAfterRepeats });
         cycleRoute = route(rt.task, models, rt.reason);
@@ -693,10 +716,10 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         promptUsed = decision.prompt ?? "Repair: fix the failing checks listed in .crestmont/runner-checks.json.";
         promptSource = "reviewer";
         // Without the orchestration endpoints the classic repair prompt is used (runner-checks.json); otherwise the reviewer's prompt.
-        if (memory) remember.repair(memory, defect, { cycle, model: cycleRoute.model.tag, task: cycleRoute.task, commitBefore: cycleBase });
+        if (memory) remember.repair(memory, rec.open, { cycle, model: cycleRoute.model.tag, task: cycleRoute.task, commitBefore: cycleBase });
         await runOne("repair", null, res ? `${promptUsed}\n\nThe full review is in .crestmont/review-${String(cycle).padStart(2, "0")}.md.` : null, cycleRoute);
         lastBuildModel = cycleRoute.model.tag;
-        if (memory) remember.repairDone(memory, defect, await commitAll(git!, `AI build: cycle ${cycle} repair`).then(() => headCommit(git!)));
+        if (memory) remember.repairDone(memory, rec.open, await commitAll(git!, `AI build: cycle ${cycle} repair`).then(() => headCommit(git!)));
         guard();
         if (stop.reason || st.localLimit || st.agentError) break;
         checks = await acceptance(commands);
@@ -736,7 +759,9 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           const detail = memory.idleSegments >= cfg.continuation.maxIdleSegments
             ? `${memory.idleSegments} consecutive segments reached ${why} without measurable progress (no new commit, completed phase, or improved requirement/check)`
             : `${memory.segmentsSinceMilestone} consecutive segments produced commits but no milestone (no phase completed, no requirement or check improved, no defect resolved)`;
-          return await finish("failed", { error: `Stalled: ${detail}; stopped to avoid a non-productive loop. Work is checkpointed.`, stopReason: "stalled", checks });
+          // "stopped" without a server request is a final failed state on the platform: a stall is never retried
+          // automatically (a retry would spend another full segment of GPU time). An Owner can still retry or resume it.
+          return await finish("stopped", { error: `Stalled: ${detail}; stopped to avoid a non-productive loop. Work is checkpointed.`, stopReason: "stalled", checks });
         }
         await checkpoint(`segment ${memory.totals.segments} end (continuation)`);
         return await finish("released", {
@@ -752,8 +777,10 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       return await finish("failed", { error: `Local safety limit reached (${reason.replace("local:", "")}) before the build finished; the control plane did not request a stop.`, stopReason: reason, checks });
     }
     if (st.agentError) {
-      await endSegment("failed");
+      await endSegment(st.terminal ? "stalled" : "failed");
       await checkpoint("after agent error");
+      // A stalled repair loop needs a person: "stopped" without a server request is a final failed state (no retries).
+      if (st.terminal) return await finish("stopped", { error: st.agentError, stopReason: "stalled", checks });
       return await finish("failed", { error: st.agentError, checks });
     }
 

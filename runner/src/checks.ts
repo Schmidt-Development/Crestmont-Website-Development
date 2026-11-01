@@ -333,7 +333,8 @@ export function credentialScan(repo: string, files: string[]): CheckOutcome {
       for (const p of CREDENTIAL_PATTERNS) {
         const m = p.re.exec(lines[i]);
         // Mock tests use obvious placeholders (sk_test_fake…, whsec_000000…): those are not credentials.
-        if (m && !FAKE_VALUE.test(m[0]) && !FAKE_VALUE.test(lines[i].slice(m.index + m[0].length, m.index + m[0].length + 40))) { findings.push(`${rel}:${i + 1}: ${p.kind} (value not shown)`); break; }
+        // Only the matched value itself decides (a comment next to a real key does not make it a placeholder).
+        if (m && !FAKE_VALUE.test(m[0])) { findings.push(`${rel}:${i + 1}: ${p.kind} (value not shown)`); break; }
       }
     }
   }

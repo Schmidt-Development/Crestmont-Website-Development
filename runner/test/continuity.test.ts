@@ -207,22 +207,60 @@ test("[AIB-CONTINUITY] crash recovery records: an unclosed segment or in-flight 
   assert.equal(m.segmentsSinceMilestone, 0);
 });
 
-test("[AIB-CONTINUITY] defect history: repeated ineffective repairs are counted across cycles, resolved defects close their repair, the digest warns against the same fix", () => {
+test("[AIB-CONTINUITY] defect history is per outstanding item: an unrelated item changing never resets a persistent failure; ineffective repairs accumulate; resolved items close their repair; the digest warns", () => {
   const m = newMemory(ID);
-  const open = ["check:booking-api", "criterion:ac-booking"];
-  let d = remember.cycle(m, { cycle: 1, decision: "REVISION_REQUIRED", outstanding: open, reviewer: "local:model-a" });
-  remember.repair(m, d, { cycle: 1, model: "model-b", task: "debugging", commitBefore: "c1" });
-  d = remember.cycle(m, { cycle: 2, decision: "REVISION_REQUIRED", outstanding: [...open].reverse(), reviewer: "local:model-a" });
-  assert.equal(d!.occurrences, 2, "same failure, any order ⇒ same defect");
-  assert.equal(ineffectiveRepairs(d), 1);
-  remember.repair(m, d, { cycle: 2, model: "model-a", task: "repeated_failure", commitBefore: "c2" });
-  assert.match(memoryDigest(m, 10_000), /1 earlier repair\(s\) did NOT fix it: use a different approach/);
-  const other = remember.cycle(m, { cycle: 3, decision: "REVISION_REQUIRED", outstanding: ["check:seo"], reviewer: "rules" });
-  assert.ok(m.defects.find((x) => x.id === d!.id)!.resolved, "the booking defect is gone in cycle 3");
-  assert.equal(m.defects.find((x) => x.id === d!.id)!.repairs.at(-1)!.resolved, true, "the last repair is the one that worked");
-  assert.equal(other!.occurrences, 1);
-  assert.equal(m.cyclesCompleted, 3);
+  const cyc = (n: number, outstanding: string[]) => remember.cycle(m, { cycle: n, decision: "REVISION_REQUIRED", outstanding, reviewer: "local:model-a" });
+  let r = cyc(1, ["check:booking-api", "check:lint"]);
+  remember.repair(m, r.open, { cycle: 1, model: "model-b", task: "debugging", commitBefore: "c1" });
+  // Review finding 3: {build, lint} → {build} used to look like a brand-new defect and reset the count.
+  r = cyc(2, ["check:booking-api"]);
+  assert.equal(r.resolved, 1, "lint really was fixed (a milestone)");
+  assert.equal(m.defects.find((d) => d.summary[0] === "check:lint")!.repairs.at(-1)!.resolved, true, "the repair that fixed lint is credited");
+  const booking = r.open[0];
+  assert.equal(booking.occurrences, 2);
+  assert.equal(ineffectiveRepairs(r.open), 1, "the booking failure survived one repair");
+  remember.repair(m, r.open, { cycle: 2, model: "model-a", task: "repeated_failure", commitBefore: "c2" });
+  r = cyc(3, ["check:booking-api", "check:seo"]);
+  assert.equal(r.resolved, 0);
+  assert.equal(ineffectiveRepairs(r.open), 2, "a new unrelated item does not hide the persistent one");
+  remember.repair(m, r.open, { cycle: 3, model: "model-a", task: "repeated_failure", commitBefore: "c3" });
+  r = cyc(4, ["check:booking-api"]);
+  assert.equal(ineffectiveRepairs(r.open), 3, "reaches MAX_INEFFECTIVE_REPAIRS");
+  assert.match(memoryDigest(m, 10_000), /check:booking-api \(seen in 4 cycle\(s\) since cycle 1; 3 earlier repair\(s\) did NOT fix it: use a different approach\)/);
+  assert.equal(m.cyclesCompleted, 4);
   assert.ok(memoryDigest(m, 400).length <= 430, "digest is bounded");
+});
+
+test("[AIB-CONTINUITY] milestones cannot be farmed: requirement statuses count only above their best-ever level; a plan phase that used its turn share counts as done", () => {
+  const m = newMemory(ID);
+  const set = (status: string) => remember.requirements(m, [{ key: "feature:booking", label: "Booking", status }]);
+  assert.equal(set("remaining"), false);
+  assert.equal(set("implemented_unverified"), true, "first time implemented: a milestone");
+  assert.equal(set("remaining"), false);
+  assert.equal(set("implemented_unverified"), false, "flipping back and forth is not progress (review finding 2)");
+  assert.equal(set("verified"), true);
+  assert.equal(set("implemented_unverified"), false, "a downgrade is not progress");
+  assert.equal(remember.requirements(m, [{ key: "feature:booking", status: "verified" }, { key: "new:item", status: "blocked" }]), false);
+  remember.phase(m, "plan", "max_turns", null);
+  remember.phase(m, "build", "max_turns", null);
+  assert.deepEqual(m.phasesCompleted, ["plan"], "plan is best-effort; an unfinished build is not done (review finding 7)");
+});
+
+test("[AIB-CONTINUITY] an older or partial memory file loads with safe defaults (no NaN switches a guard off)", () => {
+  const dir = tmp("aib-mem-old-");
+  mkdirSync(path.join(dir, "agent"), { recursive: true });
+  writeFileSync(memoryPath(dir), JSON.stringify({ schema: MEMORY_SCHEMA, ...ID, segments: [], phasesCompleted: ["plan"] }));
+  const { memory, status } = loadMemory(dir, ID);
+  assert.equal(status, "loaded");
+  assert.deepEqual(memory.phasesCompleted, ["plan"]);
+  remember.segmentStart(memory, 1, "a");
+  remember.segmentEnd(memory, "continuation", "a", { modelCalls: 1, inputTokens: 1, outputTokens: 1 }, false);
+  assert.equal(memory.idleSegments, 1);
+  assert.equal(memory.totals.continuations, 1);
+  assert.equal(memory.segmentsSinceMilestone, 1);
+  remember.usage(memory, { inputTokens: 5 });
+  assert.equal(memory.totals.inputTokens, 5);
+  assert.ok(memoryDigest(memory, 2000).includes("Phases completed: plan."));
 });
 
 test("[AIB-CONTINUITY] checkpoints carry the project memory and the runner's operation records: a resumed attempt never repeats an approved external operation", async () => {
@@ -275,4 +313,7 @@ test("[AIB-CONTINUITY] credential scan: real-looking customer keys and local sec
   assert.match(bad.outputTail, /\.dev\.vars: local secrets file with 1 value/);
   assert.match(bad.outputTail, /server\/mail\.js:1: Resend API key/);
   assert.ok(!bad.outputTail.includes(SK_LIVE) && !bad.outputTail.includes(RE_KEY), "values are not echoed");
+  // A real key next to a comment that mentions a placeholder is still a real key (review finding 8).
+  put("src/late.js", `const key = '${SK_LIVE}'; // replace placeholder before launch\n`);
+  assert.match(credentialScan(repo, ["src/late.js"]).outputTail, /src\/late\.js:1: Stripe secret or restricted key/);
 });

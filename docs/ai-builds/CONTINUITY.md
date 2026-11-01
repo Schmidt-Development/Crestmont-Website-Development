@@ -72,7 +72,7 @@ their own window by replacing older tool outputs. They start fresh on every call
 | Requirement statuses | `readRequirements` (platform seed plus the agent's evidence rules) |
 | Phases completed, review cycles completed | the job's own phase results and the platform's cycle decisions |
 | Runner acceptance checks (pass/fail per check) | the runner's checks |
-| Defect history: signature, occurrences, the repairs tried, whether each repair worked | outstanding items from the evidence |
+| Defect history **per outstanding item** (check, criterion, defect, security finding): occurrences, the repairs tried, whether each repair worked | outstanding items from the evidence |
 | Integration code/mock status, approved operations, approvals pending | the builder's integrations file and the trusted broker |
 | Preview deploy result | the runner's deploy |
 | Segments (start/end commit, end reason, tokens, resets, progress), interruptions, in-flight step | the runner |
@@ -114,12 +114,17 @@ credential shapes: Stripe `sk_/rk_/whsec_`, `re_…`, AWS, JWT, and long tokens.
 2. Opens a new segment. If the previous segment never closed (crash, lost lease, restart), it records
    `interrupted` and the step that was in flight.
 3. Puts a recovery note into the report and the model's memory digest.
-4. **Skips phases already completed** (no model call for them).
-5. Continues **review cycle numbering** where it stopped. The platform requires cycle N+1 after N, and an existing
+4. **Checks that the memory describes this source.** If the last recorded commit is not in the restored repository
+   (an oversized checkpoint without its git bundle and no project repository, or a failed clone), the completed-phase
+   record is discarded and the phases run again.
+5. **Skips phases already completed** (no model call for them). A plan phase that used its turn share counts as
+   done, because planning is best-effort.
+6. Continues **review cycle numbering** where it stopped. The platform requires cycle N+1 after N, and an existing
    cycle answers idempotently.
 
 **Duplicate side effects are prevented by:**
-- **Approved integration operations:** never re-run after a resume. The broker's record travels in the checkpoint
+- **Approved integration operations:** never re-run after a resume. The broker records each operation as soon as it
+  runs, the job checkpoints right after any newly recorded operation, and the record travels in the checkpoint
   (regression test).
 - **Approval requests:** deduplicated on the platform (`dedupe_key`).
 - **Review cycles:** idempotent per `(job, cycle)`.
@@ -142,11 +147,16 @@ credential shapes: Stripe `sk_/rk_/whsec_`, `re_…`, AWS, JWT, and long tokens.
 - **No cumulative limits** on tokens, model requests, resets or segments.
 - **Still enforced:**
   - **Stall guard:** `RUNNER_CONTINUATION_MAX_IDLE_SEGMENTS` (default 2) consecutive segments without a new commit,
-    completed phase, or improved requirement or check end the build as `Stalled`.
+    completed phase, or improved requirement or check end the build as `Stalled`. A requirement counts as improved
+    only when it reaches a status it has never reached before, so flipping statuses back and forth is not progress.
   - **Thrashing guard:** `RUNNER_CONTINUATION_MAX_SEGMENTS_WITHOUT_MILESTONE` (default 8) consecutive segments with
     commits but no milestone also end the build as `Stalled`.
-  - **Bounded repair loop:** `ORCHESTRATOR_MAX_CYCLES` counts across segments. A defect that survives
-    `MAX_INEFFECTIVE_REPAIRS` (3) targeted repairs ends the loop for a person instead of repeating the fix.
+  - **Bounded repair loop:** `ORCHESTRATOR_MAX_CYCLES` counts across segments. An outstanding item that survives
+    `MAX_INEFFECTIVE_REPAIRS` (3) targeted repairs ends the loop for a person instead of repeating the fix. Items are
+    tracked one by one, so an unrelated item appearing or disappearing never resets the count.
+  - **A stall is final:** every stall completes as `stopped` without a server request. The platform records that as
+    a failed build and does **not** retry it automatically, since a retry would spend another full segment of GPU
+    time. An Owner can still retry or resume it.
   - Loop detection, the malformed-output limits, the GPU scheduler and stalled-job detection.
 - **Never overridden:** cancel, pause, budget and eligibility stops from the platform. `RUNNER_CONTINUATION=off`
   restores the old behaviour, where a segment limit fails the attempt.
