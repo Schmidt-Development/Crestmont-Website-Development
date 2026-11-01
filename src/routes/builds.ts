@@ -342,7 +342,7 @@ ${dl([["Project", html`<a href="/staff/projects/${x.projectId}">${x.projectName}
   ["Preview retention", x.previewRetention.status === "scheduled" ? `Scheduled for deletion on ${formatDateTime(x.previewRetention.deleteAfter!)}${j.preview_retain_until ? " (extended)" : ""}` : x.previewRetention.note],
   ["Brief", d.brief ? `version ${(d.brief as { version: number }).version}` : "—"], ["Revision instruction", j.instruction],
   ["Customer revision", x.customerRevision ? html`Round ${x.customerRevision.round} (<a href="/staff/projects/${x.projectId}?tab=revisions">project revisions</a>)` : "—"]])}
-${q || (j as { quality_required?: number }).quality_required ? qualityCard(q) : ""}
+${q || j.quality_required ? qualityCard(q) : j.starter_ref === "brochure-v1" || (!j.starter_ref && j.attempts > 0) ? html`<section class="card"><h2 class="card__title">Quality scorecard</h2>${alert("warn", "Legacy website (built before the full-stack foundation): this revision keeps its original starter and is not scored by the quality engine. Moving it to fullstack v1 is a rebuild decision for the Owner.")}</section>` : ""}
 ${d.missingInformation.length ? alert("warn", html`<strong>Information needed:</strong> ${d.missingInformation.join("; ")}`) : ""}
 <section class="card"><h2 class="card__title">Requirements</h2><p class="faint">Statuses come from the runner with evidence; "verified" requires a check that ran. Counts are not a completion promise.</p>
 ${table(d.requirements as { key: string; label: string; status: string; evidence: string | null; blocker: string | null }[], [

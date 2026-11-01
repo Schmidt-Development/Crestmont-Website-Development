@@ -65,7 +65,7 @@ selected projects. Staging sample data is excluded the same way.
 | D5 | Owner-controlled customer production delivery | `DELIVERY.md`: prepare → explicit Owner authorization (MFA step-up) → runner deploy to `cm-site-<project>` → verification → versions, rollback, audit. Framework only; nothing deployed. |
 
 ## Contracts
-- Runner protocol: `RUNNER-PROTOCOL.md` · Frontend: `FRONTEND-CONTRACT.md` · Runner setup: `RUNNER-SETUP.md` · Starters: `STARTERS.md`.
+- Runner protocol: `RUNNER-PROTOCOL.md` · Frontend: `FRONTEND-CONTRACT.md` · Runner setup: `RUNNER-SETUP.md` · Starters: `STARTERS.md` · Quality engine: `QUALITY-ENGINE.md`.
 - Windows build machine (local model, default): `WINDOWS-SUPERCOMPUTER.md` · Validation plan: `LOCAL-VALIDATION.md`.
 - Founder order of work for the first real build (decisions, install, known installer issues): `FOUNDER-RUNNER-INSTALL.md`.
 - Preview account, private access, lifecycle and secret inventory: `PREVIEW-DEPLOYMENT.md`.

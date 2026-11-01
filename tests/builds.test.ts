@@ -1082,3 +1082,17 @@ test("[AIB-QUALITY] reusable defect classes become builder improvement proposals
   await decideImprovement(t.db, t.owner.id, String(rows[0].id), "approved", "Fix the token default in the starter");
   await assert.rejects(decideImprovement(t.db, t.owner.id, String(rows[0].id), "rejected", "again"), /already decided/);
 });
+
+test("[AIB-QUALITY] a project keeps its starter: revisions of a pre-V2 website continue on brochure v1 (unscored, shown to staff); new projects start on fullstack v1", async () => {
+  const t = await app();
+  const { j } = await claimed(t);
+  assert.equal((await completeRaw(t, j, { quality: passingScorecard() })).json.state, "ready_for_review");
+  // Simulate a website built before the full-stack foundation existed.
+  await t.db.prepare(`UPDATE build_jobs SET starter_ref = NULL, quality_required = 0 WHERE id = ?`).bind(j.id).run();
+  assert.equal((await t.oc.post(`/staff/builds/${j.id}/revision`, { instruction: "Update the opening hours on the contact page." })).status, 303);
+  const rev = (await runner(t, "claim", { runnerId: "runner-q", version: "1.5.0" })).json.job;
+  assert.ok(rev && rev.id !== j.id);
+  assert.deepEqual(rev.starter, { name: "brochure", version: "1" });
+  assert.equal(rev.quality, undefined);
+  assert.match(await (await t.oc.get(`/staff/builds/${rev.id}`)).text(), /Legacy website/);
+});

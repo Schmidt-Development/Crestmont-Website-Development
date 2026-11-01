@@ -28,6 +28,22 @@ import { activeBuilds, authenticateWorker, dispatch, effectivePriority, recordWo
 /** The approved foundation every new build starts from (runner/starters/fullstack-v1). */
 export const STARTER = Object.freeze({ name: "fullstack", version: "1" });
 
+/**
+ * A project keeps the starter it was first built on: revisions of a website built before the full-stack foundation
+ * (no starter_ref recorded) continue on brochure v1, because the full-stack gates and protected files would break
+ * that repository. Such legacy revisions cannot be scored by the quality engine; the staff page says so, and moving
+ * the website to fullstack v1 is a rebuild decision for the Owner. Every new project starts on fullstack v1.
+ */
+async function starterFor(db: Db, job: { id: string; project_id: string; strategy: string }): Promise<{ starter: { name: string; version: string } | null; ref: string | null; quality: boolean }> {
+  const prior = await db.prepare(`SELECT starter_ref FROM build_jobs WHERE project_id = ? AND id <> ? AND source_commit IS NOT NULL ORDER BY created_at LIMIT 1`).bind(job.project_id, job.id).first<{ starter_ref: string | null }>();
+  if (prior && !prior.starter_ref) return job.strategy === "standard" ? { starter: { name: "brochure", version: "1" }, ref: "brochure-v1", quality: false } : { starter: null, ref: null, quality: false };
+  if (prior?.starter_ref && prior.starter_ref !== `${STARTER.name}-v${STARTER.version}`) {
+    const m = /^(.+)-v(\d+)$/.exec(prior.starter_ref);
+    if (m) return { starter: { name: m[1], version: m[2] }, ref: prior.starter_ref, quality: m[1] === "fullstack" };
+  }
+  return { starter: { ...STARTER }, ref: `${STARTER.name}-v${STARTER.version}`, quality: true };
+}
+
 const MICRO = 1_000_000;
 export const usdToMicro = (usd: unknown): number => {
   const n = typeof usd === "number" && Number.isFinite(usd) ? usd : 0;
@@ -428,14 +444,15 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
     const budget = await projectBudgetMicro(db, c.project_id, s);
     const spent = await projectSpendMicro(db, c.project_id);
     if (spent >= budget) { await transition(db, c, "budget_paused", `Project budget reached ($${microToUsd(spent).toFixed(2)} of $${microToUsd(budget).toFixed(2)}); raise the limit to continue`, { kind: "system" }); continue; }
+    const pick = await starterFor(db, c);
     const token = randomToken(32);
     const leaseUntil = new Date(now.getTime() + s.lease_seconds * 1000).toISOString();
     const r = await db.prepare(`UPDATE build_jobs SET state = 'preparing', state_reason = 'claimed by runner', lease_runner = ?, lease_token_hash = ?, lease_expires_at = ?, heartbeat_at = ?,
         run_started_at = ?, started_at = COALESCE(started_at, ?), attempts = attempts + 1, stop_reason = NULL, worker_id = COALESCE(?, worker_id), updated_at = ?,
-        quality_required = 1, starter_ref = '${STARTER.name}-v${STARTER.version}'
+        quality_required = ?, starter_ref = ?
       WHERE id = ? AND state = 'queued' AND (SELECT COUNT(*) FROM build_jobs WHERE state IN ('preparing','building','verifying')) < ?
         AND (? IS NULL OR (SELECT COUNT(*) FROM build_jobs WHERE worker_id = ? AND state IN ('preparing','building','verifying')) < (SELECT max_active_projects FROM build_workers WHERE id = ?))`)
-      .bind(runnerId, await sha256Hex(token), leaseUntil, at, at, at, worker?.id ?? null, at, c.id, s.max_concurrent, worker?.id ?? null, worker?.id ?? null, worker?.id ?? null).run();
+      .bind(runnerId, await sha256Hex(token), leaseUntil, at, at, at, worker?.id ?? null, at, pick.quality ? 1 : 0, pick.ref, c.id, s.max_concurrent, worker?.id ?? null, worker?.id ?? null, worker?.id ?? null).run();
     if (!r.meta?.changes) continue; // another runner won this job (or capacity filled): try the next
     const job = (await getJob(db, c.id))!;
     await db.prepare(`INSERT OR IGNORE INTO build_runs (id, job_id, attempt, runner_id, started_at, session_id, zero_cost) VALUES (?,?,?,?,?,?,?)`)
@@ -454,7 +471,7 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
         // Full-Stack Builder V2: every package, and custom builds, start from the full-stack foundation and are scored by
         // the permanent quality engine (protocol v1.5). A runner that ignores "quality" still cannot get past
         // completeJob / internalApprove without a verified 10/10 scorecard.
-        strategy: job.strategy, packageId: job.package_id ?? (job.strategy === "custom" ? "custom" : null), starter: { ...STARTER }, quality: "required",
+        strategy: job.strategy, packageId: job.package_id ?? (job.strategy === "custom" ? "custom" : null), starter: pick.starter, ...(pick.quality ? { quality: "required" as const } : {}),
         brief: brief ? { id: brief.id, version: brief.version, sha256: brief.sha256, content: JSON.parse(brief.content_json) } : null,
         instruction: job.instruction, requirements: reqs,
         // V2: the Architect's master specification when one exists (the orchestrator then skips the architect step).
