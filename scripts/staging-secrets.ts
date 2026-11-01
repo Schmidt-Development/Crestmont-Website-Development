@@ -32,7 +32,8 @@ export function keyedFingerprint(root: string, context: string, value: string): 
 export const secretFingerprint = (root: string, name: string, value: string) => keyedFingerprint(root, `secret:${name}`, value);
 
 export async function putSecretIfChanged(ops: D1Ops, root: string, name: string, value: string, now = new Date()): Promise<"updated" | "unchanged"> {
-  if (!/^[A-Z_]{3,64}$/.test(name)) throw new Error(`invalid secret name ${name}`);
+  // Upper-case letters, digits and underscores (the name is interpolated into SQL below; nothing else may pass).
+  if (!/^[A-Z][A-Z0-9_]{2,63}$/.test(name)) throw new Error(`invalid secret name ${name}`);
   if (!root) throw new Error("ACCESS_ROOT_KEY is required");
   if (!value) throw new Error(`refusing to put an empty value for ${name}`);
   const fp = secretFingerprint(root, name, value);
