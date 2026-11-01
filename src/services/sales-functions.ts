@@ -134,6 +134,26 @@ export function outboundFunctionContracts(): Record<SalesFunction, { fields: str
   return Object.fromEntries(SALES_FUNCTIONS.map((k) => [k, { fields: all[k], required: fieldsOf(k) }])) as Record<SalesFunction, { fields: string[]; required: string[] }>;
 }
 
+/**
+ * Enum values the backend accepts per function argument (from the validators above). A Retell schema may offer a subset;
+ * any value outside these is refused with 422, so the live audit fails a Retell enum that lists one.
+ * Boolean-typed Retell parameters are accepted for the ["true"] / ["true","false"] fields (normaliseArgs converts them).
+ */
+export const OUTBOUND_FUNCTION_ENUMS: Record<string, Record<string, readonly string[]>> = {
+  update_outbound_lead: {
+    budget_range: ["under_1000", "1000_2500", "2500_5000", "over_5000", "not_shared"],
+    purchase_timeline: ["now", "within_30_days", "1_3_months", "later", "not_shared"],
+    qualification: ["qualified", "not_qualified", "needs_review"],
+    pipeline_stage: ["qualified", "quote_required", "lost"],
+    sales_outcome: AGENT_DISPOSITIONS,
+    service_interests: SERVICE_INTERESTS,
+  },
+  create_checkout_session: { package: ["starter", "business", "premium"], buyer_confirmed: ["true"] },
+  send_sales_email: { email_type: ["package_information", "checkout_link", "approved_quote", "consultation_confirmation", "follow_up", "onboarding_instructions"], package: ["starter", "business", "premium"] },
+  schedule_sales_followup: { followup_type: ["consultation", "staff_callback", "ai_follow_up_call"], preferred_time: ["morning", "afternoon", "evening", "any"], prospect_agreed: ["true"] },
+  record_do_not_call: { also_stop_email: ["true", "false"] },
+};
+
 /** Booleans → "true"/"false", string arguments redacted (card numbers, SSNs) before validation and storage. */
 function normaliseArgs(raw: unknown): Obj {
   const o = { ...obj(raw) };
@@ -377,7 +397,7 @@ async function paymentStatus(db: Db, b: Bound, ref: string | undefined): Promise
   // Authoritative: invoices.status = 'paid' and a succeeded payment are written only by the verified Stripe webhook.
   const order = await db.prepare(`SELECT o.id, o.status AS order_status, i.id AS invoice_id, i.status AS invoice_status, i.stripe_checkout_session_id, p.status AS payment_status, pr.id AS project_id, pr.status AS project_status
       FROM orders o JOIN invoices i ON i.order_id = o.id LEFT JOIN payments p ON p.invoice_id = i.id LEFT JOIN projects pr ON pr.order_id = o.id
-      WHERE o.lead_id = ? ORDER BY o.created_at DESC, p.created_at DESC LIMIT 1`).bind(b.row.lead_id)
+      WHERE o.lead_id = ? OR o.id IN (SELECT order_id FROM sales_checkout_links WHERE lead_id = ? AND order_id IS NOT NULL) ORDER BY o.created_at DESC, p.created_at DESC LIMIT 1`).bind(b.row.lead_id, b.row.lead_id)
     .first<{ id: string; order_status: string; invoice_id: string; invoice_status: string; stripe_checkout_session_id: string | null; payment_status: string | null; project_id: string | null; project_status: string | null }>();
   let status: string;
   if (order?.invoice_status === "paid" && order.payment_status === "succeeded") status = "paid";
@@ -565,14 +585,32 @@ export async function handleSalesFunction(db: Db, raw: string, queryLeadId: stri
 // ───────────── Public link handlers (used by src/routes/sales-outbound.ts) ─────────────
 
 /** Resolves a purchase link token. Returns the package to send the buyer to, or why the link is not usable. */
-export async function openCheckoutLink(db: Db, token: string, now: Date): Promise<{ ok: true; packageId: string; linkId: string } | { ok: false; reason: "invalid" | "expired" | "revoked" }> {
+export async function openCheckoutLink(db: Db, token: string, now: Date): Promise<{ ok: true; packageId: string; linkId: string; expiresAt: string } | { ok: false; reason: "invalid" | "expired" | "revoked" }> {
   if (!/^[0-9a-f]{64}$/.test(token)) return { ok: false, reason: "invalid" };
   const l = await db.prepare(`SELECT id, package_id, expires_at, revoked_at, clicked_at FROM sales_checkout_links WHERE token_hash = ?`).bind(await hashToken(token)).first<{ id: string; package_id: string; expires_at: string; revoked_at: string | null; clicked_at: string | null }>();
   if (!l) return { ok: false, reason: "invalid" };
   if (l.revoked_at) return { ok: false, reason: "revoked" };
   if (l.expires_at < now.toISOString()) return { ok: false, reason: "expired" };
   if (!l.clicked_at) await db.prepare(`UPDATE sales_checkout_links SET clicked_at = ? WHERE id = ? AND clicked_at IS NULL`).bind(now.toISOString(), l.id).run();
-  return { ok: true, packageId: l.package_id, linkId: l.id };
+  return { ok: true, packageId: l.package_id, linkId: l.id, expiresAt: l.expires_at };
+}
+
+/**
+ * Cookie set by GET /buy/:token: the purchase-link token itself (a 256-bit bearer secret already emailed to the verified
+ * buyer), HttpOnly + SameSite=Lax, until the link expires. It survives sign-in/sign-up so checkout can bind the order to
+ * the CRM lead the link was issued for (billing.ts#startPackageCheckout), instead of guessing the lead by email.
+ */
+export const SALES_LINK_COOKIE = "crestmont_sales_link";
+
+export interface SalesLinkBinding { linkId: string; leadId: string; email: string; packageId: string }
+
+/** The purchase link behind a checkout, if the token is valid, unexpired, unrevoked and for this package. */
+export async function salesLinkForCheckout(db: Db, token: string | undefined, packageId: string, now: Date): Promise<SalesLinkBinding | null> {
+  if (!token || !/^[0-9a-f]{64}$/.test(token)) return null;
+  const l = await db.prepare(`SELECT id, lead_id, email, package_id, expires_at, revoked_at FROM sales_checkout_links WHERE token_hash = ?`).bind(await hashToken(token))
+    .first<{ id: string; lead_id: string; email: string; package_id: string; expires_at: string; revoked_at: string | null }>();
+  if (!l || l.revoked_at || l.expires_at < now.toISOString() || l.package_id !== packageId) return null;
+  return { linkId: l.id, leadId: l.lead_id, email: l.email, packageId: l.package_id };
 }
 
 /** One-click unsubscribe from sales email (CAN-SPAM). Idempotent; reveals nothing about the address. */

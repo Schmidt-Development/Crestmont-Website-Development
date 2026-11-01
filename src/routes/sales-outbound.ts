@@ -2,6 +2,7 @@
 // control page. Calls are never placed from a request handler; the scheduled job does that (src/app/scheduled.ts).
 //  POST /api/webhooks/retell/outbound/functions   Retell custom functions for the SALES agent (X-Retell-Signature)
 //  POST /api/sales-outbound/retell-audit         read-only live Retell audit of the sales agent (scheduler signature)
+//  POST /api/sales-outbound/test-dispatch        signs a SYNTHETIC test request with this Worker's Retell key (staging E2E)
 //  GET  /buy/:token                               secure purchase link → existing /checkout/<package> flow
 //  GET  /sales/unsubscribe/:token                 sales email unsubscribe (confirm page); POST performs it
 //  GET  /staff/sales-outbound                     Owner page (voice.manage): switches, compliance records, queue
@@ -14,15 +15,15 @@
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatDateTime, label } from "../lib/html.ts";
-import { HttpError, jsonResponse, redirect, htmlResponse, str } from "../app/http.ts";
+import { HttpError, jsonResponse, redirect, htmlResponse, str, cookie, isSecure } from "../app/http.ts";
 import { requireStaff } from "../app/app.ts";
 import { csrf, input, textarea, select, checkbox, button, formErrors, alert, badge, table, emptyState, pageHead } from "../ui/components.ts";
 import { publicLayout } from "../ui/layout.ts";
 import { staffPage } from "./crm.ts";
 import { readBody } from "./api.ts";
-import { RetellAuthError } from "../adapters/retell.ts";
-import { verifyRetellWorkspace } from "../adapters/retell-workspaces.ts";
-import { handleSalesFunction, openCheckoutLink, unsubscribeSalesEmail } from "../services/sales-functions.ts";
+import { RetellAuthError, signRetell } from "../adapters/retell.ts";
+import { verifyRetellWorkspace, retellKey } from "../adapters/retell-workspaces.ts";
+import { handleSalesFunction, openCheckoutLink, unsubscribeSalesEmail, SALES_LINK_COOKIE } from "../services/sales-functions.ts";
 import * as so from "../services/sales-outbound.ts";
 import { listTargets } from "../services/sales-opt/registry.ts";
 import { verifyEvidenceSignature, IngestAuthError } from "../readiness/ingest.ts";
@@ -131,14 +132,60 @@ export function register(r: Router): void {
     catch (e) { if (e instanceof IngestAuthError) return jsonResponse(ctx, 401, { error: e.message }); throw e; }
     const rl = await rateLimit(ctx.db, "sales-retell-audit", 3, 300);
     if (!rl.allowed) return jsonResponse(ctx, 429, { error: "Ran recently; try again in a few minutes" });
-    const result = await auditOutboundRetell({ db: ctx.db, env: ctx.env, fetch: ctx.env.overrides?.fetch ?? fetch, baseUrl: ctx.baseUrl });
+    let expectedCallerNumber: string | null = null;
+    try { const b = JSON.parse(raw) as { expected_caller_number?: unknown }; if (typeof b.expected_caller_number === "string" && /^\+1\d{10}$/.test(b.expected_caller_number)) expectedCallerNumber = b.expected_caller_number; } catch { /* body is optional */ }
+    const result = await auditOutboundRetell({ db: ctx.db, env: ctx.env, fetch: ctx.env.overrides?.fetch ?? fetch, baseUrl: ctx.baseUrl, expectedCallerNumber });
     await audit(ctx.db, { actorKind: "system", action: "sales_outbound.retell_audit", subjectType: "retell_agent", subjectId: result.agentId, details: { status: result.status, failed: result.findings.filter((f) => !f.ok).length, total: result.findings.length } });
     return jsonResponse(ctx, 200, result);
+  });
+
+  // Staging E2E without a Retell key in GitHub: CI (scheduler-signed) hands the Worker a synthetic Retell request; the
+  // Worker signs it with its OWN outbound (or inbound) key and dispatches it through the normal router, so signature
+  // verification, the workspace rules, handlers and D1 are exercised for real. Narrow by construction: never in
+  // production, only call ids starting "call_e2e", and only sales calls flagged is_test whose lead is [TEST DATA]
+  // (an unbound call is allowed only against the outbound functions route, which refuses it before any write).
+  r.post("/api/sales-outbound/test-dispatch", async (ctx) => {
+    const raw = await readBody(ctx.req);
+    if (ctx.env.ENVIRONMENT === "production") return jsonResponse(ctx, 404, { error: "Not available in production" });
+    if (!ctx.env.SCHEDULER_TRIGGER_SECRET) return jsonResponse(ctx, 503, { error: "Not configured" });
+    try { await verifyEvidenceSignature(ctx.env.SCHEDULER_TRIGGER_SECRET, raw, ctx.req.headers.get("x-crestmont-scheduler-signature")); }
+    catch (e) { if (e instanceof IngestAuthError) return jsonResponse(ctx, 401, { error: e.message }); throw e; }
+    const rl = await rateLimit(ctx.db, "sales-test-dispatch", 120, 600);
+    if (!rl.allowed) return jsonResponse(ctx, 429, { error: "Too many test requests" });
+    let b: { key?: unknown; target?: unknown; payload?: unknown; query?: unknown };
+    try { b = JSON.parse(raw); } catch { return jsonResponse(ctx, 422, { error: "Body is not JSON" }); }
+    if (!b || typeof b !== "object" || Array.isArray(b)) return jsonResponse(ctx, 422, { error: "Body must be a JSON object" });
+    const targets: Record<string, string> = { outbound_functions: "/api/webhooks/retell/outbound/functions", functions: "/api/webhooks/retell/functions", webhook: "/api/webhooks/retell" };
+    const path = typeof b.target === "string" ? targets[b.target] : undefined;
+    const keyName = b.key === "inbound" ? "inbound" : b.key === "outbound" ? "outbound" : null;
+    if (!path || !keyName || !b.payload || typeof b.payload !== "object") return jsonResponse(ctx, 422, { error: "key (outbound|inbound), target and payload are required" });
+    const call = ((b.payload as Record<string, unknown>).call ?? {}) as Record<string, unknown>;
+    const meta = (call.metadata ?? {}) as Record<string, unknown>;
+    if (typeof call.call_id !== "string" || !/^call_e2e[A-Za-z0-9_-]{1,80}$/.test(call.call_id)) return jsonResponse(ctx, 403, { error: "Only synthetic call ids (call_e2e…) can be dispatched" });
+    const salesId = typeof meta.crestmont_sales_call_id === "string" ? meta.crestmont_sales_call_id : null;
+    if (salesId) {
+      const row = await ctx.db.prepare(`SELECT s.is_test, l.message FROM sales_calls s JOIN leads l ON l.id = s.lead_id WHERE s.id = ?`).bind(salesId).first<{ is_test: number; message: string | null }>();
+      if (!row || row.is_test !== 1 || !/^\[TEST/.test(row.message ?? "") || meta.crestmont_test !== "true") return jsonResponse(ctx, 403, { error: "Only is_test sales calls on [TEST DATA] leads can be dispatched" });
+    } else if (path !== targets.outbound_functions) return jsonResponse(ctx, 403, { error: "An unbound call can only be sent to the outbound functions route" });
+    const key = retellKey(ctx.env, keyName);
+    if (!key) return jsonResponse(ctx, 409, { error: `RETELL_${keyName.toUpperCase()}_API_KEY is not set on this Worker` });
+    const body = JSON.stringify(b.payload);
+    const query = typeof b.query === "string" && /^\?lead_id=[A-Za-z0-9_-]{1,64}$/.test(b.query) ? b.query : "";
+    const { handle } = await import("../app/app.ts");
+    const res = await handle(new Request(new URL(path + query, ctx.baseUrl), { method: "POST", headers: { "content-type": "application/json", "x-retell-signature": await signRetell(key, body) }, body }), ctx.env);
+    let json: unknown = null;
+    try { json = await res.json(); } catch { /* not JSON */ }
+    await audit(ctx.db, { actorKind: "system", action: "sales_outbound.test_dispatch", subjectType: "sales_call", subjectId: salesId, details: { target: b.target, key: keyName, status: res.status } });
+    return jsonResponse(ctx, 200, { status: res.status, json });
   });
 
   r.get("/buy/:token", async (ctx, p) => {
     const res = await openCheckoutLink(ctx.db, p.token, ctx.env.overrides?.now?.() ?? new Date());
     if (!res.ok) return linkPage(ctx, res.reason === "expired" ? "This link has expired" : "This link is not valid", "Purchase links from Crestmont are valid for 7 days. Ask us for a new one, or choose a package on our pricing page.", res.reason === "expired" ? 410 : 404);
+    // Bind the checkout that follows to this link's CRM lead (billing.ts#startPackageCheckout), whatever email the buyer
+    // signs in with. The value is the link token itself; HttpOnly, SameSite=Lax, until the link expires.
+    const maxAge = Math.max(60, Math.floor((Date.parse(res.expiresAt) - (ctx.env.overrides?.now?.() ?? new Date()).getTime()) / 1000));
+    ctx.setCookies.push(cookie(SALES_LINK_COOKIE, p.token, { secure: isSecure(ctx), httpOnly: true, sameSite: "Lax", maxAge }));
     return redirect(ctx, `/checkout/${res.packageId}?ref=sales`);
   });
 

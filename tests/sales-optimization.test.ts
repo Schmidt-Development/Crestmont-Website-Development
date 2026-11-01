@@ -406,10 +406,16 @@ test("[SALESOPT-008] staging deployment snapshots, writes, reads back and verifi
   await registerTargets(t.db, t.owner.id);
   const d = { db: t.db, env: t.env, fetch: r.f };
   assert.equal((await verifyTarget(d, "staging", t.owner.id)).ok, true);
+  // Founder decision 2026-11-01: the prompt already on the agent (typed by the Founder) is adopted verbatim at verification,
+  // so the engine replaces it only by an explicit deployment that names it as the current version.
+  const adopted = (await reg.deployedVersion(t.db, "staging"))!;
+  assert.equal(adopted.prompt_mode, "external");
+  assert.equal(adopted.instructions, "prompt typed in Retell");
   const v1 = await reg.ensureBaseline(t.db, baselineSalesInstructions());
-  await assert.rejects(deploy(d, { stage: "staging", versionId: v1.id, expectedCurrentVersionId: null, kind: "deploy", userId: t.owner.id, reason: "t" }), /passed evaluation/);
+  await assert.rejects(deploy(d, { stage: "staging", versionId: v1.id, expectedCurrentVersionId: adopted.id, kind: "deploy", userId: t.owner.id, reason: "t" }), /passed evaluation/);
   const v2 = await passedVersion(t.db, t.owner.id, v1, "Use the caller's business name once in the opening.");
-  const ok = await deploy(d, { stage: "staging", versionId: v2.id, expectedCurrentVersionId: null, kind: "deploy", userId: t.owner.id, reason: "t" });
+  await t.db.prepare(`UPDATE so_deployments SET created_at = ? WHERE stage = 'staging'`).bind(new Date(Date.now() - 120_000).toISOString()).run();
+  const ok = await deploy(d, { stage: "staging", versionId: v2.id, expectedCurrentVersionId: adopted.id, kind: "deploy", userId: t.owner.id, reason: "t" });
   assert.equal(ok.status, "verified", ok.detail);
   assert.equal(r.prompts.llm_sales_stg01, composeSalesPrompt(v2.instructions));
   assert.equal(r.prompts.llm_sales_prd01, "prompt typed in Retell", "production untouched");
@@ -459,9 +465,17 @@ test("[SALESOPT-008] production needs every gate: production environment, flag, 
   await assert.rejects(deploy(prodEnv, { stage: "production", versionId: v2.id, expectedCurrentVersionId: null, kind: "deploy", userId: t.owner.id, reason: "t" }), /not activated/);
   await reg.setControl(t.db, t.owner.id, { productionActivated: true });
   await verifyTarget(prodEnv, "production", t.owner.id);
-  await assert.rejects(deploy(prodEnv, { stage: "production", versionId: v2.id, expectedCurrentVersionId: null, kind: "deploy", userId: t.owner.id, reason: "t" }), /staging agent first/);
-  assert.equal((await deploy(dev, { stage: "staging", versionId: v2.id, expectedCurrentVersionId: null, kind: "deploy", userId: t.owner.id, reason: "t" })).status, "verified");
-  const p = await deploy(prodEnv, { stage: "production", versionId: v2.id, expectedCurrentVersionId: null, kind: "deploy", userId: t.owner.id, reason: "t" });
+  const prodAdopted = (await reg.deployedVersion(t.db, "production"))!.id;
+  await assert.rejects(deploy(prodEnv, { stage: "production", versionId: v2.id, expectedCurrentVersionId: prodAdopted, kind: "deploy", userId: t.owner.id, reason: "t" }), /staging agent first/);
+  // An unverified staging agent still carrying a hand-typed prompt is never overwritten: verify (adopt) first.
+  const unadopted = await deploy(dev, { stage: "staging", versionId: v2.id, expectedCurrentVersionId: null, kind: "deploy", userId: t.owner.id, reason: "t" });
+  assert.equal(unadopted.status, "aborted");
+  assert.match(unadopted.detail, /did not deploy/);
+  await verifyTarget(dev, "staging", t.owner.id);
+  await t.db.prepare(`UPDATE so_deployments SET created_at = ?`).bind(new Date(Date.now() - 120_000).toISOString()).run();
+  assert.equal((await deploy(dev, { stage: "staging", versionId: v2.id, expectedCurrentVersionId: (await reg.deployedVersion(t.db, "staging"))!.id, kind: "deploy", userId: t.owner.id, reason: "t" })).status, "verified");
+  await t.db.prepare(`UPDATE so_deployments SET created_at = ?`).bind(new Date(Date.now() - 120_000).toISOString()).run();
+  const p = await deploy(prodEnv, { stage: "production", versionId: v2.id, expectedCurrentVersionId: prodAdopted, kind: "deploy", userId: t.owner.id, reason: "t" });
   assert.equal(p.status, "verified", p.detail);
   assert.match(p.detail, /publish it in the Retell dashboard/);
   assert.equal(p.published, false);
@@ -492,6 +506,7 @@ test("[SALESOPT-008] review fixes: a shared Retell LLM is refused, an abandoned 
   assert.ok(shared.calls.every((c) => c.method !== "PATCH"), "nothing written to a shared LLM");
   // Abandoned lock from a stopped Worker: expires after the lease.
   const r = fakeRetell({ applyThenFail: true });
+  r.prompts.llm_sales_stg01 = ""; // a new agent with no prompt yet: nothing of the Founder's to protect
   await t.db.prepare(`INSERT INTO so_deployments (id, stage, version_id, kind, status, created_at) VALUES ('sod_old', 'staging', ?, 'deploy', 'in_progress', ?)`).bind(v2.id, new Date(Date.now() - 3_600_000).toISOString()).run();
   const res = await deploy({ db: t.db, env: t.env, fetch: r.f }, { stage: "staging", versionId: v2.id, expectedCurrentVersionId: null, kind: "deploy", userId: t.owner.id, reason: "t" });
   assert.equal((await one<{ status: string }>(t.db, `SELECT status FROM so_deployments WHERE id = 'sod_old'`)).status, "aborted");
@@ -551,7 +566,8 @@ test("[SALESOPT-011] a safety breach on the live version rolls back automaticall
   for (const v of [v2, v3]) {
     await t.db.prepare(`INSERT INTO so_deployments (id, stage, version_id, kind, status, created_at) VALUES (?, 'staging', ?, 'deploy', 'superseded', ?)`).bind(newId("sod"), v.id, new Date(Date.now() - 900_000).toISOString()).run();
   }
-  await deploy(d, { stage: "production", versionId: v2.id, expectedCurrentVersionId: null, kind: "deploy", userId: t.owner.id, reason: "t" });
+  await t.db.prepare(`UPDATE so_deployments SET created_at = ? WHERE stage = 'production'`).bind(new Date(Date.now() - 900_000).toISOString()).run();
+  await deploy(d, { stage: "production", versionId: v2.id, expectedCurrentVersionId: (await reg.deployedVersion(t.db, "production"))!.id, kind: "deploy", userId: t.owner.id, reason: "t" });
   await t.db.prepare(`UPDATE so_deployments SET created_at = ? WHERE stage = 'production'`).bind(new Date(Date.now() - 600_000).toISOString()).run();
   await deploy(d, { stage: "production", versionId: v3.id, expectedCurrentVersionId: v2.id, kind: "deploy", userId: t.owner.id, reason: "t" });
   await t.db.prepare(`UPDATE so_deployments SET created_at = ? WHERE stage = 'production' AND version_id = ?`).bind(new Date(Date.now() - 300_000).toISOString(), v3.id).run();
@@ -629,7 +645,7 @@ test("[SALESOPT-010] Owner dashboard shows status and controls; other roles are 
   assert.equal((await c.post("/staff/sales-optimization/targets", { stage: "staging", agent_id: STG })).status, 303);
   assert.equal((await c.post("/staff/sales-optimization/targets/staging/verify")).status, 303);
   assert.match(decodeURIComponent(c.cookies.get("cm_flash") ?? ""), /Retell LLM llm_sales_stg01/);
-  const v1 = (await reg.listVersions(t.db))[0];
+  const v1 = (await reg.listVersions(t.db)).find((v) => v.prompt_mode !== "external")!; // the adopted Founder prompt is not the engine's v1
   const badV = await c.post("/staff/sales-optimization/versions", { parent_id: v1.id, instructions: v1.instructions + "\nGuaranteed results for everyone.", rationale: "bad" });
   assert.equal(badV.status, 422);
   assert.match(await badV.text(), /guarantee/i);
@@ -639,7 +655,8 @@ test("[SALESOPT-010] Owner dashboard shows status and controls; other roles are 
   assert.equal((await c.post(`/staff/sales-optimization/versions/${v1.id}/evaluate`)).status, 303);
   await serveRunner(t.db, (_wf, prompt) => GOOD_SIM[SCENARIOS.find((x) => prompt.includes(x.persona))!.id]);
   await consumeEvaluations(t.db);
-  assert.equal((await c.post("/staff/sales-optimization/deploy", { stage: "staging", version_id: v1.id, expected_current: "" })).status, 303);
+  await t.db.prepare(`UPDATE so_deployments SET created_at = ?`).bind(new Date(Date.now() - 120_000).toISOString()).run();
+  assert.equal((await c.post("/staff/sales-optimization/deploy", { stage: "staging", version_id: v1.id, expected_current: (await reg.deployedVersion(t.db, "staging"))!.id })).status, 303);
   assert.match(decodeURIComponent(c.cookies.get("cm_flash") ?? ""), /Staging deployment verified/);
   assert.equal((await c.post(`/staff/sales-optimization/versions/${v1.id}/decide`, { decision: "approve" })).status, 303);
   assert.equal((await reg.getVersion(t.db, v1.id))!.status, "approved");

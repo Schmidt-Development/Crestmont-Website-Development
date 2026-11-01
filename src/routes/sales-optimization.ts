@@ -4,7 +4,8 @@
 //  GET  /staff/sales-optimization/versions/:id
 //  POST /staff/sales-optimization/control                 paused, auto_rollback, production_activated, thresholds
 //  POST /staff/sales-optimization/targets                 stage, agent_id
-//  POST /staff/sales-optimization/targets/:stage/verify   reads the agent from Retell (no write)
+//  POST /staff/sales-optimization/targets/:stage/verify   reads the agent from Retell (no write); adopts a live Founder prompt
+//  POST /staff/sales-optimization/targets/:stage/adopt    adopts the live Retell prompt as the current version (no write)
 //  POST /staff/sales-optimization/versions                new version (manual edit of a parent)
 //  POST /staff/sales-optimization/versions/:id/evaluate   run the evaluation harness
 //  POST /staff/sales-optimization/versions/:id/decide     decision=approve|reject
@@ -25,7 +26,7 @@ import { audit } from "../services/security.ts";
 import { lineDiff } from "../services/voice.ts";
 import * as reg from "../services/sales-opt/registry.ts";
 import { computeMetrics, topFindings } from "../services/sales-opt/metrics.ts";
-import { deploy, productionGate, rollback, rollbackCandidate, verifyTarget, PRODUCTION_FLAG } from "../services/sales-opt/deploy.ts";
+import { deploy, productionGate, rollback, rollbackCandidate, verifyTarget, adoptLivePrompt, PRODUCTION_FLAG } from "../services/sales-opt/deploy.ts";
 import { startEvaluation, maybeQueueProposal } from "../services/sales-opt/jobs.ts";
 import { proposeExperiment, decideExperimentStatus, experimentReport, runSalesOpt } from "../services/sales-opt/monitor.ts";
 import { baselineSalesInstructions, PROTECTED_SALES_POLICY, SALES_POLICY_VERSION } from "../domain/sales-opt/policy.ts";
@@ -105,7 +106,8 @@ async function dashboard(ctx: AppContext, errors: string[] = [], status = 200) {
     const x = targets[s];
     return html`<tr><th scope="row">${label(s)}</th><td>${x ? html`<code>${x.agent_id}</code>` : html`<span class="faint">not registered</span>`}</td>
 <td>${x?.verified_at ? (x.engine_type === "retell-llm" ? badge("verified", `Retell LLM ${x.llm_id ?? ""}`) : badge("failed", `Unsupported engine: ${x.engine_type ?? "unknown"}`)) : badge("not_configured", "Not verified")}</td>
-<td>${x ? html`<form method="post" action="${BASE}/targets/${s}/verify">${csrf(ctx)}${button("Verify with Retell", { size: "sm", variant: "secondary" })}</form>` : ""}</td></tr>`;
+<td>${x ? html`<form method="post" action="${BASE}/targets/${s}/verify">${csrf(ctx)}${button("Verify with Retell", { size: "sm", variant: "secondary" })}</form>
+<form method="post" action="${BASE}/targets/${s}/adopt">${csrf(ctx)}${button("Adopt live prompt", { size: "sm", variant: "secondary" })}</form>` : ""}</td></tr>`;
   };
 
   const body = html`${pageHead("AI Sales Optimization", html`<form method="post" action="${BASE}/run" class="row">${csrf(ctx)}${button("Run cycle now", { size: "sm", variant: "secondary" })}</form>`, "AI")}
@@ -343,6 +345,15 @@ export function register(r: Router): void {
     if (p.stage !== "staging" && p.stage !== "production") throw new HttpError(404, "Unknown stage");
     const res = await verifyTarget(deps(ctx), p.stage, ctx.user!.id);
     return res.ok ? back(ctx, res.detail) : dashboard(ctx, [res.detail], 409);
+  });
+
+  // After the Founder edits the prompt directly in Retell (drift), this makes that prompt the current version so the
+  // engine never deploys an older one over it. Read-only on Retell.
+  r.post(`${BASE}/targets/:stage/adopt`, async (ctx, p) => {
+    requireStaff(ctx, "salesopt.decide");
+    if (p.stage !== "staging" && p.stage !== "production") throw new HttpError(404, "Unknown stage");
+    const res = await adoptLivePrompt(deps(ctx), p.stage, ctx.user!.id, "Founder edited the prompt in Retell; adopted from the dashboard");
+    return res.adopted || res.versionSeq ? back(ctx, res.detail) : dashboard(ctx, [res.detail], 409);
   });
 
   r.post(`${BASE}/versions`, (ctx) => guarded(ctx, async () => {

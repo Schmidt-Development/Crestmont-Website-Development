@@ -136,6 +136,7 @@ export async function startEvaluation(db: Db, versionId: string, userId: string 
   if (!v) throw new SalesOptError("Version not found", 404);
   const running = await db.prepare(`SELECT id FROM so_eval_runs WHERE version_id = ? AND status = 'running'`).bind(versionId).first<{ id: string }>();
   if (running) throw new SalesOptError("An evaluation of this version is already running.", 409);
+  if (v.prompt_mode === "external") throw new SalesOptError("This is the Founder's own prompt adopted from Retell; it is not evaluated or re-deployed by the engine.", 409);
   await transition(db, versionId, "evaluating", { userId });
   const prompt = composeSalesPrompt(v.instructions);
   const problems = [...salesPolicyViolations(v.instructions)];
@@ -214,6 +215,8 @@ export async function maybeQueueProposal(db: Db, now = new Date(), opts: { force
   if (await db.prepare(`SELECT 1 AS x FROM so_proposal_jobs WHERE status = 'queued'`).first()) return "a proposal is already being generated";
   const base = await proposalBase(db);
   if (!base) return "no base version";
+  // The engine never rewrites a Founder-authored prompt: proposals are generated only from a composed version.
+  if (base.prompt_mode === "external") return `v${base.seq} is the Founder's own prompt (adopted from Retell): AI proposals are off until a composed version is deployed`;
   const from = new Date(now.getTime() - 30 * 86_400_000).toISOString();
   const m = await computeMetrics(db, { from, to: now.toISOString(), versionId: base.id });
   if (m.analysed < MIN_ANALYSED_FOR_PROPOSAL) return `needs ${MIN_ANALYSED_FOR_PROPOSAL} analysed calls on v${base.seq} (has ${m.analysed})`;

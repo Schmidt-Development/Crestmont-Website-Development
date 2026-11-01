@@ -14,6 +14,7 @@ import { checkoutLinesFor, loadTaxConfig, taxLines } from "./tax.ts";
 import { computeTax } from "../domain/tax.ts";
 import { parseAttributionCookie, privacySignal, ATTRIBUTION_COOKIE } from "./leads.ts";
 import { parseCookies } from "../app/http.ts";
+import { salesLinkForCheckout, SALES_LINK_COOKIE, type SalesLinkBinding } from "./sales-functions.ts";
 
 export const NOT_CONFIGURED = "Online payment is not configured yet.";
 
@@ -65,13 +66,57 @@ export async function ensureCheckoutLead(ctx: AppContext, user: CheckoutUser, or
   return leadId;
 }
 
+/**
+ * Purchase link → CRM lead (outbound AI sales). A buyer who arrived through /buy/:token is bound to the lead the link was
+ * issued for, not to whichever lead their sign-in email happens to match: the link itself (a bearer secret emailed only to
+ * the address the prospect verified on the call) is the authorization. The opportunity moves to awaiting payment exactly
+ * as ensureCheckoutLead does; a lost lead is reopened (the buyer is buying); a converted or archived lead is not reused
+ * (a repeat purchase falls back to ensureCheckoutLead). A different sign-in email is never written over the contact: it is
+ * recorded on the lead with a verification task, so a forwarded link is visible to staff. Returns null to fall back.
+ */
+export async function bindSalesLinkLead(ctx: AppContext, link: SalesLinkBinding, user: CheckoutUser, pkg: { id: string; name: string }): Promise<string | null> {
+  const db = ctx.db;
+  const at = nowIso(ctx.now);
+  let lead = await db.prepare(`SELECT id, stage, merged_into_lead_id FROM leads WHERE id = ?`).bind(link.leadId).first<{ id: string; stage: string; merged_into_lead_id: string | null }>();
+  if (lead?.merged_into_lead_id) lead = await db.prepare(`SELECT id, stage, merged_into_lead_id FROM leads WHERE id = ?`).bind(lead.merged_into_lead_id).first<{ id: string; stage: string; merged_into_lead_id: string | null }>();
+  if (!lead || lead.merged_into_lead_id) return null;
+  const open = ["new", "qualified", "quote_required", "quote_sent", "negotiation", "accepted", "awaiting_payment", "lost"];
+  if (!open.includes(lead.stage)) return null;
+  if (lead.stage !== "awaiting_payment") {
+    const r = await db.prepare(`UPDATE leads SET stage = 'awaiting_payment', updated_at = ? WHERE id = ? AND stage = ?`).bind(at, lead.id, lead.stage).run();
+    if (r.meta.changes === 1) await db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'stage_change',?,?)`)
+      .bind(newId("act"), lead.id, `Stage: ${lead.stage} → awaiting_payment (buyer started ${pkg.name} checkout from AI sales purchase link ${link.linkId})`, at).run();
+  }
+  const signedIn = user.email.trim().toLowerCase();
+  if (signedIn !== link.email.toLowerCase()) {
+    await db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`)
+      .bind(newId("act"), lead.id, `Checkout from purchase link ${link.linkId} was started by ${signedIn}; the link was sent to ${link.email}. The order is attributed to this lead.`, at).run();
+    await db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, due_at, created_at) VALUES (?,?,'task',?,?,?)`)
+      .bind(newId("act"), lead.id, `Confirm that ${signedIn} buys for this business (purchase link was sent to ${link.email}); update the contact's email if it changed.`, new Date(Date.parse(at) + 24 * 3_600_000).toISOString(), at).run();
+  }
+  await audit(db, { actorUserId: user.id, action: "lead.checkout_bound_to_sales_link", subjectType: "lead", subjectId: lead.id, details: { link: link.linkId, packageId: pkg.id, emailMatches: signedIn === link.email.toLowerCase() } });
+  return lead.id;
+}
+
 /** Standard package checkout (fixed price, 100% upfront). Premium above the floor goes through quotes. */
 export async function startPackageCheckout(ctx: AppContext, user: CheckoutUser, organizationId: string, packageId: string) {
   const pkg = packageById(packageId);
   if (!pkg) throw new HttpError(404, "Unknown package.");
   if (!ctx.payments.configured) throw new HttpError(409, NOT_CONFIGURED);
-  const leadId = await ensureCheckoutLead(ctx, user, organizationId, pkg);
+  const link = await salesLinkForCheckout(ctx.db, parseCookies(ctx.req.headers.get("cookie"))[SALES_LINK_COOKIE], pkg.id, ctx.now());
+  const boundLead = link ? await bindSalesLinkLead(ctx, link, user, pkg) : null;
+  const leadId = boundLead ?? await ensureCheckoutLead(ctx, user, organizationId, pkg);
   const order = await createPackageOrder(ctx.db, organizationId, pkg.id, user.id, ctx.now(), { leadId });
+  if (boundLead && link) {
+    // A reused open invoice may still carry the lead an earlier email-matched checkout created: the link decides.
+    const prev = await ctx.db.prepare(`SELECT lead_id FROM orders WHERE id = ?`).bind(order.orderId).first<{ lead_id: string | null }>();
+    if (prev?.lead_id !== boundLead) {
+      await ctx.db.prepare(`UPDATE orders SET lead_id = ? WHERE id = ? AND status = 'pending_payment'`).bind(boundLead, order.orderId).run();
+      if (prev?.lead_id) await ctx.db.prepare(`INSERT INTO crm_activities (id, lead_id, kind, body, created_at) VALUES (?,?,'system',?,?)`)
+        .bind(newId("act"), prev.lead_id, `Order ${order.orderId} was re-attributed to lead ${boundLead} (AI sales purchase link ${link.linkId}).`, nowIso(ctx.now)).run();
+    }
+    await ctx.db.prepare(`UPDATE sales_checkout_links SET order_id = ? WHERE id = ?`).bind(order.orderId, link.linkId).run();
+  }
   const session = await ctx.payments.createCheckout({
     mode: "payment",
     lines: order.checkoutLines,
@@ -79,7 +124,7 @@ export async function startPackageCheckout(ctx: AppContext, user: CheckoutUser, 
     customerId: await stripeCustomerOf(ctx.db, organizationId),
     successUrl: `${ctx.baseUrl}/portal/billing?checkout=success`,
     cancelUrl: `${ctx.baseUrl}/checkout/${pkg.id}?checkout=cancelled`,
-    metadata: { organization_id: organizationId, order_id: order.orderId, invoice_id: order.invoiceId, kind: "package" },
+    metadata: { organization_id: organizationId, order_id: order.orderId, invoice_id: order.invoiceId, kind: "package", lead_id: leadId, ...(boundLead && link ? { sales_link_id: link.linkId } : {}) },
     // One Stripe session per invoice per day: a repeat click on the reused invoice returns the same session (CREST-GAP-036).
     idempotencyKey: `checkout:${order.invoiceId}:${nowIso(ctx.now).slice(0, 10)}`,
   });

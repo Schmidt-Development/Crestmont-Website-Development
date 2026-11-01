@@ -24,7 +24,7 @@ import { audit } from "../security.ts";
 import { notifyOwners } from "../voice-common.ts";
 import { getRetellAgent, getRetellLlm, updateRetellLlmPrompt } from "../../adapters/retell.ts";
 import { composeSalesPrompt, hasProtectedPolicy, salesPolicyViolations } from "../../domain/sales-opt/policy.ts";
-import { deployedVersion, getVersion, listTargets, loadControl, receptionistAgentIds, SalesOptError, type Stage } from "./registry.ts";
+import { deployedVersion, getVersion, listTargets, loadControl, receptionistAgentIds, SalesOptError, promptOf, createExternalVersion, type Stage } from "./registry.ts";
 
 export const PRODUCTION_FLAG = "SALES_OPT_PRODUCTION";
 export const MAX_DEPLOYS_PER_DAY = 6;
@@ -129,10 +129,48 @@ export async function verifyTarget(d: DeployDeps, stage: Stage, userId: string |
   await d.db.prepare(`UPDATE so_targets SET engine_type = ?, llm_id = ?, verified_at = ?, updated_by = COALESCE(?, updated_by) WHERE stage = ?`)
     .bind(type, type === "retell-llm" && eng.llm_id ? eng.llm_id : null, nowIso(), userId, stage).run();
   if (type === "retell-llm" && eng.llm_id) {
+    // Nothing verified here yet and the agent already carries a prompt (the Founder's own, e.g. V17): adopt it as the
+    // current version instead of ever replacing it with an older engine version. Read-only on Retell.
+    let adopted = "";
+    if (!(await deployedVersion(d.db, stage))) {
+      const a = await adoptLivePrompt(d, stage, userId, "Founder prompt found on the agent when the target was verified");
+      adopted = a.adopted ? ` ${a.detail}` : "";
+    }
     const st = await retellState(d, stage, eng.llm_id);
-    return done(true, `Agent uses Retell LLM ${eng.llm_id}; the general prompt can be managed here. ${describeRetellState(st)}`, type);
+    return done(true, `Agent uses Retell LLM ${eng.llm_id}; the general prompt can be managed here.${adopted} ${describeRetellState(st)}`, type);
   }
   return done(false, `Agent uses a "${type}" response engine. Only Retell LLM agents are supported; conversation-flow and custom-LLM agents need a different update method that is not implemented.`, type);
+}
+
+/**
+ * Adopts the prompt currently on the stage's Retell LLM as the verified current version, without writing to Retell.
+ * Used for a Founder-authored prompt (V17) and after a manual edit (drift): the engine then attributes calls to it,
+ * compares against it, and can never deploy an older version over it without an explicit rollback.
+ */
+export async function adoptLivePrompt(d: DeployDeps, stage: Stage, userId: string | null, label: string): Promise<{ adopted: boolean; detail: string; versionSeq?: number }> {
+  const t = (await listTargets(d.db))[stage];
+  if (!t || t.engine_type !== "retell-llm" || !t.llm_id) return { adopted: false, detail: `No verified Retell LLM ${stage} target.` };
+  const key = retellKey(d.env, "outbound");
+  if (!key) return { adopted: false, detail: "RETELL_OUTBOUND_API_KEY is not set." };
+  const llm = await getRetellLlm({ apiKey: key, fetch: d.fetch, llmId: t.llm_id });
+  if (!llm.ok) return { adopted: false, detail: `Reading the prompt: ${llm.error}` };
+  const text = typeof llm.body.general_prompt === "string" ? llm.body.general_prompt : "";
+  if (!text.trim()) return { adopted: false, detail: "The agent has no prompt to adopt." };
+  const sha = await sha256Hex(text);
+  const current = await deployedVersion(d.db, stage);
+  if (current && current.prompt_sha256 === sha) return { adopted: false, detail: `Already current as v${current.seq}.`, versionSeq: current.seq };
+  // A live prompt identical to a composed engine version is that version, not a new external one.
+  const known = await d.db.prepare(`SELECT * FROM so_versions WHERE prompt_sha256 = ? ORDER BY seq DESC LIMIT 1`).bind(sha).first<Awaited<ReturnType<typeof getVersion>> & object>();
+  const v = known ?? await createExternalVersion(d.db, text, label, userId);
+  const id = newId("sod"), at = nowIso();
+  await d.db.prepare(`INSERT INTO so_deployments (id, stage, version_id, expected_current_version_id, kind, status, agent_id, llm_id, snapshot_prompt_sha256, snapshot_prompt, snapshot_retell_version, readback_sha256, retell_version_after, published, detail, initiated_by, reason, created_at, completed_at)
+      VALUES (?,?,?,?, 'deploy', 'verified', ?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(id, stage, v.id, current?.id ?? null, t.agent_id, t.llm_id, sha, text.slice(0, 20_000), typeof llm.body.version === "number" ? llm.body.version : null, sha,
+      typeof llm.body.version === "number" ? llm.body.version : null, typeof llm.body.is_published === "boolean" ? (llm.body.is_published ? 1 : 0) : null,
+      `Adopted the live Retell prompt as v${v.seq} (sha ${sha.slice(0, 12)}). Nothing was written to Retell.`, userId, label.slice(0, 500), at, at).run();
+  await d.db.prepare(`UPDATE so_deployments SET status = 'superseded' WHERE stage = ? AND status = 'verified' AND id <> ?`).bind(stage, id).run();
+  await audit(d.db, { actorUserId: userId, actorKind: userId ? "user" : "system", action: "salesopt.live_prompt_adopted", subjectType: "so_deployment", subjectId: id, details: { stage, version: v.seq } });
+  return { adopted: true, detail: `Adopted the live prompt as v${v.seq}${v.prompt_mode === "external" ? " (Founder prompt, kept verbatim)" : ""}.`, versionSeq: v.seq };
 }
 
 export async function deploy(d: DeployDeps, r: DeployRequest): Promise<DeployResult> {
@@ -156,9 +194,11 @@ export async function deploy(d: DeployDeps, r: DeployRequest): Promise<DeployRes
   const current = await deployedVersion(db, r.stage);
   if ((current?.id ?? null) !== r.expectedCurrentVersionId) throw new SalesOptError(`The ${r.stage} agent's version changed (now ${current ? `v${current.seq}` : "none"}). Reload before deploying.`, 409);
   if (current?.id === v.id) throw new SalesOptError(`v${v.seq} is already deployed on ${r.stage}.`, 409);
-  const prompt = composeSalesPrompt(v.instructions);
-  const problems = salesPolicyViolations(v.instructions);
-  if (!hasProtectedPolicy(prompt) || problems.length) throw new SalesOptError(`Refusing: the composed prompt fails the protected policy (${problems.join(" ") || "policy prefix missing"}).`, 409);
+  const external = v.prompt_mode === "external";
+  if (external && r.kind === "deploy") throw new SalesOptError(`v${v.seq} is a Founder prompt adopted from Retell; it can only be restored by a rollback.`, 409);
+  const prompt = promptOf(v);
+  const problems = external ? [] : salesPolicyViolations(v.instructions);
+  if (!external && (!hasProtectedPolicy(prompt) || problems.length)) throw new SalesOptError(`Refusing: the composed prompt fails the protected policy (${problems.join(" ") || "policy prefix missing"}).`, 409);
   const dayAgo = new Date(now().getTime() - 86_400_000).toISOString();
   const recent = await db.prepare(`SELECT COUNT(*) AS n, MAX(created_at) AS last FROM so_deployments WHERE stage = ? AND created_at >= ? AND status <> 'aborted'`).bind(r.stage, dayAgo).first<{ n: number; last: string | null }>();
   if (r.kind === "deploy" && recent && recent.n >= MAX_DEPLOYS_PER_DAY) throw new SalesOptError(`At most ${MAX_DEPLOYS_PER_DAY} deployments per stage per day.`, 429);
@@ -212,7 +252,12 @@ export async function deploy(d: DeployDeps, r: DeployRequest): Promise<DeployRes
   const base = { llm: llmId, snapSha, snap: snapText.slice(0, 20_000), snapVer };
   if (current && snapSha !== current.prompt_sha256) {
     const msg = `Drift: the Retell prompt no longer matches v${current.seq} (edited outside the platform).`;
-    if (r.kind === "deploy") return finish("aborted", `${msg} Review the snapshot on this deployment, then deploy again. Nothing was changed.`, base);
+    if (r.kind === "deploy") return finish("aborted", `${msg} Adopt the live prompt (or review the snapshot on this deployment), then deploy again. Nothing was changed.`, base);
+  }
+  // Nothing verified here yet but the agent already has a prompt the engine did not write (the Founder's V17): never
+  // overwrite it with an engine version. Adopting it (target verification does this) makes it the current version.
+  if (!current && snapText.trim() && snapSha !== (await sha256Hex(prompt))) {
+    return finish("aborted", "The agent carries a prompt this engine did not deploy (for example the Founder's own). Verify the target to adopt it as the current version first. Nothing was changed.", base);
   }
   const up = await updateRetellLlmPrompt({ apiKey: key, fetch: d.fetch, llmId, generalPrompt: prompt });
   // Even when Retell reports an error (or the request timed out) the write may have applied: the read-back decides.
