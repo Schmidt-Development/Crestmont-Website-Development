@@ -903,7 +903,8 @@ test("[PAY-007] [PAY-003] Stripe test mode: the Founder issues a refund; the sig
   assert.match(await text(o, ".page-head, main"), /Approved/i, await alerts(o));
   // Poll the request's own page for the outcome rather than relying on one navigation event (deploy 41258366594 timed out
   // waiting for "load" after this click, and the request stayed Approved). The failure message carries what the page says.
-  await btn(o, /^Issue \$1\.00 refund via Stripe$/).click();
+  // formatCents shows whole dollars without cents ("$1"); deploy 41265983047 looked for "$1.00" and never found the button.
+  await btn(o, /^Issue \$1(\.00)? refund via Stripe$/).click();
   let detail = "";
   for (const end = Date.now() + 60_000; ; await o.waitForTimeout(3_000)) {
     if (new URL(o.url()).pathname !== new URL(refundUrl).pathname) await o.goto(refundUrl).catch(() => undefined);
@@ -926,7 +927,7 @@ test("[PAY-007] [PAY-003] Stripe test mode: the Founder issues a refund; the sig
   await o.goto(`${BASE}/staff/email?to=${encodeURIComponent(contact.email)}&template=refund_decision`);
   const rows: string[] = await o.locator("main table tbody tr").allInnerTexts();
   assert.equal(rows.filter((r) => /issued/i.test(r)).length, 1, `one refund-issued email, got:\n${rows.join("\n")}`);
-  assert.match(await outbox(contact.email, "refund_decision", stripeRefund), /\$1\.00/);
+  assert.match(await outbox(contact.email, "refund_decision", stripeRefund), /\$1(\.00)?\b/);
   await c.goto(BASE + "/portal/billing");
   assert.match(await text(c), /Refund requests[\s\S]*\$1(\.00)?[\s\S]*Issued/i, "customer sees the refund issued");
   assertClean();
