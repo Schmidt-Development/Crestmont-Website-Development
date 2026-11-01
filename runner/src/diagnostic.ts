@@ -32,6 +32,36 @@ export function nativeBase(baseUrl: string): string {
 const sameModel = (a: string, b: string) => a === b || a === `${b}:latest` || b === `${a}:latest`;
 const ms = (ns: unknown) => typeof ns === "number" ? Math.round(ns / 1e6) : null;
 
+/**
+ * The D11 request. `think: false` is required: Qwen 3.x (e.g. qwen3.6:35b-a3b) is a thinking model, and without it
+ * Ollama's native /api/chat runs the reasoning phase into `message.thinking`, which can spend the whole num_predict
+ * budget and leave `message.content` empty ("the model returned no text") although the GPU did real work. Ollama
+ * ignores `think` for models without thinking support. num_predict stays bounded (64..4000) so the step fits the lease.
+ */
+export function diagnosticChatBody(model: string, job: Pick<AiDraftJob, "system" | "prompt" | "maxOutputTokens">) {
+  return { model, stream: false, think: false, keep_alive: "10m",
+    messages: [{ role: "system", content: job.system }, { role: "user", content: job.prompt }],
+    options: { temperature: 0, seed: 42, num_predict: Math.max(64, Math.min(job.maxOutputTokens || 1500, 4000)) } };
+}
+
+/** The visible answer: `message.content` with any inline <think> block and a Markdown fence removed. Reasoning text
+ *  (`message.thinking`, or an inline <think> block) is never treated as the answer; only its size is reported. */
+export function diagnosticContent(res: Record<string, unknown>): { content: string; thinkingChars: number } {
+  const msg = (res.message ?? {}) as { content?: unknown; thinking?: unknown };
+  const raw = typeof msg.content === "string" ? msg.content : "";
+  const inline = [...raw.matchAll(/<think>([\s\S]*?)(?:<\/think>|$)/g)].reduce((n, m) => n + m[1].length, 0);
+  const content = raw.replace(/<think>[\s\S]*?(?:<\/think>|$)/g, "").trim().replace(/^```(?:html)?\s*/i, "").replace(/\s*```$/, "").trim();
+  return { content, thinkingChars: (typeof msg.thinking === "string" ? msg.thinking.length : 0) + inline };
+}
+
+/** Why no answer came back, precisely enough to act on. */
+export function emptyReason(res: Record<string, unknown>, thinkingChars: number): string {
+  const done = typeof res.done_reason === "string" ? res.done_reason : null;
+  const evalCount = typeof res.eval_count === "number" ? res.eval_count : 0;
+  if (thinkingChars > 0) return `the model returned no text: it produced only reasoning (${thinkingChars} chars of thinking, ${evalCount} tokens${done ? `, done_reason ${done}` : ""}) although think=false was sent — check the Ollama version supports "think"`;
+  return `the model returned no text (${evalCount} tokens${done ? `, done_reason ${done}` : ""})`;
+}
+
 interface PsModel { name?: string; model?: string; size?: number; size_vram?: number; expires_at?: string; details?: { parameter_size?: string; quantization_level?: string; family?: string } }
 
 export async function runDiagnostic(d: DiagnosticDeps, job: AiDraftJob & { diagnostic: { correlationId: string } }): Promise<"completed" | "failed" | "lease_lost"> {
@@ -123,35 +153,33 @@ export async function runDiagnostic(d: DiagnosticDeps, job: AiDraftJob & { diagn
 
     // D10: the inference request is sent.
     const promptSha = createHash("sha256").update(job.system + "\n" + job.prompt).digest("hex");
-    await report({ code: "D10", ok: true, component: "ollama", evidence: { endpoint: `${base}/api/chat`, model: d.modelName, promptSha256: promptSha, temperature: 0, seed: 42, numPredict: job.maxOutputTokens, gpuPercent: loaded.model?.gpuPercent ?? null } });
+    await report({ code: "D10", ok: true, component: "ollama", evidence: { endpoint: `${base}/api/chat`, model: d.modelName, promptSha256: promptSha, temperature: 0, seed: 42, think: false, numPredict: diagnosticChatBody(d.modelName, job).options.num_predict, gpuPercent: loaded.model?.gpuPercent ?? null } });
 
     // D11: inference completes, with Ollama's own timings and token counts.
     let res: Record<string, unknown>;
     try {
       res = await getJson("/api/chat", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model: d.modelName, stream: false, keep_alive: "10m", messages: [{ role: "system", content: job.system }, { role: "user", content: job.prompt }],
-          options: { temperature: 0, seed: 42, num_predict: Math.max(64, Math.min(job.maxOutputTokens || 800, 2000)) } }) }, left(300_000));
+        body: JSON.stringify(diagnosticChatBody(d.modelName, job)) }, left(300_000));
     } catch (err) {
       const msg = `inference failed: ${errorMessage(err)}`;
       await report({ code: "D11", ok: false, component: "ollama", error: msg });
       return await finish({ error: msg });
     }
-    const content = String((res.message as { content?: string } | undefined)?.content ?? "")
-      .replace(/<think>[\s\S]*?<\/think>/g, "").replace(/^```(?:html)?\s*/i, "").replace(/```\s*$/, "").trim();
+    const { content, thinkingChars } = diagnosticContent(res);
     const evalCount = typeof res.eval_count === "number" ? res.eval_count : 0;
     const evalMs = ms(res.eval_duration);
     const after = await ps().catch(() => null);
     Object.assign(metrics, {
       totalMs: ms(res.total_duration), loadMs: ms(res.load_duration), promptEvalCount: res.prompt_eval_count ?? null, promptEvalMs: ms(res.prompt_eval_duration),
       evalCount, evalMs, tokensPerSecond: evalMs ? Math.round((evalCount / (evalMs / 1000)) * 10) / 10 : null, doneReason: res.done_reason ?? null,
-      reportedModel: res.model ?? null, residencyAfter: after?.model ?? null,
+      reportedModel: res.model ?? null, residencyAfter: after?.model ?? null, thinkingChars,
     });
     const looksHtml = /<html[\s>]/i.test(content) && /<h1[\s>]/i.test(content) && /<p[\s>]/i.test(content) && /<title[\s>]/i.test(content);
     const reported = typeof res.model === "string" ? res.model : "";
     const sameAsConfigured = !reported || sameModel(reported, d.modelName);
-    await report({ code: "D11", ok: !!content && sameAsConfigured, component: "ollama", error: !content ? "the model returned no text" : sameAsConfigured ? undefined : `Ollama answered with ${reported}, not the configured ${d.modelName}`,
-      evidence: { totalMs: metrics.totalMs, loadMs: metrics.loadMs, evalCount, evalMs, tokensPerSecond: metrics.tokensPerSecond, doneReason: metrics.doneReason, outputChars: content.length, looksLikeRequestedHtml: looksHtml, gpuPercentAfter: after?.model?.gpuPercent ?? null } });
-    if (!content) return await finish({ error: "the model returned no text", inputTokens: Number(res.prompt_eval_count) || 0, outputTokens: evalCount });
+    await report({ code: "D11", ok: !!content && sameAsConfigured, component: "ollama", error: !content ? emptyReason(res, thinkingChars) : sameAsConfigured ? undefined : `Ollama answered with ${reported}, not the configured ${d.modelName}`,
+      evidence: { think: false, thinkingChars, totalMs: metrics.totalMs, loadMs: metrics.loadMs, evalCount, evalMs, tokensPerSecond: metrics.tokensPerSecond, doneReason: metrics.doneReason, outputChars: content.length, looksLikeRequestedHtml: looksHtml, gpuPercentAfter: after?.model?.gpuPercent ?? null } });
+    if (!content) return await finish({ error: emptyReason(res, thinkingChars), inputTokens: Number(res.prompt_eval_count) || 0, outputTokens: evalCount });
     return await finish({ text: content, inputTokens: Number(res.prompt_eval_count) || 0, outputTokens: evalCount });
   } catch (err) {
     if (err instanceof LeaseLostError) { log.warn("diagnostic lease lost"); return "lease_lost"; }
