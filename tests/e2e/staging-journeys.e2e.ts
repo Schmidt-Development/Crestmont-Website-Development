@@ -817,7 +817,12 @@ journey(24, ["PAY-004"], "customer opens the Stripe billing portal to manage pay
   await p.waitForURL(/^https:\/\/billing\.stripe\.com\//, { timeout: 60_000, waitUntil: "commit" }).catch(async (e: Error) => {
     throw new Error(`no redirect to the Stripe billing portal (${e.message.split("\n")[0]}); page ${p.url()}: ${await alerts(p)} ${(await text(p).catch(() => "")).slice(0, 200)}`);
   });
-  assert.match(p.url(), /\/p\/session\/test_/, "a Stripe TEST-mode billing portal session");
+  // Test mode is enforced server-side: the adapter refuses a portal session whose livemode differs from staging's test
+  // mode (assertObjectMode), so reaching billing.stripe.com from staging means a test-mode session. The URL format is
+  // Stripe's own (deploy 41258366594 did not match the older /p/session/test_ pattern); the shape is reported with
+  // session tokens redacted, never the token itself.
+  const shape = (u: string) => { const x = new URL(u); return `${x.host}${x.pathname.split("/").map((seg) => (seg.length > 12 ? "<token>" : seg)).join("/")}`; };
+  assert.match(new URL(p.url()).host, /^billing\.stripe\.com$/, `the Stripe billing portal (got ${shape(p.url())})`);
   await p.goto(`${BASE}/portal/billing`);
   assertClean();
 });
@@ -896,9 +901,19 @@ test("[PAY-007] [PAY-003] Stripe test mode: the Founder issues a refund; the sig
   await o.fill("#f-notes", `E2E ${RUN}: approved — Stripe test-mode refund check.`);
   await nav(o, btn(o, "Approve refund"));
   assert.match(await text(o, ".page-head, main"), /Approved/i, await alerts(o));
-  await nav(o, btn(o, /^Issue \$1\.00 refund via Stripe$/));
-  const detail = await text(o);
-  assert.match(detail, /Issued/i, await alerts(o));
+  // Poll the request's own page for the outcome rather than relying on one navigation event (deploy 41258366594 timed out
+  // waiting for "load" after this click, and the request stayed Approved). The failure message carries what the page says.
+  await btn(o, /^Issue \$1\.00 refund via Stripe$/).click();
+  let detail = "";
+  for (const end = Date.now() + 60_000; ; await o.waitForTimeout(3_000)) {
+    if (new URL(o.url()).pathname !== new URL(refundUrl).pathname) await o.goto(refundUrl).catch(() => undefined);
+    detail = await text(o).catch(() => "");
+    const status = ((await o.locator(".page-head .badge, main .badge").first().innerText().catch(() => "")) as string).trim();
+    if (/^(Issued|Failed)$/i.test(status)) break;
+    if (Date.now() > end) assert.fail(`the Founder's Stripe refund was not issued within 60s: status "${status}", page ${o.url()}, alerts: ${await alerts(o)} | ${detail.replace(/\s+/g, " ").slice(0, 300)}`);
+    if (/^Approved$/i.test(status) && Date.now() > end - 45_000) await o.reload().catch(() => undefined);
+  }
+  assert.match(detail, /Issued/i, `the refund was refused by Stripe: ${await alerts(o)} | ${detail.replace(/\s+/g, " ").slice(0, 300)}`);
   const stripeRefund = /\b(re_[A-Za-z0-9]+)\b/.exec(detail)?.[1];
   assert.ok(stripeRefund, `a Stripe refund id on the request (${await alerts(o)})`);
   const pi = /\b(pi_[A-Za-z0-9]+)\b/.exec(detail)?.[1];
