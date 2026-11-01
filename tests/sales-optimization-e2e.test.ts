@@ -86,7 +86,9 @@ test("[SALESOPT-001] [SALESOPT-002] [SALESOPT-003] [SALESOPT-005] [SALESOPT-007]
   assert.equal((await o.post("/staff/sales-optimization/targets", { stage: "production", agent_id: PROD })).status, 303);
   assert.equal((await o.post("/staff/sales-optimization/targets/staging/verify")).status, 303);
   assert.match(flash(o), /Retell LLM llm_sales_stg01/);
-  assert.match(flash(o), /Draft prompt: no version verified here yet\..*published: no\. Phone-number version assignment and live traffic: not managed/);
+  // Founder decision 2026-11-01: the prompt already on the agent is adopted verbatim at verification (never overwritten silently).
+  assert.match(flash(o), /Adopted the live prompt as v\d+ \(Founder prompt, kept verbatim\)\. Draft prompt: matches verified v\d+\..*published: no\. Phone-number version assignment and live traffic: not managed/);
+  const adoptedId = (await one<{ id: string }>(db, `SELECT version_id AS id FROM so_deployments WHERE stage = 'staging' AND status = 'verified'`)).id;
   assert.equal((await o.post("/staff/sales-optimization/control", { auto_rollback: "1", minConnected: "50", maxOptOutRate: "15", maxComplianceRate: "2", maxComplaintRate: "5", maxErrorRate: "5", maxRefundRate: "20" })).status, 303);
   const v1 = await one<{ id: string; instructions: string }>(db, `SELECT id, instructions FROM so_versions WHERE seq = 1`);
 
@@ -96,7 +98,8 @@ test("[SALESOPT-001] [SALESOPT-002] [SALESOPT-003] [SALESOPT-005] [SALESOPT-007]
   assert.equal((await node1(simulate)).length, SCENARIOS.length);
   await run();
   assert.equal((await one<{ status: string }>(db, `SELECT status FROM so_versions WHERE id = ?`, v1.id)).status, "eval_passed");
-  assert.equal((await o.post("/staff/sales-optimization/deploy", { stage: "staging", version_id: v1.id, expected_current: "" })).status, 303);
+  await db.prepare(`UPDATE so_deployments SET created_at = ?`).bind(new Date(Date.now() - 10 * 60_000).toISOString()).run(); // FIXTURE: deployment spacing
+  assert.equal((await o.post("/staff/sales-optimization/deploy", { stage: "staging", version_id: v1.id, expected_current: adoptedId })).status, 303);
   assert.match(flash(o), /Staging deployment verified/);
   assert.equal(retell.prompts.llm_sales_stg01, composeSalesPrompt(v1.instructions));
   await db.prepare(`UPDATE so_deployments SET created_at = ?`).bind(new Date(Date.now() - 10 * 60_000).toISOString()).run(); // FIXTURE: deployment spacing
@@ -163,7 +166,7 @@ test("[SALESOPT-001] [SALESOPT-002] [SALESOPT-003] [SALESOPT-005] [SALESOPT-007]
   });
   await run();
   const v2 = await one<{ id: string; seq: number; status: string; author_kind: string; parent_id: string; evidence_json: string }>(db, `SELECT * FROM so_versions WHERE author_kind = 'ai'`);
-  assert.deepEqual({ seq: v2.seq, status: v2.status, parent: v2.parent_id }, { seq: 2, status: "evaluating", parent: v1.id }, "10. AI proposal recorded with lineage, evaluated automatically");
+  assert.deepEqual({ seq: v2.seq, status: v2.status, parent: v2.parent_id }, { seq: 3, status: "evaluating", parent: v1.id }, "10. AI proposal recorded with lineage, evaluated automatically (seq 2 is the adopted live prompt)");
   assert.ok(!/sounds like a lot/.test(v2.evidence_json), "versions hold finding ids, never transcript text");
 
   // 11. Protected policy: a version that tries to add a discount is refused before it exists.
@@ -178,13 +181,13 @@ test("[SALESOPT-001] [SALESOPT-002] [SALESOPT-003] [SALESOPT-005] [SALESOPT-007]
   // 13–15. Founder approves (MFA session) and deploys to the staging agent; Retell's read-back is verified; history recorded.
   assert.equal((await o.post(`/staff/sales-optimization/versions/${v2.id}/decide`, { decision: "approve" })).status, 303);
   assert.equal((await o.post("/staff/sales-optimization/deploy", { stage: "staging", version_id: v2.id, expected_current: v1.id })).status, 303);
-  assert.match(flash(o), /Staging deployment verified: Read-back matches v2/);
+  assert.match(flash(o), /Staging deployment verified: Read-back matches v3/);
   assert.equal(retell.prompts.llm_sales_stg01, composeSalesPrompt(improved));
   assert.ok(retell.prompts.llm_sales_stg01.startsWith(PROTECTED_SALES_POLICY));
   const hist = (await db.prepare(`SELECT d.stage, d.kind, d.status, v.seq FROM so_deployments d JOIN so_versions v ON v.id = d.version_id ORDER BY d.created_at`).all<{ stage: string; kind: string; status: string; seq: number }>()).results.map((x) => ({ ...x }));
-  assert.deepEqual(hist, [{ stage: "staging", kind: "deploy", status: "superseded", seq: 1 }, { stage: "staging", kind: "deploy", status: "verified", seq: 2 }]);
+  assert.deepEqual(hist, [{ stage: "staging", kind: "deploy", status: "superseded", seq: 2 }, { stage: "staging", kind: "deploy", status: "superseded", seq: 1 }, { stage: "staging", kind: "deploy", status: "verified", seq: 3 }], "adopted live prompt (v2), then v1, then the AI version (v3)");
   assert.equal((await o.post("/staff/sales-optimization/targets/staging/verify")).status, 303);
-  assert.match(flash(o), /Draft prompt: matches verified v2/);
+  assert.match(flash(o), /Draft prompt: matches verified v3/);
 
   // 16. The dashboard shows the staging measurements (one verified sale on v1, the AI version live on staging).
   const page = await (await o.get("/staff/sales-optimization?stage=staging")).text();
@@ -194,7 +197,7 @@ test("[SALESOPT-001] [SALESOPT-002] [SALESOPT-003] [SALESOPT-005] [SALESOPT-007]
   assert.doesNotMatch(prodView, /1 sales/, "the production view does not show the staging sale");
   assert.match(prodView, /No connected calls/);
   assert.match(page, /qwen3-fixture/, "runner status names the model that processed the jobs");
-  assert.match(page, /Staging: v2/);
+  assert.match(page, /Staging: v3/);
 
   // 17–18. FIXTURE regression on v2 (60 connected calls, half asking not to be called) → safety breach →
   //        automatic rollback to v1 on the staging agent, verified by read-back.

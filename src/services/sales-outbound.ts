@@ -151,7 +151,7 @@ export interface LeadFacts {
   contactId: string; contactName: string | null; contactEmail: string | null; contactPhone: string | null;
   businessName: string | null; industry: string | null; companyLocationNorm: string | null;
   prospect: { id: string; state: string | null; time_zone: string | null; phone_e164: string | null; shared_phone: number; website_class: string; website_url: string | null;
-    findings_json: string; identity_confidence: number; last_verified_at: string; recommended_package: string | null; category: string | null } | null;
+    findings_json: string; identity_confidence: number; last_verified_at: string; recommended_package: string | null; category: string | null; phone_status: string | null } | null;
   phoneE164: string | null; state: string | null; timeZone: string | null;
 }
 
@@ -161,7 +161,7 @@ export async function leadFacts(db: Db, leadId: string): Promise<LeadFacts | nul
       FROM leads l JOIN contacts c ON c.id = l.contact_id LEFT JOIN companies co ON co.id = c.company_id WHERE l.id = ?`).bind(leadId)
     .first<{ id: string; stage: string; merged_into_lead_id: string | null; interest: string | null; origin: string | null; message: string | null; contact_id: string; contact_name: string | null; email: string | null; phone: string | null; company_name: string | null; industry: string | null; location_norm: string | null }>();
   if (!l) return null;
-  const prospect = await db.prepare(`SELECT id, state, time_zone, phone_e164, shared_phone, website_class, website_url, findings_json, identity_confidence, last_verified_at, recommended_package, category
+  const prospect = await db.prepare(`SELECT id, state, time_zone, phone_e164, shared_phone, website_class, website_url, findings_json, identity_confidence, last_verified_at, recommended_package, category, phone_status
       FROM research_prospects WHERE crm_lead_id = ? ORDER BY updated_at DESC LIMIT 1`).bind(leadId).first<NonNullable<LeadFacts["prospect"]>>();
   const phoneE164 = toE164(l.phone) ?? prospect?.phone_e164 ?? null;
   const locState = l.location_norm ? (l.location_norm.split("|")[1] ?? "").toUpperCase() || null : null;
@@ -205,6 +205,9 @@ export async function gateFor(db: Db, f: LeadFacts, now: Date, attemptsSoFar = 0
     leadStage: f.stage, leadMerged: f.merged, sharedPhoneConflict: !!f.prospect?.shared_phone,
     attemptsSoFar, maxAttempts: maxAttempts ?? settings.max_attempts_per_lead,
   }, now);
+  // A number Retell reported as invalid_destination stays blocked until staff verify a new one (B-2).
+  const invalid = phone ? await db.prepare(`SELECT 1 AS x FROM research_prospects WHERE phone_e164 = ? AND phone_status = 'invalid'`).bind(phone).first() : null;
+  if (invalid) return { ...gate, eligible: false, reasons: [...gate.reasons, "The number was reported invalid by the carrier on an earlier call; verify the business's number first"] };
   return gate;
 }
 
@@ -504,7 +507,13 @@ async function applyOutcomeToCrm(db: Db, row: SalesCallRow, outcome: SalesOutcom
       await db.prepare(`UPDATE sales_call_consents SET revoked_at = COALESCE(revoked_at, ?), revoke_reason = COALESCE(revoke_reason, 'Wrong number reported on call') WHERE phone_e164 = ?`).bind(nowIso(), row.phone_e164).run();
       break;
     case "unclassified": await addLeadTask(db, row.lead_id, `${tag}Classify the result of AI sales call ${row.id}: the call connected but no outcome was recorded.`, 24); break;
-    case "technical_failure": await notifyOwners(db, "sales_outbound", `${tag}AI sales call ${row.id} failed (${reason ?? "unknown"}).`, "sales_call", row.id); break;
+    case "technical_failure":
+      if (reason === "invalid_destination") {
+        // The number itself is bad (not a carrier or network fault): mark it so it is never dialled again, ask for a new one.
+        await db.prepare(`UPDATE research_prospects SET phone_status = 'invalid' WHERE phone_e164 = ?`).bind(row.phone_e164).run();
+        await addLeadTask(db, row.lead_id, `${tag}The AI sales call to ${row.phone_e164} failed: the number is invalid or disconnected. Find and verify the business's current number before any further contact.`, 48);
+      }
+      await notifyOwners(db, "sales_outbound", `${tag}AI sales call ${row.id} failed (${reason ?? "unknown"}).`, "sales_call", row.id); break;
     default: break;
   }
 }

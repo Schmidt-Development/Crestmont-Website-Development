@@ -3,10 +3,15 @@
 Every value below matches the server-side authority (`src/services/sales-functions.ts` schemas,
 `src/routes/sales-outbound.ts`). Architecture and compliance: [`OUTBOUND-SALES.md`](OUTBOUND-SALES.md).
 
-**Deployment status (2026-10-31): NOT DEPLOYED.** The staging Worker runs `main`; this code is on branch
-`claude/outbound-sales-agent` (PR #69, now based on `main` after #48 merged). The staging URLs below are the exact URLs these routes will have once
-this PR is merged to `main` (staging deploys only from `main`). Until then they answer 404 on staging. The only
-endpoint already live on staging is the SHARED agent webhook, and it does not yet contain the sales outcome handler.
+**Deployment status (2026-11-01):** merged to `main` (PR #69) and deployed to staging. Outbound calling is OFF
+(`RETELL_SALES_OUTBOUND` not "on", Owner switch off, no compliance approval).
+
+**Founder decisions of 2026-11-01 override older text in this register:** the live Retell Native Single Prompt **V17**
+(written by the Founder) is authoritative; **no Default Dynamic Variables** (the dialler sends the lead's variables on every
+call); **nine** custom functions (the eight below + `record_consent`); **warm transfer**; an **approved voicemail message**
+(Retell voicemail setting, static or prompt) instead of hanging up; **60-minute** maximum call duration; email + portal only
+(no SMS); concurrency target 20 (platform cap 20, subject to the Retell account limit). The live audit
+(`src/services/retell-outbound-audit.ts`) checks exactly these.
 
 Staging base URL: `https://crestmont-platform-staging.partners-df4.workers.dev` (the workers.dev address used by every
 staging workflow; repository variable `STAGING_URL` overrides it).
@@ -220,29 +225,26 @@ Decision and reasons: `OUTBOUND-SALES.md` §6. Retell UI (sales agent → Webhoo
 
 Outcomes stored (`sales_calls.outcome`): `no_answer`, `voicemail`, `wrong_number`, `not_interested`, `interested`, `follow_up_requested`, `consultation_booked`, `checkout_sent`, `payment_confirmed`, `do_not_call`, `technical_failure`, plus `unclassified` (connected, nothing recorded → CRM task; never guessed). Stable key: Retell `call_id` bound to `crestmont_sales_call_id`; written once.
 
-## Agent-level default dynamic variables (Security & fallback settings → Default Dynamic Variables)
+## Dynamic variables — per call only (Founder decision: no Default Dynamic Variables)
 
-Retell leaves an unset variable as the literal `{{name}}`; an empty string renders as nothing. Set these defaults so a
-missing value is never spoken:
-
-| Variable | Default |
-|---|---|
-| `business_name` | empty string |
-| `first_name` | empty string |
-| `industry` | empty string |
-| `website_url` | empty string |
-| `website_status` | `unknown` |
-| `verified_issue` | empty string |
-| `recommended_service` | empty string |
-| `research_verified` | `false` |
-| `crestmont_env` | empty string |
-| `lead_id` | **no default** (never a fabricated id; the server binds the lead from signed call metadata, and an unrendered `{{lead_id}}` is ignored) |
-
-`agent_number` is a Retell system variable (the calling number) and needs no default.
+The dialler (`processSalesQueue`) sends these ten string variables on **every** call in `retell_llm_dynamic_variables`
+(`PER_CALL_VARIABLES` in `src/domain/sales-eligibility.ts`): `lead_id`, `business_name`, `first_name`, `industry`,
+`website_url`, `website_status`, `verified_issue`, `recommended_service`, `research_verified`, `crestmont_env` — empty
+strings where nothing verified is known. No Retell default is needed. The live audit fails if the prompt uses any other
+`{{variable}}` that is neither one of these nor a Retell system variable (`agent_number`, `current_time…`, …), and if any
+Default Dynamic Variable is set.
 
 ## Master prompt
 
-Paste-ready text for the sales agent's Prompt field: [`outbound-sales-agent-prompt.txt`](outbound-sales-agent-prompt.txt). It is the SIE's protected sales policy followed by version 1 of the optimizable instructions (`composeSalesPrompt(baselineSalesInstructions())`, tested byte for byte); prices in the policy come from the catalog. `tests/outbound-sales.test.ts` checks that it names only real tools and variables.
+The **live** prompt is the Founder's Retell Native Single Prompt **V17**; it is authoritative and is not replaced from this
+repository. When the agent is registered as the SIE staging target and verified, the Self-Improvement Engine **adopts V17
+verbatim** as its current version (`prompt_mode = 'external'`, approved, nothing written to Retell). From then on the engine
+refuses to deploy over a live prompt it did not deploy or adopt, never evaluates or AI-rewrites the Founder's prompt, and
+restores it only by an explicit Owner rollback. After a further manual edit in Retell, press **Adopt live prompt** on
+`/staff/sales-optimization`.
+
+[`outbound-sales-agent-prompt.txt`](outbound-sales-agent-prompt.txt) is the engine's own composed baseline
+(`composeSalesPrompt(baselineSalesInstructions())`, tested byte for byte) — reference only; it is **not** to be pasted over V17.
 
 ---
 

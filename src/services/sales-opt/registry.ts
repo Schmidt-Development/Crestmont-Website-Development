@@ -79,6 +79,8 @@ export interface VersionRow {
   id: string; seq: number; parent_id: string | null; instructions: string; prompt_sha256: string; policy_version: string; diff_json: string; rationale: string;
   evidence_json: string; author_kind: "user" | "ai" | "import"; author: string; created_at: string; status: VersionStatus; approved_by: string | null; approved_at: string | null;
   decision_note: string | null; status_updated_at: string;
+  /** 'external' = a prompt the Founder wrote directly in Retell, adopted verbatim (never composed with the protected policy). */
+  prompt_mode?: "composed" | "external";
 }
 
 const TRANSITIONS: Record<VersionStatus, readonly VersionStatus[]> = {
@@ -132,6 +134,34 @@ export async function createVersion(db: Db, v: NewVersion): Promise<VersionRow> 
   return (await getVersion(db, id))!;
 }
 
+/** The exact text a version puts on the Retell LLM: an adopted external prompt verbatim, otherwise policy + instructions. */
+export function promptOf(v: Pick<VersionRow, "instructions" | "prompt_mode">): string {
+  return v.prompt_mode === "external" ? v.instructions : composeSalesPrompt(v.instructions);
+}
+
+/**
+ * Records a Founder-authored live Retell prompt (e.g. "Single Prompt V17") as an external version: stored verbatim, status
+ * approved (the Founder wrote and published it), author "import". Never passes through the protected-policy composer,
+ * so it can only reach Retell again by a rollback to it. Idempotent on the prompt text.
+ */
+export async function createExternalVersion(db: Db, prompt: string, label: string, actorUserId: string | null): Promise<VersionRow> {
+  const sha = await sha256Hex(prompt);
+  const existing = await db.prepare(`SELECT * FROM so_versions WHERE prompt_mode = 'external' AND prompt_sha256 = ? ORDER BY seq DESC LIMIT 1`).bind(sha).first<VersionRow>();
+  if (existing) return existing;
+  const parent = await db.prepare(`SELECT * FROM so_versions ORDER BY seq DESC LIMIT 1`).first<VersionRow>();
+  const id = newId("sov"), at = nowIso();
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await db.prepare(`INSERT INTO so_versions (id, seq, parent_id, instructions, prompt_sha256, policy_version, diff_json, rationale, evidence_json, author_kind, author, created_at, status, status_updated_at, approved_by, approved_at, prompt_mode)
+          SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, 'external', '[]', ?, '[]', 'import', 'Founder (adopted from Retell)', ?, 'approved', ?, ?, ?, 'external' FROM so_versions`)
+        .bind(id, parent?.id ?? null, prompt, sha, label.slice(0, 2000), at, at, actorUserId, at).run();
+      break;
+    } catch (e) { if (attempt === 0 && /UNIQUE/.test((e as Error).message)) continue; throw e; }
+  }
+  await audit(db, { actorUserId, actorKind: actorUserId ? "user" : "system", action: "salesopt.external_version_adopted", subjectType: "so_version", subjectId: id, details: { sha: sha.slice(0, 16) } });
+  return (await getVersion(db, id))!;
+}
+
 /** Compare-and-swap status change. Returns the new row; throws 409 if the version moved meanwhile or the move is not allowed. */
 export async function transition(db: Db, id: string, to: VersionStatus, actor: { userId?: string | null; note?: string | null } = {}): Promise<VersionRow> {
   const v = await getVersion(db, id);
@@ -153,6 +183,7 @@ export async function deployedVersion(db: Db, stage: Stage): Promise<VersionRow 
 
 /** Ensures version 1 exists (the baseline instructions, author "import"). */
 export async function ensureBaseline(db: Db, instructions: string): Promise<VersionRow> {
-  const first = await db.prepare(`SELECT * FROM so_versions ORDER BY seq LIMIT 1`).first<VersionRow>();
+  // The engine's own baseline: the first composed version (an adopted Founder prompt is never the engine's v1 baseline).
+  const first = await db.prepare(`SELECT * FROM so_versions WHERE prompt_mode = 'composed' ORDER BY seq LIMIT 1`).first<VersionRow>();
   return first ?? createVersion(db, { parentId: null, instructions, rationale: "Baseline sales instructions (platform default, pending Founder review).", authorKind: "import", author: "platform" });
 }

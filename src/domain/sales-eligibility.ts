@@ -124,6 +124,9 @@ export function spokenContext(r: ResearchFacts, now: Date = new Date()): SpokenC
 }
 
 /** The Retell dynamic variables for one call (all strings, Retell requirement). Internal metadata is never included. */
+/** The variables the dialler sends on EVERY call (retell_llm_dynamic_variables). No Retell default is needed for these. */
+export const PER_CALL_VARIABLES = ["lead_id", "business_name", "first_name", "industry", "website_url", "website_status", "verified_issue", "recommended_service", "research_verified", "crestmont_env"] as const;
+
 export function dynamicVariables(i: { leadId: string; businessName: string | null; contactName: string | null; industry: string | null; websiteUrl: string | null; environment: string; ctx: SpokenContext }): Record<string, string> {
   const first = (i.contactName ?? "").trim().split(/\s+/)[0] ?? "";
   const clean = (s: string | null, max: number) => (s ?? "").replace(/[\r\n\t{}]+/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, max);
