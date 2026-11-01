@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { ControlPlaneClient } from "../src/control-plane.ts";
 import { silentLogger } from "../src/log.ts";
 import { serveOneDraft } from "../src/drafts.ts";
-import { nativeBase } from "../src/diagnostic.ts";
+import { nativeBase, diagnosticChatBody, diagnosticContent, emptyReason } from "../src/diagnostic.ts";
 import { OpenAICompatClient } from "../src/providers/openai-client.ts";
 import { startFakeControlPlane, SECRET } from "./helpers.ts";
 
@@ -20,7 +20,7 @@ const HTML = "<!doctype html><html><head><title>Junk in the Trunk</title></head>
 const GB = 1024 ** 3;
 
 /** Fake Ollama native API. `mode` selects a failure. */
-function fakeOllama(mode: "ok" | "down" | "missing" | "cpu" | "partial" = "ok") {
+function fakeOllama(mode: "ok" | "down" | "missing" | "cpu" | "partial" | "thinker" = "ok") {
   const calls: { path: string; body: unknown }[] = [];
   const fetchImpl = (async (url: string, init?: RequestInit) => {
     const path = new URL(url).pathname;
@@ -30,12 +30,16 @@ function fakeOllama(mode: "ok" | "down" | "missing" | "cpu" | "partial" = "ok") 
     if (path === "/api/version") return json(200, { version: "0.32.0" });
     if (path === "/api/generate") return mode === "missing" ? json(404, { error: `model '${MODEL}' not found` }) : json(200, { done: true });
     if (path === "/api/ps") return json(200, { models: [{ name: MODEL, size: 24 * GB, size_vram: mode === "cpu" ? 0 : mode === "partial" ? 12 * GB : 24 * GB, details: { parameter_size: "35B", quantization_level: "Q4_K_M" } }] });
+    // "thinker": behaves like Ollama with a Qwen 3.x thinking model — unless the request says think:false, the whole
+    // num_predict budget goes to message.thinking and message.content is empty (the D11 failure seen on Node 1).
+    if (path === "/api/chat" && mode === "thinker" && (calls.at(-1)!.body as { think?: unknown }).think !== false)
+      return json(200, { model: MODEL, message: { role: "assistant", content: "", thinking: "Okay, the user wants a minimal HTML page… ".repeat(60) }, done_reason: "length", prompt_eval_count: 51, eval_count: 2000, eval_duration: 20e9 });
     if (path === "/api/chat") return json(200, { model: MODEL, message: { role: "assistant", content: "```html\n" + HTML + "\n```" }, done_reason: "stop", total_duration: 3.2e9, load_duration: 0.4e9, prompt_eval_count: 51, prompt_eval_duration: 0.1e9, eval_count: 88, eval_duration: 1.6e9 });
     return json(404, { error: "unknown" });
   }) as unknown as typeof fetch;
   return { calls, fetchImpl };
 }
-async function run(mode: "ok" | "down" | "missing" | "cpu" | "partial") {
+async function run(mode: "ok" | "down" | "missing" | "cpu" | "partial" | "thinker") {
   const cp = await startFakeControlPlane({ jobs: [], aiJobs: [job()] });
   const o = fakeOllama(mode);
   try {
@@ -86,4 +90,32 @@ test("[AIB-021] runner diagnostic: stops at the first failing step and says why 
   const partial = await run("partial");
   assert.equal(partial.cps.at(-1)!.code, "D09");
   assert.match(partial.cps.at(-1)!.error, /only 50% of the model is in GPU memory/);
+});
+
+test("[AIB-021] runner diagnostic D11: a Qwen thinking model answers with text because the request sends think:false (regression: 'the model returned no text' on Node 1) [fixtures]", async () => {
+  const r = await run("thinker");
+  const chat = r.ollama.find((c) => c.path === "/api/chat")!.body as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  assert.equal(chat.think, false, "D11 must disable the reasoning phase");
+  assert.equal(chat.stream, false);
+  assert.equal(chat.model, MODEL);
+  assert.ok(chat.options.num_predict >= 800 && chat.options.num_predict <= 4000);
+  assert.equal(r.out, "completed");
+  const d11 = r.cps.find((c) => c.code === "D11")!;
+  assert.equal(d11.ok, true, d11.error);
+  assert.equal(d11.evidence.think, false);
+  assert.equal(d11.evidence.looksLikeRequestedHtml, true);
+  assert.match(r.done!.text, /<title>Junk in the Trunk<\/title>/);
+});
+
+test("[AIB-021] runner diagnostic D11: reasoning is never passed off as the answer, and an empty answer says why [fixtures]", () => {
+  assert.deepEqual(diagnosticContent({ message: { content: "", thinking: "abc" } }), { content: "", thinkingChars: 3 });
+  assert.deepEqual(diagnosticContent({ message: { content: "<think>plan</think>\n```html\n<p>x</p>\n```" } }), { content: "<p>x</p>", thinkingChars: 4 });
+  // An unterminated inline <think> (budget ran out mid-thought) is reasoning, not an answer.
+  assert.deepEqual(diagnosticContent({ message: { content: "<think>still thinking" } }), { content: "", thinkingChars: 14 });
+  assert.match(emptyReason({ done_reason: "length", eval_count: 2000 }, 1200), /only reasoning \(1200 chars of thinking, 2000 tokens, done_reason length\)/);
+  assert.equal(emptyReason({ done_reason: "stop", eval_count: 0 }, 0), "the model returned no text (0 tokens, done_reason stop)");
+  const body = diagnosticChatBody(MODEL, { system: "s", prompt: "p", maxOutputTokens: 0 });
+  assert.equal(body.think, false);
+  assert.equal(body.options.num_predict, 1500);
+  assert.equal(diagnosticChatBody(MODEL, { system: "s", prompt: "p", maxOutputTokens: 99_999 }).options.num_predict, 4000);
 });
