@@ -96,6 +96,9 @@ export async function runIntegrationOperations(d: BrokerDeps): Promise<BrokerOut
       r = { operation: op.id, status: err instanceof RefusedOperationError ? "refused" : "failed", evidence: sanitizeEvidence((err as Error).message ?? String(err), secrets) };
     }
     done[op.id] = r;
+    // Recorded at once (not only after the loop): a crash between two operations never repeats the first one.
+    mkdirSync(d.jobDir, { recursive: true });
+    writeFileSync(doneFile, JSON.stringify(done));
     out.push(r);
     if (r.status === "passed" || r.status === "failed" || r.status === "refused") await d.report([{ key: op.integration, sandboxStatus: r.status === "passed" ? "passed" : "failed", sandboxEvidence: `${op.id}: ${r.evidence}` }]);
   }

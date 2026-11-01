@@ -35,6 +35,16 @@ export interface RunnerConfig {
   localMaxTurns: number;
   localMaxBudgetUsd: number;
   localMaxRuntimeMinutes: number;
+  /**
+   * Continuation (local, zero-cost providers only): the per-attempt turn/runtime/output-token limits are SEGMENT
+   * limits, not ceilings. At a segment limit the runner checkpoints and releases the build (requeued without spending
+   * an attempt) and the next segment resumes from the checkpoint. maxIdleSegments consecutive segments without
+   * measurable progress end the build as stalled (no infinite non-productive loop), as do maxSegmentsWithoutMilestone
+   * consecutive segments that only produced commits (no phase completed, no requirement/check improved: thrashing).
+   * RUNNER_CONTINUATION=off restores
+   * the old behaviour (a segment limit fails the attempt).
+   */
+  continuation: { enabled: boolean; maxIdleSegments: number; maxSegmentsWithoutMilestone: number };
   heartbeatSecondsOverride: number | null;
   pollMinMs: number;
   pollMaxMs: number;
@@ -102,8 +112,8 @@ export interface ModelProfile {
   /** Configured memory estimate in MB (0 = unknown); replaced by the measured value while the model is loaded. */
   vramMb: number;
   quantization: string | null;
-  /** reasoning_effort sent with requests (Qwen thinking models); null = the model's default. */
-  reasoning: "high" | "medium" | "low" | null;
+  /** reasoning_effort sent with requests (Qwen thinking models); null = not configured, the client sends "none". */
+  reasoning: "high" | "medium" | "low" | "none" | null;
   /** The model accepts images (the reviewer then receives the screenshots themselves). */
   vision: boolean;
   license: string | null;
@@ -274,6 +284,8 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
     localMaxTurns: num(env.RUNNER_MAX_TURNS, 300),
     localMaxBudgetUsd: num(env.RUNNER_MAX_BUDGET_USD, 50),
     localMaxRuntimeMinutes: num(env.RUNNER_MAX_RUNTIME_MINUTES, 180),
+    continuation: { enabled: env.RUNNER_CONTINUATION !== "off", maxIdleSegments: Math.max(1, Math.min(20, num(env.RUNNER_CONTINUATION_MAX_IDLE_SEGMENTS, 2))),
+      maxSegmentsWithoutMilestone: Math.max(2, Math.min(200, num(env.RUNNER_CONTINUATION_MAX_SEGMENTS_WITHOUT_MILESTONE, 8))) },
     heartbeatSecondsOverride: env.RUNNER_HEARTBEAT_SECONDS ? num(env.RUNNER_HEARTBEAT_SECONDS, 30) : null,
     pollMinMs: num(env.RUNNER_POLL_MIN_SECONDS, 15) * 1000,
     pollMaxMs: num(env.RUNNER_POLL_MAX_SECONDS, 300) * 1000,
@@ -357,14 +369,14 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
   };
 }
 
-const REASONING = ["high", "medium", "low"] as const;
+const REASONING = ["high", "medium", "low", "none"] as const;
 
 /** Model A / Model B from LOCAL_MODEL_A / LOCAL_MODEL_B (dual) or LOCAL_MODEL for both roles (single). */
 export function loadModels(env: Env, builderTag: string): RunnerConfig["models"] {
   const baseCtx = num(env.LOCAL_MODEL_CONTEXT_TOKENS, 32_768);
   const profile = (prefix: "A" | "B", tag: string, role: ModelProfile["role"]): ModelProfile => {
     const r = env[`LOCAL_MODEL_${prefix}_REASONING`] ?? "";
-    if (r && !(REASONING as readonly string[]).includes(r)) throw new Error(`LOCAL_MODEL_${prefix}_REASONING must be high, medium or low`);
+    if (r && !(REASONING as readonly string[]).includes(r)) throw new Error(`LOCAL_MODEL_${prefix}_REASONING must be high, medium, low or none`);
     return {
       tag, role, contextTokens: num(env[`LOCAL_MODEL_${prefix}_CONTEXT_TOKENS`], baseCtx), vramMb: num(env[`LOCAL_MODEL_${prefix}_VRAM_MB`], 0),
       quantization: (env[`LOCAL_MODEL_${prefix}_QUANT`] ?? (/(q\d_k_[ms]|q8_0|q4_0|bf16|fp16)/i.exec(tag)?.[1]?.toUpperCase() ?? null)) || null,

@@ -4,9 +4,15 @@
 // Robustness for weaker local models:
 //  - strict JSON-schema validation of tool arguments with corrective feedback, lenient argument parsing, and a
 //    fallback parser for tool calls printed as text; bounded retries on malformed output;
-//  - context-window management: the system prompt, a pinned workspace message (file tree + untrusted brief) and a
-//    rolling summary of older turns are always present; older turns are folded into the summary;
-//  - limits: max turns, max wall time, max output tokens (per call and per attempt), repetition/loop detection;
+//  - context-window management: every request is measured (system prompt, workspace message, history, tool schemas
+//    and the reply's reserved output) against the model's window, with a calibration learned from the server's own
+//    prompt_tokens. Before the window is exhausted the runner resets to a FRESH context: system prompt, refreshed
+//    workspace message (file tree, untrusted brief, durable project memory), the phase instruction restated verbatim
+//    and only the newest whole turns. Removed turns go to a bounded runner-written log (never a model summary).
+//    Resets are unlimited; each one is reported to the job, which checkpoints;
+//  - limits: per-call output tokens, per-segment turns/wall time/output tokens (a segment limit ends the attempt with a
+//    checkpoint and the job continues in the next segment: there is no cumulative token ceiling), repetition/loop
+//    detection;
 //  - the transcript is persisted after every turn under <workspace>/agent/ (outside the agent's reach) and goes into
 //    the job checkpoint, so a crashed or released run resumes from the saved transcript + git state.
 // Customer brief content is passed only inside clearly delimited UNTRUSTED DATA blocks; the rules are fixed.
@@ -39,13 +45,34 @@ export interface LocalTranscript {
   schema: typeof TRANSCRIPT_SCHEMA;
   sessionId: string;
   model: string;
-  /** Rolling summary of turns folded out of the context window. */
+  /** Rolling summary of turns folded out of the context window (runner-written, mechanical; never model-written). */
   summary: string[];
   history: ChatMessage[];
   phases: { phase: string; status: string; turns: number; at: string; model?: string }[];
   turns: number;
   updatedAt: string;
+  /** The current phase's runner instruction, restated verbatim after every context reset. */
+  instruction?: { phase: string; prompt: string };
+  /** Context resets of this session (unbounded; each one starts a fresh context). */
+  compactions?: number;
 }
+
+/** Context accounting for one request (all values in estimated tokens after calibration). */
+export interface ContextUsage {
+  system: number; pinned: number; history: number; tools: number;
+  /** Output capacity reserved for the reply (max_tokens of this call). */
+  reservedOutput: number;
+  total: number;
+  /** Model context window (num_ctx). */
+  window: number;
+  /** Calibration factor applied to the chars/3.5 estimate (learned from the server's prompt_tokens; ≥ 1). */
+  calibration: number;
+}
+
+export interface CompactionInfo { compactions: number; phase: string; before: number; after: number; window: number; reason: string }
+
+/** Fraction of the usable window at which the runner resets the context before the next request. */
+export const COMPACT_AT = 0.85;
 
 export interface LocalLimits {
   maxMalformed: number;
@@ -238,49 +265,120 @@ export class LocalProvider implements AgentProvider {
     await this.sandbox?.close().catch(() => {});
   }
 
-  private pinnedMessage(): ChatMessage {
+  /** Calibration per model: real tokens per estimated token, learned from prompt_tokens (only ever raised, ≤ 3). */
+  private readonly calibration = new Map<string, number>();
+  private memoryText: (maxChars: number) => string = () => "";
+
+  private pinnedMessage(window: number): ChatMessage {
     const t = this.transcript!;
+    const charsFor = (share: number) => Math.max(1500, Math.floor(window * 3.5 * share));
     const parts = [
       "WORKSPACE CONTEXT (refreshed by the runner before every model call).",
       "",
       "Repository file tree (relative paths; node_modules/.git hidden):",
-      fileTree(this.ws!.repo),
+      fileTree(this.ws!.repo, Math.max(60, Math.min(300, Math.floor(window / 110)))),
       "",
       "Customer brief (the files BRIEF.md / BRIEF.json in the repository hold the full version):",
       untrustedBlock("brief", this.briefText || "(no brief file)"),
     ];
+    const memory = this.memoryText(charsFor(0.1));
+    if (memory) parts.push("", memory);
     if (t.summary.length) {
-      parts.push("", "Summary of earlier work in this session (older turns were folded in to save context):", ...t.summary);
+      parts.push("", "Mechanical log of earlier turns (runner-written; older turns were removed from the context to save space):", ...t.summary);
     }
     return { role: "user", content: parts.join("\n") };
   }
 
-  /** Fold older turns into the rolling summary until the request fits the context budget. */
-  private compact(budgetTokens: number): void {
+  /** Estimated size of one request in tokens, after this model's calibration. */
+  measure(model: string, messages: ChatMessage[], tools: unknown, reservedOutput: number, window: number): ContextUsage {
+    const cal = this.calibration.get(model) ?? 1;
+    const est = (s: string) => Math.ceil(estimateTokens(s) * cal);
+    const system = est(contentText(messages[0]?.content ?? "")) + 8;
+    const pinned = messages[1] ? est(contentText(messages[1].content)) + 8 : 0;
+    const history = messages.slice(2).reduce((n, m) => n + est(messageText(m)) + 8, 0);
+    const toolsTokens = tools ? est(JSON.stringify(tools)) : 0;
+    return { system, pinned, history, tools: toolsTokens, reservedOutput, total: system + pinned + history + toolsTokens + reservedOutput, window, calibration: cal };
+  }
+
+  /** Learn from the server's own count (prompt_tokens) how far the chars/3.5 estimate is off for this model. */
+  private calibrate(model: string, estimatedPrompt: number, promptTokens: number): void {
+    if (!(promptTokens > 0) || !(estimatedPrompt > 0)) return;
+    const cur = this.calibration.get(model) ?? 1;
+    const observed = (promptTokens / estimatedPrompt) * cur;
+    if (observed > cur) this.calibration.set(model, Math.min(3, cur * 0.5 + observed * 0.5 + 0.02));
+  }
+
+  /** Fold one removed message into the runner's mechanical log (never model-summarised). */
+  private fold(m: ChatMessage): void {
     const t = this.transcript!;
-    const size = () => estimateTokens(this.system) + estimateTokens(contentText(this.pinnedMessage().content)) + t.history.reduce((n, m) => n + estimateTokens(messageText(m)) + 8, 0);
-    if (size() <= budgetTokens) return;
-    const target = Math.floor(budgetTokens * 0.6);
-    while (size() > target && t.history.length > 6) {
-      // Cut whole groups: a user message, or an assistant message with all of its tool results.
-      let n = 1;
-      const head = t.history[0];
-      if (head.role === "assistant" && head.tool_calls?.length) {
-        while (n < t.history.length && t.history[n].role === "tool") n++;
-      }
-      if (t.history.length - n < 4) break;
-      const removed = t.history.splice(0, n);
-      for (const m of removed) {
-        if (m.role === "user") t.summary.push(`- [runner instruction] ${contentText(m.content).split("\n")[0].slice(0, 200)}`);
-        else if (m.role === "assistant") {
-          if (m.content) t.summary.push(`- [you said] ${m.content.replace(/\s+/g, " ").slice(0, 200)}`);
-          for (const c of m.tool_calls ?? []) t.summary.push(`- [you called] ${c.function.name} ${c.function.arguments.replace(/\s+/g, " ").slice(0, 160)}`);
-        } else if (m.role === "tool") t.summary.push(`  -> ${m.content.split("\n").find((l) => l.trim())?.slice(0, 160) ?? ""}`);
-      }
+    if (m.role === "user") t.summary.push(`- [runner] ${contentText(m.content).split("\n")[0].slice(0, 160)}`);
+    else if (m.role === "assistant") {
+      if (m.content) t.summary.push(`- [you said] ${m.content.replace(/\s+/g, " ").slice(0, 160)}`);
+      for (const c of m.tool_calls ?? []) t.summary.push(`- [you called] ${c.function.name} ${c.function.arguments.replace(/\s+/g, " ").slice(0, 140)}`);
+    } else if (m.role === "tool") t.summary.push(`  -> ${m.content.split("\n").find((l) => l.trim())?.slice(0, 140) ?? ""}`);
+  }
+
+  /**
+   * Context reset: a FRESH context made of the fixed system prompt, the refreshed workspace message (file tree,
+   * brief, durable project memory), the current phase instruction restated verbatim, and only the most recent
+   * whole turns that fit. Everything removed is folded into the bounded mechanical log; nothing a model wrote is
+   * treated as authoritative. Unlimited: every call may reset again.
+   */
+  private resetContext(window: number, reservedOutput: number, model: string, tools: unknown, phase: string): { before: number; after: number } {
+    const t = this.transcript!;
+    const usable = Math.max(1024, window - reservedOutput - Math.max(256, Math.floor(window * 0.03)));
+    const build = () => [{ role: "system" as const, content: this.system }, this.pinnedMessage(window), ...t.history];
+    const before = this.measure(model, build(), tools, reservedOutput, window).total;
+    t.compactions = (t.compactions ?? 0) + 1;
+    const instruction = t.instruction ?? { phase, prompt: "Continue the current phase." };
+    const resetMsg: ChatMessage = {
+      role: "user",
+      content: [
+        `CONTEXT RESET #${t.compactions} by the runner: the conversation reached the model's context window, so earlier turns were removed. Nothing is lost: the repository, the platform's records and the durable project memory above are the source of truth.`,
+        "Before continuing, re-read the files you need (BRIEF.json, SPEC.json, .crestmont/plan.md, .crestmont/requirements.json, .crestmont/runner-checks.json and the source files you were working on). Do not redo work that the files show is complete.",
+        "",
+        `Your current instruction (phase ${instruction.phase}), repeated verbatim:`,
+        instruction.prompt,
+      ].join("\n"),
+    };
+    // Keep the newest whole groups (an assistant tool-call message with all its results, or a user message) that fit
+    // in 30% of the usable window; the tail never starts with a dangling tool result.
+    const groups: ChatMessage[][] = [];
+    for (let i = 0; i < t.history.length;) {
+      const g = [t.history[i]];
+      let j = i + 1;
+      if (t.history[i].role === "assistant") while (j < t.history.length && t.history[j].role === "tool") g.push(t.history[j++]);
+      groups.push(g);
+      i = j;
     }
-    // Bound the summary itself (keep the most recent lines).
-    const maxSummaryTokens = Math.floor(budgetTokens * 0.25);
-    while (t.summary.length > 1 && estimateTokens(t.summary.join("\n")) > maxSummaryTokens) t.summary.shift();
+    const cal = this.calibration.get(model) ?? 1;
+    const tokensOf = (g: ChatMessage[]) => g.reduce((n, m) => n + Math.ceil(estimateTokens(messageText(m)) * cal) + 8, 0);
+    const tailBudget = Math.floor(usable * 0.3);
+    const keep: ChatMessage[][] = [];
+    let used = 0;
+    for (let k = groups.length - 1; k >= 0; k--) {
+      const n = tokensOf(groups[k]);
+      if (used + n > tailBudget) break;
+      // The instruction itself is restated in the reset message; do not keep a second copy.
+      if (groups[k][0].role === "user" && contentText(groups[k][0].content) === instruction.prompt) continue;
+      keep.unshift(groups[k]);
+      used += n;
+    }
+    const kept = new Set(keep.flat());
+    for (const m of t.history) if (!kept.has(m)) this.fold(m);
+    t.history = [resetMsg, ...keep.flat()];
+    // Bound the mechanical log (newest lines win) to 8% of the window.
+    const maxLog = Math.floor(usable * 0.08);
+    while (t.summary.length > 1 && Math.ceil(estimateTokens(t.summary.join("\n")) * cal) > maxLog) t.summary.shift();
+    // Still too large (a huge recent tool output, a tiny window): drop kept turns oldest first.
+    while (t.history.length > 1 && this.measure(model, build(), tools, reservedOutput, window).total > usable + reservedOutput) {
+      let n = 1;
+      if (t.history[1].role === "assistant") while (1 + n < t.history.length && t.history[1 + n].role === "tool") n++;
+      for (const m of t.history.splice(1, n)) this.fold(m);
+    }
+    t.history = repairHistory(t.history);
+    const after = this.measure(model, build(), tools, reservedOutput, window).total;
+    return { before, after };
   }
 
   private persist(): void { if (this.ws && this.transcript) saveTranscript(this.ws, this.transcript); }
@@ -309,11 +407,19 @@ export class LocalProvider implements AgentProvider {
     t.history = repairHistory(t.history);
     tracker.sessionId = t.sessionId;
     t.history.push({ role: "user", content: req.prompt });
+    t.instruction = { phase: req.phase, prompt: req.prompt };
+    this.memoryText = req.memory ?? (() => "");
     this.persist();
 
     const deadline = Date.now() + req.maxWallMs;
-    let budget = Math.max(2048, cfg.contextTokens - cfg.maxOutputTokensPerCall - 512);
-    let overflowRetries = 0;
+    const window = cfg.contextTokens;
+    const tools = toolSpecs();
+    let forceReset: string | null = null;
+    // After a reset whose fresh context is already large, the next reset waits for real growth (≥ 10% of the usable
+    // window), so a tight window does not throw away the newest turn on every call.
+    let resetFloor = 0;
+    let overflowStreak = 0;
+    let summary: string | null = null;
     const toolChars = Math.max(2000, Math.min(16_000, Math.floor(cfg.contextTokens * 3.5 / 6)));
     let turns = 0;
     let malformedStreak = 0;
@@ -340,15 +446,38 @@ export class LocalProvider implements AgentProvider {
         const remainingOut = cfg.maxOutputTokensTotal - tracker.outputTokens;
         if (remainingOut <= 0) { status = "max_output_tokens"; break; }
 
-        this.compact(budget);
-        const messages: ChatMessage[] = [{ role: "system", content: this.system }, this.pinnedMessage(), ...t.history];
+        // Context accounting: system + workspace context (tree, brief, memory) + history + tool schemas + the reply's
+        // reserved output, against this model's window. Reset to a fresh context before it is exhausted.
+        const maxTokens = Math.min(cfg.maxOutputTokensPerCall, remainingOut);
+        const usable = Math.max(1024, window - maxTokens - Math.max(256, Math.floor(window * 0.03)));
+        const build = (): ChatMessage[] => [{ role: "system", content: this.system }, this.pinnedMessage(window), ...t.history];
+        let messages = build();
+        let usage = this.measure(cfg.model, messages, tools, maxTokens, window);
+        if (forceReset || usage.total - maxTokens > Math.max(usable * COMPACT_AT, resetFloor)) {
+          const reason = forceReset ?? `context at ${usage.total - maxTokens} of ${usable} usable tokens (window ${window}, ${maxTokens} reserved for the reply)`;
+          forceReset = null;
+          const r = this.resetContext(window, maxTokens, cfg.model, tools, req.phase);
+          messages = build();
+          usage = this.measure(cfg.model, messages, tools, maxTokens, window);
+          tracker.note({ kind: "note", message: `context reset #${t.compactions} (${req.phase}): ${reason}; ${r.before} → ${r.after} tokens` });
+          log.info("local context reset", { phase: req.phase, compactions: t.compactions, before: r.before, after: r.after, window });
+          this.persist();
+          resetFloor = Math.min(usable, usage.total - maxTokens + Math.floor(usable * 0.1));
+          if (usage.total - maxTokens > usable) {
+            status = "error";
+            error = `the fixed context (system prompt, workspace context, current instruction) needs ~${usage.total - maxTokens} tokens of the ${usable} usable in ${cfg.model}'s ${window}-token window; raise LOCAL_MODEL_*_CONTEXT_TOKENS (and the model's num_ctx)`;
+            break;
+          }
+          await req.onCompaction?.({ compactions: t.compactions ?? 0, phase: req.phase, before: r.before, after: r.after, window, reason });
+          if (stop.reason) { status = "stopped"; stoppedBy = stop.reason; break; }
+        }
         this.abort = new AbortController();
         const timer = setTimeout(() => this.abort?.abort(), Math.max(1, deadline - Date.now()));
         let res;
         try {
           const request = {
-            model: cfg.model, messages, tools: toolSpecs(), temperature: cfg.temperature,
-            max_tokens: Math.min(cfg.maxOutputTokensPerCall, remainingOut),
+            model: cfg.model, messages, tools, temperature: cfg.temperature,
+            max_tokens: maxTokens,
             ...(profile?.reasoning ? { reasoning_effort: profile.reasoning } : (m.mode === "single" && m.b.reasoning ? { reasoning_effort: m.b.reasoning } : {})),
           };
           const signal = this.abort.signal;
@@ -360,13 +489,14 @@ export class LocalProvider implements AgentProvider {
           clearTimeout(timer);
           if (stop.reason) { status = "stopped"; stoppedBy = stop.reason; break; }
           if (Date.now() >= deadline) { status = "max_time"; break; }
-          if (isContextOverflow(err) && overflowRetries < 2) {
-            // The server refused the prompt as too long for its context window: fold more history into the summary
-            // and try again with a smaller budget (bounded; the estimate is chars/3.5, so real tokenizers can differ).
-            overflowRetries++;
-            budget = Math.max(1024, Math.floor(budget * 0.6));
-            tracker.note({ kind: "note", message: `model context overflow; compacting the conversation to ~${budget} tokens and retrying` });
-            log.warn("local model context overflow; compacting and retrying", { budget, attempt: overflowRetries });
+          if (isContextOverflow(err) && overflowStreak < 3) {
+            // The server refused the prompt as too long: its tokenizer counts more than the estimate. Raise this
+            // model's calibration and reset the context (bounded per streak; any successful call resets the streak).
+            overflowStreak++;
+            this.calibration.set(cfg.model, Math.min(3, (this.calibration.get(cfg.model) ?? 1) * 1.25));
+            forceReset = "the model server reported a context overflow";
+            tracker.note({ kind: "note", message: "model context overflow; resetting the context with a stricter estimate and retrying" });
+            log.warn("local model context overflow; resetting context and retrying", { attempt: overflowStreak });
             continue;
           }
           status = "error";
@@ -377,6 +507,11 @@ export class LocalProvider implements AgentProvider {
           this.abort = null;
         }
 
+        overflowStreak = 0;
+        this.calibrate(cfg.model, usage.total - maxTokens, res.promptTokens);
+        // Ollama's /v1 endpoint truncates an over-long prompt to num_ctx without an error: a prompt that fills the
+        // window means the model may not have seen everything. Reset before the next call.
+        if (res.promptTokens >= Math.floor(window * 0.97)) forceReset = `the prompt filled the ${window}-token window (${res.promptTokens} tokens; the server may have truncated it)`;
         turns++;
         t.turns++;
         tracker.turnsCompleted++;
@@ -392,7 +527,12 @@ export class LocalProvider implements AgentProvider {
           if (res.finishReason === "length") {
             malformedStreak++;
             t.history.push({ role: "user", content: "Your reply was cut off by the output limit. Make smaller steps: one tool call at a time, and write large files in parts with edit_file." });
-            if (malformedStreak > this.limits.maxMalformed) { status = "error"; error = "the model kept exceeding the output limit without a usable tool call"; }
+            if (malformedStreak > this.limits.maxMalformed) {
+              status = "error";
+              error = !res.content && res.reasoningChars > 0
+                ? `the model spent its whole output budget on reasoning (${res.reasoningChars} chars) and returned no content or tool call; set LOCAL_MODEL_*_REASONING=none (or lower) for this model`
+                : "the model kept exceeding the output limit without a usable tool call";
+            }
           } else {
             noToolStreak++;
             if (noToolStreak > this.limits.maxNoToolReplies) {
@@ -450,7 +590,7 @@ export class LocalProvider implements AgentProvider {
             out += `\n\nWARNING from the runner: you have made this exact ${c.name} call ${repeats} times with the same result. Do something different, or call finish if the phase is done.`;
           }
           t.history.push({ role: "tool", tool_call_id: c.id, name: c.name, content: out });
-          if (outcome.finished) { status = "success"; tracker.note({ kind: "step", message: `phase finished: ${outcome.finished.summary.slice(0, 200)}` }); break; }
+          if (outcome.finished) { status = "success"; summary = outcome.finished.summary; tracker.note({ kind: "step", message: `phase finished: ${outcome.finished.summary.slice(0, 200)}` }); break; }
           if (c.name === "run_command" || c.name === "install_packages") {
             const q = this.sandbox.overDiskQuota();
             if (q.over) { status = "error"; error = `job disk quota exceeded (${q.usedMb} MB > ${q.quotaMb} MB)`; break; }
@@ -472,6 +612,6 @@ export class LocalProvider implements AgentProvider {
     }
     tracker.note({ kind: "note", message: `local model ${cfg.model}${req.task ? ` (${req.task.replace(/_/g, " ")})` : ""}: phase ${req.phase} ${status}; ${turns} calls; tokens in ${tracker.inputTokens} / out ${tracker.outputTokens}; model time ${Math.round(tracker.modelWallMs / 1000)} s; cost $0` });
     log.info("local phase ended", { phase: req.phase, status, turns, inputTokens: tracker.inputTokens, outputTokens: tracker.outputTokens });
-    return { status: status ?? "error", error, stoppedBy };
+    return { status: status ?? "error", error, stoppedBy, summary, compactions: t.compactions ?? 0 };
   }
 }

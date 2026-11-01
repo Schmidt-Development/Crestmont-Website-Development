@@ -165,8 +165,10 @@ copied into each workspace, and only their names are enabled for the session.
 | `RUNNER_ALLOWED_DOMAINS` | no | `registry.npmjs.org` | Sandbox network allowlist for agent shell commands |
 | `RUNNER_FETCH_REFERENCES` | no | off | `1` lets the agent WebFetch only the brief's reference-site hosts |
 | `RUNNER_MAX_BUDGET_USD` | no | `50` | SDK adapter: per-attempt spend cap (the stricter of this and the server's limits wins). Local inference costs $0. |
-| `RUNNER_MAX_TURNS` | no | `300` | Local per-attempt turn cap |
-| `RUNNER_MAX_RUNTIME_MINUTES` | no | `180` | Local per-attempt wall-clock cap |
+| `RUNNER_MAX_TURNS` | no | `300` | Local per-attempt (per-**segment**) turn limit. With the local provider a segment limit checkpoints and releases the build for the next segment (`CONTINUITY.md` §4). |
+| `RUNNER_MAX_RUNTIME_MINUTES` | no | `180` | Local per-attempt (per-segment) wall-clock limit, as above |
+| `RUNNER_CONTINUATION` | no | on | `off`: a segment limit fails the attempt instead of continuing |
+| `RUNNER_CONTINUATION_MAX_IDLE_SEGMENTS` / `RUNNER_CONTINUATION_MAX_SEGMENTS_WITHOUT_MILESTONE` | no | `2` / `8` | Stall guards for continuation (`CONTINUITY.md` §4) |
 | `RUNNER_HEARTBEAT_SECONDS` | no | server value | Override the heartbeat interval |
 | `RUNNER_POLL_MIN_SECONDS` / `RUNNER_POLL_MAX_SECONDS` | no | `15` / `300` | Idle polling backoff |
 | `RUNNER_CHECK_TIMEOUT_SECONDS` | no | `300` | Per acceptance check |

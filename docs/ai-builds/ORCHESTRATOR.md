@@ -55,7 +55,7 @@ became `READY_FOR_INTERNAL_APPROVAL` (older runners' wording is still accepted a
 | License | Apache-2.0 (commercial use allowed) | Apache-2.0 |
 | Ollama tag (pin exactly) | [`qwen3.8:27b-q4_K_M`](https://ollama.com/library/qwen3.8/tags), 18 GB | [`qwen3.6:35b-a3b-q4_K_M`](https://ollama.com/library/qwen3.6/tags), 24 GB |
 | Ollama badges | tools, thinking, vision; 256K context | tools, thinking, vision; 256K context |
-| Tool calling | official serving examples use the `qwen3_coder` parser; Ollama's OpenAI-compatible API supports `tools` and `reasoning_effort`, not `tool_choice` ([docs](https://docs.ollama.com/api/openai-compatibility)) | same |
+| Tool calling | official serving examples use the `qwen3_coder` parser; Ollama's OpenAI-compatible API supports `tools` and `reasoning_effort`, not `tool_choice` ([docs](https://docs.ollama.com/api/openai-compatibility)). On `/v1` the native `think` flag is ignored; the runner sends `reasoning_effort: "none"` unless `LOCAL_MODEL_*_REASONING` is set, so Qwen 3.x reasoning cannot use up `max_tokens` and leave the builder with empty content | same |
 
 No substitution was needed: both named candidates exist. Not verified: the minimum Ollama version for these
 architectures, image input through Ollama's OpenAI-compatible endpoint for these models, and any quality or speed.
@@ -201,6 +201,9 @@ No automatic Claude, OpenAI or other paid fallback exists:
 - **Installer:** reserves the `ANTHROPIC_*`, `OPENAI_*` and `LOCAL_MODEL_API_KEY` keys.
 
 The dashboard shows "Metered AI spend" from recorded runs; it must stay $0.00.
+
+There is no cumulative local-token ceiling: long builds continue through unlimited context resets and segments, with
+stall and repair-loop guards (`CONTINUITY.md`).
 
 ## 11. Dashboard (Owner → AI builds)
 

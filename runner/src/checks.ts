@@ -287,3 +287,61 @@ export function isolationCheck(records: { container: string; ok: boolean; findin
     outputTail: ok ? `${records.length} container(s) checked, all isolated` : bad.map((r) => `${r.container}: ${r.findings.join("; ")}`).join("\n").slice(0, 3000),
   };
 }
+
+/** Credential shapes that must never be committed to a customer's website source (secret material only). */
+const CREDENTIAL_PATTERNS: { kind: string; re: RegExp }[] = [
+  { kind: "Stripe secret or restricted key", re: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}/ },
+  { kind: "Stripe webhook signing secret", re: /\bwhsec_[A-Za-z0-9]{16,}/ },
+  { kind: "Resend API key", re: /\bre_[A-Za-z0-9]{8,}_[A-Za-z0-9]{8,}/ },
+  { kind: "AWS access key id", re: /\bAKIA[0-9A-Z]{16}\b/ },
+  { kind: "private key", re: /-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----/ },
+  { kind: "GitHub token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,})/ },
+  { kind: "Anthropic or OpenAI API key", re: /\b(?:sk-ant-[A-Za-z0-9_-]{10,}|sk-proj-[A-Za-z0-9_-]{20,})/ },
+  { kind: "Slack token", re: /\bxox[abprs]-[A-Za-z0-9-]{10,}/ },
+  { kind: "Twilio auth token assignment", re: /TWILIO_AUTH_TOKEN\s*[:=]\s*["']?[0-9a-f]{32}/i },
+];
+/** Local secret files that hold real values (examples/templates are fine when their values are empty or placeholders). */
+const SECRET_FILE = /(^|\/)(\.env(\.[A-Za-z0-9_-]+)?|\.dev\.vars)$/;
+const SECRET_FILE_TEMPLATE = /\.(example|sample|template)$/;
+const FAKE_VALUE = /fake|dummy|example|placeholder|mock|redacted|x{6,}|0{8,}|12345678/i;
+
+/**
+ * Customer-owned credentials stay out of source control (Founder V4 §8; customer website operating costs run on the
+ * customer's own provider accounts). Scans the files git would commit (`files`, relative to `repo`) for credential
+ * shapes and for local secret files with real values. Matches are never echoed: only file:line and the kind.
+ */
+export function credentialScan(repo: string, files: string[]): CheckOutcome {
+  const findings: string[] = [];
+  let scanned = 0;
+  for (const rel of files.slice(0, 20_000)) {
+    if (!rel || rel.startsWith(".git/") || rel.includes("node_modules/") || rel.startsWith("customer-files/") || rel.startsWith(".crestmont/screenshots/")) continue;
+    const f = path.join(repo, rel);
+    let st;
+    try { st = lstatSync(f); } catch { continue; }
+    if (!st.isFile() || st.size > 2_000_000) continue;
+    let text: string;
+    try { text = readFileSync(f, "utf8"); } catch { continue; }
+    if (text.includes("\u0000")) continue;
+    scanned++;
+    if (SECRET_FILE.test(rel) && !SECRET_FILE_TEMPLATE.test(rel)) {
+      // Only secret-looking names count (configuration such as SITE_URL=… is not a credential).
+      const real = text.split("\n").filter((l) => /^\s*(?:export\s+)?[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|API_?KEY|AUTH|CREDENTIAL|_KEY)[A-Z0-9_]*\s*=\s*\S/.test(l) && !/=\s*["']?(?:|changeme|your[-_].*|<.*>|x+|\.\.\.|placeholder.*|test|fake.*|dummy.*)["']?\s*$/i.test(l));
+      if (real.length) findings.push(`${rel}: local secrets file with ${real.length} value(s) in the repository (secrets belong in the customer's Worker secrets, never in source)`);
+    }
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length && findings.length < 50; i++) {
+      for (const p of CREDENTIAL_PATTERNS) {
+        const m = p.re.exec(lines[i]);
+        // Mock tests use obvious placeholders (sk_test_fake…, whsec_000000…): those are not credentials.
+        // Only the matched value itself decides (a comment next to a real key does not make it a placeholder).
+        if (m && !FAKE_VALUE.test(m[0])) { findings.push(`${rel}:${i + 1}: ${p.kind} (value not shown)`); break; }
+      }
+    }
+  }
+  const ok = findings.length === 0;
+  return {
+    id: "credential-scan", label: "No credentials or local secret files in the website's source (customer-owned keys live only in the customer's Worker secrets)",
+    command: "runner: credential scan of the files git would commit", ok, code: ok ? 0 : 1, timedOut: false,
+    outputTail: ok ? `${scanned} file(s) scanned; no credential found` : findings.slice(0, 50).join("\n"),
+  };
+}

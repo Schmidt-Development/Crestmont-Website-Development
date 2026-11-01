@@ -148,7 +148,7 @@ test("[AIB-RUNNER] malformed tool calls: unknown tool, array/number arguments, m
   } finally { await m.close(); }
 });
 
-test("[AIB-RUNNER] context overflow (400 'exceeds the context size'): the loop compacts and retries; repeated overflow fails the phase [fake model]", async () => {
+test("[AIB-RUNNER] context overflow (400 'exceeds the context size'): the loop resets to a fresh context with a stricter estimate and retries; repeated overflow fails the phase [fake model]", async () => {
   assert.ok(isContextOverflow(new ModelServerError("model server answered 400: {\"error\":\"the request exceeds the available context size, try increasing it\"}", 400, false)));
   assert.ok(isContextOverflow(new ModelServerError("model server answered 400: This model's maximum context length is 32768 tokens", 400, false)));
   assert.ok(!isContextOverflow(new ModelServerError("model server answered 400: invalid tool schema", 400, false)));
@@ -160,15 +160,17 @@ test("[AIB-RUNNER] context overflow (400 'exceeds the context size'): the loop c
     return finish();
   });
   try {
-    // ~15k characters of history fit the runner's own estimate for an 8K context, but the server says otherwise.
+    // ~15k characters of history in an 8K context: the runner resets proactively, and once more when the server says it overflowed.
     const { p } = await provider(m.url, { local: { contextTokens: 8192, maxOutputTokensPerCall: 512 } });
     const r = req();
     const res = await p.run(r);
     assert.equal(res.status, "success", String(res.error));
     const after = m.requests[11];
     assert.ok(after.messages.length < overflowAt, `history compacted after the overflow (${after.messages.length} < ${overflowAt})`);
-    assert.match(String(after.messages[1].content), /Summary of earlier work/);
-    assert.ok(r.tracker.activity.some((a) => /context overflow; compacting/.test(a.message)));
+    assert.match(String(after.messages[1].content), /Mechanical log of earlier turns/);
+    assert.match(String(after.messages[2].content), /^CONTEXT RESET #\d+ by the runner/);
+    assert.ok(String(after.messages[2].content).includes(r.prompt), "the phase instruction is restated verbatim in the fresh context");
+    assert.ok(r.tracker.activity.some((a) => /context overflow; resetting the context/.test(a.message)));
   } finally { await m.close(); }
   const always = await startFakeModel(() => ({ status: 400, body: "{\"error\":\"prompt is too long\"}" }));
   try {
@@ -176,7 +178,7 @@ test("[AIB-RUNNER] context overflow (400 'exceeds the context size'): the loop c
     const res = await p.run(req());
     assert.equal(res.status, "error");
     assert.match(String(res.error), /prompt is too long/);
-    assert.equal(always.requests.length, 3, "two compaction retries, then an honest failure");
+    assert.equal(always.requests.length, 4, "three context resets in a row, then an honest failure");
   } finally { await always.close(); }
 });
 

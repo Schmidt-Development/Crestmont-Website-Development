@@ -30,6 +30,10 @@ export interface PhaseRequest {
   model?: string;
   /** V4: routed task (architecture, frontend, debugging, repeated_failure, ...), for the GPU queue and the logs. */
   task?: string;
+  /** Durable project memory digest (runner-written), bounded to maxChars; part of every fresh context. */
+  memory?: (maxChars: number) => string;
+  /** Called after each context reset (the job checkpoints there). A LeaseLostError thrown here ends the phase. */
+  onCompaction?: (info: { compactions: number; phase: string; before: number; after: number; window: number; reason: string }) => Promise<void>;
 }
 
 export type PhaseStatus =
@@ -48,6 +52,10 @@ export interface PhaseResult {
   error: string | null;
   /** The StopSwitch reason when the phase was stopped from outside. */
   stoppedBy: string | null;
+  /** The model's own finish summary (model-reported; recorded as such, never as fact). */
+  summary?: string | null;
+  /** Context resets of the provider session so far (local provider). */
+  compactions?: number;
 }
 
 export interface PrepareContext {
