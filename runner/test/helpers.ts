@@ -412,10 +412,10 @@ export const SDK_OPT_IN = { agentProvider: "claude-agent-sdk", allowPaidProvider
 
 // ── fake OpenAI-compatible model server (stands in for Ollama; never a real API) ──
 
-export interface FakeModelRequest { model: string; messages: { role: string; content: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[]; tool_call_id?: string }[]; tools?: { function: { name: string } }[]; max_tokens?: number; temperature?: number }
+export interface FakeModelRequest { model: string; messages: { role: string; content: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[]; tool_call_id?: string }[]; tools?: { function: { name: string } }[]; max_tokens?: number; temperature?: number; reasoning_effort?: string }
 
 export type FakeModelReply =
-  | { content?: string | null; toolCalls?: { name: string; arguments: string | Record<string, unknown>; id?: string }[]; finish?: string; usage?: { prompt_tokens: number; completion_tokens: number } }
+  | { content?: string | null; reasoning?: string; toolCalls?: { name: string; arguments: string | Record<string, unknown>; id?: string }[]; finish?: string; usage?: { prompt_tokens: number; completion_tokens: number } }
   | { status: number; body: string };
 
 export interface FakeModel {
@@ -452,7 +452,7 @@ export async function startFakeModel(handler: (req: FakeModelRequest, n: number,
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
         id: `chatcmpl-${state.requests.length}`, object: "chat.completion", model: body.model,
-        choices: [{ index: 0, message: { role: "assistant", content: reply.content ?? (toolCalls.length ? "" : null), ...(toolCalls.length ? { tool_calls: toolCalls } : {}) }, finish_reason: reply.finish ?? (toolCalls.length ? "tool_calls" : "stop") }],
+        choices: [{ index: 0, message: { role: "assistant", content: reply.content ?? (toolCalls.length ? "" : null), ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), ...(toolCalls.length ? { tool_calls: toolCalls } : {}) }, finish_reason: reply.finish ?? (toolCalls.length ? "tool_calls" : "stop") }],
         usage: reply.usage ?? { prompt_tokens: 1000, completion_tokens: 100, total_tokens: 1100 },
       }));
     });

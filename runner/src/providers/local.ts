@@ -392,7 +392,12 @@ export class LocalProvider implements AgentProvider {
           if (res.finishReason === "length") {
             malformedStreak++;
             t.history.push({ role: "user", content: "Your reply was cut off by the output limit. Make smaller steps: one tool call at a time, and write large files in parts with edit_file." });
-            if (malformedStreak > this.limits.maxMalformed) { status = "error"; error = "the model kept exceeding the output limit without a usable tool call"; }
+            if (malformedStreak > this.limits.maxMalformed) {
+              status = "error";
+              error = !res.content && res.reasoningChars > 0
+                ? `the model spent its whole output budget on reasoning (${res.reasoningChars} chars) and returned no content or tool call; set LOCAL_MODEL_*_REASONING=none (or lower) for this model`
+                : "the model kept exceeding the output limit without a usable tool call";
+            }
           } else {
             noToolStreak++;
             if (noToolStreak > this.limits.maxNoToolReplies) {

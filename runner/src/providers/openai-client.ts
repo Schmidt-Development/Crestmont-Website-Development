@@ -31,9 +31,19 @@ export interface ChatRequest {
   tools?: ToolSpec[];
   temperature?: number;
   max_tokens?: number;
-  /** Qwen thinking models: how much to think (Ollama's OpenAI compatibility accepts reasoning_effort). */
-  reasoning_effort?: "high" | "medium" | "low";
+  /**
+   * Qwen thinking models: how much to think. Omitted → the client sends "none" (DEFAULT_REASONING_EFFORT).
+   * On Ollama's /v1/chat/completions only reasoning_effort controls thinking ("none" requests think=false); the native
+   * `think` field is ignored there. Without it a Qwen 3.x thinking model reasons first, the reasoning counts against
+   * max_tokens, and a long plan can use the whole budget and return empty content (finish_reason "length").
+   */
+  reasoning_effort?: ReasoningEffort;
 }
+
+export type ReasoningEffort = "high" | "medium" | "low" | "none";
+
+/** Sent when a request does not choose: the builder needs visible tool calls, not hidden reasoning (see NODE1-DIAGNOSTIC D11). */
+export const DEFAULT_REASONING_EFFORT: ReasoningEffort = "none";
 
 /** Plain text of a message's content (images count as a marker). */
 export function contentText(c: string | ContentPart[] | null): string {
@@ -47,6 +57,9 @@ export interface ChatResponse {
   /** Raw tool calls; `arguments` may be a JSON string (OpenAI) or, from some servers, an object. */
   toolCalls: { id?: string; name?: string; arguments?: unknown }[];
   finishReason: string | null;
+  /** Characters of reasoning the server returned (Ollama `reasoning`, `reasoning_content`, or an inline <think> block).
+   *  Never treated as the answer; reported so an empty reply caused by reasoning is diagnosable. */
+  reasoningChars: number;
   promptTokens: number;
   completionTokens: number;
   wallMs: number;
@@ -124,7 +137,7 @@ export class OpenAICompatClient {
         const res = await fetchImpl(`${this.baseUrl}/chat/completions`, {
           method: "POST",
           headers: { "content-type": "application/json", authorization: `Bearer ${this.o.apiKey}` },
-          body: JSON.stringify({ ...req, stream: false }),
+          body: JSON.stringify({ ...req, reasoning_effort: req.reasoning_effort ?? DEFAULT_REASONING_EFFORT, stream: false }),
           signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
         });
         const text = await res.text();
@@ -163,16 +176,24 @@ export class OpenAICompatClient {
 
 export function parseChatResponse(text: string, wallMs: number): ChatResponse {
   const body = JSON.parse(text) as {
-    choices?: { message?: { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: unknown } }[] }; finish_reason?: string | null }[];
+    choices?: { message?: { content?: string | null; reasoning?: unknown; reasoning_content?: unknown; tool_calls?: { id?: string; function?: { name?: string; arguments?: unknown } }[] }; finish_reason?: string | null }[];
     usage?: { prompt_tokens?: number; completion_tokens?: number };
   };
   const choice = body.choices?.[0];
   if (!choice || !choice.message) throw new ModelServerError("model server returned no choices", 502, true);
   const msg = choice.message;
+  let content = typeof msg.content === "string" ? msg.content : null;
+  let reasoningChars = (typeof msg.reasoning === "string" ? msg.reasoning.length : 0) + (typeof msg.reasoning_content === "string" ? msg.reasoning_content.length : 0);
+  if (content !== null && content.includes("<think>")) {
+    // A server that does not separate reasoning puts it inline; an unterminated block (cut off by max_tokens) is all reasoning.
+    for (const m of content.matchAll(/<think>([\s\S]*?)(?:<\/think>|$)/g)) reasoningChars += m[1].length;
+    content = content.replace(/<think>[\s\S]*?(?:<\/think>|$)/g, "").trim();
+  }
   return {
-    content: typeof msg.content === "string" ? msg.content : null,
+    content,
     toolCalls: (msg.tool_calls ?? []).map((t) => ({ id: t.id, name: t.function?.name, arguments: t.function?.arguments })),
     finishReason: choice.finish_reason ?? null,
+    reasoningChars,
     promptTokens: Number(body.usage?.prompt_tokens) || 0,
     completionTokens: Number(body.usage?.completion_tokens) || 0,
     wallMs,

@@ -226,7 +226,7 @@ test("[AIB-015] configuration: Model A / Model B (dual) or one model (single); t
   assert.equal(single.models.a.tag, single.models.b.tag);
   assert.throws(() => loadConfig({ ...env, LOCAL_MODEL: "x", RUNNER_AGENT_PROVIDER: "claude-code" }), /removed \(Founder directive V4\)/);
   assert.throws(() => loadConfig({ ...env }), /LOCAL_MODEL_B \(or LOCAL_MODEL\)/);
-  assert.throws(() => loadModels({ LOCAL_MODEL_A: "a", LOCAL_MODEL_A_REASONING: "max" }, "b"), /must be high, medium or low/);
+  assert.throws(() => loadModels({ LOCAL_MODEL_A: "a", LOCAL_MODEL_A_REASONING: "max" }, "b"), /must be high, medium, low or none/);
 });
 
 test("[AIB-015] review fixes: an unreachable model server puts no model on cooldown; cooldown errors are recognisable as 'could not be loaded'; no busy re-arming while requests drain", async () => {
