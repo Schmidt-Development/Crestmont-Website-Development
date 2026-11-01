@@ -26,7 +26,7 @@ export const REQUIRED_WORKFLOWS = [
   "support_reply", "refund_request", "refund_decision", "project_completion", "handoff", "security_notification",
   "critical_incident",
 ] as const;
-export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "lead_alert", "proposal_accepted", "dispute_opened", "consultation", "voice_escalation", "email_change_confirm", "voice_followup"] as const;
+export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "lead_alert", "proposal_accepted", "dispute_opened", "consultation", "voice_escalation", "email_change_confirm", "voice_followup", "sales_info"] as const;
 export type EmailTemplate = (typeof EMAIL_TEMPLATES)[number];
 export type MailCategory = "transactional" | "marketing";
 export type Audience = "customer" | "staff" | "prospect" | "any";
@@ -119,6 +119,16 @@ export interface TemplateData {
   voice_followup:
     | { kind: "package_information"; name: string; packages: { name: string; price: string }[]; maintenance: { name: string; monthly: string }[]; url: string }
     | { kind: "checkout_link"; name: string; packageName: string; price: string; reference: string; url: string };
+  /**
+   * Sales email requested by a prospect on an outbound AI sales call (src/services/sales-functions.ts). Commercial, so
+   * category "marketing": it always carries the unsubscribe link and postal address. Content is fixed per event; the
+   * agent can never supply free text. Prices come from the server catalog / Founder-approved effective prices.
+   */
+  sales_info:
+    | { event: "package_information"; name: string | null; packages: { name: string; price: string }[]; maintenanceNote: string; pricingUrl: string }
+    | { event: "checkout_link"; name: string | null; packageName: string; price: string; url: string; expires: string }
+    | { event: "follow_up"; name: string | null; when: string | null; url: string }
+    | { event: "onboarding_instructions"; name: string | null; url: string };
 }
 
 export interface MailContent { subject: string; heading: string; paragraphs: string[]; cta?: { label: string; url: string } }
@@ -425,6 +435,36 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
       cta: { label: "Open monitoring", url: d.url },
     }),
     samples: [{ summary: "Error rate above threshold on the customer portal", occurredAt: "2026-01-01 12:00 UTC", url: "https://example.com/staff/monitoring" }],
+  },
+  sales_info: {
+    name: "sales_info", category: "marketing", audience: "prospect",
+    description: "Information a prospect asked for on an outbound AI sales call: package overview, secure purchase link, follow-up note or onboarding steps after a verified payment.",
+    render: (d) => {
+      const hello = d.name ? `Hello ${d.name}, thank you for speaking with Crestmont Website Development.` : "Hello, thank you for speaking with Crestmont Website Development.";
+      const notMe = "You are receiving this because you asked for it on a call with Crestmont's AI assistant. If that was not you, you can ignore this email or unsubscribe below.";
+      switch (d.event) {
+        case "package_information": return { subject: "Crestmont website packages", heading: "Our website packages",
+          paragraphs: [hello, ...d.packages.map((p) => `${p.name}: ${p.price}`), "Custom development is quoted separately after a scoping conversation.", d.maintenanceNote,
+            "Prices are fixed and paid upfront for standard packages. We do not offer discounts by phone and never guarantee rankings or launch dates.", notMe],
+          cta: { label: "Compare packages", url: d.pricingUrl } };
+        case "checkout_link": return { subject: `Your secure link for the ${d.packageName} package`, heading: `${d.packageName} package — secure checkout`,
+          paragraphs: [hello, `The ${d.packageName} package is ${d.price}, paid upfront.`, "The link takes you to Crestmont's checkout. You will sign in or create an account with this email address, review and accept the Development Agreement, and pay on Stripe's secure page. We never take card details by phone or email.",
+            `This link expires on ${d.expires}. Nothing is charged until you complete payment on Stripe.`, notMe],
+          cta: { label: "Continue to secure checkout", url: d.url } };
+        case "follow_up": return { subject: "Following up from your Crestmont call", heading: "Thanks for your time",
+          paragraphs: [hello, d.when ? `As agreed, we will follow up ${d.when}.` : "As agreed, a member of our team will follow up.", "You can reply to this email with any questions in the meantime.", notMe],
+          cta: { label: "Visit Crestmont", url: d.url } };
+        case "onboarding_instructions": return { subject: "Next steps for your Crestmont website", heading: "Your payment is confirmed",
+          paragraphs: [hello, "Stripe has confirmed your payment. Sign in to your Crestmont account to complete the onboarding questionnaire so we can start your project.", notMe],
+          cta: { label: "Start onboarding", url: d.url } };
+      }
+    },
+    samples: [
+      { event: "package_information", name: "Morgan", packages: [{ name: "Starter", price: "$999" }, { name: "Business", price: "$2,499" }, { name: "Premium", price: "$4,999+" }], maintenanceNote: "Maintenance plans ($99, $199 and $299 per month) are being finalised; a team member will confirm what each includes.", pricingUrl: "https://example.com/pricing" },
+      { event: "checkout_link", name: "Morgan", packageName: "Business", price: "$2,499", url: "https://example.com/buy/preview", expires: "November 7, 2026" },
+      { event: "follow_up", name: null, when: "on Tuesday afternoon", url: "https://example.com" },
+      { event: "onboarding_instructions", name: "Morgan", url: "https://example.com/portal" },
+    ],
   },
   email_change_confirm: {
     name: "email_change_confirm", category: "transactional", audience: "customer",

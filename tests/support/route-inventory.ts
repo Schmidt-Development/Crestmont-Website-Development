@@ -30,7 +30,7 @@ export type ResourceKind =
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
   | "member" | "notification" | "staffNotification" | "buildJob" | "siteDeployment" | "buildWorker" | "buildApproval" | "buildIntegration"
-  | "soVersion" | "soStage" | "soExperiment" | "runnerDiagnostic" | "researchProspect" | "researchProspect2";
+  | "soVersion" | "soStage" | "soExperiment" | "runnerDiagnostic" | "researchProspect" | "researchProspect2" | "salesCall" | "salesLinkToken" | "salesUnsubToken";
 
 export type Access =
   | { kind: "public" }
@@ -90,6 +90,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/readiness/github-snapshot": signed("x-crestmont-signature"),
   "POST /api/scheduled/run": signed("x-crestmont-scheduler-signature"),
   "POST /api/voice/retell-audit": signed("x-crestmont-scheduler-signature"),
+  "POST /api/sales-outbound/retell-audit": signed("x-crestmont-scheduler-signature"),
   "POST /api/crm/v1/imports": signed("x-crestmont-signature"),
   "POST /api/webhooks/stripe": hook("stripe-signature"),
   "GET /api/readiness": { access: { kind: "staff", roles: readiness }, api: true },
@@ -99,6 +100,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/webhooks/retell": hook("x-retell-signature"),
   "POST /api/webhooks/retell/functions": hook("x-retell-signature"),
   "POST /api/webhooks/retell/inbound": hook("x-retell-signature"),
+  "POST /api/webhooks/retell/outbound/functions": hook("x-retell-signature"),
   "POST /api/webhooks/resend": hook("svix-signature"),
   "POST /api/readiness/deployments": signed("x-crestmont-signature"),
   "POST /api/readiness/release-candidates": signed("x-crestmont-signature"),
@@ -572,6 +574,17 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   // ── Lead research (worker API signed with RESEARCH_RUNNER_SECRET; dashboard for lead.read_all; decisions lead.write_all; controls Owner) ──
   "POST /api/research/runner/heartbeat": signed("x-crestmont-research-signature"),
   "POST /api/research/runner/batch": signed("x-crestmont-research-signature"),
+  // ── Outbound AI sales calls (src/routes/sales-outbound.ts) ──
+  "GET /buy/:token": token("purchase link emailed to the verified prospect (only its SHA-256 is stored)", { token: "salesLinkToken" }),
+  "GET /sales/unsubscribe/:token": token("sales email unsubscribe token (confirm page)", { token: "salesUnsubToken" }),
+  "POST /sales/unsubscribe/:token": token("sales email unsubscribe token", { token: "salesUnsubToken" }, exempt("records an opt-out for the token's own address; same answer whatever the token")),
+  "GET /staff/sales-outbound": staff(rolesWith("voice.manage")),
+  "POST /staff/sales-outbound/settings": staff(rolesWith("voice.manage"), undefined, act("sales_outbound.settings_updated")),
+  "POST /staff/sales-outbound/compliance": staff(rolesWith("voice.manage"), undefined, act("sales_outbound.compliance_approved")),
+  "POST /staff/sales-outbound/consents": staff(rolesWith("voice.manage"), undefined, act("sales_outbound.consent_recorded")),
+  "POST /staff/sales-outbound/dnc-scrubs": staff(rolesWith("voice.manage"), undefined, act("sales_outbound.dnc_scrub_recorded")),
+  "POST /staff/sales-outbound/queue": staff(rolesWith("voice.manage"), undefined, act("sales_outbound.blocked")),
+  "POST /staff/sales-outbound/queue/:id/cancel": staff(rolesWith("voice.manage"), P("salesCall"), act("sales_outbound.cancelled")),
   "GET /staff/research": staff(rolesWith("lead.read_all")),
   "POST /staff/research/settings": staff(OWNER, undefined, act("research.settings_updated")),
   "POST /staff/research/promote": staff(rolesWith("lead.write_all"), undefined, act("research.prospect_promoted")),

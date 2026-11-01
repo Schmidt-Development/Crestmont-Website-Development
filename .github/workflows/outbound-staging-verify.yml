@@ -1,0 +1,46 @@
+name: Outbound sales agent staging verification
+
+# Re-runs scripts/outbound-staging-e2e.ts against the deployed staging Worker without redeploying (for example after the
+# Founder adds RETELL_OUTBOUND_API_KEY, saves the Retell agent, or registers the SIE target). Live Worker + staging D1 +
+# the outbound Retell workspace READ-ONLY. It never places a call: the script makes no create-phone-call request.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: outbound-staging-verify
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/main'   # main only, like every workflow that holds staging secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: staging
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Outbound sales agent E2E (live staging + D1 + outbound Retell workspace, read-only)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          E2E_BASE_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+          RETELL_OUTBOUND_API_KEY: ${{ secrets.RETELL_OUTBOUND_API_KEY }}
+          RETELL_INBOUND_API_KEY: ${{ secrets.RETELL_INBOUND_API_KEY }}
+          # Signs the Worker's own read-only Retell audit (scheduler key derived from the Cloudflare token).
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: node --no-warnings scripts/outbound-staging-e2e.ts
+      - name: Upload evidence (aggregate PASS/FAIL/BLOCKED only; no credentials)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: outbound-staging-e2e
+          path: evidence/outbound-staging-e2e.json
+          retention-days: 30
+          if-no-files-found: ignore
