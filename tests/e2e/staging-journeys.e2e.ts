@@ -703,7 +703,9 @@ journey(16, ["PORTAL-007"], "customer approves the final work (final launch appr
   assertClean();
 });
 
-journey(17, ["PAY-006"], "required payments are verified before release", { blocked: `${NO_STRIPE}; the milestone invoices of a journey-created project can only be paid through Stripe` });
+// Journeys 17 and 19 used to be blocked with NO_STRIPE, which became untrue once staging got a Stripe test key: journeys 5, 6
+// and 24 pay through Stripe test-mode Checkout on staging. The reasons below are the real ones.
+journey(17, ["PAY-006"], "required payments are verified before release", { blocked: "not automated yet: needs a journey-created project whose milestone invoices are each paid through Stripe test-mode Checkout before the release gate is checked (Stripe test mode itself is configured on staging; journeys 5, 6 and 24 pay through it)" });
 
 journey(18, ["PM-006"], "internal QA certifies the project; deployment authorization stays refused until every check passes", {}, async () => {
   const id = await projectId("customer.ridgeline", RIDGELINE);
@@ -727,7 +729,7 @@ journey(18, ["PM-006"], "internal QA certifies the project; deployment authoriza
   assertClean();
 });
 
-journey(19, ["PM-007"], "authorized deployment occurs", { blocked: `${NO_STRIPE}; deployment needs the full 7-check chain including required payments for a journey-created project, and the sample projects are never deployed or closed on staging` });
+journey(19, ["PM-007"], "authorized deployment occurs", { blocked: "not automated on staging: deployment needs the full 7-check chain including the required payments of journey 17 for a journey-created project, and the sample projects are never deployed or closed on staging" });
 
 // ───────────── 20. Handoff ─────────────
 
