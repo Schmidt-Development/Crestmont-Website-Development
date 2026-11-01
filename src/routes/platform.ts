@@ -255,7 +255,7 @@ async function voicePage(ctx: AppContext, errors: string[] = [], draft?: { instr
 <section class="card" id="prompt-sync" data-testid="voice-prompt-sync"><h2 class="card__title">Retell prompt synchronisation</h2>
 <p>${syncBadge}</p><p class="muted">${sync ? html`${label(sync.mode)} at ${formatDateTime(sync.created_at)}: ${sync.detail}` : "The active configuration has not been pushed to Retell from this environment."}</p>
 <p class="faint">${ctx.env.RETELL_INBOUND_API_KEY ? "Activating a version pushes its full prompt (guardrails + instructions) to the Retell LLM behind this environment's agent and reads it back. Publishing an agent version stays a Retell dashboard action." : "Provider not configured: RETELL_INBOUND_API_KEY is not set in this environment (the receptionist workspace key), so nothing can be pushed to Retell."}</p>
-<form method="post" action="/staff/voice/prompt-sync" class="row">${csrf(ctx)}${select({ name: "mode", label: "Action", options: [{ value: "push", label: "Push active version to Retell" }, { value: "check", label: "Check for drift (read only)" }] })}<div class="field">${button("Run", { variant: "secondary", size: "sm" })}</div></form></section></div>`;
+<form method="post" action="/staff/voice/prompt-sync" class="row">${csrf(ctx)}${select({ name: "mode", label: "Action", options: [{ value: "check", label: "Check for drift (read only)" }, { value: "adopt", label: "Adopt the live Retell prompt as the active version (writes nothing to Retell)" }, { value: "push", label: "Push active version to Retell (refused if the prompt was edited in Retell)" }, { value: "push_overwrite", label: "Overwrite Retell with the active version (replaces a dashboard-edited prompt)" }] })}<div class="field">${button("Run", { variant: "secondary", size: "sm" })}</div></form></section></div>`;
   const body = html`${pageHead("AI receptionist", linkButton("Operations: hours, scheduling, outbound", "/staff/voice/operations", "ghost", "sm"), "AI")}
 <div class="grid grid-3">
 <section class="card"><h2 class="card__title">Provider</h2><p>${badge(h("voice")?.status ?? "not_configured")}</p><p class="muted">${h("voice")?.detail ?? ""}</p>
@@ -1158,7 +1158,8 @@ ${dl([["Job id", j.id], ["Status", badge(j.status)], ["Provider / model", `${j.p
   });
   r.post("/staff/voice/prompt-sync", async (ctx) => {
     requireStaff(ctx, "voice.manage");
-    const mode = str(await ctx.form(), "mode") === "check" ? "check" : "push";
+    const m = str(await ctx.form(), "mode");
+    const mode = m === "check" || m === "adopt" || m === "push_overwrite" ? m : "push";
     const s = await syncPrompt({ db: ctx.db, env: ctx.env, fetch: ctx.env.overrides?.fetch ?? fetch, userId: ctx.user!.id, mode });
     return redirect(ctx, "/staff/voice#prompt-sync", { kind: s.status === "in_sync" ? "success" : "error", text: syncSentence(s) });
   });

@@ -95,14 +95,15 @@ test("[VOICE-004] [VOICE-005] prompt sync without RETELL_INBOUND_API_KEY is refu
 
 test("[VOICE-004] [VOICE-005] activating a version pushes the composed prompt to the Retell LLM, reads it back and records in_sync (fake fetch)", async () => {
   const r = fakeRetell();
+  r.state.remotePrompt = ""; // a fresh Retell LLM with no prompt yet: nothing to protect
   const t = await app({}, { fetch: r.f });
   await saveVoiceConfig(t.db, t.owner.id, configured({ inbound: { mode: "answer", numbers: [], agent_id: "agent_fixture01" } }));
   const c = await t.staff();
   await c.post("/staff/voice/configs", { instructions: INSTRUCTIONS, note: "Initial" });
   assert.equal((await c.post("/staff/voice/configs/1/activate")).status, 303);
-  assert.deepEqual(r.calls.map((x) => `${x.method} ${new URL(x.url).pathname}`), ["GET /get-agent/agent_fixture01", "PATCH /update-retell-llm/llm_fixture01", "GET /get-retell-llm/llm_fixture01"]);
+  assert.deepEqual(r.calls.map((x) => `${x.method} ${new URL(x.url).pathname}`), ["GET /get-agent/agent_fixture01", "GET /get-retell-llm/llm_fixture01", "PATCH /update-retell-llm/llm_fixture01", "GET /get-retell-llm/llm_fixture01"], "reads the live prompt before writing (drift guard)");
   assert.ok(r.calls.every((x) => x.url.startsWith("https://api.retellai.com/") && x.auth === `Bearer ${KEY}`));
-  assert.deepEqual(r.calls[1].body, { general_prompt: composePrompt(INSTRUCTIONS) }, "only general_prompt is written: guardrails + instructions");
+  assert.deepEqual(r.calls[2].body, { general_prompt: composePrompt(INSTRUCTIONS) }, "only general_prompt is written: guardrails + instructions");
   assert.ok(!r.calls.some((x) => /publish/.test(x.url)), "never publishes an agent version");
   const row = (await t.db.prepare(`SELECT status, mode, config_version, llm_id, llm_version, expected_sha256, remote_sha256 FROM voice_prompt_syncs`).first<Record<string, unknown>>())!;
   assert.equal(row.status, "in_sync");
@@ -121,6 +122,7 @@ test("[VOICE-004] [VOICE-005] activating a version pushes the composed prompt to
 
 test("[VOICE-004] [VOICE-005] drift in Retell is detected by a read-only check, alerts the Owner and fails the monitoring signal (fixture)", async () => {
   const r = fakeRetell();
+  r.state.remotePrompt = "";
   const t = await app({}, { fetch: r.f });
   await saveVoiceConfig(t.db, t.owner.id, configured({ inbound: { mode: "answer", numbers: [], agent_id: "agent_fixture01" } }));
   const c = await t.staff();
@@ -135,9 +137,39 @@ test("[VOICE-004] [VOICE-005] drift in Retell is detected by a read-only check, 
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM notifications WHERE kind = 'voice_prompt_drift' AND user_id = ?`, t.owner.id), 1);
   assert.equal((await serviceChecks(t.db, t.storage)).find((x) => x.name === "Retell prompt sync")?.status, "failing");
   assert.match(await (await c.get("/staff/voice")).text(), /Drift/);
-  // Pushing again restores the sync.
+  // A plain push never silently replaces a prompt edited in the dashboard (drift guard): nothing is written.
+  r.calls.length = 0;
   await c.post("/staff/voice/prompt-sync", { mode: "push" });
+  assert.ok(!r.calls.some((x) => x.method === "PATCH"), "no write over a dashboard edit");
+  const refused = (await t.db.prepare(`SELECT status, detail FROM voice_prompt_syncs ORDER BY rowid DESC LIMIT 1`).first<{ status: string; detail: string }>())!;
+  assert.equal(refused.status, "drift");
+  assert.match(refused.detail, /Not written/);
+  // The Owner's explicit overwrite restores the sync.
+  assert.equal((await c.post("/staff/voice/prompt-sync", { mode: "push_overwrite" })).status, 303);
   assert.equal((await t.db.prepare(`SELECT status FROM voice_prompt_syncs ORDER BY rowid DESC LIMIT 1`).first<{ status: string }>())!.status, "in_sync");
+});
+
+test("[VOICE-004] adopting the live Retell prompt records it as the active version and writes nothing to Retell; later pushes cannot silently restore an older version (fixture)", async () => {
+  const r = fakeRetell();
+  r.state.remotePrompt = "Founder V4: native single prompt maintained in the Retell dashboard.";
+  const t = await app({}, { fetch: r.f });
+  await saveVoiceConfig(t.db, t.owner.id, configured({ inbound: { mode: "answer", numbers: [], agent_id: "agent_fixture01" } }));
+  const c = await t.staff();
+  // An older repository version is saved and activated: activation must NOT overwrite V4.
+  await c.post("/staff/voice/configs", { instructions: INSTRUCTIONS, note: "Old repository prompt" });
+  await c.post("/staff/voice/configs/1/activate");
+  assert.ok(!r.calls.some((x) => x.method === "PATCH"), "activation did not overwrite the dashboard prompt");
+  assert.equal(r.state.remotePrompt, "Founder V4: native single prompt maintained in the Retell dashboard.");
+  r.calls.length = 0;
+  assert.equal((await c.post("/staff/voice/prompt-sync", { mode: "adopt" })).status, 303);
+  assert.ok(r.calls.every((x) => x.method === "GET"), "adopt only reads");
+  const v = (await t.db.prepare(`SELECT version, prompt_text, change_note FROM voice_agent_configs WHERE active = 1`).first<{ version: number; prompt_text: string; change_note: string }>())!;
+  assert.equal(v.version, 2);
+  assert.equal(v.prompt_text, r.state.remotePrompt);
+  assert.match(v.change_note, /Adopted the live Retell prompt/);
+  assert.equal((await t.db.prepare(`SELECT status FROM voice_prompt_syncs ORDER BY rowid DESC LIMIT 1`).first<{ status: string }>())!.status, "in_sync");
+  await c.post("/staff/voice/prompt-sync", { mode: "check" });
+  assert.equal((await t.db.prepare(`SELECT status FROM voice_prompt_syncs ORDER BY rowid DESC LIMIT 1`).first<{ status: string }>())!.status, "in_sync", "the adopted version matches Retell");
 });
 
 test("[VOICE-005] a push that Retell does not apply is drift, and provider errors are recorded as failed — never success (fixture)", async () => {

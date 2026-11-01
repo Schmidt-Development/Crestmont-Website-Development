@@ -47,16 +47,19 @@ async function retellAudit(key: string, rest: string[]) {
   const r = await fetch(`${base}/api/voice/retell-audit`, { method: "POST", headers: { "content-type": "application/json", "x-crestmont-scheduler-signature": sign(key, body) }, body });
   const text = await r.text();
   if (!r.ok) { console.log(`::warning title=Retell inbound audit::HTTP ${r.status} ${text.replace(/[\r\n]+/g, " ").slice(0, 200)}`); return; }
-  const a = JSON.parse(text) as { status: string; agentId: string | null; llmId: string | null; agents: { id: string; name: string | null }[]; findings: { check: string; ok: boolean; detail: string }[] };
+  const a = JSON.parse(text) as { status: string; agentId: string | null; llmId: string | null; agents: { id: string; name: string | null }[]; findings: { check: string; ok: boolean; status?: string; detail: string }[] };
   const clean = (x: string) => x.replace(/[\r\n]+/g, " ").replace(/::/g, ": ").slice(0, 300);
   const failed = a.findings.filter((f) => !f.ok);
-  console.log(`::notice title=Retell inbound audit::${a.status.toUpperCase()} — ${a.findings.length - failed.length}/${a.findings.length} checks pass · agent ${a.agentId ?? "?"} · llm ${a.llmId ?? "?"} · agents in workspace: ${a.agents.map((x) => `${x.id}${x.name ? ` (${clean(x.name)})` : ""}`).join(", ") || "none"}`);
+  console.log(`::notice title=Retell inbound audit::${a.status.toUpperCase()} — ${a.findings.filter((f) => f.status !== "info").length - failed.length}/${a.findings.filter((f) => f.status !== "info").length} checks pass · agent ${a.agentId ?? "?"} · llm ${a.llmId ?? "?"} · agents in workspace: ${a.agents.map((x) => `${x.id}${x.name ? ` (${clean(x.name)})` : ""}`).join(", ") || "none"}`);
   // GitHub keeps at most 10 notices and 10 warnings per step, so the findings are grouped into one annotation each
   // (the first deploy with one annotation per check lost 10 of 30 findings). Annotation messages hold up to 64 KB.
   const list = (fs: typeof a.findings) => fs.map((f) => `${clean(f.check)}: ${clean(f.detail)}`).join(" | ");
   if (failed.length) console.log(`::warning title=Retell inbound audit TODO (${failed.length})::${list(failed)}`);
-  const passed = a.findings.filter((f) => f.ok);
+  const passed = a.findings.filter((f) => f.ok && f.status !== "info");
   if (passed.length) console.log(`::notice title=Retell inbound audit OK (${passed.length})::${list(passed)}`);
+  // Read-only facts the Founder decides (published version, voice, data storage under legal review, …).
+  const info = a.findings.filter((f) => f.status === "info");
+  if (info.length) console.log(`::notice title=Retell inbound audit INFO (${info.length})::${list(info)}`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) await main().catch((e) => { console.log(`::error title=External scheduler::${(e as Error).message}`); process.exitCode = 1; });

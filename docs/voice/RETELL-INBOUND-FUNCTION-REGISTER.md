@@ -152,3 +152,15 @@ The built-in tools are Transfer Call (destination `{{transfer_number}}`) and End
 ## Master prompt
 
 The instructions are `INBOUND_MASTER_INSTRUCTIONS` in `src/services/voice.ts`. `/staff/voice` → Create a new version pre-fills them. Activating the version pushes guardrails + instructions to the agent's Retell LLM `general_prompt` and reads it back. Do not edit the prompt in the Retell dashboard: activation overwrites it, and the drift check reports any difference.
+
+## Founder decisions (2026-10-31): these override older guidance in this folder
+
+| Decision | How the platform applies it |
+|---|---|
+| 24/7/365 AI receptionist | Answers every call, at any hour. The inbound webhook never rejects a call for being outside hours. **Business hours in `/staff/voice/operations` are the human staffing hours**: they decide only when a live transfer is offered and when consultations can be booked. |
+| Full-service mode | Requires the Owner's monthly voice budget (`/staff/voice`). Without one, or once it is reached, functions refuse everything except message-taking. This is checked live on every function call, even if the number's inbound webhook is not configured. |
+| Max call 60 minutes | The audit passes at ≤ 60 minutes. |
+| Warm transfer only | The audit requires `transfer_option = warm_transfer`. The destination must be either `{{transfer_number}}` (filled per call by the inbound webhook only during staffed hours, so the server enforces staffing), or a fixed number equal to the approved transfer number in `/staff/voice/operations`. With a fixed number, staffing hours are enforced only by the prompt calling `check_transfer_availability`. A destination that is one of the workspace's own numbers is reported as a loop. |
+| Zero default dynamic variables | Not required. Per-call variables still come from the inbound webhook (they aren't defaults). The audit fails only if the prompt uses a variable that nothing supplies. |
+| Master prompt = Founder's Retell-native single prompt (V4) | It's maintained in the Retell dashboard. In `/staff/voice` → Retell prompt synchronisation, choose **Adopt the live Retell prompt**: it records V4 as the active version and writes nothing to Retell. A plain push or an activation never overwrites a prompt edited in the dashboard (drift guard); replacing it requires **Overwrite Retell with the active version**. |
+| Data storage | Reported for the pending privacy/legal review, not judged. The platform keeps transcripts and recordings only after `record_consent`. |
