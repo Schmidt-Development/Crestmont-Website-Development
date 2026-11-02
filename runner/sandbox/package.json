@@ -4,6 +4,6 @@
   "private": true,
   "description": "npm packages baked into the per-build sandbox image (runner/sandbox/Dockerfile, installed with npm ci from package-lock.json): Playwright for browser-check.mjs. The Chromium build is the one this Playwright version downloads at image build time.",
   "dependencies": {
-    "playwright": "1.63.0"
+    "playwright": "1.64.1"
   }
 }
