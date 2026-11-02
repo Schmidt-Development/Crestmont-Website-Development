@@ -30,6 +30,8 @@ import { addDnc, applyOutboundResult, recordCallConsent, requestOutbound } from 
 import { sendMail, type MailerCtx } from "./mailer.ts";
 import { voiceBudget, budgetOpen } from "./voice-budget.ts";
 import { safeHttpsUrl } from "../lib/html.ts";
+import { routeCalendar, wantsFounderArg, CALENDAR_LABELS, type CalendarRoute } from "../domain/calendars.ts";
+import { recordCallback, confirmedConsultation } from "./calendars.ts";
 
 export class VoiceAuthError extends Error {}
 
@@ -241,8 +243,6 @@ async function createCallLead(db: Db, call: CallRow, c: { name: string; email?: 
   return res.leadId;
 }
 
-const addTask = addLeadTask;
-
 /** True when `phoneE164` is the number this call comes from (inbound) or was placed to (outbound). */
 function isCallersOwn(call: CallRow, phoneE164: string): boolean {
   const own = toE164(call.direction === "outbound" ? call.to_number : call.from_number);
@@ -270,6 +270,9 @@ const fnSchemas = {
     phone: v.string({ pattern: phonePattern }),
     reason: v.string({ min: 3, max: 2000 }),
     preferred_time: v.string({ optional: true, max: 120 }),
+    // Dual calendars (migration 0065): true ONLY when the caller explicitly asked to speak with the Founder/owner.
+    // Missing or anything other than true → AI Follow-Up calendar (backwards compatible).
+    wants_founder: wantsFounderArg,
   }),
   route_support: v.object({
     name: v.string({ min: 2, max: 120 }),
@@ -281,6 +284,7 @@ const fnSchemas = {
     reason: v.string({ min: 3, max: 2000 }),
     name: v.string({ optional: true, max: 120 }),
     phone: v.string({ optional: true, pattern: phonePattern }),
+    wants_founder: wantsFounderArg,
   }),
   get_business_hours: v.object({}),
   check_transfer_availability: v.object({ department: v.enumOf(["sales", "support", "urgent"] as const, { optional: true }) }),
@@ -292,6 +296,7 @@ const fnSchemas = {
     start_time: v.string({ min: 16, max: 40 }),
     topic: v.string({ min: 3, max: 1000 }),
     reminder_call_ok: v.enumOf(["true", "false"] as const, { optional: true }),
+    wants_founder: wantsFounderArg,
   }),
   lookup_consultation: v.object({ confirmation_code: v.string({ min: 4, max: 20 }), phone: v.string({ pattern: phonePattern }) }),
   reschedule_consultation: v.object({ confirmation_code: v.string({ min: 4, max: 20 }), phone: v.string({ pattern: phonePattern }), new_start_time: v.string({ min: 16, max: 40 }) }),
@@ -329,6 +334,7 @@ const fnSchemas = {
     start_time: v.string({ optional: true, max: 40 }),
     preferred_date: v.string({ optional: true, pattern: /^\d{4}-\d{2}-\d{2}$/ }),
     reminder_call_ok: v.enumOf(["true", "false"] as const, { optional: true }),
+    wants_founder: wantsFounderArg,
   }),
   create_support_ticket: v.object({
     name: v.string({ min: 2, max: 120 }),
@@ -449,7 +455,9 @@ async function supportRequest(db: Db, call: CallRow, a: { name: string; email: s
     await audit(db, { actorKind: "ai", action: "ticket.created_by_receptionist", subjectType: "ticket", subjectId: ticketId, organizationId: orgId, details: { call: call.id, ...(ref ? { ref } : {}) } });
   } else {
     const leadId = call.lead_id ?? await createCallLead(db, call, { name: a.name, email: a.email, phone: a.phone, interest: "other", message: `Support callback (caller not matched to an account): ${a.summary}` });
-    await addTask(db, leadId, `Support callback${ref ? ` ${ref}` : ""} for ${a.name} at ${a.phone}. Caller could not be matched to an account by verified email and phone — verify identity before discussing any account details.`);
+    await recordCallback(db, { route: routeCalendar({ context: { channel: "inbound_receptionist", fn: withRef ? "create_support_ticket" : "route_support", kind: "support_callback" } }),
+      kind: "support_callback", source: "ai_receptionist", leadId, callId: call.id, isTest: !!call.is_test, dueAt: new Date(Date.now() + 24 * 3600e3),
+      taskBody: `Support callback${ref ? ` ${ref}` : ""} for ${a.name} at ${a.phone}. Caller could not be matched to an account by verified email and phone — verify identity before discussing any account details.` });
   }
   // Identical response in both branches: never confirms whether an account exists.
   if (!ref) return { received: true, message: SUPPORT_RESPONSE };
@@ -488,7 +496,11 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
     case "request_callback": {
       const a = parse(fnSchemas.request_callback, rawArgs ?? {});
       const leadId = call.lead_id ?? await createCallLead(db, call, { name: a.name, phone: a.phone, interest: "other", message: `Callback requested: ${a.reason}` });
-      await addTask(db, leadId, `Call back ${a.name} at ${a.phone}${a.preferred_time ? ` (preferred: ${a.preferred_time})` : ""}: ${a.reason}`);
+      // Calendar A unless the caller explicitly asked for the Founder (src/domain/calendars.ts). The task and calendar
+      // entry are one transaction and are read back; if that fails this throws and the agent is told nothing was recorded.
+      const route = routeCalendar({ wantsFounder: a.wants_founder, context: { channel: "inbound_receptionist", fn: "request_callback", kind: "callback" } });
+      const entry = await recordCallback(db, { route, kind: "callback", source: "ai_receptionist", leadId, callId: call.id, isTest: !!call.is_test, dueAt: new Date(Date.now() + 24 * 3600e3),
+        taskBody: `Call back ${a.name} at ${a.phone}${a.preferred_time ? ` (preferred: ${a.preferred_time})` : ""}: ${a.reason}` });
       // The caller asked to be called back: that request is the consent, scoped to the callback purpose only.
       // The outbound request still waits for staff approval, and outbound calling is off by default.
       // Consent counts only for the number the caller is actually calling from: a caller cannot consent for someone else.
@@ -496,7 +508,9 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       if (phone && isCallersOwn(call, phone) && await recordCallConsent(db, phone, "callback", "caller_request", `call:${call.id}`)) {
         await requestOutbound(db, { purpose: "callback", phone, name: a.name, reason: `Caller asked for a callback${a.preferred_time ? ` (preferred: ${a.preferred_time})` : ""}: ${a.reason}`, leadId, isTest: !!call.is_test });
       }
-      return { callbackRequested: true, message: "Thanks. Someone will call you back during staffed hours." };
+      return entry.calendar === "founder_callback"
+        ? { callbackRequested: true, calendar: entry.calendar, message: "Thanks. I've passed your request to speak with our Founder. The Founder or a team member will call you back during staffed hours. Don't promise a specific time." }
+        : { callbackRequested: true, calendar: entry.calendar, message: "Thanks. Someone will call you back during staffed hours." };
     }
     case "route_support":
     case "create_support_ticket": {
@@ -520,7 +534,9 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       }
       // Otherwise: a CRM task (always, so nothing is lost) and an email to every Owner.
       const leadId = call.lead_id ?? await createCallLead(db, call, { name: a.name ?? "Unknown caller", phone: a.phone ?? call.from_number, interest: "other", message: `Escalated call: ${a.reason}` });
-      await addTask(db, leadId, `ESCALATION from AI receptionist: ${a.reason}${a.phone ?? call.from_number ? ` — call back ${a.phone ?? call.from_number}` : ""}`, 4);
+      const route = routeCalendar({ wantsFounder: a.wants_founder, context: { channel: "inbound_receptionist", fn: "escalate", kind: "escalation" } });
+      await recordCallback(db, { route, kind: "escalation", source: "ai_receptionist", leadId, callId: call.id, isTest: !!call.is_test, dueAt: new Date(Date.now() + 4 * 3600e3),
+        taskBody: `ESCALATION from AI receptionist: ${a.reason}${a.phone ?? call.from_number ? ` — call back ${a.phone ?? call.from_number}` : ""}` });
       await notifyOwners(db, "voice_escalation", `${tag}AI receptionist escalated a call: ${a.reason}`, "call", call.id);
       const emailed = await emailOwnersEscalation(db, deps, call, { reason: a.reason, caller: [a.name, a.phone ?? call.from_number].filter(Boolean).join(", ") || "Unknown caller", transfer: t.reason });
       await audit(db, { actorKind: "ai", action: "call.escalated", subjectType: "call", subjectId: call.id, details: { route: "task_email", emailed, transfer: t.reason } });
@@ -559,16 +575,20 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       try {
         // Only the caller's own number is checked for an existing booking: saying "you already have one" for any
         // other number would reveal whether that number has a booking.
-        const { booking, existing } = await sched.book(db, c, now, cal, { name: a.name, phone, email: a.email ?? null, startsAt: a.start_time, topic: a.topic, leadId: call.lead_id, callId: call.id, isTest: !!call.is_test, source: "ai_receptionist", checkExisting: isCallersOwn(call, phone) });
+        const route: CalendarRoute = routeCalendar({ wantsFounder: a.wants_founder, context: { channel: "inbound_receptionist", fn: "book_consultation", kind: "consultation" } });
+        const { booking, existing } = await sched.book(db, c, now, cal, { name: a.name, phone, email: a.email ?? null, startsAt: a.start_time, topic: a.topic, leadId: call.lead_id, callId: call.id, isTest: !!call.is_test, source: "ai_receptionist", checkExisting: isCallersOwn(call, phone), calendar: route });
         if (existing) return { booked: false, already_booked: true, message: "You already have an upcoming consultation with us. I can reschedule or cancel it if you give me your booking reference." };
+        // Only a booking the database holds (active, on the routed calendar) is ever reported as booked.
+        const held = await confirmedConsultation(db, booking.id);
+        if (!held || held.calendar !== route.calendar) return { booked: false, reason: "not_recorded", message: "I couldn't save that booking. Apologise and offer a callback instead." };
         const leadId = call.lead_id ?? await createCallLead(db, call, { name: a.name, email: a.email, phone, interest: "other", message: `Consultation requested by phone: ${a.topic}` });
         await db.prepare(`UPDATE consultations SET lead_id = COALESCE(lead_id, ?) WHERE id = ?`).bind(leadId, booking.id).run();
-        await addLeadNote(db, leadId, `Consultation ${booking.status} for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) via AI receptionist`);
-        if (booking.status === "requested") await addLeadTask(db, leadId, `Confirm or decline the consultation requested for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}). Check your calendar first: no calendar is connected.`, 4);
+        await addLeadNote(db, leadId, `Consultation ${booking.status} for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) via AI receptionist · calendar: ${CALENDAR_LABELS[held.calendar].name}`);
+        if (booking.status === "requested") await addLeadTask(db, leadId, `${held.calendar === "founder_callback" ? "[FOUNDER CALLBACK] " : ""}Confirm or decline the consultation requested for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}). Check your calendar first: no calendar is connected.`, 4);
         await notifyOwners(db, "voice_consultation", `${call.is_test ? "[TEST] " : ""}Consultation ${booking.status} by phone: ${a.name}, ${sched.labelOf(booking)}`, "consultation", booking.id);
         if (a.reminder_call_ok === "true" && isCallersOwn(call, phone)) await recordCallConsent(db, phone, "consultation_reminder", "caller_request", `call:${call.id}`);
         await mailConsultation(deps, booking, booking.status === "confirmed" ? "confirmed" : "requested");
-        return { booked: true, status: booking.status, when: sched.labelOf(booking), confirmation_code: booking.confirmation_code,
+        return { booked: true, status: booking.status, when: sched.labelOf(booking), confirmation_code: booking.confirmation_code, calendar: held.calendar,
           message: booking.status === "confirmed"
             ? `The consultation is booked for ${sched.labelOf(booking)}. Read the booking reference to the caller letter by letter.`
             : `The time is held for the caller. A team member will confirm it${booking.email ? " by email" : ""}. Read the booking reference to the caller letter by letter.` };
@@ -692,7 +712,7 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       }
       const missing = (["name", "phone", "topic"] as const).filter((k) => !a[k]);
       if (missing.length) throw new ValidationError(missing.map((k) => `${k} is required to book`));
-      const r = await runFunction(db, call, "book_consultation", { name: a.name, phone: a.phone, email: a.email, start_time: a.start_time, topic: a.topic, reminder_call_ok: a.reminder_call_ok }, deps);
+      const r = await runFunction(db, call, "book_consultation", { name: a.name, phone: a.phone, email: a.email, start_time: a.start_time, topic: a.topic, reminder_call_ok: a.reminder_call_ok, ...(a.wants_founder ? { wants_founder: true } : {}) }, deps);
       return { step: "booking", ...r };
     }
     case "send_customer_email": {

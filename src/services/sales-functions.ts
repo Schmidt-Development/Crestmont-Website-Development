@@ -30,6 +30,8 @@ import { effectivePrices, effectivePrice } from "./pricing-approvals.ts";
 import { intake } from "./contact-identity.ts";
 import { audit } from "./security.ts";
 import { addLeadNote, addLeadTask, redactSensitive } from "./voice-common.ts";
+import { routeCalendar, wantsFounderArg, CALENDAR_LABELS } from "../domain/calendars.ts";
+import { recordCallback, confirmedConsultation } from "./calendars.ts";
 import { loadVoiceConfig, toE164 } from "./voice-settings.ts";
 import * as sched from "./voice-scheduling.ts";
 import { sendMail, type MailerCtx } from "./mailer.ts";
@@ -100,6 +102,9 @@ const schemas = {
     email: v.email({ optional: true }),
     topic: v.string({ optional: true, min: 3, max: 500 }),
     prospect_agreed: v.enumOf(["true"] as const),
+    // Dual calendars (migration 0065): true ONLY when the prospect explicitly asked to speak with the Founder/owner.
+    // Missing or anything other than true → AI Follow-Up calendar (backwards compatible).
+    wants_founder: wantsFounderArg,
   }),
   record_do_not_call: v.object({
     lead_id: v.string({ optional: true, pattern: LEAD_ID }),
@@ -128,7 +133,7 @@ export function outboundFunctionContracts(): Record<SalesFunction, { fields: str
     create_checkout_session: ["lead_id", "package", "email", "buyer_confirmed"],
     check_payment_status: ["lead_id", "checkout_reference"],
     send_sales_email: ["lead_id", "email_type", "email", "package"],
-    schedule_sales_followup: ["lead_id", "followup_type", "start_time", "preferred_date", "preferred_time", "name", "email", "topic", "prospect_agreed"],
+    schedule_sales_followup: ["lead_id", "followup_type", "start_time", "preferred_date", "preferred_time", "name", "email", "topic", "prospect_agreed", "wants_founder"],
     record_do_not_call: ["lead_id", "phone", "also_stop_email"],
   };
   return Object.fromEntries(SALES_FUNCTIONS.map((k) => [k, { fields: all[k], required: fieldsOf(k) }])) as Record<SalesFunction, { fields: string[]; required: string[] }>;
@@ -150,7 +155,7 @@ export const OUTBOUND_FUNCTION_ENUMS: Record<string, Record<string, readonly str
   },
   create_checkout_session: { package: ["starter", "business", "premium"], buyer_confirmed: ["true"] },
   send_sales_email: { email_type: ["package_information", "checkout_link", "approved_quote", "consultation_confirmation", "follow_up", "onboarding_instructions"], package: ["starter", "business", "premium"] },
-  schedule_sales_followup: { followup_type: ["consultation", "staff_callback", "ai_follow_up_call"], preferred_time: ["morning", "afternoon", "evening", "any"], prospect_agreed: ["true"] },
+  schedule_sales_followup: { followup_type: ["consultation", "staff_callback", "ai_follow_up_call"], preferred_time: ["morning", "afternoon", "evening", "any"], prospect_agreed: ["true"], wants_founder: ["true", "false"] },
   record_do_not_call: { also_stop_email: ["true", "false"] },
 };
 
@@ -463,8 +468,12 @@ async function sendEmail(db: Db, deps: SalesFnDeps, b: Bound, a: { email_type: s
   return say(422, "Unsupported email type.");
 }
 
-async function scheduleFollowup(db: Db, deps: SalesFnDeps, b: Bound, a: { followup_type: string; start_time?: string; preferred_date?: string; preferred_time?: string; name?: string; email?: string; topic?: string }, now: Date): Promise<SalesFnResult> {
+async function scheduleFollowup(db: Db, deps: SalesFnDeps, b: Bound, input: { followup_type: string; start_time?: string; preferred_date?: string; preferred_time?: string; name?: string; email?: string; topic?: string; wants_founder?: boolean }, now: Date): Promise<SalesFnResult> {
   const leadId = b.row.lead_id;
+  // Dual calendars: the Founder calendar only on an explicit request (src/domain/calendars.ts). An automated AI call
+  // cannot be "the Founder", so a Founder request made as ai_follow_up_call becomes a Founder staff callback.
+  const route = routeCalendar({ wantsFounder: input.wants_founder, context: { channel: "outbound_sales", fn: "schedule_sales_followup", kind: input.followup_type } });
+  const a = route.calendar === "founder_callback" && input.followup_type === "ai_follow_up_call" ? { ...input, followup_type: "staff_callback" } : input;
   const open = await db.prepare(`SELECT id, status, due_at FROM sales_followups WHERE lead_id = ? AND kind = ? AND status IN ('scheduled','requested','pending_eligibility')`).bind(leadId, a.followup_type).first<{ id: string; status: string; due_at: string | null }>();
   if (open) return { status: 200, body: { scheduled: false, already_scheduled: true, status: open.status, message: "A follow-up of this kind is already arranged; no second one was created." } };
   const at = nowIso(() => now);
@@ -479,13 +488,16 @@ async function scheduleFollowup(db: Db, deps: SalesFnDeps, b: Bound, a: { follow
     const phone = b.facts.phoneE164;
     if (!phone || !cfg.scheduling.enabled || !cfg.timezone) return { status: 200, body: { scheduled: false, reason: "scheduling_disabled", message: "Consultations can't be booked by phone right now. Offer a staff callback instead." } };
     try {
-      const { booking, existing } = await sched.book(db, cfg, now, cal, { name: a.name ?? b.facts.contactName ?? b.facts.businessName ?? "Prospect", phone, email: a.email ?? null, startsAt: a.start_time, topic: a.topic ?? "Website project (outbound sales call)", leadId, callId: null, isTest: b.isTest, source: "ai_receptionist", checkExisting: true });
+      const { booking, existing } = await sched.book(db, cfg, now, cal, { name: a.name ?? b.facts.contactName ?? b.facts.businessName ?? "Prospect", phone, email: a.email ?? null, startsAt: a.start_time, topic: a.topic ?? "Website project (outbound sales call)", leadId, callId: null, isTest: b.isTest, source: "ai_receptionist", checkExisting: true, calendar: route });
       if (existing) return { status: 200, body: { scheduled: false, already_booked: true, message: "This business already has an upcoming consultation." } };
+      // Only a booking the database holds on the routed calendar is ever reported as scheduled.
+      const held = await confirmedConsultation(db, booking.id);
+      if (!held || held.calendar !== route.calendar) return { status: 200, body: { scheduled: false, reason: "not_recorded", message: "That booking could not be saved. Apologise and offer a staff callback instead." } };
       await db.prepare(`INSERT INTO sales_followups (id, lead_id, kind, status, due_at, consultation_id, provider_call_id, created_at, updated_at) VALUES (?,?, 'consultation', ?, ?, ?, ?, ?, ?)`)
         .bind(newId("sfu"), leadId, booking.status === "confirmed" ? "scheduled" : "requested", booking.starts_at, booking.id, b.providerCallId, at, at).run();
-      await addLeadNote(db, leadId, `Consultation ${booking.status} for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) on AI sales call ${b.row.id}`);
-      if (booking.status === "requested") await addLeadTask(db, leadId, `Confirm or decline the consultation requested for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) on an AI sales call.`, 4);
-      return { status: 200, body: { scheduled: true, confirmed: booking.status === "confirmed", status: booking.status, when: sched.labelOf(booking), confirmation_code: booking.confirmation_code,
+      await addLeadNote(db, leadId, `Consultation ${booking.status} for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) on AI sales call ${b.row.id} · calendar: ${CALENDAR_LABELS[held.calendar].name}`);
+      if (booking.status === "requested") await addLeadTask(db, leadId, `${held.calendar === "founder_callback" ? "[FOUNDER CALLBACK] " : ""}Confirm or decline the consultation requested for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) on an AI sales call.`, 4);
+      return { status: 200, body: { scheduled: true, confirmed: booking.status === "confirmed", status: booking.status, when: sched.labelOf(booking), confirmation_code: booking.confirmation_code, calendar: held.calendar,
         message: booking.status === "confirmed" ? `Booked for ${sched.labelOf(booking)}. Read the booking reference letter by letter.` : "The time is held, NOT confirmed. Say a team member will confirm it. Read the booking reference letter by letter." } };
     } catch (e) {
       if (!(e instanceof sched.SlotUnavailableError)) throw e;
@@ -497,19 +509,28 @@ async function scheduleFollowup(db: Db, deps: SalesFnDeps, b: Bound, a: { follow
   if (due && (Number.isNaN(due.getTime()) || due.getTime() < now.getTime() - 86_400_000 || due.getTime() > now.getTime() + 90 * 86_400_000)) return say(422, "The follow-up date must be within the next 90 days.");
   if (a.followup_type === "staff_callback") {
     const id = newId("sfu");
-    await db.prepare(`INSERT INTO sales_followups (id, lead_id, kind, status, due_at, notes, provider_call_id, created_at, updated_at) VALUES (?,?, 'staff_callback', 'scheduled', ?, ?, ?, ?, ?)`)
-      .bind(id, leadId, due?.toISOString() ?? null, a.topic ?? null, b.providerCallId, at, at).run();
     const hours = due ? Math.max(1, Math.round((due.getTime() - now.getTime()) / 3_600_000)) : 24;
-    await addLeadTask(db, leadId, `${b.isTest ? "[TEST] " : ""}Call ${b.facts.contactName ?? b.facts.businessName ?? "the prospect"} back${a.preferred_date ? ` on ${a.preferred_date}` : ""}${window ? ` (${window})` : ""} as agreed on AI sales call ${b.row.id}${a.topic ? `: ${a.topic}` : ""}.`, hours);
-    return { status: 200, body: { scheduled: true, followup_type: "staff_callback", when: a.preferred_date ?? null, message: "A team member will call back as agreed. Don't promise an exact time beyond what the prospect asked for." } };
+    // The follow-up, its CRM task and its calendar entry are one transaction, read back before anything is promised.
+    const entry = await recordCallback(db, { route, kind: "sales_staff_callback", source: "ai_sales", leadId, providerCallId: b.providerCallId, salesFollowupId: id, isTest: b.isTest,
+      dueAt: new Date(Date.now() + hours * 3_600_000),
+      extra: [db.prepare(`INSERT INTO sales_followups (id, lead_id, kind, status, due_at, notes, provider_call_id, created_at, updated_at) VALUES (?,?, 'staff_callback', 'scheduled', ?, ?, ?, ?, ?)`)
+        .bind(id, leadId, due?.toISOString() ?? null, a.topic ?? null, b.providerCallId, at, at)],
+      taskBody: `${b.isTest ? "[TEST] " : ""}Call ${b.facts.contactName ?? b.facts.businessName ?? "the prospect"} back${a.preferred_date ? ` on ${a.preferred_date}` : ""}${window ? ` (${window})` : ""} as agreed on AI sales call ${b.row.id}${a.topic ? `: ${a.topic}` : ""}.` });
+    return { status: 200, body: { scheduled: true, followup_type: "staff_callback", calendar: entry.calendar, when: a.preferred_date ?? null,
+      message: entry.calendar === "founder_callback"
+        ? "The request to speak with the Founder is recorded. Say the Founder or a team member will call back as agreed. Don't promise an exact time."
+        : "A team member will call back as agreed. Don't promise an exact time beyond what the prospect asked for." } };
   }
   // ai_follow_up_call: queued, but the full compliance gate runs again at dial time; nothing is promised as confirmed.
   const row = await enqueueSalesCall(db, leadId, { requestedBy: null, notBefore: due?.toISOString() ?? new Date(now.getTime() + 48 * 3_600_000).toISOString(), now, isTest: b.isTest }).catch(() => null);
   const status = row && row.status === "queued" && row.id !== b.row.id ? "pending_eligibility" : "requested";
-  await db.prepare(`INSERT INTO sales_followups (id, lead_id, kind, status, due_at, sales_call_id, notes, provider_call_id, created_at, updated_at) VALUES (?,?, 'ai_follow_up_call', ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(newId("sfu"), leadId, status, due?.toISOString() ?? null, row?.id ?? null, a.topic ?? null, b.providerCallId, at, at).run();
-  if (status === "requested") await addLeadTask(db, leadId, `${b.isTest ? "[TEST] " : ""}Prospect agreed to a follow-up call${a.preferred_date ? ` on ${a.preferred_date}` : ""}. An automated call could not be queued; call them personally.`, 48);
-  return { status: 200, body: { scheduled: true, followup_type: status === "pending_eligibility" ? "ai_follow_up_call" : "staff_callback", confirmed: false,
+  const sfuId = newId("sfu");
+  const entry = await recordCallback(db, { route, kind: "sales_ai_follow_up", source: "ai_sales", leadId, providerCallId: b.providerCallId, salesFollowupId: sfuId, isTest: b.isTest,
+    dueAt: status === "requested" ? new Date(Date.now() + 48 * 3_600_000) : due ?? new Date(now.getTime() + 48 * 3_600_000),
+    extra: [db.prepare(`INSERT INTO sales_followups (id, lead_id, kind, status, due_at, sales_call_id, notes, provider_call_id, created_at, updated_at) VALUES (?,?, 'ai_follow_up_call', ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(sfuId, leadId, status, due?.toISOString() ?? null, row?.id ?? null, a.topic ?? null, b.providerCallId, at, at)],
+    taskBody: status === "requested" ? `${b.isTest ? "[TEST] " : ""}Prospect agreed to a follow-up call${a.preferred_date ? ` on ${a.preferred_date}` : ""}. An automated call could not be queued; call them personally.` : null });
+  return { status: 200, body: { scheduled: true, calendar: entry.calendar, followup_type: status === "pending_eligibility" ? "ai_follow_up_call" : "staff_callback", confirmed: false,
     message: "Say someone from Crestmont will follow up around the time they asked. Do not promise an exact time." } };
 }
 

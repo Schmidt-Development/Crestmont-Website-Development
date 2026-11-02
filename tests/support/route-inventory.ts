@@ -593,6 +593,9 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/research/promote": staff(rolesWith("lead.write_all"), undefined, act("research.prospect_promoted")),
   "POST /staff/research/dismiss": staff(rolesWith("lead.write_all"), undefined, act("research.prospect_dismissed")),
   "POST /staff/voice/caller-erasure": staff(rolesWith("voice.manage"), undefined, act("voice.caller_data_erased")),
+  // Dual internal calendars (migration 0065): read-only staff views.
+  "GET /staff/calendars/ai-follow-up": staff(rolesWith("lead.read_all")),
+  "GET /staff/calendars/founder-callback": staff(rolesWith("voice.manage")),
 };
 
 export const routeKey = (method: string, pattern: string) => `${method} ${pattern}`;

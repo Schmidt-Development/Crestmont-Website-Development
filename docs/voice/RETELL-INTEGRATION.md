@@ -98,7 +98,8 @@ Configure every function: method **POST**, URL `https://<host>/api/webhooks/rete
 { "name": "request_callback", "description": "Ask a Crestmont team member to call the caller back. Use when the caller wants a person and no live transfer is available.",
   "parameters": { "type": "object", "required": ["name", "phone", "reason"], "properties": {
     "name": { "type": "string" }, "phone": { "type": "string" }, "reason": { "type": "string" },
-    "preferred_time": { "type": "string", "description": "Caller's preferred time, if any" } } } }
+    "preferred_time": { "type": "string", "description": "Caller's preferred time, if any" },
+    "wants_founder": { "type": "boolean", "description": "true ONLY if the caller explicitly asked to speak with the Founder/owner. Omit otherwise (AI Follow-Up calendar)." } } } }
 
 { "name": "route_support", "description": "Pass an existing customer's support issue to the support team. Never confirm whether an account exists.",
   "parameters": { "type": "object", "required": ["name", "email", "phone", "summary"], "properties": {
@@ -106,7 +107,8 @@ Configure every function: method **POST**, URL `https://<host>/api/webhooks/rete
 
 { "name": "escalate", "description": "Escalate anything complex, sensitive, urgent or outside your rules (refunds, contracts, project status, complaints, outages) to a person.",
   "parameters": { "type": "object", "required": ["reason"], "properties": {
-    "reason": { "type": "string" }, "name": { "type": "string" }, "phone": { "type": "string" } } } }
+    "reason": { "type": "string" }, "name": { "type": "string" }, "phone": { "type": "string" },
+    "wants_founder": { "type": "boolean", "description": "true ONLY if the caller explicitly asked to speak with the Founder/owner. Omit otherwise (AI Follow-Up calendar)." } } } }
 
 { "name": "get_business_hours", "description": "Get Crestmont's published business hours and whether the business is open right now.",
   "parameters": { "type": "object", "properties": {} } }
@@ -122,7 +124,8 @@ Configure every function: method **POST**, URL `https://<host>/api/webhooks/rete
     "name": { "type": "string" }, "phone": { "type": "string" }, "email": { "type": "string", "description": "Only if the caller gave one" },
     "start_time": { "type": "string", "description": "The exact start_time value of the chosen slot" },
     "topic": { "type": "string", "description": "What the caller wants to discuss" },
-    "reminder_call_ok": { "type": "boolean", "description": "true only if the caller explicitly agreed to a reminder call" } } } }
+    "reminder_call_ok": { "type": "boolean", "description": "true only if the caller explicitly agreed to a reminder call" },
+    "wants_founder": { "type": "boolean", "description": "true ONLY if the caller explicitly asked to speak with the Founder/owner. Omit otherwise (AI Follow-Up calendar)." } } } }
 
 { "name": "lookup_consultation", "description": "Check an existing consultation. Needs the booking reference and the phone number used to book.",
   "parameters": { "type": "object", "required": ["confirmation_code", "phone"], "properties": { "confirmation_code": { "type": "string" }, "phone": { "type": "string" } } } }
@@ -195,3 +198,21 @@ Activating a configuration version (or *Push active version to Retell*) calls `G
 - Concurrency (20 per pay-as-you-go workspace; no published API rate limit): https://docs.retellai.com/deploy/concurrency.md
 - Data storage settings: https://docs.retellai.com/accounts/privacy-disable.md
 - Not verified from docs (isolated in code, see report): exact meanings of create-phone-call 402/422 responses; whether `transfer_*` events include `start_timestamp` on every plan.
+
+## Dual internal calendars (migration 0065)
+
+Every callback, escalation callback, support callback and consultation the receptionist (or the outbound sales agent) records
+lands on exactly one staff-only calendar. Rules: `src/domain/calendars.ts`.
+
+| Calendar | Used for | Staff view |
+|---|---|---|
+| A — AI Follow-Up (`ai_follow_up`) | Everything by default: routine callbacks, follow-up calls, questions, qualification, reminders, consultations | `/staff/calendars/ai-follow-up` (Owner, Administrator) |
+| B — Founder Callback (`founder_callback`) | ONLY when the caller explicitly asked to speak with the Founder (`wants_founder: true`, stored reason `customer_requested_founder`), or a Founder-approved escalation rule applies (`rule:<id>`; the approved list is **empty**) | `/staff/calendars/founder-callback` (Owner) |
+
+`wants_founder` is an optional boolean on `request_callback`, `escalate`, `book_consultation`, `schedule_consultation`
+(and `schedule_sales_followup` outbound). Missing, false or any non-boolean value means AI Follow-Up: existing Retell
+configurations keep working unchanged. The database rejects a Founder entry without a reason. The task and its calendar
+entry are written in one transaction and read back before the agent is told anything was recorded; a booking is reported
+only after the database confirms it on the routed calendar. To use Calendar B, the live Retell tools must add the
+`wants_founder` parameter and the Founder's live prompt must say when to set it; this repository does not overwrite the
+live prompt.
