@@ -33,6 +33,8 @@ import { buildCheckpoint, restoreCheckpoint } from "./checkpoint.ts";
 import type { StarterSpec, CheckOutcome, CheckExecutor } from "./checks.ts";
 import { previewKey, planGatedPreview, applyGatedPreview } from "./preview-gate.ts";
 import { starterDir, loadStarter, copyStarter, acceptanceCommands, runChecks, previewConfigProblems, restoreProtectedFiles, briefConformance, isolationCheck, credentialScan, previewName, PREVIEW_NAME, PREVIEW_EXPORT_STRIP } from "./checks.ts";
+import { contractCheck } from "./contracts-check.ts";
+import { persistenceCheck } from "./persistence-check.ts";
 import { writeBriefFiles, systemPromptAppend, phasePrompt } from "./prompt.ts";
 import type { Phase } from "./prompt.ts";
 import { readRequirements, checkRequirements, readStringList, readAgentReport } from "./requirements.ts";
@@ -621,6 +623,15 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         const bc = briefConformance(ws!.repo, { businessName: b.name, publicEmail: b.publicEmail, publicPhone: b.publicPhone });
         if (bc) out.push(bc);
       }
+      // Cross-file contracts: the generated pages, scripts and server must agree about element ids, form field names
+      // and endpoint paths. Both confirmed quote-form failures were disagreements of exactly this kind, and each one
+      // left every other check passing, so this runs for every project.
+      const cc = contractCheck(ws!.repo);
+      if (cc) out.push(cc);
+      // A success message must be backed by a durable write. One shipped build logged the quote to the console and
+      // answered {saved:true} while telling visitors "Submissions are stored by our system".
+      const pc = persistenceCheck(ws!.repo);
+      if (pc) out.push(pc);
       // Customer-owned credentials never live in the website's source (only file:line is reported, never the value).
       const listed = await run("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: ws!.repo, env: { PATH: cfg.agentPath, HOME: ws!.home, GIT_CONFIG_NOSYSTEM: "1" }, timeoutMs: 60_000 });
       if (listed.code === 0) out.push(credentialScan(ws!.repo, listed.stdout.split("\0")));
