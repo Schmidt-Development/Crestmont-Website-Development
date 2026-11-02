@@ -1092,7 +1092,7 @@ test("[PAY-008] [PAY-003] Stripe test mode: a disputed payment reaches staff Dis
 // phone call, so the journeys look for such a call made recently and verify what it produced, end to end, through the
 // Owner's pages. Synthetic or signed-fixture calls are flagged as test calls and never count.
 const REAL_CALL_DAYS = 7;
-let receptionistCall: { url: string; leadId: string; started: string } | null = null;
+let receptionistCall: { url: string; leadId: string; started: string; followUp: boolean } | null = null;
 const parseShown = (s: string) => new Date(s.replace(/,(?=\s\d{1,2}:)/, "")).getTime(); // "Nov 1, 2026, 5:39 PM EST"
 
 journey(27, ["VOICE-003"], "AI receptionist captures a lead from a real test call (live Retell agent, signed webhooks)", {}, async (t) => {
@@ -1114,11 +1114,11 @@ journey(27, ["VOICE-003"], "AI receptionist captures a lead from a real test cal
     assert.ok(lead, `the call links its lead: ${detail.slice(0, 300)}`);
     assert.doesNotMatch(detail, /Test call/, "a real call, not a test fixture");
     assert.doesNotMatch(detail, /Outcome\s+Error/i, "the call did not end in an error");
-    receptionistCall = { url, leadId: lead![1], started };
+    receptionistCall = { url, leadId: lead![1], started, followUp: /fn:(request_callback|schedule_consultation|escalate)\b/.test(detail) };
     break;
   }
   if (!receptionistCall) {
-    t.skip(`needs a real test call (Founder action): no real Retell receptionist call with a captured lead in the last ${REAL_CALL_DAYS} days on staging. Call the staging receptionist number (…2055), give a name and what you need, then re-run`);
+    t.skip(`needs a real test call (Founder action): no real Retell receptionist call with a captured lead in the last ${REAL_CALL_DAYS} days on staging. Call the staging receptionist number (…2055), give a name and what you need and ask for a callback, then re-run`);
     return;
   }
   console.log(`journey 27: real receptionist call ${receptionistCall.url} started ${receptionistCall.started} → lead ${receptionistCall.leadId}`);
@@ -1131,11 +1131,19 @@ journey(28, ["CRM-007"], "the real call's lead appears in the CRM with its sourc
   const lead = await text(o);
   assert.match(lead, /Source\s+Ai receptionist/i, "lead source is the AI receptionist");
   assert.match(lead, /Lead captured by AI receptionist/i, "call activity on the lead");
-  // Dual calendars (when deployed): a callback or booking the caller asked for sits on the AI Follow-Up calendar unless
-  // the caller explicitly asked for the Founder.
-  const cal = await o.goto(`${BASE}/staff/calendars/ai-follow-up`);
-  if (cal?.status() === 200 && new RegExp(esc(receptionistCall!.leadId)).test(await o.content())) {
-    console.log(`journey 28: the call's follow-up is on the AI Follow-Up calendar`);
+  // Dual calendars: a callback, booking or escalation the caller asked for is routed to exactly one internal calendar,
+  // AI Follow-Up unless the caller explicitly asked for the Founder (src/domain/calendars.ts).
+  const onCalendar = async (slug: string) => {
+    const r = await o.goto(`${BASE}/staff/calendars/${slug}`);
+    if (r?.status() === 404) return null;
+    return o.locator(`main a[href="/staff/crm/leads/${receptionistCall!.leadId}"]`).count();
+  };
+  const ai = await onCalendar("ai-follow-up"), founder = await onCalendar("founder-callback");
+  if (ai === null || founder === null) console.log("journey 28: the dual calendars are not deployed on staging yet; calendar routing not checked");
+  else if (!receptionistCall!.followUp) console.log("journey 28: the call asked for no callback or booking; calendar routing not exercised by this call");
+  else {
+    assert.equal((ai > 0 ? 1 : 0) + (founder > 0 ? 1 : 0), 1, `the requested follow-up is on exactly one calendar (AI Follow-Up: ${ai}, Founder Callback: ${founder})`);
+    console.log(`journey 28: the requested follow-up is on the ${ai ? "AI Follow-Up" : "Founder Callback"} calendar`);
   }
   assertClean();
 });
