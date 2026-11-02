@@ -14,6 +14,7 @@
 // Nothing here deploys by itself: without a runner configured with PRODUCTION_DEPLOY_COMMAND nothing is claimed.
 
 import type { Db } from "../lib/db.ts";
+import { openMaintenanceActivation } from "./maintenance-lifecycle.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import type { AppContext } from "../app/context.ts";
 import { HttpError } from "../app/http.ts";
@@ -252,6 +253,8 @@ export async function completeDeployment(db: Db, b: Record<string, unknown>, mai
     }
   }
   await audit(db, { actorKind: "system", action: verified ? "builds.site_release_live" : "builds.site_release_failed", subjectType: "project", subjectId: d.project_id, organizationId: d.organization_id, details: { deploymentId: d.id, version: d.version, state: to } });
+  // FD-27: the first verified live release (it requires the customer's final launch approval) opens the maintenance activation.
+  if (verified) await openMaintenanceActivation(db, mail ?? null, d.project_id, "release_live");
   if (verified && mail) await notifyCustomer(mail, d.project_id, { kind: "project", mail: { template: "project_update", data: { event: "site_released", version: d.version, siteUrl: d.hostname ? `https://${d.hostname}` : null } }, path: `/portal/projects/${d.project_id}`, key: `siterel:${d.id}` });
   return { state: to };
 }

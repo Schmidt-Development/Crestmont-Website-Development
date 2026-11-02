@@ -20,10 +20,12 @@ export type Permission =
   // Test-only payment simulation (internal E2E benchmarks; refused in production)
   | "payments.simulate"
   // AI Sales Optimization: view (owner/admin) and the Founder-only decisions (approve, production deploy/rollback, activation)
-  | "salesopt.read" | "salesopt.decide";
+  | "salesopt.read" | "salesopt.decide"
+  // Hosting suspension and restoration after an unresolved failed payment (Founder clarifications 1–2): Founder-only
+  | "hosting.suspend";
 
 const OWNER_ONLY: Permission[] = ["refund.decide", "refund.issue", "pricing.change", "release.approve_production",
-  "release.deploy_production", "security.exception", "builds.configure", "ai.budget", "payments.simulate", "salesopt.decide"];
+  "release.deploy_production", "security.exception", "builds.configure", "ai.budget", "payments.simulate", "salesopt.decide", "hosting.suspend"];
 
 const ALL_STAFF: Permission[] = ["readiness.read"];
 

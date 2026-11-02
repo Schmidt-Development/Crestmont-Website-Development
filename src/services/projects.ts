@@ -1,6 +1,7 @@
 // Project delivery service (PM-001..PM-007, PORTAL-003/006/007/010, EMP-003).
 // All lifecycle changes go through the validated state machine in src/domain/project.ts.
 import type { AppContext } from "../app/context.ts";
+import { openMaintenanceActivation } from "./maintenance-lifecycle.ts";
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { audit } from "./security.ts";
@@ -317,6 +318,8 @@ export async function recordDeployment(ctx: MailCtx, actor: Actor, projectId: st
     ctx.db.prepare(`UPDATE projects SET live_url = ?, updated_at = ? WHERE id = ?`).bind(url, nowIso(), projectId),
   ]);
   await audit(ctx.db, { actorUserId: actor.userId, action: "deployment.recorded", subjectType: "project", subjectId: projectId, organizationId: p.organization_id, details: { deploymentId: id, url, commitSha } });
+  // FD-27: the launch (release readiness includes the customer's final launch approval) opens the maintenance activation.
+  await openMaintenanceActivation(ctx.db, ctx, projectId, "deployment_recorded");
   return id;
 }
 
