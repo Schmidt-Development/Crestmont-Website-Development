@@ -107,15 +107,16 @@ export async function confirmEmailChange(ctx: MailCtx & { ip?: string | null }, 
   return { userId: req.user_id, newEmail: req.new_email };
 }
 
-// ───────────── CREST-GAP-072: two-factor reminder for customer administrators ─────────────
-// Founder default: MFA stays optional for customers, but administrators (who approve scope and pay) are prompted to
-// enrol with a dismissible portal notice. Staff and Owner MFA remains mandatory (src/domain/authz.ts).
+// ───────────── CREST-GAP-072 / FD-30: two-factor notice for customer administrators ─────────────
+// Founder decision FD-30 (supersedes the CREST-GAP-072 "prompt, not require" default): customer administrators must
+// use MFA. Until they enrol, the portal shows a notice that can no longer be dismissed, and administrator actions are
+// refused (src/app/app.ts, src/domain/authz.ts). Customer members keep MFA optional. Staff and Owner MFA is mandatory.
 
 export const MFA_REMINDER = "customer_admin_mfa";
 
 export async function shouldShowMfaReminder(db: Db, user: { id: string; mfaEnabled: boolean; isStaff: boolean }, role: string): Promise<boolean> {
-  if (user.isStaff || user.mfaEnabled || role !== "customer_admin") return false;
-  return !(await db.prepare(`SELECT 1 FROM user_notice_dismissals WHERE user_id = ? AND notice = ?`).bind(user.id, MFA_REMINDER).first());
+  void db; // FD-30: a dismissal recorded earlier no longer hides the notice (enrolment is required, not recommended)
+  return !(user.isStaff || user.mfaEnabled || role !== "customer_admin");
 }
 
 export async function dismissMfaReminder(db: Db, userId: string, ip: string | null = null): Promise<void> {

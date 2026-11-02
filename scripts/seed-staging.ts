@@ -51,12 +51,14 @@ const pm = await staff("project_manager", "Preview Project Manager");
 const support = await staff("support", "Preview Support");
 
 async function customer(orgName: string, person: string, slug: string) {
-  const uid = newId("usr"), org = newId("org"), password = randomToken(9);
+  // Founder decision FD-30: customer administrators must use MFA, so demo customer administrators are enrolled too
+  // (scripts/staging-access.ts re-issues the setup key from ACCESS_ROOT_KEY like the staff ones).
+  const uid = newId("usr"), org = newId("org"), password = randomToken(9), totp = newTotpSecret();
   const em = `${slug}@${DOMAIN}`;
-  db.raw.prepare(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, created_at) VALUES (?,?,?,?,?,?)`).run(uid, em, person, await hashPassword(password), iso(), iso(20));
+  db.raw.prepare(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, totp_secret, mfa_enabled, created_at) VALUES (?,?,?,?,?,?,1,?)`).run(uid, em, person, await hashPassword(password), iso(), totp, iso(20));
   db.raw.prepare(`INSERT INTO organizations (id, name, kind, created_at) VALUES (?,?,'customer',?)`).run(org, orgName, iso(20));
   db.raw.prepare(`INSERT INTO memberships (id, user_id, organization_id, role_id, created_at) VALUES (?,?,?,'customer_admin',?)`).run(newId("mbr"), uid, org, iso(20));
-  creds.push({ role: "customer_admin", email: em, password, totp: null, note: `Customer portal — ${orgName}` });
+  creds.push({ role: "customer_admin", email: em, password, totp, note: `Customer portal — ${orgName}` });
   return { uid, org, actor: { kind: "user", userId: uid, roles: [{ role: "customer_admin", organizationId: org }], mfaVerified: true } as Actor };
 }
 const harbor = await customer("Sample — Harbor Dental Studio", "Dana (sample customer)", "customer.harbor");

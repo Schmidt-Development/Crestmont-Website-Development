@@ -35,8 +35,10 @@ test("[INFRA-002] staging seed applies cleanly on a migrated database and demo a
     assert.match(await (await o.get("/staff/crm")).text(), /Sample — Northside Bakery|Morgan Sample/);
     assert.match(await (await o.get("/staff/projects")).text(), /Sample — Harbor Dental Studio/);
     // Customer: portal modules render and show their own sample project only.
-    const [, custEmail, custPw] = accounts.find((a) => a[1].startsWith("customer.harbor"))!;
-    const c = await new TestClient(env).login(custEmail, custPw);
+    // FD-30: demo customer administrators are enrolled in MFA, so they have a setup key like staff.
+    const [, custEmail, custPw, custTotp] = accounts.find((a) => a[1].startsWith("customer.harbor"))!;
+    assert.match(custTotp ?? "", /^[A-Z2-7]{32}$/, "customer administrator has a 2FA setup key");
+    const c = await new TestClient(env).login(custEmail, custPw, custTotp);
     for (const i of portalNav({} as never).flatMap((g) => g.items)) assert.equal((await c.get(i.href)).status, 200, i.href);
     const projects = await (await c.get("/portal/projects")).text();
     assert.match(projects, /Harbor Dental/);

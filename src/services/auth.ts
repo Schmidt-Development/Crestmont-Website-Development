@@ -221,7 +221,8 @@ export async function login(db: Db, emailRaw: string, password: string, meta: { 
   await db.prepare(`INSERT INTO sessions (id, user_id, token_hash, mfa_verified, ip, user_agent, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?)`)
     .bind(newId("ses"), u.id, await hashToken(token), 0, meta.ip, meta.userAgent?.slice(0, 300) ?? null, nowIso(), new Date(Date.now() + maxAge * 1000).toISOString()).run();
   await audit(db, { actorUserId: u.id, action: "session.created", subjectType: "user", subjectId: u.id, ip: meta.ip });
-  // Staff must complete MFA (enrol if needed); customers only if they enabled it.
+  // Staff must complete MFA (enrol if needed); customers only if they enabled it. A customer administrator without an
+  // authenticator signs in with the password and is held to member permissions until they enrol (FD-30, app.ts).
   return { status: "ok", sessionToken: token, userId: u.id, mfaRequired: staff || !!u.totp_secret, maxAge };
 }
 
@@ -251,10 +252,15 @@ export async function loadSession(db: Db, token: string | undefined, opts: { pas
     id: s.user_id, email: s.email, displayName: s.display_name, emailVerified: !!s.email_verified_at, mfaEnabled: !!s.totp_secret,
     memberships: memberships.map((m) => ({ organizationId: m.organization_id, organizationName: m.name, role: m.role_id })), isStaff,
   };
-  // Customers without MFA enabled are treated as fully verified for their own customer roles.
-  const effectiveMfa = mfaVerified || (!isStaff && !s.totp_secret);
-  const actor: Actor = { kind: "user", userId: s.user_id, roles: memberships.map((m) => ({ role: m.role_id, organizationId: m.organization_id })), mfaVerified: effectiveMfa };
-  return { user, actor, sessionId: s.id, mfaVerified: effectiveMfa, mfaVerifiedAt: s.mfa_verified ? s.mfa_verified_at : null };
+  // Sign-in is complete when every factor the account has was presented: a customer without MFA has only the password.
+  const signInComplete = mfaVerified || (!isStaff && !s.totp_secret);
+  // Founder decision FD-30: customer administrators must use MFA. Their actor counts as MFA-verified only after a real
+  // second factor in this session; until then src/domain/authz.ts#can grants them member permissions only, and
+  // src/app/app.ts sends any other state-changing request to enrolment. Customer members keep MFA optional.
+  const isCustomerAdmin = memberships.some((m) => m.role_id === "customer_admin");
+  const actorMfa = mfaVerified || (!isStaff && !isCustomerAdmin && !s.totp_secret);
+  const actor: Actor = { kind: "user", userId: s.user_id, roles: memberships.map((m) => ({ role: m.role_id, organizationId: m.organization_id })), mfaVerified: actorMfa };
+  return { user, actor, sessionId: s.id, mfaVerified: signInComplete, mfaVerifiedAt: s.mfa_verified ? s.mfa_verified_at : null };
 }
 
 // ── Second factor: TOTP (encrypted at rest) and single-use recovery codes (AUTH-002, AUTH-003) ──
