@@ -100,6 +100,7 @@ export function auditScenarios(w: World): Scenario[] {
   const NEWPW = "a-brand-new-password-123";
   let simOrg: { id: string; organizationId: string } | undefined;
   let simInvoice: string | undefined;
+  let hostingSub: string | undefined;
   const spareAs = () => ({ c: spare.c, id: spare.id });
   return [
     // ── Authentication flow and account (a dedicated spare customer, so tenant A is unaffected) ──
@@ -451,6 +452,15 @@ export function auditScenarios(w: World): Scenario[] {
 
     // ── AI Builds (owner controls) ──
     { key: "POST /staff/ai/budget", fields: () => ({ monthly_budget_usd: "25" }) },
+    // Founder clarifications 1–2: a fictional organization whose failed payment is past the seven-day threshold after notice.
+    { key: "POST /staff/billing/hosting/suspend", setup: async () => {
+      const org = await createCustomer(w.db, `hosting-${Date.now()}@matrix.example`, "Matrix Hosting Test Org");
+      hostingSub = newId("sub");
+      const old = new Date(Date.now() - 9 * 86_400_000).toISOString(), eligible = new Date(Date.now() - 2 * 86_400_000).toISOString();
+      await w.db.prepare(`INSERT INTO subscriptions (id, organization_id, product_id, stripe_subscription_id, status, payment_failed_at, suspension_eligible_at, suspension_reminder_sent_at, created_at, updated_at) VALUES (?,?,'essential',?,'past_due',?,?,?,?,?)`)
+        .bind(hostingSub, org.organizationId, `sub_matrix_${hostingSub}`, old, eligible, old, old, nowIso()).run();
+    }, fields: () => ({ subscription_id: hostingSub!, reason: "Matrix: unpaid for nine days after notice" }) },
+    { key: "POST /staff/billing/hosting/restore", fields: () => ({ subscription_id: hostingSub!, reason: "Matrix: payment arrangement agreed" }) },
     // Test-only payment simulation: a fresh fictional organization (the tenants have real Stripe payments and are refused).
     { key: "POST /staff/test-payments/organizations/:id/mark", setup: async () => {
       simOrg = await createCustomer(w.db, `sim-${Date.now()}@matrix.example`, "Matrix Simulation Test Org");

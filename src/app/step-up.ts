@@ -20,6 +20,9 @@ export const STEP_UP_ROUTES: Readonly<Record<string, string>> = {
   // Refund and payout decisions (Founder-protected)
   "POST /staff/refunds/:id/decide": "refund decision",
   "POST /staff/refunds/:id/issue": "refund payout",
+  // Hosting suspension decisions (Founder clarifications 1–2)
+  "POST /staff/billing/hosting/suspend": "hosting suspension",
+  "POST /staff/billing/hosting/restore": "hosting restoration",
   // Integration / secret-bearing settings
   "POST /staff/integrations/:name/verify": "integration credential probe",
   "POST /staff/ops/environments": "environment endpoints",

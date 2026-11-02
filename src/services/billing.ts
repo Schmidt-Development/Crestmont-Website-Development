@@ -5,7 +5,8 @@ import type { AppContext } from "../app/context.ts";
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { HttpError, securityHeaders } from "../app/http.ts";
-import { PACKAGES, MAINTENANCE_PLANS, PricingError, assertPlanMeetsMinimum, type PackageId, type MaintenanceId, type MaintenanceDef } from "../domain/catalog.ts";
+import { PACKAGES, MAINTENANCE_PLANS, PricingError, assertPlanMeetsMinimum, isMaintenanceId, type PackageId, type MaintenanceId, type MaintenanceDef } from "../domain/catalog.ts";
+import { maintenanceCheckoutBlock } from "./maintenance-lifecycle.ts";
 import { createPackageOrder } from "./commerce.ts";
 import { audit } from "./security.ts";
 import { sendMail } from "./mailer.ts";
@@ -186,6 +187,8 @@ export async function startMaintenanceCheckout(ctx: AppContext, user: CheckoutUs
     throw new HttpError(409, `${plan.name} maintenance cannot be purchased yet: its entitlements are proposed and awaiting Founder approval. Contact us and we will let you know when plans open.`);
   }
   if (!ctx.payments.configured) throw new HttpError(409, NOT_CONFIGURED);
+  // FD-26/FD-27: a package customer subscribes only after launch, and only to the committed plan or a higher one.
+  if (isMaintenanceId(plan.id)) { const block = await maintenanceCheckoutBlock(ctx.db, organizationId, plan.id); if (block) throw new HttpError(409, block); }
   const existing = await ctx.db.prepare(`SELECT id FROM subscriptions WHERE organization_id = ? AND product_id = ? AND status IN ('active','trialing','past_due')`).bind(organizationId, plan.id).first();
   if (existing) throw new HttpError(409, `You already have an active ${plan.name} plan. Manage it from Billing.`);
   const monthly = pricedItem("maintenance", plan.id) ? (await effectivePrice(ctx.db, "maintenance", plan.id, ctx.now())).cents : plan.monthlyCents; // CAT-007 effective price
