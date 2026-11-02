@@ -116,10 +116,10 @@ test("[SEC-006] [SEC-005] FD-38: the IP rule clears old IPs on sessions, securit
   await assert.rejects(t.db.prepare(`UPDATE audit_logs SET ip = NULL, details_json = '{}' WHERE action = 'fixture.old'`).run(), /append-only/);
   await assert.rejects(t.db.prepare(`DELETE FROM audit_logs WHERE action = 'fixture.old'`).run(), /append-only/);
 
-  const unset = await runRetention({ db: t.db });
+  const unset = await runRetention({ db: t.db, storage: null });
   assert.equal(unset.find((r) => r.category === "raw_ips")!.mode, "skipped", "nothing happens until the Owner applies the period");
   await t.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('retention.raw_ip_days', '90', ?)`).bind(nowIso()).run();
-  const res = (await runRetention({ db: t.db })).find((r) => r.category === "raw_ips")!;
+  const res = (await runRetention({ db: t.db, storage: null })).find((r) => r.category === "raw_ips")!;
   assert.equal(res.affected, 3);
   assert.equal((await one<{ ip: string | null }>(t.db, `SELECT ip FROM sessions WHERE id = 'ses_old'`)).ip, null);
   assert.equal((await one<{ ip: string | null }>(t.db, `SELECT ip FROM sessions WHERE id = 'ses_new'`)).ip, "203.0.113.7");
