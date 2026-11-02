@@ -177,6 +177,7 @@ export async function mergeLeads(db: Db, actor: Actor, sourceId: string, targetI
     db.prepare(`UPDATE quotes SET lead_id = ? WHERE lead_id = ?`).bind(targetId, sourceId),
     db.prepare(`UPDATE orders SET lead_id = ? WHERE lead_id = ?`).bind(targetId, sourceId),
     db.prepare(`UPDATE calls SET lead_id = ? WHERE lead_id = ?`).bind(targetId, sourceId),
+    db.prepare(`UPDATE calendar_callbacks SET lead_id = ? WHERE lead_id = ?`).bind(targetId, sourceId),
     db.prepare(`UPDATE lead_request_details SET lead_id = ? WHERE lead_id = ? AND NOT EXISTS (SELECT 1 FROM lead_request_details WHERE lead_id = ?)`).bind(targetId, sourceId, targetId),
     db.prepare(`UPDATE assignments SET ended_at = ? WHERE subject_type = 'lead' AND subject_id = ? AND ended_at IS NULL`).bind(at, sourceId),
   ];

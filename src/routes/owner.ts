@@ -111,7 +111,7 @@ export function register(r: Router): void {
     ];
     const anyUnknown = tiles.some((t) => t.value === UNKNOWN_FAILED);
 
-    return htmlResponse(ctx, appLayout(ctx, { title: "Executive overview", nav: staffNav(ctx), home: "/staff", area: "Owner command center" }, html`${pageHead("Executive overview", linkButton("Launch readiness", "/staff/readiness", "secondary", "sm"), `As of ${formatDateTime(ctx.now().toISOString())}`)}
+    return htmlResponse(ctx, appLayout(ctx, { title: "Executive overview", nav: staffNav(ctx), home: "/staff", area: "Owner command center" }, html`${pageHead("Executive overview", html`${linkButton("Launch readiness", "/staff/readiness", "secondary", "sm")} ${linkButton("Founder Callback calendar", "/staff/calendars/founder-callback", "ghost", "sm")} ${linkButton("AI Follow-Up calendar", "/staff/calendars/ai-follow-up", "ghost", "sm")}`, `As of ${formatDateTime(ctx.now().toISOString())}`)}
 <p class="muted">Every figure is computed from stored records at page load. Select a figure for its detail page. Zero means no matching record exists; nothing here is estimated.</p>
 ${anyUnknown ? alert("warn", html`<strong>Some figures could not be computed.</strong> A tile showing “${UNKNOWN_FAILED}” had a database error; it was recorded under <a href="/staff/monitoring">Monitoring</a> (server error log). The figure is unknown, not zero.`) : ""}
 <div class="grid grid-4 kpis exec-grid">${tiles.map(tile)}</div>

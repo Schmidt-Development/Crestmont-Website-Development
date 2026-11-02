@@ -116,7 +116,7 @@ everything. Recommended order (each step re-checked against `main` before mergin
 2. **#109** batch 1 + FD-45 (independent of #108; no conflicts verified with `git merge-tree`).
 3. **FD27** (stacked on #108 — rebase on `main` after #108 merges; migration 0066).
 4. **B2** batch 2 (migration 0067; independent).
-5. **#112** FD-13 (migration 0068). 6. **#113** FD-16 (migration 0069). 7. **#114** dual calendars (migration 0065).
+5. **#112** FD-13 (migration 0068). 6. **#113** FD-16 (migration 0069). 7. **#114** dual calendars (migration 0083, was 0065).
 8. **#115** FD-30 MFA — **last**; stacked on #110 (its conflict with #108's checkout tests is already resolved there);
    retarget to `main` after #110 merges. It changes how every customer admin signs in, including staging demo admins.
 
