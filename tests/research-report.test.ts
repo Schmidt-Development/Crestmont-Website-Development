@@ -1,4 +1,4 @@
-// Research metric samples (migration 0064) and the 24-hour report arithmetic. The report is what the Founder will
+// Research metric samples (migration 0070) and the 24-hour report arithmetic. The report is what the Founder will
 // judge a proof run by, so these tests pin the two things that could quietly mislead: a rate claimed for time that
 // was never observed, and funnel stages being added together. All data here is TEST DATA.
 import { test } from "node:test";
@@ -259,7 +259,7 @@ test("[AIOPS-001] a window crossing midnight counts the new day's progress inste
 
 test("[AIOPS-001] a missing samples table never stops the worker: the heartbeat still returns its controls", async () => {
   const app = await createTestApp();
-  // Simulates a Worker deployed ahead of migration 0064. Telemetry is expendable; the controls are not.
+  // Simulates a Worker deployed ahead of migration 0070. Telemetry is expendable; the controls are not.
   await app.db.prepare(`DROP TABLE research_runner_samples`).run();
   const controls = await heartbeat(app.db, { runnerId: "research-node1", version: "0.1.0", status: { day: "2026-11-02", evaluated: 7 } }, new Date("2026-11-02T09:00:00Z"));
   assert.equal(controls.paused, true, "research ships paused, and the worker is still told so");

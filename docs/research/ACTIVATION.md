@@ -24,7 +24,7 @@ Everything that could be prepared without Node 1 has been (see "What is ready" b
 remains, and only the first two need a person at the keyboard.
 
 1. **Merge the research branch to `main`** (`claude/eager-babbage-coz56n`). This matters for a reason beyond code
-   shipping: merging to `main` deploys **staging**, which applies **migration 0064** and creates
+   shipping: merging to `main` deploys **staging**, which applies **migration 0070** and creates
    `research_runner_samples`. Without that table there is no 15-minute metric series, so a 24-hour report can show
    end-of-day totals and delivery times but **not hourly throughput, the peak sustained hour, or the best and worst
    periods** — which is most of what the proof run is for. No pull request was opened and nothing was merged: that is
@@ -71,7 +71,7 @@ is not shared today, which is why this one could not.
   Ollama use against the Website Builder's RTX 5090. The documented path is now explicitly model-free, the installer
   prints which mode it configured, and `settings.env` now carries `HTTP_CONCURRENCY` and the GPU-guard settings so
   they can be tuned without editing code.
-- **A metric series and a report.** Migration 0064 plus `scripts/research-24h-report.ts` and the
+- **A metric series and a report.** Migration 0070 plus `scripts/research-24h-report.ts` and the
   `Research performance report` workflow. The report keeps every funnel stage separate, derives rates only from time
   it actually observed, handles the UTC day boundary and counter resets, refuses to state a daily figure for an
   unfinished window, and names the limiting factor (no worker / paused / credentials refused / delivery backlog /

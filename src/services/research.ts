@@ -121,7 +121,7 @@ export async function heartbeat(db: Db, body: Record<string, unknown>, now: Date
   // Time series for the 24-hour measurement: hourly / peak / worst-period rates cannot be derived from the two tables
   // above (latest-only and per-day). Last heartbeat in each 15-minute bucket wins. Written OUTSIDE the batch above
   // and best-effort on purpose: the heartbeat's real job is to hand the worker its controls, and losing a telemetry
-  // row (for example a Worker deployed ahead of migration 0064) must never stop research from running. A gap shows
+  // row (for example a Worker deployed ahead of migration 0070) must never stop research from running. A gap shows
   // up honestly in the report, which says "no worker samples in the window" rather than inventing a rate.
   try { await sampleStatement(db, runnerId, day, at, now, status).run(); }
   catch { /* telemetry only; the controls below are what the worker needs */ }

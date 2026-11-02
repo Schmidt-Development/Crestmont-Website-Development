@@ -1,4 +1,7 @@
--- Research worker metric samples, numbered 0064 (0063 is the quality engine). Additive: one new table, one index.
+-- Research worker metric samples, numbered 0070. 0063 is the last on main; 0064-0069 are claimed by open PRs
+-- (#108 order maintenance commitment, #114 dual calendars, #110 launch billing, #111 Founder decisions batch 2,
+-- #112 portfolio consent, #113 payment exception). Migration prefixes must be unique (tests/ops-closeout.test.ts),
+-- and D1 applies by name, so the relative order does not matter. Additive: one new table, one index.
 --
 -- Why this exists: research_runners keeps only the worker's LATEST status, and research_runner_days only a per-day
 -- cumulative total. Neither can answer "what was the throughput in hour 7", "what was the peak sustained hour" or

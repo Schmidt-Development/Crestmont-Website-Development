@@ -8,7 +8,7 @@
 //     worker's own UTC day, so progress is the sum of positive differences between consecutive samples of the same
 //     (runner, day). Nothing is extrapolated from a partial window: `complete` says whether 24 hours really elapsed.
 
-/** One row of research_runner_samples (migration 0064). */
+/** One row of research_runner_samples (migration 0070). */
 export interface SampleRow {
   bucket: string; runner_id: string; at: string; day: string;
   evaluated: number; websites_checked: number; failed_jobs: number; sent: number; records_per_hour: number;
