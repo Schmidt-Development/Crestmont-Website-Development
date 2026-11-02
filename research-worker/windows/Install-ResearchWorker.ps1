@@ -152,7 +152,8 @@ if (-not $NoAutoStart) {
   }
   Start-ScheduledTask -TaskName "CrestmontResearch-Worker"
   Ok "Task registered and started. Health: $InstallDir\Get-ResearchWorkerHealth.ps1"
-  if ($Model) { Warn "RESEARCH_MODEL=$Model: optional drafts may use the GPU shared with the AI Website Builder. The guard defers them whenever the builder needs it (RUNBOOK section 8); leave -Model empty to keep research off the GPU entirely." }
+  # ${Model} is delimited on purpose: "$Model:" parses as a scoped variable reference (like $env:X) and is a syntax error.
+  if ($Model) { Warn "RESEARCH_MODEL=${Model}: optional drafts may use the GPU shared with the AI Website Builder. The guard defers them whenever the builder needs it (RUNBOOK section 8); leave -Model empty to keep research off the GPU entirely." }
   else { Ok "No local model configured: research uses CPU, DuckDB, disk and bounded HTTP only. The Website Builder keeps the GPU." }
 }
 Write-Host "`nResearch on the platform starts PAUSED. Resume it in /staff/research (Owner) after reviewing the sources." -ForegroundColor Cyan
