@@ -165,9 +165,11 @@ export const ALERT_THRESHOLDS = {
   login_locked: 1,
   /** Email queue: Resend deliveries still queued after this many minutes. */
   email_queue_stuck_minutes: 60,
+  /** Research worker: minutes without a heartbeat while research is resumed (docs/research/PRODUCTION.md §6). */
+  research_heartbeat_stale_minutes: 30,
 } as const;
 
-export type AlertCategory = "stripe_dead_letter" | "reconciliation_finding" | "email_queue_stuck" | "feed_failing" | "security_burst";
+export type AlertCategory = "stripe_dead_letter" | "reconciliation_finding" | "email_queue_stuck" | "feed_failing" | "security_burst" | "research_worker_stale";
 export interface AlertItem { key: string; category: AlertCategory; subject: string | null; summary: string }
 export interface AlertCtx { db: Db; email: EmailAdapter; baseUrl: string; now: () => Date; settings?: Record<string, string> }
 
@@ -177,10 +179,11 @@ const CATEGORY_TITLE: Record<AlertCategory, string> = {
   email_queue_stuck: "Outgoing email is stuck in the queue",
   feed_failing: "Readiness evidence feeds are failing",
   security_burst: "Repeated security events",
+  research_worker_stale: "Lead research is resumed but no worker is doing the work",
 };
 const CATEGORY_PAGE: Record<AlertCategory, string> = {
   stripe_dead_letter: "/staff/monitoring", reconciliation_finding: "/staff/finance/reconciliation", email_queue_stuck: "/staff/monitoring",
-  feed_failing: "/staff/readiness", security_burst: "/staff/security",
+  feed_failing: "/staff/readiness", security_burst: "/staff/security", research_worker_stale: "/staff/research",
 };
 
 async function rowsOf<T>(db: Db, sql: string, ...b: unknown[]): Promise<T[]> {
@@ -221,6 +224,31 @@ export async function collectAlertItems(db: Db, now = new Date()): Promise<Alert
       items.push({ key: `${kind}:${subject}:${window}`, category: "security_burst", subject, summary: `${r.n} ${label} in the last hour for ${r.is_user ? `account ${r.who}` : `one address (${subject})`}.` });
     }
   };
+  // Lead research: resumed on the platform but nothing is reporting in. Closes the alerting gap recorded in
+  // docs/research/PRODUCTION.md §6. Nothing is raised while research is PAUSED: that is its intended resting state,
+  // and the dashboard already says so. Only the platform's own rows are read; no worker is contacted.
+  const rs = (await rowsOf<{ paused: number }>(db, `SELECT paused FROM research_settings WHERE id = 1`))[0];
+  if (rs && rs.paused === 0) {
+    const staleBefore = new Date(now.getTime() - ALERT_THRESHOLDS.research_heartbeat_stale_minutes * 60e3).toISOString();
+    const last = (await rowsOf<{ last_seen_at: string | null }>(db, `SELECT MAX(last_seen_at) AS last_seen_at FROM research_runners`))[0]?.last_seen_at ?? null;
+    if (!last) {
+      // No worker has ever checked in. Re-stated once a day while research stays resumed, because this is the exact
+      // case that looks like "the research agent is running" from the platform and is not.
+      items.push({ key: `research_worker_stale:never:${now.toISOString().slice(0, 10)}`, category: "research_worker_stale", subject: null,
+        summary: `Lead research is resumed, but no research worker has ever checked in. No businesses are being evaluated. Install the worker (docs/research/RUNBOOK.md §1) or pause research in /staff/research.` });
+    } else if (last < staleBefore) {
+      const mins = Math.floor((now.getTime() - Date.parse(last)) / 60e3);
+      items.push({ key: `research_worker_stale:${last}`, category: "research_worker_stale", subject: null,
+        summary: `Lead research is resumed, but no research worker has checked in for ${mins} minutes (last ${last}). Evaluation and delivery have stopped. Check the scheduled task and the worker log (docs/research/RUNBOOK.md §5).` });
+    }
+    // The worker is reporting in, but the platform is refusing its signature: delivery is stopped until the secret is fixed.
+    for (const r of await rowsOf<{ runner_id: string; last_seen_at: string; status_json: string }>(db, `SELECT runner_id, last_seen_at, status_json FROM research_runners WHERE last_seen_at >= ? ORDER BY runner_id`, staleBefore)) {
+      let authFailed = false;
+      try { authFailed = !!(JSON.parse(r.status_json) as { platform?: { authFailed?: boolean } }).platform?.authFailed; } catch { /* worker-reported JSON; ignore if unreadable */ }
+      if (authFailed) items.push({ key: `research_worker_stale:auth:${r.runner_id}:${window}`, category: "research_worker_stale", subject: r.runner_id,
+        summary: `Research worker ${r.runner_id} reports that its credentials are being refused, so it has stopped delivering batches. RESEARCH_RUNNER_SECRET differs between the worker and this environment (docs/research/RUNBOOK.md §5).` });
+    }
+  }
   await burst("mfa_failed", "wrong two-factor codes");
   await burst("login_challenge_started", "sign-in challenges");
   await burst("login_locked", "account lockouts");

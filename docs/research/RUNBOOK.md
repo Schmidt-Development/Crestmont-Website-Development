@@ -39,7 +39,7 @@ Architecture and vocabulary: `README.md`. Licences: `DATA-SOURCES.md`. Calling r
 ## 3. What the worker does continuously
 1. **Ingest.** Once per Overture release, it copies the US places subset (projected columns) to `data\overture\<release>\us_places.parquet`. That is one remote scan and can take hours the first time. It then works state by state, checkpointed. Records whose facts did not change are skipped. When the backlog reaches `BACKLOG_LIMIT` (default 50,000), ingest pauses until verification catches up.
 2. **Verify and audit.** It leases due records, runs website stages A–E, and audits official sites. It runs at most `HTTP_CONCURRENCY` (default 24) sites at a time, and one request at a time per host with at least `HTTP_PER_HOST_INTERVAL_MS` (default 5 s) between them, or longer if robots.txt asks. A site is called broken only after `BROKEN_ATTEMPTS` (default 2) failures at least `BROKEN_RECHECK_AFTER_MS` (default 6 h) apart.
-3. **Draft.** Only for prospects that qualify under the same deterministic rule the platform uses, it asks the local model for a summary and a call-prep brief. A draft that adds facts is discarded.
+3. **Draft (optional, lowest priority on the machine).** Only for prospects that qualify under the same deterministic rule the platform uses. A draft that adds facts is discarded. Drafting is **off unless `RESEARCH_MODEL` is set**, and it never sits on the path that evaluates or delivers a prospect: the prospect goes to the platform on its evidence immediately, and the wording is attached later and re-sent if and when the GPU is free. See §8.
 4. **Deliver.** Batches of up to the platform's `max_batch` go out with a stable batch id. On a network error or 5xx, the same batch is retried with exponential backoff. A 413 splits it, a 409 "paused" holds it, and a 401 stops delivery and reports it on health.
 5. **Re-verify.** Every `REVERIFY_AFTER_DAYS` (default 30), and whenever the source record changes.
 
@@ -56,6 +56,107 @@ Architecture and vocabulary: `README.md`. Licences: `DATA-SOURCES.md`. Calling r
   Until that run exists, nobody may state that the 10,000-evaluated-per-day target is met.
 - **Expected bottleneck** (an estimate, not a measurement): politeness waits and slow sites. Each business takes 2–4 requests per host, 5 s apart, so roughly 8–20 s of wall time. At 24 concurrent hosts that is about 1–3 businesses per second. Raising `HTTP_CONCURRENCY` raises throughput without raising the per-site rate.
 
+## 8. Sharing the GPU with the AI Website Builder
+Node 1 has one RTX 5090 and one Ollama on `127.0.0.1:11434`, used by the AI Website Builder as well. The builder
+schedules its own GPU work in-process (`runner/src/inference/scheduler.ts`), but that scheduler runs inside the
+runner container and this worker is a native Windows process, so the two cannot share a queue. What they share is
+Ollama, and Ollama reports which models are resident. That is the admission signal
+(`research-worker/src/gpu-admission.ts`).
+
+The rule is one-sided on purpose: **website generation always wins.** A research draft is wording only — the score,
+qualification and package are computed in code — so it is never worth delaying a customer's website for. Before each
+draft the worker asks `GET /api/ps` and refuses to draft when:
+
+- any model with a tag other than `RESEARCH_MODEL` is resident (the builder's Model A/B, or another application such
+  as HQ/JARVIS). Their models are **never** unloaded by this worker;
+- `nvidia-smi` reports the GPU busier than `MODEL_MAX_GPU_UTIL_PCT`;
+- our model is not already loaded and less than `MODEL_MIN_FREE_VRAM_MB` is free, so loading a second model cannot
+  squeeze the builder's out;
+- Ollama does not answer at all — unknown always counts as refused.
+
+A refusal defers the draft (it does not fail): the prospect keeps its evidence-only wording, the job is re-queued, and
+after `MAX_DRAFT_ATTEMPTS` (5) deferrals it is dropped. `keep_alive` is short (`MODEL_KEEP_ALIVE`, default `30s`) so
+research never squats VRAM between drafts. Refusals are sticky for 60 seconds, so a busy builder is not polled once
+per prospect.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `RESEARCH_MODEL` | *(unset)* | No value = **no drafts and no GPU use at all**. The whole pipeline works without it |
+| `MODEL_GPU_GUARD` | `on` | Turn off only on a machine with no other GPU work |
+| `MODEL_KEEP_ALIVE` | `30s` | How long Ollama holds the research model after a draft |
+| `MODEL_MAX_GPU_UTIL_PCT` | `25` | Defer drafting above this GPU utilisation |
+| `MODEL_MIN_FREE_VRAM_MB` | `8000` | Headroom required before loading the research model |
+| `MODEL_DRAFT_QUEUE_LIMIT` | `500` | Prospects that may wait for wording; overflow is dropped, never queued without bound |
+
+`Get-ResearchWorkerHealth.ps1` reports `drafts` (pending, done, dropped, deferrals) and the last admission decision,
+so "no summaries are appearing" can be told apart from "the worker is stuck".
+
+**If research drafting must never touch the GPU at all,** leave `RESEARCH_MODEL` unset. Nothing else changes: every
+number the platform shows is computed from evidence by code.
+
+## 9. Continuous operation and a 24-hour measurement run
+This is the procedure for an unattended run that keeps going without anyone holding a terminal open.
+
+**Install for continuous, GPU-free, nationwide research.** In an elevated PowerShell, from a checkout of this
+repository on Node 1:
+
+```powershell
+.\research-worker\windows\Install-ResearchWorker.ps1 `
+  -PlatformUrl https://<staging host> `
+  -States "" `
+  -Concurrency 24 `
+  -RunWhenLoggedOff `
+  -Install
+```
+
+- **No `-Model`.** Drafting stays off, so research never touches the GPU and the AI Website Builder keeps all of it
+  (§8). Qualification, scoring and packages are computed in code, so lead quality is unaffected.
+- **`-States ""`** researches every state, in order, checkpointed per state. Do not point a second worker at the same
+  partition: one worker owns the state file, and the task is registered `MultipleInstances IgnoreNew`.
+- **`-RunWhenLoggedOff`** adds a boot trigger and runs the task under the account's stored password. Without it the
+  task has only an at-logon trigger, so **after an unattended restart research stays stopped until someone signs in** —
+  the installer prints a warning saying exactly that. The password is needed because the platform secret is DPAPI-
+  protected for this user and a password-less (S4U) task cannot unprotect it.
+- **`-Concurrency 24`** is a deliberate starting point, not a target. Raise it in steps (§9, "Raising the rate").
+
+**Then resume research** in `/staff/research` (Owner). The worker notices within 60 s.
+
+**Budget for the first dataset scan.** Before any state is ingested, the worker copies the US subset of the Overture
+release to `data\overture\<release>\us_places.parquet`. That release is **11.90 GB across 16 Parquet parts** and the
+projected columns are about **3.8 GB**, read over the network in one scan. Expect **one to several hours**, during
+which evaluated/hour is legitimately 0. Start the official 24-hour clock **after** the snapshot completes (source
+status reads `current` on the dashboard, with a release), or the window measures the download rather than the
+pipeline.
+
+**Verify it is really running, independently of any Claude session:**
+
+```powershell
+Get-ScheduledTask -TaskName CrestmontResearch-Worker | Select-Object State
+C:\CrestmontResearch\Get-ResearchWorkerHealth.ps1
+```
+
+Health should show a recent platform heartbeat, `paused: false`, a non-zero queue once ingest starts, and
+`drafts.gpu` reporting "no GPU guard" (no model configured). On the platform, `/staff/research` should show the runner
+online with its last check-in. If research is resumed and no worker checks in for 30 minutes, the Owners are emailed
+automatically (`PRODUCTION.md` §6).
+
+**Raising the rate.** Change `HTTP_CONCURRENCY` in `C:\CrestmontResearch\settings.env`, then restart the task
+(`Restart-ScheduledTask -TaskName CrestmontResearch-Worker`; the queue, outbox and checkpoints are durable, so nothing
+is lost). Raise it only while all of these hold: processing failures flat, restricted/blocked check rate not climbing,
+CPU below about 80%, disk free comfortable, the platform accepting batches, and the outbox not growing. One request
+per host at a time with a politeness interval is enforced at any concurrency.
+
+**Reporting.** `scripts/research-24h-report.ts` builds the window's report from staging D1, read-only:
+
+```bash
+node --no-warnings scripts/research-24h-report.ts --hours 24 --target 25000 --out evidence
+```
+
+It writes `evidence/research-24h-report.json` and `.md`, keeps every funnel stage separate, and refuses to state a
+daily figure for a window that has not finished. The `Research performance report` workflow runs the same script
+daily and on demand, and uploads the report as an artifact. Accuracy is **not** in it: a false-positive rate needs the
+hand-verified sample in §4.
+
 ## 5. Troubleshooting
 | Symptom | Check / fix |
 |---|---|
@@ -66,6 +167,9 @@ Architecture and vocabulary: `README.md`. Licences: `DATA-SOURCES.md`. Calling r
 | Many `common crawl lookup failed` | 503s / rate limits. The worker backs off by itself. Lower `CC_DAILY_QUERIES` or set `COMMON_CRAWL=off` |
 | Records rejected by platform | `stage = failed` with the reason in the state DB. Usually a validation bug: open an issue with the reason |
 | Disk filling | `data\overture\<old release>` folders can be deleted once a newer release is ingested |
+| No summaries on prospects, pipeline otherwise fine | Expected while the Website Builder is using the GPU. Health shows `drafts.deferrals` rising and the admission reason. Qualification never depends on a draft (§8) |
+| Website builds slow down after installing research | Check `RESEARCH_MODEL`: if it is set, confirm `MODEL_GPU_GUARD=on`. Unset `RESEARCH_MODEL` to remove research from the GPU entirely |
+| Owner alert "Lead research is resumed but no worker is doing the work" | Research is unpaused on the platform and no worker has checked in for 30 minutes (or ever). Install/start the worker (§1) or pause research in `/staff/research` |
 
 ## 6. Recovery and rollback
 - **Worker crash or reboot.** Nothing to do: leases expire and work resumes from `data\state.sqlite`.

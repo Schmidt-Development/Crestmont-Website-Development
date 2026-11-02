@@ -13,6 +13,7 @@ import type { Db } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import type { StorageAdapter } from "../adapters/storage.ts";
 import { activeHolds, notIn } from "./legal-holds.ts";
+import { SAMPLE_RETENTION_DAYS } from "./research.ts";
 
 const DAY = 86_400_000;
 
@@ -22,6 +23,7 @@ export const ALWAYS_RULES: AlwaysRule[] = [
   { category: "rate_limits", label: "Rate-limit windows", description: "Rate-limit counters whose window started more than 2 days ago (the longest window is 1 hour)." },
   { category: "auth_tokens", label: "Email verification / password reset tokens", description: "Single-use tokens used or expired more than 7 days ago (only their hashes are stored)." },
   { category: "env_metrics", label: "Request metrics", description: "Hourly request/error/latency buckets older than 90 days (no personal data; used for the 24-hour and recent views)." },
+  { category: "research_samples", label: "Research worker metrics", description: "Research worker throughput and host-resource samples older than 90 days (operational telemetry only; used for the hourly and 24-hour research views)." },
 ];
 
 export interface ConfigurableRule { category: string; key: string; label: string; proposedDays: number; minDays: number; maxDays: number; description: string }
@@ -84,6 +86,10 @@ export async function runRetention(deps: { db: Db; storage: StorageAdapter | nul
   const mCut = iso(90 * DAY).slice(0, 13); // env_metrics.hour is 'YYYY-MM-DDTHH'
   const m = await db.prepare(`DELETE FROM env_metrics WHERE hour < ?`).bind(mCut).run().catch(() => ({ meta: { changes: 0 } }));
   results.push({ category: "env_metrics", mode: "always", affected: m.meta.changes, cutoff: `${mCut}:00:00.000Z`, detail: "hour buckets before cutoff" });
+
+  const rsCut = iso(SAMPLE_RETENTION_DAYS * DAY).slice(0, 16); // research_runner_samples.bucket is 'YYYY-MM-DDTHH:MM'
+  const rs = await db.prepare(`DELETE FROM research_runner_samples WHERE bucket < ?`).bind(rsCut).run().catch(() => ({ meta: { changes: 0 } }));
+  results.push({ category: "research_samples", mode: "always", affected: rs.meta.changes, cutoff: `${rsCut}:00.000Z`, detail: "15-minute buckets before cutoff" });
 
   // ── Tier 2: only when staff configured the period ──
   const settings = await loadSettings(db);
