@@ -10,7 +10,7 @@ import { csrf, input, textarea, select, button, linkButton, ctaLink, ARROW_SVG, 
 import { requireStaff } from "../app/app.ts";
 import { staffNav } from "./nav.ts";
 import { verifyTurnstile } from "./api.ts";
-import { PACKAGES, PACKAGE_FEATURES, packageAdditions, MAINTENANCE_PLANS, type PackageId } from "../domain/catalog.ts";
+import { PACKAGES, PACKAGE_FEATURES, packageAdditions, MAINTENANCE_PLANS, AI_RECEPTIONIST_OFFER, AI_RECEPTIONIST_COMING_SOON, type PackageId } from "../domain/catalog.ts";
 import { effectivePrices } from "../services/pricing-approvals.ts";
 import { can } from "../domain/authz.ts";
 import { captureLead, requestAttribution, submittedAttribution, notifyNewLead } from "../services/leads.ts";
@@ -242,8 +242,9 @@ const RC_INBOUND: [string, string][] = [
   ["Summaries", "Each call can end with a written summary: who called, what they needed and what happens next."],
 ];
 const RC_OUTBOUND: [string, string][] = [
-  ["Scoped separately", "Outbound calls are not part of a standard setup. Where a client needs them — for example confirming visits customers booked — they are designed and quoted individually."],
-  ["Consent first", "Only for contacts who have given the consent the law requires for that kind of call."],
+  // FD-45: only implemented and certified capabilities are offered. Outbound calling for clients is not one of them.
+  ["Not offered today", "We only sell AI voice capabilities that are fully implemented and tested. Outbound calling for clients is not one of them yet."],
+  ["Consent first, if ever offered", "Any future outbound service would call only contacts who have given the consent the law requires for that kind of call."],
 ];
 const RC_SAFEGUARDS = [
   "Call only contacts who have given the consent the law requires for that kind of call",
@@ -278,19 +279,27 @@ const RC_FAQ: [string, string][] = [
   ["Is it a ready-made product?", "No. Each AI Receptionist is a custom configuration built for one client on the voice provider they choose. What it can do depends on that provider and on the systems connected, and it is agreed in the written scope before work starts."],
   ["Will callers know they are talking to AI?", "Yes. The agent identifies itself as an AI assistant. It is designed to sound natural and conversational — not to pretend to be a person."],
   ["What happens when the AI can't help?", "It follows the rules you set: a callback task with a summary, an alert to your team or, where your phone setup supports it, a transfer. Every agent has a path to a person."],
-  ["Can it make outbound calls?", "Only if your project scopes it. Outbound calling is not part of a standard setup; where a client needs it — for example confirming visits customers booked — it is designed and quoted individually, for contacts who have given the consent the law requires, with do-not-call checks, permitted hours and opt-outs. Unsolicited automated calling is not something we set up."],
+  ["Can it make outbound calls?", "Not at the moment. We only offer AI voice capabilities that are fully implemented and tested, and outbound calling for clients is not one of them today. Your agent answers incoming calls."],
   ["Which voices and languages are available?", "That depends on the voice provider chosen for your project. You choose a voice and pace during setup; English is standard and other languages, such as Spanish, can be configured where the provider supports them."],
   ["How is it priced?", "It is quoted in writing after a scoping call, like all custom work. Phone numbers, call minutes and voice-provider usage are billed by the provider."],
 ];
 
+/** FD-45: false while the client AI Receptionist is "Coming soon" (no quote, purchase or activation). */
+const rcOpen = () => AI_RECEPTIONIST_OFFER.status === "available";
+const RC_ASK = "/contact?topic=other";
+const RC_FAQ_COMING_SOON: [string, string] = ["Can I buy it now?", "Not yet — it is coming soon. We only sell services that are fully implemented and certified, and the AI Receptionist has not completed its live call certification. Contact us if you would like to discuss it."];
+
 function aiReceptionistPage(s: ServiceDef, copy: Record<string, string>, email: string): SafeHtml {
   const quote = `/quote?service=${s.slug}`;
-  return html`${serviceHero("Custom AI voice agents", s.name, copy.summary ?? s.summary, html`${linkButton("Request a quote", quote)}${linkButton("Contact us", "/contact", "secondary")}`, receptionistConsole({ id: "rc-page" }))}
+  const open = rcOpen();
+  const ctaPrimary = open ? linkButton("Request a quote", quote) : linkButton("Ask about availability", RC_ASK);
+  return html`${serviceHero(open ? "Custom AI voice agents" : "Coming soon · Custom AI voice agents", s.name, copy.summary ?? s.summary, html`${ctaPrimary}${linkButton("Contact us", "/contact", "secondary")}`, receptionistConsole({ id: "rc-page" }))}
+${open ? "" : html`<section class="section section--flush" data-testid="rc-coming-soon"><div class="container">${alert("info", AI_RECEPTIONIST_COMING_SOON)}</div></section>`}
 <section class="section"><div class="container section__inner"><p class="section__label">What it can do</p><div class="section__head"><h2 class="reveal-words" data-reveal>Configured around your calls</h2><div class="prose" data-reveal style="--rd:140ms">${renderMarkdown(copy.intro ?? s.intro)}</div></div>
 <div class="versus rc-dir" data-reveal-group>
 <div class="versus__panel on-dark" data-reveal><p class="versus__title">Inbound — what we can configure</p><ul class="versus__list">${RC_INBOUND.map(([t, b]) => html`<li><span><strong>${t}</strong><span>${b}</span></span></li>`)}</ul></div>
-<div class="versus__panel on-dark" data-reveal style="--rd:140ms"><p class="versus__title">Outbound — only when scoped</p><ul class="versus__list">${RC_OUTBOUND.map(([t, b]) => html`<li><span><strong>${t}</strong><span>${b}</span></span></li>`)}</ul>
-<p class="rc-safe__title">Any outbound calling we configure must</p><ul class="rc-safe">${RC_SAFEGUARDS.map((x) => html`<li>${x}</li>`)}</ul></div></div></div></section>
+<div class="versus__panel on-dark" data-reveal style="--rd:140ms"><p class="versus__title">Outbound — not offered today</p><ul class="versus__list">${RC_OUTBOUND.map(([t, b]) => html`<li><span><strong>${t}</strong><span>${b}</span></span></li>`)}</ul>
+<p class="rc-safe__title">Before any outbound calling could be offered, it would have to</p><ul class="rc-safe">${RC_SAFEGUARDS.map((x) => html`<li>${x}</li>`)}</ul></div></div></div></section>
 ${section("Voice", "Choose how it sounds", html`<div data-reveal>${voiceLibrary()}</div>`, { id: "voices", lede: "Pick a voice style during setup from the voices your chosen provider offers. The styles below are text previews of tone, not recordings." })}
 ${section("Where it helps", "Built around your calls", html`<ul class="ledger rc-uses" data-reveal-group>${RC_USES.map(([t, b, tag]) => html`<li data-reveal><p class="rc-uses__tag">${tag}</p><h3>${t}</h3><p>${b}</p></li>`)}</ul><p class="muted rc-uses__note">Examples of how the service can be configured — not client results.</p>`, { id: "uses" })}
 ${section("Connected", "How it can connect", html`<ol class="rc-flow" data-reveal-group>${RC_FLOW.map(([t, b], i) => html`<li class="rc-flow__node${i === 1 ? " rc-flow__node--core" : ""}" data-reveal style="${`--rd:${i * 70}ms`}"><span class="rc-flow__n">${String(i + 1).padStart(2, "0")}</span><strong>${t}</strong><span>${b}</span></li>`)}</ol>`, { id: "workflow", lede: "Each connection is optional and is agreed in the written scope of your project, depending on what your provider and systems support." })}
@@ -299,11 +308,11 @@ ${section("Connected", "How it can connect", html`<ol class="rc-flow" data-revea
 <div class="versus__panel on-dark" data-reveal><p class="versus__title">What we design for</p><ul class="versus__list">${["Natural conversation with sensible pacing, using your provider's voice technology", "Handling interruptions and changes of plan, as far as the provider supports it", "Remembering what the caller said earlier in the same call", "Answering from your approved information only", "Working at the hours you choose"].map((x) => html`<li><span>${x}</span></li>`)}</ul></div>
 <div class="versus__panel versus__panel--not" data-reveal style="--rd:160ms"><p class="versus__title">What to know</p><ul class="versus__list">${s.boundaries.map((x) => html`<li><span>${x}</span></li>`)}</ul></div></div></div></section>
 ${section("Setup", "From first call to launch", html`<ol class="rc-steps" data-reveal-group>${RC_STEPS.map(([t, b], i) => html`<li data-reveal><span class="rc-steps__n">${String(i + 1).padStart(2, "0")}</span><strong>${t}</strong><span>${b}</span></li>`)}</ol>
-<div class="card rc-price" data-reveal><h3 class="card__title">How it is priced</h3><p>${PRICING_NOTE[s.pricing]}</p><p class="muted">Custom projects are billed 50% as a deposit, 25% after the approved design milestone and 25% before production launch. Phone numbers, call minutes and voice-provider usage are billed by the provider.</p><div class="row">${linkButton("Request a quote", quote)}</div></div>`, { id: "setup" })}
+<div class="card rc-price" data-reveal><h3 class="card__title">How it is priced</h3><p>${PRICING_NOTE[s.pricing]}</p><p class="muted">Custom projects are billed 50% as a deposit, 25% after the approved design milestone and 25% before production launch. Phone numbers, call minutes and voice-provider usage are billed by the provider.</p><div class="row">${ctaPrimary}</div></div>`, { id: "setup" })}
 <section class="section" id="faq"><div class="container faq"><div class="faq__aside"><p class="section__label">FAQs</p><h2 class="faq__title reveal-words" data-reveal>AI Receptionist questions</h2>
 <p data-reveal style="--rd:120ms">Another question? <a href="/contact">Contact us</a> or write to <a href="mailto:${email}">${email}</a>.</p></div>
-<div data-reveal>${RC_FAQ.map(([q, a]) => html`<details class="disclosure"><summary>${q}</summary><div class="disclosure__body"><p>${a}</p></div></details>`)}</div></div></section>
-<section class="section"><div class="container"><div class="cta-band on-dark rc-cta" data-reveal-group><p class="section__label" data-reveal>AI Receptionist</p><h2 class="reveal-words" data-reveal>Designed around the calls that matter</h2><p class="lede" data-reveal>Tell us how your calls work today. We'll scope an agent around your hours, systems and rules, and quote it in writing.</p><div class="hero__actions" data-reveal>${ctaLink("Request a quote", quote, "primary")}${ctaLink("Talk to us", "/contact", "secondary")}</div></div></div></section>`;
+<div data-reveal>${[...(open ? [] : [RC_FAQ_COMING_SOON]), ...RC_FAQ].map(([q, a]) => html`<details class="disclosure"><summary>${q}</summary><div class="disclosure__body"><p>${a}</p></div></details>`)}</div></div></section>
+<section class="section"><div class="container"><div class="cta-band on-dark rc-cta" data-reveal-group><p class="section__label" data-reveal>AI Receptionist</p><h2 class="reveal-words" data-reveal>Designed around the calls that matter</h2><p class="lede" data-reveal>Tell us how your calls work today. We'll scope an agent around your hours, systems and rules, and quote it in writing${open ? "" : " once it is available"}.</p><div class="hero__actions" data-reveal>${open ? ctaLink("Request a quote", quote, "primary") : ctaLink("Ask about availability", RC_ASK, "primary")}${ctaLink("Talk to us", "/contact", "secondary")}</div></div></div></section>`;
 }
 
 /** Things Crestmont will not do (shown on About and in the homepage comparison; approved copy). */
@@ -384,6 +393,7 @@ function validateLeadForm(v: FormVals, kind: "quote" | "contact"): { errors: Fie
   if (!INTERESTS.some((i) => i.value === v.interest)) e.interest = "Choose what you are interested in";
   if (kind === "quote") {
     if (v.service && !SERVICES.some((s) => s.slug === v.service)) e.service = "Choose a service from the list";
+    else if (v.service === "ai-receptionist" && !rcOpen()) e.service = AI_RECEPTIONIST_COMING_SOON; // FD-45
     if (!BUDGETS.includes(v.budget)) e.budget = "Choose a budget range";
     if (!TIMELINES.includes(v.timeline)) e.timeline = "Choose a timeline";
     if (v.message.length < 20 || v.message.length > 4000) e.message = "Describe your project in 20–4000 characters";
@@ -522,10 +532,10 @@ export function register(r: Router): void {
 <h2 class="statement__text scroll-words" id="principles-title">Published prices. Counted revisions. Nothing goes live without your approval.</h2>
 <ul class="statement__labels">${whyItems.slice(0, 4).map((w) => html`<li class="statement__label">${w.title}</li>`)}</ul></div></div></section>
 ${section("Our services", "What we build", html`${serviceBento(featured, c)}<p class="section__more"><a href="/services">All services</a></p>`, { id: "services", lede: c.get("services.overview").lede })}
-${section("New · AI Receptionist", "AI voice agents, configured for your calls", html`<div class="rc-home"><div class="rc-home__copy" data-reveal-group>
+${section(rcOpen() ? "New · AI Receptionist" : "Coming soon · AI Receptionist", "AI voice agents, configured for your calls", html`<div class="rc-home"><div class="rc-home__copy" data-reveal-group>
 <p class="lede" data-reveal>Custom AI voice agents, built for your business on the voice provider you choose. They can answer questions from your approved information, collect caller details and requests, and pass urgent calls to your team under your rules — each one scoped and quoted in writing.</p>
 <ul class="rc-home__points" data-reveal>${["A custom configuration for each client, on the provider you choose", "Answers questions and collects caller details and requests", "Optional calendar, CRM and website connections within the written scope", "Identifies itself as AI; a person is always one step away"].map((x) => html`<li>${x}</li>`)}</ul>
-<div class="hero__actions" data-reveal>${ctaLink("Explore AI Receptionist", "/services/ai-receptionist", "primary")}${ctaLink("Request a quote", "/quote?service=ai-receptionist", "secondary")}</div></div>
+<div class="hero__actions" data-reveal>${ctaLink("Explore AI Receptionist", "/services/ai-receptionist", "primary")}${rcOpen() ? ctaLink("Request a quote", "/quote?service=ai-receptionist", "secondary") : ctaLink("Ask about availability", RC_ASK, "secondary")}</div></div>
 <div class="rc-home__demo" data-reveal style="--rd:140ms">${receptionistConsole({ compact: true, id: "rc-home" })}</div></div>`, { id: "ai-receptionist" })}
 ${section("Latest work", c.get("portfolio.intro").heading === "Portfolio" ? "Real websites" : c.get("portfolio.intro").heading, projects.length ? html`${portfolioExplorer(ctx, projects, { variant: "home" })}<p class="section__more"><a href="/portfolio">View the portfolio</a></p>`
       : html`<div class="showcase__pending on-dark" data-reveal><div><h3>Portfolio in preparation</h3><p>Portfolio projects are published here once genuine screenshots of each live site have been captured and verified. We do not use mock-ups or stock imagery.</p></div>${ctaLink("About our portfolio", "/portfolio", "primary")}</div>`, { id: "portfolio" })}
@@ -703,7 +713,7 @@ ${section("Ownership", "Your site, your choice", html`<ul class="plain-list"><li
   r.get("/quote", (ctx) => {
     const pkg = ctx.url.searchParams.get("package") ?? "";
     const svc = ctx.url.searchParams.get("service") ?? "";
-    return renderQuote(ctx, { interest: INTERESTS.some((i) => i.value === pkg) ? pkg : "custom", service: serviceBySlug(svc) ? svc : "" }, {}, 200);
+    return renderQuote(ctx, { interest: INTERESTS.some((i) => i.value === pkg) ? pkg : "custom", service: serviceBySlug(svc) && !(svc === "ai-receptionist" && !rcOpen()) ? svc : "" }, svc === "ai-receptionist" && !rcOpen() ? { service: AI_RECEPTIONIST_COMING_SOON } : {}, 200);
   });
   r.post("/quote", (ctx) => handleLead(ctx, "quote", (v, e, s) => renderQuote(ctx, v, e, s)));
   r.get("/quote/thanks", (ctx) => thanksPage(ctx, "Quote request received", "Thank you. Your request is now in our CRM and a member of the team will review it and reply by email. If your project fits our services, we will follow up with questions or a written quote."));
@@ -737,6 +747,15 @@ ${d.slug === "privacy" ? html`<p class="legal-account-link" data-privacy-self-se
     const body = ctx.env.ENVIRONMENT === "production"
       ? `User-agent: *\nDisallow: /staff\nDisallow: /portal\nDisallow: /account\nDisallow: /api/\nDisallow: /checkout\nAllow: /\n\nSitemap: ${ctx.baseUrl}/sitemap.xml\n`
       : "User-agent: *\nDisallow: /\n";
+    return new Response(body, { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=3600", ...securityHeaders("api") } });
+  });
+  // FD-41: responsible vulnerability reporting (RFC 9116). Served only once the Owner has set a monitored security
+  // mailbox; no address is ever invented. Expires is renewed on every request (within the RFC's one-year limit).
+  r.get("/.well-known/security.txt", (ctx) => {
+    const contact = ctx.settings["security.contact_email"]?.trim();
+    if (!contact) return new Response("Not found\n", { status: 404, headers: { "content-type": "text/plain; charset=utf-8", ...securityHeaders("api") } });
+    const expires = new Date(ctx.now().getTime() + 180 * 86_400_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+    const body = `Contact: mailto:${contact}\nExpires: ${expires}\nPreferred-Languages: en\nCanonical: ${ctx.baseUrl}/.well-known/security.txt\n`;
     return new Response(body, { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=3600", ...securityHeaders("api") } });
   });
   r.get("/sitemap.xml", async (ctx) => {

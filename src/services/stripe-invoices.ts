@@ -27,7 +27,9 @@ import { checkoutLinesFor } from "./tax.ts";
 import { paymentsMode } from "../domain/payments-mode.ts";
 
 export const STRIPE_INVOICE_KINDS = ["deposit_50", "design_25", "prelaunch_25"] as const;
-export const DAYS_UNTIL_DUE = 14;
+/** FD-11 (Founder decision, 2026-11): invoices are due Net 7. Upfront package payments and custom 50/25/25 milestone
+ *  schedules are unchanged; this is the payment term on each Stripe invoice that is sent. No late fees or interest (FD-12). */
+export const DAYS_UNTIL_DUE = 7;
 export const STRIPE_NOT_CONFIGURED = "Stripe is not configured (no STRIPE_SECRET_KEY), so Stripe invoices cannot be created. Nothing was sent to Stripe.";
 
 export type StripeInvoicer = { ok: true; client: StripeInvoicing } | { ok: false; reason: string };

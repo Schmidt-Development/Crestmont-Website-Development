@@ -180,7 +180,8 @@ test("[PAY-007] mandatory obligations cannot be denied; issuing without Stripe e
   const r = await one<{ id: string }>(t.db, `SELECT id FROM refunds`);
   const support = await staffClient(t, "support");
   await support.c.post(`/staff/refunds/${r.id}/review`, { to: "under_review", notes: "Reviewing" });
-  assert.equal((await support.c.post(`/staff/refunds/${r.id}/review`, { to: "denied", notes: "No", mandatory: "1" })).status, 422);
+  assert.equal((await support.c.post(`/staff/refunds/${r.id}/review`, { to: "denied", notes: "No", mandatory: "1" })).status, 403, "FD-03: support can never deny");
+  assert.doesNotMatch(await (await support.c.get(`/staff/refunds/${r.id}`)).text(), />Deny</, "FD-03: support sees no Deny button");
   assert.equal((await support.c.post(`/staff/refunds/${r.id}/review`, { to: "recommended", notes: "Legally required", mandatory: "1" })).status, 303);
   const owner = await staffClient(t, "owner");
   const page = await (await owner.c.get(`/staff/refunds/${r.id}`)).text();

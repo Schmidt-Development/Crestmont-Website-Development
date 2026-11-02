@@ -187,10 +187,22 @@ export function milestoneSplit(totalCents: number): PriceBreakdown["installments
 export const APPROVED_SERVICES = [
   "Website design and development", "Website redesign", "E-commerce development", "Custom web applications",
   "Customer and administrative portals", "Booking and scheduling systems", "Payment and subscription integrations",
-  "AI chatbots and workflow automation", "AI receptionist voice agents (inbound and outbound calls)", "Hosting and maintenance", "API integrations", "Technical SEO",
+  "AI chatbots and workflow automation", "AI receptionist voice agents (inbound calls)", "Hosting and maintenance", "API integrations", "Technical SEO",
   "Search Console and analytics setup", "Google Business Profile setup assistance for eligible businesses",
   "Conversion-focused landing pages", "Email automation infrastructure", "CRM integrations", "Website performance optimization",
 ] as const;
+
+/**
+ * FD-45 (Founder decision, 2026-11): the client AI Receptionist service stays visible as "Coming soon" but cannot be
+ * requested, quoted, purchased or activated until a real end-to-end call is certified on staging (FD-44). TEMPORARY:
+ * switch `status` to "available" only after that certification is recorded in docs/closeout/FOUNDER-DECISIONS-2026-11.md.
+ */
+export const AI_RECEPTIONIST_OFFER: { readonly status: "coming_soon" | "available"; readonly reverseWhen: string } = Object.freeze({
+  status: "coming_soon",
+  reverseWhen: "a real end-to-end AI receptionist call is certified on staging (FD-44/FD-45)",
+});
+export const AI_RECEPTIONIST_COMING_SOON =
+  "Coming soon. The AI Receptionist is not yet available to request or buy: we only sell services that are fully implemented and certified, and this one has not completed its live call certification yet.";
 
 /** Phrases that must never appear in published marketing copy (§5, §12). */
 export const PROHIBITED_CLAIMS = [

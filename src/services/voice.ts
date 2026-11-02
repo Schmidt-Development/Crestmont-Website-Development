@@ -20,7 +20,7 @@ import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { hmacSha256Hex, timingSafeEqualHex, sha256Hex } from "../lib/crypto.ts";
 import { parse, v, ValidationError } from "../lib/validate.ts";
-import { PACKAGES, MAINTENANCE_PLANS, APPROVED_SERVICES } from "../domain/catalog.ts";
+import { PACKAGES, MAINTENANCE_PLANS, APPROVED_SERVICES, AI_RECEPTIONIST_OFFER } from "../domain/catalog.ts";
 import { audit, rateLimit } from "./security.ts";
 import { effectivePrices } from "./pricing-approvals.ts";
 import { addLeadNote, addLeadTask, notifyOwners, redactSensitive } from "./voice-common.ts";
@@ -119,7 +119,8 @@ export function publishedPricing(effective: Record<string, number> = {}) {
     maintenance: Object.values(MAINTENANCE_PLANS).map((m) => ({ name: m.name, monthly: `${dollars(mt(m.id, m.monthlyCents))}/month`, monthlyCents: mt(m.id, m.monthlyCents) })),
     maintenanceNote: "Plan details are being finalised. A team member will confirm what each plan includes.",
     paymentRules: "Standard packages are paid 100% upfront. Custom development is billed 50% deposit, 25% at design approval and 25% before launch.",
-    services: [...APPROVED_SERVICES],
+    // FD-45: the client AI Receptionist is "Coming soon" — the agent must not offer or quote it.
+    services: APPROVED_SERVICES.map((x) => x.startsWith("AI receptionist") && AI_RECEPTIONIST_OFFER.status !== "available" ? `${x} — coming soon, not yet available to buy` : x),
     rules: "Quote only these figures. Do not estimate, discount, or promise delivery dates.",
   };
 }
