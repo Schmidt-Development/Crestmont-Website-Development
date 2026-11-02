@@ -137,7 +137,7 @@ These are the controls **implemented in the Platform** as at this draft. Where a
 - Multi-factor authentication (TOTP, with single-use recovery codes) is **required for all Crestmont staff roles**. It is available to Customer users.
 - TOTP secrets are encrypted at rest with AES-GCM.
 - Step-up re-authentication is required for sensitive staff actions.
-- After repeated failed logins, the account is temporarily locked out, and authentication endpoints are rate limited.
+- Repeated failed logins trigger progressive protections (a bot challenge for unrecognised devices and failed-attempt rate limits) rather than a fixed account lockout, and authentication endpoints are rate limited.
 - Role-based access control separates staff roles (owner, administrator, sales, developer, project manager, support) and customer roles (customer admin, customer member). Refund decisions, pricing changes and production release approval are restricted to the owner.
 - AI actors are technically prevented from performing refund, contract, pricing or release actions.
 
