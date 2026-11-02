@@ -25,6 +25,8 @@ export const STEP_UP_ROUTES: Readonly<Record<string, string>> = {
   // Hosting suspension decisions (Founder clarifications 1–2)
   "POST /staff/billing/hosting/suspend": "hosting suspension",
   "POST /staff/billing/hosting/restore": "hosting restoration",
+  // FD-16: Founder launch/payment exception
+  "POST /staff/projects/:id/payment-exception": "launch payment exception",
   // Integration / secret-bearing settings
   "POST /staff/integrations/:name/verify": "integration credential probe",
   "POST /staff/ops/environments": "environment endpoints",
