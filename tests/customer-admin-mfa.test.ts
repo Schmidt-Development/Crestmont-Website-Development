@@ -123,7 +123,7 @@ test("[AUTH-003] [AUTH-007] FD-30: a customer administrator without MFA can sign
   assert.equal(await n(t.db, `SELECT COUNT(*) AS n FROM invitations WHERE email = 'colleague@fd30.example'`), 1);
   const accept = await c.post(`${qpath}/accept`, { agree: "1" });
   assert.match(loc(accept), /^\/portal\/billing\/invoices\/inv_/, "proposal accepted after enrolment");
-  const checkout = await c.post("/checkout/starter", { terms: "1" });
+  const checkout = await c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" });
   assert.equal(checkout.status, 303);
   assert.match(loc(checkout), /^https:\/\/checkout\.stripe\.com\//);
   assert.equal(t.fake.checkouts.length, 1);
