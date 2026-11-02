@@ -100,12 +100,19 @@ test("[TEST-003] staging: axe-core WCAG 2.1 A/AA scan of public pages, sign-in a
     for (const p of pages) { await scan(p); await readable(p); }
     await motion.close();
     const accounts = process.env.E2E_ACCOUNTS_FILE && existsSync(process.env.E2E_ACCOUNTS_FILE) ? readFileSync(process.env.E2E_ACCOUNTS_FILE, "utf8") : "";
-    const cust = /^\| customer_admin \| (customer\.harbor@\S+) \| `([^`]+)` \|/m.exec(accounts);
+    const cust = /^\| customer_admin \| (customer\.harbor@\S+) \| `([^`]+)` \| (?:`([A-Z2-7]+)`|—) \|/m.exec(accounts);
     if (cust) {
       await page.goto(BASE + "/login");
       await page.fill("#f-email", cust[1]);
       await page.fill("#f-password", cust[2]);
       await Promise.all([page.waitForLoadState("load"), page.click("button[type=submit]")]);
+      // FD-30: demo customer administrators have two-factor authentication (scripts/staging-access.ts).
+      if (new URL(page.url()).pathname.startsWith("/mfa") && cust[3]) {
+        await new Promise((r) => setTimeout(r, 30_000 - (Date.now() % 30_000) + 1_000)); // a fresh 30 s step (codes are single-use)
+        await page.fill("#f-code", await totpCode(cust[3]));
+        await Promise.all([page.waitForLoadState("load"), page.click("button[type=submit]")]);
+      }
+      assert.doesNotMatch(new URL(page.url()).pathname, /^\/(login|mfa)/, "customer signed in for the accessibility scan");
       for (const p of ["/portal", "/portal/projects", "/portal/messages", "/portal/billing", "/portal/support"]) await scan(p);
     }
     assert.deepEqual(failures, []);

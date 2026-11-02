@@ -5,11 +5,11 @@ import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, safeUrl, formatCents, formatDate, formatDateTime, label, type SafeHtml } from "../lib/html.ts";
 import { HttpError, download, htmlResponse, redirect, str } from "../app/http.ts";
-import { requireStaff, requireCustomerOrg } from "../app/app.ts";
+import { requireStaff, requireCustomerOrg, MFA_SETUP_PROMPT } from "../app/app.ts";
 import { appLayout, publicLayout } from "../ui/layout.ts";
 import { staffNav } from "./nav.ts";
 import { csrf, button, linkButton, actionForm, input, textarea, select, checkbox, formErrors, alert, badge, table, emptyState, kpi, pagination, pageParam, dl, tabs, pageHead, barChart, nl2br, dateRange, drawerAttrs, drawerBody } from "../ui/components.ts";
-import { can } from "../domain/authz.ts";
+import { can, customerAdminNeedsMfa } from "../domain/authz.ts";
 import { LEAD_STAGES, LEAD_TRANSITIONS, type LeadStage } from "../domain/crm.ts";
 import { PACKAGES, MAINTENANCE_PLANS, MINIMUM_PLAN_FOR_PACKAGE, ONE_BUSINESS_PROJECT_SCOPE, eligiblePlansFor, assertPlanMeetsMinimum, PricingError, type PackageId, type QuoteLine } from "../domain/catalog.ts";
 import { changeLeadStage } from "../services/leads.ts";
@@ -648,6 +648,7 @@ async function proposalPage(ctx: AppContext, token: string, errors: string[] = [
 <div class="row">${linkButton("Sign in", `/login?next=${encodeURIComponent(self)}`, "primary")}${linkButton("Create account", "/register", "secondary")}</div><p class="faint">After creating an account, confirm your email, sign in, and return to this link.</p></div>`;
   else if (!signedInMatch) acceptBlock = alert("warn", html`You are signed in as ${ctx.user.email}, but this proposal was sent to a different address. <form method="post" action="/logout" style="display:inline">${csrf(ctx)}<button class="btn btn--ghost btn--sm" type="submit">Sign out</button></form> and sign in with the address the proposal was sent to.`);
   else if (!ctx.user.emailVerified) acceptBlock = alert("warn", "Confirm your email address first — check your inbox for the confirmation link — then return to this page.");
+  else if (customerAdminNeedsMfa(ctx.actor)) acceptBlock = html`<div class="card card--gold stack" data-mfa-required><h2 style="font-size:1.3rem">Accept this proposal</h2>${alert("warn", MFA_SETUP_PROMPT)}<div class="row">${linkButton("Set up two-factor authentication", `/mfa/setup?next=${encodeURIComponent(self)}`, "primary")}</div><p class="faint">You will come back to this page to accept once it is on.</p></div>`; // FD-30
   else if (quotes.isPackageQuote(p.version)) acceptBlock = html`<form method="post" action="${self}/accept" class="card card--gold stack">${csrf(ctx)}<h2 style="font-size:1.3rem">Accept this proposal</h2>
 ${checkbox("agree", "I accept this proposal, its scope and payment schedule, the Development Agreement, the Refund Policy, the Data Processing Addendum and the Terms of Service.", { required: true })}
 <p class="faint"><a href="/legal/development-agreement">Development agreement</a> · <a href="/legal/refunds">Refund policy</a> · <a href="/legal/data-processing">Data processing addendum</a> · <a href="/legal/terms">Terms</a></p>

@@ -73,7 +73,7 @@ export const REQUIREMENTS: RequirementDef[] = [
   ...group("Authentication", "§17–§18", [
     ["AUTH-001", "Registration, login, email verification"],
     ["AUTH-002", "Secure account recovery"],
-    ["AUTH-003", "MFA required for staff, optional for customers"],
+    ["AUTH-003", "MFA required for staff and customer administrators (FD-30), optional for other customer users"],
     ["AUTH-004", "Session management and revocation"],
     ["AUTH-005", "Rate limiting and suspicious activity logging", "P0", "security"],
     ["AUTH-006", "Secure staff invitations"],

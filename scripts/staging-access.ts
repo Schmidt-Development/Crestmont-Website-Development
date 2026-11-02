@@ -120,7 +120,10 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
   for (const u of users) {
     const role = (u.roles ?? "").split(",").sort((a, b) => (ROLE_ORDER.indexOf(a) + 1 || 99) - (ROLE_ORDER.indexOf(b) + 1 || 99))[0] || "customer_admin";
     const password = await derivePassword(o.rootKey, salt, `password:${u.email}`);
-    const totp = u.mfa_enabled ? await deriveTotp(o.rootKey, salt, u.email) : null;
+    // FD-30: staff and customer administrators must use MFA, so they are always issued a setup key (an existing demo
+    // customer administrator seeded before FD-30 is enrolled here); other customer roles only when they enabled it.
+    const mfaRequired = (u.roles ?? "").split(",").some((r) => r === "customer_admin" || ROLE_ORDER.includes(r));
+    const totp = u.mfa_enabled || mfaRequired ? await deriveTotp(o.rootKey, salt, u.email) : null;
     accounts.push({ role, email: u.email, password, totp, note: NOTES[role] ?? "Customer portal (sample organization)" });
     // The TOTP secret is written only when the stored one is not (or may not be) the one this run issues. Re-writing it
     // on every deploy would replace a secret the Worker has since encrypted at rest (MFA_ENCRYPTION_KEY) with plaintext.
@@ -148,7 +151,7 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
       if (write || u.mfa_fails > 0) sql.push(`INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, organization_id, details_json, ip, created_at)
         VALUES (NULL, 'system', 'user.mfa_provisioned', 'user', ${q(u.id)}, NULL, ${q(JSON.stringify({ source: "staging-access", secretWritten: write }))}, NULL, ${q(now)});`);
     }
-    sql.push(`UPDATE users SET password_hash = ${q(await hashPassword(password))}, totp_secret = ${totpSql}, totp_last_step = NULL, failed_logins = 0, locked_until = NULL WHERE id = ${q(u.id)};`);
+    sql.push(`UPDATE users SET password_hash = ${q(await hashPassword(password))}, totp_secret = ${totpSql},${totp ? " mfa_enabled = 1," : ""} totp_last_step = NULL, failed_logins = 0, locked_until = NULL WHERE id = ${q(u.id)};`);
   }
   let revoked: Revoked | undefined;
   if (rotated) {

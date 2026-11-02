@@ -3,7 +3,8 @@
 // STEP_UP_MAX_AGE_MINUTES. This file is the single list of those actions; src/app/app.ts applies it to every
 // matching request through requireRecentMfa() before the route runs. Without a recent verification a browser is
 // sent to /mfa/step-up?next=<page> and returned afterwards; a JSON route answers 401. Users without MFA enrolled
-// (customers who did not opt in) are not affected; staff always have MFA.
+// (customer members who did not opt in) are not affected; staff always have MFA, and customer administrators without
+// it cannot reach these actions at all until they enrol (FD-30, requireCustomerAdminMfa in src/app/app.ts).
 
 export const STEP_UP_MAX_AGE_MINUTES = 10;
 
@@ -67,7 +68,7 @@ export const STEP_UP_ROUTES: Readonly<Record<string, string>> = {
   "POST /staff/settings/tax": "tax configuration",
   "POST /staff/settings/tax/jurisdictions": "tax jurisdictions",
   "POST /staff/employees/invitations/:id/revoke": "staff invitation revoke",
-  // Customer team changes (applies only to customers who enabled two-factor authentication)
+  // Customer team changes (customer administrators must have two-factor authentication: Founder decision FD-30)
   "POST /portal/team": "customer team invitation",
   "POST /portal/team/members/:userId/role": "customer role change",
   "POST /portal/team/members/:userId/remove": "customer member removal",

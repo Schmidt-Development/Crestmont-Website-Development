@@ -121,7 +121,8 @@ test("[AUTH-003] production: the Owner is bootstrapped by a one-time invitation 
 
 test("[AUTH-002] [AUTH-004] production: password reset is single-use, signs out every session, and does not reveal whether an account exists", async () => {
   const { db, client } = await productionApp();
-  const cust = await createCustomer(db, "reset@example.com");
+  // Password-only account (an administrator who has not enrolled yet; FD-30 still lets them sign in and browse).
+  const cust = await createCustomer(db, "reset@example.com", undefined, { mfa: false });
   const a = client();
   assert.equal((await a.post("/login", { email: cust.email, password: TEST_PASSWORD })).headers.get("location"), "/portal");
   const b = client();
@@ -144,7 +145,8 @@ test("[AUTH-002] [AUTH-004] production: password reset is single-use, signs out 
 
 test("[AUTH-005] production: repeated failures never lock an account; a remembered browser keeps signing in; strangers are challenged (CREST-GAP-003)", async () => {
   const { db, client } = await productionApp();
-  const cust = await createCustomer(db, "lock@example.com");
+  // Password-only account (not enrolled in MFA yet), so a password sign-in is a completed sign-in.
+  const cust = await createCustomer(db, "lock@example.com", undefined, { mfa: false });
   // The account holder signs in once from their own browser: it becomes a known device.
   const owner = client();
   assert.equal((await owner.post("/login", { email: cust.email, password: TEST_PASSWORD })).status, 303);

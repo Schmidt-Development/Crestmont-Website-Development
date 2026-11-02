@@ -12,7 +12,7 @@ import { paymentsMode, commerceBlock } from "../domain/payments-mode.ts";
 import { ValidationError } from "../lib/validate.ts";
 import { errorPage } from "../ui/layout.ts";
 import { registerAll } from "../routes/index.ts";
-import { can, STAFF_ROLES, type Permission } from "../domain/authz.ts";
+import { can, customerAdminNeedsMfa, STAFF_ROLES, type Permission } from "../domain/authz.ts";
 import { recordAppError } from "../services/monitoring.ts";
 import { rateLimit, securityEvent } from "../services/security.ts";
 import { previewGate } from "./preview-gate.ts";
@@ -134,6 +134,29 @@ export function requireRecentMfa(ctx: AppContext, maxAgeMinutes = STEP_UP_MAX_AG
   if (!(age >= -60e3 && age <= maxAgeMinutes * 60e3)) throw new StepUpRequired();
 }
 
+// ── FD-30: customer administrators must use multifactor authentication ──
+// Until an administrator's session has a verified second factor they may browse (GET) and use only the routes below:
+// sign-in/out, email verification, MFA enrolment and challenge, invitations, support tickets and their own
+// account-security settings.
+// Every other state-changing request (checkout, payment, approvals, proposal acceptance, team changes, refund
+// requests, data export/deletion, uploads, messages, ...) is sent to enrolment (or to the code prompt when already
+// enrolled). src/domain/authz.ts#can is the second line: administrator permissions do not apply to such a session.
+export const MFA_ENROLMENT_REQUIRED = "MFA_ENROLMENT_REQUIRED";
+export const MFA_SETUP_PROMPT = "Set up two-factor authentication to continue. It is required for account administrators.";
+const ADMIN_PRE_MFA_WRITES: readonly RegExp[] = [
+  /^\/logout$/, /^\/login$/, /^\/mfa(\/.*)?$/, /^\/verify-email\/resend$/, /^\/invite$/,
+  /^\/account\/(password|profile|email|email\/confirm|email\/cancel|mfa\/recovery-codes)$/, /^\/account\/sessions\/[^/]+(\/revoke)?$/,
+  /^\/portal\/notices\/mfa-reminder\/dismiss$/, /^\/portal\/notifications\/(read|[^/]+\/read)$/,
+  // Support stays reachable so an administrator who cannot enrol can still ask for help.
+  /^\/portal\/support\/(new|[^/]+\/reply|[^/]+\/reopen)$/,
+];
+export function requireCustomerAdminMfa(ctx: AppContext, method: string): void {
+  if (!ctx.user || ctx.user.isStaff || !customerAdminNeedsMfa(ctx.actor)) return;
+  if (method === "GET" || method === "HEAD") return;
+  if (ADMIN_PRE_MFA_WRITES.some((re) => re.test(ctx.url.pathname))) return;
+  throw new HttpError(401, ctx.user.mfaEnabled ? "MFA_REQUIRED" : MFA_ENROLMENT_REQUIRED);
+}
+
 /** Returns the customer organization the signed-in customer is acting for (first membership, or ?org= when they belong to several). */
 export function requireCustomerOrg(ctx: AppContext): { organizationId: string; organizationName: string; role: string } {
   requireUser(ctx);
@@ -199,6 +222,7 @@ async function dispatch(req: Request, env: Env, url: URL, mark: { unhandled: boo
     if (req.method === "POST" && ctx.user && !url.pathname.startsWith("/api/")) await limitActions(ctx, env, match.pattern);
     // Step-up MFA for sensitive actions (single policy list in src/app/step-up.ts). Signed-in users only: anonymous
     // requests fall through to the route's own guard, which answers 401 / sign-in as before.
+    if (ctx.user && !url.pathname.startsWith("/api/")) requireCustomerAdminMfa(ctx, req.method); // FD-30
     if (ctx.user && stepUpAction(req.method, match.pattern, url)) requireRecentMfa(ctx);
     return await match.handler(ctx, match.params);
   } catch (err) {
@@ -209,6 +233,10 @@ async function dispatch(req: Request, env: Env, url: URL, mark: { unhandled: boo
     if (err instanceof SyntaxError && isApi) return jsonResponse(ctx, 400, { error: "Malformed JSON" });
     const status = (err as { status?: number }).status;
     if (status === 401 && !isApi) {
+      if ((err as Error).message === MFA_ENROLMENT_REQUIRED && ctx) {
+        const back = stepUpReturnPath(req, url, "/portal");
+        return redirect(ctx, `/mfa/setup?next=${encodeURIComponent(back)}`, { kind: "info", text: MFA_SETUP_PROMPT });
+      }
       if ((err as Error).message === "MFA_REQUIRED" && ctx) return redirect(ctx, `/mfa?next=${encodeURIComponent(url.pathname)}`);
       if (err instanceof StepUpRequired && ctx) {
         const back = stepUpReturnPath(req, url, ctx.user?.isStaff ? "/staff" : "/account");
@@ -216,6 +244,7 @@ async function dispatch(req: Request, env: Env, url: URL, mark: { unhandled: boo
       }
       if (ctx) return redirect(ctx, `/login?next=${encodeURIComponent(url.pathname + url.search)}`);
     }
+    if (isApi && (err as Error).message === MFA_ENROLMENT_REQUIRED) return jsonResponse(ctx, 401, { error: MFA_SETUP_PROMPT });
     if (err instanceof StepUpRequired && isApi) return jsonResponse(ctx, 401, { error: "Recent two-factor verification required. Verify at /mfa/step-up and retry." });
     if (status && status >= 400 && status < 500) {
       return isApi ? jsonResponse(ctx, status, { error: (err as Error).message }) : htmlError(ctx, req, env, status, status === 403 ? "Access denied" : status === 404 ? "Page not found" : "Request could not be completed", (err as Error).message);
