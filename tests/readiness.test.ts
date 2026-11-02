@@ -46,10 +46,12 @@ test("[READY-004] signed CI evidence is ingested idempotently and unknown ids ar
 
 test("[READY-002] implementation and verification are tracked separately and latest failure wins", async () => {
   const db = await seeded();
-  // Pin the records this test reasons about so it does not depend on other areas' live status files.
-  db.raw.exec(`UPDATE requirements SET implementation_status='implemented' WHERE id IN ('DATA-001','SALES-001');
+  // Pin the records this test reasons about so it does not depend on other areas' live status files. Ingest first
+  // re-applies the deployed records (syncRequirementsIfStale), so the pins go in after each ingest.
+  const pin = () => db.raw.exec(`UPDATE requirements SET implementation_status='implemented' WHERE id IN ('DATA-001','SALES-001');
                UPDATE requirements SET implementation_status='in_progress' WHERE id='CRM-001'`);
   await ingestEvidence(db, evidence("r1", [{ requirementId: "DATA-001", outcome: "passed" }, { requirementId: "CRM-001", outcome: "passed" }]));
+  pin();
   let report = await buildReport(await loadReadinessInput(db));
   const get = (id: string) => report.requirements.find((r) => r.id === id)!;
   assert.equal(get("DATA-001").state, "verified_in_development");
@@ -60,6 +62,7 @@ test("[READY-002] implementation and verification are tracked separately and lat
   assert.equal(get("CRM-001").state, "in_progress");
   assert.equal(get("CRM-001").verification.development, "passed");
   await ingestEvidence(db, evidence("r2", [{ requirementId: "DATA-001", outcome: "failed" }], { finishedAt: "2026-10-26T11:00:00Z" }));
+  pin();
   report = await buildReport(await loadReadinessInput(db));
   assert.equal(get("DATA-001").state, "test_failed");
 });
@@ -127,4 +130,21 @@ test("[READY-007] Gate B fails when any suite for the latest commit failed, even
   const b = report.gates.find((g) => g.id === "B")!;
   assert.notEqual(b.status, "pass");
   assert.match(b.currentEvidence, /2 run\(s\) @ abc1234 \(local runs only — not GitHub Actions\): 1 passed, 1 failed/);
+});
+
+test("[READY-004] evidence ingest brings D1 up to the deployed inventory and implementation records before judging ids (no 24h wait for the daily cron)", async () => {
+  const { syncRequirementsIfStale } = await import("../src/readiness/ingest.ts");
+  const { IMPLEMENTATION } = await import("../requirements/status.ts");
+  const db = await seeded();
+  assert.equal(await syncRequirementsIfStale(db), false, "nothing to do when D1 matches the deployed records");
+  // D1 as the previous deploy left it: one requirement not yet known, one still recorded as in progress.
+  const implemented = Object.entries(IMPLEMENTATION).find(([, r]) => r.status === "implemented")![0];
+  const missing = REQUIREMENTS.find((r) => r.id !== implemented)!.id;
+  db.raw.prepare(`DELETE FROM requirements WHERE id = ?`).run(missing);
+  db.raw.prepare(`UPDATE requirements SET implementation_status = 'in_progress' WHERE id = ?`).run(implemented);
+  const r = await ingestEvidence(db, evidence("gh-sync-1", [{ requirementId: missing, outcome: "passed" }]));
+  assert.deepEqual([r.status, r.accepted, r.unknownRequirements], ["ingested", 1, []], "the new requirement's evidence is kept, not dropped as unknown");
+  const row = db.raw.prepare(`SELECT implementation_status s FROM requirements WHERE id = ?`).get(implemented) as { s: string };
+  assert.equal(row.s, "implemented", "the deployed implementation record is applied at ingest");
+  assert.equal(await syncRequirementsIfStale(db), false);
 });
