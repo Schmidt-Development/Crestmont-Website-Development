@@ -12,6 +12,7 @@ import { MAINTENANCE_PLANS } from "../domain/catalog.ts";
 import { REFUND_STATUSES, type RefundStatus } from "../domain/refunds.ts";
 import { customerBilling, customerInvoice, startInvoiceCheckout, billingPortalUrl, requestRefund, stripeRedirect, NOT_CONFIGURED } from "../services/billing.ts";
 import * as refunds from "../services/refunds.ts";
+import * as lifecycle from "../services/maintenance-lifecycle.ts";
 import * as fin from "../services/finance.ts";
 import * as docs from "../services/finance-documents.ts";
 import { createStripeMilestoneInvoice, stripeInvoicer, stripeInvoiceBlocker, STRIPE_INVOICE_KINDS } from "../services/stripe-invoices.ts";
@@ -245,6 +246,32 @@ ${definitions(fin.FINANCE_DEFINITIONS)}
 <p class="faint">This dashboard summarizes internal records. It is not tax or accounting advice; reconcile with Stripe and consult a qualified accountant.</p>`);
 }
 
+/** Founder clarifications 1–2: failed-payment episodes, suspension eligibility and the Owner's suspend/restore decisions. */
+async function hostingSuspensionPage(ctx: AppContext) {
+  requireStaff(ctx, "finance.read");
+  const rows = await lifecycle.suspensionCandidates(ctx.db);
+  const acts = (await ctx.db.prepare(`SELECT a.project_id, p.name AS project, o.name AS org, a.plan_id, a.status, a.launched_at FROM maintenance_activations a JOIN projects p ON p.id = a.project_id JOIN organizations o ON o.id = a.organization_id WHERE a.status IN ('due','awaiting_plan_verification') ORDER BY a.launched_at DESC LIMIT 50`)
+    .all<{ project_id: string; project: string; org: string; plan_id: string; status: string; launched_at: string }>()).results;
+  const owner = can(ctx.actor!, "hosting.suspend");
+  const now = ctx.now().toISOString();
+  return staffPage(ctx, "Hosting & billing status", html`${pageHead("Hosting & billing status", undefined, "Finance")}
+<p class="muted">Recurring maintenance billing starts at approved launch (FD-27). A failed monthly payment that stays unresolved for seven days after notice makes hosting eligible for suspension; suspension is an Owner decision and never deletes a website or data. Payment restores hosting automatically.</p>
+<h2 class="h4">Launched projects awaiting their maintenance plan</h2>
+${table(acts, [{ header: "Project", cell: (a) => html`<a href="/staff/projects/${a.project_id}">${a.project}</a>` }, { header: "Customer", cell: (a) => a.org }, { header: "Plan", cell: (a) => planName(a.plan_id) },
+    { header: "Status", cell: (a) => badge(a.status === "due" ? "awaiting customer" : "awaiting plan verification") }, { header: "Launched", cell: (a) => formatDate(a.launched_at) }],
+    { empty: emptyState("None", "No launched project is waiting for its maintenance plan to start.") })}
+<h2 class="h4">Failed payments and suspensions</h2>
+${table(rows, [{ header: "Customer", cell: (r) => html`<a href="/staff/customers/${r.organization_id}">${r.organization}</a>` }, { header: "Plan", cell: (r) => planName(r.product_id) },
+    { header: "First failure", cell: (r) => formatDate(r.payment_failed_at) }, { header: "Notice sent", cell: (r) => formatDate(r.suspension_reminder_sent_at) },
+    { header: "State", cell: (r) => badge(r.hosting_suspended_at ? "suspended" : r.suspension_eligible_at && r.suspension_eligible_at <= now && r.suspension_reminder_sent_at ? "eligible" : "in grace period") },
+    { header: "Decision", cell: (r) => !owner ? "Owner only" : r.hosting_suspended_at
+      ? html`<form method="post" action="/staff/billing/hosting/restore" class="stack">${csrf(ctx)}<input type="hidden" name="subscription_id" value="${r.id}">${input({ name: "reason", label: "Reason", required: true, maxlength: 500 })}${button("Restore hosting", { size: "sm" })}</form>`
+      : r.suspension_eligible_at && r.suspension_eligible_at <= now && r.suspension_reminder_sent_at
+        ? html`<form method="post" action="/staff/billing/hosting/suspend" class="stack" data-confirm="Suspend hosting for this customer? Nothing is deleted.">${csrf(ctx)}<input type="hidden" name="subscription_id" value="${r.id}">${textarea({ name: "reason", label: "Reason (recorded)", rows: 2, required: true, maxlength: 1000 })}${button("Suspend hosting", { size: "sm", variant: "danger" })}</form>`
+        : `Eligible ${formatDate(r.suspension_eligible_at)}` }],
+    { empty: emptyState("No failed payments", "Nothing is past due.") })}`);
+}
+
 async function subscriptionsPage(ctx: AppContext) {
   requireStaff(ctx, "finance.read");
   const status = ctx.url.searchParams.get("status") ?? "";
@@ -448,6 +475,19 @@ export function register(r: Router): void {
   // finance
   r.get("/staff/finance", financeDashboardPage);
   r.get("/staff/finance/subscriptions", subscriptionsPage);
+  r.get("/staff/billing/hosting", hostingSuspensionPage);
+  r.post("/staff/billing/hosting/suspend", async (ctx) => {
+    requireStaff(ctx, "hosting.suspend");
+    const f = await ctx.form();
+    await lifecycle.suspendHosting(ctx, ctx.user!.id, str(f, "subscription_id"), str(f, "reason"), ctx.now());
+    return redirect(ctx, "/staff/billing/hosting", { kind: "success", text: "Hosting suspended and the customer notified. Nothing was deleted." });
+  });
+  r.post("/staff/billing/hosting/restore", async (ctx) => {
+    requireStaff(ctx, "hosting.suspend");
+    const f = await ctx.form();
+    await lifecycle.restoreHosting(ctx, ctx.user!.id, str(f, "subscription_id"), str(f, "reason"));
+    return redirect(ctx, "/staff/billing/hosting", { kind: "success", text: "Hosting restored and the customer notified." });
+  });
   r.get("/staff/finance/invoices", invoicesPage);
   r.get("/staff/finance/invoices/:id", (ctx, p) => staffInvoicePage(ctx, p.id));
   r.post("/staff/finance/invoices/:id/stripe-invoice", async (ctx, p) => {

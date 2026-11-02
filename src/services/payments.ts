@@ -1,6 +1,7 @@
 // Applies verified Stripe events (PAY-003). Webhooks are the only source of payment truth:
 // browser redirects never mark anything paid. Every handler is idempotent.
 import type { AppContext } from "../app/context.ts";
+import { completeActivationForSubscription, recordPaymentFailure, recordPaymentRecovered } from "./maintenance-lifecycle.ts";
 import { nowIso, newId } from "../lib/db.ts";
 import { isStaleEvent, markEventResult, type StripeEvent } from "../domain/stripe-webhook.ts";
 import { markInvoicePaid, provisionProjectOnce } from "./commerce.ts";
@@ -142,6 +143,9 @@ export async function processStripeEvent(ctx: EventCtx, evt: StripeEvent): Promi
         const status = evt.type === "customer.subscription.deleted" ? "canceled" : (s(o, "status") ?? "incomplete");
         const end = subscriptionPeriodEnd(o);
         const change = await upsertSubscription(db, evt.data.object.id, org, m.product_id ?? null, status, end ? new Date(end * 1000).toISOString() : null);
+        // FD-27: an active maintenance subscription completes the launch activation for its plan (or a higher one).
+        const subRow = await db.prepare(`SELECT id FROM subscriptions WHERE stripe_subscription_id = ?`).bind(evt.data.object.id).first<{ id: string }>();
+        if (subRow) await completeActivationForSubscription(db, org, subRow.id, change.productId, change.status);
         // EMAIL-002 subscription_update: customer administrators hear about real status changes of an existing plan.
         if (change.previous && change.previous !== change.status) {
           const plan = change.productId ? (MAINTENANCE_PLANS as Record<string, { name: string }>)[change.productId]?.name ?? change.productId : "maintenance";
@@ -153,14 +157,18 @@ export async function processStripeEvent(ctx: EventCtx, evt: StripeEvent): Promi
       case "invoice.payment_failed": {
         const sub = invoiceSubscription(o);
         if (sub) await db.prepare(`UPDATE subscriptions SET status = 'past_due', updated_at = ? WHERE stripe_subscription_id = ?`).bind(nowIso(), sub).run();
+        // Clarification 1: the first unresolved failure starts the seven-day clock before hosting may be suspended.
+        const clock = sub ? await recordPaymentFailure(db, sub, new Date(evt.created ? evt.created * 1000 : Date.now())) : null;
         const to = s(o, "customer_email");
-        if (to) await sendMail(ctx, { template: "failed_payment", to, idempotencyKey: `failed:${evt.id}`, data: { kind: "plan", url: `${ctx.baseUrl}/portal/billing` } });
+        if (to) await sendMail(ctx, { template: "failed_payment", to, idempotencyKey: `failed:${evt.id}`, data: { kind: "plan", url: `${ctx.baseUrl}/portal/billing`, ...(clock ? { suspendAfter: clock.eligibleAt.slice(0, 10) } : {}) } });
         await audit(db, { actorKind: "webhook", action: "payment.failed", subjectType: "subscription", subjectId: sub, details: { event: evt.id } });
         break;
       }
       case "invoice.paid": {
         const sub = invoiceSubscription(o);
         if (sub) await db.prepare(`UPDATE subscriptions SET status = 'active', updated_at = ? WHERE stripe_subscription_id = ? AND status = 'past_due'`).bind(nowIso(), sub).run();
+        // Clarification 1–2: payment clears the failure episode and restores suspended hosting (nothing was deleted).
+        if (sub) await recordPaymentRecovered(ctx, sub);
         // PAY-006: a Stripe Invoice created for a milestone invoice (src/services/stripe-invoices.ts).
         const local = meta(o).crestmont_invoice_id;
         if (local) {

@@ -197,7 +197,7 @@ function gbpFlow(): SafeHtml {
 }
 function careFlow(): SafeHtml {
   return flow({ kind: "care", id: "care", title: "Care after launch, in plain view", hint: "An illustrative console. Plan inclusions are listed on this page once finalised; nothing here is a service-level promise.", free: true, stages: [
-    { key: "hosting", label: "Hosting", body: html`<dl class="sv-kv"><dt>Website</dt><dd>Online (illustrative)</dd><dt>Domain</dt><dd>Registered to you</dd><dt>DNS</dt><dd>Your registrar, or agency-managed DNS</dd></dl><p class="sv-small">Plans are optional; you can always take the site elsewhere.</p>` },
+    { key: "hosting", label: "Hosting", body: html`<dl class="sv-kv"><dt>Website</dt><dd>Online (illustrative)</dd><dt>Domain</dt><dd>Registered to you</dd><dt>DNS</dt><dd>Your registrar, or agency-managed DNS</dd></dl><p class="sv-small">Each website package includes a required minimum plan; your domain stays yours.</p>` },
     { key: "updates", label: "Updates", body: html`<div class="sv-actions">${act("update", "Apply updates")}</div>${log("update", ["Updates applied to a staging copy", "Checks pass on staging", "Published to the live site", "Change recorded"])}` },
     { key: "monitoring", label: "Monitoring", body: html`<div class="sv-actions">${act("outage", "Simulate an outage", false)}</div>${log("outage", ["Site stopped responding", "Alert raised", "Cause found and fixed", "Site responding again · incident recorded"], "sv-log--warn")}` },
     { key: "backups", label: "Backups", body: html`<div class="sv-actions">${act("restore", "Restore a backup")}</div>${log("restore", ["Backup selected", "Restored to a staging copy and checked", "Restored to the live site"])}` },

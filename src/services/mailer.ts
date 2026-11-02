@@ -74,7 +74,8 @@ export interface TemplateData {
   /** `hostedInvoiceUrl`: the Stripe-hosted page of a finalized Stripe invoice (CREST-GAP-039); the call to action pays there. */
   invoice: ProjectBase & { milestone: string; hostedInvoiceUrl?: string | null };
   /** `kind`: "plan" = maintenance renewal (invoice.payment_failed); "checkout" = a delayed checkout payment failed (CREST-GAP-083). */
-  failed_payment: { url: string; kind?: "plan" | "checkout" };
+  /** "suspension_notice" = the pre-suspension reminder; "suspended" = the Owner suspended hosting (clarifications 1–2). */
+  failed_payment: { url: string; kind?: "plan" | "checkout" | "suspension_notice" | "suspended"; suspendAfter?: string };
   subscription_update: { planName: string; status: string; url: string };
   support_ticket:
     | { event: "received"; name: string; subject: string; ticketRef: string; hoursNotice: string; url: string }
@@ -290,14 +291,26 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
   failed_payment: {
     name: "failed_payment", category: "transactional", audience: "customer",
     description: "A maintenance plan payment failed (from the verified Stripe webhook).",
-    render: (d) => ({
+    render: (d) => d.kind === "suspended" ? ({
+      subject: "Hosting suspended: payment needed", heading: "Your website hosting is suspended",
+      paragraphs: ["Your maintenance plan payment has stayed unpaid for more than seven days after our notices, so your website hosting has been suspended.",
+        "Your website and your data have not been deleted. Hosting is restored when the payment goes through.", "You can also ask us for a copy of your data at any time."],
+      cta: { label: "Update payment method", url: d.url },
+    }) : d.kind === "suspension_notice" ? ({
+      subject: "Reminder: payment still needed", heading: "Your payment is still outstanding",
+      paragraphs: [`Your maintenance plan payment is still unpaid. If it remains unpaid${d.suspendAfter ? ` on ${d.suspendAfter}` : " seven days after it first failed"}, your website hosting may be suspended.`,
+        "Suspension never deletes your website or data, and hosting is restored when the payment goes through. If something is wrong, reply to this email."],
+      cta: { label: "Update payment method", url: d.url },
+    }) : ({
       subject: "Action needed: payment failed", heading: "Your payment did not go through",
       paragraphs: d.kind === "checkout"
         ? ["Your recent payment could not be completed by your bank, so nothing was charged and your invoice is still open.", "You can pay again from Billing in your portal, using another payment method if needed."]
-        : ["Your most recent maintenance plan payment failed. Please update your payment method to keep your plan active.", "Stripe will retry the payment automatically."],
+        : ["Your most recent maintenance plan payment failed. Please update your payment method to keep your plan active.", "Stripe will retry the payment automatically.",
+          `If the payment stays unpaid for seven days${d.suspendAfter ? ` (from ${d.suspendAfter})` : ""}, your website hosting may be suspended after a further notice. Suspension never deletes your website or data. There is no late fee.`],
       cta: { label: d.kind === "checkout" ? "Pay from your portal" : "Update payment method", url: d.url },
     }),
-    samples: [{ url: "https://example.com/portal/billing" }, { url: "https://example.com/portal/billing/invoices/inv_preview", kind: "checkout" }],
+    samples: [{ url: "https://example.com/portal/billing" }, { url: "https://example.com/portal/billing/invoices/inv_preview", kind: "checkout" },
+      { url: "https://example.com/portal/billing", kind: "suspension_notice", suspendAfter: "2026-11-09" }, { url: "https://example.com/portal/billing", kind: "suspended" }],
   },
   subscription_update: {
     name: "subscription_update", category: "transactional", audience: "customer",

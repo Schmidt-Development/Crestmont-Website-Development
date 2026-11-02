@@ -542,7 +542,7 @@ ${section("Capabilities", caps.heading, ledger(caps.items), { id: "capabilities"
 <div class="switch" data-switch hidden><button class="switch__btn" type="button" data-switch-to="plans-packages">Website packages</button><button class="switch__btn" type="button" data-switch-to="maintenance">Monthly care</button><span class="switch__pill" aria-hidden="true"></span></div></div>
 <p class="lede" style="margin:-1rem 0 2.5rem">${pr.lede}</p>
 <div class="plans" data-plans><div class="plans__set" id="plans-packages"><h3 class="plans__set-title">Website packages</h3>${packageCards(c, { compact: true })}<p class="section__more"><a href="/pricing">Full package details</a><a href="/pricing/compare">Compare packages</a><a href="/quote">Custom development quote</a></p></div>
-<div class="plans__set" id="maintenance"><h3 class="plans__set-title">Optional maintenance plans</h3>${maintenanceCards()}<p class="section__more"><a href="/hosting-maintenance">Hosting &amp; maintenance</a></p></div></div></div></section>
+<div class="plans__set" id="maintenance"><h3 class="plans__set-title">Maintenance plans</h3>${maintenanceCards()}<p class="section__more"><a href="/hosting-maintenance">Hosting &amp; maintenance</a></p></div></div></div></section>
 ${section("Customer portal", exp.heading, itemCards(exp.items), { id: "experience", lede: exp.lede })}
 <section class="section" id="faq"><div class="container faq"><div class="faq__aside"><p class="section__label">FAQs</p><h2 class="faq__title reveal-words" data-reveal>Frequently asked questions</h2>
 <p data-reveal style="--rd:120ms">Another question? <a href="/contact">Contact us</a> or read <a href="/faq">all questions</a>.</p></div>
@@ -696,7 +696,7 @@ ${parseItems(c.get("faq.items").items).map((q) => html`<details class="disclosur
     const h = c.get("hosting.page");
     return html`${serviceHero("Ongoing care", h.heading, h.lede, html`${linkButton("Ask about maintenance", "/contact?topic=maintenance")}`, serviceVisual("hosting-maintenance"))}
 <section class="section section--flush"><div class="container">${maintenanceCards()}</div></section>
-${section("Ownership", "Your site, your choice", html`<ul class="plain-list"><li>Maintenance plans are optional. Your domain always remains registered to you.</li><li>You can use your own domain registrar or agency-managed DNS services.</li>${plansApproved() ? html`<li>Plans renew monthly by automatic billing, with self-service payment management in your customer portal; see the <a href="/legal/cancellation">cancellation policy</a>.</li>` : ""}<li>Support tickets can be submitted at any time; see the <a href="/legal/support">support policy</a> for staffed hours.</li></ul>`)}`;
+${section("Ownership", "Your site, your choice", html`<ul class="plain-list"><li>Each website package requires a minimum maintenance plan (Starter: Essential, Business: Professional, Premium: Executive; custom work as quoted). You may choose a higher plan. Billing starts when you approve and launch your website. Your domain always remains registered to you.</li><li>You can use your own domain registrar or agency-managed DNS services.</li>${plansApproved() ? html`<li>Plans renew monthly by automatic billing, with self-service payment management in your customer portal; see the <a href="/legal/cancellation">cancellation policy</a>.</li>` : ""}<li>Support tickets can be submitted at any time; see the <a href="/legal/support">support policy</a> for staffed hours.</li></ul>`)}`;
   }));
 
   // ── lead forms ──

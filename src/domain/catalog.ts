@@ -91,7 +91,7 @@ export const MAINTENANCE_PLANS: Readonly<Record<MaintenanceId, MaintenanceDef>> 
   essential: {
     id: "essential", name: "Essential", monthlyCents: 9_900, entitlementsStatus: "proposed_pending_founder_approval",
     proposedEntitlements: {
-      hosting: "Managed hosting for 1 site, up to 10 GB storage / 100 GB monthly transfer",
+      hosting: "Managed hosting for 1 business project, up to 10 GB storage / 100 GB monthly transfer",
       labor: "Up to 1 hour/month maintenance labor (non-rolling)",
       contentUpdates: "Up to 2 small content updates/month (text or image swaps)",
       securityUpdates: "Monthly dependency and platform security updates",
@@ -105,7 +105,7 @@ export const MAINTENANCE_PLANS: Readonly<Record<MaintenanceId, MaintenanceDef>> 
   professional: {
     id: "professional", name: "Professional", monthlyCents: 19_900, entitlementsStatus: "proposed_pending_founder_approval",
     proposedEntitlements: {
-      hosting: "Managed hosting for 1 site, up to 25 GB storage / 250 GB monthly transfer",
+      hosting: "Managed hosting for 1 business project, up to 25 GB storage / 250 GB monthly transfer",
       labor: "Up to 2.5 hours/month maintenance labor (non-rolling)",
       contentUpdates: "Up to 6 content updates/month",
       securityUpdates: "Bi-weekly dependency and platform security updates",
@@ -119,7 +119,7 @@ export const MAINTENANCE_PLANS: Readonly<Record<MaintenanceId, MaintenanceDef>> 
   executive: {
     id: "executive", name: "Executive", monthlyCents: 29_900, entitlementsStatus: "proposed_pending_founder_approval",
     proposedEntitlements: {
-      hosting: "Managed hosting for up to 2 sites, up to 50 GB storage / 500 GB monthly transfer",
+      hosting: "Managed hosting for 1 business project, up to 50 GB storage / 500 GB monthly transfer",
       labor: "Up to 4 hours/month maintenance labor (non-rolling)",
       contentUpdates: "Content updates within the 4-hour labor allowance",
       securityUpdates: "Weekly dependency and platform security updates",
@@ -131,6 +131,45 @@ export const MAINTENANCE_PLANS: Readonly<Record<MaintenanceId, MaintenanceDef>> 
     },
   },
 });
+
+/**
+ * FD-26 (Founder decision, 2026-11): every website package requires a hosting/maintenance plan at or above a minimum
+ * tier. Upgrades are allowed; a plan below the minimum is refused (never silently downgraded). Custom websites use the
+ * plan established in the approved quote. Each plan covers ONE business project: a single company's website, customer
+ * portal, CRM, booking system and connected dashboards, within the contracted scope and resource limits. Separate
+ * businesses owned by the same person need separate subscriptions.
+ */
+export const MAINTENANCE_ORDER: readonly MaintenanceId[] = ["essential", "professional", "executive"];
+export const MINIMUM_PLAN_FOR_PACKAGE: Readonly<Record<PackageId, MaintenanceId>> = Object.freeze({
+  starter: "essential",
+  business: "professional",
+  premium: "executive",
+});
+export const BUSINESS_PROJECTS_PER_PLAN = 1;
+export const ONE_BUSINESS_PROJECT_SCOPE =
+  "Each plan covers one business project: one company's website, customer portal, CRM, booking system and connected dashboards, within the agreed scope and resource limits. Separate businesses need separate subscriptions.";
+/** FD-27: recurring maintenance billing starts when the customer approves and launches the completed website. */
+export const MAINTENANCE_BILLING_START = "at_approved_launch" as const;
+
+export function isMaintenanceId(id: string): id is MaintenanceId {
+  return (MAINTENANCE_ORDER as readonly string[]).includes(id);
+}
+
+/** Plans the customer may choose for a package: the minimum and every higher tier, in order. */
+export function eligiblePlansFor(packageId: PackageId): MaintenanceId[] {
+  const min = MAINTENANCE_ORDER.indexOf(MINIMUM_PLAN_FOR_PACKAGE[packageId]);
+  return MAINTENANCE_ORDER.slice(min);
+}
+
+/** Throws PricingError unless `planId` is a real plan at or above the package's minimum. */
+export function assertPlanMeetsMinimum(packageId: PackageId, planId: string): MaintenanceId {
+  if (!isMaintenanceId(planId)) throw new PricingError("Choose a hosting and maintenance plan.");
+  const min = MINIMUM_PLAN_FOR_PACKAGE[packageId];
+  if (MAINTENANCE_ORDER.indexOf(planId) < MAINTENANCE_ORDER.indexOf(min)) {
+    throw new PricingError(`The ${PACKAGES[packageId].name} package requires the ${MAINTENANCE_PLANS[min].name} plan or higher.`);
+  }
+  return planId;
+}
 
 export interface QuoteLine { description: string; amountCents: number }
 

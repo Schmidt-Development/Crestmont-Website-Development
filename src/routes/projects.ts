@@ -59,6 +59,18 @@ async function generalConversationsNotice(ctx: AppContext): Promise<SafeHtml> {
 
 const REVISION_CATEGORY_LABEL: Record<string, string> = { customer_revision: "Customer revision (uses a round)", builder_defect: "Crestmont defect (no round used)", scope_change: "Scope change (change order)" };
 
+/** FD-16: the Founder's documented launch/payment exception for one project (Owner only). */
+async function paymentExceptionPanel(ctx: AppContext, projectId: string): Promise<SafeHtml> {
+  const ex = await ctx.db.prepare(`SELECT e.reason, e.unpaid_at_grant, e.granted_at, u.display_name FROM release_payment_exceptions e JOIN users u ON u.id = e.granted_by WHERE e.project_id = ? AND e.revoked_at IS NULL`)
+    .bind(projectId).first<{ reason: string; unpaid_at_grant: string; granted_at: string; display_name: string }>();
+  return html`<details class="disclosure" data-testid="payment-exception"${ex ? html` open` : ""}><summary>Founder payment exception (FD-16)</summary><div class="disclosure__body stack">
+<p class="muted">Waives only the unpaid scheduled payments for this project's release. Approvals, change-order invoices and simulated payments are never waived. Requires a fresh second factor.</p>
+${ex ? html`${dl([["In force since", formatDateTime(ex.granted_at)], ["By", ex.display_name], ["Waived", ex.unpaid_at_grant.split(",").join(", ")], ["Reason", ex.reason]])}
+<form method="post" action="/staff/projects/${projectId}/payment-exception" class="stack">${csrf(ctx)}<input type="hidden" name="intent" value="revoke">${input({ name: "reason", label: "Why revoke it", required: true, maxlength: 1000 })}${button("Revoke exception", { variant: "secondary", size: "sm" })}</form>`
+  : html`<form method="post" action="/staff/projects/${projectId}/payment-exception" class="stack" data-confirm="Authorize release without the unpaid scheduled payments?">${csrf(ctx)}<input type="hidden" name="intent" value="grant">${textarea({ name: "reason", label: "Documented reason (what was agreed and how payment will be settled)", rows: 3, required: true, maxlength: 2000 })}${button("Authorize payment exception", { variant: "danger", size: "sm" })}</form>`}
+</div></details>`;
+}
+
 export function register(r: Router): void {
   // ───────────── My work ─────────────
   r.get("/staff", async (ctx) => {
@@ -369,7 +381,8 @@ ${coord ? html`<form method="post" action="/staff/projects/${proj.id}/change-ord
       const deps = (await db.prepare(`SELECT d.url, d.commit_sha, d.deployed_at, u.display_name FROM customer_deployments d JOIN users u ON u.id = d.deployed_by WHERE d.project_id = ? ORDER BY d.deployed_at DESC`).bind(proj.id).all<{ url: string; commit_sha: string | null; deployed_at: string; display_name: string }>()).results;
       content = html`<section class="card card--gold"><h2 class="card__title">Customer release readiness</h2><p class="muted">Customer website launch chain (§28). Separate from Crestmont's own platform launch.</p>
 ${table(rr.checks, [{ header: "Check", cell: (c) => c.label }, { header: "Result", cell: (c) => badge(c.ok ? "pass" : "fail", c.ok ? "Pass" : "Missing") }, { header: "Detail", cell: (c) => c.detail }])}
-<p>${rr.ready ? badge("pass", "Ready to deploy") : badge("blocked", `Blocked: ${rr.checks.filter((c) => !c.ok).length} check(s) outstanding`)}</p></section>
+<p>${rr.ready ? badge("pass", "Ready to deploy") : badge("blocked", `Blocked: ${rr.checks.filter((c) => !c.ok).length} check(s) outstanding`)}</p>
+${can(ctx.actor!, "release.payment_exception") ? await paymentExceptionPanel(ctx, proj.id) : ""}</section>
 <div class="grid grid-2" style="margin-top:1.5rem">
 ${coord ? html`<section class="card"><h2 class="card__title">Record internal approval</h2><form method="post" action="/staff/projects/${proj.id}/approvals">${csrf(ctx)}
 ${select({ name: "kind", label: "Check", options: P.STAFF_APPROVAL_KINDS.map((k) => ({ value: k, label: P.APPROVAL_LABELS[k] })) })}
@@ -520,6 +533,17 @@ ${input({ name: "description", label: "Description", required: true, maxlength: 
     return act(ctx, p.id, "approvals", async () => {
       await P.recordStaffApproval(ctx, ctx.actor!, p.id, str(f, "kind") as P.StaffApprovalKind, str(f, "decision") === "approved" ? "approved" : "rejected", str(f, "notes"));
       return "Approval recorded.";
+    });
+  });
+  // FD-16: Founder-only launch/payment exception (step-up MFA via src/app/step-up.ts).
+  r.post("/staff/projects/:id/payment-exception", async (ctx, p) => {
+    requireStaff(ctx, "release.payment_exception");
+    const f = await ctx.form();
+    const revoke = str(f, "intent") === "revoke";
+    return act(ctx, p.id, "approvals", async () => {
+      if (revoke) { await P.revokePaymentException(ctx.db, ctx.actor!, p.id, str(f, "reason")); return "Payment exception revoked; the payment check applies again."; }
+      await P.grantPaymentException(ctx.db, ctx.actor!, p.id, str(f, "reason"));
+      return "Payment exception recorded. Every other release check still applies.";
     });
   });
   r.post("/staff/projects/:id/invoices", async (ctx, p) => {

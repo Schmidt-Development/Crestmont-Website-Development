@@ -52,7 +52,7 @@ export function assistantKnowledge(f: AssistantFacts): string {
   lines.push("PACKAGE COMPARISON BY CAPABILITY:");
   for (const feat of PACKAGE_FEATURES) lines.push(`- ${feat.label}: ${tiers.map((id) => `${PACKAGES[id].name}: ${feat.levels[id] ?? "not included"}`).join(" | ")}. (${feat.note})`);
   lines.push("CUSTOM DEVELOPMENT: quoted separately in writing after a scoping and feasibility review; billed 50% deposit, 25% after the approved design milestone, 25% before production launch. No price can be given in chat.");
-  lines.push(`MAINTENANCE PLANS (optional, monthly): ${Object.values(MAINTENANCE_PLANS).map((m) => `${m.name} ${dollars(f.pricesCents[`maintenance:${m.id}`] ?? m.monthlyCents)}/month`).join("; ")}. What each plan includes is still being finalised — do not describe plan contents; offer the contact page.`);
+  lines.push(`MAINTENANCE PLANS (monthly; every website package requires a minimum plan — Starter: Essential, Business: Professional, Premium: Executive, custom: as quoted; higher plans allowed; billing starts at approved launch, not at purchase; each plan covers one business project): ${Object.values(MAINTENANCE_PLANS).map((m) => `${m.name} ${dollars(f.pricesCents[`maintenance:${m.id}`] ?? m.monthlyCents)}/month`).join("; ")}. What each plan includes is still being finalised — do not describe plan contents; offer the contact page.`);
   lines.push("SERVICES:");
   for (const s of SERVICES) lines.push(`- ${s.name} (${servicePath(s)}): ${s.summary} Includes: ${s.includes.join("; ")}. Good to know: ${s.boundaries.join("; ")}.`);
   if (f.process.length) { lines.push("PROJECT PROCESS:"); f.process.forEach((p, i) => lines.push(`${i + 1}. ${p.title}: ${p.body}`)); }
