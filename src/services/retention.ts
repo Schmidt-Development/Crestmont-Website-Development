@@ -26,8 +26,13 @@ export const ALWAYS_RULES: AlwaysRule[] = [
 
 export interface ConfigurableRule { category: string; key: string; label: string; proposedDays: number; minDays: number; maxDays: number; description: string }
 export const CONFIGURABLE_RULES: ConfigurableRule[] = [
-  { category: "security_events", key: "retention.security_events_days", label: "Security events", proposedDays: 365, minDays: 90, maxDays: 3650,
-    description: "Failed logins, lockouts, rate-limit hits (contain email addresses and IPs). Rows older than the period are deleted." },
+  // FD-38 (Founder decision, 2026-11, provisional pending final privacy review): 180 days for identifiable security logs.
+  { category: "security_events", key: "retention.security_events_days", label: "Security events", proposedDays: 180, minDays: 90, maxDays: 3650,
+    description: "Failed logins, rate-limit hits and other security events (contain email addresses and IPs). Rows older than the period are deleted." },
+  // FD-38: 90 days for raw IP addresses. Only the IP is cleared; the row stays. Agreement acceptances keep theirs as
+  // contract evidence (lawful exception), and the audit log permits exactly this one change (migration 0067).
+  { category: "raw_ips", key: "retention.raw_ip_days", label: "Raw IP addresses", proposedDays: 90, minDays: 30, maxDays: 3650,
+    description: "IP addresses on sessions, security events and audit log entries are cleared after the period; the records themselves are kept. Agreement acceptance evidence is not changed." },
   { category: "email_bodies", key: "retention.email_bodies_days", label: "Email message bodies", proposedDays: 730, minDays: 90, maxDays: 3650,
     description: "Rendered subject/HTML/text of sent emails. Delivery log rows (template, recipient, status) are kept; only the stored body is deleted." },
   { category: "app_errors", key: "retention.app_errors_days", label: "Server error log", proposedDays: 90, minDays: 30, maxDays: 3650,
@@ -99,6 +104,14 @@ export async function runRetention(deps: { db: Db; storage: StorageAdapter | nul
         const u = notIn("user_id", holds.users);
         affected = (await db.prepare(`DELETE FROM security_events WHERE created_at < ?${u.sql}`).bind(cut, ...u.binds).run()).meta.changes;
         if (holds.users.size) detail += `; events of ${holds.users.size} held account(s) kept`;
+        break;
+      }
+      case "raw_ips": {
+        const u = notIn("user_id", holds.users), a = notIn("actor_user_id", holds.users);
+        affected += (await db.prepare(`UPDATE sessions SET ip = NULL WHERE created_at < ? AND ip IS NOT NULL${u.sql}`).bind(cut, ...u.binds).run()).meta.changes;
+        affected += (await db.prepare(`UPDATE security_events SET ip = NULL WHERE created_at < ? AND ip IS NOT NULL${u.sql}`).bind(cut, ...u.binds).run()).meta.changes;
+        affected += (await db.prepare(`UPDATE audit_logs SET ip = NULL WHERE created_at < ? AND ip IS NOT NULL${a.sql}`).bind(cut, ...a.binds).run()).meta.changes;
+        if (holds.users.size) detail += `; IPs of ${holds.users.size} held account(s) kept`;
         break;
       }
       case "email_bodies":

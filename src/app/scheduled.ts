@@ -10,7 +10,7 @@ import { applySeedBlockerLinks } from "../services/readiness-admin.ts";
 import { retryFailedStripeEvents, stripeEventCtx, repairPaidInvoicesWithoutProject } from "../services/payments.ts";
 import { retryQueuedEmails } from "../services/email-retry.ts";
 import { runSupportEscalationSweep } from "../services/support.ts";
-import { runInactivitySweep } from "../services/projects.ts";
+import { runInactivitySweep, runReviewDeadlineSweep } from "../services/projects.ts";
 import { syncGithub } from "../services/github.ts";
 import { refreshIntegrationHealth } from "../services/integrations.ts";
 import { runCostImport } from "../services/cost-import.ts";
@@ -53,7 +53,8 @@ export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string,
           detail = JSON.stringify(r).slice(0, 300);
           break;
         }
-        case "inactivity": detail = `${(await runInactivitySweep(ctx)).length} inactivity actions`; break;
+        // FD-14/FD-15: overdue customer reviews are reminded, never approved.
+        case "inactivity": detail = `${(await runInactivitySweep(ctx)).length} inactivity actions; ${await runReviewDeadlineSweep(ctx)} overdue reviews reminded`; break;
         case "integration_health": detail = `${(await refreshIntegrationHealth({ db: ctx.db, env, storage: ctx.storage })).length} integration rows refreshed`; break;
         // PAY-009: read-only comparison with Stripe; findings for human review, never marks anything paid.
         case "stripe_side_reconcile": detail = (await runStripeReconciliation(ctx.db, env)).detail; break;

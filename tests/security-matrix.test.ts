@@ -175,7 +175,7 @@ test("[AUTH-007] record-level scoping: a sales rep is denied every lead, lead ta
   const leadTask = (await w.db.prepare(`SELECT id FROM crm_activities WHERE lead_id = ? AND kind = 'task'`).bind(lead).first<{ id: string }>())!.id;
   const aiJob = `ai_unassigned_${Date.now()}`;
   await w.db.prepare(`INSERT INTO ai_jobs (id, workflow, provider, model, status, input_ref, output_ref, created_at, updated_at) VALUES (?, 'lead_qualification', 'anthropic', 'test', 'awaiting_approval', ?, 'Draft', ?, ?)`).bind(aiJob, `lead:${lead}`, new Date().toISOString(), new Date().toISOString()).run();
-  assert.equal((await o.post(`/staff/quotes/new?lead=${lead}`, { package: "starter", scope: "Starter package website: five pages with a contact form.", valid_until: "2027-06-01" })).status, 303);
+  assert.equal((await o.post(`/staff/quotes/new?lead=${lead}`, { package: "starter", scope: "Starter package website: five pages with a contact form.", valid_until: new Date(Date.now() + 20 * 86400e3).toISOString().slice(0, 10) })).status, 303); // FD-24: at most 30 days
   const quote = (await w.db.prepare(`SELECT id FROM quotes WHERE lead_id = ?`).bind(lead).first<{ id: string }>())!.id;
   const ids: Record<string, string> = { lead, leadTask, aiJob, quote };
   const errors0 = appErrors(w.db);

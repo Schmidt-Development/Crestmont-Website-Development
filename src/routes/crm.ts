@@ -15,6 +15,7 @@ import { PACKAGES, type PackageId, type QuoteLine } from "../domain/catalog.ts";
 import { changeLeadStage } from "../services/leads.ts";
 import * as crm from "../services/crm.ts";
 import * as quotes from "../services/quotes.ts";
+import { quoteDefaultValidUntil } from "../services/quotes.ts";
 import * as dedupe from "../services/crm-dedupe.ts";
 import * as identity from "../services/contact-identity.ts";
 import { eraseIdentityData, ErasureError } from "../services/identity-erasure.ts";
@@ -596,7 +597,7 @@ async function newQuotePage(ctx: AppContext, errors: string[] = [], values?: Quo
   if (!leadId) throw new HttpError(400, "Start a quote from a lead in the CRM.");
   const lead = await crm.getLead(ctx.db, ctx.actor!, leadId);
   const interest = lead.interest && ["starter", "business", "premium"].includes(lead.interest) ? lead.interest : "custom";
-  const v = values ?? { packageId: interest, scope: interest !== "custom" ? `${PACKAGES[interest as PackageId].name} package: ${PACKAGES[interest as PackageId].includes.join("; ")}.` : "", validUntil: new Date(ctx.now().getTime() + 30 * 86400e3).toISOString().slice(0, 10), lines: [] };
+  const v = values ?? { packageId: interest, scope: interest !== "custom" ? `${PACKAGES[interest as PackageId].name} package: ${PACKAGES[interest as PackageId].includes.join("; ")}.` : "", validUntil: quoteDefaultValidUntil(today(ctx)), lines: [] };
   return staffPage(ctx, "New quote", html`${pageHead(`New quote for ${lead.contact_name}`, linkButton("Back to lead", `/staff/crm/leads/${lead.id}`, "ghost", "sm"), "Quote builder")}
 ${quoteForm(ctx, `/staff/quotes/new?lead=${encodeURIComponent(lead.id)}`, v, errors, "Save draft (v1)")}`, status);
 }
