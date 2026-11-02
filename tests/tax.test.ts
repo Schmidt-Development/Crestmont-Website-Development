@@ -75,7 +75,7 @@ test("[LEGAL-005] default (not configured) adds no tax anywhere and documents ke
   const cu = await customer(t, "default@tax.example");
   const page = await (await cu.c.get("/checkout/business")).text();
   assert.doesNotMatch(page, /data-testid="checkout-tax"/);
-  assert.equal((await cu.c.post("/checkout/business", { terms: "1" })).status, 303);
+  assert.equal((await cu.c.post("/checkout/business", { terms: "1", maintenance_plan: "professional" })).status, 303);
   const inv = (await latestInvoice(t.db, cu.organizationId))!;
   assert.equal(inv.subtotal_cents, null);
   assert.equal(inv.tax_cents, 0);
@@ -91,7 +91,7 @@ test("[LEGAL-005] default (not configured) adds no tax anywhere and documents ke
   // A Stripe Tax "planned" flag alone, or a registration with no jurisdiction, still adds nothing.
   const owner = await staff(t, "owner");
   assert.equal((await owner.c.post("/staff/settings/tax", { registered: "1", stripe_tax_planned: "1", taxable: ["business"] })).status, 303);
-  assert.equal((await cu.c.post("/checkout/business", { terms: "1" })).status, 303);
+  assert.equal((await cu.c.post("/checkout/business", { terms: "1", maintenance_plan: "professional" })).status, 303);
   const inv2 = (await latestInvoice(t.db, cu.organizationId))!;
   assert.equal(inv2.tax_cents, 0);
   assert.equal(inv2.tax_detail_json, null);
@@ -114,7 +114,7 @@ test("[LEGAL-005] configured: checkout, invoice, receipt and quote show tax per 
   assert.match(page, /data-testid="checkout-tax"/);
   assert.match(page, /Sales tax — Test State \(6\.25%\): \$156\.19/);
   assert.match(page, /Total due \$2,683\.30/);
-  assert.equal((await cu.c.post("/checkout/business", { terms: "1" })).status, 303);
+  assert.equal((await cu.c.post("/checkout/business", { terms: "1", maintenance_plan: "professional" })).status, 303);
   const inv = (await latestInvoice(t.db, cu.organizationId))!;
   assert.equal(inv.subtotal_cents, 249_900);
   assert.equal(inv.tax_cents, 15_619 + 2_811);
@@ -164,7 +164,7 @@ test("[LEGAL-005] configured: checkout, invoice, receipt and quote show tax per 
   assert.match(rpdf, /\$156\.19/);
 
   // A product not marked taxable is invoiced without tax, and the snapshot says so.
-  assert.equal((await cu.c.post("/checkout/starter", { terms: "1" })).status, 303);
+  assert.equal((await cu.c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" })).status, 303);
   const starter = (await latestInvoice(t.db, cu.organizationId))!;
   assert.equal(starter.tax_cents, 0);
   assert.equal(starter.amount_cents, starter.subtotal_cents);

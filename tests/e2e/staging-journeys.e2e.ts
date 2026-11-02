@@ -950,6 +950,7 @@ test("[PAY-008] [PAY-003] Stripe test mode: a disputed payment reaches staff Dis
   const before = await disputeMails();
   const c = people.newCustomer.page;
   await c.goto(`${BASE}/checkout/starter`);
+  await c.locator("input[name=maintenance_plan][value=essential]").check(); // FD-26: Starter requires Essential or higher
   await c.locator("input[name=terms]").check();
   await nav(c, c.getByRole("button", { name: /^Pay \$[\d,.]+/ }).first());
   await payOnStripeCheckout(c, STRIPE_DISPUTE_CARD);

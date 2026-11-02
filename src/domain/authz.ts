@@ -21,11 +21,14 @@ export type Permission =
   | "payments.simulate"
   // AI Sales Optimization: view (owner/admin) and the Founder-only decisions (approve, production deploy/rollback, activation)
   | "salesopt.read" | "salesopt.decide"
+  // Hosting suspension and restoration after an unresolved failed payment (Founder clarifications 1–2): Founder-only
+  | "hosting.suspend"
   // FD-16: Founder-authorized launch/payment exception for one project (Owner-only, step-up MFA)
   | "release.payment_exception";
 
 const OWNER_ONLY: Permission[] = ["refund.decide", "refund.issue", "pricing.change", "release.approve_production",
-  "release.deploy_production", "security.exception", "builds.configure", "ai.budget", "payments.simulate", "salesopt.decide", "release.payment_exception"];
+  "release.deploy_production", "security.exception", "builds.configure", "ai.budget", "payments.simulate", "salesopt.decide", "hosting.suspend",
+  "release.payment_exception"];
 
 const ALL_STAFF: Permission[] = ["readiness.read"];
 

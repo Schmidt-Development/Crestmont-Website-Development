@@ -398,7 +398,7 @@ test("[TEST-004] backup export restores into a fresh database with identical row
   assert.equal((await visitor.post("/register", { name: "Jordan Lee", organization: "Lee Bakery", email: "jordan@leebakery.example", password: TEST_PASSWORD, terms: "1" })).status, 200);
   assert.equal((await visitor.get(linkFrom((await lastEmail(t.db, "jordan@leebakery.example"))!.text_body, "/verify-email"))).status, 303);
   const cust = await t.client().login("jordan@leebakery.example");
-  const co = await cust.post("/checkout/business", { terms: "1" });
+  const co = await cust.post("/checkout/business", { maintenance_plan: "professional", terms: "1" });
   assert.equal(co.status, 303);
   const checkout = t.fake.checkouts[0];
   const evt = { id: `evt_${newId("x")}`, type: "checkout.session.completed", created: Math.floor(Date.now() / 1000),
