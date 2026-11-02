@@ -70,6 +70,7 @@ test("[AIB-020] [AIB-019] Junk in the Trunk: lead → $2,500 quote → sign-up �
   assert.equal((await cust.post("/register", { name: JT.lead.name, organization: JT.business, email: JT.email, password: TEST_PASSWORD, terms: "1" })).status, 200);
   await cust.get(linkFrom((await lastEmail(t.db, JT.email))!.text_body, "/verify-email"));
   await cust.login(JT.email);
+  await cust.enrolMfa(qpath); // FD-30: a customer administrator enrols two-factor authentication before accepting
   const accept = await cust.post(`${qpath}/accept`, { agree: "1" });
   assert.equal(accept.status, 303, await accept.clone().text());
   const invoicePath = accept.headers.get("location")!;

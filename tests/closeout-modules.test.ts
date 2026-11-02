@@ -309,10 +309,10 @@ test("[PORTAL-004] CREST-GAP-071 portal projects, files and approvals, staff con
 });
 
 // ───────────── CREST-GAP-072 ─────────────
-test("[AUTH-003] CREST-GAP-072 customer administrators without MFA see a dismissible enrolment notice; members, MFA users and staff do not", async () => {
+test("[AUTH-003] CREST-GAP-072 / FD-30 customer administrators without MFA see a required enrolment notice; members, MFA users and staff do not", async () => {
   const app = await createTestApp();
   const { db } = app;
-  const adminCu = await createCustomer(db, "mfa-admin@a.example", "Mfa Co");
+  const adminCu = await createCustomer(db, "mfa-admin@a.example", "Mfa Co", { mfa: false });
   const member = newId("usr");
   await db.prepare(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, created_at) SELECT ?, 'mfa-member@a.example', 'Member', password_hash, ?, ? FROM users WHERE id = ?`).bind(member, nowIso(), nowIso(), adminCu.id).run();
   await db.prepare(`INSERT INTO memberships (id, user_id, organization_id, role_id, created_at) VALUES (?,?,?, 'customer_member', ?)`).bind(newId("mbr"), member, adminCu.organizationId, nowIso()).run();
@@ -320,13 +320,18 @@ test("[AUTH-003] CREST-GAP-072 customer administrators without MFA see a dismiss
   const m = await app.client().login("mfa-member@a.example");
   const dash = await (await a.get("/portal")).text();
   assert.match(dash, /data-mfa-reminder/);
-  assert.match(dash, /href="\/mfa\/setup"/);
+  assert.match(dash, /href="\/mfa\/setup\?next=\/portal"/);
+  assert.match(dash, /Set up two-factor authentication to continue/);
   assert.doesNotMatch(await (await m.get("/portal")).text(), /data-mfa-reminder/, "members are not prompted");
-  // Dismiss: hidden from then on, audited, and MFA is still optional (the portal keeps working without it).
+  // FD-30 (supersedes the CREST-GAP-072 "dismissible prompt" default): enrolment is required, so the notice can no
+  // longer be hidden. An older page posting the dismissal still works (audited) but the notice stays until enrolment;
+  // the portal stays browsable meanwhile (administrator actions are refused: tests/customer-admin-mfa.test.ts).
   assert.equal((await a.post("/portal/notices/mfa-reminder/dismiss")).status, 303);
-  assert.doesNotMatch(await (await a.get("/portal")).text(), /data-mfa-reminder/);
+  assert.match(await (await a.get("/portal")).text(), /data-mfa-reminder/);
   assert.equal(await auditCount(db, "user.mfa_reminder_dismissed", adminCu.id), 1);
   assert.equal((await a.get("/portal/billing")).status, 200);
+  await a.enrolMfa();
+  assert.doesNotMatch(await (await a.get("/portal")).text(), /data-mfa-reminder/, "gone once enrolled");
   // Staff are never shown the customer notice; staff MFA stays mandatory (a password-only staff session reaches nothing).
   const s = await createStaff(db, "support", "mfa-staff@crestmont.test");
   const half = app.client();

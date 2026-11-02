@@ -8,7 +8,7 @@ import { openDb } from "../dev/sqlite-d1.ts";
 import { handle } from "../src/app/app.ts";
 import { syncRequirements } from "../src/readiness/ingest.ts";
 import type { Env } from "../src/app/context.ts";
-import { applyAccess, accessReadme, type D1Ops } from "../scripts/staging-access.ts";
+import { applyAccess, accessReadme, accountsTable, type D1Ops } from "../scripts/staging-access.ts";
 import { verifyStagingAccess } from "../scripts/verify-staging-access.ts";
 
 const BASE = "https://crestmont-platform-staging.example.workers.dev";
@@ -248,4 +248,24 @@ test("[INFRA-002] [SEC-001] staging verifier strips nested and split tags to a f
   assert.doesNotMatch(stripTags("<<<<<<x>>>>>>"), /<[^<>]*>/);
   assert.equal(decode("<a>&lt;script&gt;</a>"), "<script>", "an escaped label is decoded once into plain text (compared, never rendered)");
   assert.equal(stripTags("Refunds & disputes > 30 days"), "Refunds & disputes > 30 days", "a lone '>' or '&' in text is kept");
+});
+
+test("[INFRA-002] [AUTH-003] FD-30: staging access enrols demo customer administrators seeded before FD-30 (no 2FA) and issues their setup key; they sign in with it", async () => {
+  const s = await stagingDb();
+  // A staging database seeded before FD-30: demo customer administrators had no authenticator.
+  s.db.raw.exec(`UPDATE users SET totp_secret = NULL, mfa_enabled = 0 WHERE email LIKE 'customer.%@crestmont-preview.test'`);
+  const r = await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false });
+  const customers = r.accounts.filter((a) => a.role === "customer_admin");
+  assert.equal(customers.length, 2);
+  for (const c of customers) assert.match(c.totp ?? "", /^[A-Z2-7]{32}$/, `${c.email} has a 2FA setup key`);
+  const rows = s.db.raw.prepare(`SELECT totp_secret, mfa_enabled FROM users WHERE email LIKE 'customer.%@crestmont-preview.test'`).all() as { totp_secret: string | null; mfa_enabled: number }[];
+  assert.ok(rows.length === 2 && rows.every((x) => x.totp_secret && x.mfa_enabled === 1), "enrolled in D1");
+  const table = accountsTable(r.accounts);
+  const row = new RegExp(`^\\| customer_admin \\| (\\S+) \\| \`([^\`]+)\` \\| (?:\`([A-Z2-7]+)\`|—) \\|`, "m").exec(table);
+  assert.ok(row && row[3], "the access notes list the customer's setup key in the format the journeys parse");
+  // The customer signs in with password + current code, as the staging journeys do.
+  const { TestClient } = await import("./support/app.ts");
+  const c = new TestClient({ DB: s.db, ENVIRONMENT: "development", APP_URL: "http://crestmont.test" } as Env);
+  await c.login(customers[0].email, customers[0].password, customers[0].totp!);
+  assert.equal((await c.get("/portal")).status, 200);
 });

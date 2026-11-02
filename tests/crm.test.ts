@@ -102,6 +102,11 @@ test("[SALES-004] end-to-end: web lead → CRM → quote → proposal email → 
   const verify = await lastEmail(t.db, "morgan@harborcoffee.example");
   await cust.get(linkFrom(verify!.text_body, "/verify-email"));
   await cust.login("morgan@harborcoffee.example");
+  // FD-30: the new customer administrator must enrol two-factor authentication before accepting; nothing is created first.
+  const early = await cust.post(`${qpath}/accept`, { agree: "1" });
+  assert.match(early.headers.get("location") ?? "", /^\/mfa\/setup\?next=/);
+  assert.equal((await one<{ n: number }>(t.db, `SELECT COUNT(*) AS n FROM orders`)).n, 0);
+  await cust.enrolMfa(qpath);
   assert.match(await (await cust.get(qpath)).text(), /Accept this proposal/);
   const accept = await cust.post(`${qpath}/accept`, { agree: "1" });
   assert.equal(accept.status, 303, await accept.clone().text());

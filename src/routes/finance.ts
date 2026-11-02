@@ -7,7 +7,8 @@ import { requireStaff, requireCustomerOrg } from "../app/app.ts";
 import { appLayout } from "../ui/layout.ts";
 import { portalNav } from "./nav.ts";
 import { csrf, button, linkButton, actionForm, input, textarea, select, checkbox, formErrors, alert, badge, table, emptyState, kpi, pagination, pageParam, dl, pageHead, barChart, nl2br } from "../ui/components.ts";
-import { can } from "../domain/authz.ts";
+import { can, customerAdminNeedsMfa } from "../domain/authz.ts";
+import { MFA_SETUP_PROMPT } from "../app/app.ts";
 import { MAINTENANCE_PLANS } from "../domain/catalog.ts";
 import { REFUND_STATUSES, type RefundStatus } from "../domain/refunds.ts";
 import { customerBilling, customerInvoice, startInvoiceCheckout, billingPortalUrl, requestRefund, stripeRedirect, NOT_CONFIGURED } from "../services/billing.ts";
@@ -36,6 +37,9 @@ function portalPage(ctx: AppContext, title: string, body: SafeHtml, status = 200
 const MILESTONE_LABEL: Record<string, string> = { full: "Payment in full", deposit_50: "50% deposit", design_25: "25% design milestone", prelaunch_25: "25% pre-launch", change_order: "Change order", subscription: "Subscription" };
 const planName = (id: string) => (id in MAINTENANCE_PLANS ? `${MAINTENANCE_PLANS[id as keyof typeof MAINTENANCE_PLANS].name} maintenance` : label(id));
 
+/** FD-30: an administrator without two-factor authentication sees how to unlock payments instead of a pay button. */
+const mfaToPay = (invoiceId: string | null) => alert("warn", html`${MFA_SETUP_PROMPT} <a href="/mfa/setup?next=${encodeURIComponent(invoiceId ? `/portal/billing/invoices/${invoiceId}` : "/portal/billing")}" data-mfa-setup-link>Set up two-factor authentication</a>`);
+
 // ── portal billing ──
 async function billingPage(ctx: AppContext, errors: string[] = [], refundValues: Record<string, string> = {}, status = 200) {
   const org = requireCustomerOrg(ctx);
@@ -45,6 +49,7 @@ async function billingPage(ctx: AppContext, errors: string[] = [], refundValues:
   const refundable = b.payments.filter((p) => p.refundable);
   const checkout = ctx.url.searchParams.get("checkout");
   const body = html`${pageHead("Billing", ctx.payments.configured && b.hasStripeCustomer && canPay ? actionForm(ctx, "/portal/billing/manage", "Manage payment methods", { variant: "secondary" }) : undefined, org.organizationName)}
+${!canPay && org.role === "customer_admin" && customerAdminNeedsMfa(ctx.actor) ? mfaToPay(null) : ""}
 ${checkout === "success" ? alert("info", "Thank you. Stripe is confirming your payment — this page updates when the confirmation arrives, usually within a minute. You will also receive a receipt by email.") : ""}
 ${!ctx.payments.configured ? alert("warn", `${NOT_CONFIGURED} Open invoices cannot be paid online yet; contact us for payment options.`) : ""}
 ${formErrors(errors)}
@@ -83,7 +88,7 @@ async function invoicePage(ctx: AppContext, id: string) {
   const canPay = can(ctx.actor!, "customer.billing", { organizationId: org.organizationId });
   const hosted = stripeInvoiceLink(inv);
   const payBlock = inv.status !== "open" ? html``
-    : !canPay ? alert("info", "Ask your account administrator to pay this invoice.")
+    : !canPay ? (org.role === "customer_admin" && customerAdminNeedsMfa(ctx.actor) ? mfaToPay(inv.id) : alert("info", "Ask your account administrator to pay this invoice."))
     : hosted ? html`<a class="btn btn--primary" href="${hosted}" rel="noopener">Pay ${formatCents(inv.amount_cents)} — Stripe invoice</a><p class="faint">This invoice is billed through a Stripe invoice. Payment is confirmed when Stripe notifies us.</p>`
     : ctx.payments.configured ? html`<form method="post" action="/portal/billing/invoices/${inv.id}/pay">${csrf(ctx)}${button(`Pay ${formatCents(inv.amount_cents)} securely`)}</form><p class="faint">You will be taken to Stripe's secure checkout. Payment is confirmed when Stripe notifies us.</p>`
     : alert("warn", `${NOT_CONFIGURED} Contact us for payment options.`);

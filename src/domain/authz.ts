@@ -60,11 +60,21 @@ export class ForbiddenError extends Error {
 
 const STAFF_MFA_REQUIRED = new Set<string>(STAFF_ROLES);
 
+/**
+ * Founder decision FD-30: customer administrators must use multifactor authentication. A `customer_admin` session that
+ * has not completed a second factor (not enrolled yet, or enrolled but the code was not entered) holds only what a
+ * `customer_member` holds (read and ordinary collaboration); billing, approvals and other administrator permissions
+ * apply once the session is MFA-verified. `customer_member` keeps MFA optional (FD-30 names administrators only).
+ */
+export const CUSTOMER_ADMIN_MFA_REQUIRED = "customer_admin" as const;
+
 export function can(actor: Actor, perm: Permission, scope?: { organizationId?: string }): boolean {
   // AI agents and automation never hold Founder-protected permissions, whatever they claim (§8, §45, AIOPS-003).
   if (actor.kind !== "user" && OWNER_ONLY.includes(perm)) return false;
   for (const { role, organizationId } of actor.roles) {
     if (STAFF_MFA_REQUIRED.has(role) && !actor.mfaVerified) continue; // staff sessions without MFA get nothing
+    // FD-30: an administrator without a verified second factor is limited to member permissions.
+    if (role === CUSTOMER_ADMIN_MFA_REQUIRED && !actor.mfaVerified && !ROLE_PERMISSIONS.customer_member.has(perm)) continue;
     if (!ROLE_PERMISSIONS[role].has(perm)) continue;
     const isCustomerRole = (CUSTOMER_ROLES as readonly string[]).includes(role);
     if (isCustomerRole && scope?.organizationId !== organizationId) continue; // tenant isolation
@@ -75,6 +85,11 @@ export function can(actor: Actor, perm: Permission, scope?: { organizationId?: s
 
 export function require(actor: Actor, perm: Permission, scope?: { organizationId?: string }): void {
   if (!can(actor, perm, scope)) throw new ForbiddenError(`Missing permission ${perm}`);
+}
+
+/** FD-30: the actor holds customer_admin somewhere but has no verified second factor, so administrator actions are refused. */
+export function customerAdminNeedsMfa(actor: Actor | null | undefined): boolean {
+  return !!actor && actor.kind === "user" && !actor.mfaVerified && actor.roles.some((r) => r.role === CUSTOMER_ADMIN_MFA_REQUIRED);
 }
 
 export function isOwner(actor: Actor): boolean {

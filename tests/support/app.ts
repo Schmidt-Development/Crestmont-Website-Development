@@ -3,7 +3,7 @@ import { createTestDb } from "./sqlite-d1.ts";
 import { handle } from "../../src/app/app.ts";
 import type { Env } from "../../src/app/context.ts";
 import { syncRequirements } from "../../src/readiness/ingest.ts";
-import { hashPassword, totpCode, newTotpSecret } from "../../src/lib/auth-crypto.ts";
+import { hashPassword, hashToken, totpCode, newTotpSecret } from "../../src/lib/auth-crypto.ts";
 import { newId, nowIso } from "../../src/lib/db.ts";
 import type { Role } from "../../src/domain/authz.ts";
 import type { StorageAdapter } from "../../src/adapters/storage.ts";
@@ -79,10 +79,16 @@ export class TestClient {
     return this.request("POST", path, { body, headers });
   }
 
+  /** Signs in. When the account has an authenticator, the secret registered by createStaff / createCustomer /
+   *  rememberTotp is used unless one is passed explicitly, so every test exercises the real second-factor step. */
   async login(email: string, password = TEST_PASSWORD, totpSecret?: string) {
     const res = await this.post("/login", { email, password });
     if (res.status !== 303) throw new Error(`login failed: ${res.status} ${(await res.text()).slice(0, 300)}`);
     if (res.headers.get("location")?.startsWith("/mfa")) {
+      if (!totpSecret) {
+        const u = await this.env.DB.prepare(`SELECT id FROM users WHERE email = ?`).bind(email.trim().toLowerCase()).first<{ id: string }>();
+        totpSecret = u ? TOTP_SECRETS.get(this.env.DB)?.get(u.id) : undefined;
+      }
       if (!totpSecret) throw new Error("MFA required but no TOTP secret given");
       // Codes are single-use per 30-second step (replay protection). Tests sign in many times within one
       // step, so the harness simulates "the next window" by clearing the last accepted step first.
@@ -93,6 +99,41 @@ export class TestClient {
     }
     return this;
   }
+
+  /** Enrols an authenticator through the real pages (GET + POST /mfa/setup), as a newly registered customer
+   *  administrator must before paying or approving (FD-30). Remembers the secret for later logins; returns it. */
+  async enrolMfa(next?: string): Promise<{ secret: string; location: string | null; status: number; page: string }> {
+    const q = next ? `?next=${encodeURIComponent(next)}` : "";
+    const setup = await this.get(`/mfa/setup${q}`);
+    const body = await setup.text();
+    const m = /data-testid="totp-secret">([A-Z2-7 ]+)</.exec(body);
+    if (setup.status !== 200 || !m) throw new Error(`mfa setup page: ${setup.status} ${body.slice(0, 300)}`);
+    const secret = m[1].replace(/\s/g, "");
+    const res = await this.post(`/mfa/setup${q}`, { code: await totpCode(secret) });
+    const page = await res.text();
+    if (res.status !== 200 || !/data-testid="recovery-codes"/.test(page)) throw new Error(`mfa enrolment failed: ${res.status} ${page.slice(0, 300)}`);
+    const session = this.cookies.get("cm_session");
+    const owner = session ? await this.env.DB.prepare(`SELECT user_id FROM sessions WHERE token_hash = ?`).bind(await hashToken(session)).first<{ user_id: string }>() : null;
+    if (owner) rememberTotp(this.env.DB, owner.user_id, secret);
+    return { secret, location: res.headers.get("location"), status: res.status, page };
+  }
+}
+
+/** Per database: user id → TOTP secret of every account the harness enrolled, so TestClient.login finds it unasked
+ *  (keyed by id, not email, so it survives an email change). */
+const TOTP_SECRETS = new WeakMap<object, Map<string, string>>();
+export function rememberTotp(db: Env["DB"], userId: string, secret: string): void {
+  let m = TOTP_SECRETS.get(db);
+  if (!m) TOTP_SECRETS.set(db, (m = new Map()));
+  m.set(userId, secret);
+}
+
+/** Enrols an authenticator for an existing user directly in the database (as /mfa/setup would) and remembers it. */
+export async function enrolTotp(db: Env["DB"], userId: string): Promise<string> {
+  const secret = newTotpSecret();
+  await db.prepare(`UPDATE users SET totp_secret = ?, mfa_enabled = 1, totp_pending_secret = NULL WHERE id = ?`).bind(secret, userId).run();
+  rememberTotp(db, userId, secret);
+  return secret;
 }
 
 /** Creates an internal staff user with a confirmed TOTP secret. Returns credentials for TestClient.login. */
@@ -107,17 +148,25 @@ export async function createStaff(db: Env["DB"], role: Role, email = `${role}@cr
   await db.prepare(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, totp_secret, mfa_enabled, created_at) VALUES (?,?,?,?,?,?,1,?)`)
     .bind(id, email, name, await hashPassword(TEST_PASSWORD), nowIso(), secret, nowIso()).run();
   await db.prepare(`INSERT INTO memberships (id, user_id, organization_id, role_id, created_at) VALUES (?,?,?,?,?)`).bind(newId("mbr"), id, org.id, role, nowIso()).run();
+  rememberTotp(db, id, secret);
   return { id, email, secret, organizationId: org.id };
 }
 
-export async function createCustomer(db: Env["DB"], email = `client${Math.floor(Math.random() * 1e9)}@example.com`, orgName = "Acme Plumbing") {
+/**
+ * Creates a customer administrator (and their organization). Founder decision FD-30: customer administrators must use
+ * MFA, so by default the account has a confirmed TOTP secret (returned, and remembered for TestClient.login).
+ * `{ mfa: false }` creates an administrator who has not enrolled yet (for the FD-30 negative tests); `secret` is null.
+ */
+export async function createCustomer(db: Env["DB"], email = `client${Math.floor(Math.random() * 1e9)}@example.com`, orgName = "Acme Plumbing", opts: { mfa?: boolean } = {}) {
   const id = newId("usr"), orgId = newId("org");
+  const secret = opts.mfa === false ? null : newTotpSecret();
   await db.batch([
-    db.prepare(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, created_at) VALUES (?,?,?,?,?,?)`).bind(id, email, "Pat Customer", await hashPassword(TEST_PASSWORD), nowIso(), nowIso()),
+    db.prepare(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, totp_secret, mfa_enabled, created_at) VALUES (?,?,?,?,?,?,?,?)`).bind(id, email, "Pat Customer", await hashPassword(TEST_PASSWORD), nowIso(), secret, secret ? 1 : 0, nowIso()),
     db.prepare(`INSERT INTO organizations (id, name, kind, created_at) VALUES (?,?,'customer',?)`).bind(orgId, orgName, nowIso()),
     db.prepare(`INSERT INTO memberships (id, user_id, organization_id, role_id, created_at) VALUES (?,?,?,'customer_admin',?)`).bind(newId("mbr"), id, orgId, nowIso()),
   ]);
-  return { id, email, organizationId: orgId };
+  if (secret) rememberTotp(db, id, secret);
+  return { id, email, organizationId: orgId, secret };
 }
 
 /** Latest email captured by the development outbox for an address. */

@@ -194,6 +194,23 @@ async function freshMfa(page: Page, a: Account) {
   }
   assert.equal(new URL(page.url()).pathname + new URL(page.url()).search, back, `step-up check passed for ${a.role} (${await alerts(page)})`);
 }
+/** FD-30: a customer administrator must enrol two-factor authentication before accepting, paying or approving. From
+ *  the page the browser is on (which offers "Set up two-factor authentication"), enrol through the real setup page with
+ *  the shown setup key, pass the one-time recovery codes page and return. Returns the TOTP secret (kept in memory only). */
+async function enrolCustomerMfa(page: Page): Promise<string> {
+  const back = new URL(page.url()).pathname + new URL(page.url()).search;
+  await nav(page, page.getByRole("link", { name: "Set up two-factor authentication" }).first());
+  assert.match(new URL(page.url()).pathname, /^\/mfa\/setup$/, await alerts(page));
+  // Staging refuses enrolment (fails closed, 503) when the Worker secret MFA_ENCRYPTION_KEY is not set (docs/DEPLOYMENT.md).
+  assert.doesNotMatch(await text(page, "body"), /Two-factor setup is unavailable/, "two-factor enrolment is unavailable on staging: set the Worker secret MFA_ENCRYPTION_KEY (docs/DEPLOYMENT.md)");
+  const secret = ((await page.locator("[data-testid=totp-secret]").innerText()) as string).replace(/\s/g, "");
+  await page.fill("#f-code", await totpCode(secret));
+  await nav(page, btn(page, "Turn on"));
+  assert.ok(await page.locator("[data-testid=recovery-codes] li").count() >= 8, `recovery codes shown once (${await alerts(page)})`);
+  await nav(page, page.getByRole("link", { name: /I have saved my codes/ }));
+  assert.equal(new URL(page.url()).pathname + new URL(page.url()).search, back, "returned to the page after enrolment");
+  return secret;
+}
 async function projectId(customer: string, name: RegExp): Promise<string> {
   const c = await as(customer);
   await c.goto(BASE + "/portal/projects");
@@ -328,6 +345,9 @@ journey(4, ["SALES-004"], "customer registers from the proposal, verifies the em
   await p.goto(linkIn(await outbox(contact.email, "verification"), "/verify-email"));
   await signIn(p, { role: "customer_admin", email: contact.email, password: contact.password });
   await p.goto(proposalUrl);
+  // FD-30: the new customer administrator sets up two-factor authentication before accepting.
+  assert.match(await text(p), /Set up two-factor authentication to continue/);
+  await enrolCustomerMfa(p);
   assert.match(await text(p), new RegExp(esc(usd(total))));
   await p.check("input[name=agree]");
   await nav(p, btn(p, "Accept and continue to payment"));

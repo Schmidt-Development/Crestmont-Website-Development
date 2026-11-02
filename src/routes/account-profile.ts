@@ -93,14 +93,15 @@ ${alert("error", "This confirmation link is invalid, already used, cancelled or 
   r.post("/portal/notices/mfa-reminder/dismiss", async (ctx) => {
     requireCustomerOrg(ctx);
     await prof.dismissMfaReminder(ctx.db, ctx.user!.id, ctx.ip);
-    return redirect(ctx, "/portal", { kind: "info", text: "Reminder hidden. You can set up two-factor authentication any time from Account & security." });
+    // FD-30: kept for old pages that still post here; the notice stays until the administrator enrols.
+    return redirect(ctx, "/portal", { kind: "info", text: "Two-factor authentication is required for account administrators, so this notice stays until it is set up." });
   });
 }
 
 /** Dashboard notice for customer administrators without two-factor authentication (CREST-GAP-072). */
 export async function mfaReminder(ctx: AppContext, org: { role: string }): Promise<SafeHtml> {
   if (!ctx.user || !(await prof.shouldShowMfaReminder(ctx.db, ctx.user, org.role))) return html``;
-  return html`<div class="alert alert--warn" role="status" data-mfa-reminder><strong>Protect your account with two-factor authentication.</strong> As an account administrator you approve scope and pay invoices, so we recommend a second sign-in step. It takes about a minute with an authenticator app.
-<div class="row" style="margin-top:.5rem">${linkButton("Set up two-factor authentication", "/mfa/setup", "primary", "sm")}${actionForm(ctx, "/portal/notices/mfa-reminder/dismiss", "Not now", { variant: "ghost" })}</div></div>`;
+  return html`<div class="alert alert--warn" role="status" data-mfa-reminder data-mfa-required><strong>Set up two-factor authentication to continue.</strong> It is required for account administrators, who approve scope and pay invoices. Until it is on you can view your portal, but paying, approvals, proposal acceptance and team changes are paused. It takes about a minute with an authenticator app.
+<div class="row" style="margin-top:.5rem">${linkButton("Set up two-factor authentication", "/mfa/setup?next=/portal", "primary", "sm")}</div></div>`;
 }
 

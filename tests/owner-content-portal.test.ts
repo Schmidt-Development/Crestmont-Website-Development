@@ -82,6 +82,11 @@ test("[AUTH-008] customer team permissions: admins change roles, remove members 
   assert.equal((await one<{ role_id: string }>(t.db, `SELECT role_id FROM memberships WHERE user_id = ?`, memberId)).role_id, "customer_admin");
   // Now two admins: the promoted member may demote the original admin, but not leave the org without one.
   const mate2 = await t.client().login("mate@team.example");
+  // FD-30: the newly promoted administrator must enrol two-factor authentication before acting as one.
+  const early = await mate2.post(`/portal/team/members/${owner.id}/role`, { role: "customer_member" });
+  assert.match(early.headers.get("location") ?? "", /^\/mfa\/setup\?next=/);
+  assert.equal((await one<{ role_id: string }>(t.db, `SELECT role_id FROM memberships WHERE user_id = ?`, owner.id)).role_id, "customer_admin", "nothing changed before enrolment");
+  await mate2.enrolMfa();
   assert.equal((await mate2.post(`/portal/team/members/${owner.id}/role`, { role: "customer_member" })).status, 303);
   assert.equal((await admin.post(`/portal/team/members/${memberId}/remove`)).status, 403, "the demoted user is no longer an admin");
   assert.equal((await mate2.post(`/portal/team/members/${memberId}/remove`)).status, 409, "cannot remove yourself");

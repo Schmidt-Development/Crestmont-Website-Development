@@ -116,6 +116,7 @@ test("[LEGAL-003] quote acceptance and package checkout record the development a
   await q.post("/register", { name: "Quinn Proposal", organization: "Quinn Co", email: "quinn@lc.example", password: TEST_PASSWORD, terms: "1" });
   await q.get(linkFrom((await lastEmail(t.db, "quinn@lc.example"))!.text_body, "/verify-email"));
   await q.login("quinn@lc.example");
+  await q.enrolMfa(qpath); // FD-30: a customer administrator enrols two-factor authentication before accepting
   assert.equal((await q.post(`${qpath}/accept`, {})).status, 422, "checkbox required");
   assert.equal((await q.post(`${qpath}/accept`, { agree: "1" })).status, 303);
   const qu = await one<{ id: string }>(t.db, `SELECT id FROM users WHERE email = 'quinn@lc.example'`);
