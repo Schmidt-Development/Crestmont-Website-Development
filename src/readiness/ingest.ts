@@ -87,6 +87,11 @@ export async function ingestEvidence(db: Db, rawBody: string): Promise<IngestRes
       await recordIngestion(db, doc.source, attemptAt, null);
       return { status: "duplicate", runId: doc.runId, accepted: 0, unknownRequirements: [] };
     }
+    // The deployed inventory and implementation records are the source of truth for which requirements exist and what
+    // is implemented. They used to reach D1 only through the daily `requirements` cron, so a deploy's evidence was judged
+    // against yesterday's inventory: new requirement ids were dropped as unknown and newly implemented work stayed
+    // "in progress" for up to a day. Bring D1 up to date first (no-op when it already matches).
+    await syncRequirementsIfStale(db);
     const known = new Set((await db.prepare(`SELECT id FROM requirements`).all<{ id: string }>()).results.map((r) => r.id));
     const unknown = [...new Set(doc.results.map((r) => r.requirementId).filter((id) => !known.has(id)))];
     const accepted = doc.results.filter((r) => known.has(r.requirementId));
@@ -160,6 +165,32 @@ async function recordIngestion(db: Db, source: string, at: string, error: string
   ).bind(source, success ? at : null, at, error).run();
 }
 
+/** The implementation_location value syncRequirements stores for a record. */
+function storedLocation(rec: ImplementationRecord): string {
+  return rec.missing ? `${rec.location} (missing: ${rec.missing})` : rec.location;
+}
+
+/**
+ * Runs syncRequirements only when D1 differs from the deployed inventory/implementation records (a missing requirement,
+ * a changed title/category/inventory version, or a changed implementation status, location or owner). One SELECT when
+ * nothing changed. Returns whether a sync ran.
+ */
+export async function syncRequirementsIfStale(db: Db, defs: RequirementDef[] = REQUIREMENTS,
+  records: Record<string, ImplementationRecord> = IMPLEMENTATION): Promise<boolean> {
+  const rows = (await db.prepare(
+    `SELECT id, title, category, inventory_version, implementation_status, implementation_location, owner FROM requirements`,
+  ).all<{ id: string; title: string; category: string; inventory_version: string | null; implementation_status: string | null; implementation_location: string | null; owner: string | null }>()).results;
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const stale = defs.some((d) => {
+    const row = byId.get(d.id);
+    if (!row || row.title !== d.title || row.category !== d.category || row.inventory_version !== INVENTORY_VERSION) return true;
+    const rec = records[d.id];
+    return !!rec && (row.implementation_status !== rec.status || row.implementation_location !== storedLocation(rec) || row.owner !== rec.owner);
+  });
+  if (stale) await syncRequirements(db, defs, records);
+  return stale;
+}
+
 /** Upserts the approved inventory. Never deletes: removed items must be dispositioned instead. */
 export async function syncRequirements(db: Db, defs: RequirementDef[] = REQUIREMENTS,
   records: Record<string, ImplementationRecord> = IMPLEMENTATION): Promise<{ upserted: number }> {
@@ -178,7 +209,7 @@ export async function syncRequirements(db: Db, defs: RequirementDef[] = REQUIREM
   const known = new Set(defs.map((d) => d.id));
   const impl = Object.entries(records).filter(([id]) => known.has(id)).map(([id, rec]) => db.prepare(
     `UPDATE requirements SET implementation_status = ?, implementation_location = ?, owner = ?, updated_at = ? WHERE id = ?`,
-  ).bind(rec.status, rec.missing ? `${rec.location} (missing: ${rec.missing})` : rec.location, rec.owner, at, id));
+  ).bind(rec.status, storedLocation(rec), rec.owner, at, id));
   if (impl.length) await db.batch(impl);
   return { upserted: defs.length };
 }
