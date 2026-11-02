@@ -10,12 +10,13 @@
 // Without the three E2E_* variables the whole file reports itself skipped.
 //
 // Honesty rules:
-//  - Journeys that cannot happen on staging today are explicit skips naming the blocker: Stripe test mode is
-//    not configured (BLK-004), no voice provider (BLK-009), no production environment / Founder launch
-//    authorization (LAUNCH-001). Nothing is simulated and nothing is reported as passed.
-//  - Post-payment journeys run against the seeded sample projects (Harbor Dental: design stage, tasks
-//    assigned; Ridgeline Landscaping: awaiting onboarding) because a new project only exists after a Stripe
-//    payment. Every record created carries the run id; mutations of sample records are additive or reversed
+//  - Journeys that cannot happen on staging today are explicit skips naming the CURRENT blocker, read from staging
+//    where possible (journey 25 asks staging whether maintenance plans can be bought; 27–28 look for a real call).
+//    Production-only journeys (31–33, LAUNCH-001) are reported separately. Nothing is simulated and nothing is
+//    reported as passed.
+//  - Journeys 4–8, 17 and 19 use a FRESH project created and paid for (Stripe test mode) on every run, so they are
+//    repeatable; other post-payment journeys run against the seeded sample projects (Harbor Dental: design stage,
+//    tasks assigned; Ridgeline Landscaping). Every record created carries the run id; mutations of sample records are additive or reversed
 //    (approvals are superseded by later decisions, the milestone status is restored, the E2E task and file
 //    are deleted, refund requests end denied, tickets end resolved). Sample projects are never cancelled,
 //    deployed or closed.
@@ -436,50 +437,66 @@ journey(7, ["SALES-004"], "project is provisioned after payment", { needs: [6] }
   assertClean();
 });
 
-// ───────────── 8–9. Onboarding and files (seeded sample projects) ─────────────
+// ───────────── 8–9. Onboarding (this run's project) and files (seeded sample project) ─────────────
 
-journey(8, ["PORTAL-002"], "customer completes conditional onboarding (sample Ridgeline project) and the PM sees the answers", {}, async (t) => {
-  const id = await projectId("customer.ridgeline", RIDGELINE);
-  const c = await as("customer.ridgeline");
+/** The project journey 7 provisioned for this run's customer (a fresh, isolated project on every run). */
+let runProjectId = "";
+async function runProject(): Promise<string> {
+  if (runProjectId) return runProjectId;
+  const c = people.newCustomer.page;
+  await c.goto(`${BASE}/portal/projects`);
+  const href = await c.locator('main a[href^="/portal/projects/prj_"]', { hasText: contact.company }).first().getAttribute("href");
+  assert.match(href ?? "", /^\/portal\/projects\/prj_/, "this run's provisioned project");
+  return (runProjectId = href!.split("/").pop()!);
+}
+
+journey(8, ["PORTAL-002"], "customer completes conditional onboarding (this run's freshly provisioned project) and the PM sees the answers", { needs: [7] }, async () => {
+  // Repeatable: journeys 4–7 create and pay for a new project on every run, so there is always a project awaiting
+  // onboarding (the seeded Ridgeline sample could only be onboarded once).
+  const id = await runProject();
+  // The Owner assigns the project manager, as for any new project.
+  const o = await as("owner");
+  await o.goto(`${BASE}/staff/projects/${id}`);
+  const pmForm = o.locator('form[action$="/pm"]');
+  const pmId = await pmForm.locator("select[name=user_id] option", { hasText: /manager/i }).first().getAttribute("value");
+  await pmForm.locator("select[name=user_id]").selectOption(pmId);
+  await nav(o, pmForm.getByRole("button", { name: "Save" }));
+  assert.match(await alerts(o), /Project manager updated/i);
+  const c = people.newCustomer.page;
   await c.goto(`${BASE}/portal/projects/${id}/onboarding`);
-  if (!(await c.locator("#f-industry").count())) {
-    // One-shot by nature: the only sample project awaiting onboarding was onboarded by an earlier run, and a new
-    // project needs a Stripe payment (BLK-004).
-    t.skip(`no project awaiting onboarding on staging: the sample Ridgeline onboarding was already submitted by an earlier run, and new projects require a payment (BLK-004). Page: ${(await text(c)).slice(0, 160).replace(/\s+/g, " ")}`);
-    return;
-  }
+  assert.ok(await c.locator("#f-industry").count(), `the new project awaits onboarding. Page: ${(await text(c)).slice(0, 160).replace(/\s+/g, " ")}`);
   const visible = (sel: string) => c.locator(sel).isVisible();
-  for (const [sel, v] of [["#f-business_name", "Sample — Ridgeline Landscaping"], ["#f-contact_name", "Sam (sample customer)"]] as const) {
+  for (const [sel, v] of [["#f-business_name", contact.company], ["#f-contact_name", contact.name]] as const) {
     if (!(await c.locator(sel).inputValue())) await c.fill(sel, v);
   }
-  await c.fill("#f-industry", `Landscaping (${RUN})`);
-  await c.fill("#f-goals", "More quote requests for seasonal landscaping work.");
-  await c.fill("#f-target_audience", "Homeowners and property managers in the valley.");
+  await c.fill("#f-industry", `Cafés (${RUN})`);
+  await c.fill("#f-goals", "Online ordering for three cafés and a loyalty programme.");
+  await c.fill("#f-target_audience", "Regular customers and office lunch orders.");
   assert.equal(await visible("#f-brand_style"), false, "style question hidden until the branding answer");
   await c.check("input[name=has_branding][value=no]");
   assert.equal(await visible("#f-brand_style"), true, "style question shown when there is no branding");
   assert.equal(await visible("#f-logo"), false);
-  await c.fill("#f-brand_style", "Earthy greens, clean and modern.");
-  await c.fill("#f-pages", "Home, Services, Gallery, Quote, Contact");
+  await c.fill("#f-brand_style", "Warm, friendly, coffee browns.");
+  await c.fill("#f-pages", "Home, Menu, Order online, Loyalty, Locations, Contact");
   await c.check("input[name=functionality][value=booking]");
   assert.equal(await visible("#f-booking_details"), true, "booking follow-up appears");
   await c.check("input[name=content_source][value=crestmont_draft]");
   await c.check("input[name=images_source][value=licensed]");
   await c.check("input[name=domain_status][value=need]");
   assert.equal(await visible("#f-domain_wishes"), true);
-  await c.fill("#f-domain_wishes", "ridgeline-sample.example");
+  await c.fill("#f-domain_wishes", `${RUN}.staging-journeys.example`);
   await c.check("input[name=hosting][value=crestmont]");
   // Submitting without the now-required booking details is refused server-side and keeps what was typed.
   await nav(c, btn(c, "Submit onboarding"));
   assert.match(await text(c, ".alert--error"), /Booking details is required/);
-  assert.equal(await c.locator("#f-industry").inputValue(), `Landscaping (${RUN})`);
-  await c.fill("#f-booking_details", "Customers book an on-site estimate visit; we use a shared calendar today.");
+  assert.equal(await c.locator("#f-industry").inputValue(), `Cafés (${RUN})`);
+  await c.fill("#f-booking_details", "Customers reserve catering pickups; we use a paper diary today.");
   await nav(c, btn(c, "Submit onboarding"));
   assert.equal(new URL(c.url()).pathname, `/portal/projects/${id}`, await alerts(c));
   assert.match(await text(c), /Scope review/i);
   const pm = await as("project_manager");
   await pm.goto(`${BASE}/staff/projects/${id}`);
-  assert.match(await text(pm), re(`Landscaping (${RUN})`), "PM sees the onboarding answers");
+  assert.match(await text(pm), re(`Cafés (${RUN})`), "PM sees the onboarding answers");
   assertClean();
 });
 
@@ -693,7 +710,7 @@ journey(15, ["PM-002"], "revision allowance counter updates for the customer and
   assertClean();
 });
 
-// ───────────── 16–19. Final approval, payments, QA, deployment ─────────────
+// ───────────── 16–19. Final approval (sample), payments and deployment (this run's project), QA (sample) ─────────────
 
 journey(16, ["PORTAL-007"], "customer approves the final work (final launch approval, sample Ridgeline project)", {}, async () => {
   const id = await projectId("customer.ridgeline", RIDGELINE);
@@ -708,7 +725,74 @@ journey(16, ["PORTAL-007"], "customer approves the final work (final launch appr
 
 // Journeys 17 and 19 used to be blocked with NO_STRIPE, which became untrue once staging got a Stripe test key: journeys 5, 6
 // and 24 pay through Stripe test-mode Checkout on staging. The reasons below are the real ones.
-journey(17, ["PAY-006"], "required payments are verified before release", { blocked: "not automated yet: needs a journey-created project whose milestone invoices are each paid through Stripe test-mode Checkout before the release gate is checked (Stripe test mode itself is configured on staging; journeys 5, 6 and 24 pay through it)" });
+/** PM moves this run's project to the next status with the overview's "Move to …" button. */
+async function moveTo(id: string, statusLabel: string) {
+  const pm = await as("project_manager");
+  await pm.goto(`${BASE}/staff/projects/${id}`);
+  await nav(pm, btn(pm, `Move to ${statusLabel}`));
+  assert.match(await alerts(pm), new RegExp(`Project moved to ${esc(statusLabel)}`, "i"), await alerts(pm));
+}
+/** PM issues a milestone invoice; the customer is emailed, opens it, pays in Stripe test-mode Checkout, and the signed
+ *  webhook marks it Paid. Returns the invoice URL. */
+async function issueAndPay(id: string, buttonLabel: string): Promise<string> {
+  const pm = await as("project_manager");
+  await pm.goto(`${BASE}/staff/projects/${id}?tab=approvals`);
+  await nav(pm, btn(pm, buttonLabel));
+  assert.match(await alerts(pm), /Milestone invoice issued/i, await alerts(pm));
+  const invUrl = linkIn(await outbox(contact.email, "invoice"), "/portal/billing/invoices/");
+  const c = people.newCustomer.page;
+  await c.goto(invUrl);
+  await nav(c, btn(c, /^Pay \$[\d,.]+ securely$/));
+  await payOnStripeCheckout(c);
+  const end = Date.now() + 120_000;
+  for (;;) {
+    await c.goto(invUrl);
+    const status = ((await c.locator("main .badge").first().innerText().catch(() => "")) as string).trim();
+    if (/^Paid$/i.test(status)) break;
+    if (Date.now() > end) assert.fail(`the signed Stripe webhook did not mark ${buttonLabel} paid within 120s (status "${status}")`);
+    await c.waitForTimeout(5_000);
+  }
+  return invUrl;
+}
+const gate = async () => { const pm = await as("project_manager"); return text(pm, ".card--gold"); };
+
+journey(17, ["PAY-006"], "required payments are verified before release (this run's project: every milestone paid in Stripe test mode)", { needs: [8] }, async () => {
+  const id = await runProject();
+  // Scope → design: a new scope version, approved by the customer.
+  const pm = await as("project_manager");
+  await pm.goto(`${BASE}/staff/projects/${id}`);
+  await pm.locator('form[action$="/scope"] textarea[name=scope]').fill(`E2E ${RUN}: online ordering for three cafés, loyalty accounts, admin portal; 3 revision rounds.`);
+  await nav(pm, btn(pm, "Save new version"));
+  assert.match(await alerts(pm), /Scope version \d+ saved/i, await alerts(pm));
+  await requestApproval("newCustomer", id, "scope", "Scope approval", `E2E ${RUN}: please approve the project scope.`);
+  assert.match(await decide("newCustomer", id, "Scope approval", "Approve", `E2E ${RUN}: scope approved.`), /Scope approval approved/i);
+  await moveTo(id, "Design");
+  // Design approved → the 25% design invoice, paid through Stripe test mode.
+  await requestApproval("newCustomer", id, "design", "Design approval", `E2E ${RUN}: please approve the design.`);
+  assert.match(await decide("newCustomer", id, "Design approval", "Approve", `E2E ${RUN}: design approved.`), /Design approval approved/i);
+  await issueAndPay(id, "Issue 25% design invoice");
+  await moveTo(id, "Customer review");
+  // Final launch approval → the 25% pre-launch invoice. While it is unpaid the release gate refuses.
+  await requestApproval("newCustomer", id, "customer_launch", "Final launch approval", `E2E ${RUN}: please confirm the website is approved for launch.`);
+  assert.match(await decide("newCustomer", id, "Final launch approval", "Approve", `E2E ${RUN}: approved for launch.`), /Final launch approval approved/i);
+  await pm.goto(`${BASE}/staff/projects/${id}?tab=approvals`);
+  await nav(pm, btn(pm, "Issue 25% pre-launch invoice"));
+  assert.match(await alerts(pm), /Milestone invoice issued/i);
+  assert.match(await gate(), /6\. Required payment verification\s+Missing\s+Unpaid: prelaunch_25/, "an unpaid required invoice blocks release");
+  assert.equal(await pm.locator('form[action$="/deployments"]').count(), 0, "no deployment form while a payment is outstanding");
+  const invUrl = linkIn(await outbox(contact.email, "invoice"), "/portal/billing/invoices/");
+  const c = people.newCustomer.page;
+  await c.goto(invUrl);
+  await nav(c, btn(c, /^Pay \$[\d,.]+ securely$/));
+  await payOnStripeCheckout(c);
+  await until(c, invUrl, /\bPaid\b/, "the signed Stripe webhook marking the pre-launch invoice paid");
+  // Verified only from Stripe-confirmed payment records: the gate's payment check now passes.
+  await pm.goto(`${BASE}/staff/projects/${id}?tab=approvals`);
+  assert.match(await gate(), /6\. Required payment verification\s+Pass/, "all required invoices paid");
+  await c.goto(`${BASE}/portal/billing`);
+  assert.equal(await c.locator('main a[href^="/portal/billing/receipts/"]').filter({ hasText: /^Receipt$/ }).count(), 3, "one receipt per milestone: deposit, design, pre-launch");
+  assertClean();
+});
 
 journey(18, ["PM-006"], "internal QA certifies the project; deployment authorization stays refused until every check passes", {}, async () => {
   const id = await projectId("customer.ridgeline", RIDGELINE);
@@ -732,7 +816,33 @@ journey(18, ["PM-006"], "internal QA certifies the project; deployment authoriza
   assertClean();
 });
 
-journey(19, ["PM-007"], "authorized deployment occurs", { blocked: "not automated on staging: deployment needs the full 7-check chain including the required payments of journey 17 for a journey-created project, and the sample projects are never deployed or closed on staging" });
+journey(19, ["PM-007"], "authorized deployment occurs (this run's project, after every release check)", { needs: [17] }, async () => {
+  const id = await runProject();
+  await moveTo(id, "Final approval");
+  const pm = await as("project_manager");
+  await pm.goto(`${BASE}/staff/projects/${id}?tab=approvals`);
+  const rec = 'form[action$="/approvals"]';
+  for (const kind of ["engineering_complete", "internal_qa", "security_accessibility", "deployment_authorized"]) {
+    await pm.locator(`${rec} select[name=kind]`).selectOption(kind);
+    await pm.locator(`${rec} select[name=decision]`).selectOption("approved");
+    await pm.locator(`${rec} textarea[name=notes]`).fill(`E2E ${RUN}: ${kind} checked (staging journey test).`);
+    await nav(pm, pm.locator(rec).getByRole("button", { name: "Record" }));
+    assert.match(await alerts(pm), /Approval recorded/i, await alerts(pm));
+  }
+  const panel = await gate();
+  for (const n of [1, 2, 3, 4, 5, 6, 7]) assert.match(panel, new RegExp(`${n}\\. [^\\n]+\\s+Pass`), `check ${n} passes`);
+  // A deployment record for this run's project (a placeholder URL on a reserved domain; no real site is published).
+  const live = `https://${RUN}.staging-journeys.example/`;
+  await pm.fill('form[action$="/deployments"] input[name=url]', live);
+  await nav(pm, btn(pm, "Record deployment"));
+  assert.match(await alerts(pm), /Deployment recorded/i, await alerts(pm));
+  assert.match(await text(pm), re(live), "deployment listed for the PM");
+  const c = people.newCustomer.page;
+  await c.goto(`${BASE}/portal/projects/${id}`);
+  const page = await text(c);
+  assert.match(page, /Deployment/i, "the customer sees the project in deployment");
+  assertClean();
+});
 
 // ───────────── 20. Handoff ─────────────
 
@@ -831,7 +941,20 @@ journey(24, ["PAY-004"], "customer opens the Stripe billing portal to manage pay
   await p.goto(`${BASE}/portal/billing`);
   assertClean();
 });
-journey(25, ["PAY-004"], "failed payment triggers recovery", { blocked: "needs a Stripe test clock to make a renewal fail on demand, which a browser journey cannot drive; invoice.payment_failed recovery is covered by signed-fixture tests (tests/commerce-closeout.test.ts) and must be checked once by hand in Stripe test mode" });
+journey(25, ["PAY-004"], "failed payment triggers recovery", { needs: [4] }, async (t) => {
+  // A renewal can only fail for a customer who has a maintenance subscription. Read from staging itself whether one can
+  // be bought yet, so the reported blocker is always the current one (never a stale message).
+  const c = people.newCustomer.page;
+  const r = await c.goto(`${BASE}/checkout/maintenance/essential`);
+  const page = await text(c);
+  if (r?.status() === 409 && /awaiting Founder approval/i.test(page)) {
+    t.skip("BLK-010 (Founder decision): maintenance plans cannot be purchased until the Founder approves their entitlements (staging answers: 'Maintenance plans are not available for purchase yet'), so no subscription exists whose renewal could fail. invoice.payment_failed handling is covered by signed-fixture tests (tests/commerce-closeout.test.ts)");
+    return;
+  }
+  // Plans are purchasable: making a renewal fail on demand still needs a Stripe test clock attached to the customer,
+  // which a browser cannot create. That staging-only driver does not exist yet, so this stays an honest skip.
+  t.skip("maintenance plans are purchasable, but no staging Stripe test-clock driver exists yet to make a renewal fail on demand; build it before this journey can run");
+});
 
 journey(26, ["PAY-007"], "refund request enters the approval workflow: support review → recommendation → Founder decision (denied, so the sample payment stays clean)", {}, async () => {
   const c = await as("customer.harbor");
@@ -964,9 +1087,58 @@ test("[PAY-008] [PAY-003] Stripe test mode: a disputed payment reaches staff Dis
 
 // ───────────── 27–28. AI receptionist ─────────────
 
-const NO_VOICE = "BLK-009: no AI receptionist provider is selected or provisioned and staging has no voice webhook secret, so no call can reach the platform (the development suite tests the handler with signed fixtures)";
-journey(27, ["VOICE-003"], "AI receptionist captures a test lead", { blocked: NO_VOICE });
-journey(28, ["CRM-007"], "call lead appears in the CRM", { blocked: NO_VOICE });
+// 27–28 verify a REAL call: a person rings the staging receptionist number (…2055), the live Retell agent answers and the
+// platform records the call and the lead through the authenticated (signed) Retell webhooks. A browser cannot place a
+// phone call, so the journeys look for such a call made recently and verify what it produced, end to end, through the
+// Owner's pages. Synthetic or signed-fixture calls are flagged as test calls and never count.
+const REAL_CALL_DAYS = 7;
+let receptionistCall: { url: string; leadId: string; started: string } | null = null;
+const parseShown = (s: string) => new Date(s.replace(/,(?=\s\d{1,2}:)/, "")).getTime(); // "Nov 1, 2026, 5:39 PM EST"
+
+journey(27, ["VOICE-003"], "AI receptionist captures a lead from a real test call (live Retell agent, signed webhooks)", {}, async (t) => {
+  const o = await as("owner");
+  await o.goto(`${BASE}/staff/voice`);
+  const rows = o.locator("main table tbody tr", { has: o.locator('a[href^="/staff/voice/calls/"]') });
+  const since = Date.now() - REAL_CALL_DAYS * 86_400_000;
+  for (let i = 0; i < Math.min(await rows.count(), 20); i++) {
+    const row = rows.nth(i);
+    const link = row.locator('a[href^="/staff/voice/calls/"]').first();
+    const started = ((await link.innerText()) as string).trim();
+    if (parseShown(started) < since) break; // newest first
+    if (/^\s*—\s*$/.test(((await row.locator("td").nth(3).innerText()) as string))) continue; // no lead on this call
+    const url = BASE + (await link.getAttribute("href"));
+    await o.goto(url);
+    const detail = await text(o);
+    if (!/Provider\s+retell/i.test(detail)) { await o.goto(`${BASE}/staff/voice`); continue; }
+    const lead = /Lead\s+(ld_[A-Za-z0-9]+)/.exec(detail);
+    assert.ok(lead, `the call links its lead: ${detail.slice(0, 300)}`);
+    assert.doesNotMatch(detail, /Test call/, "a real call, not a test fixture");
+    assert.doesNotMatch(detail, /Outcome\s+Error/i, "the call did not end in an error");
+    receptionistCall = { url, leadId: lead![1], started };
+    break;
+  }
+  if (!receptionistCall) {
+    t.skip(`needs a real test call (Founder action): no real Retell receptionist call with a captured lead in the last ${REAL_CALL_DAYS} days on staging. Call the staging receptionist number (…2055), give a name and what you need, then re-run`);
+    return;
+  }
+  console.log(`journey 27: real receptionist call ${receptionistCall.url} started ${receptionistCall.started} → lead ${receptionistCall.leadId}`);
+  assertClean();
+});
+
+journey(28, ["CRM-007"], "the real call's lead appears in the CRM with its source and call activity", { needs: [27] }, async () => {
+  const o = await as("owner");
+  await o.goto(`${BASE}/staff/crm/leads/${receptionistCall!.leadId}`);
+  const lead = await text(o);
+  assert.match(lead, /Source\s+Ai receptionist/i, "lead source is the AI receptionist");
+  assert.match(lead, /Lead captured by AI receptionist/i, "call activity on the lead");
+  // Dual calendars (when deployed): a callback or booking the caller asked for sits on the AI Follow-Up calendar unless
+  // the caller explicitly asked for the Founder.
+  const cal = await o.goto(`${BASE}/staff/calendars/ai-follow-up`);
+  if (cal?.status() === 200 && new RegExp(esc(receptionistCall!.leadId)).test(await o.content())) {
+    console.log(`journey 28: the call's follow-up is on the AI Follow-Up calendar`);
+  }
+  assertClean();
+});
 
 // ───────────── 29–30. Launch readiness evidence ─────────────
 
@@ -1037,6 +1209,8 @@ journey(30, ["READY-006"], "staging verification of this deployment updates read
 
 // ───────────── 31–33. Founder approval and production ─────────────
 
+/** Journeys only the real production launch can satisfy (reported separately in the certification file). */
+const PRODUCTION_ONLY = [31, 32, 33];
 journey(31, ["READY-008"], "Founder approval is recorded", { blocked: "LAUNCH-001: the production launch decision is the Founder's own; recording one from a demo Owner account on the shared staging readiness system would create a release candidate that invalidates any real approval (covered in development by journeys.e2e.ts [READY-008])" });
 journey(32, ["READY-009"], "production deployment updates release history", { blocked: "LAUNCH-001: there is no production environment and no Founder launch authorization, so no production deployment can occur" });
 journey(33, ["LAUNCH-003"], "production health verification updates readiness", { blocked: "LAUNCH-001: there is no production deployment to verify" });
@@ -1050,8 +1224,15 @@ test("[TEST-002] staging journeys: summary of the 33 required journeys", { skip:
   const list = [...Array(33)].map((_, i) => ({ journey: i + 1, outcome: outcome.get(i + 1) ?? "not run" }));
   const passed = list.filter((j) => j.outcome === "passed").length;
   const failed = list.filter((j) => j.outcome.startsWith("failed")).length;
-  const cert = { run: RUN, required: 33, passed, failed, notPassed: list.filter((j) => j.outcome !== "passed"), certified: passed === 33 };
+  // Recorded separately (never counted as passed, and certification is unchanged): checks that only the real production
+  // launch can satisfy. They stay skipped on staging by design, so staging alone can at most reach 30/33.
+  const productionOnly = list.filter((j) => PRODUCTION_ONLY.includes(j.journey) && j.outcome !== "passed");
+  const stagingApplicable = list.filter((j) => !PRODUCTION_ONLY.includes(j.journey));
+  const cert = { run: RUN, required: 33, passed, failed, notPassed: list.filter((j) => j.outcome !== "passed"), certified: passed === 33,
+    stagingApplicable: { required: stagingApplicable.length, passed: stagingApplicable.filter((j) => j.outcome === "passed").length },
+    productionOnly };
   mkdirSync("evidence", { recursive: true });
   writeFileSync(process.env.E2E_CERTIFICATION_FILE ?? "evidence/staging-certification.json", JSON.stringify(cert, null, 2));
   console.log(cert.certified ? "STAGING CERTIFIED: 33/33 required journeys passed" : `STAGING NOT CERTIFIED: ${passed}/33 passed, ${failed} failed, ${33 - passed - failed} skipped or blocked`);
+  console.log(`Staging-applicable journeys: ${cert.stagingApplicable.passed}/${cert.stagingApplicable.required} passed; production/Founder-launch only (not counted as passed): ${productionOnly.map((j) => j.journey).join(", ") || "none outstanding"}`);
 });
