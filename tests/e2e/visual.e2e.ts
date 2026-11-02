@@ -61,13 +61,15 @@ before(async () => {
   const now = new Date().toISOString();
   const hash = await hashPassword(PW);
   const secret = newTotpSecret();
-  srv.db.prepare(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, created_at) VALUES (?,?,?,?,?,?)`).run(`usr_vis_cust_${RUN}`, `cust.${RUN}@bakery.example`, "Pat Baker", hash, now, now);
+  // FD-30: customer administrators use two-factor authentication.
+  const custSecret = newTotpSecret();
+  srv.db.prepare(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, totp_secret, mfa_enabled, created_at) VALUES (?,?,?,?,?,?,1,?)`).run(`usr_vis_cust_${RUN}`, `cust.${RUN}@bakery.example`, "Pat Baker", hash, now, custSecret, now);
   seed(now);
   srv.db.prepare(`INSERT INTO memberships (id, user_id, organization_id, role_id, created_at) VALUES (?,?,?, 'customer_admin', ?)`).run(`mbr_vis_cust_${RUN}`, `usr_vis_cust_${RUN}`, ids.org, now);
   srv.db.prepare(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, totp_secret, mfa_enabled, created_at) VALUES (?,?,?,?,?,?,1,?)`).run(`usr_vis_owner_${RUN}`, `owner.${RUN}@crestmont.test`, "Olivia Owner", hash, now, secret, now);
   srv.db.prepare(`INSERT INTO memberships (id, user_id, organization_id, role_id, created_at) VALUES (?,?, 'org_crestmont', 'owner', ?)`).run(`mbr_vis_owner_${RUN}`, `usr_vis_owner_${RUN}`, now);
   const o = await browser.newContext(); await signIn(o, `owner.${RUN}@crestmont.test`, secret); ownerState = await o.storageState(); await o.close();
-  const c = await browser.newContext(); await signIn(c, `cust.${RUN}@bakery.example`);
+  const c = await browser.newContext(); await signIn(c, `cust.${RUN}@bakery.example`, custSecret);
   // A real upload through the portal so file pages have content.
   const p = await c.newPage();
   await p.goto(`${srv.base}/portal/projects/${ids.project}/files`);
