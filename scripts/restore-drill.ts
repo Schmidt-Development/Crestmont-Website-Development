@@ -1,8 +1,10 @@
 // Staging restore drill (TEST-004, INFRA-006, DOC-002). Used by .github/workflows/staging-restore-drill.yml:
 //   node --no-warnings scripts/restore-drill.ts sql   <tables.json>                 → prints one SELECT that counts every table
+//   node --no-warnings scripts/restore-drill.ts export-counts <export.sql>          → the export's own row counts (source side)
 //   node --no-warnings scripts/restore-drill.ts compare <source.json> <restored.json> --commit <sha> --run-id <id> --out <evidence.json>
 // tables.json / source.json / restored.json are `wrangler d1 execute --json` outputs. The comparison is the evidence:
-// identical table set and identical row counts after restoring the export into a scratch database.
+// identical table set and identical row counts after restoring the export into a scratch database. The source side
+// is the export itself (exportCounts), not a later count of the live database, which keeps changing.
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -128,6 +130,22 @@ export function redactReason(s: string): string {
     .slice(0, 500);
 }
 
+/**
+ * Row counts of the EXPORT itself ({t, n} rows, the shape compareCounts reads): one per CREATE TABLE, counting that
+ * table's INSERT statements (Wrangler's d1 export writes one row per INSERT). These are the source side of the drill.
+ * Counting the live database instead raced with live traffic: rows written or pruned between the export and the count
+ * (rate_limits on staging, 2026-11-02) failed a restore that was in fact exact.
+ */
+export function exportCounts(sql: string): Rows {
+  const counts = new Map<string, number>();
+  for (const st of splitStatements(sql)) {
+    let m: RegExpMatchArray | null;
+    if ((m = st.match(CREATE_TABLE))) { const t = ident(m, 1); if (!SKIP.test(t) && !counts.has(t)) counts.set(t, 0); }
+    else if ((m = st.match(INSERT))) { const t = ident(m, 1); if (!SKIP.test(t)) counts.set(t, (counts.get(t) ?? 0) + 1); }
+  }
+  return [...counts].sort(([a], [b]) => a.localeCompare(b)).map(([t, n]) => ({ t, n }));
+}
+
 export interface DrillResult { passed: boolean; tables: number; rows: number; problems: string[] }
 export function compareCounts(source: Rows, restored: Rows): DrillResult {
   const a = new Map(source.map((r) => [String(r.t), Number(r.n)]));
@@ -157,7 +175,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const r = sanitizeExport(readFileSync(a, "utf8"));
     writeFileSync(b, r.sql);
     console.log(`sanitized export: removed ${JSON.stringify(r.removed)}`);
-  } else if (mode === "sql") process.stdout.write(countQueries(rowsOf(readFileSync(a, "utf8")).map((r) => String(r.name))).join("\n") + "\n");
+  } else if (mode === "export-counts") process.stdout.write(JSON.stringify([{ results: exportCounts(readFileSync(a, "utf8")) }]) + "\n");
+  else if (mode === "sql") process.stdout.write(countQueries(rowsOf(readFileSync(a, "utf8")).map((r) => String(r.name))).join("\n") + "\n");
   else if (mode === "compare") {
     // a / b: comma-separated lists of wrangler JSON outputs (one per counting batch).
     const r = compareCounts(rowsOfAll(a.split(",").map((f) => readFileSync(f, "utf8"))), rowsOfAll(b.split(",").map((f) => readFileSync(f, "utf8"))));

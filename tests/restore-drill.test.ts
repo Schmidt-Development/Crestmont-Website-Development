@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { compareCounts, countSql, drillEvidence, rowsOf } from "../scripts/restore-drill.ts";
+import { compareCounts, countSql, drillEvidence, exportCounts, rowsOf } from "../scripts/restore-drill.ts";
 import { parseEvidence } from "../src/readiness/ingest.ts";
 
 test("[TEST-004] staging restore drill: counts every table, detects missing/extra tables and row drift, and emits valid signed-evidence documents", () => {
@@ -36,7 +36,8 @@ test("[TEST-004] [INFRA-006] restore drill counts tables without compound SELECT
   const oneRow = (ts: string[]) => JSON.stringify([{ results: [Object.fromEntries(ts.map((t) => [t, 2]))], success: true }]);
   assert.deepEqual(rowsOfAll([oneRow(["a", "b"]), oneRow(["c"])]), [{ t: "a", n: 2 }, { t: "b", n: 2 }, { t: "c", n: 2 }]);
   const wf = (await import("node:fs")).readFileSync(".github/workflows/staging-restore-drill.yml", "utf8");
-  assert.match(wf, /count crestmont-staging "--remote --env staging" source \|\| fail "count source rows"/);
+  assert.match(wf, /count "\$SCRATCH" "--remote" restored \|\| fail "count restored rows"/, "the restored side is counted in batches");
+  assert.match(wf, /export-counts drill\/staging\.sql > drill\/source-0\.json \|\| fail "count exported rows"/, "the source side is the export itself");
   assert.match(wf, /compare "\$\(cat drill\/source\.list\)" "\$\(cat drill\/restored\.list\)"/);
 });
 
@@ -159,4 +160,26 @@ test("[TEST-004] restore drill inserts parent rows before child rows (no relianc
   db.exec("PRAGMA foreign_keys=ON");
   for (const s of st.filter((s) => !/^PRAGMA/.test(s))) db.exec(s);   // even with no deferral at all
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM invoices").get() as { n: number }).n, 1);
+});
+
+test("[TEST-004] [INFRA-006] restore drill compares the restore with the EXPORT's own row counts, so live writes after the export cannot fail an exact restore; a lost row still fails", () => {
+  // Wrangler's d1 export: one INSERT per row; reserved and internal tables are not counted (they are not restored).
+  const dump = ["PRAGMA defer_foreign_keys=TRUE;", 'CREATE TABLE _cf_KV (key TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID;', 'INSERT INTO "_cf_KV" VALUES(\'a\',X\'00\');',
+    'CREATE TABLE "rate_limits" (k TEXT, at TEXT);', 'INSERT INTO "rate_limits" VALUES(\'a\',\'x;y\');', 'INSERT INTO "rate_limits" VALUES(\'b\',\'it\'\'s\');',
+    "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT);", "CREATE TABLE empty_t (id TEXT);", 'INSERT INTO "users" VALUES(\'u1\',\'a@b.example\');',
+    'INSERT INTO "sqlite_sequence" VALUES(\'x\',1);'].join("\n");
+  const source = exportCounts(dump);
+  assert.deepEqual(source, [{ t: "empty_t", n: 0 }, { t: "rate_limits", n: 2 }, { t: "users", n: 1 }]);
+  const restored = [{ t: "empty_t", n: 0 }, { t: "rate_limits", n: 2 }, { t: "users", n: 1 }];
+  // Staging 2026-11-02: the live database gained a rate_limits row after the export (6508 counted live, 6507 exported
+  // and restored). Against the live count that exact restore failed; against the export it passes.
+  assert.equal(compareCounts([{ t: "empty_t", n: 0 }, { t: "rate_limits", n: 3 }, { t: "users", n: 1 }], restored).passed, false, "the old live-count comparison");
+  assert.equal(compareCounts(source, restored).passed, true);
+  // A restore that loses a row, or a table, is still a failure.
+  assert.deepEqual(compareCounts(source, [{ t: "empty_t", n: 0 }, { t: "rate_limits", n: 1 }, { t: "users", n: 1 }]).problems, ["rate_limits: 2 rows before, 1 after"]);
+  assert.deepEqual(compareCounts(source, [{ t: "rate_limits", n: 2 }, { t: "users", n: 1 }]).problems, ["empty_t: missing after restore"]);
+  // The workflow takes the source side from the export file, never from a later count of the live database.
+  const wf = readFileSync(new URL("../.github/workflows/staging-restore-drill.yml", import.meta.url), "utf8");
+  assert.match(wf, /restore-drill\.ts export-counts drill\/staging\.sql > drill\/source-0\.json/);
+  assert.doesNotMatch(wf, /count crestmont-staging "--remote --env staging" source/);
 });
