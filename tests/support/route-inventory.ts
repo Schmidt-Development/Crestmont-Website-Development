@@ -211,6 +211,8 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/portfolio/:id/screenshot": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.screenshot_uploaded")),
   "POST /staff/portfolio/:id/verify-link": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.link_verified")),
   "POST /staff/portfolio/:id/relationship": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.relationship_documented")),
+  "POST /staff/portfolio/:id/consent": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.consent_recorded")),
+  "POST /staff/portfolio/:id/consent-withdraw": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.consent_withdrawn")),
   "POST /staff/portfolio/:id/demo": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.demo_updated")),
   "POST /staff/portfolio/:id/publish": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.published")),
   "POST /staff/portfolio/:id/unpublish": staff(rolesWith("portfolio.manage"), P("portfolio"), act("portfolio.unpublished")),
