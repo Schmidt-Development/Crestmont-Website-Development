@@ -55,6 +55,49 @@ export async function saveSettings(db: Db, actor: Actor, input: { paused: boolea
 
 const today = (d: Date) => d.toISOString().slice(0, 10);
 const nonNegInt = (x: unknown) => (typeof x === "number" && Number.isInteger(x) && x >= 0 && x < 1e9 ? x : 0);
+/** Optional numeric telemetry: kept only when the worker actually reported a finite number, else NULL. */
+const numOrNull = (x: unknown) => (typeof x === "number" && Number.isFinite(x) ? x : null);
+const intOrNull = (x: unknown) => (typeof x === "number" && Number.isFinite(x) ? Math.round(x) : null);
+/** UTC 15-minute bucket, so a 60-second heartbeat stores 96 samples a day per runner instead of 1,440. */
+export const sampleBucket = (d: Date) => `${d.toISOString().slice(0, 14)}${String(Math.floor(d.getUTCMinutes() / 15) * 15).padStart(2, "0")}`;
+/** Sample rows older than this are removed by the scheduled retention job (matches env_metrics). */
+export const SAMPLE_RETENTION_DAYS = 90;
+
+const obj = (x: unknown): Record<string, unknown> => (x && typeof x === "object" && !Array.isArray(x) ? x as Record<string, unknown> : {});
+
+/**
+ * One metric sample from a heartbeat's status. Operational telemetry only — counters, host resources and draft
+ * counts — never a business name, number or any personal data. Missing or non-numeric fields become NULL rather
+ * than 0, so "the worker did not report it" stays distinguishable from "it was zero".
+ */
+function sampleStatement(db: Db, runnerId: string, day: string, at: string, now: Date, status: Record<string, unknown>) {
+  const res = obj(status.resources);
+  const gpu = obj(res.gpu);
+  const drafts = obj(status.drafts);
+  const platform = obj(status.platform);
+  return db.prepare(`INSERT INTO research_runner_samples (
+      bucket, runner_id, at, day, evaluated, websites_checked, failed_jobs, sent, records_per_hour,
+      queue_depth, outbox_depth, in_flight, paused, auth_failed,
+      cpu_pct, ram_used_gb, ram_total_gb, rss_mb, disk_free_gb, gpu_util_pct, gpu_mem_used_mb, gpu_name,
+      drafts_pending, drafts_done, drafts_dropped, drafts_deferrals)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(bucket, runner_id) DO UPDATE SET
+      at = excluded.at, day = excluded.day, evaluated = excluded.evaluated, websites_checked = excluded.websites_checked,
+      failed_jobs = excluded.failed_jobs, sent = excluded.sent, records_per_hour = excluded.records_per_hour,
+      queue_depth = excluded.queue_depth, outbox_depth = excluded.outbox_depth, in_flight = excluded.in_flight,
+      paused = excluded.paused, auth_failed = excluded.auth_failed,
+      cpu_pct = excluded.cpu_pct, ram_used_gb = excluded.ram_used_gb, ram_total_gb = excluded.ram_total_gb,
+      rss_mb = excluded.rss_mb, disk_free_gb = excluded.disk_free_gb, gpu_util_pct = excluded.gpu_util_pct,
+      gpu_mem_used_mb = excluded.gpu_mem_used_mb, gpu_name = excluded.gpu_name,
+      drafts_pending = excluded.drafts_pending, drafts_done = excluded.drafts_done,
+      drafts_dropped = excluded.drafts_dropped, drafts_deferrals = excluded.drafts_deferrals`)
+    .bind(sampleBucket(now), runnerId, at, day,
+      nonNegInt(status.evaluated), nonNegInt(status.websitesChecked), nonNegInt(status.failedJobs), nonNegInt(status.sentToday), nonNegInt(status.recordsPerHour),
+      nonNegInt(status.queueDepth), nonNegInt(status.outbox), nonNegInt(status.inFlight), status.paused ? 1 : 0, platform.authFailed ? 1 : 0,
+      intOrNull(res.cpuPct), numOrNull(res.ramUsedGb), numOrNull(res.ramTotalGb), intOrNull(res.rssMb), intOrNull(res.diskFreeGb),
+      intOrNull(gpu.utilPct), intOrNull(gpu.memUsedMb), typeof gpu.name === "string" ? gpu.name.slice(0, 80) : null,
+      intOrNull(drafts.pending), intOrNull(drafts.done), intOrNull(drafts.dropped), intOrNull(drafts.deferrals));
+}
 
 /** Worker check-in: records its status, returns the controls it must obey (pause, batch size, enabled sources). */
 export async function heartbeat(db: Db, body: Record<string, unknown>, now: Date) {
@@ -75,6 +118,13 @@ export async function heartbeat(db: Db, body: Record<string, unknown>, now: Date
                 failed_jobs = MAX(failed_jobs, excluded.failed_jobs), updated_at = excluded.updated_at`)
       .bind(day, runnerId, nonNegInt(status.evaluated), nonNegInt(status.websitesChecked), nonNegInt(status.failedJobs), at),
   ]);
+  // Time series for the 24-hour measurement: hourly / peak / worst-period rates cannot be derived from the two tables
+  // above (latest-only and per-day). Last heartbeat in each 15-minute bucket wins. Written OUTSIDE the batch above
+  // and best-effort on purpose: the heartbeat's real job is to hand the worker its controls, and losing a telemetry
+  // row (for example a Worker deployed ahead of migration 0064) must never stop research from running. A gap shows
+  // up honestly in the report, which says "no worker samples in the window" rather than inventing a rate.
+  try { await sampleStatement(db, runnerId, day, at, now, status).run(); }
+  catch { /* telemetry only; the controls below are what the worker needs */ }
   const s = await loadSettings(db);
   const sources = (await listSources(db)).filter((x) => x.enabled).map((x) => x.source);
   return { paused: !!s.paused, pauseReason: s.pause_reason, qualifyThreshold: s.qualify_threshold, maxBatch: s.max_batch, enabledSources: sources, serverTime: at };

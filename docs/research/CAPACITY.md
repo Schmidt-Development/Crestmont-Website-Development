@@ -203,6 +203,24 @@ WHERE len(addresses) > 0 AND addresses[1].country = 'US' AND names.primary IS NO
 (This session could not run it: the DuckDB `httpfs` extension host is not reachable through the container's egress
 proxy, which is why the sample above was read with plain HTTP range requests instead.)
 
+### The 25,000-qualified-per-day target (2026-11-02 activation request)
+At the measured 15.3% qualification rate, 25,000 qualified prospects a day needs **163,400 businesses evaluated per
+day** — 6,808/hour, 113/minute, 1.9/second — which matches the Founder's own planning figures. Against the measured
+real-data rate of 4,168 businesses/hour at concurrency 48, that implies **concurrency of about 80**, roughly
+**884,000 HTTP requests a day** (~177 GB, ~16 Mbit/s sustained, on the unmeasured ~200 KB/request assumption) and
+about **710 MB of state file growth per day**.
+
+| Question | Answer |
+|---|---|
+| Is 25,000 qualified in **one** 24-hour window plausible? | **Possibly**, on software grounds. It needs ~80 concurrency to hold for 24 hours, which has never been tested: the 4,168/hour figure is an 18-minute burst from one datacenter IP in one small area, and ~25% of its checks were already being refused by robots rules or bot protection |
+| Is 25,000/day **sustainable**? | **For about 56 days, then no.** The national qualified pool is ≈ 1.41 M (9.20 M with a phone × 15.3%). 1.41 M ÷ 25,000 ≈ 56 days of first-pass harvest, after which new supply is business formation plus newly-broken sites |
+| What is the sustainable rate afterwards? | **Under ~3,856 new qualified prospects/day**, and realistically a few hundred. That ceiling assumes 100% of the national inventory turns over every year, which it does not |
+| Does 25,000/day of *evaluation* work indefinitely? | **Yes.** Keeping the whole country current on the 30-day re-verification cycle would itself demand ~307,000 evaluations/day, so 163,400/day never runs out of legitimate work |
+
+So the honest framing for a 24-hour proof run: **it can test whether the machine and the pipeline sustain ~6,800
+evaluations/hour**, which is the real unknown. It cannot establish 25,000/day as an ongoing lead-generation rate,
+because the national inventory does not contain 25,000 new qualified businesses per day to find.
+
 ### Verdict per target
 
 | | Target | Evaluations/day needed | Concurrency needed | Feasible? |

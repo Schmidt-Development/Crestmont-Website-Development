@@ -94,6 +94,69 @@ so "no summaries are appearing" can be told apart from "the worker is stuck".
 **If research drafting must never touch the GPU at all,** leave `RESEARCH_MODEL` unset. Nothing else changes: every
 number the platform shows is computed from evidence by code.
 
+## 9. Continuous operation and a 24-hour measurement run
+This is the procedure for an unattended run that keeps going without anyone holding a terminal open.
+
+**Install for continuous, GPU-free, nationwide research.** In an elevated PowerShell, from a checkout of this
+repository on Node 1:
+
+```powershell
+.\research-worker\windows\Install-ResearchWorker.ps1 `
+  -PlatformUrl https://<staging host> `
+  -States "" `
+  -Concurrency 24 `
+  -RunWhenLoggedOff `
+  -Install
+```
+
+- **No `-Model`.** Drafting stays off, so research never touches the GPU and the AI Website Builder keeps all of it
+  (§8). Qualification, scoring and packages are computed in code, so lead quality is unaffected.
+- **`-States ""`** researches every state, in order, checkpointed per state. Do not point a second worker at the same
+  partition: one worker owns the state file, and the task is registered `MultipleInstances IgnoreNew`.
+- **`-RunWhenLoggedOff`** adds a boot trigger and runs the task under the account's stored password. Without it the
+  task has only an at-logon trigger, so **after an unattended restart research stays stopped until someone signs in** —
+  the installer prints a warning saying exactly that. The password is needed because the platform secret is DPAPI-
+  protected for this user and a password-less (S4U) task cannot unprotect it.
+- **`-Concurrency 24`** is a deliberate starting point, not a target. Raise it in steps (§9, "Raising the rate").
+
+**Then resume research** in `/staff/research` (Owner). The worker notices within 60 s.
+
+**Budget for the first dataset scan.** Before any state is ingested, the worker copies the US subset of the Overture
+release to `data\overture\<release>\us_places.parquet`. That release is **11.90 GB across 16 Parquet parts** and the
+projected columns are about **3.8 GB**, read over the network in one scan. Expect **one to several hours**, during
+which evaluated/hour is legitimately 0. Start the official 24-hour clock **after** the snapshot completes (source
+status reads `current` on the dashboard, with a release), or the window measures the download rather than the
+pipeline.
+
+**Verify it is really running, independently of any Claude session:**
+
+```powershell
+Get-ScheduledTask -TaskName CrestmontResearch-Worker | Select-Object State
+C:\CrestmontResearch\Get-ResearchWorkerHealth.ps1
+```
+
+Health should show a recent platform heartbeat, `paused: false`, a non-zero queue once ingest starts, and
+`drafts.gpu` reporting "no GPU guard" (no model configured). On the platform, `/staff/research` should show the runner
+online with its last check-in. If research is resumed and no worker checks in for 30 minutes, the Owners are emailed
+automatically (`PRODUCTION.md` §6).
+
+**Raising the rate.** Change `HTTP_CONCURRENCY` in `C:\CrestmontResearch\settings.env`, then restart the task
+(`Restart-ScheduledTask -TaskName CrestmontResearch-Worker`; the queue, outbox and checkpoints are durable, so nothing
+is lost). Raise it only while all of these hold: processing failures flat, restricted/blocked check rate not climbing,
+CPU below about 80%, disk free comfortable, the platform accepting batches, and the outbox not growing. One request
+per host at a time with a politeness interval is enforced at any concurrency.
+
+**Reporting.** `scripts/research-24h-report.ts` builds the window's report from staging D1, read-only:
+
+```bash
+node --no-warnings scripts/research-24h-report.ts --hours 24 --target 25000 --out evidence
+```
+
+It writes `evidence/research-24h-report.json` and `.md`, keeps every funnel stage separate, and refuses to state a
+daily figure for a window that has not finished. The `Research performance report` workflow runs the same script
+daily and on demand, and uploads the report as an artifact. Accuracy is **not** in it: a false-positive rate needs the
+hand-verified sample in §4.
+
 ## 5. Troubleshooting
 | Symptom | Check / fix |
 |---|---|
