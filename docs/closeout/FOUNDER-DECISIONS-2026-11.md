@@ -33,8 +33,10 @@ None of these decisions is attorney approval or permission to publish the legal 
 
 ## Matrix
 
-PR column: **#108** = FD-26 mandatory plan (`claude/fd26-mandatory-maintenance-commitment`); **B1** = batch 1
-(`claude/founder-decisions-batch-1`).
+PR column: **#108** = FD-26 mandatory plan (`claude/fd26-mandatory-maintenance-commitment`); **#109 / B1** = batch 1
+(`claude/founder-decisions-batch-1`); **FD27** = launch billing + suspension (`claude/fd27-launch-billing-suspension`,
+stacked on #108); **B2** = batch 2 (`claude/founder-decisions-batch-2`); **MFA** = customer-admin MFA
+(`claude/fd30-customer-admin-mfa`); **CAL** = dual calendars (`claude/dual-calendars`). PR numbers are added when opened.
 
 | FD | Decision (short) | Status | Implementation / PR | Tests | Remaining |
 |---|---|---|---|---|---|
@@ -51,20 +53,20 @@ PR column: **#108** = FD-26 mandatory plan (`claude/fd26-mandatory-maintenance-c
 | 11 | Invoices Net 7; keep upfront + 50/25/25 | IMPLEMENTED (B1) | `src/services/stripe-invoices.ts` `DAYS_UNTIL_DUE = 7` (was 14) | `tests/finance-documents.test.ts`, `tests/founder-decisions-batch1.test.ts` | MSA §4.3 |
 | 12 | No late fees or interest | ALIGNED (code) | No late-fee code | — | Strike MSA §4.4(b) "1.5% per month" |
 | 13 | Portfolio display requires recorded opt-in | NOT STARTED | `services/portfolio.ts` `publishBlockers` does not check consent | — | Consent record + publish blocker; MSA:189 |
-| 14 | Five business days per review request | NOT STARTED | `approval_requests` has no due date | — | `respond_by` + reminders; MSA `[REVIEW DAYS]` |
-| 15 | Silence never approval | ALIGNED (pre-existing) | Approvals only via customer path (`projects.ts`) | existing | Strike MSA §7.5 option (ii) |
+| 14 | Five business days per review request | IMPLEMENTED (B2) | `approval_requests.respond_by` (migration 0067) = end of 5th business day ET; shown in email + portal; `runReviewDeadlineSweep` reminds once, never approves | `tests/founder-decisions-batch2.test.ts` | MSA `[REVIEW DAYS]` text; public holidays not excluded (Founder may decide) |
+| 15 | Silence never approval | ALIGNED + TESTED (B2) | Approvals only via customer path; overdue sweep leaves the request open | `tests/founder-decisions-batch2.test.ts` (no approval row after deadline) | Strike MSA §7.5 option (ii) |
 | 16 | Founder payment/launch exception via MFA workflow | NOT STARTED | `project.ts` supports `documentedPaymentException`, never wired | — | Owner-only step-up workflow + record |
 | 17 | 30 days to report handoff issues; keeps 90-day warranty | NOT STARTED | MSA:158 placeholder | — | Legal text; tracking |
 | 18 | Paused projects resume, no automatic restart fee | ALIGNED (code) | Resume to prior stage, no fee | existing | MSA:171 wording |
 | 19 | Never auto-cancel for inactivity | ALIGNED (code) | `project.ts` auto-pause only | `tests/domain.test.ts` | Strike MSA §9.4 closure option |
 | 20 | No Crestmont termination for convenience | NOT STARTED (legal text) | MSA:277 still grants it | — | Remove; attorney |
-| 21 | Customer owns domains/deliverables; hosting suspendable after notice | NOT STARTED | Ownership text exists; no suspension workflow | — | See "7-day suspension" row |
+| 21 | Customer owns domains/deliverables; hosting suspendable after notice | IMPLEMENTED in part (FD27) | Suspension workflow with notices, Owner decision, no deletion (see C-1/2) | `tests/maintenance-lifecycle.test.ts` | Technical enforcement of "hosting suspended" on the customer site (take-offline step) is manual; legal text |
 | 22 | 60-day export/transition window | NOT STARTED | DPA:77 proposes 30 days; no org export | — | Org-level export job; text |
 | 23 | Insurance research only; no coverage claimed | BLOCKED (insurer quotes, Founder) | MSA:257 claims "Crestmont maintains [INSURANCE]" | — | Remove claim until bound; obtain quotes |
-| 24 | Quotes valid 30 days | NOT STARTED | Staff choose `valid_until` freely | — | Default today + 30 |
-| 25 | 30 days' notice of subscription price increases | NOT STARTED | Price changes only checked "not in the past" | — | Enforce ≥ 30 days + notice email |
-| 26 | Mandatory minimum plan; one business project per plan | IMPLEMENTED, TESTED locally (#108) | `catalog.ts` minimums + `assertPlanMeetsMinimum`; migration 0064; checkout plan picker; Executive "1 business project" (was "up to 2 sites"); MSA B.2A | `tests/maintenance-commitment.test.ts` (7); 833/0 local | CI on #108; custom-quote plan; staging journey |
-| 27 | Subscription billing starts at approved launch | IMPLEMENTED in part (#108) | No subscription at package purchase; plan recorded on order | #108 tests | Create subscription at `customer_launch` + deploy (next PR) |
+| 24 | Quotes valid 30 days | IMPLEMENTED (B2) | `quotes.ts` refuses validity > 30 days from the Eastern creation date; form default fixed to the same business date (was UTC) | `tests/founder-decisions-batch2.test.ts` | MSA `[QUOTE VALIDITY DAYS]` |
+| 25 | 30 days' notice of subscription price increases | IMPLEMENTED (B2) | `pricing-approvals.ts`: increases need ≥30 days at proposal; effective ≥30 days after approval; subscribers emailed at approval | `tests/founder-decisions-batch2.test.ts` | Stripe price objects for existing subscriptions are not changed by this (manual until live billing exists) |
+| 26 | Mandatory minimum plan; one business project per plan | IMPLEMENTED, TESTED (#108, CI green) | `catalog.ts` minimums; migration 0064; checkout plan picker; Executive "1 business project"; MSA B.2A; "optional plans" copy replaced (FD27) | `tests/maintenance-commitment.test.ts` (7); FD27 copy guard | Merge #108; custom-quote plan; staging journey |
+| 27 | Subscription billing starts at approved launch | IMPLEMENTED (FD27, stacked on #108) | `services/maintenance-lifecycle.ts`: activation opened by both launch paths; checkout refused before launch / below committed plan; webhook completes activation (migration 0066) | `tests/maintenance-lifecycle.test.ts` | Merge #108 first; real Stripe test-mode subscription on staging (BLK-004) |
 | 28 | Third-party costs: disclosed, approved, invoiced separately | NOT STARTED | `project_costs` internal only | — | Approval + pass-through invoice kind |
 | 29 | Verified email before checkout/payment/invitation | ALIGNED (pre-existing) | `routes/verify-gate.ts`; quote acceptance; invitation token | `tests/commerce-closeout.test.ts` | Staging evidence |
 | 30 | MFA required for customer administrators | NOT STARTED (conflicts) | `auth.ts:255` lets customers skip MFA | — | Force enrolment for `customer_admin` |
@@ -75,17 +77,49 @@ PR column: **#108** = FD-26 mandatory plan (`claude/fd26-mandatory-maintenance-c
 | 35 | 30 days' notice of subprocessor changes | NOT STARTED (legal text) | DPA:55 placeholder | — | DPA text |
 | 36 | 60-day post-termination data export window | NOT STARTED | Per-user export only | — | Same as FD-22 |
 | 37 | Encrypted daily backups, 35 days + 12 monthly | IMPLEMENTED in part; BLOCKED | `production-backup.yml` encrypted, off-Cloudflare, dormant without 5 `BACKUP_*` secrets; retention not enforced in code | — | Bucket + secrets (Founder); retention/monthly archive enforcement; restore evidence |
-| 38 | 90-day raw IP, 180-day security logs | NOT STARTED (conflicts) | `retention.ts` security events 365 d; audit IPs never cleared | — | Change periods; IP truncation incl. audit log |
+| 38 | 90-day raw IP, 180-day security logs | IMPLEMENTED (B2), provisional | `retention.ts`: security events 180 d; new `raw_ips` 90 d rule (sessions, security events, audit log); migration 0067 lets audit_logs clear an IP and nothing else; acceptance IPs kept as evidence | `tests/founder-decisions-batch2.test.ts` (trigger refuses every other change) | Owner applies periods on /staff/ops/retention; counsel confirms exceptions |
 | 39 | Audited emergency backup-administrator access | IMPLEMENTED in part | Owner MFA break-glass script (audited) | existing | Designated backup admin workflow; Founder names person |
 | 40 | High-risk customers reviewed individually | NOT STARTED | — | — | Risk flag + Owner review gate |
-| 41 | Security reporting contact / security.txt | IMPLEMENTED (B1); BLOCKED on mailbox | `/.well-known/security.txt` served from Owner setting `security.contact_email`; 404 until set | `tests/founder-decisions-batch1.test.ts` | Founder creates a monitored security@ mailbox and sets it |
+| 41 | Security reporting contact / security.txt | IMPLEMENTED (B1); BLOCKED on a verified mailbox | `/.well-known/security.txt` from setting `security.contact_email`; 404 until set | `tests/founder-decisions-batch1.test.ts` | See "Security mailbox" below |
 | 42 | Opt-in marketing with consent records | NOT STARTED | Unsubscribe + suppression exist; no consent ledger; `sales_info` sent without stored consent | — | Consent ledger; privacy text says no marketing |
 | 43 | Signed confidentiality before sensitive access | NOT STARTED; BLOCKED (agreements) | — | — | Record acknowledgement before role grant |
 | 44 | Crestmont inbound receptionist in launch certification | BLOCKED (Retell workspace, number, test call) | Inbound code + fixtures exist | fixtures | Real staging call (journeys 27–28) |
-| 45 | Sell only certified AI receptionist capabilities | IMPLEMENTED in part (B1) | Outbound removed from `APPROVED_SERVICES`, service page, FAQ and the "Outbound" panel | `tests/founder-decisions-batch1.test.ts` | Public demo still has an "Outbound" scenario (`ui/receptionist.ts`); **Founder decision: keep or pull the inbound service page until a real call is certified** |
+| 45 | Sell only certified AI receptionist capabilities | IMPLEMENTED (#109) — TEMPORARY "Coming soon" | One flag `AI_RECEPTIONIST_OFFER.status` (`catalog.ts`): service page + homepage say Coming soon; every quote link → "Ask about availability"; quote form refuses the service (422, no lead); outbound demo scenario + toggle removed; website assistant and phone agent say not yet available | `tests/founder-decisions-batch1.test.ts`, updated `service-visuals`, `closeout-frontend` | **Reverse** (status → "available") only after FD-44 real E2E call is certified and recorded here |
 | 46 | Retire preview Worker after safety checks | IMPLEMENTED in part | No workflow deploys it (`tests/workflow-security.test.ts`) | existing | Founder deletes Worker/env after checks |
 | 47 | External security test: scope + real quotes | BLOCKED (vendor quotes, Founder) | `docs/security/PENTEST-SCOPE.md` | — | Request-for-quote package; Founder authorization |
-| C-1/2 | 7-day failed-payment suspension; no deletion at suspension | NOT STARTED | `payments.ts` only sets `past_due` + one email; nothing deletes data | — | Day-0/day-7 notices, suspension flag, restore on payment |
+| C-1/2 | 7-day failed-payment suspension; no deletion at suspension | IMPLEMENTED (FD27) | First failure starts the clock; day-0 email; day-5 notice; day-7 eligible (Owner told); Founder-only suspend/restore with reason + step-up MFA; payment restores automatically; nothing deleted (`/staff/billing/hosting`) | `tests/maintenance-lifecycle.test.ts` | Real Stripe test-clock run on staging; take-offline mechanism for hosted sites |
+
+## Security mailbox (FD-41) — checked 2026-11-01
+
+Public DNS for `crestmontwebsitedevelopment.com`: MX → `route1/2/3.mx.cloudflare.net` and SPF
+`include:_spf.mx.cloudflare.net`, i.e. **Cloudflare Email Routing receives mail for the domain**. That proves mail can be
+received, not that `security@` is routed or read: Email Routing rules are not visible in DNS, this session has no
+Cloudflare credential, and the repo documents only `support@`, `billing@`, `sales@`, `legal@`, `dmarc@` (EMAIL-DNS.md §3).
+No test email was sent to an unverified address.
+
+**Exact external action (Founder, ~5 minutes):** Cloudflare dashboard → the domain → Email → Email Routing → Routing
+rules → *Create address* `security@crestmontwebsitedevelopment.com` → action *Send to an email* → a mailbox the Founder
+reads (verify the destination when Cloudflare emails it). Send one test message from an outside account and confirm it
+arrives. Then Staff → Settings → "Security reporting email" = `security@crestmontwebsitedevelopment.com` →
+`/.well-known/security.txt` goes live on that environment.
+
+## Merge order and deploy triggers
+
+Every merge to `main` runs **Deploy staging** (~35–45 min, `concurrency: deploy-staging`, not cancelled, so merges queue
+one deploy each), then the restore drill and rollback rehearsal (`workflow_run`). To avoid redundant deploys, merge
+related PRs back to back only after each PR's CI is green; queued deploys run in order and the last one carries
+everything. Recommended order (each step re-checked against `main` before merging):
+
+1. **#108** FD-26 (no dependencies; migration 0064).
+2. **#109** batch 1 + FD-45 (independent of #108; no conflicts verified with `git merge-tree`).
+3. **FD27** (stacked on #108 — rebase on `main` after #108 merges; migration 0066).
+4. **B2** batch 2 (migration 0067; independent).
+5. **CAL** dual calendars (migration 0065 reserved; independent).
+6. **MFA** customer-admin MFA — **last**, and only after its staging browser journeys are updated: it changes how every
+   customer signs in, including the staging demo accounts the deploy's browser journeys use.
+
+Staging deploys were failing on journey 14 (revision request) for #105 and #106; the fix (`bd51532`, another session)
+is first included in the #107 deploy. Its result is recorded in the ledger.
 
 ## Five systems (2026-11-01 audit, code + docs)
 
@@ -105,6 +139,13 @@ PR column: **#108** = FD-26 mandatory plan (`claude/fd26-mandatory-maintenance-c
 | 2026-11-01 19:30 | PR #108 FD-26/27 opened | 833 passed / 0 failed locally; CI `test` (incl. typecheck), CodeQL, runner images, Windows scripts all green; mergeable, clean |
 | 2026-11-01 20:40 | Merge of #108 attempted | **Refused by this session's permission policy (merge without review). Needs a person to merge.** Not worked around |
 | 2026-11-01 20:45 | Batch 1 (FD-03, FD-11, FD-41, FD-45) | 832 passed / 0 failed locally |
+| 2026-11-01 19:39 | Founder instructions: continue; FD-45 "Coming soon"; check security mailbox; start customer-admin MFA | — |
+| 2026-11-01 19:45 | Rechecked #108/#109 against `main` @ `029e545` | Both mergeable/clean, all checks green. Merge not attempted again (refused earlier by policy) |
+| 2026-11-01 19:50 | Staging deploys for #105/#106 failed on journey 14; fix `bd51532` first deployed by #107 run 41364900468 | Watching |
+| 2026-11-01 20:30 | #109: FD-45 Coming soon | 832 passed / 2 failed → the 2 failures were tests requiring the old quote link; updated to the FD-45 rule, 16/16 pass |
+| 2026-11-01 21:00 | FD27 branch (launch billing + suspension) | lifecycle 7/7; security matrix/email/commerce/ops 98/98 |
+| 2026-11-01 21:30 | B2 branch (FD-14, FD-24, FD-25, FD-38) | batch-2 6/6; affected suites 32/32 after fixing the UTC/Eastern quote-date default |
+| 2026-11-01 21:30 | Security mailbox checked (DNS) | Cloudflare Email Routing; `security@` route unverifiable from here → Founder action above |
 
 ## Next code workstreams (highest risk first)
 
