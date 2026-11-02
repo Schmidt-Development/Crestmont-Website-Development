@@ -259,6 +259,9 @@ test("[PORTAL-006] [PM-002] [PM-003] revisions count against the allowance, then
   assert.equal((await db.prepare(`SELECT revision_allowance FROM projects WHERE id = ?`).bind(pa).first<{ revision_allowance: number }>())!.revision_allowance, 3, "Business = 3 rounds");
   assert.equal((await ca.post(`/portal/projects/${pa}/revisions`, { request: "Change the hero image please" })).status, 409, "no revisions before design");
   await setStatus(db, pa, "customer_review");
+  // The staging browser journey 14 (tests/e2e/staging-journeys.e2e.ts) clicks these exact button labels; renaming them
+  // without updating the journey failed staging deploy #121. Keep both in step.
+  assert.match(await (await ca.get(`/portal/projects/${pa}/revisions`)).text(), /<button[^>]*>Submit request<\/button>/, "journey 14 label (rounds left)");
   const sc = await client().login(pm.email, TEST_PASSWORD, pm.secret);
   for (let i = 1; i <= 3; i++) {
     const res = await ca.post(`/portal/projects/${pa}/revisions`, { request: `Round ${i}: adjust spacing and colors` });
@@ -269,7 +272,9 @@ test("[PORTAL-006] [PM-002] [PM-003] revisions count against the allowance, then
     await ca.post(`/portal/projects/${pa}/approvals`, { kind: "revision", decision: "approved", subject_id: rev!.id });
     assert.equal((await db.prepare(`SELECT status FROM revisions WHERE id = ?`).bind(rev!.id).first<{ status: string }>())!.status, "approved");
   }
-  assert.match(await (await ca.get(`/portal/projects/${pa}/revisions`)).text(), /Further changes need a change order/);
+  const usedUp = await (await ca.get(`/portal/projects/${pa}/revisions`)).text();
+  assert.match(usedUp, /Further changes need a change order/);
+  assert.match(usedUp, /<button[^>]*>Submit request \(changes need a change-order quote\)<\/button>/, "journey 14 label (allowance used)");
   // Fourth request: recorded as billable, needs a change order.
   assert.equal((await ca.post(`/portal/projects/${pa}/revisions`, { request: "Round 4: add a new services page" })).status, 303);
   const r4 = await db.prepare(`SELECT id, included, status FROM revisions WHERE project_id = ? AND round = 4`).bind(pa).first<{ id: string; included: number; status: string }>();
