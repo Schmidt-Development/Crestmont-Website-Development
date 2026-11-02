@@ -38,7 +38,7 @@ PR column: **#108** = FD-26 mandatory plan (`claude/fd26-mandatory-maintenance-c
 stacked on #108); **B2** = batch 2 (`claude/founder-decisions-batch-2`); **MFA** = customer-admin MFA
 (`claude/fd30-customer-admin-mfa`); **CAL** = dual calendars (`claude/dual-calendars`).
 Open PRs: **#108** FD-26 · **#109** batch 1 + FD-45 · **#110** FD-27 + suspension (stacked on #108) · **#111** batch 2 ·
-**#112** FD-13 · **#113** FD-16.
+**#112** FD-13 · **#113** FD-16 · **#114** dual calendars · **#115** FD-30 customer-admin MFA (stacked on #110).
 
 | FD | Decision (short) | Status | Implementation / PR | Tests | Remaining |
 |---|---|---|---|---|---|
@@ -71,7 +71,7 @@ Open PRs: **#108** FD-26 · **#109** batch 1 + FD-45 · **#110** FD-27 + suspens
 | 27 | Subscription billing starts at approved launch | IMPLEMENTED (#110, stacked on #108; CI green) | `services/maintenance-lifecycle.ts`: activation opened by both launch paths; checkout refused before launch / below committed plan; webhook completes activation (migration 0066) | `tests/maintenance-lifecycle.test.ts` | Merge #108 first; real Stripe test-mode subscription on staging (BLK-004) |
 | 28 | Third-party costs: disclosed, approved, invoiced separately | NOT STARTED | `project_costs` internal only | — | Approval + pass-through invoice kind |
 | 29 | Verified email before checkout/payment/invitation | ALIGNED (pre-existing) | `routes/verify-gate.ts`; quote acceptance; invitation token | `tests/commerce-closeout.test.ts` | Staging evidence |
-| 30 | MFA required for customer administrators | NOT STARTED (conflicts) | `auth.ts:255` lets customers skip MFA | — | Force enrolment for `customer_admin` |
+| 30 | MFA required for customer administrators | IMPLEMENTED (#115, stacked on #110) | `auth.ts` session MFA, `authz.ts` `can()` (unenrolled admin = member permissions), `app.ts` central gate → `/mfa/setup`; members optional; staging demo admins enrolled by `staging-access.ts`; staging `MFA_ENCRYPTION_KEY` confirmed bound | `tests/customer-admin-mfa.test.ts` (5); local browser journeys 21/21 (original branch) | Staging browser journeys run on the deploy after merge |
 | 31 | Role-based staff access with access logging | IMPLEMENTED in part | Roles in `authz.ts`; read logging only for a few views | existing | Log staff reads of customer records broadly |
 | 32 | Progressive rate limits, no fixed 15-minute lockout | ALIGNED (code) | `auth.ts` no lockout, Turnstile + limits | `tests/auth.test.ts` | Fix docs claiming lockout (AUTH-PRODUCTION, DPA, Website Terms) |
 | 33 | Recovery numbers internal until proven | IMPLEMENTED in part | `BACKUP-RECOVERY.md` internal targets | — | Remove RPO/RTO table from MSA D.8 |
@@ -85,7 +85,7 @@ Open PRs: **#108** FD-26 · **#109** batch 1 + FD-45 · **#110** FD-27 + suspens
 | 41 | Security reporting contact / security.txt | IMPLEMENTED (B1); BLOCKED on a verified mailbox | `/.well-known/security.txt` from setting `security.contact_email`; 404 until set | `tests/founder-decisions-batch1.test.ts` | See "Security mailbox" below |
 | 42 | Opt-in marketing with consent records | NOT STARTED | Unsubscribe + suppression exist; no consent ledger; `sales_info` sent without stored consent | — | Consent ledger; privacy text says no marketing |
 | 43 | Signed confidentiality before sensitive access | NOT STARTED; BLOCKED (attorney-approved agreement text) | — | — | Design ready: Owner records "signed confidentiality agreement on file" (date, evidence) before a staff role is granted or used. Changes staff sign-in for staging demo accounts → ship with/after the MFA branch. Needs counsel-approved agreement |
-| 44 | Crestmont inbound receptionist in launch certification | BLOCKED (Retell workspace, number, test call) | Inbound code + fixtures exist | fixtures | Real staging call (journeys 27–28) |
+| 44 | Crestmont inbound receptionist in launch certification | BLOCKED (Retell workspace, number, test call) | Inbound code + fixtures; dual calendars (#114) | fixtures | Real staging call (journeys 27–28); then reverse FD-45 "Coming soon" |
 | 45 | Sell only certified AI receptionist capabilities | IMPLEMENTED (#109) — TEMPORARY "Coming soon" | One flag `AI_RECEPTIONIST_OFFER.status` (`catalog.ts`): service page + homepage say Coming soon; every quote link → "Ask about availability"; quote form refuses the service (422, no lead); outbound demo scenario + toggle removed; website assistant and phone agent say not yet available | `tests/founder-decisions-batch1.test.ts`, updated `service-visuals`, `closeout-frontend` | **Reverse** (status → "available") only after FD-44 real E2E call is certified and recorded here |
 | 46 | Retire preview Worker after safety checks | IMPLEMENTED in part | No workflow deploys it (`tests/workflow-security.test.ts`) | existing | Founder deletes Worker/env after checks |
 | 47 | External security test: scope + real quotes | BLOCKED (vendor quotes, Founder) | `docs/security/PENTEST-SCOPE.md` | — | Request-for-quote package; Founder authorization |
@@ -116,12 +116,21 @@ everything. Recommended order (each step re-checked against `main` before mergin
 2. **#109** batch 1 + FD-45 (independent of #108; no conflicts verified with `git merge-tree`).
 3. **FD27** (stacked on #108 — rebase on `main` after #108 merges; migration 0066).
 4. **B2** batch 2 (migration 0067; independent).
-5. **CAL** dual calendars (migration 0065 reserved; independent).
-6. **MFA** customer-admin MFA — **last**, and only after its staging browser journeys are updated: it changes how every
-   customer signs in, including the staging demo accounts the deploy's browser journeys use.
+5. **#112** FD-13 (migration 0068). 6. **#113** FD-16 (migration 0069). 7. **#114** dual calendars (migration 0065).
+8. **#115** FD-30 MFA — **last**; stacked on #110 (its conflict with #108's checkout tests is already resolved there);
+   retarget to `main` after #110 merges. It changes how every customer admin signs in, including staging demo admins.
 
 Staging deploys were failing on journey 14 (revision request) for #105 and #106; the fix (`bd51532`, another session)
 is first included in the #107 deploy. Its result is recorded in the ledger.
+
+## Dual calendars (#114)
+
+Calendar A AI Follow-Up / Calendar B Founder Callback, both internal. Founder calendar only on an explicit
+`wants_founder: true` from the voice agent or an approved escalation rule (list empty). Nothing is confirmed to a
+caller unless the database write is read back. **External:** add optional `wants_founder` to live Retell tools
+`request_callback`, `escalate`, `schedule_consultation` (inbound) and `schedule_sales_followup` (outbound) and one
+prompt line; until then everything goes to AI Follow-Up. **Decisions:** escalation rules; calendar visibility
+(Owner + Administrator / Owner only).
 
 ## Five systems (2026-11-01 audit, code + docs)
 
@@ -153,6 +162,8 @@ is first included in the #107 deploy. Its result is recorded in the ledger.
 | 2026-11-01 20:10 | Merge of #108 retried once after `main` was healthy | Refused again by this session's permission policy. All PRs left ready for the Founder |
 | 2026-11-01 20:30 | #112 FD-13 portfolio consent | Generated staging portfolio SQL applied to a migrated DB: same 4 entries published as on `main`; withdrawal survives re-run. CI test green |
 | 2026-11-01 20:50 | #113 FD-16 payment exception | 4/4 new tests; affected suites 78/78; typecheck clean |
+| 2026-11-01 22:00 | #114 dual calendars | agent: 839/0 full suite; re-verified here: typecheck clean, 12/12 |
+| 2026-11-01 22:20 | #115 FD-30 MFA | agent: 833/0, browser journeys 21/21 + 26/26; rebased onto #110 here, conflict resolved, 84/84 combined suites |
 | 2026-11-01 20:50 | Local typecheck now possible | `tsc --types ''` diffed against `main` (tool in session scratchpad); found and fixed one real error on #111 |
 
 ## Next code workstreams (highest risk first)
