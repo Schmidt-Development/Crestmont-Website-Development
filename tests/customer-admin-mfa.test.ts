@@ -16,6 +16,7 @@ import type { PaymentsAdapter, CheckoutRequest } from "../src/adapters/payments.
 import { loadSession } from "../src/services/auth.ts";
 import { can } from "../src/domain/authz.ts";
 import { newId, nowIso } from "../src/lib/db.ts";
+import { businessDate } from "../src/lib/business-time.ts";
 
 class FakePayments implements PaymentsAdapter {
   readonly configured = true;
@@ -28,7 +29,8 @@ class FakePayments implements PaymentsAdapter {
 
 const n = async (db: Env["DB"], sql: string, ...b: unknown[]) => (await db.prepare(sql).bind(...b).first<{ n: number }>())!.n;
 const loc = (r: Response) => r.headers.get("location") ?? "";
-const future = (days = 30) => new Date(Date.now() + days * 86400e3).toISOString().slice(0, 10);
+// Quote validity is counted in Eastern business dates and capped at 30 days (FD-24, #111); a UTC date is a day ahead in the evening.
+const future = (days = 30) => new Date(Date.parse(`${businessDate(new Date())}T12:00:00Z`) + days * 86400e3).toISOString().slice(0, 10);
 
 async function app() {
   const fake = new FakePayments();
