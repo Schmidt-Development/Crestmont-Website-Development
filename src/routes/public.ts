@@ -1072,6 +1072,9 @@ function registerPortfolioAdmin(r: Router) {
   });
   action("verify-link", async (ctx, id, f) => { await pf.recordLinkVerification(ctx.db, ctx.actor!, id, str(f, "verified_on"), ctx.ip); return "Link verification recorded."; });
   action("relationship", async (ctx, id, f) => { await pf.documentRelationship(ctx.db, ctx.actor!, id, str(f, "relationship"), str(f, "evidence"), ctx.ip); return "Relationship documentation recorded."; });
+  // FD-13: explicit, recorded opt-in by the website owner (required to publish); withdrawal unpublishes at once.
+  action("consent", async (ctx, id, f) => { await pf.recordPortfolioConsent(ctx.db, ctx.actor!, id, { givenBy: str(f, "given_by"), method: str(f, "method"), givenOn: str(f, "given_on"), evidence: str(f, "evidence") }, ctx.ip); return "Portfolio consent recorded."; });
+  action("consent-withdraw", async (ctx, id, f) => { await pf.withdrawPortfolioConsent(ctx.db, ctx.actor!, id, str(f, "note"), ctx.ip); return "Consent withdrawn; the project was unpublished."; });
   action("demo", async (ctx, id, f) => {
     await pf.setDemo(ctx.db, ctx.actor!, id, { demo_url: str(f, "demo_url"), demo_status: str(f, "demo_status"), demo_revision: str(f, "demo_revision"), verified_on: str(f, "demo_verified_on"),
       poster_desktop_asset: str(f, "poster_desktop_asset"), poster_mobile_asset: str(f, "poster_mobile_asset"), poster_tablet_asset: str(f, "poster_tablet_asset") }, pf.approvedDemoOrigins(ctx.env.PORTFOLIO_DEMO_ORIGINS, { allowLocal: pf.allowLocalDemos(ctx.env.ENVIRONMENT) }), ctx.ip);
@@ -1144,6 +1147,14 @@ ${blockers.length ? html`<div class="alert alert--warn" role="status"><strong>Pu
 <div class="card"><h3 class="card__title">Relationship documentation</h3>${dl([["Current", p.relationship], ["Documented", p.relationship_documented_at ? formatDate(p.relationship_documented_at) : "Not yet documented"], ["Evidence", p.relationship_evidence]])}
 <form method="post" action="/staff/portfolio/${p.id}/relationship">${csrf(ctx)}${input({ name: "relationship", label: "Relationship statement shown publicly", value: /pending/i.test(p.relationship) ? "" : p.relationship, required: true, maxlength: 300 })}
 ${textarea({ name: "evidence", label: "Documentation (where it is kept, who authorised it, date)", rows: 3, required: true, maxlength: 2000 })}<div class="form-actions">${button("Record documentation", { variant: "secondary", size: "sm" })}</div></form></div></div>
+<div class="card" data-testid="portfolio-consent"><h3 class="card__title">Owner's portfolio consent (required)</h3>
+<p class="muted">Record only an explicit opt-in from the website owner. Silence, a signed contract alone or a launch is never consent.</p>
+${dl([["Status", p.portfolio_consent_withdrawn_at ? `Withdrawn ${formatDate(p.portfolio_consent_withdrawn_at)}` : p.portfolio_consent_at ? `Given ${formatDate(p.portfolio_consent_at)}` : "Not recorded"], ["Given by", p.portfolio_consent_by ?? "—"], ["How", p.portfolio_consent_method ?? "—"], ["Evidence", p.portfolio_consent_evidence ?? "—"]])}
+<form method="post" action="/staff/portfolio/${p.id}/consent" class="stack">${csrf(ctx)}${input({ name: "given_by", label: "Given by (name and role at the business)", required: true, maxlength: 200 })}
+${select({ name: "method", label: "How consent was given", options: [{ value: "written", label: "In writing (email, letter or signed form)" }, { value: "portal", label: "Recorded in the customer portal" }], required: true })}
+${input({ name: "given_on", label: "Date given", type: "date", required: true })}${textarea({ name: "evidence", label: "Where the consent record is kept", rows: 2, required: true, maxlength: 2000 })}
+<div class="form-actions">${button("Record consent", { variant: "secondary", size: "sm" })}</div></form>
+${p.portfolio_consent_at && !p.portfolio_consent_withdrawn_at ? html`<form method="post" action="/staff/portfolio/${p.id}/consent-withdraw" class="stack" data-confirm="Record the withdrawal and unpublish this project now?">${csrf(ctx)}${input({ name: "note", label: "How the owner withdrew consent", required: true, maxlength: 500 })}<div class="form-actions">${button("Record withdrawal and unpublish", { variant: "danger", size: "sm" })}</div></form>` : ""}</div>
 ${demoAdmin(ctx, p)}
 <h2 class="h4">Project details</h2>${projectForm(ctx, `/staff/portfolio/${p.id}`, v, "Save details")}
 <h2 class="h4">Verified testimonials</h2><p class="muted">Add only testimonials you have confirmed with the author, including permission to publish. They are stored separately and are unpublished until you publish them.</p>
