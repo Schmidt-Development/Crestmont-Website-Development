@@ -384,7 +384,7 @@ B.2 **Entitlements.** The entitlements below are **PROPOSED** in the Platform ca
 
 | Entitlement | Essential | Professional | Executive |
 |---|---|---|---|
-| Hosting | [1 site; 10 GB storage / 100 GB transfer] | [1 site; 25 GB / 250 GB] | [up to 2 sites; 50 GB / 500 GB] |
+| Hosting | [1 business project; 10 GB storage / 100 GB transfer] | [1 business project; 25 GB / 250 GB] | [1 business project; 50 GB / 500 GB] |
 | Maintenance labour (non-rolling) | [1 h/month] | [2.5 h/month] | [4 h/month] |
 | Content updates | [2 small updates/month] | [6/month] | [within labour allowance] |
 | Security updates | [monthly] | [bi-weekly] | [weekly] |
@@ -393,6 +393,8 @@ B.2 **Entitlements.** The entitlements below are **PROPOSED** in the Platform ca
 | Initial response target | [2 business days] | [1 business day] | [4 staffed hours] |
 | Overage rate (prior approval, 30-min increments) | [$95/h] | [$90/h] | [$85/h] |
 | Excluded | New pages, new features, redesigns, third-party licence fees | | |
+
+B.2A **One business project; required minimum plan (Founder decision FD-26, pending counsel review).** Each Plan covers one business project: one company's website, customer portal, CRM, booking system and connected dashboards, within the agreed scope and resource limits. Separate businesses, even with the same owner, require separate Plans. Each website package requires a Plan at or above a minimum: Starter → Essential, Business → Professional, Premium → Executive; a custom website requires the Plan stated in its approved quote. The Client may choose a higher Plan. Recurring Plan fees begin when the Client approves and launches the completed website, not at purchase of development (FD-27).
 
 **Note to Founder:** `docs/BACKUP-RECOVERY.md` states that **no automated backups exist yet**. The backup entitlements above cannot be offered until automated backups and a restore drill are in place in production.
 

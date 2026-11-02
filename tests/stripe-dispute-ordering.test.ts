@@ -29,7 +29,7 @@ async function paidCheckout(pi: string) {
   const t = await createTestApp({ STRIPE_WEBHOOK_SECRET: WHSEC, overrides: { payments: fake } });
   const cu = await createCustomer(t.db, `dispute-order-${pi}@fixture.example`, "Dispute Ordering Fixture LLC");
   const c = t.client(); await c.login(cu.email);
-  await c.post("/checkout/starter", { terms: "1" });
+  await c.post("/checkout/starter", { maintenance_plan: "essential", terms: "1" });
   const co = fake.checkouts.at(-1)!;
   const session = { id: `cs_${pi}`, object: "checkout.session", mode: "payment", payment_status: "paid", amount_total: co.lines.reduce((s, l) => s + l.amountCents * (l.quantity ?? 1), 0), payment_intent: pi, customer: `cus_${pi}`, customer_email: co.customerEmail, metadata: co.metadata };
   const dispute = (status = "needs_response") => ({ id: `du_${pi}`, object: "dispute", payment_intent: pi, charge: `ch_${pi}`, amount: session.amount_total, reason: "fraudulent", status, evidence_details: { due_by: Math.floor(Date.now() / 1000) + 9 * 86400 } });

@@ -2,7 +2,7 @@
 // Prices always come from the server catalog or a stored quote version — never from the client.
 import type { Db, DbStatement } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
-import { PACKAGES, MAINTENANCE_PLANS, milestoneSplit, type PackageId, type MaintenanceId } from "../domain/catalog.ts";
+import { PACKAGES, MAINTENANCE_PLANS, MINIMUM_PLAN_FOR_PACKAGE, PricingError, assertPlanMeetsMinimum, milestoneSplit, type PackageId, type MaintenanceId } from "../domain/catalog.ts";
 import { milestoneInvoiceAllowed } from "../domain/project.ts";
 import { audit } from "./security.ts";
 import { HttpError } from "../app/http.ts";
@@ -11,9 +11,15 @@ import { taxForNewInvoice, quoteProductKey, checkoutLinesFor } from "./tax.ts";
 
 export interface InvoiceRow { id: string; organization_id: string; order_id: string | null; project_id: string | null; milestone_kind: string | null; amount_cents: number; status: string; description: string | null }
 
-export async function createPackageOrder(db: Db, organizationId: string, packageId: PackageId, actorUserId: string, now: Date = new Date(), opts: { leadId?: string | null } = {}) {
+export async function createPackageOrder(db: Db, organizationId: string, packageId: PackageId, actorUserId: string, now: Date = new Date(), opts: { leadId?: string | null; maintenancePlanId?: string } = {}) {
   const pkg = PACKAGES[packageId];
   if (!pkg) throw new HttpError(400, "Unknown package");
+  // FD-26: a plan at or above the package minimum. A customer's explicit choice is validated (never downgraded);
+  // internal callers without a choice record the minimum, labelled as such.
+  let planId: MaintenanceId;
+  try { planId = opts.maintenancePlanId === undefined ? MINIMUM_PLAN_FOR_PACKAGE[pkg.id] : assertPlanMeetsMinimum(pkg.id, opts.maintenancePlanId); }
+  catch (e) { if (e instanceof PricingError) throw new HttpError(422, e.message); throw e; }
+  const planSource = opts.maintenancePlanId === undefined ? "minimum_default" : "customer_selected";
   // CAT-007: the Founder-approved effective price (catalog price unless an approved override is in force).
   const price = await effectivePackagePrice(db, pkg.id, now);
   const amount = price.cents;
@@ -24,12 +30,13 @@ export async function createPackageOrder(db: Db, organizationId: string, package
   // CREST-GAP-036: one open invoice per organization and package. A repeat checkout reuses it (same amounts), so
   // abandoned clicks do not pile up as receivables and two separate invoices can never both be paid. If the price or
   // tax changed since, the stale invoice is voided and a new one is issued.
-  const open = await db.prepare(`SELECT i.id AS invoice_id, o.id AS order_id, o.lead_id, o.total_cents, i.amount_cents, i.subtotal_cents, i.tax_cents, i.tax_detail_json FROM invoices i JOIN orders o ON o.id = i.order_id
+  const open = await db.prepare(`SELECT i.id AS invoice_id, o.id AS order_id, o.lead_id, o.maintenance_plan_id, o.total_cents, i.amount_cents, i.subtotal_cents, i.tax_cents, i.tax_detail_json FROM invoices i JOIN orders o ON o.id = i.order_id
       WHERE o.organization_id = ? AND o.kind = 'package' AND o.product_id = ? AND o.status = 'pending_payment' AND i.status = 'open' AND i.milestone_kind = 'full'
       ORDER BY i.created_at DESC LIMIT 1`).bind(organizationId, pkg.id)
-    .first<{ invoice_id: string; order_id: string; lead_id: string | null; total_cents: number; amount_cents: number; subtotal_cents: number | null; tax_cents: number; tax_detail_json: string | null }>();
+    .first<{ invoice_id: string; order_id: string; lead_id: string | null; maintenance_plan_id: string | null; total_cents: number; amount_cents: number; subtotal_cents: number | null; tax_cents: number; tax_detail_json: string | null }>();
   if (open) {
-    if (open.total_cents === amount && open.amount_cents === tax.amountCents && (open.tax_detail_json ?? null) === (tax.detailJson ?? null)) {
+    // A different plan choice starts a new order, so the paid order always carries the plan the customer agreed to.
+    if (open.total_cents === amount && open.amount_cents === tax.amountCents && (open.tax_detail_json ?? null) === (tax.detailJson ?? null) && (open.maintenance_plan_id ?? null) === planId) {
       if (opts.leadId && !open.lead_id) await db.prepare(`UPDATE orders SET lead_id = ? WHERE id = ? AND lead_id IS NULL`).bind(opts.leadId, open.order_id).run();
       await audit(db, { actorUserId, action: "order.reused", subjectType: "order", subjectId: open.order_id, organizationId, details: { packageId, invoiceId: open.invoice_id } });
       return { orderId: open.order_id, invoiceId: open.invoice_id, amountCents: open.amount_cents, description, reused: true,
@@ -39,15 +46,15 @@ export async function createPackageOrder(db: Db, organizationId: string, package
       db.prepare(`UPDATE invoices SET status = 'void' WHERE id = ? AND status = 'open'`).bind(open.invoice_id),
       db.prepare(`UPDATE orders SET status = 'cancelled' WHERE id = ? AND status = 'pending_payment'`).bind(open.order_id),
     ]);
-    await audit(db, { actorUserId, action: "invoice.voided_price_changed", subjectType: "invoice", subjectId: open.invoice_id, organizationId, details: { packageId, oldAmountCents: open.amount_cents, newAmountCents: tax.amountCents } });
+    await audit(db, { actorUserId, action: "invoice.voided_price_changed", subjectType: "invoice", subjectId: open.invoice_id, organizationId, details: { packageId, oldAmountCents: open.amount_cents, newAmountCents: tax.amountCents, oldPlanId: open.maintenance_plan_id, newPlanId: planId } });
   }
   const orderId = newId("ord"), invoiceId = newId("inv");
   await db.batch([
-    db.prepare(`INSERT INTO orders (id, organization_id, product_id, total_cents, status, kind, lead_id, created_at) VALUES (?,?,?,?, 'pending_payment','package',?,?)`).bind(orderId, organizationId, pkg.id, amount, opts.leadId ?? null, at),
+    db.prepare(`INSERT INTO orders (id, organization_id, product_id, total_cents, status, kind, lead_id, maintenance_plan_id, maintenance_plan_source, created_at) VALUES (?,?,?,?, 'pending_payment','package',?,?,?,?)`).bind(orderId, organizationId, pkg.id, amount, opts.leadId ?? null, planId, planSource, at),
     db.prepare(`INSERT INTO invoices (id, organization_id, order_id, milestone_kind, amount_cents, subtotal_cents, tax_cents, tax_detail_json, status, description, created_at) VALUES (?,?,?, 'full', ?, ?, ?, ?, 'open', ?, ?)`)
       .bind(invoiceId, organizationId, orderId, tax.amountCents, tax.subtotalCents, tax.taxCents, tax.detailJson, `${pkg.name} package — 100% upfront`, at),
   ]);
-  await audit(db, { actorUserId, action: "order.created", subjectType: "order", subjectId: orderId, organizationId, details: { packageId, totalCents: amount, taxCents: tax.taxCents, priceSource: price.source, priceOverrideId: price.overrideId } });
+  await audit(db, { actorUserId, action: "order.created", subjectType: "order", subjectId: orderId, organizationId, details: { packageId, totalCents: amount, taxCents: tax.taxCents, priceSource: price.source, priceOverrideId: price.overrideId, maintenancePlanId: planId, maintenancePlanSource: planSource } });
   return { orderId, invoiceId, amountCents: tax.amountCents, description, reused: false,
     checkoutLines: checkoutLinesFor({ description, amount_cents: tax.amountCents, subtotal_cents: tax.subtotalCents, tax_detail_json: tax.detailJson }, description) };
 }
