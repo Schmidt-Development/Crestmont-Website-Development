@@ -258,13 +258,53 @@ export async function recordStaffApproval(ctx: MailCtx, actor: Actor, projectId:
 export interface ReadinessCheck { key: string; label: string; ok: boolean; detail: string }
 
 /** The 7-check customer release panel (§28). Uses customerReleaseReadiness plus customer review evidence and unpaid change orders. */
+// ───────────── FD-16: Founder launch/payment exception ─────────────
+
+/** Unpaid scheduled milestones of a project (what an exception would waive). */
+async function unpaidMilestones(db: Db, projectId: string): Promise<string[]> {
+  const p = await db.prepare(`SELECT payment_schedule FROM projects WHERE id = ?`).bind(projectId).first<{ payment_schedule: "upfront" | "milestone_50_25_25" }>();
+  if (!p) throw new HttpError(404, "Project not found");
+  const paid = new Set((await db.prepare(`SELECT milestone_kind FROM invoices WHERE project_id = ? AND status = 'paid' AND milestone_kind IS NOT NULL`).bind(projectId).all<{ milestone_kind: string }>()).results.map((r) => r.milestone_kind));
+  return (p.payment_schedule === "upfront" ? ["full"] : ["deposit_50", "design_25", "prelaunch_25"]).filter((m) => !paid.has(m));
+}
+
+/** FD-16: the Founder records a documented exception for one project. Owner-only; the route requires step-up MFA. */
+export async function grantPaymentException(db: Db, actor: Actor, projectId: string, reason: string): Promise<string> {
+  if (actor.kind !== "user" || !can(actor, "release.payment_exception")) throw new HttpError(403, "Only the Founder can authorize a payment exception.");
+  const r = reason.trim();
+  if (r.length < 20 || r.length > 2000) throw new HttpError(422, "Document the exception: why, what was agreed and how payment will be settled (20–2000 characters).");
+  const p = await getProject(db, projectId);
+  if (!p) throw new HttpError(404, "Project not found");
+  const unpaid = await unpaidMilestones(db, projectId);
+  if (!unpaid.length) throw new HttpError(409, "Every scheduled payment is already paid; no exception is needed.");
+  if (await db.prepare(`SELECT 1 FROM release_payment_exceptions WHERE project_id = ? AND revoked_at IS NULL`).bind(projectId).first()) throw new HttpError(409, "An exception is already in force for this project.");
+  const id = newId("rpe");
+  await db.prepare(`INSERT INTO release_payment_exceptions (id, project_id, reason, unpaid_at_grant, granted_by, granted_at) VALUES (?,?,?,?,?,?)`).bind(id, projectId, r, unpaid.join(","), actor.userId, nowIso()).run();
+  await audit(db, { actorUserId: actor.userId, action: "release.payment_exception_granted", subjectType: "project", subjectId: projectId, organizationId: p.organization_id, details: { exceptionId: id, unpaid, reason: r } });
+  return id;
+}
+
+/** FD-16: the Founder withdraws the exception; the payment check applies again at once. */
+export async function revokePaymentException(db: Db, actor: Actor, projectId: string, reason: string): Promise<void> {
+  if (actor.kind !== "user" || !can(actor, "release.payment_exception")) throw new HttpError(403, "Only the Founder can revoke a payment exception.");
+  if (reason.trim().length < 5) throw new HttpError(422, "Record why the exception is being revoked.");
+  const p = await getProject(db, projectId);
+  if (!p) throw new HttpError(404, "Project not found");
+  const res = await db.prepare(`UPDATE release_payment_exceptions SET revoked_by = ?, revoked_at = ?, revoke_reason = ? WHERE project_id = ? AND revoked_at IS NULL`).bind(actor.userId, nowIso(), reason.trim().slice(0, 1000), projectId).run();
+  if (res.meta.changes !== 1) throw new HttpError(409, "No exception is in force for this project.");
+  await audit(db, { actorUserId: actor.userId, action: "release.payment_exception_revoked", subjectType: "project", subjectId: projectId, organizationId: p.organization_id, details: { reason: reason.trim().slice(0, 500) } });
+}
+
 export async function releaseReadiness(db: Db, projectId: string): Promise<{ ready: boolean; missing: string[]; checks: ReadinessCheck[] }> {
   const p = await db.prepare(`SELECT payment_schedule FROM projects WHERE id = ?`).bind(projectId).first<{ payment_schedule: "upfront" | "milestone_50_25_25" }>();
   if (!p) throw new HttpError(404, "Project not found");
   const approvals = (await db.prepare(`SELECT kind, decision, created_at FROM approvals WHERE project_id = ? ORDER BY created_at, rowid`).bind(projectId).all<{ kind: string; decision: "approved" | "rejected"; created_at: string }>()).results;
   const invoices = (await db.prepare(`SELECT milestone_kind, status FROM invoices WHERE project_id = ?`).bind(projectId).all<{ milestone_kind: string | null; status: string }>()).results;
   const paid = invoices.filter((i) => i.status === "paid" && i.milestone_kind).map((i) => i.milestone_kind!);
-  const base = customerReleaseReadiness({ approvals: approvals.map((a) => ({ kind: a.kind, decision: a.decision, createdAt: a.created_at })), schedule: p.payment_schedule, paidMilestones: paid });
+  // FD-16: an active Founder exception waives only unpaid scheduled milestones (never change orders or simulations).
+  const exception = await db.prepare(`SELECT reason FROM release_payment_exceptions WHERE project_id = ? AND revoked_at IS NULL`).bind(projectId).first<{ reason: string }>();
+  const base = customerReleaseReadiness({ approvals: approvals.map((a) => ({ kind: a.kind, decision: a.decision, createdAt: a.created_at })), schedule: p.payment_schedule, paidMilestones: paid,
+    ...(exception ? { documentedPaymentException: { approvedBy: "owner" as const, reason: exception.reason } } : {}) });
   const reviewed = !!(await db.prepare(`SELECT 1 FROM audit_logs WHERE subject_type = 'project' AND subject_id = ? AND action = 'project.status_changed' AND details_json LIKE '%"to":"customer_review"%' LIMIT 1`).bind(projectId).first());
   const openChangeOrders = invoices.filter((i) => i.milestone_kind === "change_order" && i.status === "open").length;
   const missing = [...base.missing];
@@ -286,7 +326,8 @@ export async function releaseReadiness(db: Db, projectId: string): Promise<{ rea
     { key: "customer_review", label: "4. Customer review", ok: reviewed, detail: reviewed ? "Customer review stage reached" : "Project has not been in customer review" },
     check("customer_launch", "5. Customer approval (final launch approval)"),
     { key: "payment_verified", label: "6. Required payment verification", ok: !paymentMissing && !openChangeOrders && !simulated,
-      detail: simulated ? "Paid by a SIMULATED test payment: this project can never be released" : paymentMissing ? `Unpaid: ${paymentMissing.slice(8).split(",").join(", ")}` : openChangeOrders ? `${openChangeOrders} change-order invoice(s) unpaid` : "All required invoices paid" },
+      detail: simulated ? "Paid by a SIMULATED test payment: this project can never be released" : paymentMissing ? `Unpaid: ${paymentMissing.slice(8).split(",").join(", ")}` : openChangeOrders ? `${openChangeOrders} change-order invoice(s) unpaid`
+        : exception ? `Founder payment exception in force: ${exception.reason}` : "All required invoices paid" },
     check("deployment_authorized", "7. Deployment authorization"),
   ];
   return { ready: missing.length === 0, missing, checks };

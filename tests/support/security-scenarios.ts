@@ -259,6 +259,9 @@ export function auditScenarios(w: World): Scenario[] {
         // The design milestone invoice needs the customer's design approval (requested by the scenario above).
         await a.admin.c.post(`/portal/projects/${a.ids.project}/approvals`, { kind: "design", decision: "approved", notes: "Design approved" });
       } },
+    // FD-16: tenant A's project is on the milestone schedule with unpaid milestones; the Founder authorizes an exception.
+    { key: "POST /staff/projects/:id/payment-exception", path: () => P(w, "POST /staff/projects/:id/payment-exception"),
+      fields: () => ({ intent: "grant", reason: "Matrix: customer agreed in writing to pay the remaining milestones within 7 days of launch" }) },
     // Deployment is recorded on tenant B's (upfront, paid) project once its release chain is complete (fixture shortcut: rows inserted directly).
     { key: "POST /staff/projects/:id/deployments", path: () => P(w, "POST /staff/projects/:id/deployments", w.b), fields: () => ({ url: "https://b.matrix.example", commit_sha: "abc1234" }),
       setup: async () => {
