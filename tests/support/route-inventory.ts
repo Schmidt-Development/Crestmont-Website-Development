@@ -191,6 +191,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /legal": pub,
   "GET /legal/:slug": { access: { kind: "public" }, params: { slug: "legalSlug" } },
   "GET /robots.txt": pub,
+  "GET /.well-known/security.txt": pub,
   "GET /sitemap.xml": pub,
   "GET /legal/:kind/versions": { access: { kind: "public" }, params: { kind: "legalKind" } },
   "GET /legal/:kind/versions/:version": { access: { kind: "public" }, params: { kind: "legalKind", version: "legalVersion" } },

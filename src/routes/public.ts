@@ -242,8 +242,9 @@ const RC_INBOUND: [string, string][] = [
   ["Summaries", "Each call can end with a written summary: who called, what they needed and what happens next."],
 ];
 const RC_OUTBOUND: [string, string][] = [
-  ["Scoped separately", "Outbound calls are not part of a standard setup. Where a client needs them — for example confirming visits customers booked — they are designed and quoted individually."],
-  ["Consent first", "Only for contacts who have given the consent the law requires for that kind of call."],
+  // FD-45: only implemented and certified capabilities are offered. Outbound calling for clients is not one of them.
+  ["Not offered today", "We only sell AI voice capabilities that are fully implemented and tested. Outbound calling for clients is not one of them yet."],
+  ["Consent first, if ever offered", "Any future outbound service would call only contacts who have given the consent the law requires for that kind of call."],
 ];
 const RC_SAFEGUARDS = [
   "Call only contacts who have given the consent the law requires for that kind of call",
@@ -278,7 +279,7 @@ const RC_FAQ: [string, string][] = [
   ["Is it a ready-made product?", "No. Each AI Receptionist is a custom configuration built for one client on the voice provider they choose. What it can do depends on that provider and on the systems connected, and it is agreed in the written scope before work starts."],
   ["Will callers know they are talking to AI?", "Yes. The agent identifies itself as an AI assistant. It is designed to sound natural and conversational — not to pretend to be a person."],
   ["What happens when the AI can't help?", "It follows the rules you set: a callback task with a summary, an alert to your team or, where your phone setup supports it, a transfer. Every agent has a path to a person."],
-  ["Can it make outbound calls?", "Only if your project scopes it. Outbound calling is not part of a standard setup; where a client needs it — for example confirming visits customers booked — it is designed and quoted individually, for contacts who have given the consent the law requires, with do-not-call checks, permitted hours and opt-outs. Unsolicited automated calling is not something we set up."],
+  ["Can it make outbound calls?", "Not at the moment. We only offer AI voice capabilities that are fully implemented and tested, and outbound calling for clients is not one of them today. Your agent answers incoming calls."],
   ["Which voices and languages are available?", "That depends on the voice provider chosen for your project. You choose a voice and pace during setup; English is standard and other languages, such as Spanish, can be configured where the provider supports them."],
   ["How is it priced?", "It is quoted in writing after a scoping call, like all custom work. Phone numbers, call minutes and voice-provider usage are billed by the provider."],
 ];
@@ -289,8 +290,8 @@ function aiReceptionistPage(s: ServiceDef, copy: Record<string, string>, email: 
 <section class="section"><div class="container section__inner"><p class="section__label">What it can do</p><div class="section__head"><h2 class="reveal-words" data-reveal>Configured around your calls</h2><div class="prose" data-reveal style="--rd:140ms">${renderMarkdown(copy.intro ?? s.intro)}</div></div>
 <div class="versus rc-dir" data-reveal-group>
 <div class="versus__panel on-dark" data-reveal><p class="versus__title">Inbound — what we can configure</p><ul class="versus__list">${RC_INBOUND.map(([t, b]) => html`<li><span><strong>${t}</strong><span>${b}</span></span></li>`)}</ul></div>
-<div class="versus__panel on-dark" data-reveal style="--rd:140ms"><p class="versus__title">Outbound — only when scoped</p><ul class="versus__list">${RC_OUTBOUND.map(([t, b]) => html`<li><span><strong>${t}</strong><span>${b}</span></span></li>`)}</ul>
-<p class="rc-safe__title">Any outbound calling we configure must</p><ul class="rc-safe">${RC_SAFEGUARDS.map((x) => html`<li>${x}</li>`)}</ul></div></div></div></section>
+<div class="versus__panel on-dark" data-reveal style="--rd:140ms"><p class="versus__title">Outbound — not offered today</p><ul class="versus__list">${RC_OUTBOUND.map(([t, b]) => html`<li><span><strong>${t}</strong><span>${b}</span></span></li>`)}</ul>
+<p class="rc-safe__title">Before any outbound calling could be offered, it would have to</p><ul class="rc-safe">${RC_SAFEGUARDS.map((x) => html`<li>${x}</li>`)}</ul></div></div></div></section>
 ${section("Voice", "Choose how it sounds", html`<div data-reveal>${voiceLibrary()}</div>`, { id: "voices", lede: "Pick a voice style during setup from the voices your chosen provider offers. The styles below are text previews of tone, not recordings." })}
 ${section("Where it helps", "Built around your calls", html`<ul class="ledger rc-uses" data-reveal-group>${RC_USES.map(([t, b, tag]) => html`<li data-reveal><p class="rc-uses__tag">${tag}</p><h3>${t}</h3><p>${b}</p></li>`)}</ul><p class="muted rc-uses__note">Examples of how the service can be configured — not client results.</p>`, { id: "uses" })}
 ${section("Connected", "How it can connect", html`<ol class="rc-flow" data-reveal-group>${RC_FLOW.map(([t, b], i) => html`<li class="rc-flow__node${i === 1 ? " rc-flow__node--core" : ""}" data-reveal style="${`--rd:${i * 70}ms`}"><span class="rc-flow__n">${String(i + 1).padStart(2, "0")}</span><strong>${t}</strong><span>${b}</span></li>`)}</ol>`, { id: "workflow", lede: "Each connection is optional and is agreed in the written scope of your project, depending on what your provider and systems support." })}
@@ -737,6 +738,15 @@ ${d.slug === "privacy" ? html`<p class="legal-account-link" data-privacy-self-se
     const body = ctx.env.ENVIRONMENT === "production"
       ? `User-agent: *\nDisallow: /staff\nDisallow: /portal\nDisallow: /account\nDisallow: /api/\nDisallow: /checkout\nAllow: /\n\nSitemap: ${ctx.baseUrl}/sitemap.xml\n`
       : "User-agent: *\nDisallow: /\n";
+    return new Response(body, { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=3600", ...securityHeaders("api") } });
+  });
+  // FD-41: responsible vulnerability reporting (RFC 9116). Served only once the Owner has set a monitored security
+  // mailbox; no address is ever invented. Expires is renewed on every request (within the RFC's one-year limit).
+  r.get("/.well-known/security.txt", (ctx) => {
+    const contact = ctx.settings["security.contact_email"]?.trim();
+    if (!contact) return new Response("Not found\n", { status: 404, headers: { "content-type": "text/plain; charset=utf-8", ...securityHeaders("api") } });
+    const expires = new Date(ctx.now().getTime() + 180 * 86_400_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+    const body = `Contact: mailto:${contact}\nExpires: ${expires}\nPreferred-Languages: en\nCanonical: ${ctx.baseUrl}/.well-known/security.txt\n`;
     return new Response(body, { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=3600", ...securityHeaders("api") } });
   });
   r.get("/sitemap.xml", async (ctx) => {
