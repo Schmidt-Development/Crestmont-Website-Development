@@ -2,10 +2,15 @@
 // output is a short factual summary and a call-prep brief. Qualification, scores and packages are computed in code
 // (src/domain/research.ts). A draft that adds facts (prices, percentages, guarantees, unseen domains) is discarded.
 import { assertLoopback } from "./config.ts";
+import type { GpuAdmission } from "./gpu-admission.ts";
 import { modelTextProblems, type Finding, type WebsiteClass, WEBSITE_CLASS_LABELS } from "../../src/domain/research.ts";
 
 export interface DraftInput { name: string; category: string | null; city: string | null; state: string | null; websiteClass: WebsiteClass; websiteUrl: string | null; findings: Finding[]; recommendedPackage: string | null; allowedDomains: string[] }
-export interface Draft { summary: string | null; brief: string | null; model: string; rejected: string[] }
+/**
+ * `deferred` means the GPU was not available and Ollama was never called, so the prospect keeps its evidence-only
+ * wording and the draft is worth retrying. It is not a failure.
+ */
+export interface Draft { summary: string | null; brief: string | null; model: string; rejected: string[]; deferred?: boolean; deferredReason?: string }
 
 const SYSTEM = `You write short, factual notes for a website-design company's sales team.
 Use ONLY the facts in the JSON you are given. Do not add facts, numbers, prices, percentages, promises or guesses.
@@ -22,11 +27,18 @@ export class LocalModel {
   private active = 0;
   private readonly waiters: (() => void)[] = [];
   readonly concurrency: number;
+  /** How long Ollama holds the model after a draft. Kept short so research never squats the shared GPU. */
+  readonly keepAlive: string;
+  /** Cooperative admission against other GPU users on this machine (the AI Website Builder above all). */
+  readonly admission: GpuAdmission | null;
   calls = 0;
   failures = 0;
-  constructor(o: { baseUrl: string; name: string; timeoutMs: number; numCtx: number; concurrency: number }) {
+  deferred = 0;
+  constructor(o: { baseUrl: string; name: string; timeoutMs: number; numCtx: number; concurrency: number; keepAlive?: string; admission?: GpuAdmission | null }) {
     assertLoopback(o.baseUrl);
     this.baseUrl = o.baseUrl; this.name = o.name; this.timeoutMs = o.timeoutMs; this.numCtx = o.numCtx; this.concurrency = o.concurrency;
+    this.keepAlive = o.keepAlive ?? "30s";
+    this.admission = o.admission ?? null;
   }
 
   /** Confirms Ollama answers and the configured model is pulled. */
@@ -40,6 +52,11 @@ export class LocalModel {
   }
 
   async draft(input: DraftInput, fetchImpl: typeof fetch = fetch): Promise<Draft> {
+    // Asked before the semaphore: a refused draft must not hold a drafting slot either.
+    if (this.admission) {
+      const a = await this.admission.check();
+      if (!a.allowed) { this.deferred++; return { summary: null, brief: null, model: this.name, rejected: [], deferred: true, deferredReason: a.reason }; }
+    }
     while (this.active >= this.concurrency) await new Promise<void>((r) => this.waiters.push(r));
     this.active++;
     try {
@@ -48,7 +65,7 @@ export class LocalModel {
         websiteCheck: WEBSITE_CLASS_LABELS[input.websiteClass], findings: input.findings.slice(0, 10).map((f) => ({ title: f.title, severity: f.severity, evidence: f.evidence })), suggestedPackage: input.recommendedPackage };
       const res = await fetchImpl(`${this.baseUrl}/api/chat`, {
         method: "POST", headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(this.timeoutMs),
-        body: JSON.stringify({ model: this.name, stream: false, format: { type: "object", properties: { summary: { type: "string" }, brief: { type: "string" } }, required: ["summary", "brief"] },
+        body: JSON.stringify({ model: this.name, stream: false, keep_alive: this.admission?.keepAlive ?? this.keepAlive, format: { type: "object", properties: { summary: { type: "string" }, brief: { type: "string" } }, required: ["summary", "brief"] },
           options: { temperature: 0.2, num_ctx: this.numCtx, num_predict: 400 }, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: JSON.stringify(facts) }] }),
       });
       if (!res.ok) throw new Error(`Ollama HTTP ${res.status}`);
