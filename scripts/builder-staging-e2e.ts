@@ -169,7 +169,7 @@ function emit(steps: Step[], data: Record<string, unknown>) {
   for (const e of (data.buildEvents as string[]) ?? []) console.log(`  event ${e}`);
   const summary = process.env.GITHUB_STEP_SUMMARY;
   if (summary) {
-    const rows = steps.map((st) => `| ${st.step} | ${st.verdict} | ${st.evidence.replace(/\|/g, "\\|")} |`);
+    const rows = steps.map((st) => `| ${st.step} | ${st.verdict} | ${st.evidence.replace(/\\/g, "\\\\").replace(/\|/g, "\\|")} |`);
     appendFileSync(summary, [`### Junk in the Trunk — AI website builder staging certification`, "", "| Step | Result | Evidence |", "|---|---|---|", ...rows, "",
       `Node 1 online (a runner polled within 5 min): **${data.node1Online}** · runners: ${runners.map((r) => `${r.id} (${r.ageMinutes ?? "?"} min)`).join(", ") || "none"}`, ""].join("\n"));
   }
