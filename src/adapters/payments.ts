@@ -8,6 +8,12 @@
 import { keyMode, type StripeMode } from "../domain/payments-mode.ts";
 
 export class LivePaymentsNotAuthorized extends Error {}
+/** A non-2xx Stripe API answer. The message is unchanged ("Stripe <status>: <message>"); `status` lets callers tell a
+ *  missing object (404) from an outage or a bad key, which must still fail. */
+export class StripeHttpError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) { super(`Stripe ${status}: ${message}`); this.status = status; }
+}
 
 function assertKeyMode(secretKey: string, mode: StripeMode) {
   if (keyMode(secretKey) !== mode) {
@@ -154,7 +160,7 @@ export class StripeReadOnly {
     const qs = query.length ? `?${new URLSearchParams(query).toString()}` : "";
     const r = await this.fetchImpl(`https://api.stripe.com/v1/${path}${qs}`, { method: "GET", headers: { authorization: `Bearer ${this.key}`, "stripe-version": STRIPE_API_VERSION } });
     const body = (await r.json().catch(() => ({}))) as T & { error?: { message: string }; livemode?: boolean };
-    if (!r.ok) throw new Error(`Stripe ${r.status}: ${body.error?.message ?? "error"}`);
+    if (!r.ok) throw new StripeHttpError(r.status, body.error?.message ?? "error");
     assertObjectMode(body, this.mode);
     return body;
   }
