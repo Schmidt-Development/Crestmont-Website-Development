@@ -163,10 +163,15 @@ Limits: ≤ 3 sales emails per lead per 24 h; idempotent per lead + type + day; 
   "name": { "type": "string", "description": "Name for the booking, if different from the contact" },
   "email": { "type": "string", "description": "Email for the booking confirmation, if given" },
   "topic": { "type": "string", "description": "What the follow-up is about, one sentence" },
-  "prospect_agreed": { "type": "boolean", "description": "true only if the prospect explicitly agreed to this follow-up" } } }
+  "prospect_agreed": { "type": "boolean", "description": "true only if the prospect explicitly agreed to this follow-up" },
+  "wants_founder": { "type": "boolean", "description": "true ONLY if the prospect explicitly asked to speak with the Founder/owner. Omit otherwise." } } }
 ```
 10. **Output:** `{ "scheduled": bool, "confirmed"?: bool, "status"?: "requested|confirmed|…", "when"?: "label", "confirmation_code"?: "…", "needs_time"?: true, "slots"?: [{ "start_time", "label" }], "already_scheduled"?: true, "reason"?: "…", "message": "…" }`
 Uses the receptionist's scheduling service (off until the Owner enables phone scheduling; without a calendar every booking is `requested` until staff confirm). One open follow-up per lead and type. AI follow-up calls re-run the full compliance gate at dial time.
+Dual internal calendars (migration 0065): every follow-up lands on the AI Follow-Up calendar unless `wants_founder` is true,
+which puts it on the Founder Callback calendar (an `ai_follow_up_call` with `wants_founder` becomes a Founder staff callback:
+no automated call stands in for the Founder). The output adds `calendar` (`ai_follow_up` | `founder_callback`), returned only
+after the follow-up and its calendar entry were written and read back.
 11. Wait · 12. **Talk While Waiting:** On, static: `Let me check that for you.` · 13. **Typing sound:** On
 
 ### Function 8 — `record_do_not_call`

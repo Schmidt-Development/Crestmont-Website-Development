@@ -93,7 +93,8 @@ Description: `Book a consultation. Call first without start_time to get open tim
   "name": { "type": "string" }, "phone": { "type": "string" },
   "email": { "type": "string", "description": "Only if the caller gave one" },
   "topic": { "type": "string", "description": "What the caller wants to discuss" },
-  "reminder_call_ok": { "type": "boolean", "description": "true only if the caller agreed to a reminder call" } } }
+  "reminder_call_ok": { "type": "boolean", "description": "true only if the caller agreed to a reminder call" },
+  "wants_founder": { "type": "boolean", "description": "true ONLY if the caller explicitly asked to speak with the Founder/owner. Omit otherwise (AI Follow-Up calendar)." } } }
 ```
 Output: `step` (`availability` | `booking`); for availability: `available`, `reason`, `timezone`, `slots[]` (start_time, label); for booking: `booked`, `status`, `when`, `confirmation_code`, `already_booked`, `slots[]` (alternatives). Talk while waiting: ON, "Let me check the calendar." Typing sound: ON. The database allows one active booking per start time.
 
@@ -148,6 +149,10 @@ These are on the same URL with the same settings. Their JSON is in `RETELL-INTEG
 - `cancel_consultation`
 
 The built-in tools are Transfer Call (destination `{{transfer_number}}`) and End Call.
+
+`request_callback`, `escalate` and `schedule_consultation` accept the optional boolean `wants_founder` (dual internal
+calendars, migration 0065): `true` only when the caller explicitly asked to speak with the Founder; the entry then goes on
+the Founder Callback calendar. Omitted = AI Follow-Up calendar. See RETELL-INTEGRATION.md, "Dual internal calendars".
 
 ## Master prompt
 

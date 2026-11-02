@@ -12,6 +12,7 @@
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { audit } from "./security.ts";
+import { AI_FOLLOW_UP, type CalendarId, type CalendarRoute } from "../domain/calendars.ts";
 import { candidateSlots, isOfferableSlot, slotLabel, type Slot, type VoiceConfig } from "./voice-settings.ts";
 
 export interface BusyInterval { start: number; end: number }
@@ -30,6 +31,8 @@ export interface ConsultationRow {
   id: string; lead_id: string | null; call_id: string | null; name: string; phone: string | null; email: string | null;
   starts_at: string; duration_minutes: number; timezone: string; status: ConsultationStatus; confirmation_code: string;
   topic: string | null; source: string; is_test: number; rescheduled_from: string | null; created_at: string;
+  /** Internal calendar (migration 0065): ai_follow_up unless routed to the Founder by src/domain/calendars.ts. */
+  calendar: CalendarId; founder_reason: string | null;
 }
 
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I: easier to read aloud
@@ -76,9 +79,9 @@ async function insertBooking(db: Db, row: Omit<ConsultationRow, "confirmation_co
   for (let i = 0; i < 5; i++) {
     const code = newConfirmationCode();
     try {
-      await db.prepare(`INSERT INTO consultations (id, lead_id, call_id, name, phone, email, starts_at, duration_minutes, timezone, status, confirmation_code, topic, source, is_test, rescheduled_from, created_at, updated_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .bind(row.id, row.lead_id, row.call_id, row.name, row.phone, row.email, row.starts_at, row.duration_minutes, row.timezone, row.status, code, row.topic, row.source, row.is_test, row.rescheduled_from, at, at).run();
+      await db.prepare(`INSERT INTO consultations (id, lead_id, call_id, name, phone, email, starts_at, duration_minutes, timezone, status, confirmation_code, topic, source, is_test, rescheduled_from, calendar, founder_reason, created_at, updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .bind(row.id, row.lead_id, row.call_id, row.name, row.phone, row.email, row.starts_at, row.duration_minutes, row.timezone, row.status, code, row.topic, row.source, row.is_test, row.rescheduled_from, row.calendar, row.founder_reason, at, at).run();
       return { ...row, confirmation_code: code, created_at: at };
     } catch (e) {
       const msg = String((e as Error).message);
@@ -90,7 +93,9 @@ async function insertBooking(db: Db, row: Omit<ConsultationRow, "confirmation_co
   throw new Error("Could not allocate a confirmation code");
 }
 
-export interface BookInput { name: string; phone: string; email?: string | null; startsAt: string; topic?: string | null; leadId: string | null; callId: string | null; isTest: boolean; source: "ai_receptionist" | "staff"; checkExisting?: boolean }
+export interface BookInput { name: string; phone: string; email?: string | null; startsAt: string; topic?: string | null; leadId: string | null; callId: string | null; isTest: boolean; source: "ai_receptionist" | "staff"; checkExisting?: boolean;
+  /** Which internal calendar the booking goes on (src/domain/calendars.ts routeCalendar). Default: AI Follow-Up. */
+  calendar?: CalendarRoute }
 
 /** Books a slot. A caller who already holds an upcoming booking gets it back instead of a second one. */
 export async function book(db: Db, cfg: VoiceConfig, at: Date, cal: CalendarAdapter, b: BookInput): Promise<{ booking: ConsultationRow; existing: boolean }> {
@@ -103,8 +108,9 @@ export async function book(db: Db, cfg: VoiceConfig, at: Date, cal: CalendarAdap
     id: newId("cns"), lead_id: b.leadId, call_id: b.callId, name: b.name, phone: b.phone, email: b.email ?? null,
     starts_at: new Date(Date.parse(b.startsAt)).toISOString(), duration_minutes: cfg.scheduling.duration_minutes, timezone: cfg.timezone!, status,
     topic: b.topic ?? null, source: b.source, is_test: b.isTest ? 1 : 0, rescheduled_from: null,
+    calendar: (b.calendar ?? AI_FOLLOW_UP).calendar, founder_reason: (b.calendar ?? AI_FOLLOW_UP).founderReason,
   });
-  await audit(db, { actorKind: b.source === "ai_receptionist" ? "ai" : "user", action: "consultation.booked", subjectType: "consultation", subjectId: booking.id, details: { status, call: b.callId, test: b.isTest } });
+  await audit(db, { actorKind: b.source === "ai_receptionist" ? "ai" : "user", action: "consultation.booked", subjectType: "consultation", subjectId: booking.id, details: { status, call: b.callId, test: b.isTest, calendar: booking.calendar, reason: booking.founder_reason } });
   return { booking, existing: false };
 }
 
@@ -129,8 +135,9 @@ export async function reschedule(db: Db, cfg: VoiceConfig, at: Date, cal: Calend
     try {
       await db.batch([
         db.prepare(`UPDATE consultations SET status = 'cancelled', cancel_reason = 'rescheduled', updated_at = ? WHERE id = ? AND status IN ('requested','confirmed')`).bind(stamp, current.id),
-        db.prepare(`INSERT INTO consultations (id, lead_id, call_id, name, phone, email, starts_at, duration_minutes, timezone, status, confirmation_code, topic, source, is_test, rescheduled_from, created_at, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id, current.lead_id, current.call_id, current.name, current.phone, current.email, startsAt, cfg.scheduling.duration_minutes, cfg.timezone!, status, code, current.topic, current.source, current.is_test, current.id, stamp, stamp),
+        // A rescheduled booking stays on the calendar (and keeps the Founder reason) of the booking it replaces.
+        db.prepare(`INSERT INTO consultations (id, lead_id, call_id, name, phone, email, starts_at, duration_minutes, timezone, status, confirmation_code, topic, source, is_test, rescheduled_from, calendar, founder_reason, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id, current.lead_id, current.call_id, current.name, current.phone, current.email, startsAt, cfg.scheduling.duration_minutes, cfg.timezone!, status, code, current.topic, current.source, current.is_test, current.id, current.calendar ?? "ai_follow_up", current.founder_reason ?? null, stamp, stamp),
       ]);
       await audit(db, { actorKind: actor.kind, actorUserId: actor.userId ?? null, action: "consultation.rescheduled", subjectType: "consultation", subjectId: id, details: { from: current.id } });
       return { ...current, id, starts_at: startsAt, duration_minutes: cfg.scheduling.duration_minutes, timezone: cfg.timezone!, status, confirmation_code: code, rescheduled_from: current.id, created_at: stamp };
