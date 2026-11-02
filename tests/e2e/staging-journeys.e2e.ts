@@ -616,7 +616,9 @@ journey(12, ["PORTAL-005"], "customer receives a notification (portal and email 
   const c = await as("customer.harbor");
   await c.goto(BASE + "/portal");
   const dash = await text(c);
-  assert.match(dash, new RegExp(`New\\s+${esc(note)}`), "unread portal notification");
+  // The unread notification's line is the PM's note, or (FD-14 review deadlines, #111) the response deadline; the note
+  // itself still reaches the customer by email (checked below by this run's id) and on the approvals page (journey 13).
+  assert.match(dash, new RegExp(`New\\s+(?:${esc(note)}|Please respond by [^\\n]+We never treat silence as approval)`), "unread portal notification");
   assert.match(dash, /Design approval awaiting your decision/, "required action on the dashboard");
   const mail = await outbox(account("customer.harbor").email, "approval_request", RUN);
   assert.match(mail, /Design approval/);
