@@ -108,3 +108,64 @@ test("[INFRA-006] [READY-012] ops_alerts runs every 15 minutes as a recorded sch
   assert.match(res.ops_alerts.detail, /0 new of 0 alert items; 0 emails to 0 owner/);
   assert.ok(await db.prepare(`SELECT 1 FROM ingestion_status WHERE source = 'job:ops_alerts' AND last_error IS NULL`).first());
 });
+
+// ───────────── Lead research worker (docs/research/PRODUCTION.md §6 alerting gap) ─────────────
+
+test("[INFRA-006] research alerting: resumed research with no worker checking in alerts the Owners; a paused agent never does", async () => {
+  const t = await setup();
+  const db = t.db;
+
+  // Research ships PAUSED. That is its intended resting state, so it is never an alert, even with no worker at all.
+  assert.equal((await db.prepare(`SELECT paused FROM research_settings WHERE id = 1`).first<{ paused: number }>())?.paused, 1);
+  assert.equal((await collectAlertItems(db, NOW)).filter((i) => i.category === "research_worker_stale").length, 0,
+    "a paused research agent is not a fault: the dashboard already shows it");
+
+  // Resumed, but nothing has ever reported in: exactly the case that looks like it is running and is not.
+  await db.prepare(`UPDATE research_settings SET paused = 0, pause_reason = NULL, updated_at = ? WHERE id = 1`).bind(ago(60)).run();
+  const never = (await collectAlertItems(db, NOW)).filter((i) => i.category === "research_worker_stale");
+  assert.equal(never.length, 1);
+  assert.equal(never[0].key, `research_worker_stale:never:${NOW.toISOString().slice(0, 10)}`);
+  assert.match(never[0].summary, /no research worker has ever checked in/);
+  assert.match(never[0].summary, /No businesses are being evaluated/);
+
+  // A worker that checked in recently is healthy: no alert.
+  const beat = async (id: string, at: string, status: Record<string, unknown> = {}) =>
+    db.prepare(`INSERT INTO research_runners (runner_id, version, first_seen_at, last_seen_at, status_json) VALUES (?,?,?,?,?)
+      ON CONFLICT(runner_id) DO UPDATE SET last_seen_at = excluded.last_seen_at, status_json = excluded.status_json`)
+      .bind(id, "0.1.0", ago(600), at, JSON.stringify(status)).run();
+  await beat("workstation-1", ago(2));
+  assert.equal((await collectAlertItems(db, NOW)).filter((i) => i.category === "research_worker_stale").length, 0, "a worker heard from 2 minutes ago is fine");
+
+  // Gone quiet past the threshold: one alert per stall episode, keyed by the last heartbeat.
+  await beat("workstation-1", ago(ALERT_THRESHOLDS.research_heartbeat_stale_minutes + 5));
+  const stale = (await collectAlertItems(db, NOW)).filter((i) => i.category === "research_worker_stale");
+  assert.equal(stale.length, 1);
+  assert.equal(stale[0].key, `research_worker_stale:${ago(ALERT_THRESHOLDS.research_heartbeat_stale_minutes + 5)}`);
+  assert.match(stale[0].summary, /no research worker has checked in for 35 minutes/);
+
+  // Owners are emailed once for the episode, and the alert points at the research dashboard.
+  const first = await runOpsAlerts(t.ctx);
+  assert.ok(first.categories.includes("research_worker_stale"));
+  const mail = (await alertMails(db)).find((m) => /research/i.test(m.text_body));
+  assert.ok(mail, "an Owner was emailed about the research worker");
+  assert.match(mail!.text_body, /\/staff\/research/);
+  const second = await runOpsAlerts(t.ctx);
+  assert.equal(second.raised, 0, "the same stall is not emailed twice");
+});
+
+test("[INFRA-006] research alerting: a worker whose credentials the platform refuses is reported, because it has stopped delivering", async () => {
+  const t = await setup();
+  const db = t.db;
+  await db.prepare(`UPDATE research_settings SET paused = 0, pause_reason = NULL, updated_at = ? WHERE id = 1`).bind(ago(60)).run();
+  await db.prepare(`INSERT INTO research_runners (runner_id, version, first_seen_at, last_seen_at, status_json) VALUES ('workstation-1','0.1.0',?,?,?)`)
+    .bind(ago(600), ago(1), JSON.stringify({ platform: { ok: false, authFailed: true, lastError: "401" } })).run();
+  const items = (await collectAlertItems(db, NOW)).filter((i) => i.category === "research_worker_stale");
+  assert.equal(items.length, 1);
+  assert.match(items[0].summary, /credentials are being refused/);
+  assert.match(items[0].summary, /RESEARCH_RUNNER_SECRET/);
+  assert.equal(items[0].subject, "workstation-1");
+
+  // Unreadable worker-reported JSON must not break the job (it is the worker's own text, not ours).
+  await db.prepare(`UPDATE research_runners SET status_json = 'not json' WHERE runner_id = 'workstation-1'`).run();
+  assert.equal((await collectAlertItems(db, NOW)).filter((i) => i.category === "research_worker_stale").length, 0);
+});

@@ -17,7 +17,17 @@ export interface Config {
   http: { userAgent: string; timeoutMs: number; perHostIntervalMs: number; concurrency: number; maxBytes: number; brokenRecheckAfterMs: number; brokenAttempts: number };
   browser: { enabled: boolean };
   lighthouse: { path: string | null };
-  model: { baseUrl: string; name: string | null; concurrency: number; timeoutMs: number; numCtx: number };
+  model: {
+    baseUrl: string; name: string | null; concurrency: number; timeoutMs: number; numCtx: number;
+    /** How long Ollama keeps the research model resident after a draft. Short: it must not squat the builder's VRAM. */
+    keepAlive: string;
+    /** Cooperative GPU admission (gpu-admission.ts). Off only for a machine with no other GPU work. */
+    gpuGuard: boolean;
+    maxGpuUtilPct: number;
+    minFreeVramMb: number;
+    /** Prospects waiting for an optional draft. Drafting never blocks verification or delivery, so this can be small. */
+    draftQueueLimit: number;
+  };
   pipeline: { backlogLimit: number; leaseMs: number; maxAttempts: number; batchFlushMs: number; heartbeatMs: number; reverifyAfterDays: number };
   healthPort: number;
 }
@@ -50,6 +60,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   if (states.some((s) => !/^[A-Z]{2}$/.test(s))) errors.push("RESEARCH_STATES must be comma-separated two-letter state codes");
   const modelUrl = env.OLLAMA_URL ?? "http://127.0.0.1:11434";
   try { assertLoopback(modelUrl); } catch (e) { errors.push((e as Error).message); }
+  const keepAlive = env.MODEL_KEEP_ALIVE ?? "30s";
+  if (!/^-?\d+(\.\d+)?(ns|us|ms|s|m|h)?$/.test(keepAlive)) errors.push("MODEL_KEEP_ALIVE looks like 30s, 5m or a number of seconds");
   const release = env.OVERTURE_RELEASE ?? null;
   if (release && !/^\d{4}-\d{2}-\d{2}\.\d+$/.test(release)) errors.push("OVERTURE_RELEASE looks like 2026-10-21.0");
   const crawlId = env.COMMON_CRAWL_ID ?? null;
@@ -82,6 +94,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       model: {
         baseUrl: modelUrl.replace(/\/+$/, ""), name: env.RESEARCH_MODEL ?? null,
         concurrency: int(env.MODEL_CONCURRENCY, 2, 1, 16), timeoutMs: int(env.MODEL_TIMEOUT_MS, 90_000, 5_000, 600_000), numCtx: int(env.MODEL_NUM_CTX, 8192, 2048, 131072),
+        keepAlive: env.MODEL_KEEP_ALIVE ?? "30s",
+        gpuGuard: on(env.MODEL_GPU_GUARD, true),
+        maxGpuUtilPct: int(env.MODEL_MAX_GPU_UTIL_PCT, 25, 0, 100),
+        minFreeVramMb: int(env.MODEL_MIN_FREE_VRAM_MB, 8_000, 0, 200_000),
+        draftQueueLimit: int(env.MODEL_DRAFT_QUEUE_LIMIT, 500, 0, 100_000),
       },
       pipeline: {
         backlogLimit: int(env.BACKLOG_LIMIT, 50_000, 100, 5_000_000), leaseMs: int(env.LEASE_MS, 10 * 60_000, 30_000, 3600_000),

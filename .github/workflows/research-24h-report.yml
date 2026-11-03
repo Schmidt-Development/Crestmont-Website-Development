@@ -1,0 +1,82 @@
+name: Research performance report
+
+# Durable, evidence-based performance report for a research measurement window (docs/research/CAPACITY.md).
+# Reads staging D1 READ-ONLY through `wrangler d1 execute --remote` and uploads the report as an artifact; it also
+# writes it to the run summary. It never promotes a prospect, never changes a setting and never writes to any table.
+#
+# A proof run is measured like this:
+#   1. The worker is started on Node 1 and research is resumed in /staff/research.
+#   2. This workflow is dispatched with the run's UTC start time, or left to the daily schedule, which reports on the
+#      window beginning at the first worker sample in the last 48 hours.
+# The scheduled run exists so a report survives whether or not anyone remembers to ask for one. "The target was
+# missed" is a valid result and does not fail the run; only an unreadable database does.
+on:
+  schedule:
+    # 08:23 UTC daily: off the hour, so it does not land with every other scheduled job.
+    - cron: "23 8 * * *"
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "Window start, UTC ISO (blank = the first worker sample in the last 48 h)"
+        type: string
+        default: ""
+      hours:
+        description: "Window length in hours"
+        type: string
+        default: "24"
+      target:
+        description: "Qualified research prospects the run was striving for, per 24 h"
+        type: string
+        default: "25000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-24h-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    if: github.ref == 'refs/heads/main'   # main only, like the other staging-facing workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: staging
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      # Dispatch inputs reach the script through the environment and are quoted shell variables, never interpolated
+      # into the script text (SEC-007 / F-23): a `${{ inputs.* }}` inside `run:` would let a dispatcher run arbitrary
+      # commands on a runner that holds the Cloudflare token. The script validates the values again itself.
+      - name: Build the report from staging D1 (read-only)
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          REPORT_START: ${{ inputs.start }}
+          REPORT_HOURS: ${{ inputs.hours }}
+          REPORT_TARGET: ${{ inputs.target }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error title=Research report::CLOUDFLARE_API_TOKEN is not set for the staging environment; the report cannot read staging D1."
+            exit 1
+          fi
+          args=()
+          if [ -n "$REPORT_START" ]; then args+=(--start "$REPORT_START"); fi
+          node --no-warnings scripts/research-24h-report.ts \
+            --hours "${REPORT_HOURS:-24}" \
+            --target "${REPORT_TARGET:-25000}" \
+            --out evidence "${args[@]}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: research-performance-report
+          path: |
+            evidence/research-24h-report.json
+            evidence/research-24h-report.md
+          retention-days: 90
+          if-no-files-found: warn

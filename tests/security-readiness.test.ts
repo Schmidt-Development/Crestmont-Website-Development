@@ -160,7 +160,12 @@ test("[SEC-006] legal holds: retention keeps held data, anonymisation waits, hol
   // Global hold: the configurable tier and old sessions are left alone entirely.
   const g = await placeHold(t.db, { scope: "global", reason: "Incident INC-1 evidence preservation", placedBy: owner.id });
   const res = await runRetention({ db: t.db, storage: t.storage });
-  assert.ok(res.filter((r) => r.category !== "rate_limits" && r.category !== "auth_tokens" && r.category !== "env_metrics").every((r) => r.mode === "skipped" && r.affected === 0));
+  // The exempt categories are the ones holding no personal data at all (finished rate-limit windows, spent
+  // single-use token hashes, request metrics, research worker throughput/host samples). Everything that could
+  // identify a person — sessions above all, and the whole configurable tier — must still be skipped.
+  const NON_PERSONAL = new Set(["rate_limits", "auth_tokens", "env_metrics", "research_samples"]);
+  assert.ok(res.filter((r) => !NON_PERSONAL.has(r.category)).every((r) => r.mode === "skipped" && r.affected === 0));
+  assert.equal(res.find((r) => r.category === "sessions")?.mode, "skipped", "sign-in records are personal: kept under a global hold");
   assert.equal((await activeHolds(t.db)).global, true);
 
   await assert.rejects(t.db.prepare(`UPDATE legal_holds SET reason = 'changed' WHERE id = ?`).bind(orgHold).run(), /immutable/);
