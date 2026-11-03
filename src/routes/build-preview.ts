@@ -19,6 +19,7 @@ import { staffPage } from "./crm.ts";
 import * as B from "../services/builds.ts";
 import * as BR from "../services/build-revisions.ts";
 import { latestQuality } from "../services/build-quality.ts";
+import { selectionForJob } from "../services/design-gallery.ts";
 
 const VIEWPORTS = { desktop: { w: 1440, h: 900, label: "Desktop" }, tablet: { w: 820, h: 1180, label: "Tablet" }, mobile: { w: 390, h: 844, label: "Mobile" } } as const;
 type ViewportName = keyof typeof VIEWPORTS;
@@ -72,6 +73,7 @@ export function register(r: Router): void {
     const cycles = (await ctx.db.prepare(`SELECT cycle, decision, decision_reason, score, builder_model, reviewer_model, next_prompt, findings_json, created_at
       FROM build_cycles WHERE job_id = ? ORDER BY cycle`).bind(j.id).all<{ cycle: number; decision: string | null; decision_reason: string | null; score: number | null; builder_model: string | null; reviewer_model: string | null; next_prompt: string | null; findings_json: string | null; created_at: string }>()).results;
     const q = await latestQuality(ctx.db, j.id);
+    const gallery = await selectionForJob(ctx.db, j.id);
     const vp = viewportOf(ctx);
     const active = ACTIVE.includes(j.state as BuildState);
 
@@ -171,6 +173,16 @@ ${table(detail.files, [
   { header: "Type", cell: (f) => f.content_type.split(";")[0] },
   { header: "Size", cell: (f) => `${Math.max(1, Math.round(f.size_bytes / 1024))} KB` },
 ], { empty: emptyState("No files", "This revision stored no files.") })}
+</section>
+
+<section class="card"><h2 class="card__title">Design references this build saw</h2>
+<p class="faint">The AI draws design quality from the one approved gallery, and what it was shown is recorded against
+ the job with the gallery version at the time. An empty list means the builder designed this website with no approved
+ benchmark to work from.</p>
+${gallery.length
+  ? table(gallery, [{ header: "Reference", cell: (g) => g.title }, { header: "Gallery version", cell: (g) => String(g.gallery_version) },
+      { header: "Shown at", cell: (g) => formatDateTime(g.selected_at) }])
+  : alert("warn", "No approved design reference was available when this build ran, so it had no benchmark to design against. The gallery needs approved references before a build can be held to a design standard.")}
 </section>
 
 <section class="card"><h2 class="card__title">Review and repair history</h2>
