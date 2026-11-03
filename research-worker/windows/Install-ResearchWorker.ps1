@@ -10,7 +10,8 @@
     3. The worker secret, stored encrypted with Windows DPAPI for this user (never printed, never on a command line).
     4. settings.env (non-secret settings).
     5. Preflight (node src/main.ts --preflight): DuckDB, Ollama model, platform connection with the secret.
-    6. Scheduled task "CrestmontResearch-Worker": starts at logon, restarts on failure, no time limit.
+    6. Scheduled task "CrestmontResearch-Worker": restarts on failure, no time limit, one instance only. It starts at
+       logon, and with -RunWhenLoggedOff also at boot and while nobody is signed in.
   It opens NO inbound firewall ports. The health endpoint listens on 127.0.0.1 only. Ollama must stay on 127.0.0.1.
 
 .PARAMETER PlatformUrl
@@ -18,7 +19,18 @@
 .PARAMETER States
   Comma-separated state codes to research first (e.g. "MI,OH"); empty = all states.
 .PARAMETER Model
-  Ollama model tag for optional drafts (must already be pulled, e.g. a Qwen instruct model). Empty = no drafts.
+  Ollama model tag for OPTIONAL drafts. LEAVE THIS EMPTY unless you have decided research may use the GPU: the GPU on
+  this machine is shared with the AI Website Builder. Empty = no drafts and no GPU use at all, which is the
+  recommended setting for a first continuous run (docs/research/RUNBOOK.md section 8). Qualification, scoring and
+  packages are computed in code either way, so nothing about lead quality depends on this.
+.PARAMETER Concurrency
+  Simultaneous website checks (HTTP_CONCURRENCY, 1-256). Start conservative and raise it in steps once the machine is
+  proven healthy; one request per host at a time with a politeness interval is enforced regardless.
+.PARAMETER RunWhenLoggedOff
+  Also run the worker when nobody is signed in, and start it at boot rather than only at logon. Task Scheduler then
+  needs the account's Windows password, which it stores itself; this is required because the worker's platform secret
+  is protected with DPAPI for this user, and a password-less (S4U) task cannot decrypt it. Without this switch the
+  worker does NOT come back on its own after an unattended restart (see the warning the installer prints).
 
 .EXAMPLE
   .\research-worker\windows\Install-ResearchWorker.ps1 -PlatformUrl https://crestmont-platform-staging.example.workers.dev -States "MI" -Install
@@ -30,6 +42,8 @@ param(
   [string]$RepoPath = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
   [string]$States = "",
   [string]$Model = "",
+  [int]$Concurrency = 24,
+  [switch]$RunWhenLoggedOff,
   [string]$SecretFile = "",
   [string]$RunnerId = ("research-" + $env:COMPUTERNAME.ToLower()),
   [string]$DuckDbPath = "duckdb",
@@ -90,11 +104,18 @@ if (-not (Test-Path $secretPath)) {
   Ok "Secret stored encrypted at $secretPath (not displayed)"
 } else { Ok "Secret already stored (unchanged)" }
 
+if ($Concurrency -lt 1 -or $Concurrency -gt 256) { Fail "-Concurrency must be 1..256 (got $Concurrency)" }
+
 Step "4. settings.env"
 $settings = @(
   "CRESTMONT_URL=$PlatformUrl", "RESEARCH_RUNNER_ID=$RunnerId", "RESEARCH_DATA_DIR=$Data", "RESEARCH_STATES=$States",
   "DUCKDB_PATH=$($duck.Source)", "OLLAMA_URL=http://127.0.0.1:11434", "RESEARCH_MODEL=$Model", "LIGHTHOUSE_PATH=$LighthousePath",
-  "OVERTURE=on", "COMMON_CRAWL=on", "FOURSQUARE_OS=off", "OSM=off", "PLAYWRIGHT=off", "HEALTH_PORT=8789"
+  "OVERTURE=on", "COMMON_CRAWL=on", "FOURSQUARE_OS=off", "OSM=off", "PLAYWRIGHT=off", "HEALTH_PORT=8789",
+  # Website checks run at this many at a time; one request per host with a politeness interval regardless.
+  "HTTP_CONCURRENCY=$Concurrency",
+  # The GPU is shared with the AI Website Builder. These keep optional drafting from ever competing with it
+  # (docs/research/RUNBOOK.md section 8). With RESEARCH_MODEL empty they have nothing to do.
+  "MODEL_GPU_GUARD=on", "MODEL_KEEP_ALIVE=30s", "MODEL_MAX_GPU_UTIL_PCT=25", "MODEL_MIN_FREE_VRAM_MB=8000"
 )
 $settings | Set-Content -Path (Join-Path $InstallDir "settings.env") -Encoding ASCII
 Copy-Item (Join-Path $PSScriptRoot "Start-ResearchWorker.ps1") $InstallDir -Force
@@ -110,10 +131,29 @@ Ok "Preflight passed"
 if (-not $NoAutoStart) {
   Step "6. Scheduled task"
   $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"{0}`" -InstallDir `"{1}`"" -f (Join-Path $InstallDir "Start-ResearchWorker.ps1"), $InstallDir)
-  $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+  # An -AtLogOn trigger alone leaves the worker stopped after an unattended restart until someone signs in, which is
+  # not continuous operation. -RunWhenLoggedOff adds a boot trigger and runs the task with the account's stored
+  # password, which DPAPI needs to unprotect the platform secret (an S4U, password-less task cannot).
+  $triggers = @(New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME")
+  if ($RunWhenLoggedOff) { $triggers += New-ScheduledTaskTrigger -AtStartup }
   $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
-  Register-ScheduledTask -TaskName "CrestmontResearch-Worker" -Action $action -Trigger $trigger -Settings $taskSettings -RunLevel Limited -Force | Out-Null
+  if ($RunWhenLoggedOff) {
+    $cred = Get-Credential -UserName "$env:USERDOMAIN\$env:USERNAME" -Message "Windows password for $env:USERNAME. Task Scheduler stores it so research keeps running with nobody signed in; it is not written to this repository or to settings.env."
+    if (-not $cred) { Fail "-RunWhenLoggedOff needs the account password to register a task that runs while logged off" }
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($cred.Password)
+    try {
+      $pw = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+      Register-ScheduledTask -TaskName "CrestmontResearch-Worker" -Action $action -Trigger $triggers -Settings $taskSettings -User $cred.UserName -Password $pw -RunLevel Limited -Force | Out-Null
+    } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr); Remove-Variable pw -ErrorAction SilentlyContinue }
+    Ok "Task registered to run at boot and while logged off"
+  } else {
+    Register-ScheduledTask -TaskName "CrestmontResearch-Worker" -Action $action -Trigger $triggers -Settings $taskSettings -RunLevel Limited -Force | Out-Null
+    Warn "The task runs only while $env:USERNAME is signed in: after an unattended restart research stays stopped until the next logon. Re-run with -RunWhenLoggedOff for continuous operation."
+  }
   Start-ScheduledTask -TaskName "CrestmontResearch-Worker"
   Ok "Task registered and started. Health: $InstallDir\Get-ResearchWorkerHealth.ps1"
+  # ${Model} is delimited on purpose: "$Model:" parses as a scoped variable reference (like $env:X) and is a syntax error.
+  if ($Model) { Warn "RESEARCH_MODEL=${Model}: optional drafts may use the GPU shared with the AI Website Builder. The guard defers them whenever the builder needs it (RUNBOOK section 8); leave -Model empty to keep research off the GPU entirely." }
+  else { Ok "No local model configured: research uses CPU, DuckDB, disk and bounded HTTP only. The Website Builder keeps the GPU." }
 }
 Write-Host "`nResearch on the platform starts PAUSED. Resume it in /staff/research (Owner) after reviewing the sources." -ForegroundColor Cyan

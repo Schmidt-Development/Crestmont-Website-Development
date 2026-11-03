@@ -109,6 +109,24 @@ export class State {
     this.bump("evaluated", now);
   }
 
+  /**
+   * Adds an optional local-model draft to a result that was already evaluated and (usually) already delivered.
+   * The record goes back to `ready` so the next batch carries the wording; the platform's ingest is idempotent and
+   * updates the stored prospect. Unlike `finish` this does NOT bump `evaluated`: the business was counted once, when
+   * it was actually evaluated, and a later draft must not inflate the day's throughput.
+   * Returns false when the record is gone or is mid-flight, so the caller can drop the draft.
+   */
+  attachDraft(key: string, result: unknown, now: Date): boolean {
+    const json = stableJson(result);
+    const hash = sha256(json);
+    const prev = this.db.prepare(`SELECT result_hash, stage FROM candidates WHERE business_key = ?`).get(key) as { result_hash: string | null; stage: Stage } | undefined;
+    if (!prev || prev.stage === "working") return false;
+    if (prev.result_hash === hash) return false; // nothing changed (draft was empty)
+    this.db.prepare(`UPDATE candidates SET stage = 'ready', result = ?, result_hash = ?, lease_until = NULL, updated_at = ? WHERE business_key = ?`)
+      .run(json, hash, now.toISOString(), key);
+    return true;
+  }
+
   // ── Outbox (idempotent batches survive restarts) ──
   /** Moves up to n ready results into one outbox batch with a fresh batch id. */
   enqueueBatch(n: number, now: Date): { batchId: string; n: number } | null {

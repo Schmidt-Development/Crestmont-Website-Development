@@ -15,6 +15,7 @@ import { OsmSource } from "./sources/osm.ts";
 import { CommonCrawl } from "./sources/commoncrawl.ts";
 import { Browser } from "./browser.ts";
 import { LocalModel } from "./model.ts";
+import { GpuAdmission } from "./gpu-admission.ts";
 import { ResearchWorker, VERSION } from "./orchestrator.ts";
 import type { SourceAdapter } from "./sources/types.ts";
 
@@ -63,9 +64,14 @@ async function main() {
 
   let model: LocalModel | null = null;
   if (cfg.model.name) {
-    model = new LocalModel({ baseUrl: cfg.model.baseUrl, name: cfg.model.name, timeoutMs: cfg.model.timeoutMs, numCtx: cfg.model.numCtx, concurrency: cfg.model.concurrency });
+    // The GPU on this machine is shared with the AI Website Builder. Research drafts are optional wording, so they
+    // ask first and stand down whenever the builder (or any other application) has a model loaded or the GPU busy.
+    const admission = cfg.model.gpuGuard
+      ? new GpuAdmission({ baseUrl: cfg.model.baseUrl, modelTag: cfg.model.name, maxUtilPct: cfg.model.maxGpuUtilPct, minFreeMb: cfg.model.minFreeVramMb, keepAlive: cfg.model.keepAlive })
+      : null;
+    model = new LocalModel({ baseUrl: cfg.model.baseUrl, name: cfg.model.name, timeoutMs: cfg.model.timeoutMs, numCtx: cfg.model.numCtx, concurrency: cfg.model.concurrency, keepAlive: cfg.model.keepAlive, admission });
     const problem = await model.preflight();
-    report.model = problem ? `OFF: ${problem}` : `${cfg.model.name} via ${cfg.model.baseUrl}`;
+    report.model = problem ? `OFF: ${problem}` : `${cfg.model.name} via ${cfg.model.baseUrl} (keep_alive ${cfg.model.keepAlive}, GPU guard ${cfg.model.gpuGuard ? `on: defer above ${cfg.model.maxGpuUtilPct}% util or under ${cfg.model.minFreeVramMb} MB free` : "OFF"})`;
     if (problem) model = null;
   } else report.model = "off (set RESEARCH_MODEL to an Ollama model you have pulled; drafts are optional)";
 

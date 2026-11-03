@@ -158,6 +158,7 @@ export const REQUIREMENTS: RequirementDef[] = [
     ["READY-010", "Blocker register with categories"],
     ["READY-011", "Exports: PDF, CSV, release evidence packet; historical snapshots"],
     ["READY-012", "Freshness / stale detection and self-monitoring"],
+    ["READY-013", "Readiness status derived automatically from evidence, not from hand-maintained declarations"],
   ]),
   ...group("AI Receptionist", "§51–§53", [
     ["VOICE-001", "Provider evaluation and recommendation before buying a number", "P0", "founder"],

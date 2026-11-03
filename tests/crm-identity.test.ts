@@ -647,3 +647,19 @@ test("[CRM-002] production duplicate audit (remote mode) is read-only: SELECT st
   const { loadRemote } = await import("../scripts/crm-duplicate-audit.ts");
   assert.equal(typeof loadRemote, "function");
 });
+
+test("[CRM-005] the CRM staging harness never reuses a fictional number staging has already seen, and gives its do-not-call entry back", async () => {
+  // Staging deploy #124 failed api.shared_line_two_businesses with SUPPRESSED/SUPPRESSED. The harness draws
+  // from a 2,000-number fictional pool and excluded numbers already in contact_identities — but a do-not-call
+  // row OUTLIVES the contact erasure at cleanup, so every run permanently consumed one number. Eventually a
+  // run drew a suppressed one and the staging deploy gate failed.
+  const src = readFileSync("scripts/crm-staging-e2e.ts", "utf8");
+  assert.match(src, /SELECT phone_e164 FROM voice_dnc WHERE phone_e164 LIKE '%55501__'/,
+    "numbers left on the do-not-call list by earlier runs must be excluded from the pool");
+  assert.match(src, /DELETE FROM voice_dnc WHERE detail LIKE/,
+    "the run must remove the do-not-call entry it created, or the pool shrinks for ever");
+  assert.ok(!/const phone = \(\) => \{ for \(;;\)/.test(src),
+    "an exhausted pool must fail loudly rather than spin for ever");
+  assert.match(src, /every fictional 555-01xx number \(\$\{PHONE_POOL\}\) is already used/,
+    "and the failure must say exactly what to clear");
+});

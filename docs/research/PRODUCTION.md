@@ -43,7 +43,12 @@ No new paid service, API key or subscription is involved.
 ## 6. Monitoring
 - **`/staff/research`:** worker online/offline, last check-in, queue depth, failed jobs, rejected records, per-source refresh, the 24-hour throughput chart, and import success rate.
 - **Node 1:** `Get-ResearchWorkerHealth.ps1` (127.0.0.1:8789) shows the platform auth state, per-stage counts and the outbox depth. Logs are in `logs\worker-*.log`.
-- **Alerting gap (not built):** a stale-worker alert into `ops_alerts`. Proposed follow-up: a scheduled check that raises an alert when no research heartbeat has arrived for 30 minutes while research is resumed.
+- **Stale-worker alert (built 2026-11-02):** the existing scheduled `ops_alerts` job (every 15 minutes) now raises a
+  `research_worker_stale` alert and emails the Owners once per episode when research is **resumed** and either no
+  worker has checked in for `research_heartbeat_stale_minutes` (30), or no worker has **ever** checked in (re-stated
+  once a day, because that case looks like "running" from the platform and is not), or a worker reports that its
+  credentials are being refused. Nothing is raised while research is paused: that is its intended resting state and the
+  dashboard already says so. Tests: `tests/ops-alerts.test.ts`.
 
 ## 7. Deployment plan
 1. Merge PR #48 to `main`. That deploys **staging only** and applies migration 0051 on staging.
