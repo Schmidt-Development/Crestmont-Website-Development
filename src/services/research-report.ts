@@ -95,6 +95,8 @@ export interface ResearchReport {
   worker: {
     runners: string[]; samples: number; expectedSamples: number; uptimePct: number | null;
     pausedSamples: number; authFailedSamples: number; lastSampleAt: string | null; lastQueueDepth: number | null; lastOutboxDepth: number | null;
+    /** True when every check-in came from the staging deploy's end-to-end test rather than a real worker. */
+    onlyDeployTestRunners: boolean;
   };
   funnel: {
     businessesEvaluated: number; websitesChecked: number; processingFailures: number;
@@ -109,6 +111,8 @@ export interface ResearchReport {
     evaluatedPerHourMean: number | null; qualifiedPerHourMean: number | null;
     peakSustainedHour: HourPoint | null; worstCompleteHour: HourPoint | null;
     observedQualificationRate: number | null;
+    /** Why the rate is null, when it is. Reported so a withheld figure is never read as a zero. */
+    rateWithheldBecause: string | null;
     deliveredPerHourMean: number | null;
   };
   resources: {
@@ -173,7 +177,22 @@ export function buildReport(input: ReportInput): ResearchReport {
 
   const mean = (n: number) => (hoursObserved > 0 ? n / hoursObserved : null);
   const qualified = input.prospects.qualifiedInWindow;
-  const observedQualificationRate = totalEvaluated > 0 ? qualified / totalEvaluated : null;
+  /**
+   * Qualified ÷ evaluated is only meaningful when both describe the same work. They do not over a short window:
+   * `qualified` counts prospects the PLATFORM first saw in the window, while `totalEvaluated` counts what the
+   * WORKER reported finishing in it, and a prospect can be delivered minutes after it was evaluated. A 30-minute
+   * read of a paused worker produced "3500%" (70 newly seen against 2 evaluated), which is not a yield at all.
+   *
+   * So the rate is reported only when the denominator both contains enough work to mean something and is at least
+   * as large as the numerator. Otherwise it is withheld as not measurable, never printed as a percentage.
+   */
+  const MIN_EVALUATED_FOR_RATE = 100;
+  const rateIsMeaningful = totalEvaluated >= MIN_EVALUATED_FOR_RATE && totalEvaluated >= qualified;
+  const observedQualificationRate = rateIsMeaningful ? qualified / totalEvaluated : null;
+  const rateWithheldBecause = rateIsMeaningful ? null
+    : totalEvaluated === 0 ? "no evaluation was observed in this window"
+    : totalEvaluated < qualified ? `${qualified} prospects were first seen but only ${totalEvaluated} evaluations were reported in this window: they describe different work, so the ratio would not be a yield`
+    : `only ${totalEvaluated} evaluations observed (a rate needs at least ${MIN_EVALUATED_FOR_RATE})`;
 
   const peak = completeHours.length ? completeHours.reduce((a, b) => (b.evaluated > a.evaluated ? b : a)) : null;
   const worst = completeHours.length ? completeHours.reduce((a, b) => (b.evaluated < a.evaluated ? b : a)) : null;
@@ -194,8 +213,13 @@ export function buildReport(input: ReportInput): ResearchReport {
     ? Math.round(totalEvaluated / hoursObserved * 24 * observedQualificationRate) : null;
 
   const shortfall = Math.max(0, input.target - qualified);
+  // The staging deploy's end-to-end test checks in under a throwaway `staging-e2e-*` runner id. Those samples are
+  // real, but they are a test harness, not a worker doing continuous research, and reading them as one would make an
+  // idle platform look staffed. Reported separately, and named as the limiting factor when they are all there is.
+  const onlyDeployTestRunners = runners.length > 0 && runners.every((r) => r.startsWith("staging-e2e-"));
   const limitingFactor = ((): string => {
     if (!inWindow.length) return "no worker samples in the window: the worker was not running, or not reaching the platform";
+    if (onlyDeployTestRunners) return "no research worker: the only check-ins are the staging deploy's end-to-end test (runner id staging-e2e-*), which researches a fixed 30-business sample and stops";
     if (inWindow.every((s) => s.paused === 1)) return "research was paused on the platform for the whole window";
     if (inWindow.some((s) => s.auth_failed === 1)) return "the platform refused the worker's credentials, so delivery stopped (RESEARCH_RUNNER_SECRET mismatch)";
     if (last && last.outbox_depth > 0 && totalDelivered < totalEvaluated) return "staging delivery: verified records are queued locally faster than the platform accepts them";
@@ -205,7 +229,7 @@ export function buildReport(input: ReportInput): ResearchReport {
     if (cpuMax !== null && cpuMax >= 90) return "CPU on the workstation";
     return "website verification throughput (per-host politeness and real site latency)";
   })();
-  const nextChange = limitingFactor.startsWith("no worker samples") ? "install and start the worker on Node 1 (docs/research/RUNBOOK.md §1)"
+  const nextChange = limitingFactor.startsWith("no worker samples") || limitingFactor.startsWith("no research worker") ? "install and start the worker on Node 1 (docs/research/RUNBOOK.md §1)"
     : limitingFactor.startsWith("research was paused") ? "resume research in /staff/research (Owner)"
     : limitingFactor.startsWith("the platform refused") ? "re-run the installer with the matching RESEARCH_RUNNER_SECRET (RUNBOOK §5)"
     : limitingFactor.startsWith("staging delivery") ? "raise max_batch in /staff/research, or let the local outbox drain at a safe rate"
@@ -222,6 +246,7 @@ export function buildReport(input: ReportInput): ResearchReport {
       pausedSamples: inWindow.filter((s) => s.paused === 1).length,
       authFailedSamples: inWindow.filter((s) => s.auth_failed === 1).length,
       lastSampleAt: last?.at ?? null, lastQueueDepth: last?.queue_depth ?? null, lastOutboxDepth: last?.outbox_depth ?? null,
+      onlyDeployTestRunners,
     },
     funnel: {
       businessesEvaluated: totalEvaluated, websitesChecked: totalWebsites, processingFailures: totalFailures,
@@ -246,6 +271,7 @@ export function buildReport(input: ReportInput): ResearchReport {
       deliveredPerHourMean: mean(totalDelivered) === null ? null : Math.round(mean(totalDelivered)!),
       peakSustainedHour: peak, worstCompleteHour: worst,
       observedQualificationRate: observedQualificationRate === null ? null : Math.round(observedQualificationRate * 10000) / 10000,
+      rateWithheldBecause,
     },
     resources: {
       cpuPctMax: pick((s) => num(s.cpu_pct), maxOf), cpuPctMean: pick((s) => num(s.cpu_pct), meanOf),
@@ -286,7 +312,10 @@ export function formatReport(r: ResearchReport): string {
   L.push("");
   L.push(`## Worker`);
   L.push(`- Runners: ${r.worker.runners.join(", ") || "none"}`);
-  L.push(`- Samples: ${r.worker.samples} of ${r.worker.expectedSamples} expected (uptime ${n(r.worker.uptimePct, "%")})`);
+  L.push(r.worker.expectedSamples > 0
+    ? `- Samples: ${r.worker.samples} of ${r.worker.expectedSamples} expected (uptime ${n(r.worker.uptimePct, "%")})`
+    : `- Samples: ${r.worker.samples}; the window is shorter than one 15-minute bucket, so uptime is not meaningful yet`);
+  if (r.worker.onlyDeployTestRunners) L.push(`- NOTE: every check-in is from the staging deploy's end-to-end test, not a research worker. These figures do not describe continuous research.`);
   L.push(`- Paused samples: ${r.worker.pausedSamples}; credential failures: ${r.worker.authFailedSamples}`);
   L.push(`- Last sample: ${r.worker.lastSampleAt ?? "none"}; queue ${n(r.worker.lastQueueDepth)}, outbox ${n(r.worker.lastOutboxDepth)}`);
   L.push("");
@@ -305,7 +334,7 @@ export function formatReport(r: ResearchReport): string {
   L.push("");
   L.push(`## Rates`);
   L.push(`- Mean evaluated/hour: ${n(r.rates.evaluatedPerHourMean)}; qualified/hour: ${n(r.rates.qualifiedPerHourMean)}; delivered/hour: ${n(r.rates.deliveredPerHourMean)}`);
-  L.push(`- Observed qualification rate: ${r.rates.observedQualificationRate === null ? "not measurable" : `${(r.rates.observedQualificationRate * 100).toFixed(2)}%`}`);
+  L.push(`- Observed qualification rate: ${r.rates.observedQualificationRate === null ? `not measurable — ${r.rates.rateWithheldBecause}` : `${(r.rates.observedQualificationRate * 100).toFixed(2)}%`}`);
   L.push(`- Peak sustained complete hour: ${r.rates.peakSustainedHour ? `${r.rates.peakSustainedHour.hour} — ${r.rates.peakSustainedHour.evaluated} evaluated` : "no complete hour observed"}`);
   L.push(`- Worst complete hour: ${r.rates.worstCompleteHour ? `${r.rates.worstCompleteHour.hour} — ${r.rates.worstCompleteHour.evaluated} evaluated` : "no complete hour observed"}`);
   L.push("");

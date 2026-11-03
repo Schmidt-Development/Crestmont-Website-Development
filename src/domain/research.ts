@@ -312,6 +312,40 @@ export function recommendPackage(cls: WebsiteClass, findings: Finding[]): Packag
   return null;
 }
 
+/**
+ * The one- or two-sentence version of a prospect's evidence, for a salesperson who has seconds to read it. The full
+ * evidence stays on the record; this is the summary that replaces dumping it into the lead's message field.
+ *
+ * It is deliberately hedged where the evidence is hedged. An automated inspection that did not find something is not
+ * proof the thing does not exist, so this never says "the site has no X": it says what was looked at and what was
+ * observed. Getting this wrong would put a claim in a salesperson's mouth that the evidence does not support.
+ */
+export function conciseEvidence(p: {
+  websiteClass: WebsiteClass; score: number; websiteUrl?: string | null;
+  findings?: { title: string; severity: Severity; confidence: number }[];
+}): string {
+  const material = (p.findings ?? []).filter((f) => f.confidence >= 0.6 && SEVERITY_RANK[f.severity] >= 2)
+    .sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]);
+  const named = material.slice(0, 3).map((f) => f.title.replace(/\.$/, ""));
+  const more = material.length > named.length ? ` and ${material.length - named.length} more` : "";
+  const list = named.length ? `${named.join("; ")}${more}` : "";
+  const score = `Research score ${p.score}/100.`;
+  switch (p.websiteClass) {
+    case "VERIFIED_WEBSITE_BROKEN":
+      return `The website listed for this business did not load when it was checked. ${score}${list ? ` Observed: ${list}.` : ""}`;
+    case "VERIFIED_WEBSITE_ISSUES":
+      return `Website reviewed by automated inspection. ${score}${list ? ` Observed: ${list}.` : ""}`;
+    case "NO_OFFICIAL_WEBSITE_FOUND":
+      return `No official website was found for this business after the documented checks. That is not proof none exists. ${score}`;
+    case "VERIFIED_OFFICIAL_WEBSITE":
+      return `Website verified with no material problems found by automated inspection. ${score}`;
+    case "WEBSITE_UNVERIFIED":
+      return `The website could not be verified (it refused automated checks, or none was listed). ${score}`;
+    case "BUSINESS_IDENTITY_UNCERTAIN":
+      return `The business identity could not be confirmed against the website that was checked. ${score}`;
+  }
+}
+
 // ───────────── Model output guard ─────────────
 /**
  * The local model's summary and sales brief are drafts. They are accepted only when they add no facts: no money

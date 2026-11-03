@@ -1,7 +1,8 @@
 // Lead research — persistence and CRM integration (proposed RESEARCH-001..006; see migrations/0051_lead_research.sql).
 // The worker pushes evidence; this module validates it, recomputes qualification itself (the worker's opinion is not
 // trusted), checks the CRM / do-not-call list / other prospects for duplicates, and keeps the fail-closed outbound
-// eligibility result next to each prospect. Promotion to a CRM lead is a person's decision, audited.
+// eligibility result next to each prospect. Promotion to a CRM lead is audited, and goes through the CRM intake
+// engine whether a person asked for it or the automatic promoter did (research-promote.ts).
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { HttpError } from "../app/http.ts";
@@ -10,7 +11,7 @@ import { sha256Hex } from "../lib/crypto.ts";
 import { audit } from "./security.ts";
 import { intake, IntakeError, type IntakeOutcome } from "./contact-identity.ts";
 import {
-  validateProspect, qualify, modelTextProblems, outboundEligibility, crmPhoneNorm, timeZoneForState, stableJson,
+  validateProspect, qualify, modelTextProblems, outboundEligibility, crmPhoneNorm, timeZoneForState, stableJson, conciseEvidence,
   WEBSITE_CLASSES, WEBSITE_CLASS_LABELS, type CleanProspect, type ProspectStatus, type WebsiteClass, type SourceId,
 } from "../domain/research.ts";
 
@@ -21,32 +22,38 @@ export const RUNNER_ONLINE_S = 180;
 /** D1 allows at most 100 bound parameters per statement. */
 const CHUNK = 90;
 
-export interface ResearchSettings { paused: number; pause_reason: string | null; qualify_threshold: number; max_batch: number; updated_by: string | null; updated_at: string }
+export interface ResearchSettings { paused: number; pause_reason: string | null; qualify_threshold: number; max_batch: number; auto_promote: number; auto_promote_max_per_run: number; updated_by: string | null; updated_at: string }
 export interface SourceRow { source: SourceId; enabled: number; role: string; license: string; attribution: string; use_terms: string; disabled_reason: string | null; terms_url: string; verified_at: string }
 
 export async function loadSettings(db: Db): Promise<ResearchSettings> {
-  return (await db.prepare(`SELECT paused, pause_reason, qualify_threshold, max_batch, updated_by, updated_at FROM research_settings WHERE id = 1`).first<ResearchSettings>())!;
+  return (await db.prepare(`SELECT paused, pause_reason, qualify_threshold, max_batch, auto_promote, auto_promote_max_per_run, updated_by, updated_at FROM research_settings WHERE id = 1`).first<ResearchSettings>())!;
 }
 export async function listSources(db: Db): Promise<SourceRow[]> {
   return (await db.prepare(`SELECT * FROM research_sources ORDER BY enabled DESC, source`).all<SourceRow>()).results;
 }
 
 /** Owner-only: pause/resume and thresholds. Audited with the changed fields. */
-export async function saveSettings(db: Db, actor: Actor, input: { paused: boolean; reason: string; threshold: number; maxBatch: number }): Promise<string[]> {
+export async function saveSettings(db: Db, actor: Actor, input: { paused: boolean; reason: string; threshold: number; maxBatch: number; autoPromote?: boolean; autoPromoteMaxPerRun?: number }): Promise<string[]> {
   const issues: string[] = [];
   if (!Number.isInteger(input.threshold) || input.threshold < 0 || input.threshold > 100) issues.push("Qualification threshold must be a whole number from 0 to 100");
   if (!Number.isInteger(input.maxBatch) || input.maxBatch < 1 || input.maxBatch > 500) issues.push("Batch size must be a whole number from 1 to 500");
   if (input.paused && input.reason.trim().length < 3) issues.push("Say why research is paused");
   if (input.reason.length > 300) issues.push("Reason is too long");
-  if (issues.length) return issues;
   const before = await loadSettings(db);
+  const autoPromote = input.autoPromote ?? !!before.auto_promote;
+  const perRun = input.autoPromoteMaxPerRun ?? before.auto_promote_max_per_run;
+  if (!Number.isInteger(perRun) || perRun < 1 || perRun > 2000) issues.push("Leads per promotion run must be a whole number from 1 to 2000");
+  if (issues.length) return issues;
   const reason = input.paused ? input.reason.trim() : null;
-  await db.prepare(`UPDATE research_settings SET paused = ?, pause_reason = ?, qualify_threshold = ?, max_batch = ?, updated_by = ?, updated_at = ? WHERE id = 1`)
-    .bind(input.paused ? 1 : 0, reason, input.threshold, input.maxBatch, actor.userId ?? null, nowIso()).run();
+  await db.prepare(`UPDATE research_settings SET paused = ?, pause_reason = ?, qualify_threshold = ?, max_batch = ?, auto_promote = ?, auto_promote_max_per_run = ?, updated_by = ?, updated_at = ? WHERE id = 1`)
+    .bind(input.paused ? 1 : 0, reason, input.threshold, input.maxBatch, autoPromote ? 1 : 0, perRun, actor.userId ?? null, nowIso()).run();
   const changed: Record<string, unknown> = {};
   if (before.paused !== (input.paused ? 1 : 0)) changed.paused = input.paused;
   if (before.qualify_threshold !== input.threshold) changed.qualify_threshold = input.threshold;
   if (before.max_batch !== input.maxBatch) changed.max_batch = input.maxBatch;
+  // Turning automatic CRM promotion on or off is the decision the Founder authorised, so it is always audited by name.
+  if (before.auto_promote !== (autoPromote ? 1 : 0)) changed.auto_promote = autoPromote;
+  if (before.auto_promote_max_per_run !== perRun) changed.auto_promote_max_per_run = perRun;
   await audit(db, { actorUserId: actor.userId, action: "research.settings_updated", subjectType: "research_settings", subjectId: "1", details: { ...changed, reason } });
   return [];
 }
@@ -333,9 +340,11 @@ export function evidenceText(p: ProspectRow): string {
  * fixed per prospect, so two people promoting at once (or a retry) get the same decision and at most one lead.
  * Research only reflects the outcome on its own record; automated calling stays off whatever the outcome.
  */
-export async function promote(db: Db, actor: Actor, id: string): Promise<{ leadId: string; outcome: IntakeOutcome }> {
+export async function promote(db: Db, actor: Actor, id: string, opts: { sweepSuppressions?: boolean } = {}): Promise<{ leadId: string; outcome: IntakeOutcome }> {
   if (!can(actor, "lead.write_all")) throw new HttpError(403, "You do not have permission to do that.");
-  await applySuppressions(db);
+  // The sweep is global, so a batch caller (research-promote.ts) runs it once for the whole batch instead of per
+  // prospect. A person promoting one prospect still gets it, which is why it defaults to on.
+  if (opts.sweepSuppressions !== false) await applySuppressions(db);
   const p = await getProspect(db, id);
   const block = async (why: string, status?: ProspectStatus, extra: Record<string, unknown> = {}) => {
     if (status) await db.prepare(`UPDATE research_prospects SET status = ?, status_detail = ?, updated_at = ? WHERE id = ? AND status IN ('qualified','review')`).bind(status, why.slice(0, 300), nowIso(), id).run();
@@ -389,6 +398,44 @@ export async function dismiss(db: Db, actor: Actor, id: string, reason: string):
   await audit(db, { actorUserId: actor.userId, action: "research.prospect_dismissed", subjectType: "research_prospect", subjectId: id, details: { reason: r } });
 }
 
+/** What a salesperson needs about a research-generated lead, and nothing else. Null for a lead research did not create. */
+export interface ResearchLeadFacts {
+  prospectId: string;
+  websiteUrl: string | null;
+  websiteClass: WebsiteClass;
+  websiteLabel: string;
+  score: number;
+  summary: string;              // the concise, correctly hedged sentence
+  modelSummary: string | null;  // the local model's wording, only when it added no facts
+  findings: { title: string; severity: string; confidence: number; evidence: string; url: string }[];
+  lastVerifiedAt: string;
+  outreachEligible: boolean;
+  outreachReasons: string[];
+  fullEvidence: string;         // the long form, for the collapsed advanced view
+}
+
+export async function researchLeadFacts(db: Db, leadId: string): Promise<ResearchLeadFacts | null> {
+  const r = await db.prepare(`SELECT id, website_url, website_class, score, summary, findings_json, last_verified_at, eligibility, eligibility_json
+      FROM research_prospects WHERE crm_lead_id = ? LIMIT 1`).bind(leadId).first<Record<string, unknown>>();
+  if (!r) return null;
+  const cls = String(r.website_class) as WebsiteClass;
+  let findings: ResearchLeadFacts["findings"] = [];
+  try { findings = JSON.parse(String(r.findings_json ?? "[]")) as ResearchLeadFacts["findings"]; } catch { findings = []; }
+  let reasons: string[] = [];
+  try { reasons = JSON.parse(String(r.eligibility_json ?? "[]")) as string[]; } catch { reasons = []; }
+  const p = await getProspect(db, String(r.id));
+  return {
+    prospectId: String(r.id),
+    websiteUrl: r.website_url === null || r.website_url === undefined ? null : String(r.website_url),
+    websiteClass: cls, websiteLabel: WEBSITE_CLASS_LABELS[cls], score: Number(r.score ?? 0),
+    summary: conciseEvidence({ websiteClass: cls, score: Number(r.score ?? 0), websiteUrl: r.website_url as string | null, findings: findings as never }),
+    modelSummary: r.summary === null || r.summary === undefined ? null : String(r.summary),
+    findings, lastVerifiedAt: String(r.last_verified_at ?? ""),
+    outreachEligible: String(r.eligibility) === "eligible", outreachReasons: reasons,
+    fullEvidence: evidenceText(p),
+  };
+}
+
 // ───────────── Dashboard ─────────────
 
 export interface RunnerRow { runner_id: string; version: string | null; first_seen_at: string; last_seen_at: string; status_json: string }
@@ -409,7 +456,10 @@ export async function dashboard(db: Db, now: Date) {
     n(`SELECT SUM(duplicates_prevented) AS n FROM research_batches WHERE received_at >= ?`, dayStart),
     n(`SELECT SUM(duplicates_prevented) AS n FROM research_batches`),
     n(`SELECT SUM(record_count) AS n FROM research_batches WHERE received_at >= ?`, dayStart),
-    n(`SELECT COUNT(*) AS n FROM research_prospects WHERE website_class IN ('WEBSITE_UNVERIFIED','BUSINESS_IDENTITY_UNCERTAIN') OR status = 'review'`),
+    // Kept as "awaiting verification" only. It used to be labelled "awaiting a decision", which was wrong twice over:
+    // an unverified or identity-uncertain record cannot be promoted by anyone, so no decision is pending on it, and
+    // lumping it with 'review' hid how many records actually need a person.
+    n(`SELECT COUNT(*) AS n FROM research_prospects WHERE website_class IN ('WEBSITE_UNVERIFIED','BUSINESS_IDENTITY_UNCERTAIN')`),
     n(`SELECT SUM(rejected) AS n FROM research_batches WHERE received_at >= ?`, dayStart),
   ]);
   const classes = new Map((await db.prepare(`SELECT website_class AS k, COUNT(*) AS n FROM research_prospects GROUP BY website_class`).all<{ k: string; n: number }>()).results.map((r) => [r.k, r.n]));
@@ -418,14 +468,20 @@ export async function dashboard(db: Db, now: Date) {
   const coverage = (await db.prepare(`SELECT json_extract(j.value, '$.source') AS source, COUNT(DISTINCT p.id) AS n FROM research_prospects p, json_each(p.sources_json) j GROUP BY source ORDER BY n DESC`).all<{ source: string; n: number }>()).results;
   const hourly = (await db.prepare(`SELECT substr(received_at, 1, 13) AS hour, SUM(record_count) AS n FROM research_batches WHERE received_at >= ? GROUP BY hour ORDER BY hour`).bind(since24h).all<{ hour: string; n: number }>()).results;
   const runners = (await db.prepare(`SELECT * FROM research_runners ORDER BY last_seen_at DESC LIMIT 10`).all<RunnerRow>()).results;
-  // CRM import success rate over 30 days: successful promotions / (successful + blocked attempts), from the audit log.
   const since30 = new Date(now.getTime() - 30 * 86400e3).toISOString();
   const promoted30 = await n(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'research.prospect_promoted' AND created_at >= ?`, since30);
   const blocked30 = await n(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'research.promotion_blocked' AND created_at >= ?`, since30);
+  // The eligible-population view (eligibilityCensus) and what automatic promotion has done (promotionTotals,
+  // recentRuns) live in research-promote.ts and are composed by the route, so these two modules do not import each
+  // other. They replace the old "import success rate", whose denominator was promotion ATTEMPTS from the audit log:
+  // 42 successful of 84 attempts read as 50% while thousands of eligible prospects had never been attempted at all.
+  const crmLeadsFromResearch = await n(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent'`);
+  const crmLeadsFromResearchToday = await n(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent' AND created_at >= ?`, dayStart);
   return {
-    total, qualifiedToday, qualifiedAll, callable, evaluatedToday, websitesToday, failedToday, rejectedToday, dupToday, dupAll, receivedToday, awaiting,
+    total, qualifiedToday, qualifiedAll, callable, evaluatedToday, websitesToday, failedToday, rejectedToday, dupToday, dupAll, receivedToday,
+    awaitingVerification: awaiting,
     byClass, byStatus, coverage, hourly, runners, promoted30, blocked30,
-    importRate: promoted30 + blocked30 ? promoted30 / (promoted30 + blocked30) : null,
+    crmLeadsFromResearch, crmLeadsFromResearchToday,
   };
 }
 

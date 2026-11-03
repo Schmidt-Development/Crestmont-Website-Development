@@ -16,6 +16,7 @@ import { staffPage } from "./crm.ts";
 import { verifyRunnerSignature } from "../services/builds.ts";
 import { claimSignatureOnce } from "../services/security.ts";
 import * as R from "../services/research.ts";
+import { eligibilityCensus, promotionTotals, recentRuns, runAutoPromotion } from "../services/research-promote.ts";
 import { WEBSITE_CLASSES, WEBSITE_CLASS_LABELS, PROSPECT_STATUSES, type Finding } from "../domain/research.ts";
 
 const RUNNER = "/api/research/runner";
@@ -91,17 +92,15 @@ ${p.crm_lead_id ? html`<p><a href="/staff/crm/leads/${p.crm_lead_id}">Open CRM l
 async function page(ctx: AppContext): Promise<Response> {
   requireStaff(ctx, "lead.read_all");
   const now = ctx.now();
-  const [d, settings, sources] = await Promise.all([R.dashboard(ctx.db, now), R.loadSettings(ctx.db), R.listSources(ctx.db)]);
-  const status = ctx.url.searchParams.get("status") ?? "";
-  const cls = ctx.url.searchParams.get("class") ?? "";
-  const state = (ctx.url.searchParams.get("state") ?? "").toUpperCase();
-  const f = {
-    status: (PROSPECT_STATUSES as readonly string[]).includes(status) ? status : undefined,
-    cls: (WEBSITE_CLASSES as readonly string[]).includes(cls) ? cls : undefined,
-    state: /^[A-Z]{2}$/.test(state) ? state : undefined,
-  };
+  const [d, settings, sources, census, promotion30, promotionRuns] = await Promise.all([
+    R.dashboard(ctx.db, now), R.loadSettings(ctx.db), R.listSources(ctx.db),
+    eligibilityCensus(ctx.db), promotionTotals(ctx.db, new Date(now.getTime() - 30 * 86400e3).toISOString()), recentRuns(ctx.db, 5),
+  ]);
+  // Only the records that genuinely need a person are listed here. General prospect browsing belongs in the CRM:
+  // once a prospect is promoted it is an ordinary CRM lead, and a second browser over the same businesses was the
+  // "duplicate prospects management section" this page used to carry.
   const pg = pageParam(ctx);
-  const rows = await R.listProspects(ctx.db, f, pg);
+  const rows = await R.listProspects(ctx.db, { status: "review" }, pg);
   const hasNext = rows.length > pg.limit;
   const runner = d.runners[0];
   const runnerStatus = runner ? JSON.parse(runner.status_json) as Record<string, unknown> : null;
@@ -116,15 +115,20 @@ ${settings.paused ? alert("warn", html`<strong>Research is paused.</strong> ${se
 ${!ctx.env.RESEARCH_RUNNER_SECRET ? alert("warn", html`<strong>No research worker can connect.</strong> RESEARCH_RUNNER_SECRET is not set on this environment. Setup: docs/research/RUNBOOK.md.`) : ""}
 ${alert("info", html`<strong>Automated calling is off for research prospects.</strong> A number in an open dataset is not permission to place AI-voice calls. Every prospect is held by the outbound eligibility gate until a counsel-approved consent design exists (Founder decision D-14). Promoting a prospect creates a CRM lead for people to work; it never queues a call.`)}
 <section class="kpis">
-${kpi("Candidates evaluated today", d.evaluatedToday, "reported by the worker")}
-${kpi("Received today", d.receivedToday ?? 0, `${d.rejectedToday} rejected by validation`)}
-${kpi("Qualified today", d.qualifiedToday, `${d.qualifiedAll} awaiting a decision`)}
-${kpi("Verified callable today", d.callable, "automated calling gate (fail-closed)")}
-${kpi("Duplicates prevented today", d.dupToday, `${d.dupAll} all time`)}
+${kpi("Candidates evaluated today", d.evaluatedToday, "worker-reported; one row per business it finished checking")}
+${kpi("Unique businesses received today", d.receivedToday ?? 0, `${d.rejectedToday} rejected by validation`)}
+${kpi("Websites checked today", d.websitesToday, "worker-reported")}
+${kpi("Research-qualified today", d.qualifiedToday, "meets the evidence rule; not the same as sales-qualified")}
+${kpi("Eligible for the CRM now", census.eligibleNow, "qualified, at or above the threshold, nothing blocking")}
+${kpi("CRM leads from research", d.crmLeadsFromResearch, `${d.crmLeadsFromResearchToday} created today`)}
+${kpi("Needs a person", census.needsPerson, "shared number, or the same business as another record")}
+${kpi("Awaiting verification", d.awaitingVerification, "website unverified or identity uncertain: cannot qualify")}
 ${kpi("Businesses on record", d.total)}
-${kpi("Awaiting verification or review", d.awaiting)}
-${kpi("Research → CRM import success", pct(d.importRate), `${d.promoted30} imported, ${d.blocked30} blocked (30 days)`)}
+${kpi("Verified callable today", d.callable, "automated calling gate (fail-closed, always 0)")}
 </section>
+<p class="faint">Every figure above counts a different thing and they are never added together. "Research-qualified" means the
+evidence rule in <code>src/domain/research.ts#qualify</code> passed. "Eligible for the CRM" is the population automatic
+promotion is responsible for. A CRM lead is a sales record a person works; it is not permission to call anyone.</p>
 <div class="grid grid--2">
 <section class="card"><h2 class="card__title">Worker health</h2>
 ${runner ? dl([
@@ -134,6 +138,9 @@ ${runner ? dl([
     ["Failed jobs today", String(d.failedToday)],
     ["Throughput", runnerStatus?.recordsPerHour !== undefined ? `${runnerStatus.recordsPerHour} records/hour (worker-measured)` : "—"],
     ["Local model", String(runnerStatus?.model ?? "—")],
+    // Source freshness stays on the page as operational information; the licence and configuration table it used to sit in is gone
+    // (that configuration belongs in admin tooling, and the attribution line below records the legal obligation).
+    ["Source refresh", sources.filter((x) => x.enabled).map((x) => `${x.source}: ${refresh[x.source]?.lastRefreshAt ? `${formatDateTime(refresh[x.source]!.lastRefreshAt!)}${refresh[x.source]!.release ? ` (${refresh[x.source]!.release})` : ""}` : "never"}`).join(" · ") || "no source enabled"],
     ["Resources", runnerStatus?.resources ? JSON.stringify(runnerStatus.resources).slice(0, 300) : "—"],
   ]) : emptyState("No worker has connected", "Install the research worker on the Windows workstation (docs/research/RUNBOOK.md). Until then nothing is researched.")}
 </section>
@@ -144,13 +151,34 @@ ${d.total ? barChart(d.byClass.map((c) => ({ label: c.label, value: c.n, display
 </section>
 </div>
 <div class="grid grid--2">
-<section class="card"><h2 class="card__title">Sources</h2>
-${table(sources, [
-    { header: "Source", cell: (s) => html`${s.source} ${s.enabled ? badge("active", "On") : badge("paused", "Off")}` },
-    { header: "Licence and use", cell: (s) => html`${s.license}<div class="faint">${s.use_terms}${s.disabled_reason ? html`<br><strong>Off:</strong> ${s.disabled_reason}` : ""}</div>` },
-    { header: "Records", numeric: true, cell: (s) => d.coverage.find((c) => c.source === s.source)?.n ?? 0 },
-    { header: "Last refresh", cell: (s) => refresh[s.source]?.lastRefreshAt ? `${formatDateTime(refresh[s.source].lastRefreshAt!)}${refresh[s.source].release ? ` (${refresh[s.source].release})` : ""}` : "—" },
+<section class="card"><h2 class="card__title">Research → CRM</h2>
+${dl([
+    ["Eligible for the CRM now", String(census.eligibleNow)],
+    ["Already a CRM lead", String(census.alreadyPromoted)],
+    ["Matched an existing CRM contact", String(census.existingCrm)],
+    ["Needs a person (shared number / same business)", String(census.needsPerson)],
+    ["Suppressed (do-not-call, erasure)", String(census.suppressed)],
+    ["Below the current threshold", String(census.belowThreshold)],
+    ["Awaiting verification", String(census.awaitingVerification)],
+    ["Not qualified", String(census.notQualified)],
+    ["Dismissed by a person", String(census.dismissed)],
+    ["Out of promotion attempts", String(census.outOfAttempts)],
   ])}
+<p class="faint">These account for all ${census.totalOnRecord} businesses on record: every record is either eligible, already
+in the CRM, or has a stated reason it is not. Automatic promotion is
+<strong>${settings.auto_promote ? "on" : "off"}</strong>.</p>
+${promotionRuns.length ? html`<h3 class="faint">Recent promotion runs (30 days: ${promotion30.examined} examined, ${promotion30.promoted} new leads)</h3>
+${table(promotionRuns, [
+    { header: "Started", cell: (r) => formatDateTime(String(r.started_at)) },
+    { header: "Trigger", cell: (r) => String(r.trigger) },
+    { header: "New leads", numeric: true, cell: (r) => Number(r.promoted ?? 0) },
+    { header: "Existing", numeric: true, cell: (r) => Number(r.existing_crm ?? 0) },
+    { header: "Review", numeric: true, cell: (r) => Number(r.review ?? 0) },
+    { header: "Blocked", numeric: true, cell: (r) => Number(r.suppressed ?? 0) + Number(r.rejected ?? 0) },
+    { header: "Left", numeric: true, cell: (r) => Number(r.remaining ?? 0) },
+  ])}` : html`<p class="faint">No automatic promotion run has happened yet.</p>`}
+<p class="faint">Data sources in use: ${sources.filter((x) => x.enabled).map((x) => x.attribution).join("; ") || "none enabled"}.
+Licences and permitted use are recorded per record and in <code>docs/research/DATA-SOURCES.md</code>.</p>
 </section>
 <section class="card"><h2 class="card__title">Received in the last 24 hours</h2>
 ${d.hourly.length ? barChart(d.hourly.map((h) => ({ label: `${h.hour.slice(11)}:00 UTC`, value: h.n, display: String(h.n) }))) : html`<p class="faint">Nothing received in the last 24 hours.</p>`}
@@ -162,21 +190,28 @@ ${checkbox("paused", "Pause research (the worker stops sending; nothing is lost)
 ${input({ name: "reason", label: "Reason (required when pausing)", value: settings.pause_reason ?? "", maxlength: 300 })}
 ${input({ name: "threshold", label: "Qualification threshold (0-100)", type: "number", min: 0, max: 100, value: settings.qualify_threshold, required: true })}
 ${input({ name: "max_batch", label: "Maximum prospects per batch", type: "number", min: 1, max: 500, value: settings.max_batch, required: true })}
+${checkbox("auto_promote", "Create CRM leads automatically for eligible qualified prospects", { checked: !!settings.auto_promote, value: "1" })}
+${input({ name: "auto_promote_max_per_run", label: "Most CRM leads one promotion run may create", type: "number", min: 1, max: 2000, value: settings.auto_promote_max_per_run, required: true })}
 ${button("Save", { variant: "primary" })}</form>
+<p class="faint">Automatic promotion runs every 15 minutes, in bounded batches, through the CRM's own intake engine, so
+customer matching, do-not-call, suppression, duplicate review and the audit record all apply exactly as they do when a
+person promotes. It keeps working while research is paused: pausing stops new research, it does not strand the backlog.
+Records needing a human decision are never promoted automatically. Creating a CRM lead still releases nobody for
+calling.</p>
+<form method="post" action="/staff/research/reconcile" class="inline-form">${csrf(ctx)}
+${button(`Reconcile the backlog now (${census.eligibleNow} eligible)`, { variant: "secondary" })}</form>
 <p class="faint">Last changed ${formatDateTime(settings.updated_at)}.</p></section>` : ""}
-<section class="card"><h2 class="card__title">Prospects</h2>
-<form method="get" class="filters">
-${select({ name: "status", label: "Status", options: PROSPECT_STATUSES.map((s) => ({ value: s, label: STATUS_LABEL[s] })), value: f.status ?? "", includeBlank: "Any" })}
-${select({ name: "class", label: "Website", options: WEBSITE_CLASSES.map((c) => ({ value: c, label: WEBSITE_CLASS_LABELS[c] })), value: f.cls ?? "", includeBlank: "Any" })}
-${input({ name: "state", label: "State", value: f.state ?? "", maxlength: 2 })}
-${button("Filter", { variant: "secondary", size: "sm" })}</form>
+<section class="card"><h2 class="card__title">Needs a person (${census.needsPerson})</h2>
+<p class="faint">Only the records a machine must not decide: a phone number shared by two businesses, or two dataset
+records that look like the same business. Everything else eligible becomes a CRM lead automatically. Promoted leads are
+worked in the <a href="/staff/crm/leads">CRM</a>, which is the single place sales records live.</p>
 ${table(rows.slice(0, pg.limit), [
     { header: "Business", cell: (p) => html`<strong>${p.name}</strong><div class="faint">${p.category ?? ""}${p.city ? ` · ${p.city}, ${p.state ?? ""}` : ""}</div>${prospectDetail(ctx, p)}` },
     { header: "Website", cell: (p) => html`${WEBSITE_CLASS_LABELS[p.website_class]}${p.max_severity ? html`<div>${badge(SEVERITY_TONE[p.max_severity] ? p.max_severity : "low", `${p.findings_count} finding(s), worst ${p.max_severity}`)}</div>` : ""}` },
     { header: "Score", numeric: true, cell: (p) => p.score },
     { header: "Status", cell: (p) => html`${badge(p.status === "qualified" ? "qualified" : p.status === "review" ? "review" : p.status === "suppressed" ? "blocked" : "", STATUS_LABEL[p.status])}${p.shared_phone ? html` ${badge("warn", "Shared phone")}` : ""}${p.status_detail ? html`<div class="faint">${p.status_detail}</div>` : ""}` },
     { header: "Verified", cell: (p) => formatDateTime(p.last_verified_at) },
-  ], { empty: emptyState("No prospects", "Prospects appear here when the research worker sends evidence. Nothing is invented: an empty list means nothing has been researched yet.") })}
+  ], { empty: emptyState("Nothing needs a person", "Records appear here only when a shared phone number or two records of one business need a human decision.") })}
 ${pagination(ctx, pg.page, hasNext)}
 </section>`;
   return staffPage(ctx, "Lead research", body);
@@ -195,9 +230,26 @@ export function register(r: Router): void {
     const issues = await R.saveSettings(ctx.db, ctx.actor!, {
       paused: str(f, "paused") === "1", reason: str(f, "reason"),
       threshold: Number(str(f, "threshold")), maxBatch: Number(str(f, "max_batch")),
+      // An absent numeric field means "leave it as it is", not zero: a form that does not carry this input must not
+      // fail validation, and must not silently rewrite the Owner's setting.
+      autoPromote: str(f, "auto_promote") === "1",
+      autoPromoteMaxPerRun: str(f, "auto_promote_max_per_run") === "" ? undefined : Number(str(f, "auto_promote_max_per_run")),
     });
     if (issues.length) return redirect(ctx, "/staff/research", { kind: "error", text: issues.join(". ") });
     return redirect(ctx, "/staff/research", { kind: "success", text: "Research controls saved." });
+  });
+
+  // Drains one bounded batch of the eligible backlog on demand. The Owner asking is itself the decision, so this
+  // works whether or not the automatic setting is on, and it works while research is paused: pausing stops new
+  // research, it does not strand prospects already on file. Every promotion still goes through the CRM intake engine.
+  r.post("/staff/research/reconcile", async (ctx) => {
+    requireStaff(ctx);
+    if (!isOwner(ctx.actor!)) throw new HttpError(403, "Only the Owner can run a research reconciliation.");
+    const r0 = await runAutoPromotion(ctx.db, { trigger: "owner", now: ctx.now(), actor: ctx.actor!, actorUserId: ctx.actor!.userId ?? null });
+    const text = r0.examined === 0
+      ? "Nothing was eligible for the CRM, so no lead was created."
+      : `${r0.examined} examined: ${r0.promoted} new CRM lead(s), ${r0.existingCrm} already a CRM contact, ${r0.review} sent for review, ${r0.suppressed} suppressed, ${r0.rejected} refused by the CRM, ${r0.failed} failed. ${r0.remaining} still eligible${r0.remaining ? " — run it again to continue" : ""}.`;
+    return redirect(ctx, "/staff/research", { kind: r0.failed ? "error" : "success", text });
   });
 
   r.post("/staff/research/promote", async (ctx) => {

@@ -141,7 +141,8 @@ ${can(actor, "support.access") || tickets.length ? html`<section class="card"><h
     const { page: pg, limit, offset } = pageParam(ctx);
     const rows = await M.listGeneralConversations(ctx.db, ctx.user!.id, { q: q || undefined, limit, offset });
     const total = await M.countGeneralConversations(ctx.db, { q: q || undefined });
-    return page(ctx, "Conversations", html`${pageHead("General conversations", undefined, "Customer messages outside projects")}
+    return page(ctx, "Conversations", html`${pageHead("Customer portal messages", undefined, "Not tied to a project")}
+${alert("info", "Messages customers send from Messages in their own portal when the conversation is not about a specific project. Project discussions stay on the project. This is not the website chat assistant and not the AI receptionist — those are recorded with their own calls and transcripts.")}
 <form method="get" class="filters" action="/staff/conversations">${input({ name: "q", label: "Find a customer", value: q, placeholder: "Organization name" })}${button("Search", { variant: "secondary", size: "sm" })}</form>
 ${table(rows, [
   { header: "Customer", cell: (x) => html`<a href="/staff/conversations/${x.id}">${x.name}</a>` },

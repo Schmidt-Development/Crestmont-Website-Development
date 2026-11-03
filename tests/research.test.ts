@@ -282,11 +282,25 @@ test("[OWN-002] research dashboard shows real counts (evaluated vs qualified vs 
   const o = await client().login(owner.email, undefined, owner.secret);
   const page = await (await o.get("/staff/research")).text();
   assert.match(page, /Candidates evaluated today<\/div><div class="kpi__value">1234/, "restart cannot lower the day's counter");
-  assert.match(page, /Qualified today<\/div><div class="kpi__value">1</);
+  assert.match(page, /Research-qualified today<\/div><div class="kpi__value">1</);
   assert.match(page, /Verified callable today<\/div><div class="kpi__value">0</);
-  assert.match(page, /Riverside Plumbing/);
   assert.match(page, /Controls \(Owner\)/);
-  assert.match(page, /2026-10-21.0/);
+  // The release id used to appear here only inside each prospect's provenance block in the old listing. That listing
+  // and that provenance are gone from the sales-facing page by design; freshness is reported as its own field, and
+  // this fixture's latest heartbeat carries no source block, so it reads "never" rather than a release.
+  assert.match(page, /Source refresh/);
+  // The Sources licence table and the general prospect browser were removed: source configuration belongs in admin
+  // tooling and the CRM is the one place leads are worked. The legal attribution line stays.
+  assert.doesNotMatch(page, /card__title">Sources</);
+  assert.doesNotMatch(page, /card__title">Prospects</);
+  assert.match(page, /Data sources in use:/);
+  assert.match(page, /Overture Maps Foundation/);
+  // Only records a machine must not decide are listed. Neither fixture prospect is one, so the queue is empty.
+  assert.match(page, /Needs a person/);
+  assert.doesNotMatch(page, /Riverside Plumbing/, "a qualified prospect is promoted automatically, not browsed here");
+  // The funnel stages the Founder asked to be distinguishable are each present and separately labelled.
+  for (const label of ["Candidates evaluated today", "Unique businesses received today", "Websites checked today",
+    "Research-qualified today", "Eligible for the CRM now", "CRM leads from research", "Awaiting verification"]) assert.ok(page.includes(label), `missing KPI: ${label}`);
   const a = await client().login(admin.email, undefined, admin.secret);
   const adminPage = await (await a.get("/staff/research")).text();
   assert.doesNotMatch(adminPage, /Controls \(Owner\)/);

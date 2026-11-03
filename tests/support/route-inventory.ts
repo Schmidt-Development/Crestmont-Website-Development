@@ -602,6 +602,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/sales-outbound/queue/:id/cancel": staff(rolesWith("voice.manage"), P("salesCall"), act("sales_outbound.cancelled")),
   "GET /staff/research": staff(rolesWith("lead.read_all")),
   "POST /staff/research/settings": staff(OWNER, undefined, act("research.settings_updated")),
+  "POST /staff/research/reconcile": staff(OWNER, undefined, act("research.auto_promotion_run")),
   "POST /staff/research/promote": staff(rolesWith("lead.write_all"), undefined, act("research.prospect_promoted")),
   "POST /staff/research/dismiss": staff(rolesWith("lead.write_all"), undefined, act("research.prospect_dismissed")),
   "POST /staff/voice/caller-erasure": staff(rolesWith("voice.manage"), undefined, act("voice.caller_data_erased")),
