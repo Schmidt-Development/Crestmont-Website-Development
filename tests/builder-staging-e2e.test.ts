@@ -11,6 +11,7 @@ import { createPackageOrder } from "../src/services/commerce.ts";
 import { hmacSha256Hex } from "../src/lib/crypto.ts";
 import { passwordProblems } from "../src/lib/auth-crypto.ts";
 import { customerPassword, verificationPath, readOnly, report } from "../scripts/builder-staging-e2e.ts";
+import { formatCents } from "../src/lib/html.ts";
 import { JITT_BUSINESS as C } from "./fixtures/junk-in-the-trunk-business.ts";
 
 const WHSEC = "whsec_jitt_fixture";
@@ -27,6 +28,31 @@ test("[AIB-020] the test customer's derived password meets the platform policy, 
   assert.equal(a, customerPassword("root-key-fixture-1"));
   assert.notEqual(a, b);
   assert.throws(() => customerPassword(""), /required/);
+});
+
+// The driver clicks a button by its exact label and asserts an exact price, so its idea of "$2,499" has to be the
+// page's. It wasn't: the driver expected "$2,499.00" while formatCents omits the cents on a whole-dollar amount,
+// and the purchase step failed on a checkout page that was perfectly correct. Asserted against the real rendered
+// page, because that is the disagreement that matters -- comparing the driver to itself would have proven nothing.
+test("[AIB-020] the price and button label the driver expects are what the real checkout page renders", async () => {
+  const t = await createTestApp({ overrides: { payments: new FakePayments() } });
+  const cu = await createCustomer(t.db, C.email, C.business);
+  const c = await t.client().login(cu.email, TEST_PASSWORD);
+  const res = await c.get("/checkout/business");
+  assert.equal(res.status, 200, "the Business checkout page renders");
+  const page = await res.text();
+
+  const expected = formatCents(C.packageCents);
+  assert.equal(expected, "$2,499", "a whole-dollar package is rendered without cents");
+  const price = /data-testid="checkout-price"[^>]*>([^<]*)/.exec(page);
+  assert.ok(price, "the page exposes its price through the testid the driver reads");
+  assert.ok(price[1].trim().startsWith(expected), `the page shows ${price[1].trim()}, the driver expects ${expected}`);
+  assert.ok(page.includes(`Pay ${expected}`), "the Pay button carries the amount the driver clicks");
+
+  // No tax block: with tax configured the button would charge a total other than $2,499, which the report's
+  // Payment line (matched on exactly packageCents) would then never recognise. The driver refuses that case.
+  assert.ok(!page.includes(`data-testid="checkout-tax"`), "no tax is configured, so the total is the package price");
+  t.close();
 });
 
 test("[AIB-020] the verification link is taken from the email body and nothing else", () => {
