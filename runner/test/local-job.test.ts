@@ -470,9 +470,11 @@ test("[AIB-CONTINUITY] a resume whose checkpoint lost the source (no git bundle,
     const x = path.join(dir, "x");
     mkdirSync(x);
     const env = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
-    assert.equal((await run("tar", ["-xzf", arc, "-C", x], { env, timeoutMs: 30_000 })).code, 0);
+    // tar runs from `dir` with relative paths: an absolute "C:\..." is read as host:path by GNU tar, the same way
+    // it was inside the runner before checkpoint.ts was fixed.
+    assert.equal((await run("tar", ["-xzf", "./a.tgz", "-C", "./x"], { cwd: dir, env, timeoutMs: 30_000 })).code, 0);
     rmSync(path.join(x, "repo.bundle"));
-    assert.equal((await run("tar", ["-czf", arc, "-C", x, "."], { env, timeoutMs: 30_000 })).code, 0);
+    assert.equal((await run("tar", ["-czf", "./a.tgz", "-C", "./x", "."], { cwd: dir, env, timeoutMs: 30_000 })).code, 0);
     r.cp.archives.set(key, readFileSync(arc).toString("base64"));
     const job2 = await nextSegment(r, 1);
     const cfg2 = { ...r.cfg, workspacesRoot: tmp("aib-lost-") };
