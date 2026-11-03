@@ -26,7 +26,7 @@ export interface BuildBrief {
   deliverables: string[];
   exclusions: string[];
   customerData: {
-    business: { name: string; industry: string; publicEmail: string; publicPhone: string };
+    business: { name: string; industry: string; publicEmail: string; publicPhone: string; serviceArea: string };
     goals: string; audience: string;
     brand: { hasBranding: boolean; guidelines: string; style: string; colors: string; logoFileIds: string[] };
     pages: string[]; pagesOverLimit: string[];

@@ -38,7 +38,7 @@ export function makeBrief(over: Partial<BuildBrief> = {}): BuildBrief {
     deliverables: ["Multi-page website", "Contact form"],
     exclusions: ["E-commerce"],
     customerData: {
-      business: { name: "Acme Plumbing ZX-41", industry: "Plumbing", publicEmail: "hello@acme.example", publicPhone: "+1 555 0100" },
+      business: { name: "Acme Plumbing ZX-41", industry: "Plumbing", publicEmail: "hello@acme.example", publicPhone: "+1 555 0100", serviceArea: "Greater Springfield" },
       goals: `More calls. zx41-goals-marker. ${INJECTION}`,
       audience: "Homeowners",
       brand: { hasBranding: false, guidelines: "", style: "Friendly", colors: "navy", logoFileIds: [] },

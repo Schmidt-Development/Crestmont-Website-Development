@@ -12,6 +12,7 @@ import type { Env } from "../src/app/context.ts";
 import { getPipeline } from "../src/services/build-pipeline.ts";
 import { withQuality, passingScorecard } from "./support/quality.ts";
 import { verifyScorecard, requiredCapabilities, PACKAGE_CAPABILITIES } from "../src/domain/quality.ts";
+import { ONBOARDING_SECTIONS, allFields } from "../src/services/onboarding.ts";
 import { decideImprovement } from "../src/services/build-quality.ts";
 import { readFileSync as readFileSyncQ } from "node:fs";
 
@@ -488,6 +489,51 @@ test("[AIB-PREVIEW] a revision snapshot is stored once, is immutable, and is bou
 // 8.4/10 on attempt 1 therefore showed a 6.8/10 revision under "This is the best verified revision the build
 // reached". The runner cannot fix this -- restoreTo can only revert inside its own attempt's history, so only the
 // platform sees every attempt. It arbitrates: a nomination is honoured only if it is actually at least as good.
+// Acceptance gate A demands a service area for any website that takes quote requests or bookings and refuses to
+// let the builder invent one (starters/fullstack-v1/scripts/lib/config-check.mjs: serviceArea === null pushes
+// "service area" into missing customer information). The onboarding form had no field for it, so a customer could
+// answer every question asked and still produce a brief no builder could satisfy -- real defect, build
+// bld_aeadb54ca53f57afcb9969bc, 2026-11-03, which escalated for a person after three targeted repairs. The form
+// now asks, and the answer has to survive the trip to the builder in the structured business facts, beside the
+// phone the same gate demands, not buried in free text the builder may or may not read as a fact.
+test("[AIB-INTAKE] the onboarding form asks for a service area and the answer reaches the builder's brief", async () => {
+  const field = ONBOARDING_SECTIONS.flatMap((sec) => sec.fields).find((f) => f.name === "service_area");
+  assert.ok(field, "the form must ask for the service area gate A requires");
+  assert.equal(field!.type, "textarea", "a service area is a list of places, not a single line");
+  assert.ok(!field!.required, "an online-only shop has no service area, so the question is optional");
+  assert.ok(!field!.showWhen, "it must be visible without first answering something else");
+  // Every package reaches gate A, so no package may be shown a form that omits the question.
+  for (const pkgId of ["starter", "business", "premium", "custom"]) {
+    assert.ok(allFields(pkgId).some((f) => f.name === "service_area"), `the ${pkgId} form must ask for the service area`);
+  }
+
+  const t = await app();
+  const { cu, c, order } = await customerWithOrder(t);
+  await stripe(t, "checkout.session.completed", session(cu.organizationId, order));
+  const pid = await projectOf(t, order.orderId);
+  const area = "Lansing, East Lansing and Okemos, Michigan";
+  assert.equal((await c.post(`/portal/projects/${pid}/onboarding`, { ...INTAKE, service_area: area })).status, 303);
+  const brief = (await B.snapshotBrief(t.db, pid)).content;
+  assert.equal(brief.customerData.business.serviceArea, area, "the brief carries the answer verbatim");
+  // It belongs with the business's own public facts, where the builder reads the phone it must also publish.
+  assert.ok(brief.customerData.business.publicPhone !== undefined, "beside the other public business facts");
+  t.close();
+});
+
+// An unanswered question must reach the builder as a known blank, not as an absent key: "the customer did not tell
+// us" is a fact the builder has to be able to see, because inventing the answer is what the gate forbids.
+test("[AIB-INTAKE] a service area the customer left blank reaches the brief as an empty string, never undefined", async () => {
+  const t = await app();
+  const { cu, c, order } = await customerWithOrder(t);
+  await stripe(t, "checkout.session.completed", session(cu.organizationId, order));
+  const pid = await projectOf(t, order.orderId);
+  assert.equal((await c.post(`/portal/projects/${pid}/onboarding`, INTAKE)).status, 303);
+  const brief = (await B.snapshotBrief(t.db, pid)).content;
+  assert.equal(brief.customerData.business.serviceArea, "", "a blank answer is recorded, not omitted");
+  assert.ok("serviceArea" in brief.customerData.business, "the key is always present in the brief");
+  t.close();
+});
+
 test("[AIB-PREVIEW] a later attempt's best revision cannot demote a higher-scoring one from an earlier attempt", async () => {
   const t = await app();
   const { job } = await queuedProject(t);

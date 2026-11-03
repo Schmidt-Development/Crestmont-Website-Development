@@ -32,6 +32,13 @@ export const ONBOARDING_SECTIONS: OnboardingSection[] = [
     { name: "contact_email", label: "Contact email", type: "email", required: true, max: 254 },
     { name: "contact_phone", label: "Contact phone", type: "tel", max: 40 },
     { name: "industry", label: "Industry", type: "text", required: true, max: 120 },
+    // Acceptance gate A refuses to let the builder invent a service area for a website that takes quote requests
+    // or bookings (starters/fullstack-v1: config-check.mjs pushes "service area" as missing customer information),
+    // and until this field existed the form never asked for it. A customer could answer every question on the form
+    // and still hand the builder an unsatisfiable brief: build bld_aeadb54ca53f57afcb9969bc escalated for exactly
+    // that. Optional, because an online-only shop has no service area -- but now it is asked, not assumed.
+    { name: "service_area", label: "Service area", type: "textarea", max: 1000,
+      hint: "The towns, cities or postal codes you serve. Needed if your website takes quote requests or bookings; we never invent it for you." },
   ] },
   { id: "goals", title: "Goals and audience", fields: [
     { name: "goals", label: "What should the website achieve?", type: "textarea", required: true, hint: "For example: more quote requests, online bookings, product sales.", max: 3000 },
