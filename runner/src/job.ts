@@ -976,7 +976,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     } catch (err2) {
       if (err2 instanceof LeaseLostError) return { outcome: "lease_lost", complete: null, workspace: ws?.dir ?? null, stopReason: "lease_lost", checks: [] };
       log.error("could not report failure", { error: errorMessage(err2) });
-      return { outcome: "failed", complete: null, workspace: ws?.dir ?? null, stopReason: null };
+      return { outcome: "failed", complete: null, workspace: ws?.dir ?? null, stopReason: null, checks: [] };
     }
   } finally {
     hbStopped = true;

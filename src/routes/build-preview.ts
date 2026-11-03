@@ -88,7 +88,7 @@ export function register(r: Router): void {
     const base = current ? `/staff/builds/${j.id}/inspect?rev=${revKey(current)}${page ? `&page=${encodeURIComponent(page)}` : ""}${compareTo ? `&cmp=${revKey(compareTo)}` : ""}` : `/staff/builds/${j.id}/inspect?`;
     const latestCycle = cycles[cycles.length - 1] ?? null;
 
-    const head = html`${pageHead(`AI build preview — ${d.brief?.content?.customerData?.business?.name ?? d.summary.projectName ?? "website"}`,
+    const head = html`${pageHead(`AI build preview — ${d.summary.organizationName}`,
       linkButton("Build record", `/staff/builds/${j.id}`, "ghost", "sm"), "The website Node 1 is generating, revision by revision")}
 ${active ? alert("info", html`This build is running: the page refreshes itself every 20 seconds. ${badge("info", BUILD_STATE_LABELS[j.state as BuildState])}`) : ""}
 <section class="card"><h2 class="card__title">This build</h2>

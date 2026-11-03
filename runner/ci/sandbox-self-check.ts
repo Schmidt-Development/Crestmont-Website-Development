@@ -26,6 +26,7 @@ const cfg: JobSandboxConfig = {
   dockerBin: process.env.DOCKER_BIN || "docker", image, volume: "", cpus: "2", memory: "2g", pidsLimit: 512, tmpfsMb: 256,
   commandTimeoutMs: 120_000, installTimeoutMs: 300_000, installNetwork: "none", installProxy: "http://egress-proxy:3128",
   registry: "https://registry.npmjs.org/", diskQuotaMb: 4096, uid: 10001, allowedBuildScripts: [], browserCheck: true,
+  runnerId: "ci-sandbox-self-check",
 };
 
 function chmodTree(p: string): void {

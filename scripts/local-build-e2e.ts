@@ -56,7 +56,7 @@ const OUT = path.resolve(opt("--out", path.join(process.cwd(), "local-build", "e
 mkdirSync(OUT, { recursive: true });
 
 const log = (...a: unknown[]) => console.log(`[harness ${new Date().toISOString()}]`, ...a);
-const one = async <R>(db: any, sql: string, ...b: unknown[]): Promise<R> => (await db.prepare(sql).bind(...b).first<R>())!;
+const one = async <R>(db: any, sql: string, ...b: unknown[]): Promise<R> => (await db.prepare(sql).bind(...b).first()) as R;
 
 async function main(): Promise<number> {
   // ===== Phase 1: the real platform workflow, in memory =====
@@ -204,7 +204,7 @@ async function main(): Promise<number> {
       if (seg > 1) log(`phase 2.${seg}: segment ${seg} of at most ${maxSegments} (resuming the checkpointed build)`);
       summary = await runJob(current, { cfg, client, manifest, logger, scheduler });
       segments.push({ segment: seg, outcome: summary?.outcome ?? "(none)", turns: summary?.complete?.turns ?? 0, ms: Date.now() - segStart, stopReason: summary?.complete?.stopReason ?? null,
-        checks: (summary?.checks ?? []).map((c) => `${c.id}=${c.ok ? "PASS" : "FAIL"}`).join(" ") || "(none)", report: summary?.complete?.report ?? null });
+        checks: (summary?.checks ?? []).map((c: { id: string; ok: boolean }) => `${c.id}=${c.ok ? "PASS" : "FAIL"}`).join(" ") || "(none)", report: summary?.complete?.report ?? null });
       log(`  segment ${seg}: ${summary?.outcome} after ${summary?.complete?.turns ?? "?"} turns`);
       if (summary?.outcome !== "released") break;
       if (seg === maxSegments) { log(`  --segments ${maxSegments} reached; the build is checkpointed and would continue`); break; }
