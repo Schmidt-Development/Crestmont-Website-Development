@@ -165,8 +165,8 @@ async function pricingPage(ctx: AppContext, errors: string[] = [], v: Record<str
   const requests = await pricing.listPriceChanges(ctx.db);
   const itemName = (t: string, id: string) => pricing.pricedItem(t, id)?.name ?? id;
   const tomorrow = new Date(now.getTime() + 86400e3).toISOString().slice(0, 10);
-  return staffPage(ctx, "Pricing", html`${pageHead("Prices & price changes", undefined, "Catalog")}
-${alert("info", "Prices change only with Founder approval. Staff propose a change with a reason; only the Owner can approve or reject it. AI and automation can never approve. Existing orders, invoices and quotes keep the prices they were created with.")}
+  return staffPage(ctx, "Pricing", html`${pageHead("Standard price list & price-change approvals", undefined, "Global catalog")}
+${alert("info", "This page sets Crestmont's STANDARD prices only: the published package and maintenance-plan prices every new customer is quoted from. A price for one customer is not set here — negotiated amounts live in that customer's quote or proposal, and nothing on this page changes an existing quote, order, invoice or subscription. Standard prices change only with Founder approval: staff propose a change with a reason, and only the Owner can approve or reject it. AI and automation can never approve one.")}
 ${formErrors(errors)}
 <section class="card stack"><h2 style="font-size:1.2rem">Prices in effect now</h2>${table(current, [
     { header: "Item", cell: (i) => i.name }, { header: "Catalog price", cell: (i) => formatCents(i.catalogCents), numeric: true },

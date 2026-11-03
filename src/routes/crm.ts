@@ -17,6 +17,7 @@ import * as crm from "../services/crm.ts";
 import * as quotes from "../services/quotes.ts";
 import * as dedupe from "../services/crm-dedupe.ts";
 import * as identity from "../services/contact-identity.ts";
+import { researchLeadFacts } from "../services/research.ts";
 import { eraseIdentityData, ErasureError } from "../services/identity-erasure.ts";
 import { isOwner } from "../domain/authz.ts";
 import { startPackageCheckout, startMaintenanceCheckout, packageById, maintenanceById, NOT_CONFIGURED, stripeRedirect } from "../services/billing.ts";
@@ -213,6 +214,8 @@ async function leadDetail(ctx: AppContext, id: string, errors: string[] = [], st
     lead.merged_into_lead_id ? Promise.resolve([]) : dedupe.duplicatesOf(ctx.db, actor, lead),
   ]);
   const idp = await identity.contactIdentityPanel(ctx.db, lead.contact_id);
+  // Null unless research created this lead; then it carries the verified website, the score and the hedged summary.
+  const rf = await researchLeadFacts(ctx.db, lead.id);
   const writable = !lead.merged_into_lead_id && (can(actor, "lead.write_all") || (can(actor, "lead.write_assigned") && lead.owner_user_id === actor.userId));
   const nextStages = (LEAD_TRANSITIONS[lead.stage] as readonly LeadStage[]).filter((s) => s !== "converted");
   const tasks = acts.filter((a) => a.kind === "task");
@@ -245,8 +248,12 @@ ${dl([["Name", lead.contact_name], ["Email", lead.contact_email ? html`<a href="
   ["Customer account", links.orgId ? html`<a href="/staff/customers/${links.orgId}">View customer</a>` : lead.contact_user_id ? "Registered (no organization link yet)" : "Not registered"],
   ["Source", label(lead.source)], ["Interest", lead.interest ? label(lead.interest) : "—"], ["Created", formatDateTime(lead.created_at)], ["Owner", lead.owner_name ?? "Unassigned"],
   ...(lead.lost_reason ? [["Closed reason", lead.lost_reason] as [string, string]] : [])])}
-${attributionCard(lead)}
-${lead.message ? html`<h3 style="font-size:1rem">Original message</h3><p>${nl2br(lead.message)}</p>` : ""}
+${rf ? researchCard(rf) : ""}
+${rf
+    // A research lead's `message` is the full evidence record. It is kept in the database untouched, but the sales
+    // view gets the one-sentence version; the long form is one click away for anyone who wants it.
+    ? html`<details><summary>Full research evidence</summary><p>${nl2br(rf.fullEvidence)}</p>${rf.findings.length ? html`<ul>${rf.findings.map((x) => html`<li><strong>${x.title}</strong> <span class="faint">(${x.severity}, confidence ${x.confidence})</span><br><span class="faint">${x.evidence}</span></li>`)}</ul>` : ""}</details>`
+    : lead.message ? html`<h3 style="font-size:1rem">Original message</h3><p>${nl2br(lead.message)}</p>` : ""}
 ${lead.qualification_notes ? html`<h3 style="font-size:1rem">Qualification notes</h3><p>${nl2br(lead.qualification_notes)}</p>` : ""}
 ${writable ? html`<details><summary>Edit contact, company and qualification</summary><form method="post" action="${base}/contact" class="stack">${csrf(ctx)}
 ${input({ name: "name", label: "Name", value: lead.contact_name, required: true })}${input({ name: "email", label: "Email", type: "email", value: lead.contact_email })}
@@ -259,14 +266,19 @@ ${writable && nextStages.length ? html`<form method="post" action="${base}/stage
 ${select({ name: "to", label: "Move to", options: nextStages.map((s) => ({ value: s, label: s === "qualified" && ["lost", "rejected", "archived"].includes(lead.stage) ? "Reopen (qualified)" : label(s) })) })}
 ${input({ name: "reason", label: "Reason", hint: "Required for Lost or Rejected." })}<div class="form-actions">${button("Change stage", { size: "sm" })}</div></form>
 <p class="faint">Converted is set automatically when Stripe confirms payment.</p>` : html`<p class="muted">${writable ? "No further manual stage changes from here." : "Only the lead owner can change the stage."}</p>`}</div>
-${can(actor, "lead.assign") ? html`<div class="card stack"><h2 style="font-size:1.2rem">Owner</h2><form method="post" action="${base}/assign" class="stack">${csrf(ctx)}
-${select({ name: "owner", label: "Assign to", options: staff.map((s) => ({ value: s.id, label: s.display_name })), value: lead.owner_user_id, includeBlank: "Unassigned" })}<div class="form-actions">${button("Save owner", { size: "sm", variant: "secondary" })}</div></form></div>` : ""}
+${/* The assignment picker is gone from the sales layout by request. Ownership is still shown in Contact & company,
+      POST .../assign still works for the offboarding and reassignment workflows that depend on it, and no column,
+      permission or route was removed. */ ""}
+${can(actor, "lead.assign") ? html`<details class="card"><summary>Change owner (${lead.owner_name ?? "unassigned"})</summary><form method="post" action="${base}/assign" class="stack">${csrf(ctx)}
+${select({ name: "owner", label: "Assign to", options: staff.map((s) => ({ value: s.id, label: s.display_name })), value: lead.owner_user_id, includeBlank: "Unassigned" })}<div class="form-actions">${button("Save owner", { size: "sm", variant: "secondary" })}</div></form></details>` : ""}
 <div class="card stack"><h2 style="font-size:1.2rem">Follow-up tasks</h2>
 ${tasks.length ? html`<ul class="checklist">${tasks.map((t) => html`<li>${t.completed_at ? html`<s>${t.body}</s> <span class="faint">done ${formatDate(t.completed_at)}</span>` : html`<strong>${t.body}</strong> <span class="${t.due_at && t.due_at < ctx.now().toISOString() ? "error-text" : "faint"}">due ${formatDate(t.due_at)}</span> ${writable ? actionForm(ctx, `${base}/tasks/${t.id}/complete`, "Mark done") : ""}`}</li>`)}</ul>` : html`<p class="muted">No follow-ups scheduled.</p>`}
 ${writable ? html`<form method="post" action="${base}/task" class="stack">${csrf(ctx)}${input({ name: "body", label: "Follow-up", required: true, id: "followup-body" })}${input({ name: "due", label: "Due date", type: "date", required: true })}<div class="form-actions">${button("Add task", { size: "sm", variant: "secondary" })}</div></form>` : ""}</div>
 </section></div>
 ${aiCard}
-${identityCard(ctx, idp)}
+${/* Contact identity, provenance, suppression and the outreach ledger are compliance records, not sales reading.
+      Nothing is deleted or permission-gated differently: the same panel, one click away. */ ""}
+<details class="card"><summary>Contact identity, provenance and duplicate protection</summary>${identityCard(ctx, idp)}</details>
 <section class="card stack"><h2 style="font-size:1.2rem">Linked records</h2>
 <h3 style="font-size:1rem">Quotes</h3>${table(links.quotes, [
     { header: "Quote", cell: (q) => html`<a href="/staff/quotes/${q.id}">${q.id}</a>` }, { header: "Version", cell: (q) => `v${q.current_version}` }, { header: "Status", cell: (q) => badge(q.status) },
@@ -304,18 +316,38 @@ ${p.changes.length ? html`<details><summary>Merge and edit history (${p.changes.
 </section>`;
 }
 
+/**
+ * The research facts a salesperson acts on: the website they are about to talk about, how strong the opportunity is,
+ * and one sentence of why. Shared by the quick view and the full lead so the two can never disagree. The long
+ * evidence and the provenance are deliberately not here; they live in the collapsed advanced block.
+ */
+function researchCard(f: NonNullable<Awaited<ReturnType<typeof researchLeadFacts>>>, heading = "Website opportunity"): SafeHtml {
+  return html`<h3 style="font-size:1rem">${heading}</h3>
+${dl([
+    ["Website", f.websiteUrl ? html`<a href="${safeUrl(f.websiteUrl)}" rel="noopener noreferrer" target="_blank">${f.websiteUrl}</a>` : "None found"],
+    ["Opportunity", f.websiteLabel],
+    ["Research score", html`<strong>${f.score}</strong>/100`],
+    ["Checked", formatDateTime(f.lastVerifiedAt)],
+    ["Outreach", f.outreachEligible ? badge("verified", "Released") : badge("escalated", "Not released for automated calling")],
+  ])}
+<p>${f.summary}</p>
+${f.modelSummary ? html`<p class="faint">${f.modelSummary}</p>` : ""}`;
+}
+
 /** Lead quick view (BRAND-003 drawer). A complete page on its own; the CRM board loads its drawer body into the drawer. */
 async function leadQuickView(ctx: AppContext, id: string) {
   requireStaff(ctx, "crm.access");
   const lead = await crm.getLead(ctx.db, ctx.actor!, id);
   const acts = await crm.activities(ctx.db, id);
   const openTasks = acts.filter((a) => a.kind === "task" && !a.completed_at);
-  const recent = acts.filter((a) => a.kind !== "task").slice(0, 5);
+  // Research-generated leads carry the business and its website opportunity; everything else a salesperson does not
+  // need in a drawer (campaign attribution, the activity timeline, assignment, promotion identifiers) is left to the
+  // full lead and the audit trail. The point of the drawer is to understand the business in seconds.
+  const rf = await researchLeadFacts(ctx.db, id);
   const body = drawerBody(lead.contact_name, html`<p>${badge(lead.stage)} <span class="faint">${label(lead.source)} · created ${formatDate(lead.created_at)}</span></p>
-${dl([["Company", lead.company_name], ["Email", lead.contact_email ? html`<a href="mailto:${lead.contact_email}">${lead.contact_email}</a>` : "—"], ["Phone", lead.contact_phone], ["Interest", lead.interest ? label(lead.interest) : "—"], ["Owner", lead.owner_name ?? "Unassigned"]])}
-${attributionCard(lead)}
-<h3 style="font-size:1rem">Open follow-ups</h3>${openTasks.length ? html`<ul class="checklist">${openTasks.map((t) => html`<li>${t.body} <span class="${t.due_at && t.due_at < ctx.now().toISOString() ? "error-text" : "faint"}">due ${formatDate(t.due_at)}</span></li>`)}</ul>` : html`<p class="muted">No open follow-ups.</p>`}
-<h3 style="font-size:1rem">Recent activity</h3>${recent.length ? html`<ul class="timeline">${recent.map((a) => html`<li><strong>${label(a.kind)}</strong> <span class="faint">${formatDateTime(a.created_at)}</span><br>${a.body.length > 220 ? a.body.slice(0, 217) + "…" : a.body}</li>`)}</ul>` : html`<p class="muted">No activity yet.</p>`}
+${dl([["Company", lead.company_name], ["Email", lead.contact_email ? html`<a href="mailto:${lead.contact_email}">${lead.contact_email}</a>` : "—"], ["Phone", lead.contact_phone], ["Interest", lead.interest ? label(lead.interest) : "—"]])}
+${rf ? researchCard(rf) : lead.company_website ? dl([["Website", html`<a href="${safeUrl(lead.company_website)}" rel="noopener noreferrer" target="_blank">${lead.company_website}</a>`]]) : ""}
+<h3 style="font-size:1rem">Next steps</h3>${openTasks.length ? html`<ul class="checklist">${openTasks.map((t) => html`<li>${t.body} <span class="${t.due_at && t.due_at < ctx.now().toISOString() ? "error-text" : "faint"}">due ${formatDate(t.due_at)}</span></li>`)}</ul>` : html`<p class="muted">No open follow-ups.</p>`}
 <p>${linkButton("Open full lead", `/staff/crm/leads/${id}`, "secondary", "sm")}</p>`);
   return staffPage(ctx, `${lead.contact_name} — quick view`, html`${pageHead(lead.contact_name, linkButton("Back to pipeline", "/staff/crm", "ghost", "sm"), "Lead quick view")}<div class="card" style="max-width:640px">${body}</div>`);
 }
@@ -517,7 +549,9 @@ ${rangeForm(ctx, range.from, range.to)}
 <section class="card"><h2 style="font-size:1.2rem">Stage funnel</h2>${r.created ? barChart(LEAD_STAGES.filter((s) => r.funnel[s]).map((s) => ({ label: label(s), value: r.funnel[s], display: String(r.funnel[s]) }))) : html`<p class="muted">No leads in this range.</p>`}</section>
 <section class="card"><h2 style="font-size:1.2rem">Revenue attributed by lead source</h2>${r.revenue.length ? barChart(r.revenue.map((x) => ({ label: label(x.source), value: x.cents, display: formatCents(x.cents) }))) : html`<p class="muted">No captured payments in this range.</p>`}</section>
 </div>
-${attributionSection(r.attribution, r.created)}${definitions(crm.SALES_DEFINITIONS)}`);
+${/* Phase 9: the detailed campaign attribution tables are not sales reading. Collection and storage are untouched
+      (UTM capture, leads.utm_*, crm.attributionReport) and the report remains available to reporting. */ ""}
+${definitions(crm.SALES_DEFINITIONS)}`);
 }
 
 // ── quotes ──

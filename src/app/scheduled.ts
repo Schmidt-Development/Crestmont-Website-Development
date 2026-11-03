@@ -20,15 +20,16 @@ import { runRetention } from "../services/retention.ts";
 import { sweepBuilds } from "../services/builds.ts";
 import { processOutboundQueue } from "../services/voice-outbound.ts";
 import { runOpsAlerts } from "../services/monitoring.ts";
+import { runAutoPromotion } from "../services/research-promote.ts";
 import { runSalesOpt } from "../services/sales-opt/monitor.ts";
 import { processSalesQueue } from "../services/sales-outbound.ts";
 
 export type JobName = "requirements" | "stripe_reconcile" | "support_escalation" | "github_sync" | "inactivity" | "integration_health"
-  | "stripe_side_reconcile" | "stripe_ledger_reconcile" | "cost_import" | "env_probe" | "retention" | "build_sweep" | "payment_repair" | "email_retry" | "voice_outbound" | "sales_outbound" | "sales_opt" | "ops_alerts";
+  | "stripe_side_reconcile" | "stripe_ledger_reconcile" | "cost_import" | "env_probe" | "retention" | "build_sweep" | "payment_repair" | "email_retry" | "voice_outbound" | "sales_outbound" | "sales_opt" | "research_promote" | "ops_alerts";
 
 /** Cron expression → jobs. Must match [triggers] crons in wrangler.toml. ops_alerts runs last so it sees this run's results. */
 export const SCHEDULE: Record<string, JobName[]> = {
-  "*/15 * * * *": ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep", "voice_outbound", "sales_outbound", "sales_opt", "ops_alerts"],
+  "*/15 * * * *": ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep", "voice_outbound", "sales_outbound", "sales_opt", "research_promote", "ops_alerts"],
   "17 11 * * *": ["requirements", "inactivity", "integration_health", "stripe_side_reconcile", "stripe_ledger_reconcile", "cost_import", "retention"],
 };
 
@@ -75,6 +76,16 @@ export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string,
         case "sales_opt": detail = await runSalesOpt({ db: ctx.db, env, fetch: env.overrides?.fetch ?? fetch, now: env.overrides?.now }); break;
         // CREST-GAP-015/-089/-024: Owner emails (critical_incident) for dead-lettered Stripe events, new reconciliation findings,
         // a stuck email queue, failing evidence feeds and security-event bursts; deduplicated per item/window (ops_alerts).
+        // Research -> CRM promotion. Bounded and resumable: it promotes one batch of eligible prospects through the
+        // CRM intake engine and stops, so the next tick continues a backlog drain rather than one unbounded write. It
+        // does nothing until the Owner turns automatic promotion on, and it is deliberately NOT gated on the research
+        // pause: pausing stops new research, while prospects already on file still have to reach the CRM.
+        case "research_promote": {
+          const r = await runAutoPromotion(ctx.db, { trigger: "scheduled" });
+          detail = r.stoppedReason === "disabled" ? `off (Owner has not enabled automatic CRM promotion); ${r.remaining} eligible and waiting`
+            : `${r.examined} examined: ${r.promoted} new CRM leads, ${r.existingCrm} existing, ${r.review} to review, ${r.suppressed} suppressed, ${r.rejected} rejected, ${r.failed} failed; ${r.remaining} remaining (${r.stoppedReason})`;
+          break;
+        }
         case "ops_alerts": { const r = await runOpsAlerts(ctx); detail = `${r.raised} new of ${r.checked} alert items; ${r.emailed} emails to ${r.recipients} owner(s)${r.categories.length ? ` (${r.categories.join(", ")})` : ""}`; break; }
         case "retention": detail = (await runRetention({ db: ctx.db, storage: ctx.storage })).map((r) => `${r.category}:${r.mode === "skipped" ? "off" : r.affected}`).join(", "); break;
       }
