@@ -6,7 +6,7 @@ Shared safeguards, not 231 separate systems: each failure mode is covered by one
 - The gates A-J are implemented in runner/starters/fullstack-v1/scripts/gates.mjs, not in runner/src, which is why they are easy to miss when reading the runner. Mapping the remaining rows means reading that script against each row; that is the next step and it has not been taken.
 - Five rows the source inventory recorded as verified cited test files that did not exist here. Two (E03, E04) were already covered by differently-named tests and have been re-cited. Three (F15, F16, F20) depended on a quality ratchet that was genuinely absent; the ratchet rule and the git restore it needs have since been brought in and wired into the cycle loop, driven by the quality scorecard this runner already computes so no second notion of quality is introduced alongside it.
 
-Generated 2026-11-03T05:27:13.782Z from 246 failure modes.
+Generated 2026-11-03T05:50:49.290Z from 246 failure modes.
 
 | status | rows |
 | --- | --- |
@@ -19,9 +19,9 @@ Generated 2026-11-03T05:27:13.782Z from 246 failure modes.
 
 ### `runner/test/fullstack.test.ts [AIB-QUALITY] ... [fake model, fake docker]`
 
-Bears on: S1, S2, S7 (PRE_EXISTING_FAILURE)
+Bears on: S1, S2, S7 (PRE_EXISTING_FAILURE_CAUSE_UNKNOWN)
 
-Three end-to-end tests ('a verified 10/10 ... completes as ready_for_review', 'a score below 10 can never enter internal approval', 'only a provider-side verification missing') fail with "Acceptance checks failed: quality-gates, brief-conformance". Identical on the pristine baseline, so not a regression. Every gate test that runs the real gates against a fixture website passes, including all four cross-industry package runs, so what is unproven is the fake-model end-to-end wiring rather than the scorecard rules or the gates.
+Three end-to-end tests ('a verified 10/10 ... completes as ready_for_review', 'a score below 10 can never enter internal approval', 'only a provider-side verification missing') fail with "Acceptance checks failed: quality-gates, brief-conformance", identically on the pristine baseline. The cause is NOT yet established. What is established: every gate test that runs the real gates against a fixture passes, including all four cross-industry package runs, and running gates.mjs by hand against the prepared fixture these tests use passes every gate on this platform (A-J, with E pending_external as designed). Two candidate causes were checked and ruled out -- a missing business.phone (that was a different, deliberately incomplete fixture) and the POSIX `cp -r` the fake build uses to stage the site (it copies Windows paths correctly here). Until the cause is known, these three stand as unexplained rather than as evidence about S1, S2 or S7 either way.
 
 ### `runner/test/resilience.test.ts [AIB-RUNNER] checkpoints never carry links`
 

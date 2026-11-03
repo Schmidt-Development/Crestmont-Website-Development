@@ -1,6 +1,6 @@
 {
   "schema": "crestmont.failure-coverage/2",
-  "generatedAt": "2026-11-03T05:27:13.782Z",
+  "generatedAt": "2026-11-03T05:50:49.290Z",
   "principle": "Shared safeguards, not 231 separate systems: each failure mode is covered by one of the mechanisms in `safeguards`, and a row leaves OPEN only when a named test in THIS repository proves that mechanism catches it.",
   "honesty": [
     "OPEN means not investigated in this repository yet. It does not mean the failure cannot happen, and it does not mean it is uncovered.",
@@ -92,8 +92,8 @@
         "S2",
         "S7"
       ],
-      "detail": "Three end-to-end tests ('a verified 10/10 ... completes as ready_for_review', 'a score below 10 can never enter internal approval', 'only a provider-side verification missing') fail with \"Acceptance checks failed: quality-gates, brief-conformance\". Identical on the pristine baseline, so not a regression. Every gate test that runs the real gates against a fixture website passes, including all four cross-industry package runs, so what is unproven is the fake-model end-to-end wiring rather than the scorecard rules or the gates.",
-      "status": "PRE_EXISTING_FAILURE"
+      "detail": "Three end-to-end tests ('a verified 10/10 ... completes as ready_for_review', 'a score below 10 can never enter internal approval', 'only a provider-side verification missing') fail with \"Acceptance checks failed: quality-gates, brief-conformance\", identically on the pristine baseline. The cause is NOT yet established. What is established: every gate test that runs the real gates against a fixture passes, including all four cross-industry package runs, and running gates.mjs by hand against the prepared fixture these tests use passes every gate on this platform (A-J, with E pending_external as designed). Two candidate causes were checked and ruled out -- a missing business.phone (that was a different, deliberately incomplete fixture) and the POSIX `cp -r` the fake build uses to stage the site (it copies Windows paths correctly here). Until the cause is known, these three stand as unexplained rather than as evidence about S1, S2 or S7 either way.",
+      "status": "PRE_EXISTING_FAILURE_CAUSE_UNKNOWN"
     },
     "runner/test/resilience.test.ts [AIB-RUNNER] checkpoints never carry links": {
       "bears_on": [
