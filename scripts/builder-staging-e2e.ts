@@ -152,6 +152,29 @@ export async function report(q: Query): Promise<{ steps: Step[]; data: Record<st
   type Rev = { job_id: string; attempt: number; cycle: number; phase: string; score: number | null; decision: string | null;
     is_best: number; reverted: number; reverted_reason: string | null; file_count: number; total_bytes: number };
   // null = the table is absent, which is a different answer from "no snapshot yet" and must not read as one.
+  // What the Design Gallery actually gave this build, and how far each image travelled. Selection, retrieval
+  // and model consumption are three separate facts: a reference can be chosen, its bytes never fetched, and
+  // the model never shown it. Only the last one is "the builder used the gallery".
+  type Use = { reference_id: string; title: string; industry: string; relevance: number | null; matched_category: string | null; image_delivered: number; model_saw: number; seen_by_model: string | null };
+  const uses = jobIds
+    ? await safe<Use[] | null>(() => q<Use>(`SELECT u.reference_id, r.title, r.industry, u.relevance, u.matched_category, u.image_delivered, u.model_saw, u.seen_by_model        FROM design_reference_uses u JOIN design_references r ON r.id = u.reference_id        WHERE u.job_id IN (${jobIds}) ORDER BY u.relevance DESC, u.id`), null)
+    : [];
+  data.galleryUses = uses;
+  if (uses === null) {
+    add("Design gallery", "BLOCKED", "staging has no design_reference_uses columns: migration 0074 is not deployed");
+  } else if (!uses.length) {
+    add("Design gallery", first ? "FAIL" : "PENDING", first ? `no reference was selected for ${first.id}: the builder had no design references` : "no build job yet");
+  } else {
+    const seen = uses.filter((u) => u.model_saw);
+    const got = uses.filter((u) => u.image_delivered);
+    const relevant = uses.filter((u) => (u.relevance ?? 0) >= 0.7);
+    // A reference the model never saw is not a reference the build used, however well it was chosen.
+    add("Design gallery", seen.length > 0 ? "PASS" : "FAIL",
+      `${uses.length} reference(s) selected, ${got.length} image(s) retrieved, ${seen.length} seen by ${seen[0]?.seen_by_model ?? "no model"}; `
+      + `${relevant.length} from the customer's own trade (${[...new Set(relevant.map((u) => u.matched_category ?? u.industry))].join(", ") || "-"}); `
+      + uses.map((u) => `${u.title} [${u.industry} ${u.relevance ?? "?"}]${u.model_saw ? " SEEN" : u.image_delivered ? " fetched-only" : " not-retrieved"}`).join(", "));
+  }
+
   const revisions = jobIds
     ? await safe<Rev[] | null>(() => q<Rev>(`SELECT job_id, attempt, cycle, phase, score, decision, is_best, reverted, reverted_reason, file_count, total_bytes FROM build_revisions WHERE job_id IN (${jobIds}) ORDER BY attempt, cycle`), null)
     : [];
