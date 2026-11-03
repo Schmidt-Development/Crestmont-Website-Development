@@ -35,7 +35,8 @@ test("[AIB-020] the verification link is taken from the email body and nothing e
 });
 
 test("[AIB-020] the certification workflow keeps secrets away from the browser and reads staging only on main", () => {
-  const wf = readFileSync(".github/workflows/builder-staging-e2e.yml", "utf8");
+  // Normalised: the assertions below are written with "\n", and a CRLF checkout would otherwise match none of them.
+  const wf = readFileSync(".github/workflows/builder-staging-e2e.yml", "utf8").replace(/\r\n/g, "\n");
   assert.match(wf, /environment: staging/);
   assert.match(wf, /if: github\.ref == 'refs\/heads\/main'/);
   assert.match(wf, /permissions:\n  contents: read/);
@@ -46,6 +47,17 @@ test("[AIB-020] the certification workflow keeps secrets away from the browser a
     const runsPackages = /playwright|npm install|builder-staging-e2e\.ts (register|purchase)/.test(step);
     assert.ok(!(holdsToken && runsPackages), `step mixes the Cloudflare token with package code: ${step.split("\n")[0]}`);
   }
+
+  // One Chromium directory for the whole job. The install step and the browser steps each resolve
+  // PLAYWRIGHT_BROWSERS_PATH for themselves, and tests/e2e/support.ts -- which the browser commands import --
+  // defaults it to /opt/pw-browsers when it is unset, which is not where "playwright install" writes. Setting it
+  // per step invites exactly that drift, so it belongs to the job and must appear once, above "steps:".
+  const [jobHeader, stepsBlock] = wf.split("\n    steps:\n");
+  assert.ok(stepsBlock, "the job has a steps: block");
+  assert.match(jobHeader, /^      PLAYWRIGHT_BROWSERS_PATH: .+$/m, "the job pins the Chromium directory");
+  // Reading it in a run: is fine (the install step reports which directory it used); re-ASSIGNING it per step is
+  // what would let the install and the launch drift apart again.
+  assert.doesNotMatch(stepsBlock, /^s+PLAYWRIGHT_BROWSERS_PATH:/m, "no step sets it: install and launch must agree");
 });
 
 test("[AIB-020] the report: every step PENDING before anything happens; purchase → payment → project → queued build proven by rows (FIXTURE)", async () => {
@@ -92,4 +104,34 @@ test("[AIB-020] the report: every step PENDING before anything happens; purchase
   assert.equal(v("AI generation"), "PENDING");
   assert.equal(v("Subscription"), "PENDING");
   assert.equal(r.data.prelaunchMaintenanceCharges, 0, "no $199 charge at purchase");
+
+  // The AI Build preview line reports stored snapshots, and a queued build has none yet. "PENDING" and "the
+  // preview works" must never be confusable, so the wording is asserted too, not just the verdict.
+  assert.equal(v("Website preview"), "PENDING");
+  assert.match(r.steps.find((s) => s.step === "Website preview")!.evidence, /no snapshot stored yet/);
+
+  // A revision row with no file behind it is the one case that must not read as success: the Founder would open
+  // the preview and see nothing. The verdict is driven by stored files, never by the existence of a row.
+  const jobId = (r.data.buildJobs as { id: string; kind: string }[]).find((j) => j.kind === "first_build")!.id;
+  const insertRevision = (cycle: number, files: number, bytes: number, best: number) =>
+    t.db.prepare(`INSERT INTO build_revisions (id, job_id, project_id, cycle, attempt, phase, commit_sha, score, decision, is_best, reverted, reverted_reason, file_count, total_bytes, created_at)
+      VALUES (?, ?, ?, ?, 1, 'repair', 'deadbeef', 8.9, 'ACCEPT', ?, 0, NULL, ?, ?, ?)`)
+      .bind(`rev_fixture_${cycle}`, jobId, pid, cycle, best, files, bytes, new Date().toISOString()).run();
+
+  await insertRevision(0, 0, 0, 0);
+  r = await report(q);
+  assert.equal(v("Website preview"), "FAIL", "a snapshot that stored no file is not a working preview");
+
+  await insertRevision(1, 3, 4096, 1);
+  r = await report(q);
+  assert.equal(v("Website preview"), "PASS");
+  const preview = r.steps.find((s) => s.step === "Website preview")!.evidence;
+  assert.match(preview, /2 revision\(s\)/);
+  assert.match(preview, /3 file\(s\)/, "the file count the Founder would actually be served");
+  assert.match(preview, /1-1\/repair@8\.9 BEST/, "which revision is the best one, and its score");
+  assert.ok(preview.includes(`/staff/builds/${jobId}/inspect`), "the report links the page that shows the artifacts");
+
+  // preview_url belongs to the separate preview-deploy feature, which nothing here configures. The two lines are
+  // independent on purpose: neither may borrow the other's verdict.
+  assert.equal(v("Preview"), "PENDING", "no preview_url was ever recorded");
 });

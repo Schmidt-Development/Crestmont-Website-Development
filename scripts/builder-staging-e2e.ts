@@ -128,6 +128,34 @@ export async function report(q: Query): Promise<{ steps: Step[]; data: Record<st
   data.quality = quality[0] ?? null;
   add("Build validation", done ? "PASS" : "PENDING", `requirements ${reqs.map((r) => `${r.status}=${r.n}`).join(", ") || "—"}`);
   add("Preview", first?.preview_url ? "PASS" : "PENDING", first?.preview_url ? `preview ${first.preview_url}` : "no preview URL recorded");
+  // The AI Build preview (migration 0072): one immutable snapshot per meaningful revision, its files in R2, served
+  // by the platform itself at /staff/builds/<job>/inspect.
+  //
+  // This is deliberately a separate line from "Preview" above. That one reports build_jobs.preview_url, which
+  // belongs to the preview-DEPLOY feature (the runner publishing the generated site as its own Worker). Node 1
+  // has no PREVIEW_DEPLOY_COMMAND, so it never sets preview_url and that line stays PENDING by design -- which
+  // says nothing either way about whether the Founder can see the generated website. Stored snapshots do.
+  const jobIds = jobs.length ? jobs.map((j) => lit(j.id)).join(",") : "";
+  type Rev = { job_id: string; attempt: number; cycle: number; phase: string; score: number | null; decision: string | null;
+    is_best: number; reverted: number; reverted_reason: string | null; file_count: number; total_bytes: number };
+  // null = the table is absent, which is a different answer from "no snapshot yet" and must not read as one.
+  const revisions = jobIds
+    ? await safe<Rev[] | null>(() => q<Rev>(`SELECT job_id, attempt, cycle, phase, score, decision, is_best, reverted, reverted_reason, file_count, total_bytes FROM build_revisions WHERE job_id IN (${jobIds}) ORDER BY attempt, cycle`), null)
+    : [];
+  data.buildRevisions = revisions;
+  if (revisions === null) {
+    add("Website preview", "BLOCKED", "staging has no build_revisions table: migration 0072 is not deployed");
+  } else if (!revisions.length) {
+    add("Website preview", "PENDING", first ? `no snapshot stored yet for ${first.id}` : "no build job yet");
+  } else {
+    const best = revisions.find((r) => r.is_best);
+    const files = revisions.reduce((n, r) => n + r.file_count, 0);
+    const bytes = revisions.reduce((n, r) => n + r.total_bytes, 0);
+    const rolled = revisions.filter((r) => r.reverted);
+    // Files are the point: a row with no file behind it would mean the Founder opens the preview and sees nothing.
+    add("Website preview", files > 0 ? "PASS" : "FAIL",
+      `${revisions.length} revision(s) for ${first?.id ?? "-"}: ${revisions.map((r) => `${r.attempt}-${r.cycle}/${r.phase}${r.score === null ? "" : `@${r.score}`}${r.is_best ? " BEST" : ""}${r.reverted ? " rolled-back" : ""}`).join(", ")}; ${files} file(s), ${Math.round(bytes / 1024)} KB; rolled back ${rolled.length}; inspect ${BASE}/staff/builds/${first?.id ?? ""}/inspect`);
+  }
 
   const revs = jobs.filter((j) => j.kind === "revision");
   add("Revision request", "PENDING", "driven after the first preview is shared (not yet automated by this driver)");
