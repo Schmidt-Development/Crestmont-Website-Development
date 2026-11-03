@@ -122,6 +122,20 @@ export async function saveRevision(db: Db, storage: StorageAdapter | null, b: Re
     prepared.push({ ...v, bytes, sha: await sha256Hex(bytes) });
   }
 
+  // The ratchet that nominates a best revision runs inside ONE attempt: runner/src/job.ts holds bestCard in memory,
+  // so a fresh segment starts with no best and ratchetDecision returns "record-best" for its first scored cycle
+  // (ratchet.ts: best === null). "The best revision this build reached" spans every attempt, and only the platform
+  // sees them all -- the runner cannot, because restoreTo can revert only inside its own attempt's history. So the
+  // nomination is arbitrated here instead of taken on trust. Job bld_aeadb54ca53f57afcb9969bc reached 8.4/10 on
+  // attempt 1 and then showed a 6.8/10 revision as "the best verified revision the build reached".
+  const score = typeof b.score === "number" && Number.isFinite(b.score) ? Math.max(0, Math.min(10, b.score)) : null;
+  const incumbent = b.isBest
+    ? await db.prepare(`SELECT score FROM build_revisions WHERE job_id = ? AND is_best = 1`).bind(job.id).first<{ score: number | null }>()
+    : null;
+  // An unscored revision never claims the flag; a measured one always beats an unmeasured incumbent; a tie goes to
+  // the newer revision, so the preview follows the live work for as long as quality holds.
+  const isBest = !!b.isBest && score !== null && (!incumbent || incumbent.score === null || score >= incumbent.score);
+
   const id = newId("brev");
   const at = nowIso();
   for (const f of prepared) {
@@ -131,20 +145,21 @@ export async function saveRevision(db: Db, storage: StorageAdapter | null, b: Re
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .bind(id, job.id, job.project_id, cycle, job.attempts, phase,
       typeof b.commit === "string" && /^[0-9a-f]{7,64}$/i.test(b.commit) ? b.commit : null,
-      typeof b.score === "number" && Number.isFinite(b.score) ? Math.max(0, Math.min(10, b.score)) : null,
+      score,
       typeof b.decision === "string" ? sanitize(b.decision, 40) : null,
-      b.isBest ? 1 : 0, b.reverted ? 1 : 0,
+      isBest ? 1 : 0, b.reverted ? 1 : 0,
       b.reverted && typeof b.revertedReason === "string" ? sanitize(b.revertedReason, 500) : null,
       prepared.length, total, at).run();
   for (const f of prepared) {
     await db.prepare(`INSERT INTO build_revision_files (revision_id, path, kind, content_type, size_bytes, sha256, storage_key) VALUES (?,?,?,?,?,?,?)`)
       .bind(id, f.path, f.kind, f.contentType, f.bytes.length, f.sha, `builds/${job.id}/rev/${job.attempts}-${cycle}/${f.path}`).run();
   }
-  // The ratchet's best revision is a property of the build, so recording a new best clears the previous one.
-  if (b.isBest) await db.prepare(`UPDATE build_revisions SET is_best = 0 WHERE job_id = ? AND id <> ?`).bind(job.id, id).run();
+  // Exactly one revision is the build's best, so an honoured nomination clears the previous one -- and a nomination
+  // the arbitration rejected clears nothing, which is the whole point.
+  if (isBest) await db.prepare(`UPDATE build_revisions SET is_best = 0 WHERE job_id = ? AND id <> ?`).bind(job.id, id).run();
   await db.prepare(`INSERT INTO build_events (job_id, at, kind, message, actor_kind, data_json) VALUES (?,?,?,?,?,?)`)
     .bind(job.id, at, "preview", `Revision snapshot stored for cycle ${cycle} (${prepared.length} file(s), ${Math.round(total / 1024)} KB)`, "runner",
-      JSON.stringify({ cycle, phase, files: prepared.length, bytes: total, isBest: !!b.isBest, reverted: !!b.reverted })).run();
+      JSON.stringify({ cycle, phase, files: prepared.length, bytes: total, isBest, reverted: !!b.reverted })).run();
   return { revisionId: id, stored: prepared.length, alreadyStored: false };
 }
 

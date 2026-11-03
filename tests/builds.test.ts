@@ -481,6 +481,48 @@ test("[AIB-PREVIEW] a revision snapshot is stored once, is immutable, and is bou
     "a refused upload leaves no partial revision behind");
 });
 
+// The best revision is a property of the BUILD, but the ratchet that nominates it is scoped to one attempt (real
+// defect, job bld_aeadb54ca53f57afcb9969bc, 2026-11-03). runner/src/job.ts keeps bestCard in memory, so a second
+// attempt starts with no best at all; ratchetDecision then returns "record-best" for its first scored cycle
+// (ratchet.ts: best === null), and the platform cleared is_best across the whole job for it. A build that reached
+// 8.4/10 on attempt 1 therefore showed a 6.8/10 revision under "This is the best verified revision the build
+// reached". The runner cannot fix this -- restoreTo can only revert inside its own attempt's history, so only the
+// platform sees every attempt. It arbitrates: a nomination is honoured only if it is actually at least as good.
+test("[AIB-PREVIEW] a later attempt's best revision cannot demote a higher-scoring one from an earlier attempt", async () => {
+  const t = await app();
+  const { job } = await queuedProject(t);
+  const file = (path: string, body: string) => ({ path, base64: Buffer.from(body).toString("base64") });
+  const store = (c: { id: string; leaseToken: string }, cycle: number, score: number, body: string) =>
+    runner(t, "revisions/store", { jobId: c.id, leaseToken: c.leaseToken, cycle, phase: "repair", score, isBest: true, files: [file("index.html", body)] });
+  const best = async () => (await t.db.prepare(`SELECT attempt, cycle, score FROM build_revisions WHERE job_id = ? AND is_best = 1`)
+    .bind(job.id).all<{ attempt: number; cycle: number; score: number }>()).results.map((r) => [r.attempt, r.cycle, r.score]);
+
+  const a1 = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  await store(a1, 1, 6.3, "<h1>v1</h1>");
+  await store(a1, 3, 8.4, "<h1>v3</h1>");
+  assert.deepEqual(await best(), [[1, 3, 8.4]], "inside one attempt the ratchet's newest best wins");
+
+  // Attempt 2, exactly as the real build reached it: the lease expires, the sweep requeues, a fresh segment claims.
+  await t.db.prepare(`UPDATE build_jobs SET lease_expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?`).bind(job.id).run();
+  await B.sweepBuilds(t.db);
+  const a2 = (await runner(t, "claim", { runnerId: "r2" })).json.job;
+  assert.equal(a2.attempt, 2, "the sweep handed out a second attempt");
+
+  // The runner nominates this in good faith: its own ratchet has no record of attempt 1. The platform knows better.
+  const worse = await store(a2, 4, 6.8, "<h1>a2</h1>");
+  assert.equal(worse.status, 200, "the snapshot is still stored -- the Founder must be able to see it");
+  assert.deepEqual(await best(), [[1, 3, 8.4]], "the 8.4 revision is still the build's best");
+  const row = await t.db.prepare(`SELECT is_best FROM build_revisions WHERE job_id = ? AND attempt = 2 AND cycle = 4`)
+    .bind(job.id).first<{ is_best: number }>();
+  assert.equal(row!.is_best, 0, "and the weaker nomination is recorded as superseded, not as best");
+
+  // A later attempt that genuinely does better takes the flag, and takes it from the earlier attempt.
+  await store(a2, 5, 9.1, "<h1>a2 better</h1>");
+  assert.deepEqual(await best(), [[2, 5, 9.1]], "a real improvement is promoted");
+  assert.equal((await t.db.prepare(`SELECT COUNT(*) AS n FROM build_revisions WHERE job_id = ? AND is_best = 1`).bind(job.id).first<{ n: number }>())!.n, 1,
+    "exactly one revision is ever the best one");
+});
+
 // A requirement the RUNNER verified must survive a round-trip through the platform (real defect, run 5, 2026-11-03).
 // The platform already refuses "verified" without evidence on write and stores the evidence it was given -- but the
 // claim seed selected only key/label/status. A resumed segment therefore got status "verified" with no evidence, the
