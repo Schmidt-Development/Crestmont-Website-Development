@@ -12,7 +12,7 @@ import { runJob, type JobDeps } from "../src/job.ts";
 import { ControlPlaneClient } from "../src/control-plane.ts";
 import { silentLogger } from "../src/log.ts";
 import type { ModelProfile, RunnerConfig } from "../src/config.ts";
-import { DeterministicReviewer } from "../src/orchestrator/advisors.ts";
+import { DeterministicReviewer, LocalModelAdvisor } from "../src/orchestrator/advisors.ts";
 import { assertNoMeteredEnv, meteredVariables, SpendPolicyError } from "../src/orchestrator/cost-guard.ts";
 import { layers, groupLayer, runCoordinatedSessions } from "../src/orchestrator/sessions.ts";
 import type { CycleEvidence } from "../src/orchestrator/contracts.ts";
@@ -194,6 +194,39 @@ test("[AIB-015] model unavailable (SIMULATED): when a model cannot be loaded the
     assert.ok(r.cp.byPath("checkpoint").length >= 1, "checkpointed");
     assert.ok(r.model.requests.every((q) => q.model === MODEL_A), "no request reached the unloaded model");
   } finally { scheduler.close(); await r.cp.close(); await r.model.close(); }
+});
+
+// A real Business build (bld_38c053c49efff7bc05129253) lost its independent review to this: the reviewer session spent
+// all 40 turns calling read_file and never produced a verdict, so the build fell back to the rule-based reviewer,
+// which cannot judge visual quality. The session now reserves its last turns for the answer and withdraws the tools,
+// so a model that would explore forever still has to answer.
+test("[AIB-REVIEW] the reviewer always answers: an endlessly exploring session is made to produce its verdict", async () => {
+  const VERDICT = { decision: "FIX_DEFECTS", addresses: ["check:browser-check"], findings: ["placeholder text is visible on two pages"], nextPrompt: "Remove the placeholder text.", assessment: { visual_design: { verdict: "fail", note: "placeholders visible" } } };
+  let turns = 0;
+  let toolsOfferedOnLastTurn = true;
+  const client = {
+    async chat(req: { tools?: unknown[] }) {
+      turns++;
+      toolsOfferedOnLastTurn = Array.isArray(req.tools) && req.tools.length > 0;
+      // This model NEVER volunteers an answer: while it is given tools it keeps reading files.
+      if (toolsOfferedOnLastTurn) {
+        return { content: null, toolCalls: [{ id: `c${turns}`, type: "function", function: { name: "read_file", arguments: JSON.stringify({ path: "public/index.html" }) } }], usage: null, ms: 1 };
+      }
+      return { content: JSON.stringify(VERDICT), toolCalls: [], usage: null, ms: 1 };
+    },
+  };
+  const model: ModelProfile = { tag: "fake-a", role: "architect_reviewer", contextTokens: 8192, vramMb: 0, quantization: null, reasoning: null, vision: false, license: null };
+  const advisor = new LocalModelAdvisor({
+    client: client as never, scheduler: null, projectId: "prj_test", model,
+    repo: process.cwd(), maxTurns: 8, maxOutputTokens: 512, temperature: 0,
+  });
+  const evidence = { screenshots: [], criteria: [], securityFindings: [], checks: [{ id: "browser-check", ok: false, command: "browser-check", outputTail: "two pages have no nav landmark" }], requirements: [], commits: [], diffStat: "", report: "built" } as unknown as CycleEvidence;
+
+  const v = await advisor.review(null, evidence, 1);
+  assert.equal(v.decision, "FIX_DEFECTS", "the verdict is the model's own, produced once the tools were withdrawn");
+  assert.equal(toolsOfferedOnLastTurn, false, "the answering turn is offered no tools, so answering is all that is left");
+  assert.ok(turns <= 8, `the session stays inside its turn budget (used ${turns})`);
+  assert.ok(turns > 1, "it did get to explore first");
 });
 
 test("[AIB-015] $0 policy: metered variables are detected and refused; the deterministic reviewer never says ready without screenshots or with failing checks", async () => {
