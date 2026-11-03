@@ -207,3 +207,73 @@ export function previewHeaders(contentType: string): Record<string, string> {
     "cache-control": "private, max-age=31536000, immutable",
   };
 }
+
+/**
+ * Resolve a requested preview path against what the snapshot actually holds.
+ *
+ * The full-stack starter publishes root-relative, EXTENSIONLESS URLs -- `/about`, `/services` -- which its deployed
+ * Worker maps onto `about.html`. A snapshot holds the files, so the preview has to do the same mapping or every
+ * in-page link 404s. This is resolution, not rewriting: the bytes served are the bytes stored.
+ */
+export function resolveRequested(requested: string, has: (p: string) => boolean): string | null {
+  const raw = requested.replace(/^\/+/, "").replace(/\/+$/, "");
+  const candidates = raw === "" ? ["index.html"] : [raw, `${raw}.html`, `${raw}/index.html`];
+  for (const c of candidates) if (revisionPath(c) && has(c)) return c;
+  return null;
+}
+
+/**
+ * Point a revision's root-relative URLs at the prefix the preview is served under.
+ *
+ * WHY THIS IS NOT "REPAIRING THE WEBSITE". The stored snapshot is immutable and is what the customer receives; this
+ * rewrites only the copy flowing to the Founder's browser, and only URLs that begin with a single "/". Without it a
+ * preview served under /staff/builds/<job>/rev/<rev>/ would ask the staff origin for /assets/site.css and render
+ * completely unstyled -- a screenshot would be more honest than that, and the point of a live preview is to be more
+ * than a screenshot. What the builder wrote is still available byte-for-byte through the file list.
+ *
+ * Left alone: absolute URLs, protocol-relative URLs, fragments, mailto:, tel:, data: and anything already prefixed.
+ */
+export function rewriteForPrefix(contentType: string, text: string, prefix: string): string {
+  const p = prefix.replace(/\/+$/, "");
+  const url = (v: string) => (v.startsWith("//") || v.startsWith(`${p}/`) ? v : `${p}${v}`);
+  if (contentType.startsWith("text/html")) {
+    return text
+      .replace(/\b(href|src|poster|action)=(["'])(\/(?!\/)[^"']*)\2/gi, (_m, a: string, q: string, v: string) => `${a}=${q}${url(v)}${q}`)
+      .replace(/\bsrcset=(["'])([^"']*)\1/gi, (_m, q: string, v: string) => `srcset=${q}${v.split(",").map((part) => {
+        const s = part.trim();
+        const sp = s.indexOf(" ");
+        const link = sp < 0 ? s : s.slice(0, sp);
+        return link.startsWith("/") && !link.startsWith("//") ? `${url(link)}${sp < 0 ? "" : s.slice(sp)}` : s;
+      }).join(", ")}${q}`)
+      .replace(/url\(\s*(["']?)(\/(?!\/)[^)"']*)\1\s*\)/gi, (_m, q: string, v: string) => `url(${q}${url(v)}${q})`);
+  }
+  if (contentType.startsWith("text/css")) {
+    return text.replace(/url\(\s*(["']?)(\/(?!\/)[^)"']*)\1\s*\)/gi, (_m, q: string, v: string) => `url(${q}${url(v)}${q})`);
+  }
+  return text;
+}
+
+/** Content types whose text is rewritten for the preview prefix; everything else is served byte-for-byte. */
+export const REWRITTEN = (contentType: string) => contentType.startsWith("text/html") || contentType.startsWith("text/css");
+
+/**
+ * Everything the preview route needs for one request: resolve, fetch, rewrite if it is markup, and head it safely.
+ *
+ * Returns null when the revision does not hold that path, so the caller answers 404 rather than guessing.
+ */
+export async function servePreviewFile(db: Db, storage: StorageAdapter | null, jobId: string, attempt: number, cycle: number, requested: string, prefix: string) {
+  if (!storage) return null;
+  const rev = await db.prepare(`SELECT id FROM build_revisions WHERE job_id = ? AND attempt = ? AND cycle = ?`).bind(jobId, attempt, cycle).first<{ id: string }>();
+  if (!rev) return null;
+  const paths = new Set((await db.prepare(`SELECT path FROM build_revision_files WHERE revision_id = ?`).bind(rev.id).all<{ path: string }>()).results.map((r) => r.path));
+  const path = resolveRequested(requested, (p) => paths.has(p));
+  if (!path) return null;
+  const row = await db.prepare(`SELECT storage_key, content_type FROM build_revision_files WHERE revision_id = ? AND path = ?`).bind(rev.id, path).first<{ storage_key: string; content_type: string }>();
+  if (!row) return null;
+  const obj = await storage.get(row.storage_key);
+  if (!obj) return null;
+  const headers = previewHeaders(row.content_type);
+  if (!REWRITTEN(row.content_type)) return { body: obj.body as BodyInit, headers };
+  const bytes = obj.body instanceof Uint8Array ? obj.body : new Uint8Array(await new Response(obj.body as BodyInit).arrayBuffer());
+  return { body: rewriteForPrefix(row.content_type, new TextDecoder().decode(bytes), prefix) as BodyInit, headers };
+}
