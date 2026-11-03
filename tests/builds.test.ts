@@ -437,6 +437,50 @@ test("[AIB-004] protocol v1.1: a runner on another host fetches the job's own ch
   assert.equal((await runner(t, "checkpoint/fetch", { jobId: c2.id, leaseToken: c.leaseToken, checkpointKey: ck.json.checkpointKey })).json.error, "lease_lost");
 });
 
+// AI Build preview: the runner stores a snapshot of the generated website for each revision, and a later cycle
+// must never overwrite an earlier one -- a reverted revision is precisely the one the Founder needs to still see.
+test("[AIB-PREVIEW] a revision snapshot is stored once, is immutable, and is bounded", async () => {
+  const t = await app();
+  await queuedProject(t);
+  const c = (await runner(t, "claim", { runnerId: "host-a" })).json.job;
+  const file = (path: string, body: string) => ({ path, base64: Buffer.from(body).toString("base64") });
+
+  const first = await runner(t, "revisions/store", { jobId: c.id, leaseToken: c.leaseToken, cycle: 0, phase: "build", score: 7.5, decision: "FIX_DEFECTS", isBest: true,
+    files: [file("index.html", "<!doctype html><title>Junk</title><h1>v1</h1>"), file("assets/site.css", "h1{color:navy}"), file(".crestmont/screenshots/home-desktop.png", "PNGDATA")] });
+  assert.equal(first.status, 200);
+  assert.equal(first.json.stored, 3);
+  assert.equal(first.json.alreadyStored, false);
+
+  // A repeat for the same revision is refused as a no-op rather than merged: re-uploading would rewrite history.
+  const again = await runner(t, "revisions/store", { jobId: c.id, leaseToken: c.leaseToken, cycle: 0, phase: "build",
+    files: [file("index.html", "<!doctype html><title>Junk</title><h1>TAMPERED</h1>")] });
+  assert.equal(again.json.alreadyStored, true);
+  assert.equal(again.json.stored, 0);
+  assert.equal(again.json.revisionId, first.json.revisionId);
+  const kept = await t.db.prepare(`SELECT size_bytes FROM build_revision_files WHERE revision_id = ? AND path = 'index.html'`).bind(first.json.revisionId).first<{ size_bytes: number }>();
+  assert.equal(kept!.size_bytes, Buffer.byteLength("<!doctype html><title>Junk</title><h1>v1</h1>"), "the first bytes are still the stored ones, not the second upload's");
+
+  // A second cycle is its own revision, side by side with the first.
+  const second = await runner(t, "revisions/store", { jobId: c.id, leaseToken: c.leaseToken, cycle: 1, phase: "repair", score: 6.9, reverted: true, revertedReason: "the repair lowered the score from 7.5 to 6.9",
+    files: [file("index.html", "<!doctype html><title>Junk</title><h1>v2</h1>")] });
+  assert.equal(second.status, 200);
+  assert.notEqual(second.json.revisionId, first.json.revisionId);
+  const rows = (await t.db.prepare(`SELECT cycle, phase, score, is_best, reverted, reverted_reason FROM build_revisions WHERE job_id = ? ORDER BY cycle`).bind(c.id).all<{ cycle: number; phase: string; score: number; is_best: number; reverted: number; reverted_reason: string | null }>()).results;
+  assert.deepEqual(rows.map((r) => [r.cycle, r.phase, r.is_best, r.reverted]), [[0, "build", 1, 0], [1, "repair", 0, 1]], "both revisions survive; the best is marked and the reverted one is kept");
+  assert.match(rows[1].reverted_reason!, /lowered the score/, "and says why it was rolled back");
+
+  // Refusals: a path outside the website, an unknown type, and a lease that is not this runner's.
+  for (const bad of ["../../etc/passwd", "/etc/passwd", "server.ts", ".env"]) {
+    const r = await runner(t, "revisions/store", { jobId: c.id, leaseToken: c.leaseToken, cycle: 2, phase: "build", files: [file(bad, "x")] });
+    assert.equal(r.status, 422, `must refuse ${bad}`);
+  }
+  assert.equal((await runner(t, "revisions/store", { jobId: c.id, leaseToken: "not-the-lease", cycle: 2, phase: "build", files: [file("index.html", "x")] })).json.error, "lease_lost");
+  assert.equal((await runner(t, "revisions/store", { jobId: c.id, leaseToken: c.leaseToken, cycle: 2, phase: "nonsense", files: [file("index.html", "x")] })).status, 422, "phase is checked");
+  assert.equal((await runner(t, "revisions/store", { jobId: c.id, leaseToken: c.leaseToken, cycle: 2, phase: "build", files: [] })).status, 422, "an empty snapshot is not a revision");
+  assert.equal((await t.db.prepare(`SELECT COUNT(*) AS n FROM build_revisions WHERE job_id = ? AND cycle = 2`).bind(c.id).first<{ n: number }>())!.n, 0,
+    "a refused upload leaves no partial revision behind");
+});
+
 // A requirement the RUNNER verified must survive a round-trip through the platform (real defect, run 5, 2026-11-03).
 // The platform already refuses "verified" without evidence on write and stores the evidence it was given -- but the
 // claim seed selected only key/label/status. A resumed segment therefore got status "verified" with no evidence, the

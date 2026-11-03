@@ -18,6 +18,7 @@ import { notify } from "../services/notifications.ts";
 import { claimSignatureOnce, securityEvent } from "../services/security.ts";
 import * as DX from "../services/runner-diagnostics.ts";
 import { latestQuality } from "../services/build-quality.ts";
+import * as BR from "../services/build-revisions.ts";
 
 const RUNNER = "/api/builds/runner";
 const usd = (n: number) => `$${n.toFixed(2)}`;
@@ -98,6 +99,8 @@ export function register(r: Router): void {
   r.post(`${RUNNER}/heartbeat`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.heartbeat(ctx.db, await runnerBody(ctx), ctx.now()))));
   r.post(`${RUNNER}/checkpoint`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.checkpoint(ctx.db, ctx.storage, await runnerBody(ctx)))));
   r.post(`${RUNNER}/checkpoint/fetch`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.fetchCheckpoint(ctx.db, ctx.storage, await runnerBody(ctx)))));
+  // AI Build preview: an immutable snapshot of the generated website for one revision (migration 0072).
+  r.post(`${RUNNER}/revisions/store`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await BR.saveRevision(ctx.db, ctx.storage, await runnerBody(ctx)))));
   // Self-hosted AI drafts (ai_jobs with provider local-runner), same signed channel.
   r.post(`${RUNNER}/ai/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await AIR.claimAiJob(ctx.db, typeof b.runnerId === "string" ? b.runnerId : "", ctx.now())); }));
   r.post(`${RUNNER}/ai/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await AIR.completeAiJob(ctx.db, await runnerBody(ctx)))));
@@ -316,6 +319,20 @@ ${button("Register worker", { size: "sm" })}</form><p class="faint">Rented GPUs 
 ], { empty: emptyState("No websites in the pipeline yet", "A website enters the pipeline when its build is created from a paid intake.") })}</section>`;
     return staffPage(ctx, "AI website pipeline", body);
   });
+  // One file of a stored revision, for the embedded preview. ":rev" is "<attempt>-<cycle>".
+  //
+  // The generated frontend runs here, so it is served with a sandboxing CSP (BR.previewHeaders): an opaque origin,
+  // no access to the staff session or the platform API, whether it is framed or opened in its own tab. The
+  // generated BACKEND is never stored or executed by this Worker; the runner exercises it in its sandbox.
+  r.get("/staff/builds/:id/rev/:rev/*", async (ctx, p) => {
+    requireStaff(ctx, "builds.read");
+    const m = /^(\d{1,4})-(\d{1,4})$/.exec(p.rev);
+    if (!m) throw new HttpError(404, "No such revision");
+    const f = await BR.revisionFile(ctx.db, ctx.storage, p.id, Number(m[1]), Number(m[2]), p["*"]);
+    if (!f) throw new HttpError(404, "No such file in this revision");
+    return new Response(f.body as BodyInit, { status: 200, headers: BR.previewHeaders(f.contentType) });
+  });
+
   r.get("/staff/builds/:id", async (ctx, p) => {
     requireStaff(ctx, "builds.read");
     const d = await B.buildDetail(ctx.db, p.id);

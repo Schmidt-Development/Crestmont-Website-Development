@@ -19,12 +19,22 @@ export class Router {
     const parts = split(pathname);
     for (const r of this.routes) {
       if (r.method !== method && !(method === "HEAD" && r.method === "GET")) continue;
-      if (r.parts.length !== parts.length) continue;
+      // A pattern whose last segment is "*" captures the remaining segments as params["*"], joined with "/". Only a
+      // trailing "*" is a wildcard and it must match at least one segment, so "/a/*" never matches "/a" itself. The
+      // AI Build preview needs this: its generated pages reference assets through ordinary relative paths. The
+      // captured value is validated by the handler against its own allowlist and never used to build a file path.
+      const wild = r.parts.length > 0 && r.parts[r.parts.length - 1] === "*";
+      if (wild ? parts.length < r.parts.length : r.parts.length !== parts.length) continue;
       const params: Record<string, string> = {};
       let ok = true;
       for (let i = 0; i < r.parts.length; i++) {
         const rp = r.parts[i];
-        if (rp.startsWith(":")) {
+        if (wild && i === r.parts.length - 1) {
+          let rest: string;
+          try { rest = parts.slice(i).map((s) => decodeURIComponent(s)).join("/"); } catch { ok = false; break; }
+          if (rest.includes("\0") || rest.length > 400) { ok = false; break; }
+          params["*"] = rest;
+        } else if (rp.startsWith(":")) {
           let val: string;
           try { val = decodeURIComponent(parts[i]); } catch { ok = false; break; }
           if (!/^[A-Za-z0-9_.-]{1,120}$/.test(val)) { ok = false; break; }
