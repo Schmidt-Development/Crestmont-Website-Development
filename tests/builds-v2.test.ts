@@ -138,6 +138,44 @@ test("[AIB-012] V4 GPU scheduling (simulated runner): one GPU worker serves many
   assert.ok(await t.db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'builds.project_priority'`).first());
 });
 
+// An overrule is the PLATFORM's decision, so the platform owes the corrective prompt (real defect, run 5, 2026-11-03).
+// The reviewer contract says nextPrompt is null for every decision that is not a continuation, and the real reviewer
+// obeys it. When the platform then overruled WAIT_FOR_EXTERNAL_SETUP into CONTINUE_BUILDING because independent work
+// remained, the next guard found no prompt and recorded the build as ESCALATED / FAILED_NEEDS_INTERVENTION, blaming
+// the reviewer for "more work without a corrective prompt" it was never asked for. An 8.9/10 build was failed this
+// way. [AIB-013] missed it because it supplies a nextPrompt on the overruled cycles -- a shape no reviewer sends.
+test("[AIB-OVERRULE] a decision the platform overrules into more work gets its prompt from the outstanding items, not an escalation", async () => {
+  const t = await app();
+  const w = await worker(t, "Node 1");
+  await runner(t, "workers/status", { runnerId: "node1", workerId: w.id, workerKey: w.key, status: {} });
+  const site = await website(t, "Beta Bakery");
+  const job = (await claim(t, w)).json.job;
+  const shots = [{ path: "s/home-desktop.png", viewport: "desktop", page: "/" }, { path: "s/home-mobile.png", viewport: "mobile", page: "/" }];
+  const submit = (cycle: number, extra: Record<string, unknown>) => runner(t, "cycles/submit", { jobId: job.id, leaseToken: job.leaseToken, cycle, prompt: "build", promptSource: "reviewer", reviewerProvider: "local:model-a", ...extra });
+
+  // The reviewer waits on the customer's provider, but a check is still failing: real independent work remains.
+  const wait = (await submit(1, { decision: "WAIT_FOR_EXTERNAL_SETUP", nextPrompt: null,
+    evidence: { checks: [{ id: "browser-check", ok: false, detail: "contrast 3.1:1 on /menu" }], criteria: [{ id: "ac-pages", status: "passed" }], screenshots: shots, integrationBlockers: ["Email: the customer's Resend domain is not verified"] } })).json;
+  assert.equal(wait.decision, "CONTINUE_BUILDING", "the overrule stands: external setup does not stop independent work");
+  assert.equal(wait.continue, true, "and the build goes on rather than waiting for a person");
+  assert.match(wait.prompt ?? "", /browser-check/, "the prompt names the outstanding work the overrule was based on");
+  assert.doesNotMatch(wait.reason, /reviewer asked for more work/, "the reviewer asked for nothing of the kind; the platform changed the decision");
+  assert.equal(await stageOf(t, site.pid), "REVISION_REQUIRED");
+
+  // Same for a premature "ready" with no prompt: one repair round, not a failed build.
+  const ready = (await submit(2, { decision: "READY_FOR_INTERNAL_APPROVAL", nextPrompt: null,
+    evidence: { checks: [{ id: "browser-check", ok: true }], criteria: [{ id: "ac-pages", status: "failed" }], screenshots: shots } })).json;
+  assert.equal(ready.decision, "FIX_DEFECTS");
+  assert.match(ready.prompt ?? "", /ac-pages/, "the failing criterion is what the builder is sent to fix");
+
+  // The loop is still bounded: an overruled continuation that repeats itself escalates like any other.
+  const stuck = { decision: "READY_FOR_INTERNAL_APPROVAL", nextPrompt: null,
+    evidence: { checks: [{ id: "browser-check", ok: true }], criteria: [{ id: "ac-pages", status: "failed" }], screenshots: shots } };
+  assert.equal((await submit(3, stuck)).json.decision, "FIX_DEFECTS");
+  assert.equal((await submit(4, stuck)).json.decision, "ESCALATED", "three identical cycles still end the loop for a person");
+  assert.equal(await stageOf(t, site.pid), "FAILED_NEEDS_INTERVENTION");
+});
+
 test("[AIB-013] review loop (simulated Model A reviewer): evidence overrules a premature 'ready', corrective prompts are traceable, models recorded, loops are bounded", async () => {
   const t = await app();
   const w = await worker(t, "Node 1");

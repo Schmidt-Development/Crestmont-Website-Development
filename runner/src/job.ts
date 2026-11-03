@@ -37,7 +37,7 @@ import { contractCheck } from "./contracts-check.ts";
 import { persistenceCheck } from "./persistence-check.ts";
 import { writeBriefFiles, systemPromptAppend, phasePrompt } from "./prompt.ts";
 import type { Phase } from "./prompt.ts";
-import { readRequirements, checkRequirements, readStringList, readAgentReport } from "./requirements.ts";
+import { readRequirements, withCheckRequirements, readStringList, readAgentReport } from "./requirements.ts";
 import { buildReport } from "./report.ts";
 import { run, proxyEnv } from "./exec.ts";
 import { runOperatorCommand } from "./operator-command.ts";
@@ -290,7 +290,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     const commit = git ? await headCommit(git) : null;
     const seed = job.requirements;
     const agentReqs = ws ? readRequirements(ws.repo, seed) : seed;
-    const requirements = [...agentReqs, ...checkRequirements(fields.checks ?? [])];
+    const requirements = withCheckRequirements(agentReqs, fields.checks ?? []);
     const missingInformation = [...(ws ? readStringList(ws.repo, "needs-information.json") : []), ...(fields.missingInformation ?? [])];
     const assumptions = [...job.brief.content.assumptions, ...(ws ? readStringList(ws.repo, "assumptions.json") : [])];
     if (missingFiles.length) assumptions.push(`Customer files that could not be downloaded: ${missingFiles.join(", ")}`);
@@ -676,7 +676,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       scoreNow = (verdict, previewDeployed, iteration) => {
         const ev = lastEvidence;
         return score({ packageId: effectivePackage, capabilities: caps, requested, checks, gates: readGates(ws!.repo), screenshots: ev?.screenshots ?? [], review: verdict,
-          requirements: readRequirements(ws!.repo, job.requirements), criteria: ev?.criteria ?? [], securityFindings: ev?.securityFindings ?? [], previewDeployed, iteration });
+          requirements: withCheckRequirements(readRequirements(ws!.repo, job.requirements), checks), criteria: ev?.criteria ?? [], securityFindings: ev?.securityFindings ?? [], previewDeployed, iteration });
       };
       let promptUsed = spec?.masterPrompt ?? "Runner build phases (plan, build, verify) from BRIEF.md";
       let promptSource: "architect" | "reviewer" | "runner" = spec ? "architect" : "runner";
@@ -691,7 +691,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         if (stop.reason || st.localLimit || st.agentError) break;
         if (checks.some((c) => !c.ok)) writeInside(ws.repo, path.join(".crestmont", "runner-checks.json"), JSON.stringify(checks.map(({ id, command, ok, code, outputTail }) => ({ id, command, ok, code, outputTail })), null, 2));
         await commitAll(git!, `AI build: cycle ${cycle} evidence`);
-        const evidence = await collectEvidence({ repo: ws.repo, pathEnv: cfg.agentPath, home: ws.home, baseCommit: cycleBase, checks, requirements: readRequirements(ws.repo, job.requirements), spec });
+        const evidence = await collectEvidence({ repo: ws.repo, pathEnv: cfg.agentPath, home: ws.home, baseCommit: cycleBase, checks, requirements: withCheckRequirements(readRequirements(ws.repo, job.requirements), checks), spec });
         lastEvidence = evidence;
         // Builder outputs: integration status and sensitive-action requests (the build continues meanwhile).
         try {

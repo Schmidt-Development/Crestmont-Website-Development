@@ -481,7 +481,11 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
     await event(db, job.id, "transition", `Claimed by runner ${runnerId}${worker ? ` for worker ${worker.label}` : ""} (attempt ${job.attempts}; ${billing})`, { kind: "runner" },
       { from: "queued", to: "preparing", data: { runnerVersion: version, capabilities, paidProvider: !capabilities.includes(ZERO_COST_CAPABILITY) } });
     const brief = job.brief_id ? await db.prepare(`SELECT id, version, sha256, content_json FROM build_briefs WHERE id = ?`).bind(job.brief_id).first<{ id: string; version: number; sha256: string; content_json: string }>() : null;
-    const reqs = (await db.prepare(`SELECT key, label, status FROM build_requirements WHERE job_id = ? ORDER BY key`).bind(job.id).all<{ key: string; label: string; status: string }>()).results;
+    // The evidence travels with the status: this platform refuses "verified" without it on write, and the runner
+    // applies the same rule on read, so a seed stripped of evidence is downgraded and a passing check is reported
+    // as unverified. Blockers come back for the same reason -- a resumed segment has to know what is wrong.
+    const reqs = (await db.prepare(`SELECT key, label, status, evidence, blocker FROM build_requirements WHERE job_id = ? ORDER BY key`).bind(job.id).all<{ key: string; label: string; status: string; evidence: string | null; blocker: string | null }>()).results
+      .map((r) => ({ key: r.key, label: r.label, status: r.status, ...(r.evidence ? { evidence: r.evidence } : {}), ...(r.blocker ? { blocker: r.blocker } : {}) }));
     const remaining = Math.max(0, budget - spent);
     return {
       job: {

@@ -52,6 +52,23 @@ export function checkRequirements(checks: CheckOutcome[]): RequirementItem[] {
     : { key: `check:${c.id}`, label: c.label, status: "blocked" as const, blocker: `Runner ran \`${c.command}\`: exit ${c.code}${c.timedOut ? " (timed out)" : ""}`.slice(0, LIMITS.blocker) });
 }
 
+/**
+ * The runner's own check results overlaid on a requirement list: what just ran wins over the claim seed's echo.
+ *
+ * From the second segment on, the seed carries back the check:* items this runner reported earlier. Judging those
+ * instead of the live result is wrong twice over: the seed's "verified" has lost the evidence that justified it (so
+ * normalizeItem downgrades it and the scorecard calls a PASSING check unverified -- the defect that recorded an
+ * 8.9/10 build as failed), and a stale pass would otherwise hide a check that is failing now. Replaces by key, so
+ * the same check never appears twice in the owner's report.
+ */
+export function withCheckRequirements(list: RequirementItem[], checks: CheckOutcome[]): RequirementItem[] {
+  const live = checkRequirements(checks);
+  if (!live.length) return list;
+  const byKey = new Map(list.map((r) => [r.key, r]));
+  for (const c of live) byKey.set(c.key, c);
+  return [...byKey.values()];
+}
+
 export function readStringList(repo: string, file: string, max = 50): string[] {
   const v = readJson(path.join(repo, ".crestmont", file));
   if (!Array.isArray(v)) return [];

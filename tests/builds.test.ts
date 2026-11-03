@@ -437,6 +437,32 @@ test("[AIB-004] protocol v1.1: a runner on another host fetches the job's own ch
   assert.equal((await runner(t, "checkpoint/fetch", { jobId: c2.id, leaseToken: c.leaseToken, checkpointKey: ck.json.checkpointKey })).json.error, "lease_lost");
 });
 
+// A requirement the RUNNER verified must survive a round-trip through the platform (real defect, run 5, 2026-11-03).
+// The platform already refuses "verified" without evidence on write and stores the evidence it was given -- but the
+// claim seed selected only key/label/status. A resumed segment therefore got status "verified" with no evidence, the
+// runner's own honesty rule downgraded it to implemented_unverified, and the quality scorecard reported
+// "requirements not verified: check:brief-conformance, ..." for seven checks that had all PASSED. That single false
+// failure then overruled the reviewer's correct WAIT_FOR_EXTERNAL_SETUP into a continuation with no corrective
+// prompt, and an 8.9/10 build was recorded as FAILED_NEEDS_INTERVENTION.
+test("[AIB-REQ-EVIDENCE] the claim seed carries a verified requirement's evidence, so a resumed segment does not re-judge it", async () => {
+  const t = await app();
+  await queuedProject(t);
+  const c = (await runner(t, "claim", { runnerId: "host-a" })).json.job;
+  await runner(t, "requirements", { jobId: c.id, leaseToken: c.leaseToken, items: [
+    { key: "check:quality-gates", label: "Acceptance gates A-J", status: "verified", evidence: "Runner ran `npm run gates`: exit 0" },
+    { key: "check:browser-check", label: "Headless Chromium", status: "blocked", blocker: "Chromium not installed" },
+  ] });
+  await runner(t, "complete", { jobId: c.id, leaseToken: c.leaseToken, outcome: "released", runCostUsd: 0, error: "segment limit" });
+
+  const seed = (await runner(t, "claim", { runnerId: "host-b" })).json.job.requirements as { key: string; status: string; evidence?: string; blocker?: string }[];
+  const gates = seed.find((r) => r.key === "check:quality-gates")!;
+  assert.equal(gates.status, "verified");
+  assert.match(gates.evidence ?? "", /exit 0/, "the evidence that justifies \"verified\" travels with it, or the runner must downgrade it again");
+  const browser = seed.find((r) => r.key === "check:browser-check")!;
+  assert.equal(browser.status, "blocked");
+  assert.match(browser.blocker ?? "", /Chromium not installed/, "a blocker is evidence too: it tells the resumed segment what is wrong");
+});
+
 // ── AI Website Builder readiness (2026-10-28): paid-provider second key, preview hosts, revision previews ──
 
 test("[AIB-005] [AIB-007] paid AI needs the platform's second key: a runner without zero token cost gets no build unless BUILD_ALLOW_PAID_PROVIDER=true; claims record the provider kind", async () => {

@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { buildReport } from "../src/report.ts";
 import type { ReportInput } from "../src/report.ts";
-import { normalizeItem, readRequirements, checkRequirements } from "../src/requirements.ts";
+import { normalizeItem, readRequirements, checkRequirements, withCheckRequirements } from "../src/requirements.ts";
 import { makeJob, tmp } from "./helpers.ts";
 
 function input(over: Partial<ReportInput> = {}): ReportInput {
@@ -74,4 +74,34 @@ test("[AIB-RUNNER] requirement statuses are normalized honestly (verified needs 
   assert.deepEqual(merged.map((r) => [r.key, r.status, r.label]), [["page:home", "verified", "Home"], ["page:contact", "remaining", "Contact"], ["new:item", "remaining", undefined]]);
   const cr = checkRequirements([{ id: "x", label: "X", command: "npm test", ok: false, code: 2, timedOut: true, outputTail: "" }]);
   assert.deepEqual(cr, [{ key: "check:x", label: "X", status: "blocked", blocker: "Runner ran `npm test`: exit 2 (timed out)" }]);
+});
+
+// The scorecard must judge the checks that just ran, not an echo of them from the claim seed (real defect, run 5,
+// 2026-11-03). Segment 1 reports check:* items; from segment 2 on they come back in the seed. Two things then go
+// wrong if the seed is trusted: a seed "verified" stripped of its evidence is downgraded and reported as an
+// unverified requirement though the check PASSED, and -- worse -- a stale "verified" from an earlier segment would
+// mask a check that is failing NOW. The live result has to win, and it has to replace rather than duplicate.
+test("[AIB-REQ-EVIDENCE] a live check result overrides the seed's echo of the same key, in both directions", () => {
+  const seed = [
+    { key: "page:home", label: "Home", status: "verified" as const, evidence: "screenshot" },
+    { key: "check:quality-gates", label: "Gates A-J", status: "verified" as const }, // seed echo: evidence dropped in transit
+    { key: "check:browser-check", label: "Chromium", status: "verified" as const }, // stale: it passed in an earlier segment
+  ];
+  const live = withCheckRequirements(seed, [
+    { id: "quality-gates", label: "Gates A-J", command: "npm run gates", ok: true, code: 0, timedOut: false, outputTail: "" },
+    { id: "browser-check", label: "Chromium", command: "node browser-check.mjs", ok: false, code: 1, timedOut: false, outputTail: "overflow" },
+  ]);
+
+  assert.equal(live.length, 3, "the live result replaces the seed's entry for that key; it never adds a second one");
+  const gates = live.find((r) => r.key === "check:quality-gates")!;
+  assert.equal(gates.status, "verified", "the check passed in this segment, so it counts as verified");
+  assert.match(gates.evidence ?? "", /exit 0/, "with the runner's own evidence, which is why it survives normalization");
+  const browser = live.find((r) => r.key === "check:browser-check")!;
+  assert.equal(browser.status, "blocked", "a check failing NOW outranks a stale pass from an earlier segment");
+  assert.equal(live.find((r) => r.key === "page:home")!.status, "verified", "requirements the checks say nothing about are untouched");
+});
+
+test("[AIB-REQ-EVIDENCE] with no checks run in this segment the list is returned unchanged", () => {
+  const seed = [{ key: "check:quality-gates", status: "implemented_unverified" as const }];
+  assert.deepEqual(withCheckRequirements(seed, []), seed, "nothing ran, so nothing is claimed either way");
 });
