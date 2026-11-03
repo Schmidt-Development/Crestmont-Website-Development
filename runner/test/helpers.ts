@@ -574,3 +574,15 @@ export const POLLUTED_ENV: Record<string, string> = {
   LANG: "C.UTF-8",
   TZ: "UTC",
 };
+
+/**
+ * Reads a repository file as text with line endings normalized to "\n".
+ *
+ * The working tree may be checked out with CRLF (git's autocrlf), and several tests assert on the exact content of
+ * repository files: the Squid template, the compose file, the Dockerfiles, the CI workflows, the installer. A
+ * pattern written as `foo:\n  bar` cannot match `foo:\r\n  bar`, so on such a checkout those assertions failed and
+ * looked like real divergences. They were not: the paid-AI host list check, for instance, reported three phantom
+ * empty entries and was verifying nothing. What a file MEANS does not depend on how the checkout stored its line
+ * endings, so a test that asserts on content should not either.
+ */
+export const readText = (p: string): string => readFileSync(p, "utf8").replace(/\r\n/g, "\n");
