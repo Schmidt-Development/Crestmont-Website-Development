@@ -82,27 +82,43 @@ export interface EligibilityCensus {
 const n = async (db: Db, sql: string, ...b: unknown[]) => Number((await db.prepare(sql).bind(...b).first<{ n: number | null }>())?.n ?? 0);
 
 /**
+ * The census as plain SQL, keyed by the field it fills. Exported because two things need the same definition of
+ * "eligible": this service (through the D1 binding) and the staging reconciliation report (through
+ * `wrangler d1 execute`, which cannot call TypeScript). A reconciliation whose two halves disagree about eligibility
+ * is worse than no reconciliation, so there is exactly one definition and both read it.
+ *
+ * The threshold and attempt cap are interpolated as numbers, never as caller text.
+ */
+export function censusQueries(qualifyThreshold: number): Record<keyof EligibilityCensus, string> {
+  const t = Number(qualifyThreshold) || 0;
+  const maxAttempts = Number(MAX_PROMOTE_ATTEMPTS);
+  return {
+    totalOnRecord: `SELECT COUNT(*) AS n FROM research_prospects`,
+    uniqueQualified: `SELECT COUNT(*) AS n FROM research_prospects WHERE qualified = 1`,
+    eligibleNow: `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'qualified' AND qualified = 1 AND score >= ${t} AND promote_attempts < ${maxAttempts}`,
+    belowThreshold: `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'qualified' AND qualified = 1 AND score < ${t}`,
+    outOfAttempts: `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'qualified' AND promote_attempts >= ${maxAttempts}`,
+    awaitingVerification: `SELECT COUNT(*) AS n FROM research_prospects WHERE website_class IN ('WEBSITE_UNVERIFIED','BUSINESS_IDENTITY_UNCERTAIN')`,
+    notQualified: `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'not_qualified'`,
+    needsPerson: `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'review'`,
+    suppressed: `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'suppressed'`,
+    existingCrm: `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'existing_crm'`,
+    alreadyPromoted: `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'promoted'`,
+    dismissed: `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'dismissed'`,
+  };
+}
+
+/**
  * Where every research record stands relative to the CRM. This is the reconciliation denominator: `eligibleNow` is
  * the population automatic promotion is responsible for, and every other number is a stated reason a record is not
  * in it. They sum to the records on file, so nothing is silently dropped.
  */
 export async function eligibilityCensus(db: Db): Promise<EligibilityCensus> {
   const s = await loadSettings(db);
-  const t = s.qualify_threshold;
-  return {
-    totalOnRecord: await n(db, `SELECT COUNT(*) AS n FROM research_prospects`),
-    uniqueQualified: await n(db, `SELECT COUNT(*) AS n FROM research_prospects WHERE qualified = 1`),
-    eligibleNow: await n(db, `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'qualified' AND qualified = 1 AND score >= ? AND promote_attempts < ?`, t, MAX_PROMOTE_ATTEMPTS),
-    belowThreshold: await n(db, `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'qualified' AND qualified = 1 AND score < ?`, t),
-    outOfAttempts: await n(db, `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'qualified' AND promote_attempts >= ?`, MAX_PROMOTE_ATTEMPTS),
-    awaitingVerification: await n(db, `SELECT COUNT(*) AS n FROM research_prospects WHERE website_class IN ('WEBSITE_UNVERIFIED','BUSINESS_IDENTITY_UNCERTAIN')`),
-    notQualified: await n(db, `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'not_qualified'`),
-    needsPerson: await n(db, `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'review'`),
-    suppressed: await n(db, `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'suppressed'`),
-    existingCrm: await n(db, `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'existing_crm'`),
-    alreadyPromoted: await n(db, `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'promoted'`),
-    dismissed: await n(db, `SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'dismissed'`),
-  };
+  const q = censusQueries(s.qualify_threshold);
+  const out = {} as EligibilityCensus;
+  for (const [key, sql] of Object.entries(q)) out[key as keyof EligibilityCensus] = await n(db, sql);
+  return out;
 }
 
 /** How many prospects are eligible and due for an attempt right now. */
