@@ -203,8 +203,53 @@ WHERE len(addresses) > 0 AND addresses[1].country = 'US' AND names.primary IS NO
 (This session could not run it: the DuckDB `httpfs` extension host is not reachable through the container's egress
 proxy, which is why the sample above was read with plain HTTP range requests instead.)
 
+### Measured at scale on staging, 2026-11-03 (supersedes the 15.3% sample for the qualification rate)
+
+The 15.3% above is a 1,197-business sample of one city. Staging has since accumulated a far larger real measurement,
+read from the authoritative rows by `.github/workflows/research-24h-report.yml` (read-only) at 16:23 UTC over a
+16.4-hour observed window:
+
+| Measured on staging | Figure |
+|---|---|
+| Businesses evaluated (worker-reported, in the window) | 23,169 |
+| Websites checked | 32,390 (1.40 per business) |
+| Qualified research prospects (distinct, first seen in the window) | 4,867 |
+| **Observed qualification rate** | **21.01%** |
+| Mean evaluated/hour across the window | 1,411 |
+| Distinct businesses on record (all time) | 11,263 |
+| Unique qualified on record | 8,405 |
+| Eligible for CRM promotion right now | 7,698 |
+| Needing a person (shared number or same-business review) | 416 — **4.95% of unique qualified** |
+| Already matched to an existing CRM contact | 2 |
+| Processing failures | 0 |
+
+So **21.01%**, not 15.3%, is the rate to plan against: it is measured over 19× more businesses, across many states
+rather than one city. It moves every derived figure in the direction of *more* achievable:
+
+| Recomputed at 21.01% | Was (15.3%) | Now |
+|---|---|---|
+| Evaluations/day for 25,000 qualified | 163,400 | **118,990** (4,958/h, 1.38/s) → concurrency ≈ **57** |
+| Evaluations/day for 60,000 qualified (target C) | ≈ 392,000 | **≈ 285,600** (11,899/h) → concurrency ≈ **137** |
+| National qualified pool (9.20 M with a phone) | ≈ 1.41 M | **≈ 1.93 M** |
+| First-pass days at 25,000/day | ≈ 56 | **≈ 77** |
+| First-pass days at 60,000/day | ≈ 23 | **≈ 32** |
+| Annual-turnover upper bound on *new* qualified/day | ≈ 3,856 | **≈ 5,295** |
+
+The conclusions do not change: the pool is larger but still finite, so 60,000 **new** qualified prospects a day is
+still out by more than a factor of ten against the ≈5,295/day ceiling, and target B (60,000 evaluated/day) is still
+the one that is sustainable forever.
+
+**The promotion rate is still not measured.** Automatic promotion has never been switched on (`auto_promote = 0` on
+staging as of 2026-11-03T19:07 UTC), so every CRM lead research has produced so far came from a bounded Owner
+reconciliation: 290 prospects sit at `promoted`, against 7,698 still eligible. What the 4.95% review rate does give
+is a *ceiling*: at most ~95% of qualified prospects can become CRM leads, so **≈19.9% of evaluated businesses** is
+the upper bound on the lead rate — an estimate, not a measurement. The real figure needs one full day with
+`auto_promote` on; the report's "Promotion runs ever recorded, by trigger" and "Promotion integrity" sections print
+the created / existing / review / suppressed / rejected / failed counts that settle it.
+
 ### The 25,000-qualified-per-day target (2026-11-02 activation request)
-At the measured 15.3% qualification rate, 25,000 qualified prospects a day needs **163,400 businesses evaluated per
+At the 15.3% sample rate (see the table above for the same arithmetic at the measured 21.01%), 25,000 qualified
+prospects a day needs **163,400 businesses evaluated per
 day** — 6,808/hour, 113/minute, 1.9/second — which matches the Founder's own planning figures. Against the measured
 real-data rate of 4,168 businesses/hour at concurrency 48, that implies **concurrency of about 80**, roughly
 **884,000 HTTP requests a day** (~177 GB, ~16 Mbit/s sustained, on the unmeasured ~200 KB/request assumption) and

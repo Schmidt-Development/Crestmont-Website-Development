@@ -269,10 +269,11 @@ ${writable && nextStages.length ? html`<form method="post" action="${base}/stage
 ${select({ name: "to", label: "Move to", options: nextStages.map((s) => ({ value: s, label: s === "qualified" && ["lost", "rejected", "archived"].includes(lead.stage) ? "Reopen (qualified)" : label(s) })) })}
 ${input({ name: "reason", label: "Reason", hint: "Required for Lost or Rejected." })}<div class="form-actions">${button("Change stage", { size: "sm" })}</div></form>
 <p class="faint">Converted is set automatically when Stripe confirms payment.</p>` : html`<p class="muted">${writable ? "No further manual stage changes from here." : "Only the lead owner can change the stage."}</p>`}</div>
-${/* The assignment picker is gone from the sales layout by request. Ownership is still shown in Contact & company,
-      POST .../assign still works for the offboarding and reassignment workflows that depend on it, and no column,
-      permission or route was removed. */ ""}
-${can(actor, "lead.assign") ? html`<details class="card"><summary>Change owner (${lead.owner_name ?? "unassigned"})</summary><form method="post" action="${base}/assign" class="stack">${csrf(ctx)}
+${/* The assignment picker was folded away by request: on an assigned lead the owner is a fact, shown in
+      Contact & company, and re-assigning is occasional. On an UNASSIGNED lead it is the next thing anyone does, so
+      the disclosure starts open -- a lead nobody owns must never need a click to find out how to give it one.
+      POST .../assign is unchanged, and no column, permission or route was removed. */ ""}
+${can(actor, "lead.assign") ? html`<details class="card"${lead.owner_user_id ? "" : " open"}><summary>${lead.owner_user_id ? html`Change owner (${lead.owner_name})` : "Assign an owner"}</summary><form method="post" action="${base}/assign" class="stack">${csrf(ctx)}
 ${select({ name: "owner", label: "Assign to", options: staff.map((s) => ({ value: s.id, label: s.display_name })), value: lead.owner_user_id, includeBlank: "Unassigned" })}<div class="form-actions">${button("Save owner", { size: "sm", variant: "secondary" })}</div></form></details>` : ""}
 <div class="card stack"><h2 style="font-size:1.2rem">Follow-up tasks</h2>
 ${tasks.length ? html`<ul class="checklist">${tasks.map((t) => html`<li>${t.completed_at ? html`<s>${t.body}</s> <span class="faint">done ${formatDate(t.completed_at)}</span>` : html`<strong>${t.body}</strong> <span class="${t.due_at && t.due_at < ctx.now().toISOString() ? "error-text" : "faint"}">due ${formatDate(t.due_at)}</span> ${writable ? actionForm(ctx, `${base}/tasks/${t.id}/complete`, "Mark done") : ""}`}</li>`)}</ul>` : html`<p class="muted">No follow-ups scheduled.</p>`}

@@ -266,21 +266,45 @@ async function main() {
     const q1 = async (sql: string) => Number((await q<{ n: number }>(sql))[0]?.n ?? 0);
     const hasColumn = await q1(`SELECT COUNT(*) AS n FROM pragma_table_info('research_settings') WHERE name = 'auto_promote'`);
     if (!hasColumn) return "skipped: migration 0073 has not been applied to this environment yet";
-    const eligibleBefore = await q1(`SELECT COUNT(*) AS n FROM research_prospects p, research_settings s WHERE s.id = 1 AND p.status = 'qualified' AND p.qualified = 1 AND p.score >= s.qualify_threshold AND p.promote_attempts < 5`);
-    const leadsBefore = await q1(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent'`);
+    // `wrangler d1 execute --remote` reads whichever replica answers, so a row written a moment ago by the Worker
+    // may not be in the next read. Every claim below is therefore made against a value that has SETTLED: the query
+    // is repeated until the condition holds, and the check fails only if it never does. Comparing one unsettled
+    // read with another is what made this check report "0 leads appeared" against a run that had promoted dozens.
+    const settle = async <T>(what: string, read: () => Promise<T>, ok: (v: T) => boolean, ms = 90_000): Promise<T> => {
+      const until = Date.now() + ms; let last = await read();
+      while (!ok(last) && Date.now() < until) { await new Promise((r) => setTimeout(r, 3_000)); last = await read(); }
+      assert(ok(last), `${what}: still ${JSON.stringify(last)} after ${Math.round(ms / 1000)}s of replica settling`);
+      return last;
+    };
+    const leadCount = () => q1(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent'`);
+    const eligibleCount = () => q1(`SELECT COUNT(*) AS n FROM research_prospects p, research_settings s WHERE s.id = 1 AND p.status = 'qualified' AND p.qualified = 1 AND p.score >= s.qualify_threshold AND p.promote_attempts < 5`);
+    const ownerRun = (after: string) => q<Record<string, string>>(`SELECT id, examined, promoted, existing_crm, review, suppressed, rejected, failed, remaining, stopped_reason, trigger, started_at
+      FROM research_promotion_runs WHERE trigger = 'owner' AND started_at > ${lit(after)} ORDER BY started_at DESC LIMIT 1`);
+
+    const eligibleBefore = await eligibleCount();
+    const leadsBefore = await leadCount();
     const autoBefore = await q1(`SELECT auto_promote AS n FROM research_settings WHERE id = 1`);
+    const mark = new Date(Date.now() - 1_000).toISOString();
 
     const res = await os.req("POST", "/staff/research/reconcile", {});
     assert(res.status === 303, `reconcile → ${res.status}`);
-    const run = (await q<Record<string, string>>(`SELECT examined, promoted, existing_crm, review, suppressed, rejected, failed, remaining, stopped_reason, trigger FROM research_promotion_runs ORDER BY started_at DESC LIMIT 1`))[0];
-    assert(run, "no promotion run was recorded");
+    // The run row this POST wrote, not merely the newest row: an earlier deploy's Owner run would otherwise be
+    // read as this one and every figure below would describe the wrong run.
+    const run = (await settle("the Owner reconcile run row", () => ownerRun(mark), (r) => r.length > 0))[0];
     assert(run.trigger === "owner", `run trigger ${run.trigger}`);
-    const leadsAfter = await q1(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent'`);
+    const promoted = Number(run.promoted);
+    // Leads must grow by exactly what the run says it promoted — once both reads have caught up.
+    const leadsAfter = await settle(`research CRM leads (expected ${leadsBefore} + ${promoted} promoted)`, leadCount, (v) => v - leadsBefore === promoted);
     const created = leadsAfter - leadsBefore;
-    assert(created === Number(run.promoted), `run says ${run.promoted} promoted but ${created} leads appeared`);
     // The per-run cap must hold: a reconcile may never create more leads than the Owner allowed.
     const cap = await q1(`SELECT auto_promote_max_per_run AS n FROM research_settings WHERE id = 1`);
     assert(created <= cap, `created ${created} leads with a cap of ${cap}`);
+    assert(Number(run.examined) <= cap, `run examined ${run.examined} prospects with a cap of ${cap}`);
+    // The outcome counters may never add up to MORE than the run examined: over-counting is how a promotion report
+    // would overstate what reached the CRM. An under-count is reported in the detail line rather than failed, since
+    // it means a prospect reached a resting place the classifier does not name, not that a lead was invented.
+    const classified = promoted + Number(run.existing_crm) + Number(run.review) + Number(run.suppressed) + Number(run.rejected) + Number(run.failed);
+    assert(classified <= Number(run.examined), `run examined ${run.examined} but its outcome counters add up to ${classified}`);
     // Enabling automatic promotion is a separate decision; a reconcile must not flip it.
     assert((await q1(`SELECT auto_promote AS n FROM research_settings WHERE id = 1`)) === autoBefore, "the reconcile changed the auto_promote setting");
 
@@ -292,20 +316,40 @@ async function main() {
           AND (l.stage <> 'new' OR l.intake_decision_id IS NULL OR l.utm_source <> 'crestmont-research'
             OR (p.website_class IN ('VERIFIED_WEBSITE_BROKEN','VERIFIED_WEBSITE_ISSUES','VERIFIED_OFFICIAL_WEBSITE') AND (p.website_url IS NULL OR p.website_url = '')))`);
       assert(bad === 0, `${bad} promoted leads are not in New, lack an intake decision, lack research attribution, or lost their verified website`);
-      const audited = await q1(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'research.auto_promotion_run'`);
-      assert(audited > 0, "the reconcile run was not audited");
     }
+    // An Owner-triggered run is always audited, whether or not it promoted anything: the decision itself is the record.
+    const audited = await q1(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'research.auto_promotion_run'`);
+    assert(audited > 0, "the reconcile run was not audited");
     // Repeating it must not create a second lead for the same business.
+    const mark2 = run.started_at;
     const again = await os.req("POST", "/staff/research/reconcile", {});
     assert(again.status === 303, `second reconcile → ${again.status}`);
-    const leadsFinal = await q1(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent'`);
-    const eligibleAfter = await q1(`SELECT COUNT(*) AS n FROM research_prospects p, research_settings s WHERE s.id = 1 AND p.status = 'qualified' AND p.qualified = 1 AND p.score >= s.qualify_threshold AND p.promote_attempts < 5`);
+    const run2 = (await settle("the second Owner reconcile run row", () => ownerRun(mark2), (r) => r.length > 0))[0];
+    assert(run2.id !== run.id, "the second reconcile did not record its own run");
+    const promoted2 = Number(run2.promoted);
+    const leadsFinal = await settle(`research CRM leads after the second run (expected ${leadsAfter} + ${promoted2})`, leadCount, (v) => v - leadsAfter === promoted2);
+    const eligibleAfter = await eligibleCount();
     // The second run may legitimately promote the next batch, so what must hold is that leads only ever grow by what
-    // the runs say they promoted, and that no prospect became two leads.
-    const doubled = await q1(`SELECT COUNT(*) AS n FROM (SELECT crm_lead_id FROM research_prospects WHERE crm_lead_id IS NOT NULL GROUP BY crm_lead_id HAVING COUNT(*) > 1)`);
-    assert(doubled === 0, `${doubled} CRM leads are claimed by more than one research prospect`);
+    // the runs say they promoted, and that research never created a SECOND lead for a business the CRM already had.
+    //
+    // Several prospects pointing at ONE lead is duplicate protection doing its job, not a defect: two Overture
+    // records of the same business, or two businesses on one switchboard number, both resolve to the CRM contact
+    // that already exists and are parked at `existing_crm` with that lead's id — `promote()` refuses them
+    // ("no second lead was created") and ingest sets the same id for a phone/email the CRM already holds. The
+    // invariant that actually proves no business was duplicated is that at most ONE prospect per lead is
+    // `promoted`: a second `promoted` claim on one lead would mean the promoter counted one lead twice.
+    const doublePromoted = await q1(`SELECT COUNT(*) AS n FROM (SELECT crm_lead_id FROM research_prospects WHERE crm_lead_id IS NOT NULL AND status = 'promoted' GROUP BY crm_lead_id HAVING COUNT(*) > 1)`);
+    assert(doublePromoted === 0, `${doublePromoted} CRM leads are claimed as a new lead by more than one research prospect`);
+    // And nothing may claim a lead that does not exist.
+    const orphaned = await q1(`SELECT COUNT(*) AS n FROM research_prospects p WHERE p.crm_lead_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM leads l WHERE l.id = p.crm_lead_id)`);
+    assert(orphaned === 0, `${orphaned} prospects point at a CRM lead that does not exist`);
+    // Reported, never asserted to zero: how much de-duplication is happening, so the figure is visible as evidence.
+    const sharedLeads = await q1(`SELECT COUNT(*) AS n FROM (SELECT crm_lead_id FROM research_prospects WHERE crm_lead_id IS NOT NULL GROUP BY crm_lead_id HAVING COUNT(*) > 1)`);
     const eligible = eligibleBefore;
-    return `eligible before ${eligible}; run: examined ${run.examined}, promoted ${run.promoted}, existing ${run.existing_crm}, review ${run.review}, suppressed ${run.suppressed}, rejected ${run.rejected}, failed ${run.failed}, remaining ${run.remaining} (${run.stopped_reason}); research CRM leads ${leadsBefore} → ${leadsFinal}; eligible now ${eligibleAfter}; auto_promote still ${autoBefore}`;
+    return `eligible before ${eligible}; run 1: examined ${run.examined}, promoted ${run.promoted}, existing ${run.existing_crm}, review ${run.review}, suppressed ${run.suppressed}, rejected ${run.rejected}, failed ${run.failed}, remaining ${run.remaining} (${run.stopped_reason})`
+      + `; run 2: examined ${run2.examined}, promoted ${run2.promoted}, existing ${run2.existing_crm}, review ${run2.review}, suppressed ${run2.suppressed}, rejected ${run2.rejected}, failed ${run2.failed}, remaining ${run2.remaining} (${run2.stopped_reason})`
+      + `; research CRM leads ${leadsBefore} → ${leadsFinal}; eligible now ${eligibleAfter}; auto_promote still ${autoBefore}; ${sharedLeads} lead(s) shared by several prospects (de-duplicated, 0 promoted twice)`
+      + (classified === Number(run.examined) ? "" : `; NOTE run 1 classified ${classified} of ${run.examined} examined`);
   });
 
   // ── 5. pause stops new research safely; restore the Owner's original state ──
