@@ -11,9 +11,9 @@ on:
   workflow_dispatch:
     inputs:
       stage:
-        description: "status (read-only) or purchase (real staging checkout in Stripe test mode)"
+        description: "status / gallery (both read-only) or purchase (real staging checkout in Stripe test mode)"
         type: choice
-        options: [status, purchase]
+        options: [status, purchase, gallery]
         default: status
       watch_minutes:
         description: "Keep polling the build for up to N minutes (0-330, read-only)"
@@ -88,8 +88,14 @@ jobs:
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
         run: node --no-warnings scripts/builder-staging-e2e.ts purchase --dir jitt
+      - name: Design Gallery audit (D1 read-only)
+        if: inputs.stage == 'gallery'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node --no-warnings scripts/builder-staging-e2e.ts gallery --dir jitt
       - name: Certification status (D1 read-only)
-        if: always()
+        if: always() && inputs.stage != 'gallery'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

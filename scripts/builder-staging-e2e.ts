@@ -420,7 +420,32 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         console.log(`… ${new Date().toISOString()} build ${job.state}; node1Online=${r.data.node1Online}; waiting`);
         await new Promise((res) => setTimeout(res, 120_000));
       }
-    } else { console.error("usage: builder-staging-e2e.ts prepare|verify-link|register|purchase|status [--dir jitt] [--wait-minutes N]"); process.exit(2); }
+    } else if (cmd === "gallery") {
+      // Read-only audit of the Design Gallery as the AI sees it. The builder can only ever use a reference that
+      // is APPROVED, ai_eligible, rights-cleared and not deleted (services/design-gallery.ts: eligibleReferences),
+      // so those are the numbers that matter — a dashboard total proves nothing about what a build can reach.
+      const q = await d1();
+      const rows = await q<{ status: string; ai_eligible: number; rights_basis: string; industry: string; deleted: number; has_desktop: number; has_mobile: number; n: number }>(
+        `SELECT status, ai_eligible, rights_basis, industry,           CASE WHEN deleted_at IS NULL THEN 0 ELSE 1 END AS deleted,           CASE WHEN desktop_key IS NULL THEN 0 ELSE 1 END AS has_desktop,           CASE WHEN mobile_key IS NULL THEN 0 ELSE 1 END AS has_mobile,           COUNT(*) AS n         FROM design_references GROUP BY status, ai_eligible, rights_basis, industry, deleted, has_desktop, has_mobile`);
+      const sum = (f: (r: typeof rows[number]) => boolean) => rows.filter(f).reduce((a, r) => a + r.n, 0);
+      const eligible = (r: typeof rows[number]) => !r.deleted && r.status === "APPROVED" && r.ai_eligible === 1 && r.rights_basis !== "unverified";
+      const byIndustry = new Map<string, number>();
+      for (const r of rows.filter(eligible)) byIndustry.set(r.industry, (byIndustry.get(r.industry) ?? 0) + r.n);
+      console.log(`Total references         : ${sum(() => true)}`);
+      console.log(`  approved               : ${sum((r) => !r.deleted && r.status === "APPROVED")}`);
+      console.log(`  pending review         : ${sum((r) => !r.deleted && r.status === "PENDING_REVIEW")}`);
+      console.log(`  disabled / rejected    : ${sum((r) => !r.deleted && (r.status === "DISABLED" || r.status === "REJECTED"))}`);
+      console.log(`  deleted                : ${sum((r) => !!r.deleted)}`);
+      console.log(`AI-ELIGIBLE (what a build can actually use): ${sum(eligible)}`);
+      console.log(`  of those, with a desktop image: ${rows.filter((r) => eligible(r) && r.has_desktop).reduce((a, r) => a + r.n, 0)}`);
+      console.log(`  of those, with a mobile image : ${rows.filter((r) => eligible(r) && r.has_mobile).reduce((a, r) => a + r.n, 0)}`);
+      console.log(`  rights unverified (excluded)  : ${sum((r) => !r.deleted && r.rights_basis === "unverified")}`);
+      console.log("By industry (AI-eligible only):");
+      for (const [k, v] of [...byIndustry].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) console.log(`  ${k.padEnd(20)} ${v}`);
+      const version = (await q<{ version: number }>(`SELECT version FROM design_gallery_state WHERE id = 1`))[0]?.version ?? null;
+      console.log(`Gallery version: ${version}`);
+      write("gallery.json", { total: sum(() => true), aiEligible: sum(eligible), byIndustry: Object.fromEntries(byIndustry), version });
+    } else { console.error("usage: builder-staging-e2e.ts prepare|verify-link|register|purchase|status|gallery [--dir jitt] [--wait-minutes N]"); process.exit(2); }
   } catch (e) {
     console.log(`::error title=Builder staging E2E (${cmd})::${clip((e as Error).message, 400)}`);
     process.exit(1);
