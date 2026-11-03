@@ -33,7 +33,16 @@ function assert(cond: unknown, msg: string): asserts cond { if (!cond) throw new
 const RUN = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 const areas = [202, 212, 248, 303, 312, 313, 404, 415, 517, 586, 616, 617, 702, 713, 734, 810, 818, 906, 919, 989];
 const usedPhones = new Set<string>();
-const phone = () => { for (;;) { const p = `+1${areas[Math.floor(Math.random() * areas.length)]}55501${String(Math.floor(Math.random() * 100)).padStart(2, "0")}`; if (!usedPhones.has(p)) { usedPhones.add(p); return p; } } };
+const PHONE_POOL = areas.length * 100;
+/** A fictional 555-01xx number this staging database has never seen. Bounded: an exhausted pool must fail
+ *  loudly here rather than spin, and the message says exactly what to clear. */
+const phone = () => {
+  for (let i = 0; i < PHONE_POOL * 20; i++) {
+    const p = `+1${areas[Math.floor(Math.random() * areas.length)]}55501${String(Math.floor(Math.random() * 100)).padStart(2, "0")}`;
+    if (!usedPhones.has(p)) { usedPhones.add(p); return p; }
+  }
+  throw new Error(`every fictional 555-01xx number (${PHONE_POOL}) is already used on staging: ${usedPhones.size} taken. Clear old synthetic contact_identities and voice_dnc rows.`);
+};
 const fmt = (e164: string) => `(${e164.slice(2, 5)}) ${e164.slice(5, 8)}-${e164.slice(8)}`;
 const dom = (s: string) => `${s}-${RUN}.example`;
 /** Synthetic names carry the run id, so a record left by an earlier run never looks like the same business. */
@@ -129,8 +138,12 @@ async function main() {
   const all = accounts();
   const owner = all.find((a) => a.role === "owner"), sales = all.find((a) => a.role === "sales");
   if (!owner) { results.push({ id: "owner.session", ok: false, detail: "no owner demo account in E2E_ACCOUNTS_FILE" }); return; }
-  // Never reuse a fictional number that already exists in staging (e.g. a synthetic shared line kept by design).
+  // Never reuse a fictional number staging has already seen. Two sources, and the second one used to be
+  // missed: do-not-call rows OUTLIVE the contact erasure at cleanup, so a number suppressed by an earlier run
+  // stayed suppressed for ever. A later run that drew it got SUPPRESSED where it expected CREATED — the
+  // api.shared_line_two_businesses failure that failed staging deploy #124.
   for (const r of await q<{ value_norm: string }>(`SELECT value_norm FROM contact_identities WHERE kind = 'phone' AND value_norm LIKE '%55501__'`)) usedPhones.add(r.value_norm);
+  for (const r of await q<{ phone_e164: string }>(`SELECT phone_e164 FROM voice_dnc WHERE phone_e164 LIKE '%55501__'`)) usedPhones.add(r.phone_e164);
   const os = new Session();
   await check("owner.sign_in", async () => {
     try { await os.login(owner.email, owner.password, owner.totp); }
@@ -306,9 +319,12 @@ async function main() {
       const r = await os.req("POST", "/staff/crm/identity-erasure", { phones: phones.slice(i, i + 10).join("\n"), emails: emails.slice(i, i + 10).join("\n"), note: `CRM E2E ${RUN} cleanup of synthetic data`, allow_reimport: "1" });
       assert(r.status === 303, `cleanup returned ${r.status}`);
     }
+    // The do-not-call entry this run added is synthetic too: leaving it permanently removes one number from a
+    // 2,000-number pool, which is what exhausted it. Erasure does not touch voice_dnc, so remove it here.
+    const dncCleared = await q(`DELETE FROM voice_dnc WHERE detail LIKE ${lit(`CRM E2E ${RUN} synthetic opt-out%`)}`).then(() => true).catch(() => false);
     const left = Number((await q<{ n: number }>(`SELECT COUNT(*) AS n FROM contacts WHERE name LIKE ${lit(`CRM E2E ${RUN}%`)}`))[0].n);
     // Shared-line businesses keep their identifier by design until both are erased; the cleanup erases all of them.
-    return `${left} synthetic contact name(s) left (anonymised rows read 'Deleted contact')`;
+    return `${left} synthetic contact name(s) left (anonymised rows read 'Deleted contact'); do-not-call entry ${dncCleared ? "removed" : "NOT removed"}`;
   });
 }
 
