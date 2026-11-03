@@ -256,6 +256,58 @@ async function main() {
     assert(callable === 0, `callable ${callable}`);
     return `${total} businesses on record; callable 0`;
   });
+  // ── 4b. the bounded Owner reconcile: the controlled CRM import test, on real staging records ──
+  // This is how automatic promotion is proven before it is switched on. The Owner route promotes ONE bounded batch
+  // (capped by research_settings.auto_promote_max_per_run) through the CRM intake engine, so every promotion still
+  // passes customer matching, do-not-call, suppression, duplicate review and the audit record. Promotion is
+  // deliberately not gated on the research pause: pausing stops new research, the existing backlog still has to
+  // reach the CRM. Nothing here enables automatic promotion; that stays a separate, explicit Owner decision.
+  await check("research.bounded_reconcile", async () => {
+    const q1 = async (sql: string) => Number((await q<{ n: number }>(sql))[0]?.n ?? 0);
+    const hasColumn = await q1(`SELECT COUNT(*) AS n FROM pragma_table_info('research_settings') WHERE name = 'auto_promote'`);
+    if (!hasColumn) return "skipped: migration 0073 has not been applied to this environment yet";
+    const eligibleBefore = await q1(`SELECT COUNT(*) AS n FROM research_prospects p, research_settings s WHERE s.id = 1 AND p.status = 'qualified' AND p.qualified = 1 AND p.score >= s.qualify_threshold AND p.promote_attempts < 5`);
+    const leadsBefore = await q1(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent'`);
+    const autoBefore = await q1(`SELECT auto_promote AS n FROM research_settings WHERE id = 1`);
+
+    const res = await os.req("POST", "/staff/research/reconcile", {});
+    assert(res.status === 303, `reconcile → ${res.status}`);
+    const run = (await q<Record<string, string>>(`SELECT examined, promoted, existing_crm, review, suppressed, rejected, failed, remaining, stopped_reason, trigger FROM research_promotion_runs ORDER BY started_at DESC LIMIT 1`))[0];
+    assert(run, "no promotion run was recorded");
+    assert(run.trigger === "owner", `run trigger ${run.trigger}`);
+    const leadsAfter = await q1(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent'`);
+    const created = leadsAfter - leadsBefore;
+    assert(created === Number(run.promoted), `run says ${run.promoted} promoted but ${created} leads appeared`);
+    // The per-run cap must hold: a reconcile may never create more leads than the Owner allowed.
+    const cap = await q1(`SELECT auto_promote_max_per_run AS n FROM research_settings WHERE id = 1`);
+    assert(created <= cap, `created ${created} leads with a cap of ${cap}`);
+    // Enabling automatic promotion is a separate decision; a reconcile must not flip it.
+    assert((await q1(`SELECT auto_promote AS n FROM research_settings WHERE id = 1`)) === autoBefore, "the reconcile changed the auto_promote setting");
+
+    // Every lead it created is a usable sales record: New stage, through the intake engine, research attribution,
+    // and for a verified-website class an actual website on the record.
+    if (created > 0) {
+      const bad = await q1(`SELECT COUNT(*) AS n FROM leads l JOIN research_prospects p ON p.crm_lead_id = l.id
+        WHERE l.origin = 'research_agent' AND p.status = 'promoted'
+          AND (l.stage <> 'new' OR l.intake_decision_id IS NULL OR l.utm_source <> 'crestmont-research'
+            OR (p.website_class IN ('VERIFIED_WEBSITE_BROKEN','VERIFIED_WEBSITE_ISSUES','VERIFIED_OFFICIAL_WEBSITE') AND (p.website_url IS NULL OR p.website_url = '')))`);
+      assert(bad === 0, `${bad} promoted leads are not in New, lack an intake decision, lack research attribution, or lost their verified website`);
+      const audited = await q1(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'research.auto_promotion_run'`);
+      assert(audited > 0, "the reconcile run was not audited");
+    }
+    // Repeating it must not create a second lead for the same business.
+    const again = await os.req("POST", "/staff/research/reconcile", {});
+    assert(again.status === 303, `second reconcile → ${again.status}`);
+    const leadsFinal = await q1(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent'`);
+    const eligibleAfter = await q1(`SELECT COUNT(*) AS n FROM research_prospects p, research_settings s WHERE s.id = 1 AND p.status = 'qualified' AND p.qualified = 1 AND p.score >= s.qualify_threshold AND p.promote_attempts < 5`);
+    // The second run may legitimately promote the next batch, so what must hold is that leads only ever grow by what
+    // the runs say they promoted, and that no prospect became two leads.
+    const doubled = await q1(`SELECT COUNT(*) AS n FROM (SELECT crm_lead_id FROM research_prospects WHERE crm_lead_id IS NOT NULL GROUP BY crm_lead_id HAVING COUNT(*) > 1)`);
+    assert(doubled === 0, `${doubled} CRM leads are claimed by more than one research prospect`);
+    const eligible = eligibleBefore;
+    return `eligible before ${eligible}; run: examined ${run.examined}, promoted ${run.promoted}, existing ${run.existing_crm}, review ${run.review}, suppressed ${run.suppressed}, rejected ${run.rejected}, failed ${run.failed}, remaining ${run.remaining} (${run.stopped_reason}); research CRM leads ${leadsBefore} → ${leadsFinal}; eligible now ${eligibleAfter}; auto_promote still ${autoBefore}`;
+  });
+
   // ── 5. pause stops new research safely; restore the Owner's original state ──
   await check("research.pause_stops_new_batches", async () => {
     const r = await os.req("POST", "/staff/research/settings", settingsForm(true, initial));

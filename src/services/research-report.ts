@@ -111,6 +111,8 @@ export interface ResearchReport {
     evaluatedPerHourMean: number | null; qualifiedPerHourMean: number | null;
     peakSustainedHour: HourPoint | null; worstCompleteHour: HourPoint | null;
     observedQualificationRate: number | null;
+    /** Why the rate is null, when it is. Reported so a withheld figure is never read as a zero. */
+    rateWithheldBecause: string | null;
     deliveredPerHourMean: number | null;
   };
   resources: {
@@ -175,7 +177,22 @@ export function buildReport(input: ReportInput): ResearchReport {
 
   const mean = (n: number) => (hoursObserved > 0 ? n / hoursObserved : null);
   const qualified = input.prospects.qualifiedInWindow;
-  const observedQualificationRate = totalEvaluated > 0 ? qualified / totalEvaluated : null;
+  /**
+   * Qualified ÷ evaluated is only meaningful when both describe the same work. They do not over a short window:
+   * `qualified` counts prospects the PLATFORM first saw in the window, while `totalEvaluated` counts what the
+   * WORKER reported finishing in it, and a prospect can be delivered minutes after it was evaluated. A 30-minute
+   * read of a paused worker produced "3500%" (70 newly seen against 2 evaluated), which is not a yield at all.
+   *
+   * So the rate is reported only when the denominator both contains enough work to mean something and is at least
+   * as large as the numerator. Otherwise it is withheld as not measurable, never printed as a percentage.
+   */
+  const MIN_EVALUATED_FOR_RATE = 100;
+  const rateIsMeaningful = totalEvaluated >= MIN_EVALUATED_FOR_RATE && totalEvaluated >= qualified;
+  const observedQualificationRate = rateIsMeaningful ? qualified / totalEvaluated : null;
+  const rateWithheldBecause = rateIsMeaningful ? null
+    : totalEvaluated === 0 ? "no evaluation was observed in this window"
+    : totalEvaluated < qualified ? `${qualified} prospects were first seen but only ${totalEvaluated} evaluations were reported in this window: they describe different work, so the ratio would not be a yield`
+    : `only ${totalEvaluated} evaluations observed (a rate needs at least ${MIN_EVALUATED_FOR_RATE})`;
 
   const peak = completeHours.length ? completeHours.reduce((a, b) => (b.evaluated > a.evaluated ? b : a)) : null;
   const worst = completeHours.length ? completeHours.reduce((a, b) => (b.evaluated < a.evaluated ? b : a)) : null;
@@ -254,6 +271,7 @@ export function buildReport(input: ReportInput): ResearchReport {
       deliveredPerHourMean: mean(totalDelivered) === null ? null : Math.round(mean(totalDelivered)!),
       peakSustainedHour: peak, worstCompleteHour: worst,
       observedQualificationRate: observedQualificationRate === null ? null : Math.round(observedQualificationRate * 10000) / 10000,
+      rateWithheldBecause,
     },
     resources: {
       cpuPctMax: pick((s) => num(s.cpu_pct), maxOf), cpuPctMean: pick((s) => num(s.cpu_pct), meanOf),
@@ -316,7 +334,7 @@ export function formatReport(r: ResearchReport): string {
   L.push("");
   L.push(`## Rates`);
   L.push(`- Mean evaluated/hour: ${n(r.rates.evaluatedPerHourMean)}; qualified/hour: ${n(r.rates.qualifiedPerHourMean)}; delivered/hour: ${n(r.rates.deliveredPerHourMean)}`);
-  L.push(`- Observed qualification rate: ${r.rates.observedQualificationRate === null ? "not measurable" : `${(r.rates.observedQualificationRate * 100).toFixed(2)}%`}`);
+  L.push(`- Observed qualification rate: ${r.rates.observedQualificationRate === null ? `not measurable — ${r.rates.rateWithheldBecause}` : `${(r.rates.observedQualificationRate * 100).toFixed(2)}%`}`);
   L.push(`- Peak sustained complete hour: ${r.rates.peakSustainedHour ? `${r.rates.peakSustainedHour.hour} — ${r.rates.peakSustainedHour.evaluated} evaluated` : "no complete hour observed"}`);
   L.push(`- Worst complete hour: ${r.rates.worstCompleteHour ? `${r.rates.worstCompleteHour.hour} — ${r.rates.worstCompleteHour.evaluated} evaluated` : "no complete hour observed"}`);
   L.push("");

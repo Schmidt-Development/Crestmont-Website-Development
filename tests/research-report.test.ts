@@ -127,6 +127,7 @@ test("[AIOPS-001] an incomplete window yields no daily claim, and a complete one
   assert.equal(r.rates.evaluatedPerHourMean, 990);
   assert.equal(r.funnel.qualifiedProspects, 3_600);
   assert.equal(r.rates.observedQualificationRate, 0.1516);
+  assert.equal(r.rates.rateWithheldBecause, null, "a full day of real evaluation yields a real rate");
   assert.equal(r.target.achieved, false);
   assert.equal(r.target.shortfall, 21_400);
   assert.match(r.target.claimable, /NOT met, short by 21400/);
@@ -324,4 +325,44 @@ test("[AIOPS-001] a real worker alongside the deploy test is not dismissed as a 
   assert.equal(r.worker.onlyDeployTestRunners, false);
   assert.doesNotMatch(r.target.limitingFactor, /no research worker/);
   assert.equal(r.funnel.businessesEvaluated, 900, "the real worker's progress across the day boundary still counts");
+});
+
+test("[AIOPS-001] a qualification rate is withheld rather than printed when the numerator and denominator describe different work", () => {
+  // Exactly the staging read that exposed this: a paused worker reported 2 evaluations in 30 minutes while 70
+  // prospects first appeared on the platform, and the report printed "3500.00%".
+  const samples = [
+    sample({ bucket: "2026-11-03T07:45", evaluated: 21_699 }),
+    sample({ bucket: "2026-11-03T08:00", evaluated: 21_700, paused: 1 }),
+    sample({ bucket: "2026-11-03T08:15", evaluated: 21_701, paused: 1 }),
+  ];
+  const r = buildReport({
+    windowStart: "2026-11-03T07:45:00.000Z", windowEnd: "2026-11-04T07:45:00.000Z", now: "2026-11-03T08:21:00.000Z",
+    target: 25_000, samples, batches: [], prospects: { ...EMPTY_PROSPECTS, qualifiedInWindow: 70 }, promoted: 0, promotionBlocked: 0,
+  });
+  assert.equal(r.funnel.businessesEvaluated, 2);
+  assert.equal(r.funnel.qualifiedProspects, 70);
+  assert.equal(r.rates.observedQualificationRate, null, "no percentage at all, rather than an impossible one");
+  assert.match(r.rates.rateWithheldBecause!, /describe different work/);
+  const text = formatReport(r);
+  assert.doesNotMatch(text, /3500/);
+  assert.doesNotMatch(text, /\d{3,}\.\d\d%/, "no three-digit-or-more percentage can be printed");
+  assert.match(text, /Observed qualification rate: not measurable/);
+});
+
+test("[AIOPS-001] a rate is also withheld when too little was evaluated to mean anything, and never shown as zero", () => {
+  const samples = [sample({ bucket: "2026-11-03T08:00", evaluated: 0 }), sample({ bucket: "2026-11-03T08:15", evaluated: 40 })];
+  const r = buildReport({
+    windowStart: "2026-11-03T08:00:00.000Z", windowEnd: "2026-11-04T08:00:00.000Z", now: "2026-11-03T08:20:00.000Z",
+    target: 25_000, samples, batches: [], prospects: { ...EMPTY_PROSPECTS, qualifiedInWindow: 4 }, promoted: 0, promotionBlocked: 0,
+  });
+  assert.equal(r.funnel.businessesEvaluated, 40);
+  assert.equal(r.rates.observedQualificationRate, null);
+  assert.match(r.rates.rateWithheldBecause!, /only 40 evaluations observed/);
+  // Nothing was evaluated at all: say so, rather than 0%.
+  const none = buildReport({
+    windowStart: "2026-11-03T08:00:00.000Z", windowEnd: "2026-11-04T08:00:00.000Z", now: "2026-11-03T08:20:00.000Z",
+    target: 25_000, samples: [], batches: [], prospects: EMPTY_PROSPECTS, promoted: 0, promotionBlocked: 0,
+  });
+  assert.equal(none.rates.observedQualificationRate, null);
+  assert.match(none.rates.rateWithheldBecause!, /no evaluation was observed/);
 });
