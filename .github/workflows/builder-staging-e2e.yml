@@ -1,0 +1,88 @@
+name: Builder staging E2E (Junk in the Trunk)
+
+# AI Website Builder certification on live staging (Founder directive 2026-11-01; scripts/builder-staging-e2e.ts).
+#   stage=status    read-only: what staging records for the test customer, its project and build, and Node 1's polls.
+#   stage=purchase  the real customer workflow: register → verify → Business checkout → Stripe TEST-mode payment →
+#                   signed webhook → project → onboarding, which queues the build Node 1 must claim. Idempotent:
+#                   a customer that already paid is never charged again.
+# watch_minutes keeps polling the build (read-only) until it settles. Never deploys, never writes a secret, never
+# writes D1, never touches production. Steps holding the Cloudflare token read D1 only; browser steps hold no secret.
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "status (read-only) or purchase (real staging checkout in Stripe test mode)"
+        type: choice
+        options: [status, purchase]
+        default: status
+      watch_minutes:
+        description: "Keep polling the build for up to N minutes (0-330, read-only)"
+        type: string
+        default: "0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: builder-staging-e2e
+  cancel-in-progress: false
+
+jobs:
+  run:
+    if: github.ref == 'refs/heads/main'   # main only (see deploy-staging.yml)
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    environment: staging
+    env:
+      E2E_BASE_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+      WRANGLER: npx --yes wrangler@4.149.0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Prepare (D1 read-only; derives the test customer's password, never printed)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node --no-warnings scripts/builder-staging-e2e.ts prepare --dir jitt
+      - name: Install Playwright (no secrets)
+        if: inputs.stage == 'purchase'
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+      - name: Register the fictional customer (browser, no secrets)
+        if: inputs.stage == 'purchase'
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+        run: node --no-warnings scripts/builder-staging-e2e.ts register --dir jitt
+      - name: Read the verification link from the staging outbox (D1 read-only)
+        if: inputs.stage == 'purchase'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node --no-warnings scripts/builder-staging-e2e.ts verify-link --dir jitt
+      - name: Purchase the Business package in Stripe test mode and submit onboarding (browser, no secrets)
+        if: inputs.stage == 'purchase'
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+        run: node --no-warnings scripts/builder-staging-e2e.ts purchase --dir jitt
+      - name: Certification status (D1 read-only)
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WATCH_MINUTES: ${{ inputs.watch_minutes }}
+        run: |
+          case "$WATCH_MINUTES" in ''|*[!0-9]*) WATCH_MINUTES=0 ;; esac
+          node --no-warnings scripts/builder-staging-e2e.ts status --dir jitt --wait-minutes "$WATCH_MINUTES"
+      - name: Upload certification evidence (no credentials)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: builder-staging-e2e-evidence
+          path: evidence/builder-staging-e2e.json
+          if-no-files-found: ignore
+          retention-days: 30
