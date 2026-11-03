@@ -104,4 +104,34 @@ test("[AIB-020] the report: every step PENDING before anything happens; purchase
   assert.equal(v("AI generation"), "PENDING");
   assert.equal(v("Subscription"), "PENDING");
   assert.equal(r.data.prelaunchMaintenanceCharges, 0, "no $199 charge at purchase");
+
+  // The AI Build preview line reports stored snapshots, and a queued build has none yet. "PENDING" and "the
+  // preview works" must never be confusable, so the wording is asserted too, not just the verdict.
+  assert.equal(v("Website preview"), "PENDING");
+  assert.match(r.steps.find((s) => s.step === "Website preview")!.evidence, /no snapshot stored yet/);
+
+  // A revision row with no file behind it is the one case that must not read as success: the Founder would open
+  // the preview and see nothing. The verdict is driven by stored files, never by the existence of a row.
+  const jobId = (r.data.buildJobs as { id: string; kind: string }[]).find((j) => j.kind === "first_build")!.id;
+  const insertRevision = (cycle: number, files: number, bytes: number, best: number) =>
+    t.db.prepare(`INSERT INTO build_revisions (id, job_id, project_id, cycle, attempt, phase, commit_sha, score, decision, is_best, reverted, reverted_reason, file_count, total_bytes, created_at)
+      VALUES (?, ?, ?, ?, 1, 'repair', 'deadbeef', 8.9, 'ACCEPT', ?, 0, NULL, ?, ?, ?)`)
+      .bind(`rev_fixture_${cycle}`, jobId, pid, cycle, best, files, bytes, new Date().toISOString()).run();
+
+  await insertRevision(0, 0, 0, 0);
+  r = await report(q);
+  assert.equal(v("Website preview"), "FAIL", "a snapshot that stored no file is not a working preview");
+
+  await insertRevision(1, 3, 4096, 1);
+  r = await report(q);
+  assert.equal(v("Website preview"), "PASS");
+  const preview = r.steps.find((s) => s.step === "Website preview")!.evidence;
+  assert.match(preview, /2 revision\(s\)/);
+  assert.match(preview, /3 file\(s\)/, "the file count the Founder would actually be served");
+  assert.match(preview, /1-1\/repair@8\.9 BEST/, "which revision is the best one, and its score");
+  assert.ok(preview.includes(`/staff/builds/${jobId}/inspect`), "the report links the page that shows the artifacts");
+
+  // preview_url belongs to the separate preview-deploy feature, which nothing here configures. The two lines are
+  // independent on purpose: neither may borrow the other's verdict.
+  assert.equal(v("Preview"), "PENDING", "no preview_url was ever recorded");
 });
