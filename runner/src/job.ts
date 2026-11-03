@@ -26,7 +26,7 @@ import {
   assertIsolation, createWorkspace, findLocalWorkspace, latestCheckpointFile, buildAgentEnv, buildCheckEnv,
 } from "./workspace.ts";
 import type { GitCtx } from "./git.ts";
-import { initRepo, configureRepo, commitAll, headCommit, ensureProjectRepo, pushBranch, cloneProjectRepo, projectRepoUrl } from "./git.ts";
+import { initRepo, configureRepo, commitAll, headCommit, restoreTo, ensureProjectRepo, pushBranch, cloneProjectRepo, projectRepoUrl } from "./git.ts";
 import type { SkillManifest, Workflow, PreflightResult } from "./skills.ts";
 import { preflight, provisionSkills } from "./skills.ts";
 import { buildCheckpoint, restoreCheckpoint } from "./checkpoint.ts";
@@ -47,6 +47,7 @@ import { DeterministicReviewer, LocalModelAdvisor } from "./orchestrator/advisor
 import type { MasterSpec, ReviewVerdict } from "./orchestrator/contracts.ts";
 import { outstanding } from "./orchestrator/contracts.ts";
 import { collectEvidence, builderIntegrations, builderApprovalRequests, writeReview, BUILDER_CONTRACT } from "./orchestrator/evidence.ts";
+import { ratchetDecision } from "./orchestrator/ratchet.ts";
 import type { SessionRecord } from "./orchestrator/sessions.ts";
 import type { InferenceScheduler } from "./inference/scheduler.ts";
 import { runIntegrationOperations } from "./integrations/broker.ts";
@@ -653,6 +654,10 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     // Every build the platform marks "required", and every starter that declares the quality engine, is gated.
     const qualityRequired = job.quality === "required" || !!starterSpec?.quality;
     let lastCard: Scorecard | null = null;
+    // Repair ratchet: the best scorecard this build has reached and the revision that achieved it.
+    let bestCard: Scorecard | null = null;
+    let bestCommit: string | null = null;
+    let regressions = 0;
     let lastVerdict: ReviewVerdict | null = null;
     // The final scorecard may use the reviewer's assessment only of the code that reviewer saw: after any repair that
     // was not reviewed again (the loop ended on its cycle limit), the review-based criteria have no evidence.
@@ -731,7 +736,41 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         }
         // Quality scorecard (every build, every iteration): failing criteria are outstanding work for this cycle, and a
         // reviewer "ready" without a verified 10/10 becomes a targeted repair (or a wait for external verification).
-        const card = scoreNow(verdict, null, cycle);
+        let card = scoreNow(verdict, null, cycle);
+        // ── repair ratchet ────────────────────────────────────────────────────────────────────────────────────────
+        // A build must not be able to walk away from its own best work. Measured on Node 1 (2026-11-02): 7.50 ->
+        // 7.16 -> 7.22 -> 6.94, every repair kept whatever it did, so the LAST and worst state was the deliverable.
+        // The bounded repair loop stops a build that stops improving; it never says which revision the customer
+        // gets. So: keep the best revision, and when a repair measurably loses ground, go back to it first.
+        {
+          const here = await headCommit(git!);
+          const d = ratchetDecision(card.score, bestCard?.score ?? null, regressions);
+          if (d.action === "record-best") { bestCard = card; bestCommit = here; regressions = 0; }
+          else if ((d.action === "revert" || d.action === "revert-and-stop") && bestCard && bestCommit && here && bestCommit !== here) {
+            regressions = d.regressions;
+            const restored = await restoreTo(git!, bestCommit, `AI build: revert cycle ${cycle - 1} repair (quality ${card.score}/10 < best ${bestCard.score}/10)`);
+            const note = `Cycle ${cycle}: the previous repair lowered the quality score from ${bestCard.score} to ${card.score}; the website was restored to its best revision (${bestCommit.slice(0, 8)}) before continuing.`;
+            log.warn("repair lowered the quality score; reverted to the best revision", { score: card.score, best: bestCard.score, bestCommit, restored, cycle });
+            sessionNotes.push(note);
+            tracker.note({ kind: "note", message: note });
+            // This cycle's evidence (changed files, commits, screenshots) describes the revision that has just been
+            // reverted away, so the cycle record says so rather than quietly pairing the best card with it.
+            verdict = { ...verdict, findings: [...verdict.findings, note] };
+            // The tree is the best one again, so that is the card the build now stands at, and the checks have to
+            // be re-run against it: the ones in hand measured a revision that no longer exists.
+            card = bestCard;
+            checks = await acceptance(commands);
+            if (d.action === "revert-and-stop") {
+              st.agentError = `Stopped repairing after ${regressions} repairs in a row that lowered the quality score. The website is at its best measured revision (${bestCard.score}/10), which is below the 10/10 required for certification.`;
+              st.terminal = true;
+              sessionNotes.push(st.agentError);
+              tracker.note({ kind: "note", message: st.agentError });
+              lastCard = card; lastVerdict = verdict; reviewCurrent = true;
+              writeInside(ws.repo, path.join(".crestmont", "quality", "scorecard.json"), JSON.stringify(card, null, 2) + "\n");
+              break;
+            }
+          }
+        }
         lastCard = card; lastVerdict = verdict; reviewCurrent = true;
         writeInside(ws.repo, path.join(".crestmont", "quality", "scorecard.json"), JSON.stringify(card, null, 2) + "\n");
         if (memory) remember.quality(memory, card);

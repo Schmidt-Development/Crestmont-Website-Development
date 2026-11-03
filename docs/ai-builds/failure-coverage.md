@@ -4,25 +4,16 @@ Shared safeguards, not 231 separate systems: each failure mode is covered by one
 
 - OPEN means not investigated in this repository yet. It does not mean the failure cannot happen, and it does not mean it is uncovered.
 - The gates A-J are implemented in runner/starters/fullstack-v1/scripts/gates.mjs, not in runner/src, which is why they are easy to miss when reading the runner. Mapping the remaining rows means reading that script against each row; that is the next step and it has not been taken.
-- Five rows the source inventory recorded as verified cited test files that do not exist here. Two (E03, E04) are genuinely covered by differently-named tests and have been re-cited. Three (F15, F16, F20) depend on a quality ratchet that is absent from this repository and are now recorded as NOT_COVERED_HERE rather than left looking done.
+- Five rows the source inventory recorded as verified cited test files that did not exist here. Two (E03, E04) were already covered by differently-named tests and have been re-cited. Three (F15, F16, F20) depended on a quality ratchet that was genuinely absent; the ratchet rule and the git restore it needs have since been brought in and wired into the cycle loop, driven by the quality scorecard this runner already computes so no second notion of quality is introduced alongside it.
 
-Generated 2026-11-03T05:16:35.708Z from 246 failure modes.
+Generated 2026-11-03T05:27:13.782Z from 246 failure modes.
 
 | status | rows |
 | --- | --- |
 | OPEN | 224 |
-| FIXED_AND_VERIFIED | 11 |
+| FIXED_AND_VERIFIED | 14 |
 | EXISTING_AND_VERIFIED | 6 |
-| NOT_COVERED_HERE | 3 |
 | BLOCKED_ON_AUTHORIZATION | 2 |
-
-## Gaps: safeguards the inventory assumed that do not exist here
-
-### quality ratchet (F15, F16, F20)
-
-Expected: Never lose previously certified functionality; roll back safely when a repair makes the website worse.
-
-The inventory records F15, F16 and F20 as FIXED_AND_VERIFIED against runner/test/quality-ratchet.test.ts. Neither that test nor any ratchet exists in this tree: `grep -rl ratchet runner/src src` returns nothing. The bounded repair loop (S12) stops a build that stops improving, which is not the same as preserving what was already certified or rolling back a harmful repair.
 
 ## Cited tests that are failing in this repository
 
@@ -30,7 +21,13 @@ The inventory records F15, F16 and F20 as FIXED_AND_VERIFIED against runner/test
 
 Bears on: S1, S2, S7 (PRE_EXISTING_FAILURE)
 
-Three end-to-end tests ('a verified 10/10 ... completes as ready_for_review', 'a score below 10 can never enter internal approval', 'only a provider-side verification missing') fail with "Acceptance checks failed: quality-gates, brief-conformance". Identical on the pristine baseline, so they are not a regression. Every gate test that runs the real gates against a fixture website passes, including all four cross-industry package runs, so what is unproven is the fake-model end-to-end wiring rather than the scorecard rules or the gates.
+Three end-to-end tests ('a verified 10/10 ... completes as ready_for_review', 'a score below 10 can never enter internal approval', 'only a provider-side verification missing') fail with "Acceptance checks failed: quality-gates, brief-conformance". Identical on the pristine baseline, so not a regression. Every gate test that runs the real gates against a fixture website passes, including all four cross-industry package runs, so what is unproven is the fake-model end-to-end wiring rather than the scorecard rules or the gates.
+
+### `runner/test/resilience.test.ts [AIB-RUNNER] checkpoints never carry links`
+
+Bears on: S14 (PRE_EXISTING_FAILURE)
+
+Asserts that symlinks are left out when a checkpoint is built and that an archive containing links is refused on restore. It fails on this machine with EPERM creating a symlink at C:etcpasswd, which needs elevation, identically on the pristine baseline. The refusal-on-restore half is what matters for safety and is not what fails; the test cannot set up its fixture without an elevated shell.
 
 ## Shared safeguards
 
@@ -99,6 +96,11 @@ Three end-to-end tests ('a verified 10/10 ... completes as ready_for_review', 'a
 - Where: runner/src/quality.ts, src/services/build-pipeline.ts
 - Proven by: `tests/builds-v2.test.ts [AIB-013]`
 
+**S15. Repair ratchet: the best revision is kept, a repair that measurably loses ground is reverted to it, and repeated regressions stop the loop**
+
+- Where: runner/src/orchestrator/ratchet.ts, runner/src/git.ts restoreTo, wired into the cycle loop in runner/src/job.ts
+- Proven by: `runner/test/quality-ratchet.test.ts [RATCHET]`
+
 **S14. Segment continuation: a per-segment limit ends a segment, not the build; 'released' requeues without spending an attempt and resumes from the checkpoint**
 
 - Where: runner/src/job.ts, src/services/builds.ts
@@ -122,9 +124,9 @@ Three end-to-end tests ('a verified 10/10 ... completes as ready_for_review', 'a
 | E09 | Vague repair instructions | FIXED_AND_VERIFIED | S12 | tests/builds-v2.test.ts [AIB-013], [AIB-OVERRULE] |
 | E12 | Overly generous scores | EXISTING_AND_VERIFIED | - | runner/test/orchestrator.test.ts |
 | E20 | Reviewer treating subjective scores as objective market valuations | FIXED_AND_VERIFIED | - | runner/test/orchestrator.test.ts |
-| F15 | Continuing despite repeated degradation | NOT_COVERED_HERE | S12 | tests/builds-v2.test.ts [AIB-013], [AIB-OVERRULE] |
-| F16 | Missing safe rollback | NOT_COVERED_HERE | - | none in this repository |
-| F20 | Failure to preserve previously certified functionality | NOT_COVERED_HERE | - | none in this repository |
+| F15 | Continuing despite repeated degradation | FIXED_AND_VERIFIED | S15 | runner/test/quality-ratchet.test.ts [RATCHET] |
+| F16 | Missing safe rollback | FIXED_AND_VERIFIED | S15 | runner/test/quality-ratchet.test.ts [RATCHET] |
+| F20 | Failure to preserve previously certified functionality | FIXED_AND_VERIFIED | S15 | runner/test/quality-ratchet.test.ts [RATCHET] |
 | G03 | Vision model missing screenshots | EXISTING_AND_VERIFIED | - | runner/test/orchestrator.test.ts |
 | G15 | Broken checkpoint restoration | FIXED_AND_VERIFIED | S14 | tests/builds.test.ts [AIB-004] (the platform half); runner/test/continuity.test.ts [AIB-CONTINUITY] (the archive half: built and restored from a drive-letter path); runner/test/orchestrator.test.ts [AIB-015] (checkpointed and released without spending an attempt) |
 | G16 | Failed resume behavior | FIXED_AND_VERIFIED | S14, S11 | tests/builds.test.ts [AIB-004] (the platform half); runner/test/continuity.test.ts [AIB-CONTINUITY] (the archive half: built and restored from a drive-letter path); runner/test/orchestrator.test.ts [AIB-015] (checkpointed and released without spending an attempt); runner/test/report.test.ts [AIB-REQ-EVIDENCE]; tests/builds.test.ts [AIB-REQ-EVIDENCE] |
@@ -171,19 +173,19 @@ An overrule now writes the prompt from the outstanding items it just named. The 
 
 The loop continued after repeated degradation.
 
-The inventory's safeguard (a quality ratchet) is absent from this repository. S12 ends a build that stops improving, which is weaker than this row needs.
+The ratchet stops the loop after two repairs in a row that lower the score, instead of spending more GPU time on a loop that is not converging.
 
 **F16 Missing safe rollback**
 
 Repairs were kept unconditionally. Measured decline 7.50 -> 7.16 -> 7.22 -> 6.94; the build could only walk away from its own best work and the LAST state was what the customer would receive.
 
-No rollback mechanism exists in this repository.
+restoreTo puts the working tree back to the best revision as a NEW commit, so the failed attempt stays in the log as evidence -- what `reset --hard` would have discarded. A file a bad repair ADDED is removed too, which `checkout -- .` leaves behind.
 
 **F20 Failure to preserve previously certified functionality**
 
 Visual repairs destroyed previously working state with no way back.
 
-Nothing here preserves previously certified functionality across a repair. This is the most serious of the three gaps.
+The best measured revision is recorded and restored, so a build can no longer walk away from its own best work. Measured on Node 1 (2026-11-02): 7.50 -> 7.16 -> 7.22 -> 6.94, every repair kept whatever it did, so the worst state was the deliverable. Driven by the quality scorecard this runner already computes, so no second notion of quality is introduced alongside it.
 
 **G15 Broken checkpoint restoration**
 

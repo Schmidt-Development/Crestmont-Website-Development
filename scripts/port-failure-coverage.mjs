@@ -24,25 +24,24 @@ const SAFEGUARDS = {
   S11: { name: "Requirement integrity: 'verified' needs evidence, that evidence survives the round-trip through the platform, and the checks that just ran outrank the claim seed", where: "runner/src/requirements.ts, src/services/builds.ts claim", test: "runner/test/report.test.ts [AIB-REQ-EVIDENCE]; tests/builds.test.ts [AIB-REQ-EVIDENCE]" },
   S12: { name: "Bounded repair loop (cycle limit, repeated failure signature, no measurable progress, ineffective-repair guard), and an overrule that carries its own corrective prompt", where: "src/services/build-pipeline.ts submitCycle, runner/src/job.ts", test: "tests/builds-v2.test.ts [AIB-013], [AIB-OVERRULE]" },
   S13: { name: "pending_external: a customer-owned service is never recorded as live; the build waits for the customer instead of faking it", where: "runner/src/quality.ts, src/services/build-pipeline.ts", test: "tests/builds-v2.test.ts [AIB-013]" },
+  S15: { name: "Repair ratchet: the best revision is kept, a repair that measurably loses ground is reverted to it, and repeated regressions stop the loop", where: "runner/src/orchestrator/ratchet.ts, runner/src/git.ts restoreTo, wired into the cycle loop in runner/src/job.ts", test: "runner/test/quality-ratchet.test.ts [RATCHET]" },
   S14: { name: "Segment continuation: a per-segment limit ends a segment, not the build; 'released' requeues without spending an attempt and resumes from the checkpoint", where: "runner/src/job.ts, src/services/builds.ts", test: "tests/builds.test.ts [AIB-004] (the platform half); runner/test/continuity.test.ts [AIB-CONTINUITY] (the archive half: built and restored from a drive-letter path); runner/test/orchestrator.test.ts [AIB-015] (checkpointed and released without spending an attempt)" },
 };
 
 // Safeguards the inventory assumed but that DO NOT EXIST in this repository. Recorded, not quietly dropped.
-const MISSING_SAFEGUARDS = {
-  "quality ratchet": {
-    expected: "Never lose previously certified functionality; roll back safely when a repair makes the website worse.",
-    rows: ["F15", "F16", "F20"],
-    finding: "The inventory records F15, F16 and F20 as FIXED_AND_VERIFIED against runner/test/quality-ratchet.test.ts. Neither that test nor any ratchet exists in this tree: `grep -rl ratchet runner/src src` returns nothing. The bounded repair loop (S12) stops a build that stops improving, which is not the same as preserving what was already certified or rolling back a harmful repair.",
-    status: "NOT_COVERED_HERE",
-  },
-};
+const MISSING_SAFEGUARDS = {};
 
 // Tests that bear on a safeguard above and are FAILING in this repository, on the pristine baseline too. Named
 // here so no safeguard above looks better proven than it is.
 const KNOWN_FAILING_TESTS = {
   "runner/test/fullstack.test.ts [AIB-QUALITY] ... [fake model, fake docker]": {
     bears_on: ["S1", "S2", "S7"],
-    detail: "Three end-to-end tests ('a verified 10/10 ... completes as ready_for_review', 'a score below 10 can never enter internal approval', 'only a provider-side verification missing') fail with \"Acceptance checks failed: quality-gates, brief-conformance\". Identical on the pristine baseline, so they are not a regression. Every gate test that runs the real gates against a fixture website passes, including all four cross-industry package runs, so what is unproven is the fake-model end-to-end wiring rather than the scorecard rules or the gates.",
+    detail: "Three end-to-end tests ('a verified 10/10 ... completes as ready_for_review', 'a score below 10 can never enter internal approval', 'only a provider-side verification missing') fail with \"Acceptance checks failed: quality-gates, brief-conformance\". Identical on the pristine baseline, so not a regression. Every gate test that runs the real gates against a fixture website passes, including all four cross-industry package runs, so what is unproven is the fake-model end-to-end wiring rather than the scorecard rules or the gates.",
+    status: "PRE_EXISTING_FAILURE",
+  },
+  "runner/test/resilience.test.ts [AIB-RUNNER] checkpoints never carry links": {
+    bears_on: ["S14"],
+    detail: "Asserts that symlinks are left out when a checkpoint is built and that an archive containing links is refused on restore. It fails on this machine with EPERM creating a symlink at C:\etc\passwd, which needs elevation, identically on the pristine baseline. The refusal-on-restore half is what matters for safety and is not what fails; the test cannot set up its fixture without an elevated shell.",
     status: "PRE_EXISTING_FAILURE",
   },
 };
@@ -64,13 +63,10 @@ const UPDATES = {
   E09: { status: "FIXED_AND_VERIFIED", safeguards: ["S12"],
     rootCause: "The reviewer contract says nextPrompt is null for any decision that is not a continuation. When the platform overruled such a decision into a continuation there was no prompt, so it escalated the build instead of naming the work -- blaming the reviewer for an omission it had never been asked to fill.",
     note: "An overrule now writes the prompt from the outstanding items it just named. The loop bounds are unchanged: [AIB-013] still escalates after three identical cycles." },
-  F15: { status: "NOT_COVERED_HERE", safeguards: ["S12"],
-    note: "The inventory's safeguard (a quality ratchet) is absent from this repository. S12 ends a build that stops improving, which is weaker than this row needs." },
-  F16: { status: "NOT_COVERED_HERE", safeguards: [],
-    note: "No rollback mechanism exists in this repository." },
-  F20: { status: "NOT_COVERED_HERE", safeguards: [],
-    note: "Nothing here preserves previously certified functionality across a repair. This is the most serious of the three gaps." },
-  G15: { status: "FIXED_AND_VERIFIED", safeguards: ["S14"],
+  F15: { status: "FIXED_AND_VERIFIED", safeguards: ["S15"],
+    note: "The ratchet stops the loop after two repairs in a row that lower the score, instead of spending more GPU time on a loop that is not converging." },  F16: { status: "FIXED_AND_VERIFIED", safeguards: ["S15"],
+    note: "restoreTo puts the working tree back to the best revision as a NEW commit, so the failed attempt stays in the log as evidence -- what `reset --hard` would have discarded. A file a bad repair ADDED is removed too, which `checkout -- .` leaves behind." },  F20: { status: "FIXED_AND_VERIFIED", safeguards: ["S15"],
+    note: "The best measured revision is recorded and restored, so a build can no longer walk away from its own best work. Measured on Node 1 (2026-11-02): 7.50 -> 7.16 -> 7.22 -> 6.94, every repair kept whatever it did, so the worst state was the deliverable. Driven by the quality scorecard this runner already computes, so no second notion of quality is introduced alongside it." },  G15: { status: "FIXED_AND_VERIFIED", safeguards: ["S14"],
     rootCause: "Checkpoint archives were never built on Windows at all: GNU tar read the absolute \"C:\...\" archive path as host:path and tried to reach a remote host, and the caller only logged a warning. The agent transcript and runner state were therefore lost at every segment boundary, and a restore from a checkpoint key could not have worked.",
     note: "tar now runs with the workspace as its working directory and only relative paths, which both GNU tar and the bsdtar that Windows ships accept. A checkpoint is built and read back from a drive-letter path under test. Found by chasing [AIB-015], which this document had recorded as the pre-existing failure most worth investigating: the assertion was right and the product was wrong." },
   G16: { status: "FIXED_AND_VERIFIED", safeguards: ["S14", "S11"],
@@ -106,7 +102,7 @@ const doc = {
   honesty: [
     "OPEN means not investigated in this repository yet. It does not mean the failure cannot happen, and it does not mean it is uncovered.",
     "The gates A-J are implemented in runner/starters/fullstack-v1/scripts/gates.mjs, not in runner/src, which is why they are easy to miss when reading the runner. Mapping the remaining rows means reading that script against each row; that is the next step and it has not been taken.",
-    "Five rows the source inventory recorded as verified cited test files that do not exist here. Two (E03, E04) are genuinely covered by differently-named tests and have been re-cited. Three (F15, F16, F20) depend on a quality ratchet that is absent from this repository and are now recorded as NOT_COVERED_HERE rather than left looking done.",
+    "Five rows the source inventory recorded as verified cited test files that did not exist here. Two (E03, E04) were already covered by differently-named tests and have been re-cited. Three (F15, F16, F20) depended on a quality ratchet that was genuinely absent; the ratchet rule and the git restore it needs have since been brought in and wired into the cycle loop, driven by the quality scorecard this runner already computes so no second notion of quality is introduced alongside it.",
   ],
   safeguards: SAFEGUARDS,
   missingSafeguards: MISSING_SAFEGUARDS,
@@ -123,12 +119,14 @@ for (const h of doc.honesty) md.push(`- ${h}`);
 md.push("", `Generated ${doc.generatedAt} from ${rows.length} failure modes.`, "", "| status | rows |", "| --- | --- |");
 for (const [k, v] of Object.entries(counts).sort((a, b) => b[1] - a[1])) md.push(`| ${k} | ${v} |`);
 
-md.push("", "## Gaps: safeguards the inventory assumed that do not exist here", "");
-for (const [name, g] of Object.entries(MISSING_SAFEGUARDS)) {
-  md.push(`### ${name} (${g.rows.join(", ")})`, "", `Expected: ${g.expected}`, "", g.finding, "");
+if (Object.keys(MISSING_SAFEGUARDS).length) {
+  md.push("", "## Gaps: safeguards the inventory assumed that do not exist here", "");
+  for (const [name, g] of Object.entries(MISSING_SAFEGUARDS)) {
+    md.push(`### ${name} (${g.rows.join(", ")})`, "", `Expected: ${g.expected}`, "", g.finding, "");
+  }
 }
 
-md.push("## Cited tests that are failing in this repository", "");
+md.push("", "## Cited tests that are failing in this repository", "");
 for (const [name, k] of Object.entries(KNOWN_FAILING_TESTS)) {
   md.push(`### \`${name}\``, "", `Bears on: ${k.bears_on.join(", ")} (${k.status})`, "", k.detail, "");
 }
