@@ -35,10 +35,19 @@ export interface SchedulerOptions {
   reconcileRetryMs?: number;
   keepAlive: string;
   residency: Residency;
+  /** The GPU and model server this scheduler owns. Defaults to device 0 (the single-GPU case). */
+  endpoint?: GpuEndpoint;
   cooldownMs?: number;
   now?: () => number;
   log?: Logger;
 }
+
+/**
+ * The GPU a scheduler owns, and the model server pinned to it. One scheduler is one device: Ollama chooses its GPUs
+ * at process start (CUDA_VISIBLE_DEVICES), so addressing a device means addressing its server. Every request is
+ * handed its endpoint, which is what lets a second GPU be another list entry rather than a rewrite of every caller.
+ */
+export interface GpuEndpoint { index: number; baseUrl: string; label: string }
 
 export interface RequestMeta { model: string; projectId: string; task: string }
 export interface Usage { promptTokens: number; completionTokens: number; wallMs: number }
@@ -100,6 +109,19 @@ export class InferenceScheduler {
     return p && p.vramMb > 0 ? p.vramMb : null;
   }
 
+  /** Whether this model is in this GPU's memory right now, as last reconciled with the model server. */
+  holds(model: string): boolean { return this.isResident(model); }
+
+  /**
+   * Whether this GPU could hold the model at all. An unknown model size or unknown GPU size answers true, because
+   * "we do not know" must not be reported as "it does not fit".
+   */
+  canHold(model: string): boolean {
+    const v = this.vram(model);
+    if (v === null || this.o.vramTotalMb <= 0) return true;
+    return v + this.o.vramReserveMb <= this.o.vramTotalMb;
+  }
+
   /** Whether these models can be in GPU memory together (all sizes known and within the GPU minus the reserve). */
   canCoReside(models: string[]): boolean {
     const uniq = [...new Set(models)];
@@ -116,7 +138,12 @@ export class InferenceScheduler {
   }
 
   /** Run one model request through the GPU queue. `fn` performs the request; its usage is recorded when returned. */
-  async run<T>(meta: RequestMeta, fn: () => Promise<T>, signal?: AbortSignal, usage?: (r: T) => Usage | null): Promise<T> {
+  /** The GPU and model server this scheduler owns; handed to every request so it reaches the right device. */
+  get endpoint(): GpuEndpoint {
+    return this.o.endpoint ?? { index: 0, baseUrl: "", label: "gpu0" };
+  }
+
+  async run<T>(meta: RequestMeta, fn: (endpoint: GpuEndpoint) => Promise<T>, signal?: AbortSignal, usage?: (r: T) => Usage | null): Promise<T> {
     const until = this.failedUntil.get(meta.model);
     if (until && until > this.now()) throw new ModelUnavailableError(`model ${meta.model} could not be loaded recently; retried after ${new Date(until).toISOString()}`);
     const enqueuedAt = this.now();
@@ -134,7 +161,7 @@ export class InferenceScheduler {
     s.waitMs += this.now() - enqueuedAt;
     this.projectActivity.set(meta.projectId, { state: "gpu_running", model: meta.model, task: meta.task });
     try {
-      const r = await fn();
+      const r = await fn(this.endpoint);
       const u = usage?.(r) ?? null;
       s.requests++;
       s.lastOkAt = new Date(this.now()).toISOString();

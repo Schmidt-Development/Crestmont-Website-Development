@@ -396,7 +396,7 @@ export function makeConfig(over: Partial<RunnerConfig> & { controlPlaneUrl: stri
       maxOutputTokensPerCall: 4096, maxOutputTokensTotal: 1_000_000, temperature: 0.2, requestTimeoutMs: 30_000,
     },
     jobSandbox: {
-      dockerBin: "docker", image: "crestmont-build-sandbox:test", volume: "", cpus: "2", memory: "4g", pidsLimit: 512,
+      dockerBin: "docker", image: "crestmont-build-sandbox:test", runnerId: "test-runner", volume: "", cpus: "2", memory: "4g", pidsLimit: 512,
       tmpfsMb: 256, commandTimeoutMs: 60_000, installTimeoutMs: 120_000, installNetwork: "crestmont_install",
       installProxy: "http://egress-proxy:3128", registry: "https://registry.npmjs.org/", diskQuotaMb: 4096, uid: 10001,
       allowedBuildScripts: [], browserCheck: true,
