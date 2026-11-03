@@ -36,6 +36,12 @@ jobs:
     env:
       E2E_BASE_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
       WRANGLER: npx --yes wrangler@4.149.0
+      # Where Playwright keeps its Chromium. The install and the launch have to agree: tests/e2e/support.ts, which
+      # the browser commands import, defaults this to /opt/pw-browsers when it is unset, and that is not where
+      # "playwright install" writes -- so the launch went looking for a browser the install had put elsewhere.
+      # deploy-staging.yml pins it per step; pinning it for the whole job means a browser step added later cannot
+      # forget it, and the install step and every browser step resolve the same directory.
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -50,9 +56,15 @@ jobs:
         run: node --no-warnings scripts/builder-staging-e2e.ts prepare --dir jitt
       - name: Install Playwright (no secrets)
         if: inputs.stage == 'purchase'
+        env:
+          PW: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
         run: |
           npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
           .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+          # Prove the browser the next steps will launch is installed, in the step that installed it. When the
+          # install directory and the launch directory disagreed, the failure surfaced two steps later as
+          # "Executable doesn't exist", which points at the browser step rather than at this one.
+          node --input-type=module -e 'const { chromium } = await import(process.env.PW); const b = await chromium.launch(); await b.close(); console.log("chromium launches from " + process.env.PLAYWRIGHT_BROWSERS_PATH);'
       - name: Register the fictional customer (browser, no secrets)
         if: inputs.stage == 'purchase'
         env:

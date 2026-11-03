@@ -35,7 +35,8 @@ test("[AIB-020] the verification link is taken from the email body and nothing e
 });
 
 test("[AIB-020] the certification workflow keeps secrets away from the browser and reads staging only on main", () => {
-  const wf = readFileSync(".github/workflows/builder-staging-e2e.yml", "utf8");
+  // Normalised: the assertions below are written with "\n", and a CRLF checkout would otherwise match none of them.
+  const wf = readFileSync(".github/workflows/builder-staging-e2e.yml", "utf8").replace(/\r\n/g, "\n");
   assert.match(wf, /environment: staging/);
   assert.match(wf, /if: github\.ref == 'refs\/heads\/main'/);
   assert.match(wf, /permissions:\n  contents: read/);
@@ -46,6 +47,17 @@ test("[AIB-020] the certification workflow keeps secrets away from the browser a
     const runsPackages = /playwright|npm install|builder-staging-e2e\.ts (register|purchase)/.test(step);
     assert.ok(!(holdsToken && runsPackages), `step mixes the Cloudflare token with package code: ${step.split("\n")[0]}`);
   }
+
+  // One Chromium directory for the whole job. The install step and the browser steps each resolve
+  // PLAYWRIGHT_BROWSERS_PATH for themselves, and tests/e2e/support.ts -- which the browser commands import --
+  // defaults it to /opt/pw-browsers when it is unset, which is not where "playwright install" writes. Setting it
+  // per step invites exactly that drift, so it belongs to the job and must appear once, above "steps:".
+  const [jobHeader, stepsBlock] = wf.split("\n    steps:\n");
+  assert.ok(stepsBlock, "the job has a steps: block");
+  assert.match(jobHeader, /^      PLAYWRIGHT_BROWSERS_PATH: .+$/m, "the job pins the Chromium directory");
+  // Reading it in a run: is fine (the install step reports which directory it used); re-ASSIGNING it per step is
+  // what would let the install and the launch drift apart again.
+  assert.doesNotMatch(stepsBlock, /^s+PLAYWRIGHT_BROWSERS_PATH:/m, "no step sets it: install and launch must agree");
 });
 
 test("[AIB-020] the report: every step PENDING before anything happens; purchase → payment → project → queued build proven by rows (FIXTURE)", async () => {
