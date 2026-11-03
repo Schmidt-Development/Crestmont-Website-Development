@@ -3,6 +3,8 @@
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatDateTime, label, safeUrl, type SafeHtml } from "../lib/html.ts";
+import { recentSyncs, recentTransitions, regressions } from "../readiness/sync.ts";
+import { ACCEPTANCE } from "../../requirements/acceptance.ts";
 import { HttpError, download, htmlResponse, jsonResponse, redirect, str } from "../app/http.ts";
 import { requireStaff } from "../app/app.ts";
 import { appLayout } from "../ui/layout.ts";
@@ -93,6 +95,53 @@ const decisionPanel = (report: ra.Report) => html`<section class="card card--gol
 ${dl([["Ready for Founder approval", report.decision.readyForFounderApproval ? "Yes — gates A–F pass" : "No — gates A–F do not all pass"], ["Launched and verified", report.decision.launched ? "Yes" : "No"],
   ["Evidence set", html`<code>${report.evidenceSetSha256}</code>`], ["Computed", formatDateTime(report.generatedAt)]])}</section>`;
 
+// ───────── READY-013: automatic derivation ─────────
+
+/**
+ * What the derivation did and when. This panel answers the questions the old dashboard could not: when was
+ * readiness last recalculated, which commit was it judged against, what moved, and what has lost a verdict.
+ */
+async function derivationPanel(ctx: AppContext, report: ra.Report): Promise<SafeHtml> {
+  const [syncs, transitions, lost] = await Promise.all([recentSyncs(ctx.db, 1), recentTransitions(ctx.db, { limit: 8 }), regressions(ctx.db)]);
+  const last = syncs[0];
+  const head = report.requirements.find((r) => r.headCommit)?.headCommit ?? null;
+  const deployed = await ctx.db.prepare(`SELECT commit_sha, environment, deployed_at FROM deployments WHERE status='succeeded' ORDER BY deployed_at DESC LIMIT 1`)
+    .first<{ commit_sha: string; environment: string; deployed_at: string }>();
+  const platform = report.requirements.filter((r) => r.tracking === "platform");
+  const byState = new Map<string, number>();
+  for (const r of platform) byState.set(r.autoState, (byState.get(r.autoState) ?? 0) + 1);
+  const complete = platform.filter((r) => r.autoComplete).length;
+  const missing = platform.filter((r) => r.autoState === "NOT_IMPLEMENTED" || r.autoState === "EVIDENCE_STALE");
+
+  return html`<section class="card stack" aria-labelledby="auto-h" data-panel="derivation">
+<div class="row row--between"><h2 id="auto-h" style="font-size:1.4rem;margin:0">Automatic status</h2>${badge(last?.error ? "fail" : "pass", last?.error ? "Last sync failed" : "Deriving from evidence")}</div>
+<p class="muted">Every status below is computed from ingested evidence against the acceptance criteria in <code>requirements/acceptance.ts</code>. No status is typed by hand: a merge alone never advances a requirement, a deployment never certifies behaviour, and evidence certifies only the commit it ran at.</p>
+${dl([
+    ["Last recalculated", last ? html`${formatDateTime(last.finished_at)} · ${last.trigger} · ${last.changed} requirement(s) changed${last.error ? html` · <strong>${last.error}</strong>` : ""}` : "Not yet — readiness recalculates at the next evidence ingest"],
+    ["Judged against commit", head ? html`<code>${head.slice(0, 12)}</code> (newest CI evidence on the default branch)` : "No CI evidence yet"],
+    ["Latest deployment", deployed ? html`<code>${deployed.commit_sha.slice(0, 12)}</code> to ${deployed.environment} · ${formatDateTime(deployed.deployed_at)}` : "None recorded"],
+    ["Platform requirements complete", `${complete} of ${platform.length} (the ${report.requirements.length - platform.length} AI-system requirements are tracked separately)`],
+  ])}
+<div class="table-wrap"><table class="table"><caption class="visually-hidden">Platform requirements by derived state</caption>
+<thead><tr><th scope="col">Derived state</th><th scope="col" class="num">Requirements</th></tr></thead>
+<tbody>${AUTO_STATES.filter((st) => byState.get(st)).map((st) => html`<tr><td><a href="/staff/readiness/requirements?autoState=${st}&tracking=platform">${badge(st)}</a></td><td class="num">${byState.get(st)}</td></tr>`)}</tbody></table></div>
+${lost.length ? html`<div><h3 style="font-size:1.1rem">Lost a verdict (${lost.length})</h3>
+${table(lost, [
+    { header: "Requirement", cell: (x) => html`<a href="/staff/readiness/requirements/${x.requirement_id}">${x.requirement_id}</a>` },
+    { header: "State", cell: (x) => badge(x.state) },
+    { header: "Why", cell: (x) => html`<span class="faint">${x.detail}</span>` },
+  ])}</div>` : html`<p class="faint">No requirement has lost a verdict it previously held.</p>`}
+${missing.length ? html`<p class="faint">${missing.length} platform requirement(s) have no usable evidence at the current commit: <a href="/staff/readiness/requirements?autoState=EVIDENCE_STALE">stale</a> · <a href="/staff/readiness/requirements?autoState=NOT_IMPLEMENTED">never proven</a>.</p>` : ""}
+${transitions.length ? html`<details class="card"><summary>Recent status changes (${transitions.length})</summary>
+${table(transitions, [
+    { header: "When", cell: (t) => formatDateTime(t.changed_at) },
+    { header: "Requirement", cell: (t) => html`<a href="/staff/readiness/requirements/${t.requirement_id}">${t.requirement_id}</a>` },
+    { header: "Change", cell: (t) => html`${t.from_state ? badge(t.from_state) : html`<span class="faint">new</span>`} → ${badge(t.to_state)}` },
+    { header: "Why", cell: (t) => html`<span class="faint">${t.detail}</span>` },
+  ])}</details>` : ""}
+</section>`;
+}
+
 // ───────── Requirements matrix ─────────
 
 function verifBadge(v: string) { return badge(v === "passed" ? "pass" : v === "failed" ? "fail" : "not_started", v === "none" ? "None" : label(v)); }
@@ -102,6 +151,8 @@ function matrix(rows: RequirementStatus[], locs: Awaited<ReturnType<typeof ra.re
     { header: "ID", cell: (r) => html`<a href="/staff/readiness/requirements/${r.id}">${r.id}</a>` },
     { header: "Requirement", cell: (r) => html`${r.title}<br><span class="faint">${r.subsystem} · ${r.priority} · ${r.category}${r.disposition !== "in_scope" ? ` · ${label(r.disposition)}` : ""}</span>` },
     { header: "Implementation", cell: (r) => badge(r.implementation) },
+    // READY-013: the derived state and the one sentence that explains it, so "why is this not done?" is answered in place.
+    { header: "Derived state", cell: (r) => html`${badge(r.autoState)}${r.autoComplete ? "" : html` <span class="faint" style="font-size:.75rem">needs ${label(r.completeAt)}</span>`}<br><span class="faint" style="font-size:.78rem">${r.autoDetail}</span>` },
     { header: "Location", cell: (r) => html`<span class="faint" style="font-size:.8rem">${locs.get(r.id)?.location ?? "Not recorded"}</span>` },
     { header: "Dev", cell: (r) => verifBadge(r.verification.development) },
     { header: "Staging", cell: (r) => verifBadge(r.verification.staging) },
@@ -114,15 +165,18 @@ function matrix(rows: RequirementStatus[], locs: Awaited<ReturnType<typeof ra.re
 }
 
 const STATES = ["not_started", "in_progress", "implemented", "test_pending", "test_failed", "verified_in_development", "verified_in_staging", "production_verified", "blocked", "requires_founder_approval"];
+/** READY-013: the derived vocabulary the Owner filters by. */
+export const AUTO_STATES = ["NOT_IMPLEMENTED", "IMPLEMENTED", "MERGED", "DEPLOYED_STAGING", "STAGING_VERIFIED", "DEPLOYED_PRODUCTION", "PRODUCTION_VERIFIED", "BLOCKED", "REGRESSED", "EVIDENCE_STALE"];
 
 function filterRequirements(ctx: AppContext, all: RequirementStatus[], locs: Awaited<ReturnType<typeof ra.requirementLocations>>) {
   const sp = ctx.url.searchParams;
   const f = { subsystem: sp.get("subsystem") ?? "", state: sp.get("state") ?? "", category: sp.get("category") ?? "", priority: sp.get("priority") ?? "", impl: sp.get("impl") ?? "",
-    env: sp.get("env") ?? "", verification: sp.get("verification") ?? "", q: (sp.get("q") ?? "").trim().toLowerCase(), stale: sp.get("stale") === "1" };
+    env: sp.get("env") ?? "", verification: sp.get("verification") ?? "", q: (sp.get("q") ?? "").trim().toLowerCase(), stale: sp.get("stale") === "1",
+    autoState: sp.get("autoState") ?? "", tracking: sp.get("tracking") ?? "" };
   const rows = all.filter((r) => (!f.subsystem || r.subsystem === f.subsystem) && (!f.state || r.state === f.state) && (!f.category || r.category === f.category)
     && (!f.priority || r.priority === f.priority) && (!f.impl || r.implementation === f.impl)
     && (!f.env || !f.verification || ((ENVS as string[]).includes(f.env) && r.verification[f.env as ReadyEnv] === f.verification))
-    && (!f.stale || r.stale)
+    && (!f.stale || r.stale) && (!f.autoState || r.autoState === f.autoState) && (!f.tracking || r.tracking === f.tracking)
     && (!f.q || `${r.id} ${r.title} ${r.subsystem} ${locs.get(r.id)?.location ?? ""}`.toLowerCase().includes(f.q)));
   return { f, rows };
 }
@@ -382,7 +436,7 @@ export function register(r: Router): void {
     return page(ctx, "Launch readiness", html`${pageHead("Launch Readiness Command Center", html`${linkButton("Export CSV", "/staff/readiness/export.csv", "ghost", "sm")}${linkButton("Printable report", "/staff/readiness/report", "ghost", "sm")}${isOwner(ctx.actor!) ? linkButton("Founder approval", "/staff/readiness/approve", "secondary", "sm") : ""}`, "Launch readiness")}
 ${subnav(ctx)}
 <p class="muted">Computed ${formatDateTime(report.generatedAt)} from ${report.requirements.length} stored requirement records, ingested test evidence, the blocker register, security findings, integration health, releases and approvals.</p>
-${feedPanel(feeds)}${decisionPanel(report)}${metersPanel(report)}${await gatesPanel(ctx, report)}`);
+${feedPanel(feeds)}${decisionPanel(report)}${await derivationPanel(ctx, report)}${metersPanel(report)}${await gatesPanel(ctx, report)}`);
   });
 
   // ───────── Requirements ─────────
@@ -415,6 +469,25 @@ ${matrix(rows, locs)}`);
     const d = await ra.requirementDetail(ctx.db, p.id);
     if (!status || !d) throw new HttpError(404, "Requirement not found.");
     const depRow = (x: { id: string; title: string; implementation_status: string }) => html`<li><a href="/staff/readiness/requirements/${x.id}">${x.id}</a> ${x.title} ${badge(x.implementation_status)}</li>`;
+    // READY-013: why this requirement is where it is, and every status change it has been through.
+    const acceptance = ACCEPTANCE[p.id];
+    const history = await recentTransitions(ctx.db, { requirementId: p.id, limit: 25 });
+    const derivation = html`<section class="card stack" data-panel="derivation-detail"><div class="row row--between"><h2 style="font-size:1.3rem;margin:0">Why this status</h2>${badge(status.autoState)}</div>
+${dl([
+      ["Acceptance criteria", acceptance?.criteria ?? "Category default: tagged tests pass in CI."],
+      ["Complete when it reaches", html`${badge(status.completeAt)}${status.autoComplete ? html` — <strong>met</strong>` : " — not yet"}`],
+      ["Evidence says", status.autoDetail],
+      ["Proven at commit", status.provenCommit ? html`<code>${short(status.provenCommit)}</code>` : "Never proven"],
+      ["Judged against commit", status.headCommit ? html`<code>${short(status.headCommit)}</code>` : "No CI evidence yet"],
+      ["External gate", acceptance?.external ? `${acceptance.external.blocker ?? acceptance.external.finding}: ${acceptance.external.note}` : "None — this requirement is proven by evidence alone"],
+      ["Tracking", status.tracking === "external_ai" ? "Externally tracked AI system (reported, not scored in the platform)" : "Platform"],
+    ])}
+${history.length ? table(history, [
+      { header: "When", cell: (t) => formatDateTime(t.changed_at) },
+      { header: "Change", cell: (t) => html`${t.from_state ? badge(t.from_state) : html`<span class="faint">new</span>`} → ${badge(t.to_state)}` },
+      { header: "Commit", cell: (t) => (t.head_commit ? html`<code>${short(t.head_commit)}</code>` : "—") },
+      { header: "Why", cell: (t) => html`<span class="faint">${t.detail}</span>` },
+    ], { caption: "Status history" }) : html`<p class="faint">No status change recorded yet. The first change is written at the next evidence ingest.</p>`}</section>`;
     return page(ctx, p.id, html`${pageHead(`${p.id} — ${status.title}`, linkButton("Matrix", "/staff/readiness/requirements", "ghost", "sm"), status.subsystem)}${subnav(ctx)}
 <div class="grid grid-2" style="align-items:start"><section class="card">${dl([["State", badge(status.state)], ["Implementation", badge(status.implementation)], ["Implementation location", String(d.req.implementation_location ?? "Not recorded")],
       ["Owner", String(d.req.owner ?? "—")], ["Directive section", String(d.req.section)], ["Priority / category", `${status.priority} · ${status.category}`], ["Disposition", label(status.disposition)],
@@ -423,6 +496,7 @@ ${matrix(rows, locs)}`);
 <section class="card stack"><h2 style="font-size:1.3rem">Dependencies</h2>${d.dependsOn.length ? html`<p>Depends on:</p><ul>${d.dependsOn.map(depRow)}</ul>` : html`<p class="faint">No dependencies.</p>`}
 ${d.dependents.length ? html`<p>Required by:</p><ul>${d.dependents.map(depRow)}</ul>` : ""}
 <h2 style="font-size:1.3rem">Blockers</h2>${d.blockers.length ? html`<ul>${d.blockers.map((b) => html`<li><a href="/staff/readiness/blockers/${b.id}">${b.id}</a> ${badge(b.status)} ${b.description}</li>`)}</ul>` : html`<p class="faint">No blockers linked.</p>`}</section></div>
+${derivation}
 <section class="card stack"><h2 style="font-size:1.3rem">Test evidence history</h2>
 ${table(d.evidence, [{ header: "Finished", cell: (e) => formatDateTime(e.finished_at) }, { header: "Run", cell: (e) => html`<a href="/staff/readiness/runs/${encodeURIComponent(e.run_id)}">${e.run_id}</a>` }, { header: "Env", cell: (e) => e.environment }, { header: "Source", cell: (e) => label(e.source) },
       { header: "Commit", cell: (e) => html`<code>${short(e.commit_sha)}</code>` }, { header: "Test", cell: (e) => e.test_name }, { header: "Outcome", cell: (e) => badge(e.outcome === "passed" ? "pass" : e.outcome === "failed" ? "fail" : "not_started", label(e.outcome)) }, { header: "Message", cell: (e) => e.message ?? "" }],
