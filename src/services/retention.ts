@@ -24,6 +24,7 @@ export const ALWAYS_RULES: AlwaysRule[] = [
   { category: "auth_tokens", label: "Email verification / password reset tokens", description: "Single-use tokens used or expired more than 7 days ago (only their hashes are stored)." },
   { category: "env_metrics", label: "Request metrics", description: "Hourly request/error/latency buckets older than 90 days (no personal data; used for the 24-hour and recent views)." },
   { category: "research_samples", label: "Research worker metrics", description: "Research worker throughput and host-resource samples older than 90 days (operational telemetry only; used for the hourly and 24-hour research views)." },
+  { category: "research_promotion_runs", label: "CRM promotion runs", description: "Scheduled promotion runs older than 90 days. Promotion runs every minute, so these rows are the per-minute and per-hour import-rate evidence; they hold counters, a duration and a stopped reason, and no personal data. Runs a person triggered are kept, because they attribute an action to that person." },
 ];
 
 export interface ConfigurableRule { category: string; key: string; label: string; proposedDays: number; minDays: number; maxDays: number; description: string }
@@ -90,6 +91,17 @@ export async function runRetention(deps: { db: Db; storage: StorageAdapter | nul
   const rsCut = iso(SAMPLE_RETENTION_DAYS * DAY).slice(0, 16); // research_runner_samples.bucket is 'YYYY-MM-DDTHH:MM'
   const rs = await db.prepare(`DELETE FROM research_runner_samples WHERE bucket < ?`).bind(rsCut).run().catch(() => ({ meta: { changes: 0 } }));
   results.push({ category: "research_samples", mode: "always", affected: rs.meta.changes, cutoff: `${rsCut}:00.000Z`, detail: "15-minute buckets before cutoff" });
+
+  // Promotion runs at one row a minute: 1,440 a day, which is small but unbounded, and the table is read for the
+  // import rate so it should not grow forever to answer "what happened in the last hour".
+  //
+  // Only the SCHEDULED rows are deleted. A run a person triggered carries `actor_user_id`, so it attributes an action
+  // to someone and is exactly the kind of record a legal hold exists to preserve; those are kept. The scheduled rows
+  // have a NULL actor and hold nothing but counters, a duration and a stopped reason, which is what lets this run as
+  // an ALWAYS rule at all. Owner runs are a handful; the minute-by-minute rows are the volume.
+  const prCut = iso(SAMPLE_RETENTION_DAYS * DAY);
+  const pr = await db.prepare(`DELETE FROM research_promotion_runs WHERE started_at < ? AND actor_user_id IS NULL`).bind(prCut).run().catch(() => ({ meta: { changes: 0 } }));
+  results.push({ category: "research_promotion_runs", mode: "always", affected: pr.meta.changes, cutoff: prCut, detail: "scheduled promotion runs before cutoff (runs a person triggered are kept)" });
 
   // ── Tier 2: only when staff configured the period ──
   const settings = await loadSettings(db);

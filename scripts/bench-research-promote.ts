@@ -20,21 +20,28 @@ const arg = (k: string, d: number) => { const i = process.argv.indexOf(k); retur
 const total = arg("--prospects", 200);
 const latencyMs = arg("--latency", 60);
 const budgetMs = arg("--budget", 20_000);
+const concurrency = arg("--concurrency", 8);
 
 const base = openDb();
-let statements = 0;      // every statement sent, including each one inside a batch (D1 row-write billing, 1k limit)
+let statements = 0;      // every statement sent, including each one inside a batch (D1 row-write billing)
 let roundTrips = 0;      // every await that crosses the wire; a batch is ONE round trip however many statements
+// Counting round trips is not enough: two reads issued together cost one wait, not two, so a total count cannot tell
+// a serial chain from a parallel one. So the wrapper WAITS --latency on every round trip, exactly as a D1 binding
+// would, and the wall clock then measures the real critical path including any parallelism and concurrency. The
+// measured depth below is wall time / latency, which is the number that decides how many fit in a run's budget.
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const trip = async <T>(f: () => Promise<T>): Promise<T> => { roundTrips++; if (latencyMs > 0) await sleep(latencyMs); return f(); };
 const db: Db = {
   prepare: (sql) => {
     const wrap = (r: DbStatement): DbStatement => Object.assign(Object.create(Object.getPrototypeOf(r)), r, {
       bind: (...v: unknown[]) => wrap(r.bind(...v)),
-      all: () => { statements++; roundTrips++; return r.all(); },
-      first: () => { statements++; roundTrips++; return r.first(); },
-      run: () => { statements++; roundTrips++; return r.run(); },
+      all: () => { statements++; return trip(() => r.all()); },
+      first: () => { statements++; return trip(() => r.first()); },
+      run: () => { statements++; return trip(() => r.run()); },
     });
     return wrap(base.prepare(sql));
   },
-  batch: (st) => { statements += st.length; roundTrips++; return base.batch(st); },
+  batch: (st) => { statements += st.length; return trip(() => base.batch(st)); },
 };
 
 // Real-shaped prospects: a verified website with findings, a unique phone and a unique domain per business, so every
@@ -65,7 +72,7 @@ const eligible = (await base.prepare(`SELECT COUNT(*) AS n FROM research_prospec
 
 statements = 0; roundTrips = 0;
 const t0 = performance.now();
-const r = await runAutoPromotion(db, { trigger: "owner", limit: Math.max(total, 1), budgetMs });
+const r = await runAutoPromotion(db, { trigger: "owner", limit: Math.max(total, 1), budgetMs, concurrency });
 const ms = performance.now() - t0;
 
 const leads = (await base.prepare(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent'`).first<{ n: number }>())!.n;
@@ -75,14 +82,17 @@ const doubled = (await base.prepare(`SELECT COUNT(*) AS n FROM (SELECT crm_lead_
 
 const perProspect = r.promoted ? roundTrips / r.promoted : 0;
 const stmtsPer = r.promoted ? statements / r.promoted : 0;
-// On D1 the floor is the serial chain: one prospect cannot finish faster than its own round trips × latency.
-const serialMsPerProspect = perProspect * latencyMs;
-const perMinuteSerial = serialMsPerProspect ? 60_000 / serialMsPerProspect : 0;
+const msPerProspect = r.promoted ? ms / r.promoted : 0;
+// Critical path, in round trips, as actually walked: wall clock / injected latency. Lower than the round-trip count
+// whenever reads were issued together or prospects ran concurrently.
+const depth = latencyMs > 0 ? ms / latencyMs : 0;
+const depthPerProspect = r.promoted ? depth / r.promoted : 0;
+const perMinute = msPerProspect ? 60_000 / msPerProspect : 0;
 
 const out = [
   `# Research → CRM promotion benchmark (node:sqlite; NOT a D1 throughput figure)`,
   ``,
-  `Seeded ${total} prospects, ${eligible} eligible. Budget ${budgetMs} ms.`,
+  `Seeded ${total} prospects, ${eligible} eligible. Budget ${budgetMs} ms, concurrency ${concurrency}.`,
   ``,
   `## What the promoter did`,
   `- examined ${r.examined}, promoted ${r.promoted}, existing ${r.existingCrm}, review ${r.review}, suppressed ${r.suppressed}, rejected ${r.rejected}, failed ${r.failed}`,
@@ -90,16 +100,16 @@ const out = [
   `- CRM leads with origin research_agent: ${leads} (in stage new: ${inNew}; with research attribution and an intake decision: ${attributed})`,
   `- leads claimed as new by more than one prospect: ${doubled} (must be 0)`,
   ``,
-  `## Cost per promoted prospect — the figures that decide D1 throughput`,
-  `- **sequential round trips: ${perProspect.toFixed(1)}**`,
-  `- statements: ${stmtsPer.toFixed(1)} (D1 bills row reads and writes, and caps 1,000 statements per invocation)`,
-  `- local wall clock: ${(ms / Math.max(r.promoted, 1)).toFixed(1)} ms (in-process SQLite; no network)`,
+  `## Cost per promoted prospect, at ${latencyMs} ms injected per D1 round trip`,
+  `- round trips issued: ${perProspect.toFixed(1)}  ·  statements: ${stmtsPer.toFixed(1)} (D1 bills rows read and written)`,
+  `- **critical path actually walked: ${depthPerProspect.toFixed(1)} round trips per prospect** (${Math.round(msPerProspect)} ms each)`,
+  `- total: ${Math.round(ms)} ms for ${r.promoted} promotions, a critical path of ${depth.toFixed(1)} round trips`,
   ``,
-  `## Projection at ${latencyMs} ms per D1 round trip`,
-  `- one prospect takes about ${Math.round(serialMsPerProspect)} ms of waiting`,
-  `- **serial throughput: ${perMinuteSerial.toFixed(1)} new leads/minute** — the 25/minute target needs ${(25 / Math.max(perMinuteSerial, 0.001)).toFixed(1)}× this`,
-  `- a ${budgetMs} ms budget fits about ${Math.floor(budgetMs / Math.max(serialMsPerProspect, 1))} prospects per serial run`,
-  `- reaching 25/minute therefore needs either fewer round trips per prospect or that many promotions in flight at once`,
+  `## Throughput`,
+  `- **${perMinute.toFixed(1)} new leads/minute** sustained at this latency and concurrency`,
+  `- 25/minute needs ${(25 / Math.max(perMinute, 0.001)).toFixed(2)}× this`,
+  `- a ${budgetMs} ms run budget fits about ${Math.floor(budgetMs / Math.max(msPerProspect, 1))} prospects`,
+  `- D1 allows 1,000 queries per invocation, so at ${perProspect.toFixed(1)} round trips the ceiling is ${Math.floor(1000 / Math.max(perProspect, 0.001))} prospects in one invocation`,
 ];
 console.log(out.join("\n"));
 if (process.env.GITHUB_STEP_SUMMARY) {

@@ -12,7 +12,7 @@ import { randomToken } from "../src/lib/auth-crypto.ts";
 import type { ProspectInput } from "../src/domain/research.ts";
 import * as R from "../src/services/research.ts";
 import { addDnc } from "../src/services/voice-outbound.ts";
-import { runAutoPromotion, eligibilityCensus, dueCount, MAX_PROMOTE_ATTEMPTS, RESEARCH_AUTOMATION } from "../src/services/research-promote.ts";
+import { runAutoPromotion, eligibilityCensus, dueCount, MAX_PROMOTE_ATTEMPTS, MAX_PER_INVOCATION, RESEARCH_AUTOMATION } from "../src/services/research-promote.ts";
 import { runJobs } from "../src/app/scheduled.ts";
 import type { SqliteDb } from "../dev/sqlite-d1.ts";
 
@@ -110,6 +110,166 @@ test("[CRM-005] re-running promotion creates no second lead, and two overlapping
   assert.equal(leadCount(t.db), after + 2, "two concurrent runs created exactly two leads");
   assert.ok(a.promoted + b.promoted >= 2);
   assert.equal(await dueCount(t.db, new Date()), 0);
+});
+
+// ───────────── concurrency ─────────────
+
+// Running promotions concurrently is what makes the throughput target reachable, and serial execution was quietly
+// doing one job beyond ordering: it guaranteed the second prospect on a shared number saw the contact the first had
+// just created. These tests hold that guarantee to the only thing that matters — the rows in the leads table.
+test("[CRM-005] concurrent promotion creates exactly one lead per business and never two for one identity", async () => {
+  const t = await setup();
+  const c = t.client();
+  // 24 distinct businesses, each with its own phone and domain: every one is a genuinely new lead.
+  const many = Array.from({ length: 24 }, (_, i) => nth(200 + i));
+  for (let i = 0; i < many.length; i += 10) await ingest(c, many.slice(i, i + 10));
+
+  const r = await runAutoPromotion(t.db, { trigger: "owner", limit: 24, concurrency: 8 });
+  assert.equal(r.promoted, 24, "every distinct business became a lead");
+  assert.equal(leadCount(t.db), 24, "the leads table agrees with the run's count");
+  // Correctness of the rows themselves, not just the tally.
+  const rows = raw(t.db).prepare(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent' AND stage = 'new'
+    AND utm_source = 'crestmont-research' AND intake_decision_id IS NOT NULL`).get() as { n: number };
+  assert.equal(rows.n, 24, "every lead is in New, attributed to research and carries an intake decision");
+  const doubled = raw(t.db).prepare(`SELECT COUNT(*) AS n FROM (SELECT crm_lead_id FROM research_prospects
+    WHERE crm_lead_id IS NOT NULL AND status = 'promoted' GROUP BY crm_lead_id HAVING COUNT(*) > 1)`).get() as { n: number };
+  assert.equal(doubled.n, 0, "no lead is claimed as new by two prospects");
+  // Nothing was released for calling by being promoted.
+  const callable = raw(t.db).prepare(`SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'promoted' AND eligibility = 'eligible'`).get() as { n: number };
+  assert.equal(callable.n, 0);
+});
+
+test("[CRM-005] a batch is identity-disjoint: two qualified prospects sharing an identifier never run together", async () => {
+  const t = await setup();
+  const c = t.client();
+  // Ingest already sends obvious same-business records to review, so to exercise the BATCHER the rows are put into
+  // the state it actually reads: two prospects, both 'qualified', sharing one phone_norm. That is reachable in
+  // production — two listings whose numbers normalise to the same digits after the first evaluation qualified them.
+  await ingest(c, [nth(300), nth(301)]);
+  const ids = (raw(t.db).prepare(`SELECT id FROM research_prospects WHERE status = 'qualified' ORDER BY id`).all() as { id: string }[]).map((r) => r.id);
+  assert.equal(ids.length, 2);
+  const shared = (raw(t.db).prepare(`SELECT phone_norm FROM research_prospects WHERE id = ?`).get(ids[0]) as { phone_norm: string }).phone_norm;
+  raw(t.db).prepare(`UPDATE research_prospects SET phone_norm = ? WHERE id = ?`).run(shared, ids[1]);
+
+  const first = await runAutoPromotion(t.db, { trigger: "owner", limit: 50, concurrency: 8 });
+  assert.equal(first.examined, 1, "only one of two prospects sharing a phone is attempted in a run");
+  assert.notEqual(first.stoppedReason, "drained", "one held back for identity is not a drained backlog");
+
+  // The next run takes the other, and the CRM decides what it is: matched, reviewed, or a lead. Never a silent
+  // duplicate — which is the whole point of not running them at the same time.
+  const second = await runAutoPromotion(t.db, { trigger: "owner", limit: 50, concurrency: 8 });
+  assert.equal(second.examined, 1);
+  const doubled = raw(t.db).prepare(`SELECT COUNT(*) AS n FROM (SELECT crm_lead_id FROM research_prospects
+    WHERE crm_lead_id IS NOT NULL AND status = 'promoted' GROUP BY crm_lead_id HAVING COUNT(*) > 1)`).get() as { n: number };
+  assert.equal(doubled.n, 0);
+});
+
+test("[CRM-005] a run never exceeds D1's per-invocation query budget, however high the Owner's cap is", async () => {
+  const t = await setup();
+  const c = t.client();
+  await t.db.prepare(`UPDATE research_settings SET auto_promote = 1, auto_promote_max_per_run = 2000 WHERE id = 1`).run();
+  const many = Array.from({ length: MAX_PER_INVOCATION + 15 }, (_, i) => nth(400 + i));
+  for (let i = 0; i < many.length; i += 10) await ingest(c, many.slice(i, i + 10));
+
+  const r = await runAutoPromotion(t.db, { trigger: "scheduled", concurrency: 8 });
+  assert.equal(r.examined, MAX_PER_INVOCATION, `a run stops at ${MAX_PER_INVOCATION} prospects whatever the cap says`);
+  assert.equal(r.stoppedReason, "query_limit", "and says why, so the next tick continuing is not mistaken for a stall");
+  assert.equal(leadCount(t.db), MAX_PER_INVOCATION);
+  assert.ok(r.remaining >= 15, "the rest is still due");
+});
+
+// ───────────── overlap protection and recovery ─────────────
+
+test("[CRM-005] the lease stops a second run overlapping the first, and says so instead of doing nothing quietly", async () => {
+  const t = await setup();
+  const c = t.client();
+  await t.db.prepare(`UPDATE research_settings SET auto_promote = 1 WHERE id = 1`).run();
+  await ingest(c, [nth(500), nth(501), nth(502)]);
+
+  // Two ticks at once. One takes the lease and works; the other reports that it could not and leaves the backlog
+  // alone — which is the point: a minute spent re-walking work in flight is a minute of throughput lost.
+  const [a, b] = await Promise.all([
+    runAutoPromotion(t.db, { trigger: "scheduled", concurrency: 4 }),
+    runAutoPromotion(t.db, { trigger: "scheduled", concurrency: 4 }),
+  ]);
+  const locked = [a, b].filter((r) => r.stoppedReason === "locked");
+  const ran = [a, b].filter((r) => r.stoppedReason !== "locked");
+  assert.equal(locked.length, 1, "exactly one of two overlapping runs is turned away");
+  assert.equal(locked[0].examined, 0, "the turned-away run touches nothing");
+  assert.equal(ran[0].promoted, 3);
+  assert.equal(leadCount(t.db), 3, "three businesses, three leads, no duplicates from the overlap");
+  // Both runs are on the record, so a skipped minute is visible rather than looking like a stall.
+  const rows = raw(t.db).prepare(`SELECT stopped_reason FROM research_promotion_runs ORDER BY started_at`).all() as { stopped_reason: string }[];
+  assert.ok(rows.some((r) => r.stopped_reason === "locked"), "the skipped run recorded why");
+});
+
+test("[CRM-005] a lease left behind by a crashed run expires instead of wedging the schedule", async () => {
+  const t = await setup();
+  const c = t.client();
+  await t.db.prepare(`UPDATE research_settings SET auto_promote = 1 WHERE id = 1`).run();
+  await ingest(c, [nth(510)]);
+
+  // A run that died without releasing: holder set, expiry in the past. The next tick must take it, not wait.
+  raw(t.db).prepare(`UPDATE research_promotion_lease SET holder = 'rpr_dead', trigger = 'scheduled', acquired_at = ?, expires_at = ? WHERE id = 1`)
+    .run(new Date(Date.now() - 600_000).toISOString(), new Date(Date.now() - 300_000).toISOString());
+  const after = await runAutoPromotion(t.db, { trigger: "scheduled", concurrency: 4 });
+  assert.notEqual(after.stoppedReason, "locked", "a stale lease does not block the next run");
+  assert.equal(after.promoted, 1);
+
+  // A live lease held by someone else is respected.
+  raw(t.db).prepare(`UPDATE research_promotion_lease SET holder = 'rpr_live', expires_at = ? WHERE id = 1`)
+    .run(new Date(Date.now() + 120_000).toISOString());
+  await ingest(c, [nth(511)]);
+  assert.equal((await runAutoPromotion(t.db, { trigger: "scheduled" })).stoppedReason, "locked");
+  assert.equal(leadCount(t.db), 1, "and it created nothing while locked out");
+});
+
+test("[CRM-005] a run that throws releases the lease rather than holding the schedule", async () => {
+  const t = await setup();
+  await t.db.prepare(`UPDATE research_settings SET auto_promote = 1 WHERE id = 1`).run();
+  // Break the read the run makes after taking the lease, so it fails inside the critical section.
+  const broken = Object.create(Object.getPrototypeOf(t.db) ?? Object.prototype) as typeof t.db;
+  let calls = 0;
+  Object.assign(broken, t.db, {
+    prepare: (sql: string) => {
+      if (sql.includes("FROM research_prospects") && sql.includes("promote_attempts <") && calls++ === 0) {
+        return { bind: () => ({ all: () => Promise.reject(new Error("D1 unavailable (simulated)")) }) } as never;
+      }
+      return t.db.prepare(sql);
+    },
+    batch: (st: unknown[]) => t.db.batch(st as never),
+  });
+  await assert.rejects(() => runAutoPromotion(broken, { trigger: "scheduled" }), /D1 unavailable/);
+  const lease = raw(t.db).prepare(`SELECT holder, expires_at FROM research_promotion_lease WHERE id = 1`).get() as { holder: string | null; expires_at: string | null };
+  assert.equal(lease.holder, null, "the lease was released on the way out of the exception");
+  assert.equal(lease.expires_at, null);
+});
+
+test("[CRM-005] with nothing eligible the per-minute tick is a cheap no-op: no leads, no audit, one run row", async () => {
+  const t = await setup();
+  await t.db.prepare(`UPDATE research_settings SET auto_promote = 1 WHERE id = 1`).run();
+  const audits = () => (raw(t.db).prepare(`SELECT COUNT(*) AS n FROM audit_logs`).get() as { n: number }).n;
+  const runs = () => (raw(t.db).prepare(`SELECT COUNT(*) AS n FROM research_promotion_runs`).get() as { n: number }).n;
+  const beforeAudits = audits();
+
+  const r = await runAutoPromotion(t.db, { trigger: "scheduled" });
+  assert.equal(r.examined, 0);
+  assert.equal(r.promoted, 0);
+  assert.equal(r.stoppedReason, "drained", "an empty backlog is drained, not locked or capped");
+  assert.equal(leadCount(t.db), 0);
+  // A tick over an empty backlog must not write an audit row every minute: 1,440 a day of nothing would bury the log
+  // that real decisions are read from.
+  assert.equal(audits(), beforeAudits, "a no-op tick audits nothing");
+  // It DOES write its own run row, which is deliberate: that row is the per-minute throughput evidence, and it is
+  // what proves the schedule is alive rather than silently stopped. It is one small row, and retention caps the
+  // table (src/services/retention.ts), so this is the cost of being able to read the rate at all.
+  assert.equal(runs(), 1, "exactly one run row, and no other writes");
+
+  // Ten more empty ticks stay flat: nothing accumulates except those rows.
+  for (let i = 0; i < 10; i++) await runAutoPromotion(t.db, { trigger: "scheduled" });
+  assert.equal(audits(), beforeAudits);
+  assert.equal(runs(), 11);
+  assert.equal(leadCount(t.db), 0);
 });
 
 // ───────────── records that must NOT be promoted automatically ─────────────

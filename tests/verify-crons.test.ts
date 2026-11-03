@@ -9,10 +9,13 @@ test("[INFRA-006] [READY-012] staging deploy verifies and repairs cron trigger r
   const staging = declaredCrons(toml, "staging");
   assert.deepEqual(staging, Object.keys(SCHEDULE).sort(), "wrangler.toml staging crons match the job schedule");
   assert.deepEqual(declaredCrons(toml, "production"), staging);
-  assert.deepEqual(registeredCrons({ result: { schedules: [{ cron: "17 11 * * *" }, { cron: "*/15 * * * *" }] } }).sort(), staging);
+  assert.deepEqual(registeredCrons({ result: { schedules: [{ cron: "17 11 * * *" }, { cron: "*/15 * * * *" }, { cron: "* * * * *" }] } }).sort(), staging);
   assert.deepEqual(registeredCrons({ result: { schedules: [] } }), []);
   assert.deepEqual(registeredCrons(null), []);
-  assert.equal(sameSchedules(["17 11 * * *", "*/15 * * * *"], staging), true);
+  assert.equal(sameSchedules(["17 11 * * *", "*/15 * * * *", "* * * * *"], staging), true);
+  // The per-minute promotion tick must be registered. A deploy that silently dropped it would leave the CRM import
+  // rate at four runs an hour with nothing failing.
+  assert.equal(sameSchedules(["17 11 * * *", "*/15 * * * *"], staging), false, "a missing per-minute cron is a mismatch, not an acceptable subset");
   assert.equal(sameSchedules([], staging), false);
   assert.equal(sameSchedules(["*/15 * * * *"], staging), false);
   const wf = readFileSync(".github/workflows/deploy-staging.yml", "utf8");

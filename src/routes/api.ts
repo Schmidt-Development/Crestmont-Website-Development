@@ -54,8 +54,12 @@ export function register(r: Router) {
     let cron: unknown;
     try { cron = (JSON.parse(raw) as { cron?: unknown }).cron; } catch { return jsonResponse(ctx, 400, { error: "Body must be JSON" }); }
     if (typeof cron !== "string" || !SCHEDULE[cron]) return jsonResponse(ctx, 422, { error: "Unknown schedule" });
-    const rl = await rateLimit(ctx.db, `scheduler:${cron}`, 1, 300);
-    if (!rl.allowed) return jsonResponse(ctx, 429, { error: "Already ran within the last 5 minutes" });
+    // The throttle exists so a leaked key cannot be used to hammer the job set; it therefore tracks each schedule's
+    // own frequency rather than a fixed five minutes. A per-minute schedule throttled to once per five would make
+    // this backup path useless for the job that needs it most.
+    const windowSeconds = cron === "* * * * *" ? 55 : 300;
+    const rl = await rateLimit(ctx.db, `scheduler:${cron}`, 1, windowSeconds);
+    if (!rl.allowed) return jsonResponse(ctx, 429, { error: `Already ran within the last ${windowSeconds} seconds` });
     await scheduled({ cron }, ctx.env);
     return jsonResponse(ctx, 200, { ran: SCHEDULE[cron] });
   });
