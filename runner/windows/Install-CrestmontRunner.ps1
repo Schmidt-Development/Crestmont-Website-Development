@@ -97,6 +97,7 @@ $script:Problems = New-Object System.Collections.ArrayList
 . (Join-Path $PSScriptRoot "SquidConf.ps1")
 . (Join-Path $PSScriptRoot "RunnerEnv.ps1")
 . (Join-Path $PSScriptRoot "OllamaProbe.ps1")
+. (Join-Path $PSScriptRoot "BackgroundTask.ps1")
 
 function Step([string]$Text) { Write-Host ""; Write-Host "==> $Text" -ForegroundColor Cyan }
 function Ok([string]$Text) { Write-Host "    OK   $Text" -ForegroundColor Green }
@@ -449,7 +450,7 @@ $composeEnv | Set-Content -Encoding ascii (Join-Path $Compose ".env")
 Ok "Wrote docker-compose.yml, proxy\squid.conf, runner.env (managed, no secret values); runner.local.env kept"
 # Tool scripts next to the install, whether or not auto-start is registered (Get-RunnerHealth, Collect-Evidence, ...).
 New-Item -ItemType Directory -Force -Path (Join-Path $State "telemetry") | Out-Null
-foreach ($tool in @("Start-CrestmontRunner.ps1", "Get-RunnerHealth.ps1", "Collect-Evidence.ps1", "Discover-Hardware.ps1", "Write-GpuTelemetry.ps1", "Test-Node1Dispatch.ps1", "Uninstall-CrestmontRunner.ps1")) {
+foreach ($tool in @("BackgroundTask.ps1", "Start-CrestmontRunner.ps1", "Get-RunnerHealth.ps1", "Collect-Evidence.ps1", "Discover-Hardware.ps1", "Write-GpuTelemetry.ps1", "Test-Node1Dispatch.ps1", "Uninstall-CrestmontRunner.ps1", "Repair-WindowsAutomation.ps1")) {
   Copy-Item -Force (Join-Path $PSScriptRoot $tool) (Join-Path $InstallDir $tool)
 }
 
@@ -518,23 +519,56 @@ if (-not $NoStart) {
 }
 if (-not $NoAutoStart) {
   Step "Auto-start after reboot"
-  $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"{0}`" -InstallDir `"{1}`"{2}" -f (Join-Path $InstallDir "Start-CrestmontRunner.ps1"), $InstallDir, $(if ($OllamaInDocker) { " -OllamaInDocker" } elseif ($PreserveOllamaConfig) { " -NoOllamaStart" } else { "" }))
-  # Docker Desktop and the Ollama tray app run in a user session, so the task runs at this user's logon.
-  $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
-  # Watchdog: the same idempotent start script every 5 minutes while the user is signed in, so a stopped Docker Desktop
-  # or compose stack comes back on its own (crashed containers restart by themselves: restart unless-stopped). It does
-  # not help before logon after a reboot (Docker Desktop needs a session; NODE1-INSTALL.md section 7).
-  # With -PreserveOllamaConfig it never starts Ollama either (-NoOllamaStart): a shared Ollama belongs to its owner.
-  $watchdog = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5)
-  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew
-  Register-ScheduledTask -TaskName "CrestmontRunner-Start" -Action $action -Trigger @($trigger, $watchdog) -Settings $settings -RunLevel Limited -Force | Out-Null
-  Ok "Scheduled task 'CrestmontRunner-Start' runs at logon of $env:USERNAME (see WINDOWS-SUPERCOMPUTER.md for unattended reboots)"
+  # Every task below is registered through Register-CrestmontBackgroundTask, which is the ONLY place in this kit that
+  # calls Register-ScheduledTask. It guarantees the two things that stop terminal windows appearing on the desktop:
+  # the job runs either in session 0 or through the hidden launcher, and never as a console host on the desktop.
+  # (A task registered the obvious way - powershell.exe with LogonType Interactive - pops a window on every single
+  # run, however many times -WindowStyle Hidden is passed; the GPU sampler below runs every minute.)
+  $startArgument = @("-InstallDir", $InstallDir)
+  if ($OllamaInDocker) { $startArgument += "-OllamaInDocker" } elseif ($PreserveOllamaConfig) { $startArgument += "-NoOllamaStart" }
+
+  # Docker Desktop and the Ollama tray app are GUI programs and need this user's own session, so this one task is
+  # interactive (launched through the hidden shim). It fires once per logon and never on a timer, so it cannot take
+  # focus while the desktop is in use. With -PreserveOllamaConfig it never starts Ollama (-NoOllamaStart): a shared
+  # Ollama belongs to its owner.
+  $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+  $startTask = Register-CrestmontBackgroundTask -TaskName "CrestmontRunner-Start" -InstallDir $InstallDir `
+    -ScriptPath (Join-Path $InstallDir "Start-CrestmontRunner.ps1") -ScriptArgument $startArgument `
+    -Trigger $logonTrigger -DesktopSession `
+    -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 3 -RestartIntervalMinutes 5 -ExecutionTimeLimitMinutes 60)
+  Ok "Scheduled task 'CrestmontRunner-Start' runs at logon of $env:USERNAME, $($startTask.Strategy) (see WINDOWS-SUPERCOMPUTER.md for unattended reboots)"
+
+  # Watchdog: the same idempotent start script every 5 minutes, but in session 0 and with -NoGuiLaunch, so a stopped
+  # compose stack comes back on its own without a window and without stealing focus (crashed containers restart by
+  # themselves: restart unless-stopped). It cannot start Docker Desktop, which needs a desktop session: after an
+  # unattended reboot that still waits for the next logon (NODE1-INSTALL.md section 7).
+  $watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5)
+  $watchdogTask = Register-CrestmontBackgroundTask -TaskName "CrestmontRunner-Watchdog" -InstallDir $InstallDir `
+    -ScriptPath (Join-Path $InstallDir "Start-CrestmontRunner.ps1") -ScriptArgument ($startArgument + @("-NoGuiLaunch", "-WaitMinutes", "1")) `
+    -Trigger $watchdogTrigger `
+    -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 1 -RestartIntervalMinutes 5 -ExecutionTimeLimitMinutes 15)
+  Ok "Scheduled task 'CrestmontRunner-Watchdog' re-checks the stack every 5 minutes, $($watchdogTask.Strategy)"
+
   # V4: GPU telemetry every minute (nvidia-smi on the host -> state\telemetry\gpu.json, read-only in the runner).
-  $gAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"{0}`" -InstallDir `"{1}`"" -f (Join-Path $InstallDir "Write-GpuTelemetry.ps1"), $InstallDir)
+  # nvidia-smi needs no desktop, so this runs in session 0.
   $gTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
-  $gSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
-  Register-ScheduledTask -TaskName "CrestmontRunner-GpuTelemetry" -Action $gAction -Trigger $gTrigger -Settings $gSettings -RunLevel Limited -Force | Out-Null
-  Ok "Scheduled task 'CrestmontRunner-GpuTelemetry' samples nvidia-smi every minute"
+  $gpuTask = Register-CrestmontBackgroundTask -TaskName "CrestmontRunner-GpuTelemetry" -InstallDir $InstallDir `
+    -ScriptPath (Join-Path $InstallDir "Write-GpuTelemetry.ps1") -ScriptArgument @("-InstallDir", $InstallDir) `
+    -Trigger $gTrigger `
+    -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 0 -ExecutionTimeLimitMinutes 2)
+  Ok "Scheduled task 'CrestmontRunner-GpuTelemetry' samples nvidia-smi every minute, $($gpuTask.Strategy)"
+
+  # Verified, not assumed: read each task back and confirm it cannot put a console on the desktop.
+  foreach ($t in @("CrestmontRunner-Start", "CrestmontRunner-Watchdog", "CrestmontRunner-GpuTelemetry")) {
+    $check = Test-CrestmontTaskIsWindowless -TaskName $t
+    if ($check.Ok) { Ok "$t opens no terminal window ($($check.Reason))" } else { Warn "$t could open a terminal window: $($check.Reason)" }
+  }
+  # Superseded by CrestmontRunner-Watchdog: the repeating trigger used to live on CrestmontRunner-Start, where it
+  # popped a window every 5 minutes. Harmless if it is not there.
+  if (Get-ScheduledTask -TaskName "CrestmontRunner-Start" -ErrorAction SilentlyContinue) {
+    $stale = @(Get-ScheduledTask -TaskName "CrestmontRunner-Start").Triggers | Where-Object { $_.Repetition -and $_.Repetition.Interval }
+    if ($stale) { Warn "CrestmontRunner-Start still carries a repeating trigger; re-run this installer or Repair-WindowsAutomation.ps1 to clear it" }
+  }
 }
 
 Step "Health"

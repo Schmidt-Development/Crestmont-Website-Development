@@ -10,8 +10,9 @@
     3. The worker secret, stored encrypted with Windows DPAPI for this user (never printed, never on a command line).
     4. settings.env (non-secret settings).
     5. Preflight (node src/main.ts --preflight): DuckDB, Ollama model, platform connection with the secret.
-    6. Scheduled task "CrestmontResearch-Worker": restarts on failure, no time limit, one instance only. It starts at
-       logon, and with -RunWhenLoggedOff also at boot and while nobody is signed in.
+    6. Scheduled task "CrestmontResearch-Worker": bounded restarts on failure, no time limit, one instance only, and
+       no terminal window (session 0 with -RunWhenLoggedOff, otherwise the hidden launcher). It starts at logon, and
+       with -RunWhenLoggedOff also at boot and while nobody is signed in.
   It opens NO inbound firewall ports. The health endpoint listens on 127.0.0.1 only. Ollama must stay on 127.0.0.1.
 
 .PARAMETER PlatformUrl
@@ -52,6 +53,9 @@ param(
   [switch]$NoAutoStart
 )
 $ErrorActionPreference = "Stop"
+# Shared with the build-runner kit: scheduled-task registration that cannot open a terminal window, single-instance
+# locking and the bounded-retry policy. One copy, in runner\windows, installed next to the worker below.
+. (Join-Path $RepoPath "runner\windows\BackgroundTask.ps1")
 function Step($m) { Write-Host "`n== $m" -ForegroundColor Cyan }
 function Ok($m) { Write-Host "  OK  $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "  !!  $m" -ForegroundColor Yellow }
@@ -120,36 +124,46 @@ $settings = @(
 $settings | Set-Content -Path (Join-Path $InstallDir "settings.env") -Encoding ASCII
 Copy-Item (Join-Path $PSScriptRoot "Start-ResearchWorker.ps1") $InstallDir -Force
 Copy-Item (Join-Path $PSScriptRoot "Get-ResearchWorkerHealth.ps1") $InstallDir -Force
+Copy-Item (Join-Path $RepoPath "runner\windows\BackgroundTask.ps1") $InstallDir -Force
 "REPO_PATH=$RepoPath" | Add-Content -Path (Join-Path $InstallDir "settings.env") -Encoding ASCII
 Ok "settings.env written (no secrets inside)"
 
 Step "5. Preflight"
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $InstallDir "Start-ResearchWorker.ps1") -InstallDir $InstallDir -Preflight
+# Run in this process (no nested powershell.exe, which would open a second console window for nothing).
+& (Join-Path $InstallDir "Start-ResearchWorker.ps1") -InstallDir $InstallDir -Preflight
 if ($LASTEXITCODE -ne 0) { Fail "Preflight failed: fix the items marked MISSING/FAILED above, then re-run" }
 Ok "Preflight passed"
 
 if (-not $NoAutoStart) {
   Step "6. Scheduled task"
-  $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"{0}`" -InstallDir `"{1}`"" -f (Join-Path $InstallDir "Start-ResearchWorker.ps1"), $InstallDir)
   # An -AtLogOn trigger alone leaves the worker stopped after an unattended restart until someone signs in, which is
   # not continuous operation. -RunWhenLoggedOff adds a boot trigger and runs the task with the account's stored
   # password, which DPAPI needs to unprotect the platform secret (an S4U, password-less task cannot).
   $triggers = @(New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME")
   if ($RunWhenLoggedOff) { $triggers += New-ScheduledTaskTrigger -AtStartup }
-  $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+  # Bounded: 4, not 999. The supervisor itself retries with exponential backoff inside a rolling budget, so a large
+  # RestartCount here would multiply two retry loops together and keep a broken worker launching indefinitely.
+  $taskSettings = Get-CrestmontBackgroundTaskSetting -RestartCount 4 -RestartIntervalMinutes 5 -RunIndefinitely
   if ($RunWhenLoggedOff) {
     $cred = Get-Credential -UserName "$env:USERDOMAIN\$env:USERNAME" -Message "Windows password for $env:USERNAME. Task Scheduler stores it so research keeps running with nobody signed in; it is not written to this repository or to settings.env."
     if (-not $cred) { Fail "-RunWhenLoggedOff needs the account password to register a task that runs while logged off" }
-    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($cred.Password)
-    try {
-      $pw = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-      Register-ScheduledTask -TaskName "CrestmontResearch-Worker" -Action $action -Trigger $triggers -Settings $taskSettings -User $cred.UserName -Password $pw -RunLevel Limited -Force | Out-Null
-    } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr); Remove-Variable pw -ErrorAction SilentlyContinue }
-    Ok "Task registered to run at boot and while logged off"
+    # Session 0 with the stored password: no desktop, so no terminal window, and DPAPI still works.
+    $task = Register-CrestmontBackgroundTask -TaskName "CrestmontResearch-Worker" -InstallDir $InstallDir `
+      -ScriptPath (Join-Path $InstallDir "Start-ResearchWorker.ps1") -ScriptArgument @("-InstallDir", $InstallDir) `
+      -Trigger $triggers -Settings $taskSettings -Credential $cred
+    Ok "Task registered to run at boot and while logged off, $($task.Strategy) (no terminal window)"
   } else {
-    Register-ScheduledTask -TaskName "CrestmontResearch-Worker" -Action $action -Trigger $triggers -Settings $taskSettings -RunLevel Limited -Force | Out-Null
+    # Without a stored password the worker has to run in this user's own logon session, because the platform secret
+    # is DPAPI-protected for this user and a session-0 S4U task has no access to the user's master key. The hidden
+    # launcher keeps it windowless all the same.
+    $task = Register-CrestmontBackgroundTask -TaskName "CrestmontResearch-Worker" -InstallDir $InstallDir `
+      -ScriptPath (Join-Path $InstallDir "Start-ResearchWorker.ps1") -ScriptArgument @("-InstallDir", $InstallDir) `
+      -Trigger $triggers -Settings $taskSettings -DesktopSession
+    Ok "Task registered, $($task.Strategy) (no terminal window)"
     Warn "The task runs only while $env:USERNAME is signed in: after an unattended restart research stays stopped until the next logon. Re-run with -RunWhenLoggedOff for continuous operation."
   }
+  $check = Test-CrestmontTaskIsWindowless -TaskName "CrestmontResearch-Worker"
+  if ($check.Ok) { Ok "CrestmontResearch-Worker opens no terminal window ($($check.Reason))" } else { Warn "CrestmontResearch-Worker could open a terminal window: $($check.Reason)" }
   Start-ScheduledTask -TaskName "CrestmontResearch-Worker"
   Ok "Task registered and started. Health: $InstallDir\Get-ResearchWorkerHealth.ps1"
   # ${Model} is delimited on purpose: "$Model:" parses as a scoped variable reference (like $env:X) and is a syntax error.

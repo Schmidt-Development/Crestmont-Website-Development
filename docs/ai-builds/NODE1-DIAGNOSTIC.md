@@ -15,7 +15,8 @@ Crestmont platform (Cloudflare Worker + D1, staging = branch main)            No
                                                                                │        ▼          :11434              │
                                                                                │ Ollama (tray app, user session) ──► GPU
                                                                                └──────────────────────────────────────┘
- Start-up: scheduled task CrestmontRunner-Start runs AT LOGON of the installing user → Docker Desktop, Ollama,
+ Start-up: scheduled task CrestmontRunner-Start runs AT LOGON of the installing user (through the hidden launcher,
+ so no terminal window) → Docker Desktop, Ollama,
  `docker compose up -d` (restart: unless-stopped). Nothing listens on Node 1; no port is exposed.
 ```
 

@@ -5,10 +5,10 @@ name: Windows PowerShell 5.1 checks
 on:
   workflow_dispatch:
   pull_request:
-    paths: ["runner/windows/**", "research-worker/windows/**", ".github/workflows/windows-powershell.yml"]
+    paths: ["runner/windows/**", "research-worker/windows/**", "runner/test/background-task.test.ts", ".github/workflows/windows-powershell.yml"]
   push:
     branches: [main]
-    paths: ["runner/windows/**", "research-worker/windows/**", ".github/workflows/windows-powershell.yml"]
+    paths: ["runner/windows/**", "research-worker/windows/**", "runner/test/background-task.test.ts", ".github/workflows/windows-powershell.yml"]
 
 permissions:
   contents: read
@@ -70,6 +70,125 @@ jobs:
             exit 1
           fi
           cat "$RUNNER_TEMP/ollamaprobe.txt"
+      - name: BackgroundTask.ps1 retry policy and quoting match background-task.ts (under 5.1)
+        shell: bash
+        env:
+          PWSH: powershell
+        run: node --no-warnings --test --test-name-pattern "match background-task.ts" runner/test/background-task.test.ts
+
+      # The terminal-popup fix, tested on real Windows with a real Task Scheduler. Two independent claims:
+      #   (a) the hidden launcher starts a console program whose console window is NOT visible, and
+      #   (b) the tasks this kit registers run in session 0 or through that launcher, one instance at a time.
+      # (a) is checked against a POSITIVE CONTROL - the same launcher with window style 1 (SW_SHOWNORMAL) - so the
+      # test cannot pass just because a CI host shows no windows at all. If the control cannot show a window, the
+      # host has no visible desktop and the step says the window check was inconclusive instead of claiming a pass.
+      - name: Background tasks register and launch without a visible terminal window
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          . .\runner\windows\BackgroundTask.ps1
+          $dir = Join-Path $env:RUNNER_TEMP "bgtask"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+          # A probe that reports whether it owns a console window and whether that window is visible.
+          $probe = Join-Path $dir "Probe.ps1"
+          @'
+          param([string]$Out)
+          Add-Type -Namespace Crestmont -Name Win -MemberDefinition @"
+          [DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow();
+          [DllImport("user32.dll")] public static extern bool IsWindowVisible(System.IntPtr hWnd);
+          "@
+          $h = [Crestmont.Win]::GetConsoleWindow()
+          $visible = $false
+          if ($h -ne [System.IntPtr]::Zero) { $visible = [Crestmont.Win]::IsWindowVisible($h) }
+          [IO.File]::WriteAllText($Out, ([ordered]@{ console = ($h -ne [System.IntPtr]::Zero); visible = [bool]$visible } | ConvertTo-Json -Compress))
+          '@ | Set-Content -Path $probe -Encoding ascii
+
+          [void](Write-CrestmontHiddenShim -InstallDir $dir)
+          $shim = Join-Path $dir "Start-CrestmontHidden.vbs"
+          if (-not (Test-Path $shim)) { throw "the hidden launcher was not written" }
+
+          function Invoke-Probe([int]$Style, [string]$Tag) {
+            $out = Join-Path $dir "$Tag.json"
+            if (Test-Path $out) { Remove-Item -Force $out }
+            $cmdline = Get-CrestmontHiddenCommandLine -ScriptPath $probe -ScriptArgument @($out)
+            # Style 0 is what the shim uses; any other style is the positive control.
+            $vbs = Join-Path $dir "run-$Tag.vbs"
+            Set-Content -Path $vbs -Encoding ascii -Value @(
+              "Dim shell",
+              "Set shell = CreateObject(""WScript.Shell"")",
+              "WScript.Quit shell.Run(WScript.Arguments(0), $Style, True)")
+            & (Join-Path $env:SystemRoot "System32\wscript.exe") $vbs $cmdline | Out-Null
+            if (-not (Test-Path $out)) { throw "$Tag probe did not run" }
+            return (Get-Content $out -Raw | ConvertFrom-Json)
+          }
+
+          $control = Invoke-Probe -Style 1 -Tag "control"
+          $hidden = Invoke-Probe -Style 0 -Tag "hidden"
+          Write-Output ("control (window style 1): console={0} visible={1}" -f $control.console, $control.visible)
+          Write-Output ("hidden  (window style 0): console={0} visible={1}" -f $hidden.console, $hidden.visible)
+          if ($hidden.visible) { throw "FAIL: the hidden launcher produced a VISIBLE console window" }
+          if (-not $control.visible) {
+            Write-Output "::warning title=Window check inconclusive::this host never shows a console window (no visible desktop), so hidden-vs-visible could not be distinguished here; the registration checks below still ran"
+          } else {
+            Write-Output "OK: window style 1 is visible and the launcher's style 0 is not, so the launcher is what hides it"
+          }
+
+          # Now the registration shape, through the real Task Scheduler.
+          $names = @()
+          try {
+            $t1 = Register-CrestmontBackgroundTask -TaskName "CrestmontCiTest-Session0" -InstallDir $dir `
+              -ScriptPath $probe -ScriptArgument @((Join-Path $dir "s0.json")) `
+              -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddDays(2) -RepetitionInterval (New-TimeSpan -Minutes 5)) `
+              -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 0 -ExecutionTimeLimitMinutes 2)
+            $names += "CrestmontCiTest-Session0"
+            Write-Output ("Session0 task strategy: {0} (LogonType {1}, executes {2})" -f $t1.Strategy, $t1.LogonType, $t1.Execute)
+
+            $t2 = Register-CrestmontBackgroundTask -TaskName "CrestmontCiTest-Desktop" -InstallDir $dir `
+              -ScriptPath $probe -ScriptArgument @((Join-Path $dir "desk.json")) `
+              -Trigger (New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME") -DesktopSession `
+              -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 1 -RestartIntervalMinutes 5 -ExecutionTimeLimitMinutes 10)
+            $names += "CrestmontCiTest-Desktop"
+            Write-Output ("Desktop task strategy: {0} (LogonType {1}, executes {2})" -f $t2.Strategy, $t2.LogonType, $t2.Execute)
+            if ([IO.Path]::GetFileName($t2.Execute) -ne "wscript.exe") { throw "a desktop task must be launched by wscript.exe, not a console host" }
+
+            foreach ($n in $names) {
+              $v = Test-CrestmontTaskIsWindowless -TaskName $n
+              Write-Output ("{0}: Ok={1} LogonType={2} MultipleInstances={3} - {4}" -f $n, $v.Ok, $v.LogonType, $v.MultipleInstances, $v.Reason)
+              if (-not $v.Ok) { throw "$n can open a terminal window: $($v.Reason)" }
+              if ($v.MultipleInstances -ne "IgnoreNew") { throw "$n is not single-instance" }
+            }
+
+            # A caller that tries to register a task allowing parallel instances must be refused.
+            $parallel = New-ScheduledTaskSettingsSet -MultipleInstances Parallel
+            $refused = $false
+            try {
+              Register-CrestmontBackgroundTask -TaskName "CrestmontCiTest-Parallel" -InstallDir $dir -ScriptPath $probe `
+                -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddDays(2)) -Settings $parallel | Out-Null
+            } catch { $refused = $true; Write-Output "OK: parallel instances refused - $($_.Exception.Message)" }
+            if (-not $refused) { throw "a task allowing parallel instances was registered; it must be refused" }
+          } finally {
+            foreach ($n in @("CrestmontCiTest-Session0", "CrestmontCiTest-Desktop", "CrestmontCiTest-Parallel")) {
+              if (Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName $n -Confirm:$false }
+            }
+          }
+
+          # The single-instance lock really is exclusive across processes.
+          $state = Join-Path $dir "state"
+          $holder = Start-Process -FilePath (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe") -PassThru -WindowStyle Hidden -ArgumentList @(
+            "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+            ". '$((Resolve-Path .\runner\windows\BackgroundTask.ps1).Path)'; `$h = Enter-CrestmontSingleInstance -Name 'ci-lock' -StateDir '$state'; if (-not `$h) { exit 9 }; Start-Sleep -Seconds 20")
+          Start-Sleep -Seconds 5
+          $second = Enter-CrestmontSingleInstance -Name "ci-lock" -StateDir $state
+          if ($second) { Exit-CrestmontSingleInstance -Handle $second; Stop-Process -Id $holder.Id -Force; throw "two processes took the same single-instance lock" }
+          Write-Output "OK: a second process could not take the lock while the first holds it"
+          Stop-Process -Id $holder.Id -Force
+          Start-Sleep -Seconds 2
+          $third = Enter-CrestmontSingleInstance -Name "ci-lock" -StateDir $state
+          if (-not $third) { throw "the lock was not released when the holder was killed" }
+          Exit-CrestmontSingleInstance -Handle $third
+          Write-Output "OK: the lock is released by the OS when the holder is killed (no stale lock file)"
+
       - name: Discover-Hardware.ps1 (read-only) -> select-model.ts
         shell: powershell
         run: |

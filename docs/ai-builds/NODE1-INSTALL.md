@@ -157,8 +157,41 @@ block E. The secret prompt does not appear while `C:\CrestmontRunner\secrets\bui
   from the committed lockfiles. The previous images are kept as `:1-previous`.
 - **Creates in Docker** the networks `crestmont_runner`, `crestmont_install` and `crestmont_egress`, and the volume
   `crestmont-workspaces`. It starts the containers `egress-proxy` and `runner` (restart: unless-stopped).
-- **Registers scheduled tasks.** `CrestmontRunner-Start` runs at your logon and every 5 minutes as the watchdog.
-  `CrestmontRunner-GpuTelemetry` runs every minute and reads `nvidia-smi`.
+- **Registers scheduled tasks**, none of which open a terminal window (see *No terminal windows* below).
+  `CrestmontRunner-Start` runs once at your logon and starts Docker Desktop and the Ollama tray app.
+  `CrestmontRunner-Watchdog` runs every 5 minutes in session 0 and brings the compose stack back without touching
+  those GUI programs. `CrestmontRunner-GpuTelemetry` runs every minute in session 0 and reads `nvidia-smi`.
+  Each task is registered single-instance (`MultipleInstances IgnoreNew`) with a bounded restart count, and the
+  installer reads every task back afterwards and prints whether it can open a window.
+
+### No terminal windows
+
+`powershell.exe` is a console program. A scheduled task that runs it with LogonType **Interactive** executes in your
+signed-in desktop session, so Windows creates **and shows** a console window every time the task starts;
+`-WindowStyle Hidden` is parsed by the PowerShell host after that window already exists and cannot prevent it. A
+repeating task of that shape pops a terminal on every repetition.
+
+Every task in this kit therefore takes one of two paths, both of them registered through the single helper
+`Register-CrestmontBackgroundTask` in `runner\windows\BackgroundTask.ps1` (the only place that calls
+`Register-ScheduledTask`):
+
+| Path | Used by | Why no window |
+| --- | --- | --- |
+| **Session 0** (`S4U`, or `Password` with `-RunWhenLoggedOff`) | the watchdog, GPU telemetry, the research worker when it has a stored password | the task runs outside any desktop session, so there is no desktop for a window to appear on |
+| **Hidden launcher** (`wscript.exe` + `Start-CrestmontHidden.vbs`) | the logon task, which must start GUI programs in your own session | `wscript.exe` is a GUI-subsystem host with no console of its own, and the shim calls `WshShell.Run(..., 0, True)`, which creates the child's console **already hidden** - no window, not even a flash. It waits for the child, so `IgnoreNew` and the execution time limit still apply |
+
+If terminal windows ever come back, run the diagnosis and repair on the machine:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\CrestmontRunner\Repair-WindowsAutomation.ps1 -DiagnoseOnly
+```
+
+It lists every scheduled task on the machine built the window-popping way (not only Crestmont's), the console-host
+processes running now with their parent process - a `powershell.exe` whose parent is `svchost.exe` was started by the
+Task Scheduler service - and whether each Crestmont task is windowless. Re-run it without `-DiagnoseOnly` to convert
+only the Crestmont tasks that fail the check, adding `-KillRunaway` to end the ones already running. It deletes
+nothing: queues, build checkpoints, logs, secrets, containers, images and volumes are untouched, and tasks that are
+not Crestmont's are only reported.
 - **Network.** Outbound HTTPS only, through the Squid allow-list (the staging host and the npm registry). Paid AI APIs
   are denied. **No inbound ports and no firewall rules.**
 - **Doesn't change** (with the flags above): Ollama's settings, Ollama's process, models, HQ/JARVIS, Windows

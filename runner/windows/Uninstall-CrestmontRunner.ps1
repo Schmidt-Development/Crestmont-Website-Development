@@ -6,7 +6,7 @@
 .DESCRIPTION
   Default (no switch): stop. Stops the runner stack (`docker compose down`; a running build is released and requeued
   by the platform without spending an attempt) and disables the scheduled tasks. Nothing is deleted. Undo with
-  Start-CrestmontRunner.ps1 and `Enable-ScheduledTask CrestmontRunner-Start`.
+  Start-CrestmontRunner.ps1 and `Enable-ScheduledTask CrestmontRunner-Start` (plus -Watchdog and -GpuTelemetry).
 
   -Rollback: return to the images and runner.env that were in use before the last installer run (the installer keeps
   them as <image>:1-previous and state\runner.env.previous), then start the stack again.
@@ -31,6 +31,7 @@ param(
   [switch]$DeleteWorkspaces
 )
 $ErrorActionPreference = "Continue"
+. (Join-Path $PSScriptRoot "BackgroundTask.ps1")
 if ($Rollback -and $Remove) { throw "Use either -Rollback or -Remove, not both" }
 $Compose = Join-Path $InstallDir "compose"
 $State = Join-Path $InstallDir "state"
@@ -40,7 +41,7 @@ $composeArgs = @("compose", "-f", $composeFile, "--project-directory", $Compose,
 $mode = $null
 foreach ($f in @((Join-Path $State "install.json"))) { if (Test-Path $f) { try { $mode = Get-Content $f -Raw | ConvertFrom-Json } catch { $mode = $null } } }
 $images = @("crestmont-ai-runner", "crestmont-build-sandbox", "crestmont-egress-proxy")
-$tasks = @("CrestmontRunner-Start", "CrestmontRunner-GpuTelemetry")
+$tasks = @("CrestmontRunner-Start", "CrestmontRunner-Watchdog", "CrestmontRunner-GpuTelemetry")
 function Say([string]$m) { Write-Host "==> $m" -ForegroundColor Cyan }
 
 Say "Stopping the Crestmont runner stack (a running build is released and requeued by the platform)"
@@ -63,10 +64,11 @@ if ($Rollback) {
   $prevEnv = Join-Path $State "runner.env.previous"
   if (Test-Path $prevEnv) { Copy-Item -Force $prevEnv (Join-Path $Compose "runner.env"); Write-Host "    runner.env restored" }
   foreach ($t in $tasks) { if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) { Enable-ScheduledTask -TaskName $t | Out-Null } }
-  $startArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $InstallDir "Start-CrestmontRunner.ps1"), "-InstallDir", $InstallDir)
+  $startArgs = @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $InstallDir "Start-CrestmontRunner.ps1"), "-InstallDir", $InstallDir)
   # Same Ollama mode as the install; never start a shared Ollama (unknown mode = do not start it).
   if ($mode -and $mode.ollamaInDocker) { $startArgs += "-OllamaInDocker" } elseif (-not $mode -or $mode.preserveOllamaConfig) { $startArgs += "-NoOllamaStart" }
-  & powershell.exe @startArgs
+  # No extra console window, even when this script is run from a visible prompt.
+  [void](Invoke-CrestmontHiddenProcess -FilePath (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe") -ArgumentList $startArgs -Wait)
   Say "Rolled back. Check: powershell -NoProfile -ExecutionPolicy Bypass -File $InstallDir\Get-RunnerHealth.ps1"
   exit 0
 }
@@ -79,6 +81,9 @@ if ($Remove) {
   foreach ($n in @("crestmont_runner", "crestmont_install", "crestmont_egress")) { & docker.exe network rm $n 2>&1 | Out-Null }
   if ($DeleteWorkspaces) { & docker.exe volume rm crestmont-workspaces 2>&1 | Out-Null; Write-Host "    deleted volume crestmont-workspaces" }
   else { Write-Host "    kept volume crestmont-workspaces (build checkpoints); -DeleteWorkspaces removes it" }
+  foreach ($leftover in @((Join-Path $InstallDir "Start-CrestmontHidden.vbs"), (Join-Path $InstallDir "tasks"))) {
+    if (Test-Path $leftover) { Remove-Item -Recurse -Force $leftover -ErrorAction SilentlyContinue; Write-Host "    removed $leftover (hidden launcher)" }
+  }
   if ($DeleteInstallDir -and (Test-Path $InstallDir)) {
     $keep = if ($DeleteSecrets) { @() } else { @("secrets") }
     Get-ChildItem -Force $InstallDir | Where-Object { $keep -notcontains $_.Name } | Remove-Item -Recurse -Force
