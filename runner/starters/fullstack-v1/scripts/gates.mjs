@@ -28,7 +28,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runFrontend } from "./lib/frontend.mjs";
 import { migratedDb } from "./lib/d1.mjs";
-import { validateConfig } from "./lib/config-check.mjs";
+import { validateConfig, inServiceArea } from "./lib/config-check.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -43,19 +43,23 @@ const fail = (g, msg) => { g.status = "fail"; g.findings.push(msg); };
 
 if (!pkg) { console.error(`unknown package ${pkgId}`); process.exit(2); }
 
-// ── configuration ──
-let config = null;
-try { config = JSON.parse(readFileSync(path.join(ROOT, "business.config.json"), "utf8")); } catch (e) { config = null; }
-const cfgCheck = config ? validateConfig(config) : { problems: ["business.config.json is missing or not JSON"], missing: [] };
-out.missingInformation = cfgCheck.missing;
-const features = Object.fromEntries(Object.entries(config?.features ?? {}).filter(([, v]) => v === true));
-out.features = features;
-
 // ── the customer's request (BRIEF.json snapshot written by the runner) ──
+// Read before the configuration, which is now judged AGAINST it: a fact the customer never gave may not
+// appear in business.config.json (gate A, "missing facts are never invented").
 const briefFile = arg("brief", path.join(ROOT, "BRIEF.json"));
 let brief = null;
 try { brief = JSON.parse(readFileSync(briefFile, "utf8")); } catch { brief = null; }
 const cd = brief?.customerData ?? brief?.content?.customerData ?? null;
+
+// ── configuration ──
+let config = null;
+try { config = JSON.parse(readFileSync(path.join(ROOT, "business.config.json"), "utf8")); } catch (e) { config = null; }
+const cfgCheck = config ? validateConfig(config, cd) : { problems: ["business.config.json is missing or not JSON"], missing: [], invented: [] };
+out.missingInformation = cfgCheck.missing;
+out.inventedInformation = cfgCheck.invented ?? [];
+const features = Object.fromEntries(Object.entries(config?.features ?? {}).filter(([, v]) => v === true));
+out.features = features;
+
 const requested = new Set();
 for (const f of cd?.features ?? []) {
   const k = typeof f === "string" ? f : f?.key;
@@ -159,6 +163,7 @@ const globalProblems = [
 const A = gate("A", "requirements");
 for (const p of cfgCheck.problems) fail(A, `business.config.json: ${p}`);
 for (const m of cfgCheck.missing) fail(A, `missing customer information: ${m} (request it from the customer; never invent it)`);
+for (const m of cfgCheck.invented ?? []) fail(A, `invented customer information: ${m} (the customer never provided it; a fabricated fact is worse than a missing one)`);
 for (const r of requested) {
   if (r.startsWith("site:")) { require(A, `feature:${r.slice(5)}`, `the customer asked for "${r.slice(5)}"; it needs a site implementation with an acceptance test`); continue; }
   if (!pkg.capabilities.includes(r)) { out.scopeChanges.push({ feature: r, reason: `not included in the ${pkgId} package: needs a change order or custom quote before it is built` }); continue; }
@@ -177,6 +182,28 @@ out.frontend = { pages: fe.pages, errors: fe.errors, warnings: fe.warnings };
 for (const e of fe.errors) {
   const target = e.area === "requirements" ? A : e.area === "security" ? null : B;
   if (target) fail(target, `${e.file}: ${e.message}`);
+}
+// A form that prints an example its own backend refuses is a broken form. The generated quote page showed
+// city "Lansing" and ZIP "48901" as placeholders while the configured service area allowed only New York and
+// Detroit, so submitting the website's own example values returned 422 outside_service_area (real defect, job
+// bld_b62360ebf30bf50493cc724d, 2026-11-03). Visitors copy placeholders; this must never pass.
+if (config && (features.quotes || features.booking) && config.serviceArea) {
+  for (const rel of fe.pages) {
+    let html = "";
+    try { html = readFileSync(path.join(ROOT, rel), "utf8"); } catch { continue; }
+    const ph = (name) => {
+      const m = new RegExp('name="' + name + '"[^>]*placeholder="([^"]+)"').exec(html)
+        ?? new RegExp('placeholder="([^"]+)"[^>]*name="' + name + '"').exec(html);
+      return m ? m[1].trim() : null;
+    };
+    const zip = ph("postalCode"), city = ph("city");
+    if (!zip && !city) continue;
+    if (!inServiceArea(config, zip, city)) {
+      const shown = [city ? `city "${city}"` : null, zip ? `ZIP "${zip}"` : null].filter(Boolean).join(", ");
+      fail(B, `${rel}: the example values the form itself prints (${shown}) are outside the configured service area, `
+        + "so a visitor who copies them gets 422 outside_service_area");
+    }
+  }
 }
 if (!fe.errors.some((e) => e.area !== "security")) B.evidence.push(`${fe.pages.length} page(s): HTML, links, forms, accessibility basics, contrast, SEO checked`);
 

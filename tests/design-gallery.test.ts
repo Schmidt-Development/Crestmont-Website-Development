@@ -102,16 +102,26 @@ test("[GALLERY] J24: every package draws on the same gallery — selection takes
   } finally { await t.close?.(); }
 });
 
-test("[GALLERY] J23: a build gets a bounded, varied set rather than the whole gallery", async () => {
+// SPECIFICATION CHANGE, Founder directive 2026-11-03: this test used to require that a build's set spanned at
+// least four industries. That requirement was the defect -- the selector took the best reference PER INDUSTRY
+// first, so a junk-removal website was shown luxury fashion and restaurants while construction references sat
+// unused. Relevance now outranks variety, and variety is only what is left when the customer's own trade runs
+// out. The set is still bounded and still free of duplicates; what it may no longer do is dilute relevance.
+test("[GALLERY] J23: a build gets a bounded set led by the customer's own trade, variety only as a remainder", async () => {
   const { t, owner } = await app();
   try {
     const industries = ["luxury", "automotive", "construction", "home-services", "technology", "saas", "professional", "hospitality", "restaurants", "healthcare", "ecommerce", "editorial"];
     for (let i = 0; i < 24; i++) await approved(t, owner, { title: `Ref ${i}`, industry: industries[i % industries.length] });
     const sel = await G.selectForBuild(t.db, { industry: "luxury" });
     assert.equal(sel.references.length, G.SELECTION_SIZE, `bounded to ${G.SELECTION_SIZE}, not all 24`);
-    assert.ok(new Set(sel.references.map((r) => r.industry)).size >= 4, `varied across industries: ${sel.references.map((r) => r.industry).join(", ")}`);
-    assert.equal(sel.references[0].industry, "luxury");
     assert.equal(new Set(sel.references.map((r) => r.id)).size, sel.references.length, "no duplicates");
+    // Every reference from the customer's own category comes first, and none of them is displaced by variety.
+    const own = sel.references.filter((r) => r.industry === "luxury");
+    assert.equal(own.length, 2, "both luxury references are in the set");
+    assert.deepEqual(sel.references.slice(0, 2).map((r) => r.industry), ["luxury", "luxury"],
+      `the customer's trade leads and is exhausted first, got: ${sel.references.map((r) => r.industry).join(", ")}`);
+    // Only after that does anything else appear, so a varied tail is a consequence, never the goal.
+    assert.ok(sel.references.slice(2).every((r) => r.industry !== "luxury"));
   } finally { await t.close?.(); }
 });
 

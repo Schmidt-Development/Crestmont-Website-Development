@@ -18,6 +18,7 @@ import { assertQualityForApproval, recordQuality } from "./build-quality.ts";
 
 import { redact } from "./monitoring.ts";
 import { getOnboarding, allFields, isVisible, type Answers } from "./onboarding.ts";
+import * as G from "./design-gallery.ts";
 import { sweepAiLeases } from "./ai-runner.ts";
 import { notifyCustomer, notifyProjectTeam, type MailCtx } from "./notifications.ts";
 import { previewSignInUrl, safePreviewPath } from "../lib/preview-token.ts";
@@ -487,6 +488,46 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
     const reqs = (await db.prepare(`SELECT key, label, status, evidence, blocker FROM build_requirements WHERE job_id = ? ORDER BY key`).bind(job.id).all<{ key: string; label: string; status: string; evidence: string | null; blocker: string | null }>()).results
       .map((r) => ({ key: r.key, label: r.label, status: r.status, ...(r.evidence ? { evidence: r.evidence } : {}), ...(r.blocker ? { blocker: r.blocker } : {}) }));
     const remaining = Math.max(0, budget - spent);
+    // The Design Gallery reaches the builder HERE, on the claim, which is the only moment the platform hands a
+    // runner everything it needs for one attempt. Selecting earlier would freeze a gallery version the owner may
+    // since have changed; selecting inside the runner would put the owner's approval decisions outside the
+    // platform. A gallery failure must never cost the customer their build, so this is best-effort and the
+    // failure is recorded as an event rather than thrown.
+    const design = await (async () => {
+      try {
+        const b = brief ? JSON.parse(brief.content_json) as BuildBrief : null;
+        const cd = b?.customerData;
+        const sel = await G.selectForBuild(db, {
+          industry: cd?.business.industry ?? null,
+          styleHints: [cd?.brand.style ?? "", cd?.brand.colors ?? ""].filter(Boolean),
+        });
+        if (!sel.references.length) return null;
+        await G.recordSelection(db, job.id, job.project_id, sel);
+        await event(db, job.id, "activity", `Gallery selection (v${sel.galleryVersion}): ${sel.reason}`, { kind: "system" },
+          { data: { galleryVersion: sel.galleryVersion, references: sel.scored.map((s) => ({ id: s.reference.id, title: s.reference.title, industry: s.reference.industry, relevance: s.weight })) } });
+        return {
+          galleryVersion: sel.galleryVersion, reason: sel.reason,
+          industryMatch: { normalized: sel.classification.normalized, confident: sel.classification.confident, ranked: sel.classification.ranked.slice(0, 6) },
+          references: sel.scored.map((s) => ({
+            id: s.reference.id, title: s.reference.title, industry: s.reference.industry, relevance: s.weight, why: s.why,
+            tags: G.tags(s.reference),
+            notes: {
+              typography: s.reference.typography_notes, layout: s.reference.layout_notes, color: s.reference.color_notes,
+              animation: s.reference.animation_notes, responsive: s.reference.responsive_notes, quality: s.reference.quality_notes,
+            },
+            // Which variants exist. The bytes are fetched separately, so a missing object is reported rather than
+            // quietly becoming "the model saw it".
+            images: (["desktop", "tablet", "mobile"] as const).filter((v) => s.reference[`${v}_key`]),
+            // Inspiration, never the customer's asset: the rights basis travels with the reference so the runner
+            // cannot decide on its own to ship a gallery screenshot as a customer's hero image.
+            rights: s.reference.rights_basis,
+          })),
+        };
+      } catch (err) {
+        await event(db, job.id, "activity", `Gallery selection failed; the build continues without references: ${String(err).slice(0, 200)}`, { kind: "system" }).catch(() => {});
+        return null;
+      }
+    })();
     return {
       job: {
         id: job.id, projectId: job.project_id, attempt: job.attempts, kind: job.kind, revision: job.revision,
@@ -503,6 +544,9 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
         worker: worker ? { id: worker.id, label: worker.label, maxActiveProjects: worker.max_active_projects } : null,
         limits: { model: s.model, maxTurns: s.max_turns, maxRuntimeMinutes: s.max_runtime_minutes, runBudgetUsd: microToUsd(Math.min(s.run_budget_micro, remaining)), projectBudgetRemainingUsd: microToUsd(remaining) },
         resume: job.agent_session_id || job.source_commit ? { sessionId: job.agent_session_id, workspaceRef: job.workspace_ref, checkpointKey: job.checkpoint_key, sourceRepo: job.source_repo, sourceBranch: job.source_branch, sourceCommit: job.source_commit } : null,
+        // What the owner-approved Design Gallery gave this build, and why. Null when the gallery is empty or
+        // unreachable: the runner then says so in its evidence instead of implying references it never had.
+        design,
       },
     };
   }

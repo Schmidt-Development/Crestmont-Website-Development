@@ -114,6 +114,10 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/builds/runner/requirements": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/checkpoint/fetch": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/revisions/store": signed("x-crestmont-runner-signature"),
+  // Design Gallery -> builder. Lease-scoped on top of the signature: a runner only ever reaches the references
+  // the job it holds was actually given, so neither route can be used to walk the gallery.
+  "POST /api/builds/runner/gallery/image": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/gallery/seen": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/ai/claim": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/ai/complete": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/ai/checkpoint": signed("x-crestmont-runner-signature"),
