@@ -1,4 +1,5 @@
 -- READY-013: automatic, evidence-driven Launch Readiness.
+-- (Numbered 0071: 0070 was taken by the research runner samples migration from PR #121.)
 --
 -- Implementation status used to be asserted by hand in requirements/status/*.ts and nothing recomputed it when
 -- engineering work landed. src/readiness/derive.ts now derives every status from the evidence CI, the staging
