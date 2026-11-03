@@ -114,22 +114,26 @@ back on its own.
 
 Set against measured numbers, not hopes (`CAPACITY.md` §4):
 
-- 25,000 qualified/day needs **163,400 businesses evaluated/day** (6,808/hour, 1.9/second) at the measured 15.3%
-  qualification rate — about **concurrency 80** and **884,000 HTTP requests a day**.
+- 25,000 qualified/day needs **118,990 businesses evaluated/day** (4,958/hour, 1.38/second) at the qualification
+  rate now measured on staging over 23,169 real businesses — **21.01%**, not the 15.3% of the original one-city
+  sample — which implies about **concurrency 57** rather than 80 (`CAPACITY.md` §4, "Measured at scale on staging").
 - **One** such day may be achievable; it has never been tested. The 4,168 businesses/hour reference is an 18-minute
   burst from a datacenter IP in one small area, with ~25% of checks already refused by robots rules or bot
   protection. Holding ~6,800/hour for 24 hours on a home or office connection is the real unknown, and it is exactly
   what a proof run would answer.
-- **Sustained, it is not available.** The national pool is ≈ 1.41 M qualified businesses (9.20 M US places with a
-  phone × 15.3%), so 25,000/day lasts about **56 days** and then falls to new business formation plus newly-broken
-  sites — bounded above by **~3,856/day** even if the entire inventory turned over annually, and realistically a few
+- **Sustained, it is not available.** The national pool is ≈ 1.93 M qualified businesses (9.20 M US places with a
+  phone × 21.01%), so 25,000/day lasts about **77 days** and then falls to new business formation plus newly-broken
+  sites — bounded above by **~5,295/day** even if the entire inventory turned over annually, and realistically a few
   hundred. That is a supply fact, not a throughput problem, and no amount of concurrency changes it.
 - A 24-hour run should therefore be judged on **evaluations per hour sustained, failure rate and accuracy**, with the
   qualified count read as the yield of those evaluations.
 
 ## Unchanged
 
-No production deployment. No outbound calling, no consent or DNC change, no bulk promotion into the callable CRM —
-promotion stays a per-prospect Owner decision through the CRM intake engine. The Website Builder's source,
+No production deployment. No outbound calling, no consent or DNC change. Promotion into the CRM is no longer only a
+per-prospect Owner click — migration 0073 added a bounded automatic promoter — but it still runs through the CRM
+intake engine for every record, it is capped per run, and the switch that lets the scheduled job use it
+(`research_settings.auto_promote`) is an explicit Owner decision, off by default. Creating a CRM lead releases nobody
+for calling. The Website Builder's source,
 configuration, scheduler, runner and jobs were not touched, and nothing was restarted. "Verified callable today"
 remains 0 by design.

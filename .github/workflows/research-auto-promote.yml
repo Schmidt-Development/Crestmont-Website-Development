@@ -1,0 +1,61 @@
+name: Research automatic CRM promotion (staging)
+
+# Turns automatic research → CRM promotion on or off in STAGING, through the Owner's own settings route so the
+# permission check, the validation and the audit record all apply (scripts/research-set-auto-promote.ts).
+#
+# It is dispatch-only and deliberately narrow:
+#  - it never resumes research: the pause flag and the Owner's pause reason are read first and sent back unchanged;
+#  - it never promotes anything itself: the 15-minute scheduled job does that, bounded by the per-run cap;
+#  - it refuses any host that is not crestmont-platform-staging.*, so it cannot reach production;
+#  - "off" is the same one-click operation as "on", so the switch can always be put back.
+on:
+  workflow_dispatch:
+    inputs:
+      enable:
+        description: "Automatic promotion"
+        type: choice
+        options: ["off", "on"]
+        default: "off"
+      max_per_run:
+        description: "Maximum prospects promoted per scheduled run (1-2000)"
+        type: string
+        default: "200"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-auto-promote
+  cancel-in-progress: false
+
+jobs:
+  set:
+    if: github.ref == 'refs/heads/main'   # main only, like the other staging-facing workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: staging
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      # Dispatch inputs reach the script through the environment as quoted shell variables and are never interpolated
+      # into the script text (SEC-007 / F-23): a `${{ inputs.* }}` inside `run:` would let a dispatcher run arbitrary
+      # commands on a runner that holds the Cloudflare token. The script validates both values again itself.
+      - name: Set automatic CRM promotion
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          E2E_BASE_URL: https://crestmont-platform-staging.partners-df4.workers.dev
+          WANT: ${{ inputs.enable }}
+          CAP: ${{ inputs.max_per_run }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error title=Automatic CRM promotion::CLOUDFLARE_API_TOKEN is not set for the staging environment."
+            exit 1
+          fi
+          node --no-warnings scripts/research-set-auto-promote.ts --enable "$WANT" --max-per-run "${CAP:-200}"

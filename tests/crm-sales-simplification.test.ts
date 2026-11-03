@@ -72,11 +72,25 @@ test("[CRM-001] the full lead shows a clickable website and a concise summary; t
   assert.match(page, /<summary>Full research evidence<\/summary>/);
   assert.match(page, /<summary>Contact identity, provenance and duplicate protection<\/summary>/);
   assert.match(page, /data-identity/, "the identity panel still renders inside the disclosure");
-  // Ownership is still visible and still changeable, just not as a primary card.
-  assert.match(page, /Change owner/);
-  assert.match(page, /Owner/);
+  // Ownership is still visible and still changeable, just not as a primary card. An UNASSIGNED lead is the one case
+  // where the picker must be reachable without opening anything: giving a new lead an owner is the next thing anyone
+  // does with it, and hiding that control behind a click broke the staging journey that assigns a fresh lead.
+  assert.match(page, /<dt>Owner<\/dt><dd>Unassigned<\/dd>/, "ownership is stated as a fact on the lead");
+  assert.match(page, /<details class="card" open><summary>Assign an owner<\/summary>/, "an unassigned lead shows the picker without a click");
+  assert.match(page, /name="owner"/, "the picker itself is on the page");
   // The sales workflows that must survive the cleanup.
   for (const kept of ["Stage", "Follow-up tasks", "Quotes", "Orders", "Projects", "Support tickets", "Activity"]) assert.ok(page.includes(kept), `removed too much: ${kept}`);
+});
+
+test("[CRM-001] once a lead has an owner the picker folds away again, and assignment still works through the real route", async () => {
+  const { app, leadId, c } = await researchLead();
+  const rep = await createStaff(app.db, "sales", "rep-assign@crestmont.test", "Rep Assigned");
+  const res = await c.post(`/staff/crm/leads/${leadId}/assign`, { owner: rep.id });
+  assert.equal(res.status, 303, "the assignment route is unchanged");
+  const page = await (await c.get(`/staff/crm/leads/${leadId}`)).text();
+  assert.match(page, /<dt>Owner<\/dt><dd>Rep Assigned<\/dd>/, "the new owner is stated as a fact");
+  assert.match(page, /<details class="card"><summary>Change owner \(/, "an assigned lead folds the picker away again");
+  assert.doesNotMatch(page, /<details class="card" open><summary>Assign an owner/);
 });
 
 test("[CRM-001] the sales dashboard no longer carries the detailed campaign attribution tables, and attribution is still stored", async () => {

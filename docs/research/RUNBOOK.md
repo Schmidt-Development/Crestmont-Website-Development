@@ -157,6 +157,42 @@ daily figure for a window that has not finished. The `Research performance repor
 daily and on demand, and uploads the report as an artifact. Accuracy is **not** in it: a false-positive rate needs the
 hand-verified sample in §4.
 
+## 10. Automatic research → CRM promotion
+
+Promotion is what turns a qualified research prospect into a CRM lead. There are three ways in, and all three go
+through the CRM intake engine (`src/services/contact-identity.ts`, channel `research_agent`), so customer matching,
+do-not-call, email suppression, erasure, duplicate review and the audit record apply identically to each:
+
+| Path | Who starts it | Bound |
+|---|---|---|
+| One prospect | Owner, "Promote" in `/staff/research` | one record |
+| Backlog reconciliation | Owner, "Reconcile the backlog now" in `/staff/research` | `auto_promote_max_per_run` (default 200) and a 20-second budget |
+| Scheduled | the 15-minute `research_promote` job | the same per-run cap, and only while `auto_promote = 1` |
+
+`research_settings.auto_promote` is **0 by default** (migration 0073). While it is 0 the scheduled job still runs
+every 15 minutes and records a run with `stopped_reason = 'disabled'` and `examined 0` — which is how you can tell
+the job is registered and firing without it creating anything.
+
+Turning it on or off in staging:
+
+```bash
+gh workflow run research-auto-promote.yml --ref main -f enable=on -f max_per_run=200
+```
+
+(or the same with `enable=off`). It signs in as the staging Owner and posts the real settings form, so the change is
+permission-checked and audited; it refuses any host that is not `crestmont-platform-staging.*`, and it reads the
+pause flag and the Owner's pause reason first and sends them back unchanged — **enabling promotion never resumes
+research**. Pausing research does not stop promotion either: pausing stops new website checking, while the backlog
+already on file still has to reach the CRM. Those are deliberately different switches.
+
+At 200 per run the scheduled job can place up to 19,200 leads a day. A prospect the intake engine refuses is retried
+with backoff (15 min, 1 h, 4 h, 16 h) and then left alone after 5 attempts with its reason recorded in
+`promote_last_error`; the report's "Promotion integrity" section counts those. A prospect at `review` is never
+promoted automatically — a shared phone number or two records of one business is a person's decision.
+
+Creating a CRM lead releases nobody for calling: outbound eligibility is computed fail-closed
+(`src/domain/research.ts#outboundEligibility`) and stays `blocked`.
+
 ## 5. Troubleshooting
 | Symptom | Check / fix |
 |---|---|

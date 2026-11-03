@@ -89,7 +89,32 @@ const census: Record<string, number> = {};
 for (const [key, sql] of Object.entries(censusQueries(threshold))) census[key] = await one(sql);
 const crmResearchLeads = await one(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent'`);
 const promotionRuns = await q<Record<string, unknown>>(`SELECT id, trigger, started_at, examined, promoted, existing_crm, review, suppressed, rejected, failed, remaining, stopped_reason
-  FROM research_promotion_runs ORDER BY started_at DESC LIMIT 10`).catch(() => []);
+  FROM research_promotion_runs ORDER BY started_at DESC LIMIT 30`).catch(() => []);
+// Every promotion run ever recorded, totalled by trigger. This is what answers "did the reconciliation already run,
+// and what did it do" without having to read a window of audit logs: `scheduled` rows prove the 15-minute job is
+// registered and firing, `owner` rows are the bounded reconciliations.
+const promotionTotalsByTrigger = await q<Record<string, unknown>>(`SELECT trigger, COUNT(*) AS runs, MIN(started_at) AS first_at, MAX(started_at) AS last_at,
+    SUM(examined) AS examined, SUM(promoted) AS promoted, SUM(existing_crm) AS existing_crm, SUM(review) AS review,
+    SUM(suppressed) AS suppressed, SUM(rejected) AS rejected, SUM(failed) AS failed
+  FROM research_promotion_runs GROUP BY trigger ORDER BY trigger`).catch(() => []);
+// Duplicate protection, measured rather than asserted. Several prospects pointing at ONE lead is the de-duplication
+// working (two records of one business, or two businesses on one switchboard number, both resolving to the CRM
+// contact that already exists). What must be zero is a lead claimed as a NEW lead by more than one prospect, and a
+// prospect pointing at a lead that no longer exists.
+const integrity = {
+  leadsSharedBySeveralProspects: await one(`SELECT COUNT(*) AS n FROM (SELECT crm_lead_id FROM research_prospects WHERE crm_lead_id IS NOT NULL GROUP BY crm_lead_id HAVING COUNT(*) > 1)`),
+  leadsClaimedAsNewTwice: await one(`SELECT COUNT(*) AS n FROM (SELECT crm_lead_id FROM research_prospects WHERE crm_lead_id IS NOT NULL AND status = 'promoted' GROUP BY crm_lead_id HAVING COUNT(*) > 1)`),
+  prospectsClaimingAMissingLead: await one(`SELECT COUNT(*) AS n FROM research_prospects p WHERE p.crm_lead_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM leads l WHERE l.id = p.crm_lead_id)`),
+  promotedLeadsNotInNew: await one(`SELECT COUNT(*) AS n FROM leads l JOIN research_prospects p ON p.crm_lead_id = l.id WHERE p.status = 'promoted' AND l.stage <> 'new'`),
+  promotedLeadsWithoutIntakeDecision: await one(`SELECT COUNT(*) AS n FROM leads l JOIN research_prospects p ON p.crm_lead_id = l.id WHERE p.status = 'promoted' AND l.intake_decision_id IS NULL`),
+  promotedLeadsWithoutResearchAttribution: await one(`SELECT COUNT(*) AS n FROM leads l JOIN research_prospects p ON p.crm_lead_id = l.id WHERE p.status = 'promoted' AND COALESCE(l.utm_source, '') <> 'crestmont-research'`),
+  researchLeadsReleasedForCalling: await one(`SELECT COUNT(*) AS n FROM research_prospects WHERE status = 'promoted' AND eligibility = 'eligible'`),
+};
+// Prospects the promoter tried and could not place, grouped by the reason it recorded. With a non-zero count here a
+// run can report "examined 200, promoted 0" and the reason is in this table rather than anywhere else.
+const attemptBuckets = await q<Record<string, unknown>>(`SELECT promote_attempts AS attempts, COUNT(*) AS n FROM research_prospects WHERE promote_attempts > 0 GROUP BY promote_attempts ORDER BY promote_attempts`).catch(() => []);
+const promoteErrors = await q<Record<string, unknown>>(`SELECT SUBSTR(COALESCE(promote_last_error, 'none'), 1, 90) AS reason, COUNT(*) AS n
+  FROM research_prospects WHERE promote_last_error IS NOT NULL GROUP BY reason ORDER BY n DESC LIMIT 8`).catch(() => []);
 // The research-qualified "today" figure, counted two ways: distinct businesses first seen today, and rows touched
 // today. The difference is the heart of the "3,729 qualified today but 42 in the CRM" question.
 const dayStart = `${now.toISOString().slice(0, 10)}T00:00:00.000Z`;
@@ -129,11 +154,23 @@ if (promotionRuns.length) {
   state.push(`## Promotion runs (most recent first)`);
   for (const r of promotionRuns) state.push(`- ${String(r.started_at)} ${String(r.trigger)}: examined ${String(r.examined)}, promoted ${String(r.promoted)}, existing ${String(r.existing_crm)}, review ${String(r.review)}, suppressed ${String(r.suppressed)}, rejected ${String(r.rejected)}, failed ${String(r.failed)}, remaining ${String(r.remaining)} (${String(r.stopped_reason)})`);
 } else state.push(`\n## Promotion runs\n- none recorded (table empty or migration 0073 not applied yet)`);
+if (promotionTotalsByTrigger.length) {
+  state.push("");
+  state.push(`## Promotion runs ever recorded, by trigger`);
+  for (const r of promotionTotalsByTrigger) state.push(`- ${String(r.trigger)}: ${String(r.runs)} run(s) ${String(r.first_at)} → ${String(r.last_at)}; examined ${String(r.examined)}, promoted ${String(r.promoted)}, existing ${String(r.existing_crm)}, review ${String(r.review)}, suppressed ${String(r.suppressed)}, rejected ${String(r.rejected)}, failed ${String(r.failed)}`);
+}
+state.push("");
+state.push(`## Promotion integrity (duplicate protection, measured)`);
+for (const [k, v] of Object.entries(integrity)) state.push(`- ${k}: ${v}`);
+if (attemptBuckets.length) state.push(`- prospects with failed promotion attempts: ${attemptBuckets.map((b) => `${String(b.n)} at ${String(b.attempts)} attempt(s)`).join(", ")}`);
+else state.push(`- prospects with failed promotion attempts: none`);
+if (promoteErrors.length) { state.push(`- reasons recorded on the prospects that could not be placed:`); for (const r of promoteErrors) state.push(`  - ${String(r.n)} × ${String(r.reason)}`); }
+else state.push(`- reasons recorded on the prospects that could not be placed: none`);
 
 const report = buildReport({ windowStart: startIso, windowEnd: endIso, now: now.toISOString(), target: TARGET, samples, batches, prospects, promoted, promotionBlocked });
 const text = `${state.join("\n")}\n\n${formatReport(report)}`;
 mkdirSync(OUT, { recursive: true });
-writeFileSync(join(OUT, "research-24h-report.json"), JSON.stringify({ report, settings, census, crmResearchLeads, qualifiedFirstSeenToday, qualifiedUpdatedToday, receivedToday, recentBatches, runners, promotionRuns }, null, 2));
+writeFileSync(join(OUT, "research-24h-report.json"), JSON.stringify({ report, settings, census, crmResearchLeads, qualifiedFirstSeenToday, qualifiedUpdatedToday, receivedToday, recentBatches, runners, promotionRuns, promotionTotalsByTrigger, integrity, attemptBuckets, promoteErrors }, null, 2));
 writeFileSync(join(OUT, "research-24h-report.md"), `${text}\n`);
 console.log(text);
 if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
