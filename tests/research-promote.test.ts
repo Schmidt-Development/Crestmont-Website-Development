@@ -295,3 +295,33 @@ test("[CRM-005] the automatic promoter is a system actor: it can create a lead a
   for (const p of ["pricing.change", "release.deploy_production", "refund.issue", "payments.simulate"] as const)
     assert.equal(can(RESEARCH_AUTOMATION, p), false, `automation must never hold ${p}`);
 });
+
+// The Owner's switch has to survive every other settings change made from that same form. It is a checkbox, and an
+// unchecked checkbox is absent from the body, so any caller that posts the form without it reads as "turn it off".
+// That is correct HTML for the real page (which always renders the checkbox) and a trap for anything else: the
+// research staging E2E posted the form to pause and resume research without it, and switched automatic CRM
+// promotion off on staging 34 minutes after it was turned on (2026-11-03 21:12 UTC).
+test("[CRM-001] the Owner settings form round-trips automatic promotion: pausing research does not switch it off", async () => {
+  const app = await createTestApp({ RESEARCH_RUNNER_SECRET: "test-research-secret" });
+  const owner = await createStaff(app.db, "owner");
+  const o = await app.client().login(owner.email, undefined, owner.secret);
+
+  // Owner turns automatic promotion on, as the page renders the form.
+  assert.equal((await o.post("/staff/research/settings", { auto_promote: "1", auto_promote_max_per_run: "200", threshold: "60", max_batch: "200" })).status, 303);
+  const on = raw(app.db).prepare(`SELECT auto_promote, auto_promote_max_per_run FROM research_settings WHERE id = 1`).get() as Record<string, number>;
+  assert.deepEqual([Number(on.auto_promote), Number(on.auto_promote_max_per_run)], [1, 200]);
+
+  // Owner now pauses research from the same form, with the checkbox still checked. The switch must survive.
+  assert.equal((await o.post("/staff/research/settings", { paused: "1", reason: "Improving engine", auto_promote: "1", auto_promote_max_per_run: "200", threshold: "60", max_batch: "200" })).status, 303);
+  const paused = raw(app.db).prepare(`SELECT paused, auto_promote FROM research_settings WHERE id = 1`).get() as Record<string, number>;
+  assert.deepEqual([Number(paused.paused), Number(paused.auto_promote)], [1, 1],
+    "pausing research must not strand the backlog by switching automatic promotion off");
+
+  // And the page re-renders it checked, so the next save from the UI carries it too.
+  const page = await (await o.get("/staff/research")).text();
+  assert.match(page, /name="auto_promote"[^>]*checked|checked[^>]*name="auto_promote"/, "the checkbox is re-rendered checked");
+
+  // Unchecking it is a real decision and still works.
+  assert.equal((await o.post("/staff/research/settings", { paused: "1", reason: "Improving engine", auto_promote_max_per_run: "200", threshold: "60", max_batch: "200" })).status, 303);
+  assert.equal(Number((raw(app.db).prepare(`SELECT auto_promote FROM research_settings WHERE id = 1`).get() as Record<string, number>).auto_promote), 0);
+});
