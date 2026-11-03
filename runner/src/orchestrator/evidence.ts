@@ -29,6 +29,7 @@ export async function collectEvidence(o: {
     path: `.crestmont/screenshots/${f}`, viewport: (f.endsWith("-mobile.png") ? "mobile" : "desktop") as "desktop" | "mobile", page: f.replace(/-(desktop|mobile)\.png$/, ""),
   })).slice(0, 200) : [];
   // Criteria: the spec's acceptance criteria, with the status the builder recorded in .crestmont/acceptance.json.
+  // See missingCriteriaEvidence below for why the absence of that file has to be said out loud.
   const reported = readJson(path.join(o.repo, ".crestmont", "acceptance.json"));
   const statusOf = new Map<string, string>(Array.isArray(reported) ? reported.filter((x) => x && typeof x.id === "string").map((x) => [x.id, String(x.status)]) : []);
   const criteria = (o.spec?.acceptanceCriteria ?? []).map((c) => ({ id: c.id, status: (statusOf.get(c.id) === "passed" ? "passed" : statusOf.get(c.id) === "failed" ? "failed" : "not_verified") as "passed" | "failed" | "not_verified" }));
@@ -43,7 +44,8 @@ export async function collectEvidence(o: {
     changedFiles, commits,
     checks: o.checks.map((c) => ({ id: c.id, ok: c.ok, detail: c.ok ? undefined : (c.outputTail ?? "").slice(-400) })),
     screenshots, criteria,
-    defects: list("defects.json"), integrationBlockers, securityFindings: list("security-findings.json"), recommendedNext: list("next-steps.json"),
+    defects: [...list("defects.json"), ...missingCriteriaEvidence(o.spec?.acceptanceCriteria ?? [], statusOf)],
+    integrationBlockers, securityFindings: list("security-findings.json"), recommendedNext: list("next-steps.json"),
   };
 }
 
@@ -74,3 +76,23 @@ export const BUILDER_CONTRACT = [
   "- Known defects go in .crestmont/defects.json, security findings in .crestmont/security-findings.json, suggested next steps in .crestmont/next-steps.json (string arrays).",
   "- Customer-owned services: every external service the website needs to operate (hosting and domain, Stripe payments, transactional email, SMS/voice, maps, booking, other APIs) runs on the CUSTOMER's own provider account and is paid by the customer. Read each credential only on the server, from an environment variable / Worker secret on the customer's own deployment (document its name in .crestmont/integrations.json as \"secrets\": [names] with \"paidBy\": \"customer\"); never hard-code a key, never put a secret in frontend code, logs or the repository, and never use, reference or bill an account belonging to Crestmont. Keep Stripe test and live keys separate (test keys in staging/preview, live keys only on the customer's production target). Prefer free tiers and open-source options; never add a paid plan or subscription yourself — request it as paid_usage_increase.",
 ].join("\n");
+
+/**
+ * An acceptance criterion with no recorded status is NOT the same as a failing one, and the difference was invisible.
+ *
+ * Four consecutive real Business builds stalled here. The agent is told once, in one bullet, to record each
+ * criterion's status in .crestmont/acceptance.json; it never wrote the file. Every criterion therefore stayed
+ * "not_verified", the scorecard could not rise above about a third however good the website was, and the repair loop
+ * escalated on "criterion:ac-pages; criterion:ac-responsive; ... survived 3 targeted repairs" -- while all seven
+ * runner checks passed and the builder had no way to know the problem was a missing file rather than a broken page.
+ *
+ * This says exactly what evidence is absent, and never supplies it: a status the runner invented would be the
+ * fabricated verification the whole quality engine exists to prevent. Only the agent can record what it verified.
+ */
+export function missingCriteriaEvidence(criteria: { id: string; text?: string }[], statusOf: Map<string, string>): string[] {
+  if (!criteria.length) return [];
+  const unrecorded = criteria.filter((c) => !statusOf.has(c.id)).map((c) => c.id);
+  if (!unrecorded.length) return [];
+  const all = unrecorded.length === criteria.length;
+  return [`Acceptance evidence is missing, not failing: ${all ? "none" : `${criteria.length - unrecorded.length} of ${criteria.length}`} of the specification's acceptance criteria have a recorded status, so they count as unverified and the build cannot be certified however good the website is. Write .crestmont/acceptance.json as [{"id","status":"passed|failed|not_verified","evidence"}] covering every criterion, marking one passed ONLY where a test or screenshot proves it. Criteria with no status yet: ${unrecorded.slice(0, 30).join(", ")}${unrecorded.length > 30 ? `, and ${unrecorded.length - 30} more` : ""}.`];
+}

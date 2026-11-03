@@ -26,16 +26,18 @@ import {
   assertIsolation, createWorkspace, findLocalWorkspace, latestCheckpointFile, buildAgentEnv, buildCheckEnv,
 } from "./workspace.ts";
 import type { GitCtx } from "./git.ts";
-import { initRepo, configureRepo, commitAll, headCommit, ensureProjectRepo, pushBranch, cloneProjectRepo, projectRepoUrl } from "./git.ts";
+import { initRepo, configureRepo, commitAll, headCommit, restoreTo, ensureProjectRepo, pushBranch, cloneProjectRepo, projectRepoUrl } from "./git.ts";
 import type { SkillManifest, Workflow, PreflightResult } from "./skills.ts";
 import { preflight, provisionSkills } from "./skills.ts";
 import { buildCheckpoint, restoreCheckpoint } from "./checkpoint.ts";
 import type { StarterSpec, CheckOutcome, CheckExecutor } from "./checks.ts";
 import { previewKey, planGatedPreview, applyGatedPreview } from "./preview-gate.ts";
 import { starterDir, loadStarter, copyStarter, acceptanceCommands, runChecks, previewConfigProblems, restoreProtectedFiles, briefConformance, isolationCheck, credentialScan, previewName, PREVIEW_NAME, PREVIEW_EXPORT_STRIP } from "./checks.ts";
+import { contractCheck } from "./contracts-check.ts";
+import { persistenceCheck } from "./persistence-check.ts";
 import { writeBriefFiles, systemPromptAppend, phasePrompt } from "./prompt.ts";
 import type { Phase } from "./prompt.ts";
-import { readRequirements, checkRequirements, readStringList, readAgentReport } from "./requirements.ts";
+import { readRequirements, withCheckRequirements, readStringList, readAgentReport } from "./requirements.ts";
 import { buildReport } from "./report.ts";
 import { run, proxyEnv } from "./exec.ts";
 import { runOperatorCommand } from "./operator-command.ts";
@@ -45,6 +47,8 @@ import { DeterministicReviewer, LocalModelAdvisor } from "./orchestrator/advisor
 import type { MasterSpec, ReviewVerdict } from "./orchestrator/contracts.ts";
 import { outstanding } from "./orchestrator/contracts.ts";
 import { collectEvidence, builderIntegrations, builderApprovalRequests, writeReview, BUILDER_CONTRACT } from "./orchestrator/evidence.ts";
+import { ratchetDecision } from "./orchestrator/ratchet.ts";
+import { collectSnapshot } from "./orchestrator/snapshot.ts";
 import type { SessionRecord } from "./orchestrator/sessions.ts";
 import type { InferenceScheduler } from "./inference/scheduler.ts";
 import { runIntegrationOperations } from "./integrations/broker.ts";
@@ -104,6 +108,8 @@ export interface JobSummary {
   complete: CompleteRequest | null;
   workspace: string | null;
   stopReason: string | null;
+  /** The runner's own checks as they stood at the end, so a caller can report on the run without parsing the report. */
+  checks: CheckOutcome[];
 }
 
 const SERVER_STOP = "server:";
@@ -282,13 +288,33 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     }
   };
 
+  /**
+   * AI Build preview: hand the platform the rendered website for one revision.
+   *
+   * Best-effort on purpose. The Founder watching a build is important; it is not more important than the build. A
+   * snapshot that cannot be stored is logged and the build carries on, and the platform refuses a repeat for a
+   * revision it already holds, so a retry can never rewrite one.
+   */
+  const snapshot = async (cycle: number, phase: "build" | "repair" | "final", meta: { score?: number | null; decision?: string | null; isBest?: boolean; reverted?: boolean; revertedReason?: string | null } = {}) => {
+    if (!ws) return;
+    try {
+      const snap = collectSnapshot(ws.repo);
+      if (!snap.files.length) return;
+      const r = await client.storeRevision(job, { cycle, phase, commit: git ? await headCommit(git) : null, ...meta, files: snap.files });
+      if (!r.alreadyStored) tracker.note({ kind: "note", message: `preview snapshot for cycle ${cycle}: ${r.stored} file(s), ${Math.round(snap.bytes / 1024)} KB${snap.skipped.length ? `, ${snap.skipped.length} left out` : ""}` });
+    } catch (err) {
+      if (err instanceof LeaseLostError) { markLeaseLost(); throw err; }
+      log.warn("preview snapshot not stored", { cycle, phase, error: errorMessage(err) });
+    }
+  };
+
   const finish = async (outcome: Outcome, fields: { error?: string | null; checks?: CheckOutcome[]; preview?: { url: string | null; note: string; name?: string | null }; stopReason?: string | null; notBefore?: string | null; quality?: Scorecard | null; missingInformation?: string[] }): Promise<JobSummary> => {
     guard();
     if (memory && remember.isOpen(memory)) await endSegment(outcome);
     const commit = git ? await headCommit(git) : null;
     const seed = job.requirements;
     const agentReqs = ws ? readRequirements(ws.repo, seed) : seed;
-    const requirements = [...agentReqs, ...checkRequirements(fields.checks ?? [])];
+    const requirements = withCheckRequirements(agentReqs, fields.checks ?? []);
     const missingInformation = [...(ws ? readStringList(ws.repo, "needs-information.json") : []), ...(fields.missingInformation ?? [])];
     const assumptions = [...job.brief.content.assumptions, ...(ws ? readStringList(ws.repo, "assumptions.json") : [])];
     if (missingFiles.length) assumptions.push(`Customer files that could not be downloaded: ${missingFiles.join(", ")}`);
@@ -324,7 +350,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     guard();
     await client.complete(job, req);
     log.info("job completed", { outcome, costUsd: req.runCostUsd, turns: req.turns });
-    return { outcome, complete: req, workspace: ws?.dir ?? null, stopReason: fields.stopReason ?? null };
+    return { outcome, complete: req, workspace: ws?.dir ?? null, stopReason: fields.stopReason ?? null, checks: fields.checks ?? [] };
   };
 
   try {
@@ -621,6 +647,15 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         const bc = briefConformance(ws!.repo, { businessName: b.name, publicEmail: b.publicEmail, publicPhone: b.publicPhone });
         if (bc) out.push(bc);
       }
+      // Cross-file contracts: the generated pages, scripts and server must agree about element ids, form field names
+      // and endpoint paths. Both confirmed quote-form failures were disagreements of exactly this kind, and each one
+      // left every other check passing, so this runs for every project.
+      const cc = contractCheck(ws!.repo);
+      if (cc) out.push(cc);
+      // A success message must be backed by a durable write. One shipped build logged the quote to the console and
+      // answered {saved:true} while telling visitors "Submissions are stored by our system".
+      const pc = persistenceCheck(ws!.repo);
+      if (pc) out.push(pc);
       // Customer-owned credentials never live in the website's source (only file:line is reported, never the value).
       const listed = await run("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: ws!.repo, env: { PATH: cfg.agentPath, HOME: ws!.home, GIT_CONFIG_NOSYSTEM: "1" }, timeoutMs: 60_000 });
       if (listed.code === 0) out.push(credentialScan(ws!.repo, listed.stdout.split("\0")));
@@ -640,6 +675,10 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     // Every build the platform marks "required", and every starter that declares the quality engine, is gated.
     const qualityRequired = job.quality === "required" || !!starterSpec?.quality;
     let lastCard: Scorecard | null = null;
+    // Repair ratchet: the best scorecard this build has reached and the revision that achieved it.
+    let bestCard: Scorecard | null = null;
+    let bestCommit: string | null = null;
+    let regressions = 0;
     let lastVerdict: ReviewVerdict | null = null;
     // The final scorecard may use the reviewer's assessment only of the code that reviewer saw: after any repair that
     // was not reviewed again (the loop ended on its cycle limit), the review-based criteria have no evidence.
@@ -658,6 +697,8 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       }
       checks = await acceptance(commands);
       for (const c of checks) tracker.note({ kind: "check", message: `${c.ok ? "PASS" : "FAIL"} ${c.command}` });
+      // The website as first generated, before any review touched it: the baseline every later cycle is compared to.
+      await snapshot(0, "build");
       const reviewer = advisorFor("reviewer")!;
       let cycleBase = buildBase;
       const requested = requestedCapabilities(job.brief.content.customerData.features ?? [], job.brief.content.customerData.integrations ?? []);
@@ -665,7 +706,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       scoreNow = (verdict, previewDeployed, iteration) => {
         const ev = lastEvidence;
         return score({ packageId: effectivePackage, capabilities: caps, requested, checks, gates: readGates(ws!.repo), screenshots: ev?.screenshots ?? [], review: verdict,
-          requirements: readRequirements(ws!.repo, job.requirements), criteria: ev?.criteria ?? [], securityFindings: ev?.securityFindings ?? [], previewDeployed, iteration });
+          requirements: withCheckRequirements(readRequirements(ws!.repo, job.requirements), checks), criteria: ev?.criteria ?? [], securityFindings: ev?.securityFindings ?? [], previewDeployed, iteration });
       };
       let promptUsed = spec?.masterPrompt ?? "Runner build phases (plan, build, verify) from BRIEF.md";
       let promptSource: "architect" | "reviewer" | "runner" = spec ? "architect" : "runner";
@@ -680,7 +721,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         if (stop.reason || st.localLimit || st.agentError) break;
         if (checks.some((c) => !c.ok)) writeInside(ws.repo, path.join(".crestmont", "runner-checks.json"), JSON.stringify(checks.map(({ id, command, ok, code, outputTail }) => ({ id, command, ok, code, outputTail })), null, 2));
         await commitAll(git!, `AI build: cycle ${cycle} evidence`);
-        const evidence = await collectEvidence({ repo: ws.repo, pathEnv: cfg.agentPath, home: ws.home, baseCommit: cycleBase, checks, requirements: readRequirements(ws.repo, job.requirements), spec });
+        const evidence = await collectEvidence({ repo: ws.repo, pathEnv: cfg.agentPath, home: ws.home, baseCommit: cycleBase, checks, requirements: withCheckRequirements(readRequirements(ws.repo, job.requirements), checks), spec });
         lastEvidence = evidence;
         // Builder outputs: integration status and sensitive-action requests (the build continues meanwhile).
         try {
@@ -718,7 +759,46 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         }
         // Quality scorecard (every build, every iteration): failing criteria are outstanding work for this cycle, and a
         // reviewer "ready" without a verified 10/10 becomes a targeted repair (or a wait for external verification).
-        const card = scoreNow(verdict, null, cycle);
+        let card = scoreNow(verdict, null, cycle);
+        // Whether the ratchet rolled this cycle back, for the snapshot the Founder will inspect.
+        let revertedThisCycle = false;
+        let revertNote: string | null = null;
+        // ── repair ratchet ────────────────────────────────────────────────────────────────────────────────────────
+        // A build must not be able to walk away from its own best work. Measured on Node 1 (2026-11-02): 7.50 ->
+        // 7.16 -> 7.22 -> 6.94, every repair kept whatever it did, so the LAST and worst state was the deliverable.
+        // The bounded repair loop stops a build that stops improving; it never says which revision the customer
+        // gets. So: keep the best revision, and when a repair measurably loses ground, go back to it first.
+        {
+          const here = await headCommit(git!);
+          const d = ratchetDecision(card.score, bestCard?.score ?? null, regressions);
+          if (d.action === "record-best") { bestCard = card; bestCommit = here; regressions = 0; }
+          else if ((d.action === "revert" || d.action === "revert-and-stop") && bestCard && bestCommit && here && bestCommit !== here) {
+            regressions = d.regressions;
+            const restored = await restoreTo(git!, bestCommit, `AI build: revert cycle ${cycle - 1} repair (quality ${card.score}/10 < best ${bestCard.score}/10)`);
+            const note = `Cycle ${cycle}: the previous repair lowered the quality score from ${bestCard.score} to ${card.score}; the website was restored to its best revision (${bestCommit.slice(0, 8)}) before continuing.`;
+            log.warn("repair lowered the quality score; reverted to the best revision", { score: card.score, best: bestCard.score, bestCommit, restored, cycle });
+            sessionNotes.push(note);
+            tracker.note({ kind: "note", message: note });
+            // This cycle's evidence (changed files, commits, screenshots) describes the revision that has just been
+            // reverted away, so the cycle record says so rather than quietly pairing the best card with it.
+            verdict = { ...verdict, findings: [...verdict.findings, note] };
+            revertedThisCycle = true;
+            revertNote = note;
+            // The tree is the best one again, so that is the card the build now stands at, and the checks have to
+            // be re-run against it: the ones in hand measured a revision that no longer exists.
+            card = bestCard;
+            checks = await acceptance(commands);
+            if (d.action === "revert-and-stop") {
+              st.agentError = `Stopped repairing after ${regressions} repairs in a row that lowered the quality score. The website is at its best measured revision (${bestCard.score}/10), which is below the 10/10 required for certification.`;
+              st.terminal = true;
+              sessionNotes.push(st.agentError);
+              tracker.note({ kind: "note", message: st.agentError });
+              lastCard = card; lastVerdict = verdict; reviewCurrent = true;
+              writeInside(ws.repo, path.join(".crestmont", "quality", "scorecard.json"), JSON.stringify(card, null, 2) + "\n");
+              break;
+            }
+          }
+        }
         lastCard = card; lastVerdict = verdict; reviewCurrent = true;
         writeInside(ws.repo, path.join(".crestmont", "quality", "scorecard.json"), JSON.stringify(card, null, 2) + "\n");
         if (memory) remember.quality(memory, card);
@@ -737,6 +817,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         const res = await client.submitCycle(job, { cycle, prompt: promptUsed, promptSource, evidence, decision: verdict.decision, addresses: verdict.addresses, nextPrompt: verdict.nextPrompt, reviewerProvider: reviewerName,
           builderModel: lastBuildModel, reviewerModel, routing: { builder: cycleRoute.slot, builderTask: cycleRoute.task, reason: cycleRoute.reason, reviewer: reviewerModel ? "A" : "rules" },
           sessions: sessionRecords.splice(0) }).catch((err) => { if (err instanceof LeaseLostError) { markLeaseLost(); throw err; } throw err; });
+        await snapshot(cycle, "repair", { score: card.score, decision: verdict.decision, isBest: bestCard === card, reverted: revertedThisCycle, revertedReason: revertNote });
         // Older platform without the orchestration endpoints: the earlier behaviour (one repair round when checks failed).
         const decision = res ?? { cycle, decision: verdict.decision, reason: "local", continue: cycle === 1 && checks.some((c) => !c.ok), prompt: verdict.nextPrompt };
         tracker.note({ kind: "step", message: `cycle ${cycle}: ${decision.decision}${res ? "" : " (platform without orchestration endpoints)"}` });
@@ -887,15 +968,15 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     if (err instanceof LeaseLostError || leaseLost) {
       stop.request("lease_lost");
       log.warn("lease lost: stopped work on this job; workspace preserved", { workspace: ws?.dir });
-      return { outcome: "lease_lost", complete: null, workspace: ws?.dir ?? null, stopReason: "lease_lost" };
+      return { outcome: "lease_lost", complete: null, workspace: ws?.dir ?? null, stopReason: "lease_lost", checks: [] };
     }
     log.error("job failed", { error: errorMessage(err) });
     try {
       return await finish("failed", { error: `Runner error: ${errorMessage(err)}` });
     } catch (err2) {
-      if (err2 instanceof LeaseLostError) return { outcome: "lease_lost", complete: null, workspace: ws?.dir ?? null, stopReason: "lease_lost" };
+      if (err2 instanceof LeaseLostError) return { outcome: "lease_lost", complete: null, workspace: ws?.dir ?? null, stopReason: "lease_lost", checks: [] };
       log.error("could not report failure", { error: errorMessage(err2) });
-      return { outcome: "failed", complete: null, workspace: ws?.dir ?? null, stopReason: null };
+      return { outcome: "failed", complete: null, workspace: ws?.dir ?? null, stopReason: null, checks: [] };
     }
   } finally {
     hbStopped = true;

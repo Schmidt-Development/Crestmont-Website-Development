@@ -84,6 +84,8 @@ export interface LocalAdvisorOptions {
 }
 
 const ADVISOR_TOOL_OUTPUT = 12_000;
+/** Turns at the end of an advisor session reserved for the answer, with the read-only tools withdrawn. */
+const FINAL_ANSWER_TURNS = 3;
 
 export class LocalModelAdvisor implements Advisor {
   readonly name: string;
@@ -109,9 +111,20 @@ export class LocalModelAdvisor implements Advisor {
     }
     const messages: ChatMessage[] = [{ role: "system", content: system }, { role: "user", content: images.length ? parts : prompt }];
     let jsonRetries = 0;
+    let told = false;
     for (let turn = 1; turn <= this.o.maxTurns; turn++) {
       if (this.o.signal?.aborted) throw new AdvisorUnavailableError(`${role} session stopped`);
-      const req = { model: this.o.model.tag, messages, tools: readOnlyToolSpecs(), temperature: this.o.temperature, max_tokens: this.o.maxOutputTokens, ...(this.o.model.reasoning ? { reasoning_effort: this.o.model.reasoning } : {}) };
+      // Inspection has to end before the turns do. A real Business build's reviewer spent all 40 turns reading files
+      // and never answered at all (every turn a tool call, no content), so the build lost its independent review and
+      // fell back to the rule-based reviewer, which cannot judge visual quality -- the whole visual gate, gone, after
+      // seven minutes of GPU time. For the last turns the tools are withdrawn: with nothing left to call, the only
+      // thing the model can produce is the answer it was asked for.
+      const mustAnswer = turn > this.o.maxTurns - FINAL_ANSWER_TURNS;
+      if (mustAnswer && !told) {
+        told = true;
+        messages.push({ role: "user", content: `The inspection budget is used up (${turn - 1} of ${this.o.maxTurns} turns). Answer now, from what you have already read, with the single JSON object only.` });
+      }
+      const req = { model: this.o.model.tag, messages, ...(mustAnswer ? {} : { tools: readOnlyToolSpecs() }), temperature: this.o.temperature, max_tokens: this.o.maxOutputTokens, ...(this.o.model.reasoning ? { reasoning_effort: this.o.model.reasoning } : {}) };
       let res: ChatResponse;
       try {
         res = this.o.scheduler
@@ -121,8 +134,8 @@ export class LocalModelAdvisor implements Advisor {
         throw new AdvisorUnavailableError(`${role} session (${this.o.model.tag}) failed: ${(err as Error).message?.slice(0, 300) ?? String(err)}`);
       }
       this.o.onUsage?.(res);
-      let calls = fromNativeCalls(res.toolCalls);
-      if (!calls.length) calls = parseTextToolCalls(res.content, READ_ONLY_TOOLS);
+      let calls = mustAnswer ? [] : fromNativeCalls(res.toolCalls);
+      if (!calls.length && !mustAnswer) calls = parseTextToolCalls(res.content, READ_ONLY_TOOLS);
       if (calls.length) {
         messages.push({ role: "assistant", content: calls.some((c) => c.fromText) ? null : (res.content || null), tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args ? JSON.stringify(c.args) : c.rawArgs.slice(0, 2000) } })) });
         for (const c of calls) {

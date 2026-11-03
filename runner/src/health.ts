@@ -16,6 +16,16 @@ export interface HealthState {
   currentJob: string | null;
   /** V4: every build this runner works on now (one per website slot). */
   runningJobs: string[];
+  /** Website slots configured (RUNNER_SLOTS): how many projects this runner may work on at once. */
+  slots: number;
+  /**
+   * Host lane occupancy (runner/src/limits.ts), one row per CPU-heavy resource. Reported separately from `slots`
+   * and from `inference` because the three are different capacities: a project queued for a lane is waiting, not
+   * working, and reading `runningJobs` alone would hide that.
+   */
+  lanes: { name: string; capacity: number; active: number; queued: number; peakQueued: number; waitMs: number; admitted: number }[];
+  /** Build sandboxes removed at startup because a previous run of this runner left them behind. */
+  sandboxesReaped: number;
   /** V4: GPU scheduler summary (model loaded, requests running/queued, switches). */
   inference: { state: string; active: number; queued: number; switches: number } | null;
   currentDraft: string | null;
@@ -43,9 +53,10 @@ export interface HealthState {
   stopping: boolean;
 }
 
-export function newHealthState(fields: Pick<HealthState, "runnerId" | "version" | "provider" | "model">): HealthState {
+export function newHealthState(fields: Pick<HealthState, "runnerId" | "version" | "provider" | "model"> & { slots?: number }): HealthState {
   return {
-    ...fields, startedAt: new Date().toISOString(), currentJob: null, runningJobs: [], inference: null, currentDraft: null, lastClaimAt: null, lastClaimOk: null,
+    ...fields, slots: fields.slots ?? 1, lanes: [], sandboxesReaped: 0,
+    startedAt: new Date().toISOString(), currentJob: null, runningJobs: [], inference: null, currentDraft: null, lastClaimAt: null, lastClaimOk: null,
     lastClaimError: null, modelReachable: null, modelCheckedAt: null, modelGpuShare: null, lastModelError: null, lastModelErrorAt: null,
     lastJobOutcome: null, lastJobError: null, lastJobAt: null, lastDraftError: null, jobsRun: 0, draftsServed: 0, stopping: false,
   };
@@ -79,7 +90,13 @@ export function recordModelError(s: HealthState, error: string, now = new Date()
  */
 export function healthStatus(s: HealthState, now = Date.now(), staleMs = 15 * 60_000): { ok: boolean; reason: string } {
   if (s.stopping) return { ok: false, reason: "stopping" };
-  if (s.currentJob || s.runningJobs.length) return { ok: true, reason: s.runningJobs.length > 1 ? `running ${s.runningJobs.length} builds` : "running a build" };
+  if (s.currentJob || s.runningJobs.length) {
+    // Say what the builds are actually doing: a project queued for a host lane or for the GPU is waiting, not
+    // working, and "running 4 builds" would read as four-way progress when three of them are in a queue.
+    const queued = s.lanes.reduce((n, l) => n + l.queued, 0) + (s.inference?.queued ?? 0);
+    const n = Math.max(s.runningJobs.length, s.currentJob ? 1 : 0);
+    return { ok: true, reason: `${n === 1 ? "running a build" : `running ${n} builds`}${queued ? `, ${queued} waiting for a lane or the GPU` : ""}` };
+  }
   if (s.modelReachable === false) return { ok: false, reason: `model server not reachable: ${s.lastModelError ?? "unknown"}` };
   if (!s.lastClaimAt) return { ok: Date.parse(s.startedAt) > now - staleMs, reason: "starting" };
   if (!s.lastClaimOk) return { ok: false, reason: `last claim failed: ${s.lastClaimError ?? "unknown"}` };

@@ -18,6 +18,7 @@ import { notify } from "../services/notifications.ts";
 import { claimSignatureOnce, securityEvent } from "../services/security.ts";
 import * as DX from "../services/runner-diagnostics.ts";
 import { latestQuality } from "../services/build-quality.ts";
+import * as BR from "../services/build-revisions.ts";
 
 const RUNNER = "/api/builds/runner";
 const usd = (n: number) => `$${n.toFixed(2)}`;
@@ -98,6 +99,8 @@ export function register(r: Router): void {
   r.post(`${RUNNER}/heartbeat`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.heartbeat(ctx.db, await runnerBody(ctx), ctx.now()))));
   r.post(`${RUNNER}/checkpoint`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.checkpoint(ctx.db, ctx.storage, await runnerBody(ctx)))));
   r.post(`${RUNNER}/checkpoint/fetch`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.fetchCheckpoint(ctx.db, ctx.storage, await runnerBody(ctx)))));
+  // AI Build preview: an immutable snapshot of the generated website for one revision (migration 0072).
+  r.post(`${RUNNER}/revisions/store`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await BR.saveRevision(ctx.db, ctx.storage, await runnerBody(ctx)))));
   // Self-hosted AI drafts (ai_jobs with provider local-runner), same signed channel.
   r.post(`${RUNNER}/ai/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await AIR.claimAiJob(ctx.db, typeof b.runnerId === "string" ? b.runnerId : "", ctx.now())); }));
   r.post(`${RUNNER}/ai/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await AIR.completeAiJob(ctx.db, await runnerBody(ctx)))));
@@ -175,6 +178,8 @@ export function register(r: Router): void {
       auto: "Automatic: entitled requests are queued as AI revisions when the project is eligible.",
     };
     const entitlement = (r: B.CustomerRevision) => r.included ? badge("ok", "Included round") : r.entitled ? badge("ok", "Change order approved") : badge("warn", r.changeOrderStatus ? `Change order ${r.changeOrderStatus}` : "Change order required");
+    // Which of these builds have an inspectable website, in one query rather than one per row.
+    const withRevisions = new Set((await ctx.db.prepare(`SELECT DISTINCT job_id FROM build_revisions`).all<{ job_id: string }>()).results.map((r) => r.job_id));
     const body = html`${pageHead("AI builds", can(ctx.actor!, "builds.configure") ? linkButton("Node diagnostics", "/staff/builds/diagnostics", "ghost", "sm") : undefined, "Automated first builds for paid intakes")}
 ${!ctx.env.BUILD_RUNNER_SECRET ? alert("warn", html`<strong>Execution unavailable.</strong> No build runner is configured on this environment (BUILD_RUNNER_SECRET is not set), so eligible builds wait in the queue and nothing is generated. Setup: docs/ai-builds/RUNNER-SETUP.md.`)
   : runner?.online ? alert("success", `Runner ${runner.runner_id} (v${runner.version ?? "?"}) last checked in ${formatDateTime(runner.last_seen_at)}.`)
@@ -186,6 +191,8 @@ ${s.globally_paused ? alert("warn", html`<strong>Automation paused.</strong> ${s
 ${table(sums, [
   { header: "Customer / project", cell: (x) => html`<a href="/staff/builds/${x.id}">${x.organizationName}</a><br><span class="faint">${x.projectName}${x.kind === "revision" ? ` · revision ${x.revision}` : ""}</span>` },
   { header: "Package", cell: (x) => x.packageId ?? "Custom" },
+  // The AI Build preview, for builds that have stored at least one revision.
+  { header: "Website", cell: (x) => withRevisions.has(x.id) ? linkButton("Inspect", `/staff/builds/${x.id}/inspect`, "ghost", "sm") : html`<span class="faint">no snapshot</span>` },
   { header: "State", cell: (x) => html`${stateBadge(x.state)}${x.cancelRequested ? html` ${badge("warn", "Stop requested")}` : ""}${x.projectPaused ? html` ${badge("warn", "Project paused")}` : ""}` },
   { header: "Eligibility", cell: (x) => x.eligibility.verdict === "queued" ? "Eligible" : x.eligibility.reasons.join("; ") },
   { header: "Requirements", cell: (x) => `${x.requirements.verified} verified · ${x.requirements.implemented_unverified} unverified · ${x.requirements.blocked} blocked · ${x.requirements.remaining} remaining` },
@@ -316,6 +323,31 @@ ${button("Register worker", { size: "sm" })}</form><p class="faint">Rented GPUs 
 ], { empty: emptyState("No websites in the pipeline yet", "A website enters the pipeline when its build is created from a paid intake.") })}</section>`;
     return staffPage(ctx, "AI website pipeline", body);
   });
+  // One file of a stored revision, for the embedded preview. ":rev" is "<attempt>-<cycle>".
+  //
+  // The generated frontend runs here, so it is served with a sandboxing CSP (BR.previewHeaders): an opaque origin,
+  // no access to the staff session or the platform API, whether it is framed or opened in its own tab. The
+  // generated BACKEND is never stored or executed by this Worker; the runner exercises it in its sandbox.
+  // The revision root. The generated site's own home link is href="/", which the preview rewrites to this path, and
+  // the wildcard route below needs at least one segment -- so without this, "home" inside the preview would 404.
+  r.get("/staff/builds/:id/rev/:rev", async (ctx, p) => {
+    requireStaff(ctx, "builds.read");
+    const m = /^(\d{1,4})-(\d{1,4})$/.exec(p.rev);
+    if (!m) throw new HttpError(404, "No such revision");
+    const f = await BR.servePreviewFile(ctx.db, ctx.storage, p.id, Number(m[1]), Number(m[2]), "", `/staff/builds/${p.id}/rev/${p.rev}`);
+    if (!f) throw new HttpError(404, "This revision has no home page");
+    return new Response(f.body, { status: 200, headers: f.headers });
+  });
+
+  r.get("/staff/builds/:id/rev/:rev/*", async (ctx, p) => {
+    requireStaff(ctx, "builds.read");
+    const m = /^(\d{1,4})-(\d{1,4})$/.exec(p.rev);
+    if (!m) throw new HttpError(404, "No such revision");
+    const f = await BR.servePreviewFile(ctx.db, ctx.storage, p.id, Number(m[1]), Number(m[2]), p["*"], `/staff/builds/${p.id}/rev/${p.rev}`);
+    if (!f) throw new HttpError(404, "No such file in this revision");
+    return new Response(f.body, { status: 200, headers: f.headers });
+  });
+
   r.get("/staff/builds/:id", async (ctx, p) => {
     requireStaff(ctx, "builds.read");
     const d = await B.buildDetail(ctx.db, p.id);
@@ -325,7 +357,11 @@ ${button("Register worker", { size: "sm" })}</form><p class="faint">Rented GPUs 
     const q = await latestQuality(ctx.db, j.id);
     const act = (path: string, label: string, extra: SafeHtml = html``, variant: "primary" | "secondary" | "danger" = "secondary") =>
       html`<form method="post" action="/staff/builds/${j.id}/${path}" class="row">${csrf(ctx)}${extra}${button(label, { variant, size: "sm" })}</form>`;
-    const body = html`${pageHead(`${x.organizationName} — ${x.kind === "revision" ? `revision ${x.revision}` : "first build"}`, linkButton("All builds", "/staff/builds", "ghost", "sm"), x.projectName)}
+    // The AI Build preview: the generated website itself, revision by revision. Offered only when a snapshot exists,
+    // so the link never leads to an empty page.
+    const hasRevisions = ((await ctx.db.prepare(`SELECT COUNT(*) AS n FROM build_revisions WHERE job_id = ?`).bind(j.id).first<{ n: number }>())?.n ?? 0) > 0;
+    const body = html`${pageHead(`${x.organizationName} — ${x.kind === "revision" ? `revision ${x.revision}` : "first build"}`,
+      html`${hasRevisions ? linkButton("Inspect the website", `/staff/builds/${j.id}/inspect`, "primary", "sm") : ""} ${linkButton("All builds", "/staff/builds", "ghost", "sm")}`, x.projectName)}
 <p>${stateBadge(x.state)} <span class="muted">${x.stateReason ?? ""}</span></p>
 ${x.cancelRequested ? alert("warn", "Stop requested: the runner stops at its next heartbeat and preserves partial work.") : ""}
 ${dl([["Project", html`<a href="/staff/projects/${x.projectId}">${x.projectName}</a>`], ["Order", x.orderId], ["Package", x.packageId ?? "Custom (quoted)"], ["Strategy", x.strategy],

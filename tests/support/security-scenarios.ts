@@ -463,6 +463,11 @@ export function auditScenarios(w: World): Scenario[] {
     }, fields: () => ({ invoice_id: simInvoice!, outcome: "paid" }) },
     { key: "POST /staff/builds/settings", fields: () => ({ run_budget: "30", project_budget: "90", model: "claude-sonnet-5-5", max_runtime: "120", max_turns: "200", max_concurrent: "2", max_attempts: "3", automation_enabled: "1" }) },
     { key: "POST /staff/builds/pause", fields: () => ({ paused: "1", reason: "matrix pause" }) },
+    // AI → Design Gallery: the owner's own add, decision, edit and removal of a design reference.
+    { key: "POST /staff/builds/gallery/add", fields: () => ({ title: "Matrix added reference", industry: "general", style_tags: "editorial", rights_basis: "own_work", rights_note: "Crestmont's own work, added by the matrix", desktop: png("matrix-added.png") }) },
+    { key: "POST /staff/builds/gallery/:id/decide", fields: () => ({ decision: "approve", note: "matrix approval" }), setup: async () => { await w.db.prepare(`UPDATE design_references SET deleted_at = NULL, deleted_by = NULL, status = 'APPROVED' WHERE id = ?`).bind(w.ids.designReference).run(); } },
+    { key: "POST /staff/builds/gallery/:id/edit", fields: () => ({ title: "Matrix edited reference", industry: "general", style_tags: "editorial", rights_basis: "own_work", ai_eligible: "1" }), setup: async () => { await w.db.prepare(`UPDATE design_references SET deleted_at = NULL, deleted_by = NULL, status = 'APPROVED' WHERE id = ?`).bind(w.ids.designReference).run(); } },
+    { key: "POST /staff/builds/gallery/:id/remove", fields: () => ({}), setup: async () => { await w.db.prepare(`UPDATE design_references SET deleted_at = NULL, deleted_by = NULL, status = 'APPROVED' WHERE id = ?`).bind(w.ids.designReference).run(); } },
     { key: "POST /staff/builds/projects/:projectId/pause", fields: () => ({ paused: "1", reason: "matrix project pause" }) },
     { key: "POST /staff/builds/projects/:projectId/budget", fields: () => ({ project_budget: "50" }) },
     // Earlier refund scenarios made tenant A's order ineligible, which (correctly) canceled its build; restore the fixture state.

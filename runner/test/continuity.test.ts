@@ -294,6 +294,34 @@ test("[AIB-CONTINUITY] checkpoints carry the project memory and the runner's ope
   assert.equal(stripeCalls, 1, "the external operation is not run a second time after the resume");
 });
 
+// The archive must be built and read back from a workspace whose path carries a drive letter (real defect,
+// 2026-11-03). GNU tar reads an absolute "C:\..." archive name as host:path and tries to reach a remote host
+// ("tar (child): Cannot connect to C: resolve failed"), so on Windows EVERY checkpoint archive failed -- silently,
+// because the caller only logs a warning. Builds still resumed, since the git push half of a checkpoint succeeds
+// on its own, which is why five real builds never exposed it; but no archive ever reached the platform, so the
+// agent transcript and runner state were lost and a resume from a checkpoint key could not have worked.
+test("[AIB-CONTINUITY] a checkpoint archives and restores from a workspace path with a drive letter", async () => {
+  const ws = createWorkspace(tmp("aib-drive-"), { id: "bld_drive", attempt: 1 });
+  const git = { repo: ws.repo, pathEnv: process.env.PATH ?? "/usr/bin:/bin", home: ws.home };
+  await initRepo(git, { name: "t", email: "t@t.invalid" }, "ai-build/first-build");
+  writeFileSync(path.join(ws.repo, "index.html"), "<!doctype html><title>x</title>");
+  const { commitAll } = await import("../src/git.ts");
+  await commitAll(git, "work to checkpoint");
+  const m = newMemory({ ...ID, projectId: "prj_drive", jobId: "bld_drive" });
+  remember.phase(m, "build", "success", null);
+  saveMemory(ws.dir, m);
+
+  const built = await buildCheckpoint(ws, git, { jobId: "bld_drive", attempt: 1, sessionId: null, sessionTotalCostUsd: 0, sourceBranch: "ai-build/first-build", sourceCommit: null }, git.pathEnv);
+  assert.ok(built.file, "the archive was written, whatever the workspace path looks like");
+  assert.ok(built.base64 && built.base64.length > 0, "and it has bytes to send to the platform");
+  if (process.platform === "win32") assert.match(path.resolve(ws.dir), /^[A-Za-z]:/, "this assertion is only meaningful where the path really does start with a drive letter");
+
+  const ws2 = createWorkspace(tmp("aib-drive2-"), { id: "bld_drive", attempt: 2 });
+  const r = await restoreCheckpoint(ws2, { ...git, repo: ws2.repo, home: ws2.home }, readFileSync(built.file), null, git.pathEnv, "ai-build/first-build");
+  assert.ok(r.repoRestored, "and it reads back: listing, link inspection and extraction all take the same archive path");
+  assert.deepEqual(loadMemory(ws2.dir, { ...ID, projectId: "prj_drive", jobId: "bld_drive" }).memory.phasesCompleted, ["build"]);
+});
+
 test("[AIB-CONTINUITY] credential scan: real-looking customer keys and local secret files fail the build; placeholders, publishable keys and templates pass; values are never echoed", () => {
   const repo = tmp("aib-scan-");
   const put = (rel: string, body: string) => { mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true }); writeFileSync(path.join(repo, rel), body); };

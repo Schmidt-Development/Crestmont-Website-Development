@@ -203,6 +203,13 @@ async function buildStaffRecords(w: World) {
   ids.portfolioFile = (await one<{ id: string }>(db, `SELECT desktop_screenshot_file_id AS id FROM portfolio_projects WHERE id = ?`, ids.portfolio)).id;
   await ok(o.post(`/staff/portfolio/${ids.portfolio}/testimonials`, { author: "A. Person", body: "Great to work with on this site.", evidence: "Email from author dated 2026-10-26 granting permission" }), "testimonial");
   ids.testimonial = (await one<{ id: string }>(db, `SELECT id FROM testimonials ORDER BY created_at DESC LIMIT 1`)).id;
+  // One design reference for the gallery routes. Inserted directly: the upload route takes a multipart image, and
+  // the matrix only needs an id that exists to aim another tenant's request at.
+  ids.designReference = "dref_matrixseed000000000000000001";
+  await w.env.overrides!.storage!.put("design-gallery/matrix-seed.png", PNG, "image/png");
+  await db.prepare(`INSERT INTO design_references (id, title, industry, style_tags_json, status, ai_eligible, desktop_key, rights_basis, rights_note, checksum, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(ids.designReference, "Matrix seed reference", "general", "[]", "APPROVED", 1, "design-gallery/matrix-seed.png", "own_work", "Crestmont's own work", "0".repeat(64), new Date().toISOString(), new Date().toISOString()).run();
   // Readiness
   await ok(o.post("/staff/readiness/blockers/new", { category: "security", severity: "high", description: "Matrix blocker description", subsystem: "Authentication", owner: "Engineering", required_action: "Scope cookie to app domain", dependency: "", requirement_ids: "AUTH-007" }), "blocker");
   ids.blocker = (await one<{ id: string }>(db, `SELECT id FROM blockers ORDER BY created_at DESC LIMIT 1`)).id;
@@ -257,11 +264,26 @@ async function buildStaffRecords(w: World) {
   await db.prepare(`INSERT INTO build_jobs (id, project_id, organization_id, order_id, kind, revision, dedupe_key, state, state_reason, strategy, package_id, trigger, preview_url, preview_name, preview_gated, customer_preview_shared_at, agent_session_id, created_at, updated_at)
                     SELECT ?, p.id, p.organization_id, p.order_id, 'first_build', 0, p.id || ':first', 'ready_for_review', 'matrix fixture', 'standard', 'business', 'sweep', 'https://cm-prv-matrix-b0.acct.workers.dev', 'cm-prv-matrix-b0', 1, datetime('now'), 'sess-matrix', ?, ? FROM projects p WHERE p.id = ?`)
     .bind(ids.buildJob, nowIso(), nowIso(), w.a.ids.project).run();
+  // One stored revision for EACH tenant's build, so the AI Build preview route serves a real file in the matrix
+  // rather than 404ing -- and so a cross-tenant request is aimed at a revision that genuinely exists. Inserted
+  // directly: the upload route is the runner's signed channel, and the matrix only needs the rows to exist.
+  ids.buildRevision = "1-0";
+  ids.buildRevisionFile = "index.html";
   // Tenant B's own shared private preview (so the customer preview routes are tenant-addressed in the matrix).
   w.b.ids.buildJob = newId("bld");
   await db.prepare(`INSERT INTO build_jobs (id, project_id, organization_id, order_id, kind, revision, dedupe_key, state, state_reason, strategy, package_id, trigger, preview_url, preview_name, preview_gated, customer_preview_shared_at, created_at, updated_at)
                     SELECT ?, p.id, p.organization_id, p.order_id, 'first_build', 0, p.id || ':first', 'ready_for_review', 'matrix fixture', 'standard', 'business', 'sweep', 'https://cm-prv-matrix-bb0.acct.workers.dev', 'cm-prv-matrix-bb0', 1, datetime('now'), ?, ? FROM projects p WHERE p.id = ?`)
     .bind(w.b.ids.buildJob, nowIso(), nowIso(), w.b.ids.project).run();
+  for (const jobId of [ids.buildJob, w.b.ids.buildJob]) {
+    const rev = newId("brev");
+    const key = `builds/${jobId}/rev/1-0/index.html`;
+    await w.env.overrides!.storage!.put(key, new TextEncoder().encode("<!doctype html><title>Matrix revision</title><h1>Matrix</h1>"), "text/html; charset=utf-8");
+    await db.prepare(`INSERT INTO build_revisions (id, job_id, project_id, cycle, attempt, phase, score, decision, is_best, reverted, file_count, total_bytes, created_at)
+                      SELECT ?, ?, j.project_id, 0, 1, 'build', 8.5, 'FIX_DEFECTS', 1, 0, 1, 60, ? FROM build_jobs j WHERE j.id = ?`)
+      .bind(rev, jobId, nowIso(), jobId).run();
+    await db.prepare(`INSERT INTO build_revision_files (revision_id, path, kind, content_type, size_bytes, sha256, storage_key) VALUES (?,?,?,?,?,?,?)`)
+      .bind(rev, "index.html", "page", "text/html; charset=utf-8", 60, "0".repeat(64), key).run();
+  }
   // Customer production delivery (Founder decision D5): tenant A's target with a superseded v1 and a live v2.
   ids.siteDeployment = newId("sd");
   await db.prepare(`INSERT INTO site_targets (id, project_id, organization_id, worker_name, created_at, updated_at) SELECT 'st_matrix', id, organization_id, 'cm-site-matrix-a', ?, ? FROM projects WHERE id = ?`).bind(nowIso(), nowIso(), w.a.ids.project).run();
@@ -306,5 +328,8 @@ export function idFor(w: World, kind: ResourceKind, tenant: Tenant = w.b): strin
 }
 
 export function fillPath(pattern: string, params: Record<string, string>): string {
-  return pattern.replace(/:([A-Za-z]+)/g, (_, k) => encodeURIComponent(params[k] ?? "zz-missing"));
+  const filled = pattern.replace(/:([A-Za-z]+)/g, (_, k) => encodeURIComponent(params[k] ?? "zz-missing"));
+  // A trailing "*" is a wildcard route (the AI Build preview serves a revision's files at any depth). Its fixture
+  // value is a real path, so each segment is encoded but the slashes between them are kept.
+  return filled.replace(/\/\*$/, () => `/${(params["*"] ?? "zz-missing").split("/").map(encodeURIComponent).join("/")}`);
 }

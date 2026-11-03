@@ -7,8 +7,16 @@ export function toHex(buf: ArrayBuffer | Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export async function sha256Hex(data: string): Promise<string> {
-  return toHex(await crypto.subtle.digest("SHA-256", enc.encode(data)));
+/**
+ * SHA-256 of text, or of bytes.
+ *
+ * The byte form matters: TextEncoder.encode coerces its argument with String(), so passing a Uint8Array used to hash
+ * the text "137,80,78,71,..." instead of the file. The Design Gallery was storing that as an image's "checksum",
+ * which was deterministic but was not the file's hash and would not match one computed anywhere else.
+ */
+export async function sha256Hex(data: string | Uint8Array): Promise<string> {
+  const bytes = typeof data === "string" ? enc.encode(data) : data;
+  return toHex(await crypto.subtle.digest("SHA-256", bytes as unknown as ArrayBuffer));
 }
 
 export async function hmacSha256Hex(secret: string, data: string): Promise<string> {

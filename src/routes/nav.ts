@@ -64,6 +64,7 @@ export function staffNav(_ctx: AppContext): NavGroup[] {
     { label: "AI", items: [
       { href: "/staff/ai", label: "AI operations", perm: "ai.manage" },
       { href: "/staff/builds", label: "AI builds", perm: "builds.read" },
+      { href: "/staff/builds/gallery", label: "Design Gallery", perm: "builds.read" },
       { href: "/staff/voice", label: "AI receptionist", perm: "voice.manage" },
       { href: "/staff/sales-optimization", label: "AI sales optimization", perm: "salesopt.read" },
     ] },
