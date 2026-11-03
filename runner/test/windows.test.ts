@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { selectModel, usableVram, nvidiaDriverVersion, nvidiaDriverTooOld, parseHardwareBytes } from "../windows/select-model.ts";
 import type { Hardware, HardwareGpu } from "../windows/select-model.ts";
-import { RUNNER_DIR, REPO_ROOT, tmp } from "./helpers.ts";
+import { RUNNER_DIR, REPO_ROOT, tmp, readText } from "./helpers.ts";
 
 const WIN = path.join(RUNNER_DIR, "windows");
 
@@ -71,7 +71,7 @@ test("[AIB-RUNNER] select-model says plainly when hardware is insufficient or pr
 });
 
 test("[AIB-RUNNER] Discover-Hardware.ps1 emits every field the documented schema and select-model need (static check; PowerShell not run here)", () => {
-  const ps = readFileSync(path.join(WIN, "Discover-Hardware.ps1"), "utf8");
+  const ps = readText(path.join(WIN, "Discover-Hardware.ps1"));
   for (const field of ["schema = \"crestmont.hardware/1\"", "collectedAt", "logicalProcessors", "cores", "totalGB", "freeGB", "vramGB", "vramReliable", "driverVersion", "source", "utilizationPercent", "wslInstalled", "wslVersion2", "wslStatusRaw", "serverReachable", "clientVersion", "hostSetting", "npmRegistry", "platform", "loadPercent", "usedPercent", "warnings"]) {
     assert.ok(ps.includes(field), `field ${field}`);
   }
@@ -81,7 +81,7 @@ test("[AIB-RUNNER] Discover-Hardware.ps1 emits every field the documented schema
   for (const forbidden of [/Set-ItemProperty/, /New-NetFirewallRule/, /Set-NetFirewall/, /\bInvoke-WebRequest\b.*-Method\s+Post/i, /SetEnvironmentVariable/, /Remove-Item/, /build_runner_secret|CrestmontRunner\\secrets/i]) {
     assert.doesNotMatch(ps, forbidden, `discovery must be read-only: ${forbidden}`);
   }
-  const doc = readFileSync(path.join(REPO_ROOT, "docs", "ai-builds", "WINDOWS-SUPERCOMPUTER.md"), "utf8");
+  const doc = readText(path.join(REPO_ROOT, "docs", "ai-builds", "WINDOWS-SUPERCOMPUTER.md"));
   for (const field of ["vramReliable", "wslVersion2", "serverReachable", "npmRegistry", "crestmont.hardware/1"]) assert.ok(doc.includes(field), `schema documented: ${field}`);
 });
 
@@ -145,7 +145,7 @@ test("[AIB-RUNNER] PowerShell scripts pass a light static lint and are ASCII-onl
   }
   assert.ok(lintPowerShell("function a { (\n }").length > 0, "lint detects imbalance");
   assert.ok(lintPowerShell("Write-Host \"build $b: x\"").length > 0, "lint detects the $name: trap");
-  const install = readFileSync(path.join(WIN, "Install-CrestmontRunner.ps1"), "utf8");
+  const install = readText(path.join(WIN, "Install-CrestmontRunner.ps1"));
   assert.doesNotMatch(install, /New-NetFirewallRule|netsh\s+advfirewall/i, "no inbound firewall rules");
   assert.match(install, /OLLAMA_HOST = "127\.0\.0\.1:11434"/);
   assert.match(install, /key = "RUNNER_ALLOW_PAID_PROVIDER"; value = "false"/);
@@ -239,7 +239,7 @@ test("[AIB-RUNNER] select-model CLI reads a UTF-16 hardware.json and exits 0 (ok
 });
 
 test("[AIB-RUNNER] compose + proxy policy: no published ports, internal networks, paid AI hosts denied, installs reach only the npm registry", () => {
-  const compose = readFileSync(path.join(WIN, "docker-compose.yml"), "utf8");
+  const compose = readText(path.join(WIN, "docker-compose.yml"));
   assert.doesNotMatch(compose, /^\s+ports:/m, "no published ports");
   assert.match(compose, /runner_net:\n\s+name: crestmont_runner\n\s+internal: true/);
   assert.match(compose, /install_net:\n\s+name: crestmont_install\n\s+internal: true/);
@@ -251,7 +251,7 @@ test("[AIB-RUNNER] compose + proxy policy: no published ports, internal networks
   assert.match(runner, /max-size/, "log rotation");
   assert.match(runner, /healthcheck:/);
   assert.match(runner, /NODE_USE_ENV_PROXY: "1"/);
-  const squid = readFileSync(path.join(WIN, "proxy", "squid.conf.template"), "utf8");
+  const squid = readText(path.join(WIN, "proxy", "squid.conf.template"));
   const order = squid.split("\n").filter((l) => l.startsWith("http_access"));
   assert.equal(order[0], "http_access deny paid_ai", "paid AI denial comes first");
   assert.equal(order.at(-1), "http_access deny all");

@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { routeTable } from "../src/routes/index.ts";
 import { STAFF_ROLES } from "../src/domain/authz.ts";
 import { ROUTE_INVENTORY } from "./support/route-inventory.ts";
-import { buildWorld, type World } from "./support/security-world.ts";
+import { buildWorld, fillPath, type World } from "./support/security-world.ts";
 import { routes, classified, pathFor, call, snapshot, changedTables, appErrors, toLogin, toMfa, loc, type RouteEntry } from "./support/security-helpers.ts";
 import { createCustomer, TEST_PASSWORD } from "./support/app.ts";
 import { newTotpSecret } from "../src/lib/auth-crypto.ts";
@@ -30,7 +30,9 @@ test("[AUTH-007] route inventory: every registered route is classified, params a
   const table = routeTable();
   const problems: string[] = [];
   for (const r of classified()) {
-    const names = [...r.pattern.matchAll(/:([A-Za-z]+)/g)].map((m) => m[1]).sort();
+    // A trailing "*" is a parameter too: it is the rest of the path, and it must be typed like any other so the
+    // matrix can address the route with a real value instead of a literal asterisk.
+    const names = [...[...r.pattern.matchAll(/:([A-Za-z]+)/g)].map((m) => m[1]), ...(r.pattern.endsWith("/*") ? ["*"] : [])].sort();
     const typed = Object.keys(r.spec.params ?? {}).sort();
     if (names.join() !== typed.join()) problems.push(`${r.key}: params ${names.join(",")} typed as ${typed.join(",")}`);
     // An authenticated route that changes state (or exports data) must carry an audit classification.
@@ -185,7 +187,7 @@ test("[AUTH-007] record-level scoping: a sales rep is denied every lead, lead ta
   for (const r of classified().filter((x) => x.spec.access.kind === "staff" && (x.spec.access.roles as readonly string[]).includes("sales"))) {
     const kinds = Object.values(r.spec.params ?? {});
     if (!kinds.some((k) => k in ids)) continue;
-    const path = r.pattern.replace(/:([A-Za-z]+)/g, (_, name: string) => ids[r.spec.params![name]]);
+    const path = fillPath(r.pattern, Object.fromEntries(Object.entries(r.spec.params!).map(([n, k]) => [n, ids[k as string]])));
     const res = await call(sales, r, path); n++;
     if (res.status !== 403 && res.status !== 404) problems.push(`${r.key} → ${await describe(res)}`);
   }

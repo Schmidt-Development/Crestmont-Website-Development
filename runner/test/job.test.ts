@@ -108,11 +108,23 @@ test("[AIB-RUNNER] the agent environment is built from an allowlist: no runner s
   try {
     const sdk = fakeSdk(happyAgent());
     const s = await runJob(job, deps(cfg, client, sdk));
+    // Every assertion below is inside this loop, so an empty `calls` would pass the whole test while checking
+    // nothing. That is not hypothetical: while npm could not be started on Windows the build failed at preflight,
+    // the agent was never invoked, and this environment-allowlist test passed vacuously on every run.
+    assert.ok(sdk.calls.length > 0, `the agent was never invoked, so nothing was checked (${s.complete?.error ?? s.outcome})`);
     for (const call of sdk.calls) {
       const env = call.options.env!;
       for (const k of Object.keys(env)) assert.ok(!FORBIDDEN_ENV.test(k), `forbidden variable ${k}`);
-      for (const v of Object.values(POLLUTED_ENV).filter((x) => x.length > 12 && !x.includes("/"))) {
-        assert.ok(!Object.values(env).includes(v), "no secret value leaked under another name");
+      // Which variables the agent legitimately inherits is decided BY NAME, not by guessing from the value. The
+      // old filter skipped any value containing "/" so that PATH would not be mistaken for a secret -- which holds
+      // only on POSIX: a Windows PATH ("C:\Windows;...") has no forward slash, so PATH was treated as a leaked
+      // secret and this assertion failed for a variable the agent is supposed to have. Excluding by name also makes
+      // the check stricter, since values like DATABASE_URL are no longer skipped for containing a slash.
+      const INHERITED = new Set(["PATH", "LANG", "TZ"]);
+      for (const [k, v] of Object.entries(POLLUTED_ENV)) {
+        if (INHERITED.has(k) || v.length <= 12) continue;
+        const leaked = Object.entries(env).find(([, ev]) => ev === v);
+        assert.ok(!leaked, `${k}'s value leaked into the agent environment as ${leaked?.[0]}`);
       }
       assert.equal(env.HOME, path.join(s.workspace!, "home"));
       assert.equal(env.CLAUDE_CONFIG_DIR, path.join(s.workspace!, "home", ".claude"));

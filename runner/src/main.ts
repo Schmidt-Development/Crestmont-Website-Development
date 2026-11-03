@@ -48,6 +48,8 @@ export interface LoopDeps {
   once?: boolean;
   /** Extra job dependencies (tests: fake docker executor, fake model server fetch). */
   jobDeps?: Partial<JobDeps>;
+  /** The build itself. Injected so slot behaviour (claiming, the duplicate guard) is testable on its own. */
+  runJobImpl?: typeof runJob;
   /** Serve AI drafts when idle (null = off). */
   drafts?: { serve: () => Promise<DraftOutcome>; maxPerIdle?: number } | null;
   /** Delete expired / owner-deleted previews when idle (null = PREVIEW_DELETE_COMMAND not configured). */
@@ -62,7 +64,12 @@ export interface LoopDeps {
    */
   modelProbe?: { check: () => Promise<{ ok: boolean; error?: string; gpuShare?: number | null }>; intervalMs?: number } | null;
   /** V4 website slots: the model-server state shared by the slots (only slot 0 probes; the others follow it). */
-  shared?: { modelOk: boolean };
+  /**
+   * V4 website slots: state shared by the slots of ONE runner process.
+   *   modelOk  only slot 0 probes the model server; the others follow it.
+   *   active   the job ids the slots are working on, so two slots can never build one project twice.
+   */
+  shared?: { modelOk: boolean; active?: Set<string> };
 }
 
 /** Probe: the model server answers GET /models and lists the configured model. No generation, no tokens. */
@@ -196,17 +203,37 @@ export async function runLoop(d: LoopDeps): Promise<number> {
       continue;
     }
     idleMs = d.cfg.pollMinMs;
+    // Two slots must never work one project. The lease makes that the control plane's job, but the slots share this
+    // process, so the cheap local check belongs here too: the second holder hands the job straight back as "released"
+    // (requeued without spending an attempt) instead of building the same project into a second workspace, where the
+    // two attempts would race over one repository and the loser's work would be thrown away.
+    const active = d.shared?.active;
+    if (active?.has(claimed.job.id)) {
+      d.logger.error("another slot of this runner is already building this job; releasing it instead of building it twice", { jobId: claimed.job.id });
+      try {
+        await d.client.complete(claimed.job, {
+          outcome: "released", runCostUsd: 0, turns: 0, sessionId: "", sourceRepo: "", sourceBranch: "", sourceCommit: "", previewUrl: null,
+          report: "Released without building: another slot of this runner already holds this job.",
+          error: "duplicate claim within one runner",
+        });
+      } catch (err) { d.logger.warn("could not release the duplicate claim", { jobId: claimed.job.id, error: errorMessage(err) }); }
+      if (d.once) return jobs;
+      continue;
+    }
+    active?.add(claimed.job.id);
     jobs++;
     if (d.health) { d.health.currentJob = claimed.job.id; d.health.runningJobs = [...d.health.runningJobs, claimed.job.id]; }
     let outcome = "crashed";
     let jobError: string | null = null;
     try {
-      const summary = await runJob(claimed.job, { cfg: d.cfg, client: d.client, queryFn: d.queryFn, manifest: d.manifest, logger: d.logger, shutdown: d.shouldStop, ...(d.jobDeps ?? {}) });
+      const summary = await (d.runJobImpl ?? runJob)(claimed.job, { cfg: d.cfg, client: d.client, queryFn: d.queryFn, manifest: d.manifest, logger: d.logger, shutdown: d.shouldStop, ...(d.jobDeps ?? {}) });
       outcome = summary.outcome;
       jobError = summary.complete?.error ?? (summary.outcome === "lease_lost" ? "lease lost (another attempt may own the job)" : null);
     } catch (err) {
       jobError = errorMessage(err);
       d.logger.error("job crashed", { jobId: claimed.job.id, error: jobError });
+    } finally {
+      active?.delete(claimed.job.id);
     }
     if (d.health) {
       d.health.runningJobs = d.health.runningJobs.filter((id) => id !== claimed.job!.id);
@@ -230,7 +257,8 @@ export async function runLoop(d: LoopDeps): Promise<number> {
  * start a few seconds apart so they do not claim at the same instant; the platform enforces the worker's capacity.
  */
 export async function runSlots(d: LoopDeps, slots: number, stagger = 3000): Promise<number> {
-  const shared = d.shared ?? { modelOk: true };
+  const shared = d.shared ?? { modelOk: true, active: new Set<string>() };
+  shared.active ??= new Set<string>();
   const loops: Promise<number>[] = [];
   for (let i = 0; i < Math.max(1, slots); i++) {
     const deps: LoopDeps = i === 0 ? { ...d, shared } : { ...d, shared, drafts: null, previews: null, deployments: null, modelProbe: null, logger: d.logger.child({ slot: i }) };

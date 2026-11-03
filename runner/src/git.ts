@@ -58,6 +58,18 @@ export async function headCommit(ctx: GitCtx): Promise<string | null> {
   return r.code === 0 ? r.stdout.trim() : null;
 }
 
+/** Puts the working tree back to `commit` as a NEW commit, so the failed attempt stays in the log as evidence. */
+export async function restoreTo(ctx: GitCtx, commit: string, message: string): Promise<string | null> {
+  if (!/^[0-9a-f]{7,40}$/i.test(commit)) throw new Error(`restoreTo: ${commit.slice(0, 40)} is not a commit id`);
+  // `read-tree -u --reset` makes the index and working tree match that commit's tree EXACTLY, which `checkout -- .`
+  // does not: a file a bad repair added is tracked, so checkout leaves it behind. HEAD is untouched, so the failed
+  // attempt stays in the log -- the thing `reset --hard` would have thrown away.
+  const r = await git(ctx, ["read-tree", "-u", "--reset", commit]);
+  if (r.code !== 0) return null;
+  await git(ctx, ["clean", "-fd"]);   // and anything untracked it left behind
+  return commitAll(ctx, message);
+}
+
 export async function currentBranch(ctx: GitCtx): Promise<string> {
   const r = await git(ctx, ["symbolic-ref", "--short", "HEAD"]);
   return r.code === 0 ? r.stdout.trim() : "main";

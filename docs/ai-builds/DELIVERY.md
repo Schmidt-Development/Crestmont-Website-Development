@@ -80,6 +80,10 @@ release is executed. Domain purchase/transfer and DNS changes at the customer's 
    SITE_CLOUDFLARE_ACCOUNT_ID_FILE=/run/secrets/site_cloudflare_account_id
    ```
 
+   On Windows, keep the `npx --yes wrangler@<exact version>` form above. The runner starts programs without a shell,
+   and a bare `wrangler` is a `.cmd` shim that cannot be started that way (`spawn wrangler ENOENT`); `npx` is run
+   through its CLI script with node, so the pinned form works on both platforms.
+
    Project repositories (`PROJECT_REPO_*`) are required: releases are built from the versioned repository.
    The command runs without a shell, in the same restricted Wrangler form as the preview commands
    (PREVIEW-DEPLOYMENT.md, "No shell"); anything else is refused when the runner starts.

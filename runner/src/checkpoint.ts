@@ -102,10 +102,29 @@ function nextIndex(ws: Workspace): number {
   return nums.length ? Math.max(...nums) + 1 : 1;
 }
 
-/** Both paths must be inside the job's workspace (absolute, so tar can never read them as options). */
+/**
+ * tar is given the job's workspace as its working directory and only paths relative to it, never absolute ones.
+ *
+ * An absolute Windows path is the one argument a drive letter breaks: GNU tar reads "C:\..." as host:path and tries
+ * to reach a remote host ("tar (child): Cannot connect to C: resolve failed"), so on this platform EVERY checkpoint
+ * archive failed -- silently, because the caller only warns. Builds still resumed, because the git push half of a
+ * checkpoint succeeds on its own, but the agent transcript and runner state never reached the platform and a resume
+ * from a checkpoint key could not have worked. The extraction directory is mangled the same way, so -C needs the
+ * same treatment as -f. --force-local would fix GNU tar and break bsdtar, which is what Windows itself ships as
+ * tar.exe; relative paths work on both.
+ *
+ * resolveWithin still keeps every path inside the workspace, and the "./" prefix keeps a name that begins with a
+ * dash from being read as an option.
+ */
+function tarPath(ws: Workspace, p: string): string {
+  const abs = resolveWithin(ws.dir, p);
+  const rel = path.relative(ws.dir, abs).split(path.sep).join("/");
+  return `./${rel}`;
+}
+
+/** Both paths must be inside the job's workspace, so tar can never be pointed outside it. */
 async function tarCreate(ws: Workspace, dir: string, file: string, pathEnv: string): Promise<void> {
-  const src = resolveWithin(ws.dir, dir), out = resolveWithin(ws.dir, file);
-  const r = await run("tar", ["-czf", out, "-C", src, "."], { env: baseEnv(pathEnv, ws.home), timeoutMs: 120_000 });
+  const r = await run("tar", ["-czf", tarPath(ws, file), "-C", tarPath(ws, dir), "."], { cwd: ws.dir, env: baseEnv(pathEnv, ws.home), timeoutMs: 120_000 });
   if (r.code !== 0) throw new Error(`tar failed: ${r.stderr.slice(0, 300)}`);
 }
 
@@ -121,7 +140,8 @@ export async function restoreCheckpoint(ws: Workspace, git: GitCtx, archive: Buf
   const archiveFile = resolveWithin(ws.dir, path.join(ws.tmp, `restore-${counter++}.tgz`));
   writeFileSync(archiveFile, archive);
   const env = baseEnv(pathEnv, ws.home);
-  const list = await run("tar", ["-tzf", archiveFile], { env, timeoutMs: 60_000 });
+  const ar = tarPath(ws, archiveFile);
+  const list = await run("tar", ["-tzf", ar], { cwd: ws.dir, env, timeoutMs: 60_000 });
   if (list.code !== 0) throw new Error("checkpoint archive is not a valid tar.gz");
   for (const member of list.stdout.split("\n").filter(Boolean)) {
     const norm = path.posix.normalize(member);
@@ -129,12 +149,12 @@ export async function restoreCheckpoint(ws: Workspace, git: GitCtx, archive: Buf
   }
   // Only regular files and directories: a symlink or hard link (e.g. a transcript pointing at /run/secrets/...) would
   // be copied into the workspace and later read back into the model context or a checkpoint upload.
-  const verbose = await run("tar", ["-tvzf", archiveFile], { env, timeoutMs: 60_000 });
+  const verbose = await run("tar", ["-tvzf", ar], { cwd: ws.dir, env, timeoutMs: 60_000 });
   if (verbose.code !== 0) throw new Error("checkpoint archive is not a valid tar.gz");
   for (const line of verbose.stdout.split("\n").filter(Boolean)) {
     if (!"-d".includes(line[0])) throw new Error(`checkpoint archive contains a link or special file (${line[0]}): ${line.slice(0, 200)}`);
   }
-  const x = await run("tar", ["-xzf", archiveFile, "-C", dir, "--no-same-owner", "--no-same-permissions"], { env, timeoutMs: 120_000 });
+  const x = await run("tar", ["-xzf", ar, "-C", tarPath(ws, dir), "--no-same-owner", "--no-same-permissions"], { cwd: ws.dir, env, timeoutMs: 120_000 });
   if (x.code !== 0) throw new Error(`could not extract checkpoint: ${x.stderr.slice(0, 300)}`);
   const linked = findLinks(dir);
   if (linked) { rmSync(dir, { recursive: true, force: true }); rmSync(archiveFile, { force: true }); throw new Error(`checkpoint archive contains a link: ${path.relative(dir, linked)}`); }

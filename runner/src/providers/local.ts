@@ -588,6 +588,22 @@ export class LocalProvider implements AgentProvider {
             }
             loopWarned = true;
             out += `\n\nWARNING from the runner: you have made this exact ${c.name} call ${repeats} times with the same result. Do something different, or call finish if the phase is done.`;
+            // "Read the file again and copy the exact text" is advice the model cannot act on when its idea of the
+            // file is stale -- after a write_file and a few context resets, the text it keeps searching for is gone.
+            // A Business build died here: four identical edit_file calls on public/admin/admin.js whose old_string no
+            // longer existed, and the whole attempt was lost to it. So the file itself is attached, not advice about
+            // it. This is appended after `recent` was recorded above, so it never weakens the loop guard.
+            if (c.name === "edit_file" && /old_string was not found/.test(out)) {
+              const rel = typeof c.args?.path === "string" ? c.args.path : "";
+              const abs = path.resolve(this.ws.repo, rel);
+              if (rel && abs.startsWith(this.ws.repo + path.sep) && existsSync(abs)) {
+                try {
+                  const body = readFileSync(abs, "utf8");
+                  const shown = body.length > 6000 ? `${body.slice(0, 3000)}\n...[middle of the file omitted]...\n${body.slice(-3000)}` : body;
+                  out += `\n\n${rel} as it is RIGHT NOW (${body.length} bytes). The text you are searching for is not in it. Copy old_string from this, or use write_file to replace the whole file:\n${shown}`;
+                } catch { /* unreadable: the warning above stands on its own */ }
+              }
+            }
           }
           t.history.push({ role: "tool", tool_call_id: c.id, name: c.name, content: out });
           if (outcome.finished) { status = "success"; summary = outcome.finished.summary; tracker.note({ kind: "step", message: `phase finished: ${outcome.finished.summary.slice(0, 200)}` }); break; }

@@ -18,7 +18,7 @@ import {
 import type { SquidInputs } from "../windows/egress-policy.ts";
 import { assertLocalEndpoint } from "../src/providers/local.ts";
 import { PaidProviderRefusedError } from "../src/providers/types.ts";
-import { RUNNER_DIR, tmp } from "./helpers.ts";
+import { RUNNER_DIR, tmp, readText } from "./helpers.ts";
 
 const WIN = path.join(RUNNER_DIR, "windows");
 const PLATFORM = "staging.crestmont.example";
@@ -82,7 +82,7 @@ test("[AIB-RUNNER] squid allow-list: anthropic.com, api.openai.com and other hos
 });
 
 test("[AIB-RUNNER] squid rendering validates every substituted host: no rule injection, no paid AI allow-listing", () => {
-  const t = readFileSync(TEMPLATE_PATH, "utf8");
+  const t = readText(TEMPLATE_PATH);
   const ok = renderSquidConf(t, { platformHost: "Staging.Crestmont.Example" });
   assert.match(ok, /^acl control_plane dstdomain staging\.crestmont\.example$/m);
   assert.match(ok, /^acl runner_extra dstdomain none\.invalid$/m);
@@ -110,7 +110,7 @@ test("[AIB-RUNNER] squid rendering validates every substituted host: no rule inj
 });
 
 test("[AIB-RUNNER] paid AI host lists agree: proxy template, local provider endpoint refusal, evidence collector", () => {
-  const squid = readFileSync(TEMPLATE_PATH, "utf8");
+  const squid = readText(TEMPLATE_PATH);
   const listed = squid.split("\n").filter((l) => l.startsWith("acl paid_ai dstdomain")).flatMap((l) => l.split(/\s+/).slice(3));
   assert.deepEqual([...listed].sort(), [...PAID_AI_DOMAINS].sort(), "squid.conf.template paid_ai == PAID_AI_DOMAINS");
   for (const d of [...PAID_AI_DOMAINS, ".ollama.com", "bedrock-runtime.us-west-2.amazonaws.com"]) {
@@ -118,9 +118,9 @@ test("[AIB-RUNNER] paid AI host lists agree: proxy template, local provider endp
     assert.throws(() => assertLocalEndpoint(`https://${host}/v1`, "qwen3-coder:30b"), PaidProviderRefusedError, `local provider refuses ${host}`);
   }
   assert.doesNotThrow(() => assertLocalEndpoint("http://host.docker.internal:11434/v1", "qwen3-coder:30b"));
-  const ps = readFileSync(path.join(WIN, "SquidConf.ps1"), "utf8");
+  const ps = readText(path.join(WIN, "SquidConf.ps1"));
   for (const d of PAID_AI_DOMAINS) assert.ok(ps.includes(`"${d}"`), `SquidConf.ps1 lists ${d}`);
-  const evidence = readFileSync(path.join(WIN, "Collect-Evidence.ps1"), "utf8");
+  const evidence = readText(path.join(WIN, "Collect-Evidence.ps1"));
   const m = /\$paidPattern = '([^']+)'/.exec(evidence);
   assert.ok(m, "Collect-Evidence.ps1 defines $paidPattern");
   const re = new RegExp(m[1], "i");
@@ -172,7 +172,7 @@ test("[AIB-RUNNER] SquidConf.ps1 (used by the installer) renders byte-for-byte w
       continue;
     }
     assert.equal(r.status, 0, r.stdout + r.stderr);
-    const fromPs = readFileSync(out, "utf8");
+    const fromPs = readText(out);
     assert.equal(fromPs, renderDefaultSquidConf({ platformHost: c.platformHost, extraDomains: c.extra, ollamaInDocker: c.ollama }), JSON.stringify(c));
   }
 });
@@ -266,7 +266,7 @@ test("[AIB-RUNNER] docker-compose.yml (docker compose config): internal networks
 });
 
 test("[AIB-RUNNER] docker-compose.yml text checks (no docker needed): no ports, sandboxes not defined in compose, pinned images", () => {
-  const compose = readFileSync(path.join(WIN, "docker-compose.yml"), "utf8");
+  const compose = readText(path.join(WIN, "docker-compose.yml"));
   assert.doesNotMatch(compose, /^\s+ports:/m);
   assert.doesNotMatch(compose, /privileged:\s*true|network_mode:\s*host|pid:\s*host/);
   const sockLines = compose.split("\n").filter((l) => /docker\.sock/.test(l) && !/^\s*#/.test(l));

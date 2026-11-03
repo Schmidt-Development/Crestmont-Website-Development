@@ -7,9 +7,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { RUNNER_DIR, REPO_ROOT } from "./helpers.ts";
+import { RUNNER_DIR, REPO_ROOT, readText } from "./helpers.ts";
 
-const read = (p: string) => readFileSync(path.join(RUNNER_DIR, p), "utf8");
+const read = (p: string) => readText(path.join(RUNNER_DIR, p));
 const json = (p: string) => JSON.parse(read(p)) as Record<string, unknown>;
 const EXACT = /^\d+\.\d+\.\d+$/;
 
@@ -115,7 +115,7 @@ test("[AIB-RUNNER] Dockerfiles: npm ci from lockfiles only, base images pinned b
 });
 
 test("[AIB-RUNNER] CI builds the runner, sandbox and proxy images (no push, read-only token) and runs their self-checks", () => {
-  const ci = readFileSync(path.join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+  const ci = readText(path.join(REPO_ROOT, ".github", "workflows", "ci.yml"));
   const job = (name: string) => {
     const start = ci.indexOf(`\n  ${name}:\n`);
     assert.ok(start >= 0, `job ${name} exists`);
@@ -135,7 +135,7 @@ test("[AIB-RUNNER] CI builds the runner, sandbox and proxy images (no push, read
   const ps = job("windows-scripts");
   assert.match(ps, /permissions:\n\s+contents: read\n/);
   assert.match(ps, /shell: pwsh\n\s+run: \.\/runner\/windows\/Test-WindowsScripts\.ps1/);
-  const winWf = readFileSync(path.join(REPO_ROOT, ".github", "workflows", "windows-powershell.yml"), "utf8");
+  const winWf = readText(path.join(REPO_ROOT, ".github", "workflows", "windows-powershell.yml"));
   const ps51 = winWf.slice(winWf.indexOf("\n  windows-powershell-51:\n"));
   assert.ok(winWf.includes("\n  windows-powershell-51:\n"), "Windows PowerShell 5.1 job exists");
   assert.match(winWf, /paths: \["runner\/windows\/\*\*"/, "Windows-hosted minutes only when the Windows kit changes");

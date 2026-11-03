@@ -1,5 +1,6 @@
 // Integration-test harness: real request pipeline (src/app/app.ts) + real migrations on in-memory SQLite.
 import { createTestDb } from "./sqlite-d1.ts";
+import type { SqliteDb } from "../../dev/sqlite-d1.ts";
 import { handle } from "../../src/app/app.ts";
 import type { Env } from "../../src/app/context.ts";
 import { syncRequirements } from "../../src/readiness/ingest.ts";
@@ -23,7 +24,11 @@ export async function createTestApp(extra: Partial<Env> = {}) {
   await syncRequirements(db);
   const storage = new MemoryStorage();
   const env: Env = { DB: db, ENVIRONMENT: "development", APP_URL: "http://crestmont.test", overrides: { storage }, ...extra };
-  return { db, env, storage, client: () => new TestClient(env) };
+  // close() releases the in-memory database. Tests that open an app per case can call it in a finally block; it is
+  // safe to call more than once, so a test does not have to track whether it already did.
+  let closed = false;
+  const close = () => { if (!closed) { closed = true; (db as SqliteDb).raw.close(); } };
+  return { db, env, storage, client: () => new TestClient(env), close };
 }
 
 export class TestClient {

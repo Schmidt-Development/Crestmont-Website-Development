@@ -5,6 +5,10 @@
     "moduleResolution": "NodeNext",
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "types": ["node"],
+    // scripts/local-build-e2e.ts drives a real build, so it imports both the platform and the runner. That pulls the
+    // runner's optional paid provider into this program, and the SDK is a peer dependency that is not installed here
+    // -- the same mapping runner/tsconfig.json uses, so the harness stays typechecked instead of being excluded.
+    "paths": { "@anthropic-ai/claude-agent-sdk": ["./runner/src/sdk-types.d.ts"] },
     "strict": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
