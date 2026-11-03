@@ -27,6 +27,19 @@ const cmd = process.argv[2] ?? "";
 const arg = (k: string, d?: string) => { const i = process.argv.indexOf(`--${k}`); return i > 0 ? process.argv[i + 1] : d; };
 const DIR = arg("dir", "jitt")!;
 const BASE = (process.env.E2E_BASE_URL ?? "").replace(/\/$/, "");
+// The certification customer's address. Onboarding can be submitted exactly once per project
+// (src/services/onboarding.ts: "Onboarding was already submitted"), so a brief that turns out to be wrong cannot
+// be corrected for a customer who has already bought -- build bld_aeadb54ca53f57afcb9969bc escalated because the
+// intake withheld the contact phone gate A requires, and no second submission was possible. Re-certifying a
+// corrected brief therefore needs a fresh customer, not an edit. Unset, the certification uses the fixture's own.
+export function certificationEmail(raw: string | undefined): string {
+  const e = raw?.trim() || C.email;
+  // Only the reserved .test domain (RFC 2606), which staging records in its outbox and never sends. A typo that
+  // reached a real domain would mail a stranger a sign-in link for a company that does not exist.
+  if (!/^[^@\s]+@[^@\s]+\.test$/.test(e)) throw new Error(`the certification customer must use a .test address, not ${e}`);
+  return e;
+}
+const EMAIL = certificationEmail(process.env.E2E_CUSTOMER_EMAIL);
 const read = <T>(f: string): T | null => (existsSync(join(DIR, f)) ? (JSON.parse(readFileSync(join(DIR, f), "utf8")) as T) : null);
 const write = (f: string, v: unknown, mode = 0o644) => { mkdirSync(DIR, { recursive: true }); writeFileSync(join(DIR, f), JSON.stringify(v, null, 2), { mode }); };
 const lit = (s: string) => `'${s.replace(/'/g, "''")}'`;
@@ -64,7 +77,7 @@ const safe = async <T>(f: () => Promise<T>, fallback: T): Promise<T> => { try { 
 
 interface CustomerState { userId: string | null; verified: boolean; orgId: string | null; projectId: string | null; paidOrderId: string | null; onboarded: boolean }
 async function customerState(q: Query): Promise<CustomerState> {
-  const u = (await q<{ id: string; email_verified_at: string | null }>(`SELECT id, email_verified_at FROM users WHERE email = ${lit(C.email)}`))[0];
+  const u = (await q<{ id: string; email_verified_at: string | null }>(`SELECT id, email_verified_at FROM users WHERE email = ${lit(EMAIL)}`))[0];
   if (!u) return { userId: null, verified: false, orgId: null, projectId: null, paidOrderId: null, onboarded: false };
   const org = (await q<{ organization_id: string }>(`SELECT m.organization_id FROM memberships m JOIN organizations o ON o.id = m.organization_id WHERE m.user_id = ${lit(u.id)} AND o.kind = 'customer' ORDER BY m.created_at LIMIT 1`))[0]?.organization_id ?? null;
   const paid = org ? (await q<{ id: string }>(`SELECT id FROM orders WHERE organization_id = ${lit(org)} AND status = 'paid' AND total_cents = ${C.packageCents} ORDER BY created_at LIMIT 1`))[0]?.id ?? null : null;
@@ -261,7 +274,7 @@ async function payOnStripeCheckout(page: Page) {
   await page.locator("#cardCvc").fill("123");
   if (await page.locator("#billingName").count()) await page.locator("#billingName").fill("Casey Trunkwell");
   if (await page.locator("#billingPostalCode").isVisible().catch(() => false)) await page.locator("#billingPostalCode").fill("48933");
-  if (await page.locator("#email").isEditable().catch(() => false)) await page.locator("#email").fill(C.email);
+  if (await page.locator("#email").isEditable().catch(() => false)) await page.locator("#email").fill(EMAIL);
   const link = page.locator("#enableStripePass");
   if ((await link.count()) && (await link.isChecked())) await link.dispatchEvent("click");
   if ((await link.count()) && (await link.isChecked())) await link.setChecked(false, { force: true });
@@ -377,9 +390,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       const pw = customerPassword(process.env.CLOUDFLARE_API_TOKEN ?? "");
       console.log(`::add-mask::${pw}`);
       const { passwordProblems } = await import("../src/lib/auth-crypto.ts");
-      const problems = passwordProblems(pw, C.email);
+      const problems = passwordProblems(pw, EMAIL);
       if (problems.length) throw new Error(`derived password rejected by the platform's policy: ${problems.join("; ")}`);
-      write("customer.json", { email: C.email, password: pw }, 0o600);
+      write("customer.json", { email: EMAIL, password: pw }, 0o600);
       const st = await customerState(await d1());
       write("state.json", st);
       console.log(`Test customer state: ${JSON.stringify(st)}`);
@@ -387,7 +400,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       const q = await d1();
       const st = await customerState(q);
       if (st.verified || !st.userId) { console.log(st.verified ? "SKIP verify-link — already verified" : "verify-link: the customer has not registered"); process.exit(st.userId ? 0 : 1); }
-      const body = (await q<{ text_body: string }>(`SELECT m.text_body FROM email_deliveries d JOIN email_messages m ON m.delivery_id = d.id WHERE d.to_email = ${lit(C.email)} AND d.template = 'verification' ORDER BY d.created_at DESC LIMIT 1`))[0]?.text_body ?? "";
+      const body = (await q<{ text_body: string }>(`SELECT m.text_body FROM email_deliveries d JOIN email_messages m ON m.delivery_id = d.id WHERE d.to_email = ${lit(EMAIL)} AND d.template = 'verification' ORDER BY d.created_at DESC LIMIT 1`))[0]?.text_body ?? "";
       const path = verificationPath(body);
       if (!path) throw new Error("no verification email for the test customer in the staging outbox");
       console.log(`::add-mask::${path.split("=")[1]}`);

@@ -19,6 +19,10 @@ on:
         description: "Keep polling the build for up to N minutes (0-330, read-only)"
         type: string
         default: "0"
+      customer_email:
+        description: "Re-certify a corrected brief as a fresh customer (a .test address; blank uses the fixture's)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -35,6 +39,9 @@ jobs:
     environment: staging
     env:
       E2E_BASE_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+      # Read by scripts/builder-staging-e2e.ts, which refuses anything but a .test address. An env: assignment, not
+      # an interpolation into a run: script (F-23).
+      E2E_CUSTOMER_EMAIL: ${{ inputs.customer_email }}
       WRANGLER: npx --yes wrangler@4.149.0
       # Where Playwright keeps its Chromium. The install and the launch have to agree: tests/e2e/support.ts, which
       # the browser commands import, defaults this to /opt/pw-browsers when it is unset, and that is not where
