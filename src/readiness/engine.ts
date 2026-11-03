@@ -1,6 +1,8 @@
 // Launch Readiness engine (§36–§50). Pure functions over stored records so the
 // dashboard, CSV export and PDF packet all derive from the same computation (§48).
 
+import { deriveRequirementStates, implementationFrom, type AutoState, type DerivedRequirement, type DeriveDeploymentRow } from "./derive.ts";
+
 export type Env = "development" | "staging" | "production";
 export const ENVS: Env[] = ["development", "staging", "production"];
 
@@ -17,6 +19,7 @@ export interface RequirementRow {
 export interface EvidenceRow {
   requirement_id: string; outcome: "passed" | "failed" | "skipped"; test_name: string;
   run_id: string; environment: Env; source: string; commit_sha: string; finished_at: string;
+  branch?: string | null;
 }
 
 export interface BlockerRow { id: string; category: string; status: "open" | "resolved"; severity: string; requirement_ids: string[] }
@@ -44,6 +47,15 @@ export interface RequirementStatus {
   evidenceRunIds: string[];
   stale: boolean;
   blockers: string[];
+  /** READY-013: the automatically derived state and the evidence that explains it. */
+  autoState: AutoState;
+  autoProgress: AutoState;
+  autoComplete: boolean;
+  autoDetail: string;
+  completeAt: DerivedRequirement["completeAt"];
+  tracking: DerivedRequirement["tracking"];
+  provenCommit: string | null;
+  headCommit: string | null;
 }
 
 export interface ReadinessInput {
@@ -56,6 +68,8 @@ export interface ReadinessInput {
   integrations: IntegrationRow[];
   releaseCandidate: { commit_sha: string; config_sha256: string } | null;
   productionDeployment: { commit_sha: string } | null;
+  /** READY-013: every recorded deployment, so a verdict can require one at the proven commit. */
+  deployments?: DeriveDeploymentRow[];
   now: Date;
   freshnessHours?: number;
 }
@@ -82,14 +96,31 @@ export function computeRequirementStatuses(input: ReadinessInput): RequirementSt
   for (const e of input.evidence) (byReq.get(e.requirement_id) ?? byReq.set(e.requirement_id, []).get(e.requirement_id)!).push(e);
   const openBlockers = input.blockers.filter((b) => b.status === "open");
 
+  // READY-013: implementation status is DERIVED from evidence (src/readiness/derive.ts), never read from a
+  // hand-maintained declaration. The legacy DerivedState below is kept so the gates, CSV and existing views
+  // keep their vocabulary, but it is now fed by the derivation rather than by requirements.implementation_status.
+  const blockerIndex = new Map<string, string[]>();
+  for (const b of openBlockers) for (const id of b.requirement_ids) blockerIndex.set(id, [...(blockerIndex.get(id) ?? []), b.id]);
+  const derived = new Map<string, DerivedRequirement>(
+    deriveRequirementStates({
+      requirements: input.requirements.map((r) => ({ id: r.id, category: r.category, subsystem: r.subsystem, disposition: r.disposition })),
+      evidence: input.evidence.map((e) => ({ ...e, branch: e.branch ?? null })),
+      deployments: input.deployments ?? [],
+      openBlockerRequirementIds: blockerIndex,
+      openBlockerIds: new Set(openBlockers.map((b) => b.id)),
+      openFindingIds: new Set(input.findings.filter((f) => f.status === "open" && f.release_blocking).map((f) => f.id)),
+      now: input.now,
+      freshnessHours: input.freshnessHours,
+    }).map((d) => [d.id, d]),
+  );
+
   return input.requirements.map((r) => {
     const per = latestPerEnv(byReq.get(r.id) ?? []);
     const verification = { development: per.development.outcome, staging: per.staging.outcome, production: per.production.outcome };
     const blockers = openBlockers.filter((b) => b.requirement_ids.includes(r.id)).map((b) => b.id);
     const lastVerifiedAt = ENVS.map((e) => per[e].at).filter(Boolean).sort().at(-1) ?? null;
-    // Passing tests never promote implementation status: a requirement is implemented only when
-    // its explicit record says every applicable layer exists (requirements/status.ts).
-    const implementation = r.implementation_status;
+    const d = derived.get(r.id)!;
+    const implementation = implementationFrom(d);
 
     let state: DerivedState;
     if (blockers.length || r.blocked_reason) state = "blocked";
@@ -107,6 +138,8 @@ export function computeRequirementStatuses(input: ReadinessInput): RequirementSt
       id: r.id, subsystem: r.subsystem, title: r.title, priority: r.priority, category: r.category, disposition: r.disposition,
       implementation, verification, state, lastVerifiedAt, stale, blockers,
       evidenceRunIds: ENVS.map((e) => per[e].runId).filter((x): x is string => !!x),
+      autoState: d.state, autoProgress: d.progress, autoComplete: d.complete, autoDetail: d.detail,
+      completeAt: d.completeAt, tracking: d.tracking, provenCommit: d.provenCommit, headCommit: d.headCommit,
     };
   });
 }
