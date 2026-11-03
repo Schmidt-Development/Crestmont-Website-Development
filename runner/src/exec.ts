@@ -112,14 +112,41 @@ export function invocationProblem(args: unknown, opts: { cwd?: unknown; env?: un
 
 const refused = (why: string): ExecResult => ({ code: 126, stdout: "", stderr: `refused by the runner's execution policy: ${why}`, timedOut: false, notFound: false, refused: true });
 
+/**
+ * npm and npx on Windows: run the CLI script with node rather than the .cmd shim.
+ *
+ * On Windows `npm`, `npx` and `wrangler` are .cmd shims, and `spawn` with `shell: false` cannot execute those at all
+ * (ENOENT) -- so on this platform the runner could not start npm or npx, which also made `npx wrangler@x.y.z` and
+ * therefore the staging preview deploy impossible. Spawning the .cmd instead would hand the arguments to cmd.exe,
+ * re-introducing exactly the shell parsing this module exists to prevent (CVE-2024-27980), so the underlying CLI
+ * script is run with node: the same program, still no shell.
+ *
+ * The path is derived from this process's own node binary and a constant suffix, never from a caller, an argument or
+ * the environment. If it is not there, the bare name is used as before and the caller sees the same ENOENT it
+ * would have seen -- this adds a way to run npm, it never changes which programs are allowed.
+ *
+ * A bare global `wrangler` is still unreachable on Windows; `npx wrangler@<version>`, which the operator-command
+ * policy already prefers for its exact version pinning, now works.
+ */
+function windowsNodeCli(p: Program): { executable: string; prefix: string[] } | null {
+  if (process.platform !== "win32") return null;
+  const file = p === "npm" ? "npm-cli.js" : p === "npx" ? "npx-cli.js" : null;
+  if (!file) return null;
+  const js = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", file);
+  return existsSync(js) ? { executable: process.execPath, prefix: [js] } : null;
+}
+
 export function run(program: Program | TrustedBinary, args: string[], opts: { cwd?: string; env: Record<string, string>; timeoutMs?: number; input?: string; maxOutput?: number }): Promise<ExecResult> {
   // The executable is a constant from PROGRAMS or a validated TrustedBinary path — never a caller-built string.
   let executable: string;
+  let prefix: string[] = [];
   if (isTrustedBinary(program)) executable = program.path;
   else {
     const p = programOf(program);
     if (!p) return Promise.resolve(refused(`"${String(program).slice(0, 80)}" is not an allow-listed program`));
-    executable = PROGRAMS[p];
+    const win = windowsNodeCli(p);
+    if (win) { executable = win.executable; prefix = win.prefix; }
+    else executable = PROGRAMS[p];
   }
   const problem = invocationProblem(args, opts);
   if (problem) return Promise.resolve(refused(problem));
@@ -132,7 +159,7 @@ export function run(program: Program | TrustedBinary, args: string[], opts: { cw
     const done = (r: ExecResult) => { if (!settled) { settled = true; resolve(r); } };
     let child;
     try {
-      child = spawn(executable, [...args], { cwd: opts.cwd, env: { ...opts.env }, stdio: ["pipe", "pipe", "pipe"], shell: false, windowsHide: true });
+      child = spawn(executable, [...prefix, ...args], { cwd: opts.cwd, env: { ...opts.env }, stdio: ["pipe", "pipe", "pipe"], shell: false, windowsHide: true });
     } catch (err) {
       done({ code: 127, stdout: "", stderr: String(err), timedOut: false, notFound: true });
       return;

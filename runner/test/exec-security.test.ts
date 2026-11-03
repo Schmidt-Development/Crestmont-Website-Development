@@ -242,3 +242,26 @@ test("[SEC-EXEC] CI scripts accept only Docker image references from their comma
   for (const ok of ["crestmont-ai-runner:ci", "ghcr.io/org/img:1.2.3", "img@sha256:" + "a".repeat(64), "localhost:5000/x/y:tag"]) assert.equal(dockerImageRef(ok), ok);
   for (const bad of ["--privileged", "-v/:/host", "img;id", "img $(id)", "../img", "IMG", "", "a//b", "img:tag:tag"]) assert.throws(() => dockerImageRef(bad), ExecPolicyError, bad);
 });
+
+// npm and npx must actually be startable on the host the runner runs on (real defect, 2026-11-03).
+//
+// On Windows `npm`, `npx` and `wrangler` are .cmd shims, and `spawn` with `shell: false` cannot execute those at
+// all: `run("npm", ...)` returned ENOENT / notFound. Local builds did not notice, because with the local provider
+// the tool checks are skipped and npm runs inside the Linux sandbox -- but `npx wrangler@x.y.z` is how the staging
+// preview is deployed, so preview deployment could never have worked from this host.
+//
+// The fix must not buy that by weakening the contract this file exists to protect: the .cmd shim is NOT spawned
+// (that would hand arguments to cmd.exe), the underlying CLI script is run with node instead.
+test("[SEC-EXEC] npm and npx can be started, without a shell and without widening the allow-list", async () => {
+  const env = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? process.env.USERPROFILE ?? "" };
+  for (const p of ["npm", "npx"] as const) {
+    const r = await run(p, ["--version"], { env, timeoutMs: 60_000 });
+    assert.equal(r.notFound, false, `${p} must be startable on this platform (got: ${r.stderr.slice(0, 120)})`);
+    assert.equal(r.code, 0, `${p} --version exited ${r.code}: ${r.stderr.slice(0, 120)}`);
+    assert.match(r.stdout.trim(), /^\d+\.\d+\.\d+/, `${p} reported a version`);
+  }
+  // The allow-list and the no-shell rule are untouched: this added a way to START npm, not a new program.
+  assert.equal(programOf("cmd"), null, "a shell is still not an allow-listed program");
+  assert.equal(programOf("powershell"), null);
+  assert.equal((await run("cmd" as never, ["/c", "echo hi"], { env })).refused, true, "and running one is still refused");
+});
