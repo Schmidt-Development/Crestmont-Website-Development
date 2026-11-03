@@ -319,7 +319,7 @@ export async function buildBrief(db: Db, projectId: string): Promise<BuildBrief>
     deliverables: pkg ? [...pkg.includes] : lineItems.length ? lineItems : lines(scopeRow?.scope_text).slice(0, 50),
     exclusions: pkg ? ["Features not listed in the package (custom functionality requires a quote or change order)", `More than ${pkg.pageLimit} pages`, "Production publishing, domain changes and live payments (owner-controlled)"] : ["Anything outside the accepted quote scope", "Production publishing, domain changes and live payments (owner-controlled)"],
     customerData: {
-      business: { name: str(a, "business_name"), industry: str(a, "industry"), publicEmail: str(a, "contact_email"), publicPhone: str(a, "contact_phone") },
+      business: { name: str(a, "business_name"), industry: str(a, "industry"), publicEmail: str(a, "contact_email"), publicPhone: str(a, "contact_phone"), serviceArea: str(a, "service_area") },
       goals: str(a, "goals"), audience: str(a, "target_audience"),
       brand: { hasBranding: str(a, "has_branding") === "yes", guidelines: str(a, "brand_guidelines"), style: str(a, "brand_style"), colors: str(a, "colors"),
         logoFileIds: files.filter((x) => /logo/i.test(x.filename) || (x.folder ?? "").toLowerCase().includes("logo")).map((x) => x.id) },

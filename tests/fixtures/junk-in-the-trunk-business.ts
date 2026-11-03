@@ -4,7 +4,7 @@
 //
 // Every value is fictional staging data. The address uses the reserved .test domain (RFC 2606): staging records the
 // email in its outbox and never sends it, and the phone is in the 555-01xx range reserved for fiction, like the
-// other two Junk in the Trunk fixtures. No street address, license, service area, testimonial or company history is
+// other two Junk in the Trunk fixtures. No street address, license, testimonial or company history is
 // given; the intake tells the builder to label any such placeholder as fictional.
 //
 // The phone is not decoration. Acceptance gate A requires a public contact phone ("missing customer information:
@@ -13,6 +13,10 @@
 // forbade inventing it made the gate unsatisfiable: build bld_aeadb54ca53f57afcb9969bc survived three targeted
 // repairs and then escalated for a person, which is correct behaviour on an impossible brief. A real customer buying
 // the Business package fills this field in, so the certification customer fills it in too.
+//
+// The service area is the same story with a sharper edge: gate A requires one for a website that takes quote
+// requests, and until this build the onboarding form had no field to put it in at all -- so the fix is a new
+// question on the real form (src/services/onboarding.ts), not a special case for this fixture.
 export const JITT_BUSINESS = {
   business: "Junk in the Trunk",
   contactName: "Casey Trunkwell (fictional test customer)",
@@ -28,6 +32,7 @@ export const JITT_BUSINESS = {
     contact_name: "Casey Trunkwell (fictional test customer)",
     contact_email: "casey@junkinthetrunk.test",
     contact_phone: "+1 517 555 0142",
+    service_area: "Greater Lansing, Michigan: Lansing, East Lansing, Okemos, Holt, Delta Township, Grand Ledge and DeWitt.",
     industry: "Junk removal and hauling",
     goals: [
       "Primary goal: generate qualified junk removal quote requests.",
@@ -54,7 +59,7 @@ export const JITT_BUSINESS = {
     domain_status: "need",
     domain_wishes: "junkinthetrunk.test (fictional; no domain is registered for this test)",
     hosting: "crestmont",
-    special_instructions: "STAGING CERTIFICATION TEST — fictional business. Publish the contact phone given above; it is fictional and safe to show. Do not invent a street address, operating license, service area, customer testimonial or company history. Where the layout needs such content, use an obviously fictional placeholder labelled \"Sample — fictional test business\". No real integrations, analytics or tracking.",
+    special_instructions: "STAGING CERTIFICATION TEST — fictional business. Publish the contact phone given above; it is fictional and safe to show. Do not invent a street address, operating license, customer testimonial or company history. Where the layout needs such content, use an obviously fictional placeholder labelled \"Sample — fictional test business\". No real integrations, analytics or tracking.",
   },
   /** The mandatory Phase 6 revision request, verbatim. */
   revisionRequest: "Make the homepage more visually impressive. Strengthen the red, white, and blue American theme, improve the main call-to-action section, and make the quote request button more prominent on mobile.",
