@@ -190,6 +190,16 @@ export class ControlPlaneClient {
     }, { jobId: job.id });
   }
 
+  /**
+   * AI Build preview: store the rendered frontend of one revision so the Founder can see what this cycle produced.
+   *
+   * Best-effort by design. A snapshot that cannot be stored must never fail a build that is otherwise fine, so the
+   * caller logs and continues; the platform refuses a repeat for the same revision, so a retry cannot rewrite one.
+   */
+  storeRevision(job: Pick<Job, "id" | "leaseToken">, req: { cycle: number; phase: "build" | "repair" | "final"; commit?: string | null; score?: number | null; decision?: string | null; isBest?: boolean; reverted?: boolean; revertedReason?: string | null; files: { path: string; base64: string }[] }): Promise<{ revisionId: string; stored: number; alreadyStored: boolean }> {
+    return this.post("/api/builds/runner/revisions/store", { jobId: job.id, leaseToken: job.leaseToken, ...req }, { jobId: job.id });
+  }
+
   checkpoint(job: Pick<Job, "id" | "leaseToken">, req: CheckpointRequest): Promise<{ checkpointKey: string | null }> {
     return this.post("/api/builds/runner/checkpoint", { jobId: job.id, leaseToken: job.leaseToken, ...req }, { jobId: job.id });
   }

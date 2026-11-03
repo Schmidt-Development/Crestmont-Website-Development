@@ -48,6 +48,7 @@ import type { MasterSpec, ReviewVerdict } from "./orchestrator/contracts.ts";
 import { outstanding } from "./orchestrator/contracts.ts";
 import { collectEvidence, builderIntegrations, builderApprovalRequests, writeReview, BUILDER_CONTRACT } from "./orchestrator/evidence.ts";
 import { ratchetDecision } from "./orchestrator/ratchet.ts";
+import { collectSnapshot } from "./orchestrator/snapshot.ts";
 import type { SessionRecord } from "./orchestrator/sessions.ts";
 import type { InferenceScheduler } from "./inference/scheduler.ts";
 import { runIntegrationOperations } from "./integrations/broker.ts";
@@ -284,6 +285,26 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     } catch (err) {
       if (err instanceof LeaseLostError) { markLeaseLost(); throw err; }
       log.warn("checkpoint failed", { label, error: errorMessage(err) });
+    }
+  };
+
+  /**
+   * AI Build preview: hand the platform the rendered website for one revision.
+   *
+   * Best-effort on purpose. The Founder watching a build is important; it is not more important than the build. A
+   * snapshot that cannot be stored is logged and the build carries on, and the platform refuses a repeat for a
+   * revision it already holds, so a retry can never rewrite one.
+   */
+  const snapshot = async (cycle: number, phase: "build" | "repair" | "final", meta: { score?: number | null; decision?: string | null; isBest?: boolean; reverted?: boolean; revertedReason?: string | null } = {}) => {
+    if (!ws) return;
+    try {
+      const snap = collectSnapshot(ws.repo);
+      if (!snap.files.length) return;
+      const r = await client.storeRevision(job, { cycle, phase, commit: git ? await headCommit(git) : null, ...meta, files: snap.files });
+      if (!r.alreadyStored) tracker.note({ kind: "note", message: `preview snapshot for cycle ${cycle}: ${r.stored} file(s), ${Math.round(snap.bytes / 1024)} KB${snap.skipped.length ? `, ${snap.skipped.length} left out` : ""}` });
+    } catch (err) {
+      if (err instanceof LeaseLostError) { markLeaseLost(); throw err; }
+      log.warn("preview snapshot not stored", { cycle, phase, error: errorMessage(err) });
     }
   };
 
@@ -676,6 +697,8 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       }
       checks = await acceptance(commands);
       for (const c of checks) tracker.note({ kind: "check", message: `${c.ok ? "PASS" : "FAIL"} ${c.command}` });
+      // The website as first generated, before any review touched it: the baseline every later cycle is compared to.
+      await snapshot(0, "build");
       const reviewer = advisorFor("reviewer")!;
       let cycleBase = buildBase;
       const requested = requestedCapabilities(job.brief.content.customerData.features ?? [], job.brief.content.customerData.integrations ?? []);
@@ -737,6 +760,9 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         // Quality scorecard (every build, every iteration): failing criteria are outstanding work for this cycle, and a
         // reviewer "ready" without a verified 10/10 becomes a targeted repair (or a wait for external verification).
         let card = scoreNow(verdict, null, cycle);
+        // Whether the ratchet rolled this cycle back, for the snapshot the Founder will inspect.
+        let revertedThisCycle = false;
+        let revertNote: string | null = null;
         // ── repair ratchet ────────────────────────────────────────────────────────────────────────────────────────
         // A build must not be able to walk away from its own best work. Measured on Node 1 (2026-11-02): 7.50 ->
         // 7.16 -> 7.22 -> 6.94, every repair kept whatever it did, so the LAST and worst state was the deliverable.
@@ -756,6 +782,8 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
             // This cycle's evidence (changed files, commits, screenshots) describes the revision that has just been
             // reverted away, so the cycle record says so rather than quietly pairing the best card with it.
             verdict = { ...verdict, findings: [...verdict.findings, note] };
+            revertedThisCycle = true;
+            revertNote = note;
             // The tree is the best one again, so that is the card the build now stands at, and the checks have to
             // be re-run against it: the ones in hand measured a revision that no longer exists.
             card = bestCard;
@@ -789,6 +817,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         const res = await client.submitCycle(job, { cycle, prompt: promptUsed, promptSource, evidence, decision: verdict.decision, addresses: verdict.addresses, nextPrompt: verdict.nextPrompt, reviewerProvider: reviewerName,
           builderModel: lastBuildModel, reviewerModel, routing: { builder: cycleRoute.slot, builderTask: cycleRoute.task, reason: cycleRoute.reason, reviewer: reviewerModel ? "A" : "rules" },
           sessions: sessionRecords.splice(0) }).catch((err) => { if (err instanceof LeaseLostError) { markLeaseLost(); throw err; } throw err; });
+        await snapshot(cycle, "repair", { score: card.score, decision: verdict.decision, isBest: bestCard === card, reverted: revertedThisCycle, revertedReason: revertNote });
         // Older platform without the orchestration endpoints: the earlier behaviour (one repair round when checks failed).
         const decision = res ?? { cycle, decision: verdict.decision, reason: "local", continue: cycle === 1 && checks.some((c) => !c.ok), prompt: verdict.nextPrompt };
         tracker.note({ kind: "step", message: `cycle ${cycle}: ${decision.decision}${res ? "" : " (platform without orchestration endpoints)"}` });
