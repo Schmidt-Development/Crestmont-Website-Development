@@ -133,10 +133,14 @@ async function main() {
               // requiring it there failed a correct admin screen, while a site header with no nav inside it stays a
               // real defect, which is how 404.html and the two booking pages were caught.
               const chrome = !!document.querySelector("header, footer, .site-header, .site-footer");
-              return { hasNav: !!root, visibleLinks: links.length, toggleVisible: toggles.length > 0, chrome };
+              // An element that clearly IS navigation but is not marked up as one: naming it turns "no nav landmark"
+              // into a fix the builder can make, instead of a verdict it can only guess at.
+              const likely = [...document.querySelectorAll("[class*=nav], [class*=menu], [class*=tabs]")]
+                .find((e) => vis(e) && e.querySelectorAll("a[href],button").length >= 2);
+              return { hasNav: !!root, visibleLinks: links.length, toggleVisible: toggles.length > 0, chrome, navLike: likely ? (likely.getAttribute("class") || likely.tagName.toLowerCase()) : null };
             });
             if (!nav.chrome && !nav.hasNav) warnings.push("navigation: no nav landmark, and no site header or footer either: treated as a private app screen, not a public page");
-            else if (!nav.hasNav) errors.push("navigation: the page has no nav landmark");
+            else if (!nav.hasNav) errors.push(`navigation: the page carries the site header or footer but has no nav landmark${nav.navLike ? `, though it has a "${nav.navLike}" element that looks like navigation: wrap it in <nav aria-label="..."> (or add role="navigation") so it is reachable` : ": a visitor who lands here cannot move around the site"}`);
             else if (nav.visibleLinks < 2) errors.push(`navigation: only ${nav.visibleLinks} navigation link(s) are visible at ${vp.width}px, so a desktop visitor cannot move around the site${nav.toggleVisible ? "; the mobile menu toggle is showing instead of the desktop navigation" : ""}`);
             else if (nav.toggleVisible) errors.push(`navigation: the mobile menu toggle is visible at ${vp.width}px alongside the desktop navigation; it should be hidden above the mobile breakpoint`);
           }
