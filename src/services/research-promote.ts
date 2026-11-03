@@ -142,6 +142,7 @@ export async function runAutoPromotion(db: Db, opts: RunOptions): Promise<Promot
   // decision, so it runs either way. Note what is NOT checked here: `settings.paused`. Pausing stops new research;
   // the backlog already on file still has to reach the CRM.
   if (opts.trigger === "scheduled" && !settings.auto_promote) {
+    // Reached only by the scheduled job, so there is no human action to attribute and nothing happened to audit.
     return finish(db, { id: runId, trigger: opts.trigger, startedAt, ...blank, remaining: await dueCount(db, now), stoppedReason: "disabled" }, opts.actorUserId ?? null);
   }
 
@@ -204,7 +205,7 @@ export async function runAutoPromotion(db: Db, opts: RunOptions): Promise<Promot
   const remaining = await dueCount(db, now);
   if (stoppedReason === "cap" && remaining === 0) stoppedReason = "drained";
   const result = await finish(db, { id: runId, trigger: opts.trigger, startedAt, ...counts, remaining, stoppedReason }, opts.actorUserId ?? null);
-  if (result.examined > 0) {
+  if (result.examined > 0 || opts.trigger === "owner") {
     await audit(db, {
       actorUserId: opts.actorUserId ?? null, action: "research.auto_promotion_run", subjectType: "research_promotion_run", subjectId: runId,
       details: { trigger: result.trigger, examined: result.examined, promoted: result.promoted, existingCrm: result.existingCrm, review: result.review, suppressed: result.suppressed, rejected: result.rejected, failed: result.failed, remaining: result.remaining, stoppedReason: result.stoppedReason },

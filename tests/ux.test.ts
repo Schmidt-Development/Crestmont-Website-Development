@@ -230,17 +230,24 @@ test("[CRM-001] UTM attribution end to end: landing URL → first-party cookie �
   const detail = await (await c.get(`/staff/crm/leads/${lead.id}`)).text();
   assert.match(detail, /<div data-attribution><dl class="dl"><dt>Campaign source<\/dt><dd>google<\/dd><dt>Medium<\/dt><dd>cpc<\/dd><dt>Campaign<\/dt><dd>fall-2026<\/dd>/);
   assert.match(detail, /<dt>Landing page<\/dt><dd>\/services<\/dd>/);
+  // The detailed attribution tables were removed from the sales dashboards by Founder request. Collection, storage
+  // and the backend report are untouched, so the coverage moves to the report itself rather than being dropped.
   const sales = await (await c.get("/staff/sales")).text();
-  assert.match(sales, /data-attribution-report/);
-  const section = sales.slice(sales.indexOf("data-attribution-report"));
-  assert.match(section, /<td>google<\/td><td class="num">1<\/td>/);
-  assert.match(section, /<td>newsletter<\/td><td class="num">1<\/td>/);
-  assert.match(section, /<span class="faint">\(none\)<\/span><\/td><td class="num">1<\/td>/, "untagged leads counted as (none)");
-  assert.match(section, /<td>google<\/td><td>cpc<\/td><td>fall-2026<\/td><td class="num">1<\/td>/);
-  // Sales reps only see attribution for their own leads.
-  const rep = await staffClient(app, "sales", "rep2@crestmont.test");
-  const repSales = await (await rep.c.get("/staff/sales")).text();
-  assert.doesNotMatch(repSales.slice(repSales.indexOf("data-attribution-report")), /google/);
+  assert.doesNotMatch(sales, /data-attribution-report/, "the detailed attribution tables are no longer on the sales dashboard");
+  const { attributionReport } = await import("../src/services/crm.ts");
+  const range = { from: "2000-01-01", to: "2100-01-01", fromIso: "2000-01-01T00:00:00.000Z", toIso: "2100-01-01T00:00:00.000Z" };
+  const ownerActor = { kind: "user" as const, userId: "u_owner", roles: [{ role: "owner" as const, organizationId: "org_crestmont" }], mfaVerified: true };
+  const report = await attributionReport(app.db, ownerActor, range);
+  const sources = report.source.map((r) => [r.value, Number(r.n)]);
+  assert.ok(sources.some(([v, n]) => v === "google" && n === 1), `google missing from ${JSON.stringify(sources)}`);
+  assert.ok(sources.some(([v, n]) => v === "newsletter" && n === 1), "newsletter counted");
+  assert.ok(sources.some(([v]) => v === null), "untagged leads are still counted, as a null source");
+  assert.ok(report.campaign.some((r) => r.value === "fall-2026"), "campaign breakdown still available");
+  assert.ok(report.combos.some((r) => r.source === "google" && r.medium === "cpc" && r.campaign === "fall-2026"), "the combined breakdown still available");
+  // The security property this test guarded stays guarded: a sales rep's report covers only their own leads.
+  const repActor = { kind: "user" as const, userId: "u_rep_without_leads", roles: [{ role: "sales" as const, organizationId: "org_crestmont" }], mfaVerified: true };
+  const repReport = await attributionReport(app.db, repActor, range);
+  assert.deepEqual(repReport.source.map((r) => r.value), [], "a rep who owns no leads sees no attribution at all");
 });
 
 // ───────────── PORTAL-005: general conversations ─────────────

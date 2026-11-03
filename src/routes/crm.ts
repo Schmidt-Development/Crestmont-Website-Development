@@ -249,6 +249,9 @@ ${dl([["Name", lead.contact_name], ["Email", lead.contact_email ? html`<a href="
   ["Source", label(lead.source)], ["Interest", lead.interest ? label(lead.interest) : "—"], ["Created", formatDateTime(lead.created_at)], ["Owner", lead.owner_name ?? "Unassigned"],
   ...(lead.lost_reason ? [["Closed reason", lead.lost_reason] as [string, string]] : [])])}
 ${rf ? researchCard(rf) : ""}
+${/* Campaign attribution is real marketing provenance for a web-form or quote-form lead, so it stays. For a research
+      lead it is self-referential (utm_source is always crestmont-research), which is the clutter that was asked to go. */ ""}
+${rf ? "" : attributionCard(lead)}
 ${rf
     // A research lead's `message` is the full evidence record. It is kept in the database untouched, but the sales
     // view gets the one-sentence version; the long form is one click away for anyone who wants it.

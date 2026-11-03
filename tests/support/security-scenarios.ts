@@ -426,6 +426,9 @@ export function auditScenarios(w: World): Scenario[] {
     // ── Lead research ──
     { key: "POST /staff/research/settings", fields: () => ({ paused: "1", reason: "Matrix pause (TEST DATA)", threshold: "60", max_batch: "100" }) },
     { key: "POST /staff/research/promote", fields: () => ({ prospect_id: w.ids.researchProspect! }), setup: async () => { w.ids.researchProspect = await insertResearchProspect(w, "+12025550143"); } },
+    // An Owner-triggered reconcile is a human action, so it records research.auto_promotion_run even when nothing was
+    // eligible to promote. (A scheduled no-op is deliberately not audited, so the log does not fill with empty rows.)
+    { key: "POST /staff/research/reconcile", fields: () => ({}) },
     { key: "POST /staff/research/dismiss", fields: () => ({ prospect_id: w.ids.researchProspect2!, reason: "Matrix dismissal (TEST DATA)" }), setup: async () => { w.ids.researchProspect2 = await insertResearchProspect(w, "+12025550144"); } },
     { key: "POST /staff/voice/caller-erasure", fields: () => ({ phone: "+15550100994", note: "Matrix erasure request by email (TEST DATA)" }) },
 
