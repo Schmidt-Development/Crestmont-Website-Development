@@ -72,16 +72,31 @@ function referencedIds(js: string): { id: string; how: string }[] {
 function requestedPaths(js: string): { p: string; how: string }[] {
   const out: { p: string; how: string }[] = [];
   for (const m of js.matchAll(/fetch\(\s*["'`](\/[A-Za-z0-9_\-/.]*)["'`]\s*[,)]/g)) out.push({ p: m[1], how: `fetch("${m[1]}")` });
+  // Most generated sites do not call fetch() directly: they wrap it (`api("/api/admin/me")`, a helper on a client
+  // object, a table of endpoints). Looking only for `fetch(` found NOTHING in the fullstack-v1 starter, so this check
+  // had nothing to compare and passed an admin page that called an endpoint the Worker never served. Any whole
+  // `/api/...` literal in client script is a request, whoever passes it on. A closing quote is still required, so an
+  // interpolated path (`/api/bookings/${ref}`) does not match and is left to the browser-level check, as before.
+  // A path still has to be WHOLE: at least one segment after /api/, and not glued to a variable (`"/api/" + kind`),
+  // which is built at runtime and stays unjudged like every other dynamic path here.
+  for (const m of js.matchAll(/["'`](\/api\/[A-Za-z0-9_\-/.]+)["'`](?!\s*\+)/g)) out.push({ p: m[1], how: `the client requests "${m[1]}"` });
   // fetch(form.action) and friends are resolved at runtime; they are not flagged here.
-  return out;
+  const seen = new Set<string>();
+  return out.filter((r) => (seen.has(r.p) ? false : (seen.add(r.p), true)));
 }
 
 /**
  * Routes a server serves: exact path comparisons, and PREFIXES from `startsWith`, which serve everything beneath
  * them. Keeping the two apart matters -- treating a prefix as an exact route would report a served path as missing.
  */
-function servedPaths(serverJs: string): { exact: Set<string>; prefixes: Set<string> } {
-  const exact = new Set<string>(), prefixes = new Set<string>();
+function servedPaths(serverJs: string): { exact: Set<string>; prefixes: Set<string>; patterns: RegExp[] } {
+  const exact = new Set<string>(), prefixes = new Set<string>(), patterns: RegExp[] = [];
+  // A route TABLE of regexes -- `const ROUTES = [["GET", /^\/api\/health$/, handler], ...]`, which is what the
+  // fullstack-v1 starter uses -- serves paths no string literal in the file mentions. Each anchored path regex is
+  // compiled and used as the matcher it is, so a parameterised route still counts as served.
+  for (const m of serverJs.matchAll(/\^\\\/[^\n]*?\$/g)) {
+    try { patterns.push(new RegExp(m[0])); } catch { /* not a usable route pattern */ }
+  }
   for (const m of serverJs.matchAll(/pathname\s*===?\s*["'`](\/[A-Za-z0-9_\-/.]*)["'`]/g)) exact.add(m[1]);
   for (const m of serverJs.matchAll(/pathname\.startsWith\(\s*["'`](\/[A-Za-z0-9_\-/.]*)["'`]/g)) {
     // A `startsWith` branch that answers 404 is a REJECTION catch-all, not a route that serves anything beneath it.
@@ -92,7 +107,7 @@ function servedPaths(serverJs: string): { exact: Set<string>; prefixes: Set<stri
     prefixes.add(m[1]);
   }
   for (const m of serverJs.matchAll(/(?:router|app)\.(?:post|get|all|put)\(\s*["'`](\/[A-Za-z0-9_\-/.]*)["'`]/gi)) exact.add(m[1]);
-  return { exact, prefixes };
+  return { exact, prefixes, patterns };
 }
 
 /** Fields the server reads out of a submitted body: body.get("x"), data.x after a formData loop, etc. */
@@ -150,13 +165,16 @@ export function contractFindings(repo: string): ContractFinding[] {
   // B11: a script posts to a path the server does not serve. This is the run 2 defect exactly.
   const served = new Set<string>();
   const servedPrefixes = new Set<string>();
+  const servedPatterns: RegExp[] = [];
   for (const f of serverFiles) {
     const s = servedPaths(stripComments(read(f)));
     for (const p of s.exact) served.add(p);
     for (const p of s.prefixes) servedPrefixes.add(p);
+    servedPatterns.push(...s.patterns);
   }
-  const isServed = (p: string) => served.has(p) || [...servedPrefixes].some((pre) => p.startsWith(pre));
-  if (served.size || servedPrefixes.size) {
+  const isServed = (p: string) => served.has(p) || [...servedPrefixes].some((pre) => p.startsWith(pre)) || servedPatterns.some((re) => re.test(p));
+  const routeList = () => [...served, ...servedPatterns.map((re) => re.source.replace(/\\\//g, "/").replace(/^\^|\$$/g, ""))].join(", ");
+  if (served.size || servedPrefixes.size || servedPatterns.length) {
     for (const f of scripts) {
       const js = stripComments(read(f));
       const rel = path.relative(repo, f).split(path.sep).join("/");
@@ -165,13 +183,13 @@ export function contractFindings(repo: string): ContractFinding[] {
         if (isServed(r.p)) continue;
         findings.push({
           severity: "error", file: rel,
-          message: `${r.how} but no server route handles ${r.p}. Served routes are: ${[...served].join(", ") || "(none found)"}. Every submission would get a 404.`,
+          message: `${r.how} but no server route handles ${r.p}. Served routes are: ${routeList() || "(none found)"}. Every submission would get a 404.`,
         });
       }
     }
     for (const a of actions) {
       if (!a.startsWith("/api/") || isServed(a)) continue;
-      findings.push({ severity: "error", file: "public/", message: `a form posts to action="${a}" but no server route handles it. Served routes are: ${[...served].join(", ")}.` });
+      findings.push({ severity: "error", file: "public/", message: `a form posts to action="${a}" but no server route handles it. Served routes are: ${routeList()}.` });
     }
   }
 

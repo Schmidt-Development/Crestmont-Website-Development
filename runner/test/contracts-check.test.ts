@@ -140,6 +140,36 @@ test("[CONTRACT] runtime-built ids, routes and fields are not guessed at", () =>
   assert.equal(contractCheck(project(dynamic))!.ok, true, "a false failure that blocks a correct build is worse than a miss");
 });
 
+// The fullstack-v1 starter -- the one every Business and Premium build uses -- serves its API from a TABLE of regex
+// routes and calls it through a wrapper, not fetch(). Neither was recognised, so the endpoint half of this check went
+// SILENT on exactly the projects that need it most: nothing was requested, nothing was served, nothing compared.
+test("[CONTRACT] a regex route table counts as serving its paths", () => {
+  const table = {
+    ...GOOD,
+    "src/worker.js": `const ROUTES = [
+      ["POST", /^\\/api\\/contact$/, (env, req) => handleContact(env, req)],
+      ["GET", /^\\/api\\/bookings\\/(BK-[A-Z0-9]{8})$/, (env, req) => getBooking(env, req)],
+    ];
+    export default { fetch: (request, env) => handle(request, env) };`,
+    "public/assets/contact.js": `const api = (p, o) => fetch(p, o);
+      api("/api/contact", { method: "POST", body: JSON.stringify({ name: "a", email: "b", message: "c" }) });`,
+  };
+  assert.equal(contractCheck(project(table))!.ok, true, "the route regex serves /api/contact, so the wrapped request is fine");
+});
+
+test("[CONTRACT] a wrapped request to a path NO route serves is still caught", () => {
+  const broken = {
+    ...GOOD,
+    "src/worker.js": `const ROUTES = [["POST", /^\\/api\\/contact$/, (env, req) => handleContact(env, req)]];
+    export default { fetch: (request, env) => handle(request, env) };`,
+    "public/assets/contact.js": `const api = (p, o) => fetch(p, o);
+      api("/api/quote", { method: "POST" });`,
+  };
+  const out = contractCheck(project(broken));
+  assert.equal(out!.ok, false, "/api/quote is served by no route and the call is wrapped, not a bare fetch()");
+  assert.match(contractFindings(project(broken)).map((f) => f.message).join(" "), /\/api\/quote/);
+});
+
 test("[CONTRACT] comments never produce phantom findings", () => {
   const commented = {
     ...GOOD,

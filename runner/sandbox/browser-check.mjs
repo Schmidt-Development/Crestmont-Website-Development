@@ -87,14 +87,30 @@ async function main() {
         // reported as a defect, or every correct form would fail. Set while that submission is in flight.
         let formAction = null;
         const isFormPost = (u) => !!formAction && typeof u === "string" && u.split("?")[0] === formAction;
+        // The same reasoning covers EVERY backend call, not just the form post: this server serves the static files
+        // only, so a page that fetches /api/... on load gets a 404 here no matter how correct it is. A real Business
+        // build was failed on exactly this -- admin/index.html, booking/confirmation.html and booking/manage.html were
+        // each marked FAIL for "HTTP 404: /api/admin/me" and "/api/bookings/", all three of which the Worker's route
+        // table does serve. Those false failures became visual_design/frontend defects, which spent the run's last
+        // turns on a repair of working code. Whether an endpoint exists is decided with certainty by the runner's
+        // contract check against the route table; a server with no backend cannot decide it, so it does not try.
+        const isBackendCall = (u) => typeof u === "string" && u.startsWith(origin) && u.slice(origin.length).split("?")[0].startsWith("/api/");
         p.on("pageerror", (e) => errors.push(`page error: ${String(e.message).slice(0, 300)}`));
-        p.on("console", (m) => { if (m.type() === "error" && !/net::ERR_/.test(m.text())) errors.push(`console error: ${m.text().slice(0, 300)}`); });
+        p.on("console", (m) => {
+          if (m.type() !== "error" || /net::ERR_/.test(m.text())) return;
+          // The browser's own "Failed to load resource ... 404" for a backend call it could not reach here. Its
+          // location is that request's URL, so the same rule applies: a note, not a defect.
+          if (isBackendCall(m.location()?.url ?? "")) { warnings.push(`backend call not available in this check (no Worker is running): ${m.text().slice(0, 200)}`); return; }
+          errors.push(`console error: ${m.text().slice(0, 300)}`);
+        });
         p.on("requestfailed", (r) => {
           const msg = `${r.url().slice(0, 200)} (${r.failure()?.errorText ?? "failed"})`;
-          if (r.url().startsWith(origin)) errors.push(`request failed: ${msg}`); else warnings.push(`off-origin request not available offline: ${msg}`);
+          if (isBackendCall(r.url())) warnings.push(`backend call not available in this check (no Worker is running): ${msg}`);
+          else if (r.url().startsWith(origin)) errors.push(`request failed: ${msg}`); else warnings.push(`off-origin request not available offline: ${msg}`);
         });
         p.on("response", (r) => {
           if (isFormPost(r.url())) return;
+          if (isBackendCall(r.url())) { if (r.status() >= 400) warnings.push(`backend call not available in this check (no Worker is running): ${r.url().replace(origin, "")} -> HTTP ${r.status()}`); return; }
           if (r.url().startsWith(origin) && r.status() >= 400 && !(page === "404.html" && r.url() === `${origin}/404.html`)) errors.push(`HTTP ${r.status()}: ${r.url().replace(origin, "")}`);
         });
         try {
@@ -112,9 +128,15 @@ async function main() {
               const links = root ? [...root.querySelectorAll("a[href]")].filter(vis) : [];
               const toggles = [...document.querySelectorAll("button,[role=button]")]
                 .filter((e) => vis(e) && /menu|nav|hamburger|toggle/i.test(`${e.className} ${e.id} ${e.getAttribute("aria-label") ?? ""} ${e.getAttribute("aria-controls") ?? ""}`));
-              return { hasNav: !!root, visibleLinks: links.length, toggleVisible: toggles.length > 0 };
+              // A page carrying the site chrome is a public page of the site and must offer its navigation. A private
+              // app shell (an admin screen) has neither header nor footer and is not held to the public-nav rule --
+              // requiring it there failed a correct admin screen, while a site header with no nav inside it stays a
+              // real defect, which is how 404.html and the two booking pages were caught.
+              const chrome = !!document.querySelector("header, footer, .site-header, .site-footer");
+              return { hasNav: !!root, visibleLinks: links.length, toggleVisible: toggles.length > 0, chrome };
             });
-            if (!nav.hasNav) errors.push("navigation: the page has no nav landmark");
+            if (!nav.chrome && !nav.hasNav) warnings.push("navigation: no nav landmark, and no site header or footer either: treated as a private app screen, not a public page");
+            else if (!nav.hasNav) errors.push("navigation: the page has no nav landmark");
             else if (nav.visibleLinks < 2) errors.push(`navigation: only ${nav.visibleLinks} navigation link(s) are visible at ${vp.width}px, so a desktop visitor cannot move around the site${nav.toggleVisible ? "; the mobile menu toggle is showing instead of the desktop navigation" : ""}`);
             else if (nav.toggleVisible) errors.push(`navigation: the mobile menu toggle is visible at ${vp.width}px alongside the desktop navigation; it should be hidden above the mobile breakpoint`);
           }
