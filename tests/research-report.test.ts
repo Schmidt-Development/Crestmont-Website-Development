@@ -290,3 +290,38 @@ test("[AIOPS-001] 'website opportunities' counts only the evidence-backed classe
   assert.match(text, /VERIFIED_OFFICIAL_WEBSITE 900/);
   assert.match(text, /WEBSITE_UNVERIFIED 500/);
 });
+
+test("[AIOPS-001] the deploy test's own runner is never read as a research worker", () => {
+  // Exactly what the first live report found on staging: one sample, from the deploy E2E's throwaway runner id.
+  const samples = [sample({ bucket: "2026-11-02T23:45", runner_id: "staging-e2e-mvzww7w0", queue_depth: 0 })];
+  const r = buildReport({
+    windowStart: "2026-11-02T23:45:00.000Z", windowEnd: "2026-11-03T23:45:00.000Z", now: "2026-11-02T23:52:00.000Z",
+    target: 25_000, samples, batches: [], prospects: { ...EMPTY_PROSPECTS, awaitingDecision: 3_501 }, promoted: 0, promotionBlocked: 0,
+  });
+  assert.equal(r.worker.onlyDeployTestRunners, true);
+  assert.match(r.target.limitingFactor, /no research worker/);
+  assert.match(r.target.limitingFactor, /staging deploy's end-to-end test/);
+  assert.match(r.target.nextChange, /install and start the worker on Node 1/);
+  const text = formatReport(r);
+  assert.match(text, /NOTE: every check-in is from the staging deploy's end-to-end test/);
+  // A window shorter than one bucket must not print "1 of 0 expected".
+  assert.doesNotMatch(text, /of 0 expected/);
+  assert.match(text, /uptime is not meaningful yet/);
+  // Real platform state is still reported truthfully alongside the caveat.
+  assert.match(text, /Prospects awaiting an Owner decision: 3501/);
+});
+
+test("[AIOPS-001] a real worker alongside the deploy test is not dismissed as a test", () => {
+  const samples = [
+    sample({ bucket: "2026-11-02T23:45", runner_id: "staging-e2e-abc", evaluated: 0 }),
+    sample({ bucket: "2026-11-02T23:45", runner_id: "research-node1", evaluated: 0 }),
+    sample({ bucket: "2026-11-03T00:00", runner_id: "research-node1", evaluated: 900, day: "2026-11-03" }),
+  ];
+  const r = buildReport({
+    windowStart: "2026-11-02T23:45:00.000Z", windowEnd: "2026-11-03T23:45:00.000Z", now: "2026-11-03T00:05:00.000Z",
+    target: 25_000, samples, batches: [], prospects: EMPTY_PROSPECTS, promoted: 0, promotionBlocked: 0,
+  });
+  assert.equal(r.worker.onlyDeployTestRunners, false);
+  assert.doesNotMatch(r.target.limitingFactor, /no research worker/);
+  assert.equal(r.funnel.businessesEvaluated, 900, "the real worker's progress across the day boundary still counts");
+});
