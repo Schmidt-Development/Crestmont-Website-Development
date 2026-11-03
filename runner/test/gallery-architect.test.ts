@@ -97,22 +97,34 @@ test("[GALLERY-ARCH] a text-only architect is sent no images and the prompt says
 });
 
 test("[GALLERY-ARCH] a reference whose image could not be retrieved is named as unseen, never quietly described", () => {
-  const block = galleryBlock([ref("dr_1", "construction", 1, "C:/tmp/a.png"), ref("dr_2", "luxury", 0, null)], true).join("\n");
-  assert.match(block, /Image 1: "construction reference dr_1"/);
-  assert.match(block, /COULD NOT BE RETRIEVED/);
-  assert.match(block, /luxury reference dr_2/);
-  // The written notes must survive into the prompt: they are all the model has for an unretrieved reference.
+  const block = galleryBlock([ref("dr_1", "construction", 1, "C:/tmp/a.png"), ref("dr_2", "luxury", 0, null)], ["dr_1"], true).join("\n");
+  assert.match(block, /Image 1: "construction reference dr_1"/, "only the attached reference is numbered");
+  assert.match(block, /NOT attached here/);
+  assert.match(block, /luxury reference dr_2.*image could not be retrieved/, "and it says WHY it is not being looked at");
+  // The written notes must survive into the prompt: they are all the model has for an unattached reference.
   assert.match(block, /full-bleed hero/);
   assert.match(block, /RIGHTS: inspiration only/, "and the rights restriction travels with them");
 });
 
+// Numbering must describe THIS message. A reference that exists on disk but did not fit the image budget is a
+// different case from one that could never be fetched, and calling it "Image 3" would point the model at an
+// image that is not there.
+test("[GALLERY-ARCH] a retrieved reference that was not attached is numbered nowhere and says so", () => {
+  const refs = [ref("dr_1", "construction", 1, "C:/tmp/a.png"), ref("dr_2", "construction", 1, "C:/tmp/b.png")];
+  const block = galleryBlock(refs, ["dr_1"], true).join("\n");
+  assert.match(block, /1 reference image\(s\) are ATTACHED/);
+  assert.match(block, /Image 1: "construction reference dr_1"/);
+  assert.doesNotMatch(block, /Image 2:/, "the unattached reference is never given an image number");
+  assert.match(block, /construction reference dr_2.*not attached to this message/);
+});
+
 test("[GALLERY-ARCH] the three-concept instruction and the no-copy rule are in the architect's prompt", () => {
-  const p = architectPrompt(input([ref("dr_1", "construction", 1, "C:/tmp/a.png")]), true);
+  const p = architectPrompt(input([ref("dr_1", "construction", 1, "C:/tmp/a.png")]), ["dr_1"]);
   assert.match(p, /TWO OR THREE separate design concepts/, "the templates are not treated as one layout");
   assert.match(p, /Never merge three unrelated palettes/);
   assert.match(p, /real hex values/, "the design spec must be implementable, not adjectives");
   assert.match(p, /builder model CANNOT see these images/, "the architect knows it is the only one that can look");
-  assert.doesNotMatch(architectPrompt(input([]), true), /DESIGN REFERENCES/, "no gallery, no claim of one");
+  assert.doesNotMatch(architectPrompt(input([]), []), /DESIGN REFERENCES/, "no gallery, no claim of one");
 });
 
 test("[GALLERY-ARCH] a planted symbolic link is never read as a reference image", () => {

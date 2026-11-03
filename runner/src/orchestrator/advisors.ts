@@ -44,10 +44,19 @@ export class AdvisorUnavailableError extends Error {
  * that it is not looking at those: a specification that pretends otherwise is exactly how a build comes to claim
  * references it never saw.
  */
-export function galleryBlock(refs: GalleryReferenceInput[], visionAvailable: boolean): string[] {
+export function galleryBlock(
+  refs: GalleryReferenceInput[],
+  attachedIds: readonly string[] = [],
+  /** Whether the model can see images AT ALL. Distinct from attachment: a vision model may still be sent none. */
+  visionCapable = attachedIds.length > 0,
+): string[] {
   if (!refs.length) return [];
-  const withImage = refs.filter((r) => r.path);
-  const withoutImage = refs.filter((r) => !r.path);
+  // "Image 3" must mean the third image in THIS message. Only the references actually attached are numbered;
+  // anything else is described in words, with the reason it is not being looked at.
+  const attached = attachedIds.map((id) => refs.find((r) => r.id === id)).filter((r): r is GalleryReferenceInput => !!r);
+  const withImage = attached;
+  const withoutImage = refs.filter((r) => !attached.includes(r));
+  const visionAvailable = attached.length > 0;
   const describe = (r: GalleryReferenceInput, i: number | null) => {
     const n = [r.notes.layout && `layout: ${r.notes.layout}`, r.notes.typography && `typography: ${r.notes.typography}`,
       r.notes.color && `colour: ${r.notes.color}`, r.notes.animation && `animation: ${r.notes.animation}`,
@@ -71,14 +80,19 @@ export function galleryBlock(refs: GalleryReferenceInput[], visionAvailable: boo
       "expensive rather than templated.",
       "Put those findings in designSpec as implementable decisions — real hex values, a real type scale, real",
       "spacing units — not adjectives. The builder model CANNOT see these images and will have only your words.");
-  } else if (withImage.length) {
-    lines.push("The reference images were downloaded, but THIS MODEL CANNOT SEE IMAGES. Do not describe them as if",
+  } else if (!visionCapable) {
+    // A text-only architect. The references were still chosen and may even be on disk, but nothing was attached
+    // and nothing will be looked at, so the model is told that in those words rather than left to assume.
+    lines.push("The reference images were retrieved, but THIS MODEL CANNOT SEE IMAGES. Do not describe them as if",
       "you had. Work from the written notes below, and say in designSpec that the visual references were not",
-      "interpreted:", ...withImage.map((r) => describe(r, null)));
+      "interpreted:", ...refs.map((r) => describe(r, null)));
   }
   if (withoutImage.length) {
-    lines.push("", "Selected, but their images COULD NOT BE RETRIEVED. You are not looking at these:",
-      ...withoutImage.map((r) => describe(r, null)));
+    // Two different reasons, and the model is told which: an image that could not be fetched at all, and one that
+    // exists but did not fit this message. Either way it is not being looked at, and must not be written about as
+    // though it were.
+    lines.push("", "Also selected, but NOT attached here — you are not looking at these; use their notes only:",
+      ...withoutImage.map((r) => `${describe(r, null)} (${r.path ? "not attached to this message" : "image could not be retrieved"})`));
   }
   lines.push("",
     "RIGHTS: inspiration only. Never reproduce a reference image, or any part of one, as the customer's hero",
@@ -86,7 +100,7 @@ export function galleryBlock(refs: GalleryReferenceInput[], visionAvailable: boo
   return lines;
 }
 
-export function architectPrompt(input: ArchitectInput, visionAvailable = false): string {
+export function architectPrompt(input: ArchitectInput, attachedIds: readonly string[] = [], visionCapable = attachedIds.length > 0): string {
   const data = JSON.stringify({ brief: input.brief, referenceUrls: input.referenceUrls, referenceImages: input.referenceImages.map((i) => ({ fileId: i.fileId, name: i.name, folder: i.folder })) }, null, 2);
   const f = fenceFor(data);
   return [
@@ -104,7 +118,7 @@ export function architectPrompt(input: ArchitectInput, visionAvailable = false):
          "They describe practices written for Claude Code: apply the design and quality guidance and ignore any",
          "tool names you do not have."]
       : []),
-    ...galleryBlock(input.galleryReferences ?? [], visionAvailable),
+    ...galleryBlock(input.galleryReferences ?? [], attachedIds, visionCapable),
     "", "Customer intake (data):", f, data, f,
   ].join("\n");
 }
@@ -230,16 +244,26 @@ export class LocalModelAdvisor implements Advisor {
 
   architect(input: ArchitectInput): Promise<unknown> {
     const vision = this.o.model.vision;
-    const gallery = (input.galleryReferences ?? []).filter((g) => g.path);
-    const sent = vision ? gallery.map((g) => ({ referenceId: g.id, path: g.path as string })) : [];
-    this.lastArchitectImages = sent;
+    // Every image costs context, and Model A's window also has to hold the brief and the specification it is about
+    // to write. Six total, the gallery's own selection size: the customer's own material keeps two of those places
+    // when they have any, because their logo and photographs decide the brand where the gallery decides the craft.
+    const MAX_IMAGES = 6;
+    const uploads = vision ? input.referenceImages.filter((r) => safeImageFile(r.path)) : [];
+    const gallery = vision ? (input.galleryReferences ?? []).filter((g) => g.path && safeImageFile(g.path)) : [];
+    const uploadSlots = Math.min(uploads.length, uploads.length ? 2 : 0);
+    const chosen = gallery.slice(0, MAX_IMAGES - uploadSlots);
+    // Recorded from what SURVIVED the size and symlink checks and the cap, never from what was requested: a
+    // reference dropped here was not seen, and reporting it as seen would be the exact claim this column exists
+    // to make falsifiable.
+    this.lastArchitectImages = chosen.map((g) => ({ referenceId: g.id, path: g.path as string }));
     const images = [
-      ...sent.map((s, i) => ({ path: s.path, label: `gallery reference image ${i + 1}` })),
-      // The customer's own uploads come after the gallery, clearly labelled, so the model can tell the Founder's
-      // quality standard from the customer's material -- they are used for different purposes.
-      ...(vision ? input.referenceImages.map((r) => ({ path: r.path, label: `customer upload ${r.name}` })) : []),
-    ].filter((i) => safeImageFile(i.path)).slice(0, 8);
-    return this.ask("architect", `${architectPrompt(input, vision && gallery.length > 0)}\n\nThe intake is also in BRIEF.json; the customer's files are listed in customer-files/INDEX.json (read them with read_file where they are text).${images.length ? ` ${images.length} image(s) are attached to this message.` : vision ? "" : " This model does not see images: judge only from the written notes."} Answer with the JSON object only, matching this JSON Schema:\n${JSON.stringify(MASTER_SPEC_JSON_SCHEMA)}`, images);
+      ...chosen.map((g, i) => ({ path: g.path as string, label: `gallery reference image ${i + 1}` })),
+      // The customer's own uploads come after the gallery and are labelled as theirs, so the model can tell the
+      // Founder's quality standard from the customer's material: they are used for different purposes.
+      ...uploads.slice(0, uploadSlots).map((r) => ({ path: r.path, label: `customer upload ${r.name}` })),
+    ];
+    const attached = chosen.length > 0;
+    return this.ask("architect", `${architectPrompt(input, this.lastArchitectImages.map((i) => i.referenceId), vision)}\n\nThe intake is also in BRIEF.json; the customer's files are listed in customer-files/INDEX.json (read them with read_file where they are text).${images.length ? ` ${images.length} image(s) are attached to this message.` : vision ? "" : " This model does not see images: judge only from the written notes."} Answer with the JSON object only, matching this JSON Schema:\n${JSON.stringify(MASTER_SPEC_JSON_SCHEMA)}`, images);
   }
 
   async review(spec: MasterSpec | null, evidence: CycleEvidence, cycle: number): Promise<ReviewVerdict> {
