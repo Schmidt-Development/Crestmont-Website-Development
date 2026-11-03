@@ -110,7 +110,9 @@ for (const f of FOUNDATION) {
   const r = await runChild(["--no-warnings", "--test", "--test-reporter=tap", f], 600_000);
   const got = parseTap(r.stdout ?? "");
   tests.push(...got);
-  const rel = path.relative(ROOT, f);
+  // Always forward slashes: a finding is read by a person and compared between runs, so its shape must not depend
+  // on whether the gate ran on Windows or Linux.
+  const rel = path.relative(ROOT, f).split(path.sep).join("/");
   // Every test the protected file declares must report a result (passed, failed or skipped): a website cannot make
   // part of a protected suite silently not run (for example by exiting the process early).
   const declared = (readFileSync(f, "utf8").match(/^test\(/gm) ?? []).length;

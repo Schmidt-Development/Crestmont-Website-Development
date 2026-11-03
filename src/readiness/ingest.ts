@@ -8,6 +8,8 @@ import { hmacSha256Hex, sha256Hex, timingSafeEqualHex } from "../lib/crypto.ts";
 import { parse, v, ValidationError, type Check } from "../lib/validate.ts";
 import { REQUIREMENTS, type RequirementDef } from "../../requirements/inventory.ts";
 import { IMPLEMENTATION, type ImplementationRecord } from "../../requirements/status.ts";
+import { acceptanceFingerprint } from "../../requirements/acceptance.ts";
+import { syncDerivedStates } from "./sync.ts";
 
 export const INVENTORY_VERSION = "2026-10-directive-v1";
 
@@ -87,6 +89,11 @@ export async function ingestEvidence(db: Db, rawBody: string): Promise<IngestRes
       await recordIngestion(db, doc.source, attemptAt, null);
       return { status: "duplicate", runId: doc.runId, accepted: 0, unknownRequirements: [] };
     }
+    // The deployed inventory and implementation records are the source of truth for which requirements exist and what
+    // is implemented. They used to reach D1 only through the daily `requirements` cron, so a deploy's evidence was judged
+    // against yesterday's inventory: new requirement ids were dropped as unknown and newly implemented work stayed
+    // "in progress" for up to a day. Bring D1 up to date first (no-op when it already matches).
+    await syncRequirementsIfStale(db);
     const known = new Set((await db.prepare(`SELECT id FROM requirements`).all<{ id: string }>()).results.map((r) => r.id));
     const unknown = [...new Set(doc.results.map((r) => r.requirementId).filter((id) => !known.has(id)))];
     const accepted = doc.results.filter((r) => known.has(r.requirementId));
@@ -118,6 +125,9 @@ export async function ingestEvidence(db: Db, rawBody: string): Promise<IngestRes
     // Optional platform services (FILE-001): bound → healthy; skipped (service not enabled) → "unavailable", never failing.
     const storage = doc.results.find((r) => r.requirementId === "FILE-001" && r.testName.startsWith("file storage (R2)"));
     if (storage) await recordIngestion(db, `file-storage:${doc.environment}`, attemptAt, storage.outcome === "passed" ? null : (storage.message ?? "not bound"), storage.outcome === "passed");
+    // READY-013: new evidence can change a verdict, so readiness is recalculated now rather than at the next
+    // daily cron. Idempotent, and a failure here must not lose the evidence that was just stored.
+    await syncDerivedStates(db, `evidence:${doc.source}`).catch(() => {});
     return { status: "ingested", runId: doc.runId, accepted: accepted.length, unknownRequirements: unknown };
   } catch (err) {
     await recordIngestion(db, doc.source, attemptAt, (err as Error).message);
@@ -160,25 +170,55 @@ async function recordIngestion(db: Db, source: string, at: string, error: string
   ).bind(source, success ? at : null, at, error).run();
 }
 
+/** The implementation_location value syncRequirements stores for a record. */
+function storedLocation(rec: ImplementationRecord): string {
+  return rec.missing ? `${rec.location} (missing: ${rec.missing})` : rec.location;
+}
+
+/**
+ * Runs syncRequirements only when D1 differs from the deployed inventory/implementation records (a missing requirement,
+ * a changed title/category/inventory version, or a changed implementation status, location or owner). One SELECT when
+ * nothing changed. Returns whether a sync ran.
+ */
+export async function syncRequirementsIfStale(db: Db, defs: RequirementDef[] = REQUIREMENTS,
+  records: Record<string, ImplementationRecord> = IMPLEMENTATION): Promise<boolean> {
+  const rows = (await db.prepare(
+    `SELECT id, title, category, inventory_version, acceptance_fingerprint, implementation_location, owner FROM requirements`,
+  ).all<{ id: string; title: string; category: string; inventory_version: string | null; acceptance_fingerprint: string | null; implementation_location: string | null; owner: string | null }>()).results;
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const stale = defs.some((d) => {
+    const row = byId.get(d.id);
+    if (!row || row.title !== d.title || row.category !== d.category || row.inventory_version !== INVENTORY_VERSION) return true;
+    // READY-013: a changed acceptance rule must reach D1 too, so a requirement's gate never lags the deployed code.
+    if (row.acceptance_fingerprint !== acceptanceFingerprint(d.id)) return true;
+    const rec = records[d.id];
+    return !!rec && (row.implementation_location !== storedLocation(rec) || row.owner !== rec.owner);
+  });
+  if (stale) await syncRequirements(db, defs, records);
+  return stale;
+}
+
 /** Upserts the approved inventory. Never deletes: removed items must be dispositioned instead. */
 export async function syncRequirements(db: Db, defs: RequirementDef[] = REQUIREMENTS,
   records: Record<string, ImplementationRecord> = IMPLEMENTATION): Promise<{ upserted: number }> {
   const at = nowIso();
   const stmts = defs.map((r) => db.prepare(
-    `INSERT INTO requirements (id, subsystem, section, title, priority, category, requires_founder_approval, inventory_version, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?)
+    `INSERT INTO requirements (id, subsystem, section, title, priority, category, requires_founder_approval, inventory_version, acceptance_fingerprint, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(id) DO UPDATE SET subsystem=excluded.subsystem, section=excluded.section, title=excluded.title,
        priority=excluded.priority, category=excluded.category, requires_founder_approval=excluded.requires_founder_approval,
-       inventory_version=excluded.inventory_version, updated_at=excluded.updated_at`,
-  ).bind(r.id, r.subsystem, r.section, r.title, r.priority, r.category, r.category === "founder" ? 1 : 0, INVENTORY_VERSION, at));
+       inventory_version=excluded.inventory_version, acceptance_fingerprint=excluded.acceptance_fingerprint, updated_at=excluded.updated_at`,
+  ).bind(r.id, r.subsystem, r.section, r.title, r.priority, r.category, r.category === "founder" ? 1 : 0, INVENTORY_VERSION, acceptanceFingerprint(r.id), at));
   await db.batch(stmts);
   const deps = defs.flatMap((r) => (r.dependsOn ?? []).map((d) => db.prepare(
     `INSERT INTO requirement_dependencies (requirement_id, depends_on_id) VALUES (?, ?) ON CONFLICT DO NOTHING`).bind(r.id, d)));
   if (deps.length) await db.batch(deps);
   const known = new Set(defs.map((d) => d.id));
+  // READY-013: these records are documentation now ("where is this implemented", "who owns it"). They no longer
+  // set implementation_status: status is derived from evidence in src/readiness/derive.ts.
   const impl = Object.entries(records).filter(([id]) => known.has(id)).map(([id, rec]) => db.prepare(
-    `UPDATE requirements SET implementation_status = ?, implementation_location = ?, owner = ?, updated_at = ? WHERE id = ?`,
-  ).bind(rec.status, rec.missing ? `${rec.location} (missing: ${rec.missing})` : rec.location, rec.owner, at, id));
+    `UPDATE requirements SET implementation_location = ?, owner = ?, updated_at = ? WHERE id = ?`,
+  ).bind(storedLocation(rec), rec.owner, at, id));
   if (impl.length) await db.batch(impl);
   return { upserted: defs.length };
 }

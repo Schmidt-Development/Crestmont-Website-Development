@@ -25,7 +25,10 @@ test("[READY-001] traceability matrix is generated from stored requirement recor
   const report = await buildReport(await loadReadinessInput(db));
   assert.equal(report.requirements.length, REQUIREMENTS.length);
   assert.ok(report.requirements.every((r) => ENVS_NONE(r.verification)), "no verification without evidence");
-  assert.equal(report.requirements.find((r) => r.id === "CRM-003")!.state, "test_pending");
+  // READY-013: with no evidence at all nothing is implemented. "test_pending" used to mean "a status file said
+  // implemented, but no test has run" — exactly the claim the derivation refuses to make.
+  assert.equal(report.requirements.find((r) => r.id === "CRM-003")!.state, "not_started");
+  assert.equal(report.requirements.find((r) => r.id === "CRM-003")!.autoState, "NOT_IMPLEMENTED");
   assert.equal(report.scores.denominator.total, REQUIREMENTS.length);
 });
 
@@ -44,24 +47,35 @@ test("[READY-004] signed CI evidence is ingested idempotently and unknown ids ar
   assert.equal((db.raw.prepare(`SELECT COUNT(*) n FROM test_evidence`).get() as { n: number }).n, 1);
 });
 
-test("[READY-002] implementation and verification are tracked separately and latest failure wins", async () => {
+test("[READY-002] [READY-013] implementation is derived from evidence, bounded by acceptance, and a later failure wins", async () => {
   const db = await seeded();
-  // Pin the records this test reasons about so it does not depend on other areas' live status files.
-  db.raw.exec(`UPDATE requirements SET implementation_status='implemented' WHERE id IN ('DATA-001','SALES-001');
-               UPDATE requirements SET implementation_status='in_progress' WHERE id='CRM-001'`);
-  await ingestEvidence(db, evidence("r1", [{ requirementId: "DATA-001", outcome: "passed" }, { requirementId: "CRM-001", outcome: "passed" }]));
+  // No status is pinned: D1's implementation_status is no longer an input. Everything below follows from the
+  // evidence and from requirements/acceptance.ts.
+  await ingestEvidence(db, evidence("r1", [{ requirementId: "DATA-001", outcome: "passed" }, { requirementId: "PAY-001", outcome: "passed" }]));
   let report = await buildReport(await loadReadinessInput(db));
   const get = (id: string) => report.requirements.find((r) => r.id === id)!;
+
+  // An engineering requirement is proven by its tagged tests passing at the current commit.
+  assert.equal(get("DATA-001").implementation, "implemented");
+  assert.equal(get("DATA-001").autoState, "MERGED");
   assert.equal(get("DATA-001").state, "verified_in_development");
-  assert.equal(get("DATA-001").verification.staging, "none");
-  assert.equal(get("SALES-001").state, "test_pending");
-  // Passing tests on a partially built requirement do not promote it to implemented.
-  assert.equal(get("CRM-001").implementation, "in_progress");
-  assert.equal(get("CRM-001").state, "in_progress");
-  assert.equal(get("CRM-001").verification.development, "passed");
+  assert.equal(get("DATA-001").verification.staging, "none", "CI never implies anything about staging");
+
+  // PAY-001's acceptance demands a live Stripe run on staging, so CI alone does not complete it.
+  assert.equal(get("PAY-001").autoState, "MERGED", "the code is proven and merged");
+  assert.equal(get("PAY-001").autoComplete, false);
+  assert.equal(get("PAY-001").implementation, "in_progress", "a passing unit test never certifies a live integration");
+  assert.match(get("PAY-001").autoDetail, /Still needs passing staging_e2e evidence/);
+
+  // A requirement nothing has tested is not started, whatever any declaration might once have said.
+  assert.equal(get("SALES-001").implementation, "not_started");
+
+  // A later failing run at the same commit wins and downgrades the requirement.
   await ingestEvidence(db, evidence("r2", [{ requirementId: "DATA-001", outcome: "failed" }], { finishedAt: "2026-10-26T11:00:00Z" }));
   report = await buildReport(await loadReadinessInput(db));
   assert.equal(get("DATA-001").state, "test_failed");
+  assert.equal(get("DATA-001").autoState, "REGRESSED");
+  assert.equal(get("DATA-001").implementation, "in_progress");
 });
 
 test("[READY-003] blocked requirements stay in the denominator and dimensions are separate", async () => {
@@ -127,4 +141,32 @@ test("[READY-007] Gate B fails when any suite for the latest commit failed, even
   const b = report.gates.find((g) => g.id === "B")!;
   assert.notEqual(b.status, "pass");
   assert.match(b.currentEvidence, /2 run\(s\) @ abc1234 \(local runs only — not GitHub Actions\): 1 passed, 1 failed/);
+});
+
+test("[READY-004] [READY-013] evidence ingest registers newly added requirements and recalculates their state (no 24h wait, no status file)", async () => {
+  const { syncRequirementsIfStale } = await import("../src/readiness/ingest.ts");
+  const db = await seeded();
+  assert.equal(await syncRequirementsIfStale(db), false, "nothing to do when D1 matches the deployed registry");
+
+  // D1 as a previous deploy left it: a requirement the deployed code now declares is not in the database yet.
+  // Pick one whose acceptance is CI alone, so passing tests are the whole proof.
+  const { ACCEPTANCE } = await import("../requirements/acceptance.ts");
+  const missing = REQUIREMENTS.filter((r) => ACCEPTANCE[r.id].completeAt === "IMPLEMENTED" && !ACCEPTANCE[r.id].external).at(-1)!.id;
+  db.raw.prepare(`DELETE FROM requirements WHERE id = ?`).run(missing);
+
+  const r = await ingestEvidence(db, evidence("gh-sync-1", [{ requirementId: missing, outcome: "passed" }]));
+  assert.deepEqual([r.status, r.accepted, r.unknownRequirements], ["ingested", 1, []], "the new requirement's evidence is kept, not dropped as unknown");
+
+  // It appears on the dashboard with a derived state, without anyone editing requirements/status/*.ts.
+  const report = await buildReport(await loadReadinessInput(db));
+  const row = report.requirements.find((x) => x.id === missing)!;
+  assert.equal(row.autoState, "MERGED");
+  assert.equal(row.implementation, "implemented");
+
+  // And the derivation was persisted by the ingest itself, with an audit trail.
+  const state = db.raw.prepare(`SELECT state FROM requirement_state WHERE requirement_id = ?`).get(missing) as { state: string } | undefined;
+  assert.equal(state?.state, "MERGED", "the ingest recalculated and stored the state");
+  const hist = db.raw.prepare(`SELECT from_state, to_state FROM requirement_state_history WHERE requirement_id = ?`).all(missing) as { from_state: string | null; to_state: string }[];
+  assert.deepEqual(hist.map((h) => [h.from_state, h.to_state]), [[null, "MERGED"]], "the transition is recorded with where it came from");
+  assert.equal(await syncRequirementsIfStale(db), false);
 });

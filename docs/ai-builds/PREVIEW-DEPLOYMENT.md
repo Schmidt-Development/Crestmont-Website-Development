@@ -128,6 +128,10 @@ Access remains possible later on top of the gate (defence in depth), but it is n
    PREVIEW_DELETE=cloudflare-api
    ```
 
+   On Windows, keep the `npx --yes wrangler@<exact version>` form above. The runner starts programs without a shell,
+   and a bare `wrangler` is a `.cmd` shim that cannot be started that way (`spawn wrangler ENOENT`); `npx` is run
+   through its CLI script with node, so the pinned form works on both platforms.
+
    `PREVIEW_DELETE=cloudflare-api` uses the runner's built-in call to Cloudflare's documented
    `DELETE /accounts/{account_id}/workers/scripts/{script_name}` (no `force`; a Worker that no longer exists counts
    as deleted). `PREVIEW_DELETE_COMMAND='npx --yes wrangler@<exact version> delete --name "$CRESTMONT_PREVIEW_NAME" --force'`

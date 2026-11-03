@@ -148,6 +148,7 @@ export class JobSandbox {
       "--workdir", CONTAINER_REPO,
       "--label", "crestmont.role=build-sandbox",
       "--label", `crestmont.job=${this.jobId}`,
+      "--label", `crestmont.runner=${this.cfg.runnerId}`,
       "--env", `HOME=${CONTAINER_HOME}`,
       "--env", "CI=1",
       "--env", `NPM_CONFIG_CACHE=${CONTAINER_HOME}/.npm`,
@@ -276,6 +277,38 @@ export class JobSandbox {
 
   async close(): Promise<void> {
     await this.kill();
+  }
+
+  /**
+   * Remove build sandboxes this runner left behind, before any slot claims a job.
+   *
+   * A sandbox is started detached (`sleep infinity`) and removed when its job finishes. If the runner process dies
+   * first -- a crash, a `docker compose down` of the runner alone, a host restart -- those containers keep running
+   * and keep their CPU and memory caps. Matching on `crestmont.runner=<this runner's id>` means a container
+   * belonging to another runner sharing the Docker host is never removed; ones from a release that predates the
+   * label are reported, not removed, because the runner cannot tell whose they are.
+   */
+  static async reapOrphans(cfg: JobSandboxConfig, exec: DockerExecutor, log: Logger = silentLogger): Promise<{ removed: string[]; unlabelled: string[]; errors: string[] }> {
+    const removed: string[] = [], unlabelled: string[] = [], errors: string[] = [];
+    // Docker's --format separates the two fields with a tab; the regex splits below keep that tab and the line
+    // break out of string literals, where a stray real newline is a syntax error and a real tab is easy to lose.
+    const list = await exec(["ps", "-a", "--filter", "label=crestmont.role=build-sandbox", "--format", `{{.Names}}\t{{.Label ${JSON.stringify("crestmont.runner")}}}`], { timeoutMs: 30_000 });
+    if (list.code !== 0) {
+      errors.push(`could not list build sandboxes (exit ${list.code}): ${(list.stderr || list.stdout).slice(0, 200)}`);
+      return { removed, unlabelled, errors };
+    }
+    for (const line of list.stdout.split(/\r?\n/)) {
+      const [name, owner] = line.split(/\t/).map((s) => s?.trim() ?? "");
+      if (!name) continue;
+      if (owner !== cfg.runnerId) { unlabelled.push(owner ? `${name} (runner ${owner})` : name); continue; }
+      const r = await exec(["rm", "-f", name], { timeoutMs: 60_000 });
+      if (r.code === 0) removed.push(name);
+      else errors.push(`could not remove ${name} (exit ${r.code}): ${(r.stderr || r.stdout).slice(0, 200)}`);
+    }
+    if (removed.length) log.warn("removed build sandboxes left by a previous run of this runner", { containers: removed });
+    if (unlabelled.length) log.info("build sandboxes belonging to another runner were left alone", { containers: unlabelled });
+    for (const e of errors) log.warn("sandbox cleanup problem", { error: e });
+    return { removed, unlabelled, errors };
   }
 
   /** Readiness: docker reachable and the sandbox image present. */

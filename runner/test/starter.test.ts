@@ -10,7 +10,8 @@ import { loadManifest, preflight, provisionSkills } from "../src/skills.ts";
 import { runLoop } from "../src/main.ts";
 import { ControlPlaneClient } from "../src/control-plane.ts";
 import { silentLogger } from "../src/log.ts";
-import { RUNNER_DIR, tmp, makeSkillsDir, makeConfig, startFakeControlPlane, makeJob, SECRET, testManifest, fakeSdk, happyAgent, SDK_OPT_IN } from "./helpers.ts";
+import { RUNNER_DIR, tmp, makeSkillsDir, makeConfig, startFakeControlPlane, makeJob, SECRET, testManifest, fakeSdk, happyAgent, SDK_OPT_IN, readText } from "./helpers.ts";
+import { pathToFileURL } from "node:url";
 
 const STARTER = path.join(RUNNER_DIR, "starters", "brochure-v1");
 
@@ -25,7 +26,7 @@ function check(root: string, ...args: string[]): { code: number; out: string } {
 
 test("[AIB-RUNNER] starter.json page limits and check profiles match the catalog PACKAGES", () => {
   const spec = loadStarter(starterDir(path.join(RUNNER_DIR, "starters"), { name: "brochure", version: "1" }));
-  const profiles = JSON.parse(readFileSync(path.join(STARTER, "scripts", "check-profiles.json"), "utf8"));
+  const profiles = JSON.parse(readText(path.join(STARTER, "scripts", "check-profiles.json")));
   for (const id of ["starter", "business", "premium"] as const) {
     assert.equal(spec.packages[id].maxPages, PACKAGES[id].pageLimit, id);
     assert.equal(profiles[id].maxPages, PACKAGES[id].pageLimit, id);
@@ -43,7 +44,7 @@ test("[AIB-RUNNER] starter check passes structurally, fails while placeholders r
   const site = tmp();
   cpSync(STARTER, site, { recursive: true });
   for (let i = 1; i <= 2; i++) {
-    const html = readFileSync(path.join(site, "public", "about.html"), "utf8").replace(/About —/, `Extra ${i} —`);
+    const html = readText(path.join(site, "public", "about.html")).replace(/About —/, `Extra ${i} —`);
     writeFileSync(path.join(site, "public", `extra${i}.html`), html);
   }
   assert.match(check(site, "--allow-placeholders", "--package", "starter").out, /6 pages exceed the starter package limit of 5/);
@@ -56,7 +57,10 @@ test("[AIB-RUNNER] starter check catches broken links, missing alt, unlabeled in
   const site = tmp();
   cpSync(STARTER, site, { recursive: true });
   const f = path.join(site, "public", "services.html");
-  writeFileSync(f, readFileSync(f, "utf8")
+  // The planted faults go in by replacing a literal that spans a line break, so this read must be normalized too:
+  // on a CRLF checkout the replace matched nothing, the faults were never planted, and the checker correctly
+  // reported "0 error(s)" -- which looked exactly like the detector failing.
+  writeFileSync(f, readText(f)
     .replace("</ul>\n      </div>", '</ul><img src="assets/img/x.png"><a href="missing.html">Missing</a><a href="contact.html#nope">Bad anchor</a><input name="q"><div>\n      </div>'));
   const out = check(site, "--allow-placeholders").out;
   assert.match(out, /broken internal reference "missing\.html"/);
@@ -68,7 +72,8 @@ test("[AIB-RUNNER] starter check catches broken links, missing alt, unlabeled in
 });
 
 test("[AIB-RUNNER] contact endpoint stub is clearly unconfigured: validates, never claims a send", async () => {
-  const mod = await import(path.join(STARTER, "src", "worker.js")) as { default: { fetch(r: Request, env: Record<string, unknown>): Promise<Response> } };
+  // An absolute path is not a valid ESM specifier on Windows ("Received protocol 'c:'"): it has to be a file URL.
+  const mod = await import(pathToFileURL(path.join(STARTER, "src", "worker.js")).href) as { default: { fetch(r: Request, env: Record<string, unknown>): Promise<Response> } };
   const env = { CONTACT_MAIL_PROVIDER: "", ASSETS: { fetch: async () => new Response("asset") } };
   const form = (fields: Record<string, string>) => { const f = new FormData(); for (const [k, v] of Object.entries(fields)) f.set(k, v); return f; };
   const post = (fields: Record<string, string>, e: Record<string, unknown> = env) => mod.default.fetch(new Request("https://site.test/api/contact", { method: "POST", body: form(fields) }), e);
@@ -83,7 +88,7 @@ test("[AIB-RUNNER] contact endpoint stub is clearly unconfigured: validates, nev
   assert.equal(spam.status, 200);
   assert.equal((await mod.default.fetch(new Request("https://site.test/api/contact"), env)).status, 405);
   assert.equal(await (await mod.default.fetch(new Request("https://site.test/about.html"), env)).text(), "asset");
-  assert.match(readFileSync(path.join(STARTER, "src", "worker.js"), "utf8"), /CONTACT FORM: UNCONFIGURED/);
+  assert.match(readText(path.join(STARTER, "src", "worker.js")), /CONTACT FORM: UNCONFIGURED/);
 });
 
 test("[AIB-RUNNER] skills manifest names the Founder's toolkit with sources and required flags; provisioning copies only listed skills", async () => {

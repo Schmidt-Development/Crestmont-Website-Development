@@ -7,6 +7,7 @@ import { hostname } from "node:os";
 import { registerSecret } from "./log.ts";
 import { trustedBinary } from "./exec.ts";
 import { parseOperatorCommand } from "./operator-command.ts";
+import { parseDevices, type GpuDevice } from "./inference/devices.ts";
 
 export interface RunnerConfig {
   controlPlaneUrl: string;
@@ -122,6 +123,12 @@ export interface ModelProfile {
 export interface InferenceConfig {
   /** Concurrent generation requests on the GPU (match OLLAMA_NUM_PARALLEL; set from the concurrency benchmark). */
   maxConcurrent: number;
+  /**
+   * The GPUs this runner dispatches to, one entry per device with the model server pinned to it
+   * (INFERENCE_DEVICES=index=baseUrl[#vramMb],...). Unset means one device built from LOCAL_MODEL_BASE_URL and
+   * GPU_VRAM_TOTAL_MB -- today's single-GPU installation, unchanged.
+   */
+  devices: GpuDevice[];
   /** GPU memory in MB (GPU_VRAM_TOTAL_MB from the installer's hardware check; 0 = unknown → one model resident). */
   vramTotalMb: number;
   /** Memory kept free for KV cache, runtime and context processing; never allocated to model weights. */
@@ -152,6 +159,12 @@ export interface LocalModelConfig {
 export interface JobSandboxConfig {
   dockerBin: string;
   image: string;
+  /**
+   * This runner's id, stamped on every sandbox container as `crestmont.runner`. The startup reaper removes only
+   * containers carrying THIS id, so a crash cannot leave a build container holding CPU and memory, and a second
+   * runner sharing the Docker host is never touched.
+   */
+  runnerId: string;
   /** Named Docker volume that holds RUNNER_WORKSPACES (runner in a container). Empty = bind-mount host paths. */
   volume: string;
   cpus: string;
@@ -306,6 +319,7 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
     models: loadModels(env, localModel),
     inference: {
       maxConcurrent: Math.max(1, Math.min(16, num(env.INFERENCE_MAX_CONCURRENT, 1))),
+      devices: parseDevices(env.INFERENCE_DEVICES, { baseUrl: env.LOCAL_MODEL_BASE_URL ?? "http://127.0.0.1:11434/v1", vramTotalMb: num(env.GPU_VRAM_TOTAL_MB, 0) }),
       vramTotalMb: num(env.GPU_VRAM_TOTAL_MB, 0),
       vramReserveMb: num(env.GPU_VRAM_RESERVE_MB, 4096),
       switchTimeoutMs: num(env.MODEL_SWITCH_TIMEOUT_SECONDS, 300) * 1000,
@@ -344,6 +358,8 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
     jobSandbox: {
       dockerBin: trustedBinary("docker", env.RUNNER_DOCKER_BIN ?? "docker").path,
       image: env.RUNNER_SANDBOX_IMAGE ?? "crestmont-build-sandbox:1",
+      // Docker label values: plain segment text, so a surprising RUNNER_ID cannot become extra docker arguments.
+      runnerId: (env.RUNNER_ID ?? `runner-${hostname()}`).slice(0, 64).replace(/[^A-Za-z0-9_.-]/g, "-"),
       volume: env.RUNNER_SANDBOX_VOLUME ?? "",
       cpus: env.RUNNER_JOB_CPUS ?? "2",
       memory: env.RUNNER_JOB_MEMORY ?? "4g",

@@ -7,6 +7,7 @@ import { newId, nowIso } from "../lib/db.ts";
 import type { AppContext } from "../app/context.ts";
 import { sha256Hex } from "../lib/crypto.ts";
 import { buildReport, loadReadinessInput } from "../readiness/report.ts";
+import { syncDerivedStates } from "../readiness/sync.ts";
 import { approvalValidity, ingestionHealth, type ReadinessInput } from "../readiness/engine.ts";
 import { can, isOwner, type Actor } from "../domain/authz.ts";
 import { audit } from "./security.ts";
@@ -277,6 +278,8 @@ export async function createBlocker(db: Db, userId: string, v: BlockerInput): Pr
     ...parseIds(v.requirement_ids).map((r) => db.prepare(`INSERT INTO blocker_requirements (blocker_id, requirement_id) VALUES (?, ?)`).bind(id, r)),
   ]);
   await audit(db, { actorUserId: userId, action: "blocker.created", subjectType: "blocker", subjectId: id, details: { category: v.category, severity: v.severity } });
+  // READY-013: a blocker change can gate or release requirements, so readiness is recalculated at once.
+  await syncDerivedStates(db, "blocker").catch(() => {});
   return id;
 }
 
@@ -292,6 +295,8 @@ export async function updateBlocker(db: Db, userId: string, id: string, v: Block
     ...parseIds(v.requirement_ids).map((r) => db.prepare(`INSERT INTO blocker_requirements (blocker_id, requirement_id) VALUES (?, ?)`).bind(id, r)),
   ]);
   await audit(db, { actorUserId: userId, action: "blocker.updated", subjectType: "blocker", subjectId: id, details: { before: { ...existing }, requirementIds: parseIds(v.requirement_ids) } });
+  // READY-013: a blocker change can gate or release requirements, so readiness is recalculated at once.
+  await syncDerivedStates(db, "blocker").catch(() => {});
 }
 
 /** Resolution evidence is mandatory (§47): what changed and where it can be verified. */
@@ -303,6 +308,8 @@ export async function resolveBlocker(db: Db, userId: string, id: string, evidenc
   const res = await db.prepare(`UPDATE blockers SET status='resolved', resolved_at=?, resolution_evidence=?, resolved_by=?, updated_at=? WHERE id = ? AND status = 'open'`).bind(at, e, userId, at, id).run();
   if (res.meta.changes !== 1) throw new ReadinessError("Blocker not found or already resolved", 409);
   await audit(db, { actorUserId: userId, action: "blocker.resolved", subjectType: "blocker", subjectId: id, details: { evidence: e } });
+  // READY-013: a blocker change can gate or release requirements, so readiness is recalculated at once.
+  await syncDerivedStates(db, "blocker").catch(() => {});
 }
 
 export async function reopenBlocker(db: Db, userId: string, id: string, reason: string): Promise<void> {
@@ -310,6 +317,8 @@ export async function reopenBlocker(db: Db, userId: string, id: string, reason: 
   const res = await db.prepare(`UPDATE blockers SET status='open', resolved_at=NULL, updated_at=? WHERE id = ? AND status = 'resolved'`).bind(nowIso(), id).run();
   if (res.meta.changes !== 1) throw new ReadinessError("Blocker not found or not resolved", 409);
   await audit(db, { actorUserId: userId, action: "blocker.reopened", subjectType: "blocker", subjectId: id, details: { reason: reason.trim() } });
+  // READY-013: a blocker change can gate or release requirements, so readiness is recalculated at once.
+  await syncDerivedStates(db, "blocker").catch(() => {});
 }
 
 // ───────────── Security findings (§64, Gate C) ─────────────

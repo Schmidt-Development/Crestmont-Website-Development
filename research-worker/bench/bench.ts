@@ -13,7 +13,7 @@ import { loadConfig } from "../src/config.ts";
 import { Platform } from "../src/crm-client.ts";
 import { ResearchWorker } from "../src/orchestrator.ts";
 import { silentLogger } from "../src/log.ts";
-import { snapshot } from "../src/resources.ts";
+import { snapshot, cpuPercent } from "../src/resources.ts";
 import { FakeHttp, cand, ok, status, page } from "../test/helpers.ts";
 import type { FetchResult } from "../src/http.ts";
 import type { SqliteDb } from "../../dev/sqlite-d1.ts";
@@ -52,8 +52,13 @@ const r0 = await snapshot(process.cwd());
 const t0 = Date.now();
 for (const c of items) state.upsertCandidate(c, "MI", new Date(), 30);
 const ingestMs = Date.now() - t0;
-let peakRss = 0, cpuSamples: number[] = [];
-const sampler = setInterval(async () => { const s = await snapshot(process.cwd()); peakRss = Math.max(peakRss, s.rssMb); cpuSamples.push(s.cpuPct); }, 1000);
+// Sampled every 250 ms, with one sample taken straight away: a run shorter than the interval used to report
+// peakRssMb 0 and avgCpuPct null. RSS is read synchronously so a slow snapshot cannot miss a peak.
+let peakRss = Math.round(process.memoryUsage().rss / 1e6);
+const cpuSamples: number[] = [];
+const sample = () => { peakRss = Math.max(peakRss, Math.round(process.memoryUsage().rss / 1e6)); cpuSamples.push(cpuPercent()); };
+sample();
+const sampler = setInterval(sample, 250);
 const ac = new AbortController();
 const work = worker.workLoop(ac.signal);
 while (state.backlog() > 0) await new Promise((r) => setTimeout(r, 200));
@@ -81,6 +86,17 @@ const result = {
   qualifiedYield: q(`SELECT COUNT(*) AS n FROM research_prospects WHERE qualified = 1`) / N,
   eligibleCallableYield: q(`SELECT COUNT(*) AS n FROM research_prospects WHERE eligibility = 'eligible'`) / N,
   falsePositiveRate: "not measurable on synthetic data: requires a manually verified sample of live results (RUNBOOK §Benchmark)",
+  // Reliability counters, reported separately from throughput (Phase 7): a fast run that drops or re-sends records is not capacity.
+  failedJobs: state.day(new Date()).failed_jobs,
+  failureRate: state.day(new Date()).failed_jobs / N,
+  stagesAtEnd: state.stages(),
+  batchesDelivered: q(`SELECT COUNT(*) AS n FROM research_batches`),
+  recordsRejectedByPlatform: q(`SELECT COALESCE(SUM(rejected), 0) AS n FROM research_batches`),
+  duplicatesPrevented: q(`SELECT COALESCE(SUM(duplicates_prevented), 0) AS n FROM research_batches`),
+  crmMatches: q(`SELECT COALESCE(SUM(crm_matches), 0) AS n FROM research_batches`),
+  unchangedOnIngest: q(`SELECT COALESCE(SUM(unchanged), 0) AS n FROM research_batches`),
+  retryOverheadBatches: (state.db.prepare(`SELECT COALESCE(SUM(attempts), 0) AS n FROM outbox`).get() as { n: number }).n,
+  outboxLeftUndelivered: state.outboxDepth(),
   resources: { before: r0, peakRssMb: peakRss, avgCpuPct: cpuSamples.length ? Math.round(cpuSamples.reduce((a, b) => a + b, 0) / cpuSamples.length) : null, after: await snapshot(process.cwd()) },
   incrementalExternalFees: "$0 (no external API called)",
 };

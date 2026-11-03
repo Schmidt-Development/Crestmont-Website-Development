@@ -93,7 +93,30 @@ async function signedRaw(path: string, body: Record<string, unknown>, opts: { se
   const res = await fetch(`${BASE}${path}`, { method: "POST", body: raw, headers: { "content-type": "application/json", [SIGNATURE_HEADER]: signBody(opts.secret ?? SECRET, raw, Math.floor(Date.now() / 1000)) } });
   return res.status;
 }
-const settingsForm = (paused: boolean, s: { qualify_threshold: number; max_batch: number }) => ({ ...(paused ? { paused: "1", reason: "Research staging E2E finished: paused until the Owner resumes" } : {}), threshold: String(s.qualify_threshold), max_batch: String(s.max_batch) });
+// Restoring the Owner's state means their pause reason too: resuming sets pause_reason to NULL
+// (src/services/research.ts#saveSettings), so re-pausing without it would quietly rewrite what they wrote.
+const settingsForm = (paused: boolean, s: { qualify_threshold: number; max_batch: number; pause_reason?: string | null }) => ({
+  ...(paused ? { paused: "1", reason: (s.pause_reason ?? "").trim().length >= 3 ? String(s.pause_reason) : "Paused: restored by the research staging E2E" } : {}),
+  threshold: String(s.qualify_threshold), max_batch: String(s.max_batch),
+});
+
+/**
+ * Restores the Owner's research controls however this script ends. The run resumes research for up to 20 minutes;
+ * if the job is cancelled or times out in that window, the old happy-path-only restore left staging research
+ * RESUMED with the Owner's pause silently cleared — and a Node 1 worker pointed at staging would then start
+ * ingesting unattended. Registered once the Owner session exists, run from a `finally` and from the signals
+ * GitHub Actions uses to cancel a job.
+ */
+let restorePauseState: (() => Promise<void>) | null = null;
+let restoreDone = false;
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => {
+    void (async () => {
+      try { await restorePauseState?.(); } catch { /* reported by the run that owns it */ }
+      process.exit(1);
+    })();
+  });
+}
 
 async function main() {
   const keys = candidates.map((c) => c.businessKey);
@@ -118,12 +141,18 @@ async function main() {
     signedOk = true;
     assert((await signedRaw("/api/research/runner/heartbeat", { runnerId: RUNNER }, { nonce })) === 409, "replayed nonce accepted");
   });
-  const initial = (await q<{ paused: number; qualify_threshold: number; max_batch: number }>(`SELECT paused, qualify_threshold, max_batch FROM research_settings WHERE id = 1`))[0];
+  const initial = (await q<{ paused: number; pause_reason: string | null; qualify_threshold: number; max_batch: number }>(`SELECT paused, pause_reason, qualify_threshold, max_batch FROM research_settings WHERE id = 1`))[0];
   const all = accounts();
   const owner = all.find((a) => a.role === "owner"), sales = all.find((a) => a.role === "sales");
   if (!owner || !initial) { results.push({ id: "owner.session", ok: false, detail: !initial ? "research_settings missing" : "no owner demo account" }); return; }
   const os = new Session();
   await check("owner.sign_in", async () => { await os.login(owner.email, owner.password, owner.totp); });
+  restorePauseState = async () => {
+    if (restoreDone) return;
+    restoreDone = true;
+    const r = await os.req("POST", "/staff/research/settings", settingsForm(!!initial.paused, initial));
+    if (r.status !== 303) throw new Error(`restoring the Owner's research controls returned ${r.status}`);
+  };
   await check("research.dashboard_owner_only", async () => {
     const r = await os.req("GET", "/staff/research");
     assert(r.status === 200 && /Lead research/.test(await r.text()), `owner dashboard → ${r.status}`);
@@ -236,11 +265,37 @@ async function main() {
     try { await platform.batch(RUNNER, `rb_e2e_after_pause_${randomBytes(6).toString("hex")}`, "[]"); throw new Error("batch accepted while paused"); }
     catch (e) { assert(e instanceof PlatformError && e.status === 409, `batch while paused → ${(e as PlatformError).status ?? (e as Error).message}`); }
   });
-  if (!initial.paused) await check("research.restore_resumed_state", async () => { const r = await os.req("POST", "/staff/research/settings", settingsForm(false, initial)); assert(r.status === 303, `settings → ${r.status}`); });
-  await check("research.deltas", async () => `prospects +${(await n(`SELECT COUNT(*) AS n FROM research_prospects`)) - before.prospects}, batches +${(await n(`SELECT COUNT(*) AS n FROM research_batches`)) - before.batches}, research leads +${created}`);
+  await check("research.owner_controls_restored", async () => {
+    await restorePauseState!();
+    const after = (await q<{ paused: number; pause_reason: string | null; qualify_threshold: number; max_batch: number }>(`SELECT paused, pause_reason, qualify_threshold, max_batch FROM research_settings WHERE id = 1`))[0];
+    assert(after.paused === initial.paused, `paused ${initial.paused} → ${after.paused}`);
+    assert(after.qualify_threshold === initial.qualify_threshold && after.max_batch === initial.max_batch, "threshold or batch size changed");
+    if (initial.paused) assert((after.pause_reason ?? "") === (initial.pause_reason ?? ""), "the Owner's pause reason was rewritten");
+    return `paused ${after.paused}, threshold ${after.qualify_threshold}, max_batch ${after.max_batch} (unchanged)`;
+  });
+  // What THIS run did, attributed by its own runner id. Table-wide deltas are reported too, but they are not this
+  // run's work: other writers (the previous deploy's E2E) and D1 read replicas both move them, which is why a run
+  // that sent 7 records has been seen reporting "prospects +54". The per-runner figures are the accurate ones.
+  await check("research.deltas", async () => {
+    const mineBatches = await n(`SELECT COUNT(*) AS n FROM research_batches WHERE runner_id = ${lit(RUNNER)}`);
+    const mineReceived = await n(`SELECT COALESCE(SUM(record_count), 0) AS n FROM research_batches WHERE runner_id = ${lit(RUNNER)}`);
+    const mineCreated = await n(`SELECT COALESCE(SUM(created), 0) AS n FROM research_batches WHERE runner_id = ${lit(RUNNER)}`);
+    const mineUpdated = await n(`SELECT COALESCE(SUM(updated), 0) AS n FROM research_batches WHERE runner_id = ${lit(RUNNER)}`);
+    const mineRejected = await n(`SELECT COALESCE(SUM(rejected), 0) AS n FROM research_batches WHERE runner_id = ${lit(RUNNER)}`);
+    const tableProspects = (await n(`SELECT COUNT(*) AS n FROM research_prospects`)) - before.prospects;
+    const tableBatches = (await n(`SELECT COUNT(*) AS n FROM research_batches`)) - before.batches;
+    return `this run: ${mineBatches} batches, ${mineReceived} records received, ${mineCreated} created, ${mineUpdated} updated, ${mineRejected} rejected, ${created} CRM leads`
+      + ` | table totals moved +${tableProspects} prospects / +${tableBatches} batches (includes other writers and replica lag)`;
+  });
 }
 
-await main().catch((e) => results.push({ id: "runner", ok: false, detail: String((e as Error).message ?? e).slice(0, 300) }));
+await main()
+  .catch((e) => results.push({ id: "runner", ok: false, detail: String((e as Error).message ?? e).slice(0, 300) }))
+  .finally(async () => {
+    // Belt and braces: if main threw before its own restore check ran, put the Owner's controls back anyway.
+    try { await restorePauseState?.(); }
+    catch (e) { results.push({ id: "research.owner_controls_restored", ok: false, detail: `could not restore the Owner's research controls: ${String((e as Error).message ?? e).slice(0, 200)}` }); }
+  });
 const passed = results.filter((r) => r.ok).length, failed = results.length - passed;
 for (const r of results.filter((x) => !x.ok).slice(0, 9)) console.log(`::error title=Research staging E2E ${r.id}::${r.detail}`);
 console.log(`::notice title=Research staging E2E::${passed} passed, ${failed} failed${failed ? ` — failed: ${results.filter((x) => !x.ok).map((x) => x.id).join(", ")}` : ""}`);

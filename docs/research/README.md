@@ -16,6 +16,7 @@ Windows workstation (research-worker/)                         Cloudflare (this 
 
 ## Where things run
 - **Workstation:** bulk data (tens of millions of rows), website checks, audits, and the local model. These are the heavy, long-running parts with no per-request cost.
+- **The GPU is shared with the AI Website Builder, and the builder has priority.** Everything the platform shows about a prospect is computed from evidence by code; the only GPU work research ever does is optional *wording*, and it stands down whenever the builder (or any other application on the machine) has a model loaded or the GPU busy. Drafting is off entirely unless `RESEARCH_MODEL` is set, and it never blocks evaluation or delivery. Mechanism and settings: `RUNBOOK.md` §8.
 - **Cloudflare:** only candidate prospects with their evidence (opportunity classes with a phone number), their validation, duplicate protection against the CRM, the decisions people make, and the dashboard. The CRM stays the system of record. A prospect becomes a lead only through an audited promotion.
 
 ## Vocabulary (reported separately everywhere)
@@ -59,8 +60,13 @@ The inventory is the Founder-approved denominator, so these were not added. Test
 - **CRM identity (PR #50, merged).** Promotion is an authoritative intake decision of #50's engine (`contact-identity.ts`, channel `research_agent`, idempotency key `research_agent:promote:<prospect>`). Its customer, suppression, shared-identifier and review rules apply to research exactly as to every other channel, the decision is stored in `crm_intake_decisions`, and the lead's `origin` is `research_agent`. Ingest keeps a cheap batched pre-check on the CRM's normalized phone/email keys and `voice_dnc`, so the queue shows likely duplicates early. The intake decision at promotion is the one that counts.
 - **Node 1 (PR #52).** The research worker uses its own HMAC secret and endpoints. It does not share the build runner's lease channel: research batches are idempotent pushes, not leased jobs. It reuses the runner's conventions (signature format, nonce, DPAPI secret, scheduled task).
 
+## Capacity
+`CAPACITY.md` is the measured answer to "can this reach 60,000 a day": what runs today, the measured funnel, the
+national supply in the Overture release, and which of the four possible 60k targets the architecture supports.
+
 ## Not built yet (honest list)
-- **Live benchmark** on the RTX 5090 workstation, and the manually verified false-positive sample. This session had no access to the workstation (RUNBOOK §4).
+- **Live benchmark** on the RTX 5090 workstation, and the manually verified false-positive sample. No session so far has had access to the workstation (RUNBOOK §4). Synthetic scale runs to 60,000 records exist (`BENCHMARK.md` §1b); they measure software overhead and the concurrency model, not hardware or live-site behaviour.
+- **The worker has never run on Node 1.** Nothing is installed there, so no research has ever been produced by the worker itself. Everything in staging came from the per-deploy staging E2E (`CAPACITY.md` §1).
 - **Real data at scale.** Controlled real-data runs (Overture `2026-10-21.0`, live websites, Common Crawl `CC-MAIN-2026-43`; `BENCHMARK.md` §3) ran on a GitHub-hosted runner, not Node 1, with the CRM in-process. Neither the full US snapshot nor staging ingestion has run.
 - **Founder decisions:** Foursquare OS access, OSM internal-use, and any outbound consent design with counsel.
 - **Data.gov / state open-data enrichment.** The source is registered but off, and no dataset has been reviewed.

@@ -222,7 +222,9 @@ const progressScore = (e: CycleEvidence) => {
  * Runner: one completed implementation cycle with the reviewer's proposed decision. The platform decides:
  *  - "ready" decisions need passing checks, every criterion passed, and desktop + mobile screenshots;
  *  - WAIT_FOR_EXTERNAL_SETUP needs nothing else outstanding but integration blockers;
- *  - a continuation needs a corrective prompt that names the outstanding items it addresses;
+ *  - a continuation needs a corrective prompt that names the outstanding items it addresses; where this platform
+ *    overruled a terminal decision into a continuation, it writes that prompt itself rather than blaming the reviewer
+ *    for not supplying one it was never asked for;
  *  - loop guards: max cycles, the same failure signature three cycles in a row, or no progress over three cycles
  *    → ESCALATED (FAILED_NEEDS_INTERVENTION), work preserved.
  * Idempotent per (job, cycle).
@@ -253,18 +255,30 @@ export async function submitCycle(db: Db, job: { id: string; project_id: string;
 
   let decision: Decision = proposed ?? "FIX_DEFECTS";
   let reason = proposed ? `Reviewer (${provider}): ${proposed}` : "No valid reviewer decision; treated as FIX_DEFECTS";
+  // An overrule below replaces a decision the reviewer meant to be terminal, for which the contract says nextPrompt
+  // is null. The prompt is then this platform's to write, from the very work the overrule is based on.
+  let overruled = false;
   if (READY.includes(decision) && (open.length || !hasDesktop || !hasMobile)) {
     decision = "FIX_DEFECTS";
+    overruled = true;
     reason = `Overruled: the evidence does not support "${proposed}" (${open.length ? `${open.length} outstanding item(s)` : ""}${!hasDesktop || !hasMobile ? `${open.length ? "; " : ""}desktop and mobile screenshots are required` : ""})`;
   }
   if (decision === "WAIT_FOR_EXTERNAL_SETUP" && (nonIntegrationOpen.length || !ev.integrationBlockers.length)) {
     decision = nonIntegrationOpen.length ? "CONTINUE_BUILDING" : "READY_FOR_FINAL_QA";
+    overruled = true;
     reason = nonIntegrationOpen.length ? "Overruled: independent work remains; external setup does not stop it" : "Overruled: no integration blocker is reported";
     if (decision === "READY_FOR_FINAL_QA" && (!hasDesktop || !hasMobile)) { decision = "FIX_DEFECTS"; reason = "Overruled: desktop and mobile screenshots are required"; }
   }
+  // External setup is the customer's to finish, so an overruled continuation sends the builder after the rest.
+  const overruleWork = nonIntegrationOpen.length ? nonIntegrationOpen : open;
+  let prompt = nextPrompt;
+  if (CONTINUE.includes(decision) && !prompt && overruled) {
+    prompt = [`The build is not finished: ${reason.replace(/^Overruled: /, "")}. Fix the following, keep everything that already passes, and re-run the checks:`,
+      ...overruleWork.slice(0, 40).map((o) => `- ${o}`)].join("\n");
+  }
   if (CONTINUE.includes(decision)) {
-    if (!nextPrompt) { decision = "ESCALATED"; reason = "The reviewer asked for more work without a corrective prompt"; }
-    else if (!open.length && decision !== "RUN_MORE_TESTS" && !addresses.length) { decision = "ESCALATED"; reason = "Continuation is not traceable to outstanding work or failed criteria"; }
+    if (!prompt) { decision = "ESCALATED"; reason = "The reviewer asked for more work without a corrective prompt"; }
+    else if (!overruled && !open.length && decision !== "RUN_MORE_TESTS" && !addresses.length) { decision = "ESCALATED"; reason = "Continuation is not traceable to outstanding work or failed criteria"; }
   }
   if (CONTINUE.includes(decision)) {
     const sameRuns = prior.length >= 2 && prior.slice(0, 2).every((p) => p.failure_signature === signature);
@@ -274,7 +288,7 @@ export async function submitCycle(db: Db, job: { id: string; project_id: string;
     else if (sameRuns && open.length) { decision = "ESCALATED"; reason = "The same failures repeated in three consecutive cycles"; }
     else if (stalled) { decision = "ESCALATED"; reason = "No measurable progress over the last three cycles"; }
   }
-  const finalPrompt = CONTINUE.includes(decision) ? nextPrompt : null;
+  const finalPrompt = CONTINUE.includes(decision) ? prompt : null;
   const sessions = (Array.isArray(b.sessions) ? b.sessions : []).slice(0, 50).map((x) => x as Record<string, unknown>).map((x) => ({
     id: s(x.id, 40), role: s(x.role, 30), model: s(x.model, 120), workstream: s(x.workstream, 60), tasks: (Array.isArray(x.tasks) ? x.tasks : []).map((t) => s(t, 60)).slice(0, 50), mode: s(x.mode, 20), status: s(x.status, 30), note: s(x.note, 300),
   }));

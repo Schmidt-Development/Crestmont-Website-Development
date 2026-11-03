@@ -15,6 +15,7 @@ import { ingestEvidence } from "../readiness/ingest.ts";
 import { audit } from "./security.ts";
 import { allowEgressHost } from "../lib/egress.ts";
 import * as ra from "./readiness-admin.ts";
+import { syncDerivedStates } from "../readiness/sync.ts";
 
 export class DeploymentError extends Error {
   readonly status: number;
@@ -133,6 +134,9 @@ export async function recordDeployment(ctx: Pick<AppContext, "db" | "now">, rawB
   await db.batch(stmts);
   await audit(db, { actorKind: "system", action: "deployment.recorded", subjectType: "deployment", subjectId: doc.deploymentId,
     details: { environment: doc.environment, commit, status: doc.status, by: doc.initiatedBy, releaseCheck: check.result, incident, rollbackTarget } });
+  // READY-013: a deployment moves requirements from merged to deployed, so readiness is recalculated now.
+  // It never certifies behaviour on its own — derive.ts still requires environment evidence at this commit.
+  await syncDerivedStates(db, `deployment:${doc.environment}`).catch(() => {});
   return { status: "recorded", deploymentId: doc.deploymentId, releaseCheck: check.result, incidentBlockerId: incident, rollbackTargetDeploymentId: rollbackTarget };
 }
 

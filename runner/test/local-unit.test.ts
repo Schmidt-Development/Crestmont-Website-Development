@@ -248,6 +248,32 @@ test("[AIB-RUNNER] loop detection: a model repeating the same call is warned onc
   } finally { await model.close(); }
 });
 
+// A real Business build (bld_c9bce0249e1153c3ffd97f76) lost its whole attempt to this: four identical edit_file calls
+// on public/admin/admin.js whose old_string no longer existed, because the model had rewritten the file and context
+// resets had dropped what it now contained. "Read the file again and copy the exact text" is advice the model cannot
+// act on in that state, so the warning now carries the file itself.
+test("[AIB-RUNNER] a repeated edit_file whose old_string is gone is answered with the file as it now is [fake model]", async () => {
+  const { model, provider } = await setup(() => ({ toolCalls: [{ name: "edit_file", arguments: { path: "public/index.html", old_string: "<h1>Goodbye</h1>", new_string: "<h1>Hi</h1>" } }] }));
+  try {
+    const res = await provider.run(req());
+    assert.equal(res.status, "loop", "the loop guard still stops the phase");
+    const warned = lastToolText(model.requests[3]);
+    assert.match(warned, /old_string was not found/);
+    assert.match(warned, /public\/index\.html as it is RIGHT NOW/, "the warning carries the file, not advice about it");
+    assert.match(warned, /<h1>Hello<\/h1>/, "and its actual current content, which is what the model needs to copy from");
+  } finally { await model.close(); }
+});
+
+test("[AIB-RUNNER] the file is attached only for the edit it belongs to, and never from outside the repository [fake model]", async () => {
+  const { model, provider } = await setup(() => ({ toolCalls: [{ name: "edit_file", arguments: { path: "../../../etc/passwd", old_string: "root", new_string: "x" } }] }));
+  try {
+    const res = await provider.run(req());
+    assert.equal(res.status, "loop");
+    const warned = lastToolText(model.requests[3]);
+    assert.doesNotMatch(warned, /RIGHT NOW/, "a path outside the repository is never read back to the model");
+  } finally { await model.close(); }
+});
+
 test("[AIB-RUNNER] max turns, max wall time and the output-token cap end a phase [fake model]", async () => {
   let i = 0;
   const { model, provider } = await setup(async () => ({ toolCalls: [{ name: "run_command", arguments: { command: `echo ${i++}` } }] }));

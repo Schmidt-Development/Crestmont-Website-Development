@@ -25,6 +25,42 @@ Conclusion: worker and platform CPU, memory and storage overhead is not the bott
 
 The platform-side ingest test (`tests/research.test.ts`, TEST-001) took 2.6–2.8 s on the same host to put 10,000 prospects through the signed API in batches of 200. That ran on in-memory SQLite, not on D1.
 
+## 1b. Synthetic scale runs (2026-11-02, cloud container): 10k / 25k / 60k
+Command: `node --no-warnings research-worker/bench/bench.ts --n <N> --latency 250 --concurrency 64`
+
+Host: cloud session container, 4 vCPU, 15 GB RAM, **no GPU**, no Ollama, no DuckDB CLI. **This is not Node 1.**
+
+| Measure | 10,000 | 25,000 | 60,000 |
+|---|---|---|---|
+| Wall time | 68.9 s | 172.2 s | 441.5 s |
+| Records/hour (software) | 522,845 | 522,770 | 489,222 |
+| Ingest into the state file | 0.9 s | 1.7 s | 4.5 s |
+| Verify + audit | 65.7 s | 164.0 s | 412.3 s |
+| Deliver (signed, in-process platform) | 2.3 s | 6.4 s | 24.7 s |
+| Simulated HTTP requests | 16,500 | 41,250 | 99,000 |
+| Batches delivered | 28 | 69 | 165 |
+| Sent to the platform | 5,500 | 13,750 | 33,000 |
+| Failed jobs / rejected / outbox left | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 |
+| Batch retries | 0 | 0 | 0 |
+| Peak process RSS | 311 MB | 529 MB | 948 MB |
+| Average CPU (4 vCPU) | 11% | 12% | 52% |
+| Eligible callable yield | **0%** | **0%** | **0%** |
+
+**Read these as a concurrency model, not a capacity ceiling.** 99,000 requests × 250 ms ÷ 64 concurrent = 387 s of
+pure simulated waiting against a measured 412 s of verify time, so **about 94% of the time is the simulated latency**
+and the worker's own code adds roughly 6%. What the runs do establish: the pipeline is linear to 60,000 records, loses
+no records, needs no retries, and does not become CPU-bound until about 52% of 4 vCPU at 60,000.
+
+Peak RSS grows with N (≈ 10 KB per record) because **the benchmark itself** holds all N generated candidates, all N
+simulated HTTP responses and an in-memory SQLite state file. The real worker keeps its state in a file on disk, so
+this figure is the harness's memory, not the worker's working set. A 24-hour run's memory needs are therefore still
+unmeasured.
+
+Defect found and fixed while running these: the sampler only measured CPU and RSS on a 1-second tick, so any run
+shorter than that reported `peakRssMb: 0` and `avgCpuPct: null`. It now samples every 250 ms with an immediate first
+sample, and reports failed jobs, rejected records, duplicates prevented, batch retries and leftover outbox depth
+alongside throughput.
+
 ## 2. Live run on the RTX 5090 workstation — NOT YET PERFORMED
 Procedure: `RUNBOOK.md` §4. Fill this in from the worker's health counters and the dashboard after 24 h on one state.
 

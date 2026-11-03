@@ -6,6 +6,7 @@ import {
   computeGates, computeRequirementStatuses, computeScores, evidenceSetHash, ingestionHealth, launchDecision,
   type ApprovalRow, type BlockerRow, type EvidenceRow, type FindingRow, type IngestionRow, type IntegrationRow, type ReadinessInput, type RequirementRow,
 } from "./engine.ts";
+import type { DeriveDeploymentRow } from "./derive.ts";
 
 export async function loadReadinessInput(db: Db, now = new Date()): Promise<ReadinessInput> {
   const all = async <T>(sql: string) => (await db.prepare(sql).all<T>()).results;
@@ -20,8 +21,11 @@ export async function loadReadinessInput(db: Db, now = new Date()): Promise<Read
   return {
     requirements: await all<RequirementRow>(`SELECT * FROM requirements ORDER BY id`),
     evidence: await all<EvidenceRow>(
-      `SELECT te.requirement_id, te.outcome, te.test_name, te.run_id, er.environment, er.source, er.commit_sha, er.finished_at
+      `SELECT te.requirement_id, te.outcome, te.test_name, te.run_id, er.environment, er.source, er.commit_sha, er.branch, er.finished_at
        FROM test_evidence te JOIN evidence_runs er ON er.id = te.run_id`),
+    // READY-013: the derivation needs every deployment, so a verdict can demand one at the proven commit.
+    deployments: await all<DeriveDeploymentRow>(
+      `SELECT id, environment, commit_sha, status, deployed_at FROM deployments`),
     blockers: blockers.map((b) => ({ ...b, requirement_ids: b.req_ids ? b.req_ids.split(",") : [] })),
     findings: await all<FindingRow>(`SELECT id, severity, release_blocking, status FROM security_findings`),
     ingestion: await all<IngestionRow>(`SELECT * FROM ingestion_status`),
@@ -57,8 +61,10 @@ function csvCell(v: unknown): string {
 }
 
 export function requirementsCsv(report: Awaited<ReturnType<typeof buildReport>>): string {
-  const header = ["id", "subsystem", "title", "priority", "category", "disposition", "implementation", "dev", "staging", "production", "state", "last_verified_at", "stale", "blockers", "evidence_runs"];
+  const header = ["id", "subsystem", "title", "priority", "category", "disposition", "implementation", "dev", "staging", "production", "state", "last_verified_at", "stale", "blockers", "evidence_runs",
+    "derived_state", "complete", "complete_at", "tracking", "proven_commit", "head_commit", "why"];
   const rows = report.requirements.map((r) => [r.id, r.subsystem, r.title, r.priority, r.category, r.disposition, r.implementation,
-    r.verification.development, r.verification.staging, r.verification.production, r.state, r.lastVerifiedAt, r.stale, r.blockers.join(" "), r.evidenceRunIds.join(" ")]);
+    r.verification.development, r.verification.staging, r.verification.production, r.state, r.lastVerifiedAt, r.stale, r.blockers.join(" "), r.evidenceRunIds.join(" "),
+    r.autoState, r.autoComplete, r.completeAt, r.tracking, r.provenCommit, r.headCommit, r.autoDetail]);
   return [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\n") + "\n";
 }

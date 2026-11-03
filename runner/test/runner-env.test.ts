@@ -12,10 +12,10 @@ import {
 } from "../windows/runner-env.ts";
 import type { EnvLine, MergeResult } from "../windows/runner-env.ts";
 import { selectModel } from "../windows/select-model.ts";
-import { RUNNER_DIR, tmp } from "./helpers.ts";
+import { RUNNER_DIR, tmp, readText } from "./helpers.ts";
 
 const WIN = path.join(RUNNER_DIR, "windows");
-const read = (f: string) => readFileSync(path.join(WIN, f), "utf8");
+const read = (f: string) => readText(path.join(WIN, f));
 
 function managed(over: Record<string, string> = {}): EnvLine[] {
   const v: Record<string, string> = {
@@ -116,7 +116,7 @@ test("[AIB-RUNNER] RunnerEnv.ps1 (used by the installer) produces exactly what r
     writeFileSync(inFile, JSON.stringify(c.input));
     const r = spawnSync(PWSH!, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-In", inFile, "-Out", outFile], { encoding: "utf8", timeout: 120_000 });
     assert.equal(r.status, 0, `${c.name}: ${r.stderr}`);
-    const ps = JSON.parse(readFileSync(outFile, "utf8").replace(/^﻿/, "")) as MergeResult;
+    const ps = JSON.parse(readText(outFile).replace(/^﻿/, "")) as MergeResult;
     const ts = mergeRunnerEnv(c.input);
     // ConvertTo-Json in Windows PowerShell 5.1 writes an empty array as [] and a one-item array as the item itself.
     const arr = (v: unknown) => (Array.isArray(v) ? v : v == null ? [] : [v]);

@@ -184,6 +184,54 @@ test("[AIB-002] controlled-fixture pipeline: one durable job → one leased sess
   assert.equal((await t.db.prepare(`SELECT status FROM projects WHERE id = ?`).bind(pid).first<{ status: string }>())!.status, "scope_review", "approval changes no project or delivery state on its own");
 });
 
+// Package caps are MAXIMUMS under the global ceiling, not reservations and not additive: with a ceiling of 4,
+// "starter 1" means at most one of those four slots may hold a Starter build, never that one is held for it. A
+// package already at its cap is SKIPPED rather than blocking the queue, so the node keeps working.
+test("[AIB-SCHED] package caps are maximums, and a capped package is skipped so another package's build starts now", async () => {
+  const t = await app();
+  await t.db.prepare(`UPDATE build_settings SET max_concurrent = 4`).run();
+  await t.db.prepare(`UPDATE build_package_caps SET max_concurrent = 1 WHERE package_id = 'starter'`).run();
+  const a = await queuedProject(t), b = await queuedProject(t), c = await queuedProject(t);
+  // Two Starter builds and one Business build are all waiting.
+  await t.db.prepare(`UPDATE build_jobs SET package_id = 'business' WHERE id = ?`).bind(c.job.id).run();
+
+  const first = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  assert.ok(first, "the first claim gets work");
+  assert.equal(first.packageId, "starter", "the oldest paid order is a Starter build");
+
+  const second = (await runner(t, "claim", { runnerId: "r2" })).json.job;
+  assert.ok(second, "the node does not idle behind a package that is at its maximum");
+  assert.equal(second.packageId, "business", "Starter is at its cap of 1, so the Business build starts instead");
+
+  const third = await runner(t, "claim", { runnerId: "r3" });
+  assert.equal(third.json.job, null, "the only work left is a second Starter build, and Starter is capped at 1");
+  const active = await t.db.prepare(`SELECT package_id, COUNT(*) AS n FROM build_jobs WHERE state IN ('preparing','building','verifying') GROUP BY package_id`).all();
+  assert.deepEqual(Object.fromEntries(active.results.map((r) => [r.package_id, r.n])), { starter: 1, business: 1 },
+    "two of the four global slots are used: the caps are maximums, not three reserved slots plus one");
+  void a; void b;
+});
+
+// FIFO runs on when the order was ACCEPTED (its first package invoice was paid), not when the job row was made, so a
+// pause, a requeue or a revision cannot send an older paid order to the back of the queue.
+test("[AIB-SCHED] FIFO follows the paid order's acceptance time, and survives a requeue", async () => {
+  const t = await app();
+  await t.db.prepare(`UPDATE build_settings SET max_concurrent = 1`).run();
+  const early = await queuedProject(t);   // job row created FIRST
+  const late = await queuedProject(t);    // job row created SECOND
+  // ... but the second customer actually paid a day earlier.
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString();
+  await t.db.prepare(`UPDATE invoices SET paid_at = ? WHERE order_id = ?`).bind(yesterday, late.order.orderId).run();
+
+  const first = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  assert.equal(first.projectId, late.pid, "the order accepted a day earlier goes first, though its job row is newer");
+
+  // Requeue it: the queue position must not move to the back.
+  await t.db.prepare(`UPDATE build_jobs SET state = 'queued', lease_runner = NULL, lease_token_hash = NULL, updated_at = ? WHERE id = ?`).bind(new Date().toISOString(), first.id).run();
+  const again = (await runner(t, "claim", { runnerId: "r2" })).json.job;
+  assert.equal(again.projectId, late.pid, "after a requeue it is still first: acceptance time is immutable, the job row's is not");
+  void early;
+});
+
 test("[AIB-003] concurrency: parallel claims never hand one job to two runners, and the concurrent-build limit holds", async () => {
   const t = await app();
   await t.db.prepare(`UPDATE build_settings SET max_concurrent = 1`).run();
@@ -387,6 +435,76 @@ test("[AIB-004] protocol v1.1: a runner on another host fetches the job's own ch
   assert.equal(Buffer.from(got.json.archiveBase64, "base64").toString(), "session transcript archive");
   assert.equal((await runner(t, "checkpoint/fetch", { jobId: c2.id, leaseToken: c2.leaseToken, checkpointKey: "builds/other-job/ckpt-1.tgz" })).status, 404, "only the job's own checkpoint");
   assert.equal((await runner(t, "checkpoint/fetch", { jobId: c2.id, leaseToken: c.leaseToken, checkpointKey: ck.json.checkpointKey })).json.error, "lease_lost");
+});
+
+// AI Build preview: the runner stores a snapshot of the generated website for each revision, and a later cycle
+// must never overwrite an earlier one -- a reverted revision is precisely the one the Founder needs to still see.
+test("[AIB-PREVIEW] a revision snapshot is stored once, is immutable, and is bounded", async () => {
+  const t = await app();
+  await queuedProject(t);
+  const c = (await runner(t, "claim", { runnerId: "host-a" })).json.job;
+  const file = (path: string, body: string) => ({ path, base64: Buffer.from(body).toString("base64") });
+
+  const first = await runner(t, "revisions/store", { jobId: c.id, leaseToken: c.leaseToken, cycle: 0, phase: "build", score: 7.5, decision: "FIX_DEFECTS", isBest: true,
+    files: [file("index.html", "<!doctype html><title>Junk</title><h1>v1</h1>"), file("assets/site.css", "h1{color:navy}"), file(".crestmont/screenshots/home-desktop.png", "PNGDATA")] });
+  assert.equal(first.status, 200);
+  assert.equal(first.json.stored, 3);
+  assert.equal(first.json.alreadyStored, false);
+
+  // A repeat for the same revision is refused as a no-op rather than merged: re-uploading would rewrite history.
+  const again = await runner(t, "revisions/store", { jobId: c.id, leaseToken: c.leaseToken, cycle: 0, phase: "build",
+    files: [file("index.html", "<!doctype html><title>Junk</title><h1>TAMPERED</h1>")] });
+  assert.equal(again.json.alreadyStored, true);
+  assert.equal(again.json.stored, 0);
+  assert.equal(again.json.revisionId, first.json.revisionId);
+  const kept = await t.db.prepare(`SELECT size_bytes FROM build_revision_files WHERE revision_id = ? AND path = 'index.html'`).bind(first.json.revisionId).first<{ size_bytes: number }>();
+  assert.equal(kept!.size_bytes, Buffer.byteLength("<!doctype html><title>Junk</title><h1>v1</h1>"), "the first bytes are still the stored ones, not the second upload's");
+
+  // A second cycle is its own revision, side by side with the first.
+  const second = await runner(t, "revisions/store", { jobId: c.id, leaseToken: c.leaseToken, cycle: 1, phase: "repair", score: 6.9, reverted: true, revertedReason: "the repair lowered the score from 7.5 to 6.9",
+    files: [file("index.html", "<!doctype html><title>Junk</title><h1>v2</h1>")] });
+  assert.equal(second.status, 200);
+  assert.notEqual(second.json.revisionId, first.json.revisionId);
+  const rows = (await t.db.prepare(`SELECT cycle, phase, score, is_best, reverted, reverted_reason FROM build_revisions WHERE job_id = ? ORDER BY cycle`).bind(c.id).all<{ cycle: number; phase: string; score: number; is_best: number; reverted: number; reverted_reason: string | null }>()).results;
+  assert.deepEqual(rows.map((r) => [r.cycle, r.phase, r.is_best, r.reverted]), [[0, "build", 1, 0], [1, "repair", 0, 1]], "both revisions survive; the best is marked and the reverted one is kept");
+  assert.match(rows[1].reverted_reason!, /lowered the score/, "and says why it was rolled back");
+
+  // Refusals: a path outside the website, an unknown type, and a lease that is not this runner's.
+  for (const bad of ["../../etc/passwd", "/etc/passwd", "server.ts", ".env"]) {
+    const r = await runner(t, "revisions/store", { jobId: c.id, leaseToken: c.leaseToken, cycle: 2, phase: "build", files: [file(bad, "x")] });
+    assert.equal(r.status, 422, `must refuse ${bad}`);
+  }
+  assert.equal((await runner(t, "revisions/store", { jobId: c.id, leaseToken: "not-the-lease", cycle: 2, phase: "build", files: [file("index.html", "x")] })).json.error, "lease_lost");
+  assert.equal((await runner(t, "revisions/store", { jobId: c.id, leaseToken: c.leaseToken, cycle: 2, phase: "nonsense", files: [file("index.html", "x")] })).status, 422, "phase is checked");
+  assert.equal((await runner(t, "revisions/store", { jobId: c.id, leaseToken: c.leaseToken, cycle: 2, phase: "build", files: [] })).status, 422, "an empty snapshot is not a revision");
+  assert.equal((await t.db.prepare(`SELECT COUNT(*) AS n FROM build_revisions WHERE job_id = ? AND cycle = 2`).bind(c.id).first<{ n: number }>())!.n, 0,
+    "a refused upload leaves no partial revision behind");
+});
+
+// A requirement the RUNNER verified must survive a round-trip through the platform (real defect, run 5, 2026-11-03).
+// The platform already refuses "verified" without evidence on write and stores the evidence it was given -- but the
+// claim seed selected only key/label/status. A resumed segment therefore got status "verified" with no evidence, the
+// runner's own honesty rule downgraded it to implemented_unverified, and the quality scorecard reported
+// "requirements not verified: check:brief-conformance, ..." for seven checks that had all PASSED. That single false
+// failure then overruled the reviewer's correct WAIT_FOR_EXTERNAL_SETUP into a continuation with no corrective
+// prompt, and an 8.9/10 build was recorded as FAILED_NEEDS_INTERVENTION.
+test("[AIB-REQ-EVIDENCE] the claim seed carries a verified requirement's evidence, so a resumed segment does not re-judge it", async () => {
+  const t = await app();
+  await queuedProject(t);
+  const c = (await runner(t, "claim", { runnerId: "host-a" })).json.job;
+  await runner(t, "requirements", { jobId: c.id, leaseToken: c.leaseToken, items: [
+    { key: "check:quality-gates", label: "Acceptance gates A-J", status: "verified", evidence: "Runner ran `npm run gates`: exit 0" },
+    { key: "check:browser-check", label: "Headless Chromium", status: "blocked", blocker: "Chromium not installed" },
+  ] });
+  await runner(t, "complete", { jobId: c.id, leaseToken: c.leaseToken, outcome: "released", runCostUsd: 0, error: "segment limit" });
+
+  const seed = (await runner(t, "claim", { runnerId: "host-b" })).json.job.requirements as { key: string; status: string; evidence?: string; blocker?: string }[];
+  const gates = seed.find((r) => r.key === "check:quality-gates")!;
+  assert.equal(gates.status, "verified");
+  assert.match(gates.evidence ?? "", /exit 0/, "the evidence that justifies \"verified\" travels with it, or the runner must downgrade it again");
+  const browser = seed.find((r) => r.key === "check:browser-check")!;
+  assert.equal(browser.status, "blocked");
+  assert.match(browser.blocker ?? "", /Chromium not installed/, "a blocker is evidence too: it tells the resumed segment what is wrong");
 });
 
 // ── AI Website Builder readiness (2026-10-28): paid-provider second key, preview hosts, revision previews ──

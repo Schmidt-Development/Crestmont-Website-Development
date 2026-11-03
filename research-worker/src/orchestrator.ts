@@ -12,7 +12,7 @@ import type { Http } from "./http.ts";
 import type { SourceAdapter } from "./sources/types.ts";
 import type { CommonCrawl } from "./sources/commoncrawl.ts";
 import type { Browser } from "./browser.ts";
-import type { LocalModel } from "./model.ts";
+import type { DraftInput, LocalModel } from "./model.ts";
 import { Platform, PlatformError, type Controls } from "./crm-client.ts";
 import { evaluate, type Probe } from "./pipeline.ts";
 import { qualify, validateProspect, US_STATE_TZ, type WebsiteClass } from "../../src/domain/research.ts";
@@ -28,6 +28,11 @@ const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((r) => { c
 
 export interface WorkerDeps { cfg: Config; state: State; http: Http; platform: Platform; sources: SourceAdapter[]; cc: CommonCrawl | null; browser: Browser | null; model: LocalModel | null; log: Logger }
 
+/** A prospect waiting for its optional wording. Never on the path that evaluates or delivers it. */
+interface DraftJob { key: string; input: DraftInput; prospect: Record<string, unknown>; attempts: number }
+/** A draft deferred this many times for want of a GPU is dropped: the prospect keeps its evidence-only wording. */
+export const MAX_DRAFT_ATTEMPTS = 5;
+
 export class ResearchWorker {
   private controls: Controls = { paused: true, pauseReason: "waiting for the first heartbeat", qualifyThreshold: 60, maxBatch: 100, enabledSources: [], serverTime: "" };
   private readonly d: WorkerDeps;
@@ -39,6 +44,8 @@ export class ResearchWorker {
   /** Lowered after a 413 (payload too large) and kept for the life of the process, so a heartbeat cannot undo it. */
   private batchCap = Number.MAX_SAFE_INTEGER;
   private server: Server | null = null;
+  private readonly draftQueue: DraftJob[] = [];
+  private readonly draftStats = { queued: 0, done: 0, dropped: 0, deferrals: 0 };
   constructor(d: WorkerDeps) {
     this.d = d;
     try { Object.assign(this.classCounts, JSON.parse(d.state.getCheckpoint("classCounts") ?? "{}")); } catch { /* fresh */ }
@@ -53,7 +60,10 @@ export class ResearchWorker {
     return {
       day: now.toISOString().slice(0, 10), evaluated: day.evaluated, websitesChecked: day.websites_checked, failedJobs: day.failed_jobs, sentToday: day.sent,
       recordsPerHour: this.finishedAt.length, queueDepth: this.d.state.backlog(), outbox: this.d.state.outboxDepth(), stages: this.d.state.stages(), inFlight: this.inFlight,
-      classCounts: this.classCounts, sources: this.sourceStatus, model: this.d.model ? `${this.d.model.name} (${this.d.model.calls} calls, ${this.d.model.failures} failed)` : "off (no RESEARCH_MODEL)",
+      classCounts: this.classCounts, sources: this.sourceStatus,
+      model: this.d.model ? `${this.d.model.name} (${this.d.model.calls} calls, ${this.d.model.failures} failed, ${this.d.model.deferred} deferred for the GPU)` : "off (no RESEARCH_MODEL)",
+      // Optional drafting, reported apart from the pipeline: it never gates evaluation, qualification or delivery.
+      drafts: { pending: this.draftQueue.length, limit: this.d.cfg.model.draftQueueLimit, ...this.draftStats, gpu: this.d.model?.admission?.status() ?? "no GPU guard" },
       browser: this.d.browser ? "playwright" : "off", paused: this.paused, platform: this.platformState,
     };
   }
@@ -121,12 +131,16 @@ export class ResearchWorker {
       if (!out.send) { this.d.state.finish(row.business_key, out.prospect, new Date(), false); this.finishedAt.push(Date.now()); return; }
       const v = validateProspect(out.prospect);
       if (!v.ok) { this.d.state.fail(row.business_key, `invalid result: ${v.issues.join("; ")}`, now, 1); return; }
-      // Drafts only for prospects that qualify on the same deterministic rule the platform applies (saves GPU time).
+      // Drafts only for prospects that qualify on the same deterministic rule the platform applies (saves GPU time),
+      // and only off the critical path: the prospect is finished and delivered on its evidence now, and the wording
+      // is attached later if and when the shared GPU is free (draftLoop). A website build never waits for this.
       if (this.d.model && qualify(v.value, { threshold: this.controls.qualifyThreshold }).qualified) {
-        const dr = await this.d.model.draft({ name: c.name, category: c.category, city: c.address.city, state: c.address.state, websiteClass: out.cls as WebsiteClass,
-          websiteUrl: out.prospect.website.url ?? null, findings: out.prospect.findings ?? [], recommendedPackage: qualify(v.value).recommendedPackage, allowedDomains: out.prospect.domains ?? [] });
-        out.prospect.summary = dr.summary; out.prospect.brief = dr.brief; out.prospect.model = dr.summary || dr.brief ? dr.model : null;
-        if (dr.rejected.length) this.d.log.info("model draft rejected", { key: row.business_key, reasons: dr.rejected.slice(0, 3) });
+        if (this.draftQueue.length < this.d.cfg.model.draftQueueLimit) {
+          this.draftQueue.push({ key: row.business_key, attempts: 0, prospect: out.prospect as unknown as Record<string, unknown>,
+            input: { name: c.name, category: c.category, city: c.address.city, state: c.address.state, websiteClass: out.cls as WebsiteClass,
+              websiteUrl: out.prospect.website.url ?? null, findings: out.prospect.findings ?? [], recommendedPackage: qualify(v.value).recommendedPackage, allowedDomains: out.prospect.domains ?? [] } });
+          this.draftStats.queued++;
+        } else this.draftStats.dropped++;
       }
       this.d.state.finish(row.business_key, out.prospect, new Date());
       this.finishedAt.push(Date.now());
@@ -153,6 +167,36 @@ export class ResearchWorker {
     }
     // Graceful shutdown: let in-flight checks finish (bounded); unfinished leases simply expire and are redone.
     await Promise.race([Promise.allSettled([...running]), sleep(30_000)]);
+  }
+
+  // ───── draft (optional wording; lowest priority on this machine) ─────
+  /**
+   * Drains the draft queue one prospect at a time. Every draft asks the cooperative GPU gate first
+   * (gpu-admission.ts); a refusal re-queues the job and waits, so the Website Builder is never competed with. A
+   * drafted prospect goes back to `ready` and the next batch carries its wording — `evaluated` is not counted again.
+   */
+  async draftLoop(signal: AbortSignal): Promise<void> {
+    while (!signal.aborted) {
+      const job = this.paused || !this.d.model ? undefined : this.draftQueue.shift();
+      if (!job) { await sleep(5_000, signal); continue; }
+      try {
+        const dr = await this.d.model!.draft(job.input);
+        if (dr.deferred) {
+          this.draftStats.deferrals++;
+          job.attempts++;
+          if (job.attempts >= MAX_DRAFT_ATTEMPTS) { this.draftStats.dropped++; this.d.log.info("draft dropped: the GPU stayed busy", { key: job.key, reason: dr.deferredReason }); }
+          else if (this.draftQueue.length < this.d.cfg.model.draftQueueLimit) this.draftQueue.push(job);
+          else this.draftStats.dropped++;
+          await sleep(30_000, signal);
+          continue;
+        }
+        if (dr.rejected.length) this.d.log.info("model draft rejected", { key: job.key, reasons: dr.rejected.slice(0, 3) });
+        if (dr.summary || dr.brief) {
+          const prospect = { ...job.prospect, summary: dr.summary, brief: dr.brief, model: dr.model };
+          if (this.d.state.attachDraft(job.key, prospect, new Date())) this.draftStats.done++;
+        }
+      } catch (e) { this.d.log.warn("draft failed", { key: job.key, error: errMsg(e) }); }
+    }
   }
 
   // ───── deliver ─────
@@ -203,6 +247,7 @@ export class ResearchWorker {
       (async () => { while (!signal.aborted) { await sleep(this.d.cfg.pipeline.heartbeatMs, signal); if (!signal.aborted) await this.heartbeat(); } })(),
       (async () => { while (!signal.aborted) { if (!this.paused) await this.ingestOnce(signal).catch((e) => this.d.log.error("ingest loop error", { error: errMsg(e) })); await sleep(this.paused ? 10_000 : 3600_000, signal); } })(),
       this.workLoop(signal),
+      this.draftLoop(signal),
       (async () => { while (!signal.aborted) { await sleep(this.d.cfg.pipeline.batchFlushMs, signal); await this.deliverOnce().catch((e) => this.d.log.error("deliver loop error", { error: errMsg(e) })); } })(),
     ];
     await Promise.allSettled(loops);
