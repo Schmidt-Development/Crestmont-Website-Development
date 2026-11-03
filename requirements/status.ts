@@ -1,9 +1,17 @@
-// Explicit implementation records (READY-002). Passing tests never promote a requirement to
-// "implemented" on their own: a requirement is implemented only when every applicable layer in
-// §3 exists. Partial work is "in_progress" with a note of what is missing.
+// DOCUMENTATION ONLY since READY-013 (2026-11-02). These records no longer set any readiness status.
 //
-// Each product area owns one file in requirements/status/. Later files override earlier ones
-// for the same requirement id, so an area can upgrade a foundation record when it finishes it.
+// They used to be the source of truth for implementation status, asserted by hand. Nothing recomputed them
+// when engineering work landed, so Launch Readiness drifted from reality: the 2026-11-02 audit found eleven
+// merged-ready pull requests that moved the implemented count by zero, because none of them edited this
+// directory. Status is now DERIVED from evidence:
+//
+//   requirements/acceptance.ts  — what proves each requirement (the acceptance criteria and its gates)
+//   src/readiness/derive.ts     — the derivation: NOT_IMPLEMENTED → … → PRODUCTION_VERIFIED, BLOCKED, REGRESSED
+//   src/readiness/sync.ts       — recalculation on every ingest, deployment and blocker change
+//
+// What survives here is the `location` and `owner` text: a useful pointer to where a requirement lives, shown
+// on its dashboard page. syncRequirements still copies those two fields, and nothing else. Editing `status`
+// below changes NOTHING on the dashboard — change the evidence, or the acceptance rule, instead.
 
 export interface ImplementationRecord {
   status: "in_progress" | "implemented";
