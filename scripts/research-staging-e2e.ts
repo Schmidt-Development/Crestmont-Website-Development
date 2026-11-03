@@ -95,8 +95,16 @@ async function signedRaw(path: string, body: Record<string, unknown>, opts: { se
 }
 // Restoring the Owner's state means their pause reason too: resuming sets pause_reason to NULL
 // (src/services/research.ts#saveSettings), so re-pausing without it would quietly rewrite what they wrote.
-const settingsForm = (paused: boolean, s: { qualify_threshold: number; max_batch: number; pause_reason?: string | null }) => ({
+//
+// It also means `auto_promote`. It is a CHECKBOX on the Owner's form, and an unchecked checkbox is simply absent from
+// the body, so a post that leaves it out reads as "off". This script posts that form four times per run (resume,
+// pause, and the restore in `finally`), so omitting it silently switched automatic CRM promotion off on every deploy
+// — it did exactly that on 2026-11-03 at 21:12 UTC, 34 minutes after the Owner turned it on. Every field the Owner
+// controls is therefore read first and sent back unchanged; only `paused` is the one this script means to move.
+const settingsForm = (paused: boolean, s: { qualify_threshold: number; max_batch: number; pause_reason?: string | null; auto_promote?: number; auto_promote_max_per_run?: number }) => ({
   ...(paused ? { paused: "1", reason: (s.pause_reason ?? "").trim().length >= 3 ? String(s.pause_reason) : "Paused: restored by the research staging E2E" } : {}),
+  ...(Number(s.auto_promote ?? 0) === 1 ? { auto_promote: "1" } : {}),
+  ...(s.auto_promote_max_per_run === undefined ? {} : { auto_promote_max_per_run: String(s.auto_promote_max_per_run) }),
   threshold: String(s.qualify_threshold), max_batch: String(s.max_batch),
 });
 
@@ -141,7 +149,14 @@ async function main() {
     signedOk = true;
     assert((await signedRaw("/api/research/runner/heartbeat", { runnerId: RUNNER }, { nonce })) === 409, "replayed nonce accepted");
   });
-  const initial = (await q<{ paused: number; pause_reason: string | null; qualify_threshold: number; max_batch: number }>(`SELECT paused, pause_reason, qualify_threshold, max_batch FROM research_settings WHERE id = 1`))[0];
+  const initial = (await q<{ paused: number; pause_reason: string | null; qualify_threshold: number; max_batch: number; auto_promote?: number; auto_promote_max_per_run?: number }>(
+    `SELECT paused, pause_reason, qualify_threshold, max_batch FROM research_settings WHERE id = 1`))[0];
+  // Read separately and tolerantly: on an environment where migration 0073 has not been applied the columns do not
+  // exist, and that must leave the rest of the run working rather than failing it. When they are absent
+  // settingsForm leaves them out of the post, which is correct — there is nothing to preserve.
+  const promoteCols = (await q<{ auto_promote: number; auto_promote_max_per_run: number }>(
+    `SELECT auto_promote, auto_promote_max_per_run FROM research_settings WHERE id = 1`).catch(() => []))[0];
+  if (promoteCols) { initial.auto_promote = Number(promoteCols.auto_promote); initial.auto_promote_max_per_run = Number(promoteCols.auto_promote_max_per_run); }
   const all = accounts();
   const owner = all.find((a) => a.role === "owner"), sales = all.find((a) => a.role === "sales");
   if (!owner || !initial) { results.push({ id: "owner.session", ok: false, detail: !initial ? "research_settings missing" : "no owner demo account" }); return; }
@@ -367,7 +382,16 @@ async function main() {
     assert(after.paused === initial.paused, `paused ${initial.paused} → ${after.paused}`);
     assert(after.qualify_threshold === initial.qualify_threshold && after.max_batch === initial.max_batch, "threshold or batch size changed");
     if (initial.paused) assert((after.pause_reason ?? "") === (initial.pause_reason ?? ""), "the Owner's pause reason was rewritten");
-    return `paused ${after.paused}, threshold ${after.qualify_threshold}, max_batch ${after.max_batch} (unchanged)`;
+    // The switch that lets the 15-minute job create CRM leads is the Owner's decision, not this script's. Asserted
+    // rather than trusted, because the only reason it is in settingsForm is that leaving it out turned it off.
+    let promote = "";
+    if (initial.auto_promote !== undefined) {
+      const ap = (await q<{ auto_promote: number; auto_promote_max_per_run: number }>(`SELECT auto_promote, auto_promote_max_per_run FROM research_settings WHERE id = 1`))[0];
+      assert(Number(ap.auto_promote) === Number(initial.auto_promote), `auto_promote ${initial.auto_promote} → ${ap.auto_promote}: this run changed the Owner's automatic promotion switch`);
+      assert(Number(ap.auto_promote_max_per_run) === Number(initial.auto_promote_max_per_run), `the per-run promotion cap changed from ${initial.auto_promote_max_per_run} to ${ap.auto_promote_max_per_run}`);
+      promote = `, auto_promote ${ap.auto_promote}, cap ${ap.auto_promote_max_per_run}`;
+    }
+    return `paused ${after.paused}, threshold ${after.qualify_threshold}, max_batch ${after.max_batch}${promote} (unchanged)`;
   });
   // What THIS run did, attributed by its own runner id. Table-wide deltas are reported too, but they are not this
   // run's work: other writers (the previous deploy's E2E) and D1 read replicas both move them, which is why a run
