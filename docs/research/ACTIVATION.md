@@ -1,12 +1,38 @@
 # Research Agent — activation status and the minimum Founder action
 
-Prepared **2026-11-02** for the 24/7 activation request. Capacity and funnel evidence: `CAPACITY.md`. Operating
-procedure: `RUNBOOK.md` §9. Calling rules, unchanged: `COMPLIANCE-GATE.md`.
+Prepared **2026-11-02** for the 24/7 activation request; step 1 executed **2026-11-03**. Capacity and funnel
+evidence: `CAPACITY.md`. Operating procedure: `RUNBOOK.md` §9. Calling rules, unchanged: `COMPLIANCE-GATE.md`.
 
-## Status: BLOCKED on one thing, and it is not code
+## Step 1 of 4: DONE — merged, deployed to staging, migration applied
+
+| Item | Evidence |
+|---|---|
+| Pull request | #121, merged |
+| Merge commit on `main` | `b640f4ea5f7e1a92f670b1050ef2f079d88f8ea5` |
+| CI | run 41544681119 — **success** |
+| Windows PowerShell 5.1 parse check | run 41544681192 — **success** (it first caught a real parse error in the installer; see "Defect fixed", second item) |
+| Staging deploy | run 41545553463 (#125) — **success**, end to end |
+| **Migration applied** | `Migrations to be applied: 0070_research_runner_samples.sql` → `0070_research_runner_samples.sql ✅`, the only pending migration |
+| Research API + dashboard after deploy | lead-research staging E2E **14 of 14 passed** against live staging D1 |
+| Owner's controls after the run | `research.owner_controls_restored — paused 1, threshold 60, max_batch 200 (unchanged)` |
+| Outbound gate | `research.no_automated_calling` passed; `4834 businesses on record; callable 0` |
+| Unrelated regressions | none: deploy #125 was fully green, unlike #124 (which failed its CRM duplicate-protection gate, a pre-existing issue outside research) |
+
+Two things that run confirmed beyond the deploy itself:
+
+- **The runner-attributed metrics fix works.** `research.deltas — this run: 2 batches, 14 records received, 0 created,
+  7 updated, 0 rejected, 0 CRM leads | table totals moved +0 prospects / +2 batches`. The table-wide delta is now +0
+  where it previously read +54 for a run that sent 7 records, which confirms the earlier figure was replica lag and
+  other writers rather than this run's work. The run legitimately created nothing: it re-researched the same daily
+  slice, so 7 records were **updated**.
+- **Nothing was promoted**, because the slice held no qualified prospect
+  (`research.promote_into_staging_crm — no qualified prospect in this batch`).
+
+## Steps 2-4: BLOCKED on one thing, and it is not code
 
 **The Research Worker is NOT running, and this session could not start it.** Activation has to happen on Node 1, the
-Founder's Windows workstation. This session is a cloud container, and it has no route there:
+Founder's Windows workstation. This session is a cloud container, and it has no route there (re-checked at the start
+of the activation attempt, not assumed from the earlier session):
 
 | Route checked | Result |
 |---|---|
@@ -20,15 +46,10 @@ measurement window has **not** started, because nothing is producing data to mea
 
 ## The minimum Founder action, in order
 
-Everything that could be prepared without Node 1 has been (see "What is ready" below). These four steps are what
-remains, and only the first two need a person at the keyboard.
+Step 1 is done (above). Steps 2-4 remain, and **only step 2 needs a person at the keyboard** — or a Claude session
+with a route to Node 1, which would then do 2-4 unattended.
 
-1. **Merge the research branch to `main`** (`claude/eager-babbage-coz56n`). This matters for a reason beyond code
-   shipping: merging to `main` deploys **staging**, which applies **migration 0070** and creates
-   `research_runner_samples`. Without that table there is no 15-minute metric series, so a 24-hour report can show
-   end-of-day totals and delivery times but **not hourly throughput, the peak sustained hour, or the best and worst
-   periods** — which is most of what the proof run is for. No pull request was opened and nothing was merged: that is
-   the Founder's call, through the existing protected workflow.
+1. ~~**Merge the research branch to `main`**~~ — done: PR #121, `b640f4e`, migration `0070` applied to staging.
 2. **Run the installer on Node 1**, in an elevated PowerShell, from a checkout of this repository at that merge
    (`RUNBOOK.md` §9 has the annotated version):
 
