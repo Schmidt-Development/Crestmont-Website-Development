@@ -193,6 +193,83 @@ promoted automatically — a shared phone number or two records of one business 
 Creating a CRM lead releases nobody for calling: outbound eligibility is computed fail-closed
 (`src/domain/research.ts#outboundEligibility`) and stays `blocked`.
 
+## 11. The 25-leads-per-minute import rate
+
+What the target means: **successfully persisted, genuinely new CRM leads**, counted from the `leads` table. An
+existing-contact match, a duplicate, a suppressed record, a review case and a failed attempt all count for nothing,
+because none of them is a new lead. `importRate()` reads the rows; the promoter's own counters are reported beside
+them so a disagreement is visible rather than invisible.
+
+### How it is reached
+
+| | Before | Now |
+|---|---|---|
+| Schedule | `*/15`, 11th of 12 jobs | **`* * * * *`, alone on its tick** |
+| Sequential D1 round trips per promotion | 11.7 | **5.6** |
+| Promotions in flight | 1 | **8** |
+| Per invocation | 12-13 observed | **up to 100** |
+| Sustained rate | ~0.85/minute | measured in staging certification |
+
+Three things had to change together, and the schedule was the largest: a job that runs four times an hour cannot
+meet a per-minute target however fast each run is.
+
+### Why concurrency is safe here
+
+Serial execution was doing a job beyond ordering. When two prospects share a phone number, an email or a company
+domain, the second one used to see the contact the first had just created and was parked at `existing_crm` instead of
+creating a second lead. Run them at the same time and both evaluate against a CRM that does not yet contain the
+other, and both could create one.
+
+So the race is removed rather than mitigated: a batch never contains two prospects that share an identifier
+(`phone_norm`, email, domain), and the ones left out are the next tick's work, counted in `deferred_identity`. Every
+promotion still goes through the CRM intake engine, so customer matching, do-not-call, email suppression, erasure,
+duplicate review, the idempotency key and the audit record all apply exactly as they do to a human promotion.
+
+### The limits it is built against
+
+- **D1 allows 1,000 queries per Worker invocation**, a `batch()` counting as one. At ~8.3 round trips per promotion
+  that is ~120, so `MAX_PER_INVOCATION` stops a run at **100** whatever the Owner's cap says, recording
+  `query_limit` — the next tick continues, rather than the invocation being killed mid-batch.
+- **30 s of CPU per sub-hourly Cron Trigger** on Workers Paid, with a 15-minute duration cap. The run budget is
+  **40 s of WALL time**, which is a different thing: a promotion spends its time waiting on D1, and measured compute
+  is about 2 ms each.
+- **Cron Triggers: 250 per account** on Workers Paid.
+- **D1 Paid: 25 billion rows read and 50 million written per month.** Rows read are negligible. Rows written are the
+  meter that binds, and the certification measures them per lead rather than estimating.
+
+### Overlap, recovery and the no-op case
+
+A run takes a lease before it starts: one row, one conditional `UPDATE`, which is a correct compare-and-swap because
+a single D1 statement is atomic. It carries an expiry rather than a flag, so a Worker killed mid-run cannot wedge the
+schedule — the lease goes stale and the next tick takes it — and it is released in a `finally`, so an exception
+cannot hold it either. A run that cannot take it records `locked` and touches nothing.
+
+With the Owner's switch off, or nothing eligible, the tick is two reads, one small run row and no writes to the CRM.
+It does not audit, because 1,440 rows a day of nothing would bury the log that real decisions are read from.
+Retention deletes scheduled run rows after 90 days and keeps every run a person triggered.
+
+### Certifying it
+
+```bash
+gh workflow run research-promotion-certify.yml --ref main -f minutes=60 -f target=25
+```
+
+Add `-f observe_minutes=60` to let the Cron Trigger work for an hour first and then certify the hour that just
+elapsed. It is read-only: it promotes nothing and measures only what the schedule did unattended, which is the only
+thing worth certifying.
+
+**A drained backlog is success, not a shortfall.** Once nothing is eligible the rate falls to whatever research
+delivers, so the certification splits the window where `remaining` hits zero and judges the target only over the
+minutes when there was work. The ops alert works the same way: `promotion_below_target` needs both a rate under
+target and at least 250 eligible prospects waiting, so it can never fire because the system succeeded.
+
+### Supply, not throughput, is the ceiling
+
+The rate is bounded by eligible prospects, and that is a research question, not a promotion one. 15,000 imports in
+24 hours needs 15,000 eligible prospects; research has been measured producing about 5,050 qualified a day, which at
+the 21.01% qualification rate needs ~71,000 evaluations a day to reach 15,000. Draining a backlog is quick; refilling
+it is the slow part (`CAPACITY.md` §4). Read the backlog figure before reading the rate.
+
 ## 5. Troubleshooting
 | Symptom | Check / fix |
 |---|---|
