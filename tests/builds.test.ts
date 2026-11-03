@@ -184,6 +184,54 @@ test("[AIB-002] controlled-fixture pipeline: one durable job → one leased sess
   assert.equal((await t.db.prepare(`SELECT status FROM projects WHERE id = ?`).bind(pid).first<{ status: string }>())!.status, "scope_review", "approval changes no project or delivery state on its own");
 });
 
+// Package caps are MAXIMUMS under the global ceiling, not reservations and not additive: with a ceiling of 4,
+// "starter 1" means at most one of those four slots may hold a Starter build, never that one is held for it. A
+// package already at its cap is SKIPPED rather than blocking the queue, so the node keeps working.
+test("[AIB-SCHED] package caps are maximums, and a capped package is skipped so another package's build starts now", async () => {
+  const t = await app();
+  await t.db.prepare(`UPDATE build_settings SET max_concurrent = 4`).run();
+  await t.db.prepare(`UPDATE build_package_caps SET max_concurrent = 1 WHERE package_id = 'starter'`).run();
+  const a = await queuedProject(t), b = await queuedProject(t), c = await queuedProject(t);
+  // Two Starter builds and one Business build are all waiting.
+  await t.db.prepare(`UPDATE build_jobs SET package_id = 'business' WHERE id = ?`).bind(c.job.id).run();
+
+  const first = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  assert.ok(first, "the first claim gets work");
+  assert.equal(first.packageId, "starter", "the oldest paid order is a Starter build");
+
+  const second = (await runner(t, "claim", { runnerId: "r2" })).json.job;
+  assert.ok(second, "the node does not idle behind a package that is at its maximum");
+  assert.equal(second.packageId, "business", "Starter is at its cap of 1, so the Business build starts instead");
+
+  const third = await runner(t, "claim", { runnerId: "r3" });
+  assert.equal(third.json.job, null, "the only work left is a second Starter build, and Starter is capped at 1");
+  const active = await t.db.prepare(`SELECT package_id, COUNT(*) AS n FROM build_jobs WHERE state IN ('preparing','building','verifying') GROUP BY package_id`).all();
+  assert.deepEqual(Object.fromEntries(active.results.map((r) => [r.package_id, r.n])), { starter: 1, business: 1 },
+    "two of the four global slots are used: the caps are maximums, not three reserved slots plus one");
+  void a; void b;
+});
+
+// FIFO runs on when the order was ACCEPTED (its first package invoice was paid), not when the job row was made, so a
+// pause, a requeue or a revision cannot send an older paid order to the back of the queue.
+test("[AIB-SCHED] FIFO follows the paid order's acceptance time, and survives a requeue", async () => {
+  const t = await app();
+  await t.db.prepare(`UPDATE build_settings SET max_concurrent = 1`).run();
+  const early = await queuedProject(t);   // job row created FIRST
+  const late = await queuedProject(t);    // job row created SECOND
+  // ... but the second customer actually paid a day earlier.
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString();
+  await t.db.prepare(`UPDATE invoices SET paid_at = ? WHERE order_id = ?`).bind(yesterday, late.order.orderId).run();
+
+  const first = (await runner(t, "claim", { runnerId: "r1" })).json.job;
+  assert.equal(first.projectId, late.pid, "the order accepted a day earlier goes first, though its job row is newer");
+
+  // Requeue it: the queue position must not move to the back.
+  await t.db.prepare(`UPDATE build_jobs SET state = 'queued', lease_runner = NULL, lease_token_hash = NULL, updated_at = ? WHERE id = ?`).bind(new Date().toISOString(), first.id).run();
+  const again = (await runner(t, "claim", { runnerId: "r2" })).json.job;
+  assert.equal(again.projectId, late.pid, "after a requeue it is still first: acceptance time is immutable, the job row's is not");
+  void early;
+});
+
 test("[AIB-003] concurrency: parallel claims never hand one job to two runners, and the concurrent-build limit holds", async () => {
   const t = await app();
   await t.db.prepare(`UPDATE build_settings SET max_concurrent = 1`).run();

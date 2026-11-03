@@ -17,6 +17,7 @@
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { HttpError } from "../app/http.ts";
+import { audit } from "./security.ts";
 
 export const GALLERY_TARGET = 50;
 /** References handed to one build. Enough to synthesise from, few enough to keep the model's context useful. */
@@ -87,8 +88,10 @@ export async function listReferences(db: Db, f: ListFilter = {}): Promise<{ rows
   if (f.q) { where.push("(title LIKE ? OR source_name LIKE ? OR quality_notes LIKE ?)"); const like = `%${f.q.slice(0, 60)}%`; bind.push(like, like, like); }
   if (f.tag) { where.push("style_tags_json LIKE ?"); bind.push(`%"${f.tag.slice(0, 40)}"%`); }
   const clause = where.join(" AND ");
-  const limit = Math.max(1, Math.min(200, f.limit ?? 60));
-  const offset = Math.max(0, f.offset ?? 0);
+  // Both of these arrive from a query string, so they can be anything. An out-of-range or fractional value must not
+  // reach SQL: 1e20 is not a representable integer to bind, and the page answered 500 instead of an empty list.
+  const limit = Math.max(1, Math.min(200, Math.floor(Number(f.limit) || 60)));
+  const offset = Math.min(1_000_000, Math.max(0, Math.floor(Number(f.offset) || 0)));
   const total = (await db.prepare(`SELECT COUNT(*) AS n FROM design_references WHERE ${clause}`).bind(...bind).first<{ n: number }>())?.n ?? 0;
   const rows = (await db.prepare(`SELECT * FROM design_references WHERE ${clause} ORDER BY updated_at DESC LIMIT ? OFFSET ?`).bind(...bind, limit, offset).all<DesignReference>()).results;
   return { rows, total };
@@ -136,6 +139,7 @@ export async function addReference(db: Db, r: NewReference, actorUserId: string 
       r.typographyNotes ?? null, r.layoutNotes ?? null, r.colorNotes ?? null, r.animationNotes ?? null, r.responsiveNotes ?? null, r.qualityNotes ?? null,
       rights, r.rightsNote ?? null, at, r.checksum ?? null, actorUserId, at, at).run();
   await recordEvent(db, id, "created", actorUserId, null, undefined, { title, industry, rights }, at);
+  await audit(db, { actorUserId, action: "design_gallery.reference_added", subjectType: "design_reference", subjectId: id, details: { title, industry, rights } });
   await bumpVersion(db, at);
   return id;
 }
@@ -152,6 +156,8 @@ export async function decide(db: Db, id: string, decision: Decision, actorUserId
   await db.prepare(`UPDATE design_references SET status = ?, updated_at = ?, version = version + 1 WHERE id = ?`).bind(status, at, id).run();
   await recordEvent(db, id, decision === "approve" ? "approved" : decision === "reject" ? "rejected" : decision === "disable" ? "disabled" : "enabled",
     actorUserId, note, { status: before.status }, { status }, at);
+  const auditAction = { approve: "design_gallery.reference_approved", reject: "design_gallery.reference_rejected", disable: "design_gallery.reference_disabled", enable: "design_gallery.reference_enabled" }[decision];
+  await audit(db, { actorUserId, action: auditAction, subjectType: "design_reference", subjectId: id, details: { decision, from: before.status, to: status, note } });
   await bumpVersion(db, at);
   return (await getReference(db, id))!;
 }
@@ -183,6 +189,7 @@ export async function editReference(db: Db, id: string, e: ReferenceEdit, actorU
   const at = now.toISOString();
   await db.prepare(`UPDATE design_references SET ${sets.join(", ")}, updated_at = ?, version = version + 1 WHERE id = ?`).bind(...bind, at, id).run();
   await recordEvent(db, id, "edited", actorUserId, null, before, e, at);
+  await audit(db, { actorUserId, action: "design_gallery.reference_edited", subjectType: "design_reference", subjectId: id, details: { fields: Object.keys(e) } });
   await bumpVersion(db, at);
   return (await getReference(db, id))!;
 }
@@ -198,6 +205,7 @@ export async function removeReference(db: Db, id: string, actorUserId: string | 
   const at = now.toISOString();
   await db.prepare(`UPDATE design_references SET deleted_at = ?, deleted_by = ?, updated_at = ?, version = version + 1 WHERE id = ?`).bind(at, actorUserId, at, id).run();
   await recordEvent(db, id, "removed", actorUserId, null, { status: before.status }, null, at);
+  await audit(db, { actorUserId, action: "design_gallery.reference_removed", subjectType: "design_reference", subjectId: id, details: { status: before.status, title: before.title } });
   await bumpVersion(db, at);
 }
 

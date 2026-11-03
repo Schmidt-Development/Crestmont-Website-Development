@@ -203,6 +203,13 @@ async function buildStaffRecords(w: World) {
   ids.portfolioFile = (await one<{ id: string }>(db, `SELECT desktop_screenshot_file_id AS id FROM portfolio_projects WHERE id = ?`, ids.portfolio)).id;
   await ok(o.post(`/staff/portfolio/${ids.portfolio}/testimonials`, { author: "A. Person", body: "Great to work with on this site.", evidence: "Email from author dated 2026-10-26 granting permission" }), "testimonial");
   ids.testimonial = (await one<{ id: string }>(db, `SELECT id FROM testimonials ORDER BY created_at DESC LIMIT 1`)).id;
+  // One design reference for the gallery routes. Inserted directly: the upload route takes a multipart image, and
+  // the matrix only needs an id that exists to aim another tenant's request at.
+  ids.designReference = "dref_matrixseed000000000000000001";
+  await w.env.overrides!.storage!.put("design-gallery/matrix-seed.png", PNG, "image/png");
+  await db.prepare(`INSERT INTO design_references (id, title, industry, style_tags_json, status, ai_eligible, desktop_key, rights_basis, rights_note, checksum, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(ids.designReference, "Matrix seed reference", "general", "[]", "APPROVED", 1, "design-gallery/matrix-seed.png", "own_work", "Crestmont's own work", "0".repeat(64), new Date().toISOString(), new Date().toISOString()).run();
   // Readiness
   await ok(o.post("/staff/readiness/blockers/new", { category: "security", severity: "high", description: "Matrix blocker description", subsystem: "Authentication", owner: "Engineering", required_action: "Scope cookie to app domain", dependency: "", requirement_ids: "AUTH-007" }), "blocker");
   ids.blocker = (await one<{ id: string }>(db, `SELECT id FROM blockers ORDER BY created_at DESC LIMIT 1`)).id;

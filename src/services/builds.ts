@@ -432,15 +432,33 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
   const s = await getBuildSettings(db);
   if (s.globally_paused || !s.automation_enabled) return { job: null, reason: "paused" as const };
   if (await activeCount(db) >= s.max_concurrent) return { job: null, reason: "at_capacity" as const };
+  // Package caps are MAXIMUMS under that same global ceiling -- not reservations, and not additive. They stop one
+  // package's backlog occupying the whole node. A package with no cap row is bound by the global ceiling alone.
+  const caps = new Map((await db.prepare(`SELECT package_id, max_concurrent FROM build_package_caps`).all<{ package_id: string; max_concurrent: number }>()).results.map((r) => [r.package_id, r.max_concurrent] as const));
+  const activeByPackage = new Map((await db.prepare(`SELECT package_id, COUNT(*) AS n FROM build_jobs WHERE state IN ('preparing','building','verifying') GROUP BY package_id`).all<{ package_id: string | null; n: number }>()).results.map((r) => [r.package_id ?? "", r.n] as const));
+  const capFor = (pkg: string | null) => Math.min(s.max_concurrent, caps.get(pkg ?? "") ?? s.max_concurrent);
+  // FIFO runs on when the customer's order was ACCEPTED (its first package invoice was paid), not when this job row
+  // was made. A retry reuses the job, but a pause, a resume or a revision does not, and a build that waited a day
+  // must not fall behind one ordered this morning because its row is newer. The order's paid_at never changes, so
+  // the queue position survives retries, pauses, restarts and requeues. Builds with no paid order (internal work)
+  // fall back to the job's own arrival.
   const rows = worker
-    ? (await db.prepare(`SELECT j.*, COALESCE(pl.priority, 0) AS _priority FROM build_jobs j JOIN build_assignments a ON a.project_id = j.project_id AND a.released_at IS NULL AND a.worker_id = ?
+    ? (await db.prepare(`SELECT j.*, COALESCE(pl.priority, 0) AS _priority,
+          COALESCE((SELECT MIN(i.paid_at) FROM invoices i WHERE i.order_id = j.order_id AND i.status = 'paid' AND i.paid_at IS NOT NULL), j.created_at) AS _accepted
+        FROM build_jobs j JOIN build_assignments a ON a.project_id = j.project_id AND a.released_at IS NULL AND a.worker_id = ?
         LEFT JOIN build_project_controls c ON c.project_id = j.project_id LEFT JOIN build_pipeline pl ON pl.project_id = j.project_id
-        WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?) AND COALESCE(c.paused,0) = 0 ORDER BY COALESCE(pl.priority, 0) DESC, j.created_at LIMIT 200`).bind(worker.id, at).all<BuildJob & { _priority: number }>()).results
-    : (await db.prepare(`SELECT j.*, COALESCE(pl.priority, 0) AS _priority FROM build_jobs j LEFT JOIN build_project_controls c ON c.project_id = j.project_id LEFT JOIN build_pipeline pl ON pl.project_id = j.project_id
-      WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?) AND COALESCE(c.paused,0) = 0 ORDER BY COALESCE(pl.priority, 0) DESC, j.created_at LIMIT 200`).bind(at).all<BuildJob & { _priority: number }>()).results;
-  // Founder priority first, raised by waiting time (no starvation); then arrival.
-  const candidates = rows.map((r) => ({ r, e: effectivePriority(r._priority, r.created_at, now) })).sort((a, b) => b.e - a.e || (a.r.created_at < b.r.created_at ? -1 : a.r.created_at > b.r.created_at ? 1 : 0)).map((x) => x.r).slice(0, 10);
+        WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?) AND COALESCE(c.paused,0) = 0 ORDER BY COALESCE(pl.priority, 0) DESC, _accepted LIMIT 200`).bind(worker.id, at).all<BuildJob & { _priority: number; _accepted: string }>()).results
+    : (await db.prepare(`SELECT j.*, COALESCE(pl.priority, 0) AS _priority,
+          COALESCE((SELECT MIN(i.paid_at) FROM invoices i WHERE i.order_id = j.order_id AND i.status = 'paid' AND i.paid_at IS NOT NULL), j.created_at) AS _accepted
+        FROM build_jobs j LEFT JOIN build_project_controls c ON c.project_id = j.project_id LEFT JOIN build_pipeline pl ON pl.project_id = j.project_id
+      WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?) AND COALESCE(c.paused,0) = 0 ORDER BY COALESCE(pl.priority, 0) DESC, _accepted LIMIT 200`).bind(at).all<BuildJob & { _priority: number; _accepted: string }>()).results;
+  // Founder priority first, raised by waiting time since the order was accepted (no starvation); then that same
+  // acceptance time, so the oldest paid order goes first.
+  const candidates = rows.map((r) => ({ r, e: effectivePriority(r._priority, r._accepted, now) })).sort((a, b) => b.e - a.e || (a.r._accepted < b.r._accepted ? -1 : a.r._accepted > b.r._accepted ? 1 : 0)).map((x) => x.r).slice(0, 10);
   for (const c of candidates) {
+    // Skipping a capped package rather than stopping is what keeps the node busy: the next waiting package's build
+    // starts now instead of the whole queue idling behind a package that is already at its maximum.
+    if ((activeByPackage.get(c.package_id ?? "") ?? 0) >= capFor(c.package_id)) continue;
     const budget = await projectBudgetMicro(db, c.project_id, s);
     const spent = await projectSpendMicro(db, c.project_id);
     if (spent >= budget) { await transition(db, c, "budget_paused", `Project budget reached ($${microToUsd(spent).toFixed(2)} of $${microToUsd(budget).toFixed(2)}); raise the limit to continue`, { kind: "system" }); continue; }
@@ -451,8 +469,9 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
         run_started_at = ?, started_at = COALESCE(started_at, ?), attempts = attempts + 1, stop_reason = NULL, worker_id = COALESCE(?, worker_id), updated_at = ?,
         quality_required = ?, starter_ref = ?
       WHERE id = ? AND state = 'queued' AND (SELECT COUNT(*) FROM build_jobs WHERE state IN ('preparing','building','verifying')) < ?
+        AND (SELECT COUNT(*) FROM build_jobs WHERE package_id IS ? AND state IN ('preparing','building','verifying')) < ?
         AND (? IS NULL OR (SELECT COUNT(*) FROM build_jobs WHERE worker_id = ? AND state IN ('preparing','building','verifying')) < (SELECT max_active_projects FROM build_workers WHERE id = ?))`)
-      .bind(runnerId, await sha256Hex(token), leaseUntil, at, at, at, worker?.id ?? null, at, pick.quality ? 1 : 0, pick.ref, c.id, s.max_concurrent, worker?.id ?? null, worker?.id ?? null, worker?.id ?? null).run();
+      .bind(runnerId, await sha256Hex(token), leaseUntil, at, at, at, worker?.id ?? null, at, pick.quality ? 1 : 0, pick.ref, c.id, s.max_concurrent, c.package_id ?? null, capFor(c.package_id), worker?.id ?? null, worker?.id ?? null, worker?.id ?? null).run();
     if (!r.meta?.changes) continue; // another runner won this job (or capacity filled): try the next
     const job = (await getJob(db, c.id))!;
     await db.prepare(`INSERT OR IGNORE INTO build_runs (id, job_id, attempt, runner_id, started_at, session_id, zero_cost) VALUES (?,?,?,?,?,?,?)`)

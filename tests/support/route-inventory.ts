@@ -26,6 +26,7 @@ export type ResourceKind =
   | "org" | "project" | "file" | "file2" | "shareLink" | "shareToken" | "changeOrder" | "ticket" | "invoice" | "paidInvoice" | "payment"
   | "session" | "revision" | "milestone" | "task" | "task2" | "assignment" | "refund" | "message" | "approvalRequest" | "customerInvitation"
   | "lead" | "leadTask" | "aiJob" | "quote" | "quoteToken" | "cmsRevision" | "cmsKey" | "portfolio" | "portfolioSlug" | "portfolioFile"
+  | "designReference"
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
@@ -498,6 +499,13 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/builds/diagnostics": staff(rolesWith("builds.configure")),
   "POST /staff/builds/diagnostics": staff(rolesWith("builds.configure"), undefined, act("builds.diagnostic_created")),
   "GET /staff/builds/diagnostics/:id": staff(rolesWith("builds.configure"), P("runnerDiagnostic")),
+  "GET /staff/builds/gallery": staff(rolesWith("builds.read")),
+  "GET /staff/builds/gallery/:id": staff(rolesWith("builds.read"), P("designReference")),
+  "GET /staff/builds/gallery/:id/image": staff(rolesWith("builds.read"), P("designReference")),
+  "POST /staff/builds/gallery/add": staff(rolesWith("builds.configure"), undefined, act("design_gallery.reference_added")),
+  "POST /staff/builds/gallery/:id/decide": staff(rolesWith("builds.configure"), P("designReference"), act("design_gallery.reference_approved")),
+  "POST /staff/builds/gallery/:id/edit": staff(rolesWith("builds.configure"), P("designReference"), act("design_gallery.reference_edited")),
+  "POST /staff/builds/gallery/:id/remove": staff(rolesWith("builds.configure"), P("designReference"), act("design_gallery.reference_removed")),
   "GET /staff/builds/:id": staff(rolesWith("builds.read"), P("buildJob")),
   "POST /staff/builds/pause": staff(rolesWith("builds.manage"), undefined, act("builds.paused_globally")),
   "POST /staff/builds/settings": staff(rolesWith("builds.configure"), undefined, act("builds.settings_updated")),
