@@ -6,7 +6,7 @@ Shared safeguards, not 231 separate systems: each failure mode is covered by one
 - The gates A-J are implemented in runner/starters/fullstack-v1/scripts/gates.mjs, not in runner/src, which is why they are easy to miss when reading the runner. Mapping the remaining rows means reading that script against each row; that is the next step and it has not been taken.
 - Five rows the source inventory recorded as verified cited test files that did not exist here. Two (E03, E04) were already covered by differently-named tests and have been re-cited. Three (F15, F16, F20) depended on a quality ratchet that was genuinely absent; the ratchet rule and the git restore it needs have since been brought in and wired into the cycle loop, driven by the quality scorecard this runner already computes so no second notion of quality is introduced alongside it.
 
-Generated 2026-11-03T05:50:49.290Z from 246 failure modes.
+Generated 2026-11-03T07:42:14.956Z from 246 failure modes.
 
 | status | rows |
 | --- | --- |

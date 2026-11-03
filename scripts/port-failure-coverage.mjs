@@ -134,9 +134,12 @@ for (const [name, k] of Object.entries(KNOWN_FAILING_TESTS)) {
 md.push("## Shared safeguards", "");
 for (const [id, s] of Object.entries(SAFEGUARDS)) md.push(`**${id}. ${s.name}**`, "", `- Where: ${s.where}`, `- Proven by: \`${s.test}\``, "");
 
+// A markdown table cell: backslashes first (escaping the pipe first would then be undone), then pipes, then
+// newlines, which would otherwise end the row.
+const cell = (v) => String(v ?? "-").replaceAll("\\", "\\\\").replaceAll("|", "\\|").replace(/\r?\n/g, " ");
 md.push("## Rows that are not OPEN", "", "| id | failure mode | status | safeguards | proven by |", "| --- | --- | --- | --- | --- |");
 for (const r of rows.filter((x) => x.status !== "OPEN")) {
-  md.push(`| ${r.id} | ${r.description} | ${r.status} | ${(r.safeguards ?? []).join(", ") || "-"} | ${String(r.test ?? "-").replace(/\|/g, "\\|")} |`);
+  md.push(`| ${r.id} | ${cell(r.description)} | ${r.status} | ${(r.safeguards ?? []).join(", ") || "-"} | ${cell(r.test)} |`);
 }
 
 md.push("", "### Why", "");

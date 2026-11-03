@@ -1,6 +1,6 @@
 {
   "schema": "crestmont.failure-coverage/2",
-  "generatedAt": "2026-11-03T05:50:49.290Z",
+  "generatedAt": "2026-11-03T07:42:14.956Z",
   "principle": "Shared safeguards, not 231 separate systems: each failure mode is covered by one of the mechanisms in `safeguards`, and a row leaves OPEN only when a named test in THIS repository proves that mechanism catches it.",
   "honesty": [
     "OPEN means not investigated in this repository yet. It does not mean the failure cannot happen, and it does not mean it is uncovered.",

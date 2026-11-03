@@ -170,7 +170,7 @@ test("[AIB-PREVIEW] the inspect page shows the stored revisions, the best one, a
   assert.match(page, /Best verified/, "the ratchet's best revision is marked");
   assert.match(page, /Rolled back/, "and the rolled-back one is still here");
   assert.match(page, /the repair lowered the quality score from 7\.5 to 6\.9/, "with the runner's own reason");
-  assert.match(page, new RegExp(`/staff/builds/${job}/rev/1-0/index\.html`), "the preview frame points at the stored revision");
+  assert.ok(page.includes(`/staff/builds/${job}/rev/1-0/index.html`), "the preview frame points at the stored revision");
   assert.match(page, /screenshots\/home-desktop\.png/, "the reviewer's screenshot is shown");
   assert.match(page, /assets\/site\.css/, "and the file list names what the revision contains");
   assert.match(page, /7\.5\/10/, "the best score is reported");
@@ -180,15 +180,15 @@ test("[AIB-PREVIEW] the inspect page shows the stored revisions, the best one, a
 
   // Comparison puts the two side by side and says which way the score moved.
   const cmp = await (await oc.get(`/staff/builds/${job}/inspect?rev=1-1&cmp=1-0`)).text();
-  assert.match(cmp, new RegExp(`/staff/builds/${job}/rev/1-1/index\.html`));
-  assert.match(cmp, new RegExp(`/staff/builds/${job}/rev/1-0/index\.html`));
+  assert.ok(cmp.includes(`/staff/builds/${job}/rev/1-1/index.html`));
+  assert.ok(cmp.includes(`/staff/builds/${job}/rev/1-0/index.html`));
   assert.match(cmp, /-0\.6 worse/, "the direction of the change is stated plainly");
 
   // And the embedded frontend really is served, with its stylesheet pointed at the preview path.
   const served = await oc.get(`/staff/builds/${job}/rev/1-0/index.html`);
   assert.equal(served.status, 200);
   const htmlBody = await served.text();
-  assert.match(htmlBody, new RegExp(`href="/staff/builds/${job}/rev/1-0/assets/site\.css"`), "the stylesheet loads inside the preview");
+  assert.ok(htmlBody.includes(`href="/staff/builds/${job}/rev/1-0/assets/site.css"`), "the stylesheet loads inside the preview");
   assert.match(served.headers.get("content-security-policy") ?? "", /sandbox allow-scripts/, "served sandboxed");
   const css = await oc.get(`/staff/builds/${job}/rev/1-0/assets/site.css`);
   assert.equal(css.status, 200);
