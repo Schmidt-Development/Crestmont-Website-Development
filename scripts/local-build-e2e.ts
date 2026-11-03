@@ -186,8 +186,28 @@ async function main(): Promise<number> {
   const scheduler = createScheduler(cfg, logger);
   const startedAt = Date.now();
   let summary: any;
+  // A per-segment turn or runtime limit does not end the build: the runner checkpoints it and reports "released",
+  // which requeues it without spending an attempt, and the next segment resumes from that checkpoint. Running one
+  // segment and stopping therefore reported a Business build as failing acceptance when nothing had failed -- it had
+  // simply not finished. The harness now does what the platform does and claims the requeued job again, up to
+  // --segments, so a build either reaches a terminal outcome or stops on the runner's own stall guard.
+  const maxSegments = Math.max(1, Number(opt("--segments", process.env.LOCAL_BUILD_SEGMENTS ?? "6")) || 1);
+  const segments: { segment: number; outcome: string; turns: number; ms: number; stopReason: string | null }[] = [];
   try {
-    summary = await runJob(job, { cfg, client, manifest, logger, scheduler });
+    let current = job;
+    for (let seg = 1; seg <= maxSegments; seg++) {
+      const segStart = Date.now();
+      if (seg > 1) log(`phase 2.${seg}: segment ${seg} of at most ${maxSegments} (resuming the checkpointed build)`);
+      summary = await runJob(current, { cfg, client, manifest, logger, scheduler });
+      segments.push({ segment: seg, outcome: summary?.outcome ?? "(none)", turns: summary?.complete?.turns ?? 0, ms: Date.now() - segStart, stopReason: summary?.complete?.stopReason ?? null });
+      log(`  segment ${seg}: ${summary?.outcome} after ${summary?.complete?.turns ?? "?"} turns`);
+      if (summary?.outcome !== "released") break;
+      if (seg === maxSegments) { log(`  --segments ${maxSegments} reached; the build is checkpointed and would continue`); break; }
+      const next = await client.claim(capabilities(cfg));
+      if (!next.job) { log("  the platform offered no job to resume (it may be waiting on a person); stopping here"); break; }
+      if (next.job.id !== job.id) { log(`  the platform offered a different job (${next.job.id}); stopping rather than building something else`); break; }
+      current = next.job;
+    }
   } finally {
     scheduler?.close();
   }
@@ -207,7 +227,7 @@ async function main(): Promise<number> {
     durationHuman: `${Math.floor(durationMs / 60000)}m ${Math.round((durationMs % 60000) / 1000)}s`,
     package: PACKAGE, invoiceCents: inv.amount_cents, projectId: project.id, jobId: job.id,
     models: { architect: cfg.models.a.tag, builder: cfg.models.b.tag, mode: cfg.models.mode, baseUrl: cfg.local.baseUrl },
-    outcome: summary?.outcome ?? null, complete: summary?.complete ?? null, checks: summary?.checks ?? null,
+    outcome: summary?.outcome ?? null, complete: summary?.complete ?? null, checks: summary?.checks ?? null, segments,
     platformState: finalJob?.state ?? null, aiAcceptance: (finalJob as any)?.ai_acceptance ?? null,
     cycles, requirements, events: events.map((e: any) => ({ kind: e.kind, message: e.message, at: e.at })),
     run: run ? { attempt: run.attempt, runnerId: run.runner_id, startedAt: run.started_at, endedAt: run.ended_at, outcome: run.outcome, costUsd: (run.cost_micro ?? 0) / 1e6, turns: run.turns, sessionId: run.session_id, error: run.error } : null,
@@ -224,6 +244,7 @@ async function main(): Promise<number> {
   log(`duration:       ${evidence.durationHuman}`);
   log(`turns / cost:   ${evidence.run?.turns ?? "?"} turns, $${(evidence.run?.costUsd ?? 0).toFixed(2)}`);
   log(`commit:         ${evidence.source?.commit ?? "(none)"} on ${evidence.source?.branch ?? "(none)"}`);
+  log(`segments:       ${segments.length} (${segments.map((s) => `${s.outcome}/${s.turns}t`).join(" -> ")})`);
   log(`review cycles:  ${cycles.length}`);
   for (const c of cycles) log(`  cycle ${c.cycle}: ${c.decision} (${c.decision_reason ?? "-"}) builder=${c.builder_model ?? "-"} reviewer=${c.reviewer_model ?? c.reviewer_provider ?? "-"}`);
   log(`checks:         ${(summary?.checks ?? []).map((c: any) => `${c.id}=${c.ok ? "PASS" : "FAIL"}`).join(" ") || "(none)"}`);
