@@ -12,7 +12,7 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fenceFor } from "../prompt.ts";
-import type { ArchitectInput, CycleEvidence, MasterSpec, ReviewVerdict } from "./contracts.ts";
+import type { ArchitectInput, CycleEvidence, GalleryReferenceInput, MasterSpec, ReviewVerdict } from "./contracts.ts";
 import { MASTER_SPEC_JSON_SCHEMA, REVIEW_JSON_SCHEMA, SPEC_SCHEMA, extractJson, outstanding, parseVerdict } from "./contracts.ts";
 import type { AdapterBilling } from "./cost-guard.ts";
 import type { ModelProfile } from "../config.ts";
@@ -36,7 +36,71 @@ export class AdvisorUnavailableError extends Error {
 
 // ── Prompts (shared) ──
 
-export function architectPrompt(input: ArchitectInput): string {
+/**
+ * How the Design Gallery is described to the architect.
+ *
+ * Attached images come first and in relevance order, so "Image 1" in the prompt is image 1 in the message. A
+ * reference whose bytes could not be fetched is listed separately, in words only, and the model is told plainly
+ * that it is not looking at those: a specification that pretends otherwise is exactly how a build comes to claim
+ * references it never saw.
+ */
+export function galleryBlock(
+  refs: GalleryReferenceInput[],
+  attachedIds: readonly string[] = [],
+  /** Whether the model can see images AT ALL. Distinct from attachment: a vision model may still be sent none. */
+  visionCapable = attachedIds.length > 0,
+): string[] {
+  if (!refs.length) return [];
+  // "Image 3" must mean the third image in THIS message. Only the references actually attached are numbered;
+  // anything else is described in words, with the reason it is not being looked at.
+  const attached = attachedIds.map((id) => refs.find((r) => r.id === id)).filter((r): r is GalleryReferenceInput => !!r);
+  const withImage = attached;
+  const withoutImage = refs.filter((r) => !attached.includes(r));
+  const visionAvailable = attached.length > 0;
+  const describe = (r: GalleryReferenceInput, i: number | null) => {
+    const n = [r.notes.layout && `layout: ${r.notes.layout}`, r.notes.typography && `typography: ${r.notes.typography}`,
+      r.notes.color && `colour: ${r.notes.color}`, r.notes.animation && `animation: ${r.notes.animation}`,
+      r.notes.responsive && `responsive: ${r.notes.responsive}`, r.notes.quality && `why it is good: ${r.notes.quality}`]
+      .filter(Boolean).join("; ");
+    return `${i === null ? "-" : `Image ${i + 1}:`} "${r.title}" [${r.industry}, relevance ${r.relevance}]${r.tags.length ? ` tags: ${r.tags.join(", ")}` : ""}${n ? ` — ${n}` : ""}`;
+  };
+  const lines = ["",
+    "DESIGN REFERENCES — Crestmont's own curated gallery, approved by the Founder as the visual quality standard.",
+    "They are ranked by closeness to THIS customer's trade: relevance 1 means the customer's own industry.",
+    "Treat them as the standard to meet, never as material to copy."];
+  if (visionAvailable && withImage.length) {
+    lines.push(`${withImage.length} reference image(s) are ATTACHED to this message, in this order:`,
+      ...withImage.map((r, i) => describe(r, i)), "",
+      "Most of these compositions show TWO OR THREE separate design concepts or colourways side by side. They are",
+      "not one layout: identify the distinct concepts, then choose ONE coherent direction, or synthesise elements",
+      "that genuinely belong together. Never merge three unrelated palettes into a single website.",
+      "Extract concretely from the images: layout structure and section hierarchy, hero composition, type pairing",
+      "and scale, the palette and its contrast relationships, button and call-to-action treatment, navigation,",
+      "card and service-grid patterns, spacing rhythm, imagery treatment, and what specifically makes them look",
+      "expensive rather than templated.",
+      "Put those findings in designSpec as implementable decisions — real hex values, a real type scale, real",
+      "spacing units — not adjectives. The builder model CANNOT see these images and will have only your words.");
+  } else if (!visionCapable) {
+    // A text-only architect. The references were still chosen and may even be on disk, but nothing was attached
+    // and nothing will be looked at, so the model is told that in those words rather than left to assume.
+    lines.push("The reference images were retrieved, but THIS MODEL CANNOT SEE IMAGES. Do not describe them as if",
+      "you had. Work from the written notes below, and say in designSpec that the visual references were not",
+      "interpreted:", ...refs.map((r) => describe(r, null)));
+  }
+  if (withoutImage.length) {
+    // Two different reasons, and the model is told which: an image that could not be fetched at all, and one that
+    // exists but did not fit this message. Either way it is not being looked at, and must not be written about as
+    // though it were.
+    lines.push("", "Also selected, but NOT attached here — you are not looking at these; use their notes only:",
+      ...withoutImage.map((r) => `${describe(r, null)} (${r.path ? "not attached to this message" : "image could not be retrieved"})`));
+  }
+  lines.push("",
+    "RIGHTS: inspiration only. Never reproduce a reference image, or any part of one, as the customer's hero",
+    "image, background, logo or any other asset. Produce original work informed by them.");
+  return lines;
+}
+
+export function architectPrompt(input: ArchitectInput, attachedIds: readonly string[] = [], visionCapable = attachedIds.length > 0): string {
   const data = JSON.stringify({ brief: input.brief, referenceUrls: input.referenceUrls, referenceImages: input.referenceImages.map((i) => ({ fileId: i.fileId, name: i.name, folder: i.folder })) }, null, 2);
   const f = fenceFor(data);
   return [
@@ -48,6 +112,13 @@ export function architectPrompt(input: ArchitectInput): string {
     "For third-party integrations (payments, email, SMS, calendars, OAuth, booking, domains): plan the full implementation with mocks and sandbox tests; only the live connection waits for credentials. Never invent credentials.",
     "Classify each uploaded reference image: customer_asset (the customer's own material to use), reference_only (inspiration, do not copy), needs_license (stock or third-party imagery that needs permission).",
     "masterPrompt: the complete implementation prompt for the builder model (a fast local coding model working with file and command tools in a repository with BRIEF.md, BRIEF.json, SPEC.json and customer-files/): concrete, step by step, file by file, detailed enough that it never needs to decide architecture or ask about ordinary implementation decisions.",
+    ...((input.skillNames ?? []).length
+      ? ["", "DESIGN GUIDES available in this workspace — read the ones that bear on this website before you decide",
+         "the visual direction, with read_file: " + (input.skillNames ?? []).map((n) => ".claude/skills/" + n + "/SKILL.md").join(", ") + ".",
+         "They describe practices written for Claude Code: apply the design and quality guidance and ignore any",
+         "tool names you do not have."]
+      : []),
+    ...galleryBlock(input.galleryReferences ?? [], attachedIds, visionCapable),
     "", "Customer intake (data):", f, data, f,
   ].join("\n");
 }
@@ -106,7 +177,10 @@ export class LocalModelAdvisor implements Advisor {
       : "You are the independent review session (Model A). You did not build this website. You can only read files with the tools given; you never change anything. Judge from evidence, not from the builder's claims. Your final answer is one JSON object and nothing else.";
     const parts: ContentPart[] = [{ type: "text", text: prompt }];
     for (const img of images) {
-      parts.push({ type: "text", text: `Screenshot: ${img.label}` });
+      // The label says what the image IS. It used to be hardcoded as "Screenshot", which was true while only the
+      // reviewer sent images; the architect now also receives gallery references and customer uploads, and
+      // calling those screenshots of the website under construction would mislead the model about what it sees.
+      parts.push({ type: "text", text: img.label });
       parts.push({ type: "image_url", image_url: { url: `data:image/png;base64,${readFileSync(img.path).toString("base64")}` } });
     }
     const messages: ChatMessage[] = [{ role: "system", content: system }, { role: "user", content: images.length ? parts : prompt }];
@@ -161,8 +235,35 @@ export class LocalModelAdvisor implements Advisor {
     throw new AdvisorUnavailableError(`the ${role} session (${this.o.model.tag}) did not return a valid JSON answer within ${this.o.maxTurns} turns`);
   }
 
+  /**
+   * Gallery images a vision model is actually sent, in the order the prompt names them. Until now this method
+   * passed no images at all, so even a vision-capable architect never saw the customer's references or the
+   * Design Gallery -- only their file names. `imagesSent` records what really went, for the platform's evidence.
+   */
+  lastArchitectImages: { referenceId: string; path: string }[] = [];
+
   architect(input: ArchitectInput): Promise<unknown> {
-    return this.ask("architect", `${architectPrompt(input)}\n\nThe intake is also in BRIEF.json; the customer's files are listed in customer-files/INDEX.json (read them with read_file where they are text). Answer with the JSON object only, matching this JSON Schema:\n${JSON.stringify(MASTER_SPEC_JSON_SCHEMA)}`);
+    const vision = this.o.model.vision;
+    // Every image costs context, and Model A's window also has to hold the brief and the specification it is about
+    // to write. Six total, the gallery's own selection size: the customer's own material keeps two of those places
+    // when they have any, because their logo and photographs decide the brand where the gallery decides the craft.
+    const MAX_IMAGES = 6;
+    const uploads = vision ? input.referenceImages.filter((r) => safeImageFile(r.path)) : [];
+    const gallery = vision ? (input.galleryReferences ?? []).filter((g) => g.path && safeImageFile(g.path)) : [];
+    const uploadSlots = Math.min(uploads.length, uploads.length ? 2 : 0);
+    const chosen = gallery.slice(0, MAX_IMAGES - uploadSlots);
+    // Recorded from what SURVIVED the size and symlink checks and the cap, never from what was requested: a
+    // reference dropped here was not seen, and reporting it as seen would be the exact claim this column exists
+    // to make falsifiable.
+    this.lastArchitectImages = chosen.map((g) => ({ referenceId: g.id, path: g.path as string }));
+    const images = [
+      ...chosen.map((g, i) => ({ path: g.path as string, label: `gallery reference image ${i + 1}` })),
+      // The customer's own uploads come after the gallery and are labelled as theirs, so the model can tell the
+      // Founder's quality standard from the customer's material: they are used for different purposes.
+      ...uploads.slice(0, uploadSlots).map((r) => ({ path: r.path, label: `customer upload ${r.name}` })),
+    ];
+    const attached = chosen.length > 0;
+    return this.ask("architect", `${architectPrompt(input, this.lastArchitectImages.map((i) => i.referenceId), vision)}\n\nThe intake is also in BRIEF.json; the customer's files are listed in customer-files/INDEX.json (read them with read_file where they are text).${images.length ? ` ${images.length} image(s) are attached to this message.` : vision ? "" : " This model does not see images: judge only from the written notes."} Answer with the JSON object only, matching this JSON Schema:\n${JSON.stringify(MASTER_SPEC_JSON_SCHEMA)}`, images);
   }
 
   async review(spec: MasterSpec | null, evidence: CycleEvidence, cycle: number): Promise<ReviewVerdict> {
@@ -175,6 +276,19 @@ export class LocalModelAdvisor implements Advisor {
 }
 
 /** Screenshots for a vision reviewer: desktop + mobile pairs, at most six, each existing, inside the repo, ≤ 2 MB. */
+/**
+ * An image file safe to read and send: a real regular file, never a symbolic link the agent planted, and small
+ * enough not to blow the model's context. Gallery references are written by the runner itself before the builder
+ * starts, but the builder shares the workspace afterwards, so the same care applies as to screenshots.
+ */
+export function safeImageFile(p: string, maxBytes = 4 * 1024 * 1024): boolean {
+  try {
+    if (!existsSync(p)) return false;
+    const st = lstatSync(p);
+    return !st.isSymbolicLink() && st.isFile() && st.size > 0 && st.size <= maxBytes;
+  } catch { return false; }
+}
+
 export function pickScreenshots(repo: string, e: CycleEvidence): { path: string; label: string }[] {
   const out: { path: string; label: string }[] = [];
   let root: string;
@@ -188,7 +302,7 @@ export function pickScreenshots(repo: string, e: CycleEvidence): { path: string;
     const st = lstatSync(lexical);
     const abs = realpathSync(lexical);
     if (st.isSymbolicLink() || !st.isFile() || !abs.startsWith(root + path.sep) || st.size > 2 * 1024 * 1024) continue;
-    out.push({ path: abs, label: `${s.page} (${s.viewport})` });
+    out.push({ path: abs, label: `Screenshot: ${s.page} (${s.viewport})` });
   }
   return out;
 }

@@ -44,7 +44,7 @@ import { runOperatorCommand } from "./operator-command.ts";
 import { resolveWithin, writeInside } from "./paths.ts";
 import type { Advisor } from "./orchestrator/advisors.ts";
 import { DeterministicReviewer, LocalModelAdvisor } from "./orchestrator/advisors.ts";
-import type { MasterSpec, ReviewVerdict } from "./orchestrator/contracts.ts";
+import type { GalleryReferenceInput, MasterSpec, ReviewVerdict } from "./orchestrator/contracts.ts";
 import { outstanding } from "./orchestrator/contracts.ts";
 import { collectEvidence, builderIntegrations, builderApprovalRequests, writeReview, BUILDER_CONTRACT } from "./orchestrator/evidence.ts";
 import { ratchetDecision } from "./orchestrator/ratchet.ts";
@@ -534,14 +534,63 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       Object.assign(now, { activity: "gpu_running", model: r.model.tag, task: r.task });
       tracker.note({ kind: "step", message: `architect session (${architect.name}; ${r.reason})` });
       const idx = (() => { try { return JSON.parse(readFileSync(path.join(ws.repo, "customer-files", "INDEX.json"), "utf8")) as { files: { id: string; savedAs: string; contentType: string; folder: string | null }[] }; } catch { return { files: [] }; } })();
+      // Design Gallery -> architect. Images are written OUTSIDE the repository (ws.dir/gallery, never
+      // ws.repo): .crestmont/ is committed, and a gallery screenshot inside the customer's repository would
+      // ship another studio's design with their website. The architect reads them from disk; nothing copies
+      // them into the site.
+      const galleryReferences = await (async () => {
+        const sel = job.design;
+        if (!sel?.references?.length) {
+          tracker.note({ kind: "step", message: sel ? "design gallery: no references selected for this build" : "design gallery: this platform sent no selection" });
+          return [] as GalleryReferenceInput[];
+        }
+        const dir = path.join(ws!.dir, "gallery");
+        mkdirSync(dir, { recursive: true });
+        const out: GalleryReferenceInput[] = [];
+        let got = 0;
+        for (const r of sel.references) {
+          // Desktop first: it shows the whole composition, which is what a three-concept template needs.
+          const variant = (["desktop", "tablet", "mobile"] as const).find((v) => r.images.includes(v)) ?? null;
+          let file: string | null = null;
+          if (variant) {
+            try {
+              const img = await client.galleryImage(job, r.id, variant);
+              if (img) {
+                const ext = img.contentType === "image/jpeg" ? "jpg" : img.contentType === "image/webp" ? "webp" : "png";
+                file = path.join(dir, r.id + "-" + variant + "." + ext);
+                writeFileSync(file, Buffer.from(img.base64, "base64"));
+                got++;
+              }
+            } catch (err) {
+              // A reference that cannot be fetched is reported, never quietly counted as seen.
+              log.warn("gallery image fetch failed", { jobId: job.id, referenceId: r.id, error: errorMessage(err) });
+              file = null;
+            }
+          }
+          out.push({ id: r.id, title: r.title, industry: r.industry, relevance: r.relevance, why: r.why, tags: r.tags, notes: r.notes, path: file, variant: file ? variant : null });
+        }
+        tracker.note({ kind: "step", message: "design gallery v" + sel.galleryVersion + ": " + got + " of " + sel.references.length + " reference image(s) retrieved — " + sel.reason });
+        return out;
+      })();
       const input = {
         brief: job.brief.content, referenceUrls: (job.brief.content.customerData.references ?? []).map((r: { url: string }) => r.url),
         referenceImages: idx.files.filter((f) => /^image\//.test(f.contentType)).map((f) => ({ fileId: f.id, path: path.join(ws!.repo, "customer-files", f.savedAs), folder: f.folder, name: f.savedAs })),
         maxSessions: 1,
+        galleryReferences,
+        skillNames,
       };
       for (let attempt = 1; attempt <= 2 && !spec && !stop.reason; attempt++) {
         try {
           const raw = await architect.architect(input);
+          // What the model ACTUALLY received, read back from the adapter rather than assumed from the request:
+          // a text-only model is sent no images at all, and that must show up in the evidence as zero.
+          const seen = (architect as { lastArchitectImages?: { referenceId: string }[] }).lastArchitectImages ?? [];
+          if (seen.length) {
+            await client.galleryImagesSeen(job, seen.map((i) => i.referenceId), models.a.tag).catch(() => {});
+            tracker.note({ kind: "step", message: "design gallery: " + seen.length + " reference image(s) interpreted by " + models.a.tag });
+          } else if (galleryReferences.some((g) => g.path)) {
+            tracker.note({ kind: "step", message: "design gallery: images were retrieved but " + models.a.tag + " received none (not a vision model); the specification rests on the written notes only" });
+          }
           const stored = await client.storeSpec(job, raw, architect.name);
           spec = raw as MasterSpec;
           sessionRecords.push({ id: "architect", role: "builder", workstream: "architecture", tasks: [], ownedPaths: [], mode: "serial", status: "completed", note: `${r.model.tag}: ${stored ? `specification v${stored.specVersion} stored` : "platform without orchestration endpoints: specification kept locally"}`, changedFiles: [] });

@@ -65,10 +65,19 @@ export function validateConfig(c) {
     need(p.accountOwner === "customer", "payments.accountOwner must be \"customer\": the business's own Stripe account (never Crestmont's)");
     need(services.some((s) => s.payable), "payments are enabled but no service is payable");
   }
-  if (features.quotes || features.booking) {
+  // A service area is customer information only when the business GOES TO THE CUSTOMER: a quote for on-site
+  // work, or a booking that needs an address. A salon or a shop that customers come to has no service area,
+  // and demanding one would be a false failure.
+  //
+  // Within that scope, null and absent now mean the same thing. They used to differ: null reported the fact as
+  // missing, while leaving the key out meant "serves everywhere" and passed — so the honest spelling escalated
+  // and omission sailed through, which rewarded the builder that said least.
+  if (features.quotes === true || c.booking?.requireAddress === true) {
     const a = c.serviceArea;
-    if (a === null) missing.push("service area");
-    else if (a !== undefined) need(Array.isArray(a.postalCodes) || Array.isArray(a.cities), "serviceArea needs postalCodes or cities");
+    if (a === null || a === undefined) missing.push("service area");
+    else need(Array.isArray(a.postalCodes) || Array.isArray(a.cities), "serviceArea needs postalCodes or cities");
+  } else if (c.serviceArea) {
+    need(Array.isArray(c.serviceArea.postalCodes) || Array.isArray(c.serviceArea.cities), "serviceArea needs postalCodes or cities");
   }
   return { problems, missing };
 }

@@ -164,6 +164,22 @@ export class ControlPlaneClient {
     catch (err) { if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null; throw err; }
   }
 
+  /**
+   * V5: the bytes of one Design Gallery image this job was given. null = no such image (an older platform, a
+   * reference the owner has since disabled, or an object that is simply not there). The caller must treat null as
+   * "this reference was never seen" and report it, never as a reason to claim the gallery was used.
+   */
+  async galleryImage(job: Pick<Job, "id" | "leaseToken">, referenceId: string, variant: "desktop" | "tablet" | "mobile"): Promise<{ base64: string; contentType: string; size: number } | null> {
+    try { return await this.post("/api/builds/runner/gallery/image", { jobId: job.id, leaseToken: job.leaseToken, referenceId, variant }); }
+    catch (err) { if (err instanceof ControlPlaneError && (err.status === 404 || err.status === 405)) return null; throw err; }
+  }
+
+  /** V5: which gallery images a vision model actually received. The platform keeps it as evidence. */
+  async galleryImagesSeen(job: Pick<Job, "id" | "leaseToken">, referenceIds: string[], model: string): Promise<void> {
+    try { await this.post("/api/builds/runner/gallery/seen", { jobId: job.id, leaseToken: job.leaseToken, referenceIds, model }); }
+    catch (err) { if (!(err instanceof ControlPlaneError && (err.status === 404 || err.status === 405))) throw err; }
+  }
+
   async reportIntegrations(job: Pick<Job, "id" | "leaseToken">, items: unknown[]): Promise<void> {
     try { await this.post("/api/builds/runner/integrations/report", { jobId: job.id, leaseToken: job.leaseToken, items }); }
     catch (err) { if (!(err instanceof ControlPlaneError && (err.status === 404 || err.status === 405))) throw err; }

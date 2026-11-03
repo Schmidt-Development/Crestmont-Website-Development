@@ -93,5 +93,8 @@ test("[AIB-018] review fixes: runner-written files never follow a symlink the ag
   writeFileSync(path.join(s.repo, ".crestmont", "screenshots", "home-mobile.png"), "png");
   const shots = pickScreenshots(s.repo, { summary: "", changedFiles: [], commits: [], checks: [], criteria: [], defects: [], integrationBlockers: [], securityFindings: [], recommendedNext: [],
     screenshots: [{ path: ".crestmont/screenshots/home-desktop.png", viewport: "desktop", page: "home" }, { path: ".crestmont/screenshots/home-mobile.png", viewport: "mobile", page: "home" }] });
-  assert.deepEqual(shots.map((x) => x.label), ["home (mobile)"]);
+  // One survivor: the desktop entry is a symbolic link the agent planted, so it is dropped. The label now
+  // carries its own "Screenshot:" prefix, because the architect receives gallery references and customer
+  // uploads in the same message and a bare "home (mobile)" would not say which kind of image it is.
+  assert.deepEqual(shots.map((x) => x.label), ["Screenshot: home (mobile)"]);
 });

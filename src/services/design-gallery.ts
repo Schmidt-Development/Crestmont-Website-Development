@@ -18,6 +18,7 @@ import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { HttpError } from "../app/http.ts";
 import { audit } from "./security.ts";
+import { classifyIndustry, weightFor, WEIGHT, type IndustryClassification } from "./industry-match.ts";
 
 export const GALLERY_TARGET = 50;
 /** References handed to one build. Enough to synthesise from, few enough to keep the model's context useful. */
@@ -231,59 +232,140 @@ export async function eligibleReferences(db: Db): Promise<DesignReference[]> {
 }
 
 export interface SelectionInput { industry?: string | null; styleHints?: string[]; size?: number }
-export interface Selection { references: DesignReference[]; galleryVersion: number; reason: string }
+export interface SelectedReference { reference: DesignReference; weight: number; why: string }
+export interface Selection {
+  references: DesignReference[];
+  /** Per-reference relevance, in the same order, for the audit record and the runner's prompt. */
+  scored: SelectedReference[];
+  classification: IndustryClassification;
+  galleryVersion: number;
+  reason: string;
+}
 
 /**
- * Choose a small, complementary set for one build.
+ * Choose a small, relevant set for one build.
  *
- * Industry match first, then style-hint overlap, then variety: the result deliberately includes references from more
- * than one industry where possible, because a site built only from its own sector's conventions is how "generic for
- * this industry" happens. Deterministic given the same gallery and inputs, so a build is reproducible.
+ * RELEVANCE OUTRANKS VARIETY (Founder directive 2026-11-03). This used to take the best reference per industry
+ * first, which guaranteed six different sectors and meant a junk-removal website was shown luxury fashion and
+ * restaurants while five construction references sat unused. Now the customer's own trade fills the set, then
+ * related trades, then design-pattern categories, and unrelated sectors only when nothing better is left.
+ *
+ * Deterministic given the same gallery and inputs, so a build is reproducible and a selection is defensible.
  */
 export async function selectForBuild(db: Db, input: SelectionInput = {}): Promise<Selection> {
   const all = await eligibleReferences(db);
   const version = await galleryVersion(db);
   const size = Math.max(1, Math.min(12, input.size ?? SELECTION_SIZE));
-  if (!all.length) return { references: [], galleryVersion: version, reason: "the gallery has no approved, AI-eligible reference, so the build proceeds without references" };
-
-  const industry = (input.industry ?? "").trim().toLowerCase();
   const hints = (input.styleHints ?? []).map((h) => h.trim().toLowerCase()).filter(Boolean);
-  const scored = all.map((r) => {
-    const t = tags(r);
-    let s = 0;
-    if (industry && r.industry === industry) s += 10;
-    for (const h of hints) if (t.includes(h)) s += 3;
-    for (const h of hints) if ((r.quality_notes ?? "").toLowerCase().includes(h)) s += 1;
-    return { r, s };
-  }).sort((a, b) => b.s - a.s || a.r.id.localeCompare(b.r.id));
+  const classification = classifyIndustry(input.industry, hints);
+  if (!all.length) {
+    return { references: [], scored: [], classification, galleryVersion: version,
+      reason: "the gallery has no approved, AI-eligible reference, so the build proceeds without references" };
+  }
 
-  const chosen: DesignReference[] = [];
-  const usedIndustries = new Set<string>();
-  // First pass: best match per industry, which guarantees variety rather than six versions of one look.
-  for (const { r } of scored) {
-    if (chosen.length >= size) break;
-    if (usedIndustries.has(r.industry)) continue;
-    chosen.push(r); usedIndustries.add(r.industry);
-  }
-  // Second pass: fill any remaining places with the next best, whatever their industry.
-  for (const { r } of scored) {
-    if (chosen.length >= size) break;
-    if (chosen.some((c) => c.id === r.id)) continue;
-    chosen.push(r);
-  }
+  const scored = all.map((r) => {
+    const w = weightFor(classification, r.industry);
+    const t = tags(r);
+    // Style agreement refines the order WITHIN a relevance band; it can never lift an unrelated sector above a
+    // relevant one, which is the whole point of the band being worth 100.
+    let style = 0;
+    for (const h of hints) if (t.includes(h)) style += 3;
+    for (const h of hints) if ((r.quality_notes ?? "").toLowerCase().includes(h)) style += 1;
+    const why = w >= WEIGHT.related ? `${r.industry} matches the customer's trade (weight ${w})`
+      : w > WEIGHT.unrelated ? `${r.industry} is a design pattern, not the customer's trade (weight ${w})`
+      : `${r.industry} is unrelated to the customer's trade`;
+    return { reference: r, weight: w, why, score: w * 100 + style };
+  }).sort((a, b) => b.score - a.score || a.reference.id.localeCompare(b.reference.id));
+
+  const chosen = scored.slice(0, size);
+  const relevant = chosen.filter((c) => c.weight >= WEIGHT.related).length;
+  const unrelated = chosen.filter((c) => c.weight === WEIGHT.unrelated).length;
   return {
-    references: chosen, galleryVersion: version,
-    reason: `${chosen.length} of ${all.length} eligible reference(s)${industry ? `, led by ${industry}` : ""}, across ${new Set(chosen.map((c) => c.industry)).size} industries`,
+    references: chosen.map((c) => c.reference),
+    scored: chosen.map(({ reference, weight, why }) => ({ reference, weight, why })),
+    classification, galleryVersion: version,
+    reason: `${chosen.length} of ${all.length} eligible reference(s): ${relevant} from the customer's trade or a related one, `
+      + `${chosen.length - relevant - unrelated} design-pattern, ${unrelated} unrelated. ${classification.reason}`,
   };
 }
 
 /** Record what a build was given, so the selection is auditable afterwards. */
 export async function recordSelection(db: Db, jobId: string, projectId: string, sel: Selection, now = new Date()): Promise<void> {
   const at = now.toISOString();
+  const by = new Map(sel.scored.map((s) => [s.reference.id, s]));
   for (const r of sel.references) {
-    await db.prepare(`INSERT INTO design_reference_uses (job_id, project_id, reference_id, gallery_version, selected_at, reason) VALUES (?,?,?,?,?,?)`)
-      .bind(jobId, projectId, r.id, sel.galleryVersion, at, sel.reason).run();
+    const s = by.get(r.id);
+    await db.prepare(`INSERT INTO design_reference_uses (job_id, project_id, reference_id, gallery_version, selected_at, reason, relevance, matched_category)
+      VALUES (?,?,?,?,?,?,?,?)`)
+      .bind(jobId, projectId, r.id, sel.galleryVersion, at, s?.why ?? sel.reason, s?.weight ?? null, r.industry).run();
   }
+}
+
+/**
+ * The runner fetched this reference's image bytes into the build workspace. Delivery is not interpretation: it
+ * says the file arrived, nothing more.
+ */
+export async function markImageDelivered(db: Db, jobId: string, referenceId: string): Promise<void> {
+  await db.prepare(`UPDATE design_reference_uses SET image_delivered = 1 WHERE job_id = ? AND reference_id = ?`).bind(jobId, referenceId).run();
+}
+
+/**
+ * A vision-capable model was actually sent these images. Only the runner knows this, and only after the call: it
+ * is the one fact that makes "the builder looked at the gallery" checkable rather than asserted.
+ */
+export async function markImagesSeen(db: Db, jobId: string, referenceIds: string[], model: string): Promise<number> {
+  let n = 0;
+  for (const id of referenceIds) {
+    const r = await db.prepare(`UPDATE design_reference_uses SET model_saw = 1, seen_by_model = ? WHERE job_id = ? AND reference_id = ? AND image_delivered = 1`)
+      .bind(model.slice(0, 120), jobId, id).run();
+    n += r.meta?.changes ?? 0;
+  }
+  return n;
+}
+
+export type ImageVariant = "desktop" | "tablet" | "mobile";
+const VARIANTS: ImageVariant[] = ["desktop", "tablet", "mobile"];
+
+/**
+ * The bytes of one gallery image, for the runner that holds this job's lease.
+ *
+ * Scoped to references THIS job was actually given: a runner cannot walk the gallery, and a reference the owner
+ * has since disabled or whose rights were withdrawn stops being served even mid-build, because the eligibility
+ * conditions are re-checked here rather than trusted from selection time.
+ */
+export async function galleryImageForJob(
+  db: Db, storage: { get(key: string): Promise<{ body: ReadableStream | ArrayBuffer | Uint8Array; contentType: string; size: number } | null> },
+  jobId: string, referenceId: string, variant: ImageVariant,
+): Promise<{ base64: string; contentType: string; size: number } | null> {
+  if (!VARIANTS.includes(variant)) throw new HttpError(400, "Unknown image variant");
+  const row = await db.prepare(`SELECT r.desktop_key, r.tablet_key, r.mobile_key, r.status, r.ai_eligible, r.rights_basis, r.deleted_at
+    FROM design_reference_uses u JOIN design_references r ON r.id = u.reference_id
+    WHERE u.job_id = ? AND u.reference_id = ?`).bind(jobId, referenceId)
+    .first<{ desktop_key: string | null; tablet_key: string | null; mobile_key: string | null; status: string; ai_eligible: number; rights_basis: string; deleted_at: string | null }>();
+  if (!row) return null; // not selected for this job: never served
+  if (row.deleted_at || row.status !== "APPROVED" || !row.ai_eligible || !rightsCleared(row.rights_basis)) return null;
+  const key = variant === "desktop" ? row.desktop_key : variant === "tablet" ? row.tablet_key : row.mobile_key;
+  if (!key) return null;
+  const obj = await storage.get(key);
+  if (!obj) return null;
+  const bytes = obj.body instanceof Uint8Array ? obj.body
+    : obj.body instanceof ArrayBuffer ? new Uint8Array(obj.body)
+    : new Uint8Array(await new Response(obj.body as ReadableStream).arrayBuffer());
+  await markImageDelivered(db, jobId, referenceId);
+  return { base64: Buffer.from(bytes).toString("base64"), contentType: obj.contentType, size: bytes.length };
+}
+
+/** The full audit row for a job: what was selected, how relevant, and how far each image actually travelled. */
+export interface ReferenceUse {
+  reference_id: string; title: string; industry: string; gallery_version: number; selected_at: string;
+  reason: string | null; relevance: number | null; matched_category: string | null;
+  image_delivered: number; model_saw: number; seen_by_model: string | null;
+}
+export async function selectionAudit(db: Db, jobId: string): Promise<ReferenceUse[]> {
+  return (await db.prepare(`SELECT u.reference_id, r.title, r.industry, u.gallery_version, u.selected_at, u.reason,
+      u.relevance, u.matched_category, u.image_delivered, u.model_saw, u.seen_by_model
+    FROM design_reference_uses u JOIN design_references r ON r.id = u.reference_id
+    WHERE u.job_id = ? ORDER BY u.relevance DESC, u.id`).bind(jobId).all<ReferenceUse>()).results;
 }
 
 export async function selectionForJob(db: Db, jobId: string): Promise<{ reference_id: string; title: string; gallery_version: number; selected_at: string }[]> {

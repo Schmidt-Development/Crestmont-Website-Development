@@ -22,7 +22,7 @@ import type { FakeModelReply, FakeModelRequest } from "./helpers.ts";
 const STARTER = path.join(RUNNER_DIR, "starters", "fullstack-v1");
 const fixture = (n: string) => JSON.parse(readFileSync(path.join(RUNNER_DIR, "test", "fixtures", "fullstack", `${n}.json`), "utf8"));
 const site = (cfg: unknown) => buildFixtureSite(STARTER, path.join(tmp("aib-fs-"), "site"), cfg);
-function gates(dir: string, pkg: string, brief?: unknown): { code: number | null; out: GatesFile & { summary: { failed: string[]; pendingExternal: string[] }; scopeChanges: { feature: string }[] } } {
+function gates(dir: string, pkg: string, brief?: unknown): { code: number | null; out: GatesFile & { summary: { failed: string[]; pendingExternal: string[] }; scopeChanges: { feature: string }[]; inventedInformation: string[] } } {
   if (brief) writeFileSync(path.join(dir, "BRIEF.json"), JSON.stringify(brief));
   const r = spawnSync(process.execPath, ["--no-warnings", "scripts/gates.mjs", "--package", pkg, "--json"], { cwd: dir, encoding: "utf8", timeout: 300_000 });
   // The last line is the integrity digest of gates.json (checked by the runner); the rest is the JSON report.
@@ -47,7 +47,15 @@ test("[AIB-V2] the website's protected package matrix equals the runner's starte
 
 for (const [name, pkg, expectE] of [["service-area", "business", "pending_external"], ["appointment", "business", "pending_external"], ["transaction", "premium", "pending_external"], ["starter-contact", "starter", "pending_external"]] as const) {
   test(`[AIB-V2] cross-industry: the ${name} business (${pkg} package) passes every required gate on the same foundation; provider-side verification stays pending without the customer's accounts`, () => {
-    const g = gates(site(fixture(name)), pkg);
+    // Gate A now judges the configuration AGAINST the brief, so a fixture must state which facts its customer
+    // actually gave. Running the gates with no brief at all is itself a failure: BRIEF.json sits in the agent's
+    // own repository, and if its absence merely skipped the fabrication check, deleting it would defeat the check.
+    const cfg = fixture(name);
+    const d = makeBrief().customerData;
+    const brief = makeBrief({ customerData: { ...d, business: { ...d.business,
+      publicEmail: cfg.business?.email ?? "", publicPhone: cfg.business?.phone ?? "",
+      serviceArea: cfg.serviceArea ? "the service area this customer provided" : "" } } });
+    const g = gates(site(cfg), pkg, brief);
     assert.equal(g.code, 0, JSON.stringify(g.out.summary));
     assert.deepEqual(g.out.summary.failed, []);
     for (const id of ["A", "B", "C", "D", "F", "G", "J"]) assert.equal(g.out.gates[id].status, "pass", `${id}: ${findings(g, id)}`);
@@ -93,6 +101,58 @@ test("[AIB-V2] requirements gate: a requested, included feature must be enabled;
   assert.match(findings(missing, "A"), /missing customer information: public contact phone/);
   const blog = gates(site(cfg), "starter", makeBrief({ customerData: { ...makeBrief().customerData, features: [{ key: "blog", details: "" }] } }));
   assert.match(findings(blog, "A"), /asked for "blog"; it needs a site implementation with an acceptance test/);
+});
+
+// Gate A promises that "missing facts are never invented". Until the configuration was compared with the brief
+// that promise was unenforceable: the gate only ever asked whether a value was PRESENT, so a builder that
+// honestly recorded null failed and escalated, while one that made a plausible value up passed. Real defect,
+// job bld_b62360ebf30bf50493cc724d (2026-11-03): a junk-removal company in Lansing, Michigan was given a
+// service area of New York and Detroit postal codes, gate A passed it, and the site's own quote form then
+// rejected every Lansing visitor with 422 outside_service_area.
+test("[AIB-V2] gate A refuses a customer fact the customer never gave, and an omitted service area no longer slips past", () => {
+  const cfg = fixture("service-area");
+  const told = makeBrief();
+  const base = told.customerData.business;
+
+  // 1. The customer gave no service area; the website states one anyway. That is fabrication, and it fails.
+  const silent = makeBrief({ customerData: { ...told.customerData, business: { ...base, serviceArea: "" } } });
+  const invented = gates(site(cfg), "business", silent);
+  assert.equal(invented.code, 1);
+  assert.match(findings(invented, "A"), /invented customer information: service area/);
+  assert.deepEqual(invented.out.inventedInformation, ["service area"]);
+
+  // 2. The honest spelling still escalates, exactly as before: null is "ask the customer", not a failure of nerve.
+  const honest = gates(site({ ...cfg, serviceArea: null }), "business", silent);
+  assert.equal(honest.code, 1);
+  assert.match(findings(honest, "A"), /missing customer information: service area/);
+  assert.deepEqual(honest.out.inventedInformation, [], "recording a fact as missing is not inventing one");
+
+  // 3. Leaving the key out used to mean "serves everywhere" and PASSED, so omission beat honesty. Not any more.
+  const { serviceArea: _omitted, ...withoutKey } = cfg as Record<string, unknown>;
+  const omitted = gates(site(withoutKey), "business", silent);
+  assert.equal(omitted.code, 1);
+  assert.match(findings(omitted, "A"), /missing customer information: service area/);
+
+  // 4. A fact the customer actually provided is not fabrication: the gate must not punish a correct build.
+  const supplied = gates(site(cfg), "business", makeBrief({ customerData: { ...told.customerData, business: { ...base, serviceArea: "Greater Springfield" } } }));
+  assert.deepEqual(supplied.out.inventedInformation, []);
+  assert.doesNotMatch(findings(supplied, "A"), /service area/);
+});
+
+// A visitor copies the example a form prints. If the backend then refuses it, the form is broken — and this is
+// invisible to any review that only looks at the page, because the contradiction lives in business.config.json.
+test("[AIB-V2] gate B refuses a form whose own placeholder values its backend would reject", () => {
+  const cfg = fixture("service-area");
+  const area = (cfg as { serviceArea?: { postalCodes?: string[]; cities?: string[] } }).serviceArea ?? {};
+  const outsideZip = "99999";
+  assert.ok(!(area.postalCodes ?? []).includes(outsideZip), "the fixture really does not serve this ZIP");
+  const dir = site(cfg);
+  const quote = path.join(dir, "public", "quote.html");
+  if (!existsSync(quote)) return; // this fixture ships no quote page: nothing to contradict
+  writeFileSync(quote, readFileSync(quote, "utf8").replace(/name="postalCode"/, `name="postalCode" placeholder="${outsideZip}"`));
+  const g = gates(dir, "business", makeBrief());
+  assert.equal(g.code, 1);
+  assert.match(findings(g, "B"), /outside the configured service area/);
 });
 
 test("[AIB-V2] a skipped required test never counts as passing; failing contrast fails accessibility", () => {

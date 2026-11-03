@@ -11,9 +11,9 @@ on:
   workflow_dispatch:
     inputs:
       stage:
-        description: "status (read-only) or purchase (real staging checkout in Stripe test mode)"
+        description: "status / gallery (both read-only) or purchase (real staging checkout in Stripe test mode)"
         type: choice
-        options: [status, purchase]
+        options: [status, purchase, gallery]
         default: status
       watch_minutes:
         description: "Keep polling the build for up to N minutes (0-330, read-only)"
@@ -88,8 +88,38 @@ jobs:
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
         run: node --no-warnings scripts/builder-staging-e2e.ts purchase --dir jitt
+      - name: Design Gallery audit (D1 read-only)
+        if: inputs.stage == 'gallery'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node --no-warnings scripts/builder-staging-e2e.ts gallery --dir jitt
+      # A database key is not an image. This HEADs the real R2 objects the audit listed, because a reference
+      # whose bytes are missing can be selected, recorded and never reach a model -- which would look like
+      # success in D1 and be a silent failure in the build.
+      - name: Design Gallery image objects exist (R2, read-only)
+        if: inputs.stage == 'gallery'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          keys=$(node -e 'const g=require("./evidence/jitt/gallery.json");process.stdout.write((g.imageKeys||[]).join("
+"))')
+          if [ -z "$keys" ]; then echo "no image keys to probe"; exit 0; fi
+          ok=0; missing=0
+          while IFS= read -r k; do
+            [ -z "$k" ] && continue
+            if $WRANGLER r2 object get "crestmont-files-staging/$k" --remote --file /dev/null >/dev/null 2>&1; then
+              ok=$((ok+1))
+            else
+              missing=$((missing+1)); echo "MISSING in R2: $k"
+            fi
+          done <<< "$keys"
+          echo "R2 objects present: $ok; missing: $missing"
+          [ "$missing" -eq 0 ]
       - name: Certification status (D1 read-only)
-        if: always()
+        if: always() && inputs.stage != 'gallery'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

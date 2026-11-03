@@ -152,6 +152,29 @@ export async function report(q: Query): Promise<{ steps: Step[]; data: Record<st
   type Rev = { job_id: string; attempt: number; cycle: number; phase: string; score: number | null; decision: string | null;
     is_best: number; reverted: number; reverted_reason: string | null; file_count: number; total_bytes: number };
   // null = the table is absent, which is a different answer from "no snapshot yet" and must not read as one.
+  // What the Design Gallery actually gave this build, and how far each image travelled. Selection, retrieval
+  // and model consumption are three separate facts: a reference can be chosen, its bytes never fetched, and
+  // the model never shown it. Only the last one is "the builder used the gallery".
+  type Use = { reference_id: string; title: string; industry: string; relevance: number | null; matched_category: string | null; image_delivered: number; model_saw: number; seen_by_model: string | null };
+  const uses = jobIds
+    ? await safe<Use[] | null>(() => q<Use>(`SELECT u.reference_id, r.title, r.industry, u.relevance, u.matched_category, u.image_delivered, u.model_saw, u.seen_by_model        FROM design_reference_uses u JOIN design_references r ON r.id = u.reference_id        WHERE u.job_id IN (${jobIds}) ORDER BY u.relevance DESC, u.id`), null)
+    : [];
+  data.galleryUses = uses;
+  if (uses === null) {
+    add("Design gallery", "BLOCKED", "staging has no design_reference_uses columns: migration 0074 is not deployed");
+  } else if (!uses.length) {
+    add("Design gallery", first ? "FAIL" : "PENDING", first ? `no reference was selected for ${first.id}: the builder had no design references` : "no build job yet");
+  } else {
+    const seen = uses.filter((u) => u.model_saw);
+    const got = uses.filter((u) => u.image_delivered);
+    const relevant = uses.filter((u) => (u.relevance ?? 0) >= 0.7);
+    // A reference the model never saw is not a reference the build used, however well it was chosen.
+    add("Design gallery", seen.length > 0 ? "PASS" : "FAIL",
+      `${uses.length} reference(s) selected, ${got.length} image(s) retrieved, ${seen.length} seen by ${seen[0]?.seen_by_model ?? "no model"}; `
+      + `${relevant.length} from the customer's own trade (${[...new Set(relevant.map((u) => u.matched_category ?? u.industry))].join(", ") || "-"}); `
+      + uses.map((u) => `${u.title} [${u.industry} ${u.relevance ?? "?"}]${u.model_saw ? " SEEN" : u.image_delivered ? " fetched-only" : " not-retrieved"}`).join(", "));
+  }
+
   const revisions = jobIds
     ? await safe<Rev[] | null>(() => q<Rev>(`SELECT job_id, attempt, cycle, phase, score, decision, is_best, reverted, reverted_reason, file_count, total_bytes FROM build_revisions WHERE job_id IN (${jobIds}) ORDER BY attempt, cycle`), null)
     : [];
@@ -420,7 +443,36 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         console.log(`… ${new Date().toISOString()} build ${job.state}; node1Online=${r.data.node1Online}; waiting`);
         await new Promise((res) => setTimeout(res, 120_000));
       }
-    } else { console.error("usage: builder-staging-e2e.ts prepare|verify-link|register|purchase|status [--dir jitt] [--wait-minutes N]"); process.exit(2); }
+    } else if (cmd === "gallery") {
+      // Read-only audit of the Design Gallery as the AI sees it. The builder can only ever use a reference that
+      // is APPROVED, ai_eligible, rights-cleared and not deleted (services/design-gallery.ts: eligibleReferences),
+      // so those are the numbers that matter — a dashboard total proves nothing about what a build can reach.
+      const q = await d1();
+      const rows = await q<{ status: string; ai_eligible: number; rights_basis: string; industry: string; deleted: number; has_desktop: number; has_mobile: number; n: number }>(
+        `SELECT status, ai_eligible, rights_basis, industry,           CASE WHEN deleted_at IS NULL THEN 0 ELSE 1 END AS deleted,           CASE WHEN desktop_key IS NULL THEN 0 ELSE 1 END AS has_desktop,           CASE WHEN mobile_key IS NULL THEN 0 ELSE 1 END AS has_mobile,           COUNT(*) AS n         FROM design_references GROUP BY status, ai_eligible, rights_basis, industry, deleted, has_desktop, has_mobile`);
+      const sum = (f: (r: typeof rows[number]) => boolean) => rows.filter(f).reduce((a, r) => a + r.n, 0);
+      const eligible = (r: typeof rows[number]) => !r.deleted && r.status === "APPROVED" && r.ai_eligible === 1 && r.rights_basis !== "unverified";
+      const byIndustry = new Map<string, number>();
+      for (const r of rows.filter(eligible)) byIndustry.set(r.industry, (byIndustry.get(r.industry) ?? 0) + r.n);
+      console.log(`Total references         : ${sum(() => true)}`);
+      console.log(`  approved               : ${sum((r) => !r.deleted && r.status === "APPROVED")}`);
+      console.log(`  pending review         : ${sum((r) => !r.deleted && r.status === "PENDING_REVIEW")}`);
+      console.log(`  disabled / rejected    : ${sum((r) => !r.deleted && (r.status === "DISABLED" || r.status === "REJECTED"))}`);
+      console.log(`  deleted                : ${sum((r) => !!r.deleted)}`);
+      console.log(`AI-ELIGIBLE (what a build can actually use): ${sum(eligible)}`);
+      console.log(`  of those, with a desktop image: ${rows.filter((r) => eligible(r) && r.has_desktop).reduce((a, r) => a + r.n, 0)}`);
+      console.log(`  of those, with a mobile image : ${rows.filter((r) => eligible(r) && r.has_mobile).reduce((a, r) => a + r.n, 0)}`);
+      console.log(`  rights unverified (excluded)  : ${sum((r) => !r.deleted && r.rights_basis === "unverified")}`);
+      console.log("By industry (AI-eligible only):");
+      for (const [k, v] of [...byIndustry].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) console.log(`  ${k.padEnd(20)} ${v}`);
+      const version = (await q<{ version: number }>(`SELECT version FROM design_gallery_state WHERE id = 1`))[0]?.version ?? null;
+      console.log(`Gallery version: ${version}`);
+      // The keys of the images a build could actually be given, so the next step can HEAD the real objects:
+      // a key in D1 proves a row, not a retrievable image.
+      const keys = (await q<{ k: string }>(`SELECT desktop_key AS k FROM design_references
+        WHERE deleted_at IS NULL AND status = 'APPROVED' AND ai_eligible = 1 AND rights_basis <> 'unverified' AND desktop_key IS NOT NULL`)).map((r) => r.k);
+      write("gallery.json", { total: sum(() => true), aiEligible: sum(eligible), byIndustry: Object.fromEntries(byIndustry), version, imageKeys: keys });
+    } else { console.error("usage: builder-staging-e2e.ts prepare|verify-link|register|purchase|status|gallery [--dir jitt] [--wait-minutes N]"); process.exit(2); }
   } catch (e) {
     console.log(`::error title=Builder staging E2E (${cmd})::${clip((e as Error).message, 400)}`);
     process.exit(1);
