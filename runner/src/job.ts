@@ -106,6 +106,8 @@ export interface JobSummary {
   complete: CompleteRequest | null;
   workspace: string | null;
   stopReason: string | null;
+  /** The runner's own checks as they stood at the end, so a caller can report on the run without parsing the report. */
+  checks: CheckOutcome[];
 }
 
 const SERVER_STOP = "server:";
@@ -326,7 +328,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     guard();
     await client.complete(job, req);
     log.info("job completed", { outcome, costUsd: req.runCostUsd, turns: req.turns });
-    return { outcome, complete: req, workspace: ws?.dir ?? null, stopReason: fields.stopReason ?? null };
+    return { outcome, complete: req, workspace: ws?.dir ?? null, stopReason: fields.stopReason ?? null, checks: fields.checks ?? [] };
   };
 
   try {
@@ -898,13 +900,13 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     if (err instanceof LeaseLostError || leaseLost) {
       stop.request("lease_lost");
       log.warn("lease lost: stopped work on this job; workspace preserved", { workspace: ws?.dir });
-      return { outcome: "lease_lost", complete: null, workspace: ws?.dir ?? null, stopReason: "lease_lost" };
+      return { outcome: "lease_lost", complete: null, workspace: ws?.dir ?? null, stopReason: "lease_lost", checks };
     }
     log.error("job failed", { error: errorMessage(err) });
     try {
       return await finish("failed", { error: `Runner error: ${errorMessage(err)}` });
     } catch (err2) {
-      if (err2 instanceof LeaseLostError) return { outcome: "lease_lost", complete: null, workspace: ws?.dir ?? null, stopReason: "lease_lost" };
+      if (err2 instanceof LeaseLostError) return { outcome: "lease_lost", complete: null, workspace: ws?.dir ?? null, stopReason: "lease_lost", checks };
       log.error("could not report failure", { error: errorMessage(err2) });
       return { outcome: "failed", complete: null, workspace: ws?.dir ?? null, stopReason: null };
     }
