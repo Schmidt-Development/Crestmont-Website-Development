@@ -1,5 +1,7 @@
--- Automatic research → CRM promotion, numbered 0072 (0070 research samples and 0071 readiness derivation are on main;
--- 0064-0069 are claimed by open PRs #108-#114). Additive: two settings columns, three prospect columns, one new table.
+-- Automatic research → CRM promotion, numbered 0073. 0070 research samples, 0071 readiness derivation and 0072
+-- build revisions (PR #123) are on main; 0064-0069 are claimed by open PRs #108-#114. Prefixes must be unique
+-- (tests/ops-closeout.test.ts) and D1 applies by name, so the relative order does not matter. Additive: two settings
+-- columns, three prospect columns, one new table.
 --
 -- Why this exists: promotion was a per-prospect Owner click (POST /staff/research/promote, one prospect_id). There was
 -- no automatic path at all, so a worker producing thousands of qualified prospects a day could only ever reach the CRM

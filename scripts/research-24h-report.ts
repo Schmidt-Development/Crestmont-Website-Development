@@ -104,7 +104,7 @@ const censusSum = ["alreadyPromoted", "existingCrm", "needsPerson", "suppressed"
 const state: string[] = [];
 state.push(`## Research Agent state (authoritative staging rows)`);
 state.push(`- research_settings.paused: **${settings.paused === 1 || settings.paused === "1" ? "PAUSED" : "NOT PAUSED"}** (raw ${String(settings.paused)})${settings.pause_reason ? ` — ${String(settings.pause_reason)}` : ""}`);
-state.push(`- auto_promote: ${Number(settings.auto_promote) === -1 ? "column absent (migration 0072 not applied yet)" : Number(settings.auto_promote) === 1 ? "**ON**" : "OFF"}; max per run ${String(settings.auto_promote_max_per_run)}`);
+state.push(`- auto_promote: ${Number(settings.auto_promote) === -1 ? "column absent (migration 0073 not applied yet)" : Number(settings.auto_promote) === 1 ? "**ON**" : "OFF"}; max per run ${String(settings.auto_promote_max_per_run)}`);
 state.push(`- qualify_threshold ${String(settings.qualify_threshold)}, max_batch ${String(settings.max_batch)}, settings last changed ${String(settings.updated_at)}`);
 state.push(`- batches ever received: ${Number(lastBatch?.n ?? 0)}; last at ${lastBatch?.at ?? "never"}; **in the last hour: ${recentBatches}** (non-zero means research is still ingesting)`);
 for (const r of runners) {
@@ -128,7 +128,7 @@ if (promotionRuns.length) {
   state.push("");
   state.push(`## Promotion runs (most recent first)`);
   for (const r of promotionRuns) state.push(`- ${String(r.started_at)} ${String(r.trigger)}: examined ${String(r.examined)}, promoted ${String(r.promoted)}, existing ${String(r.existing_crm)}, review ${String(r.review)}, suppressed ${String(r.suppressed)}, rejected ${String(r.rejected)}, failed ${String(r.failed)}, remaining ${String(r.remaining)} (${String(r.stopped_reason)})`);
-} else state.push(`\n## Promotion runs\n- none recorded (table empty or migration 0072 not applied yet)`);
+} else state.push(`\n## Promotion runs\n- none recorded (table empty or migration 0073 not applied yet)`);
 
 const report = buildReport({ windowStart: startIso, windowEnd: endIso, now: now.toISOString(), target: TARGET, samples, batches, prospects, promoted, promotionBlocked });
 const text = `${state.join("\n")}\n\n${formatReport(report)}`;

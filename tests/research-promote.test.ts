@@ -1,4 +1,4 @@
-// Automatic research → CRM promotion and backlog reconciliation (migration 0072).
+// Automatic research → CRM promotion and backlog reconciliation (migration 0073).
 //
 // What these tests are really defending: the CRM gets every eligible qualified business WITHOUT a per-lead click,
 // and without any of the protections that used to sit behind that click being lost. So each test either proves a
