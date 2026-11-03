@@ -900,13 +900,13 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     if (err instanceof LeaseLostError || leaseLost) {
       stop.request("lease_lost");
       log.warn("lease lost: stopped work on this job; workspace preserved", { workspace: ws?.dir });
-      return { outcome: "lease_lost", complete: null, workspace: ws?.dir ?? null, stopReason: "lease_lost", checks };
+      return { outcome: "lease_lost", complete: null, workspace: ws?.dir ?? null, stopReason: "lease_lost", checks: [] };
     }
     log.error("job failed", { error: errorMessage(err) });
     try {
       return await finish("failed", { error: `Runner error: ${errorMessage(err)}` });
     } catch (err2) {
-      if (err2 instanceof LeaseLostError) return { outcome: "lease_lost", complete: null, workspace: ws?.dir ?? null, stopReason: "lease_lost", checks };
+      if (err2 instanceof LeaseLostError) return { outcome: "lease_lost", complete: null, workspace: ws?.dir ?? null, stopReason: "lease_lost", checks: [] };
       log.error("could not report failure", { error: errorMessage(err2) });
       return { outcome: "failed", complete: null, workspace: ws?.dir ?? null, stopReason: null };
     }
