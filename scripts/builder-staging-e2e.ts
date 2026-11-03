@@ -444,7 +444,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       for (const [k, v] of [...byIndustry].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) console.log(`  ${k.padEnd(20)} ${v}`);
       const version = (await q<{ version: number }>(`SELECT version FROM design_gallery_state WHERE id = 1`))[0]?.version ?? null;
       console.log(`Gallery version: ${version}`);
-      write("gallery.json", { total: sum(() => true), aiEligible: sum(eligible), byIndustry: Object.fromEntries(byIndustry), version });
+      // The keys of the images a build could actually be given, so the next step can HEAD the real objects:
+      // a key in D1 proves a row, not a retrievable image.
+      const keys = (await q<{ k: string }>(`SELECT desktop_key AS k FROM design_references
+        WHERE deleted_at IS NULL AND status = 'APPROVED' AND ai_eligible = 1 AND rights_basis <> 'unverified' AND desktop_key IS NOT NULL`)).map((r) => r.k);
+      write("gallery.json", { total: sum(() => true), aiEligible: sum(eligible), byIndustry: Object.fromEntries(byIndustry), version, imageKeys: keys });
     } else { console.error("usage: builder-staging-e2e.ts prepare|verify-link|register|purchase|status|gallery [--dir jitt] [--wait-minutes N]"); process.exit(2); }
   } catch (e) {
     console.log(`::error title=Builder staging E2E (${cmd})::${clip((e as Error).message, 400)}`);
