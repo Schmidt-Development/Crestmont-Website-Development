@@ -12,6 +12,7 @@ import { hmacSha256Hex } from "../src/lib/crypto.ts";
 import { passwordProblems } from "../src/lib/auth-crypto.ts";
 import { customerPassword, verificationPath, readOnly, report } from "../scripts/builder-staging-e2e.ts";
 import { formatCents } from "../src/lib/html.ts";
+import { certificationEmail } from "../scripts/builder-staging-e2e.ts";
 import { JITT_BUSINESS as C } from "./fixtures/junk-in-the-trunk-business.ts";
 
 const WHSEC = "whsec_jitt_fixture";
@@ -34,6 +35,20 @@ test("[AIB-020] the test customer's derived password meets the platform policy, 
 // page's. It wasn't: the driver expected "$2,499.00" while formatCents omits the cents on a whole-dollar amount,
 // and the purchase step failed on a checkout page that was perfectly correct. Asserted against the real rendered
 // page, because that is the disagreement that matters -- comparing the driver to itself would have proven nothing.
+// A corrected brief cannot be re-sent to a customer who has already bought: onboarding is submitted exactly once
+// per project. Re-certifying therefore means a fresh customer, and the address is the one thing in this whole
+// certification that can reach outside the test environment -- staging mails nothing to .test, and would mail a
+// real domain for real. So the driver refuses anything else rather than trusting whoever typed the workflow input.
+test("[AIB-020] the certification customer is the fixture's by default and may only ever be overridden to a .test address", () => {
+  assert.equal(certificationEmail(undefined), C.email, "unset: the certification runs as the fixture's customer");
+  assert.equal(certificationEmail(""), C.email, "a blank workflow input is the same as unset");
+  assert.equal(certificationEmail("   "), C.email, "and so is one the dispatcher left as whitespace");
+  assert.equal(certificationEmail(" casey2@junkinthetrunk.test "), "casey2@junkinthetrunk.test", "a .test address is taken, trimmed");
+  for (const bad of ["casey@junkinthetrunk.com", "casey@gmail.com", "casey@junkinthetrunk.test.com", "not-an-address", "a@b.test extra"]) {
+    assert.throws(() => certificationEmail(bad), /must use a \.test address/, `${bad} must be refused`);
+  }
+});
+
 test("[AIB-020] the price and button label the driver expects are what the real checkout page renders", async () => {
   const t = await createTestApp({ overrides: { payments: new FakePayments() } });
   const cu = await createCustomer(t.db, C.email, C.business);
