@@ -42,6 +42,7 @@ export function certificationEmail(raw: string | undefined): string {
 const EMAIL = certificationEmail(process.env.E2E_CUSTOMER_EMAIL);
 const read = <T>(f: string): T | null => (existsSync(join(DIR, f)) ? (JSON.parse(readFileSync(join(DIR, f), "utf8")) as T) : null);
 const write = (f: string, v: unknown, mode = 0o644) => { mkdirSync(DIR, { recursive: true }); writeFileSync(join(DIR, f), JSON.stringify(v, null, 2), { mode }); };
+const writeText = (f: string, v: string) => { mkdirSync(DIR, { recursive: true }); writeFileSync(join(DIR, f), v, { mode: 0o644 }); };
 const lit = (s: string) => `'${s.replace(/'/g, "''")}'`;
 const clip = (s: unknown, n = 160) => String(s ?? "").replace(/\s+/g, " ").slice(0, n);
 
@@ -472,6 +473,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       const keys = (await q<{ k: string }>(`SELECT desktop_key AS k FROM design_references
         WHERE deleted_at IS NULL AND status = 'APPROVED' AND ai_eligible = 1 AND rights_basis <> 'unverified' AND desktop_key IS NOT NULL`)).map((r) => r.k);
       write("gallery.json", { total: sum(() => true), aiEligible: sum(eligible), byIndustry: Object.fromEntries(byIndustry), version, imageKeys: keys });
+      // Also as plain lines: the R2 probe then needs no inline script, and an inline script is what broke the
+      // workflow file the first time (an escaped newline became a real one and split the YAML).
+      writeText("gallery-keys.txt", keys.join(String.fromCharCode(10)));
     } else { console.error("usage: builder-staging-e2e.ts prepare|verify-link|register|purchase|status|gallery [--dir jitt] [--wait-minutes N]"); process.exit(2); }
   } catch (e) {
     console.log(`::error title=Builder staging E2E (${cmd})::${clip((e as Error).message, 400)}`);
