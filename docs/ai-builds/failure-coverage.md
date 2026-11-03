@@ -6,12 +6,12 @@ Shared safeguards, not 231 separate systems: each failure mode is covered by one
 - The gates A-J are implemented in runner/starters/fullstack-v1/scripts/gates.mjs, not in runner/src, which is why they are easy to miss when reading the runner. Mapping the remaining rows means reading that script against each row; that is the next step and it has not been taken.
 - Five rows the source inventory recorded as verified cited test files that do not exist here. Two (E03, E04) are genuinely covered by differently-named tests and have been re-cited. Three (F15, F16, F20) depend on a quality ratchet that is absent from this repository and are now recorded as NOT_COVERED_HERE rather than left looking done.
 
-Generated 2026-11-03T05:09:26.278Z from 246 failure modes.
+Generated 2026-11-03T05:16:35.708Z from 246 failure modes.
 
 | status | rows |
 | --- | --- |
-| OPEN | 225 |
-| FIXED_AND_VERIFIED | 10 |
+| OPEN | 224 |
+| FIXED_AND_VERIFIED | 11 |
 | EXISTING_AND_VERIFIED | 6 |
 | NOT_COVERED_HERE | 3 |
 | BLOCKED_ON_AUTHORIZATION | 2 |
@@ -25,12 +25,6 @@ Expected: Never lose previously certified functionality; roll back safely when a
 The inventory records F15, F16 and F20 as FIXED_AND_VERIFIED against runner/test/quality-ratchet.test.ts. Neither that test nor any ratchet exists in this tree: `grep -rl ratchet runner/src src` returns nothing. The bounded repair loop (S12) stops a build that stops improving, which is not the same as preserving what was already certified or rolling back a harmful repair.
 
 ## Cited tests that are failing in this repository
-
-### `runner/test/orchestrator.test.ts [AIB-015] model unavailable (SIMULATED)`
-
-Bears on: S14 (PRE_EXISTING_FAILURE)
-
-Asserts that when a model cannot be loaded the build is checkpointed and released without spending an attempt. It fails on "checkpointed: expected true, actual false" -- a substantive assertion, not a cosmetic one -- identically on the pristine baseline. The platform half of this guarantee does pass (tests/builds.test.ts [AIB-004]: a release requeues without spending an attempt and the next claim resumes from the checkpoint), so what is unproven is the runner making the checkpoint in that specific path. Worth investigating next: segment continuation depends on it.
 
 ### `runner/test/fullstack.test.ts [AIB-QUALITY] ... [fake model, fake docker]`
 
@@ -108,7 +102,7 @@ Three end-to-end tests ('a verified 10/10 ... completes as ready_for_review', 'a
 **S14. Segment continuation: a per-segment limit ends a segment, not the build; 'released' requeues without spending an attempt and resumes from the checkpoint**
 
 - Where: runner/src/job.ts, src/services/builds.ts
-- Proven by: `tests/builds.test.ts [AIB-004]`
+- Proven by: `tests/builds.test.ts [AIB-004] (the platform half); runner/test/continuity.test.ts [AIB-CONTINUITY] (the archive half: built and restored from a drive-letter path); runner/test/orchestrator.test.ts [AIB-015] (checkpointed and released without spending an attempt)`
 
 ## Rows that are not OPEN
 
@@ -132,7 +126,8 @@ Three end-to-end tests ('a verified 10/10 ... completes as ready_for_review', 'a
 | F16 | Missing safe rollback | NOT_COVERED_HERE | - | none in this repository |
 | F20 | Failure to preserve previously certified functionality | NOT_COVERED_HERE | - | none in this repository |
 | G03 | Vision model missing screenshots | EXISTING_AND_VERIFIED | - | runner/test/orchestrator.test.ts |
-| G16 | Failed resume behavior | FIXED_AND_VERIFIED | S14, S11 | tests/builds.test.ts [AIB-004]; runner/test/report.test.ts [AIB-REQ-EVIDENCE]; tests/builds.test.ts [AIB-REQ-EVIDENCE] |
+| G15 | Broken checkpoint restoration | FIXED_AND_VERIFIED | S14 | tests/builds.test.ts [AIB-004] (the platform half); runner/test/continuity.test.ts [AIB-CONTINUITY] (the archive half: built and restored from a drive-letter path); runner/test/orchestrator.test.ts [AIB-015] (checkpointed and released without spending an attempt) |
+| G16 | Failed resume behavior | FIXED_AND_VERIFIED | S14, S11 | tests/builds.test.ts [AIB-004] (the platform half); runner/test/continuity.test.ts [AIB-CONTINUITY] (the archive half: built and restored from a drive-letter path); runner/test/orchestrator.test.ts [AIB-015] (checkpointed and released without spending an attempt); runner/test/report.test.ts [AIB-REQ-EVIDENCE]; tests/builds.test.ts [AIB-REQ-EVIDENCE] |
 | G18 | Runner/harness version mismatch | BLOCKED_ON_AUTHORIZATION | - | none in this repository |
 | G19 | Local versus installed-runner behavioral differences | BLOCKED_ON_AUTHORIZATION | - | none in this repository |
 
@@ -190,6 +185,12 @@ Visual repairs destroyed previously working state with no way back.
 
 Nothing here preserves previously certified functionality across a repair. This is the most serious of the three gaps.
 
+**G15 Broken checkpoint restoration**
+
+Checkpoint archives were never built on Windows at all: GNU tar read the absolute "C:..." archive path as host:path and tried to reach a remote host, and the caller only logged a warning. The agent transcript and runner state were therefore lost at every segment boundary, and a restore from a checkpoint key could not have worked.
+
+tar now runs with the workspace as its working directory and only relative paths, which both GNU tar and the bsdtar that Windows ships accept. A checkpoint is built and read back from a drive-letter path under test. Found by chasing [AIB-015], which this document had recorded as the pre-existing failure most worth investigating: the assertion was right and the product was wrong.
+
 **G16 Failed resume behavior**
 
 Resume worked, but a resumed segment was judged against a lossy echo of its own earlier results: segment 1 was unaffected and every later segment inherited unevidenced check requirements.
@@ -216,7 +217,7 @@ Not yet investigated in this repository, grouped by category.
 - **D** (28): D01 Tests only checking element existence; D02 Primary CTA never clicked; D03 Buttons not functionally tested; D04 Links not functionally tested; D05 Navigation not functionally tested; D06 Valid form submissions not tested; D07 Invalid form submissions not tested; D08 HTTP success mistaken for persistence; D09 Stored data not read back; D10 Asynchronous errors missed; D11 Mocks hiding real integration failures; D12 Email delivery not tested; D13 Bookings not tested; D14 Payments not tested; D15 Uploads not tested; D16 Only one viewport tested; D17 Only one browser tested where compatibility matters; D18 Keyboard accessibility not tested; D19 Missing error-path tests; D20 Missing secret scenarios not tested; D21 Network failures not tested; D22 Backend failures not tested; D23 Broken test environment creating false positives; D24 Tests using stale artifacts; D25 Tests using the wrong environment; D26 Individual feature tests passing while the full journey fails; D27 Acceptance passes with deliberately broken critical functionality; D28 False claims of complete acceptance
 - **E** (14): E01 Corrupted screenshots; E05 Missing tablet review where relevant; E06 Reviewer prioritizing appearance over functionality; E07 Inconsistent scoring criteria; E08 Contradictory feedback; E10 Repeated unresolved feedback; E11 Test artifacts mistaken for design defects; E13 Overly harsh scores; E14 Visually attractive but broken websites approved; E15 Correct designs penalized because of misunderstood intent; E16 Wrong build revision reviewed; E17 Wrong screenshot associated with a review; E18 Inconsistent before/after comparisons; E19 Incomplete benchmark reference material
 - **F** (17): F01 Misinterpreted reviewer feedback; F02 Symptom fixes instead of root-cause fixes; F03 Unnecessary rewriting of working sections; F04 Unrelated file changes; F05 Functional regressions; F06 New frontend/backend mismatches; F07 Design changes without improvement; F08 Repeated failed approaches; F09 Poor patch-versus-rebuild decisions; F10 Missing evidence of improvement; F11 Contradictory repair objectives; F12 Working features destroyed by visual repairs; F13 Excessive repair cycles; F14 Premature stopping; F17 Lost repair history; F18 Unbounded GPU consumption; F19 Failure to escalate genuine blockers
-- **G** (21): G01 Wrong model selected; G02 Incorrect model configuration; G04 Incorrect image preprocessing; G05 Excessive model switching; G06 Model weight reload overhead; G07 GPU VRAM exhaustion; G08 Ollama request failures; G09 Ollama timeouts; G10 Context-window overflow; G11 Requirements lost from context; G12 Excessive conversation-history accumulation; G13 Truncated model output; G14 Partial tool execution treated as success; G15 Broken checkpoint restoration; G17 Concurrent GPU contention; G20 Build artifact mismatches; G21 Review record mismatches; G22 Model log mismatches; G23 Stale worker state; G24 Inaccurate performance metrics; G25 Unbounded time or token consumption
+- **G** (20): G01 Wrong model selected; G02 Incorrect model configuration; G04 Incorrect image preprocessing; G05 Excessive model switching; G06 Model weight reload overhead; G07 GPU VRAM exhaustion; G08 Ollama request failures; G09 Ollama timeouts; G10 Context-window overflow; G11 Requirements lost from context; G12 Excessive conversation-history accumulation; G13 Truncated model output; G14 Partial tool execution treated as success; G17 Concurrent GPU contention; G20 Build artifact mismatches; G21 Review record mismatches; G22 Model log mismatches; G23 Stale worker state; G24 Inaccurate performance metrics; G25 Unbounded time or token consumption
 - **H** (20): H01 Incorrect Cloudflare bindings; H02 Missing database migrations; H03 Broken custom domains; H04 SSL/TLS failures; H05 Missing secrets; H06 Inaccessible static assets; H07 Incompatible Cloudflare runtime behavior; H08 Failed production email delivery; H09 Incorrect payment configuration; H10 Missing backups; H11 Inadequate error monitoring; H12 Deployment of outdated artifacts; H13 Incorrect caching; H14 Broken routing; H15 Incomplete staging E2E; H16 Missing rollback strategy; H17 Unapproved deployments; H18 Incorrect environment selection; H19 Missing operational documentation; H20 False claims of production readiness
 - **I** (18): I01 Insecure form endpoints; I02 Exposed secrets; I03 Unvalidated inputs; I04 Cross-site scripting; I05 Injection vulnerabilities; I06 Unauthorized data access; I07 Missing rate limits; I08 Unsafe file uploads; I09 Broken session handling; I10 Unprotected personal information; I11 Broken authentication; I12 Broken authorization; I13 Sensitive information in logs; I14 Insecure external integrations; I15 Missing retention/deletion controls where required; I16 False payment verification; I17 Missing audit trails for sensitive operations; I18 False security certification
 - **J** (25): J01 Gallery UI disconnected from AI retrieval; J02 Multiple conflicting gallery sources; J03 Removed images still selected; J04 Disabled images still selected; J05 Rejected images automatically reappearing; J06 Stale Node 1 gallery caches; J07 Missing gallery version tracking; J08 Missing selected-reference audit history; J09 Broken image uploads; J10 Invalid image formats; J11 Corrupt images; J12 Missing thumbnails; J13 Broken full-size previews; J14 Incorrect reference metadata; J15 Duplicate references; J16 Low-quality references automatically approved; J17 Unlicensed reference storage; J18 Unauthorized image reuse in customer websites; J19 Owner permission bypass; J20 Gallery changes not reflected in new builds; J21 AI selecting irrelevant reference styles; J22 AI copying a reference too closely; J23 Too many references overloading model context; J24 Package-specific quality discrimination; J25 Gallery failures blocking unrelated website functionality

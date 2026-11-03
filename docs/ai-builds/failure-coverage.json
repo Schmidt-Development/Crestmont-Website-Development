@@ -1,6 +1,6 @@
 {
   "schema": "crestmont.failure-coverage/2",
-  "generatedAt": "2026-11-03T05:09:26.278Z",
+  "generatedAt": "2026-11-03T05:16:35.708Z",
   "principle": "Shared safeguards, not 231 separate systems: each failure mode is covered by one of the mechanisms in `safeguards`, and a row leaves OPEN only when a named test in THIS repository proves that mechanism catches it.",
   "honesty": [
     "OPEN means not investigated in this repository yet. It does not mean the failure cannot happen, and it does not mean it is uncovered.",
@@ -76,7 +76,7 @@
     "S14": {
       "name": "Segment continuation: a per-segment limit ends a segment, not the build; 'released' requeues without spending an attempt and resumes from the checkpoint",
       "where": "runner/src/job.ts, src/services/builds.ts",
-      "test": "tests/builds.test.ts [AIB-004]"
+      "test": "tests/builds.test.ts [AIB-004] (the platform half); runner/test/continuity.test.ts [AIB-CONTINUITY] (the archive half: built and restored from a drive-letter path); runner/test/orchestrator.test.ts [AIB-015] (checkpointed and released without spending an attempt)"
     }
   },
   "missingSafeguards": {
@@ -92,13 +92,6 @@
     }
   },
   "knownFailingTests": {
-    "runner/test/orchestrator.test.ts [AIB-015] model unavailable (SIMULATED)": {
-      "bears_on": [
-        "S14"
-      ],
-      "detail": "Asserts that when a model cannot be loaded the build is checkpointed and released without spending an attempt. It fails on \"checkpointed: expected true, actual false\" -- a substantive assertion, not a cosmetic one -- identically on the pristine baseline. The platform half of this guarantee does pass (tests/builds.test.ts [AIB-004]: a release requeues without spending an attempt and the next claim resumes from the checkpoint), so what is unproven is the runner making the checkpoint in that specific path. Worth investigating next: segment continuation depends on it.",
-      "status": "PRE_EXISTING_FAILURE"
-    },
     "runner/test/fullstack.test.ts [AIB-QUALITY] ... [fake model, fake docker]": {
       "bears_on": [
         "S1",
@@ -110,9 +103,9 @@
     }
   },
   "counts": {
-    "OPEN": 225,
+    "OPEN": 224,
     "EXISTING_AND_VERIFIED": 6,
-    "FIXED_AND_VERIFIED": 10,
+    "FIXED_AND_VERIFIED": 11,
     "NOT_COVERED_HERE": 3,
     "BLOCKED_ON_AUTHORIZATION": 2
   },
@@ -2731,15 +2724,18 @@
       "description": "Broken checkpoint restoration",
       "category": "G",
       "applicability": "applies to the Crestmont AI Website Builder",
-      "rootCause": "not investigated in this assignment",
+      "rootCause": "Checkpoint archives were never built on Windows at all: GNU tar read the absolute \"C:...\" archive path as host:path and tried to reach a remote host, and the caller only logged a warning. The agent transcript and runner state were therefore lost at every segment boundary, and a restore from a checkpoint key could not have worked.",
       "prevention": "-",
       "detection": "-",
       "recovery": "-",
       "implementation": "-",
-      "test": "-",
+      "test": "tests/builds.test.ts [AIB-004] (the platform half); runner/test/continuity.test.ts [AIB-CONTINUITY] (the archive half: built and restored from a drive-letter path); runner/test/orchestrator.test.ts [AIB-015] (checkpointed and released without spending an attempt)",
       "evidence": "G18 confirmed present and unfixed (installed runner predates source). The rest are OPEN.",
-      "status": "OPEN",
-      "safeguards": []
+      "status": "FIXED_AND_VERIFIED",
+      "safeguards": [
+        "S14"
+      ],
+      "note": "tar now runs with the workspace as its working directory and only relative paths, which both GNU tar and the bsdtar that Windows ships accept. A checkpoint is built and read back from a drive-letter path under test. Found by chasing [AIB-015], which this document had recorded as the pre-existing failure most worth investigating: the assertion was right and the product was wrong."
     },
     {
       "id": "G16",
@@ -2751,7 +2747,7 @@
       "detection": "-",
       "recovery": "-",
       "implementation": "-",
-      "test": "tests/builds.test.ts [AIB-004]; runner/test/report.test.ts [AIB-REQ-EVIDENCE]; tests/builds.test.ts [AIB-REQ-EVIDENCE]",
+      "test": "tests/builds.test.ts [AIB-004] (the platform half); runner/test/continuity.test.ts [AIB-CONTINUITY] (the archive half: built and restored from a drive-letter path); runner/test/orchestrator.test.ts [AIB-015] (checkpointed and released without spending an attempt); runner/test/report.test.ts [AIB-REQ-EVIDENCE]; tests/builds.test.ts [AIB-REQ-EVIDENCE]",
       "evidence": "G18 confirmed present and unfixed (installed runner predates source). The rest are OPEN.",
       "status": "FIXED_AND_VERIFIED",
       "safeguards": [

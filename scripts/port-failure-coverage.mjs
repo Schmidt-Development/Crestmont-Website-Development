@@ -24,7 +24,7 @@ const SAFEGUARDS = {
   S11: { name: "Requirement integrity: 'verified' needs evidence, that evidence survives the round-trip through the platform, and the checks that just ran outrank the claim seed", where: "runner/src/requirements.ts, src/services/builds.ts claim", test: "runner/test/report.test.ts [AIB-REQ-EVIDENCE]; tests/builds.test.ts [AIB-REQ-EVIDENCE]" },
   S12: { name: "Bounded repair loop (cycle limit, repeated failure signature, no measurable progress, ineffective-repair guard), and an overrule that carries its own corrective prompt", where: "src/services/build-pipeline.ts submitCycle, runner/src/job.ts", test: "tests/builds-v2.test.ts [AIB-013], [AIB-OVERRULE]" },
   S13: { name: "pending_external: a customer-owned service is never recorded as live; the build waits for the customer instead of faking it", where: "runner/src/quality.ts, src/services/build-pipeline.ts", test: "tests/builds-v2.test.ts [AIB-013]" },
-  S14: { name: "Segment continuation: a per-segment limit ends a segment, not the build; 'released' requeues without spending an attempt and resumes from the checkpoint", where: "runner/src/job.ts, src/services/builds.ts", test: "tests/builds.test.ts [AIB-004]" },
+  S14: { name: "Segment continuation: a per-segment limit ends a segment, not the build; 'released' requeues without spending an attempt and resumes from the checkpoint", where: "runner/src/job.ts, src/services/builds.ts", test: "tests/builds.test.ts [AIB-004] (the platform half); runner/test/continuity.test.ts [AIB-CONTINUITY] (the archive half: built and restored from a drive-letter path); runner/test/orchestrator.test.ts [AIB-015] (checkpointed and released without spending an attempt)" },
 };
 
 // Safeguards the inventory assumed but that DO NOT EXIST in this repository. Recorded, not quietly dropped.
@@ -40,11 +40,6 @@ const MISSING_SAFEGUARDS = {
 // Tests that bear on a safeguard above and are FAILING in this repository, on the pristine baseline too. Named
 // here so no safeguard above looks better proven than it is.
 const KNOWN_FAILING_TESTS = {
-  "runner/test/orchestrator.test.ts [AIB-015] model unavailable (SIMULATED)": {
-    bears_on: ["S14"],
-    detail: "Asserts that when a model cannot be loaded the build is checkpointed and released without spending an attempt. It fails on \"checkpointed: expected true, actual false\" -- a substantive assertion, not a cosmetic one -- identically on the pristine baseline. The platform half of this guarantee does pass (tests/builds.test.ts [AIB-004]: a release requeues without spending an attempt and the next claim resumes from the checkpoint), so what is unproven is the runner making the checkpoint in that specific path. Worth investigating next: segment continuation depends on it.",
-    status: "PRE_EXISTING_FAILURE",
-  },
   "runner/test/fullstack.test.ts [AIB-QUALITY] ... [fake model, fake docker]": {
     bears_on: ["S1", "S2", "S7"],
     detail: "Three end-to-end tests ('a verified 10/10 ... completes as ready_for_review', 'a score below 10 can never enter internal approval', 'only a provider-side verification missing') fail with \"Acceptance checks failed: quality-gates, brief-conformance\". Identical on the pristine baseline, so they are not a regression. Every gate test that runs the real gates against a fixture website passes, including all four cross-industry package runs, so what is unproven is the fake-model end-to-end wiring rather than the scorecard rules or the gates.",
@@ -75,6 +70,9 @@ const UPDATES = {
     note: "No rollback mechanism exists in this repository." },
   F20: { status: "NOT_COVERED_HERE", safeguards: [],
     note: "Nothing here preserves previously certified functionality across a repair. This is the most serious of the three gaps." },
+  G15: { status: "FIXED_AND_VERIFIED", safeguards: ["S14"],
+    rootCause: "Checkpoint archives were never built on Windows at all: GNU tar read the absolute \"C:\...\" archive path as host:path and tried to reach a remote host, and the caller only logged a warning. The agent transcript and runner state were therefore lost at every segment boundary, and a restore from a checkpoint key could not have worked.",
+    note: "tar now runs with the workspace as its working directory and only relative paths, which both GNU tar and the bsdtar that Windows ships accept. A checkpoint is built and read back from a drive-letter path under test. Found by chasing [AIB-015], which this document had recorded as the pre-existing failure most worth investigating: the assertion was right and the product was wrong." },
   G16: { status: "FIXED_AND_VERIFIED", safeguards: ["S14", "S11"],
     rootCause: "Resume worked, but a resumed segment was judged against a lossy echo of its own earlier results: segment 1 was unaffected and every later segment inherited unevidenced check requirements.",
     note: "This failure mode was invisible until segment continuation worked, because until then nothing resumed far enough to reach it." },
