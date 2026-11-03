@@ -192,14 +192,19 @@ async function main(): Promise<number> {
   // simply not finished. The harness now does what the platform does and claims the requeued job again, up to
   // --segments, so a build either reaches a terminal outcome or stops on the runner's own stall guard.
   const maxSegments = Math.max(1, Number(opt("--segments", process.env.LOCAL_BUILD_SEGMENTS ?? "6")) || 1);
-  const segments: { segment: number; outcome: string; turns: number; ms: number; stopReason: string | null }[] = [];
+  // Each segment's own completion report is kept: only the last segment's survives in `complete`, and the earlier
+  // ones carry the session notes that say when an advisor session failed and the deterministic reviewer stood in.
+  // Run 5 used the deterministic reviewer for cycle 1 and the vision model for cycles 2-6, and the note explaining
+  // that was in segment 1's report, which nothing had stored.
+  const segments: { segment: number; outcome: string; turns: number; ms: number; stopReason: string | null; checks: string; report: string | null }[] = [];
   try {
     let current = job;
     for (let seg = 1; seg <= maxSegments; seg++) {
       const segStart = Date.now();
       if (seg > 1) log(`phase 2.${seg}: segment ${seg} of at most ${maxSegments} (resuming the checkpointed build)`);
       summary = await runJob(current, { cfg, client, manifest, logger, scheduler });
-      segments.push({ segment: seg, outcome: summary?.outcome ?? "(none)", turns: summary?.complete?.turns ?? 0, ms: Date.now() - segStart, stopReason: summary?.complete?.stopReason ?? null });
+      segments.push({ segment: seg, outcome: summary?.outcome ?? "(none)", turns: summary?.complete?.turns ?? 0, ms: Date.now() - segStart, stopReason: summary?.complete?.stopReason ?? null,
+        checks: (summary?.checks ?? []).map((c) => `${c.id}=${c.ok ? "PASS" : "FAIL"}`).join(" ") || "(none)", report: summary?.complete?.report ?? null });
       log(`  segment ${seg}: ${summary?.outcome} after ${summary?.complete?.turns ?? "?"} turns`);
       if (summary?.outcome !== "released") break;
       if (seg === maxSegments) { log(`  --segments ${maxSegments} reached; the build is checkpointed and would continue`); break; }
@@ -245,6 +250,10 @@ async function main(): Promise<number> {
   log(`turns / cost:   ${evidence.run?.turns ?? "?"} turns, $${(evidence.run?.costUsd ?? 0).toFixed(2)}`);
   log(`commit:         ${evidence.source?.commit ?? "(none)"} on ${evidence.source?.branch ?? "(none)"}`);
   log(`segments:       ${segments.length} (${segments.map((s) => `${s.outcome}/${s.turns}t`).join(" -> ")})`);
+  for (const s of segments) if (s.checks !== "(none)") log(`  segment ${s.segment} checks: ${s.checks}`);
+  // Why a cycle fell back to the deterministic reviewer, which the cycle table alone never says.
+  const fallbacks = segments.flatMap((s) => (s.report ?? "").split("\n").filter((l) => /Review session for cycle|session failed/i.test(l)).map((l) => `  segment ${s.segment}: ${l.trim()}`));
+  for (const f of fallbacks) log(f);
   log(`review cycles:  ${cycles.length}`);
   for (const c of cycles) log(`  cycle ${c.cycle}: ${c.decision} (${c.decision_reason ?? "-"}) builder=${c.builder_model ?? "-"} reviewer=${c.reviewer_model ?? c.reviewer_provider ?? "-"}`);
   log(`checks:         ${(summary?.checks ?? []).map((c: any) => `${c.id}=${c.ok ? "PASS" : "FAIL"}`).join(" ") || "(none)"}`);
