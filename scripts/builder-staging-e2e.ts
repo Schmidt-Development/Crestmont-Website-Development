@@ -319,7 +319,17 @@ async function purchase() {
     if (!st?.paidOrderId) {
       await page.goto(BASE + "/checkout/business");
       const body = await main(page);
-      if (!/\$2,499\.00/.test(body)) throw new Error(`the Business checkout does not show $2,499.00: ${clip(body, 200)}`);
+      // The page renders money with formatCents, which omits ".00" on a whole-dollar amount: the Business package
+      // shows "$2,499", not "$2,499.00". Importing the same helper the page uses means the driver and the page
+      // cannot disagree about formatting again -- a hardcoded string here is exactly how this step failed. Imported
+      // lazily because the steps that hold the Cloudflare token must not load package code (F-24).
+      const { formatCents } = await import("../src/lib/html.ts");
+      const expected = formatCents(C.packageCents);
+      const shown = ((await page.locator(`[data-testid="checkout-price"]`).first().textContent().catch(() => null)) ?? "").trim();
+      if (!shown.startsWith(expected)) throw new Error(`the Business checkout shows ${shown || "no price"}, not ${expected}: ${clip(body, 200)}`);
+      // Tax would make the amount charged differ from the $2,499 the report matches on, so it is reported rather
+      // than absorbed: paying a total nobody asserted is how a certification quietly stops certifying anything.
+      if (await page.locator(`[data-testid="checkout-tax"]`).count()) throw new Error(`staging now adds tax at checkout, so the total is no longer ${expected}: ${clip(body, 200)}`);
       const picker = page.locator(`select[name="maintenance_plan_id"], input[name="maintenance_plan_id"]`);
       out.planPicker = (await picker.count()) > 0;
       if (out.planPicker) {
@@ -329,7 +339,8 @@ async function purchase() {
       } else console.log("NOTE the Business checkout has no maintenance plan picker on this deployment (FD-26 / PR #108 not deployed)");
       out.recurringAtCheckout = /\$199(\.00)?\s*\/\s*mo/i.test(body) && !/(launch|launched|approved)/i.test(body);
       await page.check("input[name=terms]");
-      const pay = page.getByRole("button", { name: /^Pay \$2,499\.00$/ }).first();
+      // Same formatter, exact match: no regex to escape "$" into, and no second opinion about the amount.
+      const pay = page.getByRole("button", { name: `Pay ${expected}`, exact: true }).first();
       await nav(page, pay);
       await payOnStripeCheckout(page);
       console.log("PASS Stripe TEST-mode checkout completed with the published test card; returned to staging");
