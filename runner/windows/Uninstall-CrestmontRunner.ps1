@@ -6,7 +6,7 @@
 .DESCRIPTION
   Default (no switch): stop. Stops the runner stack (`docker compose down`; a running build is released and requeued
   by the platform without spending an attempt) and disables the scheduled tasks. Nothing is deleted. Undo with
-  Start-CrestmontRunner.ps1 and `Enable-ScheduledTask CrestmontRunner-Start` (plus -Watchdog and -GpuTelemetry).
+  Start-CrestmontRunner.ps1 and `Enable-ScheduledTask CrestmontRunner-Start` (and CrestmontRunner-GpuTelemetry).
 
   -Rollback: return to the images and runner.env that were in use before the last installer run (the installer keeps
   them as <image>:1-previous and state\runner.env.previous), then start the stack again.
@@ -41,6 +41,8 @@ $composeArgs = @("compose", "-f", $composeFile, "--project-directory", $Compose,
 $mode = $null
 foreach ($f in @((Join-Path $State "install.json"))) { if (Test-Path $f) { try { $mode = Get-Content $f -Raw | ConvertFrom-Json } catch { $mode = $null } } }
 $images = @("crestmont-ai-runner", "crestmont-build-sandbox", "crestmont-egress-proxy")
+# CrestmontRunner-Watchdog is not registered any more (its 5-minute trigger is back on CrestmontRunner-Start), but
+# it stays in this list so a machine left with that orphan is still cleaned up.
 $tasks = @("CrestmontRunner-Start", "CrestmontRunner-Watchdog", "CrestmontRunner-GpuTelemetry")
 function Say([string]$m) { Write-Host "==> $m" -ForegroundColor Cyan }
 
