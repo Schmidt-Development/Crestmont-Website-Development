@@ -20,8 +20,43 @@ export type BuildPhase = "design" | "design_locked" | "functionality" | "final_q
  * behind an unfinished homepage scores worse than one that ships the homepage with a mocked booking widget. These
  * blocks say that out loud, so the model does not have to infer it from the scorecard.
  */
-export function buildPhaseBlock(p: BuildPhase, freeze: { revision: string; designPoints: number } | null): string {
+export function buildPhaseBlock(p: BuildPhase, freeze: { revision: string; designPoints: number } | null, plan?: PhasePlanLike | null): string {
   const frozen = freeze ? `The approved design is FROZEN at revision ${freeze.revision} (${freeze.designPoints}/40). ` : "";
+  // The architect's own split for THIS website, where it has one. A specification written before phasePlan existed
+  // has none, and then the phase block says what the phase is for without naming this website's deliverables --
+  // which is the honest fallback, rather than inventing a list.
+  const from = (items: string[], heading: string) => (items.length ? `\n${heading}\n${items.map((x) => `  - ${x}`).join("\n")}` : "");
+  const section = (() => {
+    if (!plan) return "";
+    if (p === "design") {
+      return from(plan.designDeliverables ?? [], "This website's design deliverables (the architect's own list):")
+        + ((plan.designDependentInteractions ?? []).length
+          ? `\nInteractions whose APPEARANCE the design is scored on, with the mock that shows each state:\n${(plan.designDependentInteractions ?? []).map((i) => `  - ${i.component} — states: ${i.states.join(", ")}; mock: ${i.mock}`).join("\n")}`
+          : "")
+        + ((plan.deferredBackend ?? []).length
+          ? `\nDeliberately DEFERRED to the functionality phase; do not build these now:\n${(plan.deferredBackend ?? []).map((b) => `  - ${b.capability}`).join("\n")}`
+          : "");
+    }
+    if (p === "functionality") {
+      return (plan.deferredBackend ?? []).length
+        ? `\nThe backend work this phase exists for, each against the approved design contract it was planned around:\n${(plan.deferredBackend ?? []).map((b) => `  - ${b.capability} — built against: ${b.dependsOnDesign}; real implementation: ${b.realImplementation}`).join("\n")}`
+        : "";
+    }
+    if (p === "final_qa") return from(plan.finalQuality ?? [], "This website's remaining quality requirements (the architect's own list):");
+    return "";
+  })();
+  return block(p, frozen) + section;
+}
+
+/** The architect's phase split, as the runner reads it off SPEC.json (orchestrator/contracts.ts: PhasePlan). */
+export interface PhasePlanLike {
+  designDeliverables?: string[];
+  designDependentInteractions?: { component: string; states: string[]; mock: string }[];
+  deferredBackend?: { capability: string; dependsOnDesign: string; realImplementation: string }[];
+  finalQuality?: string[];
+}
+
+function block(p: BuildPhase, frozen: string): string {
   switch (p) {
     case "design":
       return [
@@ -221,14 +256,14 @@ function fullstackPhase(job: Job, phase: Phase, starter: string, local: boolean)
   ];
 }
 
-export function phasePrompt(job: Job, phase: Phase, ctx: { starter: string | null; resumed: boolean; previousNote: string | null; toolset?: "claude" | "local"; buildPhase?: BuildPhase; designFreeze?: { revision: string; designPoints: number } | null }): string {
+export function phasePrompt(job: Job, phase: Phase, ctx: { starter: string | null; resumed: boolean; previousNote: string | null; toolset?: "claude" | "local"; buildPhase?: BuildPhase; designFreeze?: { revision: string; designPoints: number } | null; phasePlan?: PhasePlanLike | null }): string {
   const local = ctx.toolset === "local";
   const lines: string[] = [];
   // The design-first objective is APPENDED, not prepended. Every runner instruction has to keep starting with its
   // own first line ("Phase 2 of 3: build.", "Repair:", "This build is continuing..."): that opening is how the
   // latest runner instruction is identified in a resumed conversation, and prepending a preamble to it silently
   // breaks that identification. So the mechanics stay first and the phase objective follows them.
-  const objective = ctx.buildPhase ? ["", buildPhaseBlock(ctx.buildPhase, ctx.designFreeze ?? null)] : [];
+  const objective = ctx.buildPhase ? ["", buildPhaseBlock(ctx.buildPhase, ctx.designFreeze ?? null, ctx.phasePlan ?? null)] : [];
   if (ctx.resumed && phase !== "repair") {
     lines.push("This build is continuing from an earlier attempt. Inspect the repository and .crestmont/ status files first and continue from where the work stopped; do not start over.");
     if (ctx.previousNote) lines.push(`Runner note: ${ctx.previousNote}`);

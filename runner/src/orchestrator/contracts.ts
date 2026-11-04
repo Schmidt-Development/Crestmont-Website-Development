@@ -42,11 +42,37 @@ export interface GalleryReferenceInput {
   variant: "desktop" | "tablet" | "mobile" | null;
 }
 
+/**
+ * The architect's work, split the way the build will actually be done.
+ *
+ * Without this the specification was one undifferentiated demand, and the builder had no way to tell which of its
+ * contents belonged to the phase it was in. A booking API and a hero layout read identically in a single document,
+ * which is how GPU time went into debugging a backend behind an unfinished-looking homepage.
+ *
+ * Optional for compatibility: a specification written before this field existed still parses, and the phase prompts
+ * fall back to the undifferentiated designSpec/technicalArchitecture.
+ */
+export interface PhasePlan {
+  /** Phase 1: what the design must deliver — pages, layout, type, colour, imagery, component appearance. */
+  designDeliverables: string[];
+  /**
+   * Phase 1: interactions the DESIGN depends on, and the mock or fixture that shows each state during the design
+   * phase. A component that cannot be seen in its loading, error, empty and success states cannot be scored.
+   */
+  designDependentInteractions: { component: string; states: string[]; mock: string }[];
+  /** Phase 3: backend work deliberately DEFERRED until the design is certified, and what it will be built against. */
+  deferredBackend: { capability: string; dependsOnDesign: string; realImplementation: string }[];
+  /** Phase 4: the remaining quality requirements — security, accessibility, performance, SEO, reliability, deployment. */
+  finalQuality: string[];
+}
+
 export interface MasterSpec {
   schema: typeof SPEC_SCHEMA;
   projectSpec: string;
   designSpec: string;
   technicalArchitecture: string;
+  /** The four-way phase split (optional: older specifications have none). */
+  phasePlan?: PhasePlan;
   tasks: { id: string; title: string; workstream: string; paths: string[]; dependsOn: string[] }[];
   acceptanceCriteria: { id: string; text: string; verification: "automated" | "screenshot" | "manual" }[];
   integrations: { key: string; name: string; purpose: string }[];
@@ -60,10 +86,22 @@ export interface MasterSpec {
 /** JSON Schema of MasterSpec, given to the architect session with the prompt. */
 export const MASTER_SPEC_JSON_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["schema", "projectSpec", "designSpec", "technicalArchitecture", "tasks", "acceptanceCriteria", "integrations", "securityRequirements", "testingRequirements", "assumptions", "referenceImages", "masterPrompt"],
+  required: ["schema", "projectSpec", "designSpec", "technicalArchitecture", "phasePlan", "tasks", "acceptanceCriteria", "integrations", "securityRequirements", "testingRequirements", "assumptions", "referenceImages", "masterPrompt"],
   properties: {
     schema: { type: "string", enum: [SPEC_SCHEMA] },
     projectSpec: { type: "string" }, designSpec: { type: "string" }, technicalArchitecture: { type: "string" },
+    // Required of a NEW specification (so the architect produces the split) while the TypeScript field stays
+    // optional, so a specification stored before this existed still parses and the phase prompts fall back.
+    phasePlan: {
+      type: "object", additionalProperties: false,
+      required: ["designDeliverables", "designDependentInteractions", "deferredBackend", "finalQuality"],
+      properties: {
+        designDeliverables: { type: "array", items: { type: "string" } },
+        designDependentInteractions: { type: "array", items: { type: "object", additionalProperties: false, required: ["component", "states", "mock"], properties: { component: { type: "string" }, states: { type: "array", items: { type: "string" } }, mock: { type: "string" } } } },
+        deferredBackend: { type: "array", items: { type: "object", additionalProperties: false, required: ["capability", "dependsOnDesign", "realImplementation"], properties: { capability: { type: "string" }, dependsOnDesign: { type: "string" }, realImplementation: { type: "string" } } } },
+        finalQuality: { type: "array", items: { type: "string" } },
+      },
+    },
     tasks: { type: "array", items: { type: "object", additionalProperties: false, required: ["id", "title", "workstream", "paths", "dependsOn"], properties: { id: { type: "string" }, title: { type: "string" }, workstream: { type: "string" }, paths: { type: "array", items: { type: "string" } }, dependsOn: { type: "array", items: { type: "string" } } } } },
     acceptanceCriteria: { type: "array", items: { type: "object", additionalProperties: false, required: ["id", "text", "verification"], properties: { id: { type: "string" }, text: { type: "string" }, verification: { type: "string", enum: ["automated", "screenshot", "manual"] } } } },
     integrations: { type: "array", items: { type: "object", additionalProperties: false, required: ["key", "name", "purpose"], properties: { key: { type: "string" }, name: { type: "string" }, purpose: { type: "string" } } } },

@@ -87,6 +87,18 @@ export interface MasterSpec {
   projectSpec: string;
   designSpec: string;
   technicalArchitecture: string;
+  /**
+   * The four-way phase split the build actually runs in: what the design must deliver, which interactions the
+   * design depends on (and the mock that shows each state), which backend work is deliberately deferred until the
+   * design certifies, and what is closed last. Optional, because a specification stored before this existed has
+   * none and must keep parsing.
+   */
+  phasePlan?: {
+    designDeliverables: string[];
+    designDependentInteractions: { component: string; states: string[]; mock: string }[];
+    deferredBackend: { capability: string; dependsOnDesign: string; realImplementation: string }[];
+    finalQuality: string[];
+  };
   tasks: { id: string; title: string; workstream: string; paths: string[]; dependsOn: string[] }[];
   acceptanceCriteria: { id: string; text: string; verification: "automated" | "screenshot" | "manual" }[];
   integrations: { key: string; name: string; purpose: string }[];
@@ -136,6 +148,25 @@ export function validateSpec(raw: unknown): { spec: MasterSpec | null; problems:
   return {
     spec: {
       schema: "crestmont.master-spec/1", projectSpec: s(o.projectSpec, 20000), designSpec: s(o.designSpec, 20000), technicalArchitecture: s(o.technicalArchitecture, 20000),
+      // Stored only when the architect actually produced it. An absent or unusable phasePlan is left absent rather
+      // than filled with an empty shell: the phase prompts then fall back to the undifferentiated specification,
+      // which is honest, where an empty plan would read as "this website needs no design deliverables".
+      ...(() => {
+        const pp = o.phasePlan && typeof o.phasePlan === "object" ? o.phasePlan as Record<string, unknown> : null;
+        if (!pp) return {};
+        const obj = <T>(v: unknown, map: (x: Record<string, unknown>) => T, keep: (x: T) => boolean) =>
+          (Array.isArray(v) ? v : []).slice(0, 60).map((x) => map(x as Record<string, unknown>)).filter(keep);
+        const plan = {
+          designDeliverables: list(pp.designDeliverables, 60),
+          designDependentInteractions: obj(pp.designDependentInteractions,
+            (x) => ({ component: s(x.component, 200), states: list(x.states, 12), mock: s(x.mock, 500) }), (x) => !!x.component),
+          deferredBackend: obj(pp.deferredBackend,
+            (x) => ({ capability: s(x.capability, 200), dependsOnDesign: s(x.dependsOnDesign, 500), realImplementation: s(x.realImplementation, 1000) }), (x) => !!x.capability),
+          finalQuality: list(pp.finalQuality, 60),
+        };
+        const empty = !plan.designDeliverables.length && !plan.designDependentInteractions.length && !plan.deferredBackend.length && !plan.finalQuality.length;
+        return empty ? {} : { phasePlan: plan };
+      })(),
       tasks: outTasks, acceptanceCriteria: outAc,
       integrations: (Array.isArray(o.integrations) ? o.integrations : []).map((x) => x as Record<string, unknown>).map((x) => ({ key: id(x.key) ?? "", name: s(x.name, 100), purpose: s(x.purpose, 300) })).filter((x) => x.key).slice(0, 50),
       securityRequirements: list(o.securityRequirements), testingRequirements: list(o.testingRequirements),

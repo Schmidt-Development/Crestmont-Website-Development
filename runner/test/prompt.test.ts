@@ -63,3 +63,64 @@ test("[AIB-RUNNER] brief files: BRIEF.json, BRIEF.md, seed requirements and a fe
   assert.match(rev, /BEGIN UNTRUSTED CUSTOMER DATA: revision request/);
   assert.match(rev, /````text/);
 });
+
+// ── Design-first phase objectives in the builder prompt ───────────────────────────────────────────────────────────
+
+test("[AIB-PROMPT] every runner instruction still STARTS with its own first line, with the phase objective appended", () => {
+  // Not cosmetic. That opening line is how the latest runner instruction is identified in a resumed conversation
+  // (helpers phaseOf/stepOf do exactly this, as the local provider does), so prepending a preamble to it silently
+  // breaks phase detection -- which is what happened when this block was put first.
+  const job = makeJob();
+  for (const [phase, opener] of [["plan", /^Phase 1 of 3/], ["build", /^Phase 2 of 3/], ["verify", /^Phase 3 of 3/], ["repair", /^Repair:/]] as const) {
+    const p = phasePrompt(job, phase, { starter: "brochure-v1", resumed: false, previousNote: null, buildPhase: "design" });
+    assert.match(p, opener, `${phase}: the instruction's first line is unchanged`);
+    assert.match(p, /ACTIVE PHASE: VISUAL DESIGN/, `${phase}: and the phase objective is present`);
+  }
+  // A resumed build keeps its own opener too.
+  const resumed = phasePrompt(job, "build", { starter: "brochure-v1", resumed: true, previousNote: "note", buildPhase: "functionality" });
+  assert.match(resumed, /^This build is continuing from an earlier attempt/);
+  assert.match(resumed, /ACTIVE PHASE: FRONTEND AND BACKEND FUNCTIONALITY/);
+});
+
+test("[AIB-PROMPT] the design phase tells the builder to DEFER backend work, and the functionality phase not to redesign", () => {
+  const job = makeJob();
+  const design = phasePrompt(job, "build", { starter: "fullstack-v1", resumed: false, previousNote: null, buildPhase: "design" });
+  assert.match(design, /Do NOT build or debug customer-specific backend features yet/);
+  assert.match(design, /deterministic mocks or fixtures/);
+  assert.match(design, /a mock is never evidence that functionality works/);
+  assert.match(design, /desktop \(1366px\), tablet \(768px\) and mobile \(390px\)/, "all three viewports are named");
+  assert.match(design, /layout and spacing \(8\)/, "and the rubric the design will be scored against");
+
+  const fn = phasePrompt(job, "build", { starter: "fullstack-v1", resumed: false, previousNote: null, buildPhase: "functionality", designFreeze: { revision: "1-3", designPoints: 40 } });
+  assert.match(fn, /FROZEN at revision 1-3 \(40\/40\)/, "the builder is told which revision is authoritative");
+  assert.match(fn, /Do not redesign the website to make the backend easier/);
+  assert.match(fn, /Adapt the BACKEND to the existing approved frontend contracts/);
+  assert.match(fn, /pending_external result, not a failure/, "and not to manufacture credentials it cannot have");
+});
+
+test("[AIB-PROMPT] the architect's own phase split reaches the builder, and its absence is not papered over", () => {
+  const job = makeJob();
+  const plan = {
+    designDeliverables: ["Home, Services, Gallery, Contact at three widths"],
+    designDependentInteractions: [{ component: "Quote form", states: ["empty", "error", "success"], mock: "fixture JSON behind a delay" }],
+    deferredBackend: [{ capability: "quote persistence", dependsOnDesign: "the Quote form's field names", realImplementation: "POST /api/quotes to D1" }],
+    finalQuality: ["WCAG 2.1 AA"],
+  };
+  const design = phasePrompt(job, "build", { starter: "fullstack-v1", resumed: false, previousNote: null, buildPhase: "design", phasePlan: plan });
+  assert.match(design, /Home, Services, Gallery, Contact at three widths/, "this website's own deliverables");
+  assert.match(design, /Quote form — states: empty, error, success; mock: fixture JSON behind a delay/);
+  assert.match(design, /Deliberately DEFERRED to the functionality phase[\s\S]*quote persistence/);
+  assert.doesNotMatch(design, /POST \/api\/quotes/, "the real backend implementation is NOT dangled in front of the design phase");
+
+  const fn = phasePrompt(job, "build", { starter: "fullstack-v1", resumed: false, previousNote: null, buildPhase: "functionality", phasePlan: plan });
+  assert.match(fn, /quote persistence — built against: the Quote form's field names; real implementation: POST \/api\/quotes to D1/);
+
+  const qa = phasePrompt(job, "verify", { starter: "fullstack-v1", resumed: false, previousNote: null, buildPhase: "final_qa", phasePlan: plan });
+  assert.match(qa, /WCAG 2\.1 AA/);
+
+  // A specification written before phasePlan existed: the phase objective still appears, with no invented list.
+  const legacy = phasePrompt(job, "build", { starter: "fullstack-v1", resumed: false, previousNote: null, buildPhase: "design", phasePlan: null });
+  assert.match(legacy, /ACTIVE PHASE: VISUAL DESIGN/);
+  assert.doesNotMatch(legacy, /the architect's own list/);
+  assert.doesNotMatch(legacy, /Deliberately DEFERRED/);
+});

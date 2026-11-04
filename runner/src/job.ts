@@ -626,7 +626,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       routed.push(r);
       Object.assign(now, { activity: "gpu_running", model: r.model.tag, task: r.task });
       tracker.note({ kind: "step", message: `phase ${phase}: ${r.reason} (${r.model.tag})` });
-      const base = promptOverride ?? phasePrompt(job, phase, { starter: starterLabel, resumed: !!job.resume, previousNote, toolset, buildPhase, designFreeze: job.designFreeze ?? null });
+      const base = promptOverride ?? phasePrompt(job, phase, { starter: starterLabel, resumed: !!job.resume, previousNote, toolset, buildPhase, designFreeze: job.designFreeze ?? null, phasePlan: spec?.phasePlan ?? null });
       begin(phase === "repair" ? "repair" : "phase", `${phase} (${r.model.tag})`);
       const res = await provider!.run({
         phase,

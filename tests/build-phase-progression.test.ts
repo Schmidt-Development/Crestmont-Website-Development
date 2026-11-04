@@ -296,6 +296,58 @@ test("[PHASES] a cycle limit is still enforced", async () => {
   assert.match(last!.reason, /limit of 3 review cycles/);
 });
 
+// ── The architect's phase split ───────────────────────────────────────────────────────────────────────────────────
+
+test("[PHASES] the specification separates design deliverables, design-dependent interactions, deferred backend and final quality", () => {
+  // Without this split the specification was one undifferentiated demand, and a booking API read identically to a
+  // hero layout -- which is how GPU time went into debugging a backend behind an unfinished-looking homepage.
+  const { spec, problems } = PL.validateSpec({
+    schema: "crestmont.master-spec/1", projectSpec: "p", designSpec: "d", technicalArchitecture: "t", masterPrompt: "m",
+    tasks: [{ id: "t1", title: "Home", workstream: "frontend", paths: ["public/index.html"], dependsOn: [] }],
+    acceptanceCriteria: [{ id: "ac-1", text: "the home page renders", verification: "screenshot" }],
+    integrations: [], securityRequirements: ["no secrets in the frontend"], testingRequirements: [], assumptions: [], referenceImages: [],
+    phasePlan: {
+      designDeliverables: ["Home, Services, Gallery, Contact at three widths", "A licensed hero photograph of a loaded truck"],
+      designDependentInteractions: [{ component: "Quote form", states: ["empty", "validation error", "success"], mock: "a fixture JSON response behind a 300ms delay" }],
+      deferredBackend: [{ capability: "quote persistence", dependsOnDesign: "the Quote form's field names and success state", realImplementation: "POST /api/quotes writing to D1 with validation" }],
+      finalQuality: ["WCAG 2.1 AA", "LCP under 2.5s on the hero"],
+    },
+  });
+  assert.deepEqual(problems, []);
+  assert.ok(spec?.phasePlan, "the split is stored");
+  assert.equal(spec!.phasePlan!.designDeliverables.length, 2);
+  assert.equal(spec!.phasePlan!.designDependentInteractions[0].component, "Quote form");
+  assert.deepEqual(spec!.phasePlan!.designDependentInteractions[0].states, ["empty", "validation error", "success"]);
+  assert.match(spec!.phasePlan!.designDependentInteractions[0].mock, /fixture JSON/, "the mock that shows each state is named");
+  assert.equal(spec!.phasePlan!.deferredBackend[0].capability, "quote persistence");
+  assert.match(spec!.phasePlan!.deferredBackend[0].dependsOnDesign, /field names/, "and what the backend will be built against");
+  assert.equal(spec!.phasePlan!.finalQuality.length, 2);
+});
+
+test("[PHASES] a specification without the split still parses, and no empty plan is invented for it", () => {
+  // A specification stored before phasePlan existed must keep working: the phase prompts fall back to the
+  // undifferentiated designSpec. An empty plan would read as "this website needs no design deliverables".
+  const base = {
+    schema: "crestmont.master-spec/1", projectSpec: "p", designSpec: "d", technicalArchitecture: "t", masterPrompt: "m",
+    tasks: [{ id: "t1", title: "Home", workstream: "frontend", paths: ["public/index.html"], dependsOn: [] }],
+    acceptanceCriteria: [{ id: "ac-1", text: "renders", verification: "screenshot" }],
+    integrations: [], securityRequirements: [], testingRequirements: [], assumptions: [], referenceImages: [],
+  };
+  const legacy = PL.validateSpec(base);
+  assert.deepEqual(legacy.problems, []);
+  assert.equal(legacy.spec?.phasePlan, undefined, "absent, not an empty shell");
+
+  const hollow = PL.validateSpec({ ...base, phasePlan: { designDeliverables: [], designDependentInteractions: [], deferredBackend: [], finalQuality: [] } });
+  assert.deepEqual(hollow.problems, []);
+  assert.equal(hollow.spec?.phasePlan, undefined, "an empty plan is treated as no plan rather than stored as fact");
+
+  const junk = PL.validateSpec({ ...base, phasePlan: { designDeliverables: "not an array", deferredBackend: [{ dependsOnDesign: "x" }], finalQuality: ["real"] } });
+  assert.deepEqual(junk.problems, []);
+  assert.deepEqual(junk.spec!.phasePlan!.designDeliverables, [], "a non-array is dropped, not coerced");
+  assert.deepEqual(junk.spec!.phasePlan!.deferredBackend, [], "an entry with no capability names nothing, so it is dropped");
+  assert.deepEqual(junk.spec!.phasePlan!.finalQuality, ["real"], "and what was usable is kept");
+});
+
 // ── The gates refuse what they should ─────────────────────────────────────────────────────────────────────────────
 
 test("[PHASES] a design at 39/40 does not unlock the backend phase, however many cycles it takes", async () => {
