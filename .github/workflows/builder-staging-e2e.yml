@@ -104,9 +104,8 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          keys=$(node -e 'const g=require("./evidence/jitt/gallery.json");process.stdout.write((g.imageKeys||[]).join("
-"))')
-          if [ -z "$keys" ]; then echo "no image keys to probe"; exit 0; fi
+          f=evidence/jitt/gallery-keys.txt
+          if [ ! -s "$f" ]; then echo "no image keys to probe"; exit 0; fi
           ok=0; missing=0
           while IFS= read -r k; do
             [ -z "$k" ] && continue
@@ -115,7 +114,7 @@ jobs:
             else
               missing=$((missing+1)); echo "MISSING in R2: $k"
             fi
-          done <<< "$keys"
+          done < "$f"
           echo "R2 objects present: $ok; missing: $missing"
           [ "$missing" -eq 0 ]
       - name: Certification status (D1 read-only)
