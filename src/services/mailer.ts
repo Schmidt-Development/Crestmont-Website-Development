@@ -20,6 +20,13 @@ import type { Db } from "../lib/db.ts";
  * The 20 workflows the master directive (§55) requires branded templates for, in directive order.
  * EMAIL_TEMPLATES adds the platform's other transactional workflows.
  */
+/** A review deadline in Eastern time, e.g. "Monday, November 9 (end of day, Eastern)". */
+const fmtDeadline = (iso: string) => {
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return "the date shown in your portal"; // never crash a template on a malformed value
+  return `${new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "long", month: "long", day: "numeric" }).format(new Date(ms - 1000))} (end of day, Eastern)`;
+};
+
 export const REQUIRED_WORKFLOWS = [
   "registration", "verification", "purchase", "receipt", "onboarding", "project_update", "approval_request",
   "revision_update", "change_order", "invoice", "failed_payment", "subscription_update", "support_ticket",
@@ -60,7 +67,8 @@ export interface TemplateData {
     | { event: "general_message_from_team"; preview: string; url: string }
     | { event: "general_message_from_customer"; organizationName: string; preview: string; url: string };
   approval_request:
-    | ProjectBase & { event: "requested"; approval: string; note: string | null }
+    | ProjectBase & { event: "requested"; approval: string; note: string | null; respondBy?: string | null }
+    | ProjectBase & { event: "overdue"; approval: string; respondBy: string }
     | ProjectBase & { event: "decided"; approval: string; decision: string; notes: string | null };
   revision_update:
     | ProjectBase & { event: "requested"; round: number; allowance: number }
@@ -244,10 +252,12 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
   approval_request: {
     name: "approval_request", category: "transactional", audience: "any",
     description: "Asks the customer for an approval; tells the team about the customer's decision.",
-    render: (d) => d.event === "requested"
-      ? { subject: `Your approval is needed: ${d.approval}`, heading: `Your approval is needed: ${d.approval}`, paragraphs: [P(d), d.note ?? `Please review and record your decision for: ${d.approval}.`], cta: { label: "Open your portal", url: d.url } }
+    render: (d) => d.event === "overdue"
+      ? { subject: `Reminder: your review is waiting — ${d.approval}`, heading: `Your review is still waiting: ${d.approval}`, paragraphs: [P(d), `The review period ended ${fmtDeadline(d.respondBy)}. Nothing has been approved on your behalf — we wait for your decision. Please approve or tell us what to change.`], cta: { label: "Open your portal", url: d.url } }
+      : d.event === "requested"
+      ? { subject: `Your approval is needed: ${d.approval}`, heading: `Your approval is needed: ${d.approval}`, paragraphs: [P(d), d.note ?? `Please review and record your decision for: ${d.approval}.`, ...(d.respondBy ? [`Please respond by ${fmtDeadline(d.respondBy)} (five business days). We never treat silence as approval.`] : [])], cta: { label: "Open your portal", url: d.url } }
       : { subject: `Customer ${d.decision}: ${d.approval}`, heading: `Customer ${d.decision}: ${d.approval}`, paragraphs: [P(d), d.notes ?? `${d.approval} was ${d.decision}.`], cta: { label: "Open project", url: d.url } },
-    samples: [{ ...sampleProject, event: "requested", approval: "Design", note: null }, { ...sampleProject, event: "decided", approval: "Design", decision: "approved", notes: null }],
+    samples: [{ ...sampleProject, event: "requested", approval: "Design", note: null, respondBy: "2026-11-09T04:59:59.999Z" }, { ...sampleProject, event: "overdue", approval: "Design", respondBy: "2026-11-09T04:59:59.999Z" }, { ...sampleProject, event: "decided", approval: "Design", decision: "approved", notes: null }],
   },
   revision_update: {
     name: "revision_update", category: "transactional", audience: "any",

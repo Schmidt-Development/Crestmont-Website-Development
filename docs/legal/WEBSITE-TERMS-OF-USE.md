@@ -26,7 +26,7 @@ You must be at least 18 years old and able to form a binding contract. The Platf
 
 3.3 Tell us promptly at [NOTICE EMAIL] about any unauthorised use. Customer administrators control which colleagues can access their organisation's Portal and must remove access promptly when someone leaves.
 
-3.4 We may temporarily lock an account after repeated failed sign-in attempts, and may limit request rates to protect the Platform.
+3.4 After repeated failed sign-in attempts we may require additional verification or temporarily limit sign-in attempts, and we may limit request rates to protect the Platform.
 
 ## 4. Acceptable Use
 

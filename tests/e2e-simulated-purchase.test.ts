@@ -5,6 +5,7 @@
 // is called and no build result is produced here — the real build needs Node 1 (docs/ai-builds/E2E-BENCHMARK.md).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { businessDate } from "../src/lib/business-time.ts";
 import { createTestApp, createCustomer, createStaff, lastEmail, linkFrom, MemoryStorage, TEST_PASSWORD } from "./support/app.ts";
 import { createPackageOrder } from "../src/services/commerce.ts";
 import { hmacSha256Hex } from "../src/lib/crypto.ts";
@@ -22,7 +23,8 @@ import { JUNK_IN_THE_TRUNK as JT } from "./fixtures/junk-in-the-trunk.ts";
 import type { Env } from "../src/app/context.ts";
 
 const RUNNER_SECRET = "test-runner-secret";
-const future = (days = 30) => new Date(Date.now() + days * 86400e3).toISOString().slice(0, 10);
+// Quote validity is counted in Eastern business dates and capped at 30 days (FD-24, CREST-GAP-094).
+const future = (days = 30) => new Date(Date.parse(`${businessDate(new Date())}T12:00:00Z`) + days * 86400e3).toISOString().slice(0, 10);
 type T = Awaited<ReturnType<typeof createTestApp>>;
 const one = async <R>(t: T, sql: string, ...b: unknown[]) => (await t.db.prepare(sql).bind(...b).first<R>())!;
 const count = async (t: T, sql: string, ...b: unknown[]) => (await one<{ n: number }>(t, `SELECT COUNT(*) AS n FROM (${sql})`, ...b)).n;

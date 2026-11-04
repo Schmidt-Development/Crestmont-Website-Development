@@ -298,7 +298,7 @@ test("[CAT-007] AI and automation can never approve a price change, even with an
   const t = await app(false);
   const owner = await createStaff(t.db, "owner");
   const userOwner: Actor = { kind: "user", userId: owner.id, roles: [{ role: "owner", organizationId: owner.organizationId }], mfaVerified: true };
-  const res = await proposePriceChange(t.db, userOwner, { itemType: "maintenance", itemId: "essential", proposed: "129", effectiveDate: t.now().toISOString().slice(0, 10), reason: "Hosting cost increase (TEST DATA)" }, t.now());
+  const res = await proposePriceChange(t.db, userOwner, { itemType: "maintenance", itemId: "essential", proposed: "129", effectiveDate: new Date(t.now().getTime() + 31 * 86400e3).toISOString().slice(0, 10), reason: "Hosting cost increase (TEST DATA)" }, t.now()); // FD-25: ≥30 days' notice
   assert.ok(res.ok);
   const id = (res as { id: string }).id;
   for (const kind of ["ai", "system", "webhook"] as const) {
@@ -318,7 +318,7 @@ test("[CAT-007] an approved maintenance price applies to maintenance checkout on
   const t = await app(true);
   const owner = await createStaff(t.db, "owner");
   const actor: Actor = { kind: "user", userId: owner.id, roles: [{ role: "owner", organizationId: owner.organizationId }], mfaVerified: true };
-  const eff = new Date(t.now().getTime() + 3 * 86400e3).toISOString().slice(0, 10);
+  const eff = new Date(t.now().getTime() + 31 * 86400e3).toISOString().slice(0, 10); // FD-25: ≥30 days' notice for an increase
   const r = await proposePriceChange(t.db, actor, { itemType: "maintenance", itemId: "essential", proposed: "119", effectiveDate: eff, reason: "Maintenance cost review (TEST DATA)" }, t.now());
   await decidePriceChange(t.db, actor, (r as { id: string }).id, "approved", "", t.now());
 
@@ -329,7 +329,7 @@ test("[CAT-007] an approved maintenance price applies to maintenance checkout on
   const ctxFor = async () => buildContext(new Request("http://crestmont.test/checkout/maintenance/essential", { headers: { cookie: `cm_session=${cust.c.cookies.get("cm_session")!}` } }), t.env);
   await startMaintenanceCheckout(await ctxFor(), { id: cust.id, email: cust.email }, cust.organizationId, "essential", approved);
   assert.equal(t.fake.checkouts.at(-1)!.lines[0].amountCents, 9_900, "before the effective date: catalog price");
-  t.advance(4 * 86400e3);
+  t.advance(32 * 86400e3);
   await startMaintenanceCheckout(await ctxFor(), { id: cust.id, email: cust.email }, cust.organizationId, "essential", approved);
   assert.equal(t.fake.checkouts.at(-1)!.lines[0].amountCents, 11_900, "after the effective date: approved price");
   assert.match(await (await t.client().get("/pricing")).text(), /data-testid="price-essential">\$119</);

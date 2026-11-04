@@ -2,6 +2,7 @@
 // All records created here are TEST DATA. The Stripe adapter is a local fake that records calls.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { businessDate } from "../src/lib/business-time.ts";
 import { createTestApp, createStaff, createCustomer, lastEmail, linkFrom, TEST_PASSWORD, type TestClient } from "./support/app.ts";
 import { hmacSha256Hex } from "../src/lib/crypto.ts";
 import type { PaymentsAdapter, CheckoutRequest } from "../src/adapters/payments.ts";
@@ -21,7 +22,8 @@ class FakePayments implements PaymentsAdapter {
 }
 
 const WHSEC = "whsec_test_area_c";
-const future = (days = 30) => new Date(Date.now() + days * 86400e3).toISOString().slice(0, 10);
+// Quote validity is counted in Eastern business dates and capped at 30 days (FD-24, CREST-GAP-094).
+const future = (days = 30) => new Date(Date.parse(`${businessDate(new Date())}T12:00:00Z`) + days * 86400e3).toISOString().slice(0, 10);
 
 async function app(opts: { payments?: boolean } = {}) {
   const fake = new FakePayments();

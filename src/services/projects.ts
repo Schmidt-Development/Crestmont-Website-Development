@@ -3,6 +3,7 @@
 import type { AppContext } from "../app/context.ts";
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
+import { customerReviewDeadline } from "../lib/business-time.ts";
 import { audit } from "./security.ts";
 import { HttpError } from "../app/http.ts";
 import { can, isOwner, type Actor } from "../domain/authz.ts";
@@ -195,9 +196,11 @@ export async function requestCustomerApproval(ctx: MailCtx, actor: Actor, projec
   const open = await ctx.db.prepare(`SELECT id FROM approval_requests WHERE project_id = ? AND kind = ? AND resolved_at IS NULL AND COALESCE(subject_id,'') = COALESCE(?, '')`).bind(projectId, kind, subjectId ?? null).first<{ id: string }>();
   if (open) throw new HttpError(409, "There is already an open request for that approval.");
   const id = newId("apr");
-  await ctx.db.prepare(`INSERT INTO approval_requests (id, project_id, kind, subject_id, note, requested_by, created_at) VALUES (?,?,?,?,?,?,?)`).bind(id, projectId, kind, subjectId ?? null, note.trim() || null, actor.userId, nowIso()).run();
+  const reqAt = new Date();
+  const respondBy = customerReviewDeadline(reqAt); // FD-14
+  await ctx.db.prepare(`INSERT INTO approval_requests (id, project_id, kind, subject_id, note, requested_by, created_at, respond_by) VALUES (?,?,?,?,?,?,?,?)`).bind(id, projectId, kind, subjectId ?? null, note.trim() || null, actor.userId, reqAt.toISOString(), respondBy).run();
   await audit(ctx.db, { actorUserId: actor.userId, action: "approval.requested", subjectType: "project", subjectId: projectId, organizationId: p.organization_id, details: { kind, requestId: id } });
-  await notifyCustomer(ctx, projectId, { kind: "approval_request", mail: { template: "approval_request", data: { event: "requested", approval: APPROVAL_LABELS[kind], note: note.trim() || null } }, path: `/portal/projects/${projectId}/approvals`, key: `apr:${id}` });
+  await notifyCustomer(ctx, projectId, { kind: "approval_request", mail: { template: "approval_request", data: { event: "requested", approval: APPROVAL_LABELS[kind], note: note.trim() || null, respondBy } }, path: `/portal/projects/${projectId}/approvals`, key: `apr:${id}` });
   return id;
 }
 
@@ -736,7 +739,7 @@ export async function updateRevisionStatus(ctx: MailCtx, actor: Actor, userId: s
     .bind(status, status, at, notes.trim() || null, revisionId).run();
   await audit(ctx.db, { actorUserId: userId, action: "revision.status_changed", subjectType: "project", subjectId: r.project_id, organizationId: r.organization_id, details: { revisionId, from: r.status, to: status } });
   if (status === "delivered") {
-    await ctx.db.prepare(`INSERT INTO approval_requests (id, project_id, kind, subject_id, note, requested_by, created_at) VALUES (?,?, 'revision', ?,?,?,?)`).bind(newId("apr"), r.project_id, revisionId, `Review revision round ${r.round}`, userId, at).run();
+    await ctx.db.prepare(`INSERT INTO approval_requests (id, project_id, kind, subject_id, note, requested_by, created_at, respond_by) VALUES (?,?, 'revision', ?,?,?,?,?)`).bind(newId("apr"), r.project_id, revisionId, `Review revision round ${r.round}`, userId, at, customerReviewDeadline(new Date(at))).run();
     await notifyCustomer(ctx, r.project_id, { kind: "revision", mail: { template: "revision_update", data: { event: "delivered", round: r.round, notes: notes.trim() || null } }, path: `/portal/projects/${r.project_id}/revisions`, key: `revdel:${revisionId}` });
   }
   return r.project_id;
@@ -874,6 +877,26 @@ export function describeHistory(r: HistoryRow): string {
 }
 
 // ───────────── Inactivity (PM-005) ─────────────
+
+/**
+ * FD-14 / FD-15: a review request whose five-business-day deadline has passed is NOT approved. The customer is reminded
+ * once and the project team is told once; the request stays open until the customer decides.
+ */
+export async function runReviewDeadlineSweep(ctx: Ctx): Promise<number> {
+  const db = ctx.db;
+  const now = ctx.now().toISOString();
+  const due = (await db.prepare(`SELECT r.id, r.project_id, r.kind, r.respond_by FROM approval_requests r WHERE r.resolved_at IS NULL AND r.respond_by IS NOT NULL AND r.respond_by < ? AND r.overdue_notified_at IS NULL LIMIT 100`)
+    .bind(now).all<{ id: string; project_id: string; kind: CustomerApprovalKind; respond_by: string }>()).results;
+  for (const r of due) {
+    const claimed = await db.prepare(`UPDATE approval_requests SET overdue_notified_at = ? WHERE id = ? AND overdue_notified_at IS NULL`).bind(now, r.id).run();
+    if (claimed.meta.changes !== 1) continue;
+    const approval = APPROVAL_LABELS[r.kind];
+    await notifyCustomer(ctx, r.project_id, { kind: "approval_request", mail: { template: "approval_request", data: { event: "overdue", approval, respondBy: r.respond_by } }, path: `/portal/projects/${r.project_id}/approvals`, key: `aprdue:${r.id}` });
+    await notifyProjectTeam(ctx, r.project_id, { kind: "approval_overdue", mail: { template: "approval_request", data: { event: "overdue", approval, respondBy: r.respond_by } }, path: `/staff/projects/${r.project_id}?tab=approvals`, key: `aprdue-team:${r.id}` });
+    await audit(db, { actorKind: "system", action: "approval.review_overdue", subjectType: "project", subjectId: r.project_id, details: { requestId: r.id, kind: r.kind, respondBy: r.respond_by, approved: false } });
+  }
+  return due.length;
+}
 
 export interface SweepResult { projectId: string; action: "remind" | "escalate" | "pause"; reminder?: number }
 

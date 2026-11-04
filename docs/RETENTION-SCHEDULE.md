@@ -16,7 +16,8 @@ Implementation: `src/services/retention.ts`, run daily by the `retention` schedu
 
 | Data | Proposed period | What happens | Settings key | Allowed range |
 |---|---|---|---|---|
-| Security events (failed logins, lockouts, rate-limit hits; contain email + IP) | **365 days** | Rows deleted | `retention.security_events_days` | 90–3650 |
+| Security events (failed logins, rate-limit hits; contain email + IP) | **180 days** (FD-38, provisional) | Rows deleted | `retention.security_events_days` | 90–3650 |
+| Raw IP addresses (sessions, security events, audit log) | **90 days** (FD-38, provisional) | IP cleared; the row is kept. The audit log permits exactly this change (migration 0067). Agreement acceptance IPs are kept as contract evidence | `retention.raw_ip_days` | 30–3650 |
 | Email message bodies (rendered subject/HTML/text) | **730 days** | Body deleted. The delivery log row (template, recipient, status, dates) is kept | `retention.email_bodies_days` | 90–3650 |
 | Server error log (`app_errors`) | **90 days** | Rows deleted | `retention.app_errors_days` | 30–3650 |
 | Voice call transcripts and recording links | **90 days** after the call | `transcript` and `recording_url` cleared. The call row, outcome, summary, consent flag and CRM lead are kept | `retention.voice_transcripts_days` | 30–3650 |
@@ -26,7 +27,7 @@ Questions for the Founder and attorney before any of these are switched on:
 1. Do state laws or contracts require keeping security logs longer (for example for breach investigation windows)?
 2. Should email bodies for financial notices (invoices, receipts, refund decisions) follow the financial-records period instead of the general period?
 3. Is 90 days right for call transcripts given the recording-consent disclosure the voice provider plays (VOICE-006)?
-4. ASVS finding F-09: retention for audit IPs and security-event emails of anonymised users. The proposed answer is the security-events period above. Audit IPs stay because the audit log is append-only (see §3).
+4. ASVS finding F-09: retention for audit IPs and security-event emails of anonymised users. Founder decision FD-38 (2026-11, provisional): raw IPs 90 days, including audit-log IPs, which the audit log now allows to be cleared (and nothing else); security events 180 days. Counsel to confirm lawful exceptions.
 
 ## 3. Never deleted by the retention job
 

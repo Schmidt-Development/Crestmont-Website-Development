@@ -2,6 +2,7 @@
 // real request pipeline. All records created here are TEST DATA.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { businessDate } from "../src/lib/business-time.ts";
 import { createTestApp, createStaff, createCustomer, TEST_PASSWORD, type TestClient } from "./support/app.ts";
 import { newId, nowIso } from "../src/lib/db.ts";
 import type { Env } from "../src/app/context.ts";
@@ -21,7 +22,8 @@ async function apiLead(c: TestClient, over: Record<string, string> = {}) {
 }
 
 const one = async <T>(db: Env["DB"], sql: string, ...b: unknown[]) => (await db.prepare(sql).bind(...b).first<T>())!;
-const future = (days = 30) => new Date(Date.now() + days * 86400e3).toISOString().slice(0, 10);
+// Quote validity is counted in Eastern business dates and capped at 30 days (FD-24, CREST-GAP-094).
+const future = (days = 30) => new Date(Date.parse(`${businessDate(new Date())}T12:00:00Z`) + days * 86400e3).toISOString().slice(0, 10);
 
 // ───────────── CRM ─────────────
 test("[CRM-002] duplicate detection groups leads by email/phone/name+company; merge moves history, archives the duplicate and is audited", async () => {
