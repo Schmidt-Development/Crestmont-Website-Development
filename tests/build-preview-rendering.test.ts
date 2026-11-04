@@ -83,14 +83,15 @@ test("[PREVIEW-RENDER] the sandbox stays, and the policy names the preview's own
   // also confines the generated page to its OWN snapshot rather than the whole origin.
   // frame-ancestors is exempt: it is matched against the EMBEDDING page's origin (the staff page), not against
   // this document's own, so 'self' is both meaningful and correct there.
-  // Compared as whole source expressions, not as substrings of the policy: "the prefix appears somewhere in
-  // style-src" would also be true of a policy that merely allowed a host the prefix happens to sit under.
-  for (const directive of ["default-src", "img-src", "style-src", "script-src", "font-src"]) {
-    const sources = (new RegExp(`(?:^|; )${directive} ([^;]*)`).exec(csp)?.[1] ?? "").trim().split(/\s+/);
-    assert.ok(sources.includes(base), `${directive} names the preview prefix exactly, not a bare origin`);
-    assert.ok(!sources.includes("'self'"),
-      `${directive} must not rely on 'self': this document's origin is opaque, so 'self' can never match it`);
-  }
+  // Each fetch directive is compared WHOLE, not searched for a substring. "the prefix appears somewhere in
+  // style-src" would also hold for a policy that merely allowed a host the prefix happens to sit under, and a
+  // substring test on a URL is the weakness CodeQL's js/incomplete-url-substring-sanitization is about.
+  const value = (d: string) => (new RegExp(`(?:^|; )${d} ([^;]*)`).exec(csp)?.[1] ?? "").trim();
+  assert.equal(value("default-src"), base, "default-src is exactly the preview prefix");
+  assert.equal(value("img-src"), `${base} data:`, "images come from the snapshot or an inline data: URI");
+  assert.equal(value("style-src"), `${base} 'unsafe-inline'`, "the stylesheet, plus the inline <style> the builder emits");
+  assert.equal(value("script-src"), `${base} 'unsafe-inline'`);
+  assert.equal(value("font-src"), `${base} data:`);
   assert.match(csp, /style-src [^;]*'unsafe-inline'/, "inline <style> blocks the builder emits still apply");
 });
 
