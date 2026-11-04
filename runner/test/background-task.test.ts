@@ -86,13 +86,17 @@ test("[AIB-RUNNER] Register-ScheduledTask is called in exactly one place, and it
     assert.doesNotMatch(code, /New-ScheduledTaskPrincipal/, `${f.name} must not build a task principal itself`);
   }
 
-  const mod = read("BackgroundTask.ps1");
-  // The three registration paths, and the only two that may be used with an interactive principal.
-  assert.match(mod, /-LogonType S4U/);
+  const mod = withoutComments(read("BackgroundTask.ps1"));
+  // Two launch paths and no others: the hidden shim (the verified one), and a stored password for the research
+  // worker's -RunWhenLoggedOff. An S4U principal was removed because no job here can use it.
+  assert.doesNotMatch(mod, /-LogonType S4U/, "S4U was removed: it cannot reach the GUI programs or the user's DPAPI key");
   assert.match(mod, /-LogonType Interactive/);
-  assert.match(mod, /CrestmontWScriptExe -Argument/, "an interactive task is launched through wscript.exe, not powershell.exe");
-  const interactive = mod.slice(mod.indexOf("-LogonType Interactive") - 600, mod.indexOf("-LogonType Interactive"));
-  assert.match(interactive, /CrestmontWScriptExe/, "the interactive branch executes the hidden launcher");
+  const interactive = mod.slice(mod.indexOf("-LogonType Interactive") - 700, mod.indexOf("-LogonType Interactive"));
+  assert.match(interactive, /CrestmontWScriptExe -Argument/, "the interactive branch executes the hidden launcher, not a console host");
+  // The only powershell.exe action is the one behind -Credential, which runs in session 0 where no window exists.
+  const psActions = [...mod.matchAll(/New-ScheduledTaskAction -Execute \$script:CrestmontPowerShellExe[^\n]*/g)];
+  assert.equal(psActions.length, 1, "powershell.exe may only be a task action on the stored-password (session 0) path");
+  assert.match(mod.slice(0, mod.indexOf(psActions[0][0])), /if \(\$Credential\) \{/, "and that path is guarded by -Credential");
   // Single instance is enforced, not just defaulted.
   assert.match(mod, /MultipleInstances = "IgnoreNew"/);
   assert.match(mod, /must be registered with -MultipleInstances IgnoreNew/, "a caller passing anything else is refused");
@@ -110,57 +114,96 @@ test("[AIB-RUNNER] the hidden launcher creates the console already hidden and wa
 });
 
 /**
- * Every Register-CrestmontBackgroundTask call in a script, with whether it asks for the desktop and whether its
- * trigger repeats. The trigger is normally built into a variable on an earlier line, so it is resolved here.
+ * Every Register-CrestmontBackgroundTask call in a script, with the text of its trigger and settings. The trigger
+ * is normally built into a variable on an earlier line, so it is resolved here.
  */
-function taskRegistrations(src: string): { name: string; desktop: boolean; repeats: boolean }[] {
-  const marker = /Register-CrestmontBackgroundTask -TaskName "([^"]+)"/g;
-  const out: { name: string; desktop: boolean; repeats: boolean }[] = [];
-  for (const m of src.matchAll(marker)) {
+function taskRegistrations(src: string): { name: string; body: string; trigger: string; settings: string }[] {
+  const out: { name: string; body: string; trigger: string; settings: string }[] = [];
+  for (const m of src.matchAll(/Register-CrestmontBackgroundTask -TaskName "([^"]+)"/g)) {
     const rest = src.slice(m.index!);
-    const end = rest.slice(1).search(/\n\s*(?:Ok|Warn|Note) |Register-CrestmontBackgroundTask -TaskName/);
+    const end = rest.slice(1).search(/\n\s*(?:Ok|Warn|Note|Fail) |Register-CrestmontBackgroundTask -TaskName/);
     const body = rest.slice(0, end > 0 ? end + 1 : 900);
-    const trigger = /-Trigger (\$[A-Za-z0-9_]+|\([^\n]*)/.exec(body);
+    const trigger = /-Trigger (@\([^\n]*|\$[A-Za-z0-9_]+|\([^\n]*)/.exec(body);
     let triggerText = trigger ? trigger[1] : "";
-    if (triggerText.startsWith("$")) {
-      // e.g. "$watchdogTrigger = New-ScheduledTaskTrigger -Once -At ... -RepetitionInterval ..."
-      const assigned = new RegExp(`\\${triggerText} = New-ScheduledTaskTrigger[^\n]*`, "g");
-      triggerText = (src.match(assigned) ?? []).join(" ");
+    // Resolve every $variable the trigger expression names to its New-ScheduledTaskTrigger assignment.
+    for (const v of triggerText.matchAll(/\$[A-Za-z0-9_]+/g)) {
+      const assigned = src.match(new RegExp(`\\${v[0]} = New-ScheduledTaskTrigger[^\n]*`, "g"));
+      if (assigned) triggerText += " " + assigned.join(" ");
     }
-    out.push({ name: m[1], desktop: /-DesktopSession/.test(body), repeats: /-RepetitionInterval/.test(triggerText) });
+    // Settings are either inline or built into a variable on an earlier line; resolve both.
+    let settings = /Get-CrestmontBackgroundTaskSetting[^)\n]*/.exec(body)?.[0] ?? "";
+    if (!settings) {
+      const named = /-Settings (\$[A-Za-z0-9_]+)/.exec(body);
+      if (named) settings = (src.match(new RegExp(`\\${named[1]} = Get-CrestmontBackgroundTaskSetting[^\n]*`, "g")) ?? []).join(" ");
+    }
+    out.push({ name: m[1], body, trigger: triggerText, settings });
   }
   return out;
 }
 
-test("[AIB-RUNNER] every repeating task runs in session 0; only the logon task touches the desktop", () => {
+test("[AIB-RUNNER] the runner tasks keep the triggers, arguments and settings they shipped with, and only the launch path changed", () => {
   const install = read("Install-CrestmontRunner.ps1");
   const calls = taskRegistrations(install);
-  assert.deepEqual(calls.map((c) => c.name).sort(), ["CrestmontRunner-GpuTelemetry", "CrestmontRunner-Start", "CrestmontRunner-Watchdog"]);
-  for (const c of calls) {
-    const { repeats, desktop } = c;
-    assert.ok(!(repeats && desktop), `${c.name}: a repeating trigger must not run on the desktop - that is one window per repetition`);
-    if (c.name === "CrestmontRunner-Start") {
-      assert.ok(desktop && !repeats, "the logon task is the only desktop task, and it fires once per logon");
-    } else {
-      assert.ok(repeats && !desktop, `${c.name} repeats, so it must run in session 0`);
-    }
+  // Exactly the two tasks that already existed. Nothing extra is registered: no second watchdog, no new service.
+  assert.deepEqual(calls.map((c) => c.name).sort(), ["CrestmontRunner-GpuTelemetry", "CrestmontRunner-Start"]);
+
+  const start = calls.find((c) => c.name === "CrestmontRunner-Start")!;
+  // At logon AND every 5 minutes, both on this one task, exactly as before.
+  assert.match(start.trigger, /-AtLogOn -User "\$env:USERDOMAIN\\\$env:USERNAME"/);
+  assert.match(start.trigger, /-RepetitionInterval \(New-TimeSpan -Minutes 5\)/);
+  assert.match(start.settings, /-RestartCount 3 -RestartIntervalMinutes 5 -ExecutionTimeLimitMinutes 60/);
+  assert.doesNotMatch(start.settings, /-StartWhenAvailable/, "this task never had StartWhenAvailable");
+  assert.match(start.body, /-ScriptArgument \$startArgument/);
+
+  const gpu = calls.find((c) => c.name === "CrestmontRunner-GpuTelemetry")!;
+  assert.match(gpu.trigger, /-RepetitionInterval \(New-TimeSpan -Minutes 1\)/);
+  assert.match(gpu.settings, /-RestartCount 0 -ExecutionTimeLimitMinutes 1/, "no restart count and a one-minute limit, as before");
+  assert.doesNotMatch(gpu.settings, /-StartWhenAvailable/);
+  assert.match(gpu.body, /-ScriptArgument @\("-InstallDir", \$InstallDir\)/);
+
+  // The arguments the start task passes are the ones it always passed; -NoGuiLaunch was an invention and is gone.
+  assert.match(install, /\$startArgument = @\("-InstallDir", \$InstallDir\)/);
+  assert.match(install, /if \(\$OllamaInDocker\) \{ \$startArgument \+= "-OllamaInDocker" \} elseif \(\$PreserveOllamaConfig\) \{ \$startArgument \+= "-NoOllamaStart" \}/);
+  for (const f of ["Install-CrestmontRunner.ps1", "Start-CrestmontRunner.ps1", "Repair-WindowsAutomation.ps1"]) {
+    assert.doesNotMatch(read(f), /-NoGuiLaunch/, `${f}: the session-0 watchdog split was reverted`);
   }
-  // The watchdog must not start GUI programs: in session 0 they have no desktop, and on the desktop they steal focus.
-  assert.match(install, /-NoGuiLaunch/);
-  const start = read("Start-CrestmontRunner.ps1");
-  const guiBlock = start.slice(start.indexOf("if (-not $NoGuiLaunch) {"), start.indexOf("# Wait for the engine"));
-  assert.match(guiBlock, /Docker Desktop\.exe/);
-  assert.match(guiBlock, /ollama app\.exe/);
-  for (const m of start.matchAll(/Start-Process[^\n]*/g)) {
+  // No task asks for the desktop explicitly any more: the shim is the default path.
+  assert.doesNotMatch(withoutComments(install), /-DesktopSession/);
+  // Each task is read back after registration, and a task that could open a window stops the install.
+  assert.match(install, /Test-CrestmontTaskIsWindowless/);
+  assert.match(install, /else \{ Fail "\$t could open a terminal window/);
+  assert.match(install, /if \(\$script:Problems\.Count\) \{ Exit-WithProblem \}[\s\S]{0,400}CrestmontRunner-Watchdog/);
+  // The GUI programs are started only when absent, and minimised, so a 5-minute run cannot take focus.
+  const startScript = read("Start-CrestmontRunner.ps1");
+  for (const m of startScript.matchAll(/Start-Process[^\n]*/g)) {
     assert.match(m[0], /-WindowStyle Minimized/, "a GUI launch must not take focus");
   }
-  // Each task is read back after registration rather than assumed correct.
-  assert.match(install, /Test-CrestmontTaskIsWindowless/);
+  assert.match(startScript, /if \(-not \(Get-Process "Docker Desktop"[\s\S]{0,120}Start-Process/);
+  assert.match(startScript, /if \(-not \(Get-Process "ollama"[\s\S]{0,120}Start-Process/);
 
-  // The repair script re-registers the same tasks, so the same rule must hold there.
-  for (const c of taskRegistrations(read("Repair-WindowsAutomation.ps1"))) {
-    assert.ok(!(c.repeats && c.desktop), `Repair: ${c.name} must not repeat on the desktop`);
+  // The repair script re-registers the same two tasks the same way.
+  const repair = taskRegistrations(read("Repair-WindowsAutomation.ps1"));
+  const rStart = repair.find((c) => c.name === "CrestmontRunner-Start")!;
+  assert.match(rStart.trigger, /-AtLogOn/);
+  assert.match(rStart.trigger, /-RepetitionInterval \(New-TimeSpan -Minutes 5\)/);
+  assert.match(rStart.settings, /-RestartCount 3 -RestartIntervalMinutes 5 -ExecutionTimeLimitMinutes 60/);
+  const rGpu = repair.find((c) => c.name === "CrestmontRunner-GpuTelemetry")!;
+  assert.match(rGpu.settings, /-RestartCount 0 -ExecutionTimeLimitMinutes 1/);
+});
+
+test("[AIB-RUNNER] the research worker task keeps its settings, with the restart count bounded", () => {
+  const install = readResearch("Install-ResearchWorker.ps1");
+  const calls = taskRegistrations(install);
+  assert.deepEqual(calls.map((c) => c.name), ["CrestmontResearch-Worker", "CrestmontResearch-Worker"], "the credential and no-credential paths");
+  for (const c of calls) {
+    // As before: starts when available, no time limit, one instance. Only RestartCount changed, 999 -> 4.
+    assert.match(c.settings, /-RestartCount 4 -RestartIntervalMinutes 1 -RunIndefinitely -StartWhenAvailable/);
+    assert.match(c.body, /-ScriptArgument @\("-InstallDir", \$InstallDir\)/);
   }
+  // Only the -RunWhenLoggedOff path stores a password, and it is the only one that passes -Credential.
+  assert.equal([...install.matchAll(/-Credential \$cred/g)].length, 1);
+  assert.match(install, /\$triggers = @\(New-ScheduledTaskTrigger -AtLogOn -User "\$env:USERDOMAIN\\\$env:USERNAME"\)/);
+  assert.match(install, /if \(\$RunWhenLoggedOff\) \{ \$triggers \+= New-ScheduledTaskTrigger -AtStartup \}/);
 });
 
 test("[AIB-RUNNER] the research worker supervisor has bounded retries, one instance, and no unbounded loop", () => {
@@ -220,6 +263,103 @@ test("[AIB-RUNNER] every Windows script is ASCII (5.1 reads BOM-less files as AN
       assert.equal(bad, 0, `${f}: ${bad} non-ASCII bytes`);
     }
   }
+});
+
+test("[AIB-RUNNER] GPU telemetry never pipes nvidia-smi into Select-Object, which set $LASTEXITCODE to -1 on valid data", () => {
+  const src = read("Write-GpuTelemetry.ps1");
+  const code = withoutComments(src);
+
+  // THE DEFECT. `Select-Object -First 1` short-circuits its upstream (StopUpstreamCommandsException since PS 3.0).
+  // With a NATIVE command upstream the process is torn down instead of exiting, and $LASTEXITCODE comes back -1
+  // even though nvidia-smi printed valid data - so the guard below it skipped writing gpu.json.
+  const invocation = /^.*&\s*\$smi.*$/m.exec(code);
+  assert.ok(invocation, "the script still invokes nvidia-smi");
+  assert.doesNotMatch(invocation[0], /Select-Object/, "nvidia-smi must not be piped into Select-Object: that is the defect");
+  assert.doesNotMatch(code, /&\s*\$smi[^\n]*\|[^\n]*Select-Object/, "no native-command pipeline into Select-Object anywhere");
+  // Select-Object on an in-memory array is fine, and is how the first row is picked.
+  assert.match(code, /\$raw = @\(& \$smi @query 2>&1/, "output is collected into an array first");
+  assert.match(code, /\$exit = \$LASTEXITCODE/, "the real exit code is captured straight after the call");
+
+  // Diagnosable instead of misleadingly successful: nvidia-smi absent is exit 0, nvidia-smi broken is exit 1.
+  const missing = code.slice(code.indexOf("if (-not $smi) {\n    Write-CrestmontLogLine"));
+  assert.match(missing.slice(0, 300), /no GPU telemetry on this machine"\s*\n\s*exit 0/, "no NVIDIA GPU is not a fault");
+  for (const failure of ["nvidia-smi failed", "nvidia-smi printed nothing", "nvidia-smi output had no usable GPU row", "nvidia-smi could not be run"]) {
+    const at = code.indexOf(failure);
+    assert.ok(at > 0, `reports: ${failure}`);
+    assert.match(code.slice(at, at + 400), /exit 1/, `${failure} must exit non-zero so LastTaskResult shows it`);
+  }
+  assert.match(code, /Write-CrestmontLogLine -Path \$log/, "every outcome is written to a structured log");
+
+  // Under Windows PowerShell 5.1 with ErrorActionPreference Stop, native stderr becomes a terminating error, so
+  // 2>&1 is only safe with the preference relaxed around the call.
+  assert.match(code, /\$previous = \$ErrorActionPreference\s*\n\s*\$ErrorActionPreference = "Continue"/);
+  assert.match(code, /finally \{ \$ErrorActionPreference = \$previous \}/);
+
+  // Schema, destination and atomic write unchanged - the runner and the GPU workers page already read these.
+  for (const key of ["at = (Get-Date).ToUniversalTime().ToString(\"o\")", "name = $row[0]", "driver = $row[1]", "memoryTotalMb", "memoryUsedMb", "utilizationPercent"]) {
+    assert.ok(code.includes(key), `schema key: ${key}`);
+  }
+  assert.match(code, /\$dir = Join-Path \$InstallDir "state\\telemetry"/);
+  assert.match(code, /\$tmp = Join-Path \$dir "gpu\.json\.tmp"[\s\S]{0,200}Move-Item -Force \$tmp \(Join-Path \$dir "gpu\.json"\)/, "written to a temp file and renamed");
+
+  // One sampler at a time, so the GPU is never queried twice over and two writers cannot interleave on gpu.json.
+  assert.match(code, /Enter-CrestmontSingleInstance -Name "gpu-telemetry"/);
+  assert.match(code, /if \(-not \$lock\) \{[\s\S]{0,200}exit 0/, "a sampler that finds the lock held does nothing and reports success");
+  // A test seam, not a behaviour change: nothing on a real machine passes it.
+  assert.match(code, /\[string\]\$NvidiaSmiPath = ""/);
+});
+
+test("[AIB-RUNNER] a re-install validates prerequisites first and can roll the task configuration back", () => {
+  const mod = withoutComments(read("BackgroundTask.ps1"));
+  // Prerequisites are checked before the first state change, so a half-copied install never replaces a task.
+  const reg = mod.slice(mod.indexOf("function Register-CrestmontBackgroundTask"));
+  const prereqAt = reg.indexOf("Assert-CrestmontTaskPrerequisite");
+  const firstWrite = Math.min(...["Export-CrestmontTaskBackup", "Register-ScheduledTask", "Write-CrestmontHiddenShim"].map((m) => {
+    const i = reg.indexOf(m);
+    return i < 0 ? Number.MAX_SAFE_INTEGER : i;
+  }));
+  assert.ok(prereqAt > 0 && prereqAt < firstWrite, "prerequisites are asserted before anything is written or registered");
+  assert.match(mod, /if \(-not \(Test-Path \$ScriptPath\)\) \{\s*\n\s*throw/, "a task is never pointed at a script that is not there");
+  assert.match(mod, /RequireShimHost -and -not \(Test-CrestmontHiddenShimHost\)/, "the launcher host is checked too");
+
+  // The existing definition is exported before being replaced, and put back if registration throws.
+  assert.match(reg, /\$backup = Export-CrestmontTaskBackup -TaskName \$TaskName -BackupDir \(Join-Path \$InstallDir "state\\task-backup"\)/);
+  assert.match(reg, /\} catch \{[\s\S]{0,400}Restore-CrestmontTaskBackup -TaskName \$TaskName -Path \$backup[\s\S]{0,400}throw/, "a failed registration restores the previous definition and still fails loudly");
+  assert.match(mod, /\$TaskName \+ "\.last\.xml"/, "a stable name for the definition a rollback reaches for");
+  assert.match(mod, /Set-Content -Path \$path -Value \$xml -Encoding Unicode/, "task XML declares UTF-16");
+  assert.match(mod, /Get-Content -Path \$Path -Raw -Encoding Unicode/, "and is read back the same way");
+
+  // The operator-facing rollback.
+  const repair = read("Repair-WindowsAutomation.ps1");
+  assert.match(repair, /\[switch\]\$RestoreTasks/);
+  assert.match(repair, /Restore-CrestmontTaskBackup -TaskName \$t -Path \$path/);
+  assert.match(repair, /if \(\$RestoreTasks\) \{[\s\S]{0,2000}exit 0\n\}/, "the rollback path reports and exits without converting anything");
+  // Rolling back only touches task definitions: no file is written, no process stopped, no secret read.
+  const rollback = repair.slice(repair.indexOf("if ($RestoreTasks) {"), repair.indexOf("# ---- 4."));
+  for (const forbidden of [/Remove-Item/, /Set-Content/, /\bdocker\.exe\b/, /Stop-Process/, /ConvertTo-SecureString/, /Unregister-ScheduledTask/]) {
+    assert.doesNotMatch(rollback, forbidden, `the rollback must not use ${forbidden}`);
+  }
+  // Re-running the installer is safe: every registration replaces in place rather than failing on an existing task.
+  const registrations = [...mod.matchAll(/Register-ScheduledTask[^\n]*/g)].map((m) => m[0]);
+  assert.ok(registrations.length >= 3, "the credential path, the shim path and the restore path");
+  for (const r of registrations) assert.match(r, /-Force/, `registration must replace in place: ${r.slice(0, 60)}`);
+});
+
+test("[AIB-RUNNER] nothing new is launched or scheduled: only the two existing runner tasks and the two GUI programs", () => {
+  const install = withoutComments(read("Install-CrestmontRunner.ps1"));
+  const names = [...install.matchAll(/Register-CrestmontBackgroundTask -TaskName "([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(names.sort(), ["CrestmontRunner-GpuTelemetry", "CrestmontRunner-Start"]);
+  // No Windows service is created or started, and no third-party supervisor is introduced.
+  for (const forbidden of [/New-Service/, /nssm/i, /sc\.exe/, /Set-Service/, /Start-Service/]) {
+    assert.doesNotMatch(install, forbidden, `no service management: ${forbidden}`);
+  }
+  // The superseded watchdog task from the earlier revision is removed rather than left to duplicate work.
+  assert.match(install, /Unregister-ScheduledTask -TaskName "CrestmontRunner-Watchdog"/);
+  assert.match(install, /Export-CrestmontTaskBackup -TaskName "CrestmontRunner-Watchdog"/, "its definition is kept before it goes");
+  // The only processes the start script launches are the two that were always launched.
+  const started = [...read("Start-CrestmontRunner.ps1").matchAll(/Start-Process -FilePath (\$[A-Za-z0-9_]+)/g)].map((m) => m[1]);
+  assert.deepEqual(started.sort(), ["$app", "$dockerDesktop"]);
+  assert.match(read("Repair-WindowsAutomation.ps1"), /\$supersededTasks = @\("CrestmontRunner-Watchdog"\)/, "and the repair script reports an orphan");
 });
 
 /** pwsh on PATH, or PWSH=<path> (CI sets PWSH=powershell for Windows PowerShell 5.1); null when not installed. */

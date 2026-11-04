@@ -175,9 +175,9 @@ The installer is idempotent. It:
    The secret is mounted from `secrets\`. `compose\.env` pins `OLLAMA_IMAGE` (`-OllamaImage`).
 8. checks that a container on the internal network can list the model through the proxy, then runs the runner's
    `--preflight` (skills, model present, sandbox image present).
-9. runs `docker compose up -d` and registers the `CrestmontRunner-Start` (at logon), `CrestmontRunner-Watchdog`
-   (every 5 minutes, session 0) and `CrestmontRunner-GpuTelemetry` (every minute, session 0) scheduled tasks. None of
-   them opens a terminal window; see NODE1-INSTALL.md, *No terminal windows*.
+9. runs `docker compose up -d` and registers the `CrestmontRunner-Start` (at logon and every 5 minutes) and
+   `CrestmontRunner-GpuTelemetry` (every minute) scheduled tasks. Neither opens a terminal window: both are launched
+   through `wscript.exe` and a hidden shim; see NODE1-INSTALL.md, *No terminal windows*.
 
 **Exact Founder sequence, prerequisites, decisions and known installer issues (2026-10-28 audit):**
 `FOUNDER-RUNNER-INSTALL.md`. Read it before running the installer.
@@ -227,7 +227,7 @@ Dual-model mode (`-ModelA` + `-ModelB`) pulls both models and writes `LOCAL_MODE
 `INFERENCE_MAX_CONCURRENT` (= `OLLAMA_NUM_PARALLEL`), `GPU_VRAM_TOTAL_MB` (from the hardware check, only when reliable)
 and the GPU worker id. Ollama keeps `OLLAMA_MAX_LOADED_MODELS=1`: the runner's scheduler decides which model is in GPU
 memory and switches by unloading (`keep_alive: 0`) and loading (empty prompt) through Ollama's native API. A scheduled
-task (`CrestmontRunner-GpuTelemetry`, every minute, in session 0 so it opens no window) writes
+task (`CrestmontRunner-GpuTelemetry`, every minute, launched through the hidden shim so it opens no window) writes
 `state\telemetry\gpu.json` from `nvidia-smi`; it is mounted
 read-only into the runner and reported to the GPU workers page. Sizes, context and concurrency are estimates until the
 benchmark (`ORCHESTRATOR.md` §12) measures them on this machine.
@@ -274,9 +274,9 @@ not mitigated beyond the flags above. `workers.dev` previews (if enabled) are pu
   completes the build as `released`, which requeues it without spending an attempt (300 s grace).
 - **Reboot recovery:** Docker Desktop and the Ollama tray app start in a user session. The `CrestmontRunner-Start`
   task runs at your logon, starts both minimised (so neither takes focus), waits for the engine and runs
-  `docker compose up -d` (containers also have `restart: unless-stopped`). `CrestmontRunner-Watchdog` repeats every
-  5 minutes in session 0 and re-runs only the `docker compose up -d` half: it cannot start those GUI programs, which
-  is why an unattended reboot still waits for a logon. For unattended reboots, either sign the account in automatically (Windows
+  `docker compose up -d` (containers also have `restart: unless-stopped`). The same task repeats every 5 minutes as
+  its own watchdog, and every step is a no-op once the thing it checks is already running, so in the steady state
+  the run does nothing. It needs your session, which is why an unattended reboot still waits for a logon. For unattended reboots, either sign the account in automatically (Windows
   auto-logon; weigh the physical-access risk) or run Ollama as a service from the standalone zip with NSSM (Ollama's
   Windows docs). Docker Desktop itself cannot start before logon (Docker forum, unresolved). A build that was running
   when the machine went down is not lost. Its lease expires (180 s), the platform's 15-minute sweep requeues it with

@@ -15,19 +15,25 @@
   exists, so it cannot stop the window appearing. A task that repeats therefore pops a terminal on every
   repetition, which is what made the desktop unusable (one task here repeated every single minute).
 
-  Exactly two execution paths avoid that window, and every task registered through this file uses one of them:
+  THE FIX: a hidden launcher. wscript.exe is a GUI-subsystem host, so it owns no console at all; the shim it runs
+  calls WshShell.Run with window style 0, which creates the child's console ALREADY HIDDEN - there is no window and
+  no flash, as opposed to hiding a window that has already been shown. The shim passes bWaitOnReturn = True so the
+  task's lifetime still matches the work, which is what keeps -MultipleInstances IgnoreNew and -ExecutionTimeLimit
+  meaningful (a fire-and-forget launcher would make the task "finish" instantly and defeat both).
 
-    1. SESSION 0 (preferred, used for everything that does not need the desktop). A task whose principal is S4U
-       (no stored password) or Password/ServiceAccount runs outside any interactive desktop session, so there is no
-       desktop for a window to appear on. This is the real fix, not a cosmetic one.
+  This is the configuration verified working on the build machine: both runner tasks launch through
+  C:\Windows\System32\wscript.exe, keeping their original triggers, arguments and settings, and the popups stopped.
+  The task keeps the user's own logon session, which is what Docker Desktop and the Ollama tray app need and what
+  DPAPI needs to unprotect the research worker's secret.
 
-    2. HIDDEN LAUNCHER (only for work that genuinely needs the user's own session, such as starting Docker Desktop
-       or the Ollama tray app, which are GUI programs and do nothing useful in session 0). wscript.exe is a
-       GUI-subsystem host, so it owns no console; the shim it runs calls WshShell.Run with window style 0, which
-       creates the child's console ALREADY HIDDEN - there is no window and no flash. The shim passes
-       bWaitOnReturn = True so the task's lifetime still matches the work; that is what keeps
-       -MultipleInstances IgnoreNew and -ExecutionTimeLimit meaningful (a fire-and-forget launcher would make the
-       task "finish" instantly and defeat both).
+  The one exception is a task registered with -Credential (the research worker's -RunWhenLoggedOff, unchanged by
+  this work): the account's stored password runs it in session 0, where there is no desktop for a window to appear
+  on in the first place.
+
+  An S4U principal also runs in session 0 and was tried here, but no job in this kit can use it - the GUI programs
+  have no desktop there and the user's DPAPI master key is unavailable - so it was removed rather than left as an
+  untested second path. Test-CrestmontTaskIsWindowless still recognises S4U and ServiceAccount as windowless, so a
+  task registered that way by hand is reported correctly rather than flagged.
 
   Everything registered here is also single-instance (-MultipleInstances IgnoreNew, enforced below) and carries a
   bounded restart count, so a failing job can never turn into an unbounded spawn loop.
@@ -147,17 +153,20 @@ function Get-CrestmontBackgroundTaskSetting {
     [ValidateRange(0, 10)][int]$RestartCount = 3,
     [ValidateRange(1, 1440)][int]$RestartIntervalMinutes = 5,
     [ValidateRange(1, 4320)][int]$ExecutionTimeLimitMinutes = 60,
-    [switch]$RunIndefinitely
+    [switch]$RunIndefinitely,
+    # Opt-in, because it changes when a task runs: a missed run is started late instead of skipped. Only the
+    # research worker shipped with it, and each task here keeps the settings it already had.
+    [switch]$StartWhenAvailable
   )
   # A zero time limit means "no limit" to Task Scheduler, so it is only ever used behind -RunIndefinitely.
   $limit = if ($RunIndefinitely) { [TimeSpan]::Zero } else { New-TimeSpan -Minutes $ExecutionTimeLimitMinutes }
   $option = @{
     AllowStartIfOnBatteries = $true
     DontStopIfGoingOnBatteries = $true
-    StartWhenAvailable = $true
     MultipleInstances = "IgnoreNew"
     ExecutionTimeLimit = $limit
   }
+  if ($StartWhenAvailable) { $option["StartWhenAvailable"] = $true }
   # Task Scheduler rejects a restart interval without a restart count, so the pair is passed only together.
   if ($RestartCount -gt 0) {
     $option["RestartCount"] = $RestartCount
@@ -166,24 +175,109 @@ function Get-CrestmontBackgroundTaskSetting {
   return (New-ScheduledTaskSettingsSet @option)
 }
 
+function Assert-CrestmontTaskPrerequisite {
+  <#
+  .SYNOPSIS
+    Checks everything a task needs BEFORE any task is touched, so a half-upgraded install is never registered.
+  .DESCRIPTION
+    An installer that registered a task action pointing at a script it had not copied yet, or at a launcher the
+    machine cannot run, would replace a working task with a broken one. Both are checked here and both throw, which
+    happens before Register-CrestmontBackgroundTask changes anything.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$ScriptPath,
+    [switch]$RequireShimHost
+  )
+  if (-not (Test-Path $ScriptPath)) {
+    throw "Refusing to register a task for '$ScriptPath': the script is not there. Copy the scripts into the install folder before registering tasks."
+  }
+  if ($RequireShimHost -and -not (Test-CrestmontHiddenShimHost)) {
+    throw "Refusing to register a task: the hidden launcher needs $($script:CrestmontWScriptExe), which is missing. Enable the Windows Script Host feature, or register the task with -Credential so it runs in session 0."
+  }
+}
+
+function Export-CrestmontTaskBackup {
+  <#
+  .SYNOPSIS
+    Saves a registered task's definition as XML and returns the file path, or $null when the task is not registered.
+  .DESCRIPTION
+    The rollback path for scheduled-task configuration. Written next to the install as
+    state\task-backup\<name>-<utc>.xml, plus <name>.last.xml as the one a rollback reaches for. Task XML declares
+    UTF-16, so it is written and read as Unicode.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$TaskName,
+    [Parameter(Mandatory = $true)][string]$BackupDir
+  )
+  if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) { return $null }
+  New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
+  $xml = Export-ScheduledTask -TaskName $TaskName
+  $path = Join-Path $BackupDir ("{0}-{1}.xml" -f $TaskName, (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ"))
+  Set-Content -Path $path -Value $xml -Encoding Unicode
+  Set-Content -Path (Join-Path $BackupDir ($TaskName + ".last.xml")) -Value $xml -Encoding Unicode
+  return $path
+}
+
+function Restore-CrestmontTaskBackup {
+  <#
+  .SYNOPSIS
+    Puts a task definition back from an XML backup. $true when restored, $false when it could not be.
+  .DESCRIPTION
+    Used to undo a failed registration and by Repair-WindowsAutomation.ps1 -RestoreTasks. A task that ran with a
+    stored password cannot be restored from XML alone (the password is not in the XML); that case says so rather
+    than failing quietly, and the fix is to re-run the installer with -RunWhenLoggedOff.
+  #>
+  [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "Low")]
+  param(
+    [Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9._-]+$')][string]$TaskName,
+    [Parameter(Mandatory = $true)][string]$Path
+  )
+  if (-not (Test-Path $Path)) { return $false }
+  if (-not $PSCmdlet.ShouldProcess($TaskName, "Restore the scheduled task from $Path")) { return $false }
+  try {
+    $xml = Get-Content -Path $Path -Raw -Encoding Unicode
+    Register-ScheduledTask -TaskName $TaskName -Xml $xml -Force | Out-Null
+    return $true
+  } catch {
+    Write-Warning ("Could not restore '{0}' from {1}: {2}" -f $TaskName, $Path, $_.Exception.Message)
+    return $false
+  }
+}
+
 function Register-CrestmontBackgroundTask {
   <#
   .SYNOPSIS
     Registers a scheduled task that cannot open a terminal window, and returns what was registered.
 
-  .PARAMETER DesktopSession
-    The job needs the user's interactive session (it starts a GUI program such as Docker Desktop or the Ollama
-    tray app). Such a task cannot run in session 0, so it is registered LogonType Interactive and launched through
-    the hidden wscript.exe shim. Everything else is registered S4U and runs in session 0, where no window is
-    possible at all.
+  .DESCRIPTION
+    Two launch paths, and nothing else:
+
+      HiddenShim (the default) - LogonType Interactive, action wscript.exe + Start-CrestmontHidden.vbs. This is the
+      configuration verified working on the build machine: the task keeps the user's own session, which Docker
+      Desktop and the Ollama tray app need and which DPAPI needs to unprotect the research secret, and the shim
+      creates the child's console already hidden so no window appears.
+
+      Session0Password (-Credential) - the account's stored password, so the task runs with nobody signed in. Only
+      the research worker's -RunWhenLoggedOff uses it, exactly as it did before this change.
+
+    An S4U principal was tried and removed: it runs in session 0, where the GUI programs have no desktop and the
+    user's DPAPI master key is unavailable, so no job in this kit can use it. One launch path, the one that is
+    verified, is better than two.
+
+    Safety: prerequisites are checked before anything is touched, the existing definition is exported to XML first,
+    and a failed registration puts that definition back - so a re-run can never leave a working machine with a
+    broken task.
 
   .PARAMETER Credential
-    Register the task to run whether or not the user is signed in, with the account's stored password. Needed by
-    jobs that must unprotect a DPAPI secret (the research worker), and windowless because it runs in session 0.
+    Register the task to run whether or not the user is signed in, with the account's stored password.
+
+  .PARAMETER NoBackup
+    Skip the XML backup. For a task that is not registered yet there is nothing to back up anyway; this is for
+    callers that manage their own rollback.
 
   .OUTPUTS
-    An object with TaskName, Strategy (Session0Password / Session0S4U / HiddenShim), LogonType, Execute and
-    Argument, so the installers can report it and Repair-WindowsAutomation.ps1 can verify it.
+    An object with TaskName, Strategy (HiddenShim / Session0Password), LogonType, Execute, Argument and Backup
+    (the XML path, or $null), so the installers can report it and Repair-WindowsAutomation.ps1 can verify it.
   #>
   [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "Low")]
   param(
@@ -193,59 +287,56 @@ function Register-CrestmontBackgroundTask {
     [string[]]$ScriptArgument = @(),
     [Parameter(Mandatory = $true)]$Trigger,
     $Settings,
-    [switch]$DesktopSession,
-    [System.Management.Automation.PSCredential]$Credential
+    [System.Management.Automation.PSCredential]$Credential,
+    [switch]$NoBackup
   )
   if (-not $Settings) { $Settings = Get-CrestmontBackgroundTaskSetting }
   # Enforced, never assumed: without this a slow run plus a repeating trigger stacks instances on top of each other.
   if ("$($Settings.MultipleInstances)" -ne "IgnoreNew") {
     throw "Task '$TaskName' must be registered with -MultipleInstances IgnoreNew (got '$($Settings.MultipleInstances)'): duplicate launches are what this kit exists to prevent."
   }
+  # Before anything is touched.
+  Assert-CrestmontTaskPrerequisite -ScriptPath $ScriptPath -RequireShimHost:(-not $Credential)
+
   $user = "$env:USERDOMAIN\$env:USERNAME"
   $argument = Get-CrestmontHiddenArgument -ScriptPath $ScriptPath -ScriptArgument $ScriptArgument
   $cmdline = (Get-CrestmontQuotedArgument $script:CrestmontPowerShellExe) + " " + $argument
   if (-not $PSCmdlet.ShouldProcess($TaskName, "Register windowless scheduled task")) { return $null }
 
+  $backup = $null
+  if (-not $NoBackup) { $backup = Export-CrestmontTaskBackup -TaskName $TaskName -BackupDir (Join-Path $InstallDir "state\task-backup") }
   $registered = $null
-  if ($Credential) {
-    # Session 0 with the stored password: no desktop, so no window; DPAPI user keys are available.
-    $action = New-ScheduledTaskAction -Execute $script:CrestmontPowerShellExe -Argument $argument
-    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Credential.Password)
-    try {
-      $pw = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-      Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $Trigger -Settings $Settings -User $Credential.UserName -Password $pw -RunLevel Limited -Force | Out-Null
-    } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr); Remove-Variable pw -ErrorAction SilentlyContinue }
-    $registered = [ordered]@{ Strategy = "Session0Password"; LogonType = "Password"; Execute = $script:CrestmontPowerShellExe; Argument = $action.Arguments }
-  }
-  elseif (-not $DesktopSession) {
-    # Session 0 without a stored password (S4U). No desktop session is ever created for it, so no window can appear.
-    # S4U needs the "Log on as a batch job" right; if the policy refuses it, fall back to the hidden launcher, which
-    # is also windowless (just tied to the user being signed in).
-    $action = New-ScheduledTaskAction -Execute $script:CrestmontPowerShellExe -Argument $argument
-    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType S4U -RunLevel Limited
-    try {
+  try {
+    if ($Credential) {
+      # Session 0 with the stored password: no desktop, so no window; DPAPI user keys are available.
+      $action = New-ScheduledTaskAction -Execute $script:CrestmontPowerShellExe -Argument $argument
+      $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Credential.Password)
+      try {
+        $pw = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $Trigger -Settings $Settings -User $Credential.UserName -Password $pw -RunLevel Limited -Force | Out-Null
+      } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr); Remove-Variable pw -ErrorAction SilentlyContinue }
+      $registered = [ordered]@{ Strategy = "Session0Password"; LogonType = "Password"; Execute = $script:CrestmontPowerShellExe; Argument = $action.Arguments }
+    }
+    else {
+      # The verified path: the user's own session, launched through the hidden shim so no window appears.
+      [void](Write-CrestmontHiddenShim -InstallDir $InstallDir)
+      [void](Write-CrestmontTaskCommandLine -InstallDir $InstallDir -Job $TaskName -CommandLine $cmdline)
+      $shim = Join-Path $InstallDir $script:CrestmontShimName
+      $action = New-ScheduledTaskAction -Execute $script:CrestmontWScriptExe -Argument ((Get-CrestmontQuotedArgument $shim) + " " + (Get-CrestmontQuotedArgument $TaskName))
+      $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
       Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $Trigger -Settings $Settings -Principal $principal -Force | Out-Null
-      $registered = [ordered]@{ Strategy = "Session0S4U"; LogonType = "S4U"; Execute = $script:CrestmontPowerShellExe; Argument = $action.Arguments }
-    } catch {
-      if (-not (Test-CrestmontHiddenShimHost)) { throw }
-      Write-Warning ("Could not register '{0}' to run in session 0 ({1}). Falling back to the hidden launcher, which also opens no window but only runs while {2} is signed in." -f $TaskName, $_.Exception.Message, $user)
-      $DesktopSession = $true
+      $registered = [ordered]@{ Strategy = "HiddenShim"; LogonType = "Interactive"; Execute = $script:CrestmontWScriptExe; Argument = $action.Arguments }
     }
-  }
-  if (-not $registered -and $DesktopSession) {
-    # Must run in the user's own session (GUI programs). The shim keeps it windowless.
-    if (-not (Test-CrestmontHiddenShimHost)) {
-      throw "Task '$TaskName' needs the user's desktop session but wscript.exe is missing, so it cannot be launched without a terminal window. Enable the Windows Script Host feature, or run this job in session 0 (no GUI programs) instead."
+  } catch {
+    # Put the working definition back rather than leaving a half-registered task behind.
+    if ($backup) {
+      if (Restore-CrestmontTaskBackup -TaskName $TaskName -Path $backup) { Write-Warning "Registering '$TaskName' failed; its previous definition was restored from $backup." }
+      else { Write-Warning "Registering '$TaskName' failed and its previous definition could NOT be restored. The backup is at $backup." }
     }
-    [void](Write-CrestmontHiddenShim -InstallDir $InstallDir)
-    [void](Write-CrestmontTaskCommandLine -InstallDir $InstallDir -Job $TaskName -CommandLine $cmdline)
-    $shim = Join-Path $InstallDir $script:CrestmontShimName
-    $action = New-ScheduledTaskAction -Execute $script:CrestmontWScriptExe -Argument ((Get-CrestmontQuotedArgument $shim) + " " + (Get-CrestmontQuotedArgument $TaskName))
-    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $Trigger -Settings $Settings -Principal $principal -Force | Out-Null
-    $registered = [ordered]@{ Strategy = "HiddenShim"; LogonType = "Interactive"; Execute = $script:CrestmontWScriptExe; Argument = $action.Arguments }
+    throw
   }
   $registered["TaskName"] = $TaskName
+  $registered["Backup"] = $backup
   return (New-Object PSObject -Property $registered)
 }
 

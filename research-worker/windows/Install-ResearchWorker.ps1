@@ -141,9 +141,10 @@ if (-not $NoAutoStart) {
   # password, which DPAPI needs to unprotect the platform secret (an S4U, password-less task cannot).
   $triggers = @(New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME")
   if ($RunWhenLoggedOff) { $triggers += New-ScheduledTaskTrigger -AtStartup }
-  # Bounded: 4, not 999. The supervisor itself retries with exponential backoff inside a rolling budget, so a large
-  # RestartCount here would multiply two retry loops together and keep a broken worker launching indefinitely.
-  $taskSettings = Get-CrestmontBackgroundTaskSetting -RestartCount 4 -RestartIntervalMinutes 5 -RunIndefinitely
+  # Settings as before (start when available, no time limit, one instance) with ONE change: RestartCount is 4, not
+  # 999. The supervisor itself now retries with exponential backoff inside a rolling budget, so a large count here
+  # would multiply two retry loops together and keep a broken worker launching indefinitely.
+  $taskSettings = Get-CrestmontBackgroundTaskSetting -RestartCount 4 -RestartIntervalMinutes 1 -RunIndefinitely -StartWhenAvailable
   if ($RunWhenLoggedOff) {
     $cred = Get-Credential -UserName "$env:USERDOMAIN\$env:USERNAME" -Message "Windows password for $env:USERNAME. Task Scheduler stores it so research keeps running with nobody signed in; it is not written to this repository or to settings.env."
     if (-not $cred) { Fail "-RunWhenLoggedOff needs the account password to register a task that runs while logged off" }
@@ -153,12 +154,12 @@ if (-not $NoAutoStart) {
       -Trigger $triggers -Settings $taskSettings -Credential $cred
     Ok "Task registered to run at boot and while logged off, $($task.Strategy) (no terminal window)"
   } else {
-    # Without a stored password the worker has to run in this user's own logon session, because the platform secret
-    # is DPAPI-protected for this user and a session-0 S4U task has no access to the user's master key. The hidden
+    # Without a stored password the worker runs in this user's own logon session, because the platform secret is
+    # DPAPI-protected for this user and a session-0 task has no access to the user's master key. The hidden
     # launcher keeps it windowless all the same.
     $task = Register-CrestmontBackgroundTask -TaskName "CrestmontResearch-Worker" -InstallDir $InstallDir `
       -ScriptPath (Join-Path $InstallDir "Start-ResearchWorker.ps1") -ScriptArgument @("-InstallDir", $InstallDir) `
-      -Trigger $triggers -Settings $taskSettings -DesktopSession
+      -Trigger $triggers -Settings $taskSettings
     Ok "Task registered, $($task.Strategy) (no terminal window)"
     Warn "The task runs only while $env:USERNAME is signed in: after an unattended restart research stays stopped until the next logon. Re-run with -RunWhenLoggedOff for continuous operation."
   }

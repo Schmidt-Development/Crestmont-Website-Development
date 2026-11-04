@@ -82,6 +82,13 @@ jobs:
       # (a) is checked against a POSITIVE CONTROL - the same launcher with window style 1 (SW_SHOWNORMAL) - so the
       # test cannot pass just because a CI host shows no windows at all. If the control cannot show a window, the
       # host has no visible desktop and the step says the window check was inconclusive instead of claiming a pass.
+      # The terminal-popup fix, on real Windows with a real Task Scheduler. Two independent claims:
+      #   (a) the hidden launcher starts a console program whose console window is NOT visible, and
+      #   (b) the tasks this kit registers are launched by that launcher, one instance at a time, and a re-register
+      #       that fails puts the previous definition back.
+      # (a) is checked against a POSITIVE CONTROL - the same launcher with window style 1 (SW_SHOWNORMAL) - so the
+      # test cannot pass just because a CI host shows no windows at all. If the control cannot show a window, the
+      # host has no visible desktop and the step says the window check was inconclusive rather than claiming a pass.
       - name: Background tasks register and launch without a visible terminal window
         shell: powershell
         run: |
@@ -112,7 +119,6 @@ jobs:
             $out = Join-Path $dir "$Tag.json"
             if (Test-Path $out) { Remove-Item -Force $out }
             $cmdline = Get-CrestmontHiddenCommandLine -ScriptPath $probe -ScriptArgument @($out)
-            # Style 0 is what the shim uses; any other style is the positive control.
             $vbs = Join-Path $dir "run-$Tag.vbs"
             Set-Content -Path $vbs -Encoding ascii -Value @(
               "Dim shell",
@@ -134,41 +140,62 @@ jobs:
             Write-Output "OK: window style 1 is visible and the launcher's style 0 is not, so the launcher is what hides it"
           }
 
-          # Now the registration shape, through the real Task Scheduler.
-          $names = @()
+          # Registration shape, through the real Task Scheduler.
           try {
-            $t1 = Register-CrestmontBackgroundTask -TaskName "CrestmontCiTest-Session0" -InstallDir $dir `
-              -ScriptPath $probe -ScriptArgument @((Join-Path $dir "s0.json")) `
-              -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddDays(2) -RepetitionInterval (New-TimeSpan -Minutes 5)) `
-              -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 0 -ExecutionTimeLimitMinutes 2)
-            $names += "CrestmontCiTest-Session0"
-            Write-Output ("Session0 task strategy: {0} (LogonType {1}, executes {2})" -f $t1.Strategy, $t1.LogonType, $t1.Execute)
+            $task = Register-CrestmontBackgroundTask -TaskName "CrestmontCiTest-Hidden" -InstallDir $dir `
+              -ScriptPath $probe -ScriptArgument @((Join-Path $dir "task.json")) `
+              -Trigger @((New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"), (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5))) `
+              -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 3 -RestartIntervalMinutes 5 -ExecutionTimeLimitMinutes 60)
+            Write-Output ("strategy: {0} (LogonType {1}, executes {2})" -f $task.Strategy, $task.LogonType, $task.Execute)
+            if ($task.Strategy -ne "HiddenShim") { throw "expected the hidden launcher, got $($task.Strategy)" }
+            if ([IO.Path]::GetFileName($task.Execute) -ne "wscript.exe") { throw "a task must be launched by wscript.exe, not a console host" }
 
-            $t2 = Register-CrestmontBackgroundTask -TaskName "CrestmontCiTest-Desktop" -InstallDir $dir `
-              -ScriptPath $probe -ScriptArgument @((Join-Path $dir "desk.json")) `
-              -Trigger (New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME") -DesktopSession `
-              -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 1 -RestartIntervalMinutes 5 -ExecutionTimeLimitMinutes 10)
-            $names += "CrestmontCiTest-Desktop"
-            Write-Output ("Desktop task strategy: {0} (LogonType {1}, executes {2})" -f $t2.Strategy, $t2.LogonType, $t2.Execute)
-            if ([IO.Path]::GetFileName($t2.Execute) -ne "wscript.exe") { throw "a desktop task must be launched by wscript.exe, not a console host" }
+            $v = Test-CrestmontTaskIsWindowless -TaskName "CrestmontCiTest-Hidden"
+            Write-Output ("verdict: Ok={0} LogonType={1} MultipleInstances={2} - {3}" -f $v.Ok, $v.LogonType, $v.MultipleInstances, $v.Reason)
+            if (-not $v.Ok) { throw "the registered task can open a terminal window: $($v.Reason)" }
+            if ($v.MultipleInstances -ne "IgnoreNew") { throw "the task is not single-instance" }
 
-            foreach ($n in $names) {
-              $v = Test-CrestmontTaskIsWindowless -TaskName $n
-              Write-Output ("{0}: Ok={1} LogonType={2} MultipleInstances={3} - {4}" -f $n, $v.Ok, $v.LogonType, $v.MultipleInstances, $v.Reason)
-              if (-not $v.Ok) { throw "$n can open a terminal window: $($v.Reason)" }
-              if ($v.MultipleInstances -ne "IgnoreNew") { throw "$n is not single-instance" }
-            }
+            # Both triggers survived, which is what keeps the logon start and the 5-minute watchdog on one task.
+            $registered = Get-ScheduledTask -TaskName "CrestmontCiTest-Hidden"
+            if (@($registered.Triggers).Count -ne 2) { throw "expected 2 triggers, got $(@($registered.Triggers).Count)" }
+            $repeat = @($registered.Triggers | Where-Object { $_.Repetition -and $_.Repetition.Interval })
+            if ($repeat.Count -ne 1) { throw "the 5-minute repetition was lost" }
+            Write-Output ("OK: 2 triggers kept, one repeating every {0}" -f $repeat[0].Repetition.Interval)
 
-            # A caller that tries to register a task allowing parallel instances must be refused.
-            $parallel = New-ScheduledTaskSettingsSet -MultipleInstances Parallel
+            # A re-register exports the previous definition first, so there is something to roll back to.
+            $again = Register-CrestmontBackgroundTask -TaskName "CrestmontCiTest-Hidden" -InstallDir $dir `
+              -ScriptPath $probe -ScriptArgument @((Join-Path $dir "task.json")) `
+              -Trigger (New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME") `
+              -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 3 -RestartIntervalMinutes 5 -ExecutionTimeLimitMinutes 60)
+            if (-not $again.Backup -or -not (Test-Path $again.Backup)) { throw "the previous definition was not exported before being replaced" }
+            if (@((Get-ScheduledTask -TaskName "CrestmontCiTest-Hidden").Triggers).Count -ne 1) { throw "the re-register did not take effect" }
+            Write-Output "OK: previous definition exported to $($again.Backup) before the replacement"
+
+            # ... and rolling back restores the two-trigger definition.
+            if (-not (Restore-CrestmontTaskBackup -TaskName "CrestmontCiTest-Hidden" -Path $again.Backup)) { throw "the rollback failed" }
+            if (@((Get-ScheduledTask -TaskName "CrestmontCiTest-Hidden").Triggers).Count -ne 2) { throw "the rollback did not restore the previous triggers" }
+            Write-Output "OK: rollback restored the previous task definition"
+
+            # A caller that allows parallel instances must be refused.
             $refused = $false
             try {
               Register-CrestmontBackgroundTask -TaskName "CrestmontCiTest-Parallel" -InstallDir $dir -ScriptPath $probe `
-                -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddDays(2)) -Settings $parallel | Out-Null
+                -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddDays(2)) `
+                -Settings (New-ScheduledTaskSettingsSet -MultipleInstances Parallel) | Out-Null
             } catch { $refused = $true; Write-Output "OK: parallel instances refused - $($_.Exception.Message)" }
             if (-not $refused) { throw "a task allowing parallel instances was registered; it must be refused" }
+
+            # A task must never be pointed at a script that is not there (a half-copied upgrade).
+            $refused = $false
+            try {
+              Register-CrestmontBackgroundTask -TaskName "CrestmontCiTest-Missing" -InstallDir $dir `
+                -ScriptPath (Join-Path $dir "NotThere.ps1") `
+                -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddDays(2)) | Out-Null
+            } catch { $refused = $true; Write-Output "OK: a missing script is refused before any task is touched - $($_.Exception.Message)" }
+            if (-not $refused) { throw "a task was registered for a script that does not exist" }
+            if (Get-ScheduledTask -TaskName "CrestmontCiTest-Missing" -ErrorAction SilentlyContinue) { throw "the refused task was registered anyway" }
           } finally {
-            foreach ($n in @("CrestmontCiTest-Session0", "CrestmontCiTest-Desktop", "CrestmontCiTest-Parallel")) {
+            foreach ($n in @("CrestmontCiTest-Hidden", "CrestmontCiTest-Parallel", "CrestmontCiTest-Missing")) {
               if (Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName $n -Confirm:$false }
             }
           }
@@ -188,6 +215,94 @@ jobs:
           if (-not $third) { throw "the lock was not released when the holder was killed" }
           Exit-CrestmontSingleInstance -Handle $third
           Write-Output "OK: the lock is released by the OS when the holder is killed (no stale lock file)"
+
+      # Write-GpuTelemetry.ps1 driven for real under Windows PowerShell 5.1, against stub nvidia-smi programs with
+      # known output and known exit codes. The hosted runner has no NVIDIA GPU, which also makes the "no GPU" path
+      # testable here. The first case is the regression test for the defect: a stub that prints MANY lines reliably
+      # reproduces the Select-Object short-circuit that tore the native process down and left $LASTEXITCODE at -1,
+      # so a version that re-introduced that pipe would write no gpu.json and fail this step.
+      - name: Write-GpuTelemetry.ps1 reads nvidia-smi correctly and reports failures as failures
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dir = Join-Path $env:RUNNER_TEMP "gputel"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $gpuJson = Join-Path $dir "state\telemetry\gpu.json"
+          $telemetryScript = (Resolve-Path .\runner\windows\Write-GpuTelemetry.ps1).Path
+          $runLog = Join-Path $dir "run.log"
+
+          function New-Stub([string]$Name, [string[]]$Body) {
+            $path = Join-Path $dir "$Name.cmd"
+            Set-Content -Path $path -Encoding ascii -Value (@("@echo off") + $Body)
+            return $path
+          }
+          # Every stream of the child goes to a file, so the only thing this function emits is the exit code.
+          function Invoke-Telemetry([string]$Stub) {
+            if ($Stub) { & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $telemetryScript -InstallDir $dir -NvidiaSmiPath $Stub *> $runLog }
+            else { & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $telemetryScript -InstallDir $dir *> $runLog }
+            return $LASTEXITCODE
+          }
+
+          # 1. Valid output among many lines, plus noise that is not a GPU row at all.
+          $many = @("echo spurious driver warning, not a csv row")
+          $many += "echo NVIDIA GeForce RTX 4090, 566.36, 24564, 3072, 17"
+          1..60 | ForEach-Object { $many += "echo filler line $_" }
+          $many += "exit /b 0"
+          $ok = New-Stub -Name "smi-ok" -Body $many
+          $code = Invoke-Telemetry $ok
+          if ($code -ne 0) { throw "valid nvidia-smi output must exit 0, got $code (the Select-Object short-circuit defect looks exactly like this)" }
+          if (-not (Test-Path $gpuJson)) { throw "gpu.json was not written for valid nvidia-smi output" }
+          $sample = Get-Content $gpuJson -Raw | ConvertFrom-Json
+          Write-Output ("gpu.json: " + (Get-Content $gpuJson -Raw))
+          if ($sample.name -ne "NVIDIA GeForce RTX 4090") { throw "wrong name: $($sample.name)" }
+          if ($sample.driver -ne "566.36") { throw "wrong driver: $($sample.driver)" }
+          if ([double]$sample.memoryTotalMb -ne 24564) { throw "wrong memoryTotalMb: $($sample.memoryTotalMb)" }
+          if ([double]$sample.memoryUsedMb -ne 3072) { throw "wrong memoryUsedMb: $($sample.memoryUsedMb)" }
+          if ([double]$sample.utilizationPercent -ne 17) { throw "wrong utilizationPercent: $($sample.utilizationPercent)" }
+          $age = ((Get-Date).ToUniversalTime() - [datetime]::Parse($sample.at).ToUniversalTime()).TotalMinutes
+          if ($age -lt 0 -or $age -gt 5) { throw "the 'at' timestamp is not current: $($sample.at)" }
+          if (Test-Path $runLog) { Get-Content $runLog | ForEach-Object { Write-Output "    child: $_" } }
+          Write-Output "OK: valid output -> exit 0, gpu.json written with the documented schema and a current timestamp"
+          $written = (Get-Item $gpuJson).LastWriteTimeUtc
+
+          # 2. nvidia-smi fails: a real fault, so non-zero, and the stale sample is left alone rather than cleared.
+          Start-Sleep -Seconds 1
+          $fail = New-Stub -Name "smi-fail" -Body @("echo could not communicate with the driver 1>&2", "exit /b 9")
+          $code = Invoke-Telemetry $fail
+          if ($code -eq 0) { throw "a failing nvidia-smi must not report success" }
+          if ((Get-Item $gpuJson).LastWriteTimeUtc -ne $written) { throw "gpu.json was rewritten from a failed query" }
+          Write-Output "OK: exit $code on failure, gpu.json untouched"
+
+          # 3. nvidia-smi succeeds but prints nothing, and 4. prints something unusable.
+          foreach ($case in @(@{ n = "smi-empty"; b = @("exit /b 0") }, @{ n = "smi-garbage"; b = @("echo not,a,gpu,row", "exit /b 0") })) {
+            $stub = New-Stub -Name $case.n -Body $case.b
+            $code = Invoke-Telemetry $stub
+            if ($code -eq 0) { throw "$($case.n) must not report success" }
+            if ((Get-Item $gpuJson).LastWriteTimeUtc -ne $written) { throw "gpu.json was rewritten for $($case.n)" }
+            Write-Output "OK: $($case.n) -> exit $code, gpu.json untouched"
+          }
+
+          # 5. Fields a GPU may not report come through as null, not as a guessed zero.
+          $na = New-Stub -Name "smi-na" -Body @("echo NVIDIA T400, 537.13, 2048, [N/A], [N/A]", "exit /b 0")
+          $code = Invoke-Telemetry $na
+          if ($code -ne 0) { throw "a row with [N/A] fields is usable; expected exit 0, got $code" }
+          $sample = Get-Content $gpuJson -Raw | ConvertFrom-Json
+          if ([double]$sample.memoryTotalMb -ne 2048) { throw "wrong memoryTotalMb for the [N/A] case" }
+          if ($null -ne $sample.memoryUsedMb) { throw "memoryUsedMb should be null, got $($sample.memoryUsedMb)" }
+          if ($null -ne $sample.utilizationPercent) { throw "utilizationPercent should be null" }
+          Write-Output "OK: [N/A] fields are written as null, and the required fields still validate"
+
+          # 6. No nvidia-smi at all (this hosted runner has none): not a fault, and nothing is written.
+          $clean = Join-Path $env:RUNNER_TEMP "gputel-clean"
+          New-Item -ItemType Directory -Force -Path $clean | Out-Null
+          & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $telemetryScript -InstallDir $clean
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "a machine without nvidia-smi is not a fault; expected exit 0, got $code" }
+          if (Test-Path (Join-Path $clean "state\telemetry\gpu.json")) { throw "gpu.json must not be written without a GPU" }
+          Write-Output "OK: no nvidia-smi -> exit 0 and no gpu.json (the dashboard shows 'not reported')"
+
+          Write-Output "---- gpu-telemetry.jsonl ----"
+          Get-Content (Join-Path $dir "logs\gpu-telemetry.jsonl") | Write-Output
 
       - name: Discover-Hardware.ps1 (read-only) -> select-model.ts
         shell: powershell

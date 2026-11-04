@@ -24,13 +24,20 @@
     4. Reads every task back and reports whether it is now windowless.
 
   WHAT IT DOES NOT TOUCH
-  Nothing is deleted. Queues, build checkpoints, the DuckDB database, logs, settings.env, DPAPI secrets, Docker
+  Nothing is deleted, and no task is unregistered. Queues, build checkpoints, the DuckDB database, logs, settings.env, DPAPI secrets, Docker
   volumes, containers, images, Docker Desktop and Ollama are all left alone, and so is every scheduled task that
   does not belong to Crestmont (those are only reported). A research task that already runs with a stored password
   is already windowless and is never re-registered, so its stored password cannot be lost.
 
 .PARAMETER DiagnoseOnly
   Report and exit. Nothing is stopped, registered or changed.
+
+.PARAMETER RestoreTasks
+  Roll back: put each task definition back from the XML the installer or this script saved before it last changed
+  it (<InstallDir>\state\task-backup\<name>.last.xml), then report what each task looks like afterwards. Use this
+  if a change here or in the installer turns out to be wrong. Only scheduled-task definitions are touched; scripts,
+  state, queues and secrets are not. A task that ran with a stored password cannot be restored from XML alone - the
+  password is not in the XML - and that case says so instead of failing quietly.
 
 .PARAMETER KillRunaway
   Also end the Crestmont console-host processes that are running right now, so the popups stop before the next
@@ -47,7 +54,8 @@ param(
   [string]$InstallDir = "C:\CrestmontRunner",
   [string]$ResearchInstallDir = "C:\CrestmontResearch",
   [switch]$DiagnoseOnly,
-  [switch]$KillRunaway
+  [switch]$KillRunaway,
+  [switch]$RestoreTasks
 )
 $ErrorActionPreference = "Continue"
 . (Join-Path $PSScriptRoot "BackgroundTask.ps1")
@@ -57,7 +65,10 @@ function Ok([string]$m) { Write-Host "    OK  $m" -ForegroundColor Green }
 function Bad([string]$m) { Write-Host "    XX  $m" -ForegroundColor Red }
 function Note([string]$m) { Write-Host "    --  $m" }
 
-$crestmontTasks = @("CrestmontRunner-Start", "CrestmontRunner-Watchdog", "CrestmontRunner-GpuTelemetry", "CrestmontResearch-Worker")
+$crestmontTasks = @("CrestmontRunner-Start", "CrestmontRunner-GpuTelemetry", "CrestmontResearch-Worker")
+# Registered by an earlier revision of the installer, which split CrestmontRunner-Start's 5-minute repetition into
+# its own task. The repetition belongs back on CrestmontRunner-Start, so this one is reported as superseded.
+$supersededTasks = @("CrestmontRunner-Watchdog")
 $consoleHost = @("powershell.exe", "pwsh.exe", "cmd.exe", "conhost.exe", "cscript.exe")
 
 # ---- 1. Scheduled tasks that are built to show a window ----------------------------------------------------------
@@ -129,8 +140,36 @@ foreach ($t in $crestmontTasks) {
   else { Bad "$t WILL open a terminal window: $($v.Reason)" }
 }
 
+foreach ($t in $supersededTasks) {
+  if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) {
+    Note "$t is registered but superseded: its 5-minute trigger belongs on CrestmontRunner-Start. Re-run Install-CrestmontRunner.ps1 to remove it, or remove it yourself; leaving it only duplicates work."
+  }
+}
+
 if ($DiagnoseOnly) {
   Say "-DiagnoseOnly: nothing was changed. Re-run without it to convert the Crestmont tasks that need it."
+  exit 0
+}
+
+# ---- 3a. Rollback ------------------------------------------------------------------------------------------------
+if ($RestoreTasks) {
+  Say "Restoring scheduled-task definitions from the last saved backup (scripts, state, queues and secrets untouched)"
+  $restored = 0
+  $skipped = 0
+  foreach ($t in $crestmontTasks) {
+    $dir = if ($t -eq "CrestmontResearch-Worker") { Join-Path $ResearchInstallDir "state\task-backup" } else { Join-Path $InstallDir "state\task-backup" }
+    $path = Join-Path $dir ($t + ".last.xml")
+    if (-not (Test-Path $path)) { Note "no backup for $t at $path"; $skipped++; continue }
+    if (Restore-CrestmontTaskBackup -TaskName $t -Path $path) { Ok "restored $t from $path"; $restored++ }
+    else { Bad "could not restore $t from $path"; $skipped++ }
+  }
+  Say "Restored $restored task definition(s); $skipped skipped. State after the rollback:"
+  foreach ($t in $crestmontTasks) {
+    $v = Test-CrestmontTaskIsWindowless -TaskName $t
+    if ("$($v.Reason)" -eq "not registered") { Note "$t not registered" }
+    elseif ($v.Ok) { Ok "${t}: $($v.Reason)" }
+    else { Bad "${t}: $($v.Reason) - this is the definition you asked to restore, so the popups may come back" }
+  }
   exit 0
 }
 
@@ -168,40 +207,33 @@ else {
   $user = "$env:USERDOMAIN\$env:USERNAME"
 
   if ($toFix -contains "CrestmontRunner-Start") {
+    # Both of its original triggers: at logon, and every 5 minutes as its own watchdog.
     $r = Register-CrestmontBackgroundTask -TaskName "CrestmontRunner-Start" -InstallDir $InstallDir `
       -ScriptPath (Join-Path $InstallDir "Start-CrestmontRunner.ps1") -ScriptArgument $startArgument `
-      -Trigger (New-ScheduledTaskTrigger -AtLogOn -User $user) -DesktopSession `
+      -Trigger @((New-ScheduledTaskTrigger -AtLogOn -User $user), (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5))) `
       -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 3 -RestartIntervalMinutes 5 -ExecutionTimeLimitMinutes 60)
-    Ok "CrestmontRunner-Start re-registered ($($r.Strategy)), at logon only - the repeating trigger moves to the watchdog below"
-  }
-  if (($toFix -contains "CrestmontRunner-Watchdog") -or ($toFix -contains "CrestmontRunner-Start")) {
-    $r = Register-CrestmontBackgroundTask -TaskName "CrestmontRunner-Watchdog" -InstallDir $InstallDir `
-      -ScriptPath (Join-Path $InstallDir "Start-CrestmontRunner.ps1") -ScriptArgument ($startArgument + @("-NoGuiLaunch", "-WaitMinutes", "1")) `
-      -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5)) `
-      -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 1 -RestartIntervalMinutes 5 -ExecutionTimeLimitMinutes 15)
-    Ok "CrestmontRunner-Watchdog re-registered ($($r.Strategy)), every 5 minutes in session 0, no GUI launches"
+    Ok "CrestmontRunner-Start re-registered ($($r.Strategy)): at logon and every 5 minutes, as before"
   }
   if ($toFix -contains "CrestmontRunner-GpuTelemetry") {
     $r = Register-CrestmontBackgroundTask -TaskName "CrestmontRunner-GpuTelemetry" -InstallDir $InstallDir `
       -ScriptPath (Join-Path $InstallDir "Write-GpuTelemetry.ps1") -ScriptArgument @("-InstallDir", $InstallDir) `
       -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)) `
-      -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 0 -ExecutionTimeLimitMinutes 2)
-    Ok "CrestmontRunner-GpuTelemetry re-registered ($($r.Strategy)), every minute in session 0 - this was the once-a-minute popup"
+      -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 0 -ExecutionTimeLimitMinutes 1)
+    Ok "CrestmontRunner-GpuTelemetry re-registered ($($r.Strategy)), every minute - this was the once-a-minute popup"
   }
   if ($toFix -contains "CrestmontResearch-Worker") {
     # Only reachable when the task is NOT already password-logon (that is windowless, so it never lands in $toFix),
-    # which means it has no stored password to lose. The worker's secret is DPAPI-protected for this user, so it
-    # must stay in this user's session; the hidden launcher keeps it windowless.
-    $triggers = @(New-ScheduledTaskTrigger -AtLogOn -User $user)
+    # which means there is no stored password to lose. The worker's secret is DPAPI-protected for this user, so it
+    # stays in this user's session; the hidden launcher keeps it windowless.
     $r = Register-CrestmontBackgroundTask -TaskName "CrestmontResearch-Worker" -InstallDir $ResearchInstallDir `
       -ScriptPath (Join-Path $ResearchInstallDir "Start-ResearchWorker.ps1") -ScriptArgument @("-InstallDir", $ResearchInstallDir) `
-      -Trigger $triggers -DesktopSession `
-      -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 4 -RestartIntervalMinutes 5 -RunIndefinitely)
+      -Trigger @(New-ScheduledTaskTrigger -AtLogOn -User $user) `
+      -Settings (Get-CrestmontBackgroundTaskSetting -RestartCount 4 -RestartIntervalMinutes 1 -RunIndefinitely -StartWhenAvailable)
     Ok "CrestmontResearch-Worker re-registered ($($r.Strategy))"
     Note "for continuous operation with nobody signed in, re-run Install-ResearchWorker.ps1 -RunWhenLoggedOff (it needs the account password, which this script does not ask for)"
   }
 
-  foreach ($t in @("CrestmontRunner-Start", "CrestmontRunner-Watchdog", "CrestmontRunner-GpuTelemetry", "CrestmontResearch-Worker")) {
+  foreach ($t in $crestmontTasks) {
     if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) { Enable-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue | Out-Null }
   }
 }
