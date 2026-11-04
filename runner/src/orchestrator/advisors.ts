@@ -13,7 +13,7 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fenceFor } from "../prompt.ts";
 import type { ArchitectInput, CycleEvidence, GalleryReferenceInput, MasterSpec, ReviewVerdict } from "./contracts.ts";
-import { MASTER_SPEC_JSON_SCHEMA, REVIEW_JSON_SCHEMA, SPEC_SCHEMA, extractJson, outstanding, parseVerdict } from "./contracts.ts";
+import { DESIGN_SPEC_JSON_SCHEMA, REVIEW_JSON_SCHEMA, SPEC_SCHEMA, extractJson, outstanding, parseVerdict } from "./contracts.ts";
 import type { AdapterBilling } from "./cost-guard.ts";
 import type { ModelProfile } from "../config.ts";
 import type { InferenceScheduler } from "../inference/scheduler.ts";
@@ -26,7 +26,7 @@ export interface Advisor {
   readonly billing: AdapterBilling;
   /** Honest capability notes shown to the Owner (e.g. "text-only: reference images not analysed"). */
   readonly notes: string[];
-  architect(input: ArchitectInput): Promise<unknown>;
+  architect(input: ArchitectInput, corrections?: readonly string[]): Promise<unknown>;
   review(spec: MasterSpec | null, evidence: CycleEvidence, cycle: number, ctx?: ReviewContext): Promise<ReviewVerdict>;
 }
 
@@ -299,7 +299,7 @@ export class LocalModelAdvisor implements Advisor {
    */
   lastArchitectImages: { referenceId: string; path: string }[] = [];
 
-  architect(input: ArchitectInput): Promise<unknown> {
+  architect(input: ArchitectInput, corrections: readonly string[] = []): Promise<unknown> {
     const vision = this.o.model.vision;
     // Every image costs context, and Model A's window also has to hold the brief and the specification it is about
     // to write. Six total, the gallery's own selection size: the customer's own material keeps two of those places
@@ -319,8 +319,15 @@ export class LocalModelAdvisor implements Advisor {
       // Founder's quality standard from the customer's material: they are used for different purposes.
       ...uploads.slice(0, uploadSlots).map((r) => ({ path: r.path, label: `customer upload ${r.name}` })),
     ];
-    const attached = chosen.length > 0;
-    return this.ask("architect", `${architectPrompt(input, this.lastArchitectImages.map((i) => i.referenceId), vision)}\n\nThe intake is also in BRIEF.json; the customer's files are listed in customer-files/INDEX.json (read them with read_file where they are text).${images.length ? ` ${images.length} image(s) are attached to this message.` : vision ? "" : " This model does not see images: judge only from the written notes."} Answer with the JSON object only, matching this JSON Schema:\n${JSON.stringify(MASTER_SPEC_JSON_SCHEMA)}`, images);
+    // STAGE 1 of planning: the design specification only, against DESIGN_SPEC_JSON_SCHEMA (six required fields),
+    // not MASTER_SPEC_JSON_SCHEMA (thirteen, including a complete file-by-file implementation prompt). A reasoning
+    // model's thinking tokens share the one output budget with its answer, and asking for the full master
+    // specification truncated the reply every time on bld_e65768e6b0853a425095a1f6. The implementation-only fields
+    // are completed deterministically by validateDesignSpec.
+    const fix = corrections.length
+      ? `\n\nYour previous reply was REJECTED and is not in this conversation. Fix exactly these problems and answer again:\n${corrections.map((c) => `- ${c}`).join("\n")}\nDo not explain; return the corrected JSON object only.`
+      : "";
+    return this.ask("architect", `${architectPrompt(input, this.lastArchitectImages.map((i) => i.referenceId), vision)}\n\nThe intake is also in BRIEF.json; the customer's files are listed in customer-files/INDEX.json (read them with read_file where they are text).${images.length ? ` ${images.length} image(s) are attached to this message.` : vision ? "" : " This model does not see images: judge only from the written notes."}\n\nPLAN THE DESIGN ONLY. Do not write an implementation prompt, a task breakdown or a technical architecture: those are planned later, after the design is certified. Keep the whole reply well inside your output budget — a truncated object is unusable and counts as no specification at all. Answer with the JSON object only, matching this JSON Schema:\n${JSON.stringify(DESIGN_SPEC_JSON_SCHEMA)}${fix}`, images);
   }
 
   async review(spec: MasterSpec | null, evidence: CycleEvidence, cycle: number, ctx: ReviewContext = {}): Promise<ReviewVerdict> {
@@ -402,7 +409,7 @@ export class MockAdvisor implements Advisor {
   readonly calls: { kind: "architect" | "review"; cycle?: number; prompt: string }[] = [];
   private readonly script: { spec?: unknown; verdicts?: (ReviewVerdict | ((e: CycleEvidence, cycle: number) => ReviewVerdict))[] };
   constructor(script: { spec?: unknown; verdicts?: (ReviewVerdict | ((e: CycleEvidence, cycle: number) => ReviewVerdict))[] }) { this.script = script; }
-  async architect(input: ArchitectInput): Promise<unknown> { this.calls.push({ kind: "architect", prompt: architectPrompt(input) }); return this.script.spec; }
+  async architect(input: ArchitectInput, _corrections: readonly string[] = []): Promise<unknown> { this.calls.push({ kind: "architect", prompt: architectPrompt(input) }); return this.script.spec; }
   async review(spec: MasterSpec | null, e: CycleEvidence, cycle: number, ctx: ReviewContext = {}): Promise<ReviewVerdict> {
     this.calls.push({ kind: "review", cycle, prompt: reviewPrompt(spec, e, cycle, ctx) });
     const v = this.script.verdicts?.[Math.min(cycle - 1, (this.script.verdicts?.length ?? 1) - 1)];

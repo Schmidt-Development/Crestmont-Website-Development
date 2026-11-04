@@ -28,10 +28,31 @@ const MODEL_A = "test-arch:27b", MODEL_B = "test-coder:30b";
 const prof = (tag: string, role: ModelProfile["role"], vramMb: number): ModelProfile => ({ tag, role, contextTokens: 32_768, vramMb, quantization: "Q4_K_M", reasoning: null, vision: false, license: "Apache-2.0" });
 const MODELS = { a: prof(MODEL_A, "architect_reviewer", 18000), b: prof(MODEL_B, "builder", 24000), mode: "dual" as const };
 
+// A realistic architect reply: it has to satisfy validateDesignSpec, the same gate a real Model A reply passes
+// through. The thin stub this replaced ("designSpec: Clean, trustworthy", no phasePlan, two criteria) predates
+// that validator and would now be rejected as no specification at all -- which is the point of the gate.
 const SPEC = {
-  schema: "crestmont.master-spec/1", projectSpec: "Plumbing website", designSpec: "Clean, trustworthy", technicalArchitecture: "Static assets Worker",
+  schema: "crestmont.master-spec/1",
+  projectSpec: "A plumbing website for a local emergency and domestic plumbing company; the primary conversion goal is booked call-outs.",
+  designSpec: "Sitemap: Home, Services, About, Contact. Home leads with an emergency call-out hero and the phone number; Services lists each trade with its own card; About carries the team and coverage; Contact holds the booking form. Brand: a trustworthy blue, one warm accent, a 1.25 type scale and an 8px spacing rhythm. Imagery: one hero photograph plus one per service from the approved licensed set. Responsive at 1366, 768 and 390 with no horizontal scroll.",
+  technicalArchitecture: "Static assets Worker",
+  phasePlan: {
+    designDeliverables: [
+      "Four pages built and styled: Home, Services, About, Contact",
+      "A type scale, colour roles and spacing rhythm applied as design tokens",
+      "Hero and per-service imagery placed and sized at all three widths",
+      "A horizontal navigation bar on desktop and a working menu toggle on mobile",
+    ],
+    designDependentInteractions: [{ component: "Booking form", states: ["empty", "invalid", "submitting", "success"], mock: "static fixture, no backend" }],
+    deferredBackend: [{ capability: "Booking submission and storage", dependsOnDesign: "Booking form", realImplementation: "POST handler writing to D1 with server-side validation" }],
+    finalQuality: ["Accessible labels and landmarks", "Technical SEO and sitemap", "Security headers"],
+  },
   tasks: [{ id: "t-pages", title: "Pages", workstream: "frontend", paths: ["public/"], dependsOn: [] }],
-  acceptanceCriteria: [{ id: "ac-pages", text: "All pages exist", verification: "screenshot" }, { id: "ac-contact", text: "Contact details correct", verification: "automated" }],
+  acceptanceCriteria: [
+    { id: "ac-pages", text: "All pages exist", verification: "screenshot" },
+    { id: "ac-contact", text: "Contact details correct", verification: "automated" },
+    { id: "ac-nav", text: "Primary navigation is a horizontal bar at 1366px and a working toggle at 390px", verification: "screenshot" },
+  ],
   integrations: [{ key: "stripe", name: "Stripe", purpose: "Payments" }], securityRequirements: [], testingRequirements: [], assumptions: ["Draft copy"], referenceImages: [], masterPrompt: "Build the plumbing website exactly as specified.",
 };
 

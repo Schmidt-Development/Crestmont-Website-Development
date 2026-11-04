@@ -37,6 +37,11 @@ import type { ChatMessage, ChatToolCall } from "./openai-client.ts";
 import { TOOL_NAMES, executeTool, schemaHint, toolSpecs, validateArgs } from "./local-tools.ts";
 import { fromNativeCalls, parseTextToolCalls } from "./local-parse.ts";
 import type { ParsedCall } from "./local-parse.ts";
+import {
+  adoptLedger, manifest as ledgerManifest, newLedger, recordCommand, recordRead, recordReset,
+  recordServed, recordWrite, staleResets, thrashVerdict,
+} from "./work-ledger.ts";
+import type { WorkLedger } from "./work-ledger.ts";
 
 export const TRANSCRIPT_SCHEMA = "crestmont.local-transcript/1";
 const AGENT_DIR = "agent";
@@ -55,6 +60,12 @@ export interface LocalTranscript {
   instruction?: { phase: string; prompt: string };
   /** Context resets of this session (unbounded; each one starts a fresh context). */
   compactions?: number;
+  /**
+   * Runner-observed facts about the work done so far (files read/written with hashes, commands, completed work,
+   * open problems, resets per phase). This is what a context reset restates INSTEAD of telling the model to
+   * re-read the repository, and it survives checkpoints with the transcript.
+   */
+  ledger?: WorkLedger;
 }
 
 /** Context accounting for one request (all values in estimated tokens after calibration). */
@@ -330,16 +341,27 @@ export class LocalProvider implements AgentProvider {
     const build = () => [{ role: "system" as const, content: this.system }, this.pinnedMessage(window), ...t.history];
     const before = this.measure(model, build(), tools, reservedOutput, window).total;
     t.compactions = (t.compactions ?? 0) + 1;
+    const ledger = this.ledger();
+    recordReset(ledger, phase);
+    const resets = staleResets(ledger, phase);
     const instruction = t.instruction ?? { phase, prompt: "Continue the current phase." };
+    // The reset message used to say "re-read the files you need (BRIEF.json, SPEC.json, ... and the source files
+    // you were working on)". That one sentence is what cost bld_e65768e6b0853a425095a1f6 its three segments: the
+    // model obeyed it, re-read the same unchanged pages, refilled the window and reset again, 106 times. It is
+    // replaced by the runner's own observed facts -- which files it has written, which it has already read and
+    // which of those are byte-identical on disk -- plus an explicit instruction NOT to re-read those.
     const resetMsg: ChatMessage = {
       role: "user",
       content: [
-        `CONTEXT RESET #${t.compactions} by the runner: the conversation reached the model's context window, so earlier turns were removed. Nothing is lost: the repository, the platform's records and the durable project memory above are the source of truth.`,
-        "Before continuing, re-read the files you need (BRIEF.json, SPEC.json, .crestmont/plan.md, .crestmont/requirements.json, .crestmont/runner-checks.json and the source files you were working on). Do not redo work that the files show is complete.",
+        `CONTEXT RESET #${t.compactions} by the runner: the conversation reached the model's context window, so earlier turns were removed. Nothing is lost: the repository, the platform's records and the manifest below are the source of truth.`,
+        "Do NOT re-read files listed below as already read and unchanged — you have seen their current content and reading them again is what caused this reset. Read a file only if it is listed as changed, or if you have never read it and genuinely need it. Prefer search over reading whole files.",
         "",
+        ledgerManifest(ledger, this.ws!.repo, { phase, objective: instruction.prompt.split("\n")[0].slice(0, 200), maxChars: Math.max(1200, Math.floor(window * 3.5 * 0.06)) }),
+        "",
+        resets >= 6 ? "The runner has reset this phase's context repeatedly. Narrow your work: finish ONE file, call finish, and let the next phase continue. Do not survey the repository again." : "",
         `Your current instruction (phase ${instruction.phase}), repeated verbatim:`,
         instruction.prompt,
-      ].join("\n"),
+      ].filter((l) => l !== "").join("\n"),
     };
     // Keep the newest whole groups (an assistant tool-call message with all its results, or a user message) that fit
     // in 30% of the usable window; the tail never starts with a dangling tool result.
@@ -353,7 +375,10 @@ export class LocalProvider implements AgentProvider {
     }
     const cal = this.calibration.get(model) ?? 1;
     const tokensOf = (g: ChatMessage[]) => g.reduce((n, m) => n + Math.ceil(estimateTokens(messageText(m)) * cal) + 8, 0);
-    const tailBudget = Math.floor(usable * 0.3);
+    // Half the usable window, not 30%. Keeping only 30% threw away the work the model had just done, which is the
+    // other half of the rediscovery loop: it lost the file it was editing and went looking for it again. The
+    // manifest above is cheap (a few hundred tokens), so the space is better spent on real recent turns.
+    const tailBudget = Math.floor(usable * 0.5);
     const keep: ChatMessage[][] = [];
     let used = 0;
     for (let k = groups.length - 1; k >= 0; k--) {
@@ -383,6 +408,21 @@ export class LocalProvider implements AgentProvider {
 
   private persist(): void { if (this.ws && this.transcript) saveTranscript(this.ws, this.transcript); }
 
+  /** False until the current transcript's ledger has been normalised by adoptLedger(). */
+  private ledgerReady = false;
+
+  /** The transcript's work ledger: runner-observed facts, normalised once per session. */
+  private ledger(): WorkLedger {
+    const t = this.transcript!;
+    // Always normalised on first access: a ledger restored from a checkpoint is re-bounded rather than trusted,
+    // and an absent or wrong-schema one starts fresh (adoptLedger handles both).
+    if (!this.ledgerReady) { t.ledger = adoptLedger(t.ledger); this.ledgerReady = true; }
+    return t.ledger!;
+  }
+
+  /** Resets recorded for a phase, for the caller's thrash reporting. */
+  resetsIn(phase: string): number { return this.transcript?.ledger?.resets?.[phase] ?? 0; }
+
   async run(req: PhaseRequest): Promise<PhaseResult> {
     if (!this.ws || !this.sandbox) throw new Error("LocalProvider.prepare() was not called");
     const { tracker, stop } = req;
@@ -399,9 +439,11 @@ export class LocalProvider implements AgentProvider {
     // Session: continue this attempt's transcript, a restored one, or start a new one.
     if (req.resumeSessionId && this.transcript?.sessionId !== req.resumeSessionId) {
       this.transcript = loadTranscript(this.ws, req.resumeSessionId);
+      this.ledgerReady = false;
     }
     if (!this.transcript) {
-      this.transcript = { schema: TRANSCRIPT_SCHEMA, sessionId: `local-${randomBytes(8).toString("hex")}`, model: cfg.model, summary: [], history: [], phases: [], turns: 0, updatedAt: "" };
+      this.transcript = { schema: TRANSCRIPT_SCHEMA, sessionId: `local-${randomBytes(8).toString("hex")}`, model: cfg.model, summary: [], history: [], phases: [], turns: 0, updatedAt: "", ledger: newLedger() };
+      this.ledgerReady = false;
     }
     const t = this.transcript;
     t.history = repairHistory(t.history);
@@ -420,7 +462,16 @@ export class LocalProvider implements AgentProvider {
     let resetFloor = 0;
     let overflowStreak = 0;
     let summary: string | null = null;
-    const toolChars = Math.max(2000, Math.min(16_000, Math.floor(cfg.contextTokens * 3.5 / 6)));
+    // Per-result and per-TURN tool output budgets.
+    //
+    // The per-result cap alone was not enough: a single assistant turn may issue several tool calls in parallel, and
+    // four read_file calls at 16,000 characters each put ~18,000 tokens -- 37% of a 49,152-token window -- into the
+    // context in one turn. bld_e65768e6b0853a425095a1f6 did exactly that and reset 106 times. So the calls in one
+    // turn now SHARE a budget of a quarter of the window, and each call is additionally capped on its own. Every
+    // call still returns something (there is a floor), and clipped output says so and can be re-requested narrowly.
+    const toolChars = Math.max(2000, Math.min(10_000, Math.floor(cfg.contextTokens * 3.5 / 10)));
+    const turnToolChars = Math.max(toolChars, Math.floor(cfg.contextTokens * 3.5 * 0.25));
+    const minToolChars = 600;
     let turns = 0;
     let malformedStreak = 0;
     let noToolStreak = 0;
@@ -470,6 +521,16 @@ export class LocalProvider implements AgentProvider {
           }
           await req.onCompaction?.({ compactions: t.compactions ?? 0, phase: req.phase, before: r.before, after: r.after, window, reason });
           if (stop.reason) { status = "stopped"; stoppedBy = stop.reason; break; }
+          // Context recovery is not progress. A phase that has reset this many times is not converging, and
+          // continuing to pay for the same loop is exactly what wasted three segments of GPU time on
+          // bld_e65768e6b0853a425095a1f6. End the phase with a diagnosis the caller can act on and report.
+          if (thrashVerdict(this.ledger(), req.phase) === "stop") {
+            status = "error";
+            const n = staleResets(this.ledger(), req.phase);
+            error = `context thrashing in phase ${req.phase}: ${n} consecutive context resets with no progress between them (no file written, no command succeeded). The phase was stopped instead of resetting again. The model is re-reading material it has already seen rather than changing the repository; narrow the task, or raise ${cfg.model}'s context window (LOCAL_MODEL_*_CONTEXT_TOKENS and the model's num_ctx) if the work genuinely needs more.`;
+            tracker.note({ kind: "note", message: `phase ${req.phase} stopped after ${n} context resets with no progress between them` });
+            break;
+          }
         }
         this.abort = new AbortController();
         const timer = setTimeout(() => this.abort?.abort(), Math.max(1, deadline - Date.now()));
@@ -552,6 +613,8 @@ export class LocalProvider implements AgentProvider {
         t.history.push({ role: "assistant", content: calls.some((c) => c.fromText) ? null : (res.content || null), tool_calls: toolCalls });
 
         let anyMalformed = false;
+        // Shared across every tool call in THIS assistant turn (see turnToolChars above).
+        let turnCharsLeft = turnToolChars;
         for (const c of calls) {
           if (stop.reason) {
             t.history.push({ role: "tool", tool_call_id: c.id, name: c.name, content: "Not executed: the run was stopped." });
@@ -571,7 +634,22 @@ export class LocalProvider implements AgentProvider {
           }
           const outcome = await executeTool(c.name, c.args!, { repo: this.ws.repo, sandbox: this.sandbox, defaultTimeoutMs: this.deps.cfg.jobSandbox.commandTimeoutMs });
           tracker.note({ kind: "tool", message: outcome.activity.slice(0, 200) });
-          let out = outcome.output.length > toolChars ? outcome.output.slice(0, toolChars / 2) + "\n...[output clipped]...\n" + outcome.output.slice(-toolChars / 2) : outcome.output;
+          // This call's share: its own cap, and whatever is left of this turn's shared budget.
+          const budget = Math.max(minToolChars, Math.min(toolChars, turnCharsLeft));
+          let out = outcome.output.length > budget
+            ? outcome.output.slice(0, Math.floor(budget / 2)) + `\n...[output clipped by the runner: ${outcome.output.length - budget} of ${outcome.output.length} characters omitted to protect the context window. Re-request a narrower range or use search if you need the rest.]...\n` + outcome.output.slice(-Math.floor(budget / 2))
+            : outcome.output;
+          turnCharsLeft = Math.max(0, turnCharsLeft - out.length);
+          // Record what the runner OBSERVED, so a context reset can state it as fact instead of asking the model to
+          // go and find it again. Paths come from the validated arguments, hashes from the file on disk.
+          {
+            const led = this.ledger();
+            recordServed(led, req.phase, out.length);
+            const p = typeof c.args?.path === "string" ? c.args.path : null;
+            if (p && (c.name === "read_file" || c.name === "list_dir")) recordRead(led, this.ws.repo, p);
+            if (p && (c.name === "write_file" || c.name === "edit_file")) recordWrite(led, this.ws.repo, p);
+            if (c.name === "run_command" || c.name === "install_packages") recordCommand(led, typeof c.args?.command === "string" ? c.args.command : c.name, outcome.ok);
+          }
 
           // Repetition / loop detection: the same call with the same result again and again.
           const sig = callSignature(c);
