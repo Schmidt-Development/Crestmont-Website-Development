@@ -139,3 +139,11 @@ test("[PAY-007] refunds: support reviews, only the Founder decides, AI is blocke
   assert.throws(() => refundTransition(owner, "recommended", "denied", { mandatoryObligation: true }), /mandatory/);
   assert.throws(() => refundTransition(owner, "requested", "approved"), TransitionError);
 });
+
+test("[PAY-007] FD-03: only the Founder may deny a refund request, at review or at decision; mandatory refunds are never deniable", () => {
+  assert.throws(() => refundTransition(support, "under_review", "denied", { notes: "Out of policy" }), /Only the Founder can deny/);
+  assert.throws(() => refundTransition(support, "recommended", "denied", { notes: "No" }), /Founder/);
+  refundTransition(owner, "under_review", "denied", { notes: "Founder discretionary review: work delivered as scoped" });
+  refundTransition(owner, "recommended", "denied", { notes: "No" });
+  assert.throws(() => refundTransition(owner, "under_review", "denied", { notes: "No", mandatoryObligation: true }), /mandatory/);
+});

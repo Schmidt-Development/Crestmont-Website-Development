@@ -2,6 +2,7 @@
 // without JavaScript, clearly illustrative, and free of real transactions, forms or prohibited claims.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { AI_RECEPTIONIST_OFFER } from "../src/domain/catalog.ts";
 import { createTestApp } from "./support/app.ts";
 import { SERVICES, servicePath } from "../src/content/services.ts";
 import { SERVICE_VISUAL_SLUGS, serviceVisual } from "../src/ui/service-visuals.ts";
@@ -34,6 +35,8 @@ test("[WEB-002] [WEB-007] service pages keep their heading, summary, CTAs, price
     assert.ok(html.indexOf("hero-service__copy") < html.indexOf("hero-service__visual"), "copy first (left / top on phones)");
     assert.ok(html.includes(`<h1 class="hero-title">${s.name.replace(/&/g, "&amp;")}`) || s.slug === "hosting-maintenance", `${s.slug}: heading unchanged`);
     if (s.slug === "hosting-maintenance") assert.match(html, /href="\/contact\?topic=maintenance"/);
+    // FD-45: the AI Receptionist is "Coming soon" — its CTA asks about availability instead of requesting a quote.
+    else if (s.slug === "ai-receptionist" && AI_RECEPTIONIST_OFFER.status !== "available") { assert.match(html, /Ask about availability/); assert.doesNotMatch(html, /href="\/quote\?service=ai-receptionist"/); }
     else if (s.pricing === "custom") assert.match(html, new RegExp(`href="/quote\\?service=${s.slug}"`));
     else { assert.match(html, /href="\/pricing"/); assert.match(html, /How it is priced/); }
   }
