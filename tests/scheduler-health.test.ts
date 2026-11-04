@@ -91,16 +91,17 @@ test("[READY-012] [INFRA-006] external scheduler endpoint: HMAC-signed, 503 with
   const body = JSON.stringify({ cron: "*/15 * * * *" });
   assert.equal((await post(t, body, null)).status, 401);
   assert.equal((await post(t, body, await signEvidence("wrong", body))).status, 401);
-  assert.equal((await post(t, '{"cron":"* * * * *"}', await signEvidence("sched-key", '{"cron":"* * * * *"}'))).status, 422);
+  assert.equal((await post(t, '{"cron":"*/7 * * * *"}', await signEvidence("sched-key", '{"cron":"*/7 * * * *"}'))).status, 422, "a cron the Worker does not schedule is refused");
   const ok = await post(t, body, await signEvidence("sched-key", body));
   assert.equal(ok.status, 200);
-  assert.deepEqual(((await ok.json()) as { ran: string[] }).ran, ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep", "voice_outbound", "sales_outbound", "sales_opt", "research_promote", "ops_alerts"]);
+  assert.deepEqual(((await ok.json()) as { ran: string[] }).ran, ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep", "voice_outbound", "sales_outbound", "sales_opt", "ops_alerts"],
+    "research_promote is deliberately NOT here: it has its own minute, so it no longer queues behind ten other jobs");
   assert.ok(await t.db.prepare(`SELECT 1 FROM ingestion_status WHERE source = 'job:build_sweep' AND last_success_at IS NOT NULL`).first(), "jobs recorded exactly as a cron run");
   assert.equal((await post(t, body, await signEvidence("sched-key", body))).status, 429, "at most once per 5 minutes");
 });
 
 test("[READY-012] the monitor's scheduler client signs exactly what the Worker verifies, with the key the deploy installs", async () => {
-  const { deriveSchedulerKey, sign, FREQUENT, DAILY } = await import("../scripts/trigger-scheduler.ts");
+  const { deriveSchedulerKey, sign, MINUTE, FREQUENT, DAILY } = await import("../scripts/trigger-scheduler.ts");
   const { verifyEvidenceSignature } = await import("../src/readiness/ingest.ts");
   const { SCHEDULE } = await import("../src/app/scheduled.ts");
   const key = deriveSchedulerKey("cf-token-example");
@@ -108,7 +109,10 @@ test("[READY-012] the monitor's scheduler client signs exactly what the Worker v
   assert.notEqual(key, deriveSchedulerKey("other-token"));
   const body = JSON.stringify({ cron: FREQUENT });
   await verifyEvidenceSignature(key, body, sign(key, body));
-  assert.deepEqual([FREQUENT, DAILY].sort(), Object.keys(SCHEDULE).sort());
+  // Every schedule the Worker has must be one the backup scheduler can fire, or a Cron Trigger outage would silently
+  // stop whichever one it does not know about.
+  assert.deepEqual([MINUTE, FREQUENT, DAILY].sort(), Object.keys(SCHEDULE).sort());
+  assert.deepEqual(SCHEDULE[MINUTE], ["research_promote"], "the per-minute tick runs only promotion");
   const { readFileSync } = await import("node:fs");
   assert.match(readFileSync(".github/workflows/deploy-staging.yml", "utf8"), /trigger-scheduler\.ts derive\)[\s\S]*staging-secrets\.ts put SCHEDULER_TRIGGER_SECRET/);
 });

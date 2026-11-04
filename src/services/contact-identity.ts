@@ -320,7 +320,26 @@ interface Evaluation {
 }
 
 async function evaluate(db: Db, n: Normalized): Promise<Evaluation> {
-  const identities = await findIdentities(db, n.emails.map((e) => e.key), n.phones.map((p) => p.key));
+  // Four of these reads depend on nothing but the normalized candidate, so they are issued together instead of one
+  // after another. On a D1 binding each round trip costs real latency (~150 ms on staging), and this function used to
+  // wait for eight in series; the identity chain below genuinely has to be sequential, but these do not. Nothing
+  // about WHAT is matched changes — only when the queries leave.
+  const businessIdQuery = (() => {
+    if (!(n.domain || (n.company && n.name))) return null;
+    const conds: string[] = [], binds: string[] = [];
+    if (n.domain) { conds.push(`co.domain_norm = ?`); binds.push(n.domain); }
+    if (n.company && n.name) { conds.push(`c.name_company_norm = ?`); binds.push(`${n.name}|${n.companyRaw ?? ""}`); }
+    return db.prepare(`SELECT c.id FROM contacts c LEFT JOIN companies co ON co.id = c.company_id WHERE (${conds.join(" OR ")}) AND c.name <> 'Deleted contact' LIMIT 25`).bind(...binds).all<{ id: string }>();
+  })();
+  const [identities, businessIdRows, customerAccounts, domainCustomers] = await Promise.all([
+    findIdentities(db, n.emails.map((e) => e.key), n.phones.map((p) => p.key)),
+    businessIdQuery,
+    customerAccountsByEmail(db, n.emails.map((e) => e.key)),
+    n.domain
+      ? db.prepare(`SELECT DISTINCT organization_id FROM companies WHERE domain_norm = ? AND organization_id IS NOT NULL LIMIT 10`).bind(n.domain).all<{ organization_id: string }>()
+        .then((r) => r.results.map((x) => x.organization_id))
+      : Promise.resolve([] as string[]),
+  ]);
   const links = await linkedContacts(db, identities.map((i) => i.id));
   const linkCounts = new Map<string, number>();
   for (const l of links) linkCounts.set(l.identity_id, (linkCounts.get(l.identity_id) ?? 0) + 1);
@@ -350,19 +369,15 @@ async function evaluate(db: Db, n: Normalized): Promise<Evaluation> {
       strength: strong ? "strong" : ambiguous ? "ambiguous" : "shared", customer, relation: rel, organizationId: row.organization_id ?? row.member_org, stage: row.any_stage, row });
   }
   // Business identity without a shared identifier: same domain (and location) or same name at the same company.
+  // The candidate ids were fetched above; only excluding the ones already matched needs the loop's result.
   const businessMatches: ContactRow[] = [];
-  if (n.domain || (n.company && n.name)) {
-    const conds: string[] = [], binds: string[] = [];
-    if (n.domain) { conds.push(`co.domain_norm = ?`); binds.push(n.domain); }
-    if (n.company && n.name) { conds.push(`c.name_company_norm = ?`); binds.push(`${n.name}|${n.companyRaw ?? ""}`); }
-    const ids = (await db.prepare(`SELECT c.id FROM contacts c LEFT JOIN companies co ON co.id = c.company_id WHERE (${conds.join(" OR ")}) AND c.name <> 'Deleted contact' LIMIT 25`).bind(...binds).all<{ id: string }>()).results.map((r) => r.id);
+  if (businessIdRows) {
+    const ids = businessIdRows.results.map((r) => r.id);
     const known = new Set(matches.map((m) => m.contactId));
     for (const row of await contactsByIds(db, ids.filter((i) => !known.has(i)))) {
       if (businessRelation(n, row) === "same" || (n.name && n.company && nameKey(row.name) === n.name && companyKey(row.company_name) === n.company)) businessMatches.push(row);
     }
   }
-  const customerAccounts = await customerAccountsByEmail(db, n.emails.map((e) => e.key));
-  const domainCustomers = n.domain ? (await db.prepare(`SELECT DISTINCT organization_id FROM companies WHERE domain_norm = ? AND organization_id IS NOT NULL LIMIT 10`).bind(n.domain).all<{ organization_id: string }>()).results.map((r) => r.organization_id) : [];
   return { matches, identities, linkCounts, customerAccounts, businessMatches, domainCustomers };
 }
 
@@ -500,9 +515,12 @@ async function decideAndWrite(db: Db, candidate: Candidate, opts: IntakeOptions,
     return commit(finish("REJECTED_INVALID"));
   }
 
-  // 2. Evaluate identities, customers and suppression.
-  const ev = await evaluate(db, n);
-  const suppressed = await suppressionFor(db, n.phones.map((p) => p.key), n.emails.map((e) => e.key));
+  // 2. Evaluate identities, customers and suppression. Suppression depends only on the candidate's own identifiers,
+  // so it is read alongside the evaluation rather than after it — one fewer round trip in series per record.
+  const [ev, suppressed] = await Promise.all([
+    evaluate(db, n),
+    suppressionFor(db, n.phones.map((p) => p.key), n.emails.map((e) => e.key)),
+  ]);
   const erasureHashes = automated ? await tombstoneHashes(n.phones.map((p) => p.key), n.emails.map((e) => e.key)) : [];
   let strong = ev.matches.filter((m) => m.strength === "strong");
   const ambiguousMatches = ev.matches.filter((m) => m.strength === "ambiguous");

@@ -6,6 +6,7 @@ import { createTestApp, createStaff } from "./support/app.ts";
 import { runJobs, SCHEDULE } from "../src/app/scheduled.ts";
 import { collectAlertItems, runOpsAlerts, ALERT_THRESHOLDS } from "../src/services/monitoring.ts";
 import { OutboxEmail } from "../src/adapters/email.ts";
+import { MIN_BACKLOG_FOR_TARGET, TARGET_PER_MINUTE } from "../src/services/research-promote.ts";
 
 const NOW = new Date("2026-10-29T10:30:00Z");
 const ago = (min: number) => new Date(NOW.getTime() - min * 60e3).toISOString();
@@ -107,6 +108,49 @@ test("[INFRA-006] [READY-012] ops_alerts runs every 15 minutes as a recorded sch
   assert.equal(res.ops_alerts.ok, true, res.ops_alerts.detail);
   assert.match(res.ops_alerts.detail, /0 new of 0 alert items; 0 emails to 0 owner/);
   assert.ok(await db.prepare(`SELECT 1 FROM ingestion_status WHERE source = 'job:ops_alerts' AND last_error IS NULL`).first());
+});
+
+// ───────────── CRM promotion throughput ─────────────
+
+test("[INFRA-006] promotion alerting: below target with a backlog alerts; a drained backlog and a switched-off promoter never do", async () => {
+  const t = await setup();
+  const db = t.db;
+  const of = async (cat: string) => (await collectAlertItems(db, NOW)).filter((i) => i.category === cat);
+
+  // Automatic promotion off: its rate is not a fault, it is a decision.
+  assert.equal((await of("promotion_below_target")).length, 0, "nothing to say while the Owner has it switched off");
+
+  await db.prepare(`UPDATE research_settings SET auto_promote = 1 WHERE id = 1`).run();
+  // On, but nothing eligible: a drained backlog is the GOAL. A low rate here must never raise anything, or the alert
+  // would fire forever the moment the system succeeded.
+  assert.equal((await of("promotion_below_target")).length, 0, "a drained backlog is success, not a stall");
+
+  // A real backlog and no imports: this is the condition worth waking someone for.
+  const stmts = [];
+  for (let i = 0; i < MIN_BACKLOG_FOR_TARGET + 5; i++) {
+    stmts.push(db.prepare(`INSERT INTO research_prospects (id, business_key, name, name_norm, sources_json, website_class, website_json, findings_json, findings_count,
+        identity_confidence, score, qualified, qualification_json, status, shared_phone, eligibility, eligibility_json, content_hash, last_verified_at, first_seen_at, updated_at)
+      VALUES (?,?,?,?,'[]','NO_OFFICIAL_WEBSITE_FOUND','{}','[]',0,0.9,80,1,'[]','qualified',0,'blocked','[]',?,?,?,?)`)
+      .bind(`rp_alert_${i}`, `overture:alert${i}`, `Alert Co ${i}`, `alert co ${i}`, `h${i}`, ago(30), ago(30), ago(30)));
+  }
+  await db.batch(stmts);
+  const low = await of("promotion_below_target");
+  assert.equal(low.length, 1, "below target with work waiting is an alert");
+  assert.match(low[0].summary, /created 0 new leads in the last 15 minutes \(0.0\/minute against a target of 25\)/);
+  assert.match(low[0].summary, /eligible prospects are waiting/);
+  // Keyed by the hour, so a sustained shortfall is stated once an hour rather than once a minute.
+  assert.equal(low[0].key, `promotion_below_target:${NOW.toISOString().slice(0, 13)}`);
+
+  // Hitting the target silences it — and the rate is read from the leads table, not from any job counter, which is
+  // why these rows alone are enough to clear it without a single promotion run being recorded.
+  await db.prepare(`INSERT INTO contacts (id, name, created_at) VALUES ('ct_rate','Rate Co',?)`).bind(ago(60)).run();
+  const leads = [];
+  for (let i = 0; i < TARGET_PER_MINUTE * ALERT_THRESHOLDS.promotion_rate_window_minutes; i++) {
+    leads.push(db.prepare(`INSERT INTO leads (id, contact_id, source, origin, stage, created_at, updated_at) VALUES (?, 'ct_rate','manual','research_agent','new',?,?)`)
+      .bind(`ld_rate_${i}`, ago(5), ago(5)));
+  }
+  await db.batch(leads);
+  assert.equal((await of("promotion_below_target")).length, 0, "at target, nothing is raised");
 });
 
 // ───────────── Lead research worker (docs/research/PRODUCTION.md §6 alerting gap) ─────────────

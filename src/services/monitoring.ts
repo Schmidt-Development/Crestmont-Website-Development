@@ -7,6 +7,7 @@ import { requestAiDraft, type AiDraftRequest, type AiProvider, type AiBackend } 
 import { audit as auditLog } from "./security.ts";
 import { voiceBudget } from "./voice-budget.ts";
 import { latestPromptSync } from "./voice-prompt-sync.ts";
+import { importRate, TARGET_PER_MINUTE } from "./research-promote.ts";
 import type { EmailAdapter } from "../adapters/email.ts";
 import { sendMail } from "./mailer.ts";
 
@@ -167,9 +168,11 @@ export const ALERT_THRESHOLDS = {
   email_queue_stuck_minutes: 60,
   /** Research worker: minutes without a heartbeat while research is resumed (docs/research/PRODUCTION.md §6). */
   research_heartbeat_stale_minutes: 30,
+  /** CRM promotion: the window the import rate is judged over. Long enough that one slow minute is not an alert. */
+  promotion_rate_window_minutes: 15,
 } as const;
 
-export type AlertCategory = "stripe_dead_letter" | "reconciliation_finding" | "email_queue_stuck" | "feed_failing" | "security_burst" | "research_worker_stale";
+export type AlertCategory = "stripe_dead_letter" | "reconciliation_finding" | "email_queue_stuck" | "feed_failing" | "security_burst" | "research_worker_stale" | "promotion_below_target";
 export interface AlertItem { key: string; category: AlertCategory; subject: string | null; summary: string }
 export interface AlertCtx { db: Db; email: EmailAdapter; baseUrl: string; now: () => Date; settings?: Record<string, string> }
 
@@ -180,10 +183,12 @@ const CATEGORY_TITLE: Record<AlertCategory, string> = {
   feed_failing: "Readiness evidence feeds are failing",
   security_burst: "Repeated security events",
   research_worker_stale: "Lead research is resumed but no worker is doing the work",
+  promotion_below_target: "CRM imports are below target while eligible prospects are waiting",
 };
 const CATEGORY_PAGE: Record<AlertCategory, string> = {
   stripe_dead_letter: "/staff/monitoring", reconciliation_finding: "/staff/finance/reconciliation", email_queue_stuck: "/staff/monitoring",
   feed_failing: "/staff/readiness", security_burst: "/staff/security", research_worker_stale: "/staff/research",
+  promotion_below_target: "/staff/research",
 };
 
 async function rowsOf<T>(db: Db, sql: string, ...b: unknown[]): Promise<T[]> {
@@ -247,6 +252,24 @@ export async function collectAlertItems(db: Db, now = new Date()): Promise<Alert
       try { authFailed = !!(JSON.parse(r.status_json) as { platform?: { authFailed?: boolean } }).platform?.authFailed; } catch { /* worker-reported JSON; ignore if unreadable */ }
       if (authFailed) items.push({ key: `research_worker_stale:auth:${r.runner_id}:${window}`, category: "research_worker_stale", subject: r.runner_id,
         summary: `Research worker ${r.runner_id} reports that its credentials are being refused, so it has stopped delivering batches. RESEARCH_RUNNER_SECRET differs between the worker and this environment (docs/research/RUNBOOK.md §5).` });
+    }
+  }
+  // CRM promotion throughput. Deliberately separate from the worker alert and NOT gated on the research pause:
+  // pausing stops new research, while the backlog already on file still has to reach the CRM, so a stalled drain is
+  // a problem whether or not research is running.
+  //
+  // Two conditions have to hold before this says anything. The rate is read from the `leads` table rather than from
+  // the promoter's counters, because the target is stated in rows that exist; and it is only a fault when there is
+  // clearly enough eligible work to hit the target, so a drained backlog — the goal — can never raise it.
+  const promo = (await rowsOf<{ auto_promote: number }>(db, `SELECT auto_promote FROM research_settings WHERE id = 1`))[0];
+  if (promo?.auto_promote === 1) {
+    const mins = ALERT_THRESHOLDS.promotion_rate_window_minutes;
+    const rate = await importRate(db, mins, now).catch(() => null);
+    if (rate?.belowTarget) {
+      // Keyed by the hour so a sustained shortfall is stated once an hour, not once a minute.
+      items.push({ key: `promotion_below_target:${window}`, category: "promotion_below_target", subject: null,
+        summary: `Automatic CRM promotion created ${rate.leads} new leads in the last ${mins} minutes (${rate.perMinute.toFixed(1)}/minute against a target of ${TARGET_PER_MINUTE}), while ${rate.backlog} eligible prospects are waiting. `
+          + `${rate.runs} runs, ${rate.locked} skipped for overlap, ${rate.failed} failed, slowest ${rate.slowestMs} ms. Check /staff/research and the promotion runs there.` });
     }
   }
   await burst("mfa_failed", "wrong two-factor codes");

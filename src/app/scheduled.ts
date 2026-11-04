@@ -27,9 +27,23 @@ import { processSalesQueue } from "../services/sales-outbound.ts";
 export type JobName = "requirements" | "stripe_reconcile" | "support_escalation" | "github_sync" | "inactivity" | "integration_health"
   | "stripe_side_reconcile" | "stripe_ledger_reconcile" | "cost_import" | "env_probe" | "retention" | "build_sweep" | "payment_repair" | "email_retry" | "voice_outbound" | "sales_outbound" | "sales_opt" | "research_promote" | "ops_alerts";
 
-/** Cron expression → jobs. Must match [triggers] crons in wrangler.toml. ops_alerts runs last so it sees this run's results. */
+/**
+ * Cron expression → jobs. Must match [triggers] crons in wrangler.toml. ops_alerts runs last so it sees this run's
+ * results.
+ *
+ * `research_promote` has a minute of its own and is the ONLY job on it. It used to sit eleventh of twelve in the
+ * quarter-hourly set, which cost it twice: it ran four times an hour, and each time it inherited whatever wall clock
+ * the ten jobs before it had left — measured on staging it placed 12-13 leads where the same code placed 20-36 when
+ * asked directly. A target stated in leads per minute cannot be met by a job that runs every fifteen minutes behind
+ * a queue, so it gets its own tick. Its own lease stops one run overlapping the next
+ * (src/services/research-promote.ts), and it is cheap when there is nothing to do: with the Owner's switch off, or
+ * the backlog empty, the tick is two queries and no writes.
+ *
+ * Every other job keeps exactly the frequency it had.
+ */
 export const SCHEDULE: Record<string, JobName[]> = {
-  "*/15 * * * *": ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep", "voice_outbound", "sales_outbound", "sales_opt", "research_promote", "ops_alerts"],
+  "* * * * *": ["research_promote"],
+  "*/15 * * * *": ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep", "voice_outbound", "sales_outbound", "sales_opt", "ops_alerts"],
   "17 11 * * *": ["requirements", "inactivity", "integration_health", "stripe_side_reconcile", "stripe_ledger_reconcile", "cost_import", "retention"],
 };
 
@@ -81,9 +95,14 @@ export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string,
         // does nothing until the Owner turns automatic promotion on, and it is deliberately NOT gated on the research
         // pause: pausing stops new research, while prospects already on file still have to reach the CRM.
         case "research_promote": {
-          const r = await runAutoPromotion(ctx.db, { trigger: "scheduled" });
+          // 40 seconds of a 60-second tick. It is a WALL budget, not a CPU one: a promotion spends its time waiting
+          // on D1, and Cloudflare's limit for a sub-hourly Cron Trigger is 30 s of CPU, which this is nowhere near
+          // (measured: ~2 ms of compute per promotion). Leaving 20 s spare means a slow minute finishes inside its
+          // own tick instead of handing the lease to the next one.
+          const r = await runAutoPromotion(ctx.db, { trigger: "scheduled", budgetMs: 40_000 });
           detail = r.stoppedReason === "disabled" ? `off (Owner has not enabled automatic CRM promotion); ${r.remaining} eligible and waiting`
-            : `${r.examined} examined: ${r.promoted} new CRM leads, ${r.existingCrm} existing, ${r.review} to review, ${r.suppressed} suppressed, ${r.rejected} rejected, ${r.failed} failed; ${r.remaining} remaining (${r.stoppedReason})`;
+            : r.stoppedReason === "locked" ? `skipped: the previous run still holds the promotion lease; ${r.remaining} remaining`
+            : `${r.examined} examined: ${r.promoted} new CRM leads, ${r.existingCrm} existing, ${r.review} to review, ${r.suppressed} suppressed, ${r.rejected} rejected, ${r.failed} failed; ${r.remaining} remaining in ${r.durationMs} ms at concurrency ${r.concurrency} (${r.stoppedReason})`;
           break;
         }
         case "ops_alerts": { const r = await runOpsAlerts(ctx); detail = `${r.raised} new of ${r.checked} alert items; ${r.emailed} emails to ${r.recipients} owner(s)${r.categories.length ? ` (${r.categories.join(", ")})` : ""}`; break; }

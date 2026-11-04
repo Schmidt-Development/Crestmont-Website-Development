@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 export const SCHEDULER_KEY_LABEL = "crestmont-staging-scheduler:v1";
 export const deriveSchedulerKey = (root: string) => createHmac("sha256", root).update(SCHEDULER_KEY_LABEL).digest("hex");
 export const sign = (key: string, body: string, t = Math.floor(Date.now() / 1000)) => `t=${t},v1=${createHmac("sha256", key).update(`${t}.${body}`).digest("hex")}`;
-export const FREQUENT = "*/15 * * * *", DAILY = "17 11 * * *";
+export const MINUTE = "* * * * *", FREQUENT = "*/15 * * * *", DAILY = "17 11 * * *";
 
 async function main() {
   const [mode, ...rest] = process.argv.slice(2);
@@ -23,7 +23,8 @@ async function main() {
   if (mode !== "run") throw new Error("usage: derive | run --url <base> [--daily] | retell-audit --url <base>");
   const base = rest[rest.indexOf("--url") + 1]?.replace(/\/$/, "");
   if (!base || !/^https:\/\//.test(base)) throw new Error("--url https://… is required");
-  const crons = [FREQUENT, ...(rest.includes("--daily") ? [DAILY] : [])];
+  // MINUTE first: research promotion is the one schedule where a missed tick is a missed minute of throughput.
+  const crons = [MINUTE, FREQUENT, ...(rest.includes("--daily") ? [DAILY] : [])];
   let failed = false;
   for (const cron of crons) {
     const body = JSON.stringify({ cron });
