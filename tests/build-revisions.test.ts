@@ -204,6 +204,13 @@ test("[AIB-PREVIEW] the inspect page shows the stored revisions, the best one, a
   // a sandboxed document can make. An anonymous client here stands in for the preview's own opaque origin.
   const anon = await t.client().get(`${prefix}/assets/site.css`);
   assert.equal(anon.status, 200, "the capability authenticates the stylesheet on its own, with no cookie");
+  // Nothing of the staff session may travel back to untrusted generated content. The route builds its response
+  // directly rather than through the helpers that attach ctx.setCookies, and this is what keeps it that way: a
+  // refactor onto a cookie-attaching helper would hand a staff CSRF token to the generated page.
+  assert.equal(served.headers.get("set-cookie"), null, "a preview response sets no cookie for a staff viewer");
+  assert.equal(anon.headers.get("set-cookie"), null, "nor for an anonymous one");
+  assert.equal(served.headers.get("referrer-policy"), "no-referrer",
+    "and the capability cannot leak through a Referer to anything the generated site links to");
   assert.equal(anon.headers.get("content-type"), "text/css; charset=utf-8",
     "and it is served as CSS -- a redirect to the sign-in page is HTML, which a browser refuses as a stylesheet");
   assert.equal(await anon.text(), "h1{color:navy}", "the asset is the bytes the builder wrote");
