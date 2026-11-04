@@ -83,10 +83,12 @@ test("[PREVIEW-RENDER] the sandbox stays, and the policy names the preview's own
   // also confines the generated page to its OWN snapshot rather than the whole origin.
   // frame-ancestors is exempt: it is matched against the EMBEDDING page's origin (the staff page), not against
   // this document's own, so 'self' is both meaningful and correct there.
+  // Compared as whole source expressions, not as substrings of the policy: "the prefix appears somewhere in
+  // style-src" would also be true of a policy that merely allowed a host the prefix happens to sit under.
   for (const directive of ["default-src", "img-src", "style-src", "script-src", "font-src"]) {
-    const value = new RegExp(`${directive} ([^;]*)`).exec(csp)?.[1] ?? "";
-    assert.ok(value.includes(base), `${directive} names the preview prefix, not a bare origin`);
-    assert.ok(!value.includes("'self'"),
+    const sources = (new RegExp(`(?:^|; )${directive} ([^;]*)`).exec(csp)?.[1] ?? "").trim().split(/\s+/);
+    assert.ok(sources.includes(base), `${directive} names the preview prefix exactly, not a bare origin`);
+    assert.ok(!sources.includes("'self'"),
       `${directive} must not rely on 'self': this document's origin is opaque, so 'self' can never match it`);
   }
   assert.match(csp, /style-src [^;]*'unsafe-inline'/, "inline <style> blocks the builder emits still apply");
