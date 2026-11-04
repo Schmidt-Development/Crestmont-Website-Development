@@ -335,6 +335,9 @@ test("[PORT-007] [PORT-006] full portfolio workflow: upload, replace, verify, do
   assert.equal(badRel.status, 422);
   assert.equal((await c.post(`/staff/portfolio/${id}/relationship`, { relationship: "Website built by the Crestmont Founder for a related business", evidence: "Founder authorization letter on file, dated 2026-10-26" })).status, 303);
   assert.equal((await c.post(`/staff/portfolio/${id}/verify-link`, { verified_on: "2026-10-26" })).status, 303);
+  // FD-13: still refused until the owner's explicit opt-in is recorded.
+  assert.equal((await c.post(`/staff/portfolio/${id}/publish`)).status, 409, "no publishing without recorded consent");
+  assert.equal((await c.post(`/staff/portfolio/${id}/consent`, { given_by: "Business owner (TEST DATA)", method: "written", given_on: "2026-10-26", evidence: "Founder authorization letter on file, dated 2026-10-26" })).status, 303);
   assert.equal((await c.post(`/staff/portfolio/${id}/publish`)).status, 303);
   const anon = app.client();
   const list = await (await anon.get("/portfolio")).text();
