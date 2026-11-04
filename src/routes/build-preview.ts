@@ -28,7 +28,16 @@ type ViewportName = keyof typeof VIEWPORTS;
 const ACTIVE: BuildState[] = ["queued", "preparing", "building", "verifying"];
 
 const revKey = (r: { attempt: number; cycle: number }) => `${r.attempt}-${r.cycle}`;
+/** build_revisions.score: the reviewer's quality mark for a stored website, already on a 0-10 scale. */
 const score = (n: number | null | undefined) => (n === null || n === undefined ? "—" : `${n.toFixed(1)}/10`);
+/**
+ * build_cycles.score is a DIFFERENT measure on a DIFFERENT scale: progressScore(), a 0-1 fraction of the cycle's
+ * checks that passed (src/services/build-pipeline.ts). Both were rendered through score() above, so a cycle that
+ * passed everything was reported to the Founder as "1.0/10" beside a revision's "9.4/10" -- two unrelated numbers
+ * dressed as the same one, in the page where the score is supposed to be reconciled. The builds list already
+ * showed this value as a percentage; this agrees with it.
+ */
+const cycleScore = (n: number | null | undefined) => (n === null || n === undefined ? "—" : `${Math.round(n * 100)}% of checks`);
 
 function elapsed(from: string, to: string | null): string {
   const ms = (to ? Date.parse(to) : Date.now()) - Date.parse(from);
@@ -111,7 +120,7 @@ ${active ? alert("info", html`This build is running: the page refreshes itself e
   ${kpi("Package", String(j.package_id ?? "—"), j.kind === "revision" ? `revision ${j.revision}` : "first build")}
   ${kpi("Review cycles", String(cycles.length), latestCycle ? `latest: ${latestCycle.decision ?? "—"}` : "none yet")}
   ${kpi("Elapsed", elapsed(j.created_at, ACTIVE.includes(j.state as BuildState) ? null : j.updated_at), `attempt ${j.attempts}`)}
-  ${kpi("Current score", score(latestCycle?.score ?? null), "latest cycle, as the platform scored it")}
+  ${kpi("Latest cycle", cycleScore(latestCycle?.score ?? null), "checks passed in the newest review cycle")}
   ${kpi("Best verified", score(best?.score ?? null), best ? revLabel(best) : "no verified revision yet")}
   ${kpi("Revisions stored", String(revisions.length), "inspectable below")}
   ${kpi("Certification", q ? (q.eligible ? "Eligible" : q.waiting_external ? "Waiting on customer setup" : "Not eligible") : "No scorecard yet", q ? `${q.score}/10 · ${q.passed}/${q.applicable} criteria` : undefined)}
@@ -206,7 +215,7 @@ ${table(cycles, [
   { header: "Cycle", cell: (c) => String(c.cycle) },
   { header: "When", cell: (c) => formatDateTime(c.created_at) },
   { header: "Decision", cell: (c) => html`${badge(c.decision === "ESCALATED" ? "bad" : /^READY_/.test(c.decision ?? "") ? "ok" : "info", c.decision ?? "—")}<br><span class="faint">${c.decision_reason ?? ""}</span>` },
-  { header: "Score", cell: (c) => score(c.score) },
+  { header: "Checks passed", cell: (c) => cycleScore(c.score) },
   { header: "Models", cell: (c) => html`<span class="faint">builder</span> ${c.builder_model ?? "—"}<br><span class="faint">reviewer</span> ${c.reviewer_model ?? "—"}` },
   { header: "Findings", cell: (c) => {
       const f = ((): string[] => { try { const v = JSON.parse(c.findings_json ?? "{}") as { outstanding?: string[] }; return Array.isArray(v.outstanding) ? v.outstanding : []; } catch { return []; } })();
