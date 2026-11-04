@@ -19,7 +19,7 @@ import { createTestApp, createCustomer, createStaff, MemoryStorage } from "./sup
 import { FakePayments } from "./support/security-world.ts";
 import * as PL from "../src/services/build-pipeline.ts";
 import * as PH from "../src/services/build-phases.ts";
-import { latestQuality, qualityHistory } from "../src/services/build-quality.ts";
+import { latestQuality, qualityHistory, recordQuality } from "../src/services/build-quality.ts";
 import { REQUIRED_VIEWPORTS, SCORECARD_V2_SCHEMA, VISUAL_RUBRIC, round1 } from "../src/domain/quality-rubric.ts";
 import { QUALITY_CRITERIA } from "../src/domain/quality.ts";
 import { newId, nowIso } from "../src/lib/db.ts";
@@ -294,6 +294,28 @@ test("[PHASES] a cycle limit is still enforced", async () => {
   }
   assert.equal(last!.decision, "ESCALATED");
   assert.match(last!.reason, /limit of 3 review cycles/);
+});
+
+test("[PHASES] builder improvement proposals are counted per BUILD, not per review cycle", async () => {
+  // The card is recorded every cycle so revisions stay comparable. Proposing a reusable fix from each of them would
+  // turn builder_improvements.occurrences from "builds that hit this defect" into "cycles that hit it", inflating a
+  // number the Owner reads when deciding whether engineering time is justified.
+  const w = await world();
+  const reusable = (cycle: number) => ({
+    ...weighted({ phase: "design", design: 20, functional: "fail", other: "pass" }),
+    revision: `1-${cycle}`,
+    defects: [{ criterion: "security", class: "security", detail: "the shared input validator accepts unescaped HTML" }],
+  });
+  for (let n = 1; n <= 3; n++) await w.cycle(n, reusable(n));
+  const after = await w.t.db.prepare(`SELECT COUNT(*) AS n FROM builder_improvements`).first<{ n: number }>();
+  assert.equal(after!.n, 0, "three cycles with the same reusable defect proposed nothing");
+
+  // At completion it is proposed once.
+  await recordQuality(w.t.db, w.jobRow, "ready_for_review", reusable(3), { revision: { attempt: 1, cycle: 3 } });
+  const rows = (await w.t.db.prepare(`SELECT defect_class, occurrences FROM builder_improvements`).all<{ defect_class: string; occurrences: number }>()).results;
+  assert.equal(rows.length, 1, "one proposal for the build");
+  assert.equal(rows[0].defect_class, "security");
+  assert.equal(rows[0].occurrences, 1, "counted once for this build, not three times for its cycles");
 });
 
 // ── What the Founder actually sees ────────────────────────────────────────────────────────────────────────────────

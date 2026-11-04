@@ -59,6 +59,11 @@ export async function scopeOf(db: Db, job: JobLike): Promise<{ packageId: string
 export async function recordQuality(db: Db, job: JobLike, outcome: string, raw: unknown, o: { revision?: { attempt: number; cycle: number } | null } = {}): Promise<RecordedQuality> {
   const scope = await scopeOf(db, job);
   const at = nowIso();
+  // Improvement proposals are made once per BUILD, at completion, not on every review cycle. The card is now also
+  // recorded per cycle (so the Founder can compare revisions), and proposing from each of them would turn
+  // builder_improvements.occurrences from "builds that hit this defect" into "cycles that hit it" -- inflating a
+  // number the Owner reads when deciding whether a reusable fix is worth engineering time.
+  const propose = outcome !== "cycle";
 
   if (!isScorecardV2(raw)) {
     const v = verifyScorecard(raw, scope);
@@ -66,7 +71,7 @@ export async function recordQuality(db: Db, job: JobLike, outcome: string, raw: 
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .bind(newId("bq"), job.id, job.project_id, job.attempts, v.iteration, v.packageId, outcome.slice(0, 40), v.score, v.applicable, v.passed, v.eligible ? 1 : 0, v.waitingExternal ? 1 : 0, v.ok ? 1 : 0,
         JSON.stringify(v.problems.slice(0, 40)), JSON.stringify(v.criteria), JSON.stringify(v.defects), at, SCORECARD_V1_SCHEMA).run();
-    await proposeImprovements(db, job, v.defects);
+    if (propose) await proposeImprovements(db, job, v.defects);
     return { version: 1, ...v };
   }
 
@@ -83,7 +88,7 @@ export async function recordQuality(db: Db, job: JobLike, outcome: string, raw: 
       SCORECARD_V2_SCHEMA, v.phase, round1(v.design.points), round1(v.functionality.points), round1(v.other.points), v.totalPoints,
       JSON.stringify({ design: v.design, functionality: v.functionality, other: v.other, visualFailures: v.visualFailures, viewports: v.viewports, review: v.review }),
       v.designCertified ? 1 : 0, JSON.stringify(v.designBlockers.slice(0, 20))).run();
-  await proposeImprovements(db, job, v.defects);
+  if (propose) await proposeImprovements(db, job, v.defects);
   return { version: 2, score: v.overall, applicable, passed, ...v };
 }
 
