@@ -20,6 +20,7 @@
 //   6. the counters agree with the rows.
 import { wranglerOps } from "./staging-access.ts";
 import { TARGET_PER_MINUTE } from "../src/services/research-promote.ts";
+import { certified, judgeFullHour, judgeSustained, type Outcome } from "../src/domain/promotion-certification.ts";
 
 const arg = (k: string, d?: string) => { const i = process.argv.indexOf(`--${k}`); return i > 0 ? process.argv[i + 1] : d; };
 const MINUTES = Math.max(1, Math.min(Number(arg("minutes", "60")), 1440));
@@ -31,9 +32,16 @@ const q = <T = Record<string, unknown>>(sql: string) => d1.query<T>(sql);
 const one = async (sql: string) => Number((await q<{ n: number }>(sql))[0]?.n ?? 0);
 const lit = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
-type Check = { id: string; ok: boolean; detail: string };
+// Three outcomes, not two. "blocked" is a check that could not be attempted — almost always for want of eligible
+// supply — and it is NOT a pass: a full hour must never be certified from a window that did not last an hour. It is
+// reported separately from "fail" so a supply shortage is never read as a throughput defect, or the reverse.
+type Check = { id: string; outcome: Outcome; detail: string };
 const checks: Check[] = [];
-const check = (id: string, ok: boolean, detail: string) => { checks.push({ id, ok, detail }); console.log(`${ok ? "PASS" : "FAIL"} ${id} — ${detail}`); };
+const check = (id: string, outcome: Outcome | boolean, detail: string) => {
+  const o: Outcome = outcome === true ? "pass" : outcome === false ? "fail" : outcome;
+  checks.push({ id, outcome: o, detail });
+  console.log(`${o === "pass" ? "PASS" : o === "blocked" ? "BLOCKED" : "FAIL"} ${id} — ${detail}`);
+};
 
 const now = new Date();
 const since = new Date(now.getTime() - MINUTES * 60_000).toISOString();
@@ -57,8 +65,22 @@ for (let i = 1; i < ticks.length; i++) {
 check("schedule.no_long_gaps", gaps.length === 0, gaps.length ? `gaps longer than 150s: ${gaps.slice(0, 6).join(", ")}` : "no gap longer than 150s between consecutive scheduled runs");
 
 // ── 2 & 3. The rate, from the leads table ──
+// Only leads created by the UNATTENDED scheduled promoter count towards the target. `decided_by` is the acting
+// user's id, and the scheduled run's actor (RESEARCH_AUTOMATION) has none, so `decided_by IS NULL` is exactly the
+// set promoted without a person asking. An Owner reconcile, a single-prospect Owner promotion and the promotions
+// the staging deploy's own E2E performs all carry the Owner's id and are therefore excluded — none of them is
+// evidence that the schedule works on its own, which is the only thing worth certifying.
 const leadRows = await q<{ created_at: string }>(
-  `SELECT created_at FROM leads WHERE origin = 'research_agent' AND created_at >= ${lit(since)} ORDER BY created_at`);
+  `SELECT l.created_at FROM leads l JOIN research_prospects p ON p.crm_lead_id = l.id
+    WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND p.status = 'promoted' AND p.decided_by IS NULL
+    ORDER BY l.created_at`);
+const attendedLeads = await one(`SELECT COUNT(*) AS n FROM leads l JOIN research_prospects p ON p.crm_lead_id = l.id
+  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND p.status = 'promoted' AND p.decided_by IS NOT NULL`);
+const allResearchLeads = await one(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent' AND created_at >= ${lit(since)}`);
+const ownerRunsInWindow = await one(`SELECT COUNT(*) AS n FROM research_promotion_runs WHERE started_at >= ${lit(since)} AND trigger <> 'scheduled'`);
+check("attribution.unattended_only", true,
+  `${leadRows.length} of ${allResearchLeads} new research leads in the window were created by the unattended schedule; `
+  + `${attendedLeads} were promoted by a person (${ownerRunsInWindow} non-scheduled runs) and are excluded from every rate below`);
 const perMinute = new Map<string, number>();
 for (const r of leadRows) { const k = String(r.created_at).slice(0, 16); perMinute.set(k, (perMinute.get(k) ?? 0) + 1); }
 const best = [...perMinute.entries()].sort((a, b) => b[1] - a[1])[0] ?? ["—", 0] as [string, number];
@@ -81,28 +103,44 @@ const judged = drainedAt
 
 check("rate.best_minute_at_target", best[1] >= TARGET,
   `best single minute created ${best[1]} new CRM leads${best[0] === "—" ? "" : ` at ${best[0]}Z`} (target ${TARGET}/minute), counted from the leads table`);
-check("rate.window_at_target", workingLeads >= TARGET * workingMinutes,
-  `${workingLeads} new CRM leads over ${judged} = ${mean.toFixed(1)}/minute, ${Math.round(mean * 60)}/hour (target ${TARGET * workingMinutes} over that stretch)`);
 
-// Sustained, not a single spike: how many of the working minutes individually met the target.
-const workingKeys = drainedAt ? [...perMinute.entries()].filter(([k]) => `${k}:00.000Z` < drainedAt) : [...perMinute.entries()];
-const atTarget = workingKeys.filter(([, n]) => n >= TARGET).length;
-check("rate.sustained", atTarget >= Math.floor(workingMinutes * 0.8) || workingLeads >= TARGET * workingMinutes,
-  `${atTarget} of ${workingMinutes} working minutes individually reached ${TARGET}+; ${perMinute.size} minutes created at least one lead`);
+// A THROUGHPUT measurement, supply-adjusted: the mean over the minutes when there was work. It is deliberately NOT
+// the hour certification below — a high mean over a short supplied stretch says the machine is fast enough, and
+// says nothing about an hour.
+check("throughput.supply_adjusted", workingLeads >= TARGET * workingMinutes,
+  `${workingLeads} unattended leads over ${judged} = ${mean.toFixed(1)}/minute (needs ${TARGET * workingMinutes} over that stretch). Throughput only — not an hour certification.`);
+
+// Sustained means minute by minute. There is no average fallback: a single burst of 300 in one minute followed by
+// 59 idle minutes averages 5/minute and would once have satisfied an "or the average is fine" clause, which is
+// exactly the claim the target is not making. Each working minute has to stand on its own.
+// Every minute of the measured window, so a minute with no leads counts as the zero it is rather than being absent.
+const allMinuteKeys: string[] = [];
+for (let i = 0; i < MINUTES; i++) allMinuteKeys.push(new Date(Date.parse(since) + i * 60_000).toISOString().slice(0, 16));
+const everyMinute = allMinuteKeys.map((k) => ({ minute: k, leads: perMinute.get(k) ?? 0 }));
+const perWorkingMinute = everyMinute.slice(0, workingMinutes);
+
+const sustained = judgeSustained(perWorkingMinute, TARGET);
+check("rate.sustained", sustained.outcome,
+  `${sustained.atTarget} of ${workingMinutes} working minutes individually reached ${TARGET}+ (needs ${sustained.needed}, i.e. 90%; no window average can substitute)`
+  + (sustained.worst.length ? `; worst: ${sustained.worst.map((m) => `${m.minute.slice(11)}Z=${m.leads}`).join(", ")}` : ""));
+
+const hour = judgeFullHour({ windowMinutes: MINUTES, workingMinutes, minutes: everyMinute, target: TARGET, drainedAt });
+check("certification.full_hour", hour.outcome, hour.reason + (hour.outcome === "blocked" ? " See throughput.supply_adjusted for what the rate was over the minutes that did have work." : ""));
 
 // ── 4. Every lead is a usable sales record ──
 const bad = await one(`SELECT COUNT(*) AS n FROM leads l JOIN research_prospects p ON p.crm_lead_id = l.id
-  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND p.status = 'promoted'
+  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND p.status = 'promoted' AND p.decided_by IS NULL
     AND (l.stage <> 'new' OR l.intake_decision_id IS NULL OR COALESCE(l.utm_source,'') <> 'crestmont-research'
       OR (p.website_class IN ('VERIFIED_WEBSITE_BROKEN','VERIFIED_WEBSITE_ISSUES','VERIFIED_OFFICIAL_WEBSITE') AND COALESCE(p.website_url,'') = ''))`);
-check("leads.usable", bad === 0, `${bad} of the new leads are not in stage new, lack an intake decision, lack research attribution, or lost a verified website`);
+check("leads.usable", bad === 0, `${bad} of the unattended new leads are not in stage new, lack an intake decision, lack research attribution, or lost a verified website`);
 
-const withContact = await one(`SELECT COUNT(*) AS n FROM leads l JOIN contacts c ON c.id = l.contact_id
-  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)}`);
-check("leads.have_contact", withContact === total, `${withContact} of ${total} new leads resolve to a contact row`);
+const withContact = await one(`SELECT COUNT(*) AS n FROM leads l
+  JOIN research_prospects p ON p.crm_lead_id = l.id JOIN contacts c ON c.id = l.contact_id
+  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND p.status = 'promoted' AND p.decided_by IS NULL`);
+check("leads.have_contact", withContact === total, `${withContact} of ${total} unattended new leads resolve to a contact row`);
 
 const withEvidence = await one(`SELECT COUNT(*) AS n FROM leads l JOIN research_prospects p ON p.crm_lead_id = l.id
-  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND p.status = 'promoted'
+  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND p.status = 'promoted' AND p.decided_by IS NULL
     AND p.score > 0 AND p.findings_count >= 0 AND LENGTH(COALESCE(l.message,'')) > 20`);
 check("leads.carry_evidence", total === 0 || withEvidence === total,
   `${withEvidence} of ${total} carry the research score and the evidence text the salesperson reads`);
@@ -123,7 +161,9 @@ const dupPhones = await one(`SELECT COUNT(*) AS n FROM (
   SELECT ci.value_norm FROM contact_identities ci
     JOIN contact_identity_links cl ON cl.identity_id = ci.id AND cl.removed_at IS NULL
     JOIN leads l ON l.contact_id = cl.contact_id
+    JOIN research_prospects p ON p.crm_lead_id = l.id
   WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND ci.kind = 'phone'
+    AND p.status = 'promoted' AND p.decided_by IS NULL
   GROUP BY ci.value_norm HAVING COUNT(DISTINCT l.id) > 1)`).catch(() => -1);
 check("dedup.no_two_leads_on_one_number", dupPhones === 0,
   dupPhones < 0 ? "could not be read (the identity tables answered with an error)" : `${dupPhones} phone numbers reach more than one of the new leads`);
@@ -132,12 +172,14 @@ const callable = await one(`SELECT COUNT(*) AS n FROM research_prospects WHERE s
 check("compliance.nothing_released_for_calling", callable === 0, `${callable} promoted prospects are marked eligible for automated calling (must be 0 by design)`);
 
 // ── 6. Counters versus rows ──
-const reported = await one(`SELECT COALESCE(SUM(promoted),0) AS n FROM research_promotion_runs WHERE started_at >= ${lit(since)}`);
+// Scheduled runs only, to match the rows being counted: comparing every run's tally against the unattended rows
+// would disagree by exactly the Owner's own promotions and look like a defect.
+const reported = await one(`SELECT COALESCE(SUM(promoted),0) AS n FROM research_promotion_runs WHERE started_at >= ${lit(since)} AND trigger = 'scheduled'`);
 check("integrity.counters_match_rows", reported === total,
-  `the promotion runs report ${reported} new leads; the leads table holds ${total}${reported === total ? " (agree)" : " — a counter and the rows disagree"}`);
+  `the scheduled runs report ${reported} new leads; the leads table holds ${total} promoted without a person${reported === total ? " (agree)" : " — a counter and the rows disagree"}`);
 
-const failed = await one(`SELECT COALESCE(SUM(failed),0) AS n FROM research_promotion_runs WHERE started_at >= ${lit(since)}`);
-const locked = await one(`SELECT COUNT(*) AS n FROM research_promotion_runs WHERE started_at >= ${lit(since)} AND stopped_reason = 'locked'`);
+const failed = await one(`SELECT COALESCE(SUM(failed),0) AS n FROM research_promotion_runs WHERE started_at >= ${lit(since)} AND trigger = 'scheduled'`);
+const locked = await one(`SELECT COUNT(*) AS n FROM research_promotion_runs WHERE started_at >= ${lit(since)} AND trigger = 'scheduled' AND stopped_reason = 'locked'`);
 const backlog = await one(`SELECT COUNT(*) AS n FROM research_prospects p, research_settings s WHERE s.id = 1
   AND p.status = 'qualified' AND p.qualified = 1 AND p.score >= s.qualify_threshold AND p.promote_attempts < 5
   AND (p.promote_next_at IS NULL OR p.promote_next_at <= ${lit(now.toISOString())})`);
@@ -161,8 +203,13 @@ const writesPerLead = total > 0 ? await (async () => {
     rowsPerLead: (a + c + ci + links + co + ld + ac + dec) / total };
 })() : null;
 
-const passed = checks.filter((c) => c.ok).length;
-const failedChecks = checks.length - passed;
+const passed = checks.filter((c) => c.outcome === "pass").length;
+const failures = checks.filter((c) => c.outcome === "fail");
+const blocked = checks.filter((c) => c.outcome === "blocked");
+// Certified means every check passed. A blocked check is not a pass, so a run that could not be supplied for an
+// hour reports NOT CERTIFIED and says which part was supply rather than throughput.
+const failedChecks = failures.length + blocked.length;
+const isCertified = certified(checks.map((c) => c.outcome));
 
 const lines = [
   `# Research → CRM import rate: staging certification`,
@@ -170,15 +217,17 @@ const lines = [
   `Window ${since} → ${now.toISOString()} (${MINUTES} min). Target ${TARGET} new leads/minute.`,
   `Counted from the CRM's own rows (leads.origin = 'research_agent'), not from the promoter's counters.`,
   ``,
-  `## Result: ${failedChecks === 0 ? "**CERTIFIED**" : `**NOT CERTIFIED** (${failedChecks} failed)`}`,
-  ...checks.map((c) => `- ${c.ok ? "✅" : "❌"} ${c.id} — ${c.detail}`),
+  `## Result: ${isCertified ? "**CERTIFIED**" : `**NOT CERTIFIED** — ${failures.length} failed, ${blocked.length} could not be attempted`}`,
+  ...checks.map((c) => `- ${c.outcome === "pass" ? "✅" : c.outcome === "blocked" ? "⚠️ could not be attempted" : "❌"} ${c.id} — ${c.detail}`),
+  ...(blocked.length ? ["", `**${blocked.length} check(s) could not be attempted.** That is not a throughput result in either direction: it means the conditions the check needs did not exist, which for this system almost always means eligible supply ran out. The throughput figures above still stand on their own.`] : []),
   ``,
   `## Rate`,
-  `- new CRM leads in the window: **${total}**`,
+  `- unattended new CRM leads in the window: **${total}** (${attendedLeads} more were promoted by a person and do not count)`,
   `- the target is judged over ${judged}${drainedAt ? ", because a drained backlog is the goal and a rate of zero with nothing left to do is not a shortfall" : ""}`,
   `- mean over those minutes: **${mean.toFixed(2)}/minute**, **${Math.round(mean * 60)}/hour**`,
   `- best single minute: **${best[1]}** (target ${TARGET})`,
-  `- minutes individually at or above target: ${atTarget} of ${workingMinutes}`,
+  `- minutes individually at or above target: ${sustained.atTarget} of ${workingMinutes}`,
+  `- best fully-supplied hour: ${hour.bestHour ? `${hour.bestHour.leads} leads from ${hour.bestHour.start}Z (target ${hour.needed})` : "none existed — see certification.full_hour"}`,
   `- scheduled runs: ${ticks.length} across ${distinctMinutes} distinct minutes; ${locked} skipped for overlap; ${failed} failed`,
   `- eligible and still waiting: ${backlog}`,
   ``,
@@ -201,12 +250,14 @@ const { join } = await import("node:path");
 mkdirSync(OUT, { recursive: true });
 writeFileSync(join(OUT, "research-promotion-certification.json"), JSON.stringify({
   windowStart: since, windowEnd: now.toISOString(), minutes: MINUTES, target: TARGET,
-  total, mean, workingMinutes, workingLeads, drainedAt, bestMinute: { minute: best[0], leads: best[1] }, minutesAtTarget: atTarget,
+  total, mean, workingMinutes, workingLeads, drainedAt, bestMinute: { minute: best[0], leads: best[1] }, minutesAtTarget: sustained.atTarget,
   scheduledRuns: ticks.length, distinctMinutes, locked, failed, backlog, reported, writesPerLead, checks,
-  certified: failedChecks === 0,
+  unattendedLeads: total, attendedLeads, allResearchLeads, ownerRunsInWindow, perWorkingMinute,
+  certified: isCertified, failed_checks: failures.map((c) => c.id), blocked_checks: blocked.map((c) => c.id),
 }, null, 2));
 writeFileSync(join(OUT, "research-promotion-certification.md"), `${text}\n`);
 if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
-for (const c of checks.filter((x) => !x.ok)) console.log(`::error title=Promotion certification ${c.id}::${c.detail}`);
-console.log(`::notice title=Promotion certification::${passed} passed, ${failedChecks} failed — ${total} new CRM leads, ${mean.toFixed(1)}/minute`);
+for (const c of failures) console.log(`::error title=Promotion certification ${c.id}::${c.detail}`);
+for (const c of blocked) console.log(`::warning title=Promotion certification ${c.id} could not be attempted::${c.detail}`);
+console.log(`::notice title=Promotion certification::${passed} passed, ${failures.length} failed, ${blocked.length} not attempted — ${total} unattended CRM leads, ${mean.toFixed(1)}/minute over ${workingMinutes} supplied minutes`);
 process.exit(failedChecks ? 1 : 0);

@@ -175,6 +175,7 @@ ${/* The import rate, counted from the CRM's own rows over a real clock window. 
 <h3 class="faint">Import rate (counted from the CRM, not from the promoter)</h3>
 ${dl([
     ["New leads in the last hour", html`<strong>${rate60.leads}</strong> <span class="faint">= ${rate60.perMinute.toFixed(1)}/minute (target ${TARGET_PER_MINUTE})</span>`],
+    ["of those, created unattended", html`${rate60.unattendedLeads} <span class="faint">= ${rate60.unattendedPerMinute.toFixed(1)}/minute by the schedule itself; the rest were promoted by a person and are not evidence the schedule is keeping up</span>`],
     ["New leads in the last 15 minutes", html`${rate15.leads} <span class="faint">= ${rate15.perMinute.toFixed(1)}/minute</span>`],
     ["The promoter's own count, last hour", html`${rate60.reported} <span class="faint">${rate60.reported === rate60.leads ? "agrees with the CRM" : "DOES NOT match the CRM row count — investigate"}</span>`],
     ["Runs in the last hour", html`${rate60.runs} <span class="faint">${rate60.locked} skipped because the previous run was still going</span>`],

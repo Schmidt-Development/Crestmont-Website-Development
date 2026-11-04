@@ -206,12 +206,30 @@ them so a disagreement is visible rather than invisible.
 |---|---|---|
 | Schedule | `*/15`, 11th of 12 jobs | **`* * * * *`, alone on its tick** |
 | Sequential D1 round trips per promotion | 11.7 | **5.6** |
-| Promotions in flight | 1 | **8** |
+| Promotions in flight | 1 | **4** |
 | Per invocation | 12-13 observed | **up to 100** |
 | Sustained rate | ~0.85/minute | measured in staging certification |
 
 Three things had to change together, and the schedule was the largest: a job that runs four times an hour cannot
 meet a per-minute target however fast each run is.
+
+### Why four in flight, and not more
+
+Two platform facts decide it, and neither is about this code:
+
+- a Worker invocation may hold at most **six simultaneous connections to D1**;
+- each D1 database is backed by a **single Durable Object and processes queries one at a time**, so queries issued
+  together against one database are serialized by the database itself.
+
+So concurrency here buys the overlap of the network legs, never parallel execution. And `evaluate()` already issues
+four of its reads together, so one promotion can hold four connections on its own and two in flight already
+saturate the cap. Modelled against a serialized database with a six-connection cap, throughput reaches its knee at
+four: 63/minute at concurrency 1, 109 at 2, 135 at 4, 134 at 6. Six remains the hard clamp because it is the
+platform's limit, not because it is faster.
+
+Those numbers are a **model** (`scripts/bench-research-promote.ts`), and their absolute values depend on an assumed
+split between wire time and service time that has not been measured on staging. They are used to choose the
+constant. They are never a rate. The rate is measured by the staging certification, from rows in the CRM.
 
 ### Why concurrency is safe here
 
@@ -259,9 +277,24 @@ elapsed. It is read-only: it promotes nothing and measures only what the schedul
 thing worth certifying.
 
 **A drained backlog is success, not a shortfall.** Once nothing is eligible the rate falls to whatever research
-delivers, so the certification splits the window where `remaining` hits zero and judges the target only over the
+delivers, so the certification splits the window where `remaining` hits zero and judges *throughput* only over the
 minutes when there was work. The ops alert works the same way: `promotion_below_target` needs both a rate under
 target and at least 250 eligible prospects waiting, so it can never fire because the system succeeded.
+
+Three distinctions the certification makes, because the easy version of each check passes a case it should not:
+
+- **Only unattended imports count.** A lead is evidence the schedule works only if the schedule created it.
+  `research_prospects.decided_by` holds the acting user's id and the scheduled run's actor has none, so
+  `decided_by IS NULL` is exactly the set nobody asked for. An Owner reconcile, a single-prospect Owner promotion,
+  and the promotions the staging deploy's own E2E performs all carry the Owner's id and are excluded from every rate.
+- **Sustained means minute by minute.** 300 leads in one minute and 59 idle minutes averages 5/minute; a check that
+  accepted the average would certify that. 90% of the working minutes must individually reach the target, and no
+  average can stand in for the rest.
+- **An hour is certified only from a supplied hour.** A 30-minute window at four times the target says the machine
+  is fast and says nothing about an hour. If the window was short, or supply ran out inside it, the hour check is
+  **blocked** — reported separately from a failure, because a shortened window carries no information about an hour
+  in either direction. A blocked check is never a pass, so such a run reads NOT CERTIFIED and states which part was
+  supply.
 
 ### Supply, not throughput, is the ceiling
 

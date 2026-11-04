@@ -36,13 +36,32 @@ const BACKOFF_MS = [15 * 60e3, 60 * 60e3, 4 * 3600e3, 16 * 3600e3];
 /** A run stops cleanly before the Worker's own limits bite; the next tick resumes where it stopped. */
 const DEFAULT_BUDGET_MS = 20_000;
 /**
- * How many promotions are in flight at once. A promotion is latency-bound, not CPU-bound: measured on the real code
- * path it walks about 5.6 D1 round trips in series, so one prospect spends most of its time waiting and several can
- * wait together. The ceiling is D1's 1,000 queries per Worker invocation (a batch counts as one), which at ~8.3
- * round trips per promotion is about 120 promotions per invocation whatever the concurrency.
+ * How many promotions are in flight at once.
+ *
+ * Six, because that is what the platform allows and nothing above it can help:
+ *
+ *  - A Worker invocation may hold at most **six simultaneous connections to D1**. A seventh in-flight query does not
+ *    go faster by being asked for; it waits.
+ *  - Each D1 database is backed by a **single Durable Object and processes queries one at a time**. Queries issued
+ *    together against one database are serialized by the database itself, so concurrency buys only the overlap of
+ *    the network legs — the request and response in flight — never parallel execution.
+ *
+ * Four, not six, because `evaluate()` already issues four of its reads together: one promotion can hold four
+ * connections on its own, so two in flight already saturate the cap. Modelled against a serialized database with a
+ * six-connection cap, throughput reaches its knee at four (63/min at concurrency 1, 109 at 2, 135 at 4, 134 at 6) —
+ * past that the extra promotions only lengthen the queue in front of a database that is serving one query at a time
+ * anyway. Six is kept as the hard clamp because it is the platform's limit, not because it is faster.
+ *
+ * Those figures are a MODEL (scripts/bench-research-promote.ts), and its absolute values depend on an assumed split
+ * between wire time and service time that has not been measured on staging. They are used to choose this constant,
+ * never to state a rate. The rate is measured by the staging certification, from rows in the CRM.
+ *
+ * The hard ceiling on a run remains D1's 1,000 queries per invocation (a batch counting as one), which at ~8.3 round
+ * trips per promotion is about 120 promotions, whatever the concurrency.
  */
-export const DEFAULT_CONCURRENCY = 8;
-export const MAX_CONCURRENCY = 24;
+export const DEFAULT_CONCURRENCY = 4;
+/** The platform's simultaneous-connection limit per invocation. Asking for more than this cannot increase throughput. */
+export const MAX_CONCURRENCY = 6;
 /**
  * D1 allows 1,000 queries per Worker invocation and refuses the 1,001st with "Too many API requests by single Worker
  * invocation" — a `batch()` counting as one however many statements it carries. A promotion issues about 8.3 of
@@ -399,6 +418,13 @@ export const MIN_BACKLOG_FOR_TARGET = TARGET_PER_MINUTE * 10;
 export interface ImportRate {
   /** Genuinely new CRM leads created in the window, counted from the leads table itself. */
   leads: number;
+  /**
+   * Of those, the ones the UNATTENDED schedule created. `decided_by` is the acting user's id and the scheduled
+   * run's actor has none, so a NULL marks a promotion nobody asked for. Only these are evidence that the schedule
+   * works on its own, which is why the certification counts only them.
+   */
+  unattendedLeads: number;
+  unattendedPerMinute: number;
   /** Per minute and per hour, derived from the real row count over the real window. */
   perMinute: number;
   perHour: number;
@@ -431,8 +457,10 @@ export interface ImportRate {
  */
 export async function importRate(db: Db, minutes: number, now = new Date()): Promise<ImportRate> {
   const since = new Date(now.getTime() - minutes * 60_000).toISOString();
-  const [leadRow, runRow, backlog] = await Promise.all([
+  const [leadRow, unattendedRow, runRow, backlog] = await Promise.all([
     db.prepare(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent' AND created_at >= ?`).bind(since).first<{ n: number }>(),
+    db.prepare(`SELECT COUNT(*) AS n FROM leads l JOIN research_prospects p ON p.crm_lead_id = l.id
+      WHERE l.origin = 'research_agent' AND l.created_at >= ? AND p.status = 'promoted' AND p.decided_by IS NULL`).bind(since).first<{ n: number }>(),
     db.prepare(`SELECT COUNT(*) AS runs, COALESCE(SUM(promoted),0) AS reported, COALESCE(SUM(failed),0) AS failed,
         COALESCE(SUM(deferred_identity),0) AS deferred, COALESCE(MAX(duration_ms),0) AS slowest,
         COALESCE(AVG(duration_ms),0) AS mean, COALESCE(SUM(CASE WHEN stopped_reason = 'locked' THEN 1 ELSE 0 END),0) AS locked
@@ -441,9 +469,11 @@ export async function importRate(db: Db, minutes: number, now = new Date()): Pro
   ]);
   const retriedRow = await db.prepare(`SELECT COUNT(*) AS n FROM research_prospects WHERE promote_attempts > 0 AND status = 'qualified'`).first<{ n: number }>();
   const leads = Number(leadRow?.n ?? 0);
+  const unattendedLeads = Number(unattendedRow?.n ?? 0);
   const perMinute = minutes > 0 ? leads / minutes : 0;
   return {
-    leads, perMinute, perHour: perMinute * 60, minutes,
+    leads, unattendedLeads, unattendedPerMinute: minutes > 0 ? unattendedLeads / minutes : 0,
+    perMinute, perHour: perMinute * 60, minutes,
     runs: Number(runRow?.runs ?? 0), locked: Number(runRow?.locked ?? 0),
     reported: Number(runRow?.reported ?? 0), failed: Number(runRow?.failed ?? 0), retried: Number(retriedRow?.n ?? 0),
     deferredIdentity: Number(runRow?.deferred ?? 0),

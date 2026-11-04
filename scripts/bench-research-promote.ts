@@ -18,19 +18,60 @@ import type { ProspectInput } from "../src/domain/research.ts";
 
 const arg = (k: string, d: number) => { const i = process.argv.indexOf(k); return i > 0 ? Number(process.argv[i + 1]) : d; };
 const total = arg("--prospects", 200);
+// A D1 round trip splits into wire time, which overlaps between queries, and service time inside the
+// single-threaded database, which does not. `--latency` is accepted as the sum of the two for older invocations.
 const latencyMs = arg("--latency", 60);
+const serviceMs = arg("--service", Math.round(latencyMs / 3));
+const rttMs = arg("--rtt", latencyMs - serviceMs);
+const CONNECTIONS = arg("--connections", 6);       // the platform's simultaneous-connection limit per invocation
 const budgetMs = arg("--budget", 20_000);
-const concurrency = arg("--concurrency", 8);
+const concurrency = arg("--concurrency", 6);
 
 const base = openDb();
 let statements = 0;      // every statement sent, including each one inside a batch (D1 row-write billing)
 let roundTrips = 0;      // every await that crosses the wire; a batch is ONE round trip however many statements
 // Counting round trips is not enough: two reads issued together cost one wait, not two, so a total count cannot tell
-// a serial chain from a parallel one. So the wrapper WAITS --latency on every round trip, exactly as a D1 binding
-// would, and the wall clock then measures the real critical path including any parallelism and concurrency. The
-// measured depth below is wall time / latency, which is the number that decides how many fit in a run's budget.
+// a serial chain from a parallel one. The wrapper therefore WAITS on every round trip — but it has to wait the way
+// D1 actually behaves, not the way a parallel database would, or the model flatters concurrency and the numbers
+// mean nothing:
+//
+//   - a Worker invocation may hold at most SIX simultaneous connections to D1, so a seventh query waits for a slot;
+//   - each D1 database is a single Durable Object and PROCESSES QUERIES ONE AT A TIME, so queries issued together
+//     are serialized by the database itself.
+//
+// So a query takes a connection slot, spends --rtt on the wire (which overlaps with other queries' wire time),
+// then queues for the single-threaded database and spends --service there (which overlaps with nothing). Throughput
+// is therefore bounded by the service time, and concurrency buys only the overlap of the wire legs. An earlier
+// version of this script waited --latency with no connection cap and no database lock, which modelled a database
+// that serves six queries at once; its concurrency figures described a machine that does not exist.
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-const trip = async <T>(f: () => Promise<T>): Promise<T> => { roundTrips++; if (latencyMs > 0) await sleep(latencyMs); return f(); };
+
+/** The single-threaded database: one query at a time, in arrival order. */
+let dbQueue: Promise<void> = Promise.resolve();
+const serialized = <T>(f: () => Promise<T>): Promise<T> => {
+  const run = dbQueue.then(() => (serviceMs > 0 ? sleep(serviceMs) : Promise.resolve()));
+  dbQueue = run.then(() => undefined, () => undefined);
+  return run.then(f);
+};
+
+/** The six-connection cap, as a semaphore. */
+let free = CONNECTIONS;
+const waiting: (() => void)[] = [];
+const takeSlot = (): Promise<void> => (free > 0 ? (free--, Promise.resolve()) : new Promise<void>((r) => waiting.push(r)));
+const giveSlot = () => { const next = waiting.shift(); if (next) next(); else free++; };
+
+let peakInFlight = 0, inFlight = 0;
+const trip = async <T>(f: () => Promise<T>): Promise<T> => {
+  roundTrips++;
+  await takeSlot();
+  inFlight++; peakInFlight = Math.max(peakInFlight, inFlight);
+  try {
+    if (rttMs > 0) await sleep(rttMs / 2);          // request on the wire
+    const out = await serialized(f);                // queued behind the single-threaded database
+    if (rttMs > 0) await sleep(rttMs / 2);          // response on the wire
+    return out;
+  } finally { inFlight--; giveSlot(); }
+};
 const db: Db = {
   prepare: (sql) => {
     const wrap = (r: DbStatement): DbStatement => Object.assign(Object.create(Object.getPrototypeOf(r)), r, {
@@ -83,16 +124,20 @@ const doubled = (await base.prepare(`SELECT COUNT(*) AS n FROM (SELECT crm_lead_
 const perProspect = r.promoted ? roundTrips / r.promoted : 0;
 const stmtsPer = r.promoted ? statements / r.promoted : 0;
 const msPerProspect = r.promoted ? ms / r.promoted : 0;
-// Critical path, in round trips, as actually walked: wall clock / injected latency. Lower than the round-trip count
-// whenever reads were issued together or prospects ran concurrently.
-const depth = latencyMs > 0 ? ms / latencyMs : 0;
+const unit = rttMs + serviceMs;
+// Critical path, in round-trip equivalents, as actually walked.
+const depth = unit > 0 ? ms / unit : 0;
 const depthPerProspect = r.promoted ? depth / r.promoted : 0;
 const perMinute = msPerProspect ? 60_000 / msPerProspect : 0;
+// The floor the single-threaded database imposes on its own: every statement must pass through it in turn, so no
+// amount of concurrency can beat this.
+const serviceFloorMs = r.promoted ? (statements * serviceMs) / r.promoted : 0;
+const serviceFloorPerMinute = serviceFloorMs > 0 ? 60_000 / serviceFloorMs : 0;
 
 const out = [
-  `# Research → CRM promotion benchmark (node:sqlite; NOT a D1 throughput figure)`,
+  `# Research → CRM promotion model (node:sqlite with D1 behaviour simulated; NOT a measurement)`,
   ``,
-  `Seeded ${total} prospects, ${eligible} eligible. Budget ${budgetMs} ms, concurrency ${concurrency}.`,
+  `Seeded ${total} prospects, ${eligible} eligible. Budget ${budgetMs} ms, concurrency ${concurrency}, connection cap ${CONNECTIONS}.`,
   ``,
   `## What the promoter did`,
   `- examined ${r.examined}, promoted ${r.promoted}, existing ${r.existingCrm}, review ${r.review}, suppressed ${r.suppressed}, rejected ${r.rejected}, failed ${r.failed}`,
@@ -100,14 +145,20 @@ const out = [
   `- CRM leads with origin research_agent: ${leads} (in stage new: ${inNew}; with research attribution and an intake decision: ${attributed})`,
   `- leads claimed as new by more than one prospect: ${doubled} (must be 0)`,
   ``,
-  `## Cost per promoted prospect, at ${latencyMs} ms injected per D1 round trip`,
-  `- round trips issued: ${perProspect.toFixed(1)}  ·  statements: ${stmtsPer.toFixed(1)} (D1 bills rows read and written)`,
-  `- **critical path actually walked: ${depthPerProspect.toFixed(1)} round trips per prospect** (${Math.round(msPerProspect)} ms each)`,
-  `- total: ${Math.round(ms)} ms for ${r.promoted} promotions, a critical path of ${depth.toFixed(1)} round trips`,
+  `## MODEL, not a measurement`,
+  `This runs on node:sqlite with D1's behaviour simulated: ${rttMs} ms of wire time per round trip (which overlaps`,
+  `between queries), ${serviceMs} ms inside a database that serves ONE query at a time, and at most ${CONNECTIONS}`,
+  `simultaneous connections. Every figure below is therefore a model. The only measurement of the real rate is the`,
+  `staging certification (scripts/research-promotion-certify.ts), which counts rows in the CRM.`,
   ``,
-  `## Throughput`,
-  `- **${perMinute.toFixed(1)} new leads/minute** sustained at this latency and concurrency`,
-  `- 25/minute needs ${(25 / Math.max(perMinute, 0.001)).toFixed(2)}× this`,
+  `## Cost per promoted prospect`,
+  `- round trips issued: ${perProspect.toFixed(1)}  ·  statements: ${stmtsPer.toFixed(1)} (D1 bills rows read and written)`,
+  `- critical path walked: ${depthPerProspect.toFixed(1)} round-trip equivalents per prospect (${Math.round(msPerProspect)} ms each)`,
+  `- peak connections in flight: ${peakInFlight} of ${CONNECTIONS} allowed`,
+  ``,
+  `## Modelled throughput`,
+  `- ${perMinute.toFixed(1)} new leads/minute at concurrency ${concurrency}`,
+  `- the single-threaded database's own floor: **${serviceFloorPerMinute.toFixed(1)}/minute** (${stmtsPer.toFixed(1)} statements x ${serviceMs} ms each, which no concurrency can beat)`,
   `- a ${budgetMs} ms run budget fits about ${Math.floor(budgetMs / Math.max(msPerProspect, 1))} prospects`,
   `- D1 allows 1,000 queries per invocation, so at ${perProspect.toFixed(1)} round trips the ceiling is ${Math.floor(1000 / Math.max(perProspect, 0.001))} prospects in one invocation`,
 ];
