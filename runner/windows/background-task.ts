@@ -6,10 +6,36 @@
 // the Windows PowerShell 5.1 job). The PowerShell side is what actually runs on the build machine; this file
 // exists so the policy can be tested without Windows.
 
-/** Quotes one argument for a Windows command line (mirrors Get-CrestmontQuotedArgument). */
+/**
+ * Quotes one argument for a Windows command line (mirrors Get-CrestmontQuotedArgument).
+ *
+ * These are the CommandLineToArgvW rules, which CreateProcess and therefore both consumers here - the scheduled
+ * task's -Argument string and the command line the launcher hands to WshShell.Run - parse by. Escaping only the
+ * quotes is not enough: inside a quoted argument a run of backslashes that meets a quote is itself an escape, so
+ * a Windows path ending in a backslash ("C:\Crestmont Runner\") would have its trailing backslash escape the
+ * CLOSING quote and swallow the next argument. Each run of backslashes that precedes a quote - including the
+ * closing one - is therefore doubled, and each embedded quote is escaped after that doubling.
+ */
 export function quoteArgument(value: string): string {
   if (value.length > 0 && !/[\s"]/.test(value)) return value;
-  return `"${value.replace(/"/g, '\\"')}"`;
+  let out = '"';
+  let i = 0;
+  while (i < value.length) {
+    let slashes = 0;
+    while (i < value.length && value[i] === "\\") {
+      slashes++;
+      i++;
+    }
+    if (i >= value.length) {
+      // Backslashes right before the closing quote: double them so they stay literal.
+      out += "\\".repeat(slashes * 2);
+      break;
+    }
+    if (value[i] === '"') out += "\\".repeat(slashes * 2 + 1) + '"';
+    else out += "\\".repeat(slashes) + value[i];
+    i++;
+  }
+  return out + '"';
 }
 
 /** Arguments that run a PowerShell script non-interactively, no profile, no window (Get-CrestmontHiddenArgument). */

@@ -94,10 +94,36 @@ function Write-CrestmontHiddenShim {
 }
 
 function Get-CrestmontQuotedArgument {
-  <# .SYNOPSIS Quotes one command-line argument for a Windows command line. #>
+  <#
+  .SYNOPSIS
+    Quotes one command-line argument for a Windows command line, by the CommandLineToArgvW rules.
+  .DESCRIPTION
+    Both consumers here - the scheduled task's -Argument string, and the command line the launcher hands to
+    WshShell.Run - end up in CreateProcess, which parses by those rules. Escaping only the quotes is not enough:
+    inside a quoted argument a run of backslashes that meets a quote is itself an escape, so a Windows path ending
+    in a backslash ("C:\Crestmont Runner\") would have its trailing backslash escape the CLOSING quote and swallow
+    whatever came after it. Each run of backslashes that precedes a quote - including the closing one - is therefore
+    doubled, and each embedded quote escaped after that doubling. Mirrored by background-task.ts (quoteArgument).
+  #>
   param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
   if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') { return $Value }
-  return '"' + ($Value -replace '"', '\"') + '"'
+  $out = New-Object System.Text.StringBuilder
+  [void]$out.Append('"')
+  $i = 0
+  while ($i -lt $Value.Length) {
+    $slashes = 0
+    while ($i -lt $Value.Length -and $Value[$i] -eq [char]'\') { $slashes++; $i++ }
+    if ($i -ge $Value.Length) {
+      # Backslashes right before the closing quote: double them so they stay literal.
+      [void]$out.Append('\' * ($slashes * 2))
+      break
+    }
+    if ($Value[$i] -eq [char]'"') { [void]$out.Append('\' * ($slashes * 2 + 1)); [void]$out.Append('"') }
+    else { [void]$out.Append('\' * $slashes); [void]$out.Append($Value[$i]) }
+    $i++
+  }
+  [void]$out.Append('"')
+  return $out.ToString()
 }
 
 function Get-CrestmontHiddenArgument {

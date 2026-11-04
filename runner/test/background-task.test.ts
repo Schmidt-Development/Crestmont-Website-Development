@@ -57,13 +57,37 @@ test("[AIB-RUNNER] restart budget bounds retries over a rolling window and ages 
   assert.throws(() => restartBudget([], now, 0, 60), /maxRestarts/);
 });
 
+// A template literal cannot end in a backslash, so the backslash and quote characters are named. These are the
+// CommandLineToArgvW rules; expectations are written out by hand, not derived from the implementation.
+const BS = "\\";
+const Q = '"';
+const QUOTE_CASES: { value: string; expected: string; note: string }[] = [
+  { value: "plain", expected: "plain", note: "nothing to quote" },
+  { value: "", expected: `${Q}${Q}`, note: "an empty argument still has to occupy a slot" },
+  { value: `C:${BS}Program Files${BS}x.ps1`, expected: `${Q}C:${BS}Program Files${BS}x.ps1${Q}`, note: "a space means quotes; these backslashes meet no quote" },
+  { value: `say ${Q}hi${Q}`, expected: `${Q}say ${BS}${Q}hi${BS}${Q}${Q}`, note: "embedded quotes are escaped" },
+  { value: `C:${BS}Crestmont Runner${BS}`, expected: `${Q}C:${BS}Crestmont Runner${BS}${BS}${Q}`, note: "THE BUG: a trailing backslash would escape the closing quote, so it is doubled" },
+  { value: `C:${BS}a b${BS}${BS}`, expected: `${Q}C:${BS}a b${BS}${BS}${BS}${BS}${Q}`, note: "a run of two becomes four" },
+  { value: `a${BS}${Q}b`, expected: `${Q}a${BS}${BS}${BS}${Q}b${Q}`, note: "a backslash before an embedded quote: doubled, then the quote escaped" },
+  { value: `C:${BS}no-space${BS}`, expected: `C:${BS}no-space${BS}`, note: "unquoted, so a trailing backslash is already literal" },
+];
+
 test("[AIB-RUNNER] windowless command line: arguments are quoted and the host is never interactive", () => {
-  assert.equal(quoteArgument("plain"), "plain");
-  assert.equal(quoteArgument(""), '""');
-  assert.equal(quoteArgument(String.raw`C:\Program Files\x.ps1`), String.raw`"C:\Program Files\x.ps1"`);
-  assert.equal(quoteArgument('say "hi"'), String.raw`"say \"hi\""`);
-  const arg = hiddenArgument(String.raw`C:\CrestmontRunner\Write-GpuTelemetry.ps1`, ["-InstallDir", String.raw`C:\Crestmont Runner`]);
-  assert.equal(arg, String.raw`-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\CrestmontRunner\Write-GpuTelemetry.ps1 -InstallDir "C:\Crestmont Runner"`);
+  for (const c of QUOTE_CASES) assert.equal(quoteArgument(c.value), c.expected, `${JSON.stringify(c.value)}: ${c.note}`);
+
+  // The property the escaping exists for: a quoted argument's closing quote must never itself be escaped, which it
+  // is whenever an ODD run of backslashes precedes it. Before the fix, every path ending in a backslash did that
+  // and swallowed the argument that followed.
+  for (const c of QUOTE_CASES) {
+    const q = quoteArgument(c.value);
+    if (!q.startsWith(Q)) continue;
+    assert.ok(q.endsWith(Q) && q.length >= 2, `${c.value} -> ${q}`);
+    const run = /(\\*)"$/.exec(q)![1].length;
+    assert.equal(run % 2, 0, `${JSON.stringify(c.value)} -> ${q}: an odd run of backslashes escapes the closing quote`);
+  }
+
+  const arg = hiddenArgument(`C:${BS}CrestmontRunner${BS}Write-GpuTelemetry.ps1`, ["-InstallDir", `C:${BS}Crestmont Runner`]);
+  assert.equal(arg, `-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File C:${BS}CrestmontRunner${BS}Write-GpuTelemetry.ps1 -InstallDir ${Q}C:${BS}Crestmont Runner${Q}`);
   assert.match(arg, /-NonInteractive/, "a background job must never wait for input it cannot receive");
 });
 
@@ -362,6 +386,9 @@ test("[AIB-RUNNER] nothing new is launched or scheduled: only the two existing r
   assert.match(read("Repair-WindowsAutomation.ps1"), /\$supersededTasks = @\("CrestmontRunner-Watchdog"\)/, "and the repair script reports an orphan");
 });
 
+/** A PowerShell single-quoted literal: backslashes are literal there, only the quote needs doubling. */
+const psLiteral = (v: string): string => `'${v.replaceAll("'", "''")}'`;
+
 /** pwsh on PATH, or PWSH=<path> (CI sets PWSH=powershell for Windows PowerShell 5.1); null when not installed. */
 function findPwsh(): string | null {
   for (const c of [process.env.PWSH, "pwsh"].filter(Boolean) as string[]) {
@@ -382,7 +409,7 @@ test("[AIB-RUNNER] BackgroundTask.ps1 retry policy and quoting match background-
     `. '${path.join(WIN, "BackgroundTask.ps1").replaceAll("'", "''")}'`,
     // Jitter off, so the comparison is exact; the jittered form is the same number plus noise.
     "$delays = @(1, 2, 3, 4, 5, 6, 7, 8 | ForEach-Object { Get-CrestmontBackoffDelay -Attempt $_ -JitterPercent 0 })",
-    "$quoted = @('plain', '', 'C:\\Program Files\\x.ps1', 'say \"hi\"' | ForEach-Object { Get-CrestmontQuotedArgument $_ })",
+    `$quoted = @(${QUOTE_CASES.map((c) => psLiteral(c.value)).join(", ")} | ForEach-Object { Get-CrestmontQuotedArgument $_ })`,
     "$argline = Get-CrestmontHiddenArgument -ScriptPath 'C:\\CrestmontRunner\\Write-GpuTelemetry.ps1' -ScriptArgument @('-InstallDir', 'C:\\Crestmont Runner')",
     // Four restarts against a budget of three: the fourth must be refused.
     "$budget = @(1, 2, 3, 4 | ForEach-Object { [bool](Test-CrestmontRestartBudget -StateFile $BudgetFile -MaxRestarts 3 -WindowMinutes 60) })",
@@ -395,7 +422,7 @@ test("[AIB-RUNNER] BackgroundTask.ps1 retry policy and quoting match background-
   const ps = JSON.parse(readText(outFile).replace(/^\uFEFF/, "")) as { delays: number[]; quoted: string[]; argline: string; budget: boolean[] };
 
   assert.deepEqual(ps.delays, [1, 2, 3, 4, 5, 6, 7, 8].map((a) => backoffDelaySeconds(a)));
-  assert.deepEqual(ps.quoted, ["plain", "", String.raw`C:\Program Files\x.ps1`, 'say "hi"'].map(quoteArgument));
+  assert.deepEqual(ps.quoted, QUOTE_CASES.map((c) => c.expected), "PowerShell quotes every case exactly as documented");
   assert.equal(ps.argline, hiddenArgument(String.raw`C:\CrestmontRunner\Write-GpuTelemetry.ps1`, ["-InstallDir", String.raw`C:\Crestmont Runner`]));
   assert.deepEqual(ps.budget, [true, true, true, false], "the fourth restart in the window is refused");
 
