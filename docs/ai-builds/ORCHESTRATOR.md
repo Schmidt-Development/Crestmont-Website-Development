@@ -346,3 +346,89 @@ Run in an elevated PowerShell on Node 1, from a checkout of this branch (for exa
 | Previews (Cloudflare preview account), project repositories | Founder setup (unchanged) | PREVIEW-DEPLOYMENT.md, RUNNER-SETUP.md | Founder |
 | Merge of PR #16 / migrations to staging | not authorized | Founder decision | Founder |
 | Production customer delivery | framework only (D5) | after acceptance; Owner authorization per release | Founder |
+
+## 16. Execution efficiency and the planning gate (2026-11-04)
+
+Added after the first Design-First V3 build, `bld_e65768e6b0853a425095a1f6`. That build spent **567 model calls,
+16,358,132 input tokens and 106 context resets across three continuation segments** and produced **no screenshot, no
+stored revision and no design score** (0 rows in `build_revisions`, `build_cycles` and `build_quality`). It wrote all
+six required pages and passed its own gates, so the failure was not the model's coding: it was the orchestration
+around it. Four causes, each fixed and tested.
+
+### A. Context recovery no longer re-reads the repository
+
+The reset message used to end with *"re-read the files you need (BRIEF.json, SPEC.json, .crestmont/plan.md, … and the
+source files you were working on)"*. The model obeyed it, re-read unchanged pages, refilled the window and reset
+again. Three things changed, in `runner/src/providers/local.ts` and the new `runner/src/providers/work-ledger.ts`:
+
+- A **work ledger** records what the runner observed: files read and written with their sha256 at the time, commands
+  and whether they succeeded, completed work, open problems, and resets per phase. A reset now restates those facts
+  as a **progress manifest** and tells the model explicitly *not* to re-read files it has already seen that are
+  byte-identical on disk. Files that have changed since are listed separately as worth re-reading. The manifest is
+  runner-written fact, never a model summary, and it travels with the transcript into every checkpoint.
+- The **tail budget rose from 30% to 50%** of the usable window: keeping only 30% discarded the work the model had
+  just done, which is the other half of the rediscovery loop.
+- Tool results in **one assistant turn now share a budget** of a quarter of the window (per-result cap 10,000
+  characters). Four parallel `read_file` calls at the old 16,000-character cap put ~18,000 tokens — 37% of a
+  49,152-token window — into the context in a single turn. Clipping is explicit and says how to request the rest.
+
+**Thrash is bounded, but only when it is unproductive.** `thrashVerdict` counts resets *since the last observed
+progress* (a file written, a command that succeeded, completed work recorded) — never the raw total. A long task that
+writes a file between resets is continuity working as designed and is never interrupted; the 10M-token continuity
+guarantee is unchanged and still tested. A phase that resets `DEFAULT_THRASH.stopAt` times with nothing achieved
+between them ends with a diagnosis instead of resetting again.
+
+### B. The first preview is captured early
+
+The browser check, the snapshot and the review all sat inside an acceptance block guarded by
+`!stop.reason && !st.localLimit`. The platform's 200-turn limit tripped first in all three segments, so none of it
+ran. The browser check and the snapshot cost **no model turns**, so they now run straight after the build phase, as
+soon as `public/index.html` exists — before the full acceptance suite and even when the turn budget is spent. The
+Founder gets revision 0 of an unfinished site while generation continues. `snapshot()` also retries once, and a
+snapshot that cannot be stored now says so on the build instead of only in a runner log.
+
+### C. The scheduler is phase-aware
+
+The runner executed plan → build → verify in every phase, so a design-phase build spent its turns verifying a backend
+that is deliberately deferred. The work is now chosen from the phase the **platform** reported (`job.phase`):
+`design`/`design_locked` schedule the build only, `final_qa` verifies only, everything else keeps build + verify. It
+keys on the reported phase, not the local default, so a platform that sends no phase — and any customer revision —
+keeps the original sequence unchanged. The platform remains authoritative for transitions; the runner only chooses
+what to schedule inside the phase it was given.
+
+### D. Planning is staged, validated, and a hard gate
+
+`MASTER_SPEC_JSON_SCHEMA` required thirteen top-level fields in one JSON object, including `masterPrompt` ("the
+complete implementation prompt … step by step, file by file"), from a reasoning model whose thinking tokens share one
+8,192-token output budget with its answer. The reply truncated, `extractJson` sliced to the last `}` (an inner
+brace), `JSON.parse` threw, and the throw became a session note that reached no queryable column. `spec = raw as
+MasterSpec` then meant `null` and any stray JSON passed through as a specification.
+
+- **Stage 1** asks only for the design: `DESIGN_SPEC_JSON_SCHEMA`, six required fields (sitemap and page structure,
+  brand and design system, imagery plan, responsive expectations, the four-way `phasePlan`, and measurable
+  acceptance criteria). It fits the output budget.
+- **`validateDesignSpec`** checks every required field and completes the implementation-only fields with
+  deterministic defaults, so there is still exactly one `MasterSpec` downstream. Empty arrays are truthful ("not
+  planned yet"); nothing is fabricated. `masterPrompt` is derived from the architect's own plan and carries the
+  site-specific deliverables and an explicit DEFERRED list.
+- Up to **three bounded attempts**, each retry carrying the previous attempt's specific problems.
+- If none validates the build **fails before a single implementation turn**, with a diagnosis naming the model and
+  the setting to change. Every failure is reported on the build, not only in a session note.
+
+### Review budgets are phase-aware
+
+`src/services/build-pipeline.ts`: the eight review cycles were one pool, so a design phase that could not reach 40/40
+could spend every cycle before functionality began. Each phase now also has its own bound
+(`PHASE_CYCLE_SHARE`: design 50%, functionality 37.5%, final QA 25%, minimum 3). The shares sum to more than the
+total deliberately — this limits how much **one** phase may take without handing out extra cycles. The overall cap
+and the repeat and stall guards are unchanged, and the phase budget applies only on the weighted track: a legacy v1
+build has no phases and keeps its original single pool.
+
+### What these tests do and do not prove
+
+`runner/test/context-efficiency.test.ts`, `runner/test/planning.test.ts` and the `[AIB-PHASE]` additions in
+`tests/build-phase-progression.test.ts` are deterministic mock tests against a fake OpenAI-compatible server. They
+prove the runner's bookkeeping, contracts and scheduling. They are **not** GPU evidence: whether `qwen3.8:27b`
+actually returns a valid `DESIGN_SPEC_JSON_SCHEMA` object, and whether the builder can reach 40/40, can only be
+established by a real build. The benchmark in `context-efficiency.test.ts` compares the old and new per-turn
+character budgets arithmetically and is labelled as such — it is not a measured GPU saving.

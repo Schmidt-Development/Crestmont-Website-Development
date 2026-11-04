@@ -511,3 +511,56 @@ test("[PHASES] a safety finding closes every gate, whatever the scores are", asy
   });
   assert.equal(ok.designFrozen, true);
 });
+
+// ── Phase-aware review budgets ────────────────────────────────────────────────────────────────────────────────────
+//
+// The eight review cycles used to be one pool shared by design, functionality and final QA. A design phase that
+// could not reach 40/40 could spend every cycle before the backend phase began at all, which is exactly the shape
+// of the first Design-First V3 run: three segments in the design phase and nothing left for anything else. Each
+// phase now has its own bound as well as the overall one. Nothing here is unlimited, and the overall cap still
+// binds: the shares deliberately sum to more than the total.
+
+test("[AIB-PHASE] the design phase cannot spend every review cycle: its own budget escalates first, names the phase, and leaves the overall limit intact", async () => {
+  const w = await world();
+  // A design that keeps improving slightly, so neither the repeat guard nor the stall guard is what stops it.
+  let n = 0;
+  const results: { cycle: number; decision: string; reason: string }[] = [];
+  for (const design of [10, 14, 18, 22, 26, 30]) {
+    n++;
+    const r = await w.cycle(n, weighted({ phase: "design", design, functional: "fail", other: "fail", revision: `1-${n}` }));
+    results.push({ cycle: n, decision: String(r.decision), reason: String(r.reason ?? "") });
+    if (r.decision === "ESCALATED") break;
+  }
+  const escalated = results.find((r) => r.decision === "ESCALATED");
+  assert.ok(escalated, `the design phase is bounded (${JSON.stringify(results)})`);
+  assert.match(escalated!.reason, /phase's limit of \d+ review cycles in design/, "the reason names the phase and its own limit");
+  assert.match(escalated!.reason, /8 overall/, "and states the overall limit it did not reach");
+  // It stopped BEFORE the overall limit, which is the whole point: cycles remain for the later phases.
+  assert.ok(escalated!.cycle < 8, `it escalated at cycle ${escalated!.cycle}, before the overall limit of 8`);
+  assert.ok(escalated!.cycle >= 4, `but the design phase still got a workable budget (${escalated!.cycle} cycles)`);
+});
+
+test("[AIB-PHASE] a legacy build that reports no weighted card keeps its original single pool: the phase budget does not apply to it", async () => {
+  const w = await world();
+  // No `quality` payload at all: the v1 contract. These builds are bounded by the overall limit and the repeat and
+  // stall guards exactly as before, and must not be escalated early by a phase budget they have no phases for.
+  const seen: { decision: string; reason: string }[] = [];
+  for (let n = 1; n <= 5; n++) {
+    const r = await PL.submitCycle(w.t.db, w.jobRow, {
+      cycle: n, prompt: `legacy cycle ${n}`, promptSource: "reviewer", reviewerProvider: "local:model-a",
+      decision: "FIX_DEFECTS", nextPrompt: "next", addresses: [`criterion:ac-${n}`],
+      evidence: { ...EVIDENCE(false), defects: [`distinct defect ${n}`], criteria: [{ id: `ac-${n}`, status: "not_verified" }] },
+    });
+    seen.push({ decision: String(r.decision), reason: String(r.reason ?? "") });
+    if (r.decision === "ESCALATED") break;
+  }
+  // A legacy build may still be escalated -- by the overall limit, the repeat guard or the stall guard, all of
+  // which predate this change and are unaltered. What it must NEVER be escalated by is a phase budget, because it
+  // reports no weighted card and has no phases for one to apply to.
+  for (const s of seen) {
+    assert.doesNotMatch(s.reason, /phase's limit of/, `a legacy build is never escalated by a phase budget (got: ${s.reason})`);
+  }
+  // Prove whatever did stop it is one of the pre-existing guards, so this test cannot pass vacuously.
+  const stopped = seen.find((s) => s.decision === "ESCALATED");
+  if (stopped) assert.match(stopped.reason, /No measurable progress|same failures repeated|limit of \d+ review cycles$/, `stopped by a pre-existing guard (${stopped.reason})`);
+});

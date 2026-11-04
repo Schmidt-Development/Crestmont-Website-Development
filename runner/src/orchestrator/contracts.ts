@@ -111,6 +111,132 @@ export const MASTER_SPEC_JSON_SCHEMA = {
   },
 } as const;
 
+/**
+ * STAGE 1 of planning: the minimum valid DESIGN specification.
+ *
+ * Why this exists. MASTER_SPEC_JSON_SCHEMA requires thirteen top-level fields in one JSON object, including
+ * `masterPrompt` ("the complete implementation prompt ... concrete, step by step, file by file") and a full task
+ * list. Model A is a reasoning model whose thinking tokens share one 8,192-token output budget with that object.
+ * On bld_e65768e6b0853a425095a1f6 the reply truncated every time; extractJson then sliced to the last "}" -- an
+ * inner brace -- JSON.parse threw, the throw became a note nobody could read, and the build carried on with no
+ * specification at all, re-running the architect once per segment and burning Model A's turns each time.
+ *
+ * So planning is staged. Stage 1 asks only for what the DESIGN phase actually needs and nothing the design phase
+ * cannot use: the sitemap and page structure, the brand and design system, the imagery plan, the visual
+ * components, responsive expectations, frontend interaction states, the deliberately deferred backend, and
+ * measurable design acceptance criteria. That fits the output budget. The implementation-only fields are filled
+ * with deterministic defaults by validateDesignSpec and may be enriched later, so there is exactly ONE spec type
+ * downstream and nothing else in the pipeline has to change.
+ */
+export const DESIGN_SPEC_JSON_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["schema", "projectSpec", "designSpec", "phasePlan", "acceptanceCriteria", "assumptions"],
+  properties: {
+    schema: { type: "string", enum: [SPEC_SCHEMA] },
+    projectSpec: { type: "string", description: "What this website is, for whom, and the primary conversion goal." },
+    designSpec: { type: "string", description: "The sitemap and page structure, the brand and design system (type scale, colour roles, spacing rhythm), the imagery plan naming where each image comes from, and responsive expectations at desktop, tablet and mobile." },
+    phasePlan: MASTER_SPEC_JSON_SCHEMA.properties.phasePlan,
+    acceptanceCriteria: MASTER_SPEC_JSON_SCHEMA.properties.acceptanceCriteria,
+    assumptions: { type: "array", items: { type: "string" } },
+    referenceImages: MASTER_SPEC_JSON_SCHEMA.properties.referenceImages,
+  },
+} as const;
+
+/** What validateDesignSpec concluded: a usable spec, or the specific reasons it is not usable. */
+export interface SpecValidation {
+  ok: boolean;
+  spec: MasterSpec | null;
+  problems: string[];
+}
+
+const strArray = (v: unknown, max = 60): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.trim() !== "").slice(0, max) : [];
+
+/**
+ * Validate a stage-1 architect reply and complete it into a MasterSpec.
+ *
+ * This is the validator the runner never had: `spec = raw as MasterSpec` was a blind cast, so an object that was
+ * merely JSON -- or `null` -- passed straight through and the build proceeded as though architecture had
+ * succeeded. Every required design field is checked here, and `problems` is fed back to the model on the
+ * corrective retry and recorded on the build when planning finally fails.
+ */
+export function validateDesignSpec(raw: unknown): SpecValidation {
+  const problems: string[] = [];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, spec: null, problems: ["the reply was not a JSON object"] };
+  const o = raw as Record<string, unknown>;
+  if (typeof o.schema === "string" && o.schema !== SPEC_SCHEMA) problems.push(`"schema" must be "${SPEC_SCHEMA}"`);
+  const text = (k: string, min: number): string => {
+    const v = o[k];
+    if (typeof v !== "string" || v.trim().length < min) { problems.push(`"${k}" must be a string of at least ${min} characters describing the real plan`); return ""; }
+    return v.trim();
+  };
+  const projectSpec = text("projectSpec", 40);
+  const designSpec = text("designSpec", 120);
+
+  const pp = (o.phasePlan ?? {}) as Record<string, unknown>;
+  const designDeliverables = strArray(pp.designDeliverables);
+  if (designDeliverables.length < 3) problems.push(`"phasePlan.designDeliverables" must list at least 3 things the design phase must deliver (got ${designDeliverables.length})`);
+  const interactions = (Array.isArray(pp.designDependentInteractions) ? pp.designDependentInteractions : [])
+    .filter((x): x is { component: string; states: string[]; mock: string } =>
+      !!x && typeof x === "object" && typeof (x as { component?: unknown }).component === "string" && typeof (x as { mock?: unknown }).mock === "string")
+    .map((x) => ({ component: x.component, states: strArray(x.states, 12), mock: x.mock })).slice(0, 40);
+  const deferredBackend = (Array.isArray(pp.deferredBackend) ? pp.deferredBackend : [])
+    .filter((x): x is { capability: string; dependsOnDesign: string; realImplementation: string } =>
+      !!x && typeof x === "object" && typeof (x as { capability?: unknown }).capability === "string")
+    .map((x) => ({ capability: x.capability, dependsOnDesign: String(x.dependsOnDesign ?? ""), realImplementation: String(x.realImplementation ?? "") })).slice(0, 40);
+  const finalQuality = strArray(pp.finalQuality);
+
+  const acceptanceCriteria = (Array.isArray(o.acceptanceCriteria) ? o.acceptanceCriteria : [])
+    .filter((x): x is { id: string; text: string; verification: string } => !!x && typeof x === "object" && typeof (x as { text?: unknown }).text === "string")
+    .map((x, i) => ({
+      id: typeof x.id === "string" && x.id.trim() ? x.id.trim().slice(0, 60) : `ac-${i + 1}`,
+      text: x.text.trim().slice(0, 600),
+      verification: (["automated", "screenshot", "manual"].includes(x.verification) ? x.verification : "manual") as "automated" | "screenshot" | "manual",
+    })).slice(0, 80);
+  if (acceptanceCriteria.length < 3) problems.push(`"acceptanceCriteria" must list at least 3 measurable criteria (got ${acceptanceCriteria.length})`);
+  // A design is certified from screenshots, so the plan has to contain criteria that screenshots can settle.
+  if (acceptanceCriteria.length >= 3 && !acceptanceCriteria.some((a) => a.verification === "screenshot")) {
+    problems.push('at least one acceptance criterion must have verification "screenshot": the design is scored from browser screenshots');
+  }
+
+  const referenceImages = (Array.isArray(o.referenceImages) ? o.referenceImages : [])
+    .filter((x): x is { fileId: string; classification: MasterSpec["referenceImages"][number]["classification"] } =>
+      !!x && typeof x === "object" && typeof (x as { fileId?: unknown }).fileId === "string"
+      && ["customer_asset", "reference_only", "needs_license"].includes(String((x as { classification?: unknown }).classification)))
+    .slice(0, 40);
+
+  if (problems.length) return { ok: false, spec: null, problems };
+
+  // Implementation-only fields get deterministic, honest defaults. masterPrompt is derived from the architect's own
+  // design plan rather than invented: the builder's phase prompt carries the design-first objective, and stage 2
+  // may enrich this later. Empty arrays are truthful ("not planned yet"), never fabricated content.
+  const spec: MasterSpec = {
+    schema: SPEC_SCHEMA,
+    projectSpec,
+    designSpec,
+    technicalArchitecture: typeof o.technicalArchitecture === "string" ? o.technicalArchitecture.trim() : "",
+    phasePlan: { designDeliverables, designDependentInteractions: interactions, deferredBackend, finalQuality },
+    tasks: [],
+    acceptanceCriteria,
+    integrations: [],
+    securityRequirements: [],
+    testingRequirements: [],
+    assumptions: strArray(o.assumptions),
+    referenceImages,
+    masterPrompt: [
+      "Build the approved visual design first, exactly as specified below. Do not build customer-specific backend functionality yet.",
+      "",
+      "Design specification:",
+      designSpec,
+      "",
+      designDeliverables.length ? `The design phase must deliver:\n${designDeliverables.map((d) => `- ${d}`).join("\n")}` : "",
+      interactions.length ? `\nComponents whose states must be visible with mock data:\n${interactions.map((i) => `- ${i.component}: ${i.states.join(", ")} (mock: ${i.mock})`).join("\n")}` : "",
+      deferredBackend.length ? `\nDEFERRED until the design is certified — do not implement in the design phase:\n${deferredBackend.map((d) => `- ${d.capability}`).join("\n")}` : "",
+    ].filter((s) => s !== "").join("\n"),
+  };
+  return { ok: true, spec, problems: [] };
+}
+
 /** The structured implementation report a cycle produces (collected by the orchestrator, not self-reported only). */
 export interface CycleEvidence {
   summary: string;

@@ -318,6 +318,14 @@ export async function submitCycle(db: Db, job: CycleJob, b: Record<string, unkno
   const score = Math.round(progressScore(ev) * 1000) / 1000;
   const settings = await db.prepare(`SELECT max_review_cycles AS m FROM build_settings WHERE id = 1`).first<{ m: number }>();
   const maxCycles = settings?.m ?? 8;
+  // Review budgets are PHASE-AWARE as well as overall.
+  //
+  // The eight cycles used to be one pool shared by design, functionality and final QA, so a design phase that
+  // needed six of them left two for the entire backend and every remaining certification requirement -- and a
+  // design that could not be certified could spend all eight before functionality began at all. Each phase now has
+  // its own bound as well, and the overall cap still binds: the shares deliberately sum to more than the total, so
+  // this limits how much ONE phase may take without handing out extra cycles. Nothing here is unlimited.
+  const PHASE_CYCLE_SHARE: Partial<Record<string, number>> = { design: 0.5, design_locked: 0.5, functionality: 0.375, final_qa: 0.25 };
   const prior = (await db.prepare(`SELECT failure_signature, score, primary_progress, milestone FROM build_cycles WHERE job_id = ? ORDER BY cycle DESC LIMIT 3`).bind(job.id)
     .all<{ failure_signature: string | null; score: number | null; primary_progress: number | null; milestone: number | null }>()).results;
 
@@ -339,6 +347,16 @@ export async function submitCycle(db: Db, job: CycleJob, b: Record<string, unkno
   let milestone = card ? completedItem(previousRubric, card) : false;
 
   const phaseBefore = (await PH.phaseOf(db, job.id)).build_phase;
+  // This phase's own review budget (see PHASE_CYCLE_SHARE above). Counted from the cycles already recorded against
+  // this phase, so it survives restarts and continuation segments.
+  //
+  // Only on the weighted track. A phase budget is meaningless to a build that has no phases: a legacy v1 build
+  // reports no weighted card, its cycles carry no phase, and it is bounded by maxCycles and the repeat/stall
+  // guards exactly as before. Gating on `card` keeps those builds on their original contract.
+  const phaseShare = card ? PHASE_CYCLE_SHARE[phaseBefore] : undefined;
+  const phaseCycleCap = phaseShare === undefined ? null : Math.max(3, Math.ceil(maxCycles * phaseShare));
+  const phaseCycles = phaseShare === undefined ? 0
+    : Number((await db.prepare(`SELECT COUNT(*) AS n FROM build_cycles WHERE job_id = ? AND build_phase = ?`).bind(job.id, phaseBefore).first<{ n: number }>())?.n ?? 0);
   let phase = phaseBefore;
   let phaseBlockers: string[] = [];
   let designFrozen = !!(await PH.activeFreeze(db, job.id));
@@ -426,6 +444,10 @@ export async function submitCycle(db: Db, job: CycleJob, b: Record<string, unkno
     const recentMilestone = milestone || prior.slice(0, 2).some((p) => p.milestone === 1);
     const stalled = prior.length >= 3 && !recentMilestone && Math.max(progress, priorPrimary[0], priorPrimary[1]) <= priorPrimary[2];
     if (cycle >= maxCycles) { decision = "ESCALATED"; reason = `Reached the limit of ${maxCycles} review cycles`; }
+    else if (phaseCycleCap !== null && phaseCycles >= phaseCycleCap) {
+      decision = "ESCALATED";
+      reason = `Reached this phase's limit of ${phaseCycleCap} review cycles in ${phaseBefore} (${maxCycles} overall)`;
+    }
     else if (sameRuns && open.length && !recentMilestone) { decision = "ESCALATED"; reason = "The same failures repeated in three consecutive cycles"; }
     else if (stalled) {
       decision = "ESCALATED";

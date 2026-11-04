@@ -45,7 +45,7 @@ import { resolveWithin, writeInside } from "./paths.ts";
 import type { Advisor } from "./orchestrator/advisors.ts";
 import { DeterministicReviewer, LocalModelAdvisor } from "./orchestrator/advisors.ts";
 import type { GalleryReferenceInput, MasterSpec, ReviewVerdict } from "./orchestrator/contracts.ts";
-import { outstanding } from "./orchestrator/contracts.ts";
+import { outstanding, validateDesignSpec } from "./orchestrator/contracts.ts";
 import { collectEvidence, builderIntegrations, builderApprovalRequests, writeReview, BUILDER_CONTRACT } from "./orchestrator/evidence.ts";
 import { ratchetDecision, stopsBuild, type PhasePoints } from "./orchestrator/ratchet.ts";
 import { collectSnapshot } from "./orchestrator/snapshot.ts";
@@ -310,15 +310,29 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
    */
   const snapshot = async (cycle: number, phase: "build" | "repair" | "final", meta: { score?: number | null; decision?: string | null; isBest?: boolean; reverted?: boolean; revertedReason?: string | null } = {}) => {
     if (!ws) return;
-    try {
-      const snap = collectSnapshot(ws.repo);
-      if (!snap.files.length) return;
-      const r = await client.storeRevision(job, { cycle, phase, commit: git ? await headCommit(git) : null, ...meta, files: snap.files });
-      if (!r.alreadyStored) tracker.note({ kind: "note", message: `preview snapshot for cycle ${cycle}: ${r.stored} file(s), ${Math.round(snap.bytes / 1024)} KB${snap.skipped.length ? `, ${snap.skipped.length} left out` : ""}` });
-    } catch (err) {
-      if (err instanceof LeaseLostError) { markLeaseLost(); throw err; }
-      log.warn("preview snapshot not stored", { cycle, phase, error: errorMessage(err) });
+    // Two bounded attempts: a stored revision is immutable and the platform refuses a repeat for one it already
+    // holds (r.alreadyStored), so retrying a transient upload failure can never rewrite or duplicate a revision.
+    let lastErr = "";
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const snap = collectSnapshot(ws.repo);
+        if (!snap.files.length) {
+          // Silence here used to mean "no preview, no reason given". Say so where the Founder can read it.
+          tracker.note({ kind: "note", message: `no preview snapshot for cycle ${cycle}: the generated site has no collectable files yet` });
+          return;
+        }
+        const r = await client.storeRevision(job, { cycle, phase, commit: git ? await headCommit(git) : null, ...meta, files: snap.files });
+        if (!r.alreadyStored) tracker.note({ kind: "note", message: `preview snapshot for cycle ${cycle}: ${r.stored} file(s), ${Math.round(snap.bytes / 1024)} KB${snap.skipped.length ? `, ${snap.skipped.length} left out` : ""}` });
+        return;
+      } catch (err) {
+        if (err instanceof LeaseLostError) { markLeaseLost(); throw err; }
+        lastErr = errorMessage(err);
+        log.warn("preview snapshot not stored", { cycle, phase, attempt, error: lastErr });
+      }
     }
+    // The source is already committed and checkpointed, so nothing is lost -- but the Founder must be told that
+    // this revision has no inspectable preview rather than being left to wonder why the dashboard is empty.
+    tracker.note({ kind: "note", message: `preview snapshot for cycle ${cycle} could not be stored after 2 attempts: ${lastErr.slice(0, 200)}. The source is committed and checkpointed; this revision has no inspectable preview.` });
   };
 
   const finish = async (outcome: Outcome, fields: { error?: string | null; checks?: CheckOutcome[]; preview?: { url: string | null; note: string; name?: string | null }; stopReason?: string | null; notBefore?: string | null; quality?: Scorecard | Scorecard2 | null; missingInformation?: string[] }): Promise<JobSummary> => {
@@ -592,9 +606,12 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         galleryReferences,
         skillNames,
       };
-      for (let attempt = 1; attempt <= 2 && !spec && !stop.reason; attempt++) {
+      // Corrections from the previous attempt's validation, fed back so a retry is corrective rather than a
+      // second blind roll of the dice.
+      let specProblems: string[] = [];
+      for (let attempt = 1; attempt <= 3 && !spec && !stop.reason; attempt++) {
         try {
-          const raw = await architect.architect(input);
+          const raw = await architect.architect(input, specProblems);
           // What the model ACTUALLY received, read back from the adapter rather than assumed from the request:
           // a text-only model is sent no images at all, and that must show up in the evidence as zero.
           const seen = (architect as { lastArchitectImages?: { referenceId: string }[] }).lastArchitectImages ?? [];
@@ -604,13 +621,42 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           } else if (galleryReferences.some((g) => g.path)) {
             tracker.note({ kind: "step", message: "design gallery: images were retrieved but " + models.a.tag + " received none (not a vision model); the specification rests on the written notes only" });
           }
-          const stored = await client.storeSpec(job, raw, architect.name);
-          spec = raw as MasterSpec;
+          // Validate before anything is stored or trusted. `spec = raw as MasterSpec` used to be a blind cast, so
+          // a reply that was merely JSON -- or null -- passed through and the build continued as though
+          // architecture had succeeded.
+          const v = validateDesignSpec(raw);
+          if (!v.ok) {
+            specProblems = v.problems;
+            const why = `architect attempt ${attempt} returned an invalid design specification: ${v.problems.join("; ")}`;
+            sessionNotes.push(why.slice(0, 400));
+            // Recorded on the BUILD, not only in a session note: on bld_e65768e6b0853a425095a1f6 the architect
+            // failed three times and nothing the Founder could read said so.
+            tracker.note({ kind: "note", message: why.slice(0, 400) });
+            continue;
+          }
+          specProblems = [];
+          const stored = await client.storeSpec(job, v.spec, architect.name);
+          spec = v.spec!;
           sessionRecords.push({ id: "architect", role: "builder", workstream: "architecture", tasks: [], ownedPaths: [], mode: "serial", status: "completed", note: `${r.model.tag}: ${stored ? `specification v${stored.specVersion} stored` : "platform without orchestration endpoints: specification kept locally"}`, changedFiles: [] });
+          tracker.note({ kind: "step", message: `design specification accepted: ${v.spec!.phasePlan?.designDeliverables.length ?? 0} design deliverable(s), ${v.spec!.acceptanceCriteria.length} acceptance criteria, ${v.spec!.phasePlan?.deferredBackend.length ?? 0} deferred backend item(s)` });
         } catch (err) {
           if (err instanceof LeaseLostError) { markLeaseLost(); throw err; }
-          sessionNotes.push(`Architect session ${attempt} did not produce a valid specification: ${errorMessage(err).slice(0, 300)}`);
+          specProblems = [errorMessage(err).slice(0, 300)];
+          const why = `architect attempt ${attempt} did not produce a valid specification: ${errorMessage(err).slice(0, 300)}`;
+          sessionNotes.push(why);
+          tracker.note({ kind: "note", message: why });
         }
+      }
+      // Planning is a gate, not a formality. Without a specification the builder decides architecture itself,
+      // which is exactly how three segments of GPU time went into a site with no imagery and no design score.
+      // Stop here, before any implementation turn is spent, with a diagnosis a person can act on.
+      if (!spec && !stop.reason) {
+        await endSegment("failed");
+        await checkpoint("architect produced no specification");
+        return await finish("failed", {
+          error: `The architect could not produce a valid design specification in 3 attempts${specProblems.length ? `: ${specProblems.join("; ").slice(0, 400)}` : ""}. No implementation turns were spent. Model ${models.a.tag} must return the DESIGN_SPEC_JSON_SCHEMA object within its output budget; if it keeps truncating, lower the requested detail or raise LOCAL_MODEL_MAX_OUTPUT_TOKENS.`,
+          stopReason: "architect_failed",
+        });
       }
     }
     if (spec) {
@@ -663,7 +709,29 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     const rev = job.kind === "revision" ? revisionTask(job.instruction) : null;
     const buildRoute = rev ? route(rev.task, models, rev.reason) : route(buildTask(spec), models);
     let lastBuildModel = buildRoute.model.tag;
-    for (const phase of (spec ? ["build", "verify"] : ["plan", "build", "verify"]) as Phase[]) {
+    let earlyPreviewDone = false;
+    // ── Phase-aware scheduling (the platform's verified phase decides the work, not a fixed sequence) ──
+    //
+    // Design-First V3 made the SCORING design-first and appended the objective to the prompts, but the runner
+    // still executed plan → build → verify in every phase, so a design-phase build spent its turns on full-stack
+    // verification of a backend that is deliberately deferred. The platform stays authoritative for phase
+    // transitions; this only chooses which work to schedule inside the phase it was given.
+    //
+    //   design / design_locked : build the renderable frontend. No full-stack verify -- there is nothing to verify
+    //                            yet, and running it is how the design phase ran out of turns before its first
+    //                            screenshot.
+    //   functionality          : build and verify, against the frozen design.
+    //   final_qa               : verify only; the implementation is done.
+    // Keyed on the phase the PLATFORM actually reported (job.phase), never on the local default. buildPhase falls
+    // back to "design" when a platform sends no phase at all, and treating that as a real design phase would quietly
+    // drop the verify phase from every legacy build. A customer revision is post-approval work, so it keeps the
+    // full sequence too. Anything unrecognised keeps the original behaviour.
+    const scheduled = job.kind === "revision" ? null : job.phase ?? null;
+    const designing = scheduled === "design" || scheduled === "design_locked";
+    const phases: Phase[] = designing ? ["build"] : scheduled === "final_qa" ? ["verify"] : ["build", "verify"];
+    if (!spec) phases.unshift("plan");
+    tracker.note({ kind: "step", message: `phase plan${scheduled ? ` for build phase "${scheduled}"` : ""}: ${phases.join(" → ")}` });
+    for (const phase of phases) {
       if (stop.reason || st.localLimit || st.agentError) break;
       // Crash recovery / continuation: a phase an earlier segment completed is not run again.
       if (memory?.phasesCompleted.includes(phase)) { tracker.note({ kind: "step", message: `phase ${phase}: already completed in an earlier segment (project memory); skipped` }); continue; }
@@ -676,6 +744,31 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       if (memory && remember.requirements(memory, reqsNow)) milestone = true;
       await sendRequirements(reqsNow);
       await checkpoint(`after ${phase}`);
+      // ── First visual checkpoint: render and store the frontend as soon as it exists ──
+      //
+      // This is deliberately placed here, straight after the build phase, and NOT inside the acceptance block
+      // further down. That block is guarded by `!stop.reason && !st.localLimit`, and on
+      // bld_e65768e6b0853a425095a1f6 the platform's 200-turn limit tripped first in all three segments, so it
+      // never ran: 16.3 million input tokens produced no screenshot, no stored revision and no design score.
+      //
+      // Neither the browser check nor the snapshot costs a model turn, so both can still run when the turn budget
+      // is gone. That is the whole point: the Founder gets an inspectable preview of an unfinished website while
+      // generation is still going, instead of nothing at all.
+      if (phase === "build" && !earlyPreviewDone && existsSync(path.join(ws.repo, "public", "index.html"))) {
+        earlyPreviewDone = true;
+        if (sandbox && cfg.jobSandbox.browserCheck) {
+          try {
+            const shots = await runChecks(ws.repo, [{ id: "browser-check-early", label: "First render: every page at desktop, tablet and mobile width", command: ["node", BROWSER_CHECK, "--root", "public", "--out", ".crestmont/screenshots", "--visual-out", VISUAL_MEASUREMENTS_FILE] }], checkEnv, cfg.checkTimeoutMs, checkExecutor);
+            for (const c of shots) tracker.note({ kind: "check", message: `${c.ok ? "PASS" : "FAIL"} (first render) ${c.command}` });
+          } catch (err) {
+            if (err instanceof LeaseLostError) { markLeaseLost(); throw err; }
+            // A failed render must never read as a passing one: say so, keep the source, carry on.
+            tracker.note({ kind: "note", message: `first render could not be captured: ${errorMessage(err).slice(0, 200)}` });
+          }
+        }
+        await snapshot(0, "build");
+        tracker.note({ kind: "step", message: "first frontend preview stored as revision 0 (work in progress: the backend is not implemented yet)" });
+      }
     }
 
     /**
