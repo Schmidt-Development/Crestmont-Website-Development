@@ -45,13 +45,21 @@ const check = (id: string, outcome: Outcome | boolean, detail: string) => {
 
 const now = new Date();
 const since = new Date(now.getTime() - MINUTES * 60_000).toISOString();
+// Every query is bounded at BOTH ends, and `until` is fixed before the first read.
+//
+// Without an upper bound each query sees whatever was written since the previous one, and the promoter writes about
+// one lead a second: the first run of this script reported "4000 of 3997 leads resolve to a contact row" and "the
+// runs report 4000, the table holds 3997" — three leads created between two reads, which is not a defect in the
+// system but a defect in measuring a moving target with successive queries. A closed window makes every check
+// describe the same set of rows however long the script takes.
+const until = now.toISOString();
 
 // ── 1. Is the one-minute schedule actually firing? ──
 // From the run rows themselves: a schedule that is registered but not firing leaves gaps, and a gap is the single
 // most important thing to see, because every other figure here would look like a throughput problem instead.
 const ticks = await q<{ started_at: string; promoted: number; examined: number; remaining: number; duration_ms: number | null; stopped_reason: string; trigger: string }>(
   `SELECT started_at, promoted, examined, remaining, duration_ms, stopped_reason, trigger FROM research_promotion_runs
-    WHERE trigger = 'scheduled' AND started_at >= ${lit(since)} ORDER BY started_at`);
+    WHERE trigger = 'scheduled' AND started_at >= ${lit(since)} AND started_at < ${lit(until)} ORDER BY started_at`);
 const distinctMinutes = new Set(ticks.map((t) => String(t.started_at).slice(0, 16))).size;
 const expectedTicks = MINUTES;
 check("schedule.firing_every_minute", distinctMinutes >= Math.floor(expectedTicks * 0.9),
@@ -72,12 +80,12 @@ check("schedule.no_long_gaps", gaps.length === 0, gaps.length ? `gaps longer tha
 // evidence that the schedule works on its own, which is the only thing worth certifying.
 const leadRows = await q<{ created_at: string }>(
   `SELECT l.created_at FROM leads l JOIN research_prospects p ON p.crm_lead_id = l.id
-    WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND p.status = 'promoted' AND p.decided_by IS NULL
+    WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND l.created_at < ${lit(until)} AND p.status = 'promoted' AND p.decided_by IS NULL
     ORDER BY l.created_at`);
 const attendedLeads = await one(`SELECT COUNT(*) AS n FROM leads l JOIN research_prospects p ON p.crm_lead_id = l.id
-  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND p.status = 'promoted' AND p.decided_by IS NOT NULL`);
-const allResearchLeads = await one(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent' AND created_at >= ${lit(since)}`);
-const ownerRunsInWindow = await one(`SELECT COUNT(*) AS n FROM research_promotion_runs WHERE started_at >= ${lit(since)} AND trigger <> 'scheduled'`);
+  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND l.created_at < ${lit(until)} AND p.status = 'promoted' AND p.decided_by IS NOT NULL`);
+const allResearchLeads = await one(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent' AND created_at >= ${lit(since)} AND created_at < ${lit(until)}`);
+const ownerRunsInWindow = await one(`SELECT COUNT(*) AS n FROM research_promotion_runs WHERE started_at >= ${lit(since)} AND started_at < ${lit(until)} AND trigger <> 'scheduled'`);
 check("attribution.unattended_only", true,
   `${leadRows.length} of ${allResearchLeads} new research leads in the window were created by the unattended schedule; `
   + `${attendedLeads} were promoted by a person (${ownerRunsInWindow} non-scheduled runs) and are excluded from every rate below`);
@@ -129,18 +137,18 @@ check("certification.full_hour", hour.outcome, hour.reason + (hour.outcome === "
 
 // ── 4. Every lead is a usable sales record ──
 const bad = await one(`SELECT COUNT(*) AS n FROM leads l JOIN research_prospects p ON p.crm_lead_id = l.id
-  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND p.status = 'promoted' AND p.decided_by IS NULL
+  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND l.created_at < ${lit(until)} AND p.status = 'promoted' AND p.decided_by IS NULL
     AND (l.stage <> 'new' OR l.intake_decision_id IS NULL OR COALESCE(l.utm_source,'') <> 'crestmont-research'
       OR (p.website_class IN ('VERIFIED_WEBSITE_BROKEN','VERIFIED_WEBSITE_ISSUES','VERIFIED_OFFICIAL_WEBSITE') AND COALESCE(p.website_url,'') = ''))`);
 check("leads.usable", bad === 0, `${bad} of the unattended new leads are not in stage new, lack an intake decision, lack research attribution, or lost a verified website`);
 
 const withContact = await one(`SELECT COUNT(*) AS n FROM leads l
   JOIN research_prospects p ON p.crm_lead_id = l.id JOIN contacts c ON c.id = l.contact_id
-  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND p.status = 'promoted' AND p.decided_by IS NULL`);
+  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND l.created_at < ${lit(until)} AND p.status = 'promoted' AND p.decided_by IS NULL`);
 check("leads.have_contact", withContact === total, `${withContact} of ${total} unattended new leads resolve to a contact row`);
 
 const withEvidence = await one(`SELECT COUNT(*) AS n FROM leads l JOIN research_prospects p ON p.crm_lead_id = l.id
-  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND p.status = 'promoted' AND p.decided_by IS NULL
+  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND l.created_at < ${lit(until)} AND p.status = 'promoted' AND p.decided_by IS NULL
     AND p.score > 0 AND p.findings_count >= 0 AND LENGTH(COALESCE(l.message,'')) > 20`);
 check("leads.carry_evidence", total === 0 || withEvidence === total,
   `${withEvidence} of ${total} carry the research score and the evidence text the salesperson reads`);
@@ -162,7 +170,7 @@ const dupPhones = await one(`SELECT COUNT(*) AS n FROM (
     JOIN contact_identity_links cl ON cl.identity_id = ci.id AND cl.removed_at IS NULL
     JOIN leads l ON l.contact_id = cl.contact_id
     JOIN research_prospects p ON p.crm_lead_id = l.id
-  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND ci.kind = 'phone'
+  WHERE l.origin = 'research_agent' AND l.created_at >= ${lit(since)} AND l.created_at < ${lit(until)} AND ci.kind = 'phone'
     AND p.status = 'promoted' AND p.decided_by IS NULL
   GROUP BY ci.value_norm HAVING COUNT(DISTINCT l.id) > 1)`).catch(() => -1);
 check("dedup.no_two_leads_on_one_number", dupPhones === 0,
@@ -174,12 +182,12 @@ check("compliance.nothing_released_for_calling", callable === 0, `${callable} pr
 // ── 6. Counters versus rows ──
 // Scheduled runs only, to match the rows being counted: comparing every run's tally against the unattended rows
 // would disagree by exactly the Owner's own promotions and look like a defect.
-const reported = await one(`SELECT COALESCE(SUM(promoted),0) AS n FROM research_promotion_runs WHERE started_at >= ${lit(since)} AND trigger = 'scheduled'`);
+const reported = await one(`SELECT COALESCE(SUM(promoted),0) AS n FROM research_promotion_runs WHERE started_at >= ${lit(since)} AND started_at < ${lit(until)} AND trigger = 'scheduled'`);
 check("integrity.counters_match_rows", reported === total,
   `the scheduled runs report ${reported} new leads; the leads table holds ${total} promoted without a person${reported === total ? " (agree)" : " — a counter and the rows disagree"}`);
 
-const failed = await one(`SELECT COALESCE(SUM(failed),0) AS n FROM research_promotion_runs WHERE started_at >= ${lit(since)} AND trigger = 'scheduled'`);
-const locked = await one(`SELECT COUNT(*) AS n FROM research_promotion_runs WHERE started_at >= ${lit(since)} AND trigger = 'scheduled' AND stopped_reason = 'locked'`);
+const failed = await one(`SELECT COALESCE(SUM(failed),0) AS n FROM research_promotion_runs WHERE started_at >= ${lit(since)} AND started_at < ${lit(until)} AND trigger = 'scheduled'`);
+const locked = await one(`SELECT COUNT(*) AS n FROM research_promotion_runs WHERE started_at >= ${lit(since)} AND started_at < ${lit(until)} AND trigger = 'scheduled' AND stopped_reason = 'locked'`);
 const backlog = await one(`SELECT COUNT(*) AS n FROM research_prospects p, research_settings s WHERE s.id = 1
   AND p.status = 'qualified' AND p.qualified = 1 AND p.score >= s.qualify_threshold AND p.promote_attempts < 5
   AND (p.promote_next_at IS NULL OR p.promote_next_at <= ${lit(now.toISOString())})`);
@@ -190,14 +198,14 @@ check("health.no_failures", failed === 0, `${failed} promotions failed unexpecte
 // the real counts over the window: every statement the promotion path issues writes to one of these tables.
 const writesPerLead = total > 0 ? await (async () => {
   const [a, c, ci, links, co, ld, ac, dec] = await Promise.all([
-    one(`SELECT COUNT(*) AS n FROM audit_logs WHERE created_at >= ${lit(since)} AND action IN ('lead.created','research.prospect_promoted','research.auto_promotion_run','research.promotion_blocked')`),
-    one(`SELECT COUNT(*) AS n FROM contacts WHERE created_at >= ${lit(since)}`),
-    one(`SELECT COUNT(*) AS n FROM contact_identities WHERE created_at >= ${lit(since)}`).catch(() => 0),
-    one(`SELECT COUNT(*) AS n FROM contact_identity_links WHERE created_at >= ${lit(since)}`).catch(() => 0),
-    one(`SELECT COUNT(*) AS n FROM companies WHERE created_at >= ${lit(since)}`).catch(() => 0),
+    one(`SELECT COUNT(*) AS n FROM audit_logs WHERE created_at >= ${lit(since)} AND created_at < ${lit(until)} AND action IN ('lead.created','research.prospect_promoted','research.auto_promotion_run','research.promotion_blocked')`),
+    one(`SELECT COUNT(*) AS n FROM contacts WHERE created_at >= ${lit(since)} AND created_at < ${lit(until)}`),
+    one(`SELECT COUNT(*) AS n FROM contact_identities WHERE created_at >= ${lit(since)} AND created_at < ${lit(until)}`).catch(() => 0),
+    one(`SELECT COUNT(*) AS n FROM contact_identity_links WHERE created_at >= ${lit(since)} AND created_at < ${lit(until)}`).catch(() => 0),
+    one(`SELECT COUNT(*) AS n FROM companies WHERE created_at >= ${lit(since)} AND created_at < ${lit(until)}`).catch(() => 0),
     total,
-    one(`SELECT COUNT(*) AS n FROM crm_activities WHERE created_at >= ${lit(since)}`).catch(() => 0),
-    one(`SELECT COUNT(*) AS n FROM crm_intake_decisions WHERE created_at >= ${lit(since)}`).catch(() => 0),
+    one(`SELECT COUNT(*) AS n FROM crm_activities WHERE created_at >= ${lit(since)} AND created_at < ${lit(until)}`).catch(() => 0),
+    one(`SELECT COUNT(*) AS n FROM crm_intake_decisions WHERE created_at >= ${lit(since)} AND created_at < ${lit(until)}`).catch(() => 0),
   ]);
   return { audit: a, contacts: c, identities: ci, identityLinks: links, companies: co, leads: ld, activities: ac, decisions: dec,
     rowsPerLead: (a + c + ci + links + co + ld + ac + dec) / total };
@@ -214,7 +222,7 @@ const isCertified = certified(checks.map((c) => c.outcome));
 const lines = [
   `# Research → CRM import rate: staging certification`,
   ``,
-  `Window ${since} → ${now.toISOString()} (${MINUTES} min). Target ${TARGET} new leads/minute.`,
+  `Window ${since} → ${until} (${MINUTES} min, closed at both ends before the first read). Target ${TARGET} new leads/minute.`,
   `Counted from the CRM's own rows (leads.origin = 'research_agent'), not from the promoter's counters.`,
   ``,
   `## Result: ${isCertified ? "**CERTIFIED**" : `**NOT CERTIFIED** — ${failures.length} failed, ${blocked.length} could not be attempted`}`,
@@ -249,7 +257,7 @@ const { mkdirSync, writeFileSync, appendFileSync } = await import("node:fs");
 const { join } = await import("node:path");
 mkdirSync(OUT, { recursive: true });
 writeFileSync(join(OUT, "research-promotion-certification.json"), JSON.stringify({
-  windowStart: since, windowEnd: now.toISOString(), minutes: MINUTES, target: TARGET,
+  windowStart: since, windowEnd: until, minutes: MINUTES, target: TARGET,
   total, mean, workingMinutes, workingLeads, drainedAt, bestMinute: { minute: best[0], leads: best[1] }, minutesAtTarget: sustained.atTarget,
   scheduledRuns: ticks.length, distinctMinutes, locked, failed, backlog, reported, writesPerLead, checks,
   unattendedLeads: total, attendedLeads, allResearchLeads, ownerRunsInWindow, perWorkingMinute,

@@ -291,6 +291,13 @@ async function main() {
       assert(ok(last), `${what}: still ${JSON.stringify(last)} after ${Math.round(ms / 1000)}s of replica settling`);
       return last;
     };
+    // Leads created BY A PERSON'S run, since this mark. Not every research lead: automatic promotion now runs every
+    // minute, and on the deploy that first enabled it the scheduler created 152 leads while this check was waiting
+    // for its own count to settle — so "leads before vs leads after" measured the scheduler and failed the Owner.
+    // `decided_by` is the acting user's id and the scheduled run's actor has none, so NOT NULL is exactly the set a
+    // person caused, and `decided_at >= mark` narrows it to this check's own work.
+    const ownerLeadCount = (mark: string) => q1(`SELECT COUNT(*) AS n FROM leads l JOIN research_prospects p ON p.crm_lead_id = l.id
+      WHERE l.origin = 'research_agent' AND p.status = 'promoted' AND p.decided_by IS NOT NULL AND p.decided_at >= ${lit(mark)}`);
     const leadCount = () => q1(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent'`);
     const eligibleCount = () => q1(`SELECT COUNT(*) AS n FROM research_prospects p, research_settings s WHERE s.id = 1 AND p.status = 'qualified' AND p.qualified = 1 AND p.score >= s.qualify_threshold AND p.promote_attempts < 5`);
     const ownerRun = (after: string) => q<Record<string, string>>(`SELECT id, examined, promoted, existing_crm, review, suppressed, rejected, failed, remaining, stopped_reason, trigger, started_at
@@ -308,9 +315,9 @@ async function main() {
     const run = (await settle("the Owner reconcile run row", () => ownerRun(mark), (r) => r.length > 0))[0];
     assert(run.trigger === "owner", `run trigger ${run.trigger}`);
     const promoted = Number(run.promoted);
-    // Leads must grow by exactly what the run says it promoted — once both reads have caught up.
-    const leadsAfter = await settle(`research CRM leads (expected ${leadsBefore} + ${promoted} promoted)`, leadCount, (v) => v - leadsBefore === promoted);
-    const created = leadsAfter - leadsBefore;
+    // The leads THIS run created must equal what it says it promoted — once the read has caught up. Counted by the
+    // person it is attributed to, so the per-minute scheduler working alongside it is neither credited nor blamed.
+    const created = await settle(`leads attributed to this Owner reconcile (expected ${promoted})`, () => ownerLeadCount(mark), (v) => v === promoted);
     // The per-run cap must hold: a reconcile may never create more leads than the Owner allowed.
     const cap = await q1(`SELECT auto_promote_max_per_run AS n FROM research_settings WHERE id = 1`);
     assert(created <= cap, `created ${created} leads with a cap of ${cap}`);
@@ -327,7 +334,7 @@ async function main() {
     // and for a verified-website class an actual website on the record.
     if (created > 0) {
       const bad = await q1(`SELECT COUNT(*) AS n FROM leads l JOIN research_prospects p ON p.crm_lead_id = l.id
-        WHERE l.origin = 'research_agent' AND p.status = 'promoted'
+        WHERE l.origin = 'research_agent' AND p.status = 'promoted' AND p.decided_by IS NOT NULL AND p.decided_at >= ${lit(mark)}
           AND (l.stage <> 'new' OR l.intake_decision_id IS NULL OR l.utm_source <> 'crestmont-research'
             OR (p.website_class IN ('VERIFIED_WEBSITE_BROKEN','VERIFIED_WEBSITE_ISSUES','VERIFIED_OFFICIAL_WEBSITE') AND (p.website_url IS NULL OR p.website_url = '')))`);
       assert(bad === 0, `${bad} promoted leads are not in New, lack an intake decision, lack research attribution, or lost their verified website`);
@@ -342,7 +349,9 @@ async function main() {
     const run2 = (await settle("the second Owner reconcile run row", () => ownerRun(mark2), (r) => r.length > 0))[0];
     assert(run2.id !== run.id, "the second reconcile did not record its own run");
     const promoted2 = Number(run2.promoted);
-    const leadsFinal = await settle(`research CRM leads after the second run (expected ${leadsAfter} + ${promoted2})`, leadCount, (v) => v - leadsAfter === promoted2);
+    // Both runs together, still attributed and still from this check's mark.
+    const createdBoth = await settle(`leads attributed to both Owner reconciles (expected ${promoted + promoted2})`, () => ownerLeadCount(mark), (v) => v === promoted + promoted2);
+    const leadsFinal = await leadCount();
     const eligibleAfter = await eligibleCount();
     // The second run may legitimately promote the next batch, so what must hold is that leads only ever grow by what
     // the runs say they promoted, and that research never created a SECOND lead for a business the CRM already had.
@@ -363,7 +372,7 @@ async function main() {
     const eligible = eligibleBefore;
     return `eligible before ${eligible}; run 1: examined ${run.examined}, promoted ${run.promoted}, existing ${run.existing_crm}, review ${run.review}, suppressed ${run.suppressed}, rejected ${run.rejected}, failed ${run.failed}, remaining ${run.remaining} (${run.stopped_reason})`
       + `; run 2: examined ${run2.examined}, promoted ${run2.promoted}, existing ${run2.existing_crm}, review ${run2.review}, suppressed ${run2.suppressed}, rejected ${run2.rejected}, failed ${run2.failed}, remaining ${run2.remaining} (${run2.stopped_reason})`
-      + `; research CRM leads ${leadsBefore} → ${leadsFinal}; eligible now ${eligibleAfter}; auto_promote still ${autoBefore}; ${sharedLeads} lead(s) shared by several prospects (de-duplicated, 0 promoted twice)`
+      + `; this check's own leads ${createdBoth} (attributed to the Owner); research CRM leads table-wide ${leadsBefore} → ${leadsFinal} (the per-minute scheduler writes here too); eligible now ${eligibleAfter}; auto_promote still ${autoBefore}; ${sharedLeads} lead(s) shared by several prospects (de-duplicated, 0 promoted twice)`
       + (classified === Number(run.examined) ? "" : `; NOTE run 1 classified ${classified} of ${run.examined} examined`);
   });
 
