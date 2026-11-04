@@ -200,11 +200,19 @@ async function main() {
   if (!SECRET) { results.push({ id: "api.signed", ok: false, detail: "CRM_IMPORT_SECRET not available to the E2E step" }); }
   await check("api.missing_idempotency_400", async () => { const r = await signedImport(batch([rec("k", { business: { name: nm("NoKey") }, phones: [{ value: phone() }] })]), ""); assert(r.status === 400, `got ${r.status}`); });
   await check("api.dry_run_writes_nothing", async () => {
-    const before = Number((await q<{ n: number }>(`SELECT COUNT(*) AS n FROM crm_intake_decisions`))[0].n);
-    const r = await signedImport(batch([rec("dry", { business: { name: nm("Dry") }, phones: [{ value: pA }] })], { dryRun: true }), `e2e-${RUN}-dry`);
+    // Asserted against THIS request's own idempotency key, not the size of the table. Automatic research → CRM
+    // promotion now runs every minute and writes an intake decision for every lead it creates, so a count of the
+    // whole table grows between these two reads whatever the dry run did — which is what made this check fail on
+    // the deploy that first enabled the per-minute schedule. The key is unique per request, so a dry run that wrote
+    // a decision is still caught exactly, and one that wrote none is no longer blamed for someone else's row.
+    const key = `e2e-${RUN}-dry`;
+    const r = await signedImport(batch([rec("dry", { business: { name: nm("Dry") }, phones: [{ value: pA }] })], { dryRun: true }), key);
     assert(r.status === 200 && r.json?.dryRun === true, `got ${r.status}`);
-    const after = Number((await q<{ n: number }>(`SELECT COUNT(*) AS n FROM crm_intake_decisions`))[0].n);
-    assert(after === before, "a dry run wrote a decision");
+    const mine = await q<{ id: string }>(`SELECT id FROM crm_intake_decisions WHERE idempotency_key = ${lit(key)}`);
+    assert(mine.length === 0, `a dry run wrote a decision (${mine.length} row(s) for its own idempotency key)`);
+    // And it created nothing else of its own: no lead, no contact for the number it was given.
+    const lead = await q<{ id: string }>(`SELECT l.id FROM leads l JOIN crm_intake_decisions d ON d.lead_id = l.id WHERE d.idempotency_key = ${lit(key)}`);
+    assert(lead.length === 0, "a dry run created a lead");
   });
   let leadA = "";
   await check("api.create_research_prospect", async () => {

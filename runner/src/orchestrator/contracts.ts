@@ -14,6 +14,32 @@ export interface ArchitectInput {
   referenceUrls: string[];
   /** Hardware/provider bound on parallel sessions for this website. */
   maxSessions: number;
+  /**
+   * Owner-approved Design Gallery references for this customer's industry, already downloaded. `path` is a real
+   * file in the workspace; a reference whose image could not be fetched has `path: null` and is described in
+   * words only, so a specification can never imply a picture the model never saw.
+   */
+  galleryReferences?: GalleryReferenceInput[];
+  /**
+   * Design skills provisioned into this workspace (.claude/skills/<name>/SKILL.md). The architect has
+   * read_file, so naming them is how a local model reaches guidance the Agent SDK would otherwise inject:
+   * the SDK's own skills option is never sent to the local provider.
+   */
+  skillNames?: string[];
+}
+
+export interface GalleryReferenceInput {
+  id: string;
+  title: string;
+  industry: string;
+  /** 1 = the customer's own trade, 0 = unrelated. */
+  relevance: number;
+  why: string;
+  tags: string[];
+  notes: { typography: string | null; layout: string | null; color: string | null; animation: string | null; responsive: string | null; quality: string | null };
+  /** Absolute path of the downloaded image, or null when it could not be fetched. */
+  path: string | null;
+  variant: "desktop" | "tablet" | "mobile" | null;
 }
 
 export interface MasterSpec {

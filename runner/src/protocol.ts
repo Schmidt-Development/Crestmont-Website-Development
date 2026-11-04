@@ -94,10 +94,41 @@ export interface Job {
   /** V4: the GPU worker this job was assigned to (worker mode). */
   worker?: { id: string; label: string; maxActiveProjects?: number } | null;
   /**
+   * V5: the owner-approved Design Gallery references this build was given, ranked by the customer's own industry
+   * (platform: services/industry-match.ts). Absent on older platforms, and null when the gallery is empty or
+   * unreachable -- in which case the build proceeds without references and reports that, rather than implying it
+   * had them.
+   */
+  design?: DesignSelection | null;
+  /**
    * Quality engine (protocol v1.5): "required" ⇒ the build may complete as ready_for_review only with an eligible
    * (10/10) quality scorecard, which the platform re-verifies. Absent on older platforms (legacy behaviour).
    */
   quality?: "required";
+}
+
+/** One gallery reference as the platform describes it. The IMAGE is fetched separately, by id. */
+export interface DesignReferenceInfo {
+  id: string;
+  title: string;
+  /** The gallery's own category for this reference, e.g. "construction". */
+  industry: string;
+  /** 1 = the customer's own trade, 0 = unrelated. Used to order what the architect is shown. */
+  relevance: number;
+  why: string;
+  tags: string[];
+  notes: { typography: string | null; layout: string | null; color: string | null; animation: string | null; responsive: string | null; quality: string | null };
+  /** Which image variants exist for this reference; the bytes come from gallery/image. */
+  images: ("desktop" | "tablet" | "mobile")[];
+  /** Why Crestmont may learn from it. NEVER a licence to ship the image as a customer asset. */
+  rights: string;
+}
+
+export interface DesignSelection {
+  galleryVersion: number;
+  reason: string;
+  industryMatch: { normalized: string; confident: boolean; ranked: { category: string; weight: number; matched: string }[] };
+  references: DesignReferenceInfo[];
 }
 
 export type ClaimResponse =

@@ -1,5 +1,5 @@
 // Rate limiting and suspicious-activity logging (AUTH-005).
-import type { Db } from "../lib/db.ts";
+import type { Db, DbStatement } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 
 export async function rateLimit(db: Db, key: string, limit: number, windowSeconds: number, now = Date.now()): Promise<{ allowed: boolean; remaining: number }> {
@@ -50,9 +50,24 @@ export async function securityEvent(db: Db, kind: string, data: { userId?: strin
     .bind(kind, data.userId ?? null, data.email ?? null, data.ip ?? null, data.detail ?? null, nowIso()).run();
 }
 
-export async function audit(db: Db, e: { actorUserId?: string | null; actorKind?: "user" | "system" | "ai" | "webhook"; action: string; subjectType: string; subjectId?: string | null; organizationId?: string | null; details?: unknown; ip?: string | null }): Promise<void> {
-  await db.prepare(
+export interface AuditEvent {
+  actorUserId?: string | null; actorKind?: "user" | "system" | "ai" | "webhook"; action: string; subjectType: string;
+  subjectId?: string | null; organizationId?: string | null; details?: unknown; ip?: string | null;
+}
+
+/**
+ * The same audit row as `audit`, prepared but NOT executed, so a caller can put it in a `db.batch()` alongside the
+ * write it records. That matters on a hot path: a batch is atomic and counts as one query against D1's
+ * 1,000-per-invocation limit, so the record can no longer be written without its change (or the change without its
+ * record), and three round trips become one. `audit` is the right call everywhere else.
+ */
+export function auditStatement(db: Db, e: AuditEvent): DbStatement {
+  return db.prepare(
     `INSERT INTO audit_logs (actor_user_id, actor_kind, action, subject_type, subject_id, organization_id, details_json, ip, created_at) VALUES (?,?,?,?,?,?,?,?,?)`,
   ).bind(e.actorUserId ?? null, e.actorKind ?? "user", e.action, e.subjectType, e.subjectId ?? null, e.organizationId ?? null,
-    e.details === undefined ? null : JSON.stringify(e.details), e.ip ?? null, nowIso()).run();
+    e.details === undefined ? null : JSON.stringify(e.details), e.ip ?? null, nowIso());
+}
+
+export async function audit(db: Db, e: AuditEvent): Promise<void> {
+  await auditStatement(db, e).run();
 }

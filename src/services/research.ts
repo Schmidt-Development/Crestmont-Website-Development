@@ -8,7 +8,7 @@ import { newId, nowIso } from "../lib/db.ts";
 import { HttpError } from "../app/http.ts";
 import { can, type Actor } from "../domain/authz.ts";
 import { sha256Hex } from "../lib/crypto.ts";
-import { audit } from "./security.ts";
+import { audit, auditStatement } from "./security.ts";
 import { intake, IntakeError, type IntakeOutcome } from "./contact-identity.ts";
 import {
   validateProspect, qualify, modelTextProblems, outboundEligibility, crmPhoneNorm, timeZoneForState, stableJson, conciseEvidence,
@@ -307,7 +307,7 @@ export async function applySuppressions(db: Db): Promise<number> {
 
 export interface ProspectRow {
   id: string; business_key: string; name: string; category: string | null; address_line: string | null; city: string | null; state: string | null; zip: string | null;
-  phone_e164: string | null; email: string | null; domain: string | null; time_zone: string | null; sources_json: string; website_class: WebsiteClass; website_url: string | null;
+  phone_e164: string | null; phones_json: string; email: string | null; emails_json: string; domain: string | null; time_zone: string | null; sources_json: string; website_class: WebsiteClass; website_url: string | null;
   website_json: string; findings_json: string; findings_count: number; max_severity: string | null; identity_confidence: number; score: number; qualified: number; qualification_json: string;
   recommended_package: string | null; summary: string | null; brief: string | null; model: string | null; status: ProspectStatus; status_detail: string | null; crm_lead_id: string | null;
   shared_phone: number; eligibility: string; eligibility_json: string; last_verified_at: string; first_seen_at: string; updated_at: string;
@@ -352,9 +352,10 @@ export async function promote(db: Db, actor: Actor, id: string, opts: { sweepSup
     return new HttpError(409, why);
   };
   if (!["qualified", "review"].includes(p.status)) throw await block(`This prospect cannot be promoted (status: ${p.status.replace("_", " ")})`);
-  const lists = (await db.prepare(`SELECT phones_json, emails_json FROM research_prospects WHERE id = ?`).bind(id).first<{ phones_json: string; emails_json: string }>())!;
-  const phones = (JSON.parse(lists.phones_json) as string[]).slice(0, 10);
-  const emails = (JSON.parse(lists.emails_json) as string[]).slice(0, 10);
+  // getProspect already did `SELECT *`, so these two lists are in hand: re-reading the same row cost a whole D1 round
+  // trip per promotion, which at 149 ms on staging was about 9% of the time a promotion took.
+  const phones = (JSON.parse(p.phones_json) as string[]).slice(0, 10);
+  const emails = (JSON.parse(p.emails_json) as string[]).slice(0, 10);
   const verifiedSite = p.website_class === "VERIFIED_WEBSITE_ISSUES" || p.website_class === "VERIFIED_WEBSITE_BROKEN" || p.website_class === "VERIFIED_OFFICIAL_WEBSITE";
   const res = await intake(db, {
     businessName: p.name, contactName: null, website: verifiedSite ? p.website_url : null,
@@ -378,12 +379,21 @@ export async function promote(db: Db, actor: Actor, id: string, opts: { sweepSup
   }
   if (!res.leadId) throw await block("The CRM did not create a lead");
   const at = nowIso();
-  await db.prepare(`UPDATE research_prospects SET status = 'promoted', status_detail = NULL, crm_lead_id = ?, crm_contact_id = ?, decided_by = COALESCE(decided_by, ?), decided_at = COALESCE(decided_at, ?), updated_at = ? WHERE id = ?`)
-    .bind(res.leadId, res.contactId, actor.userId ?? null, at, at, id).run();
+  // The prospect's new status and both audit records go in ONE batch rather than three round trips. A D1 batch is
+  // atomic and counts as a single query against the 1,000-per-invocation limit, so this is both faster and cheaper
+  // than the three awaits it replaces — and the audit rows can no longer be written without the status, or vice
+  // versa, which they could when each went separately.
+  const writes = [
+    db.prepare(`UPDATE research_prospects SET status = 'promoted', status_detail = NULL, crm_lead_id = ?, crm_contact_id = ?, decided_by = COALESCE(decided_by, ?), decided_at = COALESCE(decided_at, ?), updated_at = ? WHERE id = ?`)
+      .bind(res.leadId, res.contactId, actor.userId ?? null, at, at, id),
+  ];
   if (!res.replayed) {
-    await audit(db, { actorUserId: actor.userId, action: "lead.created", subjectType: "lead", subjectId: res.leadId, details: { source: "manual", origin: "research_agent", prospect: id, decision: res.decisionId } });
-    await audit(db, { actorUserId: actor.userId, action: "research.prospect_promoted", subjectType: "research_prospect", subjectId: id, details: { leadId: res.leadId, decision: res.decisionId, websiteClass: p.website_class, score: p.score } });
+    writes.push(
+      auditStatement(db, { actorUserId: actor.userId, action: "lead.created", subjectType: "lead", subjectId: res.leadId, details: { source: "manual", origin: "research_agent", prospect: id, decision: res.decisionId } }),
+      auditStatement(db, { actorUserId: actor.userId, action: "research.prospect_promoted", subjectType: "research_prospect", subjectId: id, details: { leadId: res.leadId, decision: res.decisionId, websiteClass: p.website_class, score: p.score } }),
+    );
   }
+  await db.batch(writes);
   return { leadId: res.leadId, outcome: res.outcome };
 }
 

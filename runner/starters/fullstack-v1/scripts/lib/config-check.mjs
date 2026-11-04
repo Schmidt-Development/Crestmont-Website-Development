@@ -13,12 +13,48 @@ export function isDate(s) {
 }
 export const isTime = (s) => typeof s === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(s);
 
+/**
+ * Is a postal code or city inside the configured service area? Identical to src/lib/config.js, which serves the
+ * live requests; kept here so the gates can judge the website without loading the website's own modules.
+ */
+export function inServiceArea(c, postalCode, city) {
+  const a = c?.serviceArea;
+  if (!a) return true;
+  const zip5 = String(postalCode ?? "").slice(0, 5);
+  if (Array.isArray(a.postalCodes) && a.postalCodes.length && zip5 && a.postalCodes.includes(zip5)) return true;
+  if (Array.isArray(a.cities) && city && a.cities.some((x) => x.toLowerCase() === String(city).trim().toLowerCase())) return true;
+  return false;
+}
+
 export const FEATURE_KEYS = ["contact", "quotes", "booking", "payments", "customer_accounts", "notifications", "admin"];
 
-/** Problems in a configuration (empty = valid). `missing` lists facts that must come from the customer. */
-export function validateConfig(c) {
+/**
+ * Facts in business.config.json that may only ever come FROM THE CUSTOMER, and where the build brief carries
+ * each one. Gate A promises that "missing facts are never invented"; until the configuration was compared with
+ * the brief that promise was unenforceable, because the gate only ever asked whether a value was PRESENT. A
+ * builder that honestly recorded `null` failed and escalated, while one that made a plausible value up passed —
+ * the gate rewarded fabrication over honesty (real defect, job bld_b62360ebf30bf50493cc724d, 2026-11-03, which
+ * invented New York and Detroit postal codes for a junk-removal company in Lansing, Michigan).
+ */
+const CUSTOMER_FACTS = [
+  { path: ["business", "phone"], brief: ["business", "publicPhone"], label: "public contact phone" },
+  { path: ["business", "email"], brief: ["business", "publicEmail"], label: "public contact email" },
+  { path: ["serviceArea"], brief: ["business", "serviceArea"], label: "service area" },
+];
+const dig = (o, keys) => keys.reduce((v, k) => (v == null ? v : v[k]), o);
+const blank = (v) => v == null || (typeof v === "string" && !v.trim());
+
+/**
+ * Problems in a configuration (empty = valid). `missing` lists facts that must come from the customer; `invented`
+ * lists facts the website states that the customer never gave.
+ *
+ * `brief` is the BRIEF.json content (with customerData). Without it the fabrication check cannot run, and that is
+ * reported as a problem rather than quietly treated as a pass.
+ */
+export function validateConfig(c, brief = null) {
   const problems = [];
   const missing = [];
+  const invented = [];
   const need = (cond, msg) => { if (!cond) problems.push(msg); };
   if (!c || typeof c !== "object") return { problems: ["business.config.json is not an object"], missing };
   need(c.schema === "crestmont.business-config/1", "schema must be crestmont.business-config/1");
@@ -73,10 +109,35 @@ export function validateConfig(c) {
     need(p.accountOwner === "customer", "payments.accountOwner must be \"customer\": the business's own Stripe account (never Crestmont's)");
     need(services.some((s) => s.payable), "payments are enabled but no service is payable");
   }
-  if (features.quotes || features.booking) {
+  // A service area is customer information only when the business GOES TO THE CUSTOMER: a quote for on-site
+  // work, or a booking that needs an address. A salon or a shop that customers come to has no service area,
+  // and demanding one would be a false failure.
+  //
+  // Within that scope, null and absent now mean the same thing. They used to differ: null reported the fact as
+  // missing, while leaving the key out meant "serves everywhere" and passed — so the honest spelling escalated
+  // and omission sailed through, which rewarded the builder that said least.
+  if (features.quotes === true || c.booking?.requireAddress === true) {
     const a = c.serviceArea;
-    if (a === null) missing.push("service area");
-    else if (a !== undefined) need(Array.isArray(a.postalCodes) || Array.isArray(a.cities), "serviceArea needs postalCodes or cities");
+    if (a === null || a === undefined) missing.push("service area");
+    else need(Array.isArray(a.postalCodes) || Array.isArray(a.cities), "serviceArea needs postalCodes or cities");
+  } else if (c.serviceArea) {
+    need(Array.isArray(c.serviceArea.postalCodes) || Array.isArray(c.serviceArea.cities), "serviceArea needs postalCodes or cities");
   }
-  return { problems, missing };
+
+  // ── Fabrication check: a fact the customer never gave may not appear in the website's configuration ──
+  const cd = brief && typeof brief === "object" ? (brief.customerData ?? brief) : null;
+  if (!cd) {
+    problems.push("the build brief was not available, so facts in business.config.json could not be checked against what the customer actually provided");
+  } else {
+    for (const f of CUSTOMER_FACTS) {
+      const told = dig(cd, f.brief);
+      const shown = dig(c, f.path);
+      if (blank(told) && !blank(shown)) {
+        invented.push(f.label);
+        problems.push(`${f.path.join(".")} states a ${f.label} the customer never provided (${JSON.stringify(shown).slice(0, 120)}). `
+          + "Missing facts are requested from the customer, never invented: set it to null so the build escalates.");
+      }
+    }
+  }
+  return { problems, missing, invented };
 }

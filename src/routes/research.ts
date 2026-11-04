@@ -16,7 +16,7 @@ import { staffPage } from "./crm.ts";
 import { verifyRunnerSignature } from "../services/builds.ts";
 import { claimSignatureOnce } from "../services/security.ts";
 import * as R from "../services/research.ts";
-import { eligibilityCensus, promotionTotals, recentRuns, runAutoPromotion } from "../services/research-promote.ts";
+import { eligibilityCensus, importRate, promotionTotals, recentRuns, runAutoPromotion, TARGET_PER_MINUTE } from "../services/research-promote.ts";
 import { WEBSITE_CLASSES, WEBSITE_CLASS_LABELS, PROSPECT_STATUSES, type Finding } from "../domain/research.ts";
 
 const RUNNER = "/api/research/runner";
@@ -92,9 +92,11 @@ ${p.crm_lead_id ? html`<p><a href="/staff/crm/leads/${p.crm_lead_id}">Open CRM l
 async function page(ctx: AppContext): Promise<Response> {
   requireStaff(ctx, "lead.read_all");
   const now = ctx.now();
-  const [d, settings, sources, census, promotion30, promotionRuns] = await Promise.all([
+  const [d, settings, sources, census, promotion30, promotionRuns, rate60, rate15] = await Promise.all([
     R.dashboard(ctx.db, now), R.loadSettings(ctx.db), R.listSources(ctx.db),
-    eligibilityCensus(ctx.db), promotionTotals(ctx.db, new Date(now.getTime() - 30 * 86400e3).toISOString()), recentRuns(ctx.db, 5),
+    eligibilityCensus(ctx.db), promotionTotals(ctx.db, new Date(now.getTime() - 30 * 86400e3).toISOString()), recentRuns(ctx.db, 8),
+    // Both read from the leads table, so what is shown is what the CRM actually holds, not what the promoter counted.
+    importRate(ctx.db, 60, now), importRate(ctx.db, 15, now),
   ]);
   // Only the records that genuinely need a person are listed here. General prospect browsing belongs in the CRM:
   // once a prospect is promoted it is an ordinary CRM lead, and a second browser over the same businesses was the
@@ -167,6 +169,28 @@ ${dl([
 <p class="faint">These account for all ${census.totalOnRecord} businesses on record: every record is either eligible, already
 in the CRM, or has a stated reason it is not. Automatic promotion is
 <strong>${settings.auto_promote ? "on" : "off"}</strong>.</p>
+${/* The import rate, counted from the CRM's own rows over a real clock window. "Reported" is the promoter's own
+      tally of the same thing: the two must agree, and showing them side by side is what makes a disagreement
+      visible instead of invisible. */ ""}
+<h3 class="faint">Import rate (counted from the CRM, not from the promoter)</h3>
+${dl([
+    ["New leads in the last hour", html`<strong>${rate60.leads}</strong> <span class="faint">= ${rate60.perMinute.toFixed(1)}/minute (target ${TARGET_PER_MINUTE})</span>`],
+    ["of those, created unattended", html`${rate60.unattendedLeads} <span class="faint">= ${rate60.unattendedPerMinute.toFixed(1)}/minute by the schedule itself; the rest were promoted by a person and are not evidence the schedule is keeping up</span>`],
+    ["New leads in the last 15 minutes", html`${rate15.leads} <span class="faint">= ${rate15.perMinute.toFixed(1)}/minute</span>`],
+    ["The promoter's own count, last hour", html`${rate60.reported} <span class="faint">${rate60.reported === rate60.leads ? "agrees with the CRM" : "DOES NOT match the CRM row count — investigate"}</span>`],
+    ["Runs in the last hour", html`${rate60.runs} <span class="faint">${rate60.locked} skipped because the previous run was still going</span>`],
+    ["Slowest / mean run", `${rate60.slowestMs} ms / ${rate60.meanMs} ms`],
+    ["Failures / awaiting retry", html`${rate60.failed} <span class="faint">${rate60.retried} prospects are waiting on a retry</span>`],
+    ["Held back for a shared identifier", html`${rate60.deferredIdentity} <span class="faint">promoted on a later run, never alongside the record they share it with</span>`],
+    ["Eligible and waiting", String(rate60.backlog)],
+  ])}
+${settings.auto_promote
+    ? rate60.belowTarget
+      ? alert("warn", html`<strong>Below target.</strong> ${rate60.leads} new leads in the last hour (${rate60.perMinute.toFixed(1)}/minute against ${TARGET_PER_MINUTE}) while ${rate60.backlog} eligible prospects are waiting. The Owners are emailed about this once an hour.`)
+      : rate60.backlog === 0
+        ? html`<p class="faint">Nothing eligible is waiting, so the rate is whatever research delivers. A low figure here is the backlog being clear, not a fault.</p>`
+        : html`<p class="faint">At or above target.</p>`
+    : html`<p class="faint">Automatic promotion is off, so the only new leads are the ones a person promoted.</p>`}
 ${promotionRuns.length ? html`<h3 class="faint">Recent promotion runs (30 days: ${promotion30.examined} examined, ${promotion30.promoted} new leads)</h3>
 ${table(promotionRuns, [
     { header: "Started", cell: (r) => formatDateTime(String(r.started_at)) },
@@ -176,6 +200,8 @@ ${table(promotionRuns, [
     { header: "Review", numeric: true, cell: (r) => Number(r.review ?? 0) },
     { header: "Blocked", numeric: true, cell: (r) => Number(r.suppressed ?? 0) + Number(r.rejected ?? 0) },
     { header: "Left", numeric: true, cell: (r) => Number(r.remaining ?? 0) },
+    { header: "Took", numeric: true, cell: (r) => (r.duration_ms === null ? "—" : `${Number(r.duration_ms)} ms`) },
+    { header: "Why it stopped", cell: (r) => String(r.stopped_reason) },
   ])}` : html`<p class="faint">No automatic promotion run has happened yet.</p>`}
 <p class="faint">Data sources in use: ${sources.filter((x) => x.enabled).map((x) => x.attribution).join("; ") || "none enabled"}.
 Licences and permitted use are recorded per record and in <code>docs/research/DATA-SOURCES.md</code>.</p>

@@ -19,6 +19,7 @@ import { claimSignatureOnce, securityEvent } from "../services/security.ts";
 import * as DX from "../services/runner-diagnostics.ts";
 import { latestQuality } from "../services/build-quality.ts";
 import * as BR from "../services/build-revisions.ts";
+import * as G from "../services/design-gallery.ts";
 
 const RUNNER = "/api/builds/runner";
 const usd = (n: number) => `$${n.toFixed(2)}`;
@@ -101,6 +102,25 @@ export function register(r: Router): void {
   r.post(`${RUNNER}/checkpoint/fetch`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.fetchCheckpoint(ctx.db, ctx.storage, await runnerBody(ctx)))));
   // AI Build preview: an immutable snapshot of the generated website for one revision (migration 0072).
   r.post(`${RUNNER}/revisions/store`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await BR.saveRevision(ctx.db, ctx.storage, await runnerBody(ctx)))));
+  // Design Gallery -> builder: the image bytes for a reference THIS job was given, and the runner's report of
+  // which of them a vision model actually received. Delivery and consumption are recorded separately, so
+  // "the builder used the gallery" is checkable rather than asserted (migration 0074).
+  r.post(`${RUNNER}/gallery/image`, runnerRoute(async (ctx) => {
+    const b = await runnerBody(ctx);
+    await B.leasedJob(ctx.db, b.jobId, b.leaseToken);
+    // No object storage configured means no gallery images exist to serve. The runner treats this as "no image
+    // delivered" and reports it, rather than the build silently claiming a reference it never saw.
+    if (!ctx.storage) return jsonResponse(ctx, 404, { error: "file storage is not configured" });
+    const img = await G.galleryImageForJob(ctx.db, ctx.storage, String(b.jobId), String(b.referenceId), String(b.variant ?? "desktop") as G.ImageVariant);
+    return img ? jsonResponse(ctx, 200, img) : jsonResponse(ctx, 404, { error: "no such image for this job" });
+  }));
+  r.post(`${RUNNER}/gallery/seen`, runnerRoute(async (ctx) => {
+    const b = await runnerBody(ctx);
+    await B.leasedJob(ctx.db, b.jobId, b.leaseToken);
+    const ids = Array.isArray(b.referenceIds) ? b.referenceIds.map(String).slice(0, 24) : [];
+    const updated = await G.markImagesSeen(ctx.db, String(b.jobId), ids, String(b.model ?? ""));
+    return jsonResponse(ctx, 200, { updated });
+  }));
   // Self-hosted AI drafts (ai_jobs with provider local-runner), same signed channel.
   r.post(`${RUNNER}/ai/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await AIR.claimAiJob(ctx.db, typeof b.runnerId === "string" ? b.runnerId : "", ctx.now())); }));
   r.post(`${RUNNER}/ai/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await AIR.completeAiJob(ctx.db, await runnerBody(ctx)))));
