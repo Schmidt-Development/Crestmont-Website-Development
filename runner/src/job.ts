@@ -162,6 +162,8 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
   // there and not held in a variable that a new process would reinitialise to "design".
   let buildPhase: BuildPhase = job.phase ?? "design";
   let designFrozen = !!job.designFreeze;
+  /** When this attempt started working, so the first cycle's measured effort includes the generation phases. */
+  const attemptStartedAt = Date.now();
   const synced = { modelCalls: 0, inputTokens: 0, outputTokens: 0 };
   const saveMem = () => {
     if (!memory || !ws) return;
@@ -745,7 +747,12 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     let idleCycles = 0;
     // Where the last cycle's usage stood, so each submission reports the delta this cycle actually spent. Deltas,
     // not cumulative totals, so the platform can attribute spend to the phase that incurred it.
-    const cycleUsage = { modelCalls: tracker.modelCalls, inputTokens: tracker.inputTokens, outputTokens: tracker.outputTokens, modelWallMs: tracker.modelWallMs, at: Date.now() };
+    //
+    // Deliberately starting from ZERO and from the attempt's own start, not from where the counters stand here:
+    // the plan, build and verify phases have already run by this point, and that is where most of a design phase's
+    // GPU time actually goes. Starting from the current values would attribute the generation to no phase at all
+    // and leave the design phase looking almost free, which is the opposite of an honest measurement.
+    const cycleUsage = { modelCalls: 0, inputTokens: 0, outputTokens: 0, modelWallMs: 0, at: attemptStartedAt };
     let lastVerdict: ReviewVerdict | null = null;
     // The final scorecard may use the reviewer's assessment only of the code that reviewer saw: after any repair that
     // was not reviewed again (the loop ended on its cycle limit), the review-based criteria have no evidence.
