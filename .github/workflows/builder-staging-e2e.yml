@@ -104,8 +104,12 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          f=evidence/jitt/gallery-keys.txt
-          if [ ! -s "$f" ]; then echo "no image keys to probe"; exit 0; fi
+          # scripts/builder-staging-e2e.ts writes its evidence under --dir, which is "jitt", not "evidence/jitt".
+          # The first version of this probe looked in the wrong place, found nothing and PASSED, which is the
+          # failure mode this step exists to prevent: a missing file must be loud, not green.
+          f=jitt/gallery-keys.txt
+          if [ ! -f "$f" ]; then echo "the audit wrote no $f — the probe cannot prove anything"; exit 1; fi
+          if [ ! -s "$f" ]; then echo "the gallery has no AI-eligible reference with a desktop image"; exit 0; fi
           ok=0; missing=0
           while IFS= read -r k; do
             [ -z "$k" ] && continue
