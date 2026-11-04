@@ -28,7 +28,16 @@ type ViewportName = keyof typeof VIEWPORTS;
 const ACTIVE: BuildState[] = ["queued", "preparing", "building", "verifying"];
 
 const revKey = (r: { attempt: number; cycle: number }) => `${r.attempt}-${r.cycle}`;
+/** build_revisions.score: the reviewer's quality mark for a stored website, already on a 0-10 scale. */
 const score = (n: number | null | undefined) => (n === null || n === undefined ? "—" : `${n.toFixed(1)}/10`);
+/**
+ * build_cycles.score is a DIFFERENT measure on a DIFFERENT scale: progressScore(), a 0-1 fraction of the cycle's
+ * checks that passed (src/services/build-pipeline.ts). Both were rendered through score() above, so a cycle that
+ * passed everything was reported to the Founder as "1.0/10" beside a revision's "9.4/10" -- two unrelated numbers
+ * dressed as the same one, in the page where the score is supposed to be reconciled. The builds list already
+ * showed this value as a percentage; this agrees with it.
+ */
+const cycleScore = (n: number | null | undefined) => (n === null || n === undefined ? "—" : `${Math.round(n * 100)}% of checks`);
 
 function elapsed(from: string, to: string | null): string {
   const ms = (to ? Date.parse(to) : Date.now()) - Date.parse(from);
@@ -86,7 +95,19 @@ export function register(r: Router): void {
     const detail = current ? await BR.revisionDetail(ctx.db, j.id, current.attempt, current.cycle) : null;
     const pages = (detail?.files ?? []).filter((f) => f.kind === "page").map((f) => f.path);
     const shots = (detail?.files ?? []).filter((f) => f.kind === "screenshot").map((f) => f.path);
-    const srcFor = (rev: BR.RevisionRow, path = "") => `/staff/builds/${j.id}/rev/${revKey(rev)}/${path || "index.html"}`;
+    // Every stored file -- the framed website, the screenshots, the file list -- is served through ONE mechanism:
+    // a signed capability in the URL. There used to be a second, cookie-authenticated route, and it could only ever
+    // produce the bug this page exists to show: a sandboxed document has an opaque origin, so the browser withholds
+    // the SameSite=Lax session cookie from every request that document makes, and the stylesheet was redirected to
+    // the sign-in page. Opening index.html from the file list hit exactly that. BR.previewToken has the measurements.
+    // Minted here, behind requireStaff, once per page load.
+    const tokens = new Map<string, string>();
+    for (const rev of revisions) {
+      const t = await BR.previewToken(ctx.env, j.id, rev.attempt, rev.cycle);
+      if (t) tokens.set(revKey(rev), t);
+    }
+    const renderFor = (rev: BR.RevisionRow, path = "") =>
+      `/build-preview/${j.id}/${revKey(rev)}/${tokens.get(revKey(rev)) ?? ""}/${path || "index.html"}`;
     const base = current ? `/staff/builds/${j.id}/inspect?rev=${revKey(current)}${page ? `&page=${encodeURIComponent(page)}` : ""}${compareTo ? `&cmp=${revKey(compareTo)}` : ""}` : `/staff/builds/${j.id}/inspect?`;
     const latestCycle = cycles[cycles.length - 1] ?? null;
 
@@ -99,7 +120,7 @@ ${active ? alert("info", html`This build is running: the page refreshes itself e
   ${kpi("Package", String(j.package_id ?? "—"), j.kind === "revision" ? `revision ${j.revision}` : "first build")}
   ${kpi("Review cycles", String(cycles.length), latestCycle ? `latest: ${latestCycle.decision ?? "—"}` : "none yet")}
   ${kpi("Elapsed", elapsed(j.created_at, ACTIVE.includes(j.state as BuildState) ? null : j.updated_at), `attempt ${j.attempts}`)}
-  ${kpi("Current score", score(latestCycle?.score ?? null), "latest cycle, as the platform scored it")}
+  ${kpi("Latest cycle", cycleScore(latestCycle?.score ?? null), "checks passed in the newest review cycle")}
   ${kpi("Best verified", score(best?.score ?? null), best ? revLabel(best) : "no verified revision yet")}
   ${kpi("Revisions stored", String(revisions.length), "inspectable below")}
   ${kpi("Certification", q ? (q.eligible ? "Eligible" : q.waiting_external ? "Waiting on customer setup" : "Not eligible") : "No scorecard yet", q ? `${q.score}/10 · ${q.passed}/${q.applicable} criteria` : undefined)}
@@ -126,7 +147,10 @@ ${emptyState("No revision stored yet", active
  actually does is evidenced by the runner's gates and persistence check on the build record.</p>
 ${current.reverted ? alert("warn", html`<strong>This revision was rolled back by the repair ratchet.</strong> ${current.reverted_reason ?? ""}`) : ""}
 ${current.is_best ? alert("success", "This is the best verified revision the build reached.") : ""}
-<p class="row">${linkButton("Open in a new tab", srcFor(current, page), "secondary", "sm")}
+${tokens.size ? "" : alert("error", html`<strong>The website below cannot be rendered.</strong> Serving a sandboxed
+ preview needs a signing secret, and neither <code>BUILD_PREVIEW_FILE_SECRET</code> nor <code>BUILD_RUNNER_SECRET</code>
+ is configured on this environment. The stored files are still listed below and can be opened individually.`)}
+<p class="row">${linkButton("Open in a new tab", renderFor(current, page), "secondary", "sm")}
  ${linkButton("Refresh", `${base}&t=${String(Date.now())}`, "ghost", "sm")}
  ${revisions.length > 1 ? linkButton(compareTo ? "Stop comparing" : "Compare with another revision", compareTo ? base.replace(/&cmp=[^&]*/, "") : `${base}&cmp=${revKey(revisions.find((x) => revKey(x) !== revKey(current))!)}`, "ghost", "sm") : ""}</p>
 ${viewportLinks(base, vp)}
@@ -134,14 +158,14 @@ ${pages.length > 1 ? html`<p class="row"><span class="faint">Pages:</span> ${pag
   (page || "index.html") === pg ? badge("info", pg) : linkButton(pg, `/staff/builds/${j.id}/inspect?rev=${revKey(current)}&vp=${vp}&page=${encodeURIComponent(pg)}${compareTo ? `&cmp=${revKey(compareTo)}` : ""}`, "ghost", "sm"))}</p>` : ""}
 ${compareTo
   ? html`<div class="grid grid--2">
-<div><h3>${revLabel(current)} · ${score(current.score)}</h3>${frame(srcFor(current, page), vp, `${revLabel(current)} preview`)}</div>
-<div><h3>${revLabel(compareTo)} · ${score(compareTo.score)}</h3>${frame(srcFor(compareTo, page), vp, `${revLabel(compareTo)} preview`)}</div>
+<div><h3>${revLabel(current)} · ${score(current.score)}</h3>${frame(renderFor(current, page), vp, `${revLabel(current)} preview`)}</div>
+<div><h3>${revLabel(compareTo)} · ${score(compareTo.score)}</h3>${frame(renderFor(compareTo, page), vp, `${revLabel(compareTo)} preview`)}</div>
 </div>
 ${alert(current.score !== null && compareTo.score !== null ? (current.score > compareTo.score ? "success" : current.score < compareTo.score ? "warn" : "info") : "info",
   current.score !== null && compareTo.score !== null
     ? `Quality score: ${score(compareTo.score)} → ${score(current.score)} (${current.score === compareTo.score ? "unchanged" : current.score > compareTo.score ? `+${(current.score - compareTo.score).toFixed(1)} better` : `${(current.score - compareTo.score).toFixed(1)} worse`}).`
     : "One of these revisions has no recorded score, so the two cannot be compared on quality.")}`
-  : frame(srcFor(current, page), vp, `${revLabel(current)} preview`)}
+  : frame(renderFor(current, page), vp, `${revLabel(current)} preview`)}
 </section>
 
 <section class="card"><h2 class="card__title">Revision history</h2>
@@ -162,13 +186,13 @@ ${table(revisions, [
 
 ${shots.length ? html`<section class="card"><h2 class="card__title">Screenshots the reviewer saw — ${revLabel(current)}</h2>
 <p class="faint">Captured by the runner's headless browser during this cycle. These are what the vision reviewer judged.</p>
-<div class="grid grid--2">${shots.map((s) => html`<figure><img src="${srcFor(current, s)}" alt="${s}" loading="lazy" style="max-width:100%;border:1px solid var(--line,#ccc)"><figcaption class="faint">${s.replace(".crestmont/screenshots/", "")}</figcaption></figure>`)}</div>
+<div class="grid grid--2">${shots.map((s) => html`<figure><img src="${renderFor(current, s)}" alt="${s}" loading="lazy" style="max-width:100%;border:1px solid var(--line,#ccc)"><figcaption class="faint">${s.replace(".crestmont/screenshots/", "")}</figcaption></figure>`)}</div>
 </section>` : ""}
 
 <section class="card"><h2 class="card__title">What this revision contains</h2>
 <p class="faint">The stored bytes, exactly as the builder wrote them. Opening a file shows the original; the preview above is the same bytes with its URLs pointed at this path.</p>
 ${table(detail.files, [
-  { header: "Path", cell: (f) => html`<a href="${srcFor(current, f.path)}"><code>${f.path}</code></a>` },
+  { header: "Path", cell: (f) => html`<a href="${renderFor(current, f.path)}"><code>${f.path}</code></a>` },
   { header: "Kind", cell: (f) => f.kind },
   { header: "Type", cell: (f) => f.content_type.split(";")[0] },
   { header: "Size", cell: (f) => `${Math.max(1, Math.round(f.size_bytes / 1024))} KB` },
@@ -191,7 +215,7 @@ ${table(cycles, [
   { header: "Cycle", cell: (c) => String(c.cycle) },
   { header: "When", cell: (c) => formatDateTime(c.created_at) },
   { header: "Decision", cell: (c) => html`${badge(c.decision === "ESCALATED" ? "bad" : /^READY_/.test(c.decision ?? "") ? "ok" : "info", c.decision ?? "—")}<br><span class="faint">${c.decision_reason ?? ""}</span>` },
-  { header: "Score", cell: (c) => score(c.score) },
+  { header: "Checks passed", cell: (c) => cycleScore(c.score) },
   { header: "Models", cell: (c) => html`<span class="faint">builder</span> ${c.builder_model ?? "—"}<br><span class="faint">reviewer</span> ${c.reviewer_model ?? "—"}` },
   { header: "Findings", cell: (c) => {
       const f = ((): string[] => { try { const v = JSON.parse(c.findings_json ?? "{}") as { outstanding?: string[] }; return Array.isArray(v.outstanding) ? v.outstanding : []; } catch { return []; } })();

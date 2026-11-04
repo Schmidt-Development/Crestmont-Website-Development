@@ -26,7 +26,7 @@ export type ResourceKind =
   | "org" | "project" | "file" | "file2" | "shareLink" | "shareToken" | "changeOrder" | "ticket" | "invoice" | "paidInvoice" | "payment"
   | "session" | "revision" | "milestone" | "task" | "task2" | "assignment" | "refund" | "message" | "approvalRequest" | "customerInvitation"
   | "lead" | "leadTask" | "aiJob" | "quote" | "quoteToken" | "cmsRevision" | "cmsKey" | "portfolio" | "portfolioSlug" | "portfolioFile"
-  | "designReference" | "buildRevision" | "buildRevisionFile"
+  | "designReference" | "buildRevision" | "buildRevisionFile" | "buildPreviewToken"
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
@@ -511,8 +511,13 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/builds/gallery/:id/decide": staff(rolesWith("builds.configure"), P("designReference"), act("design_gallery.reference_approved")),
   "POST /staff/builds/gallery/:id/edit": staff(rolesWith("builds.configure"), P("designReference"), act("design_gallery.reference_edited")),
   "POST /staff/builds/gallery/:id/remove": staff(rolesWith("builds.configure"), P("designReference"), act("design_gallery.reference_removed")),
-  "GET /staff/builds/:id/rev/:rev": staff(rolesWith("builds.read"), { id: "buildJob", rev: "buildRevision" }),
-  "GET /staff/builds/:id/rev/:rev/*": staff(rolesWith("builds.read"), { id: "buildJob", rev: "buildRevision", "*": "buildRevisionFile" }),
+  // The RENDERED preview, and every file it pulls in. It cannot be cookie-authenticated: the sandboxing CSP gives
+  // the document an opaque origin, and a browser withholds a SameSite=Lax session cookie from the requests such a
+  // document makes, so the stylesheet was always redirected to /login and the page rendered unstyled. The signed
+  // token names one (job, attempt, cycle) and authorises nothing but reading that snapshot's static files; staff
+  // auth still gates the page that mints it, and it expires in an hour.
+  "GET /build-preview/:id/:rev/:token": token("signed 1-hour build-preview capability (path segment)", { id: "buildJob", rev: "buildRevision", token: "buildPreviewToken" }),
+  "GET /build-preview/:id/:rev/:token/*": token("signed 1-hour build-preview capability (path segment)", { id: "buildJob", rev: "buildRevision", token: "buildPreviewToken", "*": "buildRevisionFile" }),
   "GET /staff/builds/:id/inspect": staff(rolesWith("builds.read"), P("buildJob")),
   "GET /staff/builds/:id": staff(rolesWith("builds.read"), P("buildJob")),
   "POST /staff/builds/pause": staff(rolesWith("builds.manage"), undefined, act("builds.paused_globally")),

@@ -57,6 +57,14 @@ export interface Env {
   /** Shared HMAC secret for the AI Builds runner API (docs/ai-builds/RUNNER-PROTOCOL.md). Unset = execution unavailable. */
   BUILD_RUNNER_SECRET?: string;
   /**
+   * Optional. Signs the short-lived capability tokens that let a sandboxed build preview load its own stylesheet,
+   * fonts and scripts (src/services/build-revisions.ts). Unset is the normal case: the key is then derived from
+   * BUILD_RUNNER_SECRET under its own label, which is always present wherever a build revision can exist. Set it
+   * only to keep the two apart. Rotating either invalidates outstanding preview links, which is harmless -- they
+   * last an hour and the preview page mints a fresh one on every load.
+   */
+  BUILD_PREVIEW_FILE_SECRET?: string;
+  /**
    * "true" lets a build runner that does not declare zero token cost (a paid model provider such as the Claude Agent SDK
    * adapter) claim builds. Unset = only zero-cost (self-hosted) runners get work. Second key next to the runner's own
    * RUNNER_ALLOW_PAID_PROVIDER: paid AI needs both, plus the budgets in Owner → AI builds.

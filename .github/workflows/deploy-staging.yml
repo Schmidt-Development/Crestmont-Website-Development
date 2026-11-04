@@ -261,6 +261,11 @@ jobs:
           res=$(node --no-warnings scripts/staging-secrets.ts derive research)
           echo "::add-mask::$res"
           printf '%s' "$res" | node --no-warnings scripts/staging-secrets.ts put RESEARCH_E2E_RUNNER_SECRET
+          # Signs the capability in a build preview's own URLs. Unset, the platform falls back to BUILD_RUNNER_SECRET;
+          # staging keeps its own so the browser check below can mint a token with no staff sign-in.
+          pvf=$(node --no-warnings scripts/staging-secrets.ts derive previewFile)
+          echo "::add-mask::$pvf"
+          printf '%s' "$pvf" | node --no-warnings scripts/staging-secrets.ts put BUILD_PREVIEW_FILE_SECRET
 
       - name: Report file storage state (file-storage:staging feed)
         continue-on-error: true
@@ -583,6 +588,35 @@ jobs:
           npm install --prefix .pwf --no-save --no-audit --no-fund --ignore-scripts playwright@1.63.0 > pwf-install.log 2>&1 || { echo "::error title=Playwright install failed::$(tail -c 600 pwf-install.log | tr '\n' ' ')"; exit 1; }
           .pwf/node_modules/.bin/playwright install --with-deps chromium > pwf-browsers.log 2>&1 || { echo "::error title=Chromium install failed::$(tail -c 600 pwf-browsers.log | tr '\n' ' ')"; exit 1; }
           node --no-warnings scripts/frontend-browser-check.mjs "$BASE" evidence/frontend-browser
+
+      # A stored revision reached 9.4/10 and opened as raw HTML, because every check asked for status codes and
+      # stored bytes rather than for what a browser renders. This one asserts computed styles on the real
+      # deployment, so an unstyled preview fails the deploy instead of reaching the Founder.
+      - name: Build preview render verification on staging (computed styles, not status codes)
+        id: preview_render
+        if: steps.frontend_browser.outcome == 'success'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          BASE: ${{ steps.deploy.outputs.url }}
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pwf/node_modules/playwright/index.mjs
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pwf/browsers
+        run: |
+          unset EVIDENCE_INGEST_SECRET
+          PREVIEW_FILE_SECRET=$(node --no-warnings scripts/staging-secrets.ts derive previewFile)
+          echo "::add-mask::$PREVIEW_FILE_SECRET"
+          export PREVIEW_FILE_SECRET
+          node --no-warnings scripts/preview-render-check.mjs "$BASE" evidence/preview-render
+
+      - name: Upload build preview render evidence (generated website only; no credentials)
+        if: always() && steps.preview_render.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: staging-preview-render
+          path: evidence/preview-render
+          retention-days: 14
+          if-no-files-found: ignore
 
       - name: Upload frontend recordings and screenshots (public pages only; no credentials)
         if: always() && steps.frontend_browser.outcome != 'skipped'

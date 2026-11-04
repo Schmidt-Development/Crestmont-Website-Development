@@ -284,6 +284,12 @@ async function buildStaffRecords(w: World) {
     await db.prepare(`INSERT INTO build_revision_files (revision_id, path, kind, content_type, size_bytes, sha256, storage_key) VALUES (?,?,?,?,?,?,?)`)
       .bind(rev, "index.html", "page", "text/html; charset=utf-8", 60, "0".repeat(64), key).run();
   }
+  // A genuine preview capability for each tenant's own revision, so the matrix and the fuzzers exercise the real
+  // route instead of a placeholder that every request would reject identically. A token deliberately names ONE
+  // revision of ONE job, which is what lets the matrix prove tenant B's token cannot open tenant A's snapshot.
+  const { previewToken } = await import("../../src/services/build-revisions.ts");
+  ids.buildPreviewToken = (await previewToken(w.env, ids.buildJob, 1, 0))!;
+  w.b.ids.buildPreviewToken = (await previewToken(w.env, w.b.ids.buildJob, 1, 0))!;
   // Customer production delivery (Founder decision D5): tenant A's target with a superseded v1 and a live v2.
   ids.siteDeployment = newId("sd");
   await db.prepare(`INSERT INTO site_targets (id, project_id, organization_id, worker_name, created_at, updated_at) SELECT 'st_matrix', id, organization_id, 'cm-site-matrix-a', ?, ? FROM projects WHERE id = ?`).bind(nowIso(), nowIso(), w.a.ids.project).run();
