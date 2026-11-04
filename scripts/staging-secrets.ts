@@ -16,7 +16,13 @@ export const DERIVED_LABELS = { evidence: "crestmont-staging-evidence:v1", sched
   // deploys (a changing secret blocks rollbacks), held only by Cloudflare and derivable only with the token secret.
   crmImport: "crestmont-staging-crm-import:v1", crmErasure: "crestmont-staging-crm-erasure:v1",
   // Lead research (PR #48): signs the research runner's heartbeats and batches (x-crestmont-research-signature).
-  research: "crestmont-staging-research-runner:v1" } as const;
+  research: "crestmont-staging-research-runner:v1",
+  // Signs the capability carried in a build preview's own URLs. A sandboxed preview document has an opaque origin,
+  // so the browser withholds the SameSite=Lax session cookie from the requests it makes for its stylesheet, fonts
+  // and scripts; without a capability the preview can only ever render as unstyled HTML (see
+  // src/services/build-revisions.ts). Derived rather than a GitHub secret so the staging browser check can mint a
+  // token and verify what the page RENDERS, instead of trusting a status code.
+  previewFile: "crestmont-staging-build-preview-file:v1" } as const;
 export const deriveStagingKey = (root: string, label: keyof typeof DERIVED_LABELS) => createHmac("sha256", root).update(DERIVED_LABELS[label]).digest("hex");
 /**
  * Fingerprint of a secret value stored in staging D1 to detect changes (and retired passwords) without storing the

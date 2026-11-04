@@ -86,7 +86,19 @@ export function register(r: Router): void {
     const detail = current ? await BR.revisionDetail(ctx.db, j.id, current.attempt, current.cycle) : null;
     const pages = (detail?.files ?? []).filter((f) => f.kind === "page").map((f) => f.path);
     const shots = (detail?.files ?? []).filter((f) => f.kind === "screenshot").map((f) => f.path);
-    const srcFor = (rev: BR.RevisionRow, path = "") => `/staff/builds/${j.id}/rev/${revKey(rev)}/${path || "index.html"}`;
+    // Every stored file -- the framed website, the screenshots, the file list -- is served through ONE mechanism:
+    // a signed capability in the URL. There used to be a second, cookie-authenticated route, and it could only ever
+    // produce the bug this page exists to show: a sandboxed document has an opaque origin, so the browser withholds
+    // the SameSite=Lax session cookie from every request that document makes, and the stylesheet was redirected to
+    // the sign-in page. Opening index.html from the file list hit exactly that. BR.previewToken has the measurements.
+    // Minted here, behind requireStaff, once per page load.
+    const tokens = new Map<string, string>();
+    for (const rev of revisions) {
+      const t = await BR.previewToken(ctx.env, j.id, rev.attempt, rev.cycle);
+      if (t) tokens.set(revKey(rev), t);
+    }
+    const renderFor = (rev: BR.RevisionRow, path = "") =>
+      `/build-preview/${j.id}/${revKey(rev)}/${tokens.get(revKey(rev)) ?? ""}/${path || "index.html"}`;
     const base = current ? `/staff/builds/${j.id}/inspect?rev=${revKey(current)}${page ? `&page=${encodeURIComponent(page)}` : ""}${compareTo ? `&cmp=${revKey(compareTo)}` : ""}` : `/staff/builds/${j.id}/inspect?`;
     const latestCycle = cycles[cycles.length - 1] ?? null;
 
@@ -126,7 +138,10 @@ ${emptyState("No revision stored yet", active
  actually does is evidenced by the runner's gates and persistence check on the build record.</p>
 ${current.reverted ? alert("warn", html`<strong>This revision was rolled back by the repair ratchet.</strong> ${current.reverted_reason ?? ""}`) : ""}
 ${current.is_best ? alert("success", "This is the best verified revision the build reached.") : ""}
-<p class="row">${linkButton("Open in a new tab", srcFor(current, page), "secondary", "sm")}
+${tokens.size ? "" : alert("error", html`<strong>The website below cannot be rendered.</strong> Serving a sandboxed
+ preview needs a signing secret, and neither <code>BUILD_PREVIEW_FILE_SECRET</code> nor <code>BUILD_RUNNER_SECRET</code>
+ is configured on this environment. The stored files are still listed below and can be opened individually.`)}
+<p class="row">${linkButton("Open in a new tab", renderFor(current, page), "secondary", "sm")}
  ${linkButton("Refresh", `${base}&t=${String(Date.now())}`, "ghost", "sm")}
  ${revisions.length > 1 ? linkButton(compareTo ? "Stop comparing" : "Compare with another revision", compareTo ? base.replace(/&cmp=[^&]*/, "") : `${base}&cmp=${revKey(revisions.find((x) => revKey(x) !== revKey(current))!)}`, "ghost", "sm") : ""}</p>
 ${viewportLinks(base, vp)}
@@ -134,14 +149,14 @@ ${pages.length > 1 ? html`<p class="row"><span class="faint">Pages:</span> ${pag
   (page || "index.html") === pg ? badge("info", pg) : linkButton(pg, `/staff/builds/${j.id}/inspect?rev=${revKey(current)}&vp=${vp}&page=${encodeURIComponent(pg)}${compareTo ? `&cmp=${revKey(compareTo)}` : ""}`, "ghost", "sm"))}</p>` : ""}
 ${compareTo
   ? html`<div class="grid grid--2">
-<div><h3>${revLabel(current)} · ${score(current.score)}</h3>${frame(srcFor(current, page), vp, `${revLabel(current)} preview`)}</div>
-<div><h3>${revLabel(compareTo)} · ${score(compareTo.score)}</h3>${frame(srcFor(compareTo, page), vp, `${revLabel(compareTo)} preview`)}</div>
+<div><h3>${revLabel(current)} · ${score(current.score)}</h3>${frame(renderFor(current, page), vp, `${revLabel(current)} preview`)}</div>
+<div><h3>${revLabel(compareTo)} · ${score(compareTo.score)}</h3>${frame(renderFor(compareTo, page), vp, `${revLabel(compareTo)} preview`)}</div>
 </div>
 ${alert(current.score !== null && compareTo.score !== null ? (current.score > compareTo.score ? "success" : current.score < compareTo.score ? "warn" : "info") : "info",
   current.score !== null && compareTo.score !== null
     ? `Quality score: ${score(compareTo.score)} → ${score(current.score)} (${current.score === compareTo.score ? "unchanged" : current.score > compareTo.score ? `+${(current.score - compareTo.score).toFixed(1)} better` : `${(current.score - compareTo.score).toFixed(1)} worse`}).`
     : "One of these revisions has no recorded score, so the two cannot be compared on quality.")}`
-  : frame(srcFor(current, page), vp, `${revLabel(current)} preview`)}
+  : frame(renderFor(current, page), vp, `${revLabel(current)} preview`)}
 </section>
 
 <section class="card"><h2 class="card__title">Revision history</h2>
@@ -162,13 +177,13 @@ ${table(revisions, [
 
 ${shots.length ? html`<section class="card"><h2 class="card__title">Screenshots the reviewer saw — ${revLabel(current)}</h2>
 <p class="faint">Captured by the runner's headless browser during this cycle. These are what the vision reviewer judged.</p>
-<div class="grid grid--2">${shots.map((s) => html`<figure><img src="${srcFor(current, s)}" alt="${s}" loading="lazy" style="max-width:100%;border:1px solid var(--line,#ccc)"><figcaption class="faint">${s.replace(".crestmont/screenshots/", "")}</figcaption></figure>`)}</div>
+<div class="grid grid--2">${shots.map((s) => html`<figure><img src="${renderFor(current, s)}" alt="${s}" loading="lazy" style="max-width:100%;border:1px solid var(--line,#ccc)"><figcaption class="faint">${s.replace(".crestmont/screenshots/", "")}</figcaption></figure>`)}</div>
 </section>` : ""}
 
 <section class="card"><h2 class="card__title">What this revision contains</h2>
 <p class="faint">The stored bytes, exactly as the builder wrote them. Opening a file shows the original; the preview above is the same bytes with its URLs pointed at this path.</p>
 ${table(detail.files, [
-  { header: "Path", cell: (f) => html`<a href="${srcFor(current, f.path)}"><code>${f.path}</code></a>` },
+  { header: "Path", cell: (f) => html`<a href="${renderFor(current, f.path)}"><code>${f.path}</code></a>` },
   { header: "Kind", cell: (f) => f.kind },
   { header: "Type", cell: (f) => f.content_type.split(";")[0] },
   { header: "Size", cell: (f) => `${Math.max(1, Math.round(f.size_bytes / 1024))} KB` },

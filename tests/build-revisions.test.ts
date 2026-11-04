@@ -170,7 +170,13 @@ test("[AIB-PREVIEW] the inspect page shows the stored revisions, the best one, a
   assert.match(page, /Best verified/, "the ratchet's best revision is marked");
   assert.match(page, /Rolled back/, "and the rolled-back one is still here");
   assert.match(page, /the repair lowered the quality score from 7\.5 to 6\.9/, "with the runner's own reason");
-  assert.ok(page.includes(`/staff/builds/${job}/rev/1-0/index.html`), "the preview frame points at the stored revision");
+  // The frame points at a CAPABILITY url. It cannot point at a cookie-authenticated one: the preview is sandboxed,
+  // so the browser withholds the SameSite=Lax session cookie from every request the framed document makes, and its
+  // stylesheet would be redirected to the sign-in page -- which is how a 9.4/10 revision came to render as raw HTML.
+  const capability = new RegExp(`/build-preview/${job}/1-0/\\d{10,13}-[0-9a-f]{48}/index\\.html`);
+  assert.match(page, capability, "the preview frame points at the stored revision through a signed capability");
+  assert.doesNotMatch(page, new RegExp(`/staff/builds/${job}/rev/`),
+    "and nothing on the page still uses the cookie-authenticated route, which could only ever render unstyled");
   assert.match(page, /screenshots\/home-desktop\.png/, "the reviewer's screenshot is shown");
   assert.match(page, /assets\/site\.css/, "and the file list names what the revision contains");
   assert.match(page, /7\.5\/10/, "the best score is reported");
@@ -180,19 +186,31 @@ test("[AIB-PREVIEW] the inspect page shows the stored revisions, the best one, a
 
   // Comparison puts the two side by side and says which way the score moved.
   const cmp = await (await oc.get(`/staff/builds/${job}/inspect?rev=1-1&cmp=1-0`)).text();
-  assert.ok(cmp.includes(`/staff/builds/${job}/rev/1-1/index.html`));
-  assert.ok(cmp.includes(`/staff/builds/${job}/rev/1-0/index.html`));
+  assert.match(cmp, new RegExp(`/build-preview/${job}/1-1/\\d{10,13}-[0-9a-f]{48}/index\\.html`));
+  assert.match(cmp, new RegExp(`/build-preview/${job}/1-0/\\d{10,13}-[0-9a-f]{48}/index\\.html`));
   assert.match(cmp, /-0\.6 worse/, "the direction of the change is stated plainly");
 
-  // And the embedded frontend really is served, with its stylesheet pointed at the preview path.
-  const served = await oc.get(`/staff/builds/${job}/rev/1-0/index.html`);
+  // And the embedded frontend really is served, through the capability url the page just minted, with its
+  // stylesheet pointed inside that same prefix so the browser's request carries the capability too.
+  const href = capability.exec(page)![0];
+  const prefix = href.replace(/\/index\.html$/, "");
+  const served = await oc.get(href);
   assert.equal(served.status, 200);
   const htmlBody = await served.text();
-  assert.ok(htmlBody.includes(`href="/staff/builds/${job}/rev/1-0/assets/site.css"`), "the stylesheet loads inside the preview");
-  assert.match(served.headers.get("content-security-policy") ?? "", /sandbox allow-scripts/, "served sandboxed");
-  const css = await oc.get(`/staff/builds/${job}/rev/1-0/assets/site.css`);
-  assert.equal(css.status, 200);
-  assert.equal(await css.text(), "h1{color:navy}", "the asset is the bytes the builder wrote");
+  assert.ok(htmlBody.includes(`href="${prefix}/assets/site.css"`), "the stylesheet loads inside the preview");
+  assert.match(served.headers.get("content-security-policy") ?? "", /sandbox allow-scripts/, "still served sandboxed");
+
+  // The decisive one: the stylesheet is reachable with NO session at all, because that is the only kind of request
+  // a sandboxed document can make. An anonymous client here stands in for the preview's own opaque origin.
+  const anon = await t.client().get(`${prefix}/assets/site.css`);
+  assert.equal(anon.status, 200, "the capability authenticates the stylesheet on its own, with no cookie");
+  assert.equal(anon.headers.get("content-type"), "text/css; charset=utf-8",
+    "and it is served as CSS -- a redirect to the sign-in page is HTML, which a browser refuses as a stylesheet");
+  assert.equal(await anon.text(), "h1{color:navy}", "the asset is the bytes the builder wrote");
+
   // `/about` style extensionless routing resolves the way the deployed site does.
-  assert.equal((await oc.get(`/staff/builds/${job}/rev/1-0/`)).status, 200, "the revision root serves index.html");
+  assert.equal((await oc.get(`${prefix}/`)).status, 200, "the revision root serves index.html");
+  // A capability for one revision does not open another.
+  assert.equal((await t.client().get(prefix.replace("/1-0/", "/1-1/") + "/assets/site.css")).status, 403,
+    "the token names one revision and is refused for any other");
 });

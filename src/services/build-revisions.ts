@@ -16,6 +16,7 @@ import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import type { StorageAdapter } from "../adapters/storage.ts";
 import { HttpError } from "../app/http.ts";
+import { hmacSha256Hex, timingSafeEqualHex } from "../lib/crypto.ts";
 import { leasedJob, sanitize } from "./builds.ts";
 
 /** Per revision. A Business site is ~12 pages plus assets; these are ceilings, not expectations. */
@@ -200,21 +201,84 @@ export async function revisionFile(db: Db, storage: StorageAdapter | null, jobId
 }
 
 /**
+ * A short-lived capability for ONE stored revision, carried in the preview's own URLs.
+ *
+ * WHY THE STAFF COOKIE CANNOT DO THIS JOB. previewHeaders sends a CSP `sandbox` directive, which is what stops
+ * generated JavaScript reaching a staff session -- and it does that by giving the document an OPAQUE origin. An
+ * opaque-origin document has no site, so every subresource request it makes counts as cross-site, and the session
+ * cookie is `SameSite=Lax`: the browser correctly withholds it. So `<link rel=stylesheet>` arrived at the preview
+ * route unauthenticated, requireStaff answered `303 -> /login`, and the browser refused an HTML document in place
+ * of a stylesheet (ERR_BLOCKED_BY_ORB). The page rendered with no CSS, no fonts and no layout at all.
+ *
+ * Measured in Microsoft Edge against the stored bytes of bld_50e28bbd1cd033ad9ddfad02 revision 1-3:
+ *   with `sandbox`      document 200, tokens.css/site.css/app.js 303 -> ERR_BLOCKED_BY_ORB, body font Times New
+ *                       Roman, link colour rgb(0,0,238), nav list-style disc  (the Founder's screenshot)
+ *   without `sandbox`   all four 200, body font Open Sans, header rgb(10,49,97), nav list-style none
+ * The CSP source list was never the cause: the requests were *made* and redirected, so `'self'` had already
+ * matched. Widening it to the exact prefix changed nothing while `sandbox` stayed. Only the cookie mattered.
+ *
+ * A capability in the path removes the dependency on a cookie the browser is right to withhold, and leaves the
+ * sandbox -- and the boundary it enforces -- exactly as it was. The token authorises precisely one thing: reading
+ * the stored files of one (job, attempt, cycle). It cannot name another revision, another job, or any other route.
+ */
+const TOKEN_KEY_LABEL = "crestmont-build-preview-file-key:v1";
+export const PREVIEW_TOKEN_TTL_S = 3600;
+
+export interface PreviewSecretEnv { BUILD_PREVIEW_FILE_SECRET?: string; BUILD_RUNNER_SECRET?: string }
+
+/**
+ * A domain-separated subkey, never the root secret itself. A build revision cannot exist unless the runner
+ * authenticated with BUILD_RUNNER_SECRET to upload it, so previews work in every environment that can have one,
+ * with nothing new to provision; BUILD_PREVIEW_FILE_SECRET overrides it where the two are kept apart.
+ */
+async function tokenKey(env: PreviewSecretEnv): Promise<string | null> {
+  const root = env.BUILD_PREVIEW_FILE_SECRET || env.BUILD_RUNNER_SECRET;
+  return root ? await hmacSha256Hex(root, TOKEN_KEY_LABEL) : null;
+}
+
+const tokenPayload = (jobId: string, attempt: number, cycle: number, exp: number) => `${jobId}|${attempt}|${cycle}|${exp}`;
+
+/** `<expiry>-<mac>`; null when no secret is configured, so the caller can say so rather than serve a broken page. */
+export async function previewToken(env: PreviewSecretEnv, jobId: string, attempt: number, cycle: number, now = Date.now()): Promise<string | null> {
+  const key = await tokenKey(env);
+  if (!key) return null;
+  const exp = Math.floor(now / 1000) + PREVIEW_TOKEN_TTL_S;
+  return `${exp}-${(await hmacSha256Hex(key, tokenPayload(jobId, attempt, cycle, exp))).slice(0, 48)}`;
+}
+
+export async function previewTokenValid(env: PreviewSecretEnv, jobId: string, attempt: number, cycle: number, token: unknown, now = Date.now()): Promise<boolean> {
+  const key = await tokenKey(env);
+  if (!key || typeof token !== "string") return false;
+  const m = /^(\d{10,13})-([0-9a-f]{48})$/.exec(token);
+  if (!m) return false;
+  const exp = Number(m[1]);
+  // Expiry is inside the signed payload, so a forged expiry changes the MAC; the check below is still the one
+  // that decides, and this only avoids serving a correctly signed but stale link.
+  if (!Number.isFinite(exp) || exp * 1000 < now) return false;
+  const want = (await hmacSha256Hex(key, tokenPayload(jobId, attempt, cycle, exp))).slice(0, 48);
+  return timingSafeEqualHex(m[2], want);
+}
+
+/**
  * Response headers for a served preview file.
  *
- * `sandbox` in the CSP gives the document an opaque origin, so generated HTML and JavaScript cannot read a staff
- * session's cookies or script the page that framed it -- and it applies whether the preview is in an iframe or
- * opened in its own tab. `connect-src 'none'` stops the generated frontend calling the platform API; its own
- * backend is not deployed here, which is why forms are shown as exercised-by-the-runner rather than live.
+ * `sandbox` gives the document an opaque origin, so generated HTML and JavaScript cannot read a staff session's
+ * cookies or script the page that framed it -- and it applies whether the preview is in an iframe or opened in its
+ * own tab. `connect-src 'none'` stops the generated frontend calling the platform API; its own backend is not
+ * deployed here, which is why forms are shown as exercised-by-the-runner rather than live.
+ *
+ * `base` is the preview's own absolute prefix. Naming it beats `'self'`, which means nothing to a document whose
+ * origin is opaque: the generated page may load the files of ITS OWN revision and nothing else on this origin.
  */
-export function previewHeaders(contentType: string): Record<string, string> {
+export function previewHeaders(contentType: string, base?: string): Record<string, string> {
+  const src = base ? base.replace(/\/*$/, "/") : "'self'";
   return {
     "content-type": contentType,
     "content-security-policy": [
       "sandbox allow-scripts allow-forms allow-popups",
-      "default-src 'self'", "img-src 'self' data:", "style-src 'self' 'unsafe-inline'",
-      "script-src 'self' 'unsafe-inline'", "font-src 'self' data:", "connect-src 'none'",
-      "form-action 'none'", "base-uri 'none'", "object-src 'none'", "frame-ancestors 'self'",
+      `default-src ${src}`, `img-src ${src} data:`, `style-src ${src} 'unsafe-inline'`,
+      `script-src ${src} 'unsafe-inline'`, `font-src ${src} data:`, "connect-src 'none'",
+      "form-action 'none'", "base-uri 'none'", "object-src 'none'", "frame-src 'none'", "frame-ancestors 'self'",
     ].join("; "),
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",
@@ -276,7 +340,7 @@ export const REWRITTEN = (contentType: string) => contentType.startsWith("text/h
  *
  * Returns null when the revision does not hold that path, so the caller answers 404 rather than guessing.
  */
-export async function servePreviewFile(db: Db, storage: StorageAdapter | null, jobId: string, attempt: number, cycle: number, requested: string, prefix: string) {
+export async function servePreviewFile(db: Db, storage: StorageAdapter | null, jobId: string, attempt: number, cycle: number, requested: string, prefix: string, origin?: string) {
   if (!storage) return null;
   const rev = await db.prepare(`SELECT id FROM build_revisions WHERE job_id = ? AND attempt = ? AND cycle = ?`).bind(jobId, attempt, cycle).first<{ id: string }>();
   if (!rev) return null;
@@ -287,7 +351,7 @@ export async function servePreviewFile(db: Db, storage: StorageAdapter | null, j
   if (!row) return null;
   const obj = await storage.get(row.storage_key);
   if (!obj) return null;
-  const headers = previewHeaders(row.content_type);
+  const headers = previewHeaders(row.content_type, origin ? `${origin}${prefix}/` : undefined);
   if (!REWRITTEN(row.content_type)) return { body: obj.body as BodyInit, headers };
   const bytes = obj.body instanceof Uint8Array ? obj.body : new Uint8Array(await new Response(obj.body as BodyInit).arrayBuffer());
   return { body: rewriteForPrefix(row.content_type, new TextDecoder().decode(bytes), prefix) as BodyInit, headers };

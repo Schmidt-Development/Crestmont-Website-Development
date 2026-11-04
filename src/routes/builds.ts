@@ -343,30 +343,36 @@ ${button("Register worker", { size: "sm" })}</form><p class="faint">Rented GPUs 
 ], { empty: emptyState("No websites in the pipeline yet", "A website enters the pipeline when its build is created from a paid intake.") })}</section>`;
     return staffPage(ctx, "AI website pipeline", body);
   });
-  // One file of a stored revision, for the embedded preview. ":rev" is "<attempt>-<cycle>".
+  // One file of a stored revision: the framed website, its stylesheet and scripts, the reviewer's screenshots and
+  // the file list, all through one route authenticated by the capability token in the path. ":rev" is
+  // "<attempt>-<cycle>"; the token segment is what the browser can actually present.
   //
-  // The generated frontend runs here, so it is served with a sandboxing CSP (BR.previewHeaders): an opaque origin,
-  // no access to the staff session or the platform API, whether it is framed or opened in its own tab. The
-  // generated BACKEND is never stored or executed by this Worker; the runner exercises it in its sandbox.
-  // The revision root. The generated site's own home link is href="/", which the preview rewrites to this path, and
-  // the wildcard route below needs at least one segment -- so without this, "home" inside the preview would 404.
-  r.get("/staff/builds/:id/rev/:rev", async (ctx, p) => {
-    requireStaff(ctx, "builds.read");
-    const m = /^(\d{1,4})-(\d{1,4})$/.exec(p.rev);
+  // There used to be a staff-cookie route here instead, and it could not work: the generated frontend is served
+  // with a sandboxing CSP (BR.previewHeaders) so that it has an opaque origin and no reach into a staff session --
+  // and a browser will not send a SameSite=Lax session cookie on a request an opaque-origin document makes. The
+  // stylesheet was therefore redirected to /login and refused, and the preview rendered as raw HTML. It was removed
+  // rather than left beside this one, because every URL it served had that same defect built in.
+  // BR.previewToken records the measurements. The generated BACKEND is still never stored or executed by this
+  // Worker; the runner exercises it in its sandbox.
+  //
+  // The token names one (job, attempt, cycle) and is signed; it cannot be edited into another revision or another
+  // job, and BR.servePreviewFile only ever reads rows of that revision, so the capability is exactly "read this
+  // snapshot's static files". Staff auth still gates the page that MINTS it. Responses carry referrer-policy:
+  // no-referrer (previewHeaders), so the token does not leak through a Referer header to anything the site links to.
+  const previewFile = async (ctx: AppContext, p: Record<string, string>) => {
+    const m = /^(\d{1,4})-(\d{1,4})$/.exec(p.rev ?? "");
     if (!m) throw new HttpError(404, "No such revision");
-    const f = await BR.servePreviewFile(ctx.db, ctx.storage, p.id, Number(m[1]), Number(m[2]), "", `/staff/builds/${p.id}/rev/${p.rev}`);
-    if (!f) throw new HttpError(404, "This revision has no home page");
-    return new Response(f.body, { status: 200, headers: f.headers });
-  });
-
-  r.get("/staff/builds/:id/rev/:rev/*", async (ctx, p) => {
-    requireStaff(ctx, "builds.read");
-    const m = /^(\d{1,4})-(\d{1,4})$/.exec(p.rev);
-    if (!m) throw new HttpError(404, "No such revision");
-    const f = await BR.servePreviewFile(ctx.db, ctx.storage, p.id, Number(m[1]), Number(m[2]), p["*"], `/staff/builds/${p.id}/rev/${p.rev}`);
+    const attempt = Number(m[1]), cycle = Number(m[2]);
+    if (!(await BR.previewTokenValid(ctx.env, p.id, attempt, cycle, p.token))) {
+      throw new HttpError(403, "This preview link has expired or is not valid. Open the build preview again to get a fresh one.");
+    }
+    const prefix = `/build-preview/${p.id}/${p.rev}/${p.token}`;
+    const f = await BR.servePreviewFile(ctx.db, ctx.storage, p.id, attempt, cycle, p["*"] ?? "", prefix, ctx.url.origin);
     if (!f) throw new HttpError(404, "No such file in this revision");
     return new Response(f.body, { status: 200, headers: f.headers });
-  });
+  };
+  r.get("/build-preview/:id/:rev/:token", previewFile);
+  r.get("/build-preview/:id/:rev/:token/*", previewFile);
 
   r.get("/staff/builds/:id", async (ctx, p) => {
     requireStaff(ctx, "builds.read");
