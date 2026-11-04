@@ -296,6 +296,68 @@ test("[PHASES] a cycle limit is still enforced", async () => {
   assert.match(last!.reason, /limit of 3 review cycles/);
 });
 
+// ── What the Founder actually sees ────────────────────────────────────────────────────────────────────────────────
+
+test("[PHASES] the inspect page shows the three categories, the rubric item by item, the freeze and the measured effort", async () => {
+  // The cards are rendered here, not merely typechecked: a template mistake in the one page the Founder reads to
+  // understand what a website is worth would otherwise only appear at runtime.
+  const w = await world();
+  const owner = await createStaff(w.t.db, "owner", "owner2@crestmont.test");
+  const oc = await w.t.client().login(owner.email, undefined, owner.secret);
+
+  await w.cycle(1, weighted({ phase: "design", design: 22, functional: "fail", other: "pass" }));
+  await w.cycle(2, weighted({ phase: "design", design: 40, functional: "fail", other: "pass" }));
+
+  const page = await (await oc.get(`/staff/builds/${w.job}/inspect`)).text();
+  // The categories, each with its own maximum.
+  assert.match(page, /Quality categories/);
+  assert.match(page, /Visual design[\s\S]{0,200}40\.0\/40/, "the design category and its score");
+  assert.match(page, /Frontend \+ backend/);
+  assert.match(page, /Remaining quality/);
+  assert.match(page, /\/100/, "and the total out of 100");
+  assert.match(page, /informational aggregate, not the phase signal/, "with the overall figure labelled as what it is");
+  // The six visual items by name, which is what makes a design score actionable.
+  for (const label of ["Layout composition", "Typography, branding", "Imagery", "Component polish", "Responsive quality", "Industry fit"]) {
+    assert.ok(page.includes(label), `the rubric names "${label}"`);
+  }
+  // The phase and the freeze.
+  assert.match(page, /Active phase/);
+  assert.match(page, /Design locked/, "the phase the build reached");
+  assert.match(page, /Design freeze/);
+  assert.match(page, /Approved revision/);
+  assert.match(page, /Platform verified/, "and that the platform, not the runner, verified it");
+  assert.match(page, /Frozen design baseline/, "the snapshot holding the approved design is marked in the history");
+  assert.match(page, /Phase history/);
+  // Measured effort, with no invented savings column.
+  assert.match(page, /Measured effort per phase/);
+  assert.match(page, /Counted, not estimated/);
+  // There must be no COLUMN of projected savings. The page says so in words, which is why this looks for a table
+  // header rather than the phrase: asserting the phrase's absence would fail on the sentence explaining it.
+  assert.doesNotMatch(page, /<th[^>]*>\s*(?:Expected|Projected|Estimated)\s/i);
+
+  // Revision comparison is category by category, and names the design change.
+  const cmp = await (await oc.get(`/staff/builds/${w.job}/inspect?rev=1-2&cmp=1-1`)).text();
+  assert.match(cmp, /Visual design[\s\S]{0,400}22\.0\/40/, "the earlier revision's design score");
+  assert.match(cmp, /40\.0\/40/, "and the later one's");
+  assert.match(cmp, /\+18\.0/, "the change is stated as a signed delta");
+});
+
+test("[PHASES] a legacy scorecard is shown as legacy, and no category split is invented for it", async () => {
+  const w = await world();
+  const owner = await createStaff(w.t.db, "owner", "owner3@crestmont.test");
+  const oc = await w.t.client().login(owner.email, undefined, owner.secret);
+  await w.t.db.prepare(`INSERT INTO build_quality (id, job_id, project_id, attempt, iteration, package_id, outcome, score, applicable, passed, eligible, waiting_external, verified, verification_problems_json, criteria_json, defects_json, created_at, schema_version)
+    VALUES (?,?,?,1,3,'business','ready_for_review',9.4,19,18,0,0,1,'[]','[]','[]',?, 'crestmont.quality-scorecard/1')`)
+    .bind(newId("bq"), w.job, w.pid, nowIso()).run();
+
+  const page = await (await oc.get(`/staff/builds/${w.job}/inspect`)).text();
+  assert.match(page, /Legacy scorecard/, "it is labelled for what it is");
+  assert.match(page, /9\.4/, "its own number is still shown as history");
+  assert.match(page, /not<\/strong> a result under the weighted visual rubric/, "and explicitly not presented as a weighted result");
+  assert.doesNotMatch(page, /Visual design<\/div><div class="kpi__value">\d/, "no fabricated design points");
+  assert.match(page, /legacy scoring/, "the certification tile says which engine scored it");
+});
+
 // ── The architect's phase split ───────────────────────────────────────────────────────────────────────────────────
 
 test("[PHASES] the specification separates design deliverables, design-dependent interactions, deferred backend and final quality", () => {
