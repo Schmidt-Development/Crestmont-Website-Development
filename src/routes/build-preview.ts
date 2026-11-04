@@ -148,6 +148,35 @@ ${mstones.length ? html`<h3>Phase history</h3>${table(mstones, [
 }
 
 /**
+ * Measured efficiency per phase.
+ *
+ * Every number here was counted: inference calls, tokens, wall time, revisions, reviews, rollbacks. There is no
+ * "expected saving" column, because a GPU saving that was not measured is an architectural expectation and saying
+ * otherwise would be the fabricated evidence this engine exists to refuse. The architectural expectation is stated
+ * in words instead: backend construction is deferred until the design certifies, so design-phase cycles should
+ * show fewer calls and less time than functionality-phase ones.
+ */
+function metricsCard(rows: Awaited<ReturnType<typeof PH.phaseMetrics>>): SafeHtml {
+  if (!rows.length) return html``;
+  const mins = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 60_000)} min`);
+  return html`<section class="card"><h2 class="card__title">Measured effort per phase</h2>
+${table(rows, [
+  { header: "Phase", cell: (m) => PHASE_LABEL[m.phase] ?? m.phase },
+  { header: "Attempt", cell: (m) => String(m.attempt) },
+  { header: "Inference calls", cell: (m) => String(m.inference_calls) },
+  { header: "Tokens in / out", cell: (m) => `${m.input_tokens.toLocaleString("en-GB")} / ${m.output_tokens.toLocaleString("en-GB")}` },
+  { header: "Elapsed", cell: (m) => mins(m.elapsed_ms) },
+  { header: "Model time", cell: (m) => mins(m.review_ms) },
+  { header: "Revisions", cell: (m) => String(m.revisions) },
+  { header: "Reviews", cell: (m) => String(m.reviews) },
+  { header: "Rollbacks", cell: (m) => String(m.rollbacks) },
+], { empty: emptyState("No measurements", "") })}
+<p class="faint">Counted, not estimated. There is deliberately no "expected saving" column: deferring backend
+ construction until the design certifies is an architectural expectation, and only a before-and-after across real
+ builds can turn it into a measurement.</p></section>`;
+}
+
+/**
  * How two revisions compare, category by category.
  *
  * The framing matters as much as the numbers. A falling overall score with a rising design score is DESIGN
@@ -241,6 +270,7 @@ export function register(r: Router): void {
     // for this reason" is exactly what the Founder needs to see, and activeFreeze() would hide it.
     const freeze = (await PH.freezeHistory(ctx.db, j.id))[0] ?? null;
     const mstones = await PH.milestones(ctx.db, j.id);
+    const metrics = await PH.phaseMetrics(ctx.db, j.id);
     const gallery = await selectionForJob(ctx.db, j.id);
     const vp = viewportOf(ctx);
     const active = ACTIVE.includes(j.state as BuildState);
@@ -292,9 +322,10 @@ ${dl([["Builder job", html`<code>${j.id}</code>`], ["Order", j.order_id ? html`<
 </section>`;
 
     const categories = categoryCard(q, phaseRow.build_phase, freeze, mstones);
+    const efficiency = metricsCard(metrics);
 
     if (!current || !detail) {
-      return staffPage(ctx, "AI build preview", html`${head}${categories}
+      return staffPage(ctx, "AI build preview", html`${head}${categories}${efficiency}
 <section class="card"><h2 class="card__title">Website preview</h2>
 ${emptyState("No revision stored yet", active
   ? "Node 1 stores a snapshot of the website as soon as the first build phase finishes. This page will show it once that happens."
@@ -302,7 +333,7 @@ ${emptyState("No revision stored yet", active
 </section>`);
     }
 
-    const body = html`${head}${categories}
+    const body = html`${head}${categories}${efficiency}
 <section class="card"><h2 class="card__title">Website preview — ${revLabel(current)}</h2>
 <p class="faint">The generated frontend itself, served from the stored snapshot. Its URLs are pointed at this preview's
  path so the stylesheet and in-page links work; the stored bytes are unchanged and every file is listed below.

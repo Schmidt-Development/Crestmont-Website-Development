@@ -277,7 +277,10 @@ export function measuredVisualFailures(o: {
     if (o.browserOk !== true) out.add("unstyled");
     return [...out];
   }
-  if (m.some((x) => x.defaultFont || x.styleSheets === 0)) out.add("unstyled");
+  // No stylesheet at all, OR the browser's own default serif with only one sheet: the second is the signature of a
+  // page whose CSS loaded but applied nothing. `defaultFont` alone is not enough — a deliberate `font-family: serif`
+  // is a styling choice, not a failure.
+  if (m.some((x) => x.styleSheets === 0 || (x.defaultFont && x.styleSheets <= 1 && x.contentImages === 0))) out.add("unstyled");
   if (m.some((x) => x.viewport === "desktop" && x.nav && (x.nav.stacked || (x.nav.hasNav && x.nav.visibleLinks < 2) || x.nav.toggleVisible))) out.add("navigation");
   if (m.some((x) => x.placeholders > 0)) out.add("placeholder");
   // Overlap/clipping: a single stray box is noise, several on one page view is a layout that does not hold.

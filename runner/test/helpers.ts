@@ -494,7 +494,13 @@ export function inspectFromRunArgs(args: string[]): Record<string, unknown> {
   };
 }
 
-export function fakeDocker(opts: { passthrough?: boolean; override?: FakeDocker["override"]; /** browser check writes desktop+mobile screenshots of every public page, like the real one */ screenshots?: boolean } = {}): FakeDocker {
+export function fakeDocker(opts: {
+  passthrough?: boolean; override?: FakeDocker["override"];
+  /** browser check writes desktop+tablet+mobile screenshots and its visual measurements, like the real one */
+  screenshots?: boolean;
+  /** Measurement overrides for the fake visual.json (e.g. { contentImages: 0 } for a site with no imagery). */
+  visual?: Record<string, number | boolean>;
+} = {}): FakeDocker {
   const repos = new Map<string, string>();
   const runs = new Map<string, string[]>();
   const ok = (stdout = "") => ({ code: 0, stdout, stderr: "", timedOut: false, notFound: false });
@@ -521,14 +527,38 @@ export function fakeDocker(opts: { passthrough?: boolean; override?: FakeDocker[
       const argv = args.slice(t + 4);
       if (argv[0] === "node" && String(argv[1]).endsWith("browser-check.mjs")) {
         const repo = repos.get(name);
+        // Three viewports, matching the real check: the weighted design rubric will not certify a design without
+        // desktop, tablet AND mobile evidence, so a fake that produced two would make every build uncertifiable
+        // for a reason that has nothing to do with the website.
+        const viewports = ["desktop", "tablet", "mobile"];
+        let pages = 0;
         if (opts.screenshots && repo) {
           const pub = path.join(repo, "public");
           const shots = path.join(repo, ".crestmont", "screenshots");
           mkdirSync(shots, { recursive: true });
           const png = Buffer.from("89504e470d0a1a0a", "hex"); // FAKE: a PNG signature, not a rendered page
-          for (const f of readdirSync(pub).filter((x) => x.endsWith(".html") && x !== "404.html")) for (const vp of ["desktop", "mobile"]) writeFileSync(path.join(shots, `${f.replace(/\.html$/, "")}-${vp}.png`), png);
+          const html = readdirSync(pub).filter((x) => x.endsWith(".html") && x !== "404.html");
+          pages = html.length;
+          for (const f of html) for (const vp of viewports) writeFileSync(path.join(shots, `${f.replace(/\.html$/, "")}-${vp}.png`), png);
+          // The visual measurements the real check writes with --visual-out. FAKE values describing a clean page:
+          // a test that wants a defect passes `visual` to say so, rather than this pretending to have measured.
+          const out = argv[argv.indexOf("--visual-out") + 1];
+          if (argv.includes("--visual-out") && out) {
+            const file = path.join(repo, ...String(out).split(/[\\/]/));
+            mkdirSync(path.dirname(file), { recursive: true });
+            writeFileSync(file, JSON.stringify({
+              schema: "crestmont.visual-measurements/1", viewports, pages: html,
+              measurements: html.flatMap((page) => viewports.map((viewport) => ({
+                page, viewport, images: 3, contentImages: 3, clipped: 0, overlaps: 0, placeholders: 0,
+                styleSheets: 2, defaultFont: false, headings: 1,
+                nav: { hasNav: true, visibleLinks: 4, toggleVisible: false, stacked: false, navDirection: "row" },
+                screenshot: `.crestmont/screenshots/${page.replace(/\.html$/, "")}-${viewport}.png`,
+                ...(opts.visual ?? {}),
+              }))),
+            }, null, 2) + "\n");
+          }
         }
-        return ok("browser check: 5 pages x 2 viewports OK (fake)");
+        return ok(`browser check: ${pages || 5} pages x ${viewports.length} viewports OK (fake)`);
       }
       if (opts.passthrough === false || !repos.has(name)) return ok("");
       // Emulates the job container: the container's own shell runs the agent's command. (Deliberately not the runner's

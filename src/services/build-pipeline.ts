@@ -426,6 +426,17 @@ export async function submitCycle(db: Db, job: CycleJob, b: Record<string, unkno
   const stage: Stage = CONTINUE.includes(decision) ? "REVISION_REQUIRED" : decision === "ESCALATED" ? "FAILED_NEEDS_INTERVENTION"
     : decision === "WAIT_FOR_EXTERNAL_SETUP" ? "WAITING_FOR_EXTERNAL_SETUP" : decision === "NEEDS_HUMAN_AUTHORIZATION" ? "WAITING_FOR_HUMAN_AUTHORIZATION" : "AI_REVIEW";
   await setStage(db, job.project_id, stage, `Cycle ${cycle}: ${READY.includes(decision) ? "AI acceptance passed; the build finishes and waits for internal approval" : reason}`, "runner");
+  // Per-phase efficiency, accumulated from the runner's measured deltas and attributed to the phase the cycle
+  // STARTED in -- the spend belongs to the work that incurred it, not to the phase the gate opened into.
+  const eff = b.efficiency && typeof b.efficiency === "object" ? b.efficiency as Record<string, unknown> : null;
+  const n = (v: unknown, cap: number) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.min(Math.trunc(v), cap) : 0);
+  await PH.recordPhaseMetrics(db, job, phaseBefore, {
+    inferenceCalls: n(eff?.inferenceCalls, 10_000), inputTokens: n(eff?.inputTokens, 1e10), outputTokens: n(eff?.outputTokens, 1e10),
+    elapsedMs: n(eff?.elapsedMs, 86_400_000), reviewMs: n(eff?.modelMs, 86_400_000),
+    implementationMs: Math.max(0, n(eff?.elapsedMs, 86_400_000) - n(eff?.modelMs, 86_400_000)),
+    revisions: snapshot ? 1 : 0, reviews: 1, rollbacks: n(eff?.rollbacks, 100),
+    ineffectiveRepairs: decision === "ESCALATED" && /same failures|No measurable progress/.test(reason) ? 1 : 0,
+  });
   await audit(db, { actorKind: "system", action: "builds.review_cycle", subjectType: "build_job", subjectId: job.id, organizationId: job.organization_id, details: { cycle, proposed, decision, outstanding: open.length, score, phase, points, milestone, builderModel: model(b.builderModel), reviewerModel: model(b.reviewerModel) } });
   return { cycle, decision, reason, continue: CONTINUE.includes(decision), prompt: finalPrompt, phase, phaseBlockers: phaseBlockers.slice(0, 10), designFrozen, points };
 }

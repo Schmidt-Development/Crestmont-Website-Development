@@ -212,6 +212,47 @@ test("[PHASES] the full design-first sequence runs on fixtures alone: no Ollama,
   assert.deepEqual([...new Set(phases)], ["design_locked", "functionality", "final_qa", "complete"]);
 });
 
+test("[PHASES] effort is measured per phase and attributed to the phase that spent it", async () => {
+  const w = await world();
+  await w.snapshot(1);
+  // Two design cycles, then the freeze, then a functionality cycle. The spend of the cycle that opened the gate
+  // belongs to the phase it STARTED in, not the one it moved into.
+  const submit = (n: number, phase: string, design: number, eff: Record<string, number>) => PL.submitCycle(w.t.db, w.jobRow, {
+    cycle: n, prompt: "fixture", promptSource: "reviewer", reviewerProvider: "local:qwen2.5vl",
+    decision: "FIX_DEFECTS", nextPrompt: "continue", addresses: ["criterion:ac-pages"], evidence: EVIDENCE(true),
+    quality: weighted({ phase, design, functional: design >= 40 ? "fail" : "pass", other: "pass" }), phase, efficiency: eff,
+  });
+  await submit(1, "design", 20, { inferenceCalls: 3, inputTokens: 3000, outputTokens: 400, elapsedMs: 120_000, modelMs: 90_000 });
+  await w.snapshot(2);
+  await submit(2, "design", 40, { inferenceCalls: 2, inputTokens: 2000, outputTokens: 300, elapsedMs: 60_000, modelMs: 40_000, rollbacks: 1 });
+  await w.snapshot(3);
+  await submit(3, "design_locked", 40, { inferenceCalls: 1, inputTokens: 500, outputTokens: 50, elapsedMs: 10_000, modelMs: 8_000 });
+  await w.snapshot(4);
+  await submit(4, "functionality", 40, { inferenceCalls: 9, inputTokens: 40_000, outputTokens: 6_000, elapsedMs: 900_000, modelMs: 700_000 });
+
+  const m = await PH.phaseMetrics(w.t.db, w.job);
+  const design = m.find((x) => x.phase === "design")!;
+  assert.equal(design.inference_calls, 5, "the two design cycles are accumulated, including the one that froze the design");
+  assert.equal(design.output_tokens, 700);
+  assert.equal(design.elapsed_ms, 180_000);
+  assert.equal(design.rollbacks, 1);
+  assert.equal(design.reviews, 2);
+  assert.equal(design.implementation_ms, 50_000, "elapsed minus model time, both measured");
+  const fn = m.find((x) => x.phase === "functionality")!;
+  assert.equal(fn.inference_calls, 9, "and the functionality cycle's spend lands on the functionality phase");
+  assert.ok(fn.elapsed_ms > design.elapsed_ms, "which is where the expensive work is meant to be");
+  // Nothing is invented: a cycle that reports no efficiency block adds nothing but its own review and revision.
+  await w.snapshot(5);
+  await PL.submitCycle(w.t.db, w.jobRow, {
+    cycle: 5, prompt: "fixture", promptSource: "reviewer", reviewerProvider: "local:qwen2.5vl",
+    decision: "FIX_DEFECTS", nextPrompt: "continue", addresses: ["criterion:ac-pages"], evidence: EVIDENCE(true),
+    quality: weighted({ phase: "functionality", design: 40, functional: "fail", other: "pass" }), phase: "functionality",
+  });
+  const after = (await PH.phaseMetrics(w.t.db, w.job)).find((x) => x.phase === "functionality")!;
+  assert.equal(after.inference_calls, 9, "no tokens are guessed for a cycle that reported none");
+  assert.equal(after.reviews, 2, "but the review itself is still counted");
+});
+
 // ── Stall guard ───────────────────────────────────────────────────────────────────────────────────────────────────
 
 test("[PHASES] a design cycle that defers backend work is not escalated as \"no measurable progress\"", async () => {

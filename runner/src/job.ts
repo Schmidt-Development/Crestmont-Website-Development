@@ -743,6 +743,9 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     let bestCard: Scorecard | null = null;
     let regressions = 0;
     let idleCycles = 0;
+    // Where the last cycle's usage stood, so each submission reports the delta this cycle actually spent. Deltas,
+    // not cumulative totals, so the platform can attribute spend to the phase that incurred it.
+    const cycleUsage = { modelCalls: tracker.modelCalls, inputTokens: tracker.inputTokens, outputTokens: tracker.outputTokens, modelWallMs: tracker.modelWallMs, at: Date.now() };
     let lastVerdict: ReviewVerdict | null = null;
     // The final scorecard may use the reviewer's assessment only of the code that reviewer saw: after any repair that
     // was not reviewed again (the loop ended on its cycle limit), the review-based criteria have no evidence.
@@ -944,7 +947,18 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         const res = await client.submitCycle(job, { cycle, prompt: promptUsed, promptSource, evidence, decision: verdict.decision, addresses: verdict.addresses, nextPrompt: verdict.nextPrompt, reviewerProvider: reviewerName,
           builderModel: lastBuildModel, reviewerModel, routing: { builder: cycleRoute.slot, builderTask: cycleRoute.task, reason: cycleRoute.reason, reviewer: reviewerModel ? "A" : "rules" },
           quality: weighted, phase: buildPhase,
+          // Measured efficiency for THIS cycle, attributed to the phase that spent it. There is nowhere here to
+          // put an estimate, which is the point: a GPU saving that was not measured is not reported.
+          efficiency: {
+            inferenceCalls: tracker.modelCalls - cycleUsage.modelCalls,
+            inputTokens: tracker.inputTokens - cycleUsage.inputTokens,
+            outputTokens: tracker.outputTokens - cycleUsage.outputTokens,
+            elapsedMs: Date.now() - cycleUsage.at,
+            modelMs: tracker.modelWallMs - cycleUsage.modelWallMs,
+            rollbacks: revertedThisCycle ? 1 : 0,
+          },
           sessions: sessionRecords.splice(0) }).catch((err) => { if (err instanceof LeaseLostError) { markLeaseLost(); throw err; } throw err; });
+        Object.assign(cycleUsage, { modelCalls: tracker.modelCalls, inputTokens: tracker.inputTokens, outputTokens: tracker.outputTokens, modelWallMs: tracker.modelWallMs, at: Date.now() });
         // The platform owns the phase and the freeze, and it re-verified the card before answering. Whatever it
         // says is the phase from here on -- including a phase this runner would not have chosen.
         if (res?.phase && res.phase !== buildPhase) {
@@ -1096,7 +1110,11 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     if (qualityBlocked) {
       const w = finalWeighted;
       if (w?.waitingExternal) {
-        const pending = w.criteria.filter((c) => c.status === "pending_external").map((c) => `${c.id}: ${c.reason ?? "provider-side verification of the customer's own account"}`);
+        // Named from the flat card, which carries the human-readable criterion names: this list is shown to the
+        // Founder and to the customer as "what we are waiting for", and "External integrations: ..." says what
+        // "integrations: ..." does not.
+        const pending = (finalCard?.criteria ?? []).filter((c) => c.status === "pending_external")
+          .map((c) => `${c.name}: ${c.reason ?? "provider-side verification of the customer's own account"}`);
         return await finish("needs_information", { checks, preview, quality: w, missingInformation: pending });
       }
       const why = w
