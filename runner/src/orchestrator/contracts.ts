@@ -98,13 +98,48 @@ export interface ReviewVerdict {
   /** Corrective prompt for the same project worker (required for continuation decisions). */
   nextPrompt: string | null;
   /**
-   * The reviewer's own judgement of the subjective quality criteria (quality scorecard). Optional for compatibility;
-   * without it those criteria stay "unsupported" and the build cannot reach 10/10.
+   * The reviewer's own judgement of the subjective quality criteria (quality scorecard /1). Optional for
+   * compatibility; without it those criteria stay "unsupported".
    */
   assessment?: Partial<Record<"visual_design" | "brand_consistency" | "maintainability" | "customer_experience", { verdict: "pass" | "fail"; note?: string }>>;
+  /**
+   * The NUMERIC visual rubric: the whole of Category A (40 points), item by item.
+   *
+   * This replaces `assessment.visual_design` as the design signal, and the reason is arithmetic rather than taste.
+   * A binary visual_design PASS could move the old twenty-criterion score by at most 1/19 ≈ 0.5, so a website with
+   * a vertically stacked desktop navigation and no images at all certified at 9.4/10
+   * (bld_50e28bbd1cd033ad9ddfad02 revision 1-3). Forty points, scored per item with named deficiencies, is what
+   * makes a bad-looking website score badly.
+   *
+   * Absent ⇒ the design category is `insufficient_evidence`, worth 0, and cannot be certified. That is deliberate:
+   * a reviewer that did not score the rubric has not reviewed the design.
+   */
+  visualRubric?: VisualRubricItem[];
   /** Screenshots the reviewer actually received as images (set by the runner, never by the model). */
   imagesSeen?: number;
+  /**
+   * Whether the reviewing model can see images at all (set by the runner from the model's own capability, never by
+   * the model). A text-only reviewer must never be able to claim it visually inspected the finished design, so this
+   * is read from configuration rather than from an answer.
+   */
+  vision?: boolean;
+  /** The reviewer's name, for the record ("local:<model>", "deterministic"); set by the runner. */
+  reviewer?: string;
 }
+
+/** One visual rubric item as the reviewer scored it. `max` is fixed by the rubric and is not the model's to choose. */
+export interface VisualRubricItem {
+  id: "layout" | "typography" | "imagery" | "components" | "responsive" | "industry";
+  points: number;
+  note?: string;
+  /** The specific visual deficiencies behind a score below the maximum. A score without these is not evidence. */
+  deficiencies?: string[];
+}
+
+export const VISUAL_RUBRIC_ITEMS = Object.freeze([
+  { id: "layout", max: 8 }, { id: "typography", max: 6 }, { id: "imagery", max: 6 },
+  { id: "components", max: 7 }, { id: "responsive", max: 6 }, { id: "industry", max: 7 },
+] as const);
 
 export const REVIEW_JSON_SCHEMA = {
   type: "object", additionalProperties: false, required: ["decision", "addresses", "findings", "nextPrompt"],
@@ -115,6 +150,18 @@ export const REVIEW_JSON_SCHEMA = {
     assessment: {
       type: "object", additionalProperties: false,
       properties: Object.fromEntries(["visual_design", "brand_consistency", "maintainability", "customer_experience"].map((k) => [k, { type: "object", additionalProperties: false, required: ["verdict", "note"], properties: { verdict: { type: "string", enum: ["pass", "fail"] }, note: { type: "string" } } }])),
+    },
+    visualRubric: {
+      type: "array", minItems: 6, maxItems: 6,
+      items: {
+        type: "object", additionalProperties: false, required: ["id", "points", "note", "deficiencies"],
+        properties: {
+          id: { type: "string", enum: VISUAL_RUBRIC_ITEMS.map((i) => i.id) },
+          points: { type: "number" },
+          note: { type: "string" },
+          deficiencies: { type: "array", items: { type: "string" } },
+        },
+      },
     },
   },
 } as const;
@@ -130,7 +177,42 @@ export function parseVerdict(raw: unknown): ReviewVerdict | null {
     const v = a[k] as { verdict?: unknown; note?: unknown } | undefined;
     if (v && (v.verdict === "pass" || v.verdict === "fail")) assessment[k] = { verdict: v.verdict, note: typeof v.note === "string" ? v.note.slice(0, 500) : undefined };
   }
-  return { decision: o.decision as ReviewDecision, addresses: strs(o.addresses), findings: strs(o.findings), nextPrompt: typeof o.nextPrompt === "string" && o.nextPrompt.trim() ? o.nextPrompt.slice(0, 60000) : null, ...(Object.keys(assessment).length ? { assessment } : {}) };
+  return {
+    decision: o.decision as ReviewDecision, addresses: strs(o.addresses), findings: strs(o.findings),
+    nextPrompt: typeof o.nextPrompt === "string" && o.nextPrompt.trim() ? o.nextPrompt.slice(0, 60000) : null,
+    ...(Object.keys(assessment).length ? { assessment } : {}),
+    ...(() => { const r = parseVisualRubric(o.visualRubric); return r ? { visualRubric: r } : {}; })(),
+  };
+}
+
+/**
+ * Parse the numeric visual rubric, clamping every score to the item's own maximum.
+ *
+ * A model cannot award itself more than the rubric allows, cannot invent an item, and cannot score an item without
+ * naming its deficiencies when it is below the maximum: a bare "7/8" with no stated reason tells the builder
+ * nothing it can act on, so the point is withheld rather than taken on trust. Returns null when nothing usable came
+ * back, which leaves the design category at `insufficient_evidence` instead of 0-with-a-shrug.
+ */
+export function parseVisualRubric(raw: unknown): VisualRubricItem[] | null {
+  if (!Array.isArray(raw)) return null;
+  const seen = new Map<string, VisualRubricItem>();
+  for (const x of raw.slice(0, 12)) {
+    const o = x && typeof x === "object" ? x as Record<string, unknown> : null;
+    const item = VISUAL_RUBRIC_ITEMS.find((i) => i.id === String(o?.id));
+    if (!o || !item || seen.has(item.id)) continue;
+    const n = typeof o.points === "number" && Number.isFinite(o.points) ? Math.max(0, Math.min(item.max, o.points)) : 0;
+    const deficiencies = (Array.isArray(o.deficiencies) ? o.deficiencies : []).filter((d): d is string => typeof d === "string" && d.trim().length > 2).map((d) => d.slice(0, 400)).slice(0, 10);
+    const note = typeof o.note === "string" ? o.note.slice(0, 600) : undefined;
+    // Full marks need no deficiencies. A score below the maximum with no named deficiency and no note is a number
+    // with nothing behind it, so it scores 0 for that item and says why.
+    const unexplained = n < item.max && !deficiencies.length && !note;
+    seen.set(item.id, {
+      id: item.id, points: unexplained ? 0 : Math.round(n * 2) / 2,
+      note: unexplained ? "scored below the maximum with no stated deficiency, so the item has no evidence" : note,
+      deficiencies,
+    });
+  }
+  return seen.size ? [...seen.values()] : null;
 }
 
 /** Outstanding work the evidence shows (same rule as the platform's referee). */

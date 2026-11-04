@@ -1,10 +1,33 @@
-# AI Builds — runner protocol (v1.1; additive revisions to v1.5)
+# AI Builds — runner protocol (v1.2; additive revisions to v1.6)
 
 The Crestmont Worker is the **control plane** (eligibility, queue, leases, budgets, state, owner controls, records).
 Coding runs in a separate **build runner** (Node 22 process) that pulls work over HTTPS. By default it uses a
 self-hosted model (local provider, `WINDOWS-SUPERCOMPUTER.md`). The official Claude Agent SDK is an optional, paid
 adapter. Workers cannot host either (they need a writable filesystem, git, package managers and containers), so the
 runner runs on a machine the Founder provisions (see `RUNNER-SETUP.md`).
+
+## Runner 1.2.0 — the design-first phase protocol (v1.6, additive)
+
+The runner reports a **weighted scorecard** (`crestmont.quality-scorecard/2`: Visual Design 40 + Functionality 40 +
+Remaining 20; see `QUALITY-ENGINE.md`) and **receives its build phase from the platform**, which owns the phase
+machine and the design freeze.
+
+- `claim` → `job.phase`: `design | design_locked | functionality | final_qa | waiting | complete`. Read, never
+  chosen by the runner, so a restarted container or a resumed segment comes back to the recorded phase. Absent on
+  an older platform ⇒ treat as `design`.
+- `claim` → `job.designFreeze`: `{ revision, commitSha, designPoints, sourceFingerprint, certifiedAt }` or `null` —
+  the approved visual baseline in force. Present only once the platform has verified a freeze.
+- `cycles/submit` body gains `quality` (the weighted scorecard for this cycle) and `phase` (the phase the runner
+  believes it is in, for the record).
+- `cycles/submit` response gains `phase` (the phase the build is in **after** this cycle), `phaseBlockers` (why it
+  is not further on), `designFrozen`, and `points` — the platform's own recomputed
+  `{design, functionality, other, total}`, so the runner ratchets on verified numbers rather than its own.
+- `complete` `quality` accepts either schema. A 1.1.0 runner's `/1` card is still verified and stored, labelled as
+  legacy scoring; it simply cannot reach the new 100/100 eligibility. **A platform expecting design-first builds
+  therefore needs a runner at 1.2.0 or above** — a successful Worker deploy does not by itself update Node 1.
+- The browser check now renders desktop (1366), tablet (768) and mobile (390) and takes
+  `--visual-out .crestmont/quality/visual.json` (both paths POSIX literals: the command runs inside the Linux build
+  container whatever the runner host is).
 
 Runner 1.1.0 notes (no wire change): with the local provider, `runCostUsd` is always `0`, `sessionId` is
 `local-<hex>`, `limits.model` is ignored in favour of the runner's `LOCAL_MODEL` (named in the owner report), and

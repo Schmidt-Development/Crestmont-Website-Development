@@ -18,7 +18,9 @@ import { alert, badge, dl, emptyState, kpi, linkButton, pageHead, table } from "
 import { staffPage } from "./crm.ts";
 import * as B from "../services/builds.ts";
 import * as BR from "../services/build-revisions.ts";
-import { latestQuality } from "../services/build-quality.ts";
+import { latestQuality, type QualityRow } from "../services/build-quality.ts";
+import * as PH from "../services/build-phases.ts";
+import { PHASE_LABEL, SCORECARD_V2_SCHEMA } from "../domain/quality-rubric.ts";
 import { selectionForJob } from "../services/design-gallery.ts";
 
 const VIEWPORTS = { desktop: { w: 1440, h: 900, label: "Desktop" }, tablet: { w: 820, h: 1180, label: "Tablet" }, mobile: { w: 390, h: 844, label: "Mobile" } } as const;
@@ -38,6 +40,158 @@ const score = (n: number | null | undefined) => (n === null || n === undefined ?
  * showed this value as a percentage; this agrees with it.
  */
 const cycleScore = (n: number | null | undefined) => (n === null || n === undefined ? "—" : `${Math.round(n * 100)}% of checks`);
+
+/** Category points, as the weighted scorecard records them. "—" means not measured, which is not the same as 0. */
+const pts = (n: number | null | undefined, max: number) => (n === null || n === undefined ? "—" : `${n.toFixed(1)}/${max}`);
+const catTone = (n: number | null | undefined, max: number) => (n === null || n === undefined ? "muted" : n >= max - 0.05 ? "ok" : n >= max * 0.75 ? "warn" : "bad");
+
+const VISUAL_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  layout: "Layout composition, spacing, hierarchy, alignment", typography: "Typography, branding, colour harmony",
+  imagery: "Imagery: selection, relevance, presentation", components: "Component polish and interaction states",
+  responsive: "Responsive quality (desktop, tablet, mobile)", industry: "Industry fit, distinctiveness, premium feel",
+});
+const FUNCTIONAL_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  frontend: "Frontend controls, navigation, forms, interactions", backend: "Backend APIs, validation, business logic",
+  data: "Database persistence, permissions, authenticated features", journeys: "Tested end-to-end customer and admin journeys",
+  integrations: "External service integration correctness",
+});
+const OTHER_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  security: "Security and privacy", accessibility: "Accessibility", performance: "Performance",
+  seo: "SEO and search presentation", reliability: "Reliability and error handling", deployment: "Deployment readiness and maintainability",
+});
+
+interface RubricJson {
+  design?: { items?: RubricItemJson[]; state?: string; reason?: string | null };
+  functionality?: { items?: RubricItemJson[]; state?: string; reason?: string | null };
+  other?: { items?: RubricItemJson[]; state?: string; reason?: string | null };
+  visualFailures?: { id: string; detail: string; cap: number }[];
+  viewports?: string[];
+  review?: { reviewer: string; imagesSeen: number; vision: boolean } | null;
+}
+interface RubricItemJson { id: string; points: number; max: number; applicable: boolean; note: string | null }
+
+/**
+ * The quality-category card: where the Founder reads what a website is actually worth.
+ *
+ * It exists because this page could previously show "9.4/10" for a website whose desktop navigation rendered as a
+ * vertical column and which carried no images at all. One number over twenty near-equal checks cannot say that;
+ * three categories, with the design one broken into its six scored items and every shortfall named, can.
+ */
+function categoryCard(q: QualityRow | null, phase: string, freeze: PH.FreezeRow | null, mstones: Awaited<ReturnType<typeof PH.milestones>>): SafeHtml {
+  if (!q) {
+    return html`<section class="card"><h2 class="card__title">Quality categories</h2>
+${emptyState("No scorecard yet", "The runner reports a scorecard after its first review cycle. Until then there is nothing measured to show.")}</section>`;
+  }
+  if (q.schema_version !== SCORECARD_V2_SCHEMA) {
+    // A legacy card is shown as what it is. It is NOT re-expressed as 40/40/20: the twenty flat criteria never
+    // measured the three categories, and splitting them now would invent a visual score the build never earned.
+    return html`<section class="card"><h2 class="card__title">Quality categories</h2>
+${alert("warn", html`<strong>Legacy scorecard (${q.schema_version}).</strong> This build was scored by the earlier
+ engine: twenty near-equal pass/fail criteria, of which professional visual design was one. Its ${String(q.score)}/10
+ is kept for history and is <strong>not</strong> a result under the weighted visual rubric — it was never measured
+ against it, and no category breakdown exists for it.`)}
+<p>${String(q.passed)} of ${String(q.applicable)} applicable criteria passed. ${q.eligible ? badge("ok", "Was eligible under the old 10/10 rule") : badge("muted", "Was not eligible")}</p></section>`;
+  }
+  let rubric: RubricJson = {};
+  try { rubric = JSON.parse(q.rubric_json) as RubricJson; } catch { rubric = {}; }
+  let blockers: string[] = [];
+  try { blockers = JSON.parse(q.design_blockers_json) as string[]; } catch { blockers = []; }
+  const items = (c: { items?: RubricItemJson[] } | undefined, labels: Readonly<Record<string, string>>) =>
+    table((c?.items ?? []).filter((i) => i.applicable), [
+      { header: "Item", cell: (i: RubricItemJson) => labels[i.id] ?? i.id },
+      { header: "Points", cell: (i: RubricItemJson) => badge(catTone(i.points, i.max), `${i.points.toFixed(1)}/${i.max}`) },
+      { header: "What is short", cell: (i: RubricItemJson) => i.note ?? (i.points >= i.max - 0.05 ? "—" : "no reason recorded") },
+    ], { empty: emptyState("Nothing applicable", "No item of this category is in the approved scope.") });
+
+  return html`<section class="card"><h2 class="card__title">Quality categories</h2>
+<div class="kpis">
+  ${kpi("Visual design", pts(q.design_points, 40), rubric.design?.state === "scored" ? "scored from browser screenshots" : (rubric.design?.reason ?? "not measured"))}
+  ${kpi("Frontend + backend", pts(q.functionality_points, 40), rubric.functionality?.reason ?? "scored from the acceptance evidence")}
+  ${kpi("Remaining quality", pts(q.other_points, 20), rubric.other?.reason ?? "security, accessibility, performance, SEO, reliability, deployment")}
+  ${kpi("Overall", `${(q.total_points ?? 0).toFixed(1)}/100`, `= ${String(q.score)}/10 · informational aggregate, not the phase signal`)}
+  ${kpi("Active phase", PHASE_LABEL[phase as keyof typeof PHASE_LABEL] ?? phase, freeze ? `design frozen at revision ${freeze.revision_attempt}-${freeze.revision_cycle}` : "no design freeze yet")}
+  ${kpi("Design certified", q.design_certified ? "Yes" : "No", q.design_certified ? `${pts(q.design_points, 40)}, every item at its maximum` : `${String(blockers.length)} blocker(s)`)}
+</div>
+${q.verified ? "" : alert("error", html`<strong>This scorecard failed the platform's own verification</strong>, so none of it may be treated as certified: ${(JSON.parse(q.verification_problems_json) as string[]).slice(0, 5).join("; ")}`)}
+${rubric.review && rubric.review.vision
+  ? html`<p class="faint">Visual design reviewed by <code>${rubric.review.reviewer}</code> from ${String(rubric.review.imagesSeen)} screenshot(s); viewports evidenced: ${(rubric.viewports ?? []).join(", ") || "none"}.</p>`
+  : alert("warn", "No vision-capable reviewer inspected this website, so the visual design is recorded as unverified rather than scored. A text-only review of a visual product is not a visual review.")}
+${(rubric.visualFailures ?? []).length ? alert("error", html`<strong>Hard visual failures, each capping the design category:</strong>
+ <ul>${(rubric.visualFailures ?? []).map((f) => html`<li>${f.detail} — caps the category at ${String(f.cap)}/40</li>`)}</ul>`) : ""}
+${blockers.length ? alert("warn", html`<strong>Why the design is not certified:</strong> <ul>${blockers.slice(0, 12).map((b) => html`<li>${b}</li>`)}</ul>`) : ""}
+<h3>Visual design — 40 points</h3>${items(rubric.design, VISUAL_LABELS)}
+<h3>Frontend and backend — 40 points</h3>${items(rubric.functionality, FUNCTIONAL_LABELS)}
+<h3>Remaining quality — 20 points</h3>${items(rubric.other, OTHER_LABELS)}
+${freeze ? html`<h3>Design freeze</h3>${dl([
+  ["Approved revision", html`<code>${`${freeze.revision_attempt}-${freeze.revision_cycle}`}</code>`],
+  ["Design score at certification", pts(freeze.design_points, 40)],
+  ["Commit", freeze.commit_sha ? html`<code>${freeze.commit_sha.slice(0, 12)}</code>` : "—"],
+  ["Reviewer", html`<code>${freeze.reviewer}</code> · ${String(freeze.images_seen)} screenshot(s)`],
+  ["Viewports", (JSON.parse(freeze.viewports_json) as string[]).join(", ") || "—"],
+  ["Certified", formatDateTime(freeze.certified_at)],
+  ["Platform verified", freeze.platform_verified ? badge("ok", "Yes") : badge("bad", "No — the functionality gate stays shut")],
+  ["Still in force", freeze.invalidated_at ? badge("bad", `Invalidated ${formatDateTime(freeze.invalidated_at)}`) : badge("ok", "Yes")],
+  ["Invalidated because", freeze.invalidated_reason ?? "—"],
+])}` : ""}
+${mstones.length ? html`<h3>Phase history</h3>${table(mstones, [
+  { header: "Phase", cell: (m) => PHASE_LABEL[m.phase] ?? m.phase },
+  { header: "", cell: (m) => (m.entered ? badge("ok", "Entered") : badge("muted", "Gate stayed shut")) },
+  { header: "Cycle", cell: (m) => (m.cycle === null ? "—" : String(m.cycle)) },
+  { header: "Design / Func / Other", cell: (m) => `${pts(m.design_points, 40)} · ${pts(m.functionality_points, 40)} · ${pts(m.other_points, 20)}` },
+  { header: "Why", cell: (m) => m.reason },
+  { header: "When", cell: (m) => formatDateTime(m.created_at) },
+], { empty: emptyState("No phase history", "Nothing recorded yet.") })}` : ""}
+<p class="faint">Visual design and working functionality are 80 of the 100 points, because those are what a customer
+ buys. Internal approval needs a verified 40/40 + 40/40 + 20/20 with every category actually measured: there are no
+ compensating scores, so a strong total cannot carry a weak design and a perfect design cannot carry unfinished
+ backend work.</p></section>`;
+}
+
+/**
+ * How two revisions compare, category by category.
+ *
+ * The framing matters as much as the numbers. A falling overall score with a rising design score is DESIGN
+ * PROGRESS, not a failed repair, and during the design phase it is exactly what the architecture asks for — so the
+ * page says that instead of colouring the comparison red because the total went down.
+ */
+function compareCategories(a: BR.RevisionRow, b: BR.RevisionRow): SafeHtml {
+  const rows = [
+    { label: "Visual design", max: 40, from: b.design_points, to: a.design_points },
+    { label: "Frontend + backend", max: 40, from: b.functionality_points, to: a.functionality_points },
+    { label: "Remaining quality", max: 20, from: b.other_points, to: a.other_points },
+  ];
+  const measured = rows.filter((r) => r.from !== null && r.to !== null);
+  if (!measured.length) {
+    // A revision stored before the weighted scorecard existed has no category breakdown, and one is not invented
+    // for it. Its overall score is still comparable, so that is what is shown -- the Founder is not left with
+    // nothing because the revision predates the rubric.
+    const both = a.score !== null && b.score !== null;
+    return html`<p class="faint">Neither revision has a weighted category breakdown: both were scored before the
+     weighted rubric existed, and a design/functionality split is not invented for them.</p>
+${alert(both ? (a.score! > b.score! ? "success" : a.score! < b.score! ? "warn" : "info") : "info",
+  both
+    ? `Overall score (legacy scoring): ${score(b.score)} → ${score(a.score)} (${a.score === b.score ? "unchanged" : a.score! > b.score! ? `+${(a.score! - b.score!).toFixed(1)} better` : `${(a.score! - b.score!).toFixed(1)} worse`}).`
+    : "One of these revisions has no recorded score, so the two cannot be compared on quality.")}`;
+  }
+  const delta = (r: { from: number | null; to: number | null }) => (r.from === null || r.to === null ? null : Math.round((r.to - r.from) * 10) / 10);
+  const design = delta(rows[0]);
+  const totalFrom = measured.reduce((s, r) => s + (r.from ?? 0), 0);
+  const totalTo = measured.reduce((s, r) => s + (r.to ?? 0), 0);
+  const designProgress = design !== null && design > 0.05 && totalTo < totalFrom - 0.05;
+  return html`${table(rows, [
+    { header: "Category", cell: (r) => r.label },
+    { header: "Before", cell: (r) => pts(r.from, r.max) },
+    { header: "After", cell: (r) => pts(r.to, r.max) },
+    { header: "Change", cell: (r) => { const d = delta(r); return d === null ? "—" : d === 0 ? badge("muted", "unchanged") : badge(d > 0 ? "ok" : "bad", `${d > 0 ? "+" : ""}${d.toFixed(1)}`); } },
+  ], { empty: emptyState("No categories", "") })}
+${designProgress
+  ? alert("success", html`<strong>Design progress.</strong> The visual design improved by ${design.toFixed(1)} points
+     while the measured total fell from ${totalFrom.toFixed(1)} to ${totalTo.toFixed(1)}. During the design phase that
+     is the intended trade: backend functionality is deliberately deferred, and a better design is never discarded
+     because deferred backend points dropped.`)
+  : alert(totalTo > totalFrom + 0.05 ? "success" : totalTo < totalFrom - 0.05 ? "warn" : "info",
+      `Measured total: ${totalFrom.toFixed(1)} → ${totalTo.toFixed(1)} of ${measured.reduce((s, r) => s + r.max, 0)} points.`)}`;
+}
 
 function elapsed(from: string, to: string | null): string {
   const ms = (to ? Date.parse(to) : Date.now()) - Date.parse(from);
@@ -82,6 +236,11 @@ export function register(r: Router): void {
     const cycles = (await ctx.db.prepare(`SELECT cycle, decision, decision_reason, score, builder_model, reviewer_model, next_prompt, findings_json, created_at
       FROM build_cycles WHERE job_id = ? ORDER BY cycle`).bind(j.id).all<{ cycle: number; decision: string | null; decision_reason: string | null; score: number | null; builder_model: string | null; reviewer_model: string | null; next_prompt: string | null; findings_json: string | null; created_at: string }>()).results;
     const q = await latestQuality(ctx.db, j.id);
+    const phaseRow = await PH.phaseOf(ctx.db, j.id);
+    // The freeze is read whether or not it is still in force: "this design WAS certified and then stopped holding,
+    // for this reason" is exactly what the Founder needs to see, and activeFreeze() would hide it.
+    const freeze = (await PH.freezeHistory(ctx.db, j.id))[0] ?? null;
+    const mstones = await PH.milestones(ctx.db, j.id);
     const gallery = await selectionForJob(ctx.db, j.id);
     const vp = viewportOf(ctx);
     const active = ACTIVE.includes(j.state as BuildState);
@@ -123,15 +282,19 @@ ${active ? alert("info", html`This build is running: the page refreshes itself e
   ${kpi("Latest cycle", cycleScore(latestCycle?.score ?? null), "checks passed in the newest review cycle")}
   ${kpi("Best verified", score(best?.score ?? null), best ? revLabel(best) : "no verified revision yet")}
   ${kpi("Revisions stored", String(revisions.length), "inspectable below")}
-  ${kpi("Certification", q ? (q.eligible ? "Eligible" : q.waiting_external ? "Waiting on customer setup" : "Not eligible") : "No scorecard yet", q ? `${q.score}/10 · ${q.passed}/${q.applicable} criteria` : undefined)}
+  ${kpi("Certification", q ? (q.eligible ? "Eligible" : q.waiting_external ? "Waiting on customer setup" : "Not eligible") : "No scorecard yet",
+    q ? (q.schema_version === SCORECARD_V2_SCHEMA ? `${(q.total_points ?? 0).toFixed(1)}/100 · needs 40+40+20` : `${q.score}/10 · legacy scoring · ${q.passed}/${q.applicable} criteria`) : undefined)}
+  ${kpi("Active phase", PHASE_LABEL[phaseRow.build_phase], freeze && !freeze.invalidated_at ? `design frozen at ${freeze.revision_attempt}-${freeze.revision_cycle}` : "design not frozen")}
 </div>
 ${dl([["Builder job", html`<code>${j.id}</code>`], ["Order", j.order_id ? html`<code>${j.order_id}</code>` : "—"],
   ["Builder model", latestCycle?.builder_model ?? "—"], ["Reviewer model", latestCycle?.reviewer_model ?? "—"],
   ["Acceptance verdict", j.ai_acceptance ?? "not decided"], ["Source commit", j.source_commit ? html`<code>${j.source_commit.slice(0, 12)}</code>` : "—"]])}
 </section>`;
 
+    const categories = categoryCard(q, phaseRow.build_phase, freeze, mstones);
+
     if (!current || !detail) {
-      return staffPage(ctx, "AI build preview", html`${head}
+      return staffPage(ctx, "AI build preview", html`${head}${categories}
 <section class="card"><h2 class="card__title">Website preview</h2>
 ${emptyState("No revision stored yet", active
   ? "Node 1 stores a snapshot of the website as soon as the first build phase finishes. This page will show it once that happens."
@@ -139,14 +302,19 @@ ${emptyState("No revision stored yet", active
 </section>`);
     }
 
-    const body = html`${head}
+    const body = html`${head}${categories}
 <section class="card"><h2 class="card__title">Website preview — ${revLabel(current)}</h2>
 <p class="faint">The generated frontend itself, served from the stored snapshot. Its URLs are pointed at this preview's
  path so the stylesheet and in-page links work; the stored bytes are unchanged and every file is listed below.
  The generated <strong>backend is not deployed here</strong>, so forms will not submit in this frame — what the backend
  actually does is evidenced by the runner's gates and persistence check on the build record.</p>
 ${current.reverted ? alert("warn", html`<strong>This revision was rolled back by the repair ratchet.</strong> ${current.reverted_reason ?? ""}`) : ""}
-${current.is_best ? alert("success", "This is the best verified revision the build reached.") : ""}
+${current.is_best ? alert("success", "This is the best verified revision the build reached in its phase.") : ""}
+${current.is_design_baseline ? alert("success", "This snapshot is the FROZEN DESIGN BASELINE: the authoritative visual result all later functional work must preserve.") : ""}
+${current.design_points !== null ? html`<p class="row">${badge(catTone(current.design_points, 40), `Design ${pts(current.design_points, 40)}`)}
+ ${badge(catTone(current.functionality_points, 40), `Frontend + backend ${pts(current.functionality_points, 40)}`)}
+ ${badge(catTone(current.other_points, 20), `Remaining ${pts(current.other_points, 20)}`)}
+ ${current.build_phase ? badge("info", `Phase: ${PHASE_LABEL[current.build_phase as keyof typeof PHASE_LABEL] ?? current.build_phase}`) : ""}</p>` : ""}
 ${tokens.size ? "" : alert("error", html`<strong>The website below cannot be rendered.</strong> Serving a sandboxed
  preview needs a signing secret, and neither <code>BUILD_PREVIEW_FILE_SECRET</code> nor <code>BUILD_RUNNER_SECRET</code>
  is configured on this environment. The stored files are still listed below and can be opened individually.`)}
@@ -161,10 +329,7 @@ ${compareTo
 <div><h3>${revLabel(current)} · ${score(current.score)}</h3>${frame(renderFor(current, page), vp, `${revLabel(current)} preview`)}</div>
 <div><h3>${revLabel(compareTo)} · ${score(compareTo.score)}</h3>${frame(renderFor(compareTo, page), vp, `${revLabel(compareTo)} preview`)}</div>
 </div>
-${alert(current.score !== null && compareTo.score !== null ? (current.score > compareTo.score ? "success" : current.score < compareTo.score ? "warn" : "info") : "info",
-  current.score !== null && compareTo.score !== null
-    ? `Quality score: ${score(compareTo.score)} → ${score(current.score)} (${current.score === compareTo.score ? "unchanged" : current.score > compareTo.score ? `+${(current.score - compareTo.score).toFixed(1)} better` : `${(current.score - compareTo.score).toFixed(1)} worse`}).`
-    : "One of these revisions has no recorded score, so the two cannot be compared on quality.")}`
+${compareCategories(current, compareTo)}`
   : frame(renderFor(current, page), vp, `${revLabel(current)} preview`)}
 </section>
 
@@ -172,12 +337,17 @@ ${alert(current.score !== null && compareTo.score !== null ? (current.score > co
 <p class="faint">Every revision Node 1 stored, oldest first. Snapshots are immutable: a later cycle never overwrites an
  earlier one, so a revision the ratchet rolled back is still here to inspect.</p>
 ${table(revisions, [
-  { header: "Revision", cell: (x) => html`${revLabel(x)}<br><span class="faint">${formatDateTime(x.created_at)}</span>` },
-  { header: "Score", cell: (x) => score(x.score) },
+  { header: "Revision", cell: (x) => html`${revLabel(x)}<br><span class="faint">${formatDateTime(x.created_at)}</span>${x.build_phase ? html`<br><span class="faint">phase: ${PHASE_LABEL[x.build_phase as keyof typeof PHASE_LABEL] ?? x.build_phase}</span>` : ""}` },
+  // The categories, not only the total: a revision whose design rose while deferred backend points fell is
+  // progress, and a single overall figure makes it look like a regression.
+  { header: "Design", cell: (x) => badge(catTone(x.design_points, 40), pts(x.design_points, 40)) },
+  { header: "Front + back", cell: (x) => badge(catTone(x.functionality_points, 40), pts(x.functionality_points, 40)) },
+  { header: "Remaining", cell: (x) => badge(catTone(x.other_points, 20), pts(x.other_points, 20)) },
+  { header: "Overall", cell: (x) => score(x.score) },
   { header: "Decision", cell: (x) => x.decision ?? "—" },
   // A rolled-back revision carries its reason here, not only when it happens to be the one on screen: "show why the
   // repair was rejected" is the whole point of keeping it.
-  { header: "State", cell: (x) => html`${x.is_best ? badge("ok", "Best verified") : ""} ${x.reverted ? badge("bad", "Rolled back") : ""}${!x.is_best && !x.reverted ? badge("muted", "Superseded") : ""}${x.reverted && x.reverted_reason ? html`<br><span class="faint">${x.reverted_reason}</span>` : ""}` },
+  { header: "State", cell: (x) => html`${x.is_design_baseline ? badge("ok", "Frozen design baseline") : ""} ${x.is_best ? badge("ok", "Best verified") : ""} ${x.reverted ? badge("bad", "Rolled back") : ""}${!x.is_best && !x.reverted && !x.is_design_baseline ? badge("muted", "Superseded") : ""}${x.reverted && x.reverted_reason ? html`<br><span class="faint">${x.reverted_reason}</span>` : ""}` },
   { header: "Files", cell: (x) => `${x.file_count} (${Math.round(x.total_bytes / 1024)} KB)` },
   { header: "", cell: (x) => html`${revKey(x) === revKey(current) ? badge("info", "Shown") : linkButton("Inspect", `/staff/builds/${j.id}/inspect?rev=${revKey(x)}&vp=${vp}`, "ghost", "sm")}
  ${revKey(x) === revKey(current) ? "" : linkButton("Compare", `/staff/builds/${j.id}/inspect?rev=${revKey(current)}&vp=${vp}&cmp=${revKey(x)}`, "ghost", "sm")}` },

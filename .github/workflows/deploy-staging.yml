@@ -182,6 +182,36 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: $WRANGLER d1 migrations apply crestmont-staging --remote --env staging
 
+      # A migration that "applied" without creating what the code reads is a deploy that fails later, at the first
+      # build cycle, with a SQL error the Founder sees instead of a scorecard. So the design-first schema is
+      # asserted here, against the real staging database, before the Worker that depends on it goes out.
+      - name: Design-first schema verification (the weighted scorecard and phase machine have somewhere to live)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -uo pipefail
+          n_of() { $WRANGLER d1 execute crestmont-staging --env staging --remote --json --command "$1" > q.json 2>q.err \
+            || { sed -e 's/\x1b\[[0-9;]*m//g' q.err | tail -3; return 1; }; sed -n '/^\[/,$p' q.json | grep -oE '"n": *[0-9]+' | head -1 | tr -dc '0-9'; }
+          missing=0
+          for tbl in build_design_freezes build_phase_milestones build_phase_metrics; do
+            n=$(n_of "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='$tbl'") || n=""
+            if [ "${n:-0}" = "1" ]; then echo "table $tbl: present"; else echo "::error title=Design-first schema::table $tbl is missing after migrations"; missing=1; fi
+          done
+          for pair in build_jobs:build_phase build_jobs:design_freeze_id build_quality:schema_version \
+                      build_quality:design_points build_quality:rubric_json build_quality:design_blockers_json \
+                      build_cycles:primary_progress build_cycles:milestone \
+                      build_revisions:design_points build_revisions:is_design_baseline; do
+            tbl=${pair%%:*}; col=${pair##*:}
+            n=$(n_of "SELECT COUNT(*) AS n FROM pragma_table_info('$tbl') WHERE name='$col'") || n=""
+            if [ "${n:-0}" = "1" ]; then echo "$tbl.$col: present"; else echo "::error title=Design-first schema::$tbl.$col is missing after migrations"; missing=1; fi
+          done
+          # Historical rows must still be labelled legacy scoring, never silently reinterpreted as weighted ones.
+          legacy=$(n_of "SELECT COUNT(*) AS n FROM build_quality WHERE schema_version <> 'crestmont.quality-scorecard/2' AND (design_points IS NOT NULL OR total_points IS NOT NULL)") || legacy=""
+          if [ -n "$legacy" ] && [ "$legacy" != "0" ]; then echo "::error title=Design-first schema::$legacy legacy scorecard row(s) carry weighted category points they never earned"; missing=1; fi
+          [ "$missing" = "0" ] || exit 1
+          echo "Design-first schema verified on staging: 3 tables, 10 columns, no backfilled legacy scores."
+
       - name: Deploy Worker (staging, public website)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
