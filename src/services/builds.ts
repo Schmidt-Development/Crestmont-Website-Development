@@ -15,6 +15,7 @@ import {
 } from "../domain/builds.ts";
 import { audit } from "./security.ts";
 import { assertQualityForApproval, recordQuality } from "./build-quality.ts";
+import type { BuildPhase } from "../domain/quality-rubric.ts";
 
 import { redact } from "./monitoring.ts";
 import { getOnboarding, allFields, isVisible, type Answers } from "./onboarding.ts";
@@ -547,6 +548,20 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
         // What the owner-approved Design Gallery gave this build, and why. Null when the gallery is empty or
         // unreachable: the runner then says so in its evidence instead of implying references it never had.
         design,
+        // Design-first phase (protocol v1.6). The platform owns the phase and the freeze; the runner reads them.
+        // A resumed segment, a replaced container or a restarted runner therefore comes back to the phase that was
+        // recorded rather than restarting its design work, which is the whole point of persisting it.
+        ...(await (async () => {
+          const p = await db.prepare(`SELECT build_phase FROM build_jobs WHERE id = ?`).bind(job.id).first<{ build_phase: string }>();
+          const f = await db.prepare(`SELECT f.revision_attempt, f.revision_cycle, f.commit_sha, f.design_points, f.source_fingerprint, f.certified_at
+              FROM build_jobs j JOIN build_design_freezes f ON f.id = j.design_freeze_id
+              WHERE j.id = ? AND f.invalidated_at IS NULL AND f.platform_verified = 1`).bind(job.id)
+            .first<{ revision_attempt: number; revision_cycle: number; commit_sha: string | null; design_points: number; source_fingerprint: string | null; certified_at: string }>();
+          return {
+            phase: (p?.build_phase ?? "design") as BuildPhase,
+            designFreeze: f ? { revision: `${f.revision_attempt}-${f.revision_cycle}`, commitSha: f.commit_sha, designPoints: f.design_points, sourceFingerprint: f.source_fingerprint, certifiedAt: f.certified_at } : null,
+          };
+        })()),
       },
     };
   }
@@ -743,13 +758,22 @@ export async function completeJob(db: Db, b: Record<string, unknown>, notify?: (
   let reason: string;
   let extra: Record<string, unknown> = {};
   // Quality engine: every reported scorecard is verified and stored; a quality-required build cannot be delivered
-  // to internal approval without a verified, eligible (10/10) one. There is no exception per package.
-  const quality = b.quality !== undefined && b.quality !== null ? await recordQuality(db, job, outcome, b.quality) : null;
+  // to internal approval without a verified, eligible one. There is no exception per package. A weighted card
+  // (schema /2) is eligible only at 100/100 with every category measured; a legacy card at a verified 10/10.
+  //
+  // The newest stored snapshot of this attempt is passed in so the platform can check the card's viewport claims
+  // against the screenshot files that snapshot actually holds, rather than believing them.
+  const snapshot = b.quality !== undefined && b.quality !== null
+    ? await db.prepare(`SELECT attempt, cycle FROM build_revisions WHERE job_id = ? AND attempt = ? ORDER BY cycle DESC LIMIT 1`).bind(job.id, job.attempts).first<{ attempt: number; cycle: number }>()
+    : null;
+  const quality = b.quality !== undefined && b.quality !== null ? await recordQuality(db, job, outcome, b.quality, { revision: snapshot }) : null;
   if (outcome === "ready_for_review" && job.quality_required && (!quality || !quality.eligible)) {
     to = "failed";
     reason = !quality ? "Quality engine: the build reported no quality scorecard; it cannot enter internal approval"
       : !quality.ok ? `Quality engine: the scorecard failed the platform's verification (${quality.problems.slice(0, 3).join("; ")})`
-      : `Quality engine: ${quality.score}/10 within the approved scope; only a verified 10/10 can enter internal approval`;
+      : quality.version === 2
+        ? `Quality engine: ${quality.totalPoints}/100 — visual design ${quality.design.points}/40, frontend and backend ${quality.functionality.points}/40, remaining quality ${quality.other.points}/20; only a verified 100/100 can enter internal approval${quality.releaseBlockers.length ? ` (${quality.releaseBlockers.slice(0, 2).join("; ")})` : ""}`
+        : `Quality engine: ${quality.score}/10 within the approved scope; only a verified 10/10 can enter internal approval`;
     extra = { activity_state: null };
     await db.prepare(`UPDATE build_runs SET ended_at = ?, outcome = 'failed', error = ? WHERE job_id = ? AND attempt = ?`).bind(at, reason, job.id, job.attempts).run();
     const ok = await transition(db, job, to, reason, { kind: "runner" }, { ...common, preview_url: job.preview_url, preview_name: job.preview_name, preview_gated: job.preview_gated, ...extra });

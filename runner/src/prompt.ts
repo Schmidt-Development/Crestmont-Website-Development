@@ -9,6 +9,83 @@ import { BRIEF_RULES } from "./protocol.ts";
 
 export type Phase = "plan" | "build" | "verify" | "repair";
 
+/** The design-first build phase the platform has this job in (protocol v1.6). */
+export type BuildPhase = "design" | "design_locked" | "functionality" | "final_qa" | "waiting" | "complete";
+
+/**
+ * What the builder is working on in this phase, and what it must NOT spend turns on.
+ *
+ * The directive this implements is "do not optimise a mediocre frontend's backend". The scoring that enforces it is
+ * Visual Design 40 + Functionality 40 + Remaining 20, so a design-phase cycle that ships a working booking API
+ * behind an unfinished homepage scores worse than one that ships the homepage with a mocked booking widget. These
+ * blocks say that out loud, so the model does not have to infer it from the scorecard.
+ */
+export function buildPhaseBlock(p: BuildPhase, freeze: { revision: string; designPoints: number } | null, plan?: PhasePlanLike | null): string {
+  const frozen = freeze ? `The approved design is FROZEN at revision ${freeze.revision} (${freeze.designPoints}/40). ` : "";
+  // The architect's own split for THIS website, where it has one. A specification written before phasePlan existed
+  // has none, and then the phase block says what the phase is for without naming this website's deliverables --
+  // which is the honest fallback, rather than inventing a list.
+  const from = (items: string[], heading: string) => (items.length ? `\n${heading}\n${items.map((x) => `  - ${x}`).join("\n")}` : "");
+  const section = (() => {
+    if (!plan) return "";
+    if (p === "design") {
+      return from(plan.designDeliverables ?? [], "This website's design deliverables (the architect's own list):")
+        + ((plan.designDependentInteractions ?? []).length
+          ? `\nInteractions whose APPEARANCE the design is scored on, with the mock that shows each state:\n${(plan.designDependentInteractions ?? []).map((i) => `  - ${i.component} — states: ${i.states.join(", ")}; mock: ${i.mock}`).join("\n")}`
+          : "")
+        + ((plan.deferredBackend ?? []).length
+          ? `\nDeliberately DEFERRED to the functionality phase; do not build these now:\n${(plan.deferredBackend ?? []).map((b) => `  - ${b.capability}`).join("\n")}`
+          : "");
+    }
+    if (p === "functionality") {
+      return (plan.deferredBackend ?? []).length
+        ? `\nThe backend work this phase exists for, each against the approved design contract it was planned around:\n${(plan.deferredBackend ?? []).map((b) => `  - ${b.capability} — built against: ${b.dependsOnDesign}; real implementation: ${b.realImplementation}`).join("\n")}`
+        : "";
+    }
+    if (p === "final_qa") return from(plan.finalQuality ?? [], "This website's remaining quality requirements (the architect's own list):");
+    return "";
+  })();
+  return block(p, frozen) + section;
+}
+
+/** The architect's phase split, as the runner reads it off SPEC.json (orchestrator/contracts.ts: PhasePlan). */
+export interface PhasePlanLike {
+  designDeliverables?: string[];
+  designDependentInteractions?: { component: string; states: string[]; mock: string }[];
+  deferredBackend?: { capability: string; dependsOnDesign: string; realImplementation: string }[];
+  finalQuality?: string[];
+}
+
+function block(p: BuildPhase, frozen: string): string {
+  switch (p) {
+    case "design":
+      return [
+        "ACTIVE PHASE: VISUAL DESIGN. The objective of this phase is a 40/40 visual design, independently certified from real browser screenshots at desktop (1366px), tablet (768px) and mobile (390px).",
+        "Spend your turns on: the full approved page structure; cohesive premium presentation; a real type scale and design tokens; industry-relevant imagery and layout; responsive behaviour at all three widths; page-to-page visual consistency; and the finished APPEARANCE of every interactive component in scope (forms, booking, quotes, portals, dashboards, admin screens) including their loading, validation, error, empty and success states.",
+        "Do NOT build or debug customer-specific backend features yet. Use the starter's existing endpoints where they already work, and otherwise small deterministic mocks or fixtures so an interactive component can be SHOWN in each of its states. Label every mock clearly in .crestmont/integrations.json: a mock is never evidence that functionality works, and it earns no functionality points.",
+        "The 40 design points are layout and spacing (8), typography, branding and colour (6), imagery (6), component polish and interaction states (7), responsive quality across all three widths (6), industry appropriateness and premium presentation (7). They are scored strictly from screenshots with every shortfall named. Broken navigation at any width, overlapping or clipped components, horizontal scrolling, a page with no stylesheet applied, missing imagery the design calls for, or placeholder copy presented as final each cap the category however good the rest looks.",
+      ].join("\n");
+    case "design_locked":
+      return `ACTIVE PHASE: DESIGN LOCKED. ${frozen}Do not change the approved presentation. Confirm it still renders correctly and wait for the functionality phase.`;
+    case "functionality":
+      return [
+        `ACTIVE PHASE: FRONTEND AND BACKEND FUNCTIONALITY. ${frozen}The objective is 40/40 functionality while the design STAYS at 40/40.`,
+        "Make every component of the approved frontend genuinely work: real event handlers, real APIs with validation and business logic, the database schema and persistence, booking and scheduling, quotes and pricing, payment test integrations, authentication and authorization, customer and admin dashboards, notifications and webhook handlers, error handling, and tested end-to-end journeys. Replace the design phase's mocks with real implementations and update .crestmont/integrations.json.",
+        "Adapt the BACKEND to the existing approved frontend contracts. Do not redesign the website to make the backend easier: the design is frozen, and a change to it has to be re-certified. Where a functional change genuinely requires a presentational one, make the smallest possible change, say so in .crestmont/agent-report.md, and keep the layout, type, colour, navigation, spacing and component appearance intact.",
+        "A visually finished component connected to nothing earns no functionality points for its area, and a mocked response is never evidence that production functionality is complete. A credential only the customer can provide is a pending_external result, not a failure: record it and move on rather than trying to manufacture it.",
+      ].join("\n");
+    case "final_qa":
+      return [
+        `ACTIVE PHASE: FINAL QUALITY. ${frozen}Design and functionality are both certified and must stay that way.`,
+        "Close the remaining 20 points: security and privacy (6), accessibility (4), performance (4), SEO (2), reliability and error handling (2), deployment readiness and maintainability (2). Then re-run the full check suite and confirm the frozen design and the certified functionality have not regressed.",
+      ].join("\n");
+    case "waiting":
+      return "ACTIVE PHASE: WAITING. The build is waiting for information or an external party. Do only work that does not depend on it, and record what is blocked.";
+    case "complete":
+      return "ACTIVE PHASE: COMPLETE. All three categories are certified. Change nothing unless a specific regression is reported.";
+  }
+}
+
 /** Fence that cannot be closed by anything inside `text`. */
 export function fenceFor(text: string): string {
   const longest = Math.max(2, ...Array.from(text.matchAll(/`+/g), (m) => m[0].length));
@@ -173,15 +250,20 @@ function fullstackPhase(job: Job, phase: Phase, starter: string, local: boolean)
   return [
     "Phase 3 of 3: verify and report.",
     `Run \`${check}\`${local ? " with run_command" : ""} and fix every failing gate (A requirements, B frontend, C backend, D database, F security, G performance, J deployment). Gate E stays pending_external until the customer's own provider account is verified by the runner's approved operation: request it in .crestmont/integration-operations.json; never fake it. A skipped test never counts as passed.`,
-    "After this phase the runner restores the protected checker files, runs the gates itself, loads every page in a headless browser at desktop and mobile widths, and an independent reviewer scores the website on 20 criteria; only a verified 10/10 within the approved scope goes to Crestmont's internal approval.",
+    "After this phase the runner restores the protected checker files, runs the gates itself, and loads every page in a headless browser at desktop (1366), tablet (768) and mobile (390) widths. An independent vision-capable reviewer then scores the VISUAL DESIGN out of 40 from those screenshots, item by item, while the gates' evidence scores functionality out of 40 and the remaining quality out of 20. Only a verified 100/100 within the approved scope goes to Crestmont's internal approval, and there are no compensating scores between the three.",
     "Mark requirements verified only with evidence (command + result, or screenshot path). Fill .crestmont/needs-information.json, .crestmont/assumptions.json and .crestmont/agent-report.md.",
     ...(local ? ["Then call finish."] : []),
   ];
 }
 
-export function phasePrompt(job: Job, phase: Phase, ctx: { starter: string | null; resumed: boolean; previousNote: string | null; toolset?: "claude" | "local" }): string {
+export function phasePrompt(job: Job, phase: Phase, ctx: { starter: string | null; resumed: boolean; previousNote: string | null; toolset?: "claude" | "local"; buildPhase?: BuildPhase; designFreeze?: { revision: string; designPoints: number } | null; phasePlan?: PhasePlanLike | null }): string {
   const local = ctx.toolset === "local";
   const lines: string[] = [];
+  // The design-first objective is APPENDED, not prepended. Every runner instruction has to keep starting with its
+  // own first line ("Phase 2 of 3: build.", "Repair:", "This build is continuing..."): that opening is how the
+  // latest runner instruction is identified in a resumed conversation, and prepending a preamble to it silently
+  // breaks that identification. So the mechanics stay first and the phase objective follows them.
+  const objective = ctx.buildPhase ? ["", buildPhaseBlock(ctx.buildPhase, ctx.designFreeze ?? null, ctx.phasePlan ?? null)] : [];
   if (ctx.resumed && phase !== "repair") {
     lines.push("This build is continuing from an earlier attempt. Inspect the repository and .crestmont/ status files first and continue from where the work stopped; do not start over.");
     if (ctx.previousNote) lines.push(`Runner note: ${ctx.previousNote}`);
@@ -189,7 +271,7 @@ export function phasePrompt(job: Job, phase: Phase, ctx: { starter: string | nul
   }
   const standard = job.strategy === "standard";
   // Full-stack starter (all packages, protocol v1.5): a working backend, database and admin to configure and extend.
-  if (ctx.starter?.startsWith("fullstack-") && phase !== "repair") return [...lines, ...fullstackPhase(job, phase, ctx.starter, local)].join("\n");
+  if (ctx.starter?.startsWith("fullstack-") && phase !== "repair") return [...lines, ...fullstackPhase(job, phase, ctx.starter, local), ...objective].join("\n");
   if (phase === "plan") {
     lines.push("Phase 1 of 3: plan.");
     lines.push("Read BRIEF.md (and BRIEF.json for exact values), REVISION-REQUEST.md if present, and customer-files/INDEX.json if present.");
@@ -227,5 +309,5 @@ export function phasePrompt(job: Job, phase: Phase, ctx: { starter: string | nul
     lines.push("The failing check ids and output tails are listed in .crestmont/runner-checks.json.");
     if (local) lines.push("Call finish when the fixes are done.");
   }
-  return lines.join("\n");
+  return [...lines, ...objective].join("\n");
 }

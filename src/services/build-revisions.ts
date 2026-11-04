@@ -168,16 +168,26 @@ export interface RevisionRow {
   id: string; cycle: number; attempt: number; phase: RevisionPhase; commit_sha: string | null;
   score: number | null; decision: string | null; is_best: number; reverted: number; reverted_reason: string | null;
   file_count: number; total_bytes: number; created_at: string;
+  /**
+   * 0076: the weighted category scores this revision measured, and the design-first phase that produced it. NULL on
+   * every revision stored before the weighted scorecard existed -- which is the point: a legacy revision has no
+   * category breakdown and must not be shown one, rather than being backfilled with a plausible-looking split.
+   */
+  build_phase: string | null; design_points: number | null; functionality_points: number | null; other_points: number | null;
+  is_design_baseline: number;
 }
+
+const REVISION_COLUMNS = `id, cycle, attempt, phase, commit_sha, score, decision, is_best, reverted, reverted_reason, file_count, total_bytes, created_at,
+    build_phase, design_points, functionality_points, other_points, is_design_baseline`;
 
 /** Every stored revision of a build, oldest first: the cycle history the Founder scrolls through. */
 export async function listRevisions(db: Db, jobId: string): Promise<RevisionRow[]> {
-  return (await db.prepare(`SELECT id, cycle, attempt, phase, commit_sha, score, decision, is_best, reverted, reverted_reason, file_count, total_bytes, created_at
+  return (await db.prepare(`SELECT ${REVISION_COLUMNS}
     FROM build_revisions WHERE job_id = ? ORDER BY attempt, cycle`).bind(jobId).all<RevisionRow>()).results;
 }
 
 export async function revisionDetail(db: Db, jobId: string, attempt: number, cycle: number) {
-  const rev = await db.prepare(`SELECT id, cycle, attempt, phase, commit_sha, score, decision, is_best, reverted, reverted_reason, file_count, total_bytes, created_at
+  const rev = await db.prepare(`SELECT ${REVISION_COLUMNS}
     FROM build_revisions WHERE job_id = ? AND attempt = ? AND cycle = ?`).bind(jobId, attempt, cycle).first<RevisionRow>();
   if (!rev) return null;
   const files = (await db.prepare(`SELECT path, kind, content_type, size_bytes FROM build_revision_files WHERE revision_id = ? ORDER BY kind, path`)

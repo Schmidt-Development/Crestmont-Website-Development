@@ -345,3 +345,45 @@ test("[AIB-CONTINUITY] credential scan: real-looking customer keys and local sec
   put("src/late.js", `const key = '${SK_LIVE}'; // replace placeholder before launch\n`);
   assert.match(credentialScan(repo, ["src/late.js"]).outputTail, /src\/late\.js:1: Stripe secret or restricted key/);
 });
+
+test("[AIB-CONTINUITY] a resumed segment's digest states the REAL bar, not the one the engine used to have", () => {
+  // The digest is how a resumed build is told where it stands. It used to say "only a verified 10/10 within the
+  // approved scope reaches internal approval", which would leave the model optimising for a target that no longer
+  // exists -- the kind of mismatch that makes a build work hard on the wrong thing.
+  const m = newMemory({ ...ID });
+  const criteria = [
+    { id: "backend", applicable: true, status: "fail" },
+    { id: "frontend", applicable: true, status: "pass" },
+  ];
+  remember.quality(m, { iteration: 4, score: 7.3, eligible: false, waitingExternal: false, criteria }, {
+    phase: "functionality", design: { points: 40 }, functionality: { points: 28 }, other: { points: 19 },
+    totalPoints: 87, designCertified: true, designBlockers: [],
+  });
+  const d = memoryDigest(m, 20000);
+  assert.match(d, /87\/100/, "the total out of 100");
+  assert.match(d, /visual design 40\/40/);
+  assert.match(d, /frontend and backend 28\/40/);
+  assert.match(d, /remaining quality 19\/20/);
+  assert.match(d, /phase functionality/, "and which phase the build is in");
+  assert.match(d, /40\/40 \+ 40\/40 \+ 20\/20 with no compensating scores/, "the real bar");
+  assert.doesNotMatch(d, /verified 10\/10/, "and not the bar the engine used to have");
+  assert.match(d, /backend/, "the failing evidence criterion is still named");
+
+  // An uncertified design says WHY, because "not certified" alone is not actionable.
+  const m2 = newMemory({ ...ID });
+  remember.quality(m2, { iteration: 1, score: 5, eligible: false, waitingExternal: false, criteria }, {
+    phase: "design", design: { points: 24 }, functionality: { points: 30 }, other: { points: 18 },
+    totalPoints: 72, designCertified: false, designBlockers: ["no tablet screenshot evidence", "Imagery: 1.0/6"],
+  });
+  const d2 = memoryDigest(m2, 20000);
+  assert.match(d2, /Visual design is NOT certified/);
+  assert.match(d2, /no tablet screenshot evidence/);
+  assert.match(d2, /Imagery: 1\.0\/6/);
+
+  // A legacy cycle with no weighted card keeps its own wording rather than inventing category points.
+  const m3 = newMemory({ ...ID });
+  remember.quality(m3, { iteration: 2, score: 9.4, eligible: false, waitingExternal: false, criteria });
+  const d3 = memoryDigest(m3, 20000);
+  assert.match(d3, /9\.4\/10/);
+  assert.doesNotMatch(d3, /\/100/, "no fabricated weighted total for a cycle that never had one");
+});

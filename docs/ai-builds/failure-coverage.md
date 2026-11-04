@@ -1,5 +1,20 @@
 # A-J failure-mode coverage
 
+> **This is a dated assessment, not a live description of the engine.** It was written against the flat
+> twenty-criterion scorecard, where "a verified 10/10" was the bar and the repair ratchet protected one scalar. Both
+> changed with the design-first weighted engine (`QUALITY-ENGINE.md`): the bar is a verified 100/100 across Visual
+> Design 40 + Functionality 40 + Remaining Quality 20, the visual half is scored item by item from browser
+> screenshots at three viewports, and the ratchet and stall guard compare the ACTIVE PHASE's own category rather
+> than the total. Some test names quoted below have changed accordingly. Read this as a record of what was examined
+> and when, not as the current contract — re-editing a dated coverage report to describe an engine it never assessed
+> would make it worthless as evidence.
+>
+> One finding in it is worth carrying forward. The three `[AIB-QUALITY]` end-to-end tests noted below as failing
+> with "Acceptance checks failed: quality-gates, brief-conformance" on a pristine Windows baseline still do, for the
+> same unestablished reason. They pass on Linux CI, which is where they are actually verified — and because a
+> Windows baseline hides them, a local diff against that baseline cannot tell you whether a change broke them. It
+> did not: CI caught all three when the weighted engine changed what they assert.
+
 Shared safeguards, not 231 separate systems: each failure mode is covered by one of the mechanisms in `safeguards`, and a row leaves OPEN only when a named test in THIS repository proves that mechanism catches it.
 
 - OPEN means not investigated in this repository yet. It does not mean the failure cannot happen, and it does not mean it is uncovered.

@@ -105,7 +105,9 @@ test("[AIB-RUNNER] local provider happy path: plan/build/verify with a tool-usin
     assert.match(String(done.report), new RegExp(`${r.model.requests.length} model calls, ${r.model.requests.length * 1000} input tokens, ${r.model.requests.length * 100} output tokens`));
     assert.doesNotMatch(String(done.report), /Agent SDK client-side estimate/);
     assert.match(String(done.report), /PASS `node scripts\/check\.mjs --package starter`/);
-    assert.match(String(done.report), /PASS `node \/opt\/crestmont\/browser-check\.mjs --root public --out \.crestmont\/screenshots`/);
+    // --visual-out writes the per-viewport visual measurements the weighted design rubric reads. Both paths are
+    // POSIX literals because the command runs inside the Linux build container, whatever the runner host is.
+    assert.match(String(done.report), /PASS `node \/opt\/crestmont\/browser-check\.mjs --root public --out \.crestmont\/screenshots --visual-out \.crestmont\/quality\/visual\.json`/);
     const acts = r.cp.byPath("heartbeat").flatMap((h) => (h.body.activity as { message: string }[] | undefined) ?? []).map((a) => a.message).join("\n");
     assert.match(acts, /local model test-coder:30b \(planning\): phase plan success; \d+ calls; tokens in \d+ \/ out \d+; model time \d+ s; cost \$0/);
     // Every command (agent's and the runner's checks) went through the job container.

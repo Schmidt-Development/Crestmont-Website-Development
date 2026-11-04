@@ -34,8 +34,24 @@ function qualityCard(q: Awaited<ReturnType<typeof latestQuality>>): SafeHtml {
   const problems = JSON.parse(q.verification_problems_json) as string[];
   const criteria = JSON.parse(q.criteria_json) as QualityCriterionRow[];
   const tone = (s: string) => s === "pass" ? "ok" : s === "fail" ? "bad" : s === "pending_external" ? "warn" : s === "not_applicable" ? "muted" : "info";
+  // A weighted card leads with its three categories, because those decide approval. The twenty criteria below are
+  // the evidence those categories were computed from, not the score itself.
+  const weighted = q.schema_version === "crestmont.quality-scorecard/2";
   return html`<section class="card"><h2 class="card__title">Quality scorecard</h2>
-<p><strong>${String(q.score)}/10</strong> · ${q.passed} of ${q.applicable} applicable criteria pass · iteration ${q.iteration} · attempt ${q.attempt} · ${q.package_id}
+${weighted
+  ? html`<p><strong>${(q.total_points ?? 0).toFixed(1)}/100</strong> (= ${String(q.score)}/10) · visual design
+     <strong>${(q.design_points ?? 0).toFixed(1)}/40</strong> · frontend and backend
+     <strong>${(q.functionality_points ?? 0).toFixed(1)}/40</strong> · remaining quality
+     <strong>${(q.other_points ?? 0).toFixed(1)}/20</strong>
+     ${q.design_certified ? badge("ok", "Design certified") : badge("bad", "Design not certified")}
+     ${q.build_phase ? badge("info", `Phase: ${q.build_phase.replace(/_/g, " ")}`) : ""}</p>
+${q.design_certified ? "" : alert("warn", html`<strong>Visual design is not certified:</strong> ${(JSON.parse(q.design_blockers_json) as string[]).slice(0, 5).join("; ") || "no reason recorded"}`)}
+<p class="faint">Internal approval needs a verified 40/40 + 40/40 + 20/20, with every category measured and no
+ compensating scores. <a href="/staff/builds/${q.job_id}/inspect">The per-item rubric and the design freeze</a>.</p>`
+  : alert("warn", html`<strong>Legacy scoring (${q.schema_version}).</strong> Twenty near-equal pass/fail criteria, of
+     which professional visual design was one. This figure is kept for history and was never measured against the
+     weighted visual rubric.`)}
+<p>${weighted ? "Evidence criteria: " : html`<strong>${String(q.score)}/10</strong> · `}${q.passed} of ${q.applicable} applicable criteria pass · iteration ${q.iteration} · attempt ${q.attempt} · ${q.package_id}
  ${q.verified ? badge("ok", "Verified by the platform") : badge("bad", "Failed platform verification")} ${q.eligible ? badge("ok", "Eligible for internal approval") : q.waiting_external ? badge("warn", "Waiting on customer setup") : badge("bad", "Not eligible")}</p>
 ${problems.length ? alert("error", html`<strong>Verification problems:</strong> ${problems.slice(0, 10).join("; ")}`) : ""}
 ${table(criteria, [{ header: "Criterion", cell: (c) => c.id.replace(/_/g, " ") }, { header: "Status", cell: (c) => badge(tone(c.status), c.status.replace(/_/g, " ")) },

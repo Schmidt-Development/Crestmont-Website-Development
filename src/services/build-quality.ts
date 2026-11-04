@@ -1,17 +1,38 @@
 // Quality engine persistence and gates (platform). Scorecards are stored for every reported build iteration;
-// internal approval of a quality-required build needs the latest scorecard to be verified AND eligible (10/10);
-// reusable causes become builder improvement proposals that change nothing without a person's approval.
+// internal approval of a quality-required build needs the latest scorecard to be verified AND eligible; reusable
+// causes become builder improvement proposals that change nothing without a person's approval.
+//
+// TWO SCHEMAS LIVE HERE AT ONCE, ON PURPOSE.
+//   /1 — the flat twenty-criteria scorecard. Eligible at a verified 10/10. Historical rows keep these numbers
+//        exactly as reported, and are labelled legacy in the UI. bld_50e28bbd1cd033ad9ddfad02's 9.4 is one of them:
+//        it stays visible as history and is never presented as having passed the weighted visual rubric.
+//   /2 — the weighted scorecard: Visual Design 40 + Functionality 40 + Remaining 20. Eligible only at a verified
+//        100/100 with every category actually measured, and no compensating scores.
+// A card is routed by its own `schema` field, so a runner one version behind still reports a card the platform
+// stores and verifies rather than rejecting outright — it simply cannot reach the new eligibility.
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { sha256Hex } from "../lib/crypto.ts";
 import { HttpError } from "../app/http.ts";
 import { audit } from "./security.ts";
 import { verifyScorecard, requiredCapabilities, type VerifiedScorecard } from "../domain/quality.ts";
+import { isScorecardV2, verifyScorecard2, type VerifiedScorecard2 } from "../domain/quality-verify.ts";
+import { SCORECARD_V1_SCHEMA, SCORECARD_V2_SCHEMA, round1 } from "../domain/quality-rubric.ts";
+import { evidencedViewports } from "./build-phases.ts";
 
 export interface QualityRow {
   id: string; job_id: string; attempt: number; iteration: number; package_id: string; outcome: string; score: number; applicable: number; passed: number;
   eligible: number; waiting_external: number; verified: number; verification_problems_json: string; criteria_json: string; defects_json: string; created_at: string;
+  /** 0076: weighted scorecard. Rows that predate it default to SCORECARD_V1_SCHEMA and leave the rest NULL. */
+  schema_version: string; build_phase: string | null;
+  design_points: number | null; functionality_points: number | null; other_points: number | null; total_points: number | null;
+  rubric_json: string; design_certified: number; design_blockers_json: string;
 }
+
+/** A recorded card, either schema. `score` is always the 0-10 figure so existing readers keep working. */
+export type RecordedQuality =
+  | ({ version: 1 } & VerifiedScorecard)
+  | ({ version: 2; score: number; applicable: number; passed: number } & VerifiedScorecard2);
 
 interface JobLike { id: string; project_id: string; organization_id: string; attempts: number; package_id: string | null; strategy: string; brief_id: string | null }
 
@@ -28,28 +49,74 @@ export async function scopeOf(db: Db, job: JobLike): Promise<{ packageId: string
   return { packageId, required: requiredCapabilities(packageId, features, integrations) };
 }
 
-/** Verify and store a reported scorecard. Returns the platform's verification. */
-export async function recordQuality(db: Db, job: JobLike, outcome: string, raw: unknown): Promise<VerifiedScorecard> {
-  const v = verifyScorecard(raw, await scopeOf(db, job));
-  await db.prepare(`INSERT INTO build_quality (id, job_id, project_id, attempt, iteration, package_id, outcome, score, applicable, passed, eligible, waiting_external, verified, verification_problems_json, criteria_json, defects_json, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .bind(newId("bq"), job.id, job.project_id, job.attempts, v.iteration, v.packageId, outcome.slice(0, 40), v.score, v.applicable, v.passed, v.eligible ? 1 : 0, v.waitingExternal ? 1 : 0, v.ok ? 1 : 0,
-      JSON.stringify(v.problems.slice(0, 40)), JSON.stringify(v.criteria), JSON.stringify(v.defects), nowIso()).run();
-  await proposeImprovements(db, job, v);
-  return v;
+/**
+ * Verify and store a reported scorecard. Returns the platform's OWN verification, never the runner's numbers.
+ *
+ * For a weighted card the viewport claims are additionally checked against the screenshot files the stored snapshot
+ * actually holds: this is the one place that has both the card and the bytes, so "the reviewer saw tablet" stops
+ * being an assertion and becomes a fact about R2.
+ */
+export async function recordQuality(db: Db, job: JobLike, outcome: string, raw: unknown, o: { revision?: { attempt: number; cycle: number } | null } = {}): Promise<RecordedQuality> {
+  const scope = await scopeOf(db, job);
+  const at = nowIso();
+  // Improvement proposals are made once per BUILD, at completion, not on every review cycle. The card is now also
+  // recorded per cycle (so the Founder can compare revisions), and proposing from each of them would turn
+  // builder_improvements.occurrences from "builds that hit this defect" into "cycles that hit it" -- inflating a
+  // number the Owner reads when deciding whether a reusable fix is worth engineering time.
+  const propose = outcome !== "cycle";
+
+  if (!isScorecardV2(raw)) {
+    const v = verifyScorecard(raw, scope);
+    await db.prepare(`INSERT INTO build_quality (id, job_id, project_id, attempt, iteration, package_id, outcome, score, applicable, passed, eligible, waiting_external, verified, verification_problems_json, criteria_json, defects_json, created_at, schema_version)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(newId("bq"), job.id, job.project_id, job.attempts, v.iteration, v.packageId, outcome.slice(0, 40), v.score, v.applicable, v.passed, v.eligible ? 1 : 0, v.waitingExternal ? 1 : 0, v.ok ? 1 : 0,
+        JSON.stringify(v.problems.slice(0, 40)), JSON.stringify(v.criteria), JSON.stringify(v.defects), at, SCORECARD_V1_SCHEMA).run();
+    if (propose) await proposeImprovements(db, job, v.defects);
+    return { version: 1, ...v };
+  }
+
+  const proven = o.revision ? await evidencedViewports(db, job.id, o.revision.attempt, o.revision.cycle) : null;
+  const v = verifyScorecard2(raw, { ...scope, evidencedViewports: proven });
+  const applicable = v.criteria.filter((c) => c.applicable).length;
+  const passed = v.criteria.filter((c) => c.applicable && c.status === "pass").length;
+  await db.prepare(`INSERT INTO build_quality (id, job_id, project_id, attempt, iteration, package_id, outcome, score, applicable, passed, eligible, waiting_external, verified, verification_problems_json, criteria_json, defects_json, created_at,
+        schema_version, build_phase, design_points, functionality_points, other_points, total_points, rubric_json, design_certified, design_blockers_json)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(newId("bq"), job.id, job.project_id, job.attempts, v.iteration, v.packageId, outcome.slice(0, 40), v.overall, applicable, passed,
+      v.eligible ? 1 : 0, v.waitingExternal ? 1 : 0, v.ok ? 1 : 0,
+      JSON.stringify(v.problems.slice(0, 40)), JSON.stringify(v.criteria), JSON.stringify(v.defects), at,
+      SCORECARD_V2_SCHEMA, v.phase, round1(v.design.points), round1(v.functionality.points), round1(v.other.points), v.totalPoints,
+      JSON.stringify({ design: v.design, functionality: v.functionality, other: v.other, visualFailures: v.visualFailures, viewports: v.viewports, review: v.review }),
+      v.designCertified ? 1 : 0, JSON.stringify(v.designBlockers.slice(0, 20))).run();
+  if (propose) await proposeImprovements(db, job, v.defects);
+  return { version: 2, score: v.overall, applicable, passed, ...v };
 }
 
 export async function latestQuality(db: Db, jobId: string): Promise<QualityRow | null> {
   return db.prepare(`SELECT * FROM build_quality WHERE job_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`).bind(jobId).first<QualityRow>();
 }
 
-/** Internal approval gate: a quality-required build needs a verified 10/10. There is no override. */
+/** Every stored card for a job, newest first: the Founder's revision-by-revision comparison reads this. */
+export async function qualityHistory(db: Db, jobId: string): Promise<QualityRow[]> {
+  return (await db.prepare(`SELECT * FROM build_quality WHERE job_id = ? ORDER BY created_at ASC, rowid ASC`).bind(jobId).all<QualityRow>()).results;
+}
+
+/**
+ * Internal approval gate. There is no override, and no compensating arithmetic:
+ *   schema /1 (legacy): a verified 10/10 within the approved scope;
+ *   schema /2:          a verified 100/100 — 40/40 design, 40/40 functionality, 20/20 remaining, each measured.
+ */
 export async function assertQualityForApproval(db: Db, job: { id: string; quality_required: number }): Promise<void> {
   if (!job.quality_required) return;
   const q = await latestQuality(db, job.id);
   if (!q) throw new HttpError(409, "Quality engine: this build has no quality scorecard, so it cannot be approved internally.");
   if (!q.verified) throw new HttpError(409, `Quality engine: the build's scorecard failed the platform's verification (${(JSON.parse(q.verification_problems_json) as string[]).slice(0, 3).join("; ")}).`);
-  if (!q.eligible) throw new HttpError(409, `Quality engine: the build scored ${q.score}/10; only a verified 10/10 within the approved scope can be approved internally.`);
+  if (q.eligible) return;
+  if (q.schema_version === SCORECARD_V2_SCHEMA) {
+    const blockers = (JSON.parse(q.design_blockers_json) as string[]).slice(0, 3);
+    throw new HttpError(409, `Quality engine: this build is at ${q.total_points ?? 0}/100 — visual design ${q.design_points ?? 0}/40, frontend and backend ${q.functionality_points ?? 0}/40, remaining quality ${q.other_points ?? 0}/20. Only a verified 100/100 can be approved internally${blockers.length ? ` (design: ${blockers.join("; ")})` : ""}.`);
+  }
+  throw new HttpError(409, `Quality engine: the build scored ${q.score}/10; only a verified 10/10 within the approved scope can be approved internally.`);
 }
 
 /**
@@ -58,12 +125,12 @@ export async function assertQualityForApproval(db: Db, job: { id: string; qualit
  * proposal changes nothing by itself: it waits for a person, and an approved one still goes through code review and
  * the normal deployment gates (the builder is never modified from customer-generated code).
  */
-async function proposeImprovements(db: Db, job: JobLike, v: VerifiedScorecard): Promise<void> {
-  const reusable = v.defects.filter((d) => ["starter", "builder_prompt", "architecture", "integration", "test_coverage", "deployment", "security"].includes(d.class));
+async function proposeImprovements(db: Db, job: JobLike, defects: { criterion: string; class: string; detail: string }[]): Promise<void> {
+  const reusable = defects.filter((d) => ["starter", "builder_prompt", "architecture", "integration", "test_coverage", "deployment", "security"].includes(d.class));
   for (const d of reusable.slice(0, 10)) {
     const key = await sha256Hex(`${d.class}|${d.criterion}|${d.detail.replace(/[0-9a-f]{8,}|\d+/gi, "#").slice(0, 160)}`);
     const at = nowIso();
-    const evidence = JSON.stringify({ job: job.id, attempt: job.attempts, iteration: v.iteration, score: v.score, detail: d.detail });
+    const evidence = JSON.stringify({ job: job.id, attempt: job.attempts, detail: d.detail });
     const fix = FIX[d.class] ?? FIX.website;
     const r = await db.prepare(`INSERT INTO builder_improvements (id, dedupe_key, defect_class, criterion, root_cause, proposed_fix, regression_test, affected_components, risk, evidence_json, occurrences, first_job_id, last_job_id, status, created_at, updated_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?, 'proposed', ?, ?) ON CONFLICT(dedupe_key) DO UPDATE SET occurrences = occurrences + 1, last_job_id = excluded.last_job_id, evidence_json = excluded.evidence_json, updated_at = excluded.updated_at`)

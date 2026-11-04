@@ -1,25 +1,32 @@
 #!/usr/bin/env node
 // Browser validation of a static site, run by the build runner INSIDE the per-job sandbox container (network none).
-//   node /opt/crestmont/browser-check.mjs --root public [--out .crestmont/screenshots] [--json]
+//   node /opt/crestmont/browser-check.mjs --root public [--out .crestmont/screenshots] [--visual-out FILE] [--json]
 // Serves --root on 127.0.0.1 (loopback works without a network), opens every .html page in headless Chromium at a
-// desktop (1366x900) and a mobile (390x844) viewport and fails (exit 1) on:
+// desktop (1366x900), a tablet (768x1024) and a mobile (390x844) viewport and fails (exit 1) on:
 //   - uncaught page errors and console errors,
 //   - same-origin requests that fail or answer >= 400 (missing CSS/JS/images),
 //   - horizontal overflow (page wider than the viewport),
-//   - a page whose first Tab does not move focus (keyboard access).
+//   - a page whose first Tab does not move focus (keyboard access),
+//   - a desktop navigation whose links are stacked vertically (nothing caught this before: see "stacked" below),
+//   - a page that applied no stylesheet (placeholder copy and overlap are reported, not failed: they cap the
+//     weighted design score instead).
+// --visual-out writes the per-viewport visual measurements (imagery counts, overlap, clipping, navigation geometry,
+// stylesheet count) that the weighted design rubric reads. They are measurements, not judgements, and are written
+// even when the check fails, because a failing page is exactly the one whose design score must be capped.
 // Off-origin requests cannot succeed without a network; they are reported as warnings.
 // Screenshots: <out>/<page>-<viewport>.png. Requires the `playwright` package and its Chromium (sandbox image).
 
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import { readFileSync, readdirSync, statSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 function args(argv) {
-  const o = { root: "public", out: ".crestmont/screenshots", json: false, timeoutMs: 20000 };
+  const o = { root: "public", out: ".crestmont/screenshots", visualOut: null, json: false, timeoutMs: 20000 };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--root") o.root = argv[++i];
     else if (argv[i] === "--out") o.out = argv[++i];
+    else if (argv[i] === "--visual-out") o.visualOut = argv[++i];
     else if (argv[i] === "--json") o.json = true;
     else if (argv[i] === "--timeout-ms") o.timeoutMs = Number(argv[++i]) || o.timeoutMs;
   }
@@ -73,8 +80,13 @@ async function main() {
   const server = await serve(o.root);
   const origin = `http://127.0.0.1:${server.address().port}`;
   const browser = await chromium.launch({ args: ["--disable-dev-shm-usage"] });
-  const viewports = [{ name: "desktop", width: 1366, height: 900 }, { name: "mobile", width: 390, height: 844 }];
+  // Tablet is not optional any more. The weighted visual rubric scores "responsive visual quality across desktop,
+  // tablet and mobile" out of 6 and will not certify a design without evidence at all three, so the instrument has
+  // to produce all three. Before this, no part of the pipeline ever rendered a tablet layout.
+  const viewports = [{ name: "desktop", width: 1366, height: 900 }, { name: "tablet", width: 768, height: 1024 }, { name: "mobile", width: 390, height: 844 }];
   const results = [];
+  /** Per-page, per-viewport visual measurements, written to --visual-out for the weighted design rubric. */
+  const visual = [];
   try {
     for (const vp of viewports) {
       const context = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
@@ -120,6 +132,7 @@ async function main() {
           // Desktop navigation (failure mode C18). Run 1 rendered the hamburger toggle at desktop width with no
           // visible nav links at all, so a desktop visitor could not move around the site. Nothing caught it: the
           // page rendered, every link resolved and the screenshot looked plausible.
+          let navMeasured = null;
           if (vp.name === "desktop") {
             const nav = await p.evaluate(() => {
               const vis = (e) => { if (!e) return false; const s = getComputedStyle(e), r = e.getBoundingClientRect();
@@ -137,19 +150,97 @@ async function main() {
               // into a fix the builder can make, instead of a verdict it can only guess at.
               const likely = [...document.querySelectorAll("[class*=nav], [class*=menu], [class*=tabs]")]
                 .find((e) => vis(e) && e.querySelectorAll("a[href],button").length >= 2);
-              return { hasNav: !!root, visibleLinks: links.length, toggleVisible: toggles.length > 0, chrome, navLike: likely ? (likely.getAttribute("class") || likely.tagName.toLowerCase()) : null };
+              // Is the desktop navigation STACKED? This is the defect that reached a 9.4/10 certification:
+              // bld_50e28bbd1cd033ad9ddfad02 revision 1-3 set `.site-nav ul { flex-direction: column }` at
+              // site.css:109, outside any media query, and the `min-width: 64rem` block never reset it. Every
+              // existing rule here passed -- the links were visible, there were more than two of them, no toggle
+              // was showing -- because none of them looked at WHERE the links were. A vertical primary nav at
+              // 1366px is a broken desktop navigation, so it is measured: links whose boxes never share a row.
+              const rects = links.map((e) => e.getBoundingClientRect());
+              let sharesRow = 0;
+              for (let x = 0; x < rects.length; x++) {
+                for (let y = x + 1; y < rects.length; y++) {
+                  if (Math.min(rects[x].bottom, rects[y].bottom) - Math.max(rects[x].top, rects[y].top) > 2) { sharesRow++; y = rects.length; x = rects.length; }
+                }
+              }
+              return {
+                hasNav: !!root, visibleLinks: links.length, toggleVisible: toggles.length > 0, chrome,
+                navLike: likely ? (likely.getAttribute("class") || likely.tagName.toLowerCase()) : null,
+                stacked: links.length >= 3 && sharesRow === 0,
+                navDirection: root ? getComputedStyle(root.querySelector("ul") ?? root).flexDirection : null,
+              };
             });
+            navMeasured = nav;
             if (!nav.chrome && !nav.hasNav) warnings.push("navigation: no nav landmark, and no site header or footer either: treated as a private app screen, not a public page");
             else if (!nav.hasNav) errors.push(`navigation: the page carries the site header or footer but has no nav landmark${nav.navLike ? `, though it has a "${nav.navLike}" element that looks like navigation: wrap it in <nav aria-label="..."> (or add role="navigation") so it is reachable` : ": a visitor who lands here cannot move around the site"}`);
             else if (nav.visibleLinks < 2) errors.push(`navigation: only ${nav.visibleLinks} navigation link(s) are visible at ${vp.width}px, so a desktop visitor cannot move around the site${nav.toggleVisible ? "; the mobile menu toggle is showing instead of the desktop navigation" : ""}`);
+            else if (nav.stacked) errors.push(`navigation: the ${nav.visibleLinks} navigation links are stacked vertically at ${vp.width}px (no two share a row${nav.navDirection === "column" ? `; the list's computed flex-direction is "column"` : ""}): a desktop visitor sees a column of links where the design calls for a horizontal menu bar. Reset the mobile stacking inside the desktop media query.`);
             else if (nav.toggleVisible) errors.push(`navigation: the mobile menu toggle is visible at ${vp.width}px alongside the desktop navigation; it should be hidden above the mobile breakpoint`);
           }
+
+          // ── Visual measurements for the weighted design rubric ──
+          // These are facts a rule can establish, collected for every viewport so the design category's hard
+          // failure conditions are measured rather than left to a reviewer's prose. Overlap and imagery were both
+          // invisible to this check before: revision 1-3 shipped with zero images against a brief asking for
+          // licensed photography, and nothing in the pipeline counted them.
+          const m = await p.evaluate(() => {
+            const vis = (e) => { const s = getComputedStyle(e), r = e.getBoundingClientRect();
+              return s.display !== "none" && s.visibility !== "hidden" && Number(s.opacity) !== 0 && r.width > 2 && r.height > 2; };
+            const imgs = [...document.querySelectorAll("img, picture source, [style*='background-image']")].filter((e) => e.tagName !== "IMG" || vis(e));
+            const decorative = [...document.querySelectorAll("img")].filter((e) => vis(e) && (e.naturalWidth <= 48 || e.naturalHeight <= 48)).length;
+            // Clipping: a block whose own content is taller/wider than its box with overflow hidden.
+            const clipped = [...document.querySelectorAll("section, article, .card, .hero, header, footer, main div")].filter((e) => {
+              if (!vis(e)) return false;
+              const s = getComputedStyle(e);
+              return (s.overflow === "hidden" || s.overflowY === "hidden") && e.scrollHeight - e.clientHeight > 24;
+            }).length;
+            // Overlap: two sibling blocks whose boxes intersect by more than a hairline. Siblings only, because a
+            // child inside its parent's box is the normal case and would make every page look broken.
+            let overlaps = 0;
+            for (const parent of document.querySelectorAll("body, main, section, header, footer")) {
+              const kids = [...parent.children].filter((e) => vis(e) && getComputedStyle(e).position === "static");
+              for (let i = 0; i < kids.length; i++) for (let j = i + 1; j < kids.length; j++) {
+                const a = kids[i].getBoundingClientRect(), b = kids[j].getBoundingClientRect();
+                const dx = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+                const dy = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+                if (dx > 4 && dy > 4) overlaps++;
+              }
+            }
+            // Placeholder copy presented as final. High-confidence markers ONLY: "coming soon" and "TBD" are
+            // ordinary website copy ("new location coming soon"), and flagging them would fail correct pages.
+            const text = (document.body.innerText || "").slice(0, 200000);
+            const placeholders = (text.match(/lorem ipsum|dolor sit amet|STARTER-PLACEHOLDER|your (?:business|company) name here|insert (?:text|image|your) |placeholder text|\[placeholder\]|xxx-xxx-xxxx/gi) ?? []).length;
+            // Did any stylesheet apply at all? An unstyled page is the hardest visual failure there is.
+            const body = getComputedStyle(document.body);
+            return {
+              images: imgs.length, contentImages: imgs.length - decorative, clipped, overlaps, placeholders,
+              styleSheets: document.styleSheets.length,
+              bodyFont: body.fontFamily, defaultFont: /^\s*(?:Times New Roman|serif)\s*$/i.test(body.fontFamily),
+              headings: document.querySelectorAll("h1").length,
+            };
+          });
+          const shot = path.join(o.out, `${page.replace(/[\\/]/g, "_").replace(/\.html$/, "")}-${vp.name}.png`);
+          visual.push({ page, viewport: vp.name, ...m, nav: navMeasured, screenshot: shot });
+          // Only `unstyled` fails the check here, because a page that applied no stylesheet is broken rather than
+          // imperfect. `placeholders`, `clipped` and `overlaps` are reported as DATA for the weighted design
+          // rubric, which caps the design category for each of them (0, 14 and 20 of 40 respectively) -- so they
+          // are enforced where enforcement belongs, without failing this check.
+          //
+          // Placeholders deliberately do not fail it: this same check is the sandbox image's self-check, whose
+          // fixture is the UNFILLED starter, and the starter's own STARTER-PLACEHOLDER markers are supposed to be
+          // there before a builder replaces them. Failing on them would turn a working image into a red check.
+          // In a real build an unreplaced placeholder still caps the design at 20/40 and is named in the rubric.
+          // `styleSheets === 0` is the definitive signal and the only one that fails: a page that applied no
+          // stylesheet at all is broken. `defaultFont` is kept as a MEASUREMENT only, because a designer who
+          // chooses `font-family: serif` has styled the page deliberately, and failing that would be wrong.
+          // A stylesheet that 404s is already caught by the request checks above.
+          if (m.styleSheets === 0) errors.push(`unstyled: the page applied no stylesheet at all and renders in the browser's default font (${m.bodyFont})`);
+          if (m.placeholders > 0) warnings.push(`content: ${m.placeholders} placeholder phrase(s) are still present; they cap the visual design score until they are replaced`);
 
           // The screenshot comes FIRST, before anything is focused. A well-built site puts a "skip to content" link
           // first in the tab order and reveals it on focus, so pressing Tab before the screenshot put that link over
           // the header in every image the reviewer judged -- the instrument changing what it measured. The reviewer
           // then marked the site down for it (observed on bld_d6090c28f8e6923c75223307, cycles 2 and 4).
-          const shot = path.join(o.out, `${page.replace(/[\\/]/g, "_").replace(/\.html$/, "")}-${vp.name}.png`);
           await p.screenshot({ path: shot, fullPage: true });
 
           await p.keyboard.press("Tab");
@@ -180,7 +271,18 @@ async function main() {
     server.close();
   }
   const failed = results.filter((r) => !r.ok);
-  if (o.json) console.log(JSON.stringify({ ok: failed.length === 0, results }, null, 2));
+  // The measurements the weighted design rubric reads. Written even when the check failed: a failing page is
+  // exactly the one whose measurements the design category needs in order to cap its score honestly.
+  if (o.visualOut) {
+    mkdirSync(path.dirname(o.visualOut), { recursive: true });
+    writeFileSync(o.visualOut, JSON.stringify({
+      schema: "crestmont.visual-measurements/1",
+      viewports: [...new Set(visual.map((v) => v.viewport))],
+      pages: [...new Set(visual.map((v) => v.page))],
+      measurements: visual,
+    }, null, 2) + "\n");
+  }
+  if (o.json) console.log(JSON.stringify({ ok: failed.length === 0, results, visual }, null, 2));
   else {
     for (const r of results) {
       console.log(`${r.ok ? "PASS" : "FAIL"} ${r.page} @ ${r.viewport}${r.screenshot ? ` -> ${r.screenshot}` : ""}`);

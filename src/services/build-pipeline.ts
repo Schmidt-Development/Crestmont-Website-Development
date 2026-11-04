@@ -15,6 +15,9 @@ import type { AppContext } from "../app/context.ts";
 import { HttpError } from "../app/http.ts";
 import { sha256Hex } from "../lib/crypto.ts";
 import { audit } from "./security.ts";
+import * as PH from "./build-phases.ts";
+import { recordQuality } from "./build-quality.ts";
+import { CATEGORY_MAX, PRIMARY_PROGRESS, SCORECARD_V2_SCHEMA, type BuildPhase } from "../domain/quality-rubric.ts";
 
 type OwnerCtx = Pick<AppContext, "db"> & { userId: string };
 
@@ -84,6 +87,18 @@ export interface MasterSpec {
   projectSpec: string;
   designSpec: string;
   technicalArchitecture: string;
+  /**
+   * The four-way phase split the build actually runs in: what the design must deliver, which interactions the
+   * design depends on (and the mock that shows each state), which backend work is deliberately deferred until the
+   * design certifies, and what is closed last. Optional, because a specification stored before this existed has
+   * none and must keep parsing.
+   */
+  phasePlan?: {
+    designDeliverables: string[];
+    designDependentInteractions: { component: string; states: string[]; mock: string }[];
+    deferredBackend: { capability: string; dependsOnDesign: string; realImplementation: string }[];
+    finalQuality: string[];
+  };
   tasks: { id: string; title: string; workstream: string; paths: string[]; dependsOn: string[] }[];
   acceptanceCriteria: { id: string; text: string; verification: "automated" | "screenshot" | "manual" }[];
   integrations: { key: string; name: string; purpose: string }[];
@@ -133,6 +148,25 @@ export function validateSpec(raw: unknown): { spec: MasterSpec | null; problems:
   return {
     spec: {
       schema: "crestmont.master-spec/1", projectSpec: s(o.projectSpec, 20000), designSpec: s(o.designSpec, 20000), technicalArchitecture: s(o.technicalArchitecture, 20000),
+      // Stored only when the architect actually produced it. An absent or unusable phasePlan is left absent rather
+      // than filled with an empty shell: the phase prompts then fall back to the undifferentiated specification,
+      // which is honest, where an empty plan would read as "this website needs no design deliverables".
+      ...(() => {
+        const pp = o.phasePlan && typeof o.phasePlan === "object" ? o.phasePlan as Record<string, unknown> : null;
+        if (!pp) return {};
+        const obj = <T>(v: unknown, map: (x: Record<string, unknown>) => T, keep: (x: T) => boolean) =>
+          (Array.isArray(v) ? v : []).slice(0, 60).map((x) => map(x as Record<string, unknown>)).filter(keep);
+        const plan = {
+          designDeliverables: list(pp.designDeliverables, 60),
+          designDependentInteractions: obj(pp.designDependentInteractions,
+            (x) => ({ component: s(x.component, 200), states: list(x.states, 12), mock: s(x.mock, 500) }), (x) => !!x.component),
+          deferredBackend: obj(pp.deferredBackend,
+            (x) => ({ capability: s(x.capability, 200), dependsOnDesign: s(x.dependsOnDesign, 500), realImplementation: s(x.realImplementation, 1000) }), (x) => !!x.capability),
+          finalQuality: list(pp.finalQuality, 60),
+        };
+        const empty = !plan.designDeliverables.length && !plan.designDependentInteractions.length && !plan.deferredBackend.length && !plan.finalQuality.length;
+        return empty ? {} : { phasePlan: plan };
+      })(),
       tasks: outTasks, acceptanceCriteria: outAc,
       integrations: (Array.isArray(o.integrations) ? o.integrations : []).map((x) => x as Record<string, unknown>).map((x) => ({ key: id(x.key) ?? "", name: s(x.name, 100), purpose: s(x.purpose, 300) })).filter((x) => x.key).slice(0, 50),
       securityRequirements: list(o.securityRequirements), testingRequirements: list(o.testingRequirements),
@@ -213,10 +247,33 @@ export function outstanding(e: CycleEvidence): string[] {
   ];
 }
 
+/**
+ * The fraction of this cycle's checks and criteria that pass. Kept for legacy runners and still stored in
+ * `build_cycles.score`, but it is NO LONGER the stall signal on its own -- see `primaryProgress` below.
+ *
+ * Why: it averages everything. A cycle that takes the visual design from 20/40 to 30/40 while backend work is
+ * deliberately deferred has a LOWER progress fraction than the cycle before it, because the deferred backend
+ * criteria dominate the denominator. The old guard read that as "no measurable progress over the last three
+ * cycles" and escalated builds that were doing exactly what the architecture asks of them.
+ */
 const progressScore = (e: CycleEvidence) => {
   const total = e.checks.length + e.criteria.length;
   return total ? (e.checks.filter((c) => c.ok).length + e.criteria.filter((c) => c.status === "passed").length) / total : 0;
 };
+
+/**
+ * The number the stall guard actually compares: the ACTIVE phase's own category, normalised to 0-1 so it sits
+ * alongside the legacy fraction in the same column. A build is making progress when the category it is working on
+ * improves, whatever the total does.
+ */
+export function primaryProgress(card: { phase: BuildPhase; design: { points: number }; functionality: { points: number }; other: { points: number } } | null, fallback: number): number {
+  if (!card) return fallback;
+  const cat = PRIMARY_PROGRESS[card.phase];
+  if (!cat) return fallback;
+  return Math.round((card[cat].points / CATEGORY_MAX[cat]) * 1000) / 1000;
+}
+
+interface CycleJob { id: string; project_id: string; organization_id: string; attempts: number; package_id: string | null; strategy: string; brief_id: string | null }
 
 /**
  * Runner: one completed implementation cycle with the reviewer's proposed decision. The platform decides:
@@ -225,15 +282,25 @@ const progressScore = (e: CycleEvidence) => {
  *  - a continuation needs a corrective prompt that names the outstanding items it addresses; where this platform
  *    overruled a terminal decision into a continuation, it writes that prompt itself rather than blaming the reviewer
  *    for not supplying one it was never asked for;
- *  - loop guards: max cycles, the same failure signature three cycles in a row, or no progress over three cycles
- *    → ESCALATED (FAILED_NEEDS_INTERVENTION), work preserved.
+ *  - loop guards: max cycles, the same failure signature three cycles in a row, or no ACTIVE-PHASE progress over
+ *    three cycles → ESCALATED (FAILED_NEEDS_INTERVENTION), work preserved.
+ *
+ * It also owns the phase machine for the cycle: it verifies the reported weighted scorecard itself, records it,
+ * freezes a certified design, and answers with the phase the build is now in. The runner reads that answer; it
+ * never chooses its own phase.
  * Idempotent per (job, cycle).
  */
-export async function submitCycle(db: Db, job: { id: string; project_id: string; organization_id: string }, b: Record<string, unknown>) {
+export async function submitCycle(db: Db, job: CycleJob, b: Record<string, unknown>) {
   const cycle = Number(b.cycle);
   if (!Number.isInteger(cycle) || cycle < 1 || cycle > 1000) throw new HttpError(422, "cycle must be a positive integer");
-  const existing = await db.prepare(`SELECT decision, decision_reason, next_prompt FROM build_cycles WHERE job_id = ? AND cycle = ?`).bind(job.id, cycle).first<{ decision: Decision; decision_reason: string; next_prompt: string | null }>();
-  if (existing) return { cycle, decision: existing.decision, reason: existing.decision_reason, continue: CONTINUE.includes(existing.decision), prompt: existing.next_prompt };
+  const existing = await db.prepare(`SELECT decision, decision_reason, next_prompt, build_phase FROM build_cycles WHERE job_id = ? AND cycle = ?`).bind(job.id, cycle).first<{ decision: Decision; decision_reason: string; next_prompt: string | null; build_phase: string | null }>();
+  // Idempotent replay. The phase comes from the job row rather than the stored cycle, because a replay must tell the
+  // runner where the build IS, not where it was when this cycle was first recorded.
+  if (existing) {
+    const now = await PH.phaseOf(db, job.id);
+    return { cycle, decision: existing.decision, reason: existing.decision_reason, continue: CONTINUE.includes(existing.decision), prompt: existing.next_prompt,
+      phase: now.build_phase, phaseBlockers: [], designFrozen: !!now.design_freeze_id, points: null };
+  }
   const last = await db.prepare(`SELECT cycle FROM build_cycles WHERE job_id = ? ORDER BY cycle DESC LIMIT 1`).bind(job.id).first<{ cycle: number }>();
   if (cycle !== (last?.cycle ?? 0) + 1) throw new HttpError(409, `expected cycle ${(last?.cycle ?? 0) + 1}`);
   const ev = parseEvidence(b.evidence);
@@ -251,17 +318,82 @@ export async function submitCycle(db: Db, job: { id: string; project_id: string;
   const score = Math.round(progressScore(ev) * 1000) / 1000;
   const settings = await db.prepare(`SELECT max_review_cycles AS m FROM build_settings WHERE id = 1`).first<{ m: number }>();
   const maxCycles = settings?.m ?? 8;
-  const prior = (await db.prepare(`SELECT failure_signature, score FROM build_cycles WHERE job_id = ? ORDER BY cycle DESC LIMIT 3`).bind(job.id).all<{ failure_signature: string | null; score: number | null }>()).results;
+  const prior = (await db.prepare(`SELECT failure_signature, score, primary_progress, milestone FROM build_cycles WHERE job_id = ? ORDER BY cycle DESC LIMIT 3`).bind(job.id)
+    .all<{ failure_signature: string | null; score: number | null; primary_progress: number | null; milestone: number | null }>()).results;
+
+  // ── The weighted scorecard and the phase gate ────────────────────────────────────────────────────────────────────
+  // The card is verified HERE, from the reported evidence, and the phase is decided from the platform's own numbers.
+  // A card that claims 40/40 design without a vision reviewer, three viewports and a clean set of measured visual
+  // failures does not certify a design, whatever it says about itself.
+  const snapshot = await db.prepare(`SELECT attempt, cycle, commit_sha FROM build_revisions WHERE job_id = ? AND attempt = ? ORDER BY cycle DESC LIMIT 1`)
+    .bind(job.id, job.attempts).first<{ attempt: number; cycle: number; commit_sha: string | null }>();
+  const recorded = b.quality !== undefined && b.quality !== null ? await recordQuality(db, job, "cycle", b.quality, { revision: snapshot }) : null;
+  const card = recorded && recorded.version === 2 ? recorded : null;
+  const points = card ? { design: card.design.points, functionality: card.functionality.points, other: card.other.points, total: card.totalPoints } : null;
+  const progress = primaryProgress(card, score);
+
+  // A milestone is progress the number may not show yet: a rubric item that was short and is now at its maximum, or
+  // a phase that has just been frozen. Without this, a cycle that completes the last typography point but loses the
+  // same amount elsewhere looks identical to a cycle that did nothing.
+  const previousRubric = card ? await lastRubricItems(db, job.id, cycle) : null;
+  let milestone = card ? completedItem(previousRubric, card) : false;
+
+  const phaseBefore = (await PH.phaseOf(db, job.id)).build_phase;
+  let phase = phaseBefore;
+  let phaseBlockers: string[] = [];
+  let designFrozen = !!(await PH.activeFreeze(db, job.id));
+  const safety = ev.securityFindings.slice(0, 5);
+  if (card && safety.length) {
+    // Safety is non-deferrable in EVERY phase, and freezing a design IS progression. Checked before the freeze
+    // branch rather than inside advancePhase, because the freeze does not go through advancePhase: without this a
+    // build with an open tenant-isolation finding could still have its design certified and locked.
+    phaseBlockers = safety.map((s) => `safety: ${s}`);
+  } else if (card) {
+    // A certified design is frozen before anything else looks at the phase: the freeze IS the design→functionality
+    // transition, and it is the durable record the functionality gate reads.
+    if (phaseBefore === "design" && card.designCertified && card.ok) {
+      const files = snapshot ? (await db.prepare(`SELECT f.path, f.sha256 FROM build_revisions r JOIN build_revision_files f ON f.revision_id = r.id WHERE r.job_id = ? AND r.attempt = ? AND r.cycle = ?`)
+        .bind(job.id, snapshot.attempt, snapshot.cycle).all<{ path: string; sha256: string }>()).results : [];
+      const frozen = await PH.freezeDesign(db, job, {
+        card, revision: snapshot ? { attempt: snapshot.attempt, cycle: snapshot.cycle } : null, commitSha: snapshot?.commit_sha ?? null, cycle,
+        sourceFingerprint: files.length ? await PH.designFingerprint(files) : null,
+        screenshots: files.filter((f) => /-(?:desktop|tablet|mobile)\.png$/.test(f.path)).map((f) => f.path),
+        reviewerModel: typeof b.reviewerModel === "string" ? b.reviewerModel : null,
+      });
+      if (frozen.frozen) { phase = "design_locked"; designFrozen = true; milestone = true; }
+      else phaseBlockers = frozen.blockers;
+    } else if (phaseBefore !== "design" && designFrozen && !card.designCertified) {
+      // The frozen design no longer holds. The functional work is NOT reverted: the freeze is marked invalidated
+      // with the reason, and the design repair becomes outstanding work for the next cycle.
+      if (await PH.invalidateFreeze(db, job, `cycle ${cycle}: ${card.designBlockers.slice(0, 3).join("; ")}`)) designFrozen = false;
+      phaseBlockers = [`the frozen design no longer passes: ${card.designBlockers.slice(0, 3).join("; ")}`];
+    } else {
+      if (!designFrozen && card.designCertified && phaseBefore !== "design") await PH.revalidateFreeze(db, job, card);
+      const d = await PH.advancePhase(db, job, { card, cycle, safetyBlockers: [] });
+      phase = d.phase;
+      phaseBlockers = d.blockers;
+      if (d.advanced) milestone = true;
+      designFrozen = !!(await PH.activeFreeze(db, job.id));
+    }
+  }
 
   let decision: Decision = proposed ?? "FIX_DEFECTS";
   let reason = proposed ? `Reviewer (${provider}): ${proposed}` : "No valid reviewer decision; treated as FIX_DEFECTS";
   // An overrule below replaces a decision the reviewer meant to be terminal, for which the contract says nextPrompt
   // is null. The prompt is then this platform's to write, from the very work the overrule is based on.
   let overruled = false;
-  if (READY.includes(decision) && (open.length || !hasDesktop || !hasMobile)) {
+  // A "ready" decision has to survive the categories as well as the evidence list. 35/40 design with a high total
+  // is not ready, and neither is 40/40 design with unfinished backend work: there are no compensating scores.
+  const notReady = card ? card.releaseBlockers : [];
+  if (READY.includes(decision) && (open.length || !hasDesktop || !hasMobile || notReady.length)) {
     decision = "FIX_DEFECTS";
     overruled = true;
-    reason = `Overruled: the evidence does not support "${proposed}" (${open.length ? `${open.length} outstanding item(s)` : ""}${!hasDesktop || !hasMobile ? `${open.length ? "; " : ""}desktop and mobile screenshots are required` : ""})`;
+    const why = [
+      open.length ? `${open.length} outstanding item(s)` : "",
+      !hasDesktop || !hasMobile ? "desktop and mobile screenshots are required" : "",
+      ...notReady.slice(0, 3),
+    ].filter(Boolean);
+    reason = `Overruled: the evidence does not support "${proposed}" (${why.join("; ")})`;
   }
   if (decision === "WAIT_FOR_EXTERNAL_SETUP" && (nonIntegrationOpen.length || !ev.integrationBlockers.length)) {
     decision = nonIntegrationOpen.length ? "CONTINUE_BUILDING" : "READY_FOR_FINAL_QA";
@@ -282,11 +414,25 @@ export async function submitCycle(db: Db, job: { id: string; project_id: string;
   }
   if (CONTINUE.includes(decision)) {
     const sameRuns = prior.length >= 2 && prior.slice(0, 2).every((p) => p.failure_signature === signature);
-    // No progress: nothing in the last three cycles (this one included) beat the score of three cycles ago.
-    const stalled = prior.length >= 3 && Math.max(score, prior[0].score ?? 0, prior[1].score ?? 0) <= (prior[2].score ?? 0);
+    // No progress: nothing in the last three cycles (this one included) beat the ACTIVE PHASE's own category three
+    // cycles ago, and none of them reached a milestone.
+    //
+    // Two deliberate changes from the old guard. First, the comparison is the active category, not the overall
+    // progress fraction: a cycle that raises the visual design while leaving deferred backend criteria untouched
+    // LOWERS that fraction, and the old rule escalated builds for doing exactly what the architecture asks. Second,
+    // a completed rubric item or a frozen phase counts as progress even before the number moves, because the last
+    // half-point of one item and the first half-point of another can net to zero while real work happened.
+    const priorPrimary = prior.map((p) => p.primary_progress ?? p.score ?? 0);
+    const recentMilestone = milestone || prior.slice(0, 2).some((p) => p.milestone === 1);
+    const stalled = prior.length >= 3 && !recentMilestone && Math.max(progress, priorPrimary[0], priorPrimary[1]) <= priorPrimary[2];
     if (cycle >= maxCycles) { decision = "ESCALATED"; reason = `Reached the limit of ${maxCycles} review cycles`; }
-    else if (sameRuns && open.length) { decision = "ESCALATED"; reason = "The same failures repeated in three consecutive cycles"; }
-    else if (stalled) { decision = "ESCALATED"; reason = "No measurable progress over the last three cycles"; }
+    else if (sameRuns && open.length && !recentMilestone) { decision = "ESCALATED"; reason = "The same failures repeated in three consecutive cycles"; }
+    else if (stalled) {
+      decision = "ESCALATED";
+      reason = card
+        ? `No measurable progress in the ${PRIMARY_PROGRESS[phaseBefore] ?? "active"} category over the last three cycles`
+        : "No measurable progress over the last three cycles";
+    }
   }
   const finalPrompt = CONTINUE.includes(decision) ? prompt : null;
   const sessions = (Array.isArray(b.sessions) ? b.sessions : []).slice(0, 50).map((x) => x as Record<string, unknown>).map((x) => ({
@@ -294,17 +440,61 @@ export async function submitCycle(db: Db, job: { id: string; project_id: string;
   }));
   const model = (v: unknown) => typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,119}$/.test(v) ? v : null;
   const routing = b.routing && typeof b.routing === "object" ? JSON.stringify(b.routing).slice(0, 2000) : null;
-  await db.prepare(`INSERT INTO build_cycles (id, job_id, project_id, cycle, prompt, prompt_source, sessions_json, evidence_json, reviewer_provider, builder_model, reviewer_model, routing_json, proposed_decision, decision, decision_reason, next_prompt, score, failure_signature, findings_json, created_at, reviewed_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .bind(newId("cyc"), job.id, job.project_id, cycle, promptUsed, source, JSON.stringify(sessions), JSON.stringify(ev), provider, model(b.builderModel), model(b.reviewerModel), routing, proposed, decision, reason.slice(0, 1000), finalPrompt, score, signature, JSON.stringify({ outstanding: open.slice(0, 200), addresses }), nowIso(), nowIso()).run();
+  await db.prepare(`INSERT INTO build_cycles (id, job_id, project_id, cycle, prompt, prompt_source, sessions_json, evidence_json, reviewer_provider, builder_model, reviewer_model, routing_json, proposed_decision, decision, decision_reason, next_prompt, score, failure_signature, findings_json, created_at, reviewed_at,
+      build_phase, design_points, functionality_points, other_points, primary_progress, milestone)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(newId("cyc"), job.id, job.project_id, cycle, promptUsed, source, JSON.stringify(sessions), JSON.stringify(ev), provider, model(b.builderModel), model(b.reviewerModel), routing, proposed, decision, reason.slice(0, 1000), finalPrompt, score, signature, JSON.stringify({ outstanding: open.slice(0, 200), addresses }), nowIso(), nowIso(),
+      phase, points?.design ?? null, points?.functionality ?? null, points?.other ?? null, progress, milestone ? 1 : 0).run();
+  // The stored snapshot of this cycle carries its category scores too, so a revision stays comparable with the
+  // others after the build has moved on -- including a revision the ratchet reverted.
+  if (points && snapshot) {
+    await db.prepare(`UPDATE build_revisions SET build_phase = ?, design_points = ?, functionality_points = ?, other_points = ? WHERE job_id = ? AND attempt = ? AND cycle = ?`)
+      .bind(phase, points.design, points.functionality, points.other, job.id, snapshot.attempt, snapshot.cycle).run();
+  }
   // The automated acceptance verdict of this build (the internal-approval page shows it; it never approves anything).
   const acceptance = READY.includes(decision) ? "passed" : decision === "WAIT_FOR_EXTERNAL_SETUP" ? "passed_pending_integrations" : "failed";
   await db.prepare(`UPDATE build_jobs SET ai_acceptance = ?, updated_at = ? WHERE id = ?`).bind(acceptance, nowIso(), job.id).run();
   const stage: Stage = CONTINUE.includes(decision) ? "REVISION_REQUIRED" : decision === "ESCALATED" ? "FAILED_NEEDS_INTERVENTION"
     : decision === "WAIT_FOR_EXTERNAL_SETUP" ? "WAITING_FOR_EXTERNAL_SETUP" : decision === "NEEDS_HUMAN_AUTHORIZATION" ? "WAITING_FOR_HUMAN_AUTHORIZATION" : "AI_REVIEW";
   await setStage(db, job.project_id, stage, `Cycle ${cycle}: ${READY.includes(decision) ? "AI acceptance passed; the build finishes and waits for internal approval" : reason}`, "runner");
-  await audit(db, { actorKind: "system", action: "builds.review_cycle", subjectType: "build_job", subjectId: job.id, organizationId: job.organization_id, details: { cycle, proposed, decision, outstanding: open.length, score, builderModel: model(b.builderModel), reviewerModel: model(b.reviewerModel) } });
-  return { cycle, decision, reason, continue: CONTINUE.includes(decision), prompt: finalPrompt };
+  // Per-phase efficiency, accumulated from the runner's measured deltas and attributed to the phase the cycle
+  // STARTED in -- the spend belongs to the work that incurred it, not to the phase the gate opened into.
+  const eff = b.efficiency && typeof b.efficiency === "object" ? b.efficiency as Record<string, unknown> : null;
+  const n = (v: unknown, cap: number) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.min(Math.trunc(v), cap) : 0);
+  await PH.recordPhaseMetrics(db, job, phaseBefore, {
+    inferenceCalls: n(eff?.inferenceCalls, 10_000), inputTokens: n(eff?.inputTokens, 1e10), outputTokens: n(eff?.outputTokens, 1e10),
+    elapsedMs: n(eff?.elapsedMs, 86_400_000), reviewMs: n(eff?.modelMs, 86_400_000),
+    implementationMs: Math.max(0, n(eff?.elapsedMs, 86_400_000) - n(eff?.modelMs, 86_400_000)),
+    revisions: snapshot ? 1 : 0, reviews: 1, rollbacks: n(eff?.rollbacks, 100),
+    ineffectiveRepairs: decision === "ESCALATED" && /same failures|No measurable progress/.test(reason) ? 1 : 0,
+  });
+  await audit(db, { actorKind: "system", action: "builds.review_cycle", subjectType: "build_job", subjectId: job.id, organizationId: job.organization_id, details: { cycle, proposed, decision, outstanding: open.length, score, phase, points, milestone, builderModel: model(b.builderModel), reviewerModel: model(b.reviewerModel) } });
+  return { cycle, decision, reason, continue: CONTINUE.includes(decision), prompt: finalPrompt, phase, phaseBlockers: phaseBlockers.slice(0, 10), designFrozen, points };
+}
+
+/** The per-item rubric of the most recent weighted card before this cycle, for milestone detection. */
+async function lastRubricItems(db: Db, jobId: string, cycle: number): Promise<Record<string, { points: number; max: number }> | null> {
+  const r = await db.prepare(`SELECT rubric_json FROM build_quality WHERE job_id = ? AND schema_version = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+    .bind(jobId, SCORECARD_V2_SCHEMA).first<{ rubric_json: string }>();
+  if (!r || cycle <= 1) return null;
+  try {
+    const parsed = JSON.parse(r.rubric_json) as { design?: { items?: { id: string; points: number; max: number }[] }; functionality?: { items?: { id: string; points: number; max: number }[] }; other?: { items?: { id: string; points: number; max: number }[] } };
+    const out: Record<string, { points: number; max: number }> = {};
+    for (const cat of [parsed.design, parsed.functionality, parsed.other]) for (const i of cat?.items ?? []) out[i.id] = { points: i.points, max: i.max };
+    return out;
+  } catch { return null; }
+}
+
+/** True when a rubric item that was short of its maximum has now reached it. */
+function completedItem(before: Record<string, { points: number; max: number }> | null, card: { design: { items: { id: string; points: number; max: number; applicable: boolean }[] }; functionality: { items: { id: string; points: number; max: number; applicable: boolean }[] }; other: { items: { id: string; points: number; max: number; applicable: boolean }[] } }): boolean {
+  if (!before) return false;
+  for (const cat of [card.design, card.functionality, card.other]) {
+    for (const i of cat.items) {
+      const was = before[i.id];
+      if (i.applicable && was && was.points < was.max - 0.05 && i.points >= i.max - 0.05) return true;
+    }
+  }
+  return false;
 }
 
 // ── External integration checklist ──

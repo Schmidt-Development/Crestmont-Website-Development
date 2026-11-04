@@ -16,6 +16,7 @@ import type { JobDeps } from "../src/job.ts";
 import { ControlPlaneClient } from "../src/control-plane.ts";
 import { silentLogger } from "../src/log.ts";
 import { MockAdvisor, DeterministicReviewer } from "../src/orchestrator/advisors.ts";
+import { VISUAL_RUBRIC_ITEMS } from "../src/orchestrator/contracts.ts";
 import { RUNNER_DIR, tmp, startFakeControlPlane, startFakeModel, fakeDocker, makeJob, makeBrief, makeConfig, makeSkillsDir, testManifest, claimFrom, SECRET, POLLUTED_ENV } from "./helpers.ts";
 import type { FakeModelReply, FakeModelRequest } from "./helpers.ts";
 
@@ -330,8 +331,19 @@ function builder(prepared: string) {
   };
 }
 
-const assessed = (over: Record<string, unknown> = {}) => new MockAdvisor({ verdicts: [{ decision: "READY_FOR_FINAL_QA", addresses: [], findings: [], nextPrompt: null, imagesSeen: 2,
-  assessment: { visual_design: { verdict: "pass", note: "polished on desktop and mobile" }, brand_consistency: { verdict: "pass", note: "tokens applied" }, maintainability: { verdict: "pass", note: "starter patterns kept" }, customer_experience: { verdict: "pass", note: "clear contact journey" } }, ...over }] });
+/**
+ * A vision reviewer that judges this website finished: the binary assessment the flat criteria still use, plus the
+ * NUMERIC visual rubric the weighted design category is scored from. `vision` and `reviewer` are set by the runner
+ * from the model's CONFIGURED capability in production; a mock has to supply them, because without them the design
+ * category is `blocked` and no amount of functionality can certify the build.
+ */
+const assessed = (over: Record<string, unknown> = {}) => new MockAdvisor({ verdicts: [{
+  decision: "READY_FOR_FINAL_QA", addresses: [], findings: [], nextPrompt: null,
+  imagesSeen: 6, vision: true, reviewer: "mock",
+  assessment: { visual_design: { verdict: "pass", note: "polished on desktop and mobile" }, brand_consistency: { verdict: "pass", note: "tokens applied" }, maintainability: { verdict: "pass", note: "starter patterns kept" }, customer_experience: { verdict: "pass", note: "clear contact journey" } },
+  visualRubric: VISUAL_RUBRIC_ITEMS.map((i) => ({ id: i.id, points: i.max, note: "fixture: finished work", deficiencies: [] })),
+  ...over,
+}] });
 
 /** The job's own customer (makeBrief): the website must show the brief's business facts (brief conformance). */
 function forBrief(cfg: Record<string, any>) {
@@ -361,26 +373,44 @@ async function fullstackJob(cfgFile: Record<string, any>, reviewer: MockAdvisor 
   try { return { s: await runJob(job, deps), cp, resendCalls }; } finally { await model.close(); await cp.close(); }
 }
 
-test("[AIB-QUALITY] a full-stack build with a verified 10/10 within its scope completes as ready_for_review and reports its scorecard [fake model, fake docker]", async () => {
+test("[AIB-QUALITY] a full-stack build with a verified 100/100 completes as ready_for_review and reports its weighted scorecard [fake model, fake docker]", async () => {
   const { s, resendCalls } = await fullstackJob(fixture("starter-contact"), assessed(), { emailVerified: true });
   assert.equal(s.outcome, "ready_for_review", String(s.complete?.error));
   assert.deepEqual(resendCalls, ["https://api.resend.com/domains"], "verified by the runner's approved read-only operation, once");
-  const q = s.complete!.quality as { score: number; eligible: boolean; applicable: number };
+  const q = s.complete!.quality as { schema: string; totalPoints: number; overall: number; eligible: boolean; designCertified: boolean;
+    design: { points: number }; functionality: { points: number }; other: { points: number }; viewports: string[]; review: { vision: boolean } };
+  assert.equal(q.schema, "crestmont.quality-scorecard/2");
   assert.equal(q.eligible, true);
-  assert.equal(q.score, 10);
+  assert.equal(q.totalPoints, 100, "40 + 40 + 20, with every category measured");
+  assert.equal(q.overall, 10);
+  assert.deepEqual([q.design.points, q.functionality.points, q.other.points], [40, 40, 20]);
+  assert.equal(q.designCertified, true);
+  assert.equal(q.review.vision, true, "certified by a reviewer that could actually see the screenshots");
+  assert.deepEqual([...q.viewports].sort(), ["desktop", "mobile", "tablet"], "all three viewports evidenced");
+  // Both cards are written into the workspace: the flat evidence card at its original path, the weighted one beside it.
   const card = JSON.parse(readFileSync(path.join(s.workspace!, "repo", ".crestmont", "quality", "scorecard.json"), "utf8"));
   assert.equal(card.score, 10);
+  const weighted = JSON.parse(readFileSync(path.join(s.workspace!, "repo", ".crestmont", "quality", "weighted.json"), "utf8"));
+  assert.equal(weighted.totalPoints, 100);
+  assert.equal(weighted.design.items.length, 6, "the six visual rubric items, each with its own score");
   assert.ok(existsSync(path.join(s.workspace!, "repo", ".crestmont", "quality", "gates.json")));
 });
 
-test("[AIB-QUALITY] a score below 10 can never enter internal approval: the rule-based reviewer cannot judge design, so the build stops for a person (no automatic retry) [fake model, fake docker]", async () => {
+test("[AIB-QUALITY] below 100/100 can never enter internal approval: a rule-based reviewer cannot judge design, so the build stops for a person (no automatic retry) [fake model, fake docker]", async () => {
   const { s } = await fullstackJob(fixture("starter-contact"), new DeterministicReviewer(), { emailVerified: true });
   assert.equal(s.outcome, "stopped");
   assert.notEqual(s.outcome, "ready_for_review");
-  assert.match(String(s.complete?.error), /^Quality engine: the website is not eligible for internal approval: \d\.\d\/10 .*visual_design/);
-  const q = s.complete!.quality as { score: number; eligible: boolean };
+  // The reason is the one that matters: not "it scored badly", but that nothing capable of seeing the website
+  // looked at it, so the visual half of the product is unverified rather than judged.
+  assert.match(String(s.complete?.error), /^Quality engine: the website is not eligible for internal approval: \d+(?:\.\d)?\/100/);
+  assert.match(String(s.complete?.error), /visual design 0\/40/);
+  assert.match(String(s.complete?.error), /no vision-capable reviewer inspected the rendered website/);
+  const q = s.complete!.quality as { totalPoints: number; eligible: boolean; designCertified: boolean; design: { points: number; state: string } };
   assert.equal(q.eligible, false);
-  assert.ok(q.score < 10);
+  assert.equal(q.designCertified, false);
+  assert.equal(q.design.points, 0);
+  assert.equal(q.design.state, "blocked", "\"nobody looked\" is recorded as blocked, not as a measured zero");
+  assert.ok(q.totalPoints < 100);
 });
 
 test("[AIB-QUALITY] only a provider-side verification missing: the build waits as needs_information (it is not repaired, not approved) [fake model, fake docker]", async () => {

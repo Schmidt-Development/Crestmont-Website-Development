@@ -47,7 +47,7 @@ import { DeterministicReviewer, LocalModelAdvisor } from "./orchestrator/advisor
 import type { GalleryReferenceInput, MasterSpec, ReviewVerdict } from "./orchestrator/contracts.ts";
 import { outstanding } from "./orchestrator/contracts.ts";
 import { collectEvidence, builderIntegrations, builderApprovalRequests, writeReview, BUILDER_CONTRACT } from "./orchestrator/evidence.ts";
-import { ratchetDecision } from "./orchestrator/ratchet.ts";
+import { ratchetDecision, stopsBuild, type PhasePoints } from "./orchestrator/ratchet.ts";
 import { collectSnapshot } from "./orchestrator/snapshot.ts";
 import type { SessionRecord } from "./orchestrator/sessions.ts";
 import type { InferenceScheduler } from "./inference/scheduler.ts";
@@ -56,6 +56,10 @@ import { buildTask, repairTask, revisionTask, route, type Route, type Task } fro
 import type { InFlight, ProjectMemory } from "./memory.ts";
 import type { Scorecard } from "./quality.ts";
 import { readGates, requestedCapabilities, score, scorecardOutstanding } from "./quality.ts";
+import {
+  CATEGORY_MAX, PRIMARY_PROGRESS, VISUAL_MEASUREMENTS_FILE, phaseOutstanding, readVisualMeasurements, requiresImagery,
+  scoreWeighted, type BuildPhase, type Scorecard2,
+} from "./quality-weighted.ts";
 import type { CycleEvidence } from "./orchestrator/contracts.ts";
 import { ineffectiveRepairs, loadMemory, memoryDigest, remember, saveMemory } from "./memory.ts";
 
@@ -151,6 +155,15 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
   // Durable project memory (runner-written; see memory.ts): loaded once the workspace and any checkpoint are in place.
   let memory: ProjectMemory | null = null;
   let milestone = false;
+  // ── Design-first phase state (protocol v1.6) ──
+  // The PLATFORM owns the phase: it is read from the claim and updated from each cycle's answer, never chosen here.
+  // So a restarted container, a replaced image or a resumed segment comes back to the recorded phase rather than
+  // redesigning a website whose design is already certified and frozen -- which is exactly why it is persisted
+  // there and not held in a variable that a new process would reinitialise to "design".
+  let buildPhase: BuildPhase = job.phase ?? "design";
+  let designFrozen = !!job.designFreeze;
+  /** When this attempt started working, so the first cycle's measured effort includes the generation phases. */
+  const attemptStartedAt = Date.now();
   const synced = { modelCalls: 0, inputTokens: 0, outputTokens: 0 };
   const saveMem = () => {
     if (!memory || !ws) return;
@@ -308,7 +321,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     }
   };
 
-  const finish = async (outcome: Outcome, fields: { error?: string | null; checks?: CheckOutcome[]; preview?: { url: string | null; note: string; name?: string | null }; stopReason?: string | null; notBefore?: string | null; quality?: Scorecard | null; missingInformation?: string[] }): Promise<JobSummary> => {
+  const finish = async (outcome: Outcome, fields: { error?: string | null; checks?: CheckOutcome[]; preview?: { url: string | null; note: string; name?: string | null }; stopReason?: string | null; notBefore?: string | null; quality?: Scorecard | Scorecard2 | null; missingInformation?: string[] }): Promise<JobSummary> => {
     guard();
     if (memory && remember.isOpen(memory)) await endSegment(outcome);
     const commit = git ? await headCommit(git) : null;
@@ -615,7 +628,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       routed.push(r);
       Object.assign(now, { activity: "gpu_running", model: r.model.tag, task: r.task });
       tracker.note({ kind: "step", message: `phase ${phase}: ${r.reason} (${r.model.tag})` });
-      const base = promptOverride ?? phasePrompt(job, phase, { starter: starterLabel, resumed: !!job.resume, previousNote, toolset });
+      const base = promptOverride ?? phasePrompt(job, phase, { starter: starterLabel, resumed: !!job.resume, previousNote, toolset, buildPhase, designFreeze: job.designFreeze ?? null, phasePlan: spec?.phasePlan ?? null });
       begin(phase === "repair" ? "repair" : "phase", `${phase} (${r.model.tag})`);
       const res = await provider!.run({
         phase,
@@ -724,21 +737,34 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     // Every build the platform marks "required", and every starter that declares the quality engine, is gated.
     const qualityRequired = job.quality === "required" || !!starterSpec?.quality;
     let lastCard: Scorecard | null = null;
-    // Repair ratchet: the best scorecard this build has reached and the revision that achieved it.
-    let bestCard: Scorecard | null = null;
+    let lastWeighted: Scorecard2 | null = null;
+    // Phase-aware ratchet state. The best is held per PHASE: entering a new phase starts a new best, because the
+    // category being measured has changed and the previous phase's number is not a bar for this one.
+    let bestPoints: PhasePoints | null = null;
     let bestCommit: string | null = null;
+    let bestCard: Scorecard | null = null;
     let regressions = 0;
+    let idleCycles = 0;
+    // Where the last cycle's usage stood, so each submission reports the delta this cycle actually spent. Deltas,
+    // not cumulative totals, so the platform can attribute spend to the phase that incurred it.
+    //
+    // Deliberately starting from ZERO and from the attempt's own start, not from where the counters stand here:
+    // the plan, build and verify phases have already run by this point, and that is where most of a design phase's
+    // GPU time actually goes. Starting from the current values would attribute the generation to no phase at all
+    // and leave the design phase looking almost free, which is the opposite of an honest measurement.
+    const cycleUsage = { modelCalls: 0, inputTokens: 0, outputTokens: 0, modelWallMs: 0, at: attemptStartedAt };
     let lastVerdict: ReviewVerdict | null = null;
     // The final scorecard may use the reviewer's assessment only of the code that reviewer saw: after any repair that
     // was not reviewed again (the loop ended on its cycle limit), the review-based criteria have no evidence.
     let reviewCurrent = false;
     let lastEvidence: CycleEvidence | null = null;
     let scoreNow: (verdict: ReviewVerdict | null, previewDeployed: boolean | null, iteration: number) => Scorecard = () => { throw new Error("scorecard before acceptance"); };
+    let weighNow: (card: Scorecard, verdict: ReviewVerdict | null, revision: string | null) => Scorecard2 = () => { throw new Error("weighted scorecard before acceptance"); };
     if (!stop.reason && !st.localLimit && !st.agentError) {
       stage = "verifying";
       commands = acceptanceCommands(starterSpec, ws.repo, effectivePackage);
       if (sandbox && cfg.jobSandbox.browserCheck && existsSync(path.join(ws.repo, "public", "index.html"))) {
-        commands.push({ id: "browser-check", label: "Headless Chromium: every page at desktop and mobile width (console errors, failed requests, horizontal overflow, screenshots)", command: ["node", BROWSER_CHECK, "--root", "public", "--out", ".crestmont/screenshots"] });
+        commands.push({ id: "browser-check", label: "Headless Chromium: every page at desktop, tablet and mobile width (console errors, failed requests, overflow, stacked navigation, unstyled pages, imagery counts, screenshots)", command: ["node", BROWSER_CHECK, "--root", "public", "--out", ".crestmont/screenshots", "--visual-out", VISUAL_MEASUREMENTS_FILE] });
       }
       if (sandbox && needsInstall(ws.repo)) {
         const inst = await sandbox.install();
@@ -757,6 +783,22 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         return score({ packageId: effectivePackage, capabilities: caps, requested, checks, gates: readGates(ws!.repo), screenshots: ev?.screenshots ?? [], review: verdict,
           requirements: withCheckRequirements(readRequirements(ws!.repo, job.requirements), checks), criteria: ev?.criteria ?? [], securityFindings: ev?.securityFindings ?? [], previewDeployed, iteration });
       };
+      // Whether the approved design calls for imagery, read from the customer's intake and the architect's design
+      // specification -- never from the builder, which is how a website shipped with no images at all against a
+      // brief that asked for licensed photography.
+      const imageryRequired = requiresImagery({
+        imagesSource: job.brief.content.customerData.content?.imagesSource ?? null,
+        designSpec: spec?.designSpec ?? null,
+        pages: job.brief.content.customerData.pages ?? [],
+      });
+      weighNow = (card, verdict, revision) => scoreWeighted({
+        card, phase: buildPhase, revision,
+        visual: readVisualMeasurements(ws!.repo),
+        visualRubric: verdict?.visualRubric ?? null,
+        review: verdict?.reviewer ? { reviewer: verdict.reviewer, imagesSeen: verdict.imagesSeen ?? 0, vision: !!verdict.vision } : null,
+        requiresImagery: imageryRequired,
+        browserOk: checks.find((c) => c.id === "browser-check")?.ok ?? null,
+      });
       let promptUsed = spec?.masterPrompt ?? "Runner build phases (plan, build, verify) from BRIEF.md";
       let promptSource: "architect" | "reviewer" | "runner" = spec ? "architect" : "runner";
       let cycleRoute: Route = buildRoute;
@@ -799,33 +841,65 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         Object.assign(now, { activity: "reviewing", model: reviewRoute.model.tag, task: reviewRoute.task });
         let verdict: ReviewVerdict;
         let reviewerName = reviewer.name;
-        try { verdict = await reviewer.review(spec, evidence, cycle); }
+        // The reviewer is told which phase it is judging, and is given the browser's own visual measurements, so a
+        // design-phase review does not fail a build for the backend work the architecture told it to defer.
+        const reviewCtx = { phase: buildPhase, visual: readVisualMeasurements(ws.repo) };
+        try { verdict = await reviewer.review(spec, evidence, cycle, reviewCtx); }
         catch (err) {
           if (stop.reason) break;
-          sessionNotes.push(`Review session for cycle ${cycle} failed (${errorMessage(err).slice(0, 200)}); the deterministic reviewer judged this cycle.`);
+          sessionNotes.push(`Review session for cycle ${cycle} failed (${errorMessage(err).slice(0, 200)}); the deterministic reviewer judged this cycle. It cannot see images, so the visual design is recorded as unverified rather than scored.`);
           reviewerName = "deterministic";
-          verdict = await new DeterministicReviewer().review(spec, evidence);
+          verdict = await new DeterministicReviewer().review(spec, evidence, cycle, reviewCtx);
         }
-        // Quality scorecard (every build, every iteration): failing criteria are outstanding work for this cycle, and a
-        // reviewer "ready" without a verified 10/10 becomes a targeted repair (or a wait for external verification).
+        // Quality scorecard (every build, every iteration). The flat card is the evidence engine; the weighted card
+        // is what the phase machine, the ratchet and the Founder's dashboard read.
         let card = scoreNow(verdict, null, cycle);
+        let weighted = weighNow(card, verdict, `${job.attempt}-${cycle}`);
+        // Progress THIS cycle that the number may not show: a rubric item that was short of its maximum and has
+        // now reached it. Without this, the cycle that earns the last typography point while losing the same amount
+        // on imagery is indistinguishable from a cycle that did nothing, and the idle guard stops a converging
+        // build. `milestone` (segment-wide) is deliberately not reused here: it never resets.
+        const cycleMilestone = completedRubricItem(lastWeighted, weighted);
         // Whether the ratchet rolled this cycle back, for the snapshot the Founder will inspect.
         let revertedThisCycle = false;
         let revertNote: string | null = null;
-        // ── repair ratchet ────────────────────────────────────────────────────────────────────────────────────────
-        // A build must not be able to walk away from its own best work. Measured on Node 1 (2026-11-02): 7.50 ->
-        // 7.16 -> 7.22 -> 6.94, every repair kept whatever it did, so the LAST and worst state was the deliverable.
-        // The bounded repair loop stops a build that stops improving; it never says which revision the customer
-        // gets. So: keep the best revision, and when a repair measurably loses ground, go back to it first.
+        // ── phase-aware repair ratchet ────────────────────────────────────────────────────────────────────────────
+        // A build must not walk away from its best work, and must not be reverted for losing ground in a category
+        // it has not started. Measured on Node 1 (2026-11-02): 7.50 -> 7.16 -> 7.22 -> 6.94, every repair kept
+        // whatever it did, so the LAST and worst state was the deliverable -- hence keeping the best revision. But
+        // the comparison is now the ACTIVE PHASE's own category, because a cycle that takes the design from 20/40
+        // to 30/40 while deferred backend work falls from 30/40 to 5/40 drops the total from 7.0 to 5.5 and must
+        // NOT be reverted: that is the architecture working, not a regression.
         {
           const here = await headCommit(git!);
-          const d = ratchetDecision(card.score, bestCard?.score ?? null, regressions);
-          if (d.action === "record-best") { bestCard = card; bestCommit = here; regressions = 0; }
-          else if ((d.action === "revert" || d.action === "revert-and-stop") && bestCard && bestCommit && here && bestCommit !== here) {
-            regressions = d.regressions;
-            const restored = await restoreTo(git!, bestCommit, `AI build: revert cycle ${cycle - 1} repair (quality ${card.score}/10 < best ${bestCard.score}/10)`);
-            const note = `Cycle ${cycle}: the previous repair lowered the quality score from ${bestCard.score} to ${card.score}; the website was restored to its best revision (${bestCommit.slice(0, 8)}) before continuing.`;
-            log.warn("repair lowered the quality score; reverted to the best revision", { score: card.score, best: bestCard.score, bestCommit, restored, cycle });
+          const points: PhasePoints = { design: weighted.design.points, functionality: weighted.functionality.points, other: weighted.other.points };
+          const cat = PRIMARY_PROGRESS[buildPhase];
+          const d = ratchetDecision({
+            phase: buildPhase, current: points, best: bestPoints, designCertified: weighted.designCertified, designFrozen,
+            regressions, idleCycles, milestoneReached: cycleMilestone,
+            safetyBlockers: evidence.securityFindings.slice(0, 5),
+          });
+          tracker.note({ kind: "note", message: `ratchet (cycle ${cycle}, phase ${buildPhase}): ${d.action} — ${d.reason}` });
+          if (d.action === "record-best") { bestPoints = points; bestCard = card; bestCommit = here; regressions = 0; idleCycles = 0; }
+          else if (d.action === "keep") { idleCycles = cycleMilestone ? 0 : idleCycles + 1; }
+          else if (d.action === "repair-frozen") {
+            // The functional work is deliberately KEPT: reverting would also revert the change that broke the
+            // frozen category, which is the progress this cycle actually made. The regression becomes outstanding
+            // work for a targeted repair instead.
+            idleCycles = 0;
+            const note = `Cycle ${cycle}: ${d.reason}`;
+            sessionNotes.push(note);
+            tracker.note({ kind: "note", message: note });
+            verdict = { ...verdict, findings: [...verdict.findings, note] };
+            for (const b of (d.regressed === "design" ? weighted.designBlockers : weighted.releaseBlockers).slice(0, 10)) {
+              const item = `${d.regressed}:${b.slice(0, 160)}`;
+              if (!evidence.defects.includes(item)) evidence.defects.push(item);
+            }
+          } else if ((d.action === "revert" || d.action === "revert-and-stop") && bestPoints && bestCommit && here && bestCommit !== here) {
+            regressions = d.action === "revert" ? d.regressions : d.regressions;
+            const restored = await restoreTo(git!, bestCommit, `AI build: revert cycle ${cycle - 1} repair (${d.reason})`);
+            const note = `Cycle ${cycle}: ${d.reason}; the website was restored to the best revision of this phase (${bestCommit.slice(0, 8)}) before continuing.`;
+            log.warn("repair lost ground in the active category; reverted to the best revision", { phase: buildPhase, category: cat, points, best: bestPoints, bestCommit, restored, cycle });
             sessionNotes.push(note);
             tracker.note({ kind: "note", message: note });
             // This cycle's evidence (changed files, commits, screenshots) describes the revision that has just been
@@ -833,40 +907,78 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
             verdict = { ...verdict, findings: [...verdict.findings, note] };
             revertedThisCycle = true;
             revertNote = note;
-            // The tree is the best one again, so that is the card the build now stands at, and the checks have to
-            // be re-run against it: the ones in hand measured a revision that no longer exists.
-            card = bestCard;
+            // The tree is the best one again, so the checks have to be re-run against it: the ones in hand measured
+            // a revision that no longer exists.
             checks = await acceptance(commands);
+            card = bestCard ?? card;
+            weighted = weighNow(card, verdict, `${job.attempt}-${cycle}`);
             if (d.action === "revert-and-stop") {
-              st.agentError = `Stopped repairing after ${regressions} repairs in a row that lowered the quality score. The website is at its best measured revision (${bestCard.score}/10), which is below the 10/10 required for certification.`;
+              st.agentError = `Stopped repairing after ${regressions} cycles in a row that lowered the ${cat ?? "active"} score. The website is at the best measured revision of the ${buildPhase} phase (${cat ? `${cat} ${bestPoints[cat]}/${CATEGORY_MAX[cat]}` : "no category score"}), which is below what certification requires.`;
               st.terminal = true;
               sessionNotes.push(st.agentError);
               tracker.note({ kind: "note", message: st.agentError });
-              lastCard = card; lastVerdict = verdict; reviewCurrent = true;
-              writeInside(ws.repo, path.join(".crestmont", "quality", "scorecard.json"), JSON.stringify(card, null, 2) + "\n");
+              lastCard = card; lastWeighted = weighted; lastVerdict = verdict; reviewCurrent = true;
+              writeCards(ws.repo, card, weighted);
               break;
             }
+          } else if (stopsBuild(d)) {
+            // escalate / halt: a person decides. Neither is a score to repair past.
+            st.agentError = d.action === "halt" ? d.reason : `${d.reason} (phase ${buildPhase})`;
+            st.terminal = true;
+            sessionNotes.push(st.agentError);
+            tracker.note({ kind: "note", message: st.agentError });
+            lastCard = card; lastWeighted = weighted; lastVerdict = verdict; reviewCurrent = true;
+            writeCards(ws.repo, card, weighted);
+            break;
           }
         }
-        lastCard = card; lastVerdict = verdict; reviewCurrent = true;
-        writeInside(ws.repo, path.join(".crestmont", "quality", "scorecard.json"), JSON.stringify(card, null, 2) + "\n");
-        if (memory) remember.quality(memory, card);
-        tracker.note({ kind: "check", message: `quality scorecard (cycle ${cycle}): ${card.score}/10 (${card.passed} of ${card.applicable} applicable criteria)${card.eligible ? "" : card.waitingExternal ? "; waiting for external verification" : `; failing: ${card.criteria.filter((c) => c.applicable && c.status !== "pass").map((c) => c.id).join(", ")}`}` });
-        if (qualityRequired) for (const d of scorecardOutstanding(card)) if (!evidence.defects.includes(d)) evidence.defects.push(d);
-        if (qualityRequired && card.waitingExternal) for (const c of card.criteria.filter((x) => x.status === "pending_external")) evidence.integrationBlockers.push(`${c.name}: ${c.reason ?? "provider-side verification pending"}`.slice(0, 300));
+        lastCard = card; lastWeighted = weighted; lastVerdict = verdict; reviewCurrent = true;
+        writeCards(ws.repo, card, weighted);
+        if (memory) remember.quality(memory, card, weighted);
+        tracker.note({ kind: "check", message: `quality scorecard (cycle ${cycle}, phase ${buildPhase}): ${weighted.totalPoints}/100 = ${weighted.overall}/10 — design ${weighted.design.points}/40, frontend+backend ${weighted.functionality.points}/40, remaining ${weighted.other.points}/20${weighted.designCertified ? "; design certified" : `; design not certified: ${weighted.designBlockers.slice(0, 2).join("; ")}`}` });
+        // Outstanding work is the ACTIVE PHASE's, not every category's: a design cycle must not be driven by
+        // backend criteria it was told to defer, and a functionality cycle must not be driven by SEO.
+        if (qualityRequired) for (const d of phaseOutstanding(weighted)) if (!evidence.defects.includes(d)) evidence.defects.push(d);
+        if (qualityRequired && weighted.waitingExternal) for (const c of card.criteria.filter((x) => x.status === "pending_external")) evidence.integrationBlockers.push(`${c.name}: ${c.reason ?? "provider-side verification pending"}`.slice(0, 300));
         open = outstanding(evidence);
-        if (qualityRequired && /^READY_/.test(verdict.decision) && !card.eligible) {
-          verdict = card.waitingExternal && !open.length
+        if (qualityRequired && /^READY_/.test(verdict.decision) && !weighted.eligible) {
+          verdict = weighted.waitingExternal && !open.length
             ? { ...verdict, decision: "WAIT_FOR_EXTERNAL_SETUP", nextPrompt: null, findings: [...verdict.findings, "Quality engine: everything else passes; waiting for the customer's provider-side verification."] }
-            : { ...verdict, decision: "FIX_DEFECTS", addresses: open, findings: [...verdict.findings, `Quality engine: ${card.score}/10 is below the required 10/10.`],
-              nextPrompt: ["The website is not finished: the quality scorecard is below 10/10 within the approved scope. Fix each item, re-run `npm run check`, and keep everything that already passes:", ...card.defects.map((d) => `- ${d.detail}`)].join("\n") };
+            : { ...verdict, decision: "FIX_DEFECTS", addresses: open,
+              findings: [...verdict.findings, `Quality engine: ${weighted.totalPoints}/100 is below the required 100/100 (${weighted.releaseBlockers.slice(0, 3).join("; ")}).`],
+              nextPrompt: [`The website is not finished: it is at ${weighted.totalPoints}/100 — visual design ${weighted.design.points}/40, frontend and backend ${weighted.functionality.points}/40, remaining quality ${weighted.other.points}/20. The active phase is "${buildPhase}". Fix the following, re-run \`npm run check\`, and keep everything that already passes:`,
+                ...phaseOutstanding(weighted).map((d) => `- ${d}`), ...weighted.designBlockers.slice(0, 8).map((d) => `- design: ${d}`)].join("\n") };
         }
         writeReview(ws.repo, cycle, verdict.decision, verdict.nextPrompt, verdict.findings);
         const reviewerModel = reviewerName.startsWith("local:") ? reviewerName.slice(6) : null;
         const res = await client.submitCycle(job, { cycle, prompt: promptUsed, promptSource, evidence, decision: verdict.decision, addresses: verdict.addresses, nextPrompt: verdict.nextPrompt, reviewerProvider: reviewerName,
           builderModel: lastBuildModel, reviewerModel, routing: { builder: cycleRoute.slot, builderTask: cycleRoute.task, reason: cycleRoute.reason, reviewer: reviewerModel ? "A" : "rules" },
+          quality: weighted, phase: buildPhase,
+          // Measured efficiency for THIS cycle, attributed to the phase that spent it. There is nowhere here to
+          // put an estimate, which is the point: a GPU saving that was not measured is not reported.
+          efficiency: {
+            inferenceCalls: tracker.modelCalls - cycleUsage.modelCalls,
+            inputTokens: tracker.inputTokens - cycleUsage.inputTokens,
+            outputTokens: tracker.outputTokens - cycleUsage.outputTokens,
+            elapsedMs: Date.now() - cycleUsage.at,
+            modelMs: tracker.modelWallMs - cycleUsage.modelWallMs,
+            rollbacks: revertedThisCycle ? 1 : 0,
+          },
           sessions: sessionRecords.splice(0) }).catch((err) => { if (err instanceof LeaseLostError) { markLeaseLost(); throw err; } throw err; });
-        await snapshot(cycle, "repair", { score: card.score, decision: verdict.decision, isBest: bestCard === card, reverted: revertedThisCycle, revertedReason: revertNote });
+        Object.assign(cycleUsage, { modelCalls: tracker.modelCalls, inputTokens: tracker.inputTokens, outputTokens: tracker.outputTokens, modelWallMs: tracker.modelWallMs, at: Date.now() });
+        // The platform owns the phase and the freeze, and it re-verified the card before answering. Whatever it
+        // says is the phase from here on -- including a phase this runner would not have chosen.
+        if (res?.phase && res.phase !== buildPhase) {
+          tracker.note({ kind: "step", message: `phase ${buildPhase} -> ${res.phase}${res.designFrozen ? " (design frozen and verified by the platform)" : ""}` });
+          sessionNotes.push(`Phase ${buildPhase} -> ${res.phase}: the platform verified the scorecard and opened the gate.`);
+          buildPhase = res.phase as BuildPhase;
+          // A new phase measures a different category, so the previous phase's best is not a bar for this one.
+          bestPoints = null; bestCommit = null; bestCard = null; regressions = 0; idleCycles = 0;
+          milestone = true;
+        }
+        if (res && typeof res.designFrozen === "boolean") designFrozen = res.designFrozen;
+        if (res?.phaseBlockers?.length) tracker.note({ kind: "note", message: `phase ${buildPhase} continues: ${res.phaseBlockers.slice(0, 3).join("; ")}` });
+        await snapshot(cycle, "repair", { score: weighted.overall, decision: verdict.decision, isBest: bestCard === card, reverted: revertedThisCycle, revertedReason: revertNote });
         // Older platform without the orchestration endpoints: the earlier behaviour (one repair round when checks failed).
         const decision = res ?? { cycle, decision: verdict.decision, reason: "local", continue: cycle === 1 && checks.some((c) => !c.ok), prompt: verdict.nextPrompt };
         tracker.note({ kind: "step", message: `cycle ${cycle}: ${decision.decision}${res ? "" : " (platform without orchestration endpoints)"}` });
@@ -981,38 +1093,47 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
 
     // ── quality gate: the final scorecard (with the private staging preview) decides whether the build may enter
     // internal approval. Required for every build the platform marks quality "required" and for every starter that
-    // declares the quality engine; nothing below a verified 10/10 within the approved scope gets through.
+    // declares the quality engine; nothing below a verified 100/100 across the three categories gets through, and
+    // there are no compensating scores between them.
     let finalCard: Scorecard | null = null;
+    let finalWeighted: Scorecard2 | null = null;
     if (lastEvidence || qualityRequired) {
-      if (!reviewCurrent && lastVerdict) tracker.note({ kind: "note", message: "quality: the last repair was not reviewed again; review-based criteria have no evidence for the final code" });
+      if (!reviewCurrent && lastVerdict) tracker.note({ kind: "note", message: "quality: the last repair was not reviewed again; review-based criteria and the visual rubric have no evidence for the final code" });
       try { finalCard = scoreNow(reviewCurrent ? lastVerdict : null, cfg.preview ? !!preview.url : null, lastCard?.iteration ?? 0); }
       catch { finalCard = null; }
       if (finalCard) {
-        writeInside(ws.repo, path.join(".crestmont", "quality", "scorecard.json"), JSON.stringify(finalCard, null, 2) + "\n");
-        if (memory) remember.quality(memory, finalCard);
+        try { finalWeighted = weighNow(finalCard, reviewCurrent ? lastVerdict : null, lastWeighted?.revision ?? null); } catch { finalWeighted = null; }
+        writeCards(ws.repo, finalCard, finalWeighted);
+        if (memory) remember.quality(memory, finalCard, finalWeighted);
       }
     }
     await commitAndPush(`AI build ${job.kind === "revision" ? `revision ${job.revision}` : "first build"}: ready for owner review`);
-    const qualityBlocked = qualityRequired && !failedChecks.length && (!finalCard || !finalCard.eligible);
+    const qualityBlocked = qualityRequired && !failedChecks.length && (!finalWeighted || !finalWeighted.eligible);
     await endSegment(failedChecks.length || qualityBlocked ? "failed" : "completed");
     await checkpoint("final");
     if (failedChecks.length) {
       return await finish("failed", { error: `Acceptance checks failed: ${failedChecks.map((c) => c.id).join(", ")}`, checks, preview });
     }
     if (qualityBlocked) {
-      const card = finalCard;
-      if (card?.waitingExternal) {
-        const pending = card.criteria.filter((c) => c.status === "pending_external").map((c) => `${c.name}: ${c.reason ?? "provider-side verification of the customer's own account"}`);
-        return await finish("needs_information", { checks, preview, quality: card, missingInformation: pending });
+      const w = finalWeighted;
+      if (w?.waitingExternal) {
+        // Named from the flat card, which carries the human-readable criterion names: this list is shown to the
+        // Founder and to the customer as "what we are waiting for", and "External integrations: ..." says what
+        // "integrations: ..." does not.
+        const pending = (finalCard?.criteria ?? []).filter((c) => c.status === "pending_external")
+          .map((c) => `${c.name}: ${c.reason ?? "provider-side verification of the customer's own account"}`);
+        return await finish("needs_information", { checks, preview, quality: w, missingInformation: pending });
       }
-      const why = card ? `${card.score}/10 (${card.passed} of ${card.applicable} applicable criteria); not met: ${card.criteria.filter((c) => c.applicable && c.status !== "pass").map((c) => `${c.id} (${(c.reason ?? c.status).slice(0, 80)})`).join("; ").slice(0, 900)}` : "no scorecard could be computed (the acceptance evidence is missing)";
+      const why = w
+        ? `${w.totalPoints}/100 (= ${w.overall}/10) — visual design ${w.design.points}/40, frontend and backend ${w.functionality.points}/40, remaining quality ${w.other.points}/20; not met: ${w.releaseBlockers.join("; ").slice(0, 700)}${w.designBlockers.length ? `; design: ${w.designBlockers.slice(0, 5).join("; ").slice(0, 400)}` : ""}`
+        : "no scorecard could be computed (the acceptance evidence is missing)";
       // Not retried automatically: the repair loop already ran its bounded cycles; a person decides the next step.
-      return await finish("stopped", { error: `Quality engine: the website is not eligible for internal approval: ${why}`, stopReason: "quality_not_met", checks, preview, quality: card });
+      return await finish("stopped", { error: `Quality engine: the website is not eligible for internal approval: ${why}`, stopReason: "quality_not_met", checks, preview, quality: w ?? finalCard });
     }
     const needsInfo = readStringList(ws.repo, "needs-information.json");
     const reqs = readRequirements(ws.repo, job.requirements);
     if (needsInfo.length && reqs.some((r) => r.status === "blocked")) return await finish("needs_information", { checks, preview });
-    return await finish("ready_for_review", { checks, preview, quality: finalCard });
+    return await finish("ready_for_review", { checks, preview, quality: finalWeighted ?? finalCard });
   } catch (err) {
     if (err instanceof LeaseLostError || leaseLost) {
       stop.request("lease_lost");
@@ -1193,4 +1314,34 @@ export async function deletePreview(cfg: RunnerConfig, name: string, processEnv:
     if (r.refused) return { ok: false, error: `delete command refused: ${r.stderr.slice(0, 300)}` };
     return r.code === 0 ? { ok: true, error: null } : { ok: false, error: `delete command failed (exit ${r.code}${r.timedOut ? ", timed out" : ""})` };
   } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+/**
+ * Write both scorecards into the workspace: the flat evidence card (unchanged path, so every existing reader and
+ * checkpoint keeps working) and the weighted one beside it.
+ */
+function writeCards(repo: string, card: Scorecard, weighted: Scorecard2 | null): void {
+  writeInside(repo, path.join(".crestmont", "quality", "scorecard.json"), JSON.stringify(card, null, 2) + "\n");
+  if (weighted) writeInside(repo, path.join(".crestmont", "quality", "weighted.json"), JSON.stringify(weighted, null, 2) + "\n");
+}
+
+/**
+ * True when a rubric item that was short of its maximum has reached it since the previous cycle.
+ *
+ * This is the "newly completed criterion is progress even before the number changes" rule. It matters because the
+ * two halves of a cycle can cancel: earning the last half-point of typography while losing half a point of imagery
+ * leaves the category identical, and without this the idle guard would count that as a wasted cycle and escalate a
+ * build that is converging.
+ */
+function completedRubricItem(before: Scorecard2 | null, now: Scorecard2): boolean {
+  if (!before) return false;
+  const was = new Map<string, { points: number; max: number }>();
+  for (const cat of [before.design, before.functionality, before.other]) for (const i of cat.items) was.set(i.id, { points: i.points, max: i.max });
+  for (const cat of [now.design, now.functionality, now.other]) {
+    for (const i of cat.items) {
+      const w = was.get(i.id);
+      if (i.applicable && w && w.points < w.max - 0.05 && i.points >= i.max - 0.05) return true;
+    }
+  }
+  return false;
 }
