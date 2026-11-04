@@ -475,7 +475,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       write("gallery.json", { total: sum(() => true), aiEligible: sum(eligible), byIndustry: Object.fromEntries(byIndustry), version, imageKeys: keys });
       // Also as plain lines: the R2 probe then needs no inline script, and an inline script is what broke the
       // workflow file the first time (an escaped newline became a real one and split the YAML).
-      writeText("gallery-keys.txt", keys.join(String.fromCharCode(10)));
+      // A TRAILING newline matters: `while read -r` returns non-zero on a final line that has none, so the loop
+      // body never runs for it and the last key is skipped in silence. The probe reported 30 of 31 that way.
+      writeText("gallery-keys.txt", keys.map((k) => k + String.fromCharCode(10)).join(""));
     } else { console.error("usage: builder-staging-e2e.ts prepare|verify-link|register|purchase|status|gallery [--dir jitt] [--wait-minutes N]"); process.exit(2); }
   } catch (e) {
     console.log(`::error title=Builder staging E2E (${cmd})::${clip((e as Error).message, 400)}`);
