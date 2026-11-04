@@ -72,7 +72,11 @@ export interface ProjectMemory {
   approvalsPending: string[];
   preview: { url: string | null; note: string | null; at: string | null };
   /** Quality scorecard history (runner-computed from evidence; survives context resets, restarts and segments). */
-  quality?: { iteration: number; score: number; eligible: boolean; waitingExternal: boolean; failing: string[]; at: string }[];
+  quality?: {
+    iteration: number; score: number; eligible: boolean; waitingExternal: boolean; failing: string[]; at: string;
+    /** The weighted card's own figures, when one was computed (absent for a legacy /1-only cycle). */
+    weighted?: { phase: string; design: number; functionality: number; other: number; total: number; designCertified: boolean; designBlockers: string[] };
+  }[];
   /** Builder's own finish summaries: model-reported, bounded, never authoritative. */
   notes: { at: string; phase: string; text: string; source: "model-reported" }[];
   /** Operational metrics only (local inference has no per-token billing and no cumulative ceiling). */
@@ -288,8 +292,18 @@ export const remember = {
     m.integrations = [...byKey.values()].slice(0, 60);
     m.approvalsPending = m.integrations.filter((i) => i.status === "awaiting_approval" || i.status === "missing_credentials").map((i) => `${i.operation ?? i.key}: ${i.status}`).slice(0, 30);
   },
-  quality(m: ProjectMemory, card: { iteration: number; score: number; eligible: boolean; waitingExternal: boolean; criteria: { id: string; applicable: boolean; status: string }[] }): void {
-    (m.quality ??= []).push({ iteration: card.iteration, score: card.score, eligible: card.eligible, waitingExternal: card.waitingExternal, failing: card.criteria.filter((c) => c.applicable && c.status !== "pass").map((c) => c.id), at: new Date().toISOString() });
+  quality(
+    m: ProjectMemory,
+    card: { iteration: number; score: number; eligible: boolean; waitingExternal: boolean; criteria: { id: string; applicable: boolean; status: string }[] },
+    weighted?: { phase: string; design: { points: number }; functionality: { points: number }; other: { points: number }; totalPoints: number; designCertified: boolean; designBlockers: string[] } | null,
+  ): void {
+    (m.quality ??= []).push({
+      iteration: card.iteration, score: card.score, eligible: card.eligible, waitingExternal: card.waitingExternal,
+      failing: card.criteria.filter((c) => c.applicable && c.status !== "pass").map((c) => c.id), at: new Date().toISOString(),
+      // Carried into the digest so a resumed segment tells the builder the REAL bar. A memory that still said
+      // "only a verified 10/10" would leave the model optimising for a target that no longer exists.
+      ...(weighted ? { weighted: { phase: weighted.phase, design: weighted.design.points, functionality: weighted.functionality.points, other: weighted.other.points, total: weighted.totalPoints, designCertified: weighted.designCertified, designBlockers: weighted.designBlockers.slice(0, 6) } } : {}),
+    });
     if (m.quality.length > 40) m.quality.splice(0, m.quality.length - 40);
   },
   preview(m: ProjectMemory, p: { url: string | null; note: string | null }): void { m.preview = { url: p.url ? scrub(p.url, 300) : null, note: p.note ? scrub(p.note, 300) : null, at: new Date().toISOString() }; },
@@ -331,7 +345,14 @@ export function memoryDigest(m: ProjectMemory, maxChars: number): string {
     lines.push(`  - ${d.summary[0] ?? d.id} (seen in ${d.occurrences} cycle(s) since cycle ${d.firstCycle}${failed ? `; ${failed} earlier repair(s) did NOT fix it: use a different approach` : ""})`);
   }
   const q = m.quality?.at(-1);
-  if (q) lines.push(`Quality scorecard (iteration ${q.iteration}): ${q.score}/10${q.eligible ? " — all applicable criteria pass" : `; not yet passing: ${q.failing.join(", ")}`}. Only a verified 10/10 within the approved scope reaches internal approval (.crestmont/quality/scorecard.json has the evidence).`);
+  if (q?.weighted) {
+    const w = q.weighted;
+    lines.push(`Quality scorecard (iteration ${q.iteration}, phase ${w.phase}): ${w.total}/100 — visual design ${w.design}/40, frontend and backend ${w.functionality}/40, remaining quality ${w.other}/20. Internal approval needs a verified 40/40 + 40/40 + 20/20 with no compensating scores (.crestmont/quality/weighted.json has the per-item evidence; scorecard.json has the criteria).`);
+    if (!w.designCertified) lines.push(`  Visual design is NOT certified: ${w.designBlockers.join("; ") || "no reason recorded"}.`);
+    if (q.failing.length) lines.push(`  Evidence criteria not yet passing: ${q.failing.join(", ")}.`);
+  } else if (q) {
+    lines.push(`Quality scorecard (iteration ${q.iteration}): ${q.score}/10${q.eligible ? " — all applicable criteria pass" : `; not yet passing: ${q.failing.join(", ")}`} (.crestmont/quality/scorecard.json has the evidence).`);
+  }
   if (m.approvalsPending.length) lines.push(`Waiting on people (do not fake these; build and mock-test around them): ${m.approvalsPending.join("; ")}.`);
   const ints = m.integrations.filter((i) => i.codeStatus || i.mockStatus);
   if (ints.length) lines.push(`Integrations: ${ints.map((i) => `${i.key} code=${i.codeStatus ?? "?"} mock=${i.mockStatus ?? "?"}`).join("; ")}.`);

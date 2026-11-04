@@ -934,7 +934,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         }
         lastCard = card; lastWeighted = weighted; lastVerdict = verdict; reviewCurrent = true;
         writeCards(ws.repo, card, weighted);
-        if (memory) remember.quality(memory, card);
+        if (memory) remember.quality(memory, card, weighted);
         tracker.note({ kind: "check", message: `quality scorecard (cycle ${cycle}, phase ${buildPhase}): ${weighted.totalPoints}/100 = ${weighted.overall}/10 — design ${weighted.design.points}/40, frontend+backend ${weighted.functionality.points}/40, remaining ${weighted.other.points}/20${weighted.designCertified ? "; design certified" : `; design not certified: ${weighted.designBlockers.slice(0, 2).join("; ")}`}` });
         // Outstanding work is the ACTIVE PHASE's, not every category's: a design cycle must not be driven by
         // backend criteria it was told to defer, and a functionality cycle must not be driven by SEO.
@@ -1104,7 +1104,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       if (finalCard) {
         try { finalWeighted = weighNow(finalCard, reviewCurrent ? lastVerdict : null, lastWeighted?.revision ?? null); } catch { finalWeighted = null; }
         writeCards(ws.repo, finalCard, finalWeighted);
-        if (memory) remember.quality(memory, finalCard);
+        if (memory) remember.quality(memory, finalCard, finalWeighted);
       }
     }
     await commitAndPush(`AI build ${job.kind === "revision" ? `revision ${job.revision}` : "first build"}: ready for owner review`);

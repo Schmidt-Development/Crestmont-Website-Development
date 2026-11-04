@@ -250,7 +250,7 @@ function fullstackPhase(job: Job, phase: Phase, starter: string, local: boolean)
   return [
     "Phase 3 of 3: verify and report.",
     `Run \`${check}\`${local ? " with run_command" : ""} and fix every failing gate (A requirements, B frontend, C backend, D database, F security, G performance, J deployment). Gate E stays pending_external until the customer's own provider account is verified by the runner's approved operation: request it in .crestmont/integration-operations.json; never fake it. A skipped test never counts as passed.`,
-    "After this phase the runner restores the protected checker files, runs the gates itself, loads every page in a headless browser at desktop and mobile widths, and an independent reviewer scores the website on 20 criteria; only a verified 10/10 within the approved scope goes to Crestmont's internal approval.",
+    "After this phase the runner restores the protected checker files, runs the gates itself, and loads every page in a headless browser at desktop (1366), tablet (768) and mobile (390) widths. An independent vision-capable reviewer then scores the VISUAL DESIGN out of 40 from those screenshots, item by item, while the gates' evidence scores functionality out of 40 and the remaining quality out of 20. Only a verified 100/100 within the approved scope goes to Crestmont's internal approval, and there are no compensating scores between the three.",
     "Mark requirements verified only with evidence (command + result, or screenshot path). Fill .crestmont/needs-information.json, .crestmont/assumptions.json and .crestmont/agent-report.md.",
     ...(local ? ["Then call finish."] : []),
   ];
