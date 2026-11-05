@@ -17,6 +17,7 @@ import {
 import { audit } from "./security.ts";
 import { assertQualityForApproval, recordQuality } from "./build-quality.ts";
 import type { BuildPhase } from "../domain/quality-rubric.ts";
+import { currentAiBuildGate } from "../domain/ai-build-gate.ts";
 
 import { redact } from "./monitoring.ts";
 import { getOnboarding, allFields, isVisible, type Answers } from "./onboarding.ts";
@@ -70,7 +71,10 @@ export type CustomerRevisionMode = (typeof CUSTOMER_REVISION_MODES)[number];
 export async function getBuildSettings(db: Db): Promise<BuildSettings> {
   const s = await db.prepare(`SELECT * FROM build_settings WHERE id = 1`).first<BuildSettings>();
   if (!s) throw new Error("build_settings row missing (migration 0031)");
-  return s;
+  // Phased launch: the environment gate overrides the Owner's database switch. Every automatic path (enqueue on
+  // payment/intake/sweep, runner claim, heartbeat stop, automatic customer revisions) already reads these two fields.
+  const gate = currentAiBuildGate();
+  return gate.open ? s : { ...s, automation_enabled: 0, globally_paused: 1, pause_reason: gate.reason };
 }
 
 // ── Jobs ──

@@ -1,6 +1,7 @@
 // Request pipeline: build context → load session → CSRF for forms → route → render errors.
 import { configureErasureKeysFromEnv } from "../services/contact-identity.ts";
 import { withTransientRetry } from "../lib/db.ts";
+import { configureAiBuildGateFromEnv } from "../domain/ai-build-gate.ts";
 import type { AppContext, Env } from "./context.ts";
 import { Router } from "../lib/router.ts";
 import { HttpError, assertCsrf, cookie, hostCookieName, hstsValue, htmlResponse, isSecure, jsonResponse, parseCookies, readHostCookie, redirect } from "./http.ts";
@@ -28,6 +29,7 @@ function getRouter(): Router {
 
 export async function buildContext(req: Request, env: Env): Promise<AppContext> {
   configureErasureKeysFromEnv(env); // CRM erasure tombstone keys (Worker secrets)
+  configureAiBuildGateFromEnv(env); // phased launch: AI website generation off on production unless AI_BUILD_AUTOMATION = "on"
   const url = new URL(req.url);
   const cookies = parseCookies(req.headers.get("cookie"));
   let formCache: Promise<FormData> | null = null;

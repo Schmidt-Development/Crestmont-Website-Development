@@ -1,5 +1,6 @@
 // Staff delivery area: "My work" dashboard, projects (list/kanban/detail), tasks, inactivity sweep
 // (PM-001..PM-007, EMP-003, PORTAL-003/005/006/007/010 staff side).
+import { aiBuildGate } from "../domain/ai-build-gate.ts";
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatCents, formatDate, formatDateTime, label, safeUrl, type SafeHtml } from "../lib/html.ts";
@@ -261,6 +262,7 @@ ${input({ name: "q", label: "Search", value: search, placeholder: "Project, cust
     const exportHref = (() => { const u = new URLSearchParams(q); u.delete("page"); u.delete("view"); const s2 = u.toString(); return `/staff/projects/export.csv${s2 ? `?${s2}` : ""}`; })();
     const body = html`${pageHead("Projects", html`${linkButton("List", qs("list"), view === "list" ? "primary" : "ghost", "sm")}${linkButton("Board", qs("kanban"), view === "kanban" ? "primary" : "ghost", "sm")}${linkButton("Export CSV", exportHref, "ghost", "sm")}
 ${can(ctx.actor!, "project.coordinate") ? actionForm(ctx, "/staff/projects/sweep-inactivity", "Run inactivity sweep", { variant: "secondary", confirm: "Send due inactivity reminders, escalations and pauses now?" }) : ""}`)}
+${!aiBuildGate(ctx.env).open ? alert("info", html`<strong>Delivered by the Crestmont team.</strong> AI website generation is off on this environment (phased launch), so no paid project is built automatically: assign a project manager in scope review and take each project through design, development, internal QA and customer review here (docs/FULFILLMENT-HUMAN-SUPERVISED.md).`) : ""}
 ${filters}${view === "kanban" ? kanbanView : html`${listView}${pagination(ctx, pageNo, hasNext)}`}`;
     return page(ctx, "Projects", body);
   });

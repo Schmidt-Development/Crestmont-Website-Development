@@ -83,6 +83,12 @@ export interface Env {
    * RUNNER_ALLOW_PAID_PROVIDER: paid AI needs both, plus the budgets in Owner → AI builds.
    */
   BUILD_ALLOW_PAID_PROVIDER?: string;
+  /**
+   * Phased launch (src/domain/ai-build-gate.ts): production creates, queues and dispatches NO AI website builds unless
+   * this is exactly "on" (a committed [vars] value, bound into the release configuration digest). Staging and
+   * development are open unless it is "off".
+   */
+  AI_BUILD_AUTOMATION?: string;
   /** Comma-separated host suffixes a build preview URL may use (default ".workers.dev"). Other URLs are not recorded. */
   BUILD_PREVIEW_HOSTS?: string;
   /**
