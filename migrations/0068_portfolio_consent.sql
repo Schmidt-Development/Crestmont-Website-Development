@@ -25,4 +25,7 @@ UPDATE portfolio_projects
        portfolio_consent_evidence = relationship_evidence
  WHERE relationship_documented_at IS NOT NULL
    AND relationship LIKE 'Founder-owned business%'
-   AND relationship_evidence LIKE 'Founder Noah Schmidt confirmed in writing on 2026-10-27%';
+   -- instr(), not LIKE: D1 rejects a LIKE pattern longer than 50 bytes with
+   -- "LIKE or GLOB pattern too complex: SQLITE_ERROR [code: 7500]", which failed this migration on
+   -- staging (deploy run 41950679879). instr(x, p) = 1 is an exact prefix match with no pattern limit.
+   AND instr(relationship_evidence, 'Founder Noah Schmidt confirmed in writing on 2026-10-27') = 1;
