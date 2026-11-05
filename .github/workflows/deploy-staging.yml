@@ -376,6 +376,21 @@ jobs:
           if [ -n "$RUNNER_SECRET" ]; then printf '%s' "$RUNNER_SECRET" | node --no-warnings scripts/staging-secrets.ts put BUILD_RUNNER_SECRET
           else echo "BUILD_RUNNER_SECRET not provided: AI Builds execution stays unavailable on staging (builds wait in the queue)."; fi
 
+      # SEC-03. The malware scanner's OWN credential, deliberately not BUILD_RUNNER_SECRET: a file scanner
+      # must not be able to claim build jobs or deploy previews, and the production deploy preflight refuses
+      # a deploy while BUILD_RUNNER_SECRET is on the production Worker, so sharing one would have blocked
+      # production scanning entirely. Absent means /api/scan/* answers 503, files stay 'pending' and nothing
+      # is ever labelled clean without a verdict.
+      - name: Malware scanner secret (only when the Founder has provided one)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SCANNER_SECRET: ${{ secrets.FILE_SCANNER_SECRET }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$SCANNER_SECRET" ]; then printf '%s' "$SCANNER_SECRET" | node --no-warnings scripts/staging-secrets.ts put FILE_SCANNER_SECRET
+          else echo "FILE_SCANNER_SECRET not provided: /api/scan/* answers 503, uploads stay scan_status=pending and quarantined from share links (F-02)."; fi
+
       # Retell, two workspaces (src/adapters/retell-workspaces.ts): RETELL_INBOUND_API_KEY (receptionist) and
       # RETELL_OUTBOUND_API_KEY (sales agent + Self-Improvement Engine). Keys already set on the Worker by hand are kept:
       # a key is put only when the matching `staging` environment secret exists AND its value changed (rollback-safe);
