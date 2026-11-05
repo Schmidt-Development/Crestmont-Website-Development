@@ -1,0 +1,13 @@
+{
+  "name": "crestmont-file-scanner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone malware scanner for Node 1: ClamAV verdicts for files on the Crestmont platform (SEC-003). No dependencies.",
+  "type": "module",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "start": "node --no-warnings src/main.ts",
+    "once": "node --no-warnings src/main.ts --once",
+    "preflight": "node --no-warnings src/main.ts --preflight"
+  }
+}

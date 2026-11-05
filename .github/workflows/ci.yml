@@ -143,6 +143,24 @@ jobs:
       - name: Parse every script and run PSScriptAnalyzer (Windows PowerShell 5.1 compatibility rules)
         shell: pwsh
         run: ./runner/windows/Test-WindowsScripts.ps1 -InstallAnalyzer
+      # The file scanner's installer (scanner/windows) gets the same parse and PSScriptAnalyzer rules. It is a separate
+      # deployment from the build runner, so it is checked here without being added to the runner's own script list.
+      - name: Scanner installer parses and passes PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $failed = 0
+          foreach ($f in Get-ChildItem scanner/windows -Filter *.ps1) {
+            if (@([IO.File]::ReadAllBytes($f.FullName) | Where-Object { $_ -gt 127 }).Count) { Write-Output "FAIL ascii $($f.Name)"; $failed++ }
+            $t = $null; $e = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$t, [ref]$e)
+            foreach ($x in $e) { Write-Output "FAIL parse $($f.Name):$($x.Extent.StartLineNumber) $($x.Message)"; $failed++ }
+          }
+          Import-Module PSScriptAnalyzer
+          foreach ($x in @(Invoke-ScriptAnalyzer -Path scanner/windows -Settings runner/windows/PSScriptAnalyzerSettings.psd1)) {
+            Write-Output "::error file=scanner/windows/$($x.ScriptName),line=$($x.Line)::$($x.RuleName): $($x.Message -replace '[\r\n]+', ' ')"; $failed++
+          }
+          if ($failed) { exit 1 }
+          Write-Output "PASSED"
       - name: SquidConf.ps1 renders exactly what egress-policy.ts renders
         run: node --no-warnings --test --test-name-pattern "SquidConf.ps1" runner/test/egress-compose.test.ts
       - name: RunnerEnv.ps1 (runner.env / runner.local.env preservation) produces exactly what runner-env.ts produces

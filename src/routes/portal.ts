@@ -12,6 +12,7 @@ import {
 } from "../ui/components.ts";
 import * as P from "../services/projects.ts";
 import * as F from "../services/files.ts";
+import { scannerActive } from "../services/malware-scan.ts";
 import * as M from "../services/messages.ts";
 import { mfaReminder } from "./account-profile.ts";
 import * as O from "../services/onboarding.ts";
@@ -279,7 +280,7 @@ ${rec && !done ? html`<p class="faint">Draft last saved ${formatDateTime(rec.upd
     const base = proj ? `/portal/projects/${proj.id}/files` : "/portal/files";
     const body = html`${pageHead(proj ? "Project files" : "Files", undefined, proj?.name ?? org.organizationName)}${proj ? projectTabs(ctx, proj.id) : ""}
 ${!ctx.storage ? alert("warn", "File storage is not configured yet, so uploading and downloading files is unavailable. Your team has been told; existing records are listed below.") : ""}
-${alert("info", "Files are private to your organization and your Crestmont team. Malware scanning is not configured yet, so uploads show as “Not yet scanned”. Only PDF, images (PNG, JPG, WEBP, GIF), Word, Excel, ZIP, text and CSV up to 25 MB are accepted.")}
+${alert("info", `Files are private to your organization and your Crestmont team. ${await scannerActive(ctx.db, ctx.now()) ? "Uploads are checked for malware automatically and show as “Not yet scanned” until their scan completes; a file that fails is blocked." : "Malware scanning is not configured yet, so uploads show as “Not yet scanned”."} Only PDF, images (PNG, JPG, WEBP, GIF), Word, Excel, ZIP, text and CSV up to 25 MB are accepted.`)}
 ${formErrors(errors)}
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Upload</h2>
 <form method="post" action="${base}" enctype="multipart/form-data">${csrf(ctx)}
@@ -327,7 +328,7 @@ ${newer ? alert("info", html`A newer version exists: <a href="/portal/files/${ne
 <div class="grid grid-2"><section class="card">${dl([["Type", f.content_type], ["Size", F.humanSize(f.size_bytes)], ["Folder", f.folder ?? "—"], ["Uploaded", formatDateTime(f.created_at)], ["SHA-256", html`<code style="word-break:break-all">${f.sha256}</code>`], ["Malware scan", F.scanLabel(f.scan_status)]])}
 ${F.PREVIEWABLE.has(f.content_type) && f.content_type.startsWith("image/") ? html`<img src="/files/${f.id}/preview" alt="${f.filename}" style="max-width:100%;margin-top:1rem;border-radius:4px">` : ""}</section>
 <section class="stack">${!f.replaced_by ? html`<div class="card"><h2 class="card__title">Replace with a new version</h2><form method="post" action="/portal/files/${f.id}/replace" enctype="multipart/form-data">${csrf(ctx)}<div class="field"><label for="f-file">New version</label><input class="input" id="f-file" type="file" name="file" required></div>${button("Upload new version", { variant: "secondary", disabled: !ctx.storage })}</form></div>` : ""}
-${!f.replaced_by ? sharePanel(ctx, f, await S.listShareLinks(ctx.db, f.id), { canManage: await S.canManageShares(ctx, f) }) : ""}
+${!f.replaced_by ? sharePanel(ctx, f, await S.listShareLinks(ctx.db, f.id), { canManage: await S.canManageShares(ctx, f), scannerActive: await scannerActive(ctx.db, ctx.now()) }) : ""}
 <div class="card"><h2 class="card__title">Organize</h2><form method="post" action="/portal/files/${f.id}/move">${csrf(ctx)}${input({ name: "folder", label: "Folder", value: f.folder ?? "", maxlength: 80 })}${button("Move", { variant: "secondary" })}</form></div>
 <div class="card"><h2 class="card__title">Remove</h2><p class="muted">Removed files disappear from your file list. A record is kept for the audit trail.</p>${actionForm(ctx, `/portal/files/${f.id}/delete`, "Remove file", { variant: "danger", confirm: "Remove this file?" })}</div></section></div>
 ${versions.length ? html`<section style="margin-top:1.5rem"><h2>Earlier versions</h2>${table(versions, [{ header: "File", cell: (v) => html`<a href="/files/${v.id}">${v.filename}</a>` }, { header: "Uploaded", cell: (v) => formatDateTime(v.created_at) }, { header: "Size", cell: (v) => F.humanSize(v.size_bytes), numeric: true }])}</section>` : ""}`;
@@ -377,7 +378,7 @@ ${versions.length ? html`<section style="margin-top:1.5rem"><h2>Earlier versions
     const back = ctx.user!.isStaff ? (f.project_id ? `/staff/projects/${f.project_id}?tab=files` : `/staff/customers/${f.organization_id}`) : `/portal/files/${f.id}`;
     const body = html`${pageHead(`Share ${f.filename}`, linkButton("Back", back, "ghost", "sm"), "Secure sharing")}${formErrors(errors)}
 ${dl([["File", f.filename], ["Size", F.humanSize(f.size_bytes)], ["Malware scan", F.scanLabel(f.scan_status)]])}
-<div style="margin-top:1.5rem">${sharePanel(ctx, f, links, { canManage: await S.canManageShares(ctx, f), created })}</div>`;
+<div style="margin-top:1.5rem">${sharePanel(ctx, f, links, { canManage: await S.canManageShares(ctx, f), created, scannerActive: await scannerActive(ctx.db, ctx.now()) })}</div>`;
     const shell = ctx.user!.isStaff ? { title: "Share file", nav: staffNav(ctx), home: "/staff", area: "Crestmont staff" } : { title: "Share file", nav: portalNav(ctx), home: "/portal", area: "Customer portal" };
     // A freshly created link is shown exactly once in this response; never cache it.
     return htmlResponse(ctx, appLayout(ctx, shell, body), status);

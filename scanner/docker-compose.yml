@@ -1,0 +1,71 @@
+# Crestmont file scanner on Node 1 (SEC-003, F-02). A SEPARATE compose project from the build runner
+# (runner/windows/docker-compose.yml) and the research worker: no shared network, volume, image or env file.
+#
+#   clamd     the official ClamAV image (signatures included; freshclam inside it keeps them current). Reaches the
+#             internet ONLY for signature updates (update_net). Listens on 3310 on scan_net; nothing is published.
+#   scanner   this repository's scanner/ (Node standard library only). Reaches clamd on scan_net and the platform
+#             over HTTPS on egress_net. Holds FILE_SCANNER_SECRET and nothing else.
+#
+# Install: scanner/windows/Install-CrestmontScanner.ps1 (writes scanner.env with a restrictive ACL).
+# Manual:  docker compose -f scanner/docker-compose.yml --env-file scanner/scanner.env up -d --build
+name: crestmont-scanner
+
+services:
+  clamd:
+    image: clamav/clamav:1.5.1@sha256:b32e587feae9f156d660704beeec4ee69c79fcf5af092bdc0f2f93892a29b553
+    restart: unless-stopped
+    networks: [scan_net, update_net]
+    volumes:
+      - clamav_db:/var/lib/clamav
+    # The image's /init applies CLAMD_CONF_<Key>=<value> to its clamd.conf, keeping its own socket and user settings.
+    # INSTREAM must accept a whole file (the platform's upload limit is 25 MiB) or the scan would be partial. A file
+    # clamd cannot fully examine is reported as Heuristics.Limits.Exceeded.* / Heuristics.Encrypted.*, which the
+    # scanner maps to 'failed' (quarantined), never to 'clean'.
+    environment:
+      CLAMD_CONF_StreamMaxLength: 30M
+      CLAMD_CONF_MaxFileSize: 30M
+      CLAMD_CONF_MaxScanSize: 120M
+      CLAMD_CONF_AlertExceedsMax: "yes"
+      CLAMD_CONF_AlertEncryptedArchive: "yes"
+      CLAMD_CONF_MaxThreads: "2"
+      CLAMD_CONF_ExitOnOOM: "yes"
+    # ClamAV needs roughly 1.5-3 GB while it loads or reloads signatures; capped so it cannot starve the AI workload.
+    mem_limit: 3g
+    cpus: 1.0
+    pids_limit: 256
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 60s
+      timeout: 15s
+      start_period: 300s
+      retries: 3
+    logging: { driver: json-file, options: { max-size: "20m", max-file: "5" } }
+
+  scanner:
+    build: { context: . }
+    image: crestmont-file-scanner:1
+    restart: unless-stopped
+    depends_on: [clamd]
+    env_file: [./scanner.env]          # PLATFORM_URL, FILE_SCANNER_SECRET, SCANNER_ID (and optional tuning)
+    environment:
+      CLAMD_HOST: clamd
+      CLAMD_PORT: "3310"
+    networks: [scan_net, egress_net]
+    read_only: true
+    tmpfs: [/tmp:size=16m]
+    user: "node"
+    mem_limit: 512m                    # one file at a time: at most a 25 MiB file and its base64 in memory
+    cpus: 0.5
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
+
+networks:
+  scan_net: { internal: true }         # clamd <-> scanner only; no route out
+  update_net: {}                       # clamd's signature updates
+  egress_net: {}                       # scanner -> platform (HTTPS)
+
+volumes:
+  clamav_db: {}

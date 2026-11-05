@@ -381,15 +381,18 @@ jobs:
       # a deploy while BUILD_RUNNER_SECRET is on the production Worker, so sharing one would have blocked
       # production scanning entirely. Absent means /api/scan/* answers 503, files stay 'pending' and nothing
       # is ever labelled clean without a verdict.
-      - name: Malware scanner secret (only when the Founder has provided one)
+      # Without a Founder-provided value, a key derived from the Cloudflare token secret (like the other machine-only
+      # staging keys): stable across deploys, so it is put once and rollbacks are unaffected, and it lets the scanning
+      # E2E below run real ClamAV against staging. A Node 1 scanner for staging uses the same value.
+      - name: Malware scanner secret (the Founder's, or derived for staging)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           SCANNER_SECRET: ${{ secrets.FILE_SCANNER_SECRET }}
           ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          if [ -n "$SCANNER_SECRET" ]; then printf '%s' "$SCANNER_SECRET" | node --no-warnings scripts/staging-secrets.ts put FILE_SCANNER_SECRET
-          else echo "FILE_SCANNER_SECRET not provided: /api/scan/* answers 503, uploads stay scan_status=pending and quarantined from share links (F-02)."; fi
+          if [ -z "$SCANNER_SECRET" ]; then SCANNER_SECRET=$(node --no-warnings scripts/staging-secrets.ts derive scanner); echo "::add-mask::$SCANNER_SECRET"; echo "FILE_SCANNER_SECRET derived for staging (no GitHub secret set)."; fi
+          printf '%s' "$SCANNER_SECRET" | node --no-warnings scripts/staging-secrets.ts put FILE_SCANNER_SECRET
 
       # Retell, two workspaces (src/adapters/retell-workspaces.ts): RETELL_INBOUND_API_KEY (receptionist) and
       # RETELL_OUTBOUND_API_KEY (sales agent + Self-Improvement Engine). Keys already set on the Worker by hand are kept:
@@ -656,6 +659,46 @@ jobs:
           echo "::add-mask::$CRM_IMPORT_SECRET"
           export CRM_IMPORT_SECRET
           node --no-warnings scripts/crm-staging-e2e.ts
+
+      # SEC-003 / F-02: the malware scanning lifecycle with REAL ClamAV — the same pinned image Node 1 runs
+      # (scanner/docker-compose.yml), with its bundled signatures and the same clamd limits. Started here with no
+      # credentials in its environment; it listens on the runner's loopback only.
+      - name: Start ClamAV for the scanning E2E (pinned image; no credentials)
+        id: clamd
+        if: steps.smoke.outcome == 'success'
+        continue-on-error: true
+        run: |
+          docker run -d --name crestmont-clamd -p 127.0.0.1:3310:3310 -e CLAMAV_NO_FRESHCLAMD=true \
+            -e CLAMD_CONF_StreamMaxLength=30M -e CLAMD_CONF_MaxFileSize=30M -e CLAMD_CONF_MaxScanSize=120M \
+            -e CLAMD_CONF_AlertExceedsMax=yes -e CLAMD_CONF_AlertEncryptedArchive=yes \
+            clamav/clamav:1.5.1@sha256:b32e587feae9f156d660704beeec4ee69c79fcf5af092bdc0f2f93892a29b553 > /dev/null
+
+      # Harmless text and PDF files plus the standard EICAR test file, uploaded by a demo customer through the portal,
+      # scanned by the real scanner code (scanner/src) over the signed /api/scan/* surface, then: clean files still
+      # download byte for byte; EICAR is infected, refused, and its share link revoked; the heartbeat is recorded.
+      # Only this run's files are scanned; every other staging file is left as it is. The run's files are removed.
+      - name: Malware scanning lifecycle E2E (real ClamAV + EICAR; live staging + D1 + R2)
+        id: scan_e2e
+        if: steps.smoke.outcome == 'success' && steps.clamd.outcome == 'success'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          SCANNER_SECRET: ${{ secrets.FILE_SCANNER_SECRET }}
+          E2E_BASE_URL: ${{ steps.deploy.outputs.url }}
+          E2E_ACCOUNTS_FILE: access/demo-accounts.md
+          CLAMD_PORT: "3310"
+        run: |
+          unset EVIDENCE_INGEST_SECRET
+          if [ -n "$SCANNER_SECRET" ]; then FILE_SCANNER_SECRET="$SCANNER_SECRET"; else FILE_SCANNER_SECRET=$(node --no-warnings scripts/staging-secrets.ts derive scanner); fi
+          echo "::add-mask::$FILE_SCANNER_SECRET"
+          export FILE_SCANNER_SECRET
+          unset SCANNER_SECRET
+          rc=0
+          node --no-warnings scripts/scanner-staging-e2e.ts || rc=$?   # GitHub's bash runs with -e: capture, then clean up
+          docker rm -f crestmont-clamd > /dev/null 2>&1 || true
+          exit $rc
 
       # Lead research (PR #48). Real Overture places for a small public bounding box, extracted by a step that holds no
       # credentials (the DuckDB package and the open-data download run without secrets), then researched by the real
@@ -954,6 +997,12 @@ jobs:
         if: always() && steps.crm_e2e.outcome == 'failure'
         run: |
           echo "::error title=CRM staging E2E failed::The CRM duplicate protection E2E failed; see its annotations and the 'CRM duplicate protection E2E' step."
+          exit 1
+
+      - name: Fail the deploy when the malware scanning E2E failed
+        if: always() && (steps.clamd.outcome == 'failure' || steps.scan_e2e.outcome == 'failure')
+        run: |
+          echo "::error title=Malware scanning staging E2E failed::See the 'Malware scanning lifecycle E2E' step and its annotations."
           exit 1
 
       - name: Fail the deploy when the outbound sales agent E2E failed

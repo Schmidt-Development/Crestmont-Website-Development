@@ -74,6 +74,11 @@ export function register(r: Router): void {
     const off = notConfigured(ctx); if (off) return off;
     return jsonResponse(ctx, 200, await MS.scanFileBytes(ctx.db, ctx.storage, await scannerBody(ctx)));
   });
+  // Liveness: is the scanner running, is its ClamAV daemon answering, how old are its signatures (malware-scan feed).
+  r.post(`${SCAN}/heartbeat`, async (ctx) => {
+    const off = notConfigured(ctx); if (off) return off;
+    return jsonResponse(ctx, 200, await MS.recordHeartbeat(ctx.db, await scannerBody(ctx), ctx.now()));
+  });
   r.post(`${SCAN}/result`, async (ctx) => {
     const off = notConfigured(ctx); if (off) return off;
     const b = await scannerBody(ctx);

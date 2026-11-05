@@ -5,7 +5,7 @@ import { csrf, button, checkbox, select, input, badge, table, actionForm, alert 
 import { SHARE_DURATIONS, shareState, type ShareLinkRow } from "../services/share-links.ts";
 import type { FileRow } from "../services/files.ts";
 
-export function sharePanel(ctx: AppContext, f: FileRow, links: ShareLinkRow[], opts: { canManage: boolean; created?: { url: string; expiresAt: string } | null }): SafeHtml {
+export function sharePanel(ctx: AppContext, f: FileRow, links: ShareLinkRow[], opts: { canManage: boolean; created?: { url: string; expiresAt: string } | null; scannerActive?: boolean }): SafeHtml {
   const now = ctx.now();
   const scanWarn = f.scan_status !== "clean";
   const blocked = f.scan_status === "infected" || f.scan_status === "failed";
@@ -15,7 +15,7 @@ ${opts.created ? html`<div class="alert alert--success" role="status"><strong>Sh
 <code class="share-url" data-share-url>${opts.created.url}</code><span class="faint">Expires ${formatDateTime(opts.created.expiresAt)}.</span></div>` : ""}
 ${blocked ? alert("error", "This file cannot be shared: its malware scan did not pass.")
     : !opts.canManage ? html`<p class="faint">Only an account administrator can create share links for your organization's files.</p>`
-    : html`${scanWarn ? alert("warn", html`<strong>Not scanned for malware.</strong> Malware scanning is not configured yet, so this file has not been checked. Anyone you share it with receives it unscanned.`) : ""}
+    : html`${scanWarn ? alert("warn", html`<strong>Not scanned for malware.</strong> ${opts.scannerActive ? "This file's malware scan has not completed yet" : "Malware scanning is not configured yet, so this file has not been checked"}. Anyone you share it with receives it unscanned.`) : ""}
 <form method="post" action="/files/${f.id}/share" class="stack">${csrf(ctx)}
 ${select({ name: "hours", id: `share-hours-${f.id}`, label: "Link valid for", options: SHARE_DURATIONS.map((d) => ({ value: String(d.hours), label: d.label })), value: "72" })}
 ${input({ name: "note", id: `share-note-${f.id}`, label: "Note (optional)", maxlength: 200, hint: "Who the link is for — shown only to your team." })}
