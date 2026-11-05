@@ -4,7 +4,7 @@
 import { configureErasureKeysFromEnv } from "../services/contact-identity.ts";
 import type { Env } from "./context.ts";
 import { buildContext } from "./app.ts";
-import { nowIso } from "../lib/db.ts";
+import { nowIso, withTransientRetry } from "../lib/db.ts";
 import { syncRequirements } from "../readiness/ingest.ts";
 import { applySeedBlockerLinks } from "../services/readiness-admin.ts";
 import { retryFailedStripeEvents, stripeEventCtx, repairPaidInvoicesWithoutProject } from "../services/payments.ts";
@@ -128,6 +128,9 @@ async function record(env: Env, job: string, at: string, error: string | null) {
 }
 
 export async function scheduled(controller: { cron: string }, env: Env): Promise<void> {
+  // Same transient-fault retry as the request path: the heartbeat and usage writes in deploys #150/#151
+  // were among the code paths Cloudflare's D1 internal errors landed in.
+  env = { ...env, DB: withTransientRetry(env.DB) };
   configureErasureKeysFromEnv(env);
   const jobs = SCHEDULE[controller.cron];
   if (!jobs) { console.error(JSON.stringify({ level: "error", message: `No jobs for cron ${controller.cron}` })); return; }

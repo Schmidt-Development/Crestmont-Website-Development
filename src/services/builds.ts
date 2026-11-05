@@ -2,6 +2,7 @@
 // budgets, state, owner controls and records; a separate build runner (runner/, docs/ai-builds/) does the coding.
 // Nothing here runs an agent: the payment webhook and the onboarding submit only write rows, so they stay fast.
 import type { Db } from "../lib/db.ts";
+import { likeContains } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import type { AppContext } from "../app/context.ts";
 import type { StorageAdapter } from "../adapters/storage.ts";
@@ -1486,7 +1487,7 @@ export async function summarize(db: Db, j: BuildJob, now = new Date()): Promise<
 export async function listBuilds(db: Db, f: { state?: string; q?: string; limit: number; offset: number }) {
   const where: string[] = [], binds: unknown[] = [];
   if (f.state) { where.push(`j.state = ?`); binds.push(f.state); }
-  if (f.q) { where.push(`(p.name LIKE ? OR o.name LIKE ? OR j.id = ?)`); binds.push(`%${f.q}%`, `%${f.q}%`, f.q); }
+  if (f.q) { const l = likeContains(f.q); where.push(`(p.name LIKE ? ESCAPE '\\' OR o.name LIKE ? ESCAPE '\\' OR j.id = ?)`); binds.push(l, l, f.q); }
   const rows = (await db.prepare(`SELECT j.* FROM build_jobs j JOIN projects p ON p.id = j.project_id JOIN organizations o ON o.id = j.organization_id
       ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY j.updated_at DESC LIMIT ? OFFSET ?`).bind(...binds, f.limit, f.offset).all<BuildJob>()).results;
   return rows;

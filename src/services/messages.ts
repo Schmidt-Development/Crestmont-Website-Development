@@ -2,6 +2,7 @@
 // Internal notes (internal = 1) are staff-only and are filtered out of every customer query.
 import type { AppContext } from "../app/context.ts";
 import type { Db } from "../lib/db.ts";
+import { likeContains } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { audit } from "./security.ts";
 import { storeUpload } from "./files.ts";
@@ -162,7 +163,7 @@ async function notifyGeneral(ctx: AppContext, organizationId: string, messageId:
 
 /** Organizations with a general conversation (or every customer org when `all`), newest activity first, with unread counts for this staff user. */
 export async function listGeneralConversations(db: Db, staffUserId: string, opts: { q?: string; limit?: number; offset?: number } = {}) {
-  const like = opts.q ? `%${opts.q.replace(/[\\%_]/g, (m) => "\\" + m)}%` : null;
+  const like = opts.q ? likeContains(opts.q) : null;
   return (await db.prepare(`SELECT o.id, o.name,
       (SELECT COUNT(*) FROM messages m WHERE m.organization_id = o.id AND m.project_id IS NULL AND m.internal = 0) AS total,
       (SELECT COUNT(*) FROM messages m WHERE m.organization_id = o.id AND m.project_id IS NULL AND m.internal = 0 AND m.author_user_id <> ?
@@ -177,7 +178,7 @@ export async function listGeneralConversations(db: Db, staffUserId: string, opts
 
 /** How many organizations listGeneralConversations pages through with the same filter (CREST-GAP-071). */
 export async function countGeneralConversations(db: Db, opts: { q?: string } = {}): Promise<number> {
-  const like = opts.q ? `%${opts.q.replace(/[\\%_]/g, (m) => "\\" + m)}%` : null;
+  const like = opts.q ? likeContains(opts.q) : null;
   return (await db.prepare(`SELECT COUNT(*) AS n FROM organizations o WHERE o.kind = 'customer' ${like ? `AND o.name LIKE ? ESCAPE '\\'` : ""}
       AND (${like ? "1=1" : "EXISTS (SELECT 1 FROM messages m WHERE m.organization_id = o.id AND m.project_id IS NULL)"})`).bind(...(like ? [like] : [])).first<{ n: number }>())?.n ?? 0;
 }

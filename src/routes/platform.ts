@@ -30,7 +30,7 @@ import { voiceBudget, setVoiceBudget, VoiceBudgetError } from "../services/voice
 import { syncPrompt, latestPromptSync, type PromptSyncResult } from "../services/voice-prompt-sync.ts";
 import { readBody } from "./api.ts";
 import { ValidationError } from "../lib/validate.ts";
-import { newId, nowIso } from "../lib/db.ts";
+import { newId, nowIso, likeContains, likePrefix } from "../lib/db.ts";
 
 // ───────────── shared helpers ─────────────
 function staffPage(ctx: AppContext, title: string, body: SafeHtml, status = 200): Response {
@@ -511,7 +511,7 @@ ${s.disabled_at ? table(items, [
     const where: string[] = [], binds: unknown[] = [];
     if ((EMAIL_STATUSES as readonly string[]).includes(status)) { where.push("d.status = ?"); binds.push(status); }
     if ((EMAIL_TEMPLATES as readonly string[]).includes(template)) { where.push("d.template = ?"); binds.push(template); }
-    if (to) { where.push("d.to_email LIKE ?"); binds.push(`%${to.replace(/[%_]/g, "")}%`); }
+    if (to) { where.push("d.to_email LIKE ? ESCAPE '\\'"); binds.push(likeContains(to)); }
     if (isDate(from)) { where.push("d.created_at >= ?"); binds.push(from); }
     if (isDate(until)) { where.push("d.created_at < ?"); binds.push(new Date(Date.parse(until) + 86400e3).toISOString().slice(0, 10)); }
     return { where, binds, v: { status, template, to, from, until } };
@@ -706,7 +706,7 @@ ${alert("info", html`<strong>Alerting: email to the Owners, no paging.</strong> 
     const kind = q(ctx, "kind", 60), email = q(ctx, "email", 254), from = q(ctx, "from", 10), to = q(ctx, "to", 10);
     const where: string[] = [], binds: unknown[] = [];
     if (kind) { where.push("kind = ?"); binds.push(kind); }
-    if (email) { where.push("email LIKE ?"); binds.push(`%${email.replace(/[%_]/g, "")}%`); }
+    if (email) { where.push("email LIKE ? ESCAPE '\\'"); binds.push(likeContains(email)); }
     if (isDate(from)) { where.push("created_at >= ?"); binds.push(from); }
     if (isDate(to)) { where.push("created_at < ?"); binds.push(new Date(Date.parse(to) + 86400e3).toISOString().slice(0, 10)); }
     const { page, limit, offset } = pageParam(ctx);
@@ -769,7 +769,7 @@ ${pagination(ctx, page, events.length > limit)}</section>`;
     const kind = q(ctx, "kind", 60), email = q(ctx, "email", 254), from = q(ctx, "from", 10), to = q(ctx, "to", 10);
     const where: string[] = [], binds: unknown[] = [];
     if (kind) { where.push("kind = ?"); binds.push(kind); }
-    if (email) { where.push("email LIKE ?"); binds.push(`%${email.replace(/[%_]/g, "")}%`); }
+    if (email) { where.push("email LIKE ? ESCAPE '\\'"); binds.push(likeContains(email)); }
     if (isDate(from)) { where.push("created_at >= ?"); binds.push(from); }
     if (isDate(to)) { where.push("created_at < ?"); binds.push(new Date(Date.parse(to) + 86400e3).toISOString().slice(0, 10)); }
     const rows = (await ctx.db.prepare(`SELECT id, kind, user_id, email, ip, detail, created_at FROM security_events ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id DESC LIMIT 50000`).bind(...binds)
@@ -796,8 +796,8 @@ ${pagination(ctx, page, events.length > limit)}</section>`;
   const auditQuery = (ctx: AppContext) => {
     const actor = q(ctx, "actor", 254), action = q(ctx, "action", 120), subject = q(ctx, "subject", 120), from = q(ctx, "from", 10), to = q(ctx, "to", 10);
     const where: string[] = [], binds: unknown[] = [];
-    if (actor) { where.push("(a.actor_user_id = ? OR u.email LIKE ? OR a.actor_kind = ?)"); binds.push(actor, `%${actor.replace(/[%_]/g, "")}%`, actor); }
-    if (action) { where.push("a.action LIKE ?"); binds.push(`${action.replace(/[%_]/g, "")}%`); }
+    if (actor) { where.push("(a.actor_user_id = ? OR u.email LIKE ? ESCAPE '\\' OR a.actor_kind = ?)"); binds.push(actor, likeContains(actor), actor); }
+    if (action) { where.push("a.action LIKE ? ESCAPE '\\'"); binds.push(likePrefix(action)); }
     if (subject) { where.push("(a.subject_type = ? OR a.subject_id = ?)"); binds.push(subject, subject); }
     if (isDate(from)) { where.push("a.created_at >= ?"); binds.push(from); }
     if (isDate(to)) { where.push("a.created_at < ?"); binds.push(new Date(Date.parse(to) + 86400e3).toISOString().slice(0, 10)); }

@@ -453,26 +453,17 @@ jobs:
 
       # Public staging (2026-10-28): a fresh visitor with NO cookies sees the website; protected areas still refuse
       # anonymous visitors; every response is noindex and robots.txt disallows all. No credential is used here.
-      # When a module answers 500 the verifier can only report the status code, which is not enough to fix
-      # anything: deploys #144 and #145 failed with six modules at 500 and no way to tell why without opening
-      # the Owner's error log by hand. The exception is already stored — redacted at write time by
-      # recordAppError — so read it back here and put it in the log. Read-only, and only on a failure.
-      - name: Why did a module fail? (recent application errors, already redacted)
-        if: always() && steps.verify.outcome == 'failure'
+      # SEC-10. Everything about transport security was asserted in code and never checked against the live
+      # endpoint: hstsValue() is unit-tested, but nothing had looked at a certificate, a TLS version or a
+      # redirect on the deployed site. Read-only, no credential, nothing to buy. A warning rather than a
+      # failure where the fix is an Owner setting in the Cloudflare dashboard (minimum TLS version), because
+      # a deploy cannot change it; fatal where the deployed site itself is wrong.
+      - name: Transport security on the live site (certificate, TLS versions, HSTS, http redirect)
+        id: tls
         continue-on-error: true
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          $WRANGLER d1 execute crestmont-staging --remote --env staging --json --command \
-            "SELECT path, status, message, substr(COALESCE(stack,''), 1, 400) AS stack, created_at FROM app_errors WHERE created_at > datetime('now','-30 minutes') ORDER BY id DESC LIMIT 20" > app-errors.json 2>/dev/null || { echo "::warning::Could not read the staging error log."; exit 0; }
-          node -e '
-            const rows = (JSON.parse(require("fs").readFileSync("app-errors.json","utf8"))[0]?.results) ?? [];
-            if (!rows.length) { console.log("::warning title=No application errors::The failing pages recorded nothing in app_errors in the last 30 minutes, so the failure is probably not an unhandled exception."); process.exit(0); }
-            const e = (v) => String(v).replace(/%/g,"%25").replace(/\r/g,"%0D").replace(/\n/g,"%0A");
-            for (const r of rows) console.log(`::error title=Staging ${r.status} ${r.path}::${e(r.message)} | ${e(r.stack ?? "")}`);
-          '
-          rm -f app-errors.json
+          BASE: ${{ steps.deploy.outputs.url }}
+        run: node --no-warnings scripts/tls-check.ts "$BASE" --json evidence/tls-check.json | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Smoke checks on the public site (fresh visitor, no cookies)
         id: smoke
@@ -777,6 +768,52 @@ jobs:
 
       # CREST-GAP-030: the browser journeys are a deployment gate. They run with continue-on-error only so that evidence,
       # deployment records, sealed access notes and cleanup above still happen; this last step then fails the run.
+      # When a page answers 500 the verifier and the browser journeys can only report the status code, which is
+      # not enough to fix anything: deploys #144 and #145 failed with six modules at 500 and no way to tell why
+      # without opening the Owner's error log by hand. The exception is already stored — redacted at write time
+      # by recordAppError — so read it back here and put it in the log. Read-only.
+      #
+      # This runs AFTER every verification step and covers all of them. It was first written gated on `verify`
+      # alone and placed before the journeys, so deploy #150 — where verify passed and the journeys found
+      # /staff/crm/leads/<id>, /api/assistant and /staff/readiness/runs/<id> at 500 — printed nothing. The whole
+      # point of the step is the failure you did not anticipate, so it must not be gated on one predicted step.
+      - name: Why did a page fail? (recent application errors, already redacted)
+        if: always() && (steps.verify.outcome == 'failure' || steps.smoke.outcome == 'failure' || steps.e2e.outcome == 'failure'
+          || steps.crm_e2e.outcome == 'failure' || steps.research_e2e.outcome == 'failure'
+          || steps.outbound_e2e.outcome == 'failure' || steps.preview_render.outcome == 'failure')
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          # 90 minutes: the whole deploy, with room to spare, so an error from an early step is still in range.
+          $WRANGLER d1 execute crestmont-staging --remote --env staging --json --command \
+            "SELECT path, status, message, substr(COALESCE(stack,''), 1, 400) AS stack, created_at FROM app_errors WHERE created_at > datetime('now','-90 minutes') ORDER BY id DESC LIMIT 60" > app-errors.json 2>/dev/null || { echo "::warning::Could not read the staging error log."; exit 0; }
+          node -e '
+            const rows = (JSON.parse(require("fs").readFileSync("app-errors.json","utf8"))[0]?.results) ?? [];
+            if (!rows.length) { console.log("::warning title=No application errors::The failing pages recorded nothing in app_errors in the last 90 minutes, so the failure is probably not an unhandled exception (a CSP refusal or a redirected subresource is not one)."); process.exit(0); }
+            const e = (v) => String(v).replace(/%/g,"%25").replace(/\r/g,"%0D").replace(/\n/g,"%0A");
+            // One annotation per distinct path+message, newest first, so sixty rows of the same fault do not
+            // bury the other faults. The count says how often it happened.
+            const seen = new Map();
+            for (const r of rows) {
+              const k = `${r.status} ${r.path} ${r.message}`;
+              if (seen.has(k)) { seen.get(k).n++; continue; }
+              seen.set(k, { r, n: 1 });
+            }
+            for (const { r, n } of seen.values()) {
+              console.log(`::error title=Staging ${r.status} ${r.path}${n > 1 ? ` (x${n})` : ""}::${e(r.message)} | ${e(r.stack ?? "")}`);
+            }
+            console.log(`${seen.size} distinct fault(s) in ${rows.length} recorded error(s).`);
+          '
+          rm -f app-errors.json
+
+      - name: Fail the deploy when transport security on the live site is wrong
+        if: always() && steps.tls.outcome == 'failure'
+        run: |
+          echo "::error title=Transport security failed::See the 'Transport security on the live site' step: a certificate, TLS version or HSTS check on the deployed site failed."
+          exit 1
+
       - name: Fail the deploy when the staging browser journeys failed
         if: always() && steps.e2e.outcome == 'failure'
         run: |

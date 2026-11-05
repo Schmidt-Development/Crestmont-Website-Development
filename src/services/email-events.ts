@@ -16,6 +16,7 @@
 //   email.delivery_delayed → last_error note only; email.failed → failed; email.suppressed → suppressed.
 // Never downgrades: once delivered/bounced, a late "sent" does not move the row back.
 import type { Db } from "../lib/db.ts";
+import { likeContains } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { audit } from "./security.ts";
 
@@ -187,7 +188,7 @@ export interface SuppressionRow { id: string; email: string; reason: string; det
 export async function listSuppressions(db: Db, f: { includeRemoved: boolean; q?: string; limit: number; offset: number }): Promise<SuppressionRow[]> {
   const where: string[] = [], binds: unknown[] = [];
   if (!f.includeRemoved) where.push("s.removed_at IS NULL");
-  if (f.q) { where.push("s.email LIKE ?"); binds.push(`%${f.q.toLowerCase().replace(/[%_]/g, "")}%`); }
+  if (f.q) { where.push("s.email LIKE ? ESCAPE '\\'"); binds.push(likeContains(f.q.toLowerCase())); }
   return (await db.prepare(`SELECT s.id, s.email, s.reason, s.detail, s.created_at, s.removed_at, u.display_name AS removed_by_name, s.removal_note
       FROM email_suppressions s LEFT JOIN users u ON u.id = s.removed_by ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY s.created_at DESC LIMIT ? OFFSET ?`)
     .bind(...binds, f.limit + 1, f.offset).all<SuppressionRow>()).results;

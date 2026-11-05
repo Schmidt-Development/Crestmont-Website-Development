@@ -1,5 +1,6 @@
 // Request pipeline: build context → load session → CSRF for forms → route → render errors.
 import { configureErasureKeysFromEnv } from "../services/contact-identity.ts";
+import { withTransientRetry } from "../lib/db.ts";
 import type { AppContext, Env } from "./context.ts";
 import { Router } from "../lib/router.ts";
 import { HttpError, assertCsrf, cookie, hostCookieName, hstsValue, htmlResponse, isSecure, jsonResponse, parseCookies, readHostCookie, redirect } from "./http.ts";
@@ -152,6 +153,9 @@ export const staticContentType = (path: string) => STATIC_TYPES[path.split(".").
 export interface ExecLike { waitUntil(p: Promise<unknown>): void }
 
 export async function handle(req: Request, env: Env, exec?: ExecLike): Promise<Response> {
+  // Reads retry on a transient Cloudflare fault (src/lib/db.ts withTransientRetry). Applied here, at the
+  // entry point, so every route and every test goes through it rather than each caller remembering to.
+  env = { ...env, DB: withTransientRetry(env.DB) };
   const url = new URL(req.url);
   if (url.pathname.startsWith("/assets/") && env.ASSETS) return env.ASSETS.fetch(req);
   const gated = await previewGate(req, env);
