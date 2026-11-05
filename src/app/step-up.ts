@@ -11,6 +11,8 @@ export const STEP_UP_MAX_AGE_MINUTES = 10;
 export const STEP_UP_ROUTES: Readonly<Record<string, string>> = {
   // Release approval (Founder-protected)
   "POST /staff/readiness/approve": "release approval",
+  "POST /staff/readiness/phased-release/defer": "release scope deferral",
+  "POST /staff/readiness/phased-release/reinstate": "release scope reinstatement",
   // Role and membership changes
   "POST /staff/employees/invite": "staff invitation",
   "POST /staff/employees/:id/role": "role change",

@@ -16,6 +16,8 @@ import { audit } from "./security.ts";
 import { allowEgressHost } from "../lib/egress.ts";
 import * as ra from "./readiness-admin.ts";
 import { syncDerivedStates } from "../readiness/sync.ts";
+import { PHASE_1 } from "../readiness/phased-release.ts";
+import { deferredRequirements } from "./phased-release.ts";
 
 export class DeploymentError extends Error {
   readonly status: number;
@@ -153,6 +155,9 @@ export interface Authorization {
   releaseCandidate: { id: string; commit: string; createdAt: string } | null;
   approval: { id: string; decidedAt: string; evidenceSetSha256: string | null } | null;
   currentEvidenceSetSha256: string; gates: { id: string; status: string }[]; checkedAt: string;
+  /** Phased release: the requirements the Founder deferred. The release workflow checks that production keeps each
+   *  deferred subsystem's gate closed (scripts/release-authorization.ts) and refuses the deploy otherwise. */
+  phasedRelease: { policy: string; deferred: { id: string; subsystem: string }[] };
 }
 
 /**
@@ -168,6 +173,7 @@ export async function releaseAuthorization(ctx: Pick<AppContext, "db" | "now"> &
     commit, currentEvidenceSetSha256: report.evidenceSetSha256, gates: report.gates.map((g) => ({ id: g.id, status: g.status })), checkedAt: report.generatedAt,
     releaseCandidate: rc ? { id: rc.id, commit: rc.commit_sha, createdAt: rc.created_at } : null,
     approval: latest ? { id: latest.id, decidedAt: latest.created_at, evidenceSetSha256: latest.evidence_set_sha256 } : null,
+    phasedRelease: { policy: PHASE_1.id, deferred: await deferredRequirements(ctx.db) },
   };
   const no = (reason: string): Authorization => ({ ...base, authorized: false, reason });
   if (!FULL_SHA.test(commit)) return no("A full 40-character commit SHA is required.");

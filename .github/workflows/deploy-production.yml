@@ -105,6 +105,19 @@ jobs:
         id: auth
         run: node --no-warnings scripts/release-authorization.ts --commit "$TARGET_COMMIT" --config "${{ steps.cfg.outputs.sha256 }}"
 
+      # Phased release (docs/PHASED-LAUNCH.md): the authorization step already refused a configuration that switches a
+      # deferred AI system on. A Worker secret can do the same without touching wrangler.toml, so check the names too.
+      - name: Phased release — no production secret switches on a deferred AI system
+        if: steps.auth.outputs.deferred_subsystems != '[]'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DEFERRED_SUBSYSTEMS: ${{ steps.auth.outputs.deferred_subsystems }}
+        run: |
+          trap 'rm -f secrets.json' EXIT
+          $WRANGLER secret list --env production --format json > secrets.json
+          node --no-warnings scripts/phase-check.ts wrangler.toml secrets.json
+
       - name: Install dev tooling
         run: npm install --no-save --ignore-scripts typescript@5 @types/node@22
 

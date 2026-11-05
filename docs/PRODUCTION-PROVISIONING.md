@@ -8,6 +8,19 @@ Three separate stages. Each one needs the Founder; none happens on a push.
 | **2. Deploy** | Uploads the approved commit, applies migrations, attaches `crestmontwebsitedevelopment.com`, runs post-deploy checks, rolls back on failure. | Actions → **Deploy production** (`deploy-production.yml`), after the Founder approves the release candidate | Code: `wrangler rollback`. Migrations are additive and are not rolled back. |
 | **3. Open to customers** | Real email, `www` redirect, HSTS, Owner account, and the authentication items in `docs/AUTH-PRODUCTION.md`. | Founder decisions and configuration | — |
 
+## Current state (2026-11-05)
+
+| Resource | State | Evidence |
+|---|---|---|
+| D1 `crestmont-production` | Created, empty, `database_id` committed (`c667f1a9-…`) | Provision run [40614532868](https://github.com/Schmidt-Development/Crestmont-Website-Development/actions/runs/40614532868) |
+| R2 `crestmont-files-production` | Present (Founder-created), checked | same run |
+| Worker `crestmont-platform-production` | Empty draft; workers.dev and preview URLs off | same run |
+| Secrets `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET` (production widget), `EVIDENCE_INGEST_SECRET` (production-only) | Installed | same run |
+| `MFA_ENCRYPTION_KEY` | **Not installed**: run 1 predates the MFA step. Re-run [41962310037](https://github.com/Schmidt-Development/Crestmont-Website-Development/actions/runs/41962310037) is waiting for the Founder's `production` approval; it installs the key only if the `PRODUCTION_MFA_ENCRYPTION_KEY` environment secret exists, and otherwise warns and changes nothing. | — |
+| Phased launch | `AI_BUILD_AUTOMATION = "off"` committed for production ([PHASED-LAUNCH.md](PHASED-LAUNCH.md)) | `tests/ai-build-gate.test.ts` |
+
+No code, migration, domain or DNS has been applied to production. No payment, email, voice or AI secret exists there.
+
 ## Stage 1 — prerequisites (GitHub and Cloudflare settings only)
 
 ### Cloudflare API token (production only)
@@ -49,7 +62,7 @@ Then commit that `database_id` into `[env.production]` of `wrangler.toml` throug
 
 ## Stage 3 — before opening to customers
 - Transactional email (Resend) authorised and configured: without it, sign-up confirmation and password-reset links are only recorded in the outbox, not delivered.
-- Production Owner account bootstrapped (`scripts/bootstrap-owner.ts --email <founder> --print-sql --url https://crestmontwebsitedevelopment.com`; `--url` is required), MFA enrolled; AI-build automation paused in Owner → AI builds until approved.
+- Production Owner account bootstrapped (`scripts/bootstrap-owner.ts --email <founder> --print-sql --url https://crestmontwebsitedevelopment.com`; `--url` is required), MFA enrolled. AI website generation is off by configuration (`AI_BUILD_AUTOMATION = "off"`, [PHASED-LAUNCH.md](PHASED-LAUNCH.md)); the Owner's switch in Owner → AI builds cannot reopen it.
 - `www` → apex redirect rule, then HSTS (short max-age first).
 - The authentication gaps in `docs/AUTH-PRODUCTION.md` closed or accepted.
 - Live payments, calls and AI builds stay off until separately authorised (no secrets for them are installed by any workflow).
