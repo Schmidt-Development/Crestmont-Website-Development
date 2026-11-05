@@ -385,3 +385,23 @@ test("[MANIFEST] reloading keeps the delivery history and the concept chosen ear
   upsert(again, { id: "gal-2", kind: "gallery_reference", title: "B", originalPath: "/g/b.png", originalSha256: "aaa", originalWidth: 1, originalHeight: 1, publishable: false });
   assert.equal(again.references[0].deliveries.length, 1);
 });
+
+test("[MODELB-VISION] the budget and the capability follow the model about to run, not the previous one", async () => {
+  const d = dir();
+  const ref = png(path.join(d, "ref.png"), 560, 940);
+  // Model A can see; a deliberately text-only Model B cannot. A repair that escalates to A must still get images.
+  const b = { tag: BUILDER, role: "builder" as const, contextTokens: 65_536, vramMb: 0, quantization: null, reasoning: null, vision: false, license: null };
+  const a = { ...b, tag: "test-architect:27b", role: "architect_reviewer" as const, vision: true };
+  const { model, provider } = await setup(() => finish(), { models: { a, b, mode: "dual" as const } }, { [BUILDER]: ["completion", "tools"], "test-architect:27b": ["completion", "vision", "tools"] });
+  try {
+    await provider.preflight();
+    assert.equal(provider.visionStatus(BUILDER).capable, false, "the builder genuinely cannot see");
+    assert.equal(provider.visionStatus("test-architect:27b").capable, true, "the escalation model can");
+    const toB = provider.setVisualContext({ images: [{ path: ref, label: "R" }], note: "n", model: BUILDER });
+    assert.equal(toB.delivered.length, 0, "nothing is sent to the model that cannot see");
+    const toA = provider.setVisualContext({ images: [{ path: ref, label: "R" }], note: "n", model: "test-architect:27b" });
+    assert.equal(toA.delivered.length, 1, "the escalation model is shown the reference");
+    await provider.run(req({ model: "test-architect:27b" }));
+    assert.equal(imageParts(model.requests.at(-1)!).length, 1);
+  } finally { await provider.close(); await model.close(); }
+});

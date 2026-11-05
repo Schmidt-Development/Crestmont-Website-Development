@@ -937,7 +937,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           budgetTokens: budget,
         });
         const delivery = plan.images.length
-          ? provider!.setVisualContext({ images: plan.images, note: plan.note, maxImages: 3 })
+          ? provider!.setVisualContext({ images: plan.images, note: plan.note, maxImages: 3, model: r.model.tag })
           : provider!.setVisualContext(null);
         recordBuilderVision(manifest, plan, delivery.delivered, `${phase} phase (${buildPhase})`);
         saveManifest(ws!.dir, manifest);

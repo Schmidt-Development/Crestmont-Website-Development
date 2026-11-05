@@ -249,12 +249,14 @@ export class LocalProvider implements AgentProvider {
    * operator forgot to set must not silently blind the builder -- that is precisely the state Node 1 was in --
    * and a server that does not answer the question must not be read as a denial.
    */
-  visionStatus(): { capable: boolean; model: string; reason: string } {
+  visionStatus(model?: string): { capable: boolean; model: string; reason: string } {
     const m = this.deps.cfg.models;
-    const b = m.mode === "dual" ? m.b : m.b;
+    // The model about to run, not simply the builder: a repair that escalates to Model A is judged on Model A's
+    // capability, and budgeted against Model A's window.
+    const b = (model ? [m.a, m.b].find((x) => x.tag === model) : null) ?? m.b;
     if (this.visionBlocked) return { capable: false, model: b.tag, reason: this.visionBlocked };
     const configured = !!b.vision;
-    const probed = this.builderCapabilities;
+    const probed = this.serverCapabilities.get(b.tag) ?? null;
     const serverSays = probed === null ? null : probed.includes("vision");
     if (configured && serverSays !== false) return { capable: true, model: b.tag, reason: serverSays ? `LOCAL_MODEL_B_VISION=true and ${this.client.baseUrl} reports ${b.tag} capabilities [${probed!.join(", ")}]` : `LOCAL_MODEL_B_VISION=true (the model server did not report capabilities for ${b.tag}, so the configuration is taken at its word)` };
     if (serverSays === true) return { capable: true, model: b.tag, reason: `${this.client.baseUrl} reports ${b.tag} capabilities [${probed!.join(", ")}], which include vision; LOCAL_MODEL_B_VISION is not set, and a missing flag is not evidence that the model cannot see` };
@@ -262,8 +264,11 @@ export class LocalProvider implements AgentProvider {
     return { capable: false, model: b.tag, reason: `LOCAL_MODEL_B_VISION is not set and ${this.client.baseUrl} did not report capabilities for ${b.tag}; the builder is treated as text-only rather than sending images that may be silently discarded` };
   }
 
-  /** What the model server said the builder model can do, or null when it was not asked or did not answer. */
-  private builderCapabilities: string[] | null = null;
+  /**
+   * What the model server says each model can do, per model tag. A tag that is absent was never asked; a tag
+   * mapped to null was asked and did not answer. Neither means "cannot".
+   */
+  private serverCapabilities = new Map<string, string[] | null>();
 
   async preflight(): Promise<ProviderPreflight> {
     const errors: string[] = [];
@@ -278,8 +283,10 @@ export class LocalProvider implements AgentProvider {
     }
     // Ask the server what the BUILDER model can do, once, at preflight. A failure here is never an error: the
     // build does not depend on the answer, only the honesty of what the runner then claims.
-    try { this.builderCapabilities = await this.client.capabilities(this.deps.cfg.models.b.tag); } catch { this.builderCapabilities = null; }
-    const vs = this.visionStatus();
+    for (const tag of new Set([this.deps.cfg.models.b.tag, this.deps.cfg.models.a.tag].filter(Boolean))) {
+      try { this.serverCapabilities.set(tag, await this.client.capabilities(tag)); } catch { this.serverCapabilities.set(tag, null); }
+    }
+    const vs = this.visionStatus(this.deps.cfg.models.b.tag);
     if (!vs.capable) warnings.push(`The builder model cannot be shown images: ${vs.reason}`);
     else if (!this.deps.cfg.models.b.vision) warnings.push(`LOCAL_MODEL_B_VISION is not set, but ${vs.model} reports vision support and will be shown the design references and its own rendered screenshots. Set LOCAL_MODEL_B_VISION=true to make this explicit.`);
     errors.push(...await JobSandbox.preflight(this.deps.cfg.jobSandbox, this.deps.executor));
@@ -357,21 +364,23 @@ export class LocalProvider implements AgentProvider {
    * dropped -- never attached and never counted as delivered, which is the claim the manifest has to be able to
    * falsify.
    */
-  setVisualContext(v: { images: readonly { path: string; label: string }[]; note: string; maxImages?: number } | null): {
+  setVisualContext(v: { images: readonly { path: string; label: string }[]; note: string; maxImages?: number; model?: string } | null): {
     delivered: { label: string; path: string; tokens: number }[];
     dropped: { path: string; label: string; reason: string }[];
   } {
     if (!v || !v.images.length) { this.visual = null; return { delivered: [], dropped: [] }; }
     // Refuse rather than accept-and-discard. "Model B was given the references" has to be false here, loudly,
     // when the model cannot see them -- a silent drop is what made the old pipeline's evidence worthless.
-    const vs = this.visionStatus();
+    const vs = this.visionStatus(v.model);
     if (!vs.capable) {
       this.visual = null;
       return { delivered: [], dropped: v.images.map((i) => ({ path: i.path, label: i.label, reason: `the builder model cannot be shown images: ${vs.reason}` })) };
     }
     const m = this.deps.cfg.models;
-    const model = this.currentModel ?? this.deps.cfg.local.model;
-    const profile = m.mode === "dual" ? [m.a, m.b].find((x) => x.tag === model) ?? m.b : m.b;
+    // The caller names the model that is about to run. Falling back to currentModel would budget against the
+    // model that ran the PREVIOUS phase, because this runs before run() sets it.
+    const model = v.model ?? this.currentModel ?? this.deps.cfg.local.model;
+    const profile = [m.a, m.b].find((x) => x.tag === model) ?? m.b;
     const window = profile.contextTokens || this.deps.cfg.local.contextTokens;
     const reserveOutput = this.deps.cfg.local.maxOutputTokensPerCall;
     // The fixed cost this phase pays on every call, measured rather than guessed: without the images, so the

@@ -97,12 +97,12 @@ export interface AgentProvider {
    * evidence: a reference "supplied to Model B" that never reached the request is the one claim this whole
    * mechanism exists to make falsifiable.
    */
-  setVisualContext?(v: { images: readonly { path: string; label: string }[]; note: string; maxImages?: number } | null): {
+  setVisualContext?(v: { images: readonly { path: string; label: string }[]; note: string; maxImages?: number; model?: string } | null): {
     delivered: { label: string; path: string; tokens: number }[];
     dropped: { path: string; label: string; reason: string }[];
   };
   /** Whether this provider can actually show the builder an image, and why it can or cannot. */
-  visionStatus?(): { capable: boolean; model: string; reason: string };
+  visionStatus?(model?: string): { capable: boolean; model: string; reason: string };
 }
 
 export class PaidProviderRefusedError extends Error {
