@@ -516,7 +516,11 @@ jobs:
         continue-on-error: true
         env:
           BASE: ${{ steps.deploy.outputs.url }}
-        run: node --no-warnings scripts/tls-check.ts "$BASE" --env staging --json evidence/tls-check.json | tee -a "$GITHUB_STEP_SUMMARY"
+        run: |
+          # pipefail, or `| tee` returns tee's exit status and the step always succeeds — which is exactly
+          # what happened in deploy #154: the check reported two failures and the gate below was skipped.
+          set -o pipefail
+          node --no-warnings scripts/tls-check.ts "$BASE" --env staging --json evidence/tls-check.json | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Smoke checks on the public site (fresh visitor, no cookies)
         id: smoke

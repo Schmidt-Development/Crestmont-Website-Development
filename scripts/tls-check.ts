@@ -22,6 +22,16 @@ import { fileURLToPath } from "node:url";
 
 export interface TlsProbe { label: string; ok: boolean; detail: string; fatal: boolean }
 
+/**
+ * `host:port` for `openssl s_client -connect`. URL.host omits the port when it is the scheme default, and
+ * `-connect host` with no port does not reach 443 — which is why deploy #154 reported
+ * "certificate not expiring — could not read notAfter" against a certificate that was perfectly readable.
+ */
+export function sclientTarget(url: string): string {
+  const u = new URL(url);
+  return `${u.hostname}:${u.port || "443"}`;
+}
+
 /** Minimum remaining certificate life. Cloudflare renews well before this, so less means renewal is stuck. */
 export const MIN_CERT_DAYS = 14;
 /**
@@ -101,8 +111,15 @@ export function evaluate(f: TlsFacts, now = new Date()): TlsProbe[] {
 
   const redirected = f.httpStatus !== null && [301, 302, 307, 308].includes(f.httpStatus) && /^https:/i.test(f.httpLocation ?? "");
   const refused = f.httpStatus === null;
+  // Not fatal, for the same reason the TLS minimum version is not: whether the edge answers plain http at
+  // all is Cloudflare configuration ("Always Use HTTPS" under SSL/TLS → Edge Certificates), and a
+  // workers.dev hostname answers both schemes regardless of what this Worker does. Deploy #154 reported
+  // this as a failure, which would have blocked deploys for something no deploy can change. HSTS protects
+  // every repeat visitor; the exposure is a first plain-http request, and the Owner should know about it.
   add("plain http does not serve the site", redirected || refused,
-    refused ? "no plain-http listener" : redirected ? `HTTP ${f.httpStatus} → ${f.httpLocation}` : `HTTP ${f.httpStatus} served over plain http (expected a redirect to https)`);
+    refused ? "no plain-http listener" : redirected ? `HTTP ${f.httpStatus} → ${f.httpLocation}`
+      : `HTTP ${f.httpStatus} served over plain http — turn on "Always Use HTTPS" in Cloudflare (SSL/TLS → Edge Certificates). HSTS still protects repeat visitors; a first plain-http request is not redirected.`,
+    false);
   return out;
 }
 
@@ -118,7 +135,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const hostname = new URL(url).hostname;
 
   const verify = sh("curl", ["-sS", "-o", "/dev/null", "-w", "%{ssl_verify_result}", "--max-time", "20", url]);
-  const notAfter = sh("sh", ["-c", `echo | openssl s_client -servername ${hostname} -connect ${host} 2>/dev/null | openssl x509 -noout -enddate`]);
+  const notAfter = sh("sh", ["-c", `echo | openssl s_client -servername ${hostname} -connect ${sclientTarget(url)} 2>/dev/null | openssl x509 -noout -enddate`]);
   const tlsAt = (flag: string) => sh("curl", ["-sS", "-o", "/dev/null", flag, "--max-time", "20", url]).ok;
   const head = sh("curl", ["-sSI", "--max-time", "20", url]);
   const hsts = /^strict-transport-security:(.*)$/im.exec(head.out)?.[1]?.trim() ?? null;
