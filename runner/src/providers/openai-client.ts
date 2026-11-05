@@ -172,6 +172,35 @@ export class OpenAICompatClient {
     const body = await res.json() as { data?: { id?: string }[] };
     return (body.data ?? []).map((m) => String(m.id ?? "")).filter(Boolean);
   }
+
+  /**
+   * What the SERVER says this model can do (Ollama POST /api/show -> capabilities).
+   *
+   * Asked rather than assumed, because the alternative is a configuration flag. LOCAL_MODEL_A_VISION=true was set
+   * on Node 1 and LOCAL_MODEL_B_VISION was never set, so the runner believed its builder model was text-only --
+   * while Ollama reported qwen3.6:35b-a3b-q4_K_M as ["completion","vision","tools","thinking"]. The builder could
+   * see all along; the runner had been told it could not, and never checked.
+   *
+   * Returns null when the server does not answer this question (a non-Ollama endpoint, an older version, a
+   * network failure). Null means "not known", never "not capable": a capability nobody could measure must not be
+   * reported as absent.
+   */
+  async capabilities(model: string, signal?: AbortSignal): Promise<string[] | null> {
+    // /api/show sits beside the OpenAI-compatible surface, not under /v1.
+    const root = this.baseUrl.replace(/\/v\d+$/, "");
+    try {
+      const res = await (this.o.fetchImpl ?? fetch)(`${root}/api/show`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${this.o.apiKey}` },
+        body: JSON.stringify({ model }),
+        signal: signal ?? AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) return null;
+      const body = await res.json() as { capabilities?: unknown };
+      if (!Array.isArray(body.capabilities)) return null;
+      return body.capabilities.map((c) => String(c)).filter(Boolean);
+    } catch { return null; }
+  }
 }
 
 export function parseChatResponse(text: string, wallMs: number): ChatResponse {

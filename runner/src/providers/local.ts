@@ -33,7 +33,8 @@ import { PaidProviderRefusedError } from "./types.ts";
 import { OpenAICompatClient, isContextOverflow, contentText } from "./openai-client.ts";
 import type { InferenceScheduler } from "../inference/scheduler.ts";
 import { domainMatches, isPaidAiHost } from "./paid-hosts.ts";
-import type { ChatMessage, ChatToolCall } from "./openai-client.ts";
+import type { ChatMessage, ChatToolCall, ContentPart } from "./openai-client.ts";
+import { dataUrl, planVisionRequest, VISION_RETRY_RESERVE, type PreparedImage } from "../orchestrator/vision.ts";
 import { TOOL_NAMES, executeTool, schemaHint, toolSpecs, validateArgs } from "./local-tools.ts";
 import { fromNativeCalls, parseTextToolCalls } from "./local-parse.ts";
 import type { ParsedCall } from "./local-parse.ts";
@@ -98,6 +99,19 @@ export const DEFAULT_LIMITS: LocalLimits = { maxMalformed: 4, maxNoToolReplies: 
  * (also the egress proxy's deny list) plus ollama.com, whose API serves Ollama Cloud models remotely.
  */
 const isRemoteInferenceHost = (host: string): boolean => isPaidAiHost(host) || domainMatches(".ollama.com", host);
+
+/**
+ * Did the model server refuse the request because it was multimodal?
+ *
+ * Matched on the server's own wording (Ollama: "Multimodal data provided, but model does not support multimodal
+ * requests."), verified against the real endpoint on Node 1 with a model whose capability list omits "vision".
+ * Deliberately narrow: a 400 about anything else is still a failure, because silently continuing past an error
+ * nobody classified is how a build comes to report success it did not earn.
+ */
+export function isMultimodalRefusal(err: unknown): boolean {
+  const m = err instanceof Error ? err.message : String(err);
+  return /multimodal|image input|does not support image|vision is not supported/i.test(m);
+}
 
 export function assertLocalEndpoint(baseUrl: string, model: string): void {
   let host = "";
@@ -228,6 +242,34 @@ export class LocalProvider implements AgentProvider {
   private currentModel: string | null = null;
   private projectId = "";
 
+  /**
+   * Whether the BUILDER model can be shown an image, and on what evidence.
+   *
+   * The configured flag and the server's own answer are both consulted, and either one is enough. A flag the
+   * operator forgot to set must not silently blind the builder -- that is precisely the state Node 1 was in --
+   * and a server that does not answer the question must not be read as a denial.
+   */
+  visionStatus(model?: string): { capable: boolean; model: string; reason: string } {
+    const m = this.deps.cfg.models;
+    // The model about to run, not simply the builder: a repair that escalates to Model A is judged on Model A's
+    // capability, and budgeted against Model A's window.
+    const b = (model ? [m.a, m.b].find((x) => x.tag === model) : null) ?? m.b;
+    if (this.visionBlocked) return { capable: false, model: b.tag, reason: this.visionBlocked };
+    const configured = !!b.vision;
+    const probed = this.serverCapabilities.get(b.tag) ?? null;
+    const serverSays = probed === null ? null : probed.includes("vision");
+    if (configured && serverSays !== false) return { capable: true, model: b.tag, reason: serverSays ? `LOCAL_MODEL_B_VISION=true and ${this.client.baseUrl} reports ${b.tag} capabilities [${probed!.join(", ")}]` : `LOCAL_MODEL_B_VISION=true (the model server did not report capabilities for ${b.tag}, so the configuration is taken at its word)` };
+    if (serverSays === true) return { capable: true, model: b.tag, reason: `${this.client.baseUrl} reports ${b.tag} capabilities [${probed!.join(", ")}], which include vision; LOCAL_MODEL_B_VISION is not set, and a missing flag is not evidence that the model cannot see` };
+    if (serverSays === false) return { capable: false, model: b.tag, reason: `${this.client.baseUrl} reports ${b.tag} capabilities [${probed!.join(", ")}], which do NOT include vision. The builder cannot be shown images by this model; visual repairs proceed from the browser's measurements and the reviewer's findings only.` };
+    return { capable: false, model: b.tag, reason: `LOCAL_MODEL_B_VISION is not set and ${this.client.baseUrl} did not report capabilities for ${b.tag}; the builder is treated as text-only rather than sending images that may be silently discarded` };
+  }
+
+  /**
+   * What the model server says each model can do, per model tag. A tag that is absent was never asked; a tag
+   * mapped to null was asked and did not answer. Neither means "cannot".
+   */
+  private serverCapabilities = new Map<string, string[] | null>();
+
   async preflight(): Promise<ProviderPreflight> {
     const errors: string[] = [];
     const warnings: string[] = [];
@@ -239,6 +281,14 @@ export class LocalProvider implements AgentProvider {
     } catch (err) {
       errors.push(`Local model server ${this.client.baseUrl} is not reachable: ${errorMessage(err).slice(0, 200)}`);
     }
+    // Ask the server what the BUILDER model can do, once, at preflight. A failure here is never an error: the
+    // build does not depend on the answer, only the honesty of what the runner then claims.
+    for (const tag of new Set([this.deps.cfg.models.b.tag, this.deps.cfg.models.a.tag].filter(Boolean))) {
+      try { this.serverCapabilities.set(tag, await this.client.capabilities(tag)); } catch { this.serverCapabilities.set(tag, null); }
+    }
+    const vs = this.visionStatus(this.deps.cfg.models.b.tag);
+    if (!vs.capable) warnings.push(`The builder model cannot be shown images: ${vs.reason}`);
+    else if (!this.deps.cfg.models.b.vision) warnings.push(`LOCAL_MODEL_B_VISION is not set, but ${vs.model} reports vision support and will be shown the design references and its own rendered screenshots. Set LOCAL_MODEL_B_VISION=true to make this explicit.`);
     errors.push(...await JobSandbox.preflight(this.deps.cfg.jobSandbox, this.deps.executor));
     if (this.deps.cfg.local.contextTokens < 16_384) warnings.push(`LOCAL_MODEL_CONTEXT_TOKENS=${this.deps.cfg.local.contextTokens} is small for agentic coding; 32768 or more is recommended.`);
     return { errors, warnings };
@@ -280,22 +330,118 @@ export class LocalProvider implements AgentProvider {
   private readonly calibration = new Map<string, number>();
   private memoryText: (maxChars: number) => string = () => "";
 
+  // ── Model B's eyes (V5 correction §1-§5) ────────────────────────────────────────────────────────────────────
+  //
+  // Until this existed, local.ts built text-only requests: the word "image" did not appear in the file. Model A
+  // (architect, reviewer) was given the Design Gallery screenshots and Model B -- the model that actually writes
+  // the website -- was given Model A's prose about them. Measured consequence on bld_10e2c6007686faee0ab64d45: the
+  // builder had never seen the standard it was being scored against, and had never seen what its own code
+  // rendered. It was asked to close a visual gap it could not perceive.
+  //
+  // The images are carried in the PINNED message, not in history, and that is the design decision that matters.
+  // History is compacted -- 55 resets on one attempt of that build -- so an image placed in history is gone a few
+  // turns later while the ledger still records that it was "seen". Pinned content is rebuilt from scratch before
+  // every single call, including immediately after a reset, so "the images are in Model B's usable context right
+  // now" is true by construction rather than by hope.
+  private visual: {
+    images: PreparedImage[];
+    dropped: { path: string; label: string; reason: string }[];
+    imageTokens: number;
+    note: string;
+  } | null = null;
+
+  /** Set when the model server itself refused image input, in the words it used. Reported, never guessed at. */
+  visionBlocked: string | null = null;
+
+  /** What Model B's last request ACTUALLY carried, read back rather than assumed. The manifest records this. */
+  lastVisualDelivery: { label: string; path: string; mime: string; width: number; height: number; tokens: number }[] = [];
+
+  /**
+   * Give Model B images to look at for the phase that is about to run, or clear them with null.
+   *
+   * Budgeted here, once, against the fixed context this phase will carry: the system prompt, the workspace
+   * message, the tool schemas and the reply's reserve. An image that does not fit is DROPPED and reported as
+   * dropped -- never attached and never counted as delivered, which is the claim the manifest has to be able to
+   * falsify.
+   */
+  setVisualContext(v: { images: readonly { path: string; label: string }[]; note: string; maxImages?: number; model?: string } | null): {
+    delivered: { label: string; path: string; tokens: number }[];
+    dropped: { path: string; label: string; reason: string }[];
+  } {
+    if (!v || !v.images.length) { this.visual = null; return { delivered: [], dropped: [] }; }
+    // Refuse rather than accept-and-discard. "Model B was given the references" has to be false here, loudly,
+    // when the model cannot see them -- a silent drop is what made the old pipeline's evidence worthless.
+    const vs = this.visionStatus(v.model);
+    if (!vs.capable) {
+      this.visual = null;
+      return { delivered: [], dropped: v.images.map((i) => ({ path: i.path, label: i.label, reason: `the builder model cannot be shown images: ${vs.reason}` })) };
+    }
+    const m = this.deps.cfg.models;
+    // The caller names the model that is about to run. Falling back to currentModel would budget against the
+    // model that ran the PREVIOUS phase, because this runs before run() sets it.
+    const model = v.model ?? this.currentModel ?? this.deps.cfg.local.model;
+    const profile = [m.a, m.b].find((x) => x.tag === model) ?? m.b;
+    const window = profile.contextTokens || this.deps.cfg.local.contextTokens;
+    const reserveOutput = this.deps.cfg.local.maxOutputTokensPerCall;
+    // The fixed cost this phase pays on every call, measured rather than guessed: without the images, so the
+    // image budget is what is genuinely left over. Working headroom is held back for the conversation itself --
+    // attaching images up to the last free token would force a reset on the first tool result.
+    this.visual = null;
+    const fixed = this.measure(model, [{ role: "system", content: this.system }, this.pinnedMessage(window)], toolSpecs(), reserveOutput, window).total;
+    const workingHeadroom = Math.floor(Math.max(1024, window - reserveOutput) * 0.35);
+    const plan = planVisionRequest(v.images, {
+      windowTokens: window,
+      promptTokens: fixed - reserveOutput + workingHeadroom,
+      reserveOutput,
+      reserveRetry: VISION_RETRY_RESERVE,
+    }, Math.max(1, Math.min(v.maxImages ?? 3, 4)));
+    this.visual = plan.images.length ? { images: plan.images, dropped: plan.dropped, imageTokens: plan.imageTokens, note: v.note } : null;
+    return {
+      delivered: plan.images.map((i) => ({ label: i.label, path: i.path, tokens: i.tokens })),
+      dropped: plan.dropped,
+    };
+  }
+
+  /** The images Model B is currently able to see, for the runner's own reporting. */
+  visualContext(): { label: string; path: string; tokens: number }[] {
+    return (this.visual?.images ?? []).map((i) => ({ label: i.label, path: i.path, tokens: i.tokens }));
+  }
+
   private pinnedMessage(window: number): ChatMessage {
-    const t = this.transcript!;
-    const charsFor = (share: number) => Math.max(1500, Math.floor(window * 3.5 * share));
+    // Null before the first phase opens a transcript: setVisualContext() measures the fixed context to budget the
+    // images, and that happens before run(). The mechanical log is simply empty then.
+    const t = this.transcript;
+    // See the note above setVisualContext: when the builder is being shown images, the text that it can re-read
+    // with a tool yields the room. Never below a floor -- a file tree of twenty entries helps nobody.
+    const squeeze = this.visual ? 0.4 : 1;
+    const charsFor = (share: number) => Math.max(1500, Math.floor(window * 3.5 * share * squeeze));
     const parts = [
       "WORKSPACE CONTEXT (refreshed by the runner before every model call).",
       "",
       "Repository file tree (relative paths; node_modules/.git hidden):",
-      fileTree(this.ws!.repo, Math.max(60, Math.min(300, Math.floor(window / 110)))),
+      fileTree(this.ws!.repo, Math.max(60, Math.floor(Math.min(300, Math.floor(window / 110)) * squeeze))),
       "",
       "Customer brief (the files BRIEF.md / BRIEF.json in the repository hold the full version):",
-      untrustedBlock("brief", this.briefText || "(no brief file)"),
+      untrustedBlock("brief", this.briefText
+        ? (squeeze < 1 && this.briefText.length > charsFor(0.2)
+          ? this.briefText.slice(0, charsFor(0.2)) + "\n[shortened here to make room for the images attached below; read BRIEF.md / BRIEF.json for the full version]"
+          : this.briefText)
+        : "(no brief file)"),
     ];
     const memory = this.memoryText(charsFor(0.1));
     if (memory) parts.push("", memory);
-    if (t.summary.length) {
+    if (t?.summary.length) {
       parts.push("", "Mechanical log of earlier turns (runner-written; older turns were removed from the context to save space):", ...t.summary);
+    }
+    // The images, attached to the pinned message so a context reset cannot take them away. Labelled one line per
+    // image, in the order they are attached, because an unlabelled pair of screenshots is how a model comes to
+    // score a reference as though it were the website it built.
+    const v = this.visual;
+    if (v) {
+      parts.push("", v.note, "", `${v.images.length} image(s) are attached to this message, in this order:`,
+        ...v.images.map((i, n) => `  ${n + 1}. ${i.label} (${i.width}x${i.height})`));
+      if (v.dropped.length) parts.push(`${v.dropped.length} further image(s) did not fit this request and are NOT attached: ${v.dropped.map((d) => d.label).join("; ")}. Do not claim to have seen them.`);
+      return { role: "user", content: [{ type: "text", text: parts.join("\n") }, ...v.images.map((i): ContentPart => ({ type: "image_url", image_url: { url: dataUrl(i) } }))] };
     }
     return { role: "user", content: parts.join("\n") };
   }
@@ -305,7 +451,10 @@ export class LocalProvider implements AgentProvider {
     const cal = this.calibration.get(model) ?? 1;
     const est = (s: string) => Math.ceil(estimateTokens(s) * cal);
     const system = est(contentText(messages[0]?.content ?? "")) + 8;
-    const pinned = messages[1] ? est(contentText(messages[1].content)) + 8 : 0;
+    // Image tokens come from the images' own pixel dimensions (orchestrator/vision.ts), NOT from the text
+    // estimate: contentText() renders an image part as the six characters "[image]", so counting them as text
+    // would understate a 1366x768 screenshot by roughly 1,500 tokens and overflow the window mid-phase.
+    const pinned = (messages[1] ? est(contentText(messages[1].content)) + 8 : 0) + (this.visual?.imageTokens ?? 0);
     const history = messages.slice(2).reduce((n, m) => n + est(messageText(m)) + 8, 0);
     const toolsTokens = tools ? est(JSON.stringify(tools)) : 0;
     return { system, pinned, history, tools: toolsTokens, reservedOutput, total: system + pinned + history + toolsTokens + reservedOutput, window, calibration: cal };
@@ -576,6 +725,15 @@ export class LocalProvider implements AgentProvider {
             forceReset = "the model server reported a context overflow";
             tracker.note({ kind: "note", message: "model context overflow; resetting the context with a stricter estimate and retrying" });
             log.warn("local model context overflow; resetting context and retrying", { attempt: overflowStreak });
+            continue;
+          }
+          if (this.visual && isMultimodalRefusal(err)) {
+            const dropped = this.visual.images.map((i) => i.label);
+            this.visual = null;
+            this.visionBlocked = `${cfg.model} refused the image input: ${errorMessage(err).slice(0, 200)}`;
+            const note = `${cfg.model} refused multimodal input, so the builder cannot be shown images and is continuing from text, the browser's measurements and the reviewer's findings. Withdrawn: ${dropped.join("; ")}.`;
+            tracker.note({ kind: "note", message: note });
+            log.warn("builder model refused multimodal input; continuing text-only", { model: cfg.model, images: dropped.length });
             continue;
           }
           status = "error";

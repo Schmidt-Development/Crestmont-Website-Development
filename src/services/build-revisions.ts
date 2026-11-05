@@ -137,19 +137,26 @@ export async function saveRevision(db: Db, storage: StorageAdapter | null, b: Re
   // the newer revision, so the preview follows the live work for as long as quality holds.
   const isBest = !!b.isBest && score !== null && (!incumbent || incumbent.score === null || score >= incumbent.score);
 
+  // 0079 (V5 ss9): did this cycle actually change the website? The runner measures it -- the rendering-source
+  // hash and every screenshot's hash, compared with the state before the repair -- because the commit hash
+  // cannot: every cycle commits its evidence, so commits always differ. An unrecognised value is stored as NULL
+  // ("not measured") rather than coerced into a verdict this revision did not earn.
+  const effect = b.effect === "effective" || b.effect === "ineffective" || b.effect === "unknown" ? b.effect : null;
+
   const id = newId("brev");
   const at = nowIso();
   for (const f of prepared) {
     await storage.put(`builds/${job.id}/rev/${job.attempts}-${cycle}/${f.path}`, f.bytes, f.contentType);
   }
-  await db.prepare(`INSERT INTO build_revisions (id, job_id, project_id, cycle, attempt, phase, commit_sha, score, decision, is_best, reverted, reverted_reason, file_count, total_bytes, created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+  await db.prepare(`INSERT INTO build_revisions (id, job_id, project_id, cycle, attempt, phase, commit_sha, score, decision, is_best, reverted, reverted_reason, effect, effect_reason, file_count, total_bytes, created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .bind(id, job.id, job.project_id, cycle, job.attempts, phase,
       typeof b.commit === "string" && /^[0-9a-f]{7,64}$/i.test(b.commit) ? b.commit : null,
       score,
       typeof b.decision === "string" ? sanitize(b.decision, 40) : null,
       isBest ? 1 : 0, b.reverted ? 1 : 0,
       b.reverted && typeof b.revertedReason === "string" ? sanitize(b.revertedReason, 500) : null,
+      effect, effect && typeof b.effectReason === "string" ? sanitize(b.effectReason, 500) : null,
       prepared.length, total, at).run();
   for (const f of prepared) {
     await db.prepare(`INSERT INTO build_revision_files (revision_id, path, kind, content_type, size_bytes, sha256, storage_key) VALUES (?,?,?,?,?,?,?)`)
@@ -160,7 +167,7 @@ export async function saveRevision(db: Db, storage: StorageAdapter | null, b: Re
   if (isBest) await db.prepare(`UPDATE build_revisions SET is_best = 0 WHERE job_id = ? AND id <> ?`).bind(job.id, id).run();
   await db.prepare(`INSERT INTO build_events (job_id, at, kind, message, actor_kind, data_json) VALUES (?,?,?,?,?,?)`)
     .bind(job.id, at, "preview", `Revision snapshot stored for cycle ${cycle} (${prepared.length} file(s), ${Math.round(total / 1024)} KB)`, "runner",
-      JSON.stringify({ cycle, phase, files: prepared.length, bytes: total, isBest, reverted: !!b.reverted })).run();
+      JSON.stringify({ cycle, phase, files: prepared.length, bytes: total, isBest, reverted: !!b.reverted, effect })).run();
   return { revisionId: id, stored: prepared.length, alreadyStored: false };
 }
 
@@ -175,10 +182,16 @@ export interface RevisionRow {
    */
   build_phase: string | null; design_points: number | null; functionality_points: number | null; other_points: number | null;
   is_design_baseline: number;
+  /**
+   * 0079: whether the cycle changed the website, and the measured reason. NULL on every revision stored before
+   * the comparison existed, including the nine revisions of bld_10e2c6007686faee0ab64d45 that prompted it: those
+   * were never measured this way and must read "not measured", not "effective".
+   */
+  effect: "effective" | "ineffective" | "unknown" | null; effect_reason: string | null;
 }
 
 const REVISION_COLUMNS = `id, cycle, attempt, phase, commit_sha, score, decision, is_best, reverted, reverted_reason, file_count, total_bytes, created_at,
-    build_phase, design_points, functionality_points, other_points, is_design_baseline`;
+    build_phase, design_points, functionality_points, other_points, is_design_baseline, effect, effect_reason`;
 
 /** Every stored revision of a build, oldest first: the cycle history the Founder scrolls through. */
 export async function listRevisions(db: Db, jobId: string): Promise<RevisionRow[]> {

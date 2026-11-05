@@ -4,6 +4,8 @@
 // builder and the separate Model A review session, and reports each one to the platform (the durable record). Every
 // document that comes back from a model is untrusted input and is validated before use; the platform validates it again.
 
+import { validateBlueprint } from "./blueprint.ts";
+
 export const SPEC_SCHEMA = "crestmont.master-spec/1";
 
 /** What the Architect receives: the immutable build brief (normalized intake) plus reference images on disk. */
@@ -74,6 +76,17 @@ export interface PhasePlan {
  */
 export type SpecStage = "design" | "full";
 
+/**
+ * The approved design as DATA (V5 §5). Planned in its own model call AFTER the design specification, because a
+ * structured blueprint and a prose specification do not fit in one reasoning model's output budget together --
+ * that is exactly the truncation that produced no specification at all on bld_e65768e6b0853a425095a1f6.
+ *
+ * Optional because a build may legitimately have none: a text-only Model A, a platform that sent no gallery
+ * selection, or a blueprint call that failed every attempt. The design phase then falls back to the prose
+ * designSpec and SAYS SO, rather than presenting an undecided design as a decided one.
+ */
+export type { DesignBlueprint } from "./blueprint.ts";
+
 export interface MasterSpec {
   schema: typeof SPEC_SCHEMA;
   /** Absent on specifications stored before staged planning existed; those are complete ("full") by definition. */
@@ -83,6 +96,8 @@ export interface MasterSpec {
   technicalArchitecture: string;
   /** The four-way phase split (optional: older specifications have none). */
   phasePlan?: PhasePlan;
+  /** The structured, validated design blueprint (V5 §5). Absent when the blueprint stage produced none. */
+  designBlueprint?: import("./blueprint.ts").DesignBlueprint;
   tasks: { id: string; title: string; workstream: string; paths: string[]; dependsOn: string[] }[];
   acceptanceCriteria: { id: string; text: string; verification: "automated" | "screenshot" | "manual" }[];
   integrations: { key: string; name: string; purpose: string }[];
@@ -220,9 +235,16 @@ export function validateDesignSpec(raw: unknown): SpecValidation {
   // Implementation-only fields get deterministic, honest defaults. masterPrompt is derived from the architect's own
   // design plan rather than invented: the builder's phase prompt carries the design-first objective, and stage 2
   // may enrich this later. Empty arrays are truthful ("not planned yet"), never fabricated content.
+  // A blueprint is produced by the separate blueprint stage, never parsed out of a design-specification reply:
+  // this validator's job is the prose plan. Carrying an already-validated one through matters for the paths that
+  // re-validate a stored spec (a resumed segment, a corrective pass) -- without it, a resume would quietly lose
+  // the approved design and the build would start interpreting adjectives again.
+  const carried = o.designBlueprint && typeof o.designBlueprint === "object" && !Array.isArray(o.designBlueprint)
+    ? validateBlueprint(o.designBlueprint).blueprint : null;
   const spec: MasterSpec = {
     schema: SPEC_SCHEMA,
     specStage: "design",
+    ...(carried ? { designBlueprint: carried } : {}),
     projectSpec,
     designSpec,
     technicalArchitecture: typeof o.technicalArchitecture === "string" ? o.technicalArchitecture.trim() : "",

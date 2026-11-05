@@ -195,13 +195,30 @@ test("[QUALITY-V2] a viewport the stored snapshot cannot prove is stripped, and 
 });
 
 test("[QUALITY-V2] REGRESSION: a failing desktop criterion IS a hard visual failure, even if the card omits it", () => {
-  // The path where a runner measures the stacked navigation and simply does not declare it. The browser check's own
-  // desktop criterion is objective, so the platform derives the failure itself.
+  // The path where a runner measures a real layout defect and simply does not declare it. The browser check's own
+  // desktop criterion is objective, so the platform still derives a failure itself and the design is still capped.
   const quiet = verifyScorecard2(card({ criteriaOver: { desktop: "fail" }, visualFailures: [], claim: { designCertified: true } }), SCOPE);
-  assert.ok(quiet.visualFailures.some((f) => f.id === "navigation"), "the platform adds the failure the card left out");
-  assert.ok(quiet.design.points <= 12, `capped, not 39: got ${quiet.design.points}`);
+  assert.ok(quiet.visualFailures.length > 0, "the platform adds the failure the card left out");
+  assert.ok(quiet.design.points < 40, `capped, not full marks: got ${quiet.design.points}`);
   assert.equal(quiet.designCertified, false);
   assert.ok(quiet.problems.some((p) => /reported designCertified/.test(p)));
+  // But it does NOT claim to know which defect it was. A failing criterion says the browser check found something,
+  // not that primary navigation is broken -- bld_10e2c6007686faee0ab64d45 spent four cycles reported as "primary
+  // navigation is broken or stacked" while all seven approved pages measured a horizontal five-link bar, because
+  // two unrelated starter pages had no <nav> landmark. The derived failure is the unattributed-layout one, which
+  // is also what the runner's own rule adds in this case, so the two sides agree.
+  assert.ok(!quiet.visualFailures.some((f) => f.id === "navigation"), "no invented navigation claim");
+  assert.ok(quiet.visualFailures.some((f) => f.id === "overflow"), "an unattributed layout failure instead");
+});
+
+test("[QUALITY-V2] a declared visual failure is the specific cause: the platform does not add an unattributed one on top", () => {
+  // When the runner HAS measured the cause, that is the cause. Adding a second, vaguer failure would take the
+  // minimum of both caps and punish an honest card for being honest.
+  const declared = verifyScorecard2(card({ criteriaOver: { desktop: "fail" }, visualFailures: [{ id: "imagery" }], claim: { designCertified: false } }), SCOPE);
+  assert.ok(declared.visualFailures.some((f) => f.id === "imagery"), "the measured cause is kept");
+  assert.ok(!declared.visualFailures.some((f) => f.id === "overflow"), "and nothing vaguer is invented on top of it");
+  assert.ok(!declared.visualFailures.some((f) => f.id === "navigation"));
+  assert.ok(declared.design.points <= 24, `capped at the imagery cap: got ${declared.design.points}`);
 });
 
 test("[QUALITY-V2] an unsupported desktop or mobile criterion is missing evidence, which caps the design at zero", () => {

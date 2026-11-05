@@ -119,13 +119,29 @@ export function verifyScorecard2(raw: unknown, ctx: { packageId: string; require
     .map((f) => String((f as { id?: unknown })?.id ?? f))
     .filter((f): f is VisualFailureId => f in VISUAL_FAILURES);
   const failures = new Set<VisualFailureId>(declared);
-  // The browser check's own criteria are objective: a failing desktop or mobile criterion IS a hard visual failure,
-  // whatever the card says about it. This is the check that would have caught revision 1-3's stacked navigation had
-  // the browser check measured it, and it closes the path where a runner simply omits the failure it found.
+  // A failing desktop or mobile criterion IS a hard visual failure -- the browser check found something real, and a
+  // runner must not be able to hide it by omitting it from the card. But the criterion does not say WHICH failure,
+  // and treating every one of them as broken navigation was wrong in both directions.
+  //
+  // On bld_10e2c6007686faee0ab64d45 the design category sat at 12/40 for four cycles, reported as "primary
+  // navigation is broken or stacked where it should be horizontal", while the browser check's own measurements
+  // showed all seven approved pages with hasNav true, five visible links, navDirection "row" and stacked false.
+  // What actually failed were two starter booking pages with no <nav> landmark. The label was false, and
+  // navigation's cap (12) is the harshest of the layout failures, so a wrong attribution cost 11 points.
+  //
+  // So: when the runner HAS measured specific failures, they are the specific causes and nothing is invented on
+  // top. Only when the criterion fails and the card names no visual failure at all does the platform add one --
+  // and it adds the same unattributed-layout failure the runner's own rule adds in that case
+  // (runner/src/quality-weighted.ts: `browserOk === false && !out.size -> overflow`), so the two sides agree by
+  // construction instead of disagreeing and triggering a rollback.
+  const browserCriterionFailed = (["desktop", "mobile"] as const).some((id) => {
+    const c = statusOf.get(id);
+    return !!c?.applicable && c.status === "fail";
+  });
+  if (browserCriterionFailed && failures.size === 0) failures.add("overflow");
   for (const id of ["desktop", "mobile"] as const) {
     const c = statusOf.get(id);
-    if (c?.applicable && c.status === "fail") failures.add("navigation");
-    if (c?.applicable && (c.status === "unsupported")) failures.add("evidence");
+    if (c?.applicable && c.status === "unsupported") failures.add("evidence");
   }
   if (!review || !review.vision) failures.add("no_vision");
   for (const v of REQUIRED_VIEWPORTS) if (!viewports.includes(v)) failures.add("evidence");

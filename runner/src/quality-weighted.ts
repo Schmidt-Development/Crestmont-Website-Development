@@ -132,7 +132,19 @@ export interface VisualMeasurement {
   page: string;
   viewport: string;
   images: number;
+  /** Raster imagery: <img>, <picture source>, CSS background-image, excluding icon-sized decoration. */
   contentImages: number;
+  /**
+   * Authored vector artwork over 48px (inline <svg>), counted separately from raster imagery. Absent on
+   * measurements written before browser-check.mjs reported it.
+   */
+  vectorArt?: number;
+  /**
+   * Visible RASTER images with real intrinsic pixels: the only thing that can be a photograph (V5 §7). Optional
+   * because measurements recorded before this existed have none, and absent must mean "not measured" rather than
+   * "zero" -- a legacy measurement must not be read as proof that a build shipped without photographs.
+   */
+  photoImages?: number;
   clipped: number;
   overlaps: number;
   placeholders: number;
@@ -217,6 +229,28 @@ export function requiresImagery(o: { imagesSource?: string | null; designSpec?: 
   return (o.pages ?? []).some((p) => /gallery|portfolio|our work|projects/i.test(p));
 }
 
+/**
+ * Does the approved design call for PHOTOGRAPHY specifically? (V5 §7.)
+ *
+ * Narrower than requiresImagery on purpose, and the distinction is the whole point. "This page needs a visual"
+ * is satisfied by authored artwork; "this page needs photographs of the customer's trucks" is not. The builder
+ * prompt used to tell the model that an SVG counted and "an authored illustration is far better than an empty
+ * space" (runner/src/prompt.ts), the browser check counted any <img> or <svg> as imagery, and the two together
+ * meant a brief asking for licensed photography could be answered with line art and score full marks for it.
+ *
+ * Photography is required when something SAYS so -- the intake's image source, the architect's design
+ * specification, or the blueprint planning a photographic asset. It is never inferred from a page name: a
+ * gallery page can legitimately be a gallery of illustrated work.
+ */
+export function requiresPhotography(o: { imagesSource?: string | null; designSpec?: string | null; blueprintPhotographs?: number }): boolean {
+  if ((o.blueprintPhotographs ?? 0) > 0) return true;
+  const src = (o.imagesSource ?? "").toLowerCase();
+  if (/\bnone\b|no (?:images|photos)|text only|illustration only|no photograph/.test(src)) return false;
+  if (/photo|photograph|stock|licen[cs]ed|headshot|lifestyle shot/.test(src)) return true;
+  const spec = (o.designSpec ?? "").toLowerCase();
+  return /\b(?:photograph|photography|photo(?:s|graphs)?\b|licen[cs]ed (?:image|imagery|photo)|stock (?:image|imagery|photo)|headshot)/.test(spec);
+}
+
 // ── Scoring ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
 export function scoreItems(
@@ -285,7 +319,12 @@ export function measuredVisualFailures(o: {
   if (m.some((x) => x.placeholders > 0)) out.add("placeholder");
   // Overlap/clipping: a single stray box is noise, several on one page view is a layout that does not hold.
   if (m.some((x) => x.clipped > 0 || x.overlaps >= 2)) out.add("overlap");
-  if (o.requiresImagery && m.every((x) => x.contentImages === 0)) out.add("imagery");
+  // The imagery CAP is for a page with no visual content at all. Authored vector artwork is visual content: 24
+  // inline illustrations are not "none", and capping a site that has them at 24/40 punished the builder for doing
+  // what the design-phase prompt told it to do. Whether that artwork meets the brief's PHOTOGRAPHY requirement is
+  // a separate judgement, scored on the imagery rubric item and named as an unmet requirement -- never full credit
+  // for an illustration, and never a hard cap for having one.
+  if (o.requiresImagery && m.every((x) => x.contentImages === 0 && (x.vectorArt ?? 0) === 0)) out.add("imagery");
   if (o.browserOk === false && !out.size) out.add("overflow"); // the check failed for a layout reason not named above
   return [...out];
 }
@@ -293,7 +332,7 @@ export function measuredVisualFailures(o: {
 export function scoreVisual(
   rubric: VisualRubricVerdict[] | null,
   failures: VisualFailureId[],
-  o: { reviewer: string | null; vision: boolean; imagesSeen: number; viewports: Viewport[] },
+  o: { reviewer: string | null; vision: boolean; imagesSeen: number; viewports: Viewport[]; photographyRequired?: boolean; hasPhotography?: boolean },
 ): CategoryScore {
   const max = CATEGORY_MAX.design;
   const blank = (state: CategoryScore["state"], reason: string): CategoryScore => ({
@@ -308,7 +347,20 @@ export function scoreVisual(
   const items = VISUAL_RUBRIC.map((i) => {
     const r = given.get(i.id);
     const raw = r && Number.isFinite(r.points) ? Math.max(0, Math.min(i.max, r.points)) : 0;
-    return { id: i.id as string, points: round1(raw), max: i.max, applicable: true, note: r?.note ?? (r ? null : "the reviewer did not score this item") };
+    let points = round1(raw);
+    let note = r?.note ?? (r ? null : "the reviewer did not score this item");
+    // Vector artwork is visual content, but it is not photography. When the approved design calls for photographs
+    // and the page carries none, the imagery ITEM is held to half marks and the shortfall is named. This is the
+    // other half of the imagery correction: lifting the hard cap for authored illustrations must not quietly hand
+    // them full imagery credit, or "we drew an icon" would satisfy "the brief asks for photographs of the work".
+    if (i.id === "imagery" && o.photographyRequired && !o.hasPhotography) {
+      const half = round1(i.max / 2);
+      if (points > half) {
+        points = half;
+        note = `held at ${half}/${i.max}: the approved design calls for photography and the rendered pages carry none (authored artwork only). ${note ?? ""}`.trim();
+      }
+    }
+    return { id: i.id as string, points, max: i.max, applicable: true, note };
   });
   const scored = round1(items.reduce((s, i) => s + i.points, 0));
   const caps = failures.map((f) => ({ id: f, ...VISUAL_FAILURES[f] }));
@@ -332,6 +384,14 @@ export interface WeightedInput {
   review: { reviewer: string; imagesSeen: number; vision: boolean } | null;
   /** The approved design calls for imagery (brief: images_source / an imagery requirement in the design spec). */
   requiresImagery: boolean;
+  /**
+   * The approved design calls for PHOTOGRAPHY specifically (V5 §7): requiresPhotography() above, or a blueprint
+   * that plans a photographic asset. Separate from requiresImagery, and never derived from it: "this page needs a
+   * visual" is satisfied by authored artwork, "this page needs photographs of the customer's trucks" is not, and
+   * treating them as one requirement is how a brief asking for licensed photography was answered with line art
+   * and scored full marks for imagery.
+   */
+  requiresPhotography?: boolean;
   browserOk: boolean | null;
 }
 
@@ -341,8 +401,21 @@ export function scoreWeighted(i: WeightedInput): Scorecard2 {
   const viewports = [...new Set((i.visual?.viewports ?? []).filter((v): v is Viewport => (REQUIRED_VIEWPORTS as readonly string[]).includes(v)))];
 
   const failures = measuredVisualFailures({ visual: i.visual, viewports, browserOk: i.browserOk, requiresImagery: i.requiresImagery, review: i.review });
+  // Raster imagery anywhere in the rendered pages. Vector artwork does not count here: this is the photography
+  // question, kept separate from "does the page have any visual content at all".
+  //
+  // photoImages is the measurement that answers it -- visible <img> and background images with a raster source and
+  // real intrinsic pixels. Measurements recorded before that number existed have none, and there the older
+  // contentImages is the best available evidence: reading a legacy file as "zero photographs" would hold an older
+  // build to a measurement nobody took.
+  const measurements = i.visual?.measurements ?? [];
+  const photoMeasured = measurements.some((m) => typeof m.photoImages === "number");
+  const hasPhotography = photoMeasured
+    ? measurements.some((m) => (m.photoImages ?? 0) > 0)
+    : measurements.some((m) => m.contentImages > 0);
   const design = scoreVisual(i.visualRubric, failures, {
     reviewer: i.review?.reviewer ?? null, vision: i.review?.vision ?? false, imagesSeen: i.review?.imagesSeen ?? 0, viewports,
+    photographyRequired: i.requiresPhotography ?? false, hasPhotography,
   });
   const fn = scoreItems(FUNCTIONAL_RUBRIC, status);
   const ot = scoreItems(OTHER_RUBRIC, status);

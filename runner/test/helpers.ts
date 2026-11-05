@@ -413,7 +413,24 @@ export const SDK_OPT_IN = { agentProvider: "claude-agent-sdk", allowPaidProvider
 
 // ── fake OpenAI-compatible model server (stands in for Ollama; never a real API) ──
 
-export interface FakeModelRequest { model: string; messages: { role: string; content: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[]; tool_call_id?: string }[]; tools?: { function: { name: string } }[]; max_tokens?: number; temperature?: number; reasoning_effort?: string }
+/** A content part exactly as the client sends it (OpenAI shape; Ollama takes base64 data URLs for vision). */
+export type FakeContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
+
+export interface FakeModelRequest {
+  model: string;
+  /**
+   * content is always the TEXT of the message: a multimodal message's image parts are rendered as "[image]"
+   * and the parts themselves are kept in contentParts. That keeps every existing string assertion working
+   * while making "an image actually reached this request" directly checkable.
+   */
+  messages: { role: string; content: string | null; contentParts?: FakeContentPart[]; tool_calls?: { id: string; function: { name: string; arguments: string } }[]; tool_call_id?: string }[];
+  tools?: { function: { name: string } }[]; max_tokens?: number; temperature?: number; reasoning_effort?: string;
+}
+
+/** The image parts one request carried, in order. Empty for a text-only request. */
+export function imageParts(r: FakeModelRequest): { url: string }[] {
+  return r.messages.flatMap((m) => m.contentParts ?? []).filter((c): c is { type: "image_url"; image_url: { url: string } } => c.type === "image_url").map((c) => c.image_url);
+}
 
 export type FakeModelReply =
   | { content?: string | null; reasoning?: string; toolCalls?: { name: string; arguments: string | Record<string, unknown>; id?: string }[]; finish?: string; usage?: { prompt_tokens: number; completion_tokens: number } }
@@ -427,7 +444,7 @@ export interface FakeModel {
   close(): Promise<void>;
 }
 
-export async function startFakeModel(handler: (req: FakeModelRequest, n: number, signal: { aborted: boolean }) => FakeModelReply | Promise<FakeModelReply>, models = ["test-coder:30b"]): Promise<FakeModel> {
+export async function startFakeModel(handler: (req: FakeModelRequest, n: number, signal: { aborted: boolean }) => FakeModelReply | Promise<FakeModelReply>, models = ["test-coder:30b"], capabilities: Record<string, string[]> = {}): Promise<FakeModel> {
   const state = { requests: [] as FakeModelRequest[], aborted: 0 };
   const server = createServer((req, res) => {
     let raw = "";
@@ -435,6 +452,13 @@ export async function startFakeModel(handler: (req: FakeModelRequest, n: number,
     res.on("close", () => { if (!res.writableEnded) { sig.aborted = true; state.aborted++; } });
     req.on("data", (d) => { raw += d; });
     req.on("end", async () => {
+      if (req.method === "POST" && req.url === "/api/show") {
+        const want = (() => { try { return String((JSON.parse(raw) as { model?: string }).model ?? ""); } catch { return ""; } })();
+        if (!models.includes(want)) { res.writeHead(404, { "content-type": "application/json" }); res.end('{"error":"model not found"}'); return; }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ capabilities: capabilities[want] ?? ["completion", "tools"] }));
+        return;
+      }
       if (req.method === "GET" && req.url === "/v1/models") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ object: "list", data: models.map((id) => ({ id, object: "model" })) }));
@@ -442,6 +466,12 @@ export async function startFakeModel(handler: (req: FakeModelRequest, n: number,
       }
       if (req.method !== "POST" || req.url !== "/v1/chat/completions") { res.writeHead(404).end(); return; }
       const body = JSON.parse(raw) as FakeModelRequest;
+      for (const m of body.messages ?? []) {
+        if (!Array.isArray(m.content)) continue;
+        const parts = m.content as unknown as FakeContentPart[];
+        m.contentParts = parts;
+        m.content = parts.map((c) => (c.type === "text" ? c.text : "[image]")).join("\n");
+      }
       state.requests.push(body);
       const reply = await handler(body, state.requests.length, sig);
       if (sig.aborted) return;

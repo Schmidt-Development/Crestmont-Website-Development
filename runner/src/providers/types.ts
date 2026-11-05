@@ -88,6 +88,21 @@ export interface AgentProvider {
   hasSession(ws: Workspace, sessionId: string): boolean;
   /** Release per-job resources (containers). Must be safe to call more than once. */
   close(): Promise<void>;
+  /**
+   * Give the BUILDER model images to look at for the phase about to run, or clear them with null.
+   *
+   * Optional because not every provider is multimodal, and the honest answer for one that is not is to say so
+   * rather than to accept the images and drop them. A provider that implements this must carry the images into
+   * its real model request and must report what it ACTUALLY delivered, because the runner records that as
+   * evidence: a reference "supplied to Model B" that never reached the request is the one claim this whole
+   * mechanism exists to make falsifiable.
+   */
+  setVisualContext?(v: { images: readonly { path: string; label: string }[]; note: string; maxImages?: number; model?: string } | null): {
+    delivered: { label: string; path: string; tokens: number }[];
+    dropped: { path: string; label: string; reason: string }[];
+  };
+  /** Whether this provider can actually show the builder an image, and why it can or cannot. */
+  visionStatus?(model?: string): { capable: boolean; model: string; reason: string };
 }
 
 export class PaidProviderRefusedError extends Error {
