@@ -18,7 +18,7 @@
 //       missingSources uses when no commit is proven).
 // One aggregate pass computes the keys inside D1 and returns a few hundred rows; one filtered pass returns the rows.
 // Equivalence with the full load is proven on randomized histories by tests/readiness-evidence-load.test.ts.
-import type { Db } from "../lib/db.ts";
+import { underlyingDb, type Db } from "../lib/db.ts";
 import type { EvidenceRow } from "./engine.ts";
 
 const COLS = `te.requirement_id, te.outcome, te.test_name, te.run_id, er.environment, er.source, er.commit_sha, er.branch, er.finished_at`;
@@ -30,7 +30,31 @@ export async function allEvidence(db: Db): Promise<EvidenceRow[]> {
 
 interface Agg { r: string; env: string; src: string; any_at: string; ns_at: string | null; pass_at: string | null; f_id: number | null; p_id: number | null }
 
+/**
+ * Per-isolate cache of the bounded load. The aggregate and the filtered pass each scan test_evidence, so their cost
+ * still grows with history even though their output does not (measured by the staging session: 30 ms at 10 runs,
+ * 931 ms at 300). Five readiness pages in a row did five scans inside D1's 10-second budget. Evidence is append-only —
+ * ingest inserts with ON CONFLICT DO NOTHING and nothing updates or deletes a row — so the newest row id is a complete
+ * version of the history; the latest succeeded deployments are the only other input. Keyed on the real binding, not
+ * the per-request retry wrapper, and per database, so separate databases (tests) never share an entry.
+ */
+const cache = new WeakMap<object, { key: string; rows: EvidenceRow[] }>();
+
 export async function relevantEvidence(db: Db, defaultBranch = "main"): Promise<EvidenceRow[]> {
+  const top = await db.prepare(`SELECT MAX(id) AS id FROM test_evidence`).first<{ id: number | null }>();
+  const dep = (await db.prepare(`SELECT environment, commit_sha, deployed_at, id FROM deployments WHERE status = 'succeeded' AND environment IN ('staging','production') ORDER BY environment, deployed_at DESC, id DESC`)
+    .all<{ environment: string; commit_sha: string }>().catch(() => ({ results: [] as { environment: string; commit_sha: string }[] }))).results;
+  const latest = [...new Map(dep.map((d) => [d.environment, d.commit_sha] as const).reverse()).entries()].sort();
+  const key = JSON.stringify([top?.id ?? 0, latest, defaultBranch]);
+  const slot = underlyingDb(db) as unknown as object;
+  const hit = cache.get(slot);
+  if (hit && hit.key === key) return hit.rows;
+  const rows = await loadRelevant(db, defaultBranch);
+  cache.set(slot, { key, rows });
+  return rows;
+}
+
+async function loadRelevant(db: Db, defaultBranch: string): Promise<EvidenceRow[]> {
   // Commits that are judged. A run counts only if it has rows, exactly as when these were read from the rows. When
   // several runs tie on the newest finished_at, the derivation's choice among them depends on iteration order, so the
   // commits of ALL tied runs are included: whichever it picks, its rows are present.

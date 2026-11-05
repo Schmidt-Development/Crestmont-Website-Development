@@ -138,9 +138,18 @@ export function withTransientRetry(
   } as DbStatement);
 
   return {
+    [RAW_DB]: underlyingDb(db),
     prepare: (sql: string) => wrapStatement(db.prepare(sql)),
     batch: (statements: DbStatement[]) => db.batch(statements.map(unwrapStatement)),
-  };
+  } as Db;
+}
+
+/** Marks the real database behind a wrapper (a new wrapper is made per request), so per-isolate caches can key on it. */
+const RAW_DB = Symbol.for("crestmont.db.rawDatabase");
+
+/** The binding behind a withTransientRetry() wrapper, or the database itself when it was never wrapped. */
+export function underlyingDb(db: Db): Db {
+  return (db as unknown as Record<symbol, Db | undefined>)[RAW_DB] ?? db;
 }
 
 /** Marks the real statement carried by a wrapper, so batch() can unwrap it. */

@@ -72,3 +72,40 @@ test("[READY-013] the bounded load does not grow with history: 300 runs read abo
   assert.ok(all > 5000, `a long history (${all} rows)`);
   assert.ok(some < all / 5, `the report reads ${some} of ${all} rows`);
 });
+
+/** Counts statements whose SQL scans the evidence history (the aggregate and the filtered pass). */
+function spy(db: Awaited<ReturnType<typeof history>>) {
+  let scans = 0;
+  const wrapped = {
+    prepare: (sql: string) => { if (/GROUP BY te\.requirement_id|json_each\(\?1\)/.test(sql)) scans++; return db.prepare(sql); },
+    batch: (s: unknown[]) => db.batch(s as never),
+  } as unknown as typeof db;
+  return { db: wrapped, scans: () => scans };
+}
+
+test("[READY-013] back-to-back readiness pages scan the history once; new evidence or a new deployment is seen at once", async () => {
+  const { withTransientRetry } = await import("../src/lib/db.ts");
+  const base = await history(42, 60, 30);
+  const s = spy(base);
+  // A fresh retry wrapper per request, exactly as handle() does: the cache must key on the real database.
+  const first = await relevantEvidence(withTransientRetry(s.db));
+  for (let i = 0; i < 4; i++) assert.deepEqual(await relevantEvidence(withTransientRetry(s.db)), first);
+  assert.equal(s.scans(), 2, "one aggregate and one filtered pass for five page loads");
+  // New evidence (append-only: a higher row id) invalidates.
+  await base.prepare(`INSERT INTO evidence_runs (id, source, environment, commit_sha, branch, started_at, finished_at, received_at, payload_sha256) VALUES ('run-new','ci','development','${"e".repeat(40)}','main','2026-11-09T00:00:00Z','2026-11-09T00:00:00Z','2026-11-09T00:00:00Z','${"x".repeat(64)}')`).run();
+  await base.prepare(`INSERT INTO test_evidence (run_id, requirement_id, test_name, outcome) VALUES ('run-new', ?, 't', 'failed')`).bind(REQUIREMENTS[0].id).run();
+  const after = await relevantEvidence(withTransientRetry(s.db));
+  assert.equal(s.scans(), 4);
+  assert.ok(after.some((r) => r.run_id === "run-new"), "the new run is in the next report");
+  assert.deepEqual(after, await allEvidence(base).then(async () => relevantEvidence(base)), "and the cached result equals a fresh load");
+  // A new succeeded deployment changes the judged commits, so it invalidates too.
+  await base.prepare(`INSERT INTO deployments (id, environment, commit_sha, initiated_by, status, deployed_at) VALUES ('dep-new','staging','${"e".repeat(40)}','ci','succeeded','2026-11-09T01:00:00Z')`).run();
+  await relevantEvidence(withTransientRetry(s.db));
+  assert.equal(s.scans(), 6);
+  // Another database never sees this one's entry.
+  const other = await history(43, 20, 10);
+  assert.deepEqual(await relevantEvidence(other), (await loadReadinessInput(other, now)).evidence);
+  const bounded = await loadReadinessInput(other, now);
+  const [a, b] = [await buildReport({ ...bounded, evidence: await allEvidence(other) }), await buildReport(bounded)];
+  assert.equal(b.evidenceSetSha256, a.evidenceSetSha256);
+});
