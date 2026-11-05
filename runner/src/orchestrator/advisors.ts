@@ -15,7 +15,11 @@ import { fenceFor } from "../prompt.ts";
 import type { ArchitectInput, CycleEvidence, GalleryReferenceInput, MasterSpec, ReviewVerdict } from "./contracts.ts";
 import { ARCHITECTURE_SPEC_JSON_SCHEMA, DESIGN_SPEC_JSON_SCHEMA, REVIEW_JSON_SCHEMA, SPEC_SCHEMA, extractJson, outstanding, parseVerdict } from "./contracts.ts";
 import { VISION_RETRY_RESERVE } from "./vision.ts";
+import { RECOVERY_ROUNDS, compact, describe as describeCompaction, isContextOverflow, measure, overflowFacts } from "./context-recovery.ts";
+import { type Allowance, allowanceFor } from "./execution-budget.ts";
+import { ProgressGuard } from "./progress-guard.ts";
 import { BLUEPRINT_JSON_SCHEMA, BLUEPRINT_MIN, SECTION_LAYOUTS, blueprintChecklist, type DesignBlueprint } from "./blueprint.ts";
+import { SECTION_PURPOSE, schemaForSection, type SectionName } from "./blueprint-sections.ts";
 import { dataUrl, planVisionRequest } from "./vision.ts";
 import type { VisionPlan } from "./vision.ts";
 
@@ -264,6 +268,16 @@ export interface LocalAdvisorOptions {
   temperature: number;
   /** Token/time accounting of the advisor's model calls (the job's tracker). */
   onUsage?: (r: ChatResponse) => void;
+  /** A request was too large and was reduced to fit. Reported so the build record shows the recovery happened. */
+  onRecovery?: (r: { role: "architect" | "reviewer"; round: number; detail: string }) => void;
+  /**
+   * How much work this task is allowed, and how it is divided into resumable segments. Without one the
+   * session falls back to `maxTurns` as both -- the old single-ceiling behaviour, kept so existing callers
+   * and tests are unaffected.
+   */
+  allowance?: Allowance;
+  /** A segment ended and the session continued from what it had. */
+  onSegment?: (r: { role: "architect" | "reviewer"; segment: number; turnsUsed: number; detail: string }) => void;
   signal?: AbortSignal;
 }
 
@@ -276,6 +290,31 @@ export class LocalModelAdvisor implements Advisor {
   readonly billing = "zero-cost" as const;
   readonly notes: string[];
   readonly calls: { role: "architect" | "reviewer"; turns: number; images: number }[] = [];
+
+  /**
+   * What the last session did, kept whether it succeeded or failed.
+   *
+   * Advisor sessions used to vanish on failure: the conversation lived in a local array, `calls` was only
+   * appended on success, and build_runs.turns counts BUILDER turns. So "did not return a valid JSON answer
+   * within 40 turns" was all anyone ever learned -- and that sentence is a fixed string built from maxTurns,
+   * not a measurement. Three Summit Haul Co. blueprint attempts were investigated and not one recorded how many
+   * turns it actually used. This is that record. It holds sizes, counts and reasons; never message text.
+   */
+  lastSession: {
+    role: "architect" | "reviewer";
+    model: string;
+    turns: number;
+    modelCalls: number;
+    images: number;
+    jsonFailures: number;
+    overflows: number;
+    compactions: number;
+    segments: number;
+    stall: string | null;
+    recoveries: string[];
+    outcome: "answered" | "no-json" | "overflow-unrecoverable" | "transport" | "stopped" | null;
+    detail: string | null;
+  } | null = null;
   private readonly o: LocalAdvisorOptions;
   constructor(o: LocalAdvisorOptions) {
     this.o = o;
@@ -318,53 +357,189 @@ export class LocalModelAdvisor implements Advisor {
     const messages: ChatMessage[] = [{ role: "system", content: system }, { role: "user", content: plan.images.length ? parts : prompt }];
     let jsonRetries = 0;
     let told = false;
-    for (let turn = 1; turn <= this.o.maxTurns; turn++) {
+    // What this session really did. Written whichever way it ends, so a failure is diagnosable afterwards.
+    let imageTokens = plan.imageTokens;
+    let imagesDroppedByRecovery = 0;
+    const session = {
+      role, model: this.o.model.tag, turns: 0, modelCalls: 0, images: images.length,
+      jsonFailures: 0, overflows: 0, compactions: 0, segments: 1, stall: null as string | null, recoveries: [] as string[],
+      outcome: null as "answered" | "no-json" | "overflow-unrecoverable" | "transport" | "stopped" | null,
+      detail: null as string | null,
+    };
+    this.lastSession = session;
+    // Two numbers, not one. A segment is how far the session runs before preserving what it has and carrying
+    // on; the total is the real ceiling. The old behaviour -- one number that ENDED the task -- is what threw
+    // away nine minutes of architect work on bld_dcb3063d445e6f8890d66516.
+    const allowance = this.o.allowance ?? { segmentTurns: this.o.maxTurns, totalTurns: this.o.maxTurns, reason: `fixed ${this.o.maxTurns}-turn budget` };
+    const guard = new ProgressGuard();
+    let turnInSegment = 0;
+    let stopReason: string | null = null;
+
+    for (let turn = 1; turn <= allowance.totalTurns; turn++) {
       if (this.o.signal?.aborted) throw new AdvisorUnavailableError(`${role} session stopped`);
+      turnInSegment++;
+
+      // A session that has stopped getting anywhere does not get the rest of its budget.
+      const progress = guard.verdict();
+      if (progress.strategy === "stop") { stopReason = guard.describe(); session.stall = stopReason; break; }
+
+      // Segment boundary: preserve and continue, rather than fail. The inspection history is compacted (the
+      // model can read a file again); the task and the decisions are not touched.
+      if (turnInSegment > allowance.segmentTurns && turn < allowance.totalTurns) {
+        const plan = compact(messages, {
+          budget: Math.max(2048, Math.floor(measure(messages, { knownImageTokens: imageTokens, reservedOutput: this.o.maxOutputTokens }) * 0.6)),
+          round: 1, knownImageTokens: imageTokens, reservedOutput: this.o.maxOutputTokens,
+        });
+        if (plan.changed) { messages.splice(0, messages.length, ...plan.messages); session.compactions++; }
+        session.segments++;
+        turnInSegment = 1;
+        told = false;
+        this.o.onSegment?.({ role, segment: session.segments, turnsUsed: turn, detail: describeCompaction(plan) });
+      }
       // Inspection has to end before the turns do. A real Business build's reviewer spent all 40 turns reading files
       // and never answered at all (every turn a tool call, no content), so the build lost its independent review and
       // fell back to the rule-based reviewer, which cannot judge visual quality -- the whole visual gate, gone, after
       // seven minutes of GPU time. For the last turns the tools are withdrawn: with nothing left to call, the only
       // thing the model can produce is the answer it was asked for.
-      const mustAnswer = turn > this.o.maxTurns - FINAL_ANSWER_TURNS;
+      // The tools are withdrawn near the end of the WHOLE task, not at every segment boundary -- a segment ends
+      // by continuing, not by demanding an answer. They are also withdrawn early when the guard says more
+      // inspection will not help: the same call repeating, or reading with nothing to show for it.
+      const mustAnswer = turn > allowance.totalTurns - FINAL_ANSWER_TURNS || progress.strategy === "synthesize";
       if (mustAnswer && !told) {
         told = true;
-        messages.push({ role: "user", content: `The inspection budget is used up (${turn - 1} of ${this.o.maxTurns} turns). Answer now, from what you have already read, with the single JSON object only.` });
+        session.stall = session.stall ?? (progress.stall ? guard.describe() : null);
+        messages.push({ role: "user", content: progress.strategy === "synthesize"
+          ? `Stop inspecting: ${progress.stall?.detail ?? "no further progress"}. Answer now, from what you have already read, with the single JSON object only.`
+          : `The inspection budget is used up (${turn - 1} of ${allowance.totalTurns} turns). Answer now, from what you have already read, with the single JSON object only.` });
       }
-      const req = { model: this.o.model.tag, messages, ...(mustAnswer ? {} : { tools: readOnlyToolSpecs() }), temperature: this.o.temperature, max_tokens: this.o.maxOutputTokens, ...(this.o.model.reasoning ? { reasoning_effort: this.o.model.reasoning } : {}) };
+      const tools = mustAnswer ? undefined : readOnlyToolSpecs();
+      const buildReq = () => ({ model: this.o.model.tag, messages, ...(tools ? { tools } : {}), temperature: this.o.temperature, max_tokens: this.o.maxOutputTokens, ...(this.o.model.reasoning ? { reasoning_effort: this.o.model.reasoning } : {}) });
       let res: ChatResponse;
-      try {
-        res = this.o.scheduler
-          ? await this.o.scheduler.run({ model: this.o.model.tag, projectId: this.o.projectId, task: role === "architect" ? "architecture" : "review" }, () => this.o.client.chat(req, this.o.signal), this.o.signal, (r) => r)
-          : await this.o.client.chat(req, this.o.signal);
-      } catch (err) {
-        throw new AdvisorUnavailableError(`${role} session (${this.o.model.tag}) failed: ${(err as Error).message?.slice(0, 300) ?? String(err)}`);
+      // Execute → approach the limit → preserve → compact → continue. An oversized request is reduced and
+      // re-sent within the SAME logical task, so the inspection already done is not repeated from nothing. The
+      // reduction is bounded, it is verified to fit before it is sent, and a reduction that changed nothing
+      // stops the loop rather than sending the identical request again.
+      for (let recovery = 0; ; recovery++) {
+        try {
+          const req = buildReq();
+          res = this.o.scheduler
+            ? await this.o.scheduler.run({ model: this.o.model.tag, projectId: this.o.projectId, task: role === "architect" ? "architecture" : "review" }, () => this.o.client.chat(req, this.o.signal), this.o.signal, (r) => r)
+            : await this.o.client.chat(req, this.o.signal);
+          break;
+        } catch (err) {
+          const detail = (err as Error).message?.slice(0, 300) ?? String(err);
+          if (!isContextOverflow(err)) {
+            session.outcome = "transport";
+            session.detail = detail;
+            throw new AdvisorUnavailableError(`${role} session (${this.o.model.tag}) failed: ${detail}`);
+          }
+          session.overflows++;
+          if (recovery >= RECOVERY_ROUNDS) {
+            session.outcome = "overflow-unrecoverable";
+            session.detail = detail;
+            throw new AdvisorUnavailableError(`${role} session (${this.o.model.tag}) could not be reduced to fit after ${RECOVERY_ROUNDS} reduction(s): ${detail}`);
+          }
+          const facts = overflowFacts(err);
+          const window = facts?.available ?? this.o.model.contextTokens;
+          const toolsJson = tools ? JSON.stringify(tools) : null;
+          // THE PROVIDER IS AUTHORITATIVE. It counted this request with its own tokenizer and refused it; our
+          // chars/3.5 estimate is only an approximation of that. When the two disagree -- and the first version of
+          // this code hit exactly that, measuring 9,835 tokens for a request the server called 65,569 -- believing
+          // our own arithmetic means concluding "it already fits" and giving up on a request that was just
+          // rejected. So the server's number calibrates ours, and the reduction is judged in the server's units.
+          const ours = measure(messages, { knownImageTokens: imageTokens, toolsJson, reservedOutput: this.o.maxOutputTokens });
+          // The target is expressed as a FRACTION of the request that was just refused, measured in our own
+          // consistent units, rather than as an absolute number in the provider's. Comparing the two directly
+          // does not work: the server counts with its tokenizer and we estimate from characters plus measured
+          // image cost, and an earlier version of this code concluded "9,835 tokens, that fits" about a request
+          // the server had just called 65,569 and rejected. What is certain is that the request must get
+          // smaller, so that is what is required, and the server's own ratio sets how much smaller when it gives
+          // one. A second round cuts harder.
+          const ratio = facts?.requested && facts?.available ? facts.available / facts.requested : 0.8;
+          const shrink = Math.min(0.9, ratio) * (recovery === 0 ? 1 : 0.75);
+          const budget = Math.max(1024, Math.floor(ours * shrink));
+          const plan = compact(messages, {
+            budget, round: recovery + 1, knownImageTokens: imageTokens,
+            toolsJson, reservedOutput: this.o.maxOutputTokens,
+          });
+          session.recoveries.push(describeCompaction(plan));
+          // Resend only when the request genuinely got smaller. `fits` is recorded but is NOT the gate: it is our
+          // estimate's opinion, and the provider has just demonstrated that the two can disagree by a wide margin.
+          // Refusing to retry a request that shed its entire inspection history, because our own arithmetic still
+          // calls it large, is how the Design Blueprint was lost in the first place. The provider decides; the
+          // rounds are bounded; a reduction that changed nothing still stops immediately.
+          if (!plan.changed) {
+            session.outcome = "overflow-unrecoverable";
+            session.detail = `${detail} | ${describeCompaction(plan)}`;
+            // The provider's own words are carried through, not replaced: the attempt-level handler in job.ts
+            // classifies the failure by matching on them, and a session that cannot reduce itself must still be
+            // recognised as an overflow so the image cap halves and the next attempt is smaller.
+            throw new AdvisorUnavailableError(`${role} session (${this.o.model.tag}) is too large to reduce (${describeCompaction(plan)}): ${detail}`);
+          }
+          guard.overflow(Math.max(0, plan.before - plan.after));
+          if (plan.imagesDropped) imagesDroppedByRecovery += plan.imagesDropped;
+          imageTokens = Math.max(0, Math.round(imageTokens * (plan.imagesKept / Math.max(1, plan.imagesKept + plan.imagesDropped))));
+          messages.splice(0, messages.length, ...plan.messages);
+          this.o.onRecovery?.({ role, round: recovery + 1, detail: describeCompaction(plan) });
+        }
       }
+      session.turns = turn;
+      session.modelCalls++;
       this.o.onUsage?.(res);
       let calls = mustAnswer ? [] : fromNativeCalls(res.toolCalls);
       if (!calls.length && !mustAnswer) calls = parseTextToolCalls(res.content, READ_ONLY_TOOLS);
       if (calls.length) {
+        for (const c of calls) guard.toolCall(c.name, c.args);
         messages.push({ role: "assistant", content: calls.some((c) => c.fromText) ? null : (res.content || null), tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args ? JSON.stringify(c.args) : c.rawArgs.slice(0, 2000) } })) });
         for (const c of calls) {
           const out = c.args === null ? { output: `ERROR: arguments could not be parsed (${c.parseError ?? "invalid JSON"})` } : await executeReadOnlyTool(c.name, c.args, this.o.repo);
           messages.push({ role: "tool", tool_call_id: c.id, name: c.name, content: out.output.length > ADVISOR_TOOL_OUTPUT ? `${out.output.slice(0, ADVISOR_TOOL_OUTPUT)}\n...[clipped]` : out.output });
         }
-        // Keep the session within the context window: older tool outputs are replaced by a marker.
-        const budgetChars = this.o.model.contextTokens * 3.5 * 0.7;
-        let size = messages.reduce((n, m) => n + (m.role === "assistant" ? (m.content ?? "").length + JSON.stringify(m.tool_calls ?? []).length : contentText(m.content as string | ContentPart[]).length), 0);
-        for (const m of messages) { if (size <= budgetChars) break; if (m.role === "tool" && m.content.length > 200) { size -= m.content.length - 40; m.content = "[earlier tool output removed to fit the context]"; } }
+        // Keep the session inside the window BEFORE the next request, rather than after the provider refuses one.
+        //
+        // The previous rule compared a CHARACTER count against contextTokens * 3.5 * 0.7 and never counted the
+        // attached images at all. On bld_dcb3063d445e6f8890d66516 the six gallery references were 14,076 tokens
+        // the trimmer could not see, so it trimmed to what it believed was 70% of the window while the real
+        // request was over it -- and the Design Blueprint was lost to a 33-token overflow, twice. The same
+        // measurement the recovery path uses is used here, images included.
+        const proactive = compact(messages, {
+          budget: Math.max(2048, this.o.model.contextTokens - this.o.maxOutputTokens - VISION_RETRY_RESERVE),
+          round: 1, knownImageTokens: imageTokens,
+          toolsJson: JSON.stringify(readOnlyToolSpecs()), reservedOutput: this.o.maxOutputTokens,
+        });
+        if (proactive.changed) {
+          messages.splice(0, messages.length, ...proactive.messages);
+          session.compactions++;
+        }
         continue;
       }
       try {
         const answer = extractJson(res.content ?? "");
         this.calls.push({ role, turns: turn, images: images.length });
+        session.outcome = "answered";
+        guard.deliverable(`${role} answer`);
         return answer;
       } catch {
+        session.jsonFailures++;
+        guard.invalidJson();
+        guard.output(res.content ?? "");
+        // The last thing the model actually said, truncated. Not a reconstruction of what it meant.
+        session.detail = (res.content ?? "").slice(0, 400) || "(empty response)";
         if (jsonRetries++ >= 2) break;
         messages.push({ role: "assistant", content: res.content ?? "" });
         messages.push({ role: "user", content: "Answer with the single JSON object only (no prose, no code fence), matching the schema given." });
       }
     }
-    throw new AdvisorUnavailableError(`the ${role} session (${this.o.model.tag}) did not return a valid JSON answer within ${this.o.maxTurns} turns`);
+    // The old message said "within ${maxTurns} turns" whatever had happened, which is how three failed blueprint
+    // attempts came to report a turn count none of them had measured. Say what actually ended it.
+    session.outcome = session.outcome ?? "no-json";
+    const why = stopReason ? `progress stopped — ${stopReason}`
+      : session.jsonFailures >= 3 ? `${session.jsonFailures} unparseable answers`
+      : `the ${allowance.totalTurns}-turn budget was used up across ${session.segments} segment(s) (${allowance.reason})`;
+    throw new AdvisorUnavailableError(
+      `the ${role} session (${this.o.model.tag}) produced no valid JSON after ${session.turns} turn(s) and ${session.modelCalls} model call(s): ${why}`
+      + (session.overflows ? ` (${session.overflows} context overflow(s) recovered: ${session.recoveries.join(" | ")})` : "")
+      + (imagesDroppedByRecovery ? ` (${imagesDroppedByRecovery} image(s) given up to fit; restore before the next visual step)` : ""));
   }
 
   /**
@@ -430,6 +605,7 @@ export class LocalModelAdvisor implements Advisor {
     return answer;
   }
 
+
   /**
    * STAGE 2: the DESIGN BLUEPRINT (V5 §5) -- the approved design as data rather than adjectives.
    *
@@ -487,6 +663,86 @@ export class LocalModelAdvisor implements Advisor {
     }, MAX_IMAGES);
     const attached = preplan.images;
     if (preplan.dropped.length) this.notes.push(`blueprint request budget: ${attached.length} of ${images.length} image(s) attached for ${this.o.model.tag}; ${preplan.dropped.length} left out`);
+    const answer = await this.ask("architect", head + fix, attached.map((i) => ({ path: i.path, label: i.label })), attached.length);
+    const sent = new Set((this.lastVisionPlan?.images ?? []).map((i) => i.path));
+    this.lastArchitectImages = this.lastArchitectImages.filter((i) => sent.has(i.path));
+    return answer;
+  }
+
+  /**
+   * ONE section of the Design Blueprint.
+   *
+   * The whole-document answer is a brittle shape: on bld_dcb3063d445e6f8890d66516 all three attempts produced
+   * nothing usable and the build ran with no blueprint at all, because a single enormous JSON answer has no
+   * partial success. A section is small enough to answer and to correct, and the sections already decided are
+   * shown so the later ones are consistent with them rather than a second opinion.
+   *
+   * The gallery references stay attached for every section. A blueprint written from a text summary of images
+   * the architect was shown earlier is exactly the failure this pipeline exists to prevent.
+   */
+  async blueprintSection(
+    section: SectionName,
+    approved: MasterSpec,
+    input: ArchitectInput,
+    decided: Record<string, unknown> = {},
+    corrections: readonly string[] = [],
+    opts: { maxImages?: number } = {},
+  ): Promise<unknown> {
+    const vision = this.o.model.vision;
+    const MAX_IMAGES = Math.max(0, opts.maxImages ?? 4);
+    const gallery = vision ? (input.galleryReferences ?? []).filter((g) => g.path && safeImageFile(g.path)) : [];
+    const chosen = gallery.slice(0, MAX_IMAGES);
+    this.lastArchitectImages = chosen.map((g) => ({ referenceId: g.id, path: g.path as string }));
+    const images = chosen.map((g, i) => ({ path: g.path as string, label: `gallery reference image ${i + 1}` }));
+    const refs = chosen.map((g, i) => `- ${g.id} (attached as gallery reference image ${i + 1}): ${g.title}${g.why ? ` — ${g.why}` : ""}`);
+
+    // Only what this section needs to be consistent with. Sending every decided section back in full is how a
+    // request grows until the provider refuses it.
+    const already = Object.entries(decided)
+      .filter(([, v]) => v !== null && v !== undefined)
+      .map(([k, v]) => `${k}: ${JSON.stringify(v).slice(0, 1800)}`);
+
+    const fix = corrections.length
+      ? `\n\nYour previous "${section}" was REJECTED and is not in this conversation. Fix exactly these and answer again:\n${corrections.map((c) => `- ${c}`).join("\n")}\nReturn the corrected JSON object only.`
+      : "";
+
+    const head = [
+      `The design specification for this website has been accepted. You are writing ONE section of the DESIGN BLUEPRINT: "${section}".`,
+      "",
+      `That section is ${SECTION_PURPOSE[section]}.`,
+      "",
+      "The accepted design specification, which this section must express rather than contradict:",
+      approved.designSpec,
+      "",
+      already.length ? "Sections of this blueprint that are already decided. Be consistent with them; do not restate or revise them:\n" + already.join("\n") + "\n" : "",
+      refs.length ? "The gallery references you are looking at:\n" + refs.join("\n") + "\n" : "",
+      "RULES, because a blueprint exists to be executed and to be failed:",
+      "- Every colour is a hex value. \"A warm neutral\" is not a colour a stylesheet can use.",
+      "- Every typeface is a real family name you would load (\"Fraunces\", \"Inter\"), never \"a modern serif\".",
+      "- Every type step carries a size with a unit, a numeric weight and a line height.",
+      section === "pages"
+        ? `- Every page lists its sections IN RENDER ORDER, at least ${BLUEPRINT_MIN.sectionsPerPage} of them, each using one of these named layouts: ${SECTION_LAYOUTS.join(", ")}. Pick the layout that is actually right for the content; do not default to a grid. Every section states the real content it carries: the headline, the supporting copy, what the controls say. Not "relevant content".`
+        : "",
+      section === "visualAssets"
+        ? "- Every visual asset declares what it IS (kind) and where it may legally come from (source). An authored SVG is a legitimate visual asset: declare it as an illustration. A photograph can only come from the customer's own files or a licensed library — never from an SVG you intend to draw, and never from a gallery reference screenshot, which is another studio's work."
+        : "",
+      section === "referenceMapping"
+        ? "- Name, for each reference you were shown, the specific quality you took from it and where it applies. Cite only references actually attached above: an invented citation is worse than none. Several references are SHEETS showing two or more complete, different designs side by side; where one is, say which design with conceptIndex (1-based, from the left) and conceptCount. Choose ONE. Do not blend two concepts."
+        : "",
+      "- Nothing in this object may be a placeholder, a TODO, or an adjective standing in for a decision. If the brief does not settle something, decide it: you are the architect.",
+      "",
+      `Answer with the JSON object only — just this one section — matching this JSON Schema:`,
+      JSON.stringify(schemaForSection(section)),
+    ].filter((x) => x !== "").join("\n");
+
+    const preplan = planVisionRequest(images, {
+      windowTokens: this.o.model.contextTokens,
+      promptTokens: Math.ceil((head.length + fix.length + 1200) / 3.5) + Math.ceil(JSON.stringify(readOnlyToolSpecs()).length / 3.5),
+      reserveOutput: this.o.maxOutputTokens,
+      reserveRetry: VISION_RETRY_RESERVE,
+    }, MAX_IMAGES);
+    const attached = preplan.images;
+    if (preplan.dropped.length) this.notes.push(`blueprint section "${section}": ${attached.length} of ${images.length} image(s) attached for ${this.o.model.tag}`);
     const answer = await this.ask("architect", head + fix, attached.map((i) => ({ path: i.path, label: i.label })), attached.length);
     const sent = new Set((this.lastVisionPlan?.images ?? []).map((i) => i.path));
     this.lastArchitectImages = this.lastArchitectImages.filter((i) => sent.has(i.path));
