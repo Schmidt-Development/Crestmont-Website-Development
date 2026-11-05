@@ -310,7 +310,14 @@ test("[AIB-PLAN] a context overflow shrinks the next request instead of repeatin
     // The classification is recorded where a person can read it.
     const notes = JSON.stringify(r.cp.calls.filter((c) => c.path.endsWith("/heartbeat")).map((c) => c.body));
     assert.match(notes, /\[overflow\]/, "the failure is classified as an overflow in the build's own notes");
-    assert.match(notes, /images capped at/, "and the change made for the next attempt is recorded");
+    // And so is the change that made the next request smaller. There are now two remedies, and either is valid:
+    // the session reduces itself and carries on (clipping tool output, dropping inspection turns, and only as a
+    // last resort an image), or -- when it cannot be reduced far enough -- the attempt-level handler halves the
+    // image cap and tries again. The first is preferred because it keeps the inspection already paid for; before
+    // it existed, a request 33 tokens over the window threw away nine minutes of architect work on
+    // bld_dcb3063d445e6f8890d66516 and the build finished with no Design Blueprint at all.
+    assert.match(notes, /images capped at|clipped \d+ tool output|dropped \d+ inspection message|gave up \d+ image/,
+      "and the change made so the next request is smaller is recorded");
   } finally { await r.model.close(); await r.cp.close(); }
 });
 

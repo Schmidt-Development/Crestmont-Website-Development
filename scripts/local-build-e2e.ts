@@ -28,9 +28,11 @@ import { handle } from "../src/app/app.ts";
 import { createPackageOrder } from "../src/services/commerce.ts";
 import * as SIM from "../src/services/payment-simulation.ts";
 import * as B from "../src/services/builds.ts";
+import * as G from "../src/services/design-gallery.ts";
 import * as W from "../src/services/build-workers.ts";
 import { JUNK_IN_THE_TRUNK } from "../tests/fixtures/junk-in-the-trunk.ts";
 import { JUNK_IN_THE_TRUNK_PREMIUM } from "../tests/fixtures/junk-in-the-trunk-premium.ts";
+import { SUMMIT_HAUL } from "../tests/fixtures/summit-haul.ts";
 
 // -- runner (real) --
 import { loadConfig } from "../runner/src/config.ts";
@@ -48,7 +50,10 @@ const opt = (n: string, d: string) => { const i = argv.indexOf(n); return i >= 0
 const PACKAGE = "business" as const;          // Founder requirement 1: Business $2,499.00, 100% upfront.
 // --intake premium: the same customer, package and seven pages with the Founder's premium design direction added to
 // the brief (2026-11-02). The default stays the original intake so the 8.16/10 baseline remains reproducible.
-const JT = opt("--intake", "original") === "premium" ? JUNK_IN_THE_TRUNK_PREMIUM : JUNK_IN_THE_TRUNK;
+// --intake summit: a different fictional customer in the same industry class (different city, palette, service mix),
+// so a run measures whether the builder generalizes rather than reproducing one earlier result.
+const INTAKE = opt("--intake", "original");
+const JT = INTAKE === "premium" ? JUNK_IN_THE_TRUNK_PREMIUM : INTAKE === "summit" ? SUMMIT_HAUL : JUNK_IN_THE_TRUNK;
 const EXPECTED_CENTS = 249_900;
 const BASE = "http://crestmont.test";
 const RUNNER_SECRET = randomBytes(32).toString("hex");
@@ -65,6 +70,34 @@ async function main(): Promise<number> {
   const env = t.env;
   const owner = await createStaff(t.db, "owner", "owner@crestmont.test");
   const customer = await createCustomer(t.db, JT.email, JT.business);
+
+  // The approved design gallery. Without --gallery the harness runs with an EMPTY gallery, which is how every
+  // earlier local build was produced: selectForBuild had nothing to return and no reference ever reached a model.
+  const galleryDir = opt("--gallery", "");
+  if (galleryDir) {
+    const refs = JSON.parse(readFileSync(path.join(galleryDir, "gallery.json"), "utf8")) as any[];
+    const store = (t.env as any).overrides.storage;
+    let seeded = 0, withImage = 0;
+    for (const r of refs) {
+      const id = await G.addReference(t.db, {
+        title: r.title, industry: r.industry,
+        styleTags: (() => { try { return JSON.parse(r.style_tags_json ?? "[]"); } catch { return []; } })(),
+        sourceUrl: r.source_url, sourceName: r.source_name, desktopKey: r.desktop_key,
+        rightsBasis: r.rights_basis, rightsNote: r.rights_note, checksum: r.checksum,
+        typographyNotes: r.typography_notes, layoutNotes: r.layout_notes, colorNotes: r.color_notes,
+        animationNotes: r.animation_notes, responsiveNotes: r.responsive_notes, qualityNotes: r.quality_notes,
+      }, owner.id);
+      await G.decide(t.db, id, "approve", owner.id);
+      seeded++;
+      const img = path.join(galleryDir, "images", r.id + ".png");
+      if (existsSync(img)) { await store.put(r.desktop_key, readFileSync(img), "image/png"); withImage++; }
+    }
+    const eligible = await G.eligibleReferences(t.db);
+    log(`  gallery seeded: ${seeded} references (${withImage} with images), ${eligible.length} eligible for selection`);
+    assert.ok(eligible.length > 0, "the gallery seeded no eligible references: the build would run blind");
+  } else {
+    log("  NO GALLERY: running with an empty design gallery (pass --gallery <dir> to seed the approved references)");
+  }
 
   // Real catalog purchase of the Business package (the checkout route's own service function).
   const order = await createPackageOrder(t.db, customer.organizationId, PACKAGE, customer.id);
@@ -170,11 +203,22 @@ async function main(): Promise<number> {
   log(`  claimed job ${job.id} attempt ${job.attempt}: strategy=${job.strategy} package=${job.packageId} starter=${job.starter?.name ?? "(none)"}@${job.starter?.version ?? "-"}`);
   log(`  limits: maxTurns=${job.limits.maxTurns} maxRuntimeMinutes=${job.limits.maxRuntimeMinutes} model=${job.limits.model}`);
 
+  // Which gallery references the platform actually selected for this build, and on what basis. Recorded in the
+  // evidence so "Model A received these references" is a checkable fact rather than an assumption.
+  const design = (job as any).design ?? null;
+  if (design) {
+    log(`  gallery v${design.galleryVersion}: ${design.reason}`);
+    log(`  industry match: ${design.industryMatch?.normalized ?? "?"} (confident=${design.industryMatch?.confident})`);
+    for (const r of design.references ?? []) log(`    ref ${r.id} ${r.title} [${r.industry}] relevance=${r.relevance}`);
+  } else {
+    log("  NO GALLERY SELECTION on the claim: the builder will design without a reference");
+  }
+
   const prepared = {
     at: new Date().toISOString(), package: PACKAGE, invoiceCents: inv.amount_cents, projectId: project.id, jobId: job.id,
     strategy: job.strategy, starter: job.starter, pages: brief.customerData.pages, requirements: reqs,
     models: { architect: cfg.models.a.tag, builder: cfg.models.b.tag, mode: cfg.models.mode },
-    maxCycles: cfg.advisor.maxCycles, workspacesRoot: cfg.workspacesRoot,
+    maxCycles: cfg.advisor.maxCycles, workspacesRoot: cfg.workspacesRoot, design,
   };
   writeFileSync(path.join(OUT, "prepared.json"), JSON.stringify(prepared, null, 2));
   log(`  wrote ${path.join(OUT, "prepared.json")}`);

@@ -15,6 +15,7 @@ import { fenceFor } from "../prompt.ts";
 import type { ArchitectInput, CycleEvidence, GalleryReferenceInput, MasterSpec, ReviewVerdict } from "./contracts.ts";
 import { ARCHITECTURE_SPEC_JSON_SCHEMA, DESIGN_SPEC_JSON_SCHEMA, REVIEW_JSON_SCHEMA, SPEC_SCHEMA, extractJson, outstanding, parseVerdict } from "./contracts.ts";
 import { VISION_RETRY_RESERVE } from "./vision.ts";
+import { RECOVERY_ROUNDS, compact, describe as describeCompaction, isContextOverflow, measure, overflowFacts } from "./context-recovery.ts";
 import { BLUEPRINT_JSON_SCHEMA, BLUEPRINT_MIN, SECTION_LAYOUTS, blueprintChecklist, type DesignBlueprint } from "./blueprint.ts";
 import { dataUrl, planVisionRequest } from "./vision.ts";
 import type { VisionPlan } from "./vision.ts";
@@ -264,6 +265,8 @@ export interface LocalAdvisorOptions {
   temperature: number;
   /** Token/time accounting of the advisor's model calls (the job's tracker). */
   onUsage?: (r: ChatResponse) => void;
+  /** A request was too large and was reduced to fit. Reported so the build record shows the recovery happened. */
+  onRecovery?: (r: { role: "architect" | "reviewer"; round: number; detail: string }) => void;
   signal?: AbortSignal;
 }
 
@@ -276,6 +279,29 @@ export class LocalModelAdvisor implements Advisor {
   readonly billing = "zero-cost" as const;
   readonly notes: string[];
   readonly calls: { role: "architect" | "reviewer"; turns: number; images: number }[] = [];
+
+  /**
+   * What the last session did, kept whether it succeeded or failed.
+   *
+   * Advisor sessions used to vanish on failure: the conversation lived in a local array, `calls` was only
+   * appended on success, and build_runs.turns counts BUILDER turns. So "did not return a valid JSON answer
+   * within 40 turns" was all anyone ever learned -- and that sentence is a fixed string built from maxTurns,
+   * not a measurement. Three Summit Haul Co. blueprint attempts were investigated and not one recorded how many
+   * turns it actually used. This is that record. It holds sizes, counts and reasons; never message text.
+   */
+  lastSession: {
+    role: "architect" | "reviewer";
+    model: string;
+    turns: number;
+    modelCalls: number;
+    images: number;
+    jsonFailures: number;
+    overflows: number;
+    compactions: number;
+    recoveries: string[];
+    outcome: "answered" | "no-json" | "overflow-unrecoverable" | "transport" | "stopped" | null;
+    detail: string | null;
+  } | null = null;
   private readonly o: LocalAdvisorOptions;
   constructor(o: LocalAdvisorOptions) {
     this.o = o;
@@ -318,6 +344,16 @@ export class LocalModelAdvisor implements Advisor {
     const messages: ChatMessage[] = [{ role: "system", content: system }, { role: "user", content: plan.images.length ? parts : prompt }];
     let jsonRetries = 0;
     let told = false;
+    // What this session really did. Written whichever way it ends, so a failure is diagnosable afterwards.
+    let imageTokens = plan.imageTokens;
+    let imagesDroppedByRecovery = 0;
+    const session = {
+      role, model: this.o.model.tag, turns: 0, modelCalls: 0, images: images.length,
+      jsonFailures: 0, overflows: 0, compactions: 0, recoveries: [] as string[],
+      outcome: null as "answered" | "no-json" | "overflow-unrecoverable" | "transport" | "stopped" | null,
+      detail: null as string | null,
+    };
+    this.lastSession = session;
     for (let turn = 1; turn <= this.o.maxTurns; turn++) {
       if (this.o.signal?.aborted) throw new AdvisorUnavailableError(`${role} session stopped`);
       // Inspection has to end before the turns do. A real Business build's reviewer spent all 40 turns reading files
@@ -330,15 +366,78 @@ export class LocalModelAdvisor implements Advisor {
         told = true;
         messages.push({ role: "user", content: `The inspection budget is used up (${turn - 1} of ${this.o.maxTurns} turns). Answer now, from what you have already read, with the single JSON object only.` });
       }
-      const req = { model: this.o.model.tag, messages, ...(mustAnswer ? {} : { tools: readOnlyToolSpecs() }), temperature: this.o.temperature, max_tokens: this.o.maxOutputTokens, ...(this.o.model.reasoning ? { reasoning_effort: this.o.model.reasoning } : {}) };
+      const tools = mustAnswer ? undefined : readOnlyToolSpecs();
+      const buildReq = () => ({ model: this.o.model.tag, messages, ...(tools ? { tools } : {}), temperature: this.o.temperature, max_tokens: this.o.maxOutputTokens, ...(this.o.model.reasoning ? { reasoning_effort: this.o.model.reasoning } : {}) });
       let res: ChatResponse;
-      try {
-        res = this.o.scheduler
-          ? await this.o.scheduler.run({ model: this.o.model.tag, projectId: this.o.projectId, task: role === "architect" ? "architecture" : "review" }, () => this.o.client.chat(req, this.o.signal), this.o.signal, (r) => r)
-          : await this.o.client.chat(req, this.o.signal);
-      } catch (err) {
-        throw new AdvisorUnavailableError(`${role} session (${this.o.model.tag}) failed: ${(err as Error).message?.slice(0, 300) ?? String(err)}`);
+      // Execute → approach the limit → preserve → compact → continue. An oversized request is reduced and
+      // re-sent within the SAME logical task, so the inspection already done is not repeated from nothing. The
+      // reduction is bounded, it is verified to fit before it is sent, and a reduction that changed nothing
+      // stops the loop rather than sending the identical request again.
+      for (let recovery = 0; ; recovery++) {
+        try {
+          const req = buildReq();
+          res = this.o.scheduler
+            ? await this.o.scheduler.run({ model: this.o.model.tag, projectId: this.o.projectId, task: role === "architect" ? "architecture" : "review" }, () => this.o.client.chat(req, this.o.signal), this.o.signal, (r) => r)
+            : await this.o.client.chat(req, this.o.signal);
+          break;
+        } catch (err) {
+          const detail = (err as Error).message?.slice(0, 300) ?? String(err);
+          if (!isContextOverflow(err)) {
+            session.outcome = "transport";
+            session.detail = detail;
+            throw new AdvisorUnavailableError(`${role} session (${this.o.model.tag}) failed: ${detail}`);
+          }
+          session.overflows++;
+          if (recovery >= RECOVERY_ROUNDS) {
+            session.outcome = "overflow-unrecoverable";
+            session.detail = detail;
+            throw new AdvisorUnavailableError(`${role} session (${this.o.model.tag}) could not be reduced to fit after ${RECOVERY_ROUNDS} reduction(s): ${detail}`);
+          }
+          const facts = overflowFacts(err);
+          const window = facts?.available ?? this.o.model.contextTokens;
+          const toolsJson = tools ? JSON.stringify(tools) : null;
+          // THE PROVIDER IS AUTHORITATIVE. It counted this request with its own tokenizer and refused it; our
+          // chars/3.5 estimate is only an approximation of that. When the two disagree -- and the first version of
+          // this code hit exactly that, measuring 9,835 tokens for a request the server called 65,569 -- believing
+          // our own arithmetic means concluding "it already fits" and giving up on a request that was just
+          // rejected. So the server's number calibrates ours, and the reduction is judged in the server's units.
+          const ours = measure(messages, { knownImageTokens: imageTokens, toolsJson, reservedOutput: this.o.maxOutputTokens });
+          // The target is expressed as a FRACTION of the request that was just refused, measured in our own
+          // consistent units, rather than as an absolute number in the provider's. Comparing the two directly
+          // does not work: the server counts with its tokenizer and we estimate from characters plus measured
+          // image cost, and an earlier version of this code concluded "9,835 tokens, that fits" about a request
+          // the server had just called 65,569 and rejected. What is certain is that the request must get
+          // smaller, so that is what is required, and the server's own ratio sets how much smaller when it gives
+          // one. A second round cuts harder.
+          const ratio = facts?.requested && facts?.available ? facts.available / facts.requested : 0.8;
+          const shrink = Math.min(0.9, ratio) * (recovery === 0 ? 1 : 0.75);
+          const budget = Math.max(1024, Math.floor(ours * shrink));
+          const plan = compact(messages, {
+            budget, round: recovery + 1, knownImageTokens: imageTokens,
+            toolsJson, reservedOutput: this.o.maxOutputTokens,
+          });
+          session.recoveries.push(describeCompaction(plan));
+          // Resend only when the request genuinely got smaller. `fits` is recorded but is NOT the gate: it is our
+          // estimate's opinion, and the provider has just demonstrated that the two can disagree by a wide margin.
+          // Refusing to retry a request that shed its entire inspection history, because our own arithmetic still
+          // calls it large, is how the Design Blueprint was lost in the first place. The provider decides; the
+          // rounds are bounded; a reduction that changed nothing still stops immediately.
+          if (!plan.changed) {
+            session.outcome = "overflow-unrecoverable";
+            session.detail = `${detail} | ${describeCompaction(plan)}`;
+            // The provider's own words are carried through, not replaced: the attempt-level handler in job.ts
+            // classifies the failure by matching on them, and a session that cannot reduce itself must still be
+            // recognised as an overflow so the image cap halves and the next attempt is smaller.
+            throw new AdvisorUnavailableError(`${role} session (${this.o.model.tag}) is too large to reduce (${describeCompaction(plan)}): ${detail}`);
+          }
+          if (plan.imagesDropped) imagesDroppedByRecovery += plan.imagesDropped;
+          imageTokens = Math.max(0, Math.round(imageTokens * (plan.imagesKept / Math.max(1, plan.imagesKept + plan.imagesDropped))));
+          messages.splice(0, messages.length, ...plan.messages);
+          this.o.onRecovery?.({ role, round: recovery + 1, detail: describeCompaction(plan) });
+        }
       }
+      session.turns = turn;
+      session.modelCalls++;
       this.o.onUsage?.(res);
       let calls = mustAnswer ? [] : fromNativeCalls(res.toolCalls);
       if (!calls.length && !mustAnswer) calls = parseTextToolCalls(res.content, READ_ONLY_TOOLS);
@@ -348,23 +447,48 @@ export class LocalModelAdvisor implements Advisor {
           const out = c.args === null ? { output: `ERROR: arguments could not be parsed (${c.parseError ?? "invalid JSON"})` } : await executeReadOnlyTool(c.name, c.args, this.o.repo);
           messages.push({ role: "tool", tool_call_id: c.id, name: c.name, content: out.output.length > ADVISOR_TOOL_OUTPUT ? `${out.output.slice(0, ADVISOR_TOOL_OUTPUT)}\n...[clipped]` : out.output });
         }
-        // Keep the session within the context window: older tool outputs are replaced by a marker.
-        const budgetChars = this.o.model.contextTokens * 3.5 * 0.7;
-        let size = messages.reduce((n, m) => n + (m.role === "assistant" ? (m.content ?? "").length + JSON.stringify(m.tool_calls ?? []).length : contentText(m.content as string | ContentPart[]).length), 0);
-        for (const m of messages) { if (size <= budgetChars) break; if (m.role === "tool" && m.content.length > 200) { size -= m.content.length - 40; m.content = "[earlier tool output removed to fit the context]"; } }
+        // Keep the session inside the window BEFORE the next request, rather than after the provider refuses one.
+        //
+        // The previous rule compared a CHARACTER count against contextTokens * 3.5 * 0.7 and never counted the
+        // attached images at all. On bld_dcb3063d445e6f8890d66516 the six gallery references were 14,076 tokens
+        // the trimmer could not see, so it trimmed to what it believed was 70% of the window while the real
+        // request was over it -- and the Design Blueprint was lost to a 33-token overflow, twice. The same
+        // measurement the recovery path uses is used here, images included.
+        const proactive = compact(messages, {
+          budget: Math.max(2048, this.o.model.contextTokens - this.o.maxOutputTokens - VISION_RETRY_RESERVE),
+          round: 1, knownImageTokens: imageTokens,
+          toolsJson: JSON.stringify(readOnlyToolSpecs()), reservedOutput: this.o.maxOutputTokens,
+        });
+        if (proactive.changed) {
+          messages.splice(0, messages.length, ...proactive.messages);
+          session.compactions++;
+        }
         continue;
       }
       try {
         const answer = extractJson(res.content ?? "");
         this.calls.push({ role, turns: turn, images: images.length });
+        session.outcome = "answered";
         return answer;
       } catch {
+        session.jsonFailures++;
+        // The last thing the model actually said, truncated. Not a reconstruction of what it meant.
+        session.detail = (res.content ?? "").slice(0, 400) || "(empty response)";
         if (jsonRetries++ >= 2) break;
         messages.push({ role: "assistant", content: res.content ?? "" });
         messages.push({ role: "user", content: "Answer with the single JSON object only (no prose, no code fence), matching the schema given." });
       }
     }
-    throw new AdvisorUnavailableError(`the ${role} session (${this.o.model.tag}) did not return a valid JSON answer within ${this.o.maxTurns} turns`);
+    // The old message said "within ${maxTurns} turns" whatever had happened, which is how three failed blueprint
+    // attempts came to report a turn count none of them had measured. Say what actually ended it.
+    session.outcome = session.outcome ?? "no-json";
+    const why = session.jsonFailures >= 3
+      ? `${session.jsonFailures} unparseable answers`
+      : `the ${this.o.maxTurns}-turn inspection budget was used up`;
+    throw new AdvisorUnavailableError(
+      `the ${role} session (${this.o.model.tag}) produced no valid JSON after ${session.turns} turn(s) and ${session.modelCalls} model call(s): ${why}`
+      + (session.overflows ? ` (${session.overflows} context overflow(s) recovered: ${session.recoveries.join(" | ")})` : "")
+      + (imagesDroppedByRecovery ? ` (${imagesDroppedByRecovery} image(s) given up to fit; restore before the next visual step)` : ""));
   }
 
   /**

@@ -554,6 +554,13 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           client: provider.client, scheduler: deps.scheduler ?? null, projectId: job.projectId, model: models.a, repo: ws!.repo, signal: advisorAbort.signal,
           maxTurns: cfg.advisor.maxTurns, maxOutputTokens: cfg.local.maxOutputTokensPerCall, temperature: cfg.local.temperature,
           onUsage: (r) => { tracker.modelCalls++; tracker.inputTokens += r.promptTokens; tracker.outputTokens += r.completionTokens; tracker.modelWallMs += r.wallMs; },
+          // An oversized request recovered INSIDE the session, without losing the inspection already done. The
+          // attempt-level handler below still exists for a session that cannot be reduced far enough; this note
+          // is what tells a person the cheaper recovery happened, and what it gave up to continue.
+          onRecovery: (r) => {
+            const why = `${r.role} request was too large [overflow]: reduction ${r.round} — ${r.detail}; the session continued rather than restarting the stage`;
+            tracker.note({ kind: "note", message: why.slice(0, 400) });
+          },
         });
       }
       return role === "reviewer" ? new DeterministicReviewer() : null;
