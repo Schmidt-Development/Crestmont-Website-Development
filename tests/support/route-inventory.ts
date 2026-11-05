@@ -121,6 +121,12 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/builds/runner/ai/claim": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/ai/complete": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/ai/checkpoint": signed("x-crestmont-runner-signature"),
+  // SEC-03 malware scanner (ClamAV on Node 1, the machine that already holds BUILD_RUNNER_SECRET).
+  // scan/file serves bytes only for a file awaiting a scan, so the runner secret is not a way to read the
+  // document store; it audits each fetch. scan/result is the only writer of scan_status.
+  "POST /api/builds/runner/scan/queue": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/scan/file": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/scan/result": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/files": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/complete": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/previews/claim": signed("x-crestmont-runner-signature"),

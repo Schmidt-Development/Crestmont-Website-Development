@@ -11,6 +11,7 @@ import { syncDerivedStates } from "../readiness/sync.ts";
 import { approvalValidity, ingestionHealth, type ReadinessInput } from "../readiness/engine.ts";
 import { can, isOwner, type Actor } from "../domain/authz.ts";
 import { audit } from "./security.ts";
+import { scanHealth, SCAN_BACKLOG_HOURS } from "./malware-scan.ts";
 import { githubFeedStatus, latestGithubSync } from "./github.ts";
 import { mfaKeyStatus } from "../lib/totp-secrets.ts";
 
@@ -100,7 +101,7 @@ export async function feedStatuses(ctx: Pick<AppContext, "db" | "env" | "now">, 
   const gh = await githubFeedStatus(ctx);
   const cron = await scheduledJobsFeed(ctx, input);
   const turnstile = turnstileFeed(ctx.env, now);
-  return [...required, gh, ...(cron ? [cron] : []), ...(await mfaFeeds(ctx)), ...others, ...(turnstile ? [turnstile] : [])];
+  return [...required, gh, ...(cron ? [cron] : []), ...(await mfaFeeds(ctx)), await malwareScanFeed(ctx), ...others, ...(turnstile ? [turnstile] : [])];
 }
 
 /** MFA encryption at rest (docs/AUTH-PRODUCTION.md gap 3) on deployed environments — status only, never the key, a secret
@@ -124,6 +125,38 @@ export async function mfaFeeds(ctx: Pick<AppContext, "db" | "env">): Promise<Fee
     ? { source: `mfa-at-rest:${env}`, status: "healthy", detail: "Every stored two-factor secret is encrypted", required: false, lastSuccessAt: null, lastAttemptAt: null }
     : { source: `mfa-at-rest:${env}`, status: "unavailable", detail: key === "ok" ? "Some two-factor secrets are still stored in plaintext (encrypted at each account's next sign-in, or all at once by scripts/encrypt-totp-secrets.ts)" : "Encryption at rest needs MFA_ENCRYPTION_KEY", required: false, lastSuccessAt: null, lastAttemptAt: null };
   return [keyFeed, restFeed];
+}
+
+/**
+ * SEC-03: is a malware scanner actually reporting, and is it keeping up?
+ *
+ * Three honest states, and never "healthy" because nothing went wrong:
+ *   · not_configured — no verdict has EVER been recorded, so no scanner is connected. That is today's
+ *     state and it is what F-02 is about. Advisory, so it does not make /api/readiness/health 503 and
+ *     does not alert on every run until the Founder installs one.
+ *   · stale — a scanner has reported before, but files have been waiting over SCAN_BACKLOG_HOURS. A
+ *     scanner that stops is otherwise invisible: files simply stay 'pending' and stay quarantined, which
+ *     is safe but silent.
+ *   · healthy — a scanner has reported and nothing is older than the backlog window.
+ *
+ * Counts only. No filename, no organization, no verdict detail.
+ */
+export async function malwareScanFeed(ctx: Pick<AppContext, "db" | "now">): Promise<FeedStatus> {
+  const h = await scanHealth(ctx.db).catch(() => null);
+  const source = "malware-scan";
+  if (!h) return { source, status: "unavailable", detail: "Scan state could not be read", required: false, lastSuccessAt: null, lastAttemptAt: null, advisory: true };
+  if (!h.scannerSeen) {
+    return { source, status: "not_configured", required: false, lastSuccessAt: null, lastAttemptAt: null, advisory: true,
+      detail: `No malware scanner has reported a verdict (F-02). ${h.backlog} file(s) are stored unscanned and stay quarantined from share links; uploads are never labelled clean without a verdict.` };
+  }
+  const oldestMs = h.oldestPendingAt ? ctx.now().getTime() - Date.parse(h.oldestPendingAt) : 0;
+  const stale = h.backlog > 0 && oldestMs > SCAN_BACKLOG_HOURS * 3_600_000;
+  return {
+    source, status: stale ? "stale" : "healthy", required: false, lastSuccessAt: h.lastScanAt, lastAttemptAt: h.lastScanAt,
+    detail: stale
+      ? `Last attempt failed: ${h.backlog} file(s) waiting, oldest since ${h.oldestPendingAt} (over ${SCAN_BACKLOG_HOURS}h). Scanner last reported ${h.lastScanAt}${h.engine ? ` (${h.engine})` : ""}.`
+      : `Scanner reporting${h.engine ? ` (${h.engine})` : ""}; ${h.backlog} file(s) waiting.`,
+  };
 }
 
 /** Cron triggers that never fire are otherwise silent: every job feed simply never appears. On a deployed environment
