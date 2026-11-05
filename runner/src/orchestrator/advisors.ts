@@ -19,6 +19,7 @@ import { RECOVERY_ROUNDS, compact, describe as describeCompaction, isContextOver
 import { type Allowance, allowanceFor } from "./execution-budget.ts";
 import { ProgressGuard } from "./progress-guard.ts";
 import { BLUEPRINT_JSON_SCHEMA, BLUEPRINT_MIN, SECTION_LAYOUTS, blueprintChecklist, type DesignBlueprint } from "./blueprint.ts";
+import { SECTION_PURPOSE, schemaForSection, type SectionName } from "./blueprint-sections.ts";
 import { dataUrl, planVisionRequest } from "./vision.ts";
 import type { VisionPlan } from "./vision.ts";
 
@@ -604,6 +605,7 @@ export class LocalModelAdvisor implements Advisor {
     return answer;
   }
 
+
   /**
    * STAGE 2: the DESIGN BLUEPRINT (V5 §5) -- the approved design as data rather than adjectives.
    *
@@ -661,6 +663,86 @@ export class LocalModelAdvisor implements Advisor {
     }, MAX_IMAGES);
     const attached = preplan.images;
     if (preplan.dropped.length) this.notes.push(`blueprint request budget: ${attached.length} of ${images.length} image(s) attached for ${this.o.model.tag}; ${preplan.dropped.length} left out`);
+    const answer = await this.ask("architect", head + fix, attached.map((i) => ({ path: i.path, label: i.label })), attached.length);
+    const sent = new Set((this.lastVisionPlan?.images ?? []).map((i) => i.path));
+    this.lastArchitectImages = this.lastArchitectImages.filter((i) => sent.has(i.path));
+    return answer;
+  }
+
+  /**
+   * ONE section of the Design Blueprint.
+   *
+   * The whole-document answer is a brittle shape: on bld_dcb3063d445e6f8890d66516 all three attempts produced
+   * nothing usable and the build ran with no blueprint at all, because a single enormous JSON answer has no
+   * partial success. A section is small enough to answer and to correct, and the sections already decided are
+   * shown so the later ones are consistent with them rather than a second opinion.
+   *
+   * The gallery references stay attached for every section. A blueprint written from a text summary of images
+   * the architect was shown earlier is exactly the failure this pipeline exists to prevent.
+   */
+  async blueprintSection(
+    section: SectionName,
+    approved: MasterSpec,
+    input: ArchitectInput,
+    decided: Record<string, unknown> = {},
+    corrections: readonly string[] = [],
+    opts: { maxImages?: number } = {},
+  ): Promise<unknown> {
+    const vision = this.o.model.vision;
+    const MAX_IMAGES = Math.max(0, opts.maxImages ?? 4);
+    const gallery = vision ? (input.galleryReferences ?? []).filter((g) => g.path && safeImageFile(g.path)) : [];
+    const chosen = gallery.slice(0, MAX_IMAGES);
+    this.lastArchitectImages = chosen.map((g) => ({ referenceId: g.id, path: g.path as string }));
+    const images = chosen.map((g, i) => ({ path: g.path as string, label: `gallery reference image ${i + 1}` }));
+    const refs = chosen.map((g, i) => `- ${g.id} (attached as gallery reference image ${i + 1}): ${g.title}${g.why ? ` — ${g.why}` : ""}`);
+
+    // Only what this section needs to be consistent with. Sending every decided section back in full is how a
+    // request grows until the provider refuses it.
+    const already = Object.entries(decided)
+      .filter(([, v]) => v !== null && v !== undefined)
+      .map(([k, v]) => `${k}: ${JSON.stringify(v).slice(0, 1800)}`);
+
+    const fix = corrections.length
+      ? `\n\nYour previous "${section}" was REJECTED and is not in this conversation. Fix exactly these and answer again:\n${corrections.map((c) => `- ${c}`).join("\n")}\nReturn the corrected JSON object only.`
+      : "";
+
+    const head = [
+      `The design specification for this website has been accepted. You are writing ONE section of the DESIGN BLUEPRINT: "${section}".`,
+      "",
+      `That section is ${SECTION_PURPOSE[section]}.`,
+      "",
+      "The accepted design specification, which this section must express rather than contradict:",
+      approved.designSpec,
+      "",
+      already.length ? "Sections of this blueprint that are already decided. Be consistent with them; do not restate or revise them:\n" + already.join("\n") + "\n" : "",
+      refs.length ? "The gallery references you are looking at:\n" + refs.join("\n") + "\n" : "",
+      "RULES, because a blueprint exists to be executed and to be failed:",
+      "- Every colour is a hex value. \"A warm neutral\" is not a colour a stylesheet can use.",
+      "- Every typeface is a real family name you would load (\"Fraunces\", \"Inter\"), never \"a modern serif\".",
+      "- Every type step carries a size with a unit, a numeric weight and a line height.",
+      section === "pages"
+        ? `- Every page lists its sections IN RENDER ORDER, at least ${BLUEPRINT_MIN.sectionsPerPage} of them, each using one of these named layouts: ${SECTION_LAYOUTS.join(", ")}. Pick the layout that is actually right for the content; do not default to a grid. Every section states the real content it carries: the headline, the supporting copy, what the controls say. Not "relevant content".`
+        : "",
+      section === "visualAssets"
+        ? "- Every visual asset declares what it IS (kind) and where it may legally come from (source). An authored SVG is a legitimate visual asset: declare it as an illustration. A photograph can only come from the customer's own files or a licensed library — never from an SVG you intend to draw, and never from a gallery reference screenshot, which is another studio's work."
+        : "",
+      section === "referenceMapping"
+        ? "- Name, for each reference you were shown, the specific quality you took from it and where it applies. Cite only references actually attached above: an invented citation is worse than none. Several references are SHEETS showing two or more complete, different designs side by side; where one is, say which design with conceptIndex (1-based, from the left) and conceptCount. Choose ONE. Do not blend two concepts."
+        : "",
+      "- Nothing in this object may be a placeholder, a TODO, or an adjective standing in for a decision. If the brief does not settle something, decide it: you are the architect.",
+      "",
+      `Answer with the JSON object only — just this one section — matching this JSON Schema:`,
+      JSON.stringify(schemaForSection(section)),
+    ].filter((x) => x !== "").join("\n");
+
+    const preplan = planVisionRequest(images, {
+      windowTokens: this.o.model.contextTokens,
+      promptTokens: Math.ceil((head.length + fix.length + 1200) / 3.5) + Math.ceil(JSON.stringify(readOnlyToolSpecs()).length / 3.5),
+      reserveOutput: this.o.maxOutputTokens,
+      reserveRetry: VISION_RETRY_RESERVE,
+    }, MAX_IMAGES);
+    const attached = preplan.images;
+    if (preplan.dropped.length) this.notes.push(`blueprint section "${section}": ${attached.length} of ${images.length} image(s) attached for ${this.o.model.tag}`);
     const answer = await this.ask("architect", head + fix, attached.map((i) => ({ path: i.path, label: i.label })), attached.length);
     const sent = new Set((this.lastVisionPlan?.images ?? []).map((i) => i.path));
     this.lastArchitectImages = this.lastArchitectImages.filter((i) => sent.has(i.path));

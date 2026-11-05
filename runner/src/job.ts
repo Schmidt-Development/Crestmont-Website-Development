@@ -44,6 +44,8 @@ import { runOperatorCommand } from "./operator-command.ts";
 import { resolveWithin, writeInside } from "./paths.ts";
 import type { Advisor } from "./orchestrator/advisors.ts";
 import { allowanceFor, complexityFromBrief } from "./orchestrator/execution-budget.ts";
+import { assemble as assembleSections, describeSections, loadSections, outstanding as outstandingSections, recordSection, saveSections, sectionOf, unwrapSection } from "./orchestrator/blueprint-sections.ts";
+import { createHash } from "node:crypto";
 import { DeterministicReviewer, LocalModelAdvisor } from "./orchestrator/advisors.ts";
 import type { GalleryReferenceInput, MasterSpec, ReviewVerdict } from "./orchestrator/contracts.ts";
 import { outstanding, validateArchitectureSpec, validateDesignSpec } from "./orchestrator/contracts.ts";
@@ -821,6 +823,54 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           tracker.note({ kind: "note", message: why.slice(0, 400) });
         }
       }
+      // Three whole-document answers did not arrive. Ask for the blueprint a SECTION at a time instead: each one
+      // is small enough to answer and to correct, each is validated on its own, and the ones that succeed are
+      // written to the workspace so a failure in page composition cannot discard a colour system that was already
+      // right. The assembled result goes through the SAME validateBlueprint as a single-answer blueprint; nothing
+      // is waved through for having arrived in pieces.
+      if (!spec.designBlueprint && !stop.reason && typeof (architect as { blueprintSection?: unknown }).blueprintSection === "function") {
+        const specHash = createHash("sha256").update(approvedDesign.designSpec ?? "").digest("hex").slice(0, 32);
+        let sf = loadSections(ws.dir, job.id, job.attempt, specHash);
+        tracker.note({ kind: "step", message: `design blueprint by section (${architect.name}): ${describeSections(sf)}` });
+        for (const name of outstandingSections(sf)) {
+          if (stop.reason) break;
+          const decided = Object.fromEntries(sf.sections.filter((x) => x.value !== null).map((x) => [x.name, x.value]));
+          try {
+            const raw = await (architect as unknown as { blueprintSection: (n: unknown, a: unknown, i: unknown, d: unknown, c: readonly string[], o: { maxImages?: number }) => Promise<unknown> })
+              .blueprintSection(name, approvedDesign, input, decided, sectionOf(sf, name).problems, { maxImages: Math.max(1, Math.min(4, bpImages)) });
+            const value = unwrapSection(name, raw);
+            sf = recordSection(sf, name, value, value === null ? ["the reply was not the requested section"] : []);
+          } catch (err) {
+            if (err instanceof LeaseLostError) { markLeaseLost(); throw err; }
+            sf = recordSection(sf, name, null, [errorMessage(err).slice(0, 200)]);
+          }
+          saveSections(ws.dir, sf);
+          tracker.note({ kind: "note", message: describeSections(sf).slice(0, 400) });
+        }
+        const seenSec = (architect as { lastArchitectImages?: { referenceId: string; path: string }[] }).lastArchitectImages ?? [];
+        const asm = assembleSections(sf, {
+          sentReferenceIds: seenSec.length ? seenSec.map((i) => i.referenceId) : sentRefs,
+          requiresPhotography: photographyRequired,
+        });
+        if (asm.ok && asm.blueprint) {
+          spec = { ...approvedDesign, designBlueprint: asm.blueprint };
+          writeInside(ws.repo, path.join(".crestmont", "design-blueprint.json"), JSON.stringify(asm.blueprint, null, 2) + "\n");
+          writeFileSync(path.join(ws.repo, "DESIGN-BLUEPRINT.md"), blueprintInstructions(asm.blueprint) + "\n");
+          const storedSec = await client.storeSpec(job, spec, architect.name).catch((err) => {
+            if (err instanceof LeaseLostError) throw err;
+            tracker.note({ kind: "note", message: `design blueprint accepted but not stored on the platform: ${errorMessage(err).slice(0, 200)}` });
+            return null;
+          });
+          noteBlueprint(manifest, asm.blueprint.referenceMapping);
+          saveManifest(ws.dir, manifest);
+          tracker.note({ kind: "step", message: `design blueprint assembled from sections: ${blueprintSummary(asm.blueprint)}${storedSec ? `; stored as v${storedSec.specVersion}` : ""}` });
+        } else {
+          const why = `design blueprint by section did not complete: ${describeSections(sf)}${asm.problems.length ? ` — ${asm.problems.slice(0, 3).join("; ").slice(0, 300)}` : ""}`;
+          sessionNotes.push(why.slice(0, 500));
+          tracker.note({ kind: "note", message: why.slice(0, 500) });
+        }
+      }
+
       // NOT a build-stopping failure, and deliberately so: the design specification was accepted, and a build that
       // can produce a website from prose is better than no build. But the fact is recorded where it cannot be
       // mistaken for success -- the design phase prompt will say the design was never decided in detail, and the
