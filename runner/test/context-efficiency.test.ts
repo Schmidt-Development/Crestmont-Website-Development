@@ -19,7 +19,7 @@ import { createWorkspace } from "../src/workspace.ts";
 import { writeBriefFiles } from "../src/prompt.ts";
 import { silentLogger } from "../src/log.ts";
 import {
-  DEFAULT_THRASH, changedSince, manifest, newLedger, recordCommand, recordDone, recordRead, recordReset,
+  DEFAULT_THRASH, adoptLedger, changedSince, manifest, newLedger, recordCommand, recordDone, recordRead, recordReset,
   recordWrite, staleResets, thrashVerdict, unchangedSince,
 } from "../src/providers/work-ledger.ts";
 import type { PhaseRequest } from "../src/providers/types.ts";
@@ -324,4 +324,24 @@ test("[AIB-CTX] a reset leaves real working headroom, and one turn's tool output
     void t;
     assert.ok(model.requests.length > 5, "the phase kept working rather than being stopped");
   } finally { await model.close(); }
+});
+
+test("[AIB-CTX] a resumed session does not inherit an exhausted thrash budget, but keeps its reset history", () => {
+  const repo = tmp("aib-resume-");
+  const l = newLedger();
+  // A segment that thrashed to the limit.
+  for (let i = 0; i < DEFAULT_THRASH.stopAt + 3; i++) recordReset(l, "build");
+  assert.equal(thrashVerdict(l, "build"), "stop");
+  const totalBefore = l.resets.build;
+
+  // The next segment adopts the restored ledger. bld_10e2c6007686faee0ab64d45 attempt 4 died here: it restored a
+  // counter already past the limit, reset once, and the guard stopped the phase after 7 turns.
+  const resumed = adoptLedger(JSON.parse(JSON.stringify(l)));
+  assert.equal(staleResets(resumed, "build"), 0, "the stale counter is re-baselined for the new segment");
+  assert.equal(thrashVerdict(resumed, "build"), "ok", "a resumed build gets a real chance to make progress");
+  assert.equal(resumed.resets.build, totalBefore, "the total reset history is preserved for the diagnosis");
+
+  // And the guard still works within the new segment.
+  for (let i = 0; i < DEFAULT_THRASH.stopAt; i++) { recordReset(resumed, "build"); recordRead(resumed, repo, "a.txt"); }
+  assert.equal(thrashVerdict(resumed, "build"), "stop", "an unproductive loop in THIS segment is still bounded");
 });
