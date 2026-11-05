@@ -162,6 +162,15 @@ test("phase 1 certification: the complete non-AI customer journey, with its fail
   assert.ok(await count(t, `SELECT COUNT(*) AS n FROM agreement_acceptances WHERE organization_id = ? AND context_type = 'maintenance_checkout'`, org.id) >= 1, "maintenance terms acceptance recorded");
   assert.equal((await stripe(t, "customer.subscription.created", { id: "sub_cert_1", status: "active", customer: "cus_cert", current_period_end: Math.floor(Date.now() / 1000) + 30 * 86400, metadata: { organization_id: org.id, product_id: plan.id } })).status, 200);
   assert.equal((await one<{ status: string }>(t, `SELECT status FROM subscriptions WHERE organization_id = ? AND product_id = ?`, org.id, plan.id)).status, "active");
+  // A failed renewal (current Stripe shape: parent.subscription_details) marks the plan past due and tells the
+  // customer how to fix it; the next paid invoice restores it. (Staging cannot force a renewal to fail without a
+  // Stripe test clock — journey 25 is skipped there — so this is where the recovery path is proven.)
+  const sid = { parent: { subscription_details: { subscription: "sub_cert_1" } } };
+  assert.equal((await stripe(t, "invoice.payment_failed", { id: "in_cert_fail", customer: "cus_cert", customer_email: email, ...sid })).status, 200);
+  assert.equal((await one<{ status: string }>(t, `SELECT status FROM subscriptions WHERE stripe_subscription_id = 'sub_cert_1'`)).status, "past_due");
+  assert.equal((await lastEmail(t.db, email))?.template, "failed_payment", "the customer is told the renewal failed and where to update payment");
+  assert.equal((await stripe(t, "invoice.paid", { id: "in_cert_retry", customer: "cus_cert", ...sid })).status, 200);
+  assert.equal((await one<{ status: string }>(t, `SELECT status FROM subscriptions WHERE stripe_subscription_id = 'sub_cert_1'`)).status, "active", "recovered");
   // Cancellation arrives the same way and is reflected, not assumed.
   assert.equal((await stripe(t, "customer.subscription.deleted", { id: "sub_cert_1", status: "canceled", customer: "cus_cert", metadata: { organization_id: org.id, product_id: plan.id } })).status, 200);
   assert.equal((await one<{ status: string }>(t, `SELECT status FROM subscriptions WHERE organization_id = ? AND product_id = ?`, org.id, plan.id)).status, "canceled");
