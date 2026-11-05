@@ -523,15 +523,29 @@ jobs:
           # began. Verification through the frontend sweep took 38 minutes there, so this bound covers the
           # phase with room to spare; the job's own timeout remains the real backstop, and an always() step
           # kills it so nothing outlives the job.
-          nohup timeout 4200 $WRANGLER tail crestmont-platform-staging --env staging --format json \
-            > worker-tail.jsonl 2> worker-tail.err &
+          # setsid, not just nohup: a background process left in the step's own process group does not
+          # reliably survive the step boundary on a runner, and in deploy #161 the capture wrote 0 lines for
+          # the whole job. nohup blocks SIGHUP; it does not help if the group is killed.
+          setsid nohup timeout 4200 $WRANGLER tail crestmont-platform-staging --env staging --format json \
+            > worker-tail.jsonl 2> worker-tail.err < /dev/null &
           echo "$!" > worker-tail.pid
           date -u +%Y-%m-%dT%H:%M:%SZ > worker-tail.started
-          # Give it a moment to connect, so the first verified request is already in the stream.
-          sleep 8
-          if [ -s worker-tail.err ] && ! grep -qi "waiting for logs\|Connected" worker-tail.err; then
-            echo "::warning title=Worker log capture::Could not start the capture; the steps below fall back to app_errors alone."
-            sed -e 's/\x1b\[[0-9;]*m//g' worker-tail.err | tail -3
+          # WAIT for a connection instead of assuming one. The previous version slept 8 seconds and then
+          # tested `[ -s worker-tail.err ]`, which is false when the file is EMPTY — so a capture that
+          # produced nothing at all passed the check silently, and the failure only surfaced forty minutes
+          # later as "never connected". An instrument that cannot start should say so while it still matters.
+          connected=no
+          for _ in $(seq 1 20); do
+            if grep -qi "waiting for logs\|Connected to\|Successfully created tail" worker-tail.err 2>/dev/null \
+               || [ -s worker-tail.jsonl ]; then connected=yes; break; fi
+            sleep 3
+          done
+          if [ "$connected" = yes ]; then
+            echo "Worker log capture connected after $(( $(date -u +%s) - $(date -u -d "$(cat worker-tail.started)" +%s) ))s."
+          else
+            echo "::warning title=Worker log capture::Did not connect within 60s, so the steps below fall back to app_errors alone. This is the capture failing, NOT the Worker being quiet."
+            echo "stderr: $(sed -e 's/\x1b\[[0-9;]*m//g' worker-tail.err 2>/dev/null | tr '\n' ' ' | cut -c1-300)"
+            echo "process still alive: $(kill -0 "$(cat worker-tail.pid)" 2>/dev/null && echo yes || echo no)"
           fi
 
       - name: Verify the full access sequence on the live site
