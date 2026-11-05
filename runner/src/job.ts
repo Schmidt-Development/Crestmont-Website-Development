@@ -45,7 +45,7 @@ import { resolveWithin, writeInside } from "./paths.ts";
 import type { Advisor } from "./orchestrator/advisors.ts";
 import { DeterministicReviewer, LocalModelAdvisor } from "./orchestrator/advisors.ts";
 import type { GalleryReferenceInput, MasterSpec, ReviewVerdict } from "./orchestrator/contracts.ts";
-import { outstanding, validateDesignSpec } from "./orchestrator/contracts.ts";
+import { outstanding, validateArchitectureSpec, validateDesignSpec } from "./orchestrator/contracts.ts";
 import { collectEvidence, builderIntegrations, builderApprovalRequests, writeReview, BUILDER_CONTRACT } from "./orchestrator/evidence.ts";
 import { ratchetDecision, stopsBuild, type PhasePoints } from "./orchestrator/ratchet.ts";
 import { collectSnapshot } from "./orchestrator/snapshot.ts";
@@ -609,9 +609,22 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       // Corrections from the previous attempt's validation, fed back so a retry is corrective rather than a
       // second blind roll of the dice.
       let specProblems: string[] = [];
+      // Retries are CLASSIFIED, not uniform. bld_889ff809c133920c929a7121 showed why: attempts 1 and 2 were
+      // rejected by the platform's schema, and the corrective retry appended the rejection text to a request that
+      // already sat at the edge of the window — so attempt 3 died of context overflow instead. A rejection and an
+      // overflow need opposite responses: one wants MORE text, the other strictly LESS.
+      let maxImages = 6;
+      const classify = (e: unknown): "overflow" | "schema" | "permission" | "network" | "other" => {
+        const m = errorMessage(e);
+        if (/exceeds the available context size|context length|too many tokens|maximum context/i.test(m)) return "overflow";
+        if (/\b(?:400|422)\b|Invalid .*specification|schema/i.test(m)) return "schema";
+        if (/\b(?:401|403)\b|unauthor|forbidden/i.test(m)) return "permission";
+        if (/\b(?:429|50\d)\b|timeout|ECONN|ETIMEDOUT|socket|network/i.test(m)) return "network";
+        return "other";
+      };
       for (let attempt = 1; attempt <= 3 && !spec && !stop.reason; attempt++) {
         try {
-          const raw = await architect.architect(input, specProblems);
+          const raw = await architect.architect(input, specProblems, { maxImages });
           // What the model ACTUALLY received, read back from the adapter rather than assumed from the request:
           // a text-only model is sent no images at all, and that must show up in the evidence as zero.
           const seen = (architect as { lastArchitectImages?: { referenceId: string }[] }).lastArchitectImages ?? [];
@@ -641,10 +654,28 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           tracker.note({ kind: "step", message: `design specification accepted: ${v.spec!.phasePlan?.designDeliverables.length ?? 0} design deliverable(s), ${v.spec!.acceptanceCriteria.length} acceptance criteria, ${v.spec!.phasePlan?.deferredBackend.length ?? 0} deferred backend item(s)` });
         } catch (err) {
           if (err instanceof LeaseLostError) { markLeaseLost(); throw err; }
-          specProblems = [errorMessage(err).slice(0, 300)];
-          const why = `architect attempt ${attempt} did not produce a valid specification: ${errorMessage(err).slice(0, 300)}`;
+          const kind = classify(err);
+          let changed = "nothing (the same request would be sent again)";
+          if (kind === "overflow") {
+            // Come back smaller, and do NOT append the rejection text: that is what grows the request.
+            maxImages = Math.floor(maxImages / 2);
+            specProblems = [];
+            changed = `images capped at ${maxImages}; corrections dropped so the request shrinks`;
+          } else if (kind === "schema") {
+            specProblems = [errorMessage(err).slice(0, 300)];
+            changed = "the rejection reason fed back for a corrective retry";
+          } else if (kind === "permission") {
+            // A credential problem will not fix itself; retrying is pure waste.
+            specProblems = [errorMessage(err).slice(0, 300)];
+            changed = "none — a permission failure is not retried";
+            attempt = 3;
+          } else {
+            specProblems = [];
+            changed = "retrying the same request (transient failure)";
+          }
+          const why = `architect attempt ${attempt} did not produce a valid specification [${kind}]: ${errorMessage(err).slice(0, 300)} — next: ${changed}`;
           sessionNotes.push(why);
-          tracker.note({ kind: "note", message: why });
+          tracker.note({ kind: "note", message: why.slice(0, 400) });
         }
       }
       // Planning is a gate, not a formality. Without a specification the builder decides architecture itself,
@@ -656,6 +687,57 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         return await finish("failed", {
           error: `The architect could not produce a valid design specification in 3 attempts${specProblems.length ? `: ${specProblems.join("; ").slice(0, 400)}` : ""}. No implementation turns were spent. Model ${models.a.tag} must return the DESIGN_SPEC_JSON_SCHEMA object within its output budget; if it keeps truncating, lower the requested detail or raise LOCAL_MODEL_MAX_OUTPUT_TOKENS.`,
           stopReason: "architect_failed",
+        });
+      }
+    }
+
+    // ── STAGE 3: the functional architecture, once the design is certified ───────────────────────────────────────
+    //
+    // The design stage deliberately carries no backend architecture and no task breakdown: asking for them before
+    // the design exists is what made the architect's reply too large to return at all. They are planned HERE,
+    // against the approved design, the first time the platform reports a phase past design.
+    const architectFull = advisorFor("architect");
+    if (architectFull && spec && spec.specStage === "design" && (job.phase === "functionality" || job.phase === "final_qa") && !stop.reason) {
+      const r3 = route("architecture", models);
+      routed.push(r3);
+      Object.assign(now, { activity: "gpu_running", model: r3.model.tag, task: r3.task });
+      tracker.note({ kind: "step", message: `architecture session (${architectFull.name}): completing the certified design with its backend plan` });
+      // Captured so the narrowing survives the reassignment of `spec` below.
+      const approved = spec;
+      let archProblems: string[] = [];
+      let completed = false;
+      for (let attempt = 1; attempt <= 3 && !completed && !stop.reason; attempt++) {
+        try {
+          const raw = await architectFull.architecture!(approved, archProblems);
+          const v = validateArchitectureSpec(raw, approved);
+          if (!v.ok) {
+            archProblems = v.problems;
+            const why = `architecture attempt ${attempt} was invalid: ${v.problems.join("; ")}`;
+            sessionNotes.push(why.slice(0, 400));
+            tracker.note({ kind: "note", message: why.slice(0, 400) });
+            continue;
+          }
+          const stored = await client.storeSpec(job, v.spec, architectFull.name);
+          spec = v.spec!;
+          completed = true;
+          writeFileSync(path.join(ws.repo, "SPEC.json"), JSON.stringify(v.spec, null, 2) + "\n");
+          tracker.note({ kind: "step", message: `functional architecture accepted: ${v.spec!.tasks.length} task(s)${stored ? `, stored as v${stored.specVersion}` : ""}` });
+        } catch (err) {
+          if (err instanceof LeaseLostError) { markLeaseLost(); throw err; }
+          archProblems = [errorMessage(err).slice(0, 300)];
+          const why = `architecture attempt ${attempt} failed: ${errorMessage(err).slice(0, 300)}`;
+          sessionNotes.push(why);
+          tracker.note({ kind: "note", message: why.slice(0, 400) });
+        }
+      }
+      // The design is certified and preserved either way; the backend plan is what is missing. Stop with that
+      // diagnosis rather than letting the builder invent an architecture the platform never validated.
+      if (!completed && !stop.reason) {
+        await endSegment("failed");
+        await checkpoint("architecture stage produced no plan");
+        return await finish("failed", {
+          error: `The certified design could not be completed into a functional architecture in 3 attempts${archProblems.length ? `: ${archProblems.join("; ").slice(0, 400)}` : ""}. The approved design and its preview are preserved; only the backend plan is missing.`,
+          stopReason: "architecture_failed",
         });
       }
     }

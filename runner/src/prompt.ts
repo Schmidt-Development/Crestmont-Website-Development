@@ -230,7 +230,7 @@ export function localSystemPrompt(job: Job, skillNames: string[]): string {
   ].join("\n");
 }
 
-function fullstackPhase(job: Job, phase: Phase, starter: string, local: boolean): string[] {
+function fullstackPhase(job: Job, phase: Phase, starter: string, local: boolean, designing = false): string[] {
   const pkg = job.packageId ?? "custom";
   const check = `npm run check -- --package ${pkg}`;
   if (phase === "plan") return [
@@ -239,6 +239,21 @@ function fullstackPhase(job: Job, phase: Phase, starter: string, local: boolean)
     "Fill business.config.json ONLY from the brief: facts the customer did not give stay null and are listed in missingInformation (never invent addresses, hours, prices, licences, reviews or results); your own reasonable choices go in assumptions. Enable only features the customer asked for that this package includes (scripts/packages.json → packages." + pkg + ".capabilities); anything else is a scope change, recorded, not built.",
     "Produce .crestmont/plan.md: sitemap within the package page limit, content outline per page, design direction (tokens from the customer's brand), which features and backend extensions the scope needs, and the requirement keys each part satisfies.",
     "Write .crestmont/requirements.json from the seed, every item \"remaining\" unless it already exists.",
+  ];
+  // DESIGN PHASE: the frontend only.
+  //
+  // These instructions used to demand "the complete website ... working forms (data-api), the booking widget and
+  // manage pages" and "Extend the backend", while the design-first objective appended below told the same model to
+  // defer backend work until the design certified. The contradiction came FIRST, so the model read it first and
+  // spent its design turns on a backend nobody had asked it for yet. The two halves now agree.
+  if (phase === "build" && designing) return [
+    "Phase 2 of 3: build the approved VISUAL DESIGN (frontend only).",
+    "Configure and build the frontend from .crestmont/plan.md and SPEC.json, following STARTER.md: business.config.json, design tokens in public/assets/tokens.css (WCAG AA contrast), and every page in the approved sitemap with real copy from the customer data — never lorem ipsum or placeholders.",
+    "This phase is scored out of 40 from real browser screenshots at desktop (1366), tablet (768) and mobile (390). Spend your turns on what those screenshots show: composition and spacing, a real type scale, colour and contrast, imagery, a horizontal navigation bar on desktop with a working menu toggle on mobile, component polish, and page-to-page consistency.",
+    "Build every interactive component's APPEARANCE in all of its states — empty, filled, invalid, submitting, success, error — from safe deterministic mock data held in the frontend. Do NOT build customer-specific backend functionality in this phase: no new endpoints, no new migrations, no new backend tests. The starter's existing foundation may be used as it already is where a page needs it to render, or to demonstrate an interaction safely.",
+    "Imagery: the website needs real, visible images. Use only assets you are entitled to publish — the customer's own files in customer-files/, what the starter ships, or artwork you author yourself (SVG counts; an authored illustration is far better than an empty space). The Design Gallery references are REFERENCES ONLY: study their composition, never copy their files into this website.",
+    "Secrets never go into the repository, config, frontend or logs.",
+    local ? "Report requirement statuses with report_requirement as you go (implemented_unverified until verified). Write each file completely; prefer edit_file for small changes." : "Update .crestmont/requirements.json as you go (implemented_unverified until verified).",
   ];
   if (phase === "build") return [
     "Phase 2 of 3: build.",
@@ -271,7 +286,10 @@ export function phasePrompt(job: Job, phase: Phase, ctx: { starter: string | nul
   }
   const standard = job.strategy === "standard";
   // Full-stack starter (all packages, protocol v1.5): a working backend, database and admin to configure and extend.
-  if (ctx.starter?.startsWith("fullstack-") && phase !== "repair") return [...lines, ...fullstackPhase(job, phase, ctx.starter, local), ...objective].join("\n");
+  // `designing` comes from the platform's verified build phase, so the starter's own instructions agree with the
+  // design-first objective appended below instead of contradicting it.
+  const designing = ctx.buildPhase === "design" || ctx.buildPhase === "design_locked";
+  if (ctx.starter?.startsWith("fullstack-") && phase !== "repair") return [...lines, ...fullstackPhase(job, phase, ctx.starter, local, designing), ...objective].join("\n");
   if (phase === "plan") {
     lines.push("Phase 1 of 3: plan.");
     lines.push("Read BRIEF.md (and BRIEF.json for exact values), REVISION-REQUEST.md if present, and customer-files/INDEX.json if present.");
