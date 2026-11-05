@@ -82,8 +82,41 @@ export async function syncStageFromJob(db: Db, job: { project_id: string; state:
 
 // ── Architect specification (structured master specification from the AI Architect) ──
 
+/**
+ * Which stage of planning a specification represents, and therefore which fields it must carry.
+ *
+ * "design" is the first planning stage: the sitemap, art direction, type scale, tokens, composition, imagery plan,
+ * components, responsive behaviour, interaction states, the deferred backend and testable design acceptance
+ * criteria. It deliberately carries NO backend architecture and NO task breakdown, because those cannot be planned
+ * honestly before the design exists.
+ *
+ * "full" is the complete contract: everything above plus the technical architecture and the ordered task
+ * breakdown, produced once the design is certified.
+ *
+ * Why this exists: build bld_889ff809c133920c929a7121 failed three times with HTTP 422
+ * ("technicalArchitecture is required; tasks must list at least one task") because the runner had been changed to
+ * produce a design-stage specification while this validator still demanded the full contract. The two halves of
+ * the same system disagreed, and nothing tested them together.
+ */
+export type SpecStage = "design" | "full";
+
+/** The fields each stage requires, in one place, so the runner and the platform cannot drift again. */
+export const SPEC_STAGE_REQUIRED: Readonly<Record<SpecStage, readonly string[]>> = Object.freeze({
+  design: Object.freeze(["projectSpec", "designSpec", "masterPrompt"]),
+  full: Object.freeze(["projectSpec", "designSpec", "technicalArchitecture", "masterPrompt"]),
+});
+
 export interface MasterSpec {
   schema: "crestmont.master-spec/1";
+  /**
+   * The planning stage this specification represents. Optional: a specification stored before this existed has
+   * none and is treated as "full", which is what it was validated as.
+   *
+   * The platform NEVER trusts a runner-supplied value for authorization. storeSpec() decides the stage from its
+   * own phase state and overwrites this field with that decision, so a runner cannot declare "design" to escape
+   * full validation in a later phase.
+   */
+  specStage?: SpecStage;
   projectSpec: string;
   designSpec: string;
   technicalArchitecture: string;
@@ -112,17 +145,30 @@ export interface MasterSpec {
 const s = (v: unknown, max: number) => typeof v === "string" ? v.slice(0, max) : "";
 const id = (v: unknown) => typeof v === "string" && /^[A-Za-z0-9._:-]{1,60}$/.test(v) ? v : null;
 
-/** Validate the structured specification; returns problems (empty = valid). Untrusted: it came from a model. */
-export function validateSpec(raw: unknown): { spec: MasterSpec | null; problems: string[] } {
+/**
+ * Validate the structured specification; returns problems (empty = valid). Untrusted: it came from a model.
+ *
+ * `stage` decides which fields are required (SPEC_STAGE_REQUIRED). It defaults to "full", so every existing
+ * caller and every legacy specification keeps exactly the validation it had. A design-stage specification is
+ * accepted without a technical architecture or a task breakdown and with those fields normalised to empty — it is
+ * NOT a complete specification, and `specStage` on the stored object records that, so a later phase cannot mistake
+ * one for the other.
+ */
+export function validateSpec(raw: unknown, stage: SpecStage = "full"): { spec: MasterSpec | null; problems: string[] } {
   const p: string[] = [];
   const o = raw && typeof raw === "object" ? raw as Record<string, unknown> : null;
   if (!o) return { spec: null, problems: ["specification is not an object"] };
   if (o.schema !== "crestmont.master-spec/1") p.push("schema must be crestmont.master-spec/1");
-  for (const k of ["projectSpec", "designSpec", "technicalArchitecture", "masterPrompt"]) if (typeof o[k] !== "string" || !(o[k] as string).trim()) p.push(`${k} is required`);
+  for (const k of SPEC_STAGE_REQUIRED[stage]) if (typeof o[k] !== "string" || !(o[k] as string).trim()) p.push(`${k} is required`);
   const tasks = Array.isArray(o.tasks) ? o.tasks : [];
-  if (!tasks.length) p.push("tasks must list at least one task");
+  // A task breakdown belongs to the functional architecture, which does not exist yet at the design stage.
+  if (!tasks.length && stage === "full") p.push("tasks must list at least one task");
   const ac = Array.isArray(o.acceptanceCriteria) ? o.acceptanceCriteria : [];
   if (!ac.length) p.push("acceptanceCriteria must list at least one criterion");
+  // The design stage has to be certifiable from screenshots, so it must carry at least one criterion that is.
+  if (stage === "design" && ac.length && !ac.some((x) => (x as { verification?: unknown }).verification === "screenshot")) {
+    p.push('a design-stage specification needs at least one acceptance criterion with verification "screenshot"');
+  }
   const taskIds = new Set<string>();
   const outTasks: MasterSpec["tasks"] = [];
   for (const t of tasks.slice(0, 200)) {
@@ -147,7 +193,8 @@ export function validateSpec(raw: unknown): { spec: MasterSpec | null; problems:
   const list = (v: unknown, max = 100) => (Array.isArray(v) ? v : []).filter((x): x is string => typeof x === "string").map((x) => x.slice(0, 500)).slice(0, max);
   return {
     spec: {
-      schema: "crestmont.master-spec/1", projectSpec: s(o.projectSpec, 20000), designSpec: s(o.designSpec, 20000), technicalArchitecture: s(o.technicalArchitecture, 20000),
+      schema: "crestmont.master-spec/1", specStage: stage,
+      projectSpec: s(o.projectSpec, 20000), designSpec: s(o.designSpec, 20000), technicalArchitecture: s(o.technicalArchitecture, 20000),
       // Stored only when the architect actually produced it. An absent or unusable phasePlan is left absent rather
       // than filled with an empty shell: the phase prompts then fall back to the undifferentiated specification,
       // which is honest, where an empty plan would read as "this website needs no design deliverables".
@@ -194,13 +241,17 @@ function hasCycle(tasks: { id: string; dependsOn: string[] }[]): boolean {
 
 /** Runner: store the Architect's specification (versioned) and seed the integration checklist from it. */
 export async function storeSpec(db: Db, job: { id: string; project_id: string; organization_id: string }, raw: unknown, provider: string) {
-  const { spec, problems } = validateSpec(raw);
-  if (!spec) throw new HttpError(422, `Invalid specification: ${problems.slice(0, 10).join("; ")}`);
+  // SERVER-AUTHORITATIVE stage. The phase comes from the platform's own record, never from the request: a runner
+  // that claimed "design" while the build sat in the functionality phase would otherwise skip full validation.
+  const phase = (await PH.phaseOf(db, job.id)).build_phase;
+  const stage: SpecStage = phase === "design" || phase === "design_locked" ? "design" : "full";
+  const { spec, problems } = validateSpec(raw, stage);
+  if (!spec) throw new HttpError(422, `Invalid ${stage}-stage specification: ${problems.slice(0, 10).join("; ")}`);
   const prov = /^[a-z0-9][a-z0-9:._-]{0,59}$/.test(provider) ? provider : "unknown";
   await setStage(db, job.project_id, "ARCHITECTING", `Specification received from ${prov}`, "runner");
   await db.prepare(`UPDATE build_pipeline SET spec_json = ?, spec_version = spec_version + 1, architect_provider = ?, updated_at = ? WHERE project_id = ?`).bind(JSON.stringify(spec), prov, nowIso(), job.project_id).run();
   for (const i of spec.integrations) await ensureIntegration(db, job.project_id, job.organization_id, i.key, i.name, i.purpose);
-  await audit(db, { actorKind: "system", action: "builds.spec_recorded", subjectType: "project", subjectId: job.project_id, organizationId: job.organization_id, details: { provider: prov, tasks: spec.tasks.length, criteria: spec.acceptanceCriteria.length } });
+  await audit(db, { actorKind: "system", action: "builds.spec_recorded", subjectType: "project", subjectId: job.project_id, organizationId: job.organization_id, details: { provider: prov, stage, phase, tasks: spec.tasks.length, criteria: spec.acceptanceCriteria.length } });
   await setStage(db, job.project_id, "BUILDING", "Building from the master specification", "runner");
   return { specVersion: (await getPipeline(db, job.project_id))!.spec_version };
 }

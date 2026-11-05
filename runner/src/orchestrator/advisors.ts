@@ -13,7 +13,12 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fenceFor } from "../prompt.ts";
 import type { ArchitectInput, CycleEvidence, GalleryReferenceInput, MasterSpec, ReviewVerdict } from "./contracts.ts";
-import { DESIGN_SPEC_JSON_SCHEMA, REVIEW_JSON_SCHEMA, SPEC_SCHEMA, extractJson, outstanding, parseVerdict } from "./contracts.ts";
+import { ARCHITECTURE_SPEC_JSON_SCHEMA, DESIGN_SPEC_JSON_SCHEMA, REVIEW_JSON_SCHEMA, SPEC_SCHEMA, extractJson, outstanding, parseVerdict } from "./contracts.ts";
+import { dataUrl, planVisionRequest } from "./vision.ts";
+import type { VisionPlan } from "./vision.ts";
+
+/** Headroom kept free so a corrective retry, which APPENDS the rejection text, cannot overflow the window. */
+export const VISION_RETRY_RESERVE = 2048;
 import type { AdapterBilling } from "./cost-guard.ts";
 import type { ModelProfile } from "../config.ts";
 import type { InferenceScheduler } from "../inference/scheduler.ts";
@@ -26,7 +31,9 @@ export interface Advisor {
   readonly billing: AdapterBilling;
   /** Honest capability notes shown to the Owner (e.g. "text-only: reference images not analysed"). */
   readonly notes: string[];
-  architect(input: ArchitectInput, corrections?: readonly string[]): Promise<unknown>;
+  architect(input: ArchitectInput, corrections?: readonly string[], opts?: { maxImages?: number }): Promise<unknown>;
+  /** Stage 3: the functional architecture for an already-certified design. Optional: not every adapter plans. */
+  architecture?(approved: MasterSpec, corrections?: readonly string[]): Promise<unknown>;
   review(spec: MasterSpec | null, evidence: CycleEvidence, cycle: number, ctx?: ReviewContext): Promise<ReviewVerdict>;
 }
 
@@ -228,19 +235,38 @@ export class LocalModelAdvisor implements Advisor {
       o.model.vision ? "Vision: the reviewer receives the desktop and mobile screenshots themselves." : "Text-only: the reviewer judges the screenshot list and the browser-check results, not the images."];
   }
 
-  private async ask(role: "architect" | "reviewer", prompt: string, images: { path: string; label: string }[] = []): Promise<unknown> {
+  /** What the last ask() actually sent and left out, for the caller's evidence and notes. */
+  lastVisionPlan: VisionPlan | null = null;
+
+  private async ask(role: "architect" | "reviewer", prompt: string, images: { path: string; label: string }[] = [], maxImages = 6): Promise<unknown> {
     const system = role === "architect"
       ? "You are the website architect session (Model A). You can only read files with the tools given. You never write files or run commands. Your final answer is one JSON object and nothing else."
       : "You are the independent review session (Model A). You did not build this website. You can only read files with the tools given; you never change anything. Judge from evidence, not from the builder's claims. Your final answer is one JSON object and nothing else.";
+    // Budget the request BEFORE building it. Six full-page references cost ~48,000 tokens on a Qwen-VL patch grid
+    // and overflowed a 49,152-token window by 34 tokens on bld_889ff809c133920c929a7121. Images are kept in the
+    // order the caller gave (most relevant first) and only as many as genuinely fit, with retry headroom reserved
+    // so an appended correction cannot tip the next attempt over.
+    const promptTokens = Math.ceil((system.length + prompt.length) / 3.5)
+      + Math.ceil(JSON.stringify(readOnlyToolSpecs()).length / 3.5)
+      + images.length * 16; // the per-image label texts
+    const plan = planVisionRequest(images, {
+      windowTokens: this.o.model.contextTokens,
+      promptTokens,
+      reserveOutput: this.o.maxOutputTokens,
+      reserveRetry: VISION_RETRY_RESERVE,
+    }, maxImages);
+    this.lastVisionPlan = plan;
     const parts: ContentPart[] = [{ type: "text", text: prompt }];
-    for (const img of images) {
+    for (const img of plan.images) {
       // The label says what the image IS. It used to be hardcoded as "Screenshot", which was true while only the
       // reviewer sent images; the architect now also receives gallery references and customer uploads, and
       // calling those screenshots of the website under construction would mislead the model about what it sees.
       parts.push({ type: "text", text: img.label });
-      parts.push({ type: "image_url", image_url: { url: `data:image/png;base64,${readFileSync(img.path).toString("base64")}` } });
+      // The real MIME type, read from the file's own bytes. This was hardcoded to image/png for every attachment,
+      // including the JPEG and WebP references R2 serves.
+      parts.push({ type: "image_url", image_url: { url: dataUrl(img) } });
     }
-    const messages: ChatMessage[] = [{ role: "system", content: system }, { role: "user", content: images.length ? parts : prompt }];
+    const messages: ChatMessage[] = [{ role: "system", content: system }, { role: "user", content: plan.images.length ? parts : prompt }];
     let jsonRetries = 0;
     let told = false;
     for (let turn = 1; turn <= this.o.maxTurns; turn++) {
@@ -299,12 +325,14 @@ export class LocalModelAdvisor implements Advisor {
    */
   lastArchitectImages: { referenceId: string; path: string }[] = [];
 
-  architect(input: ArchitectInput, corrections: readonly string[] = []): Promise<unknown> {
+  async architect(input: ArchitectInput, corrections: readonly string[] = [], opts: { maxImages?: number } = {}): Promise<unknown> {
     const vision = this.o.model.vision;
     // Every image costs context, and Model A's window also has to hold the brief and the specification it is about
     // to write. Six total, the gallery's own selection size: the customer's own material keeps two of those places
     // when they have any, because their logo and photographs decide the brand where the gallery decides the craft.
-    const MAX_IMAGES = 6;
+    // Default six, but the caller lowers it after a context overflow: a request that overflowed must come back
+    // SMALLER, never resubmitted unchanged.
+    const MAX_IMAGES = Math.max(0, opts.maxImages ?? 6);
     const uploads = vision ? input.referenceImages.filter((r) => safeImageFile(r.path)) : [];
     const gallery = vision ? (input.galleryReferences ?? []).filter((g) => g.path && safeImageFile(g.path)) : [];
     const uploadSlots = Math.min(uploads.length, uploads.length ? 2 : 0);
@@ -327,9 +355,61 @@ export class LocalModelAdvisor implements Advisor {
     const fix = corrections.length
       ? `\n\nYour previous reply was REJECTED and is not in this conversation. Fix exactly these problems and answer again:\n${corrections.map((c) => `- ${c}`).join("\n")}\nDo not explain; return the corrected JSON object only.`
       : "";
-    return this.ask("architect", `${architectPrompt(input, this.lastArchitectImages.map((i) => i.referenceId), vision)}\n\nThe intake is also in BRIEF.json; the customer's files are listed in customer-files/INDEX.json (read them with read_file where they are text).${images.length ? ` ${images.length} image(s) are attached to this message.` : vision ? "" : " This model does not see images: judge only from the written notes."}\n\nPLAN THE DESIGN ONLY. Do not write an implementation prompt, a task breakdown or a technical architecture: those are planned later, after the design is certified. Keep the whole reply well inside your output budget — a truncated object is unusable and counts as no specification at all. Answer with the JSON object only, matching this JSON Schema:\n${JSON.stringify(DESIGN_SPEC_JSON_SCHEMA)}${fix}`, images);
+    // Decide which references actually fit BEFORE writing the prompt, using the largest prompt this call could
+    // produce as the estimate (an upper bound, so the real prompt is never bigger than what was budgeted for).
+    const upperBoundPrompt = architectPrompt(input, chosen.map((g) => g.id), vision).length + fix.length + JSON.stringify(DESIGN_SPEC_JSON_SCHEMA).length + 1200;
+    const preplan = planVisionRequest(images, {
+      windowTokens: this.o.model.contextTokens,
+      promptTokens: Math.ceil(upperBoundPrompt / 3.5) + Math.ceil(JSON.stringify(readOnlyToolSpecs()).length / 3.5),
+      reserveOutput: this.o.maxOutputTokens,
+      reserveRetry: VISION_RETRY_RESERVE,
+    }, MAX_IMAGES);
+    const attached = preplan.images;
+    const attachedPaths = new Set(attached.map((i) => i.path));
+    // Gallery references that did not survive the budget are reported to the caller and described to the model as
+    // NOT attached, never as images it is looking at.
+    const sentIds = chosen.filter((g) => attachedPaths.has(g.path as string)).map((g) => g.id);
+    if (preplan.dropped.length) {
+      this.notes.push(`request budget: ${attached.length} of ${images.length} image(s) attached for ${this.o.model.tag} (${this.o.model.contextTokens}-token window); ${preplan.dropped.length} left out`);
+    }
+    const answer = await this.ask("architect", `${architectPrompt(input, sentIds, vision)}\n\nThe intake is also in BRIEF.json; the customer's files are listed in customer-files/INDEX.json (read them with read_file where they are text).${attached.length ? ` ${attached.length} image(s) are attached to this message, in the order listed above.` : vision ? " No reference image fitted this model's context window; work from the written notes below." : " This model does not see images: judge only from the written notes."}\n\nPLAN THE DESIGN ONLY. Do not write an implementation prompt, a task breakdown or a technical architecture: those are planned later, after the design is certified. Keep the whole reply well inside your output budget — a truncated object is unusable and counts as no specification at all. Answer with the JSON object only, matching this JSON Schema:\n${JSON.stringify(DESIGN_SPEC_JSON_SCHEMA)}${fix}`, attached.map((i) => ({ path: i.path, label: i.label })), attached.length);
+    // Re-record the evidence from what the request ACTUALLY carried. ask() budgets the images against the model's
+    // window and may send fewer than were chosen; a reference the budget dropped was not seen, and reporting it as
+    // seen would be exactly the false claim design_reference_uses.model_saw exists to make falsifiable.
+    const sent = new Set((this.lastVisionPlan?.images ?? []).map((i) => i.path));
+    this.lastArchitectImages = this.lastArchitectImages.filter((i) => sent.has(i.path));
+    return answer;
   }
 
+  /**
+   * STAGE 3: the backend plan for a design that is already approved.
+   *
+   * No images are attached (maxImages 0): the design is settled and its appearance is not in question here, so
+   * the whole window goes to the approved design text and the plan instead of to screenshots.
+   */
+  async architecture(approved: MasterSpec, corrections: readonly string[] = []): Promise<unknown> {
+    const deferred = approved.phasePlan?.deferredBackend ?? [];
+    const fix = corrections.length
+      ? "\n\nYour previous reply was REJECTED. Fix exactly these problems and answer again:\n" + corrections.map((c) => "- " + c).join("\n") + "\nReturn the corrected JSON object only."
+      : "";
+    const prompt = [
+      "The visual design for this website has been built and independently certified. Your job now is the FUNCTIONAL ARCHITECTURE that makes it work, planned against that approved design.",
+      "",
+      "The approved design, which you must NOT restate, weaken or redesign:",
+      approved.designSpec,
+      "",
+      deferred.length
+        ? "The backend capabilities deliberately deferred during the design phase, now in scope:\n" + deferred.map((d) => "- " + d.capability + " (against: " + d.dependsOnDesign + ") - " + d.realImplementation).join("\n")
+        : "No deferred backend capabilities were recorded; plan the backend the approved design and the brief require.",
+      "",
+      "Plan the real implementation: routes with their request and response contracts, the data model and migrations, server-side validation, authentication and authorization, tenant isolation, rate limiting and idempotency, error handling, and an ordered task breakdown with dependencies. Every id used in dependsOn must exist in your own task list.",
+      "Plan only what the approved design and the customer's package actually require. Do not add features to look thorough, and do not plan an integration the customer has no account for: record that as a requirement instead.",
+      "",
+      "Answer with the JSON object only, matching this JSON Schema:",
+      JSON.stringify(ARCHITECTURE_SPEC_JSON_SCHEMA),
+    ].join("\n") + fix;
+    return this.ask("architect", prompt, [], 0);
+  }
   async review(spec: MasterSpec | null, evidence: CycleEvidence, cycle: number, ctx: ReviewContext = {}): Promise<ReviewVerdict> {
     // Vision models receive up to six screenshots (desktop, tablet and mobile of the first pages); others get the
     // list only. `vision` comes from the model's CONFIGURED capability, never from the model's own answer, so a
@@ -409,7 +489,7 @@ export class MockAdvisor implements Advisor {
   readonly calls: { kind: "architect" | "review"; cycle?: number; prompt: string }[] = [];
   private readonly script: { spec?: unknown; verdicts?: (ReviewVerdict | ((e: CycleEvidence, cycle: number) => ReviewVerdict))[] };
   constructor(script: { spec?: unknown; verdicts?: (ReviewVerdict | ((e: CycleEvidence, cycle: number) => ReviewVerdict))[] }) { this.script = script; }
-  async architect(input: ArchitectInput, _corrections: readonly string[] = []): Promise<unknown> { this.calls.push({ kind: "architect", prompt: architectPrompt(input) }); return this.script.spec; }
+  async architect(input: ArchitectInput, _corrections: readonly string[] = [], _opts: { maxImages?: number } = {}): Promise<unknown> { this.calls.push({ kind: "architect", prompt: architectPrompt(input) }); return this.script.spec; }
   async review(spec: MasterSpec | null, e: CycleEvidence, cycle: number, ctx: ReviewContext = {}): Promise<ReviewVerdict> {
     this.calls.push({ kind: "review", cycle, prompt: reviewPrompt(spec, e, cycle, ctx) });
     const v = this.script.verdicts?.[Math.min(cycle - 1, (this.script.verdicts?.length ?? 1) - 1)];

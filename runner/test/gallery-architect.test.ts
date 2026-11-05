@@ -21,16 +21,32 @@ const SPEC = {
   tasks: [], acceptanceCriteria: [], integrations: [], risks: [],
 };
 
+// 49,152 tokens: Node 1's actual LOCAL_MODEL_CONTEXT_TOKENS. The fixture used to say 8,192, in which three
+// 1366x768 references (~1,600 tokens each) plus the prompt genuinely do not fit — the request budgeter would
+// correctly send only one. Testing image delivery against a window the real deployment does not use would prove
+// nothing about the real deployment.
 const model = (vision: boolean): ModelProfile =>
-  ({ tag: vision ? "qwen3.8:27b-q4_K_M" : "text-only-model", role: "architect_reviewer", contextTokens: 8192, vramMb: 0, quantization: null, reasoning: null, vision, license: null });
+  ({ tag: vision ? "qwen3.8:27b-q4_K_M" : "text-only-model", role: "architect_reviewer", contextTokens: 49_152, vramMb: 0, quantization: null, reasoning: null, vision, license: null });
 
-/** A real PNG header on disk: the adapter reads and base64-encodes whatever it is given. */
-function pngs(n: number): { dir: string; files: string[] } {
+/**
+ * A PNG on disk with a REAL IHDR, including its width and height.
+ *
+ * The previous fixture stopped after the "IHDR" tag and carried no dimensions. That was enough while the adapter
+ * base64-encoded whatever it was handed, but the request budgeter reads an image's pixel dimensions to work out
+ * what it will cost — a 1920x4000 reference is ~9,800 tokens, which is how six of them overflowed a
+ * 49,152-token window — and it refuses anything it cannot parse rather than sending it mislabelled. A gallery
+ * image always has dimensions, so the fixture has them too.
+ */
+function pngs(n: number, width = 1366, height = 768): { dir: string; files: string[] } {
   const dir = mkdtempSync(path.join(tmpdir(), "gallery-"));
   const files: string[] = [];
   for (let i = 0; i < n; i++) {
     const p = path.join(dir, `ref${i}.png`);
-    writeFileSync(p, Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"));
+    const head = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"); // signature + IHDR length + "IHDR"
+    const dims = Buffer.alloc(8);
+    dims.writeUInt32BE(width, 0);
+    dims.writeUInt32BE(height, 4);
+    writeFileSync(p, Buffer.concat([head, dims, Buffer.alloc(5)])); // + bit depth/colour/compression/filter/interlace
     files.push(p);
   }
   return { dir, files };

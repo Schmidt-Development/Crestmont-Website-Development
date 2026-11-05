@@ -66,8 +66,18 @@ export interface PhasePlan {
   finalQuality: string[];
 }
 
+/**
+ * Which planning stage a specification represents. Mirrors SpecStage in src/services/build-pipeline.ts, which is
+ * authoritative: the platform decides the stage from its own phase record and overwrites whatever the runner sends.
+ * The runner sets it so the stored object is self-describing and so a resumed build can tell a design-stage plan
+ * from a complete one without asking.
+ */
+export type SpecStage = "design" | "full";
+
 export interface MasterSpec {
   schema: typeof SPEC_SCHEMA;
+  /** Absent on specifications stored before staged planning existed; those are complete ("full") by definition. */
+  specStage?: SpecStage;
   projectSpec: string;
   designSpec: string;
   technicalArchitecture: string;
@@ -212,6 +222,7 @@ export function validateDesignSpec(raw: unknown): SpecValidation {
   // may enrich this later. Empty arrays are truthful ("not planned yet"), never fabricated content.
   const spec: MasterSpec = {
     schema: SPEC_SCHEMA,
+    specStage: "design",
     projectSpec,
     designSpec,
     technicalArchitecture: typeof o.technicalArchitecture === "string" ? o.technicalArchitecture.trim() : "",
@@ -235,6 +246,77 @@ export function validateDesignSpec(raw: unknown): SpecValidation {
     ].filter((s) => s !== "").join("\n"),
   };
   return { ok: true, spec, problems: [] };
+}
+
+/**
+ * STAGE 3 of planning: the functional architecture, asked for only once the design is certified.
+ *
+ * This is the half the design stage deliberately leaves out — the backend architecture and the ordered task
+ * breakdown — and it is planned against the APPROVED design rather than guessed before it exists. Keeping it
+ * separate is what lets stage 1 fit a local model's output budget at all.
+ */
+export const ARCHITECTURE_SPEC_JSON_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["schema", "technicalArchitecture", "tasks"],
+  properties: {
+    schema: { type: "string", enum: [SPEC_SCHEMA] },
+    technicalArchitecture: { type: "string", description: "The real backend architecture for the approved design: routes, data model, validation, auth and storage." },
+    tasks: MASTER_SPEC_JSON_SCHEMA.properties.tasks,
+    integrations: MASTER_SPEC_JSON_SCHEMA.properties.integrations,
+    securityRequirements: { type: "array", items: { type: "string" } },
+    testingRequirements: { type: "array", items: { type: "string" } },
+  },
+} as const;
+
+/**
+ * Validate a stage-3 reply and merge it onto the approved design specification.
+ *
+ * The design half is carried over unchanged from the certified plan — the architect cannot quietly restate or
+ * weaken an approved design while adding the backend to it, which is the "preserve the frozen design" requirement
+ * expressed in the contract rather than left to a prompt.
+ */
+export function validateArchitectureSpec(raw: unknown, approved: MasterSpec): SpecValidation {
+  const problems: string[] = [];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, spec: null, problems: ["the reply was not a JSON object"] };
+  const o = raw as Record<string, unknown>;
+  if (typeof o.schema === "string" && o.schema !== SPEC_SCHEMA) problems.push(`"schema" must be "${SPEC_SCHEMA}"`);
+  const technicalArchitecture = typeof o.technicalArchitecture === "string" && o.technicalArchitecture.trim().length >= 80
+    ? o.technicalArchitecture.trim()
+    : (problems.push('"technicalArchitecture" must be a string of at least 80 characters describing the real backend'), "");
+
+  const ids = new Set<string>();
+  const tasks = (Array.isArray(o.tasks) ? o.tasks : [])
+    .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
+    .map((x, i) => ({
+      id: typeof x.id === "string" && /^[A-Za-z0-9._:-]{1,60}$/.test(x.id) ? x.id : `t-${i + 1}`,
+      title: String(x.title ?? "").trim().slice(0, 200),
+      workstream: String(x.workstream ?? "backend").trim().slice(0, 60) || "backend",
+      paths: strArray(x.paths, 40),
+      dependsOn: strArray(x.dependsOn, 40),
+    }))
+    .filter((t) => t.title !== "" && !ids.has(t.id) && (ids.add(t.id), true))
+    .slice(0, 200);
+  if (!tasks.length) problems.push('"tasks" must list at least one task with a title');
+  // Every dependency must name a task in this plan, or the ordering is meaningless.
+  const unknownDeps = tasks.flatMap((t) => t.dependsOn.filter((d) => !ids.has(d)));
+  if (unknownDeps.length) problems.push(`tasks depend on ids that are not in the plan: ${[...new Set(unknownDeps)].slice(0, 5).join(", ")}`);
+
+  if (problems.length) return { ok: false, spec: null, problems };
+  return {
+    ok: true,
+    problems: [],
+    spec: {
+      ...approved,
+      specStage: "full",
+      technicalArchitecture,
+      tasks,
+      integrations: (Array.isArray(o.integrations) ? o.integrations : [])
+        .filter((x): x is { key: string; name: string; purpose: string } => !!x && typeof x === "object" && typeof (x as { key?: unknown }).key === "string")
+        .map((x) => ({ key: x.key, name: String(x.name ?? x.key), purpose: String(x.purpose ?? "") })).slice(0, 40),
+      securityRequirements: strArray(o.securityRequirements),
+      testingRequirements: strArray(o.testingRequirements),
+    },
+  };
 }
 
 /** The structured implementation report a cycle produces (collected by the orchestrator, not self-reported only). */

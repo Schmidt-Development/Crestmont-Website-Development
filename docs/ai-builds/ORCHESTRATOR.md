@@ -432,3 +432,107 @@ prove the runner's bookkeeping, contracts and scheduling. They are **not** GPU e
 actually returns a valid `DESIGN_SPEC_JSON_SCHEMA` object, and whether the builder can reach 40/40, can only be
 established by a real build. The benchmark in `context-efficiency.test.ts` compares the old and new per-turn
 character budgets arithmetically and is labelled as such — it is not a measured GPU saving.
+
+## 17. The staged specification contract and multimodal budgeting (2026-11-04, after bld_889ff809c133920c929a7121)
+
+PR #140 made planning staged but changed only one side of the contract. The first build on it,
+`bld_889ff809c133920c929a7121`, failed all three attempts in planning — 10 minutes, **zero implementation turns**,
+$0 — and the failures were not the model's:
+
+| Attempt | What happened |
+|---|---|
+| 1 | Model A produced a design specification, all six images interpreted. **Platform returned 422**: `technicalArchitecture is required; tasks must list at least one task` |
+| 2 | Identical 422 |
+| 3 | **HTTP 400**: `request (49186 tokens) exceeds the available context size (49152 tokens)` |
+
+Attempts 1 and 2 prove the staged design plan works: `qwen3.8:27b` returns a valid one from the real intake. What
+failed was the contract between the runner and the platform, and then the retry that was supposed to fix it.
+
+### A. One phase-aware specification contract
+
+`runner/src/orchestrator/contracts.ts::validateDesignSpec()` leaves `technicalArchitecture: ""` and `tasks: []`,
+deliberately: a backend cannot be planned honestly before the design exists, and demanding both is what made the
+architect's reply too large to return at all. `src/services/build-pipeline.ts::validateSpec()` still required them.
+
+`validateSpec(raw, stage)` now takes a stage, with the required fields for each in one exported place
+(`SPEC_STAGE_REQUIRED`). The stage **defaults to `"full"`**, so every existing caller and every legacy
+specification keeps exactly the validation it had.
+
+The stage is **server-authoritative**. `storeSpec()` reads the phase from the platform's own record
+(`PH.phaseOf`) and ignores whatever `specStage` the runner sent, then overwrites that field with its own decision.
+A runner cannot declare `"design"` to escape full validation in the functionality phase, and cannot declare
+`"full"` to impose it in the design phase. Both directions are tested.
+
+A design-stage specification also has to carry at least one acceptance criterion with
+`verification: "screenshot"` — a design certified from screenshots needs at least one criterion screenshots can
+settle.
+
+### Stage 3: the functional architecture
+
+The half the design stage leaves out is planned once the design certifies, not guessed beforehand.
+`ARCHITECTURE_SPEC_JSON_SCHEMA` asks only for the technical architecture, the ordered task breakdown, integrations
+and the security and testing requirements; `validateArchitectureSpec()` validates it and **merges it onto the
+approved design**, carrying the design half over unchanged so the architect cannot quietly restate or weaken an
+approved design while adding a backend to it. Dangling `dependsOn` ids are refused. The runner runs this the first
+time the platform reports a phase past design, and fails with that diagnosis rather than letting the builder invent
+an architecture the platform never validated — the approved design and its preview are preserved either way.
+
+### B. Multimodal request budgeting
+
+`runner/src/orchestrator/vision.ts` is new. Two facts it is built on:
+
+- **An image costs tokens by its PIXEL DIMENSIONS, not its file size.** The gallery's references are full-page
+  captures: a 1920x4000 screenshot is ~11,300 tokens on a 28x28 patch grid. Six of them exceed a 49,152-token
+  window on their own, which is exactly what happened. File size would not have predicted it — those files are
+  1.8–2.4 MB each.
+- **The format must come from the bytes.** The adapter hardcoded `data:image/png` for every attachment while the
+  runner saves gallery images as `.jpg` or `.webp` when that is what R2 served.
+
+`planVisionRequest()` subtracts the prompt, the output reserve **and a retry reserve** from the window, then takes
+as many references as genuinely fit, in relevance order, recording why each excluded one was left out. The
+budgeting happens **before the prompt is written**, so `galleryBlock` names exactly the images that are attached —
+it would otherwise announce "Image 3" for a reference the budget had dropped, and telling the model truthfully what
+it is looking at is that block's entire purpose. `design_reference_uses.model_saw` is likewise recorded from what
+the request actually carried, not from what was chosen.
+
+Deliberately **not** implemented: re-encoding or downscaling. This repository has no image library, and shrinking a
+three-concept reference is how its design detail becomes unreadable. Sending fewer references at full fidelity is
+simpler and better for the design work. Corrupt, truncated, zero-byte, unknown-format and symlinked files are
+refused rather than sent mislabelled.
+
+### Classified retries
+
+The retry that killed attempt 3 appended the platform's rejection text to a request already at the window's edge.
+A rejection and an overflow need opposite responses, so retries are now classified:
+
+| Classification | Response |
+|---|---|
+| `overflow` | Halve the image cap and **drop** the correction text — the request must come back smaller |
+| `schema` | Feed the specific problems back for a corrective retry |
+| `permission` | No retry; it cannot fix itself and each attempt costs a model load |
+| `network` | Retry unchanged (transient) |
+
+Every attempt records its classification and what changed for the next one, on the build where a person can read
+it.
+
+### C. Instructions that no longer contradict each other
+
+`fullstackPhase()` told the design phase to build "the complete website ... working forms (data-api), the booking
+widget and manage pages" and to "Extend the backend", while the design-first objective appended below told the same
+model to defer backend work. The contradiction came **first**. The build phase now has a design-phase form —
+frontend only, interaction states from frontend mock data, no new endpoints, no new migrations, no new backend
+tests — selected from the platform's verified phase. The functionality phase keeps the original instructions
+unchanged.
+
+The design-phase instructions also state the imagery rule plainly: publish only assets the build is entitled to —
+the customer's own files, what the starter ships, or artwork the builder authors itself — and the Design Gallery is
+references only, never material to copy into a customer's website.
+
+### E. The contract test that was missing
+
+`tests/spec-contract.test.ts` imports the **runner's own** `validateDesignSpec` and pushes its output through the
+**real** `storeSpec()`. Every previous test either validated the runner's builder in isolation or drove the full job
+with a fixture that already returned a complete specification, so nothing put the two halves together. Seven tests
+now cover the regression, both directions of the server-authoritative stage, legacy specifications, stage 3 and its
+validation. `runner/test/vision-budget.test.ts` adds ten over image formats and the request budget, including the
+bld_889ff809 shape itself.

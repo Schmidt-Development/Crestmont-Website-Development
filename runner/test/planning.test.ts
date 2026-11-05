@@ -272,3 +272,57 @@ test("[AIB-PLAN] a platform that reports no phase keeps the original plan/build/
     assert.ok(instructions.some((i) => /^Phase 3/.test(i)), `a build with no reported phase still verifies (${instructions.join(" | ")})`);
   } finally { await r.model.close(); await r.cp.close(); }
 });
+
+// ── Failure B: retries are classified, and an overflow comes back SMALLER ──
+
+test("[AIB-PLAN] a context overflow shrinks the next request instead of repeating it, and the correction text is not appended", async () => {
+  const sizes: number[] = [];
+  const sawCorrection: boolean[] = [];
+  let architectCall = 0;
+  const r = await rig({
+    handler: (q) => {
+      if (!isArchitect(q)) return call("finish", { summary: "built" });
+      architectCall++;
+      const parts = Array.isArray(q.messages[1]?.content) ? q.messages[1].content as { type: string }[] : [];
+      sizes.push(parts.filter((p) => p.type === "image_url").length);
+      sawCorrection.push(/previous reply was REJECTED/.test(JSON.stringify(q.messages)));
+      // The model server refuses the first two attempts for context size, exactly as Ollama did.
+      if (architectCall <= 2) return { status: 400, body: JSON.stringify({ error: { message: "request (49186 tokens) exceeds the available context size (49152 tokens), try increasing it", type: "invalid_request_error" } }) };
+      return { content: JSON.stringify(GOOD) };
+    },
+  });
+  try {
+    const s = await runJob(r.job, deps(r));
+    // The build is not expected to succeed here; what matters is HOW it retried.
+    void s;
+    assert.ok(sizes.length >= 2, `the architect was called more than once (${sizes.length})`);
+    // An overflow must never be resubmitted unchanged: the image cap halves each time.
+    assert.ok(sizes[1] <= sizes[0], `attempt 2 carried no more images than attempt 1 (${sizes[0]} -> ${sizes[1]})`);
+    if (sizes.length >= 3) assert.ok(sizes[2] <= sizes[1], `and attempt 3 shrank again (${sizes[1]} -> ${sizes[2]})`);
+    // Appending the rejection text is what tipped the real request over the window, so an overflow retry must not.
+    assert.ok(!sawCorrection[1], "the overflow retry does not append the rejection text");
+    // The classification is recorded where a person can read it.
+    const notes = JSON.stringify(r.cp.calls.filter((c) => c.path.endsWith("/heartbeat")).map((c) => c.body));
+    assert.match(notes, /\[overflow\]/, "the failure is classified as an overflow in the build's own notes");
+    assert.match(notes, /images capped at/, "and the change made for the next attempt is recorded");
+  } finally { await r.model.close(); await r.cp.close(); }
+});
+
+test("[AIB-PLAN] a permission failure is not retried: it cannot fix itself and each attempt costs a model load", async () => {
+  let architectCalls = 0;
+  const r = await rig({
+    handler: (q) => {
+      if (!isArchitect(q)) return { toolCalls: [{ name: "finish", arguments: { summary: "x" } }] };
+      architectCalls++;
+      return { status: 401, body: JSON.stringify({ error: { message: "unauthorized: bad api key" } }) };
+    },
+  });
+  try {
+    const s = await runJob(r.job, deps(r));
+    assert.equal(s.stopReason, "architect_failed");
+    assert.equal(architectCalls, 1, `a permission failure is attempted once, not three times (${architectCalls})`);
+    const notes = JSON.stringify(r.cp.calls.filter((c) => c.path.endsWith("/heartbeat")).map((c) => c.body));
+    assert.match(notes, /\[permission\]/);
+    assert.match(notes, /not retried/);
+  } finally { await r.model.close(); await r.cp.close(); }
+});
