@@ -339,7 +339,7 @@ test("[INFRA-006] a staging read survives a transient Cloudflare fault; a determ
       `import { appendFileSync, readFileSync } from "node:fs";`,
       `appendFileSync("${counter}", "x");`,
       `const n = readFileSync("${counter}", "utf8").length;`,
-      `if (n < 3) { process.stderr.write("[ERROR] D1_ERROR: internal error; reference = abc" + n + "\n"); process.exit(1); }`,
+      `if (n < 3) { process.stderr.write("[ERROR] D1_ERROR: internal error; reference = abc" + n); process.exit(1); }`,
       `process.stdout.write(JSON.stringify([{ results: [{ n }], success: true }]));`,
     ].join(LF));
     process.env.WRANGLER = `${process.execPath} ${stub}`;
@@ -354,7 +354,7 @@ test("[INFRA-006] a staging read survives a transient Cloudflare fault; a determ
     writeFileSync(bad, [
       `import { appendFileSync } from "node:fs";`,
       `appendFileSync("${badCounter}", "x");`,
-      `process.stderr.write("[ERROR] no such column: count\n");`,
+      `process.stderr.write("[ERROR] no such column: count");`,
       `process.exit(1);`,
     ].join(LF));
     process.env.WRANGLER = `${process.execPath} ${bad}`;
