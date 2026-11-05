@@ -46,6 +46,7 @@ No code, migration, domain or DNS has been applied to production. No payment, em
 | `EVIDENCE_INGEST_SECRET` | required | provision workflow (generated) | installed |
 | `MFA_ENCRYPTION_KEY` | **required** — the deploy now refuses without it | provision workflow (from `PRODUCTION_MFA_ENCRYPTION_KEY`) | **missing** |
 | `CRM_ERASURE_HMAC_KEY` | recommended | provision workflow (generated, never replaced) | missing |
+| `FILE_SCANNER_SECRET` | recommended (closes F-02 on production) | Founder, with the scanner it is shared with (ClamAV on Node 1); routes `/api/scan/*` arrive with PR #151 | not set: `/api/scan/*` answer 503, files stay `pending`, quarantined from share links and never labelled clean. It is the scanner's own credential, so phase 1 keeps `BUILD_RUNNER_SECRET` forbidden |
 | `FOUNDER_EMAIL` | recommended | Founder (`wrangler secret put`) | not set; launch approvals are recorded on staging, so it does not block production |
 | `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET` (+ `EMAIL_FROM` var) | at customer activation | Founder, after the Resend account (BLK-005) | not set |
 | `STRIPE_SECRET_KEY` (live), `STRIPE_WEBHOOK_SECRET` (+ `PAYMENTS_LIVE_AUTHORIZED = "yes"` var) | at customer activation | Founder, separate authorization | not set: production refuses every Stripe event until then |
