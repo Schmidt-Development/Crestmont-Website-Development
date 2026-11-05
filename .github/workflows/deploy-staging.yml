@@ -822,7 +822,7 @@ jobs:
             "SELECT path, status, message, substr(COALESCE(stack,''), 1, 400) AS stack, created_at FROM app_errors WHERE created_at > datetime('now','-90 minutes') ORDER BY id DESC LIMIT 60" > app-errors.json 2>/dev/null || { echo "::warning::Could not read the staging error log."; exit 0; }
           node -e '
             const rows = (JSON.parse(require("fs").readFileSync("app-errors.json","utf8"))[0]?.results) ?? [];
-            if (!rows.length) { console.log("::warning title=No application errors::The failing pages recorded nothing in app_errors in the last 90 minutes, so the failure is probably not an unhandled exception (a CSP refusal or a redirected subresource is not one)."); process.exit(0); }
+            if (!rows.length) { console.log("::warning title=No application errors::Nothing in app_errors for the last 90 minutes. That means one of two things, and they are NOT the same. Either the failure was not an unhandled exception (a CSP refusal, a redirected subresource or a non-500 status is not one), OR D1 itself was faulting - recordAppError writes to D1 and swallows its own failure, so a D1 outage is the one fault the error log cannot record. app.ts console.errors every unhandled error either way, so check the Worker logs (wrangler tail) before concluding the pages were healthy."); process.exit(0); }
             const e = (v) => String(v).replace(/%/g,"%25").replace(/\r/g,"%0D").replace(/\n/g,"%0A");
             // One annotation per distinct path+message, newest first, so sixty rows of the same fault do not
             // bury the other faults. The count says how often it happened.
