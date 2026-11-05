@@ -181,7 +181,11 @@ test("[PAY-005] printable receipt: stable unique number, payment/invoice/Stripe 
   assert.match(h1, new RegExp(p1.pi));
   assert.match(h1, new RegExp(p1.inv));
   assert.match(h1, /cs_test_seed/);
-  assert.match(h1, /legal business name will appear here once the legal entity is established/);
+  // BLK-006 / IDENT-001: the operating entity is recorded (Talent Revenue Systems LLC), so a receipt prints it
+  // instead of the "not established yet" placeholder. The brand stays on the customer-facing title.
+  assert.match(h1, /Talent Revenue Systems LLC/);
+  assert.ok(!/legal business name will appear here/.test(h1), "the placeholder is gone now the entity exists");
+  assert.match(h1, /Crestmont Website Development/, "the trading brand is still what the customer sees");
   assert.match(h1, new RegExp(`/portal/billing/receipts/${p1.pay}/pdf`));
   assert.match(h1, /Print version/);
   // Stable across views; unique across payments.
@@ -323,9 +327,13 @@ test("[CAT-007] an approved maintenance price applies to maintenance checkout on
   await decidePriceChange(t.db, actor, (r as { id: string }).id, "approved", "", t.now());
 
   const cust = await customerClient(t, "maint@lc.example", "Maint Co");
-  // Gate still refuses the real (unapproved-entitlements) plan.
-  assert.equal((await cust.c.post("/checkout/maintenance/essential", { terms: "1" })).status, 409);
-  const approved: Record<string, MaintenanceDef> = { ...MAINTENANCE_PLANS, essential: { ...MAINTENANCE_PLANS.essential, entitlementsStatus: "approved" } };
+  // The entitlements gate still refuses a plan that has not been approved...
+  const unapproved: Record<string, MaintenanceDef> = { ...MAINTENANCE_PLANS, essential: { ...MAINTENANCE_PLANS.essential, entitlementsStatus: "proposed_pending_founder_approval" } };
+  await assert.rejects(
+    (async () => startMaintenanceCheckout(await buildContext(new Request("http://crestmont.test/checkout/maintenance/essential", { headers: { cookie: `cm_session=${cust.c.cookies.get("cm_session")!}` } }), t.env), { id: cust.id, email: cust.email }, cust.organizationId, "essential", unapproved))(),
+    "an unapproved plan cannot be sold");
+  // ...and the real plan, whose entitlements the Founder approved (CAT-006/BLK-010), is purchasable.
+  const approved: Record<string, MaintenanceDef> = MAINTENANCE_PLANS;
   const ctxFor = async () => buildContext(new Request("http://crestmont.test/checkout/maintenance/essential", { headers: { cookie: `cm_session=${cust.c.cookies.get("cm_session")!}` } }), t.env);
   await startMaintenanceCheckout(await ctxFor(), { id: cust.id, email: cust.email }, cust.organizationId, "essential", approved);
   assert.equal(t.fake.checkouts.at(-1)!.lines[0].amountCents, 9_900, "before the effective date: catalog price");

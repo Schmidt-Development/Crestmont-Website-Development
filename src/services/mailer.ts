@@ -13,6 +13,7 @@
 // security), so no unsubscribe link is shown. A template marked "marketing" must be sent with an
 // unsubscribe URL and the layout then adds the link; sending marketing mail without one is refused.
 import { escapeHtml } from "../lib/html.ts";
+import { OPERATING_LEGAL_NAME } from "../domain/business-identity.ts";
 import type { AppContext } from "../app/context.ts";
 import type { Db } from "../lib/db.ts";
 
@@ -646,7 +647,7 @@ export const PENDING = {
 
 export function identityFrom(settings: Record<string, string>): MailIdentity {
   const v = (k: string) => settings[k]?.trim() || null;
-  return { legalName: v("business.legal_name"), address: v("business.address"), contactEmail: v("contact.email") };
+  return { legalName: v("business.legal_name") ?? OPERATING_LEGAL_NAME, address: v("business.address"), contactEmail: v("contact.email") };
 }
 
 const oneLine = (s: string) => s.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, 250);

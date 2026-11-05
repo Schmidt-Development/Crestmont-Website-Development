@@ -2,6 +2,7 @@
 // (CMS-001..003) and Portfolio admin (PORT-007). Content: CMS-published revisions over the
 // repository defaults in src/content. Prices: only src/domain/catalog.ts.
 import type { Router } from "../lib/router.ts";
+import { legalNameFrom } from "../domain/business-identity.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, raw, safeUrl, formatCents, formatDate, formatDateTime, type SafeHtml } from "../lib/html.ts";
 import { HttpError, htmlResponse, redirect, str, securityHeaders } from "../app/http.ts";
@@ -326,7 +327,7 @@ const serviceKeys = () => SERVICES.filter((s) => s.pricing !== "maintenance").ma
 
 function legalFacts(ctx: AppContext): LegalFacts {
   return {
-    legalName: ctx.settings["business.legal_name"]?.trim() || null,
+    legalName: legalNameFrom(ctx.settings),
     address: ctx.settings["business.address"]?.trim() || null,
     staffedHours: ctx.settings["support.staffed_hours"]?.trim() || null,
     supportEmail: ctx.settings["contact.email"]?.trim() || SUPPORT_EMAIL,

@@ -148,12 +148,14 @@ test("[SUP-005] [WEB-004] /contact shows 'Staffed hours' only once support.staff
 
 test("[WEB-007] [CAT-006] hosting page: the automatic-billing renewal line appears only once maintenance entitlements are approved (CREST-GAP-090)", async () => {
   const { client } = await createTestApp();
-  assert.doesNotMatch(await (await client().get("/hosting-maintenance")).text(), /renew monthly by automatic billing/);
+  // Entitlements are Founder-approved (CAT-006/BLK-010), so the renewal terms are published.
+  assert.match(await (await client().get("/hosting-maintenance")).text(), /Plans renew monthly by automatic billing/);
   const plans = Object.values(MAINTENANCE_PLANS);
   const saved = plans.map((p) => p.entitlementsStatus);
   try {
-    for (const p of plans) (p as { entitlementsStatus: string }).entitlementsStatus = "approved";
-    assert.match(await (await client().get("/hosting-maintenance")).text(), /Plans renew monthly by automatic billing/);
+    // ...and the page falls silent again the moment any plan is not approved, which is the real contract.
+    for (const p of plans) (p as { entitlementsStatus: string }).entitlementsStatus = "proposed_pending_founder_approval";
+    assert.doesNotMatch(await (await client().get("/hosting-maintenance")).text(), /renew monthly by automatic billing/);
   } finally { plans.forEach((p, i) => ((p as { entitlementsStatus: string }).entitlementsStatus = saved[i])); }
 });
 

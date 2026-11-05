@@ -311,7 +311,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /q/:token": token("proposal token emailed to the lead", { token: "quoteToken" }),
   "POST /q/:token/accept": { access: { kind: "customer", admin: true }, params: { token: "quoteToken" }, audit: act("quote.accepted") },
   "GET /checkout/maintenance/:planId": cust({ planId: "plan" }),
-  "POST /checkout/maintenance/:planId": cust({ planId: "plan" }, blocked("no maintenance plan's entitlements are Founder-approved, so checkout returns 409 for every caller"), { admin: true }),
+  "POST /checkout/maintenance/:planId": cust({ planId: "plan" }, act("checkout.subscription_started"), { admin: true }),
   "GET /checkout/:packageId": cust({ packageId: "package" }),
   "POST /checkout/:packageId": cust({ packageId: "package" }, act("checkout.started"), { admin: true }),
 

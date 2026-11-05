@@ -143,10 +143,14 @@ test("[EMAIL-002] real sends use the registry and the Business settings identity
   assert.equal(mail?.subject, "Reset your Crestmont password");
   assert.match(mail!.text_body, /Crestmont Test Entity LLC \(TEST DATA\)/);
   assert.match(mail!.text_body, new RegExp(PENDING.address));
-  // Without a database the identity is pending, never invented.
+  // With nothing recorded in settings, the footer still states the confirmed operating entity (BLK-006) and
+  // leaves everything genuinely unknown as pending. Nothing is invented: the address and contact stay pending.
   const res = await sendMail({ email: new OutboxEmail(t.db) }, { template: "security_notification", to: "sec@email.example", idempotencyKey: "email002:sec", data: { event: "mfa_enabled" } });
   assert.equal(res.status, "queued");
-  assert.match((await lastEmail(t.db, "sec@email.example"))!.text_body, new RegExp(PENDING.legalName.replace(/[()]/g, "\\$&")));
+  const body = (await lastEmail(t.db, "sec@email.example"))!.text_body;
+  assert.match(body, /Talent Revenue Systems LLC/);
+  assert.match(body, new RegExp(PENDING.address));
+  assert.ok(!body.includes(PENDING.legalName), "the entity exists, so its name is not reported as pending");
 });
 
 test("[EMAIL-002] template preview page: Owner/administrator read-only catalogue of every template; everyone else refused", async () => {

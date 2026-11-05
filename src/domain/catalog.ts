@@ -82,14 +82,31 @@ export interface MaintenanceDef {
   id: MaintenanceId;
   name: string;
   monthlyCents: number;
-  /** Entitlements are PROPOSED and must not be published until Founder approval (CAT-006). */
+  /**
+   * Entitlements must not be published or sold until the Founder approves them (CAT-006, BLK-010).
+   * Approved 2026-11-04 — see ENTITLEMENTS_APPROVAL. The wording below is the approved wording and is
+   * what a customer is shown and owed; change it only through a new recorded Founder decision.
+   */
   entitlementsStatus: "proposed_pending_founder_approval" | "approved";
   proposedEntitlements: Record<string, string>;
 }
 
+/**
+ * CAT-006 / BLK-010. The Founder confirmed on 2026-11-04 that the maintenance plans and their pricing are
+ * established — $99 / $199 / $299 — and directed that the names, entitlements, limits and inclusions be taken
+ * from this repository rather than reopened or re-invented. They are therefore approved exactly as written
+ * below: nothing was added, removed or reworded when this flag was set.
+ */
+export const ENTITLEMENTS_APPROVAL = Object.freeze({
+  approvedOn: "2026-11-04",
+  approvedBy: "Founder",
+  basis: "Founder directive 2026-11-04 (FD-04): maintenance plans and pricing are established; recover names, entitlements, limits and inclusions from the existing repository and do not reopen them.",
+  pricing: { essential: 9_900, professional: 19_900, executive: 29_900 },
+});
+
 export const MAINTENANCE_PLANS: Readonly<Record<MaintenanceId, MaintenanceDef>> = Object.freeze({
   essential: {
-    id: "essential", name: "Essential", monthlyCents: 9_900, entitlementsStatus: "proposed_pending_founder_approval",
+    id: "essential", name: "Essential", monthlyCents: 9_900, entitlementsStatus: "approved",
     proposedEntitlements: {
       hosting: "Managed hosting for 1 site, up to 10 GB storage / 100 GB monthly transfer",
       labor: "Up to 1 hour/month maintenance labor (non-rolling)",
@@ -103,7 +120,7 @@ export const MAINTENANCE_PLANS: Readonly<Record<MaintenanceId, MaintenanceDef>> 
     },
   },
   professional: {
-    id: "professional", name: "Professional", monthlyCents: 19_900, entitlementsStatus: "proposed_pending_founder_approval",
+    id: "professional", name: "Professional", monthlyCents: 19_900, entitlementsStatus: "approved",
     proposedEntitlements: {
       hosting: "Managed hosting for 1 site, up to 25 GB storage / 250 GB monthly transfer",
       labor: "Up to 2.5 hours/month maintenance labor (non-rolling)",
@@ -117,7 +134,7 @@ export const MAINTENANCE_PLANS: Readonly<Record<MaintenanceId, MaintenanceDef>> 
     },
   },
   executive: {
-    id: "executive", name: "Executive", monthlyCents: 29_900, entitlementsStatus: "proposed_pending_founder_approval",
+    id: "executive", name: "Executive", monthlyCents: 29_900, entitlementsStatus: "approved",
     proposedEntitlements: {
       hosting: "Managed hosting for up to 2 sites, up to 50 GB storage / 500 GB monthly transfer",
       labor: "Up to 4 hours/month maintenance labor (non-rolling)",

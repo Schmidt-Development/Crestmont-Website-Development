@@ -100,7 +100,7 @@ test("[CAT-001] service pages cover exactly the approved catalogue and nothing p
   for (const s of SERVICES) assert.ok(PUBLIC_PATHS.includes(servicePath(s)));
 });
 
-test("[WEB-003] [CAT-005] pricing comes only from the catalogue; maintenance entitlements stay unpublished", async () => {
+test("[WEB-003] [CAT-005] pricing comes only from the catalogue, and the Founder-approved maintenance entitlements are published", async () => {
   const { client } = await createTestApp();
   const c = client();
   const pricing = await (await c.get("/pricing")).text();
@@ -119,9 +119,10 @@ test("[WEB-003] [CAT-005] pricing comes only from the catalogue; maintenance ent
     const h = await (await c.get(page)).text();
     for (const m of Object.values(MAINTENANCE_PLANS)) {
       assert.ok(h.includes(m.name) && h.includes(`$${m.monthlyCents / 100}`), `${page} shows ${m.name}`);
-      for (const ent of Object.values(m.proposedEntitlements)) assert.ok(!h.includes(ent), `${page} must not publish proposed entitlement "${ent}"`);
+      // Approved entitlements ARE published: they are what the customer is owed (CAT-006/BLK-010).
+      if (page === "/hosting-maintenance") for (const ent of Object.values(m.proposedEntitlements)) assert.ok(h.includes(ent), `${page} publishes approved entitlement "${ent}"`);
     }
-    assert.match(h, /Full plan details will be published here once finalised/);
+    assert.doesNotMatch(h, /Full plan details will be published here once finalised/);
   }
 });
 

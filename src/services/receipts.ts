@@ -3,6 +3,7 @@
 // per payment from an AUTOINCREMENT sequence (CWD-R-000001 …): stable across views and unique.
 // Business identity comes only from business_settings; nothing is invented when it is unset.
 import type { Db } from "../lib/db.ts";
+import { legalNameFrom } from "../domain/business-identity.ts";
 import { nowIso } from "../lib/db.ts";
 import { HttpError } from "../app/http.ts";
 import { parseTaxDetail } from "./tax.ts";
@@ -56,7 +57,7 @@ export interface BusinessIdentity { tradingName: string; legalName: string | nul
 export function businessIdentity(settings: Record<string, string>): BusinessIdentity {
   return {
     tradingName: "Crestmont Website Development",
-    legalName: settings["business.legal_name"]?.trim() || null,
+    legalName: legalNameFrom(settings),
     address: settings["business.address"]?.trim() || null,
     billingEmail: "billing@crestmontwebsitedevelopment.com",
   };

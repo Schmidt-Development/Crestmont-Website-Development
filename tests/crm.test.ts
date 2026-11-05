@@ -425,14 +425,20 @@ test("[CAT-006] maintenance subscriptions are refused until the Founder approves
   const t = await app({ payments: true });
   const cust = await createCustomer(t.db);
   const c = t.client(); await c.login(cust.email);
-  const gated = await c.get("/checkout/maintenance/essential");
-  assert.equal(gated.status, 409);
-  assert.match(await gated.text(), /awaiting Founder approval/);
-  assert.equal((await c.post("/checkout/maintenance/professional", { terms: "1" })).status, 409);
-  assert.equal(t.fake.checkouts.length, 0);
+  // The entitlements gate still refuses a plan the Founder has not approved...
+  const plans = Object.values(MAINTENANCE_PLANS);
+  const saved = plans.map((p) => p.entitlementsStatus);
+  try {
+    for (const p of plans) (p as { entitlementsStatus: string }).entitlementsStatus = "proposed_pending_founder_approval";
+    const gated = await c.get("/checkout/maintenance/essential");
+    assert.equal(gated.status, 409);
+    assert.match(await gated.text(), /awaiting Founder approval/);
+    assert.equal((await c.post("/checkout/maintenance/professional", { terms: "1" })).status, 409);
+    assert.equal(t.fake.checkouts.length, 0);
+  } finally { plans.forEach((p, i) => ((p as { entitlementsStatus: string }).entitlementsStatus = saved[i])); }
 
-  // Same code path once approved (catalog copy marked approved; the real catalog is untouched).
-  const approved: Record<string, MaintenanceDef> = { ...MAINTENANCE_PLANS, essential: { ...MAINTENANCE_PLANS.essential, entitlementsStatus: "approved" } };
+  // ...and the real, Founder-approved catalogue (CAT-006/BLK-010) goes through the subscription path.
+  const approved: Record<string, MaintenanceDef> = MAINTENANCE_PLANS;
   const sessionCookie = c.cookies.get("cm_session")!;
   const ctx = await buildContext(new Request("http://crestmont.test/checkout/maintenance/essential", { headers: { cookie: `cm_session=${sessionCookie}` } }), t.env);
   const res = await startMaintenanceCheckout(ctx, { id: cust.id, email: cust.email }, cust.organizationId, "essential", approved);

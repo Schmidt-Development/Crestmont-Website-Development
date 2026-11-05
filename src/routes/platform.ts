@@ -178,7 +178,7 @@ ${alert("info", html`Package and maintenance <strong>pricing is not editable her
 ${formErrors(errors)}
 <form method="post" action="/staff/settings" class="card stack">${csrf(ctx)}
 <h2 class="card__title">Company identity</h2>
-${input({ name: "business.legal_name", id: "f-legal", label: "Legal business name", value: val("business.legal_name"), maxlength: 160, hint: "Leave blank until the legal entity is formed (BLK-006). Never enter a name that is not registered." })}
+${input({ name: "business.legal_name", id: "f-legal", label: "Legal business name", value: val("business.legal_name"), maxlength: 160, hint: "The operating entity confirmed by the Founder is Talent Revenue Systems LLC; Crestmont Website Development is the trading brand. Recording it here is what opens production checkout. Never enter a name that is not registered." })}
 <div class="alert alert--warn" role="note" data-testid="residential-warning"><strong>Registered business address only.</strong> Never enter a home or residential address — it is displayed publicly on the business-disclosures page and in email footers. Use a registered office, commercial mailbox or registered-agent address.</div>
 ${textarea({ name: "business.address", id: "f-address", label: "Registered business mailing address", value: val("business.address"), rows: 3, maxlength: 300 })}
 ${checkbox("address_confirm", "I confirm this is a registered business address and not a residence.", { checked: !!v?.address_confirm })}
