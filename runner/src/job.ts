@@ -564,68 +564,68 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     // Planning inputs, hoisted so BOTH the first-run planning block below and the blueprint stage after it can
     // use them. The blueprint stage used to live inside that block, which meant a resumed build -- one that
     // already has a stored specification and skips planning entirely -- never produced a blueprint.
-      const idx = (() => { try { return JSON.parse(readFileSync(path.join(ws.repo, "customer-files", "INDEX.json"), "utf8")) as { files: { id: string; savedAs: string; contentType: string; folder: string | null }[] }; } catch { return { files: [] }; } })();
-      const galleryReferences = await (async () => {
-        const sel = job.design;
-        if (!sel?.references?.length) {
-          tracker.note({ kind: "step", message: sel ? "design gallery: no references selected for this build" : "design gallery: this platform sent no selection" });
-          return [] as GalleryReferenceInput[];
-        }
-        const dir = path.join(ws!.dir, "gallery");
-        mkdirSync(dir, { recursive: true });
-        const out: GalleryReferenceInput[] = [];
-        let got = 0;
-        for (const r of sel.references) {
-          // Desktop first: it shows the whole composition, which is what a three-concept template needs.
-          const variant = (["desktop", "tablet", "mobile"] as const).find((v) => r.images.includes(v)) ?? null;
-          let file: string | null = null;
-          if (variant) {
-            try {
-              const img = await client.galleryImage(job, r.id, variant);
-              if (img) {
-                const ext = img.contentType === "image/jpeg" ? "jpg" : img.contentType === "image/webp" ? "webp" : "png";
-                file = path.join(dir, r.id + "-" + variant + "." + ext);
-                writeFileSync(file, Buffer.from(img.base64, "base64"));
-                got++;
-              }
-            } catch (err) {
-              // A reference that cannot be fetched is reported, never quietly counted as seen.
-              log.warn("gallery image fetch failed", { jobId: job.id, referenceId: r.id, error: errorMessage(err) });
-              file = null;
+    const idx = (() => { try { return JSON.parse(readFileSync(path.join(ws.repo, "customer-files", "INDEX.json"), "utf8")) as { files: { id: string; savedAs: string; contentType: string; folder: string | null }[] }; } catch { return { files: [] }; } })();
+    const galleryReferences = await (async () => {
+      const sel = job.design;
+      if (!sel?.references?.length) {
+        tracker.note({ kind: "step", message: sel ? "design gallery: no references selected for this build" : "design gallery: this platform sent no selection" });
+        return [] as GalleryReferenceInput[];
+      }
+      const dir = path.join(ws!.dir, "gallery");
+      mkdirSync(dir, { recursive: true });
+      const out: GalleryReferenceInput[] = [];
+      let got = 0;
+      for (const r of sel.references) {
+        // Desktop first: it shows the whole composition, which is what a three-concept template needs.
+        const variant = (["desktop", "tablet", "mobile"] as const).find((v) => r.images.includes(v)) ?? null;
+        let file: string | null = null;
+        if (variant) {
+          try {
+            const img = await client.galleryImage(job, r.id, variant);
+            if (img) {
+              const ext = img.contentType === "image/jpeg" ? "jpg" : img.contentType === "image/webp" ? "webp" : "png";
+              file = path.join(dir, r.id + "-" + variant + "." + ext);
+              writeFileSync(file, Buffer.from(img.base64, "base64"));
+              got++;
             }
+          } catch (err) {
+            // A reference that cannot be fetched is reported, never quietly counted as seen.
+            log.warn("gallery image fetch failed", { jobId: job.id, referenceId: r.id, error: errorMessage(err) });
+            file = null;
           }
-          out.push({ id: r.id, title: r.title, industry: r.industry, relevance: r.relevance, why: r.why, tags: r.tags, notes: r.notes, path: file, variant: file ? variant : null });
         }
-        for (const r of out) {
-          const facts = r.path ? imageFacts(r.path) : null;
-          upsert(manifest, {
-            id: r.id, kind: "gallery_reference", title: r.title,
-            originalPath: r.path ?? "", originalSha256: r.path ? sha256File(r.path) : "",
-            originalWidth: facts?.width ?? null, originalHeight: facts?.height ?? null,
-            // A gallery reference is another studio's work: looking at it is allowed, publishing it is not.
-            publishable: false,
-          });
-          if (!r.path) recordExclusion(manifest, r.id, { to: "architect", reason: "the image could not be retrieved from the platform", context: "gallery fetch" });
-        }
-        saveManifest(ws!.dir, manifest);
-        tracker.note({ kind: "step", message: "design gallery v" + sel.galleryVersion + ": " + got + " of " + sel.references.length + " reference image(s) retrieved — " + sel.reason });
-        return out;
-      })();
-      const input = {
-        brief: job.brief.content, referenceUrls: (job.brief.content.customerData.references ?? []).map((r: { url: string }) => r.url),
-        referenceImages: idx.files.filter((f) => /^image\//.test(f.contentType)).map((f) => ({ fileId: f.id, path: path.join(ws!.repo, "customer-files", f.savedAs), folder: f.folder, name: f.savedAs })),
-        maxSessions: 1,
-        galleryReferences,
-        skillNames,
-      };
-      const classify = (e: unknown): "overflow" | "schema" | "permission" | "network" | "other" => {
-        const m = errorMessage(e);
-        if (/exceeds the available context size|context length|too many tokens|maximum context/i.test(m)) return "overflow";
-        if (/\b(?:400|422)\b|Invalid .*specification|schema/i.test(m)) return "schema";
-        if (/\b(?:401|403)\b|unauthor|forbidden/i.test(m)) return "permission";
-        if (/\b(?:429|50\d)\b|timeout|ECONN|ETIMEDOUT|socket|network/i.test(m)) return "network";
-        return "other";
-      };
+        out.push({ id: r.id, title: r.title, industry: r.industry, relevance: r.relevance, why: r.why, tags: r.tags, notes: r.notes, path: file, variant: file ? variant : null });
+      }
+      for (const r of out) {
+        const facts = r.path ? imageFacts(r.path) : null;
+        upsert(manifest, {
+          id: r.id, kind: "gallery_reference", title: r.title,
+          originalPath: r.path ?? "", originalSha256: r.path ? sha256File(r.path) : "",
+          originalWidth: facts?.width ?? null, originalHeight: facts?.height ?? null,
+          // A gallery reference is another studio's work: looking at it is allowed, publishing it is not.
+          publishable: false,
+        });
+        if (!r.path) recordExclusion(manifest, r.id, { to: "architect", reason: "the image could not be retrieved from the platform", context: "gallery fetch" });
+      }
+      saveManifest(ws!.dir, manifest);
+      tracker.note({ kind: "step", message: "design gallery v" + sel.galleryVersion + ": " + got + " of " + sel.references.length + " reference image(s) retrieved — " + sel.reason });
+      return out;
+    })();
+    const input = {
+      brief: job.brief.content, referenceUrls: (job.brief.content.customerData.references ?? []).map((r: { url: string }) => r.url),
+      referenceImages: idx.files.filter((f) => /^image\//.test(f.contentType)).map((f) => ({ fileId: f.id, path: path.join(ws!.repo, "customer-files", f.savedAs), folder: f.folder, name: f.savedAs })),
+      maxSessions: 1,
+      galleryReferences,
+      skillNames,
+    };
+    const classify = (e: unknown): "overflow" | "schema" | "permission" | "network" | "other" => {
+      const m = errorMessage(e);
+      if (/exceeds the available context size|context length|too many tokens|maximum context/i.test(m)) return "overflow";
+      if (/\b(?:400|422)\b|Invalid .*specification|schema/i.test(m)) return "schema";
+      if (/\b(?:401|403)\b|unauthor|forbidden/i.test(m)) return "permission";
+      if (/\b(?:429|50\d)\b|timeout|ECONN|ETIMEDOUT|socket|network/i.test(m)) return "network";
+      return "other";
+    };
 
     if (!spec && architect) {
       // A. Model A architect session (fresh context, read-only) → validated, stored master specification.
