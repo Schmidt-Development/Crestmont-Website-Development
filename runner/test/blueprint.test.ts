@@ -14,7 +14,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  BLUEPRINT_SCHEMA, blueprintBrief, blueprintChecklist, blueprintInstructions, blueprintSummary,
+  BLUEPRINT_SCHEMA, blueprintBrief, blueprintChecklist, blueprintInstructions, blueprintSummary, isVague,
   blueprintTokensCss, validateBlueprint,
 } from "../src/orchestrator/blueprint.ts";
 
@@ -277,4 +277,30 @@ test("[BLUEPRINT] the summary states measured counts, never an impression", () =
   const s = blueprintSummary(b);
   assert.match(s, /1 page\(s\), 4 composed section\(s\), 3 component\(s\), 2 visual asset\(s\) \(1 photographic\)/);
   assert.match(s, /4-step type scale/);
+});
+
+// ── ReDoS ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+test("[BLUEPRINT] the vagueness check is linear: a model's filler text cannot hang the runner", () => {
+  // CodeQL on PR #150: "exponential backtracking on strings starting with 'tbd' and containing many repetitions
+  // of '\tna'". The old pattern had a leading \s* and a trailing [\s.,;-]* inside a repeated group, so every space
+  // could be consumed by either side. Measured on the old regex: 22 reps 627 ms, 26 reps 1,143 ms, 28 reps
+  // 4,521 ms -- roughly doubling every two words. The strings checked here are written by a model, so that is a
+  // hang reachable from ordinary output.
+  const hostile = "tbd" + "\tna".repeat(64) + "!";
+  const started = Date.now();
+  // It IS all filler (the trailing "!" is a separator, so it tokenises to tbd/na/na/...), and that verdict is
+  // correct. What this test is about is that reaching it takes no measurable time.
+  assert.equal(isVague(hostile), true);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 200, `took ${elapsed}ms; anything near a second means the backtracking is back`);
+});
+
+test("[BLUEPRINT] the vagueness check still means what it did", () => {
+  for (const s of ["clean", "Modern", "  nice, clean  ", "TBD", "n/a", "the premium", "various.", "etc"]) {
+    assert.equal(isVague(s), true, `"${s}" is nothing but filler`);
+  }
+  for (const s of ["", "a warm welcome for a visitor with a full garage", "Fraunces", "clean lines over a photograph of the fleet", "modern kitchens, photographed on site"]) {
+    assert.equal(isVague(s), false, `"${s}" says something`);
+  }
 });

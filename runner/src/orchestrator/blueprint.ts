@@ -245,14 +245,34 @@ export interface BlueprintValidation {
 const HEX = /^#(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
 const WITH_UNIT = /^-?\d*\.?\d+(?:rem|em|px|pt|%|vw|vh|ch)$/;
 /** Words that describe nothing. A design specification made of these is what this module exists to replace. */
-const VAGUE = /^(?:\s*(?:a |an |the )?(?:nice|clean|modern|professional|warm|cool|minimal|minimalist|simple|elegant|sleek|bold|fresh|premium|good|appropriate|suitable|standard|default|tbd|todo|n\/?a|various|etc)[\s.,;-]*)+$/i;
+const VAGUE_WORDS: ReadonlySet<string> = new Set([
+  "a", "an", "the",
+  "nice", "clean", "modern", "professional", "warm", "cool", "minimal", "minimalist", "simple", "elegant",
+  "sleek", "bold", "fresh", "premium", "good", "appropriate", "suitable", "standard", "default",
+  "tbd", "todo", "n/a", "na", "various", "etc",
+]);
+
+/**
+ * Is this value nothing but adjectives that describe nothing?
+ *
+ * Tokenised rather than matched with one regex, deliberately. The regex this replaces had a leading \s* and a
+ * trailing [\s.,;-]* inside a repeated group, so each space between two words could be consumed by either --
+ * ambiguity that makes backtracking exponential in the number of words (CodeQL: "exponential backtracking on
+ * strings starting with 'tbd' and containing many repetitions of '\tna'"). The strings checked here come
+ * straight from a model's reply, so that is a hang reachable from ordinary output, not only a crafted attack.
+ * Splitting on separators is linear and says the same thing more plainly.
+ */
+export function isVague(s: string): boolean {
+  const tokens = s.toLowerCase().split(/[^a-z/]+/).filter(Boolean);
+  return tokens.length > 0 && tokens.every((t) => VAGUE_WORDS.has(t));
+}
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
 /** A font family name, not a description of one. */
-const namedFamily = (s: string): boolean => !!s && !VAGUE.test(s) && !/^(?:a|an|the)\s/i.test(s) && !/\b(?:serif|sans[- ]serif|monospace|display|script)\b$/i.test(s.replace(/,.*$/, "").trim());
+const namedFamily = (s: string): boolean => !!s && !isVague(s) && !/^(?:a|an|the)\s/i.test(s) && !/\b(?:serif|sans[- ]serif|monospace|display|script)\b$/i.test(s.replace(/,.*$/, "").trim());
 
 /**
  * Validate a blueprint the architect returned.
@@ -304,7 +324,7 @@ export function validateBlueprint(raw: unknown, ctx: { sentReferenceIds?: readon
     if (!str(vi.radius)) p.push('visualIdentity.radius is required (use "0" for a deliberately hard-edged design)');
     if (!str(vi.elevation)) p.push("visualIdentity.elevation is required");
     if (!["generous", "balanced", "compact"].includes(str(vi.density))) p.push('visualIdentity.density must be "generous", "balanced" or "compact"');
-    if (str(vi.intent).length < BLUEPRINT_MIN.intentChars || VAGUE.test(str(vi.intent))) p.push(`visualIdentity.intent must say what a visitor should feel in a real sentence, not "${str(vi.intent).slice(0, 48)}"`);
+    if (str(vi.intent).length < BLUEPRINT_MIN.intentChars || isVague(str(vi.intent))) p.push(`visualIdentity.intent must say what a visitor should feel in a real sentence, not "${str(vi.intent).slice(0, 48)}"`);
   }
 
   // ── assets (validated before pages, because sections reference them) ──────────────────────────────────────────
@@ -352,8 +372,8 @@ export function validateBlueprint(raw: unknown, ctx: { sentReferenceIds?: readon
       else if (sectionIds.has(id)) p.push(`section id "${id}" is used twice; ids must be unique across the whole blueprint`);
       else sectionIds.add(id);
       if (!SECTION_LAYOUTS.includes(layout as SectionLayout)) p.push(`pages[${i}].sections[${j}] ("${id}") layout "${layout.slice(0, 30)}" is not a named layout. Pick one of: ${SECTION_LAYOUTS.join(", ")}`);
-      if (str(s.intent).length < BLUEPRINT_MIN.intentChars || VAGUE.test(str(s.intent))) p.push(`pages[${i}].sections[${j}] ("${id}") needs a real intent, not "${str(s.intent).slice(0, 40)}"`);
-      if (str(s.content).length < BLUEPRINT_MIN.contentChars || VAGUE.test(str(s.content))) p.push(`pages[${i}].sections[${j}] ("${id}") needs the actual content it carries (headline, supporting copy, what the controls say), not "${str(s.content).slice(0, 40)}"`);
+      if (str(s.intent).length < BLUEPRINT_MIN.intentChars || isVague(str(s.intent))) p.push(`pages[${i}].sections[${j}] ("${id}") needs a real intent, not "${str(s.intent).slice(0, 40)}"`);
+      if (str(s.content).length < BLUEPRINT_MIN.contentChars || isVague(str(s.content))) p.push(`pages[${i}].sections[${j}] ("${id}") needs the actual content it carries (headline, supporting copy, what the controls say), not "${str(s.content).slice(0, 40)}"`);
       const used = arr(s.assets).map(str).filter(Boolean);
       for (const a of used) if (!assets.some((x) => x.id === a)) p.push(`pages[${i}].sections[${j}] ("${id}") renders asset "${a}", which is not declared in visualAssets`);
       sections.push({ id, layout: layout as SectionLayout, intent: str(s.intent), content: str(s.content), assets: used });
@@ -376,7 +396,7 @@ export function validateBlueprint(raw: unknown, ctx: { sentReferenceIds?: readon
     if (!str(c.element)) p.push(`components[${i}].element is required`);
     const states = arr(c.states).map(str).filter(Boolean);
     if (!states.length) p.push(`components[${i}] ("${str(c.name)}") must list the states that have to exist; a component with no declared states cannot be reviewed`);
-    if (str(c.appearance).length < BLUEPRINT_MIN.intentChars || VAGUE.test(str(c.appearance))) p.push(`components[${i}] ("${str(c.name)}") needs its appearance in terms of the tokens, not "${str(c.appearance).slice(0, 40)}"`);
+    if (str(c.appearance).length < BLUEPRINT_MIN.intentChars || isVague(str(c.appearance))) p.push(`components[${i}] ("${str(c.name)}") needs its appearance in terms of the tokens, not "${str(c.appearance).slice(0, 40)}"`);
     components.push({ name: str(c.name), element: str(c.element), states, appearance: str(c.appearance) });
   });
 
@@ -396,7 +416,7 @@ export function validateBlueprint(raw: unknown, ctx: { sentReferenceIds?: readon
     const id = str(r.referenceId);
     if (!id) p.push(`referenceMapping[${i}].referenceId is required`);
     else if (sent.size && !sent.has(id)) p.push(`referenceMapping[${i}] cites reference "${id}", which was not among the references provided (${[...sent].slice(0, 6).join(", ")}). Cite only what you were actually shown.`);
-    if (str(r.borrowed).length < BLUEPRINT_MIN.intentChars || VAGUE.test(str(r.borrowed))) p.push(`referenceMapping[${i}] must name the specific quality taken ("the full-bleed photographic hero with the headline set over the image"), not "${str(r.borrowed).slice(0, 40)}"`);
+    if (str(r.borrowed).length < BLUEPRINT_MIN.intentChars || isVague(str(r.borrowed))) p.push(`referenceMapping[${i}] must name the specific quality taken ("the full-bleed photographic hero with the headline set over the image"), not "${str(r.borrowed).slice(0, 40)}"`);
     const to = str(r.appliesTo);
     if (!to) p.push(`referenceMapping[${i}].appliesTo is required`);
     else if (!sectionIds.has(to) && !pages.some((x) => x.route === to) && !components.some((x) => x.name === to)) {
