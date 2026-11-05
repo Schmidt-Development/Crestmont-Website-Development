@@ -22,6 +22,7 @@ import type { JobDeps } from "../src/job.ts";
 import { ControlPlaneClient } from "../src/control-plane.ts";
 import { silentLogger } from "../src/log.ts";
 import { DESIGN_SPEC_JSON_SCHEMA, SPEC_SCHEMA, validateDesignSpec } from "../src/orchestrator/contracts.ts";
+import { SECTION_ORDER } from "../src/orchestrator/blueprint-sections.ts";
 import type { Job } from "../src/protocol.ts";
 import type { RunnerConfig } from "../src/config.ts";
 import {
@@ -156,7 +157,10 @@ const deps = (r: Rig): JobDeps => ({
 });
 const isArchitect = (r: FakeModelRequest) => /website architect session/.test(String(r.messages[0]?.content ?? ""));
 /** The blueprint stage identifies itself in its own first line; everything else from the architect is stage 1 or 3. */
-const isBlueprint = (r: FakeModelRequest) => isArchitect(r) && /Your job now is the DESIGN BLUEPRINT/.test(r.messages.map((m) => String(m.content ?? "")).join("\n"));
+// Blueprint work arrives two ways: the whole document in one answer, and -- when that does not come -- one
+// section at a time. Both are the blueprint stage, so both are counted as it; otherwise a section request would
+// be miscounted as a design-specification attempt.
+const isBlueprint = (r: FakeModelRequest) => isArchitect(r) && /Your job now is the DESIGN BLUEPRINT|ONE section of the DESIGN BLUEPRINT/.test(r.messages.map((m) => String(m.content ?? "")).join("\n"));
 const isDesignSpec = (r: FakeModelRequest) => isArchitect(r) && !isBlueprint(r);
 const call = (name: string, args: Record<string, unknown>): FakeModelReply => ({ toolCalls: [{ name, arguments: args }] });
 /** Runner instructions the builder was actually given (one per scheduled phase). */
@@ -227,10 +231,13 @@ test("[AIB-PLAN] malformed output gets a bounded corrective retry: the problems 
     assert.equal(spec.phasePlan.designDeliverables.length, 3);
     assert.ok(r.cp.calls.some((c) => c.path.endsWith("/pipeline/spec")), "the specification was sent to the platform");
     // Planning is bounded, not an open loop -- per STAGE. The design specification took two attempts (one
-    // rejection, one corrected); the blueprint stage that follows it has its own bound of three, and a blueprint
-    // that never validates must not be retried forever either.
+    // rejection, one corrected). The blueprint stage is bounded too, but its bound is now three whole-document
+    // attempts PLUS at most one pass over the sections: when the single enormous answer does not arrive, the
+    // blueprint is asked for a section at a time rather than abandoned. That is still a fixed, small number of
+    // requests -- a blueprint that never validates is never retried forever.
     assert.ok(r.model.requests.filter(isDesignSpec).length <= 3, "the design specification stage is bounded");
-    assert.ok(r.model.requests.filter(isBlueprint).length <= 3, "the blueprint stage is bounded");
+    assert.ok(r.model.requests.filter(isBlueprint).length <= 3 + SECTION_ORDER.length,
+      `the blueprint stage is bounded (${r.model.requests.filter(isBlueprint).length} requests)`);
   } finally { await r.model.close(); await r.cp.close(); }
 });
 
@@ -310,7 +317,14 @@ test("[AIB-PLAN] a context overflow shrinks the next request instead of repeatin
     // The classification is recorded where a person can read it.
     const notes = JSON.stringify(r.cp.calls.filter((c) => c.path.endsWith("/heartbeat")).map((c) => c.body));
     assert.match(notes, /\[overflow\]/, "the failure is classified as an overflow in the build's own notes");
-    assert.match(notes, /images capped at/, "and the change made for the next attempt is recorded");
+    // And so is the change that made the next request smaller. There are now two remedies, and either is valid:
+    // the session reduces itself and carries on (clipping tool output, dropping inspection turns, and only as a
+    // last resort an image), or -- when it cannot be reduced far enough -- the attempt-level handler halves the
+    // image cap and tries again. The first is preferred because it keeps the inspection already paid for; before
+    // it existed, a request 33 tokens over the window threw away nine minutes of architect work on
+    // bld_dcb3063d445e6f8890d66516 and the build finished with no Design Blueprint at all.
+    assert.match(notes, /images capped at|clipped \d+ tool output|dropped \d+ inspection message|gave up \d+ image/,
+      "and the change made so the next request is smaller is recorded");
   } finally { await r.model.close(); await r.cp.close(); }
 });
 
