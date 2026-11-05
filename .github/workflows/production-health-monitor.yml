@@ -63,3 +63,18 @@ jobs:
             echo '```json'; cat /tmp/feeds.json 2>/dev/null | head -c 4000; echo; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           if [ -n "$fail" ]; then echo "::error title=Production unhealthy::$fail (after 3 attempts)"; exit 1; fi
+
+      # Phased launch (docs/PHASED-LAUNCH.md): a Worker secret can switch AI website generation on without any deploy or
+      # release check. Compare what the running Worker reports with the committed configuration on main; only a Worker
+      # MORE open than committed fails (a reviewed reopening waits for its deploy without raising an alarm).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: always() && steps.pre.outputs.ok == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: always() && steps.pre.outputs.ok == 'true'
+        with:
+          node-version: "22.x"
+      - name: AI website generation is not open beyond the committed configuration
+        if: always() && steps.pre.outputs.ok == 'true'
+        run: node --no-warnings scripts/phase-check.ts live wrangler.toml /tmp/app.json

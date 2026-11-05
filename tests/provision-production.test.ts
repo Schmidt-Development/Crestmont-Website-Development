@@ -74,7 +74,8 @@ test("[INFRA-005] provisioning workflow: manual, main-only, confirmed, Founder-g
   // Re-runs change no secret (a changed secret blocks rollbacks, Cloudflare 10220) unless explicitly asked.
   assert.match(wf, /replace_turnstile:\s*\n\s*description:[^\n]*\n\s*type: boolean\s*\n\s*default: false/);
   assert.match(wf, /grep -qx "\$name" && \[ "\$REPLACE_TURNSTILE" != "true" \][\s\S]*already set on \$WORKER: kept/);
-  assert.equal((wf.match(/secret put/g) ?? []).length, 3, "exactly three puts: Turnstile (loop), evidence, MFA key — each guarded");
+  assert.equal((wf.match(/secret put/g) ?? []).length, 4, "exactly four puts: Turnstile (loop), evidence, CRM erasure key, MFA key — each guarded");
+  assert.match(wf, /grep -qx CRM_ERASURE_HMAC_KEY; then\s+echo "CRM_ERASURE_HMAC_KEY already set on \$WORKER: kept \(never replaced\)\."/, "the erasure key is generated once and never replaced");
   assert.doesNotMatch(wf, /STRIPE_SECRET_KEY \||RESEND_API_KEY \||secret put (STRIPE|RESEND|RETELL|ANTHROPIC|BUILD_RUNNER|STAGING_ACCESS)/, "never installs a live-service or preview secret");
   assert.doesNotMatch(wf, /echo\s+["']?\$(PROD_TURNSTILE_SECRET|CLOUDFLARE_API_TOKEN|PROD_TURNSTILE_SITE_KEY)\b/, "never echoes a secret");
   assert.doesNotMatch(wf, /upload-artifact/, "no artifacts (public repository)");

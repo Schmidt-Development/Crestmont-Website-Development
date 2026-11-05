@@ -1,5 +1,6 @@
 // JSON API: health, CI evidence ingestion, Stripe webhooks, readiness report. Moved from the
 // foundation worker.ts unchanged in behaviour. /api routes never accept cookie-authenticated writes.
+import { aiBuildGate } from "../domain/ai-build-gate.ts";
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { HttpError, jsonResponse, securityHeaders } from "../app/http.ts";
@@ -91,7 +92,11 @@ export function register(r: Router) {
     await ctx.db.prepare("SELECT 1").first();
     // CREST-GAP-055: the running Worker states whether its FILES (R2) binding exists, independent of the deploy-time
     // file-storage:<env> feed. "not_configured" = uploads are disabled on this environment. Binding presence only.
-    return jsonResponse(ctx, 200, { status: "ok", environment: ctx.env.ENVIRONMENT, fileStorage: ctx.storage ? "bound" : "not_configured" });
+    // Phased launch: the RUNNING Worker states whether AI website generation is open. A Worker secret can override a
+    // committed [vars] value without a deploy, so the post-deploy checks and the scheduled production monitor compare
+    // this with the committed configuration (scripts/production-checks.ts, production-health-monitor.yml).
+    return jsonResponse(ctx, 200, { status: "ok", environment: ctx.env.ENVIRONMENT, fileStorage: ctx.storage ? "bound" : "not_configured",
+      aiBuildAutomation: aiBuildGate(ctx.env).open ? "on" : "off" });
   });
 
   r.post("/api/leads", async (ctx) => {

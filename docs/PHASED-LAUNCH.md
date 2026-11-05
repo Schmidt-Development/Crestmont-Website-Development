@@ -44,6 +44,11 @@ record one. `src/readiness/phased-release.ts` and `src/services/phased-release.t
   refuses if the commit's `wrangler.toml` would switch a deferred system on (`scripts/release-authorization.ts`) or the
   production Worker holds a secret that would (`scripts/phase-check.ts`: `BUILD_RUNNER_SECRET`, `AI_BUILD_AUTOMATION`,
   Retell keys, …).
+- **Checked while running**: a Worker secret overrides a `[vars]` value without any deploy, so `/api/health` reports
+  `aiBuildAutomation`. The post-deploy checks require it to equal the released configuration (a mismatch rolls the
+  deploy back), and `production-health-monitor.yml` fails whenever production is more open than committed.
+- **Required secrets**: the deploy also refuses before any change when the production Worker lacks
+  `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET`, `EVIDENCE_INGEST_SECRET` or `MFA_ENCRYPTION_KEY`.
 
 Tests: `tests/phased-release.test.ts`; route classification and audit: the security matrix.
 
