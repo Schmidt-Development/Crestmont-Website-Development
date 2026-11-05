@@ -498,6 +498,37 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: node --no-warnings scripts/wait-mfa-budget.ts --accounts access/demo-accounts.md --role owner --need 7 --timeout 1920
 
+      # The Worker's own account of a 500, which does NOT depend on D1 — the point of it.
+      #
+      # app_errors is written by recordAppError, which writes to D1, so when D1 is the fault the error log
+      # cannot record it: deploy #159 had four consecutive Owner modules at 500 and an empty app_errors, and
+      # the error-log step correctly reported "no application errors" for pages that plainly failed. app.ts
+      # console.errors every unhandled error regardless, and recordAppError now logs when its own write is
+      # lost, so the Worker's console says which of the two it was. The deploy's own message already told the
+      # reader to "check wrangler tail", which nobody could do — it needs a live stream at the moment of
+      # failure. So the deploy takes the stream itself.
+      #
+      # Read-only. Backgrounded so it costs no wall time, bounded by `timeout` so it can never outlive the
+      # job, and every captured line is redacted by scripts/worker-faults.ts before anything is printed:
+      # app.ts logs raw messages and this repository is public (F-18/F-19).
+      - name: Start capturing the Worker's own log (read-only, for the failures below)
+        id: tail_start
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          # 25 minutes covers verification and the browser journeys; the job's own timeout is the backstop.
+          nohup timeout 1500 $WRANGLER tail crestmont-platform-staging --env staging --format json \
+            > worker-tail.jsonl 2> worker-tail.err &
+          echo "$!" > worker-tail.pid
+          # Give it a moment to connect, so the first verified request is already in the stream.
+          sleep 8
+          if [ -s worker-tail.err ] && ! grep -qi "waiting for logs\|Connected" worker-tail.err; then
+            echo "::warning title=Worker log capture::Could not start the capture; the steps below fall back to app_errors alone."
+            sed -e 's/\x1b\[[0-9;]*m//g' worker-tail.err | tail -3
+          fi
+
       - name: Verify the full access sequence on the live site
         id: verify
         run: |
@@ -834,6 +865,20 @@ jobs:
       # alone and placed before the journeys, so deploy #150 — where verify passed and the journeys found
       # /staff/crm/leads/<id>, /api/assistant and /staff/readiness/runs/<id> at 500 — printed nothing. The whole
       # point of the step is the failure you did not anticipate, so it must not be gated on one predicted step.
+      # Stops the capture and reports what the Worker said, whenever any verification step failed. Runs
+      # BEFORE the app_errors step so the two accounts read together: the Worker's console says what the
+      # fault was, and app_errors says whether it could be recorded at all.
+      - name: What did the Worker itself say? (its own log, redacted)
+        if: always() && (steps.verify.outcome == 'failure' || steps.smoke.outcome == 'failure' || steps.e2e.outcome == 'failure'
+          || steps.crm_e2e.outcome == 'failure' || steps.research_e2e.outcome == 'failure'
+          || steps.outbound_e2e.outcome == 'failure' || steps.preview_render.outcome == 'failure')
+        continue-on-error: true
+        run: |
+          [ -f worker-tail.pid ] && kill "$(cat worker-tail.pid)" 2>/dev/null || true
+          sleep 2
+          node --no-warnings scripts/worker-faults.ts worker-tail.jsonl --title "Staging Worker"
+          rm -f worker-tail.jsonl worker-tail.err worker-tail.pid
+
       - name: Why did a page fail? (recent application errors, already redacted)
         if: always() && (steps.verify.outcome == 'failure' || steps.smoke.outcome == 'failure' || steps.e2e.outcome == 'failure'
           || steps.crm_e2e.outcome == 'failure' || steps.research_e2e.outcome == 'failure'
@@ -866,6 +911,16 @@ jobs:
             console.log(`${seen.size} distinct fault(s) in ${rows.length} recorded error(s).`);
           '
           rm -f app-errors.json
+
+      # The reporting step above stops the capture and deletes the files when it runs, but it only runs on a
+      # failure. This is the passing-deploy case: stop the stream so nothing outlives the job. It must stay
+      # AFTER the reporting step — placed before it, it deleted the capture the report was about to read.
+      - name: Stop the Worker log capture
+        if: always()
+        continue-on-error: true
+        run: |
+          [ -f worker-tail.pid ] && kill "$(cat worker-tail.pid)" 2>/dev/null || true
+          rm -f worker-tail.jsonl worker-tail.err worker-tail.pid
 
       - name: Fail the deploy when transport security on the live site is wrong
         if: always() && steps.tls.outcome == 'failure'
