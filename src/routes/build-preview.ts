@@ -380,7 +380,7 @@ ${table(revisions, [
   // A rolled-back revision carries its reason here, not only when it happens to be the one on screen: "show why the
   // repair was rejected" is the whole point of keeping it.
   { header: "State", cell: (x) => html`${x.is_design_baseline ? badge("ok", "Frozen design baseline") : ""} ${x.is_best ? badge("ok", "Best verified") : ""} ${x.reverted ? badge("bad", "Rolled back") : ""}${!x.is_best && !x.reverted && !x.is_design_baseline ? badge("muted", "Superseded") : ""}${x.reverted && x.reverted_reason ? html`<br><span class="faint">${x.reverted_reason}</span>` : ""}` },
-  // 0078: whether the cycle changed the website at all, measured by comparing the rendering source hash and every
+  // 0079: whether the cycle changed the website at all, measured by comparing the rendering source hash and every
   // screenshot hash with the previous cycle. "Not measured" is shown for revisions stored before the comparison
   // existed, because nine of them were listed as repairs when eight changed no rendered pixel.
   { header: "Changed the site", cell: (x) => x.effect === null ? badge("muted", "Not measured")
