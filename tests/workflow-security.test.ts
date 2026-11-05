@@ -86,6 +86,33 @@ test("[SEC-007] F-24: deploy workflows hold no secret at job level, and steps th
   assert.ok(e2e.run.indexOf("unset EVIDENCE_INGEST_SECRET") >= 0 && e2e.run.indexOf("unset EVIDENCE_INGEST_SECRET") < e2e.run.indexOf("npm install"), "evidence secret dropped before npm install");
 });
 
+test("[SEC-004] F-24 extended: no workflow holding the Cloudflare token at job level runs third-party package code", () => {
+  // F-24 above covers deploy-production.yml and deploy-staging.yml, where the token is given to individual
+  // steps so npm installs, Playwright and axe never see it. Four other workflows set it at JOB level, where
+  // every step sees it:
+  //
+  //   production-backup.yml:restore-verify   provision-production.yml:provision
+  //   staging-restore-drill.yml:drill        staging-rollback-rehearsal.yml:rehearse
+  //
+  // Today that is safe — audited 2026-11-05, every step in all four is first-party and uses wrangler — but it
+  // is safe by accident. Adding one `npm install` step to any of them would hand the Cloudflare token to
+  // package install scripts, and no test would have said a word. This is the test that says it.
+  //
+  // The fix if this ever fails is to move the secret down to the steps that need it, as the two deploy
+  // workflows already do, not to add an exception here.
+  const bad: string[] = [];
+  for (const f of files) {
+    const src = read(f);
+    if (!/secrets\.CLOUDFLARE_API_TOKEN/.test(jobEnv(src))) continue; // step-level: already covered by F-24
+    for (const s of steps(src)) {
+      if (/\bnpm (install|ci|test)\b|\bnpx (?!--yes wrangler|wrangler)|playwright install/.test(s.run)) {
+        bad.push(`${f} › ${s.name}: runs package code in a job that holds the Cloudflare token at job level`);
+      }
+    }
+  }
+  assert.deepEqual(bad, [], "give the token to the steps that need it instead of to the whole job");
+});
+
 test("[SEC-007] F-18/F-19: no workflow uploads unsealed access notes, credentials or a database export as an artifact", () => {
   const bad: string[] = [];
   for (const f of files) for (const s of steps(read(f))) {

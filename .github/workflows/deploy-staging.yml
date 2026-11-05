@@ -84,6 +84,13 @@ jobs:
         with:
           node-version: "22.x"   # >= 22.18 for native TypeScript
 
+      # The error-log step below reads app_errors for THIS deploy only. A fixed 90-minute window made
+      # deploy #153 report seven faults that were deploy #151's — the same five Cloudflare reference ids,
+      # still inside the window — while #153's own failure had recorded nothing. Stale rows presented as
+      # current evidence are worse than no evidence.
+      - name: Mark when this deploy started (the error-log window)
+        run: echo "DEPLOY_STARTED_AT=$(date -u -d '2 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
       - name: Install dev tooling
         run: npm install --no-save --ignore-scripts typescript@5 @types/node@22
 
@@ -369,6 +376,21 @@ jobs:
           if [ -n "$RUNNER_SECRET" ]; then printf '%s' "$RUNNER_SECRET" | node --no-warnings scripts/staging-secrets.ts put BUILD_RUNNER_SECRET
           else echo "BUILD_RUNNER_SECRET not provided: AI Builds execution stays unavailable on staging (builds wait in the queue)."; fi
 
+      # SEC-03. The malware scanner's OWN credential, deliberately not BUILD_RUNNER_SECRET: a file scanner
+      # must not be able to claim build jobs or deploy previews, and the production deploy preflight refuses
+      # a deploy while BUILD_RUNNER_SECRET is on the production Worker, so sharing one would have blocked
+      # production scanning entirely. Absent means /api/scan/* answers 503, files stay 'pending' and nothing
+      # is ever labelled clean without a verdict.
+      - name: Malware scanner secret (only when the Founder has provided one)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SCANNER_SECRET: ${{ secrets.FILE_SCANNER_SECRET }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$SCANNER_SECRET" ]; then printf '%s' "$SCANNER_SECRET" | node --no-warnings scripts/staging-secrets.ts put FILE_SCANNER_SECRET
+          else echo "FILE_SCANNER_SECRET not provided: /api/scan/* answers 503, uploads stay scan_status=pending and quarantined from share links (F-02)."; fi
+
       # Retell, two workspaces (src/adapters/retell-workspaces.ts): RETELL_INBOUND_API_KEY (receptionist) and
       # RETELL_OUTBOUND_API_KEY (sales agent + Self-Improvement Engine). Keys already set on the Worker by hand are kept:
       # a key is put only when the matching `staging` environment secret exists AND its value changed (rollback-safe);
@@ -494,7 +516,11 @@ jobs:
         continue-on-error: true
         env:
           BASE: ${{ steps.deploy.outputs.url }}
-        run: node --no-warnings scripts/tls-check.ts "$BASE" --json evidence/tls-check.json | tee -a "$GITHUB_STEP_SUMMARY"
+        run: |
+          # pipefail, or `| tee` returns tee's exit status and the step always succeeds — which is exactly
+          # what happened in deploy #154: the check reported two failures and the gate below was skipped.
+          set -o pipefail
+          node --no-warnings scripts/tls-check.ts "$BASE" --env staging --json evidence/tls-check.json | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Smoke checks on the public site (fresh visitor, no cookies)
         id: smoke
@@ -818,11 +844,13 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           # 90 minutes: the whole deploy, with room to spare, so an error from an early step is still in range.
+          # Only this deploy's errors. DEPLOY_STARTED_AT is the runner's clock less two minutes, against
+          # created_at from the Worker's clock, so the margin covers ordinary skew between them.
           $WRANGLER d1 execute crestmont-staging --remote --env staging --json --command \
-            "SELECT path, status, message, substr(COALESCE(stack,''), 1, 400) AS stack, created_at FROM app_errors WHERE created_at > datetime('now','-90 minutes') ORDER BY id DESC LIMIT 60" > app-errors.json 2>/dev/null || { echo "::warning::Could not read the staging error log."; exit 0; }
+            "SELECT path, status, message, substr(COALESCE(stack,''), 1, 400) AS stack, created_at FROM app_errors WHERE created_at > '$DEPLOY_STARTED_AT' ORDER BY id DESC LIMIT 60" > app-errors.json 2>/dev/null || { echo "::warning::Could not read the staging error log."; exit 0; }
           node -e '
             const rows = (JSON.parse(require("fs").readFileSync("app-errors.json","utf8"))[0]?.results) ?? [];
-            if (!rows.length) { console.log("::warning title=No application errors::Nothing in app_errors for the last 90 minutes. That means one of two things, and they are NOT the same. Either the failure was not an unhandled exception (a CSP refusal, a redirected subresource or a non-500 status is not one), OR D1 itself was faulting - recordAppError writes to D1 and swallows its own failure, so a D1 outage is the one fault the error log cannot record. app.ts console.errors every unhandled error either way, so check the Worker logs (wrangler tail) before concluding the pages were healthy."); process.exit(0); }
+            if (!rows.length) { console.log("::warning title=No application errors::Nothing in app_errors since this deploy started. That means one of two things, and they are NOT the same. Either the failure was not an unhandled exception (a CSP refusal, a redirected subresource or a non-500 status is not one), OR D1 itself was faulting - recordAppError writes to D1 and swallows its own failure, so a D1 outage is the one fault the error log cannot record (it now logs the loss to the Worker log instead). app.ts console.errors every unhandled error either way, so check wrangler tail before concluding the pages were healthy. This window is THIS deploy only; an earlier deploy\'s faults are deliberately not shown."); process.exit(0); }
             const e = (v) => String(v).replace(/%/g,"%25").replace(/\r/g,"%0D").replace(/\n/g,"%0A");
             // One annotation per distinct path+message, newest first, so sixty rows of the same fault do not
             // bury the other faults. The count says how often it happened.

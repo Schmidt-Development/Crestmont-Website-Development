@@ -11,20 +11,56 @@
 //   · TLS 1.2 and 1.3 both complete
 //   · TLS 1.0 and 1.1 are refused (PCI DSS and every current baseline; Cloudflare's default minimum is 1.0,
 //     which is a setting the Owner can raise, so this check is what tells them it needs raising)
-//   · the live response carries Strict-Transport-Security with max-age >= 1 year
+//   · the live response carries Strict-Transport-Security with exactly the max-age this environment is
+//     configured to send (production's first release deliberately sends 300, not a year: CREST-GAP-029)
 //   · http:// does not serve the site: it must redirect to https:// (301/302/307/308) or refuse
 //
-// Usage: node --no-warnings scripts/tls-check.ts <https url> [--json <file>]
+// Usage: node --no-warnings scripts/tls-check.ts <https url> [--env <wrangler env>] [--json <file>]
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 export interface TlsProbe { label: string; ok: boolean; detail: string; fatal: boolean }
 
+/**
+ * `host:port` for `openssl s_client -connect`. URL.host omits the port when it is the scheme default, and
+ * `-connect host` with no port does not reach 443 — which is why deploy #154 reported
+ * "certificate not expiring — could not read notAfter" against a certificate that was perfectly readable.
+ */
+export function sclientTarget(url: string): string {
+  const u = new URL(url);
+  return `${u.hostname}:${u.port || "443"}`;
+}
+
 /** Minimum remaining certificate life. Cloudflare renews well before this, so less means renewal is stuck. */
 export const MIN_CERT_DAYS = 14;
-/** One year, the HSTS floor preload requires and the floor this platform sets by default. */
-export const MIN_HSTS_MAX_AGE = 31_536_000;
+/**
+ * The max-age an environment is CONFIGURED to send, mirroring src/app/http.ts hstsValue(): no HSTS_MAX_AGE
+ * means the two-year default that staging and development send; a numeric value means exactly that; an
+ * unusable one falls back to 300 rather than to two years, so a typo can never pin browsers for years.
+ *
+ * This is derived rather than fixed because a universal floor is the wrong rule. The first version of this
+ * check required a year, which would have failed production's FIRST RELEASE on purpose: it deliberately
+ * sends HSTS_MAX_AGE = "300" while the ramp-up is validated (CREST-GAP-029). The production-preparation
+ * session spotted that before it could bite. The real property is that the live header is what this
+ * environment is configured to send — a missing header, and a two-year header where 300 was intended, are
+ * both failures.
+ */
+export function expectedHstsMaxAge(toml: string, env: string): number {
+  const DEFAULT_MAX_AGE = 63_072_000;
+  const lines = toml.split("\n");
+  const start = lines.findIndex((l) => l.trim() === `[env.${env}]`);
+  if (start < 0) return DEFAULT_MAX_AGE;
+  const block: string[] = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (/^\s*\[/.test(l) && !l.trim().startsWith(`[env.${env}.`)) break;
+    block.push(l);
+  }
+  const raw = /HSTS_MAX_AGE\s*=\s*"([^"]*)"/.exec(block.join("\n").replace(/#.*$/gm, ""))?.[1]?.trim();
+  if (raw === undefined || raw === "") return DEFAULT_MAX_AGE;
+  return /^\d{1,9}$/.test(raw) ? Number(raw) : 300;
+}
 
 /** `max-age` from a Strict-Transport-Security header, or null when absent or unparsable. */
 export function hstsMaxAge(header: string | null | undefined): number | null {
@@ -47,6 +83,8 @@ export interface TlsFacts {
   daysLeft: number | null;
   tls12: boolean; tls13: boolean; tls10Refused: boolean; tls11Refused: boolean;
   hsts: string | null;
+  /** The max-age this environment is configured to send; the live header must carry exactly it. */
+  expectedHstsMaxAge: number;
   httpStatus: number | null; httpLocation: string | null;
 }
 
@@ -66,13 +104,22 @@ export function evaluate(f: TlsFacts, now = new Date()): TlsProbe[] {
   add("TLS 1.1 refused", f.tls11Refused, f.tls11Refused ? "refused" : "ACCEPTED — raise the minimum TLS version to 1.2 in Cloudflare (SSL/TLS → Edge Certificates)", false);
 
   const age = hstsMaxAge(f.hsts);
-  add("HSTS on the live response", age !== null && age >= MIN_HSTS_MAX_AGE,
-    age === null ? `no usable Strict-Transport-Security header (${f.hsts ?? "absent"})` : `max-age=${age} (minimum ${MIN_HSTS_MAX_AGE})`);
+  add("HSTS matches this environment's configuration", age === f.expectedHstsMaxAge,
+    age === null ? `no usable Strict-Transport-Security header (${f.hsts ?? "absent"}); expected max-age=${f.expectedHstsMaxAge}`
+      : age === f.expectedHstsMaxAge ? `max-age=${age}, as configured`
+      : `max-age=${age} but this environment is configured for ${f.expectedHstsMaxAge} — the deployed Worker and wrangler.toml disagree`);
 
   const redirected = f.httpStatus !== null && [301, 302, 307, 308].includes(f.httpStatus) && /^https:/i.test(f.httpLocation ?? "");
   const refused = f.httpStatus === null;
+  // Not fatal, for the same reason the TLS minimum version is not: whether the edge answers plain http at
+  // all is Cloudflare configuration ("Always Use HTTPS" under SSL/TLS → Edge Certificates), and a
+  // workers.dev hostname answers both schemes regardless of what this Worker does. Deploy #154 reported
+  // this as a failure, which would have blocked deploys for something no deploy can change. HSTS protects
+  // every repeat visitor; the exposure is a first plain-http request, and the Owner should know about it.
   add("plain http does not serve the site", redirected || refused,
-    refused ? "no plain-http listener" : redirected ? `HTTP ${f.httpStatus} → ${f.httpLocation}` : `HTTP ${f.httpStatus} served over plain http (expected a redirect to https)`);
+    refused ? "no plain-http listener" : redirected ? `HTTP ${f.httpStatus} → ${f.httpLocation}`
+      : `HTTP ${f.httpStatus} served over plain http — turn on "Always Use HTTPS" in Cloudflare (SSL/TLS → Edge Certificates). HSTS still protects repeat visitors; a first plain-http request is not redirected.`,
+    false);
   return out;
 }
 
@@ -88,10 +135,14 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const hostname = new URL(url).hostname;
 
   const verify = sh("curl", ["-sS", "-o", "/dev/null", "-w", "%{ssl_verify_result}", "--max-time", "20", url]);
-  const notAfter = sh("sh", ["-c", `echo | openssl s_client -servername ${hostname} -connect ${host} 2>/dev/null | openssl x509 -noout -enddate`]);
+  const notAfter = sh("sh", ["-c", `echo | openssl s_client -servername ${hostname} -connect ${sclientTarget(url)} 2>/dev/null | openssl x509 -noout -enddate`]);
   const tlsAt = (flag: string) => sh("curl", ["-sS", "-o", "/dev/null", flag, "--max-time", "20", url]).ok;
   const head = sh("curl", ["-sSI", "--max-time", "20", url]);
   const hsts = /^strict-transport-security:(.*)$/im.exec(head.out)?.[1]?.trim() ?? null;
+  // --env names the wrangler environment whose configured max-age the live header must match.
+  const envArg = process.argv.indexOf("--env");
+  const wranglerEnv = envArg > 0 ? process.argv[envArg + 1] ?? "staging" : "staging";
+  const expected = expectedHstsMaxAge(readFileSync("wrangler.toml", "utf8"), wranglerEnv);
   const plain = sh("curl", ["-sS", "-o", "/dev/null", "-w", "%{http_code} %{redirect_url}", "--max-time", "20", `http://${host}`]);
   const [code, location] = plain.ok ? plain.out.trim().split(" ") : ["", ""];
 
@@ -101,7 +152,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     tls12: tlsAt("--tlsv1.2"), tls13: tlsAt("--tlsv1.3"),
     tls10Refused: !sh("curl", ["-sS", "-o", "/dev/null", "--tlsv1.0", "--tls-max", "1.0", "--max-time", "20", url]).ok,
     tls11Refused: !sh("curl", ["-sS", "-o", "/dev/null", "--tlsv1.1", "--tls-max", "1.1", "--max-time", "20", url]).ok,
-    hsts,
+    hsts, expectedHstsMaxAge: expected,
     httpStatus: code && code !== "000" ? Number(code) : null, httpLocation: location || null,
   });
 

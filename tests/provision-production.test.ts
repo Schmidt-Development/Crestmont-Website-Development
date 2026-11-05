@@ -97,3 +97,54 @@ test("[AUTH-003] [INFRA-002] production MFA key: well-formed 32-byte base64 from
   assert.match(wf.slice(keep, put), /already set[\s\S]*kept \(never replaced\)[\s\S]*elif/);
   assert.doesNotMatch(wf, /randomBytes\(32\)\.toString\("base64"\)/, "the workflow never invents an MFA key the Founder has no copy of");
 });
+
+test("[INFRA-002] [SEC-004] every environment binds its OWN Worker, database and bucket — staging can never point at production", () => {
+  // guardProduction above protects one direction: [env.production] must target production. The other
+  // direction was unguarded, and it is the dangerous one. A single word changed in [env.staging] —
+  // database_name, bucket_name or the Worker name — would make EVERY staging deploy apply migrations to the
+  // production database, write to the production bucket, or overwrite the production Worker. guardProduction
+  // reads only the production block, so it would not notice, and the deploy's binding-preservation steps
+  // guard against a deploy REMOVING bindings, not against the committed file naming the wrong ones.
+  const want = {
+    staging: { worker: "crestmont-platform-staging", database: "crestmont-staging", bucket: "crestmont-files-staging" },
+    production: { worker: "crestmont-platform-production", database: "crestmont-production", bucket: "crestmont-files-production" },
+  } as const;
+
+  /** One [env.<name>] block: its own lines and its own sub-tables, stopping at any other section. */
+  const envBlock = (src: string, env: string) => {
+    const lines = src.split("\n");
+    const start = lines.findIndex((l) => l.trim() === `[env.${env}]`);
+    assert.ok(start >= 0, `[env.${env}] exists`);
+    const out: string[] = [];
+    for (let i = start + 1; i < lines.length; i++) {
+      const l = lines[i];
+      // A new section ends the block, unless it is one of THIS environment's sub-tables
+      // (e.g. [env.staging.vars]). Getting this wrong read straight on into [env.production].
+      if (/^\s*\[/.test(l) && !l.trim().startsWith(`[env.${env}.`)) break;
+      out.push(l);
+    }
+    return out.join("\n").replace(/#.*$/gm, "");
+  };
+
+  for (const [env, expect] of Object.entries(want)) {
+    const b = envBlock(toml, env);
+    assert.equal(/^name = "([^"]+)"/m.exec(b)?.[1], expect.worker, `${env} Worker name`);
+    assert.equal(/database_name = "([^"]+)"/.exec(b)?.[1], expect.database, `${env} D1 database`);
+    assert.equal(/bucket_name = "([^"]+)"/.exec(b)?.[1], expect.bucket, `${env} R2 bucket`);
+    // And nothing belonging to another environment appears anywhere in the block.
+    for (const [other, theirs] of Object.entries(want)) {
+      if (other === env) continue;
+      for (const name of Object.values(theirs)) {
+        assert.ok(!b.includes(name), `${env} must not reference ${other}'s ${name}`);
+      }
+    }
+  }
+
+  // The dev defaults at the top of the file must not name a deployed environment's resources either: an
+  // empty database_id there plus a production database_name would send `wrangler --env ''` at production.
+  const top = toml.slice(0, toml.indexOf("[env."))
+    .replace(/#.*$/gm, "");
+  for (const name of [...Object.values(want.staging), ...Object.values(want.production)]) {
+    assert.ok(!top.includes(name), `the default (dev) bindings must not name ${name}`);
+  }
+});

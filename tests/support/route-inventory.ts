@@ -121,12 +121,6 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/builds/runner/ai/claim": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/ai/complete": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/ai/checkpoint": signed("x-crestmont-runner-signature"),
-  // SEC-03 malware scanner (ClamAV on Node 1, the machine that already holds BUILD_RUNNER_SECRET).
-  // scan/file serves bytes only for a file awaiting a scan, so the runner secret is not a way to read the
-  // document store; it audits each fetch. scan/result is the only writer of scan_status.
-  "POST /api/builds/runner/scan/queue": signed("x-crestmont-runner-signature"),
-  "POST /api/builds/runner/scan/file": signed("x-crestmont-runner-signature"),
-  "POST /api/builds/runner/scan/result": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/files": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/complete": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/previews/claim": signed("x-crestmont-runner-signature"),
@@ -606,6 +600,14 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/sales-optimization/run": staff(rolesWith("salesopt.decide"), undefined, act("salesopt.cycle_run")),
   // ── Lead research (worker API signed with RESEARCH_RUNNER_SECRET; dashboard for lead.read_all; decisions lead.write_all; controls Owner) ──
   "POST /api/research/runner/heartbeat": signed("x-crestmont-research-signature"),
+  // SEC-03 malware scanner. Its OWN credential (FILE_SCANNER_SECRET), not the build runner's: a file
+  // scanner must not be able to claim build jobs or deploy previews, and a shared secret would also have
+  // blocked production scanning entirely, because the production preflight refuses a deploy while
+  // BUILD_RUNNER_SECRET is on the production Worker. scan/file serves bytes ONLY for a file awaiting a
+  // scan, so the credential is not a way to read the document store, and it audits each fetch.
+  "POST /api/scan/queue": signed("x-crestmont-scanner-signature"),
+  "POST /api/scan/file": signed("x-crestmont-scanner-signature"),
+  "POST /api/scan/result": signed("x-crestmont-scanner-signature"),
   "POST /api/research/runner/batch": signed("x-crestmont-research-signature"),
   // ── Outbound AI sales calls (src/routes/sales-outbound.ts) ──
   "GET /buy/:token": token("purchase link emailed to the verified prospect (only its SHA-256 is stored)", { token: "salesLinkToken" }),

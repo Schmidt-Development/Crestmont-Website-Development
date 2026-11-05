@@ -57,6 +57,19 @@ export interface Env {
   /** Shared HMAC secret for the AI Builds runner API (docs/ai-builds/RUNNER-PROTOCOL.md). Unset = execution unavailable. */
   BUILD_RUNNER_SECRET?: string;
   /**
+   * SEC-03. Signs the malware scanner's three calls (/api/scan/*), and nothing else.
+   *
+   * Deliberately NOT BUILD_RUNNER_SECRET, which the scanner would otherwise have had to hold. That secret
+   * claims build jobs, fetches checkpoints, stores revisions and deploys previews — a capability surface a
+   * file scanner has no business holding. It also made production scanning impossible: phase 1 keeps the AI
+   * builder off, and the production deploy preflight refuses a deploy while BUILD_RUNNER_SECRET is on the
+   * production Worker, so a shared secret meant F-02 could never close for production.
+   *
+   * Unset means the scan endpoints refuse: no scanner can report, files stay 'pending', and nothing is ever
+   * labelled clean without a verdict.
+   */
+  FILE_SCANNER_SECRET?: string;
+  /**
    * Optional. Signs the short-lived capability tokens that let a sandboxed build preview load its own stylesheet,
    * fonts and scripts (src/services/build-revisions.ts). Unset is the normal case: the key is then derived from
    * BUILD_RUNNER_SECRET under its own label, which is always present wherever a build revision can exist. Set it

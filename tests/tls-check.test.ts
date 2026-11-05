@@ -4,13 +4,14 @@
 // a live endpoint.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { evaluate, hstsMaxAge, certDaysLeft, MIN_CERT_DAYS, MIN_HSTS_MAX_AGE, type TlsFacts } from "../scripts/tls-check.ts";
+import { evaluate, hstsMaxAge, certDaysLeft, expectedHstsMaxAge, sclientTarget, MIN_CERT_DAYS, type TlsFacts } from "../scripts/tls-check.ts";
 
 const healthy: TlsFacts = {
   verifiedCert: true, verifyDetail: "",
   daysLeft: 70,
   tls12: true, tls13: true, tls10Refused: true, tls11Refused: true,
   hsts: "max-age=63072000; includeSubDomains",
+  expectedHstsMaxAge: 63_072_000,
   httpStatus: 301, httpLocation: "https://example.test/",
 };
 const probe = (f: Partial<TlsFacts>) => evaluate({ ...healthy, ...f });
@@ -46,23 +47,71 @@ test("[SEC-002] TLS 1.2 and 1.3 must work; 1.0 and 1.1 accepted is a warning nam
   }
 });
 
-test("[SEC-002] HSTS must be present on the live response with at least a year", () => {
+test("[SEC-002] the live HSTS header must be exactly what the environment is configured to send", () => {
   assert.equal(hstsMaxAge("max-age=63072000; includeSubDomains"), 63072000);
   assert.equal(hstsMaxAge('max-age="31536000"'), 31536000, "a quoted value is still a value");
   assert.equal(hstsMaxAge("includeSubDomains"), null);
   assert.equal(hstsMaxAge(null), null);
-  assert.equal(of({ hsts: null }, "HSTS on the live response").ok, false, "absent is a failure, not a pass");
-  assert.equal(of({ hsts: `max-age=${MIN_HSTS_MAX_AGE - 1}` }, "HSTS on the live response").ok, false);
-  assert.equal(of({ hsts: `max-age=${MIN_HSTS_MAX_AGE}` }, "HSTS on the live response").ok, true);
+
+  const label = "HSTS matches this environment's configuration";
+  assert.equal(of({ hsts: null }, label).ok, false, "absent is a failure, not a pass");
+
+  // The first version of this check required a year, which would have failed production's FIRST RELEASE on
+  // purpose: it deliberately sends HSTS_MAX_AGE = "300" while the ramp-up is validated (CREST-GAP-029).
+  // A deliberate 300 passes when 300 is what is configured...
+  assert.equal(of({ hsts: "max-age=300", expectedHstsMaxAge: 300 }, label).ok, true, "production's ramp-up is not a failure");
+  // ...and a two-year header where 300 was intended is a failure, because browsers would be pinned for years.
+  const pinned = of({ hsts: "max-age=63072000; includeSubDomains", expectedHstsMaxAge: 300 }, label);
+  assert.equal(pinned.ok, false);
+  assert.match(pinned.detail, /configured for 300/);
+  // And 300 where two years was intended is equally a mismatch: the Worker and wrangler.toml disagree.
+  assert.equal(of({ hsts: "max-age=300" }, label).ok, false);
 });
 
-test("[SEC-002] plain http must redirect to https or not answer at all", () => {
+test("[SEC-002] the expected max-age is read per environment, mirroring hstsValue()", async () => {
+  const { readFileSync } = await import("node:fs");
+  const toml = readFileSync("wrangler.toml", "utf8");
+  const { hstsValue, DEFAULT_HSTS } = await import("../src/app/http.ts");
+
+  // The committed file: production ramps at 300, staging keeps the two-year default.
+  assert.equal(expectedHstsMaxAge(toml, "production"), 300, "CREST-GAP-029");
+  assert.equal(expectedHstsMaxAge(toml, "staging"), 63_072_000);
+  assert.equal(expectedHstsMaxAge(toml, "nonexistent"), 63_072_000, "an unknown env assumes the default");
+
+  // And it agrees with the Worker's own function, which is the source of truth for what is actually sent.
+  assert.equal(`max-age=${expectedHstsMaxAge(toml, "staging")}; includeSubDomains`, DEFAULT_HSTS);
+  assert.equal(hstsValue({ HSTS_MAX_AGE: "300" }), `max-age=${expectedHstsMaxAge(toml, "production")}`);
+
+  const synth = (v: string) => `[env.x]\nvars = { HSTS_MAX_AGE = "${v}" }\n[env.y]\n`;
+  assert.equal(expectedHstsMaxAge(synth("86400"), "x"), 86_400);
+  // An unusable value falls back to 300, never to two years — a typo must not pin browsers for years.
+  assert.equal(expectedHstsMaxAge(synth("two years"), "x"), 300);
+  assert.equal(hstsValue({ HSTS_MAX_AGE: "two years" }), "max-age=300", "the Worker does the same");
+});
+
+test("[SEC-002] plain http must redirect to https or not answer at all, and names the Cloudflare setting", () => {
   const label = "plain http does not serve the site";
   assert.equal(of({ httpStatus: null, httpLocation: null }, label).ok, true, "nothing listening is fine");
   for (const s of [301, 302, 307, 308]) assert.equal(of({ httpStatus: s, httpLocation: "https://example.test/" }, label).ok, true);
-  assert.equal(of({ httpStatus: 200, httpLocation: null }, label).ok, false, "serving the site over plain http");
+  const served = of({ httpStatus: 200, httpLocation: null }, label);
+  assert.equal(served.ok, false, "serving the site over plain http is reported");
+  // Reported, not fatal: whether the edge answers plain http is Cloudflare configuration, and a
+  // workers.dev hostname answers both schemes whatever this Worker does. Deploy #154 reported it as a
+  // failure, which would block deploys for something no deploy can change.
+  assert.equal(served.fatal, false);
+  assert.match(served.detail, /Always Use HTTPS/);
   // A redirect that stays on http is the mistake this catches, not a pass.
   assert.equal(of({ httpStatus: 301, httpLocation: "http://example.test/" }, label).ok, false);
+});
+
+test("[SEC-002] the s_client target carries an explicit port", () => {
+  // URL.host drops the port when it is the scheme default, and `openssl s_client -connect host` with no
+  // port does not reach 443. Deploy #154 reported "could not read notAfter" against a readable certificate
+  // for exactly this reason, and an unreadable expiry fails rather than passing — so the bug surfaced as a
+  // fatal check failure, not a silent one.
+  assert.equal(sclientTarget("https://crestmont-platform-staging.partners-df4.workers.dev/"), "crestmont-platform-staging.partners-df4.workers.dev:443");
+  assert.equal(sclientTarget("https://example.test:8443/x"), "example.test:8443");
+  assert.equal(sclientTarget("https://example.test"), "example.test:443");
 });
 
 test("[SEC-002] certDaysLeft reads OpenSSL's notAfter line", () => {
