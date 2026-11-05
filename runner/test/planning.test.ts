@@ -332,3 +332,25 @@ test("[AIB-PLAN] a permission failure is not retried: it cannot fix itself and e
     assert.match(notes, /not retried/);
   } finally { await r.model.close(); await r.cp.close(); }
 });
+
+test("[AIB-PLAN] a RESUMED build with a stored specification still gets its design blueprint", async () => {
+  // The blueprint stage used to sit inside `if (!spec && architect)`, so a resumed build -- which already has a
+  // stored specification and skips planning entirely -- never produced one. That is exactly the path a retry of
+  // bld_10e2c6007686faee0ab64d45 takes: it has a specification from attempt 1 and a saved checkpoint, so the one
+  // build this work exists to fix would have resumed with no blueprint at all.
+  const stored = validateDesignSpec(GOOD).spec!;
+  let blueprintAsked = 0;
+  const r = await rig({
+    job: { spec: { version: 1, content: stored as unknown as Record<string, unknown> } } as Partial<Job>,
+    handler: (q) => {
+      if (isBlueprint(q)) { blueprintAsked++; return { content: "{}" }; }   // rejected, but it was ASKED
+      if (isArchitect(q)) return { content: JSON.stringify(GOOD) };
+      return call("finish", { summary: "built" });
+    },
+  });
+  try {
+    await runJob(r.job, deps(r));
+    assert.ok(blueprintAsked >= 1, "the blueprint stage must run for a build that already has a specification");
+    assert.ok(r.model.requests.filter(isDesignSpec).length === 0, "and planning itself must NOT re-run: the specification is already stored");
+  } finally { await r.model.close(); await r.cp.close(); }
+});

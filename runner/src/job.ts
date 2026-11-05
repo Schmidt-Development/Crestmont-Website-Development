@@ -561,22 +561,10 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     let spec: MasterSpec | null = job.spec?.content && typeof job.spec.content === "object" ? job.spec.content as MasterSpec : null;
     const sessionRecords: SessionRecord[] = [];
     const architect = advisorFor("architect");
-    if (!spec && architect) {
-      // A. Model A architect session (fresh context, read-only) → validated, stored master specification.
-      stage = "preparing";
-      const r = route("architecture", models);
-      routed.push(r);
-      Object.assign(now, { activity: "gpu_running", model: r.model.tag, task: r.task });
-      tracker.note({ kind: "step", message: `architect session (${architect.name}; ${r.reason})` });
+    // Planning inputs, hoisted so BOTH the first-run planning block below and the blueprint stage after it can
+    // use them. The blueprint stage used to live inside that block, which meant a resumed build -- one that
+    // already has a stored specification and skips planning entirely -- never produced a blueprint.
       const idx = (() => { try { return JSON.parse(readFileSync(path.join(ws.repo, "customer-files", "INDEX.json"), "utf8")) as { files: { id: string; savedAs: string; contentType: string; folder: string | null }[] }; } catch { return { files: [] }; } })();
-      // Design Gallery -> architect. Images are written OUTSIDE the repository (ws.dir/gallery, never
-      // ws.repo): .crestmont/ is committed, and a gallery screenshot inside the customer's repository would
-      // ship another studio's design with their website. The architect reads them from disk; nothing copies
-      // them into the site.
-      // V5 correction §3: which images reached which model, with the hash of the exact bytes sent. Every claim
-      // in this area used to be unfalsifiable -- "the references were retrieved" was recorded, "Model B received
-      // none of them, ever" was not. Kept in the job directory, never in the customer's repository: it indexes
-      // files the customer may look at and may not publish.
       const galleryReferences = await (async () => {
         const sel = job.design;
         if (!sel?.references?.length) {
@@ -630,14 +618,6 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         galleryReferences,
         skillNames,
       };
-      // Corrections from the previous attempt's validation, fed back so a retry is corrective rather than a
-      // second blind roll of the dice.
-      let specProblems: string[] = [];
-      // Retries are CLASSIFIED, not uniform. bld_889ff809c133920c929a7121 showed why: attempts 1 and 2 were
-      // rejected by the platform's schema, and the corrective retry appended the rejection text to a request that
-      // already sat at the edge of the window — so attempt 3 died of context overflow instead. A rejection and an
-      // overflow need opposite responses: one wants MORE text, the other strictly LESS.
-      let maxImages = 6;
       const classify = (e: unknown): "overflow" | "schema" | "permission" | "network" | "other" => {
         const m = errorMessage(e);
         if (/exceeds the available context size|context length|too many tokens|maximum context/i.test(m)) return "overflow";
@@ -646,6 +626,30 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         if (/\b(?:429|50\d)\b|timeout|ECONN|ETIMEDOUT|socket|network/i.test(m)) return "network";
         return "other";
       };
+
+    if (!spec && architect) {
+      // A. Model A architect session (fresh context, read-only) → validated, stored master specification.
+      stage = "preparing";
+      const r = route("architecture", models);
+      routed.push(r);
+      Object.assign(now, { activity: "gpu_running", model: r.model.tag, task: r.task });
+      tracker.note({ kind: "step", message: `architect session (${architect.name}; ${r.reason})` });
+      // Design Gallery -> architect. Images are written OUTSIDE the repository (ws.dir/gallery, never
+      // ws.repo): .crestmont/ is committed, and a gallery screenshot inside the customer's repository would
+      // ship another studio's design with their website. The architect reads them from disk; nothing copies
+      // them into the site.
+      // V5 correction §3: which images reached which model, with the hash of the exact bytes sent. Every claim
+      // in this area used to be unfalsifiable -- "the references were retrieved" was recorded, "Model B received
+      // none of them, ever" was not. Kept in the job directory, never in the customer's repository: it indexes
+      // files the customer may look at and may not publish.
+      // Corrections from the previous attempt's validation, fed back so a retry is corrective rather than a
+      // second blind roll of the dice.
+      let specProblems: string[] = [];
+      // Retries are CLASSIFIED, not uniform. bld_889ff809c133920c929a7121 showed why: attempts 1 and 2 were
+      // rejected by the platform's schema, and the corrective retry appended the rejection text to a request that
+      // already sat at the edge of the window — so attempt 3 died of context overflow instead. A rejection and an
+      // overflow need opposite responses: one wants MORE text, the other strictly LESS.
+      let maxImages = 6;
       for (let attempt = 1; attempt <= 3 && !spec && !stop.reason; attempt++) {
         try {
           const raw = await architect.architect(input, specProblems, { maxImages });
@@ -719,86 +723,87 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         });
       }
 
-      // ── STAGE 2: the DESIGN BLUEPRINT (V5 §5) ────────────────────────────────────────────────────────────────────
-      //
-      // The accepted design specification is prose. Prose cannot be executed and cannot be failed: "a clean, modern
-      // layout with a warm, professional palette" is satisfied by every rendered page and by none of them. The
-      // blueprint is the same design as DATA -- hex values, a type scale with units and weights, each page's sections
-      // in order with a named layout, each component's states, each visual asset's kind and provenance, and an
-      // explicit mapping back to the gallery reference every decision came from.
-      //
-      // Its own model call, with its own output budget: asking one reasoning model for the prose plan and this object
-      // in one reply is what truncated the architect's answer on bld_e65768e6b0853a425095a1f6 and left the build with
-      // no specification at all. A failure here therefore costs the accepted design specification nothing.
-      if (spec && !spec.designBlueprint && architect?.blueprint && !stop.reason && job.phase !== "final_qa") {
-        const rb = route("architecture", models);
-        routed.push(rb);
-        Object.assign(now, { activity: "gpu_running", model: rb.model.tag, task: rb.task });
-        tracker.note({ kind: "step", message: `design blueprint session (${architect.name}): turning the accepted design into executable data` });
-        const approvedDesign = spec;
-        // Photography is a separate requirement from imagery, and the blueprint is where it is decided rather than
-        // discovered at scoring time. §7: an authored SVG is a visual asset; it is not a photograph.
-        const photographyRequired = requiresPhotography({
-          imagesSource: job.brief.content.customerData.content?.imagesSource ?? null,
-          designSpec: approvedDesign.designSpec,
-        });
-        const sentRefs = galleryReferences.filter((g) => g.path).map((g) => g.id);
-        let bpProblems: string[] = [];
-        let bpImages = 6;
-        for (let attempt = 1; attempt <= 3 && !spec.designBlueprint && !stop.reason; attempt++) {
-          try {
-            const raw = await architect.blueprint(approvedDesign, input, bpProblems, { maxImages: bpImages });
-            const seen = (architect as { lastArchitectImages?: { referenceId: string; path: string }[] }).lastArchitectImages ?? [];
-            const v = validateBlueprint(raw, {
-              // Only references the model was ACTUALLY shown may be cited. A mapping to a reference nobody sent is a
-              // fabricated provenance claim, which is worse than an empty mapping.
-              sentReferenceIds: seen.length ? seen.map((i) => i.referenceId) : sentRefs,
-              requiresPhotography: photographyRequired,
-            });
-            if (!v.ok) {
-              bpProblems = v.problems;
-              const why = `design blueprint attempt ${attempt} was rejected: ${v.problems.join("; ")}`;
-              sessionNotes.push(why.slice(0, 400));
-              tracker.note({ kind: "note", message: why.slice(0, 400) });
-              continue;
-            }
-            spec = { ...approvedDesign, designBlueprint: v.blueprint! };
-            bpProblems = [];
-            // Persisted three ways, each for a different reader: SPEC.json for the pipeline, the platform's spec
-            // record for the Founder and for a resumed segment, and DESIGN-BLUEPRINT.md in the repository because
-            // that is the file the BUILDER reads (§6).
-            writeInside(ws.repo, path.join(".crestmont", "design-blueprint.json"), JSON.stringify(v.blueprint, null, 2) + "\n");
-            writeFileSync(path.join(ws.repo, "DESIGN-BLUEPRINT.md"), blueprintInstructions(v.blueprint!) + "\n");
-            const storedBp = await client.storeSpec(job, spec, architect.name).catch((err) => {
-              if (err instanceof LeaseLostError) throw err;
-              // The blueprint is already on disk and the build can execute it; a platform that will not store it is
-              // a reporting failure, not a reason to throw away an approved design.
-              tracker.note({ kind: "note", message: `design blueprint accepted but not stored on the platform: ${errorMessage(err).slice(0, 200)}` });
-              return null;
-            });
-            noteBlueprint(manifest, v.blueprint!.referenceMapping);
-          saveManifest(ws.dir, manifest);
-          tracker.note({ kind: "step", message: `design blueprint accepted: ${blueprintSummary(v.blueprint!)}${storedBp ? `; stored as v${storedBp.specVersion}` : ""}` });
-          } catch (err) {
-            if (err instanceof LeaseLostError) { markLeaseLost(); throw err; }
-            const kind = classify(err);
-            if (kind === "overflow") { bpImages = Math.floor(bpImages / 2); bpProblems = []; }
-            else if (kind === "permission") { attempt = 3; }
-            else bpProblems = [errorMessage(err).slice(0, 300)];
-            const why = `design blueprint attempt ${attempt} failed [${kind}]: ${errorMessage(err).slice(0, 300)}`;
-            sessionNotes.push(why);
+    }
+
+    // ── STAGE 2: the DESIGN BLUEPRINT (V5 §5) ────────────────────────────────────────────────────────────────────
+    //
+    // The accepted design specification is prose. Prose cannot be executed and cannot be failed: "a clean, modern
+    // layout with a warm, professional palette" is satisfied by every rendered page and by none of them. The
+    // blueprint is the same design as DATA -- hex values, a type scale with units and weights, each page's sections
+    // in order with a named layout, each component's states, each visual asset's kind and provenance, and an
+    // explicit mapping back to the gallery reference every decision came from.
+    //
+    // Its own model call, with its own output budget: asking one reasoning model for the prose plan and this object
+    // in one reply is what truncated the architect's answer on bld_e65768e6b0853a425095a1f6 and left the build with
+    // no specification at all. A failure here therefore costs the accepted design specification nothing.
+    if (spec && !spec.designBlueprint && architect?.blueprint && !stop.reason && job.phase !== "final_qa") {
+      const rb = route("architecture", models);
+      routed.push(rb);
+      Object.assign(now, { activity: "gpu_running", model: rb.model.tag, task: rb.task });
+      tracker.note({ kind: "step", message: `design blueprint session (${architect.name}): turning the accepted design into executable data` });
+      const approvedDesign = spec;
+      // Photography is a separate requirement from imagery, and the blueprint is where it is decided rather than
+      // discovered at scoring time. §7: an authored SVG is a visual asset; it is not a photograph.
+      const photographyRequired = requiresPhotography({
+        imagesSource: job.brief.content.customerData.content?.imagesSource ?? null,
+        designSpec: approvedDesign.designSpec,
+      });
+      const sentRefs = galleryReferences.filter((g) => g.path).map((g) => g.id);
+      let bpProblems: string[] = [];
+      let bpImages = 6;
+      for (let attempt = 1; attempt <= 3 && !spec.designBlueprint && !stop.reason; attempt++) {
+        try {
+          const raw = await architect.blueprint(approvedDesign, input, bpProblems, { maxImages: bpImages });
+          const seen = (architect as { lastArchitectImages?: { referenceId: string; path: string }[] }).lastArchitectImages ?? [];
+          const v = validateBlueprint(raw, {
+            // Only references the model was ACTUALLY shown may be cited. A mapping to a reference nobody sent is a
+            // fabricated provenance claim, which is worse than an empty mapping.
+            sentReferenceIds: seen.length ? seen.map((i) => i.referenceId) : sentRefs,
+            requiresPhotography: photographyRequired,
+          });
+          if (!v.ok) {
+            bpProblems = v.problems;
+            const why = `design blueprint attempt ${attempt} was rejected: ${v.problems.join("; ")}`;
+            sessionNotes.push(why.slice(0, 400));
             tracker.note({ kind: "note", message: why.slice(0, 400) });
+            continue;
           }
+          spec = { ...approvedDesign, designBlueprint: v.blueprint! };
+          bpProblems = [];
+          // Persisted three ways, each for a different reader: SPEC.json for the pipeline, the platform's spec
+          // record for the Founder and for a resumed segment, and DESIGN-BLUEPRINT.md in the repository because
+          // that is the file the BUILDER reads (§6).
+          writeInside(ws.repo, path.join(".crestmont", "design-blueprint.json"), JSON.stringify(v.blueprint, null, 2) + "\n");
+          writeFileSync(path.join(ws.repo, "DESIGN-BLUEPRINT.md"), blueprintInstructions(v.blueprint!) + "\n");
+          const storedBp = await client.storeSpec(job, spec, architect.name).catch((err) => {
+            if (err instanceof LeaseLostError) throw err;
+            // The blueprint is already on disk and the build can execute it; a platform that will not store it is
+            // a reporting failure, not a reason to throw away an approved design.
+            tracker.note({ kind: "note", message: `design blueprint accepted but not stored on the platform: ${errorMessage(err).slice(0, 200)}` });
+            return null;
+          });
+          noteBlueprint(manifest, v.blueprint!.referenceMapping);
+        saveManifest(ws.dir, manifest);
+        tracker.note({ kind: "step", message: `design blueprint accepted: ${blueprintSummary(v.blueprint!)}${storedBp ? `; stored as v${storedBp.specVersion}` : ""}` });
+        } catch (err) {
+          if (err instanceof LeaseLostError) { markLeaseLost(); throw err; }
+          const kind = classify(err);
+          if (kind === "overflow") { bpImages = Math.floor(bpImages / 2); bpProblems = []; }
+          else if (kind === "permission") { attempt = 3; }
+          else bpProblems = [errorMessage(err).slice(0, 300)];
+          const why = `design blueprint attempt ${attempt} failed [${kind}]: ${errorMessage(err).slice(0, 300)}`;
+          sessionNotes.push(why);
+          tracker.note({ kind: "note", message: why.slice(0, 400) });
         }
-        // NOT a build-stopping failure, and deliberately so: the design specification was accepted, and a build that
-        // can produce a website from prose is better than no build. But the fact is recorded where it cannot be
-        // mistaken for success -- the design phase prompt will say the design was never decided in detail, and the
-        // Founder sees why the result is being judged against prose instead of against a blueprint.
-        if (!spec.designBlueprint && !stop.reason) {
-          const why = `No design blueprint: 3 attempts did not produce a valid one${bpProblems.length ? ` (last: ${bpProblems.slice(0, 3).join("; ").slice(0, 300)})` : ""}. The design phase proceeds from the written design specification only, so the visual result cannot be checked against named layouts, exact colours or planned photography.`;
-          sessionNotes.push(why.slice(0, 500));
-          tracker.note({ kind: "note", message: why.slice(0, 500) });
-        }
+      }
+      // NOT a build-stopping failure, and deliberately so: the design specification was accepted, and a build that
+      // can produce a website from prose is better than no build. But the fact is recorded where it cannot be
+      // mistaken for success -- the design phase prompt will say the design was never decided in detail, and the
+      // Founder sees why the result is being judged against prose instead of against a blueprint.
+      if (!spec.designBlueprint && !stop.reason) {
+        const why = `No design blueprint: 3 attempts did not produce a valid one${bpProblems.length ? ` (last: ${bpProblems.slice(0, 3).join("; ").slice(0, 300)})` : ""}. The design phase proceeds from the written design specification only, so the visual result cannot be checked against named layouts, exact colours or planned photography.`;
+        sessionNotes.push(why.slice(0, 500));
+        tracker.note({ kind: "note", message: why.slice(0, 500) });
       }
     }
 
