@@ -259,8 +259,30 @@ Rotate everything: Actions → Deploy staging → Run workflow → tick "rotate_
 // ── CLI ──
 export function wranglerOps(): D1Ops {
   const [cmd, ...base] = (process.env.WRANGLER ?? "npx --yes wrangler@4.149.0").split(" ").filter(Boolean);
-  const run = (args: string[], input?: string) =>
-    execFileSync(cmd, [...base, ...args], { input, stdio: ["pipe", "pipe", "pipe"], encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  // execFileSync pipes stderr, so on a failure Node's error carries wrangler's actual complaint in .stderr and
+  // the message is only "Command failed: npx --yes <pinned wrangler> d1 execute …". Every caller reported that
+  // message and dropped the cause, which is how deploy #150 produced
+  //   FAIL owner.sign_in — Command failed: … SELECT window_start, count FROM rate_limits WHERE key = 'mfa:usr_…'
+  // and six more failures downstream of it, with nothing anywhere saying why the query was refused. Put the
+  // cause in the error. Colour codes are stripped and the account id is elided, as the deploy's own error-log
+  // step does; the value of a secret is passed on stdin and never appears in argv or in wrangler's output.
+  const run = (args: string[], input?: string) => {
+    try {
+      return execFileSync(cmd, [...base, ...args], { input, stdio: ["pipe", "pipe", "pipe"], encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    } catch (e) {
+      const err = e as { message?: string; stderr?: string | Buffer; stdout?: string | Buffer; status?: number | null };
+      const clean = (v: string | Buffer | undefined) => String(v ?? "")
+        .replace(/\x1b\[[0-9;]*m/g, "")
+        .replace(/\/accounts\/[^/\s]+\//g, "/accounts/…/")
+        .split("\n").map((l) => l.trim()).filter(Boolean).join(" ");
+      const said = [clean(err.stderr), clean(err.stdout)].filter(Boolean).join(" | ").slice(0, 800);
+      const code = err.status === undefined || err.status === null ? "" : ` (exit ${err.status})`;
+      // Node's own message already embeds the raw stderr, colour codes and account id included, so it is
+      // cleaned the same way rather than passed through.
+      const what = clean(err.message).split(" wrangler said:")[0].slice(0, 400) || "wrangler failed";
+      throw new Error(`${what}${code}\n  wrangler said: ${said || "(nothing on stderr or stdout)"}`);
+    }
+  };
   const d1 = ["d1", "execute", "crestmont-staging", "--remote", "--env", "staging"];
   return {
     async query(sql) {

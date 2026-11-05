@@ -249,3 +249,43 @@ test("[INFRA-002] [SEC-001] staging verifier strips nested and split tags to a f
   assert.equal(decode("<a>&lt;script&gt;</a>"), "<script>", "an escaped label is decoded once into plain text (compared, never rendered)");
   assert.equal(stripTags("Refunds & disputes > 30 days"), "Refunds & disputes > 30 days", "a lone '>' or '&' in text is kept");
 });
+
+test("[INFRA-006] a failed wrangler call reports what wrangler said, with the account id elided", async () => {
+  // execFileSync pipes stderr, so Node's error holds wrangler's real complaint — and every caller used to
+  // report only "Command failed: npx --yes wrangler@… d1 execute …". Deploy #150's research E2E failed seven
+  // checks that way, starting with owner.sign_in, and nothing recorded why the query was refused.
+  const { wranglerOps } = await import("../scripts/staging-access.ts");
+  const dir = mkdtempSync(join(tmpdir(), "wrangler-stub-"));
+  try {
+    const stub = join(dir, "stub.mjs");
+    // Colour codes, an account id, a blank line and a message on each stream: all of it must come back usable.
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(stub, [
+      `process.stderr.write("\\u001b[31m\\u2718 [ERROR]\\u001b[0m A request to the Cloudflare API `
+        + `(/accounts/acct0123456789abcdef/d1/database/dbid/query) failed.\\n\\n  no such column: count\\n");`,
+      `process.stdout.write("trailing stdout\\n");`,
+      `process.exit(1);`,
+    ].join("\n"));
+
+    const prev = process.env.WRANGLER;
+    process.env.WRANGLER = `${process.execPath} ${stub}`;
+    try {
+      let message = "";
+      try { await wranglerOps().query("SELECT window_start, count FROM rate_limits WHERE key = 'mfa:usr_x'"); }
+      catch (e) { message = (e as Error).message; }
+
+      assert.ok(message, "the call fails");
+      assert.match(message, /wrangler said:/, "the cause is reported, not only that a command failed");
+      assert.match(message, /no such column: count/, "wrangler's own diagnosis survives");
+      assert.match(message, /trailing stdout/, "stdout is included too: wrangler does not always use stderr");
+      assert.match(message, /\(exit 1\)/);
+      assert.ok(!message.includes("acct0123456789abcdef"), "the Cloudflare account id is elided");
+      assert.match(message, /\/accounts\/…\//);
+      // Node's own message embeds the raw stderr, so the colour codes have to be stripped from it as well,
+      // otherwise the GitHub annotation is unreadable.
+      assert.ok(!message.includes("\u001b["), "no terminal colour codes");
+    } finally {
+      if (prev === undefined) delete process.env.WRANGLER; else process.env.WRANGLER = prev;
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

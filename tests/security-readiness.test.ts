@@ -273,3 +273,38 @@ test("[SEC-003] portfolio screenshots are recorded as not yet scanned, never as 
     assert.doesNotMatch(s, /scan_status[^;]{0,200}VALUES[^;]*'clean'/, `${f} inserts files as pending`);
   }
 });
+
+test("[SEC-006] a completed deletion request leaves no address or IP in the security log, and keeps the security facts", async () => {
+  const t = await createTestApp();
+  try {
+    const cust = await createCustomer(t.db, "erase-me@example.com");
+    const admin = await createStaff(t.db, "administrator", "admin-sec08@crestmont.test");
+
+    // Three shapes of security event: linked to the account, unresolved (user_id NULL) but carrying the
+    // address, and a third person's event that must not be touched.
+    const { securityEvent } = await import("../src/services/security.ts");
+    await securityEvent(t.db, "login_failed", { userId: cust.id, email: cust.email, ip: "203.0.113.7", detail: "login" });
+    await securityEvent(t.db, "rate_limited", { email: cust.email, ip: "203.0.113.9", detail: "login" });
+    await securityEvent(t.db, "login_failed", { email: "someone-else@example.com", ip: "198.51.100.4", detail: "login" });
+
+    const req = await requestDeletion(t.db, cust.id, "please delete my account");
+    await processDeletion(t.db, admin.id, req, "complete", "verified by email");
+
+    const rows = (await t.db.prepare(`SELECT kind, user_id, email, ip, detail FROM security_events ORDER BY id`)
+      .all<{ kind: string; user_id: string | null; email: string | null; ip: string | null; detail: string | null }>()).results;
+    assert.equal(rows.length, 3, "no security event is deleted: the history is security data");
+
+    // 1. Linked to the anonymised account: both identifiers cleared, the fact intact.
+    assert.deepEqual({ ...rows[0] }, { kind: "login_failed", user_id: cust.id, email: null, ip: null, detail: "login" });
+    // 2. Unresolved attempt on the address: the address is cleared, the IP stays (see the comment in privacy.ts).
+    assert.deepEqual({ ...rows[1] }, { kind: "rate_limited", user_id: null, email: null, ip: "203.0.113.9", detail: "login" });
+    // 3. Someone else's event is untouched.
+    assert.deepEqual({ ...rows[2] }, { kind: "login_failed", user_id: null, email: "someone-else@example.com", ip: "198.51.100.4", detail: "login" });
+
+    // The requester's address appears nowhere in the security log, in any column.
+    const all = JSON.stringify(rows);
+    assert.ok(!all.includes("erase-me@example.com"), "the requester's address is gone from security_events");
+    const user = (await t.db.prepare(`SELECT email FROM users WHERE id = ?`).bind(cust.id).first<{ email: string }>())!;
+    assert.match(user.email, /@deleted\.invalid$/);
+  } finally { t.close(); }
+});
