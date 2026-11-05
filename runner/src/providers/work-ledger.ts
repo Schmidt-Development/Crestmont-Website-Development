@@ -77,7 +77,15 @@ export function adoptLedger(raw: unknown): WorkLedger {
     done: Array.isArray(l.done) ? l.done.slice(-MAX_DONE) : [],
     errors: Array.isArray(l.errors) ? l.errors.slice(-MAX_ERRORS) : [],
     resets: l.resets && typeof l.resets === "object" ? l.resets : {},
-    stale: l.stale && typeof l.stale === "object" ? l.stale : {},
+    // Deliberately NOT carried over: the stale-reset counter is a WITHIN-SEGMENT signal.
+    //
+    // adoptLedger runs once when a session is loaded, which is the start of a segment or a resumed attempt. At that
+    // boundary the work is checkpointed and the model gets a fresh context, so a previous segment's unproductive
+    // resets say nothing about this one. Carrying the counter over made a resumed build die immediately:
+    // bld_10e2c6007686faee0ab64d45 attempt 4 restored a ledger already past the limit, reset once, and the thrash
+    // guard stopped the phase after 7 turns -- stopping legitimate progress rather than a loop. The TOTAL in
+    // `resets` is kept, so the diagnosis still reports the full history.
+    stale: {},
     served: l.served && typeof l.served === "object" ? l.served : {},
   };
 }
