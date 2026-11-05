@@ -46,7 +46,7 @@ No code, migration, domain or DNS has been applied to production. No payment, em
 | `EVIDENCE_INGEST_SECRET` | required | provision workflow (generated) | installed |
 | `MFA_ENCRYPTION_KEY` | **required** — the deploy now refuses without it | provision workflow (from `PRODUCTION_MFA_ENCRYPTION_KEY`) | **missing** |
 | `CRM_ERASURE_HMAC_KEY` | recommended | provision workflow (generated, never replaced) | missing |
-| `FILE_SCANNER_SECRET` | recommended (closes F-02 on production) | Founder, with the scanner it is shared with (ClamAV on Node 1); routes `/api/scan/*` arrive with PR #151 | not set: `/api/scan/*` answer 503, files stay `pending`, quarantined from share links and never labelled clean. It is the scanner's own credential, so phase 1 keeps `BUILD_RUNNER_SECRET` forbidden |
+| `FILE_SCANNER_SECRET` | recommended (closes F-02 on production) | provision workflow, from the `production` environment secret `PRODUCTION_FILE_SCANNER_SECRET` (`openssl rand -hex 32`, saved in the password manager first; the same value goes into the Node 1 scanner's `scanner.env`). Installed once, never generated | not set: `/api/scan/*` answer 503, files stay `pending`, quarantined from share links and never labelled clean. The scanner (`scanner/`, ClamAV) has its own credential, so phase 1 keeps `BUILD_RUNNER_SECRET` forbidden |
 | `FOUNDER_EMAIL` | recommended | Founder (`wrangler secret put`) | not set; launch approvals are recorded on staging, so it does not block production |
 | `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET` (+ `EMAIL_FROM` var) | at customer activation | Founder, after the Resend account (BLK-005) | not set |
 | `STRIPE_SECRET_KEY` (live), `STRIPE_WEBHOOK_SECRET` (+ `PAYMENTS_LIVE_AUTHORIZED = "yes"` var) | at customer activation | Founder, separate authorization | not set: production refuses every Stripe event until then |
@@ -86,6 +86,7 @@ Account Resources: **Include → the Crestmont account** only. Zone Resources: *
   - `CLOUDFLARE_API_TOKEN` — the production token above
   - `CLOUDFLARE_ACCOUNT_ID` — `df441806863a7fd3f26dea4e782a25fc`
   - `PRODUCTION_TURNSTILE_SITE_KEY`, `PRODUCTION_TURNSTILE_SECRET` — the production widget's keys (the workflow refuses Cloudflare test keys and staging's keys)
+  - `PRODUCTION_FILE_SCANNER_SECRET` (optional until the scanner runs against production) — output of `openssl rand -hex 32`, saved in the password manager first; the provision workflow installs it once as the Worker's `FILE_SCANNER_SECRET`, and the Node 1 scanner (`scanner/windows/Install-CrestmontScanner.ps1`) uses the same value.
   - `PRODUCTION_MFA_ENCRYPTION_KEY` — output of `openssl rand -base64 32`, saved in the password manager **before** it is added here. It encrypts every stored two-factor secret on production; the workflow installs it once and never replaces it (a different value would make every enrolled authenticator unreadable). Without it, two-factor enrolment on production fails closed, so no Owner account can be completed.
 - **Environment variables** (needed by Stage 2, harmless now): `PRODUCTION_URL` = `https://crestmontwebsitedevelopment.com`, `READINESS_URL` = `https://crestmont-platform-staging.partners-df4.workers.dev`.
 

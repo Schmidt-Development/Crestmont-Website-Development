@@ -74,7 +74,12 @@ test("[INFRA-005] provisioning workflow: manual, main-only, confirmed, Founder-g
   // Re-runs change no secret (a changed secret blocks rollbacks, Cloudflare 10220) unless explicitly asked.
   assert.match(wf, /replace_turnstile:\s*\n\s*description:[^\n]*\n\s*type: boolean\s*\n\s*default: false/);
   assert.match(wf, /grep -qx "\$name" && \[ "\$REPLACE_TURNSTILE" != "true" \][\s\S]*already set on \$WORKER: kept/);
-  assert.equal((wf.match(/secret put/g) ?? []).length, 4, "exactly four puts: Turnstile (loop), evidence, CRM erasure key, MFA key — each guarded");
+  assert.equal((wf.match(/secret put/g) ?? []).length, 5, "exactly five puts: Turnstile (loop), evidence, CRM erasure key, MFA key, scanner key — each guarded");
+  // The scanner key is shared with Node 1, so it is never generated here: only the Founder's copy is installed, once.
+  const sk = wf.indexOf("grep -qx FILE_SCANNER_SECRET"), sp = wf.indexOf("secret put FILE_SCANNER_SECRET");
+  assert.ok(sk > 0 && sp > sk, "an existing scanner key is checked before anything is installed");
+  assert.match(wf.slice(sk, sp), /already set on \$WORKER: kept\.[\s\S]*elif \[ -n "\$PROD_FILE_SCANNER_SECRET" \]/);
+  assert.match(wf, /PROD_FILE_SCANNER_SECRET: \$\{\{ secrets\.PRODUCTION_FILE_SCANNER_SECRET \}\}/);
   assert.match(wf, /grep -qx CRM_ERASURE_HMAC_KEY; then\s+echo "CRM_ERASURE_HMAC_KEY already set on \$WORKER: kept \(never replaced\)\."/, "the erasure key is generated once and never replaced");
   assert.doesNotMatch(wf, /STRIPE_SECRET_KEY \||RESEND_API_KEY \||secret put (STRIPE|RESEND|RETELL|ANTHROPIC|BUILD_RUNNER|STAGING_ACCESS)/, "never installs a live-service or preview secret");
   assert.doesNotMatch(wf, /echo\s+["']?\$(PROD_TURNSTILE_SECRET|CLOUDFLARE_API_TOKEN|PROD_TURNSTILE_SITE_KEY)\b/, "never echoes a secret");

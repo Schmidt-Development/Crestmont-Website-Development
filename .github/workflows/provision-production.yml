@@ -4,7 +4,7 @@ name: Provision production
 #   • D1 database  crestmont-production       — created if missing, never recreated or deleted
 #   • R2 bucket    crestmont-files-production — must already exist (checked, never created or changed)
 #   • Worker       crestmont-platform-production — created as an empty draft that holds its production secrets
-#                  (TURNSTILE_SITE_KEY, TURNSTILE_SECRET, EVIDENCE_INGEST_SECRET, CRM_ERASURE_HMAC_KEY, MFA_ENCRYPTION_KEY); its workers.dev URL and preview
+#                  (TURNSTILE_SITE_KEY, TURNSTILE_SECRET, EVIDENCE_INGEST_SECRET, CRM_ERASURE_HMAC_KEY, MFA_ENCRYPTION_KEY, FILE_SCANNER_SECRET); its workers.dev URL and preview
 #                  URLs are switched off, so it is not reachable anywhere.
 # It NEVER uploads application code, attaches a domain or changes DNS, applies migrations, seeds data, or touches
 # crestmont-platform-staging / crestmont-platform-frontend-preview. The application is deployed only by
@@ -110,6 +110,7 @@ jobs:
           PROD_TURNSTILE_SITE_KEY: ${{ secrets.PRODUCTION_TURNSTILE_SITE_KEY }}
           PROD_TURNSTILE_SECRET: ${{ secrets.PRODUCTION_TURNSTILE_SECRET }}
           PROD_MFA_ENCRYPTION_KEY: ${{ secrets.PRODUCTION_MFA_ENCRYPTION_KEY }}
+          PROD_FILE_SCANNER_SECRET: ${{ secrets.PRODUCTION_FILE_SCANNER_SECRET }}
           REPLACE_TURNSTILE: ${{ inputs.replace_turnstile }}
         run: |
           # Fail closed: an empty list is assumed ONLY when the Worker does not exist yet (first run). A transient listing
@@ -158,6 +159,20 @@ jobs:
             echo "MFA_ENCRYPTION_KEY installed on $WORKER from PRODUCTION_MFA_ENCRYPTION_KEY."
           else
             echo "::warning title=MFA_ENCRYPTION_KEY not set::Two-factor enrolment on production fails closed until the production environment secret PRODUCTION_MFA_ENCRYPTION_KEY is added and this workflow is re-run (docs/PRODUCTION-PROVISIONING.md)."
+          fi
+          # FILE_SCANNER_SECRET is the malware scanner's credential (scanner/, F-02): the same value goes into the scanner's
+          # scanner.env on Node 1, so it comes from the production environment secret PRODUCTION_FILE_SCANNER_SECRET (the
+          # Founder keeps the copy) and is never generated here. Installed when missing; an existing one is kept.
+          if printf '%s\n' "$names" | grep -qx FILE_SCANNER_SECRET; then
+            echo "FILE_SCANNER_SECRET already set on $WORKER: kept."
+          elif [ -n "$PROD_FILE_SCANNER_SECRET" ]; then
+            if [ "${#PROD_FILE_SCANNER_SECRET}" -lt 32 ] || printf '%s' "$PROD_FILE_SCANNER_SECRET" | grep -q '[[:space:]]'; then
+              echo "::error title=PRODUCTION_FILE_SCANNER_SECRET malformed::It must be at least 32 characters with no whitespace (e.g. openssl rand -hex 32). Nothing was installed."; exit 1
+            fi
+            printf '%s' "$PROD_FILE_SCANNER_SECRET" | $WRANGLER secret put FILE_SCANNER_SECRET --env production > /dev/null
+            echo "FILE_SCANNER_SECRET installed on $WORKER from PRODUCTION_FILE_SCANNER_SECRET."
+          else
+            echo "FILE_SCANNER_SECRET not provided: /api/scan/* answers 503 on production and files stay pending (quarantined from share links)."
           fi
           $WRANGLER secret list --env production --format json > secrets.json
           node --no-warnings scripts/provision-production.ts secret-names secrets.json > names.txt; rm -f secrets.json
