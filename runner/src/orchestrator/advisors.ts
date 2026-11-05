@@ -16,6 +16,8 @@ import type { ArchitectInput, CycleEvidence, GalleryReferenceInput, MasterSpec, 
 import { ARCHITECTURE_SPEC_JSON_SCHEMA, DESIGN_SPEC_JSON_SCHEMA, REVIEW_JSON_SCHEMA, SPEC_SCHEMA, extractJson, outstanding, parseVerdict } from "./contracts.ts";
 import { VISION_RETRY_RESERVE } from "./vision.ts";
 import { RECOVERY_ROUNDS, compact, describe as describeCompaction, isContextOverflow, measure, overflowFacts } from "./context-recovery.ts";
+import { type Allowance, allowanceFor } from "./execution-budget.ts";
+import { ProgressGuard } from "./progress-guard.ts";
 import { BLUEPRINT_JSON_SCHEMA, BLUEPRINT_MIN, SECTION_LAYOUTS, blueprintChecklist, type DesignBlueprint } from "./blueprint.ts";
 import { dataUrl, planVisionRequest } from "./vision.ts";
 import type { VisionPlan } from "./vision.ts";
@@ -267,6 +269,14 @@ export interface LocalAdvisorOptions {
   onUsage?: (r: ChatResponse) => void;
   /** A request was too large and was reduced to fit. Reported so the build record shows the recovery happened. */
   onRecovery?: (r: { role: "architect" | "reviewer"; round: number; detail: string }) => void;
+  /**
+   * How much work this task is allowed, and how it is divided into resumable segments. Without one the
+   * session falls back to `maxTurns` as both -- the old single-ceiling behaviour, kept so existing callers
+   * and tests are unaffected.
+   */
+  allowance?: Allowance;
+  /** A segment ended and the session continued from what it had. */
+  onSegment?: (r: { role: "architect" | "reviewer"; segment: number; turnsUsed: number; detail: string }) => void;
   signal?: AbortSignal;
 }
 
@@ -298,6 +308,8 @@ export class LocalModelAdvisor implements Advisor {
     jsonFailures: number;
     overflows: number;
     compactions: number;
+    segments: number;
+    stall: string | null;
     recoveries: string[];
     outcome: "answered" | "no-json" | "overflow-unrecoverable" | "transport" | "stopped" | null;
     detail: string | null;
@@ -349,22 +361,55 @@ export class LocalModelAdvisor implements Advisor {
     let imagesDroppedByRecovery = 0;
     const session = {
       role, model: this.o.model.tag, turns: 0, modelCalls: 0, images: images.length,
-      jsonFailures: 0, overflows: 0, compactions: 0, recoveries: [] as string[],
+      jsonFailures: 0, overflows: 0, compactions: 0, segments: 1, stall: null as string | null, recoveries: [] as string[],
       outcome: null as "answered" | "no-json" | "overflow-unrecoverable" | "transport" | "stopped" | null,
       detail: null as string | null,
     };
     this.lastSession = session;
-    for (let turn = 1; turn <= this.o.maxTurns; turn++) {
+    // Two numbers, not one. A segment is how far the session runs before preserving what it has and carrying
+    // on; the total is the real ceiling. The old behaviour -- one number that ENDED the task -- is what threw
+    // away nine minutes of architect work on bld_dcb3063d445e6f8890d66516.
+    const allowance = this.o.allowance ?? { segmentTurns: this.o.maxTurns, totalTurns: this.o.maxTurns, reason: `fixed ${this.o.maxTurns}-turn budget` };
+    const guard = new ProgressGuard();
+    let turnInSegment = 0;
+    let stopReason: string | null = null;
+
+    for (let turn = 1; turn <= allowance.totalTurns; turn++) {
       if (this.o.signal?.aborted) throw new AdvisorUnavailableError(`${role} session stopped`);
+      turnInSegment++;
+
+      // A session that has stopped getting anywhere does not get the rest of its budget.
+      const progress = guard.verdict();
+      if (progress.strategy === "stop") { stopReason = guard.describe(); session.stall = stopReason; break; }
+
+      // Segment boundary: preserve and continue, rather than fail. The inspection history is compacted (the
+      // model can read a file again); the task and the decisions are not touched.
+      if (turnInSegment > allowance.segmentTurns && turn < allowance.totalTurns) {
+        const plan = compact(messages, {
+          budget: Math.max(2048, Math.floor(measure(messages, { knownImageTokens: imageTokens, reservedOutput: this.o.maxOutputTokens }) * 0.6)),
+          round: 1, knownImageTokens: imageTokens, reservedOutput: this.o.maxOutputTokens,
+        });
+        if (plan.changed) { messages.splice(0, messages.length, ...plan.messages); session.compactions++; }
+        session.segments++;
+        turnInSegment = 1;
+        told = false;
+        this.o.onSegment?.({ role, segment: session.segments, turnsUsed: turn, detail: describeCompaction(plan) });
+      }
       // Inspection has to end before the turns do. A real Business build's reviewer spent all 40 turns reading files
       // and never answered at all (every turn a tool call, no content), so the build lost its independent review and
       // fell back to the rule-based reviewer, which cannot judge visual quality -- the whole visual gate, gone, after
       // seven minutes of GPU time. For the last turns the tools are withdrawn: with nothing left to call, the only
       // thing the model can produce is the answer it was asked for.
-      const mustAnswer = turn > this.o.maxTurns - FINAL_ANSWER_TURNS;
+      // The tools are withdrawn near the end of the WHOLE task, not at every segment boundary -- a segment ends
+      // by continuing, not by demanding an answer. They are also withdrawn early when the guard says more
+      // inspection will not help: the same call repeating, or reading with nothing to show for it.
+      const mustAnswer = turn > allowance.totalTurns - FINAL_ANSWER_TURNS || progress.strategy === "synthesize";
       if (mustAnswer && !told) {
         told = true;
-        messages.push({ role: "user", content: `The inspection budget is used up (${turn - 1} of ${this.o.maxTurns} turns). Answer now, from what you have already read, with the single JSON object only.` });
+        session.stall = session.stall ?? (progress.stall ? guard.describe() : null);
+        messages.push({ role: "user", content: progress.strategy === "synthesize"
+          ? `Stop inspecting: ${progress.stall?.detail ?? "no further progress"}. Answer now, from what you have already read, with the single JSON object only.`
+          : `The inspection budget is used up (${turn - 1} of ${allowance.totalTurns} turns). Answer now, from what you have already read, with the single JSON object only.` });
       }
       const tools = mustAnswer ? undefined : readOnlyToolSpecs();
       const buildReq = () => ({ model: this.o.model.tag, messages, ...(tools ? { tools } : {}), temperature: this.o.temperature, max_tokens: this.o.maxOutputTokens, ...(this.o.model.reasoning ? { reasoning_effort: this.o.model.reasoning } : {}) });
@@ -430,6 +475,7 @@ export class LocalModelAdvisor implements Advisor {
             // recognised as an overflow so the image cap halves and the next attempt is smaller.
             throw new AdvisorUnavailableError(`${role} session (${this.o.model.tag}) is too large to reduce (${describeCompaction(plan)}): ${detail}`);
           }
+          guard.overflow(Math.max(0, plan.before - plan.after));
           if (plan.imagesDropped) imagesDroppedByRecovery += plan.imagesDropped;
           imageTokens = Math.max(0, Math.round(imageTokens * (plan.imagesKept / Math.max(1, plan.imagesKept + plan.imagesDropped))));
           messages.splice(0, messages.length, ...plan.messages);
@@ -442,6 +488,7 @@ export class LocalModelAdvisor implements Advisor {
       let calls = mustAnswer ? [] : fromNativeCalls(res.toolCalls);
       if (!calls.length && !mustAnswer) calls = parseTextToolCalls(res.content, READ_ONLY_TOOLS);
       if (calls.length) {
+        for (const c of calls) guard.toolCall(c.name, c.args);
         messages.push({ role: "assistant", content: calls.some((c) => c.fromText) ? null : (res.content || null), tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args ? JSON.stringify(c.args) : c.rawArgs.slice(0, 2000) } })) });
         for (const c of calls) {
           const out = c.args === null ? { output: `ERROR: arguments could not be parsed (${c.parseError ?? "invalid JSON"})` } : await executeReadOnlyTool(c.name, c.args, this.o.repo);
@@ -469,9 +516,12 @@ export class LocalModelAdvisor implements Advisor {
         const answer = extractJson(res.content ?? "");
         this.calls.push({ role, turns: turn, images: images.length });
         session.outcome = "answered";
+        guard.deliverable(`${role} answer`);
         return answer;
       } catch {
         session.jsonFailures++;
+        guard.invalidJson();
+        guard.output(res.content ?? "");
         // The last thing the model actually said, truncated. Not a reconstruction of what it meant.
         session.detail = (res.content ?? "").slice(0, 400) || "(empty response)";
         if (jsonRetries++ >= 2) break;
@@ -482,9 +532,9 @@ export class LocalModelAdvisor implements Advisor {
     // The old message said "within ${maxTurns} turns" whatever had happened, which is how three failed blueprint
     // attempts came to report a turn count none of them had measured. Say what actually ended it.
     session.outcome = session.outcome ?? "no-json";
-    const why = session.jsonFailures >= 3
-      ? `${session.jsonFailures} unparseable answers`
-      : `the ${this.o.maxTurns}-turn inspection budget was used up`;
+    const why = stopReason ? `progress stopped — ${stopReason}`
+      : session.jsonFailures >= 3 ? `${session.jsonFailures} unparseable answers`
+      : `the ${allowance.totalTurns}-turn budget was used up across ${session.segments} segment(s) (${allowance.reason})`;
     throw new AdvisorUnavailableError(
       `the ${role} session (${this.o.model.tag}) produced no valid JSON after ${session.turns} turn(s) and ${session.modelCalls} model call(s): ${why}`
       + (session.overflows ? ` (${session.overflows} context overflow(s) recovered: ${session.recoveries.join(" | ")})` : "")

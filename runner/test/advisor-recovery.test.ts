@@ -119,14 +119,77 @@ test("[CTX-012] a failed session records what it actually did, instead of a fixe
   await assert.rejects(() => advisor.architect(input([])), (err: Error) => {
     // The old message said "within 40 turns" whatever happened — a number nothing had measured.
     assert.match(err.message, /produced no valid JSON after \d+ turn\(s\) and \d+ model call\(s\)/, err.message);
-    assert.match(err.message, /unparseable answers/, "it says what actually ended the session");
+    // Either ending is a real measurement rather than a fixed sentence: three unparseable answers, or the
+    // progress guard noticing the model is repeating the identical answer and stopping sooner.
+    assert.match(err.message, /unparseable answers|unchanged-output/, "it says what actually ended the session");
     return true;
   });
 
   const s = advisor.lastSession!;
   assert.equal(s.outcome, "no-json");
-  assert.ok(s.jsonFailures >= 3, `json failures counted: ${s.jsonFailures}`);
+  assert.ok(s.jsonFailures >= 1, `json failures counted: ${s.jsonFailures}`);
   assert.ok(s.turns >= 1 && s.modelCalls >= 1, "turns and model calls are real measurements");
   assert.match(s.detail ?? "", /design should be green/, "the last thing the model actually said is kept");
   assert.ok(s.turns <= 8, "and it is bounded by the session's own turn budget");
+});
+
+test("[CTX-013] a long planning task continues past 40 turns across segments instead of failing at a ceiling", async () => {
+  // The old behaviour: one ceiling of 40, and reaching it threw the session away with
+  // "did not return a valid JSON answer within 40 turns". A Premium site genuinely needs more thinking than a
+  // Starter brochure, and running out of turns while still making progress is a reason to preserve and continue.
+  let n = 0;
+  const INSPECTION_TURNS = 52;
+  const client = {
+    async chat() {
+      n++;
+      // Keep inspecting, reading a DIFFERENT file each turn so the progress guard sees real work.
+      if (n <= INSPECTION_TURNS) {
+        return { content: null, toolCalls: [{ id: `c${n}`, name: "read_file", arguments: { path: `src/area-${n}.ts` } }], usage: null, ms: 1 };
+      }
+      return { content: JSON.stringify(SPEC), toolCalls: [], usage: null, ms: 1 };
+    },
+  };
+
+  const advisor = new LocalModelAdvisor({
+    client: client as never, scheduler: null, projectId: "prj_t", model: model(), repo: process.cwd(),
+    maxTurns: 40, maxOutputTokens: 2048, temperature: 0,
+    // A Premium-sized allowance: segments of 20, 120 across the whole task.
+    allowance: { segmentTurns: 20, totalTurns: 120, reason: "premium package" },
+  });
+
+  const spec = await advisor.architect(input([]));
+  assert.ok(spec, "the task completed");
+
+  const s = advisor.lastSession!;
+  assert.ok(s.turns > 40, `the task ran past the old 40-turn ceiling (${s.turns} turns)`);
+  assert.ok(s.modelCalls > 40, `and really made that many model calls (${s.modelCalls})`);
+  assert.ok(s.segments >= 2, `across more than one segment (${s.segments})`);
+  assert.ok(s.turns <= 120, "and stayed inside the project ceiling");
+  assert.equal(s.outcome, "answered");
+});
+
+test("[CTX-014] the project ceiling is still enforced, and a stalled session stops early", async () => {
+  // Removing the fixed ceiling must not create an endless session.
+  let n = 0;
+  const client = {
+    async chat() {
+      n++;
+      // Never answers, and always asks for the SAME file: this is a loop, not work.
+      return { content: null, toolCalls: [{ id: `c${n}`, name: "read_file", arguments: { path: "package.json" } }], usage: null, ms: 1 };
+    },
+  };
+  const advisor = new LocalModelAdvisor({
+    client: client as never, scheduler: null, projectId: "prj_t", model: model(), repo: process.cwd(),
+    maxTurns: 40, maxOutputTokens: 2048, temperature: 0,
+    allowance: { segmentTurns: 20, totalTurns: 120, reason: "premium package" },
+  });
+
+  await assert.rejects(() => advisor.architect(input([])), (err: Error) => {
+    assert.match(err.message, /produced no valid JSON/, err.message);
+    return true;
+  });
+
+  const s = advisor.lastSession!;
+  assert.ok(s.turns < 120, `it stopped well before the ceiling rather than burning it (${s.turns} turns)`);
+  assert.match(s.stall ?? "", /repeated-tool-call|inspection-without-deliverable/, `the stall is named: ${s.stall}`);
 });

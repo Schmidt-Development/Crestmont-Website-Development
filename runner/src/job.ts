@@ -43,6 +43,7 @@ import { run, proxyEnv } from "./exec.ts";
 import { runOperatorCommand } from "./operator-command.ts";
 import { resolveWithin, writeInside } from "./paths.ts";
 import type { Advisor } from "./orchestrator/advisors.ts";
+import { allowanceFor, complexityFromBrief } from "./orchestrator/execution-budget.ts";
 import { DeterministicReviewer, LocalModelAdvisor } from "./orchestrator/advisors.ts";
 import type { GalleryReferenceInput, MasterSpec, ReviewVerdict } from "./orchestrator/contracts.ts";
 import { outstanding, validateArchitectureSpec, validateDesignSpec } from "./orchestrator/contracts.ts";
@@ -544,6 +545,16 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     if (stop.reason) advisorAbort.abort();
     const models = cfg.models.mode === "dual" ? cfg.models : (() => { const one = { ...cfg.models.b, tag: cfg.local.model, contextTokens: cfg.local.contextTokens }; return { a: one, b: one, mode: "single" as const }; })();
     const routed: Route[] = [];
+    // How much planning and review this project is allowed. A Premium site with authentication, payments and
+    // five roles is not the same amount of thinking as a five-page brochure, and the old single 40-turn ceiling
+    // treated them identically -- then destroyed the session on reaching it. `ORCHESTRATOR_ADVISOR_MAX_TURNS`
+    // still sets the segment length when an operator has chosen one.
+    const advisorAllowance = (() => {
+      const a = allowanceFor(complexityFromBrief(job.brief?.content, effectivePackage));
+      const segment = Math.max(1, Math.min(a.segmentTurns, cfg.advisor.maxTurns));
+      return { ...a, segmentTurns: segment, totalTurns: Math.max(segment, a.totalTurns) };
+    })();
+    log.info("advisor allowance", { package: effectivePackage, segmentTurns: advisorAllowance.segmentTurns, totalTurns: advisorAllowance.totalTurns });
     const advisorFor = (role: "architect" | "reviewer"): Advisor | null => {
       if (role === "architect" && deps.architect !== undefined) return deps.architect;
       if (role === "reviewer" && deps.reviewer !== undefined) return deps.reviewer;
@@ -553,6 +564,13 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         return new LocalModelAdvisor({
           client: provider.client, scheduler: deps.scheduler ?? null, projectId: job.projectId, model: models.a, repo: ws!.repo, signal: advisorAbort.signal,
           maxTurns: cfg.advisor.maxTurns, maxOutputTokens: cfg.local.maxOutputTokensPerCall, temperature: cfg.local.temperature,
+          // What this project is actually allowed, from what the brief asks for, instead of one number for
+          // everything. A segment ends by preserving and continuing; the total is the real ceiling.
+          allowance: advisorAllowance,
+          onSegment: (r) => tracker.note({
+            kind: "note",
+            message: `${r.role} segment ${r.segment} began after ${r.turnsUsed} turn(s); the session continued from what it had (${r.detail})`.slice(0, 400),
+          }),
           onUsage: (r) => { tracker.modelCalls++; tracker.inputTokens += r.promptTokens; tracker.outputTokens += r.completionTokens; tracker.modelWallMs += r.wallMs; },
           // An oversized request recovered INSIDE the session, without losing the inspection already done. The
           // attempt-level handler below still exists for a session that cannot be reduced far enough; this note
