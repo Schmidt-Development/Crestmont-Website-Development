@@ -117,7 +117,8 @@ function projectSpec(mail: ProjectMail, projectName: string, url: string): MailS
 
 /** In-app notification text: the template's main (last) paragraph, so in-app and email never disagree. */
 function inAppBody(spec: MailSpec): string {
-  return templateContent(spec).paragraphs.at(-1) ?? templateContent(spec).subject;
+  const c = templateContent(spec);
+  return c.inApp ?? c.paragraphs.at(-1) ?? c.subject;
 }
 
 /** Notify (in-app + email) every customer member of the project's organization. Copy lives in the template registry. */

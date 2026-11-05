@@ -195,8 +195,10 @@ export function ingestionHealth(rows: IngestionRow[], now: Date, maxAgeHours = 7
 }
 
 export function evidenceSetHash(statuses: RequirementStatus[]): string {
-  // Deterministic identity of the evidence set used for approval binding (hashed by caller).
-  return statuses.map((s) => `${s.id}:${s.evidenceRunIds.join("+")}:${s.state}`).sort().join("|");
+  // Deterministic identity of the evidence set used for approval binding (hashed by caller). A Founder scope
+  // disposition is part of it (phased release, src/readiness/phased-release.ts): deferring or reinstating a requirement
+  // changes what the gates judge, so it must void an approval given before. In-scope items hash exactly as before.
+  return statuses.map((s) => `${s.id}:${s.evidenceRunIds.join("+")}:${s.state}${s.disposition !== "in_scope" ? `:${s.disposition}` : ""}`).sort().join("|");
 }
 
 export function approvalValidity(a: ApprovalRow | undefined, rc: ReadinessInput["releaseCandidate"], currentEvidenceSet: string | null): { valid: boolean; reason: string } {

@@ -4,7 +4,7 @@ name: Provision production
 #   • D1 database  crestmont-production       — created if missing, never recreated or deleted
 #   • R2 bucket    crestmont-files-production — must already exist (checked, never created or changed)
 #   • Worker       crestmont-platform-production — created as an empty draft that holds its production secrets
-#                  (TURNSTILE_SITE_KEY, TURNSTILE_SECRET, EVIDENCE_INGEST_SECRET, MFA_ENCRYPTION_KEY); its workers.dev URL and preview
+#                  (TURNSTILE_SITE_KEY, TURNSTILE_SECRET, EVIDENCE_INGEST_SECRET, CRM_ERASURE_HMAC_KEY, MFA_ENCRYPTION_KEY); its workers.dev URL and preview
 #                  URLs are switched off, so it is not reachable anywhere.
 # It NEVER uploads application code, attaches a domain or changes DNS, applies migrations, seeds data, or touches
 # crestmont-platform-staging / crestmont-platform-frontend-preview. The application is deployed only by
@@ -112,7 +112,13 @@ jobs:
           PROD_MFA_ENCRYPTION_KEY: ${{ secrets.PRODUCTION_MFA_ENCRYPTION_KEY }}
           REPLACE_TURNSTILE: ${{ inputs.replace_turnstile }}
         run: |
-          $WRANGLER secret list --env production --format json > secrets.json 2>/dev/null || echo "[]" > secrets.json
+          # Fail closed: an empty list is assumed ONLY when the Worker does not exist yet (first run). A transient listing
+          # failure on an existing Worker must not look like "no secrets", or the steps below would re-put or regenerate them.
+          if ! $WRANGLER secret list --env production --format json > secrets.json 2>/dev/null; then
+            code=$(curl -s -o /dev/null -w '%{http_code}' "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$WORKER/settings" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+            if [ "$code" = "404" ]; then echo "[]" > secrets.json
+            else echo "::error::Could not list the secrets of the existing $WORKER (settings HTTP $code). Nothing was changed; re-run later."; exit 1; fi
+          fi
           names=$(node --no-warnings scripts/provision-production.ts secret-names secrets.json); rm -f secrets.json
           # Secrets are put only when missing (or on an explicit replace request): any secret change makes earlier Worker
           # versions un-rollbackable (Cloudflare 10220, docs/RUNBOOK.md §3), so a routine re-run changes nothing.
@@ -132,6 +138,15 @@ jobs:
             node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))' | $WRANGLER secret put EVIDENCE_INGEST_SECRET --env production > /dev/null
             echo "EVIDENCE_INGEST_SECRET generated for $WORKER (production-only value)."
           fi
+          # CRM_ERASURE_HMAC_KEY keys the erasure tombstones that stop an erased person being re-imported automatically
+          # (src/services/contact-identity.ts). Production's own random value, generated once and NEVER replaced: a new value
+          # would stop every earlier tombstone from matching. Nothing outside the Worker needs it.
+          if printf '%s\n' "$names" | grep -qx CRM_ERASURE_HMAC_KEY; then
+            echo "CRM_ERASURE_HMAC_KEY already set on $WORKER: kept (never replaced)."
+          else
+            node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))' | $WRANGLER secret put CRM_ERASURE_HMAC_KEY --env production > /dev/null
+            echo "CRM_ERASURE_HMAC_KEY generated for $WORKER (production-only value)."
+          fi
           # MFA_ENCRYPTION_KEY encrypts every stored two-factor secret. It is NEVER replaced once set (replacing it would
           # make every enrolled authenticator unreadable). The value comes from the production environment secret
           # PRODUCTION_MFA_ENCRYPTION_KEY so the Founder keeps a recoverable copy in the password manager.
@@ -146,8 +161,8 @@ jobs:
           fi
           $WRANGLER secret list --env production --format json > secrets.json
           node --no-warnings scripts/provision-production.ts secret-names secrets.json > names.txt; rm -f secrets.json
-          for n in TURNSTILE_SITE_KEY TURNSTILE_SECRET EVIDENCE_INGEST_SECRET; do grep -qx "$n" names.txt || { echo "::error::$n is not set on $WORKER"; exit 1; }; done
-          if grep -qxE 'STRIPE_SECRET_KEY|RESEND_API_KEY|RETELL_API_KEY|RETELL_INBOUND_API_KEY|RETELL_OUTBOUND_API_KEY|ANTHROPIC_API_KEY|BUILD_RUNNER_SECRET|STAGING_ACCESS_PASSWORD' names.txt; then
+          for n in TURNSTILE_SITE_KEY TURNSTILE_SECRET EVIDENCE_INGEST_SECRET CRM_ERASURE_HMAC_KEY; do grep -qx "$n" names.txt || { echo "::error::$n is not set on $WORKER"; exit 1; }; done
+          if grep -qxE 'STRIPE_SECRET_KEY|RESEND_API_KEY|RETELL_API_KEY|RETELL_INBOUND_API_KEY|RETELL_OUTBOUND_API_KEY|ANTHROPIC_API_KEY|BUILD_RUNNER_SECRET|AI_BUILD_AUTOMATION|RESEARCH_RUNNER_SECRET|CRM_IMPORT_SECRET|PAYMENT_SIMULATION_ENABLED|STAGING_ACCESS_PASSWORD' names.txt; then
             echo "::warning title=Live-service secret present::$WORKER holds a payments/email/voice/AI or preview secret that this setup never installs. Review it in the Cloudflare dashboard."
           fi
           echo "Worker \`$WORKER\` secrets: $(tr '\n' ' ' < names.txt)(names only)." >> "$GITHUB_STEP_SUMMARY"; rm -f names.txt

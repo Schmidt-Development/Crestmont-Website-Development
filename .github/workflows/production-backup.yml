@@ -32,7 +32,12 @@ concurrency:
 
 jobs:
   backup:
-    if: github.ref == 'refs/heads/main'   # main only: a run from another branch would execute that branch's copy
+    # main only: a run from another branch would execute that branch's copy. Scheduled runs also wait for the REPOSITORY
+    # variable PRODUCTION_URL (set at launch; the same signal production-health-monitor.yml uses): before launch there is
+    # nothing to back up, and a job that names the `production` environment asks the Founder to approve it every day —
+    # 2026-10-30 to 11-05 left one run waiting and the rest cancelled behind it. A skipped job requests no approval.
+    # A manual run is always allowed.
+    if: github.ref == 'refs/heads/main' && (vars.PRODUCTION_URL != '' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: ${{ vars.BACKUP_ENVIRONMENT || 'production' }}

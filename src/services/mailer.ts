@@ -140,7 +140,12 @@ export interface TemplateData {
     | { event: "onboarding_instructions"; name: string | null; url: string };
 }
 
-export interface MailContent { subject: string; heading: string; paragraphs: string[]; cta?: { label: string; url: string } }
+export interface MailContent {
+  subject: string; heading: string; paragraphs: string[]; cta?: { label: string; url: string };
+  /** The one line shown as the in-app notification. Defaults to the last paragraph; set it when the last paragraph is
+   *  supporting detail (a deadline, a disclaimer) rather than what the notification is about. */
+  inApp?: string;
+}
 export interface TemplateDef<K extends EmailTemplate> {
   name: K;
   /** What the Founder sees in the preview catalogue. */
@@ -256,7 +261,9 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
     render: (d) => d.event === "overdue"
       ? { subject: `Reminder: your review is waiting — ${d.approval}`, heading: `Your review is still waiting: ${d.approval}`, paragraphs: [P(d), `The review period ended ${fmtDeadline(d.respondBy)}. Nothing has been approved on your behalf — we wait for your decision. Please approve or tell us what to change.`], cta: { label: "Open your portal", url: d.url } }
       : d.event === "requested"
-      ? { subject: `Your approval is needed: ${d.approval}`, heading: `Your approval is needed: ${d.approval}`, paragraphs: [P(d), d.note ?? `Please review and record your decision for: ${d.approval}.`, ...(d.respondBy ? [`Please respond by ${fmtDeadline(d.respondBy)} (five business days). We never treat silence as approval.`] : [])], cta: { label: "Open your portal", url: d.url } }
+      ? { subject: `Your approval is needed: ${d.approval}`, heading: `Your approval is needed: ${d.approval}`, paragraphs: [P(d), d.note ?? `Please review and record your decision for: ${d.approval}.`, ...(d.respondBy ? [`Please respond by ${fmtDeadline(d.respondBy)} (five business days). We never treat silence as approval.`] : [])], cta: { label: "Open your portal", url: d.url },
+          // The request itself, then the deadline: the deadline paragraph alone told the customer when to answer but not what.
+          inApp: `${d.note ?? `Please review and record your decision for: ${d.approval}.`}${d.respondBy ? ` Please respond by ${fmtDeadline(d.respondBy)}.` : ""}` }
       : { subject: `Customer ${d.decision}: ${d.approval}`, heading: `Customer ${d.decision}: ${d.approval}`, paragraphs: [P(d), d.notes ?? `${d.approval} was ${d.decision}.`], cta: { label: "Open project", url: d.url } },
     samples: [{ ...sampleProject, event: "requested", approval: "Design", note: null, respondBy: "2026-11-09T04:59:59.999Z" }, { ...sampleProject, event: "overdue", approval: "Design", respondBy: "2026-11-09T04:59:59.999Z" }, { ...sampleProject, event: "decided", approval: "Design", decision: "approved", notes: null }],
   },

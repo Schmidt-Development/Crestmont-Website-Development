@@ -105,6 +105,21 @@ jobs:
         id: auth
         run: node --no-warnings scripts/release-authorization.ts --commit "$TARGET_COMMIT" --config "${{ steps.cfg.outputs.sha256 }}"
 
+      # Before any change: the production Worker must hold the secrets production cannot work without (names only; the
+      # values are never read), and — phased release, docs/PHASED-LAUNCH.md — no secret may switch on a deferred AI
+      # system (the authorization step already refused a configuration that does; a Worker secret can do it too).
+      # MFA_ENCRYPTION_KEY: without it no Owner or staff account can enrol two-factor, so the release would be unusable.
+      - name: Production Worker secrets — required present, none switches on a deferred AI system
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DEFERRED_SUBSYSTEMS: ${{ steps.auth.outputs.deferred_subsystems }}
+          REQUIRED_SECRETS: '["TURNSTILE_SITE_KEY","TURNSTILE_SECRET","EVIDENCE_INGEST_SECRET","MFA_ENCRYPTION_KEY"]'
+        run: |
+          trap 'rm -f secrets.json' EXIT
+          $WRANGLER secret list --env production --format json > secrets.json
+          node --no-warnings scripts/phase-check.ts wrangler.toml secrets.json
+
       - name: Install dev tooling
         run: npm install --no-save --ignore-scripts typescript@5 @types/node@22
 
@@ -191,6 +206,12 @@ jobs:
         run: >
           node --no-warnings scripts/production-checks.ts --base "$PRODUCTION_URL" --environment production --commit "$TARGET_COMMIT"
           --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}" --out evidence/production-check.json
+
+      - name: Running Worker's AI website generation matches the released configuration
+        id: gate
+        run: |
+          curl -fsS --max-time 20 "$PRODUCTION_URL/api/health" -o health.json
+          node --no-warnings scripts/phase-check.ts live wrangler.toml health.json --exact
 
       - name: Post production_check evidence
         env:

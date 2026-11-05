@@ -76,7 +76,12 @@ routes = [{ pattern = "crestmontwebsitedevelopment.com", custom_domain = true }]
 # HSTS_MAX_AGE (CREST-GAP-029): the first production release sends a 5-minute HSTS without includeSubDomains, so a
 # certificate or subdomain mistake cannot pin browsers for two years. Raise it in steps (86400, then 31536000) once the
 # apex and www have served HTTPS cleanly; add HSTS_INCLUDE_SUBDOMAINS = "on" only when every subdomain serves HTTPS.
-vars = { ENVIRONMENT = "production", APP_URL = "https://crestmontwebsitedevelopment.com", HSTS_MAX_AGE = "300" }
+# AI_BUILD_AUTOMATION (phased launch, docs/PHASED-LAUNCH.md): "off" = production creates, queues and dispatches no AI
+# website builds and forwards no customer revision to the builder; paid projects are delivered by people
+# (docs/FULFILLMENT-HUMAN-SUPERVISED.md). Production is closed for ANY value but exactly "on" (src/domain/ai-build-gate.ts),
+# and the release workflow refuses "on" while AI-builder requirements are Founder-deferred. Change it only after the
+# builder's separate certification and Founder authorization, in a new release candidate.
+vars = { ENVIRONMENT = "production", APP_URL = "https://crestmontwebsitedevelopment.com", HSTS_MAX_AGE = "300", AI_BUILD_AUTOMATION = "off" }
 d1_databases = [{ binding = "DB", database_name = "crestmont-production", database_id = "c667f1a9-0802-4c52-a0e1-b512219a6eea", migrations_dir = "migrations" }]
 r2_buckets = [{ binding = "FILES", bucket_name = "crestmont-files-production" }]
 triggers = { crons = ["* * * * *", "*/15 * * * *", "17 11 * * *"] }   # must match SCHEDULE in src/app/scheduled.ts

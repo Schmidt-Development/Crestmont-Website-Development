@@ -1,5 +1,6 @@
 // Loads readiness records from the database and produces the authoritative report.
 // The JSON API, CSV export and evidence packet all call buildReport() (§48).
+import { relevantEvidence } from "./evidence-load.ts";
 import type { Db } from "../lib/db.ts";
 import { sha256Hex } from "../lib/crypto.ts";
 import {
@@ -20,9 +21,8 @@ export async function loadReadinessInput(db: Db, now = new Date()): Promise<Read
      FROM release_approvals a`);
   return {
     requirements: await all<RequirementRow>(`SELECT * FROM requirements ORDER BY id`),
-    evidence: await all<EvidenceRow>(
-      `SELECT te.requirement_id, te.outcome, te.test_name, te.run_id, er.environment, er.source, er.commit_sha, er.branch, er.finished_at
-       FROM test_evidence te JOIN evidence_runs er ON er.id = te.run_id`),
+    // Only the rows a verdict can depend on (src/readiness/evidence-load.ts): the full history overloaded staging D1.
+    evidence: await relevantEvidence(db),
     // READY-013: the derivation needs every deployment, so a verdict can demand one at the proven commit.
     deployments: await all<DeriveDeploymentRow>(
       `SELECT id, environment, commit_sha, status, deployed_at FROM deployments`),

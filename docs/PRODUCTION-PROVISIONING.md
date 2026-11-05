@@ -8,6 +8,60 @@ Three separate stages. Each one needs the Founder; none happens on a push.
 | **2. Deploy** | Uploads the approved commit, applies migrations, attaches `crestmontwebsitedevelopment.com`, runs post-deploy checks, rolls back on failure. | Actions → **Deploy production** (`deploy-production.yml`), after the Founder approves the release candidate | Code: `wrangler rollback`. Migrations are additive and are not rolled back. |
 | **3. Open to customers** | Real email, `www` redirect, HSTS, Owner account, and the authentication items in `docs/AUTH-PRODUCTION.md`. | Founder decisions and configuration | — |
 
+## Current state (2026-11-05)
+
+| Resource | State | Evidence |
+|---|---|---|
+| D1 `crestmont-production` | Created, empty, `database_id` committed (`c667f1a9-…`) | Provision run [40614532868](https://github.com/Schmidt-Development/Crestmont-Website-Development/actions/runs/40614532868) |
+| R2 `crestmont-files-production` | Present (Founder-created), checked | same run |
+| Worker `crestmont-platform-production` | Empty draft; workers.dev and preview URLs off | same run |
+| Secrets `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET` (production widget), `EVIDENCE_INGEST_SECRET` (production-only) | Installed | same run |
+| `MFA_ENCRYPTION_KEY` | **Not installed**: run 1 predates the MFA step. Re-run [41962310037](https://github.com/Schmidt-Development/Crestmont-Website-Development/actions/runs/41962310037) is waiting for the Founder's `production` approval (analysis below). | — |
+| Phased launch | `AI_BUILD_AUTOMATION = "off"` committed for production ([PHASED-LAUNCH.md](PHASED-LAUNCH.md)) | `tests/ai-build-gate.test.ts` |
+
+No code, migration, domain or DNS has been applied to production. No payment, email, voice or AI secret exists there.
+
+### The waiting re-run (41962310037), read from its pinned commit `4bffc25`
+
+- **What waits:** the single `provision` job, at the `production` environment gate. No step has run.
+- **What approving changes:** installs `MFA_ENCRYPTION_KEY` from `PRODUCTION_MFA_ENCRYPTION_KEY` if that environment
+  secret exists and is valid (base64, exactly 32 bytes, not low-entropy); if it is absent the step warns and changes
+  nothing; if malformed the job fails before writing. The Turnstile keys and `EVIDENCE_INGEST_SECRET` are kept
+  (`replace_turnstile` is false). The D1 database is found, not recreated, and must match the committed id. R2 is only checked.
+- **Exposure:** none. The last step forces the workers.dev and preview URLs **off** and fails unless they read back off.
+  No code, route, domain or migration is touched.
+- **One edge case at that commit:** if `wrangler secret list` failed transiently, the step treated the Worker as having no
+  secrets and would re-put the Turnstile keys (same values) and generate a new production `EVIDENCE_INGEST_SECRET`.
+  Nothing reads that value (every evidence post goes to `READINESS_URL`, i.e. staging), so even then nothing breaks.
+  The workflow on `main` after #148 fails closed instead.
+- **Another run needed?** Only to add `CRM_ERASURE_HMAC_KEY` (introduced in #148; it keys the erasure tombstones that stop an
+  erased person being re-imported by automated intake, all of which is off in phase 1). Not a phase 1 blocker; the
+  next provisioning run after #148 merges installs it, and re-running is safe.
+
+### Production Worker secrets (names only)
+
+| Secret | Phase 1 | Installed by | State |
+|---|---|---|---|
+| `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET` | required | provision workflow (from environment secrets) | installed |
+| `EVIDENCE_INGEST_SECRET` | required | provision workflow (generated) | installed |
+| `MFA_ENCRYPTION_KEY` | **required** — the deploy now refuses without it | provision workflow (from `PRODUCTION_MFA_ENCRYPTION_KEY`) | **missing** |
+| `CRM_ERASURE_HMAC_KEY` | recommended | provision workflow (generated, never replaced) | missing |
+| `FILE_SCANNER_SECRET` | recommended (closes F-02 on production) | Founder, with the scanner it is shared with (ClamAV on Node 1); routes `/api/scan/*` arrive with PR #151 | not set: `/api/scan/*` answer 503, files stay `pending`, quarantined from share links and never labelled clean. It is the scanner's own credential, so phase 1 keeps `BUILD_RUNNER_SECRET` forbidden |
+| `FOUNDER_EMAIL` | recommended | Founder (`wrangler secret put`) | not set; launch approvals are recorded on staging, so it does not block production |
+| `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET` (+ `EMAIL_FROM` var) | at customer activation | Founder, after the Resend account (BLK-005) | not set |
+| `STRIPE_SECRET_KEY` (live), `STRIPE_WEBHOOK_SECRET` (+ `PAYMENTS_LIVE_AUTHORIZED = "yes"` var) | at customer activation | Founder, separate authorization | not set: production refuses every Stripe event until then |
+| `BUILD_*`, `AI_BUILD_AUTOMATION`, `ANTHROPIC_API_KEY`, `RETELL_*`, `RESEARCH_*`, `CRM_IMPORT_SECRET`, `PAYMENT_SIMULATION_ENABLED`, `STAGING_ACCESS_PASSWORD` | **forbidden in phase 1** | — | provisioning warns; the deploy refuses the AI/Retell ones while deferred |
+
+### Monitoring and backups before launch
+
+- `/api/health` reports `aiBuildAutomation`. The post-deploy checks require it to equal the released configuration (a
+  mismatch rolls the deploy back), and `production-health-monitor.yml` fails if the running Worker is more open than
+  committed — the only way a Worker secret override of `AI_BUILD_AUTOMATION` would otherwise go unnoticed.
+- `production-health-monitor.yml` and scheduled `production-backup.yml` runs skip until the **repository** variable
+  `PRODUCTION_URL` exists (set it at launch). Before #148 every daily backup asked for a `production` approval; the
+  stale ones (2026-10-30 and 11-04) were cancelled. The backup still needs its off-Cloudflare destination
+  (`BACKUP_S3_*`, `BACKUP_SEAL_PASSPHRASE`, docs/BACKUP-RECOVERY.md §3.2) before its first real run.
+
 ## Stage 1 — prerequisites (GitHub and Cloudflare settings only)
 
 ### Cloudflare API token (production only)
@@ -49,7 +103,7 @@ Then commit that `database_id` into `[env.production]` of `wrangler.toml` throug
 
 ## Stage 3 — before opening to customers
 - Transactional email (Resend) authorised and configured: without it, sign-up confirmation and password-reset links are only recorded in the outbox, not delivered.
-- Production Owner account bootstrapped (`scripts/bootstrap-owner.ts --email <founder> --print-sql --url https://crestmontwebsitedevelopment.com`; `--url` is required), MFA enrolled; AI-build automation paused in Owner → AI builds until approved.
+- Production Owner account bootstrapped (`scripts/bootstrap-owner.ts --email <founder> --print-sql --url https://crestmontwebsitedevelopment.com`; `--url` is required), MFA enrolled. AI website generation is off by configuration (`AI_BUILD_AUTOMATION = "off"`, [PHASED-LAUNCH.md](PHASED-LAUNCH.md)); the Owner's switch in Owner → AI builds cannot reopen it.
 - `www` → apex redirect rule, then HSTS (short max-age first).
 - The authentication gaps in `docs/AUTH-PRODUCTION.md` closed or accepted.
 - Live payments, calls and AI builds stay off until separately authorised (no secrets for them are installed by any workflow).

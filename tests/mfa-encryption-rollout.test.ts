@@ -158,7 +158,11 @@ test("[AUTH-003] [SEC-004] end to end with a key: invalid and expired codes refu
     assert.notEqual((await fresh.get("/staff")).status, 200);
   }
   await reset();
-  const good = await totpCode(secret, now - 30); // one step of clock drift is accepted
+  // One step of clock drift is accepted. Taken from the clock NOW, not from `now` above: the refused attempts take time,
+  // and if a 30-second step boundary passed meanwhile, `now - 30` was two steps old and rightly refused (a full-suite
+  // flake). A boundary closer than 3 s is waited out, so the server cannot cross it between this line and its check.
+  if (30 - (Math.floor(Date.now() / 1000) % 30) < 3) await new Promise((r) => setTimeout(r, 3_100));
+  const good = await totpCode(secret, Math.floor(Date.now() / 1000) - 30);
   assert.equal(loc(await fresh.post("/mfa", { code: good })), "/staff");
   const r = app.client();
   await r.post("/login", { email: s.email, password: TEST_PASSWORD });

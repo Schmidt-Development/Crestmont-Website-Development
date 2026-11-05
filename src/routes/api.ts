@@ -1,5 +1,6 @@
 // JSON API: health, CI evidence ingestion, Stripe webhooks, readiness report. Moved from the
 // foundation worker.ts unchanged in behaviour. /api routes never accept cookie-authenticated writes.
+import { aiBuildGate } from "../domain/ai-build-gate.ts";
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { HttpError, jsonResponse, securityHeaders } from "../app/http.ts";
@@ -38,8 +39,16 @@ export async function verifyTurnstile(ctx: AppContext, token: unknown): Promise<
   form.set("response", token);
   if (ctx.ip) form.set("remoteip", ctx.ip);
   const f = env.overrides?.fetch ?? fetch; // test seam; production uses the global fetch
-  const r = await f("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: form });
-  return ((await r.json()) as { success?: boolean }).success === true;
+  // Fail closed on every outcome but an explicit success: an expired, reused or invalid token (success:false), a
+  // siteverify outage or a non-JSON answer all refuse the submission. Before, an outage or a malformed answer threw,
+  // so registration, password reset and the lead forms answered 500 instead of asking the visitor to retry.
+  try {
+    const r = await f("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: form, signal: AbortSignal.timeout(10_000) });
+    return ((await r.json()) as { success?: boolean }).success === true;
+  } catch (e) {
+    console.error(JSON.stringify({ level: "warn", msg: "turnstile siteverify unavailable; submission refused", error: String((e as Error)?.message ?? e).slice(0, 200) }));
+    return false;
+  }
 }
 
 export function register(r: Router) {
@@ -91,7 +100,11 @@ export function register(r: Router) {
     await ctx.db.prepare("SELECT 1").first();
     // CREST-GAP-055: the running Worker states whether its FILES (R2) binding exists, independent of the deploy-time
     // file-storage:<env> feed. "not_configured" = uploads are disabled on this environment. Binding presence only.
-    return jsonResponse(ctx, 200, { status: "ok", environment: ctx.env.ENVIRONMENT, fileStorage: ctx.storage ? "bound" : "not_configured" });
+    // Phased launch: the RUNNING Worker states whether AI website generation is open. A Worker secret can override a
+    // committed [vars] value without a deploy, so the post-deploy checks and the scheduled production monitor compare
+    // this with the committed configuration (scripts/production-checks.ts, production-health-monitor.yml).
+    return jsonResponse(ctx, 200, { status: "ok", environment: ctx.env.ENVIRONMENT, fileStorage: ctx.storage ? "bound" : "not_configured",
+      aiBuildAutomation: aiBuildGate(ctx.env).open ? "on" : "off" });
   });
 
   r.post("/api/leads", async (ctx) => {

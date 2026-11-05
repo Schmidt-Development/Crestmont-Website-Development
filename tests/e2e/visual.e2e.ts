@@ -183,9 +183,12 @@ test("[BRAND-003] drawer: CRM Quick view opens the lead in a <dialog class=drawe
   await page.locator(`a.kanban__quick[href="/staff/crm/leads/${ids.lead}/quick"]`).click();
   const drawer = page.locator("dialog.drawer[open]");
   await drawer.waitFor();
-  await page.locator("dialog.drawer[open] [data-attribution]").waitFor();
+  // The drawer is the quick summary (f0fd13e, "simpler sales UI"): contact, stage, next steps and a link to the full
+  // lead. Campaign attribution lives on the full lead page, checked below, not in the drawer.
+  await page.locator("dialog.drawer[open] a", { hasText: "Open full lead" }).waitFor();
   assert.equal(new URL(page.url()).pathname, "/staff/crm", "stayed on the board");
-  assert.match(await drawer.innerText(), /Alexandria Montgomery-Fitzgerald[\s\S]*google/);
+  assert.match(await drawer.innerText(), /Alexandria Montgomery-Fitzgerald[\s\S]*Next steps/);
+  assert.equal(await page.locator("dialog.drawer[open] [data-attribution]").count(), 0, "attribution is left to the full lead");
   await drawer.evaluate((el: Element) => Promise.all(el.getAnimations().map((x) => x.finished)));
   const box = await drawer.boundingBox();
   assert.ok(box && Math.round(box.x + box.width) === 1440 && box.height >= 990, `drawer pinned to the right edge, full height: ${JSON.stringify(box)}`);
@@ -198,6 +201,8 @@ test("[BRAND-003] drawer: CRM Quick view opens the lead in a <dialog class=drawe
   await Promise.all([p2.waitForNavigation(), p2.locator(`a.kanban__quick[href="/staff/crm/leads/${ids.lead}/quick"]`).click()]);
   assert.equal(new URL(p2.url()).pathname, `/staff/crm/leads/${ids.lead}/quick`);
   assert.match(await p2.locator("main").innerText(), /Open full lead/);
+  await p2.goto(`${srv.base}/staff/crm/leads/${ids.lead}`);
+  assert.match(await p2.locator("[data-attribution]").innerText(), /google/, "the full lead keeps the campaign attribution");
   await nojs.close();
 });
 

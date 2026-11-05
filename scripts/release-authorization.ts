@@ -6,6 +6,8 @@
 // Env: READINESS_URL, EVIDENCE_INGEST_SECRET
 //   node --no-warnings scripts/release-authorization.ts --commit <40-hex> [--config <sha256 of wrangler.toml>]
 import { signEvidence } from "../src/readiness/ingest.ts";
+import { readFileSync } from "node:fs";
+import { checkPhase } from "./phase-check.ts";
 
 const args = process.argv.slice(2);
 const get = (k: string) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : undefined; };
@@ -26,7 +28,7 @@ try {
   res = await fetch(target, { headers: { accept: "application/json", "x-crestmont-signature": await signEvidence(secret, canonical) }, signal: AbortSignal.timeout(20_000) });
 } catch (e) { console.error(`::error::Readiness API unreachable (${(e as Error).message}). Refusing to deploy.`); process.exit(1); }
 const text = await res.text();
-let body: { authorized?: boolean; reason?: string; releaseCandidate?: { id: string; commit: string } | null; approval?: { id: string } | null; gates?: { id: string; status: string }[] };
+let body: { authorized?: boolean; reason?: string; releaseCandidate?: { id: string; commit: string } | null; approval?: { id: string } | null; gates?: { id: string; status: string }[]; phasedRelease?: { policy: string; deferred: { id: string; subsystem: string }[] } };
 try { body = JSON.parse(text); } catch { console.error(`::error::Readiness API returned HTTP ${res.status}: ${text.slice(0, 300)}`); process.exit(1); }
 console.log(JSON.stringify({ status: res.status, ...body }, null, 2));
 if (res.status !== 200 || body.authorized !== true) {
@@ -34,7 +36,19 @@ if (res.status !== 200 || body.authorized !== true) {
   process.exit(1);
 }
 console.log(`Founder approval ${body.approval?.id} is valid for release candidate ${body.releaseCandidate?.id} (${commit}).`);
+// Phased release (docs/PHASED-LAUNCH.md): an approval of a deferred scope never authorizes a configuration that would
+// switch a deferred AI system on. Checked against the checked-out wrangler.toml, which is the commit being released.
+const deferred = [...new Set((body.phasedRelease?.deferred ?? []).map((d) => d.subsystem))];
+if (deferred.length) {
+  const problems = checkPhase(readFileSync(process.env.WRANGLER_TOML ?? "wrangler.toml", "utf8"), deferred, null);
+  if (problems.length) {
+    for (const p of problems) console.error(`::error title=Phased release::${p}`);
+    console.error(`::error::Production deploy NOT authorized for ${commit}: the configuration would switch on a deferred AI system.`);
+    process.exit(1);
+  }
+  console.log(`Phased release (${body.phasedRelease!.policy}): ${body.phasedRelease!.deferred.length} requirement(s) deferred; production configuration keeps ${deferred.join(", ")} off.`);
+}
 if (process.env.GITHUB_OUTPUT && body.releaseCandidate) {
   const { appendFileSync } = await import("node:fs");
-  appendFileSync(process.env.GITHUB_OUTPUT, `release_id=${body.releaseCandidate.id}\n`);
+  appendFileSync(process.env.GITHUB_OUTPUT, `release_id=${body.releaseCandidate.id}\ndeferred_subsystems=${JSON.stringify(deferred)}\n`);
 }

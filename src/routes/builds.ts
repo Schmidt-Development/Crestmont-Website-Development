@@ -1,5 +1,6 @@
 // AI Builds — runner API (signed), owner dashboard ("AI builds"), JSON contract for the frontend session,
 // and the customer-facing summary. Contract: docs/ai-builds/FRONTEND-CONTRACT.md, protocol: RUNNER-PROTOCOL.md.
+import { aiBuildGate } from "../domain/ai-build-gate.ts";
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatDateTime, type SafeHtml } from "../lib/html.ts";
@@ -112,7 +113,10 @@ function previewRedirect(location: string): Response {
 
 export function register(r: Router): void {
   // ───── Runner API (HMAC-signed; no cookies) ─────
-  r.post(`${RUNNER}/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await B.claimJob(ctx.db, { runnerId: typeof b.runnerId === "string" ? b.runnerId : "", version: typeof b.version === "string" ? b.version : "", capabilities: b.capabilities, workerId: b.workerId, workerKey: b.workerKey, status: b.workerStatus }, ctx.now(), { allowPaidProvider: ctx.env.BUILD_ALLOW_PAID_PROVIDER === "true" })); }));
+  r.post(`${RUNNER}/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx);
+    // Phased launch: with AI website generation closed on this environment, no build is dispatched or leased.
+    if (!aiBuildGate(ctx.env).open) return jsonResponse(ctx, 200, { job: null, reason: "disabled_in_environment" });
+    return jsonResponse(ctx, 200, await B.claimJob(ctx.db, { runnerId: typeof b.runnerId === "string" ? b.runnerId : "", version: typeof b.version === "string" ? b.version : "", capabilities: b.capabilities, workerId: b.workerId, workerKey: b.workerKey, status: b.workerStatus }, ctx.now(), { allowPaidProvider: ctx.env.BUILD_ALLOW_PAID_PROVIDER === "true" })); }));
   r.post(`${RUNNER}/heartbeat`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.heartbeat(ctx.db, await runnerBody(ctx), ctx.now()))));
   r.post(`${RUNNER}/checkpoint`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.checkpoint(ctx.db, ctx.storage, await runnerBody(ctx)))));
   r.post(`${RUNNER}/checkpoint/fetch`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.fetchCheckpoint(ctx.db, ctx.storage, await runnerBody(ctx)))));
@@ -222,7 +226,8 @@ ${!ctx.env.BUILD_RUNNER_SECRET ? alert("warn", html`<strong>Execution unavailabl
   : runner?.online ? alert("success", `Runner ${runner.runner_id} (v${runner.version ?? "?"}) last checked in ${formatDateTime(runner.last_seen_at)}.`)
   : alert("warn", runner ? `Runner ${runner.runner_id} last checked in ${formatDateTime(runner.last_seen_at)}; it is not polling now, so queued builds are waiting.` : "No build runner has connected yet; queued builds are waiting.")}
 ${runner && !runner.zeroCost && ctx.env.BUILD_ALLOW_PAID_PROVIDER !== "true" ? alert("warn", html`<strong>Paid provider refused.</strong> Runner ${runner.runner_id} does not declare zero token cost (a paid model provider), so it gets no builds. Paid AI needs BUILD_ALLOW_PAID_PROVIDER=true on this environment as well as the runner's own opt-in; budgets still apply.`) : ""}
-${s.globally_paused ? alert("warn", html`<strong>Automation paused.</strong> ${s.pause_reason ?? ""}`) : ""}
+${!aiBuildGate(ctx.env).open ? alert("info", html`<strong>AI website generation is off on this environment.</strong> ${aiBuildGate(ctx.env).reason ?? ""} Fulfil paid projects from <a href="/staff/projects">Projects</a> (docs/FULFILLMENT-HUMAN-SUPERVISED.md).`)
+  : s.globally_paused ? alert("warn", html`<strong>Automation paused.</strong> ${s.pause_reason ?? ""}`) : ""}
 <div class="kpis">${kpi("Queued", counts.queued ?? 0)}${kpi("Running", (counts.preparing ?? 0) + (counts.building ?? 0) + (counts.verifying ?? 0))}${kpi("Awaiting internal review", counts.ready_for_review ?? 0)}${kpi("Need attention", (counts.needs_information ?? 0) + (counts.failed ?? 0) + (counts.budget_paused ?? 0))}</div>
 <form method="get" class="filters row">${select({ name: "state", label: "State", options: BUILD_STATES.map((x) => ({ value: x, label: BUILD_STATE_LABELS[x] })), value: state, includeBlank: "All states" })}${input({ name: "q", label: "Search", value: q, placeholder: "Customer or project" })}${button("Filter", { variant: "secondary", size: "sm" })}</form>
 ${table(sums, [
@@ -257,7 +262,7 @@ ${r.status === "submitted" && !r.decision ? html`<form method="post" action="/st
 ], { empty: emptyState("No open customer revision requests", "Requests customers submit in the portal appear here while they are open.") })}
 </section>
 <section class="card"><h2 class="card__title">Controls</h2>
-${can(ctx.actor!, "builds.manage") ? html`<form method="post" action="/staff/builds/pause" class="row">${csrf(ctx)}${s.globally_paused
+${can(ctx.actor!, "builds.manage") && aiBuildGate(ctx.env).open ? html`<form method="post" action="/staff/builds/pause" class="row">${csrf(ctx)}${s.globally_paused
   ? html`<input type="hidden" name="paused" value="0">${button("Resume automation", { variant: "primary", size: "sm" })}`
   : html`<input type="hidden" name="paused" value="1">${input({ name: "reason", label: "Reason", required: true, maxlength: 300 })}${button("Pause all automation", { variant: "danger", size: "sm" })}`}</form>` : ""}
 ${configure ? html`<form method="post" action="/staff/builds/settings" class="stack">${csrf(ctx)}
@@ -459,11 +464,13 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     if (e instanceof HttpError && e.status < 500 && e.status !== 403 && e.status !== 404) return redirect(ctx, path, { kind: "error", text: e.message });
     throw e;
   };
+  /** Phased launch: refuses an Owner action that would queue AI website work while the environment gate is closed. */
+  const requireAiBuildsOpen = (ctx: AppContext) => { const g = aiBuildGate(ctx.env); if (!g.open) throw new HttpError(409, g.reason!); };
 
   r.post("/staff/builds/pause", async (ctx) => {
     requireStaff(ctx, "builds.manage");
     const f = await ctx.form();
-    try { await B.setGlobalPause(owner(ctx), str(f, "paused") === "1", str(f, "reason")); } catch (e) { return fail(ctx, "/staff/builds", e); }
+    try { if (str(f, "paused") !== "1") requireAiBuildsOpen(ctx); await B.setGlobalPause(owner(ctx), str(f, "paused") === "1", str(f, "reason")); } catch (e) { return fail(ctx, "/staff/builds", e); }
     return back(ctx, "/staff/builds", str(f, "paused") === "1" ? "Automation paused. Running builds stop at their next heartbeat; nothing new starts." : "Automation resumed.");
   });
   r.post("/staff/builds/settings", async (ctx) => {
@@ -471,6 +478,7 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     const f = await ctx.form();
     const n = (k: string) => Number(str(f, k));
     try {
+      if (f.get("automation_enabled")) requireAiBuildsOpen(ctx);
       await B.updateBuildSettings(owner(ctx), { automationEnabled: !!f.get("automation_enabled"), runBudgetUsd: n("run_budget"), projectBudgetUsd: n("project_budget"), maxRuntimeMinutes: n("max_runtime"), maxTurns: n("max_turns"), maxConcurrent: n("max_concurrent"), maxAttempts: n("max_attempts"), model: str(f, "model"),
         customerRevisionMode: (str(f, "customer_revision_mode") || undefined) as B.CustomerRevisionMode | undefined,
         previewRetentionDays: f.has("preview_retention_days") ? Number(str(f, "preview_retention_days") || "NaN") : undefined });
@@ -481,14 +489,14 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     requireStaff(ctx, "builds.configure");
     const id = str(await ctx.form(), "project_id");
     let job: B.BuildJob | null;
-    try { job = await B.setProjectControls(owner(ctx), id, { backfill: true }); } catch (e) { return fail(ctx, "/staff/builds", e); }
+    try { requireAiBuildsOpen(ctx); job = await B.setProjectControls(owner(ctx), id, { backfill: true }); } catch (e) { return fail(ctx, "/staff/builds", e); }
     return job ? back(ctx, `/staff/builds/${job.id}`, `Backfill authorized: ${BUILD_STATE_LABELS[job.state]}.`) : redirect(ctx, "/staff/builds", { kind: "info", text: "Backfill authorized, but the project is not eligible yet (or automation is off); it starts when it becomes eligible." });
   });
   r.post("/staff/builds/projects/:projectId/pause", async (ctx, p) => {
     requireStaff(ctx, "builds.manage");
     const f = await ctx.form();
     const paused = str(f, "paused") === "1";
-    try { await B.setProjectControls(owner(ctx), p.projectId, { paused, reason: str(f, "reason") }); } catch (e) { return fail(ctx, "/staff/builds", e); }
+    try { if (!paused) requireAiBuildsOpen(ctx); await B.setProjectControls(owner(ctx), p.projectId, { paused, reason: str(f, "reason") }); } catch (e) { return fail(ctx, "/staff/builds", e); }
     const last = await ctx.db.prepare(`SELECT id FROM build_jobs WHERE project_id = ? ORDER BY updated_at DESC LIMIT 1`).bind(p.projectId).first<{ id: string }>();
     return back(ctx, last ? `/staff/builds/${last.id}` : "/staff/builds", paused ? "Project automation paused." : "Project automation resumed.");
   });
@@ -508,7 +516,7 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
   for (const mode of ["retry", "resume"] as const) {
     r.post(`/staff/builds/:id/${mode}`, async (ctx, p) => {
       requireStaff(ctx, "builds.manage");
-      try { await B.retryBuild(owner(ctx), p.id, mode); } catch (e) { return fail(ctx, `/staff/builds/${p.id}`, e); }
+      try { requireAiBuildsOpen(ctx); await B.retryBuild(owner(ctx), p.id, mode); } catch (e) { return fail(ctx, `/staff/builds/${p.id}`, e); }
       return back(ctx, `/staff/builds/${p.id}`, mode === "retry" ? "Queued for retry." : "Queued to resume the saved session.");
     });
   }
@@ -517,7 +525,7 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
     const j = await B.getJob(ctx.db, p.id);
     if (!j) throw new HttpError(404, "Build not found");
     let id: string;
-    try { id = await B.submitRevision(owner(ctx), j.project_id, str(await ctx.form(), "instruction")); } catch (e) { return fail(ctx, `/staff/builds/${p.id}`, e); }
+    try { requireAiBuildsOpen(ctx); id = await B.submitRevision(owner(ctx), j.project_id, str(await ctx.form(), "instruction")); } catch (e) { return fail(ctx, `/staff/builds/${p.id}`, e); }
     return back(ctx, `/staff/builds/${id}`, "Revision queued. It continues from the previous build's source and session; the project budget is cumulative.");
   });
   r.post("/staff/builds/:id/internal-approve", async (ctx, p) => {
@@ -549,7 +557,7 @@ ${d.report ? html`<section class="card"><h2 class="card__title">Build report</h2
   r.post("/staff/builds/customer-revisions/:id/forward", async (ctx, p) => {
     requireStaff(ctx, "builds.manage");
     let id: string;
-    try { id = await B.forwardCustomerRevision(ctx.db, p.id, { kind: "user", userId: ctx.user!.id }, { instruction: str(await ctx.form(), "instruction"), mail: ctx }); } catch (e) { return fail(ctx, "/staff/builds", e); }
+    try { requireAiBuildsOpen(ctx); id = await B.forwardCustomerRevision(ctx.db, p.id, { kind: "user", userId: ctx.user!.id }, { instruction: str(await ctx.form(), "instruction"), mail: ctx }); } catch (e) { return fail(ctx, "/staff/builds", e); }
     return back(ctx, `/staff/builds/${id}`, "Revision approved and queued for the AI builder. It continues from the latest build; deliver the result from the project's Revisions tab after review.");
   });
   r.post("/staff/builds/customer-revisions/:id/reject", async (ctx, p) => {

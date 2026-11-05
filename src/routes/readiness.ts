@@ -15,6 +15,8 @@ import { audit } from "../services/security.ts";
 import { requirementsCsv } from "../readiness/report.ts";
 import { ENVS, type Env as ReadyEnv, type Metric, type RequirementStatus } from "../readiness/engine.ts";
 import * as ra from "../services/readiness-admin.ts";
+import * as phase from "../services/phased-release.ts";
+import { PHASE_1, PRODUCTION_GATES } from "../readiness/phased-release.ts";
 import { githubConfig, hasPushedSnapshot, latestGithubSync, syncGithub, type GithubRun, type GithubSyncRow } from "../services/github.ts";
 import { errorRateSummary, latestLatency, type ErrorRateSummary, type LatencyRun } from "../services/env-metrics.ts";
 
@@ -24,7 +26,7 @@ const page = (ctx: AppContext, title: string, body: SafeHtml, status = 200) =>
 const subnav = (ctx: AppContext) => tabs([
   ["/staff/readiness", "Overview"], ["/staff/readiness/requirements", "Requirements"], ["/staff/readiness/engineering", "Engineering"],
   ["/staff/readiness/env/development", "Development"], ["/staff/readiness/env/staging", "Staging"], ["/staff/readiness/env/production", "Production"],
-  ["/staff/readiness/blockers", "Blockers"], ["/staff/readiness/security", "Security"], ["/staff/readiness/releases", "Releases"],
+  ["/staff/readiness/blockers", "Blockers"], ["/staff/readiness/security", "Security"], ["/staff/readiness/releases", "Releases"], ["/staff/readiness/phased-release", "Phased release"],
   ["/staff/readiness/snapshots", "Snapshots"], ["/staff/readiness/report", "Report & exports"],
 ].map(([href, l]) => ({ href, label: l, current: ctx.url.pathname === href || (href !== "/staff/readiness" && ctx.url.pathname.startsWith(href + "/")) })));
 
@@ -411,6 +413,33 @@ ${textarea({ name: "notes", label: "Notes (optional)", rows: 3, maxlength: 4000 
     { header: "Commit", cell: (a) => html`<code>${short(a.commit_sha)}</code>` }, { header: "Validity", cell: (a) => { const x = ra.validityOf(a, rc, report.evidenceSetSha256); return html`${x.valid ? badge("pass", "Valid") : badge("stale", "Not valid")} ${x.reason}`; } }], { empty: html`<p class="faint">No launch decision has been recorded.</p>` })}</section>`, status);
 }
 
+/** Phased release (docs/PHASED-LAUNCH.md): the Founder's scope decisions for the separately-developed AI systems. */
+async function phasePanel(ctx: AppContext, errors: string[] = [], status = 200): Promise<Response> {
+  const items = await phase.phaseItems(ctx);
+  const deferred = items.filter((i) => i.disposition !== "in_scope");
+  const open = items.filter((i) => i.disposition === "in_scope");
+  const dispositions = (await ra.listApprovals(ctx.db, "scope_disposition"));
+  return page(ctx, "Phased release", html`${pageHead("Phased release scope", undefined, "Launch readiness")}${subnav(ctx)}
+${formErrors(errors)}
+${alert("info", html`<strong>${PHASE_1.title}.</strong> A deferral removes an AI-system requirement from the release gates; it does not mark it complete. Only requirements of the separately-developed AI systems can be deferred, only while production keeps that system switched off, and the production deploy refuses any configuration or Worker secret that would switch a deferred system on. Every decision voids outstanding launch approvals.`)}
+<section class="card stack"><h2 style="font-size:1.25rem">Production gates relied on</h2>${table([...PRODUCTION_GATES], [{ header: "AI system", cell: (g) => g.subsystem }, { header: "Capability kept off", cell: (g) => g.capability }, { header: "How production keeps it off", cell: (g) => g.gate }])}</section>
+<section class="card stack"><h2 style="font-size:1.25rem">Deferred (${deferred.length})</h2>${table(deferred, [
+  { header: "Requirement", cell: (i) => html`<a href="/staff/readiness/requirements/${i.id}">${i.id}</a> ${i.title}<br><span class="faint">${i.subsystem} · ${i.priority} · ${i.category} · real state: ${label(i.state)}</span>` },
+  { header: "Decision", cell: (i) => i.approvalId ?? "—" },
+  { header: "", cell: (i) => isOwner(ctx.actor!) ? html`<form method="post" action="/staff/readiness/phased-release/reinstate" class="row">${csrf(ctx)}<input type="hidden" name="id" value="${i.id}">${button("Reinstate", { variant: "secondary", size: "sm" })}</form>` : "" },
+], { empty: html`<p class="faint">Nothing is deferred: every requirement counts toward the release gates.</p>` })}</section>
+${isOwner(ctx.actor!) ? html`<form class="card card--gold stack" method="post" action="/staff/readiness/phased-release/defer">${csrf(ctx)}
+<h2 style="font-size:1.25rem">Defer for phase 1</h2>
+${table(open, [
+  { header: "", cell: (i) => i.eligible ? checkbox("id", i.id, { value: i.id }) : badge("muted", "Stays in scope") },
+  { header: "Requirement", cell: (i) => html`${i.title}<br><span class="faint">${i.subsystem} · ${i.priority} · ${i.category} · ${label(i.state)}</span>${i.reason ? html`<br><span class="faint">${i.reason}</span>` : ""}` },
+], { empty: html`<p class="faint">No AI-system requirement is in scope.</p>` })}
+${textarea({ name: "notes", label: "Reason, kept with the decision", rows: 3, maxlength: 4000, required: true })}
+${input({ name: "confirm", label: `Type "${PHASE_1.confirmPhrase}" to confirm`, required: true, maxlength: 40 })}
+<div class="form-actions">${button("Record scope decision")}</div></form>` : ""}
+<section class="card stack"><h2 style="font-size:1.25rem">Scope decisions</h2>${table(dispositions, [{ header: "When", cell: (a) => formatDateTime(a.created_at) }, { header: "By", cell: (a) => `${a.approver_name ?? a.approver_user_id}${a.approver_is_owner ? " (Owner)" : " (NOT Owner)"}` }, { header: "Decision", cell: (a) => nl2br(a.notes ?? "") }], { empty: html`<p class="faint">No scope decision has been recorded.</p>` })}</section>`, status);
+}
+
 // ───────── Registration ─────────
 
 /** Failing infrastructure feeds (cron registration, recovery drills) carry a short public reason: these texts come from
@@ -715,6 +744,25 @@ ${textarea({ name: "rollback_plan", label: "Rollback plan", value: v.rollback_pl
       await ra.recordFounderDecision(ctx, ctx.actor!, ctx.user!.id, { decision: str(f, "decision"), notes: str(f, "notes"), confirmCommit: str(f, "confirm_commit"), expectedEvidenceSet: str(f, "evidence_set") });
       return redirect(ctx, "/staff/readiness/approve", { kind: "success", text: "Founder decision recorded and bound to the release candidate and evidence set." });
     } catch (e) { const err = readinessErr(e); if (err) return approvalPanel(ctx, [err.message], err.status); throw e; }
+  });
+
+  // Phased release scope (docs/PHASED-LAUNCH.md): readable by readiness staff, changed only by the Founder (MFA step-up).
+  r.get("/staff/readiness/phased-release", async (ctx) => { requireStaff(ctx, "readiness.read"); return phasePanel(ctx); });
+  r.post("/staff/readiness/phased-release/defer", async (ctx) => {
+    requireFounder(ctx);
+    const f = await ctx.form();
+    try {
+      const out = await phase.deferForPhase(ctx, ctx.actor!, ctx.user!.id, { ids: f.getAll("id").map(String), notes: str(f, "notes"), confirm: str(f, "confirm") });
+      return redirect(ctx, "/staff/readiness/phased-release", { kind: "success", text: `Deferred ${out.deferred.join(", ")} (decision ${out.approvalId}). Outstanding launch approvals were voided.` });
+    } catch (e) { const err = readinessErr(e); if (err) return phasePanel(ctx, [err.message], err.status); throw e; }
+  });
+  r.post("/staff/readiness/phased-release/reinstate", async (ctx) => {
+    requireFounder(ctx);
+    const f = await ctx.form();
+    try {
+      const out = await phase.reinstate(ctx, ctx.actor!, ctx.user!.id, { id: str(f, "id"), notes: str(f, "notes") });
+      return redirect(ctx, "/staff/readiness/phased-release", { kind: "success", text: `${str(f, "id")} is back in scope (decision ${out.approvalId}).` });
+    } catch (e) { const err = readinessErr(e); if (err) return phasePanel(ctx, [err.message], err.status); throw e; }
   });
 
   // ───────── Exports & snapshots (§48) ─────────

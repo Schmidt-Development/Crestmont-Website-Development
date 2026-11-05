@@ -1070,8 +1070,21 @@ const STRIPE_DISPUTE_CARD = { number: "4000 0000 0000 0259", expiry: "12 / 34", 
 test("[PAY-008] [PAY-003] Stripe test mode: a disputed payment reaches staff Disputes and the Owner is emailed once", { skip: unset || false }, async (t) => {
   if (outcome.get(6) !== "passed") { t.skip(`needs journey 6 (${outcome.get(6) ?? "not run"})`); return; }
   const o = await as("owner");
-  const ownerMail = `${BASE}/staff/email?to=${encodeURIComponent(account("owner").email)}&template=dispute_opened`;
-  const disputeMails = async () => { await o.goto(ownerMail); return (await o.locator("main table tbody tr", { hasText: /Payment dispute opened/i }).count()) as number; };
+  // Count across EVERY page of the email log (25 rows a page), from today's date. Counting page one only saturated at
+  // 25 once staging had sent that many dispute emails: deploy #154 read "25 !== 26" with the email actually sent, and
+  // the assertion could never pass again. A UTC date filter keeps the walk short; the count is still exact.
+  const since = new Date().toISOString().slice(0, 10);
+  const ownerMail = (page: number) => `${BASE}/staff/email?to=${encodeURIComponent(account("owner").email)}&template=dispute_opened&from=${since}&page=${page}`;
+  const disputeMails = async () => {
+    let total = 0;
+    for (let page = 1; page <= 40; page++) {
+      await o.goto(ownerMail(page));
+      const rows = o.locator("main table tbody tr");
+      total += await rows.filter({ hasText: /Payment dispute opened/i }).count();
+      if (await rows.count() < 25) return total;
+    }
+    throw new Error("more than 1000 dispute emails since today: refusing to count further");
+  };
   const before = await disputeMails();
   const c = people.newCustomer.page;
   await c.goto(`${BASE}/checkout/starter`);
