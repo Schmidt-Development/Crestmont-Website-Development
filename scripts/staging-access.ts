@@ -21,6 +21,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashPassword, base32Encode } from "../src/lib/auth-crypto.ts";
 import { sealWithKey, openWithKey, importMfaKey } from "../src/lib/totp-secrets.ts";
+import { isTransientDbError } from "../src/lib/db.ts";
+
+/** Attempts for one staging READ through wrangler: one try plus two retries, as the Worker does. */
+export const D1_READ_ATTEMPTS = 3;
 
 export const DEMO_DOMAIN = "crestmont-preview.test";
 const ALPHABET = "23456789abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ"; // no 0/O/1/l/I, no markdown-active characters
@@ -256,6 +260,27 @@ Rotate everything: Actions → Deploy staging → Run workflow → tick "rotate_
 `;
 }
 
+/** A line feed, built rather than written, so this file's own source stays free of escape puzzles. */
+const LF = String.fromCharCode(10);
+
+/**
+ * One error, rendered for a GitHub annotation, with the CAUSE KEPT.
+ *
+ * `wranglerOps` deliberately puts wrangler's own complaint on a second line. An annotation is a single line,
+ * so callers used to write `message.split(LF)[0]` -- which keeps "Command failed: npx … d1 execute …" and
+ * drops the only part that says why. GitHub renders %0A inside an annotation as a line break, so the whole
+ * message fits on one line of workflow-command syntax and still reads as several lines in the log.
+ *
+ * `::` is escaped too: an error that happened to contain it would otherwise end the annotation early.
+ */
+export function annotation(e: unknown, limit = 900): string {
+  const text = String((e as { message?: unknown })?.message ?? e)
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .split(/\r?\n/).map((l) => l.trimEnd()).filter((l) => l.trim()).join(LF);
+  const cut = text.length > limit ? text.slice(0, limit - 1) + "…" : text;
+  return cut.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A").replace(/::/g, "%3A%3A");
+}
+
 // ── CLI ──
 export function wranglerOps(): D1Ops {
   const [cmd, ...base] = (process.env.WRANGLER ?? "npx --yes wrangler@4.149.0").split(" ").filter(Boolean);
@@ -284,9 +309,27 @@ export function wranglerOps(): D1Ops {
     }
   };
   const d1 = ["d1", "execute", "crestmont-staging", "--remote", "--env", "staging"];
+  // Cloudflare's own transient faults, judged by the same narrow rule the Worker uses (`isTransientDbError`,
+  // src/lib/db.ts): a deterministic refusal -- a missing column, a pattern D1 will not accept -- must still
+  // fail on the first attempt and be seen. Only READS are retried. `execFile` applies the access SQL and
+  // `putSecret` writes a Worker secret; either may already have taken effect when the error surfaced, so
+  // repeating one could double-apply it. Every `query` in this file is a SELECT or a CREATE TABLE IF NOT
+  // EXISTS, so re-running one is free of consequence.
+  const readWithRetry = async (op: () => string): Promise<string> => {
+    for (let attempt = 1; ; attempt++) {
+      try { return op(); }
+      catch (e) {
+        if (attempt >= D1_READ_ATTEMPTS || !isTransientDbError(e)) throw e;
+        console.log(`::notice::A transient Cloudflare fault on a staging read (attempt ${attempt} of ${D1_READ_ATTEMPTS}): ${annotation(e, 240)}`);
+        // 250ms, then 1s. A deploy can wait; losing every verification step after this one to a single blip
+        // costs far more.
+        await new Promise((r) => setTimeout(r, 250 * attempt * attempt));
+      }
+    }
+  };
   return {
     async query(sql) {
-      const out = run([...d1, "--json", "--command", sql]);
+      const out = await readWithRetry(() => run([...d1, "--json", "--command", sql]));
       const parsed = JSON.parse(out.slice(out.indexOf("[")));
       return (parsed[0]?.results ?? []) as never;
     },
@@ -317,8 +360,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       : "Demo 2FA secrets written by this run: plaintext (no STAGING_MFA_ENCRYPTION_KEY); the Worker encrypts each at its next sign-in.");
     if (r.revoked) console.log(`Revoked with the rotation: ${r.revoked.sessions} demo sessions, ${r.revoked.authTokens} one-time tokens, ${r.revoked.recoveryCodes} recovery codes, ${r.revoked.invitations} pending invitations issued by demo accounts.`);
   } catch (e) {
-    // wrangler errors can echo arguments; print only the first line of our own message.
-    console.error(`::error::Staging access could not be applied: ${String((e as Error).message ?? e).split("\n")[0].slice(0, 200)}`);
+    // The whole message, cause included. Printing only its first line is what left deploy 42087171814 saying
+    // "Command failed: … d1 execute … (SELECT MAX(a.created_at) FROM audit" with the reason nowhere in the run.
+    console.error(`::error::Staging access could not be applied: ${annotation(e)}`);
     process.exit(1);
   }
 }

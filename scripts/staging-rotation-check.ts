@@ -17,7 +17,7 @@
 import { existsSync, readFileSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { totpCode } from "../src/lib/auth-crypto.ts";
-import { currentAccess, rotationPending, wranglerOps, DEMO_DOMAIN, type AccessResult, type D1Ops } from "./staging-access.ts";
+import { currentAccess, rotationPending, wranglerOps, annotation, DEMO_DOMAIN, type AccessResult, type D1Ops } from "./staging-access.ts";
 import { passphraseProblem } from "./seal.ts";
 
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
@@ -231,7 +231,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       if (checks.some((c) => !c.ok)) { console.error("::error title=Rotation verification failed::See the step summary (no values are shown)."); process.exit(1); }
     } else throw new Error("usage: capture|verify --url <url> --state <file> [--access <file>]");
   } catch (e) {
-    console.error(`::error::Rotation check failed: ${String((e as Error).message ?? e).split("\n")[0].slice(0, 200)}`);
+    console.error(`::error::Rotation check failed: ${annotation(e)}`);
     process.exit(1);
   }
 }

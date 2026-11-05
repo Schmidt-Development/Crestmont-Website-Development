@@ -10,7 +10,7 @@
 //   env: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID (D1 reads and the binding names), WRANGLER (optional)
 import { appendFileSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { wranglerOps } from "./staging-access.ts";
+import { wranglerOps, annotation } from "./staging-access.ts";
 import { liveBindings, founderReport, tomlScriptName } from "./staging-binding-guard.ts";
 
 type Row = Record<string, unknown>;
@@ -88,7 +88,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, ["### Stripe staging check", "", ...lines.map((l) => `- ${l}`), ""].join("\n"));
     if (!ok) { console.log("::error title=Stripe staging check::the staging webhook accepted an unsigned or forged event"); process.exit(1); }
   } catch (e) {
-    console.log(`::error title=Stripe staging check::${String((e as Error).message ?? e).split("\n")[0].slice(0, 300)}`);
+    console.log(`::error title=Stripe staging check::${annotation(e)}`);
     process.exit(1);
   }
 }
