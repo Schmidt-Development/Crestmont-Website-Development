@@ -9,7 +9,7 @@ import { createTestApp, createStaff, TEST_PASSWORD } from "./support/app.ts";
 import { handle } from "../src/app/app.ts";
 import { hstsValue, DEFAULT_HSTS } from "../src/app/http.ts";
 import { metricWeight, BOT_UA } from "../src/services/env-metrics.ts";
-import { founderProblem, turnstileFeed } from "../src/services/readiness-admin.ts";
+import { founderProblem, turnstileFeed, TURNSTILE_TEST_KEY } from "../src/services/readiness-admin.ts";
 import { signEvidence, ingestEvidence } from "../src/readiness/ingest.ts";
 import { signedGetCanonical } from "../src/routes/ops.ts";
 import { nowIso } from "../src/lib/db.ts";
@@ -147,8 +147,20 @@ test("[SEC-002] the turnstile:staging feed is failing with a public reason while
   const now = new Date();
   const f = turnstileFeed({ ENVIRONMENT: "staging", TURNSTILE_SITE_KEY: stagingVars[1], TURNSTILE_SECRET: stagingVars[2] }, now)!;
   assert.equal(f.source, "turnstile:staging");
-  assert.equal(f.status, "failing", "the committed staging keys are Cloudflare's test keys");
-  assert.equal(f.advisory, true);
+  // FEED-01: this must NOT demand that staging keeps Cloudflare's always-pass test keys. Installing real keys
+  // is the fix, and a test that fails when the defect is fixed is a test that prevents the fix. Assert instead
+  // that the feed tells the truth about whichever keys are committed, and pin both verdicts explicitly below.
+  const committedAreTestKeys = [stagingVars[1], stagingVars[2]].some((k) => TURNSTILE_TEST_KEY.test(k.trim()));
+  if (committedAreTestKeys) {
+    assert.equal(f.status, "failing", "always-pass test keys mean there is no real bot challenge");
+    assert.equal(f.advisory, true, "known gap on staging: it must not turn readiness health to 503");
+  } else {
+    assert.equal(f.status, "healthy", "real staging keys report healthy");
+    assert.ok(!/^0x/.test(stagingVars[2]) || stagingVars[2].length < 60,
+      "a real Turnstile SECRET belongs in a Worker secret, never committed to wrangler.toml");
+  }
+  // Both verdicts, independent of what happens to be committed today.
+  assert.equal(turnstileFeed({ ENVIRONMENT: "staging", TURNSTILE_SITE_KEY: "1x00000000000000000000AA", TURNSTILE_SECRET: "2x0000000000000000000000000000000AA" }, now)!.status, "failing");
   assert.equal(turnstileFeed({ ENVIRONMENT: "production", TURNSTILE_SITE_KEY: "1x00000000000000000000AA", TURNSTILE_SECRET: "real-secret" }, now)!.advisory, false, "test keys on production are a real failure");
   assert.equal(turnstileFeed({ ENVIRONMENT: "staging", TURNSTILE_SITE_KEY: "0x4AAAAAAABkMYinukE8nzYS", TURNSTILE_SECRET: "0x4AAAAAAABkMYinukE8nzYS_real" }, now)!.status, "healthy");
   assert.equal(turnstileFeed({ ENVIRONMENT: "development" }, now), null);
