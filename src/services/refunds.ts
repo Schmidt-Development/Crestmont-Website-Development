@@ -3,6 +3,7 @@
 // AI/automation can never act. Every step is audited and the customer is notified of decisions.
 import type { AppContext } from "../app/context.ts";
 import type { Db } from "../lib/db.ts";
+import { likeContains } from "../lib/db.ts";
 import { nowIso, newId } from "../lib/db.ts";
 import { HttpError } from "../app/http.ts";
 import { refundTransition, type RefundStatus, REFUND_STATUSES } from "../domain/refunds.ts";
@@ -26,7 +27,7 @@ const SELECT = `SELECT r.*, o.name AS org_name, u.display_name AS requester_name
   FROM refunds r JOIN organizations o ON o.id = r.organization_id JOIN users u ON u.id = r.requested_by JOIN payments p ON p.id = r.payment_id
   LEFT JOIN users rv ON rv.id = r.reviewed_by LEFT JOIN users dc ON dc.id = r.decided_by`;
 
-const like = (q: string) => `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+const like = (q: string) => likeContains(q);
 
 export async function listRefunds(db: Db, status: string | undefined, page: { limit: number; offset: number }, q = "") {
   const conds: string[] = [], binds: unknown[] = [];

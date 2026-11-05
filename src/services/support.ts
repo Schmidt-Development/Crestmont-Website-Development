@@ -3,6 +3,7 @@
 // route layer and audited here. AI drafts are never sent automatically: a human edits and sends,
 // and sensitive tickets require an explicit approval tick that is recorded on the message and job.
 import type { Db } from "../lib/db.ts";
+import { likeContains } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import type { AppContext } from "../app/context.ts";
 import { assertTransition, TransitionError } from "../domain/state-machine.ts";
@@ -156,7 +157,7 @@ export async function listQueue(db: Db, f: QueueFilters, currentUserId: string, 
   else if (f.assignee && /^[A-Za-z0-9_]{1,64}$/.test(f.assignee)) { where.push(`a.user_id = ?`); binds.push(f.assignee); }
   if (f.breached) where.push(`t.sla_breached_at IS NOT NULL AND t.first_response_at IS NULL`);
   if (f.q) {
-    const like = `%${f.q.replace(/[%_\\]/g, (c) => "\\" + c).slice(0, 100)}%`;
+    const like = likeContains(f.q);
     where.push(`(t.subject LIKE ? ESCAPE '\\' OR t.id LIKE ? ESCAPE '\\' OR o.name LIKE ? ESCAPE '\\')`);
     binds.push(like, like, like);
   }

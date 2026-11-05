@@ -6,6 +6,7 @@
 // discrepancy that disappears (for example the webhook arrives later) is marked "cleared" automatically.
 import type { Env } from "../app/context.ts";
 import type { Db } from "../lib/db.ts";
+import { likeContains } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { StripeReadOnly, LivePaymentsNotAuthorized, type StripeCheckoutSessionSummary, type StripeBalanceTransaction } from "../adapters/payments.ts";
 import { audit } from "./security.ts";
@@ -227,7 +228,7 @@ function findingWhere(f: FindingFilter): { sql: string; binds: unknown[] } {
   if (f.kind && f.kind in FINDING_KINDS) { conds.push(`r.kind = ?`); binds.push(f.kind); }
   if (f.scope === "checkout" || f.scope === "ledger") { conds.push(`r.scope = ?`); binds.push(f.scope); }
   if (f.q) {
-    const like = `%${f.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    const like = likeContains(f.q);
     conds.push(`(r.stripe_object_id LIKE ? ESCAPE '\\' OR r.invoice_id LIKE ? ESCAPE '\\' OR r.payment_id LIKE ? ESCAPE '\\' OR o.name LIKE ? ESCAPE '\\' OR r.detail LIKE ? ESCAPE '\\')`);
     binds.push(like, like, like, like, like);
   }

@@ -2,6 +2,7 @@
 // exported so each page can show exactly how a number was derived. Unknown values (NULL fees,
 // NULL costs) are reported as unknown — never coerced to zero.
 import type { Db } from "../lib/db.ts";
+import { likeContains } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { HttpError } from "../app/http.ts";
 import { MAINTENANCE_PLANS } from "../domain/catalog.ts";
@@ -111,7 +112,7 @@ export async function financeDashboard(db: Db, range: DateRange): Promise<Dashbo
 export const LIST_EXPORT_LIMIT = 10_000;
 
 /** LIKE pattern for a free-text search box (wildcards in the user's text are escaped). */
-export function likePattern(q: string): string { return `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`; }
+export function likePattern(q: string): string { return likeContains(q); }
 /** Normalized search text from ?q= (trimmed, at most 100 characters). */
 export function searchParam(params: URLSearchParams): string { return (params.get("q") ?? "").trim().slice(0, 100); }
 

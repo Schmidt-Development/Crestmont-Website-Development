@@ -15,6 +15,7 @@
 //   - what was selected is recorded against the job with the gallery version it saw (J07, J08, J20).
 
 import type { Db } from "../lib/db.ts";
+import { likeContains } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { HttpError } from "../app/http.ts";
 import { audit } from "./security.ts";
@@ -86,8 +87,8 @@ export async function listReferences(db: Db, f: ListFilter = {}): Promise<{ rows
   const bind: unknown[] = [];
   if (f.status && f.status !== "ALL") { where.push("status = ?"); bind.push(f.status); }
   if (f.industry) { where.push("industry = ?"); bind.push(f.industry); }
-  if (f.q) { where.push("(title LIKE ? OR source_name LIKE ? OR quality_notes LIKE ?)"); const like = `%${f.q.slice(0, 60)}%`; bind.push(like, like, like); }
-  if (f.tag) { where.push("style_tags_json LIKE ?"); bind.push(`%"${f.tag.slice(0, 40)}"%`); }
+  if (f.q) { where.push("(title LIKE ? ESCAPE '\\' OR source_name LIKE ? ESCAPE '\\' OR quality_notes LIKE ? ESCAPE '\\')"); const like = likeContains(f.q); bind.push(like, like, like); }
+  if (f.tag) { where.push("style_tags_json LIKE ? ESCAPE '\\'"); bind.push(likeContains(`"${f.tag}"`)); }
   const clause = where.join(" AND ");
   // Both of these arrive from a query string, so they can be anything. An out-of-range or fractional value must not
   // reach SQL: 1e20 is not a representable integer to bind, and the page answered 500 instead of an empty list.
