@@ -100,8 +100,29 @@ for (const [name, width, height] of [["desktop", 1440, 900], ["tablet", 820, 118
   results[name] = { url, status: response?.status() ?? null, probe, requests };
 
   // ── The assertions that the unstyled screenshot fails ──
+  //
+  // Only the preview's OWN files are fatal. That is the defect this step exists for: the preview's stylesheet
+  // redirected to /login because a browser withholds a SameSite=Lax cookie from an opaque-origin document.
+  //
+  // A THIRD-PARTY request is a different thing, and failing the deploy for one was wrong. Deploy #150 failed
+  // here because a generated page asked for https://fonts.googleapis.com/css2 and previewHeaders() refused it:
+  // the build preview is sandboxed to its own revision's files (`connect-src 'none'`, style-src/font-src scoped
+  // to the revision base) precisely so a model-authored page cannot reach a third party or leak the viewer's IP
+  // to one. The CSP did its job. Widening it to satisfy this check would trade a real security boundary for a
+  // green tick, and the webfont is the model's choice in generated content, not anything this repository emits.
+  //
+  // So a refused third-party subresource is reported and kept in the evidence — the Founder should see that a
+  // generated site reaches outside itself — but it does not fail the deploy. The styling assertions below still
+  // decide whether the page actually rendered, and they are what "unstyled" really means.
+  const origin = new URL(url).origin;
   const blocked = requests.filter((r) => r.failed || (r.status && r.status >= 300));
-  for (const b of blocked) problem(`${name}: ${b.type} ${new URL(b.url).pathname} → ${b.failed ?? `HTTP ${b.status}`} (a preview subresource must load, not redirect)`);
+  const own = blocked.filter((r) => r.url.startsWith(origin));
+  const external = blocked.filter((r) => !r.url.startsWith(origin));
+  for (const b of own) problem(`${name}: ${b.type} ${new URL(b.url).pathname} → ${b.failed ?? `HTTP ${b.status}`} (a preview subresource must load, not redirect)`);
+  for (const b of external) {
+    note.push(`${name}: the generated page asked a third party for ${b.type} ${new URL(b.url).host}${new URL(b.url).pathname} and the preview sandbox refused it (${b.failed ?? `HTTP ${b.status}`}) — expected, and not a render failure`);
+    console.log(`::warning title=Preview third-party request::${name}: ${new URL(b.url).host}${new URL(b.url).pathname} (${b.type}) refused by the preview sandbox — ${b.failed ?? `HTTP ${b.status}`}`);
+  }
 
   if (rev.sheets > 0) {
     if (!probe.sheetCount) problem(`${name}: the page applied no stylesheet at all — this is the unstyled failure`);

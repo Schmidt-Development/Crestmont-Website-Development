@@ -3,6 +3,7 @@
 // Stage changes always go through changeLeadStage (src/services/leads.ts), which enforces
 // assignment and the validated pipeline.
 import type { Db } from "../lib/db.ts";
+import { likeContains } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { can, type Actor } from "../domain/authz.ts";
 import { LEAD_STAGES, type LeadStage } from "../domain/crm.ts";
@@ -43,7 +44,7 @@ function filterSql(actor: Actor, f: LeadFilter): { where: string; binds: unknown
   const binds = [...scope.binds];
   if (f.q) {
     conds.push(`(c.name LIKE ? ESCAPE '\\' OR c.email LIKE ? ESCAPE '\\' OR co.name LIKE ? ESCAPE '\\')`);
-    const like = `%${f.q.replace(/[\\%_]/g, (m) => "\\" + m)}%`;
+    const like = likeContains(f.q);
     binds.push(like, like, like);
   }
   if (f.stage && (LEAD_STAGES as readonly string[]).includes(f.stage)) { conds.push(`l.stage = ?`); binds.push(f.stage); }
@@ -290,7 +291,7 @@ const ACTIVE_CUSTOMER_SQL = `(EXISTS(SELECT 1 FROM projects p WHERE p.organizati
   OR EXISTS(SELECT 1 FROM subscriptions s WHERE s.organization_id = o.id AND s.status IN ('active','trialing','past_due')))`;
 
 export async function listCustomers(db: Db, q: string, page: { limit: number; offset: number }, opts: { status?: "active" | "inactive" } = {}) {
-  const like = `%${q.replace(/[\\%_]/g, (m) => "\\" + m)}%`;
+  const like = likeContains(q);
   const conds = [`o.kind = 'customer'`];
   const binds: unknown[] = [];
   if (q) { conds.push(`(o.name LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM memberships mm JOIN users uu ON uu.id = mm.user_id WHERE mm.organization_id = o.id AND uu.email LIKE ? ESCAPE '\\'))`); binds.push(like, like); }
@@ -342,7 +343,7 @@ export async function customerDetail(db: Db, orgId: string, pages: Partial<Recor
 
 export async function listContacts(db: Db, actor: Actor, q: string, page: { limit: number; offset: number }) {
   const scope = leadScope(actor);
-  const like = `%${q.replace(/[\\%_]/g, (m) => "\\" + m)}%`;
+  const like = likeContains(q);
   return (await db.prepare(`SELECT c.id, c.name, c.email, c.phone, co.name AS company, co.organization_id, c.user_id, COUNT(l.id) AS leads, MAX(l.id) AS last_lead_id, MAX(l.updated_at) AS last_activity
      FROM contacts c LEFT JOIN companies co ON co.id = c.company_id JOIN leads l ON l.contact_id = c.id
      WHERE ${scope.sql} ${q ? `AND (c.name LIKE ? ESCAPE '\\' OR c.email LIKE ? ESCAPE '\\' OR co.name LIKE ? ESCAPE '\\')` : ""}

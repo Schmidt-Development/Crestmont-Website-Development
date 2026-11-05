@@ -4,6 +4,7 @@
 // is configured yet, so every file stays scan_status = 'pending' and the UI says "not yet scanned".
 import type { AppContext } from "../app/context.ts";
 import type { Db } from "../lib/db.ts";
+import { likePrefix } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { toHex } from "../lib/crypto.ts";
 import { validateUpload, sanitizeFilename } from "../adapters/storage.ts";
@@ -78,7 +79,7 @@ function fileListWhere(organizationId: string, opts: { projectId?: string | null
   const where = ["f.organization_id = ?", "f.deleted_at IS NULL"];
   const binds: unknown[] = [organizationId];
   if (opts.projectId) { where.push("f.project_id = ?"); binds.push(opts.projectId); }
-  if (opts.folder) { where.push("(f.folder = ? OR f.folder LIKE ?)"); binds.push(opts.folder, `${opts.folder}/%`); }
+  if (opts.folder) { where.push("(f.folder = ? OR f.folder LIKE ? ESCAPE '\\')"); binds.push(opts.folder, likePrefix(`${opts.folder}/`)); }
   if (!opts.includeReplaced) where.push("f.replaced_by IS NULL");
   return { where: where.join(" AND "), binds };
 }

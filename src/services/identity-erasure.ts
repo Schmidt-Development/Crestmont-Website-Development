@@ -20,6 +20,7 @@
 //      remembering it); the phone outreach ledger keeps the number for per-number call limits (as calls already do).
 // The audit entry holds counts only, never the identifiers.
 import type { Db, DbStatement } from "../lib/db.ts";
+import { likeContains } from "../lib/db.ts";
 import { nowIso } from "../lib/db.ts";
 import { phoneKey, emailKey, RACE_GUARD, tombstoneHash, currentErasureKeyId, erasureKeyConfigured } from "./contact-identity.ts";
 import { salesOptErasureStatements } from "./sales-opt-erasure.ts";
@@ -81,7 +82,7 @@ const digitsSql = (col: string) => `replace(replace(replace(replace(replace(repl
 function prefilter(keys: Key[], cols: string[]): [string, string[]] {
   const parts: string[] = [], binds: string[] = [];
   for (const k of keys) for (const c of cols) {
-    if (k.kind === "email") { parts.push(`lower(COALESCE(${c},'')) LIKE ? ESCAPE '\\'`); binds.push(`%${k.value.replace(/[\\%_]/g, (m) => "\\" + m)}%`); }
+    if (k.kind === "email") { parts.push(`lower(COALESCE(${c},'')) LIKE ? ESCAPE '\\'`); binds.push(likeContains(k.value)); }
     else { parts.push(`${digitsSql(c)} LIKE ?`); binds.push(`%${k.value.slice(-7)}%`); }
   }
   return [parts.join(" OR "), binds];

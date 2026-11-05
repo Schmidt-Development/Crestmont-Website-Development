@@ -5,6 +5,7 @@
 // exact quote version that was sent, so a later revision supersedes the old link.
 import type { AppContext } from "../app/context.ts";
 import type { Db } from "../lib/db.ts";
+import { likeContains } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { can, type Actor } from "../domain/authz.ts";
 import { LEAD_TRANSITIONS, type LeadStage } from "../domain/crm.ts";
@@ -124,7 +125,7 @@ function quoteFilterSql(actor: Actor, f: QuoteListFilter) {
   if (f.status === "lapsed") { conds.push(`q.status IN ('draft','sent') AND qv.valid_until IS NOT NULL AND qv.valid_until < ?`); binds.push(today); }
   else if (f.status) { conds.push(`q.status = ?`); binds.push(f.status); }
   if (f.q) {
-    const like = `%${f.q.replace(/[\\%_]/g, (m) => "\\" + m)}%`;
+    const like = likeContains(f.q);
     conds.push(`(q.id = ? OR c.name LIKE ? ESCAPE '\\' OR c.email LIKE ? ESCAPE '\\' OR co.name LIKE ? ESCAPE '\\')`);
     binds.push(f.q, like, like, like);
   }

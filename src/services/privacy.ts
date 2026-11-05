@@ -126,6 +126,23 @@ export async function processDeletion(db: Db, staffUserId: string, requestId: st
     db.prepare(`DELETE FROM notifications WHERE user_id = ?`).bind(u),
     db.prepare(`DELETE FROM auth_tokens WHERE user_id = ?`).bind(u),
     db.prepare(`UPDATE sessions SET ip = NULL, user_agent = NULL WHERE user_id = ?`).bind(u),
+    // SEC-08. security_events stores an email and an IP beside each failed login, lockout and rate-limit hit
+    // (migration 0003). Anonymisation cleared the users row and the sessions but left those, so a completed
+    // deletion request left the requester's own address in a security log indefinitely: the retention period
+    // that would eventually remove it (retention.security_events_days) is default-off pending the approval
+    // recorded as BLK-018, and anonymising ONE account on request is a different act from choosing a global
+    // period anyway.
+    //
+    // The identifiers go, the security fact stays: kind, user_id, detail and created_at are untouched, so the
+    // lockout history, the rate-limit evidence and any investigation that depends on them still read correctly
+    // — the row simply no longer names a person. detail carries only short fixed strings ("login", "register",
+    // "login: known device") and provider error text, never the address.
+    db.prepare(`UPDATE security_events SET email = NULL, ip = NULL WHERE user_id = ?`).bind(u),
+    // Attempts that never resolved to an account (a failed login or a rate-limit hit on the address before any
+    // session existed) carry the address with user_id NULL, so they are matched by address instead. The IP is
+    // left on these: without the address the row no longer identifies the account holder, and the actor behind
+    // an unresolved attempt is not necessarily them.
+    ...(acctEmails.length ? [db.prepare(`UPDATE security_events SET email = NULL WHERE email = ? AND user_id IS NULL`).bind(acctEmails[0])] : []),
     db.prepare(`UPDATE privacy_requests SET status='completed', completed_at=?, processed_by=?, notes=COALESCE(?, notes) WHERE id=?`).bind(at, staffUserId, notes.trim() ? notes.slice(0, 1000) : null, requestId),
   ]);
   await revokeAllSessions(db, u, null, staffUserId);

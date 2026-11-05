@@ -97,3 +97,76 @@ test("[READY-013] requirements/status files no longer carry status: they are doc
   const ingest = readFileSync("src/readiness/ingest.ts", "utf8");
   assert.ok(!/SET implementation_status/.test(ingest), "nothing may write implementation_status from a declaration");
 });
+
+// ───────────── Blocker attribution (migration 0078) ─────────────
+//
+// A requirement completes the moment its named external gate clears. BLK-006 had accumulated twelve
+// requirements — the mailing address, the retention schedule, commissioning an independent penetration test,
+// the staffed support hours and the production launch authorization alongside the attorney review — so
+// finishing the legal review would have reported all of them as done. These two tests keep each gate
+// answering only for itself.
+
+test("[READY-013] the acceptance registry and the blocker register agree on what gates what", async () => {
+  const db = createTestDb();
+  await (await import("../src/readiness/ingest.ts")).syncRequirements(db);
+  await (await import("../src/services/readiness-admin.ts")).applySeedBlockerLinks(db);
+  const links = new Set((await db.prepare(`SELECT blocker_id, requirement_id FROM blocker_requirements`)
+    .all<{ blocker_id: string; requirement_id: string }>()).results.map((r) => `${r.blocker_id}/${r.requirement_id}`));
+  const unlinked: string[] = [];
+  for (const [id, a] of Object.entries(ACCEPTANCE)) {
+    if (a.external?.blocker && !links.has(`${a.external.blocker}/${id}`)) unlinked.push(`${a.external.blocker}/${id}`);
+  }
+  // A gate the register does not know about is invisible on the blocker page: the requirement reads as
+  // blocked with nothing listed as blocking it, and resolving the blocker would not clear it.
+  assert.deepEqual(unlinked, [], "link these in a migration's blocker_seed_links");
+});
+
+test("[READY-013] resolving the legal-review blocker completes the legal review and nothing else", async () => {
+  const { deriveRequirementStates } = await import("../src/readiness/derive.ts");
+
+  // Everything BLK-006 used to gate, with the gate it answers to now.
+  const ids = ["IDENT-001", "IDENT-002", "IDENT-005", "LAUNCH-001", "LEGAL-001", "LEGAL-002", "LEGAL-004", "LEGAL-005", "PAY-010", "SEC-006", "SEC-007", "SUP-005"];
+  const gate = (id: string) => ACCEPTANCE[id].external?.blocker;
+
+  // These five facts are separable and each has its own blocker; none may still hang off BLK-006.
+  assert.equal(gate("IDENT-002"), "BLK-016", "a mailing address is not an attorney review");
+  assert.equal(gate("IDENT-005"), "BLK-016");
+  assert.equal(gate("SEC-007"), "BLK-017", "an independent penetration test is not an attorney review");
+  assert.equal(gate("SEC-006"), "BLK-018", "a retention schedule is not an attorney review");
+  assert.equal(gate("SUP-005"), "BLK-019", "staffed support hours are not an attorney review");
+  assert.equal(gate("LAUNCH-001"), "BLK-020", "a production launch authorization is not an attorney review");
+  assert.equal(gate("LEGAL-004"), "BLK-006", "the attorney review itself still answers to BLK-006");
+
+  const now = new Date("2026-11-05T12:00:00Z");
+  const row = (id: string) => ({
+    requirement_id: id, outcome: "passed" as const, test_name: `[${id}] proof`, run_id: "r1",
+    environment: "development" as const, source: "ci", commit_sha: "c1", branch: "main",
+    finished_at: "2026-11-05T11:00:00Z",
+  });
+  // A succeeded staging deployment of the same commit, so a STAGING_VERIFIED requirement (SEC-006) is held
+  // back by its gate alone and not by missing deployment evidence.
+  const deployments = [{ id: "dep_1", environment: "staging" as const, commit_sha: "c1", status: "succeeded", deployed_at: "2026-11-05T11:30:00Z" }];
+  const derive = (open: string[]) => new Map(deriveRequirementStates({
+    requirements: ids.map((id) => ({ id, category: "security", subsystem: "Platform", disposition: "in_scope" })),
+    evidence: ids.map(row),
+    deployments,
+    openBlockerRequirementIds: new Map(),
+    openBlockerIds: new Set(open),
+    openFindingIds: new Set<string>(),
+    now,
+  }).map((d) => [d.id, d]));
+
+  const open = ["BLK-006", "BLK-016", "BLK-017", "BLK-018", "BLK-019", "BLK-020"];
+  const before = derive(open);
+  assert.deepEqual(ids.filter((id) => before.get(id)!.complete), [], "all twelve start blocked");
+  assert.ok(ids.every((id) => before.get(id)!.state === "BLOCKED"));
+
+  // The attorney finishes. Only what the attorney's review actually establishes may move.
+  const after = derive(open.filter((b) => b !== "BLK-006"));
+  assert.deepEqual(ids.filter((id) => after.get(id)!.complete).sort(),
+    ["IDENT-001", "LEGAL-001", "LEGAL-002", "LEGAL-004", "LEGAL-005", "PAY-010"],
+    "resolving BLK-006 must not complete the penetration test, the retention schedule, the support hours, the mailing address or the launch authorization");
+  for (const id of ["IDENT-002", "IDENT-005", "SEC-006", "SEC-007", "SUP-005", "LAUNCH-001"]) {
+    assert.equal(after.get(id)!.state, "BLOCKED", `${id} is still waiting on its own gate`);
+  }
+});

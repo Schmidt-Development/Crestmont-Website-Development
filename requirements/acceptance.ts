@@ -78,10 +78,10 @@ type Entry = Partial<Acceptance> & { criteria: string };
 const ENTRIES: Record<string, Entry> = {
   // ── Identity: nothing in the repository can establish these ──
   "IDENT-001": { criteria: "A legal entity exists and its registered name is stored in business settings.", external: { blocker: "BLK-006", note: "Founder forms the entity and enters the registered name" } },
-  "IDENT-002": { criteria: "A registered, non-residential business mailing address is stored in business settings.", external: { blocker: "BLK-006", note: "Founder obtains the address and enters it" } },
+  "IDENT-002": { criteria: "A registered, non-residential business mailing address is stored in business settings.", external: { blocker: "BLK-016", note: "Founder supplies a non-residential address, or confirms none will be published" } },
   "IDENT-003": { criteria: "support@, sales@, billing@ and legal@ receive mail and the routes are verified.", external: { blocker: "BLK-005", note: "Founder creates and verifies the mailbox routes" } },
   "IDENT-004": { criteria: "crestmontwebsitedevelopment.com is a zone on the Crestmont Cloudflare account with its nameservers switched.", external: { blocker: "BLK-011", note: "Founder adds the zone and switches nameservers at the registrar" } },
-  "IDENT-005": { criteria: "The disclosures page renders the real legal name and address, not a pending state.", external: { blocker: "BLK-006", note: "depends on IDENT-001 and IDENT-002" } },
+  "IDENT-005": { criteria: "The disclosures page renders the real legal name and address, not a pending state.", external: { blocker: "BLK-016", note: "the legal name is settled (BLK-006 covers recording it); the address is what the page still cannot print" } },
 
   // ── Catalog: entitlements are a Founder decision, not code ──
   "CAT-005": { criteria: "The three maintenance plans are purchasable, which requires their entitlements to be approved.", external: { blocker: "BLK-010", note: "Founder approves or amends the proposed entitlements (FD-05)" }, completeAt: "STAGING_VERIFIED", requires: ["staging_e2e"] },
@@ -102,7 +102,7 @@ const ENTRIES: Record<string, Entry> = {
 
   // ── Support ──
   "SUP-004": { criteria: "A real model produces a draft reply through the self-hosted runner.", external: { blocker: "BLK-015", note: "the runner must be installed on Node 1 and complete one real draft job" } },
-  "SUP-005": { criteria: "The Founder has set the staffed hours and first-response target, and the public policy page shows them.", external: { blocker: "BLK-006", note: "Founder sets the hours in Settings" } },
+  "SUP-005": { criteria: "The Founder has set the staffed hours and first-response target, and the public policy page shows them.", external: { blocker: "BLK-019", note: "Founder sets the hours in Settings" } },
 
   // ── AI operations (platform-side, but needs the external runner) ──
   "AIOPS-002": { criteria: "A real local model produces a bounded AI draft through the self-hosted runner.", external: { blocker: "BLK-015", note: "the runner must be installed on Node 1 and complete one real draft job" } },
@@ -116,8 +116,8 @@ const ENTRIES: Record<string, Entry> = {
   "SEC-003": { criteria: "Private file storage enforces signed URLs, limits and access logging, and uploads are malware-scanned before sharing.", external: { finding: "F-02", note: "no malware scanning service is configured; the Founder picks a provider" } },
 
   // ── Security assurance: an independent review is not something the repository can assert ──
-  "SEC-006": { criteria: "Approved retention periods are applied and the retention job runs in a deployed Worker.", completeAt: "STAGING_VERIFIED", external: { blocker: "BLK-006", note: "Founder and counsel approve the retention schedule, then the Owner applies it" } },
-  "SEC-007": { criteria: "An independent review or penetration test of staging is completed and its release-blocking findings are closed.", external: { blocker: "BLK-006", note: "Founder commissions the test (F-16)" } },
+  "SEC-006": { criteria: "Approved retention periods are applied and the retention job runs in a deployed Worker.", completeAt: "STAGING_VERIFIED", external: { blocker: "BLK-018", note: "Founder and counsel approve the retention schedule, then the Owner applies it" } },
+  "SEC-007": { criteria: "An independent review or penetration test of staging is completed and its release-blocking findings are closed.", external: { blocker: "BLK-017", note: "Founder commissions an independent reviewer (F-16); no review from inside this repository can close it" } },
 
   // ── Infrastructure ──
   "INFRA-002": { criteria: "Development, staging and production environments each exist with their own secrets.", completeAt: "PRODUCTION_VERIFIED", external: { blocker: "BLK-003", note: "production resources are created at launch; R2 enabled" } },
@@ -139,7 +139,7 @@ const ENTRIES: Record<string, Entry> = {
   // ── Testing and launch ──
   "TEST-002": { criteria: "The 33 required journeys run against the deployed staging site with no failures.", completeAt: "STAGING_VERIFIED", requires: ["staging_e2e"] },
   "TEST-004": { criteria: "The rollback rehearsal and the restore drill both pass against staging.", completeAt: "STAGING_VERIFIED", requires: ["staging_e2e"] },
-  "LAUNCH-001": { criteria: "The Founder has recorded the production launch authorization.", external: { blocker: "BLK-006", note: "the Founder's own decision, after gates A-F pass" } },
+  "LAUNCH-001": { criteria: "The Founder has recorded the production launch authorization.", external: { blocker: "BLK-020", note: "the Founder's own decision, after gates A-F pass" } },
   "LAUNCH-002": { criteria: "A production deployment matches the Founder-approved release candidate.", completeAt: "PRODUCTION_VERIFIED", external: { blocker: "BLK-003", note: "there is no production environment yet" } },
   "LAUNCH-003": { criteria: "Post-deploy production checks pass for the deployed commit.", completeAt: "PRODUCTION_VERIFIED", external: { blocker: "BLK-003", note: "there is no production deployment yet" } },
 };

@@ -27,7 +27,7 @@ Questions for the Founder and attorney before any of these are switched on:
 1. Do state laws or contracts require keeping security logs longer (for example for breach investigation windows)?
 2. Should email bodies for financial notices (invoices, receipts, refund decisions) follow the financial-records period instead of the general period?
 3. Is 90 days right for call transcripts given the recording-consent disclosure the voice provider plays (VOICE-006)?
-4. ASVS finding F-09: retention for audit IPs and security-event emails of anonymised users. Founder decision FD-38 (2026-11, provisional): raw IPs 90 days, including audit-log IPs, which the audit log now allows to be cleared (and nothing else); security events 180 days. Counsel to confirm lawful exceptions.
+4. ASVS finding F-09: retention for audit IPs and security-event emails of anonymised users. Founder decision FD-38 (2026-11, provisional): raw IPs 90 days, including audit-log IPs, which the audit log now allows to be cleared (and nothing else); security events 180 days. Counsel to confirm lawful exceptions. **The security-event half of F-09 no longer waits for this**: see §4a — anonymising one account on request is a different act from choosing a global period, so it does not depend on the answer. The audit-IP half still does.
 
 ## 3. Never deleted by the retention job
 
@@ -43,6 +43,32 @@ Questions for the Founder and attorney before any of these are switched on:
 ## 4. Deletion requests vs. retention
 
 A customer's deletion request (`/account/privacy`) is processed by staff (`src/services/privacy.ts`). It anonymises the user, revokes sessions and keeps the financial and agreement records the law requires. It also erases the person's phone numbers and email addresses from the CRM identity records, including held research candidates and duplicate-review items (`src/services/identity-erasure.ts`; details and what is kept, such as do-not-call entries and optional re-import tombstones keyed with a Worker secret, and the sales-analysis text of their calls, in `docs/crm-identity/RUNBOOK.md` §5a). Receptionist caller erasure and the Owner's CRM identity erasure run the same step. The retention job is separate. It applies time limits to operational data regardless of requests.
+
+### 4a. What anonymisation clears in the security log (F-09, SEC-08)
+
+`security_events` records an email address and an IP beside every failed login, lockout and rate-limit hit
+(migration 0003). Anonymisation used to clear the `users` row and the sessions and leave those untouched, so a
+**completed** deletion request left the requester's own address in a security log indefinitely — the period that
+would eventually remove it (`retention.security_events_days`) is default-off pending the approval tracked as
+**BLK-018**, and that approval is about a global period, not about one person's request.
+
+`processDeletion` now clears them, keeping the security fact:
+
+| Row | Cleared | Kept |
+|---|---|---|
+| Linked to the account (`user_id` matches) | `email`, `ip` | `kind`, `user_id`, `detail`, `created_at` |
+| Unresolved attempt on the address (`user_id IS NULL`, `email` matches) | `email` | `ip`, `kind`, `detail`, `created_at` |
+| Anyone else's | nothing | everything |
+
+No row is deleted: lockout history and rate-limit evidence stay readable and complete, they just no longer name a
+person. `detail` holds only short fixed strings (`login`, `register`, `login: known device`) and provider error
+text, never the address. The IP is left on an unresolved attempt because without the address the row no longer
+identifies the account holder, and whoever made an unresolved attempt is not necessarily them.
+
+**Still outstanding, and deliberately not changed here.** `email_deliveries.to_email` keeps the address of every
+message sent to the person, including password-reset and verification mail. Clearing it would damage delivery and
+bounce evidence that a payment dispute may need, and deciding which templates are security-only rather than
+financial is question 2 above. It is recorded here rather than guessed at, and belongs with **BLK-018**.
 
 ## 5. Backups
 

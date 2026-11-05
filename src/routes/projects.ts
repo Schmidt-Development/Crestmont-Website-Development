@@ -5,6 +5,7 @@ import type { AppContext } from "../app/context.ts";
 import { html, formatCents, formatDate, formatDateTime, label, safeUrl, type SafeHtml } from "../lib/html.ts";
 import { HttpError, download, htmlResponse, redirect, str } from "../app/http.ts";
 import { requireStaff } from "../app/app.ts";
+import { likeContains } from "../lib/db.ts";
 import { appLayout } from "../ui/layout.ts";
 import { staffNav } from "./nav.ts";
 import {
@@ -205,7 +206,7 @@ ${checkbox("internal", "Internal note — not visible to the customer")}<div cla
     else if (status !== "all") where.push("p.status NOT IN ('cancelled')");
     if (pm === "none") where.push("p.project_manager_id IS NULL"); else if (pm) { where.push("p.project_manager_id = ?"); binds.push(pm); }
     if (org) { where.push("p.organization_id = ?"); binds.push(org); }
-    if (search) { const like = `%${search.replace(/[\\%_]/g, (m) => "\\" + m)}%`; where.push("(p.name LIKE ? ESCAPE '\\' OR o.name LIKE ? ESCAPE '\\' OR p.id = ?)"); binds.push(like, like, search); }
+    if (search) { const like = likeContains(search); where.push("(p.name LIKE ? ESCAPE '\\' OR o.name LIKE ? ESCAPE '\\' OR p.id = ?)"); binds.push(like, like, search); }
     const sql = `SELECT p.id, p.name, p.status, p.product_id, p.created_at, p.updated_at, p.last_customer_activity_at, p.target_launch_at, p.completed_at, o.name AS org, u.display_name AS pm_name,
         (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.status = 'done') AS done, (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id) AS total,
         (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.status <> 'done' AND t.due_at IS NOT NULL AND t.due_at < ?) AS overdue
@@ -657,7 +658,7 @@ ${input({ name: "description", label: "Description", required: true, maxlength: 
     if (due === "week") { where.push("t.due_at BETWEEN ? AND ?"); binds.push(today, new Date(ctx.now().getTime() + 7 * 86400e3).toISOString().slice(0, 10)); }
     if (due === "none") where.push("t.due_at IS NULL");
     if (q.get("blocked") === "1") where.push(`EXISTS (SELECT 1 FROM task_dependencies d JOIN tasks dt ON dt.id = d.depends_on_task_id WHERE d.task_id = t.id AND dt.status <> 'done')`);
-    if (search) { const like = `%${search.replace(/[\\%_]/g, (m) => "\\" + m)}%`; where.push(`(t.title LIKE ? ESCAPE '\\' OR t.description LIKE ? ESCAPE '\\' OR p.name LIKE ? ESCAPE '\\' OR t.id = ?)`); binds.push(like, like, like, search); }
+    if (search) { const like = likeContains(search); where.push(`(t.title LIKE ? ESCAPE '\\' OR t.description LIKE ? ESCAPE '\\' OR p.name LIKE ? ESCAPE '\\' OR t.id = ?)`); binds.push(like, like, like, search); }
     const sql = `SELECT t.id, t.title, t.status, t.due_at, t.estimate_minutes, t.completed_at, t.created_at, p.id AS project_id, p.name AS project_name, m.name AS milestone,
         (SELECT group_concat(u.display_name, ', ') FROM assignments a JOIN users u ON u.id = a.user_id WHERE a.subject_type = 'task' AND a.subject_id = t.id AND a.ended_at IS NULL) AS assignees,
         (SELECT COALESCE(SUM(minutes),0) FROM time_entries te WHERE te.task_id = t.id) AS logged,
