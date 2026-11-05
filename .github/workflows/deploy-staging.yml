@@ -453,6 +453,18 @@ jobs:
 
       # Public staging (2026-10-28): a fresh visitor with NO cookies sees the website; protected areas still refuse
       # anonymous visitors; every response is noindex and robots.txt disallows all. No credential is used here.
+      # SEC-10. Everything about transport security was asserted in code and never checked against the live
+      # endpoint: hstsValue() is unit-tested, but nothing had looked at a certificate, a TLS version or a
+      # redirect on the deployed site. Read-only, no credential, nothing to buy. A warning rather than a
+      # failure where the fix is an Owner setting in the Cloudflare dashboard (minimum TLS version), because
+      # a deploy cannot change it; fatal where the deployed site itself is wrong.
+      - name: Transport security on the live site (certificate, TLS versions, HSTS, http redirect)
+        id: tls
+        continue-on-error: true
+        env:
+          BASE: ${{ steps.deploy.outputs.url }}
+        run: node --no-warnings scripts/tls-check.ts "$BASE" --json evidence/tls-check.json | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Smoke checks on the public site (fresh visitor, no cookies)
         id: smoke
         env:
@@ -795,6 +807,12 @@ jobs:
             console.log(`${seen.size} distinct fault(s) in ${rows.length} recorded error(s).`);
           '
           rm -f app-errors.json
+
+      - name: Fail the deploy when transport security on the live site is wrong
+        if: always() && steps.tls.outcome == 'failure'
+        run: |
+          echo "::error title=Transport security failed::See the 'Transport security on the live site' step: a certificate, TLS version or HSTS check on the deployed site failed."
+          exit 1
 
       - name: Fail the deploy when the staging browser journeys failed
         if: always() && steps.e2e.outcome == 'failure'
