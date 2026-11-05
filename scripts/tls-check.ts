@@ -42,13 +42,15 @@ export function certDaysLeft(notAfter: string, now = new Date()): number | null 
  * Turns the gathered facts into pass/fail. Kept pure so the POLICY is unit-testable without a network:
  * the thin main below only collects the facts and hands them here.
  */
-export function evaluate(f: {
+export interface TlsFacts {
   verifiedCert: boolean; verifyDetail: string;
   daysLeft: number | null;
   tls12: boolean; tls13: boolean; tls10Refused: boolean; tls11Refused: boolean;
   hsts: string | null;
   httpStatus: number | null; httpLocation: string | null;
-}, now = new Date()): TlsProbe[] {
+}
+
+export function evaluate(f: TlsFacts, now = new Date()): TlsProbe[] {
   void now;
   const out: TlsProbe[] = [];
   const add = (label: string, ok: boolean, detail: string, fatal = true) => out.push({ label, ok, detail, fatal });

@@ -4,17 +4,17 @@
 // a live endpoint.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { evaluate, hstsMaxAge, certDaysLeft, MIN_CERT_DAYS, MIN_HSTS_MAX_AGE } from "../scripts/tls-check.ts";
+import { evaluate, hstsMaxAge, certDaysLeft, MIN_CERT_DAYS, MIN_HSTS_MAX_AGE, type TlsFacts } from "../scripts/tls-check.ts";
 
-const healthy = {
+const healthy: TlsFacts = {
   verifiedCert: true, verifyDetail: "",
   daysLeft: 70,
   tls12: true, tls13: true, tls10Refused: true, tls11Refused: true,
   hsts: "max-age=63072000; includeSubDomains",
   httpStatus: 301, httpLocation: "https://example.test/",
 };
-const probe = (f: Partial<typeof healthy>) => evaluate({ ...healthy, ...f });
-const of = (f: Partial<typeof healthy>, label: string) => probe(f).find((p) => p.label === label)!;
+const probe = (f: Partial<TlsFacts>) => evaluate({ ...healthy, ...f });
+const of = (f: Partial<TlsFacts>, label: string) => probe(f).find((p) => p.label === label)!;
 
 test("[SEC-002] a correctly served site passes every transport check", () => {
   const probes = probe({});
