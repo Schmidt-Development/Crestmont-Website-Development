@@ -375,10 +375,24 @@ export class LocalProvider implements AgentProvider {
     }
     const cal = this.calibration.get(model) ?? 1;
     const tokensOf = (g: ChatMessage[]) => g.reduce((n, m) => n + Math.ceil(estimateTokens(messageText(m)) * cal) + 8, 0);
-    // Half the usable window, not 30%. Keeping only 30% threw away the work the model had just done, which is the
-    // other half of the rediscovery loop: it lost the file it was editing and went looking for it again. The
-    // manifest above is cheap (a few hundred tokens), so the space is better spent on real recent turns.
-    const tailBudget = Math.floor(usable * 0.5);
+    // The kept tail must leave GUARANTEED WORKING HEADROOM after the reset.
+    //
+    // Measured on bld_10e2c6007686faee0ab64d45: a flat 50% of the usable window kept 19,772 tokens of history
+    // against a 19,743-token budget, and the fixed context (system prompt, workspace message, mechanical log,
+    // project memory, manifest) took most of the rest. The context sat at ~30,600 of 39,486 usable immediately
+    // after every reset, so two page reads refilled it and reset again — 17 resets in one phase.
+    //
+    // 30% was the old value and was wrong in the other direction: it discarded the work the model had just done,
+    // so it lost the file it was editing and went looking for it again. Neither fraction is the answer, because
+    // neither accounts for what the FIXED part of the context actually costs on this job. So the tail is whatever
+    // is left after the fixed context and a reserved slice for new work, capped at half the window.
+    const fixedTokens = this.measure(model, [{ role: "system", content: this.system }, this.pinnedMessage(window)], tools, 0, window).total;
+    const workingHeadroom = Math.floor(usable * 0.3); // room for a few tool calls before the next reset
+    const tailBudget = Math.max(
+      // Never below a floor: a tail this small loses the current turn, which is its own failure mode.
+      Math.floor(usable * 0.12),
+      Math.min(Math.floor(usable * 0.5), usable - fixedTokens - workingHeadroom),
+    );
     const keep: ChatMessage[][] = [];
     let used = 0;
     for (let k = groups.length - 1; k >= 0; k--) {
@@ -470,8 +484,12 @@ export class LocalProvider implements AgentProvider {
     // turn now SHARE a budget of a quarter of the window, and each call is additionally capped on its own. Every
     // call still returns something (there is a floor), and clipped output says so and can be re-requested narrowly.
     const toolChars = Math.max(2000, Math.min(10_000, Math.floor(cfg.contextTokens * 3.5 / 10)));
-    const turnToolChars = Math.max(toolChars, Math.floor(cfg.contextTokens * 3.5 * 0.25));
     const minToolChars = 600;
+    // A quarter of the WINDOW is the ceiling, but the real limit is how much room is free right now. On
+    // bld_10e2c6007686faee0ab64d45 a quarter of the window was 12,288 tokens while only ~9,500 were free, so one
+    // compliant turn could still force a reset. Measured per turn, from the live context.
+    const turnBudgetFor = (freeTokens: number): number =>
+      Math.max(toolChars, Math.min(Math.floor(cfg.contextTokens * 3.5 * 0.25), Math.floor(Math.max(0, freeTokens) * 3.5 * 0.6)));
     let turns = 0;
     let malformedStreak = 0;
     let noToolStreak = 0;
@@ -614,7 +632,8 @@ export class LocalProvider implements AgentProvider {
 
         let anyMalformed = false;
         // Shared across every tool call in THIS assistant turn (see turnToolChars above).
-        let turnCharsLeft = turnToolChars;
+        // Budgeted from the room actually free in THIS context, not a fixed fraction of the window.
+        let turnCharsLeft = turnBudgetFor(usable - (usage.total - maxTokens));
         for (const c of calls) {
           if (stop.reason) {
             t.history.push({ role: "tool", tool_call_id: c.id, name: c.name, content: "Not executed: the run was stopped." });
