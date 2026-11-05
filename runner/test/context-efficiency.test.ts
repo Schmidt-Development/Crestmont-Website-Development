@@ -272,3 +272,56 @@ test("[AIB-CTX] BENCHMARK (deterministic, not GPU evidence): the per-turn budget
     assert.ok(oldTotal / (WINDOW * 3.5) > 0.3, `the old rule could take over 30% in one turn (${((oldTotal / (WINDOW * 3.5)) * 100).toFixed(1)}%)`);
   } finally { await model.close(); }
 });
+
+// ── Working headroom after a reset ──
+//
+// Measured on bld_10e2c6007686faee0ab64d45: a flat 50%-of-usable tail kept 19,772 tokens of history, the fixed
+// context took most of the rest, and the context sat at ~30,600 of 39,486 usable IMMEDIATELY after every reset.
+// Two page reads refilled it, so the phase reset 17 times and the thrash guard stopped it. A reset that leaves no
+// room to work is not a recovery.
+
+test("[AIB-CTX] a reset leaves real working headroom, and one turn's tool output cannot consume all of it", async () => {
+  const WINDOW = 49_152; // Node 1's configured window
+  const PAGE = Array.from({ length: 900 }, (_, i) => `<p>line ${i} ` + "x".repeat(70) + "</p>").join(String.fromCharCode(10));
+  let n = 0;
+  const { model, provider, ws } = await setup((r) => {
+    n++;
+    if (n > 24) return { toolCalls: [{ name: "finish", arguments: { summary: "done" } }] };
+    // Page-sized reads mixed with real writes, varied every turn: the design-phase workload that produced the
+    // thrash, without repeating an identical call (which the loop detector would correctly stop).
+    if (n % 2 === 1) {
+      return {
+        toolCalls: [0, 1].map((k) => ({ name: "read_file", arguments: { path: `public/p${((n + k) % 6) + 1}.html` } })),
+        usage: { prompt_tokens: promptEstimate(r), completion_tokens: 60 },
+      };
+    }
+    return {
+      toolCalls: [{ name: "write_file", arguments: { path: `public/out${n}.html`, content: "<!doctype html><h1>page " + n + "</h1>" } }],
+      usage: { prompt_tokens: promptEstimate(r), completion_tokens: 60 },
+    };
+  }, { contextTokens: WINDOW, maxOutputTokensPerCall: 8192 });
+  try {
+    for (const i of [1, 2, 3, 4, 5, 6]) writeFileSync(path.join(ws.repo, "public", `p${i}.html`), PAGE + `<!-- ${i} -->`);
+    const res = await provider.run(req());
+    assert.equal(res.status, "success", String(res.error));
+
+    // Every request the model actually received had to fit, with its reply's reserve.
+    const maxPrompt = Math.max(...model.requests.map((q) => promptEstimate(q)));
+    assert.ok(maxPrompt + 8192 <= WINDOW, `the largest request plus its output reserve fits the window (${maxPrompt} + 8192)`);
+
+    // The point of the fix: a request that begins a fresh context must leave room to work. Measure the SMALLEST
+    // post-reset request and confirm it is well under the window rather than pinned near it.
+    const afterReset = model.requests.filter((q) => q.messages.some((m) => typeof m.content === "string" && /^CONTEXT RESET #/.test(m.content)));
+    assert.ok(afterReset.length >= 1, "the context was reset at least once");
+    const smallestAfterReset = Math.min(...afterReset.map((q) => promptEstimate(q)));
+    const usable = WINDOW - 8192 - Math.floor(WINDOW * 0.03);
+    const headroom = usable - smallestAfterReset;
+    assert.ok(headroom >= Math.floor(usable * 0.2),
+      `a fresh context leaves at least 20% of the usable window free to work in (${headroom} of ${usable} free)`);
+
+    // And the work still happened: resets with progress are never bounded away.
+    const t = loadTranscript(ws, (res as { sessionId?: string }).sessionId ?? "")!;
+    void t;
+    assert.ok(model.requests.length > 5, "the phase kept working rather than being stopped");
+  } finally { await model.close(); }
+});
