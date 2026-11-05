@@ -12,7 +12,7 @@
 //   hashed session reference, token cost and outcome, so the Owner sees usage and cost on the AI operations page.
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
-import { PACKAGES, PACKAGE_FEATURES, MAINTENANCE_PLANS, type PackageId } from "../domain/catalog.ts";
+import { PACKAGES, PACKAGE_FEATURES, MAINTENANCE_PLANS, type PackageId, AI_RECEPTIONIST_OFFER, AI_RECEPTIONIST_COMING_SOON } from "../domain/catalog.ts";
 import { SERVICES, servicePath } from "../content/services.ts";
 import { rateLimit } from "./security.ts";
 import { costMicroUsd, paidAiBudget, priceKnown, type AiBackend } from "./ai.ts";
@@ -54,7 +54,7 @@ export function assistantKnowledge(f: AssistantFacts): string {
   lines.push("CUSTOM DEVELOPMENT: quoted separately in writing after a scoping and feasibility review; billed 50% deposit, 25% after the approved design milestone, 25% before production launch. No price can be given in chat.");
   lines.push(`MAINTENANCE PLANS (optional, monthly): ${Object.values(MAINTENANCE_PLANS).map((m) => `${m.name} ${dollars(f.pricesCents[`maintenance:${m.id}`] ?? m.monthlyCents)}/month`).join("; ")}. What each plan includes is still being finalised — do not describe plan contents; offer the contact page.`);
   lines.push("SERVICES:");
-  for (const s of SERVICES) lines.push(`- ${s.name} (${servicePath(s)}): ${s.summary} Includes: ${s.includes.join("; ")}. Good to know: ${s.boundaries.join("; ")}.`);
+  for (const s of SERVICES) lines.push(`- ${s.name} (${servicePath(s)})${s.slug === "ai-receptionist" && AI_RECEPTIONIST_OFFER.status !== "available" ? ` [${AI_RECEPTIONIST_COMING_SOON} Do not offer a quote for it.]` : ""}: ${s.summary} Includes: ${s.includes.join("; ")}. Good to know: ${s.boundaries.join("; ")}.`);
   if (f.process.length) { lines.push("PROJECT PROCESS:"); f.process.forEach((p, i) => lines.push(`${i + 1}. ${p.title}: ${p.body}`)); }
   if (f.faqs.length) { lines.push("FAQ:"); for (const q of f.faqs) lines.push(`Q: ${q.title} A: ${q.body}`); }
   lines.push(`CONTACT: email ${f.email}; contact page /contact; quote request /quote. A person replies to every enquiry.`);

@@ -39,9 +39,26 @@ test("[CAT-004] standard packages are 100% upfront; custom uses an exact 50/25/2
   assert.deepEqual(milestoneSplit(1000).map((i) => i.amountCents), [500, 250, 250]);
 });
 
-test("[CAT-006] maintenance entitlements are not marked approved without the Founder", () => {
-  assert.deepEqual(Object.values(MAINTENANCE_PLANS).map((p) => p.monthlyCents), [9_900, 19_900, 29_900]);
-  for (const p of Object.values(MAINTENANCE_PLANS)) assert.equal(p.entitlementsStatus, "proposed_pending_founder_approval");
+test("[CAT-006] maintenance entitlements are approved only with a recorded Founder decision, and the approved wording is intact", async () => {
+  const { ENTITLEMENTS_APPROVAL } = await import("../src/domain/catalog.ts");
+  assert.deepEqual(Object.values(MAINTENANCE_PLANS).map((p) => p.monthlyCents), [9_900, 19_900, 29_900],
+    "the established prices are never changed by an approval");
+  const approved = Object.values(MAINTENANCE_PLANS).filter((p) => p.entitlementsStatus === "approved");
+  if (approved.length) {
+    // Flipping the flag without saying who approved it, when, and on what basis is exactly the silent
+    // self-certification CAT-006 exists to prevent.
+    assert.ok(ENTITLEMENTS_APPROVAL?.approvedBy, "an approval names who gave it");
+    assert.match(ENTITLEMENTS_APPROVAL.approvedOn, /^\d{4}-\d{2}-\d{2}$/, "an approval is dated");
+    assert.ok(ENTITLEMENTS_APPROVAL.basis.length > 40, "an approval records the decision it rests on");
+    assert.deepEqual(ENTITLEMENTS_APPROVAL.pricing, { essential: 9_900, professional: 19_900, executive: 29_900 },
+      "the approval is for the established prices, not for altered ones");
+  }
+  for (const p of Object.values(MAINTENANCE_PLANS)) {
+    assert.ok(["proposed_pending_founder_approval", "approved"].includes(p.entitlementsStatus));
+    // Approving must never quietly empty what the customer is owed.
+    assert.ok(Object.keys(p.proposedEntitlements).length >= 8, `${p.id} keeps its full entitlement list`);
+    for (const [k, v] of Object.entries(p.proposedEntitlements)) assert.ok(v.trim().length > 5, `${p.id}.${k} is stated`);
+  }
 });
 
 test("[WEB-009] prohibited marketing claims are detected", () => {
@@ -138,4 +155,12 @@ test("[PAY-007] refunds: support reviews, only the Founder decides, AI is blocke
   assert.throws(() => refundTransition(ai, "requested", "under_review", { notes: "x" }), /AI/);
   assert.throws(() => refundTransition(owner, "recommended", "denied", { mandatoryObligation: true }), /mandatory/);
   assert.throws(() => refundTransition(owner, "requested", "approved"), TransitionError);
+});
+
+test("[PAY-007] FD-03: only the Founder may deny a refund request, at review or at decision; mandatory refunds are never deniable", () => {
+  assert.throws(() => refundTransition(support, "under_review", "denied", { notes: "Out of policy" }), /Only the Founder can deny/);
+  assert.throws(() => refundTransition(support, "recommended", "denied", { notes: "No" }), /Founder/);
+  refundTransition(owner, "under_review", "denied", { notes: "Founder discretionary review: work delivered as scoped" });
+  refundTransition(owner, "recommended", "denied", { notes: "No" });
+  assert.throws(() => refundTransition(owner, "under_review", "denied", { notes: "No", mandatoryObligation: true }), /mandatory/);
 });

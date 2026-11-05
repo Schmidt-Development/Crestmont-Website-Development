@@ -173,7 +173,7 @@ async function refundDetail(ctx: AppContext, id: string, errors: string[] = [], 
   else if (r.status === "under_review") actions = html`<form method="post" action="${base}/review" class="stack">${csrf(ctx)}
 ${textarea({ name: "notes", label: "Review findings", rows: 4, required: true, hint: "Document what was checked and why you recommend this outcome." })}
 ${checkbox("mandatory", "This refund is required by law or payment-network rules (cannot be denied).", { checked: !!r.mandatory_obligation })}
-<div class="form-actions">${button("Recommend refund", { size: "sm", name: "to", value: "recommended" })}${button("Deny", { size: "sm", variant: "danger", name: "to", value: "denied" })}</div></form>`;
+<div class="form-actions">${button("Recommend refund", { size: "sm", name: "to", value: "recommended" })}${owner && !r.mandatory_obligation ? button("Deny", { size: "sm", variant: "danger", name: "to", value: "denied" }) : ""}</div></form>`;
   else if (r.status === "recommended") actions = owner ? html`<form method="post" action="${base}/decide" class="stack">${csrf(ctx)}${textarea({ name: "notes", label: "Decision notes", rows: 3, required: true })}
 <div class="form-actions">${button("Approve refund", { size: "sm", name: "decision", value: "approved" })}${r.mandatory_obligation ? "" : button("Deny refund", { size: "sm", variant: "danger", name: "decision", value: "denied" })}</div></form>${r.mandatory_obligation ? html`<p class="faint">Marked as a mandatory obligation: it cannot be denied.</p>` : ""}`
     : alert("info", "Awaiting the Founder's decision.");

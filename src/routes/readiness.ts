@@ -245,11 +245,18 @@ ${table(snap.commits, [{ header: "Commit", cell: (c) => html`<code>${short(c.sha
 
 // ───────── Environment view ─────────
 
+// ENV-01/ENV-02: these are the ids in src/services/integrations.ts, which is the only place integrations are
+// defined. They used to read "d1" and "r2" here, which match nothing: the database and object-storage rows were
+// written under "database" and "object_storage", so every environment page showed BOTH a permanent
+// "No health record — unverified" row AND the real verified row lower down. The probes were always real; only
+// this list was wrong.
 const ENV_INTEGRATIONS: Record<string, string[]> = {
-  development: ["d1", "r2", "auth", "stripe", "resend", "ai", "github"],
-  staging: ["d1", "r2", "auth", "stripe", "resend", "ai", "voice", "telephony", "monitoring", "dns", "github"],
-  production: ["d1", "r2", "auth", "stripe", "resend", "ai", "voice", "telephony", "monitoring", "dns"],
+  development: ["database", "object_storage", "auth", "stripe", "resend", "ai", "github"],
+  staging: ["database", "object_storage", "auth", "stripe", "resend", "ai", "voice", "telephony", "monitoring", "dns", "github"],
+  production: ["database", "object_storage", "auth", "stripe", "resend", "ai", "voice", "telephony", "monitoring", "dns"],
 };
+/** Rows written before the ids were made canonical. Read, never written: nothing creates these any more. */
+const LEGACY_INTEGRATION_IDS: Record<string, string> = { d1: "database", r2: "object_storage" };
 
 const UNKNOWN = "Unknown";
 const ms = (n: number | null | undefined) => (n === null || n === undefined ? UNKNOWN : `${n} ms`);
@@ -288,8 +295,12 @@ async function envView(ctx: AppContext, env: ra.Environment): Promise<Response> 
   const verified = reqs.filter((r) => r.verification[env] === "passed").length;
   const failed = reqs.filter((r) => r.verification[env] === "failed");
   const named = ENV_INTEGRATIONS[env];
-  const integRows = [...named.map((n) => integ.find((i) => i.integration === n) ?? { integration: n, environment: env, status: "none", detail: "No health record — unverified", checked_at: "" }),
-    ...integ.filter((i) => !named.includes(i.integration))];
+  // A legacy row keeps its meaning: a stored "d1"/"r2" record answers for the canonical id rather than being
+  // orphaned below the table while the canonical row reads "No health record".
+  const canonical = (id: string) => LEGACY_INTEGRATION_IDS[id] ?? id;
+  const findRow = (n: string) => integ.find((i) => canonical(i.integration) === n);
+  const integRows = [...named.map((n) => { const r = findRow(n); return r ? { ...r, integration: n } : { integration: n, environment: env, status: "none", detail: "No health record — unverified", checked_at: "" }; }),
+    ...integ.filter((i) => !named.includes(canonical(i.integration)))];
   const reqRow = (id: string) => reqs.find((r) => r.id === id);
   const verificationRows = [
     ["Stripe sandbox (PAY-001)", "PAY-001"], ["Email delivery (EMAIL-001)", "EMAIL-001"], ["AI receptionist simulation (VOICE-003)", "VOICE-003"],

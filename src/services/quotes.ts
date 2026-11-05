@@ -37,11 +37,19 @@ export interface QuoteVersionRow {
 }
 export interface QuoteRow { id: string; lead_id: string; status: string; current_version: number; created_by: string; created_at: string; sent_at: string | null; closed_reason?: string | null; closed_at?: string | null }
 
+/** FD-24: a quote is valid for 30 days from the day its version is created. */
+export const QUOTE_VALIDITY_DAYS = 30;
+const addDaysIso = (day: string, n: number) => new Date(Date.parse(`${day}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+/** FD-24: the default (and latest) valid-until date for a quote created on the business date `today` (Eastern). */
+export const quoteDefaultValidUntil = (today: string) => addDaysIso(today, QUOTE_VALIDITY_DAYS);
+
 export function validateQuoteInput(input: QuoteInput, today: string): { ok: true; price: PriceBreakdown } | { ok: false; issues: string[] } {
   const issues: string[] = [];
   if (input.scope.length < 20 || input.scope.length > 20_000) issues.push("Describe the scope (at least 20 characters)");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(input.validUntil) || Number.isNaN(Date.parse(input.validUntil))) issues.push("Choose a valid-until date");
   else if (input.validUntil < today) issues.push("Valid-until must be today or later");
+  // FD-24 (Founder decision, 2026-11): quotes are valid for 30 days. A revision issues a new version with its own date.
+  else if (input.validUntil > addDaysIso(today, QUOTE_VALIDITY_DAYS)) issues.push(`Quotes are valid for at most ${QUOTE_VALIDITY_DAYS} days (until ${addDaysIso(today, QUOTE_VALIDITY_DAYS)})`);
   if (input.lines.length > 40) issues.push("Too many line items");
   for (const l of input.lines) if (l.description.length > 300) issues.push("Line descriptions must be 300 characters or fewer");
   let price: PriceBreakdown | null = null;

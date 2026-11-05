@@ -45,7 +45,7 @@ for (const p of PORTFOLIO_PROJECTS) {
   const documentedAt = `${FOUNDER_AUTHORIZATION.documentedOn}T00:00:00.000Z`;
   const linkAt = `${p.linkVerifiedOn}T00:00:00.000Z`;
   const demoAt = isVerified ? `${verifiedOn}T00:00:00.000Z` : null;
-  const row = { relationship: FOUNDER_AUTHORIZATION.relationship, relationship_documented_at: documentedAt, link_verified_at: linkAt, desktop_screenshot_file_id: null, mobile_screenshot_file_id: null, poster_desktop_asset: p.posterDesktop, poster_mobile_asset: p.posterMobile } as unknown as PortfolioProject;
+  const row = { relationship: FOUNDER_AUTHORIZATION.relationship, relationship_documented_at: documentedAt, link_verified_at: linkAt, desktop_screenshot_file_id: null, mobile_screenshot_file_id: null, poster_desktop_asset: p.posterDesktop, poster_mobile_asset: p.posterMobile, portfolio_consent_at: documentedAt, portfolio_consent_withdrawn_at: null } as unknown as PortfolioProject;
   const publish = publishBlockers(row).length === 0;
   sql.push(`INSERT INTO portfolio_projects (id, slug, name, industry, live_url, relationship, description, verified_features_json, technology_summary, position, published, updated_at, created_at,
   relationship_documented_at, relationship_documented_by, relationship_evidence, link_verified_at, link_verified_by, published_at, demo_url, demo_status, demo_verified_at, demo_verified_by, demo_revision, poster_desktop_asset, poster_mobile_asset, poster_tablet_asset)
@@ -57,6 +57,9 @@ ON CONFLICT(id) DO UPDATE SET slug = excluded.slug, name = excluded.name, indust
   published_at = COALESCE(portfolio_projects.published_at, excluded.published_at), demo_url = excluded.demo_url, demo_status = excluded.demo_status, demo_verified_at = excluded.demo_verified_at,
   demo_revision = excluded.demo_revision, poster_desktop_asset = excluded.poster_desktop_asset, poster_mobile_asset = excluded.poster_mobile_asset, poster_tablet_asset = excluded.poster_tablet_asset${preserve ? " WHERE portfolio_projects.relationship_documented_at IS NULL" : ""};`);
   if (preserve) sql.push(`UPDATE portfolio_projects SET demo_status = ${q(demo.values.demo_status)}, demo_verified_at = ${q(demoAt)}, demo_revision = ${q(demo.values.demo_revision)}, updated_at = ${q(now)} WHERE id = ${q(p.id)} AND demo_url IS ${q(demo.values.demo_url)};`);
+  // FD-13: the Founder's written authorization is the business owner's explicit opt-in. Never re-grants after a withdrawal.
+  sql.push(`UPDATE portfolio_projects SET portfolio_consent_at = ${q(documentedAt)}, portfolio_consent_by = 'Noah Schmidt, Founder and business owner', portfolio_consent_method = 'written', portfolio_consent_evidence = ${q(FOUNDER_AUTHORIZATION.evidence)} WHERE id = ${q(p.id)} AND portfolio_consent_at IS NULL AND portfolio_consent_withdrawn_at IS NULL;`);
+  sql.push(`UPDATE portfolio_projects SET published = 0 WHERE id = ${q(p.id)} AND portfolio_consent_withdrawn_at IS NOT NULL;`);
   audit(p.id, "portfolio.relationship_documented", { relationship: FOUNDER_AUTHORIZATION.relationship, source: "founder-authorization-2026-10-27" });
   audit(p.id, "portfolio.link_verified", { date: p.linkVerifiedOn, url: p.liveUrl });
   audit(p.id, "portfolio.demo_updated", { demoUrl: demo.values.demo_url, status: demo.values.demo_status, revision: p.demoRevision, verifiedOn: isVerified ? verifiedOn : null });

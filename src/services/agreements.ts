@@ -58,6 +58,9 @@ const LEGAL_EMAIL = "legal@crestmontwebsitedevelopment.com";
 /** Same facts the public /legal pages use (src/routes/public.ts legalFacts). */
 export function factsFromSettings(settings: Record<string, string>): LegalFacts {
   return {
+    // Deliberately NOT defaulted to the operating entity: agreement text is SHA-256 pinned and acceptances bind
+    // to an exact version, and these drafts still await attorney review (LEGAL-004). Inserting the legal name
+    // here would mint a new version of unreviewed legal text. It goes in with that review, not before.
     legalName: settings["business.legal_name"]?.trim() || null,
     address: settings["business.address"]?.trim() || null,
     staffedHours: settings["support.staffed_hours"]?.trim() || null,

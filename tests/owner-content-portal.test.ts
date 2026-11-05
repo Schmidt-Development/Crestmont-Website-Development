@@ -111,7 +111,7 @@ test("[PORTAL-001] maintenance view shows the org's plan with entitlements label
 
   const page = await (await c.get("/portal/maintenance")).text();
   assert.match(page, /Professional plan/);
-  assert.match(page, /awaiting Founder approval/);
+  assert.doesNotMatch(page, /awaiting Founder approval/, "the entitlements are approved, so the portal states them as commitments");
   assert.match(page, /Up to 2\.5 hours\/month maintenance labor/);
   assert.match(page, /https:\/\/care\.example/);
   assert.match(page, /Update opening hours/);

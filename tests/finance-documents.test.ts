@@ -284,7 +284,7 @@ test("[PAY-006] milestone invoices become Stripe Invoices (customer → invoice 
   assert.deepEqual(Object.fromEntries(cus.form), { name: "Milestone Co", "metadata[organization_id]": a.organizationId, email: "billing@milestone.example" });
   assert.equal(cus.idem, `crestmont:customer:${a.organizationId}`);
   assert.equal(stripe.calls[1].query.get("customer"), "cus_test_1");
-  assert.deepEqual(Object.fromEntries(create.form), { customer: "cus_test_1", collection_method: "send_invoice", days_until_due: "14", auto_advance: "false", pending_invoice_items_behavior: "exclude", currency: "usd",
+  assert.deepEqual(Object.fromEntries(create.form), { customer: "cus_test_1", collection_method: "send_invoice", days_until_due: "7", auto_advance: "false", pending_invoice_items_behavior: "exclude", currency: "usd",
     description: "25% on approved design", "metadata[crestmont_invoice_id]": s.d25, "metadata[organization_id]": a.organizationId, "metadata[project_id]": s.prj, "metadata[order_id]": s.ord, "metadata[milestone_kind]": "design_25" });
   assert.equal(create.idem, `crestmont:invoice:${s.d25}:create`);
   assert.deepEqual(Object.fromEntries(item.form), { customer: "cus_test_1", invoice: "in_test_1", amount: "250000", currency: "usd", description: "25% on approved design", "metadata[crestmont_invoice_id]": s.d25 });

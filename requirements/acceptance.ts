@@ -101,11 +101,11 @@ const ENTRIES: Record<string, Entry> = {
   "PAY-010": { criteria: "Live payments are activated only after the legal identity and the Founder's launch authorization.", external: { blocker: "BLK-006", note: "depends on IDENT-001/002, LEGAL-004/005 and LAUNCH-001" } },
 
   // ── Support ──
-  "SUP-004": { criteria: "A real model produces a draft reply through the self-hosted runner.", external: { blocker: "BLK-009", note: "needs the Node 1 runner, which belongs to the AI Builds workstream" } },
+  "SUP-004": { criteria: "A real model produces a draft reply through the self-hosted runner.", external: { blocker: "BLK-015", note: "the runner must be installed on Node 1 and complete one real draft job" } },
   "SUP-005": { criteria: "The Founder has set the staffed hours and first-response target, and the public policy page shows them.", external: { blocker: "BLK-006", note: "Founder sets the hours in Settings" } },
 
   // ── AI operations (platform-side, but needs the external runner) ──
-  "AIOPS-002": { criteria: "A real local model produces a bounded AI draft through the self-hosted runner.", external: { blocker: "BLK-009", note: "needs the Node 1 runner" } },
+  "AIOPS-002": { criteria: "A real local model produces a bounded AI draft through the self-hosted runner.", external: { blocker: "BLK-015", note: "the runner must be installed on Node 1 and complete one real draft job" } },
 
   // ── Email: the adapter is CI-proven against fixtures; delivery needs a verified sending domain ──
   "EMAIL-001": { criteria: "A real message is delivered through Resend from a verified sending domain.", completeAt: "STAGING_VERIFIED", requires: ["integration_probe"], external: { blocker: "BLK-005", note: "Founder creates the Resend account and verifies the domain" } },

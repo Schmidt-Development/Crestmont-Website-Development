@@ -177,7 +177,10 @@ test("[AUTH-001] unverified customers cannot check out or pay (403, nothing crea
   const inv = await createPackageOrder(t.db, cu.organizationId, "business", cu.id);
   assert.equal((await c.post(`/portal/billing/invoices/${inv.invoiceId}/pay`)).status, 403);
   assert.equal(t.fake.checkouts.length, 0, "no session for an unverified payer");
-  assert.equal((await c.post("/checkout/maintenance/essential", { terms: "1" })).status, 409, "maintenance stays gated by Founder approval first");
+  // Entitlements are approved (CAT-006/BLK-010), so maintenance is no longer refused by that gate — an
+  // unverified customer is now refused by the verification gate itself, which is the point of this test.
+  assert.equal((await c.post("/checkout/maintenance/essential", { terms: "1" })).status, 403, "an unverified customer cannot buy maintenance either");
+  assert.equal(t.fake.checkouts.length, 0, "and no Stripe session was created for them");
   assert.equal((await c.post("/verify-email/resend")).status, 303);
   assert.equal((await lastEmail(t.db, cu.email))?.template, "verification");
   // Verified → redirected to the Stripe fixture URL.

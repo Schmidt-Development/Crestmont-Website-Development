@@ -23,3 +23,23 @@ export function endOfBusinessDay(date: string): string {
   const off = offsetMinutes(noonUtc + 5 * 3600e3);
   return new Date(Date.parse(`${date}T23:59:59.999Z`) - off * 60e3).toISOString();
 }
+
+/** FD-14: business days are Monday–Friday in the business time zone (public holidays are not excluded). */
+export const CUSTOMER_REVIEW_BUSINESS_DAYS = 5;
+
+/** YYYY-MM-DD that is `n` business days (Mon–Fri) after the business date of `from`. */
+export function addBusinessDays(from: Date, n: number): string {
+  let d = new Date(Date.parse(`${businessDate(from)}T12:00:00.000Z`));
+  let left = n;
+  while (left > 0) {
+    d = new Date(d.getTime() + 86_400_000);
+    const wd = d.getUTCDay();
+    if (wd !== 0 && wd !== 6) left--;
+  }
+  return d.toISOString().slice(0, 10);
+}
+
+/** Deadline instant for a customer review requested at `requestedAt` (end of the fifth business day, Eastern). */
+export function customerReviewDeadline(requestedAt: Date): string {
+  return endOfBusinessDay(addBusinessDays(requestedAt, CUSTOMER_REVIEW_BUSINESS_DAYS));
+}

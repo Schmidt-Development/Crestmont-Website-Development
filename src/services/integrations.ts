@@ -13,6 +13,7 @@ import { sha256Hex } from "../lib/crypto.ts";
 import type { Env } from "../app/context.ts";
 import type { StorageAdapter } from "../adapters/storage.ts";
 import { audit } from "./security.ts";
+import { aiProviderFromEnv, LOCAL_RUNNER } from "./ai.ts";
 
 export const INTEGRATIONS = [
   { id: "stripe", label: "Stripe (payments)", blocker: "BLK-004" },
@@ -20,7 +21,7 @@ export const INTEGRATIONS = [
   { id: "auth", label: "Authentication (in-platform)", blocker: null },
   { id: "database", label: "Database (D1 / SQLite)", blocker: "BLK-003" },
   { id: "object_storage", label: "Object storage (R2)", blocker: "BLK-003" },
-  { id: "ai", label: "AI provider (Anthropic)", blocker: null },
+  { id: "ai", label: "AI provider (self-hosted or Anthropic)", blocker: null },
   { id: "voice", label: "Voice receptionist provider", blocker: "BLK-009" },
   { id: "telephony", label: "Telephony (phone number)", blocker: "BLK-009" },
   { id: "monitoring", label: "External monitoring & alerting", blocker: "BLK-003" },
@@ -74,9 +75,21 @@ export async function assessConfiguration(d: IntegrationDeps, id: IntegrationId)
       if (d.storage.kind === "local-disk") return { status: "configured_unverified", detail: "Development local-disk adapter (not R2). Probe writes, reads and deletes a small health object.", fingerprint: "local-disk", probe: true };
       return { status: "configured_unverified", detail: "R2 bucket bound. Probe writes, reads and deletes a small health object.", fingerprint: "r2", probe: true };
     }
-    case "ai":
-      if (!e.ANTHROPIC_API_KEY) return { status: "not_configured", detail: "ANTHROPIC_API_KEY is not set. AI drafting jobs fail with not_configured; nothing is generated.", fingerprint: null, probe: false };
-      return { status: "configured_unverified", detail: `API key set; model ${e.AI_MODEL ?? "default"}. ${e.AI_PROVIDER === "anthropic" ? "Selected as the AI backend (AI_PROVIDER=anthropic); paid calls also need the Owner's monthly AI budget." : `Not used: AI_PROVIDER is ${e.AI_PROVIDER ? `"${e.AI_PROVIDER}"` : "unset"}, so paid AI stays off.`} Probe lists models.`, fingerprint: await fp(e.ANTHROPIC_API_KEY), probe: true };
+    case "ai": {
+      // ENV-06: report the backend that is actually SELECTED (aiProviderFromEnv), not Anthropic by default.
+      // Crestmont runs a self-hosted model on Node 1, so demanding ANTHROPIC_API_KEY would report a healthy
+      // platform as broken — and would invite paying for inference nobody asked for.
+      if (e.AI_PROVIDER === LOCAL_RUNNER) {
+        if (!e.BUILD_RUNNER_SECRET) return { status: "not_configured", detail: "AI_PROVIDER=local-runner is selected but BUILD_RUNNER_SECRET is not set, so the runner cannot authenticate and no draft can be produced.", fingerprint: null, probe: false };
+        return { status: "configured_unverified", detail: `Self-hosted runner selected (AI_PROVIDER=local-runner); no paid API is used. Probe reads the runner's last heartbeat — it never starts a build.`, fingerprint: await fp(`local-runner|${e.BUILD_RUNNER_SECRET}`), probe: true };
+      }
+      if (e.AI_PROVIDER === "anthropic") {
+        if (!e.ANTHROPIC_API_KEY) return { status: "not_configured", detail: "AI_PROVIDER=anthropic is selected but ANTHROPIC_API_KEY is not set; AI drafting jobs fail with not_configured.", fingerprint: null, probe: false };
+        return { status: "configured_unverified", detail: `Anthropic selected (AI_PROVIDER=anthropic); model ${e.AI_MODEL ?? "default"}. Paid calls also need the Owner's monthly AI budget. Probe lists models.`, fingerprint: await fp(e.ANTHROPIC_API_KEY), probe: true };
+      }
+      const key = e.ANTHROPIC_API_KEY ? " An ANTHROPIC_API_KEY is present but unused, so no paid call can be made." : "";
+      return { status: "not_configured", detail: `No AI backend is selected: AI_PROVIDER is ${e.AI_PROVIDER ? `"${e.AI_PROVIDER}"` : "unset"}. AI drafting is off.${key}`, fingerprint: null, probe: false };
+    }
     case "voice":
       if (!e.VOICE_WEBHOOK_SECRET) return { status: "not_configured", detail: "No voice provider selected (BLK-009) and VOICE_WEBHOOK_SECRET is not set; the voice webhook rejects every request.", fingerprint: null, probe: false };
       return { status: "configured_unverified", detail: "VOICE_WEBHOOK_SECRET set, so signed events are accepted. No provider account is connected (BLK-009); there is no provider API to probe.", fingerprint: await fp(e.VOICE_WEBHOOK_SECRET), probe: false };
@@ -86,9 +99,21 @@ export async function assessConfiguration(d: IntegrationDeps, id: IntegrationId)
       return { status: "not_configured", detail: "Errors are recorded in the in-app error log only. No external uptime monitor or alert routing (email/SMS/pager) is configured; nobody is notified automatically.", fingerprint: null, probe: false };
     case "dns":
       return { status: "not_configured", detail: `No DNS provider access is configured (BLK-011). The probe can check public resolution of ${OFFICIAL_DOMAIN}, which does not prove control.`, fingerprint: null, probe: true };
-    case "github":
-      if (!e.GITHUB_TOKEN || !e.GITHUB_REPO) return { status: "not_configured", detail: "GITHUB_TOKEN and/or GITHUB_REPO not set; the readiness dashboard cannot read repository data.", fingerprint: null, probe: false };
-      return { status: "configured_unverified", detail: `Repository ${e.GITHUB_REPO}. Probe reads repository metadata.`, fingerprint: await fp(e.GITHUB_TOKEN + "|" + e.GITHUB_REPO), probe: true };
+    case "github": {
+      if (e.GITHUB_TOKEN && e.GITHUB_REPO) return { status: "configured_unverified", detail: `Repository ${e.GITHUB_REPO}. Probe reads repository metadata with the Worker's read-only token.`, fingerprint: await fp(e.GITHUB_TOKEN + "|" + e.GITHUB_REPO), probe: true };
+      // The staging Worker deliberately holds no GitHub token: the deploy workflow PUSHES a snapshot with its own
+      // read-only token instead. A recent successful push is real, current repository access, so report it as such
+      // rather than claiming the source is not configured (ENV-07).
+      const push = await d.db.prepare(`SELECT repo, fetched_at FROM github_sync WHERE ok = 1 AND source = 'push' ORDER BY fetched_at DESC LIMIT 1`)
+        .first<{ repo: string; fetched_at: string }>().catch(() => null);
+      if (push) {
+        const ageH = (Date.now() - Date.parse(push.fetched_at)) / 3_600_000;
+        return ageH <= 72
+          ? { status: "verified", detail: `Repository ${push.repo} read by GitHub Actions with its read-only workflow token; snapshot pushed ${push.fetched_at}. No token is held by this Worker.`, fingerprint: await fp(`push|${push.repo}`), probe: false }
+          : { status: "degraded", detail: `The last pushed snapshot of ${push.repo} is ${Math.round(ageH)} h old (${push.fetched_at}); it refreshes on each staging deploy. No GITHUB_TOKEN on this Worker for a server-side pull.`, fingerprint: await fp(`push|${push.repo}`), probe: false };
+      }
+      return { status: "not_configured", detail: "No GITHUB_TOKEN/GITHUB_REPO on this Worker and no snapshot has been pushed by GitHub Actions, so the readiness dashboard cannot read repository data.", fingerprint: null, probe: false };
+    }
     case "turnstile":
       if (!e.TURNSTILE_SECRET || !e.TURNSTILE_SITE_KEY) {
         const dev = e.ENVIRONMENT === "development" ? " Development accepts public forms without a challenge; other environments fail closed." : " Public forms fail closed (bot check refused).";
@@ -248,14 +273,27 @@ export async function verifyIntegration(d: IntegrationDeps, id: IntegrationId, a
         break;
       }
       case "ai": {
-        const r = await f("https://api.anthropic.com/v1/models?limit=5", { headers: { "x-api-key": d.env.ANTHROPIC_API_KEY!, "anthropic-version": "2023-06-01" } });
+        // ENV-06: the self-hosted runner is verified by its own heartbeat, never by starting a build and never by
+        // a paid API call. build_runners.last_seen_at is written by Node 1 each time it polls for work.
+        if (d.env.AI_PROVIDER === LOCAL_RUNNER) {
+          const seen = await d.db.prepare(`SELECT runner_id, version, last_seen_at FROM build_runners ORDER BY last_seen_at DESC LIMIT 1`)
+            .first<{ runner_id: string; version: string | null; last_seen_at: string }>().catch(() => null);
+          if (!seen) { status = "configured_unverified"; detail = "No runner has ever polled this environment, so the self-hosted model is unproven here. Install and start the runner on Node 1; it then appears automatically."; break; }
+          const ageMin = Math.round((Date.now() - Date.parse(seen.last_seen_at)) / 60_000);
+          if (ageMin > 60) { status = "degraded"; detail = `Runner ${seen.runner_id} last polled ${ageMin} min ago (${seen.last_seen_at}); it is not currently connected.`; break; }
+          status = "verified"; detail = `Self-hosted runner ${seen.runner_id}${seen.version ? ` (${seen.version})` : ""} polled ${ageMin} min ago. No paid API is used.`;
+          break;
+        }
+        if (d.env.AI_PROVIDER !== "anthropic" || !d.env.ANTHROPIC_API_KEY) { detail = "No AI backend is selected, so there is nothing to probe."; break; }
+        const r = await f("https://api.anthropic.com/v1/models?limit=5", { headers: { "x-api-key": d.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" } });
         const b = await jsonOrNull(r);
         if (!r.ok) { detail = providerError("Anthropic", r, b); break; }
         status = "verified"; detail = "Models list returned successfully.";
         break;
       }
       case "github": {
-        const repo = d.env.GITHUB_REPO!;
+        if (!d.env.GITHUB_TOKEN || !d.env.GITHUB_REPO) { detail = "No Worker token: repository access is evidenced by the snapshot GitHub Actions pushes, not by a probe from here."; break; }
+        const repo = d.env.GITHUB_REPO;
         if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { detail = "GITHUB_REPO must be owner/name."; break; }
         const r = await f(`https://api.github.com/repos/${repo}`, { headers: { authorization: `Bearer ${d.env.GITHUB_TOKEN}`, accept: "application/vnd.github+json", "user-agent": "crestmont-platform" } });
         const b = await jsonOrNull(r);

@@ -153,7 +153,7 @@ const BACKUP_METHODS = ["d1_export", "d1_time_travel_bookmark", "r2_versioning",
 const ENVS = ["development", "staging", "production"] as const;
 
 // ───────────── 8. Settings ─────────────
-const SETTING_KEYS = ["business.legal_name", "business.address", "contact.email", "contact.phone", "support.staffed_hours",
+const SETTING_KEYS = ["business.legal_name", "business.address", "contact.email", "contact.phone", "security.contact_email", "support.staffed_hours",
   "backup.rpo_target_hours", "backup.rto_target_hours", "voice.phone_number", "crm.default_lead_owner"] as const;
 
 /** Active staff who may own leads (CREST-GAP-005 default lead owner). */
@@ -178,13 +178,14 @@ ${alert("info", html`Package and maintenance <strong>pricing is not editable her
 ${formErrors(errors)}
 <form method="post" action="/staff/settings" class="card stack">${csrf(ctx)}
 <h2 class="card__title">Company identity</h2>
-${input({ name: "business.legal_name", id: "f-legal", label: "Legal business name", value: val("business.legal_name"), maxlength: 160, hint: "Leave blank until the legal entity is formed (BLK-006). Never enter a name that is not registered." })}
+${input({ name: "business.legal_name", id: "f-legal", label: "Legal business name", value: val("business.legal_name"), maxlength: 160, hint: "The operating entity confirmed by the Founder is Talent Revenue Systems LLC; Crestmont Website Development is the trading brand. Recording it here is what opens production checkout. Never enter a name that is not registered." })}
 <div class="alert alert--warn" role="note" data-testid="residential-warning"><strong>Registered business address only.</strong> Never enter a home or residential address — it is displayed publicly on the business-disclosures page and in email footers. Use a registered office, commercial mailbox or registered-agent address.</div>
 ${textarea({ name: "business.address", id: "f-address", label: "Registered business mailing address", value: val("business.address"), rows: 3, maxlength: 300 })}
 ${checkbox("address_confirm", "I confirm this is a registered business address and not a residence.", { checked: !!v?.address_confirm })}
 <h2 class="card__title">Contact</h2>
 <div class="grid grid-2">${input({ name: "contact.email", id: "f-cemail", label: "Public contact email", type: "email", value: val("contact.email"), maxlength: 254 })}
 ${input({ name: "contact.phone", id: "f-cphone", label: "Public phone", value: val("contact.phone"), maxlength: 40, hint: "Business line only. No phone number has been purchased for the AI receptionist yet." })}</div>
+${input({ name: "security.contact_email", id: "f-secemail", label: "Security reporting email (security.txt)", type: "email", value: val("security.contact_email"), maxlength: 254, hint: "Published at /.well-known/security.txt for vulnerability reports (FD-41). Leave empty until the mailbox exists and is monitored; the file is not served without it." })}
 <h2 class="card__title">Recovery targets</h2>
 <p class="hint">Used by the Backups page to judge restore drills. Leave blank until the Founder approves targets; nothing is assumed when blank.</p>
 <div class="grid grid-2">${input({ name: "backup.rpo_target_hours", id: "f-rpo", label: "Recovery point objective (hours of data loss)", type: "number", min: 1, max: 720, value: val("backup.rpo_target_hours") })}
@@ -983,6 +984,7 @@ ${textarea({ name: "evidence", label: "Evidence (row counts compared, checks run
       if (v[k] && (!/^\d+$/.test(v[k]) || Number(v[k]) < 1 || Number(v[k]) > 720)) e.push(`${name} must be a whole number of hours between 1 and 720`);
     }
     if (v["contact.email"].length > 254) e.push("Contact email is too long");
+    if (v["security.contact_email"] && (v["security.contact_email"].length > 254 || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]{2,}$/.test(v["security.contact_email"]))) e.push("Enter a valid security reporting email");
     if (v["crm.default_lead_owner"] && !(await leadOwnerOptions(ctx)).some((u) => u.id === v["crm.default_lead_owner"])) e.push("The default lead owner must be an active Owner, administrator or sales user");
     if (/<[^>]*>/.test(v["business.legal_name"] + v["business.address"])) e.push("Business name and address must be plain text");
     if (v.staffed_hours.length < 3 || v.staffed_hours.length > 160) e.push("Enter staffed support hours");

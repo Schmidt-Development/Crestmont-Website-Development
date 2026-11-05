@@ -15,6 +15,8 @@ import { can, isOwner, type Actor } from "../domain/authz.ts";
 import { PACKAGES, MAINTENANCE_PLANS, type PackageId, type MaintenanceId, type PriceBreakdown } from "../domain/catalog.ts";
 import { HttpError } from "../app/http.ts";
 import { audit } from "./security.ts";
+import { sendMail } from "./mailer.ts";
+import type { AppContext } from "../app/context.ts";
 
 export type PricedItemType = "package" | "maintenance";
 export interface PricedItem { type: PricedItemType; id: string; name: string; catalogCents: number; unit: string }
@@ -65,6 +67,9 @@ function parseDollarsToCents(s: string): number {
   return Math.round(parseFloat(t) * 100);
 }
 
+/** FD-25 (Founder decision, 2026-11): minimum notice before a monthly subscription price increase takes effect. */
+export const SUBSCRIPTION_INCREASE_NOTICE_DAYS = 30;
+
 export async function proposePriceChange(db: Db, actor: Actor, input: ProposalInput, now: Date) {
   if (!canPropose(actor)) throw new HttpError(403, "You cannot propose price changes.");
   const issues: string[] = [];
@@ -81,6 +86,11 @@ export async function proposePriceChange(db: Db, actor: Actor, input: ProposalIn
   if (item) {
     current = await effectivePrice(db, item.type, item.id, now);
     if (!Number.isNaN(cents) && cents === current.cents) issues.push("The proposed price is the same as the current price");
+    // FD-25: a monthly subscription price increase needs at least 30 days' notice before it takes effect.
+    if (item.type === "maintenance" && !Number.isNaN(cents) && cents > current.cents && /^\d{4}-\d{2}-\d{2}$/.test(input.effectiveDate)
+        && Date.parse(`${input.effectiveDate}T00:00:00.000Z`) < now.getTime() + SUBSCRIPTION_INCREASE_NOTICE_DAYS * 86_400_000) {
+      issues.push(`A maintenance plan price increase needs at least ${SUBSCRIPTION_INCREASE_NOTICE_DAYS} days' notice: choose an effective date on or after ${new Date(now.getTime() + SUBSCRIPTION_INCREASE_NOTICE_DAYS * 86_400_000).toISOString().slice(0, 10)}`);
+    }
   }
   if (issues.length) return { ok: false as const, issues };
   const id = newId("pcr");
@@ -97,7 +107,7 @@ export async function proposePriceChange(db: Db, actor: Actor, input: ProposalIn
   return { ok: true as const, id };
 }
 
-export async function decidePriceChange(db: Db, actor: Actor, id: string, decision: "approved" | "rejected", note: string, now: Date) {
+export async function decidePriceChange(db: Db, actor: Actor, id: string, decision: "approved" | "rejected", note: string, now: Date, notify?: Pick<AppContext, "email" | "baseUrl"> & { db?: Db }) {
   // Founder-protected (§78): Owner user with MFA only. AI/automation actors never hold pricing.change.
   if (!canDecide(actor)) throw new HttpError(403, "Only the Founder (Owner with pricing.change) can approve or reject price changes.");
   const r = await db.prepare(`SELECT * FROM price_change_requests WHERE id = ?`).bind(id).first<PriceChangeRow>();
@@ -106,7 +116,11 @@ export async function decidePriceChange(db: Db, actor: Actor, id: string, decisi
   if (decision === "rejected" && note.trim().length < 3) throw new HttpError(422, "Give a short reason for rejecting the change.");
   const at = nowIso(() => now);
   // An approval decided after the requested date takes effect at the moment of approval, never retroactively.
-  const effectiveAt = r.effective_at < at ? at : r.effective_at;
+  let effectiveAt = r.effective_at < at ? at : r.effective_at;
+  // FD-25: subscribers are told when the Founder approves, so an increase starts no sooner than 30 days after approval.
+  const increase = r.item_type === "maintenance" && r.proposed_cents > r.current_cents;
+  const noticeFloor = new Date(now.getTime() + SUBSCRIPTION_INCREASE_NOTICE_DAYS * 86_400_000).toISOString();
+  if (decision === "approved" && increase && effectiveAt < noticeFloor) effectiveAt = noticeFloor;
   const stmts = [db.prepare(`UPDATE price_change_requests SET status = ?, decided_by = ?, decided_at = ?, decision_note = ?, effective_at = ? WHERE id = ? AND status = 'pending'`)
     .bind(decision, actor.userId, at, note.trim() || null, decision === "approved" ? effectiveAt : r.effective_at, id)];
   const overrideId = newId("pov");
@@ -120,6 +134,16 @@ export async function decidePriceChange(db: Db, actor: Actor, id: string, decisi
     details: { item: `${r.item_type}:${r.item_id}`, fromCents: r.current_cents, toCents: r.proposed_cents, effectiveAt: decision === "approved" ? effectiveAt : null, overrideId: decision === "approved" ? overrideId : null, note: note.trim() || null } });
   await db.prepare(`INSERT INTO notifications (id, user_id, kind, subject_type, subject_id, body, created_at) VALUES (?,?,?,?,?,?,?)`)
     .bind(newId("ntf"), r.requested_by, `price_change_${decision}`, "price_change_request", id, `Your proposed price change for ${pricedItem(r.item_type, r.item_id)?.name ?? r.item_id} was ${decision}.`, at).run();
+  if (decision === "approved" && increase && notify) {
+    const plan = pricedItem(r.item_type, r.item_id)?.name ?? r.item_id;
+    const subs = (await db.prepare(`SELECT DISTINCT u.email FROM subscriptions s JOIN memberships m ON m.organization_id = s.organization_id AND m.role_id = 'customer_admin' JOIN users u ON u.id = m.user_id
+        WHERE s.product_id = ? AND s.status IN ('active','trialing','past_due') AND u.disabled_at IS NULL`).bind(r.item_id).all<{ email: string }>()).results;
+    for (const sub of subs) {
+      await sendMail(notify, { template: "subscription_update", to: sub.email, idempotencyKey: `priceinc:${id}:${sub.email}`,
+        data: { planName: plan, status: `price changing from $${(r.current_cents / 100).toFixed(2)} to $${(r.proposed_cents / 100).toFixed(2)} per month from ${effectiveAt.slice(0, 10)} (at least ${SUBSCRIPTION_INCREASE_NOTICE_DAYS} days' notice; you may cancel before then)`, url: `${notify.baseUrl}/portal/billing` } });
+    }
+    await audit(db, { actorUserId: actor.userId, action: "pricing.increase_notice_sent", subjectType: "price_change_request", subjectId: id, details: { recipients: subs.length, effectiveAt } });
+  }
   return { effectiveAt };
 }
 

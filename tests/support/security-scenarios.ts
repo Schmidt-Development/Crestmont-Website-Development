@@ -157,11 +157,13 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/portfolio/:id/verify-link", fields: () => ({ verified_on: day(-1) }) },
     { key: "POST /staff/portfolio/:id/relationship", fields: () => ({ relationship: "Website built by the Crestmont Founder for a related business", evidence: "Founder authorization letter on file, dated 2026-10-26" }) },
     { key: "POST /staff/portfolio/:id/demo", fields: () => ({ demo_url: "", demo_status: "none", demo_revision: "matrix-site@abc1234", demo_verified_on: "", poster_desktop_asset: "/assets/portfolio/matrix-desktop.webp", poster_mobile_asset: "" }) },
+    { key: "POST /staff/portfolio/:id/consent", fields: () => ({ given_by: "B. Owner, owner of the matrix business", method: "written", given_on: day(-1), evidence: "Signed consent email from the owner, filed in the matrix shared drive" }) },
     { key: "POST /staff/portfolio/:id/publish" },
     { key: "POST /staff/portfolio/:id/move", fields: () => ({ dir: "up" }) },
     { key: "POST /staff/portfolio/:id/testimonials", fields: () => ({ author: "B. Person", body: "Clear, careful and on time.", evidence: "Email from author dated 2026-10-26 granting permission" }) },
     { key: "POST /staff/portfolio/testimonials/:tid/:action" },
     { key: "POST /staff/portfolio/:id/unpublish" },
+    { key: "POST /staff/portfolio/:id/consent-withdraw", fields: () => ({ note: "Owner asked by email to stop showing the site" }) },
 
     // ── Customer portal (tenant A administrator) ──
     cust("POST /portal/projects/:id/onboarding", { setup: async () => { await w.db.prepare(`UPDATE projects SET status = 'awaiting_onboarding' WHERE id = ?`).bind(a.ids.project).run(); } }),

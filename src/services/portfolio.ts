@@ -19,6 +19,9 @@ export interface PortfolioProject {
   demo_url: string | null; demo_status: "none" | "ready" | "unavailable"; demo_verified_at: string | null; demo_verified_by: string | null; demo_revision: string | null;
   /** Genuine screenshots bundled under /assets/portfolio/ (survive preview database rebuilds; no R2 needed). */
   poster_desktop_asset: string | null; poster_mobile_asset: string | null; poster_tablet_asset: string | null;
+  /** FD-13 explicit, recorded opt-in by the website owner (migration 0068). */
+  portfolio_consent_at?: string | null; portfolio_consent_by?: string | null; portfolio_consent_method?: "written" | "portal" | null;
+  portfolio_consent_evidence?: string | null; portfolio_consent_recorded_by?: string | null; portfolio_consent_withdrawn_at?: string | null;
 }
 export interface Testimonial { id: string; portfolio_project_id: string | null; author_name: string; body: string; verification_evidence: string; verified_by: string; published: number; created_at: string | null }
 
@@ -46,7 +49,40 @@ export function publishBlockers(p: PortfolioProject): string[] {
   if (!p.mobile_screenshot_file_id && !p.poster_mobile_asset) out.push("A genuine mobile screenshot of the live site has not been uploaded.");
   if (!p.relationship_documented_at || /pending/i.test(p.relationship)) out.push("Crestmont's relationship to this business has not been documented.");
   if (!p.link_verified_at) out.push("The live link has not been verified.");
+  // FD-13: never shown without the owner's explicit, recorded opt-in (and never after it is withdrawn).
+  if (!p.portfolio_consent_at || p.portfolio_consent_withdrawn_at) out.push("The website owner's explicit opt-in to portfolio display has not been recorded.");
   return out;
+}
+
+/** FD-13: records the website owner's explicit opt-in. Silence or a contract alone is not consent. */
+export async function recordPortfolioConsent(db: Db, actor: Actor, id: string, input: { givenBy: string; method: string; givenOn: string; evidence: string }, ip?: string | null) {
+  guard(actor);
+  const issues: string[] = [];
+  const by = input.givenBy.trim(), ev = input.evidence.trim();
+  if (by.length < 3 || by.length > 200) issues.push("Name the person who gave consent and their role at the business (3–200 characters)");
+  if (input.method !== "written" && input.method !== "portal") issues.push("Choose how consent was given");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.givenOn) || Number.isNaN(Date.parse(input.givenOn))) issues.push("Enter the date consent was given");
+  else if (input.givenOn > new Date().toISOString().slice(0, 10)) issues.push("The consent date cannot be in the future");
+  if (ev.length < 10 || ev.length > 2000) issues.push("Describe where the consent record is kept (10–2000 characters)");
+  if (issues.length) throw new PortfolioError(422, "Please fix the consent details", issues);
+  if (!(await getById(db, id))) throw new PortfolioError(404, "Project not found");
+  await db.batch([
+    db.prepare(`UPDATE portfolio_projects SET portfolio_consent_at = ?, portfolio_consent_by = ?, portfolio_consent_method = ?, portfolio_consent_evidence = ?, portfolio_consent_recorded_by = ?, portfolio_consent_withdrawn_at = NULL, updated_at = ? WHERE id = ?`)
+      .bind(`${input.givenOn}T00:00:00.000Z`, by, input.method, ev, actor.userId ?? null, nowIso(), id),
+    auditStmt(db, actor, "portfolio.consent_recorded", id, { givenBy: by, method: input.method, givenOn: input.givenOn }, ip),
+  ]);
+}
+
+/** FD-13: the owner withdrew consent. The entry is unpublished at once; the history stays in the audit log. */
+export async function withdrawPortfolioConsent(db: Db, actor: Actor, id: string, note: string, ip?: string | null) {
+  guard(actor);
+  if (note.trim().length < 5) throw new PortfolioError(422, "Record how the withdrawal was received", ["Describe how the owner withdrew consent (at least 5 characters)"]);
+  if (!(await getById(db, id))) throw new PortfolioError(404, "Project not found");
+  const at = nowIso();
+  await db.batch([
+    db.prepare(`UPDATE portfolio_projects SET portfolio_consent_withdrawn_at = ?, published = 0, updated_at = ? WHERE id = ?`).bind(at, at, id),
+    auditStmt(db, actor, "portfolio.consent_withdrawn", id, { note: note.trim().slice(0, 500), unpublished: true }, ip),
+  ]);
 }
 
 // ── Interactive demos (isolated deployments only) ──

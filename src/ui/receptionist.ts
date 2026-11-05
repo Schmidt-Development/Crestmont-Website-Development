@@ -11,6 +11,8 @@ interface Line { who: Who; text: string; effect?: string; note?: string }
 interface Scenario { key: string; label: string; mode: "inbound" | "outbound"; caller: string; number: string; intro: string; checks?: string[]; lines: Line[]; summary: [string, string][] }
 
 const BIZ = "Northfield Renovation";
+// FD-45: only certified capabilities are shown. Outbound calling for clients is not offered, so the demo has no outbound
+// scenario and no inbound/outbound toggle. The Scenario type keeps "outbound" so the engine stays unchanged.
 export const RECEPTIONIST_SCENARIOS: Scenario[] = [
   {
     key: "book", label: "Book an estimate", mode: "inbound", caller: "Jordan Ellis", number: "(517) 555-0142",
@@ -46,26 +48,6 @@ export const RECEPTIONIST_SCENARIOS: Scenario[] = [
     ],
     summary: [["Outcome", "Transferred to a person (urgent)"], ["Customer", "Dana Morales · (517) 555-0187"], ["Issue", "Leak under the sink after last week's kitchen work"], ["Done during the call", "Water shut off at the valve"], ["Handled by", "Sam, on-call, with the call summary"]],
   },
-  {
-    key: "confirm", label: "Appointment confirmation", mode: "outbound", caller: "Priya Shah", number: "(517) 555-0163",
-    intro: "A follow-up call to a customer who asked to be contacted about their visit.",
-    checks: ["Consent on file — asked for appointment calls", "Not on a do-not-call or suppression list", "Within permitted calling hours · 10:05 local time", "Purpose: appointment confirmation"],
-    lines: [
-      { who: "system", text: "Pre-call checks passed · placing the simulated call", effect: "checks;call:dialing" },
-      { who: "system", text: "Answered", effect: "call:connected" },
-      { who: "ai", text: `Hi, is this Priya? This is the AI assistant calling on behalf of ${BIZ} about your estimate visit on Thursday.` },
-      { who: "caller", text: "Yes, this is Priya." },
-      { who: "ai", text: "Great. You're booked for Thursday at 2. Does that still work?" },
-      { who: "caller", text: "Mostly — do I need to clear anything out of the kitchen before you come?", note: "Customer asks a question" },
-      { who: "ai", text: "No need for the visit itself — the team just needs to see the space and measure. Clearing the counters helps, but it isn't required.", note: "Answers from the approved information" },
-      { who: "caller", text: "Okay. Actually, could we do 3 instead of 2?" },
-      { who: "ai", text: "3 o'clock on Thursday is open — I've moved you to 3, and you'll get a text confirming the new time.", effect: "calendar=Moved · Thursday 15:00;confirm=Text with the new time sent" },
-      { who: "caller", text: "Perfect, thank you." },
-      { who: "ai", text: "You're welcome. If you'd rather not get calls like this, just say so any time." },
-      { who: "system", text: "Call completed · outcome and next action recorded", effect: "crm=Outcome logged · next: reminder text;call:ended;summary" },
-    ],
-    summary: [["Outcome", "Confirmed and rescheduled"], ["New time", "Thursday 15:00"], ["Contact", "Priya Shah · (517) 555-0163"], ["Question answered", "No need to clear the kitchen"], ["Next action", "Reminder text the day before"]],
-  },
 ];
 
 const WAVE = html`<span class="rc-wave" aria-hidden="true">${Array.from({ length: 18 }, (_, i) => html`<i style="${`--i:${i}`}"></i>`)}</span>`;
@@ -81,7 +63,6 @@ ${s.checks ? html`<ul class="rc-checks" aria-label="Checks before an outbound ca
 <dl class="rc-summary" data-summary>${s.summary.map(([k, v]) => html`<dt>${k}</dt><dd>${v}</dd>`)}</dl>
 </section>`;
   const body = html`<div class="rc" data-scenario="${first.key}" data-mode="${first.mode}" data-state="idle">
-<div class="rc__modes" role="group" aria-label="Call direction"><button type="button" class="rc__mode" data-mode-btn="inbound" aria-pressed="true">Inbound</button><button type="button" class="rc__mode" data-mode-btn="outbound" aria-pressed="false">Outbound</button></div>
 <div class="rc__scns" role="group" aria-label="Scenario">${RECEPTIONIST_SCENARIOS.map((s, i) => html`<button type="button" class="sv__opt sv__opt--sm rc__scn-btn" data-scn-btn="${s.key}" data-mode="${s.mode}" aria-pressed="${i === 0 ? "true" : "false"}"${s.mode !== first.mode ? html` hidden` : ""}>${s.label}</button>`)}</div>
 <div class="rc__grid">
   <div class="rc__call" aria-label="Call">

@@ -219,7 +219,7 @@ export function register(r: Router): void {
       throw new HttpError(403, "Only the Founder (Owner with pricing.change) can approve or reject price changes.");
     }
     if (decision !== "approved" && decision !== "rejected") throw new HttpError(422, "Choose approve or reject.");
-    const res = await pricing.decidePriceChange(ctx.db, ctx.actor!, p.id, decision, str(f, "note"), ctx.now());
+    const res = await pricing.decidePriceChange(ctx.db, ctx.actor!, p.id, decision, str(f, "note"), ctx.now(), ctx);
     return redirect(ctx, "/staff/pricing", { kind: "success", text: decision === "approved" ? `Approved. The new price takes effect ${formatDateTime(res.effectiveAt)}.` : "Price change rejected." });
   });
 }

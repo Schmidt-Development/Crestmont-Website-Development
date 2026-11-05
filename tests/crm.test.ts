@@ -2,6 +2,7 @@
 // All records created here are TEST DATA. The Stripe adapter is a local fake that records calls.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { businessDate } from "../src/lib/business-time.ts";
 import { createTestApp, createStaff, createCustomer, lastEmail, linkFrom, TEST_PASSWORD, type TestClient } from "./support/app.ts";
 import { hmacSha256Hex } from "../src/lib/crypto.ts";
 import type { PaymentsAdapter, CheckoutRequest } from "../src/adapters/payments.ts";
@@ -21,7 +22,8 @@ class FakePayments implements PaymentsAdapter {
 }
 
 const WHSEC = "whsec_test_area_c";
-const future = (days = 30) => new Date(Date.now() + days * 86400e3).toISOString().slice(0, 10);
+// Quote validity is counted in Eastern business dates and capped at 30 days (FD-24, CREST-GAP-094).
+const future = (days = 30) => new Date(Date.parse(`${businessDate(new Date())}T12:00:00Z`) + days * 86400e3).toISOString().slice(0, 10);
 
 async function app(opts: { payments?: boolean } = {}) {
   const fake = new FakePayments();
@@ -423,14 +425,20 @@ test("[CAT-006] maintenance subscriptions are refused until the Founder approves
   const t = await app({ payments: true });
   const cust = await createCustomer(t.db);
   const c = t.client(); await c.login(cust.email);
-  const gated = await c.get("/checkout/maintenance/essential");
-  assert.equal(gated.status, 409);
-  assert.match(await gated.text(), /awaiting Founder approval/);
-  assert.equal((await c.post("/checkout/maintenance/professional", { terms: "1" })).status, 409);
-  assert.equal(t.fake.checkouts.length, 0);
+  // The entitlements gate still refuses a plan the Founder has not approved...
+  const plans = Object.values(MAINTENANCE_PLANS);
+  const saved = plans.map((p) => p.entitlementsStatus);
+  try {
+    for (const p of plans) (p as { entitlementsStatus: string }).entitlementsStatus = "proposed_pending_founder_approval";
+    const gated = await c.get("/checkout/maintenance/essential");
+    assert.equal(gated.status, 409);
+    assert.match(await gated.text(), /awaiting Founder approval/);
+    assert.equal((await c.post("/checkout/maintenance/professional", { terms: "1" })).status, 409);
+    assert.equal(t.fake.checkouts.length, 0);
+  } finally { plans.forEach((p, i) => ((p as { entitlementsStatus: string }).entitlementsStatus = saved[i])); }
 
-  // Same code path once approved (catalog copy marked approved; the real catalog is untouched).
-  const approved: Record<string, MaintenanceDef> = { ...MAINTENANCE_PLANS, essential: { ...MAINTENANCE_PLANS.essential, entitlementsStatus: "approved" } };
+  // ...and the real, Founder-approved catalogue (CAT-006/BLK-010) goes through the subscription path.
+  const approved: Record<string, MaintenanceDef> = MAINTENANCE_PLANS;
   const sessionCookie = c.cookies.get("cm_session")!;
   const ctx = await buildContext(new Request("http://crestmont.test/checkout/maintenance/essential", { headers: { cookie: `cm_session=${sessionCookie}` } }), t.env);
   const res = await startMaintenanceCheckout(ctx, { id: cust.id, email: cust.email }, cust.organizationId, "essential", approved);

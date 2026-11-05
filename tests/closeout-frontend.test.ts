@@ -2,6 +2,7 @@
 // copy, AI Receptionist truthfulness, accessibility markup and the CSS/no-JS rules behind them.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { AI_RECEPTIONIST_OFFER } from "../src/domain/catalog.ts";
 import { readFileSync, existsSync, mkdtempSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -147,12 +148,14 @@ test("[SUP-005] [WEB-004] /contact shows 'Staffed hours' only once support.staff
 
 test("[WEB-007] [CAT-006] hosting page: the automatic-billing renewal line appears only once maintenance entitlements are approved (CREST-GAP-090)", async () => {
   const { client } = await createTestApp();
-  assert.doesNotMatch(await (await client().get("/hosting-maintenance")).text(), /renew monthly by automatic billing/);
+  // Entitlements are Founder-approved (CAT-006/BLK-010), so the renewal terms are published.
+  assert.match(await (await client().get("/hosting-maintenance")).text(), /Plans renew monthly by automatic billing/);
   const plans = Object.values(MAINTENANCE_PLANS);
   const saved = plans.map((p) => p.entitlementsStatus);
   try {
-    for (const p of plans) (p as { entitlementsStatus: string }).entitlementsStatus = "approved";
-    assert.match(await (await client().get("/hosting-maintenance")).text(), /Plans renew monthly by automatic billing/);
+    // ...and the page falls silent again the moment any plan is not approved, which is the real contract.
+    for (const p of plans) (p as { entitlementsStatus: string }).entitlementsStatus = "proposed_pending_founder_approval";
+    assert.doesNotMatch(await (await client().get("/hosting-maintenance")).text(), /renew monthly by automatic billing/);
   } finally { plans.forEach((p, i) => ((p as { entitlementsStatus: string }).entitlementsStatus = saved[i])); }
 });
 
@@ -207,7 +210,9 @@ test("[VOICE-001] [WEB-009] AI Receptionist copy: every claim is delivered capab
   assert.match(page, /Simulated call · no real call, no audio/, "the demo is labelled as a simulation");
   assert.match(page, /scripted illustration of one possible custom configuration/i);
   assert.match(homeSection, /Simulated call · no real call, no audio/);
-  assert.match(page, /href="\/quote\?service=ai-receptionist"/, "the service is still offered");
+  // FD-45: visible but "Coming soon" — no quote path until a real end-to-end call is certified; then it is offered again.
+  if (AI_RECEPTIONIST_OFFER.status === "available") assert.match(page, /href="\/quote\?service=ai-receptionist"/, "the service is offered");
+  else { assert.match(page, /Coming soon/); assert.doesNotMatch(page, /href="\/quote\?service=ai-receptionist"/, "no quote path while coming soon"); }
   // The rule catches the old wording.
   const old = "Picks up on the first ring. Checks availability, books and reschedules appointments in your calendar and sends a confirmation.";
   assert.ok(RECEPTIONIST_UNBUILT.some((re) => re.test(old)));

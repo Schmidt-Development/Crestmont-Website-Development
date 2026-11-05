@@ -628,7 +628,7 @@ ${pastTotal > limit ? html`<p class="faint" data-showing>Showing ${offset + (pas
 
   const approvalsPage = async (ctx: AppContext, org: Org, id: string, errors: string[] = [], status = 200) => {
     const proj = await P.getOrgProject(ctx.db, org.organizationId, id);
-    const open = (await ctx.db.prepare(`SELECT id, kind, subject_id, note, created_at FROM approval_requests WHERE project_id = ? AND resolved_at IS NULL ORDER BY created_at`).bind(proj.id).all<{ id: string; kind: P.CustomerApprovalKind; subject_id: string | null; note: string | null; created_at: string }>()).results;
+    const open = (await ctx.db.prepare(`SELECT id, kind, subject_id, note, created_at, respond_by FROM approval_requests WHERE project_id = ? AND resolved_at IS NULL ORDER BY created_at`).bind(proj.id).all<{ id: string; kind: P.CustomerApprovalKind; subject_id: string | null; note: string | null; created_at: string; respond_by: string | null }>()).results;
     const past = (await ctx.db.prepare(`SELECT a.kind, a.decision, a.notes, a.created_at, u.display_name FROM approvals a JOIN users u ON u.id = a.decided_by WHERE a.project_id = ? AND a.kind IN ('scope','design','revision','customer_launch','final_acceptance') ORDER BY a.created_at DESC`).bind(proj.id).all<{ kind: string; decision: string; notes: string | null; created_at: string; display_name: string }>()).results;
     const scope = await ctx.db.prepare(`SELECT version, scope_text, approved_at FROM project_scopes WHERE project_id = ? ORDER BY version DESC LIMIT 1`).bind(proj.id).first<{ version: number; scope_text: string; approved_at: string | null }>();
     const form = (req: (typeof open)[number]) => isAdmin(org) ? html`<form method="post" action="/portal/projects/${proj.id}/approvals">${csrf(ctx)}<input type="hidden" name="kind" value="${req.kind}"><input type="hidden" name="subject_id" value="${req.subject_id ?? ""}">
@@ -636,6 +636,7 @@ ${textarea({ name: "notes", label: "Notes", hint: "Required if you reject: tell 
 <div class="row">${button("Approve", { name: "decision", value: "approved" })}${button("Reject", { variant: "danger", name: "decision", value: "rejected" })}</div></form>` : html`<p class="faint">Only an account administrator for ${org.organizationName} can record approvals.</p>`;
     const body = html`${pageHead("Approvals", undefined, proj.name)}${projectTabs(ctx, proj.id)}${formErrors(errors)}
 ${open.length ? open.map((req) => html`<section class="card card--gold" style="margin-bottom:1rem"><h2 class="card__title">${P.APPROVAL_LABELS[req.kind]}</h2>
+${req.respond_by ? html`<p class="faint" data-testid="respond-by">Please respond by ${formatDateTime(req.respond_by)} (five business days). Nothing is approved without your decision.</p>` : ""}
 ${req.note ? html`<p>${nl2br(req.note)}</p>` : ""}${req.kind === "scope" && scope ? html`<details open><summary>Scope version ${scope.version}</summary><div class="prose">${nl2br(scope.scope_text)}</div></details>` : ""}
 ${req.kind === "final_acceptance" ? html`<p><a href="/portal/projects/${proj.id}/handoff">Review the handoff package first</a>.</p>` : ""}${form(req)}</section>`) : html`<section class="card"><p class="muted">Nothing is waiting for your approval on this project.</p></section>`}
 <section style="margin-top:1.5rem"><h2>History</h2>${table(past, [

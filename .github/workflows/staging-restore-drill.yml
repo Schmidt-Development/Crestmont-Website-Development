@@ -70,7 +70,9 @@ jobs:
           $WRANGLER d1 export crestmont-staging --remote --env staging --output drill/staging.sql > /dev/null 2> drill/err.log || fail "export"
           $WRANGLER d1 execute crestmont-staging --remote --env staging --json --command "SELECT name FROM sqlite_master WHERE type='table'" > drill/tables.json 2> drill/err.log || fail "list tables"
           node --no-warnings scripts/restore-drill.ts sql drill/tables.json > drill/count.sql
-          count crestmont-staging "--remote --env staging" source || fail "count source rows"
+          # The source side is the export itself: counting the live database a moment later raced with live writes.
+          node --no-warnings scripts/restore-drill.ts export-counts drill/staging.sql > drill/source-0.json || fail "count exported rows"
+          echo drill/source-0.json > drill/source.list
       - name: Restore into a scratch database and compare
         id: restore
         if: steps.pre.outputs.ok == 'true' && steps.export.outcome == 'success'

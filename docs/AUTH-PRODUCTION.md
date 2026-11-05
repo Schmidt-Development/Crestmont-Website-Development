@@ -17,7 +17,7 @@ implemented parts are in `tests/production-auth.test.ts` (development-mode equiv
 | Password hashing | PBKDF2-SHA256, 100k iterations, per-user salt (the Workers WebCrypto maximum); breached-password check (k-anonymity) on by default outside development | auth.test.ts |
 | Password reset | single-use 1 h token, same response for unknown accounts, revokes every session | production-auth #5 |
 | Sessions | hashed tokens; absolute 12 h staff / 7 d customer; idle 2 h staff / 24 h customer; list and revoke; password change signs out others | auth.test.ts |
-| Login rate limiting and lockout | 30/15 min per IP, 10/15 min per email, lock 15 min after 8 failures; security events recorded | production-auth #6 |
+| Login abuse protection (FD-32: progressive, no fixed lockout) | No account lockout (an attacker could keep any account locked). Failed attempts only are counted: after 5 failures for an address in 15 min, unknown devices must pass a Turnstile challenge; per-IP limits of 10 failures per address and 30 overall per 15 min; 10 per device; known devices are not blocked by others' failures; security events recorded (`src/services/auth.ts`) | production-auth #6, CREST-GAP-003 |
 | MFA hardening | TOTP replay protection; replacing an authenticator needs an MFA-verified session; enrolled secret never re-displayed | production-auth #4, auth.test.ts |
 | Tenant isolation | every customer route checked against other organizations' ids | security-tenancy.test.ts |
 | Audit logging | `audit_logs` for registration, sessions, MFA, resets, invitations; `security_events` for failures | auth.test.ts, platform tests |

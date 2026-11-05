@@ -28,16 +28,23 @@ async function setup(extra: Partial<Env> = {}) {
 test("[READY-010] fresh databases carry the real discovery blocker register with identical ids and states", async () => {
   const { db, o } = await setup();
   const rows = (await db.prepare(`SELECT id, status FROM blockers ORDER BY id`).all<{ id: string; status: string }>()).results;
-  assert.deepEqual(rows.map((r) => r.id), Array.from({ length: 14 }, (_, i) => `BLK-${String(i + 1).padStart(3, "0")}`));
+  assert.deepEqual(rows.map((r) => r.id), Array.from({ length: 15 }, (_, i) => `BLK-${String(i + 1).padStart(3, "0")}`));
   // BLK-003 (Cloudflare access), BLK-012 (registries) and BLK-013 (Actions billing) were resolved with evidence by
   // migration 0045; BLK-004 (Stripe test-mode account) by migration 0070, on the staging run that exercised it.
-  assert.deepEqual(rows.filter((r) => r.status === "resolved").map((r) => r.id), ["BLK-001", "BLK-002", "BLK-003", "BLK-004", "BLK-012", "BLK-013"]);
+  assert.deepEqual(rows.filter((r) => r.status === "resolved").map((r) => r.id), ["BLK-001", "BLK-002", "BLK-003", "BLK-004", "BLK-008", "BLK-009", "BLK-010", "BLK-011", "BLK-012", "BLK-013"]);
+  // Each of these closed on recorded evidence, never on a status edit: 0045 (Cloudflare, registries, Actions
+  // billing), 0071 (Stripe test mode) and 0077 (portfolio relationship, Retell provisioning, domain control,
+  // maintenance entitlements). BLK-005, 006, 007 and 014 stay open because their own action is not done.
+  for (const id of ["BLK-008", "BLK-009", "BLK-010", "BLK-011"]) {
+    const ev = (await db.prepare(`SELECT resolution_evidence e FROM blockers WHERE id = ?`).bind(id).first<{ e: string | null }>())!;
+    assert.ok((ev.e ?? "").length > 120, `${id} closed with evidence, not with a flag`);
+  }
   const stripe = (await db.prepare(`SELECT resolution_evidence e FROM blockers WHERE id = 'BLK-004'`).first<{ e: string }>())!;
   assert.match(stripe.e, /test mode/, "BLK-004 closes on test-mode evidence only");
   assert.match(stripe.e, /Live-mode activation remains open under PAY-010/, "live payments stay a separate, open requirement");
   const page = await (await o.get("/staff/readiness/blockers")).text();
   for (const c of ["engineering", "external_account", "security", "legal", "founder_approval", "production_incident"]) assert.match(page, new RegExp(`data-category="${c}"`));
-  assert.match(page, /BLK-011/, "open blockers are listed");
+  assert.match(page, /BLK-007/, "open blockers are listed");
   // Requirement links are applied once requirement rows exist.
   assert.ok(await db.prepare(`SELECT 1 FROM blocker_requirements WHERE blocker_id = 'BLK-013' AND requirement_id = 'READY-005'`).first());
 });
@@ -47,7 +54,7 @@ test("[READY-010] blockers can be created and edited, and resolving requires res
   const created = await o.post("/staff/readiness/blockers/new", { category: "security", severity: "high", description: "Session cookie lacks a dedicated domain", subsystem: "Authentication", owner: "Engineering", required_action: "Scope cookie to app domain", dependency: "", requirement_ids: "AUTH-004 SEC-002" });
   assert.equal(created.status, 303);
   const id = created.headers.get("location")!.split("/").pop()!;
-  assert.equal(id, "BLK-015");
+  assert.equal(id, "BLK-016");
   assert.ok(await db.prepare(`SELECT 1 FROM blocker_requirements WHERE blocker_id = ? AND requirement_id = 'SEC-002'`).bind(id).first());
   const bad = await o.post("/staff/readiness/blockers/new", { category: "security", severity: "high", description: "Unknown requirement link", subsystem: "x1", owner: "Engineering", required_action: "Fix it now", requirement_ids: "NOPE-999" });
   assert.equal(bad.status, 422);
@@ -197,7 +204,7 @@ test("[READY-011] evidence packet hash matches its content; CSV and printable re
   assert.equal(res.headers.get("x-evidence-packet-sha256"), parsed.sha256);
   assert.equal(parsed.packet.report.requirements.length, REQUIREMENTS.length);
   assert.deepEqual(parsed.packet.evidenceRuns.map((r) => r.id), ["ci-p"]);
-  assert.equal(parsed.packet.blockers.length, 14);
+  assert.equal(parsed.packet.blockers.length, 15);
   const csv = await (await o.get("/staff/readiness/export.csv")).text();
   assert.equal(csv.trim().split("\n").length, REQUIREMENTS.length + 1);
   const report = await (await o.get("/staff/readiness/report")).text();

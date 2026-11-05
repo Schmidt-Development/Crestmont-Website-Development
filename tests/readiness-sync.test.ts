@@ -174,11 +174,12 @@ test("[READY-013] Scenario G: every transition above happens with requirements/s
 
 test("[READY-013] resolving a blocker releases its requirements without any status edit", async () => {
   const db = await platform();
-  await ingestEvidence(db, ciDoc("gh-11", C1, [{ requirementId: "CAT-006", outcome: "passed" }]));
-  assert.equal((await stateOf(db, "CAT-006")).autoState, "BLOCKED", "CAT-006 waits on the Founder's entitlement decision");
+  // PORT-001 waits on BLK-007 (genuine screenshots of the live sites), which is still open.
+  await ingestEvidence(db, ciDoc("gh-11", C1, [{ requirementId: "PORT-001", outcome: "passed" }]));
+  assert.equal((await stateOf(db, "PORT-001")).autoState, "BLOCKED", "PORT-001 waits on the captures");
 
-  await resolveBlocker(db, "user_owner", "BLK-010", "Founder approved the proposed maintenance entitlements on 2026-11-02 (FD-05).");
-  const after = await stateOf(db, "CAT-006");
+  await resolveBlocker(db, "user_owner", "BLK-007", "Genuine captures of the live sites reviewed and accepted by the Founder (TEST DATA).");
+  const after = await stateOf(db, "PORT-001");
   assert.equal(after.autoState, "MERGED");
   assert.equal(after.autoComplete, true);
 });
