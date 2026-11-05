@@ -1,11 +1,24 @@
 name: Staging health monitor
 
 # External alerting for staging (READY-012, INFRA-006, ASVS F-03 interim channel). Runs from GitHub's infrastructure,
-# outside Cloudflare, every 30 minutes. The scheduled probe reads only public health endpoints; the optional manual
-# backup job run uses a key derived from the Cloudflare token secret.
+# outside Cloudflare, on a 30-minute cron that GitHub does not honour (see "Schedule reality" below). The scheduled
+# probe reads only public health endpoints; the optional manual backup job run uses a key derived from the Cloudflare
+# token secret.
 # A failed run is the alert — GitHub notifies the account that last changed this schedule (and repository watchers
 # subscribed to Actions) by email/web notification. The Founder may later add or swap a channel (see docs/RUNBOOK.md,
 # "Alerting"); this workflow stays as the zero-cost baseline.
+#
+# Schedule reality (measured 2026-11-05, SEC-07): the cron asks for every 30 minutes — 48 runs a day — and GitHub
+# delivers about 4. Over the 190 hours from 2026-10-28 to 2026-11-05 it recorded 34 scheduled runs: median gap 356
+# minutes, longest 624, and not one gap under 60. GitHub documents scheduled workflows as best effort and drops runs
+# under load, so this is a detection LATENCY of up to about ten hours, not the half hour the cron reads like.
+# Reproduce with:
+#   gh api "repos/<owner>/<repo>/actions/workflows/<this file>/runs?per_page=100" --paginate \
+#     --jq '.workflow_runs[] | select(.event=="schedule") | .created_at'
+# Detection itself is proven: runs 18-26 failed continuously through the 2026-10-31 to 11-02 outage of
+# /api/readiness/health. The in-Worker ops_alerts job checks the same failing feeds every 15 minutes and emails the
+# Owners, which would make this latency irrelevant — but it sends through Resend, so it delivers nothing until
+# BLK-005 is closed. Until then a failed run here is the only alert that reaches a person.
 on:
   schedule:
     - cron: "11,41 * * * *"

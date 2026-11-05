@@ -57,7 +57,7 @@ export async function loadReport(ctx: Pick<AppContext, "db" | "now">): Promise<{
 // ───────────── Self-monitoring (READY-012, §50) ─────────────
 
 /** `advisory`: a known configuration gap that is shown as failing but does not make /api/readiness/health 503 (the health
- *  monitors would otherwise alert every 30 minutes until a provider-side change, masking real outages). */
+ *  monitors would otherwise alert on every run until a provider-side change, masking real outages). */
 export interface FeedStatus { source: string; status: "healthy" | "stale" | "failing" | "unavailable" | "not_configured"; detail: string; required: boolean; lastSuccessAt: string | null; lastAttemptAt: string | null; advisory?: boolean }
 
 /** Cloudflare's documented Turnstile TEST keys (always pass / always fail / force challenge): 1x…, 2x…, 3x… followed by zeros. */
