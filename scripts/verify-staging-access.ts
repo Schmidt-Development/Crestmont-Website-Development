@@ -7,6 +7,7 @@
 //
 // CLI: node --no-warnings scripts/verify-staging-access.ts --access access/access.json --url <url> --readme access/README.md
 // On success writes the private access README (the artifact) with the verification timestamp.
+import { withConnectRetry } from "./net-retry.ts";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { totpCode } from "../src/lib/auth-crypto.ts";
@@ -128,7 +129,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const url = arg("--url")!;
   const owner = access.accounts.find((a) => a.role === "owner")!;
   try {
-    const res = await verifyStagingAccess({ base: url, owner: { email: owner.email, password: owner.password, totp: owner.totp! } }, fetch, console.log);
+    const res = await verifyStagingAccess({ base: url, owner: { email: owner.email, password: owner.password, totp: owner.totp! } }, withConnectRetry(fetch), console.log);
     const readme = arg("--readme");
     if (readme) writeFileSync(readme, accessReadme(url, access, new Date().toISOString()), { mode: 0o600 });
     console.log(`Verified: ${res.pages}/${res.modules} Owner modules reachable through the full access sequence (public site, MFA enforced).`);

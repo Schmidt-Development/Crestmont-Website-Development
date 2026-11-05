@@ -7,6 +7,7 @@
 //     --commit $GITHUB_SHA --status succeeded --url https://staging.example.com --by github-actions:alice \
 //     [--release rel_…] [--rollback-target <deployment id>] [--ci-run gh-123-1] [--run-url https://…] \
 //     [--verification passed|failed|not_verified] [--notes "…"]
+import { withConnectRetry } from "./net-retry.ts";
 import { signEvidence } from "../src/readiness/ingest.ts";
 
 const args = process.argv.slice(2);
@@ -25,7 +26,7 @@ for (const k of ["deploymentId", "environment", "commitSha", "status", "initiate
   if (!doc[k]) { console.error(`Missing --${k === "deploymentId" ? "id" : k === "commitSha" ? "commit" : k === "initiatedBy" ? "by" : k}`); process.exit(2); }
 }
 const body = JSON.stringify(Object.fromEntries(Object.entries(doc).filter(([, v]) => v !== undefined && v !== "")));
-const res = await fetch(new URL("/api/readiness/deployments", url), {
+const res = await withConnectRetry(fetch)(new URL("/api/readiness/deployments", url), {
   method: "POST",
   headers: { "content-type": "application/json", "x-crestmont-signature": await signEvidence(secret, body) },
   body,
