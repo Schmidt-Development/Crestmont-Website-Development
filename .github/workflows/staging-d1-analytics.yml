@@ -1,0 +1,40 @@
+name: Staging D1 analytics
+
+# Read-only: which statements consumed the staging D1 budget in a window (scripts/d1-analytics.ts). Run it for the
+# window of a staging deploy whose pages answered "D1 DB is overloaded" (deploy #160: 2026-11-05 21:30 → 22:10 UTC).
+# Reads Cloudflare's GraphQL analytics and the D1 database list; writes nothing, deploys nothing, touches no Worker.
+# Needs the staging token to include Account Analytics: Read; if it does not, the run says so (COVERAGE: cannot_read)
+# rather than reporting an idle database.
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: "Window start, UTC ISO time (e.g. 2026-11-05T21:30:00Z)"
+        required: true
+      to:
+        description: "Window end, UTC ISO time"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  analytics:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Top D1 statements and per-minute load for the window
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          FROM: ${{ inputs.from }}
+          TO: ${{ inputs.to }}
+        run: node --no-warnings scripts/d1-analytics.ts --database crestmont-staging --from "$FROM" --to "$TO"
