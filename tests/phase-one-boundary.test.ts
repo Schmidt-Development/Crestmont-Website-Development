@@ -112,7 +112,9 @@ test("phase 1 boundary: no public page promises automated or AI-built websites, 
   const paths = [...new Set([...sitemap.matchAll(/<loc>https?:\/\/[^/<]+(\/[^<]*)<\/loc>/g)].map((m) => m[1]))];
   assert.ok(paths.length >= 15, `sitemap lists the public site (${paths.length})`);
   const PROMISE = /AI[- ]built|built (?:automatically|by AI)|automatically (?:built|generated|designed)|AI website builder|AI-generated (?:website|site)|instant(?:ly)? (?:website|site)|(?:website|site) in (?:minutes|hours)|autonomous(?:ly)? (?:build|develop)/i;
-  const strip = (h: string) => h.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ");
+  // Visible text only. End tags are matched with any whitespace or attributes before ">" (`</script >`), which a
+  // browser also accepts, so no script or style body leaks into (or hides from) the scan.
+  const strip = (h: string) => h.replace(/<script\b[\s\S]*?<\/script\b[^>]*>/gi, " ").replace(/<style\b[\s\S]*?<\/style\b[^>]*>/gi, " ").replace(/<[^>]+>/g, " ");
   for (const p of [...paths, "/pricing", "/quote", "/register"]) {
     const res = await t.client().get(p);
     assert.equal(res.status, 200, p);
