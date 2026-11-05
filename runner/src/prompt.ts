@@ -6,6 +6,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import type { BuildBrief, Job } from "./protocol.ts";
 import { BRIEF_RULES } from "./protocol.ts";
+import { blueprintBrief, type DesignBlueprint } from "./orchestrator/blueprint.ts";
 
 export type Phase = "plan" | "build" | "verify" | "repair";
 
@@ -20,7 +21,7 @@ export type BuildPhase = "design" | "design_locked" | "functionality" | "final_q
  * behind an unfinished homepage scores worse than one that ships the homepage with a mocked booking widget. These
  * blocks say that out loud, so the model does not have to infer it from the scorecard.
  */
-export function buildPhaseBlock(p: BuildPhase, freeze: { revision: string; designPoints: number } | null, plan?: PhasePlanLike | null): string {
+export function buildPhaseBlock(p: BuildPhase, freeze: { revision: string; designPoints: number } | null, plan?: PhasePlanLike | null, blueprint?: DesignBlueprint | null): string {
   const frozen = freeze ? `The approved design is FROZEN at revision ${freeze.revision} (${freeze.designPoints}/40). ` : "";
   // The architect's own split for THIS website, where it has one. A specification written before phasePlan existed
   // has none, and then the phase block says what the phase is for without naming this website's deliverables --
@@ -45,7 +46,18 @@ export function buildPhaseBlock(p: BuildPhase, freeze: { revision: string; desig
     if (p === "final_qa") return from(plan.finalQuality ?? [], "This website's remaining quality requirements (the architect's own list):");
     return "";
   })();
-  return block(p, frozen) + section;
+  // V5 §6: the approved blueprint is part of the design phase's objective, not a document the builder may or may
+  // not consult. Where there is none, the phase SAYS the design was never decided in detail rather than letting
+  // the model read prose and assume it had a specification.
+  const bp = (p === "design" || p === "design_locked")
+    ? (blueprint ? "\n\n" + blueprintBrief(blueprint)
+      : "\n\nNO DESIGN BLUEPRINT EXISTS for this website: the architect produced a written design specification but no"
+        + "\nstructured blueprint, so there are no approved hex values, no named section layouts and no planned asset list."
+        + "\nDecide those yourself from SPEC.json and .crestmont/plan.md, write what you decided into"
+        + "\npublic/assets/tokens.css and .crestmont/plan.md so the review can be held against it, and say in"
+        + "\n.crestmont/agent-report.md which visual decisions were yours rather than the architect's.")
+    : "";
+  return block(p, frozen) + section + bp;
 }
 
 /** The architect's phase split, as the runner reads it off SPEC.json (orchestrator/contracts.ts: PhasePlan). */
@@ -251,7 +263,12 @@ function fullstackPhase(job: Job, phase: Phase, starter: string, local: boolean,
     "Configure and build the frontend from .crestmont/plan.md and SPEC.json, following STARTER.md: business.config.json, design tokens in public/assets/tokens.css (WCAG AA contrast), and every page in the approved sitemap with real copy from the customer data — never lorem ipsum or placeholders.",
     "This phase is scored out of 40 from real browser screenshots at desktop (1366), tablet (768) and mobile (390). Spend your turns on what those screenshots show: composition and spacing, a real type scale, colour and contrast, imagery, a horizontal navigation bar on desktop with a working menu toggle on mobile, component polish, and page-to-page consistency.",
     "Build every interactive component's APPEARANCE in all of its states — empty, filled, invalid, submitting, success, error — from safe deterministic mock data held in the frontend. Do NOT build customer-specific backend functionality in this phase: no new endpoints, no new migrations, no new backend tests. The starter's existing foundation may be used as it already is where a page needs it to render, or to demonstrate an interaction safely.",
-    "Imagery: the website needs real, visible images. Use only assets you are entitled to publish — the customer's own files in customer-files/, what the starter ships, or artwork you author yourself (SVG counts; an authored illustration is far better than an empty space). The Design Gallery references are REFERENCES ONLY: study their composition, never copy their files into this website.",
+    // V5 §7. This line used to read "artwork you author yourself (SVG counts; an authored illustration is far
+    // better than an empty space)", while the brief asked for licensed photography and the browser check counted
+    // any visible <svg> as imagery. The model did exactly what it was told, drew line art, and the scorecard
+    // credited it. Authored artwork is still welcome -- it is simply not a photograph, and the two are now
+    // different requirements that are satisfied differently.
+    "Imagery: the website needs real, visible images, and you may only publish assets you are entitled to — the customer's own files in customer-files/, what the starter ships, or artwork you author yourself. Authored artwork (SVG, CSS) is a legitimate part of a design and is always better than an empty space. It is NOT a photograph: where the approved design calls for photography, use the customer's own photographs, and where none exists, render the reserved space at the intended aspect ratio with its alt text and record the missing file in .crestmont/defects.json rather than drawing a substitute. The Design Gallery references are REFERENCES ONLY: study their composition, never copy their files into this website.",
     "Secrets never go into the repository, config, frontend or logs.",
     local ? "Report requirement statuses with report_requirement as you go (implemented_unverified until verified). Write each file completely; prefer edit_file for small changes." : "Update .crestmont/requirements.json as you go (implemented_unverified until verified).",
   ];
@@ -271,14 +288,14 @@ function fullstackPhase(job: Job, phase: Phase, starter: string, local: boolean,
   ];
 }
 
-export function phasePrompt(job: Job, phase: Phase, ctx: { starter: string | null; resumed: boolean; previousNote: string | null; toolset?: "claude" | "local"; buildPhase?: BuildPhase; designFreeze?: { revision: string; designPoints: number } | null; phasePlan?: PhasePlanLike | null }): string {
+export function phasePrompt(job: Job, phase: Phase, ctx: { starter: string | null; resumed: boolean; previousNote: string | null; toolset?: "claude" | "local"; buildPhase?: BuildPhase; designFreeze?: { revision: string; designPoints: number } | null; phasePlan?: PhasePlanLike | null; blueprint?: DesignBlueprint | null }): string {
   const local = ctx.toolset === "local";
   const lines: string[] = [];
   // The design-first objective is APPENDED, not prepended. Every runner instruction has to keep starting with its
   // own first line ("Phase 2 of 3: build.", "Repair:", "This build is continuing..."): that opening is how the
   // latest runner instruction is identified in a resumed conversation, and prepending a preamble to it silently
   // breaks that identification. So the mechanics stay first and the phase objective follows them.
-  const objective = ctx.buildPhase ? ["", buildPhaseBlock(ctx.buildPhase, ctx.designFreeze ?? null, ctx.phasePlan ?? null)] : [];
+  const objective = ctx.buildPhase ? ["", buildPhaseBlock(ctx.buildPhase, ctx.designFreeze ?? null, ctx.phasePlan ?? null, ctx.blueprint ?? null)] : [];
   if (ctx.resumed && phase !== "repair") {
     lines.push("This build is continuing from an earlier attempt. Inspect the repository and .crestmont/ status files first and continue from where the work stopped; do not start over.");
     if (ctx.previousNote) lines.push(`Runner note: ${ctx.previousNote}`);

@@ -2,7 +2,7 @@
 // -> agent config + skills -> plan/build/verify phases with heartbeats, checkpoints and caps -> runner checks ->
 // preview -> commit/push -> final checkpoint -> complete. Lease loss stops everything without completing.
 
-import { writeFileSync, mkdirSync, readdirSync, readFileSync, existsSync, lstatSync, rmSync, mkdtempSync } from "node:fs";
+import { writeFileSync, mkdirSync, readdirSync, readFileSync, existsSync, lstatSync, rmSync, mkdtempSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ControlPlaneClient } from "./control-plane.ts";
@@ -46,7 +46,12 @@ import type { Advisor } from "./orchestrator/advisors.ts";
 import { DeterministicReviewer, LocalModelAdvisor } from "./orchestrator/advisors.ts";
 import type { GalleryReferenceInput, MasterSpec, ReviewVerdict } from "./orchestrator/contracts.ts";
 import { outstanding, validateArchitectureSpec, validateDesignSpec } from "./orchestrator/contracts.ts";
+import { blueprintBrief, blueprintInstructions, blueprintSummary, validateBlueprint } from "./orchestrator/blueprint.ts";
+import { planBuilderVision, recordBuilderVision } from "./orchestrator/builder-vision.ts";
+import { loadManifest, manifestSummary, noteBlueprint, recordDelivery, recordExclusion, saveManifest, sha256File, upsert } from "./orchestrator/reference-manifest.ts";
+import { imageFacts } from "./orchestrator/vision.ts";
 import { collectEvidence, builderIntegrations, builderApprovalRequests, writeReview, BUILDER_CONTRACT } from "./orchestrator/evidence.ts";
+import { classifyEffect, fingerprintCycle, ineffectiveFeedback, noopVerdict, type CycleEffect, type CycleFingerprint } from "./orchestrator/repair-effect.ts";
 import { ratchetDecision, stopsBuild, type PhasePoints } from "./orchestrator/ratchet.ts";
 import { collectSnapshot } from "./orchestrator/snapshot.ts";
 import type { SessionRecord } from "./orchestrator/sessions.ts";
@@ -57,7 +62,7 @@ import type { InFlight, ProjectMemory } from "./memory.ts";
 import type { Scorecard } from "./quality.ts";
 import { readGates, requestedCapabilities, score, scorecardOutstanding } from "./quality.ts";
 import {
-  CATEGORY_MAX, PRIMARY_PROGRESS, VISUAL_MEASUREMENTS_FILE, phaseOutstanding, readVisualMeasurements, requiresImagery,
+  CATEGORY_MAX, PRIMARY_PROGRESS, VISUAL_MEASUREMENTS_FILE, phaseOutstanding, readVisualMeasurements, requiresImagery, requiresPhotography,
   scoreWeighted, type BuildPhase, type Scorecard2,
 } from "./quality-weighted.ts";
 import type { CycleEvidence } from "./orchestrator/contracts.ts";
@@ -308,7 +313,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
    * snapshot that cannot be stored is logged and the build carries on, and the platform refuses a repeat for a
    * revision it already holds, so a retry can never rewrite one.
    */
-  const snapshot = async (cycle: number, phase: "build" | "repair" | "final", meta: { score?: number | null; decision?: string | null; isBest?: boolean; reverted?: boolean; revertedReason?: string | null } = {}) => {
+  const snapshot = async (cycle: number, phase: "build" | "repair" | "final", meta: { score?: number | null; decision?: string | null; isBest?: boolean; reverted?: boolean; revertedReason?: string | null; effect?: "effective" | "ineffective" | "unknown" | null; effectReason?: string | null } = {}) => {
     if (!ws) return;
     // Two bounded attempts: a stored revision is immutable and the platform refuses a repeat for one it already
     // holds (r.alreadyStored), so retrying a transient upload failure can never rewrite or duplicate a revision.
@@ -394,6 +399,9 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     await assertIsolation({ cwd: cfg.workspacesRoot, workspacesRoot: cfg.workspacesRoot, platformRepoPatterns: cfg.platformRepoPatterns, pathEnv: cfg.agentPath });
     ws = createWorkspace(cfg.workspacesRoot, job);
     git = { repo: ws.repo, pathEnv: cfg.agentPath, home: ws.home };
+    // V5 correction §3: the record of which images reached which model. Loaded rather than created, so a resumed
+    // segment continues the same reference and concept selection instead of choosing differently each time.
+    const manifest = loadManifest(ws.dir, job.id, job.attempt);
     log.info("job started", { workspace: ws.dir, strategy: job.strategy, packageId: job.packageId });
     scheduleHeartbeat();
     runtimeTimer = setTimeout(() => stop.request("local:runtime"), runtimeMs);
@@ -565,6 +573,10 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       // ws.repo): .crestmont/ is committed, and a gallery screenshot inside the customer's repository would
       // ship another studio's design with their website. The architect reads them from disk; nothing copies
       // them into the site.
+      // V5 correction §3: which images reached which model, with the hash of the exact bytes sent. Every claim
+      // in this area used to be unfalsifiable -- "the references were retrieved" was recorded, "Model B received
+      // none of them, ever" was not. Kept in the job directory, never in the customer's repository: it indexes
+      // files the customer may look at and may not publish.
       const galleryReferences = await (async () => {
         const sel = job.design;
         if (!sel?.references?.length) {
@@ -596,6 +608,18 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           }
           out.push({ id: r.id, title: r.title, industry: r.industry, relevance: r.relevance, why: r.why, tags: r.tags, notes: r.notes, path: file, variant: file ? variant : null });
         }
+        for (const r of out) {
+          const facts = r.path ? imageFacts(r.path) : null;
+          upsert(manifest, {
+            id: r.id, kind: "gallery_reference", title: r.title,
+            originalPath: r.path ?? "", originalSha256: r.path ? sha256File(r.path) : "",
+            originalWidth: facts?.width ?? null, originalHeight: facts?.height ?? null,
+            // A gallery reference is another studio's work: looking at it is allowed, publishing it is not.
+            publishable: false,
+          });
+          if (!r.path) recordExclusion(manifest, r.id, { to: "architect", reason: "the image could not be retrieved from the platform", context: "gallery fetch" });
+        }
+        saveManifest(ws!.dir, manifest);
         tracker.note({ kind: "step", message: "design gallery v" + sel.galleryVersion + ": " + got + " of " + sel.references.length + " reference image(s) retrieved — " + sel.reason });
         return out;
       })();
@@ -627,7 +651,12 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           const raw = await architect.architect(input, specProblems, { maxImages });
           // What the model ACTUALLY received, read back from the adapter rather than assumed from the request:
           // a text-only model is sent no images at all, and that must show up in the evidence as zero.
-          const seen = (architect as { lastArchitectImages?: { referenceId: string }[] }).lastArchitectImages ?? [];
+          const seen = (architect as { lastArchitectImages?: { referenceId: string; path: string }[] }).lastArchitectImages ?? [];
+          for (const s of seen) {
+            const f = imageFacts(s.path);
+            recordDelivery(manifest, s.referenceId, { to: "architect", sentPath: s.path, sentSha256: sha256File(s.path), width: f?.width ?? 0, height: f?.height ?? 0, tokens: f?.tokens ?? 0, operation: "none", note: "the original gallery file, sent unchanged", context: `architect attempt ${attempt}` });
+          }
+          saveManifest(ws.dir, manifest);
           if (seen.length) {
             await client.galleryImagesSeen(job, seen.map((i) => i.referenceId), models.a.tag).catch(() => {});
             tracker.note({ kind: "step", message: "design gallery: " + seen.length + " reference image(s) interpreted by " + models.a.tag });
@@ -689,6 +718,88 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           stopReason: "architect_failed",
         });
       }
+
+      // ── STAGE 2: the DESIGN BLUEPRINT (V5 §5) ────────────────────────────────────────────────────────────────────
+      //
+      // The accepted design specification is prose. Prose cannot be executed and cannot be failed: "a clean, modern
+      // layout with a warm, professional palette" is satisfied by every rendered page and by none of them. The
+      // blueprint is the same design as DATA -- hex values, a type scale with units and weights, each page's sections
+      // in order with a named layout, each component's states, each visual asset's kind and provenance, and an
+      // explicit mapping back to the gallery reference every decision came from.
+      //
+      // Its own model call, with its own output budget: asking one reasoning model for the prose plan and this object
+      // in one reply is what truncated the architect's answer on bld_e65768e6b0853a425095a1f6 and left the build with
+      // no specification at all. A failure here therefore costs the accepted design specification nothing.
+      if (spec && !spec.designBlueprint && architect?.blueprint && !stop.reason && job.phase !== "final_qa") {
+        const rb = route("architecture", models);
+        routed.push(rb);
+        Object.assign(now, { activity: "gpu_running", model: rb.model.tag, task: rb.task });
+        tracker.note({ kind: "step", message: `design blueprint session (${architect.name}): turning the accepted design into executable data` });
+        const approvedDesign = spec;
+        // Photography is a separate requirement from imagery, and the blueprint is where it is decided rather than
+        // discovered at scoring time. §7: an authored SVG is a visual asset; it is not a photograph.
+        const photographyRequired = requiresPhotography({
+          imagesSource: job.brief.content.customerData.content?.imagesSource ?? null,
+          designSpec: approvedDesign.designSpec,
+        });
+        const sentRefs = galleryReferences.filter((g) => g.path).map((g) => g.id);
+        let bpProblems: string[] = [];
+        let bpImages = 6;
+        for (let attempt = 1; attempt <= 3 && !spec.designBlueprint && !stop.reason; attempt++) {
+          try {
+            const raw = await architect.blueprint(approvedDesign, input, bpProblems, { maxImages: bpImages });
+            const seen = (architect as { lastArchitectImages?: { referenceId: string; path: string }[] }).lastArchitectImages ?? [];
+            const v = validateBlueprint(raw, {
+              // Only references the model was ACTUALLY shown may be cited. A mapping to a reference nobody sent is a
+              // fabricated provenance claim, which is worse than an empty mapping.
+              sentReferenceIds: seen.length ? seen.map((i) => i.referenceId) : sentRefs,
+              requiresPhotography: photographyRequired,
+            });
+            if (!v.ok) {
+              bpProblems = v.problems;
+              const why = `design blueprint attempt ${attempt} was rejected: ${v.problems.join("; ")}`;
+              sessionNotes.push(why.slice(0, 400));
+              tracker.note({ kind: "note", message: why.slice(0, 400) });
+              continue;
+            }
+            spec = { ...approvedDesign, designBlueprint: v.blueprint! };
+            bpProblems = [];
+            // Persisted three ways, each for a different reader: SPEC.json for the pipeline, the platform's spec
+            // record for the Founder and for a resumed segment, and DESIGN-BLUEPRINT.md in the repository because
+            // that is the file the BUILDER reads (§6).
+            writeInside(ws.repo, path.join(".crestmont", "design-blueprint.json"), JSON.stringify(v.blueprint, null, 2) + "\n");
+            writeFileSync(path.join(ws.repo, "DESIGN-BLUEPRINT.md"), blueprintInstructions(v.blueprint!) + "\n");
+            const storedBp = await client.storeSpec(job, spec, architect.name).catch((err) => {
+              if (err instanceof LeaseLostError) throw err;
+              // The blueprint is already on disk and the build can execute it; a platform that will not store it is
+              // a reporting failure, not a reason to throw away an approved design.
+              tracker.note({ kind: "note", message: `design blueprint accepted but not stored on the platform: ${errorMessage(err).slice(0, 200)}` });
+              return null;
+            });
+            noteBlueprint(manifest, v.blueprint!.referenceMapping);
+          saveManifest(ws.dir, manifest);
+          tracker.note({ kind: "step", message: `design blueprint accepted: ${blueprintSummary(v.blueprint!)}${storedBp ? `; stored as v${storedBp.specVersion}` : ""}` });
+          } catch (err) {
+            if (err instanceof LeaseLostError) { markLeaseLost(); throw err; }
+            const kind = classify(err);
+            if (kind === "overflow") { bpImages = Math.floor(bpImages / 2); bpProblems = []; }
+            else if (kind === "permission") { attempt = 3; }
+            else bpProblems = [errorMessage(err).slice(0, 300)];
+            const why = `design blueprint attempt ${attempt} failed [${kind}]: ${errorMessage(err).slice(0, 300)}`;
+            sessionNotes.push(why);
+            tracker.note({ kind: "note", message: why.slice(0, 400) });
+          }
+        }
+        // NOT a build-stopping failure, and deliberately so: the design specification was accepted, and a build that
+        // can produce a website from prose is better than no build. But the fact is recorded where it cannot be
+        // mistaken for success -- the design phase prompt will say the design was never decided in detail, and the
+        // Founder sees why the result is being judged against prose instead of against a blueprint.
+        if (!spec.designBlueprint && !stop.reason) {
+          const why = `No design blueprint: 3 attempts did not produce a valid one${bpProblems.length ? ` (last: ${bpProblems.slice(0, 3).join("; ").slice(0, 300)})` : ""}. The design phase proceeds from the written design specification only, so the visual result cannot be checked against named layouts, exact colours or planned photography.`;
+          sessionNotes.push(why.slice(0, 500));
+          tracker.note({ kind: "note", message: why.slice(0, 500) });
+        }
+      }
     }
 
     // ── STAGE 3: the functional architecture, once the design is certified ───────────────────────────────────────
@@ -745,6 +856,30 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       writeFileSync(path.join(ws.repo, "SPEC.json"), JSON.stringify(spec, null, 2) + "\n");
       writeFileSync(path.join(ws.repo, "SPEC.md"), `# Master specification\n\n## Implementation prompt\n\n${spec.masterPrompt}\n\n## Acceptance criteria\n\n${(spec.acceptanceCriteria ?? []).map((a) => `- ${a.id}: ${a.text} (${a.verification})`).join("\n")}\n`);
     }
+    /**
+     * The Design Gallery references the runner fetched for this build, read back from disk (V5 §8).
+     *
+     * Read rather than remembered on purpose: the planning block that fetches them runs only when the build has
+     * no specification yet, and a resumed segment spends all of its time in the review loop below. Titles come
+     * from the platform's own selection on the job, so a file on disk is never given a title nobody sent.
+     */
+    const galleryOnDisk = (): { id: string; title: string; path: string }[] => {
+      const dir = path.join(ws!.dir, "gallery");
+      if (!existsSync(dir)) return [];
+      const titles = new Map((job.design?.references ?? []).map((r) => [r.id, r.title]));
+      const out: { id: string; title: string; path: string }[] = [];
+      try {
+        for (const f of readdirSync(dir).sort()) {
+          const m = /^(.+?)-(?:desktop|tablet|mobile)\.(?:png|jpg|webp)$/i.exec(f);
+          if (!m) continue;
+          const id = m[1];
+          if (out.some((x) => x.id === id)) continue;   // one variant per reference is enough for a comparison
+          out.push({ id, title: titles.get(id) ?? id, path: path.join(dir, f) });
+        }
+      } catch { return out; }
+      return out.slice(0, 6);
+    };
+
     const runOne = async (phase: Phase, previousNote: string | null, promptOverride: string | null, r: Route): Promise<PhaseResult | null> => {
       const remainingBudget = budgetCap - tracker.attemptCostUsd;
       const remainingTurns = turnCap - tracker.turns();
@@ -756,7 +891,64 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       routed.push(r);
       Object.assign(now, { activity: "gpu_running", model: r.model.tag, task: r.task });
       tracker.note({ kind: "step", message: `phase ${phase}: ${r.reason} (${r.model.tag})` });
-      const base = promptOverride ?? phasePrompt(job, phase, { starter: starterLabel, resumed: !!job.resume, previousNote, toolset, buildPhase, designFreeze: job.designFreeze ?? null, phasePlan: spec?.phasePlan ?? null });
+      let base = promptOverride ?? phasePrompt(job, phase, { starter: starterLabel, resumed: !!job.resume, previousNote, toolset, buildPhase, designFreeze: job.designFreeze ?? null, phasePlan: spec?.phasePlan ?? null, blueprint: spec?.designBlueprint ?? null });
+      // V5 §6: a REPAIR runs on the reviewer's prompt, which replaces the phase objective entirely -- so without
+      // this the approved blueprint was in the build prompt and absent from every repair after it, which is where
+      // the design actually gets decided. The repair is being asked to make the website match the blueprint; it
+      // has to be able to see the blueprint.
+      if (promptOverride && spec?.designBlueprint && (buildPhase === "design" || buildPhase === "design_locked")) {
+        base = `${base}\n\n${blueprintBrief(spec.designBlueprint)}`;
+      }
+      // ── Model B's eyes (V5 correction §1, §5) ───────────────────────────────────────────────────────────────
+      //
+      // The builder is shown the approved design reference and, on a repair, the page its own code renders --
+      // through its real production request, as actual image input, not as a description. Only in the phases
+      // where it changes anything visual: there is nothing for a planning or verification turn to compare.
+      //
+      // setVisualContext budgets against this model's live context and reports what it ACTUALLY carried; the
+      // manifest records that, and records anything dropped as dropped. "The builder saw the reference" is
+      // therefore a claim with a file and a sha256 behind it, or it is not made.
+      const visualPhase = (phase === "build" || phase === "repair") && (buildPhase === "design" || buildPhase === "design_locked");
+      if (provider!.setVisualContext && visualPhase) {
+        const refs = galleryOnDisk();
+        const shots = (() => {
+          const dir = path.join(ws!.repo, ".crestmont", "screenshots");
+          if (!existsSync(dir)) return [] as { page: string; viewport: string; path: string }[];
+          try {
+            return readdirSync(dir).filter((f) => /-(desktop|tablet|mobile)\.png$/.test(f)).map((f) => ({
+              page: f.replace(/-(desktop|tablet|mobile)\.png$/, ""),
+              viewport: /-desktop\.png$/.test(f) ? "desktop" : /-tablet\.png$/.test(f) ? "tablet" : "mobile",
+              path: path.join(dir, f),
+            }));
+          } catch { return [] as { page: string; viewport: string; path: string }[]; }
+        })();
+        // A bounded allowance, held well clear of the working context: §4 is explicit that fixing the vision
+        // problem must not recreate the context problem. Measured on Node 1, this buys a native-resolution
+        // reference concept (~780 tokens) and an above-the-fold desktop render (~1,580) inside one 65,536-token
+        // window that was previously resetting 55 times an attempt.
+        const budget = Math.max(1200, Math.floor(r.model.contextTokens * 0.08));
+        const plan = planBuilderVision({
+          phase: phase === "repair" ? "repair" : "build",
+          workDir: path.join(ws!.dir, "builder-vision"),
+          blueprint: spec?.designBlueprint ?? null,
+          references: refs,
+          screenshots: shots,
+          targetPage: null,
+          budgetTokens: budget,
+        });
+        const delivery = plan.images.length
+          ? provider!.setVisualContext({ images: plan.images, note: plan.note, maxImages: 3 })
+          : provider!.setVisualContext(null);
+        recordBuilderVision(manifest, plan, delivery.delivered, `${phase} phase (${buildPhase})`);
+        saveManifest(ws!.dir, manifest);
+        if (delivery.delivered.length) {
+          tracker.note({ kind: "step", message: `builder vision: ${delivery.delivered.length} image(s) in ${r.model.tag}'s context for this ${phase} — ${delivery.delivered.map((d) => `${d.label.split(" — ")[0]} (${d.tokens} tokens)`).join("; ")}` });
+        } else {
+          const why = [...delivery.dropped.map((d) => d.reason), ...plan.excluded.map((x) => x.reason)][0] ?? "no reference image or rendered screenshot was available";
+          tracker.note({ kind: "note", message: `builder vision: ${r.model.tag} was shown NO images for this ${phase} — ${why.slice(0, 300)}` });
+          sessionNotes.push(`The builder worked without visual input in the ${phase} phase: ${why.slice(0, 300)}`);
+        }
+      } else provider!.setVisualContext?.(null);
       begin(phase === "repair" ? "repair" : "phase", `${phase} (${r.model.tag})`);
       const res = await provider!.run({
         phase,
@@ -918,6 +1110,10 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     let bestPoints: PhasePoints | null = null;
     let bestCommit: string | null = null;
     let bestCard: Scorecard | null = null;
+    // Where the best revision's screenshots are kept for the next review (V5 §8), and the design points they
+    // represent. Outside the repository on purpose: see the copy below.
+    const bestShotsDir = path.join(ws.dir, "best-screenshots");
+    let bestShotsPoints: number | null = null;
     let regressions = 0;
     let idleCycles = 0;
     // Where the last cycle's usage stood, so each submission reports the delta this cycle actually spent. Deltas,
@@ -933,6 +1129,15 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     // was not reviewed again (the loop ended on its cycle limit), the review-based criteria have no evidence.
     let reviewCurrent = false;
     let lastEvidence: CycleEvidence | null = null;
+    // V5 §9 no-op protection. A repair is judged by what it CHANGED, measured, not by the loop having run it:
+    // the fingerprint of each cycle's rendering source and screenshots, so the cycle that edited nothing is not
+    // counted as a repair and the next prompt is told so. Measured on bld_10e2c6007686faee0ab64d45: nine repair
+    // cycles produced exactly one rendered change, and nothing in the loop noticed.
+    const fingerprints: CycleFingerprint[] = [];
+    let lastFingerprint: CycleFingerprint | null = null;
+    let lastEffect: CycleEffect | null = null;
+    let consecutiveNoops = 0;
+    let lastRepairTargets: string[] = [];
     let scoreNow: (verdict: ReviewVerdict | null, previewDeployed: boolean | null, iteration: number) => Scorecard = () => { throw new Error("scorecard before acceptance"); };
     let weighNow: (card: Scorecard, verdict: ReviewVerdict | null, revision: string | null) => Scorecard2 = () => { throw new Error("weighted scorecard before acceptance"); };
     if (!stop.reason && !st.localLimit && !st.agentError) {
@@ -972,6 +1177,13 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         visualRubric: verdict?.visualRubric ?? null,
         review: verdict?.reviewer ? { reviewer: verdict.reviewer, imagesSeen: verdict.imagesSeen ?? 0, vision: !!verdict.vision } : null,
         requiresImagery: imageryRequired,
+        // V5 §7: photography is a separate requirement, decided from the intake, the approved design specification
+        // and -- authoritatively, where one exists -- the blueprint actually planning a photographic asset.
+        requiresPhotography: requiresPhotography({
+          imagesSource: job.brief.content.customerData.content?.imagesSource ?? null,
+          designSpec: spec?.designSpec ?? null,
+          blueprintPhotographs: (spec?.designBlueprint?.visualAssets ?? []).filter((a) => a.kind === "photograph").length,
+        }),
         browserOk: checks.find((c) => c.id === "browser-check")?.ok ?? null,
       });
       let promptUsed = spec?.masterPrompt ?? "Runner build phases (plan, build, verify) from BRIEF.md";
@@ -1018,7 +1230,25 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         let reviewerName = reviewer.name;
         // The reviewer is told which phase it is judging, and is given the browser's own visual measurements, so a
         // design-phase review does not fail a build for the backend work the architecture told it to defer.
-        const reviewCtx = { phase: buildPhase, visual: readVisualMeasurements(ws.repo) };
+        // V5 §8: the reviewer is given the standard it is judging against, not just the thing being judged -- the
+        // approved blueprint, the Design Gallery references Crestmont chose, and the best state this website has
+        // reached. Each image is labelled for what it is inside the adapter, so a reference can never be scored
+        // as the deliverable.
+        const bestShot = (() => {
+          if (bestShotsPoints === null || !existsSync(bestShotsDir)) return null;
+          try {
+            const f = readdirSync(bestShotsDir).filter((n) => /-desktop\.png$/.test(n)).sort()[0];
+            if (!f) return null;
+            return { path: path.join(bestShotsDir, f), label: `${f.replace(/-desktop\.png$/, "")} (desktop)`, designPoints: bestShotsPoints };
+          } catch { return null; }
+        })();
+        const reviewCtx = {
+          phase: buildPhase,
+          visual: readVisualMeasurements(ws.repo),
+          blueprint: spec?.designBlueprint ?? null,
+          references: galleryOnDisk(),
+          previousBest: bestShot,
+        };
         try { verdict = await reviewer.review(spec, evidence, cycle, reviewCtx); }
         catch (err) {
           if (stop.reason) break;
@@ -1026,6 +1256,22 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           reviewerName = "deterministic";
           verdict = await new DeterministicReviewer().review(spec, evidence, cycle, reviewCtx);
         }
+        // V5 correction §3: which images the reviewer actually saw. A gallery reference it was shown is a
+        // delivery; one the budget dropped is an exclusion. Screenshots are indexed too, so "the reviewer judged
+        // this revision" names the exact files it judged.
+        for (const img of ((reviewer as { lastReviewImages?: { path: string; label: string }[] }).lastReviewImages ?? [])) {
+          const ref = galleryOnDisk().find((g) => g.path === img.path);
+          const f = imageFacts(img.path);
+          if (ref) {
+            recordDelivery(manifest, ref.id, { to: "reviewer", sentPath: img.path, sentSha256: sha256File(img.path), width: f?.width ?? 0, height: f?.height ?? 0, tokens: f?.tokens ?? 0, operation: "none", note: "the original gallery file, sent unchanged", context: `review cycle ${cycle}` });
+            continue;
+          }
+          const base = path.basename(img.path, ".png");
+          const id = `render:${base.replace(/-(desktop|tablet|mobile)$/, "")}:${/-desktop$/.test(base) ? "desktop" : /-tablet$/.test(base) ? "tablet" : "mobile"}`;
+          upsert(manifest, { id, kind: "rendered_screenshot", title: base, originalPath: img.path, originalSha256: sha256File(img.path), originalWidth: f?.width ?? null, originalHeight: f?.height ?? null, sourceCommit: await headCommit(git!), viewport: /-desktop$/.test(base) ? "desktop" : /-tablet$/.test(base) ? "tablet" : "mobile", publishable: true });
+          recordDelivery(manifest, id, { to: "reviewer", sentPath: img.path, sentSha256: sha256File(img.path), width: f?.width ?? 0, height: f?.height ?? 0, tokens: f?.tokens ?? 0, operation: "none", note: "the rendered screenshot, sent unchanged", context: `review cycle ${cycle}` });
+        }
+        saveManifest(ws.dir, manifest);
         // Quality scorecard (every build, every iteration). The flat card is the evidence engine; the weighted card
         // is what the phase machine, the ratchet and the Founder's dashboard read.
         let card = scoreNow(verdict, null, cycle);
@@ -1034,7 +1280,29 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         // now reached it. Without this, the cycle that earns the last typography point while losing the same amount
         // on imagery is indistinguishable from a cycle that did nothing, and the idle guard stops a converging
         // build. `milestone` (segment-wide) is deliberately not reused here: it never resets.
-        const cycleMilestone = completedRubricItem(lastWeighted, weighted);
+        // ── V5 §9: did the previous repair change the website? ──────────────────────────────────────────────────
+        // Measured, not assumed: the rendering source hash and every screenshot's hash, compared with the state
+        // before the repair. A cycle that changed neither is INEFFECTIVE -- it does not earn a milestone, it does
+        // not reset the idle guard, and the next repair prompt is told the fact instead of being asked again in
+        // the same words. Source is hashed from the files themselves because every cycle commits its evidence, so
+        // the commit hash always differs and proves nothing.
+        const fp = fingerprintCycle({ repo: ws.repo, cycle, commit: await headCommit(git!), targeted: lastRepairTargets, visualPoints: weighted.design.points });
+        const effect = classifyEffect(lastFingerprint, fp, fingerprints);
+        fingerprints.push(fp);
+        lastFingerprint = fp;
+        lastEffect = effect;
+        if (effect.verdict === "ineffective") {
+          consecutiveNoops++;
+          tracker.note({ kind: "note", message: `ineffective repair cycle (${consecutiveNoops} in a row): ${effect.reason}` });
+          sessionNotes.push(`Cycle ${cycle}: ${effect.reason}. It is not counted as a visual repair.`);
+        } else {
+          if (effect.verdict === "effective") tracker.note({ kind: "note", message: effect.reason });
+          consecutiveNoops = 0;
+        }
+        // A rubric item that reached its maximum is progress only if the cycle actually changed the website: a
+        // no-op cycle whose number moved because the reviewer judged the SAME pages differently is reviewer
+        // variance, and treating it as progress is what let the idle guard sit through nine empty cycles.
+        const cycleMilestone = completedRubricItem(lastWeighted, weighted) && effect.verdict !== "ineffective";
         // Whether the ratchet rolled this cycle back, for the snapshot the Founder will inspect.
         let revertedThisCycle = false;
         let revertNote: string | null = null;
@@ -1055,7 +1323,23 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
             safetyBlockers: evidence.securityFindings.slice(0, 5),
           });
           tracker.note({ kind: "note", message: `ratchet (cycle ${cycle}, phase ${buildPhase}): ${d.action} — ${d.reason}` });
-          if (d.action === "record-best") { bestPoints = points; bestCard = card; bestCommit = here; regressions = 0; idleCycles = 0; }
+          if (d.action === "record-best") {
+          bestPoints = points; bestCard = card; bestCommit = here; regressions = 0; idleCycles = 0;
+          // V5 §8: a copy of the best state's own screenshots, so the next review can be shown "this is the best
+          // this website has looked" and say whether the cycle improved on it. Best-effort: a comparison the
+          // reviewer cannot be given is not a reason to lose the best revision.
+          try {
+            const from = path.join(ws!.repo, ".crestmont", "screenshots");
+            if (existsSync(from)) {
+              mkdirSync(bestShotsDir, { recursive: true });
+              for (const f of readdirSync(bestShotsDir)) { try { rmSync(path.join(bestShotsDir, f)); } catch { /* replaced below */ } }
+              for (const f of readdirSync(from).filter((n) => /-(desktop|mobile)\.png$/.test(n)).slice(0, 12)) {
+                copyFileSync(path.join(from, f), path.join(bestShotsDir, f));
+              }
+              bestShotsPoints = cat ? bestPoints[cat] : null;
+            }
+          } catch (err) { log.warn("best-revision screenshots not kept", { jobId: job.id, error: errorMessage(err) }); }
+        }
           else if (d.action === "keep") { idleCycles = cycleMilestone ? 0 : idleCycles + 1; }
           else if (d.action === "repair-frozen") {
             // The functional work is deliberately KEPT: reverting would also revert the change that broke the
@@ -1153,7 +1437,7 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         }
         if (res && typeof res.designFrozen === "boolean") designFrozen = res.designFrozen;
         if (res?.phaseBlockers?.length) tracker.note({ kind: "note", message: `phase ${buildPhase} continues: ${res.phaseBlockers.slice(0, 3).join("; ")}` });
-        await snapshot(cycle, "repair", { score: weighted.overall, decision: verdict.decision, isBest: bestCard === card, reverted: revertedThisCycle, revertedReason: revertNote });
+        await snapshot(cycle, "repair", { score: weighted.overall, decision: verdict.decision, isBest: bestCard === card, reverted: revertedThisCycle, revertedReason: revertNote, effect: effect.verdict, effectReason: effect.reason });
         // Older platform without the orchestration endpoints: the earlier behaviour (one repair round when checks failed).
         const decision = res ?? { cycle, decision: verdict.decision, reason: "local", continue: cycle === 1 && checks.some((c) => !c.ok), prompt: verdict.nextPrompt };
         tracker.note({ kind: "step", message: `cycle ${cycle}: ${decision.decision}${res ? "" : " (platform without orchestration endpoints)"}` });
@@ -1170,15 +1454,37 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
           st.terminal = true;
           break;
         }
+        // V5 §9: cycles that measurably change nothing are bounded too. The per-item guard above counts repairs
+        // AIMED at a defect; this one counts repairs that had no EFFECT, which is a different failure and the one
+        // actually observed -- bld_10e2c6007686faee0ab64d45 ran nine repair cycles and changed one screenshot.
+        // Two in a row escalate to the stronger model (the weaker one has demonstrated it cannot reach the page);
+        // four end the loop for a person, because a loop with no measurable effect cannot converge by repeating.
+        const noop = noopVerdict(consecutiveNoops);
+        if (noop === "stop") {
+          st.agentError = `Repair loop had no measurable effect: ${consecutiveNoops} cycles in a row changed neither the rendering source nor a single rendered pixel. ${lastEffect?.reason ?? ""} Escalated for a person instead of spending more GPU time on cycles that change nothing.`.slice(0, 600);
+          st.terminal = true;
+          sessionNotes.push(st.agentError);
+          tracker.note({ kind: "note", message: st.agentError });
+          break;
+        }
         // D. Corrective prompt → routed: ordinary defects to Model B; repeated, architectural or integration-heavy to A.
         // Consecutive cycles with this same outstanding set, across segments (project memory).
         let repeats = 0;
         if (memory && open.length) for (let i = memory.cycles.length - 1; i >= 0 && memory.cycles[i].defect === memory.cycles.at(-1)!.defect; i--) repeats++;
         else repeats = 1;
-        const rt = repairTask({ outstanding: open, sameFailureRepeats: repeats, findings: verdict.findings, escalateAfterRepeats: cfg.routing.escalateAfterRepeats });
-        cycleRoute = route(rt.task, models, rt.reason);
+        // A repair that changed nothing is treated as a repeat for routing purposes even when the defect list moved:
+        // the model that produced it has demonstrated it cannot reach the page it was asked to change.
+        const effRepeats = noop === "escalate" ? Math.max(repeats, cfg.routing.escalateAfterRepeats) : repeats;
+        const rt = repairTask({ outstanding: open, sameFailureRepeats: effRepeats, findings: verdict.findings, escalateAfterRepeats: cfg.routing.escalateAfterRepeats });
+        cycleRoute = route(rt.task, models, noop === "escalate" ? `${rt.reason}; ${consecutiveNoops} repair cycles with no measurable effect` : rt.reason);
         cycleBase = await headCommit(git!);
         promptUsed = decision.prompt ?? "Repair: fix the failing checks listed in .crestmont/runner-checks.json.";
+        // The builder is told the OBSERVED FACT about its previous repair, not asked the same thing again in the
+        // same words. Without this the loop re-sent a prompt the model had already satisfied in its own view, and
+        // the model had no way to learn that its edit never reached the rendered page.
+        const feedback = ineffectiveFeedback(lastEffect, { consecutive: consecutiveNoops, targeted: open.slice(0, 8) });
+        if (feedback) promptUsed = `${feedback}\n\n${promptUsed}`;
+        lastRepairTargets = open.slice(0, 40);
         promptSource = "reviewer";
         // Without the orchestration endpoints the classic repair prompt is used (runner-checks.json); otherwise the reviewer's prompt.
         if (memory) remember.repair(memory, rec.open, { cycle, model: cycleRoute.model.tag, task: cycleRoute.task, commitBefore: cycleBase });

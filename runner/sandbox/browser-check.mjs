@@ -188,6 +188,41 @@ async function main() {
               return s.display !== "none" && s.visibility !== "hidden" && Number(s.opacity) !== 0 && r.width > 2 && r.height > 2; };
             const imgs = [...document.querySelectorAll("img, picture source, [style*='background-image']")].filter((e) => e.tagName !== "IMG" || vis(e));
             const decorative = [...document.querySelectorAll("img")].filter((e) => vis(e) && (e.naturalWidth <= 48 || e.naturalHeight <= 48)).length;
+            // Authored vector artwork, counted SEPARATELY from raster imagery.
+            //
+            // bld_10e2c6007686faee0ab64d45 shipped 24 inline <svg> illustrations (a delivery truck, a service-area
+            // map, service icons) and still measured contentImages 0, because this query only matched <img>,
+            // <picture source> and CSS background-image. The design-phase prompt had told the builder that authored
+            // SVG counts, so it did exactly as instructed and was then capped for having "no imagery".
+            //
+            // They are two different facts and stay two different numbers: `vectorArt` proves the page is not
+            // empty of visual content, while `contentImages` remains the raster/photography measure. An
+            // illustration is not a photograph, and the rubric scores them differently.
+            const vectorArt = [...document.querySelectorAll("svg")].filter((e) => {
+              if (!vis(e)) return false;
+              const r = e.getBoundingClientRect();
+              return r.width > 48 && r.height > 48;          // icon-sized vectors are decoration, not artwork
+            }).length;
+            // RASTER imagery: the only thing that can actually BE a photograph (V5 §7).
+            //
+            // contentImages counts <img>, <picture source> and CSS background-image alike, so <img src="hero.svg">
+            // counted as content imagery and satisfied a photography requirement with a drawing. A photograph has
+            // a raster source and real intrinsic pixels, and that is what is measured here: an SVG source, a data
+            // URI of an SVG, or an element with no intrinsic dimensions is not one. This never penalises authored
+            // artwork -- it is counted in vectorArt and scored as the illustration it is.
+            const rasterish = (u) => !!u && !/\.svg(?:[?#]|$)/i.test(u) && !/^data:image\/svg\+xml/i.test(u);
+            const photoImages = [...document.querySelectorAll("img")].filter((e) => {
+              if (!vis(e)) return false;
+              if (e.naturalWidth <= 48 || e.naturalHeight <= 48) return false;   // an icon is not a photograph
+              return rasterish(e.currentSrc || e.src);
+            }).length
+              + [...document.querySelectorAll("[style*='background-image']")].filter((e) => {
+                if (!vis(e)) return false;
+                const r = e.getBoundingClientRect();
+                if (r.width <= 96 || r.height <= 96) return false;               // a textured strip is not a photograph
+                const m = /url\((['"]?)([^'")]+)\1\)/i.exec(getComputedStyle(e).backgroundImage || "");
+                return rasterish(m?.[2] ?? "");
+              }).length;
             // Clipping: a block whose own content is taller/wider than its box with overflow hidden.
             const clipped = [...document.querySelectorAll("section, article, .card, .hero, header, footer, main div")].filter((e) => {
               if (!vis(e)) return false;
@@ -213,7 +248,7 @@ async function main() {
             // Did any stylesheet apply at all? An unstyled page is the hardest visual failure there is.
             const body = getComputedStyle(document.body);
             return {
-              images: imgs.length, contentImages: imgs.length - decorative, clipped, overlaps, placeholders,
+              images: imgs.length, contentImages: imgs.length - decorative, photoImages, vectorArt, clipped, overlaps, placeholders,
               styleSheets: document.styleSheets.length,
               bodyFont: body.fontFamily, defaultFont: /^\s*(?:Times New Roman|serif)\s*$/i.test(body.fontFamily),
               headings: document.querySelectorAll("h1").length,

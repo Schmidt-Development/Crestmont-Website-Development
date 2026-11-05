@@ -340,6 +340,7 @@ ${emptyState("No revision stored yet", active
  The generated <strong>backend is not deployed here</strong>, so forms will not submit in this frame — what the backend
  actually does is evidenced by the runner's gates and persistence check on the build record.</p>
 ${current.reverted ? alert("warn", html`<strong>This revision was rolled back by the repair ratchet.</strong> ${current.reverted_reason ?? ""}`) : ""}
+${current.effect === "ineffective" ? alert("warn", html`<strong>This repair cycle changed nothing a visitor can see.</strong> ${current.effect_reason ?? ""}`) : ""}
 ${current.is_best ? alert("success", "This is the best verified revision the build reached in its phase.") : ""}
 ${current.is_design_baseline ? alert("success", "This snapshot is the FROZEN DESIGN BASELINE: the authoritative visual result all later functional work must preserve.") : ""}
 ${current.design_points !== null ? html`<p class="row">${badge(catTone(current.design_points, 40), `Design ${pts(current.design_points, 40)}`)}
@@ -379,6 +380,13 @@ ${table(revisions, [
   // A rolled-back revision carries its reason here, not only when it happens to be the one on screen: "show why the
   // repair was rejected" is the whole point of keeping it.
   { header: "State", cell: (x) => html`${x.is_design_baseline ? badge("ok", "Frozen design baseline") : ""} ${x.is_best ? badge("ok", "Best verified") : ""} ${x.reverted ? badge("bad", "Rolled back") : ""}${!x.is_best && !x.reverted && !x.is_design_baseline ? badge("muted", "Superseded") : ""}${x.reverted && x.reverted_reason ? html`<br><span class="faint">${x.reverted_reason}</span>` : ""}` },
+  // 0078: whether the cycle changed the website at all, measured by comparing the rendering source hash and every
+  // screenshot hash with the previous cycle. "Not measured" is shown for revisions stored before the comparison
+  // existed, because nine of them were listed as repairs when eight changed no rendered pixel.
+  { header: "Changed the site", cell: (x) => x.effect === null ? badge("muted", "Not measured")
+    : x.effect === "ineffective" ? html`${badge("bad", "No visible change")}${x.effect_reason ? html`<br><span class="faint">${x.effect_reason}</span>` : ""}`
+    : x.effect === "unknown" ? html`${badge("muted", "Not comparable")}${x.effect_reason ? html`<br><span class="faint">${x.effect_reason}</span>` : ""}`
+    : html`${badge("ok", "Changed")}${x.effect_reason ? html`<br><span class="faint">${x.effect_reason}</span>` : ""}` },
   { header: "Files", cell: (x) => `${x.file_count} (${Math.round(x.total_bytes / 1024)} KB)` },
   { header: "", cell: (x) => html`${revKey(x) === revKey(current) ? badge("info", "Shown") : linkButton("Inspect", `/staff/builds/${j.id}/inspect?rev=${revKey(x)}&vp=${vp}`, "ghost", "sm")}
  ${revKey(x) === revKey(current) ? "" : linkButton("Compare", `/staff/builds/${j.id}/inspect?rev=${revKey(current)}&vp=${vp}&cmp=${revKey(x)}`, "ghost", "sm")}` },

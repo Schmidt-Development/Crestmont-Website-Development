@@ -166,6 +166,16 @@ export interface VisionPlan {
  * Callers pass images in priority order and get back those that fit the budget, with every exclusion explained. An
  * image that is unreadable, oversized or of an unknown format is refused here rather than sent mislabelled.
  */
+/**
+ * Tokens held back for ONE corrective retry.
+ *
+ * A rejection is answered by appending the reason to the request, so a request budgeted to the last token
+ * overflows on the retry rather than on the attempt -- which is exactly what happened on
+ * bld_889ff809c133920c929a7121 (49,186 tokens against a 49,152-token window, after a corrective retry appended
+ * text to a request that was already full).
+ */
+export const VISION_RETRY_RESERVE = 2048;
+
 export function planVisionRequest(
   candidates: readonly { path: string; label: string }[],
   budget: VisionBudget,

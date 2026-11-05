@@ -155,6 +155,9 @@ const deps = (r: Rig): JobDeps => ({
   dockerExecutor: r.docker.executor,
 });
 const isArchitect = (r: FakeModelRequest) => /website architect session/.test(String(r.messages[0]?.content ?? ""));
+/** The blueprint stage identifies itself in its own first line; everything else from the architect is stage 1 or 3. */
+const isBlueprint = (r: FakeModelRequest) => isArchitect(r) && /Your job now is the DESIGN BLUEPRINT/.test(r.messages.map((m) => String(m.content ?? "")).join("\n"));
+const isDesignSpec = (r: FakeModelRequest) => isArchitect(r) && !isBlueprint(r);
 const call = (name: string, args: Record<string, unknown>): FakeModelReply => ({ toolCalls: [{ name, arguments: args }] });
 /** Runner instructions the builder was actually given (one per scheduled phase). */
 const builderInstructions = (m: FakeModel): string[] => {
@@ -223,8 +226,11 @@ test("[AIB-PLAN] malformed output gets a bounded corrective retry: the problems 
     const spec = JSON.parse(readFileSync(path.join(repo, "SPEC.json"), "utf8"));
     assert.equal(spec.phasePlan.designDeliverables.length, 3);
     assert.ok(r.cp.calls.some((c) => c.path.endsWith("/pipeline/spec")), "the specification was sent to the platform");
-    // Exactly one architect session beyond the corrective retry: planning is bounded, not an open loop.
-    assert.ok(r.model.requests.filter(isArchitect).length <= 3, "planning is bounded");
+    // Planning is bounded, not an open loop -- per STAGE. The design specification took two attempts (one
+    // rejection, one corrected); the blueprint stage that follows it has its own bound of three, and a blueprint
+    // that never validates must not be retried forever either.
+    assert.ok(r.model.requests.filter(isDesignSpec).length <= 3, "the design specification stage is bounded");
+    assert.ok(r.model.requests.filter(isBlueprint).length <= 3, "the blueprint stage is bounded");
   } finally { await r.model.close(); await r.cp.close(); }
 });
 

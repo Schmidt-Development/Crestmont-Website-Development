@@ -375,3 +375,71 @@ test("[QUALITY-W] scoreVisual rounds down and never rounds its way up to a thres
   assert.equal(nearly.points, 39.5, "39.5 stays 39.5; it does not become 40");
   assert.equal(nearly.state, "scored");
 });
+
+// ── Imagery: vector artwork is visual content, but it is not photography ──
+//
+// bld_10e2c6007686faee0ab64d45 shipped 24 inline SVG illustrations (a delivery truck, a service-area map, service
+// icons) and was still capped at 24/40 for "the approved design requires imagery and the website has none",
+// because the browser check counted only <img>, <picture source> and CSS background-image. The design-phase prompt
+// had explicitly told the builder that authored SVG counts.
+
+const vm = (over: Record<string, unknown> = {}) => ({
+  page: "index.html", viewport: "desktop", images: 0, contentImages: 0, vectorArt: 0,
+  clipped: 0, overlaps: 0, placeholders: 0, styleSheets: 3, bodyFont: "Inter", defaultFont: false, headings: 1,
+  nav: { hasNav: true, visibleLinks: 5, toggleVisible: false, chrome: true, navLike: "site-nav", stacked: false, navDirection: "row" },
+  screenshot: "s.png", ...over,
+});
+
+test("[QUALITY-W] REGRESSION: authored vector artwork is not \"no imagery\" — the hard cap does not fire", () => {
+  const withSvg = measuredVisualFailures({
+    visual: { viewports: ["desktop", "tablet", "mobile"], measurements: [vm({ vectorArt: 9 })] } as never,
+    viewports: ["desktop", "tablet", "mobile"], browserOk: true, requiresImagery: true, review: null,
+  });
+  assert.ok(!withSvg.includes("imagery"), `illustrations are visual content: ${JSON.stringify(withSvg)}`);
+
+  // A page with neither photographs nor artwork genuinely has none, and is still capped.
+  const empty = measuredVisualFailures({
+    visual: { viewports: ["desktop", "tablet", "mobile"], measurements: [vm()] } as never,
+    viewports: ["desktop", "tablet", "mobile"], browserOk: true, requiresImagery: true, review: null,
+  });
+  assert.ok(empty.includes("imagery"), "a page with no visual content at all is still capped");
+});
+
+test("[QUALITY-W] an illustration does not earn full imagery credit when the brief calls for photography", () => {
+  const rubric = VISUAL_RUBRIC.map((i) => ({ id: i.id, points: i.max, note: null }));
+  const opts = { reviewer: "local:model-a", vision: true, imagesSeen: 3, viewports: [...REQUIRED_VIEWPORTS] };
+
+  // Photography required, none present: the imagery ITEM is held to half marks and the shortfall is named.
+  const held = scoreVisual(rubric as never, [], { ...opts, photographyRequired: true, hasPhotography: false });
+  const item = held.items.find((i) => i.id === "imagery")!;
+  assert.equal(item.points, 3, `imagery held at half of ${item.max}: got ${item.points}`);
+  assert.match(String(item.note), /calls for photography and the rendered pages carry none/);
+  // It is a deduction on one item, NOT a category cap: the rest of the design still scores.
+  assert.ok(held.points > 24, `not capped at the old imagery cap: got ${held.points}`);
+
+  // With real photography the item scores normally.
+  const full = scoreVisual(rubric as never, [], { ...opts, photographyRequired: true, hasPhotography: true });
+  assert.equal(full.items.find((i) => i.id === "imagery")!.points, 6);
+  // And a brief that never asked for photography is not penalised for its absence.
+  const noReq = scoreVisual(rubric as never, [], { ...opts, photographyRequired: false, hasPhotography: false });
+  assert.equal(noReq.items.find((i) => i.id === "imagery")!.points, 6);
+});
+
+test("[QUALITY-W] navigation is judged from the measured navigation, not from an unrelated check failure", () => {
+  // All approved pages measure a horizontal five-link bar: there is no navigation failure, whatever else failed.
+  const clean = measuredVisualFailures({
+    visual: { viewports: ["desktop", "tablet", "mobile"], measurements: [vm({ vectorArt: 4 })] } as never,
+    viewports: ["desktop", "tablet", "mobile"], browserOk: false, requiresImagery: true,
+    review: { imagesSeen: 3, vision: true },
+  });
+  assert.ok(!clean.includes("navigation"), `no navigation claim from a clean nav measurement: ${JSON.stringify(clean)}`);
+  assert.ok(clean.includes("overflow"), "the unattributed-layout failure is recorded instead");
+
+  // A genuinely stacked desktop nav IS a navigation failure.
+  const stacked = measuredVisualFailures({
+    visual: { viewports: ["desktop"], measurements: [vm({ vectorArt: 4, nav: { hasNav: true, visibleLinks: 5, toggleVisible: false, chrome: true, navLike: "n", stacked: true, navDirection: "column" } })] } as never,
+    viewports: ["desktop"], browserOk: false, requiresImagery: true,
+    review: { imagesSeen: 3, vision: true },
+  });
+  assert.ok(stacked.includes("navigation"), "a real stacked navigation is still caught");
+});
