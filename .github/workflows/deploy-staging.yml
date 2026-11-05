@@ -453,6 +453,27 @@ jobs:
 
       # Public staging (2026-10-28): a fresh visitor with NO cookies sees the website; protected areas still refuse
       # anonymous visitors; every response is noindex and robots.txt disallows all. No credential is used here.
+      # When a module answers 500 the verifier can only report the status code, which is not enough to fix
+      # anything: deploys #144 and #145 failed with six modules at 500 and no way to tell why without opening
+      # the Owner's error log by hand. The exception is already stored — redacted at write time by
+      # recordAppError — so read it back here and put it in the log. Read-only, and only on a failure.
+      - name: Why did a module fail? (recent application errors, already redacted)
+        if: always() && steps.verify.outcome == 'failure'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          $WRANGLER d1 execute crestmont-staging --remote --env staging --json --command \
+            "SELECT path, status, message, substr(COALESCE(stack,''), 1, 400) AS stack, created_at FROM app_errors WHERE created_at > datetime('now','-30 minutes') ORDER BY id DESC LIMIT 20" > app-errors.json 2>/dev/null || { echo "::warning::Could not read the staging error log."; exit 0; }
+          node -e '
+            const rows = (JSON.parse(require("fs").readFileSync("app-errors.json","utf8"))[0]?.results) ?? [];
+            if (!rows.length) { console.log("::warning title=No application errors::The failing pages recorded nothing in app_errors in the last 30 minutes, so the failure is probably not an unhandled exception."); process.exit(0); }
+            const e = (v) => String(v).replace(/%/g,"%25").replace(/\r/g,"%0D").replace(/\n/g,"%0A");
+            for (const r of rows) console.log(`::error title=Staging ${r.status} ${r.path}::${e(r.message)} | ${e(r.stack ?? "")}`);
+          '
+          rm -f app-errors.json
+
       - name: Smoke checks on the public site (fresh visitor, no cookies)
         id: smoke
         env:
