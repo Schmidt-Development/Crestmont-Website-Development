@@ -142,3 +142,48 @@ test("[INFRA-006] a real batched write still works end to end through the wrappe
     assert.deepEqual(rows.map((r) => [r.key, r.value]), [["retry.probe.a", "1"], ["retry.probe.b", "2"]]);
   } finally { (inner as unknown as { raw: { close(): void } }).raw.close(); }
 });
+
+test("[INFRA-006] when the error log itself cannot be written, the loss is reported, not swallowed", async () => {
+  // recordAppError writes to D1 and used to swallow its own failure entirely. A D1 fault therefore took out
+  // the INSERT and the record of the original error together — which is what deploys #150 to #152 ran into:
+  // four Owner modules answered 500 and app_errors held nothing for them, so the deploy's error-log step
+  // reported "no application errors" and the pages read as healthy.
+  const { recordAppError } = await import("../src/services/monitoring.ts");
+  const dead: Db = {
+    prepare: () => ({ bind: () => ({ run: async () => { throw new Error(D1_INTERNAL); } }) }) as unknown as DbStatement,
+    batch: async () => [],
+  };
+  const lines: string[] = [];
+  const realError = console.error;
+  console.error = (m?: unknown) => { lines.push(String(m)); };
+  try {
+    // It must still not throw: a failing error log cannot be allowed to replace the real response.
+    await recordAppError(dead, { path: "/staff/security", message: "original failure", stack: "at x", environment: "staging" });
+  } finally { console.error = realError; }
+
+  assert.equal(lines.length, 1, "exactly one line, not a stack-trace storm");
+  const logged = JSON.parse(lines[0]) as { message: string; reason: string; path: string; original: string };
+  assert.match(logged.message, /app_errors write failed/);
+  assert.match(logged.reason, /D1_ERROR: internal error/, "why the record was lost");
+  assert.equal(logged.path, "/staff/security");
+  assert.equal(logged.original, "original failure", "and what was lost");
+});
+
+test("[SEC-007] the lost-record line is redacted like every other stored error", async () => {
+  // It carries the original message, so it goes through the same redaction: a line in the Worker log is as
+  // readable as a row in app_errors.
+  const { recordAppError } = await import("../src/services/monitoring.ts");
+  const dead: Db = {
+    prepare: () => ({ bind: () => ({ run: async () => { throw new Error(D1_INTERNAL); } }) }) as unknown as DbStatement,
+    batch: async () => [],
+  };
+  const lines: string[] = [];
+  const realError = console.error;
+  console.error = (m?: unknown) => { lines.push(String(m)); };
+  try {
+    await recordAppError(dead, { path: "/api/webhooks/stripe", message: "refused key sk_test_abcdef0123456789 for dana@example.com", environment: "staging" });
+  } finally { console.error = realError; }
+  const logged = JSON.parse(lines[0]) as { original: string };
+  assert.ok(!logged.original.includes("sk_test_abcdef0123456789"), "the key is redacted");
+  assert.match(logged.original, /sk_test_\[redacted\]/);
+});

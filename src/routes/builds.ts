@@ -1,6 +1,7 @@
 // AI Builds — runner API (signed), owner dashboard ("AI builds"), JSON contract for the frontend session,
 // and the customer-facing summary. Contract: docs/ai-builds/FRONTEND-CONTRACT.md, protocol: RUNNER-PROTOCOL.md.
 import type { Router } from "../lib/router.ts";
+import * as MS from "../services/malware-scan.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatDateTime, type SafeHtml } from "../lib/html.ts";
 import { HttpError, jsonResponse, redirect, str } from "../app/http.ts";
@@ -161,6 +162,20 @@ export function register(r: Router): void {
   r.post(`${RUNNER}/previews/deleted`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.reportPreviewDeleted(ctx.db, await runnerBody(ctx)))));
   // Node 1 diagnostic: runner-side checkpoints D07–D11 (lease-token authenticated, migration 0050).
   r.post(`${RUNNER}/ai/checkpoint`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await DX.recordRunnerCheckpoint(ctx.db, await runnerBody(ctx)))));
+
+  // SEC-03: the malware scanner's queue. recordScanResult and filesAwaitingScan were complete and tested and
+  // reachable from nothing, so a scanner on Node 1 could not have pulled work or reported a verdict. Same
+  // signed surface as every other runner call, and Node 1 already holds BUILD_RUNNER_SECRET.
+  r.post(`${RUNNER}/scan/queue`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await MS.scanQueue(ctx.db, Number(b.limit ?? 25))); }));
+  r.post(`${RUNNER}/scan/file`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await MS.scanFileBytes(ctx.db, ctx.storage, await runnerBody(ctx)))));
+  r.post(`${RUNNER}/scan/result`, runnerRoute(async (ctx) => {
+    const b = await runnerBody(ctx);
+    return jsonResponse(ctx, 200, await MS.recordScanResult(ctx.db, {
+      fileId: String(b.fileId ?? ""), verdict: b.verdict as MS.ScanVerdict, engine: String(b.engine ?? ""),
+      scannedSha256: String(b.scannedSha256 ?? ""), signature: typeof b.signature === "string" ? b.signature : null,
+      detail: typeof b.detail === "string" ? b.detail : null, scannedAt: typeof b.scannedAt === "string" ? b.scannedAt : undefined,
+    }));
+  }));
   r.post(`${RUNNER}/requirements`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.reportRequirements(ctx.db, await runnerBody(ctx)))));
   r.post(`${RUNNER}/files`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.runnerFile(ctx.db, ctx.storage, await runnerBody(ctx)))));
   r.post(`${RUNNER}/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await B.completeJob(ctx.db, await runnerBody(ctx), (j, to) => notifyStaff(ctx, j, to), { previewHosts: B.previewHostList(ctx.env.BUILD_PREVIEW_HOSTS) }))));

@@ -191,24 +191,55 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -uo pipefail
-          n_of() { $WRANGLER d1 execute crestmont-staging --env staging --remote --json --command "$1" > q.json 2>q.err \
-            || { sed -e 's/\x1b\[[0-9;]*m//g' q.err | tail -3; return 1; }; sed -n '/^\[/,$p' q.json | grep -oE '"n": *[0-9]+' | head -1 | tr -dc '0-9'; }
+          # "A query that did not answer" and "the schema is wrong" are different things, and this step used to
+          # report both as "is missing after migrations". Deploy #152 failed with
+          #   build_quality.schema_version is missing after migrations
+          # while the other nine columns of the same group were present, migration 0076 demonstrably adds it,
+          # and the identical check had passed on this database in deploys #150 and #151. Cloudflare was
+          # returning intermittent D1 internal errors that hour (seven in 90 minutes, each with a reference
+          # id). An unparsable reply became an empty string became "missing".
+          #
+          # So n_of now retries, and FAILS LOUDLY rather than returning nothing: the caller can tell the two
+          # apart and say which it is. The deploy still stops either way — an unverifiable schema is not a
+          # pass — but it stops with the right diagnosis.
+          n_of() {
+            local sql="$1" attempt out
+            for attempt in 1 2 3; do
+              if $WRANGLER d1 execute crestmont-staging --env staging --remote --json --command "$sql" > q.json 2>q.err; then
+                out=$(sed -n '/^\[/,$p' q.json | grep -oE '"n": *[0-9]+' | head -1 | tr -dc '0-9')
+                if [ -n "$out" ]; then printf '%s' "$out"; return 0; fi
+                echo "  attempt $attempt: no count in the reply: $(tr -d '\n' < q.json | tail -c 200)" >&2
+              else
+                echo "  attempt $attempt: $(sed -e 's/\x1b\[[0-9;]*m//g' q.err | tr '\n' ' ' | tail -c 200)" >&2
+              fi
+              sleep $((attempt * 2))
+            done
+            return 1
+          }
+          # Stop at the first unanswered query. If the database is not answering, that IS the finding, and
+          # retrying the other thirteen would add minutes of sleeping to say the same thing.
+          unverified() { echo "::error title=Design-first schema::$1 could not be VERIFIED: staging did not answer the query after 3 attempts. This is NOT the same as it being absent - see the attempt output above for what Cloudflare said."; exit 1; }
           missing=0
           for tbl in build_design_freezes build_phase_milestones build_phase_metrics; do
-            n=$(n_of "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='$tbl'") || n=""
-            if [ "${n:-0}" = "1" ]; then echo "table $tbl: present"; else echo "::error title=Design-first schema::table $tbl is missing after migrations"; missing=1; fi
+            if ! n=$(n_of "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='$tbl'"); then
+              unverified "table $tbl"; missing=1
+            elif [ "$n" = "1" ]; then echo "table $tbl: present"
+            else echo "::error title=Design-first schema::table $tbl is missing after migrations"; missing=1; fi
           done
           for pair in build_jobs:build_phase build_jobs:design_freeze_id build_quality:schema_version \
                       build_quality:design_points build_quality:rubric_json build_quality:design_blockers_json \
                       build_cycles:primary_progress build_cycles:milestone \
                       build_revisions:design_points build_revisions:is_design_baseline; do
             tbl=${pair%%:*}; col=${pair##*:}
-            n=$(n_of "SELECT COUNT(*) AS n FROM pragma_table_info('$tbl') WHERE name='$col'") || n=""
-            if [ "${n:-0}" = "1" ]; then echo "$tbl.$col: present"; else echo "::error title=Design-first schema::$tbl.$col is missing after migrations"; missing=1; fi
+            if ! n=$(n_of "SELECT COUNT(*) AS n FROM pragma_table_info('$tbl') WHERE name='$col'"); then
+              unverified "$tbl.$col"; missing=1
+            elif [ "$n" = "1" ]; then echo "$tbl.$col: present"
+            else echo "::error title=Design-first schema::$tbl.$col is missing after migrations"; missing=1; fi
           done
           # Historical rows must still be labelled legacy scoring, never silently reinterpreted as weighted ones.
-          legacy=$(n_of "SELECT COUNT(*) AS n FROM build_quality WHERE schema_version <> 'crestmont.quality-scorecard/2' AND (design_points IS NOT NULL OR total_points IS NOT NULL)") || legacy=""
-          if [ -n "$legacy" ] && [ "$legacy" != "0" ]; then echo "::error title=Design-first schema::$legacy legacy scorecard row(s) carry weighted category points they never earned"; missing=1; fi
+          if ! legacy=$(n_of "SELECT COUNT(*) AS n FROM build_quality WHERE schema_version <> 'crestmont.quality-scorecard/2' AND (design_points IS NOT NULL OR total_points IS NOT NULL)"); then
+            unverified "the legacy scorecard count"; missing=1
+          elif [ "$legacy" != "0" ]; then echo "::error title=Design-first schema::$legacy legacy scorecard row(s) carry weighted category points they never earned"; missing=1; fi
           [ "$missing" = "0" ] || exit 1
           echo "Design-first schema verified on staging: 3 tables, 10 columns, no backfilled legacy scores."
 
@@ -791,7 +822,7 @@ jobs:
             "SELECT path, status, message, substr(COALESCE(stack,''), 1, 400) AS stack, created_at FROM app_errors WHERE created_at > datetime('now','-90 minutes') ORDER BY id DESC LIMIT 60" > app-errors.json 2>/dev/null || { echo "::warning::Could not read the staging error log."; exit 0; }
           node -e '
             const rows = (JSON.parse(require("fs").readFileSync("app-errors.json","utf8"))[0]?.results) ?? [];
-            if (!rows.length) { console.log("::warning title=No application errors::The failing pages recorded nothing in app_errors in the last 90 minutes, so the failure is probably not an unhandled exception (a CSP refusal or a redirected subresource is not one)."); process.exit(0); }
+            if (!rows.length) { console.log("::warning title=No application errors::Nothing in app_errors for the last 90 minutes. That means one of two things, and they are NOT the same. Either the failure was not an unhandled exception (a CSP refusal, a redirected subresource or a non-500 status is not one), OR D1 itself was faulting - recordAppError writes to D1 and swallows its own failure, so a D1 outage is the one fault the error log cannot record. app.ts console.errors every unhandled error either way, so check the Worker logs (wrangler tail) before concluding the pages were healthy."); process.exit(0); }
             const e = (v) => String(v).replace(/%/g,"%25").replace(/\r/g,"%0D").replace(/\n/g,"%0A");
             // One annotation per distinct path+message, newest first, so sixty rows of the same fault do not
             // bury the other faults. The count says how often it happened.

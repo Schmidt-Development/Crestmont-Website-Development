@@ -20,7 +20,16 @@ export async function recordAppError(db: Db, e: { path: string; message: string;
   try {
     await db.prepare(`INSERT INTO app_errors (path, method, status, message, stack, environment, created_at) VALUES (?,?,?,?,?,?,?)`)
       .bind(e.path.slice(0, 300), e.method ?? null, e.status ?? 500, redact(e.message).slice(0, 1000), e.stack ? redact(e.stack).slice(0, 4000) : null, e.environment ?? null, nowIso()).run();
-  } catch { /* the error log itself is unavailable; console logging in app.ts still applies */ }
+  } catch (writeFailed) {
+    // The error log is the one thing that cannot report its own outage, and a D1 fault takes out the INSERT
+    // and the original error's record together. Staging deploys #150-#152 ran into exactly that: Cloudflare
+    // returned D1 internal errors, four Owner modules answered 500, and app_errors held nothing for them, so
+    // the deploy's error-log step saw "no application errors" and the pages looked healthy. app.ts
+    // console.errors every unhandled error regardless, so say here that the record was lost and why — one
+    // line in the Worker log is the difference between a silent gap and a legible one.
+    console.error(JSON.stringify({ level: "error", message: "app_errors write failed; the error below was not recorded",
+      reason: String((writeFailed as Error)?.message ?? writeFailed).slice(0, 300), path: e.path, original: redact(e.message).slice(0, 300) }));
+  }
 }
 
 export function redact(s: string): string {
