@@ -8,7 +8,7 @@ import { openDb } from "../dev/sqlite-d1.ts";
 import { handle } from "../src/app/app.ts";
 import { syncRequirements } from "../src/readiness/ingest.ts";
 import type { Env } from "../src/app/context.ts";
-import { applyAccess, accessReadme, type D1Ops } from "../scripts/staging-access.ts";
+import { applyAccess, accessReadme, annotation, D1_READ_ATTEMPTS, type D1Ops } from "../scripts/staging-access.ts";
 import { verifyStagingAccess } from "../scripts/verify-staging-access.ts";
 
 const BASE = "https://crestmont-platform-staging.example.workers.dev";
@@ -288,4 +288,103 @@ test("[INFRA-006] a failed wrangler call reports what wrangler said, with the ac
       if (prev === undefined) delete process.env.WRANGLER; else process.env.WRANGLER = prev;
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("[INFRA-006] the deploy's own annotation keeps the cause, not just \"Command failed\"", () => {
+  // Deploy 42087171814 -- the merge of #150 -- failed at "Apply staging access" and the run said only
+  //   Staging access could not be applied: Command failed: npx … d1 execute … (SELECT MAX(a.created_at) FROM audit
+  // The reason D1 refused the query appeared nowhere, because the annotation kept only the first line of the
+  // message while wranglerOps puts wrangler's complaint on the SECOND. The cause has to survive the printing too.
+  const LF = String.fromCharCode(10);
+  const e = new Error([
+    "Command failed: npx --yes wrangler@4.149.0 d1 execute crestmont-staging --remote --env staging (exit 1)",
+    "  wrangler said: ✘ [ERROR] D1_ERROR: internal error; reference = 4q6b19qrbnaus0gl55cg4lf4",
+  ].join(LF));
+
+  const a = annotation(e);
+  assert.match(a, /wrangler said:/, "the cause reaches the annotation");
+  assert.match(a, /D1_ERROR: internal error; reference = 4q6b19qrbnaus0gl55cg4lf4/,
+    "including Cloudflare's reference id, which is how a platform fault is told apart from one of ours");
+  assert.ok(!a.includes(LF), "an annotation is one line: GitHub drops everything after a real newline");
+  assert.match(a, /%0A/, "the line break is encoded, so the log still reads as two lines");
+
+  // A long message is cut, but the cut is visible rather than silent.
+  const long = annotation(new Error("x".repeat(4000)), 120);
+  assert.equal(long.length, 120);
+  assert.ok(long.endsWith("…"), "the truncation is marked");
+
+  // "::" inside the text would close the workflow command early and hide everything after it.
+  assert.ok(!annotation(new Error("endgroup::then nothing")).includes("::"),
+    "a :: in the message cannot terminate the annotation");
+});
+
+test("[INFRA-006] a staging read survives a transient Cloudflare fault; a deterministic refusal still fails at once", async () => {
+  // The same narrow rule the Worker applies (isTransientDbError, src/lib/db.ts), now on the deploy's side of
+  // the wire. Before this, one `D1_ERROR: internal error` at step 28 skipped every post-deploy verification the
+  // staging deploy performs: the access sequence, TLS, smoke checks, the browser journeys, CRM and research.
+  // Like the [INFRA-006] test above, this drives the real wranglerOps by pointing WRANGLER at a stub. That
+  // command is split on spaces (the workflow passes "npx --yes wrangler@4.149.0"), so on a machine whose node
+  // lives under "C:\Program Files" the spawn fails before the stub runs and both tests fail locally. CI is
+  // Linux, where the interpreter path has no space.
+  const { wranglerOps } = await import("../scripts/staging-access.ts");
+  const { writeFileSync } = await import("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "wrangler-retry-"));
+  const prev = process.env.WRANGLER;
+  const LF = String.fromCharCode(10), SEP = String.fromCharCode(92);
+  try {
+    // Fails with Cloudflare's own transient fault on the first two calls, then answers.
+    const stub = join(dir, "stub.mjs");
+    const counter = join(dir, "calls").split(SEP).join("/");
+    writeFileSync(stub, [
+      `import { appendFileSync, readFileSync } from "node:fs";`,
+      `appendFileSync("${counter}", "x");`,
+      `const n = readFileSync("${counter}", "utf8").length;`,
+      `if (n < 3) { process.stderr.write("[ERROR] D1_ERROR: internal error; reference = abc" + n + "\n"); process.exit(1); }`,
+      `process.stdout.write(JSON.stringify([{ results: [{ n }], success: true }]));`,
+    ].join(LF));
+    process.env.WRANGLER = `${process.execPath} ${stub}`;
+
+    const rows = await wranglerOps().query<{ n: number }>("SELECT 1");
+    assert.deepEqual(rows, [{ n: 3 }], "the read succeeds on the third attempt");
+    assert.equal(D1_READ_ATTEMPTS, 3, "one try plus two retries, as the Worker does");
+
+    // A deterministic refusal must not be retried: it would turn a clear failure into a slow one.
+    const bad = join(dir, "bad.mjs");
+    const badCounter = join(dir, "bad-calls").split(SEP).join("/");
+    writeFileSync(bad, [
+      `import { appendFileSync } from "node:fs";`,
+      `appendFileSync("${badCounter}", "x");`,
+      `process.stderr.write("[ERROR] no such column: count\n");`,
+      `process.exit(1);`,
+    ].join(LF));
+    process.env.WRANGLER = `${process.execPath} ${bad}`;
+
+    let message = "";
+    try { await wranglerOps().query("SELECT count FROM rate_limits"); } catch (e) { message = (e as Error).message; }
+    assert.match(message, /no such column: count/, "the real refusal is reported");
+    assert.equal(readFileSync(badCounter, "utf8").length, 1, "attempted exactly once");
+  } finally {
+    if (prev === undefined) delete process.env.WRANGLER; else process.env.WRANGLER = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("[INFRA-006] no deploy script reduces a wrangler error to its first line", async () => {
+  // The regression guard. wranglerOps attaches the cause on a second line, so any annotation built from the
+  // first line alone silently throws it away -- which is how a failed deploy came to have no stated reason.
+  // staging-binding-guard.ts is exempt: it builds single-line errors of its own and imports nothing from here.
+  const { readdirSync } = await import("node:fs");
+  const ESC = String.fromCharCode(92), QUOTES = [String.fromCharCode(34), String.fromCharCode(39)];
+  const offenders: string[] = [];
+  for (const name of readdirSync("scripts").filter((f) => f.endsWith(".ts"))) {
+    const text = readFileSync(join("scripts", name), "utf8");
+    if (name !== "staging-access.ts" && !text.includes(`from "./staging-access.ts"`)) continue;
+    for (const line of text.split(/\r?\n/)) {
+      // The needle is assembled, not written: it has to be the two characters backslash and n as they
+      // appear in the file being read, not a line feed.
+      const dropsTheCause = QUOTES.some((q) => line.includes(".split(" + q + ESC + "n" + q + ")[0]"));
+      if (/::error/.test(line) && dropsTheCause) offenders.push(`${name}: ${line.trim().slice(0, 120)}`);
+    }
+  }
+  assert.deepEqual(offenders, [], "these annotations would drop what wrangler said");
 });

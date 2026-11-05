@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { rateLimitEffective } from "../src/services/security.ts";
 import { MFA_ATTEMPT_LIMIT, MFA_ATTEMPT_WINDOW_SECONDS, mfaRateKey } from "../src/services/auth.ts";
-import { wranglerOps, type D1Ops } from "./staging-access.ts";
+import { wranglerOps, annotation, type D1Ops } from "./staging-access.ts";
 
 export type Window = { window_start: number; count: number };
 
@@ -58,7 +58,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       await new Promise((ok) => setTimeout(ok, (wait + 5) * 1000));
     }
   } catch (e) {
-    console.log(`::error title=Two-factor budget::${String((e as Error).message ?? e).split("\n")[0].slice(0, 300)}`);
+    console.log(`::error title=Two-factor budget::${annotation(e)}`);
     process.exit(1);
   }
 }

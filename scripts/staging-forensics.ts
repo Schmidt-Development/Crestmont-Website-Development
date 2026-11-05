@@ -13,7 +13,7 @@
 //   env: WRANGLER (staging only: wranglerOps() addresses crestmont-staging --env staging)
 import { appendFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { wranglerOps, DEMO_DOMAIN, type D1Ops } from "./staging-access.ts";
+import { wranglerOps, annotation, DEMO_DOMAIN, type D1Ops } from "./staging-access.ts";
 
 export const SINCE = "2026-10-27T00:00:00Z";
 export const EXPORT_CUTOFF = "2026-10-27T08:15:00Z";
@@ -115,7 +115,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.log(text);
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, text + "\n\n");
   } catch (e) {
-    console.error(`::error::Forensic snapshot failed: ${String((e as Error).message ?? e).split("\n")[0].slice(0, 200)}`);
+    console.error(`::error::Forensic snapshot failed: ${annotation(e)}`);
     process.exit(1);
   }
 }

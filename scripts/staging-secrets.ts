@@ -9,7 +9,7 @@
 import { createHmac, scryptSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { wranglerOps, type D1Ops } from "./staging-access.ts";
+import { wranglerOps, annotation, type D1Ops } from "./staging-access.ts";
 
 export const DERIVED_LABELS = { evidence: "crestmont-staging-evidence:v1", scheduler: "crestmont-staging-scheduler:v1",
   // CRM duplicate protection (PR #50): research import signing key and erasure-tombstone HMAC key. 256-bit, stable across
@@ -64,7 +64,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       console.log(`${arg}: ${await putSecretIfChanged(wranglerOps(), root, arg, value)}`);
     } else throw new Error("usage: derive <label> | put <NAME>");
   } catch (e) {
-    console.error(`::error::${String((e as Error).message ?? e).split("\n")[0].slice(0, 200)}`);
+    console.error(`::error::${annotation(e)}`);
     process.exit(1);
   }
 }
