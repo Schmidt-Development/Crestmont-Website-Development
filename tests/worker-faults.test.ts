@@ -90,3 +90,34 @@ test("[INFRA-006] requestPath keeps the path and drops the origin", () => {
   assert.equal(requestPath(undefined), null);
   assert.equal(requestPath("not a url"), null);
 });
+
+// ───────────── Coverage: what the capture is entitled to claim ─────────────
+//
+// The first real run of this instrument reported "the Worker logged nothing at error level" for failures it
+// had not been listening for. Deploy #160: capture started 21:30:01 with a 25-minute bound, so it died at
+// 21:55:01; the sweep that produced the 500s ran 21:56:33 to 22:08:20. Meanwhile app_errors DID hold a row
+// for one of those 500s — D1 overload at loadContent — so the two instruments contradicted each other, and
+// mine was the one that was wrong. An instrument that cannot state its own coverage will eventually report
+// silence it never listened for.
+
+test("[INFRA-006] coversUntil is false once the capture has stopped before the moment in question", async () => {
+  const { coversUntil } = await import("../scripts/worker-faults.ts");
+  const sweepStarted = new Date("2026-11-05T21:56:33Z");
+
+  // Deploy #160 exactly: started, bounded, dead before the failing step began.
+  assert.equal(coversUntil({ startedAt: "2026-11-05T21:30:01Z", endedAt: "2026-11-05T21:55:01Z", alive: false, lines: 12 }, sweepStarted), false);
+  // Still running when the report was taken: it does cover it.
+  assert.equal(coversUntil({ startedAt: "2026-11-05T21:30:01Z", endedAt: null, alive: true, lines: 900 }, sweepStarted), true);
+  // Stopped, but not until after the moment.
+  assert.equal(coversUntil({ startedAt: "2026-11-05T21:30:01Z", endedAt: "2026-11-05T22:09:00Z", alive: false, lines: 900 }, sweepStarted), true);
+  // Never started: covers nothing.
+  assert.equal(coversUntil({ startedAt: null, endedAt: null, alive: false, lines: 0 }, sweepStarted), false);
+});
+
+test("[INFRA-006] a capture that never connected says so, and claims nothing either way", () => {
+  // wrangler failing to connect produces a file with no JSON and no banner. Reporting that as "the Worker
+  // was quiet" would be worse than reporting nothing.
+  const faults = parseFaults("some unrelated noise\n");
+  assert.equal(faults.length, 1, "the noise is kept rather than dropped");
+  assert.match(faults[0].message, /unrelated noise/);
+});

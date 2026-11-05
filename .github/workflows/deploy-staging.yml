@@ -518,10 +518,15 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          # 25 minutes covers verification and the browser journeys; the job's own timeout is the backstop.
-          nohup timeout 1500 $WRANGLER tail crestmont-platform-staging --env staging --format json \
+          # 25 minutes was wrong. In deploy #160 the capture started at 21:30:01 and died at 21:55:01, and the
+          # sweep that produced the 500s ran 21:56:33 to 22:08:20 — dead for 92 seconds before that step even
+          # began. Verification through the frontend sweep took 38 minutes there, so this bound covers the
+          # phase with room to spare; the job's own timeout remains the real backstop, and an always() step
+          # kills it so nothing outlives the job.
+          nohup timeout 4200 $WRANGLER tail crestmont-platform-staging --env staging --format json \
             > worker-tail.jsonl 2> worker-tail.err &
           echo "$!" > worker-tail.pid
+          date -u +%Y-%m-%dT%H:%M:%SZ > worker-tail.started
           # Give it a moment to connect, so the first verified request is already in the stream.
           sleep 8
           if [ -s worker-tail.err ] && ! grep -qi "waiting for logs\|Connected" worker-tail.err; then
@@ -874,10 +879,21 @@ jobs:
           || steps.outbound_e2e.outcome == 'failure' || steps.preview_render.outcome == 'failure')
         continue-on-error: true
         run: |
+          # Whether the capture was still running decides what its silence is allowed to mean, so establish
+          # that BEFORE killing it. Reporting silence from a capture that had already stopped is how this
+          # instrument misled its first real run.
+          alive=no
+          if [ -f worker-tail.pid ] && kill -0 "$(cat worker-tail.pid)" 2>/dev/null; then alive=yes; fi
+          started=$(cat worker-tail.started 2>/dev/null || echo "")
+          ended=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           [ -f worker-tail.pid ] && kill "$(cat worker-tail.pid)" 2>/dev/null || true
           sleep 2
-          node --no-warnings scripts/worker-faults.ts worker-tail.jsonl --title "Staging Worker"
-          rm -f worker-tail.jsonl worker-tail.err worker-tail.pid
+          node --no-warnings scripts/worker-faults.ts worker-tail.jsonl --title "Staging Worker" \
+            --alive "$alive" --started "$started" --ended "$ended"
+          if [ -s worker-tail.err ]; then
+            echo "::notice title=Worker log capture (stderr)::$(sed -e 's/\x1b\[[0-9;]*m//g' worker-tail.err | tr '\n' ' ' | cut -c1-300)"
+          fi
+          rm -f worker-tail.jsonl worker-tail.err worker-tail.pid worker-tail.started
 
       - name: Why did a page fail? (recent application errors, already redacted)
         if: always() && (steps.verify.outcome == 'failure' || steps.smoke.outcome == 'failure' || steps.e2e.outcome == 'failure'
@@ -920,7 +936,7 @@ jobs:
         continue-on-error: true
         run: |
           [ -f worker-tail.pid ] && kill "$(cat worker-tail.pid)" 2>/dev/null || true
-          rm -f worker-tail.jsonl worker-tail.err worker-tail.pid
+          rm -f worker-tail.jsonl worker-tail.err worker-tail.pid worker-tail.started
 
       - name: Fail the deploy when transport security on the live site is wrong
         if: always() && steps.tls.outcome == 'failure'

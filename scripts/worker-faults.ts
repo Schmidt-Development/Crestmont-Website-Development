@@ -87,14 +87,51 @@ export function isLostErrorRecord(f: Fault): boolean {
   return /app_errors write failed/.test(f.message);
 }
 
+/**
+ * What window the capture actually covered, and whether it was still running. An instrument that cannot say
+ * this will eventually report silence it never listened for — which is what happened on this one's first
+ * real run. In deploy #160 the capture started at 21:30:01 with a 25-minute bound, so it died at 21:55:01;
+ * the sweep that produced the 500s ran 21:56:33 to 22:08:20. It had been dead for 92 seconds before that
+ * step even began, and reported "the Worker logged nothing at error level", which it had no basis to say.
+ */
+export interface Coverage { startedAt: string | null; endedAt: string | null; alive: boolean; lines: number }
+
+/** True when the capture had already stopped before `until`, so it cannot speak for what happened then. */
+export function coversUntil(c: Coverage, until: Date): boolean {
+  if (!c.startedAt) return false;
+  if (c.alive) return true;
+  return c.endedAt !== null && Date.parse(c.endedAt) >= until.getTime();
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const file = process.argv[2];
-  const titleArg = process.argv.indexOf("--title");
-  const title = titleArg > 0 ? process.argv[titleArg + 1] ?? "Worker fault" : "Worker fault";
+  const arg = (n: string) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : undefined; };
+  const title = arg("--title") ?? "Worker fault";
   if (!file || !existsSync(file)) { console.log(`::warning title=${title}::No Worker log capture was written, so the Worker's own account of these failures is not available.`); process.exit(0); }
-  const faults = parseFaults(readFileSync(file, "utf8"));
+  const text = readFileSync(file, "utf8");
+
+  // Coverage first, because it decides what silence is allowed to mean.
+  const cov: Coverage = {
+    startedAt: arg("--started") ?? null,
+    endedAt: arg("--ended") ?? null,
+    alive: arg("--alive") === "yes",
+    lines: text.split("\n").filter((l) => l.trim()).length,
+  };
+  const connected = /waiting for logs|Connected to|^\s*\{/m.test(text);
+  const faults = parseFaults(text);
+
+  if (!connected) {
+    console.log(`::warning title=${title}::The capture produced no usable output (${cov.lines} line(s)), so it never connected. It says NOTHING about these failures either way — do not read this as the Worker being quiet.`);
+    process.exit(0);
+  }
   if (!faults.length) {
-    console.log(`::warning title=${title}::The Worker logged nothing at error level while this ran. With an empty app_errors as well, the failures were not unhandled exceptions in the Worker at all — look outside it (the edge, or the request never arriving).`);
+    const covered = cov.alive
+      ? `It was still running when this step began${cov.startedAt ? `, from ${cov.startedAt}` : ""}.`
+      : `It covered ${cov.startedAt ?? "an unknown start"} to ${cov.endedAt ?? "an unknown end"} and had ALREADY STOPPED before this step ran, so it cannot speak for anything after that.`;
+    const verdict = cov.alive
+      ? "With an empty app_errors as well, the failures were not unhandled exceptions in the Worker at all — look outside it (the edge, or the request never arriving)."
+      : "This is NOT evidence that the Worker was quiet: check whether the failing step ran inside the window above before drawing any conclusion.";
+    console.log(`::warning title=${title}::The capture connected and logged nothing at error level. ${covered} ${verdict}`);
     process.exit(0);
   }
   const lost = faults.filter(isLostErrorRecord);
@@ -108,4 +145,5 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.log(`::error title=${title} [${f.level}]${where}${n}::${e(f.message)}`);
   }
   console.log(`${faults.length} distinct Worker fault(s) captured${lost.length ? `, ${lost.length} of them a lost error record` : ""}.`);
+  if (!cov.alive && cov.endedAt) console.log(`::warning title=${title}::The capture stopped at ${cov.endedAt}; anything after that is not covered, so these faults may be incomplete.`);
 }
