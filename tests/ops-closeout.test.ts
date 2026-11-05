@@ -113,6 +113,23 @@ test("[DATA-001] every migration has a unique 4-digit prefix (two migrations num
   assert.ok(files.includes("0045_ops_closeout.sql"));
 });
 
+test("[DATA-001] no migration uses a LIKE or GLOB pattern longer than 50 bytes (D1 error 7500)", () => {
+  // D1 caps LIKE/GLOB pattern length far below SQLite's default and answers
+  // "LIKE or GLOB pattern too complex: SQLITE_ERROR [code: 7500]". Local SQLite accepts the
+  // long pattern, so the suite passes and the migration then fails on remote D1 — which is what
+  // happened to 0068_portfolio_consent.sql on staging deploy run 41950679879, blocking every
+  // later migration and the Worker deploy behind it. Use instr(x, p) = 1 for a prefix match.
+  const offenders: string[] = [];
+  for (const f of readdirSync("migrations").filter((n) => n.endsWith(".sql")).sort()) {
+    const sql = readFileSync(`migrations/${f}`, "utf8").replace(/^\s*--.*$/gm, "");
+    for (const m of sql.matchAll(/(?:LIKE|GLOB)\s+'((?:[^']|'')*)'/gi)) {
+      const bytes = new TextEncoder().encode(m[1]).length;
+      if (bytes > 50) offenders.push(`${f}: ${bytes} bytes — ${m[1].slice(0, 40)}…`);
+    }
+  }
+  assert.deepEqual(offenders, [], offenders.join("; "));
+});
+
 // ───────────── Migration 0045: CREST-GAP-064 and -104 ─────────────
 
 test("[READY-010] [DATA-001] migration 0045 resolves BLK-003, BLK-012, BLK-013 with evidence and indexes the Stripe retry scan", async () => {
