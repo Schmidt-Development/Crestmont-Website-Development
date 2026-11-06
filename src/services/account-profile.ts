@@ -115,8 +115,9 @@ export async function confirmEmailChange(ctx: MailCtx & { ip?: string | null }, 
 export const MFA_REMINDER = "customer_admin_mfa";
 
 export async function shouldShowMfaReminder(db: Db, user: { id: string; mfaEnabled: boolean; isStaff: boolean }, role: string): Promise<boolean> {
-  void db; // FD-30: a dismissal recorded earlier no longer hides the notice (enrolment is required, not recommended)
-  return !(user.isStaff || user.mfaEnabled || role !== "customer_admin");
+  // MFA removed for every account (Founder directive, 2026-11-06): there is nothing to enrol in, so no notice.
+  void db; void user; void role;
+  return false;
 }
 
 export async function dismissMfaReminder(db: Db, userId: string, ip: string | null = null): Promise<void> {

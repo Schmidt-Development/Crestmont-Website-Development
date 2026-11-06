@@ -227,7 +227,7 @@ function roles(): SafeHtml {
     controls: html`${opt("customer", "Customer", true)}${opt("staff", "Staff")}${opt("admin", "Administrator")}`,
     notes: notes([
       { key: "customer", title: "Customer", body: "Customers see their own invoices, files and requests — never another customer's records." },
-      { key: "staff", title: "Staff", body: "Staff work across customers, with two-factor sign-in required, but cannot change team settings." },
+      { key: "staff", title: "Staff", body: "Staff work across customers but cannot change team settings." },
       { key: "admin", title: "Administrator", body: "Administrators manage team permissions, and sensitive actions are recorded in an audit log." },
     ]), hint: "Switch roles to compare. Permissions are enforced on the server, not just hidden on screen. Sample records." });
 }

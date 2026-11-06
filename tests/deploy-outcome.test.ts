@@ -70,3 +70,24 @@ test("[INFRA-005] worker-faults: an unproven capture says nothing, even when it 
   assert.match(run("no"), /never received its own probe request[\s\S]*says NOTHING/);
   assert.match(run("yes"), /connected and logged nothing at error level/);
 });
+
+test("[INFRA-005] deploy-only dispatch: succeeded but NOT verified when the smoke check passed; failed when it did not", () => {
+  const ok = deployOutcome({ smoke: { outcome: "success" } }, { rotationPending: false, mode: "deploy-only" });
+  assert.deepEqual([ok.status, ok.verification], ["succeeded", "not_verified"]);
+  assert.match(ok.notes, /verification suite was not run/);
+  const bad = deployOutcome({ smoke: { outcome: "failure" } }, { rotationPending: false, mode: "deploy-only" });
+  assert.deepEqual([bad.status, bad.verification], ["failed", "failed"]);
+  // A full run still needs every mandatory check.
+  assert.equal(deployOutcome({ smoke: { outcome: "success" } }, { rotationPending: false, mode: "full" }).status, "failed");
+});
+
+test("[INFRA-005] Founder directive 2026-11-06: a merge to main no longer deploys staging; certification runs only when chosen", () => {
+  const head = wf.slice(0, wf.indexOf("\npermissions:"));
+  assert.doesNotMatch(head, /^\s+push:/m, "no push trigger");
+  assert.match(head, /verification:[\s\S]*options: \[deploy-only, full\][\s\S]*default: deploy-only/);
+  for (const id of ["verify", "tls", "e2e", "crm_e2e", "clamd", "research_e2e", "outbound_e2e", "frontend"]) {
+    const at = wf.indexOf(`\n        id: ${id}\n`);
+    assert.match(wf.slice(at, at + 200), /if: [^\n]*env\.FULL == 'true'/, `${id} runs only in a full verification`);
+  }
+  assert.match(wf, /--mode "\$\{\{ env\.FULL == 'true' && 'full' \|\| 'deploy-only' \}\}"/);
+});

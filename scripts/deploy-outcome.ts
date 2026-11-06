@@ -22,9 +22,18 @@ export const MANDATORY = [
 /** Mandatory only when its condition held: the old access is proven revoked only after a rotation. */
 export const CONDITIONAL = { revoked: "rotation-pending" } as const;
 
-export interface Outcome { status: "succeeded" | "failed"; verification: "passed" | "failed"; failed: string[]; notes: string }
+export interface Outcome { status: "succeeded" | "failed"; verification: "passed" | "failed" | "not_verified"; failed: string[]; notes: string }
 
-export function deployOutcome(steps: Record<string, { outcome?: string; conclusion?: string } | undefined>, o: { rotationPending: boolean }): Outcome {
+export function deployOutcome(steps: Record<string, { outcome?: string; conclusion?: string } | undefined>, o: { rotationPending: boolean; mode?: "full" | "deploy-only" }): Outcome {
+  // Deploy-only dispatch (Founder directive, 2026-11-06: no staging certification runs): the code is live once the
+  // upload and the smoke check passed, and NOTHING was certified, which is exactly what the record says. It is never
+  // "passed": readiness sees an unverified deployment, not a verified one.
+  if (o.mode === "deploy-only") {
+    const smoke = steps.smoke?.outcome;
+    return smoke === "success"
+      ? { status: "succeeded", verification: "not_verified", failed: [], notes: "deploy-only dispatch: code uploaded and smoke-checked; the verification suite was not run" }
+      : { status: "failed", verification: "failed", failed: [`smoke=${smoke ?? "not run"}`], notes: `deploy-only dispatch: the smoke check did not pass (smoke=${smoke ?? "not run"})` };
+  }
   const required: string[] = [...MANDATORY, ...(o.rotationPending ? ["revoked"] : [])];
   // `outcome` is the result before continue-on-error; that is the one that says whether the check passed.
   const failed = required.filter((id) => steps[id]?.outcome !== "success").map((id) => `${id}=${steps[id]?.outcome ?? "not run"}`);
@@ -41,7 +50,9 @@ if (entry === realpathSync(fileURLToPath(import.meta.url))) {
   const i = process.argv.indexOf("--rotation-pending");
   let steps: Record<string, { outcome?: string }>;
   try { steps = JSON.parse(process.env.STEPS ?? ""); } catch { console.error("STEPS must be the JSON of the workflow's steps context"); process.exit(2); }
-  const r = deployOutcome(steps, { rotationPending: i > 0 && process.argv[i + 1] === "true" });
+  const m = process.argv.indexOf("--mode");
+  const mode = m > 0 && process.argv[m + 1] === "deploy-only" ? "deploy-only" : "full";
+  const r = deployOutcome(steps, { rotationPending: i > 0 && process.argv[i + 1] === "true", mode });
   console.log(JSON.stringify(r));
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `status=${r.status}\nverification=${r.verification}\nnotes=${r.notes.replace(/\n/g, " ")}\n`);
 }

@@ -503,7 +503,8 @@ test("[INFRA-005] deployment workflows are gated: staging skips without Cloudfla
     assert.match(y, /^permissions:\n {2}contents: (read|write)/m, `${name}: least-privilege permissions`);
   }
   // Staging
-  assert.match(staging, /push:\n\s+branches: \[main\]/);
+  // Founder directive 2026-11-06: staging deploys only when dispatched by hand; a merge to main deploys nothing.
+  assert.doesNotMatch(staging, /^\s+push:\s*$/m, "staging has no push trigger");
   assert.match(staging, /workflow_dispatch:/);
   assert.match(staging, /secrets\.CLOUDFLARE_API_TOKEN != ''/);
   assert.match(staging, /secrets\.CLOUDFLARE_ACCOUNT_ID != ''/);

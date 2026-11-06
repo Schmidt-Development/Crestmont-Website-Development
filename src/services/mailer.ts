@@ -522,7 +522,7 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
     description: "Invitation to join the Crestmont team.",
     render: (d) => ({
       subject: "You're invited to Crestmont Website Development", heading: "Join the Crestmont team",
-      paragraphs: [`${d.inviterName} invited you to join Crestmont Website Development as ${d.roleLabel}.`, "Accept within 7 days to choose your password. Two-factor authentication is required for all staff accounts."],
+      paragraphs: [`${d.inviterName} invited you to join Crestmont Website Development as ${d.roleLabel}.`, "Accept within 7 days to choose your password."],
       cta: { label: "Accept invitation", url: d.acceptUrl },
     }),
     samples: [{ inviterName: "Owner", roleLabel: "Project manager", acceptUrl: "https://example.com/invite?token=preview" }],

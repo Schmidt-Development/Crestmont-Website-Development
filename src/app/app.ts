@@ -130,11 +130,8 @@ export class StepUpRequired extends HttpError {
  */
 export function requireRecentMfa(ctx: AppContext, maxAgeMinutes = STEP_UP_MAX_AGE_MINUTES): void {
   requireUser(ctx);
-  if (!ctx.user!.mfaEnabled) return;
-  if (!ctx.sessionMfaVerified) throw new HttpError(401, "MFA_REQUIRED");
-  const at = ctx.sessionMfaAt ? Date.parse(ctx.sessionMfaAt) : NaN;
-  const age = Date.now() - at;
-  if (!(age >= -60e3 && age <= maxAgeMinutes * 60e3)) throw new StepUpRequired();
+  // MFA removed (Founder directive, 2026-11-06): no second factor is asked for, so there is nothing to step up to.
+  void maxAgeMinutes;
 }
 
 // ── FD-30: customer administrators must use multifactor authentication ──
