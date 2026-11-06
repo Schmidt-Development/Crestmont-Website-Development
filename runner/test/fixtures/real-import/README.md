@@ -28,7 +28,7 @@ To regenerate:
 
 Nothing captured was edited. `import-baseline.json`, `import-after-integration.json` and `import-after-drift.json`
 are the measurements and are untouched. The baseline is a pure function of the first of them (`baselineFrom`), and
-that function changed: DL-003 fixed how a nested landmark's spacing is measured, so the fingerprint it derives
+that function changed: DL-010 fixed how a nested landmark's spacing is measured, so the fingerprint it derives
 changed with it. The file was re-derived from the same captured measurement rather than hand-edited, and the
 manifest's `designFingerprint` moved with the design it was written against.
 
