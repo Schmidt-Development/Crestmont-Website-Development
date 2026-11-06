@@ -102,7 +102,7 @@ test("[INFRA-002] delivery gate: a pending rotation needs a usable passphrase be
   assert.equal((await gate({ ops: s.ops, epoch: "2", rotate: true, passphrase: "short" })).problems.length, 1, "a manual rotate also needs delivery");
 });
 
-test("[INFRA-002] revocation proof over HTTP on the public site: after rotation the old password, 2FA key, recovery code and session fail; the new ones and recovery work", async (t) => {
+test("[INFRA-002] revocation proof over HTTP on the public site: after rotation the old password and session fail; the new password signs in", async (t) => {
   const sleep = fakeClock(t);
   const s = await staging();
   await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false });
@@ -110,17 +110,16 @@ test("[INFRA-002] revocation proof over HTTP on the public site: after rotation 
   const st = await capture({ base: BASE, ops: s.ops, rootKey: KEY, epoch: "3", rotate: false, f: s.f, sleep, out: (l) => masked.push(l) });
   assert.ok(st, "a rotation is pending, so the current access is captured");
   assert.deepEqual(st.notes, []);
-  assert.ok(st.sessionCookie && st.oldRecoveryCode);
-  for (const v of [st.oldOwner.password, st.oldOwner.totp, st.sessionCookie, st.oldRecoveryCode]) assert.ok(masked.includes(`::add-mask::${v}`), "every captured value is masked");
+  assert.ok(st.sessionCookie);
+  for (const v of [st.oldOwner.password, st.oldOwner.totp, st.sessionCookie]) assert.ok(masked.includes(`::add-mask::${v}`), "every captured value is masked");
   assert.deepEqual(await currentAccess(s.ops, KEY).then((c) => c?.owner), st.oldOwner, "derived = live");
 
   const access = await applyAccess(s.ops, { rootKey: KEY, epoch: "3", rotate: false });
   const checks = await verify({ base: BASE, ops: s.ops, state: st, access, f: s.f, sleep, out: () => {} });
   assert.deepEqual(checks.filter((c) => !c.ok), [], report(checks));
   assert.deepEqual(checks.map((c) => c.name), [
-    "Old Owner session invalid", "Old Owner password rejected",
-    "New Owner password accepted (2FA requested)", "Old recovery code rejected", "Old Owner 2FA key rejected", "New Owner 2FA key accepted",
-    "New recovery codes can be generated and used", "No demo recovery codes remain", "No pending invitations from demo accounts",
+    "Old Owner session invalid", "Old Owner password rejected", "New Owner password accepted",
+    "No demo recovery codes remain", "No pending invitations from demo accounts",
   ]);
   const text = report(checks);
   for (const v of [st.oldOwner.password, st.oldOwner.totp, ...access.accounts.map((a) => a.password)]) assert.equal(text.includes(v!), false, "report carries no value");

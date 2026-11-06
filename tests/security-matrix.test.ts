@@ -8,9 +8,7 @@ import { routeTable } from "../src/routes/index.ts";
 import { STAFF_ROLES } from "../src/domain/authz.ts";
 import { ROUTE_INVENTORY } from "./support/route-inventory.ts";
 import { buildWorld, fillPath, type World } from "./support/security-world.ts";
-import { routes, classified, pathFor, call, snapshot, changedTables, appErrors, toLogin, toMfa, loc, type RouteEntry } from "./support/security-helpers.ts";
-import { createCustomer, TEST_PASSWORD } from "./support/app.ts";
-import { newTotpSecret } from "../src/lib/auth-crypto.ts";
+import { routes, classified, pathFor, call, snapshot, changedTables, appErrors, toLogin, loc, type RouteEntry } from "./support/security-helpers.ts";
 import type { SqliteDb } from "../dev/sqlite-d1.ts";
 
 let w: World;
@@ -74,34 +72,6 @@ test("[AUTH-007] anonymous visitors are denied on every non-public route (redire
   assert.ok(checked > 200);
   assert.equal(appErrors(w.db), errors0, "no request produced a server error");
   assert.deepEqual(changedTables(before, snapshot(w.db)).filter((t) => t !== "share_links"), [], "anonymous requests changed no state (share link access counters aside)");
-});
-
-test("[AUTH-007] password-only sessions (MFA not completed) reach nothing beyond the sign-in flow — staff and customers with 2FA", async () => {
-  // A staff member and a customer with two-factor enabled who have entered only their password.
-  const staffClient = w.app.client();
-  const res1 = await staffClient.post("/login", { email: w.staff.owner.email, password: TEST_PASSWORD });
-  assert.ok(toMfa(res1), "staff sign-in stops at the MFA challenge");
-  // The 2FA customer is also an administrator of tenant A, so a missing MFA check would expose A's records.
-  const cu = await createCustomer(w.db, "twofactor@matrix.example", "ZZTWOFA Org");
-  await w.db.prepare(`UPDATE users SET totp_secret = ?, mfa_enabled = 1 WHERE id = ?`).bind(newTotpSecret(), cu.id).run();
-  await w.db.prepare(`INSERT INTO memberships (id, user_id, organization_id, role_id, created_at) VALUES (?,?,?, 'customer_admin', ?)`).bind(`mbr_twofa_${Date.now()}`, cu.id, w.a.orgId, new Date().toISOString()).run();
-  const custClient = w.app.client();
-  assert.ok(toMfa(await custClient.post("/login", { email: cu.email, password: TEST_PASSWORD })), "customer with 2FA stops at the MFA challenge");
-  const errors0 = appErrors(w.db);
-  const before = snapshot(w.db);
-  const problems: string[] = [];
-  for (const [who, c] of [["staff", staffClient], ["customer", custClient]] as const) {
-    for (const r of classified()) {
-      const kind = r.spec.access.kind;
-      if (!["session", "customer", "staff"].includes(kind) && !(r.key === "POST /mfa/setup")) continue;
-      const res = await call(c, r, pathFor(w, r, w.a));
-      const denied = r.spec.api ? [401, 403].includes(res.status) : toMfa(res) || toLogin(res) || res.status === 401 || res.status === 403;
-      if (!denied) problems.push(`${who}: ${r.key} → ${await describe(res)}`);
-    }
-  }
-  assert.deepEqual(problems, []);
-  assert.equal(appErrors(w.db), errors0);
-  assert.deepEqual(changedTables(before, snapshot(w.db)), [], "half-authenticated sessions changed no state");
 });
 
 test("[EMP-002] role matrix: every staff role without the route's permission is denied server-side; permitted roles are served", async () => {

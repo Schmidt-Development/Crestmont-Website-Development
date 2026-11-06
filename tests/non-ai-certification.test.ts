@@ -5,7 +5,7 @@
 //   (signed webhook fixtures; FakePayments stands in for Stripe's API, so no Stripe account is contacted) → failed and
 //   duplicate payment events → project → intake → staff assignment and reassignment → scope approval → design →
 //   development → QA → customer review → customer-requested revision → files (unscanned, missing) → support →
-//   maintenance subscription → cross-customer and permission refusals → expired session → MFA failure →
+//   maintenance subscription → cross-customer and permission refusals → expired session → sign-in failure →
 //   notification provider failure.
 //
 // Provider truth (docs/NON-AI-CERTIFICATION.md): Stripe and Resend are exercised through their real adapters' code
@@ -64,12 +64,6 @@ test("phase 1 certification: the complete non-AI customer journey, with its fail
   // ── 3. Package selection + agreements: checkout refuses without acceptance, then records it against the order.
   const checkoutPage = await (await c.get("/checkout/business")).text();
   assert.match(checkoutPage, /\$2,499/, "the Business package at its approved price");
-  // FD-30: a customer administrator must enrol an authenticator before paying.
-  const gate = await c.post("/checkout/business", { terms: "1", maintenance_plan: "professional" });
-  assert.equal(gate.status, 303);
-  assert.match(gate.headers.get("location") ?? "", /^\/mfa\/setup/, "no payment before two-factor enrolment");
-  assert.equal(await count(t, `SELECT COUNT(*) AS n FROM orders WHERE organization_id = ?`, org.id), 0);
-  await c.enrolMfa("/checkout/business");
   assert.equal((await c.post("/checkout/business", {})).status, 422, "no order without accepting the agreements");
   assert.equal(await count(t, `SELECT COUNT(*) AS n FROM orders WHERE organization_id = ?`, org.id), 0);
   // FD-26: a package is bought with its committed maintenance plan (Business: Professional or higher).
@@ -211,13 +205,14 @@ test("phase 1 certification: the complete non-AI customer journey, with its fail
   assert.equal(expired.status, 303);
   assert.match(expired.headers.get("location") ?? "", /^\/login/);
 
-  // ── 15. MFA failure: a wrong second factor signs nobody in and is recorded.
+  // ── 15. Sign-in failure: a wrong password signs nobody in and is recorded. (MFA was removed on 2026-11-06; the
+  //        password is the whole sign-in.)
   const s = t.client();
-  await s.post("/login", { email: pmA.email, password: TEST_PASSWORD });
-  const wrong = await s.post("/mfa", { code: "000000" });
-  assert.ok(wrong.status === 400 || wrong.status === 401 || wrong.status === 422, `a wrong code is refused (${wrong.status})`);
-  assert.equal((await s.get("/staff")).status === 200, false, "no staff page without the second factor");
-  assert.ok(await count(t, `SELECT COUNT(*) AS n FROM security_events WHERE user_id = ? AND kind = 'mfa_failed'`, pmA.id) >= 1, "recorded as a security event");
+  const wrong = await s.post("/login", { email: pmA.email, password: "not-the-right-password-at-all" });
+  assert.notEqual(wrong.status, 303, `a wrong password is refused (${wrong.status})`);
+  assert.equal(s.cookies.has("cm_session"), false, "no session cookie is issued");
+  assert.equal((await s.get("/staff")).status === 200, false, "no staff page without signing in");
+  assert.ok(await count(t, `SELECT COUNT(*) AS n FROM security_events WHERE user_id = ? AND kind = 'login_failed'`, pmA.id) >= 1, "recorded as a security event");
 
   // ── 16. AI gate: nothing in the whole journey created, queued or dispatched an AI build.
   assert.equal(await count(t, `SELECT COUNT(*) AS n FROM build_jobs`), 0);

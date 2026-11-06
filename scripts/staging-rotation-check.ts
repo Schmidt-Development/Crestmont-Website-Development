@@ -1,12 +1,13 @@
 // Proves, over real HTTP on the live (public) staging site, that a credential rotation actually revoked the old access.
 //
 //   capture (BEFORE scripts/staging-access.ts rotates): derives the credentials that are live right now, confirms the
-//     live site accepts them, signs the demo Owner in (keeping that session) and mints one recovery code. Writes them to
-//     a 0600 state file on the runner only. Does nothing when no rotation is pending.
-//   verify (AFTER the rotation and the new-access check): old Owner password, old 2FA key, old recovery code and old
-//     session must all be rejected; the new password and 2FA key must work; the
-//     recovery-code mechanism must work end to end (generate with a fresh 2FA code → sign in with one code). Then deletes
-//     the codes it generated (nobody holds them) and confirms no demo recovery code or pending demo invitation remains.
+//     live site accepts them and signs the demo Owner in (keeping that session). Writes them to a 0600 state file on the
+//     runner only. Does nothing when no rotation is pending.
+//   verify (AFTER the rotation and the new-access check): the old Owner password and old session must be rejected; the
+//     new password must sign in; no demo recovery code or pending demo invitation may remain.
+//
+// MFA was removed for every account (Founder directive, 2026-11-06): the password is the whole sign-in, so there is no
+// 2FA key or recovery code to prove revoked over HTTP. (A rotation still deletes stored demo recovery codes.)
 //
 // Every value is registered with ::add-mask:: and none is printed, logged, summarised or uploaded. Output = check names
 // with PASS/FAIL only. Staging only (wranglerOps addresses crestmont-staging --env staging).
@@ -16,14 +17,14 @@
 //   node --no-warnings scripts/staging-rotation-check.ts verify --url <url> --state <file> --access access/access.json
 import { existsSync, readFileSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { totpCode } from "../src/lib/auth-crypto.ts";
 import { currentAccess, rotationPending, wranglerOps, annotation, DEMO_DOMAIN, type AccessResult, type D1Ops } from "./staging-access.ts";
 import { passphraseProblem } from "./seal.ts";
 
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 type Sleep = (ms: number) => Promise<void>;
-export interface Owner { email: string; password: string; totp: string }
-export interface CaptureState { oldOwner: Owner; sessionCookie: string | null; oldRecoveryCode: string | null; notes: string[] }
+/** `totp` is the stored demo setup key (still derived by staging-access.ts); it is masked but never used to sign in. */
+export interface Owner { email: string; password: string; totp?: string | null }
+export interface CaptureState { oldOwner: Owner; sessionCookie: string | null; notes: string[] }
 export interface Check { name: string; ok: boolean; detail?: string }
 
 const realSleep: Sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -55,15 +56,10 @@ export class Client {
   }
   loc(r: Response) { return new URL(r.headers.get("location") ?? "/", this.base).pathname; }
   csrf() { return this.jar.get("__Host-cm_csrf") ?? this.jar.get("cm_csrf") ?? ""; }
-  /** Email + password; true when the site asks for the second factor. */
+  /** Email + password (the whole sign-in); true when it lands in the staff area. */
   async password(email: string, password: string): Promise<boolean> {
     let r = await this.send("GET", "/login"); await r.arrayBuffer();
     r = await this.send("POST", "/login", { _csrf: this.csrf(), email, password }); await r.arrayBuffer();
-    return r.status === 303 && this.loc(r).startsWith("/mfa");
-  }
-  /** Second factor (TOTP or recovery code); true when it lands in the staff area. */
-  async second(code: string): Promise<boolean> {
-    const r = await this.send("POST", "/mfa", { _csrf: this.csrf(), code }); await r.arrayBuffer();
     return r.status === 303 && this.loc(r).startsWith("/staff");
   }
   async signedIn(): Promise<boolean> {
@@ -71,22 +67,6 @@ export class Client {
     return r.status === 200;
   }
   async logout() { const r = await this.send("POST", "/logout", { _csrf: this.csrf() }); await r.arrayBuffer(); }
-}
-
-/** Each TOTP step is accepted once and never an earlier one: always use a step that starts after now. */
-export async function freshTotp(secret: string, sleep: Sleep, now: () => number = Date.now): Promise<string> {
-  const ms = now();
-  await sleep(30_000 - (ms % 30_000) + 1_500);
-  return totpCode(secret);
-}
-
-export async function generateRecoveryCodes(c: Client, totp: string, sleep: Sleep): Promise<string[]> {
-  let r = await c.send("GET", "/account"); await r.arrayBuffer();
-  r = await c.send("POST", "/account/mfa/recovery-codes", { _csrf: c.csrf(), code: await freshTotp(totp, sleep) });
-  const page = await r.text();
-  if (r.status !== 200) return [];
-  const list = /data-testid="recovery-codes"[^>]*>([\s\S]*?)<\/ol>/.exec(page)?.[1] ?? "";
-  return [...list.matchAll(/<code>([^<]+)<\/code>/g)].map((m) => m[1].trim());
 }
 
 const mask = (v: string | null | undefined, out: (s: string) => void) => { if (v) out(`::add-mask::${v}`); };
@@ -99,21 +79,19 @@ export async function capture(o: { base: string; ops: D1Ops; rootKey: string; ep
   for (const v of [cur.owner.password, cur.owner.totp]) mask(v, out);
   const notes: string[] = [];
   const c = new Client(o.base, o.f ?? fetch, sleep);
-  if (!(await c.password(cur.owner.email, cur.owner.password)) || !(await c.second(await freshTotp(cur.owner.totp, sleep)))) {
+  if (!(await c.password(cur.owner.email, cur.owner.password))) {
     notes.push("the current Owner credentials were not accepted before the rotation (not testable)");
-    return { oldOwner: cur.owner, sessionCookie: null, oldRecoveryCode: null, notes };
+    return { oldOwner: cur.owner, sessionCookie: null, notes };
   }
   const sessionCookie = c.jar.get("__Host-cm_session") ?? c.jar.get("cm_session") ?? null;
-  const codes = await generateRecoveryCodes(c, cur.owner.totp, sleep);
-  for (const v of [sessionCookie, ...codes]) mask(v, out);
-  if (!codes.length) notes.push("no recovery code could be generated before the rotation");
-  return { oldOwner: cur.owner, sessionCookie, oldRecoveryCode: codes[0] ?? null, notes };
+  mask(sessionCookie, out);
+  return { oldOwner: cur.owner, sessionCookie, notes };
 }
 
 export async function verify(o: { base: string; ops: D1Ops; state: CaptureState; access: AccessResult; f?: Fetch; sleep?: Sleep; out?: (s: string) => void }): Promise<Check[]> {
-  const f = o.f ?? fetch, sleep = o.sleep ?? realSleep, out = o.out ?? console.log;
+  const f = o.f ?? fetch, sleep = o.sleep ?? realSleep;
   const owner = o.access.accounts.find((a) => a.role === "owner");
-  if (!owner?.totp) throw new Error("no new Owner credentials in the access file");
+  if (!owner?.password) throw new Error("no new Owner credentials in the access file");
   const s = o.state, checks: Check[] = [];
   const add = (name: string, ok: boolean, detail?: string) => checks.push({ name, ok, detail });
   const fresh = () => new Client(o.base, f, sleep);
@@ -129,29 +107,11 @@ export async function verify(o: { base: string; ops: D1Ops; state: CaptureState;
   if (s.oldOwner.password === owner.password) add("Old Owner password rejected", false, "the Owner password did not change");
   else { const p = fresh(); add("Old Owner password rejected", !(await p.password(s.oldOwner.email, s.oldOwner.password))); }
   const a = fresh();
-  add("New Owner password accepted (2FA requested)", await a.password(owner.email, owner.password));
+  const newOk = await a.password(owner.email, owner.password);
+  add("New Owner password accepted", newOk);
+  if (newOk) await a.logout();
 
-  // Second factor: old recovery code and old 2FA key first, then the new key.
-  if (s.oldRecoveryCode) add("Old recovery code rejected", !(await a.second(s.oldRecoveryCode)));
-  else add("Old recovery code rejected", false, "not testable: no recovery code was captured");
-  if (s.oldOwner.totp === owner.totp) add("Old Owner 2FA key rejected", false, "the 2FA key did not change");
-  else add("Old Owner 2FA key rejected", !(await a.second(await freshTotp(s.oldOwner.totp, sleep))));
-  const newOk = await a.second(await freshTotp(owner.totp, sleep));
-  add("New Owner 2FA key accepted", newOk);
-
-  // Recovery mechanism, end to end, with codes nobody keeps.
-  if (newOk) {
-    const codes = await generateRecoveryCodes(a, owner.totp, sleep);
-    for (const v of codes) mask(v, out);
-    await a.logout();
-    const b = fresh();
-    const ok = codes.length > 0 && (await b.password(owner.email, owner.password)) && (await b.second(codes[0]));
-    add("New recovery codes can be generated and used", ok);
-    if (ok) await b.logout();
-  } else add("New recovery codes can be generated and used", false, "not testable: new 2FA key not accepted");
-
-  // Nothing left behind: no demo recovery codes (the verifier's own are deleted here), no pending demo invitations.
-  await o.ops.query(`DELETE FROM mfa_recovery_codes WHERE user_id IN (SELECT id FROM users WHERE email LIKE '%@${DEMO_DOMAIN}')`);
+  // Nothing left behind: no demo recovery codes (the rotation deletes them), no pending demo invitations.
   const n = async (sql: string) => Number((await o.ops.query<{ n: number }>(sql))[0]?.n ?? 0);
   add("No demo recovery codes remain", (await n(`SELECT COUNT(*) AS n FROM mfa_recovery_codes WHERE user_id IN (SELECT id FROM users WHERE email LIKE '%@${DEMO_DOMAIN}')`)) === 0);
   add("No pending invitations from demo accounts", (await n(`SELECT COUNT(*) AS n FROM invitations WHERE accepted_at IS NULL AND expires_at > '${new Date().toISOString()}' AND invited_by IN (SELECT id FROM users WHERE email LIKE '%@${DEMO_DOMAIN}')`)) === 0);

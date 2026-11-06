@@ -14,7 +14,7 @@ test("[AUTH-005] [SEC-001] 50 wrong passwords from 5 IPs cannot keep the Owner o
   const owner = await createStaff(db, "owner");
   const own = client();
   await own.login(owner.email, TEST_PASSWORD, owner.secret);
-  assert.ok(own.cookies.get("cm_device"), "device remembered after password + MFA");
+  assert.ok(own.cookies.get("cm_device"), "device remembered after the password sign-in");
   await own.post("/logout");
 
   for (let i = 0; i < 50; i++) {
@@ -25,7 +25,7 @@ test("[AUTH-005] [SEC-001] 50 wrong passwords from 5 IPs cannot keep the Owner o
   assert.equal(user!.locked_until, null, "no lock is ever set");
   const back = await own.post("/login", { email: owner.email, password: TEST_PASSWORD });
   assert.equal(back.status, 303);
-  assert.match(back.headers.get("location") ?? "", /^\/mfa/, "the Owner proceeds to MFA from the remembered browser");
+  assert.equal(back.headers.get("location"), "/staff", "the Owner signs in from the remembered browser");
   const started = await db.prepare(`SELECT COUNT(*) n FROM security_events WHERE kind = 'login_challenge_started' AND user_id = ?`).bind(owner.id).first<{ n: number }>();
   assert.equal(started!.n, 1, "the challenge start is recorded once per window");
 });

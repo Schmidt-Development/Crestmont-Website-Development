@@ -11,9 +11,7 @@ import { placeHold, releaseHold, activeHolds, LegalHoldError } from "../src/serv
 import { runRetention } from "../src/services/retention.ts";
 import { processDeletion, requestDeletion, PrivacyError, buildExport } from "../src/services/privacy.ts";
 import { postMessage, MessageError } from "../src/services/messages.ts";
-import { stepUpAction } from "../src/app/step-up.ts";
 import { newId } from "../src/lib/db.ts";
-import { newTotpSecret } from "../src/lib/auth-crypto.ts";
 
 const PDF = new TextEncoder().encode("%PDF-1.4\n% test document\n");
 const NEW_PASSWORD = "an-entirely-different-passphrase-42";
@@ -214,32 +212,6 @@ test("[PORTAL-005] internal notes cannot carry attachments (files are visible to
   assert.equal((await t.db.prepare(`SELECT COUNT(*) n FROM files`).first<{ n: number }>())!.n, before, "nothing stored in the customer's files");
   const id = await postMessage(ctx, { organizationId: t.cust.organizationId, projectId: null, authorUserId: staff.id, body: "plain internal note", internal: true, fromStaff: true });
   assert.ok(id, "internal notes without attachments still work");
-});
-
-test("[AUTH-008] irreversible and Founder-protected actions require recent MFA (step-up)", async () => {
-  const u = new URL("http://x/");
-  for (const route of ["/staff/privacy/:id/process", "/staff/ops/retention", "/staff/pricing/:id/decide", "/staff/settings/tax", "/staff/settings/tax/jurisdictions", "/staff/employees/invitations/:id/revoke", "/portal/team", "/portal/team/members/:userId/role", "/portal/team/members/:userId/remove"]) {
-    assert.ok(stepUpAction("POST", route, u), route);
-  }
-  const { db, client } = await createTestApp();
-  const owner = await createStaff(db, "owner");
-  const c = await client().login(owner.email, TEST_PASSWORD, owner.secret);
-  await db.prepare(`UPDATE sessions SET mfa_verified_at = ? WHERE user_id = ?`).bind(new Date(Date.now() - 30 * 60e3).toISOString(), owner.id).run();
-  const res = await c.post("/staff/ops/retention", { "retention.app_errors_days": "90" });
-  assert.equal(res.status, 303);
-  assert.match(res.headers.get("location") ?? "", /^\/mfa\/step-up/, "stale MFA is sent to step-up before retention changes");
-
-  // Customer admin who enabled two-factor: team changes need a recent verification too; nothing is recorded before it.
-  const cust = await createCustomer(db, "mfa-admin@example.com", "MFA Org");
-  const secret = newTotpSecret();
-  await db.prepare(`UPDATE users SET totp_secret = ?, mfa_enabled = 1 WHERE id = ?`).bind(secret, cust.id).run();
-  const cc = await client().login(cust.email, TEST_PASSWORD, secret);
-  await db.prepare(`UPDATE sessions SET mfa_verified_at = ? WHERE user_id = ?`).bind(new Date(Date.now() - 30 * 60e3).toISOString(), cust.id).run();
-  for (const path of ["/portal/team", `/portal/team/members/${cust.id}/role`, `/portal/team/members/${cust.id}/remove`]) {
-    const r = await cc.post(path, { email: "new-member@example.com", role: "customer_member" });
-    assert.match(r.headers.get("location") ?? "", /^\/mfa\/step-up/, `${path} needs step-up`);
-  }
-  assert.equal((await db.prepare(`SELECT COUNT(*) n FROM invitations WHERE email = 'new-member@example.com'`).first<{ n: number }>())?.n, 0, "no invitation before step-up");
 });
 
 test("[SEC-003] [AIB-002] the build runner never receives quarantined files; unscanned files are passed as 'pending', never as clean", async () => {

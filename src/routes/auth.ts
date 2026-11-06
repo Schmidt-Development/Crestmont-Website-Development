@@ -1,14 +1,13 @@
-// Sign-in, registration, verification, MFA, password reset, invitations, account (AUTH-001..006).
+// Sign-in, registration, verification, password reset, invitations, account (AUTH-001..006). MFA was removed (2026-11-06).
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html } from "../lib/html.ts";
 import { cookie, hostCookieName, htmlResponse, isSecure, parseCookies, redirect, str } from "../app/http.ts";
 import { authLayout, appLayout } from "../ui/layout.ts";
-import { csrf, input, button, formErrors, alert, table, actionForm, badge, checkbox } from "../ui/components.ts";
+import { csrf, input, button, formErrors, table, actionForm, badge, checkbox } from "../ui/components.ts";
 import * as auth from "../services/auth.ts";
 import { requireUser } from "../app/app.ts";
 import { sendMail } from "../services/mailer.ts";
-import { otpauthUri } from "../lib/auth-crypto.ts";
 import { formatDateTime, label } from "../lib/html.ts";
 import { HttpError } from "../app/http.ts";
 import { securityEvent } from "../services/security.ts";
@@ -22,12 +21,6 @@ import { safeNextPath } from "../app/step-up.ts";
 /** Same-origin relative redirect target only (rejects //host, /\host, absolute URLs and control characters). */
 const safeNext = (n: string | null, fallback: string) => safeNextPath(n, fallback);
 const BOT_CHECK_FAILED = "We could not verify that this request came from a person. Please try again.";
-
-/** New session token once the second factor is complete (CREST-GAP-086). */
-async function rotateSessionCookie(ctx: AppContext) {
-  const r = await auth.rotateSessionToken(ctx.db, ctx.sessionId!);
-  if (r) ctx.setCookies.push(sessionCookie(ctx, r.token, r.maxAge));
-}
 
 /** The remembered-device cookie for abuse-resistant sign-in (CREST-GAP-003). */
 function deviceCookieValue(ctx: AppContext): string | null {
@@ -175,6 +168,77 @@ export function register(r: Router) {
     r.post(path, async (ctx) => onward(ctx));
   }
 
+  // ── Password reset ──
+  r.get("/password/forgot", (ctx) => forgotPage(ctx));
+  r.post("/password/forgot", async (ctx) => {
+    const f = await ctx.form();
+    // Bot protection (gap 4): Turnstile, then a per-IP limit in requestPasswordReset (the per-email limit stays).
+    if (!(await verifyTurnstile(ctx, f.get("cf-turnstile-response")))) {
+      await securityEvent(ctx.db, "bot_check_failed", { ip: ctx.ip, detail: "password reset" });
+      return forgotPage(ctx, [BOT_CHECK_FAILED], 400);
+    }
+    let res: Awaited<ReturnType<typeof auth.requestPasswordReset>>;
+    try {
+      res = await auth.requestPasswordReset(ctx.db, str(f, "email"), ctx.ip);
+    } catch (e) {
+      if (e instanceof auth.AuthError) return forgotPage(ctx, [e.message], e.status);
+      throw e;
+    }
+    if (res) {
+      await sendMail(ctx, { template: "password_reset", to: str(f, "email").toLowerCase(), idempotencyKey: `reset:${res.userId}:${res.token.slice(0, 8)}`,
+        data: { resetUrl: `${ctx.baseUrl}/password/reset?token=${res.token}` } });
+    }
+    return htmlResponse(ctx, authLayout(ctx, { title: "Check your email" }, html`<h1 style="font-size:2rem">Check your email</h1><p>If an account exists for that address, a reset link has been sent. It expires in one hour.</p>`));
+  });
+  r.get("/password/reset", (ctx) => resetPage(ctx));
+  r.post("/password/reset", async (ctx) => {
+    const f = await ctx.form();
+    try {
+      await auth.assertPasswordNotBreached(ctx.env, ctx.db, String(f.get("password") ?? ""));
+      const resetUserId = await auth.resetPassword(ctx.db, str(f, "token"), String(f.get("password") ?? ""), ctx.ip);
+      // CREST-GAP-039: security notice that the reset completed (a mail failure never blocks the reset).
+      const resetUser = await ctx.db.prepare(`SELECT email FROM users WHERE id = ?`).bind(resetUserId).first<{ email: string }>();
+      if (resetUser) {
+        try { await sendMail(ctx, { template: "security_notification", to: resetUser.email, idempotencyKey: `reset-done:${resetUserId}:${str(f, "token").slice(0, 16)}`, data: { event: "password_reset_completed" } }); }
+        catch (e) { console.error(JSON.stringify({ level: "warn", msg: "reset notice email failed", error: (e as Error).message })); }
+      }
+      return redirect(ctx, "/login", { kind: "success", text: "Password updated. Sign in with your new password." });
+    } catch (e) {
+      if (e instanceof auth.AuthError) return resetPage(ctx, [e.message], str(f, "token"));
+      throw e;
+    }
+  });
+
+  // ── Invitations ──
+  r.get("/invite", async (ctx) => {
+    const token = ctx.url.searchParams.get("token") ?? "";
+    const inv = /^[0-9a-f]{64}$/.test(token) ? await auth.invitationByToken(ctx.db, token) : null;
+    if (!inv || inv.accepted_at || inv.expires_at < new Date().toISOString()) return htmlResponse(ctx, authLayout(ctx, { title: "Invitation" }, html`<h1 style="font-size:2rem">Invitation not valid</h1><p>This invitation has expired or was already used. Ask the person who invited you to send a new one.</p>`), 400);
+    return invitePage(ctx, token, inv.email, inv.org_name, inv.role_id, await auth.invitationMode(ctx.db, inv.email, invitationSessionUser(ctx)));
+  });
+  r.post("/invite", async (ctx) => {
+    const f = await ctx.form();
+    const token = str(f, "token");
+    const sessionUserId = invitationSessionUser(ctx);
+    try {
+      const inv0 = /^[0-9a-f]{64}$/.test(token) ? await auth.invitationByToken(ctx.db, token) : null;
+      const mode = inv0 ? await auth.invitationMode(ctx.db, inv0.email, sessionUserId) : "new";
+      if (mode === "new" || mode === "claim") await auth.assertPasswordNotBreached(ctx.env, ctx.db, String(f.get("password") ?? ""));
+      await auth.acceptInvitation(ctx.db, token, str(f, "name"), String(f.get("password") ?? ""), { sessionUserId, ip: ctx.ip });
+      if (mode === "confirm") return redirect(ctx, inv0!.role_id.startsWith("customer_") ? "/portal" : "/staff", { kind: "success", text: "Invitation accepted." });
+      return redirect(ctx, "/login", { kind: "success", text: "Invitation accepted. Sign in to continue." });
+    } catch (e) {
+      if (e instanceof auth.AuthError) {
+        const inv = await auth.invitationByToken(ctx.db, token);
+        if (!inv) return redirect(ctx, "/login", { kind: "error", text: e.message });
+        if (inv.accepted_at || inv.expires_at < new Date().toISOString()) return htmlResponse(ctx, authLayout(ctx, { title: "Invitation" }, html`<h1 style="font-size:2rem">Invitation not valid</h1><p>This invitation has expired or was already used. Ask the person who invited you to send a new one.</p>`), 400);
+        return invitePage(ctx, token, inv.email, inv.org_name, inv.role_id, await auth.invitationMode(ctx.db, inv.email, sessionUserId), [e.message]);
+      }
+      throw e;
+    }
+  });
+
+
   // ── Account & sessions ──
   r.get("/account", async (ctx) => {
     requireUser(ctx);
@@ -231,24 +295,6 @@ ${table(sessions, [
 async function recordTermsAcceptance(ctx: AppContext, userId: string, organizationId: string) {
   // LEGAL-003: records the exact Terms of Service + Privacy Policy versions shown at registration.
   await recordAcceptance(ctx, { userId, organizationId, context: "registration" });
-}
-
-const codeField = () => input({ name: "code", label: "6-digit code", autocomplete: "one-time-code", required: true, maxlength: 20,
-  hint: "Lost your authenticator? Enter one of your recovery codes instead (each works once)." });
-
-const isCustomerAdmin = (ctx: AppContext) => !!ctx.user?.memberships.some((m) => m.role === "customer_admin");
-
-/** Account page copy (FD-30): required for staff and customer administrators, optional for customer members. */
-
-
-
-
-/** Shows freshly generated recovery codes. This response is the only place they ever appear in plaintext. */
-
-/** After a recovery code was used: email the account owner and warn in the UI. */
-async function recoveryUsed(ctx: AppContext, remaining: number): Promise<{ kind: "info" | "error"; text: string }> {
-  await sendMail(ctx, { template: "security_notification", to: ctx.user!.email, idempotencyKey: `mfa-rc-used:${ctx.user!.id}:${Date.now()}`, data: { event: "mfa_recovery_code_used" } });
-  return { kind: remaining <= 2 ? "error" : "info", text: `You signed in with a recovery code. ${remaining} unused code${remaining === 1 ? "" : "s"} left — generate a new set from your account page${remaining <= 2 ? " now" : ""}.` };
 }
 
 function forgotPage(ctx: AppContext, errors: string[] = [], status?: number) {

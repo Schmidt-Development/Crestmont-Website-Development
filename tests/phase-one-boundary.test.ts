@@ -146,18 +146,6 @@ test("phase 1 boundary: with the gate closed, staff deliver the paid project thr
   t.close();
 });
 
-test("phase 1 boundary: a scope change needs a FRESH second factor; a stale MFA session is sent to step-up and nothing changes", async () => {
-  const t = await createTestApp();
-  const owner = await createStaff(t.db, "owner", "founder@crestmont.test");
-  const oc = await t.client().login(owner.email, undefined, owner.secret);
-  await t.db.prepare(`UPDATE sessions SET mfa_verified_at = ? WHERE user_id = ? AND mfa_verified = 1`).bind(new Date(Date.now() - 30 * 60e3).toISOString(), owner.id).run();
-  const res = await oc.post("/staff/readiness/phased-release/defer", { id: "AIB-010", notes: "Phase 1 opens the non-AI offering; the builder is certified separately.", confirm: "defer for phase 1" });
-  assert.equal(res.status, 303);
-  assert.match(res.headers.get("location") ?? "", /^\/mfa\/step-up/);
-  assert.equal((await t.db.prepare(`SELECT disposition FROM requirements WHERE id = 'AIB-010'`).first<{ disposition: string }>())!.disposition, "in_scope");
-  t.close();
-});
-
 test("phase 1 boundary: flipping AI_BUILD_AUTOMATION changes the release configuration digest, so an approval for \"off\" never authorizes \"on\"", async () => {
   const digest = (s: string) => createHash("sha256").update(s.replace(/\r\n/g, "\n"), "utf8").digest("hex"); // scripts/release-candidate.ts
   const toml = readFileSync("wrangler.toml", "utf8");

@@ -220,7 +220,7 @@ const ROWS: { label: string; roles: string[] }[] = [
   { label: "Other customers' records", roles: ["staff", "admin"] }, { label: "Team & permission settings", roles: ["admin"] }, { label: "Security audit log", roles: ["admin"] },
 ];
 function roles(): SafeHtml {
-  const body = html`<div class="sv-roles" data-role="customer"><div class="sv-roles__signin"><span class="sv-roles__who" data-who>Signed in as a customer (sample)</span><span class="sv-roles__mfa" data-mfa>Two-factor: optional</span></div>
+  const body = html`<div class="sv-roles" data-role="customer"><div class="sv-roles__signin"><span class="sv-roles__who" data-who>Signed in as a customer (sample)</span><span class="sv-roles__mfa" data-mfa>Password sign-in</span></div>
 <ul class="sv-roles__rows">${ROWS.map((r) => { const on = r.roles.includes("customer"); return html`<li data-roles="${r.roles.join(" ")}"${on ? "" : html` data-denied`}><span>${r.label}</span><b class="sv-roles__state">${on ? "Visible" : "No access"}</b></li>`; })}</ul>
 <ol class="sv-roles__activity" data-activity><li>Signed in · customer view</li></ol></div>`;
   return frame({ kind: "roles", id: "roles", title: "Everyone sees exactly what they should", body, controlsLabel: "Choose a role",
