@@ -10,6 +10,17 @@ name: Production health monitor
 # environment has required reviewers, which would pause every scheduled run for approval. The URL therefore comes from
 # the REPOSITORY variable PRODUCTION_URL (Settings → Secrets and variables → Actions → Variables → Repository). Until that
 # variable exists (production not launched), every run skips cleanly with a notice.
+#
+# WHY THE URL IS NOT ENOUGH. PRODUCTION_URL has to be set BEFORE the first deployment, because
+# deploy-production.yml refuses to start without it ("Refuse unless production is provisioned"). So between setting the
+# variable and the first successful deploy there is a window — hours or days, and it includes the Founder approval —
+# in which the domain does not resolve and this monitor would fail every run: roughly 48 alerts a day, all of them
+# saying only "not launched yet". An alert channel that cries wolf before launch is not watched after it.
+#
+# So the real question is whether production has ever been DEPLOYED, and this asks it directly: has
+# deploy-production.yml ever completed successfully? Before the first deploy, every run skips with a notice. From the
+# first successful deploy onwards the gate is permanently open and the probe runs at full strength — nothing is
+# weakened, and there is no "launched" flag anyone has to remember to flip.
 on:
   schedule:
     - cron: "26,56 * * * *"
@@ -17,6 +28,8 @@ on:
 
 permissions:
   contents: read
+  # Read-only, and only to ask that one question. Not a secret: github.token, scoped to this repository.
+  actions: read
 
 concurrency:
   group: production-health-monitor
@@ -30,8 +43,11 @@ jobs:
     env:
       BASE: ${{ vars.PRODUCTION_URL }}
     steps:
-      - name: Skip until production has a URL
+      - name: Skip until production has a URL and has actually been deployed
         id: pre
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOY_WORKFLOW: deploy-production.yml
         run: |
           if [ -z "$BASE" ]; then
             echo "::notice title=Production health monitor skipped::The repository variable PRODUCTION_URL is not set (production not launched). Nothing was probed."
@@ -39,6 +55,17 @@ jobs:
           elif ! printf '%s' "$BASE" | grep -Eq '^https://[A-Za-z0-9.-]+$'; then
             echo "::error title=PRODUCTION_URL invalid::PRODUCTION_URL must be a bare https origin such as https://crestmontwebsitedevelopment.com"
             exit 1
+          elif ! deploys=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$DEPLOY_WORKFLOW/runs?status=success&per_page=1" --jq ".total_count"); then
+            # A lookup that FAILED must never read as "nothing is deployed" — that is how monitoring goes quiet on the
+            # day it is needed. Probe, and say in the run why the gate was skipped rather than trusted.
+            echo "::warning title=Could not confirm a production deployment::The Actions API did not answer, so the launch gate could not be read. Probing anyway: a failed lookup must not hide a real outage."
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          elif ! printf '%s' "$deploys" | grep -Eq '^[0-9]+$'; then
+            echo "::warning title=Could not confirm a production deployment::The Actions API returned '$deploys', which is not a count. Probing anyway: a failed lookup must not hide a real outage."
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          elif [ "$deploys" -eq 0 ]; then
+            echo "::notice title=Production health monitor skipped::PRODUCTION_URL is set, but $DEPLOY_WORKFLOW has never completed successfully, so nothing is deployed at $BASE yet. Nothing was probed. This gate opens by itself on the first successful production deployment."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
           else
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi

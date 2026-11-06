@@ -2,10 +2,25 @@
 // configured as documented; whether a given run passed is recorded as evidence by the runs themselves.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const wf = (n: string) => readFileSync(`.github/workflows/${n}`, "utf8");
+
+/**
+ * The body of a `run: |` block, ready to hand to bash.
+ *
+ * Captures the run of indented lines after the named step rather than reading up to a blank line, and strips CR:
+ * on a Windows checkout these files are CRLF, and a `\n\n` terminator never matches `\r\n\r\n`, so the old form of
+ * this made every such test fail locally while passing in CI.
+ */
+const runBlock = (yaml: string, stepName: string, indent = 10) => {
+  const m = new RegExp(`- name: ${stepName}[\\s\\S]*?run: \\|\\r?\\n((?:[ \\t]+[^\\n]*\\r?\\n)+)`).exec(yaml);
+  assert.ok(m, `${stepName}: no run block found`);
+  return m[1].replace(/\r/g, "").replace(new RegExp(`^ {${indent}}`, "gm"), "");
+};
 
 test("[INFRA-004] CI runs on every pull request and push to main: typecheck, unit/integration tests (incl. the secret scan), runner build and tests, dependency audit, evidence", () => {
   const ci = wf("ci.yml");
@@ -90,10 +105,45 @@ test("[INFRA-006] [READY-012] CREST-GAP-015: a production health monitor mirrors
   assert.doesNotMatch(p, /^\s+environment:/m, "no environment: required reviewers would pause every scheduled run");
   assert.match(p, /if: github\.ref == 'refs\/heads\/main'/);
   // The skip path really exits 0 and the probe never runs without a URL.
-  const pre = /- name: Skip until production has a URL[\s\S]*?run: \|\n([\s\S]*?)\n\n/.exec(p)![1].replace(/^ {10}/gm, "");
+  const pre = runBlock(p, "Skip until production has a URL");
   const out = execFileSync("bash", ["-c", pre], { env: { ...process.env, BASE: "", GITHUB_OUTPUT: "/dev/null" }, encoding: "utf8" });
   assert.match(out, /Production health monitor skipped/);
   assert.throws(() => execFileSync("bash", ["-c", pre], { env: { ...process.env, BASE: "http://insecure.example", GITHUB_OUTPUT: "/dev/null" }, stdio: "pipe" }), "an http or path URL is rejected");
+});
+
+test("[INFRA-006] [READY-012] the health monitor's launch gate: silent before the first deployment, loud after it, never silenced by a failed lookup", () => {
+  // The gate's real bash, extracted from the workflow and run against a stub `gh`. Three behaviours matter, and the
+  // third is the one that would be easy to get backwards: a lookup that FAILS must still probe, because a monitor that
+  // mistakes an API hiccup for "not launched yet" goes quiet on exactly the day it is needed.
+  const pre = runBlock(wf("production-health-monitor.yml"), "Skip until production has a URL");
+
+  // A stub `gh` that prints `out` and exits with `code`, placed first on PATH.
+  const run = (out: string, code: number) => {
+    const dir = mkdtempSync(join(tmpdir(), "gh-stub-"));
+    writeFileSync(join(dir, "gh"), `#!/bin/sh\nprintf '%s' '${out}'\nexit ${code}\n`);
+    chmodSync(join(dir, "gh"), 0o755);
+    const outFile = join(dir, "gh-output");
+    writeFileSync(outFile, "");
+    const stdout = execFileSync("bash", ["-c", pre], {
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, BASE: "https://example.com", GITHUB_REPOSITORY: "o/r", DEPLOY_WORKFLOW: "deploy-production.yml", GITHUB_OUTPUT: outFile },
+      encoding: "utf8",
+    });
+    return { stdout, output: readFileSync(outFile, "utf8") };
+  };
+
+  const never = run("0", 0);
+  assert.match(never.stdout, /::notice title=Production health monitor skipped::PRODUCTION_URL is set, but deploy-production\.yml has never completed successfully/);
+  assert.match(never.output, /ok=false/, "nothing is probed before the first successful deployment");
+
+  const launched = run("3", 0);
+  assert.equal(launched.stdout.trim(), "", "once deployed the gate is silent and simply opens");
+  assert.match(launched.output, /ok=true/, "after launch the probe runs at full strength");
+
+  for (const [out, code, why] of [["", 1, "the API call failed"], ["not a count", 0, "the API answered with nonsense"]] as const) {
+    const broken = run(out, code);
+    assert.match(broken.stdout, /::warning title=Could not confirm a production deployment/, why);
+    assert.match(broken.output, /ok=true/, `${why}: probe anyway, never hide an outage`);
+  }
 });
 
 test("[INFRA-006] CREST-GAP-016: a daily production backup exports D1 read-only, seals it, uploads it off-Cloudflare with sha256 recorded, and a second job restores it into a scratch database", () => {

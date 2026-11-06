@@ -178,11 +178,39 @@ test("production workflows: provisioning fails closed when an existing Worker's 
   assert.match(wf, /"enabled":false,"previews_enabled":false/, "provisioning still forces the draft Worker off the public internet");
 });
 
-test("production workflows: scheduled backups and monitoring wait for launch instead of asking for a production approval every day", () => {
-  const backup = readFileSync(".github/workflows/production-backup.yml", "utf8");
-  assert.match(backup, /\n  backup:\n(?:\s+#[^\n]*\n)*\s+if: github\.ref == 'refs\/heads\/main' && \(vars\.PRODUCTION_URL != '' \|\| github\.event_name == 'workflow_dispatch'\)/);
+test("production workflows: scheduled backups and monitoring wait for the first real DEPLOYMENT, not for the URL variable", () => {
+  // PRODUCTION_URL is the wrong signal and cannot be made into the right one: deploy-production.yml refuses to start
+  // without it, so it is necessarily set BEFORE the first deployment. Both scheduled workflows therefore ask whether
+  // deploy-production.yml has ever succeeded. Nothing here is a flag someone has to remember to flip.
+  // Normalised: a Windows checkout stores these CRLF, and then a `\n` in any of the patterns below silently never
+  // matches, so the test would pass in CI and fail on the machine of whoever edits the workflow.
+  const read = (n: string) => readFileSync(`.github/workflows/${n}`, "utf8").replace(/\r\n/g, "\n");
+  const backup = read("production-backup.yml");
+  const monitor = read("production-health-monitor.yml");
+
+  for (const [name, wf] of [["production-backup.yml", backup], ["production-health-monitor.yml", monitor]] as const) {
+    assert.match(wf, /actions: read/, `${name} can read its own Actions history`);
+    assert.match(wf, /GH_TOKEN: \$\{\{ github\.token \}\}/, `${name} uses the run's own token, not a secret`);
+    assert.match(
+      wf,
+      /gh api "repos\/\$GITHUB_REPOSITORY\/actions\/workflows\/\$DEPLOY_WORKFLOW\/runs\?status=success&per_page=1" --jq "\.total_count"/,
+      `${name} asks for successful deploy-production runs`,
+    );
+    assert.match(wf, /DEPLOY_WORKFLOW: deploy-production\.yml/, `${name} names the deploy workflow once, as data`);
+    // A lookup that failed must never be read as "not launched": that is how monitoring and backups go quiet.
+    assert.match(wf, /Could not confirm a production deployment/, `${name} treats a failed lookup as a warning, not as a verdict`);
+    assert.match(wf, /grep -Eq '\^\[0-9\]\+\$'/, `${name} requires the answer to be a number before comparing it`);
+  }
+
+  // The backup decides in a job that names no environment, so deciding never costs an approval.
+  assert.match(backup, /\n  gate:\n(?:\s+#[^\n]*\n)*\s+if: github\.ref == 'refs\/heads\/main'\n/, "the gate job is main-only");
+  const gate = /\n  gate:\n([\s\S]*?)\n  backup:\n/.exec(backup)?.[1] ?? "";
+  assert.ok(gate.length > 0, "the gate job comes before the backup job");
+  assert.doesNotMatch(gate, /^\s+environment:/m, "the gate names no environment: deciding must not request a review");
+  assert.match(gate, /MANUAL: \$\{\{ github\.event_name == 'workflow_dispatch' \}\}/, "a manual backup is still always allowed");
+  assert.match(backup, /\n  backup:\n\s+needs: gate\n(?:\s+#[^\n]*\n)*\s+if: needs\.gate\.outputs\.go == 'true'/, "the backup runs only when the gate says so");
   assert.match(backup, /restore-verify:\n\s+needs: backup/, "restore-verify only follows a backup that ran");
-  const monitor = readFileSync(".github/workflows/production-health-monitor.yml", "utf8");
+
   assert.doesNotMatch(monitor.replace(/#.*$/gm, ""), /^\s+environment:/m, "the monitor never names the production environment (no approval prompts)");
   assert.match(monitor, /phase-check\.ts live wrangler\.toml \/tmp\/app\.json\n/, "the monitor compares the running gate with the committed one (not --exact)");
 });
