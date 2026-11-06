@@ -250,9 +250,12 @@ test("[CONF-07] a third-party service the contract never approved is a violation
     runtime: { origins: ["https://api.stripe.com", "https://telemetry.vendor.example"] },
   });
 
-  assert.ok(violations(r).includes("unapproved-origin"), violations(r).join(","));
-  assert.match(r.findings.find((f) => f.code === "unapproved-origin")!.detail, /telemetry\.vendor\.example/);
-  assert.ok(!r.findings.some((f) => f.detail.includes("api.stripe.com")), "the approved one is not reported");
+  // Asserted by counting the findings rather than by searching their text for a hostname. A substring test
+  // against a host is the shape of the sanitisation bug CodeQL warns about (js/incomplete-url-substring-
+  // sanitization), and it is the weaker assertion anyway: this one says exactly one origin was reported.
+  const unapproved = r.findings.filter((f) => f.code === "unapproved-origin");
+  assert.equal(unapproved.length, 1, `only the origin no approved integration names: ${unapproved.map((f) => f.detail).join(" | ")}`);
+  assert.match(unapproved[0].detail, /telemetry\.vendor\.example/);
   assert.ok(violations(r).includes("unapproved-integration-used"), "and calling the one marked not-approved is caught in the source");
 });
 
