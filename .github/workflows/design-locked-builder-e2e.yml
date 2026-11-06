@@ -1,0 +1,138 @@
+name: Design-locked builder E2E
+
+# The Artifact-to-Backend Builder's end-to-end gate, for the architecture that replaced autonomous design
+# generation. `builder-staging-e2e.yml` certifies the RETIRED builder: it has no concept of an artifact, a design
+# lock or a baseline, and its last run predates this architecture entirely.
+#
+# WHAT RUNS HERE, AND WHAT CANNOT. scripts/design-locked-e2e.ts has three stages:
+#
+#   scan    upload through the real staff route -> REAL ClamAV -> the refusal and quarantine gates. This job.
+#   import  the above, plus a real sandbox npm install, a real Vite build with no network, and real Chromium
+#           measuring three viewports. Needs Docker and the frontend-import sandbox image.
+#   full    the above, plus REAL Model B writing the backend and the three gates judging it. Needs Node 1's GPU
+#           and its local models.
+#
+# Only `scan` belongs on GitHub's runners. The other two need the GPU host, so they are run there and their
+# evidence is committed — pretending otherwise would mean a green tick for a certification that never happened.
+#
+# Uses NO secret: an in-memory database with the real migrations, files created by the test, and EICAR, which is
+# the standard harmless antivirus test signature assembled at run time.
+on:
+  schedule:
+    - cron: "17 8 * * 2"   # Tuesdays 08:17 UTC
+  workflow_dispatch:
+    inputs:
+      fixture:
+        description: "Which artifact fixture to certify (all three run on a schedule)"
+        type: choice
+        options: [all, northgate-clinic, riverbend-library, summit-haul]
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: design-locked-builder-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  certify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture: [northgate-clinic, riverbend-library, summit-haul]
+    services:
+      clamd:
+        # The same image and digest as scanner/docker-compose.yml, with the same limits. A different pin here
+        # would certify something Node 1 is not running.
+        image: clamav/clamav:1.5.1@sha256:b32e587feae9f156d660704beeec4ee69c79fcf5af092bdc0f2f93892a29b553
+        ports: ["3310:3310"]
+        env:
+          CLAMD_CONF_StreamMaxLength: 30M
+          CLAMD_CONF_MaxFileSize: 30M
+          CLAMD_CONF_MaxScanSize: 120M
+          CLAMD_CONF_AlertExceedsMax: "yes"
+          CLAMD_CONF_AlertEncryptedArchive: "yes"
+          CLAMD_CONF_MaxThreads: "2"
+        options: >-
+          --health-cmd "clamdcheck.sh"
+          --health-interval 30s
+          --health-timeout 15s
+          --health-retries 20
+          --health-start-period 300s
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+
+      - name: Skip a fixture the dispatcher did not ask for
+        id: pick
+        env:
+          WANTED: ${{ inputs.fixture || 'all' }}
+          THIS: ${{ matrix.fixture }}
+        run: |
+          if [ "$WANTED" = "all" ] || [ "$WANTED" = "$THIS" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=$THIS not requested::This run was dispatched for $WANTED."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dev tooling
+        if: steps.pick.outputs.run == 'true'
+        run: npm ci --ignore-scripts
+
+      - name: Typecheck
+        if: steps.pick.outputs.run == 'true'
+        run: npx tsc -p tsconfig.json --noEmit
+
+      - name: The artifact chain against real ClamAV
+        if: steps.pick.outputs.run == 'true'
+        env:
+          FIXTURE: ${{ matrix.fixture }}
+        run: |
+          # Run it from outside the repository: the runner's isolation guard requires that for the later stages,
+          # and running the scan stage the same way keeps one invocation shape rather than two.
+          mkdir -p "$RUNNER_TEMP/outside"
+          cd "$RUNNER_TEMP/outside"
+          node --no-warnings "$GITHUB_WORKSPACE/scripts/design-locked-e2e.ts" \
+            --stage scan --fixture "$FIXTURE" --clamd-port 3310 \
+            --out "$GITHUB_WORKSPACE/evidence/design-locked-$FIXTURE"
+
+      - name: The certification actually ran, and nothing was undetermined
+        if: steps.pick.outputs.run == 'true'
+        env:
+          FIXTURE: ${{ matrix.fixture }}
+        run: |
+          # Without this a mistake that skipped every check would leave the job green having certified nothing.
+          # "undetermined" is a failure here for the same reason it is in the script: a check that did not run is
+          # not a check that passed.
+          f="evidence/design-locked-$FIXTURE/design-locked-e2e.json"
+          [ -f "$f" ] || { echo "::error title=No evidence::$f was not written"; exit 1; }
+          node -e "
+            const r = require('./' + process.argv[1]);
+            const c = r.counts;
+            console.log(JSON.stringify(c));
+            for (const k of r.checks) if (k.outcome !== 'pass') console.log(k.outcome.toUpperCase() + '  ' + k.id + ': ' + k.detail);
+            if (c.pass < 10) { console.log('::error title=Too few checks::expected at least 10, got ' + c.pass); process.exit(1); }
+            if (c.fail || c.undetermined) { console.log('::error title=Not certified::' + c.fail + ' failed, ' + c.undetermined + ' undetermined'); process.exit(1); }
+          " "$f"
+          {
+            echo "### $FIXTURE"
+            echo '```json'
+            node -e "console.log(JSON.stringify(require('./' + process.argv[1]).counts))" "$f"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && steps.pick.outputs.run == 'true'
+        with:
+          name: design-locked-e2e-${{ matrix.fixture }}
+          path: evidence/design-locked-${{ matrix.fixture }}
+          if-no-files-found: warn

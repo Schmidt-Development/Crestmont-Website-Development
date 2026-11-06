@@ -77,8 +77,12 @@ const STAGE = opt("--stage", "scan") as "scan" | "import" | "full";
 if (!["scan", "import", "full"].includes(STAGE)) { console.error(`--stage must be scan, import or full`); process.exit(2); }
 
 const FIXTURES: Record<string, string> = {
-  "northgate-clinic": "northgate-clinic-frontend",
+  // A: one inert quote form. B: accounts, roles and two dashboards. C: a filtered collection, a multi-step
+  // reservation and a two-sided message thread. Deliberately unalike, so a baseline comparison is not measuring
+  // the same shapes three times.
   "summit-haul": "summit-haul-frontend",
+  "northgate-clinic": "northgate-clinic-frontend",
+  "riverbend-library": "riverbend-library-frontend",
 };
 const fixtureArg = opt("--fixture", "northgate-clinic");
 const FIXTURE = path.isAbsolute(fixtureArg)
@@ -254,6 +258,12 @@ async function main(): Promise<number> {
   process.env.LOCAL_MODEL_A = process.env.LOCAL_MODEL_A ?? "qwen3.8:27b-q4_K_M";
   process.env.LOCAL_MODEL_A_VISION = process.env.LOCAL_MODEL_A_VISION ?? "true";
   process.env.LOCAL_MODEL_B = process.env.LOCAL_MODEL_B ?? "qwen3.6:35b-a3b-q4_K_M";
+  process.env.LOCAL_MODEL_B_VISION = process.env.LOCAL_MODEL_B_VISION ?? "true";
+  // Mirrors compose/runner.env on Node 1, which is what the real runner runs with. The first run of this harness
+  // omitted it and fell back to 32768: with a seven-page artifact and a seven-operation contract, Model B spent
+  // its whole budget re-reading files after each context reset — 28 resets, 661k input tokens, nothing written.
+  // Under-configuring the window does not test the model, it tests the window.
+  process.env.LOCAL_MODEL_CONTEXT_TOKENS = process.env.LOCAL_MODEL_CONTEXT_TOKENS ?? "65536";
   // Mirrors runner.env on Node 1. The skills directory is required configuration even for a stage that only
   // builds and measures, because loadConfig validates the whole configuration at once.
   process.env.SKILLS_SOURCE_DIR = process.env.SKILLS_SOURCE_DIR ?? "C:\\CrestmontRunner\\skills";
