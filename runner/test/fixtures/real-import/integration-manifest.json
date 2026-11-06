@@ -1,7 +1,7 @@
 {
   "schema": "crestmont.integration-manifest/1",
   "artifactSha": "59dfb2f534cf6c5956b9edac00479d2d3dfebf635e16d5f86d0dc6ff54c416c7",
-  "designFingerprint": "239cc2854af8f6ee33c75b30a671b378aa34afec8bc46c1d2451ab21a9ef81f6",
+  "designFingerprint": "60c8a0703724305cd065973a60649af9c2f827e358757c79d2a69b126e29bc31",
   "operations": [
     {
       "id": "quote-request-submit",
