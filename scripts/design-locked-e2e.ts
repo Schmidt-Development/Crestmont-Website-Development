@@ -64,6 +64,9 @@ import { capabilities } from "../runner/src/main.ts";
 import { assertIsolation, createWorkspace } from "../runner/src/workspace.ts";
 import { JobSandbox, cliDockerExecutor } from "../runner/src/sandbox.ts";
 import { importFrontend } from "../runner/src/frontend/workflow.ts";
+import { runDesignLockedJob, writeEvidence, MAX_REPAIR_CYCLES } from "../runner/src/frontend/design-locked-job.ts";
+import { LocalProvider } from "../runner/src/providers/local.ts";
+import { RunTracker, StopSwitch } from "../runner/src/agent.ts";
 import { validateManifest, completeness, describeContract } from "../runner/src/frontend/integration-manifest.ts";
 import { zipDirectory, makeZip } from "../runner/test/fixtures/zip-writer.ts";
 
@@ -148,7 +151,10 @@ async function main(): Promise<number> {
 
   // ── 2. the artifact is uploaded through the real staff route ───────────────────────────────────────────────
   rule("1. the approved frontend is uploaded");
-  const archive = zipDirectory(FIXTURE, { skip: /[\\/](node_modules|dist|\.git)([\\/]|$)/ });
+  // zipDirectory's own default skip is the right one and is anchored with (^|/), so it also excludes a TOP-LEVEL
+  // node_modules. An override of the form /[\\/](node_modules|...)/ silently does not, because the paths it tests
+  // are relative: the first run of this script shipped an 18 MB artifact with the installed tree inside it.
+  const archive = zipDirectory(FIXTURE);
   log(`artifact: ${archive.length} bytes, sha256 ${sha256(archive).slice(0, 16)}…`);
 
   const upRes = await staff.post(`/staff/builds/frontends/${projectId}/artifact`, {
@@ -248,6 +254,9 @@ async function main(): Promise<number> {
   process.env.LOCAL_MODEL_A = process.env.LOCAL_MODEL_A ?? "qwen3.8:27b-q4_K_M";
   process.env.LOCAL_MODEL_A_VISION = process.env.LOCAL_MODEL_A_VISION ?? "true";
   process.env.LOCAL_MODEL_B = process.env.LOCAL_MODEL_B ?? "qwen3.6:35b-a3b-q4_K_M";
+  // Mirrors runner.env on Node 1. The skills directory is required configuration even for a stage that only
+  // builds and measures, because loadConfig validates the whole configuration at once.
+  process.env.SKILLS_SOURCE_DIR = process.env.SKILLS_SOURCE_DIR ?? "C:\\CrestmontRunner\\skills";
   process.env.RUNNER_SANDBOX_IMAGE = process.env.RUNNER_SANDBOX_IMAGE ?? "crestmont-build-sandbox:1-frontend-import";
   process.env.RUNNER_INSTALL_NETWORK = process.env.RUNNER_INSTALL_NETWORK ?? "crestmont_install";
   delete process.env.RUNNER_SANDBOX_VOLUME;
@@ -272,7 +281,10 @@ async function main(): Promise<number> {
       approvedBy: owner.id,
       // The real scan verdict from above, not an assumption: an 'upload' source requires a clean scan.
       scan: { status: "clean", scannedAt: new Date().toISOString(), engine: cycle.engine ?? "ClamAV", fileId: artifact.file_id },
-      manifest: JSON.parse(readFileSync(path.join(FIXTURE, "integration-manifest.json"), "utf8")),
+      // No manifest here, deliberately. A plan must be written against the design that was actually measured, and
+      // that fingerprint does not exist until this step produces it — so an import freezes the baseline first and
+      // the contract is checked against it below. Passing the fixture's plan here failed exactly as it should:
+      // "the plan was written against design 000000000000… but the approved baseline is 8d8ab93a300e…".
       buildTimeoutMs: 600_000, measureTimeoutMs: 600_000,
     });
   } finally {
@@ -339,9 +351,10 @@ async function main(): Promise<number> {
   const jobId = newId("bld");
   const at = new Date().toISOString();
   await t.db.prepare(
-    `INSERT INTO build_jobs (id, project_id, organization_id, state, attempt, kind, strategy, package_id, created_at, updated_at)
-     VALUES (?, ?, ?, 'queued', 1, 'first_build', 'standard', 'business', ?, ?)`,
-  ).bind(jobId, projectId, customer.organizationId, at, at).run();
+    `INSERT INTO build_jobs (id, project_id, organization_id, kind, revision, dedupe_key, state, strategy, package_id,
+       trigger, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, 'first_build', 0, ?, 'queued', 'standard', 'business', 'payment', ?, ?, ?)`,
+  ).bind(jobId, projectId, customer.organizationId, `first:${projectId}`, owner.id, at, at).run();
   const applied = await DL.applyDesignLock(t.db, jobId, projectId);
   expect("JOB-IS-DESIGN-LOCKED", applied.applied,
     `the queued build is a design-locked build (phase ${applied.phase}, baseline ${applied.baselineId})`,
@@ -358,8 +371,84 @@ async function main(): Promise<number> {
     `the claimed job is not a design-locked build: ${JSON.stringify({ id: claimed.job.id, designLocked: claimed.job.designLocked }).slice(0, 300)}`);
 
   writeFileSync(path.join(OUT, "claimed-job.json"), JSON.stringify(claimed.job, null, 2));
-  log("the chain up to Model B is certified. Handing the job to the runner's own design-locked path.");
-  log("Run the model stage with runner/ci/frontend-integration-poc.ts, or wire runJob here once a GPU host is free.");
+
+  // ── 7. Model B writes the backend, and three gates judge it ───────────────────────────────────────────────
+  rule("6. Model B writes the backend against the frozen design");
+  const buildWs = createWorkspace(cfg.workspacesRoot, { id: claimed.job.id, attempt: claimed.job.attempt });
+  const buildSandbox = new JobSandbox(cfg.jobSandbox, buildWs, claimed.job.id, executor, logger);
+  const provider = new LocalProvider({ cfg, executor, log: logger });
+  const tracker = new RunTracker();
+  const stop = new StopSwitch();
+
+  log(`model: ${cfg.models.mode === "dual" ? cfg.models.b.tag : cfg.local.model} at ${cfg.local.baseUrl}`);
+  log(`budget: ${MAX_TURNS} turns, ${MAX_MINUTES} minutes, up to ${MAX_REPAIR_CYCLES} repair cycle(s)`);
+
+  // The tracker buffers activity rather than pushing it; drain it on a timer so a long run is watchable.
+  const ticker = setInterval(() => {
+    for (const a of tracker.drainActivity()) console.log(`  · ${String((a as { message?: string }).message ?? "").slice(0, 160)}`);
+  }, 10_000);
+
+  let dl;
+  const started = Date.now();
+  try {
+    await provider.prepare({ job: claimed.job, ws: buildWs, skillNames: [], referenceDomains: [], processEnv: process.env, systemPromptAppend: "" });
+    dl = await runDesignLockedJob({
+      job: claimed.job, ws: buildWs, sandbox: buildSandbox, provider, tracker, stop, log: logger,
+      // The real signed delivery, exactly as runner/src/job.ts does it: the artifact comes back over the
+      // control-plane channel and the runner checks its hash before opening it.
+      fetchArtifact: () => client.approvedArtifact(claimed.job!),
+      manifest,
+      maxTurns: MAX_TURNS,
+      maxWallMs: MAX_MINUTES * 60_000,
+    });
+  } finally {
+    clearInterval(ticker);
+    for (const a of tracker.drainActivity()) console.log(`  · ${String((a as { message?: string }).message ?? "").slice(0, 160)}`);
+    await buildSandbox.close().catch(() => {});
+    await provider.close?.().catch(() => {});
+  }
+  const minutes = ((Date.now() - started) / 60_000).toFixed(1);
+  log(`Model B finished after ${minutes} minute(s) and ${dl.cycles.length} cycle(s)`);
+
+  const evidencePath = writeEvidence(buildWs, dl);
+  writeFileSync(path.join(OUT, "design-locked-result.json"), JSON.stringify(dl, null, 2));
+  log(`runner evidence: ${evidencePath}`);
+
+  check("MODEL-B-RAN", dl.cycles.length > 0 ? "pass" : "undetermined",
+    dl.cycles.length > 0
+      ? `${dl.cycles.length} cycle(s) ran; the model produced ${dl.cycles.reduce((n, c) => n + c.changedFiles, 0)} file change(s) in total`
+      : `no cycle ran, so nothing was built: ${dl.problems.join("; ").slice(0, 400)}`);
+
+  // The three gates, reported separately and honestly. "ran: false" is undetermined, never a pass: the whole
+  // point of the architecture is that Model B does not certify its own work, so a gate that did not execute
+  // tells us nothing about whether the work is good.
+  const last = dl.cycles[dl.cycles.length - 1];
+  if (!last) {
+    check("GATE-CONFORMANCE", "undetermined", "no cycle to judge");
+    check("GATE-FUNCTIONAL", "undetermined", "no cycle to judge");
+    check("GATE-VISUAL", "undetermined", "no cycle to judge");
+  } else {
+    check("GATE-CONFORMANCE", last.conformance.ok ? "pass" : "fail",
+      last.conformance.ok ? "the implementation matches the contract" : `contract violations: ${last.conformance.violations.join("; ").slice(0, 500)}`);
+    check("GATE-FUNCTIONAL", !last.functional.ran ? "undetermined" : last.functional.ok ? "pass" : "fail",
+      last.functional.ran ? last.functional.detail.slice(0, 500) : `the functional gate did not run, so nothing about the backend working has been established: ${last.functional.detail.slice(0, 300)}`);
+    check("GATE-VISUAL", !last.visual.ran ? "undetermined" : last.visual.ok ? "pass" : "fail",
+      last.visual.ran ? last.visual.detail.slice(0, 500) : `the visual gate did not run, so design fidelity is unverified: ${last.visual.detail.slice(0, 300)}`);
+  }
+
+  expect("REPAIR-BOUNDED", dl.cycles.length <= MAX_REPAIR_CYCLES + 1,
+    `repair stayed within its limit: ${dl.cycles.length} of at most ${MAX_REPAIR_CYCLES + 1} cycle(s)`,
+    `repair ran ${dl.cycles.length} cycles, beyond the ${MAX_REPAIR_CYCLES} allowed`);
+
+  // Whatever the model did, the approved design must still be the approved design.
+  const heldBaseline = await DL.getBaseline(t.db, state.activeBaselineId!);
+  expect("BASELINE-IMMUTABLE", heldBaseline?.fingerprint === baseline.fingerprint,
+    "the approved baseline is unchanged after the build",
+    `the approved baseline moved: ${heldBaseline?.fingerprint?.slice(0, 16)} is not ${baseline.fingerprint.slice(0, 16)}`);
+
+  check("BUILD-VERDICT", dl.ok ? "pass" : "fail",
+    dl.ok ? `all three gates passed: ${dl.summary.slice(0, 400)}`
+          : `the build did not pass its gates (stopped at ${dl.failedAt ?? "verification"}): ${dl.problems.join("; ").slice(0, 500)}`);
 
   return finish(ledger.some((l) => l.outcome !== "pass") ? 1 : 0);
 }
