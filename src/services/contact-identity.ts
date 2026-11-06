@@ -324,12 +324,39 @@ async function evaluate(db: Db, n: Normalized): Promise<Evaluation> {
   // after another. On a D1 binding each round trip costs real latency (~150 ms on staging), and this function used to
   // wait for eight in series; the identity chain below genuinely has to be sequential, but these do not. Nothing
   // about WHAT is matched changes — only when the queries leave.
+  // One OR across two tables cost more than everything else on staging put together. Cloudflare's
+  // per-statement analytics for deploy #160 put this query top by rows read: 344 calls, 12.8 MILLION rows,
+  // ~37,000 per call, because `co.domain_norm = ? OR c.name_company_norm = ?` cannot be driven by any index
+  // and scanned `contacts` every time. Pages across staging then answered "D1 DB is overloaded. Too many
+  // resources consumed within a 10 second window" — including a trivial public page that runs one indexed
+  // lookup and was only a victim of the exhausted budget.
+  //
+  // Each branch on its own IS indexable, so they are asked separately and unioned: the name+company branch by
+  // idx_contacts_name_company_norm, and the domain branch from companies(domain_norm) down to that company's
+  // contacts through idx_contacts_company (migration 0080). Measured on 40,000 contacts, 11.5 ms -> ~0 ms,
+  // and NEITHER HALF WORKS WITHOUT THE OTHER: the index alone is never used by the OR form (11.4 ms), and the
+  // rewrite alone still scans for the domain branch (10.1 ms).
+  //
+  // What is matched is unchanged, and the LEFT JOIN was never doing what it looked like it was doing.
+  // name_company_norm is maintained by the contacts_norm triggers from contact_norm_v (migration 0044), whose
+  // CASE yields NULL unless the contact's company has a name — so a contact with no company has a NULL
+  // name_company_norm and is matched by NEITHER branch, in the old form as much as the new one. Both
+  // predicates therefore only ever hold for a contact whose company_id resolves, which makes the old LEFT
+  // JOIN equivalent to an inner join here and the rewrite exact.
+  //
+  // (An earlier version of this comment claimed the name+company branch still reached contacts with no
+  // company. It does not, and never did; the conclusion was right for the wrong reason.)
+  //
+  // Each branch keeps the original limit, and which 25 come back when a branch overflows was unspecified
+  // before and remains so — there is no ORDER BY in either form.
   const businessIdQuery = (() => {
-    if (!(n.domain || (n.company && n.name))) return null;
-    const conds: string[] = [], binds: string[] = [];
-    if (n.domain) { conds.push(`co.domain_norm = ?`); binds.push(n.domain); }
-    if (n.company && n.name) { conds.push(`c.name_company_norm = ?`); binds.push(`${n.name}|${n.companyRaw ?? ""}`); }
-    return db.prepare(`SELECT c.id FROM contacts c LEFT JOIN companies co ON co.id = c.company_id WHERE (${conds.join(" OR ")}) AND c.name <> 'Deleted contact' LIMIT 25`).bind(...binds).all<{ id: string }>();
+    const byName = n.company && n.name ? `${n.name}|${n.companyRaw ?? ""}` : null;
+    const NAME_BRANCH = `SELECT id FROM (SELECT c.id AS id FROM contacts c WHERE c.name_company_norm = ? AND c.name <> 'Deleted contact' LIMIT 25)`;
+    const DOMAIN_BRANCH = `SELECT id FROM (SELECT c.id AS id FROM contacts c JOIN companies co ON co.id = c.company_id WHERE co.domain_norm = ? AND c.name <> 'Deleted contact' LIMIT 25)`;
+    if (byName && n.domain) return db.prepare(`${NAME_BRANCH} UNION ${DOMAIN_BRANCH} LIMIT 25`).bind(byName, n.domain).all<{ id: string }>();
+    if (byName) return db.prepare(`${NAME_BRANCH} LIMIT 25`).bind(byName).all<{ id: string }>();
+    if (n.domain) return db.prepare(`${DOMAIN_BRANCH} LIMIT 25`).bind(n.domain).all<{ id: string }>();
+    return null;
   })();
   const [identities, businessIdRows, customerAccounts, domainCustomers] = await Promise.all([
     findIdentities(db, n.emails.map((e) => e.key), n.phones.map((p) => p.key)),

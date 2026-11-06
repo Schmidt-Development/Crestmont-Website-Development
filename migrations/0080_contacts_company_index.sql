@@ -1,0 +1,21 @@
+-- The staging D1 overload, measured rather than guessed (deploy #160, 21:30-22:10 UTC).
+--
+-- Cloudflare's own per-statement analytics for that window put businessIdQuery in
+-- src/services/contact-identity.ts at the top by rows read: 344 calls, 12.8 MILLION rows, about 37,000 rows
+-- per call, 15.5 seconds in total. It ran a full scan of `contacts` every time, because its OR spans two
+-- tables and no index can drive that. Pages then answered "D1_ERROR: D1 DB is overloaded. Too many resources
+-- consumed within a 10 second window" — including /services/booking-scheduling, a trivial public page that
+-- runs one indexed lookup and was simply a victim of an exhausted budget.
+--
+-- This index is one half of the fix; the query rewrite beside it is the other, and MEASURED ON 40,000
+-- CONTACTS NEITHER WORKS WITHOUT THE OTHER:
+--
+--     current query, no index      11.5 ms   SCAN c
+--     current query, this index    11.4 ms   SCAN c  — the index is never used
+--     rewrite, no index            10.1 ms   the companies branch still scans contacts
+--     rewrite + this index          ~0 ms    both branches driven by an index
+--
+-- So landing one alone and concluding it did not help would be the wrong conclusion. The rewrite drives the
+-- domain branch from companies(domain_norm), which is already indexed, and then needs this index to find
+-- that company's contacts instead of scanning the table.
+CREATE INDEX idx_contacts_company ON contacts(company_id) WHERE company_id IS NOT NULL;
