@@ -529,24 +529,28 @@ jobs:
           # setsid, not just nohup: a background process left in the step's own process group does not
           # reliably survive the step boundary on a runner, and in deploy #161 the capture wrote 0 lines for
           # the whole job. nohup blocks SIGHUP; it does not help if the group is killed.
-          setsid nohup timeout 4200 $WRANGLER tail crestmont-platform-staging --env staging --format json \
+          # The Worker is named explicitly and WITHOUT --env: given a name and --env staging, wrangler appends the
+          # environment to it and tails "crestmont-platform-staging-staging", a Worker that does not exist. That is
+          # why #160 and #161 captured nothing at all.
+          setsid nohup timeout 4200 $WRANGLER tail crestmont-platform-staging --format json \
             > worker-tail.jsonl 2> worker-tail.err < /dev/null &
           echo "$!" > worker-tail.pid
           date -u +%Y-%m-%dT%H:%M:%SZ > worker-tail.started
-          # WAIT for a connection instead of assuming one. The previous version slept 8 seconds and then
-          # tested `[ -s worker-tail.err ]`, which is false when the file is EMPTY — so a capture that
-          # produced nothing at all passed the check silently, and the failure only surfaced forty minutes
-          # later as "never connected". An instrument that cannot start should say so while it still matters.
-          connected=no
-          for _ in $(seq 1 20); do
-            if grep -qi "waiting for logs\|Connected to\|Successfully created tail" worker-tail.err 2>/dev/null \
-               || [ -s worker-tail.jsonl ]; then connected=yes; break; fi
+          # PROVE the capture sees this Worker, with a positive control: a request carrying a value nobody else
+          # can send, which must come back in the captured log. A banner or an empty file proves nothing; only
+          # our own request arriving in the stream does. Until then the capture's silence means nothing.
+          probe="p${{ github.run_id }}x${{ github.run_attempt }}x$(date -u +%s%N)"   # unique to this run; not a secret
+          proven=no
+          for _ in $(seq 1 30); do
+            curl -s -o /dev/null -m 10 "${{ steps.deploy.outputs.url }}/api/health?tailprobe=$probe" || true
             sleep 3
+            if grep -q "$probe" worker-tail.jsonl 2>/dev/null; then proven=yes; break; fi
           done
-          if [ "$connected" = yes ]; then
-            echo "Worker log capture connected after $(( $(date -u +%s) - $(date -u -d "$(cat worker-tail.started)" +%s) ))s."
+          echo "$proven" > worker-tail.proven
+          if [ "$proven" = yes ]; then
+            echo "Worker log capture PROVEN: its own probe request appeared in the stream after $(( $(date -u +%s) - $(date -u -d "$(cat worker-tail.started)" +%s) ))s."
           else
-            echo "::warning title=Worker log capture::Did not connect within 60s, so the steps below fall back to app_errors alone. This is the capture failing, NOT the Worker being quiet."
+            echo "::warning title=Worker log capture::Its probe request never appeared in the stream within 90s, so the capture is NOT connected to this Worker. The steps below fall back to app_errors alone; nothing the capture reports (including silence) is evidence."
             echo "stderr: $(sed -e 's/\x1b\[[0-9;]*m//g' worker-tail.err 2>/dev/null | tr '\n' ' ' | cut -c1-300)"
             echo "process still alive: $(kill -0 "$(cat worker-tail.pid)" 2>/dev/null && echo yes || echo no)"
           fi
@@ -829,17 +833,27 @@ jobs:
           node --no-warnings scripts/staging-rotation-check.ts verify --url "${{ steps.deploy.outputs.url }}" \
             --state "$RUNNER_TEMP/rotation-state.json" --access access/access.json
 
+      # The deployment record states what this run ACHIEVED, computed from the same mandatory steps that fail the
+      # job (scripts/deploy-outcome.ts): succeeded/passed only when every one passed; any failure, cancellation or
+      # skip records failed/failed, so a red run can never leave a succeeded, verified deployment behind for the
+      # readiness gates to judge. It used to record succeeded whenever the upload worked, verified by smoke alone.
       - name: Record evidence and deployment
+        id: record
         if: always() && steps.deploy.outcome == 'success'
         env:
           READINESS_URL: ${{ steps.deploy.outputs.url }}
+          STEPS: ${{ toJSON(steps) }}
         run: |
           [ -f evidence/staging-check.json ] && node --no-warnings scripts/post-evidence.ts evidence/staging-check.json || true
           [ -f evidence/staging-e2e.json ] && node --no-warnings scripts/post-evidence.ts evidence/staging-e2e.json || true
+          node --no-warnings scripts/deploy-outcome.ts --rotation-pending "${{ steps.gate.outputs.pending == 'true' }}" > deploy-outcome.json
+          field() { node -e 'console.log(JSON.parse(require("fs").readFileSync("deploy-outcome.json","utf8"))[process.argv[1]])' "$1"; }
+          status=$(field status); verification=$(field verification); notes=$(field notes); rm -f deploy-outcome.json
+          echo "### Deployment recorded as **$status** (verification $verification): $notes" >> "$GITHUB_STEP_SUMMARY"
           node --no-warnings scripts/post-deployment.ts --id "$DEPLOYMENT_ID" --environment staging --commit "$GITHUB_SHA" \
-            --status succeeded --url "$READINESS_URL" --by "github-actions:${{ github.actor }}" \
+            --status "$status" --url "$READINESS_URL" --by "github-actions:${{ github.actor }}" \
             --ci-run "gh-${{ github.run_id }}-${{ github.run_attempt }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --verification "${{ steps.smoke.outcome == 'success' && 'passed' || 'failed' }}" || true
+            --verification "$verification" --notes "$notes" || echo "::warning title=Deployment record not posted::the readiness API refused or was unreachable; the run's own conclusion stands."
 
       - name: GitHub readiness snapshot (branches, commits, PRs, runs, tags, code scanning)
         # READY-005 push path: the workflow's read-only token reads GitHub; the Worker needs no PAT.
@@ -946,11 +960,11 @@ jobs:
           [ -f worker-tail.pid ] && kill "$(cat worker-tail.pid)" 2>/dev/null || true
           sleep 2
           node --no-warnings scripts/worker-faults.ts worker-tail.jsonl --title "Staging Worker" \
-            --alive "$alive" --started "$started" --ended "$ended"
+            --alive "$alive" --started "$started" --ended "$ended" --proven "$(cat worker-tail.proven 2>/dev/null || echo no)"
           if [ -s worker-tail.err ]; then
             echo "::notice title=Worker log capture (stderr)::$(sed -e 's/\x1b\[[0-9;]*m//g' worker-tail.err | tr '\n' ' ' | cut -c1-300)"
           fi
-          rm -f worker-tail.jsonl worker-tail.err worker-tail.pid worker-tail.started
+          rm -f worker-tail.jsonl worker-tail.err worker-tail.pid worker-tail.started worker-tail.proven
 
       - name: Why did a page fail? (recent application errors, already redacted)
         if: always() && (steps.verify.outcome == 'failure' || steps.smoke.outcome == 'failure' || steps.e2e.outcome == 'failure'
@@ -993,7 +1007,7 @@ jobs:
         continue-on-error: true
         run: |
           [ -f worker-tail.pid ] && kill "$(cat worker-tail.pid)" 2>/dev/null || true
-          rm -f worker-tail.jsonl worker-tail.err worker-tail.pid worker-tail.started
+          rm -f worker-tail.jsonl worker-tail.err worker-tail.pid worker-tail.started worker-tail.proven
 
       - name: Fail the deploy when transport security on the live site is wrong
         if: always() && steps.tls.outcome == 'failure'
