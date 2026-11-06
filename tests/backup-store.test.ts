@@ -37,6 +37,8 @@ test("[INFRA-006] R2 store: wrangler r2 object put/get/delete against <bucket>/<
   assert.deepEqual(calls.map((c) => [c[2], c[3], c.at(-1)]), [
     ["put", "crestmont-files-staging/_backup-rehearsal/1/export.sql.sealed", "--remote"],
     ["get", "crestmont-files-staging/_backup-rehearsal/1/export.sql.sealed", "--remote"],
+    // delete reads the object first: if it is a chunk index, its parts are deleted too.
+    ["get", "crestmont-files-staging/_backup-rehearsal/1/export.sql.sealed", "--remote"],
     ["delete", "crestmont-files-staging/_backup-rehearsal/1/export.sql.sealed", "--remote"],
   ]);
   await assert.rejects(s.put("../escape", body), /object key/);
@@ -70,4 +72,43 @@ test("[INFRA-006] the staging rehearsal runs production's pipeline: export → s
   assert.doesNotMatch(r, /upload-artifact/);
   assert.match(r, /group: deploy-staging/, "never alongside a staging deploy");
   assert.match(r, /--store same-account-r2 --environment staging/);
+});
+
+test("[INFRA-006] R2 store: an object above one part is stored as parts with an index written LAST, and reassembled with every hash checked", async () => {
+  const objects = new Map<string, Buffer>();
+  const order: string[] = [];
+  let failPut: string | null = null;
+  const fake = (args: string[]) => {
+    const [, , op, path] = args;
+    const key = path.slice(path.indexOf("/") + 1);
+    const i = args.indexOf("--file");
+    if (op === "put") { if (failPut && key.endsWith(failPut)) throw new Error("network"); objects.set(key, readFileSync(args[i + 1])); order.push(key); }
+    if (op === "get") { const b = objects.get(key); if (!b) throw new Error("The specified key does not exist."); writeFileSync(args[i + 1], b); }
+    if (op === "delete") objects.delete(key);
+    return "";
+  };
+  const { CHUNKED_FORMAT } = await import("../scripts/offsite-backup.ts");
+  const s = r2Store("crestmont-files-staging", fake, { partBytes: 10, attempts: 2 });
+  const body = Buffer.from("0123456789abcdefghijklmnopqrstuvwxyz!");   // 37 bytes → 4 parts
+  await s.put("_backup-rehearsal/1/export.sql.sealed", body);
+  assert.deepEqual(order, ["0000", "0001", "0002", "0003"].map((n) => `_backup-rehearsal/1/export.sql.sealed.part-${n}`).concat("_backup-rehearsal/1/export.sql.sealed"), "parts first, index last");
+  const index = JSON.parse(objects.get("_backup-rehearsal/1/export.sql.sealed")!.toString());
+  assert.equal(index.format, CHUNKED_FORMAT);
+  assert.equal(index.size, 37);
+  assert.deepEqual((await s.get("_backup-rehearsal/1/export.sql.sealed")).toString(), body.toString());
+  // A corrupted part is caught by its own hash before anything is joined.
+  objects.set("_backup-rehearsal/1/export.sql.sealed.part-0002", Buffer.from("XXXXXXXXXX"));
+  await assert.rejects(s.get("_backup-rehearsal/1/export.sql.sealed"), /part .*part-0002 does not match/);
+  // Delete removes every part and the index.
+  await s.delete("_backup-rehearsal/1/export.sql.sealed");
+  assert.equal(objects.size, 0);
+  // A part that keeps failing: no index is written and the parts already stored are removed.
+  failPut = ".part-0002";
+  await assert.rejects(s.put("_backup-rehearsal/2/export.sql.sealed", body), /upload .*part-0002: network \(after 2 attempts\)/);
+  assert.equal(objects.size, 0, "nothing left that could be mistaken for a backup");
+  // A small object is stored as itself, exactly as before (the manifest).
+  failPut = null;
+  await s.put("_backup-rehearsal/3/manifest.json", Buffer.from('{"o":"x"}'));   // 9 bytes, under the 10-byte test part
+  assert.deepEqual([...objects.keys()], ["_backup-rehearsal/3/manifest.json"]);
+  assert.equal((await s.get("_backup-rehearsal/3/manifest.json")).toString(), '{"o":"x"}');
 });

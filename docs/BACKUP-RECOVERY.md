@@ -78,6 +78,17 @@ says "same Cloudflare account (not off-Cloudflare)". Recommended: a dedicated bu
 (not the customer-files bucket, which the Worker can write to), then `BACKUP_S3_*` for the off-Cloudflare copy, which
 takes precedence when both are set.
 
+**Large objects in R2.** `wrangler r2 object put` refuses anything above 300 MiB, and the staging export passed that
+(rehearsal #1, run 42136953807: "Wrangler only supports uploading files up to 300 MiB in size"). The R2 store therefore
+writes an object above 128 MiB as `<key>.part-0000`, `-0001`, … and then, LAST, a small JSON index at `<key>`
+(`crestmont-chunked/1`: total size and SHA-256, each part's size and SHA-256). Until every part has landed there is
+no index, so a half-finished upload is never taken for a backup, and the parts already stored are removed. Reading
+follows the index, checks every part and the joined object against their hashes, and returns the sealed export
+unchanged — the manifest, `seal.ts open` and the restore steps do not change. Each part is retried up to 3 times.
+Verified locally with a 310 MiB object through real wrangler 4.149.0 (local R2): three parts, byte-identical after
+the round trip, deleted completely. To open a chunked backup by hand: download the index and each part listed in
+it, concatenate the parts in order, check the SHA-256, then `node --no-warnings scripts/seal.ts open`.
+
 #### Rehearsal on staging (`backup-rehearsal-staging.yml`, weekly + on demand)
 
 Production's pipeline has never run (no data, no destination). The rehearsal runs the same scripts in the same order
