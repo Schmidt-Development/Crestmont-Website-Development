@@ -9,14 +9,80 @@
 //   node --no-warnings scripts/offsite-backup.ts compare <source.json> <f1,f2,…> --commit <sha> --run-id <id> --started <iso>
 //        --object <key> --sha256 <hex> --out <evidence.json>                → restore verification evidence (exit 1 on mismatch)
 //
-// Destination (GitHub `production` environment secrets): BACKUP_S3_ENDPOINT (https://…), BACKUP_S3_BUCKET,
-// BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY; optional BACKUP_S3_REGION (default us-east-1; "auto" for R2).
-// The object is the SEALED export (scripts/seal.ts, AES-256-GCM): the store never sees plaintext.
-// Nothing here prints a key, a secret or the export's contents.
+// Destination, one of:
+//   · off-Cloudflare (preferred; GitHub environment secrets): BACKUP_S3_ENDPOINT (https://…), BACKUP_S3_BUCKET,
+//     BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY; optional BACKUP_S3_REGION (default us-east-1).
+//   · an R2 bucket in the SAME Cloudflare account (BACKUP_R2_BUCKET, written with wrangler and the Cloudflare token the
+//     job already holds — no new credential). It protects against losing or corrupting the database, NOT against losing
+//     the Cloudflare account, so it is never described as off-Cloudflare (storeKind()).
+// The S3 destination wins when both are set. The object is the SEALED export (scripts/seal.ts, AES-256-GCM): the store
+// never sees plaintext. Nothing here prints a key, a secret or the export's contents.
+//   node --no-warnings scripts/offsite-backup.ts delete <key>                → remove an object (rehearsal clean-up)
 import { createHash, createHmac } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { realpathSync } from "node:fs";
 import { compareCounts, rowsOfAll } from "./restore-drill.ts";
+
+export type StoreKind = "off-cloudflare" | "same-account-r2";
+export interface Store {
+  kind: StoreKind; describe: string;
+  put(key: string, body: Buffer): Promise<{ sha256: string }>;
+  get(key: string): Promise<Buffer>;
+  delete(key: string): Promise<void>;
+}
+
+/** An R2 bucket in the account the job's Cloudflare token belongs to, through wrangler (`r2 object … --remote`). */
+export function r2Store(bucket: string, run: (args: string[]) => Buffer | string = wranglerRun): Store {
+  if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket)) throw new Error("BACKUP_R2_BUCKET is not a valid R2 bucket name");
+  const tmp = () => `${process.env.RUNNER_TEMP ?? "/tmp"}/r2-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  return {
+    kind: "same-account-r2", describe: `r2://${bucket} (same Cloudflare account — not an off-Cloudflare copy)`,
+    async put(key, body) {
+      objectKey(key);
+      const f = tmp(); writeFileSync(f, body, { mode: 0o600 });
+      try { run(["r2", "object", "put", `${bucket}/${key}`, "--file", f, "--content-type", "application/octet-stream", "--remote"]); }
+      finally { try { (await import("node:fs")).rmSync(f, { force: true }); } catch { /* best effort */ } }
+      return { sha256: sha256(body) };
+    },
+    async get(key) {
+      objectKey(key);
+      const f = tmp();
+      try { run(["r2", "object", "get", `${bucket}/${key}`, "--file", f, "--remote"]); return readFileSync(f); }
+      finally { try { (await import("node:fs")).rmSync(f, { force: true }); } catch { /* best effort */ } }
+    },
+    async delete(key) { objectKey(key); run(["r2", "object", "delete", `${bucket}/${key}`, "--remote"]); },
+  };
+}
+
+function wranglerRun(args: string[]): Buffer {
+  const [cmd, ...base] = (process.env.WRANGLER ?? "npx --yes wrangler@4.149.0").split(" ").filter(Boolean);
+  try { return execFileSync(cmd, [...base, ...args], { stdio: ["ignore", "pipe", "pipe"], maxBuffer: 256 * 1024 * 1024 }); }
+  catch (e) {
+    // wrangler's own complaint, without colour codes or the account id; never the object's content.
+    const err = String((e as { stderr?: Buffer }).stderr ?? (e as Error).message).replace(/\x1b\[[0-9;]*m/g, "").replace(/\/accounts\/[^/\s]+\//g, "/accounts/…/");
+    throw new Error(`wrangler ${args.slice(0, 3).join(" ")} failed: ${err.split("\n").filter((l) => /error|✘|code/i.test(l)).slice(0, 2).join(" ").slice(0, 240) || "no message"}`);
+  }
+}
+
+/** The configured destination: off-Cloudflare S3 first, else a same-account R2 bucket, else none. */
+export function storeFromEnv(env: Record<string, string | undefined>, f: typeof fetch = fetch): { store: Store | null; problem: string | null; missing: string[] } {
+  const s3 = s3Config(env);
+  if (s3.problem) return { store: null, problem: s3.problem, missing: [] };
+  if (s3.config) {
+    const c = s3.config;
+    return { store: { kind: "off-cloudflare", describe: `${c.endpoint}/${c.bucket} (region ${c.region})`,
+      put: (k, b) => putObject(c, k, b, f), get: (k) => getObject(c, k, f), delete: (k) => deleteObject(c, k, f) }, problem: null, missing: [] };
+  }
+  const r2 = env.BACKUP_R2_BUCKET?.trim();
+  if (r2) { try { return { store: r2Store(r2), problem: null, missing: [] }; } catch (e) { return { store: null, problem: (e as Error).message, missing: [] }; } }
+  return { store: null, problem: null, missing: [...s3.missing, "or BACKUP_R2_BUCKET"] };
+}
+
+function objectKey(key: string) {
+  if (!/^[A-Za-z0-9._\/-]{1,512}$/.test(key) || key.includes("..")) throw new Error("object key may contain only letters, digits, . _ - /");
+}
 
 export interface S3Config { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string; region: string }
 export const S3_VARS = ["BACKUP_S3_ENDPOINT", "BACKUP_S3_BUCKET", "BACKUP_S3_ACCESS_KEY_ID", "BACKUP_S3_SECRET_ACCESS_KEY"] as const;
@@ -70,6 +136,14 @@ export async function putObject(c: S3Config, key: string, body: Buffer, f: typeo
   return { sha256: digest };
 }
 
+export async function deleteObject(c: S3Config, key: string, f: typeof fetch = fetch, now = new Date()): Promise<void> {
+  const url = objectUrl(c, key);
+  const headers = signV4({ method: "DELETE", url, headers: {}, payloadSha256: sha256(""), accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, region: c.region, now });
+  const { host: _host, ...send } = headers;
+  const res = await f(url, { method: "DELETE", headers: send });
+  if (!res.ok && res.status !== 404) throw new Error(`delete failed: HTTP ${res.status}`);
+}
+
 export async function getObject(c: S3Config, key: string, f: typeof fetch = fetch, now = new Date()): Promise<Buffer> {
   const url = objectUrl(c, key);
   const headers = signV4({ method: "GET", url, headers: {}, payloadSha256: sha256(""), accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, region: c.region, now });
@@ -84,16 +158,19 @@ export function countsMap(outputs: string[]): Record<string, number> {
   return Object.fromEntries(rowsOfAll(outputs).map((r) => [String(r.t), Number(r.n)]).sort(([a], [b]) => (a < b ? -1 : 1)));
 }
 
-export function backupEvidence(o: { passed: boolean; tables: number; rows: number; problems: string[]; commit: string; runId: string; startedAt: string; object: string; sha256: string }) {
-  const name = `production D1 export sealed off-Cloudflare and restored into a scratch database: ${o.tables} tables, ${o.rows} rows${o.passed ? " identical" : ""}`;
+export function backupEvidence(o: { passed: boolean; tables: number; rows: number; problems: string[]; commit: string; runId: string; startedAt: string; object: string; sha256: string; store?: StoreKind; environment?: "production" | "staging" }) {
+  const where = (o.store ?? "off-cloudflare") === "off-cloudflare" ? "sealed off-Cloudflare" : "sealed to an R2 bucket in the same Cloudflare account (not off-Cloudflare)";
+  const env = o.environment ?? "production";
+  const name = `${env} D1 export ${where} and restored into a scratch database: ${o.tables} tables, ${o.rows} rows${o.passed ? " identical" : ""}`;
   return {
-    runId: o.runId, source: "ci", environment: "production", commitSha: o.commit, startedAt: o.startedAt, finishedAt: new Date().toISOString(),
+    runId: o.runId, source: "ci", environment: env, commitSha: o.commit, startedAt: o.startedAt, finishedAt: new Date().toISOString(),
     results: [{ requirementId: "INFRA-006", testName: name, outcome: o.passed ? "passed" : "failed",
       message: `${o.passed ? "" : `${o.problems.slice(0, 10).join("; ")} · `}object ${o.object} sha256 ${o.sha256}`.slice(0, 1000) }],
   };
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+const entry = (() => { try { return realpathSync(process.argv[1] ?? ""); } catch { return ""; } })();
+if (entry === realpathSync(fileURLToPath(import.meta.url))) {
   const [mode, a, b] = process.argv.slice(2);
   const arg = (n: string) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : undefined; };
   try {
@@ -101,19 +178,24 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     else if (mode === "compare") {
       const source = Object.entries(JSON.parse(readFileSync(a, "utf8")) as Record<string, number>).map(([t, n]) => ({ t, n }));
       const r = compareCounts(source, rowsOfAll(b.split(",").map((f) => readFileSync(f, "utf8"))));
-      writeFileSync(arg("--out") ?? "evidence/production-backup.json", JSON.stringify(backupEvidence({ ...r, commit: arg("--commit") ?? "0".repeat(40), runId: arg("--run-id") ?? `local-backup-${Date.now()}`, startedAt: arg("--started") ?? new Date().toISOString(), object: arg("--object") ?? "?", sha256: arg("--sha256") ?? "?" })));
+      const store = (arg("--store") ?? "off-cloudflare") as StoreKind, environment = (arg("--environment") ?? "production") as "production" | "staging";
+      if (!["off-cloudflare", "same-account-r2"].includes(store) || !["production", "staging"].includes(environment)) throw new Error("--store must be off-cloudflare|same-account-r2 and --environment production|staging");
+      writeFileSync(arg("--out") ?? "evidence/production-backup.json", JSON.stringify(backupEvidence({ ...r, commit: arg("--commit") ?? "0".repeat(40), runId: arg("--run-id") ?? `local-backup-${Date.now()}`, startedAt: arg("--started") ?? new Date().toISOString(), object: arg("--object") ?? "?", sha256: arg("--sha256") ?? "?", store, environment })));
       console.log(`${r.passed ? "PASSED" : "FAILED"}: ${r.tables} tables, ${r.rows} rows${r.problems.length ? `; ${r.problems.slice(0, 10).join("; ")}` : ""}`);
       if (!r.passed) process.exit(1);
     } else {
-      const { config, missing, problem } = s3Config(process.env);
+      const { store, missing, problem } = storeFromEnv(process.env);
       if (mode === "check") {
         if (problem) { console.error(problem); process.exit(1); }
-        if (missing.length) { console.error(`not configured: ${missing.join(", ")}`); process.exit(1); }
-        console.log(`destination: ${config!.endpoint}/${config!.bucket} (region ${config!.region})`);
-      } else if (!config) { console.error(problem ?? `not configured: ${missing.join(", ")}`); process.exit(1); }
-      else if (mode === "put" && a && b) { const r = await putObject(config, b, readFileSync(a)); console.log(`uploaded ${b} sha256 ${r.sha256}`); }
-      else if (mode === "get" && a && b) { writeFileSync(b, await getObject(config, a), { mode: 0o600 }); console.log(`downloaded ${a}`); }
-      else { console.error("usage: check | put <file> <key> | get <key> <out> | counts <files> <out.json> | compare <source.json> <files> [--out …]"); process.exit(2); }
+        if (!store) { console.error(`not configured: ${missing.join(", ")}`); process.exit(1); }
+        console.log(`destination: ${store.describe}`);
+        // For the workflow: which kind of copy this is, so the summary and the evidence never overstate it.
+        if (process.env.GITHUB_OUTPUT) (await import("node:fs")).appendFileSync(process.env.GITHUB_OUTPUT, `store=${store.kind}\n`);
+      } else if (!store) { console.error(problem ?? `not configured: ${missing.join(", ")}`); process.exit(1); }
+      else if (mode === "put" && a && b) { const r = await store.put(b, readFileSync(a)); console.log(`uploaded ${b} sha256 ${r.sha256}`); }
+      else if (mode === "get" && a && b) { writeFileSync(b, await store.get(a), { mode: 0o600 }); console.log(`downloaded ${a}`); }
+      else if (mode === "delete" && a) { await store.delete(a); console.log(`deleted ${a}`); }
+      else { console.error("usage: check | put <file> <key> | get <key> <out> | delete <key> | counts <files> <out.json> | compare <source.json> <files> [--out …]"); process.exit(2); }
     }
   } catch (e) {
     console.error(String((e as Error).message ?? e).split("\n")[0].slice(0, 300));

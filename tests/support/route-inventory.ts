@@ -611,6 +611,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/scan/queue": signed("x-crestmont-scanner-signature"),
   "POST /api/scan/file": signed("x-crestmont-scanner-signature"),
   "POST /api/scan/result": signed("x-crestmont-scanner-signature"),
+  "POST /api/scan/heartbeat": signed("x-crestmont-scanner-signature"),
   "POST /api/research/runner/batch": signed("x-crestmont-research-signature"),
   // ── Outbound AI sales calls (src/routes/sales-outbound.ts) ──
   "GET /buy/:token": token("purchase link emailed to the verified prospect (only its SHA-256 is stored)", { token: "salesLinkToken" }),

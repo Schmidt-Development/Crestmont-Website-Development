@@ -11,7 +11,7 @@ import { syncDerivedStates } from "../readiness/sync.ts";
 import { approvalValidity, ingestionHealth, type ReadinessInput } from "../readiness/engine.ts";
 import { can, isOwner, type Actor } from "../domain/authz.ts";
 import { audit } from "./security.ts";
-import { scanHealth, SCAN_BACKLOG_HOURS } from "./malware-scan.ts";
+import { scanHealth, SCAN_BACKLOG_HOURS, SCANNER_SILENT_MINUTES, SIGNATURES_STALE_HOURS } from "./malware-scan.ts";
 import { githubFeedStatus, latestGithubSync } from "./github.ts";
 import { mfaKeyStatus } from "../lib/totp-secrets.ts";
 
@@ -149,13 +149,27 @@ export async function malwareScanFeed(ctx: Pick<AppContext, "db" | "now">): Prom
     return { source, status: "not_configured", required: false, lastSuccessAt: null, lastAttemptAt: null, advisory: true,
       detail: `No malware scanner has reported a verdict (F-02). ${h.backlog} file(s) are stored unscanned and stay quarantined from share links; uploads are never labelled clean without a verdict.` };
   }
-  const oldestMs = h.oldestPendingAt ? ctx.now().getTime() - Date.parse(h.oldestPendingAt) : 0;
+  const now = ctx.now().getTime();
+  const oldestMs = h.oldestPendingAt ? now - Date.parse(h.oldestPendingAt) : 0;
   const stale = h.backlog > 0 && oldestMs > SCAN_BACKLOG_HOURS * 3_600_000;
+  // The scanner's own heartbeat says more than verdicts can: whether it is running at all, whether its ClamAV daemon
+  // answers, and whether its signatures are current. Each is checked before the backlog, because each explains it.
+  const hb = h.heartbeat;
+  if (hb) {
+    const base = { source, required: false, advisory: true, lastSuccessAt: h.lastScanAt, lastAttemptAt: hb.seenAt } as const;
+    const who = `${hb.scannerId}${hb.engine ? ` (${hb.engine})` : ""}`;
+    if (now - Date.parse(hb.seenAt) > SCANNER_SILENT_MINUTES * 60_000)
+      return { ...base, status: "stale", detail: `Last attempt failed: scanner ${who} has not reported since ${hb.seenAt} (over ${SCANNER_SILENT_MINUTES} min); ${h.backlog} file(s) waiting stay quarantined from share links.` };
+    if (!hb.daemonOk)
+      return { ...base, status: "failing", detail: `Last attempt failed: scanner ${hb.scannerId} is running but its ClamAV daemon is not answering${hb.detail ? ` (${hb.detail})` : ""}; ${h.backlog} file(s) waiting.` };
+    if (!hb.signaturesAt || now - Date.parse(hb.signaturesAt) > SIGNATURES_STALE_HOURS * 3_600_000)
+      return { ...base, status: "stale", detail: `Last attempt failed: scanner ${who} has ${hb.signaturesAt ? `signatures from ${hb.signaturesAt} (over ${SIGNATURES_STALE_HOURS}h old)` : "no readable signature date"}; signature updates (freshclam) have stopped.` };
+  }
   return {
     source, status: stale ? "stale" : "healthy", required: false, lastSuccessAt: h.lastScanAt, lastAttemptAt: h.lastScanAt,
     detail: stale
       ? `Last attempt failed: ${h.backlog} file(s) waiting, oldest since ${h.oldestPendingAt} (over ${SCAN_BACKLOG_HOURS}h). Scanner last reported ${h.lastScanAt}${h.engine ? ` (${h.engine})` : ""}.`
-      : `Scanner reporting${h.engine ? ` (${h.engine})` : ""}; ${h.backlog} file(s) waiting.`,
+      : `Scanner reporting${h.engine ? ` (${h.engine})` : ""}; ${h.backlog} file(s) waiting.${hb ? ` Heartbeat ${hb.seenAt}; signatures ${hb.signaturesAt}.` : ""}`,
   };
 }
 

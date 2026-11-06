@@ -1,0 +1,138 @@
+name: Backup pipeline rehearsal (staging)
+
+# INFRA-006 / TEST-004. production-backup.yml has never run: production holds no data yet and its destination is not
+# configured. This runs THE SAME scripts in the same order against staging, so the pipeline itself is proven before
+# production depends on it:
+#   export (read-only) → counts from the export → seal (scripts/seal.ts, AES-256-GCM) → plaintext removed → store
+#   (scripts/offsite-backup.ts) → every local copy removed → download from the store → sha256 of the sealed object and
+#   of the export checked against the manifest → open → restore into a throw-away D1 database → every table's row
+#   count compared → INFRA-006 evidence on staging → the stored objects and the scratch database deleted.
+#
+# Store: the EXISTING staging R2 bucket (crestmont-files-staging), under _backup-rehearsal/<run>/, with the Cloudflare
+# token this environment already holds; no new account, credential or resource. The seal passphrase is random for
+# this run only and never leaves the runner, so the stored object can be opened by nobody once the run ends (and it
+# is deleted anyway). This proves the pipeline; it is NOT a production backup and is never recorded as one.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 8 * * 3"   # weekly, Wednesday 08:23 UTC: the pipeline keeps being proven while production waits
+
+permissions:
+  contents: read
+
+jobs:
+  rehearse:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: staging
+    concurrency:
+      group: deploy-staging   # never alongside a staging deploy: an export adds load to the shared staging D1
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WRANGLER: npx --yes wrangler@4.149.0
+      SCRATCH: crestmont-backup-rehearsal-${{ github.run_id }}
+      BACKUP_R2_BUCKET: crestmont-files-staging
+      PREFIX: _backup-rehearsal/${{ github.run_id }}
+    steps:
+      - name: Check Cloudflare credentials
+        id: pre
+        env:
+          HAS: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        run: |
+          if [ "$HAS" != "true" ]; then echo "::notice title=Backup rehearsal skipped::Cloudflare secrets are not configured."; echo "ok=false" >> "$GITHUB_OUTPUT"; else echo "ok=true" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: steps.pre.outputs.ok == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: steps.pre.outputs.ok == 'true'
+        with:
+          node-version: "22.x"
+      - name: Resolve the staging D1 database id (same injection as deploy-staging.yml)
+        if: steps.pre.outputs.ok == 'true'
+        run: |
+          id=$($WRANGLER d1 list --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s).find(d=>d.name==="crestmont-staging");process.stdout.write(r?r.uuid:"")})')
+          [ -n "$id" ] || { echo "::error::The crestmont-staging D1 database was not found."; exit 1; }
+          node -e 'const fs=require("fs");let t=fs.readFileSync("wrangler.toml","utf8");t=t.replace(/(database_name = "crestmont-staging", database_id = )""/, `$1"${process.argv[1]}"`);fs.writeFileSync("wrangler.toml",t)' "$id"
+
+      - name: Export staging (read-only), seal, store
+        id: backup
+        if: steps.pre.outputs.ok == 'true'
+        run: |
+          echo "STARTED=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$GITHUB_ENV"
+          mkdir -p backup && chmod 700 backup
+          # A passphrase for this run only (never printed, never stored): sealing and opening are what is rehearsed.
+          ACCESS_ARTIFACT_PASSPHRASE=$(node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64url"))')
+          echo "::add-mask::$ACCESS_ARTIFACT_PASSPHRASE"
+          echo "ACCESS_ARTIFACT_PASSPHRASE=$ACCESS_ARTIFACT_PASSPHRASE" >> "$GITHUB_ENV"
+          export ACCESS_ARTIFACT_PASSPHRASE
+          node --no-warnings scripts/offsite-backup.ts check
+          $WRANGLER d1 export crestmont-staging --remote --env staging --output backup/export.sql > /dev/null
+          node --no-warnings scripts/restore-drill.ts export-counts backup/export.sql > backup/export-counts.json
+          node --no-warnings scripts/offsite-backup.ts counts backup/export-counts.json backup/counts.json
+          node --no-warnings scripts/seal.ts check > /dev/null
+          plain=$(sha256sum backup/export.sql | cut -d' ' -f1)
+          node --no-warnings scripts/seal.ts seal backup/export.sql backup/export.sql.sealed
+          rm -f backup/export.sql
+          sealed=$(sha256sum backup/export.sql.sealed | cut -d' ' -f1)
+          node -e 'const fs=require("fs");const [p,s,c,r]=process.argv.slice(1);fs.writeFileSync("backup/manifest.json",JSON.stringify({object:"export.sql.sealed",exportSha256:p,sealedSha256:s,commit:c,runId:r,createdAt:new Date().toISOString(),counts:JSON.parse(fs.readFileSync("backup/counts.json","utf8"))},null,1))' \
+            "$plain" "$sealed" "$GITHUB_SHA" "${{ github.run_id }}"
+          node --no-warnings scripts/offsite-backup.ts put backup/export.sql.sealed "$PREFIX/export.sql.sealed"
+          node --no-warnings scripts/offsite-backup.ts put backup/manifest.json "$PREFIX/manifest.json"
+          echo "SEALED_SHA256=$sealed" >> "$GITHUB_ENV"
+          { echo "### Backup pipeline rehearsal (staging)"; echo "- Export: $(wc -c < backup/export.sql.sealed) bytes sealed; sha256 (export) \`$plain\`, (sealed) \`$sealed\`"; echo "- Stored at r2://$BACKUP_R2_BUCKET/$PREFIX/ (deleted at the end of this run)"; } >> "$GITHUB_STEP_SUMMARY"
+          # Nothing local survives: what follows can only use what comes back from the store.
+          rm -rf backup
+
+      - name: Download from the store, verify both sha256 values, open, restore into a scratch database, compare
+        id: verify
+        if: steps.pre.outputs.ok == 'true' && steps.backup.outcome == 'success'
+        run: |
+          mkdir -p verify evidence && chmod 700 verify
+          node --no-warnings scripts/offsite-backup.ts get "$PREFIX/manifest.json" verify/manifest.json
+          node --no-warnings scripts/offsite-backup.ts get "$PREFIX/export.sql.sealed" verify/export.sql.sealed
+          want=$(node -e 'console.log(require("./verify/manifest.json").sealedSha256)')
+          [ "$(sha256sum verify/export.sql.sealed | cut -d' ' -f1)" = "$want" ] || { echo "::error::sealed object sha256 does not match the manifest"; exit 1; }
+          node --no-warnings scripts/seal.ts open verify/export.sql.sealed verify/export.sql
+          want=$(node -e 'console.log(require("./verify/manifest.json").exportSha256)')
+          [ "$(sha256sum verify/export.sql | cut -d' ' -f1)" = "$want" ] || { echo "::error::export sha256 does not match the manifest"; exit 1; }
+          node -e 'const fs=require("fs");fs.writeFileSync("verify/source-counts.json",JSON.stringify(require("./verify/manifest.json").counts))'
+          $WRANGLER d1 create "$SCRATCH" > /dev/null
+          node --no-warnings scripts/restore-drill.ts sanitize verify/export.sql verify/import.sql
+          rm -f verify/export.sql
+          $WRANGLER d1 execute "$SCRATCH" --remote --file verify/import.sql --yes > /dev/null
+          rm -f verify/import.sql
+          $WRANGLER d1 execute "$SCRATCH" --remote --json --command "SELECT name FROM sqlite_master WHERE type='table'" > verify/tables.json
+          node --no-warnings scripts/restore-drill.ts sql verify/tables.json > verify/count.sql
+          i=0; files=""
+          while IFS= read -r q; do [ -n "$q" ] || continue
+            $WRANGLER d1 execute "$SCRATCH" --remote --json --command "$q" > "verify/restored-$i.json"
+            files="$files${files:+,}verify/restored-$i.json"; i=$((i+1))
+          done < verify/count.sql
+          node --no-warnings scripts/offsite-backup.ts compare verify/source-counts.json "$files" --commit "$GITHUB_SHA" \
+            --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-backup-rehearsal" --started "$STARTED" \
+            --object "r2://$BACKUP_R2_BUCKET/$PREFIX/export.sql.sealed" --sha256 "$SEALED_SHA256" --store same-account-r2 --environment staging \
+            --out evidence/backup-rehearsal.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Record the rehearsal on staging (INFRA-006, environment staging)
+        if: always() && hashFiles('evidence/backup-rehearsal.json') != ''
+        continue-on-error: true
+        env:
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          url="${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}"
+          ev=$(node --no-warnings scripts/evidence-secret.ts print)
+          echo "::add-mask::$ev"
+          READINESS_URL="$url" EVIDENCE_INGEST_SECRET="$ev" node --no-warnings scripts/post-evidence.ts evidence/backup-rehearsal.json
+
+      - name: Delete the stored objects and the scratch database
+        if: always() && steps.pre.outputs.ok == 'true'
+        run: |
+          for k in export.sql.sealed manifest.json; do node --no-warnings scripts/offsite-backup.ts delete "$PREFIX/$k" > /dev/null 2>&1 || echo "::warning::r2://$BACKUP_R2_BUCKET/$PREFIX/$k could not be deleted (or was never stored); it is sealed with a passphrase nobody holds."; done
+          $WRANGLER d1 delete "$SCRATCH" --skip-confirmation > /dev/null 2>&1 || $WRANGLER d1 delete "$SCRATCH" -y > /dev/null 2>&1 || echo "::warning::Scratch database $SCRATCH could not be deleted automatically (or was never created); check the Cloudflare dashboard."
+      - name: Remove everything from the runner
+        if: always()
+        run: rm -rf backup verify evidence

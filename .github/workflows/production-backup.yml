@@ -10,9 +10,13 @@ name: Production backup
 # The repository is public: the export is NEVER a workflow artifact and never printed; plaintext exists only on the
 # runner, briefly, and is removed in every outcome.
 #
-# Skips with a notice (nothing exported) until the destination is configured on the GitHub environment:
-#   secrets BACKUP_S3_ENDPOINT, BACKUP_S3_BUCKET, BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY,
-#   BACKUP_SEAL_PASSPHRASE (32+ characters, kept in the Founder's password manager); optional BACKUP_S3_REGION.
+# Skips with a notice (nothing exported) until a destination is configured on the GitHub environment:
+#   off-Cloudflare (the goal): secrets BACKUP_S3_ENDPOINT, BACKUP_S3_BUCKET, BACKUP_S3_ACCESS_KEY_ID,
+#   BACKUP_S3_SECRET_ACCESS_KEY; optional BACKUP_S3_REGION; or, as an interim same-account copy with no new credential,
+#   the variable BACKUP_R2_BUCKET (an R2 bucket in the same Cloudflare account, written with the token this job already
+#   holds: it survives a lost or corrupted database, not a lost Cloudflare account, and every summary says so).
+#   Either way BACKUP_SEAL_PASSPHRASE (32+ characters, kept in the Founder's password manager).
+# The same steps are rehearsed end to end against staging by backup-rehearsal-staging.yml.
 # Environment: `production` (where CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID live). If that environment has required
 # reviewers, every scheduled run waits for approval; to run unattended, create an environment without reviewers holding
 # the same secrets and set the repository variable BACKUP_ENVIRONMENT to its name. Targets (pending Founder approval):
@@ -44,6 +48,7 @@ jobs:
     outputs:
       object: ${{ steps.upload.outputs.object }}
       manifest: ${{ steps.upload.outputs.manifest }}
+      store: ${{ steps.upload.outputs.store }}
     env:
       WRANGLER: npx --yes wrangler@4.149.0
     steps:
@@ -52,15 +57,17 @@ jobs:
         env:
           HAS_CF: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
           HAS_S3: ${{ secrets.BACKUP_S3_ENDPOINT != '' && secrets.BACKUP_S3_BUCKET != '' && secrets.BACKUP_S3_ACCESS_KEY_ID != '' && secrets.BACKUP_S3_SECRET_ACCESS_KEY != '' }}
+          HAS_R2: ${{ vars.BACKUP_R2_BUCKET != '' }}
           HAS_SEAL: ${{ secrets.BACKUP_SEAL_PASSPHRASE != '' }}
         run: |
           if [ "$HAS_CF" != "true" ]; then
             echo "::notice title=Production backup skipped::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID are not available to this environment. Nothing was exported."
             echo "ok=false" >> "$GITHUB_OUTPUT"
-          elif [ "$HAS_S3" != "true" ] || [ "$HAS_SEAL" != "true" ]; then
-            echo "::notice title=Production backup skipped::Off-Cloudflare destination not configured. Set BACKUP_S3_ENDPOINT, BACKUP_S3_BUCKET, BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY and BACKUP_SEAL_PASSPHRASE on this environment (docs/BACKUP-RECOVERY.md §3.2). Nothing was exported."
+          elif { [ "$HAS_S3" != "true" ] && [ "$HAS_R2" != "true" ]; } || [ "$HAS_SEAL" != "true" ]; then
+            echo "::notice title=Production backup skipped::Off-Cloudflare destination not configured. Set BACKUP_S3_ENDPOINT, BACKUP_S3_BUCKET, BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY and BACKUP_SEAL_PASSPHRASE on this environment (docs/BACKUP-RECOVERY.md §3.2), or the variable BACKUP_R2_BUCKET plus BACKUP_SEAL_PASSPHRASE for an interim same-account copy. Nothing was exported."
             echo "ok=false" >> "$GITHUB_OUTPUT"
           else
+            [ "$HAS_S3" = "true" ] || echo "::warning title=Same-account backup only::BACKUP_R2_BUCKET is an R2 bucket in the same Cloudflare account. It protects against a lost or corrupted database, not against losing the Cloudflare account; configure BACKUP_S3_* for the off-Cloudflare copy (docs/BACKUP-RECOVERY.md §3.2)."
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -92,7 +99,14 @@ jobs:
             $WRANGLER d1 execute crestmont-production --remote --env production --json --command "$q" > "backup/source-$i.json"
             files="$files${files:+,}backup/source-$i.json"; i=$((i+1))
           done < backup/count.sql
-          node --no-warnings scripts/offsite-backup.ts counts "$files" backup/counts.json
+          # The manifest's counts are the EXPORT's own rows: the restore must reproduce exactly what was exported. Counting
+          # the live database instead raced every write made between the export and the count (crons run every minute),
+          # so a correct backup could fail its verification. The live counts are kept as a cross-check: a table the
+          # export holds FEWER rows of than the live database had moments later is normal (new writes); more is not.
+          node --no-warnings scripts/restore-drill.ts export-counts backup/export.sql > backup/export-counts.json
+          node --no-warnings scripts/offsite-backup.ts counts backup/export-counts.json backup/counts.json
+          node --no-warnings scripts/offsite-backup.ts counts "$files" backup/live-counts.json
+          node -e 'const e=require("./backup/counts.json"),l=require("./backup/live-counts.json");const odd=Object.keys(e).filter(t=>t in l&&e[t]>l[t]).map(t=>`${t}: export ${e[t]} > live ${l[t]}`);const missing=Object.keys(l).filter(t=>!(t in e));if(odd.length||missing.length){console.log(`::warning title=Export differs from the live database::${[...odd,...missing.map(t=>`${t} not in the export`)].slice(0,10).join("; ")}`)}'
           echo "Export: $(wc -c < backup/export.sql) bytes, $(node -e 'console.log(Object.keys(require("./backup/counts.json")).length)') tables."
 
       - name: Seal the export (AES-256-GCM; plaintext removed)
@@ -110,7 +124,7 @@ jobs:
             "$NAME" "$plain" "$sealed" "$GITHUB_SHA" "${{ github.run_id }}"
           echo "plain=$plain" >> "$GITHUB_OUTPUT"; echo "sealed=$sealed" >> "$GITHUB_OUTPUT"
 
-      - name: Upload off-Cloudflare (S3-compatible)
+      - name: Upload off-Cloudflare (S3-compatible), or to the interim same-account R2 bucket
         id: upload
         if: steps.pre.outputs.ok == 'true' && steps.seal.outcome == 'success'
         env:
@@ -119,13 +133,18 @@ jobs:
           BACKUP_S3_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
           BACKUP_S3_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
           BACKUP_S3_REGION: ${{ secrets.BACKUP_S3_REGION }}
+          BACKUP_R2_BUCKET: ${{ vars.BACKUP_R2_BUCKET }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
+          node --no-warnings scripts/offsite-backup.ts check
           prefix="crestmont-production/d1/$(date -u +%Y/%m)"
           node --no-warnings scripts/offsite-backup.ts put "backup/$NAME.sql.sealed" "$prefix/$NAME.sql.sealed"
           node --no-warnings scripts/offsite-backup.ts put "backup/$NAME.json" "$prefix/$NAME.json"
           echo "object=$prefix/$NAME.sql.sealed" >> "$GITHUB_OUTPUT"; echo "manifest=$prefix/$NAME.json" >> "$GITHUB_OUTPUT"
           {
             echo "### Production backup $(date -u +%Y-%m-%dT%H:%MZ)"
+            echo "- Destination: $(node --no-warnings scripts/offsite-backup.ts check | sed 's/^destination: //')"
             echo "- Object: \`$prefix/$NAME.sql.sealed\` ($(wc -c < "backup/$NAME.sql.sealed") bytes, sealed)"
             echo "- sha256 (export): \`${{ steps.seal.outputs.plain }}\`"
             echo "- sha256 (sealed object): \`${{ steps.seal.outputs.sealed }}\`"
@@ -149,6 +168,7 @@ jobs:
       SCRATCH: crestmont-backup-verify-${{ github.run_id }}
       OBJECT: ${{ needs.backup.outputs.object }}
       MANIFEST: ${{ needs.backup.outputs.manifest }}
+      STORE: ${{ needs.backup.outputs.store }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -163,6 +183,7 @@ jobs:
           BACKUP_S3_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
           BACKUP_S3_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
           BACKUP_S3_REGION: ${{ secrets.BACKUP_S3_REGION }}
+          BACKUP_R2_BUCKET: ${{ vars.BACKUP_R2_BUCKET }}
           ACCESS_ARTIFACT_PASSPHRASE: ${{ secrets.BACKUP_SEAL_PASSPHRASE }}
         run: |
           echo "STARTED=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$GITHUB_ENV"
@@ -193,7 +214,7 @@ jobs:
           done < verify/count.sql
           node --no-warnings scripts/offsite-backup.ts compare verify/source-counts.json "$files" --commit "$GITHUB_SHA" \
             --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-production-backup" --started "$STARTED" \
-            --object "$OBJECT" --sha256 "$SEALED_SHA256" --out evidence/production-backup.json | tee -a "$GITHUB_STEP_SUMMARY"
+            --object "$OBJECT" --sha256 "$SEALED_SHA256" --store "${STORE:-off-cloudflare}" --environment production --out evidence/production-backup.json | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Record backup evidence (when the readiness API is configured)
         if: always() && hashFiles('evidence/production-backup.json') != ''
         continue-on-error: true

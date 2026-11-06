@@ -17,6 +17,7 @@
 // Usage: CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… node --no-warnings scripts/d1-analytics.ts \
 //          --database crestmont-staging --from 2026-11-05T21:30:00Z --to 2026-11-05T22:10:00Z [--top 15]
 import { fileURLToPath } from "node:url";
+import { realpathSync } from "node:fs";
 import { redact } from "../src/services/monitoring.ts";
 
 type Fetch = typeof fetch;
@@ -110,7 +111,8 @@ export function render(r: Result, from: string, to: string): string {
   return out.join("\n");
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+const entry = (() => { try { return realpathSync(process.argv[1] ?? ""); } catch { return ""; } })();
+if (entry === realpathSync(fileURLToPath(import.meta.url))) {
   const arg = (n: string) => { const i = process.argv.indexOf(`--${n}`); return i > 0 ? process.argv[i + 1] : undefined; };
   const token = process.env.CLOUDFLARE_API_TOKEN ?? "", account = process.env.CLOUDFLARE_ACCOUNT_ID ?? "";
   const to = arg("to") ?? new Date().toISOString(), from = arg("from") ?? new Date(Date.parse(to) - 3_600_000).toISOString();

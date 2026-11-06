@@ -1,6 +1,6 @@
 # Backup and recovery
 
-**Requirements:** INFRA-006, DOC-002, TEST-004 · **Status (2026-10-29):** staging is restore-drilled after every deploy (`staging-restore-drill.yml`); production has a pre-deploy export (`deploy-production.yml`) and a **daily sealed off-Cloudflare export with restore verification** (`production-backup.yml`, §3.2), which runs once its destination secrets are set. R2 versioning (§4) is not yet verified. Record every backup and every restore drill, with evidence, at **/staff/backups**.
+**Requirements:** INFRA-006, DOC-002, TEST-004 · **Status (2026-11-05):** production backup **not yet verified** — production holds no data and has no destination configured; the pipeline is rehearsed against staging (§3.2). Earlier status (2026-10-29): staging is restore-drilled after every deploy (`staging-restore-drill.yml`); production has a pre-deploy export (`deploy-production.yml`) and a **daily sealed off-Cloudflare export with restore verification** (`production-backup.yml`, §3.2), which runs once its destination secrets are set. R2 versioning (§4) is not yet verified. Record every backup and every restore drill, with evidence, at **/staff/backups**.
 
 ## 1. What needs protecting
 
@@ -56,6 +56,40 @@ Store the export **outside Cloudflare**: an encrypted bucket in a second provide
 It skips with a notice, exporting nothing, until these **environment secrets** exist: `BACKUP_S3_ENDPOINT` (e.g. `https://s3.us-west-004.backblazeb2.com`), `BACKUP_S3_BUCKET`, `BACKUP_S3_ACCESS_KEY_ID`, `BACKUP_S3_SECRET_ACCESS_KEY`, `BACKUP_SEAL_PASSPHRASE` (32+ characters; store it in the Founder's password manager — without it no backup can be opened), optional `BACKUP_S3_REGION`. Use a key limited to that one bucket, with **object lock or versioning** and a lifecycle rule (e.g. keep 35 daily copies). If the `production` environment has required reviewers, each scheduled run waits for approval; to run unattended, create an environment without reviewers that holds the same secrets and set `BACKUP_ENVIRONMENT` to its name. Open a backup: download the `.sql.sealed` object, then `node --no-warnings scripts/seal.ts open <file> export.sql`. Note: a D1 export briefly blocks other queries on a large database, so the job runs off-peak.
 
 The pre-deploy export in `deploy-production.yml` still runs before every production migration.
+
+**Row counts come from the export itself** (`restore-drill.ts export-counts`), not from the live database. Counting the
+live database a moment after the export raced every write in between (crons write every minute), so a correct backup
+could fail its restore verification. The live counts are still taken and a table the export holds *more* rows of than
+the live database had afterwards is warned about.
+
+#### Destinations — what exists today (2026-11-05)
+
+| Store | Exists? | Off-Cloudflare? | Credential | Cost | Status |
+|---|---|---|---|---|---|
+| S3-compatible bucket in a second provider (B2, Wasabi, AWS…) | **no** | yes — the goal | `BACKUP_S3_*` (new account) | B2: free up to 10 GB | Founder decision: account + bucket-scoped key |
+| R2 bucket in the same Cloudflare account | `crestmont-files-production` and `crestmont-files-staging` exist; a dedicated `crestmont-backups-production` does not | **no** | none new: the job's existing Cloudflare token (Workers R2 Storage: Edit) | R2 free tier (10 GB) | **supported** (`BACKUP_R2_BUCKET`, interim) |
+| GitHub artifacts | — | — | — | — | never: public repository |
+| Node 1's disk | yes | yes | a read-only R2 token for a pull (not built) | $0 | option, not implemented |
+
+`BACKUP_R2_BUCKET` (repository or environment **variable**) lets the daily backup run with no new credential as soon as
+production holds data. It protects against a lost or corrupted database and a bad migration; it does **not** protect
+against losing the Cloudflare account, so every run summary warns "Same-account backup only" and the INFRA-006 evidence
+says "same Cloudflare account (not off-Cloudflare)". Recommended: a dedicated bucket `crestmont-backups-production`
+(not the customer-files bucket, which the Worker can write to), then `BACKUP_S3_*` for the off-Cloudflare copy, which
+takes precedence when both are set.
+
+#### Rehearsal on staging (`backup-rehearsal-staging.yml`, weekly + on demand)
+
+Production's pipeline has never run (no data, no destination). The rehearsal runs the same scripts in the same order
+against staging: read-only export → counts from the export → seal with a one-run passphrase → plaintext removed →
+stored in the existing `crestmont-files-staging` bucket under `_backup-rehearsal/<run>/` → every local copy removed →
+downloaded back → sha256 of the sealed object and of the export checked → opened → restored into a scratch D1 →
+every table's row count compared → INFRA-006 evidence (environment **staging**) → objects and scratch database deleted.
+It proves the pipeline; it is not a production backup and never counts as one.
+
+Locally (2026-11-05): the same seal → R2 put/get/delete (real wrangler 4.149.0, local R2) → sha256 → open →
+`restore-verify.ts` round trip passed on a development database (201 tables, 579 rows, integrity ok, 0 FK violations,
+audit log still append-only).
 
 ### 3.3 Restore from an export (drill or disaster)
 ```sh

@@ -117,9 +117,17 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     alive: arg("--alive") === "yes",
     lines: text.split("\n").filter((l) => l.trim()).length,
   };
-  const connected = /waiting for logs|Connected to|^\s*\{/m.test(text);
+  // Connected means PROVEN: the deploy sends a probe request and requires it in the stream (--proven yes). Output
+  // alone is not proof: a tail of the wrong Worker name connects, prints a banner and receives nothing, which is
+  // what #160 and #161 did. Without --proven (older callers) it falls back to the weaker output check.
+  const proven = arg("--proven");
+  const connected = proven !== undefined ? proven === "yes" : /waiting for logs|Connected to|^\s*\{/m.test(text);
   const faults = parseFaults(text);
 
+  if (!connected && proven === "no") {
+    console.log(`::warning title=${title}::The capture never received its own probe request, so it was not connected to this Worker (${cov.lines} line(s) written). It says NOTHING about these failures either way — do not read this as the Worker being quiet.`);
+    process.exit(0);
+  }
   if (!connected) {
     console.log(`::warning title=${title}::The capture produced no usable output (${cov.lines} line(s)), so it never connected. It says NOTHING about these failures either way — do not read this as the Worker being quiet.`);
     process.exit(0);
