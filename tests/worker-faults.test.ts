@@ -121,3 +121,27 @@ test("[INFRA-006] a capture that never connected says so, and claims nothing eit
   assert.equal(faults.length, 1, "the noise is kept rather than dropped");
   assert.match(faults[0].message, /unrelated noise/);
 });
+
+test("[INFRA-006] wrangler tail --format json is pretty-printed: whole events are parsed, not one fault per line", async () => {
+  const { parseFaults, splitCapture } = await import("../scripts/worker-faults.ts");
+  // Shaped like deploy #164's capture: multi-line events, a "{" inside a string, and a banner line between events.
+  const ev = (url: string, logs: unknown[], outcome = "ok") => JSON.stringify({ outcome, event: { request: { url, method: "GET", cf: { tlsClientRandom: "abc=", clientTcpRtt: 8 } } }, logs, exceptions: [] }, null, 2);
+  const capture = [
+    "Successfully created tail, expires at 2026-11-06T06:31:55Z",
+    ev("https://x.workers.dev/staff/owner", []),
+    ev("https://x.workers.dev/staff/sales", [
+      { level: "error", message: ['{"level":"error","message":"app_errors write failed; the error below was not recorded","reason":"D1_ERROR: D1 DB is overloaded"}'] },
+      { level: "error", message: ['{"level":"error","path":"/staff/sales","message":"D1_ERROR: D1 DB is overloaded { brace in a string"}'] },
+    ], "exception"),
+    ev("https://x.workers.dev/api/health?tailprobe=p1", [{ level: "log", message: ["fine"] }]),
+  ].join("\n");
+  const pieces = splitCapture(capture);
+  assert.equal(pieces.filter((p) => p.kind === "json").length, 3);
+  const faults = parseFaults(capture);
+  assert.ok(faults.every((f) => f.path === "/staff/sales"), JSON.stringify(faults.map((f) => [f.level, f.path, f.message.slice(0, 60)])));
+  assert.equal(faults.filter((f) => f.level === "error").length, 2);
+  assert.ok(faults.some((f) => /D1 DB is overloaded \{ brace/.test(f.message)));
+  assert.ok(!faults.some((f) => /tlsClientRandom|clientTcpRtt/.test(f.message)), "no event fields leak out as faults");
+  // A truncated last event (the capture killed mid-write) is kept as raw text, not lost.
+  assert.equal(splitCapture('{"a":1}\n{"outcome":"exc').at(-1)!.kind, "text");
+});

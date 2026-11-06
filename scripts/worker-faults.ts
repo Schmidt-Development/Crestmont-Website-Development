@@ -41,6 +41,34 @@ export function requestPath(url: string | undefined): string | null {
 }
 
 /**
+ * The capture as a sequence of whole JSON values and the text between them. `wrangler tail --format json` writes each
+ * event as PRETTY-PRINTED JSON over many lines, not one object per line; read line by line, every field of every event
+ * became its own "raw" fault (deploy #164 annotated thousands of lines, TLS handshake fields included, and the two real
+ * faults were buried among them). Braces inside strings are skipped, so a message containing "{" cannot split an event.
+ */
+export function splitCapture(capture: string): { kind: "json" | "text"; text: string }[] {
+  const out: { kind: "json" | "text"; text: string }[] = [];
+  let depth = 0, start = -1, inStr = false, esc = false, textFrom = 0;
+  for (let i = 0; i < capture.length; i++) {
+    const ch = capture[i];
+    if (depth > 0) {
+      if (inStr) { if (esc) esc = false; else if (ch === "\\") esc = true; else if (ch === '"') inStr = false; continue; }
+      if (ch === '"') inStr = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}" && --depth === 0) { out.push({ kind: "json", text: capture.slice(start, i + 1) }); textFrom = i + 1; }
+      continue;
+    }
+    if (ch === "{") {
+      if (i > textFrom) out.push({ kind: "text", text: capture.slice(textFrom, i) });
+      depth = 1; start = i;
+    }
+  }
+  if (depth > 0) out.push({ kind: "text", text: capture.slice(start) });          // a truncated last event
+  else if (textFrom < capture.length) out.push({ kind: "text", text: capture.slice(textFrom) });
+  return out.filter((p) => p.text.trim());
+}
+
+/**
  * Faults from a capture, newest first, deduplicated by (level, path, message) with a count. Lines that are
  * not JSON are kept as raw text rather than dropped: a crash can print something that is not a log line, and
  * that is exactly when this is worth reading.
@@ -56,17 +84,18 @@ export function parseFaults(capture: string): Fault[] {
     seen.set(k, { level, path, message: text, count: 1 });
   };
 
-  for (const raw of capture.split("\n")) {
-    const line = raw.trim();
-    if (!line) continue;
-    if (!line.startsWith("{")) {
-      // wrangler's own banner and connection notices are noise; anything else is kept.
-      if (/^(⛅|🪵|Successfully created|Connected to|wrangler |\s*$)/.test(line)) continue;
-      add("raw", null, line);
+  for (const piece of splitCapture(capture)) {
+    if (piece.kind === "text") {
+      for (const raw of piece.text.split("\n")) {
+        const line = raw.trim();
+        // wrangler's own banner and connection notices are noise; anything else is kept.
+        if (!line || /^(⛅|🪵|Successfully created|Connected to|wrangler |\s*$)/.test(line)) continue;
+        add("raw", null, line);
+      }
       continue;
     }
     let o: TailLine;
-    try { o = JSON.parse(line) as TailLine; } catch { add("raw", null, line); continue; }
+    try { o = JSON.parse(piece.text) as TailLine; } catch { add("raw", null, piece.text.slice(0, 600)); continue; }
     const path = requestPath(o.event?.request?.url);
     for (const ex of o.exceptions ?? []) add("exception", path, `${ex.name ?? "Error"}: ${ex.message ?? ""}`);
     for (const log of o.logs ?? []) {
