@@ -26,6 +26,7 @@ import { wranglerOps } from "./staging-access.ts";
 import { platform } from "../scanner/src/platform.ts";
 import { Scanner } from "../scanner/src/scanner.ts";
 import { ping } from "../scanner/src/clamd.ts";
+import { totpCode } from "../src/lib/auth-crypto.ts";
 
 const BASE = (process.env.E2E_BASE_URL ?? "").replace(/\/$/, "");
 const SECRET = process.env.FILE_SCANNER_SECRET ?? "";
@@ -76,8 +77,9 @@ class Session {
 }
 function customerAccount() {
   const rows = [...readFileSync(ACCOUNTS, "utf8").matchAll(/^\| (\w+) \| (\S+) \| `([^`]+)` \| (?:`([A-Z2-7]+)`|—) \|/gm)].map((m) => ({ role: m[1], email: m[2], password: m[3], totp: m[4] ?? null }));
-  // A customer the browser journeys do not use (they use customer.harbor), without two-factor.
-  return rows.find((r) => r.role === "customer_admin" && !r.totp && !r.email.startsWith("customer.harbor@")) ?? rows.find((r) => r.role === "customer_admin" && !r.totp);
+  // A customer the browser journeys do not use (they use customer.harbor), so this run never spends their two-factor
+  // attempts. Since FD-30 every customer administrator has two-factor; staging access issues their setup keys.
+  return rows.find((r) => r.role === "customer_admin" && !r.email.startsWith("customer.harbor@")) ?? rows.find((r) => r.role === "customer_admin");
 }
 
 const ids: Record<keyof typeof FILES, string> = { text: "", pdf: "", eicar: "" };
@@ -92,9 +94,20 @@ await check("clamd answers (pinned clamav/clamav image, bundled signatures)", as
 
 await check("customer signs in and uploads two harmless files and the EICAR test file through the portal", async () => {
   const acct = customerAccount();
-  assert(acct, "no customer_admin demo account without two-factor in the accounts file");
+  assert(acct, "no customer_admin demo account in the accounts file");
   const r = await cust.req("POST", "/login", { email: acct.email, password: acct.password });
-  assert(r.status === 303 && !(r.headers.get("location") ?? "").includes("/mfa"), `login returned ${r.status} → ${r.headers.get("location")}`);
+  assert(r.status === 303, `login returned ${r.status}`);
+  if ((r.headers.get("location") ?? "").includes("/mfa")) {
+    assert(acct.totp, "the customer needs two-factor (FD-30) but the accounts file has no setup key for it");
+    // A code is accepted once per 30-second step (replay protection): start in a fresh step, one retry at most.
+    let ok = false;
+    for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+      await new Promise((res) => setTimeout(res, 30_000 - (Date.now() % 30_000) + 1_500));
+      const m = await cust.req("POST", "/mfa", { code: await totpCode(acct.totp) });
+      ok = m.status === 303 && new URL(m.headers.get("location") ?? "/mfa", BASE).pathname !== "/mfa";
+    }
+    assert(ok, "two-factor sign-in was refused");
+  }
   for (const [k, f] of Object.entries(FILES) as [keyof typeof FILES, (typeof FILES)[keyof typeof FILES]][]) {
     const fd = new FormData();
     fd.set("file", new File([f.bytes], f.name, { type: f.type }));
