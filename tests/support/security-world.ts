@@ -3,6 +3,7 @@
 // staff-side records the staff routes act on. Built through the real routes and services so every
 // row is valid by construction. Every record created here is TEST DATA.
 import { openMaintenanceActivation } from "../../src/services/maintenance-lifecycle.ts";
+import { crc32 as zlibCrc32 } from "node:zlib";
 import assert from "node:assert/strict";
 import { createTestApp, createStaff, createCustomer, MemoryStorage, TEST_PASSWORD, type TestClient } from "./app.ts";
 import { hashPassword } from "../../src/lib/auth-crypto.ts";
@@ -22,6 +23,33 @@ export const PDF = new TextEncoder().encode("%PDF-1.4\n%security matrix fixture\
 export const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 1, 2, 3, 4]);
 export const pdf = (name: string) => new File([PDF], name, { type: "application/pdf" });
 export const png = (name: string) => new File([PNG], name, { type: "image/png" });
+
+/**
+ * A real, minimal ZIP: local header, central directory, end-of-central-directory, one entry `index.html`.
+ * The artifact upload validates magic bytes, so a File of arbitrary content would be refused before the
+ * route ever ran and the scenario would prove nothing.
+ */
+const ZIP_BYTES = (() => {
+  const name = Buffer.from("index.html", "utf8");
+  const body = Buffer.from("<h1>matrix</h1>", "utf8");
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32LE(zlibCrc32(body) >>> 0, 0);
+  const lh = Buffer.alloc(30);
+  lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0, 6); lh.writeUInt16LE(0, 8);
+  crc.copy(lh, 14); lh.writeUInt32LE(body.length, 18); lh.writeUInt32LE(body.length, 22);
+  lh.writeUInt16LE(name.length, 26); lh.writeUInt16LE(0, 28);
+  const ch = Buffer.alloc(46);
+  ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(0x031e, 4); ch.writeUInt16LE(20, 6);
+  crc.copy(ch, 16); ch.writeUInt32LE(body.length, 20); ch.writeUInt32LE(body.length, 24);
+  ch.writeUInt16LE(name.length, 28); ch.writeUInt32LE((0o100644 << 16) >>> 0, 38); ch.writeUInt32LE(0, 42);
+  const cd = Buffer.concat([ch, name]);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(1, 8); eocd.writeUInt16LE(1, 10);
+  eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(lh.length + name.length + body.length, 16);
+  return Buffer.concat([lh, name, body, cd, eocd]);
+})();
+
+export const zip = (name: string) => new File([ZIP_BYTES], name, { type: "application/zip" });
 
 export class FakePayments implements PaymentsAdapter {
   readonly configured = true;

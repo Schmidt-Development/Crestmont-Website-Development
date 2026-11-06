@@ -12,7 +12,7 @@ import { HttpError, jsonResponse, redirect, str } from "../app/http.ts";
 import { requireStaff } from "../app/app.ts";
 import { can } from "../domain/authz.ts";
 import { staffPage } from "./crm.ts";
-import { storeUpload } from "../services/files.ts";
+import { UploadError, storeUpload } from "../services/files.ts";
 import { UPLOAD_LIMIT_BYTES } from "../adapters/storage.ts";
 import * as DL from "../services/design-locked.ts";
 import { alert, badge, button, csrf, emptyState, kpi, pageHead, table, linkButton } from "../ui/components.ts";
@@ -182,9 +182,19 @@ ${state.designLocked ? alert("success", html`This project is <strong>design-lock
 
     // The platform's own upload path: it writes the `files` row, computes the sha256 and sets scan_status
     // 'pending'. The artifact cannot be extracted until a scanner moves that to 'clean'.
-    const stored = await storeUpload(ctx, {
-      organizationId: project.organization_id, projectId, file, uploadedBy: actorId(ctx), folder: "frontend-artifacts",
-    });
+    //
+    // `storeUpload` refuses anything that is not an allowed type, is empty, is oversized, or whose bytes do not
+    // match its extension. That is a refusal to show the person, not an internal error, so it is answered 422
+    // with the reason rather than being allowed to become a 500.
+    let stored;
+    try {
+      stored = await storeUpload(ctx, {
+        organizationId: project.organization_id, projectId, file, uploadedBy: actorId(ctx), folder: "frontend-artifacts",
+      });
+    } catch (e) {
+      if (e instanceof UploadError) throw new HttpError(422, e.message);
+      throw e;
+    }
 
     await DL.recordArtifact(ctx.db, {
       projectId, organizationId: project.organization_id, source: "upload",
@@ -218,11 +228,13 @@ ${state.designLocked ? alert("success", html`This project is <strong>design-lock
     return redirect(ctx, `${BASE}/${p.projectId}`);
   });
 
-  // ── JSON for the runner and for tests ─────────────────────────────────────────────────────────────────────
+  // ── the project's design-lock state, as JSON ──────────────────────────────────────────────────────────────
   //
-  // Read-only, staff-authenticated. The runner's own signed channel carries the archive bytes; this is the
-  // view a person or a test asks for.
-  r.get(`${BASE}/:projectId/state.json`, async (ctx, p) => {
+  // Read-only and staff-authenticated. Deliberately NOT named `.json`: in this codebase that suffix marks a
+  // downloadable export (alongside .csv, .md, .pdf), which the audit inventory requires to be recorded as a
+  // data egress. This is a live status read for the dashboard and for tests, so auditing every glance at it
+  // would be noise. The runner's own signed channel carries the archive bytes; this carries nothing but state.
+  r.get(`${BASE}/:projectId/state`, async (ctx, p) => {
     requireStaff(ctx, "builds.read");
     const [state, artifacts, baselines] = await Promise.all([
       DL.frontendState(ctx.db, p.projectId),

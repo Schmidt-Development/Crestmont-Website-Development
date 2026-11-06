@@ -729,14 +729,14 @@ test("[DLR-03] state.json reports the gate, the artifacts and the baselines", as
     const draft = await DL.recordBaseline(t.db, artifact.id, baselineInput());
 
     const client = await t.client().login(staff.email, TEST_PASSWORD, staff.secret);
-    let body = await (await client.get(`/staff/builds/frontends/${projectId}/state.json`)).json() as Record<string, unknown>;
+    let body = await (await client.get(`/staff/builds/frontends/${projectId}/state`)).json() as Record<string, unknown>;
     assert.equal(body.designLocked, false);
     assert.equal(body.designGenerationAllowed, true, "before approval the old path is still the one that would run");
     assert.equal((body.artifacts as unknown[]).length, 1);
     assert.equal((body.baselines as { status: string }[])[0].status, "draft");
 
     await DL.approveBaseline(t.db, draft.id, { approvedBy: staff.id });
-    body = await (await client.get(`/staff/builds/frontends/${projectId}/state.json`)).json() as Record<string, unknown>;
+    body = await (await client.get(`/staff/builds/frontends/${projectId}/state`)).json() as Record<string, unknown>;
     assert.equal(body.designLocked, true);
     assert.equal(body.designGenerationAllowed, false, "approval closes the retired path for this project");
     assert.match(String(body.designGenerationReason), /autonomous frontend generation is retired/);

@@ -522,7 +522,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   // one back are `builds.configure`, because each of them decides what the AI is allowed to build against.
   "GET /staff/builds/frontends": staff(rolesWith("builds.read")),
   "GET /staff/builds/frontends/:projectId": staff(rolesWith("builds.read"), { projectId: "project" }),
-  "GET /staff/builds/frontends/:projectId/state.json": staff(rolesWith("builds.read"), { projectId: "project" }),
+  "GET /staff/builds/frontends/:projectId/state": staff(rolesWith("builds.read"), { projectId: "project" }),
   "POST /staff/builds/frontends/:projectId/artifact": staff(rolesWith("builds.configure"), { projectId: "project" }, act("frontend_artifact.received")),
   "POST /staff/builds/frontends/:projectId/baselines/:baselineId/approve": staff(rolesWith("builds.configure"), { projectId: "project", baselineId: "designBaseline" }, act("design_baseline.approved")),
   "POST /staff/builds/frontends/:projectId/rollback": staff(rolesWith("builds.configure"), { projectId: "project" }, act("design_baseline.rolled_back")),

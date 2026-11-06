@@ -2,7 +2,7 @@
 // customer POST (reused by the tenant-isolation and fuzz tests). Each scenario performs the action
 // for real, so the matrix can prove the audit row it writes. Every record created here is TEST DATA.
 import { createCustomer, TEST_PASSWORD, type TestClient } from "./app.ts";
-import { pdf, png, type World, type Tenant } from "./security-world.ts";
+import { pdf, png, zip, type World, type Tenant } from "./security-world.ts";
 import { pathFor } from "./security-helpers.ts";
 import { ROUTE_INVENTORY } from "./route-inventory.ts";
 import { newId, nowIso } from "../../src/lib/db.ts";
@@ -483,6 +483,38 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/builds/settings", fields: () => ({ run_budget: "30", project_budget: "90", model: "claude-sonnet-5-5", max_runtime: "120", max_turns: "200", max_concurrent: "2", max_attempts: "3", automation_enabled: "1" }) },
     { key: "POST /staff/builds/pause", fields: () => ({ paused: "1", reason: "matrix pause" }) },
     // AI → Design Gallery: the owner's own add, decision, edit and removal of a design reference.
+    // Design-locked frontends. Each of these decides what the AI is allowed to build against, so each writes an
+    // audit row naming the person who decided it.
+    {
+      key: "POST /staff/builds/frontends/:projectId/artifact",
+      fields: () => ({ artifact: zip("matrix-frontend.zip") }),
+    },
+    {
+      key: "POST /staff/builds/frontends/:projectId/baselines/:baselineId/approve",
+      fields: () => ({ note: "matrix approval" }),
+      // The seeded baseline is already approved, and approving twice is correctly refused. Put it back to a
+      // draft so the scenario performs a real first approval.
+      setup: async (w) => {
+        await w.db.prepare(`UPDATE design_baselines SET status = 'draft', approved_by = NULL, approved_at = NULL, approval_note = NULL, superseded_by = NULL, superseded_at = NULL WHERE id = ?`)
+          .bind(w.ids.designBaseline).run();
+        await w.db.prepare(`UPDATE projects SET design_locked = 0, active_baseline_id = NULL WHERE id = ?`).bind(w.a.ids.project).run();
+      },
+    },
+    {
+      key: "POST /staff/builds/frontends/:projectId/rollback",
+      fields: (w) => ({ baselineId: w.ids.designBaseline!, reason: "matrix rollback" }),
+      // A rollback needs something to roll back TO: the seeded baseline superseded by a newer approved one.
+      setup: async (w) => {
+        const at = new Date().toISOString();
+        await w.db.prepare(`UPDATE design_baselines SET status = 'superseded', approved_by = ?, approved_at = ?, superseded_at = ? WHERE id = ?`)
+          .bind(w.staff.owner.id, at, at, w.ids.designBaseline).run();
+        await w.db.prepare(`DELETE FROM design_baselines WHERE id = 'dbl_matrixseed00000000000002'`).run();
+        await w.db.prepare(`INSERT INTO design_baselines (id, project_id, artifact_id, version, fingerprint, status, approved_by, approved_at, signatures_json, screenshots_json, created_at)
+          VALUES ('dbl_matrixseed00000000000002', ?, ?, 2, ?, 'approved', ?, ?, '[{"page":"index","viewport":"desktop"}]', '[{"page":"index","viewport":"desktop","sha":"0"}]', ?)`)
+          .bind(w.a.ids.project, "fa_matrixseed000000000000001", "1".repeat(64), w.staff.owner.id, at, at).run();
+        await w.db.prepare(`UPDATE projects SET design_locked = 1, active_baseline_id = 'dbl_matrixseed00000000000002' WHERE id = ?`).bind(w.a.ids.project).run();
+      },
+    },
     { key: "POST /staff/builds/gallery/add", fields: () => ({ title: "Matrix added reference", industry: "general", style_tags: "editorial", rights_basis: "own_work", rights_note: "Crestmont's own work, added by the matrix", desktop: png("matrix-added.png") }) },
     { key: "POST /staff/builds/gallery/:id/decide", fields: () => ({ decision: "approve", note: "matrix approval" }), setup: async () => { await w.db.prepare(`UPDATE design_references SET deleted_at = NULL, deleted_by = NULL, status = 'APPROVED' WHERE id = ?`).bind(w.ids.designReference).run(); } },
     { key: "POST /staff/builds/gallery/:id/edit", fields: () => ({ title: "Matrix edited reference", industry: "general", style_tags: "editorial", rights_basis: "own_work", ai_eligible: "1" }), setup: async () => { await w.db.prepare(`UPDATE design_references SET deleted_at = NULL, deleted_by = NULL, status = 'APPROVED' WHERE id = ?`).bind(w.ids.designReference).run(); } },
