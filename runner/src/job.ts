@@ -585,7 +585,19 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         maxWallMs: Math.max(60_000, runtimeDeadline - Date.now()),
       });
       writeEvidence(ws, dl);
-      return designLockedSummary(dl);
+
+      // Through `finish`, like every other build, NOT a bare return.
+      //
+      // This branch used to `return designLockedSummary(dl)` directly, and `designLockedSummary` sets
+      // `complete: null`. Nothing else sends a completion — main.ts only reads `summary.outcome` for its health
+      // record — so a design-locked build never told the platform anything. The job sat in `building` until its
+      // lease expired and the sweep failed it, with no outcome, no report, no gate findings and no reason. The
+      // whole point of the three gates is that a person can see what they found, and none of it arrived.
+      //
+      // `finish` is the one path that reports: it turns the three gate checks into requirement evidence, composes
+      // the report a person reads, and calls `client.complete`.
+      const dls = designLockedSummary(dl);
+      return finish(dls.outcome as Outcome, { checks: dls.checks, stopReason: dls.stopReason });
     }
 
     // ── agent phases ──

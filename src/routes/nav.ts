@@ -63,8 +63,13 @@ export function staffNav(_ctx: AppContext): NavGroup[] {
     ] },
     { label: "AI", items: [
       { href: "/staff/ai", label: "AI operations", perm: "ai.manage" },
-      { href: "/staff/builds", label: "AI builds", perm: "builds.read" },
-      { href: "/staff/builds/gallery", label: "Design Gallery", perm: "builds.read" },
+      // The Artifact Builder is the current architecture: the Founder supplies a finished frontend and the AI
+      // builds only the backend behind it. It is listed first, and the two entries below it are named for what
+      // they are, because "AI builds" and "Artifact Builder" are otherwise easy to mistake for each other and
+      // they do opposite things with the design.
+      { href: "/staff/builds/frontends", label: "Artifact Builder", perm: "builds.read" },
+      { href: "/staff/builds", label: "AI builds (legacy generation)", perm: "builds.read" },
+      { href: "/staff/builds/gallery", label: "Design Gallery (legacy)", perm: "builds.read" },
       { href: "/staff/voice", label: "AI receptionist", perm: "voice.manage" },
       { href: "/staff/calendars/ai-follow-up", label: "AI Follow-Up calendar", perm: "lead.read_all" },
       { href: "/staff/calendars/founder-callback", label: "Founder Callback calendar", perm: "voice.manage" },
