@@ -61,6 +61,18 @@ async function retellAudit(key: string, rest: string[]) {
   // Read-only facts the Founder decides (published version, voice, data storage under legal review, …).
   const info = a.findings.filter((f) => f.status === "info");
   if (info.length) console.log(`::notice title=Retell inbound audit INFO (${info.length})::${list(info)}`);
+  // The sales (outbound) workspace, read-only as well: its agent, number and Retell's real concurrency limit
+  // (get-concurrency), which the 15 cold + 5 reserved callback allocation must fit (src/services/retell-outbound-audit.ts).
+  const ob = JSON.stringify({});
+  const r2 = await fetch(`${base}/api/sales-outbound/retell-audit`, { method: "POST", headers: { "content-type": "application/json", "x-crestmont-scheduler-signature": sign(key, ob) }, body: ob });
+  const t2 = await r2.text();
+  if (!r2.ok) { console.log(`::warning title=Retell outbound audit::HTTP ${r2.status} ${t2.replace(/[\r\n]+/g, " ").slice(0, 200)}`); return; }
+  const o = JSON.parse(t2) as { status: string; agentId: string | null; findings: { check: string; ok: boolean; state?: string; detail: string }[] };
+  const ofail = o.findings.filter((f) => !f.ok);
+  console.log(`::notice title=Retell outbound audit::${o.status.toUpperCase()} · agent ${o.agentId ?? "?"} · ${o.findings.length - ofail.length}/${o.findings.length} findings ok`);
+  if (ofail.length) console.log(`::warning title=Retell outbound audit TODO (${ofail.length})::${list(ofail as typeof a.findings)}`);
+  const oinfo = o.findings.filter((f) => f.ok);
+  if (oinfo.length) console.log(`::notice title=Retell outbound audit OK/INFO (${oinfo.length})::${list(oinfo as typeof a.findings)}`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) await main().catch((e) => { console.log(`::error title=External scheduler::${(e as Error).message}`); process.exitCode = 1; });
