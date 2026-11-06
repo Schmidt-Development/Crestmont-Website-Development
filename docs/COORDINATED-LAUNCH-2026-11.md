@@ -48,21 +48,13 @@ its deploy run was cancelled).
    consent. It opens only after counsel approves the consent design (recorded on `/staff/sales-outbound`), consent
    records exist per number, the Founder switches it on and authorises a ramp stage. Counsel should also confirm
    the callback consent model (a recorded request on the call) and both calling windows.
-6. **Founder Google Calendar** (code: `src/services/founder-calendar.ts`, `src/adapters/google-calendar.ts`, migration
-   0091). The internal Founder Calendar stays the booking record; Google adds real availability (free/busy of the
-   primary + dedicated calendar — times only) and shows every appointment on "Crestmont — Founder Appointments"
-   (created by the platform, or reused if it already exists). The Founder is emailed (platform mailer) for every new,
-   moved, confirmed and cancelled appointment, once each. If Google cannot be read, no Founder time is offered.
-   Founder steps, once per environment (staging first, then production):
-   1. Google Cloud Console (free) → create an OAuth client of type *Web application*; authorised redirect URIs
-      `https://crestmont-platform-staging.partners-df4.workers.dev/oauth/google/founder-calendar/callback` and
-      `https://crestmontwebsitedevelopment.com/oauth/google/founder-calendar/callback`. Enable the Google Calendar API.
-      While the OAuth consent screen is in "Testing", add your Google account as a test user.
-   2. Set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` on the Worker (staging and production secrets).
-   3. Sign in as the Owner → `/staff/calendars/founder-callback/google` → enter your Google account → *Connect with
-      Google* → allow the requested permissions. The page then shows the live check (calendar + free/busy).
-   4. Set your Founder appointment windows on `/staff/voice/operations`, then ask the receptionist (test call) for the
-      Founder and confirm the event and email arrive.
+6. **Founder Calendar (internal, authoritative).** No external calendar is used (Founder decision). Founder
+   appointments are request-only, one per slot within the Founder windows set on `/staff/voice/operations`, and
+   "requested" until the Founder confirms them there. The Founder is emailed through the platform mailer (Resend) at
+   `FOUNDER_NOTIFY_EMAIL` (default the Founder's address) for every new, rescheduled and cancelled appointment, once
+   each, with prospect, business, time and time zone, contact, reason, CRM context and the CRM link
+   (`src/services/founder-notifications.ts`). Staging only delivers to its recipient allowlist
+   (`EMAIL_RECIPIENT_ALLOWLIST`); production delivers to the Founder's address.
 7. **Live Stripe payments** — production checkout is closed by `commerceBlock` until ALL hold:
    - the legal policies are attorney-reviewed and published (today `DRAFT_BANNER` is set in `src/content/legal.ts`);
    - Business settings `business.legal_name` = "Talent Revenue Systems LLC" on production;

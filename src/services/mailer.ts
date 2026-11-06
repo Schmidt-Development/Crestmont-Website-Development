@@ -118,8 +118,8 @@ export interface TemplateData {
   dispute_opened: { amountCents: number; evidenceDueBy: string | null; url: string };
   /** Consultation booked by phone with the AI receptionist (VOICE-003). `when` is pre-formatted in the business time zone. */
   consultation: { event: "requested" | "confirmed" | "rescheduled" | "cancelled"; name: string; when: string; code: string };
-  /** Founder alert: an appointment with the Founder was requested, moved, confirmed or cancelled (Founder Calendar). */
-  founder_appointment: { event: "booked" | "rescheduled" | "confirmed" | "cancelled"; prospect: string; business: string | null; when: string; timeZone: string; durationMinutes: number;
+  /** Founder alert: an appointment with the Founder was requested, moved or cancelled (internal Founder Calendar). */
+  founder_appointment: { event: "booked" | "rescheduled" | "cancelled"; prospect: string; business: string | null; when: string; timeZone: string; durationMinutes: number;
     contact: string; reason: string; salesContext: string | null; status: string; reference: string; crmUrl: string | null; test: boolean };
   /** Staff alert: the AI receptionist escalated a call that could not be transferred live (CREST-GAP-053). */
   voice_escalation: { reason: string; caller: string; why: "outside_hours" | "no_transfer" | "unavailable"; test: boolean; url: string };
@@ -615,9 +615,9 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
   },
   founder_appointment: {
     name: "founder_appointment", category: "transactional", audience: "staff",
-    description: "Founder alert: a prospect's appointment with the Founder (requested only when the prospect asked for the Founder) was booked, moved, confirmed or cancelled.",
+    description: "Founder alert: a prospect's appointment with the Founder (requested only when the prospect asked for the Founder) was booked, moved or cancelled.",
     render: (d) => {
-      const what = d.event === "booked" ? (d.status === "requested" ? "requested — confirm or decline it" : "booked") : d.event === "rescheduled" ? "moved" : d.event === "confirmed" ? "confirmed" : "cancelled";
+      const what = d.event === "booked" ? (d.status === "requested" ? "requested — confirm or decline it" : "booked") : d.event === "rescheduled" ? "moved" : "cancelled";
       return {
         subject: `${d.test ? "[TEST] " : ""}Founder appointment ${d.event === "booked" ? (d.status === "requested" ? "requested" : "booked") : d.event}: ${d.prospect}, ${d.when}`,
         heading: `Your appointment with ${d.prospect} is ${what}`,

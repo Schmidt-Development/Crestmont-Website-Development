@@ -52,7 +52,7 @@ export interface SalesFnDeps {
   paymentsConfigured: boolean;
   now?: () => Date;
   calendar?: sched.CalendarAdapter;
-  founder?: { changed(consultationId: string, event: "booked" | "rescheduled" | "confirmed" | "cancelled"): Promise<void> };
+  founder?: { changed(consultationId: string, event: "booked" | "rescheduled" | "cancelled"): Promise<void> };
 }
 
 export interface SalesFnResult { status: number; body: Record<string, unknown> }

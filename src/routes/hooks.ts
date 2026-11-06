@@ -24,7 +24,7 @@ import { ingestSalesEvent } from "../services/sales-opt/ingest.ts";
 import { applySalesCallEvent } from "../services/sales-outbound.ts";
 import { audit } from "../services/security.ts";
 import type { MailerCtx } from "../services/mailer.ts";
-import { founderAdapter, founderAppointmentChanged, type FounderEvent } from "../services/founder-calendar.ts";
+import { founderAppointmentChanged, type FounderEvent } from "../services/founder-notifications.ts";
 
 const q = (ctx: AppContext, k: string, max = 120) => (ctx.url.searchParams.get(k) ?? "").trim().slice(0, max);
 
@@ -91,11 +91,10 @@ async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: st
 }
 
 
-/** Founder Calendar dependencies for the agents: Google free/busy (when connected) and the appointment hook. */
+/** Founder appointment hook for the agents: emails the Founder about new, moved and cancelled Founder appointments. */
 export async function founderDeps(ctx: AppContext, mail: MailerCtx) {
-  const f = ctx.env.overrides?.fetch ?? fetch;
-  const fd = { db: ctx.db, env: ctx.env, fetch: f, mail, baseUrl: ctx.baseUrl };
-  return { calendar: await founderAdapter(ctx.db, ctx.env, f), founder: { changed: (id: string, ev: FounderEvent) => founderAppointmentChanged(fd, id, ev) } };
+  const fd = { db: ctx.db, env: ctx.env, mail, baseUrl: ctx.baseUrl };
+  return { founder: { changed: (id: string, ev: FounderEvent) => founderAppointmentChanged(fd, id, ev) } };
 }
 
 export function register(r: Router): void {

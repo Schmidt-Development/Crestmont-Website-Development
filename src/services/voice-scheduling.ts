@@ -71,7 +71,7 @@ export async function aiSlotCount(db: Db, startsAt: string, exceptId?: string): 
 }
 
 export type Availability =
-  | { available: false; reason: "scheduling_disabled" | "hours_not_configured" | "no_slots" | "calendar_unavailable" }
+  | { available: false; reason: "scheduling_disabled" | "hours_not_configured" | "no_slots" }
   | { available: true; slots: Slot[]; timezone: string; calendarConnected: boolean };
 
 export async function availability(db: Db, cfg: VoiceConfig, at: Date, cal: CalendarAdapter, opts: { fromDate?: string; exceptId?: string; limit?: number; calendar?: CalendarId } = {}): Promise<Availability> {
@@ -80,13 +80,8 @@ export async function availability(db: Db, cfg: VoiceConfig, at: Date, cal: Cale
   const calendar = opts.calendar ?? "ai_follow_up";
   const view = calendarView(cfg, calendar);
   const to = at.getTime() + (view.scheduling.horizon_days + 1) * 86_400_000;
-  // An external calendar (Google, src/services/founder-calendar.ts) only ever informs the Founder's availability, never
-  // AI capacity. When it is connected but cannot be read, no Founder time is offered: availability is never claimed
-  // without the check.
-  let external: BusyInterval[] = [];
-  if (calendar === "founder_callback" && cal.connected) {
-    try { external = await cal.busy(at.getTime(), to); } catch { return { available: false, reason: "calendar_unavailable" }; }
-  }
+  // An external calendar (none is connected today) only ever informs the Founder's availability, never AI capacity.
+  const external = calendar === "founder_callback" && cal.connected ? await cal.busy(at.getTime(), to) : [];
   const busy = [...await bookedIntervals(db, calendar, at.getTime(), to, opts.exceptId), ...external];
   const slots = candidateSlots(view, at, busy, { fromDate: opts.fromDate, limit: opts.limit ?? 6 });
   return slots.length ? { available: true, slots, timezone: cfg.timezone, calendarConnected: cal.connected } : { available: false, reason: "no_slots" };
@@ -103,11 +98,7 @@ async function assertBookable(db: Db, cfg: VoiceConfig, at: Date, cal: CalendarA
     if (await aiSlotCount(db, startsAt, exceptId) >= AI_SLOT_CAPACITY) throw new SlotUnavailableError("That time is fully booked");
     return;
   }
-  let external: BusyInterval[] = [];
-  if (cal.connected) {
-    try { external = await cal.busy(s, e); } catch { throw new SlotUnavailableError("The Founder's calendar cannot be checked right now"); }
-  }
-  const busy = [...await bookedIntervals(db, calendar, s - 86_400_000, e + 86_400_000, exceptId), ...external];
+  const busy = [...await bookedIntervals(db, calendar, s - 86_400_000, e + 86_400_000, exceptId), ...(cal.connected ? await cal.busy(s, e) : [])];
   if (busy.some((b) => s < b.end && e > b.start)) throw new SlotUnavailableError("That time was just taken");
 }
 

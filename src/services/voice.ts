@@ -75,8 +75,8 @@ export interface VoiceDeps {
   baseUrl?: string;
   now?: () => Date;
   calendar?: sched.CalendarAdapter;
-  /** Founder appointments → Google Calendar mirror + Founder email (src/services/founder-calendar.ts). */
-  founder?: { changed(consultationId: string, event: "booked" | "rescheduled" | "confirmed" | "cancelled"): Promise<void> };
+  /** Founder appointments → Founder email (src/services/founder-notifications.ts). */
+  founder?: { changed(consultationId: string, event: "booked" | "rescheduled" | "cancelled"): Promise<void> };
   /** Whether Stripe (test mode on staging) is configured. create_checkout_session refuses honestly when it is not. */
   paymentsConfigured?: boolean;
 }
