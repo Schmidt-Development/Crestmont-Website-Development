@@ -26,7 +26,7 @@ export type ResourceKind =
   | "org" | "project" | "file" | "file2" | "shareLink" | "shareToken" | "changeOrder" | "ticket" | "invoice" | "paidInvoice" | "payment"
   | "session" | "revision" | "milestone" | "task" | "task2" | "assignment" | "refund" | "message" | "approvalRequest" | "customerInvitation"
   | "lead" | "leadTask" | "aiJob" | "quote" | "quoteToken" | "cmsRevision" | "cmsKey" | "portfolio" | "portfolioSlug" | "portfolioFile"
-  | "designReference" | "buildRevision" | "buildRevisionFile" | "buildPreviewToken"
+  | "designReference" | "designBaseline" | "buildRevision" | "buildRevisionFile" | "buildPreviewToken"
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
@@ -116,6 +116,10 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/builds/runner/revisions/store": signed("x-crestmont-runner-signature"),
   // Design Gallery -> builder. Lease-scoped on top of the signature: a runner only ever reaches the references
   // the job it holds was actually given, so neither route can be used to walk the gallery.
+  // The approved frontend for a leased build, and the baseline it is held to. Same signed channel as the rest
+  // of the runner protocol; the artifact is resolved from the lease, never from the request.
+  "POST /api/builds/runner/frontend/artifact": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/frontend/baseline": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/gallery/image": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/gallery/seen": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/ai/claim": signed("x-crestmont-runner-signature"),
@@ -514,6 +518,14 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /staff/builds/diagnostics": staff(rolesWith("builds.configure")),
   "POST /staff/builds/diagnostics": staff(rolesWith("builds.configure"), undefined, act("builds.diagnostic_created")),
   "GET /staff/builds/diagnostics/:id": staff(rolesWith("builds.configure"), P("runnerDiagnostic")),
+  // Design-locked frontends. Reading is `builds.read`; uploading an artifact, approving a design and rolling
+  // one back are `builds.configure`, because each of them decides what the AI is allowed to build against.
+  "GET /staff/builds/frontends": staff(rolesWith("builds.read")),
+  "GET /staff/builds/frontends/:projectId": staff(rolesWith("builds.read"), { projectId: "project" }),
+  "GET /staff/builds/frontends/:projectId/state.json": staff(rolesWith("builds.read"), { projectId: "project" }),
+  "POST /staff/builds/frontends/:projectId/artifact": staff(rolesWith("builds.configure"), { projectId: "project" }, act("frontend_artifact.received")),
+  "POST /staff/builds/frontends/:projectId/baselines/:baselineId/approve": staff(rolesWith("builds.configure"), { projectId: "project", baselineId: "designBaseline" }, act("design_baseline.approved")),
+  "POST /staff/builds/frontends/:projectId/rollback": staff(rolesWith("builds.configure"), { projectId: "project" }, act("design_baseline.rolled_back")),
   "GET /staff/builds/gallery": staff(rolesWith("builds.read")),
   "GET /staff/builds/gallery/:id": staff(rolesWith("builds.read"), P("designReference")),
   "GET /staff/builds/gallery/:id/image": staff(rolesWith("builds.read"), P("designReference")),

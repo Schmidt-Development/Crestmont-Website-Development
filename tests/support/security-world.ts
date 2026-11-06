@@ -214,6 +214,21 @@ async function buildStaffRecords(w: World) {
   await db.prepare(`INSERT INTO design_references (id, title, industry, style_tags_json, status, ai_eligible, desktop_key, rights_basis, rights_note, checksum, created_at, updated_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
     .bind(ids.designReference, "Matrix seed reference", "general", "[]", "APPROVED", 1, "design-gallery/matrix-seed.png", "own_work", "Crestmont's own work", "0".repeat(64), new Date().toISOString(), new Date().toISOString()).run();
+  // One frontend artifact and the design baseline approved from it, for the design-locked routes. Inserted
+  // directly, like the gallery reference above: the upload route takes a multipart ZIP, and the matrix only
+  // needs ids that exist so another tenant's request has something real to aim at.
+  ids.designBaseline = "dbl_matrixseed00000000000001";
+  {
+    const at = new Date().toISOString();
+    const artifactId = "fa_matrixseed000000000000001";
+    await db.prepare(`INSERT INTO frontend_artifacts (id, project_id, organization_id, version, source, sha256, size_bytes, framework, scan_status, status, created_at, updated_at)
+      VALUES (?,?,?,1,'upload',?,1024,'vite','clean','imported',?,?)`)
+      .bind(artifactId, w.a.ids.project, w.a.ids.org, "0".repeat(64), at, at).run();
+    await db.prepare(`INSERT INTO design_baselines (id, project_id, artifact_id, version, fingerprint, status, approved_by, approved_at, signatures_json, screenshots_json, created_at)
+      VALUES (?,?,?,1,?, 'approved', ?, ?, '[{"page":"index","viewport":"desktop"}]', '[{"page":"index","viewport":"desktop","sha":"0"}]', ?)`)
+      .bind(ids.designBaseline, w.a.ids.project, artifactId, "0".repeat(64), w.staff.owner.id, at, at).run();
+  }
+
   // Readiness
   await ok(o.post("/staff/readiness/blockers/new", { category: "security", severity: "high", description: "Matrix blocker description", subsystem: "Authentication", owner: "Engineering", required_action: "Scope cookie to app domain", dependency: "", requirement_ids: "AUTH-007" }), "blocker");
   ids.blocker = (await one<{ id: string }>(db, `SELECT id FROM blockers ORDER BY created_at DESC LIMIT 1`)).id;
