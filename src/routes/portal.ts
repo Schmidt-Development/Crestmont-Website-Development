@@ -16,6 +16,7 @@ import { scannerActive } from "../services/malware-scan.ts";
 import * as M from "../services/messages.ts";
 import { mfaReminder } from "./account-profile.ts";
 import * as O from "../services/onboarding.ts";
+import { intakeSections, intakeSummary } from "../ui/intake-form.ts";
 import * as S from "../services/share-links.ts";
 import { sharePanel } from "../ui/share.ts";
 import { listNotifications, markNotificationsRead, notificationHref } from "../services/notifications.ts";
@@ -219,34 +220,12 @@ ${kpi("Estimated completion", lastDue ? fmtDay(lastDue) : proj.target_launch_at 
     const a: O.Answers = posted ?? rec?.answers ?? { business_name: org.organizationName, contact_name: ctx.user!.displayName, contact_email: ctx.user!.email };
     const done = !!rec?.completed_at;
     const open = !done && ["purchased", "awaiting_onboarding"].includes(proj.status);
-    const val = (n: string) => { const v = a[n]; return Array.isArray(v) ? v.join(", ") : v ?? ""; };
-    const uploaded = async (n: string) => {
-      const ids = Array.isArray(a[n]) ? (a[n] as string[]) : [];
-      if (!ids.length) return html``;
-      // One JSON parameter, not one per id: uploads accumulate across draft saves and D1 rejects more than 100 bound parameters.
-      const rows = (await ctx.db.prepare(`SELECT id, filename FROM files WHERE organization_id = ? AND deleted_at IS NULL AND id IN (SELECT value FROM json_each(?))`).bind(org.organizationId, JSON.stringify(ids)).all<{ id: string; filename: string }>()).results;
-      return html`<p class="hint">Uploaded: ${rows.map((f) => html`<a href="/files/${f.id}">${f.filename}</a> `)}</p>`;
-    };
-    const field = async (f: O.OnboardingField): Promise<SafeHtml> => {
-      const req = !!f.required;
-      let inner: SafeHtml;
-      if (f.type === "textarea") inner = textarea({ name: f.name, label: f.label, value: val(f.name), hint: f.hint, required: false, maxlength: f.max, rows: 4 });
-      else if (f.type === "radio") inner = html`<fieldset class="field"><legend>${f.label}${req ? html` <span aria-hidden="true" class="faint">*</span>` : ""}</legend>${f.options!.map((o) => html`<label class="checkbox"><input type="radio" name="${f.name}" value="${o.value}"${a[f.name] === o.value ? html` checked` : ""}> <span>${o.label}</span></label>`)}${f.hint ? html`<span class="hint">${f.hint}</span>` : ""}</fieldset>`;
-      else if (f.type === "checkboxes") { const cur = Array.isArray(a[f.name]) ? (a[f.name] as string[]) : []; inner = html`<fieldset class="field"><legend>${f.label}</legend>${f.options!.map((o) => checkbox(f.name, o.label, { value: o.value, checked: cur.includes(o.value) }))}</fieldset>`; }
-      else if (f.type === "file") inner = html`<div class="field dropzone"><label for="f-${f.name}">${f.label}</label><input class="input" id="f-${f.name}" type="file" name="${f.name}"${f.name === "images" ? html` multiple` : ""} accept=".png,.jpg,.jpeg,.webp,.gif,.pdf"><span class="hint">${f.hint ?? ""} Up to 25 MB each.</span>${await uploaded(f.name)}</div>`;
-      else inner = input({ name: f.name, label: f.label, type: f.type === "tel" ? "tel" : f.type === "email" ? "email" : "text", value: val(f.name), hint: f.hint, maxlength: f.max });
-      if (req && f.type !== "radio") inner = html`${inner}<span class="faint" style="font-size:.75rem">Required${f.showWhen ? " when shown" : ""}</span>`;
-      return f.showWhen ? html`<div data-show-when="${f.showWhen.field}=${f.showWhen.values.join(",")}">${inner}</div>` : inner;
-    };
-    const sections: SafeHtml[] = [];
-    for (const s of O.ONBOARDING_SECTIONS) {
-      const fields = s.fields.filter((f) => !f.packages || f.packages.includes(proj.product_id ?? "custom"));
-      const rendered: SafeHtml[] = [];
-      for (const f of fields) rendered.push(await field(f));
-      sections.push(html`<fieldset class="card ob-section"><legend class="card__title">${s.title}</legend>${rendered}</fieldset>`);
-    }
-    const summary = done ? html`<section class="card">${alert("success", html`Onboarding submitted ${formatDateTime(rec!.completed_at)}. Need to change something? <a href="/portal/projects/${proj.id}/messages">Message your team</a>.`)}
-${dl(O.allFields(proj.product_id).filter((f) => f.type !== "file" && a[f.name] !== undefined && val(f.name) !== "").map((f) => [f.label, (f.options ? (Array.isArray(a[f.name]) ? (a[f.name] as string[]) : [a[f.name] as string]).map((v) => f.options!.find((o) => o.value === v)?.label ?? v).join(", ") : val(f.name))] as [string, string]))}</section>` : html``;
+    const sections = await intakeSections(ctx, org.organizationId, proj.product_id, a);
+    // A project whose intake was completed before payment (purchase_intakes, migration 0089) arrives with it copied
+    // here: it is done, and there is no second intake.
+    const beforePayment = done ? !!(await ctx.db.prepare(`SELECT 1 FROM purchase_intakes WHERE project_id = ? AND completed_at IS NOT NULL`).bind(proj.id).first()) : false;
+    const summary = done ? html`<section class="card">${alert("success", html`${beforePayment ? "Website intake submitted before payment" : "Onboarding submitted"} ${formatDateTime(rec!.completed_at)}. Need to change something? <a href="/portal/projects/${proj.id}/messages">Message your team</a>.`)}
+${intakeSummary(proj.product_id, a)}</section>` : html``;
     const body = html`${pageHead("Project onboarding", undefined, proj.name)}${projectTabs(ctx, proj.id)}
 ${done ? summary : !open ? alert("info", "Onboarding is not open for this project at its current stage.") : html`
 <p class="lede">Tell us about your business and website. Save a draft any time; questions appear based on your answers. Never send passwords here — we arrange access securely.</p>

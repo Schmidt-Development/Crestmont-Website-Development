@@ -353,8 +353,18 @@ async function purchase() {
     await signIn(page);
     console.log("PASS sign-in as the fictional customer");
     let projectId = st?.projectId ?? null;
+    let intakeBeforePayment = false;
     if (!st?.paidOrderId) {
+      // Founder requirement (2026-11): the website intake comes BEFORE payment. /checkout/business opens the intake
+      // (or the review page once the intake is complete); the review page carries the price and the Pay button.
       await page.goto(BASE + "/checkout/business");
+      if (new URL(page.url()).pathname === "/checkout/business/intake") {
+        await fillOnboarding(page);
+        await nav(page, page.getByRole("button", { name: /^Continue to review$/ }).first());
+        if (new URL(page.url()).pathname !== "/checkout/business/review") throw new Error(`the website intake was refused: ${clip(`${await alerts(page)} ${await main(page)}`, 300)}`);
+        console.log("PASS website intake submitted before payment");
+      }
+      intakeBeforePayment = new URL(page.url()).pathname === "/checkout/business/review";
       const body = await main(page);
       // The page renders money with formatCents, which omits ".00" on a whole-dollar amount: the Business package
       // shows "$2,499", not "$2,499.00". Importing the same helper the page uses means the driver and the page
@@ -367,10 +377,12 @@ async function purchase() {
       // Tax would make the amount charged differ from the $2,499 the report matches on, so it is reported rather
       // than absorbed: paying a total nobody asserted is how a certification quietly stops certifying anything.
       if (await page.locator(`[data-testid="checkout-tax"]`).count()) throw new Error(`staging now adds tax at checkout, so the total is no longer ${expected}: ${clip(body, 200)}`);
-      const picker = page.locator(`select[name="maintenance_plan_id"], input[name="maintenance_plan_id"]`);
+      // The review page's radios are named maintenance_plan; maintenance_plan_id is kept for older deployments.
+      const picker = page.locator(`select[name="maintenance_plan_id"], input[name="maintenance_plan_id"], input[name="maintenance_plan"]`);
       out.planPicker = (await picker.count()) > 0;
       if (out.planPicker) {
         if (await page.locator(`select[name="maintenance_plan_id"]`).count()) await page.selectOption(`select[name="maintenance_plan_id"]`, C.maintenancePlanId);
+        else if (await page.locator(`input[name="maintenance_plan"]`).count()) await page.check(`input[name="maintenance_plan"][value="${C.maintenancePlanId}"]`);
         else await page.check(`input[name="maintenance_plan_id"][value="${C.maintenancePlanId}"]`);
         console.log(`PASS maintenance plan selected at checkout: ${C.maintenancePlanId}`);
       } else console.log("NOTE the Business checkout has no maintenance plan picker on this deployment (FD-26 / PR #108 not deployed)");
@@ -391,7 +403,9 @@ async function purchase() {
       console.log(`PASS the signed Stripe webhook provisioned project ${projectId}`);
     }
     out.projectId = projectId;
-    if (!st?.onboarded) {
+    out.intakeBeforePayment = intakeBeforePayment;
+    if (intakeBeforePayment) console.log("SKIP onboarding — the website intake was submitted before payment and arrived with the project");
+    else if (!st?.onboarded) {
       await page.goto(`${BASE}/portal/projects/${projectId}/onboarding`);
       await fillOnboarding(page);
       await nav(page, page.getByRole("button", { name: /^Submit onboarding$/ }).first());

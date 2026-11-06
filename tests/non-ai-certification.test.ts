@@ -14,6 +14,7 @@ import { test } from "node:test";
 import { openMaintenanceActivation } from "../src/services/maintenance-lifecycle.ts";
 import assert from "node:assert/strict";
 import { createTestApp, createCustomer, createStaff, lastEmail, linkFrom, MemoryStorage, TEST_PASSWORD, type TestClient } from "./support/app.ts";
+import { completeIntake } from "./support/intake.ts";
 import { FakePayments } from "./support/security-world.ts";
 import { hmacSha256Hex } from "../src/lib/crypto.ts";
 import { ResendEmail } from "../src/adapters/email.ts";
@@ -61,8 +62,13 @@ test("phase 1 certification: the complete non-AI customer journey, with its fail
   assert.equal((await c.post("/login", { email, password: TEST_PASSWORD })).headers.get("location"), "/portal");
   const org = await one<{ id: string }>(t, `SELECT m.organization_id AS id FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = ?`, email);
 
-  // ── 3. Package selection + agreements: checkout refuses without acceptance, then records it against the order.
-  const checkoutPage = await (await c.get("/checkout/business")).text();
+  // ── 3. Package selection → website intake (before payment) → review + agreements: checkout refuses without
+  // acceptance, then records it against the order.
+  assert.equal((await c.post("/checkout/business", { terms: "1", maintenance_plan: "professional" })).headers.get("location"), "/checkout/business/intake", "no checkout before the intake");
+  assert.equal(await count(t, `SELECT COUNT(*) AS n FROM orders WHERE organization_id = ?`, org.id), 0);
+  await completeIntake(c, "business", { ...INTAKE }); // intake before payment (Founder requirement)
+  assert.equal(await count(t, `SELECT COUNT(*) AS n FROM build_jobs`), 0, "an intake alone creates no build");
+  const checkoutPage = await (await c.get("/checkout/business/review")).text();
   assert.match(checkoutPage, /\$2,499/, "the Business package at its approved price");
   assert.equal((await c.post("/checkout/business", {})).status, 422, "no order without accepting the agreements");
   assert.equal(await count(t, `SELECT COUNT(*) AS n FROM orders WHERE organization_id = ?`, org.id), 0);
@@ -100,9 +106,11 @@ test("phase 1 certification: the complete non-AI customer journey, with its fail
   const pid = (await one<{ id: string }>(t, `SELECT id FROM projects WHERE order_id = ?`, order.id)).id;
   assert.equal((await lastEmail(t.db, email))?.template === "receipt" || (await count(t, `SELECT COUNT(*) AS n FROM email_deliveries WHERE to_email = ? AND template IN ('receipt','purchase')`, email)) >= 1, true, "the customer is told the payment arrived");
 
-  // ── 6. Intake: the project moves to scope review and NO AI build is created (gate closed).
-  assert.equal((await c.post(`/portal/projects/${pid}/onboarding`, INTAKE)).status, 303);
+  // ── 6. Intake: completed before payment, it arrives with the project, which is in scope review; there is no second
+  // intake, and NO AI build is created (gate closed).
   assert.equal((await one<{ status: string }>(t, `SELECT status FROM projects WHERE id = ?`, pid)).status, "scope_review");
+  assert.match(await (await c.get(`/portal/projects/${pid}/onboarding`)).text(), /Website intake submitted before payment/);
+  assert.equal((await c.post(`/portal/projects/${pid}/onboarding`, INTAKE)).status, 422, "onboarding is already submitted");
   assert.equal(await count(t, `SELECT COUNT(*) AS n FROM build_jobs`), 0, "no autonomous build exists");
 
   // ── 7. Staff assignment, then reassignment (audited); the second PM can work the project.

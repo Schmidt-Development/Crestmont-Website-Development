@@ -48,7 +48,7 @@ async function runner(t: T, path: string, body: unknown) {
   return { status: res.status, json: await res.json() as Record<string, any> }; // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 
-test("[AIB-020] [AIB-019] Junk in the Trunk: lead → $2,500 quote → sign-up → acceptance → SIMULATED payment → real onboarding → one queued build → dispatched to the GPU worker (stops before inference)", async () => {
+test("[AIB-020] [AIB-019] Junk in the Trunk: lead → $2,500 quote → sign-up → acceptance → real website intake → SIMULATED payment → one queued build → dispatched to the GPU worker (stops before inference)", async () => {
   const t = await app();
 
   // ── Lead: a visitor submits the public quote form ──
@@ -89,7 +89,18 @@ test("[AIB-020] [AIB-019] Junk in the Trunk: lead → $2,500 quote → sign-up �
   const payLocation = pay.headers.get("location");
   const payHost = payLocation ? new URL(payLocation, "http://crestmont.test").hostname : null;
   assert.ok(payHost === null || (payHost !== "stripe.com" && !payHost.endsWith(".stripe.com")), "no Stripe checkout exists");
+  assert.equal(payLocation, `${invoicePath}/intake`, "the first invoice waits for the website intake");
   assert.equal(inv.status, "open");
+
+  // ── Website intake: the customer submits the real intake form BEFORE paying (Founder requirement) ──
+  assert.equal((await cust.get(`${invoicePath}/intake`)).status, 200);
+  const intake = await cust.post(`${invoicePath}/intake`, { ...JT.intake, functionality: [...JT.intake.functionality] });
+  assert.equal(intake.status, 303, await intake.clone().text());
+  assert.equal(intake.headers.get("location"), invoicePath);
+  const pin = await one<{ completed_at: string | null; answers_json: string; order_id: string; project_id: string | null }>(t, `SELECT completed_at, answers_json, order_id, project_id FROM purchase_intakes WHERE quote_version_id = ?`, order.quote_version_id);
+  assert.ok(pin.completed_at, "intake saved and completed through the real validation");
+  assert.deepEqual({ order: pin.order_id, project: pin.project_id }, { order: order.id, project: null });
+  assert.equal(await count(t, `SELECT 1 FROM build_jobs`), 0, "an intake alone creates no build: no payment, no project");
 
   // ── Simulated payment: refused for an unmarked organization, then the Owner marks the fictional org ──
   const refused = await t.oc.post("/staff/test-payments/simulate", { invoice_id: invoiceId, outcome: "paid" });
@@ -116,11 +127,16 @@ test("[AIB-020] [AIB-019] Junk in the Trunk: lead → $2,500 quote → sign-up �
   assert.deepEqual({ ...payment }, { provider: "simulated", amount_cents: JT.quote.depositCents, stripe_payment_intent_id: null, simulated_transaction_id: evt.transaction_id });
   assert.equal((await one<{ status: string }>(t, `SELECT status FROM orders WHERE id = ?`, order.id)).status, "partially_paid", "deposit paid; the 25% milestones follow later under CAT-004");
   const project = await one<{ id: string; status: string; organization_id: string; payment_schedule: string; product_id: string | null }>(t, `SELECT id, status, organization_id, payment_schedule, product_id FROM projects WHERE order_id = ?`, order.id);
-  assert.deepEqual({ status: project.status, org: project.organization_id, schedule: project.payment_schedule }, { status: "awaiting_onboarding", org: user.organization_id, schedule: "milestone_50_25_25" });
+  assert.deepEqual({ status: project.status, org: project.organization_id, schedule: project.payment_schedule }, { status: "scope_review", org: user.organization_id, schedule: "milestone_50_25_25" }, "the intake arrived with the payment: staff review the scope next");
+  const ob = await one<{ completed_at: string | null; answers_json: string }>(t, `SELECT completed_at, answers_json FROM onboarding_responses WHERE project_id = ?`, project.id);
+  assert.ok(ob.completed_at, "the completed intake was copied to the project's onboarding");
+  assert.equal(JSON.parse(ob.answers_json).colors, JT.intake.colors);
   assert.equal((await one<{ stage: string }>(t, `SELECT stage FROM leads WHERE id = ?`, leadId)).stage, "converted");
   assert.match((await one<{ body: string }>(t, `SELECT body FROM crm_activities WHERE lead_id = ? AND body LIKE '%payment confirmed%' COLLATE NOCASE`, leadId)).body, /SIMULATED payment confirmed/);
   assert.equal(await count(t, `SELECT 1 FROM email_deliveries WHERE to_email = ? AND template = 'receipt'`, JT.email), 0, "no receipt for a simulated payment");
-  assert.equal((await B.getJob(t.db, (await one<{ id: string }>(t, `SELECT id FROM build_jobs WHERE project_id = ?`, project.id)).id))!.state, "awaiting_intake");
+  // The existing eligibility rule decides after payment exactly as before: verified (simulated, test-organization)
+  // payment AND submitted intake → queued. The intake simply arrived first.
+  assert.equal((await B.getJob(t.db, (await one<{ id: string }>(t, `SELECT id FROM build_jobs WHERE project_id = ?`, project.id)).id))!.state, "queued");
 
   // Duplicate order protection: a second simulation for the same invoice records no second payment.
   const again = await t.oc.post("/staff/test-payments/simulate", { invoice_id: invoiceId, outcome: "paid" });
@@ -128,15 +144,9 @@ test("[AIB-020] [AIB-019] Junk in the Trunk: lead → $2,500 quote → sign-up �
   assert.equal(await count(t, `SELECT 1 FROM payments WHERE order_id = ?`, order.id), 1);
   assert.equal(await count(t, `SELECT 1 FROM projects WHERE order_id = ?`, order.id), 1);
 
-  // ── Onboarding: the customer submits the real intake form ──
-  assert.equal((await cust.get(`/portal/projects/${project.id}/onboarding`)).status, 200);
-  const intake = await cust.post(`/portal/projects/${project.id}/onboarding`, { ...JT.intake, functionality: [...JT.intake.functionality] });
-  assert.equal(intake.status, 303, await intake.clone().text());
-  const ob = await one<{ completed_at: string | null; answers_json: string }>(t, `SELECT completed_at, answers_json FROM onboarding_responses WHERE project_id = ?`, project.id);
-  assert.ok(ob.completed_at, "onboarding saved and completed through validation");
-  assert.equal(JSON.parse(ob.answers_json).colors, JT.intake.colors);
-  // Re-submission does not create more work.
-  await cust.post(`/portal/projects/${project.id}/onboarding`, { ...JT.intake, functionality: [...JT.intake.functionality] });
+  // ── Onboarding: already done (no second intake); re-submission is refused and does not create more work ──
+  assert.match(await (await cust.get(`/portal/projects/${project.id}/onboarding`)).text(), /Website intake submitted before payment/);
+  assert.equal((await cust.post(`/portal/projects/${project.id}/onboarding`, { ...JT.intake, functionality: [...JT.intake.functionality] })).status, 422);
   const jobs = (await t.db.prepare(`SELECT * FROM build_jobs WHERE project_id = ?`).bind(project.id).all<B.BuildJob>()).results;
   assert.equal(jobs.length, 1, "exactly one build per project");
   const job = jobs[0];

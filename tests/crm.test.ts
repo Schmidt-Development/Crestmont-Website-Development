@@ -4,6 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { businessDate } from "../src/lib/business-time.ts";
 import { createTestApp, createStaff, createCustomer, lastEmail, linkFrom, TEST_PASSWORD, type TestClient } from "./support/app.ts";
+import { completeIntake, completeQuoteIntake } from "./support/intake.ts";
 import { hmacSha256Hex } from "../src/lib/crypto.ts";
 import type { PaymentsAdapter, CheckoutRequest } from "../src/adapters/payments.ts";
 import type { Env } from "../src/app/context.ts";
@@ -121,6 +122,18 @@ test("[SALES-004] end-to-end: web lead → CRM → quote → proposal email → 
   // A second acceptance is refused.
   assert.equal((await cust.post(`${qpath}/accept`, { agree: "1" })).status, 409);
 
+  // Founder requirement: the customer describes the website before the first payment. Until the intake is complete
+  // the invoice offers the intake instead of payment, and paying is refused with no Stripe session.
+  const before = await (await cust.get(invoicePath)).text();
+  assert.match(before, /data-testid="invoice-intake-required"/);
+  assert.doesNotMatch(before, /Pay \$4,000\.25 securely/);
+  assert.match(await (await cust.get(qpath)).text(), new RegExp(`href="${invoicePath}/intake"`), "the accepted proposal links to the intake");
+  const early = await cust.post(`${invoicePath}/pay`);
+  assert.equal(early.status, 303);
+  assert.equal(early.headers.get("location"), `${invoicePath}/intake`);
+  assert.equal(t.fake.checkouts.length, 0, "no Stripe session before the intake");
+  await completeQuoteIntake(cust, invoiceId);
+
   // Pay: our route asks the (fake) Stripe adapter for a checkout session and redirects there.
   assert.match(await (await cust.get(invoicePath)).text(), /Pay \$4,000\.25 securely/);
   const pay = await cust.post(`${invoicePath}/pay`, { amount_cents: "1" });
@@ -141,8 +154,10 @@ test("[SALES-004] end-to-end: web lead → CRM → quote → proposal email → 
   assert.equal(wh.status, 200);
   assert.equal((await one<{ status: string }>(t.db, `SELECT status FROM invoices WHERE id = ?`, invoiceId)).status, "paid");
   assert.equal((await one<{ status: string }>(t.db, `SELECT status FROM orders WHERE id = ?`, order.id)).status, "partially_paid");
-  const project = await one<{ id: string; payment_schedule: string }>(t.db, `SELECT id, payment_schedule FROM projects WHERE order_id = ?`, order.id);
+  const project = await one<{ id: string; payment_schedule: string; status: string }>(t.db, `SELECT id, payment_schedule, status FROM projects WHERE order_id = ?`, order.id);
   assert.equal(project.payment_schedule, "milestone_50_25_25");
+  assert.equal(project.status, "scope_review", "the intake came with the payment: the project waits for staff scope review");
+  assert.ok((await one<{ completed_at: string | null }>(t.db, `SELECT completed_at FROM onboarding_responses WHERE project_id = ?`, project.id)).completed_at, "intake copied to the project");
   assert.equal((await one<{ stage: string }>(t.db, `SELECT stage FROM leads WHERE id = ?`, leadId)).stage, "converted");
   assert.equal((await one<{ stripe_customer_id: string }>(t.db, `SELECT stripe_customer_id FROM organizations WHERE id = ?`, order.organization_id)).stripe_customer_id, "cus_test_e2e");
 
@@ -378,7 +393,12 @@ test("[PAY-001] checkout without Stripe configured explains it and creates no or
   const t = await app();
   const cust = await createCustomer(t.db);
   const c = t.client(); await c.login(cust.email);
-  const page = await c.get("/checkout/starter");
+  // The package entry point sends the customer to the website intake first; the review page then explains the gap.
+  const entry = await c.get("/checkout/starter");
+  assert.equal(entry.status, 303);
+  assert.equal(entry.headers.get("location"), "/checkout/starter/intake");
+  await completeIntake(c, "starter"); // intake before payment (Founder requirement)
+  const page = await c.get("/checkout/starter/review");
   assert.equal(page.status, 200);
   const body = await page.text();
   assert.match(body, /Online payment is not configured yet/);
@@ -398,6 +418,7 @@ test("[CAT-007] package checkout ignores client-supplied prices and redirects to
   const t = await app({ payments: true });
   const cust = await createCustomer(t.db);
   const c = t.client(); await c.login(cust.email);
+  await completeIntake(c, "business"); // intake before payment (Founder requirement)
   assert.equal((await c.post("/checkout/business", { price: "1", maintenance_plan: "professional" })).status, 422, "terms required");
   const res = await c.post("/checkout/business", { maintenance_plan: "professional", terms: "1", price: "1", amount_cents: "100", total_cents: "100" });
   assert.equal(res.status, 303);

@@ -154,6 +154,30 @@ export class OnboardingError extends Error {
   constructor(errors: string[]) { super(errors.join("; ")); this.errors = errors; }
 }
 
+/**
+ * Shared by project onboarding and the pre-purchase intake (src/services/purchase-intake.ts): merges the posted form
+ * into the saved draft, stores uploads (logo, images) through the private file service, and validates. Drafts keep
+ * whatever is valid even when a submit fails, so nothing typed is lost; `errors` lists what blocks a submit.
+ */
+export async function collectAnswers(ctx: Pick<AppContext, "db" | "storage">, input: { organizationId: string; projectId: string | null; productId: string | null; userId: string; existing: Answers | null; form: FormData; submit: boolean }): Promise<{ clean: Answers; errors: string[] }> {
+  const answers: Answers = { ...(input.existing ?? {}), ...answersFromForm(input.productId, input.form) };
+  const uploadErrors: string[] = [];
+  for (const name of ["logo", "images"]) {
+    const files = input.form.getAll(name).filter((x): x is File => typeof x !== "string" && x.size > 0);
+    const ids = Array.isArray(answers[name]) ? [...(answers[name] as string[])] : [];
+    for (const file of files) {
+      try {
+        ids.push((await storeUpload(ctx, { organizationId: input.organizationId, projectId: input.projectId, file, uploadedBy: input.userId, folder: name === "logo" ? "Onboarding/Logo" : "Onboarding/Images" })).id);
+      } catch (e) {
+        if (e instanceof UploadError) uploadErrors.push(`${file.name}: ${e.message}`); else throw e;
+      }
+    }
+    if (ids.length) answers[name] = ids;
+  }
+  const { errors, clean } = validateOnboarding(input.productId, answers, input.submit);
+  return { clean, errors: [...uploadErrors, ...errors] };
+}
+
 /** Save a draft or submit. Submit validates conditionally, completes onboarding and moves awaiting_onboarding → scope_review. */
 export async function saveOnboarding(ctx: AppContext, input: { organizationId: string; projectId: string; userId: string; form: FormData; submit: boolean }): Promise<{ completed: boolean }> {
   const p = await ctx.db.prepare(`SELECT id, status, product_id FROM projects WHERE id = ? AND organization_id = ?`).bind(input.projectId, input.organizationId).first<{ id: string; status: string; product_id: string | null }>();
@@ -161,23 +185,7 @@ export async function saveOnboarding(ctx: AppContext, input: { organizationId: s
   const existing = await getOnboarding(ctx.db, p.id);
   if (existing?.completed_at) throw new OnboardingError(["Onboarding was already submitted. Send changes to your team through Messages."]);
   if (!["purchased", "awaiting_onboarding"].includes(p.status)) throw new OnboardingError(["Onboarding is not open for this project."]);
-  const answers: Answers = { ...(existing?.answers ?? {}), ...answersFromForm(p.product_id, input.form) };
-  // Uploads (logo, images) go through the private file service.
-  const uploadErrors: string[] = [];
-  for (const name of ["logo", "images"]) {
-    const files = input.form.getAll(name).filter((x): x is File => typeof x !== "string" && x.size > 0);
-    const ids = Array.isArray(answers[name]) ? [...(answers[name] as string[])] : [];
-    for (const file of files) {
-      try {
-        ids.push((await storeUpload(ctx, { organizationId: input.organizationId, projectId: p.id, file, uploadedBy: input.userId, folder: name === "logo" ? "Onboarding/Logo" : "Onboarding/Images" })).id);
-      } catch (e) {
-        if (e instanceof UploadError) uploadErrors.push(`${file.name}: ${e.message}`); else throw e;
-      }
-    }
-    if (ids.length) answers[name] = ids;
-  }
-  const { errors, clean } = validateOnboarding(p.product_id, answers, input.submit);
-  const allErrors = [...uploadErrors, ...errors];
+  const { clean, errors: allErrors } = await collectAnswers(ctx, { organizationId: input.organizationId, projectId: p.id, productId: p.product_id, userId: input.userId, existing: existing?.answers ?? null, form: input.form, submit: input.submit });
   const at = nowIso();
   // Drafts persist whatever is valid even when the submit fails, so nothing typed is lost.
   await ctx.db.batch([
