@@ -15,9 +15,11 @@ import { HttpError, redirect, str } from "../app/http.ts";
 import { requireStaff } from "../app/app.ts";
 import { csrf, input, textarea, select, checkbox, button, formErrors, alert, badge, table, emptyState, kpi, pageHead, linkButton } from "../ui/components.ts";
 import { staffPage } from "./crm.ts";
+import { syncAppointmentCallback, cancelAppointmentCallback } from "../services/appointment-callbacks.ts";
 import {
   loadVoiceConfig, saveVoiceConfig, VoiceConfigError, WEEKDAYS, hoursStatus, describeHours, OUTBOUND_PURPOSES,
   type VoiceConfig, type Weekday, type OutboundPurpose,
+  APPOINTMENT_MINUTES, AI_SLOT_CAPACITY,
 } from "../services/voice-settings.ts";
 import * as sched from "../services/voice-scheduling.ts";
 import * as outbound from "../services/voice-outbound.ts";
@@ -33,6 +35,7 @@ const DAY_LABEL: Record<Weekday, string> = { sun: "Sunday", mon: "Monday", tue: 
 const microUsd = (v: number) => `$${(v / 1e6).toFixed(4)}`;
 const lines = (s: string) => s.split(/[\n,]+/).map((x) => x.trim()).filter(Boolean);
 const windowsText = (c: VoiceConfig, d: Weekday) => c.hours[d].map((w) => `${w.open}-${w.close}`).join(", ");
+const weekText = (wk: Record<Weekday, { open: string; close: string }[]>, d: Weekday) => wk[d].map((w) => `${w.open}-${w.close}`).join(", ");
 
 function parseWindows(text: string): { open: string; close: string }[] | null {
   const out: { open: string; close: string }[] = [];
@@ -48,12 +51,20 @@ function parseWindows(text: string): { open: string; close: string }[] | null {
 /** Builds a candidate configuration from the form. Returns problems for unparseable fields; the service validates the rest. */
 function configFromForm(f: FormData, prev: VoiceConfig): { cfg: VoiceConfig; problems: string[] } {
   const problems: string[] = [];
-  const hours = { ...prev.hours };
-  for (const d of WEEKDAYS) {
-    const w = parseWindows(str(f, `hours.${d}`));
-    if (w === null) problems.push(`${DAY_LABEL[d]}: write hours like 09:00-17:00 (comma-separate several windows), or leave blank for closed.`);
-    else hours[d] = w;
-  }
+  const weekFrom = (prefix: string, label: string, base: Record<Weekday, { open: string; close: string }[]>) => {
+    const out = { ...base };
+    for (const d of WEEKDAYS) {
+      // A form that does not carry a field (older client) keeps the saved value instead of clearing it.
+      if (f.get(`${prefix}.${d}`) === null && prefix !== "hours") continue;
+      const w = parseWindows(str(f, `${prefix}.${d}`));
+      if (w === null) problems.push(`${label} ${DAY_LABEL[d]}: write hours like 09:00-17:00 (comma-separate several windows), or leave blank for closed.`);
+      else out[d] = w;
+    }
+    return out;
+  };
+  const hours = weekFrom("hours", "", prev.hours);
+  const aiHours = weekFrom("scheduling.ai_hours", "AI Outbound Calendar", prev.scheduling.ai_hours);
+  const founderHours = weekFrom("scheduling.founder_hours", "Founder Calendar", prev.scheduling.founder_hours);
   const int = (k: string, dflt: number) => { const v = str(f, k); return /^\d+$/.test(v) ? Number(v) : dflt; };
   const opt = (k: string) => str(f, k) || null;
   return {
@@ -64,7 +75,8 @@ function configFromForm(f: FormData, prev: VoiceConfig): { cfg: VoiceConfig; pro
       holidays: lines(str(f, "holidays")),
       inbound: { mode: str(f, "inbound.mode") === "reject" ? "reject" : "answer", numbers: lines(str(f, "inbound.numbers")), agent_id: opt("inbound.agent_id") },
       transfer: { enabled: !!f.get("transfer.enabled"), number: opt("transfer.number") },
-      scheduling: { enabled: !!f.get("scheduling.enabled"), duration_minutes: int("scheduling.duration_minutes", 30), min_notice_hours: int("scheduling.min_notice_hours", 24), horizon_days: int("scheduling.horizon_days", 21), auto_confirm: !!f.get("scheduling.auto_confirm") },
+      scheduling: { enabled: !!f.get("scheduling.enabled"), duration_minutes: APPOINTMENT_MINUTES, min_notice_hours: int("scheduling.min_notice_hours", 24), horizon_days: int("scheduling.horizon_days", 21), auto_confirm: !!f.get("scheduling.auto_confirm"),
+        ai_hours: aiHours, ai_min_notice_minutes: int("scheduling.ai_min_notice_minutes", prev.scheduling.ai_min_notice_minutes), founder_hours: founderHours },
       outbound: {
         enabled: !!f.get("outbound.enabled"), agent_id: opt("outbound.agent_id"), from_number: opt("outbound.from_number"),
         window_start: str(f, "outbound.window_start") || "09:00", window_end: str(f, "outbound.window_end") || "20:00",
@@ -95,7 +107,7 @@ ${formErrors(errors)}
 <section class="card stack"><h2 class="card__title">Status</h2>
 <p>Hours: ${hs.configured ? badge(hs.open ? "active" : "open", hs.open ? "Open now" : "Closed now") : badge("not_configured", "Not configured")} <span class="muted">${describeHours(saved)}</span></p>
 <p>Live transfer: ${saved.transfer.enabled && saved.transfer.number ? badge("configured_unverified", "Configured") : badge("not_configured", "Not configured — the agent offers a callback")}</p>
-<p>Phone scheduling: ${saved.scheduling.enabled ? badge("active", saved.scheduling.auto_confirm ? "On (auto-confirm)" : "On (staff confirm each booking)") : badge("not_configured", "Off")} <span class="faint">No calendar is connected; check your own calendar before confirming.</span></p>
+<p>Phone scheduling: ${saved.scheduling.enabled ? badge("active", saved.scheduling.auto_confirm ? "On · Founder appointments confirmed automatically" : "On · Founder confirms each Founder appointment") : badge("not_configured", "Off")} <span class="faint">AI Outbound Calendar: ${AI_SLOT_CAPACITY} bookings per ${APPOINTMENT_MINUTES}-minute slot, confirmed when booked. No external calendar provider is connected, so the Founder's own calendar is not read.</span></p>
 <p>Outbound calling: ${gate.enabled ? badge("active", "Enabled") : badge("not_configured", "Disabled")} <span class="faint">${gate.reasons.join(" · ")}</span></p>
 <p>Inbound: ${saved.inbound.mode === "reject" ? badge("failed", "Paused — calls are rejected") : badge("active", "Answering")} ${saved.inbound.numbers.length ? html`<span class="muted">bound to ${saved.inbound.numbers.join(", ")}</span>` : html`<span class="faint">No numbers bound yet: calls to any number reaching this environment are answered.</span>`}</p>
 </section>
@@ -112,12 +124,17 @@ ${input({ name: "inbound.agent_id", label: "Inbound agent id (optional override)
 <h2 class="card__title">Live transfer</h2>
 ${checkbox("transfer.enabled", "Offer live transfer to a person during business hours", { checked: c.transfer.enabled })}
 ${input({ name: "transfer.number", label: "Transfer destination (E.164)", value: c.transfer.number ?? "", maxlength: 20, hint: "A Founder-approved business line. Leave blank to keep transfers off; callers get a callback instead." })}
-<h2 class="card__title">Consultation scheduling</h2>
-${checkbox("scheduling.enabled", "Let the receptionist book consultations inside business hours", { checked: c.scheduling.enabled })}
-<div class="grid grid-3">${select({ name: "scheduling.duration_minutes", label: "Length", options: ["15", "20", "30", "45", "60", "90"].map((m) => ({ value: m, label: `${m} minutes` })), value: String(c.scheduling.duration_minutes) })}
-${input({ name: "scheduling.min_notice_hours", label: "Minimum notice (hours)", value: c.scheduling.min_notice_hours, maxlength: 3 })}
+<h2 class="card__title">Appointment calendars</h2>
+${checkbox("scheduling.enabled", "Let the AI agents book appointments (30 minutes each)", { checked: c.scheduling.enabled })}
+<p class="faint">AI Outbound Calendar: scheduled AI callbacks and sales follow-ups, up to ${AI_SLOT_CAPACITY} per 30-minute slot, each one queued as a callback at its time. Founder Calendar: only when a prospect asks for the Founder; one appointment per slot.</p>
+<h3>AI Outbound Calendar hours</h3>
+<div class="grid grid-2">${WEEKDAYS.map((d) => input({ name: `scheduling.ai_hours.${d}`, label: DAY_LABEL[d], value: weekText(c.scheduling.ai_hours, d), maxlength: 60, placeholder: "closed", hint: "08:00–21:00 only, on the hour or half hour" }))}</div>
+${input({ name: "scheduling.ai_min_notice_minutes", label: "AI callback minimum notice (minutes)", value: c.scheduling.ai_min_notice_minutes, maxlength: 5 })}
+<h3>Founder appointment windows</h3>
+<div class="grid grid-2">${WEEKDAYS.map((d) => input({ name: `scheduling.founder_hours.${d}`, label: DAY_LABEL[d], value: weekText(c.scheduling.founder_hours, d), maxlength: 60, placeholder: "business hours", hint: "Blank everywhere = business hours" }))}</div>
+<div class="grid grid-2">${input({ name: "scheduling.min_notice_hours", label: "Founder appointment minimum notice (hours)", value: c.scheduling.min_notice_hours, maxlength: 3 })}
 ${input({ name: "scheduling.horizon_days", label: "Booking horizon (days)", value: c.scheduling.horizon_days, maxlength: 2 })}</div>
-${checkbox("scheduling.auto_confirm", "Confirm phone bookings automatically (otherwise they hold the slot until you confirm)", { checked: c.scheduling.auto_confirm })}
+${checkbox("scheduling.auto_confirm", "Confirm Founder appointments automatically (otherwise each holds the slot until the Founder confirms)", { checked: c.scheduling.auto_confirm })}
 <h2 class="card__title">Outbound calling</h2>
 ${alert("warn", "Outbound calls need this switch AND RETELL_OUTBOUND=on in the environment. Every call also needs your approval, recorded consent for its purpose, no do-not-call entry and the recipient's calling hours.")}
 ${checkbox("outbound.enabled", "Allow approved outbound calls", { checked: c.outbound.enabled })}
@@ -209,6 +226,9 @@ export function register(r: Router): void {
     const decision = str(f, "decision") === "confirm" ? "confirm" : "cancel";
     try {
       const row = await sched.decide(ctx.db, ctx.user!.id, p.id, decision, str(f, "note"));
+      // The queued AI callback follows its appointment: cancelled with it, or (re)queued when it is confirmed.
+      if (decision === "cancel") await cancelAppointmentCallback(ctx.db, row.id, "Appointment cancelled by staff");
+      else await syncAppointmentCallback(ctx.db, row.id);
       if (row.email) {
         try { await sendMail(ctx, { template: "consultation", to: row.email, idempotencyKey: `consultation:${row.id}:${decision === "confirm" ? "confirmed" : "cancelled"}`, data: { event: decision === "confirm" ? "confirmed" : "cancelled", name: row.name, when: sched.labelOf(row), code: row.confirmation_code } }); }
         catch { /* recorded in the delivery log by the adapter */ }

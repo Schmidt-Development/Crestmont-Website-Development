@@ -32,6 +32,7 @@ import { voiceBudget, budgetOpen } from "./voice-budget.ts";
 import { safeHttpsUrl } from "../lib/html.ts";
 import { routeCalendar, wantsFounderArg, CALENDAR_LABELS, type CalendarRoute } from "../domain/calendars.ts";
 import { recordCallback, confirmedConsultation } from "./calendars.ts";
+import { syncAppointmentCallback, cancelAppointmentCallback } from "./appointment-callbacks.ts";
 
 export class VoiceAuthError extends Error {}
 
@@ -289,7 +290,7 @@ const fnSchemas = {
   }),
   get_business_hours: v.object({}),
   check_transfer_availability: v.object({ department: v.enumOf(["sales", "support", "urgent"] as const, { optional: true }) }),
-  check_consultation_availability: v.object({ preferred_date: v.string({ optional: true, pattern: /^\d{4}-\d{2}-\d{2}$/ }) }),
+  check_consultation_availability: v.object({ preferred_date: v.string({ optional: true, pattern: /^\d{4}-\d{2}-\d{2}$/ }), wants_founder: wantsFounderArg }),
   book_consultation: v.object({
     name: v.string({ min: 2, max: 120 }),
     phone: v.string({ pattern: phonePattern }),
@@ -509,9 +510,15 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       if (phone && isCallersOwn(call, phone) && await recordCallConsent(db, phone, "callback", "caller_request", `call:${call.id}`)) {
         await requestOutbound(db, { purpose: "callback", phone, name: a.name, reason: `Caller asked for a callback${a.preferred_time ? ` (preferred: ${a.preferred_time})` : ""}: ${a.reason}`, leadId, isTest: !!call.is_test });
       }
+      const c0 = await cfg();
+      const canBook = c0.scheduling.enabled && !!c0.timezone;
       return entry.calendar === "founder_callback"
-        ? { callbackRequested: true, calendar: entry.calendar, message: "Thanks. I've passed your request to speak with our Founder. The Founder or a team member will call you back during staffed hours. Don't promise a specific time." }
-        : { callbackRequested: true, calendar: entry.calendar, message: "Thanks. Someone will call you back during staffed hours." };
+        ? { callbackRequested: true, calendar: entry.calendar, message: canBook
+            ? "Thanks. I've passed your request to speak with our Founder. If the caller wants a set time with the Founder, check availability with check_consultation_availability (wants_founder true) and book it; otherwise say the Founder or a team member will call back. Don't promise a specific time."
+            : "Thanks. I've passed your request to speak with our Founder. The Founder or a team member will call you back. Don't promise a specific time." }
+        : { callbackRequested: true, calendar: entry.calendar, message: canBook
+            ? "Thanks, that's noted. Offer the caller a specific 30-minute callback time: call check_consultation_availability, then book their choice with book_consultation, and our AI sales specialist will call them then. Keep helping with anything else they need now."
+            : "Thanks, that's noted. Someone from Crestmont will call you back. Keep helping with anything else they need now." };
     }
     case "route_support":
     case "create_support_ticket": {
@@ -541,14 +548,16 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       await notifyOwners(db, "voice_escalation", `${tag}AI receptionist escalated a call: ${a.reason}`, "call", call.id);
       const emailed = await emailOwnersEscalation(db, deps, call, { reason: a.reason, caller: [a.name, a.phone ?? call.from_number].filter(Boolean).join(", ") || "Unknown caller", transfer: t.reason });
       await audit(db, { actorKind: "ai", action: "call.escalated", subjectType: "call", subjectId: call.id, details: { route: "task_email", emailed, transfer: t.reason } });
-      return { escalated: true, transfer: false, transfer_available: false, message: "I'm passing this to a member of the Crestmont team who will follow up during staffed hours." };
+      return { escalated: true, transfer: false, transfer_available: false, message: "I'm passing this to a member of the Crestmont team who will follow up. Keep helping the caller with anything else you can now." };
     }
     case "get_business_hours": {
       parse(fnSchemas.get_business_hours, rawArgs ?? {});
       const c = await cfg();
       const h = hoursStatus(c, now);
-      if (!h.configured) return { configured: false, open_now: false, hours: h.summary, message: "Our business hours aren't published yet. I can take your details and have someone call you back." };
-      return { configured: true, open_now: h.open, hours: h.summary, next_open: h.nextOpenAt && h.timezone ? new Intl.DateTimeFormat("en-US", { timeZone: h.timezone, weekday: "long", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(h.nextOpenAt)) : null };
+      // These are STAFFED hours (people, live transfer). The AI receptionist sells and books 24/7 whatever they say.
+      if (!h.configured) return { configured: false, open_now: false, staff_available_now: false, ai_available: true, hours: h.summary, message: "Staffed hours aren't published yet. You are available around the clock: keep helping the caller with anything they need." };
+      return { configured: true, open_now: h.open, staff_available_now: h.open, ai_available: true, hours: h.summary, next_open: h.nextOpenAt && h.timezone ? new Intl.DateTimeFormat("en-US", { timeZone: h.timezone, weekday: "long", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(h.nextOpenAt)) : null,
+        message: h.open ? "Human staff are available now." : "Human staff are not in right now; you are available around the clock and can help with everything except a live transfer." };
     }
     case "check_transfer_availability": {
       parse(fnSchemas.check_transfer_availability, rawArgs ?? {});
@@ -557,16 +566,20 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       // which the inbound webhook supplies only when a Founder-approved number is configured.
       return t.available
         ? { transfer_available: true, message: "A team member may be available. Let the caller know you are transferring them now." }
-        : { transfer_available: false, reason: t.reason, message: "Nobody is available to take the call live right now. Offer to take a message with request_callback." };
+        : { transfer_available: false, reason: t.reason, message: "Nobody is available to take the call live right now. Keep helping the caller yourself: answer their questions, recommend a package, send a checkout link or book a callback time. Use request_callback only if they still want a person." };
     }
     case "check_consultation_availability": {
       const a = parse(fnSchemas.check_consultation_availability, rawArgs ?? {});
-      const av = await sched.availability(db, await cfg(), now, cal, { fromDate: a.preferred_date });
+      // The Founder's calendar only when the caller explicitly asked for the Founder; every other time is an AI callback.
+      const calendar = routeCalendar({ wantsFounder: a.wants_founder, context: { channel: "inbound_receptionist", fn: "check_consultation_availability", kind: "consultation" } }).calendar;
+      const av = await sched.availability(db, await cfg(), now, cal, { fromDate: a.preferred_date, calendar });
       if (!av.available) {
-        return { available: false, reason: av.reason, message: av.reason === "no_slots" ? "There are no open consultation times in the booking window. Offer to take a callback request." : "I can't book consultations by phone right now. Offer to take a callback request." };
+        return { available: false, reason: av.reason, message: av.reason === "no_slots" ? "There are no open times in the booking window. Take a callback request with request_callback and keep helping the caller." : "I can't book a time by phone right now. Take a callback request with request_callback and keep helping the caller." };
       }
-      return { available: true, timezone: av.timezone, slots: av.slots.map((x) => ({ start_time: x.startsAt, label: x.label })),
-        message: "Offer these times exactly as labelled. When the caller chooses one, call book_consultation with its start_time." };
+      return { available: true, timezone: av.timezone, calendar, slots: av.slots.map((x) => ({ start_time: x.startsAt, label: x.label })),
+        message: calendar === "founder_callback"
+          ? "These are the Founder's open times. Offer them exactly as labelled; when the caller chooses one, call book_consultation with its start_time and wants_founder true."
+          : "Offer these 30-minute callback times exactly as labelled. When the caller chooses one, call book_consultation with its start_time; our AI sales specialist calls them then." };
     }
     case "book_consultation": {
       const a = parse(fnSchemas.book_consultation, rawArgs ?? {});
@@ -586,16 +599,23 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
         await db.prepare(`UPDATE consultations SET lead_id = COALESCE(lead_id, ?) WHERE id = ?`).bind(leadId, booking.id).run();
         await addLeadNote(db, leadId, `Consultation ${booking.status} for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) via AI receptionist · calendar: ${CALENDAR_LABELS[held.calendar].name}`);
         if (booking.status === "requested") await addLeadTask(db, leadId, `${held.calendar === "founder_callback" ? "[FOUNDER CALLBACK] " : ""}Confirm or decline the consultation requested for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}). Check your calendar first: no calendar is connected.`, 4);
+        if (held.calendar === "ai_follow_up") {
+          // Booking an AI callback time is the caller's request to be called then (their own number only).
+          if (isCallersOwn(call, phone)) await recordCallConsent(db, phone, "callback", "caller_request", `call:${call.id}`);
+          await syncAppointmentCallback(db, booking.id, { now, reason: a.topic });
+        }
         await notifyOwners(db, "voice_consultation", `${call.is_test ? "[TEST] " : ""}Consultation ${booking.status} by phone: ${a.name}, ${sched.labelOf(booking)}`, "consultation", booking.id);
         if (a.reminder_call_ok === "true" && isCallersOwn(call, phone)) await recordCallConsent(db, phone, "consultation_reminder", "caller_request", `call:${call.id}`);
         await mailConsultation(deps, booking, booking.status === "confirmed" ? "confirmed" : "requested");
         return { booked: true, status: booking.status, when: sched.labelOf(booking), confirmation_code: booking.confirmation_code, calendar: held.calendar,
-          message: booking.status === "confirmed"
-            ? `The consultation is booked for ${sched.labelOf(booking)}. Read the booking reference to the caller letter by letter.`
-            : `The time is held for the caller. A team member will confirm it${booking.email ? " by email" : ""}. Read the booking reference to the caller letter by letter.` };
+          message: held.calendar === "ai_follow_up"
+            ? `Booked: our AI sales specialist will call the caller at ${sched.labelOf(booking)} (30 minutes). Read the booking reference to the caller letter by letter.`
+            : booking.status === "confirmed"
+              ? `The appointment with the Founder is booked for ${sched.labelOf(booking)}. Read the booking reference to the caller letter by letter.`
+              : `The time with the Founder is held for the caller. The Founder will confirm it${booking.email ? " by email" : ""}. Read the booking reference to the caller letter by letter.` };
       } catch (e) {
         if (!(e instanceof sched.SlotUnavailableError)) throw e;
-        const alt = await sched.availability(db, c, now, cal);
+        const alt = await sched.availability(db, c, now, cal, { calendar: routeCalendar({ wantsFounder: a.wants_founder, context: { channel: "inbound_receptionist", fn: "book_consultation", kind: "consultation" } }).calendar });
         return { booked: false, reason: e.message, slots: alt.available ? alt.slots.map((x) => ({ start_time: x.startsAt, label: x.label })) : [],
           message: alt.available ? "That time isn't available. Offer one of these instead." : "That time isn't available and nothing else is open. Offer a callback." };
       }
@@ -610,6 +630,7 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       if (name === "lookup_consultation") return { verified: true, when: sched.labelOf(row), status: row.status === "confirmed" ? "confirmed" : "awaiting confirmation" };
       if (name === "cancel_consultation") {
         await sched.cancel(db, row, a.reason ?? "Cancelled by caller", { kind: "ai" });
+        await cancelAppointmentCallback(db, row.id, "Appointment cancelled by the caller");
         if (row.lead_id) await addLeadNote(db, row.lead_id, `Consultation ${sched.labelOf(row)} cancelled by caller via AI receptionist`);
         await notifyOwners(db, "voice_consultation", `${call.is_test ? "[TEST] " : ""}Consultation cancelled by phone: ${row.name}, ${sched.labelOf(row)}`, "consultation", row.id);
         await mailConsultation(deps, row, "cancelled");
@@ -618,6 +639,7 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       const c = await cfg();
       try {
         const next = await sched.reschedule(db, c, now, cal, row, a.new_start_time!, { kind: "ai" });
+        await syncAppointmentCallback(db, next.id, { now });
         if (row.lead_id) {
           await addLeadNote(db, row.lead_id, `Consultation moved from ${sched.labelOf(row)} to ${sched.labelOf(next)} (new ref ${next.confirmation_code}) via AI receptionist`);
           if (next.status === "requested") await addLeadTask(db, row.lead_id, `Confirm the rescheduled consultation ${sched.labelOf(next)} (ref ${next.confirmation_code}).`, 4);
@@ -628,7 +650,7 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
           message: "The consultation has moved. Read the NEW booking reference to the caller letter by letter." };
       } catch (e) {
         if (!(e instanceof sched.SlotUnavailableError)) throw e;
-        const alt = await sched.availability(db, c, now, cal, { exceptId: row.id });
+        const alt = await sched.availability(db, c, now, cal, { exceptId: row.id, calendar: row.calendar });
         return { verified: true, rescheduled: false, reason: e.message, slots: alt.available ? alt.slots.map((x) => ({ start_time: x.startsAt, label: x.label })) : [],
           message: "That time isn't available. The original booking is unchanged." };
       }
@@ -705,10 +727,10 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
     case "schedule_consultation": {
       // One function for Retell, two existing steps: without start_time it lists real open slots
       // (check_consultation_availability); with start_time it books through voice-scheduling.ts, where the database
-      // allows only one active booking per start time, so a slot can never be double-booked.
+      // enforces each calendar's capacity (five per AI callback slot, one per Founder slot).
       const a = parse(fnSchemas.schedule_consultation, rawArgs ?? {});
       if (!a.start_time) {
-        const r = await runFunction(db, call, "check_consultation_availability", { ...(a.preferred_date ? { preferred_date: a.preferred_date } : {}) }, deps);
+        const r = await runFunction(db, call, "check_consultation_availability", { ...(a.preferred_date ? { preferred_date: a.preferred_date } : {}), ...(a.wants_founder ? { wants_founder: true } : {}) }, deps);
         return { step: "availability", ...r };
       }
       const missing = (["name", "phone", "topic"] as const).filter((k) => !a[k]);
@@ -870,6 +892,9 @@ OPENING
 2. If {{receptionist_mode}} is "voicemail", only take a message: get the caller's name, phone number and a short message, call request_callback, thank them and end the call. Use no other function.
 3. Ask how you can help, and work out whether this is a new enquiry, an existing customer, a booking, or something else.
 
+ALWAYS OPEN
+You work 24/7, holidays included. Never say Crestmont is closed or fall back to message-taking because of the hour. Only live transfer depends on staffed hours.
+
 SERVICES AND PRICING
 - Crestmont designs, builds and redesigns websites and e-commerce sites, and builds custom web applications, customer portals, booking systems, payment integrations, AI chatbots and AI phone receptionists, API and CRM integrations, technical SEO, analytics setup and landing pages, plus hosting and maintenance.
 - For any price, package, maintenance plan or add-on question, call get_packages_pricing once and quote only what it returns. Never estimate, round, combine, negotiate or lower a price, and never invent an offer or promotion.
@@ -880,21 +905,23 @@ SERVICES AND PRICING
 
 NEW ENQUIRIES
 Collect, one question at a time: full name; phone and/or email; business name; the package of interest or custom work; what they need (pages, features, current website, goals); and when they hope to start. Read the phone number and email back to confirm them. Then call crm_upsert_lead with interest set to starter, business, premium, custom, maintenance or other. Call it once per enquiry; if the caller adds details later, call it again with the same name and contact details plus the new requirements. Never say whether the caller was already in our records.
-Then offer a next step: a consultation, a secure checkout link for a standard package, or the published prices by email.
+Recommend the package that fits and why, then offer a next step: a secure checkout link (it opens our project intake form before payment), a scheduled callback, or the published prices by email.
 
 OBJECTIONS
-If price is a concern, explain what each package includes using get_packages_pricing and suggest a consultation to match scope to budget. If they want to think it over, offer to email the published prices and save their details with crm_upsert_lead. Never pressure the caller.
+If price is a concern, explain what each package includes (get_packages_pricing) and match scope to budget. If they want to think, offer prices by email, save details with crm_upsert_lead and offer a callback. Never pressure the caller.
 
 BUYING A PACKAGE
 Only Starter, Business or Premium. Confirm the package, name and email (spell the email back), then call create_checkout_session once. Explain that the email has a secure link to our website, where they sign in or create an account, review the agreements and pay through Stripe. Never take, repeat or write down card numbers, bank details or passwords; if a caller starts reading card details, stop them politely and explain payment happens only through the secure link. If link_sent is false, apologise and offer request_callback.
 To check a payment, ask for the checkout reference from that email and the email address it went to, then call check_payment_status and read back only its message. If not verified, say you couldn't match those details without hinting which was wrong, and offer a callback. After a locked answer, don't try again on this call.
 
-CONSULTATIONS
-If {{scheduling_available}} is "false", or schedule_consultation returns available false, don't book: offer request_callback.
-1. Call schedule_consultation without start_time (add preferred_date as YYYY-MM-DD if they named a day). Offer two or three returned labels exactly as given.
-2. When they choose, confirm the time, name, phone and topic, then call schedule_consultation again with that slot's exact start_time, name, phone, topic, email if given, and reminder_call_ok true only if they agreed to a reminder call.
-3. If booked is true, read the confirmation_code back letter by letter and say whether it is confirmed or held for a team member to confirm. If the time was taken, offer the returned alternatives. If already_booked is true, offer to help with the existing booking.
-For an existing booking, ask for the booking reference and the phone used to book, then use lookup_consultation, reschedule_consultation or cancel_consultation.
+CALLBACKS
+A callback is a 30-minute call from our AI sales specialist at the caller's chosen time. You close sales yourself.
+If {{scheduling_available}} is "false", or schedule_consultation returns available false, use request_callback and keep helping.
+1. Call schedule_consultation without start_time (preferred_date as YYYY-MM-DD if they named a day). Offer two or three labels exactly as given.
+2. When they choose, confirm time, name, phone and topic, then call it again with that start_time, name, phone, topic, email if given, and reminder_call_ok true only if they agreed.
+3. If booked is true, read the confirmation_code letter by letter and say what happens next. If taken, offer the alternatives; if already_booked, offer help with it.
+Only if the caller asks for the Founder (or owner) by name or role, pass wants_founder true. Never suggest the Founder yourself.
+For an existing booking, ask for the reference and the phone used, then use lookup_consultation, reschedule_consultation or cancel_consultation.
 
 EXISTING CUSTOMERS, SUPPORT, PROJECT STATUS AND BILLING
 - You cannot see or confirm any account, project, invoice or payment details by phone, and you never say whether someone is a customer. If asked, call crm_customer_lookup once and follow its next_step.
@@ -902,7 +929,7 @@ EXISTING CUSTOMERS, SUPPORT, PROJECT STATUS AND BILLING
 - Refund requests, cancellations, contract changes, complaints and anything urgent: call escalate with the reason in the caller's words. Never approve or promise any of these.
 
 PEOPLE, TRANSFERS AND CALLBACKS
-If the caller asks for a person, or the request is outside these instructions: when {{transfer_available}} is "true", call check_transfer_availability, and only if it returns transfer_available true say you are transferring them and use the transfer tool. Otherwise call request_callback with name, phone, reason and any preferred time. For anything sensitive or urgent call escalate; if it returns transfer true, transfer the call, otherwise say the team will follow up during staffed hours. For opening hours call get_business_hours. If the caller asks not to be called again, call record_opt_out and confirm.
+If the caller asks for a person, or the request is outside these instructions: when {{transfer_available}} is "true", call check_transfer_availability, and only if it returns transfer_available true say you are transferring them and use the transfer tool. Otherwise keep helping; if they still want a person, call request_callback with name, phone, reason and preferred time. For anything sensitive or urgent call escalate; if it returns transfer true, transfer, otherwise say a team member will follow up. get_business_hours gives staffed hours only. If the caller asks not to be called again, call record_opt_out and confirm.
 
 EMAILS
 Use send_customer_email only when the caller asks for something by email: template package_information for the published prices, or consultation_details with the confirmation_code of a consultation booked on this call. Spell the address back first. You cannot write or change an email's content and never send marketing.
@@ -917,7 +944,7 @@ ENDING THE CALL
 Before ending, summarise what was done (details saved, link emailed, booking or support reference, callback requested) and what happens next, and ask if there is anything else. Thank them for calling Crestmont Website Development and use the end-call tool. End politely if the caller is abusive or the call is clearly not for Crestmont.
 
 STYLE
-Warm, professional and brief: one or two sentences at a time, plain language, one question at a time. Read references letter by letter. Business hours: {{business_hours}}. Human staff are not available around the clock.`;
+Warm, professional and brief: one or two sentences at a time, plain language, one question at a time. Staffed hours (live transfer only): {{business_hours}}.`;
 
 export function defaultAgentPrompt(): string {
   return INBOUND_MASTER_INSTRUCTIONS;

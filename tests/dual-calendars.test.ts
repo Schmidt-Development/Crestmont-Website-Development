@@ -167,11 +167,15 @@ test("[VOICE-003] inbound: the agent is never told a booking or callback exists 
   await saveVoiceConfig(t.db, t.owner.id, configured(true));
   const start = (await t.call("c_x0", "schedule_consultation", { preferred_date: "2026-11-03" })).json.slots[0].start_time;
   assert.equal((await t.call("c_x1", "schedule_consultation", { name: "First", phone: "+15550100123", topic: "Website", start_time: start })).json.booked, true);
-  // Same slot, Founder request: the unique active-slot index refuses it, so nothing is claimed on either calendar.
-  const clash = await t.call("c_x2", "schedule_consultation", { name: "Second", phone: "+15550100140", topic: "Founder please", start_time: start, wants_founder: true }, "+15550100140");
+  // The calendars are separate: an AI callback does not block the Founder's slot at the same time.
+  const founder = await t.call("c_x2", "schedule_consultation", { name: "Second", phone: "+15550100140", topic: "Founder please", start_time: start, wants_founder: true }, "+15550100140");
+  assert.equal(founder.json.booked, true);
+  assert.equal(founder.json.calendar, "founder_callback");
+  // A second Founder appointment at that time is refused by the Founder-only unique index: nothing is claimed.
+  const clash = await t.call("c_x2b", "schedule_consultation", { name: "Third", phone: "+15550100142", topic: "Founder too", start_time: start, wants_founder: true }, "+15550100142");
   assert.equal(clash.json.booked, false);
   assert.equal(clash.json.calendar, undefined);
-  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM consultations WHERE calendar = 'founder_callback'`), 0);
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM consultations WHERE calendar = 'founder_callback'`), 1);
   // Simulated database failure on the calendar write: the callback is NOT confirmed and its task is rolled back.
   await t.db.prepare(`CREATE TRIGGER test_fail_calendar BEFORE INSERT ON calendar_callbacks BEGIN SELECT RAISE(ABORT, 'simulated calendar write failure'); END`).run();
   const tasksBefore = await count(t.db, `SELECT COUNT(*) n FROM crm_activities WHERE kind = 'task'`);
@@ -218,6 +222,8 @@ async function outbound() {
     disclosureText: "I agree that Crestmont may call this number about website services using an AI (artificial) voice. Consent is not a condition of purchase.", capturedAt: new Date(now.getTime() - 5 * 86_400_000).toISOString() }, now);
   await SO.recordDncScrub(t.db, owner.id, { phone, registry: "national", result: "clear", sourceRef: "SAN-TEST-1", checkedAt: new Date(now.getTime() - 3 * 86_400_000).toISOString() }, now);
   await SO.saveSalesSettings(t.db, owner.id, { enabled: true, agentId: "agent_sales_test", fromNumber: "+16145550100", maxConcurrent: 2, maxPerRun: 3, maxPerDay: 25, maxAttempts: 2, retryAfterHours: 48 });
+  assert.deepEqual(await SO.saveColdStage(t.db, owner.id, { stage: "pilot", limits: { launch: 0, pilot: 10, stage_2: 25, stage_3: 50, stage_4: 100, stage_5: 200 }, confirmIncrease: true }), []);
+  await saveVoiceConfig(t.db, owner.id, configured(true));
   const row = await SO.enqueueSalesCall(t.db, leadId, { requestedBy: owner.id, now });
   const r = await SO.processSalesQueue({ db: t.db, env: { RETELL_OUTBOUND_API_KEY: OUT_KEY, RETELL_SALES_OUTBOUND: "on", ENVIRONMENT: "development" }, fetch: fetchImpl, now: () => now, sleep: async () => {} } as never);
   assert.equal(r.dialled, 1, r.detail);
@@ -236,27 +242,41 @@ test("[VOICE-003] [VOICE-005] outbound: a routine staff callback and an AI follo
   const cb = await t.post("schedule_sales_followup", { followup_type: "staff_callback", preferred_date: "2026-11-05", preferred_time: "morning", topic: "Pricing questions", prospect_agreed: true });
   assert.equal(cb.json.scheduled, true, JSON.stringify(cb.json));
   assert.equal(cb.json.calendar, "ai_follow_up");
-  const fu = await t.post("schedule_sales_followup", { followup_type: "ai_follow_up_call", preferred_date: "2026-11-10", prospect_agreed: true });
+  // An AI follow-up call is a real 30-minute slot on the AI Outbound Calendar: real times first, then the booking.
+  const ask = await t.post("schedule_sales_followup", { followup_type: "ai_follow_up_call", preferred_date: "2026-11-10", prospect_agreed: true });
+  assert.equal(ask.json.needs_time, true, JSON.stringify(ask.json));
+  assert.equal(ask.json.calendar, "ai_follow_up");
+  const fu = await t.post("schedule_sales_followup", { followup_type: "ai_follow_up_call", start_time: ask.json.slots[0].start_time, prospect_agreed: true });
   assert.equal(fu.json.scheduled, true, JSON.stringify(fu.json));
   assert.equal(fu.json.calendar, "ai_follow_up");
+  assert.equal(fu.json.confirmed, true);
   const ai = await entries(t.db, "ai_follow_up");
-  assert.deepEqual(ai.map((e) => e.kind).sort(), ["sales_ai_follow_up", "sales_staff_callback"]);
-  assert.ok(ai.every((e) => e.source === "ai_sales" && e.founder_reason === null));
-  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM calendar_callbacks e JOIN sales_followups f ON f.id = e.sales_followup_id`), 2, "each entry points at its real follow-up");
+  assert.deepEqual(ai.map((e) => e.kind), ["sales_staff_callback"]);
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM consultations WHERE calendar = 'ai_follow_up' AND status = 'confirmed' AND duration_minutes = 30`), 1, "the AI follow-up is a 30-minute AI Outbound Calendar appointment");
+  assert.ok(ai.every((e) => e.founder_reason === null));
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM calendar_callbacks e JOIN sales_followups f ON f.id = e.sales_followup_id`), 1, "the staff callback's entry points at its real follow-up");
+  // The booked time is queued as a scheduled AI callback (separate from the cold-outreach series in progress).
+  const cb2 = (await t.db.prepare(`SELECT mode, status, not_before FROM sales_calls WHERE mode = 'callback'`).first<{ mode: string; status: string; not_before: string }>())!;
+  assert.deepEqual({ ...cb2 }, { mode: "callback", status: "queued", not_before: ask.json.slots[0].start_time });
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM sales_followups WHERE kind = 'ai_follow_up_call' AND consultation_id IS NOT NULL AND sales_call_id IS NOT NULL`), 1);
   assert.equal((await entries(t.db, "founder_callback")).length, 0);
 });
 
 test("[VOICE-003] [VOICE-005] outbound: an explicit request for the Founder lands on the Founder calendar (an AI follow-up call becomes a Founder staff callback)", async () => {
   const t = await outbound();
-  const r = await t.post("schedule_sales_followup", { followup_type: "ai_follow_up_call", topic: "Wants the owner", prospect_agreed: true, wants_founder: true });
+  const ask = await t.post("schedule_sales_followup", { followup_type: "ai_follow_up_call", topic: "Wants the owner", prospect_agreed: true, wants_founder: true });
+  assert.equal(ask.json.needs_time, true, JSON.stringify(ask.json));
+  assert.equal(ask.json.calendar, "founder_callback", "the Founder's own availability is offered");
+  const r = await t.post("schedule_sales_followup", { followup_type: "ai_follow_up_call", topic: "Wants the owner", prospect_agreed: true, wants_founder: true, start_time: ask.json.slots[0].start_time });
   assert.equal(r.json.scheduled, true, JSON.stringify(r.json));
   assert.equal(r.json.calendar, "founder_callback");
-  assert.equal(r.json.followup_type, "staff_callback", "no automated call pretends to be the Founder");
-  const f = await entries(t.db, "founder_callback");
+  assert.equal(r.json.confirmed, false, "held until the Founder confirms");
+  const f = (await t.db.prepare(`SELECT calendar, founder_reason, status FROM consultations WHERE calendar = 'founder_callback'`).all<{ calendar: string; founder_reason: string; status: string }>()).results;
   assert.equal(f.length, 1);
   assert.equal(f[0].founder_reason, "customer_requested_founder");
-  assert.equal(f[0].kind, "sales_staff_callback");
+  assert.equal(f[0].status, "requested");
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM sales_followups WHERE kind = 'ai_follow_up_call'`), 0);
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM sales_calls WHERE mode = 'callback'`), 0, "no automated call pretends to be the Founder");
 });
 
 test("[VOICE-003] [VOICE-005] outbound: a failed calendar write is never reported as scheduled and leaves no follow-up behind", async () => {

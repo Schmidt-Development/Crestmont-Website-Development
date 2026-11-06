@@ -29,6 +29,11 @@ import { timeZoneForState } from "../domain/research.ts";
 import { listTargets, deployedVersion } from "./sales-opt/registry.ts";
 import { experimentRouting } from "./sales-opt/monitor.ts";
 import {
+  capacityPlan, allocationShortfall, parseStageLimits, stageLimitProblems, isStageIncrease, callbackEligibility, callbackMissed,
+  COLD_MAX_CONCURRENT, COLD_STAGES, COLD_STAGE_LABELS, CALLBACK_MAX_ATTEMPTS, CALLBACK_RETRY_MS, MODE_LABELS,
+  type OutboundMode, type ColdStage, type CapacityPlan,
+} from "../domain/outbound-capacity.ts";
+import {
   salesCallEligibility, spokenContext, dynamicVariables, withinSalesWindow, nextSalesWindow, resolveOutcome,
   type SalesGate, type ResearchFinding, type SpokenContext, type SalesOutcome,
 } from "../domain/sales-eligibility.ts";
@@ -48,7 +53,15 @@ export class SalesOutboundError extends Error {
 
 // ───────────── Settings and records (Owner) ─────────────
 
-export interface SalesSettings { enabled: number; agent_id: string | null; from_number: string | null; max_concurrent: number; max_dials_per_run: number; max_dials_per_day: number; max_attempts_per_lead: number; retry_after_hours: number; updated_by: string | null; updated_at: string }
+/**
+ * `enabled` is the AI Cold Outreach switch and `callbacks_enabled` the Scheduled AI Callbacks switch (migration 0090):
+ * two independent Owner switches on /staff/sales-outbound. `max_concurrent` is the cold-outreach concurrency (≤ 15),
+ * `callback_reserved` the slots only callbacks may use. `max_dials_per_day` is kept for history; cold outreach's daily
+ * volume is the ramp stage (cold_stage, cold_stage_limits_json) and callbacks have callback_max_per_day.
+ */
+export interface SalesSettings { enabled: number; callbacks_enabled: number; agent_id: string | null; from_number: string | null; max_concurrent: number; callback_reserved: number;
+  provider_concurrency_limit: number; inbound_shares_capacity: number; inbound_headroom: number; cold_stage: ColdStage; cold_stage_limits_json: string; callback_max_per_day: number;
+  max_dials_per_run: number; max_dials_per_day: number; max_attempts_per_lead: number; retry_after_hours: number; updated_by: string | null; updated_at: string }
 
 export async function loadSalesSettings(db: Db): Promise<SalesSettings> {
   return (await db.prepare(`SELECT * FROM sales_outbound_settings WHERE id = 1`).first<SalesSettings>())!;
@@ -63,7 +76,7 @@ export async function saveSalesSettings(db: Db, userId: string, i: { enabled: bo
   if (i.fromNumber.trim() && !from) problems.push("Caller number must be a dialable E.164 number");
   if (from && !from.startsWith("+1")) problems.push("Caller number must be a US (+1) number");
   const inRange = (n: number, lo: number, hi: number, what: string) => { if (!Number.isInteger(n) || n < lo || n > hi) problems.push(`${what} must be ${lo}–${hi}`); };
-  inRange(i.maxConcurrent, 1, 20, "Concurrent calls"); inRange(i.maxPerRun, 1, 20, "Dials per run"); inRange(i.maxPerDay, 1, 500, "Dials per day");
+  inRange(i.maxConcurrent, 1, COLD_MAX_CONCURRENT, "Concurrent cold-outreach calls"); inRange(i.maxPerRun, 1, 20, "Dials per run"); inRange(i.maxPerDay, 1, 500, "Dials per day");
   inRange(i.maxAttempts, 1, 3, "Attempts per lead"); inRange(i.retryAfterHours, 4, 720, "Hours between attempts");
   if (i.enabled && (!agentId || !from)) problems.push("Outbound sales can only be switched on with a sales agent id and an approved caller number");
   if (agentId) {
@@ -104,6 +117,59 @@ export async function revokeComplianceApproval(db: Db, userId: string): Promise<
   await audit(db, { actorUserId: userId, action: "sales_outbound.compliance_revoked", subjectType: "sales_compliance_approval", subjectId: "active", details: { changed: r.meta.changes } });
   return r.meta.changes === 1;
 }
+
+// ───────────── The two calling modes, capacity and the cold-outreach ramp (Owner) ─────────────
+
+/** One Owner switch per mode, saved together from the same page. Takes effect on the next dispatch run. */
+export async function saveOutboundModes(db: Db, userId: string, i: { callbacks: boolean; cold: boolean }): Promise<string[]> {
+  const s = await loadSalesSettings(db);
+  const problems: string[] = [];
+  // Switching a mode ON needs the agent and number it would dial with; switching OFF is always allowed.
+  if ((i.callbacks && !s.callbacks_enabled) || (i.cold && !s.enabled)) {
+    if (!s.agent_id || !s.from_number) problems.push("A mode can only be switched on once the sales agent id and the approved caller number are saved");
+  }
+  if (problems.length) return problems;
+  await db.prepare(`UPDATE sales_outbound_settings SET callbacks_enabled = ?, enabled = ?, updated_by = ?, updated_at = ? WHERE id = 1`).bind(i.callbacks ? 1 : 0, i.cold ? 1 : 0, userId, nowIso()).run();
+  await audit(db, { actorUserId: userId, action: "sales_outbound.modes_updated", subjectType: "sales_outbound_settings", subjectId: "1",
+    details: { callbacks: { from: !!s.callbacks_enabled, to: i.callbacks }, cold: { from: !!s.enabled, to: i.cold } } });
+  return [];
+}
+
+/** Concurrency allocation and the provider's real limit. */
+export async function saveCapacitySettings(db: Db, userId: string, i: { coldMax: number; callbackReserved: number; providerLimit: number; inboundShares: boolean; inboundHeadroom: number; callbackMaxPerDay: number }): Promise<string[]> {
+  const p: string[] = [];
+  const inRange = (n: number, lo: number, hi: number, what: string) => { if (!Number.isInteger(n) || n < lo || n > hi) p.push(`${what} must be ${lo}–${hi}`); };
+  inRange(i.coldMax, 1, COLD_MAX_CONCURRENT, "Concurrent cold-outreach calls"); inRange(i.callbackReserved, 1, 5, "Reserved callback calls");
+  inRange(i.providerLimit, 1, 200, "Provider concurrency limit"); inRange(i.inboundHeadroom, 0, 20, "Lines kept free for inbound"); inRange(i.callbackMaxPerDay, 1, 1000, "Callbacks per day");
+  if (p.length) return p;
+  await db.prepare(`UPDATE sales_outbound_settings SET max_concurrent = ?, callback_reserved = ?, provider_concurrency_limit = ?, inbound_shares_capacity = ?, inbound_headroom = ?, callback_max_per_day = ?, updated_by = ?, updated_at = ? WHERE id = 1`)
+    .bind(i.coldMax, i.callbackReserved, i.providerLimit, i.inboundShares ? 1 : 0, i.inboundHeadroom, i.callbackMaxPerDay, userId, nowIso()).run();
+  await audit(db, { actorUserId: userId, action: "sales_outbound.capacity_updated", subjectType: "sales_outbound_settings", subjectId: "1", details: i });
+  return [];
+}
+
+/**
+ * The cold-outreach ramp. Every move is the Founder's decision (Owner-only route) and audited; nothing moves it by
+ * itself. An increase additionally needs the typed confirmation so a stray click cannot raise volume.
+ */
+export async function saveColdStage(db: Db, userId: string, i: { stage: string; limits: Record<string, number>; confirmIncrease: boolean }): Promise<string[]> {
+  if (!(COLD_STAGES as readonly string[]).includes(i.stage)) return ["Unknown ramp stage"];
+  const p = stageLimitProblems(i.limits);
+  const s = await loadSalesSettings(db);
+  const before = parseStageLimits(s.cold_stage_limits_json);
+  const to = i.stage as ColdStage;
+  const raises = isStageIncrease(s.cold_stage, to) || COLD_STAGES.some((x) => i.limits[x] > before[x]);
+  if (raises && !i.confirmIncrease) p.push("Raising cold-outreach volume needs the Founder's confirmation (tick the authorisation box)");
+  if (p.length) return p;
+  const limits = Object.fromEntries(COLD_STAGES.map((x) => [x, i.limits[x]]));
+  await db.prepare(`UPDATE sales_outbound_settings SET cold_stage = ?, cold_stage_limits_json = ?, updated_by = ?, updated_at = ? WHERE id = 1`).bind(to, JSON.stringify(limits), userId, nowIso()).run();
+  await audit(db, { actorUserId: userId, action: raises ? "sales_outbound.ramp_increased" : "sales_outbound.ramp_updated", subjectType: "sales_outbound_settings", subjectId: "1",
+    details: { from: s.cold_stage, to, limit: limits[to], limits } });
+  return [];
+}
+
+export const coldDailyLimit = (s: Pick<SalesSettings, "cold_stage" | "cold_stage_limits_json">) => parseStageLimits(s.cold_stage_limits_json)[s.cold_stage];
+export { COLD_STAGES, COLD_STAGE_LABELS, MODE_LABELS };
 
 export interface ConsentInput { phone: string; leadId?: string | null; lineType: string; signerName: string; evidenceRef: string; disclosureText: string; capturedAt: string }
 
@@ -236,6 +302,122 @@ export async function sieStamp(db: Db, environment: string, agentId: string, lea
   return { metadata: md, note: route ? `experiment ${route.experimentId} routed this lead to ${route.arm} (${route.versionId}), which this agent does not run: left out of the experiment` : `version ${dep.id}` };
 }
 
+export interface SalesGateStatus { enabled: boolean; reasons: string[] }
+export const outboundKeyConfigured = (env: Pick<Env, "RETELL_OUTBOUND_API_KEY">) => !!retellKey(env, "outbound");
+export const SALES_CALLBACKS_ENV_FLAG = "RETELL_SALES_CALLBACKS";
+type SwitchEnv = Pick<Env, "RETELL_OUTBOUND_API_KEY" | "RETELL_INBOUND_API_KEY" | "RETELL_SALES_OUTBOUND"> & { RETELL_SALES_CALLBACKS?: string };
+
+/** What both modes need: the sales agent, its number and the sales workspace key (never the receptionist's). */
+function commonReasons(s: SalesSettings, env: SwitchEnv): string[] {
+  const reasons: string[] = [];
+  if (!s.agent_id) reasons.push("No sales agent id");
+  if (!s.from_number) reasons.push("No approved caller number");
+  if (!retellKey(env, "outbound")) reasons.push("RETELL_OUTBOUND_API_KEY (the sales workspace key) is not set");
+  if (keysAmbiguous(env)) reasons.push("RETELL_INBOUND_API_KEY and RETELL_OUTBOUND_API_KEY are identical: the two workspaces cannot be told apart");
+  return reasons;
+}
+
+/** AI Cold Outreach: the environment flag, the Owner switch and an active counsel-referenced compliance approval. */
+export async function salesOutboundSwitch(db: Db, env: SwitchEnv): Promise<SalesGateStatus> {
+  const s = await loadSalesSettings(db);
+  const reasons: string[] = [];
+  if (env.RETELL_SALES_OUTBOUND !== "on") reasons.push(`${SALES_OUTBOUND_ENV_FLAG} is not "on" in this environment`);
+  if (!s.enabled) reasons.push("AI Cold Outreach is off in the Owner's settings");
+  reasons.push(...commonReasons(s, env));
+  if (!(await activeComplianceApproval(db))) reasons.push("No active compliance approval for AI-voice sales calls (Founder decision D-14; counsel review required)");
+  if (coldDailyLimit(s) === 0) reasons.push(`The cold-outreach ramp is at ${COLD_STAGE_LABELS[s.cold_stage]} (0 calls a day)`);
+  return { enabled: reasons.length === 0, reasons };
+}
+
+/**
+ * Scheduled AI Callbacks: independent of cold outreach (works while cold outreach is OFF). A callback is a call the
+ * prospect asked for, so it needs that request on record (callbackEligibility), not the cold-outreach approval.
+ * RETELL_SALES_CALLBACKS="off" is an environment-level kill switch.
+ */
+export async function callbackSwitch(db: Db, env: SwitchEnv): Promise<SalesGateStatus> {
+  const s = await loadSalesSettings(db);
+  const reasons: string[] = [];
+  if (env.RETELL_SALES_CALLBACKS === "off") reasons.push(`${SALES_CALLBACKS_ENV_FLAG} is "off" in this environment`);
+  if (!s.callbacks_enabled) reasons.push("Scheduled AI Callbacks are off in the Owner's settings");
+  reasons.push(...commonReasons(s, env));
+  return { enabled: reasons.length === 0, reasons };
+}
+
+export async function modeSwitch(db: Db, env: SwitchEnv, mode: OutboundMode): Promise<SalesGateStatus> {
+  return mode === "callback" ? callbackSwitch(db, env) : salesOutboundSwitch(db, env);
+}
+
+/** The callback gate from authoritative records. The time-of-day check uses the appointment time when given. */
+export async function gateForCallback(db: Db, f: LeadFacts, at: Date, attemptsSoFar: number, maxAttempts: number) {
+  const phone = f.phoneE164;
+  const asked = phone ? await db.prepare(`SELECT evidence FROM voice_call_consents WHERE phone_e164 = ? AND purpose = 'callback' AND revoked_at IS NULL ORDER BY granted_at DESC LIMIT 1`).bind(phone).first<{ evidence: string }>() : null;
+  const written = phone && !asked ? await db.prepare(`SELECT evidence_ref FROM sales_call_consents WHERE phone_e164 = ? AND revoked_at IS NULL ORDER BY captured_at DESC LIMIT 1`).bind(phone).first<{ evidence_ref: string }>() : null;
+  const supp = await suppressionFor(db, phone ? [phone] : [], f.contactEmail ? [f.contactEmail.toLowerCase()] : []);
+  const tz = f.timeZone ?? (await loadVoiceConfig(db)).timezone;
+  return callbackEligibility({ phoneE164: phone, onDnc: phone ? await isDnc(db, phone) : false, suppressedInCrm: supp.phone || supp.erased, leadMerged: f.merged,
+    consentEvidence: asked?.evidence ?? written?.evidence_ref ?? null, timeZone: tz && validTimeZone(tz) ? tz : null, attemptsSoFar, maxAttempts }, at);
+}
+
+// ───────────── Concurrency reservations and daily limits (atomic in the database, migration 0090) ─────────────
+
+/** Claims one of the mode's concurrent-call slots, but only while fewer than `limit` are held. One statement, so two
+ *  overlapping scheduler runs can never both take the last slot; an expired reservation counts as free. */
+export async function claimSlot(db: Db, mode: OutboundMode, salesCallId: string, limit: number, now: Date, ttlMs = SALES_LEASE_MS): Promise<boolean> {
+  if (limit <= 0) return false;
+  const at = now.toISOString(), exp = new Date(now.getTime() + ttlMs).toISOString();
+  const r = await db.prepare(`UPDATE outbound_call_slots SET sales_call_id = ?1, reserved_at = ?2, expires_at = ?3
+      WHERE slot_key = (SELECT slot_key FROM outbound_call_slots WHERE mode = ?4 AND (sales_call_id IS NULL OR expires_at < ?2) ORDER BY slot_no LIMIT 1)
+        AND (sales_call_id IS NULL OR expires_at < ?2)
+        AND (SELECT COUNT(*) FROM outbound_call_slots WHERE mode = ?4 AND sales_call_id IS NOT NULL AND expires_at >= ?2) < ?5
+        AND NOT EXISTS (SELECT 1 FROM outbound_call_slots WHERE sales_call_id = ?1)`).bind(salesCallId, at, exp, mode, limit).run();
+  return r.meta.changes === 1;
+}
+export async function releaseSlot(db: Db, salesCallId: string): Promise<void> {
+  await db.prepare(`UPDATE outbound_call_slots SET sales_call_id = NULL, reserved_at = NULL, expires_at = NULL WHERE sales_call_id = ?`).bind(salesCallId).run();
+}
+export async function heldSlots(db: Db, now: Date): Promise<Record<OutboundMode, number>> {
+  const rows = (await db.prepare(`SELECT mode, COUNT(*) AS n FROM outbound_call_slots WHERE sales_call_id IS NOT NULL AND expires_at >= ? GROUP BY mode`).bind(now.toISOString()).all<{ mode: OutboundMode; n: number }>()).results;
+  return { cold: rows.find((r) => r.mode === "cold")?.n ?? 0, callback: rows.find((r) => r.mode === "callback")?.n ?? 0 };
+}
+
+/** Business-day key for daily limits (the business time zone, so "today" matches what the Owner sees). */
+async function businessDay(db: Db, now: Date): Promise<string> {
+  const tz = (await loadVoiceConfig(db)).timezone ?? "America/New_York";
+  try { return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now); } catch { return now.toISOString().slice(0, 10); }
+}
+/** Counts one dial against the mode's daily limit, only while under it (conditional upsert: race-safe). */
+async function claimDailyDial(db: Db, mode: OutboundMode, limit: number, now: Date): Promise<boolean> {
+  if (limit <= 0) return false;
+  const day = await businessDay(db, now);
+  const r = await db.prepare(`INSERT INTO outbound_daily_dials (day, mode, n) VALUES (?1, ?2, 1) ON CONFLICT(day, mode) DO UPDATE SET n = n + 1 WHERE n < ?3`).bind(day, mode, limit).run();
+  return r.meta.changes === 1;
+}
+async function unclaimDailyDial(db: Db, mode: OutboundMode, now: Date): Promise<void> {
+  await db.prepare(`UPDATE outbound_daily_dials SET n = MAX(0, n - 1) WHERE day = ? AND mode = ?`).bind(await businessDay(db, now), mode).run();
+}
+export async function dialsToday(db: Db, now: Date): Promise<Record<OutboundMode, number>> {
+  const rows = (await db.prepare(`SELECT mode, n FROM outbound_daily_dials WHERE day = ?`).bind(await businessDay(db, now)).all<{ mode: OutboundMode; n: number }>()).results;
+  return { cold: rows.find((r) => r.mode === "cold")?.n ?? 0, callback: rows.find((r) => r.mode === "callback")?.n ?? 0 };
+}
+
+/** Calls the provider is carrying that are not sales calls: inbound receptionist calls and its follow-up calls. */
+async function activeInboundCalls(db: Db, now: Date): Promise<number> {
+  const since = new Date(now.getTime() - 2 * 3_600_000).toISOString();
+  const inbound = (await db.prepare(`SELECT COUNT(*) AS n FROM calls WHERE direction = 'inbound' AND ended_at IS NULL AND started_at >= ?`).bind(since).first<{ n: number }>())!.n;
+  const followUps = (await db.prepare(`SELECT COUNT(*) AS n FROM voice_outbound_requests WHERE status = 'dialing'`).first<{ n: number }>())!.n;
+  return inbound + followUps;
+}
+
+/** The live capacity picture (dispatcher and Owner dashboard read the same numbers). */
+export async function outboundCapacity(db: Db, now: Date): Promise<CapacityPlan & { active: Record<OutboundMode, number>; activeInbound: number; shortfall: string | null }> {
+  const s = await loadSalesSettings(db);
+  const active = await heldSlots(db, now);
+  const activeInbound = await activeInboundCalls(db, now);
+  const plan = capacityPlan({ providerLimit: s.provider_concurrency_limit, inboundSharesCapacity: !!s.inbound_shares_capacity, activeInbound, inboundHeadroom: s.inbound_headroom,
+    coldMax: s.max_concurrent, callbackReserved: s.callback_reserved, activeCold: active.cold, activeCallback: active.callback });
+  return { ...plan, active, activeInbound, shortfall: allocationShortfall(s.provider_concurrency_limit, !!s.inbound_shares_capacity, s.inbound_headroom, s.max_concurrent, s.callback_reserved) };
+}
+
 // ───────────── Queue ─────────────
 
 export interface SalesCallRow {
@@ -243,6 +425,7 @@ export interface SalesCallRow {
   max_attempts: number; idempotency_key: string; provider_call_id: string | null; eligibility_json: string; dynamic_variables_json: string; outcome: string | null;
   outcome_source: string | null; disposition: string | null; disconnection_reason: string | null; duration_ms: number | null; cost_microusd: number | null;
   requested_by: string | null; is_test: number; created_at: string; updated_at: string; finalized_at: string | null;
+  mode: OutboundMode; appointment_id: string | null; context_json: string; missed_at: string | null;
 }
 
 export async function getSalesCall(db: Db, id: string): Promise<SalesCallRow | null> {
@@ -252,35 +435,67 @@ export async function salesCallByProvider(db: Db, providerCallId: string): Promi
   return db.prepare(`SELECT * FROM sales_calls WHERE provider_call_id = ?`).bind(providerCallId).first<SalesCallRow>();
 }
 
+const cleanVar = (v: unknown, max: number) => String(v ?? "").replace(/[\r\n\t{}]+/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, max);
+/** Conversation context handed to the agent on a callback, so the prospect never repeats what they already said. */
+export function callbackVariables(ctx: Record<string, unknown>): Record<string, string> {
+  return {
+    call_mode: "scheduled_callback",
+    callback_reason: cleanVar(ctx.reason, 300),
+    callback_appointment: cleanVar(ctx.appointment_label, 120),
+    previous_conversation_summary: cleanVar(ctx.summary, 1200),
+    previous_requirements: cleanVar(ctx.requirements, 600),
+  };
+}
+
 /**
- * Queues a lead for an AI sales call (staff action, or an agreed AI follow-up). The gate runs now; a blocked lead is
- * recorded as `blocked` with its reasons (audit trail) and is never dialled. One open series per lead and per number.
+ * Queues a lead for an AI call (staff action, an agreed AI follow-up, an AI Outbound Calendar appointment, or the cold
+ * outreach candidate pool). The mode's gate runs now; a blocked lead is recorded as `blocked` with its reasons (audit
+ * trail) and is never dialled. One open series per lead and per number in each mode.
  */
-export async function enqueueSalesCall(db: Db, leadId: string, opts: { requestedBy: string | null; notBefore?: string | null; now?: Date; isTest?: boolean }): Promise<SalesCallRow> {
+export async function enqueueSalesCall(db: Db, leadId: string, opts: { requestedBy: string | null; notBefore?: string | null; now?: Date; isTest?: boolean;
+  mode?: OutboundMode; appointmentId?: string | null; context?: Record<string, unknown> }): Promise<SalesCallRow> {
   const now = opts.now ?? new Date();
+  const mode = opts.mode ?? "cold";
   const f = await leadFacts(db, leadId);
   if (!f) throw new SalesOutboundError("Lead not found", 404);
   const settings = await loadSalesSettings(db);
-  const prior = (await db.prepare(`SELECT COALESCE(SUM(attempts), 0) AS n FROM sales_calls WHERE lead_id = ?`).bind(leadId).first<{ n: number }>())!.n;
-  const gate = await gateFor(db, f, now, prior, settings.max_attempts_per_lead);
+  const maxAttempts = mode === "callback" ? CALLBACK_MAX_ATTEMPTS : settings.max_attempts_per_lead;
+  const prior = mode === "callback" ? 0 : (await db.prepare(`SELECT COALESCE(SUM(attempts), 0) AS n FROM sales_calls WHERE lead_id = ? AND mode = 'cold'`).bind(leadId).first<{ n: number }>())!.n;
+  const gate = mode === "callback"
+    ? await gateForCallback(db, f, opts.notBefore ? new Date(opts.notBefore) : now, 0, maxAttempts)
+    : await gateFor(db, f, now, prior, maxAttempts);
   const id = newId("scall"), at = nowIso(() => now);
   const ctx = researchContext(f, now);
-  const vars = dynamicVariables({ leadId, businessName: f.businessName, contactName: f.contactName, industry: f.industry, websiteUrl: f.prospect?.website_url ?? null, environment: "pending", ctx });
+  const vars = { ...dynamicVariables({ leadId, businessName: f.businessName, contactName: f.contactName, industry: f.industry, websiteUrl: f.prospect?.website_url ?? null, environment: "pending", ctx }),
+    ...(mode === "callback" ? callbackVariables(opts.context ?? {}) : {}) };
   const status = gate.eligible && f.phoneE164 ? "queued" : "blocked";
+  if (mode === "callback" && status === "queued") {
+    // A prospect who booked a callback is engaged: a queued cold call to them would be a second, unasked-for call.
+    await db.prepare(`UPDATE sales_calls SET status = 'cancelled', status_detail = 'Superseded by a scheduled callback', updated_at = ? WHERE lead_id = ? AND mode = 'cold' AND status = 'queued'`).bind(at, leadId).run();
+  }
   try {
-    await db.prepare(`INSERT INTO sales_calls (id, lead_id, phone_e164, status, status_detail, not_before, max_attempts, idempotency_key, eligibility_json, dynamic_variables_json, requested_by, is_test, created_at, updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id, leadId, f.phoneE164 ?? "unknown", status, status === "blocked" ? gate.reasons.join("; ").slice(0, 900) : null,
-      opts.notBefore ?? null, settings.max_attempts_per_lead, `crestmont_${id}`, JSON.stringify(gate.reasons), JSON.stringify(vars), opts.requestedBy, opts.isTest || f.isTest ? 1 : 0, at, at).run();
+    await db.prepare(`INSERT INTO sales_calls (id, lead_id, phone_e164, status, status_detail, not_before, max_attempts, idempotency_key, eligibility_json, dynamic_variables_json, requested_by, is_test, mode, appointment_id, context_json, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id, leadId, f.phoneE164 ?? "unknown", status, status === "blocked" ? gate.reasons.join("; ").slice(0, 900) : null,
+      opts.notBefore ?? null, maxAttempts, `crestmont_${id}`, JSON.stringify(gate.reasons), JSON.stringify(vars), opts.requestedBy, opts.isTest || f.isTest ? 1 : 0,
+      mode, opts.appointmentId ?? null, JSON.stringify(opts.context ?? {}).slice(0, 4000), at, at).run();
   } catch (e) {
     if (/UNIQUE/i.test((e as Error).message)) {
-      const open = await db.prepare(`SELECT * FROM sales_calls WHERE (lead_id = ? OR phone_e164 = ?) AND status IN ('queued','dialing','in_progress') LIMIT 1`).bind(leadId, f.phoneE164 ?? "").first<SalesCallRow>();
+      const open = await db.prepare(`SELECT * FROM sales_calls WHERE (lead_id = ? OR phone_e164 = ?) AND mode = ? AND status IN ('queued','dialing','in_progress') LIMIT 1`).bind(leadId, f.phoneE164 ?? "", mode).first<SalesCallRow>();
+      if (open && mode === "callback" && open.status === "queued" && opts.appointmentId) {
+        // The prospect moved their callback: the queued series follows the new appointment (never a second call).
+        await db.prepare(`UPDATE sales_calls SET not_before = ?, appointment_id = ?, context_json = ?, dynamic_variables_json = ?, updated_at = ? WHERE id = ? AND status = 'queued'`)
+          .bind(opts.notBefore ?? null, opts.appointmentId, JSON.stringify(opts.context ?? {}).slice(0, 4000), JSON.stringify(vars), at, open.id).run();
+        return (await getSalesCall(db, open.id))!;
+      }
       if (open) return open;
     }
     throw e;
   }
   await audit(db, { actorUserId: opts.requestedBy, actorKind: opts.requestedBy ? "user" : "ai", action: status === "queued" ? "sales_outbound.queued" : "sales_outbound.blocked", subjectType: "sales_call", subjectId: id,
-    details: { lead: leadId, reasons: gate.reasons.slice(0, 12) } });
-  if (status === "queued") await addLeadNote(db, leadId, `Queued for an AI sales call (${id}); eligibility is re-checked immediately before dialling.`);
+    details: { lead: leadId, mode, reasons: gate.reasons.slice(0, 12) } });
+  if (status === "queued") await addLeadNote(db, leadId, mode === "callback"
+    ? `Scheduled AI callback queued (${id})${opts.notBefore ? ` for ${opts.notBefore}` : ""}; eligibility is re-checked immediately before dialling.`
+    : `Queued for an AI sales call (${id}); eligibility is re-checked immediately before dialling.`);
   return (await getSalesCall(db, id))!;
 }
 
@@ -290,56 +505,70 @@ export async function cancelSalesCall(db: Db, userId: string, id: string, note: 
   await audit(db, { actorUserId: userId, action: "sales_outbound.cancelled", subjectType: "sales_call", subjectId: id });
 }
 
-export interface SalesGateStatus { enabled: boolean; reasons: string[] }
-export const outboundKeyConfigured = (env: Pick<Env, "RETELL_OUTBOUND_API_KEY">) => !!retellKey(env, "outbound");
-
-/** The environment/Owner switch, separate from per-lead eligibility. */
-export async function salesOutboundSwitch(db: Db, env: Pick<Env, "RETELL_OUTBOUND_API_KEY" | "RETELL_INBOUND_API_KEY" | "RETELL_SALES_OUTBOUND">): Promise<SalesGateStatus> {
-  const s = await loadSalesSettings(db);
-  const reasons: string[] = [];
-  if (env.RETELL_SALES_OUTBOUND !== "on") reasons.push(`${SALES_OUTBOUND_ENV_FLAG} is not "on" in this environment`);
-  if (!s.enabled) reasons.push("Outbound sales calling is off in the Owner's settings");
-  if (!s.agent_id) reasons.push("No sales agent id");
-  if (!s.from_number) reasons.push("No approved caller number");
-  if (!retellKey(env, "outbound")) reasons.push("RETELL_OUTBOUND_API_KEY (the sales workspace key) is not set");
-  if (keysAmbiguous(env)) reasons.push("RETELL_INBOUND_API_KEY and RETELL_OUTBOUND_API_KEY are identical: the two workspaces cannot be told apart");
-  if (!(await activeComplianceApproval(db))) reasons.push("No active compliance approval for AI-voice sales calls (Founder decision D-14; counsel review required)");
-  return { enabled: reasons.length === 0, reasons };
-}
-
-export interface SalesQueueDeps { db: Db; env: Pick<Env, "RETELL_OUTBOUND_API_KEY" | "RETELL_INBOUND_API_KEY" | "RETELL_SALES_OUTBOUND" | "ENVIRONMENT">; fetch: typeof fetch; now?: () => Date; sleep?: (ms: number) => Promise<void> }
+export interface SalesQueueDeps { db: Db; env: Pick<Env, "RETELL_OUTBOUND_API_KEY" | "RETELL_INBOUND_API_KEY" | "RETELL_SALES_OUTBOUND" | "ENVIRONMENT"> & { RETELL_SALES_CALLBACKS?: string }; fetch: typeof fetch; now?: () => Date; sleep?: (ms: number) => Promise<void> }
 
 async function block(db: Db, row: SalesCallRow, status: "blocked" | "failed", detail: string, notify = true) {
   await db.prepare(`UPDATE sales_calls SET status = ?, status_detail = ?, updated_at = ? WHERE id = ?`).bind(status, detail.slice(0, 900), nowIso(), row.id).run();
+  await releaseSlot(db, row.id);
   await releasePhone(db, row.phone_e164, leaseRef(row.id), `${status}: ${detail}`);
-  if (notify) await addLeadTask(db, row.lead_id, `${row.is_test ? "[TEST] " : ""}AI sales call ${row.id} was not placed: ${detail}`, 24);
+  if (notify) await addLeadTask(db, row.lead_id, `${row.is_test ? "[TEST] " : ""}${row.mode === "callback" ? "Scheduled AI callback" : "AI sales call"} ${row.id} was not placed: ${detail}`, row.mode === "callback" ? 2 : 24);
 }
 
-/** Scheduled job "sales_outbound" (every 15 minutes). Dials nothing unless every switch and the per-lead gate pass. */
-export async function processSalesQueue(d: SalesQueueDeps): Promise<{ detail: string; dialled: number }> {
+/** A callback whose time passed without a call is never dialled late: it goes to a person, visibly, instead. */
+async function markMissed(db: Db, row: SalesCallRow, why: string, now: Date) {
+  const r = await db.prepare(`UPDATE sales_calls SET status = 'blocked', missed_at = ?, status_detail = ?, updated_at = ? WHERE id = ? AND status = 'queued'`).bind(now.toISOString(), `Missed: ${why}`.slice(0, 900), nowIso(), row.id).run();
+  if (r.meta.changes !== 1) return;
+  await addLeadTask(db, row.lead_id, `${row.is_test ? "[TEST] " : ""}MISSED scheduled AI callback (${row.id}, due ${row.not_before}): ${why}. Call the prospect personally or book a new time.`, 1);
+  await notifyOwners(db, "sales_outbound", `${row.is_test ? "[TEST] " : ""}A scheduled AI callback was missed (${why}).`, "sales_call", row.id);
+  await audit(db, { actorKind: "system", action: "sales_outbound.callback_missed", subjectType: "sales_call", subjectId: row.id, details: { due: row.not_before, why } });
+}
+
+/**
+ * Scheduled job "sales_outbound" (every 15 minutes; also safe to run concurrently). Each mode is dispatched only when
+ * its own switch is on — Scheduled AI Callbacks first, then AI Cold Outreach — within the capacity plan, the mode's
+ * daily limit, the per-lead gate and the recipient's calling hours. Reservations are claimed atomically.
+ */
+export async function processSalesQueue(d: SalesQueueDeps): Promise<{ detail: string; dialled: number; byMode?: Record<OutboundMode, number> }> {
   const now = d.now ?? (() => new Date());
-  const sw = await salesOutboundSwitch(d.db, d.env);
-  if (!sw.enabled) return { detail: `skipped: outbound sales disabled (${sw.reasons.join("; ")})`, dialled: 0 };
-  const budget = await voiceBudget(d.db, now());
-  if (!budgetOpen(budget)) { await noteBudgetClosed(d.db, budget); return { detail: `skipped: voice budget ${budget.state === "not_set" ? "not set" : "reached"}`, dialled: 0 }; }
-  const s = await loadSalesSettings(d.db);
+  const sw = { callback: await callbackSwitch(d.db, d.env), cold: await salesOutboundSwitch(d.db, d.env) };
   // Lost results: a dial with no call_ended for 3 hours goes to a person and is never re-dialled automatically.
   const stale = (await d.db.prepare(`SELECT * FROM sales_calls WHERE status IN ('dialing','in_progress') AND updated_at < ?`).bind(new Date(now().getTime() - SALES_STALE_DIALING_MS).toISOString()).all<SalesCallRow>()).results;
   for (const row of stale) await block(d.db, row, "failed", "no call result was received from Retell; check the Retell call log before calling again");
-  const active = (await d.db.prepare(`SELECT COUNT(*) AS n FROM sales_calls WHERE status IN ('dialing','in_progress')`).first<{ n: number }>())!.n;
-  const today = now().toISOString().slice(0, 10);
-  const dialledToday = (await d.db.prepare(`SELECT COUNT(*) AS n FROM calls WHERE direction = 'outbound' AND started_at >= ? AND id IN (SELECT c.id FROM calls c JOIN sales_calls s ON s.provider_call_id = c.provider_call_id)`).bind(`${today}T00:00:00.000Z`).first<{ n: number }>())!.n;
-  const capacity = Math.max(0, Math.min(s.max_concurrent - active, s.max_dials_per_run, s.max_dials_per_day - dialledToday));
-  if (capacity === 0) return { detail: `no capacity (active ${active}/${s.max_concurrent}, today ${dialledToday}/${s.max_dials_per_day})`, dialled: 0 };
-  const due = (await d.db.prepare(`SELECT * FROM sales_calls WHERE status = 'queued' AND (not_before IS NULL OR not_before <= ?) ORDER BY created_at LIMIT ?`).bind(now().toISOString(), capacity * 3).all<SalesCallRow>()).results;
-  let dialled = 0;
+  // A reservation whose call is no longer dialling (a release that never ran) is freed, so capacity cannot leak.
+  await d.db.prepare(`UPDATE outbound_call_slots SET sales_call_id = NULL, reserved_at = NULL, expires_at = NULL
+      WHERE sales_call_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sales_calls c WHERE c.id = outbound_call_slots.sales_call_id AND c.status IN ('dialing','in_progress'))`).run();
+  if (!sw.callback.enabled && !sw.cold.enabled) return { detail: `skipped: both calling modes are off (callbacks: ${sw.callback.reasons.join("; ")} | cold outreach: ${sw.cold.reasons.join("; ")})`, dialled: 0, byMode: { callback: 0, cold: 0 } };
+  const budget = await voiceBudget(d.db, now());
+  if (!budgetOpen(budget)) { await noteBudgetClosed(d.db, budget); return { detail: `skipped: voice budget ${budget.state === "not_set" ? "not set" : "reached"}`, dialled: 0, byMode: { callback: 0, cold: 0 } }; }
+  const s = await loadSalesSettings(d.db);
+  if (sw.cold.enabled) await topUpColdCandidates(d.db, s, now());
   const notes: string[] = [];
+  const byMode: Record<OutboundMode, number> = { callback: 0, cold: 0 };
+  for (const mode of ["callback", "cold"] as const) {
+    if (!sw[mode].enabled) { notes.push(`${MODE_LABELS[mode]} not dialling: ${sw[mode].reasons.join("; ")}`); continue; }
+    const r = await dispatchMode(d, s, mode, now, notes);
+    byMode[mode] = r;
+  }
+  const dialled = byMode.callback + byMode.cold;
+  return { detail: `${dialled} dialled (callbacks ${byMode.callback}, cold ${byMode.cold})${notes.length ? `; ${notes.join("; ")}` : ""}`.slice(0, 900), dialled, byMode };
+}
+
+async function dispatchMode(d: SalesQueueDeps, s: SalesSettings, mode: OutboundMode, now: () => Date, notes: string[]): Promise<number> {
+  const plan = await outboundCapacity(d.db, now());
+  const perRun = Math.min(plan.free[mode], s.max_dials_per_run);
+  if (perRun === 0) { notes.push(`${MODE_LABELS[mode]}: no capacity (active ${plan.active[mode]}/${plan.limit[mode]}${plan.notes.length ? `; ${plan.notes.join("; ")}` : ""})`); return 0; }
+  const dailyLimit = mode === "cold" ? coldDailyLimit(s) : s.callback_max_per_day;
+  const order = mode === "callback" ? "not_before" : "created_at";
+  const due = (await d.db.prepare(`SELECT * FROM sales_calls WHERE status = 'queued' AND mode = ? AND (not_before IS NULL OR not_before <= ?) ORDER BY ${order} LIMIT ?`).bind(mode, now().toISOString(), perRun * 3).all<SalesCallRow>()).results;
+  let dialled = 0;
   for (const row of due) {
-    if (dialled >= capacity) break;
+    if (dialled >= perRun) break;
+    if (mode === "callback" && callbackMissed(row.not_before, now())) { await markMissed(d.db, row, "its appointment time passed before it could be placed (callbacks paused, outside calling hours or no capacity)", now()); notes.push(`${row.id}: missed`); continue; }
     const f = await leadFacts(d.db, row.lead_id);
     if (!f) { await block(d.db, row, "blocked", "lead no longer exists", false); continue; }
-    const prior = (await d.db.prepare(`SELECT COALESCE(SUM(attempts), 0) AS n FROM sales_calls WHERE lead_id = ? AND id <> ?`).bind(row.lead_id, row.id).first<{ n: number }>())!.n;
-    const gate = await gateFor(d.db, f, now(), prior + row.attempts, row.max_attempts);
+    const gate = mode === "callback"
+      ? await gateForCallback(d.db, f, now(), row.attempts, row.max_attempts)
+      : await gateFor(d.db, f, now(), (await d.db.prepare(`SELECT COALESCE(SUM(attempts), 0) AS n FROM sales_calls WHERE lead_id = ? AND id <> ? AND mode = 'cold'`).bind(row.lead_id, row.id).first<{ n: number }>())!.n + row.attempts, row.max_attempts);
     if (!gate.eligible || f.phoneE164 !== row.phone_e164) {
       const why = !gate.eligible ? gate.reasons.join("; ") : "the lead's phone number changed since it was queued";
       await block(d.db, row, "blocked", why);
@@ -347,32 +576,41 @@ export async function processSalesQueue(d: SalesQueueDeps): Promise<{ detail: st
       notes.push(`${row.id}: blocked`);
       continue;
     }
-    if (!withinSalesWindow(now(), f.timeZone, f.state)) {
+    if (mode === "cold" && !withinSalesWindow(now(), f.timeZone, f.state)) {
       const next = nextSalesWindow(now(), f.timeZone, f.state);
       if (!next) { await block(d.db, row, "blocked", "no permitted calling window found in the next 8 days"); continue; }
       await d.db.prepare(`UPDATE sales_calls SET not_before = ?, status_detail = 'outside the recipient''s calling window', updated_at = ? WHERE id = ?`).bind(next.toISOString(), nowIso(), row.id).run();
       notes.push(`${row.id}: outside window`);
       continue;
     }
+    // Capacity first (the scarcest, shared resource), then the daily limit, then the number's lease, then the row.
+    const limitNow = (await outboundCapacity(d.db, now())).limit[mode];
+    if (!(await claimSlot(d.db, mode, row.id, limitNow, now()))) { notes.push(`${MODE_LABELS[mode]}: concurrency limit reached`); break; }
+    if (!(await claimDailyDial(d.db, mode, dailyLimit, now()))) { await releaseSlot(d.db, row.id); notes.push(`${MODE_LABELS[mode]}: daily limit (${dailyLimit}) reached`); break; }
+    const undo = async () => { await releaseSlot(d.db, row.id); await unclaimDailyDial(d.db, mode, now()); };
     const lease = await reservePhone(d.db, row.phone_e164, leaseRef(row.id), SALES_PURPOSE, SALES_LEASE_MS, now());
     if (!lease.ok) {
+      await undo();
       if (lease.reason === "do_not_call") await block(d.db, row, "blocked", lease.detail);
-      else await d.db.prepare(`UPDATE sales_calls SET not_before = ?, status_detail = ?, updated_at = ? WHERE id = ?`).bind(lease.retryAt ?? new Date(now().getTime() + 30 * 60_000).toISOString(), lease.detail, nowIso(), row.id).run();
+      else await d.db.prepare(`UPDATE sales_calls SET not_before = ?, status_detail = ?, updated_at = ? WHERE id = ?`).bind(lease.retryAt ?? new Date(now().getTime() + (mode === "callback" ? 5 : 30) * 60_000).toISOString(), lease.detail, nowIso(), row.id).run();
       notes.push(`${row.id}: ${lease.detail}`);
       continue;
     }
     const attempt = row.attempts + 1;
     const claim = await d.db.prepare(`UPDATE sales_calls SET status = 'dialing', attempts = ?, updated_at = ? WHERE id = ? AND status = 'queued' AND attempts = ?`).bind(attempt, nowIso(), row.id, row.attempts).run();
-    if (claim.meta.changes !== 1) { await releasePhone(d.db, row.phone_e164, leaseRef(row.id), "claim_lost"); continue; }
+    if (claim.meta.changes !== 1) { await undo(); await releasePhone(d.db, row.phone_e164, leaseRef(row.id), "claim_lost"); continue; }
     const ctx = researchContext(f, now());
-    const vars = dynamicVariables({ leadId: f.leadId, businessName: f.businessName, contactName: f.contactName, industry: f.industry, websiteUrl: f.prospect?.website_url ?? null, environment: d.env.ENVIRONMENT, ctx });
+    let context: Record<string, unknown> = {};
+    try { context = JSON.parse(row.context_json || "{}"); } catch { context = {}; }
+    const vars = { ...dynamicVariables({ leadId: f.leadId, businessName: f.businessName, contactName: f.contactName, industry: f.industry, websiteUrl: f.prospect?.website_url ?? null, environment: d.env.ENVIRONMENT, ctx }),
+      ...(mode === "callback" ? callbackVariables(context) : { call_mode: "cold_outreach" }) };
     const sie = await sieStamp(d.db, d.env.ENVIRONMENT, s.agent_id!, row.lead_id, ctx.website_status);
     const res = await createRetellPhoneCall({
       apiKey: retellKey(d.env, "outbound"), fetch: d.fetch, sleep: d.sleep, // the sales workspace only; never the receptionist's key
       body: {
         from_number: s.from_number!, to_number: row.phone_e164, override_agent_id: s.agent_id!,
         idempotency_key: `${row.idempotency_key}_a${attempt}`, honor_internal_dnc: true,
-        metadata: { crestmont_env: d.env.ENVIRONMENT, crestmont_sales_call_id: row.id, crestmont_lead_id: row.lead_id, crestmont_test: row.is_test ? "true" : "false", ...sie.metadata },
+        metadata: { crestmont_env: d.env.ENVIRONMENT, crestmont_sales_call_id: row.id, crestmont_lead_id: row.lead_id, crestmont_test: row.is_test ? "true" : "false", crestmont_call_mode: mode, ...sie.metadata },
         retell_llm_dynamic_variables: vars,
       },
     });
@@ -387,20 +625,45 @@ export async function processSalesQueue(d: SalesQueueDeps): Promise<{ detail: st
           .bind(newId("call"), RETELL_PROVIDER, res.callId, s.from_number, row.phone_e164, at, row.is_test, d.env.ENVIRONMENT, row.lead_id, at),
       ]);
       await markDialing(d.db, row.phone_e164, lease.reservationId, res.callId, now());
-      await audit(d.db, { actorKind: "system", action: "sales_outbound.dialled", subjectType: "sales_call", subjectId: row.id, details: { attempt, lead: row.lead_id, sie: sie.note } });
+      await audit(d.db, { actorKind: "system", action: "sales_outbound.dialled", subjectType: "sales_call", subjectId: row.id, details: { attempt, lead: row.lead_id, mode, sie: sie.note } });
       dialled++;
-    } else if (res.retryable && row.transient_failures + 1 < MAX_TRANSIENT_FAILURES) {
-      // Same attempt number → same idempotency key on the retry: Retell can never place a second call for it.
+    } else if ((res.retryable || res.error.includes("concurrency_limit")) && row.transient_failures + 1 < MAX_TRANSIENT_FAILURES) {
+      // Same attempt number → same idempotency key on the retry: Retell can never place a second call for it. The
+      // provider's own concurrency limit is a capacity signal, not a failure of the prospect's number.
       await d.db.prepare(`UPDATE sales_calls SET status = 'queued', attempts = ?, transient_failures = transient_failures + 1, status_detail = ?, not_before = ?, updated_at = ? WHERE id = ?`)
-        .bind(row.attempts, res.error, new Date(now().getTime() + 30 * 60_000).toISOString(), nowIso(), row.id).run();
+        .bind(row.attempts, res.error, new Date(now().getTime() + (mode === "callback" ? 2 : 30) * 60_000).toISOString(), nowIso(), row.id).run();
+      await undo();
       await releasePhone(d.db, row.phone_e164, leaseRef(row.id), `transient: ${res.error}`);
       notes.push(`${row.id}: ${res.error} (retry with the same idempotency key)`);
     } else {
+      await unclaimDailyDial(d.db, mode, now());
       await block(d.db, row, "failed", res.error);
       notes.push(`${row.id}: ${res.error}`);
     }
   }
-  return { detail: `${dialled} dialled of ${due.length} due (capacity ${capacity})${notes.length ? `; ${notes.join("; ")}` : ""}`.slice(0, 900), dialled };
+  return dialled;
+}
+
+/**
+ * The cold-outreach candidate pool: Approved-CRM leads in an open stage with documented written consent for AI-voice
+ * sales calls to their number, never called by cold outreach before. A lead does NOT need to have asked for a callback.
+ * Each candidate is queued once (its series carries its own retries); the compliance gate decides at queue time and
+ * again right before the dial, so a lead that is not eligible is recorded as blocked with its reasons.
+ */
+export async function topUpColdCandidates(db: Db, s: SalesSettings, now: Date): Promise<number> {
+  const remaining = coldDailyLimit(s) - (await dialsToday(db, now)).cold;
+  const queued = (await db.prepare(`SELECT COUNT(*) AS n FROM sales_calls WHERE mode = 'cold' AND status = 'queued'`).first<{ n: number }>())!.n;
+  const want = Math.min(Math.max(0, remaining - queued), s.max_dials_per_run * 3);
+  if (want <= 0) return 0;
+  const rows = (await db.prepare(`SELECT DISTINCT l.id FROM leads l
+      JOIN sales_call_consents sc ON sc.revoked_at IS NULL AND (sc.lead_id = l.id OR sc.phone_e164 IN (SELECT phone_e164 FROM research_prospects WHERE crm_lead_id = l.id))
+      WHERE l.merged_into_lead_id IS NULL AND l.stage IN ('new','qualified','quote_required','quote_sent','negotiation')
+        AND NOT EXISTS (SELECT 1 FROM sales_calls c WHERE c.lead_id = l.id AND c.mode = 'cold')
+      ORDER BY l.created_at LIMIT ?`).bind(want).all<{ id: string }>()).results;
+  let n = 0;
+  for (const r of rows) { const row = await enqueueSalesCall(db, r.id, { requestedBy: null, now, mode: "cold" }).catch(() => null); if (row?.status === "queued") n++; }
+  if (n) await audit(db, { actorKind: "system", action: "sales_outbound.candidates_queued", subjectType: "sales_outbound_settings", subjectId: "1", details: { queued: n, considered: rows.length } });
+  return n;
 }
 
 // ───────────── Webhook: call status and final outcome ─────────────
@@ -467,19 +730,30 @@ export async function applySalesCallEvent(db: Db, raw: string, opts: { environme
   const duration = typeof call.duration_ms === "number" && Number.isInteger(call.duration_ms) ? call.duration_ms : null;
   const retry = (outcome === "no_answer" || outcome === "voicemail") && row.attempts < row.max_attempts;
   const s = await loadSalesSettings(db);
+  // A callback that rang out is tried once more a few minutes later, inside its appointment; a cold call days later.
+  const retryAt = new Date(now.getTime() + (row.mode === "callback" ? CALLBACK_RETRY_MS : s.retry_after_hours * 3_600_000));
   const fin = await db.prepare(`UPDATE sales_calls SET status = ?, outcome = ?, outcome_source = ?, disconnection_reason = ?, duration_ms = ?, finalized_at = ?, provider_call_id = CASE WHEN ? THEN NULL ELSE provider_call_id END,
         not_before = ?, status_detail = ?, updated_at = ? WHERE id = ? AND finalized_at IS NULL`)
     .bind(retry ? "queued" : outcome === "technical_failure" ? "failed" : "completed", retry ? null : outcome, retry ? null : source, reason, duration, retry ? null : nowIso(() => now), retry ? 1 : 0,
-      retry ? new Date(now.getTime() + s.retry_after_hours * 3_600_000).toISOString() : null, retry ? `${outcome} on attempt ${row.attempts}; one more attempt later` : null, nowIso(), row.id).run();
+      retry ? retryAt.toISOString() : null, retry ? `${outcome} on attempt ${row.attempts}; one more attempt later` : null, nowIso(), row.id).run();
   if (fin.meta.changes !== 1) return { applied: "duplicate" };
+  // The call is over: its concurrent-call reservation is free for the next dial.
+  await releaseSlot(db, row.id);
+  if (!retry && row.mode === "callback" && row.appointment_id) {
+    const connected = !["no_answer", "voicemail", "technical_failure"].includes(outcome);
+    await db.prepare(`UPDATE consultations SET status = ?, updated_at = ? WHERE id = ? AND status IN ('requested','confirmed')`).bind(connected ? "completed" : "no_show", nowIso(), row.appointment_id).run();
+    if (!connected) await addLeadTask(db, row.lead_id, `${row.is_test ? "[TEST] " : ""}The scheduled AI callback (${row.id}) did not reach the prospect after ${row.attempts} attempt(s). Follow up personally or book a new time.`, 4);
+  }
   // Retell's own DNC detection (the person asked not to be called and the agent ended the call) is honoured like the function.
   if (reason === "user_requested_dnc") await suppressEverywhere(db, row.phone_e164, { leadId: row.lead_id, detail: `Retell user_requested_dnc on sales call ${row.id}`, actor: "provider" });
   await recordPhoneOutcome(db, row.phone_e164, reason ?? "ended", leaseRef(row.id), now);
-  await releasePhone(db, row.phone_e164, leaseRef(row.id), `sales:${outcome}`, retry ? { retryAfter: new Date(now.getTime() + s.retry_after_hours * 3_600_000).toISOString(), now } : { now });
+  await releasePhone(db, row.phone_e164, leaseRef(row.id), `sales:${outcome}`, retry ? { retryAfter: retryAt.toISOString(), now } : { now });
   if (retry) {
     // The retry series keeps its row; the attempt's own call stays in `calls` with its outcome history in audit.
-    await audit(db, { actorKind: "webhook", action: "sales_outbound.retry_scheduled", subjectType: "sales_call", subjectId: row.id, details: { outcome, attempt: row.attempts, providerCallId } });
-    await addLeadNote(db, row.lead_id, `AI sales call attempt ${row.attempts}: ${outcome.replace(/_/g, " ")}. One more attempt is allowed after ${s.retry_after_hours} hours.`);
+    await audit(db, { actorKind: "webhook", action: "sales_outbound.retry_scheduled", subjectType: "sales_call", subjectId: row.id, details: { outcome, attempt: row.attempts, providerCallId, mode: row.mode } });
+    await addLeadNote(db, row.lead_id, row.mode === "callback"
+      ? `Scheduled AI callback attempt ${row.attempts}: ${outcome.replace(/_/g, " ")}. One more attempt in ${Math.round(CALLBACK_RETRY_MS / 60_000)} minutes.`
+      : `AI sales call attempt ${row.attempts}: ${outcome.replace(/_/g, " ")}. One more attempt is allowed after ${s.retry_after_hours} hours.`);
     return { applied: `retry:${outcome}` };
   }
   await applyOutcomeToCrm(db, row, outcome, source, reason);

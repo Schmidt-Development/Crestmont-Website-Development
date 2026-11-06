@@ -310,7 +310,12 @@ export async function auditOutboundRetell(d: { db: Db; env: Env; fetch: typeof f
   const conc = await call(key, d.fetch, "GET", "/get-concurrency");
   if (conc.ok) {
     const lim = n(obj(conc.json).concurrency_limit), curC = n(obj(conc.json).current_concurrency);
-    add("concurrency", "INFO", `Retell limit ${lim ?? "?"} (in use ${curC ?? "?"}); platform cap max_concurrent ${settings.max_concurrent}; Founder target 20${lim !== null && lim < 20 ? ` — the account allows only ${lim}` : ""}`);
+    // Founder allocation: 15 cold-outreach + 5 reserved callback calls = 20 outbound at most. The dialler never exceeds
+    // the limit recorded on /staff/sales-outbound (provider_concurrency_limit); this compares it with what Retell reports.
+    const need = settings.max_concurrent + (settings.callback_reserved ?? 5);
+    add("concurrency", "INFO", `Retell limit ${lim ?? "?"} (in use ${curC ?? "?"}); platform allocation ${settings.max_concurrent} cold + ${settings.callback_reserved ?? 5} reserved callbacks = ${need}; recorded provider limit ${settings.provider_concurrency_limit ?? "?"}`
+      + `${lim !== null && lim < need ? ` — the account allows only ${lim}, so outbound dialling is reduced to fit (more concurrency needs the Founder's approval)` : ""}`
+      + `${lim !== null && settings.provider_concurrency_limit !== undefined && lim !== settings.provider_concurrency_limit ? ` — record ${lim} as the provider limit on /staff/sales-outbound` : ""}`);
   } else add("concurrency", "UNVERIFIED", `get-concurrency: ${conc.error}`);
   return out(findings.every((f) => f.ok) ? "ok" : "issues", { agents, agentId, llmId });
 }

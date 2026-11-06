@@ -73,7 +73,7 @@ async function setup(env: Partial<Env> = { RETELL_INBOUND_API_KEY: IN, RETELL_OU
 }
 /** What the Founder does: save the agent + number, register the SIE target and verify it (which adopts V17). */
 async function configure(t: Awaited<ReturnType<typeof setup>>, f: typeof fetch) {
-  assert.deepEqual(await SO.saveSalesSettings(t.db, t.owner.id, { enabled: false, agentId: AGENT, fromNumber: NUMBER, maxConcurrent: 20, maxPerRun: 20, maxPerDay: 200, maxAttempts: 2, retryAfterHours: 48 }), []);
+  assert.deepEqual(await SO.saveSalesSettings(t.db, t.owner.id, { enabled: false, agentId: AGENT, fromNumber: NUMBER, maxConcurrent: 15, maxPerRun: 20, maxPerDay: 200, maxAttempts: 2, retryAfterHours: 48 }), []);
   await reg.setTarget(t.db, t.owner.id, "staging", AGENT);
   const v = await verifyTarget({ db: t.db, env: t.env, fetch: f }, "staging", t.owner.id);
   assert.ok(v.ok, v.detail);

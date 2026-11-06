@@ -49,6 +49,10 @@ function configured(over: Partial<VoiceConfig> = {}): VoiceConfig {
   const c = defaultVoiceConfig();
   c.timezone = "America/Detroit";
   for (const d of ["mon", "tue", "wed", "thu", "fri"] as const) c.hours[d] = [{ open: "09:00", close: "17:00" }];
+  // These tests exercise slot rules on business hours with 24 hours' notice: the AI Outbound Calendar's own windows
+  // are left empty (falls back to business hours) and its notice set to the same 24 hours.
+  for (const d of ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const) c.scheduling.ai_hours[d] = [];
+  c.scheduling.ai_min_notice_minutes = 24 * 60;
   return { ...c, ...over };
 }
 
@@ -235,20 +239,25 @@ test("[VOICE-003] consultation availability honours hours, minimum notice, align
   assert.equal(h[0].startsAt, "2026-11-04T14:00:00.000Z");
 });
 
-test("[VOICE-003] booking: CRM lead, held slot, reference, email via the platform mailer, no duplicates, no double booking", async () => {
+test("[VOICE-003] booking: CRM lead, confirmed AI callback, reference, email via the platform mailer, no duplicates, five per slot and no sixth", async () => {
   const t = await schedulingApp();
   await t.post("/api/webhooks/retell", { event: "call_started", call: phoneCall("c_b1", { from_number: "+15550100126" }) });
   const args = { name: "Bea Booker", phone: "+1 (555) 010-0126", email: "bea@example.com", start_time: "2026-11-03T14:00:00.000Z", topic: "New site for a bakery", reminder_call_ok: true };
   const own = { from_number: "+15550100126" };
   const b = await t.post("/api/webhooks/retell/functions", fn("c_b1", "book_consultation", args, own));
   assert.equal(b.json.booked, true);
-  assert.equal(b.json.status, "requested", "no calendar connected: held until staff confirm");
+  assert.equal(b.json.status, "confirmed", "an AI Outbound Calendar appointment is the AI's own callback: confirmed when booked");
+  assert.match(b.json.message, /AI sales specialist will call/);
   assert.match(b.json.confirmation_code, /^[A-HJ-NP-Z2-9]{6}$/);
   const row = await one<{ lead_id: string; phone: string; status: string; call_id: string }>(t.db, `SELECT lead_id, phone, status, call_id FROM consultations`);
   assert.ok(row.lead_id && row.call_id);
   assert.equal(row.phone, "+15550100126", "stored normalised");
   assert.equal((await one<{ source: string }>(t.db, `SELECT source FROM leads WHERE id = ?`, row.lead_id)).source, "ai_receptionist");
-  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM crm_activities WHERE lead_id = ? AND kind = 'task' AND body LIKE 'Confirm or decline%'`, row.lead_id), 1);
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM crm_activities WHERE lead_id = ? AND kind = 'task' AND body LIKE 'Confirm or decline%'`, row.lead_id), 0, "nothing for staff to confirm");
+  // The appointment is queued as a scheduled AI callback at its time, with the caller's own request as its consent.
+  const cbRow = await one<{ mode: string; status: string; not_before: string; appointment_id: string }>(t.db, `SELECT mode, status, not_before, appointment_id FROM sales_calls WHERE lead_id = ?`, row.lead_id);
+  assert.deepEqual({ ...cbRow }, { mode: "callback", status: "queued", not_before: "2026-11-03T14:00:00.000Z", appointment_id: (await one<{ id: string }>(t.db, `SELECT id FROM consultations`)).id });
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM voice_call_consents WHERE purpose = 'callback' AND phone_e164 = '+15550100126'`), 1);
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM email_deliveries WHERE template = 'consultation' AND to_email = 'bea@example.com'`), 1, "sent through the dev outbox, never a real provider");
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM notifications WHERE kind = 'voice_consultation'`), 1);
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM voice_call_consents WHERE purpose = 'consultation_reminder'`), 1, "reminder consent only because the caller agreed");
@@ -257,19 +266,24 @@ test("[VOICE-003] booking: CRM lead, held slot, reference, email via the platfor
   // The same caller on a new call gets their existing booking back.
   const again = await t.post("/api/webhooks/retell/functions", fn("c_b2", "book_consultation", { ...args, start_time: "2026-11-03T15:00:00.000Z" }, own));
   assert.equal(again.json.already_booked, true);
-  // Another caller cannot take the same slot; alternatives are offered instead.
+  // Four more callers share the slot (five in all); the sixth is refused and offered other times.
+  for (let i = 0; i < 4; i++) {
+    const n = `+1555010013${i}`;
+    const ok = await t.post("/api/webhooks/retell/functions", fn(`c_b3${i}`, "book_consultation", { ...args, name: `Caller ${i}`, phone: n, email: undefined }, { from_number: n }));
+    assert.equal(ok.json.booked, true, `booking ${i + 2} of 5`);
+  }
   const clash = await t.post("/api/webhooks/retell/functions", fn("c_b3", "book_consultation", { ...args, name: "Other Person", phone: "+15550100127", email: undefined }, { from_number: "+15550100127" }));
-  assert.equal(clash.json.booked, false);
+  assert.equal(clash.json.booked, false, "the sixth booking in one slot is refused");
   assert.ok(clash.json.slots.length > 0);
-  assert.ok(!clash.json.slots.some((s: { start_time: string }) => s.start_time === args.start_time));
+  assert.ok(!clash.json.slots.some((s: { start_time: string }) => s.start_time === args.start_time), "a full slot is not offered");
   // A time outside the rules (3 AM) or inside the notice period is never bookable.
   const night = await t.post("/api/webhooks/retell/functions", fn("c_b4", "book_consultation", { ...args, phone: "+15550100128", start_time: "2026-11-04T08:00:00.000Z" }, { from_number: "+15550100128" }));
   assert.equal(night.json.booked, false);
   const soon = await t.post("/api/webhooks/retell/functions", fn("c_b5", "book_consultation", { ...args, phone: "+15550100129", start_time: "2026-11-02T16:00:00.000Z" }, { from_number: "+15550100129" }));
   assert.equal(soon.json.booked, false);
-  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM consultations WHERE status IN ('requested','confirmed')`), 1);
-  // The database itself refuses a second active booking at the same start.
-  await assert.rejects(t.db.prepare(`INSERT INTO consultations (id, name, starts_at, duration_minutes, timezone, status, confirmation_code, source, created_at, updated_at) VALUES ('x','x','2026-11-03T14:00:00.000Z',30,'America/Detroit','requested','ZZZZZZ','staff','t','t')`).run(), /UNIQUE/);
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM consultations WHERE status IN ('requested','confirmed')`), 5);
+  // The database itself refuses a sixth active booking at the same start (trigger, migration 0090).
+  await assert.rejects(t.db.prepare(`INSERT INTO consultations (id, name, starts_at, duration_minutes, timezone, status, confirmation_code, source, created_at, updated_at) VALUES ('x','x','2026-11-03T14:00:00.000Z',30,'America/Detroit','requested','ZZZZZZ','staff','t','t')`).run(), /ai_follow_up_slot_full/);
 });
 
 test("[VOICE-003] [VOICE-004] changing a booking needs reference AND phone; answers never reveal which part was wrong; lockout after 3 failures", async () => {
@@ -283,40 +297,51 @@ test("[VOICE-003] [VOICE-004] changing a booking needs reference AND phone; answ
   assert.doesNotMatch(JSON.stringify(wrongPhone.json), /Val|Redesign|November/);
   const ok = await t.post("/api/webhooks/retell/functions", fn("c_v3", "lookup_consultation", { confirmation_code: code.toLowerCase(), phone: "(555) 010-0130" }));
   assert.equal(ok.json.verified, true);
-  assert.equal(ok.json.status, "awaiting confirmation");
+  assert.equal(ok.json.status, "confirmed");
   // Third failure on the same call locks further attempts on that call, even with correct details.
   await t.post("/api/webhooks/retell/functions", fn("c_v2", "cancel_consultation", { confirmation_code: "BBBBBB", phone: "+15550100130" }));
   const locked = await t.post("/api/webhooks/retell/functions", fn("c_v2", "cancel_consultation", { confirmation_code: code, phone: "+15550100130" }));
   assert.equal(locked.json.locked, true);
-  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM consultations WHERE status = 'requested'`), 1, "nothing was cancelled");
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM consultations WHERE status = 'confirmed'`), 1, "nothing was cancelled");
 });
 
-test("[VOICE-003] reschedule issues a new reference and frees the old slot; cancel frees it; staff confirm through the Owner page", async () => {
+test("[VOICE-003] reschedule issues a new reference, moves the queued callback and frees the old slot; cancel frees it and cancels the callback; staff confirm Founder appointments", async () => {
   const t = await schedulingApp();
-  const b = await t.post("/api/webhooks/retell/functions", fn("c_r1", "book_consultation", { name: "Rae Move", phone: "+15550100131", email: "rae@example.com", start_time: "2026-11-03T14:00:00.000Z", topic: "Landing page" }));
+  const own = { from_number: "+15550100131" };
+  const b = await t.post("/api/webhooks/retell/functions", fn("c_r1", "book_consultation", { name: "Rae Move", phone: "+15550100131", email: "rae@example.com", start_time: "2026-11-03T14:00:00.000Z", topic: "Landing page" }, own));
   const r = await t.post("/api/webhooks/retell/functions", fn("c_r2", "reschedule_consultation", { confirmation_code: b.json.confirmation_code, phone: "+15550100131", new_start_time: "2026-11-04T15:00:00.000Z" }));
   assert.equal(r.json.rescheduled, true);
   assert.notEqual(r.json.confirmation_code, b.json.confirmation_code);
-  const rows = (await t.db.prepare(`SELECT status, starts_at, rescheduled_from FROM consultations ORDER BY created_at`).all<{ status: string; starts_at: string; rescheduled_from: string | null }>()).results;
-  assert.deepEqual(rows.map((x) => x.status), ["cancelled", "requested"]);
+  const rows = (await t.db.prepare(`SELECT id, status, starts_at, rescheduled_from FROM consultations ORDER BY created_at`).all<{ id: string; status: string; starts_at: string; rescheduled_from: string | null }>()).results;
+  assert.deepEqual(rows.map((x) => x.status), ["cancelled", "confirmed"]);
   assert.ok(rows[1].rescheduled_from);
-  // The freed slot is bookable again by someone else.
-  const other = await t.post("/api/webhooks/retell/functions", fn("c_r3", "book_consultation", { name: "Next Caller", phone: "+15550100132", start_time: "2026-11-03T14:00:00.000Z", topic: "Shop" }, { from_number: "+15550100132" }));
-  assert.equal(other.json.booked, true);
-  // A move onto a taken slot leaves the original booking untouched.
+  // The one queued callback followed the appointment: same series, new time — never a second call.
+  const cbs = (await t.db.prepare(`SELECT status, not_before, appointment_id FROM sales_calls WHERE mode = 'callback'`).all<{ status: string; not_before: string; appointment_id: string }>()).results;
+  assert.deepEqual(cbs.map((x) => ({ ...x })), [{ status: "queued", not_before: "2026-11-04T15:00:00.000Z", appointment_id: rows[1].id }]);
+  // The freed slot is bookable again; a move onto a FULL slot (five bookings) leaves the original untouched.
+  for (let i = 0; i < 5; i++) {
+    const n = `+1555010014${i}`;
+    assert.equal((await t.post("/api/webhooks/retell/functions", fn(`c_r3${i}`, "book_consultation", { name: `Next ${i}`, phone: n, start_time: "2026-11-03T14:00:00.000Z", topic: "Shop" }, { from_number: n }))).json.booked, true);
+  }
   const blocked = await t.post("/api/webhooks/retell/functions", fn("c_r4", "reschedule_consultation", { confirmation_code: r.json.confirmation_code, phone: "+15550100131", new_start_time: "2026-11-03T14:00:00.000Z" }));
   assert.equal(blocked.json.rescheduled, false);
-  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM consultations WHERE status = 'requested' AND starts_at = '2026-11-04T15:00:00.000Z'`), 1);
-  // Owner confirms the rescheduled booking from the operations page; the caller is emailed through the platform mailer.
-  const c = t.client(); await c.login(t.owner.email, TEST_PASSWORD, t.owner.secret);
-  const id = (await one<{ id: string }>(t.db, `SELECT id FROM consultations WHERE starts_at = '2026-11-04T15:00:00.000Z' AND status = 'requested'`)).id;
-  assert.equal((await c.post(`/staff/voice/consultations/${id}/decide`, { decision: "confirm" })).status, 303);
-  assert.equal((await one<{ status: string }>(t.db, `SELECT status FROM consultations WHERE id = ?`, id)).status, "confirmed");
-  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM email_deliveries WHERE template = 'consultation' AND to_email = 'rae@example.com'`), 3, "requested, rescheduled, confirmed");
-  // Caller cancels by phone.
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM consultations WHERE status = 'confirmed' AND starts_at = '2026-11-04T15:00:00.000Z'`), 1);
+  // Caller cancels by phone: the appointment and its queued callback are both cancelled.
   const cx = await t.post("/api/webhooks/retell/functions", fn("c_r5", "cancel_consultation", { confirmation_code: r.json.confirmation_code, phone: "+15550100131" }));
   assert.equal(cx.json.cancelled, true);
-  assert.equal((await one<{ status: string }>(t.db, `SELECT status FROM consultations WHERE id = ?`, id)).status, "cancelled");
+  assert.equal((await one<{ status: string }>(t.db, `SELECT status FROM consultations WHERE id = ?`, rows[1].id)).status, "cancelled");
+  assert.equal((await one<{ status: string }>(t.db, `SELECT status FROM sales_calls WHERE appointment_id = ?`, rows[1].id)).status, "cancelled");
+  // A Founder appointment (asked for explicitly) is held until the Founder confirms it from the operations page.
+  const fo = await t.post("/api/webhooks/retell/functions", fn("c_r6", "book_consultation", { name: "Fay Founder", phone: "+15550100150", email: "fay@example.com", start_time: "2026-11-05T15:00:00.000Z", topic: "Partnership", wants_founder: true }, { from_number: "+15550100150" }));
+  assert.equal(fo.json.booked, true);
+  assert.equal(fo.json.status, "requested");
+  assert.equal(fo.json.calendar, "founder_callback");
+  const c = t.client(); await c.login(t.owner.email, TEST_PASSWORD, t.owner.secret);
+  const id = (await one<{ id: string }>(t.db, `SELECT id FROM consultations WHERE calendar = 'founder_callback'`)).id;
+  assert.equal((await c.post(`/staff/voice/consultations/${id}/decide`, { decision: "confirm" })).status, 303);
+  assert.equal((await one<{ status: string }>(t.db, `SELECT status FROM consultations WHERE id = ?`, id)).status, "confirmed");
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM email_deliveries WHERE template = 'consultation' AND to_email = 'fay@example.com'`), 2, "requested, confirmed");
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM sales_calls WHERE appointment_id = ?`, id), 0, "the AI never dials a Founder appointment");
 });
 
 // ───────────── Outbound calling ─────────────
@@ -576,7 +601,7 @@ test("[VOICE-005] [SEC-001] Owner operations page: settings round-trip with vali
   assert.equal(ok.status, 303);
   const cfg = await loadVoiceConfig(t.db);
   assert.deepEqual(cfg.hours.mon, [{ open: "09:00", close: "12:00" }, { open: "13:00", close: "17:00" }]);
-  assert.equal(cfg.scheduling.duration_minutes, 45);
+  assert.equal(cfg.scheduling.duration_minutes, 30, "every appointment is 30 minutes, whatever an old form sends");
   assert.deepEqual(cfg.holidays, ["2026-12-25"]);
   const page = await (await c.get("/staff/voice/operations")).text();
   assert.doesNotMatch(page, new RegExp(KEY));
@@ -616,7 +641,8 @@ test("[VOICE-004] booking for a different number never reveals whether that numb
 test("[VOICE-003] read-only answers are fresh on repeat; a failed attempt is retried, not replayed", async () => {
   const t = await schedulingApp();
   const first = await t.post("/api/webhooks/retell/functions", fn("c_ro", "check_consultation_availability", {}));
-  await t.post("/api/webhooks/retell/functions", fn("c_ro2", "book_consultation", { name: "Taker", phone: "+15550100210", start_time: first.json.slots[0].start_time, topic: "Site" }, { from_number: "+15550100210" }));
+  // Fill the first slot (five AI callbacks), so the fresh answer must differ.
+  for (let i = 0; i < 5; i++) await t.post("/api/webhooks/retell/functions", fn(`c_ro2${i}`, "book_consultation", { name: `Taker ${i}`, phone: `+1555010021${i}`, start_time: first.json.slots[0].start_time, topic: "Site" }, { from_number: `+1555010021${i}` }));
   const again = await t.post("/api/webhooks/retell/functions", fn("c_ro", "check_consultation_availability", {}));
   assert.notEqual(again.json.slots[0].start_time, first.json.slots[0].start_time, "identical request on the same call sees the new booking");
   // Simulate a stored failed attempt for a write function: the retry runs again instead of returning the error.

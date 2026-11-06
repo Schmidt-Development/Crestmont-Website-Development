@@ -32,7 +32,9 @@ import { audit } from "./security.ts";
 import { addLeadNote, addLeadTask, redactSensitive } from "./voice-common.ts";
 import { routeCalendar, wantsFounderArg, CALENDAR_LABELS } from "../domain/calendars.ts";
 import { recordCallback, confirmedConsultation } from "./calendars.ts";
-import { loadVoiceConfig, toE164 } from "./voice-settings.ts";
+import { loadVoiceConfig, toE164, zonedToUtc } from "./voice-settings.ts";
+import { recordCallConsent } from "./voice-outbound.ts";
+import { syncAppointmentCallback } from "./appointment-callbacks.ts";
 import * as sched from "./voice-scheduling.ts";
 import { sendMail, type MailerCtx } from "./mailer.ts";
 import { endOfBusinessDay, businessDate } from "../lib/business-time.ts";
@@ -471,67 +473,66 @@ async function sendEmail(db: Db, deps: SalesFnDeps, b: Bound, a: { email_type: s
 async function scheduleFollowup(db: Db, deps: SalesFnDeps, b: Bound, input: { followup_type: string; start_time?: string; preferred_date?: string; preferred_time?: string; name?: string; email?: string; topic?: string; wants_founder?: boolean }, now: Date): Promise<SalesFnResult> {
   const leadId = b.row.lead_id;
   // Dual calendars: the Founder calendar only on an explicit request (src/domain/calendars.ts). An automated AI call
-  // cannot be "the Founder", so a Founder request made as ai_follow_up_call becomes a Founder staff callback.
+  // cannot be "the Founder", so a Founder request made as ai_follow_up_call becomes a Founder appointment request.
   const route = routeCalendar({ wantsFounder: input.wants_founder, context: { channel: "outbound_sales", fn: "schedule_sales_followup", kind: input.followup_type } });
-  const a = route.calendar === "founder_callback" && input.followup_type === "ai_follow_up_call" ? { ...input, followup_type: "staff_callback" } : input;
+  const a = route.calendar === "founder_callback" && input.followup_type === "ai_follow_up_call" ? { ...input, followup_type: "consultation" } : input;
   const open = await db.prepare(`SELECT id, status, due_at FROM sales_followups WHERE lead_id = ? AND kind = ? AND status IN ('scheduled','requested','pending_eligibility')`).bind(leadId, a.followup_type).first<{ id: string; status: string; due_at: string | null }>();
   if (open) return { status: 200, body: { scheduled: false, already_scheduled: true, status: open.status, message: "A follow-up of this kind is already arranged; no second one was created." } };
   const at = nowIso(() => now);
-  if (a.followup_type === "consultation") {
-    const cfg = await loadVoiceConfig(db);
+  const cfg = await loadVoiceConfig(db);
+  if (a.followup_type === "consultation" || a.followup_type === "ai_follow_up_call") {
+    // Both are appointments: an AI follow-up call is a 30-minute slot on the AI Outbound Calendar (five per slot), queued
+    // as a scheduled callback at its time; a Founder request is a slot on the Founder Calendar. Real availability only.
     const cal = deps.calendar ?? sched.NO_CALENDAR;
     if (!a.start_time) {
-      const av = await sched.availability(db, cfg, now, cal, { fromDate: a.preferred_date });
-      if (!av.available) return { status: 200, body: { scheduled: false, reason: av.reason, message: "Consultations can't be booked by phone right now. Offer a staff callback instead (followup_type staff_callback)." } };
-      return { status: 200, body: { scheduled: false, needs_time: true, timezone: av.timezone, slots: av.slots.map((x) => ({ start_time: x.startsAt, label: x.label })), message: "Offer only these times. When the prospect chooses one, call again with its start_time." } };
+      const av = await sched.availability(db, cfg, now, cal, { fromDate: a.preferred_date, calendar: route.calendar });
+      if (!av.available) return { status: 200, body: { scheduled: false, reason: av.reason, message: "No time can be booked right now. Offer a staff callback instead (followup_type staff_callback)." } };
+      return { status: 200, body: { scheduled: false, needs_time: true, timezone: av.timezone, calendar: route.calendar, slots: av.slots.map((x) => ({ start_time: x.startsAt, label: x.label })), message: "Offer only these times. When the prospect chooses one, call again with its start_time." } };
     }
     const phone = b.facts.phoneE164;
-    if (!phone || !cfg.scheduling.enabled || !cfg.timezone) return { status: 200, body: { scheduled: false, reason: "scheduling_disabled", message: "Consultations can't be booked by phone right now. Offer a staff callback instead." } };
+    if (!phone || !cfg.scheduling.enabled || !cfg.timezone) return { status: 200, body: { scheduled: false, reason: "scheduling_disabled", message: "No time can be booked right now. Offer a staff callback instead." } };
     try {
       const { booking, existing } = await sched.book(db, cfg, now, cal, { name: a.name ?? b.facts.contactName ?? b.facts.businessName ?? "Prospect", phone, email: a.email ?? null, startsAt: a.start_time, topic: a.topic ?? "Website project (outbound sales call)", leadId, callId: null, isTest: b.isTest, source: "ai_receptionist", checkExisting: true, calendar: route });
-      if (existing) return { status: 200, body: { scheduled: false, already_booked: true, message: "This business already has an upcoming consultation." } };
+      if (existing) return { status: 200, body: { scheduled: false, already_booked: true, message: "This business already has an upcoming appointment." } };
       // Only a booking the database holds on the routed calendar is ever reported as scheduled.
       const held = await confirmedConsultation(db, booking.id);
       if (!held || held.calendar !== route.calendar) return { status: 200, body: { scheduled: false, reason: "not_recorded", message: "That booking could not be saved. Apologise and offer a staff callback instead." } };
-      await db.prepare(`INSERT INTO sales_followups (id, lead_id, kind, status, due_at, consultation_id, provider_call_id, created_at, updated_at) VALUES (?,?, 'consultation', ?, ?, ?, ?, ?, ?)`)
-        .bind(newId("sfu"), leadId, booking.status === "confirmed" ? "scheduled" : "requested", booking.starts_at, booking.id, b.providerCallId, at, at).run();
-      await addLeadNote(db, leadId, `Consultation ${booking.status} for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) on AI sales call ${b.row.id} · calendar: ${CALENDAR_LABELS[held.calendar].name}`);
-      if (booking.status === "requested") await addLeadTask(db, leadId, `${held.calendar === "founder_callback" ? "[FOUNDER CALLBACK] " : ""}Confirm or decline the consultation requested for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) on an AI sales call.`, 4);
+      const kind = held.calendar === "ai_follow_up" && a.followup_type === "ai_follow_up_call" ? "ai_follow_up_call" : "consultation";
+      let callback: SalesCallRow | null = null;
+      if (held.calendar === "ai_follow_up") {
+        // The prospect agreed, on this recorded call, to be called back at this time: that is the callback's consent.
+        await recordCallConsent(db, phone, "callback", "caller_request", `sales_call:${b.row.id}`);
+        callback = await syncAppointmentCallback(db, booking.id, { now, reason: a.topic ?? null });
+      }
+      await db.prepare(`INSERT INTO sales_followups (id, lead_id, kind, status, due_at, consultation_id, sales_call_id, provider_call_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+        .bind(newId("sfu"), leadId, kind, booking.status === "confirmed" ? "scheduled" : "requested", booking.starts_at, booking.id, callback?.id ?? null, b.providerCallId, at, at).run();
+      await addLeadNote(db, leadId, `${held.calendar === "ai_follow_up" ? "AI callback" : "Founder appointment"} ${booking.status} for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) on AI sales call ${b.row.id} · calendar: ${CALENDAR_LABELS[held.calendar].name}`);
+      if (booking.status === "requested") await addLeadTask(db, leadId, `[FOUNDER CALLBACK] Confirm or decline the appointment requested for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) on an AI sales call.`, 4);
       return { status: 200, body: { scheduled: true, confirmed: booking.status === "confirmed", status: booking.status, when: sched.labelOf(booking), confirmation_code: booking.confirmation_code, calendar: held.calendar,
-        message: booking.status === "confirmed" ? `Booked for ${sched.labelOf(booking)}. Read the booking reference letter by letter.` : "The time is held, NOT confirmed. Say a team member will confirm it. Read the booking reference letter by letter." } };
+        message: held.calendar === "ai_follow_up"
+          ? `Booked: we will call back at ${sched.labelOf(booking)} (30 minutes). Read the booking reference letter by letter.`
+          : booking.status === "confirmed" ? `Booked with the Founder for ${sched.labelOf(booking)}. Read the booking reference letter by letter.` : "The time with the Founder is held, NOT confirmed. Say the Founder will confirm it. Read the booking reference letter by letter." } };
     } catch (e) {
       if (!(e instanceof sched.SlotUnavailableError)) throw e;
       return { status: 200, body: { scheduled: false, reason: e.message, message: "That time isn't available. Ask for another and check availability again." } };
     }
   }
+  // staff_callback: a person calls back. The preferred day and part of day are read in the business time zone.
   const window = a.preferred_time && a.preferred_time !== "any" ? a.preferred_time : null;
-  const due = a.preferred_date ? new Date(`${a.preferred_date}T${window === "afternoon" ? "17" : window === "evening" ? "21" : "14"}:00:00.000Z`) : null;
+  const minutes = window === "afternoon" ? 14 * 60 : window === "evening" ? 18 * 60 : 10 * 60;
+  const due = a.preferred_date && /^\d{4}-\d{2}-\d{2}$/.test(a.preferred_date) ? zonedToUtc(a.preferred_date, minutes, cfg.timezone ?? "America/New_York") : null;
   if (due && (Number.isNaN(due.getTime()) || due.getTime() < now.getTime() - 86_400_000 || due.getTime() > now.getTime() + 90 * 86_400_000)) return say(422, "The follow-up date must be within the next 90 days.");
-  if (a.followup_type === "staff_callback") {
-    const id = newId("sfu");
-    const hours = due ? Math.max(1, Math.round((due.getTime() - now.getTime()) / 3_600_000)) : 24;
-    // The follow-up, its CRM task and its calendar entry are one transaction, read back before anything is promised.
-    const entry = await recordCallback(db, { route, kind: "sales_staff_callback", source: "ai_sales", leadId, providerCallId: b.providerCallId, salesFollowupId: id, isTest: b.isTest,
-      dueAt: new Date(Date.now() + hours * 3_600_000),
-      extra: [db.prepare(`INSERT INTO sales_followups (id, lead_id, kind, status, due_at, notes, provider_call_id, created_at, updated_at) VALUES (?,?, 'staff_callback', 'scheduled', ?, ?, ?, ?, ?)`)
-        .bind(id, leadId, due?.toISOString() ?? null, a.topic ?? null, b.providerCallId, at, at)],
-      taskBody: `${b.isTest ? "[TEST] " : ""}Call ${b.facts.contactName ?? b.facts.businessName ?? "the prospect"} back${a.preferred_date ? ` on ${a.preferred_date}` : ""}${window ? ` (${window})` : ""} as agreed on AI sales call ${b.row.id}${a.topic ? `: ${a.topic}` : ""}.` });
-    return { status: 200, body: { scheduled: true, followup_type: "staff_callback", calendar: entry.calendar, when: a.preferred_date ?? null,
-      message: entry.calendar === "founder_callback"
-        ? "The request to speak with the Founder is recorded. Say the Founder or a team member will call back as agreed. Don't promise an exact time."
-        : "A team member will call back as agreed. Don't promise an exact time beyond what the prospect asked for." } };
-  }
-  // ai_follow_up_call: queued, but the full compliance gate runs again at dial time; nothing is promised as confirmed.
-  const row = await enqueueSalesCall(db, leadId, { requestedBy: null, notBefore: due?.toISOString() ?? new Date(now.getTime() + 48 * 3_600_000).toISOString(), now, isTest: b.isTest }).catch(() => null);
-  const status = row && row.status === "queued" && row.id !== b.row.id ? "pending_eligibility" : "requested";
-  const sfuId = newId("sfu");
-  const entry = await recordCallback(db, { route, kind: "sales_ai_follow_up", source: "ai_sales", leadId, providerCallId: b.providerCallId, salesFollowupId: sfuId, isTest: b.isTest,
-    dueAt: status === "requested" ? new Date(Date.now() + 48 * 3_600_000) : due ?? new Date(now.getTime() + 48 * 3_600_000),
-    extra: [db.prepare(`INSERT INTO sales_followups (id, lead_id, kind, status, due_at, sales_call_id, notes, provider_call_id, created_at, updated_at) VALUES (?,?, 'ai_follow_up_call', ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(sfuId, leadId, status, due?.toISOString() ?? null, row?.id ?? null, a.topic ?? null, b.providerCallId, at, at)],
-    taskBody: status === "requested" ? `${b.isTest ? "[TEST] " : ""}Prospect agreed to a follow-up call${a.preferred_date ? ` on ${a.preferred_date}` : ""}. An automated call could not be queued; call them personally.` : null });
-  return { status: 200, body: { scheduled: true, calendar: entry.calendar, followup_type: status === "pending_eligibility" ? "ai_follow_up_call" : "staff_callback", confirmed: false,
-    message: "Say someone from Crestmont will follow up around the time they asked. Do not promise an exact time." } };
+  const id = newId("sfu");
+  // The follow-up, its CRM task and its calendar entry are one transaction, read back before anything is promised.
+  const entry = await recordCallback(db, { route, kind: "sales_staff_callback", source: "ai_sales", leadId, providerCallId: b.providerCallId, salesFollowupId: id, isTest: b.isTest,
+    dueAt: due ?? new Date(now.getTime() + 24 * 3_600_000),
+    extra: [db.prepare(`INSERT INTO sales_followups (id, lead_id, kind, status, due_at, notes, provider_call_id, created_at, updated_at) VALUES (?,?, 'staff_callback', 'scheduled', ?, ?, ?, ?, ?)`)
+      .bind(id, leadId, due?.toISOString() ?? null, a.topic ?? null, b.providerCallId, at, at)],
+    taskBody: `${b.isTest ? "[TEST] " : ""}Call ${b.facts.contactName ?? b.facts.businessName ?? "the prospect"} back${a.preferred_date ? ` on ${a.preferred_date}` : ""}${window ? ` (${window})` : ""} as agreed on AI sales call ${b.row.id}${a.topic ? `: ${a.topic}` : ""}.` });
+  return { status: 200, body: { scheduled: true, followup_type: "staff_callback", calendar: entry.calendar, when: a.preferred_date ?? null,
+    message: entry.calendar === "founder_callback"
+      ? "The request to speak with the Founder is recorded. Say the Founder or a team member will call back as agreed. Don't promise an exact time."
+      : "A team member will call back as agreed. Don't promise an exact time beyond what the prospect asked for." } };
 }
 
 // ───────────── Dispatcher ─────────────

@@ -93,6 +93,8 @@ async function app(opts: { now?: Date; payments?: boolean; env?: Partial<Env> } 
       disclosureText: "I agree that Crestmont may call this number about website services using an AI (artificial) voice. Consent is not a condition of purchase.", capturedAt: daysAgo(now, 5) }, now);
     await SO.recordDncScrub(t.db, owner.id, { phone, registry: "national", result: "clear", sourceRef: "SAN-TEST-0001", checkedAt: daysAgo(now, 3) }, now);
     await SO.saveSalesSettings(t.db, owner.id, { enabled: true, agentId: "agent_sales_test", fromNumber: "+16145550100", maxConcurrent: 2, maxPerRun: 3, maxPerDay: 25, maxAttempts: 2, retryAfterHours: 48 });
+    // The cold-outreach ramp launches at 0 calls a day; the Founder authorises the Pilot stage (10 a day).
+    if ((await SO.loadSalesSettings(t.db)).cold_stage === "launch") assert.deepEqual(await SO.saveColdStage(t.db, owner.id, { stage: "pilot", limits: { launch: 0, pilot: 10, stage_2: 25, stage_3: 50, stage_4: 100, stage_5: 200 }, confirmIncrease: true }), []);
   };
   return { ...t, now, post, owner, actor, seedLead, authorise, retell: rf };
 }
@@ -223,7 +225,7 @@ test("[VOICE-005] [CRM-005] research leads are blocked by default; staff records
   assert.equal((await SO.getSalesCall(t.db, queued.id))!.status, "cancelled");
   assert.ok(SCHEDULE["*/15 * * * *"].includes("sales_outbound"));
   const job = await runJobs({ ...t.env, RETELL_SALES_OUTBOUND: undefined }, ["sales_outbound"]);
-  assert.match(job.sales_outbound.detail, /disabled/);
+  assert.match(job.sales_outbound.detail, /AI Cold Outreach not dialling: RETELL_SALES_OUTBOUND/);
 });
 
 test("[VOICE-005] dialling: dynamic variables, signed metadata, idempotency key, calling window, concurrency and DNC re-checked immediately before the dial", async () => {
@@ -235,7 +237,8 @@ test("[VOICE-005] dialling: dynamic variables, signed metadata, idempotency key,
   assert.equal(req.body.override_agent_id, "agent_sales_test");
   assert.equal(req.body.honor_internal_dnc, true);
   assert.equal(req.body.idempotency_key, `crestmont_${salesId}_a1`);
-  assert.deepEqual(req.body.metadata, { crestmont_env: "development", crestmont_sales_call_id: salesId, crestmont_lead_id: leadId, crestmont_test: "false", crestmont_segment: "broken_website" });
+  assert.deepEqual(req.body.metadata, { crestmont_env: "development", crestmont_sales_call_id: salesId, crestmont_lead_id: leadId, crestmont_test: "false", crestmont_call_mode: "cold", crestmont_segment: "broken_website" });
+  assert.equal(req.body.retell_llm_dynamic_variables.call_mode, "cold_outreach");
   const v = req.body.retell_llm_dynamic_variables;
   assert.equal(v.lead_id, leadId);
   assert.equal(v.business_name, "Buckeye Bakery (TEST DATA)");
@@ -525,7 +528,7 @@ test("[OWN-002] [SEC-005] Owner page: off by default with reasons, Owner-only, s
   await t.db.prepare(`INSERT INTO voice_settings (id, config_json, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json`).bind(JSON.stringify(vc), ISO(t.now)).run();
   const problems = await SO.saveSalesSettings(t.db, t.owner.id, { enabled: true, agentId: "agent_receptionist", fromNumber: "+16145550100", maxConcurrent: 1, maxPerRun: 1, maxPerDay: 1, maxAttempts: 1, retryAfterHours: 48 });
   assert.ok(problems.some((p) => /separate Retell agent/.test(p)));
-  assert.ok((await SO.saveSalesSettings(t.db, t.owner.id, { enabled: true, agentId: "agent_x", fromNumber: "+16145550100", maxConcurrent: 50, maxPerRun: 1, maxPerDay: 1, maxAttempts: 1, retryAfterHours: 48 })).some((p) => /1–20/.test(p)), "concurrency capped at Retell's documented 20");
+  assert.ok((await SO.saveSalesSettings(t.db, t.owner.id, { enabled: true, agentId: "agent_x", fromNumber: "+16145550100", maxConcurrent: 16, maxPerRun: 1, maxPerDay: 1, maxAttempts: 1, retryAfterHours: 48 })).some((p) => /1–15/.test(p)), "cold outreach capped at the Founder's 15 concurrent calls");
 });
 
 test("[VOICE-004] [SALESOPT-005] the Retell master prompt is SIE version 1 verbatim, names only real tools and variables, and passes the protected policy", async () => {

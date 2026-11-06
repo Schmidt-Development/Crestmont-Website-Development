@@ -404,6 +404,9 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/voice/dnc", fields: () => ({ phone: "+15550100993", detail: "Matrix opt-out (TEST DATA)" }) },
     // ── Outbound AI sales calls (TEST DATA; nothing dials: RETELL_SALES_OUTBOUND is unset) ──
     { key: "POST /staff/sales-outbound/settings", fields: () => ({ agent_id: "agent_matrix_sales_out", from_number: "+15550100970", max_concurrent: "1", max_per_run: "1", max_per_day: "5", max_attempts: "2", retry_after_hours: "48" }) },
+    { key: "POST /staff/sales-outbound/modes", fields: () => ({}) },
+    { key: "POST /staff/sales-outbound/capacity", fields: () => ({ cold_max: "15", callback_reserved: "5", provider_limit: "20", inbound_shares: "1", inbound_headroom: "2", callback_max_per_day: "200" }) },
+    { key: "POST /staff/sales-outbound/ramp", fields: () => ({ stage: "launch", "limit.launch": "0", "limit.pilot": "10", "limit.stage_2": "25", "limit.stage_3": "50", "limit.stage_4": "100", "limit.stage_5": "200" }) },
     { key: "POST /staff/sales-outbound/compliance", fields: () => ({ action: "approve", counsel_reference: "MATRIX-COUNSEL-REF (TEST DATA)", notes: "", confirm: "1" }) },
     { key: "POST /staff/sales-outbound/consents", fields: () => ({ phone: "+15550100971", line_type: "landline", signer_name: "Matrix Signer", evidence_ref: "matrix-form-0001",
       disclosure_text: "I agree Crestmont may call this number about website services using an AI (artificial) voice. TEST DATA.", captured_at: new Date(Date.now() - 86400e3).toISOString() }) },
