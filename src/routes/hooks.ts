@@ -23,6 +23,8 @@ import { verifyRetellWorkspace, type RetellWorkspace } from "../adapters/retell-
 import { ingestSalesEvent } from "../services/sales-opt/ingest.ts";
 import { applySalesCallEvent } from "../services/sales-outbound.ts";
 import { audit } from "../services/security.ts";
+import type { MailerCtx } from "../services/mailer.ts";
+import { founderAdapter, founderAppointmentChanged, type FounderEvent } from "../services/founder-calendar.ts";
 
 const q = (ctx: AppContext, k: string, max = 120) => (ctx.url.searchParams.get(k) ?? "").trim().slice(0, max);
 
@@ -80,11 +82,20 @@ async function retell(ctx: AppContext, translate: (db: AppContext["db"], raw: st
   };
   if (t.kind === "ack") { await salesFacts(); return jsonResponse(ctx, t.status ?? 200, fn ? ((t.body.result as Record<string, unknown> | undefined) ?? t.body) : t.body); }
   // Consultation confirmations go through the platform's existing mail pipeline (Resend outside development).
-  const res = await handleVoiceEvent(ctx.db, t.body, { mail: { email: ctx.email, db: ctx.db, settings: ctx.settings }, baseUrl: ctx.baseUrl, now, paymentsConfigured: ctx.payments.configured });
+  const mailCtx = { email: ctx.email, db: ctx.db, settings: ctx.settings };
+  const res = await handleVoiceEvent(ctx.db, t.body, { mail: mailCtx, baseUrl: ctx.baseUrl, now, paymentsConfigured: ctx.payments.configured, ...await founderDeps(ctx, mailCtx) });
   if (res.status < 300) await salesFacts();
   // Retell gives the function response body to the agent's LLM: return only the result object.
   if (fn) return jsonResponse(ctx, res.status, (res.body.result as Record<string, unknown> | undefined) ?? res.body);
   return jsonResponse(ctx, res.status, res.body);
+}
+
+
+/** Founder Calendar dependencies for the agents: Google free/busy (when connected) and the appointment hook. */
+export async function founderDeps(ctx: AppContext, mail: MailerCtx) {
+  const f = ctx.env.overrides?.fetch ?? fetch;
+  const fd = { db: ctx.db, env: ctx.env, fetch: f, mail, baseUrl: ctx.baseUrl };
+  return { calendar: await founderAdapter(ctx.db, ctx.env, f), founder: { changed: (id: string, ev: FounderEvent) => founderAppointmentChanged(fd, id, ev) } };
 }
 
 export function register(r: Router): void {

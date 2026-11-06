@@ -16,7 +16,7 @@ its deploy run was cancelled).
 | AI Outbound Calendar | 30-minute appointments, up to 5 per slot (database trigger, race-safe), own hours (default every day 09:00–20:00 business time), confirmed when booked. | `src/services/voice-scheduling.ts` |
 | Founder Calendar | Separate; one appointment per slot; Founder windows; held until the Founder confirms; offered only on an explicit request (`wants_founder`). | same, `src/domain/calendars.ts` |
 | Receptionist | Sells 24/7; no "closed"/message-taking fallback; only live transfer follows staffed hours; never suggests the Founder. | `src/services/voice.ts` |
-| Intake before payment | Package → intake → review (scope, price, agreements) → Stripe → project with the intake already attached; quote deposits need the intake first. | `src/services/purchase-intake.ts`, `src/routes/crm.ts` |
+| Intake before payment | Package → intake → review (scope, price, agreements) → Stripe → project with the intake already attached. One shared rule (`requireIntakeForPayment`) covers new checkout, legacy unpaid orders, quote deposits, Stripe-hosted quote invoices (refused before issue) and the staff payment simulation. Hosted invoices issued before the rule are listed for manual remediation on `/staff/finance/invoices`. | `src/services/purchase-intake.ts` |
 | Self-Improvement Engine | Dashboard: current/previous version, per-version calls and rates (qualified, appointment conversion, sales, revenue), proposals, approval log, rollback history. | `src/routes/sales-optimization.ts` |
 
 ## Founder / provider actions (cannot be done from code)
@@ -48,10 +48,21 @@ its deploy run was cancelled).
    consent. It opens only after counsel approves the consent design (recorded on `/staff/sales-outbound`), consent
    records exist per number, the Founder switches it on and authorises a ramp stage. Counsel should also confirm
    the callback consent model (a recorded request on the call) and both calling windows.
-6. **Calendar provider:** no external calendar is connected (none existed). The internal calendars are the real
-   availability. Reading the Founder's personal free/busy needs the Founder to choose a provider and grant access;
-   until then Founder appointments use the Founder windows on `/staff/voice/operations` and stay "requested" until
-   confirmed.
+6. **Founder Google Calendar** (code: `src/services/founder-calendar.ts`, `src/adapters/google-calendar.ts`, migration
+   0092). The internal Founder Calendar stays the booking record; Google adds real availability (free/busy of the
+   primary + dedicated calendar — times only) and shows every appointment on "Crestmont — Founder Appointments"
+   (created by the platform, or reused if it already exists). The Founder is emailed (platform mailer) for every new,
+   moved, confirmed and cancelled appointment, once each. If Google cannot be read, no Founder time is offered.
+   Founder steps, once per environment (staging first, then production):
+   1. Google Cloud Console (free) → create an OAuth client of type *Web application*; authorised redirect URIs
+      `https://crestmont-platform-staging.partners-df4.workers.dev/oauth/google/founder-calendar/callback` and
+      `https://crestmontwebsitedevelopment.com/oauth/google/founder-calendar/callback`. Enable the Google Calendar API.
+      While the OAuth consent screen is in "Testing", add your Google account as a test user.
+   2. Set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` on the Worker (staging and production secrets).
+   3. Sign in as the Owner → `/staff/calendars/founder-callback/google` → enter your Google account → *Connect with
+      Google* → allow the requested permissions. The page then shows the live check (calendar + free/busy).
+   4. Set your Founder appointment windows on `/staff/voice/operations`, then ask the receptionist (test call) for the
+      Founder and confirm the event and email arrive.
 7. **Live Stripe payments** — production checkout is closed by `commerceBlock` until ALL hold:
    - the legal policies are attorney-reviewed and published (today `DRAFT_BANNER` is set in `src/content/legal.ts`);
    - Business settings `business.legal_name` = "Talent Revenue Systems LLC" on production;
@@ -60,7 +71,12 @@ its deploy run was cancelled).
    - one live webhook endpoint `https://crestmontwebsitedevelopment.com/api/webhooks/stripe` with
      `checkout.session.completed`, `checkout.session.expired`, `invoice.paid`, `charge.refunded`,
      `charge.dispute.created`, `charge.dispute.updated`, `charge.dispute.closed`.
-   None of these can be verified from the repository; no real-money transaction is run.
+   None of these can be verified from the repository; no real-money transaction is run. After the first production
+   deploy, `GET /api/health` reports `payments.mode`, `payments.checkout` (open/closed) and the exact reason checkout
+   is closed, plus whether the webhook secret is present — from the running Worker, with no secret shown. No
+   publishable key is needed: checkout is Stripe-hosted.
+   - `business.legal_name` is set on production by the Owner in Business settings after the first deploy (a migration
+     cannot set it: it changes the rendered agreement texts, which are versioned).
 8. **AI Website Builder:** separate session. `decideEligibility` queues a build once payment and intake exist; it does
    not check staff scope APPROVAL. The directive requires authorised scope — for the Builder session to decide.
 9. **Release:** after the Builder passes its gates, create a new release candidate for the final `main` commit

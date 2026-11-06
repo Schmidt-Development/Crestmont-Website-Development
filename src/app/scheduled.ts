@@ -1,6 +1,7 @@
 // Scheduled jobs (Cloudflare Cron Triggers → worker `scheduled`). Each job is isolated: one failing
 // job never stops the others, and every run is recorded in ingestion_status ("job:<name>") so the
 // Readiness self-monitoring can show stale or failing automation instead of silently trusting it.
+import { retryFounderSync } from "../services/founder-calendar.ts";
 import { configureErasureKeysFromEnv } from "../services/contact-identity.ts";
 import type { Env } from "./context.ts";
 import { buildContext } from "./app.ts";
@@ -26,7 +27,7 @@ import { processSalesQueue } from "../services/sales-outbound.ts";
 import { runSuspensionSweep } from "../services/maintenance-lifecycle.ts";
 
 export type JobName = "requirements" | "stripe_reconcile" | "support_escalation" | "github_sync" | "inactivity" | "integration_health"
-  | "stripe_side_reconcile" | "stripe_ledger_reconcile" | "cost_import" | "env_probe" | "retention" | "build_sweep" | "payment_repair" | "email_retry" | "voice_outbound" | "sales_outbound" | "sales_opt" | "research_promote" | "ops_alerts" | "hosting_suspension";
+  | "stripe_side_reconcile" | "stripe_ledger_reconcile" | "cost_import" | "env_probe" | "retention" | "build_sweep" | "payment_repair" | "email_retry" | "voice_outbound" | "sales_outbound" | "sales_opt" | "research_promote" | "ops_alerts" | "hosting_suspension" | "founder_calendar_sync";
 
 /**
  * Cron expression → jobs. Must match [triggers] crons in wrangler.toml. ops_alerts runs last so it sees this run's
@@ -44,7 +45,7 @@ export type JobName = "requirements" | "stripe_reconcile" | "support_escalation"
  */
 export const SCHEDULE: Record<string, JobName[]> = {
   "* * * * *": ["research_promote"],
-  "*/15 * * * *": ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep", "voice_outbound", "sales_outbound", "sales_opt", "ops_alerts"],
+  "*/15 * * * *": ["stripe_reconcile", "payment_repair", "email_retry", "support_escalation", "github_sync", "env_probe", "build_sweep", "voice_outbound", "sales_outbound", "founder_calendar_sync", "sales_opt", "ops_alerts"],
   "17 11 * * *": ["requirements", "inactivity", "integration_health", "stripe_side_reconcile", "stripe_ledger_reconcile", "cost_import", "retention", "hosting_suspension"],
 };
 
@@ -87,6 +88,8 @@ export async function runJobs(env: Env, jobs: JobName[]): Promise<Record<string,
         case "voice_outbound": detail = (await processOutboundQueue({ db: ctx.db, env, fetch: env.overrides?.fetch ?? fetch, now: env.overrides?.now })).detail; break;
         // Outbound AI sales calls: off unless RETELL_SALES_OUTBOUND, the Owner switch and a compliance approval are all on.
         case "sales_outbound": detail = (await processSalesQueue({ db: ctx.db, env, fetch: env.overrides?.fetch ?? fetch, now: env.overrides?.now })).detail; break;
+        // Founder appointments whose Google Calendar event is pending or failed (src/services/founder-calendar.ts).
+        case "founder_calendar_sync": detail = (await retryFounderSync({ db: ctx.db, env, fetch: env.overrides?.fetch ?? fetch, mail: { email: ctx.email, db: ctx.db, settings: ctx.settings }, baseUrl: env.APP_URL })).detail; break;
         // SALESOPT-001..009: attribution, analysis/evaluation/proposal jobs for the self-hosted model, safety monitoring.
         // Never dials and never deploys except an automatic rollback to a previously verified version on a safety breach.
         case "sales_opt": detail = await runSalesOpt({ db: ctx.db, env, fetch: env.overrides?.fetch ?? fetch, now: env.overrides?.now }); break;

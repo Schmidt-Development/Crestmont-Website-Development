@@ -130,6 +130,9 @@ export interface Env {
   HSTS_INCLUDE_SUBDOMAINS?: string;
   /** The Founder's sign-in email. When set, only that account can record or carry a production launch approval. CREST-GAP-020. */
   FOUNDER_EMAIL?: string;
+  /** Google OAuth client (Founder Calendar, src/services/founder-calendar.ts). Free; created by the Founder in Google Cloud. */
+  GOOGLE_OAUTH_CLIENT_ID?: string;
+  GOOGLE_OAUTH_CLIENT_SECRET?: string;
   FILES?: unknown;             // R2 bucket binding
   ASSETS?: { fetch(req: Request): Promise<Response> };
   /** Test/dev hook: overrides the computed adapters. */

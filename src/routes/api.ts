@@ -1,5 +1,6 @@
 // JSON API: health, CI evidence ingestion, Stripe webhooks, readiness report. Moved from the
 // foundation worker.ts unchanged in behaviour. /api routes never accept cookie-authenticated writes.
+import { paymentsMode, commerceBlock } from "../domain/payments-mode.ts";
 import { aiBuildGate } from "../domain/ai-build-gate.ts";
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
@@ -103,8 +104,14 @@ export function register(r: Router) {
     // Phased launch: the RUNNING Worker states whether AI website generation is open. A Worker secret can override a
     // committed [vars] value without a deploy, so the post-deploy checks and the scheduled production monitor compare
     // this with the committed configuration (scripts/production-checks.ts, production-health-monitor.yml).
+    // Live-payment readiness, stated by the running Worker without revealing any secret: the Stripe mode its key allows,
+    // whether checkout is open (commerceBlock) and why not, and whether the webhook secret exists. (No publishable key is
+    // used: checkout is Stripe-hosted.)
+    const pm = paymentsMode(ctx.env);
+    const block = commerceBlock(ctx.env, ctx.settings);
     return jsonResponse(ctx, 200, { status: "ok", environment: ctx.env.ENVIRONMENT, fileStorage: ctx.storage ? "bound" : "not_configured",
-      aiBuildAutomation: aiBuildGate(ctx.env).open ? "on" : "off" });
+      aiBuildAutomation: aiBuildGate(ctx.env).open ? "on" : "off",
+      payments: { mode: pm.mode, checkout: block ? "closed" : "open", reason: block ?? pm.reason, webhookSecret: !!ctx.env.STRIPE_WEBHOOK_SECRET } });
   });
 
   r.post("/api/leads", async (ctx) => {
