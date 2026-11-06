@@ -117,7 +117,7 @@ test("[AUTH-003] [AUTH-007] FD-30: a customer administrator without MFA can sign
 
   // Enrol through the real pages (shows recovery codes once), then the same actions succeed.
   const enrolled = await c.enrolMfa(qpath);
-  assert.match(enrolled.page, new RegExp(`href="${qpath.replace(/\//g, "\\/")}"`), "continue link returns to the proposal");
+  assert.ok(enrolled.page.includes(`href="${qpath}"`), "continue link returns to the proposal");
   const after = await sessionActor(t.db, c);
   assert.equal(after.actor.mfaVerified, true);
   const invite = await c.post("/portal/team", { email: "colleague@fd30.example", role: "customer_member" });
