@@ -16,6 +16,8 @@ import { computeTax } from "../domain/tax.ts";
 import { parseAttributionCookie, privacySignal, ATTRIBUTION_COOKIE } from "./leads.ts";
 import { parseCookies } from "../app/http.ts";
 import { salesLinkForCheckout, SALES_LINK_COOKIE, type SalesLinkBinding } from "./sales-functions.ts";
+import { recordAcceptance } from "./agreements.ts";
+import { completedOpenIntake, stampIntakeOrder } from "./purchase-intake.ts";
 
 export const NOT_CONFIGURED = "Online payment is not configured yet.";
 
@@ -99,7 +101,15 @@ export async function bindSalesLinkLead(ctx: AppContext, link: SalesLinkBinding,
   return lead.id;
 }
 
-/** Standard package checkout (fixed price, 100% upfront). Premium above the floor goes through quotes. */
+/** The message shown when a payment is attempted before the website intake is complete. */
+export const INTAKE_REQUIRED = "Complete the website intake before paying: tell us what you want built, then review the scope and price.";
+
+/**
+ * Standard package checkout (fixed price, 100% upfront). Premium above the floor goes through quotes.
+ * Founder requirement (2026-11): the organization's website intake for this package must be complete (purchase_intakes,
+ * migration 0089) before any order or Stripe session exists. The caller has verified that the customer ticked the
+ * agreements checkbox: the acceptance is recorded here, against the order, BEFORE the Stripe session is created.
+ */
 export async function startPackageCheckout(ctx: AppContext, user: CheckoutUser, organizationId: string, packageId: string, maintenancePlanId: string) {
   const pkg = packageById(packageId);
   if (!pkg) throw new HttpError(404, "Unknown package.");
@@ -108,6 +118,8 @@ export async function startPackageCheckout(ctx: AppContext, user: CheckoutUser, 
   try { planId = assertPlanMeetsMinimum(pkg.id, maintenancePlanId); }
   catch (e) { if (e instanceof PricingError) throw new HttpError(422, e.message); throw e; }
   if (!ctx.payments.configured) throw new HttpError(409, NOT_CONFIGURED);
+  const intake = await completedOpenIntake(ctx.db, organizationId, { kind: "package", productId: pkg.id });
+  if (!intake) throw new HttpError(409, INTAKE_REQUIRED);
   const link = await salesLinkForCheckout(ctx.db, parseCookies(ctx.req.headers.get("cookie"))[SALES_LINK_COOKIE], pkg.id, ctx.now());
   const boundLead = link ? await bindSalesLinkLead(ctx, link, user, pkg) : null;
   const leadId = boundLead ?? await ensureCheckoutLead(ctx, user, organizationId, pkg);
@@ -122,20 +134,23 @@ export async function startPackageCheckout(ctx: AppContext, user: CheckoutUser, 
     }
     await ctx.db.prepare(`UPDATE sales_checkout_links SET order_id = ? WHERE id = ?`).bind(order.orderId, link.linkId).run();
   }
+  await stampIntakeOrder(ctx.db, intake.id, order.orderId);
+  // LEGAL-003: the agreements are accepted before the customer is sent to pay, never after the Stripe session exists.
+  await recordAcceptance(ctx, { userId: user.id, organizationId, context: "package_checkout", contextId: order.orderId });
   const session = await ctx.payments.createCheckout({
     mode: "payment",
     lines: order.checkoutLines,
     customerEmail: user.email,
     customerId: await stripeCustomerOf(ctx.db, organizationId),
     successUrl: `${ctx.baseUrl}/portal/billing?checkout=success`,
-    cancelUrl: `${ctx.baseUrl}/checkout/${pkg.id}?checkout=cancelled`,
-    metadata: { organization_id: organizationId, order_id: order.orderId, invoice_id: order.invoiceId, kind: "package", lead_id: leadId, maintenance_plan_id: planId, ...(boundLead && link ? { sales_link_id: link.linkId } : {}) },
+    cancelUrl: `${ctx.baseUrl}/checkout/${pkg.id}/review?checkout=cancelled`,
+    metadata: { organization_id: organizationId, order_id: order.orderId, invoice_id: order.invoiceId, kind: "package", lead_id: leadId, maintenance_plan_id: planId, intake_id: intake.id, ...(boundLead && link ? { sales_link_id: link.linkId } : {}) },
     // One Stripe session per invoice per day: a repeat click on the reused invoice returns the same session (CREST-GAP-036).
     idempotencyKey: `checkout:${order.invoiceId}:${nowIso(ctx.now).slice(0, 10)}`,
   });
   await recordCheckoutSession(ctx.db, order.invoiceId, session.id);
-  await audit(ctx.db, { actorUserId: user.id, action: "checkout.started", subjectType: "invoice", subjectId: order.invoiceId, organizationId, details: { packageId: pkg.id, amountCents: order.amountCents, reusedInvoice: order.reused, maintenancePlanId: planId } });
-  return { url: session.url, orderId: order.orderId, invoiceId: order.invoiceId };
+  await audit(ctx.db, { actorUserId: user.id, action: "checkout.started", subjectType: "invoice", subjectId: order.invoiceId, organizationId, details: { packageId: pkg.id, amountCents: order.amountCents, reusedInvoice: order.reused, maintenancePlanId: planId, intakeId: intake.id } });
+  return { url: session.url, orderId: order.orderId, invoiceId: order.invoiceId, intakeId: intake.id };
 }
 
 async function recordCheckoutSession(db: Db, invoiceId: string, sessionId: string) {
@@ -151,6 +166,27 @@ export async function customerInvoice(db: Db, organizationId: string, invoiceId:
   return inv;
 }
 
+/**
+ * Founder requirement (2026-11): an accepted quote's first invoice (100% upfront or the 50% deposit) is paid only once
+ * the customer completed the website intake for that quote version. Later 25% milestones and change orders are not
+ * gated: the intake belongs to the start of the project.
+ */
+export async function invoiceNeedsIntake(db: Db, organizationId: string, inv: { milestone_kind: string | null; status: string },
+  order: { kind: string; quote_version_id: string | null } | null): Promise<boolean> {
+  if (inv.status !== "open" || !order || order.kind !== "quote" || !order.quote_version_id) return false;
+  if (inv.milestone_kind !== "full" && inv.milestone_kind !== "deposit_50") return false;
+  return !(await completedOpenIntake(db, organizationId, { kind: "quote", quoteVersionId: order.quote_version_id }));
+}
+
+/** Open first invoices of accepted quotes that cannot be paid until the website intake is complete (see invoiceNeedsIntake). */
+export async function invoicesNeedingIntake(db: Db, organizationId: string): Promise<Set<string>> {
+  const rows = (await db.prepare(`SELECT i.id FROM invoices i JOIN orders o ON o.id = i.order_id
+      WHERE i.organization_id = ? AND i.status = 'open' AND i.milestone_kind IN ('full','deposit_50') AND o.kind = 'quote' AND o.quote_version_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM purchase_intakes x WHERE x.organization_id = i.organization_id AND x.quote_version_id = o.quote_version_id AND x.completed_at IS NOT NULL AND x.project_id IS NULL)`)
+    .bind(organizationId).all<{ id: string }>()).results;
+  return new Set(rows.map((r) => r.id));
+}
+
 /** Pay any open invoice of the customer's organization (package, quote deposit, milestone, change order). */
 export async function startInvoiceCheckout(ctx: AppContext, user: CheckoutUser, organizationId: string, invoiceId: string) {
   const inv = await customerInvoice(ctx.db, organizationId, invoiceId);
@@ -159,7 +195,8 @@ export async function startInvoiceCheckout(ctx: AppContext, user: CheckoutUser, 
   // PAY-006: an invoice billed as a Stripe Invoice is paid through its Stripe link only, never also through Checkout.
   if (inv.stripe_invoice_status === "open" || inv.stripe_invoice_status === "paid") throw new HttpError(409, "This invoice is billed through a Stripe invoice. Use the “Pay Stripe invoice” link on the invoice page.");
   if (!ctx.payments.configured) throw new HttpError(409, NOT_CONFIGURED);
-  const order = inv.order_id ? await ctx.db.prepare(`SELECT kind FROM orders WHERE id = ?`).bind(inv.order_id).first<{ kind: string }>() : null;
+  const order = inv.order_id ? await ctx.db.prepare(`SELECT kind, quote_version_id FROM orders WHERE id = ?`).bind(inv.order_id).first<{ kind: string; quote_version_id: string | null }>() : null;
+  if (await invoiceNeedsIntake(ctx.db, organizationId, inv, order)) throw new HttpError(409, INTAKE_REQUIRED);
   const kind = inv.milestone_kind === "change_order" ? "change_order" : inv.milestone_kind === "design_25" || inv.milestone_kind === "prelaunch_25" ? "milestone" : order?.kind ?? "invoice";
   const session = await ctx.payments.createCheckout({
     mode: "payment",

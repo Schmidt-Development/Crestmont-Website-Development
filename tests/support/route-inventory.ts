@@ -318,6 +318,9 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /checkout/maintenance/:planId": cust({ planId: "plan" }, act("checkout.subscription_started"), { admin: true }),
   "GET /checkout/:packageId": cust({ packageId: "package" }),
   "POST /checkout/:packageId": cust({ packageId: "package" }, act("checkout.started"), { admin: true }),
+  "GET /checkout/:packageId/intake": cust({ packageId: "package" }),
+  "POST /checkout/:packageId/intake": cust({ packageId: "package" }, act("purchase_intake.draft_saved")),
+  "GET /checkout/:packageId/review": cust({ packageId: "package" }),
 
   // ── Delivery: my work, conversations, projects, tasks (src/routes/projects.ts) ──
   "GET /staff": staff(STAFF_ROLES),
@@ -392,6 +395,8 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /portal/billing": cust(),
   "GET /portal/billing/invoices/:id": cust(P("invoice")),
   "POST /portal/billing/invoices/:id/pay": cust(P("invoice"), act("checkout.started"), { admin: true }),
+  "GET /portal/billing/invoices/:id/intake": cust(P("invoice")),
+  "POST /portal/billing/invoices/:id/intake": cust(P("invoice"), act("purchase_intake.draft_saved")),
   "POST /portal/billing/manage": cust(undefined, act("billing.portal_opened"), { admin: true }),
   "POST /portal/billing/refund-request": cust(undefined, act("refund.requested"), { admin: true }),
   "GET /staff/refunds": staff(rolesWith("refund.review")),
@@ -635,6 +640,9 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /sales/unsubscribe/:token": token("sales email unsubscribe token", { token: "salesUnsubToken" }, exempt("records an opt-out for the token's own address; same answer whatever the token")),
   "GET /staff/sales-outbound": staff(rolesWith("voice.manage")),
   "POST /staff/sales-outbound/settings": staff(rolesWith("voice.manage"), undefined, act("sales_outbound.settings_updated")),
+  "POST /staff/sales-outbound/modes": staff(rolesWith("voice.manage"), undefined, act("sales_outbound.modes_updated")),
+  "POST /staff/sales-outbound/capacity": staff(rolesWith("voice.manage"), undefined, act("sales_outbound.capacity_updated")),
+  "POST /staff/sales-outbound/ramp": staff(rolesWith("voice.manage"), undefined, act("sales_outbound.ramp_updated")),
   "POST /staff/sales-outbound/compliance": staff(rolesWith("voice.manage"), undefined, act("sales_outbound.compliance_approved")),
   "POST /staff/sales-outbound/consents": staff(rolesWith("voice.manage"), undefined, act("sales_outbound.consent_recorded")),
   "POST /staff/sales-outbound/dnc-scrubs": staff(rolesWith("voice.manage"), undefined, act("sales_outbound.dnc_scrub_recorded")),

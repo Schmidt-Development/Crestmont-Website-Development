@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createStaff, createCustomer, lastEmail, linkFrom, TEST_PASSWORD, type TestClient } from "./support/app.ts";
+import { completeIntake } from "./support/intake.ts";
 import type { PaymentsAdapter, CheckoutRequest } from "../src/adapters/payments.ts";
 import type { Env } from "../src/app/context.ts";
 import type { Actor } from "../src/domain/authz.ts";
@@ -96,6 +97,7 @@ test("[LEGAL-003] quote acceptance and package checkout record the development a
   const t = await app(true);
   // Package checkout: no acceptance without the checkbox, then exact versions with it.
   const cust = await customerClient(t, "buyer@lc.example", "Buyer Co");
+  await completeIntake(cust.c, "starter"); // intake before payment (Founder requirement)
   assert.equal((await cust.c.post("/checkout/starter", { maintenance_plan: "essential" })).status, 422);
   assert.equal((await one<{ n: number }>(t.db, `SELECT COUNT(*) AS n FROM agreement_acceptances WHERE user_id = ?`, cust.id)).n, 0);
   assert.equal((await cust.c.post("/checkout/starter", { maintenance_plan: "essential", terms: "1" })).status, 303);
@@ -149,6 +151,7 @@ test("[LEGAL-003] when the rendered text changes (business legal name set), the 
   const t = await app(true);
   await t.db.prepare(`INSERT INTO business_settings (key, value, updated_at) VALUES ('business.legal_name','Crestmont Test Entity LLC (TEST DATA)',?)`).bind(new Date().toISOString()).run();
   const cust = await customerClient(t, "drift@lc.example", "Drift Co");
+  await completeIntake(cust.c, "business"); // intake before payment (Founder requirement)
   assert.equal((await cust.c.post("/checkout/business", { maintenance_plan: "professional", terms: "1" })).status, 303);
   const rows = await acceptances(t.db, cust.id);
   const terms = rows.find((r) => r.kind === "terms_of_service")!;
@@ -222,6 +225,7 @@ test("[AUTH-008] a customer cannot open another organization's receipt, and staf
   assert.equal((await b.c.get(`/portal/billing/receipts/${pb.pay}`)).status, 200);
   assert.equal((await a.c.get(`/staff/finance/receipts/${pb.pay}`)).status, 403);
   // Agreements are org-scoped too.
+  await completeIntake(b.c, "starter"); // intake before payment (Founder requirement)
   await b.c.post("/checkout/starter", { maintenance_plan: "essential", terms: "1" });
   assert.doesNotMatch(await (await a.c.get("/portal/agreements")).text(), /rb@lc\.example/);
 });
@@ -235,11 +239,12 @@ test("[CAT-007] price change: staff propose with a reason, only the Owner approv
   const dev = await staffClient(t, "developer");
   const owner = await staffClient(t, "owner");
   const cust = await customerClient(t, "price@lc.example", "Price Co");
+  await completeIntake(cust.c, "starter"); // the checkout price is shown on the review page, after the intake
 
   const prices = async () => {
     const pricing = await (await t.client().get("/pricing")).text();
     const compare = await (await t.client().get("/pricing/compare")).text();
-    const checkout = await (await cust.c.get("/checkout/starter")).text();
+    const checkout = await (await cust.c.get("/checkout/starter/review")).text();
     return {
       pricing: /data-testid="price-starter">([^<]+)</.exec(pricing)![1],
       compare: compare.includes(/data-testid="price-starter">([^<]+)</.exec(pricing)![1]),

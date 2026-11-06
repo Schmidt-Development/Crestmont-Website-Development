@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createStaff, createCustomer, lastEmail, linkFrom, TEST_PASSWORD, type TestClient } from "./support/app.ts";
+import { completeIntake } from "./support/intake.ts";
 import { hmacSha256Hex } from "../src/lib/crypto.ts";
 import { newId, nowIso } from "../src/lib/db.ts";
 import type { Env } from "../src/app/context.ts";
@@ -127,6 +128,7 @@ test("[PAY-010] production with a test key shows payments as not configured; pro
   const cu = await createCustomer(t.db, "prodbuyer@fixture.example");
   const c = t.client();
   await c.login(cu.email);
+  await completeIntake(c, "starter"); // intake before payment (Founder requirement)
   const res = await c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" });
   assert.equal(res.status, 409);
   assert.match(await res.text(), /not configured/);
@@ -167,6 +169,7 @@ test("[AUTH-001] unverified customers cannot check out or pay (403, nothing crea
   await t.db.prepare(`UPDATE users SET email_verified_at = NULL WHERE id = ?`).bind(cu.id).run();
   const c = t.client(); await c.login(cu.email);
   assert.equal((await c.get("/portal/billing")).status, 200, "browsing stays allowed");
+  await completeIntake(c, "starter"); // intake before payment (Founder requirement)
   const res = await c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" });
   assert.equal(res.status, 403);
   const page = await res.text();
@@ -197,6 +200,7 @@ test("[PAY-003] fault injection: provisioning fails after the invoice is marked 
   const owner = await createStaff(t.db, "owner");
   const pm = await createStaff(t.db, "project_manager");
   const cu = await customerClient(t, "fault@fixture.example");
+  await completeIntake(cu.c, "starter"); // intake before payment (Founder requirement)
   assert.equal((await cu.c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" })).status, 303);
   const co = t.fake.checkouts.at(-1)!;
   const invoiceId = co.metadata.invoice_id, orderId = co.metadata.order_id;
@@ -228,6 +232,7 @@ test("[PAY-003] fault injection: provisioning fails after the invoice is marked 
   const portal = await cu.c.post("/portal/billing/manage");
   assert.equal(portal.status, 303);
   assert.match(portal.headers.get("location")!, /billing\.stripe\.com/);
+  await completeIntake(cu.c, "business"); // intake before payment (Founder requirement)
   assert.equal((await cu.c.post("/checkout/business", { terms: "1", maintenance_plan: "professional" })).status, 303);
   assert.equal(t.fake.checkouts.at(-1)!.customerId, "cus_pi_fault_1", "later checkouts pass the stored customer");
   assert.equal(co.customerId ?? null, null, "the first checkout had no customer yet");
@@ -236,6 +241,7 @@ test("[PAY-003] fault injection: provisioning fails after the invoice is marked 
 test("[PAY-003] dead-lettered provisioning is repaired by the scheduled sweep; projects.order_id is unique (concurrent provisioning creates one)", async () => {
   const t = await app();
   const cu = await customerClient(t, "sweep@fixture.example");
+  await completeIntake(cu.c, "starter"); // intake before payment (Founder requirement)
   await cu.c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" });
   const co = t.fake.checkouts.at(-1)!;
   t.db.raw.exec(`CREATE TRIGGER fixture_fail_projects2 BEFORE INSERT ON projects BEGIN SELECT RAISE(ABORT, 'injected'); END;`);
@@ -265,6 +271,7 @@ test("[PAY-003] dead-lettered provisioning is repaired by the scheduled sweep; p
 test("[PAY-005] duplicate checkout reuses one open package invoice; checkout.session.expired voids it ($0 outstanding); a stale session never voids a newer one", async () => {
   const t = await app();
   const cu = await customerClient(t, "dupe@fixture.example");
+  await completeIntake(cu.c, "starter"); // intake before payment (Founder requirement)
   assert.equal((await cu.c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" })).status, 303);
   assert.equal((await cu.c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" })).status, 303);
   const [c1, c2] = t.fake.checkouts;
@@ -273,6 +280,7 @@ test("[PAY-005] duplicate checkout reuses one open package invoice; checkout.ses
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM invoices WHERE organization_id = ? AND status = 'open'`, cu.organizationId), 1);
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM orders WHERE organization_id = ?`, cu.organizationId), 1);
   // A different package is a different order.
+  await completeIntake(cu.c, "business"); // intake before payment (Founder requirement)
   await cu.c.post("/checkout/business", { terms: "1", maintenance_plan: "professional" });
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM invoices WHERE organization_id = ? AND status = 'open'`, cu.organizationId), 2);
   // Expiry of an older session id (not the one recorded) is ignored.
@@ -295,6 +303,7 @@ test("[PAY-005] duplicate checkout reuses one open package invoice; checkout.ses
 test("[PAY-003] async payment failure emails the customer; payment_intent.payment_failed is recorded; subscription checkout sends subscription_data metadata", async () => {
   const t = await app();
   const cu = await customerClient(t, "async@fixture.example");
+  await completeIntake(cu.c, "starter"); // intake before payment (Founder requirement)
   await cu.c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" });
   const co = t.fake.checkouts.at(-1)!;
   await webhook(t, "checkout.session.async_payment_failed", { id: "cs_async_1", object: "checkout.session", mode: "payment", payment_status: "unpaid", customer_email: cu.email, metadata: co.metadata });
@@ -326,6 +335,7 @@ test("[PAY-003] async payment failure emails the customer; payment_intent.paymen
 test("[PAY-007] charge.refunded: Dashboard refunds email the customer once; platform-issued refunds are not emailed twice", async () => {
   const t = await app();
   const cu = await customerClient(t, "refund@fixture.example");
+  await completeIntake(cu.c, "starter"); // intake before payment (Founder requirement)
   await cu.c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" });
   const co = t.fake.checkouts.at(-1)!;
   await webhook(t, "checkout.session.completed", paidSession(co, "pi_refund_1"));
@@ -481,6 +491,7 @@ test("[CRM-006] a direct package purchase creates a CRM lead with the first-part
   await c.get("/pricing?utm_source=fixture_news&utm_medium=email&utm_campaign=autumn");
   assert.ok(c.cookies.get("cm_attr")?.includes("fixture_news"));
   await c.login(cu.email);
+  await completeIntake(c, "business"); // intake before payment (Founder requirement)
   await c.post("/checkout/business", { terms: "1", maintenance_plan: "professional" });
   const co = t.fake.checkouts.at(-1)!;
   const lead = await one<{ id: string; source: string; stage: string; utm_source: string; utm_campaign: string; interest: string }>(t.db, `SELECT l.id, l.source, l.stage, l.utm_source, l.utm_campaign, l.interest FROM leads l JOIN orders o ON o.lead_id = l.id WHERE o.id = ?`, co.metadata.order_id);
@@ -492,6 +503,7 @@ test("[CRM-006] a direct package purchase creates a CRM lead with the first-part
   await t.client().request("POST", "/api/leads", { body: JSON.stringify({ name: "Existing Buyer", email: "Existing@Fixture.example", interest: "starter", message: "Thinking about the starter package.", source: "web_form" }), headers: { "content-type": "application/json" } });
   const before = await count(t.db, `SELECT COUNT(*) n FROM leads`);
   const c2 = t.client(); await c2.login(cu2.email);
+  await completeIntake(c2, "starter"); // intake before payment (Founder requirement)
   await c2.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" });
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM leads`), before);
   const linked = await one<{ stage: string; source: string }>(t.db, `SELECT l.stage, l.source FROM leads l JOIN orders o ON o.lead_id = l.id WHERE o.id = ?`, t.fake.checkouts.at(-1)!.metadata.order_id);

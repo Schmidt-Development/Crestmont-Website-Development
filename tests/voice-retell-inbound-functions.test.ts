@@ -193,7 +193,7 @@ test("[PAY-001] [PAY-004] check_payment_status needs reference + email, locks af
 
 // ───────────── 6. schedule_consultation ─────────────
 
-test("[VOICE-003] schedule_consultation: off switch, real slots, booking, idempotent retry and no double booking (fixture)", async () => {
+test("[VOICE-003] schedule_consultation: off switch, real slots, booking, idempotent retry, five per slot and no sixth (fixture)", async () => {
   const t = await app();
   const off = await t.call("c_sc0", "schedule_consultation", {});
   assert.equal(off.json.step, "availability");
@@ -211,11 +211,16 @@ test("[VOICE-003] schedule_consultation: off switch, real slots, booking, idempo
   assert.equal(b.json.booked, true);
   assert.match(b.json.confirmation_code, /^[A-HJ-NP-Z2-9]{6}$/);
   assert.deepEqual((await t.call("c_sc1", "schedule_consultation", args)).json, b.json, "retry replays; no second booking");
+  // Up to five callers share one 30-minute AI callback slot; the sixth is refused with alternatives.
+  for (let i = 0; i < 4; i++) {
+    const n = `+1555010013${i}`;
+    assert.equal((await t.call(`c_sc3${i}`, "schedule_consultation", { ...args, name: `Caller ${i}`, phone: n, email: undefined }, { from_number: n })).json.booked, true, `booking ${i + 2} of 5`);
+  }
   const clash = await t.call("c_sc2", "schedule_consultation", { ...args, name: "Other", phone: "+15550100124", email: undefined }, { from_number: "+15550100124" });
-  assert.equal(clash.json.booked, false, "slot conflict refused");
-  assert.ok(clash.json.slots.length > 0 && clash.json.slots.every((s: { start_time: string }) => s.start_time !== start), "alternatives exclude the taken slot");
-  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM consultations WHERE starts_at = ? AND status IN ('requested','confirmed')`, start), 1);
-  // Availability after booking no longer offers the taken slot (read-only answers are not replayed).
+  assert.equal(clash.json.booked, false, "sixth booking in the slot refused");
+  assert.ok(clash.json.slots.length > 0 && clash.json.slots.every((s: { start_time: string }) => s.start_time !== start), "alternatives exclude the full slot");
+  assert.equal(await count(t.db, `SELECT COUNT(*) n FROM consultations WHERE starts_at = ? AND status IN ('requested','confirmed')`, start), 5);
+  // Availability after the slot fills no longer offers it (read-only answers are not replayed).
   const after = await t.call("c_sc1", "schedule_consultation", { preferred_date: "2026-11-03" });
   assert.notEqual(after.json.slots[0].start_time, start);
   // The call outcome counts the booking as a captured lead.
@@ -321,7 +326,7 @@ test("[VOICE-004] the inbound master instructions pass the platform's own prompt
   for (const n of INBOUND_FUNCTIONS) assert.match(INBOUND_MASTER_INSTRUCTIONS, new RegExp(`\\b${n}\\b`), `${n} is used by the prompt`);
   const known = new Set<string>([...VOICE_FUNCTIONS, ...RETELL_ONLY_FUNCTIONS]);
   const fields = new Set(["receptionist_mode", "link_sent", "scheduling_available", "start_time", "preferred_date", "reminder_call_ok", "confirmation_code",
-    "already_booked", "next_step", "transfer_available", "package_information", "consultation_details", "business_hours"]);
+    "already_booked", "next_step", "transfer_available", "package_information", "consultation_details", "business_hours", "wants_founder"]);
   const unknown = [...INBOUND_MASTER_INSTRUCTIONS.matchAll(/\b([a-z]+(?:_[a-z]+)+)\b/g)].map((m) => m[1]).filter((n) => !known.has(n) && !fields.has(n));
   assert.deepEqual([...new Set(unknown)], [], "every snake_case name is a deployed function, a documented response field or a dynamic variable");
   assert.match(VOICE_GUARDRAILS, /create_support_ticket/);

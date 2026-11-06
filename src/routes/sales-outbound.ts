@@ -5,8 +5,11 @@
 //  POST /api/sales-outbound/test-dispatch        signs a SYNTHETIC test request with this Worker's Retell key (staging E2E)
 //  GET  /buy/:token                               secure purchase link → existing /checkout/<package> flow
 //  GET  /sales/unsubscribe/:token                 sales email unsubscribe (confirm page); POST performs it
-//  GET  /staff/sales-outbound                     Owner page (voice.manage): switches, compliance records, queue
-//  POST /staff/sales-outbound/settings            switches and limits (step-up MFA)
+//  GET  /staff/sales-outbound                     Owner page (voice.manage): the two calling modes, capacity, ramp, records, queue
+//  POST /staff/sales-outbound/modes               Scheduled AI Callbacks ON/OFF and AI Cold Outreach ON/OFF
+//  POST /staff/sales-outbound/capacity            concurrency allocation (15 cold + 5 reserved callbacks) and provider limit
+//  POST /staff/sales-outbound/ramp                cold-outreach ramp stage and its daily limits (Founder authorises increases)
+//  POST /staff/sales-outbound/settings            agent, caller number and attempt rules
 //  POST /staff/sales-outbound/compliance          record / revoke the Founder + counsel approval (step-up MFA)
 //  POST /staff/sales-outbound/consents            record documented prior express written consent for one number
 //  POST /staff/sales-outbound/dnc-scrubs          record a National/State DNC registry check result
@@ -29,6 +32,8 @@ import { listTargets } from "../services/sales-opt/registry.ts";
 import { verifyEvidenceSignature, IngestAuthError } from "../readiness/ingest.ts";
 import { rateLimit, audit } from "../services/security.ts";
 import { auditOutboundRetell } from "../services/retell-outbound-audit.ts";
+import { callbackBoard } from "../services/appointment-callbacks.ts";
+import { parseStageLimits } from "../domain/outbound-capacity.ts";
 
 async function salesFunctions(ctx: AppContext): Promise<Response> {
   const raw = await readBody(ctx.req);
@@ -60,6 +65,12 @@ async function ownerPage(ctx: AppContext, errors: string[] = [], status = 200): 
   requireStaff(ctx, "voice.manage");
   const s = await so.loadSalesSettings(ctx.db);
   const sw = await so.salesOutboundSwitch(ctx.db, ctx.env);
+  const cb = await so.callbackSwitch(ctx.db, ctx.env);
+  const now = ctx.env.overrides?.now?.() ?? new Date();
+  const cap = await so.outboundCapacity(ctx.db, now);
+  const today = await so.dialsToday(ctx.db, now);
+  const board = await callbackBoard(ctx.db, now);
+  const limits = parseStageLimits(s.cold_stage_limits_json);
   const approval = await so.activeComplianceApproval(ctx.db);
   const stage = ctx.env.ENVIRONMENT === "production" ? "production" : "staging";
   const sieTarget = (await listTargets(ctx.db))[stage];
@@ -71,7 +82,48 @@ async function ownerPage(ctx: AppContext, errors: string[] = [], status = 200): 
   const consents = (await ctx.db.prepare(`SELECT id, phone_e164, line_type, signer_name, evidence_ref, captured_at, revoked_at FROM sales_call_consents ORDER BY recorded_at DESC LIMIT 20`).all<{ id: string; phone_e164: string; line_type: string; signer_name: string; evidence_ref: string; captured_at: string; revoked_at: string | null }>()).results;
   const body = html`${pageHead("AI sales calls (outbound)", undefined, "AI receptionist")}
 ${formErrors(errors)}
-${sw.enabled ? alert("warn", "Outbound AI sales calling is ON. Every call is still re-checked against the compliance gate immediately before dialling.") : alert("info", html`Outbound AI sales calling is <strong>off</strong>. ${sw.reasons.join(" · ")}`)}
+<section class="card stack" data-calling-modes><h2 class="card__title">Calling modes</h2>
+<form method="post" action="/staff/sales-outbound/modes" class="stack">${csrf(ctx)}
+<div class="grid grid-2">
+<div class="stack" data-mode="callback"><h3>${so.MODE_LABELS.callback}</h3>
+${checkbox("callbacks", "ON — call prospects at the times they booked on the AI Outbound Calendar", { checked: s.callbacks_enabled === 1 })}
+<p>${cb.enabled ? badge("active", "Running") : s.callbacks_enabled ? badge("not_configured", "On, but not dialling") : badge("cancelled", "Off")} <span class="faint">${cb.enabled ? "Due callbacks are placed within the reserved capacity." : cb.reasons.join(" · ")}</span></p>
+<p class="faint">Active ${cap.active.callback}/${cap.limit.callback} · placed today ${today.callback}/${s.callback_max_per_day}. Works whether or not cold outreach is on. Turning it off keeps every booking; a callback whose time passes while it is off is marked missed and given to a person, never dialled late.</p></div>
+<div class="stack" data-mode="cold"><h3>${so.MODE_LABELS.cold}</h3>
+${checkbox("cold", "ON — call eligible Approved-CRM leads proactively", { checked: s.enabled === 1 })}
+<p>${sw.enabled ? badge("active", "Running") : s.enabled ? badge("not_configured", "On, but not dialling") : badge("cancelled", "Off")} <span class="faint">${sw.enabled ? "Every call is re-checked against the compliance gate immediately before dialling." : sw.reasons.join(" · ")}</span></p>
+<p class="faint">Active ${cap.active.cold}/${cap.limit.cold} · placed today ${today.cold}/${so.coldDailyLimit(s)} (${so.COLD_STAGE_LABELS[s.cold_stage]}). Turning it off stops new cold calls at once; callbacks are not affected.</p></div>
+</div>
+<div class="form-actions">${button("Save calling modes")}</div></form>
+<p class="faint">Capacity now: ${cap.outboundRoom} outbound line(s) available of the provider limit ${s.provider_concurrency_limit}${s.inbound_shares_capacity ? ` (shared with ${cap.activeInbound} inbound call(s) + ${s.inbound_headroom} kept free for inbound)` : ""}. ${cap.notes.join(" · ")}</p>
+${cap.shortfall ? alert("warn", cap.shortfall) : ""}
+</section>
+<section class="card stack"><h2 class="card__title">Concurrency allocation</h2>
+<form method="post" action="/staff/sales-outbound/capacity" class="stack">${csrf(ctx)}
+<div class="grid grid-3">${input({ name: "cold_max", label: "Cold outreach: max concurrent calls (1–15)", type: "number", value: s.max_concurrent, min: 1, max: 15 })}
+${input({ name: "callback_reserved", label: "Reserved for scheduled callbacks (1–5)", type: "number", value: s.callback_reserved, min: 1, max: 5 })}
+${input({ name: "callback_max_per_day", label: "Callbacks per day", type: "number", value: s.callback_max_per_day, min: 1, max: 1000 })}
+${input({ name: "provider_limit", label: "Retell concurrency limit (from the Retell dashboard)", type: "number", value: s.provider_concurrency_limit, min: 1, max: 200 })}
+${input({ name: "inbound_headroom", label: "Lines kept free for inbound callers", type: "number", value: s.inbound_headroom, min: 0, max: 20 })}</div>
+${checkbox("inbound_shares", "Inbound receptionist calls share this limit (leave on unless Retell confirms the sales workspace has its own)", { checked: s.inbound_shares_capacity === 1 })}
+<div class="form-actions">${button("Save allocation", { variant: "secondary" })}</div></form></section>
+<section class="card stack"><h2 class="card__title">Cold-outreach ramp</h2>
+<p class="muted">The Founder authorises activation and every increase; nothing raises volume by itself. Current stage: <strong>${so.COLD_STAGE_LABELS[s.cold_stage]}</strong> (${limits[s.cold_stage]} cold calls a day).</p>
+<form method="post" action="/staff/sales-outbound/ramp" class="stack">${csrf(ctx)}
+${select({ name: "stage", label: "Stage", options: so.COLD_STAGES.map((x) => ({ value: x, label: `${so.COLD_STAGE_LABELS[x]} — ${limits[x]} a day` })), value: s.cold_stage })}
+<div class="grid grid-3">${so.COLD_STAGES.map((x) => input({ name: `limit.${x}`, label: `${so.COLD_STAGE_LABELS[x]}: calls a day`, type: "number", value: limits[x], min: 0, max: 1000 }))}</div>
+${checkbox("confirm_increase", "I am the Founder and I authorise this cold-outreach volume.")}
+<div class="form-actions">${button("Save ramp", { variant: "secondary" })}</div></form></section>
+<section class="card stack" data-callback-board><h2 class="card__title">Scheduled AI callbacks</h2>
+${board.overdue.length ? alert("warn", `${board.overdue.length} callback(s) are past their time and not yet placed${s.callbacks_enabled ? "" : " because Scheduled AI Callbacks are off"}. More than 30 minutes late, they are marked missed and given to a person.`) : ""}
+${table(board.upcoming, [
+  { header: "When", cell: (r) => (r.not_before ? formatDateTime(r.not_before) : "—") }, { header: "Prospect", cell: (r) => html`${r.contact_name ?? r.lead_id}${r.is_test ? html` ${badge("in_progress", "Test")}` : ""}` },
+  { header: "Status", cell: (r) => badge(r.status, label(r.status)) }, { header: "Attempts", cell: (r) => String(r.attempts) }, { header: "Detail", cell: (r) => r.status_detail ?? "—" },
+], { empty: emptyState("No callbacks scheduled", "Appointments booked on the AI Outbound Calendar appear here at their time.") })}
+${board.missed.length ? html`<h3>Missed (last 14 days)</h3>${table(board.missed, [
+  { header: "Was due", cell: (r) => (r.not_before ? formatDateTime(r.not_before) : "—") }, { header: "Prospect", cell: (r) => r.contact_name ?? r.lead_id },
+  { header: "Marked missed", cell: (r) => formatDateTime(r.missed_at) }, { header: "Why", cell: (r) => r.status_detail ?? "—" },
+])}` : ""}</section>
 <p class="muted">Founder decision D-14 keeps AI-voice sales calls closed until counsel approves a consent design. A number in a public dataset is not consent. A lead is dialled only with documented prior express written consent covering AI-voice calls to that number, a National Do Not Call Registry check within 31 days, a known state and time zone, and inside the conservative calling window (weekdays 10:00–19:00 recipient time, no federal holidays).</p>
 <p class="muted">Retell workspace: outbound (RETELL_OUTBOUND_API_KEY ${so.outboundKeyConfigured(ctx.env) ? "configured" : "NOT configured"}). ${sieLine}</p>
 <section class="card stack"><h2 class="card__title">Compliance approval</h2>
@@ -82,15 +134,12 @@ ${input({ name: "counsel_reference", label: "Counsel's reference for the approve
 ${textarea({ name: "notes", label: "Notes (scope, states excluded, conditions)", rows: 3, maxlength: 1000 })}
 ${checkbox("confirm", "I am the Founder and counsel has approved AI-voice sales calls under the recorded consent design.", { required: true })}
 <div class="form-actions">${button("Record approval")}</div></form>`}</section>
-<section class="card stack"><h2 class="card__title">Switches and limits</h2>
+<section class="card stack"><h2 class="card__title">Sales agent and attempts</h2>
 <form method="post" action="/staff/sales-outbound/settings" class="stack">${csrf(ctx)}
-${checkbox("enabled", "Enable outbound AI sales calls in this environment (RETELL_SALES_OUTBOUND must also be on)", { checked: s.enabled === 1 })}
 ${input({ name: "agent_id", label: "Retell sales agent id (separate from the receptionist)", value: s.agent_id ?? "", maxlength: 80 })}
 ${input({ name: "from_number", label: "Approved caller number (E.164, Retell-owned or imported)", value: s.from_number ?? "", maxlength: 20 })}
-${input({ name: "max_concurrent", label: "Concurrent calls (1–20; Retell's workspace limit is shared with the receptionist)", type: "number", value: s.max_concurrent, min: 1, max: 20 })}
-${input({ name: "max_per_run", label: "Dials per 15-minute run", type: "number", value: s.max_dials_per_run, min: 1, max: 20 })}
-${input({ name: "max_per_day", label: "Dials per day", type: "number", value: s.max_dials_per_day, min: 1, max: 500 })}
-${input({ name: "max_attempts", label: "Attempts per lead", type: "number", value: s.max_attempts_per_lead, min: 1, max: 3 })}
+${input({ name: "max_per_run", label: "Dials per 15-minute run, per mode", type: "number", value: s.max_dials_per_run, min: 1, max: 20 })}
+${input({ name: "max_attempts", label: "Cold outreach: attempts per lead", type: "number", value: s.max_attempts_per_lead, min: 1, max: 3 })}
 ${input({ name: "retry_after_hours", label: "Hours between attempts", type: "number", value: s.retry_after_hours, min: 4, max: 720 })}
 <div class="form-actions">${button("Save")}</div></form></section>
 <section class="card stack"><h2 class="card__title">Record written consent for one number</h2>
@@ -202,9 +251,33 @@ export function register(r: Router): void {
     requireStaff(ctx, "voice.manage");
     const f = await ctx.form();
     const n = (k: string) => Number(str(f, k));
-    const problems = await so.saveSalesSettings(ctx.db, ctx.user!.id, { enabled: !!f.get("enabled"), agentId: str(f, "agent_id"), fromNumber: str(f, "from_number"),
-      maxConcurrent: n("max_concurrent"), maxPerRun: n("max_per_run"), maxPerDay: n("max_per_day"), maxAttempts: n("max_attempts"), retryAfterHours: n("retry_after_hours") });
+    // The switches, concurrency and daily volume have their own forms; this one keeps their saved values.
+    const cur = await so.loadSalesSettings(ctx.db);
+    const problems = await so.saveSalesSettings(ctx.db, ctx.user!.id, { enabled: cur.enabled === 1, agentId: str(f, "agent_id"), fromNumber: str(f, "from_number"),
+      maxConcurrent: cur.max_concurrent, maxPerRun: n("max_per_run"), maxPerDay: cur.max_dials_per_day, maxAttempts: n("max_attempts"), retryAfterHours: n("retry_after_hours") });
     return problems.length ? ownerPage(ctx, problems, 422) : redirect(ctx, "/staff/sales-outbound", { kind: "success", text: "Saved." });
+  });
+  r.post("/staff/sales-outbound/modes", async (ctx) => {
+    requireStaff(ctx, "voice.manage");
+    const f = await ctx.form();
+    const problems = await so.saveOutboundModes(ctx.db, ctx.user!.id, { callbacks: !!f.get("callbacks"), cold: !!f.get("cold") });
+    return problems.length ? ownerPage(ctx, problems, 422) : redirect(ctx, "/staff/sales-outbound", { kind: "success", text: "Calling modes saved. They apply from the next dispatch run." });
+  });
+  r.post("/staff/sales-outbound/capacity", async (ctx) => {
+    requireStaff(ctx, "voice.manage");
+    const f = await ctx.form();
+    const n = (k: string) => Number(str(f, k));
+    const problems = await so.saveCapacitySettings(ctx.db, ctx.user!.id, { coldMax: n("cold_max"), callbackReserved: n("callback_reserved"), providerLimit: n("provider_limit"),
+      inboundShares: !!f.get("inbound_shares"), inboundHeadroom: n("inbound_headroom"), callbackMaxPerDay: n("callback_max_per_day") });
+    return problems.length ? ownerPage(ctx, problems, 422) : redirect(ctx, "/staff/sales-outbound", { kind: "success", text: "Allocation saved." });
+  });
+  r.post("/staff/sales-outbound/ramp", async (ctx) => {
+    requireStaff(ctx, "voice.manage");
+    const f = await ctx.form();
+    const lim: Record<string, number> = {};
+    for (const x of so.COLD_STAGES) lim[x] = /^\d+$/.test(str(f, `limit.${x}`)) ? Number(str(f, `limit.${x}`)) : NaN;
+    const problems = await so.saveColdStage(ctx.db, ctx.user!.id, { stage: str(f, "stage"), limits: lim, confirmIncrease: !!f.get("confirm_increase") });
+    return problems.length ? ownerPage(ctx, problems, 422) : redirect(ctx, "/staff/sales-outbound", { kind: "success", text: "Ramp saved." });
   });
   const guarded = (fn: (ctx: AppContext, f: FormData) => Promise<string>) => async (ctx: AppContext) => {
     requireStaff(ctx, "voice.manage");

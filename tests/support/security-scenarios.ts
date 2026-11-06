@@ -6,7 +6,8 @@ import { pdf, png, zip, type World, type Tenant } from "./security-world.ts";
 import { pathFor } from "./security-helpers.ts";
 import { ROUTE_INVENTORY } from "./route-inventory.ts";
 import { newId, nowIso } from "../../src/lib/db.ts";
-import { createPackageOrder } from "../../src/services/commerce.ts";
+import { createPackageOrder, createQuoteOrder } from "../../src/services/commerce.ts";
+import { INTAKE_ANSWERS } from "./intake.ts";
 import { baselineSalesInstructions as baselineSales } from "../../src/domain/sales-opt/policy.ts";
 
 type Fields = Record<string, string | string[] | File>;
@@ -38,6 +39,8 @@ export function customerPostFields(w: World, t: Tenant): Record<string, () => Fi
     "POST /q/:token/accept": () => ({ agree: "1" }),
     "POST /checkout/maintenance/:planId": () => ({ terms: "1" }),
     "POST /checkout/:packageId": () => ({ terms: "1", maintenance_plan: "essential" }), // ids.package is "starter" (FD-26 minimum)
+    "POST /checkout/:packageId/intake": () => ({ intent: "draft", business_name: `${t.marker} intake answer` }),
+    "POST /portal/billing/invoices/:id/intake": () => ({ intent: "draft", business_name: `${t.marker} quote intake answer` }),
     "POST /portal/support/new": () => ({ subject: `${t.marker} second ticket`, category: "billing", description: `${t.marker} a question about my invoice`, project_id: t.ids.project! }),
     "POST /portal/support/:id/reply": () => ({ body: `${t.marker} more detail for the team` }),
     "POST /portal/support/:id/reopen": () => ({}),
@@ -174,6 +177,15 @@ export function auditScenarios(w: World): Scenario[] {
     cust("POST /portal/support/new"),
     cust("POST /portal/support/:id/reply"),
     cust("POST /portal/billing/invoices/:id/pay"),
+    // The website intake for an accepted quote, before its first invoice is paid (migration 0089).
+    cust("POST /portal/billing/invoices/:id/intake", { path: () => `/portal/billing/invoices/${x.quoteInvoice}/intake`, setup: async () => {
+      const q = newId("quo"), v = newId("qv");
+      await w.db.batch([
+        w.db.prepare(`INSERT INTO quotes (id, lead_id, status, current_version, created_by, created_at) VALUES (?,?, 'accepted', 1, ?, ?)`).bind(q, w.ids.lead, s.owner.id, nowIso()),
+        w.db.prepare(`INSERT INTO quote_versions (id, quote_id, version, line_items_json, total_cents, payment_schedule, scope_text, package_id, accepted_at, created_at) VALUES (?,?,1,'[]', 600000, 'milestone_50_25_25', 'Matrix custom scope', 'custom', ?, ?)`).bind(v, q, nowIso(), nowIso()),
+      ]);
+      x.quoteInvoice = (await createQuoteOrder(w.db, a.orgId, { id: v, total_cents: 600000, payment_schedule: "milestone_50_25_25", quote_id: q, package_id: "custom" }, null, a.admin.id)).invoiceId;
+    } }),
     cust("POST /portal/billing/manage", { setup: async () => { await w.db.prepare(`UPDATE organizations SET stripe_customer_id = 'cus_matrix_a' WHERE id = ?`).bind(a.orgId).run(); } }),
     cust("POST /portal/billing/refund-request", { setup: async () => {
       // A second paid payment so a fresh refund request is allowed (one open request per payment).
@@ -185,7 +197,12 @@ export function auditScenarios(w: World): Scenario[] {
       ]);
       a.ids.payment = pay;
     } }),
-    cust("POST /checkout/:packageId"),
+    cust("POST /checkout/:packageId/intake"),
+    // Founder requirement: the package's website intake is complete before checkout creates an order.
+    cust("POST /checkout/:packageId", { setup: async () => {
+      const res = await a.admin.c.post(`/checkout/${w.ids.package}/intake`, { ...INTAKE_ANSWERS, intent: "submit" });
+      if (res.headers.get("location") !== `/checkout/${w.ids.package}/review`) throw new Error(`intake not completed: ${res.status}`);
+    } }),
     cust("POST /checkout/maintenance/:planId"),
     // The proposal is accepted by the customer account registered with the lead's own email address.
     { key: "POST /q/:token/accept", run: async () => {
@@ -404,6 +421,9 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "POST /staff/voice/dnc", fields: () => ({ phone: "+15550100993", detail: "Matrix opt-out (TEST DATA)" }) },
     // ── Outbound AI sales calls (TEST DATA; nothing dials: RETELL_SALES_OUTBOUND is unset) ──
     { key: "POST /staff/sales-outbound/settings", fields: () => ({ agent_id: "agent_matrix_sales_out", from_number: "+15550100970", max_concurrent: "1", max_per_run: "1", max_per_day: "5", max_attempts: "2", retry_after_hours: "48" }) },
+    { key: "POST /staff/sales-outbound/modes", fields: () => ({}) },
+    { key: "POST /staff/sales-outbound/capacity", fields: () => ({ cold_max: "15", callback_reserved: "5", provider_limit: "20", inbound_shares: "1", inbound_headroom: "2", callback_max_per_day: "200" }) },
+    { key: "POST /staff/sales-outbound/ramp", fields: () => ({ stage: "launch", "limit.launch": "0", "limit.pilot": "10", "limit.stage_2": "25", "limit.stage_3": "50", "limit.stage_4": "100", "limit.stage_5": "200" }) },
     { key: "POST /staff/sales-outbound/compliance", fields: () => ({ action: "approve", counsel_reference: "MATRIX-COUNSEL-REF (TEST DATA)", notes: "", confirm: "1" }) },
     { key: "POST /staff/sales-outbound/consents", fields: () => ({ phone: "+15550100971", line_type: "landline", signer_name: "Matrix Signer", evidence_ref: "matrix-form-0001",
       disclosure_text: "I agree Crestmont may call this number about website services using an AI (artificial) voice. TEST DATA.", captured_at: new Date(Date.now() - 86400e3).toISOString() }) },

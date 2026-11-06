@@ -380,14 +380,17 @@ export async function completePaidInvoice(ctx: Pick<AppContext, "db" | "email" |
   }
   // CREST-GAP-037: owners and project managers hear about a newly provisioned project exactly once.
   if (provisioned && projectId) {
-    const p = await db.prepare(`SELECT p.name, o.name AS org_name FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.id = ?`).bind(projectId).first<{ name: string; org_name: string }>();
+    const p = await db.prepare(`SELECT p.name, p.status, o.name AS org_name FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.id = ?`).bind(projectId).first<{ name: string; status: string; org_name: string }>();
     const staff = (await db.prepare(`SELECT DISTINCT m.user_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.role_id IN ('owner','project_manager') AND u.disabled_at IS NULL`).all<{ user_id: string }>()).results;
-    for (const u of staff) await notify(db, u.user_id, { kind: "project_provisioned", subjectType: "project", subjectId: projectId, body: `Payment confirmed: ${p?.name ?? "a new project"} (${p?.org_name ?? "customer"}) was provisioned and awaits onboarding. Assign a project manager.` });
+    const awaits = p?.status === "scope_review" ? "arrived with the customer's completed website intake and awaits scope review" : "awaits onboarding";
+    for (const u of staff) await notify(db, u.user_id, { kind: "project_provisioned", subjectType: "project", subjectId: projectId, body: `Payment confirmed: ${p?.name ?? "a new project"} (${p?.org_name ?? "customer"}) was provisioned and ${awaits}. Assign a project manager.` });
   }
   // A simulated payment is not a real transaction: no receipt is sent.
   const recipient = simulated || opts.noReceipt ? null : to ?? await orgBillingEmail(db, inv.organization_id);
+  // The website intake is normally completed before payment (migration 0089): the receipt then points at the project.
+  const intakeDone = projectId ? !!(await db.prepare(`SELECT 1 FROM onboarding_responses WHERE project_id = ? AND completed_at IS NOT NULL`).bind(projectId).first()) : false;
   if (recipient) await sendMail(ctx, { template: "receipt", to: recipient, idempotencyKey: `receipt:${inv.id}`,
-    data: { amountCents: inv.amount_cents, next: projectId ? "onboarding" : "billing", url: `${ctx.baseUrl}/portal${projectId ? `/projects/${projectId}/onboarding` : "/billing"}` } });
+    data: { amountCents: inv.amount_cents, next: !projectId ? "billing" : intakeDone ? "project" : "onboarding", url: `${ctx.baseUrl}/portal${!projectId ? "/billing" : intakeDone ? `/projects/${projectId}` : `/projects/${projectId}/onboarding`}` } });
   return { projectId, provisioned };
 }
 

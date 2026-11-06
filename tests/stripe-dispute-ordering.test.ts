@@ -5,6 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createCustomer, createStaff, TEST_PASSWORD, type TestClient } from "./support/app.ts";
+import { completeIntake } from "./support/intake.ts";
 import { hmacSha256Hex } from "../src/lib/crypto.ts";
 import type { PaymentsAdapter, CheckoutRequest } from "../src/adapters/payments.ts";
 
@@ -29,6 +30,7 @@ async function paidCheckout(pi: string) {
   const t = await createTestApp({ STRIPE_WEBHOOK_SECRET: WHSEC, overrides: { payments: fake } });
   const cu = await createCustomer(t.db, `dispute-order-${pi}@fixture.example`, "Dispute Ordering Fixture LLC");
   const c = t.client(); await c.login(cu.email);
+  await completeIntake(c, "starter"); // intake before payment (Founder requirement)
   await c.post("/checkout/starter", { maintenance_plan: "essential", terms: "1" });
   const co = fake.checkouts.at(-1)!;
   const session = { id: `cs_${pi}`, object: "checkout.session", mode: "payment", payment_status: "paid", amount_total: co.lines.reduce((s, l) => s + l.amountCents * (l.quantity ?? 1), 0), payment_intent: pi, customer: `cus_${pi}`, customer_email: co.customerEmail, metadata: co.metadata };

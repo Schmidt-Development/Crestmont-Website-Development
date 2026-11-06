@@ -37,11 +37,20 @@ export interface VoiceConfig {
   };
   scheduling: {
     enabled: boolean;
+    /** Every appointment is 30 minutes (Founder rule, 2026-11-06); kept as a field for stored configs. */
     duration_minutes: number;
+    /** Minimum notice for a Founder appointment. */
     min_notice_hours: number;
     horizon_days: number;
-    /** false (default): phone bookings are "requested" and hold the slot until staff confirm them. */
+    /** Founder Calendar only. false (default): a Founder appointment is "requested" until the Founder confirms it.
+     *  AI Outbound Calendar appointments are AI callbacks and are confirmed when booked. */
     auto_confirm: boolean;
+    /** AI Outbound Calendar: when scheduled AI callbacks may be booked (business time zone). Empty = business hours. */
+    ai_hours: Record<Weekday, Window[]>;
+    /** Minimum notice for an AI callback appointment, in minutes. */
+    ai_min_notice_minutes: number;
+    /** Founder Calendar: the Founder's appointment windows. Empty = business hours. */
+    founder_hours: Record<Weekday, Window[]>;
   };
   outbound: {
     /** Second switch; outbound also needs RETELL_OUTBOUND=on in the environment. */
@@ -57,6 +66,11 @@ export interface VoiceConfig {
 }
 
 const closedWeek = (): Record<Weekday, Window[]> => ({ sun: [], mon: [], tue: [], wed: [], thu: [], fri: [], sat: [] });
+const everyDay = (open: string, close: string): Record<Weekday, Window[]> => ({ sun: [{ open, close }], mon: [{ open, close }], tue: [{ open, close }], wed: [{ open, close }], thu: [{ open, close }], fri: [{ open, close }], sat: [{ open, close }] });
+/** Every appointment on either calendar is 30 minutes (Founder rule). */
+export const APPOINTMENT_MINUTES = 30;
+/** Confirmed bookings allowed in one 30-minute slot of the AI Outbound Calendar (enforced by a database trigger, 0090). */
+export const AI_SLOT_CAPACITY = 5;
 
 export function defaultVoiceConfig(): VoiceConfig {
   return {
@@ -65,7 +79,8 @@ export function defaultVoiceConfig(): VoiceConfig {
     holidays: [],
     inbound: { mode: "answer", numbers: [], agent_id: null },
     transfer: { enabled: false, number: null },
-    scheduling: { enabled: false, duration_minutes: 30, min_notice_hours: 24, horizon_days: 21, auto_confirm: false },
+    scheduling: { enabled: false, duration_minutes: APPOINTMENT_MINUTES, min_notice_hours: 24, horizon_days: 21, auto_confirm: false,
+      ai_hours: everyDay("09:00", "20:00"), ai_min_notice_minutes: 60, founder_hours: closedWeek() },
     outbound: { enabled: false, agent_id: null, from_number: null, window_start: "09:00", window_end: "20:00", max_per_number_per_day: 1, max_per_number_per_week: 3 },
   };
 }
@@ -120,10 +135,19 @@ export function voiceConfigProblems(c: VoiceConfig): string[] {
   if (c.transfer.enabled && !c.transfer.number) p.push("Live transfer cannot be enabled without an approved transfer number.");
   if (c.transfer.enabled && !anyHours) p.push("Live transfer needs business hours: transfers are only offered while the business is open.");
   const s = c.scheduling;
-  if (![15, 20, 30, 45, 60, 90].includes(s.duration_minutes)) p.push("Consultation length must be 15, 20, 30, 45, 60 or 90 minutes.");
+  if (s.duration_minutes !== APPOINTMENT_MINUTES) p.push(`Appointments are ${APPOINTMENT_MINUTES} minutes long.`);
+  if (!Number.isInteger(s.ai_min_notice_minutes) || s.ai_min_notice_minutes < 0 || s.ai_min_notice_minutes > 7 * 24 * 60) p.push("AI callback notice must be 0–10080 minutes.");
+  for (const [label, wk, lo, hi] of [["AI Outbound Calendar", s.ai_hours, 8 * 60, 21 * 60], ["Founder Calendar", s.founder_hours, 0, 24 * 60]] as const) {
+    for (const day of WEEKDAYS) for (const w of wk[day]) {
+      if (!HHMM.test(w.open) || !HHMM.test(w.close) || minutesOf(w.close) <= minutesOf(w.open)) { p.push(`${label} ${day}: windows must be HH:MM with the end after the start.`); continue; }
+      if (minutesOf(w.open) % APPOINTMENT_MINUTES || minutesOf(w.close) % APPOINTMENT_MINUTES) p.push(`${label} ${day}: windows must start and end on the hour or half hour.`);
+      if (minutesOf(w.open) < lo || minutesOf(w.close) > hi) p.push(`${label} ${day}: callbacks must stay within 08:00–21:00.`);
+    }
+  }
   if (!Number.isInteger(s.min_notice_hours) || s.min_notice_hours < 1 || s.min_notice_hours > 336) p.push("Minimum booking notice must be 1–336 hours.");
   if (!Number.isInteger(s.horizon_days) || s.horizon_days < 1 || s.horizon_days > 90) p.push("Booking horizon must be 1–90 days.");
-  if (s.enabled && !anyHours) p.push("Phone scheduling needs business hours: consultations are offered inside them.");
+  const anyWin = (wk: Record<Weekday, Window[]>) => WEEKDAYS.some((d) => wk[d].length > 0);
+  if (s.enabled && !anyHours && !anyWin(s.ai_hours) && !anyWin(s.founder_hours)) p.push("Phone scheduling needs AI Outbound Calendar hours, Founder hours or business hours.");
   const o = c.outbound;
   if (!HHMM.test(o.window_start) || !HHMM.test(o.window_end)) p.push("Outbound calling window must use HH:MM (24-hour).");
   else {
@@ -146,18 +170,25 @@ export function voiceConfigProblems(c: VoiceConfig): string[] {
 function normalise(raw: unknown): VoiceConfig {
   const d = defaultVoiceConfig();
   const o = (raw && typeof raw === "object" ? raw : {}) as Partial<VoiceConfig>;
-  const hours = closedWeek();
-  for (const day of WEEKDAYS) {
-    const ws = (o.hours as Record<string, unknown> | undefined)?.[day];
-    hours[day] = Array.isArray(ws) ? ws.filter((w): w is Window => !!w && typeof (w as Window).open === "string" && typeof (w as Window).close === "string").map((w) => ({ open: w.open, close: w.close })) : [];
-  }
+  const week = (src: unknown): Record<Weekday, Window[]> => {
+    const out = closedWeek();
+    for (const day of WEEKDAYS) {
+      const ws = (src as Record<string, unknown> | undefined)?.[day];
+      out[day] = Array.isArray(ws) ? ws.filter((w): w is Window => !!w && typeof (w as Window).open === "string" && typeof (w as Window).close === "string").map((w) => ({ open: w.open, close: w.close })) : [];
+    }
+    return out;
+  };
+  const hours = week(o.hours);
+  const sch = (o.scheduling ?? {}) as Partial<VoiceConfig["scheduling"]>;
   return {
     timezone: typeof o.timezone === "string" ? o.timezone : null,
     hours,
     holidays: Array.isArray(o.holidays) ? o.holidays.filter((h): h is string => typeof h === "string") : [],
     inbound: { ...d.inbound, ...(o.inbound ?? {}), numbers: Array.isArray(o.inbound?.numbers) ? o.inbound!.numbers.filter((n): n is string => typeof n === "string") : [] },
     transfer: { ...d.transfer, ...(o.transfer ?? {}) },
-    scheduling: { ...d.scheduling, ...(o.scheduling ?? {}) },
+    scheduling: { ...d.scheduling, ...sch,
+      ai_hours: sch.ai_hours && typeof sch.ai_hours === "object" ? week(sch.ai_hours) : d.scheduling.ai_hours,
+      founder_hours: sch.founder_hours && typeof sch.founder_hours === "object" ? week(sch.founder_hours) : d.scheduling.founder_hours },
     outbound: { ...d.outbound, ...(o.outbound ?? {}) },
   };
 }
@@ -349,4 +380,16 @@ export function isOfferableSlot(c: VoiceConfig, at: Date, startsAt: string): boo
   const local = localParts(new Date(t), c.timezone);
   const slots = candidateSlots(c, at, [], { fromDate: local.date, limit: 200 });
   return slots.some((s) => Date.parse(s.startsAt) === t);
+}
+
+
+/**
+ * The rules one calendar's slots follow: its own windows (falling back to business hours when none are set), 30-minute
+ * appointments, and its own notice period. candidateSlots / isOfferableSlot take this view.
+ */
+export function calendarView(c: VoiceConfig, calendar: "ai_follow_up" | "founder_callback"): VoiceConfig {
+  const own = calendar === "ai_follow_up" ? c.scheduling.ai_hours : c.scheduling.founder_hours;
+  const hasOwn = WEEKDAYS.some((d) => own[d].length > 0);
+  return { ...c, hours: hasOwn ? own : c.hours, scheduling: { ...c.scheduling, duration_minutes: APPOINTMENT_MINUTES,
+    min_notice_hours: calendar === "ai_follow_up" ? c.scheduling.ai_min_notice_minutes / 60 : c.scheduling.min_notice_hours } };
 }
