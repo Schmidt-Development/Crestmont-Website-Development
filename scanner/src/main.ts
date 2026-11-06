@@ -11,7 +11,14 @@
 //
 // Environment: PLATFORM_URL (https origin), FILE_SCANNER_SECRET, SCANNER_ID (default node1-clamav), CLAMD_HOST
 // (clamd), CLAMD_PORT (3310), POLL_SECONDS (60), HEARTBEAT_SECONDS (300), BATCH (10), MAX_BYTES (26214400),
-// REQUEST_TIMEOUT_MS (60000), CLAMD_TIMEOUT_MS (120000), HEALTH_PORT (8790; 0 = off; listens on 127.0.0.1 only).
+// REQUEST_TIMEOUT_MS (60000), CLAMD_TIMEOUT_MS (120000), HEALTH_PORT (8790; 0 = off; listens on 127.0.0.1 only),
+// CLAMD_MAX_FILE_SIZE (31457280 = 30M) and CLAMD_MAX_SCAN_SIZE (125829120 = 120M).
+//
+// Those last two must equal clamd's own MaxFileSize and MaxScanSize, which scanner/docker-compose.yml sets to 30M and
+// 120M and passes in explicitly so the two cannot drift. They are the scanner's only way to know what the daemon will
+// NOT examine: clamd skips an archive member larger than MaxFileSize and still answers "OK", so an archive declaring
+// more expansion than this is reported `failed` instead of taking that "OK" at face value. scanner/src/archive.ts
+// has the measurements.
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
@@ -38,6 +45,10 @@ export function settings(env: Record<string, string | undefined>): Settings {
     pollMs: n("POLL_SECONDS", 60, 5, 3600) * 1000, heartbeatMs: n("HEARTBEAT_SECONDS", 300, 30, 1500) * 1000,
     requestTimeoutMs: n("REQUEST_TIMEOUT_MS", 60_000, 1000, 600_000), healthPort: n("HEALTH_PORT", 8790, 0, 65535),
     clamd: { host: env.CLAMD_HOST || "clamd", port: n("CLAMD_PORT", 3310, 1, 65535), timeoutMs: n("CLAMD_TIMEOUT_MS", 120_000, 1000, 600_000) },
+    daemonLimits: {
+      maxFileSizeBytes: n("CLAMD_MAX_FILE_SIZE", 30 * 1024 * 1024, 1024, 1024 * 1024 * 1024),
+      maxScanSizeBytes: n("CLAMD_MAX_SCAN_SIZE", 120 * 1024 * 1024, 1024, 4 * 1024 * 1024 * 1024),
+    },
   };
 }
 

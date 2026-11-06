@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36" width="36" height="36" role="img" aria-label="Riverbend Tool Library">
+  <rect width="36" height="36" rx="4" fill="#9C4722" />
+  <path d="M8 26 L20 9 L23 11 L11 28 Z" fill="#F6EDE2" />
+  <circle cx="26" cy="24" r="5" fill="none" stroke="#F6EDE2" stroke-width="2.5" />
+</svg>

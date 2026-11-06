@@ -20,8 +20,12 @@
     }
   },
   "include": ["src", "test", "windows/*.ts", "ci/*.ts"],
-  // The imported-frontend fixture is a React/Vite project with its own tsconfig, toolchain and dependencies.
-  // It is test DATA -- the thing the import pipeline consumes -- not runner code, and it is compiled by Vite
-  // inside the sandbox, never by this typecheck.
-  "exclude": ["test/fixtures/summit-haul-frontend", "test/fixtures/summit-haul-integration"]
+  // The imported-frontend fixtures are React/Vite projects with their own tsconfig, toolchain and dependencies.
+  // They are test DATA -- the thing the import pipeline consumes -- not runner code, and each is compiled by Vite
+  // inside the sandbox against its own tsconfig, never by this typecheck.
+  //
+  // Patterns rather than a list of names: a fourth fixture would otherwise break the runner's typecheck the moment
+  // it was committed, with an error ("cannot use JSX unless the '--jsx' flag is provided") that says nothing about
+  // why a frontend fixture is being compiled as runner code at all.
+  "exclude": ["test/fixtures/*-frontend", "test/fixtures/*-integration"]
 }

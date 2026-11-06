@@ -15,7 +15,7 @@
 //             → bounded repair cycles while they make measurable progress
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Workspace } from "../workspace.ts";
 import type { JobSandbox } from "../sandbox.ts";
@@ -79,6 +79,45 @@ export interface DesignLockedResult {
   problems: string[];
   /** Everything a person needs to see on the dashboard, in words. */
   summary: string;
+}
+
+/**
+ * A snapshot of the project's own files: relative path -> size and modification time.
+ *
+ * `changedFiles` in the cycle record used to be the literal 0. The build record therefore told whoever read it
+ * that a cycle had changed nothing even when Model B had just written a server and nine endpoints. Nothing
+ * BEHAVED wrongly — the repair loop's `progressed` is computed from the violation counts, not from this — but the
+ * evidence a person reads to decide what happened said something untrue.
+ *
+ * Deliberately not `git status`: this path runs with a workspace that may have no repository, and a count that
+ * silently reads 0 whenever git is absent is the defect this replaces rather than a fix for it.
+ */
+function fileSnapshot(root: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const skip = /^(node_modules|dist|build|\.git|\.crestmont|\.vite|\.cache)$/;
+  const walk = (dir: string, rel: string): void => {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (skip.test(e.name)) continue;
+      const abs = path.join(dir, e.name);
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(abs, r);
+      else if (e.isFile()) {
+        try { const st = statSync(abs); out.set(r, `${st.size}:${st.mtimeMs}`); } catch { /* vanished mid-walk */ }
+      }
+    }
+  };
+  walk(root, "");
+  return out;
+}
+
+/** Files added, removed or rewritten between two snapshots. */
+function countChanged(before: Map<string, string>, after: Map<string, string>): number {
+  let n = 0;
+  for (const [p, sig] of after) if (before.get(p) !== sig) n++;
+  for (const p of before.keys()) if (!after.has(p)) n++;
+  return n;
 }
 
 const sha256 = (b: Uint8Array): string => createHash("sha256").update(b).digest("hex");
@@ -214,6 +253,7 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
     const intent: CycleRecord["intent"] = cycle === 1 ? "integration" : "repair";
     note(`${intent} cycle ${cycle}`);
 
+    const before = fileSnapshot(d.ws.repo);
     const run = await d.provider.run({
       phase: intent === "integration" ? "build" : "repair",
       prompt, maxTurns: d.maxTurns, maxBudgetUsd: 0, maxWallMs: d.maxWallMs,
@@ -222,6 +262,8 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
       memory: () => integrationMemory(report, baseline),
     });
     if (run.status === "stopped") { problems.push(`${intent} cycle ${cycle} was stopped: ${run.stoppedBy ?? "unknown"}`); break; }
+    // Counted here, before the rebuild and the gates, so it reflects what the MODEL did and not what verifying it did.
+    const changedFiles = countChanged(before, fileSnapshot(d.ws.repo));
 
     // Model B does NOT get to say whether its own work is done. Each of these runs independently.
     const conf = checkConformance({ repo: d.ws.repo, manifest, baselinePackage: approvedPackage });
@@ -239,7 +281,7 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
       cycle, intent,
       conformance: { ok: conf.ok, violations },
       functional, visual,
-      changedFiles: 0,
+      changedFiles,
       progressed: cycle === 1 ? true : progressed,
     });
 

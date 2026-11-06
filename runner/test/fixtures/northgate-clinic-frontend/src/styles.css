@@ -1,0 +1,317 @@
+/* Northgate Dental — the approved design.
+ *
+ * Deliberately a different design system from summit-haul-frontend: a cool clinical teal against warm paper, a
+ * different type scale, different radii and a different grid. Two fixtures that merely re-skinned one another would
+ * not test the design lock, because any baseline comparison would be measuring the same shapes twice.
+ *
+ * System fonts and inline SVG only. A fixture that reaches the network for a font cannot be built in a sandbox with
+ * --network none, and the baseline screenshots would differ between machines depending on what loaded.
+ */
+
+:root {
+  --ink: #10242a;
+  --ink-soft: #46606a;
+  --paper: #fbf8f3;
+  --card: #ffffff;
+  --line: #dfe5e3;
+  --teal: #0e5a6b;
+  --teal-dark: #0a4451;
+  --teal-wash: #e8f1f2;
+  --coral: #c2563f;
+  --ok: #1d6a4f;
+  --warn: #8a5a12;
+
+  --radius: 14px;
+  --radius-sm: 8px;
+  --shell: 1120px;
+  --gap: 28px;
+
+  --step-0: 1rem;
+  --step-1: 1.1875rem;
+  --step-2: 1.5rem;
+  --step-3: 2rem;
+  --step-4: 2.75rem;
+  --step-5: 3.5rem;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: var(--step-0)/1.65 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+h1, h2, h3 { line-height: 1.15; margin: 0 0 0.5em; letter-spacing: -0.015em; }
+h1 { font-size: var(--step-4); }
+h2 { font-size: var(--step-3); }
+h3 { font-size: var(--step-1); }
+p { margin: 0 0 1em; }
+a { color: var(--teal-dark); }
+
+.shell {
+  width: 100%;
+  max-width: var(--shell);
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ── header ───────────────────────────────────────────────────────────────── */
+
+.site-header {
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.site-header .shell {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  min-height: 76px;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--step-1);
+  font-weight: 650;
+  color: var(--ink);
+  text-decoration: none;
+  letter-spacing: -0.01em;
+}
+
+.site-nav { margin-left: auto; }
+
+.site-nav ul {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.site-nav a {
+  display: block;
+  padding: 9px 13px;
+  border-radius: var(--radius-sm);
+  color: var(--ink-soft);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.site-nav a:hover { background: var(--teal-wash); color: var(--teal-dark); }
+.site-nav a[aria-current="page"] { color: var(--teal-dark); background: var(--teal-wash); }
+
+.nav-toggle {
+  display: none;
+  margin-left: auto;
+  padding: 9px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+/* ── buttons and forms ────────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 13px 22px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--teal);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.btn:hover { background: var(--teal-dark); }
+.btn[disabled] { opacity: 0.55; cursor: not-allowed; }
+.btn.ghost { background: transparent; color: var(--teal-dark); border-color: var(--line); }
+.btn.ghost:hover { background: var(--teal-wash); }
+.btn.danger { background: transparent; color: var(--coral); border-color: #e7cdc6; }
+.btn.danger:hover { background: #fbefec; }
+.btn.small { padding: 8px 14px; font-size: 0.9375rem; }
+
+.field { display: block; margin-bottom: 18px; }
+.field > span { display: block; font-weight: 550; margin-bottom: 6px; }
+.field .hint { display: block; font-weight: 400; color: var(--ink-soft); font-size: 0.9375rem; margin-top: 4px; }
+
+input, select, textarea {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+}
+
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 1px;
+  border-color: var(--teal);
+}
+
+textarea { min-height: 120px; resize: vertical; }
+
+.field.invalid input, .field.invalid select, .field.invalid textarea { border-color: var(--coral); }
+.error { color: var(--coral); font-size: 0.9375rem; margin-top: 6px; }
+
+.row { display: grid; gap: 18px; grid-template-columns: 1fr 1fr; }
+
+/* ── surfaces ─────────────────────────────────────────────────────────────── */
+
+.section { padding: 72px 0; }
+.section.tight { padding: 48px 0; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 28px;
+}
+
+.panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.panel-head {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.panel-head h2 { margin: 0; font-size: var(--step-2); }
+
+.hero {
+  background: linear-gradient(180deg, var(--teal-wash), var(--paper));
+  border-bottom: 1px solid var(--line);
+  padding: 84px 0;
+}
+
+.hero .shell { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 48px; align-items: center; }
+.hero h1 { font-size: var(--step-5); }
+
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.8125rem;
+  font-weight: 650;
+  color: var(--teal-dark);
+  margin: 0 0 12px;
+}
+
+.lede { font-size: var(--step-1); color: var(--ink-soft); max-width: 46ch; }
+
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--gap); }
+.grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--gap); }
+
+.form-narrow { max-width: 560px; margin: 0 auto; }
+
+/* ── tables ───────────────────────────────────────────────────────────────── */
+
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 14px 24px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { font-size: 0.8125rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-soft); }
+tbody tr:last-child td { border-bottom: 0; }
+
+.pill {
+  display: inline-block;
+  padding: 4px 11px;
+  border-radius: 999px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.pill.confirmed { background: #e4f1ea; color: var(--ok); }
+.pill.requested { background: #fdf2e0; color: var(--warn); }
+.pill.cancelled { background: #f6eceb; color: var(--coral); }
+
+.empty { padding: 48px 24px; text-align: center; color: var(--ink-soft); }
+
+/* A label a screen reader announces and sighted users do not see. Not display:none, which hides it from both. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.notice {
+  padding: 16px 20px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--teal-wash);
+  margin-bottom: 24px;
+}
+
+.notice.problem { background: #fbefec; border-color: #e7cdc6; color: #7d2f1e; }
+.notice.good { background: #e4f1ea; border-color: #bcdcc9; color: #14503c; }
+
+.toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
+.toolbar input, .toolbar select { width: auto; min-width: 200px; }
+.toolbar .spacer { margin-left: auto; }
+
+/* ── footer ───────────────────────────────────────────────────────────────── */
+
+.site-footer {
+  background: var(--ink);
+  color: #d7e3e5;
+  margin-top: 80px;
+  padding: 56px 0 28px;
+}
+
+.site-footer .shell { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: var(--gap); }
+.site-footer .brand { color: #fff; }
+.site-footer h3 { color: #fff; font-size: var(--step-0); text-transform: uppercase; letter-spacing: 0.07em; }
+.site-footer ul { list-style: none; margin: 0; padding: 0; }
+.site-footer li { margin-bottom: 8px; }
+.site-footer a { color: #d7e3e5; text-decoration: none; }
+.site-footer a:hover { color: #fff; text-decoration: underline; }
+.site-footer .legal { margin-top: 36px; padding-top: 20px; border-top: 1px solid rgba(255, 255, 255, 0.14); font-size: 0.9375rem; color: rgba(215, 227, 229, 0.75); }
+
+/* ── narrow screens ───────────────────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+  .hero { padding: 56px 0; }
+  .hero .shell, .grid-3, .grid-2, .row, .site-footer .shell { grid-template-columns: 1fr; }
+  .hero h1 { font-size: var(--step-3); }
+  h1 { font-size: var(--step-3); }
+  .nav-toggle { display: inline-flex; }
+  .site-nav { display: none; width: 100%; margin: 0; }
+  .site-nav.is-open { display: block; padding-bottom: 16px; }
+  .site-nav ul { flex-direction: column; align-items: stretch; gap: 2px; }
+  .site-header .shell { flex-wrap: wrap; padding-top: 14px; padding-bottom: 14px; }
+  .section { padding: 48px 0; }
+  th, td { padding: 12px 16px; }
+  /* A table of appointments does not fit a phone; it scrolls rather than reflowing into something unreadable. */
+  .panel .scroller { overflow-x: auto; }
+  .panel .scroller table { min-width: 620px; }
+}

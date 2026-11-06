@@ -13,6 +13,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createCustomer, createStaff, TEST_PASSWORD } from "./support/app.ts";
 import * as DL from "../src/services/design-locked.ts";
+import * as MS from "../src/services/malware-scan.ts";
 import { newId, nowIso } from "../src/lib/db.ts";
 import { sha256Hex } from "../src/lib/crypto.ts";
 import type { Env } from "../src/app/context.ts";
@@ -753,4 +754,74 @@ test("[DLR-04] an anonymous visitor reaches none of it", async () => {
       assert.ok([302, 303, 401, 403, 404].includes(r.status), `${p} is not public (${r.status})`);
     }
   } finally { t.close(); }
+});
+
+test("[DLK-12] a scan verdict reaches the artifact: clean is shown as clean, infected quarantines the project, and neither undoes a person's progress", async () => {
+  // Found by running the whole chain against a real ClamAV daemon (scripts/design-locked-e2e.ts). The scanner
+  // wrote its verdict to `files` and nothing told the frontend artifact, so a scanned artifact showed "pending" on
+  // the dashboard for ever and an infected one never entered §13's `artifact_quarantined`. Delivery was never at
+  // risk — it re-reads the live files row — but every human-facing signal was wrong.
+  const t = await createTestApp();
+  const staff = await createStaff(t.db, "owner", "dlk12@crestmont.test");
+  const org = (await createCustomer(t.db, "dlk12-customer@example.com")).organizationId;
+
+  /** A file row plus an artifact pointing at it, as the staff upload route creates them. */
+  const upload = async (projectId: string) => {
+    const fileId = newId("file");
+    const at = nowIso();
+    const sha = await sha256Hex(`bytes-${fileId}`);
+    await t.db.prepare(
+      `INSERT INTO files (id, organization_id, project_id, filename, r2_key, content_type, size_bytes, sha256, scan_status, uploaded_by, created_at)
+       VALUES (?, ?, ?, 'frontend.zip', ?, 'application/zip', 2048, ?, 'pending', ?, ?)`,
+    ).bind(fileId, org, projectId, `frontend-artifacts/${fileId}.zip`, sha, staff.id, at).run();
+    const artifact = await DL.recordArtifact(t.db, {
+      projectId, organizationId: org, source: "upload", fileId, sha256: sha, sizeBytes: 2048, uploadedBy: staff.id, scanStatus: "pending",
+    });
+    return { fileId, artifact, sha };
+  };
+
+  const verdict = async (fileId: string, sha: string, v: "clean" | "infected" | "failed", signature: string | null = null) =>
+    MS.recordScanResult(t.db, { fileId, verdict: v, engine: "ClamAV 1.5.1", scannedSha256: sha, signature, scannedAt: nowIso() });
+
+  try {
+    // ── clean ───────────────────────────────────────────────────────────────────────────────────────────────────
+    const cleanProject = await project(t.db, org, "Clean upload");
+    const clean = await upload(cleanProject);
+    assert.equal((await DL.getArtifact(t.db, clean.artifact.id))!.scan_status, "pending", "it starts pending");
+
+    await verdict(clean.fileId, clean.sha, "clean");
+    assert.equal((await DL.getArtifact(t.db, clean.artifact.id))!.scan_status, "clean", "the dashboard now shows what the scanner found");
+    assert.notEqual((await DL.frontendState(t.db, cleanProject)).state, "artifact_quarantined", "a clean verdict quarantines nothing");
+
+    // ── infected ────────────────────────────────────────────────────────────────────────────────────────────────
+    const badProject = await project(t.db, org, "Infected upload");
+    const bad = await upload(badProject);
+    await verdict(bad.fileId, bad.sha, "infected", "Win.Test.EICAR_HDB-1");
+
+    const quarantined = (await DL.getArtifact(t.db, bad.artifact.id))!;
+    assert.equal(quarantined.scan_status, "infected");
+    assert.equal(quarantined.status, "quarantined", "the artifact itself is quarantined, not merely flagged");
+    assert.equal((await DL.frontendState(t.db, badProject)).state, "artifact_quarantined", "§13's quarantine state is actually entered");
+    assert.match(quarantined.problems_json, /infected/i, "the reason is recorded for whoever reads it");
+
+    // ── a re-scan must not undo a person's approval ─────────────────────────────────────────────────────────────
+    // The regression this guards: using recordVerdict for every verdict would have reset an imported, approved
+    // artifact to "validating" the next time a routine re-scan came back clean.
+    const liveProject = await project(t.db, org, "Approved and re-scanned");
+    const live = await upload(liveProject);
+    await verdict(live.fileId, live.sha, "clean");
+    await DL.recordVerdict(t.db, live.artifact.id, { status: "imported", framework: "vite", archiveRoot: "site" });
+    const draft = await DL.recordBaseline(t.db, live.artifact.id, baselineInput());
+    await DL.approveBaseline(t.db, draft.id, { approvedBy: staff.id });
+    assert.equal((await DL.frontendState(t.db, liveProject)).state, "design_locked");
+
+    await verdict(live.fileId, live.sha, "clean");
+    assert.equal((await DL.frontendState(t.db, liveProject)).state, "design_locked", "a re-scan does not drag an approved project backwards");
+    assert.equal((await DL.getArtifact(t.db, live.artifact.id))!.status, "imported", "nor the artifact");
+
+    // An infected re-scan of an already-approved artifact DOES quarantine it: that is not progress being undone,
+    // that is new information about the same bytes.
+    await verdict(live.fileId, live.sha, "infected", "Win.Test.EICAR_HDB-1");
+    assert.equal((await DL.frontendState(t.db, liveProject)).state, "artifact_quarantined");
+  } finally { await t.close(); }
 });

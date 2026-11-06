@@ -1,0 +1,111 @@
+name: Scanner ClamAV certification
+
+# SEC-003 / F-02. Runs the scanner's lifecycle against a REAL ClamAV daemon, with the same limits
+# scanner/docker-compose.yml configures on Node 1.
+#
+# WHY THIS IS A WORKFLOW OF ITS OWN, AND NOT PART OF CI. tests/scanner.test.ts proves the scanner's logic against a
+# stand-in clamd that speaks the real z-protocol, and that is the right thing to run on every pull request: it is
+# fast and it is about our code. But a stand-in can only prove the MAPPING of a verdict. It cannot prove what real
+# ClamAV actually says, and the difference was not academic:
+#
+#   measured 2026-11-06 against clamav/clamav:1.5.1, with AlertExceedsMax=yes and MaxFileSize=30M
+#     a ZIP holding one 40 MB file  (40 KB on the wire)  -> stream: OK
+#     a ZIP holding one 200 MB file (200 KB on the wire) -> stream: OK
+#     a ZIP with the encrypted flag                      -> Heuristics.Encrypted.Zip FOUND
+#
+# A member larger than MaxFileSize is skipped and the skip is not reported, so a decompression bomb came back clean —
+# and a file labelled clean is one the design-locked builder will extract and build. The encrypted case worked; the
+# size case did not. scanner/src/archive.ts now decides that question on the scanner's side instead of trusting the
+# daemon to confess, and these tests are what noticed and what keeps it honest.
+#
+# So this runs weekly rather than per pull request: the behaviour it guards belongs to ClamAV and its signature feed,
+# which change on their own schedule, not to our commits. The clamav image is ~1 GB and needs several minutes to load
+# signatures, which is the other reason it is not on the pull-request path.
+#
+# Uses NO secret: an ephemeral database and files created by the test. EICAR is the standard harmless antivirus test
+# signature, assembled at run time so the repository never holds the string verbatim.
+on:
+  schedule:
+    - cron: "41 7 * * 1"   # Mondays 07:41 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scanner-clamav-certification
+  cancel-in-progress: true
+
+jobs:
+  certify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      clamd:
+        # The same image, by the same digest, as scanner/docker-compose.yml. If that pin changes and this one does
+        # not, this job certifies something Node 1 is not running.
+        image: clamav/clamav:1.5.1@sha256:b32e587feae9f156d660704beeec4ee69c79fcf5af092bdc0f2f93892a29b553
+        ports: ["3310:3310"]
+        env:
+          CLAMD_CONF_StreamMaxLength: 30M
+          CLAMD_CONF_MaxFileSize: 30M
+          CLAMD_CONF_MaxScanSize: 120M
+          CLAMD_CONF_AlertExceedsMax: "yes"
+          CLAMD_CONF_AlertEncryptedArchive: "yes"
+          CLAMD_CONF_MaxThreads: "2"
+        # Signature loading takes minutes on a cold container; the job must not start scanning before PING answers.
+        options: >-
+          --health-cmd "clamdcheck.sh"
+          --health-interval 30s
+          --health-timeout 15s
+          --health-retries 20
+          --health-start-period 300s
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+
+      - name: Record which engine and signature set certified this run
+        run: |
+          # Not decoration: a verdict is only as good as the engine that gave it, and a signature set that silently
+          # stopped updating is exactly the failure this job exists to make visible. VERSION over clamd's own
+          # z-protocol, so this also proves the port is really a clamd and not something else listening.
+          node -e "const net=require('net');const s=net.connect(3310,'127.0.0.1',()=>s.write('zVERSION\0'));let b='';s.setTimeout(25000,()=>{console.error('no answer');process.exit(1)});s.on('data',d=>{b+=d;if(b.includes('\0')){console.log(b.replace(/\0/g,'').trim());s.destroy();}});s.on('error',e=>{console.error(e.message);process.exit(1)});" > engine.txt
+          cat engine.txt
+          grep -Eq '^ClamAV [0-9]' engine.txt || { echo "::error title=No ClamAV::the daemon did not identify itself as ClamAV; nothing was certified"; exit 1; }
+          {
+            echo "### Scanner certification"
+            echo "- engine: \`$(cat engine.txt)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install dev tooling
+        run: npm ci --ignore-scripts
+
+      - name: Typecheck
+        run: npx tsc -p tsconfig.json --noEmit
+
+      - name: Scanner lifecycle against real ClamAV
+        env:
+          CLAMD_TEST_PORT: "3310"
+        run: |
+          # tests/scanner.test.ts honours CLAMD_TEST_PORT for its lifecycle test, so the same suite CI runs against a
+          # stand-in runs here against the real daemon. scanner-clamav.test.ts is skipped entirely without it.
+          node --no-warnings --test tests/scanner-clamav.test.ts tests/scanner.test.ts tests/scanner-archive.test.ts tests/scanner-isolation.test.ts tests/malware-scan-transport.test.ts
+
+      - name: The certification actually ran (a skipped suite is not a pass)
+        env:
+          CLAMD_TEST_PORT: "3310"
+        run: |
+          # Without this, a mistake that unset CLAMD_TEST_PORT would skip every real-daemon test and the job would go
+          # green having certified nothing at all.
+          out=$(node --no-warnings --test tests/scanner-clamav.test.ts 2>&1 | tail -20)
+          printf '%s\n' "$out"
+          pass=$(printf '%s' "$out" | sed -nE 's/^. pass ([0-9]+)$/\1/p')
+          skip=$(printf '%s' "$out" | sed -nE 's/^. skipped ([0-9]+)$/\1/p')
+          [ "${pass:-0}" -ge 5 ] || { echo "::error title=Nothing certified::expected at least 5 real-ClamAV tests to pass, got ${pass:-0}"; exit 1; }
+          [ "${skip:-0}" -eq 0 ] || { echo "::error title=Tests skipped::${skip} real-ClamAV tests were skipped; the daemon was not reached"; exit 1; }
+          echo "- real-ClamAV tests passed: $pass (0 skipped)" >> "$GITHUB_STEP_SUMMARY"

@@ -197,6 +197,53 @@ export async function recordVerdict(db: Db, id: string, v: {
   return (await getArtifact(db, id))!;
 }
 
+/**
+ * A scan verdict has landed on a stored file. Tell any frontend artifact that file belongs to.
+ *
+ * WHY THIS EXISTS. `frontend_artifacts.scan_status` was written once, at upload, as 'pending', and nothing ever
+ * updated it: `recordVerdict` was reached only from the import path and from tests. Two consequences, found by
+ * running the whole chain against a real ClamAV daemon rather than a stand-in:
+ *
+ *   · An artifact the scanner had confirmed clean still showed "pending" on the design-locked dashboard. Staff
+ *     reading that would conclude scanning was not working, which is the opposite of the truth.
+ *   · An INFECTED artifact never moved the project to `artifact_quarantined`. That state is specified in §13 and
+ *     DLK-02 covers it, but nothing in the running system ever entered it, so the project sat in
+ *     `validating_artifact` with no explanation of why it would never progress.
+ *
+ * Neither was exploitable: `deliverApprovedArtifact` re-reads the live `files.scan_status` at delivery, so an
+ * unclean artifact was always refused a build. What was broken was everyone's view of it.
+ *
+ * Only an infected verdict changes the artifact's own status and the project's state. A clean or failed verdict
+ * touches the scan column alone — a routine re-scan coming back clean must not drag an artifact that is already
+ * imported and awaiting a person's approval back to "validating".
+ */
+export async function applyScanVerdict(
+  db: Db,
+  fileId: string,
+  verdict: "clean" | "infected" | "failed",
+  o: { engine?: string | null } = {},
+): Promise<{ artifactIds: string[] }> {
+  if (!fileId) return { artifactIds: [] };
+  const rows = (await db.prepare(`SELECT id FROM frontend_artifacts WHERE file_id = ?`).bind(fileId)
+    .all<{ id: string }>()).results;
+  const artifactIds: string[] = [];
+
+  for (const r of rows) {
+    if (verdict === "infected") {
+      await recordVerdict(db, r.id, {
+        status: "quarantined",
+        scanStatus: "infected",
+        problems: [`the malware scanner reported this artifact infected${o.engine ? ` (${o.engine})` : ""}`],
+      });
+    } else {
+      await db.prepare(`UPDATE frontend_artifacts SET scan_status = ?, updated_at = ? WHERE id = ?`)
+        .bind(verdict, nowIso(), r.id).run();
+    }
+    artifactIds.push(r.id);
+  }
+  return { artifactIds };
+}
+
 // ── baselines ───────────────────────────────────────────────────────────────────────────────────────────────
 
 export interface BaselineInput {

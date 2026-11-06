@@ -6,6 +6,8 @@
 //   clamd "<name> FOUND"                         → infected (terminal on the platform; share links revoked there)
 //   Heuristics.Limits.Exceeded / Encrypted       → failed: those bytes were NOT fully examined, so they are never
 //                                                  called clean, and an unexaminable file is not called malware either
+//   an archive declaring more expansion than       → failed, decided HERE and before streaming, because clamd skips an
+//   clamd will examine                             oversized member and still answers "OK" (scanner/src/archive.ts)
 //   clamd "... ERROR" for this file              → failed (quarantined until a later scan succeeds)
 //   clamd unreachable                            → no verdict at all: it is not the file's fault; the cycle stops and
 //                                                  the heartbeat reports the daemon down
@@ -17,11 +19,20 @@
 import { createHash } from "node:crypto";
 import { ClamdUnavailable, ping, scanBytes, version, type ClamdOptions } from "./clamd.ts";
 import { PlatformError, type Platform } from "./platform.ts";
+import { beyondDaemonLimits, DEFAULT_DAEMON_LIMITS, type DaemonLimits } from "./archive.ts";
 
 export interface ScannerConfig {
   scannerId: string; clamd: ClamdOptions; batch: number;
   /** The scanner's own ceiling; the platform's maxBytes applies too and the lower one wins. */
   maxBytes: number;
+  /**
+   * The ceilings configured on clamd itself. An archive that declares more expansion than these is reported `failed`
+   * BEFORE it is streamed, because clamd skips an oversized member and answers "OK" without saying it skipped
+   * anything. Must match the CLAMD_CONF_* values in scanner/docker-compose.yml.
+   *
+   * Omitted falls back to DEFAULT_DAEMON_LIMITS, which is those same values: the check is never silently off.
+   */
+  daemonLimits?: DaemonLimits;
 }
 
 export interface CycleReport {
@@ -107,6 +118,10 @@ export class Scanner {
           // Not a verdict: these are not the stored bytes. Try again later.
           rep.deferred++; this.defer(item.fileId); this.lastError = `bytes for ${item.fileId} did not match the recorded SHA-256`; continue;
         }
+        // Decided before streaming: clamd cannot be asked whether it skipped something, so the question is settled
+        // here, where the configured limits are known.
+        const unexaminable = beyondDaemonLimits(bytes, this.cfg.daemonLimits ?? DEFAULT_DAEMON_LIMITS);
+        if (unexaminable) { await report("failed", { detail: `not fully examined: ${unexaminable}` }); continue; }
         const v = await scanBytes(this.cfg.clamd, bytes);
         if (v.kind === "clean") await report("clean");
         else if (v.kind === "found" && UNEXAMINED.test(v.signature)) await report("failed", { detail: `not fully examined: ${v.signature}` });
