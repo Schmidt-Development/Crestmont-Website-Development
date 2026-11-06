@@ -35,13 +35,52 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Whether asking the Founder to approve a backup is warranted at all. This job names NO environment, so deciding
+  # never itself costs an approval.
+  #
+  # It used to be decided by `vars.PRODUCTION_URL != ''`, and that variable turned out to be the wrong signal: it has
+  # to be set BEFORE the first deployment, because deploy-production.yml refuses to start without it. From the moment
+  # it was set, this workflow asked the Founder every morning to approve exporting a database that did not exist yet —
+  # and then skipped, because no backup destination is configured either. The same mistake as
+  # 2026-10-30 to 11-05, when one run waited and the rest were cancelled behind it.
+  #
+  # So ask the question that was always meant: has production ever actually been deployed?
+  gate:
+    # main only: a run from another branch would execute that branch's copy.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read   # read-only, and only for the one question below
+    outputs:
+      go: ${{ steps.decide.outputs.go }}
+    steps:
+      - name: Has production ever been deployed?
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
+          DEPLOY_WORKFLOW: deploy-production.yml
+        run: |
+          if [ "$MANUAL" = "true" ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          elif ! deploys=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$DEPLOY_WORKFLOW/runs?status=success&per_page=1" --jq ".total_count") || ! printf '%s' "$deploys" | grep -Eq '^[0-9]+$'; then
+            # A failed lookup must not read as "nothing to back up". Err towards running: a backup that asks for an
+            # approval it did not need is a nuisance, a backup silently skipped is lost data.
+            echo "::warning title=Could not confirm a production deployment::The Actions API did not answer with a count, so the launch gate could not be read. Continuing to the backup rather than skipping it."
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          elif [ "$deploys" -eq 0 ]; then
+            echo "::notice title=Production backup skipped::$DEPLOY_WORKFLOW has never completed successfully, so production holds no data to export. Nothing was exported and no approval was requested. This gate opens by itself on the first successful production deployment."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
   backup:
-    # main only: a run from another branch would execute that branch's copy. Scheduled runs also wait for the REPOSITORY
-    # variable PRODUCTION_URL (set at launch; the same signal production-health-monitor.yml uses): before launch there is
-    # nothing to back up, and a job that names the `production` environment asks the Founder to approve it every day —
-    # 2026-10-30 to 11-05 left one run waiting and the rest cancelled behind it. A skipped job requests no approval.
-    # A manual run is always allowed.
-    if: github.ref == 'refs/heads/main' && (vars.PRODUCTION_URL != '' || github.event_name == 'workflow_dispatch')
+    needs: gate
+    # A skipped job requests no approval, which is the entire point of the gate above.
+    if: needs.gate.outputs.go == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: ${{ vars.BACKUP_ENVIRONMENT || 'production' }}
