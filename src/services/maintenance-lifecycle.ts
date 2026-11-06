@@ -47,7 +47,7 @@ async function customerAdmins(db: Db, organizationId: string): Promise<string[]>
 /**
  * Opens the maintenance activation for a project that has just launched. Idempotent per project (a later deployment or
  * release changes nothing). Projects without a committed plan (quote orders whose plan is set in the approved quote,
- * orders from before migration 0064) are reported to the Owner instead of guessed.
+ * orders from before migration 0084) are reported to the Owner instead of guessed.
  */
 export async function openMaintenanceActivation(db: Db, mail: LifecycleCtx | null, projectId: string, trigger: ActivationTrigger): Promise<MaintenanceActivation | null> {
   const existing = await db.prepare(`SELECT * FROM maintenance_activations WHERE project_id = ?`).bind(projectId).first<MaintenanceActivation>();

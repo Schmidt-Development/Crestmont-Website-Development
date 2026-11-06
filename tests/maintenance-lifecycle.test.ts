@@ -2,6 +2,7 @@
 // notice, never deleting data, restored on payment). TEST DATA only: Stripe events are SIGNED FIXTURES and email goes to
 // the development outbox.
 import { test } from "node:test";
+import { MAINTENANCE_PLANS } from "../src/domain/catalog.ts";
 import assert from "node:assert/strict";
 import { createTestApp, createCustomer, createStaff, lastEmail, type TestClient } from "./support/app.ts";
 import { hmacSha256Hex } from "../src/lib/crypto.ts";
@@ -46,7 +47,23 @@ test("[PAY-004] FD-27: before launch a package customer cannot start the mainten
   assert.equal((await one<{ n: number }>(t.db, `SELECT COUNT(*) n FROM maintenance_activations`)).n, 0);
 });
 
+test("[PAY-004] FD-27 / BLK-010: with the Founder-approved plans, launch opens the activation as due for the committed plan", async () => {
+  const t = await createTestApp();
+  const { projectId } = await paidPackage(t.db, "executive");
+  const a = await openMaintenanceActivation(t.db, null, projectId, "deployment_recorded");
+  assert.equal(a!.plan_id, "executive");
+  assert.equal(a!.status, "due", "BLK-010 approved the entitlements (2026-11-04), so the plan is billable at launch");
+  assert.equal((await one<{ n: number }>(t.db, `SELECT COUNT(*) n FROM subscriptions`)).n, 0, "the customer starts it; nothing is created for them");
+});
+
 test("[PAY-004] FD-27 / FD-05: launch opens one activation for the committed plan; unverified plan benefits are never billed and the Owner is told", async () => {
+  // The plans are approved since BLK-010 (23f56e1). This path still exists for a plan whose entitlements are
+  // ever withdrawn, so it is exercised the way main's BLK-010 tests do: the catalogue marked unapproved for
+  // the duration of the test only.
+  const plan = MAINTENANCE_PLANS.executive as { entitlementsStatus: string };
+  const saved = plan.entitlementsStatus;
+  plan.entitlementsStatus = "proposed_pending_founder_approval";
+  try {
   const t = await createTestApp();
   const owner = await createStaff(t.db, "owner");
   const { cu, projectId } = await paidPackage(t.db, "executive");
@@ -61,6 +78,7 @@ test("[PAY-004] FD-27 / FD-05: launch opens one activation for the committed pla
   // Once launched, the customer may choose the committed plan or higher; never lower.
   assert.equal(await maintenanceCheckoutBlock(t.db, cu.organizationId, "executive"), null);
   assert.match((await maintenanceCheckoutBlock(t.db, cu.organizationId, "professional"))!, /requires the Executive plan or higher/);
+  } finally { plan.entitlementsStatus = saved; }
 });
 
 test("[PAY-004] FD-27: an active subscription for the committed plan (or higher) completes the activation; a lower plan does not", async () => {

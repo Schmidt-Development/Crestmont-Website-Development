@@ -2,7 +2,7 @@
 --  * maintenance_activations: the recurring maintenance subscription starts at approved launch, never at purchase. When
 --    a project's site first goes live (a recorded customer deployment or a verified live release, both of which require
 --    the customer's final launch approval), one activation is opened for the plan committed on the order
---    (orders.maintenance_plan_id, migration 0064). Status:
+--    (orders.maintenance_plan_id, migration 0084). Status:
 --      due                         plan sellable; the customer starts the subscription for that plan (or a higher one)
 --      awaiting_plan_verification  the plan's benefits are not yet operationally verified (FD-05, clarification 8),
 --                                  so nothing can be billed; the Owner sees it

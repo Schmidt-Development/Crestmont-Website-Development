@@ -11,6 +11,7 @@
 // Provider truth (docs/NON-AI-CERTIFICATION.md): Stripe and Resend are exercised through their real adapters' code
 // paths with fixtures — this proves the platform's side, not a live provider connection.
 import { test } from "node:test";
+import { openMaintenanceActivation } from "../src/services/maintenance-lifecycle.ts";
 import assert from "node:assert/strict";
 import { createTestApp, createCustomer, createStaff, lastEmail, linkFrom, MemoryStorage, TEST_PASSWORD, type TestClient } from "./support/app.ts";
 import { FakePayments } from "./support/security-world.ts";
@@ -63,9 +64,17 @@ test("phase 1 certification: the complete non-AI customer journey, with its fail
   // ── 3. Package selection + agreements: checkout refuses without acceptance, then records it against the order.
   const checkoutPage = await (await c.get("/checkout/business")).text();
   assert.match(checkoutPage, /\$2,499/, "the Business package at its approved price");
+  // FD-30: a customer administrator must enrol an authenticator before paying.
+  const gate = await c.post("/checkout/business", { terms: "1", maintenance_plan: "professional" });
+  assert.equal(gate.status, 303);
+  assert.match(gate.headers.get("location") ?? "", /^\/mfa\/setup/, "no payment before two-factor enrolment");
+  assert.equal(await count(t, `SELECT COUNT(*) AS n FROM orders WHERE organization_id = ?`, org.id), 0);
+  await c.enrolMfa("/checkout/business");
   assert.equal((await c.post("/checkout/business", {})).status, 422, "no order without accepting the agreements");
   assert.equal(await count(t, `SELECT COUNT(*) AS n FROM orders WHERE organization_id = ?`, org.id), 0);
-  const go = await c.post("/checkout/business", { terms: "1" });
+  // FD-26: a package is bought with its committed maintenance plan (Business: Professional or higher).
+  assert.equal((await c.post("/checkout/business", { terms: "1" })).status, 422, "no order without a maintenance plan");
+  const go = await c.post("/checkout/business", { terms: "1", maintenance_plan: "professional" });
   assert.equal(go.status, 303);
   assert.match(go.headers.get("location") ?? "", /^https:\/\/checkout\.stripe\.com\//, "the customer is sent to Stripe Checkout (test mode)");
   const order = await one<{ id: string; total_cents: number }>(t, `SELECT id, total_cents FROM orders WHERE organization_id = ?`, org.id);
@@ -151,7 +160,17 @@ test("phase 1 certification: the complete non-AI customer journey, with its fail
   assert.deepEqual(plans.map((p) => p.entitlementsStatus), ["approved", "approved", "approved"]);
   const hosting = await (await t.client().get("/hosting-maintenance")).text();
   for (const price of ["$99", "$199", "$299"]) assert.ok(hosting.includes(price), `maintenance page shows ${price}`);
-  const plan = plans[0];
+  // FD-27: maintenance billing starts at the approved launch, never before it.
+  const plan = plans.find((p) => p.id === "professional")!;
+  const early = await c.post(`/checkout/maintenance/${plan.id}`, { terms: "1" });
+  assert.equal(early.status, 409, "before launch the maintenance subscription cannot start");
+  assert.match(await early.text(), /starts when you approve and launch/);
+  assert.equal(await count(t, `SELECT COUNT(*) AS n FROM subscriptions WHERE organization_id = ?`, org.id), 0, "nothing billed before launch");
+  // The launch itself (final approval → recorded deployment) is certified by the browser journey; here it is
+  // recorded through the same service that path calls, so the activation exists for the committed plan.
+  const act = await openMaintenanceActivation(t.db, null, pid, "deployment_recorded");
+  assert.equal(act?.plan_id, "professional");
+  assert.equal(act?.status, "due");
   const mPage = await c.get(`/checkout/maintenance/${plan.id}`);
   assert.equal(mPage.status, 200);
   assert.match(await mPage.text(), /\/month/);
