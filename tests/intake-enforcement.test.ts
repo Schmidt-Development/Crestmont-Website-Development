@@ -178,7 +178,7 @@ test("[PAY-006] Stripe-hosted quote invoices: no payable deposit is issued befor
   assert.equal(t.stripeCalls.length, sends);
   const custPage = await (await b.c.get(`/portal/billing/invoices/${q2.invoiceId}`)).text();
   assert.match(custPage, /data-testid="invoice-intake-required"/);
-  assert.ok(!custPage.includes(hostedUrl), "the hosted link is not offered before the intake");
+  assert.equal(custPage.split(hostedUrl).length, 1, "the hosted link is not offered before the intake");
   assert.deepEqual(await snapshot(), before);
   // Once the customer completes that intake it leaves the list and the hosted link is offered again.
   await completeQuoteIntake(b.c, q2.invoiceId);
