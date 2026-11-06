@@ -25,7 +25,7 @@ import { can } from "../domain/authz.ts";
 import { audit } from "../services/security.ts";
 import { lineDiff } from "../services/voice.ts";
 import * as reg from "../services/sales-opt/registry.ts";
-import { computeMetrics, topFindings } from "../services/sales-opt/metrics.ts";
+import { computeMetrics, topFindings, versionBreakdown, type VersionRowMetrics } from "../services/sales-opt/metrics.ts";
 import { deploy, productionGate, rollback, rollbackCandidate, verifyTarget, adoptLivePrompt, PRODUCTION_FLAG } from "../services/sales-opt/deploy.ts";
 import { startEvaluation, maybeQueueProposal } from "../services/sales-opt/jobs.ts";
 import { proposeExperiment, decideExperimentStatus, experimentReport, runSalesOpt } from "../services/sales-opt/monitor.ts";
@@ -48,6 +48,17 @@ async function guarded(ctx: AppContext, fn: () => Promise<Response>, versionId?:
     throw e;
   }
 }
+
+/** A rate is shown only when its denominator reaches the Founder's "minimum connected calls before judging". */
+const rateOrNoData = (num: number, den: number, min: number, digits = 1): string =>
+  den >= min ? `${((num / den) * 100).toFixed(digits)}% (${num}/${den})` : `Not enough data (${den} of ${min} needed)`;
+const EPOCH = "1970-01-01T00:00:00.000Z";
+const deployResultTone = (st: string) => st === "verified" ? "verified" : st === "in_progress" ? "in_progress" : st === "superseded" ? "closed" : "failed";
+const who = (r: { display_name: string | null; email: string | null; actor_kind?: string | null }) =>
+  r.display_name ? `${r.display_name}${r.email ? ` (${r.email})` : ""}` : r.actor_kind === "ai" ? "Self-hosted model" : "System (automatic)";
+/** Decisions recorded in the append-only audit log (who decided, when): the approval log reads these, no extra table. */
+const DECISION_ACTIONS = ["salesopt.version_approved", "salesopt.version_rejected", "salesopt.version_retired", "salesopt.external_version_adopted", "salesopt.experiment_start", "salesopt.experiment_stop"] as const;
+const DECISION_LABEL: Record<string, string> = { version_approved: "Approved", version_rejected: "Rejected", version_retired: "Retired", external_version_adopted: "Founder prompt adopted", experiment_start: "Experiment started", experiment_stop: "Experiment stopped" };
 
 function versionStatusBadge(s: string): SafeHtml {
   const tone: Record<string, string> = { draft: "draft", evaluating: "in_progress", eval_failed: "failed", eval_passed: "recommended", approved: "approved", rejected: "rejected", retired: "archived" };
@@ -77,11 +88,57 @@ async function dashboard(ctx: AppContext, errors: string[] = [], status = 200) {
   const incidents = (await db.prepare(`SELECT fi.category, fi.label, fi.created_at, f.stage, f.provider_call_id FROM so_findings fi JOIN so_call_facts f ON f.call_id = fi.call_id
       WHERE fi.basis = 'observed' AND fi.category IN (${[...COMPLIANCE_CATEGORIES].map(() => "?").join(",")}) ORDER BY fi.created_at DESC LIMIT 15`).bind(...COMPLIANCE_CATEGORIES)
     .all<{ category: string; label: string; created_at: string; stage: string; provider_call_id: string }>()).results;
-  const proposals = (await db.prepare(`SELECT p.status, p.detail, p.created_at, v.seq FROM so_proposal_jobs p LEFT JOIN so_versions v ON v.id = p.version_id ORDER BY p.created_at DESC LIMIT 5`).all<{ status: string; detail: string | null; created_at: string; seq: number | null }>()).results;
+  const PROPOSALS_SHOWN = 50;
+  const proposals = (await db.prepare(`SELECT p.status, p.detail, p.created_at, v.id AS vid, v.seq, v.status AS vstatus, pv.seq AS pseq FROM so_proposal_jobs p
+      LEFT JOIN so_versions v ON v.id = p.version_id LEFT JOIN so_versions pv ON pv.id = p.parent_version_id ORDER BY p.created_at DESC LIMIT ?`).bind(PROPOSALS_SHOWN)
+    .all<{ status: string; detail: string | null; created_at: string; vid: string | null; seq: number | null; vstatus: string | null; pseq: number | null }>()).results;
+  const proposalTotal = (await db.prepare(`SELECT COUNT(*) AS n FROM so_proposal_jobs`).first<{ n: number }>())!.n;
   const jobs = (await db.prepare(`SELECT status, COUNT(*) AS n FROM ai_jobs WHERE workflow LIKE 'salesopt_%' AND created_at >= ? GROUP BY status`).bind(from).all<{ status: string; n: number }>()).results;
   const experiments = (await db.prepare(`SELECT e.*, b.seq AS bseq, c.seq AS cseq FROM so_experiments e JOIN so_versions b ON b.id = e.baseline_version_id JOIN so_versions c ON c.id = e.candidate_version_id ORDER BY e.created_at DESC LIMIT 5`)
     .all<{ id: string; status: string; bseq: number; cseq: number; candidate_share: number; min_connected_per_arm: number; decision: string | null; decision_detail: string | null; created_at: string }>()).results;
   const rbStaging = await rollbackCandidate(db, "staging"), rbProd = await rollbackCandidate(db, "production");
+  // Per stage: current version, the previous version (the rollback target the buttons below use) and the latest deployment.
+  const current: Record<reg.Stage, reg.VersionRow | null> = { staging: stg, production: prod };
+  const prevVersion: Record<reg.Stage, reg.VersionRow | null> = { staging: rbStaging ? await reg.getVersion(db, rbStaging) : null, production: rbProd ? await reg.getVersion(db, rbProd) : null };
+  const latestDeployment = (s: reg.Stage) => db.prepare(`SELECT d.kind, d.status, d.created_at, d.published, v.seq FROM so_deployments d JOIN so_versions v ON v.id = d.version_id
+      WHERE d.stage = ? ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1`).bind(s).first<{ kind: string; status: string; created_at: string; published: number | null; seq: number }>();
+  const lastDep = { staging: await latestDeployment("staging"), production: await latestDeployment("production") };
+  // Rollback history: every kind=rollback deployment (from = the version it replaced, i.e. its compare-and-swap
+  // expected_current_version_id; to = the restored version) and whether Retell's read-back matched the restored prompt.
+  const rollbacks = (await db.prepare(`SELECT d.stage, d.status, d.reason, d.detail, d.created_at, d.readback_sha256, d.initiated_by, tv.seq AS to_seq, tv.prompt_sha256 AS to_sha, fv.seq AS from_seq,
+        u.display_name, u.email
+      FROM so_deployments d JOIN so_versions tv ON tv.id = d.version_id LEFT JOIN so_versions fv ON fv.id = d.expected_current_version_id LEFT JOIN users u ON u.id = d.initiated_by
+      WHERE d.kind = 'rollback' ORDER BY d.created_at DESC, d.rowid DESC LIMIT 50`)
+    .all<{ stage: string; status: string; reason: string | null; detail: string | null; created_at: string; readback_sha256: string | null; initiated_by: string | null; to_seq: number; to_sha: string; from_seq: number | null; display_name: string | null; email: string | null }>()).results;
+  const rolledBack = (await db.prepare(`SELECT d.stage, d.created_at, v.seq FROM so_deployments d JOIN so_versions v ON v.id = d.version_id WHERE d.status = 'rolled_back' ORDER BY d.created_at DESC LIMIT 50`)
+    .all<{ stage: string; created_at: string; seq: number }>()).results;
+  const decisionIn = DECISION_ACTIONS.map(() => "?").join(",");
+  const decisions = (await db.prepare(`SELECT a.action, a.actor_kind, a.created_at, u.display_name, u.email, v.id AS vid, v.seq, v.decision_note, eb.seq AS bseq, ec.seq AS cseq
+      FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_user_id
+      LEFT JOIN so_versions v ON a.subject_type = 'so_version' AND v.id = a.subject_id
+      LEFT JOIN so_experiments e ON a.subject_type = 'so_experiment' AND e.id = a.subject_id
+      LEFT JOIN so_versions eb ON eb.id = e.baseline_version_id LEFT JOIN so_versions ec ON ec.id = e.candidate_version_id
+      WHERE a.action IN (${decisionIn}) ORDER BY a.id DESC LIMIT 50`).bind(...DECISION_ACTIONS)
+    .all<{ action: string; actor_kind: string; created_at: string; display_name: string | null; email: string | null; vid: string | null; seq: number | null; decision_note: string | null; bseq: number | null; cseq: number | null }>()).results;
+  const decisionTotal = (await db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE action IN (${decisionIn})`).bind(...DECISION_ACTIONS).first<{ n: number }>())!.n;
+  // Calls attributed to each version on the selected stage, over all recorded calls (test calls excluded). The current
+  // and previous versions are listed even before they have calls; NULL = recorded but not attributable to a version.
+  const perVersion = await versionBreakdown(db, { stage: kStage, from: EPOCH, to: t.toISOString() });
+  const vById = new Map(versions.map((v) => [v.id, v]));
+  const shownIds = new Set<string | null>(perVersion.map((r) => r.versionId));
+  for (const v of [current[kStage], prevVersion[kStage]]) if (v) { shownIds.add(v.id); vById.set(v.id, v); }
+  for (const id of shownIds) if (id && !vById.has(id)) { const v = await reg.getVersion(db, id); if (v) vById.set(id, v); }
+  const noCalls = (versionId: string | null): VersionRowMetrics => ({ versionId, attempts: 0, connected: 0, qualified: 0, analysedConnected: 0, appointments: 0, sales: 0, revenueCents: 0 });
+  const pvRows = [...shownIds].map((id) => ({ ...(perVersion.find((r) => r.versionId === id) ?? noCalls(id)), v: id ? vById.get(id) ?? null : null }))
+    .sort((a, b) => (b.v?.seq ?? -1) - (a.v?.seq ?? -1));
+  // The dialler (src/services/sales-outbound.ts#sieStamp) stamps crestmont_so_version only when its agent is the
+  // engine's target for the stage this environment dials on: production in production, staging elsewhere.
+  const dialler = await db.prepare(`SELECT enabled, agent_id FROM sales_outbound_settings WHERE id = 1`).first<{ enabled: number; agent_id: string | null }>();
+  const diallerStage: reg.Stage = ctx.env.ENVIRONMENT === "production" ? "production" : "staging";
+  const diallerTarget = targets[diallerStage];
+  const diallerOther = targets[diallerStage === "production" ? "staging" : "production"];
+  const diallerAgent = dialler?.agent_id ?? null;
+  const agentMismatch = !!diallerAgent && diallerTarget?.agent_id !== diallerAgent;
   // Runner status for sales-optimization jobs, from what the platform itself observed (ai_jobs + leases). A queued job
   // proves nothing about Node 1: only a claim (lease) or a completion stamped "self-hosted:<model>" does.
   const rj = (await db.prepare(`SELECT
@@ -112,7 +169,8 @@ async function dashboard(ctx: AppContext, errors: string[] = [], status = 200) {
 
   const body = html`${pageHead("AI Sales Optimization", html`<form method="post" action="${BASE}/run" class="row">${csrf(ctx)}${button("Run cycle now", { size: "sm", variant: "secondary" })}</form>`, "AI")}
 ${formErrors(errors)}
-${alert("warn", html`<strong>Scope.</strong> This engine evaluates and improves a <em>registered Retell sales agent</em>. It never places calls. This platform has no sales-calling path: outbound calls are limited to consented callbacks, reminders and support follow-ups (Founder decision D-14, MSA Sched. C.7). Enabling sales calling needs counsel's TCPA review and a separate, Founder-approved change.`)}
+${alert("info", html`<strong>Scope.</strong> This engine evaluates and improves the prompt of a <em>registered Retell sales agent</em>; the engine itself does not dial. Outbound AI sales calls are placed by the separate dialler (<code>src/services/sales-outbound.ts</code>, <a href="/staff/sales-outbound">AI sales calls</a>), which is off by default and dials only with RETELL_SALES_OUTBOUND=on, the Owner's switch, an active Founder + counsel compliance approval (Founder decision D-14, MSA Sched. C.7), documented prior express written consent and a clear Do Not Call scrub for the number. The engine never targets the inbound receptionist agent.`)}
+${agentMismatch ? alert("warn", html`<strong>The dialler's agent is not this engine's ${diallerStage} target.</strong> The outbound sales dialler uses agent <code>${diallerAgent}</code>, but the registered ${diallerStage} sales agent is ${diallerTarget ? html`<code>${diallerTarget.agent_id}</code>` : "not set"}. Its calls carry no prompt-version stamp (crestmont_so_version) and ${diallerOther?.agent_id === diallerAgent ? `are measured under ${diallerOther!.stage} with whatever version is deployed there` : "are not recorded by this engine at all"}, so they get no version attribution. Register the dialler's agent as the ${diallerStage} target, or change the dialler's agent.`) : ""}
 <p class="row"><span class="faint">Metrics shown for:</span> ${kStage === "production" ? html`<strong>production</strong> · <a href="${BASE}?stage=staging">staging</a>` : html`<a href="${BASE}">production</a> · <strong>staging</strong>`}</p>
 ${ctl.paused ? alert("info", "Optimization is paused: no analyses or proposals are queued. Safety monitoring keeps running.") : ""}
 
@@ -128,6 +186,35 @@ ${kpi("Attributed revenue", usd(m.revenueCents), `Stripe-verified, net of refund
 ${kpi("Opt-out rate", pct(m.optOutRate), `${m.optOuts} opt-outs`)}
 ${kpi("Compliance incidents", m.complianceFindings, `${pct(m.complianceRate)} of ${m.analysed} analysed calls`)}
 </div>
+<div class="kpis grid grid-4">
+${kpi("Qualified conversation rate", m.connected >= th.minConnected ? pct(m.qualifiedRate) : "Not enough data", `${m.qualified} qualified of ${m.connected} connected · ${m.analysed} analysed. Counts only calls the self-hosted analysis runner has processed`)}
+${kpi("Appointment conversion", m.connected >= th.minConnected ? pct(m.appointmentRate) : "Not enough data", `${m.appointments} consultations booked on ${m.connected} connected calls (callbacks excluded)`)}
+</div>
+<p class="faint">Rates are shown once at least ${th.minConnected} calls are connected (the Founder's "minimum connected calls before judging"); below that the page says "not enough data". Every figure comes from recorded call facts, booked consultations and webhook-verified Stripe payments.</p>
+
+<section class="card stack"><h2 class="card__title">Script version by stage</h2>
+<div class="table-wrap"><table class="table"><thead><tr><th scope="col">Stage</th><th scope="col">Sales agent</th><th scope="col">Current version</th><th scope="col">Previous version (rollback target)</th><th scope="col">Latest deployment</th></tr></thead><tbody>
+${(["production", "staging"] as const).map((s) => { const d = lastDep[s], cur = current[s], pv = prevVersion[s], tg = targets[s]; return html`<tr><th scope="row">${label(s)}</th>
+<td>${tg ? html`<code>${tg.agent_id}</code>` : html`<span class="faint">not registered</span>`}</td>
+<td>${cur ? html`<a href="${BASE}/versions/${cur.id}">v${cur.seq}</a>${cur.prompt_mode === "external" ? html` <span class="faint">(Founder prompt)</span>` : ""}` : "None deployed"}</td>
+<td>${pv ? html`<a href="${BASE}/versions/${pv.id}">v${pv.seq}</a>` : html`<span class="faint">None (nothing earlier verified on this stage)</span>`}</td>
+<td>${d ? html`${label(d.kind)} of v${d.seq}: ${badge(deployResultTone(d.status), label(d.status))} <span class="faint">${formatDateTime(d.created_at)}${s === "production" && d.status === "verified" && d.published === 0 ? " · not yet published in Retell" : ""}</span>` : html`<span class="faint">Never deployed</span>`}</td></tr>`; })}
+</tbody></table></div>
+</section>
+
+<section class="section--tight"><h2>Calls attributed to each version (${kStage}, all recorded calls)</h2>
+${table(pvRows, [
+  { header: "Version", cell: (r) => r.v ? html`<a href="${BASE}/versions/${r.v.id}">v${r.v.seq}</a>${current[kStage]?.id === r.v.id ? html` ${badge("verified", "current")}` : prevVersion[kStage]?.id === r.v.id ? html` ${badge("closed", "previous")}` : ""}` : html`<span class="faint">No version (unattributed)</span>` },
+  { header: "Status", cell: (r) => r.v ? versionStatusBadge(r.v.status) : "—" },
+  { header: "Calls", cell: (r) => r.attempts, numeric: true },
+  { header: "Connected", cell: (r) => r.connected, numeric: true },
+  { header: "Qualified conversation rate", cell: (r) => html`${rateOrNoData(r.qualified, r.connected, th.minConnected)}${r.connected && r.analysedConnected < r.connected ? html` <span class="faint">${r.analysedConnected} of ${r.connected} analysed</span>` : ""}` },
+  { header: "Appointment conversion", cell: (r) => rateOrNoData(r.appointments, r.connected, th.minConnected) },
+  { header: "Closed sales", cell: (r) => r.v ? r.sales : "—", numeric: true },
+  { header: "Revenue", cell: (r) => r.v ? usd(r.revenueCents) : html`<span class="faint">not attributable to a version</span>`, numeric: true },
+], { empty: emptyState("No calls recorded yet", "Calls appear here once the registered sales agent's signed Retell events arrive.") })}
+<p class="faint">A call belongs to the version the dialler stamped on it, or else the version verified on the stage when the call was first seen. Qualified conversation rate depends on the self-hosted analysis runner having processed the call: an unanalysed call is never counted as qualified. Appointment conversion counts connected calls on which a consultation was booked (a consultation follow-up recorded for that Retell call); staff callbacks and AI follow-up calls are not appointments. Closed sales and revenue are last-touch, webhook-verified Stripe payments net of refunds and disputes. Versions that ran in different periods are not like-for-like; use an experiment for a controlled comparison.</p>
+</section>
 
 <section class="card stack"><h2 class="card__title">Self-hosted model runner (Node 1)</h2>
 ${dl([
@@ -154,6 +241,7 @@ ${dl([
   ["Self-hosted model jobs (30 days)", jobs.length ? jobs.map((j) => `${label(j.status)} ${j.n}`).join(" · ") : "None yet (needs the build runner with AI drafts enabled)"],
   ["Protected policy", `${SALES_POLICY_VERSION} (prices generated from the catalog)`],
   ["Attribution source", "Webhook-verified Stripe payments on orders linked to the call's lead (14-day window)"],
+  ["Outbound sales dialler (src/services/sales-outbound.ts)", `${dialler?.enabled ? "Enabled by the Owner" : "Disabled by the Owner"} · RETELL_SALES_OUTBOUND ${ctx.env.RETELL_SALES_OUTBOUND === "on" ? "on" : "off"} in this environment · agent ${diallerAgent ?? "not set"}${diallerAgent ? (agentMismatch ? ` (NOT the ${diallerStage} target: no version attribution)` : ` (the ${diallerStage} target: calls carry crestmont_so_version)`) : ""}`],
   ["Retell states (kept separate)", "1 draft prompt updated and read back — done here · 2 version published — Retell dashboard · 3 version assigned to a phone number — Retell Phone Numbers tab · 4 live traffic — never started by this platform"],
 ])}
 <div class="table-wrap"><table class="table"><thead><tr><th scope="col">Stage</th><th scope="col">Retell agent</th><th scope="col">Verified</th><th scope="col"></th></tr></thead><tbody>${targetRow("staging")}${targetRow("production")}</tbody></table></div>
@@ -189,8 +277,42 @@ ${input({ name: "maxRefundRate", label: "Max refund/dispute rate (%)", value: +(
   { header: "Created", cell: (r) => formatDateTime(r.created_at) },
   { header: "Live on", cell: (r) => [prod?.id === r.id ? "production" : "", stg?.id === r.id ? "staging" : ""].filter(Boolean).join(", ") || "—" },
 ], { empty: emptyState("No versions", "Version 1 is created from the platform baseline.") })}
-${proposals.length ? html`<p class="faint">Recent AI proposals: ${proposals.map((p) => `${label(p.status)}${p.seq ? ` (v${p.seq})` : ""}${p.detail ? ` — ${p.detail.slice(0, 120)}` : ""}`).join(" · ")}</p>` : ""}
 ${canDecide && !ctl.paused ? html`<form method="post" action="${BASE}/run" class="row">${csrf(ctx)}<input type="hidden" name="propose" value="1">${button("Ask the self-hosted model for a proposal now", { size: "sm", variant: "ghost" })}</form>` : ""}
+</section>
+
+<section class="section--tight"><h2>AI proposals</h2>
+<p class="faint">${proposalTotal === 0 ? "No proposals requested yet." : proposalTotal > proposals.length ? `${proposalTotal} proposals in total; showing the latest ${proposals.length}.` : `${proposalTotal} proposal${proposalTotal === 1 ? "" : "s"} in total.`}</p>
+${proposals.length ? table(proposals, [
+  { header: "Requested", cell: (r) => formatDateTime(r.created_at) },
+  { header: "From", cell: (r) => r.pseq ? `v${r.pseq}` : "—" },
+  { header: "Job", cell: (r) => badge(r.status === "accepted" ? "verified" : r.status === "queued" ? "queued" : "failed", label(r.status)) },
+  { header: "Resulting version", cell: (r) => r.vid ? html`<a href="${BASE}/versions/${r.vid}">v${r.seq}</a> ${versionStatusBadge(r.vstatus ?? "draft")}` : "—" },
+  { header: "Detail", cell: (r) => html`<span class="faint">${(r.detail ?? "").slice(0, 200)}</span>` },
+]) : ""}
+</section>
+
+<section class="section--tight"><h2>Approval log</h2>
+<p class="faint">Founder decisions, read from the append-only audit log${decisionTotal > decisions.length ? ` (${decisionTotal} in total; showing the latest ${decisions.length})` : ""}.</p>
+${table(decisions, [
+  { header: "When", cell: (r) => formatDateTime(r.created_at) },
+  { header: "Decision", cell: (r) => { const a = r.action.replace("salesopt.", ""); return badge(["version_approved", "external_version_adopted", "experiment_start"].includes(a) ? "approved" : "rejected", DECISION_LABEL[a] ?? label(a)); } },
+  { header: "Subject", cell: (r) => r.vid ? html`<a href="${BASE}/versions/${r.vid}">v${r.seq}</a>` : r.bseq !== null ? `Experiment v${r.bseq} → v${r.cseq}` : "—" },
+  { header: "Decided by", cell: (r) => who(r) },
+  { header: "Note", cell: (r) => html`<span class="faint">${["salesopt.version_approved", "salesopt.version_rejected"].includes(r.action) ? r.decision_note ?? "" : ""}</span>` },
+], { empty: emptyState("No decisions yet", "Approvals, rejections and experiment decisions appear here with who made them and when.") })}
+</section>
+
+<section class="section--tight"><h2>Rollback history</h2>
+${table(rollbacks, [
+  { header: "When", cell: (r) => formatDateTime(r.created_at) },
+  { header: "Stage", cell: (r) => label(r.stage) },
+  { header: "From → to", cell: (r) => `v${r.from_seq ?? "?"} → v${r.to_seq}` },
+  { header: "Result", cell: (r) => badge(deployResultTone(r.status), label(r.status)) },
+  { header: "Read-back verified", cell: (r) => r.readback_sha256 && r.readback_sha256 === r.to_sha ? badge("verified", "Yes") : badge("failed", "No") },
+  { header: "By", cell: (r) => r.initiated_by ? who(r) : "Automatic (safety monitor)" },
+  { header: "Reason", cell: (r) => html`${r.reason ?? ""}${["failed", "aborted"].includes(r.status) && r.detail ? html` <span class="faint">${r.detail.slice(0, 200)}</span>` : ""}` },
+], { empty: emptyState("No rollbacks", "Founder and automatic rollbacks appear here with the versions involved and Retell's read-back.") })}
+${rolledBack.length ? html`<p class="faint">Deployments marked rolled back: ${rolledBack.map((r) => `v${r.seq} on ${r.stage} (deployed ${formatDateTime(r.created_at)})`).join(" · ")}</p>` : ""}
 </section>
 
 <section class="section--tight"><h2>Deployment history</h2>${table(deployments, [
@@ -198,7 +320,7 @@ ${canDecide && !ctl.paused ? html`<form method="post" action="${BASE}/run" class
   { header: "Stage", cell: (r) => label(r.stage) },
   { header: "Version", cell: (r) => `v${r.seq}` },
   { header: "Kind", cell: (r) => label(r.kind) },
-  { header: "Result", cell: (r) => html`${badge(r.status === "verified" ? "verified" : r.status === "in_progress" ? "in_progress" : r.status === "superseded" ? "closed" : "failed", label(r.status))}${r.stage === "production" && r.status === "verified" && r.published === 0 ? html` ${badge("requires_founder_approval", "Publish in Retell")}` : ""}` },
+  { header: "Result", cell: (r) => html`${badge(deployResultTone(r.status), label(r.status))}${r.stage === "production" && r.status === "verified" && r.published === 0 ? html` ${badge("requires_founder_approval", "Publish in Retell")}` : ""}` },
   { header: "Detail", cell: (r) => html`<span class="faint">${(r.detail ?? "").slice(0, 200)}</span>` },
 ], { empty: emptyState("Nothing deployed yet", "Deploy an evaluated version to the staging agent first.") })}
 ${canDecide ? html`<div class="row">${rbStaging ? html`<form method="post" action="${BASE}/rollback">${csrf(ctx)}<input type="hidden" name="stage" value="staging">${button("Roll back staging", { size: "sm", variant: "danger" })}</form>` : ""}
@@ -217,7 +339,7 @@ ${rbProd ? html`<form method="post" action="${BASE}/rollback">${csrf(ctx)}<input
 ${canDecide && prod ? html`<form method="post" action="${BASE}/experiments" class="row">${csrf(ctx)}<input type="hidden" name="baseline_id" value="${prod.id}">
 ${select({ name: "candidate_id", label: "Candidate", options: versions.filter((v) => ["eval_passed", "approved"].includes(v.status) && v.id !== prod.id).map((v) => ({ value: v.id, label: `v${v.seq}` })), includeBlank: "Choose…" })}
 ${input({ name: "share", label: "Candidate share (%)", value: 20, maxlength: 2 })}${input({ name: "min", label: "Minimum connected calls per arm", value: 400, maxlength: 6 })}${button("Propose experiment", { variant: "secondary" })}</form>
-<p class="faint">Nothing in this platform places sales calls, so an experiment only splits traffic once a Founder-approved dialler uses the routing described in docs/voice/SALES-OPTIMIZATION.md.</p>` : ""}
+<p class="faint">Traffic is split by the outbound sales dialler (src/services/sales-outbound.ts), which stamps the experiment only when the lead's arm is the version verified on its agent; the engine deploys one prompt per stage, so a candidate arm needs its own Retell agent or version (docs/voice/SALES-OPTIMIZATION.md §5).</p>` : ""}
 </section>
 
 <section class="section--tight"><h2>Compliance incidents</h2>${table(incidents, [
@@ -301,6 +423,8 @@ ${table(SCENARIOS.map((s) => ({ s, r: results.find((x) => x.scenario === s.id) }
 <section class="section--tight"><h2>Measured performance (30 days)</h2>
 <div class="table-wrap"><table class="table"><thead><tr><th scope="col">Metric</th><th scope="col" class="num">v${v.seq}</th><th scope="col" class="num">${prod && prod.id !== v.id ? `Production v${prod.seq}` : "Baseline"}</th></tr></thead><tbody>
 ${metricRow("Connected calls", String(mine.connected), base ? String(base.connected) : null)}
+${metricRow("Qualified conversation rate (analysed calls only)", pct(mine.qualifiedRate), base ? pct(base.qualifiedRate) : null)}
+${metricRow("Appointment conversion", pct(mine.appointmentRate), base ? pct(base.appointmentRate) : null)}
 ${metricRow("Verified conversion", pct(mine.conversionRate, 2), base ? pct(base.conversionRate, 2) : null)}
 ${metricRow("Revenue per connected call", mine.revenuePerConnectedCents === null ? "Unknown" : usd(mine.revenuePerConnectedCents), base ? (base.revenuePerConnectedCents === null ? "Unknown" : usd(base.revenuePerConnectedCents)) : null)}
 ${metricRow("Opt-out rate", pct(mine.optOutRate), base ? pct(base.optOutRate) : null)}

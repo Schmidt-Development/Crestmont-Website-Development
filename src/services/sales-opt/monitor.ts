@@ -82,7 +82,7 @@ export async function decideExperimentStatus(db: Db, userId: string, id: string,
 /**
  * Arm for a lead in the running experiment, for whatever creates calls. Stamp the returned version id as
  * metadata.crestmont_so_version and the experiment id as metadata.crestmont_so_experiment so outcomes attribute
- * correctly. Nothing in this repository places sales calls; see docs/voice/SALES-OPTIMIZATION.md §Experiments.
+ * correctly. The outbound sales dialler (src/services/sales-outbound.ts#sieStamp) does this; see docs/voice/SALES-OPTIMIZATION.md §5.
  */
 export async function experimentRouting(db: Db, leadKey: string): Promise<{ experimentId: string; arm: "baseline" | "candidate"; versionId: string } | null> {
   const e = await db.prepare(`SELECT id, baseline_version_id, candidate_version_id, candidate_share FROM so_experiments WHERE status = 'running'`).first<{ id: string; baseline_version_id: string; candidate_version_id: string; candidate_share: number }>();

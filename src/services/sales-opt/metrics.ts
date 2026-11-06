@@ -3,14 +3,25 @@
 // Unknown is shown as unknown (null), never as zero. Test calls are excluded everywhere.
 // Findings are counted per CALL (compliance, complaints) or per call and category (objections), so re-analysis with a
 // new analyzer version, or a deterministic and a model finding for the same utterance, never count twice.
+//
+// Appointment conversion (APPOINTMENT_SQL): a CONNECTED call counts as an appointment when the outbound dialler's
+// schedule_sales_followup function recorded a consultation for that very Retell call: a sales_followups row with
+// kind = 'consultation' and provider_call_id = so_call_facts.provider_call_id (src/services/sales-functions.ts writes it
+// only after the booking is held in the consultations table on the routed calendar), and not cancelled. That row is the
+// source of truth. sales_calls.outcome = 'consultation_booked' is derived from the same row at call end
+// (resolveOutcome, source 'consultations') but undercounts: checkout_sent and payment_confirmed take precedence over it,
+// and the agent's own disposition can never produce it. Staff callbacks and AI follow-up calls (the other
+// sales_followups kinds, lumped together in follow_up_requested) are NOT appointments.
 import type { Db } from "../../lib/db.ts";
 import { COMPLIANCE_CATEGORIES } from "../../domain/sales-opt/analysis.ts";
 import { rate, wilson, type Interval, type SafetyCounts } from "../../domain/sales-opt/stats.ts";
 
 export interface MetricsFilter { stage?: "staging" | "production"; from: string; to: string; versionId?: string | null; segment?: string | null; experimentId?: string | null; arm?: "baseline" | "candidate" | null }
 
+export const APPOINTMENT_SQL = `(f.connected = 1 AND EXISTS (SELECT 1 FROM sales_followups sf WHERE sf.provider_call_id = f.provider_call_id AND sf.kind = 'consultation' AND sf.status <> 'cancelled'))`;
+
 export interface Metrics {
-  attempts: number; connected: number; qualified: number; checkoutInitiated: number; sales: number; revenueCents: number;
+  attempts: number; connected: number; qualified: number; appointments: number; appointmentRate: number | null; checkoutInitiated: number; sales: number; revenueCents: number;
   refundsOrDisputes: number; optOuts: number; escalations: number; errors: number; complaints: number; analysed: number; complianceFindings: number;
   objections: number; avgDurationS: number | null; costMicroUsd: number | null; days: number;
   attemptsPerDay: number | null; connectionRate: number | null; qualifiedRate: number | null; conversionRate: number | null; conversionCi: Interval;
@@ -32,11 +43,11 @@ function where(f: MetricsFilter): { sql: string; binds: unknown[] } {
 export async function computeMetrics(db: Db, f: MetricsFilter): Promise<Metrics> {
   const w = where(f);
   const c = (await db.prepare(`SELECT COUNT(*) AS attempts, COALESCE(SUM(f.connected = 1), 0) AS connected, COALESCE(SUM(f.qualified = 1), 0) AS qualified,
-        COALESCE(SUM(f.checkout_link_generated), 0) AS checkout, COALESCE(SUM(f.opt_out), 0) AS opt_outs, COALESCE(SUM(f.human_escalation), 0) AS escalations,
+        COALESCE(SUM(${APPOINTMENT_SQL}), 0) AS appointments, COALESCE(SUM(f.checkout_link_generated), 0) AS checkout, COALESCE(SUM(f.opt_out), 0) AS opt_outs, COALESCE(SUM(f.human_escalation), 0) AS escalations,
         COALESCE(SUM(f.error IS NOT NULL), 0) AS errors, AVG(CASE WHEN f.connected = 1 THEN f.duration_ms END) AS avg_ms,
         SUM(c.cost_microusd) AS cost, COUNT(c.cost_microusd) AS costed
       FROM so_call_facts f JOIN calls c ON c.id = f.call_id WHERE ${w.sql}`).bind(...w.binds)
-    .first<{ attempts: number; connected: number; qualified: number; checkout: number; opt_outs: number; escalations: number; errors: number; avg_ms: number | null; cost: number | null; costed: number }>())!;
+    .first<{ attempts: number; connected: number; qualified: number; appointments: number; checkout: number; opt_outs: number; escalations: number; errors: number; avg_ms: number | null; cost: number | null; costed: number }>())!;
   const s = (await db.prepare(`SELECT COALESCE(SUM(a.status = 'paid'), 0) AS sales, COALESCE(SUM(CASE WHEN a.status = 'paid' THEN a.amount_cents END), 0) AS revenue,
         COALESCE(SUM(a.status IN ('refunded','partially_refunded','disputed')), 0) AS bad, COUNT(*) AS total
       FROM so_attributions a JOIN so_call_facts f ON f.call_id = a.call_id WHERE a.is_last_touch = 1 AND ${w.sql}`).bind(...w.binds)
@@ -52,7 +63,7 @@ export async function computeMetrics(db: Db, f: MetricsFilter): Promise<Metrics>
   // Cost is known only when every attempt reported one; a partial sum would understate it.
   const cost = c.attempts > 0 && c.costed === c.attempts ? c.cost : null;
   return {
-    attempts: c.attempts, connected: c.connected, qualified: c.qualified, checkoutInitiated: c.checkout, sales: s.sales, revenueCents: s.revenue,
+    attempts: c.attempts, connected: c.connected, qualified: c.qualified, appointments: c.appointments, appointmentRate: rate(c.appointments, c.connected), checkoutInitiated: c.checkout, sales: s.sales, revenueCents: s.revenue,
     refundsOrDisputes: s.bad, optOuts: c.opt_outs, escalations: c.escalations, errors: c.errors, complaints: fnd.complaints, analysed: fnd.analysed,
     complianceFindings: fnd.compliance, objections: fnd.objections, avgDurationS: c.avg_ms === null ? null : Math.round(c.avg_ms / 1000), costMicroUsd: cost, days,
     attemptsPerDay: c.attempts ? c.attempts / days : null,
@@ -79,4 +90,27 @@ export async function segmentBreakdown(db: Db, f: MetricsFilter): Promise<{ segm
   const out: { segment: string; metrics: Metrics }[] = [];
   for (const { s } of segs) if (s) out.push({ segment: s, metrics: await computeMetrics(db, { ...f, segment: s }) });
   return out;
+}
+
+export interface VersionRowMetrics {
+  versionId: string | null; attempts: number; connected: number; qualified: number; analysedConnected: number; appointments: number; sales: number; revenueCents: number;
+}
+
+/**
+ * Per-version counts in one pass (same filter and the same facts as computeMetrics, grouped by so_call_facts.version_id).
+ * version_id NULL = calls the engine recorded but could not attribute to a version (e.g. no verified deployment yet).
+ * Sales and revenue are last-touch, webhook-verified Stripe attributions only (status 'paid').
+ */
+export async function versionBreakdown(db: Db, f: Omit<MetricsFilter, "versionId">): Promise<VersionRowMetrics[]> {
+  const w = where(f);
+  const calls = (await db.prepare(`SELECT f.version_id AS v, COUNT(*) AS attempts, COALESCE(SUM(f.connected = 1), 0) AS connected, COALESCE(SUM(f.qualified = 1), 0) AS qualified,
+        COALESCE(SUM(${APPOINTMENT_SQL}), 0) AS appointments,
+        COALESCE(SUM(f.connected = 1 AND EXISTS (SELECT 1 FROM so_analyses an WHERE an.call_id = f.call_id AND an.status = 'done')), 0) AS analysed
+      FROM so_call_facts f JOIN calls c ON c.id = f.call_id WHERE ${w.sql} GROUP BY f.version_id`).bind(...w.binds)
+    .all<{ v: string | null; attempts: number; connected: number; qualified: number; appointments: number; analysed: number }>()).results;
+  const sales = new Map((await db.prepare(`SELECT f.version_id AS v, COALESCE(SUM(a.status = 'paid'), 0) AS sales, COALESCE(SUM(CASE WHEN a.status = 'paid' THEN a.amount_cents END), 0) AS revenue
+      FROM so_attributions a JOIN so_call_facts f ON f.call_id = a.call_id WHERE a.is_last_touch = 1 AND ${w.sql} GROUP BY f.version_id`).bind(...w.binds)
+    .all<{ v: string | null; sales: number; revenue: number }>()).results.map((r) => [r.v, r]));
+  return calls.map((r) => ({ versionId: r.v, attempts: r.attempts, connected: r.connected, qualified: r.qualified, analysedConnected: r.analysed, appointments: r.appointments,
+    sales: sales.get(r.v)?.sales ?? 0, revenueCents: sales.get(r.v)?.revenue ?? 0 }));
 }
