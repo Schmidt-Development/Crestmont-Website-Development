@@ -1,5 +1,4 @@
--- Founder Calendar ↔ Google Calendar (Founder directive 2026-11-06, priority 1). ADDITIVE ONLY. Numbered 0092: 0091 is
--- reserved for the intake-enforcement work.
+-- Founder Calendar ↔ Google Calendar (Founder directive 2026-11-06, priority 1). ADDITIVE ONLY.
 --
 -- The internal Founder Calendar (consultations, calendar = 'founder_callback') stays the booking record. Google Calendar
 -- is the external availability source (free/busy of the Founder's primary + the dedicated calendar) and the place the

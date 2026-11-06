@@ -49,7 +49,7 @@ its deploy run was cancelled).
    records exist per number, the Founder switches it on and authorises a ramp stage. Counsel should also confirm
    the callback consent model (a recorded request on the call) and both calling windows.
 6. **Founder Google Calendar** (code: `src/services/founder-calendar.ts`, `src/adapters/google-calendar.ts`, migration
-   0092). The internal Founder Calendar stays the booking record; Google adds real availability (free/busy of the
+   0091). The internal Founder Calendar stays the booking record; Google adds real availability (free/busy of the
    primary + dedicated calendar — times only) and shows every appointment on "Crestmont — Founder Appointments"
    (created by the platform, or reused if it already exists). The Founder is emailed (platform mailer) for every new,
    moved, confirmed and cancelled appointment, once each. If Google cannot be read, no Founder time is offered.
