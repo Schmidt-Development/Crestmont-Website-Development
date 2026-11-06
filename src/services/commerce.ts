@@ -119,27 +119,67 @@ export async function provisionProjectOnce(db: Db, orderId: string): Promise<{ p
   if (!o) throw new Error(`Order ${orderId} not found`);
   const pkg = o.product_id && o.product_id in PACKAGES ? PACKAGES[o.product_id as PackageId] : null;
   const schedule = o.payment_schedule ?? "upfront";
+  // Founder requirement (2026-11): the website intake is completed before payment (purchase_intakes, migration 0089).
+  const intake = await purchaseIntakeForOrder(db, o);
   const allowance = pkg?.revisionRounds ?? 3; // custom projects: 3 rounds unless the quote scope states otherwise
   const at = nowIso();
   const projectId = newId("prj");
   const scope = o.scope_text ?? (pkg ? `${pkg.name} package: ${pkg.includes.join("; ")}.` : "Scope per accepted quote.");
   const milestoneNames = ["Onboarding", "Scope review", "Design", "Development", "Internal QA", "Customer review", "Launch"];
   const mine = `EXISTS (SELECT 1 FROM projects WHERE id = ?)`;
+  // The intake is copied in the same guarded batch as the project, so a project exists only with its intake. A
+  // completed intake lands the project where an onboarding submit does today (scope_review), so staff still review the
+  // scope; the status is read from the row inside the batch, never from the earlier read. Without one: as before.
+  const intakeDone = `EXISTS (SELECT 1 FROM purchase_intakes WHERE id = ? AND completed_at IS NOT NULL AND project_id IS NULL)`;
+  const intakeStatements = intake ? [
+    db.prepare(`INSERT INTO onboarding_responses (project_id, answers_json, completed_at, updated_at) SELECT ?, answers_json, completed_at, ? FROM purchase_intakes WHERE id = ? AND project_id IS NULL AND ${mine}
+                ON CONFLICT(project_id) DO NOTHING`).bind(projectId, at, intake.id, projectId),
+    db.prepare(`UPDATE files SET project_id = ? WHERE organization_id = ? AND project_id IS NULL AND id IN (SELECT value FROM json_each(?)) AND ${mine}`)
+      .bind(projectId, o.organization_id, JSON.stringify(intakeUploads(intake.answers_json)), projectId),
+    db.prepare(`UPDATE purchase_intakes SET project_id = ?, order_id = ?, updated_at = ? WHERE id = ? AND project_id IS NULL AND ${mine}`).bind(projectId, o.id, at, intake.id, projectId),
+  ] : [];
   const res = await db.batch([
     db.prepare(`INSERT OR IGNORE INTO projects (id, organization_id, order_id, product_id, name, status, revision_allowance, payment_schedule, last_customer_activity_at, created_at, updated_at)
-                VALUES (?,?,?,?,?, 'awaiting_onboarding', ?, ?, ?, ?, ?)`)
-      .bind(projectId, o.organization_id, o.id, o.product_id, `${o.org_name} — ${pkg ? pkg.name + " website" : "custom project"}`, allowance, schedule, at, at, at),
+                VALUES (?,?,?,?,?, CASE WHEN ${intakeDone} THEN 'scope_review' ELSE 'awaiting_onboarding' END, ?, ?, ?, ?, ?)`)
+      .bind(projectId, o.organization_id, o.id, o.product_id, `${o.org_name} — ${pkg ? pkg.name + " website" : "custom project"}`, intake?.id ?? null, allowance, schedule, at, at, at),
     db.prepare(`INSERT INTO project_scopes (id, project_id, version, scope_text) SELECT ?,?,1,? WHERE ${mine}`).bind(newId("scp"), projectId, scope, projectId),
     ...milestoneNames.map((n, i) => db.prepare(`INSERT INTO milestones (id, project_id, name, position, status) SELECT ?,?,?,?, 'pending' WHERE ${mine}`).bind(newId("ms"), projectId, n, i + 1, projectId)),
     db.prepare(`UPDATE invoices SET project_id = ? WHERE order_id = ? AND project_id IS NULL AND ${mine}`).bind(projectId, o.id, projectId),
+    ...intakeStatements,
   ]);
   if (res[0].meta.changes !== 1) {
     const winner = await db.prepare(`SELECT id FROM projects WHERE order_id = ?`).bind(orderId).first<{ id: string }>();
     if (!winner) throw new Error(`Project for order ${orderId} was not created`);
     return { projectId: winner.id, created: false };
   }
-  await audit(db, { actorKind: "system", action: "project.provisioned", subjectType: "project", subjectId: projectId, organizationId: o.organization_id, details: { orderId } });
+  await audit(db, { actorKind: "system", action: "project.provisioned", subjectType: "project", subjectId: projectId, organizationId: o.organization_id, details: { orderId, purchaseIntakeId: intake?.id ?? null } });
+  if (intake) {
+    const copied = await db.prepare(`SELECT completed_at FROM onboarding_responses WHERE project_id = ?`).bind(projectId).first<{ completed_at: string | null }>();
+    if (copied?.completed_at) {
+      await audit(db, { actorKind: "system", action: "onboarding.completed", subjectType: "project", subjectId: projectId, organizationId: o.organization_id, details: { source: "purchase_intake", purchaseIntakeId: intake.id, completedAt: copied.completed_at } });
+      await audit(db, { actorKind: "system", action: "project.status_changed", subjectType: "project", subjectId: projectId, organizationId: o.organization_id, details: { from: "awaiting_onboarding", to: "scope_review", note: "Website intake completed before payment" } });
+    }
+  }
   return { projectId, created: true };
+}
+
+/**
+ * The pre-purchase intake a paid order provisions with (migration 0089): the one stamped with this order, else the
+ * organization's open intake for the same package or quote version. Null for an order bought without one (historical
+ * orders, internal tooling): that project keeps the post-payment onboarding exactly as before.
+ */
+export async function purchaseIntakeForOrder(db: Db, o: { id: string; organization_id: string; kind: string; product_id: string | null; quote_version_id: string | null }) {
+  return db.prepare(`SELECT id, answers_json, completed_at FROM purchase_intakes WHERE organization_id = ? AND project_id IS NULL
+      AND (order_id = ? OR (? = 'package' AND product_id = ?) OR (? = 'quote' AND quote_version_id = ?))
+      ORDER BY COALESCE(order_id = ?, 0) DESC, completed_at IS NULL, updated_at DESC LIMIT 1`)
+    .bind(o.organization_id, o.id, o.kind, o.product_id, o.kind, o.quote_version_id, o.id).first<{ id: string; answers_json: string; completed_at: string | null }>();
+}
+
+/** File ids uploaded with an intake (logo, images): stored before any project existed, linked to it on provisioning. */
+export function intakeUploads(answersJson: string): string[] {
+  let a: Record<string, unknown> = {};
+  try { a = JSON.parse(answersJson); } catch { /* none */ }
+  return ["logo", "images"].flatMap((k) => (Array.isArray(a[k]) ? (a[k] as unknown[]).filter((x): x is string => typeof x === "string") : []));
 }
 
 /** Issues the next 25% milestone invoice when its project approval exists; refuses duplicates. */

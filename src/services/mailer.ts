@@ -50,7 +50,7 @@ export interface TemplateData {
   verification: { name: string | null; confirmUrl: string };
   /** Order confirmation (no call site yet: payment confirmation is sent as `receipt`). */
   purchase: { orderDescription: string; amountCents: number; url: string };
-  receipt: { amountCents: number; next: "onboarding" | "billing"; url: string };
+  receipt: { amountCents: number; next: "onboarding" | "project" | "billing"; url: string };
   onboarding: ProjectBase & { event: "completed" };
   project_update:
     | ProjectBase & { event: "status_changed"; from: string; to: string }
@@ -197,10 +197,11 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
     description: "Payment received (sent from the verified Stripe webhook only).",
     render: (d) => ({
       subject: "Payment received — Crestmont", heading: "Thank you — your payment was received",
-      paragraphs: [`We received your payment of ${money(d.amountCents)}.`, d.next === "onboarding" ? "Your project is set up. The next step is onboarding, where you tell us about your business, brand and goals." : "Your project record has been updated."],
-      cta: { label: d.next === "onboarding" ? "Start onboarding" : "View billing", url: d.url },
+      paragraphs: [`We received your payment of ${money(d.amountCents)}.`, d.next === "onboarding" ? "Your project is set up. The next step is onboarding, where you tell us about your business, brand and goals."
+        : d.next === "project" ? "Your project is set up with the website intake you completed. Your project manager reviews the scope with you next." : "Your project record has been updated."],
+      cta: { label: d.next === "onboarding" ? "Start onboarding" : d.next === "project" ? "View your project" : "View billing", url: d.url },
     }),
-    samples: [{ amountCents: 250000, next: "onboarding", url: "https://example.com/portal/projects/prj_sample/onboarding" }, { amountCents: 62500, next: "billing", url: "https://example.com/portal/billing" }],
+    samples: [{ amountCents: 250000, next: "project", url: "https://example.com/portal/projects/prj_sample" }, { amountCents: 250000, next: "onboarding", url: "https://example.com/portal/projects/prj_sample/onboarding" }, { amountCents: 62500, next: "billing", url: "https://example.com/portal/billing" }],
   },
   onboarding: {
     name: "onboarding", category: "transactional", audience: "staff",

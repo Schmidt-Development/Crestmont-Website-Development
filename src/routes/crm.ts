@@ -21,7 +21,10 @@ import * as identity from "../services/contact-identity.ts";
 import { researchLeadFacts } from "../services/research.ts";
 import { eraseIdentityData, ErasureError } from "../services/identity-erasure.ts";
 import { isOwner } from "../domain/authz.ts";
-import { startPackageCheckout, startMaintenanceCheckout, packageById, maintenanceById, NOT_CONFIGURED, stripeRedirect } from "../services/billing.ts";
+import { startPackageCheckout, startMaintenanceCheckout, packageById, maintenanceById, NOT_CONFIGURED, INTAKE_REQUIRED, invoicesNeedingIntake, stripeRedirect } from "../services/billing.ts";
+import { completedOpenIntake, findIntake, savePurchaseIntake } from "../services/purchase-intake.ts";
+import { OnboardingError } from "../services/onboarding.ts";
+import { intakeSections, intakeSummary } from "../ui/intake-form.ts";
 import { requestAiDraft, aiProviderFromEnv, decideAiJob } from "../services/ai.ts";
 import { audit } from "../services/security.ts";
 import { toCsv, parseDollars, parseRange } from "../services/finance.ts";
@@ -679,7 +682,14 @@ async function proposalPage(ctx: AppContext, token: string, errors: string[] = [
   const self = `/q/${token}`;
   const signedInMatch = ctx.user && p.contact.email && ctx.user.email.toLowerCase() === p.contact.email.toLowerCase();
   let acceptBlock: SafeHtml;
-  if (p.state === "accepted") acceptBlock = alert("success", html`This proposal was accepted on ${formatDate(p.version.accepted_at)}. ${ctx.user ? html`<a href="/portal/billing">Go to billing</a>` : html`<a href="/login?next=/portal/billing">Sign in</a> to view billing.`}`);
+  if (p.state === "accepted") {
+    // The first invoice waits for the website intake (migration 0089): a member of the buying organization is sent there.
+    const first = ctx.user ? await ctx.db.prepare(`SELECT i.id, i.organization_id FROM invoices i JOIN orders o ON o.id = i.order_id WHERE o.quote_version_id = ? AND o.kind = 'quote' AND i.milestone_kind IN ('full','deposit_50') ORDER BY i.created_at LIMIT 1`)
+      .bind(p.version.id).first<{ id: string; organization_id: string }>() : null;
+    const member = !!first && !!ctx.user?.memberships.some((m) => m.organizationId === first.organization_id);
+    const intakeDue = member && (await invoicesNeedingIntake(ctx.db, first!.organization_id)).has(first!.id);
+    acceptBlock = alert("success", html`This proposal was accepted on ${formatDate(p.version.accepted_at)}. ${intakeDue ? html`<a href="/portal/billing/invoices/${first!.id}/intake">Complete your website intake</a> to pay the first invoice.` : ctx.user ? html`<a href="/portal/billing">Go to billing</a>` : html`<a href="/login?next=/portal/billing">Sign in</a> to view billing.`}`);
+  }
   else if (p.state === "superseded") acceptBlock = alert("warn", "This version has been replaced by a newer proposal. Use the link in the most recent email from Crestmont.");
   else if (p.state === "expired") acceptBlock = alert("warn", "This proposal has expired. Contact us and we will send an updated proposal.");
   else if (p.state === "withdrawn") acceptBlock = alert("warn", "This proposal is no longer available.");
@@ -716,14 +726,68 @@ async function acceptProposalRoute(ctx: AppContext, token: string) {
   if (!f.get("agree")) return proposalPage(ctx, token, ["Tick the box to accept the proposal and agreements."], 422);
   // CREST-GAP-032: acceptance, order, invoice and agreement records commit together inside acceptProposal.
   const order = await quotes.acceptProposal(ctx, p, { id: ctx.user.id, email: ctx.user.email }, org.organizationId);
-  return redirect(ctx, `/portal/billing/invoices/${order.invoiceId}`, { kind: "success", text: "Proposal accepted. Pay the first invoice to start your project." });
+  return redirect(ctx, `/portal/billing/invoices/${order.invoiceId}`, { kind: "success", text: "Proposal accepted. Complete the website intake, then pay the first invoice to start your project." });
 }
 
 // ── package checkout ──
-async function checkoutPage(ctx: AppContext, packageId: string, errors: string[] = [], status = 200, selectedPlan: string | null = null) {
+// Founder requirement (2026-11): select package → website intake → review scope and price → accept agreements → Stripe
+// payment → project fulfilment. Customers describe what they want before paying (purchase_intakes, migration 0089).
+const CHECKOUT_STEPS = ["Website intake", "Review and agree", "Secure payment"] as const;
+function checkoutSteps(current: 0 | 1 | 2): SafeHtml {
+  return html`<ol class="row faint" data-testid="checkout-steps" style="list-style:none;padding:0;gap:1rem">${CHECKOUT_STEPS.map((s, i) => html`<li${i === current ? html` aria-current="step"` : ""}>${i === current ? html`<strong>${i + 1}. ${s}</strong>` : html`${i + 1}. ${s}`}</li>`)}</ol>`;
+}
+function checkoutPackage(packageId: string) {
   const pkg = packageById(packageId);
   if (!pkg) throw new HttpError(404, "That package does not exist.");
-  requireCustomerOrg(ctx);
+  return pkg;
+}
+
+/** GET /checkout/:packageId — the package's entry point: the intake first, then the review once the intake is complete. */
+async function checkoutEntry(ctx: AppContext, packageId: string) {
+  const pkg = checkoutPackage(packageId);
+  const org = requireCustomerOrg(ctx);
+  const done = await completedOpenIntake(ctx.db, org.organizationId, { kind: "package", productId: pkg.id });
+  return redirect(ctx, `/checkout/${pkg.id}/${done ? "review" : "intake"}${ctx.url.search}`);
+}
+
+async function checkoutIntakePage(ctx: AppContext, packageId: string, errors: string[] = [], status = 200) {
+  const pkg = checkoutPackage(packageId);
+  const org = requireCustomerOrg(ctx);
+  const intake = await findIntake(ctx.db, org.organizationId, { kind: "package", productId: pkg.id });
+  const a = intake?.answers ?? { business_name: org.organizationName, contact_name: ctx.user!.displayName, contact_email: ctx.user!.email };
+  const sections = await intakeSections(ctx, org.organizationId, pkg.id, a);
+  return htmlResponse(ctx, publicLayout(ctx, { title: `Website intake — ${pkg.name}`, noindex: true }, html`<section class="section"><div class="container stack" style="max-width:860px">
+<div class="eyebrow">Checkout · ${pkg.name} website package</div><h1>Tell us about your website</h1>${checkoutSteps(0)}
+<p class="lede">Before you pay, describe the website you want: your business, goals, pages and content. You review the scope and price next, and pay only after that. Save a draft any time and come back to finish it. Never send passwords here — we arrange access securely.</p>
+${intake?.completed_at ? alert("info", html`You completed this intake ${formatDateTime(intake.completed_at)}. <a href="/checkout/${pkg.id}/review">Continue to review</a>, or change your answers and submit again.`) : intake ? html`<p class="faint" data-testid="intake-draft-saved">Draft last saved ${formatDateTime(intake.updated_at)}.</p>` : ""}${formErrors(errors)}
+<form method="post" action="/checkout/${pkg.id}/intake" enctype="multipart/form-data" class="stack">${csrf(ctx)}${sections}
+<div class="form-actions">${button("Save draft", { variant: "secondary", name: "intent", value: "draft" })}${button("Continue to review", { name: "intent", value: "submit" })}</div></form>
+</div></section>`), status);
+}
+
+async function checkoutIntakePost(ctx: AppContext, packageId: string) {
+  const pkg = checkoutPackage(packageId);
+  const org = requireCustomerOrg(ctx);
+  const f = await ctx.form();
+  const submit = str(f, "intent") === "submit";
+  try {
+    const res = await savePurchaseIntake(ctx, { organizationId: org.organizationId, userId: ctx.user!.id, target: { kind: "package", productId: pkg.id }, form: f, submit });
+    return res.completed
+      ? redirect(ctx, `/checkout/${pkg.id}/review`, { kind: "success", text: "Website intake saved. Review your scope and price before paying." })
+      : redirect(ctx, `/checkout/${pkg.id}/intake`, { kind: "success", text: "Draft saved. You can come back and finish it any time." });
+  } catch (e) {
+    if (e instanceof OnboardingError) return checkoutIntakePage(ctx, packageId, e.errors, 422);
+    if (e instanceof HttpError && (e.status === 409 || e.status === 422)) return checkoutIntakePage(ctx, packageId, [e.message], e.status);
+    throw e;
+  }
+}
+
+/** GET /checkout/:packageId/review — scope, server-side price and tax, plan choice and agreements, then payment. */
+async function checkoutReviewPage(ctx: AppContext, packageId: string, errors: string[] = [], status = 200, selectedPlan: string | null = null) {
+  const pkg = checkoutPackage(packageId);
+  const org = requireCustomerOrg(ctx);
+  const intake = await completedOpenIntake(ctx.db, org.organizationId, { kind: "package", productId: pkg.id });
+  if (!intake) return redirect(ctx, `/checkout/${pkg.id}/intake`, { kind: "info", text: "Complete the website intake first. You review the scope and price next." });
   const configured = ctx.payments.configured;
   const cancelled = ctx.url.searchParams.get("checkout") === "cancelled";
   const priceCents = (await effectivePrice(ctx.db, "package", pkg.id, ctx.now())).cents; // CAT-007
@@ -739,40 +803,45 @@ async function checkoutPage(ctx: AppContext, packageId: string, errors: string[]
 ${planChoices.map((p) => html`<label class="row"><input type="radio" name="maintenance_plan" value="${p.id}" required${selectedPlan === p.id ? html` checked` : ""}> ${p.name} — ${formatCents(p.monthlyCents)}/month${p.id === minPlan ? html` <small>(minimum)</small>` : ""}</label>`)}
 <p class="faint" data-testid="checkout-maintenance-billing">You are not charged for the plan today. Monthly billing starts only when you approve and launch your completed website. <a href="/hosting-maintenance">Compare plans</a></p></fieldset>`;
   return htmlResponse(ctx, publicLayout(ctx, { title: `Checkout — ${pkg.name}`, noindex: true }, html`<section class="section"><div class="container stack" style="max-width:760px">
-<div class="eyebrow">Checkout</div><h1>${pkg.name} website package</h1>
+<div class="eyebrow">Checkout</div><h1>${pkg.name} website package</h1>${checkoutSteps(1)}
 ${cancelled ? alert("info", "Checkout was cancelled. Nothing was charged.") : ""}${formErrors(errors)}
-<div class="card card--gold stack"><p class="price" data-testid="checkout-price">${formatCents(priceCents)}${pkg.priceIsFloor ? html` <small>starting price</small>` : ""}</p>
+<div class="card card--gold stack"><h2 style="font-size:1.2rem">Scope and price</h2><p class="price" data-testid="checkout-price">${formatCents(priceCents)}${pkg.priceIsFloor ? html` <small>starting price</small>` : ""}</p>
 ${tax.configured ? html`<div data-testid="checkout-tax">${tax.byJurisdiction.map((j) => html`<p>${taxLabel(j)}: ${usd(j.taxCents)}</p>`)}<p><strong>Total due ${usd(tax.totalCents)}</strong></p></div>` : ""}
 <p class="muted">Fixed price, paid 100% upfront. ${pkg.revisionRounds} revision rounds, up to ${pkg.pageLimit} pages.</p>
-<ul class="checklist">${pkg.includes.map((i) => html`<li>${i}</li>`)}</ul>
-${pkg.priceIsFloor ? html`<p class="faint">Need more than the standard Premium scope? <a href="/quote">Request a custom quote</a> — work above the starting price is quoted separately.</p>` : ""}</div>
+<ul class="checklist" data-testid="checkout-scope">${pkg.includes.map((i) => html`<li>${i}</li>`)}</ul>
+${pkg.priceIsFloor ? html`<p class="faint">Need more than the standard Premium scope? <a href="/quote">Request a custom quote</a> — work above the starting price is quoted separately.</p>` : ""}
+<p class="faint">Your project manager confirms the final scope with you against your intake after payment, before design starts.</p></div>
+<details class="card" data-testid="checkout-intake-summary"><summary><strong>Your website intake</strong> · submitted ${formatDateTime(intake.completed_at)} · <a href="/checkout/${pkg.id}/intake">Edit</a></summary>${intakeSummary(pkg.id, intake.answers)}</details>
 ${configured ? html`<form method="post" action="/checkout/${pkg.id}" class="card stack">${csrf(ctx)}
 ${planFieldset}
 ${checkbox("terms", "I agree to the Development Agreement, Terms of Service, Refund Policy and Data Processing Addendum.", { required: true })}
 <p class="faint"><a href="/legal/development-agreement">Development agreement</a> · <a href="/legal/terms">Terms</a> · <a href="/legal/refunds">Refund policy</a> · <a href="/legal/data-processing">Data processing addendum</a></p>
 <p class="faint">You will be taken to Stripe's secure checkout. Your payment is confirmed only when Stripe notifies us.</p>
 <div class="form-actions">${button(`Pay ${formatCents(dueCents)}`)}</div></form>`
-    : html`<div class="card stack">${alert("warn", `${NOT_CONFIGURED} You cannot pay online right now.`)}<p>We can still start your project: request a quote or contact us and we will follow up with payment options.</p>
+    : html`<div class="card stack">${alert("warn", `${NOT_CONFIGURED} You cannot pay online right now.`)}<p>Your intake is saved. We can still start your project: request a quote or contact us and we will follow up with payment options.</p>
 <div class="row">${linkButton("Request a quote", "/quote", "primary")}${linkButton("Contact us", "/contact", "secondary")}</div></div>`}
 </div></section>`), status);
 }
 
 async function checkoutPost(ctx: AppContext, packageId: string) {
-  const pkg = packageById(packageId);
-  if (!pkg) throw new HttpError(404, "That package does not exist.");
+  const pkg = checkoutPackage(packageId);
   const org = requireCustomerOrg(ctx);
   if (!can(ctx.actor!, "customer.billing", { organizationId: org.organizationId })) throw new HttpError(403, "Only an account administrator can make purchases for this organization.");
   const unverified = requireVerifiedForPayment(ctx); // CREST-GAP-031
   if (unverified) return unverified;
-  if (!ctx.payments.configured) return checkoutPage(ctx, packageId, [`${NOT_CONFIGURED} No order was created.`], 409);
+  // No order and no Stripe session before the website intake is complete.
+  if (!(await completedOpenIntake(ctx.db, org.organizationId, { kind: "package", productId: pkg.id }))) {
+    return redirect(ctx, `/checkout/${pkg.id}/intake`, { kind: "error", text: INTAKE_REQUIRED });
+  }
+  if (!ctx.payments.configured) return checkoutReviewPage(ctx, packageId, [`${NOT_CONFIGURED} No order was created.`], 409);
   const f = await ctx.form();
   const planChoice = String(f.get("maintenance_plan") ?? "");
   try { assertPlanMeetsMinimum(pkg.id, planChoice); }
-  catch (e) { if (e instanceof PricingError) return checkoutPage(ctx, packageId, [e.message], 422, null); throw e; }
-  if (!f.get("terms")) return checkoutPage(ctx, packageId, ["You must accept the agreements to continue."], 422, planChoice);
-  // Any client-supplied price/amount fields are ignored: the order total comes from PACKAGES.
+  catch (e) { if (e instanceof PricingError) return checkoutReviewPage(ctx, packageId, [e.message], 422, null); throw e; }
+  if (!f.get("terms")) return checkoutReviewPage(ctx, packageId, ["You must accept the agreements to continue."], 422, planChoice);
+  // Any client-supplied price/amount fields are ignored: the order total comes from PACKAGES. The agreement
+  // acceptance is recorded inside startPackageCheckout, before the Stripe session is created.
   const res = await startPackageCheckout(ctx, { id: ctx.user!.id, email: ctx.user!.email, name: ctx.user!.displayName }, org.organizationId, pkg.id, planChoice);
-  await recordAcceptance(ctx, { userId: ctx.user!.id, organizationId: org.organizationId, context: "package_checkout", contextId: res.orderId });
   return stripeRedirect(ctx, res.url);
 }
 
@@ -1016,7 +1085,10 @@ export function register(r: Router): void {
 
   r.get("/checkout/maintenance/:planId", (ctx, p) => maintenanceCheckoutPage(ctx, p.planId, false));
   r.post("/checkout/maintenance/:planId", (ctx, p) => maintenanceCheckoutPage(ctx, p.planId, true));
-  r.get("/checkout/:packageId", (ctx, p) => checkoutPage(ctx, p.packageId));
+  r.get("/checkout/:packageId", (ctx, p) => checkoutEntry(ctx, p.packageId));
   r.post("/checkout/:packageId", (ctx, p) => checkoutPost(ctx, p.packageId));
+  r.get("/checkout/:packageId/intake", (ctx, p) => checkoutIntakePage(ctx, p.packageId));
+  r.post("/checkout/:packageId/intake", (ctx, p) => checkoutIntakePost(ctx, p.packageId));
+  r.get("/checkout/:packageId/review", (ctx, p) => checkoutReviewPage(ctx, p.packageId));
 }
 

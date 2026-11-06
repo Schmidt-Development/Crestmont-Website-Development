@@ -48,7 +48,11 @@ test("[WEB-006] [CAT-003] registration, sign-in and checkout pages render; custo
   assert.ok([302, 303].includes(r.status), `anonymous checkout redirects (${r.status})`);
   const c = await createCustomer(t.db, "cat3@example.com");
   const cust = await t.client().login(c.email, TEST_PASSWORD);
-  assert.equal((await cust.get("/checkout/starter")).status, 200);
+  // The package entry point leads to the website intake first (Founder requirement: describe it before paying).
+  const entry = await cust.get("/checkout/starter");
+  assert.equal(entry.status, 303);
+  assert.equal(entry.headers.get("location"), "/checkout/starter/intake");
+  assert.equal((await cust.get("/checkout/starter/intake")).status, 200);
   assert.equal((await cust.get("/checkout/custom")).status, 404, "custom work has no package checkout");
   const pricing = await (await anon.get("/pricing")).text();
   assert.match(pricing, /href="\/quote/, "custom work routes to a quote request");

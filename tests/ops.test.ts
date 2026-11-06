@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { createTestApp, createStaff, createCustomer, lastEmail, linkFrom, TEST_PASSWORD, type TestClient } from "./support/app.ts";
+import { completeIntake } from "./support/intake.ts";
 import { signEvidence, ingestEvidence } from "../src/readiness/ingest.ts";
 import { buildReport, loadReadinessInput } from "../src/readiness/report.ts";
 import { hmacSha256Hex } from "../src/lib/crypto.ts";
@@ -398,6 +399,7 @@ test("[TEST-004] backup export restores into a fresh database with identical row
   assert.equal((await visitor.post("/register", { name: "Jordan Lee", organization: "Lee Bakery", email: "jordan@leebakery.example", password: TEST_PASSWORD, terms: "1" })).status, 200);
   assert.equal((await visitor.get(linkFrom((await lastEmail(t.db, "jordan@leebakery.example"))!.text_body, "/verify-email"))).status, 303);
   const cust = await t.client().login("jordan@leebakery.example");
+  await completeIntake(cust, "business"); // intake before payment (Founder requirement)
   const co = await cust.post("/checkout/business", { maintenance_plan: "professional", terms: "1" });
   assert.equal(co.status, 303);
   const checkout = t.fake.checkouts[0];

@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createStaff, createCustomer, TEST_PASSWORD, type TestClient } from "./support/app.ts";
+import { completeIntake } from "./support/intake.ts";
 import type { Env } from "../src/app/context.ts";
 import { StripeTestPayments, StripeInvoicing, type PaymentsAdapter, type CheckoutRequest } from "../src/adapters/payments.ts";
 import { computeTax, lineTaxCents, parseRatePercent, formatRate, type TaxConfig } from "../src/domain/tax.ts";
@@ -73,7 +74,8 @@ test("[LEGAL-005] default (not configured) adds no tax anywhere and documents ke
   assert.equal(cfg.registered, false);
   assert.equal(cfg.rates.length, 0);
   const cu = await customer(t, "default@tax.example");
-  const page = await (await cu.c.get("/checkout/business")).text();
+  await completeIntake(cu.c, "business"); // intake before payment (Founder requirement)
+  const page = await (await cu.c.get("/checkout/business/review")).text();
   assert.doesNotMatch(page, /data-testid="checkout-tax"/);
   assert.equal((await cu.c.post("/checkout/business", { terms: "1", maintenance_plan: "professional" })).status, 303);
   const inv = (await latestInvoice(t.db, cu.organizationId))!;
@@ -110,7 +112,8 @@ test("[LEGAL-005] configured: checkout, invoice, receipt and quote show tax per 
   assert.match(settings, /TS-000123/);
 
   const cu = await customer(t, "taxed@tax.example");
-  const page = await (await cu.c.get("/checkout/business")).text();
+  await completeIntake(cu.c, "business"); // intake before payment (Founder requirement)
+  const page = await (await cu.c.get("/checkout/business/review")).text();
   assert.match(page, /data-testid="checkout-tax"/);
   assert.match(page, /Sales tax — Test State \(6\.25%\): \$156\.19/);
   assert.match(page, /Total due \$2,683\.30/);
@@ -164,6 +167,7 @@ test("[LEGAL-005] configured: checkout, invoice, receipt and quote show tax per 
   assert.match(rpdf, /\$156\.19/);
 
   // A product not marked taxable is invoiced without tax, and the snapshot says so.
+  await completeIntake(cu.c, "starter"); // intake before payment (Founder requirement)
   assert.equal((await cu.c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" })).status, 303);
   const starter = (await latestInvoice(t.db, cu.organizationId))!;
   assert.equal(starter.tax_cents, 0);

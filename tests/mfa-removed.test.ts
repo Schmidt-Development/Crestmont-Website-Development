@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createStaff, createCustomer, enrolTotp, TEST_PASSWORD, type TestClient } from "./support/app.ts";
+import { completeIntake } from "./support/intake.ts";
 import type { Env } from "../src/app/context.ts";
 import type { PaymentsAdapter, CheckoutRequest } from "../src/adapters/payments.ts";
 import { stepUpAction } from "../src/app/step-up.ts";
@@ -130,6 +131,7 @@ test("[AUTH-003] [AUTH-007] MFA removed: a customer administrator without an aut
   assert.equal(loc(invite), "/portal/team");
   assert.equal(await n(t.db, `SELECT COUNT(*) AS n FROM invitations WHERE email = 'teammate@nomfa.example' AND organization_id = ?`, admin.organizationId), 1, "the invitation was created");
 
+  await completeIntake(c, "starter"); // intake before payment (Founder requirement)
   const checkout = await c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" });
   assert.equal(checkout.status, 303);
   assert.match(loc(checkout), /^https:\/\/checkout\.stripe\.com\//, "sent to Stripe Checkout, not to /mfa/setup");

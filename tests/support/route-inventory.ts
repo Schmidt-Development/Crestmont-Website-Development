@@ -318,6 +318,9 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /checkout/maintenance/:planId": cust({ planId: "plan" }, act("checkout.subscription_started"), { admin: true }),
   "GET /checkout/:packageId": cust({ packageId: "package" }),
   "POST /checkout/:packageId": cust({ packageId: "package" }, act("checkout.started"), { admin: true }),
+  "GET /checkout/:packageId/intake": cust({ packageId: "package" }),
+  "POST /checkout/:packageId/intake": cust({ packageId: "package" }, act("purchase_intake.draft_saved")),
+  "GET /checkout/:packageId/review": cust({ packageId: "package" }),
 
   // ── Delivery: my work, conversations, projects, tasks (src/routes/projects.ts) ──
   "GET /staff": staff(STAFF_ROLES),
@@ -392,6 +395,8 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /portal/billing": cust(),
   "GET /portal/billing/invoices/:id": cust(P("invoice")),
   "POST /portal/billing/invoices/:id/pay": cust(P("invoice"), act("checkout.started"), { admin: true }),
+  "GET /portal/billing/invoices/:id/intake": cust(P("invoice")),
+  "POST /portal/billing/invoices/:id/intake": cust(P("invoice"), act("purchase_intake.draft_saved")),
   "POST /portal/billing/manage": cust(undefined, act("billing.portal_opened"), { admin: true }),
   "POST /portal/billing/refund-request": cust(undefined, act("refund.requested"), { admin: true }),
   "GET /staff/refunds": staff(rolesWith("refund.review")),

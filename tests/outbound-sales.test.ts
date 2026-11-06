@@ -6,6 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createStaff, createCustomer, TEST_PASSWORD, lastEmail, linkFrom } from "./support/app.ts";
+import { completeIntake } from "./support/intake.ts";
 import { hmacSha256Hex } from "../src/lib/crypto.ts";
 import type { CheckoutRequest } from "../src/adapters/payments.ts";
 import * as REG from "../src/services/sales-opt/registry.ts";
@@ -678,6 +679,7 @@ test("[PAY-001] [CRM-005] purchase link binds the order to the sales lead even w
   assert.equal(buy.status, 303);
   assert.match(buy.headers.get("set-cookie") ?? "", /crestmont_sales_link=[0-9a-f]{64}; Path=\/; Max-Age=\d+; HttpOnly; SameSite=Lax/);
   await c.login(buyer.email);
+  await completeIntake(c, "business"); // intake before payment (Founder requirement)
   const res = await c.post("/checkout/business", { maintenance_plan: "professional", terms: "1" });
   assert.equal(res.status, 303, await res.text());
   const order = await one<{ id: string; lead_id: string }>(t.db, `SELECT id, lead_id FROM orders WHERE organization_id = ?`, buyer.organizationId);
@@ -719,12 +721,14 @@ test("[PAY-001] a tampered, expired or other-package link never re-attributes a 
   const c = t.client();
   await c.get(L.url);
   await c.login(buyer.email);
+  await completeIntake(c, "business"); // intake before payment (Founder requirement)
   assert.equal((await c.post("/checkout/business", { maintenance_plan: "professional", terms: "1" })).status, 303, "link is for Starter, purchase is Business");
   assert.notEqual((await one<{ lead_id: string }>(t.db, `SELECT lead_id FROM orders WHERE organization_id = ?`, buyer.organizationId)).lead_id, L.leadId);
   const c2 = t.client();
   c2.cookies.set("crestmont_sales_link", "f".repeat(64));
   const b2 = await createCustomer(t.db, "third@else.example", "Third Co");
   await c2.login(b2.email);
+  await completeIntake(c2, "starter"); // intake before payment (Founder requirement)
   await c2.post("/checkout/starter", { maintenance_plan: "essential", terms: "1" });
   assert.notEqual((await one<{ lead_id: string }>(t.db, `SELECT lead_id FROM orders WHERE organization_id = ?`, b2.organizationId)).lead_id, L.leadId, "unknown token ignored");
 });

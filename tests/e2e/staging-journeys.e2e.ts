@@ -328,6 +328,39 @@ journey(3, ["SALES-002", "SALES-003"], "sales qualifies the lead, builds a custo
   assertClean();
 });
 
+/** Fills the conditional website intake (journey 4, before the deposit is paid) and submits it, proving the
+ *  conditional questions and the server-side refusal on the way. `submit` is the form's submit button label. */
+async function fillConditionalIntake(c: Page, submit: string): Promise<void> {
+  assert.ok(await c.locator("#f-industry").count(), `the website intake form is shown. Page: ${(await text(c)).slice(0, 160).replace(/\s+/g, " ")}`);
+  const visible = (sel: string) => c.locator(sel).isVisible();
+  for (const [sel, v] of [["#f-business_name", contact.company], ["#f-contact_name", contact.name]] as const) {
+    if (!(await c.locator(sel).inputValue())) await c.fill(sel, v);
+  }
+  await c.fill("#f-industry", `Cafés (${RUN})`);
+  await c.fill("#f-goals", "Online ordering for three cafés and a loyalty programme.");
+  await c.fill("#f-target_audience", "Regular customers and office lunch orders.");
+  assert.equal(await visible("#f-brand_style"), false, "style question hidden until the branding answer");
+  await c.check("input[name=has_branding][value=no]");
+  assert.equal(await visible("#f-brand_style"), true, "style question shown when there is no branding");
+  assert.equal(await visible("#f-logo"), false);
+  await c.fill("#f-brand_style", "Warm, friendly, coffee browns.");
+  await c.fill("#f-pages", "Home, Menu, Order online, Loyalty, Locations, Contact");
+  await c.check("input[name=functionality][value=booking]");
+  assert.equal(await visible("#f-booking_details"), true, "booking follow-up appears");
+  await c.check("input[name=content_source][value=crestmont_draft]");
+  await c.check("input[name=images_source][value=licensed]");
+  await c.check("input[name=domain_status][value=need]");
+  assert.equal(await visible("#f-domain_wishes"), true);
+  await c.fill("#f-domain_wishes", `${RUN}.staging-journeys.example`);
+  await c.check("input[name=hosting][value=crestmont]");
+  // Submitting without the now-required booking details is refused server-side and keeps what was typed.
+  await nav(c, btn(c, submit));
+  assert.match(await text(c, ".alert--error"), /Booking details is required/);
+  assert.equal(await c.locator("#f-industry").inputValue(), `Cafés (${RUN})`);
+  await c.fill("#f-booking_details", "Customers reserve catering pickups; we use a paper diary today.");
+  await nav(c, btn(c, submit));
+}
+
 journey(4, ["SALES-004"], "customer registers from the proposal, verifies the email, signs in and accepts the quote → order and deposit invoice", { needs: [3] }, async () => {
   const c = await previewContext();
   people.newCustomer = c;
@@ -353,6 +386,14 @@ journey(4, ["SALES-004"], "customer registers from the proposal, verifies the em
   await p.check("input[name=agree]");
   await nav(p, btn(p, "Accept and continue to payment"));
   assert.match(new URL(p.url()).pathname, /^\/portal\/billing\/invoices\/inv_/, await alerts(p));
+  // Founder requirement (2026-11): the customer describes the website before paying. The deposit offers the website
+  // intake instead of payment until it is submitted (the conditional questions are exercised here, journey 8 checks
+  // that the project arrives with them).
+  const invoicePath = new URL(p.url()).pathname;
+  assert.match(await text(p), /Before this first payment, tell us about the website you want/);
+  await p.goto(`${BASE}${invoicePath}/intake`);
+  await fillConditionalIntake(p, "Submit intake");
+  assert.equal(new URL(p.url()).pathname, invoicePath, await alerts(p));
   const inv = await text(p);
   assert.match(inv, new RegExp(esc(usd(Math.floor(total / 2)))), "50% deposit invoice");
   assert.match(inv, /Open/i);
@@ -470,9 +511,9 @@ async function runProject(): Promise<string> {
   return (runProjectId = href!.split("/").pop()!);
 }
 
-journey(8, ["PORTAL-002"], "customer completes conditional onboarding (this run's freshly provisioned project) and the PM sees the answers", { needs: [7] }, async () => {
-  // Repeatable: journeys 4–7 create and pay for a new project on every run, so there is always a project awaiting
-  // onboarding (the seeded Ridgeline sample could only be onboarded once).
+journey(8, ["PORTAL-002"], "the freshly provisioned project carries the conditional intake the customer completed before paying, and the PM sees the answers", { needs: [7] }, async () => {
+  // Repeatable: journeys 4–7 create and pay for a new project on every run, with a fresh intake each time (the seeded
+  // Ridgeline sample could only be onboarded once).
   const id = await runProject();
   // The Owner assigns the project manager, as for any new project.
   const o = await as("owner");
@@ -483,36 +524,13 @@ journey(8, ["PORTAL-002"], "customer completes conditional onboarding (this run'
   await nav(o, pmForm.getByRole("button", { name: "Save" }));
   assert.match(await alerts(o), /Project manager updated/i);
   const c = people.newCustomer.page;
+  // The website intake was submitted before payment (journey 4): it arrived with the project, which is in scope
+  // review, and there is no second intake.
   await c.goto(`${BASE}/portal/projects/${id}/onboarding`);
-  assert.ok(await c.locator("#f-industry").count(), `the new project awaits onboarding. Page: ${(await text(c)).slice(0, 160).replace(/\s+/g, " ")}`);
-  const visible = (sel: string) => c.locator(sel).isVisible();
-  for (const [sel, v] of [["#f-business_name", contact.company], ["#f-contact_name", contact.name]] as const) {
-    if (!(await c.locator(sel).inputValue())) await c.fill(sel, v);
-  }
-  await c.fill("#f-industry", `Cafés (${RUN})`);
-  await c.fill("#f-goals", "Online ordering for three cafés and a loyalty programme.");
-  await c.fill("#f-target_audience", "Regular customers and office lunch orders.");
-  assert.equal(await visible("#f-brand_style"), false, "style question hidden until the branding answer");
-  await c.check("input[name=has_branding][value=no]");
-  assert.equal(await visible("#f-brand_style"), true, "style question shown when there is no branding");
-  assert.equal(await visible("#f-logo"), false);
-  await c.fill("#f-brand_style", "Warm, friendly, coffee browns.");
-  await c.fill("#f-pages", "Home, Menu, Order online, Loyalty, Locations, Contact");
-  await c.check("input[name=functionality][value=booking]");
-  assert.equal(await visible("#f-booking_details"), true, "booking follow-up appears");
-  await c.check("input[name=content_source][value=crestmont_draft]");
-  await c.check("input[name=images_source][value=licensed]");
-  await c.check("input[name=domain_status][value=need]");
-  assert.equal(await visible("#f-domain_wishes"), true);
-  await c.fill("#f-domain_wishes", `${RUN}.staging-journeys.example`);
-  await c.check("input[name=hosting][value=crestmont]");
-  // Submitting without the now-required booking details is refused server-side and keeps what was typed.
-  await nav(c, btn(c, "Submit onboarding"));
-  assert.match(await text(c, ".alert--error"), /Booking details is required/);
-  assert.equal(await c.locator("#f-industry").inputValue(), `Cafés (${RUN})`);
-  await c.fill("#f-booking_details", "Customers reserve catering pickups; we use a paper diary today.");
-  await nav(c, btn(c, "Submit onboarding"));
-  assert.equal(new URL(c.url()).pathname, `/portal/projects/${id}`, await alerts(c));
+  assert.match(await text(c), /Website intake submitted before payment/, `the project arrived with its intake. Page: ${(await text(c)).slice(0, 160).replace(/\s+/g, " ")}`);
+  assert.equal(await c.locator("#f-industry").count(), 0, "no second intake form");
+  assert.match(await text(c), re(`Cafés (${RUN})`));
+  await c.goto(`${BASE}/portal/projects/${id}`);
   assert.match(await text(c), /Scope review/i);
   const pm = await as("project_manager");
   await pm.goto(`${BASE}/staff/projects/${id}`);
@@ -1108,6 +1126,9 @@ test("[PAY-008] [PAY-003] Stripe test mode: a disputed payment reaches staff Dis
   const before = await disputeMails();
   const c = people.newCustomer.page;
   await c.goto(`${BASE}/checkout/starter`);
+  // Founder requirement: the website intake comes first (a fresh one per purchase), then the review page.
+  if (new URL(c.url()).pathname === "/checkout/starter/intake") await fillConditionalIntake(c, "Continue to review");
+  assert.equal(new URL(c.url()).pathname, "/checkout/starter/review", await alerts(c));
   await c.locator("input[name=maintenance_plan][value=essential]").check(); // FD-26: Starter requires Essential or higher
   await c.locator("input[name=terms]").check();
   await nav(c, c.getByRole("button", { name: /^Pay \$[\d,.]+/ }).first());

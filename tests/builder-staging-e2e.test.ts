@@ -53,9 +53,18 @@ test("[AIB-020] the price and button label the driver expects are what the real 
   const t = await createTestApp({ overrides: { payments: new FakePayments() } });
   const cu = await createCustomer(t.db, C.email, C.business);
   const c = await t.client().login(cu.email, TEST_PASSWORD);
-  const res = await c.get("/checkout/business");
+  // The driver's path: /checkout/business opens the website intake first; its fixture intake must pass the real
+  // validation there, and "Continue to review" leads to the page with the price and the Pay button.
+  const entry = await c.get("/checkout/business");
+  assert.equal(entry.headers.get("location"), "/checkout/business/intake", "the checkout starts with the intake");
+  const intakePage = await (await c.get("/checkout/business/intake")).text();
+  assert.ok(intakePage.includes(">Continue to review<"), "the intake's submit button carries the label the driver clicks");
+  const submitted = await c.post("/checkout/business/intake", { intent: "submit", ...C.intake, functionality: [...C.intake.functionality] });
+  assert.equal(submitted.headers.get("location"), "/checkout/business/review", "the fixture intake passes the real validation");
+  const res = await c.get("/checkout/business/review");
   assert.equal(res.status, 200, "the Business checkout page renders");
   const page = await res.text();
+  assert.match(page, /name="maintenance_plan" value="professional"/, "the plan picker the driver selects from");
 
   const expected = formatCents(C.packageCents);
   assert.equal(expected, "$2,499", "a whole-dollar package is rendered without cents");

@@ -70,7 +70,8 @@ test("[AUTH-008] customer A gets 403/404 on every customer route addressed with 
   }
   assert.deepEqual(problems, []);
   assert.ok(covered.length >= 29, `covered ${covered.length} id-addressed customer routes`);
-  assert.deepEqual(notTenant.sort(), ["GET /checkout/:packageId", "GET /checkout/maintenance/:planId", "POST /checkout/:packageId", "POST /checkout/maintenance/:planId", "POST /q/:token/accept"],
+  assert.deepEqual(notTenant.sort(), ["GET /checkout/:packageId", "GET /checkout/:packageId/intake", "GET /checkout/:packageId/review", "GET /checkout/maintenance/:planId",
+    "POST /checkout/:packageId", "POST /checkout/:packageId/intake", "POST /checkout/maintenance/:planId", "POST /q/:token/accept"],
     "only catalogue-addressed routes and the emailed proposal token are outside the tenant matrix");
   // A proposal is bound to the lead's email address: another organization's administrator holding the link cannot accept it.
   const orders0 = (w.db as SqliteDb).raw.prepare(`SELECT COUNT(*) AS n FROM orders`).get() as { n: number };

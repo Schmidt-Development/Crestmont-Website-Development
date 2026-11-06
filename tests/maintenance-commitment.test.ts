@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createCustomer } from "./support/app.ts";
+import { completeIntake } from "./support/intake.ts";
 import type { Env } from "../src/app/context.ts";
 import type { PaymentsAdapter, CheckoutRequest } from "../src/adapters/payments.ts";
 import {
@@ -58,7 +59,8 @@ test("[CAT-005] FD-26 / clarification 3: every plan covers exactly one business 
 
 test("[SALES-004] [CAT-005] checkout page offers only plans at or above the minimum and says nothing is billed for the plan today", async () => {
   const { c } = await buyer("planpage@fixture.example");
-  const business = await (await c.get("/checkout/business")).text();
+  await completeIntake(c, "business"); // intake before payment (Founder requirement)
+  const business = await (await c.get("/checkout/business/review")).text();
   assert.match(business, /data-testid="checkout-maintenance-plan"/);
   assert.match(business, /name="maintenance_plan" value="professional"/);
   assert.match(business, /name="maintenance_plan" value="executive"/);
@@ -66,18 +68,21 @@ test("[SALES-004] [CAT-005] checkout page offers only plans at or above the mini
   assert.match(business, /requires the Professional plan or higher/);
   assert.match(business, /not charged for the plan today/);
   assert.match(business, /one business project/i);
-  const starter = await (await c.get("/checkout/starter")).text();
+  await completeIntake(c, "starter"); // intake before payment (Founder requirement)
+  const starter = await (await c.get("/checkout/starter/review")).text();
   assert.match(starter, /name="maintenance_plan" value="essential"/);
 });
 
 test("[SALES-004] [CAT-004] FD-26: checkout without a plan, or below the minimum, creates no order and no Stripe session", async () => {
   const { t, fake, c } = await buyer("noplan@fixture.example");
+  await completeIntake(c, "business"); // intake before payment (Founder requirement)
   const missing = await c.post("/checkout/business", { terms: "1" });
   assert.equal(missing.status, 422);
   assert.match(await missing.text(), /Choose a hosting and maintenance plan/);
   const downgrade = await c.post("/checkout/business", { terms: "1", maintenance_plan: "essential" });
   assert.equal(downgrade.status, 422);
   assert.match(await downgrade.text(), /requires the Professional plan or higher/);
+  await completeIntake(c, "premium"); // intake before payment (Founder requirement)
   const forged = await c.post("/checkout/premium", { terms: "1", maintenance_plan: "essential_plus" });
   assert.equal(forged.status, 422);
   assert.equal(await count(t.db, `SELECT COUNT(*) n FROM orders`), 0);
@@ -86,6 +91,7 @@ test("[SALES-004] [CAT-004] FD-26: checkout without a plan, or below the minimum
 
 test("[SALES-004] [CAT-004] FD-26 / FD-27: an upgraded choice is recorded on the order; the package is a one-time payment and no subscription starts", async () => {
   const { t, fake, c } = await buyer("upgrade@fixture.example");
+  await completeIntake(c, "starter"); // intake before payment (Founder requirement)
   const res = await c.post("/checkout/starter", { terms: "1", maintenance_plan: "executive" });
   assert.equal(res.status, 303);
   const co = fake.checkouts.at(-1)!;
@@ -102,6 +108,7 @@ test("[SALES-004] [CAT-004] FD-26 / FD-27: an upgraded choice is recorded on the
 
 test("[SALES-004] FD-26: changing the plan before paying voids the open invoice and issues one for the new choice", async () => {
   const { t, fake, c } = await buyer("switch@fixture.example");
+  await completeIntake(c, "business"); // intake before payment (Founder requirement)
   assert.equal((await c.post("/checkout/business", { terms: "1", maintenance_plan: "professional" })).status, 303);
   const first = fake.checkouts.at(-1)!.metadata;
   assert.equal((await c.post("/checkout/business", { terms: "1", maintenance_plan: "professional" })).status, 303);
