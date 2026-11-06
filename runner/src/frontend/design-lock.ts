@@ -96,7 +96,23 @@ const key = (s: { page: string; viewport: string }): string => `${s.page}|${s.vi
  */
 export function frameOf(s: DesignSignature): { sel: string; x: number; w: number; gap: number }[] {
   const ls = [...s.landmarks].sort((a, b) => a.y - b.y);
-  return ls.map((l, i) => ({ sel: l.sel, x: l.x, w: l.w, gap: i === 0 ? l.y : l.y - (ls[i - 1].y + ls[i - 1].h) }));
+  return ls.map((l, i) => {
+    if (i === 0) return { sel: l.sel, x: l.x, w: l.w, gap: l.y };
+    const prev = ls[i - 1];
+    // NESTED landmarks are measured from their parent's TOP, not from its bottom.
+    //
+    // `gap` means "the spacing between landmarks", and bottom-to-top is the right way to measure it between
+    // siblings. But landmarks nest: `section` sits inside `main`, both starting at the same y. Measured
+    // bottom-to-top a child's gap is minus its parent's HEIGHT, so every content-driven height change moves it by
+    // exactly that much — which is absolute height sneaking back into a comparison that deliberately excludes it.
+    //
+    // Measured on a real build: Model B connected the staff page's backend, the page got 27px shorter on mobile,
+    // and `section`'s gap went from -1194 to -1167. Beyond the 16px tolerance, so the visual gate reported layout
+    // drift for a page whose grid, order and real spacing were all untouched. The inset from the parent's top is
+    // what "where this sits inside that" actually means, and it does not move when the parent grows.
+    const nested = prev.y <= l.y && prev.y + prev.h >= l.y + l.h;
+    return { sel: l.sel, x: l.x, w: l.w, gap: nested ? l.y - prev.y : l.y - (prev.y + prev.h) };
+  });
 }
 
 /**

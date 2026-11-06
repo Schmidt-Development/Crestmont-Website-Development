@@ -6,9 +6,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  TOLERANCE, baselineFingerprint, captureBaseline, compareToBaseline, describeDrift, freezeRow, signatureHash,
+  TOLERANCE, baselineFingerprint, captureBaseline, compareToBaseline, describeDrift, frameOf, freezeRow, signatureHash,
 } from "../src/frontend/design-lock.ts";
-import type { DesignSignature } from "../src/frontend/design-lock.ts";
+import type { DesignSignature, DesignBaseline } from "../src/frontend/design-lock.ts";
 import type { RenderShot } from "../src/orchestrator/repair-effect.ts";
 
 /** Summit Haul's palette, since it is the design this architecture was written in response to. */
@@ -223,4 +223,54 @@ test("[DL-009] the freeze row reuses the existing table and does not misrepresen
   assert.equal(rubric.design_fingerprint, b.fingerprint);
   assert.equal(rubric.pages.length, 2);
   assert.equal(rubric.pages[0].signature, signatureHash(b.signatures[0]));
+});
+
+test("[DL-003] a content-driven height change in a parent landmark is not layout drift", () => {
+  // Measured on a real build: Model B connected the staff page's backend, the page came out 27px shorter on
+  // mobile, and the visual gate reported layout drift. Nothing about the design had changed \u2014 same grid, same
+  // vertical order, same real spacing.
+  //
+  // The cause was `gap`. It is measured bottom-to-top, which is right between siblings, but landmarks nest:
+  // `section` sits inside `main` at the same y. Measured that way a child's gap is minus its parent's HEIGHT, so
+  // any content-driven height change moves it by exactly that amount. That is absolute height sneaking back into
+  // a comparison which excludes it on purpose (DL-002), and it would have flagged every successful integration.
+  const sig = (mainH: number): DesignSignature => ({
+    page: "staff", viewport: "mobile",
+    skeleton: ["header", "main", "section", "footer"],
+    palette: ["rgb(16, 36, 42)"], fonts: ["system-ui"], typeScale: [16, 24],
+    landmarks: [
+      { sel: "header", x: 0, y: 0, w: 390, h: 77 },
+      { sel: "main", x: 0, y: 77, w: 390, h: mainH },
+      { sel: "section", x: 0, y: 77, w: 390, h: mainH },
+      { sel: "footer", x: 0, y: 77 + mainH + 80, w: 390, h: 703 },
+    ],
+    docHeight: 77 + mainH + 80 + 703,
+  } as DesignSignature);
+
+  const before = sig(1194);
+  const after = sig(1167);
+
+  // The real spacing is identical: the footer still sits 80px below the content.
+  const f = (s: DesignSignature) => new Map(frameOf(s).map((x) => [x.sel, x]));
+  assert.equal(f(after).get("footer")!.gap, f(before).get("footer")!.gap, "the footer's spacing is unchanged");
+  assert.equal(f(after).get("section")!.gap, f(before).get("section")!.gap, "a nested landmark's inset does not move when its parent grows");
+
+  const baseline = {
+    fingerprint: "x", artifactSha: "a", sourceFingerprint: null, approvedBy: "u", capturedAt: "now",
+    signatures: [before], renders: [],
+  } as unknown as DesignBaseline;
+  const held = compareToBaseline(baseline, [after]);
+  assert.deepEqual(held.findings.filter((x) => x.kind === "design-drift"), [], "a shorter page is content, not drift");
+  assert.equal(held.ok, true);
+
+  // The lock still catches what it is for: a landmark genuinely moved, and a real change in sibling spacing.
+  const shifted = sig(1194);
+  shifted.landmarks = shifted.landmarks.map((l) => (l.sel === "section" ? { ...l, x: 40 } : l));
+  assert.equal(compareToBaseline(baseline, [shifted]).ok, false, "a landmark moved across the grid is drift");
+
+  const respaced = sig(1194);
+  respaced.landmarks = respaced.landmarks.map((l) => (l.sel === "footer" ? { ...l, y: l.y + 60 } : l));
+  const r = compareToBaseline(baseline, [respaced]);
+  assert.equal(r.ok, false, "60px more space above the footer is drift");
+  assert.match(r.findings.map((x) => x.detail).join(" "), /spacing above it changed/);
 });
