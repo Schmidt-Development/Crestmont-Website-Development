@@ -1,0 +1,977 @@
+{
+  "artifactSha": "59dfb2f534cf6c5956b9edac00479d2d3dfebf635e16d5f86d0dc6ff54c416c7",
+  "sourceFingerprint": "4069f795ec246a23fc0edb7e6c5810f03bbec0bfbd513dbef75e27be1dff4ef3",
+  "signatures": [
+    {
+      "page": "index",
+      "viewport": "desktop",
+      "skeleton": [
+        "header.site-header",
+        "nav.site-nav",
+        "ul",
+        "main",
+        "section.hero",
+        "h1",
+        "section.section",
+        "h2",
+        "ul.card-grid",
+        "h3",
+        "h3",
+        "h3",
+        "section.section.section-sand",
+        "h2",
+        "h3",
+        "h3",
+        "h3",
+        "section.section",
+        "h2",
+        "footer.site-footer",
+        "h3",
+        "ul",
+        "h3",
+        "ul"
+      ],
+      "palette": [
+        "rgb(21, 41, 29)",
+        "rgb(217, 131, 36)",
+        "rgb(232, 220, 200)",
+        "rgb(244, 238, 226)",
+        "rgb(255, 255, 255)",
+        "rgb(26, 26, 24)",
+        "rgb(31, 61, 43)",
+        "rgb(92, 107, 96)",
+        "rgba(232, 220, 200, 0.8)",
+        "rgba(31, 61, 43, 0.12)"
+      ],
+      "fonts": [
+        "Arial Black",
+        "Segoe UI"
+      ],
+      "typeScale": [
+        13,
+        14,
+        15,
+        16,
+        18,
+        24,
+        32,
+        44,
+        60
+      ],
+      "landmarks": [
+        {
+          "sel": "header",
+          "x": 0,
+          "y": 0,
+          "w": 1366,
+          "h": 88
+        },
+        {
+          "sel": "nav",
+          "x": 865,
+          "y": 31,
+          "w": 384,
+          "h": 26
+        },
+        {
+          "sel": "main",
+          "x": 0,
+          "y": 88,
+          "w": 1366,
+          "h": 2485
+        },
+        {
+          "sel": "section",
+          "x": 0,
+          "y": 88,
+          "w": 1366,
+          "h": 648
+        },
+        {
+          "sel": "section:nth(2)",
+          "x": 0,
+          "y": 736,
+          "w": 1366,
+          "h": 748
+        },
+        {
+          "sel": "section:nth(3)",
+          "x": 0,
+          "y": 1484,
+          "w": 1366,
+          "h": 547
+        },
+        {
+          "sel": "section:nth(4)",
+          "x": 0,
+          "y": 2031,
+          "w": 1366,
+          "h": 543
+        },
+        {
+          "sel": "footer",
+          "x": 0,
+          "y": 2573,
+          "w": 1366,
+          "h": 341
+        }
+      ],
+      "docHeight": 2914
+    },
+    {
+      "page": "index",
+      "viewport": "mobile",
+      "skeleton": [
+        "header.site-header",
+        "main",
+        "section.hero",
+        "h1",
+        "section.section",
+        "h2",
+        "ul.card-grid",
+        "h3",
+        "h3",
+        "h3",
+        "section.section.section-sand",
+        "h2",
+        "h3",
+        "h3",
+        "h3",
+        "section.section",
+        "h2",
+        "footer.site-footer",
+        "h3",
+        "ul",
+        "h3",
+        "ul"
+      ],
+      "palette": [
+        "rgb(21, 41, 29)",
+        "rgb(217, 131, 36)",
+        "rgb(232, 220, 200)",
+        "rgb(244, 238, 226)",
+        "rgb(255, 255, 255)",
+        "rgb(26, 26, 24)",
+        "rgb(31, 61, 43)",
+        "rgb(92, 107, 96)",
+        "rgba(232, 220, 200, 0.8)",
+        "rgba(31, 61, 43, 0.12)"
+      ],
+      "fonts": [
+        "Arial Black",
+        "Segoe UI"
+      ],
+      "typeScale": [
+        13,
+        14,
+        15,
+        16,
+        18,
+        24,
+        30,
+        32,
+        40
+      ],
+      "landmarks": [
+        {
+          "sel": "header",
+          "x": 0,
+          "y": 0,
+          "w": 390,
+          "h": 88
+        },
+        {
+          "sel": "main",
+          "x": 0,
+          "y": 88,
+          "w": 390,
+          "h": 3632
+        },
+        {
+          "sel": "section",
+          "x": 0,
+          "y": 88,
+          "w": 390,
+          "h": 873
+        },
+        {
+          "sel": "section:nth(2)",
+          "x": 0,
+          "y": 961,
+          "w": 390,
+          "h": 1407
+        },
+        {
+          "sel": "section:nth(3)",
+          "x": 0,
+          "y": 2367,
+          "w": 390,
+          "h": 889
+        },
+        {
+          "sel": "section:nth(4)",
+          "x": 0,
+          "y": 3257,
+          "w": 390,
+          "h": 463
+        },
+        {
+          "sel": "footer",
+          "x": 0,
+          "y": 3720,
+          "w": 390,
+          "h": 677
+        }
+      ],
+      "docHeight": 4397
+    },
+    {
+      "page": "index",
+      "viewport": "tablet",
+      "skeleton": [
+        "header.site-header",
+        "main",
+        "section.hero",
+        "h1",
+        "section.section",
+        "h2",
+        "ul.card-grid",
+        "h3",
+        "h3",
+        "h3",
+        "section.section.section-sand",
+        "h2",
+        "h3",
+        "h3",
+        "h3",
+        "section.section",
+        "h2",
+        "footer.site-footer",
+        "h3",
+        "ul",
+        "h3",
+        "ul"
+      ],
+      "palette": [
+        "rgb(21, 41, 29)",
+        "rgb(217, 131, 36)",
+        "rgb(232, 220, 200)",
+        "rgb(244, 238, 226)",
+        "rgb(255, 255, 255)",
+        "rgb(26, 26, 24)",
+        "rgb(31, 61, 43)",
+        "rgb(92, 107, 96)",
+        "rgba(232, 220, 200, 0.8)",
+        "rgba(31, 61, 43, 0.12)"
+      ],
+      "fonts": [
+        "Arial Black",
+        "Segoe UI"
+      ],
+      "typeScale": [
+        13,
+        14,
+        15,
+        16,
+        18,
+        24,
+        30,
+        32,
+        40
+      ],
+      "landmarks": [
+        {
+          "sel": "header",
+          "x": 0,
+          "y": 0,
+          "w": 768,
+          "h": 88
+        },
+        {
+          "sel": "main",
+          "x": 0,
+          "y": 88,
+          "w": 768,
+          "h": 3386
+        },
+        {
+          "sel": "section",
+          "x": 0,
+          "y": 88,
+          "w": 768,
+          "h": 953
+        },
+        {
+          "sel": "section:nth(2)",
+          "x": 0,
+          "y": 1041,
+          "w": 768,
+          "h": 1216
+        },
+        {
+          "sel": "section:nth(3)",
+          "x": 0,
+          "y": 2257,
+          "w": 768,
+          "h": 754
+        },
+        {
+          "sel": "section:nth(4)",
+          "x": 0,
+          "y": 3011,
+          "w": 768,
+          "h": 463
+        },
+        {
+          "sel": "footer",
+          "x": 0,
+          "y": 3474,
+          "w": 768,
+          "h": 677
+        }
+      ],
+      "docHeight": 4151
+    },
+    {
+      "page": "quote",
+      "viewport": "desktop",
+      "skeleton": [
+        "header.site-header",
+        "nav.site-nav",
+        "ul",
+        "main",
+        "section.hero",
+        "h1",
+        "section.section",
+        "form.quote-form",
+        "aside",
+        "h3",
+        "h3",
+        "h3",
+        "footer.site-footer",
+        "h3",
+        "ul",
+        "h3",
+        "ul"
+      ],
+      "palette": [
+        "rgb(21, 41, 29)",
+        "rgb(217, 131, 36)",
+        "rgb(232, 220, 200)",
+        "rgb(244, 238, 226)",
+        "rgb(255, 255, 255)",
+        "rgb(26, 26, 24)",
+        "rgb(31, 61, 43)",
+        "rgb(92, 107, 96)",
+        "rgba(232, 220, 200, 0.8)",
+        "rgba(31, 61, 43, 0.28)"
+      ],
+      "fonts": [
+        "Arial Black",
+        "Segoe UI"
+      ],
+      "typeScale": [
+        13,
+        14,
+        15,
+        16,
+        18,
+        24,
+        60
+      ],
+      "landmarks": [
+        {
+          "sel": "header",
+          "x": 0,
+          "y": 0,
+          "w": 1366,
+          "h": 88
+        },
+        {
+          "sel": "nav",
+          "x": 865,
+          "y": 31,
+          "w": 384,
+          "h": 26
+        },
+        {
+          "sel": "main",
+          "x": 0,
+          "y": 88,
+          "w": 1366,
+          "h": 1190
+        },
+        {
+          "sel": "section",
+          "x": 0,
+          "y": 88,
+          "w": 1366,
+          "h": 356
+        },
+        {
+          "sel": "section:nth(2)",
+          "x": 0,
+          "y": 444,
+          "w": 1366,
+          "h": 834
+        },
+        {
+          "sel": "footer",
+          "x": 0,
+          "y": 1278,
+          "w": 1366,
+          "h": 341
+        }
+      ],
+      "docHeight": 1618
+    },
+    {
+      "page": "quote",
+      "viewport": "mobile",
+      "skeleton": [
+        "header.site-header",
+        "main",
+        "section.hero",
+        "h1",
+        "section.section",
+        "form.quote-form",
+        "aside",
+        "h3",
+        "h3",
+        "h3",
+        "footer.site-footer",
+        "h3",
+        "ul",
+        "h3",
+        "ul"
+      ],
+      "palette": [
+        "rgb(21, 41, 29)",
+        "rgb(217, 131, 36)",
+        "rgb(232, 220, 200)",
+        "rgb(244, 238, 226)",
+        "rgb(255, 255, 255)",
+        "rgb(26, 26, 24)",
+        "rgb(31, 61, 43)",
+        "rgb(92, 107, 96)",
+        "rgba(232, 220, 200, 0.8)",
+        "rgba(31, 61, 43, 0.28)"
+      ],
+      "fonts": [
+        "Arial Black",
+        "Segoe UI"
+      ],
+      "typeScale": [
+        13,
+        14,
+        15,
+        16,
+        18,
+        24,
+        40
+      ],
+      "landmarks": [
+        {
+          "sel": "header",
+          "x": 0,
+          "y": 0,
+          "w": 390,
+          "h": 88
+        },
+        {
+          "sel": "main",
+          "x": 0,
+          "y": 88,
+          "w": 390,
+          "h": 1788
+        },
+        {
+          "sel": "section",
+          "x": 0,
+          "y": 88,
+          "w": 390,
+          "h": 416
+        },
+        {
+          "sel": "section:nth(2)",
+          "x": 0,
+          "y": 504,
+          "w": 390,
+          "h": 1372
+        },
+        {
+          "sel": "footer",
+          "x": 0,
+          "y": 1876,
+          "w": 390,
+          "h": 677
+        }
+      ],
+      "docHeight": 2553
+    },
+    {
+      "page": "quote",
+      "viewport": "tablet",
+      "skeleton": [
+        "header.site-header",
+        "main",
+        "section.hero",
+        "h1",
+        "section.section",
+        "form.quote-form",
+        "aside",
+        "h3",
+        "h3",
+        "h3",
+        "footer.site-footer",
+        "h3",
+        "ul",
+        "h3",
+        "ul"
+      ],
+      "palette": [
+        "rgb(21, 41, 29)",
+        "rgb(217, 131, 36)",
+        "rgb(232, 220, 200)",
+        "rgb(244, 238, 226)",
+        "rgb(255, 255, 255)",
+        "rgb(26, 26, 24)",
+        "rgb(31, 61, 43)",
+        "rgb(92, 107, 96)",
+        "rgba(232, 220, 200, 0.8)",
+        "rgba(31, 61, 43, 0.28)"
+      ],
+      "fonts": [
+        "Arial Black",
+        "Segoe UI"
+      ],
+      "typeScale": [
+        13,
+        14,
+        15,
+        16,
+        18,
+        24,
+        40
+      ],
+      "landmarks": [
+        {
+          "sel": "header",
+          "x": 0,
+          "y": 0,
+          "w": 768,
+          "h": 88
+        },
+        {
+          "sel": "main",
+          "x": 0,
+          "y": 88,
+          "w": 768,
+          "h": 1603
+        },
+        {
+          "sel": "section",
+          "x": 0,
+          "y": 88,
+          "w": 768,
+          "h": 334
+        },
+        {
+          "sel": "section:nth(2)",
+          "x": 0,
+          "y": 422,
+          "w": 768,
+          "h": 1269
+        },
+        {
+          "sel": "footer",
+          "x": 0,
+          "y": 1691,
+          "w": 768,
+          "h": 677
+        }
+      ],
+      "docHeight": 2368
+    },
+    {
+      "page": "services",
+      "viewport": "desktop",
+      "skeleton": [
+        "header.site-header",
+        "nav.site-nav",
+        "ul",
+        "main",
+        "section.hero",
+        "h1",
+        "section.section",
+        "h2",
+        "table.rate-table",
+        "section.section.section-sand",
+        "h2",
+        "ul.card-grid",
+        "h3",
+        "h3",
+        "h3",
+        "h3",
+        "h3",
+        "h3",
+        "section.section",
+        "h2",
+        "footer.site-footer",
+        "h3",
+        "ul",
+        "h3",
+        "ul"
+      ],
+      "palette": [
+        "rgb(21, 41, 29)",
+        "rgb(217, 131, 36)",
+        "rgb(232, 220, 200)",
+        "rgb(244, 238, 226)",
+        "rgb(255, 255, 255)",
+        "rgb(26, 26, 24)",
+        "rgb(31, 61, 43)",
+        "rgb(92, 107, 96)",
+        "rgba(232, 220, 200, 0.8)",
+        "rgba(31, 61, 43, 0.12)"
+      ],
+      "fonts": [
+        "Arial Black",
+        "Segoe UI"
+      ],
+      "typeScale": [
+        13,
+        14,
+        15,
+        16,
+        18,
+        24,
+        44,
+        60
+      ],
+      "landmarks": [
+        {
+          "sel": "header",
+          "x": 0,
+          "y": 0,
+          "w": 1366,
+          "h": 88
+        },
+        {
+          "sel": "nav",
+          "x": 865,
+          "y": 31,
+          "w": 384,
+          "h": 26
+        },
+        {
+          "sel": "main",
+          "x": 0,
+          "y": 88,
+          "w": 1366,
+          "h": 2338
+        },
+        {
+          "sel": "section",
+          "x": 0,
+          "y": 88,
+          "w": 1366,
+          "h": 394
+        },
+        {
+          "sel": "section:nth(2)",
+          "x": 0,
+          "y": 482,
+          "w": 1366,
+          "h": 754
+        },
+        {
+          "sel": "section:nth(3)",
+          "x": 0,
+          "y": 1236,
+          "w": 1366,
+          "h": 835
+        },
+        {
+          "sel": "section:nth(4)",
+          "x": 0,
+          "y": 2070,
+          "w": 1366,
+          "h": 355
+        },
+        {
+          "sel": "footer",
+          "x": 0,
+          "y": 2426,
+          "w": 1366,
+          "h": 341
+        }
+      ],
+      "docHeight": 2766
+    },
+    {
+      "page": "services",
+      "viewport": "mobile",
+      "skeleton": [
+        "header.site-header",
+        "main",
+        "section.hero",
+        "h1",
+        "section.section",
+        "h2",
+        "table.rate-table",
+        "section.section.section-sand",
+        "h2",
+        "ul.card-grid",
+        "h3",
+        "h3",
+        "h3",
+        "h3",
+        "h3",
+        "h3",
+        "section.section",
+        "h2",
+        "footer.site-footer",
+        "h3",
+        "ul",
+        "h3",
+        "ul"
+      ],
+      "palette": [
+        "rgb(21, 41, 29)",
+        "rgb(217, 131, 36)",
+        "rgb(232, 220, 200)",
+        "rgb(244, 238, 226)",
+        "rgb(255, 255, 255)",
+        "rgb(26, 26, 24)",
+        "rgb(31, 61, 43)",
+        "rgb(92, 107, 96)",
+        "rgba(232, 220, 200, 0.8)",
+        "rgba(31, 61, 43, 0.12)"
+      ],
+      "fonts": [
+        "Arial Black",
+        "Segoe UI"
+      ],
+      "typeScale": [
+        13,
+        14,
+        15,
+        16,
+        18,
+        24,
+        30,
+        40
+      ],
+      "landmarks": [
+        {
+          "sel": "header",
+          "x": 0,
+          "y": 0,
+          "w": 390,
+          "h": 88
+        },
+        {
+          "sel": "main",
+          "x": 0,
+          "y": 88,
+          "w": 390,
+          "h": 3118
+        },
+        {
+          "sel": "section",
+          "x": 0,
+          "y": 88,
+          "w": 390,
+          "h": 460
+        },
+        {
+          "sel": "section:nth(2)",
+          "x": 0,
+          "y": 548,
+          "w": 390,
+          "h": 777
+        },
+        {
+          "sel": "section:nth(3)",
+          "x": 0,
+          "y": 1325,
+          "w": 390,
+          "h": 1543
+        },
+        {
+          "sel": "section:nth(4)",
+          "x": 0,
+          "y": 2868,
+          "w": 390,
+          "h": 338
+        },
+        {
+          "sel": "footer",
+          "x": 0,
+          "y": 3206,
+          "w": 390,
+          "h": 677
+        }
+      ],
+      "docHeight": 3882
+    },
+    {
+      "page": "services",
+      "viewport": "tablet",
+      "skeleton": [
+        "header.site-header",
+        "main",
+        "section.hero",
+        "h1",
+        "section.section",
+        "h2",
+        "table.rate-table",
+        "section.section.section-sand",
+        "h2",
+        "ul.card-grid",
+        "h3",
+        "h3",
+        "h3",
+        "h3",
+        "h3",
+        "h3",
+        "section.section",
+        "h2",
+        "footer.site-footer",
+        "h3",
+        "ul",
+        "h3",
+        "ul"
+      ],
+      "palette": [
+        "rgb(21, 41, 29)",
+        "rgb(217, 131, 36)",
+        "rgb(232, 220, 200)",
+        "rgb(244, 238, 226)",
+        "rgb(255, 255, 255)",
+        "rgb(26, 26, 24)",
+        "rgb(31, 61, 43)",
+        "rgb(92, 107, 96)",
+        "rgba(232, 220, 200, 0.8)",
+        "rgba(31, 61, 43, 0.12)"
+      ],
+      "fonts": [
+        "Arial Black",
+        "Segoe UI"
+      ],
+      "typeScale": [
+        13,
+        14,
+        15,
+        16,
+        18,
+        24,
+        30,
+        40
+      ],
+      "landmarks": [
+        {
+          "sel": "header",
+          "x": 0,
+          "y": 0,
+          "w": 768,
+          "h": 88
+        },
+        {
+          "sel": "main",
+          "x": 0,
+          "y": 88,
+          "w": 768,
+          "h": 2652
+        },
+        {
+          "sel": "section",
+          "x": 0,
+          "y": 88,
+          "w": 768,
+          "h": 416
+        },
+        {
+          "sel": "section:nth(2)",
+          "x": 0,
+          "y": 504,
+          "w": 768,
+          "h": 674
+        },
+        {
+          "sel": "section:nth(3)",
+          "x": 0,
+          "y": 1178,
+          "w": 768,
+          "h": 1286
+        },
+        {
+          "sel": "section:nth(4)",
+          "x": 0,
+          "y": 2464,
+          "w": 768,
+          "h": 276
+        },
+        {
+          "sel": "footer",
+          "x": 0,
+          "y": 2740,
+          "w": 768,
+          "h": 677
+        }
+      ],
+      "docHeight": 3417
+    }
+  ],
+  "renders": [
+    {
+      "page": "index",
+      "viewport": "desktop",
+      "sha": "ea1e6ea3fe372e4d8b842741839b6a98c642be8c6159a499abba328bc1ddf520"
+    },
+    {
+      "page": "quote",
+      "viewport": "desktop",
+      "sha": "b15a4288c7ebfa6f1beb43e15219e8b016bd9d5ea2f77be88c130a808c05d085"
+    },
+    {
+      "page": "services",
+      "viewport": "desktop",
+      "sha": "6bb58268583decdeb341975fbf2e7a8ae6315b08d33de22eb6c91d2fce027a5e"
+    },
+    {
+      "page": "index",
+      "viewport": "tablet",
+      "sha": "e6a8962b39ea3b7eda3eb684312ab2f6ea020a30e48a84fae248e1fd37340bf6"
+    },
+    {
+      "page": "quote",
+      "viewport": "tablet",
+      "sha": "0dc4f67d8c75fe913972581621972d2873324ec76321b2878d094fafc2d8b1db"
+    },
+    {
+      "page": "services",
+      "viewport": "tablet",
+      "sha": "0624dcb8affe2983b32afb7d8da8a9ae574bb8811471c51fc8c706e84acb4f1a"
+    },
+    {
+      "page": "index",
+      "viewport": "mobile",
+      "sha": "cd68d11d2e949024ae976b55551ad255f901c7d5a9a55ae50f0bbaa7d5fffc41"
+    },
+    {
+      "page": "quote",
+      "viewport": "mobile",
+      "sha": "54e21e7fb03713c5ce9c5cd68b1d683f71875be9e5239c1ca8fa50c5ad851273"
+    },
+    {
+      "page": "services",
+      "viewport": "mobile",
+      "sha": "4d022df0a8728d05974d4f7a3de20ea8e5b8342af931861360c75ba5d5624fc5"
+    }
+  ],
+  "fingerprint": "239cc2854af8f6ee33c75b30a671b378aa34afec8bc46c1d2451ab21a9ef81f6",
+  "capturedAt": "2026-11-06T01:23:52.384Z",
+  "approvedBy": "Founder (proof of concept)"
+}

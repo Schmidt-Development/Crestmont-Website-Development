@@ -40,6 +40,11 @@ RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
 
 COPY browser-check.mjs /opt/crestmont/browser-check.mjs
 
+# The design-locked import's measuring instrument: routes, the interaction inventory, design signatures and the
+# baseline screenshots at desktop, tablet and mobile. Kept separate from browser-check.mjs because that script is
+# the legacy pipeline's pass/fail gate and is still serving live projects; this one only measures and records.
+COPY frontend-import.mjs /opt/crestmont/frontend-import.mjs
+
 # Same uid as the runner (10001) so both can write the job's workspace; no login shell, no sudo. Setuid/setgid bits
 # are removed from every binary (su, passwd, mount, ...): no-new-privileges already neutralises them at run time;
 # this makes the image safe even if a container were started without it.

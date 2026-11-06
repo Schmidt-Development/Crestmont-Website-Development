@@ -70,6 +70,9 @@ import {
 } from "./quality-weighted.ts";
 import type { CycleEvidence } from "./orchestrator/contracts.ts";
 import { ineffectiveRepairs, loadMemory, memoryDigest, remember, saveMemory } from "./memory.ts";
+import { runDesignLockedJob, writeEvidence } from "./frontend/design-locked-job.ts";
+import type { DesignLockedResult } from "./frontend/design-locked-job.ts";
+import type { IntegrationManifest, ManifestContract } from "./frontend/integration-manifest.ts";
 
 /** A repair that left the same defect in place this many times ends the build as stalled (never the same fix forever). */
 export const MAX_INEFFECTIVE_REPAIRS = 3;
@@ -125,6 +128,32 @@ export interface JobSummary {
 }
 
 const SERVER_STOP = "server:";
+
+/**
+ * A design-locked build's result, as the platform's own completion record.
+ *
+ * `ready_for_review` ONLY when all three gates passed independently. A build whose backend works but drifted
+ * the design, or conforms but does not work, completes as `stopped` with the reason — because a person has to
+ * look at it, and because Model B does not get to decide that its own work is finished.
+ */
+function designLockedSummary(r: DesignLockedResult): JobSummary {
+  const last = r.cycles.at(-1);
+  const check = (id: string, label: string, ok: boolean, detail: string): CheckOutcome =>
+    ({ id, label, command: id, ok, code: ok ? 0 : 1, timedOut: false, outputTail: detail.slice(0, 2000) });
+  const checks: CheckOutcome[] = [
+    check("check:contract-conformance", "Contract conformance", last?.conformance.ok ?? false,
+      (last?.conformance.violations ?? []).join(", ") || "conforms to the approved manifest"),
+    check("check:functional-acceptance", "Functional acceptance", last?.functional.ok ?? false, last?.functional.detail ?? "not run"),
+    check("check:visual-fidelity", "Visual fidelity", last?.visual.ok ?? false, last?.visual.detail ?? "not run"),
+  ];
+  return {
+    outcome: r.ok ? "ready_for_review" : "stopped",
+    complete: null,
+    workspace: null,
+    stopReason: r.ok ? null : (r.problems[0] ?? `design-locked build did not complete (${r.failedAt ?? "verification"})`),
+    checks,
+  };
+}
 
 export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
   const { cfg, client } = deps;
@@ -535,6 +564,29 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
     const toolset = provider.id === "local" ? "local" as const : "claude" as const;
     const sandbox = provider instanceof LocalProvider ? provider.jobSandbox() : null;
     const checkExecutor: CheckExecutor | undefined = sandbox ? (argv, t) => sandbox.argv(argv, t) : undefined;
+
+    // ── design-locked builds take a different path entirely (protocol v1.7) ──
+    //
+    // When a person has approved a frontend artifact for this project, this build is not a website generation:
+    // it is a BACKEND integration against a frozen design. That work has its own module, so none of the
+    // phases, prompts or visual scoring below runs for it, and the retired frontend-generation pipeline is
+    // unreachable rather than merely discouraged.
+    //
+    // A project without an approved baseline never has `designLocked`, so every existing build falls straight
+    // through to the code below, exactly as before.
+    if (job.designLocked && sandbox) {
+      stage = "building";
+      log.info("design-locked build", { baseline: job.designLocked.fingerprint.slice(0, 12), version: job.designLocked.version });
+      const dl = await runDesignLockedJob({
+        job, ws, sandbox, provider, tracker, stop, log,
+        fetchArtifact: () => client.approvedArtifact(job),
+        manifest: (job.spec?.content as (IntegrationManifest & ManifestContract) | undefined) ?? null,
+        maxTurns: turnCap,
+        maxWallMs: Math.max(60_000, runtimeDeadline - Date.now()),
+      });
+      writeEvidence(ws, dl);
+      return designLockedSummary(dl);
+    }
 
     // ── agent phases ──
     stage = "building";

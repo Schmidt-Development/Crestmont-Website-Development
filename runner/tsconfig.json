@@ -19,5 +19,9 @@
       "@anthropic-ai/claude-agent-sdk": ["./src/sdk-types.d.ts"]
     }
   },
-  "include": ["src", "test", "windows/*.ts", "ci/*.ts"]
+  "include": ["src", "test", "windows/*.ts", "ci/*.ts"],
+  // The imported-frontend fixture is a React/Vite project with its own tsconfig, toolchain and dependencies.
+  // It is test DATA -- the thing the import pipeline consumes -- not runner code, and it is compiled by Vite
+  // inside the sandbox, never by this typecheck.
+  "exclude": ["test/fixtures/summit-haul-frontend", "test/fixtures/summit-haul-integration"]
 }

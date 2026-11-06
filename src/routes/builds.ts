@@ -1,6 +1,7 @@
 // AI Builds — runner API (signed), owner dashboard ("AI builds"), JSON contract for the frontend session,
 // and the customer-facing summary. Contract: docs/ai-builds/FRONTEND-CONTRACT.md, protocol: RUNNER-PROTOCOL.md.
 import { aiBuildGate } from "../domain/ai-build-gate.ts";
+import * as DL from "../services/design-locked.ts";
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatDateTime, type SafeHtml } from "../lib/html.ts";
@@ -141,6 +142,40 @@ export function register(r: Router): void {
     const updated = await G.markImagesSeen(ctx.db, String(b.jobId), ids, String(b.model ?? ""));
     return jsonResponse(ctx, 200, { updated });
   }));
+  // Design-locked frontends: the approved artifact for a leased build.
+  //
+  // The runner names no artifact, project or version. It presents a lease, and the platform resolves the
+  // frontend from the job's own project and from the baseline a person approved. Everything the runner could
+  // get wrong, or be tricked into sending, is therefore not part of the request.
+  r.post(`${RUNNER}/frontend/artifact`, runnerRoute(async (ctx) => {
+    const b = await runnerBody(ctx);
+    const job = await B.leasedJob(ctx.db, b.jobId, b.leaseToken);
+    try {
+      return jsonResponse(ctx, 200, await DL.deliverApprovedArtifact(ctx.db, ctx.storage, job));
+    } catch (e) {
+      if (e instanceof DL.DeliveryError) return jsonResponse(ctx, e.status, { error: e.message });
+      throw e;
+    }
+  }));
+
+  // What the build is being held to: the approved design's identity and manifests, without the archive bytes.
+  r.post(`${RUNNER}/frontend/baseline`, runnerRoute(async (ctx) => {
+    const b = await runnerBody(ctx);
+    const job = await B.leasedJob(ctx.db, b.jobId, b.leaseToken);
+    const state = await DL.frontendState(ctx.db, job.project_id);
+    if (!state.designLocked || !state.activeBaselineId) return jsonResponse(ctx, 409, { error: "this project has no approved design baseline" });
+    const baseline = await DL.getBaseline(ctx.db, state.activeBaselineId);
+    if (!baseline || baseline.project_id !== job.project_id) return jsonResponse(ctx, 409, { error: "no approved baseline for this project" });
+    return jsonResponse(ctx, 200, {
+      baselineId: baseline.id, version: baseline.version, fingerprint: baseline.fingerprint,
+      sourceFingerprint: baseline.source_fingerprint, approvedAt: baseline.approved_at,
+      routes: JSON.parse(baseline.route_manifest_json), assets: JSON.parse(baseline.asset_manifest_json),
+      components: JSON.parse(baseline.component_inventory_json), interactions: JSON.parse(baseline.interaction_inventory_json),
+      signatures: JSON.parse(baseline.signatures_json), screenshots: JSON.parse(baseline.screenshots_json),
+      states: JSON.parse(baseline.states_json), viewports: JSON.parse(baseline.viewports_json),
+    });
+  }));
+
   // Self-hosted AI drafts (ai_jobs with provider local-runner), same signed channel.
   r.post(`${RUNNER}/ai/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await AIR.claimAiJob(ctx.db, typeof b.runnerId === "string" ? b.runnerId : "", ctx.now())); }));
   r.post(`${RUNNER}/ai/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await AIR.completeAiJob(ctx.db, await runnerBody(ctx)))));

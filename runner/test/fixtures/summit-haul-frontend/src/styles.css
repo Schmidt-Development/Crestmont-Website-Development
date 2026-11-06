@@ -1,0 +1,368 @@
+/* Summit Haul Co. — the approved design.
+ *
+ * Self-contained on purpose: system fonts only, SVG illustrations only, no external requests. The import sandbox
+ * runs with no network, so a design that depended on a font CDN would measure differently there than it looks to
+ * the Founder — and the baseline would be a lie. */
+
+:root {
+  --forest: #1f3d2b;
+  --forest-deep: #15291d;
+  --sand: #e8dcc8;
+  --sand-light: #f4eee2;
+  --amber: #d98324;
+  --amber-dark: #b36a17;
+  --ink: #1a1a18;
+  --muted: #5c6b60;
+  --white: #ffffff;
+
+  --sans: "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --display: "Arial Black", "Segoe UI", Impact, sans-serif;
+
+  --step-0: 16px;
+  --step-1: 18px;
+  --step-2: 24px;
+  --step-3: 32px;
+  --step-4: 44px;
+  --step-5: 60px;
+
+  --gap: 24px;
+  --section: 96px;
+  --radius: 4px;
+  --shell: 1180px;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: var(--step-0);
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--sand-light);
+}
+
+h1, h2, h3 {
+  font-family: var(--display);
+  line-height: 1.1;
+  letter-spacing: -0.015em;
+  margin: 0 0 16px;
+  text-transform: uppercase;
+}
+
+h1 { font-size: var(--step-5); }
+h2 { font-size: var(--step-4); }
+h3 { font-size: var(--step-2); }
+
+p { margin: 0 0 16px; }
+
+a { color: var(--forest); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.shell {
+  width: 100%;
+  max-width: var(--shell);
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ── header ─────────────────────────────────────────────────────────────── */
+
+.site-header {
+  background: var(--forest);
+  color: var(--sand);
+  position: relative;
+}
+
+.site-header .shell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 88px;
+  gap: var(--gap);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--sand);
+  font-family: var(--display);
+  font-size: var(--step-1);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.brand:hover { text-decoration: none; }
+.brand svg { display: block; flex: none; }
+
+.site-nav ul {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.site-nav a {
+  color: var(--sand);
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  padding: 6px 0;
+  border-bottom: 2px solid transparent;
+}
+
+.site-nav a:hover,
+.site-nav a[aria-current="page"] {
+  border-bottom-color: var(--amber);
+  text-decoration: none;
+}
+
+.nav-toggle {
+  display: none;
+  background: transparent;
+  border: 1px solid rgba(232, 220, 200, 0.4);
+  color: var(--sand);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+/* ── buttons ────────────────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-block;
+  border: 0;
+  border-radius: var(--radius);
+  padding: 15px 30px;
+  font: inherit;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.btn-primary { background: var(--amber); color: var(--forest-deep); }
+.btn-primary:hover { background: var(--amber-dark); color: var(--white); text-decoration: none; }
+.btn-ghost { background: transparent; color: var(--sand); border: 2px solid var(--sand); }
+.btn-ghost:hover { background: var(--sand); color: var(--forest); text-decoration: none; }
+
+/* ── hero ───────────────────────────────────────────────────────────────── */
+
+.hero {
+  background: var(--forest-deep);
+  color: var(--sand-light);
+  padding: var(--section) 0;
+}
+
+.hero .shell {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 56px;
+  align-items: center;
+}
+
+.hero h1 { color: var(--white); }
+.hero .lede { font-size: var(--step-2); color: var(--sand); max-width: 34ch; }
+.hero-actions { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 32px; }
+.hero-art svg { width: 100%; height: auto; display: block; }
+
+.eyebrow {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--amber);
+  margin: 0 0 16px;
+}
+
+/* ── sections ───────────────────────────────────────────────────────────── */
+
+.section { padding: var(--section) 0; }
+.section-sand { background: var(--sand); }
+.section-head { max-width: 58ch; margin-bottom: 48px; }
+.section-head p { color: var(--muted); font-size: var(--step-1); }
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--gap);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.card {
+  background: var(--white);
+  border: 1px solid rgba(31, 61, 43, 0.12);
+  border-radius: var(--radius);
+  padding: 32px 28px;
+}
+
+.card svg { display: block; margin-bottom: 20px; }
+.card h3 { margin-bottom: 10px; }
+.card p { color: var(--muted); margin: 0; }
+
+.price {
+  font-family: var(--display);
+  font-size: var(--step-3);
+  color: var(--forest);
+  margin-top: 20px;
+  display: block;
+}
+
+.steps { counter-reset: step; display: grid; grid-template-columns: repeat(3, 1fr); gap: 40px; }
+.step { position: relative; padding-top: 56px; }
+.step::before {
+  counter-increment: step;
+  content: counter(step);
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  background: var(--amber);
+  color: var(--forest-deep);
+  font-family: var(--display);
+  border-radius: 50%;
+}
+
+/* A two-column split that collapses. Declared here rather than inline, so the media query below can actually
+ * override it — an inline grid-template-columns wins over any stylesheet rule and overflows at phone width. */
+.split {
+  display: grid;
+  grid-template-columns: 1.3fr 0.7fr;
+  gap: 56px;
+  align-items: start;
+}
+
+/* A wide table cannot be made narrow; it is given its own scroll so the PAGE never scrolls sideways. */
+.table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.table-scroll .rate-table { min-width: 560px; }
+
+/* ── form ───────────────────────────────────────────────────────────────── */
+
+.quote-form {
+  background: var(--white);
+  border: 1px solid rgba(31, 61, 43, 0.14);
+  border-radius: var(--radius);
+  padding: 40px;
+  display: grid;
+  gap: 20px;
+}
+
+.field { display: grid; gap: 7px; }
+.field label { font-weight: 600; font-size: 14px; letter-spacing: 0.02em; }
+.field .hint { color: var(--muted); font-size: 13px; }
+
+.field input,
+.field select,
+.field textarea {
+  font: inherit;
+  padding: 13px 14px;
+  border: 1px solid rgba(31, 61, 43, 0.28);
+  border-radius: var(--radius);
+  background: var(--white);
+  color: var(--ink);
+  width: 100%;
+}
+
+.field input:focus,
+.field select:focus,
+.field textarea:focus {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+  border-color: var(--forest);
+}
+
+.field textarea { min-height: 120px; resize: vertical; }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+
+.form-status { border-radius: var(--radius); padding: 14px 16px; font-size: 15px; }
+.form-status-ok { background: rgba(31, 61, 43, 0.08); border: 1px solid var(--forest); }
+.form-status-bad { background: rgba(179, 106, 23, 0.1); border: 1px solid var(--amber-dark); }
+
+/* ── faq ────────────────────────────────────────────────────────────────── */
+
+/* The measure is constrained on the CONTENT, not on the shell: putting max-width on .shell would combine with
+ * its `margin: 0 auto` and centre the whole block, so the FAQ would sit indented from every other section. */
+.faq .section-head,
+.faq details { max-width: 70ch; }
+.faq details {
+  border-bottom: 1px solid rgba(31, 61, 43, 0.18);
+  padding: 20px 0;
+}
+.faq summary {
+  cursor: pointer;
+  font-weight: 700;
+  font-size: var(--step-1);
+  list-style: none;
+}
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::after { content: " +"; color: var(--amber); font-family: var(--display); }
+.faq details[open] summary::after { content: " \2013"; }
+.faq details p { margin: 12px 0 0; color: var(--muted); }
+
+/* ── table ──────────────────────────────────────────────────────────────── */
+
+.rate-table { width: 100%; border-collapse: collapse; background: var(--white); }
+.rate-table th,
+.rate-table td { text-align: left; padding: 16px 18px; border-bottom: 1px solid rgba(31, 61, 43, 0.12); }
+.rate-table th { background: var(--forest); color: var(--sand); font-size: 13px; letter-spacing: 0.1em; text-transform: uppercase; }
+
+/* ── footer ─────────────────────────────────────────────────────────────── */
+
+.site-footer {
+  background: var(--forest-deep);
+  color: var(--sand);
+  padding: 64px 0 40px;
+}
+
+.site-footer .shell { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 40px; }
+.site-footer a { color: var(--sand); }
+.site-footer h3 { font-size: 14px; letter-spacing: 0.12em; color: var(--amber); }
+.site-footer ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.legal {
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 1px solid rgba(232, 220, 200, 0.2);
+  font-size: 13px;
+  color: rgba(232, 220, 200, 0.7);
+}
+
+/* ── responsive ─────────────────────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+  :root { --step-5: 40px; --step-4: 30px; --section: 64px; }
+  .hero .shell { grid-template-columns: 1fr; gap: 36px; }
+  .card-grid, .steps { grid-template-columns: 1fr; }
+  .site-footer .shell { grid-template-columns: 1fr; }
+  .field-row { grid-template-columns: 1fr; }
+  .split { grid-template-columns: 1fr; gap: 40px; }
+  .quote-form { padding: 28px 20px; }
+
+  .nav-toggle { display: block; }
+  .site-nav {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: var(--forest);
+    border-top: 1px solid rgba(232, 220, 200, 0.2);
+    padding: 16px 24px 24px;
+    z-index: 20;
+  }
+  .site-nav.is-open { display: block; }
+  .site-nav ul { flex-direction: column; align-items: flex-start; gap: 4px; }
+  .site-nav a { display: block; padding: 12px 0; width: 100%; }
+}
