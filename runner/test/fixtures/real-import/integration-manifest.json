@@ -1,0 +1,36 @@
+{
+  "schema": "crestmont.integration-manifest/1",
+  "artifactSha": "59dfb2f534cf6c5956b9edac00479d2d3dfebf635e16d5f86d0dc6ff54c416c7",
+  "designFingerprint": "239cc2854af8f6ee33c75b30a671b378aa34afec8bc46c1d2451ab21a9ef81f6",
+  "operations": [
+    {
+      "id": "quote-request-submit",
+      "page": "quote",
+      "element": "form#quote-request",
+      "kind": "form-submit",
+      "behaviour": "Persist a quote request and show the visitor a confirmation in the form's own style.",
+      "expectChange": "content",
+      "acceptance": [
+        "a submitted request is stored as a row in quote_requests",
+        "a request missing a required field is refused with 422 and nothing is stored",
+        "a storage failure shows an error in the form rather than a false confirmation"
+      ],
+      "dataModel": [
+        {
+          "table": "quote_requests",
+          "fields": [
+            "name",
+            "phone",
+            "email",
+            "postcode",
+            "load_size",
+            "details"
+          ]
+        }
+      ]
+    }
+  ],
+  "outOfScope": [
+    "No payment is taken. No email is sent. Nothing goes live without a person releasing it."
+  ]
+}

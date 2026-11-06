@@ -7,7 +7,7 @@ import { createHmac } from "node:crypto";
 import type {
   ClaimResponse, HeartbeatRequest, HeartbeatResponse, CheckpointRequest, RequirementItem, CompleteRequest, Job,
   AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest, DiagnosticCheckpoint, ExpiredPreview, ExpiredPreviewsResponse,
-  SiteDeployment, DeploymentClaimResponse, DeploymentCompleteRequest, CycleSubmitResponse, WorkerStatus } from "./protocol.ts";
+  SiteDeployment, DeploymentClaimResponse, DeploymentCompleteRequest, CycleSubmitResponse, WorkerStatus, ApprovedArtifact } from "./protocol.ts";
 import { RUNNER_VERSION, LIMITS } from "./protocol.ts";
 import type { Logger } from "./log.ts";
 import { silentLogger, errorMessage } from "./log.ts";
@@ -178,6 +178,32 @@ export class ControlPlaneClient {
   async galleryImagesSeen(job: Pick<Job, "id" | "leaseToken">, referenceIds: string[], model: string): Promise<void> {
     try { await this.post("/api/builds/runner/gallery/seen", { jobId: job.id, leaseToken: job.leaseToken, referenceIds, model }); }
     catch (err) { if (!(err instanceof ControlPlaneError && (err.status === 404 || err.status === 405))) throw err; }
+  }
+
+  /**
+   * The approved frontend for this job (protocol v1.7).
+   *
+   * No artifact, project or version is named: the platform resolves it from this job's own project and from the
+   * baseline a person approved, so there is nothing here for a runner to get wrong or be tricked into sending.
+   * The caller verifies the sha256 over the bytes before opening the archive.
+   */
+  async approvedArtifact(job: Pick<Job, "id" | "leaseToken">): Promise<ApprovedArtifact | null> {
+    try { return await this.post("/api/builds/runner/frontend/artifact", { jobId: job.id, leaseToken: job.leaseToken }); }
+    catch (err) {
+      // 404/405: a platform that predates this endpoint. 409: no approved baseline for this project. Both mean
+      // "there is no design-locked work here", and the job falls through to the path it would otherwise take.
+      if (err instanceof ControlPlaneError && [404, 405, 409].includes(err.status)) return null;
+      throw err;
+    }
+  }
+
+  /** The approved design this build is held to: manifests and screenshot digests, without the archive. */
+  async approvedBaseline(job: Pick<Job, "id" | "leaseToken">): Promise<Record<string, unknown> | null> {
+    try { return await this.post("/api/builds/runner/frontend/baseline", { jobId: job.id, leaseToken: job.leaseToken }); }
+    catch (err) {
+      if (err instanceof ControlPlaneError && [404, 405, 409].includes(err.status)) return null;
+      throw err;
+    }
   }
 
   async reportIntegrations(job: Pick<Job, "id" | "leaseToken">, items: unknown[]): Promise<void> {

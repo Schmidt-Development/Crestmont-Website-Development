@@ -128,6 +128,44 @@ export interface Job {
     sourceFingerprint: string | null;
     certifiedAt: string;
   } | null;
+  /**
+   * Design-locked frontends (protocol v1.7). Present only when a person has APPROVED a frontend artifact for
+   * this project. Its presence changes what the build is: the runner fetches the approved artifact over the
+   * signed channel and builds the backend against it, instead of generating a frontend.
+   *
+   * Absent on older platforms, and absent for every project that has no approved baseline, so the legacy path
+   * is reached exactly as before.
+   */
+  designLocked?: {
+    baselineId: string;
+    version: number;
+    /** The one value naming this exact approved design. */
+    fingerprint: string;
+    sourceFingerprint: string | null;
+    approvedAt: string | null;
+    artifactId: string;
+    viewports: string[];
+    routes: number;
+    interactionsNeedingBackend: number;
+  } | null;
+}
+
+/** The approved frontend artifact, delivered over the signed channel. */
+export interface ApprovedArtifact {
+  artifactId: string;
+  version: number;
+  baselineId: string;
+  baselineVersion: number;
+  designFingerprint: string;
+  /** The runner recomputes this over the bytes before it opens the archive. */
+  sha256: string;
+  sizeBytes: number;
+  framework: "react" | "react-ts" | "vite" | "static" | null;
+  archiveRoot: string | null;
+  filename: string;
+  base64: string;
+  scanStatus: string;
+  scanned: boolean;
 }
 
 /** One gallery reference as the platform describes it. The IMAGE is fetched separately, by id. */

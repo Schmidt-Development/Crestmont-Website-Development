@@ -18,6 +18,7 @@ import { newId, nowIso } from "../lib/db.ts";
 import { sha256Hex } from "../lib/crypto.ts";
 import { HttpError } from "../app/http.ts";
 import { audit } from "./security.ts";
+import { designGenerationAllowed } from "./design-locked.ts";
 import {
   BUILD_PHASES, CATEGORY_MAX, NEXT_PHASE, PHASE_LABEL, PRIMARY_PROGRESS, phaseBlockers, round1,
   type BuildPhase, type CategoryScore,
@@ -209,6 +210,13 @@ export async function advancePhase(db: Db, job: { id: string; project_id: string
 /** Put a job into `waiting` (an external party or missing information), remembering the phase to return to. */
 export async function setPhase(db: Db, job: { id: string; project_id: string; organization_id: string; attempts: number }, phase: BuildPhase, reason: string): Promise<void> {
   if (!isBuildPhase(phase)) throw new HttpError(422, "unknown build phase");
+  // Phase D gate (§15). `design` IS the autonomous frontend-design stage, so a design-locked project can never
+  // be put into it -- not by a retry, not by a revision, not by an operator moving phases by hand. The check is
+  // here as well as at build creation because this is the one function that can reach the phase column.
+  if (phase === "design") {
+    const gate = await designGenerationAllowed(db, job.project_id);
+    if (!gate.allowed) throw new HttpError(409, gate.reason);
+  }
   await db.prepare(`UPDATE build_jobs SET build_phase = ?, updated_at = ? WHERE id = ?`).bind(phase, nowIso(), job.id).run();
   await db.prepare(`INSERT INTO build_phase_milestones (id, job_id, attempt, phase, cycle, reason, blockers_json, entered, created_at) VALUES (?,?,?,?,NULL,?,'[]',1,?)`)
     .bind(newId("bpm"), job.id, job.attempts, phase, reason.slice(0, 600), nowIso()).run();

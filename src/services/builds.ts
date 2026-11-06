@@ -4,6 +4,8 @@
 import type { Db } from "../lib/db.ts";
 import { likeContains } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
+import { applyDesignLock } from "./design-locked.ts";
+import * as DL from "./design-locked.ts";
 import type { AppContext } from "../app/context.ts";
 import type { StorageAdapter } from "../adapters/storage.ts";
 import { HttpError } from "../app/http.ts";
@@ -244,7 +246,12 @@ export async function syncProjectBuild(db: Db, projectId: string, trigger: "paym
       .bind(id, projectId, f.project.organization_id, f.order?.id ?? null, dedupe, strategy, strategy === "standard" ? f.order!.product_id : null, trigger, actor.userId ?? null, settings.max_attempts, at, at).run();
     job = await db.prepare(`SELECT * FROM build_jobs WHERE dedupe_key = ?`).bind(dedupe).first<BuildJob>();
     if (!job) return null;
-    if (ins.meta?.changes) await event(db, job.id, "action", `Build record created (${trigger})`, actor);
+    if (ins.meta?.changes) {
+      await event(db, job.id, "action", `Build record created (${trigger})`, actor);
+      // Phase D gate: a design-locked project starts at `design_locked`, never at `design`. No-op otherwise.
+      const locked = await applyDesignLock(db, job.id, projectId);
+      if (locked.applied) await event(db, job.id, "action", "Design-locked project: autonomous frontend generation is skipped", actor);
+    }
   }
   return applyDecision(db, job, decision, actor);
 }
@@ -562,15 +569,40 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
               FROM build_jobs j JOIN build_design_freezes f ON f.id = j.design_freeze_id
               WHERE j.id = ? AND f.invalidated_at IS NULL AND f.platform_verified = 1`).bind(job.id)
             .first<{ revision_attempt: number; revision_cycle: number; commit_sha: string | null; design_points: number; source_fingerprint: string | null; certified_at: string }>();
+          // Design-locked frontends (protocol v1.7). When a person has approved a frontend artifact for this
+          // project, the runner is told so here and nowhere else: it then fetches the artifact over the signed
+          // channel and builds the BACKEND, instead of generating a frontend. A runner that predates this field
+          // simply ignores it, and a project without an approved baseline never sees it.
+          const locked = await DL.frontendState(db, job.project_id);
+          const baseline = locked.designLocked && locked.activeBaselineId ? await DL.getBaseline(db, locked.activeBaselineId) : null;
           return {
             phase: (p?.build_phase ?? "design") as BuildPhase,
             designFreeze: f ? { revision: `${f.revision_attempt}-${f.revision_cycle}`, commitSha: f.commit_sha, designPoints: f.design_points, sourceFingerprint: f.source_fingerprint, certifiedAt: f.certified_at } : null,
+            designLocked: baseline
+              ? {
+                baselineId: baseline.id,
+                version: baseline.version,
+                fingerprint: baseline.fingerprint,
+                sourceFingerprint: baseline.source_fingerprint,
+                approvedAt: baseline.approved_at,
+                artifactId: baseline.artifact_id,
+                viewports: safeJson<string[]>(baseline.viewports_json, []),
+                routes: safeJson<unknown[]>(baseline.route_manifest_json, []).length,
+                interactionsNeedingBackend: safeJson<{ needsBackend?: boolean; functional?: boolean }[]>(baseline.interaction_inventory_json, [])
+                  .filter((i) => i.needsBackend === true && i.functional !== true).length,
+              }
+              : null,
           };
         })()),
       },
     };
   }
   return { job: null, reason: "none_queued" as const };
+}
+
+/** Parse a JSON column without letting one bad row fail a claim. */
+function safeJson<T>(raw: string | null | undefined, fallback: T): T {
+  try { return raw ? JSON.parse(raw) as T : fallback; } catch { return fallback; }
 }
 
 /** The job a runner request refers to, only while that runner holds its lease (V2 orchestrator endpoints). */
@@ -962,6 +994,13 @@ export async function retryBuild(c: OwnerCtx, id: string, mode: "retry" | "resum
     if (/UNIQUE/i.test((e as Error).message)) throw new HttpError(409, "Another build for this project is already queued or running.");
     throw e;
   }
+  // Phase D gate on the retry/resume path too (§15, §16).
+  //
+  // A retry does not create a new build row, so the gate applied at creation never ran for a job that existed
+  // BEFORE its project became design-locked -- which is exactly Summit Haul's situation. Without this, retrying
+  // that build would resume at `build_phase = 'design'` and start inventing a frontend again, on a project whose
+  // design the Founder has since supplied and approved.
+  await applyDesignLock(c.db, id, j.project_id);
   await audit(c.db, { actorUserId: c.userId, action: `builds.${mode}`, subjectType: "build_job", subjectId: id, organizationId: j.organization_id });
 }
 
@@ -1008,6 +1047,8 @@ async function queueRevisionJob(db: Db, projectId: string, instruction: string, 
     if (/UNIQUE/i.test(m)) throw new HttpError(409, "A revision is already queued or running for this project.");
     throw e;
   }
+  // Phase D gate: the same rule on a revision. A design-locked project must not redesign on a revision either.
+  await applyDesignLock(db, id, projectId);
   await event(db, id, "transition", customerRevision ? `Revision ${rev} queued for customer revision round ${customerRevision.round}` : `Revision ${rev} queued by owner`, actor,
     { to: "queued", data: { previous: prev.id, customerRevisionId: customerRevision?.id ?? null } });
   return id;
