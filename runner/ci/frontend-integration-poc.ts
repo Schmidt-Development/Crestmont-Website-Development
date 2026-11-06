@@ -14,7 +14,8 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } fr
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadConfig } from "../src/config.ts";
-import { JobSandbox, cliDockerExecutor } from "../src/sandbox.ts";
+import { JobSandbox } from "../src/sandbox.ts";
+import { PocSandboxes, pocConfig } from "./poc-sandbox.ts";
 import { LocalProvider } from "../src/providers/local.ts";
 import { RunTracker, StopSwitch } from "../src/agent.ts";
 import { createLogger } from "../src/log.ts";
@@ -92,19 +93,24 @@ async function main() {
   console.log(`budget: ${maxTurns} turns, ${maxMinutes} minutes`);
 
   const cfg = loadConfig(process.env);
-  const executor = cliDockerExecutor(cfg.jobSandbox.dockerBin, dockerEnv());
+  // Its own runner id, so `reapOwn()` collects what THIS script left and nothing else. Without it the
+  // containers carry the real runner's id or a shared one, and no reaper is allowed to touch them.
+  cfg.jobSandbox = pocConfig("integration-poc", { image: cfg.jobSandbox.image });
+  const pocs = new PocSandboxes(cfg.jobSandbox, log);
+  const removeHandlers = pocs.installExitHandlers();
+  await pocs.reapOwn();
+  const executor = pocs.executor;
   const pre = await JobSandbox.preflight(cfg.jobSandbox, executor);
   if (pre.length) { console.error(`cannot run: ${pre.join("; ")}`); process.exit(2); }
   console.log(`model: ${cfg.models.mode === "dual" ? cfg.models.b.tag : cfg.local.model} at ${cfg.local.baseUrl}`);
 
-  const installSandbox = new JobSandbox(cfg.jobSandbox, ws, "bld_integration_poc", executor, log);
+  const installSandbox = pocs.create(ws, "bld_integration_poc");
   console.log("installing dependencies from the lockfile...");
   const installed = await installSandbox.install();
   if (installed.code !== 0) {
     console.error(`dependencies did not install (exit ${installed.code}): ${(installed.stderr || installed.stdout).slice(0, 800)}`);
     process.exit(2);
   }
-  await installSandbox.close().catch(() => {});
   console.log("dependencies installed");
 
   const provider = new LocalProvider({ cfg, executor, log });
@@ -145,7 +151,7 @@ async function main() {
   if (outcome.exceptionRequest) console.log(`\nit asked for a design exception instead of taking one:\n${outcome.exceptionRequest.slice(0, 1200)}`);
 
   // ── did the design survive it? ────────────────────────────────────────────────────────────────────────────
-  const sandbox = new JobSandbox(cfg.jobSandbox, ws, j.id, executor, log);
+  const sandbox = pocs.create(ws, j.id);
   try {
     rule("rebuilding and re-measuring");
     const rebuilt = await sandbox.argv(["npm", "run", "build"], 300_000, "npm run build");
@@ -173,7 +179,8 @@ async function main() {
     console.log(`\nevidence kept at ${path.join(WORK, "evidence")}`);
     console.log(`workspace kept at ${ws.repo}`);
   } finally {
-    await sandbox.close().catch(() => {});
+    await pocs.closeAll();
+    removeHandlers();
     await provider.close?.().catch(() => {});
   }
 }

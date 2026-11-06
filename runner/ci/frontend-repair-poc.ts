@@ -13,7 +13,8 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } fr
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadConfig } from "../src/config.ts";
-import { JobSandbox, cliDockerExecutor } from "../src/sandbox.ts";
+import { JobSandbox } from "../src/sandbox.ts";
+import { PocSandboxes, pocConfig } from "./poc-sandbox.ts";
 import { LocalProvider } from "../src/providers/local.ts";
 import { RunTracker, StopSwitch } from "../src/agent.ts";
 import { createLogger } from "../src/log.ts";
@@ -84,15 +85,20 @@ async function main() {
   writeFileSync(path.join(WORK, "evidence", "repair-brief.md"), brief);
 
   const cfg = loadConfig(process.env);
-  const executor = cliDockerExecutor(cfg.jobSandbox.dockerBin, dockerEnv());
+  // Its own runner id, so `reapOwn()` collects what THIS script left and nothing else. Without it the
+  // containers carry the real runner's id or a shared one, and no reaper is allowed to touch them.
+  cfg.jobSandbox = pocConfig("repair-poc", { image: cfg.jobSandbox.image });
+  const pocs = new PocSandboxes(cfg.jobSandbox, log);
+  const removeHandlers = pocs.installExitHandlers();
+  await pocs.reapOwn();
+  const executor = pocs.executor;
   const pre = await JobSandbox.preflight(cfg.jobSandbox, executor);
   if (pre.length) { console.error(`cannot run: ${pre.join("; ")}`); process.exit(2); }
 
-  const install = new JobSandbox(cfg.jobSandbox, ws, "bld_repair_poc", executor, log);
+  const install = pocs.create(ws, "bld_repair_poc");
   console.log("\ninstalling dependencies...");
   const installed = await install.install();
   if (installed.code !== 0) { console.error(`install failed: ${(installed.stderr || installed.stdout).slice(0, 600)}`); process.exit(2); }
-  await install.close().catch(() => {});
 
   const job = { id: "bld_repair_poc", projectId: "prj_repair_poc", attempt: 1, kind: "first_build", packageId: "business",
     instruction: null, requirements: null, strategy: "standard", leaseToken: "", leaseExpiresAt: "", workspaceRef: null,
@@ -125,7 +131,7 @@ async function main() {
   if (outcome.summary) console.log(`\nits summary:\n${outcome.summary.slice(0, 2000)}`);
 
   // ── the three questions ───────────────────────────────────────────────────────────────────────────────────
-  const sandbox = new JobSandbox(cfg.jobSandbox, ws, job.id, executor, log);
+  const sandbox = pocs.create(ws, job.id);
   try {
     rule("1. does it conform now?");
     const after = checkConformance({ repo: ws.repo, manifest, baselinePackage: approvedPackage });
@@ -155,7 +161,8 @@ async function main() {
     cpSync(path.join(ws.repo, ".crestmont"), path.join(WORK, "evidence", "crestmont"), { recursive: true });
     console.log(`\nevidence: ${path.join(WORK, "evidence")}\nworkspace: ${ws.repo}`);
   } finally {
-    await sandbox.close().catch(() => {});
+    await pocs.closeAll();
+    removeHandlers();
     await provider.close?.().catch(() => {});
   }
 }

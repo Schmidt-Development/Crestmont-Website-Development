@@ -13,7 +13,8 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { JobSandbox, cliDockerExecutor } from "../src/sandbox.ts";
+import { JobSandbox } from "../src/sandbox.ts";
+import { PocSandboxes, pocConfig } from "./poc-sandbox.ts";
 import type { JobSandboxConfig } from "../src/config.ts";
 import { importFrontend, readBaseline, verifyDesignHeld } from "../src/frontend/workflow.ts";
 import { describeOutcome } from "../src/frontend/workflow.ts";
@@ -116,7 +117,10 @@ async function main() {
 
   rule(`stage: ${stage}`);
   const cfg = sandboxConfig();
-  const pre = await JobSandbox.preflight(cfg, cliDockerExecutor(cfg.dockerBin, dockerEnv()));
+  const pocs = new PocSandboxes(cfg);
+  const removeHandlers = pocs.installExitHandlers();
+  await pocs.reapOwn();
+  const pre = await JobSandbox.preflight(cfg, pocs.executor);
   if (pre.length) {
     console.error(`cannot run: ${pre.join("; ")}`);
     process.exit(2);
@@ -125,7 +129,7 @@ async function main() {
 
   if (stage === "baseline") rmSync(WORK, { recursive: true, force: true });
   const ws = workspace(path.join(WORK, "ws"));
-  const sandbox = new JobSandbox(cfg, ws, "import-poc", cliDockerExecutor(cfg.dockerBin, dockerEnv()));
+  const sandbox = pocs.create(ws, "import-poc");
 
   try {
     if (stage === "baseline") {
@@ -220,7 +224,8 @@ async function main() {
     }
     log(`as expected for stage ${stage}.`);
   } finally {
-    await sandbox.close().catch(() => {});
+    await pocs.closeAll();
+    removeHandlers();
     if (!keep && stage !== "baseline") log(`\n(workspace left at ${WORK} for inspection)`);
   }
 }
