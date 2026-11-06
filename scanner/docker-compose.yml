@@ -51,6 +51,13 @@ services:
     environment:
       CLAMD_HOST: clamd
       CLAMD_PORT: "3310"
+      # The SAME ceilings the daemon above is configured with, in bytes. The scanner needs them because clamd skips an
+      # archive member larger than MaxFileSize and still answers "OK" — measured, see scanner/src/archive.ts — so a
+      # decompression bomb would otherwise be labelled clean. An archive declaring more expansion than these is
+      # reported `failed` and stays quarantined. If the CLAMD_CONF_* values above change, change these with them;
+      # tests/scanner-isolation.test.ts checks that the two still agree.
+      CLAMD_MAX_FILE_SIZE: "31457280"     # 30M, as CLAMD_CONF_MaxFileSize above
+      CLAMD_MAX_SCAN_SIZE: "125829120"    # 120M, as CLAMD_CONF_MaxScanSize above
     networks: [scan_net, egress_net]
     read_only: true
     tmpfs: [/tmp:size=16m]
