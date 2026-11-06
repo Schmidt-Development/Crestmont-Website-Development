@@ -10,6 +10,8 @@
 import { readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { wranglerOps } from "./staging-access.ts";
 import { hmacSha256Hex } from "../src/lib/crypto.ts";
+import { createHmac } from "node:crypto";
+import { deriveStagingKey } from "./staging-secrets.ts";
 import { totpCode } from "../src/lib/auth-crypto.ts";
 import { IMPORT_API_VERSION } from "../src/services/crm-import.ts";
 
@@ -36,10 +38,18 @@ const usedPhones = new Set<string>();
 const PHONE_POOL = areas.length * 100;
 /** A fictional 555-01xx number this staging database has never seen. Bounded: an exhausted pool must fail
  *  loudly here rather than spin, and the message says exactly what to clear. */
+// Erasure tombstones of earlier runs' synthetic numbers (HMAC-SHA256 under the staging Worker's CRM_ERASURE_HMAC_KEY,
+// which deploy-staging.yml derives from the token: src/services/contact-identity.ts tombstoneHash). A number erased
+// at an earlier run's cleanup is refused for ever after (that is the point of a tombstone), so a fresh draw that hit
+// one came back SUPPRESSED where CREATED or a duplicate review was expected — the api.ambiguous_held_for_review
+// failure of staging deploy #165. Neither identities nor do-not-call rows remember it; only its keyed hash does.
+const tombstones = new Set<string>();
+const erasureKey = process.env.ACCESS_ROOT_KEY ? deriveStagingKey(process.env.ACCESS_ROOT_KEY, "crmErasure") : null;
+const tombstoned = (e164: string) => !!erasureKey && tombstones.has(createHmac("sha256", erasureKey).update(`crestmont-crm-erasure:v2|phone:${e164}`).digest("hex"));
 const phone = () => {
   for (let i = 0; i < PHONE_POOL * 20; i++) {
     const p = `+1${areas[Math.floor(Math.random() * areas.length)]}55501${String(Math.floor(Math.random() * 100)).padStart(2, "0")}`;
-    if (!usedPhones.has(p)) { usedPhones.add(p); return p; }
+    if (!usedPhones.has(p) && !tombstoned(p)) { usedPhones.add(p); return p; }
   }
   throw new Error(`every fictional 555-01xx number (${PHONE_POOL}) is already used on staging: ${usedPhones.size} taken. Clear old synthetic contact_identities and voice_dnc rows.`);
 };
@@ -144,6 +154,8 @@ async function main() {
   // api.shared_line_two_businesses failure that failed staging deploy #124.
   for (const r of await q<{ value_norm: string }>(`SELECT value_norm FROM contact_identities WHERE kind = 'phone' AND value_norm LIKE '%55501__'`)) usedPhones.add(r.value_norm);
   for (const r of await q<{ phone_e164: string }>(`SELECT phone_e164 FROM voice_dnc WHERE phone_e164 LIKE '%55501__'`)) usedPhones.add(r.phone_e164);
+  for (const r of await q<{ key_hash: string }>(`SELECT key_hash FROM crm_erasure_tombstones WHERE kind = 'phone'`)) tombstones.add(r.key_hash);
+  if (!erasureKey) console.log("::warning::ACCESS_ROOT_KEY not set: earlier runs' erasure tombstones cannot be recognised, so a drawn number may already be refused");
   const os = new Session();
   await check("owner.sign_in", async () => {
     try { await os.login(owner.email, owner.password, owner.totp); }

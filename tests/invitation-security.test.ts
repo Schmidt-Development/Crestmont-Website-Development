@@ -33,12 +33,12 @@ test("[AUTH-006] [SEC-001] pre-registered unverified account cannot capture a st
   const token = new URL(link!, "http://x").searchParams.get("token")!;
   assert.equal((await employee.post("/invite", { token, name: "Real Employee", password: INVITEE_PW })).status, 303);
 
-  // The attacker's password no longer works; the invitee's does and is forced into MFA enrolment.
+  // The attacker's password no longer works; the invitee's does and lands in the staff area (MFA was removed).
   assert.equal((await app.client().post("/login", { email: "newhire@crestmont.test", password: ATTACKER_PW })).status, 400);
   const real = app.client();
   const ok = await real.post("/login", { email: "newhire@crestmont.test", password: INVITEE_PW });
   assert.equal(ok.status, 303);
-  assert.match(ok.headers.get("location") ?? "", /^\/mfa/);
+  assert.equal(ok.headers.get("location"), "/staff");
   // The attacker's pre-existing session was revoked.
   const stale = await attackerSession.get("/portal");
   assert.notEqual(stale.status, 200, "pre-acceptance session must be invalid");

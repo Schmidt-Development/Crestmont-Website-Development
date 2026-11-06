@@ -1,12 +1,12 @@
 // Production-mode authentication journeys (AUTH-001..006, AUTH-008, INFRA-002). The same flows already have
 // development-mode tests in tests/auth.test.ts; these run the real request pipeline with ENVIRONMENT=production
 // — including a misconfigured preview gate — to prove the production Worker behaves as the Founder approved:
-// public pages open to everyone, individual accounts for customers, employees and the Owner, MFA for staff.
+// public pages open to everyone, individual accounts for customers, employees and the Owner (MFA was removed for
+// every account on 2026-11-06: the password is the whole sign-in).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createTestApp, createStaff, createCustomer, lastEmail, linkFrom, TEST_PASSWORD } from "./support/app.ts";
-import { totpCode } from "../src/lib/auth-crypto.ts";
 
 // Production enables the breached-password check; answer it locally (no breach) instead of calling the API.
 // Turnstile siteverify is answered locally too: only the token "human-token" passes (TEST DATA).
@@ -67,7 +67,7 @@ test("[AUTH-001] [AUTH-008] production: a customer signs up, confirms the email,
   assert.ok(hash && !hash.password_hash.includes(TEST_PASSWORD), "no plaintext password stored");
 });
 
-test("[AUTH-006] [AUTH-003] production: an employee accepts an individual invitation, must enrol MFA, and gets only their role", async () => {
+test("[AUTH-006] [AUTH-003] production: an employee accepts an individual invitation, signs in with the password, and gets only their role", async () => {
   const { db, client } = await productionApp();
   const { createInvitation } = await import("../src/services/auth.ts");
   const admin = await createStaff(db, "administrator");
@@ -75,18 +75,15 @@ test("[AUTH-006] [AUTH-003] production: an employee accepts an individual invita
   const c = client();
   assert.equal((await c.post("/invite", { token, name: "Sam Sales", password: TEST_PASSWORD })).status, 303);
   const login = await c.post("/login", { email: "sam@crestmont.test", password: TEST_PASSWORD });
-  assert.equal(login.headers.get("location"), "/mfa");
-  assert.match((await c.get("/staff")).headers.get("location") ?? "", /^\/mfa/, "no staff page before MFA");
-  assert.equal((await c.get("/mfa")).headers.get("location"), "/mfa/setup");
-  const setup = await (await c.get("/mfa/setup")).text();
-  const secret = /data-testid="totp-secret">([A-Z2-7 ]+)</.exec(setup)![1].replace(/ /g, "");
-  assert.equal((await c.post("/mfa/setup", { code: await totpCode(secret) })).status, 200, "enrolled; recovery codes shown once");
+  assert.equal(login.headers.get("location"), "/staff");
   assert.equal((await c.get("/staff")).status, 200);
+  const m = await db.prepare(`SELECT m.role_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = 'sam@crestmont.test'`).first<{ role_id: string }>();
+  assert.equal(m?.role_id, "sales", "the invited role, nothing more");
   const approve = await c.get("/staff/readiness/approve");
   assert.notEqual(approve.status, 200, "only the Owner may open the release approval page");
 });
 
-test("[AUTH-003] production: the Owner is bootstrapped by a one-time invitation (no default password), signs in with email + password and must pass MFA", async () => {
+test("[AUTH-003] production: the Owner is bootstrapped by a one-time invitation (no default password), signs in with email + password", async () => {
   const { db, client } = await productionApp();
   const r = spawnSync(process.execPath, ["--no-warnings", "scripts/bootstrap-owner.ts", "--email", "founder@crestmont.test", "--print-sql", "--url", "http://crestmont.test"], { encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
@@ -98,25 +95,16 @@ test("[AUTH-003] production: the Owner is bootstrapped by a one-time invitation 
   const c = client();
   assert.equal((await c.post("/invite", { token: invite!, name: "The Founder", password: TEST_PASSWORD })).status, 303);
   assert.equal((await c.post("/invite", { token: invite!, name: "Someone else", password: TEST_PASSWORD })).status, 400, "the Owner invitation is single-use");
-  assert.equal((await c.post("/login", { email: "founder@crestmont.test", password: TEST_PASSWORD })).headers.get("location"), "/mfa");
-  assert.match((await c.get("/staff/readiness/approve")).headers.get("location") ?? "", /^\/mfa/, "release approval requires MFA");
-  assert.equal((await c.get("/mfa")).headers.get("location"), "/mfa/setup", "the Owner must enrol an authenticator");
-  const setup = await (await c.get("/mfa/setup")).text();
-  const secret = /data-testid="totp-secret">([A-Z2-7 ]+)</.exec(setup)![1].replace(/ /g, "");
-  assert.equal((await c.post("/mfa/setup", { code: "000000" })).status, 400);
-  assert.equal((await c.post("/mfa/setup", { code: await totpCode(secret) })).status, 200, "enrolled; recovery codes shown once");
-  assert.equal((await c.get("/staff/readiness/approve")).status, 200);
+  assert.equal((await c.post("/login", { email: "founder@crestmont.test", password: TEST_PASSWORD })).headers.get("location"), "/staff");
+  assert.equal((await c.get("/staff/readiness/approve")).status, 200, "the Owner reaches release approval");
   const role = await db.prepare(`SELECT m.role_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = 'founder@crestmont.test'`).first<{ role_id: string }>();
   assert.equal(role?.role_id, "owner");
 
-  // A new session must pass MFA again.
+  // A wrong password still opens nothing.
   const d = client();
-  assert.equal((await d.post("/login", { email: "founder@crestmont.test", password: TEST_PASSWORD })).headers.get("location"), "/mfa");
-  assert.equal((await d.post("/mfa", { code: "000000" })).status, 401);
-  const account = await c.get("/account");
-  assert.equal(account.status, 200);
-  assert.ok(!(await account.text()).includes(secret), "an enrolled MFA secret is never shown again");
-  assert.match((await d.get("/mfa/setup")).headers.get("location") ?? "", /^\/mfa(\?next=%2Fmfa%2Fsetup)?$/, "an unverified session cannot replace the authenticator");
+  assert.notEqual((await d.post("/login", { email: "founder@crestmont.test", password: "not-the-founders-password" })).status, 303);
+  assert.match((await d.get("/staff/readiness/approve")).headers.get("location") ?? "", /^\/login/);
+  assert.equal((await c.get("/account")).status, 200);
 });
 
 test("[AUTH-002] [AUTH-004] production: password reset is single-use, signs out every session, and does not reveal whether an account exists", async () => {

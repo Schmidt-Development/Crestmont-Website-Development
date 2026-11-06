@@ -51,38 +51,6 @@ test("[AUTH-001] registration rejects weak passwords and does not reveal existin
   assert.match(await dup.text(), /If this address can be used/);
 });
 
-test("[AUTH-003] staff must complete MFA before reaching staff pages", async () => {
-  const { db, client } = await createTestApp();
-  const s = await createStaff(db, "sales");
-  const c = client();
-  const res = await c.post("/login", { email: s.email, password: TEST_PASSWORD });
-  assert.equal(res.headers.get("location"), "/mfa");
-  const blocked = await c.get("/account");
-  assert.equal(blocked.status, 303);
-  assert.match(blocked.headers.get("location") ?? "", /^\/mfa/);
-  const bad = await c.post("/mfa", { code: "000000" });
-  assert.equal(bad.status, 401);
-  const ok = await c.post("/mfa", { code: await totpCode(s.secret) });
-  assert.equal(ok.status, 303);
-  assert.equal((await c.get("/account")).status, 200);
-});
-
-test("[AUTH-003] staff without MFA are sent to enrolment and can enable TOTP", async () => {
-  const { db, client } = await createTestApp();
-  const s = await createStaff(db, "developer");
-  await db.prepare(`UPDATE users SET totp_secret = NULL, mfa_enabled = 0 WHERE id = ?`).bind(s.id).run();
-  const c = client();
-  await c.post("/login", { email: s.email, password: TEST_PASSWORD });
-  const mfa = await c.get("/mfa");
-  assert.equal(mfa.headers.get("location"), "/mfa/setup");
-  const setup = await c.get("/mfa/setup");
-  const secret = /data-testid="totp-secret">([A-Z2-7 ]+)</.exec(await setup.text())![1].replace(/ /g, "");
-  const done = await c.post("/mfa/setup", { code: await totpCode(secret) });
-  assert.equal(done.status, 200, "enrolment shows the recovery codes once");
-  assert.equal([...(await done.text()).matchAll(/<li><code>[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}<\/code><\/li>/g)].length, 10);
-  assert.equal((await db.prepare(`SELECT mfa_enabled FROM users WHERE id = ?`).bind(s.id).first<{ mfa_enabled: number }>())?.mfa_enabled, 1);
-});
-
 test("[AUTH-005] repeated failed sign-ins never lock the account: unknown browsers must pass the challenge, failures are logged (CREST-GAP-003)", async () => {
   // Turnstile configured; the stubbed siteverify passes only the token "pass".
   const turnstile: typeof fetch = async (_u, init) => new Response(JSON.stringify({ success: (init?.body as FormData).get("response") === "pass" }));
@@ -181,22 +149,6 @@ test("[SEC-002] pages carry a strict CSP and anti-framing headers", async () => 
   assert.equal(res.headers.get("x-frame-options"), "DENY");
   const cookies = res.headers.getSetCookie().join("\n");
   assert.match(cookies, /cm_csrf=[0-9a-f]{32}; Path=\/; Max-Age=86400; HttpOnly; SameSite=Strict/);
-});
-
-test("[AUTH-003] a TOTP code cannot be replayed (ASVS F-04)", async () => {
-  const { db, client } = await createTestApp();
-  const s = await createStaff(db, "support");
-  const code = await totpCode(s.secret);
-  const a = client();
-  await a.post("/login", { email: s.email, password: TEST_PASSWORD });
-  assert.equal((await a.post("/mfa", { code })).status, 303);
-  const b = client();
-  await b.post("/login", { email: s.email, password: TEST_PASSWORD });
-  const replay = await b.post("/mfa", { code });
-  assert.equal(replay.status, 401);
-  assert.match(await replay.text(), /already used/);
-  const ev = await db.prepare(`SELECT COUNT(*) n FROM security_events WHERE kind = 'mfa_replay_rejected'`).first<{ n: number }>();
-  assert.equal(ev!.n, 1);
 });
 
 test("[AUTH-004] idle sessions expire: staff after 2 hours, customers after 24 hours (ASVS F-07)", async () => {

@@ -106,7 +106,7 @@ export const CMS_KEYS: CmsKeyDef[] = [
     defaults: { heading: "Technical capabilities", items: block([
       ["Responsive, accessible front ends", "Layouts that work on phones, tablets and desktops, built toward WCAG 2.1 AA."],
       ["Performance", "Optimised images and assets, minimal scripts and modern edge hosting."],
-      ["Security", "Two-factor sign-in for staff, CSRF protection, strict content security policies and audit logging."],
+      ["Security", "Role-based access, CSRF protection, strict content security policies and audit logging."],
       ["Integrations", "Payments, scheduling, CRM, email and other services connected through their documented APIs."],
       ["Applications and portals", "Role-based customer and staff portals, dashboards and custom workflows."],
       ["Search and measurement", "Technical SEO, Search Console and analytics configured under your ownership."],

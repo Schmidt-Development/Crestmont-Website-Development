@@ -127,59 +127,6 @@ test("[SEC-004] cross-environment isolation: a secret sealed under one environme
   assert.notEqual(await sealWithKey(staging, "usr_1", secret), sealed, "a fresh nonce for every encryption");
 });
 
-test("[AUTH-003] [SEC-004] end to end with a key: invalid and expired codes refused, valid accepted, and no secret or code is written to any log table", async () => {
-  const { totpCode } = await import("../src/lib/auth-crypto.ts");
-  const key = KEY();
-  const app = await createTestApp({ ENVIRONMENT: "development", MFA_ENCRYPTION_KEY: key });
-  const { createStaff, TEST_PASSWORD } = await import("./support/app.ts");
-  const s = await createStaff(app.db, "support", "e2e-mfa@crestmont.test");
-  await app.db.prepare(`UPDATE users SET totp_secret = NULL, mfa_enabled = 0 WHERE id = ?`).bind(s.id).run();
-  const c = app.client();
-  await c.post("/login", { email: s.email, password: TEST_PASSWORD });
-  const setup = await (await c.get("/mfa/setup")).text();
-  const secret = /data-testid="totp-secret">([A-Z2-7 ]+)</.exec(setup)![1].replace(/ /g, "");
-  const enrolCode = await totpCode(secret);
-  const done = await c.post("/mfa/setup", { code: enrolCode });
-  const codes = [...(await done.text()).matchAll(/<li><code>([a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4})<\/code><\/li>/g)].map((m) => m[1]);
-  assert.equal(codes.length, 10);
-  const row = await app.db.prepare(`SELECT totp_secret, totp_pending_secret FROM users WHERE id = ?`).bind(s.id).first<{ totp_secret: string; totp_pending_secret: string | null }>();
-  assert.match(row!.totp_secret, /^v1:/, "stored encrypted");
-  assert.equal(row!.totp_pending_secret, null);
-
-  const reset = () => app.db.prepare(`UPDATE users SET totp_last_step = NULL WHERE id = ?`).bind(s.id).run().then(() => app.db.prepare(`DELETE FROM rate_limits WHERE key = ?`).bind(`mfa:${s.id}`).run());
-  const fresh = app.client();
-  await fresh.post("/login", { email: s.email, password: TEST_PASSWORD });
-  const now = Math.floor(Date.now() / 1000);
-  const tried: string[] = [];
-  for (const [label, code] of [["expired (3 steps old)", await totpCode(secret, now - 90)], ["future (3 steps ahead)", await totpCode(secret, now + 90)], ["malformed", "12345"], ["wrong", "000000"]] as const) {
-    if (code === await totpCode(secret)) continue; // astronomically unlikely collision
-    await reset(); tried.push(code);
-    assert.equal((await fresh.post("/mfa", { code })).status, 401, `${label} code refused`);
-    assert.notEqual((await fresh.get("/staff")).status, 200);
-  }
-  await reset();
-  // One step of clock drift is accepted. Taken from the clock NOW, not from `now` above: the refused attempts take time,
-  // and if a 30-second step boundary passed meanwhile, `now - 30` was two steps old and rightly refused (a full-suite
-  // flake). A boundary closer than 3 s is waited out, so the server cannot cross it between this line and its check.
-  if (30 - (Math.floor(Date.now() / 1000) % 30) < 3) await new Promise((r) => setTimeout(r, 3_100));
-  const good = await totpCode(secret, Math.floor(Date.now() / 1000) - 30);
-  assert.equal(loc(await fresh.post("/mfa", { code: good })), "/staff");
-  const r = app.client();
-  await r.post("/login", { email: s.email, password: TEST_PASSWORD });
-  assert.equal(loc(await r.post("/mfa", { code: codes[0] })), "/staff", "recovery code accepted once");
-
-  // Nothing secret anywhere in the log / audit / event tables (or the stored email bodies).
-  const dump = JSON.stringify([
-    ...(await app.db.prepare(`SELECT * FROM security_events`).all()).results,
-    ...(await app.db.prepare(`SELECT * FROM audit_logs`).all()).results,
-    ...(await app.db.prepare(`SELECT * FROM email_messages`).all().catch(() => ({ results: [] }))).results,
-  ]);
-  for (const v of [secret, key, ...codes]) assert.ok(!dump.includes(v), "no TOTP secret, key or recovery code is logged");
-  // 6-digit codes as standalone tokens (a hex id or timestamp may contain the same digits by chance).
-  for (const v of [enrolCode, good, ...tried.filter((t) => t.length === 6 && t !== "000000")]) assert.ok(!new RegExp(`(?<![0-9a-zA-Z])${v}(?![0-9a-zA-Z])`).test(dump), "no TOTP code is logged");
-});
-const loc = (r: Response) => r.headers.get("location") ?? "";
-
 test("[SEC-004] encrypt-totp-secrets on a remote target refuses --yes until a Worker-encrypted secret proves the key", async () => {
   const { run } = await import("../scripts/encrypt-totp-secrets.ts");
   const key = KEY();

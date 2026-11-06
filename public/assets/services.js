@@ -263,7 +263,7 @@
 
   // Portals: role switch re-evaluates every row from the same permission rules.
   engines.roles = (v) => {
-    const WHO = { customer: ["Signed in as a customer (sample)", "Two-factor: optional"], staff: ["Signed in as staff (sample)", "Two-factor: required"], admin: ["Signed in as an administrator (sample)", "Two-factor: required"] };
+    const WHO = { customer: ["Signed in as a customer (sample)", "Password sign-in"], staff: ["Signed in as staff (sample)", "Password sign-in"], admin: ["Signed in as an administrator (sample)", "Password sign-in"] };
     v.fig.addEventListener("click", (e) => {
       const b = e.target.closest(".sv__controls [data-key]"); if (!b) return; const role = b.dataset.key, R = $(v.body, ".sv-roles");
       R.dataset.role = role; v.pick(role); v.note(role);

@@ -1,14 +1,13 @@
-// Sign-in, registration, verification, MFA, password reset, invitations, account (AUTH-001..006).
+// Sign-in, registration, verification, password reset, invitations, account (AUTH-001..006). MFA was removed (2026-11-06).
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html } from "../lib/html.ts";
 import { cookie, hostCookieName, htmlResponse, isSecure, parseCookies, redirect, str } from "../app/http.ts";
 import { authLayout, appLayout } from "../ui/layout.ts";
-import { csrf, input, button, formErrors, alert, table, actionForm, badge, checkbox } from "../ui/components.ts";
+import { csrf, input, button, formErrors, table, actionForm, badge, checkbox } from "../ui/components.ts";
 import * as auth from "../services/auth.ts";
 import { requireUser } from "../app/app.ts";
 import { sendMail } from "../services/mailer.ts";
-import { otpauthUri } from "../lib/auth-crypto.ts";
 import { formatDateTime, label } from "../lib/html.ts";
 import { HttpError } from "../app/http.ts";
 import { securityEvent } from "../services/security.ts";
@@ -22,12 +21,6 @@ import { safeNextPath } from "../app/step-up.ts";
 /** Same-origin relative redirect target only (rejects //host, /\host, absolute URLs and control characters). */
 const safeNext = (n: string | null, fallback: string) => safeNextPath(n, fallback);
 const BOT_CHECK_FAILED = "We could not verify that this request came from a person. Please try again.";
-
-/** New session token once the second factor is complete (CREST-GAP-086). */
-async function rotateSessionCookie(ctx: AppContext) {
-  const r = await auth.rotateSessionToken(ctx.db, ctx.sessionId!);
-  if (r) ctx.setCookies.push(sessionCookie(ctx, r.token, r.maxAge));
-}
 
 /** The remembered-device cookie for abuse-resistant sign-in (CREST-GAP-003). */
 function deviceCookieValue(ctx: AppContext): string | null {
@@ -164,88 +157,16 @@ export function register(r: Router) {
   });
 
   // ── MFA ──
-  r.get("/mfa", async (ctx) => {
+  // MFA removed (Founder directive, 2026-11-06). These addresses stay so old links and bookmarks land somewhere
+  // sensible: each sends the signed-in user on to where they were going, and nobody is asked for a code.
+  const onward = (ctx: AppContext) => {
     requireUser(ctx);
-    const next = ctx.url.searchParams.get("next") ?? "";
-    if (ctx.sessionMfaVerified) return redirect(ctx, safeNext(next, ctx.user!.isStaff ? "/staff" : "/portal"));
-    if (!ctx.user!.mfaEnabled) return redirect(ctx, `/mfa/setup${next ? `?next=${encodeURIComponent(next)}` : ""}`);
-    return mfaChallenge(ctx);
-  });
-  r.post("/mfa", async (ctx) => {
-    requireUser(ctx);
-    const f = await ctx.form();
-    try {
-      const res = await auth.completeMfa(ctx.env, ctx.db, ctx.sessionId!, ctx.user!.id, str(f, "code"), ctx.ip);
-      await rotateSessionCookie(ctx);
-      await setDeviceCookie(ctx, ctx.user!.id, deviceCookieValue(ctx));
-      const dest = safeNext(ctx.url.searchParams.get("next"), ctx.user!.isStaff ? "/staff" : "/portal");
-      if (res.method === "recovery") return redirect(ctx, dest, await recoveryUsed(ctx, res.remaining));
-      return redirect(ctx, dest);
-    } catch (e) {
-      if (e instanceof auth.AuthError) return mfaChallenge(ctx, [e.message], e.status === 503 ? 503 : undefined);
-      throw e;
-    }
-  });
-  r.get("/mfa/setup", async (ctx) => {
-    requireUser(ctx);
-    if (ctx.user!.mfaEnabled && !ctx.sessionMfaVerified) return redirect(ctx, "/mfa");
-    try {
-      const secret = await auth.beginTotpEnrollment(ctx.env, ctx.db, ctx.user!.id);
-      return mfaSetup(ctx, secret);
-    } catch (e) {
-      if (e instanceof auth.AuthError) return mfaUnavailable(ctx, e.message);
-      throw e;
-    }
-  });
-  r.post("/mfa/setup", async (ctx) => {
-    requireUser(ctx);
-    // Same rule as GET: replacing an enrolled authenticator needs a session that already passed MFA.
-    if (ctx.user!.mfaEnabled && !ctx.sessionMfaVerified) return redirect(ctx, "/mfa");
-    const f = await ctx.form();
-    try {
-      const codes = await auth.confirmTotpEnrollment(ctx.env, ctx.db, ctx.user!.id, ctx.sessionId!, str(f, "code").replace(/\s/g, ""));
-      await rotateSessionCookie(ctx);
-      await setDeviceCookie(ctx, ctx.user!.id, deviceCookieValue(ctx));
-      await sendMail(ctx, { template: "security_notification", to: ctx.user!.email, idempotencyKey: `mfa-on:${ctx.user!.id}:${Date.now()}`, data: { event: "mfa_enabled" } });
-      // The recovery codes are shown exactly once, in this response; only their hashes are stored.
-      return recoveryCodesPage(ctx, codes, safeNext(ctx.url.searchParams.get("next"), ctx.user!.isStaff ? "/staff" : "/account"), "Two-factor authentication is enabled");
-    } catch (e) {
-      if (e instanceof auth.AuthError) {
-        if (e.status === 503) return mfaUnavailable(ctx, e.message);
-        const pending = await auth.pendingTotpSecret(ctx.env, ctx.db, ctx.user!.id).catch(() => null);
-        if (!pending) return redirect(ctx, `/mfa/setup${ctx.url.search}`, { kind: "error", text: e.message });
-        return mfaSetup(ctx, pending, [e.message]);
-      }
-      throw e;
-    }
-  });
-
-  // ── Step-up MFA (src/app/step-up.ts): a fresh TOTP or recovery code before a sensitive action ──
-  r.get("/mfa/step-up", async (ctx) => {
-    requireUser(ctx);
-    const next = safeNext(ctx.url.searchParams.get("next"), ctx.user!.isStaff ? "/staff" : "/account");
-    if (!ctx.sessionMfaVerified) return redirect(ctx, `/mfa?next=${encodeURIComponent(next)}`);
-    if (!ctx.user!.mfaEnabled) {
-      return htmlResponse(ctx, authLayout(ctx, { title: "Confirm it is you" }, html`<h1 style="font-size:2rem">No second step needed</h1>
-<p class="muted">Your account does not use two-factor authentication, so there is nothing to confirm. You can turn it on from your account page.</p><p><a class="btn" href="${next}">Continue</a></p>`));
-    }
-    return stepUpPage(ctx, next);
-  });
-  r.post("/mfa/step-up", async (ctx) => {
-    requireUser(ctx);
-    const next = safeNext(ctx.url.searchParams.get("next"), ctx.user!.isStaff ? "/staff" : "/account");
-    if (!ctx.sessionMfaVerified) return redirect(ctx, `/mfa?next=${encodeURIComponent(next)}`);
-    if (!ctx.user!.mfaEnabled) return redirect(ctx, next);
-    const f = await ctx.form();
-    try {
-      const res = await auth.verifySecondFactor(ctx.env, ctx.db, ctx.sessionId!, ctx.user!.id, str(f, "code"), ctx.ip, "step_up");
-      if (res.method === "recovery") return redirect(ctx, next, await recoveryUsed(ctx, res.remaining));
-      return redirect(ctx, next, { kind: "success", text: "Verified. You can continue for the next 10 minutes." });
-    } catch (e) {
-      if (e instanceof auth.AuthError) return stepUpPage(ctx, next, [e.message], e.status === 503 ? 503 : 401);
-      throw e;
-    }
-  });
+    return redirect(ctx, safeNext(ctx.url.searchParams.get("next"), ctx.user!.isStaff ? "/staff" : "/portal"));
+  };
+  for (const path of ["/mfa", "/mfa/setup", "/mfa/step-up"]) {
+    r.get(path, async (ctx) => onward(ctx));
+    r.post(path, async (ctx) => onward(ctx));
+  }
 
   // ── Password reset ──
   r.get("/password/forgot", (ctx) => forgotPage(ctx));
@@ -305,7 +226,7 @@ export function register(r: Router) {
       if (mode === "new" || mode === "claim") await auth.assertPasswordNotBreached(ctx.env, ctx.db, String(f.get("password") ?? ""));
       await auth.acceptInvitation(ctx.db, token, str(f, "name"), String(f.get("password") ?? ""), { sessionUserId, ip: ctx.ip });
       if (mode === "confirm") return redirect(ctx, inv0!.role_id.startsWith("customer_") ? "/portal" : "/staff", { kind: "success", text: "Invitation accepted." });
-      return redirect(ctx, "/login", { kind: "success", text: "Invitation accepted. Sign in to continue — staff accounts set up two-factor authentication next." });
+      return redirect(ctx, "/login", { kind: "success", text: "Invitation accepted. Sign in to continue." });
     } catch (e) {
       if (e instanceof auth.AuthError) {
         const inv = await auth.invitationByToken(ctx.db, token);
@@ -317,22 +238,18 @@ export function register(r: Router) {
     }
   });
 
+
   // ── Account & sessions ──
   r.get("/account", async (ctx) => {
     requireUser(ctx);
     if (!ctx.sessionMfaVerified) throw new HttpError(401, "MFA_REQUIRED");
     const sessions = (await ctx.db.prepare(`SELECT id, ip, user_agent, created_at, expires_at, revoked_at FROM sessions WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 20`)
       .bind(ctx.user!.id, new Date().toISOString()).all<{ id: string; ip: string | null; user_agent: string | null; created_at: string; expires_at: string }>()).results;
-    const recovery = await auth.recoveryCodeStatus(ctx.db, ctx.user!.id);
     const body = html`<div class="page-head"><h1>Account</h1></div>
 <div class="grid grid-2"><section class="card"><h2 class="card__title">Profile</h2><p>${ctx.user!.displayName}<br><span class="muted">${ctx.user!.email}</span> ${ctx.user!.emailVerified ? badge("verified", "Email verified") : badge("pending", "Email not confirmed")}</p>
 ${ctx.user!.memberships.map((m) => html`<p class="faint">${m.organizationName} · ${label(m.role)}</p>`)}
 <p data-account-links>${ctx.user!.isStaff ? "" : html`<a href="/account/profile">Edit name or email</a> · `}<a href="/account/privacy">Privacy &amp; your data</a> — download your data or request deletion.</p></section>
-<section class="card"><h2 class="card__title">Two-factor authentication</h2>
-${ctx.user!.mfaEnabled ? html`<p>${badge("active", "Enabled")} Codes from your authenticator app are required at sign-in.</p>
-<p data-testid="recovery-status">Recovery codes: ${recovery.total ? html`<strong>${recovery.remaining}</strong> of ${recovery.total} unused` : html`${badge("pending", "None")} generate a set now so a lost phone does not lock you out`}.</p>
-<form method="post" action="/account/mfa/recovery-codes" class="stack">${csrf(ctx)}${input({ name: "code", label: "Current 6-digit code from your authenticator", autocomplete: "one-time-code", inputmode: "numeric", required: true, maxlength: 7, hint: "Generating a new set replaces every earlier recovery code." })}${button(recovery.total ? "Generate new recovery codes" : "Generate recovery codes", { variant: "secondary" })}</form>
-<p><a href="/mfa/setup">Replace authenticator</a></p>` : html`<p class="muted" data-mfa-requirement>${mfaRequirementText(ctx)}</p><a class="btn btn--secondary" href="/mfa/setup">Set up two-factor authentication</a>`}</section></div>
+<section class="card"><h2 class="card__title">Sign-in</h2><p class="muted">You sign in with your email address and password. Keep your password private; changing it signs out your other sessions.</p></section></div>
 <section class="card" style="margin-top:1.5rem"><h2 class="card__title">Change password</h2>
 <form method="post" action="/account/password">${csrf(ctx)}<div class="grid grid-2">${input({ name: "current", label: "Current password", type: "password", autocomplete: "current-password", required: true })}${input({ name: "next", label: "New password", type: "password", autocomplete: "new-password", required: true, hint: "At least 12 characters. Other sessions will be signed out." })}</div>${button("Update password", { variant: "secondary" })}</form></section>
 <section style="margin-top:1.5rem"><div class="row row--between"><h2 style="font-size:1.5rem;margin:0">Active sessions</h2>${actionForm(ctx, "/account/sessions/revoke-others", "Sign out all other sessions", { variant: "danger", confirm: "Sign out every other session?" })}</div>
@@ -359,22 +276,6 @@ ${table(sessions, [
       throw e;
     }
   });
-  // Regenerating recovery codes needs an MFA-verified session AND a current authenticator code (a fresher check than
-  // step-up: a recovery code cannot mint new recovery codes). Shown once; audited; the user is emailed.
-  r.post("/account/mfa/recovery-codes", async (ctx) => {
-    requireUser(ctx);
-    if (!ctx.sessionMfaVerified) throw new HttpError(401, "MFA_REQUIRED");
-    if (!ctx.user!.mfaEnabled) return redirect(ctx, "/account", { kind: "error", text: "Turn on two-factor authentication first." });
-    const f = await ctx.form();
-    try {
-      const codes = await auth.regenerateRecoveryCodes(ctx.env, ctx.db, ctx.sessionId!, ctx.user!.id, str(f, "code"), ctx.ip);
-      await sendMail(ctx, { template: "security_notification", to: ctx.user!.email, idempotencyKey: `mfa-rc:${ctx.user!.id}:${Date.now()}`, data: { event: "mfa_recovery_codes_regenerated" } });
-      return recoveryCodesPage(ctx, codes, "/account", "New recovery codes");
-    } catch (e) {
-      if (e instanceof auth.AuthError) return redirect(ctx, "/account", { kind: "error", text: e.message });
-      throw e;
-    }
-  });
   r.post("/account/sessions/:id/revoke", async (ctx, p) => {
     requireUser(ctx);
     if (!ctx.sessionMfaVerified) throw new HttpError(401, "MFA_REQUIRED");
@@ -396,62 +297,11 @@ async function recordTermsAcceptance(ctx: AppContext, userId: string, organizati
   await recordAcceptance(ctx, { userId, organizationId, context: "registration" });
 }
 
-const codeField = () => input({ name: "code", label: "6-digit code", autocomplete: "one-time-code", required: true, maxlength: 20,
-  hint: "Lost your authenticator? Enter one of your recovery codes instead (each works once)." });
-
-const isCustomerAdmin = (ctx: AppContext) => !!ctx.user?.memberships.some((m) => m.role === "customer_admin");
-
-/** Account page copy (FD-30): required for staff and customer administrators, optional for customer members. */
-function mfaRequirementText(ctx: AppContext): string {
-  if (ctx.user!.isStaff) return "Required for staff.";
-  if (isCustomerAdmin(ctx)) return "Required for account administrators. Set it up to pay invoices, approve work, accept proposals and manage your team.";
-  return "Optional for team members, and recommended.";
-}
-
-function mfaChallenge(ctx: AppContext, errors: string[] = [], status?: number) {
-  return htmlResponse(ctx, authLayout(ctx, { title: "Verification code" }, html`<h1 style="font-size:2rem">Enter your code</h1><p class="muted">Open your authenticator app and enter the 6-digit code for Crestmont.</p>${formErrors(errors)}
-<form method="post" action="/mfa${ctx.url.search}">${csrf(ctx)}${codeField()}<div class="form-actions">${button("Verify")}</div></form>`), status ?? (errors.length ? 401 : 200));
-}
-
-function stepUpPage(ctx: AppContext, next: string, errors: string[] = [], status?: number) {
-  return htmlResponse(ctx, authLayout(ctx, { title: "Confirm it is you" }, html`<h1 style="font-size:2rem">Confirm it is you</h1>
-<p class="muted">This action needs a fresh two-factor check. Enter the current 6-digit code from your authenticator app; you will then return to the page you were on.</p>${formErrors(errors)}
-<form method="post" action="/mfa/step-up?next=${encodeURIComponent(next)}">${csrf(ctx)}${codeField()}<div class="form-actions">${button("Verify and continue")}<a class="btn btn--ghost" href="${next}">Cancel</a></div></form>`), status ?? 200);
-}
-
-function mfaUnavailable(ctx: AppContext, message: string) {
-  return htmlResponse(ctx, authLayout(ctx, { title: "Two-factor setup unavailable" }, html`<h1 style="font-size:2rem">Two-factor setup is unavailable</h1>${alert("error", message)}<p><a href="/">Back to the website</a></p>`), 503);
-}
-
-/** Shows freshly generated recovery codes. This response is the only place they ever appear in plaintext. */
-function recoveryCodesPage(ctx: AppContext, codes: string[], next: string, heading: string) {
-  return htmlResponse(ctx, authLayout(ctx, { title: "Recovery codes" }, html`<h1 style="font-size:2rem">${heading}</h1>
-${alert("info", "Save these recovery codes now, somewhere safe and separate from your phone (a password manager or a printed copy). They are shown only once. Each code works once, in place of a 6-digit code, if you lose your authenticator.")}
-<ol class="recovery-codes" data-testid="recovery-codes">${codes.map((c) => html`<li><code>${c}</code></li>`)}</ol>
-<p class="muted">Generating a new set (from your account page) replaces all of these.</p>
-<div class="form-actions"><a class="btn" href="${next}">I have saved my codes — continue</a></div>`));
-}
-
-/** After a recovery code was used: email the account owner and warn in the UI. */
-async function recoveryUsed(ctx: AppContext, remaining: number): Promise<{ kind: "info" | "error"; text: string }> {
-  await sendMail(ctx, { template: "security_notification", to: ctx.user!.email, idempotencyKey: `mfa-rc-used:${ctx.user!.id}:${Date.now()}`, data: { event: "mfa_recovery_code_used" } });
-  return { kind: remaining <= 2 ? "error" : "info", text: `You signed in with a recovery code. ${remaining} unused code${remaining === 1 ? "" : "s"} left — generate a new set from your account page${remaining <= 2 ? " now" : ""}.` };
-}
-
 function forgotPage(ctx: AppContext, errors: string[] = [], status?: number) {
   return htmlResponse(ctx, authLayout(ctx, { title: "Reset password" }, html`<h1 style="font-size:2rem">Reset your password</h1>${formErrors(errors)}
 <form method="post" action="/password/forgot">${csrf(ctx)}${input({ name: "email", label: "Email", type: "email", autocomplete: "email", required: true })}${turnstileWidget(ctx)}<div class="form-actions">${button("Send reset link")}</div></form>`), status ?? (errors.length ? 400 : 200));
 }
 
-function mfaSetup(ctx: AppContext, secret: string, errors: string[] = []) {
-  const grouped = secret.match(/.{1,4}/g)?.join(" ") ?? secret;
-  return htmlResponse(ctx, authLayout(ctx, { title: "Set up two-factor authentication" }, html`<h1 style="font-size:2rem">Set up two-factor authentication</h1>
-${ctx.user!.isStaff ? alert("info", "Two-factor authentication is required for Crestmont staff accounts.") : isCustomerAdmin(ctx) ? alert("info", "Two-factor authentication is required for account administrators, who approve work and pay invoices. Until it is on you can view your portal, but not pay, approve, accept proposals or manage your team.") : ""}
-<ol class="muted"><li>Open an authenticator app (1Password, Google Authenticator, Authy, Microsoft Authenticator).</li><li>Add an account using this setup key, or open the link on a phone that has the app.</li><li>Enter the 6-digit code it shows.</li></ol>
-<p><span class="label">Setup key</span><br><code style="font-size:1.1rem;letter-spacing:.08em;color:var(--gold-1)" data-testid="totp-secret">${grouped}</code></p>
-<p><a href="${otpauthUri(secret, ctx.user!.email)}">Open in authenticator app</a></p>${formErrors(errors)}
-<form method="post" action="/mfa/setup${ctx.url.search}">${csrf(ctx)}${input({ name: "code", label: "6-digit code", autocomplete: "one-time-code", inputmode: "numeric", required: true, maxlength: 7 })}<div class="form-actions">${button("Turn on")}</div></form>`), errors.length ? 400 : 200);
-}
 
 function resetPage(ctx: AppContext, errors: string[] = [], token = ctx.url.searchParams.get("token") ?? "") {
   return htmlResponse(ctx, authLayout(ctx, { title: "Choose a new password" }, html`<h1 style="font-size:2rem">Choose a new password</h1>${formErrors(errors)}

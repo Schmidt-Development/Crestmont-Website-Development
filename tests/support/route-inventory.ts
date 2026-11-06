@@ -7,11 +7,11 @@
 // access  — who may call the route (server-side, enforced in src/):
 //   public     anyone, no session
 //   token      anyone holding a secret capability token in the URL (share links, proposals, invitations)
-//   authflow   sign-in / MFA flow: needs a session but runs BEFORE MFA verification by design
+//   authflow   sign-in flow: needs a session (MFA was removed on 2026-11-06; the /mfa addresses only redirect onward)
 //   session    any fully signed-in user (staff or customer), acting only on their own account
 //   customer   a member of a customer organization, scoped to that organization (admin: customer_admin only;
 //              staffToo: staff may also call it, subject to record-level checks)
-//   staff      Crestmont staff with MFA; `roles` = the staff roles allowed to perform the action at all
+//   staff      signed-in Crestmont staff; `roles` = the staff roles allowed to perform the action at all
 //   signed     machine-to-machine API authenticated by an HMAC signature header (no cookies)
 //   webhook    provider webhook authenticated by the provider's signature header
 // params  — the resource kind each :param names (used to substitute real ids from another tenant).
@@ -144,14 +144,14 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /register": pub,
   "GET /verify-email": token("email verification token (?token=)"),
   "POST /verify-email/resend": flow(exempt("re-sends the caller's own verification email; rate of mail is bounded by idempotency keys")),
+  // MFA was removed (Founder directive, 2026-11-06): these old addresses only redirect a signed-in user onward
+  // (tests/mfa-removed.test.ts). They change nothing, so they need no audit classification.
   "GET /mfa": flow(),
-  "POST /mfa": flow(act("session.mfa_verified")),
+  "POST /mfa": flow(),
   "GET /mfa/setup": flow(),
-  "POST /mfa/setup": flow(act("user.mfa_enabled")),
-  // Step-up MFA (src/app/step-up.ts): a fully signed-in session re-verifies before a sensitive action.
-  "GET /mfa/step-up": session(),
-  "POST /mfa/step-up": session(act("session.step_up_verified")),
-  "POST /account/mfa/recovery-codes": session(act("user.mfa_recovery_codes_regenerated")),
+  "POST /mfa/setup": flow(),
+  "GET /mfa/step-up": flow(),
+  "POST /mfa/step-up": flow(),
   "GET /password/forgot": pub,
   "POST /password/forgot": pub,
   "GET /password/reset": token("password reset token (?token=)"),

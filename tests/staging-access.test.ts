@@ -36,7 +36,7 @@ async function stagingDb() {
 const ownerOf = (r: Awaited<ReturnType<typeof applyAccess>>) => { const o = r.accounts.find((a) => a.role === "owner")!; return { email: o.email, password: o.password, totp: o.totp! }; };
 const KEY = "test-root-key-0123456789abcdef";
 
-test("[INFRA-002] staging access: public site, artifact and live accounts agree; full Owner sequence with MFA verified; rotation revokes old credentials", async () => {
+test("[INFRA-002] staging access: public site, artifact and live accounts agree; full Owner sequence with a password sign-in (no 2FA step); rotation revokes old credentials", async () => {
   const s = await stagingDb();
 
   // First run after this change: rotates (no salt yet) and applies the demo credentials. No preview password is issued.
@@ -48,7 +48,7 @@ test("[INFRA-002] staging access: public site, artifact and live accounts agree;
   const owner1 = ownerOf(r1);
   assert.match(owner1.totp, /^[A-Z2-7]{32}$/);
 
-  // The complete sequence the Founder follows, over the real request pipeline.
+  // The complete sequence the Founder follows, over the real request pipeline: email + password reach the Owner area.
   const v = await verifyStagingAccess({ base: BASE, owner: owner1 }, s.fetchFor(s.env()));
   assert.deepEqual(v, { modules: 32, pages: 32 });
 
@@ -60,7 +60,6 @@ test("[INFRA-002] staging access: public site, artifact and live accounts agree;
   const r2 = await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false });
   assert.equal(r2.rotated, false);
   assert.deepEqual(r2.accounts, r1.accounts);
-  s.db.raw.prepare("UPDATE users SET totp_last_step = NULL").run(); // next 30 s window
   await verifyStagingAccess({ base: BASE, owner: ownerOf(r2) }, s.fetchFor(s.env()));
 
   // An Owner session exists; rotation must revoke it along with every old credential.
@@ -72,7 +71,6 @@ test("[INFRA-002] staging access: public site, artifact and live accounts agree;
   assert.notEqual(ownerOf(r3).totp, owner1.totp, "2FA setup key rotated");
   assert.equal((s.db.raw.prepare(`SELECT COUNT(*) AS n FROM sessions s JOIN users u ON u.id = s.user_id WHERE u.email LIKE '%@crestmont-preview.test'`).get() as { n: number }).n, 0, "demo sessions revoked");
   await assert.rejects(verifyStagingAccess({ base: BASE, owner: owner1 }, s.fetchFor(s.env())), /Owner password/, "old Owner password refused after rotation");
-  s.db.raw.prepare("UPDATE users SET totp_last_step = NULL").run();
   await verifyStagingAccess({ base: BASE, owner: ownerOf(r3) }, s.fetchFor(s.env()));
 
   // Bumping ACCESS_EPOCH in the workflow forces a rotation without anyone ticking a box.
@@ -85,6 +83,7 @@ test("[INFRA-002] staging access: public site, artifact and live accounts agree;
   assert.doesNotMatch(md, /## \d\. Preview password/);
   for (const item of [BASE, ownerOf(r3).email, ownerOf(r3).password, ownerOf(r3).totp]) assert.ok(md.includes(item));
   assert.match(md, /Verified by the deploy run/);
+  assert.doesNotMatch(md, /6-digit code|Recovery codes|→ 2FA →/, "the steps no longer include a two-factor step");
 });
 
 test("[INFRA-002] staging access refuses to run without a root key", async () => {
@@ -112,7 +111,6 @@ test("[INFRA-002] [SEC-004] staging access writes a demo 2FA secret only when it
   assert.equal(r2.rotated, false);
   assert.equal(ownerOf(r2).totp, owner.totp, "same reported setup key");
   assert.equal(stored(id), sealed, "the encrypted value is not overwritten with plaintext");
-  s.db.raw.prepare("UPDATE users SET totp_last_step = NULL").run();
   await verifyStagingAccess({ base: BASE, owner: ownerOf(r2) }, s.fetchFor({ ...s.env(), MFA_ENCRYPTION_KEY: mfaKey }));
 
   // A secret that was cleared (e.g. an MFA reset) is written again even though the marker matches. A deploy key is
@@ -121,10 +119,12 @@ test("[INFRA-002] [SEC-004] staging access writes a demo 2FA secret only when it
   const r4 = await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false, mfaKey });
   assert.equal(r4.totpStorage, "plaintext-unverified");
   assert.equal(stored(id), owner.totp);
-  // The real sign-in path (Worker holds the key) encrypts it at rest.
-  s.db.raw.prepare("UPDATE users SET totp_last_step = NULL").run();
+  // Signing in (password only since MFA was removed) leaves the stored secret exactly as it was.
   await verifyStagingAccess({ base: BASE, owner: ownerOf(r4) }, s.fetchFor({ ...s.env(), MFA_ENCRYPTION_KEY: mfaKey }));
-  assert.match(stored(id)!, /^v1:/, "encrypted by the Worker at sign-in");
+  assert.equal(stored(id), owner.totp, "sign-in does not touch stored 2FA data");
+  // scripts/encrypt-totp-secrets.ts (the Worker's key) then seals it at rest.
+  s.db.raw.prepare(`UPDATE users SET totp_secret = ? WHERE id = ?`).run(await sealWithKey(mfaKey, id, owner.totp), id);
+  assert.match(stored(id)!, /^v1:/);
   assert.equal(await openWithKey(mfaKey, id, stored(id)!), owner.totp);
   await assert.rejects(openWithKey(mfaKey, "usr_other", stored(id)!)); // bound to this user
 
@@ -145,7 +145,6 @@ test("[INFRA-002] [SEC-004] staging access writes a demo 2FA secret only when it
   assert.ok(demo.length > 0);
   for (const d of demo) assert.match(d.t, /^v1:/, `${d.id} stored encrypted`);
   assert.equal(await openWithKey(mfaKey, id, stored(id)!), ownerOf(r3).totp);
-  s.db.raw.prepare("UPDATE users SET totp_last_step = NULL").run();
   await verifyStagingAccess({ base: BASE, owner: ownerOf(r3) }, s.fetchFor({ ...s.env(), MFA_ENCRYPTION_KEY: mfaKey }));
   // A redeploy without rotation leaves every encrypted secret byte-for-byte unchanged.
   const sealedAll = s.db.raw.prepare(`SELECT id, totp_secret FROM users ORDER BY id`).all();
@@ -208,8 +207,6 @@ test("[INFRA-002] [SEC-004] staging access: adopts secrets the Worker already en
   await new Promise((r) => setTimeout(r, 5));
   const r4 = await applyAccess(s.ops, { rootKey: KEY, epoch: "2", rotate: false, mfaKey });
   assert.ok(s.db.raw.prepare(`SELECT 1 FROM audit_logs WHERE action = 'user.mfa_provisioned' AND subject_id = ?`).get(id), "provisioning recorded");
-  s.db.raw.prepare("UPDATE users SET totp_last_step = NULL").run();
-  await new Promise((r) => setTimeout(r, 5));
   await verifyStagingAccess({ base: BASE, owner: ownerOf(r4) }, s.fetchFor({ ...s.env(), MFA_ENCRYPTION_KEY: mfaKey }));
 });
 
@@ -389,7 +386,7 @@ test("[INFRA-006] no deploy script reduces a wrangler error to its first line", 
   assert.deepEqual(offenders, [], "these annotations would drop what wrangler said");
 });
 
-test("[INFRA-002] [AUTH-003] FD-30: staging access enrols demo customer administrators seeded before FD-30 (no 2FA) and issues their setup key; they sign in with it", async () => {
+test("[INFRA-002] [AUTH-003] staging access stores a setup key for demo customer administrators seeded without one (as it did under FD-30); they sign in with the password alone", async () => {
   const s = await stagingDb();
   // A staging database seeded before FD-30: demo customer administrators had no authenticator.
   s.db.raw.exec(`UPDATE users SET totp_secret = NULL, mfa_enabled = 0 WHERE email LIKE 'customer.%@crestmont-preview.test'`);
@@ -402,9 +399,9 @@ test("[INFRA-002] [AUTH-003] FD-30: staging access enrols demo customer administ
   const table = accountsTable(r.accounts);
   const row = new RegExp(`^\\| customer_admin \\| (\\S+) \\| \`([^\`]+)\` \\| (?:\`([A-Z2-7]+)\`|—) \\|`, "m").exec(table);
   assert.ok(row && row[3], "the access notes list the customer's setup key in the format the journeys parse");
-  // The customer signs in with password + current code, as the staging journeys do.
+  // MFA was removed: the customer signs in with the password alone; the stored key is never asked for.
   const { TestClient } = await import("./support/app.ts");
   const c = new TestClient({ DB: s.db, ENVIRONMENT: "development", APP_URL: "http://crestmont.test" } as Env);
-  await c.login(customers[0].email, customers[0].password, customers[0].totp!);
+  await c.login(customers[0].email, customers[0].password);
   assert.equal((await c.get("/portal")).status, 200);
 });

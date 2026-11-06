@@ -220,14 +220,14 @@ const ROWS: { label: string; roles: string[] }[] = [
   { label: "Other customers' records", roles: ["staff", "admin"] }, { label: "Team & permission settings", roles: ["admin"] }, { label: "Security audit log", roles: ["admin"] },
 ];
 function roles(): SafeHtml {
-  const body = html`<div class="sv-roles" data-role="customer"><div class="sv-roles__signin"><span class="sv-roles__who" data-who>Signed in as a customer (sample)</span><span class="sv-roles__mfa" data-mfa>Two-factor: optional</span></div>
+  const body = html`<div class="sv-roles" data-role="customer"><div class="sv-roles__signin"><span class="sv-roles__who" data-who>Signed in as a customer (sample)</span><span class="sv-roles__mfa" data-mfa>Password sign-in</span></div>
 <ul class="sv-roles__rows">${ROWS.map((r) => { const on = r.roles.includes("customer"); return html`<li data-roles="${r.roles.join(" ")}"${on ? "" : html` data-denied`}><span>${r.label}</span><b class="sv-roles__state">${on ? "Visible" : "No access"}</b></li>`; })}</ul>
 <ol class="sv-roles__activity" data-activity><li>Signed in · customer view</li></ol></div>`;
   return frame({ kind: "roles", id: "roles", title: "Everyone sees exactly what they should", body, controlsLabel: "Choose a role",
     controls: html`${opt("customer", "Customer", true)}${opt("staff", "Staff")}${opt("admin", "Administrator")}`,
     notes: notes([
       { key: "customer", title: "Customer", body: "Customers see their own invoices, files and requests — never another customer's records." },
-      { key: "staff", title: "Staff", body: "Staff work across customers, with two-factor sign-in required, but cannot change team settings." },
+      { key: "staff", title: "Staff", body: "Staff work across customers but cannot change team settings." },
       { key: "admin", title: "Administrator", body: "Administrators manage team permissions, and sensitive actions are recorded in an audit log." },
     ]), hint: "Switch roles to compare. Permissions are enforced on the server, not just hidden on screen. Sample records." });
 }

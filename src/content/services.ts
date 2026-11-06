@@ -65,7 +65,7 @@ export const SERVICES: ServiceDef[] = [
     slug: "portals", name: "Customer & administrative portals", approved: ["Customer and administrative portals"], group: "Applications & systems", pricing: "custom",
     summary: "Secure sign-in areas where customers or staff can view records, files, requests and status.",
     intro: "Portals give your customers or team a private, authenticated place to work. We design role-based access so each person sees only what they should, and we log sensitive actions.",
-    includes: ["Secure sign-in with optional two-factor authentication", "Role-based permissions", "Document and file sharing", "Request or ticket submission", "Activity history"],
+    includes: ["Secure password sign-in", "Role-based permissions", "Document and file sharing", "Request or ticket submission", "Activity history"],
     boundaries: ["Portal scope is quoted as custom development", "Integration with existing systems depends on their available APIs"],
   },
   {

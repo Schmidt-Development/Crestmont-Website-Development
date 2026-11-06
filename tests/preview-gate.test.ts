@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createTestApp, createStaff, enrolTotp, TEST_PASSWORD } from "./support/app.ts";
+import { createTestApp, createStaff, TEST_PASSWORD } from "./support/app.ts";
 import { handle } from "../src/app/app.ts";
 
 const req = (env: object, path: string, init: RequestInit = {}) => handle(new Request("https://staging.example" + path, init), env as never);
@@ -60,7 +60,7 @@ test("[INFRA-002] staging config is public (Founder decision 2026-10-28); produc
   assert.equal((await req(env, "/api/health")).status, 200, "health check still reachable for deploy smoke tests");
 });
 
-test("[INFRA-002] public staging: a fresh visitor with no cookies sees the website; accounts, MFA and internal areas stay protected; nothing is indexable", async () => {
+test("[INFRA-002] public staging: a fresh visitor with no cookies sees the website; accounts and internal areas stay protected; nothing is indexable", async () => {
   // Deployed staging configuration. A leftover STAGING_ACCESS_PASSWORD secret alone must not re-enable the gate.
   const { db, env, client } = await createTestApp({ ENVIRONMENT: "staging", STAGING_ACCESS_PASSWORD: "leftover-old-preview-secret" });
   for (const p of ["/", "/services", "/pricing", "/pricing/compare", "/portfolio", "/process", "/about", "/contact", "/faq", "/login", "/legal"]) {
@@ -86,14 +86,17 @@ test("[INFRA-002] public staging: a fresh visitor with no cookies sees the websi
   assert.equal((await req(env, "/api/webhooks/stripe", { method: "POST", body: "{}" })).status, 401);
   // The old preview endpoint is gone (nothing to brute-force).
   assert.equal((await req(env, "/__preview-access", { method: "POST", body: new URLSearchParams({ password: "leftover-old-preview-secret" }) })).headers.get("set-cookie")?.includes("cm_preview") ?? false, false);
-  // Owner and staff: the password alone never reaches the staff area (mandatory MFA); a wrong password is refused.
+  // Owner and staff: a wrong password is refused and reaches nothing; the right password is the whole sign-in (MFA was
+  // removed on 2026-11-06) and opens the staff area.
   await createStaff(db, "owner", "owner@crestmont.test");
   const c = client();
-  assert.notEqual((await c.post("/login", { email: "owner@crestmont.test", password: "wrong-password-123" })).headers.get("location"), "/mfa", "wrong password refused");
+  const bad = await c.post("/login", { email: "owner@crestmont.test", password: "wrong-password-123" });
+  assert.notEqual(bad.status, 303, "wrong password refused");
+  assert.match((await c.get("/staff")).headers.get("location") ?? "", /^\/login/, "no staff page after a wrong password");
   const login = await c.post("/login", { email: "owner@crestmont.test", password: TEST_PASSWORD });
-  assert.equal(login.headers.get("location"), "/mfa", "Owner password leads to the 2FA step");
-  assert.match((await c.get("/staff")).headers.get("location") ?? "", /^\/mfa/, "no staff page before MFA");
-  assert.match((await c.get("/staff/readiness/approve")).headers.get("location") ?? "", /^\/mfa/, "release approval requires MFA");
+  assert.equal(login.headers.get("location"), "/staff", "the Owner's password signs in");
+  assert.equal((await c.get("/staff")).status, 200);
+  assert.equal((await c.get("/staff/readiness/approve")).status, 200, "the Owner reaches release approval");
   // Customer accounts still need their own credentials; the portal refuses an anonymous client.
   assert.notEqual((await client().get("/portal")).status, 200);
 });
@@ -123,13 +126,7 @@ test("[SEC-003] public staging: forms are rate-limited even with always-pass Tur
   assert.equal(reg.status, 200);
   assert.equal((await c.post("/login", { email: "stranger@example.org", password: TEST_PASSWORD, "cf-turnstile-response": "x" })).headers.get("location"), "/portal");
   const PDF = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x0a]);
-  // FD-30: a self-registered customer administrator is first sent to two-factor enrolment; nothing is stored.
-  const pre = await c.post("/portal/files", { file: new File([PDF], "x.pdf") });
-  assert.match(pre.headers.get("location") ?? "", /^\/mfa\/setup\?next=/);
-  // With two-factor authentication in place, the email-verification gate still applies.
-  const stranger = (await app.db.prepare(`SELECT id FROM users WHERE email = ?`).bind("stranger@example.org").first<{ id: string }>())!;
-  await enrolTotp(app.db, stranger.id);
-  await c.login("stranger@example.org");
+  // The email-verification gate applies.
   const up = await c.post("/portal/files", { file: new File([PDF], "x.pdf") });
   assert.equal(up.status, 403, "unverified account cannot upload on staging");
   assert.match(await up.text(), /Verify your email address/);

@@ -1129,6 +1129,8 @@ test("[PAY-008] [PAY-003] Stripe test mode: a disputed payment reaches staff Dis
 // Owner's pages. Synthetic or signed-fixture calls are flagged as test calls and never count.
 const REAL_CALL_DAYS = 7;
 let receptionistCall: { url: string; leadId: string; started: string; followUp: boolean } | null = null;
+/** When staging first ran the dual calendars (deploy #165, run 42145559428, "Deploy Worker" step). */
+const CALENDARS_LIVE_SINCE = "2026-11-06T01:48:35Z";
 const parseShown = (s: string) => new Date(s.replace(/,(?=\s\d{1,2}:)/, "")).getTime(); // "Nov 1, 2026, 5:39 PM EST"
 
 journey(27, ["VOICE-003"], "AI receptionist captures a lead from a real test call (live Retell agent, signed webhooks)", {}, async (t) => {
@@ -1177,6 +1179,10 @@ journey(28, ["CRM-007"], "the real call's lead appears in the CRM with its sourc
   const ai = await onCalendar("ai-follow-up"), founder = await onCalendar("founder-callback");
   if (ai === null || founder === null) console.log("journey 28: the dual calendars are not deployed on staging yet; calendar routing not checked");
   else if (!receptionistCall!.followUp) console.log("journey 28: the call asked for no callback or booking; calendar routing not exercised by this call");
+  // A call made before the dual calendars existed on staging cannot be on one: its callback was recorded before
+  // calendar_callbacks (migration 0083) existed, and back-filling would invent a routing decision nobody made. The
+  // first deploy carrying it (#165) uploaded the Worker at CALENDARS_LIVE_SINCE; routing is asserted for calls after.
+  else if (parseShown(receptionistCall!.started) < Date.parse(CALENDARS_LIVE_SINCE)) console.log(`journey 28: the call (${receptionistCall!.started}) predates the dual calendars on staging (${CALENDARS_LIVE_SINCE}); calendar routing needs a newer real call`);
   else {
     assert.equal((ai > 0 ? 1 : 0) + (founder > 0 ? 1 : 0), 1, `the requested follow-up is on exactly one calendar (AI Follow-Up: ${ai}, Founder Callback: ${founder})`);
     console.log(`journey 28: the requested follow-up is on the ${ai ? "AI Follow-Up" : "Founder Callback"} calendar`);

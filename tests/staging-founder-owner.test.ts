@@ -1,5 +1,5 @@
 // Staging: the Founder's own Owner account next to the demo Owner (scripts/bootstrap-owner.ts --staging-additional-owner).
-// Proves the invitation path works end to end (password, mandatory MFA enrolment, Owner-only pages such as
+// Proves the invitation path works end to end (password sign-in — MFA was removed on 2026-11-06 — and Owner-only pages such as
 // /staff/research); that the demo Owner and every existing account are left exactly as they were; that the SQL is
 // all-or-nothing (an ineligible run changes no row, not even a pending Owner invitation) and fails closed outside
 // staging D1; and that the invitation token never reaches the console, the SQL file or the repository. TEST DATA only.
@@ -10,14 +10,14 @@ import { readFileSync, mkdtempSync, writeFileSync, existsSync, rmSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestApp, createStaff, createCustomer, TEST_PASSWORD } from "./support/app.ts";
-import { totpCode, hashToken } from "../src/lib/auth-crypto.ts";
+import { hashToken } from "../src/lib/auth-crypto.ts";
 import type { Env } from "../src/app/context.ts";
 
 const toml = readFileSync("wrangler.toml", "utf8");
 const STAGING_URL = /APP_URL\s*=\s*"([^"]+)"/.exec(toml.slice(toml.indexOf("\n[env.staging]")))![1];
 const DEMO_OWNER = "owner@crestmont-preview.test";
 const FOUNDER = "founder+staging-owner@example.com";
-// Staging refuses 2FA enrolment without MFA_ENCRYPTION_KEY (secrets are encrypted at rest), as the real Worker does.
+// Staging Workers hold MFA_ENCRYPTION_KEY (stored demo 2FA secrets are encrypted at rest); kept so the app runs as deployed.
 const TEST_MFA_KEY = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
 
 // The script refuses to run in CI; the test runner itself runs in CI, so the child gets an environment without those markers.
@@ -43,9 +43,8 @@ async function stagingApp() {
   await app.db.prepare(`INSERT INTO _staging_access (key, value) VALUES ('salt', 'test-salt')`).run();
   return app;
 }
-async function signIn(client: ReturnType<Awaited<ReturnType<typeof createTestApp>>["client"]>, email: string, secret: string) {
-  assert.equal((await client.post("/login", { email, password: TEST_PASSWORD })).headers.get("location"), "/mfa");
-  assert.equal((await client.post("/mfa", { code: await totpCode(secret) })).status, 303);
+async function signIn(client: ReturnType<Awaited<ReturnType<typeof createTestApp>>["client"]>, email: string) {
+  assert.equal((await client.post("/login", { email, password: TEST_PASSWORD })).headers.get("location"), "/staff");
 }
 /** A pending Owner invitation that existed before (e.g. one issued earlier and not yet used). */
 async function pendingOwnerInvitation(db: Env["DB"]) {
@@ -63,10 +62,10 @@ const dump = async (db: Env["DB"]) => ({
   sessions: (await db.prepare(`SELECT * FROM sessions ORDER BY id`).all()).results,
 });
 
-test("[AUTH-003] staging: the Founder gets an own Owner account by invitation, with mandatory MFA, while the demo Owner is untouched", async () => {
+test("[AUTH-003] staging: the Founder gets an own Owner account by invitation, signs in with the password, while the demo Owner is untouched", async () => {
   const { db, client } = await stagingApp();
   const demo = await createStaff(db, "owner", DEMO_OWNER, "Preview Owner");
-  await signIn(client(), DEMO_OWNER, demo.secret); // the demo Owner has live sessions, like staging's
+  await signIn(client(), DEMO_OWNER); // the demo Owner has live sessions, like staging's
   const customer = await createCustomer(db, "founder@example.com"); // the Founder's existing customer account
   const snapshot = async () => ({
     demo: await db.prepare(`SELECT password_hash, totp_secret, mfa_enabled, disabled_at FROM users WHERE id = ?`).bind(demo.id).first(),
@@ -85,22 +84,18 @@ test("[AUTH-003] staging: the Founder gets an own Owner account by invitation, w
   const c = client();
   assert.equal((await c.post("/invite", { token: r.token, name: "The Founder", password: TEST_PASSWORD })).status, 303);
   assert.equal((await client().post("/invite", { token: r.token, name: "Someone else", password: TEST_PASSWORD })).status, 400, "single-use");
-  assert.equal((await c.post("/login", { email: FOUNDER, password: TEST_PASSWORD })).headers.get("location"), "/mfa");
-  assert.notEqual((await c.get("/staff/research")).status, 200, "no staff page before MFA");
-  assert.equal((await c.get("/mfa")).headers.get("location"), "/mfa/setup", "the Owner must enrol an authenticator");
-  const setup = await (await c.get("/mfa/setup")).text();
-  const secret = /data-testid="totp-secret">([A-Z2-7 ]+)</.exec(setup)![1].replace(/ /g, "");
-  assert.equal((await c.post("/mfa/setup", { code: await totpCode(secret) })).status, 200);
+  assert.notEqual((await c.get("/staff/research")).status, 200, "no staff page before signing in");
+  assert.equal((await c.post("/login", { email: FOUNDER, password: TEST_PASSWORD })).headers.get("location"), "/staff");
   assert.equal((await c.get("/staff/research")).status, 200, "Lead research opens for the Founder's Owner account");
   assert.equal((await c.get("/staff/readiness/approve")).status, 200, "Owner-only pages open");
 
-  // A fresh session must pass MFA again before any staff page.
+  // A wrong password opens no staff page.
   const d = client();
-  assert.equal((await d.post("/login", { email: FOUNDER, password: TEST_PASSWORD })).headers.get("location"), "/mfa");
+  assert.notEqual((await d.post("/login", { email: FOUNDER, password: "not-the-founders-password" })).status, 303);
   assert.notEqual((await d.get("/staff/research")).status, 200);
 
-  const founder = await db.prepare(`SELECT u.id, m.role_id, m.organization_id, u.mfa_enabled FROM users u JOIN memberships m ON m.user_id = u.id WHERE u.email = ?`).bind(FOUNDER).all<{ id: string; role_id: string; organization_id: string; mfa_enabled: number }>();
-  assert.deepEqual(founder.results.map((x) => [x.role_id, x.organization_id, x.mfa_enabled]), [["owner", "org_crestmont", 1]], "a separate account holding only the Owner role");
+  const founder = await db.prepare(`SELECT u.id, m.role_id, m.organization_id FROM users u JOIN memberships m ON m.user_id = u.id WHERE u.email = ?`).bind(FOUNDER).all<{ id: string; role_id: string; organization_id: string }>();
+  assert.deepEqual(founder.results.map((x) => [x.role_id, x.organization_id]), [["owner", "org_crestmont"]], "a separate account holding only the Owner role");
   assert.notEqual(founder.results[0].id, customer.id);
   assert.deepEqual(await snapshot(), before, "demo Owner (password, 2FA, sessions, role) and the customer account unchanged");
 

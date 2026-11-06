@@ -124,8 +124,9 @@ export async function applyAccess(ops: D1Ops, o: { rootKey: string; epoch: strin
   for (const u of users) {
     const role = (u.roles ?? "").split(",").sort((a, b) => (ROLE_ORDER.indexOf(a) + 1 || 99) - (ROLE_ORDER.indexOf(b) + 1 || 99))[0] || "customer_admin";
     const password = await derivePassword(o.rootKey, salt, `password:${u.email}`);
-    // FD-30: staff and customer administrators must use MFA, so they are always issued a setup key (an existing demo
-    // customer administrator seeded before FD-30 is enrolled here); other customer roles only when they enabled it.
+    // MFA was removed for every account (2026-11-06): sign-in never asks for a code. Staging still issues and stores a
+    // derived setup key for staff and customer administrators (as before), so stored account data and the access
+    // files keep their shape; nobody needs it to sign in.
     const mfaRequired = (u.roles ?? "").split(",").some((r) => r === "customer_admin" || ROLE_ORDER.includes(r));
     const totp = u.mfa_enabled || mfaRequired ? await deriveTotp(o.rootKey, salt, u.email) : null;
     accounts.push({ role, email: u.email, password, totp, note: NOTES[role] ?? "Customer portal (sample organization)" });
@@ -229,7 +230,7 @@ export function accessReadme(url: string, r: AccessResult, verifiedAt: string | 
   return `# Crestmont staging — private access
 
 Keep this file private. It is issued only through this GitHub Actions artifact.
-${verifiedAt ? `Verified by the deploy run at ${verifiedAt}: public site (no preview password) → Owner sign-in → 2FA → all 32 Owner modules.` : "NOT VERIFIED — do not rely on these values."}
+${verifiedAt ? `Verified by the deploy run at ${verifiedAt}: public site (no preview password) → Owner sign-in with email and password → all 32 Owner modules.` : "NOT VERIFIED — do not rely on these values."}
 ${r.rotated ? "These credentials were rotated in this run; all earlier demo passwords, 2FA keys, recovery codes, demo sessions and pending demo invitations no longer work." : "Credentials unchanged since the last rotation."}
 
 ## 1. Staging website (public — no preview password)
@@ -240,22 +241,18 @@ ${url}
 
 - Email: \`${owner.email}\`
 - Password: \`${owner.password}\`
-- 2FA authenticator setup key: \`${owner.totp}\`
-  (in Google Authenticator, 1Password, Authy or similar: add account → "enter a setup key" → time-based, 6 digits, 30 seconds)
 
 ## Steps
 
 1. Open the website (it loads directly) and choose Sign in.
-2. Sign in with the Owner email and password.
-3. Enter the 6-digit code from your authenticator app.
-4. The Owner command center opens with all 32 modules in the left navigation.
+2. Sign in with the Owner email and password. There is no two-factor step (MFA was removed for every account).
+3. The Owner command center opens with all 32 modules in the left navigation.
 
-Passwords use dashes between groups of five characters; type the dashes. Each 2FA code works once.
-
-After a rotation the Owner has no recovery codes. Once signed in, open Account → Recovery codes, enter a current
-2FA code and save the new codes in your password manager (they are shown once).
+Passwords use dashes between groups of five characters; type the dashes.
 
 ## All demo accounts (sample data only)
+
+The 2FA setup key column is stored account data only; sign-in never asks for a code.
 
 ${accountsTable(r.accounts)}
 

@@ -398,7 +398,6 @@ test("[TEST-004] backup export restores into a fresh database with identical row
   assert.equal((await visitor.post("/register", { name: "Jordan Lee", organization: "Lee Bakery", email: "jordan@leebakery.example", password: TEST_PASSWORD, terms: "1" })).status, 200);
   assert.equal((await visitor.get(linkFrom((await lastEmail(t.db, "jordan@leebakery.example"))!.text_body, "/verify-email"))).status, 303);
   const cust = await t.client().login("jordan@leebakery.example");
-  await cust.enrolMfa(); // FD-30: a customer administrator enrols two-factor authentication before checkout
   const co = await cust.post("/checkout/business", { maintenance_plan: "professional", terms: "1" });
   assert.equal(co.status, 303);
   const checkout = t.fake.checkouts[0];
@@ -503,7 +502,8 @@ test("[INFRA-005] deployment workflows are gated: staging skips without Cloudfla
     assert.match(y, /^permissions:\n {2}contents: (read|write)/m, `${name}: least-privilege permissions`);
   }
   // Staging
-  assert.match(staging, /push:\n\s+branches: \[main\]/);
+  // Founder directive 2026-11-06: staging deploys only when dispatched by hand; a merge to main deploys nothing.
+  assert.doesNotMatch(staging, /^\s+push:\s*$/m, "staging has no push trigger");
   assert.match(staging, /workflow_dispatch:/);
   assert.match(staging, /secrets\.CLOUDFLARE_API_TOKEN != ''/);
   assert.match(staging, /secrets\.CLOUDFLARE_ACCOUNT_ID != ''/);

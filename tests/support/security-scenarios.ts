@@ -7,7 +7,6 @@ import { pathFor } from "./security-helpers.ts";
 import { ROUTE_INVENTORY } from "./route-inventory.ts";
 import { newId, nowIso } from "../../src/lib/db.ts";
 import { createPackageOrder } from "../../src/services/commerce.ts";
-import { totpCode } from "../../src/lib/auth-crypto.ts";
 import { baselineSalesInstructions as baselineSales } from "../../src/domain/sales-opt/policy.ts";
 
 type Fields = Record<string, string | string[] | File>;
@@ -45,8 +44,6 @@ export function customerPostFields(w: World, t: Tenant): Record<string, () => Fi
     "POST /portal/billing/invoices/:id/pay": () => ({}),
     "POST /portal/billing/manage": () => ({}),
     "POST /portal/billing/refund-request": () => ({ payment_id: t.ids.payment!, amount: "50", reason: `${t.marker} duplicate purchase by mistake`, evidence: "receipt" }),
-    "POST /mfa/step-up": () => ({ code: "000000" }),
-    "POST /account/mfa/recovery-codes": () => ({ code: "000000" }),
     "POST /account/password": () => ({ current: TEST_PASSWORD, next: TEST_PASSWORD }),
     "POST /account/sessions/:id/revoke": () => ({}),
     "POST /account/sessions/revoke-others": () => ({}),
@@ -68,7 +65,7 @@ export interface Scenario {
   setup?: (w: World) => Promise<void>;
   /** Accept an error flash on success (the action ran and was recorded, but reports a provider-side failure). */
   allowErrorFlash?: true;
-  /** Fully custom request (multi-step flows such as MFA enrolment). */
+  /** Fully custom request (multi-step flows). */
   run?: (w: World) => Promise<{ res: Response; actorId: string }>;
 }
 
@@ -96,7 +93,7 @@ export function auditScenarios(w: World): Scenario[] {
   const cf = customerPostFields(w, a);
   const cust = (key: string, extra: Partial<Scenario> = {}): Scenario => ({ key, as: custA, fields: () => cf[key](), ...extra });
   const x: Record<string, string> = {};
-  let spare: { id: string; email: string; c: TestClient; secret: string };
+  let spare: { id: string; email: string; c: TestClient };
   const NEWPW = "a-brand-new-password-123";
   let simOrg: { id: string; organizationId: string } | undefined;
   let simInvoice: string | undefined;
@@ -104,30 +101,10 @@ export function auditScenarios(w: World): Scenario[] {
   const spareAs = () => ({ c: spare.c, id: spare.id });
   return [
     // ── Authentication flow and account (a dedicated spare customer, so tenant A is unaffected) ──
-    { key: "POST /mfa/setup", run: async () => {
+    { key: "POST /account/password", as: spareAs, fields: () => ({ current: TEST_PASSWORD, next: NEWPW }), setup: async () => {
       const cu = await createCustomer(w.db, "spare-account@matrix.example", "Spare Account Co");
-      spare = { id: cu.id, email: cu.email, c: await w.app.client().login(cu.email), secret: "" };
-      const page = await (await spare.c.get("/mfa/setup")).text();
-      spare.secret = /data-testid="totp-secret">([A-Z2-7 ]+)</.exec(page)![1].replace(/\s/g, "");
-      return { res: await spare.c.post("/mfa/setup", { code: await totpCode(spare.secret) }), actorId: cu.id };
+      spare = { id: cu.id, email: cu.email, c: await w.app.client().login(cu.email) };
     } },
-    { key: "POST /mfa", run: async () => {
-      const c = w.app.client();
-      await c.post("/login", { email: spare.email, password: TEST_PASSWORD });
-      await w.db.prepare(`UPDATE users SET totp_last_step = NULL WHERE id = ?`).bind(spare.id).run();
-      const res = await c.post("/mfa", { code: await totpCode(spare.secret) });
-      spare.c = c;
-      return { res, actorId: spare.id };
-    } },
-    { key: "POST /mfa/step-up", run: async () => {
-      await w.db.prepare(`UPDATE users SET totp_last_step = NULL WHERE id = ?`).bind(spare.id).run();
-      return { res: await spare.c.post("/mfa/step-up?next=%2Faccount", { code: await totpCode(spare.secret) }), actorId: spare.id };
-    } },
-    { key: "POST /account/mfa/recovery-codes", run: async () => {
-      await w.db.prepare(`UPDATE users SET totp_last_step = NULL WHERE id = ?`).bind(spare.id).run();
-      return { res: await spare.c.post("/account/mfa/recovery-codes", { code: await totpCode(spare.secret) }), actorId: spare.id };
-    } },
-    { key: "POST /account/password", as: spareAs, fields: () => ({ current: TEST_PASSWORD, next: NEWPW }) },
     { key: "POST /account/sessions/:id/revoke", run: async () => {
       const other = w.app.client();
       await other.post("/login", { email: spare.email, password: NEWPW });
