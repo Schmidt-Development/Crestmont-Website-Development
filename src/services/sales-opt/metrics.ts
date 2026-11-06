@@ -18,7 +18,10 @@ import { rate, wilson, type Interval, type SafetyCounts } from "../../domain/sal
 
 export interface MetricsFilter { stage?: "staging" | "production"; from: string; to: string; versionId?: string | null; segment?: string | null; experimentId?: string | null; arm?: "baseline" | "candidate" | null }
 
-export const APPOINTMENT_SQL = `(f.connected = 1 AND EXISTS (SELECT 1 FROM sales_followups sf WHERE sf.provider_call_id = f.provider_call_id AND sf.kind = 'consultation' AND sf.status <> 'cancelled'))`;
+// Since the Founder's 2026-11-06 directive an AI follow-up call is itself a booked 30-minute appointment on the AI
+// Outbound Calendar (kind 'ai_follow_up_call' WITH a consultation_id); it counts as an appointment like a consultation.
+export const APPOINTMENT_SQL = `(f.connected = 1 AND EXISTS (SELECT 1 FROM sales_followups sf WHERE sf.provider_call_id = f.provider_call_id AND sf.status <> 'cancelled'
+  AND (sf.kind = 'consultation' OR (sf.kind = 'ai_follow_up_call' AND sf.consultation_id IS NOT NULL))))`;
 
 export interface Metrics {
   attempts: number; connected: number; qualified: number; appointments: number; appointmentRate: number | null; checkoutInitiated: number; sales: number; revenueCents: number;
