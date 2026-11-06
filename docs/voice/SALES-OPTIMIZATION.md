@@ -4,12 +4,13 @@
 real call or payment has gone through the engine, and the self-hosted runner has not run any of its jobs. Requirements
 SALESOPT-001…012 are all `in_progress` (see `requirements/status/sales-opt.ts`). §8 holds the acceptance ledger.
 
-> **Scope boundary.** The engine *evaluates and improves* the prompt of a registered Retell **sales** agent. It never places
-> calls. This platform has no sales-calling path. Outbound calling is limited to three consented purposes
-> (`callback`, `consultation_reminder`, `support_followup`; `src/services/voice-outbound.ts`). That follows Founder
-> decision **D-14**: outbound sales calling needs a new consent design and counsel's TCPA review first. See also
-> MSA Sched. C.7 and `docs/legal/RESEARCH-NOTES-2026-10.md` rows 4–7. The brief's target of 5,500 dialling attempts
-> a day is out of scope here. Enabling it is a separate, Founder-approved change after counsel's review.
+> **Scope boundary.** The engine *evaluates and improves* the prompt of a registered Retell **sales** agent; the engine
+> itself does not dial. Outbound AI sales calls are placed by the separate dialler `src/services/sales-outbound.ts`
+> (`/staff/sales-outbound`, `docs/voice/OUTBOUND-SALES.md`). It is off by default and dials only with
+> `RETELL_SALES_OUTBOUND=on`, the Owner's switch, an active Founder + counsel compliance approval (Founder decision
+> **D-14**, MSA Sched. C.7), documented prior express written consent for AI-voice calls to that number and a clear Do
+> Not Call scrub. The receptionist's consented follow-ups (`callback`, `consultation_reminder`, `support_followup`;
+> `src/services/voice-outbound.ts`) are a different path. The engine never targets the inbound receptionist agent.
 
 ## 1. Phase 0 audit (verified facts, 2026-10-30)
 
@@ -87,11 +88,11 @@ Production stays untouched until the Founder sets `SALES_OPT_PRODUCTION=on` on p
 
 ## 5. Experiments (dialler contract)
 
-`experimentRouting(db, leadKey)` returns `{ experimentId, arm, versionId }` for the single running experiment, using a deterministic SHA-256 bucket. Whatever creates sales calls must:
+`experimentRouting(db, leadKey)` returns `{ experimentId, arm, versionId }` for the single running experiment, using a deterministic SHA-256 bucket. The dialler (`src/services/sales-outbound.ts#sieStamp`) and anything else that creates sales calls must:
 - place the call with the agent or version that holds `versionId`, and stamp `metadata.crestmont_so_version = versionId` and `metadata.crestmont_so_experiment = experimentId`;
 - stamp `metadata.crestmont_lead_id` and optionally `metadata.crestmont_segment` (`[a-z0-9_-]{1,40}`) so cohorts can be compared like for like.
 
-**Nothing in this repository places sales calls.** Running an experiment also needs a second Retell agent or version holding the candidate prompt. Both are deliberately left to the separate, counsel-reviewed dialler change.
+The outbound sales dialler `src/services/sales-outbound.ts` places the calls (off by default; see the scope boundary above). `sieStamp` stamps `crestmont_so_version` only when the dialler's agent (`sales_outbound_settings.agent_id`) is the engine's target for the stage it dials on (production in production, staging elsewhere), and stamps `crestmont_so_experiment` only when the lead's arm is the version verified on that agent. The engine deploys one prompt per stage, so a candidate arm needs a second Retell agent or version holding the candidate prompt; until then candidate-arm leads are left out of the experiment. When the dialler's agent is not the target, its calls get no version attribution, and the dashboard shows a warning.
 
 ## 6. Operations
 
@@ -100,11 +101,12 @@ Production stays untouched until the Founder sets `SALES_OPT_PRODUCTION=on` on p
 - **Worker restart:** every step is a compare-and-swap or idempotent upsert. An `in_progress` deployment left by a crash blocks that stage until it is marked `aborted` in D1 after checking the agent in Retell. Do this on purpose, never automatically.
 - **Retention and erasure:** transcripts stay in `calls.transcript` (consent-gated, `retention.voice_transcripts_days`, caller erasure). Evidence quotes are cleared on the next cycle once the transcript is gone, and versions hold no transcript text.
 - **Access:** dashboard `salesopt.read` and decisions `salesopt.decide` are both Owner-only, and every decision needs step-up MFA. API keys are never rendered or logged.
+- **Dashboard views:** the current and previous (rollback-target) version per stage with the latest deployment, a per-version table (calls, connected, qualified-conversation rate, appointment conversion, closed sales, revenue), every AI proposal (latest 50 listed, total counted), the approval log (version approvals and rejections, adopted Founder prompts, experiment start and stop; read from `audit_logs`, who and when), and the rollback history (from → to version, reason, who or automatic, read-back verified). A rate is shown only once its denominator reaches the Founder's minimum connected calls (default 50); below that the page says "not enough data". The qualified-conversation rate counts only calls the self-hosted analysis runner has processed. **Appointment conversion** = connected calls with a `sales_followups` row of kind `consultation` for that Retell call (`provider_call_id`), not cancelled, divided by connected calls (`metrics.ts#APPOINTMENT_SQL`). Staff callbacks and AI follow-up calls are not appointments.
 - **Alerts:** failed/aborted deployments, every production deployment, safety breaches and automatic experiment stops notify every Owner in the app.
 
 ## 7. Known gaps
 
-- No sales agent, sales dialler or checkout-link tool exists. `checkout_link_generated` is recorded only if a future `send_checkout_link` function appears in the call's tool invocations.
+- The outbound sales agent, its dialler (`src/services/sales-outbound.ts`) and its checkout tool (`create_checkout_session`, `src/services/sales-functions.ts`) exist but have not run against a real Retell workspace or a real lead. `checkout_link_generated` is recorded from those function events (or a `send_checkout_link` tool invocation).
 - Publishing a Retell version and pinning the phone number are manual steps.
 - Conversation-flow and custom-LLM agents are not supported, and the engine refuses them.
 - The policy checks and scenario assertions are heuristics. Offline simulation shows only policy adherence on scripted scenarios, not real-world sales improvement.
@@ -133,7 +135,7 @@ The full-chain test `tests/sales-optimization-e2e.test.ts` runs steps 1–20 thr
 | Staging Retell update + read-back | IMPLEMENTED | Fixture E2E steps 13–15. **BLOCKED** for staging: Retell staging agent and key. |
 | Rollback | IMPLEMENTED | Fixture E2E steps 17–18 (automatic, on a safety breach) |
 | Retell publish / phone-number assignment / live traffic | Manual, never automated | Retell dashboard: agent → Deploy/Publish; Phone Numbers → choose the agent version. The engine reports these as "not managed". |
-| Production isolation; no live calls; no production Retell change | IMPLEMENTED | Gates in `deploy.ts#productionGate`. No dialler exists (D-14). Fixture E2E step 20. |
+| Production isolation; no live calls; no production Retell change | IMPLEMENTED | Gates in `deploy.ts#productionGate`. The engine never dials; the separate dialler (`sales-outbound.ts`) is off by default behind D-14's gates. Fixture E2E step 20. |
 | Owner dashboard (status, runner, diagnostics, KPIs per stage) | IMPLEMENTED | `tests/sales-optimization.test.ts` [SALESOPT-010], fixture E2E step 16 |
 
 ### Founder actions (all of the external blockers above)

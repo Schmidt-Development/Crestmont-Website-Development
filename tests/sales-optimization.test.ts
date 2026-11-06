@@ -20,7 +20,8 @@ import { groundAnalysis, deterministicFindings, extractJson, parseProposal, loca
 import { wilson, diffInterval, decideExperiment, assignArm, safetyBreaches, DEFAULT_THRESHOLDS, parseThresholds, type ArmCounts } from "../src/domain/sales-opt/stats.ts";
 import * as reg from "../src/services/sales-opt/registry.ts";
 import { reconcileAttributions } from "../src/services/sales-opt/attribution.ts";
-import { computeMetrics } from "../src/services/sales-opt/metrics.ts";
+import { computeMetrics, versionBreakdown } from "../src/services/sales-opt/metrics.ts";
+import { readFileSync } from "node:fs";
 import { queueAnalyses, consumeAnalyses, startEvaluation, consumeEvaluations, maybeQueueProposal, consumeProposals, purgeOrphanedEvidence, WF } from "../src/services/sales-opt/jobs.ts";
 import { deploy, rollback, verifyTarget, productionGate } from "../src/services/sales-opt/deploy.ts";
 import { monitorDeployments, proposeExperiment, decideExperimentStatus, experimentRouting, monitorExperiments } from "../src/services/sales-opt/monitor.ts";
@@ -632,7 +633,7 @@ test("[SALESOPT-010] Owner dashboard shows status and controls; other roles are 
   const t = await app({}, r.f);
   const c = await t.staff();
   const page = await (await c.get("/staff/sales-optimization")).text();
-  for (const s of ["AI Sales Optimization", "Production prompt version", "Verified conversion", "Integration health", "Founder controls", "Prompt versions and approval queue", "Deployment history", "Compliance incidents", "This engine evaluates and improves", "never places calls", "D-14"]) assert.ok(page.includes(s), s);
+  for (const s of ["AI Sales Optimization", "Production prompt version", "Verified conversion", "Integration health", "Founder controls", "Prompt versions and approval queue", "Deployment history", "Compliance incidents", "This engine evaluates and improves", "the engine itself does not dial", "src/services/sales-outbound.ts", "D-14"]) assert.ok(page.includes(s), s);
   assert.ok(!page.includes(KEY), "the API key is never rendered");
   const admin = await createStaff(t.db, "administrator", "admin@crestmontwebsitedevelopment.com");
   const ac = await t.client().login(admin.email, TEST_PASSWORD, admin.secret);
@@ -667,4 +668,155 @@ test("[SALESOPT-010] Owner dashboard shows status and controls; other roles are 
   assert.equal(prodRes.status, 409);
   assert.match(await prodRes.text(), /Production deployment is not available/);
   assert.equal(r.prompts.llm_sales_prd01, "prompt typed in Retell", "production agent untouched from development");
+});
+
+// ───────────── Owner dashboard: per-version results, appointments, approvals, rollbacks ─────────────
+// FIXTURE data only (directly inserted call facts, follow-ups and proposal jobs); none of it is live evidence.
+
+const section = (page: string, h2: string) => new RegExp(`<h2>${h2}</h2>[\\s\\S]*?</section>`).exec(page)?.[0] ?? "";
+
+test("[SALESOPT-004] [SALESOPT-010] per-version calls, qualified-conversation and appointment conversion come only from recorded facts; small samples say not enough data", async () => {
+  const t = await app();
+  await registerTargets(t.db, t.owner.id);
+  const v1 = await reg.ensureBaseline(t.db, baselineSalesInstructions());
+  const v2 = await passedVersion(t.db, t.owner.id, v1, "Ask which day of the week is busiest.");
+  await seedFacts(t.db, 60, { versionId: v1.id, since: 300_000 });
+  await seedFacts(t.db, 10, { versionId: v1.id, since: 200_000 });
+  await seedFacts(t.db, 5, { versionId: v2.id, since: 100_000 });
+  const ids = async (v: string) => (await t.db.prepare(`SELECT provider_call_id AS id, call_id FROM so_call_facts WHERE version_id = ? ORDER BY started_at, call_id`).bind(v).all<{ id: string; call_id: string }>()).results;
+  const c1 = await ids(v1.id), c2 = await ids(v2.id);
+  for (const c of c1.slice(60)) await t.db.prepare(`UPDATE so_call_facts SET connected = 0, dial_outcome = 'dial_no_answer' WHERE call_id = ?`).bind(c.call_id).run();
+  for (const c of c1.slice(0, 20)) await t.db.prepare(`UPDATE so_call_facts SET qualified = 1 WHERE call_id = ?`).bind(c.call_id).run();
+  for (const c of c1.slice(0, 30)) await t.db.prepare(`INSERT INTO so_analyses (id, call_id, analyzer, status, created_at) VALUES (?,?, 'fixture', 'done', ?)`).bind(newId("soan"), c.call_id, nowIso()).run();
+  const book = async (providerCallId: string, kind = "consultation", status = "scheduled") => {
+    await t.db.prepare(`INSERT INTO sales_followups (id, lead_id, kind, status, provider_call_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`)
+      .bind(newId("sfu"), await lead(t.db), kind, status, providerCallId, nowIso(), nowIso()).run();
+  };
+  for (const c of c1.slice(10, 22)) await book(c.id);                 // 12 consultations booked on connected v1 calls
+  for (const c of c1.slice(22, 25)) await book(c.id, "staff_callback"); // callbacks are follow-ups, not appointments
+  await book(c1[25].id, "ai_follow_up_call", "pending_eligibility");
+  await book(c1[26].id, "consultation", "cancelled");                 // a cancelled booking is not an appointment
+  await book(c1[60].id);                                               // a call that never connected is not a conversion
+  for (const c of c2.slice(0, 2)) await book(c.id);
+  // One webhook-verified sale on a v1 call's lead.
+  const ld = await lead(t.db);
+  await t.db.prepare(`UPDATE so_call_facts SET lead_id = ? WHERE call_id = ?`).bind(ld, c1[5].call_id).run();
+  await paidOrder(t.db, ld);
+  assert.equal((await reconcileAttributions(t.db)).created, 1);
+
+  const from = new Date(Date.now() - 30 * 86_400_000).toISOString(), to = new Date(Date.now() + 60_000).toISOString();
+  const m1 = await computeMetrics(t.db, { from, to, versionId: v1.id });
+  assert.deepEqual({ attempts: m1.attempts, connected: m1.connected, qualified: m1.qualified, appointments: m1.appointments, sales: m1.sales, revenue: m1.revenueCents },
+    { attempts: 70, connected: 60, qualified: 20, appointments: 12, sales: 1, revenue: 249_900 });
+  assert.equal(m1.appointmentRate, 0.2);
+  assert.equal(m1.qualifiedRate, 20 / 60);
+  const m2 = await computeMetrics(t.db, { from, to, versionId: v2.id });
+  assert.equal(m2.appointments, 2);
+  const rows = await versionBreakdown(t.db, { stage: "production", from, to });
+  assert.deepEqual(rows.find((r) => r.versionId === v1.id), { versionId: v1.id, attempts: 70, connected: 60, qualified: 20, analysedConnected: 30, appointments: 12, sales: 1, revenueCents: 249_900 });
+  assert.deepEqual(rows.find((r) => r.versionId === v2.id), { versionId: v2.id, attempts: 5, connected: 5, qualified: 0, analysedConnected: 0, appointments: 2, sales: 0, revenueCents: 0 });
+
+  const c = await t.staff();
+  let page = await (await c.get("/staff/sales-optimization")).text();
+  const pv = section(page, "Calls attributed to each version \\(production, all recorded calls\\)");
+  assert.ok(pv, "per-version table rendered");
+  assert.match(pv, /33\.3% \(20\/60\)/, "qualified conversation rate for v1");
+  assert.match(pv, /30 of 60 analysed/, "the page says the rate depends on the analysis runner");
+  assert.match(pv, /20\.0% \(12\/60\)/, "appointment conversion for v1: 12 booked consultations / 60 connected");
+  assert.match(pv, /Not enough data \(5 of 50 needed\)/, "v2's five connected calls give no rate");
+  assert.ok(!/40\.0%/.test(pv), "no rate is fabricated from v2's 2 of 5");
+  assert.match(pv, /\$2,499/);
+  assert.match(page, /Appointment conversion<\/div><div class="kpi__value">21\.5%/, "30-day production KPI: 14 of 65 connected");
+  assert.match(page, /Qualified conversation rate<\/div><div class="kpi__value">30\.8%/);
+  assert.match(page, /analysis runner has processed/);
+  // The Founder's minimum sample governs every rate on the page.
+  await reg.setControl(t.db, t.owner.id, { thresholds: { ...DEFAULT_THRESHOLDS, minConnected: 100 } });
+  page = await (await c.get("/staff/sales-optimization")).text();
+  assert.match(section(page, "Calls attributed to each version \\(production, all recorded calls\\)"), /Not enough data \(60 of 100 needed\)/);
+  assert.match(page, /Appointment conversion<\/div><div class="kpi__value">Not enough data/);
+});
+
+test("[SALESOPT-010] [SALESOPT-008] [SALESOPT-006] the dashboard shows current and previous version per stage, the approval log, every proposal and the rollback history", async () => {
+  const r = fakeRetell();
+  const t = await app({}, r.f);
+  await registerTargets(t.db, t.owner.id);
+  const d = { db: t.db, env: t.env, fetch: r.f };
+  assert.equal((await verifyTarget(d, "staging", t.owner.id)).ok, true); // adopts the Founder's live prompt
+  const adopted = (await reg.deployedVersion(t.db, "staging"))!;
+  const v1 = await reg.ensureBaseline(t.db, baselineSalesInstructions());
+  const v2 = await passedVersion(t.db, t.owner.id, v1, "Ask how they get most customers today.", true);
+  const v3 = await passedVersion(t.db, t.owner.id, v2, "Recap the chosen package before closing.");
+  const v4 = await reg.createVersion(t.db, { parentId: v1.id, instructions: `${v1.instructions}\nSpeak a little faster.`, rationale: "faster", authorKind: "user", author: t.owner.id });
+  await reg.transition(t.db, v4.id, "rejected", { userId: t.owner.id, note: "Pace is fine as it is" });
+  const age = () => t.db.prepare(`UPDATE so_deployments SET created_at = ? WHERE stage = 'staging'`).bind(new Date(Date.now() - 300_000).toISOString()).run(); // FIXTURE: deployment spacing
+  await age();
+  assert.equal((await deploy(d, { stage: "staging", versionId: v2.id, expectedCurrentVersionId: adopted.id, kind: "deploy", userId: t.owner.id, reason: "t" })).status, "verified");
+  await age();
+  assert.equal((await deploy(d, { stage: "staging", versionId: v3.id, expectedCurrentVersionId: v2.id, kind: "deploy", userId: t.owner.id, reason: "t" })).status, "verified");
+  for (let i = 0; i < 55; i++) {
+    await t.db.prepare(`INSERT INTO so_proposal_jobs (ai_job_id, parent_version_id, evidence_json, status, detail, created_at) VALUES (?,?, '[]', 'rejected', ?, ?)`)
+      .bind(newId("aij"), v1.id, `fixture proposal ${i}`, new Date(Date.now() - (60 - i) * 60_000).toISOString()).run();
+  }
+  const c = await t.staff();
+  const stagingRow = (page: string) => /<th scope="row">Staging<\/th>[\s\S]*?<\/tr>/.exec(page)![0]; // first one: "Script version by stage"
+  const before = r.calls.length;
+  let page = await (await c.get("/staff/sales-optimization")).text();
+  assert.equal(r.calls.length, before, "rendering the dashboard never calls Retell");
+  assert.match(page, /Script version by stage/);
+  assert.match(stagingRow(page), new RegExp(`>v${v3.seq}</a>[\\s\\S]*>v${v2.seq}</a>[\\s\\S]*Deploy of v${v3.seq}`), "current v3, previous (rollback target) v2, latest deployment");
+  assert.match(section(page, "Rollback history"), /No rollbacks/);
+
+  await age();
+  const rb = await rollback(d, "staging", t.owner.id, "Recap made the calls longer");
+  assert.equal(rb.status, "verified");
+  // FIXTURE: an automatic production rollback whose read-back did not match.
+  await t.db.prepare(`INSERT INTO so_deployments (id, stage, version_id, expected_current_version_id, kind, status, reason, detail, created_at, completed_at) VALUES (?, 'production', ?, ?, 'rollback', 'failed', 'Automatic rollback: opt_out_rate above the limit', 'Read-back did not match; the previous prompt was restored.', ?, ?)`)
+    .bind(newId("sod"), v2.id, v3.id, new Date(Date.now() - 1000).toISOString(), nowIso()).run();
+  page = await (await c.get("/staff/sales-optimization")).text();
+  assert.match(stagingRow(page), new RegExp(`>v${v2.seq}</a>[\\s\\S]*>v${adopted.seq}</a>[\\s\\S]*Rollback of v${v2.seq}`), "after the rollback: current v2, previous the adopted prompt");
+  const rbs = section(page, "Rollback history");
+  assert.match(rbs, new RegExp(`v${v3.seq} → v${v2.seq}`));
+  assert.match(rbs, /Recap made the calls longer/);
+  assert.match(rbs, /Test owner \(owner@crestmontwebsitedevelopment\.com\)/);
+  assert.match(rbs, /Automatic \(safety monitor\)/);
+  assert.match(rbs, /Read-back did not match/);
+  assert.equal((rbs.match(/>Yes</g) ?? []).length, 1, "only the verified rollback shows a matching read-back");
+  assert.equal((rbs.match(/>No</g) ?? []).length, 1);
+  assert.match(rbs, new RegExp(`Deployments marked rolled back: v${v3.seq} on staging`));
+  const log = section(page, "Approval log");
+  assert.match(log, new RegExp(`Approved[\\s\\S]*>v${v2.seq}</a>[\\s\\S]*Test owner`));
+  assert.match(log, new RegExp(`Rejected[\\s\\S]*>v${v4.seq}</a>[\\s\\S]*Pace is fine as it is`));
+  assert.match(log, /Founder prompt adopted/);
+  const props = section(page, "AI proposals");
+  assert.match(props, /55 proposals in total; showing the latest 50\./);
+  assert.equal((props.match(/fixture proposal \d+</g) ?? []).length, 50);
+  assert.match(props, /fixture proposal 54</);
+  assert.ok(!/fixture proposal 4</.test(props), "the oldest beyond the cap are counted, not listed");
+  assert.ok(r.calls.every((x) => !x.url.includes(RECEPTIONIST) || x.method === "GET"), "the receptionist's agent is never written");
+});
+
+test("[SALESOPT-010] the dashboard and docs name the outbound dialler (no stale no-dialler wording) and warn when the dialler's agent is not the engine's target", async () => {
+  const docs = readFileSync(new URL("../docs/voice/SALES-OPTIMIZATION.md", import.meta.url), "utf8");
+  for (const stale of ["This platform has no sales-calling path", "Outbound calling is limited to three consented purposes", "Nothing in this repository places sales calls", "No sales agent, sales dialler", "No dialler exists"]) assert.ok(!docs.includes(stale), `docs: ${stale}`);
+  assert.match(docs, /src\/services\/sales-outbound\.ts/);
+  const t = await app();
+  await registerTargets(t.db, t.owner.id);
+  const c = await t.staff();
+  const get = async () => (await c.get("/staff/sales-optimization")).text();
+  let page = await get();
+  for (const stale of ["never places calls", "no sales-calling path", "Nothing in this platform places sales calls"]) assert.ok(!page.includes(stale), stale);
+  assert.ok(!page.includes("carry no prompt-version stamp"), "no dialler agent saved: no warning");
+  const setAgent = (id: string) => t.db.prepare(`UPDATE sales_outbound_settings SET agent_id = ? WHERE id = 1`).bind(id).run();
+  await setAgent("agent_unregistered01");
+  page = await get();
+  assert.match(page, /The dialler(&#39;|')s agent is not this engine(&#39;|')s staging target/);
+  assert.match(page, /<code>agent_unregistered01<\/code>[\s\S]*carry no prompt-version stamp \(crestmont_so_version\) and are not recorded by this engine at all/);
+  // This development environment dials on staging (sieStamp), so the production agent is a mismatch too.
+  await setAgent(PROD);
+  page = await get();
+  assert.match(page, /carry no prompt-version stamp \(crestmont_so_version\) and are measured under production/);
+  await setAgent(STG);
+  page = await get();
+  assert.ok(!page.includes("carry no prompt-version stamp"), "the dialler's agent is the staging target: no warning");
+  assert.match(page, /the staging target: calls carry crestmont_so_version/);
 });
