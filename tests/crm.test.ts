@@ -142,7 +142,8 @@ test("[SALES-004] end-to-end: web lead → CRM → quote → proposal email → 
   const co = t.fake.checkouts.at(-1)!;
   assert.equal(co.mode, "payment");
   assert.equal(co.lines[0].amountCents, 400_025, "amount comes from the invoice, not the form");
-  assert.deepEqual(co.metadata, { organization_id: order.organization_id, invoice_id: invoiceId, order_id: order.id, kind: "quote" });
+  const intakeId = (await one<{ id: string }>(t.db, `SELECT id FROM purchase_intakes WHERE organization_id = ?`, order.organization_id)).id;
+  assert.deepEqual(co.metadata, { organization_id: order.organization_id, invoice_id: invoiceId, order_id: order.id, kind: "quote", intake_id: intakeId }, "the session names the intake it pays for");
   assert.equal(co.customerEmail, "morgan@harborcoffee.example");
   // The browser success redirect never marks anything paid.
   assert.match(await (await cust.get("/portal/billing?checkout=success")).text(), /Stripe is confirming your payment/);

@@ -20,7 +20,8 @@ async function main() {
   const key = deriveSchedulerKey(root);
   if (mode === "derive") { process.stdout.write(key); return; }
   if (mode === "retell-audit") return retellAudit(key, rest);
-  if (mode !== "run") throw new Error("usage: derive | run --url <base> [--daily] | retell-audit --url <base>");
+  if (mode === "retell-outbound-audit") return retellOutboundAudit(key, rest);
+  if (mode !== "run") throw new Error("usage: derive | run --url <base> [--daily] | retell-audit --url <base> | retell-outbound-audit --url <base>");
   const base = rest[rest.indexOf("--url") + 1]?.replace(/\/$/, "");
   if (!base || !/^https:\/\//.test(base)) throw new Error("--url https://… is required");
   // MINUTE first: research promotion is the one schedule where a missed tick is a missed minute of throughput.
@@ -34,6 +35,26 @@ async function main() {
     if (!r.ok && r.status !== 429) failed = true; // 429 = already ran in the last 5 minutes
   }
   if (failed) { console.log("::error title=External scheduler::a job-set trigger failed"); process.exitCode = 1; }
+}
+
+/** The sales (outbound) workspace, read-only: its agent, caller number and Retell's real concurrency limit
+ *  (get-concurrency), which the 15 cold + 5 reserved callback allocation must fit (src/services/retell-outbound-audit.ts).
+ *  Its own deploy step, so its annotations do not crowd out the receptionist's (GitHub keeps 10 per level per step). */
+async function retellOutboundAudit(key: string, rest: string[]) {
+  const base = rest[rest.indexOf("--url") + 1]?.replace(/\/$/, "");
+  if (!base || !/^https:\/\//.test(base)) throw new Error("--url https://… is required");
+  const body = JSON.stringify({});
+  const r = await fetch(`${base}/api/sales-outbound/retell-audit`, { method: "POST", headers: { "content-type": "application/json", "x-crestmont-scheduler-signature": sign(key, body) }, body });
+  const text = await r.text();
+  if (!r.ok) { console.log(`::warning title=Retell outbound audit::HTTP ${r.status} ${text.replace(/[\r\n]+/g, " ").slice(0, 200)}`); return; }
+  const o = JSON.parse(text) as { status: string; agentId: string | null; findings: { check: string; ok: boolean; detail: string }[] };
+  const clean = (x: string) => x.replace(/[\r\n]+/g, " ").replace(/::/g, ": ").slice(0, 300);
+  const list = (fs: typeof o.findings) => fs.map((f) => `${clean(f.check)}: ${clean(f.detail)}`).join(" | ");
+  const failed = o.findings.filter((f) => !f.ok);
+  console.log(`::notice title=Retell outbound audit::${o.status.toUpperCase()} · agent ${o.agentId ?? "?"} · ${o.findings.length - failed.length}/${o.findings.length} findings ok`);
+  if (failed.length) console.log(`::warning title=Retell outbound audit TODO (${failed.length})::${list(failed)}`);
+  const ok = o.findings.filter((f) => f.ok);
+  if (ok.length) console.log(`::notice title=Retell outbound audit OK/INFO (${ok.length})::${list(ok)}`);
 }
 
 /**
@@ -62,5 +83,6 @@ async function retellAudit(key: string, rest: string[]) {
   const info = a.findings.filter((f) => f.status === "info");
   if (info.length) console.log(`::notice title=Retell inbound audit INFO (${info.length})::${list(info)}`);
 }
+
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) await main().catch((e) => { console.log(`::error title=External scheduler::${(e as Error).message}`); process.exitCode = 1; });

@@ -34,7 +34,7 @@ export const REQUIRED_WORKFLOWS = [
   "support_reply", "refund_request", "refund_decision", "project_completion", "handoff", "security_notification",
   "critical_incident",
 ] as const;
-export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "lead_alert", "proposal_accepted", "dispute_opened", "consultation", "voice_escalation", "email_change_confirm", "voice_followup", "sales_info"] as const;
+export const EMAIL_TEMPLATES = [...REQUIRED_WORKFLOWS, "password_reset", "staff_invitation", "quote_sent", "lead_received", "lead_alert", "proposal_accepted", "dispute_opened", "consultation", "founder_appointment", "voice_escalation", "email_change_confirm", "voice_followup", "sales_info"] as const;
 export type EmailTemplate = (typeof EMAIL_TEMPLATES)[number];
 export type MailCategory = "transactional" | "marketing";
 export type Audience = "customer" | "staff" | "prospect" | "any";
@@ -118,6 +118,9 @@ export interface TemplateData {
   dispute_opened: { amountCents: number; evidenceDueBy: string | null; url: string };
   /** Consultation booked by phone with the AI receptionist (VOICE-003). `when` is pre-formatted in the business time zone. */
   consultation: { event: "requested" | "confirmed" | "rescheduled" | "cancelled"; name: string; when: string; code: string };
+  /** Founder alert: an appointment with the Founder was requested, moved or cancelled (internal Founder Calendar). */
+  founder_appointment: { event: "booked" | "rescheduled" | "cancelled"; prospect: string; business: string | null; when: string; timeZone: string; durationMinutes: number;
+    contact: string; reason: string; salesContext: string | null; status: string; reference: string; crmUrl: string | null; test: boolean };
   /** Staff alert: the AI receptionist escalated a call that could not be transferred live (CREST-GAP-053). */
   voice_escalation: { reason: string; caller: string; why: "outside_hours" | "no_transfer" | "unavailable"; test: boolean; url: string };
   /** Sent to the NEW address of a requested account email change (CREST-GAP-073); the change applies only after confirmation. */
@@ -608,6 +611,29 @@ export const TEMPLATES: { [K in EmailTemplate]: TemplateDef<K> } = {
       { event: "confirmed", name: "Morgan Hale", when: "Tuesday, November 3 at 10:00 AM EST", code: "K7MP4Q" },
       { event: "rescheduled", name: "Morgan Hale", when: "Thursday, November 5 at 2:30 PM EST", code: "R2WX9T" },
       { event: "cancelled", name: "Morgan Hale", when: "Tuesday, November 3 at 10:00 AM EST", code: "K7MP4Q" },
+    ],
+  },
+  founder_appointment: {
+    name: "founder_appointment", category: "transactional", audience: "staff",
+    description: "Founder alert: a prospect's appointment with the Founder (requested only when the prospect asked for the Founder) was booked, moved or cancelled.",
+    render: (d) => {
+      const what = d.event === "booked" ? (d.status === "requested" ? "requested — confirm or decline it" : "booked") : d.event === "rescheduled" ? "moved" : "cancelled";
+      return {
+        subject: `${d.test ? "[TEST] " : ""}Founder appointment ${d.event === "booked" ? (d.status === "requested" ? "requested" : "booked") : d.event}: ${d.prospect}, ${d.when}`,
+        heading: `Your appointment with ${d.prospect} is ${what}`,
+        paragraphs: [
+          `When: ${d.when} (${d.timeZone}), ${d.durationMinutes} minutes.`,
+          `Prospect: ${d.prospect}${d.business ? `, ${d.business}` : ""}. Contact: ${d.contact}.`,
+          `Reason: ${d.reason}`,
+          ...(d.salesContext ? [`Sales context: ${d.salesContext}`] : []),
+          `Reference ${d.reference}. ${d.status === "requested" && d.event !== "cancelled" ? "It holds the slot until you confirm it on the receptionist operations page." : ""}`.trim(),
+        ],
+        ...(d.crmUrl ? { cta: { label: "Open the CRM record", url: d.crmUrl } } : {}),
+      };
+    },
+    samples: [
+      { event: "booked", prospect: "Morgan Hale", business: "Hale Bakery", when: "Tuesday, November 3 at 10:00 AM EST", timeZone: "America/New_York", durationMinutes: 30, contact: "+15550100123 · morgan@example.com", reason: "Wants to talk to the Founder about a custom portal", salesContext: "Interest: custom", status: "requested", reference: "K7MP4Q", crmUrl: "https://example.com/staff/crm/leads/ld_sample", test: false },
+      { event: "cancelled", prospect: "Morgan Hale", business: null, when: "Tuesday, November 3 at 10:00 AM EST", timeZone: "America/New_York", durationMinutes: 30, contact: "+15550100123", reason: "—", salesContext: null, status: "cancelled", reference: "K7MP4Q", crmUrl: null, test: true },
     ],
   },
   voice_escalation: {

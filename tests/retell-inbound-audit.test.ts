@@ -17,7 +17,8 @@ Ask for consent and call record_consent. New enquiries: crm_customer_lookup, the
 Buying: create_checkout_session, then check_payment_status. Consultations: schedule_consultation, lookup_consultation,
 reschedule_consultation, cancel_consultation. Support: create_support_ticket. Email: send_customer_email. A person:
 check_transfer_availability then the warm transfer, else request_callback; sensitive issues: escalate. Hours: get_business_hours.
-Opt-out: record_opt_out. The caller is {{user_number}}.`;
+Opt-out: record_opt_out. Buying starts with our project intake form, then payment. Only if the caller specifically asks for the
+Founder, pass wants_founder true. The caller is {{user_number}}.`;
 
 function goodConfig(over: { agent?: Record<string, unknown>; llm?: Record<string, unknown>; tools?: (t: Record<string, unknown>[]) => Record<string, unknown>[]; numbers?: unknown[] } = {}) {
   const c = functionContracts();

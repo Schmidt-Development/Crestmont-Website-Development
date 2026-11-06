@@ -75,6 +75,8 @@ export interface VoiceDeps {
   baseUrl?: string;
   now?: () => Date;
   calendar?: sched.CalendarAdapter;
+  /** Founder appointments → Founder email (src/services/founder-notifications.ts). */
+  founder?: { changed(consultationId: string, event: "booked" | "rescheduled" | "cancelled"): Promise<void> };
   /** Whether Stripe (test mode on staging) is configured. create_checkout_session refuses honestly when it is not. */
   paymentsConfigured?: boolean;
 }
@@ -514,7 +516,7 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       const canBook = c0.scheduling.enabled && !!c0.timezone;
       return entry.calendar === "founder_callback"
         ? { callbackRequested: true, calendar: entry.calendar, message: canBook
-            ? "Thanks. I've passed your request to speak with our Founder. If the caller wants a set time with the Founder, check availability with check_consultation_availability (wants_founder true) and book it; otherwise say the Founder or a team member will call back. Don't promise a specific time."
+            ? "Thanks. I've passed your request to speak with our Founder. If the caller wants a set time with the Founder, use schedule_consultation with wants_founder true to offer and book one; otherwise say the Founder or a team member will call back. Don't promise a specific time."
             : "Thanks. I've passed your request to speak with our Founder. The Founder or a team member will call you back. Don't promise a specific time." }
         : { callbackRequested: true, calendar: entry.calendar, message: canBook
             ? "Thanks, that's noted. Offer the caller a specific 30-minute callback time: call check_consultation_availability, then book their choice with book_consultation, and our AI sales specialist will call them then. Keep helping with anything else they need now."
@@ -599,6 +601,7 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
         await db.prepare(`UPDATE consultations SET lead_id = COALESCE(lead_id, ?) WHERE id = ?`).bind(leadId, booking.id).run();
         await addLeadNote(db, leadId, `Consultation ${booking.status} for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) via AI receptionist · calendar: ${CALENDAR_LABELS[held.calendar].name}`);
         if (booking.status === "requested") await addLeadTask(db, leadId, `${held.calendar === "founder_callback" ? "[FOUNDER CALLBACK] " : ""}Confirm or decline the consultation requested for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}). Check your calendar first: no calendar is connected.`, 4);
+        if (held.calendar === "founder_callback") await deps.founder?.changed(booking.id, "booked");
         if (held.calendar === "ai_follow_up") {
           // Booking an AI callback time is the caller's request to be called then (their own number only).
           if (isCallersOwn(call, phone)) await recordCallConsent(db, phone, "callback", "caller_request", `call:${call.id}`);
@@ -631,6 +634,7 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       if (name === "cancel_consultation") {
         await sched.cancel(db, row, a.reason ?? "Cancelled by caller", { kind: "ai" });
         await cancelAppointmentCallback(db, row.id, "Appointment cancelled by the caller");
+        if (row.calendar === "founder_callback") await deps.founder?.changed(row.id, "cancelled");
         if (row.lead_id) await addLeadNote(db, row.lead_id, `Consultation ${sched.labelOf(row)} cancelled by caller via AI receptionist`);
         await notifyOwners(db, "voice_consultation", `${call.is_test ? "[TEST] " : ""}Consultation cancelled by phone: ${row.name}, ${sched.labelOf(row)}`, "consultation", row.id);
         await mailConsultation(deps, row, "cancelled");
@@ -640,6 +644,7 @@ async function runFunction(db: Db, call: CallRow, name: VoiceFunction, rawArgsIn
       try {
         const next = await sched.reschedule(db, c, now, cal, row, a.new_start_time!, { kind: "ai" });
         await syncAppointmentCallback(db, next.id, { now });
+        if (next.calendar === "founder_callback") await deps.founder?.changed(next.id, "rescheduled");
         if (row.lead_id) {
           await addLeadNote(db, row.lead_id, `Consultation moved from ${sched.labelOf(row)} to ${sched.labelOf(next)} (new ref ${next.confirmation_code}) via AI receptionist`);
           if (next.status === "requested") await addLeadTask(db, row.lead_id, `Confirm the rescheduled consultation ${sched.labelOf(next)} (ref ${next.confirmation_code}).`, 4);

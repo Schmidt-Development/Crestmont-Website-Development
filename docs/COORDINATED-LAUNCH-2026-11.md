@@ -16,7 +16,7 @@ its deploy run was cancelled).
 | AI Outbound Calendar | 30-minute appointments, up to 5 per slot (database trigger, race-safe), own hours (default every day 09:00–20:00 business time), confirmed when booked. | `src/services/voice-scheduling.ts` |
 | Founder Calendar | Separate; one appointment per slot; Founder windows; held until the Founder confirms; offered only on an explicit request (`wants_founder`). | same, `src/domain/calendars.ts` |
 | Receptionist | Sells 24/7; no "closed"/message-taking fallback; only live transfer follows staffed hours; never suggests the Founder. | `src/services/voice.ts` |
-| Intake before payment | Package → intake → review (scope, price, agreements) → Stripe → project with the intake already attached; quote deposits need the intake first. | `src/services/purchase-intake.ts`, `src/routes/crm.ts` |
+| Intake before payment | Package → intake → review (scope, price, agreements) → Stripe → project with the intake already attached. One shared rule (`requireIntakeForPayment`) covers new checkout, legacy unpaid orders, quote deposits, Stripe-hosted quote invoices (refused before issue) and the staff payment simulation. Hosted invoices issued before the rule are listed for manual remediation on `/staff/finance/invoices`. | `src/services/purchase-intake.ts` |
 | Self-Improvement Engine | Dashboard: current/previous version, per-version calls and rates (qualified, appointment conversion, sales, revenue), proposals, approval log, rollback history. | `src/routes/sales-optimization.ts` |
 
 ## Founder / provider actions (cannot be done from code)
@@ -48,10 +48,13 @@ its deploy run was cancelled).
    consent. It opens only after counsel approves the consent design (recorded on `/staff/sales-outbound`), consent
    records exist per number, the Founder switches it on and authorises a ramp stage. Counsel should also confirm
    the callback consent model (a recorded request on the call) and both calling windows.
-6. **Calendar provider:** no external calendar is connected (none existed). The internal calendars are the real
-   availability. Reading the Founder's personal free/busy needs the Founder to choose a provider and grant access;
-   until then Founder appointments use the Founder windows on `/staff/voice/operations` and stay "requested" until
-   confirmed.
+6. **Founder Calendar (internal, authoritative).** No external calendar is used (Founder decision). Founder
+   appointments are request-only, one per slot within the Founder windows set on `/staff/voice/operations`, and
+   "requested" until the Founder confirms them there. The Founder is emailed through the platform mailer (Resend) at
+   `FOUNDER_NOTIFY_EMAIL` (default the Founder's address) for every new, rescheduled and cancelled appointment, once
+   each, with prospect, business, time and time zone, contact, reason, CRM context and the CRM link
+   (`src/services/founder-notifications.ts`). Staging only delivers to its recipient allowlist
+   (`EMAIL_RECIPIENT_ALLOWLIST`); production delivers to the Founder's address.
 7. **Live Stripe payments** — production checkout is closed by `commerceBlock` until ALL hold:
    - the legal policies are attorney-reviewed and published (today `DRAFT_BANNER` is set in `src/content/legal.ts`);
    - Business settings `business.legal_name` = "Talent Revenue Systems LLC" on production;
@@ -60,7 +63,12 @@ its deploy run was cancelled).
    - one live webhook endpoint `https://crestmontwebsitedevelopment.com/api/webhooks/stripe` with
      `checkout.session.completed`, `checkout.session.expired`, `invoice.paid`, `charge.refunded`,
      `charge.dispute.created`, `charge.dispute.updated`, `charge.dispute.closed`.
-   None of these can be verified from the repository; no real-money transaction is run.
+   None of these can be verified from the repository; no real-money transaction is run. After the first production
+   deploy, `GET /api/health` reports `payments.mode`, `payments.checkout` (open/closed) and the exact reason checkout
+   is closed, plus whether the webhook secret is present — from the running Worker, with no secret shown. No
+   publishable key is needed: checkout is Stripe-hosted.
+   - `business.legal_name` is set on production by the Owner in Business settings after the first deploy (a migration
+     cannot set it: it changes the rendered agreement texts, which are versioned).
 8. **AI Website Builder:** separate session. `decideEligibility` queues a build once payment and intake exist; it does
    not check staff scope APPROVAL. The directive requires authorised scope — for the Builder session to decide.
 9. **Release:** after the Builder passes its gates, create a new release candidate for the final `main` commit

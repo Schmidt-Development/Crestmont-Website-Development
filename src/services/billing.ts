@@ -17,7 +17,10 @@ import { parseAttributionCookie, privacySignal, ATTRIBUTION_COOKIE } from "./lea
 import { parseCookies } from "../app/http.ts";
 import { salesLinkForCheckout, SALES_LINK_COOKIE, type SalesLinkBinding } from "./sales-functions.ts";
 import { recordAcceptance } from "./agreements.ts";
-import { completedOpenIntake, stampIntakeOrder } from "./purchase-intake.ts";
+import { requireIntakeForTarget, requireIntakeForPayment, stampIntakeOrder, INTAKE_REQUIRED, invoicesNeedingIntake } from "./purchase-intake.ts";
+
+/** Re-exported for the routes; the rule itself lives in ./purchase-intake.ts (requireIntakeForPayment). */
+export { INTAKE_REQUIRED, invoicesNeedingIntake };
 
 export const NOT_CONFIGURED = "Online payment is not configured yet.";
 
@@ -101,9 +104,6 @@ export async function bindSalesLinkLead(ctx: AppContext, link: SalesLinkBinding,
   return lead.id;
 }
 
-/** The message shown when a payment is attempted before the website intake is complete. */
-export const INTAKE_REQUIRED = "Complete the website intake before paying: tell us what you want built, then review the scope and price.";
-
 /**
  * Standard package checkout (fixed price, 100% upfront). Premium above the floor goes through quotes.
  * Founder requirement (2026-11): the organization's website intake for this package must be complete (purchase_intakes,
@@ -118,8 +118,7 @@ export async function startPackageCheckout(ctx: AppContext, user: CheckoutUser, 
   try { planId = assertPlanMeetsMinimum(pkg.id, maintenancePlanId); }
   catch (e) { if (e instanceof PricingError) throw new HttpError(422, e.message); throw e; }
   if (!ctx.payments.configured) throw new HttpError(409, NOT_CONFIGURED);
-  const intake = await completedOpenIntake(ctx.db, organizationId, { kind: "package", productId: pkg.id });
-  if (!intake) throw new HttpError(409, INTAKE_REQUIRED);
+  const intake = await requireIntakeForTarget(ctx.db, organizationId, { kind: "package", productId: pkg.id });
   const link = await salesLinkForCheckout(ctx.db, parseCookies(ctx.req.headers.get("cookie"))[SALES_LINK_COOKIE], pkg.id, ctx.now());
   const boundLead = link ? await bindSalesLinkLead(ctx, link, user, pkg) : null;
   const leadId = boundLead ?? await ensureCheckoutLead(ctx, user, organizationId, pkg);
@@ -166,27 +165,6 @@ export async function customerInvoice(db: Db, organizationId: string, invoiceId:
   return inv;
 }
 
-/**
- * Founder requirement (2026-11): an accepted quote's first invoice (100% upfront or the 50% deposit) is paid only once
- * the customer completed the website intake for that quote version. Later 25% milestones and change orders are not
- * gated: the intake belongs to the start of the project.
- */
-export async function invoiceNeedsIntake(db: Db, organizationId: string, inv: { milestone_kind: string | null; status: string },
-  order: { kind: string; quote_version_id: string | null } | null): Promise<boolean> {
-  if (inv.status !== "open" || !order || order.kind !== "quote" || !order.quote_version_id) return false;
-  if (inv.milestone_kind !== "full" && inv.milestone_kind !== "deposit_50") return false;
-  return !(await completedOpenIntake(db, organizationId, { kind: "quote", quoteVersionId: order.quote_version_id }));
-}
-
-/** Open first invoices of accepted quotes that cannot be paid until the website intake is complete (see invoiceNeedsIntake). */
-export async function invoicesNeedingIntake(db: Db, organizationId: string): Promise<Set<string>> {
-  const rows = (await db.prepare(`SELECT i.id FROM invoices i JOIN orders o ON o.id = i.order_id
-      WHERE i.organization_id = ? AND i.status = 'open' AND i.milestone_kind IN ('full','deposit_50') AND o.kind = 'quote' AND o.quote_version_id IS NOT NULL
-        AND NOT EXISTS (SELECT 1 FROM purchase_intakes x WHERE x.organization_id = i.organization_id AND x.quote_version_id = o.quote_version_id AND x.completed_at IS NOT NULL AND x.project_id IS NULL)`)
-    .bind(organizationId).all<{ id: string }>()).results;
-  return new Set(rows.map((r) => r.id));
-}
-
 /** Pay any open invoice of the customer's organization (package, quote deposit, milestone, change order). */
 export async function startInvoiceCheckout(ctx: AppContext, user: CheckoutUser, organizationId: string, invoiceId: string) {
   const inv = await customerInvoice(ctx.db, organizationId, invoiceId);
@@ -195,8 +173,9 @@ export async function startInvoiceCheckout(ctx: AppContext, user: CheckoutUser, 
   // PAY-006: an invoice billed as a Stripe Invoice is paid through its Stripe link only, never also through Checkout.
   if (inv.stripe_invoice_status === "open" || inv.stripe_invoice_status === "paid") throw new HttpError(409, "This invoice is billed through a Stripe invoice. Use the “Pay Stripe invoice” link on the invoice page.");
   if (!ctx.payments.configured) throw new HttpError(409, NOT_CONFIGURED);
-  const order = inv.order_id ? await ctx.db.prepare(`SELECT kind, quote_version_id FROM orders WHERE id = ?`).bind(inv.order_id).first<{ kind: string; quote_version_id: string | null }>() : null;
-  if (await invoiceNeedsIntake(ctx.db, organizationId, inv, order)) throw new HttpError(409, INTAKE_REQUIRED);
+  const order = inv.order_id ? await ctx.db.prepare(`SELECT kind FROM orders WHERE id = ?`).bind(inv.order_id).first<{ kind: string }>() : null;
+  // The one payment rule: a quote's first invoice, or a package order made before intakes existed, waits for the intake.
+  const gate = await requireIntakeForPayment(ctx.db, inv.id, { stamp: true });
   const kind = inv.milestone_kind === "change_order" ? "change_order" : inv.milestone_kind === "design_25" || inv.milestone_kind === "prelaunch_25" ? "milestone" : order?.kind ?? "invoice";
   const session = await ctx.payments.createCheckout({
     mode: "payment",
@@ -205,7 +184,7 @@ export async function startInvoiceCheckout(ctx: AppContext, user: CheckoutUser, 
     customerId: await stripeCustomerOf(ctx.db, organizationId),
     successUrl: `${ctx.baseUrl}/portal/billing?checkout=success`,
     cancelUrl: `${ctx.baseUrl}/portal/billing/invoices/${inv.id}?checkout=cancelled`,
-    metadata: { organization_id: organizationId, invoice_id: inv.id, order_id: inv.order_id ?? "", kind },
+    metadata: { organization_id: organizationId, invoice_id: inv.id, order_id: inv.order_id ?? "", kind, ...(gate.intakeId ? { intake_id: gate.intakeId } : {}) },
     // One Stripe session per invoice per day: retries within a day reuse the same session.
     idempotencyKey: `checkout:${inv.id}:${nowIso(ctx.now).slice(0, 10)}`,
   });

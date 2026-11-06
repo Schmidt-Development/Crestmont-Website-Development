@@ -16,6 +16,7 @@ import { requireStaff } from "../app/app.ts";
 import { csrf, input, textarea, select, checkbox, button, formErrors, alert, badge, table, emptyState, kpi, pageHead, linkButton } from "../ui/components.ts";
 import { staffPage } from "./crm.ts";
 import { syncAppointmentCallback, cancelAppointmentCallback } from "../services/appointment-callbacks.ts";
+import { founderAppointmentChanged } from "../services/founder-notifications.ts";
 import {
   loadVoiceConfig, saveVoiceConfig, VoiceConfigError, WEEKDAYS, hoursStatus, describeHours, OUTBOUND_PURPOSES,
   type VoiceConfig, type Weekday, type OutboundPurpose,
@@ -229,6 +230,10 @@ export function register(r: Router): void {
       // The queued AI callback follows its appointment: cancelled with it, or (re)queued when it is confirmed.
       if (decision === "cancel") await cancelAppointmentCallback(ctx.db, row.id, "Appointment cancelled by staff");
       else await syncAppointmentCallback(ctx.db, row.id);
+      // The Founder confirmed it themselves, so only a cancellation needs an email.
+      if (row.calendar === "founder_callback" && decision === "cancel") {
+        await founderAppointmentChanged({ db: ctx.db, env: ctx.env, mail: { email: ctx.email, db: ctx.db, settings: ctx.settings }, baseUrl: ctx.baseUrl }, row.id, "cancelled");
+      }
       if (row.email) {
         try { await sendMail(ctx, { template: "consultation", to: row.email, idempotencyKey: `consultation:${row.id}:${decision === "confirm" ? "confirmed" : "cancelled"}`, data: { event: decision === "confirm" ? "confirmed" : "cancelled", name: row.name, when: sched.labelOf(row), code: row.confirmation_code } }); }
         catch { /* recorded in the delivery log by the adapter */ }

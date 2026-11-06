@@ -7,6 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { businessDate } from "../src/lib/business-time.ts";
 import { createTestApp, createCustomer, createStaff, lastEmail, linkFrom, MemoryStorage, TEST_PASSWORD } from "./support/app.ts";
+import { seedCompletedIntake } from "./support/intake.ts";
 import { createPackageOrder } from "../src/services/commerce.ts";
 import { hmacSha256Hex } from "../src/lib/crypto.ts";
 import * as B from "../src/services/builds.ts";
@@ -176,6 +177,9 @@ test("[AIB-020] [AIB-019] Junk in the Trunk: lead → $2,500 quote → sign-up �
 async function testInvoice(t: Awaited<ReturnType<typeof app>>, name = "Adapter Test Org", mark = true) {
   const cu = await createCustomer(t.db, `adapter${Math.random().toString(16).slice(2, 8)}@adapter.test`, name);
   const order = await createPackageOrder(t.db, cu.organizationId, "starter", cu.id);
+  // The simulation obeys the same intake-before-payment rule as real payments (tests/intake-enforcement.test.ts
+  // proves the refusal); these adapter checks start from an order whose intake is complete.
+  await seedCompletedIntake(t.db, cu.organizationId, { productId: "starter" }, cu.id);
   if (mark) await SIM.markTestOrganization(t, t.owner.id, cu.organizationId, true, name);
   return { cu, order };
 }

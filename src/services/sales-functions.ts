@@ -52,6 +52,7 @@ export interface SalesFnDeps {
   paymentsConfigured: boolean;
   now?: () => Date;
   calendar?: sched.CalendarAdapter;
+  founder?: { changed(consultationId: string, event: "booked" | "rescheduled" | "cancelled"): Promise<void> };
 }
 
 export interface SalesFnResult { status: number; body: Record<string, unknown> }
@@ -507,6 +508,7 @@ async function scheduleFollowup(db: Db, deps: SalesFnDeps, b: Bound, input: { fo
       await db.prepare(`INSERT INTO sales_followups (id, lead_id, kind, status, due_at, consultation_id, sales_call_id, provider_call_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
         .bind(newId("sfu"), leadId, kind, booking.status === "confirmed" ? "scheduled" : "requested", booking.starts_at, booking.id, callback?.id ?? null, b.providerCallId, at, at).run();
       await addLeadNote(db, leadId, `${held.calendar === "ai_follow_up" ? "AI callback" : "Founder appointment"} ${booking.status} for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) on AI sales call ${b.row.id} · calendar: ${CALENDAR_LABELS[held.calendar].name}`);
+      if (held.calendar === "founder_callback") await deps.founder?.changed(booking.id, "booked");
       if (booking.status === "requested") await addLeadTask(db, leadId, `[FOUNDER CALLBACK] Confirm or decline the appointment requested for ${sched.labelOf(booking)} (ref ${booking.confirmation_code}) on an AI sales call.`, 4);
       return { status: 200, body: { scheduled: true, confirmed: booking.status === "confirmed", status: booking.status, when: sched.labelOf(booking), confirmation_code: booking.confirmation_code, calendar: held.calendar,
         message: held.calendar === "ai_follow_up"

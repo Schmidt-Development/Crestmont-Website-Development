@@ -17,7 +17,7 @@ import type { Env } from "../app/context.ts";
 import { RETELL_API_BASE } from "../adapters/retell.ts";
 import { retellKey } from "../adapters/retell-workspaces.ts";
 import { loadVoiceConfig } from "./voice-settings.ts";
-import { INBOUND_FUNCTIONS, VOICE_FUNCTIONS, VOICE_GUARDRAILS, functionContracts } from "./voice.ts";
+import { INBOUND_FUNCTIONS, VOICE_FUNCTIONS, VOICE_GUARDRAILS, INBOUND_MASTER_INSTRUCTIONS, composePrompt, functionContracts } from "./voice.ts";
 import { sha256Hex } from "../lib/crypto.ts";
 
 export const REQUIRED_EVENTS = ["call_started", "call_ended", "call_analyzed", "transfer_started", "transfer_bridged", "transfer_cancelled", "transfer_ended"] as const;
@@ -29,6 +29,35 @@ export const WEBHOOK_VARIABLES = ["crestmont_env", "receptionist_mode", "busines
 /** Variables Retell itself fills on every call (docs: dynamic variables → system variables). */
 const SYSTEM_VARIABLE = /^(current_time|current_calendar|direction|user_number|agent_number|call_id|call_type|session_duration|session_type|current_agent_state|previous_agent_state)(_.*)?$/;
 export const MAX_CALL_MS = 3_600_000; // Founder decision: 60 minutes
+/** Tools that choose the calendar: wants_founder true → Founder Calendar; missing/false → AI Outbound Calendar. */
+export const FOUNDER_FLAG_TOOLS = ["schedule_consultation", "request_callback"] as const;
+
+/**
+ * What the live prompt tells the agent about selling around the clock (Founder directive 2026-11-06), from the text
+ * only, never printing it. Conflicting after-hours wording is reported by category and count.
+ */
+export function promptBehaviourFindings(prompt: string): { check: string; status: FindingStatus; detail: string }[] {
+  const out: { check: string; status: FindingStatus; detail: string }[] = [];
+  const has = (re: RegExp) => re.test(prompt);
+  out.push({ check: "prompt: sells 24/7", status: has(/24\s*\/\s*7|24 hours a day|around the clock|any hour|365 days|always (open|available)/i) ? "pass" : "fail",
+    detail: has(/24\s*\/\s*7|24 hours a day|around the clock|any hour|365 days|always (open|available)/i) ? "states the receptionist is available at any hour" : "no instruction that the receptionist sells at any hour (24/7)" });
+  const conflicts: [string, RegExp][] = [
+    ["says Crestmont is closed", /\b(we|crestmont|the office|our office)\s*(are|is|'re)\s*(currently\s+)?closed\b/i],
+    ["switches to message-taking", /\b(only\s+)?take (a )?message\b|\bleave a message\b/i],
+    ["limits help to business hours", /\b(outside|after)\s+(of\s+)?(our\s+)?(business|office|opening)\s+hours\b[^.]{0,80}\b(only|just|cannot|can't|don't|do not)\b/i],
+    ["branches on business_open_now", /\{\{\s*business_open_now\s*\}\}/],
+  ];
+  const hits = conflicts.map(([k, re]) => ({ k, n: (prompt.match(new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g")) ?? []).length })).filter((x) => x.n > 0);
+  // "take a message" may legitimately appear in the budget-limited voicemail mode instruction; reported, judged by a person.
+  const hard = hits.filter((x) => x.k !== "switches to message-taking" || !/voicemail/i.test(prompt));
+  out.push({ check: "prompt: no after-hours limits", status: hard.length ? "fail" : hits.length ? "info" : "pass",
+    detail: hits.length ? `${hits.map((x) => `${x.k} (${x.n})`).join(", ")}${hard.length ? "" : " — only inside the voicemail (budget) instruction"}` : "no closed / after-hours / message-only wording" });
+  out.push({ check: "prompt: intake before payment", status: has(/intake/i) ? "pass" : "fail", detail: has(/intake/i) ? "tells the agent the purchase starts with the project intake" : "does not mention the project intake that now comes before payment" });
+  const founderRule = has(/wants_founder/) && has(/(only|specifically)[^.]{0,80}founder|founder[^.]{0,80}(only|specifically)/i);
+  out.push({ check: "prompt: Founder only on request", status: founderRule ? "pass" : "fail", detail: founderRule ? "Founder appointments only when the caller asks (wants_founder)" : "no request-only rule for Founder appointments with wants_founder" });
+  out.push({ check: "prompt: callback booking", status: has(/schedule_consultation/) ? "pass" : "fail", detail: has(/schedule_consultation/) ? "books callback times with schedule_consultation" : "schedule_consultation is not named" });
+  return out;
+}
 
 export type FindingStatus = "pass" | "fail" | "info";
 export interface AuditFinding { check: string; ok: boolean; status: FindingStatus; detail: string }
@@ -161,6 +190,19 @@ export async function auditInboundRetell(d: { db: Db; env: Env; fetch: typeof fe
   const strays = tools.filter((x) => s(x.type) === "custom" && !(RECEPTIONIST_TOOLS as readonly string[]).includes(s(x.name) ?? ""));
   if (strays.length) add("unexpected custom functions", false, strays.map((x) => `${s(x.name)} → ${s(x.url) ?? "?"}`).join("; "));
   add("End Call tool", tools.some((x) => s(x.type) === "end_call"), tools.some((x) => s(x.type) === "end_call") ? "present" : "missing");
+  // Founder appointments are request-only: the booking and callback tools must carry the optional wants_founder flag
+  // (missing or false → AI Outbound Calendar; true → Founder Calendar). Never required.
+  for (const name of FOUNDER_FLAG_TOOLS) {
+    const t = tools.find((x) => s(x.type) === "custom" && s(x.name) === name);
+    if (!t) continue;
+    const p = obj(obj(obj(t.parameters).properties).wants_founder);
+    const req = arr(obj(t.parameters).required).includes("wants_founder");
+    // A boolean, or the string enum "true"/"false" the platform's contracts document (adapters normalise both).
+    const typed = s(p.type) === "boolean" || (s(p.type) === "string" && (!arr(p.enum).length || arr(p.enum).includes("true")));
+    const ok = typed && !req;
+    add(`${name}: wants_founder`, ok, !Object.keys(p).length ? "missing: add the optional wants_founder flag (true only when the caller asks for the Founder)"
+      : `type ${s(p.type) ?? "?"}${typed ? "" : " (use boolean, or string enum true/false)"}${req ? ", marked required (must be optional)" : ""}${ok ? ": optional, routes to the Founder Calendar only when true" : ""}`);
+  }
 
   // 5. Phone numbers in the inbound workspace (needed before the transfer check, to detect loops).
   const nums = await call(key, d.fetch, "GET", "/v2/list-phone-numbers");
@@ -197,6 +239,10 @@ export async function auditInboundRetell(d: { db: Db; env: Env; fetch: typeof fe
   const fromWebhook = vars.filter((v) => (WEBHOOK_VARIABLES as readonly string[]).includes(v));
   const unknownVars = vars.filter((v) => !(WEBHOOK_VARIABLES as readonly string[]).includes(v) && !SYSTEM_VARIABLE.test(v));
   add("prompt variables", unknownVars.length === 0, `${vars.length ? `uses ${vars.map((v) => `{{${v}}}`).join(", ")}` : "uses no variables"}${unknownVars.length ? `; nothing supplies ${unknownVars.join(", ")} (no defaults exist)` : ""}${fromWebhook.length ? `; ${fromWebhook.join(", ")} come only from the inbound webhook` : ""}`);
+  for (const f of promptBehaviourFindings(prompt)) add(f.check, f.status, f.detail);
+  const repo = composePrompt(INBOUND_MASTER_INSTRUCTIONS);
+  add("live prompt vs repository instructions", "info", prompt === repo ? "identical to the repository's receptionist instructions"
+    : `differs from the repository's instructions (live ${prompt.length} chars, repository ${repo.length}). The live prompt is authoritative: deployments never write it; only an Owner activation on /staff/voice does, and the drift guard refuses to overwrite dashboard edits.`);
   const active = await d.db.prepare(`SELECT version, prompt_text FROM voice_agent_configs WHERE active = 1`).first<{ version: number; prompt_text: string }>();
   if (!active) add("platform prompt version", "info", "no active /staff/voice version: the platform pushes nothing, so the Retell prompt stays as the Founder set it. Use 'Adopt the live Retell prompt' to record it.");
   else add("platform prompt version", active.prompt_text === prompt, active.prompt_text === prompt ? `active v${active.version} = the live prompt` : `active v${active.version} differs from the live prompt: pushing would overwrite it (the drift guard refuses unless confirmed). Adopt the live prompt to reconcile.`);

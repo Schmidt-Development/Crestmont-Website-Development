@@ -25,6 +25,7 @@ import { StripeInvoicing, LivePaymentsNotAuthorized, type StripeInvoice } from "
 import { audit } from "./security.ts";
 import { checkoutLinesFor } from "./tax.ts";
 import { paymentsMode } from "../domain/payments-mode.ts";
+import { requireIntakeForPayment } from "./purchase-intake.ts";
 
 export const STRIPE_INVOICE_KINDS = ["deposit_50", "design_25", "prelaunch_25"] as const;
 /** FD-11 (Founder decision, 2026-11): invoices are due Net 7. Upfront package payments and custom 50/25/25 milestone
@@ -74,6 +75,10 @@ export async function createStripeMilestoneInvoice(db: Db, env: Env, actorUserId
         i.stripe_invoice_id, i.stripe_invoice_status, i.stripe_checkout_session_id
       FROM invoices i JOIN organizations o ON o.id = i.organization_id WHERE i.id = ?`).bind(invoiceId).first<LocalInvoice>();
   if (!inv) throw new HttpError(404, "Invoice not found.");
+  // Pre-issuance control (Founder requirement): no payable Stripe invoice is created, finalized or re-sent for an
+  // order's first invoice before its website intake is complete. An invoice already issued is never changed here; the
+  // staff invoices page lists such invoices for manual remediation.
+  await requireIntakeForPayment(db, inv.id);
   if (inv.stripe_invoice_id && (inv.stripe_invoice_status === "open" || inv.stripe_invoice_status === "paid")) {
     const row = await db.prepare(`SELECT stripe_hosted_invoice_url, stripe_invoice_number FROM invoices WHERE id = ?`).bind(inv.id).first<{ stripe_hosted_invoice_url: string | null; stripe_invoice_number: string | null }>();
     return { outcome: "already_finalized", stripeInvoiceId: inv.stripe_invoice_id, status: inv.stripe_invoice_status, hostedUrl: row?.stripe_hosted_invoice_url ?? null, number: row?.stripe_invoice_number ?? null };
