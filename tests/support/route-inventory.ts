@@ -26,7 +26,7 @@ export type ResourceKind =
   | "org" | "project" | "file" | "file2" | "shareLink" | "shareToken" | "changeOrder" | "ticket" | "invoice" | "paidInvoice" | "payment"
   | "session" | "revision" | "milestone" | "task" | "task2" | "assignment" | "refund" | "message" | "approvalRequest" | "customerInvitation"
   | "lead" | "leadTask" | "aiJob" | "quote" | "quoteToken" | "cmsRevision" | "cmsKey" | "portfolio" | "portfolioSlug" | "portfolioFile"
-  | "designReference" | "designBaseline" | "buildRevision" | "buildRevisionFile" | "buildPreviewToken"
+  | "designReference" | "designBaseline" | "frontendArtifact" | "buildRevision" | "buildRevisionFile" | "buildPreviewToken"
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
@@ -531,6 +531,12 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /staff/builds/frontends/:projectId/artifact": staff(rolesWith("builds.configure"), { projectId: "project" }, act("frontend_artifact.received")),
   "POST /staff/builds/frontends/:projectId/baselines/:baselineId/approve": staff(rolesWith("builds.configure"), { projectId: "project", baselineId: "designBaseline" }, act("design_baseline.approved")),
   "POST /staff/builds/frontends/:projectId/rollback": staff(rolesWith("builds.configure"), { projectId: "project" }, act("design_baseline.rolled_back")),
+  // Rejecting an artifact is the other half of approving one: both decide what the AI may build against, so both
+  // are `builds.configure` and both are audited.
+  "POST /staff/builds/frontends/:projectId/artifacts/:artifactId/reject": staff(rolesWith("builds.configure"), { projectId: "project", artifactId: "frontendArtifact" }, act("frontend_artifact.rejected")),
+  // Starting a backend job goes through the platform's own queueing path, which decides eligibility; this route
+  // only asks it to. Audited by the build record's own events rather than a separate audit row.
+  "POST /staff/builds/frontends/:projectId/build": staff(rolesWith("builds.configure"), { projectId: "project" }, act("builds.backend_job_started")),
   "GET /staff/builds/gallery": staff(rolesWith("builds.read")),
   "GET /staff/builds/gallery/:id": staff(rolesWith("builds.read"), P("designReference")),
   "GET /staff/builds/gallery/:id/image": staff(rolesWith("builds.read"), P("designReference")),

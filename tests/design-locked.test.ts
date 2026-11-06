@@ -825,3 +825,87 @@ test("[DLK-12] a scan verdict reaches the artifact: clean is shown as clean, inf
     assert.equal((await DL.frontendState(t.db, liveProject)).state, "artifact_quarantined");
   } finally { await t.close(); }
 });
+
+test("[DLR-05] the project page is enough to run an artifact through: the inventory, the artifact, rejection, and a build that refuses honestly", async () => {
+  // The staff page used to end at the baselines table. A person could upload and approve, and then had nothing:
+  // no view of what the browser actually found, no way to reject a wrong artifact, no way to start the backend
+  // job, and no sight of what any of the three gates decided. These are the controls that make the workflow
+  // usable, and each is asserted to do something rather than merely to be on the page.
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const cust = await createCustomer(t.db);
+    const projectId = await project(t.db, cust.organizationId);
+    const fileId = newId("file");
+    const at = nowIso();
+    const sha = await sha256Hex("artifact-bytes");
+    await t.db.prepare(
+      `INSERT INTO files (id, organization_id, project_id, filename, r2_key, content_type, size_bytes, sha256, scan_status, uploaded_by, created_at)
+       VALUES (?, ?, ?, 'frontend.zip', ?, 'application/zip', 30569, ?, 'clean', ?, ?)`,
+    ).bind(fileId, cust.organizationId, projectId, `frontend-artifacts/${fileId}.zip`, sha, staff.id, at).run();
+
+    const artifact = await DL.recordArtifact(t.db, {
+      projectId, organizationId: cust.organizationId, source: "upload", fileId, sha256: sha,
+      sizeBytes: 30_569, uploadedBy: staff.id, scanStatus: "clean",
+    });
+    await DL.recordVerdict(t.db, artifact.id, { status: "imported", framework: "vite" });
+    // A measurement with a real shape: two pages, one inert form, one thing that could not be read.
+    await DL.recordBaseline(t.db, artifact.id, baselineInput({
+      routes: [{ page: "index", title: "Home" }, { page: "quote", title: "Get a quote" }],
+      interactions: [
+        { page: "quote", element: "form#quote-request", label: "Quote request", needsBackend: true, functional: false },
+        { page: "index", element: "button.nav-toggle", label: "Menu", needsBackend: false, functional: true },
+        { page: "index", element: "table.prices", label: "Price table", needsBackend: false, functional: false, undetermined: true },
+      ],
+    }));
+
+    // Approved, so the page is past "approve one above" and on to whether a build can start.
+    const draft = (await DL.listBaselines(t.db, projectId)).find((b) => b.status === "draft")!;
+    await DL.approveBaseline(t.db, draft.id, { approvedBy: staff.id });
+
+    const client = await t.client().login(staff.email, TEST_PASSWORD, staff.secret);
+    const page = async () => (await client.get(`/staff/builds/frontends/${projectId}`)).text();
+
+    // ── what the browser found ────────────────────────────────────────────────────────────────────────────────
+    let body = await page();
+    assert.match(body, /The imported frontend/, "the measurement is shown, not just its fingerprint");
+    assert.match(body, /form#quote-request/, "the inert form is named as waiting on a backend");
+    assert.doesNotMatch(body, /button\.nav-toggle[\s\S]{0,400}Waiting on a backend/, "working client-side behaviour is not listed as work");
+    assert.match(body, /Could not be read from the markup/, "an undetermined element is a question, not an inference");
+    assert.match(body, /table\.prices/);
+
+    // ── the artifact itself ───────────────────────────────────────────────────────────────────────────────────
+    assert.match(body, new RegExp(`/files/${fileId}`), "the exact submitted bytes are downloadable");
+    assert.match(body, /no stored screenshots to show/, "it says plainly that there are no images, rather than implying there are");
+
+    // ── a build that will not start, and says why ─────────────────────────────────────────────────────────────
+    // This project has no paid order and no intake, so the platform's own rule refuses it. The page must give the
+    // reason rather than a button that fails.
+    assert.match(body, /will not queue a build yet/, "the refusal is explained on the page");
+    const refused = await client.post(`/staff/builds/frontends/${projectId}/build`, {});
+    assert.equal(refused.status, 409, "and the endpoint refuses it too, with the same rule");
+    assert.match(await refused.text(), /No build was queued/);
+    assert.equal(
+      (await t.db.prepare(`SELECT COUNT(*) AS n FROM build_jobs WHERE project_id = ?`).bind(projectId).first<{ n: number }>())!.n,
+      0, "nothing was queued");
+
+    // ── rejecting the artifact ────────────────────────────────────────────────────────────────────────────────
+    const noReason = await client.post(`/staff/builds/frontends/${projectId}/artifacts/${artifact.id}/reject`, {});
+    assert.equal(noReason.status, 422, "a rejection without a reason is not a decision anyone can act on");
+
+    const rejected = await client.post(`/staff/builds/frontends/${projectId}/artifacts/${artifact.id}/reject`, { reason: "wrong business" });
+    assert.ok([302, 303].includes(rejected.status), `rejection accepted (${rejected.status})`);
+    assert.equal((await DL.getArtifact(t.db, artifact.id))!.status, "rejected");
+    assert.equal((await DL.frontendState(t.db, projectId)).state, "artifact_rejected");
+    assert.match((await DL.getArtifact(t.db, artifact.id))!.problems_json, /wrong business/, "the reason is kept");
+
+    body = await page();
+    assert.match(body, /artifact rejected/, "the state is visible afterwards");
+
+    // Another tenant's artifact cannot be rejected through this project's path.
+    const other = await createCustomer(t.db, "other-tenant@example.com");
+    const otherProject = await project(t.db, other.organizationId, "Someone else");
+    const strayed = await client.post(`/staff/builds/frontends/${otherProject}/artifacts/${artifact.id}/reject`, { reason: "x" });
+    assert.equal(strayed.status, 404, "an artifact belonging to another project is not reachable through this one");
+  } finally { await t.close(); }
+});

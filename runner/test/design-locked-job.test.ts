@@ -338,3 +338,30 @@ test("[DLJ-10] a measured design that differs from the approved one is reported,
   assert.match(r.problems.join(" "), /renders a different design from the one approved/);
   assert.match(r.problems.join(" "), /continues against the APPROVED baseline/, "and says which one it used");
 });
+
+test("[DLJ-WIRE] a design-locked build reports its outcome to the platform, like every other build", () => {
+  // This asserts the WIRING in runner/src/job.ts, by reading it, because the behaviour needs Docker, a model and a
+  // control plane and is covered end to end by scripts/design-locked-e2e.ts --stage full. The invariant is worth a
+  // cheap guard of its own because losing it is silent and expensive:
+  //
+  // The branch used to end `return designLockedSummary(dl)`. `designLockedSummary` sets `complete: null`, and
+  // nothing else sends a completion — runner/src/main.ts only reads `summary.outcome` for its health record. So a
+  // design-locked build told the platform NOTHING. The job sat in `building` until its lease expired and the sweep
+  // failed it: no outcome, no report, no gate findings, no reason. Three independent gates had run and a person
+  // could see none of it.
+  const src = readFileSync(path.resolve(import.meta.dirname, "../src/job.ts"), "utf8").replace(/\r\n/g, "\n");
+  const branch = /if \(job\.designLocked && sandbox\) \{([\s\S]*?)\n    \}/.exec(src);
+  assert.ok(branch, "the design-locked branch of runJob was not found");
+  // Comments stripped: this branch EXPLAINS the defect it fixes, and the explanation names the very code the
+  // assertions below forbid.
+  const body = branch[1].replace(/^\s*\/\/.*$/gm, "");
+
+  assert.match(body, /return finish\(/, "the design-locked branch must complete through `finish`, the one path that calls client.complete");
+  assert.doesNotMatch(body, /return designLockedSummary\(/, "a bare return skips the completion entirely: the platform never learns the outcome");
+  assert.match(body, /checks: dls\.checks/, "the three gate outcomes must reach the platform, not just the verdict");
+  assert.match(body, /stopReason: dls\.stopReason/, "the blocking reason is what a person reads first");
+
+  // `finish` is what turns those checks into requirement evidence and composes the report.
+  assert.match(src, /const finish = async \(outcome: Outcome, fields: \{[^}]*checks\?: CheckOutcome\[\]/, "finish still takes the checks");
+  assert.match(src, /await client\.complete\(job, req\)/, "finish still reports to the platform");
+});

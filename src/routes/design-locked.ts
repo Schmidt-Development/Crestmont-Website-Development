@@ -15,6 +15,8 @@ import { staffPage } from "./crm.ts";
 import { UploadError, storeUpload } from "../services/files.ts";
 import { UPLOAD_LIMIT_BYTES } from "../adapters/storage.ts";
 import * as DL from "../services/design-locked.ts";
+import { syncProjectBuild, getBuildSettings, projectFacts, decideEligibility } from "../services/builds.ts";
+import { audit } from "../services/security.ts";
 import { alert, badge, button, csrf, emptyState, kpi, pageHead, table, linkButton } from "../ui/components.ts";
 
 const BASE = "/staff/builds/frontends";
@@ -105,6 +107,27 @@ ${rows.length === 0 ? emptyState("Nothing yet", "No project is on the design-loc
     const draft = baselines.find((b) => b.status === "draft");
     const approved = baselines.find((b) => b.status === "approved");
 
+    // The newest measurement, approved or not: a draft is what a person is being asked to approve, so it is what
+    // they need to see.
+    const measured = draft ?? approved ?? baselines[0] ?? null;
+    const routes = measured ? safeArr(measured.route_manifest_json) : [];
+    const interactions = measured ? safeArr(measured.interaction_inventory_json) : [];
+    const views = measured ? safeArr(measured.signatures_json) : [];
+    const needsBackend = interactions.filter((i) => i.needsBackend === true && i.undetermined !== true);
+    const undetermined = interactions.filter((i) => i.undetermined === true);
+
+    // Whether a build can be started, decided by the platform's own rule rather than a second one invented here.
+    const [facts, settings, jobRows] = await Promise.all([
+      projectFacts(ctx.db, projectId),
+      getBuildSettings(ctx.db),
+      ctx.db.prepare(`SELECT id, state, state_reason, stop_reason, attempts, max_attempts, preview_url, report_md, finished_at
+                        FROM build_jobs WHERE project_id = ? ORDER BY created_at DESC LIMIT 10`).bind(projectId).all(),
+    ]);
+    const eligibility = decideEligibility(facts);
+    const automationOff = !settings.automation_enabled;
+    const jobs = (jobRows.results ?? []) as Record<string, unknown>[];
+    const latestReport = jobs.map((j) => j.report_md).find((r) => typeof r === "string" && r.trim()) as string | undefined;
+
     const problemsOf = (a: DL.FrontendArtifact): SafeHtml => {
       let list: { severity?: string; code?: string; detail?: string; path?: string }[] = [];
       try { list = JSON.parse(a.problems_json); } catch { list = []; }
@@ -164,6 +187,92 @@ ${state.designLocked ? alert("success", html`This project is <strong>design-lock
     ],
   )}
   ${draft && mayApprove ? alert("info", html`Baseline <strong>v${String(draft.version)}</strong> has been measured and is waiting for a person to approve it. Approving it locks the design${approved ? html` and supersedes v${String(approved.version)}` : ""}.`) : ""}
+</section>
+
+${measured ? html`<section class="card">
+  <h2>The imported frontend</h2>
+  <p class="faint">What a real browser found in the submitted artifact, measured at desktop, tablet and mobile. The inventory below is what the AI is asked to make work; the design itself is not its to change.</p>
+  <div class="grid grid-3">
+    ${kpi("Pages", String(routes.length))}
+    ${kpi("Waiting on a backend", String(needsBackend.length))}
+    ${kpi("Undetermined", String(undetermined.length))}
+  </div>
+  ${routes.length ? table(routes, [
+      { header: "Page", cell: (x: Record<string, unknown>) => html`<code>${String(x.page ?? "")}</code>` },
+      { header: "Title", cell: (x: Record<string, unknown>) => html`${String(x.title ?? "\u2014")}` },
+    ]) : ""}
+  <h3 style="font-size:1rem;margin-top:1rem">Waiting on a backend</h3>
+  ${needsBackend.length === 0 ? html`<p class="faint">Nothing in this frontend needs a backend.</p>` : table(needsBackend, [
+      { header: "Page", cell: (x: Record<string, unknown>) => html`<code>${String(x.page ?? "")}</code>` },
+      { header: "Element", cell: (x: Record<string, unknown>) => html`<code>${String(x.element ?? "")}</code>` },
+      { header: "What it is", cell: (x: Record<string, unknown>) => html`${String(x.label ?? x.role ?? "\u2014")}` },
+    ])}
+  ${undetermined.length ? html`<h3 style="font-size:1rem;margin-top:1rem">Could not be read from the markup</h3>
+    <p class="faint">Recorded as questions rather than guessed at. Each one is something to decide before it is built.</p>
+    ${table(undetermined, [
+      { header: "Page", cell: (x: Record<string, unknown>) => html`<code>${String(x.page ?? "")}</code>` },
+      { header: "Element", cell: (x: Record<string, unknown>) => html`<code>${String(x.element ?? "")}</code>` },
+      { header: "What it is", cell: (x: Record<string, unknown>) => html`${String(x.label ?? x.role ?? "\u2014")}` },
+    ])}` : ""}
+</section>` : ""}
+
+<section class="card">
+  <h2>The submitted artifact</h2>
+  <p class="faint">The exact bytes that were uploaded, and the design measured from them. Downloading one is recorded against your account.</p>
+  ${artifacts.length === 0 ? html`<p class="faint">Nothing has been uploaded for this project yet.</p>` : table(artifacts, [
+      { header: "Version", cell: (a: DL.FrontendArtifact) => html`v${String(a.version)}` },
+      { header: "Scan", cell: (a: DL.FrontendArtifact) => scanBadge(a.scan_status) },
+      { header: "Size", cell: (a: DL.FrontendArtifact) => html`${String(Math.round(a.size_bytes / 1024))} KB` },
+      { header: "SHA-256", cell: (a: DL.FrontendArtifact) => html`<code>${a.sha256.slice(0, 16)}\u2026</code>` },
+      { header: "", cell: (a: DL.FrontendArtifact) => a.file_id
+          ? linkButton("Download the ZIP", `/files/${a.file_id}`, "ghost", "sm")
+          : html`<span class="faint">no stored file</span>` },
+      { header: "", cell: (a: DL.FrontendArtifact) => !mayApprove || a.status === "rejected" || a.status === "quarantined" ? html`` :
+          html`<form method="post" action="${BASE}/${projectId}/artifacts/${a.id}/reject" class="row" style="gap:.25rem"
+              onsubmit="return confirm('Reject this artifact? The project moves to artifact_rejected and nothing is built from it.')">
+            ${csrf(ctx)}<input type="text" name="reason" placeholder="why" maxlength="300" required>${button("Reject", { variant: "ghost", size: "sm" })}</form>` },
+    ])}
+  ${measured ? html`<h3 style="font-size:1rem;margin-top:1rem">The measured design</h3>
+    <p class="faint">There are no stored screenshots to show you: a baseline records each view's fingerprint, not its image. What was measured is below, and the artifact itself is downloadable above.</p>
+    ${table(views.slice(0, 24), [
+      { header: "Page", cell: (x: Record<string, unknown>) => html`<code>${String(x.page ?? "")}</code>` },
+      { header: "Viewport", cell: (x: Record<string, unknown>) => html`${String(x.viewport ?? "")}` },
+      { header: "Landmarks", cell: (x: Record<string, unknown>) => html`${String((x.skeleton as unknown[] | undefined)?.length ?? 0)}` },
+      { header: "Palette", cell: (x: Record<string, unknown>) => html`${String((x.palette as unknown[] | undefined)?.length ?? 0)} colours` },
+      { header: "Fonts", cell: (x: Record<string, unknown>) => html`${((x.fonts as string[] | undefined) ?? []).slice(0, 2).join(", ") || "\u2014"}` },
+    ])}` : ""}
+</section>
+
+<section class="card">
+  <h2>Backend development</h2>
+  <p class="faint">The AI builds the backend behind the approved design and never the design itself. Three independent gates judge the result \u2014 the contract, the application actually working, and the design still matching \u2014 and the model does not decide whether its own work passed.</p>
+
+  ${!state.designLocked
+    ? alert("info", "A backend job can start once a design baseline is approved. Approve one above.")
+    : eligibility.verdict !== "queued"
+      ? alert("warn", html`This project is design-locked, but the platform will not queue a build yet: <strong>${eligibility.reasons.join("; ")}</strong>. That is the same rule every build follows, so the thing to fix is the project, not this page.${automationOff ? html` Automatic starts are also switched off in <a href="/staff/builds">AI builds</a> settings.` : ""}`)
+      : mayApprove
+        ? html`<form method="post" action="${BASE}/${projectId}/build" class="row" style="gap:.5rem;align-items:center"
+            onsubmit="return confirm('Start a backend development job against the approved design?')">
+          ${csrf(ctx)}${button("Start a backend job", { variant: "primary" })}
+          <span class="faint">Queues a build for the Node 1 runner. The approved design is handed to it and cannot be changed by it.</span>
+        </form>`
+        : html`<p class="faint">You do not have permission to start a build.</p>`}
+
+  ${jobs.length === 0 ? emptyState("No backend job yet", "Nothing has been built against this design.") : table(jobs, [
+      { header: "Build", cell: (j: Record<string, unknown>) => linkButton(String(j.id).slice(0, 12), `/staff/builds/${String(j.id)}`, "ghost", "sm") },
+      { header: "State", cell: (j: Record<string, unknown>) => badge(BUILD_TONE[String(j.state)] ?? "info", String(j.state).replace(/_/g, " ")) },
+      { header: "Attempts", cell: (j: Record<string, unknown>) => html`${String(j.attempts ?? 0)} of ${String(j.max_attempts ?? 0)}` },
+      { header: "Why it stopped", cell: (j: Record<string, unknown>) => j.stop_reason
+          ? html`${String(j.stop_reason)}` : j.state_reason ? html`<span class="faint">${String(j.state_reason)}</span>` : html`<span class="faint">\u2014</span>` },
+      { header: "Preview", cell: (j: Record<string, unknown>) => j.preview_url
+          ? html`<a href="${String(j.preview_url)}" rel="noopener">Open the website</a>` : html`<span class="faint">none</span>` },
+      { header: "Finished", cell: (j: Record<string, unknown>) => j.finished_at ? html`${formatDateTime(String(j.finished_at))}` : html`<span class="faint">running</span>` },
+    ])}
+
+  ${latestReport ? html`<h3 style="font-size:1rem;margin-top:1rem">What the runner reported</h3>
+    <p class="faint">The runner's own account of the most recent build: each gate's finding, every repair cycle it attempted, and why it stopped.</p>
+    <pre style="white-space:pre-wrap;max-height:28rem;overflow:auto">${latestReport}</pre>` : ""}
 </section>`;
     return staffPage(ctx, project.name, body);
   });
@@ -234,6 +343,69 @@ ${state.designLocked ? alert("success", html`This project is <strong>design-lock
   // downloadable export (alongside .csv, .md, .pdf), which the audit inventory requires to be recorded as a
   // data egress. This is a live status read for the dashboard and for tests, so auditing every glance at it
   // would be noise. The runner's own signed channel carries the archive bytes; this carries nothing but state.
+  // ── reject an artifact ─────────────────────────────────────────────────────────────────
+  //
+  // Approving is the decision that locks a design; this is the other half of it. Without it a staff member who
+  // sees a wrong or broken artifact has nothing to press, and the project sits in `validating_artifact` looking
+  // like something is still running. The reason is required, because "rejected" with no account of why is not a
+  // decision anyone can act on.
+  r.post(`${BASE}/:projectId/artifacts/:artifactId/reject`, async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    const form = await ctx.form();
+    const reason = str(form, "reason").slice(0, 300);
+    if (!reason) throw new HttpError(422, "Say why it is being rejected.");
+
+    const artifact = await DL.getArtifact(ctx.db, p.artifactId);
+    if (!artifact || artifact.project_id !== p.projectId) throw new HttpError(404, "No such artifact for this project.");
+
+    await DL.recordVerdict(ctx.db, artifact.id, {
+      status: "rejected",
+      problems: [reason],
+      actorId: actorId(ctx),
+    });
+    return redirect(ctx, `${BASE}/${p.projectId}`);
+  });
+
+  // ── start a backend job ──────────────────────────────────────────────────────────────
+  //
+  // Through `syncProjectBuild`, which is the platform's own queueing path: it applies the same eligibility rule
+  // every build follows, snapshots the brief, seeds the requirements, and calls `applyDesignLock` so the job is
+  // marked as a design-locked build rather than a website generation. Deliberately NOT a second code path that
+  // inserts a build row directly — that would be a way to start a build the rules would have refused.
+  //
+  // `backfill` is the trigger the Owner already uses to start a build for a project that should have one.
+  r.post(`${BASE}/:projectId/build`, async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    const projectId = p.projectId;
+
+    const state = await DL.frontendState(ctx.db, projectId);
+    if (!state.designLocked) throw new HttpError(409, "This project has no approved design baseline, so there is nothing to build a backend against.");
+
+    const actor = actorId(ctx);
+    const job = await syncProjectBuild(ctx.db, projectId, "backfill", { kind: "user", userId: actor });
+    if (!job) {
+      // Honest refusal with the actual reason, rather than a redirect that looks like success.
+      const facts = await projectFacts(ctx.db, projectId);
+      const decision = decideEligibility(facts);
+      const settings = await getBuildSettings(ctx.db);
+      const why = decision.verdict === "ineligible"
+        ? decision.reasons.join("; ")
+        : !settings.automation_enabled
+          ? "automatic starts are switched off in the AI builds settings"
+          : "the project is not yet eligible for a build";
+      throw new HttpError(409, `No build was queued: ${why}.`);
+    }
+
+    // Starting a build spends the runner's time and the project's budget against a design someone approved, so it
+    // is attributable like the approval was.
+    await audit(ctx.db, {
+      actorUserId: actor, actorKind: "user", action: "builds.backend_job_started",
+      subjectType: "build_job", subjectId: job.id, organizationId: job.organization_id,
+      details: { projectId, baselineId: state.activeBaselineId, state: job.state, trigger: "backfill" },
+    });
+    return redirect(ctx, `${BASE}/${projectId}`);
+  });
+
   r.get(`${BASE}/:projectId/state`, async (ctx, p) => {
     requireStaff(ctx, "builds.read");
     const [state, artifacts, baselines] = await Promise.all([
@@ -252,6 +424,18 @@ ${state.designLocked ? alert("success", html`This project is <strong>design-lock
     });
   });
 }
+
+/** A JSON array column, parsed defensively: a malformed column must not take the page down. */
+function safeArr<T = Record<string, unknown>>(json: string | null): T[] {
+  try { const a = JSON.parse(json ?? "[]"); return Array.isArray(a) ? (a as T[]) : []; } catch { return []; }
+}
+
+/** A build's state, in the tone the workflow means it. */
+const BUILD_TONE: Record<string, string> = {
+  ready_for_review: "ok", approved: "ok", queued: "info", preparing: "info", building: "info", verifying: "info",
+  failed: "danger", canceled: "muted", needs_information: "warn", budget_paused: "warn", paused: "warn",
+  awaiting_intake: "muted", awaiting_payment: "muted",
+};
 
 function safeLen(json: string): number {
   try { const a = JSON.parse(json); return Array.isArray(a) ? a.length : 0; } catch { return 0; }

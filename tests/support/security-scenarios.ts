@@ -506,6 +506,33 @@ export function auditScenarios(w: World): Scenario[] {
       },
     },
     {
+      key: "POST /staff/builds/frontends/:projectId/artifacts/:artifactId/reject",
+      fields: () => ({ reason: "matrix rejection" }),
+      // The seeded artifact is `imported`; rejecting it is a real first decision. Put it back afterwards so the
+      // scenarios that follow still have an importable artifact to work with.
+      setup: async (w) => {
+        await w.db.prepare(`UPDATE frontend_artifacts SET status = 'imported', problems_json = '[]' WHERE id = ?`)
+          .bind(w.ids.frontendArtifact).run();
+      },
+    },
+    {
+      key: "POST /staff/builds/frontends/:projectId/build",
+      // `syncProjectBuild` returns the existing build for a project when there is one, so the route succeeds and
+      // audits without the matrix having to manufacture a paid order and a completed intake. The point being
+      // proven here is that the route attributes the decision, not that eligibility works — tests/builds own that.
+      setup: async (w) => {
+        const at = new Date().toISOString();
+        await w.db.prepare(`UPDATE projects SET design_locked = 1, active_baseline_id = ? WHERE id = ?`)
+          .bind(w.ids.designBaseline, w.a.ids.project).run();
+        await w.db.prepare(`UPDATE design_baselines SET status = 'approved', approved_by = ?, approved_at = ? WHERE id = ?`)
+          .bind(w.staff.owner.id, at, w.ids.designBaseline).run();
+        await w.db.prepare(`INSERT OR IGNORE INTO build_jobs
+            (id, project_id, organization_id, kind, revision, dedupe_key, state, state_reason, strategy, package_id, trigger, created_by, max_attempts, created_at, updated_at)
+          VALUES ('bld_matrixseed0000000000001', ?, ?, 'first_build', 0, ?, 'awaiting_intake', 'seeded for the audit matrix', 'standard', 'business', 'backfill', ?, 3, ?, ?)`)
+          .bind(w.a.ids.project, w.a.ids.org, `${w.a.ids.project}:first`, w.staff.owner.id, at, at).run();
+      },
+    },
+    {
       key: "POST /staff/builds/frontends/:projectId/rollback",
       fields: (w) => ({ baselineId: w.ids.designBaseline!, reason: "matrix rollback" }),
       // A rollback needs something to roll back TO: the seeded baseline superseded by a newer approved one.

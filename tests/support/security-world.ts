@@ -249,6 +249,7 @@ async function buildStaffRecords(w: World) {
   {
     const at = new Date().toISOString();
     const artifactId = "fa_matrixseed000000000000001";
+    ids.frontendArtifact = artifactId;
     await db.prepare(`INSERT INTO frontend_artifacts (id, project_id, organization_id, version, source, sha256, size_bytes, framework, scan_status, status, created_at, updated_at)
       VALUES (?,?,?,1,'upload',?,1024,'vite','clean','imported',?,?)`)
       .bind(artifactId, w.a.ids.project, w.a.ids.org, "0".repeat(64), at, at).run();
