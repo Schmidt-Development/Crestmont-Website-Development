@@ -12,7 +12,7 @@ import { MFA_SETUP_PROMPT } from "../app/app.ts";
 import { MAINTENANCE_PLANS } from "../domain/catalog.ts";
 import { REFUND_STATUSES, type RefundStatus } from "../domain/refunds.ts";
 import { customerBilling, customerInvoice, startInvoiceCheckout, billingPortalUrl, requestRefund, stripeRedirect, NOT_CONFIGURED, INTAKE_REQUIRED, invoicesNeedingIntake } from "../services/billing.ts";
-import { findIntake, savePurchaseIntake, intakeProductKey, quoteOrderFor } from "../services/purchase-intake.ts";
+import { findIntake, savePurchaseIntake, intakeProductKey, quoteOrderFor, intakeTargetForInvoice, stripeHostedInvoicesMissingIntake, type IntakeTarget } from "../services/purchase-intake.ts";
 import { OnboardingError } from "../services/onboarding.ts";
 import { intakeSections, intakeSummary } from "../ui/intake-form.ts";
 import * as refunds from "../services/refunds.ts";
@@ -95,7 +95,7 @@ async function invoicePage(ctx: AppContext, id: string) {
   const hosted = stripeInvoiceLink(inv);
   const needsIntake = (await invoicesNeedingIntake(ctx.db, org.organizationId)).has(inv.id);
   const payBlock = inv.status !== "open" ? html``
-    : needsIntake ? html`<div class="stack" data-testid="invoice-intake-required">${alert("info", "Before this first payment, tell us about the website you want. Your project manager reviews your intake against the accepted proposal.")}${linkButton("Complete website intake", `/portal/billing/invoices/${inv.id}/intake`, "primary")}</div>`
+    : needsIntake ? html`<div class="stack" data-testid="invoice-intake-required">${alert("info", "Before this first payment, tell us about the website you want. Your project manager reviews your intake against the scope you are buying.")}${linkButton("Complete website intake", `/portal/billing/invoices/${inv.id}/intake`, "primary")}</div>`
     : !canPay ? (org.role === "customer_admin" && customerAdminNeedsMfa(ctx.actor) ? mfaToPay(inv.id) : alert("info", "Ask your account administrator to pay this invoice."))
     : hosted ? html`<a class="btn btn--primary" href="${hosted}" rel="noopener">Pay ${formatCents(inv.amount_cents)} — Stripe invoice</a><p class="faint">This invoice is billed through a Stripe invoice. Payment is confirmed when Stripe notifies us.</p>`
     : ctx.payments.configured ? html`<form method="post" action="/portal/billing/invoices/${inv.id}/pay">${csrf(ctx)}${button(`Pay ${formatCents(inv.amount_cents)} securely`)}</form><p class="faint">You will be taken to Stripe's secure checkout. Payment is confirmed when Stripe notifies us.</p>`
@@ -108,26 +108,26 @@ ${payBlock}</section>
 <section class="card"><h2 style="font-size:1.2rem">Payments (receipts)</h2>${table(pays, [{ header: "Date", cell: (p) => formatDateTime(p.created_at) }, { header: "Status", cell: (p) => badge(p.status) }, { header: "Amount", cell: (p) => formatCents(p.amount_cents), numeric: true }, { header: "Reference", cell: (p) => p.stripe_payment_intent_id ?? p.id }, { header: "", cell: (p) => (p.status !== "failed" ? html`<a href="/portal/billing/receipts/${p.id}">Receipt</a> · <a href="/portal/billing/receipts/${p.id}/pdf">PDF</a>` : "") }], { empty: html`<p class="muted">No payment recorded yet.</p>` })}</section>`);
 }
 
-/** The accepted quote version whose website intake belongs to this invoice: a quote order's first (full or 50%) invoice. */
-async function intakeQuoteVersion(ctx: AppContext, organizationId: string, inv: { order_id: string | null; milestone_kind: string | null }): Promise<string | null> {
-  if (!inv.order_id || (inv.milestone_kind !== "full" && inv.milestone_kind !== "deposit_50")) return null;
-  const o = await ctx.db.prepare(`SELECT quote_version_id FROM orders WHERE id = ? AND organization_id = ? AND kind = 'quote'`).bind(inv.order_id, organizationId).first<{ quote_version_id: string | null }>();
-  return o?.quote_version_id ?? null;
+/** The questions an invoice's intake is filtered by: the package, or the accepted quote's package ("custom" otherwise). */
+async function intakeProductFor(ctx: AppContext, organizationId: string, target: IntakeTarget): Promise<string> {
+  if (target.kind === "package") return intakeProductKey(target);
+  return intakeProductKey(target, (await quoteOrderFor(ctx.db, organizationId, target.quoteVersionId)).package_id);
 }
 
 /**
- * Founder requirement (2026-11): the website intake for an accepted quote, completed before its first invoice is paid.
- * The same questions and validation as project onboarding; the record is keyed by the quote version (migration 0089).
+ * Founder requirement (2026-11): the website intake behind an invoice's first payment — an accepted quote's intake
+ * (keyed by the quote version), or the package intake for a package order made before intakes existed (the same open
+ * intake /checkout/:pkg/intake uses, so the package selection and the existing order are kept). Same questions and
+ * validation as project onboarding (migration 0089).
  */
 async function invoiceIntakePage(ctx: AppContext, id: string, errors: string[] = [], status = 200) {
   const org = requireCustomerOrg(ctx);
   const inv = await customerInvoice(ctx.db, org.organizationId, id);
-  const qv = await intakeQuoteVersion(ctx, org.organizationId, inv);
+  const target = await intakeTargetForInvoice(ctx.db, org.organizationId, inv);
   const head = pageHead("Website intake", linkButton("Back to invoice", `/portal/billing/invoices/${inv.id}`, "ghost", "sm"), `Invoice ${inv.id}`);
-  if (!qv) return portalPage(ctx, "Website intake", html`${head}${alert("info", "No website intake is needed for this invoice.")}`);
-  const order = await quoteOrderFor(ctx.db, org.organizationId, qv);
-  const productKey = intakeProductKey({ kind: "quote", quoteVersionId: qv }, order.package_id);
-  const intake = await findIntake(ctx.db, org.organizationId, { kind: "quote", quoteVersionId: qv });
+  if (!target) return portalPage(ctx, "Website intake", html`${head}${alert("info", "No website intake is needed for this invoice.")}`);
+  const productKey = await intakeProductFor(ctx, org.organizationId, target);
+  const intake = await findIntake(ctx.db, org.organizationId, target);
   if (intake?.project_id || inv.status !== "open") {
     return portalPage(ctx, "Website intake", html`${head}${intake?.completed_at ? html`<section class="card">${alert("success", `Website intake submitted ${formatDateTime(intake.completed_at)}. Changes now go to your team through Messages.`)}${intakeSummary(productKey, intake.answers)}</section>`
       : alert("info", "This invoice is no longer open. Any remaining questions are in your project's onboarding tab.")}`);
@@ -354,6 +354,9 @@ async function invoicesPage(ctx: AppContext) {
   }
   const { page, limit, offset } = pageParam(ctx);
   const rows = await fin.listInvoices(ctx.db, { status: valid, kind, q, range, limit, offset });
+  // Read-only remediation list: Stripe-hosted first invoices issued before the intake rule, still unpaid, whose order
+  // has no completed website intake. Nothing here is voided or changed automatically.
+  const missingIntake = await stripeHostedInvoicesMissingIntake(ctx.db);
   const filters = html`${input({ name: "q", label: "Search", value: q, placeholder: "Customer, description, invoice id", maxlength: 100 })}
 ${select({ name: "status", label: "Status", options: [...fin.INVOICE_STATUSES], value: valid, includeBlank: "Any status" })}
 ${select({ name: "kind", label: "Type", options: fin.INVOICE_KINDS.map((k) => ({ value: k, label: MILESTONE_LABEL[k] ?? label(k) })), value: kind, includeBlank: "Any type" })}`;
@@ -364,7 +367,13 @@ ${table(rows.slice(0, limit), [{ header: "Issued", cell: (i) => html`<a href="/s
     { header: "Status", cell: (i) => badge(i.status) }, { header: "Amount", cell: (i) => formatCents(i.amount_cents), numeric: true },
     { header: "Paid", cell: (i) => formatDate(i.paid_at) }, { header: "Project", cell: (i) => (i.project_id ? html`<a href="/staff/projects/${i.project_id}">View</a>` : "—") },
     { header: "Documents", cell: (i) => html`<a href="/staff/finance/invoices/${i.id}/pdf">Invoice PDF</a>${(i.payment_ids ?? "").split(",").filter(Boolean).map((pid, n) => html`<br><a href="/staff/finance/receipts/${pid}" data-receipt>Receipt${n ? ` ${n + 1}` : ""}</a> · <a href="/staff/finance/receipts/${pid}/pdf">PDF</a>`)}` }],
-    { empty: emptyState("No invoices", "Invoices are created by purchases, accepted quotes, milestones and change orders.") })}${pagination(ctx, page, rows.length > limit)}`);
+    { empty: emptyState("No invoices", "Invoices are created by purchases, accepted quotes, milestones and change orders.") })}${pagination(ctx, page, rows.length > limit)}
+<section class="card stack" data-testid="stripe-invoices-missing-intake"><h2 style="font-size:1.1rem">Stripe-hosted invoices awaiting a website intake (manual remediation)</h2>
+<p class="faint">Unpaid Stripe-hosted first invoices (full payment or 50% deposit) whose order has no completed website intake. They were issued before the intake rule; nothing is voided or changed automatically. Ask the customer to complete the intake from the invoice page, or void the Stripe invoice in Stripe after review. Read-only.</p>
+${table(missingIntake, [{ header: "Invoice", cell: (i) => html`<a href="/staff/finance/invoices/${i.id}">${i.id}</a>` }, { header: "Customer", cell: (i) => html`<a href="/staff/customers/${i.organization_id}">${i.org_name}</a>` },
+    { header: "Type", cell: (i) => MILESTONE_LABEL[i.milestone_kind] ?? i.milestone_kind }, { header: "Order", cell: (i) => `${i.order_id} (${label(i.order_kind)})` }, { header: "Stripe invoice", cell: (i) => i.stripe_invoice_number ?? i.stripe_invoice_id ?? "—" },
+    { header: "Amount", cell: (i) => formatCents(i.amount_cents), numeric: true }, { header: "Issued", cell: (i) => formatDate(i.created_at) }],
+    { empty: html`<p class="muted">None: every unpaid Stripe-hosted first invoice has its website intake.</p>` })}</section>`);
 }
 
 async function staffInvoicePage(ctx: AppContext, id: string, errors: string[] = [], status = 200) {
@@ -374,7 +383,8 @@ async function staffInvoicePage(ctx: AppContext, id: string, errors: string[] = 
     .first<{ stripe_invoice_status: string | null; stripe_invoice_number: string | null; stripe_hosted_invoice_url: string | null; stripe_invoice_error: string | null; stripe_invoice_synced_at: string | null; stripe_checkout_session_id: string | null }>();
   const inv = { ...d.invoice, ...full! };
   const invoicer = stripeInvoicer(ctx.env);
-  const blocker = stripeInvoiceBlocker(inv);
+  const blocker = stripeInvoiceBlocker(inv) ?? ((await invoicesNeedingIntake(ctx.db, d.organization.id)).has(inv.id)
+    ? "The customer has not completed the website intake for this order. A payable Stripe invoice is issued only after the intake (Founder requirement); the customer completes it from the invoice page in the portal." : null);
   const done = inv.stripe_invoice_status === "open" || inv.stripe_invoice_status === "paid";
   const history = (await ctx.db.prepare(`SELECT a.action, a.created_at, a.actor_kind, u.display_name FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_user_id WHERE a.subject_type = 'invoice' AND a.subject_id = ? ORDER BY a.id DESC LIMIT 50`).bind(id)
     .all<{ action: string; created_at: string; actor_kind: string; display_name: string | null }>()).results;
@@ -484,12 +494,13 @@ export function register(r: Router): void {
   r.post("/portal/billing/invoices/:id/intake", async (ctx, p) => {
     const org = requireCustomerOrg(ctx);
     const inv = await customerInvoice(ctx.db, org.organizationId, p.id);
-    const qv = await intakeQuoteVersion(ctx, org.organizationId, inv);
-    if (!qv) throw new HttpError(409, "No website intake is needed for this invoice.");
+    const target = await intakeTargetForInvoice(ctx.db, org.organizationId, inv);
+    if (!target) throw new HttpError(409, "No website intake is needed for this invoice.");
+    if (inv.status !== "open") throw new HttpError(409, "This invoice is no longer open. Send changes to your team through Messages.");
     const f = await ctx.form();
     const submit = str(f, "intent") === "submit";
     try {
-      const res = await savePurchaseIntake(ctx, { organizationId: org.organizationId, userId: ctx.user!.id, target: { kind: "quote", quoteVersionId: qv }, form: f, submit });
+      const res = await savePurchaseIntake(ctx, { organizationId: org.organizationId, userId: ctx.user!.id, target, form: f, submit });
       return res.completed
         ? redirect(ctx, `/portal/billing/invoices/${inv.id}`, { kind: "success", text: "Website intake submitted. You can now pay the first invoice." })
         : redirect(ctx, `/portal/billing/invoices/${inv.id}/intake`, { kind: "success", text: "Draft saved. You can come back and finish it any time." });

@@ -21,6 +21,7 @@ import { sha256Hex } from "../lib/crypto.ts";
 import { HttpError } from "../app/http.ts";
 import { audit } from "./security.ts";
 import { confirmInvoicePayment } from "./payments.ts";
+import { requireIntakeForPayment } from "./purchase-intake.ts";
 
 export const SIMULATED_EVENT_SCHEMA = "crestmont.simulated-payment/1";
 export const SIMULATED_PAID = "SIMULATED_PAID";
@@ -170,6 +171,9 @@ async function evaluate(db: Db, env: Pick<Env, "ENVIRONMENT">, e: SimulatedPayme
   if (e.paymentStatus !== SIMULATED_PAID) return reject(`unknown payment status: ${String(e.paymentStatus).slice(0, 40)}`, c);
   if (c.status === "paid") return { outcome: "duplicate_order", reason: "the invoice is already paid; no second payment was recorded", ctx: c };
   if (c.status !== "open") return reject(`the invoice is ${c.status}; only open invoices can be paid`, c);
+  // The same rule as every real payment path: the order's website intake must be complete first.
+  try { await requireIntakeForPayment(db, c.invoice_id); }
+  catch (err) { if (err instanceof HttpError && err.status === 409) return reject(`website intake not completed: ${err.message}`, c); throw err; }
   return { outcome: "applied", reason: null, ctx: c };
 }
 

@@ -7,7 +7,7 @@ import { pathFor } from "./security-helpers.ts";
 import { ROUTE_INVENTORY } from "./route-inventory.ts";
 import { newId, nowIso } from "../../src/lib/db.ts";
 import { createPackageOrder, createQuoteOrder } from "../../src/services/commerce.ts";
-import { INTAKE_ANSWERS } from "./intake.ts";
+import { INTAKE_ANSWERS, seedCompletedIntake } from "./intake.ts";
 import { baselineSalesInstructions as baselineSales } from "../../src/domain/sales-opt/policy.ts";
 
 type Fields = Record<string, string | string[] | File>;
@@ -176,7 +176,12 @@ export function auditScenarios(w: World): Scenario[] {
     { key: "GET /portal/billing/receipts/:paymentId/pdf", as: custA, path: () => `/portal/billing/receipts/${a.ids.payment}/pdf` },
     cust("POST /portal/support/new"),
     cust("POST /portal/support/:id/reply"),
-    cust("POST /portal/billing/invoices/:id/pay"),
+    // ids.invoice is an unpaid package order without an intake (as orders made before the intake rule are): the
+    // customer completes the package intake from the invoice, then pays the same invoice.
+    cust("POST /portal/billing/invoices/:id/pay", { setup: async () => {
+      const res = await a.admin.c.post(`/portal/billing/invoices/${a.ids.invoice}/intake`, { ...INTAKE_ANSWERS, intent: "submit" });
+      if (res.headers.get("location") !== `/portal/billing/invoices/${a.ids.invoice}`) throw new Error(`invoice intake not completed: ${res.status}`);
+    } }),
     // The website intake for an accepted quote, before its first invoice is paid (migration 0089).
     cust("POST /portal/billing/invoices/:id/intake", { path: () => `/portal/billing/invoices/${x.quoteInvoice}/intake`, setup: async () => {
       const q = newId("quo"), v = newId("qv");
@@ -476,6 +481,7 @@ export function auditScenarios(w: World): Scenario[] {
     }, path: () => `/staff/test-payments/organizations/${simOrg!.organizationId}/mark`, fields: () => ({ mark: "1", confirm: "Matrix Simulation Test Org" }) },
     { key: "POST /staff/test-payments/simulate", setup: async () => {
       simInvoice = (await createPackageOrder(w.db, simOrg!.organizationId, "starter", simOrg!.id)).invoiceId;
+      await seedCompletedIntake(w.db, simOrg!.organizationId, { productId: "starter" }, simOrg!.id); // same intake rule as real payments
     }, fields: () => ({ invoice_id: simInvoice!, outcome: "paid" }) },
     { key: "POST /staff/builds/settings", fields: () => ({ run_budget: "30", project_budget: "90", model: "claude-sonnet-5-5", max_runtime: "120", max_turns: "200", max_concurrent: "2", max_attempts: "3", automation_enabled: "1" }) },
     { key: "POST /staff/builds/pause", fields: () => ({ paused: "1", reason: "matrix pause" }) },
