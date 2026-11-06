@@ -113,6 +113,22 @@ async function signIn(page: Page, email: string, secret?: string) {
   }
   assert.doesNotMatch(new URL(page.url()).pathname, /^\/(login|mfa)/, `signed in as ${email}`);
 }
+/** FD-30: a customer administrator must enrol two-factor authentication before accepting, paying or approving. From
+ *  the page the browser is on (which offers "Set up two-factor authentication"), enrol through the real setup page
+ *  with the shown setup key, keep the recovery codes page, and continue back. Returns the TOTP secret. */
+async function enrolCustomerMfa(page: Page): Promise<string> {
+  const back = new URL(page.url()).pathname + new URL(page.url()).search;
+  await nav(page, page.getByRole("link", { name: "Set up two-factor authentication" }).first());
+  assert.match(new URL(page.url()).pathname, /^\/mfa\/setup$/);
+  assert.match(await text(page, "body"), /required for account administrators/i);
+  const secret = ((await page.locator("[data-testid=totp-secret]").innerText()) as string).replace(/\s/g, "");
+  await page.fill("#f-code", await totpCode(secret));
+  await nav(page, btn(page, "Turn on"));
+  assert.ok(await page.locator("[data-testid=recovery-codes] li").count() >= 8, "recovery codes shown once");
+  await nav(page, page.getByRole("link", { name: /I have saved my codes/ }));
+  assert.equal(new URL(page.url()).pathname + new URL(page.url()).search, back, "returned to the page after enrolment");
+  return secret;
+}
 /** Step-up MFA (src/app/step-up.ts): sensitive actions need a TOTP check within 10 minutes; do it just before. */
 async function freshMfa(page: Page, user: StaffUser) {
   const back = new URL(page.url()).pathname + new URL(page.url()).search;
@@ -174,6 +190,7 @@ let pm: Actor & { user: StaffUser };
 let dev: Actor & { user: StaffUser };
 let supportAgent: Actor & { user: StaffUser };
 let customer: Actor;
+let customerSecret = ""; // FD-30: the journey customer's TOTP secret, enrolled in step [SALES-004]
 let leadId = "", quoteId = "", proposalUrl = "", depositInvoiceId = "", projectId = "", ticketUrl = "";
 
 // ───────────── 1–2. Lead capture → CRM ─────────────
@@ -273,6 +290,10 @@ step("[SALES-004] customer registers with the quote email, verifies, signs in, a
   await signIn(p, contact.email);
 
   await p.goto(proposalUrl);
+  // FD-30: the new customer administrator is asked to set up two-factor authentication before accepting.
+  assert.match(await text(p), /Set up two-factor authentication to continue/);
+  assert.equal(await p.locator("input[name=agree]").count(), 0, "no accept form before enrolment");
+  customerSecret = await enrolCustomerMfa(p);
   assert.match(await text(p), new RegExp(usd(total).replace("$", "\\$")));
   await p.check("input[name=agree]");
   await nav(p, btn(p, "Accept and continue to payment"));

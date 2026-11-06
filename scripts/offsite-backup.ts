@@ -20,7 +20,7 @@
 //   node --no-warnings scripts/offsite-backup.ts delete <key>                → remove an object (rehearsal clean-up)
 import { createHash, createHmac } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import { compareCounts, rowsOfAll } from "./restore-drill.ts";
@@ -33,26 +33,88 @@ export interface Store {
   delete(key: string): Promise<void>;
 }
 
-/** An R2 bucket in the account the job's Cloudflare token belongs to, through wrangler (`r2 object … --remote`). */
-export function r2Store(bucket: string, run: (args: string[]) => Buffer | string = wranglerRun): Store {
+/** wrangler refuses `r2 object put` above 300 MiB ("Wrangler only supports uploading files up to 300 MiB in size"); the
+ *  staging export passed that in backup rehearsal #1. Parts stay well below it. */
+export const R2_PART_BYTES = 128 * 1024 * 1024;
+export const CHUNKED_FORMAT = "crestmont-chunked/1";
+interface ChunkIndex { format: typeof CHUNKED_FORMAT; size: number; sha256: string; parts: { key: string; size: number; sha256: string }[] }
+
+/**
+ * An R2 bucket in the account the job's Cloudflare token belongs to, through wrangler (`r2 object … --remote`).
+ * An object larger than one part is stored as `<key>.part-0000`, `-0001`, … with a small JSON index at `<key>` that
+ * is written LAST: until every part has landed there is no index, so a half-finished upload is never mistaken for
+ * a backup. get() follows the index, checks every part's SHA-256 and the whole object's, and returns the joined
+ * bytes; callers (production-backup.yml, the rehearsal) see one object either way. Each part is retried a bounded
+ * number of times.
+ */
+export function r2Store(bucket: string, run: (args: string[]) => Buffer | string = wranglerRun, o: { partBytes?: number; attempts?: number } = {}): Store {
   if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket)) throw new Error("BACKUP_R2_BUCKET is not a valid R2 bucket name");
+  const partBytes = o.partBytes ?? R2_PART_BYTES, attempts = o.attempts ?? 3;
   const tmp = () => `${process.env.RUNNER_TEMP ?? "/tmp"}/r2-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const retry = <T>(what: string, f: () => T): T => {
+    let last: unknown;
+    for (let i = 0; i < attempts; i++) { try { return f(); } catch (e) { last = e; } }
+    throw new Error(`${what}: ${(last as Error).message} (after ${attempts} attempts)`);
+  };
+  const putOne = (key: string, body: Buffer) => {
+    const f = tmp(); writeFileSync(f, body, { mode: 0o600 });
+    try { retry(`upload ${key}`, () => run(["r2", "object", "put", `${bucket}/${key}`, "--file", f, "--content-type", "application/octet-stream", "--remote"])); }
+    finally { rmSync(f, { force: true }); }
+  };
+  const getOne = (key: string): Buffer => {
+    const f = tmp();
+    try { retry(`download ${key}`, () => run(["r2", "object", "get", `${bucket}/${key}`, "--file", f, "--remote"])); return readFileSync(f); }
+    finally { rmSync(f, { force: true }); }
+  };
+  const asIndex = (b: Buffer): ChunkIndex | null => {
+    if (b.length > 1_000_000 || b[0] !== 0x7b) return null;   // an index is small JSON; a sealed object is neither
+    try { const j = JSON.parse(b.toString("utf8")) as ChunkIndex; return j.format === CHUNKED_FORMAT && Array.isArray(j.parts) ? j : null; } catch { return null; }
+  };
   return {
     kind: "same-account-r2", describe: `r2://${bucket} (same Cloudflare account — not an off-Cloudflare copy)`,
     async put(key, body) {
       objectKey(key);
-      const f = tmp(); writeFileSync(f, body, { mode: 0o600 });
-      try { run(["r2", "object", "put", `${bucket}/${key}`, "--file", f, "--content-type", "application/octet-stream", "--remote"]); }
-      finally { try { (await import("node:fs")).rmSync(f, { force: true }); } catch { /* best effort */ } }
-      return { sha256: sha256(body) };
+      const whole = sha256(body);
+      if (body.length <= partBytes) { putOne(key, body); return { sha256: whole }; }
+      const parts: ChunkIndex["parts"] = [];
+      try {
+        for (let i = 0, off = 0; off < body.length; i++, off += partBytes) {
+          const part = body.subarray(off, Math.min(off + partBytes, body.length));
+          const pk = `${key}.part-${String(i).padStart(4, "0")}`;
+          putOne(pk, part);
+          parts.push({ key: pk, size: part.length, sha256: sha256(part) });
+        }
+      } catch (e) {
+        // No index was written, so nothing can mistake these for a backup; remove them anyway.
+        for (const p of parts) { try { run(["r2", "object", "delete", `${bucket}/${p.key}`, "--remote"]); } catch { /* best effort */ } }
+        throw e;
+      }
+      const index: ChunkIndex = { format: CHUNKED_FORMAT, size: body.length, sha256: whole, parts };
+      putOne(key, Buffer.from(JSON.stringify(index)));
+      return { sha256: whole };
     },
     async get(key) {
       objectKey(key);
-      const f = tmp();
-      try { run(["r2", "object", "get", `${bucket}/${key}`, "--file", f, "--remote"]); return readFileSync(f); }
-      finally { try { (await import("node:fs")).rmSync(f, { force: true }); } catch { /* best effort */ } }
+      const first = getOne(key);
+      const index = asIndex(first);
+      if (!index) return first;
+      const out: Buffer[] = [];
+      for (const p of index.parts) {
+        const b = getOne(p.key);
+        if (b.length !== p.size || sha256(b) !== p.sha256) throw new Error(`part ${p.key} does not match its recorded size/SHA-256`);
+        out.push(b);
+      }
+      const joined = Buffer.concat(out);
+      if (joined.length !== index.size || sha256(joined) !== index.sha256) throw new Error(`reassembled ${key} does not match its recorded SHA-256`);
+      return joined;
     },
-    async delete(key) { objectKey(key); run(["r2", "object", "delete", `${bucket}/${key}`, "--remote"]); },
+    async delete(key) {
+      objectKey(key);
+      let index: ChunkIndex | null = null;
+      try { index = asIndex(getOne(key)); } catch { /* missing: nothing to follow */ }
+      for (const p of index?.parts ?? []) run(["r2", "object", "delete", `${bucket}/${p.key}`, "--remote"]);
+      run(["r2", "object", "delete", `${bucket}/${key}`, "--remote"]);
+    },
   };
 }
 

@@ -67,8 +67,8 @@ Open PRs: **#108** FD-26 · **#109** batch 1 + FD-45 · **#110** FD-27 + suspens
 | 23 | Insurance research only; no coverage claimed | BLOCKED (insurer quotes, Founder) | MSA:257 claims "Crestmont maintains [INSURANCE]" | — | Remove claim until bound; obtain quotes |
 | 24 | Quotes valid 30 days | IMPLEMENTED (#111; CI green) | `quotes.ts` refuses validity > 30 days from the Eastern creation date; form default fixed to the same business date (was UTC) | `tests/founder-decisions-batch2.test.ts` | MSA `[QUOTE VALIDITY DAYS]` |
 | 25 | 30 days' notice of subscription price increases | IMPLEMENTED (#111; CI green) | `pricing-approvals.ts`: increases need ≥30 days at proposal; effective ≥30 days after approval; subscribers emailed at approval | `tests/founder-decisions-batch2.test.ts` | Stripe price objects for existing subscriptions are not changed by this (manual until live billing exists) |
-| 26 | Mandatory minimum plan; one business project per plan | IMPLEMENTED, TESTED (#108, CI green) | `catalog.ts` minimums; migration 0064; checkout plan picker; Executive "1 business project"; MSA B.2A; "optional plans" copy replaced (FD27) | `tests/maintenance-commitment.test.ts` (7); FD27 copy guard | Merge #108; custom-quote plan; staging journey |
-| 27 | Subscription billing starts at approved launch | IMPLEMENTED (#110, stacked on #108; CI green) | `services/maintenance-lifecycle.ts`: activation opened by both launch paths; checkout refused before launch / below committed plan; webhook completes activation (migration 0066) | `tests/maintenance-lifecycle.test.ts` | Merge #108 first; real Stripe test-mode subscription on staging (BLK-004) |
+| 26 | Mandatory minimum plan; one business project per plan | IMPLEMENTED, TESTED (#108, CI green) | `catalog.ts` minimums; migration 0084 (was 0064); checkout plan picker; Executive "1 business project"; MSA B.2A; "optional plans" copy replaced (FD27) | `tests/maintenance-commitment.test.ts` (7); FD27 copy guard | Merge #108; custom-quote plan; staging journey |
+| 27 | Subscription billing starts at approved launch | IMPLEMENTED (#110, stacked on #108; CI green) | `services/maintenance-lifecycle.ts`: activation opened by both launch paths; checkout refused before launch / below committed plan; webhook completes activation (migration 0085, was 0066) | `tests/maintenance-lifecycle.test.ts` | Merge #108 first; real Stripe test-mode subscription on staging (BLK-004) |
 | 28 | Third-party costs: disclosed, approved, invoiced separately | NOT STARTED | `project_costs` internal only | — | Approval + pass-through invoice kind |
 | 29 | Verified email before checkout/payment/invitation | ALIGNED (pre-existing) | `routes/verify-gate.ts`; quote acceptance; invitation token | `tests/commerce-closeout.test.ts` | Staging evidence |
 | 30 | MFA required for customer administrators | IMPLEMENTED (#115, stacked on #110) | `auth.ts` session MFA, `authz.ts` `can()` (unenrolled admin = member permissions), `app.ts` central gate → `/mfa/setup`; members optional; staging demo admins enrolled by `staging-access.ts`; staging `MFA_ENCRYPTION_KEY` confirmed bound | `tests/customer-admin-mfa.test.ts` (5); local browser journeys 21/21 (original branch) | Staging browser journeys run on the deploy after merge |
@@ -112,11 +112,11 @@ one deploy each), then the restore drill and rollback rehearsal (`workflow_run`)
 related PRs back to back only after each PR's CI is green; queued deploys run in order and the last one carries
 everything. Recommended order (each step re-checked against `main` before merging):
 
-1. **#108** FD-26 (no dependencies; migration 0064).
+1. **#108** FD-26 (no dependencies; migration 0084, was 0064).
 2. **#109** batch 1 + FD-45 (independent of #108; no conflicts verified with `git merge-tree`).
-3. **FD27** (stacked on #108 — rebase on `main` after #108 merges; migration 0066).
+3. **FD27** (stacked on #108 — rebase on `main` after #108 merges; migration 0085, was 0066).
 4. **B2** batch 2 (migration 0067; independent).
-5. **#112** FD-13 (migration 0068). 6. **#113** FD-16 (migration 0069). 7. **#114** dual calendars (migration 0065).
+5. **#112** FD-13 (migration 0068). 6. **#113** FD-16 (migration 0086, was 0069). 7. **#114** dual calendars (migration 0083, was 0065).
 8. **#115** FD-30 MFA — **last**; stacked on #110 (its conflict with #108's checkout tests is already resolved there);
    retarget to `main` after #110 merges. It changes how every customer admin signs in, including staging demo admins.
 

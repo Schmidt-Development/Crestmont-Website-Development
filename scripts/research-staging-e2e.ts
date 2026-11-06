@@ -238,7 +238,10 @@ async function main() {
       const k = r.status === 303 && loc.startsWith("/staff/crm/leads/") ? "lead" : r.status === 303 ? "held_or_existing" : `http_${r.status}`;
       outcomes[k] = (outcomes[k] ?? 0) + 1;
     }
-    created = await n(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent'`) - before.researchLeads;
+    // Counted through THIS run's prospects, not as a global delta: the every-minute research_promote cron promotes
+    // other prospects into the same CRM while this check runs (deploy #164: 197 of them), and a global count read
+    // their leads as this run's.
+    created = await n(`SELECT COUNT(*) AS n FROM research_prospects p JOIN leads l ON l.id = p.crm_lead_id WHERE p.id IN ${ids} AND l.origin = 'research_agent'`);
     assert(!Object.keys(outcomes).some((k) => k.startsWith("http_")), `unexpected responses ${JSON.stringify(outcomes)}`);
     const linked = await n(`SELECT COUNT(*) AS n FROM research_prospects p JOIN leads l ON l.id = p.crm_lead_id WHERE p.id IN ${ids} AND p.status = 'promoted' AND l.origin = 'research_agent' AND l.intake_decision_id IN (SELECT id FROM crm_intake_decisions) AND l.utm_source = 'crestmont-research'`);
     assert(linked === created, `${linked} promoted prospects linked to research leads with an intake decision, ${created} leads created`);
@@ -248,10 +251,15 @@ async function main() {
   });
   await check("research.no_duplicate_lead_on_repeat_promotion", async () => {
     if (!promotable.length) return "nothing promoted";
-    const leads0 = await n(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent'`);
+    // Scoped to this run's prospects for the same reason: a promotion writes one research.prospect_promoted audit
+    // row per lead it creates, and the prospect keeps the lead it was first linked to.
+    const promotions = () => n(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'research.prospect_promoted' AND subject_id IN ${ids}`);
+    const linkedLeads = () => q<{ id: string; crm_lead_id: string | null }>(`SELECT id, crm_lead_id FROM research_prospects WHERE id IN ${ids} ORDER BY id`);
+    const [a0, l0] = [await promotions(), JSON.stringify(await linkedLeads())];
     for (const p of promotable) await os.req("POST", "/staff/research/promote", { prospect_id: p.id });
-    const leads1 = await n(`SELECT COUNT(*) AS n FROM leads WHERE origin = 'research_agent'`);
-    assert(leads1 === leads0, `repeat promotion created ${leads1 - leads0} lead(s)`);
+    const [a1, l1] = [await promotions(), JSON.stringify(await linkedLeads())];
+    assert(a1 === a0, `repeat promotion created ${a1 - a0} more promotion(s)`);
+    assert(l1 === l0, "repeat promotion re-linked a prospect to a different lead");
   });
   await check("research.existing_crm_preserved", async () => {
     const other = await n(`SELECT COUNT(*) AS n FROM leads WHERE COALESCE(origin,'') <> 'research_agent'`);

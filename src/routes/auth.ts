@@ -332,7 +332,7 @@ ${ctx.user!.memberships.map((m) => html`<p class="faint">${m.organizationName} Â
 ${ctx.user!.mfaEnabled ? html`<p>${badge("active", "Enabled")} Codes from your authenticator app are required at sign-in.</p>
 <p data-testid="recovery-status">Recovery codes: ${recovery.total ? html`<strong>${recovery.remaining}</strong> of ${recovery.total} unused` : html`${badge("pending", "None")} generate a set now so a lost phone does not lock you out`}.</p>
 <form method="post" action="/account/mfa/recovery-codes" class="stack">${csrf(ctx)}${input({ name: "code", label: "Current 6-digit code from your authenticator", autocomplete: "one-time-code", inputmode: "numeric", required: true, maxlength: 7, hint: "Generating a new set replaces every earlier recovery code." })}${button(recovery.total ? "Generate new recovery codes" : "Generate recovery codes", { variant: "secondary" })}</form>
-<p><a href="/mfa/setup">Replace authenticator</a></p>` : html`<p class="muted">${ctx.user!.isStaff ? "Required for staff." : "Optional for customers, and recommended."}</p><a class="btn btn--secondary" href="/mfa/setup">Set up two-factor authentication</a>`}</section></div>
+<p><a href="/mfa/setup">Replace authenticator</a></p>` : html`<p class="muted" data-mfa-requirement>${mfaRequirementText(ctx)}</p><a class="btn btn--secondary" href="/mfa/setup">Set up two-factor authentication</a>`}</section></div>
 <section class="card" style="margin-top:1.5rem"><h2 class="card__title">Change password</h2>
 <form method="post" action="/account/password">${csrf(ctx)}<div class="grid grid-2">${input({ name: "current", label: "Current password", type: "password", autocomplete: "current-password", required: true })}${input({ name: "next", label: "New password", type: "password", autocomplete: "new-password", required: true, hint: "At least 12 characters. Other sessions will be signed out." })}</div>${button("Update password", { variant: "secondary" })}</form></section>
 <section style="margin-top:1.5rem"><div class="row row--between"><h2 style="font-size:1.5rem;margin:0">Active sessions</h2>${actionForm(ctx, "/account/sessions/revoke-others", "Sign out all other sessions", { variant: "danger", confirm: "Sign out every other session?" })}</div>
@@ -399,6 +399,15 @@ async function recordTermsAcceptance(ctx: AppContext, userId: string, organizati
 const codeField = () => input({ name: "code", label: "6-digit code", autocomplete: "one-time-code", required: true, maxlength: 20,
   hint: "Lost your authenticator? Enter one of your recovery codes instead (each works once)." });
 
+const isCustomerAdmin = (ctx: AppContext) => !!ctx.user?.memberships.some((m) => m.role === "customer_admin");
+
+/** Account page copy (FD-30): required for staff and customer administrators, optional for customer members. */
+function mfaRequirementText(ctx: AppContext): string {
+  if (ctx.user!.isStaff) return "Required for staff.";
+  if (isCustomerAdmin(ctx)) return "Required for account administrators. Set it up to pay invoices, approve work, accept proposals and manage your team.";
+  return "Optional for team members, and recommended.";
+}
+
 function mfaChallenge(ctx: AppContext, errors: string[] = [], status?: number) {
   return htmlResponse(ctx, authLayout(ctx, { title: "Verification code" }, html`<h1 style="font-size:2rem">Enter your code</h1><p class="muted">Open your authenticator app and enter the 6-digit code for Crestmont.</p>${formErrors(errors)}
 <form method="post" action="/mfa${ctx.url.search}">${csrf(ctx)}${codeField()}<div class="form-actions">${button("Verify")}</div></form>`), status ?? (errors.length ? 401 : 200));
@@ -437,7 +446,7 @@ function forgotPage(ctx: AppContext, errors: string[] = [], status?: number) {
 function mfaSetup(ctx: AppContext, secret: string, errors: string[] = []) {
   const grouped = secret.match(/.{1,4}/g)?.join(" ") ?? secret;
   return htmlResponse(ctx, authLayout(ctx, { title: "Set up two-factor authentication" }, html`<h1 style="font-size:2rem">Set up two-factor authentication</h1>
-${ctx.user!.isStaff ? alert("info", "Two-factor authentication is required for Crestmont staff accounts.") : ""}
+${ctx.user!.isStaff ? alert("info", "Two-factor authentication is required for Crestmont staff accounts.") : isCustomerAdmin(ctx) ? alert("info", "Two-factor authentication is required for account administrators, who approve work and pay invoices. Until it is on you can view your portal, but not pay, approve, accept proposals or manage your team.") : ""}
 <ol class="muted"><li>Open an authenticator app (1Password, Google Authenticator, Authy, Microsoft Authenticator).</li><li>Add an account using this setup key, or open the link on a phone that has the app.</li><li>Enter the 6-digit code it shows.</li></ol>
 <p><span class="label">Setup key</span><br><code style="font-size:1.1rem;letter-spacing:.08em;color:var(--gold-1)" data-testid="totp-secret">${grouped}</code></p>
 <p><a href="${otpauthUri(secret, ctx.user!.email)}">Open in authenticator app</a></p>${formErrors(errors)}

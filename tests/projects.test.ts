@@ -204,6 +204,9 @@ test("[PM-006] release readiness blocks deployment until all internal and custom
   assert.equal((await status(db, pid)).status, "deployment");
   const dep = await db.prepare(`SELECT url, commit_sha FROM customer_deployments WHERE project_id = ?`).bind(pid).first<{ url: string; commit_sha: string }>();
   assert.deepEqual({ ...dep }, { url: "https://acme.example", commit_sha: "abc1234" });
+  // FD-27: the launch opens the maintenance step. This fixture project has no package order with a committed plan, so the
+  // Owner is told instead of a plan being guessed.
+  assert.ok(await db.prepare(`SELECT 1 FROM audit_logs WHERE action = 'maintenance.activation_missing_plan' AND subject_id = ?`).bind(pid).first(), "launch hook ran");
   // Closure checklist: the handoff must be published before the project can be completed.
   const blocked = await pmC.post(`/staff/projects/${pid}/status`, { to: "completed" });
   assert.equal(blocked.status, 409);

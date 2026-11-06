@@ -104,6 +104,11 @@ test("[SALES-004] end-to-end: web lead → CRM → quote → proposal email → 
   const verify = await lastEmail(t.db, "morgan@harborcoffee.example");
   await cust.get(linkFrom(verify!.text_body, "/verify-email"));
   await cust.login("morgan@harborcoffee.example");
+  // FD-30: the new customer administrator must enrol two-factor authentication before accepting; nothing is created first.
+  const early = await cust.post(`${qpath}/accept`, { agree: "1" });
+  assert.match(early.headers.get("location") ?? "", /^\/mfa\/setup\?next=/);
+  assert.equal((await one<{ n: number }>(t.db, `SELECT COUNT(*) AS n FROM orders`)).n, 0);
+  await cust.enrolMfa(qpath);
   assert.match(await (await cust.get(qpath)).text(), /Accept this proposal/);
   const accept = await cust.post(`${qpath}/accept`, { agree: "1" });
   assert.equal(accept.status, 303, await accept.clone().text());
@@ -384,7 +389,7 @@ test("[PAY-001] checkout without Stripe configured explains it and creates no or
   assert.match(body, /Online payment is not configured yet/);
   assert.match(body, /href="\/quote"/);
   assert.match(body, /href="\/contact"/);
-  assert.equal((await c.post("/checkout/starter", { terms: "1" })).status, 409);
+  assert.equal((await c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" })).status, 409);
   assert.equal((await one<{ n: number }>(t.db, `SELECT COUNT(*) n FROM orders`)).n, 0);
   assert.equal((await one<{ n: number }>(t.db, `SELECT COUNT(*) n FROM invoices`)).n, 0);
   // Signed-out visitors are sent to sign in.
@@ -398,8 +403,8 @@ test("[CAT-007] package checkout ignores client-supplied prices and redirects to
   const t = await app({ payments: true });
   const cust = await createCustomer(t.db);
   const c = t.client(); await c.login(cust.email);
-  assert.equal((await c.post("/checkout/business", { price: "1" })).status, 422, "terms required");
-  const res = await c.post("/checkout/business", { terms: "1", price: "1", amount_cents: "100", total_cents: "100" });
+  assert.equal((await c.post("/checkout/business", { price: "1", maintenance_plan: "professional" })).status, 422, "terms required");
+  const res = await c.post("/checkout/business", { maintenance_plan: "professional", terms: "1", price: "1", amount_cents: "100", total_cents: "100" });
   assert.equal(res.status, 303);
   assert.match(res.headers.get("location")!, /^https:\/\/checkout\.stripe\.com\//);
   const co = t.fake.checkouts[0];
@@ -418,7 +423,7 @@ test("[CAT-007] package checkout ignores client-supplied prices and redirects to
   assert.equal((await one<{ status: string }>(t.db, `SELECT status FROM invoices WHERE id = ?`, inv.id)).status, "open");
   // Staff cannot use customer checkout.
   const owner = await staffClient(t, "owner");
-  assert.equal((await owner.c.post("/checkout/starter", { terms: "1" })).status, 403);
+  assert.equal((await owner.c.post("/checkout/starter", { terms: "1", maintenance_plan: "essential" })).status, 403);
 });
 
 test("[CAT-006] maintenance subscriptions are refused until the Founder approves entitlements; the approved path uses subscription mode", async () => {

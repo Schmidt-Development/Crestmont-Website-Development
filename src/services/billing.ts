@@ -5,7 +5,8 @@ import type { AppContext } from "../app/context.ts";
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { HttpError, securityHeaders } from "../app/http.ts";
-import { PACKAGES, MAINTENANCE_PLANS, type PackageId, type MaintenanceId, type MaintenanceDef } from "../domain/catalog.ts";
+import { PACKAGES, MAINTENANCE_PLANS, PricingError, assertPlanMeetsMinimum, isMaintenanceId, type PackageId, type MaintenanceId, type MaintenanceDef } from "../domain/catalog.ts";
+import { maintenanceCheckoutBlock } from "./maintenance-lifecycle.ts";
 import { createPackageOrder } from "./commerce.ts";
 import { audit } from "./security.ts";
 import { sendMail } from "./mailer.ts";
@@ -99,14 +100,18 @@ export async function bindSalesLinkLead(ctx: AppContext, link: SalesLinkBinding,
 }
 
 /** Standard package checkout (fixed price, 100% upfront). Premium above the floor goes through quotes. */
-export async function startPackageCheckout(ctx: AppContext, user: CheckoutUser, organizationId: string, packageId: string) {
+export async function startPackageCheckout(ctx: AppContext, user: CheckoutUser, organizationId: string, packageId: string, maintenancePlanId: string) {
   const pkg = packageById(packageId);
   if (!pkg) throw new HttpError(404, "Unknown package.");
+  // FD-26: the customer's own plan choice, at or above the package minimum, is required before any order exists.
+  let planId: MaintenanceId;
+  try { planId = assertPlanMeetsMinimum(pkg.id, maintenancePlanId); }
+  catch (e) { if (e instanceof PricingError) throw new HttpError(422, e.message); throw e; }
   if (!ctx.payments.configured) throw new HttpError(409, NOT_CONFIGURED);
   const link = await salesLinkForCheckout(ctx.db, parseCookies(ctx.req.headers.get("cookie"))[SALES_LINK_COOKIE], pkg.id, ctx.now());
   const boundLead = link ? await bindSalesLinkLead(ctx, link, user, pkg) : null;
   const leadId = boundLead ?? await ensureCheckoutLead(ctx, user, organizationId, pkg);
-  const order = await createPackageOrder(ctx.db, organizationId, pkg.id, user.id, ctx.now(), { leadId });
+  const order = await createPackageOrder(ctx.db, organizationId, pkg.id, user.id, ctx.now(), { leadId, maintenancePlanId: planId });
   if (boundLead && link) {
     // A reused open invoice may still carry the lead an earlier email-matched checkout created: the link decides.
     const prev = await ctx.db.prepare(`SELECT lead_id FROM orders WHERE id = ?`).bind(order.orderId).first<{ lead_id: string | null }>();
@@ -124,12 +129,12 @@ export async function startPackageCheckout(ctx: AppContext, user: CheckoutUser, 
     customerId: await stripeCustomerOf(ctx.db, organizationId),
     successUrl: `${ctx.baseUrl}/portal/billing?checkout=success`,
     cancelUrl: `${ctx.baseUrl}/checkout/${pkg.id}?checkout=cancelled`,
-    metadata: { organization_id: organizationId, order_id: order.orderId, invoice_id: order.invoiceId, kind: "package", lead_id: leadId, ...(boundLead && link ? { sales_link_id: link.linkId } : {}) },
+    metadata: { organization_id: organizationId, order_id: order.orderId, invoice_id: order.invoiceId, kind: "package", lead_id: leadId, maintenance_plan_id: planId, ...(boundLead && link ? { sales_link_id: link.linkId } : {}) },
     // One Stripe session per invoice per day: a repeat click on the reused invoice returns the same session (CREST-GAP-036).
     idempotencyKey: `checkout:${order.invoiceId}:${nowIso(ctx.now).slice(0, 10)}`,
   });
   await recordCheckoutSession(ctx.db, order.invoiceId, session.id);
-  await audit(ctx.db, { actorUserId: user.id, action: "checkout.started", subjectType: "invoice", subjectId: order.invoiceId, organizationId, details: { packageId: pkg.id, amountCents: order.amountCents, reusedInvoice: order.reused } });
+  await audit(ctx.db, { actorUserId: user.id, action: "checkout.started", subjectType: "invoice", subjectId: order.invoiceId, organizationId, details: { packageId: pkg.id, amountCents: order.amountCents, reusedInvoice: order.reused, maintenancePlanId: planId } });
   return { url: session.url, orderId: order.orderId, invoiceId: order.invoiceId };
 }
 
@@ -182,6 +187,8 @@ export async function startMaintenanceCheckout(ctx: AppContext, user: CheckoutUs
     throw new HttpError(409, `${plan.name} maintenance cannot be purchased yet: its entitlements are proposed and awaiting Founder approval. Contact us and we will let you know when plans open.`);
   }
   if (!ctx.payments.configured) throw new HttpError(409, NOT_CONFIGURED);
+  // FD-26/FD-27: a package customer subscribes only after launch, and only to the committed plan or a higher one.
+  if (isMaintenanceId(plan.id)) { const block = await maintenanceCheckoutBlock(ctx.db, organizationId, plan.id); if (block) throw new HttpError(409, block); }
   const existing = await ctx.db.prepare(`SELECT id FROM subscriptions WHERE organization_id = ? AND product_id = ? AND status IN ('active','trialing','past_due')`).bind(organizationId, plan.id).first();
   if (existing) throw new HttpError(409, `You already have an active ${plan.name} plan. Manage it from Billing.`);
   const monthly = pricedItem("maintenance", plan.id) ? (await effectivePrice(ctx.db, "maintenance", plan.id, ctx.now())).cents : plan.monthlyCents; // CAT-007 effective price

@@ -2,6 +2,7 @@
 // customer organizations that each own every customer resource type, every staff role, and the
 // staff-side records the staff routes act on. Built through the real routes and services so every
 // row is valid by construction. Every record created here is TEST DATA.
+import { openMaintenanceActivation } from "../../src/services/maintenance-lifecycle.ts";
 import assert from "node:assert/strict";
 import { createTestApp, createStaff, createCustomer, MemoryStorage, TEST_PASSWORD, type TestClient } from "./app.ts";
 import { hashPassword } from "../../src/lib/auth-crypto.ts";
@@ -93,6 +94,9 @@ async function buildTenant(w: Omit<World, "a" | "b">, key: "a" | "b"): Promise<T
   const pid = await provisionProject(db, paid.orderId);
   await db.prepare(`UPDATE projects SET name = ? WHERE id = ?`).bind(`${marker} Website`, pid).run();
   ids.project = pid;
+  // Fixture shortcut (FD-27): maintenance billing starts at the approved launch, so the launch is recorded through
+  // the service the real deployment path calls; the pre-launch refusal is tested in tests/maintenance-lifecycle.test.ts.
+  await openMaintenanceActivation(db, null, pid, "deployment_recorded");
   ids.payment = (await one<{ id: string }>(db, `SELECT id FROM payments WHERE invoice_id = ?`, paid.invoiceId)).id;
   ids.paidInvoice = paid.invoiceId;
   ids.invoice = (await createPackageOrder(db, cu.organizationId, "starter", cu.id)).invoiceId;
@@ -321,7 +325,7 @@ async function buildStaffRecords(w: World) {
   ids.legalKind = "terms_of_service";
   ids.legalVersion = (await one<{ version: string }>(db, `SELECT version FROM agreements WHERE kind = 'terms_of_service' ORDER BY effective_at LIMIT 1`)).version;
   ids.package = "starter";
-  ids.plan = "essential";
+  ids.plan = "professional";   // the Business package's committed minimum (FD-26)
   ids.reportFile = "transactions.csv";
   ids.testimonialAction = "publish";
 }

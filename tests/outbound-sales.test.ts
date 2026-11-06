@@ -678,7 +678,7 @@ test("[PAY-001] [CRM-005] purchase link binds the order to the sales lead even w
   assert.equal(buy.status, 303);
   assert.match(buy.headers.get("set-cookie") ?? "", /crestmont_sales_link=[0-9a-f]{64}; Path=\/; Max-Age=\d+; HttpOnly; SameSite=Lax/);
   await c.login(buyer.email);
-  const res = await c.post("/checkout/business", { terms: "1" });
+  const res = await c.post("/checkout/business", { maintenance_plan: "professional", terms: "1" });
   assert.equal(res.status, 303, await res.text());
   const order = await one<{ id: string; lead_id: string }>(t.db, `SELECT id, lead_id FROM orders WHERE organization_id = ?`, buyer.organizationId);
   assert.equal(order.lead_id, L.leadId, "the order belongs to the lead the link was issued for");
@@ -694,7 +694,7 @@ test("[PAY-001] [CRM-005] purchase link binds the order to the sales lead even w
   // Checkout creation is not payment.
   assert.equal((await t.post(FN, fn(L.callId, L.salesId, "check_payment_status", {}))).json.payment_status, "checkout_started_not_paid");
   // Repeat click: same open invoice, no second order.
-  assert.equal((await c.post("/checkout/business", { terms: "1" })).status, 303);
+  assert.equal((await c.post("/checkout/business", { maintenance_plan: "professional", terms: "1" })).status, 303);
   assert.equal(await count(t.db, `SELECT COUNT(*) AS n FROM orders WHERE organization_id = ? AND status = 'pending_payment'`, buyer.organizationId), 1);
   // Stripe confirms; the same webhook delivered twice changes nothing more.
   assert.equal((await payViaStripe(t, order.id)).status, 200);
@@ -719,13 +719,13 @@ test("[PAY-001] a tampered, expired or other-package link never re-attributes a 
   const c = t.client();
   await c.get(L.url);
   await c.login(buyer.email);
-  assert.equal((await c.post("/checkout/business", { terms: "1" })).status, 303, "link is for Starter, purchase is Business");
+  assert.equal((await c.post("/checkout/business", { maintenance_plan: "professional", terms: "1" })).status, 303, "link is for Starter, purchase is Business");
   assert.notEqual((await one<{ lead_id: string }>(t.db, `SELECT lead_id FROM orders WHERE organization_id = ?`, buyer.organizationId)).lead_id, L.leadId);
   const c2 = t.client();
   c2.cookies.set("crestmont_sales_link", "f".repeat(64));
   const b2 = await createCustomer(t.db, "third@else.example", "Third Co");
   await c2.login(b2.email);
-  await c2.post("/checkout/starter", { terms: "1" });
+  await c2.post("/checkout/starter", { maintenance_plan: "essential", terms: "1" });
   assert.notEqual((await one<{ lead_id: string }>(t.db, `SELECT lead_id FROM orders WHERE organization_id = ?`, b2.organizationId)).lead_id, L.leadId, "unknown token ignored");
 });
 

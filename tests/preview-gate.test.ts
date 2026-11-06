@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createTestApp, createStaff, TEST_PASSWORD } from "./support/app.ts";
+import { createTestApp, createStaff, enrolTotp, TEST_PASSWORD } from "./support/app.ts";
 import { handle } from "../src/app/app.ts";
 
 const req = (env: object, path: string, init: RequestInit = {}) => handle(new Request("https://staging.example" + path, init), env as never);
@@ -123,6 +123,13 @@ test("[SEC-003] public staging: forms are rate-limited even with always-pass Tur
   assert.equal(reg.status, 200);
   assert.equal((await c.post("/login", { email: "stranger@example.org", password: TEST_PASSWORD, "cf-turnstile-response": "x" })).headers.get("location"), "/portal");
   const PDF = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x0a]);
+  // FD-30: a self-registered customer administrator is first sent to two-factor enrolment; nothing is stored.
+  const pre = await c.post("/portal/files", { file: new File([PDF], "x.pdf") });
+  assert.match(pre.headers.get("location") ?? "", /^\/mfa\/setup\?next=/);
+  // With two-factor authentication in place, the email-verification gate still applies.
+  const stranger = (await app.db.prepare(`SELECT id FROM users WHERE email = ?`).bind("stranger@example.org").first<{ id: string }>())!;
+  await enrolTotp(app.db, stranger.id);
+  await c.login("stranger@example.org");
   const up = await c.post("/portal/files", { file: new File([PDF], "x.pdf") });
   assert.equal(up.status, 403, "unverified account cannot upload on staging");
   assert.match(await up.text(), /Verify your email address/);

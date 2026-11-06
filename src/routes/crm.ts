@@ -5,13 +5,13 @@ import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, safeUrl, formatCents, formatDate, formatDateTime, label, type SafeHtml } from "../lib/html.ts";
 import { HttpError, download, htmlResponse, redirect, str } from "../app/http.ts";
-import { requireStaff, requireCustomerOrg } from "../app/app.ts";
+import { requireStaff, requireCustomerOrg, MFA_SETUP_PROMPT } from "../app/app.ts";
 import { appLayout, publicLayout } from "../ui/layout.ts";
 import { staffNav } from "./nav.ts";
 import { csrf, button, linkButton, actionForm, input, textarea, select, checkbox, formErrors, alert, badge, table, emptyState, kpi, pagination, pageParam, dl, tabs, pageHead, barChart, nl2br, dateRange, drawerAttrs, drawerBody } from "../ui/components.ts";
-import { can } from "../domain/authz.ts";
+import { can, customerAdminNeedsMfa } from "../domain/authz.ts";
 import { LEAD_STAGES, LEAD_TRANSITIONS, type LeadStage } from "../domain/crm.ts";
-import { PACKAGES, type PackageId, type QuoteLine } from "../domain/catalog.ts";
+import { PACKAGES, MAINTENANCE_PLANS, MINIMUM_PLAN_FOR_PACKAGE, ONE_BUSINESS_PROJECT_SCOPE, eligiblePlansFor, assertPlanMeetsMinimum, PricingError, type PackageId, type QuoteLine } from "../domain/catalog.ts";
 import { changeLeadStage } from "../services/leads.ts";
 import * as crm from "../services/crm.ts";
 import * as quotes from "../services/quotes.ts";
@@ -687,6 +687,7 @@ async function proposalPage(ctx: AppContext, token: string, errors: string[] = [
 <div class="row">${linkButton("Sign in", `/login?next=${encodeURIComponent(self)}`, "primary")}${linkButton("Create account", "/register", "secondary")}</div><p class="faint">After creating an account, confirm your email, sign in, and return to this link.</p></div>`;
   else if (!signedInMatch) acceptBlock = alert("warn", html`You are signed in as ${ctx.user.email}, but this proposal was sent to a different address. <form method="post" action="/logout" style="display:inline">${csrf(ctx)}<button class="btn btn--ghost btn--sm" type="submit">Sign out</button></form> and sign in with the address the proposal was sent to.`);
   else if (!ctx.user.emailVerified) acceptBlock = alert("warn", "Confirm your email address first — check your inbox for the confirmation link — then return to this page.");
+  else if (customerAdminNeedsMfa(ctx.actor)) acceptBlock = html`<div class="card card--gold stack" data-mfa-required><h2 style="font-size:1.3rem">Accept this proposal</h2>${alert("warn", MFA_SETUP_PROMPT)}<div class="row">${linkButton("Set up two-factor authentication", `/mfa/setup?next=${encodeURIComponent(self)}`, "primary")}</div><p class="faint">You will come back to this page to accept once it is on.</p></div>`; // FD-30
   else if (quotes.isPackageQuote(p.version)) acceptBlock = html`<form method="post" action="${self}/accept" class="card card--gold stack">${csrf(ctx)}<h2 style="font-size:1.3rem">Accept this proposal</h2>
 ${checkbox("agree", "I accept this proposal, its scope and payment schedule, the Development Agreement, the Refund Policy, the Data Processing Addendum and the Terms of Service.", { required: true })}
 <p class="faint"><a href="/legal/development-agreement">Development agreement</a> · <a href="/legal/refunds">Refund policy</a> · <a href="/legal/data-processing">Data processing addendum</a> · <a href="/legal/terms">Terms</a></p>
@@ -719,7 +720,7 @@ async function acceptProposalRoute(ctx: AppContext, token: string) {
 }
 
 // ── package checkout ──
-async function checkoutPage(ctx: AppContext, packageId: string, errors: string[] = [], status = 200) {
+async function checkoutPage(ctx: AppContext, packageId: string, errors: string[] = [], status = 200, selectedPlan: string | null = null) {
   const pkg = packageById(packageId);
   if (!pkg) throw new HttpError(404, "That package does not exist.");
   requireCustomerOrg(ctx);
@@ -729,6 +730,14 @@ async function checkoutPage(ctx: AppContext, packageId: string, errors: string[]
   // LEGAL-005: configured sales tax is shown per jurisdiction and included in the amount charged.
   const tax = computeTax([{ description: `${pkg.name} website package`, amountCents: priceCents, productKey: pkg.id }], await loadTaxConfig(ctx.db));
   const dueCents = tax.configured ? tax.totalCents : priceCents;
+  // FD-26/FD-27: the customer chooses a hosting and maintenance plan at or above the package minimum. Nothing is billed
+  // for it today: the monthly subscription starts when the customer approves and launches the completed website.
+  const minPlan = MINIMUM_PLAN_FOR_PACKAGE[pkg.id];
+  const planChoices = await Promise.all(eligiblePlansFor(pkg.id).map(async (id) => ({ id, name: MAINTENANCE_PLANS[id].name, monthlyCents: (await effectivePrice(ctx.db, "maintenance", id, ctx.now())).cents })));
+  const planFieldset = html`<fieldset class="stack" data-testid="checkout-maintenance-plan"><legend><strong>Hosting and maintenance plan (required)</strong></legend>
+<p class="faint">The ${pkg.name} package requires the ${MAINTENANCE_PLANS[minPlan].name} plan or higher. ${ONE_BUSINESS_PROJECT_SCOPE}</p>
+${planChoices.map((p) => html`<label class="row"><input type="radio" name="maintenance_plan" value="${p.id}" required${selectedPlan === p.id ? html` checked` : ""}> ${p.name} — ${formatCents(p.monthlyCents)}/month${p.id === minPlan ? html` <small>(minimum)</small>` : ""}</label>`)}
+<p class="faint" data-testid="checkout-maintenance-billing">You are not charged for the plan today. Monthly billing starts only when you approve and launch your completed website. <a href="/hosting-maintenance">Compare plans</a></p></fieldset>`;
   return htmlResponse(ctx, publicLayout(ctx, { title: `Checkout — ${pkg.name}`, noindex: true }, html`<section class="section"><div class="container stack" style="max-width:760px">
 <div class="eyebrow">Checkout</div><h1>${pkg.name} website package</h1>
 ${cancelled ? alert("info", "Checkout was cancelled. Nothing was charged.") : ""}${formErrors(errors)}
@@ -738,6 +747,7 @@ ${tax.configured ? html`<div data-testid="checkout-tax">${tax.byJurisdiction.map
 <ul class="checklist">${pkg.includes.map((i) => html`<li>${i}</li>`)}</ul>
 ${pkg.priceIsFloor ? html`<p class="faint">Need more than the standard Premium scope? <a href="/quote">Request a custom quote</a> — work above the starting price is quoted separately.</p>` : ""}</div>
 ${configured ? html`<form method="post" action="/checkout/${pkg.id}" class="card stack">${csrf(ctx)}
+${planFieldset}
 ${checkbox("terms", "I agree to the Development Agreement, Terms of Service, Refund Policy and Data Processing Addendum.", { required: true })}
 <p class="faint"><a href="/legal/development-agreement">Development agreement</a> · <a href="/legal/terms">Terms</a> · <a href="/legal/refunds">Refund policy</a> · <a href="/legal/data-processing">Data processing addendum</a></p>
 <p class="faint">You will be taken to Stripe's secure checkout. Your payment is confirmed only when Stripe notifies us.</p>
@@ -756,9 +766,12 @@ async function checkoutPost(ctx: AppContext, packageId: string) {
   if (unverified) return unverified;
   if (!ctx.payments.configured) return checkoutPage(ctx, packageId, [`${NOT_CONFIGURED} No order was created.`], 409);
   const f = await ctx.form();
-  if (!f.get("terms")) return checkoutPage(ctx, packageId, ["You must accept the agreements to continue."], 422);
+  const planChoice = String(f.get("maintenance_plan") ?? "");
+  try { assertPlanMeetsMinimum(pkg.id, planChoice); }
+  catch (e) { if (e instanceof PricingError) return checkoutPage(ctx, packageId, [e.message], 422, null); throw e; }
+  if (!f.get("terms")) return checkoutPage(ctx, packageId, ["You must accept the agreements to continue."], 422, planChoice);
   // Any client-supplied price/amount fields are ignored: the order total comes from PACKAGES.
-  const res = await startPackageCheckout(ctx, { id: ctx.user!.id, email: ctx.user!.email, name: ctx.user!.displayName }, org.organizationId, pkg.id);
+  const res = await startPackageCheckout(ctx, { id: ctx.user!.id, email: ctx.user!.email, name: ctx.user!.displayName }, org.organizationId, pkg.id, planChoice);
   await recordAcceptance(ctx, { userId: ctx.user!.id, organizationId: org.organizationId, context: "package_checkout", contextId: res.orderId });
   return stripeRedirect(ctx, res.url);
 }

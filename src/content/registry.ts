@@ -64,7 +64,7 @@ const PROCESS_DEFAULT = block([
   ["Your review and revisions", "You review the site and request changes. Each revision round is counted against your package."],
   ["Final approval", "You formally approve the finished site. Required payments are verified."],
   ["Launch and handoff", "We deploy to your domain and hand over access, documentation, ownership details and training materials for your final acceptance."],
-  ["Ongoing care (optional)", "Choose a monthly maintenance plan, or take the site elsewhere. Your domain remains yours."],
+  ["Ongoing care", "Your package includes a required minimum maintenance plan, billed monthly from approved launch. Your domain remains yours."],
 ]);
 
 const pageSeo: [string, string, string, string][] = [
