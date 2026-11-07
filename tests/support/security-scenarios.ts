@@ -492,6 +492,12 @@ export function auditScenarios(w: World): Scenario[] {
       key: "POST /staff/builds/frontends/:projectId/artifact",
       fields: () => ({ artifact: zip("matrix-frontend.zip") }),
     },
+    // The way in with nothing but a ZIP: it creates a test project and receives the artifact in one step, so the
+    // audited action is the artifact's. Nothing is seeded for it -- having nothing is the case it exists for.
+    {
+      key: "POST /staff/builds/frontends/new",
+      fields: () => ({ target: "new", name: "Security matrix test project", artifact: zip("matrix-first-frontend.zip") }),
+    },
     {
       key: "POST /staff/builds/frontends/:projectId/baselines/:baselineId/approve",
       fields: () => ({ note: "matrix approval" }),
