@@ -16,6 +16,7 @@ import * as DL from "../src/services/design-locked.ts";
 import * as MS from "../src/services/malware-scan.ts";
 import { newId, nowIso } from "../src/lib/db.ts";
 import { sha256Hex } from "../src/lib/crypto.ts";
+import { makeZip } from "../runner/test/fixtures/zip-writer.ts";
 import type { Env } from "../src/app/context.ts";
 
 type Db = Env["DB"];
@@ -908,4 +909,172 @@ test("[DLR-05] the project page is enough to run an artifact through: the invent
     const strayed = await client.post(`/staff/builds/frontends/${otherProject}/artifacts/${artifact.id}/reject`, { reason: "x" });
     assert.equal(strayed.status, 404, "an artifact belonging to another project is not reachable through this one");
   } finally { await t.close(); }
+});
+
+// ── the way in ────────────────────────────────────────────────────────────────────────────────────────────────
+//
+// The upload endpoint has always taken a project id, and the only screen that offered one was a project's own
+// page -- which does not exist until an artifact has been uploaded against it. So a first artifact could not be
+// uploaded at all without making database rows by hand or going through a customer purchase. These cover the
+// screen that fixes that, and every refusal it has to keep.
+
+/**
+ * A real ZIP with an entry in it.
+ *
+ * An end-of-central-directory record on its own is a valid empty ZIP and the platform refuses it: `validateUpload`
+ * requires a local file header (PK), which an empty archive does not have. That refusal is right -- a
+ * frontend with no files in it is not a frontend -- so the fixture is a ZIP that actually contains something.
+ */
+function zipFile(name = "frontend.zip"): File {
+  const zip = makeZip([{ path: "index.html", body: Buffer.from("<!doctype html><title>t</title>") }]);
+  // Copied into a plain Uint8Array: a Node Buffer may be backed by a SharedArrayBuffer, which BlobPart is not.
+  return new File([new Uint8Array(zip)], name, { type: "application/zip" });
+}
+
+test("[DLU-01] the dashboard offers the upload, and only to someone who may configure builds", async () => {
+  const t = await createTestApp();
+  try {
+    const owner = await createStaff(t.db, "owner");
+    const asOwner = await t.client().login(owner.email, TEST_PASSWORD, owner.secret);
+
+    const page = await asOwner.get("/staff/builds/frontends");
+    assert.equal(page.status, 200);
+    const text = await page.text();
+    assert.match(text, /Upload frontend artifact/, "the control is on the dashboard, not buried inside a project");
+    assert.match(text, /\/staff\/builds\/frontends\/new/, "and it points at the upload screen");
+    assert.match(text, /nothing needs to be set up first/i, "an empty dashboard is a starting point, not a dead end");
+
+    const viewer = await createStaff(t.db, "support");
+    const asViewer = await t.client().login(viewer.email, TEST_PASSWORD, viewer.secret);
+    const seen = await asViewer.get("/staff/builds/frontends");
+    if (seen.status === 200) {
+      assert.ok(!/Upload frontend artifact/.test(await seen.text()), "a reader is not offered the upload");
+    }
+  } finally { t.close(); }
+});
+
+test("[DLU-02] a first artifact goes up with no project, no order and nothing seeded by hand", async () => {
+  const t = await createTestApp();
+  try {
+    const owner = await createStaff(t.db, "owner");
+    const asOwner = await t.client().login(owner.email, TEST_PASSWORD, owner.secret);
+
+    const form = await asOwner.get("/staff/builds/frontends/new");
+    assert.equal(form.status, 200);
+    const formText = await form.text();
+    assert.match(formText, /name="artifact"/, "there is a file field");
+    assert.match(formText, /enctype="multipart\/form-data"/);
+    assert.match(formText, /scanned/i, "and it says the ZIP is scanned before anything in it is read");
+
+    const res = await asOwner.post("/staff/builds/frontends/new", {
+      target: "new", name: "Northgate Dental test", artifact: zipFile(),
+    });
+    assert.equal(res.status, 303, (await res.text()).slice(0, 300));
+
+    const location = res.headers.get("location") ?? "";
+    const projectId = location.split("/").pop() ?? "";
+    assert.match(projectId, /^prj_/, `redirected to ${location}`);
+
+    const project = await t.db.prepare(
+      `SELECT p.name, p.order_id, org.kind, org.name AS orgName
+         FROM projects p JOIN organizations org ON org.id = p.organization_id WHERE p.id = ?`,
+    ).bind(projectId).first<{ name: string; order_id: string | null; kind: string; orgName: string }>();
+    assert.equal(project?.name, "Northgate Dental test");
+    assert.equal(project?.order_id, null, "a test project has no order behind it, which is the point");
+    assert.equal(project?.kind, "internal", "and belongs to an internal organization");
+    assert.match(project?.orgName ?? "", /Artifact Builder tests/, "named so it is never mistaken for paid work");
+
+    const artifact = await DL.latestArtifact(t.db, projectId);
+    assert.ok(artifact, "the artifact was recorded against the new project");
+    assert.equal(artifact?.scan_status, "pending", "and it is not clean until a scanner says so");
+    const file = await t.db.prepare(`SELECT scan_status FROM files WHERE id = ?`).bind(artifact?.file_id)
+      .first<{ scan_status: string }>();
+    assert.equal(file?.scan_status, "pending", "the platform's own upload path set that, not this route");
+
+    const dash = await asOwner.get("/staff/builds/frontends");
+    assert.match(await dash.text(), /Northgate Dental test/, "and the project is on the dashboard now");
+
+    const created = await t.db.prepare(
+      `SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'project.created' AND subject_id = ?`,
+    ).bind(projectId).first<{ n: number }>();
+    assert.equal(created?.n, 1, "creating it is audited like any other creation");
+  } finally { t.close(); }
+});
+
+test("[DLU-03] a refused file leaves nothing behind", async () => {
+  const t = await createTestApp();
+  try {
+    const owner = await createStaff(t.db, "owner");
+    const asOwner = await t.client().login(owner.email, TEST_PASSWORD, owner.secret);
+    const before = (await t.db.prepare(`SELECT COUNT(*) AS n FROM projects`).first<{ n: number }>())?.n ?? 0;
+
+    const wrongName = await asOwner.post("/staff/builds/frontends/new", {
+      target: "new", name: "Should not exist",
+      artifact: new File([new TextEncoder().encode("not a zip at all")], "frontend.txt", { type: "text/plain" }),
+    });
+    assert.equal(wrongName.status, 422, (await wrongName.text()).slice(0, 200));
+
+    // Bytes that are not a ZIP under a name that says they are: storeUpload is the authority and still refuses,
+    // which is the case that needs the project to be taken back.
+    const lying = await asOwner.post("/staff/builds/frontends/new", {
+      target: "new", name: "Should not exist either",
+      artifact: new File([new TextEncoder().encode("not a zip at all")], "frontend.zip", { type: "application/zip" }),
+    });
+    assert.equal(lying.status, 422, (await lying.text()).slice(0, 200));
+
+    const after = (await t.db.prepare(`SELECT COUNT(*) AS n FROM projects`).first<{ n: number }>())?.n ?? 0;
+    assert.equal(after, before, "a wrong file does not leave a project behind on every attempt");
+    const named = await t.db.prepare(`SELECT COUNT(*) AS n FROM projects WHERE name LIKE 'Should not exist%'`)
+      .first<{ n: number }>();
+    assert.equal(named?.n, 0);
+  } finally { t.close(); }
+});
+
+test("[DLU-04] a customer and a staff reader cannot upload", async () => {
+  const t = await createTestApp();
+  try {
+    const cust = await createCustomer(t.db);
+    const reader = await createStaff(t.db, "support");
+    const asCustomer = await t.client().login(cust.email, TEST_PASSWORD, cust.secret);
+    const asReader = await t.client().login(reader.email, TEST_PASSWORD, reader.secret);
+
+    for (const [who, c] of [["customer", asCustomer], ["reader", asReader]] as const) {
+      const got = await c.get("/staff/builds/frontends/new");
+      assert.ok(got.status >= 300, `${who}: GET answered ${got.status}`);
+      const posted = await c.post("/staff/builds/frontends/new", { target: "new", name: "Not allowed", artifact: zipFile() });
+      assert.ok(posted.status >= 300 && posted.status !== 303, `${who}: POST answered ${posted.status}`);
+    }
+
+    const n = (await t.db.prepare(`SELECT COUNT(*) AS n FROM projects WHERE name = 'Not allowed'`).first<{ n: number }>())?.n ?? 0;
+    assert.equal(n, 0, "and nothing was created by trying");
+  } finally { t.close(); }
+});
+
+test("[DLU-05] an existing project can be chosen, and a quarantined one is not offered", async () => {
+  const t = await createTestApp();
+  try {
+    const owner = await createStaff(t.db, "owner");
+    const asOwner = await t.client().login(owner.email, TEST_PASSWORD, owner.secret);
+    const cust = await createCustomer(t.db);
+    const ok = await project(t.db, cust.organizationId, "Riverbend Library");
+    const bad = await project(t.db, cust.organizationId, "Quarantined project");
+    await t.db.prepare(`UPDATE projects SET frontend_state = 'artifact_quarantined' WHERE id = ?`).bind(bad).run();
+
+    const names = (await DL.uploadTargets(t.db, { limit: 50 })).map((x) => x.projectName);
+    assert.ok(names.includes("Riverbend Library"), names.join(", "));
+    assert.ok(!names.includes("Quarantined project"), "a quarantined artifact is dealt with, not piled on");
+
+    const page = await asOwner.get("/staff/builds/frontends/new");
+    assert.match(await page.text(), /Riverbend Library/, "the eligible project is offered on the screen");
+
+    const res = await asOwner.post("/staff/builds/frontends/new", { target: "existing", projectId: ok, artifact: zipFile() });
+    assert.equal(res.status, 303, (await res.text()).slice(0, 200));
+    assert.equal(res.headers.get("location"), `/staff/builds/frontends/${ok}`);
+    assert.ok(await DL.latestArtifact(t.db, ok), "the artifact landed on the project that was chosen");
+
+    const unknown = await asOwner.post("/staff/builds/frontends/new", {
+      target: "existing", projectId: "prj_does_not_exist", artifact: zipFile(),
+    });
+    assert.equal(unknown.status, 422);
+  } finally { t.close(); }
 });

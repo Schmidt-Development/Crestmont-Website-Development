@@ -7,7 +7,7 @@
 
 import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
-import { html, formatDateTime, type SafeHtml } from "../lib/html.ts";
+import { html, join, formatDateTime, type SafeHtml } from "../lib/html.ts";
 import { HttpError, jsonResponse, redirect, str } from "../app/http.ts";
 import { requireStaff } from "../app/app.ts";
 import { can } from "../domain/authz.ts";
@@ -20,6 +20,33 @@ import { audit } from "../services/security.ts";
 import { alert, badge, button, csrf, emptyState, kpi, pageHead, table, linkButton } from "../ui/components.ts";
 
 const BASE = "/staff/builds/frontends";
+
+/**
+ * Receive an artifact for a project. Both entry points go through this, so neither can lose a check.
+ *
+ * `storeUpload` is the platform's own upload path: it writes the `files` row, computes the sha256 and sets
+ * scan_status 'pending'. Nothing in the ZIP is read until a scanner moves that to 'clean'. It refuses anything
+ * that is not an allowed type, is empty, is oversized, or whose bytes do not match its extension -- a refusal to
+ * show the person, so it is answered 422 with the reason rather than becoming a 500.
+ */
+async function receiveArtifact(ctx: AppContext, o: { projectId: string; organizationId: string; file: File }): Promise<void> {
+  let stored;
+  try {
+    stored = await storeUpload(ctx, {
+      organizationId: o.organizationId, projectId: o.projectId, file: o.file,
+      uploadedBy: actorId(ctx), folder: "frontend-artifacts",
+    });
+  } catch (e) {
+    if (e instanceof UploadError) throw new HttpError(422, e.message);
+    throw e;
+  }
+  await DL.recordArtifact(ctx.db, {
+    projectId: o.projectId, organizationId: o.organizationId, source: "upload",
+    fileId: stored.id, sha256: stored.sha256, sizeBytes: stored.size_bytes,
+    uploadedBy: actorId(ctx), scanStatus: stored.scan_status,
+  });
+}
+
 
 /** The colour a state reads as. Failure states are warnings, not errors: a person has to act, nothing is broken. */
 const STATE_TONE: Record<string, string> = {
@@ -64,16 +91,20 @@ export function register(r: Router): void {
     const byState = new Map<string, number>();
     for (const x of rows) byState.set(x.state ?? "none", (byState.get(x.state ?? "none") ?? 0) + 1);
 
-    const body = html`${pageHead("AI → Approved frontends", linkButton("AI builds", "/staff/builds", "ghost", "sm"),
+    // The upload control belongs here, where someone arrives with a ZIP and nothing else. It was reachable only
+    // from a project's own page, which does not exist until an artifact has been uploaded against it.
+    const mayUpload = !!ctx.actor && can(ctx.actor, "builds.configure");
+    const body = html`${pageHead("AI → Approved frontends",
+      html`${mayUpload ? linkButton("Upload frontend artifact", `${BASE}/new`, "primary", "sm") : ""}${linkButton("AI builds", "/staff/builds", "ghost", "sm")}`,
       "The Founder supplies the design. The AI builds the backend and must leave the design alone.")}
-${rows.length === 0 ? alert("info", html`No project is on the design-locked workflow yet. A project joins it when an approved frontend artifact is uploaded against it.`) : ""}
+${rows.length === 0 ? alert("info", html`No project is on the design-locked workflow yet. ${mayUpload ? html`Start by uploading a frontend ZIP: <a href="${BASE}/new">Upload frontend artifact</a>. A test project is created for it, so nothing needs to be set up first.` : html`A project joins it when an approved frontend artifact is uploaded against it.`}`) : ""}
 <div class="kpis">
   ${kpi("Design locked", rows.filter((x) => x.designLocked).length, "approved and frozen")}
   ${kpi("Awaiting approval", byState.get("awaiting_approval") ?? 0, "a person must look")}
   ${kpi("Building backend", (byState.get("building_backend") ?? 0) + (byState.get("integrating") ?? 0))}
   ${kpi("Needs attention", (byState.get("artifact_rejected") ?? 0) + (byState.get("artifact_quarantined") ?? 0) + (byState.get("blocked") ?? 0))}
 </div>
-${rows.length === 0 ? emptyState("Nothing yet", "No project is on the design-locked workflow.") : table(
+${rows.length === 0 ? emptyState("Nothing yet", "No project is on the design-locked workflow.", mayUpload ? linkButton("Upload frontend artifact", `${BASE}/new`, "primary") : undefined) : table(
   rows,
   [
     { header: "Project", cell: (x: DL.DesignLockedRow) => html`<a href="${BASE}/${x.projectId}">${x.projectName}</a>` },
@@ -87,6 +118,102 @@ ${rows.length === 0 ? emptyState("Nothing yet", "No project is on the design-loc
   ],
 )}`;
     return staffPage(ctx, "Approved frontends", body);
+  });
+
+
+  // ── start here ────────────────────────────────────────────────────────────────────────────────────────────
+  //
+  // The upload endpoint has always taken a project id, and the only screen offering one was a project's own page.
+  // With no design-locked project yet there was nowhere to begin: a first artifact could not be uploaded without
+  // making database rows by hand or going through a customer purchase. This is that screen.
+  //
+  // Registered BEFORE `/:projectId`, or the router reads "new" as a project id.
+  r.get(`${BASE}/new`, async (ctx) => {
+    requireStaff(ctx, "builds.configure");
+    const targets = await DL.uploadTargets(ctx.db, { limit: 50 });
+    const limitMb = String(Math.round(UPLOAD_LIMIT_BYTES / 1024 / 1024));
+
+    const body = html`${pageHead("Upload a frontend artifact", linkButton("Back to artifact builder", BASE, "ghost", "sm"),
+      "A ZIP of the finished frontend. It is scanned before anything in it is read, then measured in a sandbox. It does not become the approved design until you approve it.")}
+<section class="card">
+  <form method="post" action="${BASE}/new" enctype="multipart/form-data">
+    ${csrf(ctx)}
+
+    <h2>1. Which project</h2>
+    ${targets.length === 0
+      ? html`<p class="faint">No project exists yet, so this will create a test project for it. Nothing needs to be set up first.</p>`
+      : html`<p><label><input type="radio" name="target" value="new" checked> Create a new test project</label></p>
+    <p><label><input type="radio" name="target" value="existing"> Use an existing project</label>
+      <select name="projectId" aria-label="Existing project">
+        ${join(targets.map((t) => html`<option value="${t.projectId}">${t.projectName} — ${t.organizationName}${t.designLocked ? " (design-locked)" : ""}</option>`))}
+      </select>
+    </p>`}
+    <p><label>Name for the test project<br><input type="text" name="name" value="Artifact test" maxlength="120" required></label></p>
+
+    <h2>2. The ZIP</h2>
+    <p class="faint">Up to ${limitMb} MB. A ZIP of the complete frontend project, as it was built.</p>
+    <input type="file" name="artifact" accept=".zip,application/zip" required>
+
+    <p style="margin-top:1rem">${button("Upload and scan", { variant: "primary" })}</p>
+  </form>
+</section>
+<section class="card">
+  <h2>What happens next</h2>
+  <ol class="faint">
+    <li>The ZIP is scanned for malware. Nothing inside it is read until a scanner says it is clean.</li>
+    <li>It is extracted and measured in a sandbox with no network: pages, interactions, and the design signature at three viewports.</li>
+    <li>You review what was measured and approve the design baseline. That is the step that locks the design.</li>
+    <li>You start backend generation. The AI builds the backend around your design and may not change it.</li>
+  </ol>
+</section>`;
+    return staffPage(ctx, "Upload a frontend artifact", body);
+  });
+
+  r.post(`${BASE}/new`, async (ctx) => {
+    requireStaff(ctx, "builds.configure");
+    const form = await ctx.form();
+    const file = form.get("artifact");
+    if (!(file instanceof File) || file.size === 0) throw new HttpError(422, "Choose a ZIP of the frontend project.");
+
+    // Refuse the obvious before anything is created. Without this a wrong file leaves a project behind on every
+    // attempt, and a dashboard fills up with the evidence of someone choosing the wrong file twice.
+    if (file.size > UPLOAD_LIMIT_BYTES) {
+      throw new HttpError(422, `That file is ${Math.round(file.size / 1024 / 1024)} MB. The limit is ${Math.round(UPLOAD_LIMIT_BYTES / 1024 / 1024)} MB.`);
+    }
+    if (!/\.zip$/i.test(file.name)) throw new HttpError(422, "Choose a .zip of the frontend project.");
+
+    let projectId: string;
+    let organizationId: string;
+    let created = false;
+    if (str(form, "target") === "existing") {
+      projectId = str(form, "projectId");
+      const row = await ctx.db.prepare(`SELECT id, organization_id FROM projects WHERE id = ?`).bind(projectId)
+        .first<{ id: string; organization_id: string }>();
+      if (!row) throw new HttpError(422, "Choose a project that exists.");
+      organizationId = row.organization_id;
+    } else {
+      // A test project has no order behind it, which is exactly the point: inventing an order, an invoice and a
+      // payment to try a ZIP would be worse than the problem. createTestProject marks it as internal and audits it.
+      try {
+        ({ projectId, organizationId } = await DL.createTestProject(ctx.db, {
+          name: str(form, "name") || "Artifact test", actorId: actorId(ctx), ip: ctx.ip,
+        }));
+        created = true;
+      } catch (e) {
+        throw new HttpError(422, (e as Error).message);
+      }
+    }
+
+    try {
+      await receiveArtifact(ctx, { projectId, organizationId, file });
+    } catch (e) {
+      // storeUpload is the authority on what a frontend artifact may be, and it can still refuse a file that
+      // passed the checks above -- bytes that do not match the extension, for one. A project created a moment ago
+      // for an artifact that was refused has nothing in it and no reason to exist, so it goes with the refusal.
+      if (created) await DL.deleteEmptyTestProject(ctx.db, projectId, { actorId: actorId(ctx), ip: ctx.ip });
+      throw e;
+    }
+    return redirect(ctx, `${BASE}/${projectId}`);
   });
 
   // ── one project ───────────────────────────────────────────────────────────────────────────────────────────

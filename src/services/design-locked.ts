@@ -111,6 +111,107 @@ export class DesignLockError extends Error {
  * The version is allocated here rather than passed in, so two uploads racing cannot both claim version 2 — the
  * UNIQUE (project_id, version) index turns that into an error instead of a silent overwrite.
  */
+/**
+ * Projects an artifact can be uploaded against, newest first.
+ *
+ * The upload endpoint has always needed a project id, and the only screen that offered it was a project's own
+ * page -- so with no design-locked project yet there was nowhere to start, and the Founder could not upload a
+ * first artifact without making database rows by hand. This is the list that screen needs.
+ *
+ * A project already carrying an approved, locked design is still eligible: a later artifact is how a design is
+ * revised, and approving it is a deliberate, audited act (approveBaseline). What is excluded is a project whose
+ * current artifact is quarantined, because the next step there is to deal with that, not to pile another on.
+ */
+export async function uploadTargets(db: Db, o: { limit?: number } = {}): Promise<
+  { projectId: string; projectName: string; organizationId: string; organizationName: string; state: string | null; designLocked: boolean }[]
+> {
+  const rows = await db.prepare(
+    `SELECT p.id AS projectId, p.name AS projectName, p.organization_id AS organizationId, org.name AS organizationName,
+            p.frontend_state AS state, COALESCE(p.design_locked, 0) AS designLocked
+       FROM projects p
+       JOIN organizations org ON org.id = p.organization_id
+      WHERE p.status NOT IN ('cancelled')
+        AND COALESCE(p.frontend_state, '') != 'artifact_quarantined'
+      ORDER BY p.updated_at DESC
+      LIMIT ?`,
+  ).bind(Math.min(Math.max(1, o.limit ?? 50), 200)).all<{
+    projectId: string; projectName: string; organizationId: string; organizationName: string; state: string | null; designLocked: number;
+  }>();
+  return (rows.results ?? []).map((r) => ({ ...r, designLocked: r.designLocked === 1 }));
+}
+
+/** The one organization test projects belong to, created on first use so nothing has to be seeded by hand. */
+export const TEST_ORG_NAME = "Crestmont internal — Artifact Builder tests";
+
+/**
+ * A project for testing the builder, with no order behind it.
+ *
+ * Every other project in the platform comes from a paid order (provisionProject), which is the right rule for a
+ * customer project and the wrong one for trying an artifact: it would mean inventing an order, an invoice and a
+ * payment to upload a ZIP. `projects.order_id` is nullable and `uq_projects_order` is partial, so a project
+ * without one is legitimate and collides with nothing.
+ *
+ * It is marked plainly -- an `internal` organization with a name that says what it is -- so it is never mistaken
+ * for work someone is paying for, and it is audited like any other creation.
+ */
+export async function createTestProject(
+  db: Db,
+  o: { name: string; actorId: string; ip?: string | null },
+): Promise<{ projectId: string; organizationId: string }> {
+  const name = o.name.trim();
+  if (name.length < 2 || name.length > 120) throw new Error("A test project needs a name of 2–120 characters.");
+
+  const at = nowIso();
+  let org = await db.prepare(`SELECT id FROM organizations WHERE kind = 'internal' AND name = ? LIMIT 1`)
+    .bind(TEST_ORG_NAME).first<{ id: string }>();
+  if (!org) {
+    const orgId = newId("org");
+    await db.prepare(`INSERT INTO organizations (id, name, kind, created_at) VALUES (?,?,'internal',?)`)
+      .bind(orgId, TEST_ORG_NAME, at).run();
+    org = { id: orgId };
+  }
+
+  const projectId = newId("prj");
+  await db.prepare(
+    `INSERT INTO projects (id, organization_id, order_id, product_id, name, status, revision_allowance, payment_schedule, created_at, updated_at)
+     VALUES (?,?,NULL,NULL,?, 'design', 0, 'upfront', ?, ?)`,
+  ).bind(projectId, org.id, name, at, at).run();
+
+  await audit(db, {
+    actorUserId: o.actorId, action: "project.created", subjectType: "project", subjectId: projectId,
+    organizationId: org.id, details: { purpose: "artifact-builder-test", order: null }, ip: o.ip ?? null,
+  });
+  return { projectId, organizationId: org.id };
+}
+
+/**
+ * Remove a test project that was created a moment ago for an artifact the upload path then refused.
+ *
+ * Deliberately narrow. It refuses to touch anything with an order, anything outside the internal test
+ * organization, and anything that already has an artifact or a baseline -- so it can only ever undo the row this
+ * request created, never a project someone is using. The deletion is audited like the creation was.
+ */
+export async function deleteEmptyTestProject(
+  db: Db,
+  projectId: string,
+  o: { actorId: string; ip?: string | null },
+): Promise<boolean> {
+  const row = await db.prepare(
+    `SELECT p.id, p.organization_id
+       FROM projects p JOIN organizations org ON org.id = p.organization_id
+      WHERE p.id = ? AND p.order_id IS NULL AND org.kind = 'internal' AND org.name = ?
+        AND NOT EXISTS (SELECT 1 FROM frontend_artifacts a WHERE a.project_id = p.id)
+        AND NOT EXISTS (SELECT 1 FROM design_baselines b WHERE b.project_id = p.id)`,
+  ).bind(projectId, TEST_ORG_NAME).first<{ id: string; organization_id: string }>();
+  if (!row) return false;
+  await db.prepare(`DELETE FROM projects WHERE id = ?`).bind(projectId).run();
+  await audit(db, {
+    actorUserId: o.actorId, action: "project.deleted", subjectType: "project", subjectId: projectId,
+    organizationId: row.organization_id, details: { reason: "the artifact it was created for was refused" }, ip: o.ip ?? null,
+  });
+  return true;
+}
+
 export async function recordArtifact(db: Db, a: {
   projectId: string;
   organizationId: string;

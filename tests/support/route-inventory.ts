@@ -527,6 +527,10 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   // Design-locked frontends. Reading is `builds.read`; uploading an artifact, approving a design and rolling
   // one back are `builds.configure`, because each of them decides what the AI is allowed to build against.
   "GET /staff/builds/frontends": staff(rolesWith("builds.read")),
+  // The way in with nothing but a ZIP. `builds.configure` because it can create a project and does receive an
+  // artifact; it is registered before /:projectId so "new" is not read as a project id.
+  "GET /staff/builds/frontends/new": staff(rolesWith("builds.configure")),
+  "POST /staff/builds/frontends/new": staff(rolesWith("builds.configure"), undefined, act("frontend_artifact.received")),
   "GET /staff/builds/frontends/:projectId": staff(rolesWith("builds.read"), { projectId: "project" }),
   "GET /staff/builds/frontends/:projectId/state": staff(rolesWith("builds.read"), { projectId: "project" }),
   "POST /staff/builds/frontends/:projectId/artifact": staff(rolesWith("builds.configure"), { projectId: "project" }, act("frontend_artifact.received")),
