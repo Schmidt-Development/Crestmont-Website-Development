@@ -8,6 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:net";
 import { Scanner } from "../scanner/src/scanner.ts";
+import type { Platform } from "../scanner/src/platform.ts";
 
 /** A clamd that answers PING and VERSION, so a cycle can reach the queue. Nothing is ever streamed to it here. */
 function fakeClamd(): Promise<{ port: number; close: () => Promise<void> }> {
@@ -39,7 +40,7 @@ test("[SCAN-H1] a successful cycle clears the error from a failed one, so health
     };
     const scanner = new Scanner(
       { scannerId: "test", batch: 10, maxBytes: 26_214_400, clamd: { host: "127.0.0.1", port: clamd.port, timeoutMs: 2000 } },
-      api as unknown as Parameters<typeof Scanner.prototype.constructor>[1],
+      api as unknown as Platform,
     );
 
     const bad = await scanner.cycle();
