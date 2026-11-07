@@ -648,6 +648,10 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
           // simply ignores it, and a project without an approved baseline never sees it.
           const locked = await DL.frontendState(db, job.project_id);
           const baseline = locked.designLocked && locked.activeBaselineId ? await DL.getBaseline(db, locked.activeBaselineId) : null;
+          // The contract travels with the design lock, which is the only place it means anything. It used to be
+          // read from `build_pipeline.spec_json` -- a master specification, a different shape for the retired
+          // frontend-generation path -- so a design-locked build never had a contract and stopped at once.
+          const contract = baseline ? await DL.activeContract(db, job.project_id) : null;
           return {
             phase: (p?.build_phase ?? "design") as BuildPhase,
             designFreeze: f ? { revision: `${f.revision_attempt}-${f.revision_cycle}`, commitSha: f.commit_sha, designPoints: f.design_points, sourceFingerprint: f.source_fingerprint, certifiedAt: f.certified_at } : null,
@@ -663,6 +667,11 @@ export async function claimJob(db: Db, runner: { runnerId: string; version?: str
                 routes: safeJson<unknown[]>(baseline.route_manifest_json, []).length,
                 interactionsNeedingBackend: safeJson<{ needsBackend?: boolean; functional?: boolean }[]>(baseline.interaction_inventory_json, [])
                   .filter((i) => i.needsBackend === true && i.functional !== true).length,
+                // Only a contract recorded against THIS design is handed over. One written for an earlier design
+                // names pages and elements that may no longer exist, and a build must stop rather than stretch it.
+                contract: contract && contract.design_fingerprint === baseline.fingerprint
+                  ? { version: contract.version, recordedAt: contract.created_at, manifest: safeJson<unknown>(contract.manifest_json, null) }
+                  : null,
               }
               : null,
           };

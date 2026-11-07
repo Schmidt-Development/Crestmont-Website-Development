@@ -580,7 +580,12 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       const dl = await runDesignLockedJob({
         job, ws, sandbox, provider, tracker, stop, log,
         fetchArtifact: () => client.approvedArtifact(job),
-        manifest: (job.spec?.content as (IntegrationManifest & ManifestContract) | undefined) ?? null,
+        // The contract, from where the platform records it. This read `job.spec?.content` -- the architect's
+        // master specification for the retired frontend-generation path, a different shape entirely -- so a
+        // design-locked build never had a contract and stopped at `manifest` thirteen seconds in. Still a cast,
+        // but `validateManifest` inside the job checks the shape against the measured design before anything is
+        // asked of a model.
+        manifest: (job.designLocked.contract?.manifest as (IntegrationManifest & ManifestContract) | undefined) ?? null,
         maxTurns: turnCap,
         maxWallMs: Math.max(60_000, runtimeDeadline - Date.now()),
       });

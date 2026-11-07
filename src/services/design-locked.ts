@@ -13,6 +13,11 @@
 //   3. A DESIGN-LOCKED PROJECT DOES NOT ENTER THE RETIRED PIPELINE (§15 Phase D). `designGenerationAllowed`
 //      is the single question the build path asks, so the gate cannot be half-applied.
 
+// The integration manifest's format is defined once, in the module that enforces it for the runner. A second
+// copy of the rules here is exactly how `renders` and `screenshots` drifted apart until every import report
+// was refused; the file is a pure validator with no imports of its own, so it bundles into the Worker as is.
+import { validateManifest, MANIFEST_SCHEMA } from "../../runner/src/frontend/integration-manifest.ts";
+import type { IntegrationManifest } from "../../runner/src/frontend/integration-manifest.ts";
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { audit } from "./security.ts";
@@ -611,6 +616,118 @@ export async function getBaseline(db: Db, id: string): Promise<DesignBaselineRow
 export async function approvedBaseline(db: Db, projectId: string): Promise<DesignBaselineRow | null> {
   return await db.prepare(`SELECT * FROM design_baselines WHERE project_id = ? AND status = 'approved'`)
     .bind(projectId).first<DesignBaselineRow>();
+}
+
+// -- the integration contract -----------------------------------------------------------------------------------
+//
+// A design-locked build is judged by three gates, and contract conformance needs a contract. The runner has
+// required one since that path was written and read it from `build_pipeline.spec_json`, which holds a master
+// specification -- a different thing, for the retired frontend-generation path. Nothing wrote an integration
+// manifest and no screen accepted one, so every submitted artifact reached a queued build and stopped at
+// "this project has no integration manifest". These functions give the contract a home and a way in.
+
+export interface ContractRow {
+  id: string;
+  project_id: string;
+  artifact_id: string;
+  baseline_id: string;
+  design_fingerprint: string;
+  artifact_sha256: string;
+  version: number;
+  manifest_json: string;
+  operations: number;
+  visual_states: number;
+  recorded_by: string | null;
+  note: string | null;
+  superseded_at: string | null;
+  created_at: string;
+}
+
+/** The contract a build would be held to right now, or null when none has been recorded. */
+export async function activeContract(db: Db, projectId: string): Promise<ContractRow | null> {
+  return await db.prepare(
+    `SELECT * FROM design_locked_contracts WHERE project_id = ? AND superseded_at IS NULL ORDER BY version DESC LIMIT 1`,
+  ).bind(projectId).first<ContractRow>();
+}
+
+export async function listContracts(db: Db, projectId: string): Promise<ContractRow[]> {
+  return (await db.prepare(`SELECT * FROM design_locked_contracts WHERE project_id = ? ORDER BY version DESC`)
+    .bind(projectId).all<ContractRow>()).results;
+}
+
+/**
+ * Record an integration contract for a project's approved design.
+ *
+ * Validated against the design it names, not merely parsed. The manifest declares pages and interactive elements,
+ * and those names only mean something in one measured design: `validateManifest` is given the pages the baseline
+ * actually measured, so a contract naming a page that does not exist is refused here rather than failing inside a
+ * build an hour later. The artifact checksum and design fingerprint must match the approved baseline's, which is
+ * what stops a contract written for an earlier design from being applied to a newer one.
+ *
+ * Returns the problems instead of throwing them, because the person pasting a contract needs to see all of them at
+ * once, not the first.
+ */
+export async function recordContract(
+  db: Db,
+  projectId: string,
+  raw: unknown,
+  o: { recordedBy: string; note?: string | null; ip?: string | null },
+): Promise<{ ok: true; contract: ContractRow } | { ok: false; problems: string[] }> {
+  const baseline = await approvedBaseline(db, projectId);
+  if (!baseline) {
+    return { ok: false, problems: ["this project has no approved design yet, and a contract is written against one: approve the measured design first"] };
+  }
+  const artifact = await getArtifact(db, baseline.artifact_id);
+  if (!artifact) return { ok: false, problems: ["the approved design's artifact is missing"] };
+
+  const m = (raw ?? {}) as Partial<IntegrationManifest>;
+  if (m.schema !== MANIFEST_SCHEMA) {
+    return { ok: false, problems: [`a contract must declare schema "${MANIFEST_SCHEMA}" (this one says ${JSON.stringify(m.schema ?? null)}). A master specification is not an integration contract.`] };
+  }
+
+  // Which pages the approved design actually has. The manifest may only speak about these.
+  let measuredPages: { page?: unknown }[] = [];
+  try { measuredPages = JSON.parse(String(baseline.signatures_json ?? "[]")) as { page?: unknown }[]; } catch { measuredPages = []; }
+  const approvedPages = [...new Set(measuredPages.map((x) => String(x.page ?? "")).filter(Boolean))];
+  const checked = validateManifest(m as IntegrationManifest, {
+    approvedPages,
+    designFingerprint: baseline.fingerprint,
+    artifactSha: artifact.sha256,
+  });
+  const problems = checked.problems.filter((p) => p.severity === "reject").map((p) => `${p.code}: ${p.detail}`);
+  if (!checked.ok || !checked.manifest) {
+    return { ok: false, problems: problems.length ? problems : ["the contract did not validate against the approved design"] };
+  }
+
+  const at = nowIso();
+  const prev = await activeContract(db, projectId);
+  const next = ((await db.prepare(`SELECT COALESCE(MAX(version), 0) AS v FROM design_locked_contracts WHERE project_id = ?`)
+    .bind(projectId).first<{ v: number }>())?.v ?? 0) + 1;
+  const id = newId("dlc");
+  const manifest = checked.manifest;
+
+  // The previous version is superseded, never removed: what an earlier build was held to is evidence.
+  if (prev) await db.prepare(`UPDATE design_locked_contracts SET superseded_at = ? WHERE id = ?`).bind(at, prev.id).run();
+  await db.prepare(
+    `INSERT INTO design_locked_contracts (id, project_id, artifact_id, baseline_id, design_fingerprint, artifact_sha256,
+       version, manifest_json, operations, visual_states, recorded_by, note, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).bind(id, projectId, baseline.artifact_id, baseline.id, baseline.fingerprint, artifact.sha256, next,
+    JSON.stringify(manifest), manifest.operations.length, (manifest.visualStates ?? []).length,
+    o.recordedBy, o.note?.slice(0, 500) ?? null, at).run();
+
+  await audit(db, {
+    actorUserId: o.recordedBy, action: "design_locked_contract.recorded", subjectType: "project", subjectId: projectId,
+    organizationId: artifact.organization_id,
+    details: {
+      version: next, supersedes: prev?.version ?? null, baselineId: baseline.id, baselineVersion: baseline.version,
+      designFingerprint: baseline.fingerprint.slice(0, 12), artifactSha: artifact.sha256.slice(0, 12),
+      operations: manifest.operations.length, visualStates: (manifest.visualStates ?? []).length,
+      warnings: checked.problems.filter((p) => p.severity !== "reject").map((p) => p.code),
+    },
+    ip: o.ip ?? null,
+  });
+  return { ok: true, contract: (await activeContract(db, projectId))! };
 }
 
 export async function listBaselines(db: Db, projectId: string): Promise<DesignBaselineRow[]> {

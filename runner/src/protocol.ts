@@ -147,6 +147,16 @@ export interface Job {
     viewports: string[];
     routes: number;
     interactionsNeedingBackend: number;
+    /**
+     * The integration contract for this design: what the backend work must do, recorded by a person before it
+     * starts, and the thing the conformance gate judges the result against.
+     *
+     * Null when none has been recorded, and the build stops saying so. It is delivered here rather than in
+     * `spec`, which carries the architect's master specification for the retired frontend-generation path: that
+     * is a different shape, and reading one as the other meant a design-locked build never had a contract at all.
+     * Absent on an older platform, which is the same as none.
+     */
+    contract?: { version: number; recordedAt: string; manifest: unknown } | null;
   } | null;
 }
 

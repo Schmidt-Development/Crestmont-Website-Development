@@ -263,10 +263,11 @@ ${rows.length === 0 ? emptyState("Nothing yet", "No project is on the design-loc
       .first<{ id: string; name: string; organization_id: string }>();
     if (!project) throw new HttpError(404, "No such project.");
 
-    const [artifacts, baselines, state] = await Promise.all([
+    const [artifacts, baselines, state, contract] = await Promise.all([
       DL.listArtifacts(ctx.db, projectId),
       DL.listBaselines(ctx.db, projectId),
       DL.frontendState(ctx.db, projectId),
+      DL.activeContract(ctx.db, projectId),
     ]);
     const draft = baselines.find((b) => b.status === "draft");
     const approved = baselines.find((b) => b.status === "approved");
@@ -408,9 +409,55 @@ ${measured ? html`<section class="card">
 </section>
 
 <section class="card">
+  <h2>The integration contract</h2>
+  <p class="faint">
+    What the backend will do, written down before it starts: which operations, against which pages and elements of
+    the approved design, and how each is to be accepted. A build is judged against this &mdash; the first of the
+    three gates is conformance to it &mdash; so a build cannot start without one, and the model that does the work
+    never writes it.
+  </p>
+
+  ${contract
+    ? html`<p>
+        ${badge("ok", `v${String(contract.version)}`)}
+        ${String(contract.operations)} operation${contract.operations === 1 ? "" : "s"},
+        ${String(contract.visual_states)} declared visual state${contract.visual_states === 1 ? "" : "s"}
+        &middot; recorded ${formatDateTime(contract.created_at)}
+        &middot; against design <code class="faint">${contract.design_fingerprint.slice(0, 12)}&hellip;</code>
+      </p>
+      ${contract.note ? html`<p class="faint">${contract.note}</p>` : ""}
+      <details><summary>The contract as recorded</summary><pre style="white-space:pre-wrap;max-height:24rem;overflow:auto">${JSON.stringify(JSON.parse(contract.manifest_json), null, 2)}</pre></details>`
+    : alert("warn", html`No contract has been recorded for this project, so a backend build will stop as soon as it starts: <strong>there is nothing for it to build against and nothing to verify an implementation with</strong>. Record one below.`)}
+
+  ${!state.designLocked
+    ? html`<p class="faint">A contract is written against an approved design, so approve one first.</p>`
+    : mayApprove
+      ? html`<form method="post" action="${BASE}/${projectId}/contract" class="stack">
+          ${csrf(ctx)}
+          <label for="f-manifest">The contract (JSON)</label>
+          <textarea id="f-manifest" name="manifest" rows="12" required placeholder='{"schema":"crestmont.integration-manifest/1", ...}'
+            style="width:100%;font-family:ui-monospace,monospace;font-size:.85rem"></textarea>
+          <p class="faint">
+            Checked against the design that was actually measured before it is stored: the artifact checksum and
+            design fingerprint must be this project's, and every page and element it names must exist in the
+            approved frontend. A contract that does not match is refused with the reasons, not stored and
+            discovered later.
+          </p>
+          <label for="f-contract-note">Note (optional)</label>
+          <input id="f-contract-note" name="note" maxlength="500" placeholder="Why this version, or what changed">
+          ${button(contract ? `Replace contract v${String(contract.version)}` : "Record the contract", { variant: "primary" })}
+          ${contract ? html`<span class="faint">The current version is superseded, not deleted: what an earlier build was held to stays on the record.</span>` : ""}
+        </form>`
+      : html`<p class="faint">You do not have permission to record a contract.</p>`}
+</section>
+
+<section class="card">
   <h2>Backend development</h2>
   <p class="faint">The AI builds the backend behind the approved design and never the design itself. Three independent gates judge the result \u2014 the contract, the application actually working, and the design still matching \u2014 and the model does not decide whether its own work passed.</p>
 
+  ${state.designLocked && !contract
+    ? alert("warn", "A backend job also needs an integration contract: record one above. Without it the build stops as soon as it starts, because there is nothing to build against and nothing to verify an implementation with.")
+    : ""}
   ${!state.designLocked
     ? alert("info", "A backend job can start once a design baseline is approved. Approve one above.")
     : eligibility.verdict !== "queued"
@@ -568,6 +615,29 @@ ${measured ? html`<section class="card">
       details: { projectId, baselineId: state.activeBaselineId, state: job.state, trigger: "backfill" },
     });
     return redirect(ctx, `${BASE}/${projectId}`);
+  });
+
+  // Record the integration contract for this project's approved design.
+  //
+  // Validated by the service against the design that was actually measured, and every refusal comes back with its
+  // reasons rather than being stored to fail inside a build later. A person writes this: the contract is what an
+  // implementation is judged against, so the model doing the work must not be its author.
+  r.post(`${BASE}/:projectId/contract`, async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    const form = await ctx.form();
+    const text = str(form, "manifest").trim();
+    if (!text) throw new HttpError(422, "Paste the contract as JSON.");
+    if (text.length > 400_000) throw new HttpError(413, "That contract is larger than 400 KB; a contract names operations, it does not carry data.");
+
+    let parsed: unknown;
+    try { parsed = JSON.parse(text); }
+    catch (e) { throw new HttpError(422, `That is not valid JSON: ${(e as Error).message.slice(0, 200)}`); }
+
+    const result = await DL.recordContract(ctx.db, p.projectId, parsed, {
+      recordedBy: actorId(ctx), note: str(form, "note") || null, ip: ctx.ip ?? null,
+    });
+    if (!result.ok) throw new HttpError(422, `The contract was not recorded: ${result.problems.slice(0, 8).join("; ")}`);
+    return redirect(ctx, `${BASE}/${p.projectId}`);
   });
 
   r.get(`${BASE}/:projectId/state`, async (ctx, p) => {
