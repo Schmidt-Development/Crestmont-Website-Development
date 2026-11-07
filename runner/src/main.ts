@@ -331,7 +331,10 @@ async function main(argv: string[]): Promise<number> {
   if (argv.includes("--preflight")) return (await runPreflight(cfg, manifest, logger, queryFn)) ? 0 : 1;
 
   const client = new ControlPlaneClient({ baseUrl: cfg.controlPlaneUrl, secret: cfg.secret, runnerId: cfg.runnerId, logger, worker: cfg.worker });
-  const health = newHealthState({ runnerId: cfg.runnerId, version: RUNNER_VERSION, provider: cfg.agentProvider, model: cfg.agentProvider === "local" ? (cfg.models.mode === "dual" ? `A ${cfg.models.a.tag} / B ${cfg.models.b.tag}` : cfg.local.model) : "per job" });
+  // `slots` is passed because the health endpoint is where an operator CHECKS the capacity this process runs with,
+  // and the default of 1 made it report one slot however many were configured. The runner really did run
+  // `cfg.slots` claim loops, so the readout contradicted the node it was describing while looking authoritative.
+  const health = newHealthState({ runnerId: cfg.runnerId, version: RUNNER_VERSION, provider: cfg.agentProvider, slots: cfg.slots, model: cfg.agentProvider === "local" ? (cfg.models.mode === "dual" ? `A ${cfg.models.a.tag} / B ${cfg.models.b.tag}` : cfg.local.model) : "per job" });
   const scheduler = createScheduler(cfg, logger);
   if (cfg.healthPort) {
     await startHealthServer(health, cfg.healthHost, cfg.healthPort);

@@ -267,7 +267,9 @@ Ok "Images built"
 
 # -- 5. model selection --
 Step "Model selection"
-& docker.exe run --rm --network none -v "${State}:/in:ro" --entrypoint node crestmont-ai-runner:1 --no-warnings windows/select-model.ts /in/hardware.json | Out-File -Encoding utf8 (Join-Path $State "recommendation.json")
+# -Slots is passed in because it sizes the per-build container limits: the builds have to fit the machine TOGETHER,
+# and a limit chosen as though one build had the node to itself overcommits it at four slots.
+& docker.exe run --rm --network none -v "${State}:/in:ro" --entrypoint node crestmont-ai-runner:1 --no-warnings windows/select-model.ts /in/hardware.json "$Slots" | Out-File -Encoding utf8 (Join-Path $State "recommendation.json")
 $selectExit = $LASTEXITCODE
 $rec = Get-Content (Join-Path $State "recommendation.json") -Raw | ConvertFrom-Json
 Write-Host "    $($rec.summary)"

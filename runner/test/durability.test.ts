@@ -139,6 +139,14 @@ test("[DUR] health never reports four busy slots as four-way progress while thre
   assert.equal(s.ok, true);
   assert.match(s.reason, /running 4 builds, 3 waiting for a lane or the GPU/);
   assert.equal(h.slots, 4, "the configured slot count is reported beside what is running");
+
+  // `newHealthState` defaults slots to 1 for callers that have no config, and main() is NOT one of them: it has
+  // `cfg.slots`, ran that many claim loops, and still reported one slot on the endpoint an operator checks to
+  // confirm capacity. The wiring lives inside main(), which is not exported, so this asserts the call site.
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  const call = main.match(/newHealthState\(\{.*/);
+  assert.ok(call, "main() must build the health state");
+  assert.match(call[0], /slots: cfg\.slots/, `the health endpoint must report the configured capacity: ${call[0]}`);
 });
 
 test("[DUR] lane figures reported to the platform separate waiting from working", async () => {
