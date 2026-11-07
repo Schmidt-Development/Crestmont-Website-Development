@@ -163,6 +163,10 @@ jobs:
           Write-Output "PASSED"
       - name: SquidConf.ps1 renders exactly what egress-policy.ts renders
         run: node --no-warnings --test --test-name-pattern "SquidConf.ps1" runner/test/egress-compose.test.ts
+      - name: BackgroundTask.ps1 (retry budget, backoff, command-line quoting) matches background-task.ts
+        env:
+          PWSH: pwsh
+        run: node --no-warnings --test --test-name-pattern "match background-task.ts" runner/test/background-task.test.ts
       - name: RunnerEnv.ps1 (runner.env / runner.local.env preservation) produces exactly what runner-env.ts produces
         run: |
           set -o pipefail
