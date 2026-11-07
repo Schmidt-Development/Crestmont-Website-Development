@@ -21,7 +21,8 @@ async function main() {
   if (mode === "derive") { process.stdout.write(key); return; }
   if (mode === "retell-audit") return retellAudit(key, rest);
   if (mode === "retell-outbound-audit") return retellOutboundAudit(key, rest);
-  if (mode !== "run") throw new Error("usage: derive | run --url <base> [--daily] | retell-audit --url <base> | retell-outbound-audit --url <base>");
+  if (mode === "retell-founder-flag") return retellFounderFlag(key, rest);
+  if (mode !== "run") throw new Error("usage: derive | run --url <base> [--daily] | retell-audit --url <base> | retell-outbound-audit --url <base> | retell-founder-flag --url <base> [--apply]");
   const base = rest[rest.indexOf("--url") + 1]?.replace(/\/$/, "");
   if (!base || !/^https:\/\//.test(base)) throw new Error("--url https://… is required");
   // MINUTE first: research promotion is the one schedule where a missed tick is a missed minute of throughput.
@@ -35,6 +36,20 @@ async function main() {
     if (!r.ok && r.status !== 429) failed = true; // 429 = already ran in the last 5 minutes
   }
   if (failed) { console.log("::error title=External scheduler::a job-set trigger failed"); process.exitCode = 1; }
+}
+
+/** Adds wants_founder to the receptionist's two calendar tools (dry run unless --apply) and prints the read-back. */
+async function retellFounderFlag(key: string, rest: string[]) {
+  const base = rest[rest.indexOf("--url") + 1]?.replace(/\/$/, "");
+  if (!base || !/^https:\/\//.test(base)) throw new Error("--url https://… is required");
+  const body = JSON.stringify({ apply: rest.includes("--apply") });
+  const r = await fetch(`${base}/api/voice/retell-tools/founder-flag`, { method: "POST", headers: { "content-type": "application/json", "x-crestmont-scheduler-signature": sign(key, body) }, body });
+  const text = await r.text();
+  if (!r.ok) throw new Error(`founder-flag: HTTP ${r.status} ${text.replace(/[\r\n]+/g, " ").slice(0, 200)}`);
+  const o = JSON.parse(text) as { status: string; agentId: string | null; llmId: string | null; tools: { name: string; before: string; after: string }[]; detail: string };
+  const line = `${o.status.toUpperCase()} · agent ${o.agentId ?? "?"} · llm ${o.llmId ?? "?"} · ${o.tools.map((t) => `${t.name}: ${t.before} → ${t.after}`).join(", ")} · ${o.detail}`.replace(/::/g, ": ");
+  console.log(o.status === "failed" || o.status === "refused" ? `::error title=Retell wants_founder::${line}` : `::notice title=Retell wants_founder::${line}`);
+  if (o.status === "failed" || o.status === "refused") process.exitCode = 1;
 }
 
 /** The sales (outbound) workspace, read-only: its agent, caller number and Retell's real concurrency limit

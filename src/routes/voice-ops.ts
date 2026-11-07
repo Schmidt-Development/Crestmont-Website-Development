@@ -31,6 +31,7 @@ import { readBody } from "./api.ts";
 import { verifyEvidenceSignature, IngestAuthError } from "../readiness/ingest.ts";
 import { rateLimit, audit } from "../services/security.ts";
 import { auditInboundRetell } from "../services/retell-inbound-audit.ts";
+import { addFounderFlag } from "../services/retell-founder-flag.ts";
 
 const DAY_LABEL: Record<Weekday, string> = { sun: "Sunday", mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday" };
 const microUsd = (v: number) => `$${(v / 1e6).toFixed(4)}`;
@@ -203,6 +204,23 @@ export function register(r: Router): void {
     if (!rl.allowed) return jsonResponse(ctx, 429, { error: "Ran recently; try again in a few minutes" });
     const result = await auditInboundRetell({ db: ctx.db, env: ctx.env, fetch: ctx.env.overrides?.fetch ?? fetch, baseUrl: ctx.baseUrl });
     await audit(ctx.db, { actorKind: "system", action: "voice.retell_audit", subjectType: "retell_agent", subjectId: result.agentId, details: { status: result.status, failed: result.findings.filter((f) => !f.ok).length, total: result.findings.length } });
+    return jsonResponse(ctx, 200, result);
+  });
+  // Adds the optional wants_founder flag to the receptionist's schedule_consultation and request_callback tools in Retell
+  // (src/services/retell-founder-flag.ts). Signed machine endpoint like the audit; never on production; dry run unless
+  // the signed body says apply. Writes general_tools only and verifies by read-back.
+  r.post("/api/voice/retell-tools/founder-flag", async (ctx) => {
+    const raw = await readBody(ctx.req);
+    if (ctx.env.ENVIRONMENT === "production") return jsonResponse(ctx, 404, { error: "Not available in production" });
+    if (!ctx.env.SCHEDULER_TRIGGER_SECRET) return jsonResponse(ctx, 503, { error: "Trigger not configured" });
+    try { await verifyEvidenceSignature(ctx.env.SCHEDULER_TRIGGER_SECRET, raw, ctx.req.headers.get("x-crestmont-scheduler-signature")); }
+    catch (e) { if (e instanceof IngestAuthError) return jsonResponse(ctx, 401, { error: e.message }); throw e; }
+    const rl = await rateLimit(ctx.db, "retell-founder-flag", 3, 300);
+    if (!rl.allowed) return jsonResponse(ctx, 429, { error: "Ran recently; try again in a few minutes" });
+    let apply = false;
+    try { apply = (JSON.parse(raw) as { apply?: unknown }).apply === true; } catch { /* dry run */ }
+    const result = await addFounderFlag({ db: ctx.db, env: ctx.env, fetch: ctx.env.overrides?.fetch ?? fetch, dryRun: !apply });
+    await audit(ctx.db, { actorKind: "system", action: "voice.retell_founder_flag", subjectType: "retell_agent", subjectId: result.agentId, details: { status: result.status, apply, tools: result.tools } });
     return jsonResponse(ctx, 200, result);
   });
   r.get("/staff/voice/operations", (ctx) => opsPage(ctx));
