@@ -56,6 +56,20 @@ const dockerEnv = (): Record<string, string> => {
 
 export type ImportOutcomeKind = "unsupported" | "none" | "done";
 
+/**
+ * The platform's own reason out of a refusal body, for the artifact's verdict.
+ *
+ * The body is JSON `{"error":"..."}` from the Worker; anything else is passed through, bounded. The point is that
+ * the Founder reads what the platform objected to, not an HTTP status.
+ */
+function refusalReason(e: ControlPlaneError): string {
+  try {
+    const j = JSON.parse(e.body) as { error?: unknown };
+    if (typeof j.error === "string" && j.error.trim()) return j.error.slice(0, 300);
+  } catch { /* not JSON */ }
+  return (e.body || e.message).slice(0, 300);
+}
+
 export function importWorker(d: ImportWorkerDeps): { serve(): Promise<ImportOutcomeKind> } {
   let supported = true;
 
@@ -135,14 +149,49 @@ export function importWorker(d: ImportWorkerDeps): { serve(): Promise<ImportOutc
           return "done";
         }
 
-        await d.client.reportFrontendImport({
-          artifactId: claim.artifactId,
-          status: "imported",
-          framework: outcome.ingest?.framework ?? null,
-          archiveRoot: outcome.ingest?.archiveRoot ?? null,
-          problems: outcome.problems.slice(0, 20),
-          baseline: outcome.baseline,
-        });
+        try {
+          await d.client.reportFrontendImport({
+            artifactId: claim.artifactId,
+            status: "imported",
+            framework: outcome.ingest?.framework ?? null,
+            archiveRoot: outcome.ingest?.archiveRoot ?? null,
+            problems: outcome.problems.slice(0, 20),
+            baseline: outcome.baseline,
+            // The same measurement's inventory. Without it the platform records a design with zero routes and
+            // zero interactions and the Artifact Builder screen says so, which is wrong about a measured frontend.
+            // Each array is read defensively. A missing one would throw here, inside the reporting path, and a
+            // throw there loses the import entirely: nothing is reported, the lease expires and the whole
+            // measurement runs again. Evidence this good is not worth risking on a shape assumption.
+            measurement: outcome.report
+              ? {
+                routes: outcome.report.routes ?? [],
+                interactions: outcome.report.interactions ?? [],
+                states: (outcome.report.states ?? []).map((x) => ({ page: x.page, viewport: x.viewport, state: x.state, sha: x.sha })),
+                viewports: [...new Set((outcome.report.renders ?? []).map((x) => x.viewport))],
+              }
+              : null,
+          });
+        } catch (err) {
+          // A 4xx on this report is the platform REFUSING what was measured, not a fault in reaching it. The
+          // measured design it would not take is the only one this import produced, so sending it again cannot
+          // work: retrying leaves the artifact looping on the lease for ever and holding the import lane, which
+          // is what happened to three artifacts on Node 1 whose baseline carried no screenshot.
+          //
+          // So it becomes the artifact's verdict, in the platform's own words. A 5xx, a timeout or a network
+          // error is still infrastructure and still falls through to the outer catch, which reports nothing.
+          const status = err instanceof ControlPlaneError ? err.status : 0;
+          if (status < 400 || status >= 500) throw err;
+          const why = refusalReason(err as ControlPlaneError);
+          await d.client.reportFrontendImport({
+            artifactId: claim.artifactId,
+            status: "rejected",
+            problems: [`the platform would not accept the measured design: ${why}`, ...outcome.problems.slice(0, 19)],
+          });
+          d.logger.warn("the platform refused the measured design; reported as the artifact's verdict rather than retried", {
+            artifactId: claim.artifactId, status, why,
+          });
+          return "done";
+        }
         log("frontend artifact imported and measured", {
           fingerprint: outcome.baseline.fingerprint.slice(0, 12),
           pages: outcome.report?.routes.length ?? 0,

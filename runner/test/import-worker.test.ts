@@ -42,6 +42,8 @@ function fakeClient(o: {
   claim?: FrontendImportClaim | null;
   claimThrows?: unknown;
   bytes?: { artifactId: string; sha256: string; filename: string; base64: string } | null;
+  /** Thrown by the `imported` report only, so the rejection that follows it still goes through. */
+  reportThrows?: unknown;
 } = {}) {
   const reports: Reported[] = [];
   return {
@@ -53,7 +55,10 @@ function fakeClient(o: {
           ? { artifactId: "fa_1", sha256: SHA, filename: "frontend.zip", base64: BYTES.toString("base64") }
           : o.bytes;
       },
-      async reportFrontendImport(r: Reported) { reports.push(r); },
+      async reportFrontendImport(r: Reported) {
+        reports.push(r);
+        if (o.reportThrows && r.status === "imported") throw o.reportThrows;
+      },
     } as unknown as Parameters<typeof importWorker>[0]["client"],
   };
 }
@@ -85,7 +90,7 @@ test("[IMP-02] a measured design is reported with its baseline, and never as a r
       ok: true,
       baseline: baseline as never,
       ingest: { framework: "vite", archiveRoot: "site" } as never,
-      report: { routes: [{ page: "index" }, { page: "quote" }] } as never,
+      report: { routes: [{ page: "index" }, { page: "quote" }], interactions: [], states: [], renders: [{ page: "index", viewport: "desktop", sha: "a".repeat(64) }] } as never,
     }),
   });
 
@@ -96,6 +101,12 @@ test("[IMP-02] a measured design is reported with its baseline, and never as a r
   assert.equal(f.reports[0].framework, "vite", "what the ingest found, not a guess");
   assert.equal(f.reports[0].archiveRoot, "site");
   assert.equal((f.reports[0].baseline as { fingerprint: string }).fingerprint, baseline.fingerprint, "the measured design travels with it");
+  // The same measurement's inventory travels beside it, or the platform records a design with no routes and the
+  // Artifact Builder screen reports zero pages for a frontend it just measured.
+  const m = f.reports[0].measurement as { routes: unknown[]; viewports: string[] } | null;
+  assert.ok(m, "the measurement is sent");
+  assert.equal(m.routes.length, 2, "the routes the measurement found");
+  assert.deepEqual(m.viewports, ["desktop"], "and the viewports it captured");
 });
 
 test("[IMP-07] the import's workspace sits where a sandbox on the workspaces volume can mount it", async () => {
@@ -145,6 +156,55 @@ test("[IMP-08] a sandbox on the workspaces volume refuses a workspace it could n
   // With no volume the mounts are absolute host paths, so nesting is none of this check's business.
   const noVolume = { ...sandboxCfg, volume: "" } as typeof sandboxCfg;
   assert.ok(new JobSandbox(noVolume, nested, "fa_2", (async () => ({ code: 0, stdout: "", stderr: "", timedOut: false, notFound: false })) as never).mountFlags().some((x) => x.includes("type=bind")));
+});
+
+test("[IMP-09] a measured design the platform refuses becomes the artifact's verdict, not an endless retry", async () => {
+  // Measured on Node 1: three artifacts looped on the import lease for ever. Each was measured, each reported, and
+  // each report came back 400 `a baseline needs at least one screenshot: there would be no visual record` -- the
+  // platform refusing the measured design. The worker read a failed report as infrastructure (which is right for a
+  // sandbox that would not start) and left the claim to expire, so the same artifact was measured and refused
+  // again every twenty minutes, holding the single import lane while it did.
+  //
+  // A 4xx is the platform refusing WHAT WAS MEASURED. The measured design is the only one this import produced, so
+  // sending it again cannot succeed: it is the artifact's verdict, in the platform's own words.
+  const baseline = { fingerprint: "b".repeat(64), signatures: [], renders: [] };
+  const f = fakeClient({
+    claim: claim(),
+    reportThrows: new ControlPlaneError(400, JSON.stringify({ error: "a baseline needs at least one screenshot: there would be no visual record" }), "/frontend/import/report"),
+  });
+  const w = importWorker({
+    client: f.client, cfg, logger: silent, workRoot: cfg.workspacesRoot, runnerId: "r",
+    importer: async () => outcome({ ok: true, baseline: baseline as never, problems: ["a note from the measurement"] }),
+  });
+
+  assert.equal(await w.serve(), "done");
+  assert.equal(f.reports.length, 2, `the refused report, then the verdict: ${JSON.stringify(f.reports.map((r) => r.status))}`);
+  assert.equal(f.reports[0].status, "imported");
+  assert.equal(f.reports[1].status, "rejected", "the artifact gets a verdict rather than another lap");
+  const why = (f.reports[1].problems ?? []).join(" | ");
+  assert.match(why, /would not accept the measured design/, why);
+  assert.match(why, /at least one screenshot/, `in the platform's own words: ${why}`);
+  assert.match(why, /a note from the measurement/, "and the measurement's own notes are kept");
+});
+
+test("[IMP-10] a platform that is merely unreachable still reports nothing, so the claim is offered again", async () => {
+  // The other half of [IMP-09]: 5xx, a timeout or a socket error says nothing about the artifact. Rejecting the
+  // Founder's work because the platform had a bad minute would be the worst possible answer, so nothing is sent
+  // and the lease expiry re-offers it -- which is also how a runner that dies mid-import is handled.
+  for (const thrown of [
+    new ControlPlaneError(500, "upstream error", "/frontend/import/report"),
+    new ControlPlaneError(502, "bad gateway", "/frontend/import/report"),
+    new Error("fetch failed"),
+  ]) {
+    const f = fakeClient({ claim: claim(), reportThrows: thrown });
+    const w = importWorker({
+      client: f.client, cfg, logger: silent, workRoot: cfg.workspacesRoot, runnerId: "r",
+      importer: async () => outcome({ ok: true, baseline: { fingerprint: "c".repeat(64), signatures: [], renders: [] } as never }),
+    });
+    assert.equal(await w.serve(), "done");
+    assert.equal(f.reports.filter((r) => r.status === "rejected").length, 0,
+      `${thrown instanceof ControlPlaneError ? thrown.status : "network"}: the artifact must not be blamed for the platform being unreachable`);
+  }
 });
 
 test("[IMP-03] an archive that will not build is the artifact's verdict, with the reasons", async () => {

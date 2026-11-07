@@ -18,6 +18,10 @@ import * as MS from "../src/services/malware-scan.ts";
 import { newId, nowIso } from "../src/lib/db.ts";
 import { sha256Hex } from "../src/lib/crypto.ts";
 import { makeZip } from "../runner/test/fixtures/zip-writer.ts";
+// The RUNNER's own baseline builder, used here on purpose: the payload the platform must accept is whatever
+// this produces, and a hand-written copy of it is what let the two sides drift apart unnoticed.
+import { captureBaseline } from "../runner/src/frontend/design-lock.ts";
+import { hmacSha256Hex } from "../src/lib/crypto.ts";
 import type { Env } from "../src/app/context.ts";
 
 type Db = Env["DB"];
@@ -1475,5 +1479,141 @@ test("[DLS-07] an approved design does not pay for a customer's build", async ()
     assert.equal(decision.verdict, "ineligible", decision.reasons.join("; "));
     assert.match(decision.reasons.join(" "), /no order is linked/, decision.reasons.join("; "));
     assert.equal(await B.syncProjectBuild(t.db, projectId, "backfill"), null, "and nothing is queued for it");
+  } finally { t.close(); }
+});
+
+// -- the runner's report, in the runner's own words -----------------------------------------------------------
+//
+// Everything above builds a `BaselineInput` by hand, in THIS side's vocabulary. That is why nothing caught the
+// import channel being broken from the day it was written: the runner's `DesignBaseline` calls the screenshot
+// hashes `renders`, `recordBaseline` requires `screenshots`, and an `as DL.BaselineInput` cast sat between them.
+// Every import report on Node 1 was refused with "a baseline needs at least one screenshot", the runner read the
+// 400 as infrastructure, and the artifact was measured and refused again for ever.
+//
+// So this posts what the runner posts, built by the runner's own code.
+
+const RUNNER_SECRET_FOR_IMPORT = "test-runner-secret";
+
+async function postImportReport(t: Awaited<ReturnType<typeof createTestApp>>, body: unknown) {
+  const raw = JSON.stringify(body);
+  const ts = Math.floor(Date.now() / 1000);
+  const res = await t.client().request("POST", "/api/builds/runner/frontend/import/report", {
+    body: raw,
+    headers: {
+      "content-type": "application/json",
+      "x-crestmont-runner-signature": `t=${ts},v1=${await hmacSha256Hex(RUNNER_SECRET_FOR_IMPORT, `${ts}.${raw}`)}`,
+    },
+  });
+  return { status: res.status, json: (await res.json()) as Record<string, unknown> };
+}
+
+const sig = (page: string, viewport: "desktop" | "tablet" | "mobile") => ({
+  page, viewport,
+  skeleton: ["header.site", "main.page", "footer.site"],
+  palette: ["rgb(10, 68, 81)", "rgb(16, 36, 40)", "rgb(255, 255, 255)"],
+  fonts: ["system-ui"],
+  typeScale: [16, 20, 32],
+  docHeight: 856,
+  landmarks: [
+    { sel: "header.site", x: 0, y: 0, w: 1280, h: 96 },
+    { sel: "main.page", x: 0, y: 96, w: 1280, h: 640 },
+    { sel: "footer.site", x: 0, y: 736, w: 1280, h: 120 },
+  ],
+});
+
+test("[DLS-08] the platform records the baseline the runner actually sends, screenshot hashes included", async () => {
+  const t = await createTestApp({ BUILD_RUNNER_SECRET: RUNNER_SECRET_FOR_IMPORT });
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const made = await DL.createTestProject(t.db, { name: "Import shape", actorId: staff.id });
+    const { artifact } = await cleanArtifact(t, made.projectId, made.organizationId, staff.id);
+
+    // Built by the runner's captureBaseline, so the field names are the runner's, not this test's idea of them.
+    const runnerBaseline = captureBaseline({
+      artifactSha: artifact.sha256,
+      sourceFingerprint: "f".repeat(64),
+      approvedBy: "runner win-test",
+      signatures: [sig("index", "desktop"), sig("index", "tablet"), sig("index", "mobile")],
+      renders: [
+        { page: "index", viewport: "desktop", sha: "1".repeat(64) },
+        { page: "index", viewport: "tablet", sha: "2".repeat(64) },
+        { page: "index", viewport: "mobile", sha: "3".repeat(64) },
+      ],
+    });
+    assert.ok(!("screenshots" in runnerBaseline), "the runner does not use the word `screenshots`; that is the point");
+    assert.equal(runnerBaseline.renders.length, 3);
+
+    const res = await postImportReport(t, {
+      artifactId: artifact.id,
+      status: "imported",
+      framework: "static",
+      archiveRoot: "site",
+      problems: [],
+      baseline: runnerBaseline,
+      measurement: {
+        routes: [{ page: "index", path: "/index.html" }],
+        interactions: [{ page: "index", element: "form#quote", needsBackend: true, functional: false }],
+        states: [{ page: "index", viewport: "mobile", state: "nav-open", sha: "4".repeat(64) }],
+        viewports: ["desktop", "tablet", "mobile"],
+      },
+    });
+
+    assert.equal(res.status, 200, `the platform must accept the runner's own baseline: ${JSON.stringify(res.json)}`);
+    assert.equal(res.json.recorded, "imported", JSON.stringify(res.json));
+
+    // And what it stored is the evidence, not an empty shell.
+    const row = await t.db.prepare(
+      `SELECT fingerprint, screenshots_json, signatures_json, route_manifest_json, interaction_inventory_json, states_json, viewports_json
+         FROM design_baselines WHERE artifact_id = ?`,
+    ).bind(artifact.id).first<Record<string, string>>();
+    assert.ok(row, "a baseline row exists");
+    assert.equal(row.fingerprint, runnerBaseline.fingerprint);
+    assert.equal(JSON.parse(row.screenshots_json).length, 3, "the runner's `renders` are recorded as screenshots");
+    assert.equal(JSON.parse(row.signatures_json).length, 3);
+    assert.equal(JSON.parse(row.route_manifest_json).length, 1, "and the same measurement's route inventory");
+    assert.equal(JSON.parse(row.interaction_inventory_json).length, 1);
+    assert.equal(JSON.parse(row.states_json).length, 1);
+    assert.deepEqual(JSON.parse(row.viewports_json), ["desktop", "tablet", "mobile"]);
+  } finally { t.close(); }
+});
+
+test("[DLS-09] a report the platform will not accept is refused with a reason, not a silent empty baseline", async () => {
+  const t = await createTestApp({ BUILD_RUNNER_SECRET: RUNNER_SECRET_FOR_IMPORT });
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const made = await DL.createTestProject(t.db, { name: "Import refusal", actorId: staff.id });
+    const { artifact } = await cleanArtifact(t, made.projectId, made.organizationId, staff.id);
+    const good = captureBaseline({
+      artifactSha: artifact.sha256, sourceFingerprint: null, approvedBy: "runner",
+      signatures: [sig("index", "desktop")],
+      renders: [{ page: "index", viewport: "desktop", sha: "1".repeat(64) }],
+    });
+
+    // No screenshot hashes at all: refused, and the message names the field that was empty so the runner can
+    // report it as the artifact's verdict instead of retrying a report that can never be accepted.
+    const noShots = await postImportReport(t, { artifactId: artifact.id, status: "imported", baseline: { ...good, renders: [] } });
+    assert.equal(noShots.status, 422, JSON.stringify(noShots.json));
+    assert.match(String(noShots.json.error), /no screenshot hashes/, String(noShots.json.error));
+    assert.match(String(noShots.json.error), /renders/, "and names the field the runner sent");
+
+    const noSigs = await postImportReport(t, { artifactId: artifact.id, status: "imported", baseline: { ...good, signatures: [] } });
+    assert.equal(noSigs.status, 422, JSON.stringify(noSigs.json));
+    assert.match(String(noSigs.json.error), /no page signatures/, String(noSigs.json.error));
+
+    const noPrint = await postImportReport(t, { artifactId: artifact.id, status: "imported", baseline: { ...good, fingerprint: "nope" } });
+    assert.equal(noPrint.status, 422, JSON.stringify(noPrint.json));
+
+    // None of those recorded anything.
+    const n = await t.db.prepare(`SELECT COUNT(*) AS n FROM design_baselines WHERE artifact_id = ?`).bind(artifact.id).first<{ n: number }>();
+    assert.equal(n?.n, 0, "a refused report leaves no baseline behind");
+
+    // An older runner that sends no measurement is still accepted; the counts are simply empty.
+    const ok = await postImportReport(t, { artifactId: artifact.id, status: "imported", baseline: good });
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    const row = await t.db.prepare(`SELECT screenshots_json, route_manifest_json FROM design_baselines WHERE artifact_id = ?`)
+      .bind(artifact.id).first<Record<string, string>>();
+    assert.ok(row, "the accepted report recorded a baseline");
+    assert.equal(JSON.parse(row.screenshots_json).length, 1);
+    assert.deepEqual(JSON.parse(row.route_manifest_json), [], "no measurement sent means no routes claimed");
   } finally { t.close(); }
 });

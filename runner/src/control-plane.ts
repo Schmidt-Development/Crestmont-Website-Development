@@ -239,6 +239,15 @@ export class ControlPlaneClient {
     lockfileSha?: string | null;
     problems?: string[];
     baseline?: unknown;
+    /**
+     * What the measurement found, beside the baseline itself.
+     *
+     * The baseline is the design lock: signatures, screenshot hashes and the fingerprint over them. The platform
+     * also records the route, interaction and state inventory the same measurement produced, and shows their
+     * counts on the Artifact Builder screen. Sent as its own field because it is evidence about the artifact, not
+     * part of what is frozen.
+     */
+    measurement?: unknown;
   }): Promise<void> {
     try { await this.post("/api/builds/runner/frontend/import/report", { ...r }); }
     catch (err) {
