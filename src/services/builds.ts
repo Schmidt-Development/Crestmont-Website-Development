@@ -160,6 +160,15 @@ export interface ProjectFacts {
   simulatedPayment?: boolean;
   /** The Owner marked the organization as a fictional test organization (required for a simulated payment to count). */
   simulationTestOrg?: boolean;
+  /**
+   * Crestmont's OWN project, with no order, whose design has been approved.
+   *
+   * The payment and intake gates below exist so no customer's website is built before it is paid for. An internal
+   * project has no customer and no order at all, so there is no payment to wait for and nothing to under-charge;
+   * what authorizes the build is the approved design baseline, which only a staff approval can create. That is how
+   * the Founder's own test artifacts reach a backend build: by being approved, not by faking a payment.
+   */
+  internalApprovedDesign?: boolean;
 }
 
 export async function projectFacts(db: Db, projectId: string): Promise<ProjectFacts> {
@@ -177,6 +186,12 @@ export async function projectFacts(db: Db, projectId: string): Promise<ProjectFa
     : !!(order.quote_version_id && (await db.prepare(`SELECT 1 FROM quote_versions WHERE id = ? AND COALESCE(TRIM(scope_text),'') <> ''`).bind(order.quote_version_id).first())));
   const pay = qualifying ? await db.prepare(`SELECT status, provider FROM payments WHERE invoice_id = ? ORDER BY created_at DESC LIMIT 1`).bind(qualifying.id).first<{ status: string; provider: string }>() : null;
   const refundRow = order ? await db.prepare(`SELECT 1 FROM refunds r JOIN payments p ON p.id = r.payment_id WHERE p.order_id = ? AND r.status IN ('approved','issued')`).bind(order.id).first() : null;
+  // `kind = 'internal'` is Crestmont's own organization, never a customer's, and `order_id IS NULL` means there is
+  // no order behind this project at all -- the same two conditions the test-project cleanup path uses before it
+  // will delete one. The approved baseline is the third: a person approved a design for this project.
+  const internalApprovedDesign = org?.kind === "internal" && !project.order_id && !!(await db.prepare(
+    `SELECT 1 FROM design_baselines WHERE project_id = ? AND status = 'approved' LIMIT 1`,
+  ).bind(projectId).first());
   return {
     project, order, qualifying, intakeSubmittedAt: onboarding?.completed_at ?? null,
     verifiedCustomer: org?.kind === "customer" && !!org.verified && order?.organization_id === project.organization_id,
@@ -185,6 +200,7 @@ export async function projectFacts(db: Db, projectId: string): Promise<ProjectFa
     disputed: pay?.status === "disputed",
     simulatedPayment: pay?.provider === "simulated",
     simulationTestOrg: !!org?.simulation_test_org,
+    internalApprovedDesign,
   };
 }
 
@@ -200,6 +216,13 @@ export function decideEligibility(f: ProjectFacts): Eligibility {
   const bad: string[] = [];
   if (!f.project) return { verdict: "ineligible", reasons: ["project not found"] };
   if (["cancelled", "completed", "maintenance"].includes(f.project.status)) bad.push(`project is ${f.project.status}`);
+  // Crestmont's own project, no order, approved design: queued on the strength of the approval. Everything below
+  // this line is about a customer's order and payment, and an internal project has neither -- which is why the
+  // Founder's submitted test artifacts used to be approved, measured and then silently never built. Checked after
+  // the project's status, so a cancelled one is still ineligible, and before anything that reads an order.
+  if (!bad.length && f.internalApprovedDesign) {
+    return { verdict: "queued", reasons: ["Crestmont's own project with an approved design and no order: the approval is the authorization, and there is no payment to wait for"] };
+  }
   if (!f.order) bad.push("no order is linked to the project");
   else if (f.order.status === "cancelled" || f.order.status === "refunded") bad.push(`order is ${f.order.status}`);
   if (!f.verifiedCustomer) bad.push("the customer organization has no verified customer admin");
