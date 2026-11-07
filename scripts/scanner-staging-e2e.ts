@@ -91,6 +91,10 @@ function customerAccount() {
 const ids: Record<keyof typeof FILES, string> = { text: "", pdf: "", eicar: "" };
 const shareToken = randomBytes(32).toString("hex");
 const shareId = `shr_${RUN.replace(/-/g, "")}`;
+// Set when the scanner already serving staging quarantined EICAR before this run's synthetic link existed: the
+// verdict revokes the links that exist AT THAT MOMENT, so a row inserted afterwards is never revoked; it must still
+// be refused (createShareLink refuses infected files and resolveShare answers file_unavailable).
+let linkAfterVerdict = false;
 const cust = new Session();
 
 await check("clamd answers (pinned clamav/clamav image, bundled signatures)", async () => {
@@ -147,7 +151,8 @@ await check("a share link for the EICAR file works before it is scanned", async 
   const r = await fetch(`${BASE}/share/${shareToken}`, { redirect: "manual" });
   if (REMOTE && r.status !== 200) {
     const st = (await q<{ scan_status: string }>(`SELECT scan_status FROM files WHERE id = ${lit(ids.eicar)}`))[0]?.scan_status;
-    return `the remote scanner reached it first (${st}); the revocation check below still applies`;
+    linkAfterVerdict = st === "infected" || st === "failed";
+    return `the remote scanner reached it first (${st}); the link was created after the verdict, so it must be refused rather than revoked`;
   }
   assert(r.status === 200, `share link answered ${r.status} before the scan`);
   assert(/has not been scanned for malware/.test(await r.text()), "the unscanned warning is shown");
@@ -208,7 +213,7 @@ await check("harmless files are scanned clean and still download byte for byte",
   assert(/Scanned clean/.test(await page.text()), "the portal shows 'Scanned clean'");
 });
 
-await check("EICAR is quarantined: infected with a named detection, download refused, share link revoked", async () => {
+await check("EICAR is quarantined: infected with a named detection, download refused, share link revoked (or refused, if created after the verdict)", async () => {
   const s = (await q<{ scan_status: string }>(`SELECT scan_status FROM files WHERE id = ${lit(ids.eicar)}`))[0]?.scan_status;
   assert(s === "infected", `EICAR is ${s}`);
   const scan = (await q<{ verdict: string; signature: string; engine: string; scanned_sha256: string }>(`SELECT verdict, signature, engine, scanned_sha256 FROM file_scans WHERE file_id = ${lit(ids.eicar)} ORDER BY recorded_at DESC LIMIT 1`))[0];
@@ -218,7 +223,9 @@ await check("EICAR is quarantined: infected with a named detection, download ref
   assert(d.status >= 400, `customer download of the infected file answered ${d.status}`);
   await d.arrayBuffer();
   const link = (await q<{ revoked_at: string | null }>(`SELECT revoked_at FROM share_links WHERE id = ${lit(shareId)}`))[0];
-  assert(link?.revoked_at, "the share link was not revoked");
+  // A link that existed when the verdict arrived is revoked by it. A link created after the verdict (the remote
+  // scanner won the race) cannot have been, and is checked by the refusal below instead.
+  if (!linkAfterVerdict) assert(link?.revoked_at, "the share link was not revoked");
   const out = await fetch(`${BASE}/share/${shareToken}`, { redirect: "manual" });
   assert(out.status === 410, `the share link answered ${out.status} to an outsider after the verdict`);
   const audit = (await q<{ n: number }>(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'file.quarantined' AND subject_id = ${lit(ids.eicar)}`))[0]?.n;
