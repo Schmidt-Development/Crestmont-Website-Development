@@ -113,30 +113,43 @@ async function signIn(page: Page, email: string, secret?: string) {
   }
   assert.doesNotMatch(new URL(page.url()).pathname, /^\/(login|mfa)/, `signed in as ${email}`);
 }
-/** FD-30: a customer administrator must enrol two-factor authentication before accepting, paying or approving. From
- *  the page the browser is on (which offers "Set up two-factor authentication"), enrol through the real setup page
- *  with the shown setup key, keep the recovery codes page, and continue back. Returns the TOTP secret. */
-async function enrolCustomerMfa(page: Page): Promise<string> {
-  const back = new URL(page.url()).pathname + new URL(page.url()).search;
-  await nav(page, page.getByRole("link", { name: "Set up two-factor authentication" }).first());
-  assert.match(new URL(page.url()).pathname, /^\/mfa\/setup$/);
-  assert.match(await text(page, "body"), /required for account administrators/i);
-  const secret = ((await page.locator("[data-testid=totp-secret]").innerText()) as string).replace(/\s/g, "");
-  await page.fill("#f-code", await totpCode(secret));
-  await nav(page, btn(page, "Turn on"));
-  assert.ok(await page.locator("[data-testid=recovery-codes] li").count() >= 8, "recovery codes shown once");
-  await nav(page, page.getByRole("link", { name: /I have saved my codes/ }));
-  assert.equal(new URL(page.url()).pathname + new URL(page.url()).search, back, "returned to the page after enrolment");
-  return secret;
-}
-/** Step-up MFA (src/app/step-up.ts): sensitive actions need a TOTP check within 10 minutes; do it just before. */
-async function freshMfa(page: Page, user: StaffUser) {
+/** Step-up before a sensitive action. MFA was removed (Founder directive 2026-11-06): /mfa/step-up sends a signed-in
+ *  user straight back without a code form, which this asserts; the action itself still requires the right role. */
+async function freshMfa(page: Page, _user: StaffUser) {
   const back = new URL(page.url()).pathname + new URL(page.url()).search;
   await page.goto(`${srv.base}/mfa/step-up?next=${encodeURIComponent(back)}`);
-  srv.db.prepare("UPDATE users SET totp_last_step = NULL WHERE email = ?").run(user.email);
-  await page.fill("#f-code", await totpCode(user.secret));
-  await nav(page, "button[type=submit]");
+  assert.equal(await page.locator("#f-code").count(), 0, "no code form");
   assert.equal(new URL(page.url()).pathname + new URL(page.url()).search, back, "returned to the page after the step-up check");
+}
+/** The website intake required before the first payment (#168): fills the required answers and submits. */
+async function fillIntake(c: Page): Promise<void> {
+  assert.ok(await c.locator("#f-industry").count(), "the website intake form is shown");
+  for (const [sel, v] of [["#f-business_name", contact.company], ["#f-contact_name", contact.name]] as const) {
+    if (!(await c.locator(sel).inputValue())) await c.fill(sel, v);
+  }
+  await c.fill("#f-industry", "Cafés");
+  await c.fill("#f-goals", "Online ordering for three cafés.");
+  await c.fill("#f-target_audience", "Regular customers.");
+  const visible = (sel: string) => c.locator(sel).isVisible();
+  assert.equal(await visible("#f-brand_style"), false, "style question hidden until the branding answer");
+  await c.check("input[name=has_branding][value=no]");
+  assert.equal(await visible("#f-brand_style"), true, "style question when there is no branding");
+  await c.fill("#f-brand_style", "Warm, friendly.");
+  await c.fill("#f-pages", "Home, Menu, Contact");
+  await c.check("input[name=functionality][value=booking]");
+  assert.equal(await visible("#f-booking_details"), true, "booking follow-up appears");
+  await c.check("input[name=content_source][value=crestmont_draft]");
+  await c.check("input[name=images_source][value=licensed]");
+  await c.check("input[name=domain_status][value=need]");
+  assert.equal(await visible("#f-domain_wishes"), true);
+  await c.fill("#f-domain_wishes", "harbor-cafes.example");
+  await c.check("input[name=hosting][value=crestmont]");
+  // Submitting without the now-required booking details is refused server-side and keeps what was typed.
+  await nav(c, btn(c, "Submit intake"));
+  assert.match(await text(c, ".alert--error"), /Booking details is required/);
+  assert.equal(await c.locator("#f-industry").inputValue(), "Cafés", "valid answers kept");
+  await c.fill("#f-booking_details", "Table reservations for tastings.");
+  await nav(c, btn(c, "Submit intake"));
 }
 async function staffActor(role: string, name: string, opts: Record<string, unknown> = {}): Promise<Actor & { user: StaffUser }> {
   const user = await createStaff(role, name);
@@ -190,7 +203,6 @@ let pm: Actor & { user: StaffUser };
 let dev: Actor & { user: StaffUser };
 let supportAgent: Actor & { user: StaffUser };
 let customer: Actor;
-let customerSecret = ""; // FD-30: the journey customer's TOTP secret, enrolled in step [SALES-004]
 let leadId = "", quoteId = "", proposalUrl = "", depositInvoiceId = "", projectId = "", ticketUrl = "";
 
 // ───────────── 1–2. Lead capture → CRM ─────────────
@@ -290,16 +302,20 @@ step("[SALES-004] customer registers with the quote email, verifies, signs in, a
   await signIn(p, contact.email);
 
   await p.goto(proposalUrl);
-  // FD-30: the new customer administrator is asked to set up two-factor authentication before accepting.
-  assert.match(await text(p), /Set up two-factor authentication to continue/);
-  assert.equal(await p.locator("input[name=agree]").count(), 0, "no accept form before enrolment");
-  customerSecret = await enrolCustomerMfa(p);
+  // MFA was removed for every account (Founder directive 2026-11-06): the customer administrator accepts directly.
+  assert.doesNotMatch(await text(p), /Set up two-factor authentication to continue/, "no two-factor gate before accepting");
   assert.match(await text(p), new RegExp(usd(total).replace("$", "\\$")));
   await p.check("input[name=agree]");
   await nav(p, btn(p, "Accept and continue to payment"));
   const path = new URL(p.url()).pathname;
   assert.match(path, /^\/portal\/billing\/invoices\/inv_/);
   depositInvoiceId = path.split("/").pop()!;
+  // Founder requirement (2026-11, #168): the customer describes the website before the first payment, so the deposit
+  // offers the intake first; once it is submitted the invoice page states the payment status.
+  assert.match(await text(p), /Before this first payment, tell us about the website you want/);
+  await p.goto(`${srv.base}${path}/intake`);
+  await fillIntake(p);
+  assert.equal(new URL(p.url()).pathname, path, "back on the invoice after the intake");
   const inv = await text(p);
   assert.match(inv, new RegExp(usd(Math.floor(total / 2)).replace("$", "\\$")));
   assert.match(inv, /Online payment is not configured yet\./, "honest: no Stripe key in this environment");
@@ -345,41 +361,13 @@ step("[PAY-003] signed webhook fixture (no Stripe account; BLK-004): checkout.se
 
 // ───────────── 8–9. Onboarding + uploads ─────────────
 
-step("[PORTAL-002] customer completes conditional onboarding: answers reveal follow-up questions, hidden required fields are enforced only when shown, logo uploads", async () => {
+step("[PORTAL-002] the project arrives with the conditional website intake the customer completed before paying (#168): no second intake, project in scope review", async () => {
   const p = customer.page;
-  await p.goto(srv.base + "/portal");
-  await nav(p, p.getByRole("link", { name: /Complete onboarding for/ }));
-  const visible = (sel: string) => p.locator(sel).isVisible();
-  assert.equal(await visible("#f-logo"), false, "logo upload hidden until branding answer");
-  await p.check("input[name=has_branding][value=yes]");
-  assert.equal(await visible("#f-logo"), true);
-  assert.equal(await visible("#f-brand_style"), false);
-  await p.check("input[name=has_branding][value=no]");
-  assert.equal(await visible("#f-brand_style"), true, "style question when there is no branding");
-  await p.check("input[name=has_branding][value=yes]");
-  await p.setInputFiles("#f-logo", { name: "harbor-logo.png", mimeType: "image/png", buffer: PNG });
-  await p.fill("#f-industry", "Specialty coffee");
-  await p.fill("#f-goals", "Online ordering for pickup and a loyalty program.");
-  await p.fill("#f-target_audience", "Regulars and office workers near our three cafés.");
-  await p.fill("#f-pages", "Home, Menu, Order, Locations, Loyalty, Contact");
-  await p.check("input[name=functionality][value=booking]");
-  assert.equal(await visible("#f-booking_details"), true);
-  await p.check("input[name=content_source][value=crestmont_draft]");
-  await p.check("input[name=images_source][value=licensed]");
-  assert.equal(await visible("#f-images"), false);
-  await p.check("input[name=domain_status][value=need]");
-  assert.equal(await visible("#f-domain_wishes"), true);
-  assert.equal(await visible("#f-domain_name"), false);
-  await p.fill("#f-domain_wishes", "harborcoffee-e2e.example");
-  await p.check("input[name=hosting][value=crestmont]");
-  // Submit without the now-required booking details → server-side conditional validation.
-  await nav(p, btn(p, "Submit onboarding"));
-  assert.match(await text(p, ".alert--error"), /Booking details is required/);
-  assert.match(await text(p), /Uploaded: harbor-logo\.png/, "logo kept with the draft");
-  assert.equal(await p.locator("#f-industry").inputValue(), "Specialty coffee", "valid answers kept");
-  await p.fill("#f-booking_details", "Table reservations for tastings, managed in Google Calendar today.");
-  await nav(p, btn(p, "Submit onboarding"));
-  assert.equal(new URL(p.url()).pathname, `/portal/projects/${projectId}`);
+  await p.goto(`${srv.base}/portal/projects/${projectId}/onboarding`);
+  assert.match(await text(p), /Website intake submitted before payment/, "the project arrived with its intake");
+  assert.equal(await p.locator("#f-industry").count(), 0, "no second intake form");
+  assert.match(await text(p), /Cafés/);
+  await p.goto(`${srv.base}/portal/projects/${projectId}`);
   assert.match(await text(p), /Scope review/i);
   assertClean();
 });
@@ -394,7 +382,6 @@ step("[PORTAL-004] customer uploads a project file; it is listed with its folder
   const page = await text(p);
   assert.match(page, /storefront\.png/);
   assert.match(page, /Branding/);
-  assert.match(page, /harbor-logo\.png/, "onboarding logo also stored as a project file");
   await nav(p, p.getByRole("link", { name: "storefront.png" }));
   const img = p.locator("main img").first();
   await img.evaluate((el: HTMLImageElement) => el.decode().catch(() => undefined));
@@ -411,7 +398,7 @@ step("[PM-004] PM takes the project and assigns a task; the developer updates th
   await p.goto(srv.base + "/staff/projects");
   await nav(p, p.locator("main a", { hasText: contact.company }).first());
   assert.equal(new URL(p.url()).pathname, `/staff/projects/${projectId}`);
-  assert.match(await text(p), /Specialty coffee/, "PM sees the onboarding answers");
+  assert.match(await text(p), /Cafés/, "PM sees the intake answers given before payment");
   await p.locator('form[action$="/pm"] select').selectOption(pm.user.id);
   await nav(p, p.locator('form[action$="/pm"]').getByRole("button", { name: "Save" }));
   assert.match(await text(p), new RegExp(`Project manager\\s+${pm.user.name}`, "i"));
