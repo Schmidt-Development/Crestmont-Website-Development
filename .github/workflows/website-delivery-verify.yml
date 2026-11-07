@@ -1,3 +1,5 @@
+name: Website delivery verification (deployed staging, browser)
+
 # Can a finished website actually reach the customer who is buying it?
 #
 # Everything else that covers the handover runs in-process against an in-memory database, and none of it can say
