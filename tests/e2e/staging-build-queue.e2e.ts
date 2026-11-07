@@ -79,7 +79,7 @@ async function signedIn(role: string): Promise<Page> {
 function fixtureZip(n: number): Buffer {
   const hue = 20 + n * 37;
   return makeZip([
-    { path: "index.html", body: Buffer.from(`<!doctype html><html><head><title>Queue fixture ${n} (${RUN})</title><link rel=stylesheet href=/s.css></head><body><header><h1>Fixture ${n}</h1></header><main><p>Disposable artifact ${n} for run ${RUN}.</p><form><label>Name <input name=name></label><button type=submit>Send</button></form></main></body></html>`) },
+    { path: "index.html", body: Buffer.from(`<!doctype html><html><head><title>Queue fixture ${n} (${RUN})</title><link rel=stylesheet href=/s.css></head><body><header><h1>Fixture ${n}</h1></header><main><p>Disposable artifact ${n} for run ${RUN}.</p><form id=quote><label>Name <input name=name></label><button type=submit>Send</button></form></main></body></html>`) },
     { path: "s.css", body: Buffer.from(`:root{--accent:hsl(${hue} 46% 32%)}body{font-family:system-ui;color:#102428;margin:0}header{padding:${16 + n}px;background:var(--accent);color:#fff}main{padding:24px}button{background:var(--accent);color:#fff;border:0;padding:8px 14px}`) },
     { path: "app.js", body: Buffer.from(`document.querySelector("form")?.addEventListener("submit", (e) => { e.preventDefault(); });\n// fixture ${n} of run ${RUN}\n`) },
   ]);
@@ -151,7 +151,57 @@ test(`[AB-Q-01] ${FIXTURES} disposable frontends are submitted and approved in o
   assert.equal(submitted.length, FIXTURES);
 });
 
-test("[AB-Q-02] four builds run and the rest hold real positions, with nobody pressing start", { skip: unset }, async (t) => {
+/** The contract the platform recorded for a project, read from its own state endpoint. */
+async function contractOf(p: Page, projectUrl: string): Promise<{
+  version: number; operations: number; authoredBy: string; authorModel: string | null; reviewFlags: number;
+} | null> {
+  const res = await p.request.get(`${projectUrl}/state`);
+  if (!res.ok()) return null;
+  const state = await res.json() as { contract?: { version: number; operations: number; authoredBy: string; authorModel: string | null; reviewFlags: number } | null };
+  return state.contract ?? null;
+}
+
+test("[AB-Q-02] every submitted frontend gets a validated contract drafted for it, with nobody writing one", { skip: unset }, async (t) => {
+  if (submitted.length !== FIXTURES) return t.skip("not every fixture was submitted");
+  const o = await signedIn("owner");
+
+  // This is what the Founder's decision of 2026-11-07 asked for, and it is also what the rest of this file needs
+  // to be worth running: a design-locked build with no contract stops thirteen seconds after it starts, so six
+  // builds that each last thirteen seconds would prove nothing about four slots. Each of these builds has real
+  // work to do because each has a contract saying what the work is.
+  //
+  // Scanning, importing, measuring and then drafting all happen once per fixture, and the drafting is a Model A
+  // session on the one GPU lane, so they are serialised. Patient on purpose, and it says what it is waiting on.
+  const deadline = Date.now() + 45 * 60_000;
+  const found = new Map<number, { version: number; operations: number; authoredBy: string; authorModel: string | null; reviewFlags: number }>();
+  let said = "";
+  while (Date.now() < deadline && found.size < submitted.length) {
+    for (const s of submitted) {
+      if (found.has(s.n)) continue;
+      const c = await contractOf(o, s.url);
+      if (c) {
+        found.set(s.n, c);
+        console.log(`  fixture ${s.n}: contract v${c.version}, ${c.operations} operation(s), by ${c.authoredBy}${c.authorModel ? ` (${c.authorModel})` : ""}${c.reviewFlags ? `, ${c.reviewFlags} flagged for review` : ""}`);
+      }
+    }
+    if (found.size >= submitted.length) break;
+    const now = `${found.size} of ${submitted.length} fixtures have a contract`;
+    if (now !== said) { console.log(`  waiting: ${now}`); said = now; }
+    await o.waitForTimeout(20_000);
+  }
+
+  assert.equal(found.size, submitted.length, `only ${found.size} of ${submitted.length} fixtures had a contract within 45 minutes; a build without one stops at once, so the queue proof below would be meaningless`);
+
+  for (const [n, c] of found) {
+    // Drafted, not written. A contract a person typed would prove nothing about the automatic path -- and a
+    // contract the IMPLEMENTING model wrote would prove something worse.
+    assert.equal(c.authoredBy, "model-a", `fixture ${n}'s contract was recorded as ${c.authoredBy}, not drafted`);
+    assert.ok(c.authorModel, `fixture ${n}'s contract does not name the model that drafted it`);
+    assert.ok(c.operations >= 1, `fixture ${n}'s contract plans ${c.operations} operations; the fixture has a form that needs a backend`);
+  }
+});
+
+test("[AB-Q-03] four builds run and the rest hold real positions, with nobody pressing start", { skip: unset }, async (t) => {
   if (submitted.length !== FIXTURES) return t.skip("not every fixture was submitted");
   const o = await signedIn("owner");
 
@@ -204,7 +254,7 @@ test("[AB-Q-02] four builds run and the rest hold real positions, with nobody pr
   console.log(`  waiting ${m.queued.map((q) => `${q.position}. ${q.project}`).join(", ")}`);
 });
 
-test("[AB-Q-03] releasing a slot starts the next in line by itself", { skip: unset }, async (t) => {
+test("[AB-Q-04] releasing a slot starts the next in line by itself", { skip: unset }, async (t) => {
   if (submitted.length !== FIXTURES) return t.skip("not every fixture was submitted");
   const o = await signedIn("owner");
   const before = await queueBoard(o);
