@@ -83,7 +83,11 @@ export class Scanner {
     const rep: CycleReport = { scanned: 0, clean: 0, infected: 0, failed: 0, deferred: 0, daemonOk: false, error: null, engine: null };
     const finish = (error: string | null) => {
       rep.error = error; rep.daemonOk = this.daemonOk; rep.engine = this.engine?.engine ?? null;
-      this.lastCycleAt = new Date(this.now()).toISOString(); this.lastCycleOk = !error; if (error) this.lastError = error;
+      // Clear it on success as well as record it on failure. It was only ever assigned, so a scanner that had
+      // recovered still reported the error that was over -- /healthz answered 200 with ok:true next to
+      // "HTTP 401: Signature mismatch" from before the credential was synchronised. A health field that keeps
+      // describing a fixed fault is worse than no field, because it is read as the current state.
+      this.lastCycleAt = new Date(this.now()).toISOString(); this.lastCycleOk = !error; this.lastError = error ?? null;
       return rep;
     };
     try {
