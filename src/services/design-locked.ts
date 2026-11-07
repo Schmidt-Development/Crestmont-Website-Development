@@ -759,13 +759,22 @@ export function validateContractDraft(
   }
   // An uncovered interaction may be declined, but it has to be declined BY NAME: the element identifier must
   // appear in one of the `outOfScope` lines. A general apology does not say which button is staying dead.
-  const declined = (manifest.outOfScope ?? []).join(" \u0001 ");
+  //
+  // A GENERIC identifier -- a bare tag name like `form`, which is what the measurement falls back to for an
+  // element with no id or class -- has to name its page too. Otherwise any sentence containing the word "form"
+  // would read as a decision about a specific form, and on a site with four of them three could ship dead while
+  // the contract looked deliberate.
+  const declinedLines = manifest.outOfScope ?? [];
+  const named = (i: InteractionItem) => {
+    const generic = !/[#.:[\]]/.test(i.element);
+    return declinedLines.some((line) => line.includes(i.element) && (!generic || line.includes(i.page)));
+  };
   for (const i of cov.uncovered) {
-    if (declined.includes(i.element)) {
+    if (named(i)) {
       warnings.push(`out-of-scope: "${i.element}" on "${i.page}" needs a backend and is deliberately not in the plan`);
       continue;
     }
-    problems.push(`uncovered-interaction: "${i.element}" on page "${i.page}" (${i.role}) needs a backend and no operation claims it. Either plan it, or name that exact element in outOfScope and say why it is being left.`);
+    problems.push(`uncovered-interaction: "${i.element}" on page "${i.page}" (${i.role}) needs a backend and no operation claims it. Either plan it, or name that exact element${/[#.:[\]]/.test(i.element) ? "" : ` and its page ("${i.page}")`} in outOfScope and say why it is being left.`);
   }
 
   // ── feasibility ──

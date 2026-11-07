@@ -1882,6 +1882,34 @@ test("[DLC-04] a draft that leaves a measured interaction unclaimed is refused, 
   } finally { t.close(); }
 });
 
+test("[DLC-04b] a generic element identifier has to be declined by page as well", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    // `form` with no id and no class is what the measurement falls back to, and there are two of them on two
+    // pages. "the form is not in this contract" would read as a decision about either -- so on a site with four
+    // forms, three could ship dead while the contract looked deliberate.
+    const { made, artifact, baseline } = await approvedMeasurement(t, staff.id, "Generic elements", {
+      signatures: [{ page: "index", viewport: "desktop" }, { page: "contact", viewport: "desktop" }],
+      interactions: [
+        { page: "index", element: "form#quote", needsBackend: true, functional: false },
+        { page: "contact", element: "form", needsBackend: true, functional: false },
+      ],
+    });
+
+    const loose = await DL.recordContract(t.db, made.projectId, manifestFor(artifact.sha256, baseline.fingerprint, {
+      outOfScope: ["the form is not in this contract: there is nowhere to send it yet"],
+    }), { recordedBy: staff.id });
+    assert.equal(loose.ok, false, JSON.stringify(loose));
+    assert.match("problems" in loose ? loose.problems.join(" ") : "", /its page \("contact"\)/, JSON.stringify(loose));
+
+    const exact = await DL.recordContract(t.db, made.projectId, manifestFor(artifact.sha256, baseline.fingerprint, {
+      outOfScope: ["the form on contact is not in this contract: there is nowhere to send it yet"],
+    }), { recordedBy: staff.id });
+    assert.ok(exact.ok, !exact.ok ? exact.problems.join("; ") : "");
+  } finally { t.close(); }
+});
+
 test("[DLC-05] a draft about an element the measurement never found is refused", async () => {
   const t = await createTestApp();
   try {
