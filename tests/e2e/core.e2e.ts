@@ -2,7 +2,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, launchBrowser, latestEmail, linkIn } from "./support.ts";
-import { hashPassword, totpCode, newTotpSecret } from "../../src/lib/auth-crypto.ts";
+import { hashPassword, newTotpSecret } from "../../src/lib/auth-crypto.ts";
 import { execFileSync } from "node:child_process";
 import { readFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -59,8 +59,8 @@ test("[AUTH-001] browser journey: register → confirm email from outbox → sig
   await page.close();
 });
 
-test("[AUTH-003] browser journey: staff sign-in requires a TOTP code", async () => {
-  const secret = newTotpSecret();
+test("[AUTH-003] browser journey: staff sign in with email and password, no code step (MFA removed 2026-11-06); a wrong password is refused", async () => {
+  const secret = newTotpSecret();   // a stored authenticator from before the removal is ignored, not deleted
   const now = new Date().toISOString();
   srv.db.exec(`INSERT OR IGNORE INTO organizations (id, name, kind, created_at) VALUES ('org_crestmont','Crestmont Website Development','internal','${now}')`);
   srv.db.prepare(`INSERT INTO users (id, email, display_name, password_hash, email_verified_at, totp_secret, mfa_enabled, created_at) VALUES ('usr_e2e_pm','pm.e2e@crestmont.test','E2E PM',?,?,?,1,?)`).run(await hashPassword(PW), now, secret, now);
@@ -68,13 +68,14 @@ test("[AUTH-003] browser journey: staff sign-in requires a TOTP code", async () 
   const page = await browser.newPage();
   await page.goto(srv.base + "/login");
   await page.fill("#f-email", "pm.e2e@crestmont.test");
-  await page.fill("#f-password", PW);
-  await Promise.all([page.waitForURL(/\/mfa/), page.click("button[type=submit]")]);
-  await page.fill("#f-code", "000000");
+  await page.fill("#f-password", PW + "-wrong");
   await Promise.all([page.waitForLoadState("load"), page.click("button[type=submit]")]);
-  assert.match(await page.content(), /That code is not valid/);
-  await page.fill("#f-code", await totpCode(secret));
-  await Promise.all([page.waitForURL((u: URL) => !u.pathname.startsWith("/mfa")), page.click("button[type=submit]")]);
+  assert.match(await page.content(), /Email or password is incorrect/);
+  assert.match(new URL(page.url()).pathname, /^\/login/, "a wrong password does not sign in");
+  await page.fill("#f-email", "pm.e2e@crestmont.test");
+  await page.fill("#f-password", PW);
+  await Promise.all([page.waitForURL((u: URL) => !u.pathname.startsWith("/login")), page.click("button[type=submit]")]);
+  assert.doesNotMatch(new URL(page.url()).pathname, /^\/mfa/, "no two-factor step");
   assert.match(page.url(), /\/staff/);
   await page.close();
 });

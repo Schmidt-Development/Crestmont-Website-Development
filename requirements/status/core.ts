@@ -9,7 +9,7 @@ export const CORE: Record<string, ImplementationRecord> = {
   "BRAND-005": { status: "in_progress", location: "src/ui/components.ts", owner: "engineering", missing: "skeleton usage on slow views" },
   "AUTH-001": { status: "implemented", location: "src/services/auth.ts + src/routes/auth.ts", owner: "engineering" },
   "AUTH-002": { status: "implemented", location: "src/services/auth.ts#requestPasswordReset/resetPassword", owner: "engineering" },
-  "AUTH-003": { status: "implemented", location: "src/lib/auth-crypto.ts (RFC 6238) + /mfa routes; staff enforced in requireStaff", owner: "engineering" },
+  "AUTH-003": { status: "implemented", location: "src/services/auth.ts (password sign-in, MFA removed 2026-11-06) + src/app/app.ts requireRecentMfa no-op; tests/mfa-removed.test.ts", owner: "engineering" },
   "AUTH-004": { status: "implemented", location: "sessions table + /account session management", owner: "engineering" },
   "AUTH-005": { status: "implemented", location: "src/services/security.ts + login lockout", owner: "engineering" },
   "AUTH-006": { status: "implemented", location: "src/services/auth.ts#createInvitation/acceptInvitation + /invite", owner: "engineering" },

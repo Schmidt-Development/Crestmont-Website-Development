@@ -84,6 +84,33 @@ export function integrationPrompt(i: IntegrationPromptInput): string {
   if (working.length > 14) lines.push(bullet(`…and ${working.length - 14} more`));
   lines.push("");
 
+  // The contract has always said how the data must be stored. The brief never passed it on, so the model chose:
+  // the first Northgate run wrote a JSON file (which genuinely persists, and survived the restart check) and the
+  // second reached for a native sqlite driver the sandbox cannot build. Both were reasonable guesses at something
+  // the contract had already decided. Say it here, where the work starts, instead of only in a repair message
+  // after a gate has failed.
+  if (m.persistence) {
+    const p9 = m.persistence;
+    lines.push(`## How it must store things`);
+    lines.push("");
+    lines.push(p9.enforcement === "required"
+      ? `The approved architecture uses **${p9.technology}**, and that is a requirement, not a preference. A JSON file, an in-memory array or a different database is a failed build even if every request returns the right answer — behaviour cannot tell them apart, and a file store loses writes the first time two people submit at once.`
+      : `The approved architecture uses **${p9.technology}**. Any mechanism that genuinely persists is acceptable here, so use your judgement — but an in-memory array is not persistence.`);
+    if (p9.technology === "sqlite") {
+      lines.push("");
+      lines.push(`Use \`node:sqlite\`, which is built into Node and needs no install. **The sandbox has no network and no compiler**, so a native driver such as \`better-sqlite3\` may not install at all; a dependency the sandbox cannot build is a failed build, not a detail.`);
+    }
+    if (p9.durable !== false) {
+      lines.push("");
+      lines.push(`Rows must survive the application restarting. This is checked by restarting it and reading them back.`);
+    }
+    if (p9.evidence?.length) {
+      lines.push("");
+      lines.push(`How a reader will tell it is really in use: ${p9.evidence.map((e) => `${e}`).join("; ")}.`);
+    }
+    lines.push("");
+  }
+
   lines.push(`## What you are building`);
   lines.push("");
   lines.push(`${needing.length} control(s) need a backend. ${order.length} operation(s) are planned, in this order:`);
