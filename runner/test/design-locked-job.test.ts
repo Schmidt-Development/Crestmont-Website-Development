@@ -227,8 +227,14 @@ test("[DLJ-03] Model B cannot certify its own work: all three gates run independ
   // make this gate pass, because the manifest's written acceptance criteria describe behaviour nothing exercised.
   // Unverified is not verified, whatever the model wrote about itself.
   assert.equal(first.functional.ran, true, "the runner's own driver runs whether or not the model wrote a test");
-  assert.match(first.functional.detail, /were NOT verified/, "and an unverifiable criterion is not a passing one");
+  assert.match(first.functional.detail, /could not be evaluated/, "and an unverifiable criterion is not a passing one");
   assert.match(first.functional.detail, /the model produced no acceptance check of its own/);
+  // Each unestablished criterion is named, because that list is what has to be worked through next.
+  assert.match(first.functional.detail, /acceptance\[0\]/, "the criteria are reported one by one, not as a count");
+  const results = JSON.parse(readFileSync(path.join(repo, ".crestmont", "acceptance", "results.json"), "utf8")) as
+    { counts: { pass: number; fail: number; undetermined: number }; checks: { id: string; undetermined?: boolean }[] };
+  assert.ok(results.counts.undetermined > 0, "the undetermined criteria are kept as diagnostics beside the plan");
+  assert.ok(results.checks.some((c) => c.undetermined && /acceptance\[/.test(c.id)));
   assert.match(r.summary, /RESULT: not complete/);
 });
 

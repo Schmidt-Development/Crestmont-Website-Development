@@ -27,6 +27,7 @@ import type { ApiContract, ApiRequirement, IntegrationManifest, ManifestContract
 export const ACCEPTANCE_DIR = ".crestmont/acceptance";
 export const DRIVER = `${ACCEPTANCE_DIR}/contract-acceptance.mjs`;
 export const PLAN = `${ACCEPTANCE_DIR}/plan.json`;
+export const RESULTS = `${ACCEPTANCE_DIR}/results.json`;
 
 export interface AcceptanceCheck {
   id: string;
@@ -113,12 +114,31 @@ if (!plan.start) {
 }
 
 const base = "http://127.0.0.1:" + plan.port;
-const child = spawn(plan.start[0], plan.start.slice(1), {
+// Its own process GROUP. npm run start is a wrapper: a signal sent to npm does not reliably reach the server npm
+// started, and that server keeps the port. Stopping the group stops what it started, which is what makes the
+// restart check below mean anything (and what stops a leftover server breaking the next run with EADDRINUSE).
+const SPAWN = {
   cwd: process.cwd(),
   env: { ...process.env, PORT: String(plan.port), NODE_ENV: "test" },
   stdio: ["ignore", "pipe", "pipe"],
   shell: process.platform === "win32",
-});
+  detached: process.platform !== "win32",
+};
+const stopTree = async (proc) => {
+  if (!proc || proc.exitCode !== null) return;
+  try {
+    if (process.platform === "win32") spawn("taskkill", ["/pid", String(proc.pid), "/t", "/f"], { stdio: "ignore" });
+    else process.kill(-proc.pid, "SIGTERM");
+  } catch { try { proc.kill("SIGTERM"); } catch { /* already gone */ } }
+  for (let i = 0; i < 40 && proc.exitCode === null; i++) await new Promise((r) => setTimeout(r, 250));
+  if (proc.exitCode === null) {
+    try {
+      if (process.platform !== "win32") process.kill(-proc.pid, "SIGKILL");
+      else proc.kill("SIGKILL");
+    } catch { /* already gone */ }
+  }
+};
+const child = spawn(plan.start[0], plan.start.slice(1), SPAWN);
 let log = "";
 child.stdout.on("data", (d) => { log += d; });
 child.stderr.on("data", (d) => { log += d; });
@@ -257,22 +277,36 @@ if (!up) {
     }
 
     // Does the session survive the application restarting? A session held only in memory is not a session.
-    child.kill("SIGTERM");
-    await sleep(500);
-    if (child.exitCode === null) child.kill("SIGKILL");
-    const again = spawn(plan.start[0], plan.start.slice(1), {
-      cwd: process.cwd(), env: { ...process.env, PORT: String(plan.port), NODE_ENV: "test" },
-      stdio: ["ignore", "pipe", "pipe"], shell: process.platform === "win32",
-    });
+    //
+    // Stopping it properly matters more than it looks: npm run start is a wrapper, SIGTERM reaches npm and the
+    // node process it spawned keeps the port, so a second start binds nothing and the check reports "did not come
+    // back up" when the application was fine all along. So: stop, then WAIT FOR THE PORT TO BE FREE before
+    // starting again, and say which of the two failed if it does.
+    const free = async () => {
+      try { await fetch(base + "/", { signal: AbortSignal.timeout(1000) }); return false; } catch { return true; }
+    };
+    await stopTree(child);
+    let released = false;
+    for (let i = 0; i < 40 && !released; i++) { await sleep(250); released = await free(); }
+    if (!released) {
+      add("persistence:stops-cleanly", false,
+        "the application kept answering on port " + plan.port + " after being stopped, so a restart could not be tested (on a shell wrapper, a signal may not reach the server it started)", true);
+    }
+
+    const again = spawn(plan.start[0], plan.start.slice(1), SPAWN);
+    let backLog = "";
+    again.stdout.on("data", (d) => { backLog += d; });
+    again.stderr.on("data", (d) => { backLog += d; });
     let back = false;
-    for (let i = 0; i < 40 && !back; i++) {
+    for (let i = 0; i < 60 && !back; i++) {
       await sleep(500);
       if (again.exitCode !== null) break;
       try { await fetch(base + "/", { signal: AbortSignal.timeout(1500) }); back = true; } catch { /* not yet */ }
     }
     const me = plan.endpoints.find((x) => x.auth === "customer" && x.method === "GET" && /\/me$|session/i.test(x.path));
     if (!back) {
-      add("persistence:session-survives-restart", false, "the application did not come back up, so persistence could not be established", true);
+      add("persistence:session-survives-restart", false,
+        "the application did not come back up within 30s, so persistence could not be established: " + backLog.slice(-300).replace(/\s+/g, " "), true);
     } else if (!me) {
       add("persistence:session-survives-restart", false, "the contract declares no endpoint that reports the signed-in account, so a surviving session could not be observed", true);
     } else {
@@ -281,15 +315,11 @@ if (!up) {
         after === (me.success ?? 200) ? "the session still worked after the application restarted"
           : "after a restart the session answered " + after + ", so sessions do not survive one");
     }
-    again.kill("SIGTERM");
-    await sleep(300);
-    if (again.exitCode === null) again.kill("SIGKILL");
+    await stopTree(again);
   }
 }
 
-try { child.kill("SIGTERM"); } catch { /* already gone */ }
-await sleep(200);
-try { if (child.exitCode === null) child.kill("SIGKILL"); } catch { /* already gone */ }
+await stopTree(child);
 
 console.log(JSON.stringify({ results }));
 process.exit(results.some((r) => !r.ok) ? 1 : 0);
@@ -312,6 +342,40 @@ export function readAcceptanceOutput(stdout: string): AcceptanceCheck[] {
     const parsed = JSON.parse(line) as { results?: AcceptanceCheck[] };
     return Array.isArray(parsed.results) ? parsed.results : [];
   } catch { return []; }
+}
+
+/**
+ * One check per written acceptance criterion that nothing executed established.
+ *
+ * The contract driver proves the API CONTRACT: each declared route is served, an anonymous caller is refused with
+ * exactly the declared status, a malformed request is refused with exactly the declared status, and — once it has
+ * registered and signed in as itself — that a signed-in caller gets the declared success and a staff endpoint
+ * refuses a customer session.
+ *
+ * The manifest's per-operation `acceptance` lines are narrower than that: "a submitted request is stored as a row
+ * in appointments with status 'requested'" names a table and a value. Nothing above reads the database, so those
+ * are reported one by one as UNDETERMINED with their own text, rather than rolled into a single sentence. A
+ * person reading the build record should be able to see WHICH criteria were not established, because that is the
+ * list the six-artifact campaign has to work through.
+ */
+export function coverageChecks(manifest: { operations: { id: string; acceptance: string[] }[] }): AcceptanceCheck[] {
+  return manifest.operations.flatMap((op) =>
+    op.acceptance.map((text, i) => ({
+      id: `${op.id} :: acceptance[${i}]`,
+      ok: false,
+      undetermined: true,
+      detail: `not established by any executed check: ${text}`,
+    })),
+  );
+}
+
+/** The full check list, written beside the plan so a later run can be compared with this one. */
+export function writeAcceptanceResults(repo: string, checks: readonly AcceptanceCheck[]): string {
+  mkdirSync(path.join(repo, ACCEPTANCE_DIR), { recursive: true });
+  const counts = { pass: 0, fail: 0, undetermined: 0 };
+  for (const c of checks) counts[c.undetermined ? "undetermined" : c.ok ? "pass" : "fail"]++;
+  writeFileSync(path.join(repo, RESULTS), JSON.stringify({ at: new Date().toISOString(), counts, checks }, null, 2));
+  return RESULTS;
 }
 
 /**
