@@ -319,7 +319,11 @@ test("[AST-08] the deployed egress allowlist does not block a validated asset, a
 
     // And the exception closed behind it: the host is blocked again once the request is done.
     await assert.rejects(() => guarded("https://fonts.googleapis.com/css2?family=Fraunces"), /blocked by the egress allowlist/);
-    assert.ok(!EGRESS_HOSTS.includes("fonts.googleapis.com"), "the standing allowlist was not widened");
+    // `some(h => h === …)` rather than `includes(…)`: an exact membership test, and one that cannot be read as a
+    // substring check. CodeQL's incomplete-url-substring-sanitization rule cannot tell an array's `includes` from
+    // a string's, and flagged this as a high alert -- which is a false positive, but "no entry of the standing
+    // allowlist IS this host" is the clearer way to say it in any case.
+    assert.ok(!EGRESS_HOSTS.some((h) => h === "fonts.googleapis.com"), "the standing allowlist was not widened");
   } finally { t.close(); }
 });
 
