@@ -119,6 +119,10 @@ test("[VOICE-004] Retell prompt audit: 24/7 selling, after-hours conflicts, inta
   const f = Object.fromEntries(promptBehaviourFindings(bad).map((x) => [x.check, x]));
   assert.equal(f["prompt: sells 24/7"].status, "fail");
   assert.equal(f["prompt: no after-hours limits"].status, "fail");
-  assert.match(f["prompt: no after-hours limits"].detail, /says Crestmont is closed \(1\).*branches on business_open_now/);
+  assert.match(f["prompt: no after-hours limits"].detail, /says Crestmont is closed: 1 as an instruction.*branches on business_open_now: 1 as an instruction/);
+  // A prohibition is the opposite of a conflict: "never say we're closed" passes, and says how it was read.
+  const neg = Object.fromEntries(promptBehaviourFindings(`${good} Never tell callers we are closed. Do not just take a message after hours.`).map((x) => [x.check, x]));
+  assert.equal(neg["prompt: no after-hours limits"].status, "pass", neg["prompt: no after-hours limits"].detail);
+  assert.match(neg["prompt: no after-hours limits"].detail, /inside a prohibition/);
   assert.doesNotMatch(JSON.stringify(promptBehaviourFindings(bad)), /Tell callers/, "the prompt text is never echoed");
 });
