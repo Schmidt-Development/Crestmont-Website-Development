@@ -674,7 +674,7 @@ jobs:
           unset EVIDENCE_INGEST_SECRET   # set via GITHUB_ENV earlier; third-party packages below never see it (F-24)
           npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 axe-core@4.10.2 > /dev/null
           .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
-          node --no-warnings --test --test-concurrency=1 --test-reporter=./scripts/evidence-reporter.mjs tests/e2e/staging.e2e.ts tests/e2e/staging-quality.e2e.ts tests/e2e/staging-journeys.e2e.ts
+          node --no-warnings --test --test-concurrency=1 --test-reporter=./scripts/evidence-reporter.mjs tests/e2e/staging.e2e.ts tests/e2e/staging-quality.e2e.ts tests/e2e/staging-journeys.e2e.ts tests/e2e/staging-artifact-upload.e2e.ts
 
       # PR #50: CRM duplicate protection against the live Worker and the real staging D1 (synthetic data only, erased at
       # the end): migrations 0048/0049, schema, backfill, signed research imports, idempotency, concurrent duplicates,
