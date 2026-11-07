@@ -193,6 +193,7 @@ test("[SEC-001] signed JSON endpoints: malformed and hostile JSON with valid sig
     "POST /api/assistant": async () => ({ origin: "http://crestmont.test" }),
     "POST /api/scheduled/run": async (b) => ({ "x-crestmont-scheduler-signature": await signEvidence(SECRETS.scheduler, b) }),
     "POST /api/voice/retell-audit": async (b) => ({ "x-crestmont-scheduler-signature": await signEvidence(SECRETS.scheduler, b) }),
+    "POST /api/voice/retell-tools/founder-flag": async (b) => ({ "x-crestmont-scheduler-signature": await signEvidence(SECRETS.scheduler, b) }),
     "POST /api/sales-outbound/retell-audit": async (b) => ({ "x-crestmont-scheduler-signature": await signEvidence(SECRETS.scheduler, b) }),
     "POST /api/sales-outbound/test-dispatch": async (b) => ({ "x-crestmont-scheduler-signature": await signEvidence(SECRETS.scheduler, b) }),
     "POST /api/crm/v1/imports": async (b) => ({ "x-crestmont-signature": await signEvidence(SECRETS.crmImport, b), "idempotency-key": `fuzz-${Math.random().toString(16).slice(2, 12)}` }),

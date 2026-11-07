@@ -1,0 +1,47 @@
+name: Retell receptionist — add wants_founder to the calendar tools
+
+# Founder directive 2026-11-06. Adds the optional wants_founder flag to the receptionist's schedule_consultation and
+# request_callback tools in Retell, through the staging Worker's own inbound key (src/services/retell-founder-flag.ts).
+# Writes general_tools only (never the prompt), verifies by read-back that nothing else changed, and is a dry run unless
+# `apply` is ticked. Retell saves it to the agent's draft; the Founder publishes the agent in Retell. Manual only.
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Write the change (unticked = dry run: report what would change)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retell-founder-flag
+  cancel-in-progress: false
+
+jobs:
+  flag:
+    if: github.ref == 'refs/heads/main'   # main only, like every workflow that holds staging secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: staging
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+      - name: Add wants_founder (read-back verified)
+        env:
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          STAGING_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+          APPLY: ${{ inputs.apply }}
+        run: node --no-warnings scripts/trigger-scheduler.ts retell-founder-flag --url "$STAGING_URL" $( [ "$APPLY" = "true" ] && echo --apply )
+      - name: Independent read-back (read-only inbound audit)
+        if: always()
+        continue-on-error: true
+        env:
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          STAGING_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+        run: node --no-warnings scripts/trigger-scheduler.ts retell-audit --url "$STAGING_URL"
