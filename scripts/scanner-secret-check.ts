@@ -14,6 +14,9 @@
 //                      the value it put, salted with the root key, so a matching fingerprint says the bookkeeping
 //                      agrees. It can agree while the Worker's actual value has since been changed by something
 //                      else — which is why the probe exists and wins.
+//   --probe-provided <origin>
+//                      The same oracle for a Founder-provided FILE_SCANNER_SECRET taken from the environment, for use
+//                      after the staging Worker has been synchronised to it. Needs no token.
 //   --probe-installed <origin>
 //                      The same oracle for the value already in scanner.env on this host: needs no token at all.
 //   --offline          Checksums only. Lets several candidate tokens be told apart with no network and no secret.
@@ -72,6 +75,28 @@ const probeOrigin = flag("--probe");
 const envFile = flag("--installed-at") ?? "C:/CrestmontScanner/scanner.env";
 
 const probeInstalled = flag("--probe-installed");
+const probeProvided = flag("--probe-provided");
+
+// After the staging Worker has been synchronised to a Founder-provided FILE_SCANNER_SECRET, the derived key is no
+// longer what it holds, so --probe would ask the wrong question. This asks with the provided value itself, read from
+// the environment (never an argument, so it cannot reach a process list), and needs no root token.
+if (probeProvided) {
+  const given = process.env.FILE_SCANNER_SECRET ?? "";
+  if (!/^[0-9a-f]{64}$/.test(given)) {
+    console.error("::error::FILE_SCANNER_SECRET must be set to 64 lower-case hex characters for --probe-provided");
+    process.exit(1);
+  }
+  console.log(`provided secret         : ${checksum(given)}`);
+  try {
+    const r = await probe(probeProvided, given);
+    console.log(`
+PROBE (${probeProvided}, provided secret): ${r.verdict}`);
+    process.exitCode = r.status === 200 ? 0 : 1;
+  } catch (e) {
+    console.error(`::error::probe failed to reach the Worker: ${(e as Error).message}`);
+    process.exitCode = 1;
+  }
+} else {
 
 // Asking about the value already on this host needs no token and no D1: the Worker itself answers. This is the
 // cheapest honest test of "is the scanner's current credential the one staging expects", and the only one that
@@ -132,13 +157,18 @@ if (probeOrigin) {
 if (!offline) {
   try {
     const fp = secretFingerprint(root, SECRET_NAME, derived);
-    const rows = await wranglerOps().query<{ fingerprint: string }>(`SELECT fingerprint FROM deploy_secret_fingerprints WHERE name = '${SECRET_NAME}'`);
+    // updated_at as well as the fingerprint. A MISMATCH alone cannot say WHY: the row may never have matched this
+    // token, or something may have rewritten it. Its timestamp settles that against the deploy history -- a row
+    // written after the last deploy means a put ran outside CI, with a root this environment does not hold.
+    const rows = await wranglerOps().query<{ fingerprint: string; updated_at: string }>(`SELECT fingerprint, updated_at FROM deploy_secret_fingerprints WHERE name = '${SECRET_NAME}'`);
     if (!rows[0]) {
       console.log(`RECORDED IN D1: none — the deploy has no fingerprint for ${SECRET_NAME}, so it never put one.`);
       exit = exit || 2;
     } else {
       const ok = rows[0].fingerprint === fp;
-      console.log(`RECORDED IN D1: ${ok ? "MATCH" : "MISMATCH"} — the deploy's record ${ok ? "agrees with this token" : "was written by a DIFFERENT token"}`);
+      console.log(`RECORDED IN D1: ${ok ? "MATCH" : "MISMATCH"} — the record ${ok ? "agrees with this token" : "was written by a DIFFERENT token"}`);
+      console.log(`  recorded at           : ${rows[0].updated_at}`);
+      console.log(`  recorded fingerprint  : ${checksum(rows[0].fingerprint)}   (computed from this token: ${checksum(fp)})`);
       if (!ok) exit = exit || 1;
     }
   } catch (e) {
@@ -148,4 +178,5 @@ if (!offline) {
 }
 
 process.exitCode = exit;
+}
 }
