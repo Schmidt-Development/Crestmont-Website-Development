@@ -77,13 +77,38 @@ out.requested = [...requested];
 // them). No inherited test-runner context (a parent `node --test` would capture the results) and no NODE_OPTIONS.
 const childEnv = { ...process.env, NODE_OPTIONS: "" };
 delete childEnv.NODE_TEST_CONTEXT;
+
+/**
+ * Kill a detached child and everything it started, on this platform.
+ *
+ * `process.kill(-pid)` addresses a process GROUP, which only exists on POSIX. On Windows it throws, and the empty
+ * catch that used to wrap it swallowed the throw -- so nothing was killed and nothing said so. Measured on the
+ * Windows build node: 512 orphaned `serve.mjs` processes left by earlier test runs, holding 27.9 GB of its 95 GB.
+ * These gates normally run inside a Linux sandbox, where the group kill worked, which is why it went unnoticed;
+ * on a Windows host running the suite it never did.
+ *
+ * `taskkill /T /F` is the Windows equivalent: terminate the process and its children. It is spawned with no stdio
+ * and unref'd so it cannot hold this process open, and a real failure is reported rather than hidden -- the whole
+ * bug was a silent failure.
+ */
+function killTree(pid, onProblem) {
+  if (!pid) return;
+  try {
+    if (process.platform === "win32") spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", detached: true }).unref();
+    else process.kill(-pid, "SIGKILL");
+  } catch (e) {
+    // ESRCH means it had already gone, which is the outcome we wanted. Anything else is a leak worth knowing about.
+    if (e?.code !== "ESRCH" && onProblem) onProblem(e);
+  }
+}
+
 function runChild(argv, timeoutMs) {
   return new Promise((resolve) => {
     const c = spawn(process.execPath, argv, { cwd: ROOT, env: childEnv, detached: true, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";
     c.stdout.on("data", (d) => { if (stdout.length < 20_000_000) stdout += d; });
     c.stderr.on("data", (d) => { if (stderr.length < 2_000_000) stderr += d; });
-    const killGroup = () => { try { process.kill(-c.pid, "SIGKILL"); } catch { /* already gone */ } };
+    const killGroup = () => killTree(c.pid);
     const timer = setTimeout(killGroup, timeoutMs);
     c.on("close", (code) => { clearTimeout(timer); killGroup(); resolve({ status: code, stdout, stderr }); });
     c.on("error", () => { clearTimeout(timer); resolve({ status: -1, stdout, stderr }); });
@@ -293,7 +318,9 @@ for (const e of fe.errors.filter((x) => x.area === "performance")) fail(G, `${e.
     if (p95 > 100) fail(G, `local API p95 ${p95.toFixed(1)} ms exceeds the 100 ms budget`);
     else G.evidence.push(`local API p95 ${p95.toFixed(1)} ms; page weight within budget`);
   } catch (e) { fail(G, `performance measurement failed: ${String(e.message).slice(0, 200)}`); }
-  finally { if (server?.pid) { try { process.kill(-server.pid, "SIGKILL"); } catch { /* gone */ } } }
+  // The one long-lived child, and so the one that actually leaked. A failure to stop it is a gate finding, not a
+  // silence: a measurement run that leaves a web server behind has not finished cleanly.
+  finally { killTree(server?.pid, (e) => fail(G, `the measurement website could not be stopped (${String(e.message).slice(0, 120)}); it may still be running`)); }
 }
 
 // ── J deployment readiness ──
