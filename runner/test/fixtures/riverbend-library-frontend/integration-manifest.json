@@ -21,7 +21,7 @@
     "provider": "own"
   },
   "persistence": {
-    "enforcement": "any",
+    "enforcement": "required",
     "technology": "sqlite",
     "durable": true,
     "evidence": [

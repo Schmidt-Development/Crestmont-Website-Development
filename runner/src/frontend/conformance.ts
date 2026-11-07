@@ -206,7 +206,7 @@ export function checkConformance(o: {
           mentioned
             ? `The contract requires a table \`${model.table}\`. The name appears in the source, but no CREATE TABLE defines it, so there is no schema for it.`
             : `The contract requires a table \`${model.table}\` and nothing in the source defines or mentions it.`,
-          `Define \`${model.table}\` with the fields the contract names (${model.fields.join(", ")}), using the contract's storage technology.`);
+          `Define \`${model.table}\` with the fields the contract names (${model.fields.join(", ")})${m.persistence ? ` in ${m.persistence.technology}` : ""}${m.persistence?.technology === "sqlite" ? " (node:sqlite is built in, which matters because the sandbox has no network)" : ""}.`);
         continue;
       }
       const missing = model.fields.filter((f) => !got.columns.has(f.toLowerCase()));
