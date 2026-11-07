@@ -32,6 +32,12 @@ const BASE = (process.env.E2E_BASE_URL ?? "").replace(/\/$/, "");
 const SECRET = process.env.FILE_SCANNER_SECRET ?? "";
 const ACCOUNTS = process.env.E2E_ACCOUNTS_FILE ?? "";
 const CLAMD = { host: "127.0.0.1", port: Number(process.env.CLAMD_PORT ?? 3310), timeoutMs: 60_000 };
+// E2E_REMOTE_SCANNER=1 leaves the scanning to whatever scanner is already serving this platform -- the operational
+// one on Node 1 -- instead of running one here. A scanner that passes its own tests in CI proves the code; only this
+// proves the DEPLOYMENT: real portal upload, the platform's own queue, that scanner's signed verdict, the row it
+// writes. It costs a wait, because that scanner polls on its own schedule.
+const REMOTE = process.env.E2E_REMOTE_SCANNER === "1";
+const REMOTE_WAIT_MS = Number(process.env.E2E_REMOTE_WAIT_SECONDS ?? 420) * 1000;
 if (!BASE || !SECRET || !ACCOUNTS) { console.error("::error::E2E_BASE_URL, FILE_SCANNER_SECRET and E2E_ACCOUNTS_FILE are required"); process.exit(2); }
 // E2E_LOCAL_DB: run the same checks against `npm run dev` and its SQLite file, to rehearse this script before staging.
 const d1 = process.env.E2E_LOCAL_DB
@@ -129,6 +135,10 @@ await check("a share link for the EICAR file works before it is scanned", async 
   await q(`INSERT INTO share_links (id, token_hash, file_id, organization_id, created_by, created_at, expires_at, unscanned_acknowledged, note)
            VALUES (${lit(shareId)}, ${lit(sha(new TextEncoder().encode(shareToken)))}, ${lit(ids.eicar)}, ${lit(f.organization_id)}, ${lit(f.uploaded_by)}, ${lit(new Date().toISOString())}, ${lit(new Date(Date.now() + 3_600_000).toISOString())}, 1, ${lit(`Scanner E2E ${RUN}`)})`);
   const r = await fetch(`${BASE}/share/${shareToken}`, { redirect: "manual" });
+  if (REMOTE && r.status !== 200) {
+    const st = (await q<{ scan_status: string }>(`SELECT scan_status FROM files WHERE id = ${lit(ids.eicar)}`))[0]?.scan_status;
+    return `the remote scanner reached it first (${st}); the revocation check below still applies`;
+  }
   assert(r.status === 200, `share link answered ${r.status} before the scan`);
   assert(/has not been scanned for malware/.test(await r.text()), "the unscanned warning is shown");
 });
@@ -139,9 +149,35 @@ const mine = new Set<string>();
 const api = { ...real, queue: async (limit: number) => { const qq = await real.queue(100); return { ...qq, files: qq.files.filter((f) => mine.has(f.fileId)).slice(0, limit) }; } };
 const scanner = new Scanner({ scannerId: "staging-ci-clamav", batch: 10, maxBytes: 26_214_400, clamd: CLAMD }, api);
 
-await check("the scanner reports a verdict for each file (queue → bytes → SHA-256 → clamd → signed result)", async () => {
+await check(REMOTE
+  ? "the scanner already serving this platform reports a verdict for each file (its own poll, its own signed result)"
+  : "the scanner reports a verdict for each file (queue → bytes → SHA-256 → clamd → signed result)", async () => {
   for (const v of Object.values(ids)) if (v) mine.add(v);
   assert(mine.size === 3, "uploads missing");
+
+  if (REMOTE) {
+    // No local scan. Wait for the rows, then read the engine the remote scanner actually reported with. A file still
+    // pending at the deadline is a failure, never a pass: nothing here may label an unscanned file clean.
+    const idList = [...mine].map((i) => lit(i)).join(",");
+    const deadline = Date.now() + REMOTE_WAIT_MS;
+    // files.scan_status is the state the platform acts on; file_scans is the append-only record of who reported it
+    // and with which engine (0040_security_readiness.sql). Reading both is how the engine gets named here.
+    let rows: { id: string; scan_status: string; engine: string | null }[] = [];
+    for (;;) {
+      rows = await q<{ id: string; scan_status: string; engine: string | null }>(
+        `SELECT f.id, f.scan_status, (SELECT s.engine FROM file_scans s WHERE s.file_id = f.id ORDER BY s.recorded_at DESC LIMIT 1) AS engine
+           FROM files f WHERE f.id IN (${idList})`);
+      if (rows.length === 3 && rows.every((r) => r.scan_status !== "pending")) break;
+      const left = Math.round((deadline - Date.now()) / 1000);
+      assert(left > 0, `still pending after ${Math.round(REMOTE_WAIT_MS / 1000)}s: ${rows.map((r) => `${r.id}=${r.scan_status}`).join(", ")}`);
+      await new Promise((r) => setTimeout(r, 10_000));
+    }
+    const clean = rows.filter((r) => r.scan_status === "clean").length;
+    const infected = rows.filter((r) => r.scan_status === "infected").length;
+    assert(clean === 2 && infected === 1, `clean ${clean}, infected ${infected} (${rows.map((r) => `${r.id}=${r.scan_status}`).join(", ")})`);
+    return `engine ${rows.find((r) => r.engine)?.engine ?? "not recorded"} (remote scanner)`;
+  }
+
   const queued = (await real.queue(100)).files.filter((f) => mine.has(f.fileId)).length;
   assert(queued === 3, `the platform's queue offers ${queued} of this run's 3 files`);
   const r = await scanner.cycle();
