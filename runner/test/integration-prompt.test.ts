@@ -54,3 +54,33 @@ test("[PROMPT-03] a contract with no persistence section says nothing about stor
   assert.ok(!/## How it must store things/.test(s), "no section at all");
   assert.ok(!/node:sqlite/.test(s), "and no technology the contract never named");
 });
+
+test("[PROMPT-04] the brief says the application has to start, and which script the driver will run", () => {
+  // The second Northgate run wrote server/db.ts and server/server.ts, added no script, and the functional gate
+  // reported "the project has no start script and no server file, so the application could not be started": 19
+  // criteria unevaluated because nobody could run the thing. The contract already permits the script.
+  const s = integrationPrompt({
+    manifest: {
+      schema: "crestmont.integration-manifest/1", artifactSha: "a".repeat(64), designFingerprint: "d".repeat(64),
+      operations: [], projectConfig: { allowedNewScripts: ["start", "api", "migrate"] },
+    } as unknown as IntegrationManifest & ManifestContract,
+    baseline, report, outputRoot: "dist", framework: "vite",
+  });
+  assert.match(s, /## It has to start/);
+  assert.match(s, /npm run start/, "naming the script the driver will actually run");
+  assert.match(s, /not written by you and not editable by you/, "and that the driver is not the model's own");
+  assert.match(s, /the build fails on that alone/, "and the consequence, so it is not read as advice");
+  assert.match(s, /PORT/, "and the port it must listen on");
+  assert.match(s, /run what the build produces, not the sources/, "which matters once the model writes TypeScript");
+});
+
+test("[PROMPT-05] a contract that permits no start script is not told to add one", () => {
+  const s = integrationPrompt({
+    manifest: {
+      schema: "crestmont.integration-manifest/1", artifactSha: "a".repeat(64), designFingerprint: "d".repeat(64),
+      operations: [], projectConfig: { allowedNewScripts: ["migrate"] },
+    } as unknown as IntegrationManifest & ManifestContract,
+    baseline, report, outputRoot: "dist", framework: "vite",
+  });
+  assert.ok(!/## It has to start/.test(s), "the brief does not ask for something the contract forbids");
+});

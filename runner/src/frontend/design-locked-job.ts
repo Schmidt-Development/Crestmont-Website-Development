@@ -271,7 +271,7 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
     const rebuilt = await d.sandbox.argv(["npm", "run", "build"], undefined, "npm run build");
     const visual = rebuilt.code !== 0
       ? { ran: false, ok: false, detail: `the project no longer builds (exit ${rebuilt.code})` }
-      : await measureVisual(d, baseline, report, built.outputRoot, importOut, cycle);
+      : await measureVisual(d, baseline, report, built.outputRoot, importOut, cycle, manifest);
     const functional = await runFunctional(d, manifest);
 
     const broken = conf.findings.filter((f) => f.severity === "violation");
@@ -329,6 +329,7 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
 /** Re-render and compare with the approved baseline. */
 async function measureVisual(
   d: DesignLockedDeps, baseline: DesignBaseline, before: ImportReport, outputRoot: string, importOut: string, cycle: number,
+  manifest: IntegrationManifest & ManifestContract,
 ): Promise<CycleRecord["visual"]> {
   const dir = `${importOut}-cycle-${cycle}`;
   const r = await d.sandbox.argv(["node", IMPORT_SCRIPT, "--root", outputRoot || ".", "--out", dir], undefined, "frontend-import (verify)");
@@ -337,7 +338,14 @@ async function measureVisual(
   try { after = readImportReport(path.join(d.ws.repo, dir)); }
   catch (err) { return { ran: false, ok: false, detail: String((err as Error)?.message ?? err) }; }
 
-  const v = verifyAgainstBaseline(baseline, after, { before });
+  // The manifest, or the declarations in it are never read. `declaredChanges(manifest)` is what tells the drift
+  // comparison which pages the backend was authorised to change the content of; without it `declared` is empty and
+  // every rendering change is reported as "nothing in the integration manifest said this page would change" --
+  // which is every successful build, since connecting a backend is what changes what a page renders. Measured on
+  // the second Northgate run: the design signature held on all 21 page views and the gate still failed with 9
+  // undeclared-content findings. A signature change is still design-drift whatever the manifest claims; this only
+  // restores the content declarations the contract already carries.
+  const v = verifyAgainstBaseline(baseline, after, { before, manifest });
   const drifted = v.drift.findings.filter((f) => f.kind !== "declared-content");
   const ok = v.drift.ok && v.stateChanges.length === 0;
   return {

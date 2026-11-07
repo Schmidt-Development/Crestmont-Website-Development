@@ -12,7 +12,7 @@ import path from "node:path";
 import { baselineFrom, describeImport, describeVerify, inventoryOf, readImportReport, verifyAgainstBaseline } from "../src/frontend/import.ts";
 import type { ImportReport } from "../src/frontend/import.ts";
 import type { DesignBaseline } from "../src/frontend/design-lock.ts";
-import { coverage, validateManifest } from "../src/frontend/integration-manifest.ts";
+import { coverage, declaredChanges, validateManifest } from "../src/frontend/integration-manifest.ts";
 import type { IntegrationManifest } from "../src/frontend/integration-manifest.ts";
 import { planBuild, staticRoot } from "../src/frontend/build.ts";
 import { visualSummary } from "../src/frontend/design-locked-job.ts";
@@ -253,4 +253,37 @@ test("[REAL-009] the import reads as a plain account of what was found", () => {
   assert.match(text, /9 baseline screenshot\(s\)/);
   assert.match(text, /28 already work without a backend, 1 need one/);
   assert.match(text, /needs a backend — quote\/form#quote-request/);
+});
+
+/**
+ * The content declarations only work if the comparison is given the manifest.
+ *
+ * `declaredChanges(manifest)` is what authorises a page to render differently once a backend is connected -- which
+ * is every page the backend touches. The design-locked job called `verifyAgainstBaseline` without the manifest, so
+ * `declared` was always empty and every rendering change came back as "nothing in the integration manifest said
+ * this page would change". Measured on the second Northgate run: the design signature held on all 21 page views
+ * and the gate still failed, with 9 undeclared-content findings.
+ *
+ * A signature change is still design-drift whatever the manifest claims -- [REAL-006] covers that and is unchanged.
+ * This is only about a page that rendered differently while its design held.
+ */
+test("[REAL-011] a declared content change is only forgiven when the comparison is given the manifest", () => {
+  // The fixture declares exactly one page as a content change.
+  assert.deepEqual(declaredChanges(MANIFEST).map((d) => d.page), ["quote"]);
+
+  // Same signatures, one different render on that page: the design held, the content moved.
+  const moved = {
+    ...AFTER,
+    renders: AFTER.renders.map((r) => (r.page === "quote" && r.viewport === "desktop" ? { ...r, sha: "f".repeat(64) } : r)),
+  };
+
+  const withManifest = verifyAgainstBaseline(BASELINE, moved, { manifest: MANIFEST, before: BASE });
+  assert.equal(withManifest.drift.ok, true, withManifest.drift.findings.map((f) => f.kind + ":" + f.page).join(", "));
+  assert.ok(withManifest.drift.findings.some((f) => f.kind === "declared-content" && f.page === "quote"),
+    "the change is recorded as declared rather than passed over in silence");
+
+  const without = verifyAgainstBaseline(BASELINE, moved, { before: BASE });
+  assert.equal(without.drift.ok, false, "without the manifest the same build fails");
+  assert.ok(without.drift.findings.some((f) => f.kind === "undeclared-content" && f.page === "quote"),
+    "and fails for a reason that is about the manifest, not about the design");
 });
