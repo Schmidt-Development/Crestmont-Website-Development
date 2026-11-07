@@ -226,3 +226,47 @@ test("[DUR] a project that finishes releases its slot, so the next project is no
     assert.equal(shared.active.size, 0, "no project id is still marked active");
   } finally { await cp.close(); }
 });
+
+test("[DUR] an uploaded frontend is still imported while every slot is building", async () => {
+  // Imports ran in slot 0's idle branch, under a comment saying an import must never take a slot from a build. At
+  // one slot that was true and harmless. At four, all four building means NOTHING is ever imported: the submitted
+  // frontend cannot be measured, so it cannot be approved, so it cannot be queued -- until a build finishes, and a
+  // build is the long thing. This holds every slot busy and requires the import to happen anyway.
+  const jobs = [makeJob(), makeJob(), makeJob(), makeJob()];
+  const cp = await startFakeControlPlane({ jobs });
+  try {
+    const client = new ControlPlaneClient({ baseUrl: cp.url, secret: SECRET, runnerId: "r" });
+    const cfg = makeConfig({ controlPlaneUrl: cp.url, skillsSourceDir: makeSkillsDir(testManifest()) });
+
+    let building = 0, peak = 0;
+    let imported = 0;
+    let release: (() => void) | null = null;
+    const held = new Promise<void>((r) => { release = r; });
+    const runJobImpl = (async () => {
+      building++; peak = Math.max(peak, building);
+      await held;                       // every slot stays in a build until the import has happened
+      building--;
+      return { outcome: "ready_for_review", turns: 1, complete: null, checks: [] };
+    }) as never;
+
+    let stop = false;
+    // A real (tiny) timer, not a no-op: a loop that only ever awaits already-resolved promises drains the microtask
+    // queue forever and the timer phase never runs, so this test's own polling below would never advance.
+    const tick = async () => { await new Promise((r) => setTimeout(r, 1)); };
+    const loops = runSlots({
+      cfg, client, manifest: testManifest(), logger: silentLogger, shouldStop: () => stop, once: false, runJobImpl,
+      sleep: tick,
+      // It imports only once every slot is occupied, so the import happening at all IS the assertion.
+      imports: { serve: async () => { if (building < 4 || imported > 0) { await tick(); return "none"; } imported++; return "done"; } },
+    }, 4, 0);
+
+    const deadline = Date.now() + 20_000;
+    while (imported === 0 && Date.now() < deadline) await tick();
+    stop = true;
+    release();
+    await loops;
+
+    assert.equal(peak, 4, `all four slots have to be in a build for this to prove anything (peak ${peak})`);
+    assert.equal(imported, 1, "the uploaded frontend was imported while all four slots were building");
+  } finally { await cp.close(); }
+});
