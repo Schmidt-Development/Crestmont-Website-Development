@@ -13,7 +13,7 @@ import { newHealthState, healthStatus } from "../src/health.ts";
 import { HostLimits } from "../src/limits.ts";
 import { makeConfig, makeJob, startFakeControlPlane, testManifest, makeSkillsDir, SECRET } from "./helpers.ts";
 import { ControlPlaneClient } from "../src/control-plane.ts";
-import { runSlots } from "../src/main.ts";
+import { runLoop, runSlots } from "../src/main.ts";
 import { silentLogger } from "../src/log.ts";
 
 const tmp = () => mkdtempSync(path.join(os.tmpdir(), "dur-"));
@@ -269,4 +269,76 @@ test("[DUR] an uploaded frontend is still imported while every slot is building"
     assert.equal(peak, 4, `all four slots have to be in a build for this to prove anything (peak ${peak})`);
     assert.equal(imported, 1, "the uploaded frontend was imported while all four slots were building");
   } finally { await cp.close(); }
+});
+
+test("[DUR] an idle slot stops waiting when a sibling takes work, instead of sleeping out a five-minute backoff", async () => {
+  // Measured on Node 1 with six fixtures (run 42405202273): three slots claimed within one second of each other
+  // and the fourth claimed 107 seconds later, while a build sat queued and the node was below its cap the whole
+  // time. RUNNER_POLL_MAX_SECONDS is 300, so that wait could have been five minutes.
+  //
+  // The backoff itself is right -- "nothing is queued" deserves a longer pause each time it is true. What was
+  // wrong is that the answer kept its authority after it stopped being true. A sibling claiming a build is new
+  // information about the queue, so the wait ends and the backoff starts over.
+  const cfg = cfg0();
+  const shared = { modelOk: true, active: new Set<string>(), activity: 0 };
+  const waits: number[] = [];
+  let polls = 0;
+
+  // The claim is refused twice and then answered, so the loop sleeps twice: once with a sibling claiming during
+  // the wait, once without. The two requested durations are the evidence.
+  const client = {
+    async claim() {
+      polls++;
+      if (polls <= 2) return { job: null, reason: "none_queued" as const };
+      return { job: null, reason: "none_queued" as const };
+    },
+  } as unknown as Parameters<typeof runLoop>[0]["client"];
+
+  let stop = false;
+  await runLoop({
+    cfg, client, manifest: testManifest(), logger: silentLogger, shouldStop: () => stop, shared,
+    sleep: async (ms: number, until: () => boolean) => {
+      waits.push(ms);
+      if (waits.length === 1) {
+        // A sibling slot claims a build while this one is waiting.
+        shared.activity++;
+        assert.ok(until(), "the wait must notice a sibling's claim rather than sleeping on");
+        return;
+      }
+      // Nothing happened during the second wait, so it must have run its course.
+      assert.ok(!until(), "a quiet wait is not interrupted");
+      stop = true;
+    },
+  });
+
+  assert.equal(waits.length, 2, `two waits; got ${JSON.stringify(waits)}`);
+  assert.equal(waits[0], cfg.pollMinMs, "the first wait is the minimum interval");
+  assert.equal(
+    waits[1], cfg.pollMinMs,
+    `after a sibling claimed, the backoff starts over rather than growing: got ${waits[1]}ms, expected ${cfg.pollMinMs}ms`,
+  );
+  // Poll, woken wait, poll again, quiet wait, stop: being woken is what produced the second poll.
+  assert.equal(polls, 2, `the woken slot asked again rather than waiting out the backoff: ${polls} poll(s)`);
+});
+
+test("[DUR] a quiet idle slot still backs off, so an empty queue is not polled every fifteen seconds", async () => {
+  // The other half of the same change: without a sibling doing anything, nothing has changed about the queue and
+  // the interval must still grow. A node whose four slots all polled at the minimum for ever would be answering
+  // its own question four times a minute to no purpose.
+  const cfg = cfg0();
+  const shared = { modelOk: true, active: new Set<string>(), activity: 0 };
+  const waits: number[] = [];
+  const client = {
+    async claim() { return { job: null, reason: "none_queued" as const }; },
+  } as unknown as Parameters<typeof runLoop>[0]["client"];
+
+  let stop = false;
+  await runLoop({
+    cfg, client, manifest: testManifest(), logger: silentLogger, shouldStop: () => stop, shared,
+    sleep: async (ms: number) => { waits.push(ms); if (waits.length >= 3) stop = true; },
+  });
+
+  assert.equal(waits.length, 3);
+  assert.ok(waits[1] > waits[0] && waits[2] > waits[1], `the interval grows while nothing happens: ${JSON.stringify(waits)}`);
+  assert.ok(waits[2] <= cfg.pollMaxMs, "and never past the configured maximum");
 });
