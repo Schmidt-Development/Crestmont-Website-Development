@@ -332,6 +332,22 @@ async function buildStaffRecords(w: World) {
     await db.prepare(`INSERT INTO build_revision_files (revision_id, path, kind, content_type, size_bytes, sha256, storage_key) VALUES (?,?,?,?,?,?,?)`)
       .bind(rev, "index.html", "page", "text/html; charset=utf-8", 60, "0".repeat(64), key).run();
   }
+  // A delivered website for each tenant, so the delivery routes and the portal's own read are tenant-addressed in
+  // the matrix: tenant B must not be able to see or act on tenant A's delivery, and the partial unique index
+  // means each project may have exactly one live one.
+  ids.websiteDelivery = newId("wdl");
+  w.b.ids.websiteDelivery = newId("wdl");
+  for (const [deliveryId, tenant, jobId] of [
+    [ids.websiteDelivery, w.a, ids.buildJob] as const,
+    [w.b.ids.websiteDelivery, w.b, w.b.ids.buildJob] as const,
+  ]) {
+    await db.prepare(`INSERT INTO website_deliveries (id, project_id, organization_id, job_id, source_project_id,
+        revision_attempt, revision_cycle, status, assigned_by, assigned_at, visible_at, visible_by, created_at)
+      VALUES (?,?,?,?,?,1,0,'customer_visible',?,?,?,?,?)`)
+      .bind(deliveryId, tenant.ids.project!, tenant.ids.org!, jobId, tenant.ids.project!,
+        w.staff.owner.id, nowIso(), nowIso(), w.staff.owner.id, nowIso()).run();
+  }
+
   // A genuine preview capability for each tenant's own revision, so the matrix and the fuzzers exercise the real
   // route instead of a placeholder that every request would reject identically. A token deliberately names ONE
   // revision of ONE job, which is what lets the matrix prove tenant B's token cannot open tenant A's snapshot.

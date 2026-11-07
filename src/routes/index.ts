@@ -21,6 +21,7 @@ import * as live from "./live.ts";
 import * as builds from "./builds.ts";
 import * as designLocked from "./design-locked.ts";
 import * as buildPreview from "./build-preview.ts";
+import * as websiteDelivery from "./website-delivery.ts";
 import * as designGallery from "./design-gallery.ts";
 import * as tax from "./tax.ts";
 import * as testPayments from "./test-payments.ts";
@@ -37,7 +38,7 @@ import * as calendars from "./calendars.ts";
 // literal paths register first.
 export function registerAll(r: Router): void {
   // reportsOps precedes finance so /staff/reports/operations is not captured by /staff/reports/:file.
-  for (const m of [api, auth, publicSite, portal, crm, projects, support, reportsOps, finance, owner, readiness, platform, legal, hooks, ops, notifications, portalMaintenance, live, designGallery, designLocked, builds, buildPreview, tax, voiceOps, salesOptimization, accountProfile, research, testPayments, salesOutbound, scan, calendars]) m.register(r);
+  for (const m of [api, auth, publicSite, portal, crm, projects, support, reportsOps, finance, owner, readiness, platform, legal, hooks, ops, notifications, portalMaintenance, live, designGallery, designLocked, builds, buildPreview, websiteDelivery, tax, voiceOps, salesOptimization, accountProfile, research, testPayments, salesOutbound, scan, calendars]) m.register(r);
 }
 
 /** Every registered method + path pattern, in match order (route security matrix, AUTH-007/SEC-001). */

@@ -30,7 +30,7 @@ export type ResourceKind =
   | "testimonial" | "testimonialAction" | "blocker" | "finding" | "snapshot" | "run" | "requirement" | "env" | "invitation" | "staffUser"
   | "emailDelivery" | "emailTemplate" | "integration" | "privacyRequest" | "voiceVersion" | "call" | "consultation" | "outboundRequest" | "priceRequest" | "suppression"
   | "reconFinding" | "serviceSlug" | "legalSlug" | "legalKind" | "legalVersion" | "package" | "plan" | "reportFile"
-  | "member" | "notification" | "staffNotification" | "buildJob" | "siteDeployment" | "buildWorker" | "buildApproval" | "buildIntegration"
+  | "member" | "notification" | "staffNotification" | "buildJob" | "websiteDelivery" | "siteDeployment" | "buildWorker" | "buildApproval" | "buildIntegration"
   | "soVersion" | "soStage" | "soExperiment" | "runnerDiagnostic" | "researchProspect" | "researchProspect2" | "salesCall" | "salesLinkToken" | "salesUnsubToken";
 
 export type Access =
@@ -248,6 +248,8 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "GET /portal/projects/:id": cust(P("project")),
   "GET /portal/projects/:id/onboarding": cust(P("project")),
   "POST /portal/projects/:id/onboarding": cust(P("project"), act("onboarding.draft_saved")),
+  // The customer's own verdict on the website delivered to their project. Their act, recorded as theirs.
+  "POST /portal/projects/:id/website/decision": cust(P("project"), act("website_delivery.customer_decision")),
   "GET /portal/files": cust(),
   "POST /portal/files": cust(undefined, act("file.uploaded")),
   "GET /portal/projects/:id/files": cust(P("project")),
@@ -546,6 +548,11 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   // Rejecting an artifact is the other half of approving one: both decide what the AI may build against, so both
   // are `builds.configure` and both are audited.
   "POST /staff/builds/frontends/:projectId/artifacts/:artifactId/reject": staff(rolesWith("builds.configure"), { projectId: "project", artifactId: "frontendArtifact" }, act("frontend_artifact.rejected")),
+  // Delivering a finished website to an existing customer project.
+  "GET /staff/builds/:id/deliver": staff(rolesWith("builds.manage"), { id: "buildJob" }),
+  "POST /staff/builds/:id/deliver": staff(rolesWith("builds.manage"), { id: "buildJob" }, act("website_delivery.assigned")),
+  "POST /staff/builds/:id/deliver/:deliveryId/visible": staff(rolesWith("builds.manage"), { id: "buildJob", deliveryId: "websiteDelivery" }, act("website_delivery.made_visible")),
+  "POST /staff/projects/:projectId/deliver/rollback": staff(rolesWith("builds.manage"), { projectId: "project" }, act("website_delivery.rolled_back")),
   "POST /staff/builds/frontends/:projectId/artifacts/:artifactId/retry-import": staff(rolesWith("builds.configure"), { projectId: "project", artifactId: "frontendArtifact" }, act("frontend_artifact.import_retried")),
   // Starting a backend job goes through the platform's own queueing path, which decides eligibility; this route
   // only asks it to. Audited by the build record's own events rather than a separate audit row.
