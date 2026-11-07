@@ -32,6 +32,7 @@ import type { DesignBaseline } from "./design-lock.ts";
 import { checkConformance, describeConformance, repairBrief } from "./conformance.ts";
 import type { ConformanceReport } from "./conformance.ts";
 import { integrationMemory, integrationPrompt, readIntegrationOutcome } from "./integrate.ts";
+import { acceptancePlan, readAcceptanceOutput, summarise, writeAcceptanceDriver, DRIVER } from "./acceptance.ts";
 import { completeness, validateManifest } from "./integration-manifest.ts";
 import type { IntegrationManifest, ManifestContract } from "./integration-manifest.ts";
 
@@ -349,15 +350,61 @@ async function measureVisual(
  * project that ships no runnable check reports that it could not be verified — never that it passed.
  */
 async function runFunctional(d: DesignLockedDeps, manifest: IntegrationManifest & ManifestContract): Promise<CycleRecord["functional"]> {
-  const candidates = ["verify-backend.mjs", "server/verify-backend.mjs", "test/acceptance.mjs"];
-  const found = candidates.find((c) => existsSync(path.join(d.ws.repo, c)));
-  if (!found) {
+  // The INDEPENDENT checks first, and they are the only ones that can make this gate pass.
+  //
+  // This used to look for `verify-backend.mjs` and run it. Model B writes that file, so the model authored both
+  // the implementation and the test that judged it: a verifier that exits 0 without asserting anything produced
+  // "all acceptance checks passed". Executing someone's own test independently does not make the test
+  // independent.
+  //
+  // The integration manifest is what is independent. It is written before the work, it belongs to the project,
+  // and its `apis` state per endpoint the status a well-formed, an invalid and an unauthenticated request must
+  // each get. The runner writes its own driver from that and runs it against the started application.
+  const plan = acceptancePlan(d.ws.repo, manifest);
+  writeAcceptanceDriver(d.ws.repo, plan);
+  const run = await d.sandbox.argv(["node", "--no-warnings", DRIVER], undefined, "contract acceptance");
+  const checks = readAcceptanceOutput(run.stdout);
+  const verdict = summarise(checks);
+
+  // A verifier the model wrote is still run, because it may exercise business flows the contract cannot describe
+  // without credentials. It is recorded as corroboration and can never turn a failure into a pass.
+  const authored = ["verify-backend.mjs", "server/verify-backend.mjs", "test/acceptance.mjs"]
+    .find((c) => existsSync(path.join(d.ws.repo, c)));
+  let corroboration = "";
+  if (authored) {
+    const r = await d.sandbox.argv(["node", "--no-warnings", authored], undefined, "model-authored acceptance");
+    corroboration = r.code === 0
+      ? `; the model's own ${authored} also passed (corroboration only — it did not decide this gate)`
+      : `; the model's own ${authored} failed (exit ${r.code}): ${(r.stdout || r.stderr).slice(-300)}`;
+    // Its failure is evidence against, so it can fail the gate even when the contract checks passed.
+    if (r.code !== 0 && verdict.ok) {
+      return { ran: true, ok: false, detail: `${verdict.detail}${corroboration}` };
+    }
+  } else {
+    // Nothing exercised the behavioural criteria, so they are undetermined, and undetermined is not a pass.
+    //
+    // The contract driver establishes the API CONTRACT — each declared route is served, an anonymous caller is
+    // refused with exactly the declared status, a malformed request is refused with exactly the declared status.
+    // The manifest's per-operation `acceptance` criteria describe BEHAVIOUR: a row actually stored, one owner's
+    // data not reachable by another, a status that survives a restart. Those need credentials the contract does
+    // not carry, so with no executable check of any kind they remain unverified.
     const criteria = manifest.operations.flatMap((o) => o.acceptance).length;
-    return { ran: false, ok: false, detail: `no runnable acceptance check was produced, so none of the ${criteria} acceptance criteria could be verified` };
+    return {
+      ran: verdict.ran,
+      ok: false,
+      detail: `${verdict.detail}; the model produced no acceptance check of its own, so ${criteria} written acceptance criterion(s) describing behaviour were NOT verified`,
+    };
   }
-  const r = await d.sandbox.argv(["node", "--no-warnings", found], undefined, "acceptance");
-  const tail = (r.stdout || r.stderr).slice(-600);
-  return { ran: true, ok: r.code === 0, detail: r.code === 0 ? `all acceptance checks passed (${found})` : `acceptance checks failed (exit ${r.code}): ${tail}` };
+
+  // Where a model-authored verifier exists and passed, it is corroboration ON TOP of the independent contract
+  // checks — never instead of them. That is the part that changed: a verifier the model wrote used to be the
+  // whole gate, so one that exited 0 without asserting anything read as "all acceptance checks passed".
+  //
+  // It is still the model's own account of its own work. Independent execution of the behavioural criteria needs
+  // the driver to obtain its own credentials through the declared register and login endpoints and exercise
+  // ownership and role refusals itself; until it does, this gate is weaker than the architecture intends and
+  // says so in its own words rather than in a comment.
+  return { ran: verdict.ran, ok: verdict.ok, detail: `${verdict.detail}${corroboration}` };
 }
 
 /** What to ask for next, built from whichever gate failed. */
