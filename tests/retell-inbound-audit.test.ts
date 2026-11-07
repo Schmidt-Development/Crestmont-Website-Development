@@ -33,7 +33,7 @@ function goodConfig(over: { agent?: Record<string, unknown>; llm?: Record<string
   };
 }
 
-function fakeRetell(cfg: ReturnType<typeof goodConfig>, opts: { status?: number } = {}) {
+function fakeRetell(cfg: ReturnType<typeof goodConfig>, opts: { status?: number; published?: { version: number; llmVersion: number; prompt: string } } = {}) {
   const calls: { method: string; path: string; auth: string | null }[] = [];
   const f = (async (url: string, init: RequestInit = {}) => {
     const u = new URL(url);
@@ -41,6 +41,8 @@ function fakeRetell(cfg: ReturnType<typeof goodConfig>, opts: { status?: number 
     if (opts.status) return new Response(JSON.stringify({ status: "error", message: "Unauthorized" }), { status: opts.status });
     if (u.pathname === "/v2/list-agents") return new Response(JSON.stringify({ items: [{ agent_id: "agent_rcpt01", agent_name: "Crestmont Receptionist" }], has_more: false }));
     if (u.pathname === "/get-agent/agent_rcpt01") return new Response(JSON.stringify(cfg.agent));
+    if (u.pathname === "/list-agent-versions/agent_rcpt01" && opts.published) return new Response(JSON.stringify([{ version: opts.published.version + 1, is_published: false, response_engine: { version: opts.published.llmVersion + 1 } }, { version: opts.published.version, is_published: true, response_engine: { version: opts.published.llmVersion } }]));
+    if (u.pathname === "/get-retell-llm/llm_rcpt01" && opts.published && u.searchParams.get("version") === String(opts.published.llmVersion)) return new Response(JSON.stringify({ ...cfg.llm, general_prompt: opts.published.prompt }));
     if (u.pathname === "/get-retell-llm/llm_rcpt01") return new Response(JSON.stringify(cfg.llm));
     if (u.pathname === "/v2/list-phone-numbers") return new Response(JSON.stringify({ items: cfg.numbers, has_more: false }));
     return new Response("not found", { status: 404 });
@@ -165,4 +167,17 @@ test("[VOICE-005] the deploy prints all audit findings in at most four annotatio
   assert.doesNotMatch(fn, /for \(const f of a\.findings\) console\.log/, "no per-finding annotations");
   const ok = fn.slice(fn.indexOf("const a = JSON.parse"));
   assert.equal((ok.match(/console\.log\(`::(notice|warning)/g) ?? []).length, 4, "success path: summary + TODO + OK + INFO lists");
+});
+
+test("[VOICE-004] the audit compares the saved prompt with the PUBLISHED version callers hear, and judges the published one too", async () => {
+  const t = await setup();
+  const cfg = goodConfig();
+  const stale = await auditInboundRetell({ db: t.db, env: t.env, fetch: fakeRetell(cfg, { published: { version: 2, llmVersion: 2, prompt: "Outside business hours we are closed; only take a message." } }).f, baseUrl: BASE });
+  const pub = stale.findings.find((f) => f.check === "published version carries the saved prompt")!;
+  assert.equal(pub.ok, false);
+  assert.match(pub.detail, /publish the agent in Retell/);
+  assert.equal(stale.findings.find((f) => f.check === "published prompt: no after-hours limits")!.ok, false, "the published prompt's own conflicts are reported");
+  const same = await auditInboundRetell({ db: t.db, env: t.env, fetch: fakeRetell(cfg, { published: { version: 2, llmVersion: 2, prompt: cfg.llm.general_prompt as string } }).f, baseUrl: BASE });
+  assert.equal(same.findings.find((f) => f.check === "published version carries the saved prompt")!.ok, true);
+  assert.doesNotMatch(JSON.stringify(stale), /only take a message/, "no prompt text is ever echoed");
 });

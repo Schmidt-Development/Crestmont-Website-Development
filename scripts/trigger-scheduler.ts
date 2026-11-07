@@ -54,7 +54,10 @@ async function retellOutboundAudit(key: string, rest: string[]) {
   console.log(`::notice title=Retell outbound audit::${o.status.toUpperCase()} · agent ${o.agentId ?? "?"} · ${o.findings.length - failed.length}/${o.findings.length} findings ok`);
   if (failed.length) console.log(`::warning title=Retell outbound audit TODO (${failed.length})::${list(failed)}`);
   const ok = o.findings.filter((f) => f.ok);
-  if (ok.length) console.log(`::notice title=Retell outbound audit OK/INFO (${ok.length})::${list(ok)}`);
+  // GitHub cuts a log line at about 4 KB, so long lists go out in a few annotations of whole findings.
+  const chunks: string[][] = [[]];
+  for (const f of ok) { const line = `${clean(f.check)}: ${clean(f.detail)}`; if ([...chunks[chunks.length - 1], line].join(" | ").length > 3500) chunks.push([]); chunks[chunks.length - 1].push(line); }
+  chunks.filter((c) => c.length).slice(0, 6).forEach((c, i) => console.log(`::notice title=Retell outbound audit OK/INFO (${i + 1}/${chunks.length})::${c.join(" | ")}`));
 }
 
 /**

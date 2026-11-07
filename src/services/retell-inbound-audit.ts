@@ -47,11 +47,26 @@ export function promptBehaviourFindings(prompt: string): { check: string; status
     ["limits help to business hours", /\b(outside|after)\s+(of\s+)?(our\s+)?(business|office|opening)\s+hours\b[^.]{0,80}\b(only|just|cannot|can't|don't|do not)\b/i],
     ["branches on business_open_now", /\{\{\s*business_open_now\s*\}\}/],
   ];
-  const hits = conflicts.map(([k, re]) => ({ k, n: (prompt.match(new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g")) ?? []).length })).filter((x) => x.n > 0);
-  // "take a message" may legitimately appear in the budget-limited voicemail mode instruction; reported, judged by a person.
-  const hard = hits.filter((x) => x.k !== "switches to message-taking" || !/voicemail/i.test(prompt));
-  out.push({ check: "prompt: no after-hours limits", status: hard.length ? "fail" : hits.length ? "info" : "pass",
-    detail: hits.length ? `${hits.map((x) => `${x.k} (${x.n})`).join(", ")}${hard.length ? "" : " — only inside the voicemail (budget) instruction"}` : "no closed / after-hours / message-only wording" });
+  // A phrase inside a prohibition ("Never say we're closed", "Do not just take a message") is the opposite of a
+  // conflict: the sentence before the match is checked for a negation. Voicemail (budget) mode may legitimately take a
+  // message. Only the categories and counts are reported, never the text.
+  const NEGATION = /\b(never|don't|do not|dont|avoid|not|no longer|instead of|rather than|without)\b/i;
+  const hits = conflicts.map(([k, re]) => {
+    let negated = 0, voicemail = 0, other = 0;
+    for (const m of prompt.matchAll(new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g"))) {
+      const before = prompt.slice(0, m.index ?? 0);
+      const sentence = before.slice(Math.max(before.lastIndexOf("."), before.lastIndexOf("!"), before.lastIndexOf("?"), before.lastIndexOf("\n")) + 1);
+      const around = prompt.slice(Math.max(0, (m.index ?? 0) - 300), (m.index ?? 0) + 300);
+      if (NEGATION.test(sentence) || NEGATION.test(m[0])) negated++;
+      else if (k === "switches to message-taking" && /voicemail/i.test(around)) voicemail++;
+      else other++;
+    }
+    return { k, negated, voicemail, other };
+  }).filter((x) => x.negated + x.voicemail + x.other > 0);
+  const hard = hits.filter((x) => x.other > 0);
+  const describe = (x: (typeof hits)[number]) => `${x.k}: ${[x.other ? `${x.other} as an instruction` : null, x.negated ? `${x.negated} inside a prohibition (never/do not…)` : null, x.voicemail ? `${x.voicemail} in the voicemail (budget) instruction` : null].filter(Boolean).join(", ")}`;
+  out.push({ check: "prompt: no after-hours limits", status: hard.length ? "fail" : hits.length ? "pass" : "pass",
+    detail: hits.length ? `${hits.map(describe).join("; ")}${hard.length ? "" : " — none is an active after-hours limit"}` : "no closed / after-hours / message-only wording" });
   out.push({ check: "prompt: intake before payment", status: has(/intake/i) ? "pass" : "fail", detail: has(/intake/i) ? "tells the agent the purchase starts with the project intake" : "does not mention the project intake that now comes before payment" });
   const founderRule = has(/wants_founder/) && has(/(only|specifically)[^.]{0,80}founder|founder[^.]{0,80}(only|specifically)/i);
   out.push({ check: "prompt: Founder only on request", status: founderRule ? "pass" : "fail", detail: founderRule ? "Founder appointments only when the caller asks (wants_founder)" : "no request-only rule for Founder appointments with wants_founder" });
@@ -243,6 +258,26 @@ export async function auditInboundRetell(d: { db: Db; env: Env; fetch: typeof fe
   const repo = composePrompt(INBOUND_MASTER_INSTRUCTIONS);
   add("live prompt vs repository instructions", "info", prompt === repo ? "identical to the repository's receptionist instructions"
     : `differs from the repository's instructions (live ${prompt.length} chars, repository ${repo.length}). The live prompt is authoritative: deployments never write it; only an Owner activation on /staff/voice does, and the drift guard refuses to overwrite dashboard edits.`);
+  // What callers actually hear: the PUBLISHED agent version (phone numbers route to it), not an unpublished draft.
+  let versions = await call(key, d.fetch, "GET", `/list-agent-versions/${encodeURIComponent(agentId)}`);
+  if (!versions.ok && (versions.status === 404 || versions.status === 400)) versions = await call(key, d.fetch, "GET", `/get-agent-versions/${encodeURIComponent(agentId)}`);
+  if (!versions.ok) add("published version", "info", `list-agent-versions: ${versions.error}; the published prompt could not be compared`);
+  else {
+    const vs = items(versions.json).map(obj);
+    const pub = vs.filter((v) => v.is_published === true).sort((a, b) => (n(b.version) ?? 0) - (n(a.version) ?? 0))[0];
+    const pubLlm = pub ? n(obj(pub.response_engine).version) : null;
+    if (!pub) add("published version", false, "no published version: calls cannot use the saved prompt until it is published");
+    else {
+      const pr = await call(key, d.fetch, "GET", `/get-retell-llm/${encodeURIComponent(llmId)}${pubLlm !== null ? `?version=${pubLlm}` : ""}`);
+      const pubPrompt = pr.ok ? s(obj(pr.json).general_prompt) ?? "" : null;
+      if (pubPrompt === null) add("published version", "info", `agent v${n(pub.version)} is published (LLM v${pubLlm ?? "?"}); its prompt could not be read: ${pr.error}`);
+      else if (pubPrompt === prompt) add("published version carries the saved prompt", true, `agent v${n(pub.version)} (LLM v${pubLlm ?? "?"}) is published and uses this prompt: callers hear it`);
+      else {
+        add("published version carries the saved prompt", false, `agent v${n(pub.version)} (LLM v${pubLlm ?? "?"}) is published with a DIFFERENT prompt (${pubPrompt.length} chars, sha256 ${(await sha256Hex(pubPrompt)).slice(0, 12)}) than the saved draft: publish the agent in Retell so callers hear the saved V4`);
+        for (const f of promptBehaviourFindings(pubPrompt)) add(`published ${f.check}`, f.status, f.detail);
+      }
+    }
+  }
   const active = await d.db.prepare(`SELECT version, prompt_text FROM voice_agent_configs WHERE active = 1`).first<{ version: number; prompt_text: string }>();
   if (!active) add("platform prompt version", "info", "no active /staff/voice version: the platform pushes nothing, so the Retell prompt stays as the Founder set it. Use 'Adopt the live Retell prompt' to record it.");
   else add("platform prompt version", active.prompt_text === prompt, active.prompt_text === prompt ? `active v${active.version} = the live prompt` : `active v${active.version} differs from the live prompt: pushing would overwrite it (the drift guard refuses unless confirmed). Adopt the live prompt to reconcile.`);
