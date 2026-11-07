@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { DatabaseSync as Sqlite } from "node:sqlite";
 import { compareCounts, countSql, drillEvidence, exportCounts, rowsOf } from "../scripts/restore-drill.ts";
 import { parseEvidence } from "../src/readiness/ingest.ts";
 
@@ -182,4 +183,73 @@ test("[TEST-004] [INFRA-006] restore drill compares the restore with the EXPORT'
   const wf = readFileSync(new URL("../.github/workflows/staging-restore-drill.yml", import.meta.url), "utf8");
   assert.match(wf, /restore-drill\.ts export-counts drill\/staging\.sql > drill\/source-0\.json/);
   assert.doesNotMatch(wf, /count crestmont-staging "--remote --env staging" source/);
+});
+
+// Staging drill 42321793218 failed with SQLITE_CONSTRAINT_FOREIGNKEY once the Artifact Builder wrote rows: migration 0088
+// closes a cycle through a NULLABLE column (projects.active_baseline_id → design_baselines → frontend_artifacts →
+// projects) and design_baselines.superseded_by points into its own table. Ordering on every reference put
+// frontend_artifacts rows before the projects they belong to, which only deferred foreign keys could accept — and D1
+// applies an import in batches.
+function cycleSource() {
+  const db = new Sqlite(":memory:");
+  db.exec("PRAGMA foreign_keys=ON");
+  for (const f of readdirSync("migrations").filter((f) => f.endsWith(".sql")).sort()) db.exec(readFileSync(`migrations/${f}`, "utf8"));
+  const now = "2026-11-07T00:00:00.000Z";
+  db.exec(`INSERT INTO organizations (id, name, kind, created_at) VALUES ('org1','Harbor Dental','customer','${now}');
+    INSERT INTO projects (id, organization_id, name, status, revision_allowance, payment_schedule, created_at, updated_at) VALUES ('p1','org1','Site','design',2,'upfront','${now}','${now}');
+    INSERT INTO frontend_artifacts (id, project_id, organization_id, version, source, sha256, size_bytes, status, created_at, updated_at) VALUES ('a1','p1','org1',1,'upload','h',10,'imported','${now}','${now}');
+    INSERT INTO design_baselines (id, project_id, artifact_id, version, fingerprint, status, created_at) VALUES ('b2','p1','a1',2,'f2','draft','${now}');
+    INSERT INTO design_baselines (id, project_id, artifact_id, version, fingerprint, status, created_at, superseded_by) VALUES ('b1','p1','a1',1,'f1','superseded','${now}','b2');
+    UPDATE projects SET active_baseline_id = 'b2' WHERE id = 'p1';`);
+  return db;
+}
+
+test("[TEST-004] [INFRA-006] restore drill restores the projects ↔ design_baselines cycle with foreign keys enforced on EVERY statement (staging drill 42321793218)", async () => {
+  const { sanitizeExport, splitStatements, rehearse } = await import("../scripts/restore-drill.ts");
+  const { exportSql } = await import("../scripts/backup-export.ts");
+  const { DatabaseSync } = await import("node:sqlite");
+  const src = cycleSource();
+  for (const [kind, dump] of [["with column lists (backup-export)", exportSql(src)], ["without column lists (D1 style)", await d1StyleExport(src)]] as const) {
+    const r = sanitizeExport(dump);
+    assert.ok(r.deferred >= 2, `${kind}: the cyclic and self references are set after load (${r.deferred})`);
+    const db = new DatabaseSync(":memory:");
+    db.exec("PRAGMA foreign_keys=ON");
+    for (const s of splitStatements(r.sql).filter((s) => !/^PRAGMA/i.test(s))) db.exec(s);   // no deferral at all
+    assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), [], kind);
+    assert.equal((db.prepare("SELECT active_baseline_id AS v FROM projects WHERE id='p1'").get() as { v: string }).v, "b2", `${kind}: the deferred value is restored`);
+    assert.equal((db.prepare("SELECT superseded_by AS v FROM design_baselines WHERE id='b1'").get() as { v: string }).v, "b2", `${kind}: the self reference is restored`);
+    const st = splitStatements(r.sql);
+    const firstTrigger = st.findIndex((s) => /^CREATE\s+TRIGGER/i.test(s)), lastUpdate = st.map((s) => /^UPDATE/i.test(s)).lastIndexOf(true);
+    assert.ok(firstTrigger < 0 || lastUpdate < firstTrigger, `${kind}: fix-ups run before triggers are re-created`);
+    const rh = rehearse(dump, r.sql);
+    assert.deepEqual(rh.problems, [], `${kind}: the local rehearsal passes`);
+    assert.ok(rh.reference.content.projects && rh.reference.content.design_baselines, "critical tables are fingerprinted");
+  }
+  // The pre-fix ordering (every reference orders tables) put frontend_artifacts first: the failure staging hit.
+  const st = splitStatements(sanitizeExport(exportSql(src)).sql).filter((s) => /^INSERT/i.test(s)).map((s) => s.match(/INTO "(\w+)"/)![1]);
+  assert.ok(st.indexOf("projects") < st.indexOf("frontend_artifacts") && st.indexOf("frontend_artifacts") < st.indexOf("design_baselines"), st.join());
+});
+
+test("[TEST-004] restore drill rehearsal separates bad SOURCE data from a bad restore, and the scratch comparison fails on any lost value", async () => {
+  const { rehearse, sanitizeExport, verifyRestored } = await import("../scripts/restore-drill.ts");
+  const orphan = ["PRAGMA defer_foreign_keys=TRUE;", "CREATE TABLE p (id TEXT PRIMARY KEY);", "CREATE TABLE c (id TEXT PRIMARY KEY, p TEXT NOT NULL REFERENCES p(id));",
+    `INSERT INTO "c" VALUES('c1','missing');`].join("\n");
+  const r = rehearse(orphan, sanitizeExport(orphan).sql, ["c"]);
+  assert.match(r.problems.join("; "), /source export has 1 foreign-key violation\(s\): c → p \(1\)/);
+  assert.match(r.problems.join("; "), /local rehearsal stopped at INSERT c: FOREIGN KEY constraint failed/);
+  assert.doesNotMatch(r.problems.join("; "), /missing'/, "no row data in the reason");
+  const ok = ["CREATE TABLE p (id TEXT PRIMARY KEY, n INTEGER);", `INSERT INTO "p" VALUES('a',1);`, `INSERT INTO "p" VALUES('b',NULL);`].join("\n");
+  const good = rehearse(ok, sanitizeExport(ok).sql, ["p"]);
+  assert.deepEqual(good.problems, []);
+  const objects = good.reference.objects.map((o) => ({ o }));
+  const rows = (rs: string[]) => rs.map((r) => ({ r }));
+  const fine = verifyRestored(good.reference, { objects, fk: [], content: { p: rows([`'b'${String.fromCharCode(31)}NULL`, `'a'${String.fromCharCode(31)}1`]) } });
+  assert.deepEqual(fine, [], "row order does not matter");
+  const lost = verifyRestored(good.reference, { objects, fk: [], content: { p: rows([`'a'${String.fromCharCode(31)}1`, `'b'${String.fromCharCode(31)}2`]) } });
+  assert.match(lost.join(), /p content differs/);
+  assert.match(verifyRestored(good.reference, { objects: [], fk: [{ table: "p" }], content: {} }).join("; "), /foreign_key_check: 1 violation.*table:p missing.*p content not read/);
+  const wf = readFileSync(".github/workflows/staging-restore-drill.yml", "utf8");
+  assert.match(wf, /restore-drill\.ts rehearse drill\/staging\.sql drill\/import\.sql drill\/reference\.json/);
+  assert.match(wf, /--command "PRAGMA foreign_key_check" > drill\/fk\.json/);
+  assert.match(wf, /--reference drill\/reference\.json --fk drill\/fk\.json --objects drill\/objects\.json --content "\$content"/);
 });

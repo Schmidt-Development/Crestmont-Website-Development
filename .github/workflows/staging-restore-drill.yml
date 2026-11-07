@@ -83,9 +83,23 @@ jobs:
               files="$files${files:+,}drill/$3-$i.json"; i=$((i+1)); done < drill/count.sql; echo "$files" > "drill/$3.list"; }
           $WRANGLER d1 create "$SCRATCH" > /dev/null 2> drill/err.log || fail "create scratch database"
           node --no-warnings scripts/restore-drill.ts sanitize drill/staging.sql drill/import.sql
+          # Local proof first (same SQLite engine): the import replayed with foreign keys enforced on every statement,
+          # integrity_check, foreign_key_check and every table's content against the export. Also writes the reference
+          # that the scratch database is compared with below. Nothing here touches staging.
+          node --no-warnings scripts/restore-drill.ts rehearse drill/staging.sql drill/import.sql drill/reference.json > drill/out.log 2> drill/err.log || fail "local rehearsal"
+          cat drill/out.log
           $WRANGLER d1 execute "$SCRATCH" --remote --file drill/import.sql --yes > drill/out.log 2> drill/err.log || fail "import export into scratch"
           count "$SCRATCH" "--remote" restored || fail "count restored rows"
+          # Integrity of the restored scratch database itself: foreign keys, schema objects, critical tables' rows.
+          $WRANGLER d1 execute "$SCRATCH" --remote --json --command "PRAGMA foreign_key_check" > drill/fk.json 2> drill/err.log || fail "foreign_key_check on scratch"
+          $WRANGLER d1 execute "$SCRATCH" --remote --json --command "$(node --no-warnings scripts/restore-drill.ts objects-sql)" > drill/objects.json 2> drill/err.log || fail "schema objects on scratch"
+          content=""
+          while IFS=$'\t' read -r t q; do [ -n "$t" ] || continue
+            $WRANGLER d1 execute "$SCRATCH" --remote --json --command "$q" > "drill/content-$t.json" 2> drill/err.log || fail "read $t from scratch"
+            content="$content${content:+,}$t=drill/content-$t.json"
+          done < <(node --no-warnings scripts/restore-drill.ts content-sql drill/reference.json)
           node --no-warnings scripts/restore-drill.ts compare "$(cat drill/source.list)" "$(cat drill/restored.list)" \
+            --reference drill/reference.json --fk drill/fk.json --objects drill/objects.json --content "$content" \
             --commit "$GITHUB_SHA" --run-id "gh-${{ github.run_id }}-${{ github.run_attempt }}-restore-drill" --started "$STARTED" --out evidence/restore-drill.json
       - name: Record evidence on staging
         if: always() && steps.pre.outputs.ok == 'true'

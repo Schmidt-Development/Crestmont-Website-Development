@@ -17,7 +17,7 @@ With one person, that person holds all roles and writes the timeline as they go.
 ## 1. Detection sources
 
 - `/staff/monitoring` (unhandled errors), `/staff/readiness` health feeds (scheduler, cron registration, recovery drills, file storage), `/api/readiness/health`.
-- `staging-health-monitor.yml` failures (GitHub Actions emails the repository owner).
+- `production-health-monitor.yml` failures (GitHub Actions emails the repository owner). The staging monitor is manual only since 2026-11-07.
 - `security_events`: `login_locked`, `login_blocked_locked`, `rate_limited`, `breach_check_unavailable`; `audit_logs`: `file.download_blocked`, `file.quarantined`, `file.download_denied`, `privacy.deletion_blocked_by_hold`.
 - Provider dashboards and emails: Cloudflare, Stripe (disputes, webhook failures), Resend (bounces/complaints), Retell.
 - Customer reports via support tickets (security-sensitive tickets are incidents — RUNBOOK §9).

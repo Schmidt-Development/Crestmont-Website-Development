@@ -43,9 +43,11 @@ test("[SEC-004] dependency scanning: Dependabot watches npm (root and runner), G
   }
 });
 
-test("[READY-012] [DOC-002] external alerting: an off-platform monitor probes service and evidence-feed health every 30 minutes with retries and fails loudly; the runbook documents the channel", () => {
+test("[READY-012] [DOC-002] the staging health check is on demand only (schedule retired 2026-11-07, not a launch gate) and still probes service and evidence-feed health with retries and fails loudly; the runbook documents it", () => {
   const m = wf("staging-health-monitor.yml");
-  assert.match(m, /schedule:\s*\n\s*- cron: "11,41 \* \* \* \*"/);
+  assert.doesNotMatch(m, /^\s*schedule:/m, "no recurring schedule: staging is temporary and not a production launch requirement");
+  assert.match(m, /^\s*workflow_dispatch:/m, "kept as a manual diagnostic");
+  for (const n of ["deploy-production.yml", "release.yml", "production-health-monitor.yml"]) assert.doesNotMatch(wf(n), /staging-health-monitor|Staging health monitor/, `${n} does not depend on the retired monitor`);
   assert.match(m, /\/api\/health/);
   assert.match(m, /\/api\/readiness\/health/);
   assert.match(m, /for attempt in 1 2 3/);
