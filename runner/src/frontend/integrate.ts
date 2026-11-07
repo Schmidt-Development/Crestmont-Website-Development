@@ -125,6 +125,25 @@ export function integrationPrompt(i: IntegrationPromptInput): string {
     lines.push("");
   }
 
+  // A page behind authentication is verified by signing in, which needs an account of that role to exist. Nothing
+  // in the contract can self-register a member of staff, so the runner writes the accounts it needs and the
+  // application creates them -- and ONLY when the variable is set, or a seeding path would ship as a hole.
+  if ((m.visualStates ?? []).length) {
+    const roles = [...new Set((m.visualStates ?? []).map((v) => v.session))];
+    lines.push(`## Test accounts, for verification only`);
+    lines.push("");
+    lines.push(`${(m.visualStates ?? []).map((v) => `\`${v.page}\``).join(", ")} are checked as a signed-in person sees them, because that is the only way to compare them with the approved design. When the environment variable \`CRESTMONT_SEED\` names a JSON file, create exactly the accounts it lists and nothing else:`);
+    lines.push("");
+    lines.push("```json");
+    lines.push(`{ "accounts": [${roles.map((r) => `{ "role": "${r}", "email": "…", "password": "…" }`).join(", ")}] }`);
+    lines.push("```");
+    lines.push("");
+    lines.push(`When \`CRESTMONT_SEED\` is NOT set, do nothing at all: no accounts, no rows, no fixtures. A seeding path that runs without being asked is a way in, and it would be a failed build however convenient it is.`);
+    lines.push("");
+    lines.push(`Create the accounts with the same code path a real registration uses -- the same hashing, the same validation, the same roles table. An account made another way proves nothing about the one a person gets.`);
+    lines.push("");
+  }
+
   lines.push(`## What you are building`);
   lines.push("");
   lines.push(`${needing.length} control(s) need a backend. ${order.length} operation(s) are planned, in this order:`);

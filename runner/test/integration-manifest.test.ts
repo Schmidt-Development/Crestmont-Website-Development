@@ -255,3 +255,26 @@ test("[IM-010] an acceptance probe must point at a criterion that exists and a s
   const notAStatus = valid(manifest([op({ acceptanceProbes: [{ criterion: 0, as: "anonymous", path: "/api/quotes", expect: 4220 }] })], { apis } as never));
   assert.ok(codes(notAStatus.problems).includes("probe-status"), codes(notAStatus.problems).join(","));
 });
+
+test("[IM-011] a declared visual state must name an approved page and a role, once each", () => {
+  // The declaration is what makes a gated page comparable at all, so a wrong one is not a detail: an unapproved
+  // page cannot be compared with anything, and a blank role would capture anonymously -- the exact thing the
+  // declaration exists to stop, and it would then look as though the state had been honoured.
+  const good = valid(manifest([op()], { visualStates: [{ page: "quote", session: "staff", mask: [".card p"] }] } as never));
+  assert.ok(good.ok, codes(good.problems).join(","));
+
+  const unapproved = valid(manifest([op()], { visualStates: [{ page: "dashboard", session: "staff" }] } as never));
+  assert.ok(codes(unapproved.problems).includes("visual-state-page"), codes(unapproved.problems).join(","));
+
+  const twice = valid(manifest([op()], { visualStates: [{ page: "quote", session: "staff" }, { page: "quote", session: "customer" }] } as never));
+  assert.ok(codes(twice.problems).includes("visual-state-duplicate"), codes(twice.problems).join(","));
+
+  const noRole = valid(manifest([op()], { visualStates: [{ page: "quote", session: "" }] } as never));
+  assert.ok(codes(noRole.problems).includes("visual-state-session"), codes(noRole.problems).join(","));
+
+  const shouty = valid(manifest([op()], { visualStates: [{ page: "quote", session: "STAFF" }] } as never));
+  assert.ok(codes(shouty.problems).includes("visual-state-session"), "the role is lower case, so it matches one value everywhere");
+
+  const emptyMask = valid(manifest([op()], { visualStates: [{ page: "quote", session: "staff", mask: ["  "] }] } as never));
+  assert.ok(codes(emptyMask.problems).includes("visual-state-mask"), codes(emptyMask.problems).join(","));
+});

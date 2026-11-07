@@ -79,6 +79,30 @@ export interface AcceptanceProbe {
   repeat?: boolean;
 }
 
+/**
+ * A page whose approved rendering can only be reproduced with a session.
+ *
+ * The design lock compares the approved rendering with the one the finished build produces. For a page behind
+ * authentication those are not the same view unless the comparison signs in: measured on Northgate, an anonymous
+ * capture of a staff page lost the three approved summary cards and the only two accent colours on it, which reads
+ * as drift and is not. Declaring the session makes the two captures equivalent.
+ *
+ * It does not relax anything. Palette, fonts, type scale, skeleton and frame are compared exactly as before, on
+ * the page as a signed-in person sees it, and a signature change is still design-drift whatever is declared here.
+ * `mask` is for text that genuinely varies -- today's date, a count that comes from real rows -- and normalises
+ * only those elements' text before the screenshot is hashed. It never excludes an element from the signature.
+ *
+ * The contract names the ROLE, never a credential: the runner creates the account and holds the password.
+ */
+export interface VisualState {
+  /** The page, as the import names it (the html file without its extension). */
+  page: string;
+  /** The role to be signed in as. The runner provisions it; `access-denied` is captured separately as its own state. */
+  session: string;
+  /** Selectors whose text varies run to run. Normalised before the screenshot hash; never removed from the signature. */
+  mask?: string[];
+}
+
 export interface IntegrationManifest {
   schema: typeof MANIFEST_SCHEMA;
   /** The artifact this plan is for. */
@@ -86,8 +110,15 @@ export interface IntegrationManifest {
   /** The exact approved design this plan was written against (`DesignBaseline.fingerprint`). */
   designFingerprint: string;
   operations: IntegrationOperation[];
+  /** Pages whose approved rendering needs a session to be reproduced. See VisualState. */
+  visualStates?: VisualState[];
   /** Anything the plan cannot do and why — stated, not discovered later. */
   outOfScope?: string[];
+}
+
+/** The declared visual states, in the order the contract lists them. */
+export function declaredVisualStates(m: IntegrationManifest): readonly VisualState[] {
+  return m.visualStates ?? [];
 }
 
 /** One interactive element found in the approved frontend. Produced by the import, consumed here. */
@@ -216,6 +247,26 @@ export function validateManifest(
     }
 
     ops.push(op as IntegrationOperation);
+  }
+
+  // A declared visual state must name an approved page and a role the runner can actually be signed in as. A page
+  // nobody approved cannot be compared against anything, and a blank role would silently capture anonymously --
+  // which is the very thing the declaration exists to stop.
+  const seenStates = new Set<string>();
+  for (const [n, vs] of ((man as { visualStates?: VisualState[] }).visualStates ?? []).entries()) {
+    const at = `visual state ${n + 1}`;
+    if (!isStr(vs?.page) || (o.approvedPages && !o.approvedPages.includes(vs.page))) {
+      reject("visual-state-page", `${at} names the page "${String(vs?.page)}", which is not one of the approved pages`);
+      continue;
+    }
+    if (seenStates.has(vs.page)) reject("visual-state-duplicate", `${at} is the second declaration for "${vs.page}"`);
+    seenStates.add(vs.page);
+    if (!isStr(vs.session) || !/^[a-z][a-z0-9_-]{1,23}$/.test(vs.session)) {
+      reject("visual-state-session", `${at} must name the role to sign in as, in lower case (got ${JSON.stringify(vs.session)})`);
+    }
+    for (const sel of vs.mask ?? []) {
+      if (!isStr(sel) || !sel.trim()) reject("visual-state-mask", `${at} has an empty selector in its mask`);
+    }
   }
 
   // Dependencies must resolve, and must not form a cycle: a cycle means no operation can ever start.

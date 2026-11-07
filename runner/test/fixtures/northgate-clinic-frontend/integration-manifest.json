@@ -526,5 +526,18 @@
         "staff-set-status"
       ]
     }
+  ],
+  "visualStates": [
+    {
+      "page": "staff",
+      "session": "staff",
+      "mask": [
+        ".card p"
+      ]
+    },
+    {
+      "page": "account",
+      "session": "customer"
+    }
   ]
 }

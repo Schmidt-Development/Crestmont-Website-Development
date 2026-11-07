@@ -26,6 +26,7 @@ import type { Logger } from "../log.ts";
 import { ingestArtifact } from "./ingest.ts";
 import { buildFrontend, planBuild } from "./build.ts";
 import { baselineFrom, describeImport, readImportReport, verifyAgainstBaseline } from "./import.ts";
+import { writeVisualSpec } from "./visual.ts";
 import type { ImportReport } from "./import.ts";
 import { IMPORT_OUT, IMPORT_SCRIPT, writeBaseline } from "./workflow.ts";
 import type { DesignBaseline, DriftFinding } from "./design-lock.ts";
@@ -332,7 +333,14 @@ async function measureVisual(
   manifest: IntegrationManifest & ManifestContract,
 ): Promise<CycleRecord["visual"]> {
   const dir = `${importOut}-cycle-${cycle}`;
-  const r = await d.sandbox.argv(["node", IMPORT_SCRIPT, "--root", outputRoot || ".", "--out", dir], undefined, "frontend-import (verify)");
+  // A contract that declared visual states is measured against the running application, so a page behind
+  // authentication is captured as a signed-in person sees it rather than as an anonymous visitor does. When it
+  // cannot be -- no states declared, nothing to start, nowhere to sign in -- the static measurement is used, which
+  // is what every build did before and is still correct for a site with no gated pages.
+  const vis = writeVisualSpec(d.ws.repo, manifest);
+  const argv = ["node", IMPORT_SCRIPT, "--root", outputRoot || ".", "--out", dir];
+  if ("path" in vis) argv.push("--app", vis.path);
+  const r = await d.sandbox.argv(argv, undefined, "path" in vis ? "frontend-import (verify, signed in)" : "frontend-import (verify)");
   if (r.code !== 0) return { ran: false, ok: false, detail: `re-measuring failed (exit ${r.code})` };
   let after: ImportReport;
   try { after = readImportReport(path.join(d.ws.repo, dir)); }
