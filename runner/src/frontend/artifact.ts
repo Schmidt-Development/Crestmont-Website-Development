@@ -37,6 +37,57 @@ export interface ArtifactVerdict {
   assets: string[];
   /** Entry point candidates found. */
   entryPoints: string[];
+  /** Which document the site opens at, decided by `discoverHtmlEntry`. Absent on a verdict reached before it. */
+  entry?: HtmlEntry;
+}
+
+/**
+ * Which HTML document a static site opens at.
+ *
+ * ONE place decides this. It used to be decided in three, all by the same test -- `has(/(^|\/)index\.html?$/)`
+ * for the framework, the same regex again for the entry-point list, and a third copy inside the rejection
+ * message -- and all three asked the question that turned out to be wrong: is a file called `index.html` in here?
+ *
+ * The Founder's first real upload was one self-contained HTML file, `01-vesper-rowe-law.html`, with its CSS and
+ * JavaScript inside it: a complete, valid website. It was refused in 0.55 seconds as "no supported frontend was
+ * recognised ... No package.json and no index.html was found at any level" -- by the same message that lists "a
+ * static HTML/CSS/JS site" as supported. The measurement instrument never needed `index.html`: it discovers
+ * every .html file under the root and names each page from its path. Only this decision stood in the way.
+ *
+ * The rules are deterministic and ordered, because an archive with several candidate documents must not have one
+ * picked for it arbitrarily:
+ *
+ *   index          an `index.html` at the top level. The ordinary case, and it always wins.
+ *   nested-index   exactly one `index.html`, deeper in (a `dist/` or `build/` output).
+ *   single         exactly one HTML file in the whole archive, named something else. Unambiguous: it is the site.
+ *   ambiguous      several HTML documents and no index to choose between them. Refused, with the candidates
+ *                  named, so the owner is told what to do instead of having a file picked for them.
+ *   none           no HTML at all.
+ */
+export type HtmlEntry =
+  | { kind: "index"; path: string }
+  | { kind: "nested-index"; path: string }
+  | { kind: "single"; path: string }
+  | { kind: "ambiguous"; candidates: string[] }
+  | { kind: "none" };
+
+const HTML_RE = /\.html?$/i;
+const INDEX_RE = /(^|\/)index\.html?$/i;
+
+export function discoverHtmlEntry(paths: readonly string[]): HtmlEntry {
+  const html = paths.filter((p) => HTML_RE.test(p));
+  if (!html.length) return { kind: "none" };
+
+  const root = html.find((p) => INDEX_RE.test(p) && !p.includes("/"));
+  if (root) return { kind: "index", path: root };
+
+  const nested = html.filter((p) => INDEX_RE.test(p));
+  // "Deepest first" is not a tie-break anyone could predict, so ONE nested index is accepted and several are not.
+  if (nested.length === 1) return { kind: "nested-index", path: nested[0] };
+  if (nested.length > 1) return { kind: "ambiguous", candidates: [...nested].sort() };
+
+  if (html.length === 1) return { kind: "single", path: html[0] };
+  return { kind: "ambiguous", candidates: [...html].sort() };
 }
 
 /** Hard ceilings. An artifact is a website, not a disk image. */
@@ -174,18 +225,26 @@ export function validateArtifact(input: ArtifactInput): ArtifactVerdict {
     return name in d;
   };
 
+  const entry = discoverHtmlEntry(paths);
+
   let framework: Framework | null = null;
   const hasTs = has(/\.tsx?$/) || !!text["tsconfig.json"];
   if (dep("vite") || has(/^vite\.config\.[jt]s$/)) framework = "vite";
   else if (dep("react") || has(/\.jsx$/) || has(/\.tsx$/)) framework = hasTs ? "react-ts" : "react";
-  else if (has(/(^|\/)index\.html?$/)) framework = "static";
+  // A site with HTML and no build tooling is a static site, whatever its document is called. `ambiguous` is still
+  // a static site: it is refused below for having no single entry, not for being unrecognisable, because telling
+  // an owner their multi-page website "is not a supported frontend" would send them to fix the wrong thing.
+  else if (entry.kind !== "none") framework = "static";
 
   if (!framework) {
     reject("unsupported-framework",
       "no supported frontend was recognised. Supported: a React app, React with TypeScript, a Vite project, or a static HTML/CSS/JS site. "
-      + (pkg ? "package.json lists neither react nor vite." : "No package.json and no index.html was found at any level."));
+      + (pkg ? "package.json lists neither react nor vite." : "No package.json and no .html document was found at any level."));
   }
-  if (framework !== "static" && !pkg) {
+  // Only when a framework WAS recognised. `framework !== "static"` was true of null as well, so an archive with
+  // neither a package.json nor an index.html was refused twice -- once for being unrecognised, and once as
+  // "a null project needs a package.json", which is what the Founder's rejection record actually says.
+  if (framework && framework !== "static" && !pkg) {
     reject("missing-package-json", `a ${framework} project needs a package.json, and none is in the archive`);
   }
   if (framework !== "static" && pkg && !text["package-lock.json"] && !text["pnpm-lock.yaml"] && !text["yarn.lock"]) {
@@ -193,14 +252,22 @@ export function validateArtifact(input: ArtifactInput): ArtifactVerdict {
   }
 
   // ── entry points and assets ─────────────────────────────────────────────────────────────────────────────────
-  const entryPoints = paths.filter((p) => /^(?:src\/)?(?:main|index|App)\.(?:[jt]sx?)$/.test(p) || /(^|\/)index\.html?$/.test(p));
-  if (framework === "static" && !entryPoints.some((p) => /index\.html?$/.test(p))) {
-    reject("missing-entry-point", "a static site needs an index.html");
+  const entryPoints = paths.filter((p) => /^(?:src\/)?(?:main|index|App)\.(?:[jt]sx?)$/.test(p) || INDEX_RE.test(p));
+  if (framework === "static") {
+    if (entry.kind === "ambiguous") {
+      reject("ambiguous-entry-point",
+        `this archive holds ${entry.candidates.length} HTML documents and no index.html, so which one the website opens at cannot be decided: `
+        + `${entry.candidates.slice(0, 8).join(", ")}${entry.candidates.length > 8 ? ", …" : ""}. `
+        + "Add an index.html at the top level, or upload a single HTML document on its own.");
+    } else if (entry.kind !== "none" && !entryPoints.includes(entry.path)) {
+      // A single document named something else is the entry point, so it belongs in the list the record shows.
+      entryPoints.push(entry.path);
+    }
   }
   const assets = paths.filter((p) => ASSET_EXT.test(p));
 
   const fatal = problems.some((p) => p.severity === "reject" || p.severity === "quarantine");
-  return { ok: !fatal, framework, problems, assets, entryPoints };
+  return { ok: !fatal, framework, problems, assets, entryPoints, entry };
 }
 
 /** One line per problem, for the import record and for the person who has to act on it. */

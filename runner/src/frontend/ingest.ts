@@ -11,7 +11,7 @@
 // caller has no clean verdict to show, extraction does not happen, and the import record says why.
 
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describeProblems, unsafePath, validateArtifact } from "./artifact.ts";
 import type { ArtifactProblem, ArtifactVerdict, Framework } from "./artifact.ts";
@@ -50,6 +50,13 @@ export interface IngestResult {
   verdict: ArtifactVerdict | null;
   /** Set only when extraction actually happened. */
   extracted: { dir: string; files: number; bytes: number } | null;
+  /**
+   * The document the site opens at, after extraction.
+   *
+   * `renamedFrom` is set when an unambiguous single-document archive was normalised to `index.html`. Recorded
+   * rather than silent: the owner uploaded a file with a name, and the record says what happened to it.
+   */
+  entrypoint: { path: string; renamedFrom: string | null } | null;
   /** True when the artifact must be kept for inspection rather than discarded. */
   quarantine: boolean;
 }
@@ -94,7 +101,7 @@ export function ingestArtifact(o: {
 
   const fail = (partial: Partial<IngestResult> = {}): IngestResult => ({
     ok: false, artifactSha, source: o.source, scanned: false, scanStatus,
-    framework: null, archiveRoot: "", problems, verdict: null, extracted: null, quarantine: false,
+    framework: null, archiveRoot: "", problems, verdict: null, extracted: null, entrypoint: null, quarantine: false,
     ...partial,
   });
 
@@ -159,7 +166,7 @@ export function ingestArtifact(o: {
   }
 
   if (o.extract === false) {
-    return { ok: true, artifactSha, source: o.source, scanned, scanStatus, framework: verdict.framework, archiveRoot, problems, verdict, extracted: null, quarantine: false };
+    return { ok: true, artifactSha, source: o.source, scanned, scanStatus, framework: verdict.framework, archiveRoot, problems, verdict, extracted: null, entrypoint: null, quarantine: false };
   }
 
   // ── 4. extraction ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -196,10 +203,43 @@ export function ingestArtifact(o: {
     writeFileSync(target, body, { mode: 0o644, flag: "wx" });
   }
 
+  // ── 5. the entry point ────────────────────────────────────────────────────────────────────────────────────────
+  //
+  // A website opens at "/". A single document called `01-vesper-rowe-law.html` is a complete website, and served
+  // as it stands it has no root document at all: a visitor who types the address gets nothing. So an UNAMBIGUOUS
+  // single-document archive is normalised here -- renamed, not copied, because two identical documents would be
+  // measured as two pages and the approved design would carry a page that does not exist.
+  //
+  // Only the unambiguous case. An archive with an index.html is left exactly as it is, and one with several
+  // documents and no index was already refused with its candidates named: nothing here picks a file for anyone.
+  let entrypoint: { path: string; renamedFrom: string | null } | null = null;
+  const entry = verdict.entry;
+  if (entry && (entry.kind === "index" || entry.kind === "nested-index")) {
+    entrypoint = { path: entry.path, renamedFrom: null };
+  } else if (entry && entry.kind === "single") {
+    const from = entry.path;
+    const to = from.includes("/") ? `${from.slice(0, from.lastIndexOf("/"))}/index.html` : "index.html";
+    if (from === to) {
+      entrypoint = { path: to, renamedFrom: null };
+    } else {
+      const fromAbs = path.resolve(dest, from);
+      const toAbs = path.resolve(dest, to);
+      if (!toAbs.startsWith(dest + path.sep) && toAbs !== dest) {
+        throw new Error(`refusing to normalise the entry point to "${to}": it resolves outside the destination directory`);
+      }
+      renameSync(fromAbs, toAbs);
+      entrypoint = { path: to, renamedFrom: from };
+      problems.push({
+        severity: "warn", code: "entry-point-normalised", path: from,
+        detail: `this archive holds one HTML document and no index.html, so it is served as the site's index; the file was renamed from "${from}" to "${to}"`,
+      });
+    }
+  }
+
   return {
     ok: true, artifactSha, source: o.source, scanned, scanStatus,
     framework: verdict.framework, archiveRoot, problems, verdict,
-    extracted: { dir: dest, files, bytes }, quarantine: false,
+    extracted: { dir: dest, files, bytes }, entrypoint, quarantine: false,
   };
 }
 
@@ -210,5 +250,8 @@ export function describeIngest(r: IngestResult): string {
     : r.scanned ? "scanned clean" : `NOT scanned (status "${r.scanStatus}")`;
   if (!r.ok) return `import refused — ${gate}\n${describeProblems(r.verdict ?? { ok: false, framework: null, problems: r.problems, assets: [], entryPoints: [] })}`;
   const where = r.extracted ? `${r.extracted.files} file(s), ${Math.round(r.extracted.bytes / 1024)} KB` : "verdict only, nothing written";
-  return `imported as a ${r.framework} project — ${gate}; ${where}${r.archiveRoot ? `; archive root "${r.archiveRoot}/" stripped` : ""}${r.problems.length ? `\n${describeProblems(r.verdict!)}` : ""}`;
+  const entry = r.entrypoint
+    ? `; opens at "${r.entrypoint.path}"${r.entrypoint.renamedFrom ? ` (renamed from "${r.entrypoint.renamedFrom}": one HTML document and no index.html)` : ""}`
+    : "";
+  return `imported as a ${r.framework} project — ${gate}; ${where}${r.archiveRoot ? `; archive root "${r.archiveRoot}/" stripped` : ""}${entry}${r.problems.length ? `\n${describeProblems(r.verdict!)}` : ""}`;
 }

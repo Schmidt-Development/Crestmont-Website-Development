@@ -587,6 +587,22 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
         // laid over the starter, so the measurement also finds the starter's pages; without this the fingerprint
         // is computed over a wider set of pages than the approved one and could never match.
         fetchApprovedBaseline: () => client.approvedBaseline(job),
+        // The external assets the approved design was MEASURED with, restored from the platform's own records.
+        // It fetches nothing: the rows exist from the import, so the build renders the identical bytes and the
+        // visual gate is not comparing a page with its fonts against a page without them.
+        resolveAssets: async (refs) => {
+          const out: Awaited<ReturnType<NonNullable<Parameters<typeof runDesignLockedJob>[0]["resolveAssets"]>>> = [];
+          for (let i = 0; i < refs.length; i += 10) {
+            const batch = refs.slice(i, i + 10);
+            const answer = await client.resolveFrontendAssets({
+              artifactId: job.designLocked?.artifactId ?? "",
+              assets: batch.map((r) => ({ url: r.url, kind: r.kind, referencedBy: r.referencedBy })),
+            });
+            if (!answer) break;
+            out.push(...answer.assets);
+          }
+          return out;
+        },
         // The contract, from where the platform records it. This read `job.spec?.content` -- the architect's
         // master specification for the retired frontend-generation path, a different shape entirely -- so a
         // design-locked build never had a contract and stopped at `manifest` thirteen seconds in. Still a cast,

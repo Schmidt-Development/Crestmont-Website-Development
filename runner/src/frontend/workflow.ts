@@ -18,6 +18,8 @@ import type { BuildResult, BuildSandbox } from "./build.ts";
 import { describeIngest, ingestArtifact } from "./ingest.ts";
 import type { ArtifactSource, IngestResult, ScanGate } from "./ingest.ts";
 import { baselineFrom, describeImport, readImportReport, verifyAgainstBaseline } from "./import.ts";
+import { describePinned, pinExternalAssets } from "./pin-assets.ts";
+import type { PinOutcome, ResolveAssets } from "./pin-assets.ts";
 import type { ImportReport, VerifyResult } from "./import.ts";
 import type { DesignBaseline } from "./design-lock.ts";
 import { validateManifest } from "./integration-manifest.ts";
@@ -43,6 +45,13 @@ export interface ImportOutcome {
   manifestProblems: ManifestProblem[];
   verify: VerifyResult | null;
   problems: string[];
+  /**
+   * The artifact's external dependencies, acquired and written in before anything was measured.
+   *
+   * Null when no resolver was supplied, which is how a caller that cannot reach the platform behaves: the import
+   * then measures the artifact as it stands, exactly as it did before, and says nothing it cannot support.
+   */
+  assets: PinOutcome | null;
 }
 
 /**
@@ -57,6 +66,13 @@ export async function importFrontend(o: {
   scan?: ScanGate;
   /** The job's repo directory. The frontend is extracted here. */
   repo: string;
+  /**
+   * Acquires the artifact's external dependencies through the platform, which has the network and the rules.
+   *
+   * Optional, and absent means "do not": an import with no resolver measures what is in the archive, which is
+   * the old behaviour and is still correct for an artifact that references nothing external.
+   */
+  resolveAssets?: ResolveAssets;
   sandbox: ImportSandbox;
   approvedBy: string;
   manifest?: unknown;
@@ -65,7 +81,7 @@ export async function importFrontend(o: {
 }): Promise<ImportOutcome> {
   const out: ImportOutcome = {
     ok: false, failedAt: null, ingest: null, build: null, report: null,
-    baseline: null, manifestProblems: [], verify: null, problems: [],
+    baseline: null, manifestProblems: [], verify: null, problems: [], assets: null,
   };
 
   // ── 1. ingest ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -75,6 +91,29 @@ export async function importFrontend(o: {
     out.failedAt = "ingest";
     out.problems.push(describeIngest(ingest));
     return out;
+  }
+  // Ingest's own warnings on a SUCCESSFUL import, which used to be dropped: only the failure path described the
+  // ingest at all. That the entry point was renamed, or that an install hook was found, is something the owner
+  // should read on the project page rather than something only the runner's log knows.
+  for (const p of ingest.problems) {
+    if (p.severity === "warn") out.problems.push(`${p.code}${p.path ? ` (${p.path})` : ""}: ${p.detail}`);
+  }
+
+  // ── 1b. the external assets ─────────────────────────────────────────────────────────────────────────────────
+  //
+  // Before the build and before the measurement, because both of them must see the same files a visitor would.
+  // The measurement container has no network: without this step a site whose typography comes from a font CDN is
+  // measured in a fallback face, and that becomes the approved design.
+  //
+  // A failure to ACQUIRE is not a failure to import. The design is measured either way; what changes is that a
+  // missing visual dependency is reported, and the platform refuses to approve a baseline that has any.
+  if (o.resolveAssets) {
+    try {
+      out.assets = await pinExternalAssets({ repo: o.repo, resolve: o.resolveAssets });
+      out.problems.push(describePinned(out.assets));
+    } catch (err) {
+      out.problems.push(`the external assets could not be resolved: ${String((err as Error)?.message ?? err).slice(0, 300)}`);
+    }
   }
 
   // ── 2. build ────────────────────────────────────────────────────────────────────────────────────────────────

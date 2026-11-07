@@ -72,7 +72,25 @@ jobs:
         run: |
           npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
           .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
-          node --no-warnings --test --test-concurrency=1 tests/e2e/staging-artifact-upload.e2e.ts
+          rc=0
+          node --no-warnings --test --test-concurrency=1 tests/e2e/staging-artifact-upload.e2e.ts 2>&1 | tee upload-e2e.log
+          rc=${PIPESTATUS[0]}
+          # A SKIPPED check is UNDETERMINED, and this run exists to determine something. Several of these tests
+          # skip themselves when the scanner or the runner has not answered within their patience, and node:test
+          # exits 0 for a skip -- so this workflow could report GREEN having established nothing about the upload
+          # path. The build-queue verification already learned this; the same guard belongs here.
+          skipped=$(grep -cE '^ok [0-9]+ - .* # SKIP' upload-e2e.log || true)
+          if [ "${skipped:-0}" -gt 0 ]; then
+            echo "::error title=Artifact upload::${skipped} check(s) could not be determined, which is not a pass:"
+            grep -E '^ok [0-9]+ - .* # SKIP' upload-e2e.log | cut -c1-400
+            rc=1
+          fi
+          if ! grep -qE '^# fail 0$' upload-e2e.log; then
+            echo "::error title=Artifact upload::the test run did not report '# fail 0':"
+            grep -E '^# (tests|pass|fail|skipped) ' upload-e2e.log || echo "  (no counts were printed at all)"
+            rc=1
+          fi
+          exit "$rc"
 
       - name: Remove the credential files
         if: always()

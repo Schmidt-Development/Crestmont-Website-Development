@@ -21,6 +21,7 @@ import { claimSignatureOnce, securityEvent, audit } from "../services/security.t
 import * as DX from "../services/runner-diagnostics.ts";
 import { latestQuality } from "../services/build-quality.ts";
 import * as BR from "../services/build-revisions.ts";
+import * as AA from "../services/artifact-assets.ts";
 import * as G from "../services/design-gallery.ts";
 
 const RUNNER = "/api/builds/runner";
@@ -334,6 +335,50 @@ export function register(r: Router): void {
       approved: true, approvedBy: approval.approvedBy, queued, queueRefusal,
       // The runner reads this and drafts the contract. It is not an error: it is the next step.
       awaitingContract, projectId: project?.project_id ?? null, designFingerprint: recorded.fingerprint,
+    });
+  }));
+
+  // ── the asset step: the external things the design depends on, acquired once and pinned ────────────────────
+  //
+  // The measurement container has no network, by design, so a font CDN and an image host were simply absent from
+  // every measured baseline: the owner approved a design rendered with fallback fonts and empty image boxes.
+  // Node 1 cannot fetch them either -- its egress proxy allows the npm registry, the control plane and the model
+  // server, and explicitly DENIES the domain Google Fonts is served from.
+  //
+  // So the runner finds the dependencies in the extracted artifact and asks the PLATFORM to acquire them. Every
+  // rule lives in `services/artifact-assets.ts`: https only, no credentials, no IP-literal or private host,
+  // redirects re-checked at each hop, an allow-list of content types each confirmed against the bytes' own magic
+  // numbers, and size and count ceilings. Nothing fetched here is ever executed; it is written into the artifact
+  // and rendered by a browser in a sandbox that has no network.
+  //
+  // Refusals come back rather than being hidden. A visual dependency that cannot be acquired is what makes a
+  // baseline materially incomplete, and the approval path refuses it instead of letting a fallback be approved.
+  r.post(`${RUNNER}/frontend/assets/resolve`, runnerRoute(async (ctx) => {
+    const b = await runnerBody(ctx);
+    if (!ctx.storage) return jsonResponse(ctx, 404, { error: "file storage is not configured" });
+    const artifactId = typeof b.artifactId === "string" ? b.artifactId : "";
+    if (!artifactId) return jsonResponse(ctx, 422, { error: "artifactId is required" });
+    const raw = Array.isArray(b.assets) ? b.assets : [];
+    if (raw.length > AA.ASSET_LIMITS.perArtifact) {
+      return jsonResponse(ctx, 422, { error: `at most ${AA.ASSET_LIMITS.perArtifact} assets per request` });
+    }
+    const requests = raw
+      .map((x) => (x ?? {}) as Record<string, unknown>)
+      .filter((x) => typeof x.url === "string")
+      .map((x) => ({
+        url: String(x.url).slice(0, 2048),
+        kind: (["image", "font", "stylesheet", "other"].includes(String(x.kind)) ? String(x.kind) : "other") as AA.AssetKind,
+        referencedBy: typeof x.referencedBy === "string" ? x.referencedBy.slice(0, 300) : null,
+      }));
+
+    const r0 = await AA.resolveAssets(ctx.db, ctx.storage, { artifactId, requests });
+    return jsonResponse(ctx, 200, {
+      assets: r0.assets.map((a) => ({
+        url: a.url, kind: a.kind, status: a.status, why: a.why ?? null, sha256: a.sha256 ?? null,
+        bytes: a.bytes ?? null, contentType: a.contentType ?? null,
+        localPath: a.status === "pinned" ? AA.localPathFor(a) : null, body: a.body ?? null,
+      })),
+      refusedVisual: r0.refusedVisual,
     });
   }));
 

@@ -126,6 +126,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   "POST /api/builds/runner/frontend/import/claim": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/frontend/import/bytes": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/frontend/import/report": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/frontend/assets/resolve": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/frontend/contract/submit": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/gallery/image": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/gallery/seen": signed("x-crestmont-runner-signature"),
@@ -545,6 +546,7 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   // Rejecting an artifact is the other half of approving one: both decide what the AI may build against, so both
   // are `builds.configure` and both are audited.
   "POST /staff/builds/frontends/:projectId/artifacts/:artifactId/reject": staff(rolesWith("builds.configure"), { projectId: "project", artifactId: "frontendArtifact" }, act("frontend_artifact.rejected")),
+  "POST /staff/builds/frontends/:projectId/artifacts/:artifactId/retry-import": staff(rolesWith("builds.configure"), { projectId: "project", artifactId: "frontendArtifact" }, act("frontend_artifact.import_retried")),
   // Starting a backend job goes through the platform's own queueing path, which decides eligibility; this route
   // only asks it to. Audited by the build record's own events rather than a separate audit row.
   "POST /staff/builds/frontends/:projectId/build": staff(rolesWith("builds.configure"), { projectId: "project" }, act("builds.backend_job_started")),

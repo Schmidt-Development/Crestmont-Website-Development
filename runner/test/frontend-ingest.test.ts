@@ -11,6 +11,7 @@ import { crc32, deflateRawSync } from "node:zlib";
 import { ZIP_LIMITS, ZipArchive, ZipError } from "../src/frontend/zip.ts";
 import { commonRoot, describeIngest, ingestArtifact } from "../src/frontend/ingest.ts";
 import { dir, makeZip, symlink, viteProjectZip } from "./fixtures/zip-writer.ts";
+import { planBuild } from "../src/frontend/build.ts";
 
 const tmp = (): string => mkdtempSync(path.join(tmpdir(), "fe-ingest-"));
 const codes = (r: { problems: { code: string }[] }) => r.problems.map((p) => p.code);
@@ -272,4 +273,97 @@ test("[ING-007] a deflate stream is read correctly at size, not just on toy inpu
   assert.equal(z.read(e).toString("utf8"), css, "and inflates back byte for byte");
   assert.equal(crc32(Buffer.from(css)) >>> 0, e.crc >>> 0);
   assert.ok(deflateRawSync(Buffer.from(css)).length > 0);
+});
+
+test("[ING-008] a single-document archive is normalised to index.html, and the whole chain then works", () => {
+  // The Founder's archive, as bytes: one self-contained document with a name of its own.
+  const html = "<!doctype html><html><head><title>Vesper Rowe Law</title><style>body{margin:0;font-family:system-ui}</style>"
+    + "</head><body><header><h1>Vesper Rowe</h1></header><main><p>Attorneys.</p></main><script>0</script></body></html>";
+  const dest = path.join(tmp(), "repo");
+  const r = ingestArtifact({
+    bytes: makeZip([{ path: "01-vesper-rowe-law.html", body: html }]),
+    destDir: dest, source: "customer-upload", scan: CLEAN,
+  });
+
+  assert.equal(r.ok, true, describeIngest(r));
+  assert.equal(r.framework, "static");
+
+  // A website opens at "/". Served as uploaded, this one had no root document at all: the normalisation is what
+  // makes the measurement, the serve step and the eventual deployment all find it.
+  assert.equal(r.entrypoint?.path, "index.html");
+  assert.equal(r.entrypoint?.renamedFrom, "01-vesper-rowe-law.html");
+  assert.ok(existsSync(path.join(dest, "index.html")), "the document is on disk as index.html");
+  assert.ok(!existsSync(path.join(dest, "01-vesper-rowe-law.html")), "renamed, not copied: two copies would be measured as two pages");
+  assert.equal(readFileSync(path.join(dest, "index.html"), "utf8"), html, "and its contents are untouched");
+
+  // Recorded, not silent. The owner uploaded a file with a name and is told what happened to it.
+  assert.ok(codes(r).includes("entry-point-normalised"), codes(r).join(","));
+  assert.match(describeIngest(r), /opens at "index\.html"/);
+  assert.match(describeIngest(r), /renamed from "01-vesper-rowe-law\.html"/);
+
+  // And the next step in the chain -- which has its own index.html requirement -- is now satisfied.
+  const plan = planBuild(dest, "static");
+  assert.ok(!("error" in plan), `the build plan must resolve: ${JSON.stringify(plan)}`);
+  assert.equal((plan as { expectOutput: string }).expectOutput, "", "served from the project root");
+});
+
+test("[ING-009] an archive that already has an index.html is left exactly as it was", () => {
+  const dest = path.join(tmp(), "repo");
+  const r = ingestArtifact({
+    bytes: makeZip([
+      { path: "index.html", body: "<!doctype html><h1>Home</h1>" },
+      { path: "about.html", body: "<!doctype html><h1>About</h1>" },
+      { path: "styles.css", body: "body{margin:0}" },
+    ]),
+    destDir: dest, source: "customer-upload", scan: CLEAN,
+  });
+
+  assert.equal(r.ok, true, describeIngest(r));
+  assert.equal(r.entrypoint?.path, "index.html");
+  assert.equal(r.entrypoint?.renamedFrom, null, "nothing was renamed");
+  assert.ok(!codes(r).includes("entry-point-normalised"));
+  assert.ok(existsSync(path.join(dest, "about.html")), "and the other pages are still their own pages");
+  assert.deepEqual(readdirSync(dest).sort(), ["about.html", "index.html", "styles.css"]);
+});
+
+test("[ING-010] a single document inside a folder is normalised beside itself, never outside the destination", () => {
+  // The archive root is only stripped when every entry shares one, which a single-file archive does not, so the
+  // document can legitimately arrive at `law/01-vesper-rowe-law.html`. The index belongs beside it, not at the
+  // destination root where nothing else is.
+  const dest = path.join(tmp(), "repo");
+  const r = ingestArtifact({
+    bytes: makeZip([{ path: "law/01-vesper-rowe-law.html", body: "<!doctype html><h1>Vesper Rowe</h1>" }]),
+    destDir: dest, source: "customer-upload", scan: CLEAN,
+  });
+
+  assert.equal(r.ok, true, describeIngest(r));
+  assert.equal(r.entrypoint?.path, "law/index.html");
+  assert.ok(existsSync(path.join(dest, "law", "index.html")));
+  // Every written path stays inside the destination; the rename is checked the same way the extraction is.
+  for (const p of readdirSync(dest, { recursive: true }) as string[]) {
+    assert.ok(path.resolve(dest, p).startsWith(dest), `${p} is inside the destination`);
+  }
+
+  // `staticRoot` finds it one level down, so the build serves the folder rather than the empty root.
+  const plan = planBuild(dest, "static");
+  assert.ok(!("error" in plan), JSON.stringify(plan));
+  assert.equal((plan as { expectOutput: string }).expectOutput, "law");
+});
+
+test("[ING-011] several documents with no index are refused before extraction, with nothing written", () => {
+  const dest = path.join(tmp(), "repo");
+  const r = ingestArtifact({
+    bytes: makeZip([
+      { path: "about.html", body: "<h1>About</h1>" },
+      { path: "services.html", body: "<h1>Services</h1>" },
+    ]),
+    destDir: dest, source: "customer-upload", scan: CLEAN,
+  });
+
+  assert.equal(r.ok, false);
+  assert.ok(codes(r).includes("ambiguous-entry-point"), codes(r).join(","));
+  assert.equal(r.extracted, null, "a refused archive is not unpacked");
+  assert.equal(r.entrypoint, null);
+  assert.match(describeIngest(r), /import refused/);
+  assert.match(describeIngest(r), /about\.html/, "and the owner is told which documents were found");
 });

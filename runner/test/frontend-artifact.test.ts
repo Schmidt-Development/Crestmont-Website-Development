@@ -239,3 +239,98 @@ test("[FA-008] validation reads manifests and source, and never loads binary ass
   assert.equal(shouldReadAsText("fonts/Inter.woff2", 90_000), false);
   assert.equal(shouldReadAsText("src/bundle.js", 8 * 1024 * 1024), false, "and nothing oversized is read at all");
 });
+
+// -- the entry point: which document a static site opens at -------------------------------------------------------
+//
+// The Founder's first real upload was refused by this code in 0.55 seconds. It was one self-contained HTML file,
+// `01-vesper-rowe-law.html`, CSS and JavaScript inside it, external images and fonts by URL: a complete website.
+// The record read
+//
+//   REJECT unsupported-framework: no supported frontend was recognised. Supported: a React app, React with
+//   TypeScript, a Vite project, or a static HTML/CSS/JS site. No package.json and no index.html was found at
+//   any level.
+//   REJECT missing-package-json: a null project needs a package.json, and none is in the archive
+//
+// -- refused by a message that lists its own format as supported, and refused twice, the second time as "a null
+// project". Nothing downstream needed `index.html`: the measurement instrument discovers every .html file and
+// names each page from its path. One decision, asked the wrong way, in three places.
+
+test("[FA-009] a single arbitrarily named HTML document is a static website", () => {
+  // The Founder's archive, by shape: one document, nothing else.
+  const lawFirm = validateArtifact({
+    entries: [f("01-vesper-rowe-law.html", 48_000)],
+    text: { "01-vesper-rowe-law.html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><h1>Vesper Rowe</h1><script>0</script></body></html>" },
+  });
+  assert.equal(lawFirm.framework, "static", `a single HTML document is a static site: ${describeProblems(lawFirm)}`);
+  assert.equal(lawFirm.ok, true, describeProblems(lawFirm));
+  assert.deepEqual(lawFirm.entry, { kind: "single", path: "01-vesper-rowe-law.html" });
+  assert.ok(lawFirm.entryPoints.includes("01-vesper-rowe-law.html"), "and it is the entry point the record names");
+  // The second rejection was a bug of its own: `framework !== "static"` was true of null too.
+  assert.ok(!codes(lawFirm).includes("missing-package-json"), "a static site needs no package.json");
+
+  // A document beside its own stylesheet, script and images -- still one document, still unambiguous.
+  const withAssets = validateArtifact({
+    entries: [f("vesper-rowe.htm"), f("styles.css"), f("app.js"), f("logo.png", 4096), f("fonts/body.woff2", 20_000)],
+    text: { "vesper-rowe.htm": "<!doctype html><link rel=stylesheet href=styles.css>", "styles.css": "body{margin:0}", "app.js": "0" },
+  });
+  assert.equal(withAssets.framework, "static", describeProblems(withAssets));
+  assert.equal(withAssets.entry?.kind, "single");
+  assert.ok(withAssets.assets.includes("logo.png") && withAssets.assets.includes("fonts/body.woff2"));
+});
+
+test("[FA-010] an index.html always wins, and a nested one is accepted", () => {
+  // The ordinary case is unchanged, and it must stay unchanged: a site with an index.html opens there even when
+  // other documents sit beside it.
+  const multi = validateArtifact({
+    entries: [f("index.html"), f("about.html"), f("contact.html"), f("styles.css")],
+    text: { "index.html": "<h1>Home</h1>", "about.html": "<h1>About</h1>", "contact.html": "<h1>Contact</h1>" },
+  });
+  assert.equal(multi.framework, "static");
+  assert.equal(multi.ok, true, describeProblems(multi));
+  assert.deepEqual(multi.entry, { kind: "index", path: "index.html" });
+
+  // A build output: one index.html, deeper in. Accepted before this change and still accepted.
+  const nested = validateArtifact({
+    entries: [f("dist/index.html"), f("dist/app.js")],
+    text: { "dist/index.html": "<div id=root></div>" },
+  });
+  assert.equal(nested.framework, "static");
+  assert.equal(nested.ok, true, describeProblems(nested));
+  assert.deepEqual(nested.entry, { kind: "nested-index", path: "dist/index.html" });
+});
+
+test("[FA-011] several documents and no index is refused by name, with the candidates", () => {
+  // The case that must NOT be guessed. Picking the alphabetically first document, or the largest, or the one
+  // nearest the root, would silently make somebody's About page their home page.
+  const v = validateArtifact({
+    entries: [f("about.html"), f("services.html"), f("vesper-rowe-law.html"), f("styles.css")],
+    text: { "about.html": "<h1>About</h1>", "services.html": "<h1>Services</h1>", "vesper-rowe-law.html": "<h1>Home</h1>" },
+  });
+  assert.equal(v.ok, false);
+  assert.equal(v.framework, "static", "it IS a static site; what is missing is which document opens it");
+  assert.ok(!codes(v).includes("unsupported-framework"), `telling the owner this format is unsupported would send them to fix the wrong thing: ${codes(v).join(",")}`);
+  const why = v.problems.find((p) => p.code === "ambiguous-entry-point")!;
+  assert.ok(why, codes(v).join(","));
+  for (const p of ["about.html", "services.html", "vesper-rowe-law.html"]) assert.ok(why.detail.includes(p), `names ${p}: ${why.detail}`);
+  assert.match(why.detail, /Add an index\.html|upload a single HTML document/, why.detail);
+
+  // Two nested indexes are the same problem: there is no predictable tie-break between them.
+  const twoNested = validateArtifact({
+    entries: [f("site-a/index.html"), f("site-b/index.html")],
+    text: { "site-a/index.html": "<h1>A</h1>", "site-b/index.html": "<h1>B</h1>" },
+  });
+  assert.equal(twoNested.ok, false);
+  assert.ok(codes(twoNested).includes("ambiguous-entry-point"), codes(twoNested).join(","));
+});
+
+test("[FA-012] an archive with no HTML and no manifest is still refused, and says so once", () => {
+  const v = validateArtifact({ entries: [f("main.py"), f("requirements.txt")], text: { "requirements.txt": "django==5.0" } });
+  assert.equal(v.framework, null);
+  assert.equal(v.ok, false);
+  assert.ok(codes(v).includes("unsupported-framework"));
+  // The message no longer promises index.html specifically, because an index.html is not what is required.
+  const why = v.problems.find((p) => p.code === "unsupported-framework")!;
+  assert.match(why.detail, /no \.html document was found/, why.detail);
+  assert.ok(!codes(v).includes("missing-package-json"), `one problem, not two: ${codes(v).join(",")}`);
+  assert.equal(v.entry?.kind, "none");
+});

@@ -24,6 +24,8 @@ import type { RunTracker, StopSwitch } from "../agent.ts";
 import type { ApprovedArtifact, Job } from "../protocol.ts";
 import type { Logger } from "../log.ts";
 import { ingestArtifact } from "./ingest.ts";
+import { describePinned, pinExternalAssets } from "./pin-assets.ts";
+import type { ResolveAssets } from "./pin-assets.ts";
 import { buildFrontend, planBuild } from "./build.ts";
 import { baselineFrom, describeImport, readImportReport, verifyAgainstBaseline } from "./import.ts";
 import { writeVisualSpec } from "./visual.ts";
@@ -51,6 +53,14 @@ export interface DesignLockedDeps {
   log: Logger;
   /** Fetches the approved artifact over the signed channel. */
   fetchArtifact: () => Promise<ApprovedArtifact | null>;
+  /**
+   * Restores the external assets this artifact was measured with, from what the platform stored at import.
+   *
+   * Never a fetch: the platform answers from its own records, so the build renders the same bytes the approved
+   * baseline was measured from. Optional -- an older platform has no asset channel, and the build then behaves
+   * as it did before, measuring the artifact as the archive holds it.
+   */
+  resolveAssets?: ResolveAssets;
   /**
    * Fetches the approved design's own manifests -- in particular its page signatures.
    *
@@ -190,6 +200,29 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
     return finish(out);
   }
   note(`imported as a ${ingest.framework} project (${ingest.extracted?.files ?? 0} files)`);
+
+  // ── 2b. the SAME external assets the approved design was measured with ────────────────────────────────────
+  //
+  // The artifact in R2 is the archive as uploaded, so re-extracting it brings back the original external
+  // references -- the font CDN, the image host. If this build fetched them again it would be measuring whatever
+  // those hosts serve today against a baseline measured from what they served at import. The platform returns
+  // the bytes it already STORED for this artifact and fetches nothing, so the build renders identical files.
+  //
+  // Without this the visual gate compares a page with its fonts to a page without them, which is precisely the
+  // false drift that made every design-locked build stop.
+  if (d.resolveAssets) {
+    try {
+      const pinned = await pinExternalAssets({ repo: d.ws.repo, resolve: d.resolveAssets });
+      if (pinned.assets.length) note(describePinned(pinned));
+      for (const m of pinned.missing) {
+        // The approval gate refuses a baseline with missing visual assets, so reaching here means they were
+        // acquired at import and are not now. That is a real difference from the approved design.
+        problems.push(`the approved design's ${m.kind} ${m.url} is not available to this build: ${m.why}. ${m.impact}`);
+      }
+    } catch (err) {
+      problems.push(`the approved design's external assets could not be restored: ${String((err as Error)?.message ?? err).slice(0, 300)}`);
+    }
+  }
 
   // ── 3. build ──────────────────────────────────────────────────────────────────────────────────────────────
   const plan = planBuild(d.ws.repo, ingest.framework);

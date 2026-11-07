@@ -16,6 +16,7 @@ import { UploadError, storeUpload } from "../services/files.ts";
 import { UPLOAD_LIMIT_BYTES } from "../adapters/storage.ts";
 import * as DL from "../services/design-locked.ts";
 import { syncProjectBuild, getBuildSettings, projectFacts, decideEligibility, queueSnapshot, startBackendBuild } from "../services/builds.ts";
+import * as AA from "../services/artifact-assets.ts";
 import { audit } from "../services/security.ts";
 import { alert, badge, button, csrf, emptyState, kpi, pageHead, table, linkButton } from "../ui/components.ts";
 
@@ -86,6 +87,21 @@ function actorId(ctx: AppContext): string {
   const id = ctx.actor?.userId;
   if (!id) throw new HttpError(403, "This action has to be taken by a signed-in person.");
   return id;
+}
+
+/**
+ * What a missing dependency does to the design, in words an owner can act on.
+ *
+ * The runner says the same thing in `external-assets.ts` for the import record; this is the page's copy, because
+ * the page reads rows rather than an import outcome. "It failed" is not something anyone can decide about; "your
+ * typeface is not there, so the letterforms and line breaks are different" is.
+ */
+function assetImpact(kind: string, url: string): string {
+  const host = (() => { try { return new URL(url).host; } catch { return "an external host"; } })();
+  if (kind === "font") return `the typeface served by ${host} is not available, so this text renders in a fallback font: different letterforms, widths and line breaks`;
+  if (kind === "image") return `the image served by ${host} is not available, so this element renders empty or with its alternative text`;
+  if (kind === "stylesheet") return `the stylesheet served by ${host} is not available, so everything it styles renders unstyled — this usually changes the whole page`;
+  return `the resource served by ${host} is not available`;
 }
 
 export function register(r: Router): void {
@@ -303,11 +319,46 @@ ${rows.length === 0 ? emptyState("Nothing yet", "No project is on the design-loc
     // reads is the same as an invented one: the work stops in the same place and nobody knows why.
     const reviewFlags = contract ? safeArr(contract.review_flags_json) : [];
 
+    // The external assets this design depends on. The measurement has no network, so these were downloaded once
+    // and written into the artifact; the ones that could not be are the reason approval is refused, and they are
+    // shown where the approving happens rather than buried in a column.
+    const assetRows: AA.ArtifactAssetRow[] = measured ? await AA.listAssets(ctx.db, measured.artifact_id) : [];
+    const missingAssets = assetRows.filter((a) => a.status === "refused" && ["image", "font", "stylesheet"].includes(a.kind));
+    const pinnedAssets = assetRows.filter((a) => a.status === "pinned");
+
+    // Two shapes reach this column, and only one of them used to render.
+    //
+    // `validateArtifact` produces objects ({severity, code, detail, path}); the IMPORT reports plain strings --
+    // `describeIngest`'s multi-line account, a build error, a measurement failure. A string has no `.code` and no
+    // `.detail`, so every imported-or-rejected artifact's reasons rendered as empty bullets. The Founder's law
+    // firm upload was refused with two precise, actionable sentences and the project page showed two blank lines.
     const problemsOf = (a: DL.FrontendArtifact): SafeHtml => {
-      let list: { severity?: string; code?: string; detail?: string; path?: string }[] = [];
-      try { list = JSON.parse(a.problems_json); } catch { list = []; }
+      let list: unknown[] = [];
+      try { const v = JSON.parse(a.problems_json); list = Array.isArray(v) ? v : []; } catch { list = []; }
       if (!list.length) return html``;
-      return html`<ul class="faint" style="margin:.25rem 0 0">${list.slice(0, 8).map((x) => html`<li><code>${x.code ?? ""}</code> ${x.detail ?? ""}${x.path ? html` <code>${x.path}</code>` : ""}</li>`)}</ul>`;
+      const line = (x: unknown): SafeHtml => {
+        if (typeof x === "string") {
+          // Multi-line, because describeIngest's account is several lines and each one says something different.
+          return html`<li style="white-space:pre-wrap">${x.slice(0, 2000)}</li>`;
+        }
+        const p = (x ?? {}) as { code?: string; detail?: string; path?: string };
+        if (!p.code && !p.detail) return html`<li>${JSON.stringify(x).slice(0, 400)}</li>`;
+        return html`<li><code>${p.code ?? ""}</code> ${p.detail ?? ""}${p.path ? html` <code>${p.path}</code>` : ""}</li>`;
+      };
+      return html`<ul class="faint" style="margin:.25rem 0 0">${join(list.slice(0, 8).map(line))}</ul>`;
+    };
+
+    // Offering a rejected artifact for import again. The archive is still in R2 and still scanned clean, so when
+    // the importer was wrong about it there has to be a way back that is not "upload the same bytes again". The
+    // service re-reads the scan verdict and refuses anything but the project's latest rejected artifact.
+    const latestArtifactId = artifacts[0]?.id ?? null;
+    const retryOf = (a: DL.FrontendArtifact): SafeHtml => {
+      if (a.status !== "rejected" || a.id !== latestArtifactId || !mayApprove) return html``;
+      return html`<form method="post" action="${BASE}/${projectId}/artifacts/${a.id}/retry-import" style="margin:.4rem 0 0">
+        ${csrf(ctx)}
+        ${button("Import again", { variant: "ghost", size: "sm" })}
+        <span class="faint">The same archive, scanned again as clean before anything is unpacked.</span>
+      </form>`;
     };
 
     const body = html`${pageHead(project.name, linkButton("All approved frontends", BASE, "ghost", "sm"), "Approved frontend and design baseline")}
@@ -334,7 +385,7 @@ ${state.designLocked ? alert("success", html`This project is <strong>design-lock
       { header: "Source", cell: (a: DL.FrontendArtifact) => html`${a.source.replace(/_/g, " ")}` },
       { header: "Framework", cell: (a: DL.FrontendArtifact) => html`${a.framework ?? "—"}` },
       { header: "Scan", cell: (a: DL.FrontendArtifact) => scanBadge(a.scan_status) },
-      { header: "Status", cell: (a: DL.FrontendArtifact) => html`${badge(a.status === "imported" ? "ok" : a.status === "rejected" || a.status === "quarantined" ? "danger" : "info", a.status)}${problemsOf(a)}` },
+      { header: "Status", cell: (a: DL.FrontendArtifact) => html`${badge(a.status === "imported" ? "ok" : a.status === "rejected" || a.status === "quarantined" ? "danger" : "info", a.status)}${problemsOf(a)}${retryOf(a)}` },
       { header: "Received", cell: (a: DL.FrontendArtifact) => html`${formatDateTime(a.created_at)}` },
     ],
   )}
@@ -362,6 +413,22 @@ ${state.designLocked ? alert("success", html`This project is <strong>design-lock
     ],
   )}
   ${draft && mayApprove ? alert("info", html`Baseline <strong>v${String(draft.version)}</strong> has been measured and is waiting for a person to approve it. Approving it locks the design${approved ? html` and supersedes v${String(approved.version)}` : ""}.`) : ""}
+  ${missingAssets.length
+    ? alert("error", html`<strong>This design cannot be approved yet.</strong>
+        It depends on ${String(missingAssets.length)} external visual asset${missingAssets.length === 1 ? "" : "s"} that could not be acquired, so
+        what was measured is not what the website looks like &mdash; approving it would lock in a fallback.
+        Package ${missingAssets.length === 1 ? "it" : "them"} inside the archive, or make ${missingAssets.length === 1 ? "it" : "them"} publicly readable, and import again.
+        <ul>${join(missingAssets.slice(0, 10).map((m) => html`<li>
+          <code>${m.kind}</code> <code class="faint">${m.url.slice(0, 160)}</code>
+          ${m.referenced_by ? html` &middot; referenced by <code class="faint">${m.referenced_by}</code>` : ""}
+          <br><span class="faint">${m.why ?? "it could not be acquired"} &mdash; ${assetImpact(m.kind, m.url)}</span>
+        </li>`))}</ul>`)
+    : ""}
+  ${pinnedAssets.length
+    ? html`<p class="faint">${String(pinnedAssets.length)} external asset${pinnedAssets.length === 1 ? "" : "s"}
+        (${[...new Set(pinnedAssets.map((a) => a.kind))].join(", ")}) were downloaded once and written into the artifact, so the
+        design is measured, built and verified with exactly these bytes. Nothing is fetched again.</p>`
+    : ""}
 </section>
 
 ${measured ? html`<section class="card">
@@ -571,6 +638,19 @@ ${measured ? html`<section class="card">
     if (!baselineId) throw new HttpError(422, "Choose a baseline to roll back to.");
     if (!reason) throw new HttpError(422, "Say why you are rolling back.");
     await DL.rollbackBaseline(ctx.db, p.projectId, { toBaselineId: baselineId, actorId: actorId(ctx), reason });
+    return redirect(ctx, `${BASE}/${p.projectId}`);
+  });
+
+  // Offer a rejected artifact for import again.
+  //
+  // The archive is still in R2 and its scan verdict is still clean; what was wrong was the importer's reading of
+  // it. Without this, every artifact the importer refused before a fix stayed refused for ever, and the only
+  // recovery was asking the owner to upload the same bytes a second time. The service re-reads the scan status
+  // rather than trusting the artifact's copy of it, so a retry can never bypass scanning.
+  r.post(`${BASE}/:projectId/artifacts/:artifactId/retry-import`, async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    const r0 = await DL.retryImport(ctx.db, p.artifactId, { actorId: actorId(ctx), ip: ctx.ip ?? null });
+    if (!r0.ok) throw new HttpError(409, `This artifact cannot be imported again: ${r0.why}`);
     return redirect(ctx, `${BASE}/${p.projectId}`);
   });
 

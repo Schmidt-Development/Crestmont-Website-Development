@@ -520,6 +520,36 @@ export function auditScenarios(w: World): Scenario[] {
       },
     },
     {
+      key: "POST /staff/builds/frontends/:projectId/artifacts/:artifactId/retry-import",
+      // Offering a rejected artifact for import again. The service re-reads the scan verdict from `files`, so the
+      // scenario has to leave a genuinely clean archive behind a genuinely rejected artifact -- which is exactly
+      // the state the Founder's law firm upload was in. What is proven here is that the retry attributes the
+      // decision; the gates themselves are [DLI-06] and [DLI-07]'s.
+      fields: () => ({}),
+      setup: async (w) => {
+        const at = new Date().toISOString();
+        // The seeded artifact carries no `files` row, and `retryImport` reads the scan verdict from the FILE --
+        // never from the artifact's copy of it -- so a retry cannot run on an archive nobody scanned. The
+        // scenario therefore has to give it a genuinely clean one.
+        const fileId = "file_matrixretry0000000000001";
+        await w.db.prepare(`DELETE FROM files WHERE id = ?`).bind(fileId).run();
+        await w.db.prepare(`INSERT INTO files (id, organization_id, project_id, filename, r2_key, content_type, size_bytes, sha256, scan_status, uploaded_by, created_at)
+          VALUES (?,?,?,'frontend.zip','frontend-artifacts/matrix-retry.zip','application/zip',1024,?, 'clean', ?, ?)`)
+          .bind(fileId, w.a.ids.org, w.a.ids.project, "0".repeat(64), w.staff.owner.id, at).run();
+        await w.db.prepare(`UPDATE frontend_artifacts SET status = 'rejected', file_id = ?,
+            problems_json = '["REJECT unsupported-framework: no supported frontend was recognised."]'
+          WHERE id = ?`).bind(fileId, w.ids.frontendArtifact).run();
+        // Only the project's LATEST artifact is retried -- re-importing an older one would measure a design the
+        // owner has already replaced. The upload scenario a few steps earlier puts a NEWER artifact on this same
+        // project, so the seeded one has to be made the latest rather than assumed to be. Its version is raised
+        // instead of the newer row being deleted, because that row is another scenario's proof.
+        await w.db.prepare(`UPDATE frontend_artifacts SET version =
+            (SELECT MAX(version) + 1 FROM frontend_artifacts WHERE project_id =
+              (SELECT project_id FROM frontend_artifacts WHERE id = ?))
+          WHERE id = ?`).bind(w.ids.frontendArtifact, w.ids.frontendArtifact).run();
+      },
+    },
+    {
       key: "POST /staff/builds/frontends/:projectId/build",
       // `syncProjectBuild` returns the existing build for a project when there is one, so the route succeeds and
       // audits without the matrix having to manufacture a paid order and a completed intake. The point being

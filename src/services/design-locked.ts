@@ -23,6 +23,7 @@ import type {
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { audit } from "./security.ts";
+import { missingVisualAssets } from "./artifact-assets.ts";
 import { sha256Hex } from "../lib/crypto.ts";
 import type { StorageAdapter } from "../adapters/storage.ts";
 
@@ -346,6 +347,72 @@ export async function deliverArtifactForImport(
   };
 }
 
+/**
+ * Offer a REJECTED artifact for import again.
+ *
+ * The Founder's first real upload was refused by a detector that only recognised a file called `index.html`. The
+ * archive was fine, it is still in R2, and its scan verdict is still clean -- but `claimArtifactForImport` only
+ * offers `received` artifacts, so once the importer had said `rejected` there was no way back except uploading
+ * the same bytes again. After a fix to the importer, every artifact it had wrongly refused was stranded.
+ *
+ * So the retry is a first-class act with the same gates as the original import, not a database edit:
+ *
+ *   · the archive must still be scanned CLEAN, re-read here and now from `files`. A retry never carries a
+ *     verdict forward and never bypasses scanning.
+ *   · only a REJECTED artifact. A quarantined one is replaced by a person, an imported one has nothing to retry,
+ *     a superseded one is not the design anyone is waiting for.
+ *   · only the project's LATEST artifact. Re-importing an older one would measure a design the owner has already
+ *     replaced, and `recordBaseline` would then offer that for approval.
+ *
+ * The recorded problems are cleared, because they describe an import that is being redone. The audit row keeps
+ * them, so what was said and when stays on the record.
+ */
+export async function retryImport(
+  db: Db,
+  artifactId: string,
+  o: { actorId: string; ip?: string | null },
+): Promise<{ ok: true; artifact: FrontendArtifact } | { ok: false; why: string }> {
+  const a = await getArtifact(db, artifactId);
+  if (!a) return { ok: false, why: "no such frontend artifact" };
+  if (a.status === "quarantined") {
+    return { ok: false, why: "this artifact is quarantined, and a quarantined archive is replaced rather than retried" };
+  }
+  if (a.status !== "rejected") {
+    return { ok: false, why: `only a rejected artifact can be offered for import again; this one is "${a.status}"` };
+  }
+
+  const scan = a.file_id
+    ? await db.prepare(`SELECT scan_status FROM files WHERE id = ?`).bind(a.file_id).first<{ scan_status: string }>()
+    : null;
+  if (!scan || scan.scan_status !== "clean") {
+    return { ok: false, why: `the archive's scan status is "${scan?.scan_status ?? "unknown"}", and an import runs only on a clean verdict` };
+  }
+
+  const latest = await latestArtifact(db, a.project_id);
+  if (latest && latest.id !== a.id) {
+    return { ok: false, why: `a newer artifact (version ${latest.version}) has been uploaded for this project, so this one is not the design to measure` };
+  }
+
+  await db.prepare(`UPDATE frontend_artifacts SET status = 'received', problems_json = '[]', updated_at = ? WHERE id = ? AND status = 'rejected'`)
+    .bind(nowIso(), a.id).run();
+  await setFrontendState(db, a.project_id, "validating_artifact");
+  await audit(db, {
+    actorUserId: o.actorId, actorKind: "user", action: "frontend_artifact.import_retried",
+    subjectType: "frontendArtifact", subjectId: a.id, organizationId: a.organization_id,
+    details: { version: a.version, sha256: a.sha256.slice(0, 12), clearedProblems: safeProblemList(a.problems_json).slice(0, 10) },
+    ip: o.ip ?? null,
+  });
+  return { ok: true, artifact: (await getArtifact(db, a.id))! };
+}
+
+/** The problems a verdict recorded, for the audit row. Never throws on a column that is not JSON. */
+function safeProblemList(raw: unknown): string[] {
+  try {
+    const v = JSON.parse(String(raw ?? "[]"));
+    return Array.isArray(v) ? v.map((x) => String(x).slice(0, 300)) : [];
+  } catch { return []; }
+}
+
 /** Put a claimed artifact back for another attempt, when the runner could not finish (a crash, a lost sandbox). */
 export async function releaseImportClaim(db: Db, artifactId: string): Promise<void> {
   await db.prepare(`UPDATE frontend_artifacts SET status = 'received', updated_at = ? WHERE id = ? AND status = 'validating'`)
@@ -604,10 +671,21 @@ export async function applySubmissionApproval(
   ).bind(nowIso(), nowIso(), artifactId).run();
   if (!stamped.meta.changes) return { applied: false, why: "the acknowledgement was applied by another report" };
 
-  await approveBaseline(db, baselineId, {
-    approvedBy: a.approval_intent_by,
-    note: `approved at submission and applied after measurement (artifact v${a.version}, sha256 ${a.sha256.slice(0, 12)}…)`,
-  });
+  // The gates inside `approveBaseline` throw, and this path is reached from the import report, where a throw
+  // would become a 500 and lose the measured design. A refusal is an answer, so it is returned as one -- the most
+  // likely being a design whose external visual dependencies could not be acquired.
+  try {
+    await approveBaseline(db, baselineId, {
+      approvedBy: a.approval_intent_by,
+      note: `approved at submission and applied after measurement (artifact v${a.version}, sha256 ${a.sha256.slice(0, 12)}…)`,
+    });
+  } catch (err) {
+    const why = err instanceof DesignLockError ? err.message : String((err as Error)?.message ?? err).slice(0, 400);
+    // The acknowledgement was stamped before this ran, so it is released: the owner resolves what was wrong and
+    // the next import applies it, rather than the acknowledgement being spent on a refusal.
+    await db.prepare(`UPDATE frontend_artifacts SET approval_intent_applied_at = NULL WHERE id = ?`).bind(artifactId).run();
+    return { applied: false, why };
+  }
   return { applied: true, approvedBy: a.approval_intent_by, baselineVersion: b.version };
 }
 
@@ -954,6 +1032,24 @@ export async function approveBaseline(db: Db, baselineId: string, o: { approvedB
   if (!b) throw new DesignLockError("no such design baseline", 404);
   if (!o.approvedBy) throw new DesignLockError("a design baseline must record who approved it");
   if (b.status !== "draft") throw new DesignLockError(`this baseline is already ${b.status}; approve a new version instead`, 409);
+
+  // A baseline that is missing a visual dependency is not the design anyone meant to approve.
+  //
+  // The measurement runs with no network, so an external font or photograph that could not be acquired and
+  // pinned was simply absent from it: the fallback face and the empty image box became the approved design, and
+  // every later comparison was against that. Approving it is the one step where that stops being recoverable, so
+  // it is refused here, with the dependencies named. The remedy is to resolve them -- package them in the
+  // archive, or make them publicly readable -- not to approve around them.
+  const missing = await missingVisualAssets(db, b.artifact_id);
+  if (missing.length) {
+    throw new DesignLockError(
+      `this design depends on ${missing.length} external visual asset(s) that could not be acquired, so what was measured is not what the site looks like: `
+      + missing.slice(0, 5).map((m) => `${m.kind} ${m.url} (${m.why ?? "not acquired"})`).join("; ")
+      + (missing.length > 5 ? `; and ${missing.length - 5} more` : "")
+      + ". Package them inside the archive, or make them publicly readable, and import again.",
+      409,
+    );
+  }
 
   const at = nowIso();
   const current = await approvedBaseline(db, b.project_id);
