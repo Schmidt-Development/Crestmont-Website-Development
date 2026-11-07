@@ -318,6 +318,40 @@ test("[AIB-SLOTS] the installer passes its -Slots to the sizing, and a bad one i
   );
 });
 
+test("[AIB-SANDBOX] the sandbox image ships every instrument, and one tag is used everywhere", () => {
+  // Measured on Node 1: an import reached the sandbox and died inside it with
+  //   Cannot find module '/opt/crestmont/frontend-import.mjs'
+  // because `crestmont-build-sandbox:1` -- the only image the installer installs and the runner runs -- did not
+  // carry the measurement instrument, while a side tag used by scripts/design-locked-e2e.ts did. The harness whose
+  // job is to prove the chain works was proving it against an image the node does not have.
+  //
+  // Two invariants, both cheap and both static. First: every instrument beside the Dockerfile is copied into the
+  // image, so adding one without shipping it fails here rather than inside a container on a build node.
+  const dir = path.join(RUNNER_DIR, "sandbox");
+  const dockerfile = readText(path.join(dir, "Dockerfile"));
+  const instruments = readdirSync(dir).filter((f) => f.endsWith(".mjs"));
+  assert.ok(instruments.length >= 2, `found ${instruments.length} instruments in runner/sandbox`);
+  for (const f of instruments) {
+    // A plain string, not a regex: the line is literal, and an escaped pattern is one more thing to get wrong.
+    assert.ok(
+      dockerfile.split("\n").some((line) => line.trim() === `COPY ${f} /opt/crestmont/${f}`),
+      `runner/sandbox/Dockerfile must COPY ${f} to /opt/crestmont/${f}, or the sandbox cannot run it`,
+    );
+  }
+
+  // Second: ONE tag, everywhere. The installer writes RUNNER_SANDBOX_IMAGE, the runner's config defaults to it and
+  // the E2E harness sets it; three places that only agree by being checked.
+  const tag = /RUNNER_SANDBOX_IMAGE"; value = "([^"]+)"/.exec(readText(path.join(WIN, "Install-CrestmontRunner.ps1")))?.[1];
+  assert.ok(tag, "Install-CrestmontRunner.ps1 must write RUNNER_SANDBOX_IMAGE");
+  for (const [label, file, re] of [
+    ["runner/src/config.ts", path.join(RUNNER_DIR, "src", "config.ts"), /RUNNER_SANDBOX_IMAGE \?\? "([^"]+)"/],
+    ["scripts/design-locked-e2e.ts", path.join(RUNNER_DIR, "..", "scripts", "design-locked-e2e.ts"), /RUNNER_SANDBOX_IMAGE \?\? "([^"]+)"/],
+  ] as const) {
+    const found = re.exec(readText(file))?.[1];
+    assert.equal(found, tag, `${label} uses sandbox image ${found}, the installer installs ${tag}; a harness or a runner that uses a different image proves nothing about the node`);
+  }
+});
+
 test("[AIB-RUNNER] compose + proxy policy: no published ports, internal networks, paid AI hosts denied, installs reach only the npm registry", () => {
   const compose = readText(path.join(WIN, "docker-compose.yml"));
   assert.doesNotMatch(compose, /^\s+ports:/m, "no published ports");
