@@ -121,7 +121,9 @@ export function integrationPrompt(i: IntegrationPromptInput): string {
     lines.push("");
     lines.push(`Add a \`${startable}\` script to \`package.json\` that starts the API and serves the built site, and make sure it works. An independent driver -- not written by you and not editable by you -- runs \`npm run ${startable}\`, waits for the port, and exercises every endpoint the contract declares. If it cannot start the application, nothing about your work can be verified and the build fails on that alone, however good the code is.`);
     lines.push("");
-    lines.push(`It must listen on the port in \`PORT\` when that is set. If you write TypeScript, the script must run what the build produces, not the sources.`);
+    lines.push(`It must listen on the port in \`PORT\` when that is set.`);
+    lines.push("");
+    lines.push(`The driver runs \`npm run build\` and then \`npm run ${startable}\`, in that order and nothing else. So everything \`${startable}\` needs must exist by the end of \`build\`: if you write the server in TypeScript, either \`build\` compiles it or \`${startable}\` compiles it first. A separate script that nothing runs leaves the application unstartable -- measured, and it cost a whole build: \`start: node dist/server.js\` with the compile in a \`compile-server\` script the build never called, so starting it failed with MODULE_NOT_FOUND and not one acceptance criterion could be evaluated.`);
     lines.push("");
   }
 

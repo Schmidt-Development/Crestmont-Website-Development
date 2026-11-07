@@ -35,6 +35,14 @@ function args(argv) {
     else if (argv[i] === "--max-pages") o.maxPages = Number(argv[++i]) || o.maxPages;
     else if (argv[i] === "--max-probes") o.maxProbes = Number(argv[++i]) || o.maxProbes;
     else if (argv[i] === "--app") o.app = argv[++i];
+    // An unknown flag is refused rather than ignored. The sandbox runs the copy baked into its IMAGE, so a runner
+    // asking for something this build does not have means the image is stale -- and silently ignoring it is the
+    // worst outcome: measured on 2026-11-07, --app was dropped without a word and the run reported a clean static
+    // measurement, so a feature that had never executed looked as though it had.
+    else if (argv[i].startsWith("--")) {
+      console.error("frontend-import: unknown option " + argv[i] + " (this build of the instrument is older than the runner asking for it)");
+      process.exit(2);
+    }
   }
   return o;
 }
