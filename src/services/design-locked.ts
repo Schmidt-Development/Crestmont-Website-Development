@@ -357,6 +357,14 @@ export async function recordArtifact(db: Db, a: {
   repoCommit?: string | null;
   uploadedBy?: string | null;
   scanStatus?: string;
+  /**
+   * The person acknowledging, at submission, that this is the approved design.
+   *
+   * Not an approval. Approval is the one step that must be a person's AND must name a measured design, and at
+   * submission there is no design yet -- nothing has been scanned, unpacked or measured. This records who said it
+   * and leaves `applySubmissionApproval` to act on it once a baseline exists.
+   */
+  approvalIntentBy?: string | null;
 }): Promise<FrontendArtifact> {
   const at = nowIso();
   const next = (await db.prepare(`SELECT COALESCE(MAX(version), 0) AS v FROM frontend_artifacts WHERE project_id = ?`)
@@ -367,12 +375,23 @@ export async function recordArtifact(db: Db, a: {
 
   await db.prepare(
     `INSERT INTO frontend_artifacts (id, project_id, organization_id, version, source, file_id, template_ref,
-       repo_url, repo_commit, sha256, size_bytes, scan_status, status, uploaded_by, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?)`,
+       repo_url, repo_commit, sha256, size_bytes, scan_status, status, uploaded_by, created_at, updated_at,
+       approval_intent_by, approval_intent_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?)`,
   ).bind(id, a.projectId, a.organizationId, next + 1, a.source, a.fileId ?? null, a.templateRef ?? null,
-    a.repoUrl ?? null, a.repoCommit ?? null, a.sha256, a.sizeBytes, scan, a.uploadedBy ?? null, at, at).run();
+    a.repoUrl ?? null, a.repoCommit ?? null, a.sha256, a.sizeBytes, scan, a.uploadedBy ?? null, at, at,
+    a.approvalIntentBy ?? null, a.approvalIntentBy ? at : null).run();
 
   await setFrontendState(db, a.projectId, "validating_artifact");
+  if (a.approvalIntentBy) {
+    // Recorded as its own entry, because "this person said the submitted frontend is the approved design" is a
+    // separate statement from "this person uploaded a file", and the approval it later becomes refers back to it.
+    await audit(db, {
+      organizationId: a.organizationId, actorUserId: a.approvalIntentBy, actorKind: "user",
+      action: "frontend_artifact.approval_acknowledged", subjectType: "frontendArtifact", subjectId: id,
+      details: { version: next + 1, sha256: a.sha256, appliesAfter: "a clean scan, a successful import and a measured design" },
+    });
+  }
   await audit(db, {
     organizationId: a.organizationId, actorUserId: a.uploadedBy ?? null, actorKind: a.uploadedBy ? "user" : "system",
     action: "frontend_artifact.received", subjectType: "frontend_artifact", subjectId: id,
@@ -528,6 +547,61 @@ export async function recordBaseline(db: Db, artifactId: string, b: BaselineInpu
 
   await setFrontendState(db, a.project_id, "awaiting_approval");
   return (await getBaseline(db, id))!;
+}
+
+/**
+ * Act on an acknowledgement given at submission, now that the design exists.
+ *
+ * The Founder's requirement is that submitting a finished frontend carries it into the backend queue without
+ * another button press. Approval still has to be a person's and still has to name a measured design, so the
+ * acknowledgement is recorded at submission (`recordArtifact`'s `approvalIntentBy`) and becomes an approval only
+ * here -- after the artifact has been scanned clean, imported and measured.
+ *
+ * Every refusal below is a case where approving would mean approving something that does not exist or is not the
+ * thing acknowledged:
+ *
+ *   · no acknowledgement -- nobody said it, so nothing is approved;
+ *   · already applied -- an acknowledgement approves once, even if a baseline is recorded again;
+ *   · the artifact is not `imported` -- it was rejected, quarantined or never measured;
+ *   · the baseline is not a draft, or belongs to another artifact -- not the design that was measured from these
+ *     bytes.
+ *
+ * It goes through `approveBaseline`, so the record, the supersession of a previous design and the audit row are
+ * exactly what a manual approval writes. Nothing here is a second approval path.
+ */
+export async function applySubmissionApproval(
+  db: Db,
+  artifactId: string,
+  baselineId: string,
+): Promise<{ applied: true; approvedBy: string; baselineVersion: number } | { applied: false; why: string }> {
+  const a = await db.prepare(
+    `SELECT id, status, project_id, sha256, version, approval_intent_by, approval_intent_applied_at
+       FROM frontend_artifacts WHERE id = ?`,
+  ).bind(artifactId).first<{
+    id: string; status: string; project_id: string; sha256: string; version: number;
+    approval_intent_by: string | null; approval_intent_applied_at: string | null;
+  }>();
+  if (!a) return { applied: false, why: "no such artifact" };
+  if (!a.approval_intent_by) return { applied: false, why: "the submission carried no approval acknowledgement" };
+  if (a.approval_intent_applied_at) return { applied: false, why: "the acknowledgement has already been applied" };
+  if (a.status !== "imported") return { applied: false, why: `the artifact is ${a.status}, so there is no measured design to approve` };
+
+  const b = await getBaseline(db, baselineId);
+  if (!b || b.artifact_id !== artifactId) return { applied: false, why: "that baseline was not measured from this artifact" };
+  if (b.status !== "draft") return { applied: false, why: `that baseline is already ${b.status}` };
+
+  // Stamped FIRST and conditionally, so two reports for the same artifact cannot both approve.
+  const stamped = await db.prepare(
+    `UPDATE frontend_artifacts SET approval_intent_applied_at = ?, updated_at = ?
+      WHERE id = ? AND approval_intent_applied_at IS NULL`,
+  ).bind(nowIso(), nowIso(), artifactId).run();
+  if (!stamped.meta.changes) return { applied: false, why: "the acknowledgement was applied by another report" };
+
+  await approveBaseline(db, baselineId, {
+    approvedBy: a.approval_intent_by,
+    note: `approved at submission and applied after measurement (artifact v${a.version}, sha256 ${a.sha256.slice(0, 12)}…)`,
+  });
+  return { applied: true, approvedBy: a.approval_intent_by, baselineVersion: b.version };
 }
 
 export async function getBaseline(db: Db, id: string): Promise<DesignBaselineRow | null> {

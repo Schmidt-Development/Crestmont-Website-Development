@@ -235,3 +235,71 @@ test("[GALLERY-BUILD] a model only counts as having seen an image that was actua
     assert.equal(audit.find((x) => x.reference_id === b)!.model_saw, 0, "and B, never delivered, stays unseen");
   } finally { await t.close?.(); }
 });
+
+// ── the queue the Artifact Builder shows ──────────────────────────────────────────────────────────────────────
+//
+// The screen has to show a real position. A position computed any way other than the claim's own would be a
+// number that looks authoritative and is wrong, so `queueSnapshot` runs the same candidate query and the same
+// comparator as `claimJob`. That duplication is only safe while something holds the two together: this does.
+
+test("[QUE-01] the position the queue shows is the one the next claim actually takes", async () => {
+  const { t } = await app();
+  try {
+    // Three waiting builds, queued oldest-first with a gap between them so the order is unambiguous.
+    const a = await queued(t, "Junk removal");
+    const b = await queued(t, "Junk removal");
+    const c = await queued(t, "Junk removal");
+    await t.db.prepare(`UPDATE build_jobs SET created_at = ? WHERE id = ?`).bind("2026-11-01T00:00:00.000Z", a.job).run();
+    await t.db.prepare(`UPDATE build_jobs SET created_at = ? WHERE id = ?`).bind("2026-11-02T00:00:00.000Z", b.job).run();
+    await t.db.prepare(`UPDATE build_jobs SET created_at = ? WHERE id = ?`).bind("2026-11-03T00:00:00.000Z", c.job).run();
+
+    const before = await B.queueSnapshot(t.db);
+    assert.equal(before.active.length, 0, "nothing is running yet");
+    assert.deepEqual(before.queued.map((q) => q.position), [1, 2, 3], "positions count from one");
+    assert.equal(before.queued[0].jobId, a.job, `oldest first: ${before.queued.map((q) => q.projectName).join(", ")}`);
+
+    // The claim takes the head of that same queue, which is the whole claim this test makes.
+    const first = await claim(t);
+    assert.equal(first.job?.id, before.queued[0].jobId, "the claim and the screen agree on who is next");
+
+    const after = await B.queueSnapshot(t.db);
+    assert.equal(after.active.length, 1, "it now occupies a slot");
+    assert.equal(after.active[0].jobId, a.job);
+    assert.deepEqual(after.queued.map((q) => q.jobId), [b.job, c.job], "and the rest move up");
+    assert.deepEqual(after.queued.map((q) => q.position), [1, 2]);
+
+    const second = await claim(t);
+    assert.equal(second.job?.id, b.job, "the next claim takes the next position, not an arbitrary row");
+  } finally { t.close(); }
+});
+
+test("[QUE-02] the cap is what the screen reports, and a full node queues the rest instead of starting them", async () => {
+  const { t } = await app();
+  try {
+    await t.db.prepare(`UPDATE build_settings SET max_concurrent = 2 WHERE id = 1`).run();
+    const jobs = [await queued(t, "Junk removal"), await queued(t, "Junk removal"), await queued(t, "Junk removal")];
+    for (const [i, j] of jobs.entries()) {
+      await t.db.prepare(`UPDATE build_jobs SET created_at = ? WHERE id = ?`).bind(`2026-11-0${i + 1}T00:00:00.000Z`, j.job).run();
+    }
+
+    assert.equal((await B.queueSnapshot(t.db)).cap, 2, "the screen reports the cap the claim enforces");
+    assert.ok((await claim(t)).job, "first slot");
+    assert.ok((await claim(t)).job, "second slot");
+
+    const full = await claim(t);
+    assert.equal(full.job, null, "a full node starts nothing more");
+    assert.equal(full.reason, "at_capacity");
+
+    const snap = await B.queueSnapshot(t.db);
+    assert.equal(snap.active.length, 2, `${snap.active.length} active`);
+    assert.equal(snap.queued.length, 1, "and the third is waiting, not lost");
+    assert.equal(snap.queued[0].position, 1, "next in line");
+
+    // Releasing a slot is all it takes: the next claim picks the waiting build up with no intervention.
+    // 'approved' is a real terminal state in this schema; 'succeeded' is not, and the CHECK says so.
+    await t.db.prepare(`UPDATE build_jobs SET state = 'approved' WHERE id = ?`).bind(snap.active[0].jobId).run();
+    const resumed = await claim(t);
+    assert.equal(resumed.job?.id, jobs[2].job, "the queued build starts on its own once capacity frees");
+    assert.equal((await B.queueSnapshot(t.db)).queued.length, 0);
+  } finally { t.close(); }
+});

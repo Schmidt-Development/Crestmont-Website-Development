@@ -1250,3 +1250,156 @@ test("[DLI-05] an import that failed is recorded as the artifact's verdict, with
     assert.equal(await DL.claimArtifactForImport(t.db, { runnerId: "r2" }), null, "a rejected artifact is not retried for ever");
   } finally { t.close(); }
 });
+
+// ── approving at submission ───────────────────────────────────────────────────────────────────────────────────
+//
+// The Founder's requirement is that submitting a finished frontend carries it into the backend queue without
+// another button press. Approval is the one step that must be a person's AND must name a measured design, and at
+// submission there is no design yet. So the acknowledgement is recorded then and becomes an approval only after a
+// clean scan, a successful import and a measurement -- against THAT baseline. These cover every case where
+// applying it would mean approving something other than what was acknowledged.
+
+test("[DLS-01] an acknowledgement becomes an approval only once the design has been measured", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const cust = await createCustomer(t.db);
+    const projectId = await project(t.db, cust.organizationId);
+    const { artifact } = await cleanArtifact(t, projectId, cust.organizationId, staff.id);
+    await t.db.prepare(`UPDATE frontend_artifacts SET approval_intent_by = ?, approval_intent_at = ? WHERE id = ?`)
+      .bind(staff.id, nowIso(), artifact.id).run();
+
+    // Measured? No. So there is nothing to approve, and saying so is the whole point.
+    const early = await DL.applySubmissionApproval(t.db, artifact.id, "dbl_nope");
+    assert.equal(early.applied, false);
+    assert.match("why" in early ? early.why : "", /no measured design|not measured|was not measured/i, JSON.stringify(early));
+    assert.equal((await DL.frontendState(t.db, projectId)).designLocked, false, "and nothing is locked");
+
+    // Now the import happens.
+    await DL.recordVerdict(t.db, artifact.id, { status: "imported", framework: "vite" });
+    const baseline = await DL.recordBaseline(t.db, artifact.id, baselineInput());
+    assert.equal(baseline.status, "draft", "the measurement itself approves nothing");
+
+    const applied = await DL.applySubmissionApproval(t.db, artifact.id, baseline.id);
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.equal("approvedBy" in applied ? applied.approvedBy : "", staff.id, "the approval names the person who acknowledged it");
+
+    const after = await DL.getBaseline(t.db, baseline.id);
+    assert.equal(after?.status, "approved");
+    assert.equal(after?.approved_by, staff.id);
+    assert.match(after?.approval_note ?? "", new RegExp(artifact.sha256.slice(0, 12)), "and records the artifact's own checksum");
+    assert.match(after?.approval_note ?? "", /v1/, "and the artifact version");
+
+    const state = await DL.frontendState(t.db, projectId);
+    assert.equal(state.designLocked, true, "only now is the design locked");
+    assert.equal(state.activeBaselineId, baseline.id);
+
+    const row = await t.db.prepare(
+      `SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'design_baseline.approved' AND actor_user_id = ? AND subject_id = ?`,
+    ).bind(staff.id, baseline.id).first<{ n: number }>();
+    assert.equal(row?.n, 1, "audited as the person's own decision, like a manual approval");
+  } finally { t.close(); }
+});
+
+test("[DLS-02] an acknowledgement never approves an artifact that was not measured from those bytes", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const cust = await createCustomer(t.db);
+    const projectId = await project(t.db, cust.organizationId);
+
+    // A rejected artifact: acknowledged, but there is no design.
+    const a = await cleanArtifact(t, projectId, cust.organizationId, staff.id, "first-bytes");
+    await t.db.prepare(`UPDATE frontend_artifacts SET approval_intent_by = ?, approval_intent_at = ? WHERE id = ?`)
+      .bind(staff.id, nowIso(), a.artifact.id).run();
+    await DL.recordVerdict(t.db, a.artifact.id, { status: "rejected", problems: ["it will not build"] });
+    const rejected = await DL.applySubmissionApproval(t.db, a.artifact.id, "dbl_none");
+    assert.equal(rejected.applied, false);
+    assert.match("why" in rejected ? rejected.why : "", /rejected/i, JSON.stringify(rejected));
+
+    // A baseline measured from a DIFFERENT artifact must not be approved by this one's acknowledgement.
+    const b = await cleanArtifact(t, projectId, cust.organizationId, staff.id, "second-bytes");
+    await DL.recordVerdict(t.db, b.artifact.id, { status: "imported", framework: "vite" });
+    const other = await DL.recordBaseline(t.db, b.artifact.id, baselineInput());
+
+    const c = await cleanArtifact(t, projectId, cust.organizationId, staff.id, "third-bytes");
+    await t.db.prepare(`UPDATE frontend_artifacts SET approval_intent_by = ?, approval_intent_at = ? WHERE id = ?`)
+      .bind(staff.id, nowIso(), c.artifact.id).run();
+    await DL.recordVerdict(t.db, c.artifact.id, { status: "imported", framework: "vite" });
+
+    const crossed = await DL.applySubmissionApproval(t.db, c.artifact.id, other.id);
+    assert.equal(crossed.applied, false, "one artifact's acknowledgement cannot approve another's design");
+    assert.match("why" in crossed ? crossed.why : "", /not measured from this artifact/i, JSON.stringify(crossed));
+    assert.equal((await DL.getBaseline(t.db, other.id))?.status, "draft", "and the other baseline is untouched");
+  } finally { t.close(); }
+});
+
+test("[DLS-03] an acknowledgement approves once, however many times a report arrives", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const cust = await createCustomer(t.db);
+    const projectId = await project(t.db, cust.organizationId);
+    const { artifact } = await cleanArtifact(t, projectId, cust.organizationId, staff.id);
+    await t.db.prepare(`UPDATE frontend_artifacts SET approval_intent_by = ?, approval_intent_at = ? WHERE id = ?`)
+      .bind(staff.id, nowIso(), artifact.id).run();
+    await DL.recordVerdict(t.db, artifact.id, { status: "imported", framework: "vite" });
+    const baseline = await DL.recordBaseline(t.db, artifact.id, baselineInput());
+
+    assert.equal((await DL.applySubmissionApproval(t.db, artifact.id, baseline.id)).applied, true);
+    const again = await DL.applySubmissionApproval(t.db, artifact.id, baseline.id);
+    assert.equal(again.applied, false, "a retry, a restart or a second report does not approve twice");
+    assert.match("why" in again ? again.why : "", /already/i, JSON.stringify(again));
+
+    const approvals = await t.db.prepare(
+      `SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'design_baseline.approved' AND subject_id = ?`,
+    ).bind(baseline.id).first<{ n: number }>();
+    assert.equal(approvals?.n, 1, "and exactly one approval is on the record");
+  } finally { t.close(); }
+});
+
+test("[DLS-04] a submission with no acknowledgement is never approved on its own", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const cust = await createCustomer(t.db);
+    const projectId = await project(t.db, cust.organizationId);
+    const { artifact } = await cleanArtifact(t, projectId, cust.organizationId, staff.id);
+    await DL.recordVerdict(t.db, artifact.id, { status: "imported", framework: "vite" });
+    const baseline = await DL.recordBaseline(t.db, artifact.id, baselineInput());
+
+    const none = await DL.applySubmissionApproval(t.db, artifact.id, baseline.id);
+    assert.equal(none.applied, false, "nobody said it, so nothing is approved");
+    assert.match("why" in none ? none.why : "", /no approval acknowledgement/i, JSON.stringify(none));
+    assert.equal((await DL.getBaseline(t.db, baseline.id))?.status, "draft");
+    assert.equal((await DL.frontendState(t.db, projectId)).designLocked, false,
+      "the measurements are there to review and the decision is still a person's");
+  } finally { t.close(); }
+});
+
+test("[DLS-05] recordArtifact keeps the acknowledgement with the upload, and audits it as its own statement", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const cust = await createCustomer(t.db);
+    const projectId = await project(t.db, cust.organizationId);
+    const sha = await sha256Hex("ack-bytes");
+    const a = await DL.recordArtifact(t.db, {
+      projectId, organizationId: cust.organizationId, source: "upload", sha256: sha,
+      sizeBytes: 9, uploadedBy: staff.id, scanStatus: "pending", approvalIntentBy: staff.id,
+    });
+
+    const row = await t.db.prepare(`SELECT approval_intent_by, approval_intent_at, approval_intent_applied_at FROM frontend_artifacts WHERE id = ?`)
+      .bind(a.id).first<{ approval_intent_by: string; approval_intent_at: string; approval_intent_applied_at: string | null }>();
+    assert.equal(row?.approval_intent_by, staff.id);
+    assert.ok(row?.approval_intent_at, "and when it was said");
+    assert.equal(row?.approval_intent_applied_at, null, "and it has not been acted on yet");
+
+    const said = await t.db.prepare(
+      `SELECT details_json FROM audit_logs WHERE action = 'frontend_artifact.approval_acknowledged' AND subject_id = ?`,
+    ).bind(a.id).first<{ details_json: string }>();
+    assert.ok(said, "the acknowledgement is audited in its own right");
+    assert.match(said!.details_json, new RegExp(sha.slice(0, 12)), "naming the bytes it was said about");
+    assert.match(said!.details_json, /clean scan/, "and what it waits for");
+  } finally { t.close(); }
+});
