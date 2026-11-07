@@ -111,6 +111,20 @@ export function integrationPrompt(i: IntegrationPromptInput): string {
     lines.push("");
   }
 
+  // The independent driver starts the application to check it. Nothing told the model that, and nothing said how,
+  // so the second Northgate run wrote server/db.ts and server/server.ts, added no script, and the functional gate
+  // reported "the project has no start script and no server file, so the application could not be started" -- 19
+  // criteria unevaluated because nobody could run the thing. The contract already permits the script; say so.
+  const startable = (m.projectConfig?.allowedNewScripts ?? []).find((n) => n === "start" || n === "api" || n === "serve");
+  if (startable) {
+    lines.push(`## It has to start`);
+    lines.push("");
+    lines.push(`Add a \`${startable}\` script to \`package.json\` that starts the API and serves the built site, and make sure it works. An independent driver -- not written by you and not editable by you -- runs \`npm run ${startable}\`, waits for the port, and exercises every endpoint the contract declares. If it cannot start the application, nothing about your work can be verified and the build fails on that alone, however good the code is.`);
+    lines.push("");
+    lines.push(`It must listen on the port in \`PORT\` when that is set. If you write TypeScript, the script must run what the build produces, not the sources.`);
+    lines.push("");
+  }
+
   lines.push(`## What you are building`);
   lines.push("");
   lines.push(`${needing.length} control(s) need a backend. ${order.length} operation(s) are planned, in this order:`);
