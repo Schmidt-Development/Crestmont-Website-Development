@@ -360,6 +360,55 @@ export function coverage(m: IntegrationManifest, inventory: readonly Interaction
   };
 }
 
+/**
+ * The contract minus the operations whose essential facts are not known.
+ *
+ * A recorded gap (`missing`) is correct work: the Founder's instruction is that a business requirement which
+ * genuinely cannot be established from the frontend is FLAGGED, specifically, rather than invented. But flagging
+ * it and then handing the operation to the builder anyway is the same as inventing it one step later -- the model
+ * is asked to make a checkout work and told nothing about the provider or the price, and something plausible
+ * comes out. That is the defect that reaches a customer.
+ *
+ * So an operation named in any `missing[].blocks` is removed from the manifest the BUILD uses. It is not
+ * implemented, not prompted for, not judged by the three gates, and not counted as covered. It stays in the
+ * recorded contract, where the gap is also recorded, so what was deferred and why is on the project's record
+ * rather than quietly absent.
+ *
+ * The rest of the plan is built normally. One open question does not stop five answerable operations.
+ */
+export function withoutBlocked(m: IntegrationManifest & ManifestContract): {
+  manifest: IntegrationManifest & ManifestContract;
+  deferred: { id: string; why: string }[];
+} {
+  const blocked = new Map<string, string>();
+  for (const gap of m.missing ?? []) {
+    for (const id of gap.blocks ?? []) {
+      if (!blocked.has(id)) blocked.set(id, `${gap.what}: ${gap.why}`);
+    }
+  }
+  if (!blocked.size) return { manifest: m, deferred: [] };
+
+  const kept = m.operations.filter((op) => !blocked.has(op.id));
+  const deferred = m.operations.filter((op) => blocked.has(op.id)).map((op) => ({ id: op.id, why: blocked.get(op.id)! }));
+  return {
+    manifest: {
+      ...m,
+      operations: kept.map((op) => ({
+        ...op,
+        // A dependency on a deferred operation cannot be satisfied, and leaving it would make the execution order
+        // depend on something that is not in the plan.
+        dependsOn: (op.dependsOn ?? []).filter((d) => !blocked.has(d)),
+      })),
+      // Said in the manifest itself, so the implementation prompt carries the reason rather than a silence.
+      outOfScope: [
+        ...(m.outOfScope ?? []),
+        ...deferred.map((x) => `${x.id} is deferred: ${x.why}. Do not implement it and do not invent what is missing.`),
+      ],
+    },
+    deferred,
+  };
+}
+
 /** Operations that must not go live without a person releasing them. */
 export function requiresRelease(m: IntegrationManifest): IntegrationOperation[] {
   return m.operations.filter((o) => RELEASE_GATED.includes(o.kind));
