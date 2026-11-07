@@ -182,8 +182,12 @@ test("[AB-Q-02] four builds run and the rest hold real positions, with nobody pr
   // that the NODE is full at exactly the cap and that nothing beyond the cap was started.
   assert.equal(board.active.length, board.cap, `the node runs exactly its cap, no more and no fewer: ${board.raw.slice(0, 600)}`);
   assert.equal(m.active.length + m.queued.length, FIXTURES, "every fixture is accounted for, running or waiting");
-  assert.ok(m.active.length >= 1, `at least one fixture is building: ${board.raw.slice(0, 400)}`);
-  assert.ok(m.queued.length >= 1, `and at least one is waiting rather than started beyond the cap: ${board.raw.slice(0, 400)}`);
+  // Not "at least one of MINE is running": the queue is FIFO, so an earlier run's fixtures or a customer's build
+  // can legitimately hold all four slots while this run's six wait behind them. That the node runs exactly its cap
+  // is asserted above, and that a waiting build starts when a slot frees is [AB-Q-03]. Demanding that one of this
+  // run's own be among the four would be asserting a position nobody promised it.
+  assert.ok(m.queued.length >= 1, `at least one fixture is waiting rather than started beyond the cap: ${board.raw.slice(0, 400)}`);
+  console.log(`  of this run's ${FIXTURES}: ${m.active.length} running, ${m.queued.length} waiting`);
 
   // A position is a promise about order, so it has to count from one without gaps.
   assert.deepEqual(
