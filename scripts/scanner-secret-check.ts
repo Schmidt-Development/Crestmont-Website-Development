@@ -121,13 +121,18 @@ if (probeOrigin) {
 if (!offline) {
   try {
     const fp = secretFingerprint(root.trim(), SECRET_NAME, derived);
-    const rows = await wranglerOps().query<{ fingerprint: string }>(`SELECT fingerprint FROM deploy_secret_fingerprints WHERE name = '${SECRET_NAME}'`);
+    // updated_at as well as the fingerprint. A MISMATCH alone cannot say WHY: the row may never have matched this
+    // token, or something may have rewritten it. Its timestamp settles that against the deploy history -- a row
+    // written after the last deploy means a put ran outside CI, with a root this environment does not hold.
+    const rows = await wranglerOps().query<{ fingerprint: string; updated_at: string }>(`SELECT fingerprint, updated_at FROM deploy_secret_fingerprints WHERE name = '${SECRET_NAME}'`);
     if (!rows[0]) {
       console.log(`RECORDED IN D1: none — the deploy has no fingerprint for ${SECRET_NAME}, so it never put one.`);
       exit = exit || 2;
     } else {
       const ok = rows[0].fingerprint === fp;
-      console.log(`RECORDED IN D1: ${ok ? "MATCH" : "MISMATCH"} — the deploy's record ${ok ? "agrees with this token" : "was written by a DIFFERENT token"}`);
+      console.log(`RECORDED IN D1: ${ok ? "MATCH" : "MISMATCH"} — the record ${ok ? "agrees with this token" : "was written by a DIFFERENT token"}`);
+      console.log(`  recorded at           : ${rows[0].updated_at}`);
+      console.log(`  recorded fingerprint  : ${checksum(rows[0].fingerprint)}   (computed from this token: ${checksum(fp)})`);
       if (!ok) exit = exit || 1;
     }
   } catch (e) {
