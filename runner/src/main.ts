@@ -199,9 +199,10 @@ export async function runLoop(d: LoopDeps): Promise<number> {
           else if (r === "done") served++;
         } catch (err) { d.logger.warn("customer release handling failed", { error: errorMessage(err) }); }
       }
-      // An uploaded artifact has to be unpacked, built and measured before anyone can approve its design, and
-      // until the platform grew a channel for it there was nowhere for that to happen. It runs when idle, like
-      // the workers above: it is not a build, and it must never take a slot from one.
+      // Imports are NOT served here any more -- see `runImports`. A slot's idle branch was the wrong place for
+      // them the moment a node had four slots: all four busy meant nothing was ever imported. `runSlots` leaves
+      // `imports` null on every slot, so this is only reachable by a caller that sets it deliberately (a test
+      // driving one loop), and it stays for that.
       if (d.imports && importsSupported && !d.shouldStop()) {
         try {
           const r = await d.imports.serve();
@@ -266,18 +267,60 @@ export async function runLoop(d: LoopDeps): Promise<number> {
 }
 
 /**
+ * The import lane: one loop that only unpacks, builds and measures uploaded artifacts.
+ *
+ * Imports used to run in slot 0's idle branch, beside drafts and preview cleanup, under a comment saying an import
+ * "is not a build, and it must never take a slot from one". At one slot that was true and harmless. At four it
+ * means a node whose slots are all building NEVER imports: a newly submitted frontend cannot be measured, so it
+ * cannot be approved, so it cannot be queued -- until a build finishes, and a build is the long thing. "Never
+ * takes a slot" had become "never runs", which is the opposite of what the comment intended.
+ *
+ * So it is its own loop, outside the slots. It claims nothing a build claims, it does not count against the cap,
+ * and it runs one import at a time: an import is a real sandbox with real CPU behind it, and the node is sized for
+ * `slots` of those plus this one.
+ *
+ * Only infrastructure errors are caught here. An import that legitimately fails reports itself rejected through the
+ * worker, and one that dies without reporting is re-offered when its lease expires; neither should stop the lane.
+ */
+export async function runImports(d: LoopDeps): Promise<number> {
+  if (!d.imports) return 0;
+  const sleep = d.sleep ?? interruptibleSleep;
+  const log = d.logger.child({ lane: "imports" });
+  let idleMs = d.cfg.pollMinMs;
+  let served = 0;
+  for (;;) {
+    if (d.shouldStop()) return served;
+    let done = false;
+    try {
+      const r = await d.imports.serve();
+      if (r === "unsupported") { log.info("the control plane does not offer frontend imports; not polling for them again until restart"); return served; }
+      done = r === "done";
+      if (done) { served++; idleMs = d.cfg.pollMinMs; }
+    } catch (err) { log.warn("frontend import handling failed", { error: errorMessage(err) }); }
+    if (d.once) return served;
+    if (done) continue;
+    await sleep(idleMs, d.shouldStop);
+    idleMs = Math.min(d.cfg.pollMaxMs, Math.round(idleMs * 1.5));
+  }
+}
+
+/**
  * V4: several website builds at once, each in its own slot (own workspace, sandbox container, transcript, checkpoints).
  * Slot 0 also serves drafts, preview cleanup and customer releases and probes the model server for all slots. Slots
  * start a few seconds apart so they do not claim at the same instant; the platform enforces the worker's capacity.
+ * Imports run beside the slots in their own lane, not in slot 0's idle branch -- see `runImports`.
  */
 export async function runSlots(d: LoopDeps, slots: number, stagger = 3000): Promise<number> {
   const shared = d.shared ?? { modelOk: true, active: new Set<string>() };
   shared.active ??= new Set<string>();
   const loops: Promise<number>[] = [];
   for (let i = 0; i < Math.max(1, slots); i++) {
-    const deps: LoopDeps = i === 0 ? { ...d, shared } : { ...d, shared, drafts: null, previews: null, deployments: null, imports: null, modelProbe: null, logger: d.logger.child({ slot: i }) };
+    // `imports: null` on every slot, slot 0 included: the import lane owns them now.
+    const deps: LoopDeps = i === 0 ? { ...d, shared, imports: null } : { ...d, shared, drafts: null, previews: null, deployments: null, imports: null, modelProbe: null, logger: d.logger.child({ slot: i }) };
     loops.push((async () => { if (i > 0) await (d.sleep ?? interruptibleSleep)(i * stagger, d.shouldStop); return d.shouldStop() ? 0 : runLoop(deps); })());
   }
+  // Mapped to 0 so the return value stays a count of BUILDS, which is what every caller reads it as.
+  if (d.imports) loops.push(runImports(d).then(() => 0));
   return (await Promise.all(loops)).reduce((a, b) => a + b, 0);
 }
 
