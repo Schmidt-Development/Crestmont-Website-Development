@@ -325,3 +325,35 @@ test("[IM-012] an operation whose essential facts are unknown is deferred, not h
   assert.equal(withoutBlocked(plain).manifest, plain);
   assert.deepEqual(withoutBlocked(plain).deferred, []);
 });
+
+test("[IM-013] a question that prevents nothing does not stop the work it was recorded against", () => {
+  // Measured, not supposed: asked to draft a contract for a three-page haul site, Model A produced a correct plan
+  // for its one quote form and recorded two open questions against it -- where email notifications should go, and
+  // how long a request should be kept -- naming the operation in `blocks` for both. Neither prevents storing a
+  // quote request honestly. Deferring on the model's say-so would have turned a good contract into a build with
+  // nothing to do, which is a worse outcome than either question.
+  const full = {
+    ...manifest([op()]),
+    dataModels: [{ table: "quote_requests", fields: ["name", "phone", "postcode", "load_size"] }],
+    missing: [
+      { what: "where quote notifications should be emailed", why: "the frontend names no recipient", blocks: ["op-quote-form"] },
+      { what: "how long a quote request is kept", why: "no retention rule is stated anywhere", blocks: ["op-quote-form"] },
+    ],
+  };
+
+  const r = withoutBlocked(full);
+  assert.deepEqual(r.deferred, [], "nothing essential is missing, so nothing is deferred");
+  assert.deepEqual(r.manifest.operations.map((o) => o.id), ["op-quote-form"], "the work is built");
+  assert.equal(r.openQuestions.length, 2, "and both questions are still questions, for a person");
+  assert.equal(r.manifest.outOfScope, undefined, "nothing is declared out of scope on the strength of a preference");
+
+  // The same shape of claim about something that genuinely cannot be built is still honoured: a payment with no
+  // approved provider is what completeness objects to, so that one IS deferred.
+  const paid = {
+    ...manifest([op({ id: "take-deposit", kind: "payment" })]),
+    dataModels: full.dataModels,
+    missing: [{ what: "the payment provider and the deposit amount", why: "neither is anywhere in the frontend", blocks: ["take-deposit"] }],
+  };
+  assert.deepEqual(withoutBlocked(paid).deferred.map((d) => d.id), ["take-deposit"]);
+  assert.deepEqual(withoutBlocked(paid).openQuestions, [], "a gap that did stop something is not also listed as harmless");
+});

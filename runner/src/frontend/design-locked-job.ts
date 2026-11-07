@@ -246,10 +246,15 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
   // asking the builder to implement the operation anyway is inventing the fact one step later: a checkout with no
   // provider and no price becomes a plausible checkout. It is deferred instead -- out of the prompt, out of the
   // three gates, and on the record with the reason.
-  const { manifest, deferred } = withoutBlocked(contract);
+  const { manifest, deferred, openQuestions } = withoutBlocked(contract);
   for (const x of deferred) {
     problems.push(`deferred ${x.id}: not built, because the contract records this as not established — ${x.why}`);
     note(`${x.id} is deferred: ${x.why}`);
+  }
+  // A recorded question that prevents nothing is still a question. Said out loud rather than dropped, because a
+  // build record that mentions neither the gap nor the work implies the contract settled everything.
+  for (const q of openQuestions) {
+    note(`open question, which does not stop this work: ${q.what} — ${q.why}`);
   }
   if (!manifest.operations.length) {
     out.failedAt = "manifest";
