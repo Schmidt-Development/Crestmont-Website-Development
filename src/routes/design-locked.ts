@@ -293,6 +293,12 @@ ${rows.length === 0 ? emptyState("Nothing yet", "No project is on the design-loc
     const jobs = (jobRows.results ?? []) as Record<string, unknown>[];
     const latestReport = jobs.map((j) => j.report_md).find((r) => typeof r === "string" && r.trim()) as string | undefined;
 
+    // The two values a contract has to declare about the design it is written against, resolved once and shown
+    // on the contract form: whoever writes one needs them exactly, and guessing is what a refusal is for.
+    const approvedBaselineRow = baselines.find((b) => b.id === state.activeBaselineId);
+    const approvedFingerprint = approvedBaselineRow?.fingerprint ?? "—";
+    const approvedArtifactSha = artifacts.find((a) => a.id === approvedBaselineRow?.artifact_id)?.sha256 ?? "—";
+
     const problemsOf = (a: DL.FrontendArtifact): SafeHtml => {
       let list: { severity?: string; code?: string; detail?: string; path?: string }[] = [];
       try { list = JSON.parse(a.problems_json); } catch { list = []; }
@@ -442,6 +448,13 @@ ${measured ? html`<section class="card">
             design fingerprint must be this project's, and every page and element it names must exist in the
             approved frontend. A contract that does not match is refused with the reasons, not stored and
             discovered later.
+          </p>
+          <p class="faint">
+            A contract declares the design it was written against, and these are this project's two values.
+            Copy them in: <code>artifactSha</code> is
+            <code>${approvedArtifactSha}</code>
+            and <code>designFingerprint</code> is <code>${approvedFingerprint}</code>.
+            A contract naming anything else is refused rather than stretched to fit.
           </p>
           <label for="f-contract-note">Note (optional)</label>
           <input id="f-contract-note" name="note" maxlength="500" placeholder="Why this version, or what changed">
@@ -642,10 +655,11 @@ ${measured ? html`<section class="card">
 
   r.get(`${BASE}/:projectId/state`, async (ctx, p) => {
     requireStaff(ctx, "builds.read");
-    const [state, artifacts, baselines] = await Promise.all([
+    const [state, artifacts, baselines, contractState] = await Promise.all([
       DL.frontendState(ctx.db, p.projectId),
       DL.listArtifacts(ctx.db, p.projectId),
       DL.listBaselines(ctx.db, p.projectId),
+      DL.activeContract(ctx.db, p.projectId),
     ]);
     const gate = await DL.designGenerationAllowed(ctx.db, p.projectId);
     return jsonResponse(ctx, 200, {
@@ -653,8 +667,14 @@ ${measured ? html`<section class="card">
       ...state,
       designGenerationAllowed: gate.allowed,
       designGenerationReason: gate.reason,
-      artifacts: artifacts.map((a) => ({ id: a.id, version: a.version, source: a.source, framework: a.framework, scanStatus: a.scan_status, status: a.status })),
-      baselines: baselines.map((b) => ({ id: b.id, version: b.version, status: b.status, fingerprint: b.fingerprint, approvedAt: b.approved_at, approvedBy: b.approved_by })),
+      // sha256 and artifactId are here because a contract has to DECLARE the design it was written against, and
+      // whoever writes one needs the two exact values to declare. They are not secrets: an archive's checksum and
+      // the id of a design this staff user can already read on the page beside it.
+      artifacts: artifacts.map((a) => ({ id: a.id, version: a.version, source: a.source, framework: a.framework, scanStatus: a.scan_status, status: a.status, sha256: a.sha256 })),
+      baselines: baselines.map((b) => ({ id: b.id, version: b.version, status: b.status, fingerprint: b.fingerprint, artifactId: b.artifact_id, approvedAt: b.approved_at, approvedBy: b.approved_by })),
+      contract: contractState
+        ? { version: contractState.version, operations: contractState.operations, visualStates: contractState.visual_states, designFingerprint: contractState.design_fingerprint, recordedAt: contractState.created_at }
+        : null,
     });
   });
 }
