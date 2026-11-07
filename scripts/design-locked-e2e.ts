@@ -267,7 +267,13 @@ async function main(): Promise<number> {
   // Mirrors runner.env on Node 1. The skills directory is required configuration even for a stage that only
   // builds and measures, because loadConfig validates the whole configuration at once.
   process.env.SKILLS_SOURCE_DIR = process.env.SKILLS_SOURCE_DIR ?? "C:\\CrestmontRunner\\skills";
-  process.env.RUNNER_SANDBOX_IMAGE = process.env.RUNNER_SANDBOX_IMAGE ?? "crestmont-build-sandbox:1-frontend-import";
+  // Mirrors runner.env on Node 1 too, and this line used not to: it defaulted to a side tag,
+  // `crestmont-build-sandbox:1-frontend-import`, that only this harness ever used. The measurement instrument was
+  // in that image and NOT in `crestmont-build-sandbox:1`, which is the only image the installer installs and the
+  // runner runs, so this harness passed while every real import on Node 1 died inside the sandbox with
+  // `Cannot find module '/opt/crestmont/frontend-import.mjs'`. A harness that mirrors the node must mirror the
+  // image; a one-off tag can still be given through the environment for an experiment.
+  process.env.RUNNER_SANDBOX_IMAGE = process.env.RUNNER_SANDBOX_IMAGE ?? "crestmont-build-sandbox:1";
   process.env.RUNNER_INSTALL_NETWORK = process.env.RUNNER_INSTALL_NETWORK ?? "crestmont_install";
   delete process.env.RUNNER_SANDBOX_VOLUME;
 
