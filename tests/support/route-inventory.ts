@@ -121,6 +121,11 @@ export const ROUTE_INVENTORY: Record<string, RouteSpec> = {
   // of the runner protocol; the artifact is resolved from the lease, never from the request.
   "POST /api/builds/runner/frontend/artifact": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/frontend/baseline": signed("x-crestmont-runner-signature"),
+  // The import step. Claiming and reporting change what a person will be asked to approve, so both are audited by
+  // the artifact's own records; fetching the bytes is a read of something the runner was already given.
+  "POST /api/builds/runner/frontend/import/claim": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/frontend/import/bytes": signed("x-crestmont-runner-signature"),
+  "POST /api/builds/runner/frontend/import/report": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/gallery/image": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/gallery/seen": signed("x-crestmont-runner-signature"),
   "POST /api/builds/runner/ai/claim": signed("x-crestmont-runner-signature"),
