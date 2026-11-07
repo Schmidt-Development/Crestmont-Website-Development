@@ -71,7 +71,9 @@ test("[PROMPT-04] the brief says the application has to start, and which script 
   assert.match(s, /not written by you and not editable by you/, "and that the driver is not the model's own");
   assert.match(s, /the build fails on that alone/, "and the consequence, so it is not read as advice");
   assert.match(s, /PORT/, "and the port it must listen on");
-  assert.match(s, /run what the build produces, not the sources/, "which matters once the model writes TypeScript");
+  assert.match(s, /npm run build.*and then.*npm run start/s, "and the order the two are run in");
+  assert.match(s, /everything .start. needs must exist by the end of .build./, "so a compile step nothing runs is not enough");
+  assert.match(s, /MODULE_NOT_FOUND/, "with the failure it actually caused, not a warning in the abstract");
 });
 
 test("[PROMPT-05] a contract that permits no start script is not told to add one", () => {
