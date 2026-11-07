@@ -245,7 +245,8 @@ jobs:
           for pair in build_jobs:build_phase build_jobs:design_freeze_id build_quality:schema_version \
                       build_quality:design_points build_quality:rubric_json build_quality:design_blockers_json \
                       build_cycles:primary_progress build_cycles:milestone \
-                      build_revisions:design_points build_revisions:is_design_baseline; do
+                      build_revisions:design_points build_revisions:is_design_baseline \
+                      design_locked_contracts:authored_by design_locked_contracts:review_flags_json; do
             tbl=${pair%%:*}; col=${pair##*:}
             if ! n=$(n_of "SELECT COUNT(*) AS n FROM pragma_table_info('$tbl') WHERE name='$col'"); then
               unverified "$tbl.$col"; missing=1
