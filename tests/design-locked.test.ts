@@ -1267,6 +1267,82 @@ test("[DLI-05] an import that failed is recorded as the artifact's verdict, with
 // clean scan, a successful import and a measurement -- against THAT baseline. These cover every case where
 // applying it would mean approving something other than what was acknowledged.
 
+test("[DLI-06] a rejected artifact can be offered for import again, and only under the same gates", async () => {
+  // The Founder's first real upload was refused by an importer that only recognised a file called `index.html`.
+  // The archive was fine and is still in R2, but the claim only offers `received` artifacts -- so a wrong verdict
+  // was permanent, and the only way back was uploading the same bytes a second time.
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const made = await DL.createTestProject(t.db, { name: "Retry import", actorId: staff.id });
+    const { artifact } = await cleanArtifact(t, made.projectId, made.organizationId, staff.id);
+
+    // Not rejected yet: there is nothing to retry, and saying so beats quietly re-offering it.
+    const early = await DL.retryImport(t.db, artifact.id, { actorId: staff.id });
+    assert.equal(early.ok, false);
+    assert.match("why" in early ? early.why : "", /only a rejected artifact/i, JSON.stringify(early));
+
+    await DL.recordVerdict(t.db, artifact.id, {
+      status: "rejected",
+      problems: ["import refused — scanned clean\nREJECT unsupported-framework: no supported frontend was recognised."],
+    });
+    assert.equal((await DL.getArtifact(t.db, artifact.id))!.status, "rejected");
+    assert.equal((await DL.frontendState(t.db, made.projectId)).state, "artifact_rejected");
+
+    // The retry puts it back exactly where a fresh upload sits, so the ordinary claim picks it up.
+    const again = await DL.retryImport(t.db, artifact.id, { actorId: staff.id });
+    assert.ok(again.ok, "why" in again ? again.why : "");
+    assert.equal(again.artifact.status, "received");
+    assert.deepEqual(JSON.parse(again.artifact.problems_json), [], "the old verdict's reasons are cleared");
+    assert.equal((await DL.frontendState(t.db, made.projectId)).state, "validating_artifact");
+
+    // Attributed, with what was cleared kept on the record rather than lost with the column.
+    const said = await t.db.prepare(
+      `SELECT actor_kind, details_json FROM audit_logs WHERE action = 'frontend_artifact.import_retried' AND subject_id = ?`,
+    ).bind(artifact.id).first<{ actor_kind: string; details_json: string }>();
+    assert.ok(said, "a retry is an attributable act");
+    assert.equal(said.actor_kind, "user");
+    assert.match(said.details_json, /unsupported-framework/, "the reasons it is being retried against are kept");
+
+    const claim = await DL.claimArtifactForImport(t.db, { runnerId: "r-retry" });
+    assert.equal(claim?.artifactId, artifact.id, "and the ordinary import claim now offers it");
+  } finally { t.close(); }
+});
+
+test("[DLI-07] a retry never bypasses scanning, a quarantine, or a newer upload", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const made = await DL.createTestProject(t.db, { name: "Retry gates", actorId: staff.id });
+    const { artifact, fileId } = await cleanArtifact(t, made.projectId, made.organizationId, staff.id);
+    await DL.recordVerdict(t.db, artifact.id, { status: "rejected", problems: ["no"] });
+
+    // The scan verdict is re-read NOW, from the file, not trusted from the artifact's own copy. An archive whose
+    // scan has since been invalidated is not unpacked because someone pressed a button.
+    await t.db.prepare(`UPDATE files SET scan_status = 'pending' WHERE id = ?`).bind(fileId).run();
+    const unscanned = await DL.retryImport(t.db, artifact.id, { actorId: staff.id });
+    assert.equal(unscanned.ok, false);
+    assert.match("why" in unscanned ? unscanned.why : "", /scan status is "pending"/, JSON.stringify(unscanned));
+    assert.equal((await DL.getArtifact(t.db, artifact.id))!.status, "rejected", "and nothing moved");
+
+    await t.db.prepare(`UPDATE files SET scan_status = 'clean' WHERE id = ?`).bind(fileId).run();
+
+    // A quarantined archive is replaced by a person, never retried.
+    await DL.recordVerdict(t.db, artifact.id, { status: "quarantined", problems: ["infected"] });
+    const quarantined = await DL.retryImport(t.db, artifact.id, { actorId: staff.id });
+    assert.equal(quarantined.ok, false);
+    assert.match("why" in quarantined ? quarantined.why : "", /quarantined/i, JSON.stringify(quarantined));
+
+    // And an older rejected artifact is not the design anyone is waiting for.
+    await DL.recordVerdict(t.db, artifact.id, { status: "rejected", problems: ["no"] });
+    const newer = await cleanArtifact(t, made.projectId, made.organizationId, staff.id, "a second upload");
+    assert.ok(newer.artifact.version > artifact.version);
+    const stale = await DL.retryImport(t.db, artifact.id, { actorId: staff.id });
+    assert.equal(stale.ok, false);
+    assert.match("why" in stale ? stale.why : "", /newer artifact/i, JSON.stringify(stale));
+  } finally { t.close(); }
+});
+
 test("[DLS-01] an acknowledgement becomes an approval only once the design has been measured", async () => {
   const t = await createTestApp();
   try {

@@ -303,11 +303,39 @@ ${rows.length === 0 ? emptyState("Nothing yet", "No project is on the design-loc
     // reads is the same as an invented one: the work stops in the same place and nobody knows why.
     const reviewFlags = contract ? safeArr(contract.review_flags_json) : [];
 
+    // Two shapes reach this column, and only one of them used to render.
+    //
+    // `validateArtifact` produces objects ({severity, code, detail, path}); the IMPORT reports plain strings --
+    // `describeIngest`'s multi-line account, a build error, a measurement failure. A string has no `.code` and no
+    // `.detail`, so every imported-or-rejected artifact's reasons rendered as empty bullets. The Founder's law
+    // firm upload was refused with two precise, actionable sentences and the project page showed two blank lines.
     const problemsOf = (a: DL.FrontendArtifact): SafeHtml => {
-      let list: { severity?: string; code?: string; detail?: string; path?: string }[] = [];
-      try { list = JSON.parse(a.problems_json); } catch { list = []; }
+      let list: unknown[] = [];
+      try { const v = JSON.parse(a.problems_json); list = Array.isArray(v) ? v : []; } catch { list = []; }
       if (!list.length) return html``;
-      return html`<ul class="faint" style="margin:.25rem 0 0">${list.slice(0, 8).map((x) => html`<li><code>${x.code ?? ""}</code> ${x.detail ?? ""}${x.path ? html` <code>${x.path}</code>` : ""}</li>`)}</ul>`;
+      const line = (x: unknown): SafeHtml => {
+        if (typeof x === "string") {
+          // Multi-line, because describeIngest's account is several lines and each one says something different.
+          return html`<li style="white-space:pre-wrap">${x.slice(0, 2000)}</li>`;
+        }
+        const p = (x ?? {}) as { code?: string; detail?: string; path?: string };
+        if (!p.code && !p.detail) return html`<li>${JSON.stringify(x).slice(0, 400)}</li>`;
+        return html`<li><code>${p.code ?? ""}</code> ${p.detail ?? ""}${p.path ? html` <code>${p.path}</code>` : ""}</li>`;
+      };
+      return html`<ul class="faint" style="margin:.25rem 0 0">${join(list.slice(0, 8).map(line))}</ul>`;
+    };
+
+    // Offering a rejected artifact for import again. The archive is still in R2 and still scanned clean, so when
+    // the importer was wrong about it there has to be a way back that is not "upload the same bytes again". The
+    // service re-reads the scan verdict and refuses anything but the project's latest rejected artifact.
+    const latestArtifactId = artifacts[0]?.id ?? null;
+    const retryOf = (a: DL.FrontendArtifact): SafeHtml => {
+      if (a.status !== "rejected" || a.id !== latestArtifactId || !mayApprove) return html``;
+      return html`<form method="post" action="${BASE}/${projectId}/artifacts/${a.id}/retry-import" style="margin:.4rem 0 0">
+        ${csrf(ctx)}
+        ${button("Import again", { variant: "ghost", size: "sm" })}
+        <span class="faint">The same archive, scanned again as clean before anything is unpacked.</span>
+      </form>`;
     };
 
     const body = html`${pageHead(project.name, linkButton("All approved frontends", BASE, "ghost", "sm"), "Approved frontend and design baseline")}
@@ -334,7 +362,7 @@ ${state.designLocked ? alert("success", html`This project is <strong>design-lock
       { header: "Source", cell: (a: DL.FrontendArtifact) => html`${a.source.replace(/_/g, " ")}` },
       { header: "Framework", cell: (a: DL.FrontendArtifact) => html`${a.framework ?? "—"}` },
       { header: "Scan", cell: (a: DL.FrontendArtifact) => scanBadge(a.scan_status) },
-      { header: "Status", cell: (a: DL.FrontendArtifact) => html`${badge(a.status === "imported" ? "ok" : a.status === "rejected" || a.status === "quarantined" ? "danger" : "info", a.status)}${problemsOf(a)}` },
+      { header: "Status", cell: (a: DL.FrontendArtifact) => html`${badge(a.status === "imported" ? "ok" : a.status === "rejected" || a.status === "quarantined" ? "danger" : "info", a.status)}${problemsOf(a)}${retryOf(a)}` },
       { header: "Received", cell: (a: DL.FrontendArtifact) => html`${formatDateTime(a.created_at)}` },
     ],
   )}
@@ -571,6 +599,19 @@ ${measured ? html`<section class="card">
     if (!baselineId) throw new HttpError(422, "Choose a baseline to roll back to.");
     if (!reason) throw new HttpError(422, "Say why you are rolling back.");
     await DL.rollbackBaseline(ctx.db, p.projectId, { toBaselineId: baselineId, actorId: actorId(ctx), reason });
+    return redirect(ctx, `${BASE}/${p.projectId}`);
+  });
+
+  // Offer a rejected artifact for import again.
+  //
+  // The archive is still in R2 and its scan verdict is still clean; what was wrong was the importer's reading of
+  // it. Without this, every artifact the importer refused before a fix stayed refused for ever, and the only
+  // recovery was asking the owner to upload the same bytes a second time. The service re-reads the scan status
+  // rather than trusting the artifact's copy of it, so a retry can never bypass scanning.
+  r.post(`${BASE}/:projectId/artifacts/:artifactId/retry-import`, async (ctx, p) => {
+    requireStaff(ctx, "builds.configure");
+    const r0 = await DL.retryImport(ctx.db, p.artifactId, { actorId: actorId(ctx), ip: ctx.ip ?? null });
+    if (!r0.ok) throw new HttpError(409, `This artifact cannot be imported again: ${r0.why}`);
     return redirect(ctx, `${BASE}/${p.projectId}`);
   });
 

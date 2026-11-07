@@ -346,6 +346,72 @@ export async function deliverArtifactForImport(
   };
 }
 
+/**
+ * Offer a REJECTED artifact for import again.
+ *
+ * The Founder's first real upload was refused by a detector that only recognised a file called `index.html`. The
+ * archive was fine, it is still in R2, and its scan verdict is still clean -- but `claimArtifactForImport` only
+ * offers `received` artifacts, so once the importer had said `rejected` there was no way back except uploading
+ * the same bytes again. After a fix to the importer, every artifact it had wrongly refused was stranded.
+ *
+ * So the retry is a first-class act with the same gates as the original import, not a database edit:
+ *
+ *   · the archive must still be scanned CLEAN, re-read here and now from `files`. A retry never carries a
+ *     verdict forward and never bypasses scanning.
+ *   · only a REJECTED artifact. A quarantined one is replaced by a person, an imported one has nothing to retry,
+ *     a superseded one is not the design anyone is waiting for.
+ *   · only the project's LATEST artifact. Re-importing an older one would measure a design the owner has already
+ *     replaced, and `recordBaseline` would then offer that for approval.
+ *
+ * The recorded problems are cleared, because they describe an import that is being redone. The audit row keeps
+ * them, so what was said and when stays on the record.
+ */
+export async function retryImport(
+  db: Db,
+  artifactId: string,
+  o: { actorId: string; ip?: string | null },
+): Promise<{ ok: true; artifact: FrontendArtifact } | { ok: false; why: string }> {
+  const a = await getArtifact(db, artifactId);
+  if (!a) return { ok: false, why: "no such frontend artifact" };
+  if (a.status === "quarantined") {
+    return { ok: false, why: "this artifact is quarantined, and a quarantined archive is replaced rather than retried" };
+  }
+  if (a.status !== "rejected") {
+    return { ok: false, why: `only a rejected artifact can be offered for import again; this one is "${a.status}"` };
+  }
+
+  const scan = a.file_id
+    ? await db.prepare(`SELECT scan_status FROM files WHERE id = ?`).bind(a.file_id).first<{ scan_status: string }>()
+    : null;
+  if (!scan || scan.scan_status !== "clean") {
+    return { ok: false, why: `the archive's scan status is "${scan?.scan_status ?? "unknown"}", and an import runs only on a clean verdict` };
+  }
+
+  const latest = await latestArtifact(db, a.project_id);
+  if (latest && latest.id !== a.id) {
+    return { ok: false, why: `a newer artifact (version ${latest.version}) has been uploaded for this project, so this one is not the design to measure` };
+  }
+
+  await db.prepare(`UPDATE frontend_artifacts SET status = 'received', problems_json = '[]', updated_at = ? WHERE id = ? AND status = 'rejected'`)
+    .bind(nowIso(), a.id).run();
+  await setFrontendState(db, a.project_id, "validating_artifact");
+  await audit(db, {
+    actorUserId: o.actorId, actorKind: "user", action: "frontend_artifact.import_retried",
+    subjectType: "frontendArtifact", subjectId: a.id, organizationId: a.organization_id,
+    details: { version: a.version, sha256: a.sha256.slice(0, 12), clearedProblems: safeProblemList(a.problems_json).slice(0, 10) },
+    ip: o.ip ?? null,
+  });
+  return { ok: true, artifact: (await getArtifact(db, a.id))! };
+}
+
+/** The problems a verdict recorded, for the audit row. Never throws on a column that is not JSON. */
+function safeProblemList(raw: unknown): string[] {
+  try {
+    const v = JSON.parse(String(raw ?? "[]"));
+    return Array.isArray(v) ? v.map((x) => String(x).slice(0, 300)) : [];
+  } catch { return []; }
+}
+
 /** Put a claimed artifact back for another attempt, when the runner could not finish (a crash, a lost sandbox). */
 export async function releaseImportClaim(db: Db, artifactId: string): Promise<void> {
   await db.prepare(`UPDATE frontend_artifacts SET status = 'received', updated_at = ? WHERE id = ? AND status = 'validating'`)

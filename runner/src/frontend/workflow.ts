@@ -76,6 +76,12 @@ export async function importFrontend(o: {
     out.problems.push(describeIngest(ingest));
     return out;
   }
+  // Ingest's own warnings on a SUCCESSFUL import, which used to be dropped: only the failure path described the
+  // ingest at all. That the entry point was renamed, or that an install hook was found, is something the owner
+  // should read on the project page rather than something only the runner's log knows.
+  for (const p of ingest.problems) {
+    if (p.severity === "warn") out.problems.push(`${p.code}${p.path ? ` (${p.path})` : ""}: ${p.detail}`);
+  }
 
   // ── 2. build ────────────────────────────────────────────────────────────────────────────────────────────────
   const plan = planBuild(o.repo, ingest.framework);
