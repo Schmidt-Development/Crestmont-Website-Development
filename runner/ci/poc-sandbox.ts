@@ -14,6 +14,8 @@
 // starts, and closes every sandbox it created on the way out, including on a crash. Containers belonging to the
 // real runner, or to another script, are never touched: the label is the boundary.
 
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { JobSandbox, cliDockerExecutor } from "../src/sandbox.ts";
 import type { DockerExecutor } from "../src/sandbox.ts";
 import type { JobSandboxConfig } from "../src/config.ts";
@@ -116,6 +118,9 @@ export function pocConfig(runnerId: string, over: Partial<JobSandboxConfig> = {}
     image: env.RUNNER_SANDBOX_IMAGE ?? "crestmont-build-sandbox:1",
     runnerId,
     volume: "",
+    // Bind mounts (volume ""), so JobSandbox never consults this; it is stated because a sandbox on the
+    // workspaces VOLUME can only mount <workspacesRoot>/<ref> and has to be able to check that.
+    workspacesRoot: path.resolve(env.RUNNER_WORKSPACES ?? tmpdir()),
     cpus: env.RUNNER_JOB_CPUS ?? "8",
     memory: env.RUNNER_JOB_MEMORY ?? "8g",
     pidsLimit: 512,

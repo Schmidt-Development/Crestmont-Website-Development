@@ -20,6 +20,7 @@ import { run, trustedBinary } from "./exec.ts";
 import type { ExecResult } from "./exec.ts";
 import type { JobSandboxConfig } from "./config.ts";
 import type { Workspace } from "./workspace.ts";
+import { IsolationError } from "./workspace.ts";
 import type { Logger } from "./log.ts";
 import { silentLogger } from "./log.ts";
 
@@ -124,6 +125,16 @@ export class JobSandbox {
 
   /** Mounts: this job's repo and home only. Volume sub-paths when the runner itself runs in a container. */
   mountFlags(): string[] {
+    // `volume-subpath` is ONE segment from the volume root, so it names this workspace only while the workspace
+    // sits directly under the workspaces root that volume is mounted at. The frontend import worker created its
+    // workspace a level deeper and every import died on a docker error naming a path that had never existed.
+    // Refusing here says which workspace is wrong, before a container is created and left behind.
+    if (this.cfg.volume && this.cfg.workspacesRoot && path.resolve(this.cfg.workspacesRoot, this.ws.ref) !== path.resolve(this.ws.dir)) {
+      throw new IsolationError(
+        `workspace ${this.ws.ref} is at ${this.ws.dir}, which is not directly under the workspaces root ` +
+        `${this.cfg.workspacesRoot}; a sandbox on volume ${this.cfg.volume} can only mount <root>/<ref>`,
+      );
+    }
     const m = (sub: "repo" | "home", dst: string, hostPath: string) => this.cfg.volume
       ? `type=volume,src=${this.cfg.volume},dst=${dst},volume-subpath=${this.ws.ref}/${sub}`
       : `type=bind,src=${hostPath},dst=${dst}`;

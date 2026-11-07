@@ -167,6 +167,15 @@ export interface JobSandboxConfig {
   runnerId: string;
   /** Named Docker volume that holds RUNNER_WORKSPACES (runner in a container). Empty = bind-mount host paths. */
   volume: string;
+  /**
+   * RUNNER_WORKSPACES: the root `volume` is mounted at inside this runner.
+   *
+   * A sandbox mount on the volume is `volume-subpath=<workspace ref>/repo`, one segment from the volume ROOT, so
+   * that is only the right path while the workspace sits directly under this root. `mountFlags` checks it, because
+   * a workspace created a level deeper produced a mount the daemon could not resolve and the failure surfaced as a
+   * docker error about a path nobody had asked for.
+   */
+  workspacesRoot: string;
   cpus: string;
   memory: string;
   pidsLimit: number;
@@ -361,6 +370,7 @@ export function loadConfig(env: Env = process.env, runnerDir = path.resolve(impo
       // Docker label values: plain segment text, so a surprising RUNNER_ID cannot become extra docker arguments.
       runnerId: (env.RUNNER_ID ?? `runner-${hostname()}`).slice(0, 64).replace(/[^A-Za-z0-9_.-]/g, "-"),
       volume: env.RUNNER_SANDBOX_VOLUME ?? "",
+      workspacesRoot: path.resolve(workspacesRoot),
       cpus: env.RUNNER_JOB_CPUS ?? "2",
       memory: env.RUNNER_JOB_MEMORY ?? "4g",
       pidsLimit: num(env.RUNNER_JOB_PIDS, 512),
