@@ -440,18 +440,27 @@ export function writeAcceptanceResults(repo: string, checks: readonly Acceptance
  * A pass needs every check to have passed AND at least one check to have run. An undetermined check is a
  * failure: the directive's rule is that nothing may be claimed to have passed unless it actually ran and passed.
  */
-export function summarise(checks: readonly AcceptanceCheck[]): { ran: boolean; ok: boolean; detail: string } {
+/**
+ * The verdict, and the COUNTS behind it.
+ *
+ * The counts are returned because the repair loop needs to know whether a cycle improved anything, and "ok or
+ * not" cannot answer that: a repair that fixes three of four failing checks is progress, and a loop that can only
+ * see the boolean stops after one attempt believing nothing moved.
+ */
+export function summarise(checks: readonly AcceptanceCheck[]): {
+  ran: boolean; ok: boolean; detail: string; passed: number; failed: number; undetermined: number;
+} {
   if (checks.length === 0) {
-    return { ran: false, ok: false, detail: "the independent acceptance driver produced no result, so nothing was verified" };
+    return { ran: false, ok: false, detail: "the independent acceptance driver produced no result, so nothing was verified", passed: 0, failed: 0, undetermined: 0 };
   }
   const failed = checks.filter((c) => !c.ok && !c.undetermined);
   const undetermined = checks.filter((c) => c.undetermined);
   const passed = checks.filter((c) => c.ok);
   if (failed.length === 0 && undetermined.length === 0) {
-    return { ran: true, ok: true, detail: `${passed.length} contract check(s) passed against the running application` };
+    return { ran: true, ok: true, detail: `${passed.length} contract check(s) passed against the running application`, passed: passed.length, failed: 0, undetermined: 0 };
   }
   const parts: string[] = [];
   if (failed.length) parts.push(`${failed.length} failed: ${failed.slice(0, 4).map((c) => `${c.id} — ${c.detail}`).join("; ")}`);
   if (undetermined.length) parts.push(`${undetermined.length} could not be evaluated: ${undetermined.slice(0, 3).map((c) => `${c.id} — ${c.detail}`).join("; ")}`);
-  return { ran: true, ok: false, detail: `${passed.length} passed, ${parts.join(". ")}` };
+  return { ran: true, ok: false, detail: `${passed.length} passed, ${parts.join(". ")}`, passed: passed.length, failed: failed.length, undetermined: undetermined.length };
 }

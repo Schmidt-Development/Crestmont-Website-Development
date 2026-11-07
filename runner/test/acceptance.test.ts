@@ -33,9 +33,12 @@ const manifest = (over: Partial<IntegrationManifest & ManifestContract> = {}): I
 test("[ACC-01] undetermined is never a pass, and a driver that said nothing is not a pass either", () => {
   // The whole point. A check that could not be evaluated tells us nothing about whether the work is good, and
   // the directive's rule is that nothing may be claimed to have passed unless it actually ran and passed.
+  // The counts are part of the verdict now: the repair loop measures progress by them, and "ok or not" cannot
+  // say whether a cycle fixed three of four failing checks.
   assert.deepEqual(summarise([]), {
     ran: false, ok: false,
     detail: "the independent acceptance driver produced no result, so nothing was verified",
+    passed: 0, failed: 0, undetermined: 0,
   });
 
   const withUndetermined = summarise([
@@ -45,6 +48,11 @@ test("[ACC-01] undetermined is never a pass, and a driver that said nothing is n
   assert.equal(withUndetermined.ran, true);
   assert.equal(withUndetermined.ok, false, "one undetermined check is enough to withhold a pass");
   assert.match(withUndetermined.detail, /could not be evaluated/);
+  assert.deepEqual(
+    { passed: withUndetermined.passed, failed: withUndetermined.failed, undetermined: withUndetermined.undetermined },
+    { passed: 1, failed: 0, undetermined: 1 },
+    "and the counts say which, so a later cycle can be compared with this one",
+  );
 
   const failing = summarise([
     { id: "app:starts", ok: true, detail: "started" },
@@ -52,12 +60,13 @@ test("[ACC-01] undetermined is never a pass, and a driver that said nothing is n
   ]);
   assert.equal(failing.ok, false);
   assert.match(failing.detail, /declared 401, answered 200/, "the measurement is in the verdict, not just a count");
+  assert.deepEqual({ passed: failing.passed, failed: failing.failed, undetermined: failing.undetermined }, { passed: 1, failed: 1, undetermined: 0 });
 
   const passing = summarise([
     { id: "app:starts", ok: true, detail: "started" },
     { id: "GET /api/x :: refuses anonymous", ok: true, detail: "401 as declared" },
   ]);
-  assert.deepEqual(passing, { ran: true, ok: true, detail: "2 contract check(s) passed against the running application" });
+  assert.deepEqual(passing, { ran: true, ok: true, detail: "2 contract check(s) passed against the running application", passed: 2, failed: 0, undetermined: 0 });
 });
 
 test("[ACC-02] the plan is derived from the contract and the project's own scripts, never invented", () => {
