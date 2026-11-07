@@ -22,6 +22,13 @@ services:
     # clamd cannot fully examine is reported as Heuristics.Limits.Exceeded.* / Heuristics.Encrypted.*, which the
     # scanner maps to 'failed' (quarantined), never to 'clean'.
     environment:
+      # freshclam (inside this image) downloads new signatures on its own, then tells clamd to reload them through the
+      # local socket its freshclam.conf names. Without that socket the download succeeds and the RELOAD never happens:
+      # measured on 2026-11-07, freshclam had daily 28175 on disk while the running daemon still answered VERSION with
+      # 27927 from 2026-03-01 — eight months of signatures downloaded and not loaded, with nothing in clamd's own log
+      # to say so ("Clamd was NOT notified: Can't connect to clamd through /tmp/clamd.sock"). The daemon still listens
+      # on TCP 3310 for the scanner; this only adds the socket freshclam looks for.
+      CLAMD_CONF_LocalSocket: /tmp/clamd.sock
       CLAMD_CONF_StreamMaxLength: 30M
       CLAMD_CONF_MaxFileSize: 30M
       CLAMD_CONF_MaxScanSize: 120M

@@ -42,3 +42,16 @@ test("[SEC-003] scanner compose project is separate from the build runner's and 
   assert.match(runner, /^name: crestmont-runner$/m);
   for (const must of ['CLAMD_CONF_AlertExceedsMax: "yes"', "CLAMD_CONF_StreamMaxLength: 30M"]) assert.ok(c.includes(must), must);
 });
+
+/**
+ * A scanner running on signatures from eight months ago reports "clean" with the same confidence as a current one, and
+ * nothing in its own logs says otherwise. freshclam downloads into the shared volume and then notifies clamd over the
+ * local socket its freshclam.conf names; if clamd does not open that socket the download lands and the daemon keeps
+ * the signature set baked into the pinned image. Measured on 2026-11-07: daily 28175 on disk, VERSION still answering
+ * 27927 from 2026-03-01. The daemon must therefore open the local socket as well as TCP 3310.
+ */
+test("[SEC-003] clamd opens the local socket freshclam notifies, so downloaded signatures are actually loaded", () => {
+  const c = readFileSync("scanner/docker-compose.yml", "utf8");
+  assert.match(c, /^\s+CLAMD_CONF_LocalSocket: \/tmp\/clamd\.sock$/m, "clamd must open /tmp/clamd.sock for freshclam's RELOAD");
+  assert.doesNotMatch(c, /^\s+ports:/m, "and still publish nothing");
+});
