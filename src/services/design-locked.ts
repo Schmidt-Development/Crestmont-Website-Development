@@ -16,8 +16,10 @@
 // The integration manifest's format is defined once, in the module that enforces it for the runner. A second
 // copy of the rules here is exactly how `renders` and `screenshots` drifted apart until every import report
 // was refused; the file is a pure validator with no imports of its own, so it bundles into the Worker as is.
-import { validateManifest, MANIFEST_SCHEMA } from "../../runner/src/frontend/integration-manifest.ts";
-import type { IntegrationManifest } from "../../runner/src/frontend/integration-manifest.ts";
+import { validateManifest, MANIFEST_SCHEMA, completeness, coverage } from "../../runner/src/frontend/integration-manifest.ts";
+import type {
+  IntegrationManifest, InteractionItem, ManifestContract, MissingRequirement, OperationKind,
+} from "../../runner/src/frontend/integration-manifest.ts";
 import type { Db } from "../lib/db.ts";
 import { newId, nowIso } from "../lib/db.ts";
 import { audit } from "./security.ts";
@@ -641,6 +643,11 @@ export interface ContractRow {
   note: string | null;
   superseded_at: string | null;
   created_at: string;
+  /** "staff" when a person wrote it, "model-a" when it was drafted from the measured frontend. */
+  authored_by: string;
+  author_model: string | null;
+  /** The requirements the contract could not establish, as JSON. Flagged for a person, never invented. */
+  review_flags_json: string;
 }
 
 /** The contract a build would be held to right now, or null when none has been recorded. */
@@ -653,6 +660,171 @@ export async function activeContract(db: Db, projectId: string): Promise<Contrac
 export async function listContracts(db: Db, projectId: string): Promise<ContractRow[]> {
   return (await db.prepare(`SELECT * FROM design_locked_contracts WHERE project_id = ? ORDER BY version DESC`)
     .bind(projectId).all<ContractRow>()).results;
+}
+
+/**
+ * Operation kinds that are served over HTTP, so a criterion about them can be established by a request.
+ *
+ * `navigation` and `admin` are left out: the first needs no backend surface of its own, and the second is
+ * release-gated and exercised by a person. Every other kind must carry at least one acceptance probe, because a
+ * criterion nothing can execute is reported UNDETERMINED -- and an UNDETERMINED criterion fails the functional
+ * gate. A contract with no probes is therefore a contract whose build cannot pass, and accepting one would mean
+ * queueing work that is guaranteed to stop at verification.
+ */
+const PROBEABLE: readonly OperationKind[] = ["data-read", "data-write", "form-submit", "search", "auth", "payment", "upload"];
+
+/** Kinds that put a row somewhere, and so need the storage to be declared rather than left to the builder. */
+const PERSISTING: readonly OperationKind[] = ["data-write", "form-submit", "payment", "upload"];
+
+export interface ContractVerdict {
+  ok: boolean;
+  /** Why it was refused. Every one of them, not the first: a draft is corrected against the whole list. */
+  problems: string[];
+  /** Recorded, not refused. */
+  warnings: string[];
+  /** Requirements the contract could not establish from the frontend. Flagged for a person; never invented. */
+  reviewFlags: MissingRequirement[];
+}
+
+/**
+ * THE INDEPENDENT VALIDATOR.
+ *
+ * A contract may now be drafted by Model A (Founder decision, 2026-11-07) instead of written by hand, which moves
+ * all of the weight onto this function: it is the only thing standing between "a model wrote down what it intends
+ * to be judged against" and "a build is held to it". So it runs HERE, on the platform, in the request that records
+ * the contract -- not in the runner that authored it, and not as a step the author can skip, soften or re-run with
+ * a friendlier threshold. It is deterministic: the same draft and the same measurement always give the same
+ * verdict, and no model is consulted.
+ *
+ * What it establishes, in the Founder's terms:
+ *
+ *   schema correctness, artifact SHA, design fingerprint   `validateManifest`, against this project's own
+ *                                                          approved baseline and artifact.
+ *   consistency with the measured frontend                  every operation points at a page and an element the
+ *                                                          measurement actually found. An operation on an
+ *                                                          invented element is work nobody can check.
+ *   operation coverage                                      every interaction the measurement says needs a
+ *                                                          backend is either claimed by an operation or named
+ *                                                          in `outOfScope`. Silence is not a decision.
+ *   technical feasibility                                   `completeness`: a payment with no approved provider,
+ *                                                          a login with no auth contract, a write to a table
+ *                                                          nobody modelled, a secret that does not exist.
+ *   verifiability                                           an HTTP-served operation carries a probe, and work
+ *                                                          that stores data declares where it is stored.
+ *
+ * A genuinely unknowable business requirement is NOT a refusal: it belongs in `missing`, comes back as a review
+ * flag, and is shown to a person. That is the difference between flagging a gap and inventing a fact.
+ */
+export function validateContractDraft(
+  raw: unknown,
+  measured: {
+    approvedPages: readonly string[];
+    interactions: readonly InteractionItem[];
+    designFingerprint: string;
+    artifactSha: string;
+  },
+): ContractVerdict & { manifest: (IntegrationManifest & ManifestContract) | null } {
+  const problems: string[] = [];
+  const warnings: string[] = [];
+
+  const m = (raw ?? {}) as Partial<IntegrationManifest>;
+  if (m.schema !== MANIFEST_SCHEMA) {
+    return {
+      ok: false, warnings, reviewFlags: [], manifest: null,
+      problems: [`a contract must declare schema "${MANIFEST_SCHEMA}" (this one says ${JSON.stringify(m.schema ?? null)}). A master specification is not an integration contract.`],
+    };
+  }
+
+  const checked = validateManifest(m as IntegrationManifest, {
+    approvedPages: measured.approvedPages,
+    designFingerprint: measured.designFingerprint,
+    artifactSha: measured.artifactSha,
+  });
+  for (const p of checked.problems) {
+    (p.severity === "reject" ? problems : warnings).push(`${p.code}: ${p.detail}`);
+  }
+  if (!checked.ok || !checked.manifest) {
+    return { ok: false, problems: problems.length ? problems : ["the contract did not validate against the approved design"], warnings, reviewFlags: [], manifest: null };
+  }
+  const manifest = checked.manifest as IntegrationManifest & ManifestContract;
+
+  // ── consistency with the measurement, and coverage of it ──
+  //
+  // `coverage` is given the inventory the import measured, so both halves are judged against the same facts the
+  // author was given: an operation on an element that is not there, and an element that needs a backend and that
+  // no operation claims.
+  const cov = coverage(manifest, measured.interactions);
+  for (const op of cov.unmatched) {
+    problems.push(`unmeasured-element: operation "${op.id}" is about "${op.element}" on page "${op.page}", and the measurement found no such interactive element there. An operation on something that is not in the approved frontend cannot be built or checked.`);
+  }
+  // An uncovered interaction may be declined, but it has to be declined BY NAME: the element identifier must
+  // appear in one of the `outOfScope` lines. A general apology does not say which button is staying dead.
+  //
+  // A GENERIC identifier -- a bare tag name like `form`, which is what the measurement falls back to for an
+  // element with no id or class -- has to name its page too. Otherwise any sentence containing the word "form"
+  // would read as a decision about a specific form, and on a site with four of them three could ship dead while
+  // the contract looked deliberate.
+  const declinedLines = manifest.outOfScope ?? [];
+  const named = (i: InteractionItem) => {
+    const generic = !/[#.:[\]]/.test(i.element);
+    return declinedLines.some((line) => line.includes(i.element) && (!generic || line.includes(i.page)));
+  };
+  for (const i of cov.uncovered) {
+    if (named(i)) {
+      warnings.push(`out-of-scope: "${i.element}" on "${i.page}" needs a backend and is deliberately not in the plan`);
+      continue;
+    }
+    problems.push(`uncovered-interaction: "${i.element}" on page "${i.page}" (${i.role}) needs a backend and no operation claims it. Either plan it, or name that exact element${/[#.:[\]]/.test(i.element) ? "" : ` and its page ("${i.page}")`} in outOfScope and say why it is being left.`);
+  }
+
+  // ── feasibility ──
+  const complete = completeness(manifest);
+  for (const b of complete.blockers) {
+    problems.push(`${b.code}${b.operationId ? ` [${b.operationId}]` : ""}: ${b.detail}`);
+  }
+
+  // ── verifiability ──
+  for (const op of manifest.operations) {
+    if (PROBEABLE.includes(op.kind) && !(op.acceptanceProbes ?? []).length) {
+      problems.push(`no-probe [${op.id}]: a ${op.kind} operation is served over HTTP, so at least one of its acceptance criteria must carry an acceptanceProbe naming a declared api path and the status it must get. Without one the criterion is reported UNDETERMINED, which fails the functional gate.`);
+    }
+  }
+  const persists = manifest.operations.some((op) => PERSISTING.includes(op.kind));
+  if (persists && !manifest.persistence?.technology) {
+    problems.push("no-persistence: this plan stores data and does not declare where. A build measured once stored its rows in a JSON file while the contract named a table, and every behavioural check still passed; declare persistence.technology, and whether it is `required` or `any`.");
+  }
+
+  // Declared endpoints must be distinct and look like paths: two operations probing the same path expecting
+  // different things is not a contract, it is a coin toss.
+  const paths = new Map<string, number>();
+  for (const a of manifest.apis ?? []) {
+    const key = `${String(a.method ?? "GET").toUpperCase()} ${String(a.path ?? "")}`;
+    paths.set(key, (paths.get(key) ?? 0) + 1);
+    if (!String(a.path ?? "").startsWith("/")) problems.push(`api-path: "${String(a.path)}" is not a path; it must begin with "/"`);
+  }
+  for (const [key, n] of paths) if (n > 1) problems.push(`duplicate-api: ${key} is declared ${n} times`);
+
+  const ok = problems.length === 0;
+  return { ok, problems, warnings, reviewFlags: complete.missing, manifest: ok ? manifest : null };
+}
+
+/** The measured design a contract is judged against, read off the baseline's own stored measurement. */
+function measurementOf(baseline: DesignBaselineRow, artifactSha: string): {
+  approvedPages: string[]; interactions: InteractionItem[]; designFingerprint: string; artifactSha: string;
+} {
+  const parse = <T>(s: unknown): T[] => {
+    try { const v = JSON.parse(String(s ?? "[]")); return Array.isArray(v) ? (v as T[]) : []; } catch { return []; }
+  };
+  const pages = parse<{ page?: unknown }>(baseline.signatures_json).map((x) => String(x.page ?? "")).filter(Boolean);
+  // The inventory as the import recorded it. `functional` means it already works without a backend, so it is not
+  // waiting for one -- the same reduction `inventoryOf` makes in the runner, applied to the stored rows.
+  const interactions = parse<{ page?: unknown; element?: unknown; role?: unknown; needsBackend?: unknown; functional?: unknown }>(baseline.interaction_inventory_json)
+    .map((i) => ({
+      page: String(i.page ?? ""), element: String(i.element ?? ""), role: String(i.role ?? ""),
+      needsBackend: !!i.needsBackend && !i.functional,
+    }))
+    .filter((i) => i.page && i.element);
+  return { approvedPages: [...new Set(pages)], interactions, designFingerprint: baseline.fingerprint, artifactSha };
 }
 
 /**
@@ -671,8 +843,20 @@ export async function recordContract(
   db: Db,
   projectId: string,
   raw: unknown,
-  o: { recordedBy: string; note?: string | null; ip?: string | null },
-): Promise<{ ok: true; contract: ContractRow } | { ok: false; problems: string[] }> {
+  o: {
+    /** The person recording it, or null when Model A drafted it. */
+    recordedBy: string | null;
+    /** Who wrote it. Provenance, kept on the row: a verification report's weight depends on it. */
+    authoredBy?: "staff" | "model-a";
+    /** The model tag that drafted it. A tag, never a prompt or a transcript. */
+    authorModel?: string | null;
+    note?: string | null;
+    ip?: string | null;
+  },
+): Promise<
+  | { ok: true; contract: ContractRow; warnings: string[]; reviewFlags: MissingRequirement[] }
+  | { ok: false; problems: string[]; warnings?: string[] }
+> {
   const baseline = await approvedBaseline(db, projectId);
   if (!baseline) {
     return { ok: false, problems: ["this project has no approved design yet, and a contract is written against one: approve the measured design first"] };
@@ -680,26 +864,16 @@ export async function recordContract(
   const artifact = await getArtifact(db, baseline.artifact_id);
   if (!artifact) return { ok: false, problems: ["the approved design's artifact is missing"] };
 
-  const m = (raw ?? {}) as Partial<IntegrationManifest>;
-  if (m.schema !== MANIFEST_SCHEMA) {
-    return { ok: false, problems: [`a contract must declare schema "${MANIFEST_SCHEMA}" (this one says ${JSON.stringify(m.schema ?? null)}). A master specification is not an integration contract.`] };
-  }
-
-  // Which pages the approved design actually has. The manifest may only speak about these.
-  let measuredPages: { page?: unknown }[] = [];
-  try { measuredPages = JSON.parse(String(baseline.signatures_json ?? "[]")) as { page?: unknown }[]; } catch { measuredPages = []; }
-  const approvedPages = [...new Set(measuredPages.map((x) => String(x.page ?? "")).filter(Boolean))];
-  const checked = validateManifest(m as IntegrationManifest, {
-    approvedPages,
-    designFingerprint: baseline.fingerprint,
-    artifactSha: artifact.sha256,
-  });
-  const problems = checked.problems.filter((p) => p.severity === "reject").map((p) => `${p.code}: ${p.detail}`);
+  // One gate, whoever is recording. A draft from Model A and a contract pasted by a person go through exactly the
+  // same deterministic validation against exactly the same measured design: a model cannot be given an easier
+  // check than a human, and a human cannot be given an easier one than a model.
+  const checked = validateContractDraft(raw, measurementOf(baseline, artifact.sha256));
   if (!checked.ok || !checked.manifest) {
-    return { ok: false, problems: problems.length ? problems : ["the contract did not validate against the approved design"] };
+    return { ok: false, problems: checked.problems, warnings: checked.warnings };
   }
 
   const at = nowIso();
+  const authoredBy = o.authoredBy ?? "staff";
   const prev = await activeContract(db, projectId);
   const next = ((await db.prepare(`SELECT COALESCE(MAX(version), 0) AS v FROM design_locked_contracts WHERE project_id = ?`)
     .bind(projectId).first<{ v: number }>())?.v ?? 0) + 1;
@@ -710,24 +884,57 @@ export async function recordContract(
   if (prev) await db.prepare(`UPDATE design_locked_contracts SET superseded_at = ? WHERE id = ?`).bind(at, prev.id).run();
   await db.prepare(
     `INSERT INTO design_locked_contracts (id, project_id, artifact_id, baseline_id, design_fingerprint, artifact_sha256,
-       version, manifest_json, operations, visual_states, recorded_by, note, created_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       version, manifest_json, operations, visual_states, recorded_by, note, created_at,
+       authored_by, author_model, review_flags_json)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).bind(id, projectId, baseline.artifact_id, baseline.id, baseline.fingerprint, artifact.sha256, next,
     JSON.stringify(manifest), manifest.operations.length, (manifest.visualStates ?? []).length,
-    o.recordedBy, o.note?.slice(0, 500) ?? null, at).run();
+    o.recordedBy, o.note?.slice(0, 500) ?? null, at,
+    authoredBy, authoredBy === "model-a" ? (o.authorModel ?? null) : null, JSON.stringify(checked.reviewFlags)).run();
 
   await audit(db, {
-    actorUserId: o.recordedBy, action: "design_locked_contract.recorded", subjectType: "project", subjectId: projectId,
+    actorUserId: o.recordedBy,
+    // A drafted contract is the AI's act, and the audit says so rather than attributing it to whoever happened to
+    // approve the design. `actorKind` is the only honest place for that distinction.
+    actorKind: authoredBy === "model-a" ? "ai" : o.recordedBy ? "user" : "system",
+    action: "design_locked_contract.recorded", subjectType: "project", subjectId: projectId,
     organizationId: artifact.organization_id,
     details: {
       version: next, supersedes: prev?.version ?? null, baselineId: baseline.id, baselineVersion: baseline.version,
       designFingerprint: baseline.fingerprint.slice(0, 12), artifactSha: artifact.sha256.slice(0, 12),
       operations: manifest.operations.length, visualStates: (manifest.visualStates ?? []).length,
-      warnings: checked.problems.filter((p) => p.severity !== "reject").map((p) => p.code),
+      authoredBy, authorModel: authoredBy === "model-a" ? (o.authorModel ?? null) : null,
+      warnings: checked.warnings.slice(0, 20),
+      reviewFlags: checked.reviewFlags.map((f) => f.what).slice(0, 20),
     },
     ip: o.ip ?? null,
   });
-  return { ok: true, contract: (await activeContract(db, projectId))! };
+  return { ok: true, contract: (await activeContract(db, projectId))!, warnings: checked.warnings, reviewFlags: checked.reviewFlags };
+}
+
+/**
+ * A drafted contract the validator refused, written to the audit log.
+ *
+ * Without this, a refusal is a sentence in a runner log on a machine in a cupboard, and the project simply sits
+ * there with an approved design and no build. The attempt is evidence: it says the authoring ran, what the
+ * validator objected to, and how many tries were spent -- which is also how anyone can tell a bounded correction
+ * loop from a runner quietly grinding against the same objection for ever.
+ */
+export async function recordContractRefusal(
+  db: Db,
+  projectId: string,
+  o: { problems: readonly string[]; attempt: number; attemptsAllowed: number; authorModel?: string | null },
+): Promise<void> {
+  const org = await db.prepare(`SELECT organization_id FROM projects WHERE id = ?`).bind(projectId)
+    .first<{ organization_id: string }>();
+  await audit(db, {
+    actorKind: "ai", action: "design_locked_contract.refused", subjectType: "project", subjectId: projectId,
+    organizationId: org?.organization_id ?? null,
+    details: {
+      attempt: o.attempt, attemptsAllowed: o.attemptsAllowed, authorModel: o.authorModel ?? null,
+      problems: o.problems.slice(0, 20).map((p) => p.slice(0, 300)),
+    },
+  });
 }
 
 export async function listBaselines(db: Db, projectId: string): Promise<DesignBaselineRow[]> {

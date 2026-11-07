@@ -26,6 +26,8 @@ import { createWorkspace } from "../workspace.ts";
 import { importFrontend } from "./workflow.ts";
 import { ControlPlaneError } from "../control-plane.ts";
 import { createHash } from "node:crypto";
+import { CONTRACT_ATTEMPTS, draftAndSubmitContract, type ContractAuthor } from "./contract-author.ts";
+import type { ImportInteraction, ImportRoute } from "./import.ts";
 
 export interface ImportWorkerDeps {
   client: ControlPlaneClient;
@@ -38,6 +40,17 @@ export interface ImportWorkerDeps {
   /** Where the import's workspace is created. One per claim, named after the artifact. */
   workRoot: string;
   runnerId: string;
+  /**
+   * Drafts the integration contract for the design this import measured, in a fresh Model A session with
+   * read-only tools over the unpacked artifact.
+   *
+   * Null when this runner cannot plan -- no local model, or the paid adapter, whose model is not ours. The import
+   * then does exactly what it did before: it reports the measured design and leaves the contract to a person.
+   * Taking `repo` rather than closing over one keeps the session pointed at THIS claim's workspace.
+   */
+  contractAuthor?: ((repo: string) => ContractAuthor) | null;
+  /** The model tag that drafts it, recorded on the contract as provenance. A tag, never a prompt. */
+  authorModel?: string | null;
 }
 
 /**
@@ -68,6 +81,83 @@ function refusalReason(e: ControlPlaneError): string {
     if (typeof j.error === "string" && j.error.trim()) return j.error.slice(0, 300);
   } catch { /* not JSON */ }
   return (e.body || e.message).slice(0, 300);
+}
+
+/**
+ * Draft the integration contract for a design the platform has just approved, and submit it.
+ *
+ * Separate from `serve()` because it is a separate job with its own failure modes, none of which may reach the
+ * import's own outcome: by the time this runs the measured design is recorded and approved, and nothing here is
+ * allowed to turn that into a rejection. Every exit is a log line and a return.
+ */
+async function authorTheContract(
+  d: ImportWorkerDeps,
+  m: {
+    projectId: string;
+    artifactSha: string;
+    designFingerprint: string;
+    /** The platform's own answer: a build is waiting for a contract. */
+    awaiting: boolean;
+    repo: string;
+    routes: readonly ImportRoute[];
+    interactions: readonly ImportInteraction[];
+  },
+  log: (msg: string, extra?: Record<string, unknown>) => void,
+): Promise<void> {
+  // Not waiting for one: either this platform predates the contract channel, or a contract for this exact design
+  // is already recorded. Both mean there is nothing to draft.
+  if (!m.awaiting) return;
+  if (!d.contractAuthor) {
+    log("the platform is waiting for an integration contract and this runner cannot draft one (no local planning model); leaving it for a person");
+    return;
+  }
+  if (!m.routes.length) {
+    log("no measured pages came back with the import, so there is nothing to write a contract about");
+    return;
+  }
+
+  const author = d.contractAuthor(m.repo);
+  try {
+    const result = await draftAndSubmitContract({
+      author,
+      input: {
+        projectId: m.projectId, artifactSha: m.artifactSha, designFingerprint: m.designFingerprint,
+        routes: m.routes, interactions: m.interactions,
+      },
+      attempts: CONTRACT_ATTEMPTS,
+      onAttempt: (r) => d.logger.warn("the platform's validator refused the drafted contract; correcting it", {
+        projectId: m.projectId, attempt: r.attempt, of: CONTRACT_ATTEMPTS, problems: r.problems.slice(0, 5),
+      }),
+      submit: async (r) => {
+        const answer = await d.client.submitFrontendContract({
+          projectId: m.projectId, manifest: r.manifest, attempt: r.attempt, attemptsAllowed: r.attemptsAllowed,
+          authorModel: d.authorModel ?? null,
+        });
+        // A platform with no contract channel is not a refusal of the draft. Reported as recorded:false with no
+        // problems, which stops the loop rather than redrafting against nothing.
+        return answer ?? { recorded: false, problems: [] };
+      },
+    });
+
+    if (result.recorded) {
+      log("integration contract drafted and accepted", {
+        projectId: m.projectId, attempts: result.attempts, version: result.submission?.version ?? null,
+        queued: result.submission?.queued ?? null,
+        queueRefusal: result.submission?.queueRefusal ?? null,
+        reviewFlags: (result.submission?.reviewFlags ?? []).map((f) => f.what).slice(0, 5),
+      });
+      return;
+    }
+    d.logger.warn("no integration contract could be drafted that the platform would accept; the design stays approved and the project waits for a person", {
+      projectId: m.projectId, attempts: result.attempts, problems: result.problems.slice(0, 5),
+    });
+  } catch (err) {
+    // Authoring is the only thing that failed. The import's outcome is already recorded, so this is a warning and
+    // nothing else; the project waits for a contract exactly as it does when a draft is refused.
+    d.logger.warn("the integration contract could not be drafted", {
+      projectId: m.projectId, error: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300),
+    });
+  }
 }
 
 export function importWorker(d: ImportWorkerDeps): { serve(): Promise<ImportOutcomeKind> } {
@@ -155,8 +245,9 @@ export function importWorker(d: ImportWorkerDeps): { serve(): Promise<ImportOutc
           return "done";
         }
 
+        let reported: Awaited<ReturnType<typeof d.client.reportFrontendImport>> = null;
         try {
-          await d.client.reportFrontendImport({
+          reported = await d.client.reportFrontendImport({
             artifactId: claim.artifactId,
             status: "imported",
             framework: outcome.ingest?.framework ?? null,
@@ -203,6 +294,27 @@ export function importWorker(d: ImportWorkerDeps): { serve(): Promise<ImportOutc
           pages: outcome.report?.routes.length ?? 0,
           framework: outcome.ingest?.framework ?? null,
         });
+
+        // The contract. The platform has recorded and approved the measured design and told us whether a build
+        // can be queued yet: `awaitingContract` means it cannot, because a design-locked build is judged against
+        // an integration contract and stops at once without one.
+        //
+        // So the draft is written here, in this claim, while the measurement and the unpacked artifact are both
+        // still in hand -- the two things the draft has to be written from. Everything that decides whether it is
+        // ACCEPTED happens on the platform: this sends a draft and reads the verdict.
+        //
+        // A failure to produce an accepted contract is not the artifact's verdict. The design is measured and
+        // approved either way; what is missing is the plan, and the project waits visibly with the validator's
+        // reasons in the audit log rather than being rejected or retried for ever.
+        await authorTheContract(d, {
+          projectId: reported?.projectId ?? claim.projectId,
+          artifactSha: claim.sha256,
+          designFingerprint: reported?.designFingerprint ?? outcome.baseline.fingerprint,
+          awaiting: reported?.awaitingContract === true,
+          repo: ws.repo,
+          routes: outcome.report?.routes ?? [],
+          interactions: outcome.report?.interactions ?? [],
+        }, log);
         return "done";
       } catch (err) {
         // An infrastructure fault says nothing about the artifact, so it is NOT reported as the artifact's

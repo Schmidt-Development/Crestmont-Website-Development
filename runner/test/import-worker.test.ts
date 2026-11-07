@@ -17,6 +17,7 @@ import { createWorkspace } from "../src/workspace.ts";
 import { ControlPlaneError } from "../src/control-plane.ts";
 import type { ImportOutcome } from "../src/frontend/workflow.ts";
 import type { FrontendImportClaim } from "../src/protocol.ts";
+import type { ContractAuthoringInput } from "../src/frontend/contract-author.ts";
 
 const silent = {
   debug() {}, info() {}, warn() {}, error() {},
@@ -332,4 +333,96 @@ test("[IMP-06] an artifact the platform stops offering is left alone", async () 
   assert.equal(await w.serve(), "done");
   assert.equal(opened, false);
   assert.deepEqual(f.reports, [], "no verdict is written over the platform's own");
+});
+
+test("[IMP-13] the import drafts a contract when the platform says it is waiting for one, and otherwise does not", async () => {
+  // The platform no longer queues a backend build on approval alone: a design-locked build judged against nothing
+  // stops thirteen seconds after it starts, which is what six Founder artifacts each produced. It approves the
+  // design, says `awaitingContract`, and the draft is written here -- in this claim, while the measurement and the
+  // unpacked artifact are both still in hand.
+  const measured = outcome({
+    ok: true,
+    baseline: { fingerprint: "c".repeat(64), signatures: [], renders: [] } as never,
+    report: {
+      routes: [{ page: "index", file: "index.html", title: "Home" }],
+      interactions: [{ page: "index", element: "form#quote", role: "form", needsBackend: true, functional: false }],
+      states: [], renders: [{ page: "index", viewport: "desktop" }],
+    } as never,
+  });
+
+  for (const [label, answer, expectDrafts] of [
+    ["waiting for a contract", { awaitingContract: true, projectId: "prj_9", designFingerprint: "c".repeat(64) }, 1],
+    ["not waiting", { awaitingContract: false, queued: "bld_1" }, 0],
+    ["an older platform that says nothing", null, 0],
+  ] as const) {
+    const drafted: ContractAuthoringInput[] = [];
+    const submissions: unknown[] = [];
+    const client = {
+      async claimFrontendImport() { return claim(); },
+      async frontendImportBytes() { return { artifactId: "fa_1", sha256: SHA, filename: "frontend.zip", base64: BYTES.toString("base64") }; },
+      async reportFrontendImport() { return answer; },
+      async submitFrontendContract(r: unknown) { submissions.push(r); return { recorded: true, version: 1, queued: "bld_2" }; },
+    } as unknown as Parameters<typeof importWorker>[0]["client"];
+
+    const w = importWorker({
+      client, cfg, logger: silent, workRoot: cfg.workspacesRoot, runnerId: "r",
+      executor: (async () => ({ code: 0, stdout: "", stderr: "", timedOut: false, notFound: false })) as never,
+      importer: (async () => measured) as never,
+      contractAuthor: () => async (i) => { drafted.push(i); return { operations: [] }; },
+      authorModel: "qwen-test:32b",
+    });
+
+    assert.equal(await w.serve(), "done", label);
+    assert.equal(drafted.length, expectDrafts, `${label}: ${drafted.length} draft(s)`);
+    assert.equal(submissions.length, expectDrafts, `${label}: ${submissions.length} submission(s)`);
+    if (expectDrafts) {
+      // The draft is written against the project and the design the platform named, and about what was measured.
+      assert.equal(drafted[0].projectId, "prj_9", "the platform's own answer decides which project, not the claim");
+      assert.equal(drafted[0].designFingerprint, "c".repeat(64));
+      assert.equal(drafted[0].artifactSha, SHA);
+      assert.equal(drafted[0].interactions.length, 1);
+      const sent = submissions[0] as { authorModel: string; attemptsAllowed: number; manifest: { artifactSha: string } };
+      assert.equal(sent.authorModel, "qwen-test:32b", "provenance travels with the draft");
+      assert.equal(sent.manifest.artifactSha, SHA, "and the two hashes are stamped on before it is sent");
+      assert.ok(sent.attemptsAllowed >= 1, "the bound is declared to the platform, so a refusal can be counted");
+    }
+  }
+});
+
+test("[IMP-14] a contract that cannot be drafted does not undo the import", async () => {
+  // By the time authoring runs, the measured design is recorded and APPROVED. Nothing about a failed draft may
+  // turn that into a rejection: the design is good, the plan is missing, and those are different verdicts about
+  // different things. The project waits visibly for a contract instead.
+  const measured = outcome({
+    ok: true,
+    baseline: { fingerprint: "c".repeat(64), signatures: [], renders: [] } as never,
+    report: {
+      routes: [{ page: "index", file: "index.html", title: "Home" }],
+      interactions: [], states: [], renders: [],
+    } as never,
+  });
+
+  for (const [label, author] of [
+    ["the session threw", () => async () => { throw new Error("the model server is not answering"); }],
+    ["every draft was refused", () => async () => ({ operations: [] })],
+  ] as const) {
+    const reports: { status: string }[] = [];
+    const client = {
+      async claimFrontendImport() { return claim(); },
+      async frontendImportBytes() { return { artifactId: "fa_1", sha256: SHA, filename: "frontend.zip", base64: BYTES.toString("base64") }; },
+      async reportFrontendImport(r: { status: string }) { reports.push(r); return { awaitingContract: true, projectId: "prj_9", designFingerprint: "c".repeat(64) }; },
+      async submitFrontendContract() { return { recorded: false, problems: ["uncovered-interaction: something"] }; },
+    } as unknown as Parameters<typeof importWorker>[0]["client"];
+
+    const w = importWorker({
+      client, cfg, logger: silent, workRoot: cfg.workspacesRoot, runnerId: "r",
+      executor: (async () => ({ code: 0, stdout: "", stderr: "", timedOut: false, notFound: false })) as never,
+      importer: (async () => measured) as never,
+      contractAuthor: author as never,
+    });
+
+    assert.equal(await w.serve(), "done", label);
+    assert.equal(reports.length, 1, `${label}: the import reported exactly once`);
+    assert.equal(reports[0].status, "imported", `${label}: and it still reported the design as measured`);
+  }
 });

@@ -360,6 +360,77 @@ export function coverage(m: IntegrationManifest, inventory: readonly Interaction
   };
 }
 
+/**
+ * The contract minus the operations whose essential facts are not known.
+ *
+ * A recorded gap (`missing`) is correct work: the Founder's instruction is that a business requirement which
+ * genuinely cannot be established from the frontend is FLAGGED, specifically, rather than invented. But flagging
+ * it and then handing the operation to the builder anyway is the same as inventing it one step later -- the model
+ * is asked to make a checkout work and told nothing about the provider or the price, and something plausible
+ * comes out. That is the defect that reaches a customer.
+ *
+ * So an operation named in any `missing[].blocks` is removed from the manifest the BUILD uses -- WHEN the gap is
+ * one that actually makes building it dishonest. It is then not implemented, not prompted for, not judged by the
+ * three gates, and not counted as covered. It stays in the recorded contract, where the gap is also recorded, so
+ * what was deferred and why is on the project's record rather than quietly absent.
+ *
+ * That qualification is the whole subtlety, and it was measured rather than guessed. Asked to draft a contract
+ * for a three-page haul site, Model A produced a correct plan for its one quote form and recorded two open
+ * questions against it: where email notifications should go, and how long a request should be kept. Both named
+ * the operation in `blocks`. Neither prevents storing a quote request honestly -- the plan sends no email and the
+ * contract's own data model says what is stored -- so deferring on the model's say-so would have turned a good
+ * contract into a build with nothing to do.
+ *
+ * `completeness` already knows which gaps are fatal: run it with the recorded gaps REMOVED, and the operations it
+ * objects to are exactly the ones whose essential facts are absent. An operation is deferred only if it is both
+ * named in `blocks` and one of those. The rest of the plan is built, and the remaining questions stay as review
+ * flags for a person. One open preference does not stop the work; one unknown price does.
+ */
+export function withoutBlocked(m: IntegrationManifest & ManifestContract): {
+  manifest: IntegrationManifest & ManifestContract;
+  deferred: { id: string; why: string }[];
+  /** Recorded gaps that block nothing essential: still questions for a person, not reasons to stop. */
+  openQuestions: MissingRequirement[];
+} {
+  const claimed = new Map<string, string>();
+  for (const gap of m.missing ?? []) {
+    for (const id of gap.blocks ?? []) {
+      if (!claimed.has(id)) claimed.set(id, `${gap.what}: ${gap.why}`);
+    }
+  }
+  // Which operations cannot be carried out honestly with what the contract declares, judged WITHOUT the recorded
+  // gaps -- otherwise a gap would be its own justification for stopping.
+  const essential = new Set(
+    completeness({ ...m, missing: [] }).blockers
+      .map((b) => b.operationId)
+      .filter((x): x is string => !!x),
+  );
+  const blocked = new Map([...claimed].filter(([id]) => essential.has(id)));
+  const openQuestions = (m.missing ?? []).filter((gap) => !(gap.blocks ?? []).some((id) => blocked.has(id)));
+  if (!blocked.size) return { manifest: m, deferred: [], openQuestions };
+
+  const kept = m.operations.filter((op) => !blocked.has(op.id));
+  const deferred = m.operations.filter((op) => blocked.has(op.id)).map((op) => ({ id: op.id, why: blocked.get(op.id)! }));
+  return {
+    manifest: {
+      ...m,
+      operations: kept.map((op) => ({
+        ...op,
+        // A dependency on a deferred operation cannot be satisfied, and leaving it would make the execution order
+        // depend on something that is not in the plan.
+        dependsOn: (op.dependsOn ?? []).filter((d) => !blocked.has(d)),
+      })),
+      // Said in the manifest itself, so the implementation prompt carries the reason rather than a silence.
+      outOfScope: [
+        ...(m.outOfScope ?? []),
+        ...deferred.map((x) => `${x.id} is deferred: ${x.why}. Do not implement it and do not invent what is missing.`),
+      ],
+    },
+    deferred,
+    openQuestions,
+  };
+}
+
 /** Operations that must not go live without a person releasing them. */
 export function requiresRelease(m: IntegrationManifest): IntegrationOperation[] {
   return m.operations.filter((o) => RELEASE_GATED.includes(o.kind));

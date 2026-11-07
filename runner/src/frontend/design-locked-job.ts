@@ -34,7 +34,7 @@ import { checkConformance, describeConformance, repairBrief } from "./conformanc
 import type { ConformanceReport } from "./conformance.ts";
 import { integrationMemory, integrationPrompt, readIntegrationOutcome } from "./integrate.ts";
 import { acceptancePlan, coverageChecks, readAcceptanceOutput, summarise, writeAcceptanceDriver, writeAcceptanceResults, DRIVER } from "./acceptance.ts";
-import { completeness, validateManifest } from "./integration-manifest.ts";
+import { completeness, validateManifest, withoutBlocked } from "./integration-manifest.ts";
 import type { IntegrationManifest, ManifestContract } from "./integration-manifest.ts";
 
 /** How many repair cycles a build may spend. Each one must make measurable progress to earn the next. */
@@ -224,13 +224,13 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
   note(describeImport(report).split("\n")[0]);
 
   // ── 5. the contract ───────────────────────────────────────────────────────────────────────────────────────
-  const manifest = d.manifest ?? null;
-  if (!manifest) {
+  const contract = d.manifest ?? null;
+  if (!contract) {
     out.failedAt = "manifest";
     problems.push("this project has no integration manifest, so there is no contract to build against and nothing to verify an implementation with");
     return finish(out);
   }
-  const checked = validateManifest(manifest, {
+  const checked = validateManifest(contract, {
     approvedPages: [...new Set(report.signatures.map((s) => s.page))],
     artifactSha: artifact.sha256,
   });
@@ -239,8 +239,28 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
     problems.push(...checked.problems.filter((p) => p.severity === "reject").map((p) => `${p.code}: ${p.detail}`));
     return finish(out);
   }
-  const gaps = completeness(manifest);
+  const gaps = completeness(contract);
   for (const b of gaps.blockers) problems.push(`contract blocker ${b.code}: ${b.detail}`);
+
+  // An operation whose essential facts the contract records as UNKNOWN is not built. Flagging a gap and then
+  // asking the builder to implement the operation anyway is inventing the fact one step later: a checkout with no
+  // provider and no price becomes a plausible checkout. It is deferred instead -- out of the prompt, out of the
+  // three gates, and on the record with the reason.
+  const { manifest, deferred, openQuestions } = withoutBlocked(contract);
+  for (const x of deferred) {
+    problems.push(`deferred ${x.id}: not built, because the contract records this as not established — ${x.why}`);
+    note(`${x.id} is deferred: ${x.why}`);
+  }
+  // A recorded question that prevents nothing is still a question. Said out loud rather than dropped, because a
+  // build record that mentions neither the gap nor the work implies the contract settled everything.
+  for (const q of openQuestions) {
+    note(`open question, which does not stop this work: ${q.what} — ${q.why}`);
+  }
+  if (!manifest.operations.length) {
+    out.failedAt = "manifest";
+    problems.push("every operation in this contract is blocked by a requirement the contract records as not established, so there is nothing that can be built honestly yet");
+    return finish(out);
+  }
 
   const approvedPackage = existsSync(path.join(d.ws.repo, "package.json"))
     ? JSON.parse(readFileSync(path.join(d.ws.repo, "package.json"), "utf8")) as Record<string, unknown>

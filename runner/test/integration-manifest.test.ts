@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   MANIFEST_SCHEMA, coverage, declaredChanges, describeManifest, describeManifestProblems,
-  executionOrder, requiresRelease, validateManifest,
+  executionOrder, requiresRelease, validateManifest, withoutBlocked,
 } from "../src/frontend/integration-manifest.ts";
 import type { IntegrationManifest, IntegrationOperation, InteractionItem } from "../src/frontend/integration-manifest.ts";
 import { captureBaseline, compareToBaseline, describeDrift } from "../src/frontend/design-lock.ts";
@@ -277,4 +277,83 @@ test("[IM-011] a declared visual state must name an approved page and a role, on
 
   const emptyMask = valid(manifest([op()], { visualStates: [{ page: "quote", session: "staff", mask: ["  "] }] } as never));
   assert.ok(codes(emptyMask.problems).includes("visual-state-mask"), codes(emptyMask.problems).join(","));
+});
+
+test("[IM-012] an operation whose essential facts are unknown is deferred, not handed to the builder", () => {
+  // A recorded gap is correct work: a requirement that genuinely cannot be established from the frontend is
+  // flagged rather than invented. Handing the operation to the builder anyway invents it one step later -- asked
+  // to make a checkout work and told nothing about the provider or the price, something plausible comes out.
+  const quote = op();
+  const deposit = op({ id: "take-deposit", kind: "payment", page: "quote", element: "form#deposit" });
+  const thanks = op({ id: "show-receipt", page: "contact", element: "section#receipt", dependsOn: ["take-deposit", "op-quote-form"] });
+  const full = {
+    ...manifest([quote, deposit, thanks]),
+    outOfScope: ["the newsletter box is not in this contract"],
+    missing: [{
+      what: "the payment provider and the deposit amount",
+      why: "the frontend quotes no price and names no provider, and neither may be invented",
+      blocks: ["take-deposit"],
+    }],
+  };
+
+  const { manifest: build, deferred } = withoutBlocked(full);
+  assert.deepEqual(deferred.map((d) => d.id), ["take-deposit"]);
+  assert.match(deferred[0].why, /payment provider/);
+  assert.deepEqual(build.operations.map((o) => o.id), ["op-quote-form", "show-receipt"], "one open question does not stop the answerable work");
+
+  // A dependency on something that is not being built cannot be satisfied, and leaving it would make the
+  // execution order depend on an operation that is not in the plan.
+  assert.deepEqual(build.operations.find((o) => o.id === "show-receipt")!.dependsOn, ["op-quote-form"]);
+  assert.ok(executionOrder(build), "and the reduced plan still has an order");
+
+  // Said in the manifest, so the implementation prompt carries the reason rather than a silence.
+  assert.equal(build.outOfScope?.length, 2);
+  assert.match(build.outOfScope!.join(" "), /take-deposit is deferred/);
+  assert.match(build.outOfScope!.join(" "), /do not invent what is missing/i);
+
+  // The deferred operation is not counted as covered either: it was never built, so claiming its interaction
+  // would be the dead button the coverage check exists to find.
+  const inventory: InteractionItem[] = [
+    { page: "quote", element: "form#quote-request", role: "form", needsBackend: true },
+    { page: "quote", element: "form#deposit", role: "form", needsBackend: true },
+  ];
+  assert.equal(coverage(build, inventory).uncovered.length, 1);
+  assert.equal(coverage(build, inventory).uncovered[0].element, "form#deposit");
+
+  // A contract with nothing recorded as missing is handed through untouched -- the same object, not a copy.
+  const plain = manifest([quote]);
+  assert.equal(withoutBlocked(plain).manifest, plain);
+  assert.deepEqual(withoutBlocked(plain).deferred, []);
+});
+
+test("[IM-013] a question that prevents nothing does not stop the work it was recorded against", () => {
+  // Measured, not supposed: asked to draft a contract for a three-page haul site, Model A produced a correct plan
+  // for its one quote form and recorded two open questions against it -- where email notifications should go, and
+  // how long a request should be kept -- naming the operation in `blocks` for both. Neither prevents storing a
+  // quote request honestly. Deferring on the model's say-so would have turned a good contract into a build with
+  // nothing to do, which is a worse outcome than either question.
+  const full = {
+    ...manifest([op()]),
+    dataModels: [{ table: "quote_requests", fields: ["name", "phone", "postcode", "load_size"] }],
+    missing: [
+      { what: "where quote notifications should be emailed", why: "the frontend names no recipient", blocks: ["op-quote-form"] },
+      { what: "how long a quote request is kept", why: "no retention rule is stated anywhere", blocks: ["op-quote-form"] },
+    ],
+  };
+
+  const r = withoutBlocked(full);
+  assert.deepEqual(r.deferred, [], "nothing essential is missing, so nothing is deferred");
+  assert.deepEqual(r.manifest.operations.map((o) => o.id), ["op-quote-form"], "the work is built");
+  assert.equal(r.openQuestions.length, 2, "and both questions are still questions, for a person");
+  assert.equal(r.manifest.outOfScope, undefined, "nothing is declared out of scope on the strength of a preference");
+
+  // The same shape of claim about something that genuinely cannot be built is still honoured: a payment with no
+  // approved provider is what completeness objects to, so that one IS deferred.
+  const paid = {
+    ...manifest([op({ id: "take-deposit", kind: "payment" })]),
+    dataModels: full.dataModels,
+    missing: [{ what: "the payment provider and the deposit amount", why: "neither is anywhere in the frontend", blocks: ["take-deposit"] }],
+  };
+  assert.deepEqual(withoutBlocked(paid).deferred.map((d) => d.id), ["take-deposit"]);
+  assert.deepEqual(withoutBlocked(paid).openQuestions, [], "a gap that did stop something is not also listed as harmless");
 });

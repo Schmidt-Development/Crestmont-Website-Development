@@ -36,6 +36,8 @@ import { meteredVariables } from "./orchestrator/cost-guard.ts";
 import { rmSync } from "node:fs";
 import path from "node:path";
 import { importWorker } from "./frontend/import-worker.ts";
+import type { ContractAuthor } from "./frontend/contract-author.ts";
+import { LocalModelAdvisor } from "./orchestrator/advisors.ts";
 import { fileURLToPath } from "node:url";
 
 export interface LoopDeps {
@@ -295,6 +297,46 @@ function dockerEnvForReaper(): Record<string, string> {
   return env;
 }
 
+/**
+ * A Model A session that drafts the integration contract for one imported frontend.
+ *
+ * Built per claim and pointed at that claim's workspace, so the session's read-only tools read the artifact that
+ * was just measured and nothing else. One OpenAI-compatible client is shared, as everywhere else here, and the
+ * call goes through the same inference scheduler as every other Model A session: drafting a contract takes a turn
+ * on the one GPU lane, it does not open a second one.
+ */
+function contractAuthorFor(
+  cfg: RunnerConfig,
+  scheduler: InferenceScheduler | null,
+  logger: Logger,
+): (repo: string) => ContractAuthor {
+  const client = new OpenAICompatClient({
+    baseUrl: cfg.local.baseUrl, apiKey: cfg.local.apiKey, timeoutMs: cfg.local.requestTimeoutMs, retries: 0,
+  });
+  // In single-model mode the one model plays both parts, exactly as the build path resolves it.
+  const model = cfg.models.mode === "dual"
+    ? cfg.models.a
+    : { ...cfg.models.b, tag: cfg.local.model, contextTokens: cfg.local.contextTokens };
+  return (repo: string) => async (input) => {
+    const advisor = new LocalModelAdvisor({
+      client, scheduler, projectId: input.projectId, model, repo,
+      maxTurns: cfg.advisor.maxTurns, maxOutputTokens: cfg.local.maxOutputTokensPerCall,
+      temperature: cfg.local.temperature,
+    });
+    const answer = await advisor.contract(input);
+    // The session's own record, so a refused or failed draft can be diagnosed from the runner log rather than
+    // guessed at. Counts and reasons; never the prompt and never the answer.
+    const s = advisor.lastSession;
+    if (s) {
+      logger.info("contract draft session", {
+        projectId: input.projectId, model: s.model, turns: s.turns, modelCalls: s.modelCalls,
+        jsonFailures: s.jsonFailures, outcome: s.outcome, detail: s.detail,
+      });
+    }
+    return answer;
+  };
+}
+
 export async function runImports(d: LoopDeps): Promise<number> {
   if (!d.imports) return 0;
   const sleep = d.sleep ?? interruptibleSleep;
@@ -452,6 +494,13 @@ async function main(argv: string[]): Promise<number> {
     // Importing needs the sandbox: the archive is installed, built and measured inside it, never on this machine.
     imports: importWorker({
       client, cfg, logger, runnerId: cfg.runnerId, workRoot: cfg.workspacesRoot,
+      // Model A also drafts the integration contract for what it measured (Founder decision, 2026-11-07). The
+      // session is built per claim, pointed at that claim's own workspace, so the draft is written from the real
+      // markup rather than from an element identifier. Only for the local provider: the paid adapter's model is
+      // not ours, and a runner without a planning model reports the measured design and leaves the contract --
+      // which is exactly what this lane did before.
+      contractAuthor: cfg.agentProvider === "local" ? contractAuthorFor(cfg, scheduler, logger) : null,
+      authorModel: cfg.agentProvider === "local" ? (cfg.models.mode === "dual" ? cfg.models.a.tag : cfg.local.model) : null,
     }),
     // The local provider (and local drafts) need the model server; the paid adapter's model is not ours to probe.
     modelProbe: cfg.agentProvider === "local" ? { check: localModelProbe(cfg), intervalMs: 300_000 } : null,

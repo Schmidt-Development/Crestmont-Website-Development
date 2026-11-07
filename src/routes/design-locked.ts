@@ -15,7 +15,7 @@ import { staffPage } from "./crm.ts";
 import { UploadError, storeUpload } from "../services/files.ts";
 import { UPLOAD_LIMIT_BYTES } from "../adapters/storage.ts";
 import * as DL from "../services/design-locked.ts";
-import { syncProjectBuild, getBuildSettings, projectFacts, decideEligibility, queueSnapshot } from "../services/builds.ts";
+import { syncProjectBuild, getBuildSettings, projectFacts, decideEligibility, queueSnapshot, startBackendBuild } from "../services/builds.ts";
 import { audit } from "../services/security.ts";
 import { alert, badge, button, csrf, emptyState, kpi, pageHead, table, linkButton } from "../ui/components.ts";
 
@@ -299,6 +299,10 @@ ${rows.length === 0 ? emptyState("Nothing yet", "No project is on the design-loc
     const approvedFingerprint = approvedBaselineRow?.fingerprint ?? "—";
     const approvedArtifactSha = artifacts.find((a) => a.id === approvedBaselineRow?.artifact_id)?.sha256 ?? "—";
 
+    // What the contract could not establish from the frontend. Shown, because a flagged requirement that nobody
+    // reads is the same as an invented one: the work stops in the same place and nobody knows why.
+    const reviewFlags = contract ? safeArr(contract.review_flags_json) : [];
+
     const problemsOf = (a: DL.FrontendArtifact): SafeHtml => {
       let list: { severity?: string; code?: string; detail?: string; path?: string }[] = [];
       try { list = JSON.parse(a.problems_json); } catch { list = []; }
@@ -420,7 +424,8 @@ ${measured ? html`<section class="card">
     What the backend will do, written down before it starts: which operations, against which pages and elements of
     the approved design, and how each is to be accepted. A build is judged against this &mdash; the first of the
     three gates is conformance to it &mdash; so a build cannot start without one, and the model that does the work
-    never writes it.
+    never writes it. Model A drafts it from the measured frontend when an artifact is imported; the platform
+    validates every draft against that measurement before recording it, and you can replace it below.
   </p>
 
   ${contract
@@ -430,10 +435,18 @@ ${measured ? html`<section class="card">
         ${String(contract.visual_states)} declared visual state${contract.visual_states === 1 ? "" : "s"}
         &middot; recorded ${formatDateTime(contract.created_at)}
         &middot; against design <code class="faint">${contract.design_fingerprint.slice(0, 12)}&hellip;</code>
+        &middot; ${contract.authored_by === "model-a"
+          ? html`drafted by Model A${contract.author_model ? html` (<code class="faint">${contract.author_model}</code>)` : ""}`
+          : "written by hand"}
       </p>
       ${contract.note ? html`<p class="faint">${contract.note}</p>` : ""}
+      ${reviewFlags.length
+        ? alert("warn", html`This contract records ${String(reviewFlags.length)} requirement${reviewFlags.length === 1 ? "" : "s"} that could not be established from the frontend. ${""}
+            They were flagged rather than invented, and the operations they block cannot be finished until someone settles them:
+            <ul>${join(reviewFlags.map((f) => html`<li><strong>${String(f.what ?? "")}</strong> &mdash; ${String(f.why ?? "")}${Array.isArray(f.blocks) && f.blocks.length ? html` (blocks ${f.blocks.map(String).join(", ")})` : ""}</li>`))}</ul>`)
+        : ""}
       <details><summary>The contract as recorded</summary><pre style="white-space:pre-wrap;max-height:24rem;overflow:auto">${JSON.stringify(JSON.parse(contract.manifest_json), null, 2)}</pre></details>`
-    : alert("warn", html`No contract has been recorded for this project, so a backend build will stop as soon as it starts: <strong>there is nothing for it to build against and nothing to verify an implementation with</strong>. Record one below.`)}
+    : alert("warn", html`No contract has been recorded for this project, so a backend build will stop as soon as it starts: <strong>there is nothing for it to build against and nothing to verify an implementation with</strong>. One is drafted automatically when an artifact is imported and measured; if none appeared, the drafts were refused by the validator and the reasons are in the audit log. Record one below.`)}
 
   ${!state.designLocked
     ? html`<p class="faint">A contract is written against an approved design, so approve one first.</p>`
@@ -469,7 +482,7 @@ ${measured ? html`<section class="card">
   <p class="faint">The AI builds the backend behind the approved design and never the design itself. Three independent gates judge the result \u2014 the contract, the application actually working, and the design still matching \u2014 and the model does not decide whether its own work passed.</p>
 
   ${state.designLocked && !contract
-    ? alert("warn", "A backend job also needs an integration contract: record one above. Without it the build stops as soon as it starts, because there is nothing to build against and nothing to verify an implementation with.")
+    ? alert("warn", "A backend job also needs an integration contract, and this project has none, so it has not been queued: a build without one stops as soon as it starts. One is drafted automatically when an artifact is imported; if none is here, every draft was refused by the validator, and the reasons are in the audit log. You can also record one above.")
     : ""}
   ${!state.designLocked
     ? alert("info", "A backend job can start once a design baseline is approved. Approve one above.")
@@ -647,9 +660,14 @@ ${measured ? html`<section class="card">
     catch (e) { throw new HttpError(422, `That is not valid JSON: ${(e as Error).message.slice(0, 200)}`); }
 
     const result = await DL.recordContract(ctx.db, p.projectId, parsed, {
-      recordedBy: actorId(ctx), note: str(form, "note") || null, ip: ctx.ip ?? null,
+      recordedBy: actorId(ctx), authoredBy: "staff", note: str(form, "note") || null, ip: ctx.ip ?? null,
     });
     if (!result.ok) throw new HttpError(422, `The contract was not recorded: ${result.problems.slice(0, 8).join("; ")}`);
+    // The contract was the thing the build was waiting for, so recording one starts it -- the same step the
+    // drafted path takes, through the same eligibility rule and capacity cap. A project whose design is approved
+    // and whose contract has just arrived should not need a second button press; whether it was accepted or
+    // declined is shown by the Backend development section on the page this redirects to.
+    await startBackendBuild(ctx.db, p.projectId, { actor: { kind: "user", userId: actorId(ctx) } });
     return redirect(ctx, `${BASE}/${p.projectId}`);
   });
 
@@ -673,7 +691,15 @@ ${measured ? html`<section class="card">
       artifacts: artifacts.map((a) => ({ id: a.id, version: a.version, source: a.source, framework: a.framework, scanStatus: a.scan_status, status: a.status, sha256: a.sha256 })),
       baselines: baselines.map((b) => ({ id: b.id, version: b.version, status: b.status, fingerprint: b.fingerprint, artifactId: b.artifact_id, approvedAt: b.approved_at, approvedBy: b.approved_by })),
       contract: contractState
-        ? { version: contractState.version, operations: contractState.operations, visualStates: contractState.visual_states, designFingerprint: contractState.design_fingerprint, recordedAt: contractState.created_at }
+        ? {
+          version: contractState.version, operations: contractState.operations,
+          visualStates: contractState.visual_states, designFingerprint: contractState.design_fingerprint,
+          recordedAt: contractState.created_at,
+          // Provenance and open questions: an automated check reading this endpoint needs to know whether a
+          // contract was drafted or written, and what it left unsettled.
+          authoredBy: contractState.authored_by, authorModel: contractState.author_model,
+          reviewFlags: safeArr(contractState.review_flags_json).length,
+        }
         : null,
     });
   });
