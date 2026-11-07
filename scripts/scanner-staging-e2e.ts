@@ -211,16 +211,33 @@ await check("harmless files are scanned clean and still download byte for byte",
 await check("EICAR is quarantined: infected with a named detection, download refused, share link revoked", async () => {
   const s = (await q<{ scan_status: string }>(`SELECT scan_status FROM files WHERE id = ${lit(ids.eicar)}`))[0]?.scan_status;
   assert(s === "infected", `EICAR is ${s}`);
-  const scan = (await q<{ verdict: string; signature: string; engine: string; scanned_sha256: string }>(`SELECT verdict, signature, engine, scanned_sha256 FROM file_scans WHERE file_id = ${lit(ids.eicar)} ORDER BY recorded_at DESC LIMIT 1`))[0];
+  const scan = (await q<{ verdict: string; signature: string; engine: string; scanned_sha256: string; recorded_at: string; scanned_at: string }>(`SELECT verdict, signature, engine, scanned_sha256, recorded_at, scanned_at FROM file_scans WHERE file_id = ${lit(ids.eicar)} ORDER BY recorded_at DESC LIMIT 1`))[0];
   assert(scan?.verdict === "infected" && /eicar/i.test(scan.signature ?? ""), `file_scans: ${JSON.stringify(scan ?? null)}`);
   assert(scan.scanned_sha256 === sha(FILES.eicar.bytes), "the verdict is bound to the stored bytes' SHA-256");
   const d = await cust.req("GET", `/files/${ids.eicar}`);
   assert(d.status >= 400, `customer download of the infected file answered ${d.status}`);
   await d.arrayBuffer();
-  const link = (await q<{ revoked_at: string | null }>(`SELECT revoked_at FROM share_links WHERE id = ${lit(shareId)}`))[0];
-  assert(link?.revoked_at, "the share link was not revoked");
+  // Two different claims, and only one of them depends on the order things happened in.
+  //
+  // The revocation sweep runs when a verdict is recorded, so it can only revoke links that already existed. With a
+  // remote scanner the file can be scanned before this run inserts its link -- measured: the share-link check above
+  // reported "the remote scanner reached it first (infected)" -- and then there was nothing to revoke. Requiring
+  // revoked_at regardless would be asserting the test's own timing. What must hold either way is that the link
+  // cannot be used, so that is asserted unconditionally; revocation is asserted exactly when the link predated the
+  // verdict, which is when the sweep was responsible for it.
+  const link = (await q<{ revoked_at: string | null; created_at: string }>(
+    `SELECT revoked_at, created_at FROM share_links WHERE id = ${lit(shareId)}`))[0];
+  assert(link, "the share link row is gone");
   const out = await fetch(`${BASE}/share/${shareToken}`, { redirect: "manual" });
-  assert(out.status === 410, `the share link answered ${out.status} to an outsider after the verdict`);
+  assert(out.status >= 400, `an outsider could still use the share link for a quarantined file (${out.status})`);
+  await out.arrayBuffer().catch(() => undefined);
+  const existedFirst = Date.parse(link.created_at) <= Date.parse(scan.recorded_at ?? scan.scanned_at);
+  if (existedFirst) {
+    assert(link.revoked_at, "the share link existed before the verdict and was not revoked");
+    assert(out.status === 410, `a revoked share link answered ${out.status} rather than 410`);
+  } else {
+    assert(!link.revoked_at || out.status === 410, "inconsistent: the link is revoked but does not answer 410");
+  }
   const audit = (await q<{ n: number }>(`SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'file.quarantined' AND subject_id = ${lit(ids.eicar)}`))[0]?.n;
   assert(Number(audit) >= 1, "no file.quarantined audit entry");
   return scan.signature;
