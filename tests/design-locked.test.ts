@@ -1078,3 +1078,175 @@ test("[DLU-05] an existing project can be chosen, and a quarantined one is not o
     assert.equal(unknown.status, 422);
   } finally { t.close(); }
 });
+
+// ── the import step ───────────────────────────────────────────────────────────────────────────────────────────
+//
+// Between a scanned ZIP and a design a person can approve, something has to unpack, build and measure it. Nothing
+// on the deployed platform did: recordVerdict was reached only from the reject route, recordBaseline from nowhere,
+// and the two runner-facing frontend endpoints both require a baseline that is ALREADY approved. So an uploaded
+// artifact was scanned and then had nothing to approve, and the Founder could not get past the upload.
+
+async function cleanArtifact(t: Awaited<ReturnType<typeof createTestApp>>, projectId: string, organizationId: string, staffId: string, body = "artifact-bytes") {
+  const fileId = newId("file");
+  const at = nowIso();
+  const bytes = new TextEncoder().encode(body);
+  const sha = await sha256Hex(bytes);
+  const key = `frontend-artifacts/${fileId}.zip`;
+  await t.storage.put(key, bytes, "application/zip");
+  await t.db.prepare(
+    `INSERT INTO files (id, organization_id, project_id, filename, r2_key, content_type, size_bytes, sha256, scan_status, uploaded_by, created_at)
+     VALUES (?, ?, ?, 'frontend.zip', ?, 'application/zip', ?, ?, 'clean', ?, ?)`,
+  ).bind(fileId, organizationId, projectId, key, bytes.length, sha, staffId, at).run();
+  const artifact = await DL.recordArtifact(t.db, {
+    projectId, organizationId, source: "upload", fileId, sha256: sha,
+    sizeBytes: bytes.length, uploadedBy: staffId, scanStatus: "clean",
+  });
+  return { artifact, fileId, sha, bytes };
+}
+
+test("[DLI-01] only a clean artifact is offered for import, and only to one runner", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const cust = await createCustomer(t.db);
+    const projectId = await project(t.db, cust.organizationId);
+
+    // Nothing to do yet.
+    assert.equal(await DL.claimArtifactForImport(t.db, { runnerId: "r1" }), null, "an empty queue offers nothing");
+
+    // An artifact still awaiting its scan is not work yet.
+    const pendingFile = newId("file");
+    const at = nowIso();
+    const pendingSha = await sha256Hex("pending-bytes");
+    await t.db.prepare(
+      `INSERT INTO files (id, organization_id, project_id, filename, r2_key, content_type, size_bytes, sha256, scan_status, uploaded_by, created_at)
+       VALUES (?, ?, ?, 'frontend.zip', ?, 'application/zip', 12, ?, 'pending', ?, ?)`,
+    ).bind(pendingFile, cust.organizationId, projectId, `frontend-artifacts/${pendingFile}.zip`, pendingSha, staff.id, at).run();
+    await DL.recordArtifact(t.db, {
+      projectId, organizationId: cust.organizationId, source: "upload", fileId: pendingFile,
+      sha256: pendingSha, sizeBytes: 12, uploadedBy: staff.id, scanStatus: "pending",
+    });
+    assert.equal(await DL.claimArtifactForImport(t.db, { runnerId: "r1" }), null, "an unscanned artifact is not offered");
+
+    // A clean one is.
+    const { artifact } = await cleanArtifact(t, projectId, cust.organizationId, staff.id);
+    const first = await DL.claimArtifactForImport(t.db, { runnerId: "r1" });
+    assert.equal(first?.artifactId, artifact.id, "the clean artifact is claimed");
+    assert.equal(first?.sha256, artifact.sha256);
+
+    // And a second runner gets nothing, because the claim is the status change itself.
+    assert.equal(await DL.claimArtifactForImport(t.db, { runnerId: "r2" }), null, "two runners never take the same artifact");
+    assert.equal((await DL.getArtifact(t.db, artifact.id))?.status, "validating");
+    const state = await DL.frontendState(t.db, projectId);
+    assert.equal(state.state, "validating_artifact", "and the project says what is happening to it");
+  } finally { t.close(); }
+});
+
+test("[DLI-02] a claim that was never finished becomes claimable again", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const cust = await createCustomer(t.db);
+    const projectId = await project(t.db, cust.organizationId);
+    const { artifact } = await cleanArtifact(t, projectId, cust.organizationId, staff.id);
+
+    assert.ok(await DL.claimArtifactForImport(t.db, { runnerId: "r1" }));
+    // Still held a moment later.
+    assert.equal(await DL.claimArtifactForImport(t.db, { runnerId: "r2", staleMs: 60_000 }), null);
+    // A runner that died leaves the row behind; after the lease it is work again rather than stuck for ever.
+    const later = await DL.claimArtifactForImport(t.db, { runnerId: "r2", now: new Date(Date.now() + 25 * 60_000) });
+    assert.equal(later?.artifactId, artifact.id, "the lease expires instead of losing the artifact");
+
+    // And a runner can hand it back deliberately.
+    await DL.releaseImportClaim(t.db, artifact.id);
+    assert.equal((await DL.getArtifact(t.db, artifact.id))?.status, "received");
+  } finally { t.close(); }
+});
+
+test("[DLI-03] the bytes are delivered only while claimed, only when clean, and only if they still hash right", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const cust = await createCustomer(t.db);
+    const projectId = await project(t.db, cust.organizationId);
+    const { artifact, fileId, bytes } = await cleanArtifact(t, projectId, cust.organizationId, staff.id);
+
+    // Not claimed: nothing is handed over.
+    await assert.rejects(
+      () => DL.deliverArtifactForImport(t.db, t.storage, artifact.id),
+      (e: Error) => /not being imported/.test(e.message),
+      "an unclaimed artifact is not delivered",
+    );
+
+    await DL.claimArtifactForImport(t.db, { runnerId: "r1" });
+    const got = await DL.deliverArtifactForImport(t.db, t.storage, artifact.id);
+    assert.equal(got.sha256, artifact.sha256);
+    assert.equal(Buffer.from(got.base64, "base64").toString("utf8"), new TextDecoder().decode(bytes), "the bytes are the ones stored");
+
+    // The scanning gate is read NOW, not from what was recorded when the artifact arrived.
+    await t.db.prepare(`UPDATE files SET scan_status = 'infected' WHERE id = ?`).bind(fileId).run();
+    await assert.rejects(
+      () => DL.deliverArtifactForImport(t.db, t.storage, artifact.id),
+      (e: Error) => /is infected, so it is not delivered/.test(e.message),
+      "an artifact flagged after it was recorded is refused at delivery",
+    );
+
+    // A swapped object in storage is caught by the hash, not trusted from the row.
+    await t.db.prepare(`UPDATE files SET scan_status = 'clean' WHERE id = ?`).bind(fileId).run();
+    const file = await t.db.prepare(`SELECT r2_key FROM files WHERE id = ?`).bind(fileId).first<{ r2_key: string }>();
+    await t.storage.put(file!.r2_key, new TextEncoder().encode("something else entirely"), "application/zip");
+    await assert.rejects(
+      () => DL.deliverArtifactForImport(t.db, t.storage, artifact.id),
+      (e: Error) => /no longer hash/.test(e.message),
+      "bytes that do not hash to the record are refused",
+    );
+  } finally { t.close(); }
+});
+
+test("[DLI-04] a measured design lands where a person can approve it, and nothing here approves it", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const cust = await createCustomer(t.db);
+    const projectId = await project(t.db, cust.organizationId);
+    const { artifact } = await cleanArtifact(t, projectId, cust.organizationId, staff.id);
+    await DL.claimArtifactForImport(t.db, { runnerId: "r1" });
+
+    await DL.recordVerdict(t.db, artifact.id, { status: "imported", framework: "vite" });
+    const baseline = await DL.recordBaseline(t.db, artifact.id, baselineInput());
+
+    assert.equal(baseline.status, "draft", "a measured baseline is a draft: the import never approves one");
+    const state = await DL.frontendState(t.db, projectId);
+    assert.equal(state.state, "awaiting_approval", "the project is waiting for a person");
+    assert.equal(state.designLocked, false, "and nothing is locked until they say so");
+
+    // The person approves, and only then is it locked.
+    await DL.approveBaseline(t.db, baseline.id, { approvedBy: staff.id });
+    const after = await DL.frontendState(t.db, projectId);
+    assert.equal(after.designLocked, true);
+    assert.equal(after.activeBaselineId, baseline.id);
+  } finally { t.close(); }
+});
+
+test("[DLI-05] an import that failed is recorded as the artifact's verdict, with its reasons", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const cust = await createCustomer(t.db);
+    const projectId = await project(t.db, cust.organizationId);
+    const { artifact } = await cleanArtifact(t, projectId, cust.organizationId, staff.id);
+    await DL.claimArtifactForImport(t.db, { runnerId: "r1" });
+
+    await DL.recordVerdict(t.db, artifact.id, {
+      status: "rejected",
+      problems: ["npm install failed: no lockfile", "the build produced no dist/"],
+    });
+
+    const after = await DL.getArtifact(t.db, artifact.id);
+    assert.equal(after?.status, "rejected");
+    assert.match(after?.problems_json ?? "", /no lockfile/, "the reasons are kept for the person who uploaded it");
+    const state = await DL.frontendState(t.db, projectId);
+    assert.equal(state.state, "artifact_rejected", "and the dashboard shows it as needing attention");
+    assert.equal(await DL.claimArtifactForImport(t.db, { runnerId: "r2" }), null, "a rejected artifact is not retried for ever");
+  } finally { t.close(); }
+});

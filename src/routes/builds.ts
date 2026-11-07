@@ -176,6 +176,69 @@ export function register(r: Router): void {
     });
   }));
 
+
+  // ── the import step: a scanned artifact becomes a measured design ──────────────────────────────────────────
+  //
+  // Between "a ZIP was uploaded" and "a person approves the design" something has to unpack it, build it and
+  // measure it, and nothing on the deployed platform did: the two endpoints above serve a leased BUILD and both
+  // require a baseline that is already approved. So an upload was scanned and then had nothing to approve. The
+  // step existed only inside scripts/design-locked-e2e.ts, in-process.
+  //
+  // These three are that channel, on the same signed runner surface. No new state and no new lease table: the
+  // artifact's own `status` carries it ('received' -> 'validating' -> 'imported' or 'rejected'), and the claim is
+  // a conditional UPDATE so two runners cannot take the same artifact.
+  r.post(`${RUNNER}/frontend/import/claim`, runnerRoute(async (ctx) => {
+    const b = await runnerBody(ctx);
+    const runnerId = typeof b.runnerId === "string" ? b.runnerId : "";
+    const claim = await DL.claimArtifactForImport(ctx.db, { runnerId, now: ctx.now() });
+    return jsonResponse(ctx, 200, { artifact: claim });
+  }));
+
+  // The bytes, for an artifact that is being imported. The scanning gate is applied here, at the moment of
+  // delivery, rather than trusted from what was recorded when the artifact arrived.
+  r.post(`${RUNNER}/frontend/import/bytes`, runnerRoute(async (ctx) => {
+    const b = await runnerBody(ctx);
+    const artifactId = typeof b.artifactId === "string" ? b.artifactId : "";
+    try {
+      return jsonResponse(ctx, 200, await DL.deliverArtifactForImport(ctx.db, ctx.storage, artifactId));
+    } catch (e) {
+      if (e instanceof DL.DeliveryError) return jsonResponse(ctx, e.status, { error: e.message });
+      throw e;
+    }
+  }));
+
+  // What the import found. A measured design moves the project to `awaiting_approval`, which is where the staff
+  // approval control takes over -- this endpoint never approves anything, because approval is a person's.
+  r.post(`${RUNNER}/frontend/import/report`, runnerRoute(async (ctx) => {
+    const b = await runnerBody(ctx);
+    const artifactId = typeof b.artifactId === "string" ? b.artifactId : "";
+    const ok = b.status === "imported";
+    if (!ok && b.status !== "rejected") return jsonResponse(ctx, 422, { error: "status must be 'imported' or 'rejected'" });
+
+    const problems = Array.isArray(b.problems) ? b.problems.slice(0, 50) : [];
+    if (!ok) {
+      // A failed import is the artifact's verdict, not a baseline. The project lands in `artifact_rejected`,
+      // which the dashboard shows as needing attention, with the reasons the runner gave.
+      await DL.recordVerdict(ctx.db, artifactId, { status: "rejected", problems });
+      return jsonResponse(ctx, 200, { recorded: "rejected" });
+    }
+
+    const baseline = b.baseline as DL.BaselineInput | undefined;
+    if (!baseline || typeof baseline.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(baseline.fingerprint)) {
+      return jsonResponse(ctx, 422, { error: "an imported artifact must carry a measured baseline with a sha256 fingerprint" });
+    }
+
+    await DL.recordVerdict(ctx.db, artifactId, {
+      status: "imported",
+      framework: (typeof b.framework === "string" ? b.framework : null) as never,
+      archiveRoot: typeof b.archiveRoot === "string" ? b.archiveRoot : null,
+      lockfileSha: typeof b.lockfileSha === "string" ? b.lockfileSha : null,
+      problems,
+    });
+    const recorded = await DL.recordBaseline(ctx.db, artifactId, baseline);
+    return jsonResponse(ctx, 200, { recorded: "imported", baselineId: recorded.id, baselineVersion: recorded.version });
+  }));
+
   // Self-hosted AI drafts (ai_jobs with provider local-runner), same signed channel.
   r.post(`${RUNNER}/ai/claim`, runnerRoute(async (ctx) => { const b = await runnerBody(ctx); return jsonResponse(ctx, 200, await AIR.claimAiJob(ctx.db, typeof b.runnerId === "string" ? b.runnerId : "", ctx.now())); }));
   r.post(`${RUNNER}/ai/complete`, runnerRoute(async (ctx) => jsonResponse(ctx, 200, await AIR.completeAiJob(ctx.db, await runnerBody(ctx)))));

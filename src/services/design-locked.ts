@@ -212,6 +212,139 @@ export async function deleteEmptyTestProject(
   return true;
 }
 
+// ── the import step: from a scanned artifact to a measured design ─────────────────────────────────────────────
+//
+// Between "the Founder uploaded a ZIP" and "a person approves the design" something has to unpack it, build it and
+// measure it. Nothing on the deployed platform did. `recordVerdict` was reached only from the reject route,
+// `recordBaseline` from nowhere at all, and both runner-facing frontend endpoints serve a leased BUILD and require
+// a baseline that is already approved -- so an uploaded artifact was scanned and then had nothing to approve.
+// The step existed only inside scripts/design-locked-e2e.ts, which drives a sandbox in-process.
+//
+// These three functions are that channel, and they add no new state: `status` already has 'received' for an
+// artifact nobody has looked at and 'validating' for one being looked at, which is the lease. A claim is a
+// conditional UPDATE, so two runners cannot take the same artifact, and a runner that dies leaves a 'validating'
+// row that becomes claimable again after `staleMs`.
+
+export interface ImportClaim {
+  artifactId: string;
+  projectId: string;
+  organizationId: string;
+  version: number;
+  sha256: string;
+  sizeBytes: number;
+}
+
+/** How long a claimed artifact stays claimed before another runner may take it. */
+export const IMPORT_LEASE_MS = 20 * 60_000;
+
+/**
+ * Take one artifact that is waiting to be imported, or nothing.
+ *
+ * Only a CLEAN artifact is ever offered. An artifact still pending a scan is not work yet, and an infected or
+ * failed one is not work at all -- the gate is read from `files.scan_status` at this moment rather than from the
+ * copy taken when the artifact was recorded, because what matters is its status now.
+ */
+export async function claimArtifactForImport(
+  db: Db,
+  o: { runnerId: string; now?: Date; staleMs?: number } = { runnerId: "" },
+): Promise<ImportClaim | null> {
+  const now = o.now ?? new Date();
+  const at = now.toISOString();
+  const stale = new Date(now.getTime() - (o.staleMs ?? IMPORT_LEASE_MS)).toISOString();
+
+  // One conditional UPDATE is the whole lease: whichever runner's statement matches the row first gets it, and the
+  // `status IN (...)` in the WHERE means the loser's statement changes nothing and returns no row.
+  const picked = await db.prepare(
+    `UPDATE frontend_artifacts SET status = 'validating', updated_at = ?
+      WHERE id = (
+        SELECT a.id FROM frontend_artifacts a
+          JOIN files f ON f.id = a.file_id
+          JOIN projects p ON p.id = a.project_id
+         WHERE f.scan_status = 'clean'
+           AND (a.status = 'received' OR (a.status = 'validating' AND a.updated_at < ?))
+           AND p.status NOT IN ('cancelled')
+         ORDER BY a.created_at ASC
+         LIMIT 1
+      )
+      AND (status = 'received' OR (status = 'validating' AND updated_at < ?))
+      RETURNING id, project_id, organization_id, version, sha256, size_bytes`,
+  ).bind(at, stale, stale).first<{
+    id: string; project_id: string; organization_id: string; version: number; sha256: string; size_bytes: number;
+  }>();
+  if (!picked) return null;
+
+  await setFrontendState(db, picked.project_id, "validating_artifact");
+  await audit(db, {
+    actorUserId: null, action: "frontend_artifact.import_claimed", subjectType: "frontendArtifact", subjectId: picked.id,
+    organizationId: picked.organization_id, details: { runnerId: o.runnerId.slice(0, 64), version: picked.version },
+  });
+  return {
+    artifactId: picked.id, projectId: picked.project_id, organizationId: picked.organization_id,
+    version: picked.version, sha256: picked.sha256, sizeBytes: picked.size_bytes,
+  };
+}
+
+export interface ImportBytes {
+  artifactId: string;
+  version: number;
+  sha256: string;
+  sizeBytes: number;
+  filename: string;
+  /** The archive itself. The runner checks this against `sha256` before it opens it. */
+  base64: string;
+}
+
+/**
+ * The bytes of an artifact that is being imported.
+ *
+ * The same quarantine gate as `deliverApprovedArtifact`, applied at the moment of delivery and not trusted from
+ * the record: an artifact recorded clean and later flagged must not be handed over because of what was true
+ * earlier. It is offered only while claimed, so nothing can pull bytes for an artifact nobody is importing.
+ */
+export async function deliverArtifactForImport(
+  db: Db,
+  storage: StorageAdapter | null,
+  artifactId: string,
+): Promise<ImportBytes> {
+  if (!storage) throw new DeliveryError("file storage is not configured", 409);
+  const a = await getArtifact(db, artifactId);
+  if (!a) throw new DeliveryError("no such artifact", 404);
+  if (a.status !== "validating") throw new DeliveryError(`this artifact is ${a.status}, not being imported`, 409);
+  if (!a.file_id) throw new DeliveryError("this artifact has no stored file", 409);
+
+  const file = await db.prepare(`SELECT id, filename, scan_status, size_bytes, r2_key FROM files WHERE id = ?`)
+    .bind(a.file_id).first<{ id: string; filename: string; scan_status: string; size_bytes: number; r2_key: string }>();
+  if (!file) throw new DeliveryError("the artifact's file no longer exists", 409);
+  if (file.scan_status !== "clean") {
+    throw new DeliveryError(`the artifact's file is ${file.scan_status}, so it is not delivered`, 409);
+  }
+
+  const obj = await storage.get(file.r2_key);
+  if (!obj) throw new DeliveryError("the artifact's bytes are missing from storage", 409);
+  // `StoredObject.body` is a stream in R2 and bytes on local disk; read both the same way, as the approved
+  // delivery below does, so the import behaves identically in development and in staging.
+  const bytes = obj.body instanceof Uint8Array
+    ? obj.body
+    : new Uint8Array(obj.body instanceof ArrayBuffer ? obj.body : await new Response(obj.body).arrayBuffer());
+
+  // Hashed from the bytes actually read, never trusted from the row: this is the check that catches a swapped
+  // object in storage between the scan and the import.
+  const digest = await sha256Hex(bytes);
+  if (digest !== a.sha256) {
+    throw new DeliveryError("the stored bytes no longer hash to the artifact's recorded sha256; delivery refused", 409);
+  }
+  return {
+    artifactId: a.id, version: a.version, sha256: a.sha256, sizeBytes: file.size_bytes,
+    filename: file.filename, base64: Buffer.from(bytes).toString("base64"),
+  };
+}
+
+/** Put a claimed artifact back for another attempt, when the runner could not finish (a crash, a lost sandbox). */
+export async function releaseImportClaim(db: Db, artifactId: string): Promise<void> {
+  await db.prepare(`UPDATE frontend_artifacts SET status = 'received', updated_at = ? WHERE id = ? AND status = 'validating'`)
+    .bind(nowIso(), artifactId).run();
+}
+
 export async function recordArtifact(db: Db, a: {
   projectId: string;
   organizationId: string;
