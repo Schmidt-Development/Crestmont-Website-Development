@@ -4,7 +4,7 @@
 // eligibility result next to each prospect. Promotion to a CRM lead is audited, and goes through the CRM intake
 // engine whether a person asked for it or the automatic promoter did (research-promote.ts).
 import type { Db } from "../lib/db.ts";
-import { newId, nowIso } from "../lib/db.ts";
+import { newId, nowIso, underlyingDb } from "../lib/db.ts";
 import { HttpError } from "../app/http.ts";
 import { can, type Actor } from "../domain/authz.ts";
 import { sha256Hex } from "../lib/crypto.ts";
@@ -450,32 +450,48 @@ export async function researchLeadFacts(db: Db, leadId: string): Promise<Researc
 
 export interface RunnerRow { runner_id: string; version: string | null; first_seen_at: string; last_seen_at: string; status_json: string }
 
+/** Per-source coverage parses sources_json for EVERY prospect, the costliest statement on /staff/research. It changes
+ *  only when a research batch arrives, so it is reused for five minutes per database binding (WeakMap keyed on the
+ *  binding behind the per-request wrapper: nothing is shared between environments or tests, nothing outlives it). */
+const COVERAGE_TTL_MS = 5 * 60_000;
+const coverageCache = new WeakMap<object, { at: number; rows: { source: string; n: number }[] }>();
+async function sourceCoverage(db: Db, now: Date): Promise<{ source: string; n: number }[]> {
+  const key = underlyingDb(db) as object;   // the binding, not the per-request retry wrapper (src/lib/db.ts)
+  const hit = coverageCache.get(key);
+  if (hit && now.getTime() - hit.at >= 0 && now.getTime() - hit.at < COVERAGE_TTL_MS) return hit.rows;
+  const rows = (await db.prepare(`SELECT json_extract(j.value, '$.source') AS source, COUNT(DISTINCT p.id) AS n FROM research_prospects p, json_each(p.sources_json) j GROUP BY source ORDER BY n DESC`).all<{ source: string; n: number }>()).results;
+  coverageCache.set(key, { at: now.getTime(), rows });
+  return rows;
+}
+
 export async function dashboard(db: Db, now: Date) {
   const day = today(now);
   const dayStart = `${day}T00:00:00.000Z`;
   const since24h = new Date(now.getTime() - 86400e3).toISOString();
   const n = async (sql: string, ...b: unknown[]) => (await db.prepare(sql).bind(...b).first<{ n: number | null }>())?.n ?? 0;
-  const [total, qualifiedToday, qualifiedAll, callable, evaluatedToday, websitesToday, failedToday, dupToday, dupAll, receivedToday, awaiting, rejectedToday] = await Promise.all([
-    n(`SELECT COUNT(*) AS n FROM research_prospects`),
-    n(`SELECT COUNT(*) AS n FROM research_prospects WHERE qualified = 1 AND first_seen_at >= ?`, dayStart),
-    n(`SELECT COUNT(*) AS n FROM research_prospects WHERE status IN ('qualified','review')`),
-    n(`SELECT COUNT(*) AS n FROM research_prospects WHERE eligibility = 'eligible' AND updated_at >= ?`, dayStart),
+  // One scan of research_prospects for every count it feeds (was five full scans per load; with the census, twelve
+  // more). On staging's data volume the extra scans exhausted D1's per-database 10-second budget and took unrelated
+  // Owner pages down with HTTP 500 (deploy 42340671949). Each column keeps its original WHERE clause.
+  const p = await db.prepare(`SELECT COUNT(*) AS total,
+      COALESCE(SUM(CASE WHEN qualified = 1 AND first_seen_at >= ?1 THEN 1 ELSE 0 END), 0) AS qualified_today,
+      COALESCE(SUM(CASE WHEN status IN ('qualified','review') THEN 1 ELSE 0 END), 0) AS qualified_all,
+      COALESCE(SUM(CASE WHEN eligibility = 'eligible' AND updated_at >= ?1 THEN 1 ELSE 0 END), 0) AS callable,
+      COALESCE(SUM(CASE WHEN website_class IN ('WEBSITE_UNVERIFIED','BUSINESS_IDENTITY_UNCERTAIN') THEN 1 ELSE 0 END), 0) AS awaiting
+    FROM research_prospects`).bind(dayStart).first<{ total: number; qualified_today: number; qualified_all: number; callable: number; awaiting: number }>();
+  const [total, qualifiedToday, qualifiedAll, callable, awaiting] = [p?.total, p?.qualified_today, p?.qualified_all, p?.callable, p?.awaiting].map((v) => Number(v ?? 0));
+  const [evaluatedToday, websitesToday, failedToday, dupToday, dupAll, receivedToday, rejectedToday] = await Promise.all([
     n(`SELECT SUM(evaluated) AS n FROM research_runner_days WHERE day = ?`, day),
     n(`SELECT SUM(websites_checked) AS n FROM research_runner_days WHERE day = ?`, day),
     n(`SELECT SUM(failed_jobs) AS n FROM research_runner_days WHERE day = ?`, day),
     n(`SELECT SUM(duplicates_prevented) AS n FROM research_batches WHERE received_at >= ?`, dayStart),
     n(`SELECT SUM(duplicates_prevented) AS n FROM research_batches`),
     n(`SELECT SUM(record_count) AS n FROM research_batches WHERE received_at >= ?`, dayStart),
-    // Kept as "awaiting verification" only. It used to be labelled "awaiting a decision", which was wrong twice over:
-    // an unverified or identity-uncertain record cannot be promoted by anyone, so no decision is pending on it, and
-    // lumping it with 'review' hid how many records actually need a person.
-    n(`SELECT COUNT(*) AS n FROM research_prospects WHERE website_class IN ('WEBSITE_UNVERIFIED','BUSINESS_IDENTITY_UNCERTAIN')`),
     n(`SELECT SUM(rejected) AS n FROM research_batches WHERE received_at >= ?`, dayStart),
   ]);
   const classes = new Map((await db.prepare(`SELECT website_class AS k, COUNT(*) AS n FROM research_prospects GROUP BY website_class`).all<{ k: string; n: number }>()).results.map((r) => [r.k, r.n]));
   const byClass = WEBSITE_CLASSES.map((k) => ({ key: k, label: WEBSITE_CLASS_LABELS[k], n: classes.get(k) ?? 0 }));
   const byStatus = (await db.prepare(`SELECT status AS k, COUNT(*) AS n FROM research_prospects GROUP BY status ORDER BY n DESC`).all<{ k: string; n: number }>()).results;
-  const coverage = (await db.prepare(`SELECT json_extract(j.value, '$.source') AS source, COUNT(DISTINCT p.id) AS n FROM research_prospects p, json_each(p.sources_json) j GROUP BY source ORDER BY n DESC`).all<{ source: string; n: number }>()).results;
+  const coverage = await sourceCoverage(db, now);
   const hourly = (await db.prepare(`SELECT substr(received_at, 1, 13) AS hour, SUM(record_count) AS n FROM research_batches WHERE received_at >= ? GROUP BY hour ORDER BY hour`).bind(since24h).all<{ hour: string; n: number }>()).results;
   const runners = (await db.prepare(`SELECT * FROM research_runners ORDER BY last_seen_at DESC LIMIT 10`).all<RunnerRow>()).results;
   const since30 = new Date(now.getTime() - 30 * 86400e3).toISOString();

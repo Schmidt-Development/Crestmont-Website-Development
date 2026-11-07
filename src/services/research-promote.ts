@@ -195,10 +195,24 @@ export function censusQueries(qualifyThreshold: number): Record<keyof Eligibilit
  */
 export async function eligibilityCensus(db: Db): Promise<EligibilityCensus> {
   const s = await loadSettings(db);
-  const q = censusQueries(s.qualify_threshold);
+  const row = await db.prepare(censusSql(s.qualify_threshold)).first<Record<string, number | null>>();
   const out = {} as EligibilityCensus;
-  for (const [key, sql] of Object.entries(q)) out[key as keyof EligibilityCensus] = await n(db, sql);
+  for (const key of Object.keys(censusQueries(s.qualify_threshold))) out[key as keyof EligibilityCensus] = Number(row?.[key] ?? 0);
   return out;
+}
+
+/**
+ * The census as ONE scan of research_prospects: each count is a conditional sum over exactly the WHERE clause of its
+ * censusQueries() statement, so the numbers are identical. Twelve separate full scans per /staff/research load were
+ * enough, on staging's data volume, to exhaust D1's per-database 10-second budget ("D1 DB is overloaded") and take
+ * unrelated Owner pages down with it (deploy 42340671949).
+ */
+export function censusSql(qualifyThreshold: number): string {
+  const cols = Object.entries(censusQueries(qualifyThreshold)).map(([key, sql]) => {
+    const where = sql.match(/\bWHERE\s+([\s\S]+)$/i)?.[1];
+    return `COALESCE(SUM(${where ? `CASE WHEN ${where} THEN 1 ELSE 0 END` : "1"}), 0) AS ${key}`;
+  });
+  return `SELECT ${cols.join(", ")} FROM research_prospects`;
 }
 
 /** How many prospects are eligible and due for an attempt right now. */
