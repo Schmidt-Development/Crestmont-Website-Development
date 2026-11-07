@@ -24,6 +24,56 @@ import * as BR from "../services/build-revisions.ts";
 import * as G from "../services/design-gallery.ts";
 
 const RUNNER = "/api/builds/runner";
+
+/**
+ * Translate the runner's measured baseline into what the platform records.
+ *
+ * The two sides name the same evidence differently, and this used to be an `as DL.BaselineInput` cast across the
+ * boundary -- which compiles, says nothing, and was wrong: the runner's `DesignBaseline` calls the screenshot
+ * hashes `renders`, `recordBaseline` requires `screenshots`, so EVERY import report was refused with
+ * `a baseline needs at least one screenshot: there would be no visual record`. A 400 on the report reads as
+ * infrastructure to the runner, so the artifact was offered again when its lease expired, measured again, refused
+ * again, for ever. Three artifacts were doing exactly that on Node 1 when this was found.
+ *
+ * So the translation is explicit, in one place, and the cast is gone. A missing or malformed field is answered
+ * with 422 and a reason naming it, because a refusal the runner can read becomes the artifact's verdict instead
+ * of another lap.
+ *
+ * `measurement` is the same measurement's route, interaction and state inventory, sent beside the baseline. It is
+ * optional: an older runner sends none, and the baseline is still recorded, with those counts empty.
+ */
+function baselineInputFrom(raw: unknown, measurement: unknown): { baseline: DL.BaselineInput } | { error: string } {
+  const b = (raw ?? {}) as Record<string, unknown>;
+  if (typeof b.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(b.fingerprint)) {
+    return { error: "an imported artifact must carry a measured baseline with a sha256 fingerprint" };
+  }
+  const arr = (v: unknown) => (Array.isArray(v) ? v : []);
+  // `renders` is the runner's word for them; `screenshots` is this side's. Same hashes.
+  const screenshots = arr(b.screenshots).length ? arr(b.screenshots) : arr(b.renders);
+  const signatures = arr(b.signatures);
+  if (!signatures.length) return { error: "the measured baseline carries no page signatures, so there is no design to record" };
+  if (!screenshots.length) return { error: "the measured baseline carries no screenshot hashes (field `renders`), so there would be no visual record" };
+
+  const m = (measurement ?? {}) as Record<string, unknown>;
+  return {
+    baseline: {
+      fingerprint: b.fingerprint,
+      sourceFingerprint: typeof b.sourceFingerprint === "string" ? b.sourceFingerprint : null,
+      lockfileSha: typeof b.lockfileSha === "string" ? b.lockfileSha : null,
+      signatures,
+      screenshots,
+      routes: arr(m.routes),
+      interactions: arr(m.interactions),
+      states: arr(m.states).length ? arr(m.states) : arr(b.states),
+      viewports: arr(m.viewports).filter((v): v is string => typeof v === "string"),
+      // The measurement produces no separate asset or component inventory; the platform has columns for them and
+      // they stay empty rather than being filled with something invented.
+      assets: [],
+      components: [],
+    },
+  };
+}
+
 const usd = (n: number) => `$${n.toFixed(2)}`;
 const dur = (s: number | null) => s === null ? "—" : s < 3600 ? `${Math.floor(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`;
 const STATE_BADGE: Partial<Record<BuildState, string>> = { ready_for_review: "ok", approved: "ok", failed: "bad", canceled: "muted", needs_information: "warn", budget_paused: "warn", paused: "warn", building: "info", verifying: "info", preparing: "info", queued: "info" };
@@ -223,10 +273,9 @@ export function register(r: Router): void {
       return jsonResponse(ctx, 200, { recorded: "rejected" });
     }
 
-    const baseline = b.baseline as DL.BaselineInput | undefined;
-    if (!baseline || typeof baseline.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(baseline.fingerprint)) {
-      return jsonResponse(ctx, 422, { error: "an imported artifact must carry a measured baseline with a sha256 fingerprint" });
-    }
+    const translated = baselineInputFrom(b.baseline, b.measurement);
+    if ("error" in translated) return jsonResponse(ctx, 422, { error: translated.error });
+    const baseline = translated.baseline;
 
     await DL.recordVerdict(ctx.db, artifactId, {
       status: "imported",
