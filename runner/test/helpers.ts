@@ -353,10 +353,13 @@ export function testManifest(): SkillManifest {
 }
 
 export function makeConfig(over: Partial<RunnerConfig> & { controlPlaneUrl: string; skillsSourceDir: string }): RunnerConfig {
+  // One root for both: the sandbox's own copy is what `mountFlags` checks a workspace against, so a test that set
+  // them to different directories would be testing a machine that cannot exist.
+  const workspacesRoot = over.workspacesRoot ?? tmp("aib-ws-");
   return {
     secret: SECRET,
     runnerId: "runner-test",
-    workspacesRoot: tmp("aib-ws-"),
+    workspacesRoot,
     skillsManifestPath: path.join(RUNNER_DIR, "skills", "manifest.json"),
     startersDir: path.join(RUNNER_DIR, "starters"),
     anthropicApiKey: "sk-ant-test-not-a-real-key-000000",
@@ -396,7 +399,7 @@ export function makeConfig(over: Partial<RunnerConfig> & { controlPlaneUrl: stri
       maxOutputTokensPerCall: 4096, maxOutputTokensTotal: 1_000_000, temperature: 0.2, requestTimeoutMs: 30_000,
     },
     jobSandbox: {
-      dockerBin: "docker", image: "crestmont-build-sandbox:test", runnerId: "test-runner", volume: "", cpus: "2", memory: "4g", pidsLimit: 512,
+      dockerBin: "docker", image: "crestmont-build-sandbox:test", runnerId: "test-runner", volume: "", workspacesRoot, cpus: "2", memory: "4g", pidsLimit: 512,
       tmpfsMb: 256, commandTimeoutMs: 60_000, installTimeoutMs: 120_000, installNetwork: "crestmont_install",
       installProxy: "http://egress-proxy:3128", registry: "https://registry.npmjs.org/", diskQuotaMb: 4096, uid: 10001,
       allowedBuildScripts: [], browserCheck: true,

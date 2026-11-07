@@ -11,6 +11,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { importWorker } from "../src/frontend/import-worker.ts";
+import { JobSandbox } from "../src/sandbox.ts";
+import type { JobSandboxConfig } from "../src/config.ts";
+import { createWorkspace } from "../src/workspace.ts";
 import { ControlPlaneError } from "../src/control-plane.ts";
 import type { ImportOutcome } from "../src/frontend/workflow.ts";
 import type { FrontendImportClaim } from "../src/protocol.ts";
@@ -93,6 +96,55 @@ test("[IMP-02] a measured design is reported with its baseline, and never as a r
   assert.equal(f.reports[0].framework, "vite", "what the ingest found, not a guess");
   assert.equal(f.reports[0].archiveRoot, "site");
   assert.equal((f.reports[0].baseline as { fingerprint: string }).fingerprint, baseline.fingerprint, "the measured design travels with it");
+});
+
+test("[IMP-07] the import's workspace sits where a sandbox on the workspaces volume can mount it", async () => {
+  // Measured on Node 1: every import died at
+  //   cannot access path /var/lib/docker/volumes/crestmont-workspaces/_data/<ref>/repo: no such file
+  // and the worker, correctly treating that as infrastructure, retried for ever and left a created container
+  // behind each time. `JobSandbox` mounts `volume-subpath=<ref>/repo`, ONE segment from the volume root, so a
+  // workspace nested in a per-artifact subdirectory can never be mounted. This pins the workspace's position.
+  const f = fakeClient({ claim: claim() });
+  let repo = "";
+  const w = importWorker({
+    client: f.client, cfg, logger: silent, workRoot: cfg.workspacesRoot, runnerId: "r",
+    importer: async (args: { repo: string }) => { repo = args.repo; return outcome({ ok: false, problems: ["stopped here on purpose"] }); },
+  });
+  assert.equal(await w.serve(), "done");
+
+  const root = path.resolve(cfg.workspacesRoot);
+  const rel = path.relative(root, path.resolve(repo));
+  const parts = rel.split(path.sep);
+  assert.equal(parts.length, 2, `the workspace must be <root>/<ref>/repo, so repo is two segments below the root; got ${rel}`);
+  assert.equal(parts[1], "repo");
+  assert.match(parts[0], /^import-fa_1-a1-[0-9a-f]{6}$/, `and the ref says what it is and is unique per claim: ${parts[0]}`);
+});
+
+test("[IMP-08] a sandbox on the workspaces volume refuses a workspace it could not mount, before creating a container", async () => {
+  // The guard for [IMP-07], at the place that builds the mount. Without it the only report was the daemon's, about
+  // a path nobody had asked for, after a container had already been created and left behind.
+  const root = mkdtempSync(path.join(tmpdir(), "imp-root-"));
+  const sandboxCfg = {
+    dockerBin: "docker", image: "x", runnerId: "r", volume: "crestmont-workspaces", workspacesRoot: root,
+    cpus: "2", memory: "2g", pidsLimit: 512, tmpfsMb: 256, commandTimeoutMs: 1000, installTimeoutMs: 1000,
+    installNetwork: "n", installProxy: "", registry: "", diskQuotaMb: 1024, uid: 10001,
+    allowedBuildScripts: [], browserCheck: false,
+  } as unknown as JobSandboxConfig;
+
+  const good = createWorkspace(root, { id: "import-fa_1", attempt: 1 });
+  const flags = new JobSandbox(sandboxCfg, good, "fa_1", (async () => ({ code: 0, stdout: "", stderr: "", timedOut: false, notFound: false })) as never).mountFlags();
+  assert.ok(flags.some((x) => x === `type=volume,src=crestmont-workspaces,dst=/workspace/repo,volume-subpath=${good.ref}/repo`), flags.join(" "));
+
+  const nested = createWorkspace(path.join(root, "import-fa_2"), { id: "import-fa_2", attempt: 1 });
+  assert.throws(
+    () => new JobSandbox(sandboxCfg, nested, "fa_2", (async () => ({ code: 0, stdout: "", stderr: "", timedOut: false, notFound: false })) as never).mountFlags(),
+    /not directly under the workspaces root/,
+    "a workspace the mount cannot reach is refused here, not by the daemon",
+  );
+
+  // With no volume the mounts are absolute host paths, so nesting is none of this check's business.
+  const noVolume = { ...sandboxCfg, volume: "" } as typeof sandboxCfg;
+  assert.ok(new JobSandbox(noVolume, nested, "fa_2", (async () => ({ code: 0, stdout: "", stderr: "", timedOut: false, notFound: false })) as never).mountFlags().some((x) => x.includes("type=bind")));
 });
 
 test("[IMP-03] an archive that will not build is the artifact's verdict, with the reasons", async () => {

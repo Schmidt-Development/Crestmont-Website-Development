@@ -57,6 +57,9 @@ function sandboxConfig(): JobSandboxConfig {
     image: env.RUNNER_SANDBOX_IMAGE ?? "crestmont-build-sandbox:1",
     runnerId: "import-poc",
     volume: "",
+    // Bind mounts (volume ""), so JobSandbox never consults this; it is stated because a sandbox on the
+    // workspaces VOLUME can only mount <workspacesRoot>/<ref> and has to be able to check that.
+    workspacesRoot: path.resolve(env.RUNNER_WORKSPACES ?? tmpdir()),
     cpus: env.RUNNER_JOB_CPUS ?? "8",
     memory: env.RUNNER_JOB_MEMORY ?? "8g",
     pidsLimit: 512,

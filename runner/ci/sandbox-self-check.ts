@@ -22,8 +22,11 @@ const RUNNER_DIR = path.resolve(import.meta.dirname, "..");
 const image = process.argv[2] ? dockerImageRef(process.argv[2]) : process.argv[2];
 if (!image) { process.stderr.write("usage: node runner/ci/sandbox-self-check.ts <sandbox image>\n"); process.exit(2); }
 
+// Declared before the config, which has to name the root a volume-backed sandbox would mount workspaces from.
+const root = mkdtempSync(path.join(tmpdir(), "cm-selfcheck-"));
+
 const cfg: JobSandboxConfig = {
-  dockerBin: process.env.DOCKER_BIN || "docker", image, volume: "", cpus: "2", memory: "2g", pidsLimit: 512, tmpfsMb: 256,
+  dockerBin: process.env.DOCKER_BIN || "docker", image, volume: "", workspacesRoot: root, cpus: "2", memory: "2g", pidsLimit: 512, tmpfsMb: 256,
   commandTimeoutMs: 120_000, installTimeoutMs: 300_000, installNetwork: "none", installProxy: "http://egress-proxy:3128",
   registry: "https://registry.npmjs.org/", diskQuotaMb: 4096, uid: 10001, allowedBuildScripts: [], browserCheck: true,
   runnerId: "ci-sandbox-self-check",
@@ -35,7 +38,6 @@ function chmodTree(p: string): void {
   if (st.isDirectory()) for (const e of readdirSync(p)) chmodTree(path.join(p, e));
 }
 
-const root = mkdtempSync(path.join(tmpdir(), "cm-selfcheck-"));
 const ws = createWorkspace(root, { id: "ci-selfcheck", attempt: 1 });
 cpSync(path.join(RUNNER_DIR, "starters", "brochure-v1"), ws.repo, { recursive: true });
 // The CI user is not uid 10001: let the container user write the bind-mounted job directories (test only; production

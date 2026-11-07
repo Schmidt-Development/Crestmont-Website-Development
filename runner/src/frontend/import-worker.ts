@@ -99,7 +99,19 @@ export function importWorker(d: ImportWorkerDeps): { serve(): Promise<ImportOutc
           return "done";
         }
 
-        const ws = createWorkspace(path.join(d.workRoot, `import-${claim.artifactId}`), { id: claim.artifactId, attempt: 1 });
+        // Directly under the work root, NOT in a per-artifact subdirectory.
+        //
+        // A workspace ref is one path segment under the workspaces root, and `JobSandbox` relies on exactly that:
+        // when the runner itself runs in a container it mounts `volume-subpath=<ref>/repo` on the shared
+        // workspaces volume. Nesting the workspace one level deeper left that mount pointing at a path that does
+        // not exist, so every import on a containerised runner died at
+        //
+        //   cannot access path /var/lib/docker/volumes/crestmont-workspaces/_data/<ref>/repo: no such file
+        //
+        // which the worker correctly treated as an infrastructure fault and retried for ever, leaving a created
+        // container behind on each attempt. The artifact id is folded into the job id instead, so the ref is
+        // still one per claim and still says what it is.
+        const ws = createWorkspace(d.workRoot, { id: `import-${claim.artifactId}`, attempt: 1 });
         const executor = d.executor ?? cliDockerExecutor(d.cfg.jobSandbox.dockerBin, dockerEnv());
         const sandbox = new JobSandbox(d.cfg.jobSandbox, ws, claim.artifactId, executor, d.logger);
 
