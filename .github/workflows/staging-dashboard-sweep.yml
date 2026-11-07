@@ -1,0 +1,118 @@
+name: Staging dashboard sweep (targeted re-verification)
+
+# Re-runs the browser specs of the staging certification against the ALREADY-DEPLOYED staging Worker, without
+# redeploying and without the rest of the suite — for a targeted re-check after a fix (for example BRAND-006's Owner
+# sweep at 375px and 1440px, which run 42345838991 failed with D1 overload). Then reads staging's own error log for this
+# run's window and fails if any request returned a 5xx or D1 reported overload.
+#
+# Staging only. Read-only except what the specs themselves do (the journeys create their own synthetic records, exactly
+# as in the deploy). Demo-account credentials are re-applied exactly as scanner-staging-verify.yml does: ACCESS_EPOCH 3
+# with ROTATE unset re-derives the SAME passwords (scripts/staging-access.ts), so nothing rotates and the Founder's
+# sealed access artifact stays valid. The credential files are deleted even when the run fails. No evidence is posted:
+# the readiness record of a commit comes only from a full deploy.
+on:
+  workflow_dispatch:
+    inputs:
+      specs:
+        description: "quality: the design/accessibility sweep (WEB-009, BRAND-006, axe). all: quality + staging.e2e + the browser journeys"
+        type: choice
+        options: [quality, all]
+        default: quality
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    if: github.ref == 'refs/heads/main'
+    concurrency:
+      group: deploy-staging   # applies access SQL; never overlaps a deploy or another staging writer
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: staging
+    # The Cloudflare token is given only to the steps that use it (F-24): the Playwright and axe install never sees it.
+    env:
+      ACCESS_EPOCH: "3"                 # the same epoch deploy-staging.yml uses: no rotation
+      WRANGLER: npx --yes wrangler@4.149.0
+      STAGING_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+
+      - name: Resolve the staging D1 database id (same injection as deploy-staging.yml, CREST-GAP-065)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          id=$($WRANGLER d1 list --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s).find(d=>d.name==="crestmont-staging");process.stdout.write(r?r.uuid:"")})')
+          [ -n "$id" ] || { echo "::error::The crestmont-staging D1 database was not found."; exit 1; }
+          node -e 'const fs=require("fs");let t=fs.readFileSync("wrangler.toml","utf8");t=t.replace(/(database_name = "crestmont-staging", database_id = )""/, `$1"${process.argv[1]}"`);fs.writeFileSync("wrangler.toml",t)' "$id"
+          grep -q "$id" wrangler.toml && echo "Staging D1: $id"
+
+      - name: Mark the start of this run's error-log window
+        run: |
+          echo "Workflow commit: $GITHUB_SHA (staging serves the commit of its last deploy)"
+          echo "SWEEP_STARTED_AT=$(date -u -d '2 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          echo "Window starts $(date -u +%Y-%m-%dT%H:%M:%SZ) (error-log margin: 2 minutes)"
+
+      - name: Apply staging access (same epoch, no rotation, so the same derived passwords)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          MFA_ENCRYPTION_KEY: ${{ secrets.STAGING_MFA_ENCRYPTION_KEY }}
+        run: node --no-warnings scripts/staging-access.ts --url "$STAGING_URL" --out access
+
+      - name: Browser specs against the deployed staging site
+        id: specs
+        continue-on-error: true
+        env:
+          E2E_BASE_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+          E2E_ACCOUNTS_FILE: access/demo-accounts.md
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
+          AXE_PATH: ${{ github.workspace }}/.pw/node_modules/axe-core/axe.min.js
+          SPECS: ${{ inputs.specs }}
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 axe-core@4.10.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+          files="tests/e2e/staging-quality.e2e.ts"
+          [ "$SPECS" = "all" ] && files="tests/e2e/staging.e2e.ts tests/e2e/staging-quality.e2e.ts tests/e2e/staging-journeys.e2e.ts"
+          node --no-warnings --test --test-concurrency=1 --test-reporter=spec $files
+
+      - name: Remove the credential files
+        if: always()
+        run: rm -f access/private.json access/access.json access/demo-accounts.md access/README.md
+
+      - name: Staging errors in this window (5xx and D1 overload; already redacted)
+        id: errors
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          # recordAppError writes to D1 and swallows its own failure, so a request that failed BECAUSE D1 was overloaded
+          # may be missing here; the specs' own HTTP checks and the Staging D1 analytics workflow cover that case.
+          $WRANGLER d1 execute crestmont-staging --remote --env staging --json --command \
+            "SELECT path, status, message, created_at FROM app_errors WHERE created_at > '$SWEEP_STARTED_AT' ORDER BY id DESC LIMIT 200" > app-errors.json
+          node -e '
+            const rows = (JSON.parse(require("fs").readFileSync("app-errors.json","utf8"))[0]?.results) ?? [];
+            const bad = rows.filter((r) => Number(r.status) >= 500 || /overloaded/i.test(String(r.message)));
+            const by = new Map();
+            for (const r of bad) { const k = `${r.status} ${r.path} ${String(r.message).slice(0, 160)}`; by.set(k, (by.get(k) ?? 0) + 1); }
+            for (const [k, n] of by) console.log(`::error title=Staging error during the sweep${n > 1 ? ` (x${n})` : ""}::${k}`);
+            console.log(`${rows.length} recorded error(s) in the window; ${bad.length} were 5xx or D1 overload.`);
+            process.exit(bad.length ? 1 : 0);
+          '
+          rm -f app-errors.json
+
+      - name: Fail when a spec failed
+        if: steps.specs.outcome != 'success'
+        run: |
+          echo "::error::One or more browser specs failed (see the step above)."
+          exit 1

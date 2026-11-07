@@ -241,9 +241,11 @@ export async function runSummaries(db: Db, opts: { environment?: Environment; so
   const where: string[] = []; const binds: unknown[] = [];
   if (opts.environment) { where.push(`er.environment = ?`); binds.push(opts.environment); }
   if (opts.source) { where.push(`er.source = ?`); binds.push(opts.source); }
-  return (await db.prepare(`SELECT er.*, COALESCE(SUM(te.outcome='passed'),0) AS passed, COALESCE(SUM(te.outcome='failed'),0) AS failed, COALESCE(SUM(te.outcome='skipped'),0) AS skipped
-     FROM evidence_runs er LEFT JOIN test_evidence te ON te.run_id = er.id ${where.length ? "WHERE " + where.join(" AND ") : ""}
-     GROUP BY er.id ORDER BY er.finished_at DESC LIMIT ?`).bind(...binds, opts.limit ?? 20).all<RunSummary>()).results;
+  // Counts come from evidence_run_counts, kept by a trigger as rows arrive (migration 0091). Counting test_evidence here
+  // read every row of every run in the environment to show 15, on every environment and engineering page view.
+  return (await db.prepare(`SELECT er.*, COALESCE(c.passed,0) AS passed, COALESCE(c.failed,0) AS failed, COALESCE(c.skipped,0) AS skipped
+     FROM evidence_runs er LEFT JOIN evidence_run_counts c ON c.run_id = er.id ${where.length ? "WHERE " + where.join(" AND ") : ""}
+     ORDER BY er.finished_at DESC LIMIT ?`).bind(...binds, opts.limit ?? 20).all<RunSummary>()).results;
 }
 
 export async function failedTestsOfRun(db: Db, runId: string) {
