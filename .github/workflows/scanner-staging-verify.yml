@@ -17,14 +17,16 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  # Shares the deploy group: this applies access SQL and writes staging files, like the drills that share it.
-  group: deploy-staging
-  cancel-in-progress: false
-
 jobs:
   verify:
     if: github.ref == 'refs/heads/main'
+    # Job-level, after `if:` (CREST-NEW-007): GitHub keeps ONE pending run per concurrency group, so a run
+    # that never starts a job still holds the slot. At workflow level it did exactly that here -- the synthetic
+    # failed `push` run GitHub creates for an unparseable workflow took the slot and a dispatched run sat
+    # `pending` behind it for fifteen minutes. A skipped job never enters the group.
+    concurrency:
+      group: deploy-staging   # applies access SQL and writes staging files
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: staging

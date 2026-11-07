@@ -2,12 +2,13 @@
 // configured as documented; whether a given run passed is recorded as evidence by the runs themselves.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const wf = (n: string) => readFileSync(`.github/workflows/${n}`, "utf8");
+const allWorkflows = () => readdirSync(".github/workflows").filter((f) => f.endsWith(".yml"));
 
 /**
  * The body of a `run: |` block, ready to hand to bash.
@@ -191,4 +192,27 @@ test("[DOC-002] [INFRA-005] CREST-GAP-068: the runbook documents first-release r
   assert.match(rollback, /rollback --env production/, "failed code never keeps serving");
   assert.match(rollback, /if \[ -f backups\/EMPTY-DATABASE\.txt \]; then[\s\S]*First release rolled back/);
   assert.match(prod, /backups\/EMPTY-DATABASE\.txt/, "the marker is written by the safety-export step");
+});
+
+/**
+ * CREST-NEW-007, generalised. The rule was asserted for the two drills by name, so it did not cover the next
+ * workflow to join the group -- and two of them did, both at workflow level. GitHub keeps ONE pending run per
+ * concurrency group, and a run that never starts a job still holds the slot: the synthetic failed `push` run that
+ * GitHub creates for an unparseable workflow took it, and a dispatched run sat `pending` behind it for fifteen
+ * minutes with no job and no explanation. At job level, after the `if:`, a skipped job never enters the group.
+ *
+ * Any workflow sharing the deploy group, now or later, is covered by this.
+ */
+test("[TEST-004] CREST-NEW-007: every workflow sharing the deploy-staging group takes it at JOB level, not workflow level", () => {
+  const sharing = allWorkflows().filter((f) => /group: deploy-staging/.test(wf(f)));
+  assert.ok(sharing.length >= 3, `found ${sharing.length} workflow(s) in the group`);
+  for (const f of sharing) {
+    const s = wf(f).split("\r").join("");
+    if (/^name: Deploy staging$/m.test(s)) continue;   // the deploy itself owns the group
+    assert.doesNotMatch(s, /^concurrency:/m, `${f}: the group must not be taken at workflow level`);
+    assert.match(s, /^    concurrency:\n      group: deploy-staging/m, `${f}: job-level group`);
+    const ifAt = s.search(/^    if: /m);
+    const cAt = s.search(/^    concurrency:/m);
+    assert.ok(ifAt > 0 && cAt > ifAt, `${f}: the group is taken after the if:, so a skipped job never enters it`);
+  }
 });
