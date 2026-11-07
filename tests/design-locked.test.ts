@@ -15,6 +15,7 @@ import { createTestApp, createCustomer, createStaff, TEST_PASSWORD } from "./sup
 import * as DL from "../src/services/design-locked.ts";
 import * as B from "../src/services/builds.ts";
 import * as MS from "../src/services/malware-scan.ts";
+import * as AA from "../src/services/artifact-assets.ts";
 import { newId, nowIso } from "../src/lib/db.ts";
 import { sha256Hex } from "../src/lib/crypto.ts";
 import { makeZip } from "../runner/test/fixtures/zip-writer.ts";
@@ -1340,6 +1341,86 @@ test("[DLI-07] a retry never bypasses scanning, a quarantine, or a newer upload"
     const stale = await DL.retryImport(t.db, artifact.id, { actorId: staff.id });
     assert.equal(stale.ok, false);
     assert.match("why" in stale ? stale.why : "", /newer artifact/i, JSON.stringify(stale));
+  } finally { t.close(); }
+});
+
+test("[DLI-08] a design measured without its external assets can be measured again", async () => {
+  // Law Firm 02 on staging: the HTML imported and measured perfectly, and its Google Fonts stylesheet and three
+  // photographs had been refused by the platform's egress allowlist. So the measured design was the page in a
+  // fallback face with empty image boxes. The approval gate correctly refused it -- and that left the artifact
+  // stuck, because `imported` is not `rejected` and there was no way to measure it again.
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const made = await DL.createTestProject(t.db, { name: "Measured without assets", actorId: staff.id });
+    const { artifact, fileId } = await cleanArtifact(t, made.projectId, made.organizationId, staff.id);
+    await DL.recordVerdict(t.db, artifact.id, { status: "imported", framework: "static" });
+    await DL.recordBaseline(t.db, artifact.id, baselineInput({ signatures: [{ page: "index", viewport: "desktop" }] }));
+    await t.db.prepare(`UPDATE files SET scan_status = 'clean' WHERE id = ?`).bind(fileId).run();
+
+    // A complete measurement has nothing to redo, and says so rather than re-running a GPU-free but real import.
+    const complete = await DL.retryImport(t.db, artifact.id, { actorId: staff.id });
+    assert.equal(complete.ok, false);
+    assert.match("why" in complete ? complete.why : "", /nothing to redo/i, JSON.stringify(complete));
+
+    // Now record what staging recorded: one stylesheet and three images refused, plus one font already pinned.
+    const at = nowIso();
+    const rows: [string, string, string, string | null][] = [
+      ["https://fonts.googleapis.com/css2?family=Fraunces", "stylesheet", "refused", "Outbound request to fonts.googleapis.com blocked by the egress allowlist"],
+      ["https://images.unsplash.com/photo-1", "image", "refused", "blocked by the egress allowlist"],
+      ["https://images.unsplash.com/photo-2", "image", "refused", "blocked by the egress allowlist"],
+      ["https://images.unsplash.com/photo-3", "image", "refused", "blocked by the egress allowlist"],
+      ["https://cdn.example.com/kept.woff2", "font", "pinned", null],
+    ];
+    for (const [url, kind, status, why] of rows) {
+      await t.db.prepare(`INSERT INTO frontend_artifact_assets (id, artifact_id, url, kind, status, why, sha256, r2_key, local_path, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(
+        newId("faa"), artifact.id, url, kind, status, why,
+        status === "pinned" ? "f".repeat(64) : null,
+        status === "pinned" ? "frontend-assets/x/y" : null,
+        status === "pinned" ? "_crestmont-assets/f.woff2" : null, at).run();
+    }
+    assert.equal((await AA.missingVisualAssets(t.db, artifact.id)).length, 4);
+
+    const again = await DL.retryImport(t.db, artifact.id, { actorId: staff.id });
+    assert.ok(again.ok, "why" in again ? again.why : "");
+    assert.equal(again.artifact.status, "received", "the ordinary import claim will pick it up");
+
+    // The REFUSED rows are cleared so they are attempted again -- `resolveAssets` answers from its own records,
+    // so without this a dependency that failed once would come back refused for ever.
+    assert.equal((await AA.missingVisualAssets(t.db, artifact.id)).length, 0, "the refusals are cleared for another attempt");
+    const kept = await AA.listAssets(t.db, artifact.id);
+    assert.deepEqual(kept.map((k) => k.url), ["https://cdn.example.com/kept.woff2"], "and the pinned bytes are kept: they are already immutable");
+
+    // What it is expected to acquire is on the record.
+    const said = await t.db.prepare(
+      `SELECT details_json FROM audit_logs WHERE action = 'frontend_artifact.import_retried' AND subject_id = ?`,
+    ).bind(artifact.id).first<{ details_json: string }>();
+    assert.ok(said);
+    assert.match(said.details_json, /fonts\.googleapis\.com/);
+    assert.match(said.details_json, /"previousStatus":"imported"/);
+  } finally { t.close(); }
+});
+
+test("[DLI-09] a locked design is not re-measured behind an approval", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const made = await DL.createTestProject(t.db, { name: "Locked, not re-measured", actorId: staff.id });
+    const { artifact, fileId } = await cleanArtifact(t, made.projectId, made.organizationId, staff.id);
+    await DL.recordVerdict(t.db, artifact.id, { status: "imported", framework: "static" });
+    const b = await DL.recordBaseline(t.db, artifact.id, baselineInput({ signatures: [{ page: "index", viewport: "desktop" }] }));
+    await t.db.prepare(`UPDATE files SET scan_status = 'clean' WHERE id = ?`).bind(fileId).run();
+    await DL.approveBaseline(t.db, b.id, { approvedBy: staff.id, note: "approved" });
+
+    // A refusal recorded after the fact must not become a way to re-measure something already locked.
+    await t.db.prepare(`INSERT INTO frontend_artifact_assets (id, artifact_id, url, kind, status, why, created_at)
+      VALUES (?,?,?,?,?,?,?)`).bind(newId("faa"), artifact.id, "https://img.example.com/x.png", "image", "refused", "blocked", nowIso()).run();
+
+    const r = await DL.retryImport(t.db, artifact.id, { actorId: staff.id });
+    assert.equal(r.ok, false);
+    assert.match("why" in r ? r.why : "", /already approved and locked/i, JSON.stringify(r));
+    assert.equal((await DL.getArtifact(t.db, artifact.id))!.status, "imported", "nothing moved");
   } finally { t.close(); }
 });
 

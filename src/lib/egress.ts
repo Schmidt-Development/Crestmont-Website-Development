@@ -13,6 +13,42 @@ export const EGRESS_HOSTS: readonly string[] = [
   "api.retellai.com",             // voice provider API
 ];
 
+/**
+ * Hosts that a URL out of an UPLOADED FILE may never reach, whatever else it satisfies.
+ *
+ * The allowlist above answers "which services does the platform talk to". This answers a different question:
+ * when the platform fetches a URL that came from a customer's artifact -- a web font, a photograph -- which hosts
+ * must that never be able to touch? Two groups, for two reasons:
+ *
+ *   · the paid inference APIs, because "no paid AI service is called" is evidence this platform maintains, and a
+ *     crafted artifact must not be able to make the platform call one;
+ *   · the platform's own provider hosts, because those are where its money, its mail and its customer records
+ *     are, and an uploaded file must not be able to aim a request at them even a GET.
+ *
+ * `.googleapis.com` is deliberately NOT here: Google Fonts is served from `fonts.googleapis.com`, it is a normal
+ * dependency of a normal website, and refusing it is what made the Founder's law firm design measure in a
+ * fallback face. The runner's own egress proxy denies that domain because the RUNNER has no business there; the
+ * platform fetching a stylesheet on an owner's behalf is a different act with different rules.
+ */
+export const UNTRUSTED_DENY_HOSTS: readonly string[] = [
+  "api.anthropic.com", "claude.ai", "claude.com", "api.openai.com", "openai.azure.com",
+  "api.mistral.ai", "openrouter.ai", "api.groq.com", "api.together.xyz", "api.together.ai",
+  "api.fireworks.ai", "api.cohere.ai", "api.cohere.com", "api.deepseek.com", "api.x.ai",
+  "api.perplexity.ai", "api.replicate.com", "api-inference.huggingface.co", "router.huggingface.co",
+  "generativelanguage.googleapis.com", "aiplatform.googleapis.com",
+  ...EGRESS_HOSTS,
+];
+
+/** Is this a host an uploaded artifact may cause the platform to fetch from? */
+export function untrustedHostAllowed(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/\.$/, "");
+  if (UNTRUSTED_DENY_HOSTS.includes(h)) return false;
+  // A subdomain of a denied host is the same host for this purpose.
+  if (UNTRUSTED_DENY_HOSTS.some((d) => h.endsWith(`.${d}`))) return false;
+  if (/(^|\.)bedrock-runtime(-fips)?\./.test(h) && h.endsWith(".amazonaws.com")) return false;
+  return true;
+}
+
 const dynamic = new Set<string>();
 
 export class EgressBlockedError extends Error {

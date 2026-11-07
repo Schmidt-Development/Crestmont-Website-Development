@@ -377,8 +377,33 @@ export async function retryImport(
   if (a.status === "quarantined") {
     return { ok: false, why: "this artifact is quarantined, and a quarantined archive is replaced rather than retried" };
   }
-  if (a.status !== "rejected") {
-    return { ok: false, why: `only a rejected artifact can be offered for import again; this one is "${a.status}"` };
+  // Two reasons to re-import, and the second one is why Law Firm 02 needed this.
+  //
+  // A REJECTED artifact is the obvious case: the importer was wrong about it and has since been fixed.
+  //
+  // An IMPORTED artifact whose measurement is materially incomplete is the other. Law Firm 02 imported and
+  // measured perfectly well -- and its Google Fonts stylesheet and three photographs had been refused by the
+  // platform's egress allowlist, so the design that was measured is the page in a fallback face with empty image
+  // boxes. The approval gate correctly refused it, which left the artifact stuck: `imported` is not `rejected`,
+  // so there was no way to measure it again once the acquisition was fixed. A measurement that cannot be redone
+  // is a measurement that is wrong for ever.
+  //
+  // Only while nothing is approved from it. Re-measuring behind an approved baseline would be replacing a locked
+  // design, which is a different act with a different control.
+  const incomplete = a.status === "imported" ? await missingVisualAssets(db, a.id) : [];
+  const approvedFromThis = await db.prepare(
+    `SELECT 1 FROM design_baselines WHERE artifact_id = ? AND status = 'approved' LIMIT 1`,
+  ).bind(a.id).first();
+  if (a.status === "imported" && approvedFromThis) {
+    return { ok: false, why: "a design from this artifact is already approved and locked; replacing it is a new upload, not a re-import" };
+  }
+  if (a.status !== "rejected" && !(a.status === "imported" && incomplete.length)) {
+    return {
+      ok: false,
+      why: a.status === "imported"
+        ? "this artifact imported and its measurement is complete, so there is nothing to redo"
+        : `only a rejected artifact, or an imported one whose visual assets could not be acquired, can be offered for import again; this one is "${a.status}"`,
+    };
   }
 
   const scan = a.file_id
@@ -393,13 +418,26 @@ export async function retryImport(
     return { ok: false, why: `a newer artifact (version ${latest.version}) has been uploaded for this project, so this one is not the design to measure` };
   }
 
-  await db.prepare(`UPDATE frontend_artifacts SET status = 'received', problems_json = '[]', updated_at = ? WHERE id = ? AND status = 'rejected'`)
+  // The REFUSED asset rows are cleared so they are attempted again. `resolveAssets` answers from its own records
+  // for an artifact it has already resolved -- which is the whole point, since the measurement, the build and the
+  // visual check must render identical bytes -- so without this a dependency that failed once would come back
+  // refused for ever, however well the acquisition had since been fixed. The PINNED rows are kept: those bytes
+  // are already immutable and already what the design is measured against.
+  const cleared = await db.prepare(`DELETE FROM frontend_artifact_assets WHERE artifact_id = ? AND status = 'refused'`)
+    .bind(a.id).run();
+  await db.prepare(`UPDATE frontend_artifacts SET status = 'received', problems_json = '[]', updated_at = ? WHERE id = ? AND status IN ('rejected', 'imported')`)
     .bind(nowIso(), a.id).run();
   await setFrontendState(db, a.project_id, "validating_artifact");
   await audit(db, {
     actorUserId: o.actorId, actorKind: "user", action: "frontend_artifact.import_retried",
     subjectType: "frontendArtifact", subjectId: a.id, organizationId: a.organization_id,
-    details: { version: a.version, sha256: a.sha256.slice(0, 12), clearedProblems: safeProblemList(a.problems_json).slice(0, 10) },
+    details: {
+      version: a.version, sha256: a.sha256.slice(0, 12), previousStatus: a.status,
+      clearedProblems: safeProblemList(a.problems_json).slice(0, 10),
+      // What was missing, and therefore what this re-import is expected to acquire.
+      missingAssets: incomplete.map((m) => `${m.kind} ${m.url}`).slice(0, 10),
+      refusedAssetRowsCleared: cleared.meta?.changes ?? 0,
+    },
     ip: o.ip ?? null,
   });
   return { ok: true, artifact: (await getArtifact(db, a.id))! };

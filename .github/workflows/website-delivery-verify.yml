@@ -1,0 +1,97 @@
+name: Website delivery verification (deployed staging, browser)
+
+# Can a finished website actually reach the customer who is buying it?
+#
+# Everything else that covers the handover runs in-process against an in-memory database, and none of it can say
+# whether a customer can open the website: that needs the deployed Worker, the real snapshot in R2, a real signed
+# preview capability and two real sign-ins. The Founder's requirement is not "the assignment row was written" --
+# it is "the customer opened the website".
+#
+# It creates no customer and no project. It signs in as a demo CUSTOMER first, reads the projects that customer
+# already has, and delivers to one of those, so the customer/project pairing is a fact rather than an assumption.
+# A second customer account is used for the isolation checks, and a tampered preview capability is required to be
+# refused. One delivery row per run, on an existing project; the previous delivery is superseded, never deleted,
+# so a rollback stays available.
+#
+# Dispatch-only, so it runs against staging as it stands without redeploying.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: staging
+    # Job-level, after the `if:` (CREST-NEW-007): GitHub keeps one pending run per concurrency group and a run that
+    # never starts a job still holds the slot. A skipped job never enters the group.
+    concurrency:
+      group: deploy-staging   # it applies access SQL and writes staging rows
+      cancel-in-progress: false
+    env:
+      WRANGLER: npx --yes wrangler@4.149.0
+      STAGING_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.x"
+
+      # The Cloudflare token lives on the steps that need it, never at job level: the browser step below runs
+      # third-party packages and must not hold it (F-24, tests/workflow-security.test.ts).
+      - name: Resolve the staging D1 database id (same injection as deploy-staging.yml, CREST-GAP-065)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          id=$($WRANGLER d1 list --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s).find(d=>d.name==="crestmont-staging");process.stdout.write(r?r.uuid:"")})')
+          [ -n "$id" ] || { echo "::error::The crestmont-staging D1 database was not found."; exit 1; }
+          node -e 'const fs=require("fs");let t=fs.readFileSync("wrangler.toml","utf8");t=t.replace(/(database_name = "crestmont-staging", database_id = )""/, `$1"${process.argv[1]}"`);fs.writeFileSync("wrangler.toml",t)' "$id"
+          grep -q "$id" wrangler.toml && echo "Staging D1: $id"
+
+      - name: Apply staging access (same epoch, no rotation, so the same derived passwords)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_ROOT_KEY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACCESS_EPOCH: "3"
+          MFA_ENCRYPTION_KEY: ${{ secrets.STAGING_MFA_ENCRYPTION_KEY }}
+        run: node --no-warnings scripts/staging-access.ts --url "$STAGING_URL" --out access
+
+      - name: Deliver a finished website to an existing customer project
+        env:
+          E2E_BASE_URL: ${{ vars.STAGING_URL || 'https://crestmont-platform-staging.partners-df4.workers.dev' }}
+          E2E_ACCOUNTS_FILE: access/demo-accounts.md
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/.pw/node_modules/playwright/index.mjs
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw/browsers
+        run: |
+          npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
+          .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+          rc=0
+          node --no-warnings --test --test-concurrency=1 tests/e2e/staging-website-delivery.e2e.ts 2>&1 | tee delivery-e2e.log
+          rc=${PIPESTATUS[0]}
+          # A SKIPPED check is UNDETERMINED, and this run exists to determine something. Several of these tests
+          # skip themselves when the scanner or the runner has not answered within their patience, and node:test
+          # exits 0 for a skip -- so this workflow could report GREEN having established nothing about the upload
+          # path. The build-queue verification already learned this; the same guard belongs here.
+          skipped=$(grep -cE '^ok [0-9]+ - .* # SKIP' delivery-e2e.log || true)
+          if [ "${skipped:-0}" -gt 0 ]; then
+            echo "::error title=Website delivery::${skipped} check(s) could not be determined, which is not a pass:"
+            grep -E '^ok [0-9]+ - .* # SKIP' delivery-e2e.log | cut -c1-400
+            rc=1
+          fi
+          if ! grep -qE '^# fail 0$' delivery-e2e.log; then
+            echo "::error title=Website delivery::the test run did not report '# fail 0':"
+            grep -E '^# (tests|pass|fail|skipped) ' delivery-e2e.log || echo "  (no counts were printed at all)"
+            rc=1
+          fi
+          exit "$rc"
+
+      - name: Remove the credential files
+        if: always()
+        run: rm -f access/private.json access/access.json access/demo-accounts.md access/README.md

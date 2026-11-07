@@ -4,6 +4,8 @@ import type { Router } from "../lib/router.ts";
 import type { AppContext } from "../app/context.ts";
 import { html, formatCents, formatDate, formatDateTime, label, safeUrl, type SafeHtml } from "../lib/html.ts";
 import { HttpError, htmlResponse, redirect, str } from "../app/http.ts";
+import { customerWebsiteSection } from "./website-delivery.ts";
+import * as WD from "../services/website-delivery.ts";
 import { requireCustomerOrg, requireStaff } from "../app/app.ts";
 import { appLayout, publicLayout } from "../ui/layout.ts";
 import { portalNav, staffNav } from "./nav.ts";
@@ -195,7 +197,12 @@ ${notes.length ? html`<ul class="timeline">${notes.map((n) => { const href = not
     if (unpaid) blockers.push(`${unpaid} open invoice${unpaid === 1 ? "" : "s"} for this project`);
     const lastDue = milestones.map((m) => m.due_at).filter(Boolean).sort().at(-1) ?? null;
     const pct = tc.total ? Math.round((tc.done / tc.total) * 100) : 0;
+    // The finished website, when one has been assigned to this project and somebody has made it visible. The
+    // section mints its own preview link each time this page is read, so a link cannot outlive the page it came
+    // from, and it is only ever minted for a delivery on a project this customer's organisation owns.
+    const website = await customerWebsiteSection(ctx, org.organizationId, proj.id);
     const body = html`${pageHead(proj.name, undefined, `${packageName(proj.product_id)} · ${proj.id}`)}${projectTabs(ctx, proj.id)}
+${website}
 <div class="kpis">${kpi("Status", P.labelStatus(proj.status))}${kpi("Task progress", tc.total ? `${tc.done} / ${tc.total}` : "Not planned yet", tc.total ? `${pct}% complete` : "Your team adds tasks after scope review", tc.total ? pct : undefined)}
 ${kpi("Revisions used", `${usage.used} / ${proj.revision_allowance}`, usage.total > usage.used ? `${usage.total - usage.used} billable round(s)` : "Included rounds")}
 ${kpi("Estimated completion", lastDue ? fmtDay(lastDue) : proj.target_launch_at ? fmtDay(proj.target_launch_at) : "Not scheduled yet", lastDue ? "Based on milestone due dates" : undefined)}</div>
@@ -234,6 +241,21 @@ ${rec && !done ? html`<p class="faint">Draft last saved ${formatDateTime(rec.upd
 <div class="form-actions">${button("Save draft", { variant: "secondary", name: "intent", value: "draft" })}${button("Submit onboarding", { name: "intent", value: "submit" })}</div></form>`}`;
     return page(ctx, "Onboarding", body, status);
   };
+  // The customer's verdict on the website they were shown. Never inferred from visibility: "they can see it" is
+  // not "they approved it", which is why the service keeps those in different columns.
+  r.post("/portal/projects/:id/website/decision", async (ctx, p) => {
+    const org = requireCustomerOrg(ctx);
+    await P.getOrgProject(ctx.db, org.organizationId, p.id);
+    const form = await ctx.form();
+    const decision = String(form.get("decision") ?? "approved") === "revision_requested" ? "revision_requested" : "approved";
+    const r0 = await WD.recordCustomerDecision(ctx.db, {
+      organizationId: org.organizationId, projectId: p.id, decision,
+      actorId: ctx.actor?.userId ?? "", note: String(form.get("note") ?? "").trim() || null, ip: ctx.ip ?? null,
+    });
+    if (!r0.ok) throw new HttpError(409, r0.why);
+    return redirect(ctx, `/portal/projects/${p.id}`);
+  });
+
   r.get("/portal/projects/:id/onboarding", async (ctx, p) => onboardingPage(ctx, requireCustomerOrg(ctx), p.id));
   r.post("/portal/projects/:id/onboarding", async (ctx, p) => {
     const org = requireCustomerOrg(ctx);

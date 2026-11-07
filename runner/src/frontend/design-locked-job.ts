@@ -83,11 +83,19 @@ export interface CycleRecord {
   /** What this cycle was asked to do. */
   intent: "integration" | "repair";
   conformance: { ok: boolean; violations: string[]; violationDetails?: string[] };
-  functional: { ran: boolean; ok: boolean; detail: string };
-  visual: { ran: boolean; ok: boolean; detail: string };
+  /** `failed` and `undetermined` are what progress is measured by; `ok` cannot answer "did this cycle help". */
+  functional: { ran: boolean; ok: boolean; detail: string; failed?: number; undetermined?: number };
+  visual: { ran: boolean; ok: boolean; detail: string; findings?: number };
   changedFiles: number;
   /** Did this cycle move anything? A cycle that fixes nothing does not earn another. */
   progressed: boolean;
+  /**
+   * A gate this cycle BROKE that the last one passed, named.
+   *
+   * Phase 4's rule in executable form: a repair that improves functionality and damages the approved design is
+   * not an improvement, and the loop has to see it rather than counting it as progress.
+   */
+  regressed?: string[];
 }
 
 export interface DesignLockedResult {
@@ -356,6 +364,8 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
   // ── 6. Model B, then verification, then bounded repair ────────────────────────────────────────────────────
   let prompt = integrationPrompt({ manifest, baseline, report, outputRoot: built.outputRoot, framework: ingest.framework });
   let previousViolations: string[] = [];
+  /** What the three gates measured last cycle, so "did this help" is a comparison and not a guess. */
+  let previous: { violations: number; functional: number; visual: number } | null = null;
 
   for (let cycle = 1; cycle <= MAX_REPAIR_CYCLES + 1; cycle++) {
     if (d.stop.reason) { problems.push(`stopped: ${d.stop.reason}`); break; }
@@ -388,8 +398,21 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
     // reads, so it is kept beside them rather than thrown away: three bare "table-not-defined" told nobody which
     // three tables, and that is what the gate's whole value depends on saying.
     const violationDetails = broken.map((f) => (f.file ? `${f.file}: ` : "") + f.detail);
-    const progressed = cycle === 1 || violations.length < previousViolations.length
-      || violations.some((v) => !previousViolations.includes(v)) === false && violations.length < previousViolations.length;
+    // PROGRESS, ACROSS ALL THREE GATES.
+    //
+    // This used to be, in effect, `violations.length < previousViolations.length` -- the only clause that could
+    // ever be true, since the third was subsumed by the second. So progress meant "fewer CONFORMANCE violations"
+    // and nothing else. A build whose contract already conformed and whose functional or visual gate failed had
+    // zero violations in every cycle, scored no progress from cycle 2, and was stopped after a single repair
+    // attempt with "changed nothing measurable" -- even if that attempt had fixed three of four failing checks.
+    // `nextPrompt` was already writing functional and visual repair briefs the loop would not let it act on.
+    //
+    // So each gate reports a count and progress is movement in any of them with no movement backwards. A gate
+    // that was passing and now fails is a REGRESSION, named rather than averaged away: Phase 4's rule is that a
+    // repair which improves functionality and damages the approved design has not improved anything.
+    const score = gateScore(conf.ok, violations, functional, visual);
+    const { progressed: moved, regressed } = measureProgress(previous, score, violations, previousViolations);
+    const progressed = cycle === 1 || moved;
 
     cycles.push({
       cycle, intent,
@@ -397,7 +420,9 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
       functional, visual,
       changedFiles,
       progressed: cycle === 1 ? true : progressed,
+      regressed: regressed.length ? regressed : undefined,
     });
+    for (const r of regressed) note(`cycle ${cycle}: ${r}`);
 
     if (conf.ok && functional.ok && visual.ok) {
       out.ok = true;
@@ -407,7 +432,9 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
 
     // A cycle that fixed nothing does not earn another: that is how an afternoon disappears.
     if (cycle > 1 && !progressed) {
-      problems.push(`repair cycle ${cycle} changed nothing measurable (${violations.length} violation(s) before and after); stopping rather than repeating it`);
+      problems.push(regressed.length
+        ? `repair cycle ${cycle} made things worse rather than better: ${regressed.join("; ")}; stopping rather than repairing on top of it`
+        : `repair cycle ${cycle} changed nothing measurable (contract ${score.violations}, functional ${score.functional}, visual ${score.visual} — the same as before); stopping rather than repeating it`);
       break;
     }
     if (cycle === MAX_REPAIR_CYCLES + 1) {
@@ -416,6 +443,7 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
     }
 
     previousViolations = violations;
+    previous = score;
     const next = nextPrompt(conf, functional, visual, cycle);
     if (!next) {
       problems.push("the implementation does not pass, and there is nothing specific enough to ask for a repair of");
@@ -468,6 +496,7 @@ async function measureVisual(
     detail: ok
       ? `the approved design held across ${v.drift.compared} page view(s)`
       : visualSummary(drifted, v.stateChanges.length),
+    findings: drifted.length + v.stateChanges.length,
   };
 }
 
@@ -539,13 +568,74 @@ async function runFunctional(d: DesignLockedDeps, manifest: IntegrationManifest 
 
   // A model verifier that FAILED is evidence against, so it fails the gate even when the contract checks passed.
   if (authored && !corroborated && verdict.ok) {
-    return { ran: true, ok: false, detail: `${verdict.detail}${corroboration}` };
+    return { ran: true, ok: false, detail: `${verdict.detail}${corroboration}`, failed: verdict.failed, undetermined: verdict.undetermined };
   }
-  return { ran: full.ran, ok: full.ok, detail: `${full.detail}${corroboration}` };
+  return { ran: full.ran, ok: full.ok, detail: `${full.detail}${corroboration}`, failed: full.failed, undetermined: full.undetermined };
 }
 
 
 /** What to ask for next, built from whichever gate failed. */
+/** What the three gates measured this cycle, as comparable numbers. Lower is better in every one. */
+export interface GateScore { violations: number; functional: number; visual: number }
+
+export function gateScore(
+  _conformanceOk: boolean,
+  violations: readonly string[],
+  functional: CycleRecord["functional"],
+  visual: CycleRecord["visual"],
+): GateScore {
+  return {
+    violations: violations.length,
+    // An undetermined check counts against the score: it is not a pass, so resolving one is progress.
+    functional: (functional.failed ?? (functional.ok ? 0 : 1)) + (functional.undetermined ?? 0),
+    visual: visual.findings ?? (visual.ok ? 0 : 1),
+  };
+}
+
+/**
+ * Did this cycle help?
+ *
+ * The question the repair loop lives or dies by, and it used to be answered by one clause:
+ * `violations.length < previousViolations.length`. (The expression had three, and the third was subsumed by the
+ * second, so only that one could ever be true.) Progress therefore meant "fewer CONFORMANCE violations" and
+ * nothing else -- so a build whose contract already conformed and whose functional or visual gate failed scored
+ * no progress from the second cycle onwards and was stopped after ONE repair attempt, even if that attempt had
+ * fixed three of four failing acceptance checks. `nextPrompt` was already writing functional and visual repair
+ * briefs that the loop would not let it act on.
+ *
+ * Now: movement in ANY gate is progress, movement backwards in any gate is a REGRESSION, and a regression
+ * cancels an improvement elsewhere. That last rule is Phase 4's in executable form -- a repair that improves
+ * functionality and damages the approved design has not improved anything.
+ */
+export function measureProgress(
+  previous: GateScore | null,
+  now: GateScore,
+  violations: readonly string[],
+  previousViolations: readonly string[],
+): { progressed: boolean; regressed: string[] } {
+  if (!previous) return { progressed: true, regressed: [] };
+
+  const regressed: string[] = [];
+  let improved = false;
+  for (const [gate, a, b] of [
+    ["contract conformance", now.violations, previous.violations],
+    ["functional acceptance", now.functional, previous.functional],
+    ["visual fidelity", now.visual, previous.visual],
+  ] as const) {
+    if (a < b) improved = true;
+    if (a > b) regressed.push(`${gate} got worse (${b} → ${a})`);
+  }
+
+  // A swap -- the same number of violations but a different set -- is not progress. Saying so stops the loop
+  // trading one defect for another until the budget runs out.
+  if (!improved && !regressed.length && now.violations === previous.violations
+    && violations.some((v) => !previousViolations.includes(v))) {
+    regressed.push(`the conformance violations changed without reducing (${previousViolations.length} before, ${violations.length} after)`);
+  }
+
+  return { progressed: improved && regressed.length === 0, regressed };
+}
+
 function nextPrompt(conf: ConformanceReport, functional: CycleRecord["functional"], visual: CycleRecord["visual"], cycle: number): string | null {
   if (!conf.ok) return repairBrief(conf, { attempt: cycle, maxAttempts: MAX_REPAIR_CYCLES });
 

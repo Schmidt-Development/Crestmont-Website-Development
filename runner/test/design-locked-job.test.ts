@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { MAX_REPAIR_CYCLES, runDesignLockedJob, writeEvidence } from "../src/frontend/design-locked-job.ts";
+import { MAX_REPAIR_CYCLES, gateScore, measureProgress, runDesignLockedJob, writeEvidence } from "../src/frontend/design-locked-job.ts";
 import type { DesignLockedDeps } from "../src/frontend/design-locked-job.ts";
 import { zipDirectory } from "./fixtures/zip-writer.ts";
 import { RunTracker, StopSwitch } from "../src/agent.ts";
@@ -461,4 +461,58 @@ test("[DLJ-12] an approved page that stops rendering is a failure, not a quieter
     r.problems.some((p) => /a-page-that-is-gone.*no longer render at all/.test(p)),
     `a missing approved page is named: ${JSON.stringify(r.problems)}`,
   );
+});
+
+test("[DLJ-13] progress is movement in ANY of the three gates, and a regression cancels it", () => {
+  // THE DEFECT. This was `violations.length < previousViolations.length` -- the only clause of three that could
+  // ever be true, the others being subsumed by it. So "did this cycle help" meant "are there fewer CONTRACT
+  // violations", and nothing else. A build whose contract already conformed and whose functional or visual gate
+  // failed scored zero violations in every cycle, no progress from cycle 2, and was stopped after ONE repair
+  // attempt with "changed nothing measurable" -- even if that attempt had fixed three of four failing checks.
+  // `nextPrompt` was already writing functional and visual repair briefs the loop would not let it act on.
+  const none: string[] = [];
+
+  // The exact historical case: contract clean throughout, functional improving.
+  const before = { violations: 0, functional: 4, visual: 0 };
+  const after = { violations: 0, functional: 1, visual: 0 };
+  const r1 = measureProgress(before, after, none, none);
+  assert.equal(r1.progressed, true, "fixing three of four failing checks is progress");
+  assert.deepEqual(r1.regressed, []);
+
+  // Visual drift reducing is progress too.
+  assert.equal(measureProgress({ violations: 2, functional: 0, visual: 5 }, { violations: 2, functional: 0, visual: 2 }, ["a", "b"], ["a", "b"]).progressed, true);
+
+  // Nothing moved: not progress, and the loop is right to stop.
+  assert.equal(measureProgress(before, before, none, none).progressed, false);
+
+  // PHASE 4's RULE. A repair that improves functionality and damages the approved design has not improved
+  // anything, and the regression is named rather than averaged away.
+  const traded = measureProgress({ violations: 0, functional: 4, visual: 0 }, { violations: 0, functional: 0, visual: 3 }, none, none);
+  assert.equal(traded.progressed, false, "functionality gained at the design's expense is not progress");
+  assert.equal(traded.regressed.length, 1);
+  assert.match(traded.regressed[0], /visual fidelity got worse \(0 → 3\)/);
+
+  // A swap -- the same count, a different set -- is not progress either, or the loop trades one defect for
+  // another until the budget is gone.
+  const swapped = measureProgress({ violations: 1, functional: 0, visual: 0 }, { violations: 1, functional: 0, visual: 0 }, ["b"], ["a"]);
+  assert.equal(swapped.progressed, false);
+  assert.match(swapped.regressed[0], /changed without reducing/);
+
+  // The first cycle has nothing to compare with, and is never judged as making no progress.
+  assert.deepEqual(measureProgress(null, after, none, none), { progressed: true, regressed: [] });
+});
+
+test("[DLJ-14] an undetermined check counts against the score, so resolving one is progress", () => {
+  // Undetermined is not a pass -- the whole acceptance design rests on that -- so it has to count as something
+  // the repair loop can reduce. Otherwise a cycle that turns four unverifiable criteria into four verified
+  // passes would score as "nothing changed".
+  const withFour = gateScore(true, [], { ran: true, ok: false, detail: "", failed: 0, undetermined: 4 }, { ran: true, ok: true, detail: "", findings: 0 });
+  assert.equal(withFour.functional, 4);
+  const withOne = gateScore(true, [], { ran: true, ok: false, detail: "", failed: 1, undetermined: 0 }, { ran: true, ok: true, detail: "", findings: 0 });
+  assert.equal(withOne.functional, 1);
+  assert.equal(measureProgress(withFour, withOne, [], []).progressed, true);
+
+  // A gate that reported no counts at all still scores: a failure is one, a pass is none.
+  assert.equal(gateScore(true, [], { ran: false, ok: false, detail: "" }, { ran: false, ok: false, detail: "" }).functional, 1);
+  assert.equal(gateScore(true, [], { ran: true, ok: true, detail: "" }, { ran: true, ok: true, detail: "" }).visual, 0);
 });

@@ -18,6 +18,7 @@ export function customerPostFields(w: World, t: Tenant): Record<string, () => Fi
   return {
     "POST /portal/notifications/read": () => ({}),
     "POST /portal/projects/:id/onboarding": () => ({ intent: "draft", business_name: `${t.marker} onboarding answer 2` }),
+    "POST /portal/projects/:id/website/decision": () => ({ decision: "approved", note: `${t.marker} looks right` }),
     "POST /portal/files": () => ({ file: pdf(`${t.marker}-upload.pdf`), folder: "Uploads", project_id: t.ids.project! }),
     "POST /portal/projects/:id/files": () => ({ file: pdf(`${t.marker}-project-upload.pdf`) }),
     "POST /portal/files/:id/replace": () => ({ file: pdf(`${t.marker}-v2.pdf`) }),
@@ -148,6 +149,19 @@ export function auditScenarios(w: World): Scenario[] {
 
     // ── Customer portal (tenant A administrator) ──
     cust("POST /portal/projects/:id/onboarding", { setup: async () => { await w.db.prepare(`UPDATE projects SET status = 'awaiting_onboarding' WHERE id = ?`).bind(a.ids.project).run(); } }),
+    // The customer approving the website delivered to their project. It has to be visible to them for this to be
+    // a real act, and the decision columns are deliberately separate from visibility: being able to see a website
+    // is not approving it.
+    cust("POST /portal/projects/:id/website/decision", { setup: async () => {
+      const at = new Date().toISOString();
+      await w.db.prepare(`UPDATE website_deliveries SET superseded_by = NULL WHERE project_id = ?`).bind(a.ids.project).run();
+      await w.db.prepare(`DELETE FROM website_deliveries WHERE project_id = ? AND id <> ?`)
+        .bind(a.ids.project, w.ids.websiteDelivery).run();
+      await w.db.prepare(`UPDATE website_deliveries SET superseded_at = NULL, superseded_by = NULL,
+          visible_at = ?, visible_by = ?, status = 'customer_visible',
+          customer_reviewed_at = NULL, customer_decision = NULL WHERE id = ?`)
+        .bind(at, w.staff.owner.id, w.ids.websiteDelivery).run();
+    } }),
     cust("POST /portal/files"),
     cust("POST /portal/projects/:id/files"),
     cust("POST /portal/files/:id/move"),
@@ -517,6 +531,63 @@ export function auditScenarios(w: World): Scenario[] {
       setup: async (w) => {
         await w.db.prepare(`UPDATE frontend_artifacts SET status = 'imported', problems_json = '[]' WHERE id = ?`)
           .bind(w.ids.frontendArtifact).run();
+      },
+    },
+    // Delivering a finished website to an existing customer project. Each of these resets the delivery rows for
+    // tenant A's project to the state it needs, because they share one world and run in order -- the lesson the
+    // retry-import scenario learned when the upload scenario put a newer artifact in front of it.
+    {
+      key: "POST /staff/builds/:id/deliver/:deliveryId/visible",
+      fields: () => ({}),
+      setup: async (w) => {
+        await w.db.prepare(`UPDATE website_deliveries SET superseded_by = NULL WHERE project_id = ?`)
+          .bind(w.a.ids.project).run();
+        await w.db.prepare(`DELETE FROM website_deliveries WHERE project_id = ? AND id <> ?`)
+          .bind(w.a.ids.project, w.ids.websiteDelivery).run();
+        await w.db.prepare(`UPDATE website_deliveries SET superseded_at = NULL, superseded_by = NULL,
+            visible_at = NULL, visible_by = NULL, status = 'assigned' WHERE id = ?`)
+          .bind(w.ids.websiteDelivery).run();
+      },
+    },
+    {
+      key: "POST /staff/projects/:projectId/deliver/rollback",
+      // Rolling back needs a version to go back to, so the scenario leaves one superseded behind the live one.
+      fields: () => ({ deliveryId: "wdl_matrixpast00000000000001" }),
+      setup: async (w) => {
+        const at = new Date().toISOString();
+        await w.db.prepare(`UPDATE website_deliveries SET superseded_by = NULL WHERE project_id = ?`)
+          .bind(w.a.ids.project).run();
+        await w.db.prepare(`DELETE FROM website_deliveries WHERE project_id = ? AND id <> ?`)
+          .bind(w.a.ids.project, w.ids.websiteDelivery).run();
+        await w.db.prepare(`UPDATE website_deliveries SET superseded_at = NULL, superseded_by = NULL,
+            visible_at = ?, visible_by = ?, status = 'customer_visible' WHERE id = ?`)
+          .bind(at, w.staff.owner.id, w.ids.websiteDelivery).run();
+        await w.db.prepare(`INSERT INTO website_deliveries (id, project_id, organization_id, job_id, source_project_id,
+            revision_attempt, revision_cycle, status, assigned_by, assigned_at, superseded_at, created_at)
+          VALUES ('wdl_matrixpast00000000000001', ?, ?, ?, ?, 1, 0, 'superseded', ?, ?, ?, ?)`)
+          .bind(w.a.ids.project, w.a.ids.org, w.ids.buildJob, w.a.ids.project, w.staff.owner.id, at, at, at).run();
+      },
+    },
+    {
+      key: "POST /staff/builds/:id/deliver",
+      // Assigning the finished build to tenant A's own project. There is a live delivery in front of it, so this
+      // also exercises the supersede path rather than only the first-ever assignment.
+      fields: (w) => ({ projectId: w.a.ids.project!, visible: "yes" }),
+      setup: async (w) => {
+        await w.db.prepare(`UPDATE website_deliveries SET superseded_by = NULL WHERE project_id = ?`)
+          .bind(w.a.ids.project).run();
+        await w.db.prepare(`DELETE FROM website_deliveries WHERE project_id = ? AND id <> ?`)
+          .bind(w.a.ids.project, w.ids.websiteDelivery).run();
+        await w.db.prepare(`UPDATE website_deliveries SET superseded_at = NULL, superseded_by = NULL WHERE id = ?`)
+          .bind(w.ids.websiteDelivery).run();
+        // Eligibility reads the newest scorecard: an unverified one, or one with design blockers, means the build
+        // is not finished. The fixture build has no real scorecard, so any seeded row is made a passing one.
+        await w.db.prepare(`UPDATE build_quality SET verified = 1, design_blockers_json = '[]' WHERE job_id = ?`)
+          .bind(w.ids.buildJob).run();
+        // An earlier scenario cancels this build, and only a FINISHED build may be delivered to a customer -- so
+        // the precondition is restored here rather than assumed from the seed.
+        await w.db.prepare(`UPDATE build_jobs SET state = 'ready_for_review' WHERE id = ?`).bind(w.ids.buildJob).run();
+        await w.db.prepare(`DELETE FROM website_deliveries WHERE id = 'wdl_matrixpast00000000000001'`).run();
       },
     },
     {
