@@ -27,6 +27,7 @@ import type { ApiContract, ApiRequirement, IntegrationManifest, ManifestContract
 export const ACCEPTANCE_DIR = ".crestmont/acceptance";
 export const DRIVER = `${ACCEPTANCE_DIR}/contract-acceptance.mjs`;
 export const PLAN = `${ACCEPTANCE_DIR}/plan.json`;
+export const RESULTS = `${ACCEPTANCE_DIR}/results.json`;
 
 export interface AcceptanceCheck {
   id: string;
@@ -47,6 +48,7 @@ export interface AcceptancePlan {
     success?: number;
     invalid?: number;
     unauthenticated?: number;
+    requestExample?: Record<string, unknown>;
   }[];
 }
 
@@ -84,7 +86,7 @@ export function acceptancePlan(repo: string, manifest: IntegrationManifest & Man
     method: (a.method ?? "GET").toUpperCase(),
     path: a.path,
     auth: a.auth ?? "public",
-    ...(isContract(a) ? { success: a.success, invalid: a.invalid, unauthenticated: a.unauthenticated } : {}),
+    ...(isContract(a) ? { success: a.success, invalid: a.invalid, unauthenticated: a.unauthenticated, requestExample: a.requestExample } : {}),
   }));
   return { start: startCommand(repo, manifest), port, endpoints };
 }
@@ -112,12 +114,31 @@ if (!plan.start) {
 }
 
 const base = "http://127.0.0.1:" + plan.port;
-const child = spawn(plan.start[0], plan.start.slice(1), {
+// Its own process GROUP. npm run start is a wrapper: a signal sent to npm does not reliably reach the server npm
+// started, and that server keeps the port. Stopping the group stops what it started, which is what makes the
+// restart check below mean anything (and what stops a leftover server breaking the next run with EADDRINUSE).
+const SPAWN = {
   cwd: process.cwd(),
   env: { ...process.env, PORT: String(plan.port), NODE_ENV: "test" },
   stdio: ["ignore", "pipe", "pipe"],
   shell: process.platform === "win32",
-});
+  detached: process.platform !== "win32",
+};
+const stopTree = async (proc) => {
+  if (!proc || proc.exitCode !== null) return;
+  try {
+    if (process.platform === "win32") spawn("taskkill", ["/pid", String(proc.pid), "/t", "/f"], { stdio: "ignore" });
+    else process.kill(-proc.pid, "SIGTERM");
+  } catch { try { proc.kill("SIGTERM"); } catch { /* already gone */ } }
+  for (let i = 0; i < 40 && proc.exitCode === null; i++) await new Promise((r) => setTimeout(r, 250));
+  if (proc.exitCode === null) {
+    try {
+      if (process.platform !== "win32") process.kill(-proc.pid, "SIGKILL");
+      else proc.kill("SIGKILL");
+    } catch { /* already gone */ }
+  }
+};
+const child = spawn(plan.start[0], plan.start.slice(1), SPAWN);
 let log = "";
 child.stdout.on("data", (d) => { log += d; });
 child.stderr.on("data", (d) => { log += d; });
@@ -174,17 +195,131 @@ if (!up) {
                           : "declared " + e.invalid + " for an invalid request, answered " + bad);
     }
 
-    // Business flows behind a credential are not invented here.
-    if (e.auth !== "public" && typeof e.success === "number") {
-      add(id + " :: authenticated success", false,
-        "needs a credential the contract does not carry, so the declared " + e.success + " was not exercised", true);
+  }
+
+  // ---- a session of the driver's own, so authenticated behaviour can be exercised for real ----
+  //
+  // The credentials are generated here and never come from the contract. requestExample says what shape a
+  // valid body has; {{email}} and {{password}} are substituted, so a manifest never carries a secret.
+  const reg = plan.endpoints.find((x) => x.auth === "public" && x.method === "POST" && /register|signup|join/i.test(x.path));
+  const login = plan.endpoints.find((x) => x.auth === "public" && x.method === "POST" && /login|session|signin/i.test(x.path));
+  const unique = "acc-" + Date.now() + "-" + Math.random().toString(16).slice(2, 8);
+  const who = { email: unique + "@crestmont.test", password: "Driver-" + unique + "-Aa1!" };
+  const other = { email: "other-" + unique + "@crestmont.test", password: "Other-" + unique + "-Aa1!" };
+
+  const fill = (ex, me) => JSON.parse(JSON.stringify(ex).replaceAll("{{email}}", me.email).replaceAll("{{password}}", me.password));
+  const post = async (p, bodyObj, cookie) => {
+    try {
+      const res = await fetch(base + p, {
+        method: "POST", signal: AbortSignal.timeout(10000),
+        headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) },
+        body: JSON.stringify(bodyObj),
+      });
+      return { status: res.status, cookie: res.headers.get("set-cookie") ?? "" };
+    } catch { return { status: 0, cookie: "" }; }
+  };
+
+  let session = "";
+  if (!reg || !reg.requestExample || !login || !login.requestExample) {
+    add("auth:session", false,
+      "the contract declares no register/login endpoint with a requestExample, so the driver could not obtain a session and no authenticated behaviour was exercised", true);
+  } else {
+    const made = await post(concrete(reg.path), fill(reg.requestExample, who), "");
+    add("auth:register", made.status === (reg.success ?? 201),
+      made.status === (reg.success ?? 201) ? "registered an account of the driver's own (" + made.status + ")"
+        : "declared " + (reg.success ?? 201) + " for a valid registration, answered " + made.status);
+    await post(concrete(reg.path), fill(reg.requestExample, other), "");
+
+    const got = await post(concrete(login.path), fill(login.requestExample, who), "");
+    const raw = (got.cookie || "").split(",").map((c) => c.split(";")[0].trim()).filter(Boolean).join("; ");
+    session = raw;
+    add("auth:login", got.status === (login.success ?? 200) && !!raw,
+      got.status === (login.success ?? 200) && raw ? "signed in and received a session cookie"
+        : "login answered " + got.status + (raw ? "" : " and set no cookie"));
+
+    // The cookie must not be readable by a script, or a cross-site page could send it.
+    const flags = (got.cookie || "").toLowerCase();
+    add("auth:cookie-flags", flags.includes("httponly") && flags.includes("samesite"),
+      flags.includes("httponly") && flags.includes("samesite") ? "the session cookie is HttpOnly and SameSite"
+        : "the session cookie is missing HttpOnly and/or SameSite");
+
+    // Wrong password must be refused, with the same answer an unknown address gets.
+    const wrong = await post(concrete(login.path), fill(login.requestExample, { email: who.email, password: "not-the-password-Aa1!" }), "");
+    const unknown = await post(concrete(login.path), fill(login.requestExample, { email: "nobody-" + unique + "@crestmont.test", password: who.password }), "");
+    add("auth:refuses-wrong-password", wrong.status === (login.invalid ?? 401),
+      "a wrong password answered " + wrong.status + " (declared " + (login.invalid ?? 401) + ")");
+    add("auth:same-answer-for-unknown-email", wrong.status === unknown.status,
+      wrong.status === unknown.status ? "an unknown address gets the same answer as a wrong password"
+        : "an unknown address answered " + unknown.status + " and a wrong password " + wrong.status + ", which tells an attacker which addresses are registered");
+  }
+
+  if (session) {
+    const get = async (p, cookie) => {
+      try { return (await fetch(base + p, { headers: { cookie }, signal: AbortSignal.timeout(8000) })).status; } catch { return 0; }
+    };
+    for (const e of plan.endpoints) {
+      if (e.method !== "GET" || typeof e.success !== "number") continue;
+      const p = concrete(e.path);
+      const id = e.method + " " + e.path;
+      const status = await get(p, session);
+
+      if (e.auth === "customer") {
+        add(id + " :: signed-in success", status === e.success,
+          status === e.success ? "answered " + status + " for a signed-in caller as declared"
+            : "declared " + e.success + " for a signed-in caller, answered " + status);
+      } else if (e.auth === "staff" || e.auth === "admin") {
+        // A customer session must be REFUSED, not handed an empty list: an empty list is indistinguishable from
+        // a quiet day, which is how a hole stays hidden.
+        add(id + " :: refuses a customer session", status === 403,
+          status === 403 ? "a customer session is refused with 403"
+            : "a staff endpoint answered " + status + " to a customer session" + (status === 200 ? " — a customer can read staff data" : ""));
+      }
     }
+
+    // Does the session survive the application restarting? A session held only in memory is not a session.
+    //
+    // Stopping it properly matters more than it looks: npm run start is a wrapper, SIGTERM reaches npm and the
+    // node process it spawned keeps the port, so a second start binds nothing and the check reports "did not come
+    // back up" when the application was fine all along. So: stop, then WAIT FOR THE PORT TO BE FREE before
+    // starting again, and say which of the two failed if it does.
+    const free = async () => {
+      try { await fetch(base + "/", { signal: AbortSignal.timeout(1000) }); return false; } catch { return true; }
+    };
+    await stopTree(child);
+    let released = false;
+    for (let i = 0; i < 40 && !released; i++) { await sleep(250); released = await free(); }
+    if (!released) {
+      add("persistence:stops-cleanly", false,
+        "the application kept answering on port " + plan.port + " after being stopped, so a restart could not be tested (on a shell wrapper, a signal may not reach the server it started)", true);
+    }
+
+    const again = spawn(plan.start[0], plan.start.slice(1), SPAWN);
+    let backLog = "";
+    again.stdout.on("data", (d) => { backLog += d; });
+    again.stderr.on("data", (d) => { backLog += d; });
+    let back = false;
+    for (let i = 0; i < 60 && !back; i++) {
+      await sleep(500);
+      if (again.exitCode !== null) break;
+      try { await fetch(base + "/", { signal: AbortSignal.timeout(1500) }); back = true; } catch { /* not yet */ }
+    }
+    const me = plan.endpoints.find((x) => x.auth === "customer" && x.method === "GET" && /\/me$|session/i.test(x.path));
+    if (!back) {
+      add("persistence:session-survives-restart", false,
+        "the application did not come back up within 30s, so persistence could not be established: " + backLog.slice(-300).replace(/\s+/g, " "), true);
+    } else if (!me) {
+      add("persistence:session-survives-restart", false, "the contract declares no endpoint that reports the signed-in account, so a surviving session could not be observed", true);
+    } else {
+      const after = await get(concrete(me.path), session);
+      add("persistence:session-survives-restart", after === (me.success ?? 200),
+        after === (me.success ?? 200) ? "the session still worked after the application restarted"
+          : "after a restart the session answered " + after + ", so sessions do not survive one");
+    }
+    await stopTree(again);
   }
 }
 
-child.kill("SIGTERM");
-await sleep(300);
-if (child.exitCode === null) child.kill("SIGKILL");
+await stopTree(child);
 
 console.log(JSON.stringify({ results }));
 process.exit(results.some((r) => !r.ok) ? 1 : 0);
@@ -207,6 +342,40 @@ export function readAcceptanceOutput(stdout: string): AcceptanceCheck[] {
     const parsed = JSON.parse(line) as { results?: AcceptanceCheck[] };
     return Array.isArray(parsed.results) ? parsed.results : [];
   } catch { return []; }
+}
+
+/**
+ * One check per written acceptance criterion that nothing executed established.
+ *
+ * The contract driver proves the API CONTRACT: each declared route is served, an anonymous caller is refused with
+ * exactly the declared status, a malformed request is refused with exactly the declared status, and — once it has
+ * registered and signed in as itself — that a signed-in caller gets the declared success and a staff endpoint
+ * refuses a customer session.
+ *
+ * The manifest's per-operation `acceptance` lines are narrower than that: "a submitted request is stored as a row
+ * in appointments with status 'requested'" names a table and a value. Nothing above reads the database, so those
+ * are reported one by one as UNDETERMINED with their own text, rather than rolled into a single sentence. A
+ * person reading the build record should be able to see WHICH criteria were not established, because that is the
+ * list the six-artifact campaign has to work through.
+ */
+export function coverageChecks(manifest: { operations: { id: string; acceptance: string[] }[] }): AcceptanceCheck[] {
+  return manifest.operations.flatMap((op) =>
+    op.acceptance.map((text, i) => ({
+      id: `${op.id} :: acceptance[${i}]`,
+      ok: false,
+      undetermined: true,
+      detail: `not established by any executed check: ${text}`,
+    })),
+  );
+}
+
+/** The full check list, written beside the plan so a later run can be compared with this one. */
+export function writeAcceptanceResults(repo: string, checks: readonly AcceptanceCheck[]): string {
+  mkdirSync(path.join(repo, ACCEPTANCE_DIR), { recursive: true });
+  const counts = { pass: 0, fail: 0, undetermined: 0 };
+  for (const c of checks) counts[c.undetermined ? "undetermined" : c.ok ? "pass" : "fail"]++;
+  writeFileSync(path.join(repo, RESULTS), JSON.stringify({ at: new Date().toISOString(), counts, checks }, null, 2));
+  return RESULTS;
 }
 
 /**

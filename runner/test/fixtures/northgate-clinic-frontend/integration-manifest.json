@@ -7,72 +7,214 @@
     "packageId": "business",
     "scope": "Make the approved Northgate Dental frontend work: accounts, roles, appointment booking and the two dashboards. The design is finished and must not change."
   },
-  "runtime": { "framework": "vite", "node": "22", "deploy": "static frontend plus a local API process" },
-  "auth": { "required": true, "roles": ["customer", "staff"], "provider": "own" },
+  "runtime": {
+    "framework": "vite",
+    "node": "22",
+    "deploy": "static frontend plus a local API process"
+  },
+  "auth": {
+    "required": true,
+    "roles": [
+      "customer",
+      "staff"
+    ],
+    "provider": "own"
+  },
   "persistence": {
     "enforcement": "any",
     "technology": "sqlite",
     "durable": true,
-    "evidence": ["a database file on disk", "rows that survive restarting the application"]
+    "evidence": [
+      "a database file on disk",
+      "rows that survive restarting the application"
+    ]
   },
   "projectConfig": {
-    "scripts": { "dev": "preserve", "build": "preserve", "preview": "preserve" },
-    "allowedNewScripts": ["start", "api", "migrate"],
-    "allowedDependencies": ["better-sqlite3", "node:sqlite", "express", "cookie", "bcrypt", "argon2"]
+    "scripts": {
+      "dev": "preserve",
+      "build": "preserve",
+      "preview": "preserve"
+    },
+    "allowedNewScripts": [
+      "start",
+      "api",
+      "migrate"
+    ],
+    "allowedDependencies": [
+      "better-sqlite3",
+      "node:sqlite",
+      "express",
+      "cookie",
+      "bcrypt",
+      "argon2"
+    ]
   },
   "dataModels": [
     {
       "table": "accounts",
-      "fields": ["id", "name", "email", "password_hash", "role", "created_at"],
+      "fields": [
+        "id",
+        "name",
+        "email",
+        "password_hash",
+        "role",
+        "created_at"
+      ],
       "purpose": "One row per registered patient or staff member. Email is unique."
     },
     {
       "table": "sessions",
-      "fields": ["id", "account_id", "created_at", "expires_at"],
+      "fields": [
+        "id",
+        "account_id",
+        "created_at",
+        "expires_at"
+      ],
       "purpose": "An issued session. The cookie carries this id and nothing else about the account."
     },
     {
       "table": "appointments",
-      "fields": ["id", "account_id", "patient_name", "email", "phone", "treatment", "preferred_date", "time_window", "notes", "status", "created_at", "updated_at"],
+      "fields": [
+        "id",
+        "account_id",
+        "patient_name",
+        "email",
+        "phone",
+        "treatment",
+        "preferred_date",
+        "time_window",
+        "notes",
+        "status",
+        "created_at",
+        "updated_at"
+      ],
       "purpose": "One appointment request. `status` is requested, confirmed or cancelled. `account_id` is the owner."
     }
   ],
   "apis": [
-    { "method": "POST", "path": "/api/register", "auth": "public", "success": 201, "invalid": 422, "purpose": "Create an account. Refuses an email that is already registered." },
-    { "method": "POST", "path": "/api/login", "auth": "public", "success": 200, "invalid": 401, "purpose": "Issue a session for correct credentials. The same 401 for an unknown email and a wrong password." },
-    { "method": "POST", "path": "/api/logout", "auth": "customer", "success": 204, "purpose": "End the current session." },
-    { "method": "GET", "path": "/api/me", "auth": "customer", "success": 200, "unauthenticated": 401, "purpose": "Who the session belongs to, and the role. The navigation's signed-in shape depends on it." },
-    { "method": "POST", "path": "/api/appointments", "auth": "public", "success": 201, "invalid": 422, "purpose": "Record an appointment request from the booking form. Attaches the account when one is signed in." },
-    { "method": "GET", "path": "/api/appointments", "auth": "customer", "success": 200, "unauthenticated": 401, "purpose": "The signed-in patient's OWN appointments. Never anyone else's." },
-    { "method": "POST", "path": "/api/appointments/:id/cancel", "auth": "customer", "success": 200, "invalid": 422, "unauthenticated": 401, "purpose": "Cancel an appointment the caller owns. Someone else's is refused with 403, not hidden." },
-    { "method": "GET", "path": "/api/staff/appointments", "auth": "staff", "success": 200, "unauthenticated": 401, "purpose": "Every appointment, for the practice schedule. A customer session is refused with 403." },
-    { "method": "POST", "path": "/api/staff/appointments/:id/status", "auth": "staff", "success": 200, "invalid": 422, "unauthenticated": 401, "purpose": "Confirm or cancel any appointment. Staff only." }
+    {
+      "method": "POST",
+      "path": "/api/register",
+      "auth": "public",
+      "success": 201,
+      "invalid": 422,
+      "purpose": "Create an account. Refuses an email that is already registered.",
+      "requestExample": {
+        "name": "Acceptance Driver",
+        "email": "{{email}}",
+        "password": "{{password}}",
+        "confirm": "{{password}}",
+        "terms": true
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/login",
+      "auth": "public",
+      "success": 200,
+      "invalid": 401,
+      "purpose": "Issue a session for correct credentials. The same 401 for an unknown email and a wrong password.",
+      "requestExample": {
+        "email": "{{email}}",
+        "password": "{{password}}"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/logout",
+      "auth": "customer",
+      "success": 204,
+      "purpose": "End the current session."
+    },
+    {
+      "method": "GET",
+      "path": "/api/me",
+      "auth": "customer",
+      "success": 200,
+      "unauthenticated": 401,
+      "purpose": "Who the session belongs to, and the role. The navigation's signed-in shape depends on it."
+    },
+    {
+      "method": "POST",
+      "path": "/api/appointments",
+      "auth": "public",
+      "success": 201,
+      "invalid": 422,
+      "purpose": "Record an appointment request from the booking form. Attaches the account when one is signed in."
+    },
+    {
+      "method": "GET",
+      "path": "/api/appointments",
+      "auth": "customer",
+      "success": 200,
+      "unauthenticated": 401,
+      "purpose": "The signed-in patient's OWN appointments. Never anyone else's."
+    },
+    {
+      "method": "POST",
+      "path": "/api/appointments/:id/cancel",
+      "auth": "customer",
+      "success": 200,
+      "invalid": 422,
+      "unauthenticated": 401,
+      "purpose": "Cancel an appointment the caller owns. Someone else's is refused with 403, not hidden."
+    },
+    {
+      "method": "GET",
+      "path": "/api/staff/appointments",
+      "auth": "staff",
+      "success": 200,
+      "unauthenticated": 401,
+      "purpose": "Every appointment, for the practice schedule. A customer session is refused with 403."
+    },
+    {
+      "method": "POST",
+      "path": "/api/staff/appointments/:id/status",
+      "auth": "staff",
+      "success": 200,
+      "invalid": 422,
+      "unauthenticated": 401,
+      "purpose": "Confirm or cancel any appointment. Staff only."
+    }
   ],
   "securityControls": [
     {
       "id": "SEC-PASSWORD-HASH",
       "requirement": "A password is never stored or logged in a form it could be read back from. Only a hash is kept.",
-      "evidence": ["a password hashing function", "no column holding a plaintext password"]
+      "evidence": [
+        "a password hashing function",
+        "no column holding a plaintext password"
+      ]
     },
     {
       "id": "SEC-OWNERSHIP",
       "requirement": "Every read and write of an appointment is scoped to the caller's own account, on the server. Filtering in the browser is not authorisation.",
-      "evidence": ["account_id compared against the session on the server", "a 403 for another account's appointment"]
+      "evidence": [
+        "account_id compared against the session on the server",
+        "a 403 for another account's appointment"
+      ]
     },
     {
       "id": "SEC-ROLE",
       "requirement": "The staff endpoints and the staff page's data are refused to a customer session. Being unlinked in the navigation is not a control.",
-      "evidence": ["a role check on the server before any staff data is returned"]
+      "evidence": [
+        "a role check on the server before any staff data is returned"
+      ]
     },
     {
       "id": "SEC-SESSION-COOKIE",
       "requirement": "The session cookie is HttpOnly and SameSite, so a script cannot read it and another site cannot send it.",
-      "evidence": ["HttpOnly", "SameSite"]
+      "evidence": [
+        "HttpOnly",
+        "SameSite"
+      ]
     },
     {
       "id": "SEC-NO-SECRET-IN-BUNDLE",
       "requirement": "No credential, hash or session secret appears in anything the browser downloads.",
-      "evidence": ["the built assets contain no secret"]
+      "evidence": [
+        "the built assets contain no secret"
+      ]
     }
   ],
   "operations": [
@@ -89,7 +231,17 @@
         "a password under 12 characters is refused with 422 and nothing is stored",
         "the stored password_hash is not the password"
       ],
-      "dataModel": [{ "table": "accounts", "fields": ["name", "email", "password_hash", "role"] }]
+      "dataModel": [
+        {
+          "table": "accounts",
+          "fields": [
+            "name",
+            "email",
+            "password_hash",
+            "role"
+          ]
+        }
+      ]
     },
     {
       "id": "account-login",
@@ -104,8 +256,18 @@
         "an unknown email is refused with the same 401 and the same message as a wrong password",
         "GET /api/me returns the signed-in account and its role"
       ],
-      "dataModel": [{ "table": "sessions", "fields": ["account_id", "expires_at"] }],
-      "dependsOn": ["account-register"]
+      "dataModel": [
+        {
+          "table": "sessions",
+          "fields": [
+            "account_id",
+            "expires_at"
+          ]
+        }
+      ],
+      "dependsOn": [
+        "account-register"
+      ]
     },
     {
       "id": "appointment-request",
@@ -120,7 +282,22 @@
         "a request made while signed in has account_id set to that account",
         "a storage failure shows an error in the form rather than a false confirmation"
       ],
-      "dataModel": [{ "table": "appointments", "fields": ["patient_name", "email", "phone", "treatment", "preferred_date", "time_window", "notes", "status", "account_id"] }]
+      "dataModel": [
+        {
+          "table": "appointments",
+          "fields": [
+            "patient_name",
+            "email",
+            "phone",
+            "treatment",
+            "preferred_date",
+            "time_window",
+            "notes",
+            "status",
+            "account_id"
+          ]
+        }
+      ]
     },
     {
       "id": "patient-appointments",
@@ -135,8 +312,22 @@
         "a patient with no appointments sees the empty state, not an error",
         "requesting the list as one patient never returns another patient's row"
       ],
-      "dataModel": [{ "table": "appointments", "fields": ["id", "preferred_date", "time_window", "treatment", "status"] }],
-      "dependsOn": ["account-login", "appointment-request"]
+      "dataModel": [
+        {
+          "table": "appointments",
+          "fields": [
+            "id",
+            "preferred_date",
+            "time_window",
+            "treatment",
+            "status"
+          ]
+        }
+      ],
+      "dependsOn": [
+        "account-login",
+        "appointment-request"
+      ]
     },
     {
       "id": "patient-cancel",
@@ -151,8 +342,18 @@
         "cancelling while unauthenticated is refused with 401",
         "cancelling an already-cancelled appointment does not create a second change"
       ],
-      "dataModel": [{ "table": "appointments", "fields": ["status", "updated_at"] }],
-      "dependsOn": ["patient-appointments"]
+      "dataModel": [
+        {
+          "table": "appointments",
+          "fields": [
+            "status",
+            "updated_at"
+          ]
+        }
+      ],
+      "dependsOn": [
+        "patient-appointments"
+      ]
     },
     {
       "id": "staff-schedule",
@@ -167,8 +368,21 @@
         "an unauthenticated request is refused with 401",
         "the requested and confirmed counts match the rows actually stored"
       ],
-      "dataModel": [{ "table": "appointments", "fields": ["id", "patient_name", "preferred_date", "treatment", "status"] }],
-      "dependsOn": ["account-login"]
+      "dataModel": [
+        {
+          "table": "appointments",
+          "fields": [
+            "id",
+            "patient_name",
+            "preferred_date",
+            "treatment",
+            "status"
+          ]
+        }
+      ],
+      "dependsOn": [
+        "account-login"
+      ]
     },
     {
       "id": "staff-set-status",
@@ -183,8 +397,18 @@
         "an unknown status value is refused with 422",
         "the change is visible to the owning patient's own list"
       ],
-      "dataModel": [{ "table": "appointments", "fields": ["status", "updated_at"] }],
-      "dependsOn": ["staff-schedule"]
+      "dataModel": [
+        {
+          "table": "appointments",
+          "fields": [
+            "status",
+            "updated_at"
+          ]
+        }
+      ],
+      "dependsOn": [
+        "staff-schedule"
+      ]
     }
   ],
   "outOfScope": [
@@ -197,7 +421,10 @@
     {
       "what": "How a staff account comes to exist",
       "why": "Registration creates customers. Promoting an account to staff is an administrative act, and the approved design has no screen for it.",
-      "blocks": ["staff-schedule", "staff-set-status"]
+      "blocks": [
+        "staff-schedule",
+        "staff-set-status"
+      ]
     }
   ]
 }
