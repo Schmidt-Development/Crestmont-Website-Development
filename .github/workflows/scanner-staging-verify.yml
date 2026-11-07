@@ -50,7 +50,7 @@ jobs:
           node -e 'const fs=require("fs");let t=fs.readFileSync("wrangler.toml","utf8");t=t.replace(/(database_name = "crestmont-staging", database_id = )""/, `$1"${process.argv[1]}"`);fs.writeFileSync("wrangler.toml",t)' "$id"
           grep -q "$id" wrangler.toml && echo "Staging D1: $id"
 
-      - name: Apply staging access (same epoch, no rotation: the same derived passwords)
+      - name: Apply staging access (same epoch, no rotation, so the same derived passwords)
         env:
           MFA_ENCRYPTION_KEY: ${{ secrets.STAGING_MFA_ENCRYPTION_KEY }}
         run: node --no-warnings scripts/staging-access.ts --url "$STAGING_URL" --out access
