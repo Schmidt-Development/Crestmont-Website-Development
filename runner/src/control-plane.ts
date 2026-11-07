@@ -7,7 +7,8 @@ import { createHmac } from "node:crypto";
 import type {
   ClaimResponse, HeartbeatRequest, HeartbeatResponse, CheckpointRequest, RequirementItem, CompleteRequest, Job,
   AiDraftJob, AiDraftClaimResponse, AiDraftCompleteRequest, DiagnosticCheckpoint, ExpiredPreview, ExpiredPreviewsResponse,
-  SiteDeployment, DeploymentClaimResponse, DeploymentCompleteRequest, CycleSubmitResponse, WorkerStatus, ApprovedArtifact, FrontendImportClaim } from "./protocol.ts";
+  SiteDeployment, DeploymentClaimResponse, DeploymentCompleteRequest, CycleSubmitResponse, WorkerStatus, ApprovedArtifact, FrontendImportClaim,
+  FrontendImportReportResult, ContractSubmitResult } from "./protocol.ts";
 import { RUNNER_VERSION, LIMITS } from "./protocol.ts";
 import type { Logger } from "./log.ts";
 import { silentLogger, errorMessage } from "./log.ts";
@@ -248,10 +249,32 @@ export class ControlPlaneClient {
      * part of what is frozen.
      */
     measurement?: unknown;
-  }): Promise<void> {
-    try { await this.post("/api/builds/runner/frontend/import/report", { ...r }); }
+  }): Promise<FrontendImportReportResult | null> {
+    try { return (await this.post<FrontendImportReportResult>("/api/builds/runner/frontend/import/report", { ...r })) ?? null; }
     catch (err) {
-      if (err instanceof ControlPlaneError && [404, 405].includes(err.status)) return;
+      if (err instanceof ControlPlaneError && [404, 405].includes(err.status)) return null;
+      throw err;
+    }
+  }
+
+  /**
+   * A drafted integration contract, for the platform's validator to accept or refuse.
+   *
+   * The answer is the validator's, and a refusal arrives as `recorded: false` with its reasons rather than as an
+   * HTTP error, because the reasons are the point: the draft is corrected against them and submitted again. A
+   * 404/405 means this platform has no contract channel at all -- an older platform rather than a bad draft -- so
+   * it comes back null and the caller stops trying instead of redrafting against nothing.
+   */
+  async submitFrontendContract(r: {
+    projectId: string;
+    manifest: unknown;
+    attempt: number;
+    attemptsAllowed: number;
+    authorModel?: string | null;
+  }): Promise<ContractSubmitResult | null> {
+    try { return (await this.post<ContractSubmitResult>("/api/builds/runner/frontend/contract/submit", { ...r })) ?? null; }
+    catch (err) {
+      if (err instanceof ControlPlaneError && [404, 405].includes(err.status)) return null;
       throw err;
     }
   }

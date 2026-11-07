@@ -296,35 +296,92 @@ export function register(r: Router): void {
       return jsonResponse(ctx, 200, { recorded: "imported", baselineId: recorded.id, baselineVersion: recorded.version, approved: false, why: approval.why });
     }
 
-    // Approved and eligible, so the backend build is queued without anyone pressing anything -- through
-    // `syncProjectBuild`, the same path the staff button uses, so the same eligibility rule, the same brief
-    // snapshot and the same capacity limit apply. A refusal here is reported, not hidden: the design is approved
-    // either way, and a build that the rules decline is something a person needs to see rather than a silence.
+    // Approved. Whether the backend build can be queued YET depends on one more thing: a design-locked build is
+    // judged against an integration contract, and without one it stops thirteen seconds after it starts with
+    // "this project has no integration manifest". Queueing it anyway is how six Founder artifacts each produced a
+    // failed build and no backend.
+    //
+    // So the queue waits for the contract. The runner drafts one from this measurement and submits it to
+    // `frontend/contract/submit` below, which validates it and queues the build itself. If authoring fails, the
+    // design stays approved and the project waits visibly with a reason, which is the honest outcome -- not a
+    // build that cannot pass.
     const project = await ctx.db.prepare(`SELECT project_id FROM frontend_artifacts WHERE id = ?`).bind(artifactId)
       .first<{ project_id: string }>();
     let queued: string | null = null;
     let queueRefusal: string | null = null;
+    let awaitingContract = false;
     if (project) {
-      const job = await B.syncProjectBuild(ctx.db, project.project_id, "backfill", { kind: "user", userId: approval.approvedBy });
-      if (job) {
-        queued = job.id;
-        await audit(ctx.db, {
-          actorUserId: approval.approvedBy, actorKind: "user", action: "builds.backend_job_started",
-          subjectType: "build_job", subjectId: job.id, organizationId: job.organization_id,
-          details: { trigger: "submission approval", baselineId: recorded.id, baselineVersion: recorded.version, artifactId },
-        });
+      const contract = await DL.activeContract(ctx.db, project.project_id);
+      // The contract has to be for THIS design. One written against an earlier fingerprint says nothing about
+      // the frontend that was just measured.
+      if (!contract || contract.design_fingerprint !== recorded.fingerprint) {
+        awaitingContract = true;
       } else {
-        const decision = B.decideEligibility(await B.projectFacts(ctx.db, project.project_id));
-        const settings = await B.getBuildSettings(ctx.db);
-        queueRefusal = decision.verdict === "ineligible"
-          ? decision.reasons.join("; ")
-          : !settings.automation_enabled ? "automatic starts are switched off in the AI builds settings"
-            : "the project is not yet eligible for a build";
+        const started = await B.startBackendBuild(ctx.db, project.project_id, { actor: { kind: "user", userId: approval.approvedBy } });
+        queued = started.job?.id ?? null;
+        queueRefusal = started.refusal;
+        if (started.job) {
+          await audit(ctx.db, {
+            actorUserId: approval.approvedBy, actorKind: "user", action: "builds.backend_job_started",
+            subjectType: "build_job", subjectId: started.job.id, organizationId: started.job.organization_id,
+            details: { trigger: "submission approval", baselineId: recorded.id, baselineVersion: recorded.version, artifactId, contractVersion: contract.version },
+          });
+        }
       }
     }
     return jsonResponse(ctx, 200, {
       recorded: "imported", baselineId: recorded.id, baselineVersion: recorded.version,
       approved: true, approvedBy: approval.approvedBy, queued, queueRefusal,
+      // The runner reads this and drafts the contract. It is not an error: it is the next step.
+      awaitingContract, projectId: project?.project_id ?? null, designFingerprint: recorded.fingerprint,
+    });
+  }));
+
+  // ── the contract step: a measured design gets the plan its build will be judged against ────────────────────
+  //
+  // Founder decision, 2026-11-07: Model A drafts the integration contract for every uploaded frontend, and Model
+  // B implements it. Nobody writes one by hand for a customer website, and nothing about that weakens the gate --
+  // the draft arrives here and is accepted only by `validateContractDraft`, which runs on the platform, in this
+  // request, and which the authoring runner can neither skip nor soften. Schema, artifact checksum, design
+  // fingerprint, coverage of the measured interactions, feasibility and consistency, or it is refused with the
+  // reasons and nothing is recorded.
+  //
+  // A refusal is not the end: the runner corrects the draft against these objections and submits again, up to its
+  // own small bound. Each refused attempt is written to the audit log, so the loop is visible and finite rather
+  // than a runner grinding silently against the same objection.
+  r.post(`${RUNNER}/frontend/contract/submit`, runnerRoute(async (ctx) => {
+    const b = await runnerBody(ctx);
+    const projectId = typeof b.projectId === "string" ? b.projectId : "";
+    if (!projectId) return jsonResponse(ctx, 422, { error: "projectId is required" });
+    const attempt = Number.isInteger(b.attempt) ? Number(b.attempt) : 1;
+    const attemptsAllowed = Number.isInteger(b.attemptsAllowed) ? Number(b.attemptsAllowed) : 1;
+    const authorModel = typeof b.authorModel === "string" ? b.authorModel.slice(0, 120) : null;
+
+    const result = await DL.recordContract(ctx.db, projectId, b.manifest, {
+      recordedBy: null, authoredBy: "model-a", authorModel,
+      note: `drafted by Model A from the measured frontend (attempt ${attempt} of ${attemptsAllowed})`,
+    });
+    if (!result.ok) {
+      await DL.recordContractRefusal(ctx.db, projectId, { problems: result.problems, attempt, attemptsAllowed, authorModel });
+      // 200, not 4xx: the submission was understood and answered. The runner needs the objections to correct the
+      // draft, and a 4xx on this channel is the runner's signal that the platform will never accept what it has.
+      return jsonResponse(ctx, 200, { recorded: false, problems: result.problems.slice(0, 20) });
+    }
+
+    const started = await B.startBackendBuild(ctx.db, projectId);
+    if (started.job) {
+      await audit(ctx.db, {
+        actorKind: "ai", action: "builds.backend_job_started", subjectType: "build_job", subjectId: started.job.id,
+        organizationId: started.job.organization_id,
+        details: { trigger: "drafted contract", contractVersion: result.contract.version, authorModel, operations: result.contract.operations },
+      });
+    }
+    return jsonResponse(ctx, 200, {
+      recorded: true, version: result.contract.version, operations: result.contract.operations,
+      warnings: result.warnings.slice(0, 20),
+      // The requirements the draft could not establish from the frontend. Flagged, never invented.
+      reviewFlags: result.reviewFlags.slice(0, 20),
+      queued: started.job?.id ?? null, queueRefusal: started.refusal,
     });
   }));
 

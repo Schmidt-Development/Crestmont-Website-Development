@@ -176,6 +176,41 @@ export interface FrontendImportClaim {
   sizeBytes: number;
 }
 
+/**
+ * What the platform did with a reported import (protocol v1.9).
+ *
+ * `awaitingContract` is the one field the runner acts on. A design-locked build is judged against an integration
+ * contract and stops at once without one, so the platform no longer queues the build on approval alone: it says
+ * the design is approved and the contract is missing, and the runner drafts one. Older platforms send none of
+ * these fields, and an absent `awaitingContract` means exactly what it did before -- nothing further to do.
+ */
+export interface FrontendImportReportResult {
+  recorded?: "imported" | "rejected";
+  baselineId?: string;
+  baselineVersion?: number;
+  approved?: boolean;
+  approvedBy?: string | null;
+  queued?: string | null;
+  queueRefusal?: string | null;
+  awaitingContract?: boolean;
+  projectId?: string | null;
+  designFingerprint?: string | null;
+  why?: string | null;
+}
+
+/** The platform validator's answer to a drafted integration contract. A refusal carries its reasons. */
+export interface ContractSubmitResult {
+  recorded: boolean;
+  problems?: string[];
+  version?: number;
+  operations?: number;
+  warnings?: string[];
+  /** Requirements the draft could not establish from the frontend, for a person to settle. */
+  reviewFlags?: { what: string; why: string; blocks: string[] }[];
+  queued?: string | null;
+  queueRefusal?: string | null;
+}
+
 export interface ApprovedArtifact {
   artifactId: string;
   version: number;

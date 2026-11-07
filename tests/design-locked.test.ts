@@ -42,8 +42,11 @@ const baselineInput = (over: Partial<DL.BaselineInput> = {}): DL.BaselineInput =
   routes: [{ page: "index" }, { page: "quote" }],
   assets: [{ path: "logo.svg", sha256: "c".repeat(64) }],
   components: [{ name: "Layout" }],
+  // The measured interaction inventory, and it has to be CONSISTENT with the signatures below and with the
+  // contract fixture: `recordContract` now checks operation coverage against this list, so an element here that
+  // no contract claims is a refusal, and an element on a page that was never measured could never be claimed.
   interactions: [
-    { page: "quote", element: "form#quote-request", needsBackend: true, functional: false },
+    { page: "index", element: "form#quote", needsBackend: true, functional: false },
     { page: "index", element: "button.nav-toggle", needsBackend: false, functional: true },
   ],
   signatures: [{ page: "index", viewport: "desktop" }, { page: "index", viewport: "mobile" }],
@@ -1646,8 +1649,20 @@ const manifestFor = (artifactSha: string, fingerprint: string, over: Record<stri
         "a submission with no name is refused and stores nothing",
       ],
       dataModel: [{ table: "quotes", fields: ["id", "name", "created_at"] }],
+      // The two criteria above in executable form. The validator requires a probe on an HTTP-served operation:
+      // a criterion nothing can execute is reported UNDETERMINED, and UNDETERMINED fails the functional gate, so
+      // a contract without probes is one whose build cannot pass.
+      acceptanceProbes: [
+        { criterion: 0, as: "anonymous", method: "POST", path: "/api/quotes", body: { name: "Ada" }, expect: 201 },
+        { criterion: 1, as: "anonymous", method: "POST", path: "/api/quotes", body: {}, expect: 422 },
+      ],
     },
   ],
+  // Where the rows go, and the endpoint the probes name. Both are checked: a write to a table nobody modelled is
+  // a schema nobody designed, and a probe may not invent a surface.
+  dataModels: [{ table: "quotes", fields: ["id", "name", "created_at"], purpose: "quote requests from the form" }],
+  apis: [{ method: "POST", path: "/api/quotes", auth: "public", success: 201, invalid: 422, requestExample: { name: "Ada" } }],
+  persistence: { enforcement: "required" as const, technology: "d1" as const, durable: true },
   ...over,
 });
 
@@ -1792,3 +1807,306 @@ test("[DLC-03] the claim hands the runner the contract for THIS design, and noth
     assert.equal(lockedC?.contract, null, "a contract for another design is withheld");
   } finally { t.close(); }
 });
+
+// -- the independent validator, and the automatic authoring it exists to gate ------------------------------------
+//
+// The Founder's decision of 2026-11-07 is that Model A drafts the contract for every uploaded frontend. The whole
+// weight of that decision rests on these checks: a draft is accepted only by `validateContractDraft`, which runs
+// on the platform, over the measurement the platform stored, and which the authoring runner can neither skip nor
+// soften. So each test below is one way a draft could be plausible, pass a schema check, and still be worthless.
+
+/** A signed runner call. The same channel the import uses, so the same secret and the same signature. */
+async function postRunner(t: Awaited<ReturnType<typeof createTestApp>>, path: string, body: unknown) {
+  const raw = JSON.stringify(body);
+  const ts = Math.floor(Date.now() / 1000);
+  const res = await t.client().request("POST", path, {
+    body: raw,
+    headers: {
+      "content-type": "application/json",
+      "x-crestmont-runner-signature": `t=${ts},v1=${await hmacSha256Hex(RUNNER_SECRET_FOR_IMPORT, `${ts}.${raw}`)}`,
+    },
+  });
+  return { status: res.status, json: (await res.json()) as Record<string, unknown> };
+}
+
+/** A measured, approved design with the inventory and signatures a contract is judged against. */
+async function approvedMeasurement(
+  t: Awaited<ReturnType<typeof createTestApp>>,
+  staffId: string,
+  name: string,
+  over: Partial<DL.BaselineInput> = {},
+) {
+  const made = await DL.createTestProject(t.db, { name, actorId: staffId });
+  const { artifact } = await cleanArtifact(t, made.projectId, made.organizationId, staffId);
+  await DL.recordVerdict(t.db, artifact.id, { status: "imported", framework: "static" });
+  const baseline = await DL.recordBaseline(t.db, artifact.id, baselineInput({
+    signatures: [{ page: "index", viewport: "desktop" }],
+    ...over,
+  }));
+  await DL.approveBaseline(t.db, baseline.id, { approvedBy: staffId, note: "approved" });
+  return { made, artifact, baseline };
+}
+
+test("[DLC-04] a draft that leaves a measured interaction unclaimed is refused, and declining it by name is not", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    // Two elements need a backend; the contract fixture plans one of them.
+    const { made, artifact, baseline } = await approvedMeasurement(t, staff.id, "Coverage", {
+      interactions: [
+        { page: "index", element: "form#quote", needsBackend: true, functional: false },
+        { page: "index", element: "form#booking", needsBackend: true, functional: false },
+      ],
+    });
+
+    // This is the failure the coverage check exists for: a plan that works perfectly and leaves the booking form a
+    // dead button. Nothing in the schema is wrong with it.
+    const silent = await DL.recordContract(t.db, made.projectId, manifestFor(artifact.sha256, baseline.fingerprint), { recordedBy: staff.id });
+    assert.equal(silent.ok, false, JSON.stringify(silent));
+    const why = "problems" in silent ? silent.problems.join(" ") : "";
+    assert.match(why, /uncovered-interaction/, why);
+    assert.match(why, /form#booking/, why);
+
+    // Declining it in general terms is still silence about that button.
+    const vague = await DL.recordContract(t.db, made.projectId, manifestFor(artifact.sha256, baseline.fingerprint, {
+      outOfScope: ["some interactions are left for a later phase"],
+    }), { recordedBy: staff.id });
+    assert.equal(vague.ok, false, "a general apology does not say which button stays dead");
+
+    // Declining it BY NAME is a decision, and is kept as a warning rather than refused.
+    const named = await DL.recordContract(t.db, made.projectId, manifestFor(artifact.sha256, baseline.fingerprint, {
+      outOfScope: ["form#booking is not in this contract: the customer has no booking system to write into yet"],
+    }), { recordedBy: staff.id });
+    assert.ok(named.ok, !named.ok ? named.problems.join("; ") : "");
+    assert.ok(named.warnings.some((w) => /form#booking/.test(w)), `the decision is kept as a warning: ${JSON.stringify(named.warnings)}`);
+  } finally { t.close(); }
+});
+
+test("[DLC-05] a draft about an element the measurement never found is refused", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const { made, artifact, baseline } = await approvedMeasurement(t, staff.id, "Invented element");
+    const base = manifestFor(artifact.sha256, baseline.fingerprint);
+
+    // The page exists and the schema is right. The element does not exist, so nobody could build or check this.
+    const invented = await DL.recordContract(t.db, made.projectId, {
+      ...base,
+      operations: [{ ...base.operations[0], element: "form#newsletter" }],
+      outOfScope: ["form#quote is deliberately left unplanned by this test"],
+    }, { recordedBy: staff.id });
+    assert.equal(invented.ok, false, JSON.stringify(invented));
+    const why = "problems" in invented ? invented.problems.join(" ") : "";
+    assert.match(why, /unmeasured-element/, why);
+    assert.match(why, /form#newsletter/, why);
+  } finally { t.close(); }
+});
+
+test("[DLC-06] an HTTP-served operation with nothing that can establish its criteria is refused", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const { made, artifact, baseline } = await approvedMeasurement(t, staff.id, "Unprovable");
+    const base = manifestFor(artifact.sha256, baseline.fingerprint);
+
+    // Criteria in prose and nothing that can execute them. The driver reports all of them UNDETERMINED -- which
+    // fails the functional gate -- so this contract's build could never pass, however well it was built.
+    const prose = await DL.recordContract(t.db, made.projectId, {
+      ...base,
+      operations: [{ ...base.operations[0], acceptanceProbes: [] }],
+    }, { recordedBy: staff.id });
+    assert.equal(prose.ok, false, JSON.stringify(prose));
+    assert.match("problems" in prose ? prose.problems.join(" ") : "", /no-probe/, JSON.stringify(prose));
+
+    // A probe naming a surface the contract never declared is worse than none: it would verify the contract
+    // against an endpoint the contract never agreed to.
+    const ghost = await DL.recordContract(t.db, made.projectId, {
+      ...base,
+      operations: [{
+        ...base.operations[0],
+        acceptanceProbes: [{ criterion: 0, as: "anonymous", method: "POST", path: "/api/not-declared", expect: 201 }],
+      }],
+    }, { recordedBy: staff.id });
+    assert.equal(ghost.ok, false, JSON.stringify(ghost));
+    assert.match("problems" in ghost ? ghost.problems.join(" ") : "", /probe-path/, JSON.stringify(ghost));
+  } finally { t.close(); }
+});
+
+test("[DLC-07] a draft that stores data without saying where is refused", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const { made, artifact, baseline } = await approvedMeasurement(t, staff.id, "Nowhere to write");
+    const base = manifestFor(artifact.sha256, baseline.fingerprint);
+
+    // Measured once: a quote form that worked perfectly and wrote its rows to a JSON file, while the contract
+    // named a table. Every behavioural check passed, because behaviour was all anything checked.
+    const noStore = { ...base } as Record<string, unknown>;
+    delete noStore.persistence;
+    const unsaid = await DL.recordContract(t.db, made.projectId, noStore, { recordedBy: staff.id });
+    assert.equal(unsaid.ok, false, JSON.stringify(unsaid));
+    assert.match("problems" in unsaid ? unsaid.problems.join(" ") : "", /no-persistence/, JSON.stringify(unsaid));
+
+    // And a table nobody designed is a table nobody designed, whatever the operation says it writes to.
+    const unmodelled = await DL.recordContract(t.db, made.projectId, { ...base, dataModels: [] }, { recordedBy: staff.id });
+    assert.equal(unmodelled.ok, false, JSON.stringify(unmodelled));
+    assert.match("problems" in unmodelled ? unmodelled.problems.join(" ") : "", /table-not-modelled/, JSON.stringify(unmodelled));
+  } finally { t.close(); }
+});
+
+test("[DLC-08] a requirement the frontend cannot settle is flagged, not invented and not fatal", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const { made, artifact, baseline } = await approvedMeasurement(t, staff.id, "Open question");
+    const base = manifestFor(artifact.sha256, baseline.fingerprint);
+
+    // An operation that takes money, with no approved provider: a blocker, because carrying it out would produce
+    // a checkout that reports success without a payment.
+    const payment = {
+      ...base.operations[0], id: "take-deposit", kind: "payment",
+      behaviour: "Take the deposit the pricing page quotes when the form is submitted.",
+    };
+    const guessing = await DL.recordContract(t.db, made.projectId, { ...base, operations: [payment] }, { recordedBy: staff.id });
+    assert.equal(guessing.ok, false, JSON.stringify(guessing));
+    assert.match("problems" in guessing ? guessing.problems.join(" ") : "", /payment-without-provider/, JSON.stringify(guessing));
+
+    // The same plan with the gap RECORDED instead of guessed at. Now it is a contract with an open question --
+    // which is correct work -- and the question comes back as a flag for a person.
+    const flagged = await DL.recordContract(t.db, made.projectId, {
+      ...base,
+      operations: [payment],
+      missing: [{
+        what: "the payment provider and the deposit amount",
+        why: "the frontend quotes no price and names no provider, and neither may be invented",
+        blocks: ["take-deposit"],
+      }],
+    }, { recordedBy: staff.id });
+    assert.ok(flagged.ok, !flagged.ok ? flagged.problems.join("; ") : "");
+    assert.equal(flagged.reviewFlags.length, 1, JSON.stringify(flagged.reviewFlags));
+    assert.match(flagged.reviewFlags[0].what, /payment provider/);
+    const stored = JSON.parse(flagged.contract.review_flags_json) as { what: string }[];
+    assert.equal(stored.length, 1, "and it is kept on the contract, so the screen can show it");
+  } finally { t.close(); }
+});
+
+test("[DLC-09] a drafted contract is recorded as the model's, and queues the build it was waiting for", async () => {
+  const t = await createTestApp({ BUILD_RUNNER_SECRET: RUNNER_SECRET_FOR_IMPORT });
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const { made, artifact, baseline } = await approvedMeasurement(t, staff.id, "Drafted");
+
+    const res = await postRunner(t, "/api/builds/runner/frontend/contract/submit", {
+      projectId: made.projectId,
+      manifest: manifestFor(artifact.sha256, baseline.fingerprint),
+      attempt: 1, attemptsAllowed: 3, authorModel: "qwen-test:32b",
+    });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.equal(res.json.recorded, true, JSON.stringify(res.json));
+    assert.equal(res.json.version, 1);
+
+    const row = (await DL.activeContract(t.db, made.projectId))!;
+    assert.equal(row.authored_by, "model-a", "provenance is on the contract, not inferred later");
+    assert.equal(row.author_model, "qwen-test:32b");
+    assert.equal(row.recorded_by, null, "no person recorded it, and it does not claim one did");
+
+    // Audited as the AI's act rather than attributed to whoever approved the design.
+    const said = await t.db.prepare(
+      `SELECT actor_kind, details_json FROM audit_logs WHERE action = 'design_locked_contract.recorded' AND subject_id = ?`,
+    ).bind(made.projectId).first<{ actor_kind: string; details_json: string }>();
+    assert.ok(said);
+    assert.equal(said.actor_kind, "ai");
+    assert.match(said.details_json, /model-a/);
+
+    // And the build the contract was the last missing piece of is queued by the platform, with nobody pressing
+    // anything. That is the whole point of the decision: an upload becomes a running backend build by itself.
+    assert.ok(typeof res.json.queued === "string" && res.json.queued, `the build must be queued: ${JSON.stringify(res.json)}`);
+    const job = await t.db.prepare(`SELECT state FROM build_jobs WHERE id = ?`).bind(res.json.queued).first<{ state: string }>();
+    assert.ok(job, "the queued job exists");
+    assert.ok(["queued", "preparing"].includes(job.state), job.state);
+  } finally { t.close(); }
+});
+
+test("[DLC-10] a refused draft records nothing, answers with the reasons, and is written down", async () => {
+  const t = await createTestApp({ BUILD_RUNNER_SECRET: RUNNER_SECRET_FOR_IMPORT });
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const { made, artifact, baseline } = await approvedMeasurement(t, staff.id, "Refused draft");
+
+    const res = await postRunner(t, "/api/builds/runner/frontend/contract/submit", {
+      projectId: made.projectId,
+      // The schema is right and the design is right; the plan is silent about the measured form.
+      manifest: manifestFor(artifact.sha256, baseline.fingerprint, { operations: [] }),
+      attempt: 2, attemptsAllowed: 3, authorModel: "qwen-test:32b",
+    });
+    // 200 with the reasons, not a 4xx: the reasons are what the next draft is corrected against.
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.equal(res.json.recorded, false);
+    assert.ok(Array.isArray(res.json.problems) && res.json.problems.length, JSON.stringify(res.json));
+
+    assert.equal(await DL.activeContract(t.db, made.projectId), null, "a refused draft is not stored");
+    const refusal = await t.db.prepare(
+      `SELECT actor_kind, details_json FROM audit_logs WHERE action = 'design_locked_contract.refused' AND subject_id = ?`,
+    ).bind(made.projectId).first<{ actor_kind: string; details_json: string }>();
+    assert.ok(refusal, "a refused draft is evidence: the attempt happened and the validator objected");
+    assert.equal(refusal.actor_kind, "ai");
+    assert.match(refusal.details_json, /"attempt":2/);
+    assert.match(refusal.details_json, /"attemptsAllowed":3/, "so a bounded loop can be told from an endless one");
+
+    // Nothing was queued on the strength of a contract that does not exist.
+    const jobs = await t.db.prepare(`SELECT COUNT(*) AS n FROM build_jobs WHERE project_id = ?`).bind(made.projectId).first<{ n: number }>();
+    assert.equal(jobs?.n, 0, "nothing was queued");
+  } finally { t.close(); }
+});
+
+test("[DLC-11] an approved design with no contract is not queued, and the report says a contract is awaited", async () => {
+  const t = await createTestApp({ BUILD_RUNNER_SECRET: RUNNER_SECRET_FOR_IMPORT });
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const made = await DL.createTestProject(t.db, { name: "Awaiting a contract", actorId: staff.id });
+    const { artifact } = await cleanArtifact(t, made.projectId, made.organizationId, staff.id);
+    // Submitted as the approved design, which is what carries it into the queue without a second button press.
+    await t.db.prepare(`UPDATE frontend_artifacts SET approval_intent_by = ?, approval_intent_at = ? WHERE id = ?`)
+      .bind(staff.id, nowIso(), artifact.id).run();
+
+    const measured = captureBaseline({
+      artifactSha: artifact.sha256,
+      sourceFingerprint: "f".repeat(64),
+      approvedBy: "runner win-test",
+      signatures: [sig("index", "desktop")],
+      renders: [{ page: "index", viewport: "desktop", sha: "1".repeat(64) }],
+    });
+    const report = await postImportReport(t, {
+      artifactId: artifact.id, status: "imported", framework: "static", problems: [], baseline: measured,
+      measurement: {
+        routes: [{ page: "index", path: "/index.html" }],
+        interactions: [{ page: "index", element: "form#quote", needsBackend: true, functional: false }],
+        states: [], viewports: ["desktop"],
+      },
+    });
+
+    assert.equal(report.status, 200, JSON.stringify(report.json));
+    assert.equal(report.json.approved, true, "the acknowledgement still becomes the approval");
+    // The change: the build is NOT queued, because a design-locked build judged against nothing stops thirteen
+    // seconds after it starts. Six Founder artifacts each produced exactly that failed build.
+    assert.equal(report.json.awaitingContract, true, JSON.stringify(report.json));
+    assert.equal(report.json.queued, null, "nothing is queued against a contract that does not exist");
+    const none = await t.db.prepare(`SELECT COUNT(*) AS n FROM build_jobs WHERE project_id = ?`).bind(made.projectId).first<{ n: number }>();
+    assert.equal(none?.n, 0, "and no job row was created");
+
+    // The runner is told which project and which design to draft against, so it does not have to guess either.
+    assert.equal(report.json.projectId, made.projectId);
+    assert.equal(report.json.designFingerprint, measured.fingerprint);
+
+    // Then the draft arrives, and the build starts on the strength of it.
+    const submitted = await postRunner(t, "/api/builds/runner/frontend/contract/submit", {
+      projectId: made.projectId,
+      manifest: manifestFor(artifact.sha256, measured.fingerprint),
+      attempt: 1, attemptsAllowed: 3, authorModel: "qwen-test:32b",
+    });
+    assert.equal(submitted.json.recorded, true, JSON.stringify(submitted.json));
+    assert.ok(submitted.json.queued, `the contract is what the build was waiting for: ${JSON.stringify(submitted.json)}`);
+  } finally { t.close(); }
+});
+
+

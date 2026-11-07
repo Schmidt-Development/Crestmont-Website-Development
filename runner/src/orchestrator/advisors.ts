@@ -12,6 +12,7 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fenceFor } from "../prompt.ts";
+import { contractPrompt, type ContractAuthoringInput } from "../frontend/contract-author.ts";
 import type { ArchitectInput, CycleEvidence, GalleryReferenceInput, MasterSpec, ReviewVerdict } from "./contracts.ts";
 import { ARCHITECTURE_SPEC_JSON_SCHEMA, DESIGN_SPEC_JSON_SCHEMA, REVIEW_JSON_SCHEMA, SPEC_SCHEMA, extractJson, outstanding, parseVerdict } from "./contracts.ts";
 import { VISION_RETRY_RESERVE } from "./vision.ts";
@@ -50,6 +51,16 @@ export interface Advisor {
   blueprint?(approved: MasterSpec, input: ArchitectInput, corrections?: readonly string[], opts?: { maxImages?: number }): Promise<unknown>;
   /** Stage 3: the functional architecture for an already-certified design. Optional: not every adapter plans. */
   architecture?(approved: MasterSpec, corrections?: readonly string[]): Promise<unknown>;
+  /**
+   * The INTEGRATION CONTRACT for an imported frontend: what the backend work will do, before it starts.
+   *
+   * A different job from `architecture`, which plans a backend for a design this platform generated and holds in
+   * a master specification. Here the design arrived as an approved artifact and the only description of it is the
+   * measurement, so the input is the measurement and the output is an integration manifest. The prompt and the
+   * schema live in `frontend/contract-author.ts` with the rest of the contract's rules; this only runs the
+   * session. Optional: an adapter that does not plan does not offer it.
+   */
+  contract?(input: ContractAuthoringInput): Promise<unknown>;
   review(spec: MasterSpec | null, evidence: CycleEvidence, cycle: number, ctx?: ReviewContext): Promise<ReviewVerdict>;
 }
 
@@ -778,6 +789,19 @@ export class LocalModelAdvisor implements Advisor {
     ].join("\n") + fix;
     return this.ask("architect", prompt, [], 0);
   }
+
+  /**
+   * The integration contract for an imported frontend.
+   *
+   * No images (maxImages 0): the design is approved and frozen, its appearance is not in question, and the whole
+   * window goes to the measurement and the plan. The session is the ordinary architect session -- fresh, with
+   * read-only tools over the artifact's own source, so the draft is written from the real markup and not from an
+   * element identifier alone.
+   */
+  async contract(input: ContractAuthoringInput): Promise<unknown> {
+    return this.ask("architect", contractPrompt(input), [], 0);
+  }
+
   /** The images the last review request actually carried, in the order they were attached. */
   lastReviewImages: { path: string; label: string }[] = [];
 

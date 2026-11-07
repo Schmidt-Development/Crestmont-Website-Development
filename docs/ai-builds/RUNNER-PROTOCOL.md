@@ -193,6 +193,41 @@ runner falls back to the v1.4 single-repair behavior.
   be loaded: the build is requeued without using an attempt and resumes from its checkpoint. No paid fallback.
 - Capability `dual-model`: the runner serves Model A and Model B. `zero-token-cost` is still required.
 
+## Imported frontends and their contracts (v1.8 import, v1.9 contract; additive)
+
+Not builds: an uploaded frontend has to be unpacked, built and measured before anyone can approve its design, and
+the measured design then needs the plan its backend will be judged against. No lease table — the artifact's own
+`status` carries the import, and the platform hands out one claim at a time.
+
+### `POST /api/builds/runner/frontend/import/claim`
+`{ runnerId }` → `{ artifact: { artifactId, projectId, organizationId, version, sha256, sizeBytes } | null }`.
+
+### `POST /api/builds/runner/frontend/import/bytes`
+`{ artifactId }` → the archive, base64, with its `sha256`. The scanning gate is applied again here, at delivery.
+409 when the artifact stopped being importable while the runner held it.
+
+### `POST /api/builds/runner/frontend/import/report`
+`{ artifactId, status: "imported" | "rejected", baseline, measurement, framework, archiveRoot, lockfileSha, problems }`.
+A measured design is recorded as a DRAFT baseline; an acknowledgement given at submission becomes the approval
+here, and nowhere else. The response says what happened: `{ recorded, baselineId, baselineVersion, approved,
+queued, queueRefusal, awaitingContract, projectId, designFingerprint }`.
+
+`awaitingContract: true` means the design is approved and no integration contract exists for this fingerprint, so
+the backend build has **not** been queued — a design-locked build stops at once without a contract, and queueing
+one anyway produces a failed build and no backend. The runner drafts the contract and submits it below.
+
+### `POST /api/builds/runner/frontend/contract/submit` (v1.9)
+`{ projectId, manifest, attempt, attemptsAllowed, authorModel }` → `{ recorded, version, operations, warnings,
+reviewFlags, queued, queueRefusal }`, or `{ recorded: false, problems }`.
+
+The manifest is an integration contract (`crestmont.integration-manifest/1`), drafted by Model A from the
+measurement. The platform validates it deterministically — schema, artifact checksum, design fingerprint,
+coverage of the measured interaction inventory, feasibility and consistency — and a refusal answers **200** with
+`problems`, because those reasons are what the next draft is corrected against. Attempts are bounded by the
+runner and every refusal is written to the audit log. On acceptance the platform queues the backend build itself,
+through the same eligibility rule and capacity cap as the staff button, and `reviewFlags` carries the
+requirements the draft could not establish from the frontend: flagged for a person, never invented.
+
 ## Lease expiry
 A lease lasts `lease_seconds` (default 180 s) and is renewed by every successful heartbeat. When it expires, the
 15-minute sweep revokes the token (every later call answers `lease_lost`) and requeues the build with its resume data

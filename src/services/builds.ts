@@ -245,6 +245,36 @@ async function projectControls(db: Db, projectId: string) {
 }
 
 /**
+ * Queue the backend build for a project, and say WHY if it will not start.
+ *
+ * `syncProjectBuild` answers with a job or with null, and null has half a dozen causes -- ineligible, automation
+ * switched off, too old to start on its own, already built. Every caller that wants to tell a person what
+ * happened then has to re-derive the reason, and three of them derived it differently. This is that derivation,
+ * once: the queue attempt and the explanation together.
+ *
+ * Nothing here decides eligibility. It asks the same rule the staff button asks, so a build started by the
+ * contract landing and a build started by hand are the same build with the same checks and the same capacity cap.
+ */
+export async function startBackendBuild(
+  db: Db,
+  projectId: string,
+  o: { trigger?: "payment" | "intake" | "sweep" | "backfill"; actor?: Actor } = {},
+): Promise<{ job: BuildJob | null; refusal: string | null }> {
+  const job = await syncProjectBuild(db, projectId, o.trigger ?? "backfill", o.actor ?? { kind: "system" });
+  if (job) return { job, refusal: null };
+  const decision = decideEligibility(await projectFacts(db, projectId));
+  const settings = await getBuildSettings(db);
+  return {
+    job: null,
+    refusal: decision.verdict === "ineligible"
+      ? decision.reasons.join("; ")
+      : !settings.automation_enabled
+        ? "automatic starts are switched off in the AI builds settings"
+        : "the project is not yet eligible for a build",
+  };
+}
+
+/**
  * Re-evaluates the first build of a project. Called after a verified payment, an intake submission, refunds,
  * disputes and cancellations, and by the scheduled sweep (which recovers any enqueue lost between recording a
  * payment and this call). Idempotent: one first build per project (dedupe_key), compare-and-set transitions.
