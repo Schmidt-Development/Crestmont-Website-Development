@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { buildFixtureSite } from "./fixtures/fullstack/site.ts";
 import { score, scorecardOutstanding, requestedCapabilities, CRITERIA } from "../src/quality.ts";
@@ -74,6 +74,55 @@ test("[AIB-V2] the starter as shipped (unconfigured, placeholder pages) fails ac
   assert.equal(g.code, 1);
   assert.match(findings(g, "A"), /configured must be true/);
   assert.match(findings(g, "B"), /STARTER-PLACEHOLDER/);
+});
+
+test("[AIB-V2] the measurement website is stopped when the gates finish, not left running", () => {
+  // Gate G measures API latency over local HTTP against scripts/lib/serve.mjs, spawned detached and killed in a
+  // `finally`. That kill was `process.kill(-pid)`, a POSIX process GROUP, inside an empty catch. On Windows it
+  // throws and the catch swallowed it, so the server was never stopped and nothing said so: 512 orphaned
+  // serve.mjs processes were measured on the build node, holding 27.9 GB of its 95 GB. In the Linux sandbox these
+  // gates normally run in the group kill worked, which is why no test noticed.
+  //
+  // A live process's current directory cannot be removed on Windows, so a surviving server makes this fail there,
+  // which is the platform the bug lived on. Everywhere else it checks the teardown path still runs clean.
+  const root = tmp("aib-fs-");
+  const dir = path.join(root, "site");
+  buildFixtureSite(STARTER, dir, fixture("service-area"));
+  gates(dir, "business");
+
+  // The Windows kill is `taskkill`, spawned detached, so it finishes just after the gates process exits.
+  let last: unknown = null;
+  for (let i = 0; i < 40; i++) {
+    try { rmSync(root, { recursive: true, force: true }); last = null; break; } catch (e) { last = e; spawnSync(process.execPath, ["-e", "setTimeout(()=>{},250)"]); }
+  }
+  assert.equal(last, null, `the gates left something running in ${root}: ${String((last as Error | null)?.message).slice(0, 300)}`);
+  assert.equal(existsSync(root), false, "and the measurement directory is gone");
+});
+
+test("[AIB-V2] a starter script never kills a process group without checking the platform first", () => {
+  // The guard for the above. `process.kill(-pid)` reads as portable and is not: it throws on Windows, where a
+  // process group does not exist. These scripts ship into every generated project and are run by operators on
+  // Windows as well as in the Linux sandbox, so the group kill is only ever correct behind a platform check --
+  // `killTree` is that check. Any other use is the bug coming back.
+  const scripts = path.join(STARTER, "scripts");
+  const files: string[] = [];
+  const walk = (d: string) => { for (const e of readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.(mjs|cjs|js|ts)$/.test(e.name)) files.push(p); } };
+  walk(scripts);
+  assert.ok(files.length > 3, `found ${files.length} starter scripts to check`);
+
+  let gated = 0;
+  for (const f of files) {
+    const code = readFileSync(f, "utf8").replace(/^\s*(\/\/|\*).*$/gm, "");   // the explanation in gates.mjs names it on purpose
+    for (const m of code.matchAll(/process\.kill\(\s*-/g)) {
+      const near = code.slice(Math.max(0, m.index - 300), m.index);
+      assert.match(
+        near, /process\.platform\s*===\s*["']win32["']/,
+        `${path.relative(STARTER, f)} kills a process group with no platform check above it; it throws on Windows and the server survives`,
+      );
+      gated++;
+    }
+  }
+  assert.ok(gated >= 1, "killTree is the one place a process group is killed, and it was not found");
 });
 
 test("[AIB-V2] placeholder functionality fails: a form that posts nowhere, an href=\"#\" control, missing booking widget", () => {
