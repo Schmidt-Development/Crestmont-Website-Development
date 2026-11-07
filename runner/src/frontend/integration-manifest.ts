@@ -46,6 +46,37 @@ export interface IntegrationOperation {
   dataModel?: { table: string; fields: string[] }[];
   /** Other operation ids that must work first. */
   dependsOn?: string[];
+  /** Executable form of some of the criteria above, by index. See AcceptanceProbe. */
+  acceptanceProbes?: AcceptanceProbe[];
+}
+
+/**
+ * An acceptance criterion in executable form.
+ *
+ * The criteria are prose, written before the work, and that is what makes them worth anything. It also meant the
+ * driver could not evaluate them: it proved the API CONTRACT -- every declared route served, every declared refusal
+ * exactly as declared -- and then reported all 28 of Northgate's criteria as UNDETERMINED, including seven it had
+ * just established. A criterion nothing can execute is honest; a criterion something DID establish and that is still
+ * reported unverified is not.
+ *
+ * So a criterion may carry a probe: one request, by index, with the session to make it from and the status it must
+ * get. The prose is unchanged and still authoritative -- the probe says how to check it, never what it means. A
+ * criterion with no probe stays UNDETERMINED, which still fails the gate.
+ */
+export interface AcceptanceProbe {
+  /** Which acceptance criterion this establishes: a 0-based index into the operation's `acceptance`. */
+  criterion: number;
+  /** Who makes the request. `other-customer` is a second account the driver registers, for ownership checks. */
+  as: "anonymous" | "customer" | "other-customer";
+  method?: string;
+  /** Must be one of the declared `apis` paths: a probe cannot invent a surface. */
+  path: string;
+  /** `{{email}}` and `{{password}}` are substituted with credentials the driver generates, as in `requestExample`. */
+  body?: Record<string, unknown>;
+  /** The status this request must get. */
+  expect: number;
+  /** Send it twice and judge the SECOND response: "an email that already exists", "already cancelled". */
+  repeat?: boolean;
 }
 
 export interface IntegrationManifest {
@@ -151,6 +182,33 @@ export function validateManifest(
     // An operation with no acceptance criterion cannot be verified, so it can never honestly be reported done.
     if (!Array.isArray(op.acceptance) || op.acceptance.filter(isStr).length === 0) {
       reject("no-acceptance", `${where} has no acceptance criteria, so there would be no way to tell whether it works`, op.id);
+    }
+
+    // A probe must point at a criterion that exists and a surface that was declared. An out-of-range index would
+    // silently establish nothing (or, worse, the wrong criterion), and a path nobody declared would let the contract
+    // be verified against an endpoint the contract never agreed to.
+    const probes = Array.isArray(op.acceptanceProbes) ? op.acceptanceProbes : [];
+    const declaredPaths = new Set(((man as { apis?: { path?: unknown }[] }).apis ?? []).map((a) => String(a?.path ?? "")));
+    const seenCriteria = new Set<number>();
+    for (const [n, pr] of probes.entries()) {
+      const at = `${where} probe ${n + 1}`;
+      if (!Number.isInteger(pr?.criterion) || pr.criterion < 0 || pr.criterion >= (op.acceptance?.length ?? 0)) {
+        reject("probe-criterion", `${at} points at acceptance criterion ${String(pr?.criterion)}, and this operation has ${op.acceptance?.length ?? 0}`, op.id);
+        continue;
+      }
+      if (seenCriteria.has(pr.criterion)) {
+        reject("probe-duplicate", `${at} is the second probe for criterion ${pr.criterion}; one criterion is established by one probe`, op.id);
+      }
+      seenCriteria.add(pr.criterion);
+      if (pr.as !== "anonymous" && pr.as !== "customer" && pr.as !== "other-customer") {
+        reject("probe-session", `${at} must say who makes the request: anonymous, customer or other-customer`, op.id);
+      }
+      if (!Number.isInteger(pr.expect) || pr.expect < 100 || pr.expect > 599) {
+        reject("probe-status", `${at} must expect an HTTP status, not ${String(pr.expect)}`, op.id);
+      }
+      if (!isStr(pr.path) || !declaredPaths.has(pr.path)) {
+        reject("probe-path", `${at} probes ${String(pr.path)}, which is not one of the declared apis`, op.id);
+      }
     }
 
     if ((op.kind === "data-write" || op.kind === "form-submit" || op.kind === "payment") && !op.dataModel?.length) {
