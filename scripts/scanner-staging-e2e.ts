@@ -94,6 +94,16 @@ const shareId = `shr_${RUN.replace(/-/g, "")}`;
 const cust = new Session();
 
 await check("clamd answers (pinned clamav/clamav image, bundled signatures)", async () => {
+  if (REMOTE) {
+    // No local daemon, and none wanted: the daemon under test is the one on the host that serves this platform,
+    // and the platform records whether it answered. A PING from CI would only prove something about CI.
+    const hb = (await q<{ scanner_id: string; engine: string; signatures_at: string | null; daemon_ok: number; seen_at: string }>(
+      `SELECT scanner_id, engine, signatures_at, daemon_ok, seen_at FROM scanner_heartbeats ORDER BY seen_at DESC LIMIT 1`))[0];
+    assert(hb, "no scanner has ever reported a heartbeat to this platform");
+    assert(hb.daemon_ok === 1, `${hb.scanner_id} reports its daemon is not answering (${hb.engine || "no engine"})`);
+    assert(Date.now() - Date.parse(hb.seen_at) < 30 * 60_000, `${hb.scanner_id} last reported at ${hb.seen_at}`);
+    return `${hb.scanner_id}: ${hb.engine}; signatures ${hb.signatures_at ?? "date unreadable"}`;
+  }
   for (let i = 0; i < 60; i++) { try { if (await ping(CLAMD)) return `127.0.0.1:${CLAMD.port}`; } catch { /* still loading */ } await new Promise((r) => setTimeout(r, 5_000)); }
   throw new Error("clamd did not answer PING within 5 minutes");
 });
@@ -217,12 +227,29 @@ await check("EICAR is quarantined: infected with a named detection, download ref
 });
 
 await check("infected is terminal: a second pass reports nothing, and the scanner can no longer read the file", async () => {
-  const r = await scanner.cycle();
-  assert(!r.error && r.scanned === 0, `second pass: ${JSON.stringify(r)}`);
+  if (REMOTE) {
+    // The platform must stop offering it. That is the same claim the local cycle made -- "a second pass finds
+    // nothing" -- asked of the queue that any scanner would read, which is where the decision actually lives.
+    const offered = (await real.queue(100)).files.some((f) => f.fileId === ids.eicar);
+    assert(!offered, "the platform still offers the quarantined file for scanning");
+  } else {
+    const r = await scanner.cycle();
+    assert(!r.error && r.scanned === 0, `second pass: ${JSON.stringify(r)}`);
+  }
   await real.file(ids.eicar).then(() => { throw new Error("the scanner credential could still read the quarantined file"); }, (e: Error & { status?: number }) => assert(e.status === 409, `expected 409, got ${e.status}: ${e.message}`));
 });
 
 await check("the scanner process sends a signed heartbeat; staging records engine and signature date", async () => {
+  if (REMOTE) {
+    // The scanner serving this platform heartbeats on its own schedule; starting another one here would test a
+    // process that is not the one doing the work. Its row carries the engine and the signature date it reported.
+    const hb = (await q<{ scanner_id: string; engine: string; signatures_at: string | null; daemon_ok: number; seen_at: string }>(
+      `SELECT scanner_id, engine, signatures_at, daemon_ok, seen_at FROM scanner_heartbeats ORDER BY seen_at DESC LIMIT 1`))[0];
+    assert(hb && hb.daemon_ok === 1, `heartbeat row: ${JSON.stringify(hb ?? null)}`);
+    assert(Date.now() - Date.parse(hb.seen_at) < 30 * 60_000, `the latest heartbeat is from ${hb.seen_at}`);
+    assert(/clamav/i.test(hb.engine ?? ""), `the heartbeat names no ClamAV engine: ${hb.engine}`);
+    return `${hb.scanner_id}: ${hb.engine}; signatures ${hb.signatures_at ?? "date unreadable"}`;
+  }
   const p = spawnSync(process.execPath, ["--no-warnings", "scanner/src/main.ts", "--preflight"], {
     env: { PATH: process.env.PATH, PLATFORM_URL: BASE, FILE_SCANNER_SECRET: SECRET, SCANNER_ID: "staging-ci-clamav", CLAMD_HOST: CLAMD.host, CLAMD_PORT: String(CLAMD.port), HEALTH_PORT: "0" },
     encoding: "utf8", timeout: 120_000,
