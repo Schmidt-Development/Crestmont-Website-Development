@@ -13,6 +13,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestApp, createCustomer, createStaff, TEST_PASSWORD } from "./support/app.ts";
 import * as DL from "../src/services/design-locked.ts";
+import * as B from "../src/services/builds.ts";
 import * as MS from "../src/services/malware-scan.ts";
 import { newId, nowIso } from "../src/lib/db.ts";
 import { sha256Hex } from "../src/lib/crypto.ts";
@@ -1401,5 +1402,78 @@ test("[DLS-05] recordArtifact keeps the acknowledgement with the upload, and aud
     assert.ok(said, "the acknowledgement is audited in its own right");
     assert.match(said!.details_json, new RegExp(sha.slice(0, 12)), "naming the bytes it was said about");
     assert.match(said!.details_json, /clean scan/, "and what it waits for");
+  } finally { t.close(); }
+});
+
+// ── and then a backend build ──────────────────────────────────────────────────────────────────────────────────
+//
+// Approving a design is only half of "submit a finished frontend and a backend build starts". The other half is
+// build eligibility, which exists so no customer's website is built before it is paid for: an order, a verified
+// customer admin, recorded scope, a paid qualifying invoice, submitted intake. Crestmont's OWN test project has
+// none of those and never will, so every Founder test artifact was scanned, imported, measured, approved -- and
+// then silently never built, because `syncProjectBuild` returned null.
+
+test("[DLS-06] Crestmont's own approved project reaches a queued build, with no order and no payment", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const made = await DL.createTestProject(t.db, { name: "Queue fixture", actorId: staff.id });
+
+    // Before the approval there is nothing to build: no approved design, no order, no payment.
+    assert.equal(await B.syncProjectBuild(t.db, made.projectId, "backfill"), null, "an unapproved internal project starts nothing");
+    const facts = await B.projectFacts(t.db, made.projectId);
+    assert.equal(facts.internalApprovedDesign, false);
+    assert.equal(B.decideEligibility(facts).verdict, "ineligible");
+
+    const { artifact } = await cleanArtifact(t, made.projectId, made.organizationId, staff.id);
+    await t.db.prepare(`UPDATE frontend_artifacts SET approval_intent_by = ?, approval_intent_at = ? WHERE id = ?`)
+      .bind(staff.id, nowIso(), artifact.id).run();
+    await DL.recordVerdict(t.db, artifact.id, { status: "imported", framework: "static" });
+    const baseline = await DL.recordBaseline(t.db, artifact.id, baselineInput());
+    assert.equal((await DL.applySubmissionApproval(t.db, artifact.id, baseline.id)).applied, true);
+
+    // The approval IS the authorization, and it is the only thing that changed.
+    const after = await B.projectFacts(t.db, made.projectId);
+    assert.equal(after.internalApprovedDesign, true);
+    assert.equal(after.order, null, "still no order");
+    assert.equal(after.qualifying, null, "still no payment");
+    const decision = B.decideEligibility(after);
+    assert.equal(decision.verdict, "queued", decision.reasons.join("; "));
+    assert.match(decision.reasons.join(" "), /approval is the authorization/, decision.reasons.join("; "));
+
+    const job = await B.syncProjectBuild(t.db, made.projectId, "backfill", { kind: "user", userId: staff.id });
+    assert.ok(job, "a build job exists");
+    assert.equal(job.state, "queued", `the build is queued, not held: ${job.state} (${job.state_reason})`);
+    assert.equal(job.project_id, made.projectId);
+    assert.equal(job.order_id, null);
+    // `build_phase` is a column rather than a field of BuildJob, so it is read where it lives.
+    const phase = await t.db.prepare(`SELECT build_phase FROM build_jobs WHERE id = ?`).bind(job.id).first<{ build_phase: string }>();
+    assert.equal(phase?.build_phase, "design_locked", "and it skips autonomous design generation, as a design-locked build must");
+
+    // It is in the queue the screen shows, with a position.
+    const snap = await B.queueSnapshot(t.db);
+    assert.equal(snap.queued.filter((q) => q.jobId === job.id).length, 1, JSON.stringify(snap));
+  } finally { t.close(); }
+});
+
+test("[DLS-07] an approved design does not pay for a customer's build", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const cust = await createCustomer(t.db);
+    const projectId = await project(t.db, cust.organizationId);
+    const { artifact } = await cleanArtifact(t, projectId, cust.organizationId, staff.id);
+    await DL.recordVerdict(t.db, artifact.id, { status: "imported", framework: "vite" });
+    const baseline = await DL.recordBaseline(t.db, artifact.id, baselineInput());
+    await DL.approveBaseline(t.db, baseline.id, { approvedBy: staff.id, note: "approved by hand" });
+    assert.equal((await DL.getBaseline(t.db, baseline.id))?.status, "approved", "the design really is approved");
+
+    // A customer organization is not internal, so the shortcut must not apply however the design was approved.
+    const facts = await B.projectFacts(t.db, projectId);
+    assert.equal(facts.internalApprovedDesign, false, "a customer project is never Crestmont's own");
+    const decision = B.decideEligibility(facts);
+    assert.equal(decision.verdict, "ineligible", decision.reasons.join("; "));
+    assert.match(decision.reasons.join(" "), /no order is linked/, decision.reasons.join("; "));
+    assert.equal(await B.syncProjectBuild(t.db, projectId, "backfill"), null, "and nothing is queued for it");
   } finally { t.close(); }
 });
