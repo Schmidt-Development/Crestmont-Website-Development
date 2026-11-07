@@ -15,6 +15,7 @@ import type { DesignBaseline } from "../src/frontend/design-lock.ts";
 import { coverage, validateManifest } from "../src/frontend/integration-manifest.ts";
 import type { IntegrationManifest } from "../src/frontend/integration-manifest.ts";
 import { planBuild, staticRoot } from "../src/frontend/build.ts";
+import { visualSummary } from "../src/frontend/design-locked-job.ts";
 
 const DIR = path.resolve(import.meta.dirname, "fixtures/real-import");
 const load = <T>(name: string): T => JSON.parse(readFileSync(path.join(DIR, name), "utf8")) as T;
@@ -175,6 +176,30 @@ test("[REAL-006] one changed CSS custom property is caught on every page and eve
   // A declaration does not excuse it: the manifest declared the quote page as a content change, and the quote
   // page is still reported as design drift.
   assert.ok(drifted.some((f) => f.page === "quote"), "a content declaration cannot authorise a restyle");
+
+  // The SUMMARY has to carry that detail, because it is what a person reads and what the repair brief is built
+  // from. It used to print `${page} [${aspects}]` alone: the Northgate run reported "staff [palette, skeleton]"
+  // three times for a build whose rewrite had deleted three approved summary cards, and neither the operator nor
+  // the model was told which elements were gone. Two repair cycles then changed nothing on this gate.
+  const summary = visualSummary(drifted, v.stateChanges.length);
+  assert.match(summary, /9 drift finding\(s\)/);
+  assert.match(summary, /interactive state\(s\) changed/);
+  assert.match(summary, /rgb\(0, 122, 255\)/, "the colour that should not be there is named in the summary");
+  assert.match(summary, /rgb\(217, 131, 36\)/, "and the approved one that went missing");
+  assert.match(summary, /and 6 more/, "with the rest counted rather than dropped silently");
+});
+
+test("[REAL-010] the summary names components that were removed, not just the aspect that moved", () => {
+  // A structural loss is the case the Northgate run hit: the approved page keeps its palette only because the
+  // elements carrying those colours exist. Delete them and both aspects move at once, which is precisely the
+  // signal "[palette, skeleton]" on its own cannot distinguish from a restyle.
+  const summary = visualSummary([{
+    kind: "design-drift", page: "staff", viewport: "desktop", aspects: ["palette", "skeleton"],
+    detail: "approved colours no longer painted: rgb(138, 90, 18), rgb(29, 106, 79); structure changed: 4 element(s) gone (h3, h3, h3, h2), 0 added",
+  }], 1);
+  assert.match(summary, /staff at desktop/, "the page and the viewport");
+  assert.match(summary, /4 element\(s\) gone/, "and that components were removed");
+  assert.match(summary, /rgb\(138, 90, 18\)/, "and which approved colours went with them");
 });
 
 test("[REAL-007] a malformed or missing report is refused rather than half-used", () => {
