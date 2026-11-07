@@ -81,7 +81,7 @@ test("[ACC-02] the plan is derived from the contract and the project's own scrip
 
   const plan = acceptancePlan(repo, manifest());
   assert.equal(plan.endpoints.length, 3);
-  assert.deepEqual(plan.endpoints[1], { method: "GET", path: "/api/appointments", auth: "customer", success: 200, invalid: undefined, unauthenticated: 401 });
+  assert.deepEqual(plan.endpoints[1], { method: "GET", path: "/api/appointments", auth: "customer", success: 200, invalid: undefined, unauthenticated: 401, requestExample: undefined });
   assert.ok(plan.port > 0);
 });
 
@@ -124,6 +124,18 @@ test("[ACC-05] the driver source itself only ever reports what it measured", () 
   assert.match(DRIVER_SOURCE, /process\.exit\(results\.some\(\(r\) => !r\.ok\) \? 1 : 0\)/);
   assert.match(DRIVER_SOURCE, /crestmont-acceptance-nonexistent/, "a declared :id is probed with a value that must not exist");
   assert.match(DRIVER_SOURCE, /add\("app:starts", false,[\s\S]{0,200}could not be started/, "an application that will not start is a reported failure");
-  assert.match(DRIVER_SOURCE, /needs a credential the contract does not carry/, "and a flow it cannot reach is undetermined, not skipped");
   assert.doesNotMatch(DRIVER_SOURCE, /verify-backend/, "the independent driver does not consult anything the model wrote");
+
+  // It obtains its OWN credentials rather than carrying any, and the contract never holds a secret.
+  assert.match(DRIVER_SOURCE, /const unique = "acc-" \+ Date\.now\(\)/, "credentials are generated per run");
+  assert.match(DRIVER_SOURCE, /replaceAll\("\{\{email\}\}"/, "the contract states a body shape, not a credential");
+  assert.match(DRIVER_SOURCE, /the contract declares no register\/login endpoint with a requestExample/, "no example means undetermined, not skipped");
+
+  // The properties that matter most, each asserted to be measured rather than assumed.
+  assert.match(DRIVER_SOURCE, /auth:cookie-flags/, "HttpOnly and SameSite are checked on the real cookie");
+  assert.match(DRIVER_SOURCE, /auth:same-answer-for-unknown-email/, "an unknown address must not be distinguishable from a wrong password");
+  assert.match(DRIVER_SOURCE, /refuses a customer session/, "a staff endpoint must refuse a customer session");
+  assert.match(DRIVER_SOURCE, /a customer can read staff data/, "and the failure says what it means");
+  assert.match(DRIVER_SOURCE, /persistence:session-survives-restart/, "a session held only in memory is not a session");
+  assert.match(DRIVER_SOURCE, /status === 403/, "an empty list is not a refusal");
 });
