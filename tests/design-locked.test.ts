@@ -1617,3 +1617,178 @@ test("[DLS-09] a report the platform will not accept is refused with a reason, n
     assert.deepEqual(JSON.parse(row.route_manifest_json), [], "no measurement sent means no routes claimed");
   } finally { t.close(); }
 });
+
+// -- the integration contract -----------------------------------------------------------------------------------
+//
+// A design-locked build is judged by three gates and the first is conformance to a contract. The runner required
+// one from the day that path was written and read it from `build_pipeline.spec_json`, which holds the architect's
+// master specification -- a different shape, for the retired frontend-generation path. Nothing wrote an
+// integration manifest and no screen accepted one, so on staging six Founder-submitted artifacts each reached a
+// queued build and stopped thirteen seconds later with "this project has no integration manifest". The only
+// manifests anywhere were test fixtures, which is why the Northgate harness ran and a real submission could not.
+
+const CONTRACT_SCHEMA = "crestmont.integration-manifest/1";
+
+const manifestFor = (artifactSha: string, fingerprint: string, over: Record<string, unknown> = {}) => ({
+  schema: CONTRACT_SCHEMA,
+  artifactSha,
+  designFingerprint: fingerprint,
+  operations: [
+    {
+      id: "quote-request",
+      page: "index",
+      element: "form#quote",
+      kind: "form-submit",
+      behaviour: "Accept a quote request from the form and store it, showing the form's own error styling when a field is missing.",
+      expectChange: "content",
+      acceptance: [
+        "a valid submission stores exactly one row in quotes",
+        "a submission with no name is refused and stores nothing",
+      ],
+      dataModel: [{ table: "quotes", fields: ["id", "name", "created_at"] }],
+    },
+  ],
+  ...over,
+});
+
+test("[DLC-01] a contract is recorded against the approved design, and a build is handed it", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const made = await DL.createTestProject(t.db, { name: "Contract", actorId: staff.id });
+    const { artifact } = await cleanArtifact(t, made.projectId, made.organizationId, staff.id);
+    await DL.recordVerdict(t.db, artifact.id, { status: "imported", framework: "static" });
+    const baseline = await DL.recordBaseline(t.db, artifact.id, baselineInput({
+      signatures: [{ page: "index", viewport: "desktop" }, { page: "index", viewport: "mobile" }],
+    }));
+    await DL.approveBaseline(t.db, baseline.id, { approvedBy: staff.id, note: "approved" });
+
+    // Before: nothing, and that is why a build would stop.
+    assert.equal(await DL.activeContract(t.db, made.projectId), null);
+
+    const first = await DL.recordContract(t.db, made.projectId, manifestFor(artifact.sha256, baseline.fingerprint), { recordedBy: staff.id, note: "first cut" });
+    assert.equal(first.ok, true, "ok" in first && !first.ok ? first.problems.join("; ") : "");
+    assert.ok(first.ok);
+    assert.equal(first.contract.version, 1);
+    assert.equal(first.contract.operations, 1);
+    assert.equal(first.contract.design_fingerprint, baseline.fingerprint, "tied to the design it was written against");
+    assert.equal(first.contract.artifact_sha256, artifact.sha256, "and to the bytes");
+    assert.equal(first.contract.recorded_by, staff.id, "a person wrote it");
+
+    // Recorded as its own attributable act.
+    const said = await t.db.prepare(
+      `SELECT details_json FROM audit_logs WHERE action = 'design_locked_contract.recorded' AND subject_id = ?`,
+    ).bind(made.projectId).first<{ details_json: string }>();
+    assert.ok(said, "recording a contract is audited");
+    assert.match(said.details_json, new RegExp(baseline.fingerprint.slice(0, 12)));
+
+    // A second version supersedes the first without destroying it: what an earlier build was held to is evidence.
+    const second = await DL.recordContract(t.db, made.projectId, manifestFor(artifact.sha256, baseline.fingerprint, {
+      outOfScope: ["payments are not in this contract"],
+    }), { recordedBy: staff.id });
+    assert.ok(second.ok);
+    assert.equal(second.contract.version, 2);
+    assert.equal((await DL.activeContract(t.db, made.projectId))!.version, 2, "the later one is the active one");
+    const all = await DL.listContracts(t.db, made.projectId);
+    assert.equal(all.length, 2, "and the first is still on the record");
+    assert.ok(all.find((c) => c.version === 1)!.superseded_at, "marked superseded, not deleted");
+  } finally { t.close(); }
+});
+
+test("[DLC-02] a contract for another design, or of another kind, is refused with the reason", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const made = await DL.createTestProject(t.db, { name: "Contract refusals", actorId: staff.id });
+
+    // No approved design yet: there is nothing to write a contract against.
+    const early = await DL.recordContract(t.db, made.projectId, manifestFor("a".repeat(64), "b".repeat(64)), { recordedBy: staff.id });
+    assert.equal(early.ok, false);
+    assert.match("problems" in early ? early.problems.join(" ") : "", /no approved design/i, JSON.stringify(early));
+
+    const { artifact } = await cleanArtifact(t, made.projectId, made.organizationId, staff.id);
+    await DL.recordVerdict(t.db, artifact.id, { status: "imported", framework: "static" });
+    const baseline = await DL.recordBaseline(t.db, artifact.id, baselineInput({
+      signatures: [{ page: "index", viewport: "desktop" }],
+    }));
+    await DL.approveBaseline(t.db, baseline.id, { approvedBy: staff.id, note: "approved" });
+
+    // A master specification is not an integration contract. This is the exact confusion that left every
+    // design-locked build without one, so it is refused by name.
+    const wrongKind = await DL.recordContract(t.db, made.projectId, {
+      schema: "crestmont.master-spec/1", projectSpec: "build it", designSpec: "nice", technicalArchitecture: "workers",
+    }, { recordedBy: staff.id });
+    assert.equal(wrongKind.ok, false);
+    const kindWhy = "problems" in wrongKind ? wrongKind.problems.join(" ") : "";
+    assert.match(kindWhy, /crestmont\.integration-manifest\/1/, kindWhy);
+    assert.match(kindWhy, /master specification is not an integration contract/i, kindWhy);
+
+    // Written against a different design, or different bytes: refused, because the names in it may mean nothing.
+    const otherDesign = await DL.recordContract(t.db, made.projectId, manifestFor(artifact.sha256, "c".repeat(64)), { recordedBy: staff.id });
+    assert.equal(otherDesign.ok, false, JSON.stringify(otherDesign));
+    const otherBytes = await DL.recordContract(t.db, made.projectId, manifestFor("d".repeat(64), baseline.fingerprint), { recordedBy: staff.id });
+    assert.equal(otherBytes.ok, false, JSON.stringify(otherBytes));
+
+    // Naming a page the approved design does not have: refused here, not discovered inside a build an hour later.
+    const ghostPage = await DL.recordContract(t.db, made.projectId, manifestFor(artifact.sha256, baseline.fingerprint, {
+      operations: [{
+        id: "ghost", page: "pricing", element: "form#x", kind: "form-submit",
+        behaviour: "Something on a page the approved design does not have.",
+        expectChange: "content", acceptance: ["it works", "and it is stored"],
+        dataModel: [{ table: "x", fields: ["id"] }],
+      }],
+    }), { recordedBy: staff.id });
+    assert.equal(ghostPage.ok, false, JSON.stringify(ghostPage));
+    assert.match("problems" in ghostPage ? ghostPage.problems.join(" ") : "", /pricing/, JSON.stringify(ghostPage));
+
+    assert.equal(await DL.activeContract(t.db, made.projectId), null, "none of those were stored");
+  } finally { t.close(); }
+});
+
+test("[DLC-03] the claim hands the runner the contract for THIS design, and nothing when there is none", async () => {
+  const t = await createTestApp();
+  try {
+    const staff = await createStaff(t.db, "owner");
+    const made = await DL.createTestProject(t.db, { name: "Contract delivery", actorId: staff.id });
+    const { artifact } = await cleanArtifact(t, made.projectId, made.organizationId, staff.id);
+    await DL.recordVerdict(t.db, artifact.id, { status: "imported", framework: "static" });
+    const baseline = await DL.recordBaseline(t.db, artifact.id, baselineInput({
+      signatures: [{ page: "index", viewport: "desktop" }],
+    }));
+    await DL.approveBaseline(t.db, baseline.id, { approvedBy: staff.id, note: "approved" });
+
+    const queued = await B.syncProjectBuild(t.db, made.projectId, "backfill", { kind: "user", userId: staff.id });
+    assert.ok(queued, "the approved internal project queues a build");
+
+    const runner = { runnerId: "r-contract", capabilities: ["local-model", "container-sandbox", "zero-token-cost", "git"] };
+
+    // No contract yet: the design lock is handed over, the contract is explicitly null, and the build will say so
+    // rather than appearing to have one.
+    const first = await B.claimJob(t.db, runner);
+    assert.equal(first.job?.id, queued.id, first.reason ?? "");
+    const lockedA = first.job?.designLocked as { fingerprint: string; contract: unknown } | null | undefined;
+    assert.ok(lockedA, "the design lock travels with the claim");
+    assert.equal(lockedA.fingerprint, baseline.fingerprint);
+    assert.equal(lockedA.contract, null, "no contract recorded means none delivered");
+
+    // Record one, requeue, claim again: now it travels, whole.
+    const rec = await DL.recordContract(t.db, made.projectId, manifestFor(artifact.sha256, baseline.fingerprint), { recordedBy: staff.id });
+    assert.ok(rec.ok, "ok" in rec && !rec.ok ? rec.problems.join("; ") : "");
+    await t.db.prepare(`UPDATE build_jobs SET state = 'queued', lease_runner = NULL, lease_token_hash = NULL, lease_expires_at = NULL WHERE id = ?`).bind(queued.id).run();
+
+    const second = await B.claimJob(t.db, runner);
+    const lockedB = second.job?.designLocked as { contract: { version: number; manifest: { operations: unknown[] } } | null } | null | undefined;
+    assert.ok(lockedB?.contract, `the contract must reach the runner: ${JSON.stringify(second.job?.designLocked)}`);
+    assert.equal(lockedB.contract.version, 1);
+    assert.equal(lockedB.contract.manifest.operations.length, 1, "and the manifest itself, not a summary of it");
+
+    // A contract written against a DIFFERENT design is not handed over: the pages and elements it names may not
+    // exist in this one, and a build must stop rather than be held to a contract for something else.
+    await t.db.prepare(`UPDATE design_locked_contracts SET design_fingerprint = ? WHERE project_id = ?`)
+      .bind("f".repeat(64), made.projectId).run();
+    await t.db.prepare(`UPDATE build_jobs SET state = 'queued', lease_runner = NULL, lease_token_hash = NULL, lease_expires_at = NULL WHERE id = ?`).bind(queued.id).run();
+    const third = await B.claimJob(t.db, runner);
+    const lockedC = third.job?.designLocked as { contract: unknown } | null | undefined;
+    assert.equal(lockedC?.contract, null, "a contract for another design is withheld");
+  } finally { t.close(); }
+});

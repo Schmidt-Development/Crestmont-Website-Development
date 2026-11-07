@@ -551,6 +551,52 @@ export function auditScenarios(w: World): Scenario[] {
         await w.db.prepare(`UPDATE projects SET design_locked = 1, active_baseline_id = 'dbl_matrixseed00000000000002' WHERE id = ?`).bind(w.a.ids.project).run();
       },
     },
+    // After the rollback scenario on purpose: at most one baseline per project may be approved, and both
+    // scenarios approve one of their own. This one supersedes every approved baseline for the project
+    // before inserting its own, so it has to be the later of the two.
+    {
+      key: "POST /staff/builds/frontends/:projectId/contract",
+      // A contract declares the design it was written against and is refused unless both values are this
+      // project's, so the scenario fixes the two values and then declares them. What is being proven here is that
+      // recording a contract attributes the decision; whether the validation is right is tests/design-locked's.
+      fields: () => ({
+        manifest: JSON.stringify({
+          schema: "crestmont.integration-manifest/1",
+          artifactSha: "2".repeat(64),
+          designFingerprint: "3".repeat(64),
+          operations: [{
+            id: "matrix-op",
+            page: "index",
+            element: "form#quote",
+            kind: "form-submit",
+            behaviour: "Store a quote request from the form and confirm it in the form's own place.",
+            expectChange: "content",
+            acceptance: ["a valid submission stores exactly one row", "an empty submission stores nothing"],
+            dataModel: [{ table: "quote_requests", fields: ["id", "name", "created_at"] }],
+          }],
+        }),
+        note: "matrix contract",
+      }),
+      setup: async (w) => {
+        const at = new Date().toISOString();
+        // A baseline is immutable once it leaves draft, and the seeded one is already approved, so this does what
+        // a real second design does: supersede it (which the trigger allows) and approve a fresh one, with its own
+        // artifact, whose fingerprint and checksum the contract above declares.
+        await w.db.prepare(`UPDATE design_baselines SET status = 'superseded', superseded_at = ? WHERE project_id = ? AND status = 'approved'`)
+          .bind(at, w.a.ids.project).run();
+        await w.db.prepare(`DELETE FROM design_locked_contracts WHERE project_id = ?`).bind(w.a.ids.project).run();
+        await w.db.prepare(`DELETE FROM design_baselines WHERE id = 'dbl_matrixcontract00000000001'`).run();
+        await w.db.prepare(`DELETE FROM frontend_artifacts WHERE id = 'fa_matrixcontract000000000001'`).run();
+        await w.db.prepare(`INSERT INTO frontend_artifacts (id, project_id, organization_id, version, source, sha256, size_bytes, framework, scan_status, status, created_at, updated_at)
+          VALUES ('fa_matrixcontract000000000001', ?, ?, 9, 'upload', ?, 1024, 'static', 'clean', 'imported', ?, ?)`)
+          .bind(w.a.ids.project, w.a.ids.org, "2".repeat(64), at, at).run();
+        await w.db.prepare(`INSERT INTO design_baselines (id, project_id, artifact_id, version, fingerprint, status, approved_by, approved_at, signatures_json, screenshots_json, created_at)
+          VALUES ('dbl_matrixcontract00000000001', ?, 'fa_matrixcontract000000000001', 9, ?, 'approved', ?, ?, '[{"page":"index","viewport":"desktop"}]', '[{"page":"index","viewport":"desktop","sha":"0"}]', ?)`)
+          .bind(w.a.ids.project, "3".repeat(64), w.staff.owner.id, at, at).run();
+        await w.db.prepare(`UPDATE projects SET design_locked = 1, active_baseline_id = 'dbl_matrixcontract00000000001' WHERE id = ?`)
+          .bind(w.a.ids.project).run();
+      },
+    },
     { key: "POST /staff/builds/gallery/add", fields: () => ({ title: "Matrix added reference", industry: "general", style_tags: "editorial", rights_basis: "own_work", rights_note: "Crestmont's own work, added by the matrix", desktop: png("matrix-added.png") }) },
     { key: "POST /staff/builds/gallery/:id/decide", fields: () => ({ decision: "approve", note: "matrix approval" }), setup: async () => { await w.db.prepare(`UPDATE design_references SET deleted_at = NULL, deleted_by = NULL, status = 'APPROVED' WHERE id = ?`).bind(w.ids.designReference).run(); } },
     { key: "POST /staff/builds/gallery/:id/edit", fields: () => ({ title: "Matrix edited reference", industry: "general", style_tags: "editorial", rights_basis: "own_work", ai_eligible: "1" }), setup: async () => { await w.db.prepare(`UPDATE design_references SET deleted_at = NULL, deleted_by = NULL, status = 'APPROVED' WHERE id = ?`).bind(w.ids.designReference).run(); } },
