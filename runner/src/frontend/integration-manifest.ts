@@ -506,4 +506,15 @@ export interface ApiContract extends ApiRequirement {
   invalid?: number;
   /** When set, an unauthenticated request must get this. */
   unauthenticated?: number;
+  /**
+   * A well-formed request body, so the independent acceptance driver can exercise this endpoint for real.
+   *
+   * Without it the driver can only check that an endpoint refuses what it should refuse; it cannot check that a
+   * valid request succeeds, because it would have to invent a body and would then be testing its own guess. An
+   * endpoint with no example is reported UNDETERMINED rather than skipped.
+   *
+   * `{{email}}` and `{{password}}` in a string are replaced with credentials the driver generates for itself, so
+   * the contract never carries one.
+   */
+  requestExample?: Record<string, unknown>;
 }

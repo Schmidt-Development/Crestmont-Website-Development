@@ -7,55 +7,315 @@
     "packageId": "premium",
     "scope": "Make the approved Riverbend Tool Library frontend work: membership, a real collection behind the catalogue's filters, reservations with conflict checking, and the two-sided message thread between members and the desk. The design is finished and must not change."
   },
-  "runtime": { "framework": "vite", "node": "22", "deploy": "static frontend plus a local API process" },
-  "auth": { "required": true, "roles": ["member", "staff"], "provider": "own" },
+  "runtime": {
+    "framework": "vite",
+    "node": "22",
+    "deploy": "static frontend plus a local API process"
+  },
+  "auth": {
+    "required": true,
+    "roles": [
+      "member",
+      "staff"
+    ],
+    "provider": "own"
+  },
   "persistence": {
     "enforcement": "any",
     "technology": "sqlite",
     "durable": true,
-    "evidence": ["a database file on disk", "reservations that survive restarting the application"]
+    "evidence": [
+      "a database file on disk",
+      "reservations that survive restarting the application"
+    ]
   },
   "projectConfig": {
-    "scripts": { "dev": "preserve", "build": "preserve", "preview": "preserve" },
-    "allowedNewScripts": ["start", "api", "migrate", "seed"],
-    "allowedDependencies": ["better-sqlite3", "node:sqlite", "express", "cookie", "bcrypt", "argon2"]
+    "scripts": {
+      "dev": "preserve",
+      "build": "preserve",
+      "preview": "preserve"
+    },
+    "allowedNewScripts": [
+      "start",
+      "api",
+      "migrate",
+      "seed"
+    ],
+    "allowedDependencies": [
+      "better-sqlite3",
+      "node:sqlite",
+      "express",
+      "cookie",
+      "bcrypt",
+      "argon2"
+    ]
   },
   "dataModels": [
-    { "table": "members", "fields": ["id", "name", "email", "password_hash", "address", "postcode", "role", "status", "joined_at"], "purpose": "One row per membership. Email is unique. `role` is member or staff; `status` is applied, active or lapsed." },
-    { "table": "sessions", "fields": ["id", "member_id", "created_at", "expires_at"], "purpose": "An issued session. The cookie carries this id and nothing else." },
-    { "table": "items", "fields": ["id", "name", "category", "blurb", "deposit_pence", "condition", "retired_at"], "purpose": "The lending collection. This is what the catalogue's filters and search operate on." },
-    { "table": "reservations", "fields": ["id", "item_id", "member_id", "collect_on", "return_by", "status", "notes", "created_at", "updated_at"], "purpose": "One booking of one item by one member. `status` is reserved, out, returned, overdue or cancelled. `member_id` is the owner." },
-    { "table": "messages", "fields": ["id", "member_id", "author", "body", "created_at"], "purpose": "A two-sided thread per member. `author` is member or staff. A member's thread is their own." }
+    {
+      "table": "members",
+      "fields": [
+        "id",
+        "name",
+        "email",
+        "password_hash",
+        "address",
+        "postcode",
+        "role",
+        "status",
+        "joined_at"
+      ],
+      "purpose": "One row per membership. Email is unique. `role` is member or staff; `status` is applied, active or lapsed."
+    },
+    {
+      "table": "sessions",
+      "fields": [
+        "id",
+        "member_id",
+        "created_at",
+        "expires_at"
+      ],
+      "purpose": "An issued session. The cookie carries this id and nothing else."
+    },
+    {
+      "table": "items",
+      "fields": [
+        "id",
+        "name",
+        "category",
+        "blurb",
+        "deposit_pence",
+        "condition",
+        "retired_at"
+      ],
+      "purpose": "The lending collection. This is what the catalogue's filters and search operate on."
+    },
+    {
+      "table": "reservations",
+      "fields": [
+        "id",
+        "item_id",
+        "member_id",
+        "collect_on",
+        "return_by",
+        "status",
+        "notes",
+        "created_at",
+        "updated_at"
+      ],
+      "purpose": "One booking of one item by one member. `status` is reserved, out, returned, overdue or cancelled. `member_id` is the owner."
+    },
+    {
+      "table": "messages",
+      "fields": [
+        "id",
+        "member_id",
+        "author",
+        "body",
+        "created_at"
+      ],
+      "purpose": "A two-sided thread per member. `author` is member or staff. A member's thread is their own."
+    }
   ],
   "apis": [
-    { "method": "POST", "path": "/api/join", "auth": "public", "success": 201, "invalid": 422, "purpose": "Create a membership application. Refuses an email already registered." },
-    { "method": "POST", "path": "/api/login", "auth": "public", "success": 200, "invalid": 401, "purpose": "Issue a session. The same 401 for an unknown email and a wrong password." },
-    { "method": "GET", "path": "/api/me", "auth": "customer", "success": 200, "unauthenticated": 401, "purpose": "Who the session belongs to and the role, so the navigation can take its signed-in shape." },
-    { "method": "GET", "path": "/api/items", "auth": "public", "success": 200, "purpose": "The whole collection with each item's current availability. This is the list the catalogue's filters, search, sort and counts already operate on." },
-    { "method": "GET", "path": "/api/items/:id", "auth": "public", "success": 200, "invalid": 404, "purpose": "One item, so the item page can resolve the id in its query string." },
-    { "method": "GET", "path": "/api/items/:id/availability", "auth": "public", "success": 200, "invalid": 422, "purpose": "Whether an item is free between two dates. The reservation wizard's second step asks this." },
-    { "method": "POST", "path": "/api/reservations", "auth": "customer", "success": 201, "invalid": 422, "unauthenticated": 401, "purpose": "Record a reservation, refusing dates that clash with an existing one." },
-    { "method": "GET", "path": "/api/reservations", "auth": "customer", "success": 200, "unauthenticated": 401, "purpose": "The signed-in member's OWN reservations. Never anyone else's." },
-    { "method": "POST", "path": "/api/reservations/:id/cancel", "auth": "customer", "success": 200, "invalid": 422, "unauthenticated": 401, "purpose": "Cancel a reservation the caller owns. Another member's is refused with 403." },
-    { "method": "GET", "path": "/api/messages", "auth": "customer", "success": 200, "unauthenticated": 401, "purpose": "The signed-in member's own thread, both sides of it." },
-    { "method": "POST", "path": "/api/messages", "auth": "customer", "success": 201, "invalid": 422, "unauthenticated": 401, "purpose": "Add a member message to their own thread." },
-    { "method": "GET", "path": "/api/staff/queue", "auth": "staff", "success": 200, "unauthenticated": 401, "purpose": "Reservations waiting to be handed out. A member session is refused with 403." },
-    { "method": "GET", "path": "/api/staff/items", "auth": "staff", "success": 200, "unauthenticated": 401, "purpose": "The collection with loan state, for the desk." },
-    { "method": "POST", "path": "/api/staff/reservations/:id/status", "auth": "staff", "success": 200, "invalid": 422, "unauthenticated": 401, "purpose": "Hand out, return or cancel any reservation. Staff only." },
-    { "method": "GET", "path": "/api/staff/enquiries", "auth": "staff", "success": 200, "unauthenticated": 401, "purpose": "Unanswered member messages across all threads. Staff only." },
-    { "method": "POST", "path": "/api/staff/messages/:memberId", "auth": "staff", "success": 201, "invalid": 422, "unauthenticated": 401, "purpose": "Reply on one member's thread. The reply must appear on that member's own thread and on no other." }
+    {
+      "method": "POST",
+      "path": "/api/join",
+      "auth": "public",
+      "success": 201,
+      "invalid": 422,
+      "purpose": "Create a membership application. Refuses an email already registered.",
+      "requestExample": {
+        "name": "Acceptance Driver",
+        "email": "{{email}}",
+        "password": "{{password}}",
+        "address": "14 Mill Lane",
+        "postcode": "RV1 2AB",
+        "agree": true
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/login",
+      "auth": "public",
+      "success": 200,
+      "invalid": 401,
+      "purpose": "Issue a session. The same 401 for an unknown email and a wrong password.",
+      "requestExample": {
+        "email": "{{email}}",
+        "password": "{{password}}"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/me",
+      "auth": "customer",
+      "success": 200,
+      "unauthenticated": 401,
+      "purpose": "Who the session belongs to and the role, so the navigation can take its signed-in shape."
+    },
+    {
+      "method": "GET",
+      "path": "/api/items",
+      "auth": "public",
+      "success": 200,
+      "purpose": "The whole collection with each item's current availability. This is the list the catalogue's filters, search, sort and counts already operate on."
+    },
+    {
+      "method": "GET",
+      "path": "/api/items/:id",
+      "auth": "public",
+      "success": 200,
+      "invalid": 404,
+      "purpose": "One item, so the item page can resolve the id in its query string."
+    },
+    {
+      "method": "GET",
+      "path": "/api/items/:id/availability",
+      "auth": "public",
+      "success": 200,
+      "invalid": 422,
+      "purpose": "Whether an item is free between two dates. The reservation wizard's second step asks this."
+    },
+    {
+      "method": "POST",
+      "path": "/api/reservations",
+      "auth": "customer",
+      "success": 201,
+      "invalid": 422,
+      "unauthenticated": 401,
+      "purpose": "Record a reservation, refusing dates that clash with an existing one."
+    },
+    {
+      "method": "GET",
+      "path": "/api/reservations",
+      "auth": "customer",
+      "success": 200,
+      "unauthenticated": 401,
+      "purpose": "The signed-in member's OWN reservations. Never anyone else's."
+    },
+    {
+      "method": "POST",
+      "path": "/api/reservations/:id/cancel",
+      "auth": "customer",
+      "success": 200,
+      "invalid": 422,
+      "unauthenticated": 401,
+      "purpose": "Cancel a reservation the caller owns. Another member's is refused with 403."
+    },
+    {
+      "method": "GET",
+      "path": "/api/messages",
+      "auth": "customer",
+      "success": 200,
+      "unauthenticated": 401,
+      "purpose": "The signed-in member's own thread, both sides of it."
+    },
+    {
+      "method": "POST",
+      "path": "/api/messages",
+      "auth": "customer",
+      "success": 201,
+      "invalid": 422,
+      "unauthenticated": 401,
+      "purpose": "Add a member message to their own thread."
+    },
+    {
+      "method": "GET",
+      "path": "/api/staff/queue",
+      "auth": "staff",
+      "success": 200,
+      "unauthenticated": 401,
+      "purpose": "Reservations waiting to be handed out. A member session is refused with 403."
+    },
+    {
+      "method": "GET",
+      "path": "/api/staff/items",
+      "auth": "staff",
+      "success": 200,
+      "unauthenticated": 401,
+      "purpose": "The collection with loan state, for the desk."
+    },
+    {
+      "method": "POST",
+      "path": "/api/staff/reservations/:id/status",
+      "auth": "staff",
+      "success": 200,
+      "invalid": 422,
+      "unauthenticated": 401,
+      "purpose": "Hand out, return or cancel any reservation. Staff only."
+    },
+    {
+      "method": "GET",
+      "path": "/api/staff/enquiries",
+      "auth": "staff",
+      "success": 200,
+      "unauthenticated": 401,
+      "purpose": "Unanswered member messages across all threads. Staff only."
+    },
+    {
+      "method": "POST",
+      "path": "/api/staff/messages/:memberId",
+      "auth": "staff",
+      "success": 201,
+      "invalid": 422,
+      "unauthenticated": 401,
+      "purpose": "Reply on one member's thread. The reply must appear on that member's own thread and on no other."
+    }
   ],
   "securityControls": [
-    { "id": "SEC-PASSWORD-HASH", "requirement": "A password is never stored or logged in a readable form. Only a hash is kept.", "evidence": ["a password hashing function", "no column holding a plaintext password"] },
-    { "id": "SEC-OWNERSHIP-RESERVATIONS", "requirement": "Every read and write of a reservation is scoped to the caller's own membership, on the server.", "evidence": ["member_id compared against the session on the server", "a 403 for another member's reservation"] },
-    { "id": "SEC-OWNERSHIP-THREAD", "requirement": "A member sees their own message thread and no one else's, decided on the server. A thread is two-sided, so the staff replies on it are theirs to see and other members' are not.", "evidence": ["member_id from the session, never from the request"] },
-    { "id": "SEC-ROLE", "requirement": "Every staff endpoint refuses a member session outright. An empty list is not a refusal: it is indistinguishable from a quiet day, which is how a hole stays hidden.", "evidence": ["a role check before any staff data is read", "403 rather than an empty array"] },
-    { "id": "SEC-SESSION-COOKIE", "requirement": "The session cookie is HttpOnly and SameSite.", "evidence": ["HttpOnly", "SameSite"] },
-    { "id": "SEC-NO-SECRET-IN-BUNDLE", "requirement": "No credential, hash or session secret appears in anything the browser downloads.", "evidence": ["the built assets contain no secret"] }
+    {
+      "id": "SEC-PASSWORD-HASH",
+      "requirement": "A password is never stored or logged in a readable form. Only a hash is kept.",
+      "evidence": [
+        "a password hashing function",
+        "no column holding a plaintext password"
+      ]
+    },
+    {
+      "id": "SEC-OWNERSHIP-RESERVATIONS",
+      "requirement": "Every read and write of a reservation is scoped to the caller's own membership, on the server.",
+      "evidence": [
+        "member_id compared against the session on the server",
+        "a 403 for another member's reservation"
+      ]
+    },
+    {
+      "id": "SEC-OWNERSHIP-THREAD",
+      "requirement": "A member sees their own message thread and no one else's, decided on the server. A thread is two-sided, so the staff replies on it are theirs to see and other members' are not.",
+      "evidence": [
+        "member_id from the session, never from the request"
+      ]
+    },
+    {
+      "id": "SEC-ROLE",
+      "requirement": "Every staff endpoint refuses a member session outright. An empty list is not a refusal: it is indistinguishable from a quiet day, which is how a hole stays hidden.",
+      "evidence": [
+        "a role check before any staff data is read",
+        "403 rather than an empty array"
+      ]
+    },
+    {
+      "id": "SEC-SESSION-COOKIE",
+      "requirement": "The session cookie is HttpOnly and SameSite.",
+      "evidence": [
+        "HttpOnly",
+        "SameSite"
+      ]
+    },
+    {
+      "id": "SEC-NO-SECRET-IN-BUNDLE",
+      "requirement": "No credential, hash or session secret appears in anything the browser downloads.",
+      "evidence": [
+        "the built assets contain no secret"
+      ]
+    }
   ],
   "operations": [
     {
-      "id": "member-join", "page": "join", "element": "form#join", "kind": "auth",
+      "id": "member-join",
+      "page": "join",
+      "element": "form#join",
+      "kind": "auth",
       "behaviour": "Create a membership application from the form and show the approved errors when the email is taken or a field is wrong.",
       "expectChange": "content",
       "acceptance": [
@@ -64,10 +324,26 @@
         "a password under 12 characters is refused with 422 and nothing is stored",
         "the stored password_hash is not the password"
       ],
-      "dataModel": [{ "table": "members", "fields": ["name", "email", "password_hash", "address", "postcode", "role", "status"] }]
+      "dataModel": [
+        {
+          "table": "members",
+          "fields": [
+            "name",
+            "email",
+            "password_hash",
+            "address",
+            "postcode",
+            "role",
+            "status"
+          ]
+        }
+      ]
     },
     {
-      "id": "member-login", "page": "login", "element": "form#login", "kind": "auth",
+      "id": "member-login",
+      "page": "login",
+      "element": "form#login",
+      "kind": "auth",
       "behaviour": "Sign in and issue a session cookie, with one message for any failure.",
       "expectChange": "content",
       "acceptance": [
@@ -76,11 +352,24 @@
         "an unknown email is refused with the same 401 and the same message",
         "GET /api/me returns the member and their role"
       ],
-      "dataModel": [{ "table": "sessions", "fields": ["member_id", "expires_at"] }],
-      "dependsOn": ["member-join"]
+      "dataModel": [
+        {
+          "table": "sessions",
+          "fields": [
+            "member_id",
+            "expires_at"
+          ]
+        }
+      ],
+      "dependsOn": [
+        "member-join"
+      ]
     },
     {
-      "id": "catalogue-collection", "page": "index", "element": "ul.items in the catalogue", "kind": "data-read",
+      "id": "catalogue-collection",
+      "page": "index",
+      "element": "ul.items in the catalogue",
+      "kind": "data-read",
       "behaviour": "Serve the collection with each item's availability, so the approved filters, search, sort and per-category counts have something to work on. The filtering itself already works in the browser and must not be moved to the server.",
       "expectChange": "content",
       "acceptance": [
@@ -89,10 +378,25 @@
         "a retired item never appears",
         "the per-category counts in the approved sidebar match the items returned"
       ],
-      "dataModel": [{ "table": "items", "fields": ["id", "name", "category", "blurb", "deposit_pence", "retired_at"] }]
+      "dataModel": [
+        {
+          "table": "items",
+          "fields": [
+            "id",
+            "name",
+            "category",
+            "blurb",
+            "deposit_pence",
+            "retired_at"
+          ]
+        }
+      ]
     },
     {
-      "id": "item-detail", "page": "item", "element": "the item panel", "kind": "data-read",
+      "id": "item-detail",
+      "page": "item",
+      "element": "the item panel",
+      "kind": "data-read",
       "behaviour": "Resolve the id in the page's query string to one item, and show the approved not-found state when it does not exist.",
       "expectChange": "content",
       "acceptance": [
@@ -100,11 +404,27 @@
         "an unknown id is answered 404 and the page shows its not-found state rather than an error",
         "a retired item is answered 404"
       ],
-      "dataModel": [{ "table": "items", "fields": ["id", "name", "category", "condition", "deposit_pence"] }],
-      "dependsOn": ["catalogue-collection"]
+      "dataModel": [
+        {
+          "table": "items",
+          "fields": [
+            "id",
+            "name",
+            "category",
+            "condition",
+            "deposit_pence"
+          ]
+        }
+      ],
+      "dependsOn": [
+        "catalogue-collection"
+      ]
     },
     {
-      "id": "reservation-availability", "page": "item", "element": "step 2 of form#reserve-dates", "kind": "data-read",
+      "id": "reservation-availability",
+      "page": "item",
+      "element": "step 2 of form#reserve-dates",
+      "kind": "data-read",
       "behaviour": "Answer whether an item is free between two dates, which the wizard's second step asks before it offers to confirm.",
       "expectChange": "content",
       "acceptance": [
@@ -113,11 +433,26 @@
         "a return date before the collection date is refused with 422",
         "a loan longer than seven days is refused with 422"
       ],
-      "dataModel": [{ "table": "reservations", "fields": ["item_id", "collect_on", "return_by", "status"] }],
-      "dependsOn": ["item-detail"]
+      "dataModel": [
+        {
+          "table": "reservations",
+          "fields": [
+            "item_id",
+            "collect_on",
+            "return_by",
+            "status"
+          ]
+        }
+      ],
+      "dependsOn": [
+        "item-detail"
+      ]
     },
     {
-      "id": "reservation-create", "page": "item", "element": "form#reserve-confirm", "kind": "data-write",
+      "id": "reservation-create",
+      "page": "item",
+      "element": "form#reserve-confirm",
+      "kind": "data-write",
       "behaviour": "Record the reservation and confirm it in the approved style. Refuse a clash rather than double-booking.",
       "expectChange": "content",
       "acceptance": [
@@ -126,11 +461,29 @@
         "two identical requests sent together result in exactly one reservation",
         "reserving while unauthenticated is refused with 401"
       ],
-      "dataModel": [{ "table": "reservations", "fields": ["item_id", "member_id", "collect_on", "return_by", "status", "notes"] }],
-      "dependsOn": ["reservation-availability", "member-login"]
+      "dataModel": [
+        {
+          "table": "reservations",
+          "fields": [
+            "item_id",
+            "member_id",
+            "collect_on",
+            "return_by",
+            "status",
+            "notes"
+          ]
+        }
+      ],
+      "dependsOn": [
+        "reservation-availability",
+        "member-login"
+      ]
     },
     {
-      "id": "member-reservations", "page": "account", "element": "table in the reservations tab", "kind": "data-read",
+      "id": "member-reservations",
+      "page": "account",
+      "element": "table in the reservations tab",
+      "kind": "data-read",
       "behaviour": "List the signed-in member's own reservations in the approved table, with the approved empty state when there are none.",
       "expectChange": "content",
       "acceptance": [
@@ -139,11 +492,27 @@
         "a member with none sees the empty state, not an error",
         "requesting the list as one member never returns another member's row"
       ],
-      "dataModel": [{ "table": "reservations", "fields": ["id", "item_id", "collect_on", "return_by", "status"] }],
-      "dependsOn": ["reservation-create"]
+      "dataModel": [
+        {
+          "table": "reservations",
+          "fields": [
+            "id",
+            "item_id",
+            "collect_on",
+            "return_by",
+            "status"
+          ]
+        }
+      ],
+      "dependsOn": [
+        "reservation-create"
+      ]
     },
     {
-      "id": "reservation-cancel", "page": "account", "element": "the Cancel button in a reservations row", "kind": "data-write",
+      "id": "reservation-cancel",
+      "page": "account",
+      "element": "the Cancel button in a reservations row",
+      "kind": "data-write",
       "behaviour": "Cancel a reservation the signed-in member owns and reflect it in the table.",
       "expectChange": "content",
       "acceptance": [
@@ -152,11 +521,24 @@
         "cancelling an item already handed out is refused with 422",
         "the cancelled dates become available again"
       ],
-      "dataModel": [{ "table": "reservations", "fields": ["status", "updated_at"] }],
-      "dependsOn": ["member-reservations"]
+      "dataModel": [
+        {
+          "table": "reservations",
+          "fields": [
+            "status",
+            "updated_at"
+          ]
+        }
+      ],
+      "dependsOn": [
+        "member-reservations"
+      ]
     },
     {
-      "id": "member-thread", "page": "account", "element": "ul.thread in the messages tab", "kind": "data-read",
+      "id": "member-thread",
+      "page": "account",
+      "element": "ul.thread in the messages tab",
+      "kind": "data-read",
       "behaviour": "Show the signed-in member's own thread, both their messages and the desk's replies.",
       "expectChange": "content",
       "acceptance": [
@@ -165,11 +547,27 @@
         "another member's thread is never returned",
         "an unauthenticated request is refused with 401"
       ],
-      "dataModel": [{ "table": "messages", "fields": ["id", "member_id", "author", "body", "created_at"] }],
-      "dependsOn": ["member-login"]
+      "dataModel": [
+        {
+          "table": "messages",
+          "fields": [
+            "id",
+            "member_id",
+            "author",
+            "body",
+            "created_at"
+          ]
+        }
+      ],
+      "dependsOn": [
+        "member-login"
+      ]
     },
     {
-      "id": "member-message-send", "page": "account", "element": "form#message-compose", "kind": "data-write",
+      "id": "member-message-send",
+      "page": "account",
+      "element": "form#message-compose",
+      "kind": "data-write",
       "behaviour": "Add the member's message to their own thread and show it in the approved style.",
       "expectChange": "content",
       "acceptance": [
@@ -178,11 +576,25 @@
         "a member cannot write a message onto another member's thread",
         "the member_id is taken from the session and never from the request body"
       ],
-      "dataModel": [{ "table": "messages", "fields": ["member_id", "author", "body"] }],
-      "dependsOn": ["member-thread"]
+      "dataModel": [
+        {
+          "table": "messages",
+          "fields": [
+            "member_id",
+            "author",
+            "body"
+          ]
+        }
+      ],
+      "dependsOn": [
+        "member-thread"
+      ]
     },
     {
-      "id": "staff-desk", "page": "admin", "element": "the queue, collection and enquiries panels", "kind": "data-read",
+      "id": "staff-desk",
+      "page": "admin",
+      "element": "the queue, collection and enquiries panels",
+      "kind": "data-read",
       "behaviour": "Serve the three staff views: reservations waiting to be handed out, the collection with loan state, and unanswered enquiries, with the approved counts above them.",
       "expectChange": "content",
       "acceptance": [
@@ -191,11 +603,27 @@
         "an unauthenticated request is refused with 401",
         "the three counts shown match the rows actually stored"
       ],
-      "dataModel": [{ "table": "reservations", "fields": ["id", "member_id", "item_id", "collect_on", "status"] }],
-      "dependsOn": ["member-login"]
+      "dataModel": [
+        {
+          "table": "reservations",
+          "fields": [
+            "id",
+            "member_id",
+            "item_id",
+            "collect_on",
+            "status"
+          ]
+        }
+      ],
+      "dependsOn": [
+        "member-login"
+      ]
     },
     {
-      "id": "staff-actions", "page": "admin", "element": "the Hand out button and the reply forms", "kind": "admin",
+      "id": "staff-actions",
+      "page": "admin",
+      "element": "the Hand out button and the reply forms",
+      "kind": "admin",
       "behaviour": "Hand out, return or cancel any reservation, and reply on a member's thread. Both are staff-only and both must be visible to the member they concern.",
       "expectChange": "content",
       "acceptance": [
@@ -204,8 +632,19 @@
         "a member session attempting either is refused with 403 and nothing changes",
         "an unknown status value is refused with 422"
       ],
-      "dataModel": [{ "table": "messages", "fields": ["member_id", "author", "body"] }],
-      "dependsOn": ["staff-desk"]
+      "dataModel": [
+        {
+          "table": "messages",
+          "fields": [
+            "member_id",
+            "author",
+            "body"
+          ]
+        }
+      ],
+      "dependsOn": [
+        "staff-desk"
+      ]
     }
   ],
   "outOfScope": [
@@ -218,12 +657,17 @@
     {
       "what": "How a staff membership comes to exist",
       "why": "Joining creates a member. Promoting one to staff is an administrative act and the approved design has no screen for it.",
-      "blocks": ["staff-desk", "staff-actions"]
+      "blocks": [
+        "staff-desk",
+        "staff-actions"
+      ]
     },
     {
       "what": "The initial collection",
       "why": "The approved design has no screen for adding an item, only for editing one. Where the four hundred tools come from is not something the frontend says.",
-      "blocks": ["catalogue-collection"]
+      "blocks": [
+        "catalogue-collection"
+      ]
     }
   ]
 }
