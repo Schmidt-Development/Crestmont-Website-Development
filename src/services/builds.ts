@@ -398,6 +398,56 @@ export async function verifyRunnerSignature(secret: string | undefined, body: st
 async function activeCount(db: Db) {
   return (await db.prepare(`SELECT COUNT(*) AS n FROM build_jobs WHERE state IN ('preparing','building','verifying')`).first<{ n: number }>())!.n;
 }
+/**
+ * What is running and what is waiting, in the order the next claim will actually take them.
+ *
+ * The Artifact Builder has to show a real queue position, and a position computed any other way than the claim's
+ * own would be a number that looks authoritative and is wrong. So this runs the SAME candidate query and the SAME
+ * comparator as `claimJob`: `effectivePriority` descending (which raises a long wait so nothing starves), then the
+ * acceptance time, which for an internal project with no paid order is the job's own arrival -- plain FIFO by
+ * submission, and stable across retries, pauses and restarts because none of them changes it.
+ *
+ * The duplication is deliberate and bounded: `[QUE-01]` asserts this and `claimJob` agree on the head of the
+ * queue, so the two cannot drift apart without a test failing. Refactoring the claim path itself to share the
+ * code would be the tidier change and a riskier one; the claim is where a mistake costs a double-started build.
+ *
+ * `position` counts from 1 among jobs that could be claimed now. A paused project and a job held by `not_before`
+ * are excluded, exactly as the claim excludes them, because a position they would never be offered from is a
+ * promise the queue does not make.
+ */
+export async function queueSnapshot(db: Db, now = new Date()): Promise<{
+  cap: number;
+  active: { jobId: string; projectId: string; projectName: string; state: string; startedAt: string | null; runner: string | null }[];
+  queued: { jobId: string; projectId: string; projectName: string; position: number; waitingSince: string }[];
+}> {
+  const s = await getBuildSettings(db);
+  const at = now.toISOString();
+
+  const active = (await db.prepare(
+    `SELECT j.id AS jobId, j.project_id AS projectId, p.name AS projectName, j.state, j.run_started_at AS startedAt, j.lease_runner AS runner
+       FROM build_jobs j JOIN projects p ON p.id = j.project_id
+      WHERE j.state IN ('preparing','building','verifying')
+      ORDER BY j.run_started_at ASC`,
+  ).all<{ jobId: string; projectId: string; projectName: string; state: string; startedAt: string | null; runner: string | null }>()).results ?? [];
+
+  const rows = (await db.prepare(
+    `SELECT j.id AS jobId, j.project_id AS projectId, p.name AS projectName, COALESCE(pl.priority, 0) AS _priority,
+            COALESCE((SELECT MIN(i.paid_at) FROM invoices i WHERE i.order_id = j.order_id AND i.status = 'paid' AND i.paid_at IS NOT NULL), j.created_at) AS _accepted
+       FROM build_jobs j JOIN projects p ON p.id = j.project_id
+       LEFT JOIN build_project_controls c ON c.project_id = j.project_id
+       LEFT JOIN build_pipeline pl ON pl.project_id = j.project_id
+      WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?) AND COALESCE(c.paused, 0) = 0
+      ORDER BY COALESCE(pl.priority, 0) DESC, _accepted LIMIT 200`,
+  ).bind(at).all<{ jobId: string; projectId: string; projectName: string; _priority: number; _accepted: string }>()).results ?? [];
+
+  const queued = rows
+    .map((r) => ({ r, e: effectivePriority(r._priority, r._accepted, now) }))
+    .sort((a, b) => b.e - a.e || (a.r._accepted < b.r._accepted ? -1 : a.r._accepted > b.r._accepted ? 1 : 0))
+    .map((x, i) => ({ jobId: x.r.jobId, projectId: x.r.projectId, projectName: x.r.projectName, position: i + 1, waitingSince: x.r._accepted }));
+
+  return { cap: s.max_concurrent, active, queued };
+}
+
 export async function projectSpendMicro(db: Db, projectId: string): Promise<number> {
   return (await db.prepare(`SELECT COALESCE(SUM(cost_micro),0) AS c FROM build_jobs WHERE project_id = ?`).bind(projectId).first<{ c: number }>())!.c;
 }

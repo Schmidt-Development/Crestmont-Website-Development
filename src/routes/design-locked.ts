@@ -15,7 +15,7 @@ import { staffPage } from "./crm.ts";
 import { UploadError, storeUpload } from "../services/files.ts";
 import { UPLOAD_LIMIT_BYTES } from "../adapters/storage.ts";
 import * as DL from "../services/design-locked.ts";
-import { syncProjectBuild, getBuildSettings, projectFacts, decideEligibility } from "../services/builds.ts";
+import { syncProjectBuild, getBuildSettings, projectFacts, decideEligibility, queueSnapshot } from "../services/builds.ts";
 import { audit } from "../services/security.ts";
 import { alert, badge, button, csrf, emptyState, kpi, pageHead, table, linkButton } from "../ui/components.ts";
 
@@ -93,6 +93,9 @@ export function register(r: Router): void {
   r.get(BASE, async (ctx) => {
     requireStaff(ctx, "builds.read");
     const rows = await DL.dashboard(ctx.db, { limit: 200 });
+    // What is running and what is waiting, in the order the next claim will take them. Shown here because this is
+    // the screen someone watches after submitting, and "queued" with no position is indistinguishable from stuck.
+    const queue = await queueSnapshot(ctx.db);
 
     const byState = new Map<string, number>();
     for (const x of rows) byState.set(x.state ?? "none", (byState.get(x.state ?? "none") ?? 0) + 1);
@@ -107,9 +110,27 @@ ${rows.length === 0 ? alert("info", html`No project is on the design-locked work
 <div class="kpis">
   ${kpi("Design locked", rows.filter((x) => x.designLocked).length, "approved and frozen")}
   ${kpi("Awaiting approval", byState.get("awaiting_approval") ?? 0, "a person must look")}
-  ${kpi("Building backend", (byState.get("building_backend") ?? 0) + (byState.get("integrating") ?? 0))}
+  ${kpi("Active builds", `${queue.active.length} / ${queue.cap}`, queue.active.length >= queue.cap ? "every slot in use" : `${queue.cap - queue.active.length} slot(s) free`, (queue.active.length / Math.max(1, queue.cap)) * 100)}
+  ${kpi("Waiting", queue.queued.length, queue.queued.length ? "starts automatically as slots free" : "nothing queued")}
   ${kpi("Needs attention", (byState.get("artifact_rejected") ?? 0) + (byState.get("artifact_quarantined") ?? 0) + (byState.get("blocked") ?? 0))}
 </div>
+
+${queue.active.length || queue.queued.length ? html`<section class="card">
+  <h2>Backend builds</h2>
+  <p class="faint">At most ${String(queue.cap)} run at once. The rest wait in order and start on their own as slots are released; nobody has to press anything.</p>
+  ${queue.active.length ? table(queue.active, [
+    { header: "Slot", cell: (x: typeof queue.active[number]) => html`${String(queue.active.indexOf(x) + 1)} of ${String(queue.cap)}` },
+    { header: "Project", cell: (x: typeof queue.active[number]) => html`<a href="${BASE}/${x.projectId}">${x.projectName}</a>` },
+    { header: "State", cell: (x: typeof queue.active[number]) => badge("info", x.state) },
+    { header: "Started", cell: (x: typeof queue.active[number]) => html`${x.startedAt ? formatDateTime(x.startedAt) : "—"}` },
+    { header: "Runner", cell: (x: typeof queue.active[number]) => html`<span class="faint">${x.runner ?? "—"}</span>` },
+  ]) : html`<p class="faint">No build is running.</p>`}
+  ${queue.queued.length ? html`<h3>Queue</h3>${table(queue.queued, [
+    { header: "Position", cell: (x: typeof queue.queued[number]) => html`${String(x.position)}` },
+    { header: "Project", cell: (x: typeof queue.queued[number]) => html`<a href="${BASE}/${x.projectId}">${x.projectName}</a>` },
+    { header: "Waiting since", cell: (x: typeof queue.queued[number]) => html`${formatDateTime(x.waitingSince)}` },
+  ])}` : ""}
+</section>` : ""}
 ${rows.length === 0 ? emptyState("Nothing yet", "No project is on the design-locked workflow.", mayUpload ? linkButton("Upload frontend artifact", `${BASE}/new`, "primary") : undefined) : table(
   rows,
   [
