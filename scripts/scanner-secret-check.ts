@@ -21,7 +21,7 @@
 // It prints no secret. Checksums are a truncated SHA-256 under a fixed public label: one-way, and short enough to be
 // quoted safely in a CI log or a message.
 //
-//   node --no-warnings scripts/scanner-secret-check.ts [--probe <origin> | --probe-installed <origin>] [--offline] [--env-file <path>]
+//   node --no-warnings scripts/scanner-secret-check.ts [--probe <origin> | --probe-installed <origin>] [--offline] [--installed-at <path>]
 //     env: ACCESS_ROOT_KEY (the Cloudflare API token), CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID (for the D1 read)
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -69,7 +69,7 @@ const args = process.argv.slice(2);
 const flag = (name: string) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
 const offline = args.includes("--offline");
 const probeOrigin = flag("--probe");
-const envFile = flag("--env-file") ?? "C:/CrestmontScanner/scanner.env";
+const envFile = flag("--installed-at") ?? "C:/CrestmontScanner/scanner.env";
 
 const probeInstalled = flag("--probe-installed");
 
@@ -95,7 +95,9 @@ if (!root) { console.error("::error::ACCESS_ROOT_KEY is required (the Cloudflare
 if (root !== root.trim()) console.log(`!! the token has surrounding whitespace (${root.length} characters, ${root.trim().length} trimmed) — an HMAC key is byte-exact, so this alone changes the derived secret`);
 
 const derived = deriveStagingKey(root.trim(), "scanner");
-console.log(`::add-mask::${derived}`);
+// GitHub consumes this directive and masks the value; anywhere else it is just the secret, printed. Measured:
+// run locally, the line read "::add-mask::<the derived key>". Only ask for masking where masking exists.
+if (process.env.GITHUB_ACTIONS === "true") console.log(`::add-mask::${derived}`);
 console.log(`token checksum          : ${checksum(root.trim())}`);
 console.log(`derives scanner key     : ${checksum(derived)}`);
 
