@@ -72,10 +72,17 @@ export interface LoopDeps {
   /** V4 website slots: the model-server state shared by the slots (only slot 0 probes; the others follow it). */
   /**
    * V4 website slots: state shared by the slots of ONE runner process.
-   *   modelOk  only slot 0 probes the model server; the others follow it.
-   *   active   the job ids the slots are working on, so two slots can never build one project twice.
+   *   modelOk   only slot 0 probes the model server; the others follow it.
+   *   active    the job ids the slots are working on, so two slots can never build one project twice.
+   *   activity  bumped whenever any slot claims a build or finishes one. An idle slot waits on this as well as on
+   *             its own backoff, because its backoff is an answer to a question it asked in the past: "nothing is
+   *             queued" was true when it asked and is not an argument for staying asleep once a sibling has just
+   *             taken work. Measured on Node 1 with six fixtures: three slots claimed within one second of each
+   *             other and the fourth, whose poll phase had drifted, claimed 107 seconds later -- a queued build
+   *             waiting on an idle slot, with the node below its cap the whole time. RUNNER_POLL_MAX_SECONDS is
+   *             300, so that wait could have been five minutes.
    */
-  shared?: { modelOk: boolean; active?: Set<string> };
+  shared?: { modelOk: boolean; active?: Set<string>; activity?: number };
 }
 
 /** Probe: the model server answers GET /models and lists the configured model. No generation, no tokens. */
@@ -216,7 +223,11 @@ export async function runLoop(d: LoopDeps): Promise<number> {
       if (d.once) return jobs;
       if (served > 0) { idleMs = d.cfg.pollMinMs; continue; }
       const factor = claimed.reason === "none_queued" ? 1.5 : 3;
-      await sleep(idleMs, d.shouldStop);
+      // The backoff still applies, but a sibling claiming or finishing a build ends it early: that is new
+      // information about the queue, and sleeping through it leaves work waiting on a node with a free slot.
+      const seen = d.shared?.activity ?? 0;
+      await sleep(idleMs, () => d.shouldStop() || (d.shared?.activity ?? 0) !== seen);
+      if (!d.shouldStop() && (d.shared?.activity ?? 0) !== seen) { idleMs = d.cfg.pollMinMs; continue; }
       idleMs = Math.min(d.cfg.pollMaxMs, Math.round(idleMs * factor));
       continue;
     }
@@ -239,6 +250,8 @@ export async function runLoop(d: LoopDeps): Promise<number> {
       continue;
     }
     active?.add(claimed.job.id);
+    // The queue had work a moment ago, so the slots still waiting out a backoff should ask again now.
+    if (d.shared) d.shared.activity = (d.shared.activity ?? 0) + 1;
     jobs++;
     if (d.health) { d.health.currentJob = claimed.job.id; d.health.runningJobs = [...d.health.runningJobs, claimed.job.id]; }
     let outcome = "crashed";
@@ -252,6 +265,8 @@ export async function runLoop(d: LoopDeps): Promise<number> {
       d.logger.error("job crashed", { jobId: claimed.job.id, error: jobError });
     } finally {
       active?.delete(claimed.job.id);
+      // A slot has just come free. Whichever slots are waiting at capacity should stop waiting.
+      if (d.shared) d.shared.activity = (d.shared.activity ?? 0) + 1;
     }
     if (d.health) {
       d.health.runningJobs = d.health.runningJobs.filter((id) => id !== claimed.job!.id);
@@ -368,6 +383,7 @@ export async function runImports(d: LoopDeps): Promise<number> {
 export async function runSlots(d: LoopDeps, slots: number, stagger = 3000): Promise<number> {
   const shared = d.shared ?? { modelOk: true, active: new Set<string>() };
   shared.active ??= new Set<string>();
+  shared.activity ??= 0;
   const loops: Promise<number>[] = [];
   for (let i = 0; i < Math.max(1, slots); i++) {
     // `imports: null` on every slot, slot 0 included: the import lane owns them now.

@@ -93,8 +93,13 @@ jobs:
         run: |
           npm install --prefix .pw --no-save --no-audit --no-fund --ignore-scripts playwright@1.48.2 > /dev/null
           .pw/node_modules/.bin/playwright install --with-deps chromium > /dev/null
+          # `| tee` made this step report success while the tests failed. Without pipefail a pipeline's status is
+          # the LAST command's, so `|| rc=$?` read tee's exit code -- always 0 -- and `exit $rc` exited 0. Run
+          # 42405202273 finished GREEN with `# fail 1`: [AB-Q-03] measured three active builds where it required
+          # four. A verification that cannot be failed is not a verification.
           rc=0
-          node --no-warnings --test --test-concurrency=1 tests/e2e/staging-build-queue.e2e.ts 2>&1 | tee queue-e2e.log || rc=$?
+          node --no-warnings --test --test-concurrency=1 tests/e2e/staging-build-queue.e2e.ts 2>&1 | tee queue-e2e.log
+          rc=${PIPESTATUS[0]}
           # A SKIPPED check is UNDETERMINED, and this run exists to determine something. node:test exits 0 when a
           # test skips itself, so the first run of this workflow finished GREEN while reporting
           #   [AB-Q-02] ... # SKIP only 0 of 6 fixtures had reached the queue within 45 minutes
@@ -105,7 +110,14 @@ jobs:
             grep -E '^ok [0-9]+ - .* # SKIP' queue-e2e.log | cut -c1-400
             rc=1
           fi
-          exit $rc
+          # The counts node:test printed, read back rather than inferred from an exit code that has been wrong
+          # once already. A run that printed no counts at all has an unknown outcome, which is also not a pass.
+          if ! grep -qE '^# fail 0$' queue-e2e.log; then
+            echo "::error title=Build queue::the test run did not report '# fail 0':"
+            grep -E '^# (tests|pass|fail|skipped) ' queue-e2e.log || echo "  (no counts were printed at all)"
+            rc=1
+          fi
+          exit "$rc"
 
       # The timeline, not a snapshot.
       #

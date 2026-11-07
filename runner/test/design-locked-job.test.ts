@@ -14,6 +14,7 @@ import type { DesignLockedDeps } from "../src/frontend/design-locked-job.ts";
 import { zipDirectory } from "./fixtures/zip-writer.ts";
 import { RunTracker, StopSwitch } from "../src/agent.ts";
 import { silentLogger } from "../src/log.ts";
+import { baselineFingerprint } from "../src/frontend/design-lock.ts";
 import type { ApprovedArtifact, Job } from "../src/protocol.ts";
 import type { IntegrationManifest, ManifestContract } from "../src/frontend/integration-manifest.ts";
 
@@ -390,4 +391,74 @@ test("[DLJ-WIRE] a design-locked build reports its outcome to the platform, like
   // `finish` is what turns those checks into requirement evidence and composes the report.
   assert.match(src, /const finish = async \(outcome: Outcome, fields: \{[^}]*checks\?: CheckOutcome\[\]/, "finish still takes the checks");
   assert.match(src, /await client\.complete\(job, req\)/, "finish still reports to the platform");
+});
+
+test("[DLJ-11] the starter's own pages are not mistaken for a change to the approved design", async () => {
+  // Measured on Node 1 (run 42405202273). The Founder's fixtures each measure ONE page, `index`, in three
+  // viewports. A design-locked build lays the artifact over the starter, so the same fixture measured
+  //
+  //   index, public, public/404, public/admin, public/booking/confirmation, public/booking/manage
+  //
+  // and `baselineFingerprint` hashes every signature it is given. Eighteen against three can never match, so
+  // every design-locked build reported "the frontend renders a different design from the one approved" and
+  // finished `stopped` -- while the three `index` signatures were byte-for-byte identical to the approved ones.
+  const report = JSON.parse(readFileSync(path.join(REAL, "import-baseline.json"), "utf8")) as {
+    signatures: { page: string; viewport: string }[];
+  };
+  const pages = [...new Set(report.signatures.map((s) => s.page))];
+  assert.ok(pages.length > 1, `the fixture must measure several pages for this test to mean anything: ${pages.join(", ")}`);
+
+  // The approved design is ONE of those pages. The others stand in for what the starter brings.
+  const approvedPage = pages[0];
+  const approvedSignatures = report.signatures.filter((s) => s.page === approvedPage);
+  const approvedFingerprint = baselineFingerprint(approvedSignatures as never);
+
+  const repo = path.join(tmp(), "repo");
+  const provider = fakeProvider({ repo, onCycle: () => writeConformingBackend(repo) });
+  const r = await runDesignLockedJob(deps({
+    repo, provider: provider as never,
+    fetchArtifact: async () => artifact({ designFingerprint: approvedFingerprint }),
+    fetchApprovedBaseline: async () => ({ signatures: approvedSignatures }),
+  }));
+
+  assert.ok(
+    !r.problems.some((p) => /renders a different design from the one approved/.test(p)),
+    `the approved page was reproduced exactly, so nothing should claim the design changed: ${JSON.stringify(r.problems)}`,
+  );
+  assert.ok(
+    !r.problems.some((p) => /no longer render at all/.test(p)),
+    `and the approved page does render: ${JSON.stringify(r.problems)}`,
+  );
+
+  // Without the approved page list the old, wider comparison still applies: the same build then reports the
+  // difference, because it is comparing three signatures against all of them.
+  const wider = await runDesignLockedJob(deps({
+    repo: path.join(tmp(), "repo2"), provider: fakeProvider({ repo: path.join(tmp(), "repo2") }) as never,
+    fetchArtifact: async () => artifact({ designFingerprint: approvedFingerprint }),
+  }));
+  assert.ok(
+    wider.problems.some((p) => /renders a different design from the one approved/.test(p)),
+    "the fallback is unchanged, so an older platform behaves exactly as before",
+  );
+});
+
+test("[DLJ-12] an approved page that stops rendering is a failure, not a quieter fingerprint", async () => {
+  // The other direction of the same change, and the one that must not be lost: narrowing the comparison to the
+  // approved pages would be a way to pass by rendering none of them. A page the approved design contains and the
+  // build does not is reported as exactly that.
+  const repo = path.join(tmp(), "repo");
+  const provider = fakeProvider({ repo, onCycle: () => writeConformingBackend(repo) });
+  const r = await runDesignLockedJob(deps({
+    repo, provider: provider as never,
+    fetchArtifact: async () => artifact({ designFingerprint: "9".repeat(64) }),
+    // An approved design with a page the measurement will not contain.
+    fetchApprovedBaseline: async () => ({
+      signatures: [{ page: "a-page-that-is-gone", viewport: "desktop", skeleton: [], palette: [], fonts: [], typeScale: [], landmarks: [], docHeight: 1 }],
+    }),
+  }));
+
+  assert.ok(
+    r.problems.some((p) => /a-page-that-is-gone.*no longer render at all/.test(p)),
+    `a missing approved page is named: ${JSON.stringify(r.problems)}`,
+  );
 });

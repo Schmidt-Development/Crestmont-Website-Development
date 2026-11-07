@@ -583,6 +583,10 @@ export async function runJob(job: Job, deps: JobDeps): Promise<JobSummary> {
       const dl = await runDesignLockedJob({
         job, ws, sandbox, provider, tracker, stop, log,
         fetchArtifact: () => client.approvedArtifact(job),
+        // The approved design's own page list, so the re-measurement is compared like with like. The artifact is
+        // laid over the starter, so the measurement also finds the starter's pages; without this the fingerprint
+        // is computed over a wider set of pages than the approved one and could never match.
+        fetchApprovedBaseline: () => client.approvedBaseline(job),
         // The contract, from where the platform records it. This read `job.spec?.content` -- the architect's
         // master specification for the retired frontend-generation path, a different shape entirely -- so a
         // design-locked build never had a contract and stopped at `manifest` thirteen seconds in. Still a cast,

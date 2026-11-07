@@ -224,8 +224,25 @@ test("[AB-Q-03] four builds run and the rest hold real positions, with nobody pr
     await new Promise((r) => setTimeout(r, 30_000));
   }
 
-  const m = ours(board);
   assert.equal(board.cap, 4, `the screen must report the four-slot cap: ${board.raw.slice(0, 200)}`);
+
+  // Reaching the queue is not the same as filling the slots, and the difference was measured in minutes.
+  //
+  // The loop above stops the moment the sixth fixture is accounted for -- and the sixth had its contract four
+  // seconds earlier. A slot claims on its own poll, and an idle slot's backoff grows to
+  // RUNNER_POLL_MAX_SECONDS (300), so the fourth slot can still be asleep when the sixth build appears. Run
+  // 42405202273 asserted at that instant, found three active, and reported a four-slot failure on a node that
+  // was working: its fourth slot claimed 107 seconds later, two seconds after the workflow had finished.
+  //
+  // So filling the slots gets its own patient wait. This does not relax the requirement. With six fixtures
+  // queued there is always more work than slots, so a node that never reaches four has a real fault, and failing
+  // with the board is then the right answer -- where a skip would be an undetermined result dressed as patience.
+  const fullBy = Date.now() + 10 * 60_000;
+  while (board.active.length < board.cap && Date.now() < fullBy) {
+    await new Promise((r) => setTimeout(r, 15_000));
+    board = await queueBoard(o);
+  }
+  const m = ours(board);
 
   // Counted over the whole board, not just this run's fixtures: staging is shared, and another project's build
   // occupying a slot is a legitimate state that this test must not read as a queue fault. What is being checked is

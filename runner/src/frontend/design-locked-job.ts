@@ -30,6 +30,7 @@ import { writeVisualSpec } from "./visual.ts";
 import type { ImportReport } from "./import.ts";
 import { IMPORT_OUT, IMPORT_SCRIPT, writeBaseline } from "./workflow.ts";
 import type { DesignBaseline, DriftFinding } from "./design-lock.ts";
+import { baselineFingerprint } from "./design-lock.ts";
 import { checkConformance, describeConformance, repairBrief } from "./conformance.ts";
 import type { ConformanceReport } from "./conformance.ts";
 import { integrationMemory, integrationPrompt, readIntegrationOutcome } from "./integrate.ts";
@@ -50,6 +51,15 @@ export interface DesignLockedDeps {
   log: Logger;
   /** Fetches the approved artifact over the signed channel. */
   fetchArtifact: () => Promise<ApprovedArtifact | null>;
+  /**
+   * Fetches the approved design's own manifests -- in particular its page signatures.
+   *
+   * Needed because the approved design and the thing this build measures are not the same SET OF PAGES. The
+   * artifact is laid over the starter, so the measurement also finds the starter's pages, and the fingerprint is
+   * computed over all of them. Optional: without it the comparison falls back to the whole-report fingerprint,
+   * which is what it did before.
+   */
+  fetchApprovedBaseline?: () => Promise<{ signatures?: unknown[] } | null>;
   /** The integration manifest for this project, when the platform has one. */
   manifest?: (IntegrationManifest & ManifestContract) | null;
   maxTurns: number;
@@ -218,8 +228,52 @@ export async function runDesignLockedJob(d: DesignLockedDeps): Promise<DesignLoc
 
   // The design the PLATFORM approved is the one that counts. If re-measuring this artifact produces a different
   // design, something has changed between approval and now and the build must not quietly proceed.
-  if (baseline.fingerprint !== artifact.designFingerprint) {
-    problems.push(`the frontend renders a different design from the one approved (approved ${artifact.designFingerprint.slice(0, 12)}…, measured ${baseline.fingerprint.slice(0, 12)}…). The build continues against the APPROVED baseline, and this difference is recorded for a person.`);
+  //
+  // But it has to be compared LIKE WITH LIKE, and it was not. The approved design is measured from the artifact
+  // alone: the Founder's six fixtures each measured one page, `index`, in three viewports. This build measures
+  // the artifact laid over the starter, which brings its own pages, so the same six fixtures measured
+  //
+  //   index, public, public/404, public/admin, public/booking/confirmation, public/booking/manage
+  //
+  // -- eighteen signatures against the approved three. `baselineFingerprint` hashes every signature it is given,
+  // so the two values could never match, and EVERY design-locked build reported "the frontend renders a different
+  // design from the one approved" and finished `stopped`. Measured on Node 1: restricted to `index`, all three of
+  // the rebuilt signatures are byte-for-byte identical to the approved ones. The design was reproduced exactly;
+  // the comparison was asking a different question.
+  //
+  // So the fingerprint is recomputed over the approved design's OWN pages. Nothing is relaxed: every approved
+  // page must still match exactly, in every viewport, and a page the starter adds is still reported by the drift
+  // check as a new page. What is removed is a guaranteed false alarm that masked any real one.
+  const approvedPages = await (async () => {
+    try {
+      const approvedBaseline = await d.fetchApprovedBaseline?.();
+      const sigs = Array.isArray(approvedBaseline?.signatures) ? approvedBaseline.signatures : [];
+      const pages = sigs.map((s) => String((s as { page?: unknown })?.page ?? "")).filter(Boolean);
+      return new Set(pages);
+    } catch (err) {
+      // Not fatal: the comparison below then asks the old, wider question, which is noisy rather than wrong.
+      note(`the approved design's page list could not be fetched (${String((err as Error)?.message ?? err).slice(0, 120)}); comparing the whole measurement instead`);
+      return new Set<string>();
+    }
+  })();
+
+  const comparable = approvedPages.size
+    ? report.signatures.filter((s) => approvedPages.has(s.page))
+    : report.signatures;
+  // `baselineFingerprint` canonicalises and sorts what it is given, so the subset needs no ordering of its own.
+  const measuredFingerprint = approvedPages.size ? baselineFingerprint(comparable) : baseline.fingerprint;
+
+  const extraPages = [...new Set(report.signatures.map((s) => s.page))].filter((p) => approvedPages.size && !approvedPages.has(p));
+  if (extraPages.length) note(`pages beyond the approved design, which the starter provides: ${extraPages.join(", ")}`);
+  if (approvedPages.size) {
+    const missing = [...approvedPages].filter((p) => !comparable.some((s) => s.page === p));
+    if (missing.length) {
+      problems.push(`the approved design's page(s) ${missing.join(", ")} no longer render at all, so the approved design cannot be reproduced`);
+    }
+  }
+
+  if (measuredFingerprint !== artifact.designFingerprint) {
+    problems.push(`the frontend renders a different design from the one approved (approved ${artifact.designFingerprint.slice(0, 12)}…, measured ${measuredFingerprint.slice(0, 12)}… over ${comparable.length} signature(s) of the approved page(s)). The build continues against the APPROVED baseline, and this difference is recorded for a person.`);
   }
   note(describeImport(report).split("\n")[0]);
 
