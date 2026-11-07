@@ -64,12 +64,14 @@ export function staffNav(_ctx: AppContext): NavGroup[] {
     { label: "AI", items: [
       { href: "/staff/ai", label: "AI operations", perm: "ai.manage" },
       // The Artifact Builder is the current architecture: the Founder supplies a finished frontend and the AI
-      // builds only the backend behind it. It is listed first, and the two entries below it are named for what
-      // they are, because "AI builds" and "Artifact Builder" are otherwise easy to mistake for each other and
-      // they do opposite things with the design.
+      // builds only the backend behind it.
       { href: "/staff/builds/frontends", label: "Artifact Builder", perm: "builds.read" },
-      { href: "/staff/builds", label: "AI builds (legacy generation)", perm: "builds.read" },
-      { href: "/staff/builds/gallery", label: "Design Gallery (legacy)", perm: "builds.read" },
+      // The retired frontend-generation pipeline is NOT listed. Its routes, jobs, build records, runner and
+      // gallery assets are all untouched and still reachable by URL — /staff/builds, /staff/builds/:id and
+      // /staff/builds/gallery still serve, and the Artifact Builder links to them where a person needs them (a
+      // build's own detail page, and the settings that hold the automation switch). What is gone is the standing
+      // invitation in the navigation, because the two builders do opposite things with the design and the wrong
+      // one was one click away.
       { href: "/staff/voice", label: "AI receptionist", perm: "voice.manage" },
       { href: "/staff/calendars/ai-follow-up", label: "AI Follow-Up calendar", perm: "lead.read_all" },
       { href: "/staff/calendars/founder-callback", label: "Founder Callback calendar", perm: "voice.manage" },

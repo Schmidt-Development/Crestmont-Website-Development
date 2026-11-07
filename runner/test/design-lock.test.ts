@@ -6,9 +6,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  TOLERANCE, baselineFingerprint, captureBaseline, compareToBaseline, describeDrift, freezeRow, signatureHash,
+  TOLERANCE, baselineFingerprint, canonical, captureBaseline, compareToBaseline, describeDrift, frameOf, freezeRow, signatureHash,
 } from "../src/frontend/design-lock.ts";
-import type { DesignSignature } from "../src/frontend/design-lock.ts";
+import type { DesignSignature, DesignBaseline } from "../src/frontend/design-lock.ts";
 import type { RenderShot } from "../src/orchestrator/repair-effect.ts";
 
 /** Summit Haul's palette, since it is the design this architecture was written in response to. */
@@ -223,4 +223,116 @@ test("[DL-009] the freeze row reuses the existing table and does not misrepresen
   assert.equal(rubric.design_fingerprint, b.fingerprint);
   assert.equal(rubric.pages.length, 2);
   assert.equal(rubric.pages[0].signature, signatureHash(b.signatures[0]));
+});
+
+test("[DL-010] a content-driven height change in a parent landmark is not layout drift", () => {
+  // Measured on a real build: Model B connected the staff page's backend, the page came out 27px shorter on
+  // mobile, and the visual gate reported layout drift. Nothing about the design had changed \u2014 same grid, same
+  // vertical order, same real spacing.
+  //
+  // The cause was `gap`. It is measured bottom-to-top, which is right between siblings, but landmarks nest:
+  // `section` sits inside `main` at the same y. Measured that way a child's gap is minus its parent's HEIGHT, so
+  // any content-driven height change moves it by exactly that amount. That is absolute height sneaking back into
+  // a comparison which excludes it on purpose (DL-002), and it would have flagged every successful integration.
+  const sig = (mainH: number): DesignSignature => ({
+    page: "staff", viewport: "mobile",
+    skeleton: ["header", "main", "section", "footer"],
+    palette: ["rgb(16, 36, 42)"], fonts: ["system-ui"], typeScale: [16, 24],
+    landmarks: [
+      { sel: "header", x: 0, y: 0, w: 390, h: 77 },
+      { sel: "main", x: 0, y: 77, w: 390, h: mainH },
+      { sel: "section", x: 0, y: 77, w: 390, h: mainH },
+      { sel: "footer", x: 0, y: 77 + mainH + 80, w: 390, h: 703 },
+    ],
+    docHeight: 77 + mainH + 80 + 703,
+  } as DesignSignature);
+
+  const before = sig(1194);
+  const after = sig(1167);
+
+  // The real spacing is identical: the footer still sits 80px below the content.
+  const f = (s: DesignSignature) => new Map(frameOf(s).map((x) => [x.sel, x]));
+  assert.equal(f(after).get("footer")!.gap, f(before).get("footer")!.gap, "the footer's spacing is unchanged");
+  assert.equal(f(after).get("section")!.gap, f(before).get("section")!.gap, "a nested landmark's inset does not move when its parent grows");
+
+  const baseline = {
+    fingerprint: "x", artifactSha: "a", sourceFingerprint: null, approvedBy: "u", capturedAt: "now",
+    signatures: [before], renders: [],
+  } as unknown as DesignBaseline;
+  const held = compareToBaseline(baseline, [after]);
+  assert.deepEqual(held.findings.filter((x) => x.kind === "design-drift"), [], "a shorter page is content, not drift");
+  assert.equal(held.ok, true);
+
+  // The lock still catches what it is for: a landmark genuinely moved, and a real change in sibling spacing.
+  const shifted = sig(1194);
+  shifted.landmarks = shifted.landmarks.map((l) => (l.sel === "section" ? { ...l, x: 40 } : l));
+  assert.equal(compareToBaseline(baseline, [shifted]).ok, false, "a landmark moved across the grid is drift");
+
+  const respaced = sig(1194);
+  respaced.landmarks = respaced.landmarks.map((l) => (l.sel === "footer" ? { ...l, y: l.y + 60 } : l));
+  const r = compareToBaseline(baseline, [respaced]);
+  assert.equal(r.ok, false, "60px more space above the footer is drift");
+  assert.match(r.findings.map((x) => x.detail).join(" "), /spacing above it changed/);
+});
+
+test("[DL-011] the design-lock definition is pinned: changing it invalidates every approved baseline", () => {
+  // READ THIS IF THIS TEST FAILS.
+  //
+  // `canonical()` is what a design fingerprint is computed from, and that fingerprint is stored on every
+  // Founder-APPROVED baseline. Changing the definition silently re-defines what "the approved design" means:
+  // every stored fingerprint was produced by the old definition and can never be reproduced by the new one, so
+  // the runner's check that the artifact still renders the approved design starts reporting a difference that is
+  // not there.
+  //
+  // That already happened once. DL-010 fixed how a nested landmark's gap is measured, which was right, and the
+  // recorded fingerprint moved from 239cc285... to 60c8a070... as a consequence. It was safe only because no
+  // approved baseline existed anywhere yet.
+  //
+  // So if you are here because this failed: that is the point. Decide deliberately, and if any approved baseline
+  // exists, re-measure and re-approve it with a person's authorization rather than letting the meaning drift.
+  const sig: DesignSignature = {
+    page: "index", viewport: "desktop",
+    skeleton: ["header", "main", "section", "footer"],
+    palette: ["rgb(16, 36, 42)", "rgb(255, 255, 255)"],
+    fonts: ["system-ui"],
+    typeScale: [16, 24, 40],
+    landmarks: [
+      { sel: "header", x: 0, y: 0, w: 1280, h: 76 },
+      { sel: "main", x: 0, y: 76, w: 1280, h: 2000 },
+      { sel: "section", x: 0, y: 76, w: 1280, h: 900 },
+      { sel: "footer", x: 0, y: 2156, w: 1280, h: 400 },
+    ],
+    docHeight: 2556,
+  } as DesignSignature;
+
+  assert.equal(canonical(sig), [
+    "page=index",
+    "viewport=desktop",
+    "skeleton=header>main>section>footer",
+    "palette=rgb(16, 36, 42),rgb(255, 255, 255)",
+    "fonts=system-ui",
+    "type=16,24,40",
+    "frame=header@x0,w1280,gap0;main@x0,w1280,gap0;section@x0,w1280,gap0;footer@x0,w1280,gap1184",
+  ].join("\n"));
+
+  // `section` is nested inside `main` and its gap is 0 — the inset from its parent's top, not minus its parent's
+  // height. That is the DL-010 fix, pinned here so it cannot be undone by accident either.
+  assert.equal(signatureHash(sig), "c55eab7514ed5527e33ad69ffac454eae4ff5259c0b35da80a93eb3c7de5dcc6");
+
+  // And the things the lock is over are all in it: a change to any one of them changes the fingerprint.
+  const vary = (f: (x: DesignSignature) => DesignSignature) => signatureHash(f(structuredClone(sig)));
+  assert.notEqual(vary((x) => { x.palette = [...x.palette, "rgb(1, 2, 3)"]; return x; }), signatureHash(sig), "palette");
+  assert.notEqual(vary((x) => { x.fonts = ["Georgia"]; return x; }), signatureHash(sig), "fonts");
+  assert.notEqual(vary((x) => { x.typeScale = [16, 24, 41]; return x; }), signatureHash(sig), "type scale");
+  assert.notEqual(vary((x) => { x.skeleton = ["header", "footer"]; return x; }), signatureHash(sig), "skeleton");
+  assert.notEqual(vary((x) => { x.landmarks[1].x = 40; return x; }), signatureHash(sig), "horizontal placement");
+  assert.notEqual(vary((x) => { x.landmarks[3].y += 200; return x; }), signatureHash(sig), "spacing between landmarks");
+
+  // But a content-driven height change is NOT in it. The mutation has to be one a browser could actually produce:
+  // the nested `section` holds less content, so it shrinks, `main` shrinks with it and the footer reflows up by
+  // the same amount. Shrinking `main` alone is not a real layout — its height is its children's.
+  assert.equal(
+    vary((x) => { x.landmarks[2].h = 700; x.landmarks[1].h = 1800; x.landmarks[3].y = 1956; x.docHeight = 2356; return x; }),
+    signatureHash(sig),
+    "200px less content, with everything below it reflowed, is the same design");
 });

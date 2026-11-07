@@ -51,6 +51,8 @@ function fakeSandbox(o: {
   measureCode?: number;
   report?: string;
   acceptanceCode?: number;
+  /** Exit code of a verifier the model wrote, which is corroboration only. */
+  modelAcceptanceCode?: number;
   /** Called on each `npm run build`, so a test can mutate the repo the way a model would. */
   onBuild?: (n: number) => void;
 }) {
@@ -70,9 +72,22 @@ function fakeSandbox(o: {
         writeFileSync(path.join(dir, "import.json"), readFileSync(o.report ?? path.join(REAL, "import-baseline.json")));
         return run(0);
       }
+      // The runner's OWN contract driver. It prints one JSON line of results, so the fake prints the same shape:
+      // a fake that printed prose would make `summarise` report "no result", which is a failure and would be
+      // indistinguishable from a real driver that crashed.
+      if (label.includes("contract-acceptance.mjs")) {
+        calls.push("contract-acceptance");
+        const results = o.acceptanceCode
+          ? [{ id: "app:starts", ok: true, detail: "started" },
+             { id: "POST /api/x :: refuses anonymous", ok: false, detail: "declared 401, answered 200" }]
+          : [{ id: "app:starts", ok: true, detail: "started" },
+             { id: "POST /api/x :: refuses anonymous", ok: true, detail: "401 as declared" }];
+        return run(o.acceptanceCode ?? 0, JSON.stringify({ results }));
+      }
+      // A verifier the MODEL wrote. Corroboration only: it can never make the gate pass.
       if (label.includes("verify-backend") || label.includes("acceptance")) {
         calls.push("acceptance");
-        return run(o.acceptanceCode ?? 0, o.acceptanceCode ? "2/10 checks passed" : "10/10 checks passed");
+        return run(o.modelAcceptanceCode ?? 0, o.modelAcceptanceCode ? "2/10 checks passed" : "10/10 checks passed");
       }
       calls.push("build");
       builds++;
@@ -208,7 +223,12 @@ test("[DLJ-03] Model B cannot certify its own work: all three gates run independ
   assert.equal(first.conformance.ok, false);
   assert.ok(first.conformance.violations.includes("file-substituted-for-database"), first.conformance.violations.join(","));
   assert.equal(first.functional.ok, false);
-  assert.match(first.functional.detail, /no runnable acceptance check was produced/, "and an unverifiable criterion is not a passing one");
+  // The independent contract driver DID run — it is the runner's own, so it always does — and it still does not
+  // make this gate pass, because the manifest's written acceptance criteria describe behaviour nothing exercised.
+  // Unverified is not verified, whatever the model wrote about itself.
+  assert.equal(first.functional.ran, true, "the runner's own driver runs whether or not the model wrote a test");
+  assert.match(first.functional.detail, /were NOT verified/, "and an unverifiable criterion is not a passing one");
+  assert.match(first.functional.detail, /the model produced no acceptance check of its own/);
   assert.match(r.summary, /RESULT: not complete/);
 });
 
